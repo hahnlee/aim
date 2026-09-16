@@ -1,0 +1,20 @@
+--- a/HidlInternal.cpp
++++ b/HidlInternal.cpp
+@@ -19,7 +19,7 @@
+
+ #include <hidl/HidlInternal.h>
+
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) || defined(DARWIN_ART_ANDROID_HIDL_POLICY)
+ #include <android/api-level.h>
+ #endif
+ #include <android-base/logging.h>
+@@ -37,7 +37,7 @@
+
+ std::string getVndkSpHwPath(const char* lib) {
+     static std::string vndk_version = base::GetProperty("ro.vndk.version", "");
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) || defined(DARWIN_ART_ANDROID_HIDL_POLICY)
+     static int api_level = android_get_device_api_level();
+     if (api_level >= __ANDROID_API_R__) {
+         return android::base::StringPrintf("/apex/com.android.vndk.v%s/%s/hw/",

@@ -28,6 +28,7 @@ unsafe extern "C" {
     ) -> Option<unsafe extern "C" fn()>;
     fn darwin_art_bionic_errno_resolve(name: *const c_char) -> Option<unsafe extern "C" fn()>;
     fn darwin_art_bionic___system_property_find(name: *const c_char) -> *const c_void;
+    fn darwin_art_bionic_android_get_device_api_level() -> i32;
     fn darwin_art_bionic___system_property_read_callback(
         property: *const c_void,
         callback: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, u32),
@@ -166,9 +167,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if property.name != b"ro.build.version.sdk" || property.value != b"36" {
         return Err("property callback snapshot mismatch".into());
     }
+    // SAFETY: the original C getter reads the installed Rust property area.
+    if unsafe { darwin_art_bionic_android_get_device_api_level() } != 36 {
+        return Err("device API getter disagrees with property snapshot".into());
+    }
     let bytes = fs::read(fixture)?;
     let mut resolver = ClosedResolver;
-    let mut image = LoadedElf::load_with_resolver(&bytes, &mut resolver)?;
+    let image = LoadedElf::load_with_resolver(&bytes, &mut resolver)?;
     image.run_initializers()?;
 
     // SAFETY: host errno is audit-only and never guest-resolved.
@@ -215,6 +220,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if image.call_exported_i32("bionic_process_fixture_sigaction_query")? != 42 {
         return Err("sigaction guest flags/query failed".into());
     }
+    if image.call_exported_i32("bionic_process_fixture_sigaction_context_recovery")? != 42 {
+        return Err("sigaction guest ucontext recovery failed".into());
+    }
 
     drop(activation);
     drop(snapshot);
@@ -230,7 +238,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("post-teardown Android calls did not fail closed".into());
     }
     println!(
-        "bionic-process-state-facade: PASS immutable snapshot concurrent teardown signal-trampoline"
+        "bionic-process-state-facade: PASS immutable snapshot concurrent teardown signal-trampoline ucontext-recovery"
     );
     Ok(())
 }

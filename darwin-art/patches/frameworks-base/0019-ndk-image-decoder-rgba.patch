@@ -1,0 +1,75 @@
+--- a/imagedecoder.cpp
++++ b/imagedecoder.cpp
+@@ -103,6 +103,11 @@
+     }
+ }
+
++static SkColorType ndkOutputColorType(SkAndroidCodec* codec) {
++    const auto preferred = codec->computeOutputColorType(kN32_SkColorType);
++    return preferred == kBGRA_8888_SkColorType ? kRGBA_8888_SkColorType : preferred;
++}
++
+ static int createFromStream(std::unique_ptr<SkStreamRewindable> stream, AImageDecoder** outDecoder) {
+     SkCodec::Result result;
+     auto codec = SkCodec::MakeFromStream(std::move(stream), &result, nullptr,
+@@ -122,7 +127,14 @@
+         return ANDROID_IMAGE_DECODER_INVALID_INPUT;
+     }
+
+-    *outDecoder = reinterpret_cast<AImageDecoder*>(new ImageDecoder(std::move(androidCodec)));
++    // NDK pixels have Android RGBA order, independent of host Skia N32.
++    // Retain the codec's preferred depth, including F16/HDR output.
++    auto preferred = ndkOutputColorType(androidCodec.get());
++    auto decoder = std::make_unique<ImageDecoder>(std::move(androidCodec));
++    if (!decoder->setOutColorType(preferred)) {
++        return ANDROID_IMAGE_DECODER_INVALID_CONVERSION;
++    }
++    *outDecoder = reinterpret_cast<AImageDecoder*>(decoder.release());
+     return ANDROID_IMAGE_DECODER_SUCCESS;
+ }
+
+@@ -200,7 +212,7 @@
+ static SkColorType getColorType(AndroidBitmapFormat format) {
+     switch (format) {
+         case ANDROID_BITMAP_FORMAT_RGBA_8888:
+-            return kN32_SkColorType;
++            return kRGBA_8888_SkColorType;
+         case ANDROID_BITMAP_FORMAT_RGB_565:
+             return kRGB_565_SkColorType;
+         case ANDROID_BITMAP_FORMAT_RGBA_4444:
+@@ -285,7 +297,7 @@
+     // changed the output color type, so we cannot rely on it. Alternatively,
+     // we could store the ADataSpace in the ImageDecoder.
+     const ImageDecoder* imageDecoder = toDecoder(info);
+-    SkColorType colorType = imageDecoder->mCodec->computeOutputColorType(kN32_SkColorType);
++    SkColorType colorType = ndkOutputColorType(imageDecoder->mCodec.get());
+     sk_sp<SkColorSpace> colorSpace = imageDecoder->getDefaultColorSpace();
+     return uirenderer::ColorSpaceToADataSpace(colorSpace.get(), colorType);
+ }
+@@ -293,7 +305,7 @@
+ // FIXME: Share with getFormat in android_bitmap.cpp?
+ static AndroidBitmapFormat getFormat(SkColorType colorType) {
+     switch (colorType) {
+-        case kN32_SkColorType:
++        case kRGBA_8888_SkColorType:
+             return ANDROID_BITMAP_FORMAT_RGBA_8888;
+         case kRGB_565_SkColorType:
+             return ANDROID_BITMAP_FORMAT_RGB_565;
+@@ -314,7 +326,7 @@
+     if (!info) {
+         return ANDROID_BITMAP_FORMAT_NONE;
+     }
+-    return getFormat(toDecoder(info)->mCodec->computeOutputColorType(kN32_SkColorType));
++    return getFormat(ndkOutputColorType(toDecoder(info)->mCodec.get()));
+ }
+
+ int AImageDecoderHeaderInfo_getAlphaFlags(const AImageDecoderHeaderInfo* info) {
+@@ -463,7 +475,7 @@
+
+     const auto colorType = imageDecoder->getOutputInfo().colorType();
+     switch (colorType) {
+-        case kN32_SkColorType:
++        case kRGBA_8888_SkColorType:
+         case kRGBA_F16_SkColorType:
+             break;
+         default:

@@ -15,11 +15,14 @@ static int32_t guest_errno;
 static int directory_closed;
 static int directory_index;
 static int directory_error;
+static int stat_calls;
 static const char* const directory_entries[] = {".", "..", "asset.bin"};
 
 static int managed_stat(const char* path, DarwinArtAndroidStat* status) {
   (void)path;
-  (void)status;
+  ++stat_calls;
+  memset(status, 0, sizeof(*status));
+  status->st_mode = 0100644;
   return 0;
 }
 
@@ -94,6 +97,13 @@ int main(void) {
 
   darwin_art_libcore_install_filesystem_provider(managed_stat, NULL, NULL,
                                                  load_errno);
+  assert(setenv("DARWIN_ART_TEST_FONT", "/system/fonts/Roboto-Regular.ttf", 1) == 0);
+  assert(setenv("DARWIN_ART_RUNTIME_HOST_FILES", "/system/fonts/Roboto-Regular.ttf", 1) == 0);
+  struct stat font_status;
+  assert(darwin_art_libcore_stat("/system/fonts/Roboto-Regular.ttf", &font_status) == 0);
+  assert(stat_calls == 1 && S_ISREG(font_status.st_mode));
+  unsetenv("DARWIN_ART_TEST_FONT");
+  unsetenv("DARWIN_ART_RUNTIME_HOST_FILES");
 
   // A configured immutable runtime root is the managed host-directory
   // exception used by ICU. It must retain a host DIR handle and not be sent

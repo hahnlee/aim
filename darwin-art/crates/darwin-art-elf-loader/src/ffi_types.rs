@@ -76,7 +76,12 @@ pub struct DarwinArtElfHandle {
 }
 
 pub struct DarwinArtElfGraphHandle {
-    pub(crate) graph: Mutex<LoadedElfGraph>,
+    pub(crate) owner: GraphHandleOwner,
+}
+pub(crate) enum GraphHandleOwner {
+    Graph(Mutex<LoadedElfGraph>),
+    // Read-only source view, not an owning/mutable graph handle.
+    Selected(crate::GlobalElfImage),
 }
 
 #[repr(C)]
@@ -86,14 +91,40 @@ pub struct DarwinArtElfGraphSource {
     pub length: usize,
 }
 
+#[repr(C)]
+pub struct DarwinArtElfGlobalSource {
+    pub graph: *const DarwinArtElfGraphHandle,
+    pub soname: *const c_char,
+}
+
 pub struct DarwinArtElfInspection {
+    pub(crate) flags_1: u64,
     pub(crate) soname: Option<CString>,
+    pub(crate) runpath: Option<CString>,
     pub(crate) needed: Vec<CString>,
 }
 
 pub struct DarwinArtElfDiscoveredGraph {
+    pub(crate) namespace_scopes: Option<(crate::NamespaceScopes, usize)>,
+    /// Per-load linker policy snapshot. None preserves legacy graph staging;
+    /// Some(value) is supplied by the linker owner before graph linking.
+    pub(crate) appcompat_16kb: Option<bool>,
     pub(crate) root_soname: CString,
     pub(crate) _names: Vec<CString>,
     pub(crate) _bytes: Vec<Vec<u8>>,
     pub(crate) sources: Vec<DarwinArtElfGraphSource>,
+    // Admission-context identities, in exactly the same order as sources.
+    pub(crate) source_images: Vec<u64>,
+    // Pin the admitted inode, including after unlink/replacement, through load.
+    pub(crate) source_files: Vec<std::sync::Arc<std::fs::File>>,
+    pub(crate) _residents: Vec<DiscoveredResident>,
+}
+
+pub(crate) struct DiscoveredResident {
+    pub(crate) needed: Vec<CString>,
+    pub(crate) name: CString,
+    pub(crate) image: u64,
+    // Concrete owner is supplied by the admission layer; dropping it releases
+    // its real image lease. No integer-only provider declarations here.
+    pub(crate) _lease: Box<dyn std::any::Any>,
 }

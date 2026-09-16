@@ -29,8 +29,6 @@ libaaudio.so	AAudioStream_requestStop		aaudio
 libaaudio.so	AAudioStream_setBufferSizeInFrames		aaudio
 libaaudio.so	AAudioStream_waitForStateChange		aaudio
 libaaudio.so	AAudio_createStreamBuilder		aaudio
-libandroid.so	android_res_nquery		dns
-libandroid.so	android_res_nresult		dns
 libbinder_ndk.so	AIBinder_Class_define	LIBBINDER_NDK	binder-ndk
 libbinder_ndk.so	AIBinder_Class_setOnDump	LIBBINDER_NDK	binder-ndk
 libbinder_ndk.so	AIBinder_Class_setTransactionCodeToFunctionNameMap	LIBBINDER_NDK	binder-ndk
@@ -81,6 +79,7 @@ libc.so	__cxa_atexit	LIBC	dso-lifecycle
 libc.so	__cxa_finalize	LIBC	dso-lifecycle
 libc.so	__cxa_thread_atexit_impl	LIBC	dso-lifecycle
 libc.so	__errno	LIBC	errno
+libc.so	__fread_chk	LIBC_N	stdio
 libc.so	__fwrite_chk	LIBC	stdio
 libc.so	__fwrite_chk	LIBC_N	stdio
 libc.so	__get_h_errno	LIBC	dns
@@ -97,7 +96,7 @@ libc.so	__pthread_cleanup_pop	LIBC	pthread
 libc.so	__pthread_cleanup_push	LIBC	pthread
 libc.so	__pwrite64_chk	LIBC	filesystem
 libc.so	__pwrite64_chk	LIBC_N	filesystem
-libc.so	__pwrite_chk	LIBC	filesystem
+libc.so	__pwrite_chk	LIBC_N	filesystem
 libc.so	__read_chk	LIBC	central-fd-broker
 libc.so	__readlink_chk	LIBC	filesystem
 libc.so	__register_atfork	LIBC	dso-lifecycle
@@ -115,10 +114,15 @@ libc.so	__strncat_chk	LIBC	leaf
 libc.so	__strncpy_chk	LIBC	leaf
 libc.so	__strncpy_chk2	LIBC	leaf
 libc.so	__strrchr_chk	LIBC	leaf
+libc.so	__system_property_area_serial	LIBC	process-state
 libc.so	__system_property_find	LIBC	process-state
+libc.so	__system_property_foreach	LIBC	process-state
 libc.so	__system_property_get	LIBC	process-state
 libc.so	__system_property_read	LIBC	process-state
 libc.so	__system_property_read_callback	LIBC_O	process-state
+libc.so	__system_property_serial	LIBC	process-state
+libc.so	__system_property_set	LIBC	process-state
+libc.so	__system_property_wait	LIBC_O	process-state
 libc.so	__umask_chk	LIBC	filesystem
 libc.so	__vsnprintf_chk	LIBC	format
 libc.so	__vsprintf_chk	LIBC	format
@@ -138,6 +142,9 @@ libc.so	android_fdsan_create_owner_tag	LIBC	socket
 libc.so	android_fdsan_create_owner_tag	LIBC_Q	socket
 libc.so	android_fdsan_exchange_owner_tag	LIBC	socket
 libc.so	android_fdsan_exchange_owner_tag	LIBC_Q	socket
+libc.so	android_fdsan_get_error_level	LIBC_Q	socket
+libc.so	android_fdsan_get_owner_tag	LIBC_Q	socket
+libc.so	android_fdsan_set_error_level	LIBC_Q	socket
 libc.so	android_get_device_api_level	LIBC	process-state
 libc.so	android_get_device_api_level	LIBC_Q	process-state
 libc.so	android_getaddrinfofornet	LIBC	dns
@@ -192,6 +199,7 @@ libc.so	execv	LIBC	process-state
 libc.so	execve	LIBC	process-state
 libc.so	execvp	LIBC	process-state
 libc.so	exit	LIBC	process-state
+libc.so	fchdir	LIBC	filesystem
 libc.so	fchmod	LIBC	filesystem
 libc.so	fchmodat	LIBC	filesystem
 libc.so	fchown	LIBC	filesystem
@@ -237,6 +245,7 @@ libc.so	ftello	LIBC	stdio
 libc.so	ftruncate	LIBC	filesystem
 libc.so	ftruncate64	LIBC	filesystem
 libc.so	ftrylockfile	LIBC	stdio
+libc.so	ftw	LIBC	filesystem
 libc.so	funlockfile	LIBC	stdio
 libc.so	futimens	LIBC	filesystem
 libc.so	futimes	LIBC	filesystem
@@ -350,7 +359,7 @@ libc.so	madvise	LIBC	vm
 libc.so	mallinfo	LIBC	allocator
 libc.so	malloc	LIBC	allocator
 libc.so	malloc_usable_size	LIBC	allocator
-libc.so	mallopt		allocator
+libc.so	mallopt	LIBC_O	allocator
 libc.so	mbrlen	LIBC	locale
 libc.so	mbrtowc	LIBC	locale
 libc.so	mbsnrtowcs	LIBC	locale
@@ -364,8 +373,10 @@ libc.so	memmem	LIBC	leaf
 libc.so	memmove	LIBC	leaf
 libc.so	memrchr	LIBC	leaf
 libc.so	memset	LIBC	leaf
+libc.so	memset_explicit	LIBC_U	leaf
 libc.so	mincore	LIBC	vm
 libc.so	mkdir	LIBC	filesystem
+libc.so	mkdirat	LIBC	filesystem
 libc.so	mkdtemp	LIBC	filesystem
 libc.so	mkstemp	LIBC	filesystem
 libc.so	mkstemp64	LIBC	filesystem
@@ -380,6 +391,7 @@ libc.so	munlock	LIBC	vm
 libc.so	munmap	LIBC	vm
 libc.so	nanosleep	LIBC	time
 libc.so	newlocale	LIBC	locale
+libc.so	nftw	LIBC	filesystem
 libc.so	nice	LIBC	process-state
 libc.so	nrand48	LIBC	process-state
 libc.so	open	LIBC	filesystem
@@ -476,6 +488,7 @@ libc.so	readdir_r	LIBC	filesystem
 libc.so	readlink	LIBC	filesystem
 libc.so	readv	LIBC	central-fd-broker
 libc.so	realloc	LIBC	allocator
+libc.so	reallocarray	LIBC_Q	allocator
 libc.so	realpath	LIBC	filesystem
 libc.so	recv	LIBC	socket
 libc.so	recvfrom	LIBC	socket
@@ -583,6 +596,7 @@ libc.so	strtod	LIBC	float-conversion
 libc.so	strtod_l	LIBC_O	float-conversion
 libc.so	strtof	LIBC	float-conversion
 libc.so	strtof_l	LIBC_O	float-conversion
+libc.so	strtoimax	LIBC	numeric
 libc.so	strtok	LIBC	leaf
 libc.so	strtok_r	LIBC	leaf
 libc.so	strtol	LIBC	numeric
@@ -681,26 +695,25 @@ libdl.so	dlclose	LIBC	dso-lifecycle
 libdl.so	dlerror	LIBC	dso-lifecycle
 libdl.so	dlopen	LIBC	dso-lifecycle
 libdl.so	dlsym	LIBC	dso-lifecycle
-liblog.so	__android_log_assert		liblog
-liblog.so	__android_log_buf_print		liblog
-liblog.so	__android_log_buf_write		liblog
-liblog.so	__android_log_call_aborter		liblog
-liblog.so	__android_log_default_aborter		liblog
-liblog.so	__android_log_error_write		liblog
-liblog.so	__android_log_get_minimum_priority		liblog
-liblog.so	__android_log_is_loggable		liblog
-liblog.so	__android_log_is_loggable_len		liblog
-liblog.so	__android_log_logd_logger		liblog
-liblog.so	__android_log_print		liblog
+liblog.so	__android_log_assert	LIBLOG	liblog
+liblog.so	__android_log_buf_print	LIBLOG	liblog
+liblog.so	__android_log_buf_write	LIBLOG	liblog
+liblog.so	__android_log_call_aborter	LIBLOG_R	liblog
+liblog.so	__android_log_default_aborter	LIBLOG_R	liblog
+liblog.so	__android_log_error_write	LIBLOG_M	liblog
+liblog.so	__android_log_get_minimum_priority	LIBLOG_R	liblog
+liblog.so	__android_log_is_loggable	LIBLOG_M	liblog
+liblog.so	__android_log_is_loggable_len	LIBLOG_O	liblog
+liblog.so	__android_log_logd_logger	LIBLOG_R	liblog
 liblog.so	__android_log_print	LIBLOG	liblog
-liblog.so	__android_log_set_aborter		liblog
-liblog.so	__android_log_set_default_tag		liblog
-liblog.so	__android_log_set_logger		liblog
-liblog.so	__android_log_set_minimum_priority		liblog
-liblog.so	__android_log_stderr_logger		liblog
-liblog.so	__android_log_vprint		liblog
-liblog.so	__android_log_write		liblog
-liblog.so	__android_log_write_log_message		liblog
+liblog.so	__android_log_set_aborter	LIBLOG_R	liblog
+liblog.so	__android_log_set_default_tag	LIBLOG_R	liblog
+liblog.so	__android_log_set_logger	LIBLOG_R	liblog
+liblog.so	__android_log_set_minimum_priority	LIBLOG_R	liblog
+liblog.so	__android_log_stderr_logger	LIBLOG_R	liblog
+liblog.so	__android_log_vprint	LIBLOG	liblog
+liblog.so	__android_log_write	LIBLOG	liblog
+liblog.so	__android_log_write_log_message	LIBLOG_R	liblog
 libm.so	acos	LIBC	math
 libm.so	acosf	LIBC	math
 libm.so	acosh	LIBC	math

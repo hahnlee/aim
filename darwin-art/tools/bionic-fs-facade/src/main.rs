@@ -76,16 +76,19 @@ impl ClosedResolver {
             "chdir" => c"chdir",
             "close" => c"close",
             "closedir" => c"closedir",
+            "dirfd" => c"dirfd",
             "fchmod" => c"fchmod",
             "fchmodat" => c"fchmodat",
             "fdopendir" => c"fdopendir",
             "fstat" => c"fstat",
+            "fstatat" => c"fstatat",
             "ftruncate" => c"ftruncate",
             "getcwd" => c"getcwd",
             "isatty" => c"isatty",
             "link" => c"link",
             "lstat" => c"lstat",
             "mkdir" => c"mkdir",
+            "mkdirat" => c"mkdirat",
             "open" => c"open",
             "openat" => c"openat",
             "opendir" => c"opendir",
@@ -258,7 +261,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let bytes = fs::read(fixture)?;
     let mut resolver = ClosedResolver;
-    let mut image = LoadedElf::load_with_resolver(&bytes, &mut resolver)?;
+    let image = LoadedElf::load_with_resolver(&bytes, &mut resolver)?;
     image.run_initializers()?;
     let host_file = File::open(root.join("etc/payload.txt"))?;
     // SAFETY: the descriptor is live and Darwin selector 15 is the semantic

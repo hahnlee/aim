@@ -19,6 +19,15 @@ static void SigactionHandler(int signal_number) {
   if (signal_number == SIGUSR2) ++gSignalSeen;
 }
 
+static void RecoverFaultHandler(int signal_number, siginfo_t* info,
+                                void* raw_context) {
+  (void)info;
+  if (signal_number != SIGSEGV || raw_context == NULL) return;
+  ucontext_t* context = (ucontext_t*)raw_context;
+  context->uc_mcontext.pc += 4;
+  ++gSignalSeen;
+}
+
 static int Equal(const char* left, const char* right) {
   while (*left == *right && *left != '\0') {
     ++left;
@@ -125,6 +134,20 @@ bionic_process_fixture_sigaction_query(void) {
       observed.sa_handler != SIG_DFL || observed.sa_flags != 0)
     return 26;
   if (sigaction(SIGUSR2, &old_action, NULL) != 0) return 24;
+  return 42;
+}
+
+__attribute__((visibility("default"))) int
+bionic_process_fixture_sigaction_context_recovery(void) {
+  struct sigaction action = {0};
+  struct sigaction old_action = {0};
+  gSignalSeen = 0;
+  action.sa_sigaction = RecoverFaultHandler;
+  action.sa_flags = SA_SIGINFO;
+  if (sigaction(SIGSEGV, &action, &old_action) != 0) return 27;
+  __asm__ volatile("mov x9, xzr\n\tstr xzr, [x9]" ::: "x9", "memory");
+  if (sigaction(SIGSEGV, &old_action, NULL) != 0) return 28;
+  if (gSignalSeen != 1) return 29;
   return 42;
 }
 

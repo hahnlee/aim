@@ -111,6 +111,15 @@ static int authorized_private_host_path(const char* path) {
 // IsAuthorizedHostRuntimePath. Only immutable runtime roots and exact files
 // may use Darwin DIR handles; every other path remains a guest capability.
 static int authorized_host_runtime_path(const char* path) {
+  // Guest namespaces cannot become host capabilities through a test setting
+  // or an artifact list. In particular /system fonts must be resolved by the
+  // same VFS owner as FileInputStream, not stat() against the macOS root.
+  static const char* guest_roots[] = {
+      "/system", "/system_ext", "/vendor", "/product", "/apex", "/data",
+      "/storage", "/sdcard", "/proc", "/dev"};
+  for (size_t i = 0; i < sizeof(guest_roots) / sizeof(guest_roots[0]); ++i) {
+    if (path_is_within(path, guest_roots[i])) return 0;
+  }
   return listed_host_file(path) ||
          authorized_directory_within(path, getenv("ANDROID_I18N_ROOT")) ||
          authorized_directory_within(path, getenv("ANDROID_DATA")) ||
@@ -120,8 +129,6 @@ static int authorized_host_runtime_path(const char* path) {
          explicit_host_file(path, "DARWIN_ART_APK_APP_RESOURCE_APK") ||
          explicit_host_file(path, "DARWIN_ART_APK_APP_SUPPORT_DEX") ||
          explicit_host_file(path, "DARWIN_ART_FRAMEWORK_RES_APK") ||
-         explicit_host_file(path, "DARWIN_ART_TEST_FONTS_XML") ||
-         explicit_host_file(path, "DARWIN_ART_TEST_FONT") ||
          explicit_host_file(path, "DARWIN_ART_HOST_FONTS_XML") ||
          explicit_host_file(path, "DARWIN_ART_HOST_FONT");
 }

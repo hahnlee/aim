@@ -19,6 +19,10 @@ darwin_common_pool_explicit_patch="$project_root/patches/frameworks-base/0014-da
 
 # shellcheck disable=SC1090
 source "$lock_file"
+source "$project_root/upstream/android16-ndk-bitmap.lock"
+bitmap_buffer_patch="$project_root/patches/frameworks-base/0015-darwin-bitmap-buffer-access.patch"
+source "$project_root/upstream/android16-ndk-image-decoder.lock"
+decoder_color_patch="$project_root/patches/frameworks-base/0018-image-decoder-explicit-color-order.patch"
 
 deps_root="$aosp_root/hwui-static-deps"
 if [[ -z "${DARWIN_ART_ANDROID16_SYSPROP_ROOT:-}" ||
@@ -45,6 +49,8 @@ verify_sha() {
 }
 
 verify_sha "$hwui/Android.bp" "$HWUI_ANDROID_BP_SHA256"
+verify_sha "$bitmap_buffer_patch" "$BITMAP_BUFFER_ACCESS_PATCH_SHA256"
+verify_sha "$decoder_color_patch" "$IMAGE_DECODER_COLOR_ORDER_PATCH_SHA256"
 verify_sha "$hwui/HWUIProperties.sysprop" "$HWUI_SYSPROP_SHA256"
 verify_sha "$project_root/patches/frameworks-base/0001-darwin-android-critical-jni-abi.patch" \
   "$CRITICAL_JNI_PATCH_SHA256"
@@ -260,6 +266,8 @@ patch_identity="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$HWUI_SOURCE_MANIFEST_SHA25
   "$DARWIN_REQUIRE_JNI_PATCH_SHA256" \
   "$DARWIN_COMMON_POOL_PATCH_SHA256" \
   "$DARWIN_COMMON_POOL_EXPLICIT_PATCH_SHA256" \
+  "$BITMAP_BUFFER_ACCESS_PATCH_SHA256" \
+  "$IMAGE_DECODER_COLOR_ORDER_PATCH_SHA256" \
   "$(shasum -a 256 "$project_root/compat/darwin_hwui_jni_attachment.h" | awk '{print $1}')" \
   | shasum -a 256 | awk '{print $1}')"
 if [[ ! -f "$patched_marker" || "$(<"$patched_marker")" != "$patch_identity" ]]; then
@@ -275,6 +283,8 @@ if [[ ! -f "$patched_marker" || "$(<"$patched_marker")" != "$patch_identity" ]];
   patch -d "$fresh_shadow" -p1 < "$darwin_require_jni_patch"
   patch -d "$fresh_shadow" -p1 < "$darwin_common_pool_patch"
   patch -d "$fresh_shadow" -p1 < "$darwin_common_pool_explicit_patch"
+  patch -d "$fresh_shadow" -p1 < "$bitmap_buffer_patch"
+  patch -d "$fresh_shadow" -p1 < "$decoder_color_patch"
   printf '%s\n' "$patch_identity" > "$fresh_shadow/.darwin-art-patched-source"
   rm -rf "$patched_hwui"
   mv "$fresh_shadow" "$patched_hwui"

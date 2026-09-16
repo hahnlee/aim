@@ -16,9 +16,7 @@
 #include <cstddef>
 #include <pthread.h>
 #include <fcntl.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 #include "art_method-inl.h"
@@ -30,8 +28,11 @@
 #include "darwin_art/darwin_art.h"
 #include "debugger.h"
 #include "darwin_framework_natives.h"
+#include "graphics/graphics_environment.h"
 #include "darwin_binder_wire.h"
+#include "binder/service_endpoint.h"
 #include "darwin_provider_owners.h"
+#include "../runtime/framework/pm/installed_record_source.h"
 #include "runtime_network_probe.h"
 #include "runtime_hwui_probe.h"
 #include "runtime_elf_probe.h"
@@ -47,6 +48,8 @@
 #include "runtime_graphics_phase.h"
 #include "runtime_jni_acceptance_probe.h"
 #include "runtime_registration_phase.h"
+#include "../runtime/framework/app/process_entry.h"
+#include "../runtime/framework/system/process_entry.h"
 #include "runtime_upstream_test.h"
 #include "surfaceflinger/service_darwin.h"
 #include "runtime_app_bootstrap.h"
@@ -58,6 +61,7 @@
 #include "jvalue.h"
 #include "mirror/class-inl.h"
 #include "mirror/throwable.h"
+#include "nativeloader/native_loader.h"
 #include "plugin.h"
 #include "runtime.h"
 #include "jni/java_vm_ext.h"
@@ -115,238 +119,11 @@ bool ConfigureAndroidLogTags() {
   return true;
 }
 
-bool WriteAll(int fd, const void* data, size_t size) {
-  const auto* bytes = static_cast<const uint8_t*>(data);
-  while (size != 0) {
-    const ssize_t written = write(fd, bytes, size);
-    if (written <= 0) return false;
-    bytes += written;
-    size -= static_cast<size_t>(written);
-  }
-  return true;
-}
-
-bool ReadAll(int fd, void* data, size_t size) {
-  auto* bytes = static_cast<uint8_t*>(data);
-  while (size != 0) {
-    const ssize_t read_count = read(fd, bytes, size);
-    if (read_count <= 0) return false;
-    bytes += read_count;
-    size -= static_cast<size_t>(read_count);
-  }
-  return true;
-}
-
-std::string ResolveDaemonPackage(const char* package_name) {
-  // Android's package manager publishes immutable system packages in addition
-  // to user-installed packages. Keep the first compatibility services in the
-  // system-server registry rather than teaching individual applications about
-  // them. The records intentionally advertise only package identity; Binder
-  // services are added separately when an app actually requests one.
-  static constexpr const char* kGoogleAndroidReleaseCertificate =
-      "MIIEQzCCAyugAwIBAgIJAMLgh0ZkSjCNMA0GCSqGSIb3DQEBBAUAMHQxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpDYWxpZm9ybmlh"
-      "MRYwFAYDVQQHEw1Nb3VudGFpbiBWaWV3MRQwEgYDVQQKEwtHb29nbGUgSW5jLjEQMA4GA1UECxMHQW5kcm9pZDEQMA4GA1UEAxMH"
-      "QW5kcm9pZDAeFw0wODA4MjEyMzEzMzRaFw0zNjAxMDcyMzEzMzRaMHQxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpDYWxpZm9ybmlh"
-      "MRYwFAYDVQQHEw1Nb3VudGFpbiBWaWV3MRQwEgYDVQQKEwtHb29nbGUgSW5jLjEQMA4GA1UECxMHQW5kcm9pZDEQMA4GA1UEAxMH"
-      "QW5kcm9pZDCCASAwDQYJKoZIhvcNAQEBBQADggENADCCAQgCggEBAKtWLgDYO6IIrgqWbxJOKdoR8qtW0I9Y4sypEwPpt1TTcvZA"
-      "pxsdyxMJZ2JORland2qSGT2y5b+3JKkedxiLDmpHpDsz2WCbdxgxRczfey5YZnTJ4VZbH0xqWVW/8lGmPav5xVwnIiJS6HXk+BVK"
-      "ZF+JcWjAsb/GEuq/eFdpuzSqeYTcfi6idkyugwfYwXFU1+5fZKUaRKYCwkkFQVfcAs1fXA5V+++FGfvjJ/CxURaSxaBvGdGDhfXE"
-      "28LWuT9ozCl5xw4Yq5OGazvV24mZVSoOO0yZ31j7kYvtwYK6NeADwbSxDdJEqO4k//0zOHKrUiGYXtqw/A0LFFtqoZKFjnkCAQOj"
-      "gdkwgdYwHQYDVR0OBBYEFMd9jMIhF1Ylmn/Tgt9r45jk14alMIGmBgNVHSMEgZ4wgZuAFMd9jMIhF1Ylmn/Tgt9r45jk14aloXik"
-      "djB0MQswCQYDVQQGEwJVUzETMBEGA1UECBMKQ2FsaWZvcm5pYTEWMBQGA1UEBxMNTW91bnRhaW4gVmlldzEUMBIGA1UEChMLR29v"
-      "Z2xlIEluYy4xEDAOBgNVBAsTB0FuZHJvaWQxEDAOBgNVBAMTB0FuZHJvaWSCCQDC4IdGZEowjTAMBgNVHRMEBTADAQH/MA0GCSqG"
-      "SIb3DQEBBAUAA4IBAQBt0lLO74UwLDYKqs6Tm8/yzKkEu116FmH4rkaymUIE0P9KaMftGlMexFlaYjzmB2OxZyl6euNXEsQH8gjw"
-      "yxCUKRJNexBiGcCEyj6z+a1fuHHvkiaai+KL8W1EyNmgjmyy8AW7P+LLlkR+ho5zEHatRbM/YAnqGcFh5iZBqpknHf1SKMXFh4dd"
-      "239FJ1jWYfbMDMy3NS5CTMQ2XFI1MvcyUTdZPErjQfTbQe3aDQsQcafEQPD+nqActifKZ0Np0IS9L9kR/wbNvyz6ENwPiTrjV2KR"
-      "kEjH78ZMcUQXg0L3BYHJ3lc69Vs5Ddf9uUGGMYldX3WfMBEmh/9iFBDAaTCK";
-  const std::string package(package_name == nullptr ? "" : package_name);
-  const char* guest_apk = nullptr;
-  const char* version_name = nullptr;
-  const char* label = nullptr;
-  if (package == "com.google.android.gms") {
-    guest_apk = "/system/priv-app/GmsCore/GmsCore.apk";
-    version_name = "25.12.00";
-    label = "Google Play services";
-  } else if (package == "com.android.vending") {
-    guest_apk = "/system/priv-app/Phonesky/Phonesky.apk";
-    version_name = "45.2.19";
-    label = "Google Play Store";
-  }
-  if (guest_apk != nullptr) {
-    return std::string("darwin-art-launch-v1\napk=") + guest_apk +
-           "\ndex=" + guest_apk +
-           "\nsha256=darwin-art-system-package\nmetadata=darwin-art-system:" +
-           " package=" + package +
-           " system=true enabled=true version_code=251200000 version_name=" +
-           version_name + " target_sdk=36 label=" + label +
-           " signature_base64=" + kGoogleAndroidReleaseCertificate +
-           " permissions=com.google.android.c2dm.permission.SEND\n";
-  }
-  const char* socket_path = std::getenv("DARWIN_ART_PROFILE_SOCKET");
-  if (socket_path == nullptr || package_name == nullptr) return {};
-  if (package.empty() || package.size() > 255 ||
-      !std::all_of(package.begin(), package.end(), [](unsigned char byte) {
-        return std::isalnum(byte) || byte == '.' || byte == '_' || byte == '-';
-      })) {
-    return {};
-  }
-  const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (fd < 0) return {};
-  sockaddr_un address{};
-  address.sun_family = AF_UNIX;
-  if (std::strlen(socket_path) >= sizeof(address.sun_path)) {
-    close(fd);
-    return {};
-  }
-  std::memcpy(address.sun_path, socket_path, std::strlen(socket_path) + 1);
-  if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-    close(fd);
-    return {};
-  }
-  uint8_t header[16]{};
-  std::memcpy(header, "DARTD001", 8);
-  const uint16_t version = 1;
-  const uint16_t operation = 6;
-  std::memcpy(header + 8, &version, sizeof(version));
-  std::memcpy(header + 10, &operation, sizeof(operation));
-  const uint32_t length = static_cast<uint32_t>(package.size());
-  std::memcpy(header + 12, &length, sizeof(length));
-  if (!WriteAll(fd, header, sizeof(header)) ||
-      !WriteAll(fd, package.data(), package.size()) ||
-      !ReadAll(fd, header, sizeof(header)) ||
-      std::memcmp(header, "DARTD001", 8) != 0) {
-    close(fd);
-    return {};
-  }
-  uint16_t response_version = 0;
-  uint16_t response_operation = 0;
-  std::memcpy(&response_version, header + 8, sizeof(response_version));
-  std::memcpy(&response_operation, header + 10, sizeof(response_operation));
-  if (response_version != version || response_operation != (operation | 0x8000)) {
-    close(fd);
-    return {};
-  }
-  uint32_t response_length = 0;
-  std::memcpy(&response_length, header + 12, sizeof(response_length));
-  if (response_length < 4 || response_length > 64 * 1024) {
-    close(fd);
-    return {};
-  }
-  std::vector<uint8_t> response(response_length);
-  const bool received = ReadAll(fd, response.data(), response.size());
-  close(fd);
-  uint32_t status = 1;
-  if (received) std::memcpy(&status, response.data(), sizeof(status));
-  return received && status == 0
-             ? std::string(response.begin() + 4, response.end())
-             : std::string();
-}
-
 jstring NativeResolveDaemonPackage(JNIEnv* env, jclass, jstring package_name) {
-  if (package_name == nullptr) return nullptr;
-  const char* utf = env->GetStringUTFChars(package_name, nullptr);
-  if (utf == nullptr) return nullptr;
-  const std::string record = ResolveDaemonPackage(utf);
-  env->ReleaseStringUTFChars(package_name, utf);
-  return record.empty() ? nullptr : env->NewStringUTF(record.c_str());
+  return darwin_art::framework::pm::QueryInstalledRecord(
+      env, std::getenv("DARWIN_ART_PROFILE_SOCKET"), package_name);
 }
 
-jclass LoadApplicationClass(JNIEnv* env, jobject loader, const char* name) {
-  jclass loader_class = env->GetObjectClass(loader);
-  jmethodID load = loader_class == nullptr
-                       ? nullptr
-                       : env->GetMethodID(loader_class, "loadClass",
-                                          "(Ljava/lang/String;)Ljava/lang/Class;");
-  jstring class_name = env->NewStringUTF(name);
-  jobject loaded = load == nullptr
-                       ? nullptr
-                       : env->CallObjectMethod(loader, load, class_name);
-  env->DeleteLocalRef(class_name);
-  env->DeleteLocalRef(loader_class);
-  return static_cast<jclass>(loaded);
-}
-
-int RunSystemServerLite(JNIEnv* env, jobject app_loader) {
-  const char* socket_path = std::getenv("DARWIN_ART_SYSTEM_SERVER_SOCKET");
-  if (socket_path == nullptr || *socket_path == '\0') {
-    std::cerr << "ART system_server-lite: socket capability missing\n";
-    return 70;
-  }
-  jclass server = LoadApplicationClass(
-      env, app_loader, "dev.darwinart.system.DarwinSystemServer");
-  JNINativeMethod methods[] = {
-      {const_cast<char*>("nativeResolvePackage"),
-       const_cast<char*>("(Ljava/lang/String;)Ljava/lang/String;"),
-       reinterpret_cast<void*>(&NativeResolveDaemonPackage)},
-  };
-  if (server == nullptr || env->ExceptionCheck() ||
-      env->RegisterNatives(server, methods, 1) != JNI_OK) {
-    std::cerr << "ART system_server-lite: could not load/register DarwinSystemServer"
-              << " class=" << server << " exception=" << env->ExceptionCheck()
-              << "\n";
-    if (env->ExceptionCheck()) {
-      env->ExceptionDescribe();
-      env->ExceptionClear();
-    }
-    return 70;
-  }
-  jmethodID create = env->GetStaticMethodID(
-      server, "createPackageRegistry", "()Landroid/os/Binder;");
-  jobject registry = create == nullptr
-                         ? nullptr
-                         : env->CallStaticObjectMethod(server, create);
-  if (registry == nullptr || env->ExceptionCheck()) {
-    std::cerr << "ART system_server-lite: could not create package registry"
-              << " method=" << create << " registry=" << registry
-              << " exception=" << env->ExceptionCheck() << "\n";
-    if (env->ExceptionCheck()) {
-      env->ExceptionDescribe();
-      env->ExceptionClear();
-    }
-    return 70;
-  }
-
-  const int listener = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (listener < 0) {
-    std::cerr << "ART system_server-lite: socket() failed: "
-              << std::strerror(errno) << "\n";
-    return 70;
-  }
-  sockaddr_un address{};
-  address.sun_family = AF_UNIX;
-  if (std::strlen(socket_path) >= sizeof(address.sun_path)) {
-    std::cerr << "ART system_server-lite: socket path exceeds Darwin limit: "
-              << socket_path << "\n";
-    close(listener);
-    return 70;
-  }
-  std::memcpy(address.sun_path, socket_path, std::strlen(socket_path) + 1);
-  const int probe = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (probe >= 0 &&
-      connect(probe, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) {
-    close(probe);
-    close(listener);
-    return 0;
-  }
-  if (probe >= 0) close(probe);
-  unlink(socket_path);
-  if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
-      chmod(socket_path, 0600) != 0 || listen(listener, 16) != 0) {
-    std::cerr << "ART system_server-lite: publish failed for " << socket_path
-              << ": " << std::strerror(errno) << "\n";
-    close(listener);
-    return 70;
-  }
-  std::cerr << "ART system_server-lite: package registry ready socket="
-            << socket_path << "\n";
-  for (;;) {
-    const int client = accept(listener, nullptr, nullptr);
-    if (client < 0) continue;
-    if (!darwin_art::StartServingRemoteBinder(env, client, registry)) {
-      close(client);
-    }
-  }
-}
 
 }  // namespace
 
@@ -437,24 +214,6 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
   const bool run_apk_app = process_options.run_apk_app;
   const bool run_system_server =
       run_apk_app && std::getenv("DARWIN_ART_SYSTEM_SERVER_MODE") != nullptr;
-  const char* service_component =
-      run_apk_app ? std::getenv("DARWIN_ART_APK_SERVICE_COMPONENT") : nullptr;
-  const char* service_control =
-      run_apk_app ? std::getenv("DARWIN_ART_SERVICE_CONTROL_FD") : nullptr;
-  const bool run_service_process = service_component != nullptr &&
-                                   *service_component != '\0' &&
-                                   service_control != nullptr;
-  std::string service_class_name;
-  std::string service_descriptor;
-  if (run_service_process) {
-    const char* slash = std::strchr(service_component, '/');
-    service_class_name = slash == nullptr ? service_component : slash + 1;
-    if (!service_class_name.empty() && service_class_name.front() == '.') {
-      service_class_name = process_options.apk_app_package + service_class_name;
-    }
-    service_descriptor = "L" + service_class_name + ";";
-    std::replace(service_descriptor.begin(), service_descriptor.end(), '.', '/');
-  }
   const bool run_framework_button = process_options.run_framework_button;
   const bool use_framework_resources = process_options.use_framework_resources;
   const jint window_scale = process_options.window_scale;
@@ -587,11 +346,19 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
     options.Set(art::RuntimeArgumentMap::BootClassPathOatFds,
                 art::ParseIntList<':'> (std::move(oat_fds)));
   }
-  std::string application_class_path = config->app_dex;
-  if (run_system_server) {
-    application_class_path = apk_app_support_dex;
-  } else if (run_apk_app && apk_app_support_dex[0] != '\0') {
-    application_class_path.insert(0, std::string(apk_app_support_dex) + ":");
+  // The normal APK's code path belongs to ActivityThread/LoadedApk. Keep only
+  // the compatibility service DEX in the VM's bootstrap ClassPath; putting the
+  // APK itself here makes SystemClassLoader an eager second owner of app code.
+  std::string application_class_path =
+      (run_system_server || (run_apk_app && !run_direct_apk))
+          ? apk_app_support_dex
+          : config->app_dex;
+  if (run_system_server &&
+      !darwin_art::framework::system::BuildSystemClassPath(
+          std::getenv("DARWIN_ART_ANDROID_FILESYSTEM_ROOT"), apk_app_support_dex,
+          &application_class_path)) {
+    std::cerr << "ART system process: invalid service classpath inputs\n";
+    return 70;
   }
   options.Set(art::RuntimeArgumentMap::ClassPath,
               application_class_path);
@@ -807,6 +574,10 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
   if (!art::Runtime::Create(std::move(options))) {
     return 1;
   }
+  // JNI_CreateJavaVM initializes NativeLoader after Runtime::Create and before
+  // Runtime::Start. This embedded app_process path performs the same two
+  // operations directly, so it must preserve that ordering explicitly.
+  android::InitializeNativeLoader();
   // Android's zygote specialization publishes DEBUG_ENABLE_JDWP separately
   // from ApplicationInfo.FLAG_DEBUGGABLE. ART run-tests that attach a limited
   // JVMTI environment use that process capability while deliberately keeping
@@ -823,6 +594,7 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
     art::Runtime::Current()->SetRuntimeDebugState(
         art::Runtime::RuntimeDebugState::kJavaDebuggableAtInit);
   }
+  darwin_art::graphics::ConfigureGraphicsEnvironment(java_debuggable);
   if (enable_jit && std::getenv("DARWIN_ART_JIT_TRACE") != nullptr) {
     std::cerr << "ART runtime: java-debuggable="
               << (art::Runtime::Current()->IsJavaDebuggable() ? 1 : 0)
@@ -846,20 +618,6 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
     return 33;
   }
   JNIEnv* env = self->GetJniEnv();
-
-  // Android loads libopenjdk's boot JNI owner before boot classes execute.
-  // Do the same for the composed Darwin owner so core-oj named methods are
-  // discoverable during the first class initializers, not only after app load.
-  if (const char* owner = std::getenv("DARWIN_ART_OPENJDK_NAMED_JNI_OWNER");
-      owner != nullptr && *owner != '\0') {
-    std::string load_error;
-    if (!art::Runtime::Current()->GetJavaVM()->LoadNativeLibrary(
-            env, owner, nullptr, nullptr, &load_error)) {
-      std::cerr << "ART OpenJDK boot JNI owner load failed: " << load_error
-                << "\n";
-      return 18;
-    }
-  }
 
   process_boundary.set_art_thread(self);
   if (config->provider_acquire != nullptr) {
@@ -896,18 +654,35 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
             << " compiler_callbacks=" << (art::Runtime::Current()->IsCompiler() ? 1 : 0)
             << " aot_compiler=" << (art::Runtime::Current()->IsAotCompiler() ? 1 : 0)
             << "\n";
+  if (run_apk_app && !run_system_server && !run_direct_apk) {
+    // ActivityThread/LoadedApk own binding and application code loading for
+    // every application process, including declared and isolated services.
+    // ActiveServices dispatches the framework create/bind transactions after
+    // attachApplication; never enter fixture class discovery, direct
+    // Service.attach, or eager native loading for production APK processes.
+    return darwin_art::framework::app::RunApplicationProcess(env, self);
+  }
+  if (run_system_server) {
+    // System startup must not require any Activity/View/PackageManager fixture.
+    const int status = darwin_art::framework::system::RunSystemProcess(
+        env, std::getenv("DARWIN_ART_SYSTEM_SERVER_SOCKET"),
+        &NativeResolveDaemonPackage);
+    run_result->hello_answer = 0;
+    run_result->native_round_trip = 0;
+    run_result->arraycopy_result = 0;
+    run_result->activity_probe_result = 0;
+    run_result->lifecycle_result = 0;
+    run_result->frame_width = 0;
+    run_result->frame_height = 0;
+    return status;
+  }
   const char* activity_descriptor =
-      run_service_process
-          ? service_descriptor.c_str()
-          : (run_apk_app && !run_system_server
-                 ? apk_app_descriptor
-                 : "Ldev/darwinart/probe/ProbeActivity;");
-  const char* process_dex =
-      run_system_server ? apk_app_support_dex : config->app_dex;
+      run_apk_app ? apk_app_descriptor : "Ldev/darwinart/probe/ProbeActivity;";
+  const char* process_dex = config->app_dex;
   darwin_art_app::ClassSet app_classes;
   const int app_status = darwin_art_app::load_classes(
       self->GetJniEnv(), self, class_linker, soa, hs,
-      run_apk_app && !run_system_server, process_dex,
+      run_apk_app, process_dex,
       apk_app_support_dex, apk_app_native_path, activity_descriptor,
       run_direct_apk, direct_apk_path,
       run_elf_jni_fixture, run_network_acceptance,
@@ -1043,26 +818,6 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
     return registration_status;
   }
 
-  if (run_system_server) {
-    if (!darwin_art_surfaceflinger_service_start()) {
-      std::cerr << "ART system_server-lite: SurfaceFlinger service setup failed\n";
-      return 70;
-    }
-    if (darwin_art_install_context_loader(env, app_loader_ref) != 0) {
-      std::cerr << "ART system_server-lite: ClassLoader setup failed\n";
-      return 70;
-    }
-    const int status = RunSystemServerLite(env, app_loader_ref);
-    run_result->hello_answer = 0;
-    run_result->native_round_trip = 0;
-    run_result->arraycopy_result = 0;
-    run_result->activity_probe_result = 0;
-    run_result->lifecycle_result = 0;
-    run_result->frame_width = 0;
-    run_result->frame_height = 0;
-    return status;
-  }
-
   // Android's managed System.load/Runtime.nativeLoad path reaches
   // JavaVMExt only after the app PathClassLoader and thread context loader
   // have been installed.  Loading earlier makes JNI_OnLoad observe the boot
@@ -1151,39 +906,15 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
   }
   jint lifecycle_result = 43;
   int presentation_status = 0;
-  if (run_service_process) {
-    if (darwin_art_install_context_loader(env, app_loader_ref) != 0) {
-      std::cerr << "ART Android service: context ClassLoader setup failed\n";
-      return 27;
-    }
-    const jint control_fd = static_cast<jint>(std::strtol(
-        service_control, nullptr, 10));
-    presentation_status = darwin_art_presentation::run_service(
-        env, self, probe_activity_class, probe_context_class,
-        probe_resources_class, package_manager, use_framework_resources,
-        window_scale, framework_res_apk, apk_app_package,
-        service_class_name.c_str(),
-        process_options.apk_app_resource_apk.c_str(), control_fd);
-    if (presentation_status != 0) return presentation_status;
-    run_result->hello_answer = 0;
-    run_result->native_round_trip = 0;
-    run_result->arraycopy_result = 0;
-    run_result->activity_probe_result = 0;
-    run_result->lifecycle_result = 0;
-    run_result->frame_width = 0;
-    run_result->frame_height = 0;
-    return 0;
-  }
   // The ELF/JNI acceptance fixture is a headless execution test.  It does
   // not represent an Android application process and deliberately has no
-  // support DEX containing DarwinServiceBridge, so entering the window
+  // runtime support DEX, so entering the window
   // presentation bootstrap here would exercise an unrelated service-manager
   // dependency and turn a JNI test into an IServiceManager NPE.  Real APK
   // processes and the framework-button probe still take the complete
   // presentation path below.
   const bool run_headless_elf_fixture =
-      run_elf_jni_fixture && !run_apk_app && !run_framework_button &&
-      !run_service_process;
+      run_elf_jni_fixture && !run_apk_app && !run_framework_button;
   if (run_headless_elf_fixture) {
     presentation_status = 0;
   } else if (run_apk_app) {
@@ -1192,8 +923,7 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
     // AppKit actor, while graphics/input callbacks stay on this owner thread;
     // no JNI or GraphicsSession state crosses into AppKit.
     if (darwin_art_graphics::prepare_gpu_surface(
-            graphics_state, kApkFrameWidth * window_scale,
-            kApkFrameHeight * window_scale) != 0) {
+            graphics_state, kApkFrameWidth, kApkFrameHeight) != 0) {
       std::cerr << "ART Android GPU: main-thread surface preparation failed\n";
       return 33;
     }

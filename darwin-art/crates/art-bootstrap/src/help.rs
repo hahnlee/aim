@@ -15,6 +15,7 @@ pub(crate) fn print_help() {
     println!("  build-resource-jni  build Android's four complete resource JNI registrars");
     println!("  build-android-util-log  build Android's complete android.util.Log JNI owner");
     println!("  build-android-runtime-host  own ART's process JavaVM for AndroidRuntime callbacks");
+    println!("  build-binder-jni  build pinned AOSP Binder/Parcel JNI and RPC boundary archives");
     println!("  build-libcore-linux  build the complete libcore.io.Linux Darwin registrar");
     println!("  build-os-constants  preserve all Android/Linux constants on Darwin");
     println!("  build-unix-filesystem  build Android's complete UnixFileSystem JNI owner");
@@ -53,6 +54,7 @@ pub(crate) fn print_help() {
     println!(
         "  build-android16-boot-image  build and atomically publish the AOSP speed boot image"
     );
+    println!("  prepare-runtime-common-shadow  stage shared patched ART sources");
     println!("  build-runtime-bootstrap  compile ART Runtime initialization for Darwin");
     println!(
         "  build-runtime-graphics-bootstrap  compile the isolated real-graphics Runtime flavor"

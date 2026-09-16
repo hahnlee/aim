@@ -15,18 +15,24 @@ requested extent because Darwin has no equivalent automatic-growth contract;
 non-anonymous or fixed stack-hint combinations remain capability-closed.
 The anonymous fd is intentionally ignored and is never treated as a host fd.
 Android `MAP_ANONYMOUS=0x20` is rebuilt as Darwin `MAP_ANON=0x1000`; guest flags
-are never passed through. `MAP_FIXED`, shared, file-backed, ashmem, hints, and
-nonzero offsets fail with explicit Android errno. Offset and range arithmetic
+are never passed through. Provider-owned `MAP_FIXED`, shared anonymous, and
+resolver-backed private/shared file mappings are supported. Ashmem and
+unsupported hints fail with explicit Android errno. Offset and range arithmetic
 are checked against the Darwin page size exposed by the surrounding process.
 
-Each successful host mapping is registered in a mutex-protected side table.
-`mprotect`, `madvise`, and `munmap` accept only the complete owned mapping (the
-original or host-rounded length); partial ranges are `EOPNOTSUPP`. Misaligned or
-zero ranges fail before Darwin. Calls and retirement are serialized, so a
-concurrent operation either sees the live mapping or is rejected from the table
-without invoking a host syscall. The acceptance gate checks the table is empty
-after unmap and never reads, writes, or executes a retired pointer. Provider
-drop unmaps any remaining complete mappings.
+Each successful host mapping is registered in a mutex-protected interval table.
+`mprotect`, `madvise`, and `munmap` operate on page-aligned owned subranges.
+Splits retain their original allocation identity and adjacent segments are
+coalesced again only when their allocation identity and effective mapping state
+match; distinct adjacent `mmap` allocations therefore retain Linux `munmap` and
+`mremap` boundaries. The ordinary VMA metadata capacity is independent from the
+fixed-size async-signal-safe JIT snapshot, so non-JIT mappings cannot exhaust
+signal-handler storage. Both have explicit fail-closed safety ceilings (65,536
+segments and 4,096 JIT-capable ranges) rather than the previous shared 1,024
+entry limit. Misaligned or zero ranges fail before Darwin. Calls and retirement
+are serialized, so a concurrent operation either sees the live mapping or is
+rejected from the table without invoking a host syscall. Provider drop unmaps
+any remaining complete mappings.
 
 Direct simultaneous write and execute mappings return Android `EACCES`; RW to
 RX and RX to RW transitions are supported. An ownership-checked subset of an
@@ -58,12 +64,10 @@ Darwin host errno. Unknown host errno translation sets a deterministic Android
 `EIO` and a provider capability-failure bit. The resolver is closed and accepts
 only the six exact versioned imports; it never uses dyld or `dlsym`.
 
-File-backed mappings require a future central virtual-FD owner. That integration
-must retain an open-file description independent of guest `close`, validate
-mapping access mode and offset, and model EOF/SIGBUS without exposing a Darwin
-fd. Partial unmap/protection needs an interval registry before it can be added.
-Repeated `munmap` of a retired range is currently fail-closed `EINVAL`, stricter
-than Linux's successful no-op.
+File-backed mappings use the central virtual-FD resolver, which transfers a
+duplicate host descriptor into the mapping operation without exposing it to the
+guest. EOF/SIGBUS fidelity remains follow-up work. Repeated `munmap` of a retired
+range is currently fail-closed `EINVAL`, stricter than Linux's successful no-op.
 
 Run `./audit.sh`. It pins NDK/Bionic/Darwin headers and libc exports, verifies
 the zero pinned-libc++ demand, ABI constants/signatures, exact C dependencies,

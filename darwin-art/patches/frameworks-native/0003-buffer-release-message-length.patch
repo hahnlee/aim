@@ -1,0 +1,13 @@
+--- a/libs/gui/BufferReleaseChannel.cpp
++++ b/libs/gui/BufferReleaseChannel.cpp
+@@ -109,6 +109,11 @@
+ status_t BufferReleaseChannel::Message::unflatten(void const*& buffer, size_t& size,
+                                                   int const*& fds, size_t& count) {
++    // Validate the complete record before accepting ownership of a fence FD.
++    // A short record must not report a successful buffer release.
++    if (size < getFlattenedSize()) {
++        return NO_MEMORY;
++    }
+     releaseFence = sp<Fence>::make();
+     if (status_t err = releaseFence->unflatten(buffer, size, fds, count); err != OK) {
+         return err;

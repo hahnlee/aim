@@ -315,8 +315,11 @@ static NSString *const DARErrorDomain = @"dev.darwinart.manager";
     }
     NSString *launcher = [self.runtimeRootURL URLByAppendingPathComponent:
                                                    @"tools/run-android-apk-app.sh"].path;
-    [self runActionProgram:ctl
-                 arguments:@[@"daemonize", package, launcher, @"--record", recordURL.path,
+    // The launcher daemonizes the final host and waits synchronously by
+    // default. The manager asks only for an asynchronous handoff so the
+    // manager task does not own or wait on the app window.
+    [self runActionProgram:@"/usr/bin/env"
+                 arguments:@[@"DARWIN_ART_ASYNC_LAUNCH=1", launcher, @"--record", recordURL.path,
                              @"86400"]
                 completion:^(NSError *launchError) {
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),

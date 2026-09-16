@@ -1,0 +1,51 @@
+diff --git a/ojluni/src/main/native/io_util_md.c b/ojluni/src/main/native/io_util_md.c
+index 3c03f6a..30e38a7 100644
+--- a/ojluni/src/main/native/io_util_md.c
++++ b/ojluni/src/main/native/io_util_md.c
+@@ -47,6 +47,27 @@
+ #endif
+ // END Android-added: Fuchsia: Alias *64 functions on Fuchsia. http://b/119496969
+
++#if defined(DARWIN_ART_OPENJDK_VIRTUAL_DESCRIPTORS)
++// FileDescriptor.fd is an Android descriptor capability. Keep the original
++// OpenJDK implementation, but bind every syscall used by its shared helpers
++// to the Darwin ART descriptor owner after the platform headers have defined
++// their *64 aliases.
++#undef open64
++#undef fstat64
++#undef lseek64
++#undef ftruncate64
++#undef ioctl
++#undef read
++#undef write
++#define open64 darwin_art_openjdk_nio_open
++#define fstat64 darwin_art_openjdk_nio_fstat
++#define lseek64 darwin_art_openjdk_nio_lseek
++#define ftruncate64 darwin_art_openjdk_nio_ftruncate
++#define ioctl darwin_art_openjdk_nio_ioctl
++#define read darwin_art_openjdk_nio_read
++#define write darwin_art_openjdk_nio_write
++#endif
++
+ #ifdef MACOSX
+
+ #include <CoreFoundation/CoreFoundation.h>
+diff --git a/ojluni/src/main/native/FileInputStream.c b/ojluni/src/main/native/FileInputStream.c
+index b190327..ccaf32d 100644
+--- a/ojluni/src/main/native/FileInputStream.c
++++ b/ojluni/src/main/native/FileInputStream.c
+@@ -41,6 +41,14 @@
+
+ #include "jvm.h"
+
++#if defined(DARWIN_ART_OPENJDK_VIRTUAL_DESCRIPTORS)
++// sys/ioctl.h may replace a command-line/forced-include alias. Rebind after
++// the complete OpenJDK include set so FileInputStream.available0() operates
++// on the Android descriptor capability rather than its integer as a host fd.
++#undef ioctl
++#define ioctl darwin_art_openjdk_nio_ioctl
++#endif
++
+
+ #include "io_util_md.h"
+ #include <nativehelper/JNIHelp.h>

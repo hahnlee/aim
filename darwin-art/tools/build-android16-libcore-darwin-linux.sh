@@ -137,6 +137,7 @@ my %supported = (
   mmap => 'DarwinLinuxMmap', munmap => 'DarwinLinuxMunmap',
   sysconf => 'DarwinLinuxSysconf',
   getenv => 'DarwinLinuxGetenv', getpwuid => 'DarwinLinuxGetpwuid',
+  setenv => 'DarwinLinuxSetenv', unsetenv => 'DarwinLinuxUnsetenv',
   stat => 'DarwinLinuxStat', lseek => 'DarwinLinuxLseek',
   kill => 'DarwinLinuxKill',
   sendfile => 'DarwinLinuxSendfile',
@@ -405,6 +406,9 @@ public final class LibcoreDarwinAbiSmoke {
     private native boolean unsupportedBoolean(String value, int number) throws ErrnoException;
     private native long availableProcessors() throws ErrnoException;
     private native String environment(String name) throws ErrnoException;
+    private native void setEnvironment(String name, String value, boolean overwrite)
+            throws ErrnoException;
+    private native void unsetEnvironment(String name) throws ErrnoException;
     private native StructStat statPath(String path) throws ErrnoException;
     private native boolean accessPath(String path, int mode) throws ErrnoException;
     private native int writeFile(String path, byte[] bytes) throws ErrnoException;
@@ -469,6 +473,53 @@ public final class LibcoreDarwinAbiSmoke {
         String environment = smoke.environment("DARWIN_ART_MANAGED_SMOKE");
         if (!"present".equals(environment)) {
             throw new AssertionError("getenv=" + environment);
+        }
+        String variable = "DARWIN_ART_MANAGED_SETENV";
+        smoke.unsetEnvironment(variable);
+        if (smoke.environment(variable) != null) {
+            throw new AssertionError("unsetenv left a value");
+        }
+        try {
+            smoke.setEnvironment(variable, "first", false);
+            if (!"first".equals(smoke.environment(variable))) {
+                throw new AssertionError("setenv did not publish first value");
+            }
+            smoke.setEnvironment(variable, "second", false);
+            if (!"first".equals(smoke.environment(variable))) {
+                throw new AssertionError("setenv overwrite=false changed value");
+            }
+            smoke.setEnvironment(variable, "second", true);
+            if (!"second".equals(smoke.environment(variable))) {
+                throw new AssertionError("setenv overwrite=true did not change value");
+            }
+            expectErrno(22, "setenv empty name", () ->
+                    smoke.setEnvironment("", "value", true));
+            expectErrno(22, "setenv equals name", () ->
+                    smoke.setEnvironment("name=value", "value", true));
+            expectErrno(22, "unsetenv empty name", () ->
+                    smoke.unsetEnvironment(""));
+            expectErrno(22, "unsetenv equals name", () ->
+                    smoke.unsetEnvironment("name=value"));
+        } finally {
+            smoke.unsetEnvironment(variable);
+        }
+        try {
+            smoke.setEnvironment(null, "value", true);
+            throw new AssertionError("setenv(null, ...) unexpectedly succeeded");
+        } catch (NullPointerException expected) {
+            // ScopedUtfChars preserves the AOSP null argument contract.
+        }
+        try {
+            smoke.setEnvironment("name", null, true);
+            throw new AssertionError("setenv(..., null, ...) unexpectedly succeeded");
+        } catch (NullPointerException expected) {
+            // ScopedUtfChars preserves the AOSP null argument contract.
+        }
+        try {
+            smoke.unsetEnvironment(null);
+            throw new AssertionError("unsetenv(null) unexpectedly succeeded");
+        } catch (NullPointerException expected) {
+            // ScopedUtfChars preserves the AOSP null argument contract.
         }
         byte[] payload = "PK\u0003\u0004darwin-libcore-writePK\u0005\u0006"
                 .getBytes(StandardCharsets.ISO_8859_1);
@@ -542,6 +593,7 @@ public final class LibcoreDarwinAbiSmoke {
             throw new AssertionError("non-Bionic fdsan contract failed");
         }
         System.out.println("managed-abi: V/I/J/L/Z ErrnoException(ENOTSUP)"
+                + " env=getenv+setenv/overwrite/null/einval+unsetenv/null/einval"
                 + " access=existing/missing/mode lseek=set/cur/end+zip+overflow strerror(EINVAL)=pass"
                 + " strsignal(SIGTERM)=pass fdsan=non-Bionic"
                 + " processors=" + processors);
@@ -557,7 +609,7 @@ javac --release 17 -encoding UTF-8 -d "$java_classes" \
 managed_abi_output="$(DARWIN_ART_MANAGED_SMOKE=present java -cp "$java_classes" \
   dev.darwinart.probe.LibcoreDarwinAbiSmoke "$abi_library")"
 [[ "$managed_abi_output" == \
-   'managed-abi: V/I/J/L/Z ErrnoException(ENOTSUP) access=existing/missing/mode lseek=set/cur/end+zip+overflow strerror(EINVAL)=pass strsignal(SIGTERM)=pass fdsan=non-Bionic processors='* ]] ||
+   'managed-abi: V/I/J/L/Z ErrnoException(ENOTSUP) env=getenv+setenv/overwrite/null/einval+unsetenv/null/einval access=existing/missing/mode lseek=set/cur/end+zip+overflow strerror(EINVAL)=pass strsignal(SIGTERM)=pass fdsan=non-Bionic processors='* ]] ||
   fail "managed ABI smoke output mismatch: $managed_abi_output"
 managed_processors="${managed_abi_output##*=}"
 [[ "$managed_processors" =~ ^[1-9][0-9]*$ ]] ||
@@ -568,4 +620,4 @@ mkdir -p "$build_dir"
 cp "$archive" "$build_dir/libcore-darwin-linux.a"
 cp "$smoke" "$build_dir/libcore-darwin-linux-smoke"
 
-echo "libcore-darwin-linux: methods=$method_count regular=$supported_regular critical=$supported_critical enotsup=$unsupported_count fixed-abi=$unsupported_count managed=V/I/J/L/Z+getenv/access/stat/write/lseek/uname/strerror/strsignal/fdsan managed-processors=$managed_processors archive=Mach-O-arm64 $smoke_output"
+echo "libcore-darwin-linux: methods=$method_count regular=$supported_regular critical=$supported_critical enotsup=$unsupported_count fixed-abi=$unsupported_count managed=V/I/J/L/Z+getenv/setenv/unsetenv/access/stat/write/lseek/uname/strerror/strsignal/fdsan managed-processors=$managed_processors archive=Mach-O-arm64 $smoke_output"

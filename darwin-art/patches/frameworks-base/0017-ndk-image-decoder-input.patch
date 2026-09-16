@@ -1,0 +1,46 @@
+--- a/imagedecoder.cpp
++++ b/imagedecoder.cpp
+@@ -46,3 +46,6 @@
+ #include "aassetstreamadaptor.h"
++#if defined(__APPLE__)
++#include "graphics/image_decoder_input.h"
++#endif
+
+ using namespace android;
+@@ -112,3 +115,6 @@
+                                          SkCodec::SelectionPolicy::kPreferAnimation);
++    if (!codec) {
++        return ResultToErrorCode(result);
++    }
+     // These may be swapped due to the SkEncodedOrigin, but we're just checking
+     // them to make sure they fit in int32_t.
+@@ -135,3 +141,3 @@
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) || defined(__APPLE__)
+     auto stream = std::make_unique<AAssetStreamAdaptor>(asset);
+     return createFromStream(std::move(stream), outDecoder);
+@@ -143,11 +149,18 @@
++#if !defined(__APPLE__)
+ static bool isSeekable(int descriptor) {
+     return ::lseek64(descriptor, 0, SEEK_CUR) != -1;
+ }
++#endif
+
+ int AImageDecoder_createFromFd(int fd, AImageDecoder** outDecoder) {
+-    if (fd <= 0 || !outDecoder) {
++    if (fd < 0 || !outDecoder) {
+         return ANDROID_IMAGE_DECODER_BAD_PARAMETER;
+     }
++    *outDecoder = nullptr;
+
++#if defined(__APPLE__)
++    FILE* file = darwin_art::graphics::OpenImageDecoderInput(fd);
++    if (!file) return ANDROID_IMAGE_DECODER_BAD_PARAMETER;
++#else
+     struct stat fdStat;
+     if (fstat(fd, &fdStat) == -1) {
+@@ -174,3 +188,4 @@
+     }
++#endif
+
+     auto stream = std::unique_ptr<SkStreamRewindable>(new SkFILEStream(file));

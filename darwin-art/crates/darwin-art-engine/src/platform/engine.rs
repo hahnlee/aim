@@ -1,11 +1,15 @@
-use super::abi::{EngineSymbols, LoadedEngine};
+use super::abi::{BinderBrokerSymbols, EngineSymbols, LoadedEngine, native_loader_config_allowed};
 use super::graphics::GraphicsSession;
 use super::process::ProcessRequest;
+use super::process_filesystem::{ProcessFilesystemError, install_with};
+use super::process_snapshot::{ProcessSnapshotError, ProcessSnapshotInputs};
 use super::surface::SurfaceSession;
 use core::ffi::c_void;
 use darwin_art_engine_sys::{ProcessConfig, ProcessResult, ProviderAcquireFn, ProviderReleaseFn};
 use darwin_art_runtime::{NativeResource, ProviderBridge};
+use std::os::fd::BorrowedFd;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Process-scoped engine owner.  The dynamic library and its shutdown
 /// callback share one Rust lifetime, so callers cannot accidentally drop
@@ -13,6 +17,10 @@ use std::path::Path;
 pub struct EngineSession {
     engine: LoadedEngine,
     shutdown_taken: bool,
+    shutdown_status: i32,
+    process_entered: AtomicBool,
+    process_snapshot_installed: bool,
+    process_filesystem_installed: bool,
 }
 
 impl EngineSession {
@@ -20,6 +28,10 @@ impl EngineSession {
         Ok(Self {
             engine: LoadedEngine::open(path)?,
             shutdown_taken: false,
+            shutdown_status: 0,
+            process_entered: AtomicBool::new(false),
+            process_snapshot_installed: false,
+            process_filesystem_installed: false,
         })
     }
 
@@ -38,14 +50,86 @@ impl EngineSession {
         )
     }
 
+    /// Borrow the central Bionic Binder-FD publication ABI from this exact
+    /// RuntimeEntry image. The returned function pointers remain valid while
+    /// this `EngineSession` owns the dynamic image.
+    pub fn binder_broker_symbols(&self) -> BinderBrokerSymbols {
+        self.engine.symbols().binder_broker
+    }
+
+    /// Install the host/service-owned Android process snapshot through the
+    /// engine's configured ABI. The native side copies every input before the
+    /// call returns; this owner records the active lifetime only afterward.
+    pub fn install_process_snapshot(
+        &mut self,
+        inputs: &ProcessSnapshotInputs,
+    ) -> Result<(), ProcessSnapshotError> {
+        if self.shutdown_taken {
+            return Err(ProcessSnapshotError::EngineClosed);
+        }
+        if self.process_snapshot_installed {
+            return Err(ProcessSnapshotError::AlreadyInstalled);
+        }
+        inputs.install_with(self.engine.symbols().process.install_process_snapshot)?;
+        self.process_snapshot_installed = true;
+        Ok(())
+    }
+
+    /// Atomically install a snapshot and explicit trusted Android credentials.
+    /// A native image that rejects version 2 is an error, never a v1 fallback.
+    pub fn install_process_snapshot_with_credentials(
+        &mut self,
+        inputs: &ProcessSnapshotInputs,
+        credentials: &super::process_credentials::ProcessCredentialsInputs,
+    ) -> Result<(), ProcessSnapshotError> {
+        if self.shutdown_taken {
+            return Err(ProcessSnapshotError::EngineClosed);
+        }
+        if self.process_snapshot_installed {
+            return Err(ProcessSnapshotError::AlreadyInstalled);
+        }
+        inputs.install_with_credentials(
+            credentials,
+            self.engine.symbols().process.install_process_snapshot,
+        )?;
+        self.process_snapshot_installed = true;
+        Ok(())
+    }
+
+    /// Install the process filesystem from a caller-owned authority
+    /// descriptor. Native code duplicates the descriptor synchronously and
+    /// copies both guest paths before this method returns.
+    pub fn install_process_filesystem(
+        &mut self,
+        root_fd: BorrowedFd<'_>,
+        guest_mount: &[u8],
+        cwd: &[u8],
+    ) -> Result<(), ProcessFilesystemError> {
+        if self.shutdown_taken {
+            return Err(ProcessFilesystemError::EngineClosed);
+        }
+        if self.process_filesystem_installed {
+            return Err(ProcessFilesystemError::AlreadyInstalled);
+        }
+        install_with(
+            root_fd,
+            guest_mount,
+            cwd,
+            self.engine.symbols().process.install_process_filesystem,
+        )?;
+        self.process_filesystem_installed = true;
+        Ok(())
+    }
+
     /// Run one process through the versioned ABI and construct its result
     /// in the same crate that owns the raw function pointer. The caller
     /// receives no partially initialized result on a nonzero status.
     pub(crate) fn run_process(&self, config: &ProcessConfig) -> Result<ProcessResult, i32> {
-        if !config.is_compatible() {
+        if self.shutdown_taken || !config.is_compatible() || !native_loader_config_allowed(config) {
             return Err(-1);
         }
         let mut result = ProcessResult::new();
+        self.process_entered.store(true, Ordering::Release);
         // SAFETY: `config` and all callback state it references are owned
         // by the caller for this synchronous invocation; the function
         // pointer belongs to this live EngineSession image.
@@ -129,12 +213,19 @@ impl EngineSession {
     /// call and until the owner is dropped afterward.
     pub fn close(&mut self) -> i32 {
         if self.shutdown_taken {
-            return 0;
+            return self.shutdown_status;
         }
         self.shutdown_taken = true;
+        // Installing configuration/opening the image does not create a VM.
+        // Failed pre-run bootstrap transfers must release their snapshot
+        // without invoking the native shutdown state machine in kNotReady.
+        if !self.process_entered.load(Ordering::Acquire) {
+            return 0;
+        }
         // SAFETY: the function pointer was resolved from this live,
         // version-checked engine image and takes no arguments.
-        unsafe { (self.engine.symbols().process.shutdown_process)() }
+        self.shutdown_status = unsafe { (self.engine.symbols().process.shutdown_process)() };
+        self.shutdown_status
     }
 
     /// Unload guest NativeLoader DSOs before an Android process-style `_exit`.
@@ -155,7 +246,40 @@ impl Drop for EngineSession {
         // A failed ownership transfer must not leave ART resident. Normal
         // RuntimeSession teardown marks this callback consumed first, so
         // Drop is idempotent in the successful path.
-        let _ = self.close();
+        let shutdown_status = self.close();
+        if self.process_filesystem_installed {
+            // A failed VM shutdown does not prove filesystem users have
+            // quiesced. Never release the authority while native threads may
+            // still use it.
+            if shutdown_status != 0 {
+                std::process::abort();
+            }
+            self.process_filesystem_installed = false;
+            // SAFETY: close completed and the callback belongs to the live
+            // engine image. Filesystem teardown precedes snapshot teardown.
+            let status = unsafe { (self.engine.symbols().process.uninstall_process_filesystem)() };
+            if status != 0 {
+                std::process::abort();
+            }
+        }
+        if self.process_snapshot_installed {
+            // A failed VM shutdown does not prove its property users quiesced.
+            // Retain the failure across repeated close calls; never unload
+            // their backing snapshot/image under surviving native threads.
+            if shutdown_status != 0 {
+                std::process::abort();
+            }
+            // Mark the local owner consumed before calling out so a future
+            // panic/unwind path cannot attempt a second native uninstall.
+            self.process_snapshot_installed = false;
+            // SAFETY: close has completed and the process-state callback is
+            // still resolved from the live engine image. Do not dlclose an
+            // image whose process snapshot could still reference its storage.
+            let status = unsafe { (self.engine.symbols().process.uninstall_process_snapshot)() };
+            if status != 0 {
+                std::process::abort();
+            }
+        }
     }
 }
 

@@ -1,0 +1,135 @@
+diff --git a/core/jni/android_util_Binder.cpp b/core/jni/android_util_Binder.cpp
+--- a/core/jni/android_util_Binder.cpp
++++ b/core/jni/android_util_Binder.cpp
+@@ -438,2 +438,7 @@
+-        IPCThreadState* thread_state = IPCThreadState::self();
+-        const int32_t strict_policy_before = thread_state->getStrictModePolicy();
++#if defined(__APPLE__)
++        int32_t strict_policy_before = 0;
++        (void)darwin_art_binder_rpc_strict_mode_get(&strict_policy_before);
++#else
++        IPCThreadState* thread_state = IPCThreadState::self();
++        const int32_t strict_policy_before = thread_state->getStrictModePolicy();
++#endif
+@@ -450,1 +455,9 @@
+-            auto state = IPCThreadState::self();
++            int32_t calling_pid = 0;
++            int32_t calling_uid = 0;
++#if defined(__APPLE__)
++            (void)darwin_art_binder_rpc_identity_current(&calling_pid, &calling_uid, nullptr);
++#else
++            auto state = IPCThreadState::self();
++            calling_pid = state->getCallingPid();
++            calling_uid = state->getCallingUid();
++#endif
+@@ -454,1 +467,1 @@
+-                             state->getCallingPid(), state->getCallingUid());
++                             calling_pid, calling_uid);
+@@ -463,1 +476,9 @@
+-        if (thread_state->getStrictModePolicy() != strict_policy_before) {
++#if defined(__APPLE__)
++        int32_t strict_policy_after = 0;
++        (void)darwin_art_binder_rpc_strict_mode_get(&strict_policy_after);
++        const bool strict_policy_changed = strict_policy_after != strict_policy_before;
++#else
++        const bool strict_policy_changed =
++                thread_state->getStrictModePolicy() != strict_policy_before;
++#endif
++        if (strict_policy_changed) {
+@@ -1245,29 +1266,61 @@
+ static void android_os_Binder_setThreadStrictModePolicy(CRITICAL_JNI_PARAMS_COMMA jint policyMask)
+ {
++#if defined(__APPLE__)
++    (void)darwin_art_binder_rpc_strict_mode_set(policyMask);
++#else
+     IPCThreadState::self()->setStrictModePolicy(policyMask);
++#endif
+ }
+
+ static jint android_os_Binder_getThreadStrictModePolicy(CRITICAL_JNI_PARAMS)
+ {
++#if defined(__APPLE__)
++    int32_t policy = 0;
++    (void)darwin_art_binder_rpc_strict_mode_get(&policy);
++    return policy;
++#else
+     return IPCThreadState::self()->getStrictModePolicy();
++#endif
+ }
+
+ static jlong android_os_Binder_setCallingWorkSourceUid(CRITICAL_JNI_PARAMS_COMMA jint workSource)
+ {
++#if defined(__APPLE__)
++    int64_t token = 0;
++    (void)darwin_art_binder_rpc_work_source_set(workSource, &token);
++    return token;
++#else
+     return IPCThreadState::self()->setCallingWorkSourceUid(workSource);
++#endif
+ }
+
+ static jlong android_os_Binder_getCallingWorkSourceUid(CRITICAL_JNI_PARAMS)
+ {
++#if defined(__APPLE__)
++    int32_t uid = -1;
++    (void)darwin_art_binder_rpc_work_source_get(&uid);
++    return uid;
++#else
+     return IPCThreadState::self()->getCallingWorkSourceUid();
++#endif
+ }
+
+ static jlong android_os_Binder_clearCallingWorkSource(CRITICAL_JNI_PARAMS)
+ {
++#if defined(__APPLE__)
++    int64_t token = 0;
++    (void)darwin_art_binder_rpc_work_source_clear(&token);
++    return token;
++#else
+     return IPCThreadState::self()->clearCallingWorkSource();
++#endif
+ }
+
+ static void android_os_Binder_restoreCallingWorkSource(CRITICAL_JNI_PARAMS_COMMA jlong token)
+ {
++#if defined(__APPLE__)
++    (void)darwin_art_binder_rpc_work_source_restore(token);
++#else
+     IPCThreadState::self()->restoreCallingWorkSource(token);
++#endif
+ }
+@@ -1287,4 +1338,6 @@
+ static void android_os_Binder_flushPendingCommands(JNIEnv* env, jobject clazz)
+ {
++#if !defined(__APPLE__)
+     IPCThreadState::self()->flushCommands();
++#endif
+ }
+@@ -1418,5 +1471,7 @@
+ static void android_os_BinderInternal_joinThreadPool(JNIEnv* env, jobject clazz)
+ {
++#if !defined(__APPLE__)
+     sp<IBinder> b = ProcessState::self()->getContextObject(NULL);
+     android::IPCThreadState::self()->joinThreadPool();
++#endif
+ }
+@@ -1430,5 +1485,7 @@
+ static void android_os_BinderInternal_setMaxThreads(JNIEnv* env,
+         jobject clazz, jint maxThreads)
+ {
++#if !defined(__APPLE__)
+     ProcessState::self()->setThreadPoolMaxThreadCount(maxThreads);
++#endif
+ }
+@@ -1776,9 +1833,11 @@
+ static void BinderProxy_destroy(void* rawNativeData)
+ {
+     BinderProxyNativeData * nativeData = (BinderProxyNativeData *) rawNativeData;
+     LOG_DEATH_FREEZE("Destroying BinderProxy: binder=%p drl=%p fsccl=%p\n",
+                      nativeData->mObject.get(), nativeData->mOrgue.get(),
+                      nativeData->mFrozenStateChangeCallbackList.get());
+     delete nativeData;
++#if !defined(__APPLE__)
+     IPCThreadState::self()->flushCommands();
++#endif
+ }

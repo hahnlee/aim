@@ -20,6 +20,23 @@ struct AndroidArm64VaList {
 
 extern "C" int darwin_art_android_log_print(int priority, const char* tag,
                                              const char* format, ...);
+extern "C" void darwin_art_android_log_assert(const char*, const char*, const char*, ...);
+extern "C" int darwin_art_android_log_buf_print(int buffer, int priority,
+                                                const char* tag,
+                                                const char* format, ...);
+
+extern "C" int darwin_art_android_log_buf_print_captured(
+    int buffer, int priority, const char* tag, const char* format,
+    uint8_t* gp_registers, uint8_t* fp_registers, uint8_t* caller_stack) {
+  if (format == nullptr) return -1;
+  AndroidArm64VaList arguments{caller_stack, gp_registers + 64,
+                               fp_registers + 128, -32, -128};
+  char message[4096];
+  const int count = darwin_art_bionic_vsnprintf(
+      message, sizeof(message), format, &arguments);
+  if (count < 0) return count;
+  return __android_log_buf_write(buffer, priority, tag, message);
+}
 
 extern "C" int darwin_art_android_log_print_captured(
     int priority, const char* tag, const char* format, uint8_t* gp_registers,
@@ -47,36 +64,12 @@ extern "C" int darwin_art_android_log_vprint(int priority, const char* tag,
 
 namespace {
 
-void TraceTransferBufferFailure(const char* message) {
-  if (message != nullptr &&
-      std::getenv("DARWIN_ART_DEBUG_TRANSFER_BUFFER_LOG") != nullptr &&
-      std::strstr(message, "TransferBuffer::Initialize() failed") != nullptr) {
-    std::fprintf(stderr,
-                 "DARWIN liblog: TransferBuffer failure caller=%p message=%s\n",
-                 __builtin_return_address(0), message);
-    void** frame = static_cast<void**>(__builtin_frame_address(0));
-    for (int depth = 0; depth != 12 && frame != nullptr; ++depth) {
-      std::fprintf(stderr, "DARWIN liblog: frame[%d]=%p fp=%p\n", depth,
-                   frame[1], frame);
-      void** parent = static_cast<void**>(frame[0]);
-      if (parent <= frame || reinterpret_cast<uintptr_t>(parent) -
-                                 reinterpret_cast<uintptr_t>(frame) >
-                             (1u << 20)) {
-        break;
-      }
-      frame = parent;
-    }
-  }
-}
-
 int DarwinArtAndroidLogWrite(int priority, const char* tag,
                              const char* message) {
-  TraceTransferBufferFailure(message);
   return __android_log_write(priority, tag, message);
 }
 
 void DarwinArtAndroidLogWriteMessage(__android_log_message* message) {
-  TraceTransferBufferFailure(message == nullptr ? nullptr : message->message);
   __android_log_write_log_message(message);
 }
 
@@ -97,8 +90,9 @@ extern "C" int darwin_art_android_log_error_write(int priority,
 
 // Exact sorted dynsym surface of the NDK r28c API 35 liblog.so stub.
 const Entry kEntries[] = {
-    LIBLOG_ENTRY(__android_log_assert),
-    LIBLOG_ENTRY(__android_log_buf_print),
+    {"__android_log_assert", reinterpret_cast<uintptr_t>(&darwin_art_android_log_assert)},
+    {"__android_log_buf_print",
+     reinterpret_cast<uintptr_t>(&darwin_art_android_log_buf_print)},
     LIBLOG_ENTRY(__android_log_buf_write),
     LIBLOG_ENTRY(__android_log_call_aborter),
     LIBLOG_ENTRY(__android_log_default_aborter),
@@ -124,6 +118,15 @@ const Entry kEntries[] = {
 
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) == DARWIN_ART_LIBLOG_PROVIDER_COUNT);
 
+struct VersionEntry {
+  const char* name;
+  const char* version;
+};
+const VersionEntry kVersions[] = {
+#include "../bionic-provider-namespace/generated/liblog_versions.inc"
+};
+static_assert(sizeof(kVersions) / sizeof(kVersions[0]) == DARWIN_ART_LIBLOG_PROVIDER_COUNT);
+
 }  // namespace
 
 extern "C" size_t darwin_art_liblog_provider_count() {
@@ -140,10 +143,15 @@ extern "C" uintptr_t darwin_art_liblog_provider_address(uint32_t ordinal) {
 
 extern "C" uintptr_t darwin_art_liblog_provider_resolve(const char* symbol,
                                                           const char* version) {
-  if (symbol == nullptr ||
-      (version != nullptr && version[0] != '\0' &&
-       std::strcmp(version, "LIBLOG") != 0))
-    return 0;
+  if (symbol == nullptr) return 0;
+  if (version != nullptr && version[0] != '\0') {
+    bool matches = false;
+    for (const VersionEntry& entry : kVersions) {
+      if (std::strcmp(entry.name, symbol) == 0 &&
+          std::strcmp(entry.version, version) == 0) matches = true;
+    }
+    if (!matches) return 0;
+  }
   for (const Entry& entry : kEntries) {
     if (std::strcmp(entry.name, symbol) == 0) return entry.address;
   }

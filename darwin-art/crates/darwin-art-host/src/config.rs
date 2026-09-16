@@ -108,6 +108,8 @@ pub enum HostError {
     InteriorNul(PathBuf),
     InvalidCallbackBinding(&'static str),
     DynamicLoader(String),
+    ProcessState(String),
+    Filesystem(String),
     InvalidVisibleSeconds(f64),
     RuntimeFailed(i32),
     ShutdownFailed(i32),
@@ -133,6 +135,8 @@ impl fmt::Display for HostError {
                 write!(formatter, "invalid callback binding: {kind}")
             }
             Self::DynamicLoader(message) => write!(formatter, "dynamic loader: {message}"),
+            Self::ProcessState(message) => write!(formatter, "process state: {message}"),
+            Self::Filesystem(message) => write!(formatter, "process filesystem: {message}"),
             Self::InvalidVisibleSeconds(seconds) => write!(
                 formatter,
                 "visible seconds must be finite and in the range 0..=86400: {seconds}"

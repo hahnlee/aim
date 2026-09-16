@@ -8,11 +8,13 @@ extern "C" SymbolFunction darwin_art_bionic_libc_leaf_resolve(const char *);
 extern "C" SymbolFunction darwin_art_bionic_allocator_resolve(const char *);
 extern "C" SymbolFunction darwin_art_bionic_errno_resolve(const char *);
 extern "C" SymbolFunction darwin_art_bionic_fs_resolve(const char *);
+extern "C" SymbolFunction darwin_art_bionic_ftw_resolve(const char *);
 extern "C" SymbolFunction darwin_art_bionic_time_resolve(const char *);
 extern "C" uintptr_t darwin_art_bionic_time_data_resolve(const char *);
 extern "C" void *darwin_art_bionic_pthread_resolve(const char *, const char *,
                                                    const char *);
 extern "C" SymbolFunction darwin_art_bionic_process_state_resolve(const char *);
+extern "C" SymbolFunction darwin_art_bionic_property_client_resolve(const char *);
 extern "C" uintptr_t darwin_art_bionic_process_state_data_resolve(const char *);
 extern "C" void *darwin_art_dl_phdr_resolve(const char *, const char *,
                                             const char *);
@@ -88,7 +90,9 @@ uintptr_t Errno(void *, const char *, const char *symbol, const char *) {
   return Address(darwin_art_bionic_errno_resolve(symbol));
 }
 uintptr_t Filesystem(void *, const char *, const char *symbol, const char *) {
-  return Address(darwin_art_bionic_fs_resolve(symbol));
+  const auto traversal = darwin_art_bionic_ftw_resolve(symbol);
+  return Address(traversal != nullptr ? traversal
+                                     : darwin_art_bionic_fs_resolve(symbol));
 }
 uintptr_t Time(void *, const char *, const char *symbol, const char *) {
   const uintptr_t data = darwin_art_bionic_time_data_resolve(symbol);
@@ -101,6 +105,8 @@ uintptr_t Pthread(void *, const char *soname, const char *symbol,
       darwin_art_bionic_pthread_resolve(soname, symbol, version));
 }
 uintptr_t ProcessState(void *, const char *, const char *symbol, const char *) {
+  const auto client = darwin_art_bionic_property_client_resolve(symbol);
+  if (client != nullptr) return Address(client);
   const uintptr_t data = darwin_art_bionic_process_state_data_resolve(symbol);
   if (data != 0) return data;
   return Address(darwin_art_bionic_process_state_resolve(symbol));

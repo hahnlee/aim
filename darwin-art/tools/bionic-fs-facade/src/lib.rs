@@ -4,7 +4,7 @@ use darwin_art_fs_broker::{BrokerError, ReadOnlyBroker};
 use darwin_art_prefix::{MountKind, MountTable, PrefixError, Resolution};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::ffi::{CStr, CString, c_char, c_int, c_long, c_void};
+use std::ffi::{CStr, c_char, c_int, c_long, c_void};
 use std::fmt::Write as _;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -19,6 +19,54 @@ use std::rc::Rc;
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
+
+mod canonical_path;
+mod descriptor_table;
+mod directory;
+mod filesystem_namespace;
+mod immutable_open;
+#[cfg(test)]
+mod immutable_open_tests;
+mod metadata;
+mod mkdir_at;
+mod native_image;
+mod open_at;
+mod private_data;
+#[cfg(test)]
+mod private_data_tests;
+#[cfg(test)]
+mod shared_storage_tests;
+mod working_directory;
+mod writable_mount;
+#[cfg(test)]
+mod writable_mount_tests;
+mod writable_operations;
+use descriptor_table::{DescriptorTable, FD_CLOEXEC};
+use directory::DirectoryTable;
+use private_data::PrivateDataRoot;
+
+type HostDescriptorResolver = unsafe extern "C" fn(c_int, *mut c_int) -> c_int;
+static HOST_DESCRIPTOR_RESOLVER: Mutex<Option<HostDescriptorResolver>> = Mutex::new(None);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn darwin_art_bionic_fs_bind_host_descriptor_resolver(
+    callback: Option<HostDescriptorResolver>,
+) -> c_int {
+    let Ok(mut installed) = HOST_DESCRIPTOR_RESOLVER.lock() else {
+        return -1;
+    };
+    match (installed.is_some(), callback) {
+        (false, Some(callback)) => {
+            *installed = Some(callback);
+            0
+        }
+        (true, None) => {
+            *installed = None;
+            0
+        }
+        _ => -1,
+    }
+}
 
 const AT_FDCWD: c_int = -100;
 const O_ACCMODE: c_int = 3;
@@ -84,13 +132,6 @@ unsafe extern "C" {
         host_fd: c_int,
         android_command: c_int,
         android_lock: isize,
-        host_errno: *mut c_int,
-    ) -> c_int;
-    fn darwin_art_bionic_fs_host_openat_private(
-        root_fd: c_int,
-        relative: *const c_char,
-        android_flags: c_int,
-        mode: u32,
         host_errno: *mut c_int,
     ) -> c_int;
     fn darwin_art_bionic_fs_host_cpu_count(online: c_int) -> c_long;
@@ -319,68 +360,7 @@ struct OverlayDescriptor {
     writable: bool,
 }
 
-struct DescriptorTable {
-    next: c_int,
-    free: Vec<c_int>,
-    entries: BTreeMap<c_int, Descriptor>,
-}
-
 const CENTRAL_BROKER_TOKEN_MARKER: c_int = 0x4000_0000;
-
-impl Default for DescriptorTable {
-    fn default() -> Self {
-        Self {
-            next: 10_000,
-            free: Vec::new(),
-            entries: BTreeMap::new(),
-        }
-    }
-}
-
-impl DescriptorTable {
-    fn insert(&mut self, descriptor: Descriptor) -> Result<c_int, ()> {
-        if let Some(fd) = self.free.pop() {
-            assert!(self.entries.insert(fd, descriptor).is_none());
-            return Ok(fd);
-        }
-        for _ in 0..100_000 {
-            let candidate = self.next;
-            self.next = if self.next >= CENTRAL_BROKER_TOKEN_MARKER - 1 {
-                10_000
-            } else {
-                self.next + 1
-            };
-            if candidate & CENTRAL_BROKER_TOKEN_MARKER != 0 {
-                continue;
-            }
-            if let std::collections::btree_map::Entry::Vacant(entry) = self.entries.entry(candidate)
-            {
-                entry.insert(descriptor);
-                return Ok(candidate);
-            }
-        }
-        Err(())
-    }
-
-    fn close_entry(&mut self, fd: c_int) -> Option<Descriptor> {
-        let descriptor = self.entries.remove(&fd)?;
-        self.free.push(fd);
-        Some(descriptor)
-    }
-
-    fn take(&mut self, fd: c_int) -> Option<Descriptor> {
-        self.entries.remove(&fd)
-    }
-
-    fn restore(&mut self, fd: c_int, descriptor: Descriptor) {
-        assert!(self.entries.insert(fd, descriptor).is_none());
-    }
-
-    fn release(&mut self, fd: c_int) {
-        assert!(!self.entries.contains_key(&fd));
-        self.free.push(fd);
-    }
-}
 
 trait EntropyBackend: Send + Sync {
     fn fill(&self, bytes: &mut [u8]) -> Result<(), ()>;
@@ -401,72 +381,8 @@ impl EntropyBackend for SecurityEntropy {
     }
 }
 
-#[repr(C)]
-struct DirectoryToken {
-    opaque_id: u64,
-}
-
-struct DirectoryRecord {
-    // Token and translated entry are separate allocations containing no host
-    // descriptor or DIR pointer. Only their addresses cross the guest ABI.
-    _token: Box<DirectoryToken>,
-    host_directory: usize,
-    offset: i64,
-    entry: Box<AndroidDirent>,
-}
-
-impl Drop for DirectoryRecord {
-    fn drop(&mut self) {
-        if self.host_directory != 0 {
-            let mut ignored_errno = 0;
-            // SAFETY: a nonzero stream is owned by this state until this call.
-            unsafe {
-                darwin_art_bionic_fs_host_closedir(
-                    self.host_directory as *mut c_void,
-                    &mut ignored_errno,
-                )
-            };
-            self.host_directory = 0;
-        }
-    }
-}
-
-struct DirectoryTable {
-    // Only live streams are retained. POSIX makes DIR* use after closedir
-    // undefined, so close can reclaim both facade-owned guest allocations.
-    streams: BTreeMap<usize, DirectoryRecord>,
-    next_id: u64,
-}
-
-impl Default for DirectoryTable {
-    fn default() -> Self {
-        Self {
-            streams: BTreeMap::new(),
-            next_id: 1,
-        }
-    }
-}
-
-impl DirectoryTable {
-    fn insert(&mut self, host_directory: *mut c_void) -> *mut c_void {
-        let opaque_id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        let token = Box::new(DirectoryToken { opaque_id });
-        let token_pointer = (&*token as *const DirectoryToken).cast_mut().cast();
-        let state = DirectoryRecord {
-            _token: token,
-            host_directory: host_directory as usize,
-            offset: 0,
-            entry: Box::new(AndroidDirent::default()),
-        };
-        self.streams.insert(token_pointer as usize, state);
-        token_pointer
-    }
-}
-
 pub struct Facade {
-    prefix: MountTable,
-    broker: ReadOnlyBroker,
+    namespace: filesystem_namespace::FilesystemNamespace,
     // Native APK code sometimes receives the installer-owned host path from
     // ApplicationInfo and opens it directly (Unity's central-directory scan
     // is one example). Keep this as a single capability, never a general host
@@ -484,11 +400,10 @@ pub struct Facade {
     // direct children for DexPathList.findLibrary(), while arbitrary host
     // traversal remains outside the guest filesystem contract.
     authorized_host_native_dir: Option<PathBuf>,
-    cwd: Mutex<Vec<u8>>,
     descriptors: Mutex<DescriptorTable>,
     overlay: Mutex<OverlayState>,
-    private_root: Option<PathBuf>,
-    private_root_directory: Option<File>,
+    private_root: Option<PrivateDataRoot>,
+    storage_root: Option<writable_mount::WritableMount>,
     directories: Mutex<DirectoryTable>,
     entropy: Arc<dyn EntropyBackend>,
     capability_failure: AtomicBool,
@@ -512,48 +427,16 @@ impl Facade {
                 String::from_utf8_lossy(cwd)
             );
         }
-        let mut prefix = MountTable::new();
-        prefix
-            .add_mount(1, MountKind::Immutable, false, guest_mount)
-            .map_err(|_| "invalid guest mount")?;
-        prefix
-            .add_mount(2, MountKind::Private, true, b"/data")
-            .map_err(|_| "invalid private data mount")?;
-        prefix.seal().map_err(|_| "could not seal guest mount")?;
-        // Prove cwd belongs to this mount before any guest operation can use it.
-        let initial_cwd = prefix
-            .resolve(cwd, b".")
-            .map_err(|_| "cwd is outside guest mount")?;
-        if initial_cwd.mount_id != 1 || initial_cwd.writable {
-            return Err("cwd is outside immutable guest mount");
-        }
-        let broker = ReadOnlyBroker::from_directory(root).map_err(|_| "invalid mount root")?;
-        let opened_cwd = broker
-            .open(&initial_cwd.relative_path)
-            .map_err(|_| "cwd cannot be securely opened")?;
-        if !opened_cwd.metadata().is_dir() {
-            return Err("cwd is not a directory");
-        }
-        let private_root = std::env::var_os("DARWIN_ART_ANDROID_PRIVATE_DATA_ROOT")
+        let mut private_root = std::env::var_os("DARWIN_ART_ANDROID_PRIVATE_DATA_ROOT")
             .map(PathBuf::from)
             .or_else(|| {
                 std::env::var_os("DARWIN_ART_ANDROID_FILESYSTEM_ROOT")
                     .map(PathBuf::from)
                     .map(|root| root.join("data"))
-            });
-        if let Some(path) = private_root.as_ref()
-            && (!path.is_absolute() || !path.is_dir())
-        {
-            return Err("invalid private data root");
-        }
-        let private_root_directory = if let Some(path) = private_root.as_ref() {
-            match File::open(path) {
-                Ok(file) => Some(file),
-                Err(_) => return Err("private data root cannot be opened"),
-            }
-        } else {
-            None
-        };
+            })
+            .map(PrivateDataRoot::open)
+            .transpose()
+            .map_err(|_| "invalid private data root")?;
         let authorized_host_apk = std::env::var_os("DARWIN_ART_APK_APP_RESOURCE_APK")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute() && path.is_file());
@@ -581,18 +464,37 @@ impl Facade {
             .filter_map(|name| std::env::var_os(name).map(PathBuf::from))
             .filter(|path| path.is_absolute() && path.is_file())
             .collect();
+        let mut storage_root = std::env::var_os("DARWIN_ART_ANDROID_SHARED_STORAGE_ROOT")
+            .map(PathBuf::from)
+            .map(|path| writable_mount::WritableMount::open(path, b"/storage"))
+            .transpose()?;
+        let namespace = filesystem_namespace::FilesystemNamespace::with_storage(
+            root,
+            guest_mount,
+            cwd,
+            private_root.as_ref(),
+            storage_root.as_ref(),
+        )?;
+        if let (Some(private), Some(guest)) = (&mut private_root, &namespace.guest_root) {
+            private
+                .attach_guest_root(guest.clone())
+                .map_err(|_| "private data root differs from guest mount")?;
+        }
+        if let (Some(storage), Some(guest)) = (&mut storage_root, &namespace.guest_root) {
+            storage
+                .attach_guest_root(guest.clone())
+                .map_err(|_| "storage root differs from guest mount")?;
+        }
         Ok(Self {
-            prefix,
-            broker,
+            namespace,
             authorized_host_apk,
             authorized_host_apk_splits,
             authorized_host_test_fonts,
             authorized_host_native_dir,
-            cwd: Mutex::new(initial_cwd.normalized_path),
             descriptors: Mutex::new(DescriptorTable::default()),
             overlay: Mutex::new(OverlayState::default()),
             private_root,
-            private_root_directory,
+            storage_root,
             directories: Mutex::new(DirectoryTable::default()),
             entropy,
             capability_failure: AtomicBool::new(false),
@@ -647,10 +549,13 @@ impl Facade {
     }
 
     fn resolve_from(&self, cwd: &[u8], path: &[u8]) -> Result<Resolution, c_int> {
-        match self.prefix.resolve(cwd, path) {
+        match self.namespace.prefix.resolve(cwd, path) {
             Ok(resolution)
                 if (resolution.mount_id == 1 && !resolution.writable)
-                    || (resolution.mount_id == 2 && resolution.writable) =>
+                    || (resolution.mount_id == 2 && resolution.writable)
+                    || (resolution.mount_id == 3
+                        && resolution.writable
+                        && self.storage_root.is_some()) =>
             {
                 Ok(resolution)
             }
@@ -671,7 +576,7 @@ impl Facade {
     }
 
     fn resolve(&self, path: &[u8]) -> Result<Resolution, c_int> {
-        let cwd = match self.cwd.lock() {
+        let cwd = match self.namespace.cwd.snapshot() {
             Ok(cwd) => cwd.clone(),
             Err(_) => {
                 self.fail_capability();
@@ -745,7 +650,7 @@ impl Facade {
     // friends can create app-private files without falling through to the
     // immutable guest broker (which reports ENOTDIR for a host pathname).
     fn authorized_host_private_candidate(&self, path: &[u8]) -> Option<PathBuf> {
-        let root = self.private_root.as_ref()?;
+        let root = self.private_root.as_ref()?.path();
         let requested = PathBuf::from(std::ffi::OsString::from_vec(path.to_vec()));
         let relative = requested.strip_prefix(root).ok()?;
         if relative.as_os_str().is_empty()
@@ -762,8 +667,8 @@ impl Facade {
         Some(requested)
     }
 
-    fn private_relative_from_host_path(&self, path: &PathBuf) -> Option<Vec<u8>> {
-        let root = self.private_root.as_ref()?;
+    fn private_relative_from_host_path(&self, path: &std::path::Path) -> Option<Vec<u8>> {
+        let root = self.private_root.as_ref()?.path();
         let relative = path.strip_prefix(root).ok()?;
         let bytes = relative.as_os_str().as_bytes();
         if bytes.is_empty()
@@ -782,37 +687,13 @@ impl Facade {
         flags: c_int,
         mode: u32,
     ) -> Result<File, c_int> {
-        let fallback_root;
-        let root = if let Some(root) = self.private_root_directory.as_ref() {
-            root
-        } else if let Some(path) = self.private_root.as_ref() {
-            fallback_root = File::open(path).map_err(|error| self.fail_io(&error))?;
-            &fallback_root
-        } else {
-            return Err(self.fail(ANDROID_EIO));
-        };
-        let path = CString::new(relative).map_err(|_| self.fail(ANDROID_EINVAL))?;
-        let mut host_errno = 0;
-        // SAFETY: root is an owned directory fd; path is a temporary,
-        // NUL-terminated relative name; the helper validates each component
-        // and returns one owned host descriptor on success.
-        let fd = unsafe {
-            darwin_art_bionic_fs_host_openat_private(
-                root.as_raw_fd(),
-                path.as_ptr(),
-                flags,
-                mode,
-                &mut host_errno,
-            )
-        };
-        if fd < 0 {
-            if host_errno != 0 {
-                return Err(self.fail_io(&std::io::Error::from_raw_os_error(host_errno)));
-            }
-            return Err(self.fail(ANDROID_EINVAL));
-        }
-        // SAFETY: the helper transfers ownership of this descriptor.
-        Ok(unsafe { File::from_raw_fd(fd) })
+        let authority = self
+            .private_root
+            .as_ref()
+            .ok_or_else(|| self.fail(ANDROID_EIO))?;
+        authority
+            .open_file(relative, flags, mode)
+            .map_err(|error| self.fail_io(&error))
     }
 
     fn open_authorized_host_private(&self, path: PathBuf, flags: c_int, mode: u32) -> c_int {
@@ -846,7 +727,7 @@ impl Facade {
             Ok(descriptors) => descriptors,
             Err(_) => return self.fail_capability(),
         };
-        match descriptors.insert(Descriptor::PrivateFile(file)) {
+        match descriptors.insert_with_flags(Descriptor::PrivateFile(file), flags & O_CLOEXEC != 0) {
             Ok(fd) => fd,
             Err(()) => self.fail(ANDROID_EMFILE),
         }
@@ -881,7 +762,7 @@ impl Facade {
     }
 
     fn private_path(&self, relative: &[u8]) -> Result<PathBuf, c_int> {
-        let root = self.private_root.as_ref().ok_or(ANDROID_EIO)?;
+        let root = self.private_root.as_ref().ok_or(ANDROID_EIO)?.path();
         if relative.contains(&0)
             || (!relative.is_empty()
                 && relative.split(|byte| *byte == b'/').any(|component| {
@@ -899,61 +780,6 @@ impl Facade {
             return Err(ANDROID_EACCES);
         }
         self.private_path(&resolution.relative_path)
-    }
-
-    fn open_private(&self, resolution: Resolution, flags: c_int, mode: u32) -> c_int {
-        let accepted = O_ACCMODE
-            | O_CREAT
-            | O_EXCL
-            | O_TRUNC
-            | O_APPEND
-            | O_DSYNC
-            | O_SYNC
-            | O_NONBLOCK
-            | O_DIRECTORY
-            | O_NOFOLLOW
-            | O_LARGEFILE
-            | O_CLOEXEC;
-        if flags & !accepted != 0 || flags & O_TMPFILE == O_TMPFILE {
-            if std::env::var_os("DARWIN_ART_FS_TRACE").is_some() {
-                eprintln!(
-                    "DARWIN FS: private open unsupported relative={} flags={flags:#x}",
-                    String::from_utf8_lossy(&resolution.relative_path)
-                );
-            }
-            return self.fail(ANDROID_EOPNOTSUPP);
-        }
-        let file = match self.open_private_relative(&resolution.relative_path, flags, mode) {
-            Ok(file) => file,
-            Err(error) => {
-                if std::env::var_os("DARWIN_ART_FS_TRACE").is_some() {
-                    eprintln!(
-                        "DARWIN FS: private open failed relative={} flags={flags:#x} error={error}",
-                        String::from_utf8_lossy(&resolution.relative_path)
-                    );
-                }
-                return error;
-            }
-        };
-        if flags & O_DIRECTORY != 0 && !file.metadata().is_ok_and(|metadata| metadata.is_dir()) {
-            return self.fail(ANDROID_ENOTDIR);
-        }
-        let mut descriptors = match self.descriptors.lock() {
-            Ok(descriptors) => descriptors,
-            Err(_) => return self.fail_capability(),
-        };
-        match descriptors.insert(Descriptor::PrivateFile(file)) {
-            Ok(fd) => {
-                if std::env::var_os("DARWIN_ART_FS_TRACE").is_some() {
-                    eprintln!(
-                        "DARWIN FS: private open relative={} flags={flags:#x} fd={fd}",
-                        String::from_utf8_lossy(&resolution.relative_path)
-                    );
-                }
-                fd
-            }
-            Err(()) => self.fail(ANDROID_EMFILE),
-        }
     }
 
     fn random_device(path: &[u8]) -> Option<RandomDeviceKind> {
@@ -1003,10 +829,8 @@ impl Facade {
     fn synthetic_proc_contents(path: &[u8]) -> Option<Vec<u8>> {
         const MEMORY_KIB: usize = 8 * 1024 * 1024;
         fn is_virtual_proc_file(path: &[u8], suffix: &[u8]) -> bool {
-            if (suffix == b"/status"
-                && (path == b"/proc/self/status" || path == b"/proc/thread-self/status"))
-                || (suffix == b"/statm"
-                    && (path == b"/proc/self/statm" || path == b"/proc/thread-self/statm"))
+            if suffix == b"/statm"
+                && (path == b"/proc/self/statm" || path == b"/proc/thread-self/statm")
             {
                 return true;
             }
@@ -1019,26 +843,54 @@ impl Facade {
                         && pid != b"0"
                 })
         }
+        let is_self = |name: &[u8]| {
+            let mut self_path = b"/proc/self/".to_vec();
+            self_path.extend_from_slice(name);
+            let mut thread_self_path = b"/proc/thread-self/".to_vec();
+            thread_self_path.extend_from_slice(name);
+            let mut pid_suffix = Vec::with_capacity(name.len() + 1);
+            pid_suffix.push(b'/');
+            pid_suffix.extend_from_slice(name);
+            path == self_path
+                || path == thread_self_path
+                || path
+                    .strip_prefix(b"/proc/")
+                    .and_then(|rest| rest.strip_suffix(pid_suffix.as_slice()))
+                    .is_some_and(|pid| {
+                        !pid.is_empty()
+                            && pid.len() <= 10
+                            && pid.iter().all(u8::is_ascii_digit)
+                            && pid != b"0"
+                    })
+        };
         let is_cpuinfo = path == b"/proc/cpuinfo";
-        let is_status = is_virtual_proc_file(path, b"/status");
         let is_statm = is_virtual_proc_file(path, b"/statm");
+        let is_status = is_self(b"status");
+        let is_cmdline = is_self(b"cmdline");
+        let is_oom_score_adj = is_self(b"oom_score_adj");
         let is_cpu_sysfs = path == b"/sys/devices/system/cpu/possible"
             || path == b"/sys/devices/system/cpu/present"
             || path == b"/sys/devices/system/cpu/online"
             || path.starts_with(b"/sys/devices/system/cpu/cpu");
         let is_static_proc =
             path == b"/proc/meminfo" || path == b"/proc/loadavg" || path == b"/proc/uptime";
-        if !is_cpuinfo && !is_status && !is_statm && !is_cpu_sysfs && !is_static_proc {
+        if !is_cpuinfo
+            && !is_statm
+            && !is_status
+            && !is_cmdline
+            && !is_oom_score_adj
+            && !is_cpu_sysfs
+            && !is_static_proc
+        {
             return None;
         }
         // Only CPU proc/sysfs surfaces need the host topology. Keep fixed
         // memory/load/uptime data and ordinary assets off this host query.
-        let (configured_cpu_count, online_cpu_count) =
-            if is_cpuinfo || is_status || is_statm || is_cpu_sysfs {
-                host_cpu_counts()
-            } else {
-                (0, 0)
-            };
+        let (configured_cpu_count, online_cpu_count) = if is_cpuinfo || is_statm || is_cpu_sysfs {
+            host_cpu_counts()
+        } else {
+            (0, 0)
+        };
 
         if path == b"/proc/cpuinfo" {
             let mut contents = String::new();
@@ -1096,35 +948,31 @@ impl Facade {
         if path == b"/proc/uptime" {
             return Some(b"86400.00 86400.00\n".to_vec());
         }
-
-        let is_self = |name: &[u8]| {
-            let mut self_path = b"/proc/self/".to_vec();
-            self_path.extend_from_slice(name);
-            let mut thread_self_path = b"/proc/thread-self/".to_vec();
-            thread_self_path.extend_from_slice(name);
-            let mut pid_suffix = Vec::with_capacity(name.len() + 1);
-            pid_suffix.push(b'/');
-            pid_suffix.extend_from_slice(name);
-            path == self_path
-                || path == thread_self_path
-                || path
-                    .strip_prefix(b"/proc/")
-                    .and_then(|rest| rest.strip_suffix(pid_suffix.as_slice()))
-                    .is_some_and(|pid| {
-                        !pid.is_empty()
-                            && pid.len() <= 10
-                            && pid.iter().all(u8::is_ascii_digit)
-                            && pid != b"0"
-                    })
-        };
-        if is_self(b"status") {
+        if is_status {
+            let uid = std::env::var("DARWIN_ART_ANDROID_UID")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(10_000);
+            let process_name = std::env::var("DARWIN_ART_APK_PROCESS_NAME")
+                .or_else(|_| std::env::var("DARWIN_ART_APK_APP_PACKAGE"))
+                .unwrap_or_else(|_| "darwin-art".to_owned());
             return Some(
                 format!(
-                    "Name:\tdarwin-art-host\nState:\tR (running)\nPid:\t1\nPPid:\t0\nUid:\t501\t501\t501\t501\nGid:\t20\t20\t20\t20\nVmPeak:\t1048576 kB\nVmSize:\t1048576 kB\nVmRSS:\t262144 kB\nCpus_allowed_list:\t0-{}\n",
-                    online_cpu_count - 1,
+                    "Name:\t{process_name}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nVmHWM:\t262144 kB\nVmRSS:\t262144 kB\nRssAnon:\t262144 kB\nRssShmem:\t0 kB\nVmSwap:\t0 kB\n"
                 )
                 .into_bytes(),
             );
+        }
+        if is_cmdline {
+            let mut process_name = std::env::var("DARWIN_ART_APK_PROCESS_NAME")
+                .or_else(|_| std::env::var("DARWIN_ART_APK_APP_PACKAGE"))
+                .unwrap_or_else(|_| "darwin-art".to_owned())
+                .into_bytes();
+            process_name.push(0);
+            return Some(process_name);
+        }
+        if is_oom_score_adj {
+            return Some(b"0\n".to_vec());
         }
         if is_self(b"statm") {
             return Some(b"262144 65536 0 0 0 0 0\n".to_vec());
@@ -1201,12 +1049,15 @@ impl Facade {
             Ok(descriptors) => descriptors,
             Err(_) => return self.fail_capability(),
         };
-        match descriptors.insert(Descriptor::Overlay(OverlayDescriptor {
-            node,
-            offset: 0,
-            readable: true,
-            writable: false,
-        })) {
+        match descriptors.insert_with_flags(
+            Descriptor::Overlay(OverlayDescriptor {
+                node,
+                offset: 0,
+                readable: true,
+                writable: false,
+            }),
+            flags & O_CLOEXEC != 0,
+        ) {
             Ok(fd) => fd,
             Err(()) => self.fail(ANDROID_EMFILE),
         }
@@ -1348,7 +1199,7 @@ impl Facade {
             Ok(descriptors) => descriptors,
             Err(_) => return self.fail_capability(),
         };
-        match descriptors.insert(descriptor) {
+        match descriptors.insert_with_flags(descriptor, flags & O_CLOEXEC != 0) {
             Ok(fd) => {
                 if std::env::var_os("DARWIN_ART_FS_TRACE").is_some() {
                     eprintln!(
@@ -1381,7 +1232,7 @@ impl Facade {
             Ok(descriptors) => descriptors,
             Err(_) => return self.fail_capability(),
         };
-        match descriptors.insert(Descriptor::Random(kind)) {
+        match descriptors.insert_with_flags(Descriptor::Random(kind), flags & O_CLOEXEC != 0) {
             Ok(fd) => fd,
             Err(()) => self.fail(ANDROID_EMFILE),
         }
@@ -1404,7 +1255,7 @@ impl Facade {
             Ok(descriptors) => descriptors,
             Err(_) => return self.fail_capability(),
         };
-        match descriptors.insert(Descriptor::File(file)) {
+        match descriptors.insert_with_flags(Descriptor::File(file), flags & O_CLOEXEC != 0) {
             Ok(fd) => fd,
             Err(()) => self.fail(ANDROID_EMFILE),
         }
@@ -1461,7 +1312,9 @@ impl Facade {
                 Ok(descriptors) => descriptors,
                 Err(_) => return self.fail_capability(),
             };
-            return match descriptors.insert(Descriptor::File(file)) {
+            return match descriptors
+                .insert_with_flags(Descriptor::File(file), flags & O_CLOEXEC != 0)
+            {
                 Ok(fd) => fd,
                 Err(()) => self.fail(ANDROID_EMFILE),
             };
@@ -1478,7 +1331,9 @@ impl Facade {
                 Ok(descriptors) => descriptors,
                 Err(_) => return self.fail_capability(),
             };
-            return match descriptors.insert(Descriptor::File(file)) {
+            return match descriptors
+                .insert_with_flags(Descriptor::File(file), flags & O_CLOEXEC != 0)
+            {
                 Ok(fd) => fd,
                 Err(()) => self.fail(ANDROID_EMFILE),
             };
@@ -1507,12 +1362,18 @@ impl Facade {
                 Ok(descriptors) => descriptors,
                 Err(_) => return self.fail_capability(),
             };
-            return match descriptors.insert(Descriptor::File(file)) {
+            return match descriptors
+                .insert_with_flags(Descriptor::File(file), flags & O_CLOEXEC != 0)
+            {
                 Ok(fd) => fd,
                 Err(()) => self.fail(ANDROID_EMFILE),
             };
         }
-        let resolution = match self.resolve(path) {
+        let cwd = match self.namespace.cwd.named_lease() {
+            Ok(cwd) => cwd,
+            Err(error) => return self.fail_io(&error),
+        };
+        let resolution = match self.resolve_from(&cwd.path, path) {
             Ok(resolution) => resolution,
             Err(error) => {
                 if std::env::var_os("DARWIN_ART_FS_TRACE").is_some() {
@@ -1524,43 +1385,16 @@ impl Facade {
                 return self.fail(error);
             }
         };
+        if self.writable_root(resolution.mount_id).is_some() {
+            return self.open_writable(path, resolution, flags, mode, &cwd.path);
+        }
         if resolution.mount_id == 2 {
-            if self.private_root.is_some() {
-                return self.open_private(resolution, flags, mode);
-            }
             return self.open_overlay(resolution, flags, mode);
         }
         if let Err(error) = self.validate_immutable_flags(flags) {
             return self.fail(error);
         }
-        let mut relative = resolution.relative_path;
-        if resolution.requires_directory && !relative.is_empty() {
-            relative.push(b'/');
-        }
-        let opened = match self.broker.open(&relative) {
-            Ok(opened) => opened,
-            Err(error) => {
-                if std::env::var_os("DARWIN_ART_FS_TRACE").is_some() {
-                    eprintln!(
-                        "DARWIN FS: open broker failed path={} relative={} error={error}",
-                        String::from_utf8_lossy(path),
-                        String::from_utf8_lossy(&relative)
-                    );
-                }
-                return self.fail_broker(&error);
-            }
-        };
-        if flags & O_DIRECTORY != 0 && !opened.metadata().is_dir() {
-            return self.fail(ANDROID_ENOTDIR);
-        }
-        let mut descriptors = match self.descriptors.lock() {
-            Ok(descriptors) => descriptors,
-            Err(_) => return self.fail_capability(),
-        };
-        let result = match descriptors.insert(Descriptor::File(opened.into_file())) {
-            Ok(fd) => fd,
-            Err(()) => self.fail(ANDROID_EMFILE),
-        };
+        let result = self.open_immutable(path, resolution, flags, &cwd);
         if std::env::var_os("DARWIN_ART_FS_TRACE").is_some()
             && (path.windows(7).any(|part| part == b"/fonts/") || path.ends_with(b"fonts.xml"))
         {
@@ -1632,25 +1466,9 @@ impl Facade {
             Ok(descriptors) => descriptors,
             Err(_) => return self.fail_capability(),
         };
-        match descriptors.insert(descriptor) {
+        match descriptors.insert_with_flags(descriptor, flags & O_CLOEXEC != 0) {
             Ok(fd) => fd,
             Err(()) => self.fail(ANDROID_EMFILE),
-        }
-    }
-
-    fn openat_with_mode(&self, directory_fd: c_int, path: &[u8], flags: c_int, mode: u32) -> c_int {
-        if directory_fd == AT_FDCWD || path.starts_with(b"/") {
-            return self.open_with_mode(path, flags, mode);
-        }
-        let descriptors = match self.descriptors.lock() {
-            Ok(descriptors) => descriptors,
-            Err(_) => return self.fail_capability(),
-        };
-        match descriptors.entries.get(&directory_fd) {
-            Some(Descriptor::Random(_)) => self.fail(ANDROID_ENOTDIR),
-            Some(Descriptor::File(_) | Descriptor::PrivateFile(_)) => self.fail(ANDROID_EOPNOTSUPP),
-            Some(Descriptor::Overlay(_)) => self.fail(ANDROID_ENOTDIR),
-            None => self.fail(ANDROID_EBADF),
         }
     }
 
@@ -2107,7 +1925,12 @@ impl Facade {
                 Some(Descriptor::Overlay(_)) => return self.fail(ANDROID_EOPNOTSUPP),
                 None => return self.fail(ANDROID_EBADF),
             };
-            return match descriptors.insert(duplicate) {
+            let origin = descriptors.origin(fd).cloned();
+            return match descriptors.insert_with_origin(
+                duplicate,
+                command == F_DUPFD_CLOEXEC,
+                origin,
+            ) {
                 Ok(duplicate_fd) if (duplicate_fd as isize) >= argument => duplicate_fd,
                 Ok(duplicate_fd) => {
                     let _ = descriptors.close_entry(duplicate_fd);
@@ -2117,28 +1940,30 @@ impl Facade {
             };
         }
         if matches!(command, F_GETFD | F_SETFD | F_GETFL | F_SETFL) {
-            if command == F_SETFD && argument & !1 != 0 {
+            if command == F_SETFD && argument & !(FD_CLOEXEC as isize) != 0 {
                 return self.fail(ANDROID_EINVAL);
             }
             if command == F_SETFL && argument & !(O_APPEND | O_NONBLOCK) as isize != 0 {
                 return self.fail(ANDROID_EINVAL);
             }
-            let descriptors = match self.descriptors.lock() {
+            let mut descriptors = match self.descriptors.lock() {
                 Ok(descriptors) => descriptors,
                 Err(_) => return self.fail_capability(),
             };
+            if command == F_GETFD {
+                return descriptors
+                    .fd_flags(fd)
+                    .unwrap_or_else(|| self.fail(ANDROID_EBADF));
+            }
+            if command == F_SETFD {
+                if descriptors.set_fd_flags(fd, argument as c_int) {
+                    return 0;
+                }
+                return self.fail(ANDROID_EBADF);
+            }
             let Some(descriptor) = descriptors.entries.get(&fd) else {
                 return self.fail(ANDROID_EBADF);
             };
-            if command == F_GETFD {
-                // Facade descriptors never cross exec; mirror Android's
-                // close-on-exec ownership contract independently of the
-                // private host descriptor number.
-                return 1;
-            }
-            if command == F_SETFD {
-                return 0;
-            }
             let access = match descriptor {
                 Descriptor::File(_) | Descriptor::Random(_) => O_RDONLY,
                 Descriptor::PrivateFile(file) => {
@@ -2241,24 +2066,62 @@ impl Facade {
             Ok(descriptors) => descriptors,
             Err(_) => return self.fail_capability(),
         };
-        let Some(descriptor) = descriptors.entries.get(&fd) else {
-            return self.fail(ANDROID_EBADF);
-        };
-        let translated = match descriptor {
-            Descriptor::File(file) | Descriptor::PrivateFile(file) => {
-                let metadata = match file.metadata() {
-                    Ok(metadata) => metadata,
-                    Err(error) => return self.fail_io(&error),
-                };
-                metadata_to_android(&metadata)
+        let translated = if let Some(descriptor) = descriptors.entries.get(&fd) {
+            match descriptor {
+                Descriptor::File(file) | Descriptor::PrivateFile(file) => {
+                    let metadata = match file.metadata() {
+                        Ok(metadata) => metadata,
+                        Err(error) => return self.fail_io(&error),
+                    };
+                    metadata_to_android(&metadata)
+                }
+                Descriptor::Random(kind) => random_device_stat(*kind),
+                Descriptor::Overlay(descriptor) => {
+                    let file = match descriptor.node.lock() {
+                        Ok(file) => file,
+                        Err(_) => return self.fail_capability(),
+                    };
+                    overlay_file_stat(&file)
+                }
             }
-            Descriptor::Random(kind) => random_device_stat(*kind),
-            Descriptor::Overlay(descriptor) => {
-                let file = match descriptor.node.lock() {
-                    Ok(file) => file,
-                    Err(_) => return self.fail_capability(),
-                };
-                overlay_file_stat(&file)
+        } else {
+            // External descriptor owners (ashmem today, and other brokered
+            // Android descriptors later) retain policy and lifetime. fstat
+            // borrows one owned host duplicate only long enough to translate
+            // host metadata into Android's arm64 struct stat.
+            drop(descriptors);
+            let resolver = match HOST_DESCRIPTOR_RESOLVER.lock() {
+                Ok(resolver) => *resolver,
+                Err(_) => return self.fail_capability(),
+            };
+            let Some(resolver) = resolver else {
+                return self.fail(ANDROID_EBADF);
+            };
+            let mut host_fd = -1;
+            // SAFETY: host_fd is writable for the callback and status 1
+            // transfers ownership of exactly one duplicate to this call.
+            let resolution = unsafe { resolver(fd, &mut host_fd) };
+            match resolution {
+                0 => return self.fail(ANDROID_EBADF),
+                -1 => return -1,
+                1 if host_fd >= 0 => {
+                    // SAFETY: resolution 1 transfers this descriptor. File
+                    // closes it after metadata capture, so close/reuse races
+                    // cannot invalidate the in-flight operation.
+                    let duplicate = unsafe { File::from_raw_fd(host_fd) };
+                    let metadata = match duplicate.metadata() {
+                        Ok(metadata) => metadata,
+                        Err(error) => return self.fail_io(&error),
+                    };
+                    if std::env::var_os("DARWIN_ART_FS_TRACE").is_some() {
+                        eprintln!(
+                            "DARWIN FS: fstat external fd={fd} host_fd={host_fd} size={}",
+                            metadata.len()
+                        );
+                    }
+                    metadata_to_android(&metadata)
+                }
+                _ => return self.fail_capability(),
             }
         };
         // SAFETY: the guest ABI requires a writable 128-byte Android stat object.
@@ -2287,192 +2150,6 @@ impl Facade {
         }
     }
 
-    unsafe fn stat(&self, path: &[u8], status: *mut AndroidStat, no_follow: bool) -> c_int {
-        if status.is_null() {
-            return self.fail(ANDROID_EFAULT);
-        }
-        if let Some(kind) = Self::random_device(path) {
-            // SAFETY: the Android ABI requires one writable 128-byte stat object.
-            unsafe { status.write(random_device_stat(kind)) };
-            return 0;
-        }
-        if let Some(data) = Self::synthetic_proc_contents(path) {
-            let file = OverlayFile {
-                inode: Self::synthetic_inode(path),
-                mode: ANDROID_S_IFREG | 0o444,
-                data,
-            };
-            // SAFETY: the Android ABI requires one writable 128-byte stat
-            // object, checked for null above.
-            unsafe { status.write(overlay_file_stat(&file)) };
-            return 0;
-        }
-        if let Some(apk) = self.authorized_host_apk_path(path) {
-            let metadata = match if no_follow {
-                fs::symlink_metadata(apk)
-            } else {
-                fs::metadata(apk)
-            } {
-                Ok(metadata) => metadata,
-                Err(error) => return self.fail_io(&error),
-            };
-            unsafe { status.write(metadata_to_android(&metadata)) };
-            return 0;
-        }
-        if let Some(native_path) = self.authorized_host_native_path(path) {
-            let metadata = match if no_follow {
-                fs::symlink_metadata(native_path)
-            } else {
-                fs::metadata(native_path)
-            } {
-                Ok(metadata) => metadata,
-                Err(error) => return self.fail_io(&error),
-            };
-            unsafe { status.write(metadata_to_android(&metadata)) };
-            return 0;
-        }
-        if let Some(private_path) = self.authorized_host_private_path(path) {
-            let metadata = match if no_follow {
-                fs::symlink_metadata(private_path)
-            } else {
-                fs::metadata(private_path)
-            } {
-                Ok(metadata) => metadata,
-                Err(error) => return self.fail_io(&error),
-            };
-            unsafe { status.write(metadata_to_android(&metadata)) };
-            return 0;
-        }
-        // Preserve ENOENT for a missing final component below the writable
-        // private root.  Falling through to guest-path resolution would treat
-        // this absolute host pathname as an immutable mount and can turn the
-        // ordinary missing-file result into ENOTDIR.
-        if let Some(private_path) = self.authorized_host_private_candidate(path) {
-            let metadata = match if no_follow {
-                fs::symlink_metadata(private_path)
-            } else {
-                fs::metadata(private_path)
-            } {
-                Ok(metadata) => metadata,
-                Err(error) => return self.fail_io(&error),
-            };
-            unsafe { status.write(metadata_to_android(&metadata)) };
-            return 0;
-        }
-        let resolution = match self.resolve(path) {
-            Ok(resolution) => resolution,
-            Err(error) => return self.fail(error),
-        };
-        if resolution.mount_id == 2 {
-            if self.private_root.is_some() {
-                let path = match self.private_path(&resolution.relative_path) {
-                    Ok(path) => path,
-                    Err(error) => return self.fail(error),
-                };
-                let metadata = match if no_follow {
-                    fs::symlink_metadata(path)
-                } else {
-                    fs::metadata(path)
-                } {
-                    Ok(metadata) => metadata,
-                    Err(error) => return self.fail_io(&error),
-                };
-                unsafe { status.write(metadata_to_android(&metadata)) };
-                return 0;
-            }
-            let overlay = match self.overlay.lock() {
-                Ok(overlay) => overlay,
-                Err(_) => return self.fail_capability(),
-            };
-            let translated = match overlay.entries.get(&resolution.relative_path) {
-                Some(OverlayEntry::File(node)) => {
-                    let file = match node.lock() {
-                        Ok(file) => file,
-                        Err(_) => return self.fail_capability(),
-                    };
-                    overlay_file_stat(&file)
-                }
-                Some(OverlayEntry::Directory(directory)) => overlay_directory_stat(*directory),
-                None => return self.fail(ANDROID_ENOENT),
-            };
-            unsafe { status.write(translated) };
-            return 0;
-        }
-        let mut relative_path = resolution.relative_path;
-        if resolution.requires_directory && !relative_path.is_empty() {
-            relative_path.push(b'/');
-        }
-        let metadata = match self.broker.stat(&relative_path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                if no_follow && is_final_symlink_rejection(&error, &relative_path) {
-                    return self.fail(ANDROID_EOPNOTSUPP);
-                }
-                return self.fail_broker(&error);
-            }
-        };
-        let translated = metadata_to_android(&metadata);
-        // SAFETY: the guest ABI requires a writable 128-byte Android stat object.
-        unsafe { status.write(translated) };
-        0
-    }
-
-    fn chdir(&self, path: &[u8]) -> c_int {
-        // chdir is process-global in Bionic. Holding this lock through the
-        // authorization walk gives concurrent calls a total update order.
-        let mut cwd = match self.cwd.lock() {
-            Ok(cwd) => cwd,
-            Err(_) => return self.fail_capability(),
-        };
-        let resolution = match self.resolve_from(&cwd, path) {
-            Ok(resolution) => resolution,
-            Err(error) => return self.fail(error),
-        };
-        let opened = match self.broker.open(&resolution.relative_path) {
-            Ok(opened) => opened,
-            Err(error) => return self.fail_broker(&error),
-        };
-        if !opened.metadata().is_dir() {
-            return self.fail(ANDROID_ENOTDIR);
-        }
-        *cwd = resolution.normalized_path;
-        0
-    }
-
-    unsafe fn getcwd(&self, buffer: *mut c_char, size: usize) -> *mut c_char {
-        if buffer.is_null() {
-            // Bionic's allocation extension needs the coherent Bionic allocator,
-            // which this isolated facade deliberately does not own.
-            self.fail(ANDROID_EOPNOTSUPP);
-            return ptr::null_mut();
-        }
-        let cwd = match self.cwd.lock() {
-            Ok(cwd) => cwd,
-            Err(_) => {
-                self.fail_capability();
-                return ptr::null_mut();
-            }
-        };
-        let required = match cwd.len().checked_add(1) {
-            Some(required) => required,
-            None => {
-                self.fail_capability();
-                return ptr::null_mut();
-            }
-        };
-        if size < required {
-            self.fail(ANDROID_ERANGE);
-            return ptr::null_mut();
-        }
-        // SAFETY: the ABI requires buffer to be writable for size bytes; the
-        // checked required length is at most size and includes the trailing NUL.
-        unsafe {
-            ptr::copy_nonoverlapping(cwd.as_ptr(), buffer.cast::<u8>(), cwd.len());
-            buffer.add(cwd.len()).write(0);
-        }
-        buffer
-    }
-
     fn readlink(&self, path: &[u8], buffer: *mut c_char, size: usize) -> isize {
         if buffer.is_null() && size != 0 {
             return self.fail(ANDROID_EFAULT) as isize;
@@ -2499,7 +2176,7 @@ impl Facade {
             Ok(resolution) => resolution,
             Err(error) => return self.fail(error) as isize,
         };
-        match self.broker.open(&resolution.relative_path) {
+        match self.namespace.broker.open(&resolution.relative_path) {
             // A securely opened regular file or directory is definitively not
             // a symlink. Match Linux/Bionic readlink with EINVAL.
             Ok(_) => self.fail(ANDROID_EINVAL) as isize,
@@ -2558,13 +2235,8 @@ impl Facade {
         if resolution.mount_id != 2 {
             return self.fail(ANDROID_EROFS);
         }
-        if self.private_root.is_some() {
-            use std::os::unix::fs::PermissionsExt;
-            let path = match self.private_path(&resolution.relative_path) {
-                Ok(path) => path,
-                Err(error) => return self.fail(error),
-            };
-            return match fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777)) {
+        if let Some(root) = self.private_root.as_ref() {
+            return match root.chmod(&resolution.relative_path, mode) {
                 Ok(()) => 0,
                 Err(error) => self.fail_io(&error),
             };
@@ -2604,10 +2276,10 @@ impl Facade {
             Err(_) => return self.fail_capability(),
         };
         match descriptors.entries.get(&fd) {
-            // The private overlay belongs to the one Android application
-            // process. Ownership changes therefore preserve the same virtual
-            // owner without leaking Darwin uid/gid state.
-            Some(Descriptor::Overlay(_)) => 0,
+            // Overlay nodes do not yet store guest ownership or authorize
+            // transitions against process credentials. Never acknowledge a
+            // change whose requested uid/gid would simply be discarded.
+            Some(Descriptor::Overlay(_)) => self.fail(ANDROID_EOPNOTSUPP),
             Some(_) => self.fail(ANDROID_EROFS),
             None => self.fail(ANDROID_EBADF),
         }
@@ -2648,23 +2320,19 @@ impl Facade {
             Ok(resolution) => resolution,
             Err(error) => return self.fail(error),
         };
-        if resolution.mount_id != 2 {
+        if !resolution.writable {
             return self.fail(ANDROID_EROFS);
         }
         if resolution.relative_path.is_empty() {
             return self.fail(ANDROID_EEXIST);
         }
-        if self.private_root.is_some() {
-            use std::os::unix::fs::PermissionsExt;
-            let path = match self.private_path(&resolution.relative_path) {
-                Ok(path) => path,
+        if let Some(root) = self.writable_root(resolution.mount_id) {
+            let relative = match self.writable_relative(root, path) {
+                Ok(relative) => relative,
                 Err(error) => return self.fail(error),
             };
-            return match fs::create_dir(&path) {
-                Ok(()) => {
-                    let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777));
-                    0
-                }
+            return match root.mkdir(&relative, mode) {
+                Ok(()) => 0,
                 Err(error) => self.fail_io(&error),
             };
         }
@@ -2723,12 +2391,8 @@ impl Facade {
         if resolution.mount_id != 2 {
             return self.fail(ANDROID_EROFS);
         }
-        if self.private_root.is_some() {
-            let path = match self.private_path(&resolution.relative_path) {
-                Ok(path) => path,
-                Err(error) => return self.fail(error),
-            };
-            return match fs::create_dir_all(path) {
+        if let Some(root) = &self.private_root {
+            return match root.seed_directory(&resolution.relative_path) {
                 Ok(()) => 0,
                 Err(error) => self.fail_io(&error),
             };
@@ -2770,80 +2434,6 @@ impl Facade {
             );
         }
         0
-    }
-
-    fn remove_path(&self, path: &[u8]) -> c_int {
-        let resolution = match self.resolve(path) {
-            Ok(resolution) => resolution,
-            Err(error) => return self.fail(error),
-        };
-        if resolution.mount_id != 2 || self.private_root.is_none() {
-            return self.fail(ANDROID_EROFS);
-        }
-        let path = match self.private_path(&resolution.relative_path) {
-            Ok(path) => path,
-            Err(error) => return self.fail(error),
-        };
-        let result = match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_dir() => fs::remove_dir(path),
-            Ok(_) => fs::remove_file(path),
-            Err(error) => return self.fail_io(&error),
-        };
-        match result {
-            Ok(()) => 0,
-            Err(error) => self.fail_io(&error),
-        }
-    }
-
-    fn rename_path(&self, old_path: &[u8], new_path: &[u8]) -> c_int {
-        let old = match self.resolve(old_path) {
-            Ok(resolution) if resolution.mount_id == 2 => resolution,
-            Ok(_) => return self.fail(ANDROID_EROFS),
-            Err(error) => return self.fail(error),
-        };
-        let new = match self.resolve(new_path) {
-            Ok(resolution) if resolution.mount_id == 2 => resolution,
-            Ok(_) => return self.fail(ANDROID_EROFS),
-            Err(error) => return self.fail(error),
-        };
-        if self.private_root.is_none() {
-            return self.fail(ANDROID_EROFS);
-        }
-        let old = match self.private_path(&old.relative_path) {
-            Ok(path) => path,
-            Err(error) => return self.fail(error),
-        };
-        let new = match self.private_path(&new.relative_path) {
-            Ok(path) => path,
-            Err(error) => return self.fail(error),
-        };
-        match fs::rename(old, new) {
-            Ok(()) => 0,
-            Err(error) => self.fail_io(&error),
-        }
-    }
-
-    fn truncate_path(&self, path: &[u8], length: i64) -> c_int {
-        if length < 0 {
-            return self.fail(ANDROID_EINVAL);
-        }
-        let resolution = match self.resolve(path) {
-            Ok(resolution) if resolution.mount_id == 2 => resolution,
-            Ok(_) => return self.fail(ANDROID_EROFS),
-            Err(error) => return self.fail(error),
-        };
-        let path = match self.private_path(&resolution.relative_path) {
-            Ok(path) => path,
-            Err(error) => return self.fail(error),
-        };
-        match OpenOptions::new()
-            .write(true)
-            .open(path)
-            .and_then(|file| file.set_len(length as u64))
-        {
-            Ok(()) => 0,
-            Err(error) => self.fail_io(&error),
-        }
     }
 
     fn resolve_at(&self, directory_fd: c_int, path: &[u8]) -> Result<Resolution, c_int> {
@@ -2913,9 +2503,9 @@ impl Facade {
             Ok(resolution) => resolution,
             Err(error) => return self.fail(error) as i64,
         };
-        let opened = match self.broker.open(&resolution.relative_path) {
+        let opened = match self.open_for_path_query(path, &resolution) {
             Ok(opened) => opened,
-            Err(error) => return self.fail_broker(&error) as i64,
+            Err(error) => return error as i64,
         };
         let mut value = -1_i64;
         let mut host_errno = 0;
@@ -2923,7 +2513,7 @@ impl Facade {
         // call. The helper maps the semantic Android selector explicitly.
         let result = unsafe {
             darwin_art_bionic_fs_host_fpathconf(
-                opened.file().as_raw_fd(),
+                opened.as_raw_fd(),
                 name,
                 &mut value,
                 &mut host_errno,
@@ -2936,55 +2526,6 @@ impl Facade {
         }
     }
 
-    unsafe fn realpath(&self, path: &[u8], resolved: *mut c_char) -> *mut c_char {
-        if resolved.is_null() {
-            // Bionic's allocation extension belongs to the coherent allocator
-            // provider and is not guessed by this standalone facade.
-            self.fail(ANDROID_EOPNOTSUPP);
-            return ptr::null_mut();
-        }
-        if path == b"/proc/self" {
-            // Linux procfs exposes self as a magic symlink to the caller's
-            // numeric process directory. Android File.getCanonicalFile()
-            // relies on this identity; returning the lexical "self" segment
-            // breaks code that parses the canonical basename as a PID.
-            let canonical = format!("/proc/{}", std::process::id());
-            // SAFETY: realpath's caller supplies a PATH_MAX-sized output and
-            // this bounded decimal PID path is far smaller than PATH_MAX.
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    canonical.as_ptr(),
-                    resolved.cast::<u8>(),
-                    canonical.len(),
-                );
-                resolved.add(canonical.len()).write(0);
-            }
-            return resolved;
-        }
-        let resolution = match self.resolve(path) {
-            Ok(resolution) => resolution,
-            Err(error) => {
-                self.fail(error);
-                return ptr::null_mut();
-            }
-        };
-        if let Err(error) = self.broker.open(&resolution.relative_path) {
-            self.fail_broker(&error);
-            return ptr::null_mut();
-        }
-        // The prefix layer pins normalized guest paths to at most 4095 bytes,
-        // matching Android PATH_MAX including the NUL in the caller buffer.
-        unsafe {
-            ptr::copy_nonoverlapping(
-                resolution.normalized_path.as_ptr(),
-                resolved.cast::<u8>(),
-                resolution.normalized_path.len(),
-            );
-            resolved.add(resolution.normalized_path.len()).write(0);
-        }
-        resolved
-    }
-
     unsafe fn statvfs(&self, path: &[u8], status: *mut AndroidStatvfs) -> c_int {
         if status.is_null() {
             return self.fail(ANDROID_EFAULT);
@@ -2993,20 +2534,9 @@ impl Facade {
             Ok(resolution) => resolution,
             Err(error) => return self.fail(error),
         };
-        let opened = if resolution.mount_id == 2 && self.private_root.is_some() {
-            let private = match self.private_path(&resolution.relative_path) {
-                Ok(path) => path,
-                Err(error) => return self.fail(error),
-            };
-            match File::open(private) {
-                Ok(file) => file,
-                Err(error) => return self.fail_io(&error),
-            }
-        } else {
-            match self.broker.open(&resolution.relative_path) {
-                Ok(opened) => opened.into_file(),
-                Err(error) => return self.fail_broker(&error),
-            }
+        let opened = match self.open_for_path_query(path, &resolution) {
+            Ok(file) => file,
+            Err(error) => return error,
         };
         let mut host = HostStatvfs::default();
         let mut host_errno = 0;
@@ -3037,144 +2567,6 @@ impl Facade {
         0
     }
 
-    fn opendir(&self, path: &[u8]) -> *mut c_void {
-        let resolution = match self.resolve(path) {
-            Ok(resolution) => resolution,
-            Err(error) => {
-                self.fail(error);
-                return ptr::null_mut();
-            }
-        };
-        let opened = if resolution.mount_id == 2 && self.private_root.is_some() {
-            let private = match self.private_path(&resolution.relative_path) {
-                Ok(path) => path,
-                Err(error) => {
-                    self.fail(error);
-                    return ptr::null_mut();
-                }
-            };
-            match File::open(private) {
-                Ok(file) => file,
-                Err(error) => {
-                    self.fail_io(&error);
-                    return ptr::null_mut();
-                }
-            }
-        } else {
-            match self.broker.open(&resolution.relative_path) {
-                Ok(opened) => opened.into_file(),
-                Err(error) => {
-                    self.fail_broker(&error);
-                    return ptr::null_mut();
-                }
-            }
-        };
-        if !opened.metadata().is_ok_and(|metadata| metadata.is_dir()) {
-            self.fail(ANDROID_ENOTDIR);
-            return ptr::null_mut();
-        }
-        let raw_fd = opened.into_raw_fd();
-        let mut host_errno = 0;
-        // SAFETY: fdopendir takes ownership of raw_fd only on success.
-        let host_directory =
-            unsafe { darwin_art_bionic_fs_host_fdopendir(raw_fd, &mut host_errno) };
-        if host_directory.is_null() {
-            // SAFETY: ownership was not transferred when fdopendir failed.
-            unsafe { host_close(raw_fd) };
-            self.fail_host_errno(host_errno);
-            return ptr::null_mut();
-        }
-        let mut directories = match self.directories.lock() {
-            Ok(directories) => directories,
-            Err(_) => {
-                let mut ignored_errno = 0;
-                // SAFETY: stream ownership has not entered a table yet.
-                unsafe { darwin_art_bionic_fs_host_closedir(host_directory, &mut ignored_errno) };
-                self.fail_capability();
-                return ptr::null_mut();
-            }
-        };
-        directories.insert(host_directory)
-    }
-
-    fn fdopendir(&self, fd: c_int) -> *mut c_void {
-        let mut descriptors = match self.descriptors.lock() {
-            Ok(descriptors) => descriptors,
-            Err(_) => {
-                self.fail_capability();
-                return ptr::null_mut();
-            }
-        };
-        let Some(descriptor) = descriptors.entries.get(&fd) else {
-            self.fail(ANDROID_EBADF);
-            return ptr::null_mut();
-        };
-        if matches!(descriptor, Descriptor::Overlay(_)) {
-            self.fail(ANDROID_ENOTDIR);
-            return ptr::null_mut();
-        }
-        let file = match descriptor {
-            Descriptor::File(file) | Descriptor::PrivateFile(file) => file,
-            _ => {
-                self.fail(ANDROID_ENOTDIR);
-                return ptr::null_mut();
-            }
-        };
-        match file.metadata() {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => {
-                self.fail(ANDROID_ENOTDIR);
-                return ptr::null_mut();
-            }
-            Err(error) => {
-                self.fail_io(&error);
-                return ptr::null_mut();
-            }
-        }
-        let descriptor = descriptors
-            .take(fd)
-            .expect("validated virtual descriptor must remain present under its lock");
-        let (file, private) = match descriptor {
-            Descriptor::File(file) => (file, false),
-            Descriptor::PrivateFile(file) => (file, true),
-            _ => unreachable!("validated descriptor kind changed under lock"),
-        };
-        let raw_fd = file.into_raw_fd();
-        let mut host_errno = 0;
-        // SAFETY: fdopendir consumes raw_fd only when it returns a stream.
-        let host_directory =
-            unsafe { darwin_art_bionic_fs_host_fdopendir(raw_fd, &mut host_errno) };
-        if host_directory.is_null() {
-            // SAFETY: failed fdopendir leaves ownership of the still-live descriptor
-            // with the caller; restore it under the exact same virtual descriptor.
-            let restored = unsafe { File::from_raw_fd(raw_fd) };
-            descriptors.restore(
-                fd,
-                if private {
-                    Descriptor::PrivateFile(restored)
-                } else {
-                    Descriptor::File(restored)
-                },
-            );
-            self.fail_host_errno(host_errno);
-            return ptr::null_mut();
-        }
-        descriptors.release(fd);
-        drop(descriptors);
-
-        let mut directories = match self.directories.lock() {
-            Ok(directories) => directories,
-            Err(_) => {
-                let mut ignored_errno = 0;
-                // SAFETY: the host stream owns raw_fd after successful fdopendir.
-                unsafe { darwin_art_bionic_fs_host_closedir(host_directory, &mut ignored_errno) };
-                self.fail_capability();
-                return ptr::null_mut();
-            }
-        };
-        directories.insert(host_directory)
-    }
-
     fn fail_host_errno(&self, host_errno: c_int) -> c_int {
         if host_errno != 0 {
             // SAFETY: translation is value-only and preserves Darwin errno.
@@ -3183,112 +2575,6 @@ impl Facade {
             }
         }
         self.fail_capability()
-    }
-
-    fn readdir(&self, directory: *mut c_void) -> *mut AndroidDirent {
-        if directory.is_null() {
-            self.fail(ANDROID_EBADF);
-            return ptr::null_mut();
-        }
-        // A single lock serializes readdir/closedir on every facade stream.
-        // Tokens are keys only and are never dereferenced before membership.
-        let mut directories = match self.directories.lock() {
-            Ok(directories) => directories,
-            Err(_) => {
-                self.fail_capability();
-                return ptr::null_mut();
-            }
-        };
-        let Some(state) = directories.streams.get_mut(&(directory as usize)) else {
-            self.fail(ANDROID_EBADF);
-            return ptr::null_mut();
-        };
-        if state.host_directory == 0 {
-            self.fail(ANDROID_EBADF);
-            return ptr::null_mut();
-        }
-        let mut host_entry = HostDirent::default();
-        let mut host_errno = 0;
-        // SAFETY: the table exclusively owns and serializes this live stream.
-        let result = unsafe {
-            darwin_art_bionic_fs_host_readdir(
-                state.host_directory as *mut c_void,
-                &mut host_entry,
-                &mut host_errno,
-            )
-        };
-        if result == 0 {
-            // Bionic readdir leaves errno unchanged at end-of-directory.
-            return ptr::null_mut();
-        }
-        if result < 0 {
-            self.fail_host_errno(host_errno);
-            return ptr::null_mut();
-        }
-        let name_length = usize::from(host_entry.d_name_length);
-        if name_length >= host_entry.d_name.len() {
-            self.fail_capability();
-            return ptr::null_mut();
-        }
-        state.offset = match state.offset.checked_add(1) {
-            Some(offset) => offset,
-            None => {
-                self.fail_capability();
-                return ptr::null_mut();
-            }
-        };
-        let record_length = (19usize + name_length + 1 + 7) & !7;
-        *state.entry = AndroidDirent::default();
-        state.entry.d_ino = host_entry.d_ino;
-        state.entry.d_off = state.offset;
-        state.entry.d_reclen = record_length as u16;
-        state.entry.d_type = android_directory_type(host_entry.d_type);
-        state.entry.d_name[..=name_length].copy_from_slice(&host_entry.d_name[..=name_length]);
-        &raw mut *state.entry
-    }
-
-    fn closedir(&self, directory: *mut c_void) -> c_int {
-        if directory.is_null() {
-            return self.fail(ANDROID_EBADF);
-        }
-        let mut directories = match self.directories.lock() {
-            Ok(directories) => directories,
-            Err(_) => return self.fail_capability(),
-        };
-        let Some(mut state) = directories.streams.remove(&(directory as usize)) else {
-            return self.fail(ANDROID_EBADF);
-        };
-        let host_directory = std::mem::replace(&mut state.host_directory, 0);
-        let mut host_errno = 0;
-        // SAFETY: table ownership is transferred exactly once to closedir.
-        if unsafe {
-            darwin_art_bionic_fs_host_closedir(host_directory as *mut c_void, &mut host_errno)
-        } == 0
-        {
-            0
-        } else {
-            self.fail_host_errno(host_errno)
-        }
-    }
-
-    fn rewinddir(&self, directory: *mut c_void) {
-        if directory.is_null() {
-            self.fail(ANDROID_EBADF);
-            return;
-        }
-        let mut directories = match self.directories.lock() {
-            Ok(directories) => directories,
-            Err(_) => {
-                self.fail_capability();
-                return;
-            }
-        };
-        let Some(state) = directories.streams.get_mut(&(directory as usize)) else {
-            self.fail(ANDROID_EBADF);
-            return;
-        };
-        unsafe { darwin_art_bionic_fs_host_rewinddir(state.host_directory as *mut c_void) };
-        state.offset = 0;
     }
 
     fn sendfile_transfer(&self, request: &SendfileRequest, result: &mut SendfileResult) -> c_int {

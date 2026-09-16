@@ -30,6 +30,7 @@ pub(crate) fn core_probe_includes(
         root.join("_aosp/art/libelffile"),
         root.join("_aosp/art/libprofile"),
         root.join("_aosp/art/libnativebridge/include"),
+        root.join("_aosp/art/libnativeloader/include"),
         runtime.to_path_buf(),
         runtime.join("base"),
         runtime.join("arch/arm64"),

@@ -1,0 +1,78 @@
+package dev.darwinart.runtime.pm;
+
+import android.content.pm.ActivityInfo;
+import android.content.pm.ApplicationInfo;
+
+/** Launch activity projection owned by installed package state. */
+public final class InstalledActivityInfo {
+    private InstalledActivityInfo() {}
+
+    public static ActivityInfo launchActivity(String packageName, String record) {
+        InstalledPackageRecord installed = InstalledPackageRecord.fromRecord(packageName, record);
+        if (installed == null) return null;
+        String activityName = installed.legacyManifestHint("launch_component");
+        if (activityName == null || activityName.equals("none")) return null;
+
+        return activity(packageName, record, activityName);
+    }
+
+    /** Resolves one manifest-declared activity from installed package state. */
+    public static ActivityInfo activity(String packageName, String record, String activityName) {
+        InstalledPackageRecord installed = InstalledPackageRecord.fromRecord(packageName, record);
+        if (installed == null || activityName == null || activityName.isEmpty()) return null;
+
+        String targetActivity = aliasTarget(installed, activityName);
+        String declarationName = targetActivity == null ? activityName : targetActivity;
+        int theme = 0;
+        boolean declared = false;
+        String activities = installed.legacyManifestHint("activities");
+        if (activities != null && !activities.equals("none")) {
+            for (String declaration : activities.split(",")) {
+                int delimiter = declaration.lastIndexOf('=');
+                if (delimiter > 0
+                        && declarationName.equals(declaration.substring(0, delimiter))) {
+                    theme = Integer.decode(declaration.substring(delimiter + 1));
+                    declared = true;
+                    break;
+                }
+            }
+        }
+        if (!declared) return null;
+
+        ApplicationInfo application = InstalledApplicationInfo.fromRecord(packageName, record);
+        ActivityInfo info = new ActivityInfo();
+        info.packageName = packageName;
+        info.name = activityName;
+        info.targetActivity = targetActivity;
+        info.applicationInfo = application;
+        info.enabled = true;
+        // These legacy metadata fields describe only the launch activity.
+        // Other activities must retain normal ApplicationInfo label fallback
+        // until their own manifest label is available in the package record.
+        if (activityName.equals(installed.legacyManifestHint("launch_component"))) {
+            InstalledApplicationInfo.applyLabel(
+                    info, installed, "activity_label", "activity_label_res");
+        }
+        if ("1".equals(installed.legacyManifestHint("activity_hardware_accelerated"))) {
+            info.flags |= ActivityInfo.FLAG_HARDWARE_ACCELERATED;
+        }
+
+        info.theme = theme;
+        String orientation = installed.legacyManifestHint("screen_orientation");
+        if (orientation != null) info.screenOrientation = Integer.parseInt(orientation);
+        return info;
+    }
+
+    private static String aliasTarget(InstalledPackageRecord installed, String activityName) {
+        String aliases = installed.legacyManifestHint("activity_aliases");
+        if (aliases == null || aliases.equals("none")) return null;
+        for (String declaration : aliases.split(",")) {
+            int delimiter = declaration.indexOf('>');
+            if (delimiter > 0 && activityName.equals(declaration.substring(0, delimiter))) {
+                String target = declaration.substring(delimiter + 1);
+                return target.isEmpty() ? null : target;
+            }
+        }
+        return null;
+    }
+}

@@ -19,3 +19,17 @@ extern "C" int darwin_art_surfaceflinger_service_present(
     uint32_t target_height, uint64_t transaction_id,
     const DarwinArtMetalComposerLayer* layers, size_t layer_count,
     void* producer_event, uint64_t producer_value);
+
+// Submits a target-independent Android SurfaceControl transaction containing
+// buffers. Central SurfaceFlinger resolves its display from current parent
+// ancestry and returns a fence for the actual composition.
+extern "C" int darwin_art_surfaceflinger_service_submit(
+    uint64_t transaction_id, const DarwinArtMetalComposerLayer* layers,
+    size_t layer_count);
+
+// Commits hierarchy, geometry, visibility and relative-layer state without a
+// display target. system_server/WMS owns these transactions on Android and
+// must not fabricate an application IOSurface merely to reach SurfaceFlinger.
+extern "C" int darwin_art_surfaceflinger_service_commit(
+    uint64_t transaction_id, const DarwinArtMetalComposerLayer* layers,
+    size_t layer_count);

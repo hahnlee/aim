@@ -107,6 +107,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bionic-fdsan-owner"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "bionic-float-conversion-facade"
 version = "0.1.0"
 dependencies = [
@@ -128,6 +135,7 @@ dependencies = [
  "darwin-art-elf-loader",
  "darwin-art-fs-broker",
  "darwin-art-prefix",
+ "libc",
 ]
 
 [[package]]
@@ -159,6 +167,7 @@ dependencies = [
  "android-binder-ndk-provider",
  "android-dso-namespace",
  "bionic-dso-lifecycle-facade",
+ "bionic-fdsan-owner",
  "bionic-fs-facade",
  "bionic-process-state-facade",
  "bionic-stdio-facade",
@@ -294,6 +303,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "darwin-art-binder-device"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "darwin-art-binder-process"
+version = "0.1.0"
+dependencies = [
+ "darwin-art-binder-device",
+ "darwin-art-profile",
+ "libc",
+]
+
+[[package]]
 name = "darwin-art-build-contract"
 version = "0.1.0"
 
@@ -329,9 +354,19 @@ name = "darwin-art-host"
 version = "0.1.0"
 dependencies = [
  "darwin-art-abi",
+ "darwin-art-binder-process",
  "darwin-art-engine",
  "darwin-art-engine-sys",
+ "darwin-art-profile",
  "darwin-art-runtime",
+ "libc",
+ "sha2",
+]
+
+[[package]]
+name = "darwin-art-looper-transport"
+version = "0.1.0"
+dependencies = [
  "libc",
 ]
 
@@ -349,13 +384,20 @@ version = "0.1.0"
 [[package]]
 name = "darwin-art-profile"
 version = "0.1.0"
+dependencies = [
+ "darwin-art-binder-device",
+ "libc",
+]
 
 [[package]]
 name = "darwin-art-runtime"
 version = "0.1.0"
 dependencies = [
+ "bionic-fs-facade",
  "darwin-art-abi",
  "darwin-art-engine-sys",
+ "darwin-art-profile",
+ "libc",
 ]
 
 [[package]]
@@ -445,6 +487,9 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 [[package]]
 name = "super-i18n-apex-extract"
 version = "0.1.0"
+dependencies = [
+ "darwin-art-fs-broker",
+]
 
 [[package]]
 name = "typenum"

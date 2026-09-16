@@ -55,10 +55,6 @@ void darwin_art_bionic_funlockfile(DarwinArtAndroidFile* f) {
 }
 size_t darwin_art_bionic_fread(void* b,size_t s,size_t n,DarwinArtAndroidFile* f) { WRAP(e, darwin_art_bionic_stdio_fread_core(b,s,n,f)); }
 size_t darwin_art_bionic_fwrite(const void* b,size_t s,size_t n,DarwinArtAndroidFile* f) { WRAP(e, darwin_art_bionic_stdio_fwrite_core(b,s,n,f)); }
-size_t darwin_art_bionic___fwrite_chk(const void* b,size_t s,size_t n,DarwinArtAndroidFile* f,size_t capacity) {
-  if (s != 0 && n > capacity / s) return 0;
-  return darwin_art_bionic_fwrite(b,s,n,f);
-}
 int darwin_art_bionic_fseek(DarwinArtAndroidFile* f,long o,int w) { WRAP(e, darwin_art_bionic_stdio_fseek_core(f,o,w)); }
 int darwin_art_bionic_fseeko(DarwinArtAndroidFile* f,int64_t o,int w) { WRAP(e, darwin_art_bionic_stdio_fseek_core(f,o,w)); }
 int64_t darwin_art_bionic_ftello(DarwinArtAndroidFile* f) { WRAP(e, darwin_art_bionic_stdio_ftello_core(f)); }
@@ -296,6 +292,7 @@ int darwin_art_bionic_vprintf(const char* format, const void* ap) { (void)format
 static int Compare(const char* a,const char* b) { while(*a==*b&&*a){a++;b++;} return (unsigned char)*a<(unsigned char)*b?-1:((unsigned char)*a!=(unsigned char)*b); }
 typedef struct { const char* name; DarwinArtBionicStdioFunction address; } Binding;
 static const Binding kBindings[] = {
+ {"__fread_chk",(DarwinArtBionicStdioFunction)darwin_art_bionic___fread_chk},
  {"__fwrite_chk",(DarwinArtBionicStdioFunction)darwin_art_bionic___fwrite_chk},
  {"__sF",(DarwinArtBionicStdioFunction)darwin_art_bionic___sF},
  {"clearerr",(DarwinArtBionicStdioFunction)darwin_art_bionic_clearerr},

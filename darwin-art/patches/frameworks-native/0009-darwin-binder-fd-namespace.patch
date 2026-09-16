@@ -1,0 +1,64 @@
+diff --git a/libs/binder/OS_unix_base.cpp b/libs/binder/OS_unix_base.cpp
+--- a/libs/binder/OS_unix_base.cpp
++++ b/libs/binder/OS_unix_base.cpp
+@@ -23,7 +23,11 @@
+ #include <log/log.h>
+ #include <string.h>
+ #include <sys/socket.h>
+
++#if defined(__APPLE__)
++#include <fd_transport.h>
++#endif
++
+ using android::binder::ReadFully;
+
+ namespace android::binder::os {
+@@ -56,7 +60,11 @@ status_t getRandomBytes(uint8_t* data, size_t size) {
+ }
+
+ status_t dupFileDescriptor(int oldFd, int* newFd) {
++#if defined(__APPLE__)
++    int ret = darwin_art_binder_duplicate_file_descriptor(oldFd);
++#else
+     int ret = fcntl(oldFd, F_DUPFD_CLOEXEC, 0);
++#endif
+     if (ret < 0) {
+         return -errno;
+     }
+diff --git a/libs/binder/Parcel.cpp b/libs/binder/Parcel.cpp
+--- a/libs/binder/Parcel.cpp
++++ b/libs/binder/Parcel.cpp
+@@ -52,5 +52,9 @@
+ #include "RpcState.h"
+ #include "Static.h"
+ #include "Utils.h"
+
++#if defined(__APPLE__)
++#include <fd_transport.h>
++#endif
++
+ // A lot of code in this file uses definitions from the
+@@ -145,7 +149,11 @@ static void FdTagClose(int fd, const void* addr) {
+ }
+ static void FdTagClose(int fd, const void* addr) {
+     (void)addr;
++#if defined(__APPLE__)
++    darwin_art_binder_close_file_descriptor(fd);
++#else
+     close(fd);
++#endif
+ }
+ #endif
+
+@@ -1625,7 +1633,11 @@ status_t Parcel::writeDupFileDescriptor(int fd)
+     }
+     status_t err = writeFileDescriptor(dupFd, true /*takeOwnership*/);
+     if (err != OK) {
++#if defined(__APPLE__)
++        darwin_art_binder_close_file_descriptor(dupFd);
++#else
+         close(dupFd);
++#endif
+     }
+     return err;
+ }

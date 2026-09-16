@@ -16,6 +16,7 @@
 #include "darwin_art_bionic_provider_namespace.h"
 #include "darwin_art_jni_proxy.h"
 #include "darwin_art_runtime_native_owner.h"
+#include "loader/elf_graph_cache.h"
 
 namespace android {
 
@@ -86,8 +87,8 @@ struct ElfLibrary {
       std::array<unsigned char, DARWIN_ART_JNI_PROXY_STORAGE_SIZE> proxy_storage{};
   DarwinArtJniProxy* proxy = nullptr;
   JavaVM* art_vm = nullptr;
-  // Initiating app loader for JNI_OnLoad/ProxyFindClass.  NativeBridge's
-  // callback has no class-loader argument, so retain the lease per image.
+  // Legacy initiating-loader lease used by guest dlopen namespace routing.
+  // JNI FindClass must instead use ART's native-call/ClassLoader context.
   void* app_loader = nullptr;
   // Stable NativeLoader namespace identity shared by every global reference
   // to the same Java ClassLoader. Detached native threads cannot call
@@ -109,7 +110,6 @@ struct ElfLibrary {
   std::unordered_map<std::string, void*> exported_jni_trampolines;
   std::mutex method_descriptor_mutex;
   std::unordered_map<void*, std::string> method_descriptors;
-  std::unordered_map<void*, std::string> method_names;
 };
 
 int PublishRuntimeElfImage(void* context, uintptr_t start, uintptr_t end);
@@ -119,15 +119,6 @@ bool LookupOptionalElfSymbol(ElfLibrary* library,
                              const char* name,
                              uintptr_t* address,
                              std::string* error);
-std::vector<std::string> SnapshotCachedElfSonames();
-bool RegisterCachedElfGraph(const char* root_soname,
-                            DarwinArtElfGraphHandle* graph,
-                            std::string* error);
-void UnregisterCachedElfGraph(const char* root_soname);
-DarwinArtElfResolveStatus ResolveCachedElfProvider(
-    const DarwinArtElfSymbolRequest* request,
-    uintptr_t* out_address,
-    DarwinArtElfErrorBuffer* error);
 bool IsExactFixtureGraph(const char* root_soname,
                          const DarwinArtElfGraphSource* sources,
                          size_t source_count);

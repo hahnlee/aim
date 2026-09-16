@@ -16,6 +16,43 @@ static PROCESS_OWNER: LazyLock<ProcessOwner> = LazyLock::new(|| ProcessOwner {
     quiescent: Condvar::new(),
 });
 
+type SpecialDeviceOpen = unsafe extern "C" fn(c_int, u32, *mut c_int) -> c_int;
+static BINDER_DEVICE_OPEN: Mutex<Option<SpecialDeviceOpen>> = Mutex::new(None);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn darwin_art_bionic_fs_bind_binder_device_open(
+    callback: Option<SpecialDeviceOpen>,
+) -> c_int {
+    let Ok(mut installed) = BINDER_DEVICE_OPEN.lock() else {
+        return -1;
+    };
+    match (installed.is_some(), callback) {
+        (false, Some(callback)) => {
+            *installed = Some(callback);
+            0
+        }
+        (true, None) => {
+            *installed = None;
+            0
+        }
+        _ => -1,
+    }
+}
+
+fn open_binder_device(flags: c_int, mode: u32) -> Option<c_int> {
+    let callback = BINDER_DEVICE_OPEN.lock().ok().and_then(|slot| *slot)?;
+    let mut android_errno = 0;
+    let descriptor = unsafe { callback(flags, mode, &mut android_errno) };
+    if descriptor < 0 {
+        Facade::set_android_errno(if android_errno > 0 {
+            android_errno
+        } else {
+            ANDROID_EINVAL
+        });
+    }
+    Some(descriptor)
+}
+
 fn process_owner_state() -> MutexGuard<'static, ProcessOwnerState> {
     PROCESS_OWNER.state.lock().unwrap_or_else(|_| {
         // The phase and in-flight count cannot be reconstructed after a panic
@@ -475,6 +512,11 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_open_core(
         Facade::set_android_errno(ANDROID_EFAULT);
         return -1;
     };
+    if path == b"/dev/binder" {
+        if let Some(descriptor) = open_binder_device(flags, mode) {
+            return descriptor;
+        }
+    }
     with_active(-1, |facade| facade.open_with_mode(path, flags, mode))
 }
 
@@ -507,7 +549,7 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_read_core(
     count: usize,
 ) -> isize {
     let result = with_active(-1, |facade| unsafe { facade.read(fd, buffer, count) });
-    if std::env::var_os("DARWIN_ART_FS_TRACE").is_some() && fd >= 10_000 {
+    if std::env::var_os("DARWIN_ART_FS_TRACE").is_some() && (fd >= 10_000 || result != 0) {
         eprintln!("DARWIN FS: read fd={fd} count={count} result={result}");
     }
     result
@@ -535,7 +577,7 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_readv_core(
     vectors: *const crate::NativeIovec,
     count: c_int,
 ) -> isize {
-    if count < 0 || count > 1024 || (count != 0 && vectors.is_null()) {
+    if !(0..=1024).contains(&count) || (count != 0 && vectors.is_null()) {
         return with_active(-1, |facade| facade.fail(22) as isize);
     }
     with_active(-1, |facade| unsafe { facade.readv(fd, vectors, count) })
@@ -551,7 +593,7 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_writev_core(
     vectors: *const crate::NativeIovec,
     count: c_int,
 ) -> isize {
-    if count < 0 || count > 1024 || (count != 0 && vectors.is_null()) {
+    if !(0..=1024).contains(&count) || (count != 0 && vectors.is_null()) {
         return with_active(-1, |facade| facade.fail(22) as isize);
     }
     with_active(-1, |facade| unsafe { facade.writev(fd, vectors, count) })
@@ -657,6 +699,11 @@ pub extern "C" fn darwin_art_bionic_fs_fsync_core(fd: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn darwin_art_bionic_fs_fchdir_core(fd: c_int) -> c_int {
+    with_active(-1, |facade| facade.fchdir(fd))
+}
+
+#[unsafe(no_mangle)]
 /// # Safety
 ///
 /// `path` must be a readable NUL-terminated byte path and `status` must point
@@ -675,8 +722,8 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_stat_core(
 #[unsafe(no_mangle)]
 /// # Safety
 ///
-/// Same pointer contract as [`darwin_art_bionic_fs_stat_core`]. Symlink
-/// metadata is unsupported by the no-follow broker and fails explicitly.
+/// Same pointer contract as [`darwin_art_bionic_fs_stat_core`]. GuestRoot
+/// installations support final-link metadata without following its target.
 pub unsafe extern "C" fn darwin_art_bionic_fs_lstat_core(
     path: *const c_char,
     status: *mut AndroidStat,
@@ -686,6 +733,19 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_lstat_core(
         return -1;
     };
     with_active(-1, |facade| unsafe { facade.stat(path, status, true) })
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// Path is readable/NUL-terminated; status is a writable Android stat object.
+pub unsafe extern "C" fn darwin_art_bionic_fs_fstatat_core(
+    fd: c_int, path: *const c_char, status: *mut AndroidStat, flags: c_int,
+) -> c_int {
+    let Some(path) = (unsafe { path_bytes(path) }) else {
+        Facade::set_android_errno(ANDROID_EFAULT);
+        return -1;
+    };
+    with_active(-1, |facade| unsafe { facade.fstatat(fd, path, status, flags) })
 }
 
 #[unsafe(no_mangle)]
@@ -762,6 +822,11 @@ pub extern "C" fn darwin_art_bionic_fs_rewinddir_core(directory: *mut c_void) {
 #[unsafe(no_mangle)]
 pub extern "C" fn darwin_art_bionic_fs_closedir_core(directory: *mut c_void) -> c_int {
     with_active(-1, |facade| facade.closedir(directory))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn darwin_art_bionic_fs_dirfd_core(directory: *mut c_void) -> c_int {
+    with_active(-1, |facade| facade.dirfd(directory))
 }
 
 #[unsafe(no_mangle)]
@@ -872,6 +937,22 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_mkdir_core(path: *const c_char, _m
         return -1;
     };
     with_active(-1, |facade| facade.mkdir(path, _mode))
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `path` must point to a readable NUL-terminated Android byte path.
+pub unsafe extern "C" fn darwin_art_bionic_fs_mkdirat_core(
+    directory_fd: c_int,
+    path: *const c_char,
+    mode: u32,
+) -> c_int {
+    let Some(path) = (unsafe { path_bytes(path) }) else {
+        Facade::set_android_errno(ANDROID_EFAULT);
+        return -1;
+    };
+    with_active(-1, |facade| facade.mkdir_at(directory_fd, path, mode))
 }
 
 #[unsafe(no_mangle)]

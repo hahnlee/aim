@@ -230,21 +230,21 @@ mod tests {
 
     #[test]
     fn process_lease_survives_temporary_borrows_until_bridge_clear() {
-        ACQUIRES.store(0, Ordering::SeqCst);
-        RELEASES.store(0, Ordering::SeqCst);
-        CLEARS.store(0, Ordering::SeqCst);
-        let bridge = ProviderBridge::from_callbacks(acquire, release, clear);
+        for (kind, fd) in [(ProviderKind::Network, -1), (ProviderKind::Filesystem, 7)] {
+            ACQUIRES.store(0, Ordering::SeqCst);
+            RELEASES.store(0, Ordering::SeqCst);
+            CLEARS.store(0, Ordering::SeqCst);
+            let bridge = ProviderBridge::from_callbacks(acquire, release, clear);
 
-        bridge
-            .acquire_process_lease(ProviderKind::Network, -1)
-            .unwrap();
-        let temporary = bridge.acquire_lease(ProviderKind::Network, -1).unwrap();
-        drop(temporary);
-        assert_eq!(ACQUIRES.load(Ordering::SeqCst), 1);
-        assert_eq!(RELEASES.load(Ordering::SeqCst), 0);
+            bridge.acquire_process_lease(kind, fd).unwrap();
+            let temporary = bridge.acquire_lease(kind, fd).unwrap();
+            drop(temporary);
+            assert_eq!(ACQUIRES.load(Ordering::SeqCst), 1);
+            assert_eq!(RELEASES.load(Ordering::SeqCst), 0);
 
-        bridge.clear().unwrap();
-        assert_eq!(RELEASES.load(Ordering::SeqCst), 1);
-        assert_eq!(CLEARS.load(Ordering::SeqCst), 1);
+            bridge.clear().unwrap();
+            assert_eq!(RELEASES.load(Ordering::SeqCst), 1);
+            assert_eq!(CLEARS.load(Ordering::SeqCst), 1);
+        }
     }
 }

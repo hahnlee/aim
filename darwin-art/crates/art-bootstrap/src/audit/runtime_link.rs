@@ -11,6 +11,13 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
     // can never validate a stale object set (notably the framework shutdown
     // owner) left by an earlier graph invocation.
     build_runtime_bootstrap(root)?;
+    build_shell_gate(root, "build-android16-application-shared-memory.sh")?;
+    build_shell_gate(root, "build-android16-debugstore.sh")?;
+    build_shell_gate(root, "build-android16-activity-thread.sh")?;
+    build_shell_gate(root, "build-android16-bionic-linker-config.sh")?;
+    build_shell_gate(root, "build-android16-tracing-perfetto.sh")?;
+    build_shell_gate(root, "build-android16-system-properties.sh")?;
+    build_shell_gate(root, "build-android16-binder-jni.sh")?;
     // Runtime::Create can compile JNI stubs through the ART compiler archive.
     // Build that producer here, too: the headless audit is a supported direct
     // entry point (and is used by `all`), so relying on a prior explicit JIT
@@ -44,12 +51,6 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
         &openjdk_named_jni_owner,
         "OpenJDK named-JNI owner dylib is missing",
     )?;
-    let filesystem_object = if let Some(path) = env::var_os("DARWIN_ART_NATIVE_FILESYSTEM_OBJECT") {
-        PathBuf::from(path)
-    } else {
-        compile_runtime_filesystem_probe(root, &build_dir)?
-    };
-    require_file(&filesystem_object, "runtime filesystem object is missing")?;
     let network_object = if let Some(path) = env::var_os("DARWIN_ART_NATIVE_NETWORK_OBJECT") {
         PathBuf::from(path)
     } else {
@@ -311,6 +312,13 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
     linker
         .arg("-dynamiclib")
         .arg("-Wl,-install_name,@rpath/libdarwin_art_runtime.dylib")
+        .arg(root.join("_build/application-shared-memory/libapplication-shared-memory-darwin.a"))
+        .arg(root.join("_build/debugstore/libdebugstore-darwin.a"))
+        .arg(root.join("_build/activity-thread/libactivity-thread-darwin.a"))
+        .arg(root.join("_build/bionic-linker-config/linker_dlwarning.o"))
+        .arg(root.join("_build/tracing-perfetto/libandroid-tracing-perfetto-darwin.a"))
+        .arg(root.join("_build/tracing-perfetto/perfetto-out/libperfetto_c.dylib"))
+        .arg("-Wl,-rpath,@loader_path/../tracing-perfetto/perfetto-out")
         // RuntimeSession resolves this lifecycle hook through the dylib ABI;
         // force it through dead-strip and publish it for the host engine.
         .arg("-Wl,-u,_darwin_art_prepare_process_exit")
@@ -339,6 +347,13 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
         .arg("-Wl,-exported_symbol,_darwin_art_surface_active_gpu")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_install_hooks")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_clear_hooks")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_process_state_install_configured")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_process_state_process_uninstall")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_fs_process_install")
+        .arg("-Wl,-exported_symbol,_darwin_art_binder_export_file_descriptor")
+        .arg("-Wl,-exported_symbol,_darwin_art_binder_import_file_descriptor")
+        .arg("-Wl,-exported_symbol,_darwin_art_binder_close_file_descriptor")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_fs_process_uninstall")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_native_acquire")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_native_release")
         .arg("-Wl,-exported_symbol,_darwin_art_runtime_native_owner_create")
@@ -384,7 +399,6 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
         .arg(&jni_acceptance_object)
         .arg(&graphics_phase_object)
         .arg(&graphics_input_object)
-        .arg(&filesystem_object)
         .arg(&network_object)
         .arg(&surface_object)
         // Native registration is rooted from ART startup rather than a direct
@@ -396,6 +410,12 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
             root.join("_build/runtime-bootstrap/libart-runtime-bootstrap-darwin.a")
                 .display()
         ))
+        .arg(root.join("_build/binder-jni/libbinder-jni-darwin.a"))
+        .arg(root.join("_build/binder-jni/libbinder-rpc-boundary-darwin.a"))
+        // Dynamically resolved by the Rust Binder process endpoint. Link the
+        // exact FD boundary object because ordinary archive extraction cannot
+        // see dlsym-only roots.
+        .arg(root.join("_build/binder-jni/fd-transport.o"))
         // RegisterLibcoreNatives owns these AOSP OpenJDK tables; keep the
         // module archives on the CPU closure rather than manufacturing local
         // substitutes for their entrypoints.
@@ -418,6 +438,7 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
         .arg(root.join("_build/unix-filesystem-darwin/libopenjdk-unix-filesystem-darwin.a"))
         .arg(root.join("_build/icu-foundation/libicui18n-darwin.a"))
         .arg(root.join("_build/androidfw-foundation/libandroidfw-darwin.a"))
+        .arg(root.join("_build/system-properties/libsystem-properties-jni-darwin.a"))
         .arg(root.join("_build/graphics-foundations/libutils-darwin.a"))
         .arg(root.join("_build/graphics-foundations/libcutils-darwin.a"))
         .arg(root.join("_build/graphics-foundations/liblog-darwin.a"))
@@ -516,6 +537,10 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
             "CoreVideo",
             "-framework",
             "VideoToolbox",
+            "-framework",
+            "Network",
+            "-framework",
+            "SystemConfiguration",
             "-o",
         ])
         .arg(&runtime_library);

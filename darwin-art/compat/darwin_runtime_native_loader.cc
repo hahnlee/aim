@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +18,13 @@
 #include <vector>
 
 #include "darwin_provider_owners.h"
+#include "loader/boot_apex_jni_policy.h"
+#include "loader/bionic_provider_set.h"
+#include "loader/classloader_identity.h"
+#include "loader/classloader_namespaces.h"
+#include "loader/library_search.h"
+#include "loader/guest_open_request.h"
+#include "filesystem/process_authority.h"
 #include "darwin_android_media_ndk.h"
 #include "darwin_jni_shorty.h"
 #include "darwin_art_bionic_builtin_adapters.h"
@@ -46,11 +54,6 @@ bool IsMediaNdkHandle(void* handle) {
   return handle == static_cast<void*>(&g_media_ndk_handle_tag);
 }
 
-uint64_t& NextLoaderNamespaceId() {
-  static auto* next = new uint64_t(1);
-  return *next;
-}
-
 // ElfLibraryRegistryMutex must be held. A Java ClassLoader can have many
 // distinct global-reference values, but Android NativeLoader gives all of
 // them one linker namespace. Prefer exact identity so detached native threads
@@ -63,34 +66,13 @@ uint64_t FindLoaderNamespaceIdLocked(JNIEnv* env, jobject loader) {
       return library->loader_namespace_id;
     }
   }
-  if (env != nullptr) {
-    for (auto* library : ElfLibraries()) {
-      if (library != nullptr && library->app_loader != nullptr &&
-          env->IsSameObject(loader, static_cast<jobject>(library->app_loader))) {
-        return library->loader_namespace_id;
-      }
-    }
-  }
-  return 0;
+  return darwin_art::loader::FindClassLoaderIdentity(env, loader);
 }
 
 uint64_t GetOrCreateLoaderNamespaceId(JNIEnv* env, jobject loader) {
-  if (loader == nullptr) return 0;
-  std::lock_guard<std::mutex> lock(ElfLibraryRegistryMutex());
-  if (const uint64_t existing = FindLoaderNamespaceIdLocked(env, loader);
-      existing != 0) {
-    return existing;
-  }
-  return NextLoaderNamespaceId()++;
+  return darwin_art::loader::EnsureClassLoaderIdentity(env, loader);
 }
 
-struct DarwinArtLoaderCallbacks {
-  void* context;
-  void* (*open)(void*, const char*, int, const void*, char*, size_t);
-  void* (*lookup)(void*, void*, const char*, const char*, char*, size_t);
-  int (*close)(void*, void*, char*, size_t);
-};
-extern "C" int darwin_art_loader_bind(const DarwinArtLoaderCallbacks*);
 
 extern "C" uintptr_t darwin_art_bionic_rust_provider_closure_anchor();
 
@@ -148,8 +130,12 @@ class ScopedGuestLoaderAttachment {
   bool attached_here_ = false;
 };
 
-void* GuestDsoOpen(void* context, const char* path, int, const void*,
+void* GuestDsoOpen(void* context, const char* path, int flags, const DarwinArtAndroidDlExtInfo* info,
                   char* error, size_t capacity) {
+  if (const char* rejection = darwin_art::loader::LegacyOpenRequestError(flags, info)) {
+    CopyLoaderError(rejection, error, capacity);
+    return nullptr;
+  }
   auto* owner = static_cast<ElfLibrary*>(context);
   if (owner == nullptr || owner->magic != kElfLibraryMagic || path == nullptr) {
     CopyLoaderError("invalid Android guest loader context", error, capacity);
@@ -522,11 +508,17 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
                                     int32_t,
                                     const char* path,
                                     jobject loader,
-                                    const char*,
+                                    const char* caller_location,
                                     jstring library_path,
                                     bool* needs_native_bridge,
                                     char** error_msg) {
   if (needs_native_bridge != nullptr) *needs_native_bridge = false;
+  if (std::getenv("DARWIN_ART_DEBUG_GUEST_LIBDL") != nullptr) {
+    std::fprintf(stderr,
+                 "DARWIN native loader request path=%s loader=%p caller=%s\n",
+                 path == nullptr ? "(null)" : path, loader,
+                 caller_location == nullptr ? "(null)" : caller_location);
+  }
   // Boot-classpath modules (for example Conscrypt) resolve JNI from their
   // APEX namespace, not from an APK's nativeLibraryPath.  NativeLoader gives
   // those requests a null class loader and may pass only the SONAME.  Map that
@@ -535,8 +527,22 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
   std::string system_native_path;
   std::string app_native_path;
   const char* resolved_path = path;
-  if (loader == nullptr && path != nullptr && std::strchr(path, '/') == nullptr &&
+  if (path != nullptr && std::strchr(path, '/') == nullptr &&
       std::strchr(path, '\\') == nullptr) {
+    const auto apex = darwin_art::loader::ResolveBootApexJniLibrary(
+        path, caller_location,
+        std::getenv("DARWIN_ART_ANDROID_FILESYSTEM_ROOT"));
+    if (apex.decision == darwin_art::loader::BootApexJniDecision::kDenied) {
+      SetNativeLoaderError(error_msg, apex.error);
+      return nullptr;
+    }
+    if (apex.decision == darwin_art::loader::BootApexJniDecision::kAllowed) {
+      system_native_path = apex.path;
+      resolved_path = system_native_path.c_str();
+    }
+  }
+  if (loader == nullptr && path != nullptr && std::strchr(path, '/') == nullptr &&
+      std::strchr(path, '\\') == nullptr && system_native_path.empty()) {
     const char* system_directory =
         std::getenv("DARWIN_ART_ANDROID_SYSTEM_NATIVE_DIR");
     if (system_directory != nullptr && system_directory[0] == '/' &&
@@ -604,48 +610,13 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
   // entering the fd-relative ELF loader.
   if (loader != nullptr && path != nullptr && std::strchr(path, '/') == nullptr &&
       std::strchr(path, '\\') == nullptr && std::strstr(path, "..") == nullptr) {
-    const char* search_path =
-        env == nullptr || library_path == nullptr
-            ? nullptr
-            : env->GetStringUTFChars(library_path, nullptr);
-    if (search_path != nullptr) {
-      std::string directories(search_path);
-      env->ReleaseStringUTFChars(library_path, search_path);
-      size_t begin = 0;
-      while (begin <= directories.size()) {
-        const size_t end = directories.find(':', begin);
-        const std::string directory = directories.substr(
-            begin, end == std::string::npos ? std::string::npos : end - begin);
-        if (!directory.empty() && directory[0] == '/') {
-          const std::string candidate = directory + "/" + path;
-          struct stat candidate_status {};
-          if (stat(candidate.c_str(), &candidate_status) == 0 &&
-              S_ISREG(candidate_status.st_mode)) {
-            app_native_path = candidate;
-            resolved_path = app_native_path.c_str();
-            break;
-          }
-        }
-        if (end == std::string::npos) break;
-        begin = end + 1;
-      }
+    std::string namespace_error;
+    if (!darwin_art::loader::FindClassLoaderLibrary(
+            env, loader, path, &app_native_path, &namespace_error)) {
+      SetNativeLoaderError(error_msg, namespace_error);
+      return nullptr;
     }
-    // The detached runtime's PathClassLoader path is installed from this
-    // already-authorized directory. Keep the same narrow authority as a
-    // fallback for platform ClassLoader implementations that return an empty
-    // library search path while still passing a bare SONAME.
-    if (app_native_path.empty()) {
-      const char* directory = std::getenv("DARWIN_ART_APK_APP_NATIVE_DIR");
-      if (directory != nullptr && directory[0] == '/') {
-        const std::string candidate = std::string(directory) + "/" + path;
-        struct stat candidate_status {};
-        if (stat(candidate.c_str(), &candidate_status) == 0 &&
-            S_ISREG(candidate_status.st_mode)) {
-          app_native_path = candidate;
-          resolved_path = app_native_path.c_str();
-        }
-      }
-    }
+    resolved_path = app_native_path.c_str();
   }
   // A native worker may invoke bionic dlopen after detaching from ART. Reuse
   // remains possible without entering ART. New images arrive here with the
@@ -668,12 +639,26 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
       return existing->graph_handle;
     }
   }
+  // An unresolved application SONAME must not escape into dyld's process-wide
+  // search. Public namespace links must resolve it explicitly before this point.
+  if (loader != nullptr && resolved_path != nullptr &&
+      std::strchr(resolved_path, '/') == nullptr) {
+    SetNativeLoaderError(error_msg,
+                         std::string("Library not found in ClassLoader search path: ") +
+                             resolved_path);
+    return nullptr;
+  }
   bool selected_darwin = false;
   void* selected_handle =
       system_native_path.empty()
           ? OpenSelectedDarwinArtifact(resolved_path, &selected_darwin, error_msg)
           : nullptr;
   if (selected_darwin) return selected_handle;
+  const uint64_t loader_namespace_id = GetOrCreateLoaderNamespaceId(env, loader);
+  if (loader != nullptr && loader_namespace_id == 0) {
+    SetNativeLoaderError(error_msg, "ClassLoader identity allocation failed");
+    return nullptr;
+  }
   const char* builtin_providers[] = {
       kDarwinArtElfJniHostProviderSoname,
       "libc.so",
@@ -698,9 +683,9 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
   int root_is_elf = 0;
   std::string parent_path;
   std::vector<uint8_t> root_component;
-  ScopedFd trusted_directory;
+  darwin_art::filesystem::ProcessAuthorityLease filesystem_lease;
   if (SplitTrustedLibraryPath(resolved_path, &parent_path, &root_component)) {
-    std::vector<std::string> cached_sonames = SnapshotCachedElfSonames();
+    std::vector<std::string> cached_sonames = SnapshotCachedElfSonames(loader_namespace_id);
     std::vector<const char*> providers(std::begin(builtin_providers),
                                        std::end(builtin_providers));
     const std::string requested_component(root_component.begin(),
@@ -714,13 +699,56 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
     if (opened_directory.get() < 0) {
       discovery_status = DARWIN_ART_ELF_IO;
     } else {
-      discovery_status = darwin_art_elf_discover_sibling_graph(
-          opened_directory.get(), root_component.data(), root_component.size(),
-          providers.data(), providers.size(), &root_is_elf, &discovered_raw,
-          &discovery_error);
-      if (discovery_status == DARWIN_ART_ELF_OK) {
-        trusted_directory = std::move(opened_directory);
+      ScopedFd root_file(openat(opened_directory.get(), requested_component.c_str(),
+                               O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+      std::array<unsigned char, 4> magic{};
+      ssize_t magic_size = -1;
+      if (root_file.get() >= 0) {
+        do {
+          magic_size = pread(root_file.get(), magic.data(), magic.size(), 0);
+        } while (magic_size < 0 && errno == EINTR);
+        if (magic_size < 0) {
+          SetNativeLoaderError(error_msg, "native image header read failed");
+          return nullptr;
+        }
       }
+      const bool is_elf = magic_size == 4 &&
+          magic == std::array<unsigned char, 4>{0x7f, 'E', 'L', 'F'};
+      if (is_elf) {
+        std::string error;
+        if (!filesystem_lease.Acquire(
+                std::getenv("DARWIN_ART_ANDROID_FILESYSTEM_ROOT"), &error)) {
+          SetNativeLoaderError(error_msg, "Bionic filesystem setup failed: " + error);
+          return nullptr;
+        }
+      }
+      struct DependencyContext {
+        int directory_fd;
+        const char* filesystem_root;
+      } dependency_context{
+          opened_directory.get(),
+          std::getenv("DARWIN_ART_ANDROID_FILESYSTEM_ROOT")};
+      // Existing closed-directory policy, pending namespace-owned admission.
+      // Root is already open and is never reopened during graph discovery.
+      auto open_dependency = +[](void* context, uint64_t, const char*,
+                                 const char* name, const char*, uint64_t* image) -> int {
+        *image = 0;
+        auto* dependency = static_cast<DependencyContext*>(context);
+        int descriptor =
+            openat(dependency->directory_fd, name,
+                   O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (descriptor >= 0) return descriptor;
+        const std::string exported = darwin_art::loader::ResolvePublicApexLibrary(
+            name, dependency->filesystem_root);
+        return exported.empty()
+                   ? -1
+                   : open(exported.c_str(),
+                          O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+      };
+      discovery_status = darwin_art_elf_discover_admitted_graph(
+          root_file.get(), 0, root_component.data(), root_component.size(),
+          providers.data(), providers.size(), open_dependency, &dependency_context,
+          &root_is_elf, &discovered_raw, &discovery_error);
     }
   }
   std::unique_ptr<DarwinArtElfDiscoveredGraph, DiscoveredGraphDeleter> discovered(
@@ -749,7 +777,7 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
     auto library = std::make_unique<ElfLibrary>();
     library->resolved_path = resolved_path == nullptr ? "" : resolved_path;
     library->cached_root_soname = root_soname;
-    library->loader_namespace_id = GetOrCreateLoaderNamespaceId(env, loader);
+    library->loader_namespace_id = loader_namespace_id;
     library->app_loader = loader == nullptr ? nullptr : env->NewGlobalRef(loader);
     if (std::getenv("DARWIN_ART_DEBUG_GUEST_LIBDL") != nullptr) {
       std::fprintf(stderr, "DARWIN ELF loader: initiating loader=%p global=%p\n",
@@ -781,7 +809,7 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
       TeardownProviderNamespace(library.get());
       return nullptr;
     }
-    std::vector<std::string> cached_sonames = SnapshotCachedElfSonames();
+    std::vector<std::string> cached_sonames = SnapshotCachedElfSonames(loader_namespace_id);
     std::vector<const char*> graph_providers(std::begin(builtin_providers),
                                              std::end(builtin_providers));
     for (const std::string& soname : cached_sonames) {
@@ -804,33 +832,24 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
       TeardownProviderNamespace(library.get());
       return nullptr;
     }
-    library->provider_namespace = darwin_art_bionic_namespace_create();
-    if (library->provider_namespace == nullptr) {
-      SetNativeLoaderError(error_msg, "Bionic provider namespace allocation failed");
+    auto providers = darwin_art::loader::CreateBionicProviderSet(&error);
+    if (!providers) {
+      SetNativeLoaderError(error_msg, error);
       TeardownProviderNamespace(library.get());
       return nullptr;
     }
+    // AttachNativeOwner consumes the resource on both success and failure.
+    auto* provider_namespace = providers.release();
     if (!AttachNativeOwner(library.get(), kNativeOwnerNamespace,
-                           library->provider_namespace, &DropRuntimeProviderNamespace,
+                           provider_namespace, &DropRuntimeProviderNamespace,
                            &error)) {
       SetNativeLoaderError(error_msg, "Rust native owner namespace slot failed: " + error);
       TeardownProviderNamespace(library.get());
       return nullptr;
     }
+    library->provider_namespace = provider_namespace;
     if (library->fixture_graph) {
       g_elf_fixture_namespace_lifecycle.store(1, std::memory_order_relaxed);
-    }
-    DarwinArtBionicNamespaceStatus namespace_status =
-        darwin_art_bionic_namespace_bind_builtins(library->provider_namespace, nullptr);
-    if (namespace_status == DARWIN_ART_BIONIC_NAMESPACE_OK) {
-      namespace_status = darwin_art_bionic_namespace_seal(library->provider_namespace);
-    }
-    if (namespace_status != DARWIN_ART_BIONIC_NAMESPACE_OK) {
-      SetNativeLoaderError(error_msg,
-                           std::string("Bionic provider namespace setup failed: ") +
-                               darwin_art_bionic_namespace_status_name(namespace_status));
-      TeardownProviderNamespace(library.get());
-      return nullptr;
     }
     if (library->fixture_graph) {
       g_elf_fixture_namespace_lifecycle.store(2, std::memory_order_relaxed);
@@ -849,29 +868,8 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
       TeardownProviderNamespace(library.get());
       return nullptr;
     }
-    // The ELF sibling directory is authority for native-library discovery only.
-    // Guest filesystem access must be rooted at the separately authorized
-    // Android filesystem tree; otherwise an app can see its .so directory but
-    // cannot resolve normal paths such as /system or /storage/emulated/0.
-    ScopedFd filesystem_directory;
-    const char* filesystem_root =
-        std::getenv("DARWIN_ART_ANDROID_FILESYSTEM_ROOT");
-    if (filesystem_root == nullptr || filesystem_root[0] == '\0') {
-      filesystem_root = std::getenv("DARWIN_ART_ANDROID_SYSTEM_ROOT");
-    }
-    if (filesystem_root != nullptr && filesystem_root[0] == '/') {
-      filesystem_directory = ScopedFd(open(filesystem_root,
-                                           O_RDONLY | O_DIRECTORY | O_CLOEXEC |
-                                               O_NOFOLLOW));
-    }
-    const int filesystem_fd = filesystem_directory.get() >= 0
-                                  ? filesystem_directory.get()
-                                  : trusted_directory.get();
-    if (!darwin_art::providers::acquire_filesystem(filesystem_fd, &error)) {
-      SetNativeLoaderError(error_msg, "Bionic filesystem setup failed: " + error);
-      TeardownProviderNamespace(library.get());
-      return nullptr;
-    }
+    // AttachNativeOwner consumes this lease even if attaching fails.
+    filesystem_lease.Transfer();
     if (!AttachNativeOwner(
             library.get(), kNativeOwnerFilesystem,
             reinterpret_cast<void*>(static_cast<uintptr_t>(
@@ -984,7 +982,7 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
       TeardownProviderNamespace(library.get());
       return nullptr;
     }
-    if (!RegisterCachedElfGraph(root_soname, library->graph, &error)) {
+    if (!RegisterCachedElfGraph(loader_namespace_id, root_soname, library->graph, &error)) {
       SetNativeLoaderError(error_msg, "Android ELF namespace cache failed: " + error);
       TeardownProviderNamespace(library.get());
       return nullptr;

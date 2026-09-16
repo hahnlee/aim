@@ -4,8 +4,8 @@ This integration seam composes the standalone Bionic providers into one exact
 SONAME/symbol/version namespace without modifying their implementations. The
 generated ownership table covers all 160 of the pinned NDK r28c API-35 arm64
 `libc++_shared.so`'s 160 libc-family `@LIBC` imports, the provider-owned
-`pthread_create@LIBC` extension needed by general Android DSOs, and all 18
-unversioned `liblog.so` exports. `generated/unsupported-libc.tsv` is empty;
+`pthread_create@LIBC` extension needed by general Android DSOs, and 19
+implemented `liblog.so` exports. `generated/unsupported-libc.tsv` is empty;
 unknown symbols remain capability errors rather than candidates for a Darwin
 symbol with the same name.
 
@@ -26,8 +26,9 @@ extensions (`pthread_create`, central `close`, socket, DNS, and the Android
 `stdout` object) are
 owned by `libc.so`; loader-owned
 `dl_iterate_phdr` is owned by `libdl.so`, matching that provider's actual
-contract and libc++'s `DT_NEEDED`. Both accept only `LIBC`; `liblog.so` accepts
-only an absent or empty version.
+contract and libc++'s `DT_NEEDED`. Original ELF metadata selects default
+versions. `liblog.so` accepts each implemented symbol's exact pinned version
+or an unversioned default request, not arbitrary cross-symbol version aliases.
 
 ## Embedding contract
 

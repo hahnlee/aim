@@ -3,12 +3,30 @@
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_char, c_int};
 use std::ptr;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
-const PROP_VALUE_MAX: usize = 92;
+mod credentials;
+mod process_owner;
+mod process_snapshot_abi;
+mod properties;
+mod property_iteration_abi;
+mod property_versions;
+mod property_wait_abi;
+use credentials::Credentials;
+pub use credentials::{
+    CredentialsOutput, darwin_art_bionic_process_state_read_credential_ids_core,
+    darwin_art_bionic_process_state_read_credentials_core,
+};
+pub use process_owner::{
+    darwin_art_bionic_process_state_is_installed, darwin_art_bionic_process_state_process_install,
+    darwin_art_bionic_process_state_process_uninstall, install_process_snapshot,
+    uninstall_process_snapshot,
+};
+pub use process_snapshot_abi::darwin_art_bionic_process_state_install_configured;
+use properties::PropertyArea;
 const ANDROID_ENOENT: i32 = 2;
+const ANDROID_E2BIG: i32 = 7;
 const ANDROID_EIO: i32 = 5;
 const ANDROID_EFAULT: i32 = 14;
 const AT_PAGESZ: u64 = 6;
@@ -25,7 +43,6 @@ unsafe extern "C" {
 static ACTIVE: OnceLock<RwLock<Option<Arc<Snapshot>>>> = OnceLock::new();
 static CAPABILITY_FAILURE: AtomicBool = AtomicBool::new(false);
 static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
-static PROCESS_OWNER: Mutex<Option<ProcessOwner>> = Mutex::new(None);
 
 // A process always exposes a valid, NUL-terminated environment vector, even
 // before the host installs its capability-filtered Android snapshot. This is
@@ -54,20 +71,10 @@ pub struct Snapshot {
     environment: BTreeMap<Vec<u8>, Box<[u8]>>,
     _environment_strings: Vec<Box<[u8]>>,
     environment_pointers: Vec<usize>,
-    properties: BTreeMap<Vec<u8>, PropertyEntry>,
+    properties: PropertyArea,
     auxv: BTreeMap<u64, u64>,
     _random: Box<[u8; 16]>,
-}
-
-struct ProcessOwner {
-    // Activation must be dropped before its snapshot storage.
-    activation: Activation,
-    _snapshot: Arc<Snapshot>,
-}
-
-struct PropertyEntry {
-    name: Box<[u8]>,
-    value: Box<[u8]>,
+    credentials: Option<Credentials>,
 }
 
 impl Snapshot {
@@ -76,13 +83,31 @@ impl Snapshot {
         properties: Vec<(Vec<u8>, Vec<u8>)>,
         aux: AuxSnapshot,
     ) -> Result<Self, &'static str> {
+        Self::new_inner(environment, properties, aux, None)
+    }
+
+    pub(crate) fn new_with_credentials(
+        environment: Vec<(Vec<u8>, Vec<u8>)>,
+        properties: Vec<(Vec<u8>, Vec<u8>)>,
+        aux: AuxSnapshot,
+        credentials: Credentials,
+    ) -> Result<Self, &'static str> {
+        Self::new_inner(environment, properties, aux, Some(credentials))
+    }
+
+    fn new_inner(
+        environment: Vec<(Vec<u8>, Vec<u8>)>,
+        properties: Vec<(Vec<u8>, Vec<u8>)>,
+        aux: AuxSnapshot,
+        credentials: Option<Credentials>,
+    ) -> Result<Self, &'static str> {
         if aux.page_size < 4096 || !aux.page_size.is_power_of_two() {
             return Err("invalid Android page size");
         }
         if aux.hwcap & !SAFE_HWCAP != 0 || aux.hwcap2 != 0 {
             return Err("unsupported Android arm64 hardware capability claim");
         }
-        let environment = collect_snapshot(environment, false)?;
+        let environment = collect_environment(environment)?;
         let environment_strings = environment
             .iter()
             .map(|(name, value)| {
@@ -98,20 +123,7 @@ impl Snapshot {
             .map(|entry| entry.as_ptr() as usize)
             .collect::<Vec<_>>();
         environment_pointers.push(0);
-        let properties = collect_snapshot(properties, true)?
-            .into_iter()
-            .map(|(name, value)| {
-                let mut terminated_name = name.clone();
-                terminated_name.push(0);
-                (
-                    name,
-                    PropertyEntry {
-                        name: terminated_name.into_boxed_slice(),
-                        value,
-                    },
-                )
-            })
-            .collect();
+        let properties = PropertyArea::new(properties)?;
         let random = Box::new(aux.random);
         let random_address = (&*random as *const [u8; 16]) as usize as u64;
         let auxv = BTreeMap::from([
@@ -128,6 +140,7 @@ impl Snapshot {
             properties,
             auxv,
             _random: random,
+            credentials,
         })
     }
 
@@ -138,6 +151,7 @@ impl Snapshot {
         if active.is_some() {
             return Err("another process snapshot is active");
         }
+        self.properties.resume_waiters()?;
         // SAFETY: activation is serialized by ACTIVE's write lock. The pointer
         // array and its strings are owned by the Arc installed below and remain
         // stable until Activation clears the exported slot before dropping it.
@@ -169,7 +183,9 @@ impl Drop for Activation {
                         darwin_art_bionic_environ =
                             (&raw mut EMPTY_ENVIRONMENT).cast::<*mut c_char>()
                     };
-                    active.take();
+                    if let Some(snapshot) = active.take() {
+                        snapshot.properties.close_waiters();
+                    }
                 }
                 Err(_) => CAPABILITY_FAILURE.store(true, Ordering::Release),
             }
@@ -178,16 +194,15 @@ impl Drop for Activation {
     }
 }
 
-fn collect_snapshot(
+fn collect_environment(
     entries: Vec<(Vec<u8>, Vec<u8>)>,
-    property: bool,
 ) -> Result<BTreeMap<Vec<u8>, Box<[u8]>>, &'static str> {
     let mut result = BTreeMap::new();
     for (name, mut value) in entries {
-        if name.is_empty() || name.contains(&0) || (!property && name.contains(&b'=')) {
+        if name.is_empty() || name.contains(&0) || name.contains(&b'=') {
             return Err("invalid snapshot name");
         }
-        if value.contains(&0) || (property && value.len() >= PROP_VALUE_MAX) {
+        if value.contains(&0) {
             return Err("invalid snapshot value");
         }
         value.push(0);
@@ -212,6 +227,15 @@ fn active_snapshot() -> Option<Arc<Snapshot>> {
             None
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_process_owner_guard() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_PROCESS_OWNER_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+    TEST_PROCESS_OWNER_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn missing_snapshot() {
@@ -271,7 +295,17 @@ pub unsafe extern "C" fn darwin_art_bionic_process_property_get_core(
         unsafe { value.write(0) };
         return 0;
     };
-    let Some(source) = snapshot.properties.get(name) else {
+    let source = match snapshot.properties.get(name) {
+        Ok(source) => source,
+        Err(_) => {
+            CAPABILITY_FAILURE.store(true, Ordering::Release);
+            set_errno(ANDROID_EIO);
+            // SAFETY: output is writable by the caller's ABI contract.
+            unsafe { value.write(0) };
+            return 0;
+        }
+    };
+    let Some(source) = source else {
         // SAFETY: property ABI requires at least PROP_VALUE_MAX writable bytes.
         unsafe { value.write(0) };
         return 0;
@@ -301,12 +335,14 @@ pub unsafe extern "C" fn darwin_art_bionic_process_property_find_core(
         missing_snapshot();
         return ptr::null();
     };
-    snapshot
-        .properties
-        .get(name)
-        .map_or(ptr::null(), |property| {
-            (property as *const PropertyEntry).cast()
-        })
+    match snapshot.properties.find(name) {
+        Ok(token) => token,
+        Err(_) => {
+            CAPABILITY_FAILURE.store(true, Ordering::Release);
+            set_errno(ANDROID_EIO);
+            ptr::null()
+        }
+    }
 }
 
 type PropertyReadCallback = unsafe extern "C" fn(
@@ -333,22 +369,27 @@ pub unsafe extern "C" fn darwin_art_bionic_process_property_read_callback_core(
         missing_snapshot();
         return;
     };
-    let Some(entry) = snapshot
-        .properties
-        .values()
-        .find(|entry| std::ptr::eq(*entry as *const PropertyEntry, property.cast()))
-    else {
+    let entry = match snapshot.properties.read(property) {
+        Ok(entry) => entry,
+        Err(_) => {
+            CAPABILITY_FAILURE.store(true, Ordering::Release);
+            set_errno(ANDROID_EIO);
+            return;
+        }
+    };
+    let Some(entry) = entry else {
         set_errno(ANDROID_EFAULT);
         return;
     };
-    // SAFETY: entry storage belongs to the active snapshot and the callback is
-    // required by the guest ABI to consume both strings synchronously.
+    // SAFETY: the coherent read shares immutable strings with the area;
+    // read-only values remain valid for the area's lifetime. No lock is held
+    // during the synchronous callback, which may re-enter property lookup.
     unsafe {
         callback.unwrap_unchecked()(
             cookie,
             entry.name.as_ptr().cast(),
             entry.value.as_ptr().cast(),
-            0,
+            entry.serial,
         )
     };
 }
@@ -374,77 +415,4 @@ pub fn capability_failed() -> bool {
 
 pub fn drop_count() -> usize {
     DROP_COUNT.load(Ordering::Acquire)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn darwin_art_bionic_process_state_process_install() -> c_int {
-    let mut owner = match PROCESS_OWNER.lock() {
-        Ok(owner) => owner,
-        Err(_) => return -1,
-    };
-    if owner.is_some() {
-        return -1;
-    }
-    let mut random = [0_u8; 16];
-    unsafe extern "C" {
-        fn getentropy(buffer: *mut std::ffi::c_void, length: usize) -> c_int;
-    }
-    // SAFETY: random is writable for exactly the requested byte count.
-    if unsafe { getentropy(random.as_mut_ptr().cast(), random.len()) } != 0 {
-        return -1;
-    }
-    let snapshot = match Snapshot::new(
-        vec![
-            (b"ANDROID_ROOT".to_vec(), b"/system".to_vec()),
-            (b"ANDROID_DATA".to_vec(), b"/data".to_vec()),
-            (b"ANDROID_STORAGE".to_vec(), b"/storage".to_vec()),
-            (
-                b"EXTERNAL_STORAGE".to_vec(),
-                b"/storage/emulated/0".to_vec(),
-            ),
-            (b"LANG".to_vec(), b"en-US".to_vec()),
-        ],
-        vec![
-            (b"device.cpu.count".to_vec(), b"8".to_vec()),
-            (b"device.cpu.frequency_mhz".to_vec(), b"2400".to_vec()),
-            (b"device.cpu.model".to_vec(), b"Darwin ARM64".to_vec()),
-            (b"ro.build.version.sdk".to_vec(), b"36".to_vec()),
-            (b"ro.build.version.release".to_vec(), b"16".to_vec()),
-            (b"ro.product.cpu.abi".to_vec(), b"arm64-v8a".to_vec()),
-            (b"ro.product.cpu.abilist".to_vec(), b"arm64-v8a".to_vec()),
-        ],
-        AuxSnapshot {
-            page_size: 16_384,
-            hwcap: SAFE_HWCAP,
-            hwcap2: 0,
-            secure: false,
-            random,
-        },
-    ) {
-        Ok(snapshot) => Arc::new(snapshot),
-        Err(_) => return -1,
-    };
-    let activation = match snapshot.activate() {
-        Ok(activation) => activation,
-        Err(_) => return -1,
-    };
-    *owner = Some(ProcessOwner {
-        activation,
-        _snapshot: snapshot,
-    });
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn darwin_art_bionic_process_state_process_uninstall() -> c_int {
-    let mut owner = match PROCESS_OWNER.lock() {
-        Ok(owner) => owner,
-        Err(_) => return -1,
-    };
-    let Some(process) = owner.take() else {
-        return -1;
-    };
-    drop(process.activation);
-    drop(process._snapshot);
-    0
 }

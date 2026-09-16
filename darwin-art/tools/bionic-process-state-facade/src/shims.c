@@ -63,10 +63,47 @@ const void* darwin_art_bionic___system_property_find(const char* name) {
   return result;
 }
 
+extern int darwin_art_bionic_process_property_foreach_core(
+    DarwinArtBionicPropertyForeachCallback callback, void* cookie);
+
+int darwin_art_bionic___system_property_foreach(
+    DarwinArtBionicPropertyForeachCallback callback, void* cookie) {
+  const int saved_host_errno = errno;
+  const int result = darwin_art_bionic_process_property_foreach_core(callback, cookie);
+  errno = saved_host_errno;
+  return result;
+}
+
 typedef struct DarwinArtPropertyReadBuffer {
   char* name;
   char* value;
 } DarwinArtPropertyReadBuffer;
+
+uint32_t darwin_art_bionic___system_property_serial(const void* property) {
+  const int saved = errno;
+  const uint32_t result = darwin_art_bionic_process_property_serial_core(property);
+  errno = saved;
+  return result;
+}
+uint32_t darwin_art_bionic___system_property_area_serial(void) {
+  const int saved = errno;
+  const uint32_t result = darwin_art_bionic_process_property_area_serial_core();
+  errno = saved;
+  return result;
+}
+bool darwin_art_bionic___system_property_wait(const void* property, uint32_t old,
+                                            uint32_t* output, const struct timespec* timeout) {
+  const int saved = errno;
+  DarwinArtPropertyWaitTimeout converted;
+  if (timeout != NULL) {
+    converted.seconds = timeout->tv_sec;
+    converted.nanoseconds = timeout->tv_nsec;
+  }
+  const int result = darwin_art_bionic_process_property_wait_core(
+      property, old, output, timeout == NULL ? NULL : &converted);
+  errno = saved;
+  return result > 0;
+}
 
 static void DarwinArtPropertyRead(void* cookie, const char* name,
                                   const char* value, uint32_t serial) {
@@ -271,12 +308,22 @@ long darwin_art_bionic_getrandom(void* output, size_t length, unsigned flags) {
   return (long)length;
 }
 
-int darwin_art_bionic_android_get_device_api_level(void) { return 36; }
-
 int darwin_art_bionic_getpid(void) { return (int)getpid(); }
 int darwin_art_bionic_getppid(void) { return 1; }
 const char* darwin_art_bionic_getprogname(void) { return "chrome"; }
-unsigned darwin_art_bionic_geteuid(void) { return (unsigned)geteuid(); }
+static int ReadAndroidCredentialIds(DarwinArtProcessCredentialsOutput* output) {
+  const int saved_host_errno = errno;
+  const int result =
+      darwin_art_bionic_process_state_read_credential_ids_core(output);
+  errno = saved_host_errno;
+  return result;
+}
+
+unsigned darwin_art_bionic_geteuid(void) {
+  DarwinArtProcessCredentialsOutput credentials;
+  return ReadAndroidCredentialIds(&credentials) == 0 ? credentials.euid
+                                                     : (unsigned)geteuid();
+}
 int darwin_art_bionic_getpagesize(void) { return getpagesize(); }
 int darwin_art_bionic_daemon(int nochdir, int noclose) {
   (void)nochdir;
@@ -439,6 +486,42 @@ static uint64_t MaskFromHost(const sigset_t* host) {
   return result;
 }
 
+static void ApplyAndroidSignalContext(const AndroidSignalContext* android,
+                                      ucontext_t* host) {
+  if (android == NULL || host == NULL) return;
+  const uint64_t host_mask = MaskFromHost(&host->uc_sigmask);
+  if (android->signal_mask != host_mask)
+    MaskToHost(android->signal_mask, &host->uc_sigmask);
+#if defined(__aarch64__)
+  if (host->uc_mcontext == NULL) return;
+  _STRUCT_ARM_THREAD_STATE64* state = &host->uc_mcontext->__ss;
+  for (size_t index = 0; index < 29; ++index) {
+    if (android->machine.registers[index] != state->__x[index])
+      state->__x[index] = android->machine.registers[index];
+  }
+  const uintptr_t frame_pointer = arm_thread_state64_get_fp(*state);
+  if (android->machine.registers[29] != frame_pointer)
+    arm_thread_state64_set_fp(*state, android->machine.registers[29]);
+  const uintptr_t link_register = arm_thread_state64_get_lr(*state);
+  if (android->machine.registers[30] != link_register) {
+    typedef void (*CodePointer)(void);
+    arm_thread_state64_set_lr_fptr(
+        *state, (CodePointer)(uintptr_t)android->machine.registers[30]);
+  }
+  const uintptr_t stack_pointer = arm_thread_state64_get_sp(*state);
+  if (android->machine.stack_pointer != stack_pointer)
+    arm_thread_state64_set_sp(*state, android->machine.stack_pointer);
+  const uintptr_t program_counter = arm_thread_state64_get_pc(*state);
+  if (android->machine.program_counter != program_counter) {
+    typedef void (*CodePointer)(void);
+    arm_thread_state64_set_pc_fptr(
+        *state, (CodePointer)(uintptr_t)android->machine.program_counter);
+  }
+  if (android->machine.processor_state != state->__cpsr)
+    state->__cpsr = (uint32_t)android->machine.processor_state;
+#endif
+}
+
 static int AndroidSignal(int host_signal) {
   for (int signal_number = 1; signal_number < 32; ++signal_number)
     if (HostSignal(signal_number) == host_signal) return signal_number;
@@ -575,12 +658,54 @@ int darwin_art_bionic_process_state_recover_runtime_signal(
       host_signal, (siginfo_t*)host_info, host_context, NULL, NULL);
 }
 
+#if defined(__aarch64__)
+static void TraceNativeTrap(void* host_context) {
+  if (getenv("DARWIN_ART_DEBUG_NATIVE_TRAP") == NULL || host_context == NULL)
+    return;
+  const ucontext_t* context = (const ucontext_t*)host_context;
+  if (context->uc_mcontext == NULL) return;
+  const arm_thread_state64_t state = context->uc_mcontext->__ss;
+  uintptr_t frame = arm_thread_state64_get_fp(state);
+  char line[192];
+  int length = snprintf(
+      line, sizeof(line),
+      "DARWIN native trap pid=%d pc=%p lr=%p sp=%p fp=%p\n", getpid(),
+      (void*)arm_thread_state64_get_pc(state),
+      (void*)arm_thread_state64_get_lr(state),
+      (void*)arm_thread_state64_get_sp(state), (void*)frame);
+  if (length > 0)
+    (void)write(STDERR_FILENO, line,
+                (size_t)length < sizeof(line) ? (size_t)length
+                                              : sizeof(line) - 1);
+  for (size_t depth = 0; depth < 32 && frame != 0; ++depth) {
+    uintptr_t words[2] = {0, 0};
+    mach_vm_size_t copied = 0;
+    if (mach_vm_read_overwrite(mach_task_self(), frame, sizeof(words),
+                               (mach_vm_address_t)words,
+                               &copied) != KERN_SUCCESS ||
+        copied != sizeof(words)) {
+      break;
+    }
+    length = snprintf(line, sizeof(line),
+                      "DARWIN native trap frame[%zu]=%p fp=%p\n", depth,
+                      (void*)words[1], (void*)frame);
+    if (length > 0)
+      (void)write(STDERR_FILENO, line,
+                  (size_t)length < sizeof(line) ? (size_t)length
+                                                : sizeof(line) - 1);
+    if (words[0] <= frame || words[0] - frame > 1024 * 1024) break;
+    frame = words[0];
+  }
+}
+#endif
+
 static void DarwinArtAndroidSignalTrampoline(int host_signal,
                                               siginfo_t* host_info,
                                               void* host_context) {
   if (host_signal <= 0 || host_signal >= NSIG) return;
   const int android_signal = AndroidSignal(host_signal);
 #if defined(__aarch64__)
+  if (android_signal == 5) TraceNativeTrap(host_context);
   uint32_t unresolved_syndrome = 0;
   uintptr_t unresolved_pc = 0;
   // Guest RWX translation is runtime-internal and must precede Android's
@@ -591,6 +716,11 @@ static void DarwinArtAndroidSignalTrampoline(int host_signal,
                                   &unresolved_pc)) return;
   if ((android_signal == 7 || android_signal == 11) && host_info != NULL &&
       unresolved_pc != 0) {
+    // Preserve the original faulting context for opt-in diagnostics. LLDB
+    // cannot launch an Android package process directly because darwin-artd
+    // must register its PID and credentials before exec; unwinding here keeps
+    // that production ownership path intact.
+    TraceNativeTrap(host_context);
     char message[256];
     const int length = snprintf(
         message, sizeof(message),
@@ -722,6 +852,7 @@ static void DarwinArtAndroidSignalTrampoline(int host_signal,
     }
     ((void (*)(int, void*, void*))address)(android_signal, android_info,
                                            &android_context);
+    ApplyAndroidSignalContext(&android_context, (ucontext_t*)host_context);
   } else {
     ((void (*)(int))address)(android_signal);
   }
@@ -786,10 +917,33 @@ void (*darwin_art_bionic_signal(int signal_number, void (*handler)(int)))(int) {
   return old_action.handler;
 }
 
-unsigned darwin_art_bionic_getuid(void) { return (unsigned)getuid(); }
-unsigned darwin_art_bionic_getgid(void) { return (unsigned)getgid(); }
-unsigned darwin_art_bionic_getegid(void) { return (unsigned)getegid(); }
-int darwin_art_bionic_setuid(unsigned uid) { return setuid((uid_t)uid); }
+unsigned darwin_art_bionic_getuid(void) {
+  DarwinArtProcessCredentialsOutput credentials;
+  return ReadAndroidCredentialIds(&credentials) == 0 ? credentials.uid
+                                                     : (unsigned)getuid();
+}
+unsigned darwin_art_bionic_getgid(void) {
+  DarwinArtProcessCredentialsOutput credentials;
+  return ReadAndroidCredentialIds(&credentials) == 0 ? credentials.gid
+                                                     : (unsigned)getgid();
+}
+unsigned darwin_art_bionic_getegid(void) {
+  DarwinArtProcessCredentialsOutput credentials;
+  return ReadAndroidCredentialIds(&credentials) == 0 ? credentials.egid
+                                                     : (unsigned)getegid();
+}
+int darwin_art_bionic_setuid(unsigned uid) {
+  DarwinArtProcessCredentialsOutput credentials;
+  if (ReadAndroidCredentialIds(&credentials) != 0) {
+    return setuid((uid_t)uid);
+  }
+  if (uid == credentials.uid || uid == credentials.euid ||
+      uid == credentials.suid) {
+    return 0;
+  }
+  darwin_art_bionic_errno_store(1);  // Android EPERM.
+  return -1;
+}
 int darwin_art_bionic_gethostname(char* name, size_t length) {
   return gethostname(name, length);
 }
@@ -1244,14 +1398,22 @@ typedef struct Binding {
 static const Binding kBindings[] = {
     {"__sched_cpucount",
      (DarwinArtBionicProcessFunction)darwin_art_bionic___sched_cpucount},
+    {"__system_property_area_serial",
+     (DarwinArtBionicProcessFunction)darwin_art_bionic___system_property_area_serial},
     {"__system_property_find",
      (DarwinArtBionicProcessFunction)darwin_art_bionic___system_property_find},
+    {"__system_property_foreach",
+     (DarwinArtBionicProcessFunction)darwin_art_bionic___system_property_foreach},
     {"__system_property_get",
      (DarwinArtBionicProcessFunction)darwin_art_bionic___system_property_get},
     {"__system_property_read",
      (DarwinArtBionicProcessFunction)darwin_art_bionic___system_property_read},
     {"__system_property_read_callback",
      (DarwinArtBionicProcessFunction)darwin_art_bionic___system_property_read_callback},
+    {"__system_property_serial",
+     (DarwinArtBionicProcessFunction)darwin_art_bionic___system_property_serial},
+    {"__system_property_wait",
+     (DarwinArtBionicProcessFunction)darwin_art_bionic___system_property_wait},
     {"_exit", (DarwinArtBionicProcessFunction)darwin_art_bionic__exit},
     {"_longjmp", (DarwinArtBionicProcessFunction)darwin_art_bionic__longjmp},
     {"_setjmp", (DarwinArtBionicProcessFunction)darwin_art_bionic__setjmp},

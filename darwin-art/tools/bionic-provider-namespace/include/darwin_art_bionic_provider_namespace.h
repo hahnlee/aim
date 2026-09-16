@@ -94,6 +94,10 @@ darwin_art_bionic_namespace_bind(DarwinArtBionicNamespace *namespace_instance,
                                  const DarwinArtBionicProviderBinding *binding);
 DarwinArtBionicNamespaceStatus
 darwin_art_bionic_namespace_seal(DarwinArtBionicNamespace *namespace_instance);
+/* Non-mutating image admission. Requires a sealed live provider set and its
+ * declared SONAME; does not resolve a synthetic symbol or acquire a lease. */
+DarwinArtBionicNamespaceStatus darwin_art_bionic_namespace_image_status(
+    DarwinArtBionicNamespace*, const char* soname);
 
 /* Exact closed lookup. Version aliases are explicit manifest triples: NDK
  * liblog imports are unversioned while reviewed system/APEX imports may use

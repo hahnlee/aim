@@ -8,19 +8,36 @@ use darwin_art_engine_sys::{
     GraphicsSessionDispatchKeyV1Fn, GraphicsSessionDispatchPointerFn,
     GraphicsSessionDispatchPointerV2Fn, GraphicsSessionPumpFrameFn,
     GraphicsSessionPumpMainLooperFn, GraphicsSessionWaitMainLooperFn,
-    GraphicsSessionWakeMainLooperFn, PrepareProcessExitFn, ProviderClearHooksFn,
-    ProviderInstallHooksFn, ProviderNativeAcquireFn, ProviderNativeReleaseFn, RunProcessFn,
-    ShutdownProcessFn, SurfaceActiveFn, SurfaceCloseRequestedFn, SurfaceCreateFn, SurfaceDestroyFn,
-    SurfaceGetSizeFn, SurfaceNextKeyEventV1Fn, SurfaceNextPointerEventFn,
-    SurfaceNextPointerEventV2Fn, SurfacePresentAsyncFn, SurfacePresentFn, SurfacePumpEventsFn,
-    SurfaceResizeFn, SurfaceUpdateFn,
+    GraphicsSessionWakeMainLooperFn, PrepareProcessExitFn, ProcessConfig,
+    ProcessFilesystemInstallFn, ProcessFilesystemUninstallFn, ProcessSnapshotInstallConfiguredFn,
+    ProcessSnapshotUninstallFn, ProviderClearHooksFn, ProviderInstallHooksFn,
+    ProviderNativeAcquireFn, ProviderNativeReleaseFn, RunProcessFn, ShutdownProcessFn,
+    SurfaceActiveFn, SurfaceCloseRequestedFn, SurfaceCreateFn, SurfaceDestroyFn, SurfaceGetSizeFn,
+    SurfaceNextKeyEventV1Fn, SurfaceNextPointerEventFn, SurfaceNextPointerEventV2Fn,
+    SurfacePresentAsyncFn, SurfacePresentFn, SurfacePumpEventsFn, SurfaceResizeFn, SurfaceUpdateFn,
 };
+use darwin_art_engine_sys::{
+    BinderCloseFileFn, BinderExportFileFn, BinderFdInstallOwnerFn, BinderFdPublishFn,
+    BinderFdUninstallOwnerFn, BinderImportFileFn,
+};
+
+/// Current native RuntimeEntry images have no negotiated NativeLoader sidecar
+/// contract.  Reject a non-null tail before any pointer is dereferenced or any
+/// native process callback runs.  Future support must add a real versioned ABI
+/// capability rather than flipping a local boolean here.
+pub(crate) fn native_loader_config_allowed(config: &ProcessConfig) -> bool {
+    config.native_loader_config.is_null()
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct ProcessSymbols {
     pub run_process: RunProcessFn,
     pub shutdown_process: ShutdownProcessFn,
     pub prepare_process_exit: PrepareProcessExitFn,
+    pub install_process_snapshot: ProcessSnapshotInstallConfiguredFn,
+    pub uninstall_process_snapshot: ProcessSnapshotUninstallFn,
+    pub install_process_filesystem: ProcessFilesystemInstallFn,
+    pub uninstall_process_filesystem: ProcessFilesystemUninstallFn,
 }
 
 #[derive(Clone, Copy)]
@@ -64,11 +81,22 @@ pub(crate) struct ProviderSymbols {
 }
 
 #[derive(Clone, Copy)]
+pub struct BinderBrokerSymbols {
+    pub install_owner: BinderFdInstallOwnerFn,
+    pub publish: BinderFdPublishFn,
+    pub uninstall_owner: BinderFdUninstallOwnerFn,
+    pub export_file: BinderExportFileFn,
+    pub import_file: BinderImportFileFn,
+    pub close_file: BinderCloseFileFn,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct EngineSymbols {
     pub process: ProcessSymbols,
     pub surface: SurfaceSymbols,
     pub graphics: GraphicsSymbols,
     pub provider: ProviderSymbols,
+    pub binder_broker: BinderBrokerSymbols,
 }
 
 pub(crate) struct LoadedEngine {
@@ -86,6 +114,14 @@ impl LoadedEngine {
                     run_process: library.symbol(b"darwin_art_run_process\0")?,
                     shutdown_process: library.symbol(b"darwin_art_shutdown_process\0")?,
                     prepare_process_exit: library.symbol(b"darwin_art_prepare_process_exit\0")?,
+                    install_process_snapshot: library
+                        .symbol(b"darwin_art_bionic_process_state_install_configured\0")?,
+                    uninstall_process_snapshot: library
+                        .symbol(b"darwin_art_bionic_process_state_process_uninstall\0")?,
+                    install_process_filesystem: library
+                        .symbol(b"darwin_art_bionic_fs_process_install\0")?,
+                    uninstall_process_filesystem: library
+                        .symbol(b"darwin_art_bionic_fs_process_uninstall\0")?,
                 },
                 surface: SurfaceSymbols {
                     create: library.symbol(b"darwin_art_surface_create\0")?,
@@ -142,6 +178,16 @@ impl LoadedEngine {
                     native_acquire: library.symbol(b"darwin_art_provider_native_acquire\0")?,
                     native_release: library.symbol(b"darwin_art_provider_native_release\0")?,
                 },
+                binder_broker: BinderBrokerSymbols {
+                    install_owner: library
+                        .symbol(b"darwin_art_bionic_binder_fd_install_owner\0")?,
+                    publish: library.symbol(b"darwin_art_bionic_binder_fd_publish\0")?,
+                    uninstall_owner: library
+                        .symbol(b"darwin_art_bionic_binder_fd_uninstall_owner\0")?,
+                    export_file: library.symbol(b"darwin_art_binder_export_file_descriptor\0")?,
+                    import_file: library.symbol(b"darwin_art_binder_import_file_descriptor\0")?,
+                    close_file: library.symbol(b"darwin_art_binder_close_file_descriptor\0")?,
+                },
             }
         };
         Ok(Self {
@@ -152,6 +198,42 @@ impl LoadedEngine {
 
     pub(crate) fn symbols(&self) -> EngineSymbols {
         self.symbols
+    }
+}
+
+#[cfg(test)]
+mod native_loader_config_tests {
+    use super::native_loader_config_allowed;
+    use darwin_art_engine_sys::ProcessConfig;
+
+    fn process_config() -> ProcessConfig {
+        ProcessConfig::new(
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+            0,
+            0,
+            core::ptr::null_mut(),
+            None,
+            core::ptr::null_mut(),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn null_optional_sidecar_remains_legacy_compatible() {
+        let config = process_config();
+        assert!(native_loader_config_allowed(&config));
+    }
+
+    #[test]
+    fn configured_sidecar_fails_closed_without_dereference() {
+        let config = process_config()
+            .with_native_loader_config(1usize as *const darwin_art_engine_sys::NativeLoaderConfig);
+        assert!(!native_loader_config_allowed(&config));
     }
 }
 

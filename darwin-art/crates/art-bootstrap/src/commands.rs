@@ -45,6 +45,7 @@ pub(crate) fn run() -> Result<()> {
         "build-android-runtime-host" => {
             build_shell_gate(&root, "build-android16-android-runtime-host.sh")
         }
+        "build-binder-jni" => build_shell_gate(&root, "build-android16-binder-jni.sh"),
         "build-libcore-linux" => build_shell_gate(&root, "build-android16-libcore-darwin-linux.sh"),
         "build-os-constants" => build_shell_gate(&root, "build-android16-os-constants-darwin.sh"),
         "build-unix-filesystem" => {
@@ -114,6 +115,7 @@ pub(crate) fn run() -> Result<()> {
         "build-dex2oat" => build_dex2oat(&root).map(|_| ()),
         "build-android16-boot-image" => build_android16_boot_image(&root),
         "build-jit-libelffile" => build_jit_libelffile(&root).map(|_| ()),
+        "prepare-runtime-common-shadow" => prepare_runtime_shadow(&root).map(|_| ()),
         "build-runtime-bootstrap" => build_runtime_bootstrap(&root),
         "build-runtime-bootstrap-internal" => build_runtime_bootstrap_inner(&root),
         "build-runtime-graphics-bootstrap" => build_runtime_graphics_bootstrap(&root),

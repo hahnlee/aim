@@ -1,0 +1,5 @@
+# Original PS16K EROFS link targets, not host library aliases.
+/system/lib64/libc.so /apex/com.android.runtime/lib64/bionic/libc.so
+/system/lib64/libdl.so /apex/com.android.runtime/lib64/bionic/libdl.so
+/system/lib64/libm.so /apex/com.android.runtime/lib64/bionic/libm.so
+/system/lib64/libdl_android.so /apex/com.android.runtime/lib64/bionic/libdl_android.so

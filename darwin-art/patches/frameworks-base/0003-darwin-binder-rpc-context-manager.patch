@@ -1,0 +1,23 @@
+diff --git a/core/jni/android_util_Binder.cpp b/core/jni/android_util_Binder.cpp
+--- a/core/jni/android_util_Binder.cpp
++++ b/core/jni/android_util_Binder.cpp
+@@ -28,5 +28,6 @@
+ #include <binderthreadstate/CallerUtils.h>
+ #if defined(__APPLE__)
++#include <context_manager.h>
+ #include <rpc_identity.h>
+ #endif
+ #include <cutils/atomic.h>
+@@ -1406,8 +1407,12 @@ jint android_os_Debug_getDeathObjectCount(JNIEnv* env, jobject clazz)
+
+ static jobject android_os_BinderInternal_getContextObject(JNIEnv* env, jobject clazz)
+ {
++#if defined(__APPLE__)
++    return darwin_art::GetSystemContextObject(env);
++#else
+     sp<IBinder> b = ProcessState::self()->getContextObject(NULL);
+     return javaObjectForIBinder(env, b);
++#endif
+ }
+
+ static void android_os_BinderInternal_joinThreadPool(JNIEnv* env, jobject clazz)

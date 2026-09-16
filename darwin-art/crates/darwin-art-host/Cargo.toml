@@ -9,4 +9,7 @@ darwin-art-abi = { path = "../darwin-art-abi" }
 darwin-art-engine-sys = { path = "../darwin-art-engine-sys" }
 darwin-art-engine = { path = "../darwin-art-engine" }
 darwin-art-runtime = { path = "../darwin-art-runtime" }
+darwin-art-profile = { path = "../darwin-art-profile" }
+darwin-art-binder-process = { path = "../darwin-art-binder-process" }
 libc = "0.2"
+sha2 = "0.10"

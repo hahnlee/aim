@@ -1,0 +1,47 @@
+diff --git a/core/jni/android_util_Binder.cpp b/core/jni/android_util_Binder.cpp
+index 35601e2e52a1..63a310dc6c62 100644
+--- a/core/jni/android_util_Binder.cpp
++++ b/core/jni/android_util_Binder.cpp
+@@ -204,10 +204,42 @@ static JavaVM* jnienv_to_javavm(JNIEnv* env)
+     return env->GetJavaVM(&vm) >= 0 ? vm : NULL;
+ }
+
++#if defined(__APPLE__)
++class DarwinBinderThreadAttachment {
++public:
++    JNIEnv* env(JavaVM* requestedVm) {
++        JNIEnv* result = nullptr;
++        const jint status = requestedVm->GetEnv(reinterpret_cast<void**>(&result), JNI_VERSION_1_4);
++        if (status == JNI_OK) return result;
++        if (status != JNI_EDETACHED || mVM != nullptr ||
++            requestedVm->AttachCurrentThread(&result, nullptr) != JNI_OK) {
++            return nullptr;
++        }
++        mVM = requestedVm;
++        return result;
++    }
++
++    ~DarwinBinderThreadAttachment() {
++        if (mVM != nullptr) mVM->DetachCurrentThread();
++    }
++
++private:
++    JavaVM* mVM = nullptr;
++};
++#endif
++
+ static JNIEnv* javavm_to_jnienv(JavaVM* vm)
+ {
++#if defined(__APPLE__)
++    // Android's kernel Binder pool enters through the Android runtime thread
++    // hook. Binder RPC uses host std::threads, so attach at this platform
++    // boundary and detach when the worker exits.
++    thread_local DarwinBinderThreadAttachment attachment;
++    return vm == nullptr ? nullptr : attachment.env(vm);
++#else
+     JNIEnv* env;
+     return vm->GetEnv((void **)&env, JNI_VERSION_1_4) >= 0 ? env : NULL;
++#endif
+ }
+
+ static const char* GetErrorTypeName(JNIEnv* env, jthrowable error) {

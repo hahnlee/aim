@@ -13,8 +13,7 @@
 #include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
 
-extern "C" int darwin_art_bionic_process_state_process_install(void);
-extern "C" int darwin_art_bionic_process_state_process_uninstall(void);
+extern "C" int darwin_art_bionic_process_state_is_installed(void);
 
 namespace darwin_art_process {
 namespace {
@@ -48,7 +47,10 @@ State g_state;
 }  // namespace
 
 bool begin_run(const struct darwin_art_lifecycle_hooks* lifecycle_hooks) {
-  if (darwin_art_bionic_process_state_process_install() != 0) {
+  // The embedding engine owns the configured snapshot across ART and provider
+  // teardown. Runtime entry only borrows it; never install fixture defaults or
+  // release the caller's snapshot on an entry failure.
+  if (darwin_art_bionic_process_state_is_installed() != 1) {
     return false;
   }
   if (lifecycle_hooks != nullptr) {
@@ -60,13 +62,11 @@ bool begin_run(const struct darwin_art_lifecycle_hooks* lifecycle_hooks) {
         lifecycle_hooks->begin_shutdown == nullptr ||
         lifecycle_hooks->mark_failed == nullptr ||
         lifecycle_hooks->begin_run(lifecycle_hooks->context) != 0) {
-      (void)darwin_art_bionic_process_state_process_uninstall();
       return false;
     }
   }
   std::lock_guard<std::mutex> lock(g_state.mutex);
   if (g_state.run_started) {
-    (void)darwin_art_bionic_process_state_process_uninstall();
     return false;
   }
   g_state.run_started = true;
@@ -265,9 +265,6 @@ void mark_shutdown_complete() {
   g_state.lifecycle_hooks = nullptr;
   g_state.host_services = nullptr;
   g_state.shutdown_complete = true;
-  if (darwin_art_bionic_process_state_process_uninstall() != 0) {
-    std::abort();
-  }
 }
 
 void record_network_elf_loaded() {

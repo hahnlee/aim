@@ -10,6 +10,8 @@ extern void darwin_art_bionic_errno_store(int32_t android_errno);
 _Static_assert(sizeof(long) == 8, "Android arm64 long width drift");
 _Static_assert(sizeof(unsigned long) == 8,
                "Android arm64 unsigned long width drift");
+_Static_assert(sizeof(intmax_t) == 8, "Android arm64 intmax_t width drift");
+_Static_assert(INTMAX_MAX == INT64_MAX, "Android arm64 intmax_t limit drift");
 
 enum {
   kAndroidEinval = 22,
@@ -141,6 +143,11 @@ long long darwin_art_bionic_strtoll(const char* input, char** end, int base) {
       const long long result = (long long)ParseSigned(input, end, base));
 }
 
+intmax_t darwin_art_bionic_strtoimax(const char* input, char** end, int base) {
+  HOST_ERRNO_GUARD(
+      const intmax_t result = (intmax_t)ParseSigned(input, end, base));
+}
+
 unsigned long darwin_art_bionic_strtoul(const char* input, char** end,
                                         int base) {
   HOST_ERRNO_GUARD(
@@ -207,6 +214,8 @@ DarwinArtBionicNumericFunction darwin_art_bionic_numeric_resolve(
     return (DarwinArtBionicNumericFunction)darwin_art_bionic_strtol;
   if (NameEquals(name, "strtoll"))
     return (DarwinArtBionicNumericFunction)darwin_art_bionic_strtoll;
+  if (NameEquals(name, "strtoimax"))
+    return (DarwinArtBionicNumericFunction)darwin_art_bionic_strtoimax;
   if (NameEquals(name, "strtoll_l"))
     return (DarwinArtBionicNumericFunction)darwin_art_bionic_strtoll_l;
   if (NameEquals(name, "strtoul"))

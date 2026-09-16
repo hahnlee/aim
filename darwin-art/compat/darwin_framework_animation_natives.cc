@@ -1,6 +1,9 @@
 #include "darwin_framework_natives.h"
 
+#include "darwin_android_platform.h"
 #include "darwin_android_time.h"
+#include "darwin_art_bionic_socket_broker.h"
+#include "darwin_framework_system_natives.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -17,6 +20,22 @@
 #include <vector>
 
 namespace {
+
+extern "C" void darwin_art_graphics_debug_vsync(JNIEnv*)
+    __attribute__((weak));
+
+constexpr auto kDisplayFrameInterval = std::chrono::nanoseconds(16'666'667);
+
+std::chrono::steady_clock::time_point NextDisplayDeadline() {
+  const auto now = std::chrono::steady_clock::now();
+  const auto elapsed = now.time_since_epoch();
+  const auto frame = elapsed / kDisplayFrameInterval + 1;
+  return std::chrono::steady_clock::time_point(frame * kDisplayFrameInterval);
+}
+
+struct DisplayPulse {
+  int64_t timestamp_nanos;
+};
 
 
 // DisplayEventReceiver is the clock edge behind Choreographer, ValueAnimator,
@@ -57,10 +76,73 @@ class DarwinDisplayEventReceiver {
 
   ~DarwinDisplayEventReceiver() = default;
 
+  bool InitializeLooperTransport(void* looper) {
+    constexpr int kAndroidONonblock = 0x800;
+    constexpr int kAndroidOCloexec = 0x80000;
+    int32_t descriptors[2] = {-1, -1};
+    if (darwin_art_bionic_socket_broker_pipe2(
+            descriptors, kAndroidONonblock | kAndroidOCloexec) != 0) {
+      return false;
+    }
+    auto* callback_owner =
+        new (std::nothrow) std::weak_ptr<DarwinDisplayEventReceiver>();
+    if (callback_owner != nullptr) {
+      std::lock_guard lock(mutex_);
+      *callback_owner = self_;
+    }
+    if (looper == nullptr || callback_owner == nullptr) {
+      (void)darwin_art_bionic_socket_broker_close(descriptors[0]);
+      (void)darwin_art_bionic_socket_broker_close(descriptors[1]);
+      delete callback_owner;
+      return false;
+    }
+    if (darwin_art_android_platform_add_fd_owned(
+            looper, descriptors[0], 0, 0x0001, &LooperCallback,
+            callback_owner, callback_owner, &ReleaseCallbackOwner) != 1) {
+      (void)darwin_art_bionic_socket_broker_close(descriptors[0]);
+      (void)darwin_art_bionic_socket_broker_close(descriptors[1]);
+      return false;
+    }
+    {
+      std::lock_guard lock(mutex_);
+      looper_ = looper;
+      read_fd_ = descriptors[0];
+      write_fd_ = descriptors[1];
+      transport_registered_ = true;
+    }
+    timer_thread_ = std::thread([this] { TimerLoop(); });
+    return true;
+  }
+
   void Dispose(JNIEnv* env) {
-    std::unique_lock lock(mutex_);
-    disposed_ = true;
-    condition_.wait(lock, [this] { return callbacks_ == 0; });
+    void* looper = nullptr;
+    int read_fd = -1;
+    int write_fd = -1;
+    {
+      std::unique_lock lock(mutex_);
+      disposed_ = true;
+      timer_stop_ = true;
+      condition_.notify_all();
+      condition_.wait(lock, [this] { return callbacks_ == 0; });
+      looper = looper_;
+      read_fd = read_fd_;
+      write_fd = write_fd_;
+      looper_ = nullptr;
+      read_fd_ = -1;
+      write_fd_ = -1;
+      transport_registered_ = false;
+    }
+    if (looper != nullptr && read_fd >= 0) {
+      (void)darwin_art_android_platform_remove_fd(looper, read_fd);
+    }
+    if (timer_thread_.joinable()) timer_thread_.join();
+    if (read_fd >= 0) {
+      (void)darwin_art_bionic_socket_broker_close(read_fd);
+    }
+    if (write_fd >= 0) {
+      (void)darwin_art_bionic_socket_broker_close(write_fd);
+    }
+    std::lock_guard lock(mutex_);
     if (receiver_weak_ != nullptr) {
       env->DeleteGlobalRef(receiver_weak_);
       receiver_weak_ = nullptr;
@@ -101,7 +183,13 @@ class DarwinDisplayEventReceiver {
 
   void Schedule() {
     std::lock_guard lock(mutex_);
-    if (!disposed_) pending_vsync_ = true;
+    if (disposed_) return;
+    pending_vsync_ = true;
+    if (transport_registered_ && !timer_armed_) {
+      timer_armed_ = true;
+      timer_deadline_ = NextDisplayDeadline();
+      condition_.notify_all();
+    }
   }
 
   bool DispatchPending(JNIEnv* env, jlong timestamp) {
@@ -145,6 +233,62 @@ class DarwinDisplayEventReceiver {
   }
 
  private:
+  static void ReleaseCallbackOwner(void* owner) {
+    delete static_cast<std::weak_ptr<DarwinDisplayEventReceiver>*>(owner);
+  }
+
+  static int LooperCallback(int fd, int events, void* data) {
+    const auto* receiver =
+        static_cast<std::weak_ptr<DarwinDisplayEventReceiver>*>(data);
+    auto retained = receiver == nullptr ? nullptr : receiver->lock();
+    if (retained == nullptr) return 0;
+    DisplayPulse pulse{};
+    jlong source_timestamp = 0;
+    intptr_t received = 0;
+    while ((received = darwin_art_bionic_socket_broker_read(
+                fd, &pulse, sizeof(pulse))) > 0) {
+      if (received == static_cast<intptr_t>(sizeof(pulse))) {
+        source_timestamp = pulse.timestamp_nanos;
+      }
+    }
+    JNIEnv* env = nullptr;
+    if (retained->vm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) !=
+        JNI_OK) {
+      return 1;
+    }
+    (void)events;
+    if (source_timestamp != 0) {
+      retained->DispatchPending(env, source_timestamp);
+      if (darwin_art_graphics_debug_vsync != nullptr) {
+        darwin_art_graphics_debug_vsync(env);
+      }
+    }
+    return 1;
+  }
+
+  void TimerLoop() {
+    std::unique_lock lock(mutex_);
+    while (!timer_stop_) {
+      condition_.wait(lock, [this] { return timer_stop_ || timer_armed_; });
+      if (timer_stop_) break;
+      const auto deadline = timer_deadline_;
+      if (condition_.wait_until(lock, deadline, [this, deadline] {
+            return timer_stop_ || !timer_armed_ || timer_deadline_ != deadline;
+          })) {
+        continue;
+      }
+      timer_armed_ = false;
+      const int write_fd = write_fd_;
+      lock.unlock();
+      if (write_fd >= 0) {
+        const DisplayPulse pulse{darwin_art::AndroidUptimeNanos()};
+        (void)darwin_art_bionic_socket_broker_write(write_fd, &pulse,
+                                                    sizeof(pulse));
+      }
+      lock.lock();
+    }
+  }
+
   jobject UpdateVsyncData(JNIEnv* env, jlong timestamp, jlong vsync_id) {
     constexpr jlong kFrameIntervalNanos = 16'666'667;
     constexpr jlong kGpuBudgetNanos = 2'000'000;
@@ -203,9 +347,17 @@ class DarwinDisplayEventReceiver {
   std::mutex mutex_;
   std::condition_variable condition_;
   std::weak_ptr<DarwinDisplayEventReceiver> self_;
+  std::thread timer_thread_;
+  std::chrono::steady_clock::time_point timer_deadline_{};
+  void* looper_ = nullptr;
+  int read_fd_ = -1;
+  int write_fd_ = -1;
   size_t callbacks_ = 0;
   jlong next_vsync_id_ = 1;
   bool pending_vsync_ = false;
+  bool transport_registered_ = false;
+  bool timer_armed_ = false;
+  bool timer_stop_ = false;
   bool disposed_ = false;
 };
 
@@ -239,7 +391,7 @@ void DisplayEventReceiverRelease(void* raw) {
 }
 
 jlong DisplayEventReceiverNativeInit(JNIEnv* env, jclass, jobject receiver_weak,
-                                     jobject vsync_data_weak, jobject, jint,
+                                     jobject vsync_data_weak, jobject message_queue, jint,
                                      jint, jlong) {
   if (receiver_weak == nullptr || vsync_data_weak == nullptr) {
     return 0;
@@ -357,6 +509,13 @@ jlong DisplayEventReceiverNativeInit(JNIEnv* env, jclass, jobject receiver_weak,
   const jlong handle = static_cast<jlong>(reinterpret_cast<std::uintptr_t>(
       receiver_state.get()));
   receiver_state->SetSelf(receiver_state);
+  void* looper =
+      darwin_art::framework_system::message_queue_looper(env, message_queue);
+  if (looper == nullptr ||
+      !receiver_state->InitializeLooperTransport(looper)) {
+    receiver_state->Dispose(env);
+    return 0;
+  }
   {
     std::lock_guard lock(g_display_receiver_mutex);
     g_display_receivers.emplace(handle, std::move(receiver_state));

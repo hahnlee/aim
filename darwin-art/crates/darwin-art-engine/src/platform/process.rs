@@ -18,6 +18,8 @@ use std::ptr::NonNull;
 use super::graphics::GraphicsSession;
 use darwin_art_runtime::ProviderBridge;
 
+pub use super::native_loader_input::{InputError, NativeLoaderInput};
+
 #[derive(Debug)]
 pub enum ProcessRequestError {
     InteriorNul(PathBuf),
@@ -108,6 +110,7 @@ pub struct ProcessRequest<'a> {
     heap_initial_bytes: u64,
     heap_maximum_bytes: u64,
     callbacks: CallbackBindings<'a>,
+    native_loader_config: Option<NativeLoaderInput>,
 }
 
 impl<'a> ProcessRequest<'a> {
@@ -131,6 +134,7 @@ impl<'a> ProcessRequest<'a> {
             heap_initial_bytes,
             heap_maximum_bytes,
             callbacks,
+            native_loader_config: None,
         })
     }
 
@@ -143,6 +147,11 @@ impl<'a> ProcessRequest<'a> {
 
     pub fn with_host_services(mut self, services: Option<&'a HostServices>) -> Self {
         self.callbacks.host_services = services;
+        self
+    }
+
+    pub fn with_native_loader_config(mut self, config: Option<NativeLoaderInput>) -> Self {
+        self.native_loader_config = config;
         self
     }
 
@@ -179,6 +188,11 @@ impl<'a> ProcessRequest<'a> {
                 .map_or(core::ptr::null(), |services| {
                     services as *const HostServices
                 }),
+        )
+        .with_native_loader_config(
+            self.native_loader_config
+                .as_ref()
+                .map_or(core::ptr::null(), NativeLoaderInput::as_ptr),
         )
     }
 }

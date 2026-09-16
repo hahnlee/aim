@@ -47,13 +47,15 @@ flags=(-arch arm64 -isysroot "$sdk_root" -std=c17 -O2 -fno-builtin
 "$android_cc" -std=c17 -Wall -Wextra -Werror -Wpedantic \
   -I"$script_dir/include" -fsyntax-only "$script_dir/probes/abi_signatures.c"
 "$cc" "${flags[@]}" -c "$script_dir/src/allocator.c" -o "$temp_root/allocator.o"
-"$ar" rcs "$temp_root/libdarwin-art-bionic-allocator.a" "$temp_root/allocator.o"
+"$cc" "${flags[@]}" -c "$script_dir/src/allocator_options.c" -o "$temp_root/allocator_options.o"
+"$ar" rcs "$temp_root/libdarwin-art-bionic-allocator.a" "$temp_root/allocator.o" "$temp_root/allocator_options.o"
 
 nm -u "$temp_root/allocator.o" | sed 's/^[[:space:]]*//' | sort >"$temp_root/undefined"
 cat >"$temp_root/expected-undefined" <<'EOF'
 ___error
 _calloc
 _darwin_art_bionic_errno_store
+_darwin_art_bionic_mallopt
 _free
 _malloc
 _malloc_size
@@ -65,7 +67,7 @@ diff -u "$temp_root/expected-undefined" "$temp_root/undefined" ||
 
 definitions="$(nm -gU "$temp_root/allocator.o")"
 for symbol in aligned_alloc free malloc malloc_result posix_memalign posix_memalign_result \
-              realloc realloc_result allocator_resolve allocator_table; do
+              realloc reallocarray realloc_result allocator_resolve allocator_table; do
   grep -F " _darwin_art_bionic_$symbol" <<<"$definitions" >/dev/null ||
     fail "missing prefixed definition $symbol"
 done
@@ -79,10 +81,10 @@ if rg -n 'dlsym' "$script_dir/src" "$script_dir/include" \
 fi
 
 "$cc" "${flags[@]}" "$script_dir/probes/differential.c" \
-  "$temp_root/allocator.o" -o "$temp_root/differential"
+  "$temp_root/allocator.o" "$temp_root/allocator_options.o" -o "$temp_root/differential"
 "$temp_root/differential"
 "$cc" "${flags[@]}" -O1 -g -fsanitize=address,undefined \
-  "$script_dir/probes/differential.c" "$script_dir/src/allocator.c" \
+  "$script_dir/probes/differential.c" "$script_dir/src/allocator.c" "$script_dir/src/allocator_options.c" \
   -o "$temp_root/differential-sanitized"
 ASAN_OPTIONS=allocator_may_return_null=1 "$temp_root/differential-sanitized" >/dev/null
 

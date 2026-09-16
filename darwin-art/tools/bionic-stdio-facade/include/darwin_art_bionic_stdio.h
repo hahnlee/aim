@@ -42,6 +42,8 @@ int darwin_art_bionic_ftrylockfile(DarwinArtAndroidFile*);
 void darwin_art_bionic_funlockfile(DarwinArtAndroidFile*);
 size_t darwin_art_bionic_fread(void*, size_t, size_t, DarwinArtAndroidFile*);
 size_t darwin_art_bionic_fwrite(const void*, size_t, size_t, DarwinArtAndroidFile*);
+size_t darwin_art_bionic___fread_chk(void*, size_t, size_t, DarwinArtAndroidFile*, size_t);
+size_t darwin_art_bionic___fwrite_chk(const void*, size_t, size_t, DarwinArtAndroidFile*, size_t);
 int darwin_art_bionic_fseek(DarwinArtAndroidFile*, long, int);
 int darwin_art_bionic_fseeko(DarwinArtAndroidFile*, int64_t, int);
 int64_t darwin_art_bionic_ftello(DarwinArtAndroidFile*);

@@ -12,7 +12,7 @@ use super::GRAPH_VERSION;
 use super::atomic;
 use super::cache::{
     cached_native_objects_from_dirs, emit_cached_native_graph,
-    emit_cached_native_graph_with_inputs, emit_cached_native_object_edges,
+    emit_cached_native_graph_with_inputs, emit_cached_native_object_edges_with_order_only,
 };
 use super::foundation::{
     FoundationFamily, cached_foundation_objects, foundation_input_list, foundation_inputs,
@@ -124,6 +124,15 @@ fn shadow_identity_matches(
     })
 }
 
+// Every recipe that invokes the bootstrap CLI must depend on the exact binary
+// path it executes.  A phony alias containing both targets does not order
+// sibling prerequisites in Ninja, so omitting this direct edge can run an old
+// CLI while Cargo is rebuilding the same path.
+fn append_bootstrap_cli_prerequisite(graph: &mut String, target: &str) {
+    graph.push_str(target);
+    graph.push(' ');
+}
+
 fn runtime_common_shadow_is_current(root: &Path) -> bool {
     let runtime = root.join("_aosp/art/runtime");
     let source_files = RUNTIME_COMMON_SHADOW_SOURCES
@@ -139,6 +148,24 @@ fn runtime_common_shadow_is_current(root: &Path) -> bool {
         &source_files,
         &patch_files,
     )
+}
+
+fn runtime_common_shadow_inputs(root: &Path) -> Vec<PathBuf> {
+    let runtime = root.join("_aosp/art/runtime");
+    let mut inputs = RUNTIME_COMMON_SHADOW_SOURCES
+        .iter()
+        .map(|source| runtime.join(source))
+        .chain(
+            RUNTIME_COMMON_SHADOW_PATCHES
+                .iter()
+                .map(|patch| root.join(patch)),
+        )
+        .collect::<Vec<_>>();
+    inputs.push(root.join("crates/art-bootstrap/src/runtime_bootstrap/manifest.rs"));
+    inputs.push(root.join("crates/art-bootstrap/src/runtime_bootstrap/staging.rs"));
+    inputs.sort();
+    inputs.dedup();
+    inputs
 }
 
 pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
@@ -179,6 +206,8 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     let native_output_root = root.join("_build");
     let runtime_owner_archive_path = root.join("target/release/libdarwin_art_runtime.a");
     let interpreter_archive_path = root.join("_build/interpreter-core/libart-interpreter-darwin.a");
+    let runtime_shadow_marker_path =
+        root.join("_build/runtime-common/patched-source/.darwin-art-shadow-identity");
     let archive_path = native_output_root.join(GRAPHICS_BOOTSTRAP_ARCHIVE);
     let runtime_archive_path = native_output_root.join(RUNTIME_BOOTSTRAP_ARCHIVE);
     let hwui_foundation_archive_path = native_output_root.join(HWUI_STATIC_FOUNDATION_ARCHIVE);
@@ -226,8 +255,6 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         bionic_provider_root.join("libdarwin-art-bionic-float-conversion.a");
     let bionic_binary128_provider_archive_path =
         bionic_provider_root.join("libdarwin-art-bionic-binary128-conversion.a");
-    let filesystem_object_path =
-        native_output_root.join("runtime-probes/darwin_art_runtime_filesystem_probe.cc.o");
     let network_object_path =
         native_output_root.join("runtime-probes/darwin_art_runtime_network_probe.cc.o");
     let hwui_object_path =
@@ -289,7 +316,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     let bionic_binary128_provider_archive = ninja_path(&bionic_binary128_provider_archive_path);
     let runtime_owner_archive = ninja_path(&runtime_owner_archive_path);
     let interpreter_archive = ninja_path(&interpreter_archive_path);
-    let filesystem_object = ninja_path(&filesystem_object_path);
+    let runtime_shadow_marker = ninja_path(&runtime_shadow_marker_path);
     let network_object = ninja_path(&network_object_path);
     let hwui_object = ninja_path(&hwui_object_path);
     let graphics_object = ninja_path(&graphics_object_path);
@@ -333,7 +360,6 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     } else {
         None
     };
-    let filesystem_object_for_shell = filesystem_object_path.to_string_lossy().into_owned();
     let network_object_for_shell = network_object_path.to_string_lossy().into_owned();
     let bootstrap_input_list = bootstrap_inputs
         .iter()
@@ -435,13 +461,13 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         .collect::<Vec<_>>()
         .join(" ");
     let interpreter_inputs = interpreter_core_inputs(&root);
+    let runtime_shadow_inputs = runtime_common_shadow_inputs(&root);
     // Probe objects are separate graph products.  Do not attach the complete
     // bootstrap input closure to each one: that turns an edit to an unrelated
     // probe/provider into a rebuild of every probe.  The compiler writes the
     // real transitive dependency list to `$out.d`; the explicit inputs below
     // seed Ninja's first build and keep the ownership boundary readable.
     let probe_manifest::ProbeGraphInputs {
-        filesystem_probe_inputs,
         network_probe_inputs,
         hwui_probe_inputs,
         graphics_probe_inputs,
@@ -455,7 +481,6 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         app_resources_inputs,
         app_activity_inputs,
         app_presentation_inputs,
-        filesystem_probe_stamp,
         network_probe_stamp,
         hwui_probe_stamp,
         graphics_probe_stamp,
@@ -507,6 +532,25 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         graph.push(' ');
     }
     graph.push('\n');
+    graph.push_str("rule runtime_common_shadow\n");
+    graph.push_str("  command = cd ");
+    graph.push_str(&shell_quote(&root_for_shell));
+    graph.push_str(" && ");
+    graph.push_str(&bootstrap_cli);
+    graph.push_str(" prepare-runtime-common-shadow\n");
+    graph.push_str("  description = STAGE shared ART runtime sources\n");
+    graph.push_str("  restat = 1\n\n");
+    graph.push_str("build ");
+    graph.push_str(&runtime_shadow_marker);
+    graph.push_str(": runtime_common_shadow ");
+    graph.push_str(&bootstrap_cli_target);
+    for input in &runtime_shadow_inputs {
+        graph.push(' ');
+        graph.push_str(&ninja_path(input));
+    }
+    graph.push_str("\nbuild runtime-common-shadow: phony ");
+    graph.push_str(&runtime_shadow_marker);
+    graph.push_str("\n\n");
     let mut cached_rules_emitted = false;
     // The runtime-common directory is shared by both archive flavors. It used
     // to be passed only as an archive input, which made Ninja treat stale
@@ -524,11 +568,15 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let shared_inputs =
-        emit_cached_native_object_edges(&mut graph, &shared_objects, &mut cached_rules_emitted)
-            .into_iter()
-            .map(PathBuf::from)
-            .collect::<Vec<_>>();
+    let shared_inputs = emit_cached_native_object_edges_with_order_only(
+        &mut graph,
+        &shared_objects,
+        &mut cached_rules_emitted,
+        std::slice::from_ref(&runtime_shadow_marker_path),
+    )
+    .into_iter()
+    .map(PathBuf::from)
+    .collect::<Vec<_>>();
     if let Some(cached_objects) = cached_graphics_objects.as_deref() {
         let (_, flavor_objects): (Vec<_>, Vec<_>) = cached_objects
             .iter()
@@ -540,6 +588,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
             &archive,
             &mut cached_rules_emitted,
             &shared_inputs,
+            std::slice::from_ref(&runtime_shadow_marker_path),
         );
         graph.push_str("build ");
         graph.push_str(&stamp);
@@ -573,6 +622,12 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         graph.push(' ');
         graph.push_str(&ninja_path(&graphics_ready_path));
         graph.push_str(": graphics_bootstrap ");
+        // Depend at the producer edge, not only the phony alias: otherwise
+        // Ninja can execute the old CLI while rebuilding that same binary.
+        graph.push_str(&bootstrap_cli_target);
+        graph.push(' ');
+        graph.push_str(&runtime_shadow_marker);
+        graph.push(' ');
         graph.push_str(&bootstrap_input_list);
         graph.push('\n');
     }
@@ -592,6 +647,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
             &runtime_archive,
             &mut cached_rules_emitted,
             &shared_inputs,
+            std::slice::from_ref(&runtime_shadow_marker_path),
         );
         graph.push_str("build ");
         graph.push_str(&runtime_stamp);
@@ -625,6 +681,8 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         graph.push_str(&ninja_path(&runtime_ready_path));
         graph.push_str(": runtime_bootstrap ");
         graph.push_str(&bootstrap_cli_target);
+        graph.push(' ');
+        graph.push_str(&runtime_shadow_marker);
         graph.push(' ');
         graph.push_str(&bootstrap_input_list);
         graph.push('\n');
@@ -681,6 +739,8 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str(": interpreter_core ");
     graph.push_str(&bootstrap_cli_target);
     graph.push(' ');
+    graph.push_str(&runtime_shadow_marker);
+    graph.push(' ');
     for input in &interpreter_inputs {
         graph.push_str(&ninja_path(input));
         graph.push(' ');
@@ -692,8 +752,9 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str(&interpreter_archive);
     graph.push('\n');
 
-    // The JIT compiler consumes the runtime's staged ABI headers. Build the
-    // runtime first so a clean build cannot race source staging.
+    // The JIT compiler consumes the shared staged ABI headers. Depend on the
+    // narrow staging producer rather than the complete graphics archive so
+    // JIT and runtime compilation can proceed in parallel after publication.
     let jit_archive = ninja_path(&root.join("_build/jit-compiler/libart-compiler-darwin.a"));
     let jit_support_archive =
         ninja_path(&root.join("_build/jit-compiler/libart-libelffile-darwin.a"));
@@ -795,7 +856,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str(": jit_compiler ");
     graph.push_str(&bootstrap_cli_target);
     graph.push(' ');
-    graph.push_str(&archive);
+    graph.push_str(&runtime_shadow_marker);
     for input in &jit_inputs {
         graph.push(' ');
         graph.push_str(&ninja_path(&root.join(input)));
@@ -865,7 +926,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         .cloned()
         .collect::<Vec<_>>();
     let hwui_ready = hwui_main.len() == 81 && hwui_apex.len() == 5;
-    let graphics_ready = graphics_main.len() == 62 && graphics_registrar.len() == 1;
+    let graphics_ready = graphics_main.len() == 66 && graphics_registrar.len() == 1;
     let icu_cached = cached_foundation_objects(&native_output_root.join("icu-foundation/objects"))?;
     let icu_common = icu_cached
         .iter()
@@ -1075,27 +1136,6 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str(&bionic_provider_input_list);
     graph.push('\n');
 
-    graph.push_str("rule runtime_filesystem_probe\n");
-    graph.push_str("  command = cd ");
-    graph.push_str(&shell_quote(&root_for_shell));
-    graph.push_str(" && DARWIN_ART_NATIVE_OUTPUT=");
-    graph.push_str(&shell_quote(&filesystem_object_for_shell));
-    graph.push(' ');
-    graph.push_str(&bootstrap_cli);
-    graph.push_str(" build-runtime-filesystem-probe\n");
-    graph.push_str("  description = CXX runtime_filesystem_probe\n");
-    // The Rust command owns the C++ dependency cache for this probe.  Ninja
-    // only tracks the explicit phase stamp and source inputs; consuming a
-    // depfile produced inside the bootstrap CLI makes the stored dependency mtime
-    // race the copied object and dirties every warm graph invocation.
-    graph.push_str("  restat = 1\n\n");
-    graph.push_str("build ");
-    graph.push_str(&filesystem_object);
-    graph.push_str(": runtime_filesystem_probe ");
-    graph.push_str(&filesystem_probe_inputs);
-    graph.push(' ');
-    graph.push_str(&ninja_path(&filesystem_probe_stamp));
-    graph.push('\n');
     graph.push_str("rule runtime_network_probe\n");
     graph.push_str("  command = cd ");
     graph.push_str(&shell_quote(&root_for_shell));
@@ -1110,6 +1150,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&network_object);
     graph.push_str(": runtime_network_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push_str(&network_probe_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&network_probe_stamp));
@@ -1128,6 +1169,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&hwui_object);
     graph.push_str(": runtime_hwui_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push_str(&hwui_probe_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&hwui_probe_stamp));
@@ -1154,8 +1196,6 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     ));
     graph.push_str(" && DARWIN_ART_NATIVE_OUTPUT_ROOT=");
     graph.push_str(&shell_quote(&native_output_for_shell));
-    graph.push_str(" DARWIN_ART_NATIVE_FILESYSTEM_OBJECT=");
-    graph.push_str(&shell_quote(&filesystem_object_path.to_string_lossy()));
     graph.push_str(" DARWIN_ART_NATIVE_NETWORK_OBJECT=");
     graph.push_str(&shell_quote(&network_object_path.to_string_lossy()));
     graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_OBJECT=");
@@ -1194,6 +1234,14 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&graphics_object);
     graph.push_str(": runtime_graphics_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
+    // This edge invokes the fast linker, which refreshes the JIT producer.
+    // Order it after the explicit producers: otherwise both patch/compile the
+    // same staged ART sources concurrently before the final link edge.
+    graph.push_str(&jit_archive);
+    graph.push(' ');
+    graph.push_str(&interpreter_archive);
+    graph.push(' ');
     graph.push_str(&graphics_probe_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&graphics_probe_stamp));
@@ -1231,6 +1279,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&graphics_gpu_object);
     graph.push_str(": runtime_graphics_gpu_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push_str(&graphics_gpu_probe_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&graphics_gpu_probe_stamp));
@@ -1248,6 +1297,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&graphics_phase_object);
     graph.push_str(": runtime_graphics_phase_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push_str(&graphics_phase_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&graphics_phase_stamp));
@@ -1265,6 +1315,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&graphics_input_object);
     graph.push_str(": runtime_graphics_input_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push_str(&graphics_input_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&graphics_input_stamp));
@@ -1282,6 +1333,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&graphics_state_object);
     graph.push_str(": runtime_graphics_state_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push_str(&graphics_state_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&graphics_state_stamp));
@@ -1302,6 +1354,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&graphics_session_object);
     graph.push_str(": runtime_graphics_session_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push_str(&graphics_session_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&graphics_session_stamp));
@@ -1319,6 +1372,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&jni_acceptance_object);
     graph.push_str(": runtime_jni_acceptance_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push_str(&jni_acceptance_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&jni_acceptance_stamp));
@@ -1336,6 +1390,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&app_bootstrap_object);
     graph.push_str(": runtime_app_bootstrap_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push_str(&app_bootstrap_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&app_bootstrap_stamp));
@@ -1353,6 +1408,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&app_resources_object);
     graph.push_str(": runtime_app_resources_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push_str(&app_resources_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&app_resources_stamp));
@@ -1370,6 +1426,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&app_activity_object);
     graph.push_str(": runtime_app_activity_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push_str(&app_activity_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&app_activity_stamp));
@@ -1389,6 +1446,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&app_presentation_object);
     graph.push_str(": runtime_app_presentation_probe ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push(' ');
     graph.push_str(&app_presentation_inputs);
     graph.push(' ');
@@ -1463,8 +1521,6 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str(&shell_quote(&root_for_shell));
     graph.push_str(" && DARWIN_ART_NATIVE_OUTPUT_ROOT=");
     graph.push_str(&shell_quote(&native_output_for_shell));
-    graph.push_str(" DARWIN_ART_NATIVE_FILESYSTEM_OBJECT=");
-    graph.push_str(&shell_quote(&filesystem_object_for_shell));
     graph.push_str(" DARWIN_ART_NATIVE_NETWORK_OBJECT=");
     graph.push_str(&shell_quote(&network_object_for_shell));
     graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_OBJECT=");
@@ -1506,6 +1562,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&runtime_library);
     graph.push_str(": graphics_audit ");
+    append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     // The fast audit consumes these foundation artifacts directly.  Keep them
     // as real Ninja prerequisites so a missing or rebuilt foundation cannot
     // race the final dylib link/audit edge.
@@ -1552,8 +1609,6 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str(&system_natives_archive);
     graph.push(' ');
     graph.push_str(&boringssl_archive);
-    graph.push(' ');
-    graph.push_str(&filesystem_object);
     graph.push(' ');
     graph.push_str(&network_object);
     graph.push(' ');
@@ -1633,9 +1688,19 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str(": surfaceflinger_core ");
     for input in [
         "tools/build-android16-surfaceflinger-core.sh",
+        "tools/lib/surfaceflinger-compile-flags.sh",
         "tools/sync-android16-surfaceflinger-core.sh",
         "upstream/android16-surfaceflinger-core.lock",
         "patches/frameworks-native/0001-darwin-surfaceflinger-core.patch",
+        "patches/frameworks-native/0002-darwin-surface-commit-wait.patch",
+        "patches/frameworks-native/0003-buffer-release-message-length.patch",
+        "patches/frameworks-native/0004-darwin-release-record-transport.patch",
+        "compat/surfaceflinger/release_record_transport.cc",
+        "compat/surfaceflinger/release_record_transport.h",
+        "tools/test-release-record-transport.sh",
+        "tools/tests/release-record-transport-test.cc",
+        "compat/surfaceflinger/commit_signal.h",
+        "tools/tests/parcel-native-handle-test.cc",
         "compat/surfaceflinger/tracing_perfetto.h",
         "compat/surfaceflinger/transaction_bridge.cc",
         "compat/surfaceflinger/transaction_bridge.h",

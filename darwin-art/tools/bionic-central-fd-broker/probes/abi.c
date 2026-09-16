@@ -14,6 +14,7 @@ _Static_assert(DARWIN_ART_FD_STDIO == 3, "stdio kind drift");
 _Static_assert(DARWIN_ART_FD_SOCKET == 4, "socket kind drift");
 _Static_assert(DARWIN_ART_FD_EPOLL == 5, "epoll kind drift");
 _Static_assert(DARWIN_ART_FD_PIPE == 6, "pipe kind drift");
+_Static_assert(DARWIN_ART_FD_BINDER == 7, "binder kind drift");
 _Static_assert(sizeof(((DarwinArtFdPollEntry *)0)->fd) == sizeof(int),
                "guest descriptor width drift");
 _Static_assert(offsetof(DarwinArtFdOwnerV1, read_at) == 56,

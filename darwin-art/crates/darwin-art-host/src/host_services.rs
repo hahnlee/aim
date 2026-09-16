@@ -112,6 +112,7 @@ impl ServiceProcessManager {
                 "DARWIN_ART_APK_ISOLATED_PROCESS",
                 if request.isolated { "1" } else { "0" },
             )
+            .env_remove("DARWIN_ART_DESKTOP_PRESENTATION")
             .env("DARWIN_ART_CHILD_LIBRARY", &self.options.library)
             .env("DARWIN_ART_CHILD_CORE_OJ", &self.options.core_oj_jar)
             .env(

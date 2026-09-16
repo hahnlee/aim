@@ -1,0 +1,37 @@
+diff --git a/libs/binder/BpBinder.cpp b/libs/binder/BpBinder.cpp
+--- a/libs/binder/BpBinder.cpp
++++ b/libs/binder/BpBinder.cpp
+@@ -461,1 +461,6 @@
+-                ALOGV("Requesting death notification: %p handle %d\n", this, binderHandle());
++                if (isRpcBinder()) {
++                    ALOGV("Requesting RPC death notification: %p address %llu\n", this,
++                          static_cast<unsigned long long>(rpcAddress()));
++                } else {
++                    ALOGV("Requesting death notification: %p handle %d\n", this, binderHandle());
++                }
+@@ -506,1 +511,6 @@
+-                ALOGV("Clearing death notification: %p handle %d\n", this, binderHandle());
++                if (isRpcBinder()) {
++                    ALOGV("Clearing RPC death notification: %p address %llu\n", this,
++                          static_cast<unsigned long long>(rpcAddress()));
++                } else {
++                    ALOGV("Clearing death notification: %p handle %d\n", this, binderHandle());
++                }
+@@ -531,2 +541,7 @@
+-    ALOGV("Sending obituary for proxy %p handle %d, mObitsSent=%s\n", this, binderHandle(),
+-          mObitsSent ? "true" : "false");
++    if (isRpcBinder()) {
++        ALOGV("Sending obituary for RPC proxy %p address %llu, mObitsSent=%s\n", this,
++              static_cast<unsigned long long>(rpcAddress()), mObitsSent ? "true" : "false");
++    } else {
++        ALOGV("Sending obituary for proxy %p handle %d, mObitsSent=%s\n", this, binderHandle(),
++              mObitsSent ? "true" : "false");
++    }
+@@ -540,1 +555,6 @@
+-        ALOGV("Clearing sent death notification: %p handle %d\n", this, binderHandle());
++        if (isRpcBinder()) {
++            ALOGV("Clearing sent RPC death notification: %p address %llu\n", this,
++                  static_cast<unsigned long long>(rpcAddress()));
++        } else {
++            ALOGV("Clearing sent death notification: %p handle %d\n", this, binderHandle());
++        }

@@ -10,6 +10,23 @@
 use core::ffi::{c_char, c_void};
 use darwin_art_abi::{AbiHeader, StatusCode};
 
+mod process_credentials;
+mod process_snapshot;
+pub use process_credentials::{
+    PROCESS_SNAPSHOT_CREDENTIALS_ABI_VERSION, ProcessCredentialsConfig, ProcessSnapshotConfigV2,
+};
+pub use process_snapshot::{
+    PROCESS_SNAPSHOT_ABI_VERSION, ProcessSnapshotConfig, ProcessSnapshotEntry,
+    ProcessSnapshotInstallConfiguredFn, ProcessSnapshotUninstallFn,
+};
+mod process_filesystem;
+pub use process_filesystem::{
+    PROCESS_FILESYSTEM_ALREADY_INSTALLED, PROCESS_FILESYSTEM_BUSY,
+    PROCESS_FILESYSTEM_CREATE_FAILED, PROCESS_FILESYSTEM_INVALID_ARGUMENT,
+    PROCESS_FILESYSTEM_NOT_INSTALLED, PROCESS_FILESYSTEM_OK, ProcessFilesystemInstallFn,
+    ProcessFilesystemUninstallFn,
+};
+
 pub type FrameCallback = unsafe extern "C" fn(
     context: *mut c_void,
     argb_pixels: *const u32,
@@ -59,6 +76,43 @@ pub struct HostServices {
     pub release_service: Option<ReleaseServiceFn>,
 }
 
+pub const NATIVE_LOADER_CONFIG_ABI_VERSION: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeLoaderConfig {
+    pub header: AbiHeader,
+    pub linker_config_path: *const c_char,
+    pub executable_path: *const c_char,
+    pub library_search_path: *const c_char,
+    pub android_unwind_path: *const c_char,
+}
+
+impl NativeLoaderConfig {
+    pub const fn new(
+        linker_config_path: *const c_char,
+        executable_path: *const c_char,
+        library_search_path: *const c_char,
+        android_unwind_path: *const c_char,
+    ) -> Self {
+        Self {
+            header: AbiHeader {
+                struct_size: core::mem::size_of::<Self>() as u32,
+                abi_version: NATIVE_LOADER_CONFIG_ABI_VERSION,
+            },
+            linker_config_path,
+            executable_path,
+            library_search_path,
+            android_unwind_path,
+        }
+    }
+
+    pub const fn is_compatible(&self) -> bool {
+        self.header.abi_version == NATIVE_LOADER_CONFIG_ABI_VERSION
+            && self.header.struct_size as usize >= core::mem::size_of::<Self>()
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LifecycleHooks {
@@ -89,6 +143,7 @@ pub struct ProcessConfig {
     pub graphics_session_context: *mut c_void,
     pub lifecycle_hooks: *const LifecycleHooks,
     pub host_services: *const HostServices,
+    pub native_loader_config: *const NativeLoaderConfig,
 }
 
 impl ProcessConfig {
@@ -124,6 +179,7 @@ impl ProcessConfig {
             graphics_session_context: core::ptr::null_mut(),
             lifecycle_hooks: core::ptr::null(),
             host_services: core::ptr::null(),
+            native_loader_config: core::ptr::null(),
         }
     }
 
@@ -143,6 +199,11 @@ impl ProcessConfig {
 
     pub const fn with_host_services(mut self, services: *const HostServices) -> Self {
         self.host_services = services;
+        self
+    }
+
+    pub const fn with_native_loader_config(mut self, config: *const NativeLoaderConfig) -> Self {
+        self.native_loader_config = config;
         self
     }
 }
@@ -190,6 +251,7 @@ pub struct SurfaceCreateInfo {
     pub height: u32,
     pub title: *const c_char,
     pub visible: bool,
+    pub scale_to_display: bool,
 }
 
 pub type SurfaceCreateFn = unsafe extern "C" fn(*const SurfaceCreateInfo, *mut i32) -> *mut c_void;
@@ -209,7 +271,7 @@ mod tests {
 
     #[test]
     fn process_config_layout_is_owned_by_raw_ffi_crate() {
-        assert_eq!(size_of::<ProcessConfig>(), 128);
+        assert_eq!(size_of::<ProcessConfig>(), 136);
         assert_eq!(align_of::<ProcessConfig>(), 8);
         assert_eq!(offset_of!(ProcessConfig, header), 0);
         assert_eq!(
@@ -235,6 +297,42 @@ mod tests {
         assert_eq!(offset_of!(ProcessConfig, graphics_session_context), 104);
         assert_eq!(offset_of!(ProcessConfig, lifecycle_hooks), 112);
         assert_eq!(offset_of!(ProcessConfig, host_services), 120);
+        assert_eq!(offset_of!(ProcessConfig, native_loader_config), 128);
+        let defaults = ProcessConfig::new(
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+            0,
+            0,
+            core::ptr::null_mut(),
+            None,
+            core::ptr::null_mut(),
+            None,
+            None,
+        );
+        assert!(defaults.native_loader_config.is_null());
+    }
+
+    #[test]
+    fn native_loader_config_layout_is_owned_by_raw_ffi_crate() {
+        assert_eq!(size_of::<NativeLoaderConfig>(), 40);
+        assert_eq!(align_of::<NativeLoaderConfig>(), 8);
+        assert_eq!(offset_of!(NativeLoaderConfig, header), 0);
+        assert_eq!(offset_of!(NativeLoaderConfig, linker_config_path), 8);
+        assert_eq!(offset_of!(NativeLoaderConfig, executable_path), 16);
+        assert_eq!(offset_of!(NativeLoaderConfig, library_search_path), 24);
+        assert_eq!(offset_of!(NativeLoaderConfig, android_unwind_path), 32);
+        assert!(
+            NativeLoaderConfig::new(
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+            )
+            .is_compatible()
+        );
     }
 
     #[test]
@@ -296,6 +394,7 @@ mod tests {
         assert_eq!(offset_of!(SurfaceCreateInfo, height), 4);
         assert_eq!(offset_of!(SurfaceCreateInfo, title), 8);
         assert_eq!(offset_of!(SurfaceCreateInfo, visible), 16);
+        assert_eq!(offset_of!(SurfaceCreateInfo, scale_to_display), 17);
         assert_eq!(size_of::<Option<FrameCallback>>(), size_of::<*mut c_void>());
         assert_eq!(
             align_of::<Option<FrameCallback>>(),
@@ -402,6 +501,14 @@ pub type ProviderInstallHooksFn = unsafe extern "C" fn(
 pub type ProviderClearHooksFn = unsafe extern "C" fn();
 pub type ProviderNativeAcquireFn = unsafe extern "C" fn(kind: u32, authority_fd: i32) -> i32;
 pub type ProviderNativeReleaseFn = unsafe extern "C" fn(kind: u32) -> i32;
+pub type BinderFdInstallOwnerFn =
+    unsafe extern "C" fn(callbacks: *const c_void, owner: *mut u64) -> u32;
+pub type BinderFdPublishFn =
+    unsafe extern "C" fn(owner: u64, object: u64, guest_fd: *mut i32) -> u32;
+pub type BinderFdUninstallOwnerFn = unsafe extern "C" fn(owner: u64) -> u32;
+pub type BinderExportFileFn = unsafe extern "C" fn(guest_fd: i32) -> i32;
+pub type BinderImportFileFn = unsafe extern "C" fn(host_fd: i32) -> i32;
+pub type BinderCloseFileFn = unsafe extern "C" fn(guest_fd: i32) -> i32;
 
 /// Sentinel used by a missing optional callback without exporting a C++ type.
 pub const ENGINE_STATUS_UNAVAILABLE: i32 = StatusCode::Unsupported as i32;

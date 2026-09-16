@@ -1,0 +1,9 @@
+# Android 16 ActivityManager service lifecycle callbacks used by ActiveServices.
+FRAMEWORK_ACTIVE_SERVICES_PATH=_prebuilt/android-16/bootclasspath/framework.jar
+FRAMEWORK_ACTIVE_SERVICES_SHA256=ae3d578e3c4cd28ad822d0bc7b35fa308800f440472f54f2aff8aa5c1e22cd91
+PUBLISH_SERVICE_SIGNATURE='void publishService(android.os.IBinder,android.content.Intent,android.os.IBinder)'
+PUBLISH_SERVICE_TRANSACTION=41
+SERVICE_DONE_EXECUTING_SIGNATURE='void serviceDoneExecuting(android.os.IBinder,int,int,int,android.content.Intent)'
+SERVICE_DONE_EXECUTING_TRANSACTION=63
+UNBIND_FINISHED_SIGNATURE='void unbindFinished(android.os.IBinder,android.content.Intent)'
+UNBIND_FINISHED_TRANSACTION=74

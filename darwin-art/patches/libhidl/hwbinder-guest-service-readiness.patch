@@ -1,0 +1,34 @@
+--- a/Utils.cpp
++++ b/Utils.cpp
+@@ -20,6 +20,10 @@
+ #include <android-base/logging.h>
+ #include <android-base/properties.h>
+
++#if defined(DARWIN_ART_ANDROID_HWBINDER_POLICY)
++#include "filesystem/linker_config_fs.h"
++#endif
++
+ namespace android::hardware {
+
+ void zeroMemory(uint8_t* data, size_t size) {
+@@ -28,7 +32,11 @@
+ }
+
+ static bool file_exists(const std::string& file) {
++#if defined(DARWIN_ART_ANDROID_HWBINDER_POLICY)
++    int res = darwin_art::filesystem::GuestLinkerAccess(file.c_str(), F_OK);
++#else
+     int res = access(file.c_str(), F_OK);
++#endif
+     if (res == 0 || errno == EACCES) return true;
+     return false;
+ }
+@@ -46,7 +54,7 @@
+     }
+     // TODO(b/31559095): need bionic host so that we can use 'prop_info' returned
+     // from WaitForProperty
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) || defined(DARWIN_ART_ANDROID_HWBINDER_POLICY)
+     static const char* kHwServicemanagerReadyProperty = "hwservicemanager.ready";
+
+     using std::literals::chrono_literals::operator""s;

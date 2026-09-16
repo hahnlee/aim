@@ -3,6 +3,7 @@
 #include <iostream>
 #include <memory>
 
+#include "darwin_angle_egl.h"
 #include "darwin_hwui_gpu_mode.h"
 #include "darwin_surface_bridge.h"
 #include "mirror/throwable.h"
@@ -556,6 +557,7 @@ int prepare_gpu_surface(GraphicsState* state, jint width, jint height) {
                    ? app_label
                    : "Darwin ART · HWUI Metal",
       .visible = true,
+      .scale_to_display = run_apk_app,
   };
   DarwinArtSurfaceResult result = DARWIN_ART_SURFACE_OK;
   state->gpu_surface = darwin_art_surface_create(&info, &result);
@@ -565,6 +567,9 @@ int prepare_gpu_surface(GraphicsState* state, jint width, jint height) {
     return static_cast<int>(result);
   }
   darwin_art_surface_set_active_gpu(state->gpu_surface);
+  // This is the display/HWC creation boundary. Configure the stable output
+  // extent once here; individual BLAST queues retain their own dimensions.
+  darwin_art::ConfigureDarwinAngleDisplayTarget(width, height);
   const uint32_t surface_id =
       darwin_art_surface_gpu_iosurface_id(state->gpu_surface);
   if (surface_id != 0) {

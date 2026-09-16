@@ -120,10 +120,6 @@ pub(crate) fn probe_runtime_dex_flavor_impl(
         .arg(&framework)
         .arg(&core_icu4j)
         .arg(&classes_dex);
-    let named_jni_owner = root.join("_build/runtime-link-probe/libopenjdk-named-jni-owner.dylib");
-    if named_jni_owner.is_file() {
-        command.env("DARWIN_ART_OPENJDK_NAMED_JNI_OWNER", &named_jni_owner);
-    }
     let mut system_root = None;
     if real_graphics {
         let icu_runtime = root.join("_build/icu-runtime-adapters/runtime");

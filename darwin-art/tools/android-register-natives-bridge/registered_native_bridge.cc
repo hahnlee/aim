@@ -1,9 +1,12 @@
 #include "darwin_art_registered_native_bridge.h"
 
 #include <cstring>
+#include <exception>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -79,6 +82,7 @@ struct KeyHash {
 
 struct Entry {
   void* thunk;
+  DarwinArtAndroidFunctionOwnerV1 owner;
 };
 
 }  // namespace
@@ -91,31 +95,34 @@ struct DarwinArtRegisteredNativeCache {
   DarwinArtRegisteredNativeThunkFactoryV1 factory;
   std::mutex mutex;
   std::unordered_map<Key, Entry, KeyHash> entries;
+  std::unordered_set<Key, KeyHash> retired;
 };
 
 namespace {
 
-bool LookupOwner(DarwinArtRegisteredNativeCache* cache,
-                 const void* function,
-                 DarwinArtAndroidFunctionOwnerV1* owner_out) {
+int LookupOwner(DarwinArtRegisteredNativeCache* cache,
+                const void* function,
+                DarwinArtAndroidFunctionOwnerV1* owner_out) {
   if (cache == nullptr || function == nullptr || owner_out == nullptr) {
-    return false;
+    return -1;
   }
   DarwinArtAndroidFunctionOwnerV1 owner{};
-  if (cache->factory.lookup_owner(cache->factory.context, function, &owner) ==
-          0 ||
-      !ValidOwner(function, owner)) {
-    return false;
+  const int status =
+      cache->factory.lookup_owner(cache->factory.context, function, &owner);
+  if (status <= 0) return status == 0 ? 0 : -1;
+  if (!ValidOwner(function, owner)) {
+    cache->factory.release_owner(cache->factory.context, &owner);
+    return -1;
   }
   *owner_out = owner;
-  return true;
+  return 1;
 }
 
 }  // namespace
 
 extern "C" DarwinArtRegisteredNativeCache*
 darwin_art_registered_native_cache_create(
-    const DarwinArtRegisteredNativeThunkFactoryV1* factory) {
+    const DarwinArtRegisteredNativeThunkFactoryV1* factory) try {
   if (factory == nullptr ||
       factory->abi_version != DARWIN_ART_REGISTERED_NATIVE_BRIDGE_ABI_VERSION ||
       factory->struct_size != sizeof(*factory) ||
@@ -124,82 +131,107 @@ darwin_art_registered_native_cache_create(
     return nullptr;
   }
   return new DarwinArtRegisteredNativeCache(*factory);
+} catch (...) {
+  return nullptr;
 }
 
 extern "C" void darwin_art_registered_native_cache_destroy(
-    DarwinArtRegisteredNativeCache* cache) {
+    DarwinArtRegisteredNativeCache* cache) try {
   if (cache == nullptr) {
     return;
   }
-  std::vector<void*> doomed;
+  decltype(cache->entries) doomed;
   {
     std::lock_guard<std::mutex> lock(cache->mutex);
-    for (const auto& [key, entry] : cache->entries) {
-      (void)key;
-      doomed.push_back(entry.thunk);
-    }
-    cache->entries.clear();
+    doomed.swap(cache->entries);
   }
-  for (void* thunk : doomed) {
-    cache->factory.destroy_thunk(cache->factory.context, thunk);
+  for (const auto& [key, entry] : doomed) {
+    cache->factory.destroy_thunk(cache->factory.context, entry.thunk);
+    cache->factory.release_owner(cache->factory.context, &entry.owner);
   }
   delete cache;
+} catch (...) {
+  std::terminate();
 }
 
 extern "C" bool darwin_art_is_android_function_pointer(
     DarwinArtRegisteredNativeCache* cache,
     const void* function) {
   DarwinArtAndroidFunctionOwnerV1 owner{};
-  const bool owned = LookupOwner(cache, function, &owner);
+  const bool owned = LookupOwner(cache, function, &owner) == 1;
   if (owned) {
     cache->factory.release_owner(cache->factory.context, &owner);
   }
   return owned;
 }
 
-extern "C" void* darwin_art_get_registered_native_trampoline(
+namespace {
+
+// Consumes one acquired lookup lease, transferring it only on publication.
+void* GetWithOwner(
     DarwinArtRegisteredNativeCache* cache,
     const void* android_function,
     const char* shorty,
     uint32_t shorty_length,
-    DarwinArtJniCallType call_type) {
-  if (cache == nullptr ||
-      !ValidShorty(shorty, shorty_length, call_type)) {
-    return nullptr;
-  }
-  DarwinArtAndroidFunctionOwnerV1 owner{};
-  if (!LookupOwner(cache, android_function, &owner)) {
-    return nullptr;
-  }
+    DarwinArtJniCallType call_type,
+    DarwinArtAndroidFunctionOwnerV1 owner) {
+  const auto release = [cache](DarwinArtAndroidFunctionOwnerV1* held) {
+    cache->factory.release_owner(cache->factory.context, held);
+  };
+  std::unique_ptr<DarwinArtAndroidFunctionOwnerV1, decltype(release)> lease(
+      &owner, release);
+  if (!ValidShorty(shorty, shorty_length, call_type)) return nullptr;
   Key key{owner.image_id,
           owner.generation,
           reinterpret_cast<uintptr_t>(android_function),
           std::string(shorty, shorty_length),
           call_type};
 
-  std::unique_lock<std::mutex> lock(cache->mutex);
-  const auto found = cache->entries.find(key);
-  if (found != cache->entries.end()) {
-    void* thunk = found->second.thunk;
-    lock.unlock();
-    cache->factory.release_owner(cache->factory.context, &owner);
-    return thunk;
+  const Key generation{
+      owner.image_id, owner.generation, 0, "", DARWIN_ART_JNI_CALL_REGULAR};
+  {
+    std::lock_guard<std::mutex> lock(cache->mutex);
+    if (cache->retired.contains(generation)) return nullptr;
+    const auto found = cache->entries.find(key);
+    if (found != cache->entries.end()) return found->second.thunk;
   }
   void* thunk = cache->factory.build_thunk(cache->factory.context,
-                                           android_function,
-                                           &owner,
-                                           shorty,
-                                           shorty_length,
-                                           call_type);
+                                          android_function,
+                                          &owner,
+                                          shorty,
+                                          shorty_length,
+                                          call_type);
   if (thunk == nullptr) {
-    lock.unlock();
-    cache->factory.release_owner(cache->factory.context, &owner);
     return nullptr;
   }
-  cache->entries.emplace(std::move(key), Entry{thunk});
-  lock.unlock();
-  cache->factory.release_owner(cache->factory.context, &owner);
+  const auto destroy = [cache](void* value) {
+    cache->factory.destroy_thunk(cache->factory.context, value);
+  };
+  std::unique_ptr<void, decltype(destroy)> pending(thunk, destroy);
+  std::lock_guard<std::mutex> lock(cache->mutex);
+  if (cache->retired.contains(generation)) return nullptr;
+  const auto winner = cache->entries.find(key);
+  if (winner != cache->entries.end()) return winner->second.thunk;
+  cache->entries.emplace(std::move(key), Entry{thunk, owner});
+  pending.release();
+  lease.release();
   return thunk;
+}
+
+}  // namespace
+
+extern "C" void* darwin_art_get_registered_native_trampoline(
+    DarwinArtRegisteredNativeCache* cache,
+    const void* android_function,
+    const char* shorty,
+    uint32_t shorty_length,
+    DarwinArtJniCallType call_type) try {
+  DarwinArtAndroidFunctionOwnerV1 owner{};
+  if (LookupOwner(cache, android_function, &owner) != 1) return nullptr;
+  return GetWithOwner(
+      cache, android_function, shorty, shorty_length, call_type, owner);
+} catch (...) {
+  return nullptr;
 }
 
 extern "C" DarwinArtRegisteredNativeResolution
@@ -210,12 +242,16 @@ darwin_art_resolve_registered_native(
     const char* shorty,
     uint32_t shorty_length,
     DarwinArtJniCallType call_type,
-    const void** callable_out) {
+    const void** callable_out) try {
+  if (callable_out != nullptr) *callable_out = nullptr;
   if (cache == nullptr || function == nullptr || callable_out == nullptr) {
     return DARWIN_ART_REGISTERED_NATIVE_ERROR;
   }
   *callable_out = nullptr;
-  const bool owned = darwin_art_is_android_function_pointer(cache, function);
+  DarwinArtAndroidFunctionOwnerV1 owner{};
+  const int status = LookupOwner(cache, function, &owner);
+  if (status < 0) return DARWIN_ART_REGISTERED_NATIVE_ERROR;
+  const bool owned = status == 1;
   if (!class_loader_namespace_is_bridged && !owned) {
     *callable_out = function;
     return DARWIN_ART_REGISTERED_NATIVE_DIRECT;
@@ -223,47 +259,62 @@ darwin_art_resolve_registered_native(
   if (!owned) {
     return DARWIN_ART_REGISTERED_NATIVE_ERROR;
   }
-  void* thunk = darwin_art_get_registered_native_trampoline(
-      cache, function, shorty, shorty_length, call_type);
+  void* thunk = GetWithOwner(
+      cache, function, shorty, shorty_length, call_type, owner);
   if (thunk == nullptr) {
     return DARWIN_ART_REGISTERED_NATIVE_ERROR;
   }
   *callable_out = thunk;
   return DARWIN_ART_REGISTERED_NATIVE_TRAMPOLINE;
+} catch (...) {
+  if (callable_out != nullptr) *callable_out = nullptr;
+  return DARWIN_ART_REGISTERED_NATIVE_ERROR;
 }
 
 extern "C" size_t darwin_art_registered_native_cache_retire_image(
     DarwinArtRegisteredNativeCache* cache,
     uint64_t image_id,
-    uint64_t generation) {
+    uint64_t generation) try {
   if (cache == nullptr || image_id == 0 || generation == 0) {
     return 0;
   }
-  std::vector<void*> doomed;
+  std::vector<Entry> doomed;
   {
     std::lock_guard<std::mutex> lock(cache->mutex);
+    // Allocate before changing entries, so allocation failure cannot orphan
+    // previously removed thunks or their retained image leases.
+    doomed.reserve(cache->entries.size());
+    cache->retired.insert(
+        Key{image_id, generation, 0, "", DARWIN_ART_JNI_CALL_REGULAR});
     for (auto iterator = cache->entries.begin();
          iterator != cache->entries.end();) {
       if (iterator->first.image_id == image_id &&
           iterator->first.generation == generation) {
-        doomed.push_back(iterator->second.thunk);
+        doomed.push_back(iterator->second);
         iterator = cache->entries.erase(iterator);
       } else {
         ++iterator;
       }
     }
   }
-  for (void* thunk : doomed) {
-    cache->factory.destroy_thunk(cache->factory.context, thunk);
+  for (const Entry& entry : doomed) {
+    cache->factory.destroy_thunk(cache->factory.context, entry.thunk);
+    cache->factory.release_owner(cache->factory.context, &entry.owner);
   }
   return doomed.size();
+} catch (...) {
+  // This ABI has no retirement-failure result. Returning zero could authorize
+  // unmapping a still-published target, so fail-stop instead of claiming success.
+  std::terminate();
 }
 
 extern "C" size_t darwin_art_registered_native_cache_size(
-    DarwinArtRegisteredNativeCache* cache) {
+    DarwinArtRegisteredNativeCache* cache) try {
   if (cache == nullptr) {
     return 0;
   }
   std::lock_guard<std::mutex> lock(cache->mutex);
   return cache->entries.size();
+} catch (...) {
+  std::terminate();
 }

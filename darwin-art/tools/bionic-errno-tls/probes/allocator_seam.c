@@ -24,6 +24,12 @@ int main(void) {
   darwin_art_bionic_errno_publish_result(failure.bionic_errno);
   CHECK(darwin_art_bionic_errno_load() == 12);
   CHECK(errno == 28001);
-  puts("allocator errno result seam: PASS");
+  CHECK(darwin_art_bionic_mallopt(-101, 0) == 1);
+  CHECK(darwin_art_bionic_errno_load() == 12 && errno == 28001);
+  CHECK(!darwin_art_bionic_android_mallopt(1, NULL, 0));
+  CHECK(darwin_art_bionic_errno_load() == 95 && errno == 28001);
+  CHECK(!darwin_art_bionic_android_mallopt(1, NULL, 1));
+  CHECK(darwin_art_bionic_errno_load() == 22 && errno == 28001);
+  puts("allocator errno result seam: allocation/purge/unsupported profiling PASS");
   return 0;
 }

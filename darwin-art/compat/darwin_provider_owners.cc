@@ -1,4 +1,5 @@
 #include "darwin_provider_owners.h"
+#include "filesystem/archive_open.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -32,6 +33,9 @@ darwin_art_bionic_vm_recover_jit_execution_fault(uintptr_t fault_address,
                                                  int execution_fault);
 
 __attribute__((constructor)) static void BindJitFaultRecovery() {
+  if (darwin_art_bionic_fs_bind_host_descriptor_resolver(
+          &darwin_art_bionic_fd_dup_host_fd_core) != 0)
+    std::abort();
   darwin_art_bionic_process_state_bind_jit_fault_recovery(
       &darwin_art_bionic_vm_recover_jit_execution_fault);
   darwin_art_bionic_process_state_bind_sigchain(
@@ -41,6 +45,8 @@ __attribute__((constructor)) static void BindJitFaultRecovery() {
 __attribute__((destructor)) static void UnbindJitFaultRecovery() {
   darwin_art_bionic_process_state_bind_sigchain(nullptr, nullptr);
   darwin_art_bionic_process_state_bind_jit_fault_recovery(nullptr);
+  if (darwin_art_bionic_fs_bind_host_descriptor_resolver(nullptr) != 0)
+    std::abort();
 }
 
 extern "C" DarwinArtBionicSendfileTransferStatus
@@ -119,6 +125,7 @@ bool acquire_filesystem_direct(int directory_fd, std::string *error) {
       }
     }
   }
+  darwin_art_install_archive_filesystem(true);
   return true;
 }
 
@@ -133,6 +140,7 @@ bool seed_filesystem_private_directory(const char *guest_path,
 }
 
 void release_filesystem_direct() {
+  darwin_art_install_archive_filesystem(false);
   if (darwin_art_bionic_fs_process_uninstall() !=
       DARWIN_ART_BIONIC_FS_PROCESS_OWNER_OK) {
     std::abort();
@@ -219,8 +227,8 @@ void release_sendfile_direct() {
 
 bool acquire_vm_direct(std::string *error) {
   if (darwin_art_bionic_vm_bind_file_descriptor_resolver(
-          &darwin_art_bionic_fs_dup_host_fd_core) != 0) {
-    *error = "Bionic VM filesystem descriptor bridge failed";
+          &darwin_art_bionic_fd_dup_host_fd_core) != 0) {
+    *error = "Bionic VM descriptor bridge failed";
     return false;
   }
   if (darwin_art_bionic_vm_process_install() == 0)

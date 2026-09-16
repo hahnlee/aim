@@ -10,7 +10,7 @@
 #include <atomic>
 
 extern "C" void darwin_art_bionic_errno_store(int32_t android_errno);
-extern "C" int darwin_art_bionic_socket_broker_ioctl_dispatch(
+extern "C" int darwin_art_bionic_fd_broker_ioctl_dispatch(
     int fd, uint32_t request, void* argument, int* handled, int* result,
     int* android_errno) __attribute__((weak_import));
 
@@ -116,11 +116,11 @@ int Dispatch(int32_t fd, uint32_t request, void* argument) {
   // central fd broker rather than the filesystem table. Give that owner the
   // first chance to implement Linux device ioctls (notably sync_file fences)
   // before classifying the descriptor through the filesystem provider.
-  if (darwin_art_bionic_socket_broker_ioctl_dispatch != nullptr) {
+  if (darwin_art_bionic_fd_broker_ioctl_dispatch != nullptr) {
     int handled = 0;
     int broker_result = -1;
     int broker_errno = 0;
-    if (darwin_art_bionic_socket_broker_ioctl_dispatch(
+    if (darwin_art_bionic_fd_broker_ioctl_dispatch(
             fd, request, argument, &handled, &broker_result,
             &broker_errno) != 0) {
       return Fail(kAndroidEio);

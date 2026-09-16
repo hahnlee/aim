@@ -918,15 +918,18 @@ bool SwapHostWindowSurface(EGLDisplay native_display,
       native_bind_target = window.bind_target;
       std::int32_t previous_active_texture = 0;
       std::int32_t previous_texture = 0;
-      std::int32_t previous_framebuffer = 0;
+      std::int32_t previous_read_framebuffer = 0;
+      std::int32_t previous_draw_framebuffer = 0;
       std::int32_t previous_scissor[4] = {};
       const bool scissor_enabled = api.gl_is_enabled(0x0C11) != 0;
       api.gl_get_integer_v(0x84E0, &previous_active_texture);  // GL_ACTIVE_TEXTURE
       api.gl_get_integer_v(window.texture_target == kGlTexture2d ? 0x8069
                                                                  : 0x84F6,
                            &previous_texture);
+      api.gl_get_integer_v(0x8CAA,
+                           &previous_read_framebuffer);  // GL_READ_FRAMEBUFFER_BINDING
       api.gl_get_integer_v(0x8CA6,
-                           &previous_framebuffer);  // GL_FRAMEBUFFER_BINDING
+                           &previous_draw_framebuffer);  // GL_DRAW_FRAMEBUFFER_BINDING
       api.gl_get_integer_v(0x0C10, previous_scissor);  // GL_SCISSOR_BOX
       // AppKit resizing replaces the host IOSurface atomically. Android keeps
       // the same Surface/ANativeWindow identity across surfaceChanged(), so
@@ -1062,7 +1065,8 @@ bool SwapHostWindowSurface(EGLDisplay native_display,
           transferred_height = std::min(window.render_height, window.height);
         }
       }
-      api.gl_bind_framebuffer(kGlFramebuffer, previous_framebuffer);
+      api.gl_bind_framebuffer(0x8CA8, previous_read_framebuffer);  // GL_READ_FRAMEBUFFER
+      api.gl_bind_framebuffer(kGlDrawFramebuffer, previous_draw_framebuffer);
       api.gl_scissor(previous_scissor[0], previous_scissor[1],
                      previous_scissor[2], previous_scissor[3]);
       if (scissor_enabled) api.gl_enable(0x0C11);  // GL_SCISSOR_TEST
@@ -1224,11 +1228,29 @@ bool SwapHostWindowSurface(EGLDisplay native_display,
       }
       HostWindowSurface& current = found->second;
       if (current.target_bound) {
+        std::int32_t previous_active_texture = 0;
+        std::int32_t previous_texture = 0;
+        std::int32_t previous_read_framebuffer = 0;
+        std::int32_t previous_draw_framebuffer = 0;
+        api.gl_get_integer_v(0x84E0, &previous_active_texture);  // GL_ACTIVE_TEXTURE
+        api.gl_get_integer_v(current.texture_target == kGlTexture2d ? 0x8069
+                                                                    : 0x84F6,
+                             &previous_texture);
+        api.gl_get_integer_v(0x8CAA,
+                             &previous_read_framebuffer);  // GL_READ_FRAMEBUFFER_BINDING
+        api.gl_get_integer_v(0x8CA6,
+                             &previous_draw_framebuffer);  // GL_DRAW_FRAMEBUFFER_BINDING
         api.gl_bind_texture(current.texture_target, current.texture);
         api.release_tex_image(native_display, current.iosurface_target,
                               kEglBackBuffer);
         api.gl_delete_framebuffers(1, &current.framebuffer);
         api.gl_delete_textures(1, &current.texture);
+        api.gl_bind_framebuffer(0x8CA8,
+                                previous_read_framebuffer);  // GL_READ_FRAMEBUFFER
+        api.gl_bind_framebuffer(kGlDrawFramebuffer, previous_draw_framebuffer);
+        api.gl_bind_texture(current.texture_target,
+                            static_cast<std::uint32_t>(previous_texture));
+        api.gl_active_texture(static_cast<std::uint32_t>(previous_active_texture));
       }
       api.destroy_surface(native_display, current.iosurface_target);
       current.native_buffer = next_native_buffer;
@@ -1749,12 +1771,66 @@ void ConfigureDarwinAngleHostSurface(jint x, jint y, jint width, jint height) {
   }
 }
 
+void ConfigureDarwinAngleDisplayTarget(jint width, jint height) {
+  if (width <= 0 || height <= 0) return;
+  g_host_surface_width.store(width, std::memory_order_release);
+  g_host_surface_height.store(height, std::memory_order_release);
+  DarwinArtSurface* surface = darwin_art_surface_active_gpu();
+  if (surface == nullptr) return;
+  uint32_t backing_width = 0;
+  uint32_t backing_height = 0;
+  if (!darwin_art_surface_get_size(surface, &backing_width, &backing_height) ||
+      backing_width == 0 || backing_height == 0) {
+    return;
+  }
+  // SurfaceFlinger consumes Android logical display coordinates and projects
+  // them into this physical IOSurface. Scanout then copies that completed
+  // physical target pixel-for-pixel into CAMetalLayer; it must not reuse the
+  // logical extent as a source or destination rectangle.
+  darwin_art_surface_gpu_configure_embedded(surface, 0, 0, backing_width,
+                                            backing_height);
+  darwin_art_surface_gpu_set_embedded_buffer_extent(surface, backing_width,
+                                                    backing_height);
+  darwin_art_surface_gpu_publish_embedded(surface);
+  const uint32_t surface_id =
+      darwin_art_surface_gpu_iosurface_id(surface);
+  if (surface_id != 0) {
+    const std::string encoded = std::to_string(surface_id);
+    setenv("DARWIN_ART_HOST_IOSURFACE_ID", encoded.c_str(), 1);
+  }
+  if (std::getenv("DARWIN_ART_DEBUG_RESIZE") != nullptr) {
+    std::cerr << "ART Android EGL: display logical=" << width << "x"
+              << height << " backing=" << backing_width << "x"
+              << backing_height << "\n";
+  }
+}
+
 jint DarwinAngleHostSurfaceWidth() {
-  return g_host_surface_width.load(std::memory_order_acquire);
+  const jint configured =
+      g_host_surface_width.load(std::memory_order_acquire);
+  if (configured > 0) return configured;
+  DarwinArtSurface* surface = darwin_art_surface_active_gpu();
+  uint32_t width = 0;
+  uint32_t height = 0;
+  return surface != nullptr &&
+          darwin_art_surface_get_logical_size(surface, &width, &height) &&
+          width <= static_cast<uint32_t>(INT32_MAX)
+      ? static_cast<jint>(width)
+      : 0;
 }
 
 jint DarwinAngleHostSurfaceHeight() {
-  return g_host_surface_height.load(std::memory_order_acquire);
+  const jint configured =
+      g_host_surface_height.load(std::memory_order_acquire);
+  if (configured > 0) return configured;
+  DarwinArtSurface* surface = darwin_art_surface_active_gpu();
+  uint32_t width = 0;
+  uint32_t height = 0;
+  return surface != nullptr &&
+          darwin_art_surface_get_logical_size(surface, &width, &height) &&
+          height <= static_cast<uint32_t>(INT32_MAX)
+      ? static_cast<jint>(height)
+      : 0;
 }
 
 bool RegisterDarwinAngleEglNatives(JNIEnv* env) {
@@ -2002,9 +2078,29 @@ EGLContext EglCreateContextHost(EGLDisplay display, EGLConfig config,
                                 EGLContext share, const EGLint* attributes) {
   auto& api = GetAngleApi();
   EGLContext result = api.create_context(display, config, share, attributes);
-  if (DebugGraphicsDso()) {
+  if (DebugGraphicsDso() || result == nullptr) {
     std::cerr << "ART Android EGL: eglCreateContext result=" << result
-              << "\n";
+              << " error=0x" << std::hex
+              << (result == nullptr && api.get_error != nullptr
+                      ? api.get_error()
+                      : 0)
+              << std::dec
+              << " attributes=";
+    if (attributes == nullptr) {
+      std::cerr << "<null>";
+    } else {
+      for (std::size_t index = 0; index < 64; index += 2) {
+        const EGLint name = attributes[index];
+        std::cerr << (index == 0 ? "[" : ",") << "0x" << std::hex
+                  << name << std::dec;
+        if (name == kEglNone) {
+          std::cerr << "]";
+          break;
+        }
+        std::cerr << "=" << attributes[index + 1];
+      }
+    }
+    std::cerr << "\n";
   }
   return result;
 }
@@ -4083,8 +4179,6 @@ extern "C" bool darwin_art_android_begin_hardware_buffer_composition(
   }
   g_metal_composer_layers.clear();
   g_metal_composer_transaction_id = transaction_id;
-  g_surface_control_target.has_content = true;
-  return true;
 
   // The transaction bridge now retains every attached SurfaceControl backing
   // and submits the complete sorted layer tree on each commit. `clear=true`
@@ -4149,8 +4243,16 @@ extern "C" int darwin_art_android_end_hardware_buffer_composition() {
   bool composed = false;
   int completion_fence = kEglNoNativeFenceFdAndroid;
   if (remote && producer_event != nullptr && target.bound) {
+    const jint configured_width = DarwinAngleHostSurfaceWidth();
+    const jint configured_height = DarwinAngleHostSurfaceHeight();
+    const uint32_t logical_width =
+        configured_width > 0 ? static_cast<uint32_t>(configured_width)
+                             : target.width;
+    const uint32_t logical_height =
+        configured_height > 0 ? static_cast<uint32_t>(configured_height)
+                              : target.height;
     completion_fence = darwin_art_surfaceflinger_service_present(
-        target.surface_id, target.width, target.height,
+        target.surface_id, logical_width, logical_height,
         g_metal_composer_transaction_id, g_metal_composer_layers.data(),
         g_metal_composer_layers.size(), producer_event, producer_value);
     composed = completion_fence >= 0;
@@ -4658,7 +4760,11 @@ extern "C" void darwin_art_android_present_surface_control_state(
     std::uint32_t transform,
     std::int32_t destination_left, std::int32_t destination_top,
     std::int32_t destination_right, std::int32_t destination_bottom,
-    std::int32_t z, float alpha, const std::int32_t* transparent_region_rects,
+    std::int32_t position_x, std::int32_t position_y, float scale_x,
+    float scale_y, bool has_crop, std::int32_t crop_left,
+    std::int32_t crop_top, std::int32_t crop_right,
+    std::int32_t crop_bottom, std::int32_t z, float alpha,
+    const std::int32_t* transparent_region_rects,
     std::uint32_t transparent_region_count) {
   g_metal_composer_layers.push_back({
       .owner_process_id = owner_process_id,
@@ -4677,6 +4783,15 @@ extern "C" void darwin_art_android_present_surface_control_state(
       .destination_top = destination_top,
       .destination_right = destination_right,
       .destination_bottom = destination_bottom,
+      .position_x = position_x,
+      .position_y = position_y,
+      .scale_x = scale_x,
+      .scale_y = scale_y,
+      .has_crop = has_crop,
+      .crop_left = crop_left,
+      .crop_top = crop_top,
+      .crop_right = crop_right,
+      .crop_bottom = crop_bottom,
       .z = z,
       .alpha = alpha,
   });

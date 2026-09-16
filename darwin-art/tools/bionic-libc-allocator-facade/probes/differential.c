@@ -84,6 +84,31 @@ static int CheckSizeZeroAndRealloc(void) {
   return 0;
 }
 
+static int CheckReallocarrayOverflow(void) {
+  unsigned char* original = darwin_art_bionic_malloc(64);
+  CHECK(original != NULL);
+  memset(original, 0x6d, 64);
+  errno = 22001;
+  g_bionic_errno = 0;
+  void* result = darwin_art_bionic_reallocarray(original, SIZE_MAX, 2);
+  CHECK(result == NULL);
+  CHECK(g_bionic_errno == DARWIN_ART_BIONIC_ENOMEM);
+  CHECK(errno == 22001);
+  for (size_t index = 0; index < 64; ++index) CHECK(original[index] == 0x6d);
+  darwin_art_bionic_free(original);
+
+  unsigned char* small = darwin_art_bionic_malloc(8);
+  CHECK(small != NULL);
+  memset(small, 0x3a, 8);
+  g_bionic_errno = 0;
+  unsigned char* grown = darwin_art_bionic_reallocarray(small, 4, 8);
+  CHECK(grown != NULL);
+  CHECK(g_bionic_errno == 0);
+  for (size_t index = 0; index < 8; ++index) CHECK(grown[index] == 0x3a);
+  darwin_art_bionic_free(grown);
+  return 0;
+}
+
 static int CheckPosixMemalign(void) {
   const size_t invalid[] = {0, 1, 2, 3, 4, 6, 7, 12, 24};
   for (size_t index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index) {
@@ -150,7 +175,7 @@ static int CheckResolver(void) {
   const char* expected[] = {
       "aligned_alloc",      "calloc",          "free",    "mallinfo",
       "malloc",             "malloc_usable_size", "mallopt", "memalign",
-      "posix_memalign",     "realloc",         "strdup",  "strndup",
+      "posix_memalign",     "realloc", "reallocarray", "strdup", "strndup",
       "tempnam",
   };
   CHECK(count == sizeof(expected) / sizeof(expected[0]));
@@ -183,6 +208,8 @@ static int CheckResolver(void) {
   CHECK((table[8].capabilities & DARWIN_ART_BIONIC_ALLOC_FULL_RETURN_CODE) != 0);
   CHECK((table[9].capabilities &
          DARWIN_ART_BIONIC_ALLOC_NEEDS_ERRNO_RESULT_SEAM) != 0);
+  CHECK((table[10].capabilities &
+         DARWIN_ART_BIONIC_ALLOC_NEEDS_ERRNO_RESULT_SEAM) != 0);
   for (size_t index = 0; index < count; ++index) {
     CHECK((table[index].capabilities &
            DARWIN_ART_BIONIC_ALLOC_FIXED_REGISTER_ABI) != 0);
@@ -198,7 +225,25 @@ static int CheckResolver(void) {
 }
 
 int main(void) {
+  unsigned char* live = darwin_art_bionic_malloc(4096);
+  CHECK(live != NULL);
+  memset(live, 0x5a, 4096);
+  errno = EDOM;
+  g_bionic_errno = 7;
+  CHECK(darwin_art_bionic_mallopt(-101, 123) == 1);
+  CHECK(darwin_art_bionic_mallopt(-104, 0) == 1);
+  CHECK(errno == EDOM && g_bionic_errno == 7);
+  for (size_t i = 0; i < 4096; ++i) CHECK(live[i] == 0x5a);
+  CHECK(darwin_art_bionic_mallopt(123456, 0) == 0);
+  CHECK(!darwin_art_bionic_android_mallopt(1, live, 0));
+  CHECK(g_bionic_errno == 22);
+  CHECK(!darwin_art_bionic_android_mallopt(1, NULL, 0));
+  CHECK(g_bionic_errno == 95);
+  CHECK(!darwin_art_bionic_android_mallopt(123456, NULL, 0));
+  CHECK(g_bionic_errno == 95);
+  darwin_art_bionic_free(live);
   CHECK(CheckSizeZeroAndRealloc() == 0);
+  CHECK(CheckReallocarrayOverflow() == 0);
   CHECK(CheckPosixMemalign() == 0);
   CHECK(CheckAlignedAlloc() == 0);
   CHECK(CheckHostErrnoIsolation() == 0);

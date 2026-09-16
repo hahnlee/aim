@@ -1,0 +1,75 @@
+--- a/libs/gui/SurfaceComposerClient.cpp
++++ b/libs/gui/SurfaceComposerClient.cpp
+@@ -17,5 +17,8 @@
+ #define LOG_TAG "SurfaceComposerClient"
+
+ #include <semaphore.h>
++#if defined(__APPLE__)
++#include "commit_signal.h"
++#endif
+ #include <stdint.h>
+ #include <sys/types.h>
+@@ -1060,42 +1063,63 @@
+ class SyncCallback {
+ public:
+     static auto getCallback(std::shared_ptr<SyncCallback>& callbackContext) {
+         return [callbackContext](void* /* unused context */, nsecs_t /* latchTime */,
+                                  const sp<Fence>& /* presentFence */,
+                                  const std::vector<SurfaceControlStats>& /* stats */) {
+             if (!callbackContext) {
+                 ALOGE("failed to get callback context for SyncCallback");
+                 return;
+             }
++#if defined(__APPLE__)
++            callbackContext->mCommitSignal.signal();
++#else
+             LOG_ALWAYS_FATAL_IF(sem_post(&callbackContext->mSemaphore), "sem_post failed");
++#endif
+         };
+     }
+     ~SyncCallback() {
++#if !defined(__APPLE__)
+         if (mInitialized) {
+             LOG_ALWAYS_FATAL_IF(sem_destroy(&mSemaphore), "sem_destroy failed");
+         }
++#endif
+     }
+     void init() {
++#if defined(__APPLE__)
++        mDeadline = darwin_art::surfaceflinger::CommitSignal::Clock::now() + std::chrono::seconds(4);
++#else
+         LOG_ALWAYS_FATAL_IF(clock_gettime(CLOCK_MONOTONIC, &mTimeoutTimespec) == -1,
+                             "clock_gettime() fail! in SyncCallback::init");
+         mTimeoutTimespec.tv_sec += 4;
+         LOG_ALWAYS_FATAL_IF(sem_init(&mSemaphore, 0, 0), "sem_init failed");
+         mInitialized = true;
++#endif
+     }
+     void wait() {
++#if defined(__APPLE__)
++        if (!mCommitSignal.waitUntil(mDeadline)) {
++            ALOGW("Sync transaction timed out waiting for commit callback.");
++        }
++#else
+         int result = sem_clockwait(&mSemaphore, CLOCK_MONOTONIC, &mTimeoutTimespec);
+         if (result && errno != ETIMEDOUT && errno != EINTR) {
+             LOG_ALWAYS_FATAL("sem_clockwait failed(%d)", errno);
+         } else if (errno == ETIMEDOUT) {
+             ALOGW("Sync transaction timed out waiting for commit callback.");
+         }
++#endif
+     }
+     void* getContext() { return static_cast<void*>(this); }
+
+ private:
++#if defined(__APPLE__)
++    darwin_art::surfaceflinger::CommitSignal mCommitSignal;
++    darwin_art::surfaceflinger::CommitSignal::Clock::time_point mDeadline;
++#else
+     sem_t mSemaphore;
+     bool mInitialized = false;
+     timespec mTimeoutTimespec;
++#endif
+ };
+
+ status_t SurfaceComposerClient::Transaction::apply(bool synchronous, bool oneWay) {

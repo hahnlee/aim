@@ -61,63 +61,6 @@ bool IsListedHostFile(const char* path) {
   return false;
 }
 
-bool ResolveAlignedEnvironmentPath(const char* path,
-                                   const char* logical_environment,
-                                   const char* backing_environment,
-                                   std::string* backing) {
-  if (path == nullptr || logical_environment == nullptr ||
-      backing_environment == nullptr || backing == nullptr) {
-    return false;
-  }
-  const char* logical = std::getenv(logical_environment);
-  const char* physical = std::getenv(backing_environment);
-  if (logical == nullptr || physical == nullptr) return false;
-
-  const size_t path_length = std::strlen(path);
-  while (*logical != '\0' && *physical != '\0') {
-    const char* logical_end = std::strchr(logical, ':');
-    const char* physical_end = std::strchr(physical, ':');
-    const size_t logical_length =
-        logical_end == nullptr ? std::strlen(logical)
-                               : static_cast<size_t>(logical_end - logical);
-    const size_t physical_length =
-        physical_end == nullptr ? std::strlen(physical)
-                                : static_cast<size_t>(physical_end - physical);
-    if (logical_length == path_length &&
-        std::memcmp(logical, path, path_length) == 0) {
-      backing->assign(physical, physical_length);
-      return true;
-    }
-    if (logical_end == nullptr || physical_end == nullptr) break;
-    logical = logical_end + 1;
-    physical = physical_end + 1;
-  }
-  return false;
-}
-
-bool ResolveBootClassPathBacking(const char* path, std::string* backing) {
-  if (!ResolveAlignedEnvironmentPath(path,
-                                     "DARWIN_ART_BOOT_CLASSPATH_LOCATIONS",
-                                     "DARWIN_ART_BOOT_CLASSPATH",
-                                     backing)) {
-    return false;
-  }
-  // The two aligned lists preserve Android's logical BCP identity while the
-  // detached Darwin process opens its physical backing. Require the backing
-  // to be an exact immutable runtime-file capability; neither a directory
-  // prefix nor an arbitrary relative path crosses into the host filesystem.
-  return !backing->empty() && (*backing)[0] == '/' &&
-         IsListedHostFile(backing->c_str());
-}
-
-bool IsImmutableOpen(int linux_flags) {
-  constexpr int kAndroidAccessMode = 3;
-  constexpr int kAndroidReadOnly = 0;
-  constexpr int kAndroidWriteEffects = 64 | 128 | 512 | 1024;
-  return (linux_flags & kAndroidAccessMode) == kAndroidReadOnly &&
-         (linux_flags & kAndroidWriteEffects) == 0;
-}
-
 void RememberHostFd(int fd) {
   if (fd < 0) return;
   std::lock_guard<std::mutex> lock(g_host_fd_mutex);
@@ -250,12 +193,9 @@ bool IsAuthorizedHostRuntimePath(const char* path) {
 }
 
 int Open(const char* path, int linux_flags, mode_t mode) {
-  std::string boot_class_path_backing;
+  // Boot JARs live at their Android paths in the immutable system image.
+  // Keep NIO and libcore on that same filesystem, without a private BCP alias.
   const char* effective_path = path;
-  if (IsImmutableOpen(linux_flags) &&
-      ResolveBootClassPathBacking(path, &boot_class_path_backing)) {
-    effective_path = boot_class_path_backing.c_str();
-  }
   const char* system_root = std::getenv("DARWIN_ART_ANDROID_SYSTEM_ROOT");
   const bool use_sealed_system_file =
       system_root != nullptr && effective_path != nullptr &&
@@ -475,11 +415,7 @@ int Ftruncate(int fd, int64_t length) {
 }
 
 int Stat(const char* path, struct stat* status) {
-  std::string boot_class_path_backing;
   const char* effective_path = path;
-  if (ResolveBootClassPathBacking(path, &boot_class_path_backing)) {
-    effective_path = boot_class_path_backing.c_str();
-  }
   const bool authorized = IsAuthorizedHostRuntimePath(effective_path);
   if (std::getenv("DARWIN_ART_DEBUG_LIBCORE_IO") != nullptr &&
       path != nullptr && std::strstr(path, "app_resources_lib") != nullptr) {

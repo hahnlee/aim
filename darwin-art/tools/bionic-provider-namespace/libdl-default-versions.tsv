@@ -1,0 +1,16 @@
+symbol	default_version
+__cfi_init	LIBC_PLATFORM
+__cfi_shadow_size	LIBC_OMR1
+__cfi_slowpath	LIBC_OMR1
+__cfi_slowpath_diag	LIBC_OMR1
+android_dlopen_ext	LIBC
+android_get_LD_LIBRARY_PATH	LIBC_PLATFORM
+android_get_application_target_sdk_version	LIBC_N
+android_handle_signal	LIBC_PLATFORM
+dl_iterate_phdr	LIBC
+dladdr	LIBC
+dlclose	LIBC
+dlerror	LIBC
+dlopen	LIBC
+dlsym	LIBC
+dlvsym	LIBC_N

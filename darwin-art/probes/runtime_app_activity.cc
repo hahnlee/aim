@@ -1,274 +1,21 @@
 #include "runtime_app_activity.h"
+#include "../runtime/framework/app/process_attachment.h"
+#include "../runtime/framework/app/application_binding.h"
+#include "../runtime/framework/os/service_process_transport.h"
 
-#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
-#include <iterator>
 #include <string>
 #include <sstream>
-#include <unistd.h>
 
 #include "mirror/throwable.h"
 #include "darwin_binder_wire.h"
-#include "runtime_process_state.h"
+#include "darwin_surface_bridge.h"
 #include "thread-current-inl.h"
 
 namespace darwin_art_app_activity {
 namespace {
-
-bool DecodeHex(const std::string& encoded, std::string* decoded) {
-  if (decoded == nullptr || encoded.size() % 2 != 0) return false;
-  decoded->clear();
-  decoded->reserve(encoded.size() / 2);
-  auto nibble = [](char value) -> int {
-    if (value >= '0' && value <= '9') return value - '0';
-    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
-    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
-    return -1;
-  };
-  for (size_t index = 0; index < encoded.size(); index += 2) {
-    const int high = nibble(encoded[index]);
-    const int low = nibble(encoded[index + 1]);
-    if (high < 0 || low < 0) return false;
-    decoded->push_back(static_cast<char>((high << 4) | low));
-  }
-  return true;
-}
-
-std::vector<std::string> Split(const std::string& value, char delimiter) {
-  std::vector<std::string> result;
-  size_t begin = 0;
-  while (begin <= value.size()) {
-    const size_t end = value.find(delimiter, begin);
-    result.push_back(value.substr(begin, end == std::string::npos
-                                           ? std::string::npos
-                                           : end - begin));
-    if (end == std::string::npos) break;
-    begin = end + 1;
-  }
-  return result;
-}
-
-jobject AllocateWithoutConstructor(JNIEnv* env, jclass type) {
-  if (env == nullptr || type == nullptr) return nullptr;
-  jclass unsafe_class = env->FindClass("sun/misc/Unsafe");
-  if (unsafe_class == nullptr) {
-    env->ExceptionClear();
-    unsafe_class = env->FindClass("jdk/internal/misc/Unsafe");
-  }
-  if (unsafe_class == nullptr) {
-    env->ExceptionClear();
-    return nullptr;
-  }
-  jfieldID singleton = env->GetStaticFieldID(unsafe_class, "theUnsafe",
-                                             "Lsun/misc/Unsafe;");
-  if (singleton == nullptr) {
-    env->ExceptionClear();
-    singleton = env->GetStaticFieldID(unsafe_class, "theUnsafe",
-                                      "Ljdk/internal/misc/Unsafe;");
-  }
-  jobject unsafe = singleton == nullptr
-                       ? nullptr
-                       : env->GetStaticObjectField(unsafe_class, singleton);
-  jmethodID allocate = unsafe == nullptr
-                           ? nullptr
-                           : env->GetMethodID(unsafe_class, "allocateInstance",
-                                              "(Ljava/lang/Class;)Ljava/lang/Object;");
-  jobject result = (unsafe != nullptr && allocate != nullptr)
-                       ? env->CallObjectMethod(unsafe, allocate, type)
-                       : nullptr;
-  env->ExceptionClear();
-  env->DeleteLocalRef(unsafe);
-  env->DeleteLocalRef(unsafe_class);
-  return result;
-}
-
-bool InstallDeclaredContentProviders(JNIEnv* env, jobject context,
-                                     jobject application_info,
-                                     jobject app_loader) {
-  const char* encoded = std::getenv("DARWIN_ART_APK_APP_PROVIDERS");
-  if (env == nullptr || context == nullptr || app_loader == nullptr ||
-      encoded == nullptr || encoded[0] == '\0' ||
-      std::strcmp(encoded, "none") == 0) {
-    return true;
-  }
-  jclass loader_class = env->GetObjectClass(app_loader);
-  jmethodID load_class = loader_class == nullptr
-                             ? nullptr
-                             : env->GetMethodID(
-                                   loader_class, "loadClass",
-                                   "(Ljava/lang/String;)Ljava/lang/Class;");
-  jclass provider_info_class = env->FindClass("android/content/pm/ProviderInfo");
-  jmethodID provider_info_constructor =
-      provider_info_class == nullptr
-          ? nullptr
-          : env->GetMethodID(provider_info_class, "<init>", "()V");
-  jclass bundle_class = env->FindClass("android/os/Bundle");
-  jmethodID bundle_constructor = bundle_class == nullptr
-                                     ? nullptr
-                                     : env->GetMethodID(bundle_class, "<init>", "()V");
-  jmethodID put_string = bundle_class == nullptr
-                             ? nullptr
-                             : env->GetMethodID(bundle_class, "putString",
-                                                "(Ljava/lang/String;Ljava/lang/String;)V");
-  jmethodID put_int = bundle_class == nullptr
-                          ? nullptr
-                          : env->GetMethodID(bundle_class, "putInt",
-                                             "(Ljava/lang/String;I)V");
-  jmethodID put_boolean = bundle_class == nullptr
-                              ? nullptr
-                              : env->GetMethodID(bundle_class, "putBoolean",
-                                                 "(Ljava/lang/String;Z)V");
-  jfieldID info_name = provider_info_class == nullptr
-                           ? nullptr
-                           : env->GetFieldID(provider_info_class, "name",
-                                             "Ljava/lang/String;");
-  jfieldID info_authority = provider_info_class == nullptr
-                                ? nullptr
-                                : env->GetFieldID(provider_info_class, "authority",
-                                                  "Ljava/lang/String;");
-  jfieldID info_init_order = provider_info_class == nullptr
-                                 ? nullptr
-                                 : env->GetFieldID(provider_info_class, "initOrder", "I");
-  jfieldID info_application = provider_info_class == nullptr
-                                  ? nullptr
-                                  : env->GetFieldID(
-                                        provider_info_class, "applicationInfo",
-                                        "Landroid/content/pm/ApplicationInfo;");
-  jfieldID info_metadata = provider_info_class == nullptr
-                               ? nullptr
-                               : env->GetFieldID(provider_info_class, "metaData",
-                                                 "Landroid/os/Bundle;");
-  if (load_class == nullptr || provider_info_constructor == nullptr ||
-      bundle_constructor == nullptr || info_name == nullptr ||
-      info_authority == nullptr || info_init_order == nullptr ||
-      info_application == nullptr || info_metadata == nullptr ||
-      env->ExceptionCheck()) {
-    if (env->ExceptionCheck()) env->ExceptionClear();
-    return false;
-  }
-  for (const std::string& item : Split(encoded, ';')) {
-    if (item.empty()) continue;
-    const size_t first = item.find('>');
-    const size_t second = first == std::string::npos
-                              ? std::string::npos
-                              : item.find('>', first + 1);
-    const size_t third = second == std::string::npos
-                             ? std::string::npos
-                             : item.find('>', second + 1);
-    if (first == std::string::npos || second == std::string::npos ||
-        third == std::string::npos) {
-      continue;
-    }
-    std::string provider_name;
-    std::string authority;
-    if (!DecodeHex(item.substr(0, first), &provider_name) ||
-        !DecodeHex(item.substr(first + 1, second - first - 1), &authority)) {
-      continue;
-    }
-    // FirebaseInitProvider is intentionally owned by the APK Application in
-    // this detached process.  Calling it here as well starts a second
-    // Firebase singleton before ActivityThread has published the application
-    // context and causes Firebase's fatal-exit path.  Other manifest
-    // providers (notably AndroidX Startup/WorkManager) still follow the
-    // Android attachInfo -> onCreate ordering below.
-    if (provider_name ==
-        "com.google.firebase.provider.FirebaseInitProvider") {
-      continue;
-    }
-    const unsigned long init_order = std::strtoul(
-        item.substr(second + 1, third - second - 1).c_str(), nullptr, 16);
-    jstring class_name = env->NewStringUTF(provider_name.c_str());
-    jclass provider_class = reinterpret_cast<jclass>(
-        env->CallObjectMethod(app_loader, load_class, class_name));
-    env->DeleteLocalRef(class_name);
-    if (provider_class == nullptr || env->ExceptionCheck()) {
-      if (env->ExceptionCheck()) env->ExceptionClear();
-      env->DeleteLocalRef(provider_class);
-      continue;  // Optional Play Services providers may be absent.
-    }
-    jmethodID provider_constructor =
-        env->GetMethodID(provider_class, "<init>", "()V");
-    jmethodID attach_info = env->GetMethodID(
-        provider_class, "attachInfo",
-        "(Landroid/content/Context;Landroid/content/pm/ProviderInfo;)V");
-    jmethodID on_create = env->GetMethodID(provider_class, "onCreate", "()Z");
-    jobject provider = provider_constructor == nullptr
-                           ? nullptr
-                           : env->NewObject(provider_class, provider_constructor);
-    // ProviderInfo is an SDK-stub class in the compact framework image and
-    // its public constructor throws RuntimeException("Stub!"). Android's
-    // system_server allocates it as a parcelable data holder, so mirror that
-    // behavior with Unsafe when the constructor is a stub.
-    jobject info = env->NewObject(provider_info_class, provider_info_constructor);
-    if (info == nullptr && env->ExceptionCheck()) {
-      env->ExceptionClear();
-      info = AllocateWithoutConstructor(env, provider_info_class);
-    }
-    jobject metadata = env->NewObject(bundle_class, bundle_constructor);
-    jstring name_value = env->NewStringUTF(provider_name.c_str());
-    jstring authority_value = env->NewStringUTF(authority.c_str());
-    if (provider != nullptr && info != nullptr && metadata != nullptr &&
-        name_value != nullptr && authority_value != nullptr &&
-        !env->ExceptionCheck()) {
-      env->SetObjectField(info, info_name, name_value);
-      env->SetObjectField(info, info_authority, authority_value);
-      env->SetIntField(info, info_init_order, static_cast<jint>(init_order));
-      if (application_info != nullptr) {
-        env->SetObjectField(info, info_application, application_info);
-      }
-      for (const std::string& metadata_item :
-           Split(item.substr(third + 1), ',')) {
-        const size_t colon = metadata_item.find(':');
-        const size_t value_colon = colon == std::string::npos
-                                       ? std::string::npos
-                                       : metadata_item.find(':', colon + 1);
-        if (colon == std::string::npos || value_colon == std::string::npos) continue;
-        std::string metadata_name;
-        if (!DecodeHex(metadata_item.substr(0, colon), &metadata_name)) continue;
-        jstring key = env->NewStringUTF(metadata_name.c_str());
-        const char kind = metadata_item[colon + 1];
-        const std::string value = metadata_item.substr(value_colon + 1);
-        if (kind == 's' && put_string != nullptr) {
-          std::string string_value;
-          if (DecodeHex(value, &string_value)) {
-            jstring text = env->NewStringUTF(string_value.c_str());
-            env->CallVoidMethod(metadata, put_string, key, text);
-            env->DeleteLocalRef(text);
-          }
-        } else if ((kind == 'i' || kind == 'r') && put_int != nullptr) {
-          const jint integer = static_cast<jint>(std::strtoul(value.c_str(), nullptr, 16));
-          env->CallVoidMethod(metadata, put_int, key, integer);
-        } else if (kind == 'b' && put_boolean != nullptr) {
-          env->CallVoidMethod(metadata, put_boolean, key, value == "1");
-        }
-        env->DeleteLocalRef(key);
-      }
-      env->SetObjectField(info, info_metadata, metadata);
-      if (attach_info != nullptr) {
-        env->CallVoidMethod(provider, attach_info, context, info);
-      }
-      if (on_create != nullptr && !env->ExceptionCheck()) {
-        env->CallBooleanMethod(provider, on_create);
-      }
-    }
-    env->DeleteLocalRef(authority_value);
-    env->DeleteLocalRef(name_value);
-    env->DeleteLocalRef(metadata);
-    env->DeleteLocalRef(info);
-    env->DeleteLocalRef(provider);
-    env->DeleteLocalRef(provider_class);
-    if (env->ExceptionCheck()) {
-      env->ExceptionDescribe();
-      env->ExceptionClear();
-    }
-  }
-  env->DeleteLocalRef(bundle_class);
-  env->DeleteLocalRef(provider_info_class);
-  env->DeleteLocalRef(loader_class);
-  return !env->ExceptionCheck();
-}
 
 std::string JavaString(JNIEnv* env, jstring value) {
   if (value == nullptr) return {};
@@ -277,71 +24,6 @@ std::string JavaString(JNIEnv* env, jstring value) {
   std::string result(utf);
   env->ReleaseStringUTFChars(value, utf);
   return result;
-}
-
-jintArray SpawnService(JNIEnv* env, jclass, jstring component,
-                       jstring instance_name, jstring process_name,
-                       jboolean isolated, jobject intent) {
-  const bool debug_timing =
-      std::getenv("DARWIN_ART_DEBUG_SLOW_FRAME") != nullptr;
-  const auto started = std::chrono::steady_clock::now();
-  const auto log_stage = [&](const char* stage) {
-    if (!debug_timing) return;
-    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                             std::chrono::steady_clock::now() - started)
-                             .count();
-    std::cerr << "DARWIN_ART service-spawn stage=" << stage
-              << " elapsed_us=" << elapsed << "\n";
-  };
-  const std::string component_utf = JavaString(env, component);
-  const std::string instance_utf = JavaString(env, instance_name);
-  const std::string process_utf = JavaString(env, process_name);
-  if (component_utf.empty() || process_utf.empty() || env->ExceptionCheck()) {
-    return nullptr;
-  }
-  int32_t host_pid = -1;
-  int32_t control_fd = -1;
-  const int32_t spawn_status = darwin_art_process::spawn_service_process(
-      component_utf.c_str(), instance_utf.c_str(), process_utf.c_str(),
-      isolated == JNI_TRUE, &host_pid, &control_fd);
-  log_stage("spawn");
-  if (spawn_status != 0) {
-    return nullptr;
-  }
-  const bool intent_sent =
-      intent != nullptr && darwin_art::SendServiceBindIntent(env, control_fd, intent);
-  log_stage("bind-intent");
-  const bool dispatcher_started =
-      intent_sent && darwin_art::StartRemoteBinderDispatcher(env, control_fd);
-  log_stage("dispatcher");
-  if (!dispatcher_started) {
-    close(control_fd);
-    darwin_art_process::release_service_process(host_pid);
-    return nullptr;
-  }
-  jint values[2] = {host_pid, control_fd};
-  jintArray result = env->NewIntArray(2);
-  if (result == nullptr || env->ExceptionCheck()) {
-    close(control_fd);
-    darwin_art_process::release_service_process(host_pid);
-    return nullptr;
-  }
-  env->SetIntArrayRegion(result, 0, 2, values);
-  return env->ExceptionCheck() ? nullptr : result;
-}
-
-jint ReleaseRemoteService(JNIEnv* env, jclass, jint host_pid, jint control_fd) {
-  darwin_art::CloseRemoteBinderChannel(env, control_fd);
-  const int close_status = control_fd < 0 ? -1 : close(control_fd);
-  const int32_t release_status =
-      darwin_art_process::release_service_process(host_pid);
-  return close_status == 0 && release_status == 0 ? 0 : -1;
-}
-
-jboolean RemoteTransact(JNIEnv* env, jclass, jint control_fd, jint target_id,
-                        jint code, jobject data, jobject reply, jint flags) {
-  return darwin_art::TransactRemoteBinder(env, control_fd, target_id, code,
-                                         data, reply, flags);
 }
 
 jstring ResolveInstalledPackage(JNIEnv* env, jclass, jstring package_name) {
@@ -354,13 +36,15 @@ jstring ResolveInstalledPackage(JNIEnv* env, jclass, jstring package_name) {
 
 bool InstallPackageManagerNatives(JNIEnv* env, jobject package_manager) {
   jclass package_manager_class = env->GetObjectClass(package_manager);
+  jclass record_endpoint = env->FindClass("dev/darwinart/runtime/pm/PackageRecords");
   JNINativeMethod methods[] = {
       {const_cast<char*>("nativeResolveInstalledPackage"),
        const_cast<char*>("(Ljava/lang/String;)Ljava/lang/String;"),
        reinterpret_cast<void*>(&ResolveInstalledPackage)},
   };
-  const bool installed = package_manager_class != nullptr &&
-                         env->RegisterNatives(package_manager_class, methods, 1) == JNI_OK;
+  const bool installed = package_manager_class != nullptr && record_endpoint != nullptr &&
+                         env->RegisterNatives(record_endpoint, methods, 1) == JNI_OK;
+  env->DeleteLocalRef(record_endpoint);
   const char* verify_package = std::getenv("DARWIN_ART_VERIFY_SYSTEM_PACKAGE");
   if (installed && verify_package != nullptr && *verify_package != '\0') {
     jmethodID get_package_info = env->GetMethodID(
@@ -386,54 +70,6 @@ bool InstallPackageManagerNatives(JNIEnv* env, jobject package_manager) {
   return installed;
 }
 
-bool InstallHostServiceNatives(JNIEnv* env, jclass probe_context_class) {
-  JNINativeMethod methods[] = {
-      {const_cast<char*>("nativeSpawnService"),
-       const_cast<char*>(
-           "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
-           "ZLandroid/content/Intent;)[I"),
-       reinterpret_cast<void*>(&SpawnService)},
-      {const_cast<char*>("nativeReleaseRemoteService"),
-       const_cast<char*>("(II)I"),
-       reinterpret_cast<void*>(&ReleaseRemoteService)},
-      {const_cast<char*>("nativeRemoteTransact"),
-       const_cast<char*>(
-           "(IIILandroid/os/Parcel;Landroid/os/Parcel;I)Z"),
-       reinterpret_cast<void*>(&RemoteTransact)},
-  };
-  return env->RegisterNatives(probe_context_class, methods,
-                              static_cast<jint>(std::size(methods))) == JNI_OK;
-}
-
-bool EnsureActivityThreadConfigurationController(JNIEnv* env,
-                                                 jobject activity_thread) {
-  if (env == nullptr || activity_thread == nullptr) return false;
-  jclass activity_thread_class = env->FindClass("android/app/ActivityThread");
-  jclass controller_class =
-      env->FindClass("android/app/ConfigurationController");
-  jfieldID controller_field =
-      activity_thread_class == nullptr
-          ? nullptr
-          : env->GetFieldID(activity_thread_class, "mConfigurationController",
-                            "Landroid/app/ConfigurationController;");
-  if (controller_class == nullptr || controller_field == nullptr ||
-      env->ExceptionCheck()) {
-    return false;
-  }
-  jobject controller =
-      env->GetObjectField(activity_thread, controller_field);
-  if (controller != nullptr) return !env->ExceptionCheck();
-  jmethodID constructor = env->GetMethodID(
-      controller_class, "<init>", "(Landroid/app/ActivityThreadInternal;)V");
-  controller = constructor == nullptr
-                   ? nullptr
-                   : env->NewObject(controller_class, constructor,
-                                    activity_thread);
-  if (controller == nullptr || env->ExceptionCheck()) return false;
-  env->SetObjectField(activity_thread, controller_field, controller);
-  return !env->ExceptionCheck();
-}
-
 }  // namespace
 
 int prepare(JNIEnv* env, art::Thread* self, jobject* activity_instance_out,
@@ -451,7 +87,8 @@ int prepare(JNIEnv* env, art::Thread* self, jobject* activity_instance_out,
   if (!run_apk_app && activity_instance == nullptr) {
     return 27;
   }
-  if (!InstallHostServiceNatives(env, probe_context_class) ||
+  if (!darwin_art::framework::os::RegisterServiceProcessTransport(
+          env, probe_context_class) ||
       !InstallPackageManagerNatives(env, package_manager) ||
       env->ExceptionCheck()) {
     std::cerr << "ART Android process: host service JNI setup failed\n";
@@ -718,335 +355,13 @@ int prepare(JNIEnv* env, art::Thread* self, jobject* activity_instance_out,
   }
 
   jobject application = resources->application;
-  jobject apk_application = nullptr;
-  const char* application_name =
-      run_apk_app ? std::getenv("DARWIN_ART_APK_APP_APPLICATION") : nullptr;
-  // ActivityThread attaches every Application, including the base
-  // android.app.Application class, to the process Context before any Activity
-  // lifecycle callback. Do not special-case the framework class: apps that do
-  // not declare a subclass still rely on its database/files/services context.
-  if (application_name != nullptr) {
-    jclass class_class = env->FindClass("java/lang/Class");
-    jmethodID get_class_loader =
-        class_class == nullptr
-            ? nullptr
-            : env->GetMethodID(class_class, "getClassLoader",
-                               "()Ljava/lang/ClassLoader;");
-    jobject app_loader =
-        get_class_loader == nullptr
-            ? nullptr
-            : env->CallObjectMethod(
-                  reinterpret_cast<jobject>(probe_activity_class),
-                  get_class_loader);
-    jclass loader_class =
-        app_loader == nullptr ? nullptr : env->GetObjectClass(app_loader);
-    jmethodID load_class =
-        loader_class == nullptr
-            ? nullptr
-            : env->GetMethodID(loader_class, "loadClass",
-                               "(Ljava/lang/String;)Ljava/lang/Class;");
-    jstring application_class_name = env->NewStringUTF(application_name);
-    jclass application_class =
-        load_class == nullptr || application_class_name == nullptr
-            ? nullptr
-            : reinterpret_cast<jclass>(env->CallObjectMethod(
-                  app_loader, load_class, application_class_name));
-    jmethodID application_constructor =
-        application_class == nullptr
-            ? nullptr
-            : env->GetMethodID(application_class, "<init>", "()V");
-    apk_application =
-        application_constructor == nullptr
-            ? nullptr
-            : env->NewObject(application_class, application_constructor);
-    jclass context_wrapper_class =
-        env->FindClass("android/content/ContextWrapper");
-    jfieldID application_base =
-        context_wrapper_class == nullptr
-            ? nullptr
-            : env->GetFieldID(context_wrapper_class, "mBase",
-                              "Landroid/content/Context;");
-    jmethodID application_attach_base =
-        context_wrapper_class == nullptr
-            ? nullptr
-            : env->GetMethodID(context_wrapper_class, "attachBaseContext",
-                               "(Landroid/content/Context;)V");
-    jmethodID application_on_create =
-        resources->application_class == nullptr
-            ? nullptr
-            : env->GetMethodID(resources->application_class, "onCreate", "()V");
-    jclass activity_thread_class = env->FindClass("android/app/ActivityThread");
-    jfieldID current_activity_thread =
-        activity_thread_class == nullptr
-            ? nullptr
-            : env->GetStaticFieldID(activity_thread_class,
-                                    "sCurrentActivityThread",
-                                    "Landroid/app/ActivityThread;");
-    jfieldID initial_application =
-        activity_thread_class == nullptr
-            ? nullptr
-            : env->GetFieldID(activity_thread_class, "mInitialApplication",
-                              "Landroid/app/Application;");
-    jfieldID bound_application =
-        activity_thread_class == nullptr
-            ? nullptr
-            : env->GetFieldID(activity_thread_class, "mBoundApplication",
-                              "Landroid/app/ActivityThread$AppBindData;");
-    jobject activity_thread =
-        current_activity_thread == nullptr
-            ? nullptr
-            : env->GetStaticObjectField(activity_thread_class,
-                                        current_activity_thread);
-    if (activity_thread == nullptr && activity_thread_class != nullptr &&
-        !env->ExceptionCheck()) {
-      jmethodID activity_thread_constructor =
-          env->GetMethodID(activity_thread_class, "<init>", "()V");
-      if (activity_thread_constructor != nullptr && !env->ExceptionCheck()) {
-        activity_thread =
-            env->NewObject(activity_thread_class, activity_thread_constructor);
-        if (activity_thread != nullptr && !env->ExceptionCheck()) {
-          env->SetStaticObjectField(activity_thread_class,
-                                    current_activity_thread, activity_thread);
-        }
-      }
-    }
-    if (!EnsureActivityThreadConfigurationController(env, activity_thread)) {
-      std::cerr << "ART Android process: ActivityThread configuration setup "
-                   "failed\n";
-      if (env->ExceptionCheck()) env->ExceptionDescribe();
+  if (run_apk_app) {
+    application = darwin_art::framework::app::AwaitApplication(env);
+    if (application == nullptr || env->ExceptionCheck()) {
+      std::cerr << "ART Android process: framework application binding failed\n";
+      if (self->IsExceptionPending()) std::cerr << self->GetException()->Dump() << "\n";
       return 27;
     }
-    // bindApplication() publishes this record before Application.attach().
-    // Application.getProcessName/currentPackageName intentionally read it.
-    jclass bind_data_class =
-        env->FindClass("android/app/ActivityThread$AppBindData");
-    jmethodID bind_data_constructor =
-        bind_data_class == nullptr
-            ? nullptr
-            : env->GetMethodID(bind_data_class, "<init>", "()V");
-    jobject bind_data =
-        bind_data_constructor == nullptr
-            ? nullptr
-            : env->NewObject(bind_data_class, bind_data_constructor);
-    jfieldID bind_process_name =
-        bind_data_class == nullptr
-            ? nullptr
-            : env->GetFieldID(bind_data_class, "processName",
-                              "Ljava/lang/String;");
-    jclass application_info_class =
-        env->FindClass("android/content/pm/ApplicationInfo");
-    jmethodID application_info_constructor =
-        application_info_class == nullptr
-            ? nullptr
-            : env->GetMethodID(application_info_class, "<init>", "()V");
-    jobject application_info =
-        application_info_constructor == nullptr
-            ? nullptr
-            : env->NewObject(application_info_class,
-                             application_info_constructor);
-    jfieldID bind_app_info =
-        bind_data_class == nullptr
-            ? nullptr
-            : env->GetFieldID(bind_data_class, "appInfo",
-                              "Landroid/content/pm/ApplicationInfo;");
-    jfieldID app_info_package =
-        application_info_class == nullptr
-            ? nullptr
-            : env->GetFieldID(application_info_class, "packageName",
-                              "Ljava/lang/String;");
-    jfieldID app_info_process =
-        application_info_class == nullptr
-            ? nullptr
-            : env->GetFieldID(application_info_class, "processName",
-                              "Ljava/lang/String;");
-    const char* configured_process_name =
-        std::getenv("DARWIN_ART_APK_PROCESS_NAME");
-    jstring process_name = env->NewStringUTF(
-        configured_process_name == nullptr ? apk_app_package
-                                           : configured_process_name);
-    jstring application_package = env->NewStringUTF(apk_app_package);
-    // Zygote sets Process.sArgV0 before ActivityThread.bindApplication().
-    // Process.myProcessName() is a Java accessor for that field (not a native
-    // method), and Android SDKs require its @NonNull contract during eager
-    // application initialization.
-    jclass process_class = env->FindClass("android/os/Process");
-    jfieldID process_arg_v0 =
-        process_class == nullptr
-            ? nullptr
-            : env->GetStaticFieldID(process_class, "sArgV0",
-                                    "Ljava/lang/String;");
-    if (process_arg_v0 != nullptr && process_name != nullptr &&
-        !env->ExceptionCheck()) {
-      env->SetStaticObjectField(process_class, process_arg_v0, process_name);
-    }
-    if (activity_thread != nullptr && bind_data != nullptr &&
-        application_info != nullptr && bound_application != nullptr &&
-        bind_process_name != nullptr && bind_app_info != nullptr &&
-        app_info_package != nullptr && app_info_process != nullptr &&
-        process_name != nullptr && application_package != nullptr &&
-        !env->ExceptionCheck()) {
-      env->SetObjectField(bind_data, bind_process_name, process_name);
-      env->SetObjectField(application_info, app_info_package,
-                          application_package);
-      env->SetObjectField(application_info, app_info_process, process_name);
-      env->SetObjectField(bind_data, bind_app_info, application_info);
-      env->SetObjectField(activity_thread, bound_application, bind_data);
-    }
-    if (apk_application != nullptr && application_base != nullptr &&
-        application_attach_base != nullptr && application_on_create != nullptr &&
-        activity_thread != nullptr && bind_data != nullptr &&
-        !env->ExceptionCheck()) {
-      // ActivityThread's Application.attach() invokes the application's
-      // virtual attachBaseContext() before onCreate(). Calling the virtual hook
-      // here preserves application bootstrap logic (Chromium publishes its
-      // process Context from this callback) while avoiding Application.attach's
-      // ContextImpl-only LoadedApk bookkeeping in the detached host.
-      env->CallVoidMethod(apk_application, application_attach_base,
-                          out->probe_context);
-      if (env->ExceptionCheck()) {
-        std::cerr << "ART Android window: application attachBaseContext failed\n";
-        if (self->IsExceptionPending()) {
-          std::cerr << self->GetException()->Dump() << "\n";
-        }
-        return 27;
-      }
-      // Application.attach() guarantees a usable ContextWrapper base before
-      // returning to ActivityThread. Some split-aware Applications publish
-      // themselves from an override before eventually delegating to the
-      // framework implementation; preserve the callback, then establish the
-      // framework invariant if that delegation did not attach the base.
-      jobject application_context_base =
-          env->GetObjectField(apk_application, application_base);
-      if (application_context_base == nullptr && !env->ExceptionCheck()) {
-        env->CallNonvirtualVoidMethod(apk_application, context_wrapper_class,
-                                      application_attach_base,
-                                      out->probe_context);
-      }
-      env->DeleteLocalRef(application_context_base);
-      if (env->ExceptionCheck()) {
-        std::cerr << "ART Android window: Application base Context setup failed\n";
-        return 27;
-      }
-      jmethodID set_application_context = env->GetMethodID(
-          probe_context_class, "setApplicationContext",
-          "(Landroid/content/Context;)V");
-      if (set_application_context == nullptr || env->ExceptionCheck()) {
-        std::cerr << "ART Android window: application context identity setup failed\n";
-        return 27;
-      }
-      env->CallVoidMethod(out->probe_context, set_application_context,
-                          apk_application);
-      if (activity_thread == nullptr || initial_application == nullptr ||
-          env->ExceptionCheck()) {
-        std::cerr << "ART Android window: ActivityThread application setup failed\n";
-        return 27;
-      }
-      env->SetObjectField(activity_thread, initial_application,
-                          apk_application);
-      env->DeleteLocalRef(application_package);
-      env->DeleteLocalRef(process_name);
-      env->DeleteLocalRef(application_info);
-      env->DeleteLocalRef(application_info_class);
-      env->DeleteLocalRef(bind_data);
-      env->DeleteLocalRef(bind_data_class);
-      env->DeleteLocalRef(activity_thread);
-      env->DeleteLocalRef(activity_thread_class);
-      jobject installed_base =
-          env->GetObjectField(apk_application, application_base);
-      if (installed_base == nullptr && !env->ExceptionCheck()) {
-        std::cerr << "ART Android window: application base context was not installed\n";
-      }
-      env->DeleteLocalRef(installed_base);
-      jclass context_class = env->FindClass("android/content/Context");
-      jmethodID get_application_context =
-          context_class == nullptr
-              ? nullptr
-              : env->GetMethodID(context_class, "getApplicationContext",
-                                 "()Landroid/content/Context;");
-      jobject installed_application_context =
-          get_application_context == nullptr || env->ExceptionCheck()
-              ? nullptr
-              : env->CallObjectMethod(apk_application,
-                                      get_application_context);
-      if (installed_application_context == nullptr && !env->ExceptionCheck()) {
-        std::cerr << "ART Android window: application context is null after install\n";
-      }
-      env->DeleteLocalRef(installed_application_context);
-      env->DeleteLocalRef(context_class);
-      if (!env->ExceptionCheck()) {
-        jfieldID activity_application_info =
-            resources->activity_info_class == nullptr
-                ? nullptr
-                : env->GetFieldID(resources->activity_info_class,
-                                  "applicationInfo",
-                                  "Landroid/content/pm/ApplicationInfo;");
-        jobject provider_application_info =
-            activity_application_info == nullptr ||
-                    resources->activity_info == nullptr
-                ? nullptr
-                : env->GetObjectField(resources->activity_info,
-                                      activity_application_info);
-        if (!InstallDeclaredContentProviders(
-                env, out->probe_context, provider_application_info, app_loader)) {
-          std::cerr << "ART Android process: ContentProvider bootstrap failed\n";
-          env->DeleteLocalRef(provider_application_info);
-          return 27;
-        }
-        env->DeleteLocalRef(provider_application_info);
-        // Zygote initializes Typeface before Application.onCreate(). Arbitrary
-        // APKs, including Chromium, can resolve fonts from their Application
-        // callback, so the detached process must establish the same invariant
-        // before entering app code rather than waiting for Activity creation.
-        jstring font_bootstrap_name =
-            env->NewStringUTF("dev.darwinart.probe.FontBootstrap");
-        jclass font_bootstrap =
-            load_class == nullptr || font_bootstrap_name == nullptr
-                ? nullptr
-                : reinterpret_cast<jclass>(env->CallObjectMethod(
-                      app_loader, load_class, font_bootstrap_name));
-        jmethodID install_fonts =
-            font_bootstrap == nullptr
-                ? nullptr
-                : env->GetStaticMethodID(font_bootstrap, "install", "()V");
-        if (install_fonts != nullptr && !env->ExceptionCheck()) {
-          env->CallStaticVoidMethod(font_bootstrap, install_fonts);
-          if (env->ExceptionCheck()) {
-            // A minimal Darwin image may not expose the platform Minikin
-            // native Typeface factory even though the APK's Java framework
-            // classes are present. Keep Application.onCreate reachable while
-            // preserving the pending exception as a diagnostic; text paths
-            // can then use the Skia-backed host fallback instead of aborting
-            // the entire Android process during zygote-equivalent bootstrap.
-            std::cerr << "ART Android framework: system font bootstrap unavailable;"
-                      << " continuing with host font fallback\n";
-            if (self->GetException() != nullptr) {
-              std::cerr << self->GetException()->Dump() << "\n";
-            }
-            env->ExceptionDescribe();
-            env->ExceptionClear();
-          }
-        }
-        env->DeleteLocalRef(font_bootstrap);
-        env->DeleteLocalRef(font_bootstrap_name);
-      }
-      if (!env->ExceptionCheck()) {
-        env->CallVoidMethod(apk_application, application_on_create);
-      }
-    }
-    env->DeleteLocalRef(application_class);
-    env->DeleteLocalRef(context_wrapper_class);
-    env->DeleteLocalRef(application_class_name);
-    env->DeleteLocalRef(loader_class);
-    env->DeleteLocalRef(app_loader);
-    env->DeleteLocalRef(class_class);
-    if (apk_application == nullptr || env->ExceptionCheck()) {
-      std::cerr << "ART Android window: application bootstrap failed\n";
-      if (self->IsExceptionPending()) {
-        std::cerr << self->GetException()->Dump() << "\n";
-      }
-      return 27;
-    }
-    application = apk_application;
   }
 
   // ActivityThread creates and attaches the Application before invoking the
@@ -1150,6 +465,13 @@ int prepare(JNIEnv* env, art::Thread* self, jobject* activity_instance_out,
     // Host presentation consumes a resolved title, while package metadata
     // keeps the original resource reference and literal label separate.
     setenv("DARWIN_ART_APK_WINDOW_TITLE", window_title.c_str(), 1);
+    const DarwinArtSurfaceResult title_status =
+        darwin_art_surface_set_active_title(window_title.c_str());
+    if (title_status != DARWIN_ART_SURFACE_OK) {
+      std::cerr << "ART Android window: could not publish resolved title status="
+                << title_status << "\n";
+      return 31;
+    }
   }
   jstring title = env->NewStringUTF(window_title.c_str());
   jobject component_name =
@@ -1185,13 +507,14 @@ int prepare(JNIEnv* env, art::Thread* self, jobject* activity_instance_out,
       activity_thread = env->NewObject(activity_thread_class,
                                        activity_thread_constructor);
       if (activity_thread != nullptr && !env->ExceptionCheck()) {
-        env->SetStaticObjectField(activity_thread_class,
-                                  current_activity_thread,
-                                  activity_thread);
+        if (!darwin_art::framework::app::AttachApplicationProcess(env, activity_thread)) {
+          if (env->ExceptionCheck()) env->ExceptionDescribe();
+          return 27;
+        }
       }
     }
   }
-  if (!EnsureActivityThreadConfigurationController(env, activity_thread)) {
+  if (activity_thread == nullptr || env->ExceptionCheck()) {
     std::cerr << "ART Android process: ActivityThread configuration setup "
                  "failed\n";
     if (env->ExceptionCheck()) env->ExceptionDescribe();
@@ -1418,7 +741,7 @@ int prepare(JNIEnv* env, art::Thread* self, jobject* activity_instance_out,
   env->DeleteLocalRef(resources_class);
   env->DeleteLocalRef(component_name_class);
   env->DeleteLocalRef(intent_class);
-  env->DeleteLocalRef(apk_application);
+  if (run_apk_app) env->DeleteLocalRef(application);
   return 0;
 }
 

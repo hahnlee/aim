@@ -55,6 +55,20 @@ pub(super) fn validate_graphics_runtime_link(
         }
     }
     let all_symbols = command_output(Command::new("nm").args(["-aC"]).arg(runtime_library))?;
+    // These are internal Rust/native transport calls, not public dylib ABI.
+    for required in [
+        "_darwin_art_service_endpoint_open",
+        "_darwin_art_service_endpoint_close",
+        "_darwin_art_service_endpoint_ready",
+        "_darwin_art_service_endpoint_lost",
+    ] {
+        if !all_symbols.lines().any(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            matches!(fields.as_slice(), [_, "t" | "T", name] if *name == required)
+        }) {
+            return Err(format!("real-graphics Runtime lacks endpoint owner {required}").into());
+        }
+    }
     // Dynamic JNI lookup is the Android contract for OpenJDK native methods:
     // the linker must retain and export the complete provider surface even
     // though no image relocation references those entrypoints. The aggregate

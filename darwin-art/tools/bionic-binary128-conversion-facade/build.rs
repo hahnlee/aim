@@ -135,12 +135,28 @@ fn main() {
             .arg(&allocator),
         "allocator test dependency",
     );
+    let allocator_options = out.join("allocator_options.o");
+    run(
+        Command::new("clang")
+            .args(&common)
+            .arg("-std=c17")
+            .arg("-I")
+            .arg(root.join("tools/bionic-libc-allocator-facade/include"))
+            .args([
+                "-c",
+                "../bionic-libc-allocator-facade/src/allocator_options.c",
+                "-o",
+            ])
+            .arg(&allocator_options),
+        "allocator options test dependency",
+    );
     let allocator_archive = out.join("libbinary128_allocator_test.a");
     run(
         Command::new("ar")
             .arg("rcs")
             .arg(&allocator_archive)
-            .arg(&allocator),
+            .arg(&allocator)
+            .arg(&allocator_options),
         "allocator archive",
     );
 
@@ -190,6 +206,8 @@ fn main() {
         "build.rs",
         "src/provider.cc",
         "src/entry.S",
+        "../bionic-libc-allocator-facade/src/allocator.c",
+        "../bionic-libc-allocator-facade/src/allocator_options.c",
         "include/darwin_art_bionic_binary128_conversion.h",
     ] {
         println!("cargo:rerun-if-changed={source}");

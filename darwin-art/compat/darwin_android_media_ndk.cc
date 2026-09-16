@@ -1,13 +1,11 @@
 #include "darwin_android_media_ndk.h"
+#include "media/format.h"
+#include "media/image_reader_ndk.h"
 
-#include "darwin_angle_egl.h"
-#include "darwin_art_bionic_socket_broker.h"
 #include "darwin_vp9_decoder.h"
 
-#include <android/hardware_buffer.h>
 #include <CoreMedia/CoreMedia.h>
-#include <media/NdkImage.h>
-#include <media/NdkImageReader.h>
+#include <media/NdkMediaFormat.h>
 #include <VideoToolbox/VideoToolbox.h>
 
 #include <cstddef>
@@ -20,14 +18,6 @@
 #include <unordered_map>
 #include <vector>
 #include <sys/types.h>
-
-struct AMediaFormat {
-  std::unordered_map<std::string, int32_t> integers;
-  std::unordered_map<std::string, int64_t> wide_integers;
-  std::unordered_map<std::string, float> floats;
-  std::unordered_map<std::string, std::string> strings;
-  std::unordered_map<std::string, std::vector<uint8_t>> buffers;
-};
 
 struct AMediaCodec {
   std::mutex mutex;
@@ -65,179 +55,13 @@ struct AMediaCodecOnAsyncNotifyCallback {
 struct ANativeWindow;
 struct AMediaCrypto;
 
-struct AImage {
-  int32_t width = 0;
-  int32_t height = 0;
-  AHardwareBuffer* buffer = nullptr;
-};
-
-struct AImageReader {
-  int32_t width = 0;
-  int32_t height = 0;
-  int32_t format = 0;
-  uint64_t usage = 0;
-  int32_t max_images = 0;
-  ANativeWindow* window = nullptr;
-  AImageReader_ImageListener listener{};
-};
-
 namespace {
 
 constexpr int32_t kMediaErrorUnsupported = -1010;
 constexpr int32_t kMediaErrorInvalidObject = -10000;
 
-#define MEDIA_KEY(name, value) extern "C" const char* name = value
-MEDIA_KEY(AMEDIAFORMAT_KEY_BITRATE_MODE, "bitrate-mode");
-MEDIA_KEY(AMEDIAFORMAT_KEY_BIT_RATE, "bitrate");
-MEDIA_KEY(AMEDIAFORMAT_KEY_COLOR_FORMAT, "color-format");
-MEDIA_KEY(AMEDIAFORMAT_KEY_COLOR_RANGE, "color-range");
-MEDIA_KEY(AMEDIAFORMAT_KEY_COLOR_STANDARD, "color-standard");
-MEDIA_KEY(AMEDIAFORMAT_KEY_COLOR_TRANSFER, "color-transfer");
-MEDIA_KEY(AMEDIAFORMAT_KEY_FRAME_RATE, "frame-rate");
-MEDIA_KEY(AMEDIAFORMAT_KEY_HEIGHT, "height");
-MEDIA_KEY(AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, "i-frame-interval");
-MEDIA_KEY(AMEDIAFORMAT_KEY_LATENCY, "latency");
-MEDIA_KEY(AMEDIAFORMAT_KEY_LEVEL, "level");
-MEDIA_KEY(AMEDIAFORMAT_KEY_MIME, "mime");
-MEDIA_KEY(AMEDIAFORMAT_KEY_PRIORITY, "priority");
-MEDIA_KEY(AMEDIAFORMAT_KEY_PROFILE, "profile");
-MEDIA_KEY(AMEDIAFORMAT_KEY_SLICE_HEIGHT, "slice-height");
-MEDIA_KEY(AMEDIAFORMAT_KEY_STRIDE, "stride");
-MEDIA_KEY(AMEDIAFORMAT_KEY_TEMPORAL_LAYERING, "ts-schema");
-MEDIA_KEY(AMEDIAFORMAT_KEY_WIDTH, "width");
-MEDIA_KEY(AMEDIAFORMAT_KEY_AAC_PROFILE, "aac-profile");
-MEDIA_KEY(AMEDIAFORMAT_KEY_CHANNEL_COUNT, "channel-count");
-MEDIA_KEY(AMEDIAFORMAT_KEY_CHANNEL_MASK, "channel-mask");
-MEDIA_KEY(AMEDIAFORMAT_KEY_DURATION, "durationUs");
-MEDIA_KEY(AMEDIAFORMAT_KEY_FLAC_COMPRESSION_LEVEL, "flac-compression-level");
-MEDIA_KEY(AMEDIAFORMAT_KEY_IS_ADTS, "is-adts");
-MEDIA_KEY(AMEDIAFORMAT_KEY_IS_AUTOSELECT, "is-autoselect");
-MEDIA_KEY(AMEDIAFORMAT_KEY_IS_DEFAULT, "is-default");
-MEDIA_KEY(AMEDIAFORMAT_KEY_IS_FORCED_SUBTITLE, "is-forced-subtitle");
-MEDIA_KEY(AMEDIAFORMAT_KEY_LANGUAGE, "language");
-MEDIA_KEY(AMEDIAFORMAT_KEY_MAX_HEIGHT, "max-height");
-MEDIA_KEY(AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, "max-input-size");
-MEDIA_KEY(AMEDIAFORMAT_KEY_MAX_WIDTH, "max-width");
-MEDIA_KEY(AMEDIAFORMAT_KEY_PUSH_BLANK_BUFFERS_ON_STOP, "push-blank-buffers-on-shutdown");
-MEDIA_KEY(AMEDIAFORMAT_KEY_REPEAT_PREVIOUS_FRAME_AFTER, "repeat-previous-frame-after");
-MEDIA_KEY(AMEDIAFORMAT_KEY_SAMPLE_RATE, "sample-rate");
-MEDIA_KEY(AMEDIAFORMAT_KEY_ROTATION, "rotation-degrees");
-#undef MEDIA_KEY
 
 }  // namespace
-
-extern "C" AMediaFormat* AMediaFormat_new() { return new AMediaFormat; }
-
-extern "C" int32_t AMediaFormat_delete(AMediaFormat* format) {
-  delete format;
-  return 0;
-}
-
-extern "C" const char* AMediaFormat_toString(AMediaFormat* format) {
-  static thread_local std::string description;
-  description.clear();
-  if (format == nullptr) return description.c_str();
-  description = "AMediaFormat{";
-  bool first = true;
-  for (const auto& entry : format->strings) {
-    if (!first) description += ", ";
-    first = false;
-    description += entry.first;
-    description += "=";
-    description += entry.second;
-  }
-  description += "}";
-  return description.c_str();
-}
-
-extern "C" bool AMediaFormat_getInt32(AMediaFormat* format,
-                                       const char* name,
-                                       int32_t* output) {
-  if (format == nullptr || name == nullptr || output == nullptr) return false;
-  const auto found = format->integers.find(name);
-  if (found == format->integers.end()) return false;
-  *output = found->second;
-  return true;
-}
-
-extern "C" bool AMediaFormat_getInt64(AMediaFormat* format,
-                                       const char* name, int64_t* output) {
-  if (format == nullptr || name == nullptr || output == nullptr) return false;
-  const auto found = format->wide_integers.find(name);
-  if (found == format->wide_integers.end()) return false;
-  *output = found->second;
-  return true;
-}
-
-extern "C" bool AMediaFormat_getFloat(AMediaFormat* format,
-                                       const char* name, float* output) {
-  if (format == nullptr || name == nullptr || output == nullptr) return false;
-  const auto found = format->floats.find(name);
-  if (found == format->floats.end()) return false;
-  *output = found->second;
-  return true;
-}
-
-extern "C" bool AMediaFormat_getSize(AMediaFormat* format,
-                                      const char* name, size_t* output) {
-  int64_t value = 0;
-  if (!AMediaFormat_getInt64(format, name, &value) || value < 0) return false;
-  *output = static_cast<size_t>(value);
-  return true;
-}
-
-extern "C" bool AMediaFormat_getString(AMediaFormat* format,
-                                        const char* name,
-                                        const char** output) {
-  if (format == nullptr || name == nullptr || output == nullptr) return false;
-  const auto found = format->strings.find(name);
-  if (found == format->strings.end()) return false;
-  *output = found->second.c_str();
-  return true;
-}
-
-extern "C" void AMediaFormat_setInt32(AMediaFormat* format,
-                                       const char* name,
-                                       int32_t value) {
-  if (format != nullptr && name != nullptr) format->integers[name] = value;
-}
-
-extern "C" void AMediaFormat_setInt64(AMediaFormat* format,
-                                       const char* name, int64_t value) {
-  if (format != nullptr && name != nullptr) format->wide_integers[name] = value;
-}
-
-extern "C" void AMediaFormat_setFloat(AMediaFormat* format,
-                                       const char* name,
-                                       float value) {
-  if (format != nullptr && name != nullptr) format->floats[name] = value;
-}
-
-extern "C" void AMediaFormat_setString(AMediaFormat* format,
-                                        const char* name,
-                                        const char* value) {
-  if (format != nullptr && name != nullptr && value != nullptr) {
-    format->strings[name] = value;
-  }
-}
-
-extern "C" bool AMediaFormat_getBuffer(AMediaFormat* format, const char* name,
-                                         void** output, size_t* size) {
-  if (format == nullptr || name == nullptr || output == nullptr || size == nullptr)
-    return false;
-  auto found = format->buffers.find(name);
-  if (found == format->buffers.end()) return false;
-  *output = found->second.data();
-  *size = found->second.size();
-  return true;
-}
-
-extern "C" void AMediaFormat_setBuffer(AMediaFormat* format, const char* name,
-                                         const void* data, size_t size) {
-  if (format == nullptr || name == nullptr || data == nullptr) return;
-  const auto* bytes = static_cast<const uint8_t*>(data);
-  format->buffers[name] = std::vector<uint8_t>(bytes, bytes + size);
-}
 
 #include "darwin_media_extractor_ndk.inc"
 
@@ -329,16 +153,18 @@ extern "C" int32_t AMediaCodec_configure(AMediaCodec* codec,
   if (surface != nullptr || crypto != nullptr || flags != 0 || codec->configured) {
     return kMediaErrorUnsupported;
   }
-  auto mime = format->strings.find("mime");
-  if (mime == format->strings.end()) return kMediaErrorUnsupported;
-  auto width = format->integers.find("width");
-  auto height = format->integers.find("height");
-  if (width == format->integers.end() || height == format->integers.end() ||
-      width->second <= 0 || height->second <= 0 ||
-      width->second > 16384 || height->second > 16384) return kMediaErrorUnsupported;
-  codec->width = width->second;
-  codec->height = height->second;
-  codec->mime = mime->second;
+  auto* input_format = const_cast<AMediaFormat*>(format);
+  const char* mime = nullptr;
+  int32_t width = 0;
+  int32_t height = 0;
+  if (!AMediaFormat_getString(input_format, "mime", &mime) ||
+      !AMediaFormat_getInt32(input_format, "width", &width) ||
+      !AMediaFormat_getInt32(input_format, "height", &height) ||
+      width <= 0 || height <= 0 || width > 16384 || height > 16384)
+    return kMediaErrorUnsupported;
+  codec->width = width;
+  codec->height = height;
+  codec->mime = mime;
   if (codec->mime == "video/x-vnd.on2.vp9") {
     if (!codec->vp9.Initialize(codec->width, codec->height)) return kMediaErrorUnsupported;
     codec->input.resize(4 * 1024 * 1024);
@@ -350,16 +176,22 @@ extern "C" int32_t AMediaCodec_configure(AMediaCodec* codec,
     }
     return 0;
   }
-  auto sps_it = format->buffers.find("csd-0");
-  auto pps_it = format->buffers.find("csd-1");
-  auto vps_it = format->buffers.find("csd-2");
+  void* sps_data = nullptr;
+  void* pps_data = nullptr;
+  void* vps_data = nullptr;
+  size_t sps_size = 0, pps_size = 0, vps_size = 0;
   const bool hevc = codec->name.find("hevc") != std::string::npos;
-  if (mime == format->strings.end() || sps_it == format->buffers.end() ||
-      pps_it == format->buffers.end() || (hevc && vps_it == format->buffers.end()))
+  if (!AMediaFormat_getBuffer(input_format, "csd-0", &sps_data, &sps_size) ||
+      !AMediaFormat_getBuffer(input_format, "csd-1", &pps_data, &pps_size) ||
+      (hevc && !AMediaFormat_getBuffer(input_format, "csd-2", &vps_data, &vps_size)))
     return kMediaErrorUnsupported;
-  codec->mime = mime->second;
-  const auto sps = StripCodecStartCode(sps_it->second);
-  const auto pps = StripCodecStartCode(pps_it->second);
+  auto copy_parameter_set = [](void* data, size_t size) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    return size == 0 ? std::vector<uint8_t>{}
+                     : std::vector<uint8_t>(bytes, bytes + size);
+  };
+  const auto sps = StripCodecStartCode(copy_parameter_set(sps_data, sps_size));
+  const auto pps = StripCodecStartCode(copy_parameter_set(pps_data, pps_size));
   OSStatus status = noErr;
   if (!hevc) {
     const uint8_t* sets[] = {sps.data(), pps.data()};
@@ -367,7 +199,7 @@ extern "C" int32_t AMediaCodec_configure(AMediaCodec* codec,
     status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
         kCFAllocatorDefault, 2, sets, sizes, 4, &codec->format);
   } else {
-    const auto vps = StripCodecStartCode(vps_it->second);
+    const auto vps = StripCodecStartCode(copy_parameter_set(vps_data, vps_size));
     const uint8_t* sets[] = {vps.data(), sps.data(), pps.data()};
     size_t sizes[] = {vps.size(), sps.size(), pps.size()};
     status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
@@ -443,13 +275,16 @@ extern "C" AMediaFormat* AMediaCodec_getOutputFormat(AMediaCodec* codec) {
   if (!codec) return nullptr;
   std::lock_guard<std::mutex> lock(codec->mutex);
   auto* format = AMediaFormat_new();
-  format->strings["mime"] = "video/raw";
-  format->integers = {{"width", codec->width}, {"height", codec->height},
+  if (format == nullptr) return nullptr;
+  AMediaFormat_setString(format, "mime", "video/raw");
+  const std::pair<const char*, int32_t> fields[] = {
+      {"width", codec->width}, {"height", codec->height},
       {"stride", codec->width}, {"slice-height", codec->height},
       {"color-format", codec->mime == "video/x-vnd.on2.vp9" ? 0x13 : 0x15},
       {"crop-left", 0}, {"crop-top", 0}, {"crop-right", codec->width - 1},
       {"crop-bottom", codec->height - 1}, {"color-range", 2},
       {"color-standard", 1}, {"color-transfer", 3}, {"rotation-degrees", 0}};
+  for (const auto& [name, value] : fields) AMediaFormat_setInt32(format, name, value);
   return format;
 }
 extern "C" AMediaFormat* AMediaCodec_getBufferFormat(AMediaCodec* codec, size_t) {
@@ -569,99 +404,10 @@ extern "C" void AMediaCodec_releaseName(AMediaCodec*, char* name) {
   std::free(name);
 }
 
-extern "C" media_status_t AImageReader_newWithUsage(
-    int32_t width, int32_t height, int32_t format, uint64_t usage,
-    int32_t max_images, AImageReader** out) {
-  if (out == nullptr || width <= 0 || height <= 0 || max_images <= 0)
-    return AMEDIA_ERROR_INVALID_PARAMETER;
-  *out = nullptr;
-  auto* reader = new (std::nothrow) AImageReader();
-  if (reader == nullptr) return AMEDIA_ERROR_UNKNOWN;
-  reader->width = width;
-  reader->height = height;
-  reader->format = format;
-  reader->usage = usage;
-  reader->max_images = max_images;
-  reader->window = static_cast<ANativeWindow*>(
-      darwin_art_android_ANativeWindow_create(width, height, format));
-  if (reader->window == nullptr) {
-    delete reader;
-    return AMEDIA_ERROR_UNKNOWN;
-  }
-  *out = reader;
-  return AMEDIA_OK;
-}
-
-extern "C" void AImageReader_delete(AImageReader* reader) {
-  if (reader == nullptr) return;
-  darwin_art_android_ANativeWindow_release(reader->window);
-  delete reader;
-}
-
-extern "C" media_status_t AImageReader_getWindow(AImageReader* reader,
-                                                   ANativeWindow** out) {
-  if (reader == nullptr || out == nullptr) return AMEDIA_ERROR_INVALID_PARAMETER;
-  *out = reader->window;
-  return AMEDIA_OK;
-}
-
-extern "C" media_status_t AImageReader_setImageListener(
-    AImageReader* reader, AImageReader_ImageListener* listener) {
-  if (reader == nullptr) return AMEDIA_ERROR_INVALID_PARAMETER;
-  reader->listener = listener == nullptr ? AImageReader_ImageListener{} : *listener;
-  return AMEDIA_OK;
-}
-
-media_status_t AcquireEmptyImage(AImageReader* reader, AImage** out,
-                                 int* fence) {
-  if (reader == nullptr || out == nullptr || fence == nullptr)
-    return AMEDIA_ERROR_INVALID_PARAMETER;
-  *out = nullptr;
-  *fence = -1;
-  return AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE;
-}
-
-extern "C" media_status_t AImageReader_acquireNextImageAsync(
-    AImageReader* reader, AImage** out, int* fence) {
-  return AcquireEmptyImage(reader, out, fence);
-}
-extern "C" media_status_t AImageReader_acquireLatestImageAsync(
-    AImageReader* reader, AImage** out, int* fence) {
-  return AcquireEmptyImage(reader, out, fence);
-}
-
-extern "C" void AImage_delete(AImage* image) {
-  if (image == nullptr) return;
-  if (image->buffer != nullptr) AHardwareBuffer_release(image->buffer);
-  delete image;
-}
-extern "C" void AImage_deleteAsync(AImage* image, int fence) {
-  if (fence >= 0) darwin_art_bionic_socket_broker_close(fence);
-  if (image != nullptr) AImage_delete(image);
-}
-extern "C" media_status_t AImage_getWidth(const AImage* image, int32_t* out) {
-  if (image == nullptr || out == nullptr) return AMEDIA_ERROR_INVALID_PARAMETER;
-  *out = image->width; return AMEDIA_OK;
-}
-extern "C" media_status_t AImage_getHeight(const AImage* image, int32_t* out) {
-  if (image == nullptr || out == nullptr) return AMEDIA_ERROR_INVALID_PARAMETER;
-  *out = image->height; return AMEDIA_OK;
-}
-extern "C" media_status_t AImage_getCropRect(const AImage* image,
-                                              AImageCropRect* out) {
-  if (image == nullptr || out == nullptr) return AMEDIA_ERROR_INVALID_PARAMETER;
-  *out = AImageCropRect{0, 0, image->width, image->height};
-  return AMEDIA_OK;
-}
-extern "C" media_status_t AImage_getHardwareBuffer(const AImage* image,
-                                                     AHardwareBuffer** out) {
-  if (image == nullptr || out == nullptr) return AMEDIA_ERROR_INVALID_PARAMETER;
-  *out = image->buffer;
-  return image->buffer == nullptr ? AMEDIA_ERROR_INVALID_OBJECT : AMEDIA_OK;
-}
-
 void* darwin_art_android_media_ndk_symbol(const char* symbol) {
   if (symbol == nullptr) return nullptr;
+  if (void* address = darwin_art::media::FormatSymbol(symbol)) return address;
+  if (void* address = darwin_art::media::ImageReaderSymbol(symbol)) return address;
 #define MEDIA_FUNCTION(name)                         \
   if (std::strcmp(symbol, #name) == 0) {             \
     return reinterpret_cast<void*>(&name);           \
@@ -688,20 +434,6 @@ void* darwin_art_android_media_ndk_symbol(const char* symbol) {
   MEDIA_FUNCTION(AMediaCodec_setParameters)
   MEDIA_FUNCTION(AMediaCodec_start)
   MEDIA_FUNCTION(AMediaCodec_stop)
-  MEDIA_FUNCTION(AMediaFormat_delete)
-  MEDIA_FUNCTION(AMediaFormat_getInt32)
-  MEDIA_FUNCTION(AMediaFormat_getInt64)
-  MEDIA_FUNCTION(AMediaFormat_getFloat)
-  MEDIA_FUNCTION(AMediaFormat_getSize)
-  MEDIA_FUNCTION(AMediaFormat_getString)
-  MEDIA_FUNCTION(AMediaFormat_getBuffer)
-  MEDIA_FUNCTION(AMediaFormat_new)
-  MEDIA_FUNCTION(AMediaFormat_setFloat)
-  MEDIA_FUNCTION(AMediaFormat_setInt32)
-  MEDIA_FUNCTION(AMediaFormat_setInt64)
-  MEDIA_FUNCTION(AMediaFormat_setBuffer)
-  MEDIA_FUNCTION(AMediaFormat_setString)
-  MEDIA_FUNCTION(AMediaFormat_toString)
   MEDIA_FUNCTION(AMediaExtractor_new)
   MEDIA_FUNCTION(AMediaExtractor_delete)
   MEDIA_FUNCTION(AMediaExtractor_setDataSourceFd)
@@ -724,58 +456,6 @@ void* darwin_art_android_media_ndk_symbol(const char* symbol) {
   MEDIA_FUNCTION(AMediaDataSource_setGetSize)
   MEDIA_FUNCTION(AMediaDataSource_setClose)
   MEDIA_FUNCTION(AMediaDataSource_setGetAvailableSize)
-  MEDIA_FUNCTION(AImageReader_acquireLatestImageAsync)
-  MEDIA_FUNCTION(AImageReader_acquireNextImageAsync)
-  MEDIA_FUNCTION(AImageReader_delete)
-  MEDIA_FUNCTION(AImageReader_getWindow)
-  MEDIA_FUNCTION(AImageReader_newWithUsage)
-  MEDIA_FUNCTION(AImageReader_setImageListener)
-  MEDIA_FUNCTION(AImage_delete)
-  MEDIA_FUNCTION(AImage_deleteAsync)
-  MEDIA_FUNCTION(AImage_getCropRect)
-  MEDIA_FUNCTION(AImage_getHardwareBuffer)
-  MEDIA_FUNCTION(AImage_getHeight)
-  MEDIA_FUNCTION(AImage_getWidth)
 #undef MEDIA_FUNCTION
-#define MEDIA_DATA(name)                             \
-  if (std::strcmp(symbol, #name) == 0) {             \
-    return reinterpret_cast<void*>(&name);           \
-  }
-  MEDIA_DATA(AMEDIAFORMAT_KEY_BITRATE_MODE)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_BIT_RATE)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_COLOR_FORMAT)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_COLOR_RANGE)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_COLOR_STANDARD)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_COLOR_TRANSFER)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_FRAME_RATE)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_HEIGHT)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_I_FRAME_INTERVAL)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_LATENCY)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_LEVEL)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_MIME)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_PRIORITY)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_PROFILE)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_SLICE_HEIGHT)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_STRIDE)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_TEMPORAL_LAYERING)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_WIDTH)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_AAC_PROFILE)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_CHANNEL_COUNT)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_CHANNEL_MASK)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_DURATION)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_FLAC_COMPRESSION_LEVEL)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_IS_ADTS)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_IS_AUTOSELECT)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_IS_DEFAULT)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_IS_FORCED_SUBTITLE)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_LANGUAGE)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_MAX_HEIGHT)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_MAX_INPUT_SIZE)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_MAX_WIDTH)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_PUSH_BLANK_BUFFERS_ON_STOP)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_REPEAT_PREVIOUS_FRAME_AFTER)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_SAMPLE_RATE)
-  MEDIA_DATA(AMEDIAFORMAT_KEY_ROTATION)
-#undef MEDIA_DATA
   return nullptr;
 }

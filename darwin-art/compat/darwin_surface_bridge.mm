@@ -1,4 +1,5 @@
 #import <AppKit/AppKit.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include "darwin_surface_internal.h"
@@ -16,6 +17,7 @@
 #include <iostream>
 #include <limits>
 #include <new>
+#include <notify.h>
 #include <time.h>
 #include <unordered_map>
 #include <vector>
@@ -39,6 +41,7 @@ static_assert(offsetof(DarwinArtSurfaceCreateInfo, width) == 0);
 static_assert(offsetof(DarwinArtSurfaceCreateInfo, height) == 4);
 static_assert(offsetof(DarwinArtSurfaceCreateInfo, title) == 8);
 static_assert(offsetof(DarwinArtSurfaceCreateInfo, visible) == 16);
+static_assert(offsetof(DarwinArtSurfaceCreateInfo, scale_to_display) == 17);
 
 constexpr uint32_t kBytesPerPixel = 4;
 constexpr size_t kRowAlignment = 64;
@@ -48,6 +51,36 @@ constexpr uint32_t kBgraPixelFormat =
     (static_cast<uint32_t>('G') << 16) |
     (static_cast<uint32_t>('R') << 8) |
     static_cast<uint32_t>('A');
+
+std::string CompositionNotificationName(uint32_t surface_id) {
+  return "dev.darwinart.surface." + std::to_string(surface_id) +
+         ".composition";
+}
+
+void ConfigureCompositionNotification(DarwinArtSurface* surface) {
+  if (surface == nullptr) return;
+  const int previous =
+      surface->scanout_notification_token.exchange(-1,
+                                                   std::memory_order_acq_rel);
+  if (previous >= 0) (void)notify_cancel(previous);
+  const uint32_t surface_id = surface->io_surface == nullptr
+      ? 0
+      : IOSurfaceGetID(surface->io_surface);
+  if (surface_id == 0) return;
+  int token = -1;
+  const std::string name = CompositionNotificationName(surface_id);
+  const uint32_t status = notify_register_check(name.c_str(), &token);
+  if (status == NOTIFY_STATUS_OK) {
+    surface->scanout_notification_token.store(token,
+                                              std::memory_order_release);
+  }
+  if (std::getenv("DARWIN_ART_DEBUG_SURFACE_TRANSACTIONS") != nullptr) {
+    std::fprintf(stderr,
+                 "ART SurfaceFlinger: display notification register "
+                 "target=%u token=%d status=%u\n",
+                 surface_id, token, status);
+  }
+}
 
 bool IsMainThread() {
   return [NSThread isMainThread];
@@ -257,10 +290,15 @@ void ApplyApplicationIdentity(NSApplication* application, NSWindow* window) {
   if (window != nil) window.miniwindowImage = image;
 }
 
-CGFloat WindowScale(bool visible) {
+CGFloat WindowScale(bool visible, bool automatic) {
   const char* value = std::getenv("DARWIN_ART_WINDOW_SCALE");
-  return visible && value != nullptr && std::strcmp(value, "2") == 0 ? 2.0
-                                                                       : 1.0;
+  if (!visible) return 1.0;
+  if (value != nullptr && std::strcmp(value, "2") == 0) return 2.0;
+  if (value != nullptr && std::strcmp(value, "1") == 0) return 1.0;
+  if (!automatic) return 1.0;
+  NSScreen* screen = NSScreen.mainScreen;
+  const CGFloat scale = screen == nil ? 1.0 : screen.backingScaleFactor;
+  return scale > 0.0 ? scale : 1.0;
 }
 
 uint32_t AndroidMetaState(NSEventModifierFlags flags) {
@@ -512,11 +550,19 @@ NSEventModifierFlags ModifierFlagForKey(unsigned short code) {
   // mapping from the live layer instead of assuming the launcher's requested
   // scale is still the presentation scale after a Retina/resize transition.
   const CGSize drawable_size = _metalLayer.drawableSize;
+  const CGFloat android_width =
+      _ownerSurface != nullptr && _ownerSurface->logical_width != 0
+          ? _ownerSurface->logical_width
+          : drawable_size.width;
+  const CGFloat android_height =
+      _ownerSurface != nullptr && _ownerSurface->logical_height != 0
+          ? _ownerSurface->logical_height
+          : drawable_size.height;
   const CGFloat x_scale = bounds.size.width > 0.0
-                              ? drawable_size.width / bounds.size.width
+                              ? android_width / bounds.size.width
                               : 1.0;
   const CGFloat y_scale = bounds.size.height > 0.0
-                              ? drawable_size.height / bounds.size.height
+                              ? android_height / bounds.size.height
                               : 1.0;
   // DarwinArtMetalView is flipped, so convertPoint already returns a
   // top-left-origin Y coordinate. Flipping it a second time made a click near
@@ -563,6 +609,13 @@ NSEventModifierFlags ModifierFlagForKey(unsigned short code) {
     std::cerr << "ART Android InputChannel backpressure dropped pointer "
               << "action=" << packet.action << " sequence="
               << packet.sequence << "\n";
+  }
+  if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
+    std::cerr << "ART AppKit pointer action=" << packet.action
+              << " sequence=" << packet.sequence << " point=" << point.x
+              << "," << point.y << " android=" << packet.x << ","
+              << packet.y << " enqueue="
+              << static_cast<uint32_t>(enqueue_result) << "\n";
   }
   [self signalOwnerWake];
   if (action == DARWIN_ART_POINTER_DOWN) {
@@ -785,6 +838,17 @@ static DarwinArtSurfaceResult ResizeSurfaceBacking(DarwinArtSurface* surface,
       1.0, std::ceil(bounds.size.width * scale)));
   const uint32_t height = static_cast<uint32_t>(std::max<CGFloat>(
       1.0, std::ceil(bounds.size.height * scale)));
+  if (self.surface->scale_to_display) {
+    self.surface->logical_width = static_cast<uint32_t>(std::max<CGFloat>(
+        1.0, std::ceil(bounds.size.width)));
+    self.surface->logical_height = static_cast<uint32_t>(std::max<CGFloat>(
+        1.0, std::ceil(bounds.size.height)));
+  } else {
+    // Direct-backing callers expose Android pixels one-for-one. AppKit still
+    // presents those pixels in points according to CAMetalLayer.contentsScale.
+    self.surface->logical_width = width;
+    self.surface->logical_height = height;
+  }
   const DarwinArtSurfaceResult result =
       ResizeSurfaceBacking(self.surface, width, height, false);
   if (result != DARWIN_ART_SURFACE_OK) {
@@ -798,6 +862,9 @@ static DarwinArtSurfaceResult ResizeSurfaceBacking(DarwinArtSurface* surface,
 @end
 
 DarwinArtSurface::~DarwinArtSurface() {
+    const int notification_token = scanout_notification_token.exchange(
+        -1, std::memory_order_acq_rel);
+    if (notification_token >= 0) (void)notify_cancel(notification_token);
     {
       std::lock_guard<std::mutex> lock(composition_mutex);
       composition_monitor_stop = true;
@@ -1041,11 +1108,26 @@ static DarwinArtSurface* CreateSurfaceOnMain(
     return finish(DARWIN_ART_SURFACE_INVALID_ARGUMENT, nullptr);
   }
 
+  // Android service and system processes may initialize HWUI/Metal, but they
+  // are not Activity display owners. Sanitize the request at the AppKit
+  // boundary so older service launch paths cannot allocate an onscreen
+  // NSWindow either.
+  const bool visible = create_info->visible;
+  const CGFloat window_scale = WindowScale(visible, create_info->scale_to_display);
+  const uint32_t backing_width = create_info->scale_to_display
+      ? static_cast<uint32_t>(std::ceil(create_info->width * window_scale))
+      : create_info->width;
+  const uint32_t backing_height = create_info->scale_to_display
+      ? static_cast<uint32_t>(std::ceil(create_info->height * window_scale))
+      : create_info->height;
+  if (!IsValidDimension(backing_width) || !IsValidDimension(backing_height)) {
+    return finish(DARWIN_ART_SURFACE_INVALID_ARGUMENT, nullptr);
+  }
   const size_t minimum_row_bytes =
-      static_cast<size_t>(create_info->width) * kBytesPerPixel;
+      static_cast<size_t>(backing_width) * kBytesPerPixel;
   const size_t bytes_per_row = AlignRowBytes(minimum_row_bytes);
   if (bytes_per_row > std::numeric_limits<size_t>::max() /
-                          static_cast<size_t>(create_info->height)) {
+                          static_cast<size_t>(backing_height)) {
     return finish(DARWIN_ART_SURFACE_INVALID_ARGUMENT, nullptr);
   }
 
@@ -1060,8 +1142,8 @@ static DarwinArtSurface* CreateSurfaceOnMain(
     }
 
     NSDictionary* surface_properties = @{
-      (__bridge NSString*)kIOSurfaceWidth : @(create_info->width),
-      (__bridge NSString*)kIOSurfaceHeight : @(create_info->height),
+      (__bridge NSString*)kIOSurfaceWidth : @(backing_width),
+      (__bridge NSString*)kIOSurfaceHeight : @(backing_height),
       (__bridge NSString*)kIOSurfaceBytesPerElement : @(kBytesPerPixel),
       (__bridge NSString*)kIOSurfaceBytesPerRow : @(bytes_per_row),
       (__bridge NSString*)kIOSurfacePixelFormat : @(kBgraPixelFormat),
@@ -1076,9 +1158,9 @@ static DarwinArtSurface* CreateSurfaceOnMain(
     const size_t allocation_size = IOSurfaceGetAllocSize(io_surface);
     if (actual_bytes_per_row < minimum_row_bytes ||
         actual_bytes_per_row > std::numeric_limits<size_t>::max() /
-                                   static_cast<size_t>(create_info->height) ||
+                                   static_cast<size_t>(backing_height) ||
         allocation_size < actual_bytes_per_row *
-                              static_cast<size_t>(create_info->height)) {
+                              static_cast<size_t>(backing_height)) {
       CFRelease(io_surface);
       return finish(DARWIN_ART_SURFACE_ALLOCATION_FAILED, nullptr);
     }
@@ -1111,29 +1193,38 @@ static DarwinArtSurface* CreateSurfaceOnMain(
       CFRelease(io_surface);
       return finish(DARWIN_ART_SURFACE_ALLOCATION_FAILED, nullptr);
     }
-    surface->width = create_info->width;
-    surface->height = create_info->height;
+    surface->width = backing_width;
+    surface->height = backing_height;
+    surface->logical_width = create_info->width;
+    surface->logical_height = create_info->height;
+    surface->scale_to_display = create_info->scale_to_display;
     surface->bytes_per_row = actual_bytes_per_row;
     surface->io_surface = io_surface;
     surface->device = device;
     surface->command_queue = command_queue;
     surface->io_surface_texture = io_surface_texture;
-    surface->visible = create_info->visible;
+    surface->visible = visible;
     surface->window_closed.store(false, std::memory_order_release);
+    ConfigureCompositionNotification(surface);
 
     NSApplication* application = NSApplication.sharedApplication;
-    if (create_info->visible) {
+    if (visible) {
       [application setActivationPolicy:NSApplicationActivationPolicyRegular];
     }
-    const CGFloat window_scale = WindowScale(create_info->visible);
-    NSRect frame = NSMakeRect(0, 0, create_info->width / window_scale,
-                              create_info->height / window_scale);
+    NSRect frame = NSMakeRect(
+        0, 0,
+        create_info->scale_to_display
+            ? static_cast<CGFloat>(create_info->width)
+            : static_cast<CGFloat>(backing_width) / window_scale,
+        create_info->scale_to_display
+            ? static_cast<CGFloat>(create_info->height)
+            : static_cast<CGFloat>(backing_height) / window_scale);
     // Headless surfaces still need a Metal view/layer for GPU work, but must
     // not allocate an AppKit window. A large number of probes and hidden
     // rendering surfaces are created with visible=false; creating an
     // NSWindow for each one makes tests leak apparent windows and needlessly
     // couples offscreen rendering to AppKit window management.
-    if (create_info->visible) {
+    if (visible) {
       surface->window = [[NSWindow alloc]
           initWithContentRect:frame
                     styleMask:(NSWindowStyleMaskTitled |
@@ -1154,14 +1245,14 @@ static DarwinArtSurface* CreateSurfaceOnMain(
     surface->view = [[DarwinArtMetalView alloc]
         initWithFrame:frame
                device:device
-            pixelSize:CGSizeMake(create_info->width, create_info->height)
+            pixelSize:CGSizeMake(backing_width, backing_height)
          contentScale:window_scale];
     if (surface->view == nil || surface->view.metalLayer == nil) {
       delete surface;
       return finish(DARWIN_ART_SURFACE_ALLOCATION_FAILED, nullptr);
     }
     [surface->view setOwnerSurface:surface];
-    if (create_info->visible) {
+    if (visible) {
       DarwinArtSurfaceWindowDelegate* delegate =
           [[DarwinArtSurfaceWindowDelegate alloc] init];
       delegate.view = surface->view;
@@ -1180,9 +1271,31 @@ static DarwinArtSurface* CreateSurfaceOnMain(
       if (base_address != nullptr) {
         std::memset(base_address, 0,
                     actual_bytes_per_row *
-                        static_cast<size_t>(create_info->height));
+                        static_cast<size_t>(backing_height));
       }
       IOSurfaceUnlock(io_surface, 0, nullptr);
+    }
+    if (visible) {
+      // A visible surface is this Android application process's display
+      // target. Publish it before ActivityThread enters its permanent Looper
+      // so BLAST/HWUI and SurfaceFlinger can resolve the backing IOSurface
+      // without waiting for the process entrypoint to return.
+      darwin_art_surface_set_active_gpu(surface);
+      {
+        // Publish every visible display, including callers already supplying
+        // physical Android pixels. Scaling policy does not control whether
+        // SurfaceFlinger receives the target identity and scanout extent.
+        darwin_art_surface_gpu_configure_embedded(
+            surface, 0, 0, backing_width, backing_height);
+        darwin_art_surface_gpu_set_embedded_buffer_extent(
+            surface, backing_width, backing_height);
+        darwin_art_surface_gpu_publish_embedded(surface);
+        const uint32_t surface_id = IOSurfaceGetID(io_surface);
+        if (surface_id != 0) {
+          const std::string encoded = std::to_string(surface_id);
+          setenv("DARWIN_ART_HOST_IOSURFACE_ID", encoded.c_str(), 1);
+        }
+      }
     }
     return finish(DARWIN_ART_SURFACE_OK, surface);
   }
@@ -1251,6 +1364,7 @@ static DarwinArtSurfaceResult ResizeSurfaceBacking(DarwinArtSurface* surface,
         0, std::memory_order_release);
     surface->scanout_last_requested_embedded_frame.store(
         0, std::memory_order_release);
+    ConfigureCompositionNotification(surface);
   }
   if (old_surface != nullptr) CFRelease(old_surface);
   if (surface->view != nil) {
@@ -1292,6 +1406,31 @@ DarwinArtSurfaceResult darwin_art_surface_set_title(
       return DARWIN_ART_SURFACE_INVALID_ARGUMENT;
     }
     if (surface->window != nil) surface->window.title = WindowTitle(title);
+    return DARWIN_ART_SURFACE_OK;
+  });
+}
+
+DarwinArtSurfaceResult darwin_art_surface_set_active_title(const char* title) {
+  return RunOnMainSync([&] {
+    DarwinArtSurface* surface =
+        g_active_gpu_surface.load(std::memory_order_acquire);
+    return darwin_art_surface_set_title(surface, title);
+  });
+}
+
+DarwinArtSurfaceResult darwin_art_surface_set_active_title_utf16(
+    const uint16_t* title, size_t length) {
+  return RunOnMainSync([&] {
+    DarwinArtSurface* surface =
+        g_active_gpu_surface.load(std::memory_order_acquire);
+    if (surface == nullptr || title == nullptr || length == 0) {
+      return DARWIN_ART_SURFACE_INVALID_ARGUMENT;
+    }
+    NSString* value = [[NSString alloc]
+        initWithCharacters:reinterpret_cast<const unichar*>(title)
+                    length:length];
+    if (value == nil) return DARWIN_ART_SURFACE_INVALID_ARGUMENT;
+    if (surface->window != nil) surface->window.title = value;
     return DARWIN_ART_SURFACE_OK;
   });
 }
@@ -1353,6 +1492,15 @@ bool darwin_art_surface_get_size(DarwinArtSurface* surface,
   return true;
 }
 
+bool darwin_art_surface_get_logical_size(DarwinArtSurface* surface,
+                                         uint32_t* width, uint32_t* height) {
+  if (surface == nullptr || width == nullptr || height == nullptr) return false;
+  std::lock_guard<std::mutex> lock(surface->backing_mutex);
+  *width = surface->logical_width;
+  *height = surface->logical_height;
+  return *width > 0 && *height > 0;
+}
+
 DarwinArtSurfaceResult darwin_art_surface_update(
     DarwinArtSurface* surface,
     const void* bgra_pixels,
@@ -1401,6 +1549,35 @@ static DarwinArtSurfaceResult PresentSurfaceOnMain(
   }
 
   @autoreleasepool {
+    // A structural composition is submitted by system_server on a different
+    // Metal command queue/process. Its completion notification is the acquire
+    // boundary for the display consumer. Refresh the IOSurface texture import
+    // at that backing epoch so the app process cannot keep sampling an older
+    // Metal resource view after WMS moved or detached a layer.
+    if (surface->scanout_reimport_backing.exchange(
+            false, std::memory_order_acq_rel)) {
+      std::lock_guard<std::mutex> lock(surface->backing_mutex);
+      if (IOSurfaceLock(surface->io_surface, kIOSurfaceLockReadOnly, nullptr) ==
+          kIOReturnSuccess) {
+        IOSurfaceUnlock(surface->io_surface, kIOSurfaceLockReadOnly, nullptr);
+      }
+      MTLTextureDescriptor* descriptor =
+          [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:
+                                    MTLPixelFormatBGRA8Unorm
+                                                            width:surface->width
+                                                           height:surface->height
+                                                        mipmapped:NO];
+      descriptor.storageMode = MTLStorageModeShared;
+      descriptor.usage = MTLTextureUsageShaderRead;
+      id<MTLTexture> refreshed =
+          [surface->device newTextureWithDescriptor:descriptor
+                                          iosurface:surface->io_surface
+                                              plane:0];
+      if (refreshed == nil) {
+        return DARWIN_ART_SURFACE_GPU_SUBMISSION_FAILED;
+      }
+      surface->io_surface_texture = refreshed;
+    }
     id<CAMetalDrawable> drawable = [surface->view.metalLayer nextDrawable];
     if (drawable == nil) {
       return DARWIN_ART_SURFACE_DRAWABLE_UNAVAILABLE;
@@ -1499,6 +1676,17 @@ DarwinArtSurfaceResult darwin_art_surface_present(DarwinArtSurface* surface) {
 
 static void RunAsyncPresentOnMain(DarwinArtSurface* surface);
 
+static void ScheduleAsyncPresentOnMain(DarwinArtSurface* surface) {
+  // The host deliberately keeps AppKit on the process main thread while ART
+  // owns a separate Android UI thread. Publish only a pending generation and
+  // wake that actor here. PumpSurfaceEventsOnMain is the sole consumer; using
+  // a second GCD/CFRunLoop callback would both race teardown through a raw
+  // surface pointer and allow a final structural frame to remain queued.
+  (void)surface;
+  CFRunLoopRef run_loop = CFRunLoopGetMain();
+  CFRunLoopWakeUp(run_loop);
+}
+
 bool darwin_art_surface_gpu_track_composition_fence(
     DarwinArtSurface* surface, int fence_fd) {
   if (surface == nullptr || fence_fd < 0) return false;
@@ -1547,6 +1735,27 @@ bool darwin_art_surface_gpu_scanout_ready(DarwinArtSurface* surface) {
   const uint64_t ready =
       surface->composition_ready_generation.load(std::memory_order_acquire);
   return submitted == 0 || ready >= submitted;
+}
+
+bool ClaimDisplayNotification(DarwinArtSurface* surface) {
+  if (surface == nullptr) return false;
+  const int notification_token = surface->scanout_notification_token.load(
+      std::memory_order_acquire);
+  int notification_changed = 0;
+  if (notification_token < 0 ||
+      notify_check(notification_token, &notification_changed) !=
+          NOTIFY_STATUS_OK ||
+      notification_changed == 0) {
+    return false;
+  }
+  surface->scanout_reimport_backing.store(true, std::memory_order_release);
+  if (std::getenv("DARWIN_ART_DEBUG_SURFACE_TRANSACTIONS") != nullptr) {
+    std::fprintf(stderr,
+                 "ART SurfaceFlinger: display notification claimed "
+                 "surface=%p token=%d\n",
+                 surface, notification_token);
+  }
+  return true;
 }
 
 bool ClaimScanoutDirty(DarwinArtSurface* surface) {
@@ -1603,7 +1812,7 @@ void MaybeLogScanoutStats(DarwinArtSurface* surface) {
   }
   const uint64_t requests =
       surface->scanout_requests.load(std::memory_order_relaxed);
-  if (requests != 1 && (requests % 60) != 0) return;
+  if (requests != 1 && (requests % 600) != 0) return;
   std::fprintf(
       stderr,
       "ART SurfaceFlinger: scanout stats surface=%p requests=%llu "
@@ -1625,7 +1834,12 @@ DarwinArtSurfaceResult darwin_art_surface_present_async(
   if (surface == nullptr) return DARWIN_ART_SURFACE_INVALID_ARGUMENT;
   surface->scanout_requests.fetch_add(1, std::memory_order_relaxed);
   MaybeLogScanoutStats(surface);
-  if (!darwin_art_surface_gpu_scanout_ready(surface)) {
+  // A WMS structural redraw notification is published only after central
+  // Metal completion, and can therefore supersede an older app-producer
+  // fence still being retired locally. Check it before the producer gate;
+  // otherwise a stale fence can indefinitely hide a newer composed display.
+  const bool display_dirty = ClaimDisplayNotification(surface);
+  if (!display_dirty && !darwin_art_surface_gpu_scanout_ready(surface)) {
     // SurfaceFlinger has not latched this target yet. The fence monitor will
     // issue one trailing request when the generation becomes ready, while
     // the display clock remains free to continue waking the ART owner.
@@ -1637,7 +1851,7 @@ DarwinArtSurfaceResult darwin_art_surface_present_async(
   // already presented CAMetalLayer contents instead of dispatching another
   // identical blit to AppKit. A new fence generation claims the next turn;
   // fence-less surfaces keep the legacy every-tick behavior above.
-  if (!ClaimScanoutDirty(surface)) {
+  if (!display_dirty && !ClaimScanoutDirty(surface)) {
     return DARWIN_ART_SURFACE_OK;
   }
   if (IsMainThread()) {
@@ -1660,9 +1874,7 @@ DarwinArtSurfaceResult darwin_art_surface_present_async(
     }
   }
   if (schedule) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-      RunAsyncPresentOnMain(surface);
-    });
+    ScheduleAsyncPresentOnMain(surface);
   }
   return DARWIN_ART_SURFACE_OK;
 }
@@ -1689,6 +1901,16 @@ static void RunAsyncPresentOnMain(DarwinArtSurface* surface) {
     }
     request_generation = surface->presentation_requested;
   }
+  if (std::getenv("DARWIN_ART_DEBUG_SURFACE_TRANSACTIONS") != nullptr) {
+    std::fprintf(stderr,
+                 "ART SurfaceFlinger: AppKit scanout drain surface=%p "
+                 "target=%u request=%llu\n",
+                 surface,
+                 surface->io_surface == nullptr
+                     ? 0
+                     : IOSurfaceGetID(surface->io_surface),
+                 static_cast<unsigned long long>(request_generation));
+  }
   const DarwinArtSurfaceResult result = PresentSurfaceOnMain(surface);
   surface->scanout_present_calls.fetch_add(1, std::memory_order_relaxed);
   surface->last_scanout_status.store(result, std::memory_order_release);
@@ -1711,9 +1933,7 @@ static void RunAsyncPresentOnMain(DarwinArtSurface* surface) {
     std::fprintf(stderr, "ART Android async scanout failed status=%d\n", result);
   }
   if (schedule_next) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-      RunAsyncPresentOnMain(surface);
-    });
+    ScheduleAsyncPresentOnMain(surface);
   }
 }
 
@@ -1762,6 +1982,13 @@ static DarwinArtSurfaceResult PumpSurfaceEventsOnMain(
         [application sendEvent:event];
       }
       [application updateWindows];
+      bool presentation_pending = false;
+      {
+        std::lock_guard<std::mutex> lock(surface->presentation_mutex);
+        presentation_pending = surface->presentation_scheduled &&
+                               !surface->presentation_closing;
+      }
+      if (presentation_pending) RunAsyncPresentOnMain(surface);
     }
   }
   if (surface->visible && !surface->window.visible) {
@@ -1798,6 +2025,18 @@ int32_t darwin_art_appkit_pump_events(double seconds) {
   }
   @autoreleasepool {
     NSApplication* application = NSApplication.sharedApplication;
+    static bool activation_policy_initialized = false;
+    if (!activation_policy_initialized) {
+      activation_policy_initialized = true;
+      // Service children share the app bundle executable, but do not own a
+      // desktop application/window. Keep their AppKit/Metal run loop without
+      // publishing extra Dock or application-switcher entries.
+      const char* presentation =
+          std::getenv("DARWIN_ART_DESKTOP_PRESENTATION");
+      if (presentation == nullptr || std::strcmp(presentation, "1") != 0) {
+        [application setActivationPolicy:NSApplicationActivationPolicyProhibited];
+      }
+    }
     NSDate* deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
     while (deadline.timeIntervalSinceNow > 0.0) {
       const NSTimeInterval slice_seconds =
@@ -1810,6 +2049,30 @@ int32_t darwin_art_appkit_pump_events(double seconds) {
                                                   dequeue:YES];
       if (event != nil) [application sendEvent:event];
       [application updateWindows];
+      // The process main thread is an explicit AppKit actor rather than a
+      // returned-to-dispatch main queue. It is also the persistent display
+      // consumer: a structural SurfaceFlinger composition can complete while
+      // the Android owner is blocked indefinitely in MessageQueue.next(), so
+      // checking the target notification cannot depend on a short-lived host
+      // FrameClock. present_async is cheap when neither a completion
+      // generation nor a structural notification is dirty, and executes the
+      // Metal scanout directly because this is already AppKit's main actor.
+      // ART/JNI remains on the Android UI owner and is never entered here.
+      DarwinArtSurface* surface =
+          g_active_gpu_surface.load(std::memory_order_acquire);
+      if (surface != nullptr) {
+        (void)darwin_art_surface_present_async(surface);
+      }
+
+      // Drain a latest-wins command that was published by the fence monitor or
+      // another non-main producer before this AppKit turn.
+      bool presentation_pending = false;
+      if (surface != nullptr) {
+        std::lock_guard<std::mutex> lock(surface->presentation_mutex);
+        presentation_pending = surface->presentation_scheduled &&
+                               !surface->presentation_closing;
+      }
+      if (presentation_pending) RunAsyncPresentOnMain(surface);
     }
   }
   return DARWIN_ART_SURFACE_OK;

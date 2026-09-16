@@ -1,0 +1,13 @@
+diff --git a/core/jni/core_jni_helpers.h b/core/jni/core_jni_helpers.h
+--- a/core/jni/core_jni_helpers.h
++++ b/core/jni/core_jni_helpers.h
+@@ -28,7 +28,8 @@
+ // and they need all the JNI methods to have JNIEnv* and jclass/jobject as their first two arguments.
+ // The following macro allows to have those arguments when compiling for host while omitting them when
+ // compiling for Android.
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) || \
++        defined(DARWIN_ART_ANDROID_CRITICAL_JNI_ABI)
+ #define CRITICAL_JNI_PARAMS
+ #define CRITICAL_JNI_PARAMS_COMMA
+ #else

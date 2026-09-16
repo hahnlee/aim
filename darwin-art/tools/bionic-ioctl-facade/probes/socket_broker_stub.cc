@@ -1,7 +1,7 @@
 #include <stdint.h>
 
-/* Isolated ioctl tests have no central socket broker; report unhandled. */
-extern "C" int darwin_art_bionic_socket_broker_ioctl_dispatch(
+/* Isolated ioctl tests have no central FD broker; report unhandled. */
+extern "C" int darwin_art_bionic_fd_broker_ioctl_dispatch(
     int fd, uint32_t request, void* argument, int* handled, int* result,
     int* android_errno) {
   (void)fd;

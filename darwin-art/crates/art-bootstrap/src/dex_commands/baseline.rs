@@ -75,6 +75,7 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
     let hello_source = generate_large_field_fixture(root, &build_dir)?;
 
     let android_platform_jar = find_android_platform_jar()?;
+    run_command(Command::new("bash").arg(root.join("tools/build-android16-package-dex-usage.sh")))?;
     let android_mock_jar = android_platform_jar
         .parent()
         .ok_or("Android platform jar has no parent")?
@@ -89,6 +90,7 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
     let javac_bootclasspath = env::join_paths([
         find_android_core_system_modules()?,
         android_platform_jar.clone(),
+        root.join("_build/package-dex-usage-runtime/package-dex-usage.jar"),
     ])?;
     run_command(
         Command::new("javac")
@@ -116,16 +118,60 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
             .arg(root.join("probes/ProbeCalendarProvider.java"))
             .arg(root.join("probes/ProbeResources.java"))
             .arg(root.join("probes/ProbePackageManager.java"))
+            // Runtime PM ownership, not a test fixture.
+            .arg(root.join("runtime/framework/pm/InstalledApplicationInfo.java"))
+            .arg(root.join("runtime/framework/pm/InstalledManifestMetadata.java"))
+            .arg(root.join("runtime/framework/pm/InstalledResourceValue.java"))
+            .arg(root.join("runtime/framework/pm/InstalledActivityInfo.java"))
+            .arg(root.join("runtime/framework/pm/InstalledPackageInfo.java"))
+            .arg(root.join("runtime/framework/pm/InstalledServiceInfo.java"))
+            .arg(root.join("runtime/framework/pm/InstalledPackageRecord.java"))
+            .arg(root.join("runtime/framework/pm/PackageRecords.java"))
+            .arg(root.join("runtime/framework/pm/DexLoadReports.java"))
+            .arg(root.join("runtime/framework/pm/PackageManagerEndpoint.java"))
+            .arg(root.join("runtime/framework/storage/StorageManagerEndpoint.java"))
+            .arg(root.join("runtime/framework/os/RemoteBinder.java"))
+            .arg(root.join("runtime/framework/os/SystemServices.java"))
+            .arg(root.join("runtime/framework/system/ServiceDirectory.java"))
+            .arg(root.join("runtime/framework/am/ApplicationProcessRegistry.java"))
+            .arg(root.join("runtime/framework/am/SystemServiceBindings.java"))
+            .arg(root.join("runtime/framework/am/ServiceRecord.java"))
+            .arg(root.join("runtime/framework/am/IntentBindRecord.java"))
+            .arg(root.join("runtime/framework/am/ConnectionRecord.java"))
+            .arg(root.join("runtime/framework/am/ActiveServices.java"))
+            .arg(root.join("runtime/framework/am/ActivityManagerEndpoint.java"))
+            .arg(root.join("runtime/framework/am/ActivityManagerClient.java"))
+            .arg(root.join("runtime/framework/display/BuiltInDisplayConfiguration.java"))
+            .arg(root.join("runtime/framework/display/DefaultDisplayRegistry.java"))
+            .arg(root.join("runtime/framework/display/DisplayManagerEndpoint.java"))
+            .arg(root.join("runtime/framework/wm/ActivityClientControllerEndpoint.java"))
+            .arg(root.join("runtime/framework/wm/ActivityTaskManagerEndpoint.java"))
+            .arg(root.join("runtime/framework/wm/WindowManagerEndpoint.java"))
+            .arg(root.join("runtime/framework/wm/WindowSessionEndpoint.java"))
+            .arg(root.join("runtime/framework/wm/WindowSurfaceRegistry.java"))
+            .arg(root.join("runtime/framework/wm/WindowInputPublisher.java"))
+            .arg(root.join("runtime/framework/wm/DesktopWindowMetadataRegistry.java"))
+            .arg(root.join("runtime/framework/wm/DesktopWindowMetadataEndpoint.java"))
+            .arg(root.join("runtime/framework/wm/DesktopWindowMetadataClient.java"))
+            .arg(root.join("runtime/framework/user/UserManagerEndpoint.java"))
+            .arg(root.join("runtime/framework/content/SettingsProviderEndpoint.java"))
+            .arg(root.join("runtime/framework/content/ContentServiceEndpoint.java"))
+            .arg(root.join("runtime/framework/content/ClipboardServiceEndpoint.java"))
+            .arg(root.join("runtime/framework/notification/NotificationManagerEndpoint.java"))
+            .arg(root.join("runtime/framework/inputmethod/InputMethodManagerEndpoint.java"))
+            .arg(root.join("runtime/framework/input/InputManagerEndpoint.java"))
+            .arg(root.join("runtime/framework/input/InputDeviceRegistry.java"))
             .arg(root.join("probes/ProbeXmlResourceParser.java"))
             .arg(root.join("probes/ProbeCanvas.java"))
             .arg(root.join("probes/ProbeView.java"))
             .arg(root.join("probes/ProbeContentRoot.java"))
-            // The baseline probe also exercises the same in-process system
-            // service contract used by installed apps. Without this AOSP
-            // bridge class BinderInternal.getContextObject() can only return
-            // an empty Binder and ResourcesManager fails during bootstrap.
+            // Remaining legacy fixture types are migration debt. They no
+            // longer provide BinderInternal's system service-manager root.
             .arg(root.join("tools/android-apk-app-runtime/fixture/DarwinServiceBridge.java"))
             .arg(root.join("probes/compile-stubs/android/content/IContentProvider.java"))
+            .arg(root.join("probes/compile-stubs/android/app/IApplicationThread.java"))
+            .arg(root.join("probes/compile-stubs/android/app/IServiceConnection.java"))
+            .arg(root.join("probes/compile-stubs/android/content/res/CompatibilityInfo.java"))
             .arg(root.join("probes/compile-stubs/android/content/ContentCaptureOptions.java"))
             .arg(root.join("probes/compile-stubs/android/view/autofill/AutofillManager.java"))
             .arg(root.join("probes/compile-stubs/android/view/InputChannel.java")),
@@ -215,8 +261,7 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         class_dir.join("dev/darwinart/probe/ProbeContext$LocalServiceRecord.class");
     let bound_service_record_class =
         class_dir.join("dev/darwinart/probe/ProbeContext$BoundServiceRecord.class");
-    let remote_service_binder_class =
-        class_dir.join("dev/darwinart/probe/ProbeContext$RemoteServiceBinder.class");
+    let remote_service_binder_class = class_dir.join("dev/darwinart/runtime/os/RemoteBinder.class");
     let audio_manager_class = class_dir.join("android/media/ProbeAudioManager.class");
     let compatibility_handler_class =
         class_dir.join("dev/darwinart/probe/ProbeContext$CompatibilityHandler.class");
@@ -291,6 +336,7 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
             .arg("--output")
             .arg(&dex_dir)
             .arg(&hello_class)
+            .arg(root.join("_build/package-dex-usage-runtime/package-dex-usage.jar"))
             .arg(class_dir.join("dev/darwinart/probe/JitInvokeCustom.class"))
             .arg(class_dir.join("dev/darwinart/probe/JitConstructorParent.class"))
             .arg(class_dir.join("dev/darwinart/probe/JitFinalReference.class"))
@@ -315,6 +361,72 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
             .arg(&local_service_record_class)
             .arg(&bound_service_record_class)
             .arg(&remote_service_binder_class)
+            .arg(class_dir.join("dev/darwinart/runtime/os/SystemServices.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/system/ServiceDirectory.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/am/ApplicationProcessRegistry.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/am/ApplicationProcessRegistry$1.class"))
+            .arg(
+                class_dir
+                    .join("dev/darwinart/runtime/am/ApplicationProcessRegistry$InitialWork.class"),
+            )
+            .arg(
+                class_dir.join(
+                    "dev/darwinart/runtime/am/ApplicationProcessRegistry$ProcessRecord.class",
+                ),
+            )
+            .arg(class_dir.join(
+                "dev/darwinart/runtime/am/ApplicationProcessRegistry$AttachedApplication.class",
+            ))
+            .arg(class_dir.join("dev/darwinart/runtime/am/ActivityManagerEndpoint.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/am/ActiveServices.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/am/SystemServiceBindings.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/am/ActiveServices$ProcessLauncher.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/am/ServiceRecord.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/am/IntentBindRecord.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/am/ConnectionRecord.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/am/ActivityManagerClient.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/display/BuiltInDisplayConfiguration.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/display/DefaultDisplayRegistry.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/display/DisplayManagerEndpoint.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/wm/ActivityClientControllerEndpoint.class"))
+            .arg(class_dir.join(
+                "dev/darwinart/runtime/wm/ActivityClientControllerEndpoint$ActivityRecord.class",
+            ))
+            .arg(
+                class_dir
+                    .join("dev/darwinart/runtime/wm/ActivityClientControllerEndpoint$State.class"),
+            )
+            .arg(class_dir.join("dev/darwinart/runtime/wm/ActivityTaskManagerEndpoint.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/wm/WindowManagerEndpoint.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/wm/WindowSessionEndpoint.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/wm/WindowSurfaceRegistry.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/wm/WindowInputPublisher.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/wm/DesktopWindowMetadataRegistry.class"))
+            .arg(
+                class_dir.join(
+                    "dev/darwinart/runtime/wm/DesktopWindowMetadataRegistry$WindowState.class",
+                ),
+            )
+            .arg(
+                class_dir.join(
+                    "dev/darwinart/runtime/wm/DesktopWindowMetadataRegistry$ProcessState.class",
+                ),
+            )
+            .arg(class_dir.join("dev/darwinart/runtime/wm/DesktopWindowMetadataEndpoint.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/wm/DesktopWindowMetadataClient.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/wm/DesktopWindowMetadataClient$1.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/user/UserManagerEndpoint.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/content/SettingsProviderEndpoint.class"))
+            .arg(
+                class_dir
+                    .join("dev/darwinart/runtime/notification/NotificationManagerEndpoint.class"),
+            )
+            .arg(
+                class_dir
+                    .join("dev/darwinart/runtime/inputmethod/InputMethodManagerEndpoint.class"),
+            )
+            .arg(class_dir.join("dev/darwinart/runtime/input/InputManagerEndpoint.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/input/InputDeviceRegistry.class"))
             .arg(&audio_manager_class)
             .arg(&compatibility_handler_class)
             .arg(&default_service_handler_class)
@@ -331,6 +443,17 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
             .arg(&calendar_provider_class)
             .arg(&resources_class)
             .arg(&package_manager_class)
+            .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledApplicationInfo.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledManifestMetadata.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledResourceValue.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledActivityInfo.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledPackageInfo.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledServiceInfo.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledPackageRecord.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/pm/PackageRecords.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/pm/PackageRecords$Source.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/pm/DexLoadReports.class"))
+            .arg(class_dir.join("dev/darwinart/runtime/pm/PackageManagerEndpoint.class"))
             .arg(&mock_package_manager_class)
             .arg(&mock_context_class)
             .arg(&xml_parser_class)
@@ -450,19 +573,63 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
                     class[32]=Ldev/darwinart/probe/ProbeXmlResourceParser;";
     verify_dex_contract(
         &output,
-        56,
-        2688,
+        115,
+        3104,
         &[
             "Ldev/darwinart/probe/ProbeContext;",
             "Ldev/darwinart/probe/ProbeContext$BaseContext;",
             "Ldev/darwinart/probe/ProbeContext$BoundServiceRecord;",
-            "Ldev/darwinart/probe/ProbeContext$RemoteServiceBinder;",
+            "Ldev/darwinart/runtime/os/RemoteBinder;",
+            "Ldev/darwinart/runtime/os/SystemServices;",
+            "Ldev/darwinart/runtime/system/ServiceDirectory;",
+            "Lcom/android/server/pm/dex/DexUsageStore;",
+            "Ldev/darwinart/runtime/am/ActivityManagerEndpoint;",
+            "Ldev/darwinart/runtime/am/ActiveServices;",
+            "Ldev/darwinart/runtime/am/SystemServiceBindings;",
+            "Ldev/darwinart/runtime/am/ServiceRecord;",
+            "Ldev/darwinart/runtime/am/IntentBindRecord;",
+            "Ldev/darwinart/runtime/am/ConnectionRecord;",
+            "Ldev/darwinart/runtime/am/ApplicationProcessRegistry;",
+            "Ldev/darwinart/runtime/am/ApplicationProcessRegistry$InitialWork;",
+            "Ldev/darwinart/runtime/am/ApplicationProcessRegistry$AttachedApplication;",
+            "Ldev/darwinart/runtime/am/ActivityManagerClient;",
+            "Ldev/darwinart/runtime/display/BuiltInDisplayConfiguration;",
+            "Ldev/darwinart/runtime/display/DefaultDisplayRegistry;",
+            "Ldev/darwinart/runtime/display/DisplayManagerEndpoint;",
+            "Ldev/darwinart/runtime/wm/ActivityClientControllerEndpoint;",
+            "Ldev/darwinart/runtime/wm/ActivityClientControllerEndpoint$ActivityRecord;",
+            "Ldev/darwinart/runtime/wm/ActivityClientControllerEndpoint$State;",
+            "Ldev/darwinart/runtime/wm/ActivityTaskManagerEndpoint;",
+            "Ldev/darwinart/runtime/wm/WindowManagerEndpoint;",
+            "Ldev/darwinart/runtime/wm/WindowSessionEndpoint;",
+            "Ldev/darwinart/runtime/wm/WindowSurfaceRegistry;",
+            "Ldev/darwinart/runtime/wm/WindowInputPublisher;",
+            "Ldev/darwinart/runtime/wm/DesktopWindowMetadataRegistry;",
+            "Ldev/darwinart/runtime/wm/DesktopWindowMetadataEndpoint;",
+            "Ldev/darwinart/runtime/wm/DesktopWindowMetadataClient;",
+            "Ldev/darwinart/runtime/user/UserManagerEndpoint;",
+            "Ldev/darwinart/runtime/content/SettingsProviderEndpoint;",
+            "Ldev/darwinart/runtime/notification/NotificationManagerEndpoint;",
+            "Ldev/darwinart/runtime/inputmethod/InputMethodManagerEndpoint;",
+            "Ldev/darwinart/runtime/input/InputManagerEndpoint;",
+            "Ldev/darwinart/runtime/input/InputDeviceRegistry;",
             "Ldev/darwinart/probe/JitInvokeCustom;",
             "Ldev/darwinart/probe/ProbePackageManager;",
+            "Ldev/darwinart/runtime/pm/InstalledApplicationInfo;",
+            "Ldev/darwinart/runtime/pm/InstalledManifestMetadata;",
+            "Ldev/darwinart/runtime/pm/InstalledResourceValue;",
+            "Ldev/darwinart/runtime/pm/InstalledActivityInfo;",
+            "Ldev/darwinart/runtime/pm/InstalledPackageInfo;",
+            "Ldev/darwinart/runtime/pm/InstalledServiceInfo;",
+            "Ldev/darwinart/runtime/pm/InstalledPackageRecord;",
+            "Ldev/darwinart/runtime/pm/PackageRecords;",
+            "Ldev/darwinart/runtime/pm/PackageManagerEndpoint;",
+            "Ldev/darwinart/runtime/pm/DexLoadReports;",
             "Ldev/darwinart/probe/ProbeResources;",
         ],
     )?;
 
+    super::verify_service_definitions_external(&output)?;
     let corrupt_dex = dex_dir.join("classes-corrupt.dex");
     let mut corrupt_bytes = fs::read(&classes_dex)?;
     let last = corrupt_bytes

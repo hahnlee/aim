@@ -1,0 +1,81 @@
+--- a/com_android_internal_os_ApplicationSharedMemory.cpp
++++ b/com_android_internal_os_ApplicationSharedMemory.cpp
+@@ -17,6 +17,7 @@
+ // See: ApplicationSharedMemory.md
+
+ #include <cutils/ashmem.h>
++#include "memory/application_descriptor.h"
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <nativehelper/JNIHelp.h>
+@@ -139,24 +140,23 @@
+               "Unexpected SystemCachceNonce offset in SharedMemory");
+
+ static jint nativeCreate(JNIEnv* env, jclass) {
+-    // Create anonymous shared memory region
+-    int fd = ashmem_create_region("ApplicationSharedMemory", sizeof(SharedMemory));
++    int fd = darwin_art::memory::CreateApplicationDescriptor(sizeof(SharedMemory));
+     if (fd < 0) {
+-        jniThrowExceptionFmt(env, "java/lang/RuntimeException", "Failed to create ashmem: %s",
+-                             strerror(errno));
++        jniThrowExceptionFmt(env, "java/lang/RuntimeException", "Failed to create shared memory: %s",
++                            strerror(errno));
+     }
+     return fd;
+ }
+
+ static jlong nativeMap(JNIEnv* env, jclass, jint fd, jboolean isMutable) {
+-    void* ptr = mmap(nullptr, sizeof(SharedMemory), isMutable ? PROT_READ | PROT_WRITE : PROT_READ,
+-                     MAP_SHARED, fd, 0);
++    void* ptr = darwin_art::memory::MapApplicationDescriptor(fd, sizeof(SharedMemory), isMutable);
+     if (ptr == MAP_FAILED) {
++        const int error = errno;
+-        close(fd);
++        darwin_art::memory::CloseApplicationDescriptor(fd);
+         jniThrowExceptionFmt(env, "java/lang/RuntimeException", "Failed to mmap shared memory: %s",
+-                             strerror(errno));
+-    }
+-
++                            strerror(error));
++        return 0;
++    }
+     return reinterpret_cast<jlong>(ptr);
+ }
+
+@@ -165,28 +165,20 @@
+ }
+
+ static void nativeUnmap(JNIEnv* env, jclass, jlong ptr) {
+-    if (munmap(reinterpret_cast<void*>(ptr), sizeof(SharedMemory)) == -1) {
++    if (darwin_art::memory::UnmapApplicationMemory(
++                reinterpret_cast<void*>(ptr), sizeof(SharedMemory)) == -1) {
+         jniThrowExceptionFmt(env, "java/lang/RuntimeException",
+-                             "Failed to munmap shared memory: %s", strerror(errno));
++                            "Failed to munmap shared memory: %s", strerror(errno));
+     }
+ }
+
+ static jint nativeDupAsReadOnly(JNIEnv* env, jclass, jint fd) {
+-    // Duplicate file descriptor
+-    fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+-    if (fd < 0) {
+-        jniThrowExceptionFmt(env, "java/lang/RuntimeException", "Failed to dup fd: %s",
+-                             strerror(errno));
+-    }
+-
+-    // Set new file descriptor to read-only
+-    if (ashmem_set_prot_region(fd, PROT_READ)) {
+-        close(fd);
++    int reader = darwin_art::memory::DuplicateApplicationDescriptorReader(fd);
++    if (reader < 0) {
+         jniThrowExceptionFmt(env, "java/lang/RuntimeException",
+-                             "Failed to ashmem_set_prot_region: %s", strerror(errno));
+-    }
+-
+-    return fd;
++                            "Failed to export read-only shared memory: %s", strerror(errno));
++    }
++    return reader;
+ }
+
+ static void nativeSetLatestNetworkTimeUnixEpochMillisAtZeroElapsedRealtimeMillis(jlong ptr,

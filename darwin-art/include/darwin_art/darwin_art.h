@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 #define DARWIN_ART_ABI_VERSION 1u
+#define DARWIN_ART_NATIVE_LOADER_CONFIG_ABI_VERSION 1u
 
 // Process lifecycle errors are kept outside the existing run-stage values.
 // Shutdown is intentionally not idempotent: a duplicate call is reported so
@@ -108,6 +109,19 @@ typedef struct darwin_art_host_services {
   darwin_art_release_service_t release_service;
 } darwin_art_host_services_t;
 
+// Optional additive Android NativeLoader input owned by the Rust host. The
+// four paths are borrowed for the duration of darwin_art_run_process; callers
+// must provide absolute guest/host paths as required by the selected loader
+// owner and must not mutate their backing bytes during the call.
+typedef struct darwin_art_native_loader_config {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  const char* linker_config_path;
+  const char* executable_path;
+  const char* library_search_path;
+  const char* android_unwind_path;
+} darwin_art_native_loader_config_t;
+
 typedef struct darwin_art_process_config {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -133,6 +147,9 @@ typedef struct darwin_art_process_config {
   // Optional additive Rust ActivityManager/process owner. Older callers may
   // provide a prefix ending at lifecycle_hooks.
   const darwin_art_host_services_t* host_services;
+  // Optional additive NativeLoader configuration. Older callers may provide a
+  // prefix ending at host_services; the engine checks struct_size before use.
+  const darwin_art_native_loader_config_t* native_loader_config;
 } darwin_art_process_config_t;
 
 typedef struct darwin_art_process_result {

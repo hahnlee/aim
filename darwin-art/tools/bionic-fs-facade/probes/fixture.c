@@ -118,6 +118,16 @@ __attribute__((visibility("default"))) int bionic_fs_fixture_run(void) {
   errno = 0;
   if (openat(directory, "payload.txt", O_RDONLY) != -1 ||
       errno != EOPNOTSUPP) return 12;
+  errno = 0;
+  if (mkdirat(directory, "new-directory", 0700) != -1 || errno != EROFS)
+    return 115;
+  errno = 0;
+  if (mkdirat(-7, "new-directory", 0700) != -1 || errno != EBADF)
+    return 116;
+  errno = 0;
+  if (mkdirat(-7, "/system/etc/new-directory", 0700) != -1 ||
+      errno != EROFS)
+    return 117;
   if (close(directory) != 0) return 13;
 
   if (stat("/system/etc/payload.txt", &status) != 0 ||
@@ -173,8 +183,13 @@ __attribute__((visibility("default"))) int bionic_fs_fixture_run(void) {
   if (directory_fd < 0) return 64;
   stream = fdopendir(directory_fd);
   if (stream == NULL) return 65;
+  if (dirfd(stream) != directory_fd) return 66;
   errno = 0;
-  if (close(directory_fd) != -1 || errno != EBADF) return 66;
+  struct stat directory_status;
+  if (fstat(directory_fd, &directory_status) != 0 ||
+      !S_ISDIR(directory_status.st_mode)) return 66;
+  if (fstatat(directory_fd, "", &directory_status, AT_EMPTY_PATH) != 0 ||
+      !S_ISDIR(directory_status.st_mode)) return 66;
   saw_payload = 0;
   for (;;) {
     struct dirent* entry = readdir(stream);
@@ -182,6 +197,8 @@ __attribute__((visibility("default"))) int bionic_fs_fixture_run(void) {
     if (NameEqual(entry->d_name, "payload.txt")) saw_payload = 1;
   }
   if (!saw_payload || closedir(stream) != 0) return 67;
+  errno = 0;
+  if (close(directory_fd) != -1 || errno != EBADF) return 66;
   int regular_fd = open("etc/payload.txt", O_RDONLY);
   if (regular_fd < 0) return 68;
   errno = 0;

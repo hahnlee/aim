@@ -1,12 +1,40 @@
 use super::{
     DsoLifecycle, ExportedSymbol, LoadError, LoadedElf, RejectAllResolver, ResolveError,
-    ResolvedSymbol, STB_GLOBAL, StagedElf, SymbolRequest, SymbolResolver, VersionRequirement,
+    ResolvedSymbol, StagedElf, SymbolRequest, SymbolResolver, VersionRequirement,
 };
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+#[path = "namespace_android_versions.rs"]
+mod android_versions;
+#[path = "namespace_globals.rs"]
+mod globals;
+#[path = "namespace_lookup_layout.rs"]
+mod lookup_layout;
+#[cfg(test)]
+#[path = "namespace_native_owners_tests.rs"]
+mod native_owners_tests;
+#[path = "namespace_residents.rs"]
+mod residents;
+pub use globals::GlobalElfImage;
+#[path = "namespace_scope_config.rs"]
+mod scope_config;
+pub use scope_config::NamespaceScopes;
+#[path = "namespace_bindings.rs"]
+mod bindings;
+#[path = "namespace_mapping_lease.rs"]
+mod mapping_lease;
+pub use mapping_lease::RetainedElfMapping;
+#[path = "namespace_external_owners.rs"]
+mod external_owners;
+#[path = "namespace_image_resource.rs"]
+pub(crate) mod image_resource;
+#[path = "namespace_mappings.rs"]
+mod mappings;
+#[path = "namespace_selection_metadata.rs"]
+mod selection_metadata;
 
 /// An explicitly populated, closed ELF namespace.
 ///
@@ -17,10 +45,12 @@ use std::sync::Arc;
 pub struct ClosedElfNamespace {
     sources: HashMap<String, Vec<u8>>,
     providers: HashSet<String>,
+    resident_dependencies: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug)]
 pub enum NamespaceError {
+    Scope(&'static str),
     DuplicateSoname(String),
     UnknownDependency {
         requested_by: String,
@@ -40,9 +70,15 @@ pub enum NamespaceError {
     },
 }
 
+pub(crate) struct ScopeLinkOptions<'a> {
+    pub(crate) namespace_scopes: Option<&'a NamespaceScopes>,
+    pub(crate) appcompat_16kb: Option<bool>,
+}
+
 impl fmt::Display for NamespaceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Scope(detail) => write!(formatter, "invalid namespace scopes: {detail}"),
             Self::DuplicateSoname(soname) => {
                 write!(formatter, "duplicate namespace SONAME: {soname}")
             }
@@ -121,8 +157,8 @@ impl ClosedElfNamespace {
     /// Loads a root and its complete recursive `DT_NEEDED` closure.
     ///
     /// The optional resolver is the namespace's explicit non-ELF provider source (for example,
-    /// a Bionic facade). It is consulted only after lookup in the requester's ELF dependency
-    /// scope and is never retained after eager relocation.
+    /// a Bionic facade). It is consulted only after lookup in the root's ELF local
+    /// group and is never retained after eager relocation.
     pub fn load_with_resolver(
         &self,
         root: &str,
@@ -137,28 +173,237 @@ impl ClosedElfNamespace {
         external: &mut dyn SymbolResolver,
         lifecycle: Option<Arc<dyn DsoLifecycle>>,
     ) -> Result<LoadedElfGraph, NamespaceError> {
+        self.load_with_globals(root, external, lifecycle, &[])
+    }
+
+    /// Load after the Android namespace owner selects an ordered global group.
+    /// Selected mappings stay alive through this graph's finalizers and unload.
+    pub fn load_with_globals(
+        &self,
+        root: &str,
+        external: &mut dyn SymbolResolver,
+        lifecycle: Option<Arc<dyn DsoLifecycle>>,
+        globals: &[GlobalElfImage],
+    ) -> Result<LoadedElfGraph, NamespaceError> {
+        self.load_with_globals_and_owners(root, external, lifecycle, globals, Vec::new())
+    }
+
+    /// Retain real native dependency owners through initialization, rollback,
+    /// all graph/image clones and ELF finalizers. These owners grant lifetime
+    /// only: namespace admission and lookup order remain separate contracts.
+    /// Owners must permit release from the thread dropping the last graph.
+    pub fn load_with_globals_and_owners(
+        &self,
+        root: &str,
+        external: &mut dyn SymbolResolver,
+        lifecycle: Option<Arc<dyn DsoLifecycle>>,
+        globals: &[GlobalElfImage],
+        native_owners: Vec<Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> Result<LoadedElfGraph, NamespaceError> {
+        let graph =
+            self.link_with_globals_and_owners(root, external, lifecycle, globals, native_owners)?;
+        graph.initialize()?;
+        Ok(graph)
+    }
+
+    /// Map and relocate a graph without executing constructors. The linker
+    /// owner must publish it before initialize, serialize competing opens,
+    /// and retract failed initialization from its registry. Not dlopen itself.
+    pub fn link_with_globals_and_owners(
+        &self,
+        root: &str,
+        external: &mut dyn SymbolResolver,
+        lifecycle: Option<Arc<dyn DsoLifecycle>>,
+        globals: &[GlobalElfImage],
+        native_owners: Vec<Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> Result<LoadedElfGraph, NamespaceError> {
+        self.link_with_scopes(root, external, lifecycle, globals, native_owners, None)
+    }
+
+    /// Link with explicit Android namespace scope decisions. None denotes this
+    /// type's original single-namespace contract, not a missing-metadata fallback.
+    /// Mapping lifetime is still whole-graph; this does not implement group close.
+    pub fn link_with_scopes(
+        &self,
+        root: &str,
+        external: &mut dyn SymbolResolver,
+        lifecycle: Option<Arc<dyn DsoLifecycle>>,
+        globals: &[GlobalElfImage],
+        native_owners: Vec<Arc<dyn std::any::Any + Send + Sync>>,
+        namespace_scopes: Option<&NamespaceScopes>,
+    ) -> Result<LoadedElfGraph, NamespaceError> {
+        self.link_with_scopes_and_appcompat(
+            root,
+            external,
+            lifecycle,
+            globals,
+            native_owners,
+            ScopeLinkOptions {
+                namespace_scopes,
+                appcompat_16kb: None,
+            },
+        )
+    }
+
+    /// Link with explicit namespace scopes and a per-discovered-graph 16KiB
+    /// app-compat policy snapshot. None retains this namespace's legacy
+    /// staging behavior; Some(false/true) selects Android's disabled/enabled
+    /// mode for every image staged by this graph.
+    pub(crate) fn link_with_scopes_and_appcompat(
+        &self,
+        root: &str,
+        external: &mut dyn SymbolResolver,
+        lifecycle: Option<Arc<dyn DsoLifecycle>>,
+        globals: &[GlobalElfImage],
+        native_owners: Vec<Arc<dyn std::any::Any + Send + Sync>>,
+        scope_options: ScopeLinkOptions<'_>,
+    ) -> Result<LoadedElfGraph, NamespaceError> {
+        let ScopeLinkOptions {
+            namespace_scopes,
+            appcompat_16kb,
+        } = scope_options;
+        self.validate_resident_dependencies(globals)?;
+        let mut global_catalog = globals
+            .iter()
+            .map(GlobalElfImage::catalog)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut global_versions = globals
+            .iter()
+            .map(GlobalElfImage::android_version_definitions)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut global_sources: Vec<_> = (0..globals.len())
+            .map(symbols::BindingSource::Resident)
+            .collect();
+        let mut providers = self.providers.clone();
+        providers.extend(globals.iter().map(|image| image.soname.clone()));
         let mut builder = GraphBuilder::default();
-        if self.providers.contains(root) {
+        if providers.contains(root) {
             return Err(NamespaceError::SonameMismatch {
                 supplied: root.to_owned(),
                 embedded: None,
             });
         }
-        builder.stage_recursive(root, root, &self.sources, &self.providers)?;
+        builder.stage_recursive(root, root, &self.sources, &providers, appcompat_16kb)?;
 
-        let scopes = builder.compute_scopes();
-        let catalog = builder.export_catalog()?;
-        let object_sonames: Vec<_> = builder
-            .objects
+        let layout = builder.compute_scopes(
+            builder.indices[root],
+            &self.providers,
+            &self.resident_dependencies,
+            namespace_scopes,
+        )?;
+        let group_roots: HashMap<String, String> = layout
+            .owners
             .iter()
-            .map(|object| object.soname.clone())
+            .enumerate()
+            .map(|(image, &owner)| (layout.names[image].clone(), layout.names[owner].clone()))
             .collect();
+        let object_sonames = layout.names;
+        let scopes = layout.scopes;
+        let mapping_owners = layout.owners;
+        let mut mapping_dependencies: Vec<Vec<usize>> = layout
+            .dependencies
+            .into_iter()
+            .take(builder.objects.len())
+            .map(|children| {
+                children
+                    .into_iter()
+                    .filter(|&i| i < builder.objects.len())
+                    .collect()
+            })
+            .collect();
+        if let Some(policy) = namespace_scopes {
+            policy.validate(&object_sonames, globals.len())?;
+        }
+        let mut catalog = builder.export_catalog()?;
+        let mut versions = builder.android_version_definitions()?;
+        catalog.resize_with(object_sonames.len(), Vec::new);
+        versions.resize_with(object_sonames.len(), || None);
+        // Resident globals precede newly discovered DF_1_GLOBAL images.
+        // Build this before relocating any member so every requester sees the
+        // same group, regardless of dependency-first relocation order.
+        let resident_global_count = global_catalog.len();
+        let mut bindings = vec![Vec::new(); builder.objects.len()];
+        let namespace_global_order = if namespace_scopes.is_some() {
+            builder
+                .compute_scopes(
+                    builder.indices[root],
+                    &self.providers,
+                    &self.resident_dependencies,
+                    None,
+                )?
+                .scopes[builder.indices[root]]
+                .clone()
+        } else {
+            Vec::new()
+        };
+        for &index in &scopes[builder.indices[root]] {
+            if namespace_scopes.is_some() {
+                break;
+            }
+            if index < builder.objects.len()
+                && builder.objects[index].staged.image.dynamic_flags_1() & super::DF_1_GLOBAL != 0
+            {
+                global_catalog.push(catalog[index].clone());
+                global_versions.push(versions[index].clone());
+                global_sources.push(symbols::BindingSource::Local(index));
+            }
+        }
         for &index in &builder.dependency_order {
+            let scoped_catalog;
+            let scoped_sources;
+            let scoped_versions;
+            let current_sources;
+            let current_versions;
+            let current_globals = if let Some(policy) = namespace_scopes {
+                let namespace = policy.namespace(&object_sonames[index])?;
+                let mut selected: Vec<_> = policy.globals[&namespace]
+                    .iter()
+                    .map(|&i| global_catalog[i].clone())
+                    .collect();
+                let mut sources: Vec<_> = policy.globals[&namespace]
+                    .iter()
+                    .map(|&i| global_sources[i])
+                    .collect();
+                let mut selected_versions: Vec<_> = policy.globals[&namespace]
+                    .iter()
+                    .map(|&i| global_versions[i].clone())
+                    .collect();
+                // Newly staged DF_1_GLOBAL members belong to their primary
+                // namespace; a public dependency link doesn't promote them.
+                for &i in &namespace_global_order {
+                    let Some(object) = builder.objects.get(i) else {
+                        continue;
+                    };
+                    if policy.namespace(&object_sonames[i])? == namespace
+                        && object.staged.image.dynamic_flags_1() & super::DF_1_GLOBAL != 0
+                    {
+                        selected.push(catalog[i].clone());
+                        selected_versions.push(versions[i].clone());
+                        sources.push(symbols::BindingSource::Local(i));
+                    }
+                }
+                debug_assert_eq!(global_catalog.len(), resident_global_count);
+                scoped_catalog = selected;
+                scoped_sources = sources;
+                scoped_versions = selected_versions;
+                current_sources = &scoped_sources;
+                current_versions = &scoped_versions;
+                &scoped_catalog
+            } else {
+                current_sources = &global_sources;
+                current_versions = &global_versions;
+                &global_catalog
+            };
             let mut resolver = GraphResolver {
+                global_sources: current_sources,
+                bindings: Vec::new(),
                 requester: index,
                 object_sonames: &object_sonames,
                 scopes: &scopes,
                 catalog: &catalog,
+                versions: &versions,
+                global_catalog: current_globals,
+                global_versions: current_versions,
                 provider_sonames: &self.providers,
                 external,
             };
@@ -170,6 +415,15 @@ impl ClosedElfNamespace {
                     soname: builder.objects[index].soname.clone(),
                     source,
                 })?;
+            bindings[index] = resolver.bindings;
+            for source in &bindings[index] {
+                if let symbols::BindingSource::Local(child) = *source
+                    && child < builder.objects.len()
+                    && !mapping_dependencies[index].contains(&child)
+                {
+                    mapping_dependencies[index].push(child);
+                }
+            }
         }
 
         // Publish every live reservation only after the full graph has relocated, but before
@@ -274,23 +528,6 @@ impl ClosedElfNamespace {
             eprintln!("DARWIN ELF preflight: soname={soname} symbol={symbol} result={result}");
         }
 
-        for &index in &builder.dependency_order {
-            builder.objects[index]
-                .staged
-                .image
-                .run_initializers_for_graph()
-                .map_err(|source| NamespaceError::Load {
-                    soname: builder.objects[index].soname.clone(),
-                    source,
-                })?;
-        }
-        // Finalization is graph-transactional: no object is armed until every constructor in
-        // dependency order has returned. A structural failure in a later initializer therefore
-        // drops even the already initialized prefix without running a partial finalizer set.
-        for &index in &builder.dependency_order {
-            builder.objects[index].staged.image.arm_finalizers();
-        }
-
         let root_index = *builder
             .indices
             .get(root)
@@ -311,19 +548,55 @@ impl ClosedElfNamespace {
             .rev()
             .map(|&index| builder.objects[index].soname.clone())
             .collect();
+        let needed: Vec<_> = builder
+            .objects
+            .iter()
+            .map(|object| object.staged.image.needed_libraries().to_vec())
+            .collect();
         let objects = builder
             .objects
             .into_iter()
-            .map(|object| Some(object.staged.image))
+            .map(|object| object.staged.image)
             .collect();
+        let external = Arc::new(mappings::ExternalOwners {
+            globals: globals.to_vec(),
+            native: native_owners,
+        });
+        let retention = external_owners::ExternalRetention::new(
+            external.clone(),
+            &object_sonames,
+            &needed,
+            &bindings,
+        );
+        let objects = mappings::GroupedMappings::with_resources(
+            objects,
+            &mapping_owners,
+            &builder.dependency_order,
+            &mapping_dependencies,
+            &retention,
+        );
+        let selection = Arc::new(selection_metadata::SelectionMetadata {
+            indices: builder.indices.clone(),
+            group_roots: group_roots.clone(),
+            identities: (0..mapping_owners.len())
+                .map(|i| objects.identity(i).unwrap())
+                .collect(),
+        });
         Ok(LoadedElfGraph {
             inner: Arc::new(GraphInner {
+                selection,
                 objects,
+                bindings,
+                binding_names: object_sonames,
+                external,
+                indices: builder.indices,
                 root_index,
+                group_roots,
                 load_order,
                 initialization_order,
                 unload_order,
                 drop_order: builder.dependency_order,
+                finalization: crate::finalization::Finalization::default(),
             }),
         })
     }
@@ -339,6 +612,56 @@ pub struct LoadedElfGraph {
 }
 
 impl LoadedElfGraph {
+    /// Original local-group root for a newly mapped member. This identity
+    /// survives selected-image retention; it is not an independent unmap lease.
+    pub fn local_group_root(&self, soname: &str) -> Option<&str> {
+        self.inner.group_roots.get(soname).map(String::as_str)
+    }
+    /// Run all graph members' destructor passes without releasing mappings.
+    /// This does not implement dlclose reference counting or NODELETE policy.
+    /// # Safety
+    /// The linker owner must establish unload eligibility, serialize guest
+    /// operations, and prohibit subsequent initialization/use of torn-down
+    /// library state. It retains this group through callbacks and unpublication.
+    pub unsafe fn finalize(&self) {
+        self.inner.finalize();
+    }
+
+    /// Run constructors in dependency order after linker publication. Requires
+    /// owner-level open serialization; a repeated/concurrent initialization
+    /// is rejected, not treated as completion. No graph mutex spans callbacks.
+    pub fn initialize(&self) -> Result<(), NamespaceError> {
+        for (soname, &index) in self
+            .inner
+            .initialization_order
+            .iter()
+            .zip(&self.inner.drop_order)
+        {
+            let image = self.inner.objects[index].as_ref().expect("retained image");
+            image
+                .run_initializers_for_graph()
+                .map_err(|source| NamespaceError::Load {
+                    soname: soname.clone(),
+                    source,
+                })?;
+        }
+        // Preserve eager API's transactional finalizer arming.
+        for &index in &self.inner.drop_order {
+            self.inner.objects[index]
+                .as_ref()
+                .expect("retained image")
+                .arm_finalizers();
+        }
+        Ok(())
+    }
+    /// Query a mapped member by its admitted logical SONAME, including DSOs
+    /// without an embedded DT_SONAME. Graph ownership keeps the image live.
+    pub fn dynamic_flags_1(&self, soname: &str) -> Option<u64> {
+        let index = *self.inner.indices.get(soname)?;
+        self.inner.objects[index]
+            .as_ref()
+            .map(LoadedElf::dynamic_flags_1)
+    }
     pub fn load_order(&self) -> &[String] {
         &self.inner.load_order
     }
@@ -389,7 +712,17 @@ impl LoadedElfGraph {
 }
 
 struct GraphInner {
-    objects: Vec<Option<LoadedElf>>,
+    selection: Arc<selection_metadata::SelectionMetadata>,
+    bindings: Vec<Vec<symbols::BindingSource>>,
+    binding_names: Vec<String>,
+    group_roots: HashMap<String, String>,
+    finalization: crate::finalization::Finalization,
+    // Mapping owners also retain these resources past a released graph view.
+    // Selected images retain this resource owner and their mapping component,
+    // not the whole GraphInner.
+    external: Arc<mappings::ExternalOwners>,
+    indices: HashMap<String, usize>,
+    objects: mappings::GroupedMappings,
     root_index: usize,
     load_order: Vec<String>,
     initialization_order: Vec<String>,
@@ -397,15 +730,30 @@ struct GraphInner {
     drop_order: Vec<usize>,
 }
 
-// SAFETY: LoadedElf is Send and graph contents are immutable after eager relocation and init.
+// SAFETY: LoadedElf is Send; mappings/metadata are fixed after relocation.
+// Initialization state is atomic, and no mutable reference crosses callbacks.
+// The linker owner must serialize initialization and execution of guest code.
 unsafe impl Send for GraphInner {}
 unsafe impl Sync for GraphInner {}
 
+impl GraphInner {
+    fn finalize(&self) {
+        // Keep every mapping until all local finalizers have run, matching
+        // Android's separate destructor pass before soinfo_free/unmap.
+        self.finalization.run(|| {
+            for &index in self.drop_order.iter().rev() {
+                if let Some(image) = &self.objects[index] {
+                    image.finalize_once();
+                }
+            }
+        });
+    }
+}
 impl Drop for GraphInner {
     fn drop(&mut self) {
-        for &index in self.drop_order.iter().rev() {
-            drop(self.objects[index].take());
-        }
+        // Mapping owners finalize only when their dependency-qualified leases
+        // drain. A selected physical mapping may outlive this graph view.
+        self.objects.clear();
     }
 }
 
@@ -432,6 +780,7 @@ impl GraphBuilder {
         soname: &str,
         sources: &HashMap<String, Vec<u8>>,
         providers: &HashSet<String>,
+        appcompat_16kb: Option<bool>,
     ) -> Result<usize, NamespaceError> {
         if let Some(&index) = self.indices.get(soname) {
             return Ok(index);
@@ -442,9 +791,11 @@ impl GraphBuilder {
                 requested_by: requested_by.to_owned(),
                 soname: soname.to_owned(),
             })?;
-        let staged = LoadedElf::stage(bytes).map_err(|source| NamespaceError::Load {
-            soname: soname.to_owned(),
-            source,
+        let staged = LoadedElf::stage_with_appcompat(bytes, appcompat_16kb).map_err(|source| {
+            NamespaceError::Load {
+                soname: soname.to_owned(),
+                source,
+            }
         })?;
         if staged
             .image
@@ -470,7 +821,8 @@ impl GraphBuilder {
             if providers.contains(&dependency) {
                 continue;
             }
-            let dependency_index = self.stage_recursive(soname, &dependency, sources, providers)?;
+            let dependency_index =
+                self.stage_recursive(soname, &dependency, sources, providers, appcompat_16kb)?;
             self.objects[index].dependencies.push(dependency_index);
         }
         self.visiting.remove(soname);
@@ -480,22 +832,32 @@ impl GraphBuilder {
         Ok(index)
     }
 
-    fn compute_scopes(&self) -> Vec<Vec<usize>> {
-        (0..self.objects.len())
-            .map(|root| {
-                let mut scope = Vec::new();
-                let mut seen = HashSet::new();
-                let mut queue = VecDeque::from([root]);
-                while let Some(index) = queue.pop_front() {
-                    if !seen.insert(index) {
-                        continue;
-                    }
-                    scope.push(index);
-                    queue.extend(self.objects[index].dependencies.iter().copied());
-                }
-                scope
+    fn compute_scopes(
+        &self,
+        root: usize,
+        providers: &HashSet<String>,
+        resident_dependencies: &HashMap<String, Vec<String>>,
+        namespace_scopes: Option<&NamespaceScopes>,
+    ) -> Result<lookup_layout::Layout, NamespaceError> {
+        // Explicit admission scopes determine local group ownership; the legacy
+        // closed-namespace call supplies one namespace, not per-DSO subtrees.
+        let files: Vec<_> = self
+            .objects
+            .iter()
+            .map(|object| {
+                (
+                    object.soname.clone(),
+                    object.staged.image.needed_libraries().to_vec(),
+                )
             })
-            .collect()
+            .collect();
+        lookup_layout::layout_scoped(
+            root,
+            &files,
+            providers,
+            resident_dependencies,
+            namespace_scopes,
+        )
     }
 
     fn export_catalog(&self) -> Result<Vec<Vec<ExportedSymbol>>, NamespaceError> {
@@ -513,103 +875,26 @@ impl GraphBuilder {
             })
             .collect()
     }
-}
 
-struct GraphResolver<'a> {
-    requester: usize,
-    object_sonames: &'a [String],
-    scopes: &'a [Vec<usize>],
-    catalog: &'a [Vec<ExportedSymbol>],
-    provider_sonames: &'a HashSet<String>,
-    external: &'a mut dyn SymbolResolver,
-}
-
-impl GraphResolver<'_> {
-    fn graph_lookup(
+    fn android_version_definitions(
         &self,
-        symbol: &str,
-        version: Option<VersionRequirement<'_>>,
-    ) -> Result<Option<usize>, ResolveError> {
-        let scope = &self.scopes[self.requester];
-        let candidate_objects: Vec<usize> = match version {
-            Some(requirement) => {
-                let Some(index) = scope
-                    .iter()
-                    .copied()
-                    .find(|&index| self.object_sonames[index] == requirement.soname)
-                else {
-                    if self.provider_sonames.contains(requirement.soname) {
-                        return Ok(None);
-                    }
-                    return Err(ResolveError::UnknownSoname(requirement.soname.to_owned()));
-                };
-                vec![index]
-            }
-            None => scope.clone(),
-        };
-        let mut weak = None;
-        for index in candidate_objects {
-            for export in &self.catalog[index] {
-                if export.name != symbol.as_bytes() {
-                    continue;
-                }
-                let version_matches = match version {
-                    Some(requirement) => {
-                        export.version.as_deref() == Some(requirement.name)
-                            && export.version_hidden == requirement.hidden
-                    }
-                    None => !export.version_hidden,
-                };
-                if !version_matches {
-                    continue;
-                }
-                if export.binding == STB_GLOBAL {
-                    return Ok(Some(export.address));
-                }
-                weak.get_or_insert(export.address);
-            }
-        }
-        if let Some(requirement) = version {
-            let provider_has_symbol = scope.iter().copied().any(|index| {
-                self.object_sonames[index] == requirement.soname
-                    && self.catalog[index]
-                        .iter()
-                        .any(|export| export.name == symbol.as_bytes())
-            });
-            if provider_has_symbol {
-                return Err(ResolveError::VersionMismatch {
-                    soname: requirement.soname.to_owned(),
-                    symbol: symbol.to_owned(),
-                    requested: requirement.name.to_owned(),
-                });
-            }
-        }
-        Ok(weak)
+    ) -> Result<Vec<Option<HashMap<u16, String>>>, NamespaceError> {
+        self.objects
+            .iter()
+            .map(|object| {
+                object
+                    .staged
+                    .image
+                    .android_version_definitions()
+                    .map_err(|source| NamespaceError::Load {
+                        soname: object.soname.clone(),
+                        source,
+                    })
+            })
+            .collect()
     }
 }
 
-impl SymbolResolver for GraphResolver<'_> {
-    fn resolve(
-        &mut self,
-        request: SymbolRequest<'_>,
-    ) -> Result<Option<ResolvedSymbol>, ResolveError> {
-        if let Some(address) = self.graph_lookup(request.symbol, request.version)? {
-            let address = NonZeroUsize::new(address)
-                .ok_or_else(|| ResolveError::Rejected("ELF export has null address".to_owned()))?;
-            // SAFETY: the graph owns the provider mapping until every graph handle is dropped.
-            return Ok(Some(unsafe { ResolvedSymbol::new(address) }));
-        }
-        let provider_is_explicit = request
-            .version
-            .is_some_and(|requirement| self.provider_sonames.contains(requirement.soname))
-            || request
-                .needed_libraries
-                .iter()
-                .any(|soname| self.provider_sonames.contains(soname));
-        if provider_is_explicit {
-            self.external.resolve(request)
-        } else {
-            Ok(None)
-        }
-    }
-}
+#[path = "namespace_symbols.rs"]
+mod symbols;
+use symbols::GraphResolver;

@@ -35,6 +35,7 @@ libc.so	gethostbyname	LIBC	dns	Legacy resolver symbol kept in the Android networ
 libc.so	getservbyname	LIBC	dns	Legacy service resolver symbol kept in the Android network namespace
 libc.so	environ	LIBC	process-state	Pointer vector backed by the active immutable Android process environment snapshot
 libc.so	__system_property_find	LIBC	process-state	Stable opaque property token lookup in the active immutable Android process snapshot
+libc.so	__system_property_foreach	LIBC	process-state	Synchronous iteration over every property in the active immutable Android process snapshot
 libc.so	__system_property_read	LIBC	process-state	Legacy property read over the active immutable Android process snapshot
 libc.so	__system_property_read_callback	LIBC_O	process-state	Validated synchronous callback over a property token owned by the active process snapshot
 libc.so	timezone	LIBC	time	Android long seconds-west-of-UTC slot initialized through the host timezone database
@@ -142,7 +143,7 @@ libc.so	__pread64_chk	LIBC	filesystem	Fortify checked positioned read alias
 libc.so	__pread_chk	LIBC	filesystem	Fortify checked positioned read
 libc.so	__pwrite64_chk	LIBC	filesystem	Fortify checked positioned write alias
 libc.so	__pwrite64_chk	LIBC_N	filesystem	Android N version alias for fortified positioned write
-libc.so	__pwrite_chk	LIBC	filesystem	Fortify checked positioned write
+libc.so	__pwrite_chk	LIBC_N	filesystem	Android N fortified positioned write
 libc.so	__readlink_chk	LIBC	filesystem	Fortify checked virtual readlink
 libc.so	futimes	LIBC	filesystem	Explicit ENOSYS pending descriptor timestamp mutation
 libc.so	futimens	LIBC	filesystem	Descriptor timestamp mutation through Android virtual-fd utimensat
@@ -162,8 +163,9 @@ libc.so	setmntent	LIBC	stdio	Open a capability-rooted mount table stream
 libc.so	recvmmsg	LIBC	socket	Explicit EOPNOTSUPP for batched message receive pending ancillary-message support
 libc.so	flock	LIBC	filesystem	Android advisory locks translated for capability-backed private-data descriptors
 libc.so	fstatfs	LIBC	filesystem	Explicit ENOSYS pending Android statfs ABI translation
-libc.so	dirfd	LIBC	filesystem	Explicit ENOSYS pending directory-stream descriptor publication
-libc.so	fstatat	LIBC	filesystem	Explicit ENOSYS pending relative descriptor path translation
+libc.so	dirfd	LIBC	filesystem	Directory-owned guest descriptor retained through closedir
+libc.so	fstatat	LIBC	filesystem	GuestRoot FD-relative lookup plus AT_EMPTY_PATH; legacy submount relative lookup unsupported
+libc.so	fchdir	LIBC	filesystem	GuestRoot admitted directory FD owns cwd; unnameable directories and legacy submount unsupported
 libc.so	readdir_r	LIBC	filesystem	Deprecated reentrant directory read over capability-owned streams
 libc.so	getchar	LIBC	stdio	Android stdin character input
 libc.so	putc_unlocked	LIBC	stdio	Android FILE byte output compatibility
@@ -211,6 +213,9 @@ libc.so	android_fdsan_create_owner_tag	LIBC	socket	Android FD ownership tag cons
 libc.so	android_fdsan_create_owner_tag	LIBC_Q	socket	Android Q version alias for fdsan tag construction
 libc.so	android_fdsan_exchange_owner_tag	LIBC	socket	Android FD ownership tag compatibility
 libc.so	android_fdsan_exchange_owner_tag	LIBC_Q	socket	Android Q version alias for fdsan ownership exchange
+libc.so	android_fdsan_get_error_level	LIBC_Q	socket	Process-wide Android FDSAN severity query
+libc.so	android_fdsan_get_owner_tag	LIBC_Q	socket	Read descriptor ownership from the shared Rust FDSAN tag store
+libc.so	android_fdsan_set_error_level	LIBC_Q	socket	Atomic Android FDSAN severity exchange returning previous level
 libc.so	freeifaddrs	LIBC	socket	Virtual interface enumeration cleanup
 libc.so	freeifaddrs	LIBC_N	socket	Android N version alias for interface enumeration cleanup
 libc.so	getifaddrs	LIBC	socket	Explicit ENOSYS pending translated interface enumeration
@@ -231,6 +236,7 @@ libc.so	getrlimit	LIBC	process-state	Virtual Android process resource limits
 libc.so	setrlimit	LIBC	process-state	Virtual Android process resource limit mutation
 libc.so	strsignal	LIBC	process-state	Android signal description mapping
 libc.so	__fwrite_chk	LIBC	stdio	Fortify checked capability-owned stream write
+libc.so	__fread_chk	LIBC_N	stdio	Fortified capability-owned stream read
 libc.so	__fwrite_chk	LIBC_N	stdio	Android N version alias for fortified stream write
 libc.so	mallinfo	LIBC	allocator	Android allocator statistics snapshot
 libc.so	fnmatch	LIBC	locale	Android pathname pattern matching
@@ -277,8 +283,6 @@ libbinder_ndk.so	AStatus_delete	LIBBINDER_NDK	binder-ndk	Binder status lifecycle
 libbinder_ndk.so	AStatus_fromStatus	LIBBINDER_NDK	binder-ndk	Binder status construction
 libbinder_ndk.so	AStatus_isOk	LIBBINDER_NDK	binder-ndk	Binder status query
 libbinder_ndk.so	AStatus_newOk	LIBBINDER_NDK	binder-ndk	Successful Binder status construction
-libandroid.so	android_res_nquery		dns	Android asynchronous DNS query fallback
-libandroid.so	android_res_nresult		dns	Android asynchronous DNS result fallback
 libc.so	setpriority	LIBC	process-state	Virtual Android per-thread nice hint without mutating unrelated Darwin processes
 libc.so	setsid	LIBC	process-state	Virtual Android session creation
 libc.so	unsetenv	LIBC	process-state	Process environment mutation
@@ -317,6 +321,8 @@ libc.so	__FD_SET_chk	LIBC	leaf	Bionic fortified fd_set insertion bounds check
 libc.so	__FD_ISSET_chk	LIBC	leaf	Bionic fortified fd_set membership bounds check
 libc.so	__FD_CLR_chk	LIBC	leaf	Bionic fortified fd_set removal bounds check
 libc.so	strtoumax	LIBC	numeric	Android maximum-width unsigned integer conversion
+libc.so	strtoimax	LIBC	numeric	Android maximum-width signed integer conversion
+libc.so	mkdirat	LIBC	filesystem	Guest directory-relative creation through filesystem ownership
 libc.so	vsprintf	LIBC	format	Android va_list unbounded string formatting
 libc.so	mlock	LIBC	vm	Explicit ENOSYS pending VM-owned range locking
 libc.so	munlock	LIBC	vm	Advisory unlock for native memory consumers
@@ -402,7 +408,7 @@ libc.so	strpbrk	LIBC	leaf	byte-string search required by AOSP Skia native consum
 libc.so	strrchr	LIBC	leaf	byte-string search required by AOSP Skia native consumers
 libc.so	strspn	LIBC	leaf	byte-string search required by AOSP Skia native consumers
 libc.so	strstr	LIBC	leaf	byte-string search required by AOSP Skia native consumers
-libc.so	mallopt		allocator	Android allocator tuning compatibility for AOSP Skia native consumers
+libc.so	mallopt	LIBC_O	allocator	Android16 original libc default export (libc-default-versions.source)
 libc.so	calloc	LIBC	allocator	Android zeroed allocation compatibility for AOSP Skia native consumers
 libc.so	malloc_usable_size	LIBC	allocator	Android allocation size compatibility for AOSP Skia native consumers
 libc.so	vprintf	LIBC	stdio	Bounded Android vprintf compatibility for AOSP Skia native consumers
@@ -499,7 +505,6 @@ libm.so	tan	LIBC	math	Darwin math compatibility for AOSP Skia native consumers
 libm.so	tanf	LIBC	math	Darwin math compatibility for AOSP Skia native consumers
 libm.so	tanh	LIBC	math	Darwin math compatibility for AOSP Skia native consumers
 libm.so	tanhf	LIBC	math	Darwin hyperbolic tangent compatibility for Android native consumers
-liblog.so	__android_log_print	LIBLOG	liblog	Android system/APEX symbol-version alias for libjavacrypto
 libc.so	__open_2	LIBC	filesystem	Bionic fortified two-argument open over the capability filesystem
 libc.so	__read_chk	LIBC	central-fd-broker	Bionic bounded read over the central descriptor owner
 libc.so	__write_chk	LIBC_N	central-fd-broker	Bionic bounded write over the central descriptor owner
@@ -600,6 +605,14 @@ libc.so	tolower_l	LIBC	locale	Android C locale lowercase mapping with explicit l
 libc.so	toupper	LIBC	locale	Android C locale uppercase mapping
 libc.so	toupper_l	LIBC	locale	Android C locale uppercase mapping with explicit locale handle
 libc.so	__umask_chk	LIBC	filesystem	Android fortified process umask state
+libc.so	reallocarray	LIBC_Q	allocator	Overflow-checked array reallocation preserving original allocation on failure
+libc.so	memset_explicit	LIBC_U	leaf	Explicit memory clearing through volatile byte stores
+libc.so	ftw	LIBC	filesystem	Original AOSP file tree traversal over guest providers
+libc.so	__system_property_set	LIBC	process-state	Original AOSP property-service client; service availability required
+libc.so	__system_property_area_serial	LIBC	process-state	Property area generation from shared process owner
+libc.so	__system_property_serial	LIBC	process-state	Property handle generation from shared process owner
+libc.so	__system_property_wait	LIBC_O	process-state	Wait for property generation change with relative timeout
+libc.so	nftw	LIBC	filesystem	Original AOSP flagged file tree traversal over guest providers
 libdl.so	android_dlopen_ext	LIBC	dso-lifecycle	Android guest DSO namespace extended open
 libdl.so	dlclose	LIBC	dso-lifecycle	Android guest DSO namespace close
 libdl.so	dlerror	LIBC	dso-lifecycle	Android guest DSO namespace error channel

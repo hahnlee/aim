@@ -32,17 +32,24 @@ typedef struct DarwinArtAndroidFunctionOwnerV1 {
   uintptr_t executable_end;
 } DarwinArtAndroidFunctionOwnerV1;
 
+// Return positive only after acquiring a lease, zero for an unowned pointer,
+// and negative on lookup failure. Zero/negative results must not acquire a lease.
+// Even a malformed positive owner record is passed to release_owner.
 typedef int (*DarwinArtLookupAndroidFunctionOwnerV1)(
     void* context,
     const void* function,
     DarwinArtAndroidFunctionOwnerV1* owner_out);
 
-// A successful lookup owns a temporary image lease. The loader must prevent
-// unmapping until the matching release call has completed.
+// A successful lookup owns an image lease. On cache publication it is retained
+// until retirement/destruction, and released AFTER destroying the thunk. Other
+// lookups release before returning. The loader must prevent unmapping until the
+// matching release completes; retirement must precede waiting for cache leases.
 typedef void (*DarwinArtReleaseAndroidFunctionOwnerV1)(
     void* context,
     const DarwinArtAndroidFunctionOwnerV1* owner);
 
+// Callbacks must not throw. Build/destroy run outside the cache mutex. Concurrent
+// misses may build duplicates; each result must have independent ownership.
 typedef void* (*DarwinArtBuildRegisteredNativeThunkV1)(
     void* context,
     const void* android_function,
@@ -66,9 +73,15 @@ typedef struct DarwinArtRegisteredNativeThunkFactoryV1 {
 
 typedef struct DarwinArtRegisteredNativeCache DarwinArtRegisteredNativeCache;
 
+// Allocation failures during create/resolve return null/ERROR. Retirement,
+// destruction and size have no error channel and fail-stop on internal failure;
+// they must never report successful retirement while resources remain live.
+
 DarwinArtRegisteredNativeCache* darwin_art_registered_native_cache_create(
     const DarwinArtRegisteredNativeThunkFactoryV1* factory);
 
+// Caller must stop cache operations and quiesce all returned callable entries
+// before destruction; the cache does not synchronize executing native calls.
 void darwin_art_registered_native_cache_destroy(
     DarwinArtRegisteredNativeCache* cache);
 
@@ -102,6 +115,9 @@ DarwinArtRegisteredNativeResolution darwin_art_resolve_registered_native(
 // Called by the loader when the exact Android ELF image generation is closed.
 // ART has no per-method native-bridge release callback; UnregisterNatives only
 // resets ArtMethod entrypoints, so cache entries live until image retirement.
+// Caller must quiesce published callables before retiring. Pending builders may
+// finish but cannot publish this generation afterward. Retired generations stay
+// rejected until cache destruction; loader image leases still govern unmapping.
 size_t darwin_art_registered_native_cache_retire_image(
     DarwinArtRegisteredNativeCache* cache,
     uint64_t image_id,

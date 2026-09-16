@@ -2,7 +2,9 @@
 
 #include <pthread.h>
 
+#include <cstdlib>
 #include <cstdint>
+#include <iostream>
 #include <mutex>
 #include <new>
 #include <unordered_set>
@@ -277,6 +279,56 @@ int32_t wait_main_looper(darwin_art_graphics_session_t* session,
 }
 
 }  // namespace darwin_art_graphics
+
+// DisplayEventReceiver is Android-owned and runs while ActivityThread.main()
+// holds the owner thread inside Looper.loop(). Keep this optional diagnostic
+// hook outside the product ABI: it only resolves the bound session on that
+// same owner thread and never lets the display helper enter ART/JNI.
+extern "C" void darwin_art_graphics_debug_vsync(JNIEnv* env) {
+  if (env == nullptr ||
+      std::getenv("DARWIN_ART_DEBUG_VIEW_TEXT") == nullptr) {
+    return;
+  }
+  jclass global_class = env->FindClass("android/view/WindowManagerGlobal");
+  jmethodID get_instance =
+      global_class == nullptr
+          ? nullptr
+          : env->GetStaticMethodID(global_class, "getInstance",
+                                   "()Landroid/view/WindowManagerGlobal;");
+  jobject global = get_instance == nullptr
+                       ? nullptr
+                       : env->CallStaticObjectMethod(global_class, get_instance);
+  jfieldID views_field =
+      global_class == nullptr
+          ? nullptr
+          : env->GetFieldID(global_class, "mViews", "Ljava/util/ArrayList;");
+  jobject views = views_field == nullptr
+                      ? nullptr
+                      : env->GetObjectField(global, views_field);
+  jclass list_class = env->FindClass("java/util/ArrayList");
+  jmethodID size = list_class == nullptr
+                       ? nullptr
+                       : env->GetMethodID(list_class, "size", "()I");
+  jmethodID get = list_class == nullptr
+                      ? nullptr
+                      : env->GetMethodID(list_class, "get",
+                                         "(I)Ljava/lang/Object;");
+  jobject root = nullptr;
+  if (views != nullptr && size != nullptr && get != nullptr &&
+      !env->ExceptionCheck()) {
+    const jint count = env->CallIntMethod(views, size);
+    if (count > 0 && !env->ExceptionCheck()) {
+      root = env->CallObjectMethod(views, get, count - 1);
+    }
+  }
+  darwin_art_graphics::debug_view_text_state(env, root);
+  env->DeleteLocalRef(root);
+  env->DeleteLocalRef(list_class);
+  env->DeleteLocalRef(views);
+  env->DeleteLocalRef(global);
+  env->DeleteLocalRef(global_class);
+  if (env->ExceptionCheck()) env->ExceptionClear();
+}
 
 extern "C" DARWIN_ART_EXPORT darwin_art_graphics_session_t*
 darwin_art_graphics_session_create() {

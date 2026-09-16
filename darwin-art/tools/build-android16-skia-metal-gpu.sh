@@ -78,7 +78,7 @@ skia_gl_standard=\"gles\" skia_use_egl=true skia_use_metal=true \
 skia_use_vulkan=false \
 skia_use_libjpeg_turbo_decode=true skia_use_libjpeg_turbo_encode=false \
 skia_use_no_jpeg_encode=true skia_use_libpng_decode=true \
-skia_use_libpng_encode=false skia_use_no_png_encode=true \
+skia_use_libpng_encode=true skia_use_no_png_encode=false \
 skia_use_libwebp_decode=true skia_use_system_libwebp=false \
 skia_use_libwebp_encode=false skia_use_no_webp_encode=true \
 skia_use_wuffs=false skia_use_piex=false skia_use_xps=false \

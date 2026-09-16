@@ -1,4 +1,6 @@
 #include "darwin_framework_natives.h"
+#include "graphics/graphics_environment.h"
+#include "graphics/overlay_properties_natives.h"
 
 #if defined(DARWIN_ART_REAL_GRAPHICS)
 #include <android/graphics/jni_runtime.h>
@@ -74,6 +76,7 @@ void ShutdownFrameworkAsyncWorkers() {
 }
 
 void ShutdownFrameworkGraphicsRuntime() {
+  graphics::ResetGraphicsEnvironment();
 #if defined(DARWIN_ART_REAL_GRAPHICS)
   // The ICU JNI unload hook runs first and calls u_cleanup(); release the
   // external Android ICU data mapping only after no ICU consumer remains.
@@ -113,7 +116,8 @@ bool RegisterFrameworkGraphicsNatives(JNIEnv* env) {
     return false;
   }
   init_android_graphics();
-  return register_android_graphics_classes(env) >= 0;
+  return register_android_graphics_classes(env) >= 0 &&
+         graphics::RegisterOverlayPropertiesNatives(env);
 #else
   // ProbeCanvas, DarwinPaint, and DarwinRenderNode were registered atomically
   // by RegisterFrameworkNatives().

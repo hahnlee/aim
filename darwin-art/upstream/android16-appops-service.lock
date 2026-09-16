@@ -1,0 +1,8 @@
+# Android 16 AppOps contract used by the desktop endpoint.
+FRAMEWORK_APPOPS_PATH=_prebuilt/android-16/bootclasspath/framework.jar
+FRAMEWORK_APPOPS_SHA256=ae3d578e3c4cd28ad822d0bc7b35fa308800f440472f54f2aff8aa5c1e22cd91
+IAPPOPS_SERVICE_DESCRIPTOR=com.android.internal.app.IAppOpsService
+CHECK_OPERATION_FOR_DEVICE_SIGNATURE='int checkOperationForDevice(int,int,java.lang.String,java.lang.String,int)'
+CHECK_OPERATION_FOR_DEVICE_TRANSACTION=55
+APPOPS_SERVICE_NAME=appops
+APPOPS_MODE_ALLOWED=0

@@ -4,9 +4,41 @@
 #[cfg(not(target_os = "macos"))]
 compile_error!("darwin-art-profile requires macOS; no weaker filesystem fallback exists");
 
+mod app_ids;
+mod application_launch_template;
+mod binder_client;
+mod binder_service;
+mod binder_transfer;
+mod bound_service_client;
+mod bound_service_process;
+mod bound_service_registry;
+pub use binder_client::{BinderAuthorityConnection, connect_binder_authority_at};
+pub use bound_service_client::{activate_bound_service_process, start_bound_service_process};
+pub use bound_service_process::{BoundServiceProcessRequest, BoundServiceProcessResponse};
+mod fd_passing;
 mod filesystem;
+mod listener_wait;
+mod peer_process;
+mod process_command;
+mod process_identity;
+mod process_incarnation;
+mod process_start_gate;
+pub use process_start_gate::wait_for_process_registration;
+mod package_client;
+pub use package_client::resolve_package_at;
+mod process_registry;
 mod protocol;
+pub use process_identity::ProcessIdentity;
 mod registry;
+pub mod runtime_service_cli;
+mod runtime_service_client;
+pub mod runtime_service_endpoints;
+mod runtime_service_launch;
+pub mod runtime_service_protocol;
+mod runtime_service_state;
+pub use runtime_service_client::{
+    publish_runtime_lost, publish_runtime_ready, start_runtime_service,
+};
 mod server;
 
 use std::env;
@@ -411,6 +443,35 @@ pub fn register_package(
 pub fn resolve_package(paths: &ProfilePaths, package: &str) -> Result<Vec<u8>, ProfileError> {
     registry::validate_package(package)?;
     request(paths, protocol::OP_RESOLVE, package.as_bytes())
+}
+
+pub fn resolve_process_identity(
+    paths: &ProfilePaths,
+    pid: u32,
+) -> Result<ProcessIdentity, ProfileError> {
+    resolve_process_identity_at(&paths.socket, pid)
+}
+
+/// Query an already-running profile daemon. Never spawn or select a profile
+/// from the Binder dispatch path; the host provides the socket capability.
+pub fn resolve_process_identity_at(
+    socket: &Path,
+    pid: u32,
+) -> Result<ProcessIdentity, ProfileError> {
+    if pid == 0 {
+        return Err(ProfileError::Daemon("process PID must be non-zero".into()));
+    }
+    let mut stream = UnixStream::connect(socket)?;
+    let timeout = Some(std::time::Duration::from_secs(1));
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
+    protocol::write_request(
+        &mut stream,
+        protocol::OP_PROCESS_IDENTITY,
+        &pid.to_le_bytes(),
+    )?;
+    let response = protocol::expect_ok(&mut stream, protocol::OP_PROCESS_IDENTITY)?;
+    ProcessIdentity::decode(&response, pid)
 }
 
 pub fn unregister_package(

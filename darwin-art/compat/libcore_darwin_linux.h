@@ -73,6 +73,9 @@ void DarwinLinuxSocketpair(JNIEnv *env, jobject receiver, jint domain,
                            jobject java_fd2);
 jlong DarwinLinuxSysconf(JNIEnv *env, jobject receiver, jint name);
 jstring DarwinLinuxGetenv(JNIEnv *env, jobject receiver, jstring java_name);
+void DarwinLinuxSetenv(JNIEnv *env, jobject receiver, jstring java_name,
+                       jstring java_value, jboolean overwrite);
+void DarwinLinuxUnsetenv(JNIEnv *env, jobject receiver, jstring java_name);
 jobject DarwinLinuxGetpwuid(JNIEnv *env, jobject receiver, jint uid);
 jobject DarwinLinuxUname(JNIEnv *env, jobject receiver);
 jstring DarwinLinuxStrerror(JNIEnv *env, jobject receiver, jint error_number);

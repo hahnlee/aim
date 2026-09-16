@@ -1,0 +1,8 @@
+# Android 16 framework power-manager contract used by the desktop endpoint.
+FRAMEWORK_POWER_PATH=_prebuilt/android-16/bootclasspath/framework.jar
+FRAMEWORK_POWER_SHA256=ae3d578e3c4cd28ad822d0bc7b35fa308800f440472f54f2aff8aa5c1e22cd91
+IPOWER_MANAGER_DESCRIPTOR=android.os.IPowerManager
+IS_INTERACTIVE_SIGNATURE='boolean isInteractive()'
+IS_INTERACTIVE_TRANSACTION=21
+IS_DISPLAY_INTERACTIVE_SIGNATURE='boolean isDisplayInteractive(int)'
+IS_DISPLAY_INTERACTIVE_TRANSACTION=22

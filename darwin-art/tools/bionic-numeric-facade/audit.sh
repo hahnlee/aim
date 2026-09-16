@@ -50,6 +50,7 @@ check "$dir/audit.sh" "$AUDIT_SHA256"
 tail -n +2 "$dir/manifests/imports.tsv" | cut -f1 | sort > "$tmp/provider-demand"
 trap 'find "$tmp" -depth -delete' EXIT
 cat > "$tmp/expected-demand" <<'EOF'
+strtoimax
 strtol
 strtoll
 strtoll_l
@@ -66,7 +67,7 @@ for absent in strtol_l strtoul_l; do
   ! awk -F '\t' -v wanted="$absent" '$1==wanted{found=1}END{exit !found}' "$master" ||
     fail "unexpected pinned libc++ demand: $absent"
 done
-[[ "$(tail -n +2 "$dir/manifests/imports.tsv" | wc -l | tr -d ' ')" == 6 ]] ||
+[[ "$(tail -n +2 "$dir/manifests/imports.tsv" | wc -l | tr -d ' ')" == 7 ]] ||
   fail 'supported import count'
 
 source_root="$root/_aosp/bionic-numeric-facade"
@@ -99,7 +100,7 @@ assert "(*p == 'b' || *p == 'B') && isdigit(p[1])" in integer
 assert '__builtin_mul_overflow' in integer
 assert 'errno = ERANGE' in integer and 'errno = EINVAL' in integer
 assert 'return neg ? -acc : acc;' in integer
-for name in ('strtol', 'strtoll', 'strtoul', 'strtoull'):
+for name in ('strtol', 'strtoll', 'strtoimax', 'strtoul', 'strtoull'):
     assert f'{name}(' in integer
 for name in ('strtol_l', 'strtoll_l', 'strtoul_l', 'strtoull_l'):
     body = locale[locale.index(name + '('):]
@@ -120,7 +121,7 @@ done
 check "$ndk/source.properties" "$NDK_SOURCE_PROPERTIES_SHA256"
 check "$ndk/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/stdlib.h" "$NDK_STDLIB_H_SHA256"
 check "$libc" "$NDK_API35_ARM64_LIBC_SHA256"
-for symbol in strtol strtoll strtoll_l strtoul strtoull strtoull_l; do
+for symbol in strtol strtoll strtoimax strtoll_l strtoul strtoull strtoull_l; do
   "$readelf" --dyn-syms --wide "$libc" |
     awk -v wanted="$symbol@@LIBC" '$4=="FUNC"&&$5=="GLOBAL"&&$8==wanted{found=1}END{exit !found}' ||
     fail "API-35 libc export: $symbol@@LIBC"
@@ -167,6 +168,7 @@ file "$fixture" | grep -F 'ELF 64-bit LSB shared object, ARM aarch64' >/dev/null
   awk '$7=="UND"&&$8!=""{print $8}' | sort -u > "$tmp/fixture.imports"
 cat > "$tmp/fixture.expected" <<'EOF'
 __errno@LIBC
+strtoimax@LIBC
 strtol@LIBC
 strtoll@LIBC
 strtoll_l@LIBC
@@ -203,4 +205,4 @@ UBSAN_OPTIONS=halt_on_error=1 BIONIC_NUMERIC_C_SANITIZER=undefined \
   CARGO_TARGET_DIR="$tmp/ubsan" cargo run --quiet --manifest-path "$dir/Cargo.toml" -- "$fixture"
 cargo fmt --manifest-path "$dir/Cargo.toml" -- --check
 clean
-echo 'bionic-numeric-facade: PASS libc++=6 AndroidELF=7@LIBC AOSP-differential base=0,2..36 host-strto=0 threads=8x1000 C-ASan C-UBSan target-clean'
+echo 'bionic-numeric-facade: PASS libc++=7 AndroidELF=8@LIBC AOSP-differential base=0,2..36 host-strto=0 threads=8x1000 C-ASan C-UBSan target-clean'

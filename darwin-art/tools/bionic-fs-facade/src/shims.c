@@ -1,4 +1,5 @@
 #include "darwin_art_bionic_fs.h"
+#include "darwin_art_bionic_fortify_io.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -227,96 +228,6 @@ int darwin_art_bionic_fs_host_record_lock(int host_fd, int android_command,
   return 0;
 }
 
-static int host_flags_from_android_private(int flags) {
-  int host = flags & O_ACCMODE;
-#define MAP_PRIVATE_FLAG(android_flag, host_flag) \
-  do { if ((flags & (android_flag)) != 0) host |= (host_flag); } while (0)
-  MAP_PRIVATE_FLAG(64, O_CREAT);
-  MAP_PRIVATE_FLAG(128, O_EXCL);
-  MAP_PRIVATE_FLAG(512, O_TRUNC);
-  MAP_PRIVATE_FLAG(1024, O_APPEND);
-  MAP_PRIVATE_FLAG(2048, O_NONBLOCK);
-#ifdef O_DSYNC
-  MAP_PRIVATE_FLAG(4096, O_DSYNC);
-#endif
-#ifdef O_SYNC
-  MAP_PRIVATE_FLAG(1052672, O_SYNC);
-#endif
-#ifdef O_DIRECTORY
-  MAP_PRIVATE_FLAG(16384, O_DIRECTORY);
-#endif
-#ifdef O_NOFOLLOW
-  MAP_PRIVATE_FLAG(32768, O_NOFOLLOW);
-#endif
-#ifdef O_CLOEXEC
-  MAP_PRIVATE_FLAG(524288, O_CLOEXEC);
-#endif
-#undef MAP_PRIVATE_FLAG
-  return host;
-}
-
-int darwin_art_bionic_fs_host_openat_private(int root_fd, const char* relative,
-                                             int android_flags, uint32_t mode,
-                                             int* host_errno) {
-  if (relative == NULL || relative[0] == '\0' || host_errno == NULL) return -2;
-  const int saved_errno = errno;
-  char* copy = strdup(relative);
-  if (copy == NULL) {
-    *host_errno = ENOMEM;
-    errno = saved_errno;
-    return -1;
-  }
-  int directory = dup(root_fd);
-  if (directory < 0) {
-    *host_errno = errno;
-    free(copy);
-    errno = saved_errno;
-    return -1;
-  }
-  char* cursor = copy;
-  char* component = NULL;
-  char* next = NULL;
-  int result = -1;
-  while ((component = strsep(&cursor, "/")) != NULL) {
-    if (component[0] == '\0' || strcmp(component, ".") == 0 ||
-        strcmp(component, "..") == 0) {
-      *host_errno = EINVAL;
-      break;
-    }
-    next = cursor;
-    const int final_component = next == NULL || *next == '\0';
-    if (final_component) {
-      int host_flags = host_flags_from_android_private(android_flags);
-#ifdef O_NOFOLLOW
-      host_flags |= O_NOFOLLOW;
-#endif
-      result = openat(directory, component, host_flags, (mode_t)mode);
-      *host_errno = result < 0 ? errno : 0;
-      break;
-    }
-    int child_flags = O_RDONLY;
-#ifdef O_DIRECTORY
-    child_flags |= O_DIRECTORY;
-#endif
-#ifdef O_NOFOLLOW
-    child_flags |= O_NOFOLLOW;
-#endif
-#ifdef O_CLOEXEC
-    child_flags |= O_CLOEXEC;
-#endif
-    const int child = openat(directory, component, child_flags, 0);
-    if (child < 0) {
-      *host_errno = errno;
-      break;
-    }
-    (void)close(directory);
-    directory = child;
-  }
-  (void)close(directory);
-  free(copy);
-  errno = saved_errno;
-  return result;
-}
 
 int darwin_art_bionic_open(const char* path, int flags, uint32_t mode) {
   const int saved_host_errno = errno;
@@ -452,32 +363,32 @@ int darwin_art_bionic___openat_2(int directory_fd, const char* path,
 
 intptr_t darwin_art_bionic___read_chk(int fd, void* buffer, size_t count,
                                       size_t buffer_size) {
-  if (count > buffer_size) return -1;
+  darwin_art_bionic_check_io_buffer(count, buffer_size);
   return darwin_art_bionic_read(fd, buffer, count);
 }
 
 intptr_t darwin_art_bionic___write_chk(int fd, const void* buffer,
                                        size_t count, size_t buffer_size) {
-  if (count > buffer_size) return -1;
+  darwin_art_bionic_check_io_buffer(count, buffer_size);
   return darwin_art_bionic_write(fd, buffer, count);
 }
 
 intptr_t darwin_art_bionic___pread_chk(int fd, void* buffer, size_t count,
                                        int64_t offset, size_t buffer_size) {
-  if (count > buffer_size) return -1;
+  darwin_art_bionic_check_io_buffer(count, buffer_size);
   return darwin_art_bionic_pread(fd, buffer, count, offset);
 }
 
 intptr_t darwin_art_bionic___pwrite_chk(int fd, const void* buffer,
                                         size_t count, int64_t offset,
                                         size_t buffer_size) {
-  if (count > buffer_size) return -1;
+  darwin_art_bionic_check_io_buffer(count, buffer_size);
   return darwin_art_bionic_pwrite(fd, buffer, count, offset);
 }
 
 intptr_t darwin_art_bionic___readlink_chk(const char* path, char* buffer,
                                           size_t size, size_t buffer_size) {
-  if (size > buffer_size) return -1;
+  darwin_art_bionic_check_io_buffer(size, buffer_size);
   return darwin_art_bionic_readlink(path, buffer, size);
 }
 
@@ -531,6 +442,13 @@ char* darwin_art_bionic_getcwd(char* buffer, size_t size) {
 int darwin_art_bionic_chdir(const char* path) {
   const int saved_host_errno = errno;
   const int result = darwin_art_bionic_fs_chdir_core(path);
+  errno = saved_host_errno;
+  return result;
+}
+
+int darwin_art_bionic_fchdir(int fd) {
+  const int saved_host_errno = errno;
+  const int result = darwin_art_bionic_fs_fchdir_core(fd);
   errno = saved_host_errno;
   return result;
 }
@@ -695,21 +613,20 @@ int darwin_art_bionic_fstatfs_unsupported(int fd, void* status) {
   return -1;
 }
 
-int darwin_art_bionic_dirfd_unsupported(void* directory) {
-  (void)directory;
-  darwin_art_bionic_errno_store(38);
-  return -1;
+int darwin_art_bionic_dirfd(void* directory) {
+  const int saved_host_errno = errno;
+  const int result = darwin_art_bionic_fs_dirfd_core(directory);
+  errno = saved_host_errno;
+  return result;
 }
 
-int darwin_art_bionic_fstatat_unsupported(int directory_fd, const char* path,
+int darwin_art_bionic_fstatat(int directory_fd, const char* path,
                                          DarwinArtAndroidStat* status,
                                          int flags) {
-  (void)directory_fd;
-  (void)path;
-  (void)status;
-  (void)flags;
-  darwin_art_bionic_errno_store(38);
-  return -1;
+  const int saved_host_errno = errno;
+  const int result = darwin_art_bionic_fs_fstatat_core(directory_fd, path, status, flags);
+  errno = saved_host_errno;
+  return result;
 }
 
 int darwin_art_bionic_readdir_r(void* directory, DarwinArtAndroidDirent* entry,
@@ -784,6 +701,13 @@ int darwin_art_bionic_link(const char* old_path, const char* new_path) {
 int darwin_art_bionic_mkdir(const char* path, uint32_t mode) {
   const int saved_host_errno = errno;
   const int result = darwin_art_bionic_fs_mkdir_core(path, mode);
+  errno = saved_host_errno;
+  return result;
+}
+
+int darwin_art_bionic_mkdirat(int directory_fd, const char* path, uint32_t mode) {
+  const int saved_host_errno = errno;
+  const int result = darwin_art_bionic_fs_mkdirat_core(directory_fd, path, mode);
   errno = saved_host_errno;
   return result;
 }
@@ -1012,7 +936,8 @@ static const Binding kBindings[] = {
     {"close", (DarwinArtBionicFsFunction)darwin_art_bionic_close},
     {"closedir", (DarwinArtBionicFsFunction)darwin_art_bionic_closedir},
     {"creat", (DarwinArtBionicFsFunction)darwin_art_bionic_creat},
-    {"dirfd", (DarwinArtBionicFsFunction)darwin_art_bionic_dirfd_unsupported},
+    {"dirfd", (DarwinArtBionicFsFunction)darwin_art_bionic_dirfd},
+    {"fchdir", (DarwinArtBionicFsFunction)darwin_art_bionic_fchdir},
     {"fchmod", (DarwinArtBionicFsFunction)darwin_art_bionic_fchmod},
     {"fchmodat", (DarwinArtBionicFsFunction)darwin_art_bionic_fchmodat},
     {"fchown", (DarwinArtBionicFsFunction)darwin_art_bionic_fchown},
@@ -1021,7 +946,7 @@ static const Binding kBindings[] = {
     {"flock", (DarwinArtBionicFsFunction)darwin_art_bionic_flock_unsupported},
     {"fstat", (DarwinArtBionicFsFunction)darwin_art_bionic_fstat},
     {"fstat64", (DarwinArtBionicFsFunction)darwin_art_bionic_fstat64},
-    {"fstatat", (DarwinArtBionicFsFunction)darwin_art_bionic_fstatat_unsupported},
+    {"fstatat", (DarwinArtBionicFsFunction)darwin_art_bionic_fstatat},
     {"fstatfs", (DarwinArtBionicFsFunction)darwin_art_bionic_fstatfs_unsupported},
     {"fsync", (DarwinArtBionicFsFunction)darwin_art_bionic_fsync},
     {"ftruncate", (DarwinArtBionicFsFunction)darwin_art_bionic_ftruncate},
@@ -1036,6 +961,7 @@ static const Binding kBindings[] = {
     {"lstat", (DarwinArtBionicFsFunction)darwin_art_bionic_lstat},
     {"lstat64", (DarwinArtBionicFsFunction)darwin_art_bionic_lstat64},
     {"mkdir", (DarwinArtBionicFsFunction)darwin_art_bionic_mkdir},
+    {"mkdirat", (DarwinArtBionicFsFunction)darwin_art_bionic_mkdirat},
     {"mkdtemp", (DarwinArtBionicFsFunction)darwin_art_bionic_mkdtemp},
     {"mkstemp", (DarwinArtBionicFsFunction)darwin_art_bionic_mkstemp},
     {"mkstemp64", (DarwinArtBionicFsFunction)darwin_art_bionic_mkstemp64},

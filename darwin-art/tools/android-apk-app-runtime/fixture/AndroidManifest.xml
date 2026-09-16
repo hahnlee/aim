@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="dev.darwinart.simple">
     <uses-sdk android:minSdkVersion="35" android:targetSdkVersion="35" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <application
         android:label="Darwin ART APK"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
@@ -13,7 +14,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <service android:name=".ImageService" android:exported="false" />
+        <service
+            android:name=".ImageService"
+            android:exported="false"
+            android:isolatedProcess="true" />
         <service
             android:name=".DisabledService"
             android:enabled="false"

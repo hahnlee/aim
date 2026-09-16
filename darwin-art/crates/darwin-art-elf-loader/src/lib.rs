@@ -19,11 +19,12 @@ mod mapping;
 mod namespace;
 mod packed_relocations;
 mod parser;
+mod segment_loading;
 mod tls;
 
 use parser::{
-    parse_dynamic, parse_dynamic_with_policy, parse_image, parse_image_with_policy,
-    validate_dynamic_capabilities,
+    parse_dynamic, parse_dynamic_with_policy, parse_image, parse_image_with_appcompat,
+    parse_image_with_policy, validate_dynamic_capabilities,
 };
 
 use mapping::Mapping;
@@ -33,96 +34,16 @@ use tls::{
     unregister_tls_descriptors,
 };
 
-pub use namespace::{ClosedElfNamespace, LoadedElfGraph, NamespaceError};
+pub use namespace::{
+    ClosedElfNamespace, GlobalElfImage, LoadedElfGraph, NamespaceError, NamespaceScopes,
+    RetainedElfMapping,
+};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ElfMetadata {
-    pub soname: Option<Vec<u8>>,
-    pub needed_libraries: Vec<Vec<u8>>,
-}
-
-/// Parses one Android arm64 ET_DYN image without relocating it or running guest code.
-///
-/// This path parses file bytes only: it does not reserve address space, relocate, or run guest code.
-pub fn inspect_elf_metadata(bytes: &[u8]) -> Result<ElfMetadata, LoadError> {
-    let parsed = parse_image_with_policy(bytes, true)?;
-    let dynamic = parse_dynamic_with_policy(bytes, &parsed.dynamic, true)?;
-    let needed_libraries = dynamic
-        .needed_offsets
-        .iter()
-        .map(|offset| dynamic_string_bytes(bytes, &parsed.loads, &dynamic, *offset))
-        .collect::<Result<Vec<_>, _>>()?;
-    let soname = dynamic
-        .soname_offset
-        .map(|offset| dynamic_string_bytes(bytes, &parsed.loads, &dynamic, offset))
-        .transpose()?;
-    if needed_libraries.iter().any(Vec::is_empty) {
-        return Err(LoadError::Format("empty DT_NEEDED string"));
-    }
-    if soname.as_ref().is_some_and(Vec::is_empty) {
-        return Err(LoadError::Format("empty DT_SONAME string"));
-    }
-    Ok(ElfMetadata {
-        soname,
-        needed_libraries,
-    })
-}
-
-fn dynamic_string_bytes(
-    bytes: &[u8],
-    loads: &[ProgramHeader],
-    dynamic: &DynamicInfo,
-    offset: u64,
-) -> Result<Vec<u8>, LoadError> {
-    let table = dynamic
-        .string_table
-        .ok_or(LoadError::Format("missing DT_STRTAB"))?;
-    let size = dynamic
-        .string_size
-        .ok_or(LoadError::Format("missing DT_STRSZ"))?;
-    if offset >= size {
-        return Err(LoadError::Bounds("dynamic string offset"));
-    }
-    let address = table
-        .checked_add(offset)
-        .ok_or(LoadError::Bounds("dynamic string address overflow"))?;
-    let remaining = size - offset;
-    let end = address
-        .checked_add(remaining)
-        .ok_or(LoadError::Bounds("dynamic string range overflow"))?;
-    let load = loads
-        .iter()
-        .find(|load| {
-            load.flags & PF_R != 0
-                && address >= load.virtual_address
-                && load
-                    .virtual_address
-                    .checked_add(load.file_size)
-                    .is_some_and(|load_end| end <= load_end)
-        })
-        .ok_or(LoadError::Bounds(
-            "dynamic string table is not file-backed readable data",
-        ))?;
-    let file_offset = load
-        .offset
-        .checked_add(
-            address
-                .checked_sub(load.virtual_address)
-                .ok_or(LoadError::Bounds("dynamic string file mapping"))?,
-        )
-        .ok_or(LoadError::Bounds("dynamic string file offset overflow"))?;
-    let data = checked_slice(
-        bytes,
-        to_usize(file_offset, "dynamic string file offset")?,
-        to_usize(remaining, "dynamic string size")?,
-        "dynamic string file range",
-    )?;
-    let terminator = data
-        .iter()
-        .position(|byte| *byte == 0)
-        .ok_or(LoadError::Format("unterminated dynamic string"))?;
-    Ok(data[..terminator].to_vec())
-}
+mod finalization;
+mod initialization;
+mod metadata;
+mod relocation_symbols;
+pub use metadata::{ElfMetadata, inspect_elf_metadata};
 
 #[cfg(not(target_os = "macos"))]
 compile_error!("darwin-art-elf-loader supports only macOS hosts");
@@ -212,6 +133,7 @@ const R_AARCH64_IRELATIVE: u32 = 1032;
 const DF_BIND_NOW: u64 = 0x8;
 const DF_SYMBOLIC: u64 = 0x2;
 const DF_1_NOW: u64 = 0x1;
+const DF_1_GLOBAL: u64 = 0x2;
 const SHN_UNDEF: u16 = 0;
 const SHN_ABS: u16 = 0xfff1;
 const STB_GLOBAL: u8 = 1;
@@ -338,6 +260,9 @@ pub struct VersionRequirement<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct SymbolRequest<'a> {
     pub symbol: &'a str,
+    /// Standalone relocation supplies DT_NEEDED. Ordered graph lookup supplies
+    /// exactly the selected native image here; a miss must return Ok(None) so
+    /// later local-group images can be searched. Do not scan unrelated images.
     pub needed_libraries: &'a [String],
     pub version: Option<VersionRequirement<'a>>,
     /// True for an ELF `STB_WEAK` undefined symbol. A resolver may use this
@@ -352,6 +277,17 @@ pub struct SymbolRequest<'a> {
 /// `Ok(None)` means the symbol is absent. An absent weak undefined symbol resolves to zero; an
 /// absent global undefined symbol fails the load.
 pub trait SymbolResolver {
+    /// Preempt a default-visible definition within the caller's load group.
+    /// Raw ELF bytes are preserved; an explicit version matches that name.
+    /// Standalone external import providers do not preempt definitions by
+    /// default. A graph resolver must search its complete ordered local group.
+    fn resolve_defined(
+        &mut self,
+        _name: &[u8],
+        _version: Option<&str>,
+    ) -> Result<Option<ResolvedSymbol>, ResolveError> {
+        Ok(None)
+    }
     fn resolve(
         &mut self,
         request: SymbolRequest<'_>,
@@ -463,6 +399,7 @@ struct ProgramHeader {
 struct DynamicInfo {
     needed_offsets: Vec<u64>,
     soname_offset: Option<u64>,
+    runpath_offset: Option<u64>,
     hash: Option<u64>,
     gnu_hash: Option<u64>,
     string_table: Option<u64>,
@@ -507,6 +444,7 @@ struct ParsedImage {
     image_size: usize,
     reservation_size: usize,
     image_offset: usize,
+    compat_layout: bool,
     stack_guard_offset: usize,
     direct_syscall_shim_offset: usize,
     direct_syscall_shim_size: usize,
@@ -529,9 +467,8 @@ pub struct LoadedElf {
     dynamic: DynamicInfo,
     needed_libraries: Vec<String>,
     soname: Option<String>,
-    initializers_run: bool,
-    finalizers_armed: bool,
-    finalizers_run: bool,
+    initialization: initialization::Initialization,
+    finalization: finalization::Finalization,
     finalizers: Vec<usize>,
     dso_lifecycle: Option<Arc<dyn DsoLifecycle>>,
     tls_header: Option<ProgramHeader>,
@@ -592,52 +529,23 @@ impl LoadedElf {
     }
 
     fn stage(bytes: &[u8]) -> Result<StagedElf, LoadError> {
+        Self::stage_with_appcompat(bytes, None)
+    }
+
+    pub(crate) fn stage_with_appcompat(
+        bytes: &[u8],
+        appcompat_16kb: Option<bool>,
+    ) -> Result<StagedElf, LoadError> {
         if !cfg!(target_arch = "aarch64") {
             return Err(LoadError::Capability(Capability::HostArchitecture));
         }
-        let parsed = parse_image(bytes)?;
+        let parsed = match appcompat_16kb {
+            None => parse_image(bytes)?,
+            Some(enabled) => parse_image_with_appcompat(bytes, Some(enabled))?,
+        };
         let mapping = Mapping::reserve(parsed.reservation_size)?;
 
-        for (index, protection) in parsed.page_protections.iter().copied().enumerate() {
-            if protection != PROT_NONE {
-                mapping.protect(
-                    index * parsed.page_size,
-                    parsed.page_size,
-                    PROT_READ | PROT_WRITE,
-                )?;
-            }
-        }
-
-        for load in &parsed.loads {
-            let destination_offset = parsed
-                .image_offset
-                .checked_add(difference_to_usize(
-                    load.virtual_address,
-                    parsed.minimum_page,
-                )?)
-                .ok_or(LoadError::Bounds("PT_LOAD shifted destination overflow"))?;
-            let file_offset = to_usize(load.offset, "PT_LOAD file offset")?;
-            let file_size = to_usize(load.file_size, "PT_LOAD file size")?;
-            let memory_size = to_usize(load.memory_size, "PT_LOAD memory size")?;
-            let source = checked_slice(bytes, file_offset, file_size, "PT_LOAD file range")?;
-            // SAFETY: parse_image proves every destination interval is within the reservation,
-            // and the corresponding pages were made writable above.
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    source.as_ptr(),
-                    mapping.pointer().as_ptr().add(destination_offset),
-                    file_size,
-                );
-                ptr::write_bytes(
-                    mapping
-                        .pointer()
-                        .as_ptr()
-                        .add(destination_offset + file_size),
-                    0,
-                    memory_size - file_size,
-                );
-            }
-        }
+        segment_loading::populate(&mapping, &parsed, bytes)?;
 
         let dynamic = parse_dynamic(bytes, &parsed.dynamic)?;
         validate_dynamic_capabilities(&dynamic)?;
@@ -677,9 +585,8 @@ impl LoadedElf {
             dynamic,
             needed_libraries: Vec::new(),
             soname: None,
-            initializers_run: false,
-            finalizers_armed: false,
-            finalizers_run: false,
+            initialization: initialization::Initialization::default(),
+            finalization: finalization::Finalization::default(),
             finalizers: Vec::new(),
             dso_lifecycle: None,
             tls_header: parsed.tls,
@@ -893,6 +800,25 @@ impl LoadedElf {
         self.exported_address_bytes(name)
     }
 
+    /// Returns the image's parsed GNU version definitions for Android's
+    /// dlsym/dlvsym matching policy. `None` means the image has no DT_VERSYM;
+    /// an empty map means DT_VERSYM is present but no named definitions were
+    /// supplied, so an unknown request still falls back to VER_NDX_GLOBAL.
+    pub(crate) fn android_version_definitions(
+        &self,
+    ) -> Result<Option<HashMap<u16, String>>, LoadError> {
+        if self.dynamic.versym.is_none() {
+            return Ok(None);
+        }
+        let definitions = self.parse_version_definitions(self.symbol_count()?)?;
+        Ok(Some(
+            definitions
+                .into_iter()
+                .map(|(index, definition)| (index, definition.name))
+                .collect(),
+        ))
+    }
+
     pub(crate) fn debug_mapped_pointer(&self, virtual_address: u64) -> Result<usize, LoadError> {
         Ok(self.loaded_pointer(virtual_address, 1)? as usize)
     }
@@ -906,55 +832,6 @@ impl LoadedElf {
         (self.stack_guard.as_ptr() as usize, unsafe {
             self.stack_guard.as_ptr().read()
         })
-    }
-
-    pub fn run_initializers(&mut self) -> Result<(), LoadError> {
-        self.run_initializers_internal(true)
-    }
-
-    fn run_initializers_for_graph(&mut self) -> Result<(), LoadError> {
-        self.run_initializers_internal(false)
-    }
-
-    fn run_initializers_internal(&mut self, arm_finalizers: bool) -> Result<(), LoadError> {
-        if self.initializers_run {
-            return Err(LoadError::InitializersAlreadyRun);
-        }
-        let address = self.dynamic.init_array.unwrap_or(0);
-        let size = self.dynamic.init_array_size.unwrap_or(0);
-        if (address == 0) != (size == 0) || size % 8 != 0 {
-            return Err(LoadError::Format("invalid DT_INIT_ARRAY pair"));
-        }
-        if size != 0 {
-            self.require_loaded_range(address, size, None, "DT_INIT_ARRAY")?;
-            for index in 0..(size / 8) {
-                let entry_address = address
-                    .checked_add(index * 8)
-                    .ok_or(LoadError::Bounds("DT_INIT_ARRAY entry overflow"))?;
-                let pointer = self.read_loaded_u64(entry_address)?;
-                if pointer == 0 || pointer == u64::MAX {
-                    continue;
-                }
-                self.require_host_executable(pointer, "DT_INIT_ARRAY function")?;
-                // SAFETY: the entry was relocated, lies in an executable PT_LOAD, and the
-                // fixture ABI is the supported no-argument AArch64 procedure-call subset.
-                let initializer: unsafe extern "C" fn() = unsafe {
-                    std::mem::transmute::<usize, unsafe extern "C" fn()>(
-                        usize::try_from(pointer)
-                            .map_err(|_| LoadError::Bounds("initializer pointer"))?,
-                    )
-                };
-                unsafe { initializer() };
-            }
-        }
-        self.initializers_run = true;
-        self.finalizers_armed = arm_finalizers;
-        Ok(())
-    }
-
-    fn arm_finalizers(&mut self) {
-        debug_assert!(self.initializers_run);
-        self.finalizers_armed = true;
     }
 
     fn mapping_range(&self) -> Range<usize> {
@@ -1029,23 +906,8 @@ impl LoadedElf {
         Ok(())
     }
 
-    fn run_finalizers_once(&mut self) {
-        if !self.finalizers_armed || self.finalizers_run {
-            return;
-        }
-        // Mark first: re-entrant teardown must never execute the sequence twice.
-        self.finalizers_run = true;
-        for &pointer in &self.finalizers {
-            // SAFETY: finish_load validated and captured each relocated function pointer while
-            // the image was immutable. The mapping is still live and this loader supports the
-            // no-argument AArch64 finalizer ABI used by Android ELF DSOs.
-            let finalizer: unsafe extern "C" fn() = unsafe { std::mem::transmute(pointer) };
-            unsafe { finalizer() };
-        }
-    }
-
     pub fn call_exported_i32(&self, name: &str) -> Result<i32, LoadError> {
-        if !self.initializers_run {
+        if !self.initialization.complete() {
             return Err(LoadError::InitializersNotRun);
         }
         self.call_exported_i32_before_initializers(name)
@@ -1569,105 +1431,6 @@ impl LoadedElf {
         Ok(())
     }
 
-    fn resolve_relocation_symbol(
-        &self,
-        index: u32,
-        symbol_count: u32,
-        versions: &HashMap<u16, OwnedVersionRequirement>,
-        resolved: &mut HashMap<u32, usize>,
-        resolver: &mut dyn SymbolResolver,
-    ) -> Result<usize, LoadError> {
-        if let Some(address) = resolved.get(&index) {
-            return Ok(*address);
-        }
-        if index == 0 {
-            return Ok(0);
-        }
-        if index >= symbol_count {
-            return Err(LoadError::Bounds("relocation symbol index"));
-        }
-        let symbol = self.dynamic_symbol(index)?;
-        if symbol.kind == STT_TLS {
-            return Err(LoadError::Capability(Capability::Tls));
-        }
-        if !matches!(symbol.kind, STT_NOTYPE | STT_OBJECT | STT_FUNC) {
-            return Err(LoadError::InvalidSymbol(format!("dynsym[{index}] type")));
-        }
-        if symbol.section_index != SHN_UNDEF {
-            let symbol_name = self.dynamic_string_bytes(symbol.name_offset)?;
-            if symbol.section_index == SHN_ABS
-                && !self.is_image_relative_absolute_marker(&symbol, &symbol_name)
-            {
-                return Err(LoadError::Capability(Capability::AbsoluteSymbolDefinition));
-            }
-            let is_load_end_marker = symbol.size == 0
-                && self.loads.iter().any(|load| {
-                    load.virtual_address
-                        .checked_add(load.memory_size)
-                        .is_some_and(|end| end == symbol.value)
-                });
-            if !is_load_end_marker {
-                self.require_loaded_range(
-                    symbol.value,
-                    symbol.size.max(1),
-                    None,
-                    "defined symbol",
-                )?;
-            }
-            let pointer_size = usize::try_from(symbol.size)
-                .map_err(|_| LoadError::Bounds("defined symbol size"))?;
-            let address = self.loaded_pointer(symbol.value, pointer_size)? as usize;
-            resolved.insert(index, address);
-            return Ok(address);
-        }
-        if !matches!(symbol.binding, STB_GLOBAL | STB_WEAK) || symbol.visibility != 0 {
-            return Err(LoadError::InvalidSymbol(format!("dynsym[{index}] binding")));
-        }
-        let name_bytes = self.dynamic_string_bytes(symbol.name_offset)?;
-        if name_bytes.is_empty() {
-            return Err(LoadError::InvalidSymbol(format!(
-                "dynsym[{index}] empty name"
-            )));
-        }
-        // Undefined symbols are passed through the Rust resolver's historical
-        // UTF-8 API.  Android DSOs may contain arbitrary bytes in *defined*
-        // names (which are retained below), but an invalid undefined import
-        // cannot be represented by this external resolver contract.
-        let name = std::str::from_utf8(name_bytes)
-            .map_err(|_| LoadError::InvalidSymbol(format!("dynsym[{index}] non-UTF-8 name")))?;
-        let version = self.version_for_symbol(index, versions)?;
-        let request_version = version.map(|(requirement, hidden)| VersionRequirement {
-            soname: &requirement.soname,
-            name: &requirement.name,
-            hidden,
-            flags: requirement.flags,
-        });
-        let result = resolver
-            .resolve(SymbolRequest {
-                symbol: name,
-                needed_libraries: &self.needed_libraries,
-                version: request_version,
-                is_weak: symbol.binding == STB_WEAK,
-            })
-            .map_err(|source| LoadError::Resolver {
-                symbol: name.to_owned(),
-                source,
-            })?;
-        let address = match result {
-            Some(symbol) => symbol.address(),
-            None if symbol.binding == STB_WEAK => 0,
-            None => {
-                return Err(LoadError::UnresolvedSymbol {
-                    symbol: name.to_owned(),
-                    soname: version.map(|(item, _)| item.soname.clone()),
-                    version: version.map(|(item, _)| item.name.clone()),
-                });
-            }
-        };
-        resolved.insert(index, address);
-        Ok(address)
-    }
-
     fn parse_version_requirements(
         &self,
         symbol_count: u32,
@@ -1854,7 +1617,7 @@ impl LoadedElf {
             }
             let symbol_name = self.dynamic_string_bytes(symbol.name_offset)?;
             if symbol.section_index == SHN_ABS
-                && !self.is_image_relative_absolute_marker(&symbol, &symbol_name)
+                && !self.is_image_relative_absolute_marker(&symbol, symbol_name)
             {
                 return Err(LoadError::Capability(Capability::AbsoluteSymbolDefinition));
             }
@@ -1882,14 +1645,15 @@ impl LoadedElf {
                 continue;
             }
             let (version, hidden) = self.definition_for_symbol(index, &versions)?;
+            let version_index = self.version_index_for_symbol(index)?;
             let pointer_size = usize::try_from(symbol.size)
                 .map_err(|_| LoadError::Bounds("exported symbol size"))?;
             result.push(ExportedSymbol {
                 name,
                 address: self.loaded_pointer(symbol.value, pointer_size)? as usize,
-                binding: symbol.binding,
                 version: version.map(|item| item.name.clone()),
                 version_hidden: hidden,
+                version_index,
             });
         }
         Ok(result)
@@ -2010,6 +1774,16 @@ impl LoadedElf {
             .get(&index)
             .ok_or(LoadError::Format("DT_VERSYM index has no DT_VERDEF entry"))?;
         Ok((Some(definition), raw & VERSYM_HIDDEN != 0))
+    }
+
+    fn version_index_for_symbol(&self, symbol_index: u32) -> Result<Option<u16>, LoadError> {
+        let Some(table) = self.dynamic.versym else {
+            return Ok(None);
+        };
+        let address = table
+            .checked_add(u64::from(symbol_index) * 2)
+            .ok_or(LoadError::Bounds("DT_VERSYM entry overflow"))?;
+        Ok(Some(self.read_loaded_u16(address)?))
     }
 
     fn symbol_count(&self) -> Result<u32, LoadError> {
@@ -2436,13 +2210,7 @@ impl LoadedElf {
 
 impl Drop for LoadedElf {
     fn drop(&mut self) {
-        if let Some(lifecycle) = self.dso_lifecycle.take()
-            && lifecycle.finalize_image(self.mapping_range()).is_err()
-        {
-            // Continuing could unmap code that still owns live callbacks.
-            std::process::abort();
-        }
-        self.run_finalizers_once();
+        self.finalize_once();
         unregister_tls_descriptors(&self.tls_descriptor_tokens);
         if let Some(module) = &self.tls_module {
             // Guest finalizers may touch this image's TLS. Release the unloading thread's block
@@ -2488,9 +2256,11 @@ struct ExportedSymbol {
     /// through replacement-character or lossy conversions.
     name: Vec<u8>,
     address: usize,
-    binding: u8,
     version: Option<String>,
     version_hidden: bool,
+    /// Raw DT_VERSYM value, including VERSYM_HIDDEN. None means DT_VERSYM is
+    /// absent from this image, which is distinct from a LOCAL/GLOBAL index.
+    version_index: Option<u16>,
 }
 
 fn terminated_dynamic_string(bytes: &[u8]) -> Result<&[u8], LoadError> {
@@ -2634,30 +2404,30 @@ mod tests {
             ExportedSymbol {
                 name: b"ascii_export".to_vec(),
                 address: 1,
-                binding: STB_GLOBAL,
                 version: None,
                 version_hidden: false,
+                version_index: None,
             },
             ExportedSymbol {
                 name: b"raw\x80".to_vec(),
                 address: 2,
-                binding: STB_GLOBAL,
                 version: None,
                 version_hidden: false,
+                version_index: None,
             },
             ExportedSymbol {
                 name: b"raw\x81".to_vec(),
                 address: 3,
-                binding: STB_GLOBAL,
                 version: None,
                 version_hidden: false,
+                version_index: None,
             },
             ExportedSymbol {
                 name: b"raw\xef\xbf\xbd".to_vec(),
                 address: 4,
-                binding: STB_GLOBAL,
                 version: None,
                 version_hidden: false,
+                version_index: None,
             },
         ];
         assert_eq!(

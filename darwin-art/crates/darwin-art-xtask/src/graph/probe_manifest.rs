@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use super::inputs::{probe_content_stamp, probe_inputs};
 
 pub(crate) struct ProbeGraphInputs {
-    pub(crate) filesystem_probe_inputs: String,
     pub(crate) network_probe_inputs: String,
     pub(crate) hwui_probe_inputs: String,
     pub(crate) graphics_probe_inputs: String,
@@ -24,7 +23,6 @@ pub(crate) struct ProbeGraphInputs {
     pub(crate) app_resources_inputs: String,
     pub(crate) app_activity_inputs: String,
     pub(crate) app_presentation_inputs: String,
-    pub(crate) filesystem_probe_stamp: PathBuf,
     pub(crate) network_probe_stamp: PathBuf,
     pub(crate) hwui_probe_stamp: PathBuf,
     pub(crate) graphics_probe_stamp: PathBuf,
@@ -42,15 +40,6 @@ pub(crate) struct ProbeGraphInputs {
 }
 
 pub(crate) fn collect(root: &Path) -> io::Result<ProbeGraphInputs> {
-    let filesystem_probe_inputs = probe_inputs(
-        root,
-        &[
-            "probes/runtime_filesystem_probe.cc",
-            "probes/runtime_filesystem_probe.h",
-            "tools/bionic-fs-facade/include/darwin_art_bionic_fs.h",
-            "tools/bionic-ioctl-facade/include/darwin_art_bionic_ioctl.h",
-        ],
-    );
     let network_probe_inputs = probe_inputs(
         root,
         &[
@@ -65,6 +54,7 @@ pub(crate) fn collect(root: &Path) -> io::Result<ProbeGraphInputs> {
             "probes/runtime_hwui_probe.h",
             "tools/bionic-fs-facade/include/darwin_art_bionic_fs.h",
             "tools/bionic-socket-broker-adapter/include/darwin_art_bionic_socket_broker.h",
+            "compat/network/multinetwork.h",
         ],
     );
     let graphics_probe_inputs = probe_inputs(
@@ -176,6 +166,9 @@ pub(crate) fn collect(root: &Path) -> io::Result<ProbeGraphInputs> {
         root,
         &[
             "probes/runtime_app_activity.cc",
+            "runtime/framework/app/application_binding.h",
+            "runtime/framework/app/process_attachment.h",
+            "runtime/framework/pm/declared_providers.h",
             "probes/runtime_app_activity.h",
             "probes/runtime_app_resources.h",
         ],
@@ -185,16 +178,6 @@ pub(crate) fn collect(root: &Path) -> io::Result<ProbeGraphInputs> {
     // mtimes (and keep each phase's content identity independent of the broad
     // runtime graph digest).  The audit path regenerates the graph before
     // asking Ninja for its warm/no-op result.
-    let filesystem_probe_stamp = probe_content_stamp(
-        root,
-        "filesystem",
-        &[
-            "probes/runtime_filesystem_probe.cc",
-            "probes/runtime_filesystem_probe.h",
-            "tools/bionic-fs-facade/include/darwin_art_bionic_fs.h",
-            "tools/bionic-ioctl-facade/include/darwin_art_bionic_ioctl.h",
-        ],
-    )?;
     let network_probe_stamp = probe_content_stamp(
         root,
         "network",
@@ -211,6 +194,7 @@ pub(crate) fn collect(root: &Path) -> io::Result<ProbeGraphInputs> {
             "probes/runtime_hwui_probe.h",
             "tools/bionic-fs-facade/include/darwin_art_bionic_fs.h",
             "tools/bionic-socket-broker-adapter/include/darwin_art_bionic_socket_broker.h",
+            "compat/network/multinetwork.h",
         ],
     )?;
     let graphics_probe_stamp = probe_content_stamp(
@@ -328,6 +312,9 @@ pub(crate) fn collect(root: &Path) -> io::Result<ProbeGraphInputs> {
         "app-activity",
         &[
             "probes/runtime_app_activity.cc",
+            "runtime/framework/app/application_binding.h",
+            "runtime/framework/app/process_attachment.h",
+            "runtime/framework/pm/declared_providers.h",
             "probes/runtime_app_activity.h",
             "probes/runtime_app_resources.h",
         ],
@@ -341,6 +328,20 @@ pub(crate) fn collect(root: &Path) -> io::Result<ProbeGraphInputs> {
         "runtime-entry",
         &[
             "probes/runtime_entry_probe.cc",
+            "compat/binder/service_endpoint.h",
+            "compat/process/service_endpoint.h",
+            "runtime/framework/system/application_shared_memory.h",
+            "runtime/framework/app/main_loop.h",
+            "runtime/framework/app/process_entry.h",
+            "runtime/framework/app/process_registration.h",
+            "runtime/framework/app/process_entry.cc",
+            "runtime/framework/app/process_registration.cc",
+            "runtime/framework/am/application_binding.h",
+            "runtime/framework/am/process_launch.h",
+            "runtime/framework/connectivity/network_path_abi.h",
+            "runtime/framework/connectivity/network_provider_jni.h",
+            "runtime/framework/power/power_state_platform.h",
+            "runtime/framework/power/power_state_jni.h",
             "probes/runtime_registration_phase.cc",
             "probes/runtime_registration_phase.h",
             "probes/runtime_process_state.h",
@@ -352,7 +353,6 @@ pub(crate) fn collect(root: &Path) -> io::Result<ProbeGraphInputs> {
         ],
     )?;
     Ok(ProbeGraphInputs {
-        filesystem_probe_inputs,
         network_probe_inputs,
         hwui_probe_inputs,
         graphics_probe_inputs,
@@ -366,7 +366,6 @@ pub(crate) fn collect(root: &Path) -> io::Result<ProbeGraphInputs> {
         app_resources_inputs,
         app_activity_inputs,
         app_presentation_inputs,
-        filesystem_probe_stamp,
         network_probe_stamp,
         hwui_probe_stamp,
         graphics_probe_stamp,

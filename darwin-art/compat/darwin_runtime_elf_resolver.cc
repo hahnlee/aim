@@ -14,8 +14,10 @@
 #include "darwin_android_asset_manager.h"
 #include "darwin_android_system_fonts.h"
 #include "darwin_android_platform.h"
+#include "network/multinetwork.h"
 #include "darwin_android_media_ndk.h"
 #include "darwin_angle_egl.h"
+#include "loader/bionic_symbol_lookup.h"
 
 extern "C" void AndroidBitmap_getInfo(void) __attribute__((weak_import));
 extern "C" void AndroidBitmap_lockPixels(void) __attribute__((weak_import));
@@ -105,7 +107,17 @@ DarwinArtElfResolveStatus ResolvePlatformProvider(
     const DarwinArtElfSymbolRequest* request,
     uintptr_t* out_address,
     DarwinArtElfErrorBuffer* error) {
+  if (out_address) *out_address = 0;
   if (request->version_soname != nullptr || request->version_name != nullptr) {
+    if (request->version_soname != nullptr && request->version_name != nullptr &&
+        std::strcmp(request->version_soname, "libandroid.so") == 0) {
+      void* network = darwin_art_android_multinetwork_symbol(
+          request->symbol, request->version_name);
+      if (network != nullptr) {
+        *out_address = reinterpret_cast<uintptr_t>(network);
+        return DARWIN_ART_ELF_RESOLVE_FOUND;
+      }
+    }
     return DARWIN_ART_ELF_RESOLVE_NOT_FOUND;
   }
   uintptr_t result = 0;
@@ -185,6 +197,8 @@ DarwinArtElfResolveStatus ResolvePlatformProvider(
     consider_address(darwin_art_android_asset_manager_symbol(request->symbol));
     consider_address(darwin_art_android_platform_symbol(request->symbol));
     consider_address(darwin_art_android_system_font_symbol(request->symbol));
+    consider_address(darwin_art_android_multinetwork_symbol(
+        request->symbol, request->version_name));
   }
   if (NeedsLibrary(request, "libmediandk.so")) {
     consider_address(darwin_art_android_media_ndk_symbol(request->symbol));
@@ -246,6 +260,7 @@ DarwinArtElfResolveStatus ResolveRuntimeProvider(
     const DarwinArtElfSymbolRequest* request,
     uintptr_t* out_address,
     DarwinArtElfErrorBuffer* error) {
+  if (out_address) *out_address = 0;
   if (request == nullptr || out_address == nullptr ||
       request->abi_version != DARWIN_ART_ELF_ABI_VERSION ||
       request->symbol == nullptr) {
@@ -282,7 +297,7 @@ DarwinArtElfResolveStatus ResolveRuntimeProvider(
     return DARWIN_ART_ELF_RESOLVE_ERROR;
   }
   const DarwinArtElfResolveStatus cached =
-      ResolveCachedElfProvider(request, out_address, error);
+      ResolveCachedElfProvider(library->loader_namespace_id, request, out_address, error);
   if (cached != DARWIN_ART_ELF_RESOLVE_NOT_FOUND) return cached;
   if (request->version_soname != nullptr && request->version_name != nullptr &&
       std::strcmp(request->version_soname, "libc.so") == 0 &&
@@ -320,36 +335,17 @@ DarwinArtElfResolveStatus ResolveRuntimeProvider(
     return DARWIN_ART_ELF_RESOLVE_FOUND;
   }
   if (provider_soname == nullptr) {
-    DarwinArtBionicNamespaceResult unique{};
-    size_t matches = 0;
-    for (size_t index = 0; index < request->needed_library_count; ++index) {
-      const char* soname = request->needed_libraries[index];
-      if (soname == nullptr) continue;
-      const DarwinArtBionicNamespaceResult candidate =
-          darwin_art_bionic_namespace_resolve(
-              library->provider_namespace, soname, request->symbol, nullptr);
-      if (candidate.status == DARWIN_ART_BIONIC_NAMESPACE_OK &&
-          candidate.address != 0) {
-        unique = candidate;
-        ++matches;
-      }
-    }
-    if (matches == 1) {
-      *out_address = unique.address;
+    const auto result = darwin_art::loader::LookupBionicDependencies(
+        library->provider_namespace, request->needed_libraries,
+        request->needed_library_count, request->symbol);
+    if (result.status == DARWIN_ART_BIONIC_NAMESPACE_OK && result.address) {
+      *out_address = result.address;
       return DARWIN_ART_ELF_RESOLVE_FOUND;
     }
-    if (matches > 1) {
-      SetResolverError(error,
-                       "unversioned Bionic import has multiple exact providers");
-      return DARWIN_ART_ELF_RESOLVE_ERROR;
-    }
-    {
-      if (request->symbol_weak != 0) {
-        return DARWIN_ART_ELF_RESOLVE_NOT_FOUND;
-      }
-      SetResolverError(error, "unversioned Bionic import has no exact provider");
-      return DARWIN_ART_ELF_RESOLVE_ERROR;
-    }
+    if (darwin_art::loader::IsBionicSymbolMiss(result.status))
+      return DARWIN_ART_ELF_RESOLVE_NOT_FOUND;
+    SetResolverError(error, darwin_art_bionic_namespace_status_name(result.status));
+    return DARWIN_ART_ELF_RESOLVE_ERROR;
   }
   // Bionic exposes the large-file stdio aliases as LIBC_N, while the closed
   // stdio owner intentionally publishes the same 64-bit ABI under its
@@ -382,7 +378,7 @@ DarwinArtElfResolveStatus ResolveRuntimeProvider(
           library->provider_namespace, provider_soname, namespace_symbol,
           namespace_version);
   if (result.status != DARWIN_ART_BIONIC_NAMESPACE_OK || result.address == 0) {
-    if (request->symbol_weak != 0) {
+    if (darwin_art::loader::IsBionicSymbolMiss(result.status)) {
       return DARWIN_ART_ELF_RESOLVE_NOT_FOUND;
     }
     const std::string detail =

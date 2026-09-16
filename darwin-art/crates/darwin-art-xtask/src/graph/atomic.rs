@@ -1,6 +1,19 @@
-use std::fs;
-use std::io;
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_WRITER: AtomicU64 = AtomicU64::new(0);
+
+struct StagedFile(PathBuf);
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        // Only this writer's create_new-owned staging file may be removed.
+        // After a successful rename this path no longer exists.
+        let _ = fs::remove_file(&self.0);
+    }
+}
 
 /// Publish graph metadata as one complete file. A killed xtask must leave the
 /// previous Ninja graph/cache stamp usable rather than a truncated file.
@@ -14,9 +27,31 @@ pub(crate) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let temporary = path.with_extension(format!("darwin-art-xtask-tmp-{}", std::process::id()));
-    fs::write(&temporary, bytes)?;
-    fs::rename(temporary, path)
+    let filename = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "graph output has no filename")
+    })?;
+    let (mut output, staged) = loop {
+        let mut name = filename.to_os_string();
+        name.push(format!(
+            ".darwin-art-xtask-tmp-{}-{}",
+            std::process::id(),
+            NEXT_WRITER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let temporary = path.with_file_name(name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => break (file, StagedFile(temporary)),
+            // A previous process with a reused PID may have left a staging file.
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    output.write_all(bytes)?;
+    drop(output);
+    fs::rename(&staged.0, path)
 }
 
 #[cfg(test)]
@@ -40,5 +75,42 @@ mod tests {
         assert_eq!(before, after);
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_writers_publish_complete_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "darwin-art-atomic-concurrent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("manifest.json");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    let bytes = vec![b'A' + index; 8192];
+                    barrier.wait();
+                    for _ in 0..32 {
+                        write(&path, &bytes)?;
+                        let published = fs::read(&path)?;
+                        assert_eq!(published.len(), bytes.len());
+                        assert!(published.iter().all(|byte| *byte == published[0]));
+                    }
+                    Ok::<(), std::io::Error>(())
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|handle| handle.join()).collect();
+        fs::remove_dir_all(&directory).unwrap();
+        for result in results {
+            result.unwrap().unwrap();
+        }
     }
 }

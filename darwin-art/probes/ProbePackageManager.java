@@ -23,6 +23,8 @@ import java.util.HashMap;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import dev.darwinart.runtime.pm.InstalledApplicationInfo;
+import static dev.darwinart.runtime.pm.PackageRecords.nativeResolveInstalledPackage;
 
 /** Minimal package policy for framework feature gates before system_server exists. */
 public final class ProbePackageManager extends MockPackageManager {
@@ -31,7 +33,6 @@ public final class ProbePackageManager extends MockPackageManager {
             "com.google.android.c2dm.permission.SEND";
     private static final String IID_TOKEN_REQUEST_ACTION =
             "com.google.iid.TOKEN_REQUEST";
-    private static native String nativeResolveInstalledPackage(String packageName);
     private String packageName;
     private String activityName;
     private ActivityInfo activityInfo;
@@ -68,39 +69,17 @@ public final class ProbePackageManager extends MockPackageManager {
 
     private static ApplicationInfo installedApplicationInfo(
             String requestedPackage, String record) {
-        if (record == null) return null;
-        ApplicationInfo info = new ApplicationInfo();
-        info.packageName = requestedPackage;
-        info.sourceDir = recordValue(record, "apk");
-        info.publicSourceDir = info.sourceDir;
-        info.dataDir = "/data/user/0/" + requestedPackage;
-        // PackageManager is the authoritative source for ApplicationInfo in
-        // Android's native-library discovery path.  Keep the installed-app
-        // copy consistent with the Context-owned instance so Unity's
-        // FindNativeLibraryPath("il2cpp") can resolve the unmodified APK's
-        // extracted arm64 directory regardless of which API supplied the
-        // ApplicationInfo object.
-        boolean systemPackage = "true".equals(metadataValue(record, "system"));
-        info.enabled = !"false".equals(metadataValue(record, "enabled"));
-        if (systemPackage) {
-            info.flags |= ApplicationInfo.FLAG_SYSTEM;
-        } else {
-            info.nativeLibraryDir = System.getenv("DARWIN_ART_APK_APP_NATIVE_DIR");
-            applyApplicationPaths(info);
-        }
+        ApplicationInfo info = InstalledApplicationInfo.fromRecord(requestedPackage, record);
+        if (info == null) return null;
         // The launcher environment describes only the package being run. Do
         // not stamp that label onto records for unrelated installed packages
         // (for example Play Services queried by an SDK).
         String runningPackage = System.getenv("DARWIN_ART_APK_APP_PACKAGE");
         if (runningPackage != null && runningPackage.equals(requestedPackage)) {
+            info.nativeLibraryDir = System.getenv("DARWIN_ART_APK_APP_NATIVE_DIR");
+            applyApplicationPaths(info);
             applyApplicationLabel(info, null);
-        }
-        applyApplicationIcon(info);
-        String target = metadataValue(record, "target_sdk");
-        if (target != null) {
-            try {
-                info.targetSdkVersion = Integer.parseInt(target);
-            } catch (NumberFormatException ignored) {}
+            applyApplicationIcon(info);
         }
         return info;
     }
@@ -470,7 +449,13 @@ public final class ProbePackageManager extends MockPackageManager {
         ActivityInfo configured = source == null ? new ActivityInfo() : source;
         configured.packageName = packageName;
         configured.name = activityName;
-        if (configured.applicationInfo == null) {
+        if (System.getenv("DARWIN_ART_APK_APP_PACKAGE") != null) {
+            configured.applicationInfo = installedApplicationInfo(packageName,
+                    nativeResolveInstalledPackage(packageName));
+            if (configured.applicationInfo == null) {
+                throw new IllegalStateException("Installed package record missing: " + packageName);
+            }
+        } else if (configured.applicationInfo == null) {
             configured.applicationInfo = new ApplicationInfo();
         }
         configured.applicationInfo.packageName = packageName;
@@ -502,16 +487,25 @@ public final class ProbePackageManager extends MockPackageManager {
         if (serviceNames != null && !"none".equals(serviceNames)) {
             for (String serviceSpec : serviceNames.split(",")) {
                 int separator = serviceSpec.indexOf('>');
+                int flagsSeparator = separator < 0
+                        ? -1 : serviceSpec.indexOf('>', separator + 1);
                 String serviceName = separator < 0
                         ? serviceSpec : serviceSpec.substring(0, separator);
                 String processName = separator < 0
-                        ? packageName : serviceSpec.substring(separator + 1);
+                        ? packageName
+                        : flagsSeparator < 0
+                                ? serviceSpec.substring(separator + 1)
+                                : serviceSpec.substring(separator + 1, flagsSeparator);
                 if (serviceName.isEmpty() || processName.isEmpty()) continue;
                 ServiceInfo service = new ServiceInfo();
                 service.packageName = packageName;
                 service.name = serviceName;
                 service.processName = processName;
                 service.applicationInfo = new ApplicationInfo(activityInfo.applicationInfo);
+                if (flagsSeparator >= 0
+                        && "1".equals(serviceSpec.substring(flagsSeparator + 1))) {
+                    service.flags |= ServiceInfo.FLAG_ISOLATED_PROCESS;
+                }
                 serviceInfos.put(new ComponentName(packageName, serviceName), service);
             }
         }

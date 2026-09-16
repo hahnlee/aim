@@ -29,9 +29,17 @@ extern "C" void darwin_art_android_platform_wake_looper(void* looper);
 // owned by the ART owner thread; these wrappers keep the public APK ABI
 // independent from the compatibility layer's private ALooper type.
 using DarwinArtLooperCallback = int (*)(int, int, void*);
+using DarwinArtLooperOwnerRelease = void (*)(void*);
 extern "C" int darwin_art_android_platform_add_fd(
     void* looper, int fd, int ident, int events,
     DarwinArtLooperCallback callback, void* data);
+// Takes ownership of `owner` on every return path. A successful registration
+// retains it through every in-flight poll snapshot, then invokes `release`
+// after the last snapshot or registration drops it.
+extern "C" int darwin_art_android_platform_add_fd_owned(
+    void* looper, int fd, int ident, int events,
+    DarwinArtLooperCallback callback, void* data, void* owner,
+    DarwinArtLooperOwnerRelease release);
 extern "C" int darwin_art_android_platform_remove_fd(void* looper, int fd);
 
 // SCM_RIGHTS transports the Darwin file description but not Android ashmem's
@@ -88,6 +96,12 @@ extern "C" void* darwin_art_android_hardware_buffer_iosurface(
 // reset a reusable transaction without exposing the private implementation.
 extern "C" void* darwin_art_android_surface_control_create_root(
     const char* name);
+// Reconstructs the process-local client object for a SurfaceControl whose
+// authoritative layer is owned by another Android process. The pair is the
+// compositor capability carried by SurfaceControl's framework Parcel JNI;
+// transactions retain it unchanged when they cross into SurfaceFlinger.
+extern "C" void* darwin_art_android_surface_control_create_imported(
+    uint32_t owner_process_id, uint32_t layer_id, const char* name);
 extern "C" bool darwin_art_android_surface_control_get_identity(
     void* control, uint32_t* owner_process_id, uint32_t* layer_id);
 extern "C" void darwin_art_android_surface_transaction_clear(

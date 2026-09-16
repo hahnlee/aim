@@ -7,7 +7,9 @@
 
 #include <chrono>
 #include <atomic>
+#include <cstdlib>
 #include <cstdint>
+#include <iostream>
 #include <time.h>
 
 namespace darwin_art::framework_system {
@@ -33,6 +35,8 @@ class DarwinMessageQueue {
     return polling_.load(std::memory_order_acquire);
   }
 
+  void* Looper() const { return looper_; }
+
  private:
   void* looper_ = nullptr;
   std::atomic<bool> polling_{false};
@@ -55,9 +59,43 @@ jlong process_get_elapsed_cpu_time(JNIEnv*, jclass) {
   return TimevalToMillis(usage.ru_utime) + TimevalToMillis(usage.ru_stime);
 }
 
-jint event_log_write_event(JNIEnv*, jclass, jint, jobjectArray) {
+jint event_log_write_event(JNIEnv* env, jclass, jint tag, jobjectArray values) {
   // ServiceManager latency diagnostics are optional on the host; preserve
   // the Java call contract without importing Android's kernel event log.
+  // SurfaceView's AOSP callback trace is useful when diagnosing the generic
+  // SurfaceHolder contract. Keep this opt-in and at the Android EventLog
+  // boundary instead of adding application-specific hooks.
+  if (tag == 60006 && values != nullptr &&
+      std::getenv("DARWIN_ART_DEBUG_SURFACE_CALLBACKS") != nullptr) {
+    std::cerr << "ART Android SurfaceView callback:";
+    const jsize count = env->GetArrayLength(values);
+    for (jsize index = 0; index < count; ++index) {
+      jobject value = env->GetObjectArrayElement(values, index);
+      if (value == nullptr) {
+        std::cerr << " <null>";
+        continue;
+      }
+      jclass value_class = env->GetObjectClass(value);
+      jmethodID to_string =
+          value_class == nullptr
+              ? nullptr
+              : env->GetMethodID(value_class, "toString", "()Ljava/lang/String;");
+      jstring text = to_string == nullptr
+                         ? nullptr
+                         : static_cast<jstring>(env->CallObjectMethod(value, to_string));
+      const char* chars = text == nullptr ? nullptr : env->GetStringUTFChars(text, nullptr);
+      std::cerr << ' ' << (chars == nullptr ? "<?>" : chars);
+      if (chars != nullptr) env->ReleaseStringUTFChars(text, chars);
+      if (text != nullptr) env->DeleteLocalRef(text);
+      if (value_class != nullptr) env->DeleteLocalRef(value_class);
+      env->DeleteLocalRef(value);
+      if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        break;
+      }
+    }
+    std::cerr << '\n';
+  }
   return 0;
 }
 
@@ -93,6 +131,18 @@ void message_queue_native_set_file_descriptor_events(JNIEnv*, jclass, jlong,
   // not register descriptors, so the first framework gate keeps this explicit.
 }
 
+void* message_queue_looper(JNIEnv* env, jobject queue) {
+  if (env == nullptr || queue == nullptr) return nullptr;
+  jclass queue_class = env->GetObjectClass(queue);
+  if (queue_class == nullptr) return nullptr;
+  jfieldID pointer_field = env->GetFieldID(queue_class, "mPtr", "J");
+  env->DeleteLocalRef(queue_class);
+  if (pointer_field == nullptr || env->ExceptionCheck()) return nullptr;
+  DarwinMessageQueue* native_queue =
+      ToMessageQueue(env->GetLongField(queue, pointer_field));
+  return native_queue == nullptr ? nullptr : native_queue->Looper();
+}
+
 jboolean log_is_loggable(JNIEnv*, jclass, jstring, jint priority) {
   constexpr jint kInfoPriority = 4;
   return priority >= kInfoPriority ? JNI_TRUE : JNI_FALSE;
@@ -101,8 +151,6 @@ jboolean log_is_loggable(JNIEnv*, jclass, jstring, jint priority) {
 jint log_println(JNIEnv* env, jclass, jint, jint, jstring, jstring message) {
   return message == nullptr ? 0 : env->GetStringLength(message);
 }
-
-jboolean trace_is_tag_enabled(JNIEnv*, jclass, jlong) { return JNI_FALSE; }
 
 jlong system_clock_uptime_nanos(JNIEnv*, jclass) {
   return darwin_art::AndroidUptimeNanos();

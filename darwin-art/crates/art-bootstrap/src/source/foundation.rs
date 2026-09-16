@@ -157,11 +157,27 @@ pub(crate) fn build_foundation(root: &Path) -> Result<()> {
     ];
     let mut zip_jobs = Vec::new();
     for source in zip_sources {
-        let source_path = libziparchive.join(source);
+        let mut source_path = libziparchive.join(source);
+        if source == "zip_archive.cc" {
+            let original = fs::read_to_string(&source_path)?;
+            let marker = "::android::base::utf8::open(";
+            if original.matches(marker).count() != 1 {
+                return Err("unexpected AOSP ZipArchive open boundary".into());
+            }
+            let adapted = original.replace(marker, "::darwin_art_archive_open(");
+            source_path = patched_source_dir.join("zip_archive.cc");
+            if fs::read_to_string(&source_path).ok().as_deref() != Some(adapted.as_str()) {
+                fs::write(&source_path, adapted)?;
+            }
+        }
         let object = zip_object_dir.join(format!("{source}.o"));
         let mut command = common_cpp_command(&includes);
         command
             .arg("-DZLIB_CONST")
+            .arg("-I")
+            .arg(&libziparchive)
+            .arg("-include")
+            .arg(root.join("compat/filesystem/archive_open.h"))
             .arg("-D_FILE_OFFSET_BITS=64")
             .arg("-DINCFS_SUPPORT_DISABLED=1")
             .arg("-c")
@@ -170,6 +186,14 @@ pub(crate) fn build_foundation(root: &Path) -> Result<()> {
             .arg(&object);
         zip_jobs.push(PendingNativeCompile { command, object });
     }
+    let object = zip_object_dir.join("archive_open.o");
+    let mut command = common_cpp_command(&includes);
+    command
+        .arg("-c")
+        .arg(root.join("compat/filesystem/archive_open.cc"))
+        .arg("-o")
+        .arg(&object);
+    zip_jobs.push(PendingNativeCompile { command, object });
     let (zip_objects, zip_compiled, _) = compile_pending_native(zip_jobs, &compiler_identity)?;
     let zip_archive = build_dir.join("libziparchive-darwin.a");
     create_archive_if_needed(&zip_archive, &zip_objects, zip_compiled)?;

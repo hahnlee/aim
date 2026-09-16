@@ -6,6 +6,10 @@ set -euo pipefail
 set +u
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+source "$root/tools/lib/system-private-data.sh"
+source "$root/tools/lib/runtime-system-image.sh"
+source "$root/tools/lib/system-service-environment.sh"
+source "$root/tools/lib/runtime-system-service.sh"
 installed_record=""
 split_apks=()
 if [[ "${1:-}" == "--record" ]]; then
@@ -116,6 +120,46 @@ if [[ -z "$installed_record" ]]; then
     fi
   fi
 fi
+metadata_refreshed=0
+manifest_schema="$(sed -n 's/^apk-app-runtime: .* manifest_schema=\([^ ]*\) .*/\1/p' <<<"$metadata")"
+manifest_schema_needs_refresh=0
+if [[ -n "$installed_record" ]]; then
+  # Installed records carry an immutable metadata snapshot. Schema 4 adds the
+  # service permission/exported/enabled projection required by system services.
+  case "$manifest_schema" in
+    ""|0|1|2|3) manifest_schema_needs_refresh=1 ;;
+    4) ;;
+    *)
+      echo "installed package metadata schema is unsupported: $manifest_schema" >&2
+      exit 69
+      ;;
+  esac
+fi
+if [[ "$manifest_schema_needs_refresh" == "1" ]]; then
+  # Installed launch records are immutable package payload references, but
+  # their PackageManager projection is versioned runtime state. Re-inspect the
+  # unchanged installed APK when that projection schema advances, just as
+  # Android rebuilds package settings from package manifests after an OTA.
+  metadata_tool="$root/target/release/android-apk-app-runtime"
+  [[ -x "$metadata_tool" ]] || {
+    echo "installed package metadata is stale; rebuild the runtime before launch" >&2
+    exit 69
+  }
+  refresh_arguments=("$source_apk")
+  [[ "$app_dex" == "$source_apk" ]] || refresh_arguments+=("$app_dex")
+  for split_apk in "${split_apks[@]}"; do
+    refresh_arguments+=(--split "$split_apk")
+  done
+  refreshed_metadata="$($metadata_tool "${refresh_arguments[@]}")"
+  refreshed_schema="$(sed -n 's/^apk-app-runtime: .* manifest_schema=\([^ ]*\) .*/\1/p' \
+    <<<"$refreshed_metadata")"
+  [[ "$refreshed_schema" == "4" ]] || {
+    echo "rebuilt APK metadata tool does not support manifest schema 4" >&2
+    exit 69
+  }
+  metadata="$refreshed_metadata"
+  metadata_refreshed=1
+fi
 package="$(sed -n 's/^apk-app-runtime: package=\([^ ]*\) .*/\1/p' <<<"$metadata")"
 application="$(sed -n 's/^apk-app-runtime: .* application=\([^ ]*\) .*/\1/p' <<<"$metadata")"
 activity="$(sed -n 's/^apk-app-runtime: .* activity=\([^ ]*\) .*/\1/p' <<<"$metadata")"
@@ -162,7 +206,10 @@ version_code="$(sed -n 's/^apk-app-runtime: .* version_code=\([^ ]*\) .*/\1/p' <
 version_name="$(sed -n 's/^apk-app-runtime: .* version_name=\([^ ]*\) .*/\1/p' <<<"$metadata")"
 theme="$(sed -n 's/^apk-app-runtime: .* theme=\([^ ]*\) .*/\1/p' <<<"$metadata")"
 target_sdk="$(sed -n 's/^apk-app-runtime: .* target_sdk=\([^ ]*\) .*/\1/p' <<<"$metadata")"
+requested_permissions="$(sed -n 's/^apk-app-runtime: .* permissions=\([^ ]*\) .*/\1/p' <<<"$metadata")"
 debuggable="$(sed -n 's/^apk-app-runtime: .* debuggable=\([^ ]*\) .*/\1/p' <<<"$metadata")"
+hardware_accelerated="$(sed -n 's/^apk-app-runtime: .* hardware_accelerated=\([^ ]*\) .*/\1/p' <<<"$metadata")"
+activity_hardware_accelerated="$(sed -n 's/^apk-app-runtime: .* activity_hardware_accelerated=\([^ ]*\) .*/\1/p' <<<"$metadata")"
 label="$(sed -n 's/^apk-app-runtime: .* label=\(.*\) label_res=.*/\1/p' <<<"$metadata")"
 label_res="$(sed -n 's/^apk-app-runtime: .* label_res=\([^ ]*\) .*/\1/p' <<<"$metadata")"
 activity_label="$(sed -n 's/^apk-app-runtime-activity-label: label=\(.*\) label_res=.*/\1/p' <<<"$metadata")"
@@ -171,7 +218,7 @@ application_icon_res="$(sed -n 's/^apk-app-runtime-application-icon: res=\([^ ]*
 icon="$(sed -n 's/^apk-app-runtime: .* icon=\([^ ]*\) .*/\1/p' <<<"$metadata")"
 native_count="$(sed -n 's/^apk-app-runtime: .* native=\([^ ]*\) .*/\1/p' <<<"$metadata")"
 native_root="$(sed -n 's/^apk-app-runtime: .* native_root=\([^ ]*\)$/\1/p' <<<"$metadata")"
-[[ -n "$package" && -n "$application" && -n "$activity" && -n "$launch_component" && -n "$screen_orientation" && -n "$descriptor" && -n "$activities" && -n "$activity_aliases" && -n "$services" && -n "$receivers" && -n "$service_metadata" && -n "$application_metadata" && -n "$version_code" && -n "$theme" && -n "$target_sdk" && -n "$debuggable" && -n "$label" && -n "$label_res" && -n "$icon" && -n "$native_count" && -n "$native_root" ]] || {
+[[ -n "$package" && -n "$application" && -n "$activity" && -n "$launch_component" && -n "$screen_orientation" && -n "$descriptor" && -n "$activities" && -n "$activity_aliases" && -n "$services" && -n "$receivers" && -n "$service_metadata" && -n "$application_metadata" && -n "$requested_permissions" && -n "$version_code" && -n "$theme" && -n "$target_sdk" && -n "$debuggable" && -n "$hardware_accelerated" && -n "$activity_hardware_accelerated" && -n "$label" && -n "$label_res" && -n "$icon" && -n "$native_count" && -n "$native_root" ]] || {
   echo "could not decode inspected APK metadata" >&2
   exit 65
 }
@@ -200,6 +247,18 @@ profile_mount="$("$profile_ctl" ensure)"
 export DARWIN_ART_PROFILE_CTL="$profile_ctl"
 export DARWIN_ART_PROFILE_SOCKET
 DARWIN_ART_PROFILE_SOCKET="$("$profile_ctl" socket)"
+if [[ "$metadata_refreshed" == "1" ]]; then
+  # Publish the regenerated PackageManager projection through the profile
+  # authority before system_server resolves the service declaration. Preserve
+  # every identity/path/app-id field from the existing launch record.
+  record_stage="$(mktemp "$profile_mount/run/launch-record.XXXXXX")"
+  while IFS= read -r record_line; do
+    [[ "$record_line" == metadata=* ]] || printf '%s\n' "$record_line"
+  done <"$installed_record" >"$record_stage"
+  printf 'metadata=%s\n' "$metadata" >>"$record_stage"
+  "$profile_ctl" register "$package" "$record_stage"
+  rm -f "$record_stage"
+fi
 # App-data isolation changes only the package sandbox. Android system services
 # remain profile-scoped and common to every APK, just as they are on a device.
 # Darwin's sockaddr_un.sun_path is only 104 bytes, so keep process-control
@@ -299,6 +358,7 @@ if [[ -z "$installed_record" && -n "$profile_mount" ]]; then
     printf 'apk=%s\n' "$apk"
     printf 'dex=%s\n' "$app_dex"
     printf 'sha256=%s\n' "$apk_sha256"
+    printf 'native_library_dir=%s\n' "$installed_directory/android-elf/arm64-v8a"
     for split_apk in "${installed_split_apks[@]}"; do
       printf 'split=%s\n' "$split_apk"
     done
@@ -375,7 +435,6 @@ fi
 framework_location="$root/_prebuilt/android-16/bootclasspath/framework-location.jar"
 core_icu="$root/_build/bootclasspath/core-icu4j-api36.jar"
 conscrypt="$root/_build/android16-ps16k-r07/extracted/conscrypt/javalib/conscrypt.jar"
-conscrypt_native="$root/_build/android16-ps16k-r07/extracted/conscrypt/lib64"
 framework_bluetooth="$root/_build/android16-ps16k-r07/extracted/bt/javalib/framework-bluetooth.jar"
 framework_mediaprovider="$root/_build/android16-ps16k-r07/extracted/mediaprovider/javalib/framework-mediaprovider.jar"
 framework_permission="$root/_build/android16-ps16k-r07/extracted/permission/javalib/framework-permission.jar"
@@ -386,10 +445,24 @@ okhttp="$root/_build/android16-ps16k-r07/extracted/art/javalib/okhttp.jar"
 # framework modules.  The host ABI accepts the remaining colon-separated
 # components through its boot-tail field.
 boot_tail="$framework_location:$conscrypt:$framework_bluetooth:$framework_mediaprovider:$framework_permission:$framework_permission_s:$okhttp:$core_icu"
-support_dex="$root/_build/button-dex/dex/classes.dex"
-fonts_xml="$root/probes/button/fonts.xml"
-roboto="$root/_aosp/external/skia/resources/fonts/Roboto-Regular.ttf"
-framework_res="$root/_prebuilt/android-16/resources/framework-res.apk"
+# One image-derived classpath owns runtime resolution, including service children.
+# The fixed positional ABI above remains until callers migrate; ART consumes
+# this complete ordered path instead of treating the ABI slots as class order.
+export DARWIN_ART_BOOT_CLASSPATH
+DARWIN_ART_BOOT_CLASSPATH="$(python3 "$root/tools/bootclasspath/resolve.py")"
+export DARWIN_ART_BOOT_CLASSPATH_LOCATIONS
+DARWIN_ART_BOOT_CLASSPATH_LOCATIONS="$(python3 "$root/tools/bootclasspath/resolve.py" --locations)"
+support_dex="$root/_build/runtime-support-dex/dex/classes.dex"
+# Apps and newly started system services use the same immutable Android image.
+# Writable /data and /storage are separate authorities, never image contents.
+image_mode=development
+[[ "${DARWIN_ART_PACKAGED_RUNTIME:-0}" != "1" ]] || image_mode=packaged
+shared_image_store="${DARWIN_ART_SYSTEM_IMAGE_STORE:-$HOME/Library/Application Support/DarwinART/runtime-images}"
+system_archive="$(darwin_art_runtime_system_archive "$root" "$image_mode")"
+system_root="$(darwin_art_prepare_runtime_system_image "$root" "$host" "$image_mode" "$shared_image_store")"
+fonts_xml="$system_root/system/etc/fonts.xml"
+roboto="$system_root/system/fonts/Roboto-Regular.ttf"
+framework_res="$system_root/system/framework/framework-res.apk"
 if [[ ! -f "$support_dex" ]]; then
   if [[ -n "$installed_record" ]]; then
     echo "installed run requires prebuilt support DEX; run cargo xtask build" >&2
@@ -398,22 +471,25 @@ if [[ ! -f "$support_dex" ]]; then
   cargo run -q -p art-bootstrap -- build-button-dex >/dev/null
 fi
 if [[ -n "$profile_mount" ]]; then
-  # The support probe DEX is also loaded by the profile's system server. ART
+  # The production support DEX is also loaded by the profile's system server. ART
   # may create oat/vdex beside any DEX it opens, so never point a packaged
   # launch at the read-only signed Manager bundle. Keep a profile-owned copy
   # with the same bytes and let dexopt place artifacts under this writable
   # cache root.
-  support_dex_cache="$profile_mount/system/dex-cache/button-dex"
+  support_dex_cache="$profile_mount/system/dex-cache/runtime-support-dex"
   mkdir -p "$support_dex_cache"
-  # The cache file is sealed after publication. Re-open only this profile-owned
-  # copy for an idempotent refresh; never relax permissions in the signed app.
-  [[ ! -e "$support_dex_cache/classes.dex" ]] ||
-    chmod u+w "$support_dex_cache/classes.dex"
-  cp "$support_dex" "$support_dex_cache/classes.dex"
-  chmod 0400 "$support_dex_cache/classes.dex"
+  # Existing app/system-server processes can have this DEX mmap'ed. Publish a
+  # new inode atomically instead of truncating their live mapping (or racing
+  # another launch's chmod/copy). Identical launches need no publication.
+  if ! cmp -s "$support_dex" "$support_dex_cache/classes.dex"; then
+    support_dex_stage="$(mktemp "$support_dex_cache/classes.dex.XXXXXX")"
+    cp "$support_dex" "$support_dex_stage"
+    chmod 0400 "$support_dex_stage"
+    mv -f "$support_dex_stage" "$support_dex_cache/classes.dex"
+  fi
   support_dex="$support_dex_cache/classes.dex"
 fi
-export DARWIN_ART_RUNTIME_HOST_FILES="$core_oj:$core_libart:$framework:$boot_tail:$support_dex:$app_dex"
+export DARWIN_ART_RUNTIME_HOST_FILES="$DARWIN_ART_BOOT_CLASSPATH:$support_dex:$app_dex"
 for input in "$host" "$runtime" "$core_oj" "$core_libart" "$framework" "$framework_location" "$core_icu" "$conscrypt" "$framework_bluetooth" "$framework_mediaprovider" "$framework_permission" "$framework_permission_s" "$okhttp" "$support_dex" "$fonts_xml" "$roboto" "$framework_res"; do
   [[ -f "$input" ]] || {
     echo "runtime input is missing: $input" >&2
@@ -422,95 +498,24 @@ for input in "$host" "$runtime" "$core_oj" "$core_libart" "$framework" "$framewo
   }
 done
 
-# The Android font bootstrap uses the guest filesystem facade. Give arbitrary
-# no-native APKs the same immutable, minimal system root as the in-tree gate;
-# pointing the process at the host filesystem would bypass the guest path
-# policy and make results depend on the developer machine.
-prune_stale_system_roots() {
-  local run_root="$1"
-  [[ -d "$run_root" ]] || return 0
-  while IFS= read -r -d '' stale_root; do
-    # The system tree is sealed while the app runs. A killed host cannot run
-    # the EXIT trap, so reopen only roots older than a day before removing.
-    # A recorded owner PID is authoritative for a live launch; never delete
-    # an old root while its owner is still alive.
-    owner_file="$stale_root/.darwin-art-owner-pid"
-    if [[ -r "$owner_file" ]]; then
-      owner_pid="$(sed -n '1p' "$owner_file")"
-      if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
-        continue
-      fi
-    fi
-    chmod -R u+w "$stale_root" 2>/dev/null || true
-    rm -r -- "$stale_root" 2>/dev/null || true
-  done < <(find "$run_root" -maxdepth 1 -type d -name 'app.*' -mmin +1440 -print0)
-}
-if [[ -n "$profile_mount" ]]; then
-  prune_stale_system_roots "$profile_mount/run"
-  system_root="$(mktemp -d "$profile_mount/run/app.XXXXXX")"
-else
-  system_root="$(mktemp -d "${TMPDIR:-/tmp}/darwin-art-apk-system-root.XXXXXX")"
-fi
-printf '%s\n' "$$" >"$system_root/.darwin-art-owner-pid"
+# Only the launch-owned icon is temporary. The image outlives all app and
+# service processes; shell exit must neither chmod/delete it nor kill children
+# to reclaim it. Process termination belongs to the profile supervisor.
 icon_file=""
-wait_for_app_processes() {
-  [[ -n "$profile_mount" && -x "$profile_ctl" && -n "$package" ]] || return 0
-  local deadline=0
-  local pids=""
-  local signal=""
-  # The host normally reaps service children before returning. This second
-  # supervisor boundary covers fatal/early exits where Rust Drop cannot run:
-  # profile leases are authoritative, so do not remove the shared root while
-  # a child still belongs to this package.
-  for signal in none TERM KILL; do
-    deadline=$((SECONDS + 5))
-    while (( SECONDS < deadline )); do
-      pids="$("$profile_ctl" ps 2>/dev/null | awk -v package="$package" '$2 == package { print $1 }')"
-      [[ -z "$pids" ]] && return 0
-      if [[ "$signal" != none ]]; then
-        # Only signal rows owned by this APK package. android.system and all
-        # other profile residents remain outside this launch cleanup scope.
-        kill -"$signal" $pids 2>/dev/null || true
-      fi
-      sleep 0.05
-    done
-  done
-  # Leave the root for the profile daemon's stale-root janitor if a child
-  # ignored both signals; never delete it under a live process lease.
-  return 1
+cleanup_launch_icon() {
+  [[ -z "$icon_file" ]] || rm -f -- "$icon_file"
 }
-cleanup_system_root() {
-  chmod -R u+w "$system_root" 2>/dev/null || true
-  if wait_for_app_processes; then
-    rm -rf "$system_root"
-  else
-    echo "darwin-art: retaining system root while app process leases remain: $system_root" >&2
-  fi
-  [[ -z "$icon_file" ]] || rm -f "$icon_file"
-}
-trap cleanup_system_root EXIT
-mkdir -p "$system_root/system/etc" "$system_root/system/fonts" \
-  "$system_root/system/framework" "$system_root/system/lib64"
-cp "$fonts_xml" "$system_root/system/etc/fonts.xml"
-cp "$roboto" "$system_root/system/fonts/Roboto-Regular.ttf"
-cp "$framework_res" "$system_root/system/framework/framework-res.apk"
-for library in libc++.so libcrypto.so libjavacrypto.so libssl.so; do
-  cp "$conscrypt_native/$library" "$system_root/system/lib64/$library"
-done
-chmod 0400 "$system_root/system/etc/fonts.xml" \
-  "$system_root/system/fonts/Roboto-Regular.ttf" \
-  "$system_root/system/framework/framework-res.apk" \
-  "$system_root/system/lib64/"*.so
-chmod 0700 "$system_root"
-chmod 0500 "$system_root/system" "$system_root/system/etc" \
-  "$system_root/system/fonts" "$system_root/system/framework"
-chmod 0500 "$system_root/system/lib64"
+trap cleanup_launch_icon EXIT
 
 icu_runtime="$root/_build/icu-runtime-adapters/runtime"
 export ANDROID_I18N_ROOT="$icu_runtime/i18n"
 export ANDROID_DATA="$icu_runtime/data"
 export ANDROID_TZDATA_ROOT="$icu_runtime/tzdata"
 export DARWIN_ART_APK_APP_PACKAGE="$package"
+# The launcher grants exactly this Activity host one macOS desktop target.
+# system_server and daemon-created service/renderer children explicitly strip
+# the capability while retaining their Android graphics/IOSurface paths.
+export DARWIN_ART_DESKTOP_PRESENTATION=1
 export DARWIN_ART_APK_APP_APPLICATION="$application"
 export DARWIN_ART_APK_APP_ACTIVITY="$activity"
 export DARWIN_ART_APK_APP_LAUNCH_COMPONENT="$launch_component"
@@ -527,6 +532,7 @@ export DARWIN_ART_APK_APP_VERSION_CODE="$version_code"
 export DARWIN_ART_APK_APP_VERSION_NAME="$version_name"
 export DARWIN_ART_APK_APP_THEME="$theme"
 export DARWIN_ART_APK_APP_TARGET_SDK="$target_sdk"
+export DARWIN_ART_APK_APP_REQUESTED_PERMISSIONS="$requested_permissions"
 export DARWIN_ART_RUNTIME_TARGET_SDK_VERSION="$target_sdk"
 export DARWIN_ART_RUNTIME_JAVA_DEBUGGABLE="$debuggable"
 export DARWIN_ART_APK_APP_APK_SHA256="$apk_sha256"
@@ -553,16 +559,23 @@ export DARWIN_ART_APK_APP_DATA_GUEST_DIR="/data/user/0/$package"
 # ContextImpl creates these package-private directories before app code runs.
 # The detached host exposes the same writable subtree inside the sealed guest
 # root; Java and native code therefore agree on the Android /data path.
-chmod 0700 "$system_root"
 guest_app_data="$private_data_root/user/0/$package"
+guest_device_data="$private_data_root/user_de/0/$package"
 mkdir -p "$guest_app_data/files" "$guest_app_data/cache" \
   "$guest_app_data/code_cache" "$guest_app_data/no_backup" \
-  "$guest_app_data/databases" "$guest_app_data/shared_prefs"
+  "$guest_app_data/databases" "$guest_app_data/shared_prefs" \
+  "$guest_device_data/files" "$guest_device_data/cache" \
+  "$guest_device_data/code_cache" "$guest_device_data/no_backup" \
+  "$guest_device_data/databases" "$guest_device_data/shared_prefs"
 chmod 0500 "$private_data_root/user" "$private_data_root/user/0"
+chmod 0500 "$private_data_root/user_de" "$private_data_root/user_de/0"
 chmod 0700 "$guest_app_data" "$guest_app_data/files" \
   "$guest_app_data/cache" "$guest_app_data/code_cache" \
   "$guest_app_data/no_backup" "$guest_app_data/databases" \
-  "$guest_app_data/shared_prefs"
+  "$guest_app_data/shared_prefs" "$guest_device_data" \
+  "$guest_device_data/files" "$guest_device_data/cache" \
+  "$guest_device_data/code_cache" "$guest_device_data/no_backup" \
+  "$guest_device_data/databases" "$guest_device_data/shared_prefs"
 
 # Chromium reads its Android command line from an app-private file. Keep that
 # transport independent from any temporary GPU policy: acceptance tests and
@@ -611,25 +624,21 @@ if [[ -n "${DARWIN_ART_APP_COMMAND_LINE_FILE:-}" ]]; then
   chmod 0500 "$command_line_dir"
 fi
 chmod 0500 "$private_data_root"
-chmod 0500 "$system_root"
 
-# Publish only this application's authorized external-storage directory inside
-# the sealed guest root. Native Android libraries must see Android paths rather
-# than arbitrary Darwin paths; the filesystem facade keeps the host authority
-# rooted at this temporary capability tree.
-external_storage_dir="$app_data_dir/external"
-guest_external_root="$system_root/storage/emulated/0"
-chmod 0700 "$system_root"
-guest_external_app="$guest_external_root/Android/data/$package/files"
-mkdir -p "$external_storage_dir" "$guest_external_app"
-if [[ -n "$(find "$external_storage_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-  # Preserve the Android scoped-storage path.  Flattening this copy into
-  # /storage/emulated/0 makes an app-visible file unreachable through the
-  # canonical /Android/data/<package>/files contract used by MediaStore/VLC.
-  cp -R "$external_storage_dir/." "$guest_external_app/"
+# Persistent profile storage is mounted by the process filesystem owner.
+# Migration preserves file identities and the old host-producer path, and
+# refuses conflicting trees rather than merging or replacing user files.
+shared_storage_root="$profile_mount/storage"
+if [[ "$app_data_root" != "$profile_mount/data/apps" ]]; then
+  # An explicitly isolated app-data root must not acquire the real profile's
+  # external files. Keep its persistent storage on the same volume as its data.
+  shared_storage_root="$app_data_root/.shared-storage"
+  mkdir -p "$shared_storage_root"
+  chmod 0700 "$shared_storage_root"
 fi
-chmod -R u=rX,go= "$system_root/storage"
-chmod 0500 "$system_root"
+external_storage_dir="$("$host" --prepare-external-storage \
+  "$shared_storage_root" "$app_data_dir" "$package")"
+export DARWIN_ART_ANDROID_SHARED_STORAGE_ROOT="$shared_storage_root"
 export DARWIN_ART_APK_APP_EXTERNAL_DIR="/storage/emulated/0/Android/data/$package/files"
 if [[ "$icon" != "none" ]]; then
   icon_file="$(mktemp "${TMPDIR:-/tmp}/darwin-art-apk-icon.XXXXXX")"
@@ -758,7 +767,7 @@ if [[ -n "${DARWIN_ART_DEBUG_HOST:-}" ]]; then
   host="$DARWIN_ART_DEBUG_HOST"
 fi
 # Keep the launcher shell alive for debugger modes as well. An exec'd lldb
-# would bypass cleanup_system_root just like an exec'd app host.
+# would bypass launch-owned icon cleanup just like an exec'd app host.
 run_lldb() {
   lldb "$@"
   local status=$?
@@ -808,78 +817,48 @@ fi
 host_command=("$host" --window-seconds "$seconds" \
   "$runtime" "$core_oj" "$core_libart" "$framework" "$boot_tail" "$app_dex")
 if [[ -n "$profile_mount" ]]; then
-  system_server_pid="$("$profile_ctl" ps | awk '$2 == "android.system" { print $1; exit }')"
-  if [[ -z "$system_server_pid" ]] || ! kill -0 "$system_server_pid" 2>/dev/null; then
-    # A killed system_server leaves pathname sockets behind. Remove only this
-    # profile's two deterministic endpoints before launching its replacement;
-    # otherwise the readiness loop can accept a stale inode and start the app
-    # before Binder and SurfaceFlinger are listening.
-    rm -f "$DARWIN_ART_SYSTEM_SERVER_SOCKET" "$DARWIN_ART_SURFACEFLINGER_SOCKET"
-    system_server_log="${profile_mount%/mnt}/darwin-artd.log"
-    system_server_root="$profile_mount/system-server-root"
-    system_server_private="$profile_mount/data/apps/android.system/private-data"
-    if [[ ! -d "$system_server_root/system" ]]; then
-      mkdir -p "$system_server_root" "$system_server_private/user/0/android"
-      cp -R "$system_root/system" "$system_server_root/system"
-      mkdir -p "$system_server_root/storage/emulated/0"
-      chmod -R u=rX,go= "$system_server_root/system" "$system_server_root/storage"
-    else
-      mkdir -p "$system_server_private/user/0/android"
-    fi
-    chmod 0700 "$system_server_private" "$system_server_private/user/0/android"
-    chmod 0500 "$system_server_root" "$system_server_private"
-    system_server_command=("$host" --window-seconds 0 \
-      "$runtime" "$core_oj" "$core_libart" "$framework" "$boot_tail" "$support_dex")
-    system_server_launcher_pid="$( \
-      DARWIN_ART_SYSTEM_SERVER_MODE=1 \
-      DARWIN_ART_APK_APP_PACKAGE=android \
-      DARWIN_ART_APK_APP_APPLICATION=android.app.Application \
-      DARWIN_ART_APK_APP_ACTIVITY=dev.darwinart.probe.ProbeActivity \
-      DARWIN_ART_APK_APP_LAUNCH_COMPONENT=none \
-      DARWIN_ART_APK_APP_SCREEN_ORIENTATION=-1 \
-      DARWIN_ART_APK_APP_DESCRIPTOR=Ldev/darwinart/probe/ProbeActivity\; \
-      DARWIN_ART_APK_APP_ACTIVITIES=none \
-      DARWIN_ART_APK_APP_ACTIVITY_ALIASES=none \
-      DARWIN_ART_APK_APP_SERVICES=none \
-      DARWIN_ART_APK_APP_SERVICE_METADATA=none \
-      DARWIN_ART_APK_APP_METADATA=none \
-      DARWIN_ART_APK_APP_VERSION_CODE=1 \
-      DARWIN_ART_APK_APP_VERSION_NAME=1 \
-      DARWIN_ART_APK_APP_THEME=0 \
-      DARWIN_ART_APK_APP_TARGET_SDK=36 \
-      DARWIN_ART_APK_APP_LABEL=Android \
-      DARWIN_ART_APK_APP_LABEL_RES=0 \
-      DARWIN_ART_APK_APP_ICON_RES=0 \
-      DARWIN_ART_APK_APP_RESOURCE_APK="$framework_res" \
-      DARWIN_ART_ANDROID_PRIVATE_DATA_ROOT="$system_server_private" \
-      DARWIN_ART_APK_APP_DATA_DIR="${system_server_private%/private-data}" \
-      DARWIN_ART_APK_APP_DATA_GUEST_DIR=/data/user/0/android \
-      DARWIN_ART_APK_APP_EXTERNAL_DIR=/storage/emulated/0 \
-      DARWIN_ART_ANDROID_FILESYSTEM_ROOT="$system_server_root" \
-      DARWIN_ART_ANDROID_SYSTEM_ROOT="$system_server_root/system" \
-      DARWIN_ART_ANDROID_SYSTEM_NATIVE_DIR="$system_server_root/system/lib64" \
-      DARWIN_ART_RUNTIME_HOST_FILES="$core_oj:$core_libart:$framework:$boot_tail:$support_dex" \
-      DARWIN_ART_DEBUG_SURFACECONTROL_CAPTURE_PATH="${DARWIN_ART_DEBUG_SURFACECONTROL_CAPTURE_PATH:-}" \
-      DARWIN_ART_DEBUG_SURFACECONTROL_CAPTURE_PIXELS="${DARWIN_ART_DEBUG_SURFACECONTROL_CAPTURE_PIXELS:-}" \
-      "$profile_ctl" daemonize android.system "${system_server_command[@]}" \
+  runtime_start="$(darwin_art_start_runtime_system_service \
+    "$host" "$profile_mount" "$system_root" "$system_archive" "$shared_image_store" \
+    "$framework_res" "$support_dex" "$runtime" "$core_oj" "$core_libart" "$framework" "$boot_tail" \
     )"
-    for _ in {1..100}; do
-      [[ -S "$DARWIN_ART_SYSTEM_SERVER_SOCKET" &&
-         -S "$DARWIN_ART_SURFACEFLINGER_SOCKET" ]] && break
-      kill -0 "$system_server_launcher_pid" 2>/dev/null || break
-      sleep 0.05
-    done
-    [[ -S "$DARWIN_ART_SYSTEM_SERVER_SOCKET" &&
-       -S "$DARWIN_ART_SURFACEFLINGER_SOCKET" ]] || {
-      echo "system_server-lite did not publish Binder and SurfaceFlinger" >&2
-      tail -40 "$system_server_log" >&2 || true
-      exit 70
-    }
+  darwin_art_apply_runtime_endpoints "$runtime_start"
+  # The profile daemon must own the final host Child. A caller-owned
+  # exec lease made the host's lifetime depend on this shell (and left the
+  # manager/app shim with a second, unrelated owner). daemonize registers
+  # the host PID before acknowledging it, so the shell can safely wait for
+  # that exact process through the authoritative profile ps view.
+  host_pid="$("$profile_ctl" daemonize "$package" "${host_command[@]}")"
+  [[ "$host_pid" =~ ^[1-9][0-9]*$ ]] || {
+    echo "darwin-artd returned an invalid application PID: $host_pid" >&2
+    exit 69
+  }
+
+  # Manager/Finder shims use this explicit handoff mode: the shell performs
+  # all package/runtime setup, transfers final-host ownership to darwin-artd,
+  # and returns once that transfer is acknowledged. Ordinary invocations
+  # remain synchronous and retain their requested window duration.
+  if [[ "${DARWIN_ART_ASYNC_LAUNCH:-0}" == "1" ]]; then
+    exit 0
   fi
-  # Wait for the app host instead of replacing this shell. Replacing it with
-  # exec would skip cleanup_system_root's EXIT trap and leak a sealed ~38 MiB
-  # system tree on every normal launch.
-  "$profile_ctl" exec "$package" "${host_command[@]}"
+
+  wait_for_daemon_process() {
+    local pid="$1" expected_package="$2" processes
+    while :; do
+      # Do not use kill -0 or parent/child relationships: the profile daemon's
+      # process registry is the ownership authority and is incarnation-safe.
+      processes="$("$profile_ctl" ps)" || {
+        echo "could not query darwin-artd process ownership" >&2
+        return 69
+      }
+      if ! awk -F '\t' -v expected_pid="$pid" -v expected_package="$expected_package" \
+          '$1 == expected_pid && $2 == expected_package { found = 1 }
+           END { exit(found ? 0 : 1) }' <<<"$processes"; then
+        return 0
+      fi
+      sleep 0.1
+    done
+  }
+  wait_for_daemon_process "$host_pid" "$package"
   status=$?
   exit "$status"
 fi

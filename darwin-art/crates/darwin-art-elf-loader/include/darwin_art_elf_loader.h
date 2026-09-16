@@ -2,6 +2,7 @@
 #define DARWIN_ART_ELF_LOADER_H_
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -79,6 +80,12 @@ typedef struct DarwinArtElfLifecycleCallbacks {
   DarwinArtElfFinalizeImageCallback finalize_image;
   void* context;
 } DarwinArtElfLifecycleCallbacks;
+typedef struct DarwinArtElfLifecycleOwner DarwinArtElfLifecycleOwner;
+/* Retain returns the callback context used by publish/finalize; release runs
+ * after the last mapping reference. Source callbacks are copied. */
+DarwinArtElfStatus darwin_art_elf_lifecycle_owner_create(const DarwinArtElfLifecycleCallbacks*,
+    void* (*retain)(void*), void (*release)(void*), DarwinArtElfLifecycleOwner**, DarwinArtElfErrorBuffer*);
+void darwin_art_elf_lifecycle_owner_destroy(DarwinArtElfLifecycleOwner*);
 
 typedef struct DarwinArtElfHandle DarwinArtElfHandle;
 typedef struct DarwinArtElfGraphHandle DarwinArtElfGraphHandle;
@@ -104,6 +111,12 @@ DarwinArtElfStatus darwin_art_elf_inspect_bytes(
     size_t length,
     DarwinArtElfInspection** out_inspection,
     DarwinArtElfErrorBuffer* error);
+/* Borrows an already-admitted host fd and performs bounded positional reads.
+ * Does not change its offset or reopen a path. Caller prevents concurrent inode
+ * writes: stable descriptor identity is not an immutable-content guarantee.
+ * Same inspection lifetime as inspect_bytes; namespace grants remain external. */
+DarwinArtElfStatus darwin_art_elf_inspect_fd(
+    int fd, DarwinArtElfInspection** out_inspection, DarwinArtElfErrorBuffer* error);
 DarwinArtElfStatus darwin_art_elf_inspection_soname(
     const DarwinArtElfInspection* inspection,
     const char** out_soname,
@@ -118,6 +131,19 @@ DarwinArtElfStatus darwin_art_elf_inspection_needed_at(
     const char** out_soname,
     DarwinArtElfErrorBuffer* error);
 void darwin_art_elf_inspection_destroy(DarwinArtElfInspection** inspection);
+/* Raw DT_RUNPATH, borrowed until inspection_destroy. Null means absent;
+ * expansion and namespace authorization remain the caller's responsibility. */
+DarwinArtElfStatus darwin_art_elf_inspection_runpath(
+    const DarwinArtElfInspection*, const char** out_runpath, DarwinArtElfErrorBuffer* error);
+// Raw DT_FLAGS_1, zero if absent. Not RTLD flags or proof the image is loadable.
+// Failure leaves output untouched; caller retains inspection during this call.
+DarwinArtElfStatus darwin_art_elf_inspection_flags_1(
+    const DarwinArtElfInspection*, uint64_t* out_flags, DarwinArtElfErrorBuffer* error);
+// Query actual loaded member (logical SONAME), not a file opened again.
+// Graph must remain live. Missing member fails without changing output.
+DarwinArtElfStatus darwin_art_elf_graph_flags_1(
+    const DarwinArtElfGraphHandle*, const char* soname, uint64_t* out_flags,
+    DarwinArtElfErrorBuffer* error);
 
 /*
  * Discovers a closed recursive graph below one caller-selected, already-open
@@ -154,11 +180,85 @@ DarwinArtElfStatus darwin_art_elf_discovered_graph_root_soname(
     const DarwinArtElfDiscoveredGraph* graph,
     const char** out_soname,
     DarwinArtElfErrorBuffer* error);
+/* Host-only, single closed SONAME scope. Root fd is borrowed/duplicated, never
+ * reopened by name. Each dependency callback receives referring image ID and SONAME/name
+ * plus raw RUNPATH (null if absent), borrowed only during callback. No token
+ * expansion is performed here. Callback transfers an owned host fd, or returns
+ * negative failure. Provider names
+ * bypass file discovery as in sibling discovery. Caller enforces namespace
+ * permissions and prevents inode mutation. Null opener fails if deps exist.
+ * Image IDs are caller-owned opaque keys (not namespace IDs or host fds).
+ * Caller retains their canonical guest path/namespace context until this call
+ * returns, including failure. A successful opener writes its admitted image ID
+ * to out_image; descendants receive that exact ID, not a SONAME-derived key.
+ * Zero is allowed for callers whose policy requires no per-image context.
+ * Repeated admissions of the same selected image must return the same ID.
+ * Every non-provider dependency edge is admitted, including cycles. The closed
+ * graph rejects a duplicate SONAME with a different ID or file identity.
+ * IDs are not retained by the returned byte graph.
+ * This does not implement cross-namespace duplicate-SONAME identity. */
+DarwinArtElfStatus darwin_art_elf_discover_admitted_graph(
+    int root_fd, uint64_t root_image, const uint8_t* root_name, size_t root_length,
+    const char* const* providers, size_t provider_count,
+    int (*open_dependency)(void*, uint64_t parent_image, const char* needed_by,
+                           const char* name, const char* raw_runpath,
+                           uint64_t* out_image), void* context,
+    int* out_is_elf, DarwinArtElfDiscoveredGraph** out_graph, DarwinArtElfErrorBuffer* error);
+/* Per-edge alternative without provider-name bypass. Callback 0 transfers
+ * kind=1: fd>=0, resident/release=NULL; kind=2: fd=-1, live resident+release.
+ * image is a stable nonzero identity. Nonzero callback result transfers nothing.
+ * Release must not unwind and remains callable through graph destruction.
+ * All root/file inputs must remain immutable during discovery. This remains
+ * a closed SONAME graph: different identities under one name are rejected. */
+typedef struct DarwinArtElfAdmission {
+  uint32_t kind;
+  int32_t fd;
+  uint64_t image;
+  void* resident;
+  void (*release)(void*);
+} DarwinArtElfAdmission;
+DarwinArtElfStatus darwin_art_elf_discover_resident_graph(
+    int root_fd, uint64_t root_image, const uint8_t* root_name, size_t root_length,
+    int (*admit)(void*, uint64_t, const char*, const char*, const char*, DarwinArtElfAdmission*),
+    void* context, int* out_is_elf, DarwinArtElfDiscoveredGraph** out_graph,
+    DarwinArtElfErrorBuffer* error);
 DarwinArtElfStatus darwin_art_elf_discovered_graph_sources(
     const DarwinArtElfDiscoveredGraph* graph,
     const DarwinArtElfGraphSource** out_sources,
     size_t* out_count,
     DarwinArtElfErrorBuffer* error);
+typedef struct DarwinArtElfFileIdentity { uint64_t device, inode, offset; } DarwinArtElfFileIdentity;
+// Exact retained fd identity; current whole-file discovery has offset=0.
+DarwinArtElfStatus darwin_art_elf_discovered_graph_file_identity(
+    const DarwinArtElfDiscoveredGraph*, size_t index, DarwinArtElfFileIdentity*, DarwinArtElfErrorBuffer*);
+/* Source index matches discovered_graph_sources. Returns the original caller
+ * admission ID, not a namespace ID or permission grant. Output reset on error.
+ * Resolve/copy placement before destroying the caller's discovery context. */
+DarwinArtElfStatus darwin_art_elf_discovered_graph_source_image(
+    const DarwinArtElfDiscoveredGraph* graph, size_t index, uint64_t* output,
+    DarwinArtElfErrorBuffer* error);
+/* Extended discovery. Metadata returns ordered DT_NEEDED array/count, borrowed
+ * while the transferred resident lease lives (not callback-local storage).
+ * Nonzero fails discovery and releases leases; zero count permits NULL array.
+ * NULL callback preserves legacy leaf-only residents. No visibility grant. */
+DarwinArtElfStatus darwin_art_elf_discover_resident_graph_with_edges(
+    int root_fd, uint64_t root_image, const uint8_t* root_name, size_t root_length,
+    int (*admit)(void*, uint64_t, const char*, const char*, const char*, DarwinArtElfAdmission*),
+    int (*metadata)(void*, void* resident, const char* const** names, size_t* count),
+    void* context, int* out_is_elf, DarwinArtElfDiscoveredGraph** out_graph,
+    DarwinArtElfErrorBuffer* error);
+/* Native residents admitted by discover_resident_graph. The returned name and
+ * resident are borrowed: do not release them. Keep the discovered graph alive
+ * throughout resolution/use, or retain a separate owner using its native API.
+ * Invalid index/graph clears outputs and returns INVALID_ARGUMENT. */
+DarwinArtElfStatus darwin_art_elf_discovered_graph_resident_count(
+    const DarwinArtElfDiscoveredGraph* graph, size_t* count,
+    DarwinArtElfErrorBuffer* error);
+DarwinArtElfStatus darwin_art_elf_discovered_graph_resident(
+    const DarwinArtElfDiscoveredGraph* graph, size_t index,
+    const char** name, uint64_t* image, void** resident,
+    DarwinArtElfErrorBuffer* error);
+
 void darwin_art_elf_discovered_graph_destroy(
     DarwinArtElfDiscoveredGraph** graph);
 
@@ -207,6 +307,161 @@ DarwinArtElfStatus darwin_art_elf_graph_load_with_lifecycle(
     const DarwinArtElfLifecycleCallbacks* lifecycle,
     DarwinArtElfGraphHandle** out_handle,
     DarwinArtElfErrorBuffer* error);
+
+typedef struct DarwinArtElfGlobalSource {
+  // Owning graph or borrowed read-only selected-image source. A source returned
+  // by selected_image_source may only be used for global input/selection of its
+  // own SONAME, not graph initialize/finalize/clone or unrelated member access.
+  const DarwinArtElfGraphHandle* graph;
+  const char* soname;
+} DarwinArtElfGlobalSource;
+typedef struct DarwinArtElfSelectedImage DarwinArtElfSelectedImage;
+// Synchronous original local-group finalizers only; no unmap/dependency close.
+// Caller must establish eligibility, complete parent ownership and quiescence;
+// no later library-state use is permitted. This is not public guest dlclose.
+DarwinArtElfStatus darwin_art_elf_selected_group_finalize(
+    const DarwinArtElfSelectedImage*, DarwinArtElfErrorBuffer*);
+// Retain the original declared ELF dependency without searching a namespace.
+// Native/ambiguous/unavailable edges fail and clear output. Release the result
+// with selected_image_release; this is not an Android dlopen reference.
+DarwinArtElfStatus darwin_art_elf_selected_dependency_image(
+    const DarwinArtElfSelectedImage* parent, const char* name,
+    DarwinArtElfSelectedImage** output, DarwinArtElfErrorBuffer* error);
+/* Original local-group identity in this loader instance; never an address or
+ * a persistent handle. No reference counting or close eligibility implied. */
+DarwinArtElfStatus darwin_art_elf_selected_group_info(const DarwinArtElfSelectedImage*,
+    uint64_t* id, uint8_t* is_root, DarwinArtElfErrorBuffer*);
+// Typed owner suitable for a namespace payload. Retains its mapping group and
+// dependencies, not the whole original graph; only
+// selected image's symbols are offered via its borrowed global source.
+DarwinArtElfStatus darwin_art_elf_select_image(const DarwinArtElfGraphHandle*,
+    const char* soname, DarwinArtElfSelectedImage**, DarwinArtElfErrorBuffer*);
+DarwinArtElfStatus darwin_art_elf_selected_image_clone(const DarwinArtElfSelectedImage*,
+    DarwinArtElfSelectedImage**, DarwinArtElfErrorBuffer*);
+DarwinArtElfStatus darwin_art_elf_selected_image_source(const DarwinArtElfSelectedImage*,
+    DarwinArtElfGlobalSource*, uint64_t* flags_1, DarwinArtElfErrorBuffer*);
+void darwin_art_elf_selected_image_release(DarwinArtElfSelectedImage*);
+/* Original PT_LOAD memory coverage only; query address is never dereferenced.
+ * Excludes mapping holes, rounding and other images retained as dependencies. */
+DarwinArtElfStatus darwin_art_elf_selected_contains_address(const DarwinArtElfSelectedImage*,
+    uintptr_t address, int32_t* contains, DarwinArtElfErrorBuffer*);
+/* Exact executable PT_LOAD range [begin,end) containing address in this
+ * retained image. Data segments, mapping holes and other images return
+ * DARWIN_ART_ELF_SYMBOL_NOT_FOUND with both outputs cleared. */
+DarwinArtElfStatus darwin_art_elf_selected_executable_range(
+    const DarwinArtElfSelectedImage*, uintptr_t address, uintptr_t* begin,
+    uintptr_t* end, DarwinArtElfErrorBuffer* error);
+/* Exact retained mapping identity, not SONAME or file-byte equality. */
+DarwinArtElfStatus darwin_art_elf_selected_image_same(const DarwinArtElfSelectedImage*,
+    const DarwinArtElfSelectedImage*, int32_t* same, DarwinArtElfErrorBuffer*);
+/* Compare candidate against parent's retained DT_NEEDED ELF owner. Unknown or
+ * non-ELF original identity is an error, never guessed from its SONAME. */
+DarwinArtElfStatus darwin_art_elf_selected_dependency_same(const DarwinArtElfSelectedImage*,
+    const char* needed, const DarwinArtElfSelectedImage*, int32_t* same, DarwinArtElfErrorBuffer*);
+/* Original retained native callback result for declared DT_NEEDED only.
+ * Borrowed until selected image release; unavailable identity is an error. */
+DarwinArtElfStatus darwin_art_elf_selected_native_dependency(const DarwinArtElfSelectedImage*,
+    const char* needed, void** borrowed_owner, DarwinArtElfErrorBuffer*);
+/* DT_NEEDED in original order. Borrowed until image release; NULL at end.
+ * Enumeration grants neither namespace access nor global symbol visibility. */
+DarwinArtElfStatus darwin_art_elf_selected_image_needed(const DarwinArtElfSelectedImage*,
+    size_t index, const char** name, DarwinArtElfErrorBuffer*);
+/* Lookup only the selected image. Null version selects a non-hidden export.
+ * OK with address zero means absent. Returned address is borrowed from image. */
+DarwinArtElfStatus darwin_art_elf_selected_image_lookup(const DarwinArtElfSelectedImage*,
+    const char* symbol, const char* version, uintptr_t* address, DarwinArtElfErrorBuffer*);
+/* Android dynamic-linker export matching for the selected image. Same bounded
+ * inputs and output contract as selected_image_lookup, but applies Android's
+ * version metadata rules. OK with address zero means an Android lookup miss. */
+DarwinArtElfStatus darwin_art_elf_selected_image_lookup_android(
+    const DarwinArtElfSelectedImage*, const char* symbol, const char* version,
+    uintptr_t* address, DarwinArtElfErrorBuffer*);
+/* Retained original local-group root from this image's graph, not namespace
+ * re-search. Identity only; does not increment Android dlopen counts or grant
+ * independent group-unmap eligibility. Release with selected_image_release. */
+DarwinArtElfStatus darwin_art_elf_selected_group_root(const DarwinArtElfSelectedImage*,
+    DarwinArtElfSelectedImage**, DarwinArtElfErrorBuffer*);
+/* Global array is ordered and borrowed during load only. Selected graphs are
+ * retained by the result through finalizers/unload; owner locks are released
+ * before callbacks. No private dependency exports are implicitly granted. */
+DarwinArtElfStatus darwin_art_elf_graph_load_with_globals(
+    const char* root_soname, const DarwinArtElfGraphSource* sources, size_t source_count,
+    const char* const* provider_sonames, size_t provider_count,
+    const DarwinArtElfLoadOptions* options, const DarwinArtElfLifecycleCallbacks* lifecycle,
+    const DarwinArtElfGlobalSource* globals, size_t global_count,
+    DarwinArtElfGraphHandle** out_handle, DarwinArtElfErrorBuffer* error);
+
+typedef struct DarwinArtElfImagePlacement {
+  uint64_t image, namespace_id;
+} DarwinArtElfImagePlacement;
+typedef struct DarwinArtElfNamespaceScope {
+  uint64_t namespace_id;
+  const uint64_t* visible_images;
+  size_t visible_count;
+  const size_t* global_indices;
+  size_t global_count;
+} DarwinArtElfNamespaceScope;
+/* Copies complete trusted linker decisions by original admitted image ID.
+ * Discovery exclusively borrowed. Failure preserves the previous scope set.
+ * global_count must match the subsequent load's ordered global-image array. */
+DarwinArtElfStatus darwin_art_elf_discovered_graph_set_namespace_scopes(
+    DarwinArtElfDiscoveredGraph*, const DarwinArtElfImagePlacement*, size_t placement_count,
+    const DarwinArtElfNamespaceScope*, size_t scope_count, size_t global_count,
+    DarwinArtElfErrorBuffer*);
+/* Snapshot the linker-owned 16KiB app-compat decision for this discovered
+ * graph. Discovery remains metadata-only; the decision is applied to every
+ * image only when the graph is linked. */
+DarwinArtElfStatus darwin_art_elf_discovered_graph_set_16kb_appcompat(
+    DarwinArtElfDiscoveredGraph*, bool enabled, DarwinArtElfErrorBuffer*);
+
+/* Borrowed owner record. retain returns an independently retained resource or
+ * NULL on failure. release must be thread-safe, infallible and must not unwind.
+ * A retained owner survives graph clones, selected/global images and finalizers.
+ * Retained prefix is released on load/retain failure; input ownership unchanged.
+ * These records grant lifetime only, not symbol lookup or namespace admission. */
+typedef struct DarwinArtElfNativeOwner {
+  void* context;
+  void* (*retain)(void*);
+  void (*release)(void*);
+} DarwinArtElfNativeOwner;
+/* Load admitted sources and resident edges together. Discovery stays borrowed;
+ * owners must match resident order/count and exact admitted context pointers.
+ * Retained results preserve named identity through finalizers and graph clones. */
+DarwinArtElfStatus darwin_art_elf_discovered_graph_load_with_owners(
+    const DarwinArtElfDiscoveredGraph*, const DarwinArtElfLoadOptions*,
+    const DarwinArtElfLifecycleCallbacks*, const DarwinArtElfGlobalSource*, size_t global_count,
+    const DarwinArtElfNativeOwner*, size_t owner_count,
+    DarwinArtElfGraphHandle**, DarwinArtElfErrorBuffer*);
+/* Same inputs, but constructors deferred. Caller owns publication/rollback. */
+DarwinArtElfStatus darwin_art_elf_discovered_graph_link_with_owners(
+    const DarwinArtElfDiscoveredGraph*, const DarwinArtElfLoadOptions*,
+    const DarwinArtElfLifecycleCallbacks*, const DarwinArtElfGlobalSource*, size_t global_count,
+    const DarwinArtElfNativeOwner*, size_t owner_count,
+    DarwinArtElfGraphHandle**, DarwinArtElfErrorBuffer*);
+/* Same discovery/resident identities, but lifecycle context is owned by all
+ * resulting mappings. Source lifecycle handle can be destroyed after return. */
+DarwinArtElfStatus darwin_art_elf_discovered_graph_link_with_owned_lifecycle(
+    const DarwinArtElfDiscoveredGraph*, const DarwinArtElfLoadOptions*,
+    const DarwinArtElfLifecycleOwner*, const DarwinArtElfGlobalSource*, size_t global_count,
+    const DarwinArtElfNativeOwner*, size_t owner_count,
+    DarwinArtElfGraphHandle**, DarwinArtElfErrorBuffer*);
+/* Clones graph under lock then releases lock before constructors. Duplicate
+ * initialization is an error; linker owner handles competing/reentrant opens. */
+DarwinArtElfStatus darwin_art_elf_graph_initialize(
+    const DarwinArtElfGraphHandle*, DarwinArtElfErrorBuffer*);
+/* Destructor phase only, not dlclose. Owner must establish group eligibility,
+ * serialize execution, retain mappings/registry during callbacks, and prohibit
+ * later use of torn-down library state. Repeated calls do not repeat callbacks.
+ * No graph mutex spans guest code; mapping release remains a separate phase. */
+DarwinArtElfStatus darwin_art_elf_graph_finalize(
+    const DarwinArtElfGraphHandle*, DarwinArtElfErrorBuffer*);
+DarwinArtElfStatus darwin_art_elf_graph_load_with_owners(
+    const char* root_soname, const DarwinArtElfGraphSource* sources, size_t source_count,
+    const char* const* provider_sonames, size_t provider_count,
+    const DarwinArtElfLoadOptions* options, const DarwinArtElfLifecycleCallbacks* lifecycle,
+    const DarwinArtElfGlobalSource* globals, size_t global_count,
+    const DarwinArtElfNativeOwner* owners, size_t owner_count,
+    DarwinArtElfGraphHandle** out_handle, DarwinArtElfErrorBuffer* error);
 
 DarwinArtElfStatus darwin_art_elf_graph_lookup_root(
     DarwinArtElfGraphHandle* handle,

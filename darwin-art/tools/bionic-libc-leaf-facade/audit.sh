@@ -52,7 +52,7 @@ diff -u "$temp_root/expected-undefined" "$temp_root/undefined" ||
 "$ar" rcs "$temp_root/libdarwin-art-bionic-libc-leaf.a" "$temp_root/leaf.o"
 
 definitions="$(nm -gU "$temp_root/leaf.o")"
-for symbol in atoi atol bsearch isprint memchr memcmp memcpy memmove memset qsort strcasecmp strcat strchr \
+for symbol in atoi atol bsearch isprint memchr memcmp memcpy memmove memset memset_explicit qsort strcasecmp strcat strchr \
               strcmp strcpy strcspn strlcat strlen strncat strncmp strncpy strpbrk \
               strrchr strspn strstr wcslen wmemchr wmemcmp wmemcpy wmemmove wmemset; do
   grep -F " _darwin_art_bionic_$symbol" <<<"$definitions" >/dev/null || fail "missing facade definition $symbol"
@@ -69,4 +69,4 @@ fi
 "$cc" "${flags[@]}" -fsanitize=address,undefined "$script_dir/probes/differential.c" \
   "$script_dir/src/leaf.c" -o "$temp_root/differential-sanitized"
 "$temp_root/differential-sanitized" >/dev/null
-echo 'bionic-libc-leaf-facade: PASS functions=159 object=1 bindings=66 dependencies=allocator+stack-check+Darwin-TLV'
+echo 'bionic-libc-leaf-facade: PASS functions=159 object=1 bindings=67 dependencies=allocator+stack-check+Darwin-TLV'

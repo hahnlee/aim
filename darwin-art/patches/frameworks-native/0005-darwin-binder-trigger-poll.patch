@@ -1,0 +1,10 @@
+--- a/libs/binder/FdTrigger.cpp
++++ b/libs/binder/FdTrigger.cpp
+@@ -71,1 +71,6 @@
+-            {.fd = mRead.get(), .events = 0, .revents = 0},
++#if defined(__APPLE__)
++            // Darwin ignores events=0, including EOF on the shutdown pipe.
++            {.fd = mRead.get(), .events = POLLIN, .revents = 0},
++#else
++            {.fd = mRead.get(), .events = 0, .revents = 0},
++#endif

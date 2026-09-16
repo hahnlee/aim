@@ -1,0 +1,18 @@
+[package]
+name = "darwin-art-debugstore"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+crossbeam-queue = "0.3"
+parking_lot = "0.12"
+cxx = "=1.0.194"
+
+[build-dependencies]
+cxx-build = "=1.0.194"

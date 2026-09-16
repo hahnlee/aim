@@ -7,6 +7,7 @@ import csv
 import pathlib
 import re
 import sys
+from default_versions import load_defaults
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -132,6 +133,10 @@ def main() -> int:
     )
     if len(liblog) != 19 or len(set(liblog)) != 19:
         raise SystemExit("liblog provider surface is not exactly 19 unique symbols")
+    defaults = load_defaults(HERE)
+    liblog_versions = defaults["liblog.so"]
+    if any(symbol not in liblog_versions for symbol in liblog):
+        raise SystemExit("liblog provider export absent from original ELF metadata")
 
     owner_enum = {
         "leaf": "DARWIN_ART_BIONIC_PROVIDER_LEAF",
@@ -186,7 +191,8 @@ def main() -> int:
           symbol, "LIBC", owner) for symbol, owner in claimed.items()]
         + [(row["soname"], row["symbol"], row["version"], row["owner"])
            for row in extensions]
-        + [("liblog.so", symbol, "", "liblog") for symbol in liblog]
+        + [("liblog.so", symbol, liblog_versions[symbol], "liblog")
+           for symbol in liblog]
     )
     unsupported = sorted(
         (symbol, row["category"], row["rationale"])
@@ -206,10 +212,18 @@ def main() -> int:
         writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
         writer.writerow(("symbol", "class", "reason"))
         writer.writerows(unsupported)
+    with (output / "liblog_versions.inc").open("w") as stream:
+        for symbol in sorted(liblog):
+            stream.write(f'    {{"{symbol}", "{liblog_versions[symbol]}"}},\n')
     with (output / "ownership.inc").open("w") as stream:
         for soname, symbol, version, owner in ownership:
+            # A known original definition selects only its real default version.
+            # Other providers retain explicit unversioned routes until their
+            # own original-image metadata is imported.
+            default = (defaults[soname].get(symbol) == version if soname in defaults
+                       else version == "")
             stream.write(
-                f'    {{"{soname}", "{symbol}", "{version}", {owner_enum[owner]}}},\n'
+                f'    {{"{soname}", "{symbol}", "{version}", {owner_enum[owner]}, {str(default).lower()}}},\n'
             )
     with (output / "unsupported_symbols.inc").open("w") as stream:
         for symbol, _category, _reason in unsupported:

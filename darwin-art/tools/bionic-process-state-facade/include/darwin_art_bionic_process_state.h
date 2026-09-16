@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,7 +17,74 @@ typedef int (*DarwinArtBionicSigchainOwnsSignal)(int signal_number);
 typedef void (*DarwinArtBionicEnsureFrontOfChain)(int signal_number);
 
 char* darwin_art_bionic_getenv(const char* name);
+int darwin_art_bionic_android_get_device_api_level(void);
 int darwin_art_bionic_process_state_process_install(void);
+/* Read-only: 1 installed, 0 absent, -1 owner failure. No lifetime transfer. */
+int darwin_art_bionic_process_state_is_installed(void);
+/* Host/service-owned initialization, not an Android app API. Every byte is
+ * copied before return; no defaults are fabricated. Call before starting ART,
+ * and uninstall only after all process users have quiesced. Returns 0 or -1. */
+typedef struct DarwinArtProcessSnapshotEntry {
+  const uint8_t* name;
+  size_t name_size;
+  const uint8_t* value;
+  size_t value_size;
+} DarwinArtProcessSnapshotEntry;
+typedef struct DarwinArtProcessSnapshotConfigV1 {
+  uint32_t abi_version; /* 1 */
+  uint32_t struct_size;
+  const DarwinArtProcessSnapshotEntry* environment;
+  size_t environment_count;
+  const DarwinArtProcessSnapshotEntry* properties;
+  size_t property_count;
+  uint64_t page_size;
+  uint64_t hwcap;
+  uint64_t hwcap2;
+  uint8_t secure;
+  uint8_t reserved[7]; /* zero */
+  uint8_t random[16]; /* supplied by the process launch authority */
+} DarwinArtProcessSnapshotConfigV1;
+typedef DarwinArtProcessSnapshotConfigV1 DarwinArtProcessSnapshotConfig;
+typedef struct DarwinArtProcessCredentialsConfig {
+  uint32_t uid;
+  uint32_t euid;
+  uint32_t suid;
+  uint32_t gid;
+  uint32_t egid;
+  uint32_t sgid;
+  const uint32_t* supplementary_groups;
+  size_t supplementary_group_count;
+  uint64_t permitted;
+  uint64_t effective;
+  uint64_t inheritable;
+} DarwinArtProcessCredentialsConfig;
+typedef struct DarwinArtProcessSnapshotConfigV2 {
+  DarwinArtProcessSnapshotConfigV1 base;
+  DarwinArtProcessCredentialsConfig credentials;
+} DarwinArtProcessSnapshotConfigV2;
+int darwin_art_bionic_process_state_install_configured(
+    const DarwinArtProcessSnapshotConfig* config);
+/* Checked readback from the active trusted snapshot. V1 snapshots have no
+ * credentials and return -1. On a too-small group buffer, no output field or
+ * group is written and the function returns -1 with Android E2BIG. */
+typedef struct DarwinArtProcessCredentialsOutput {
+  uint32_t uid;
+  uint32_t euid;
+  uint32_t suid;
+  uint32_t gid;
+  uint32_t egid;
+  uint32_t sgid;
+  size_t supplementary_group_count;
+  uint64_t permitted;
+  uint64_t effective;
+  uint64_t inheritable;
+} DarwinArtProcessCredentialsOutput;
+int darwin_art_bionic_process_state_read_credentials_core(
+    DarwinArtProcessCredentialsOutput* output, uint32_t* supplementary_groups,
+    size_t group_capacity);
+/* Scalar identity readback is independent of supplementary-group capacity. */
+int darwin_art_bionic_process_state_read_credential_ids_core(
+    DarwinArtProcessCredentialsOutput* output);
 int darwin_art_bionic_process_state_process_uninstall(void);
 void darwin_art_bionic_process_state_bind_jit_fault_recovery(
     DarwinArtBionicJitFaultRecovery recovery);
@@ -26,6 +95,22 @@ void darwin_art_bionic_process_state_bind_sigchain(
     DarwinArtBionicEnsureFrontOfChain ensure_front);
 int darwin_art_bionic___system_property_get(const char* name, char* value);
 const void* darwin_art_bionic___system_property_find(const char* name);
+typedef void (*DarwinArtBionicPropertyForeachCallback)(const void* property,
+                                                        void* cookie);
+int darwin_art_bionic___system_property_foreach(
+    DarwinArtBionicPropertyForeachCallback callback, void* cookie);
+uint32_t darwin_art_bionic___system_property_serial(const void* property);
+uint32_t darwin_art_bionic___system_property_area_serial(void);
+uint32_t darwin_art_bionic_process_property_serial_core(const void* property);
+uint32_t darwin_art_bionic_process_property_area_serial_core(void);
+typedef struct DarwinArtPropertyWaitTimeout {
+  int64_t seconds;
+  int64_t nanoseconds;
+} DarwinArtPropertyWaitTimeout;
+int darwin_art_bionic_process_property_wait_core(const void*, uint32_t, uint32_t*,
+                                                const DarwinArtPropertyWaitTimeout*);
+bool darwin_art_bionic___system_property_wait(const void*, uint32_t, uint32_t*,
+                                            const struct timespec*);
 int darwin_art_bionic___system_property_read(const void* property, char* name,
                                              char* value);
 void darwin_art_bionic___system_property_read_callback(

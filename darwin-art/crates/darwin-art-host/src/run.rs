@@ -12,6 +12,8 @@ use crate::runtime::HostRuntime;
 #[cfg(target_os = "macos")]
 use crate::teardown::RuntimeShutdownGuard;
 #[cfg(target_os = "macos")]
+use darwin_art_binder_process::{BinderFdEndpoint, BrokerApi};
+#[cfg(target_os = "macos")]
 use darwin_art_engine::EngineSession;
 use darwin_art_engine_sys::AppKitPumpEventsFn;
 use darwin_art_runtime::{ProviderBridge, ProviderKind, Subsystem};
@@ -20,13 +22,9 @@ use std::thread;
 use std::time::Instant;
 
 #[cfg(target_os = "macos")]
-use std::fs::{File, OpenOptions};
+use crate::process_filesystem::open_filesystem_authority;
 #[cfg(target_os = "macos")]
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "macos")]
-use std::os::unix::fs::OpenOptionsExt;
-#[cfg(target_os = "macos")]
-use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
@@ -41,36 +39,6 @@ fn exit_android_process(status: i32) -> ! {
     // Flush stdio explicitly because _exit intentionally skips libc teardown.
     unsafe { libc::fflush(std::ptr::null_mut()) };
     unsafe { _exit(status) }
-}
-
-#[cfg(target_os = "macos")]
-fn open_filesystem_authority() -> Result<Option<File>, HostError> {
-    let root = std::env::var_os("DARWIN_ART_ANDROID_FILESYSTEM_ROOT")
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            std::env::var_os("DARWIN_ART_ANDROID_SYSTEM_ROOT").filter(|value| !value.is_empty())
-        });
-    let Some(root) = root else {
-        return Ok(None);
-    };
-    let root = PathBuf::from(root);
-    if !root.is_absolute() {
-        return Err(HostError::HostService(format!(
-            "Android filesystem authority must be absolute: {}",
-            root.display()
-        )));
-    }
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(&root)
-        .map(Some)
-        .map_err(|error| {
-            HostError::HostService(format!(
-                "open Android filesystem authority {}: {error}",
-                root.display()
-            ))
-        })
 }
 
 pub fn run(options: &RunOptions) -> Result<HostOutcome, HostError> {
@@ -200,7 +168,11 @@ fn run_owner(
 
     #[cfg(target_os = "macos")]
     {
-        if options.visible_seconds > 0.0 {
+        let debug_startup = std::env::var_os("DARWIN_ART_DEBUG_PROCESS_CREDENTIALS").is_some();
+        // Only the bounded native test loop consumes this cooperative flag.
+        // ActivityThread owns an unbounded Android Looper; swallowing SIGTERM
+        // there prevents the process supervisor from terminating the app.
+        if options.visible_seconds > 0.0 && !options.terminate_android_process {
             crate::process_signal::install().map_err(|error| {
                 HostError::HostService(format!("install SIGTERM handler: {error}"))
             })?;
@@ -215,7 +187,11 @@ fn run_owner(
         let mut shutdown_guard =
             RuntimeShutdownGuard::new(&mut runtime, options.terminate_android_process);
 
-        let bootstrap = attach_runtime(shutdown_guard.runtime(), &options.library)?;
+        let bootstrap = attach_runtime(shutdown_guard.runtime(), &options.library)
+            .inspect_err(|error| eprintln!("ART host bootstrap failed: {error}"))?;
+        if debug_startup {
+            eprintln!("ART process credentials: runtime bootstrap complete");
+        }
         let graphics_attached = bootstrap.graphics_attached;
         if let (Some(sender), Some(engine)) = (appkit_sender, shutdown_guard.runtime().engine()) {
             sender
@@ -245,6 +221,30 @@ fn run_owner(
         {
             return Err(HostError::RuntimeFailed(error.status() as i32));
         }
+        if debug_startup {
+            eprintln!("ART process credentials: subsystem owners installed");
+        }
+
+        // Allocate only the desktop scanout target before ActivityThread
+        // enters its permanent Looper. Android's ViewRoot/BLAST/HWUI path
+        // remains the sole producer of application pixels.
+        let app_display = {
+            let engine = shutdown_guard
+                .runtime()
+                .engine()
+                .ok_or_else(|| HostError::RuntimeFailed(-1))?;
+            crate::app_display::create(engine, options)?
+        };
+        if let Some(surface) = app_display {
+            shutdown_guard
+                .runtime()
+                .attach_surface(surface)
+                .map_err(|_| HostError::RuntimeFailed(-1))?;
+            shutdown_guard
+                .runtime()
+                .install_subsystem(Subsystem::Surface)
+                .map_err(|error| HostError::RuntimeFailed(error.status() as i32))?;
+        }
 
         // The native entrypoint receives a Rust-owned lifecycle bridge. It is
         // kept alive through the later shutdown call, so the C++ probe only
@@ -266,6 +266,11 @@ fn run_owner(
         // synchronous Android process invocation; the native facade owns its
         // own duplicate until the Rust process lease is released.
         let filesystem_authority = open_filesystem_authority()?;
+        // AOSP application processes retain ProcessState and its Binder pool
+        // until the OS reaps the zygote child. These outer owners therefore
+        // live through ART, HWUI and the GPU loop and are reclaimed by `_exit`.
+        let mut _binder_endpoint = None;
+        let mut _binder_dispatcher = None;
         let process = {
             let runtime = shutdown_guard.runtime();
             let Some(provider) = runtime.provider() else {
@@ -275,7 +280,11 @@ fn run_owner(
             if let Some(authority) = filesystem_authority.as_ref() {
                 provider
                     .acquire_process_lease(ProviderKind::Filesystem, authority.as_raw_fd())
+                    .inspect_err(|error| eprintln!("ART host filesystem lease failed: {error}"))
                     .map_err(HostError::RuntimeFailed)?;
+            }
+            if debug_startup {
+                eprintln!("ART process credentials: filesystem authority installed");
             }
             // Socket and pipe descriptors can arrive in the first Binder
             // transaction that starts an Android service process, before its
@@ -287,6 +296,85 @@ fn run_owner(
             provider
                 .acquire_process_lease(ProviderKind::Network, -1)
                 .map_err(HostError::RuntimeFailed)?;
+            if debug_startup {
+                eprintln!("ART process credentials: network authority installed");
+            }
+            // ProcessState maps the Binder receive arena before an APK loads
+            // its first native library. Keep Android VM ownership live from
+            // process bootstrap so central Binder/ashmem descriptors resolve
+            // through the same Bionic mapping boundary at that earlier point.
+            // Later native-library loads borrow this Rust-counted lease.
+            provider
+                .acquire_process_lease(ProviderKind::Vm, -1)
+                .map_err(HostError::RuntimeFailed)?;
+            if debug_startup {
+                eprintln!("ART process credentials: VM authority installed");
+            }
+            if options.terminate_android_process {
+                let socket = std::env::var_os(darwin_art_profile::PROFILE_SOCKET_ENV)
+                    .map(std::path::PathBuf::from)
+                    .ok_or_else(|| {
+                        HostError::HostService(
+                            "Android app process has no profile Binder authority socket".into(),
+                        )
+                    })?;
+                let (client, dispatcher) = darwin_art_binder_process::connect_process(
+                    &socket,
+                    std::process::id() as i32,
+                )
+                .map_err(|error| {
+                    if debug_startup {
+                        eprintln!(
+                            "ART process credentials: Binder authority connect failed: {error:?}"
+                        );
+                    }
+                    HostError::HostService(format!("connect Binder authority: {error:?}"))
+                })?;
+                if debug_startup {
+                    eprintln!("ART process credentials: Binder authority connected");
+                }
+                let reader = std::thread::Builder::new()
+                    .name("darwin-art-binder-dispatch".into())
+                    .spawn(move || {
+                        let result = dispatcher.run();
+                        if let Err(error) = &result {
+                            eprintln!("ART Binder authority dispatcher stopped: {error:?}");
+                        }
+                        result
+                    })
+                    .map_err(|error| {
+                        HostError::HostService(format!("spawn Binder dispatcher: {error}"))
+                    })?;
+                client.get_context_manager().map_err(|error| {
+                    HostError::HostService(format!("resolve Binder context manager: {error:?}"))
+                })?;
+                let broker = runtime
+                    .engine()
+                    .ok_or_else(|| HostError::RuntimeFailed(-1))?
+                    .binder_broker_symbols();
+                _binder_endpoint = Some(
+                    BinderFdEndpoint::install(
+                        client,
+                        BrokerApi {
+                            install_owner: broker.install_owner,
+                            publish: broker.publish,
+                            uninstall_owner: broker.uninstall_owner,
+                            descriptor: darwin_art_binder_process::DescriptorApi {
+                                export: broker.export_file,
+                                import: broker.import_file,
+                                close: broker.close_file,
+                            },
+                        },
+                    )
+                    .map_err(|error| {
+                        HostError::HostService(format!("install Binder FD endpoint: {error:?}"))
+                    })?,
+                );
+                _binder_dispatcher = Some(reader);
+                if debug_startup {
+                    eprintln!("ART process credentials: Binder endpoint installed");
+                }
+            }
             let request = match build_process_request(
                 options,
                 ptr::from_mut(&mut frame_host).cast(),
@@ -310,6 +398,9 @@ fn run_owner(
                 let _ = shutdown_guard.shutdown();
                 return Err(HostError::RuntimeFailed(-1));
             };
+            if debug_startup {
+                eprintln!("ART process credentials: enter ART process request");
+            }
             match engine.run_request(&request) {
                 Ok(result) => result,
                 Err(error) => {

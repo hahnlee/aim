@@ -1,0 +1,6 @@
+Android 16 API 36 PS16K system image, com.android.runtime APEX
+Guest path: /apex/com.android.runtime/lib64/bionic/libc.so
+ELF SHA256: faa44ff59c5bc4cfc5413868bed9868879d2a1ad87dbb89b44121810c469dc8c
+TSV SHA256: d9f5e1e4ef2b12316163ae66dacb2cec7ecc2d57963cce4ca274cf607597c647
+Extractor: extract_default_versions.py with NDK 28.2.13676358 llvm-readelf
+Only defined visible default dynamic exports; no inferred compatibility aliases.

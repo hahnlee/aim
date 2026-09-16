@@ -19,6 +19,10 @@ iteration. The device `AndroidRuntime.cpp` has the fixed sequence SystemClock,
 CharsetUtils, EventLog, Log, then MemoryIntArray. The independent gate verifies
 the host property-driven dispatch contract and the device table ordering.
 
+DarwinART invokes the complete registrar from the process-wide framework
+registration phase, before Binder can initialize StrictMode. It is not owned
+by the later AssetManager/resource installation phase.
+
 The exact TU's Darwin link dependency is the pinned AOSP host `liblog` archive,
 which provides `__android_log_assert`, `__android_log_buf_write`,
 `__android_log_is_loggable`, and `__android_log_print`. Its libutils, libbase,

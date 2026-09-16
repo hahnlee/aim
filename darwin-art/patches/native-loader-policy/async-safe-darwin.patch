@@ -1,0 +1,27 @@
+--- a/async_safe_log.cpp
++++ b/async_safe_log.cpp
+@@ -33,1 +33,3 @@
++#if !defined(__APPLE__)
+ #include <linux/net.h>
++#endif
+@@ -54,1 +56,2 @@
++#if !defined(__APPLE__)
+ #pragma GCC poison close
+@@ -68,0 +72,1 @@
++#endif
+@@ -498,1 +503,2 @@
++#if !defined(__APPLE__)
+ static int open_log_socket() {
+@@ -530,0 +536,1 @@
++#endif
+@@ -531,1 +538,7 @@
+ int async_safe_write_log(int priority, const char* tag, const char* msg) {
++#if defined(__APPLE__)
++  // Native diagnostics use the inherited host log descriptor, not logd's
++  // Linux wire protocol. Keep the upstream allocation-free writev sink.
++  (void)priority;
++  return write_stderr(tag, msg);
++#else
+@@ -562,1 +575,2 @@
+   return result;
++#endif

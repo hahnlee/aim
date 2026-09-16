@@ -361,10 +361,10 @@ int main(int argc, char** argv) {
           "unexpected first-generation cache size");
 
   context.active = false;
-  Require(context.owner_leases == 0, "image close raced an owner lease");
+  Require(context.owner_leases == 3, "cached entries lost their image leases");
   const size_t retired = darwin_art_registered_native_cache_retire_image(
       cache, context.owner.image_id, context.owner.generation);
-  Require(retired == 3 && context.destroys == 3 &&
+  Require(retired == 3 && context.destroys == 3 && context.owner_leases == 0 &&
               darwin_art_registered_native_cache_size(cache) == 0,
           "image retirement did not release exact generation");
   Require(!darwin_art_is_android_function_pointer(
@@ -394,7 +394,7 @@ int main(int argc, char** argv) {
               retired);
 
   darwin_art_registered_native_cache_destroy(cache);
-  Require(context.builds == 4 && context.destroys == 4,
+  Require(context.builds == 4 && context.destroys == 4 && context.owner_leases == 0,
           "cache destroy/build lifecycle mismatch");
   return 0;
 }

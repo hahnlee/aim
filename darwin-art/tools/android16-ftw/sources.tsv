@@ -1,0 +1,7 @@
+local	upstream	sha256
+ftw.cpp	libc/bionic/ftw.cpp	8ffd2e951f8f85d694eda7be831654d33e40cf00fb00819d3b273a867724e1ec
+fts.c	libc/bionic/fts.c	4db7a5819c0024b73e4dd45a3b23c1f25a0dc854125b9b0cf24cfe118bdc02da
+recallocarray.c	libc/upstream-openbsd/lib/libc/stdlib/recallocarray.c	2ceafbd525e571d5bc14c75225905d5a7a3fc1e6a12d9ff0b1fab05010347543
+include/fts.h	libc/include/fts.h	41ffcb284a391c3dd4b40e47277fb53d52f7b5d323bf9b4ed216579459fc8a29
+include/ftw.h	libc/include/ftw.h	5827064dfbc429b3c71d070e3e544455a62c1e371aaae8438fd1e8ba9c15760a
+include/openbsd-compat.h	libc/upstream-openbsd/android/include/openbsd-compat.h	41c247af39f71acb20b41725dca0849b484fbc304da554c91402cfd4f2e1a3c2

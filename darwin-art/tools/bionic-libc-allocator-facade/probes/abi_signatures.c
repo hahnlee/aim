@@ -5,6 +5,7 @@
 typedef void* (*MallocSignature)(size_t);
 typedef void (*FreeSignature)(void*);
 typedef void* (*ReallocSignature)(void*, size_t);
+typedef void* (*ReallocarraySignature)(void*, size_t, size_t);
 typedef int (*PosixMemalignSignature)(void**, size_t, size_t);
 typedef void* (*AlignedAllocSignature)(size_t, size_t);
 
@@ -14,6 +15,9 @@ _Static_assert(_Generic(&darwin_art_bionic_free, FreeSignature: 1, default: 0),
                "free signature drift");
 _Static_assert(_Generic(&darwin_art_bionic_realloc, ReallocSignature: 1, default: 0),
                "realloc signature drift");
+_Static_assert(_Generic(&darwin_art_bionic_reallocarray,
+                        ReallocarraySignature: 1, default: 0),
+               "reallocarray signature drift");
 _Static_assert(_Generic(&darwin_art_bionic_posix_memalign,
                         PosixMemalignSignature: 1, default: 0),
                "posix_memalign signature drift");

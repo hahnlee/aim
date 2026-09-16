@@ -1,0 +1,12 @@
+--- a/apex/android_bitmap.cpp
++++ b/apex/android_bitmap.cpp
+@@ -248,5 +248,8 @@
+     switch (info->format) {
+         case ANDROID_BITMAP_FORMAT_RGBA_8888:
+-            colorType = kN32_SkColorType;
++            // NDK callers supply RGBA bytes regardless of the host's native
++            // Skia N32 order (BGRA on Darwin). Keep this external pixel ABI
++            // explicit instead of changing the renderer's storage format.
++            colorType = kRGBA_8888_SkColorType;
+             break;
+         case ANDROID_BITMAP_FORMAT_RGB_565:

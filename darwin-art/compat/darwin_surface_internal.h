@@ -41,6 +41,9 @@ struct DarwinArtSurface {
   mutable std::mutex backing_mutex;
   uint32_t width = 0;
   uint32_t height = 0;
+  uint32_t logical_width = 0;
+  uint32_t logical_height = 0;
+  bool scale_to_display = false;
   size_t bytes_per_row = 0;
   IOSurfaceRef io_surface = nullptr;
   id<MTLDevice> device = nil;
@@ -67,6 +70,13 @@ struct DarwinArtSurface {
   // the legacy every-tick behavior.
   std::atomic<uint64_t> scanout_last_requested_generation{0};
   std::atomic<uint64_t> scanout_last_requested_embedded_frame{0};
+  // Central SurfaceFlinger can recompose this display because system_server
+  // changed the retained layer tree without an app-owned present fence. A
+  // Darwin notify check token is the platform display-consumer wakeup for
+  // those cross-process compositions; it is polled only at display-clock
+  // edges and therefore cannot call into AppKit from the service process.
+  std::atomic<int> scanout_notification_token{-1};
+  std::atomic<bool> scanout_reimport_backing{false};
   std::atomic<uint64_t> scanout_dirty_skipped{0};
   std::atomic<uint64_t> scanout_present_calls{0};
   std::atomic<int32_t> last_scanout_status{DARWIN_ART_SURFACE_OK};

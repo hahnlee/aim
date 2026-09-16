@@ -2,6 +2,8 @@ use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+mod inventory;
+mod tree;
 
 const TARGET_APEX_ENTRY: &[u8] = b"apex_payload.img";
 const DEFAULT_EXT4_PATH: &str = "/javalib/core-icu4j.jar";
@@ -578,7 +580,7 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} INPUT.apex OUTPUT [INTERNAL_PATH]")
+    format!("usage: {program} INPUT.apex OUTPUT [INTERNAL_PATH] [--inventory|--tree]")
 }
 
 fn run() -> Result<()> {
@@ -600,6 +602,14 @@ fn run() -> Result<()> {
         .next()
         .and_then(|value| value.into_string().ok())
         .unwrap_or_else(|| DEFAULT_EXT4_PATH.to_owned());
+    let mode = match arguments.next() {
+        None => "file",
+        Some(flag) if flag == "--inventory" && output == Path::new("-") => "inventory",
+        Some(flag) if flag == "--tree" && output != Path::new("-") && internal_path == "/" => {
+            "tree"
+        }
+        _ => return Err(invalid(usage(&program)).into()),
+    };
     if arguments.next().is_some() {
         return Err(invalid(usage(&program)).into());
     }
@@ -607,6 +617,26 @@ fn run() -> Result<()> {
     let mut file = File::open(&input)?;
     let payload = find_stored_zip_entry(&mut file, TARGET_APEX_ENTRY)?;
     let mut filesystem = Ext4Image::open(file, payload)?;
+    if mode == "tree" {
+        filesystem.extract_tree(&output)?;
+        println!(
+            "APEX payload extracted to {} (not activated)",
+            output.display()
+        );
+        return Ok(());
+    }
+    if mode == "inventory" {
+        for (path, inode) in filesystem.inventory(&internal_path)? {
+            println!(
+                "mode={:06o} bytes={} path={:?} link={:?}",
+                inode.mode,
+                inode.size,
+                path,
+                filesystem.inventory_link(&inode)?
+            );
+        }
+        return Ok(());
+    }
     if output == Path::new("-") {
         for name in filesystem.list_directory(&internal_path)? {
             println!("{name}");

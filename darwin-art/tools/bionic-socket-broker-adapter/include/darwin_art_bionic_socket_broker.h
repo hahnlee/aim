@@ -43,6 +43,10 @@ typedef struct DarwinArtAndroidMmsghdr {
 
 int darwin_art_bionic_socket_broker_activate(void);
 int darwin_art_bionic_socket_broker_deactivate(void);
+/* Trusted host installation API, not an Android exported symbol. The runtime
+ * owns and protects host_path; service permissions remain service-owned. */
+int darwin_art_bionic_socket_broker_install_unix_endpoint(
+    const void* android_address, uint32_t length, const char* host_path);
 
 int darwin_art_bionic_socket_broker_socket(int domain, int type, int protocol);
 int darwin_art_bionic_socket_broker_pipe(int32_t descriptors[2]);
@@ -109,8 +113,23 @@ int darwin_art_bionic_socket_broker_fcntl(int fd, int command,
                                           intptr_t argument);
 int darwin_art_bionic_fd_export_for_scm(int guest_fd);
 int darwin_art_bionic_fd_import_from_scm(int host_fd);
+int darwin_art_bionic_socket_broker_res_nquery(uint64_t network,
+                                               const char* name,
+                                               int ns_class, int ns_type,
+                                               uint32_t flags);
+int darwin_art_bionic_socket_broker_res_nresult(int fd, int* rcode,
+                                                uint8_t* answer,
+                                                size_t answer_length);
+/* VM facade resolver: transfers one duplicate for any central-broker,
+ * filesystem, or Android shared-memory descriptor. */
+int darwin_art_bionic_fd_dup_host_fd_core(int guest_fd, int* host_fd);
 /* Returns zero after reporting whether a central-broker descriptor handled the
  * ioctl. This is the device-owner seam used by the Bionic ioctl facade. */
+int darwin_art_bionic_fd_broker_ioctl_dispatch(
+    int fd, uint32_t request, void* argument, int* handled, int* result,
+    int* android_errno);
+/* Compatibility name for old runtime archives. New callers use the central-FD
+ * name because device ownership is no longer socket-specific. */
 int darwin_art_bionic_socket_broker_ioctl_dispatch(
     int fd, uint32_t request, void* argument, int* handled, int* result,
     int* android_errno);

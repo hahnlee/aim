@@ -50,6 +50,11 @@ sdk="$(xcrun --sdk macosx --show-sdk-path)"
 stage="$(mktemp -d "$output_dir.stage.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/objects"
+mkdir -p "$stage/source"
+archive_open_patch="$project_root/patches/ziparchive/0001-darwin-archive-open.patch"
+[[ "$(sha256 "$archive_open_patch")" == "$ARCHIVE_OPEN_PATCH_SHA256" ]] || fail "archive open patch mismatch"
+cp "$source_root/zip_archive.cc" "$stage/source/zip_archive.cc"
+(cd "$stage/source" && patch --batch --forward -p1 -i "$archive_open_patch")
 
 flags=(
   -arch arm64 -isysroot "$sdk" -std=c++20 -O2 -fPIC
@@ -57,6 +62,7 @@ flags=(
   -Wno-sign-conversion -Wold-style-cast
   -DZLIB_CONST -D_FILE_OFFSET_BITS=64 -DZIPARCHIVE_DISABLE_CALLBACK_API=1
   -I"$source_root" -I"$source_root/include"
+  -include "$project_root/compat/filesystem/archive_open.h"
   -I"$source_root/incfs_support/include"
   -I"$project_root/_aosp/system/libbase/include"
   -I"$project_root/_aosp/system/logging/liblog/include"
@@ -67,7 +73,9 @@ objects=()
 for source in "${sources[@]}"; do
   object="$stage/objects/${source//\//_}.o"
   echo "ziparchive-for-incfs: compile $source"
-  "$cxx" "${flags[@]}" -c "$source_root/$source" -o "$object"
+  input="$source_root/$source"
+  [[ "$source" != zip_archive.cc ]] || input="$stage/source/zip_archive.cc"
+  "$cxx" "${flags[@]}" -c "$input" -o "$object"
   file "$object" | grep -F 'Mach-O 64-bit object arm64' >/dev/null
   objects+=("$object")
 done
@@ -98,6 +106,7 @@ smoke="$stage/android16-ziparchive-incfs-smoke"
   -I"$source_root/include" -I"$project_root/_aosp/system/libbase/include" \
   -I"$project_root/_aosp/external/googletest/googletest/include" \
   "$project_root/probes/android16_ziparchive_incfs_smoke.cpp" "$archive" \
+  "$project_root/compat/filesystem/archive_open.cc" \
   "$project_root/_aosp/system/libbase/posix_strerror_r.cpp" \
   "$project_root/_build/foundation/libandroid-base-darwin.a" \
   "$project_root/_build/graphics-foundations/liblog-darwin.a" -lz -o "$smoke"

@@ -61,6 +61,8 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         run_graphics_upstream_gates(root, incremental)?;
     }
     let runtime_native_owner_archive = build_runtime_native_owner(root)?;
+    build_shell_gate(root, "build-android16-system-properties.sh")?;
+    build_shell_gate(root, "build-android16-binder-jni.sh")?;
     run_command(
         Command::new("bash").arg(root.join("tools/build-android16-openjdkjvmti-darwin.sh")),
     )?;
@@ -69,12 +71,6 @@ pub(crate) fn audit_runtime_graphics_link_mode(
     let build_paths = BuildPaths::from_root(root);
     let build_dir = build_paths.native_output("runtime-graphics-link-probe");
     let object = build_dir.join("darwin_art_runtime.cc.o");
-    let filesystem_object = if let Some(path) = env::var_os("DARWIN_ART_NATIVE_FILESYSTEM_OBJECT") {
-        PathBuf::from(path)
-    } else {
-        compile_runtime_filesystem_probe(root, &build_dir)?
-    };
-    require_file(&filesystem_object, "runtime filesystem object is missing")?;
     let network_object = if let Some(path) = env::var_os("DARWIN_ART_NATIVE_NETWORK_OBJECT") {
         PathBuf::from(path)
     } else {
@@ -106,6 +102,13 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         asynchronous_close_backend,
         resource_jni_archive,
         android_util_log_archive,
+        application_shared_memory_archive,
+        debugstore_archive,
+        activity_thread_archive,
+        bionic_dlwarning_object,
+        classloader_factory_jni,
+        trace_archive,
+        perfetto_library,
         virtual_ref_base_ptr_archive,
         android_runtime_host,
     } = GraphicsRuntimeInputs::load(root, &build_paths)?;
@@ -539,6 +542,7 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         return Err("OpenJDK NIO archive has no JNI entrypoints".into());
     }
     art_exports.extend(nio_jni_exports);
+    art_exports.extend(super::graphics_bitmap::bitmap_exports(root)?);
     art_exports.sort_unstable();
     art_exports.dedup();
     if art_exports.is_empty() {
@@ -617,6 +621,13 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg("-Wl,-exported_symbol,_darwin_art_surface_gpu_active_canvas")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_install_hooks")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_clear_hooks")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_process_state_install_configured")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_process_state_process_uninstall")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_fs_process_install")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_fs_process_uninstall")
+        .arg("-Wl,-exported_symbol,_darwin_art_binder_export_file_descriptor")
+        .arg("-Wl,-exported_symbol,_darwin_art_binder_import_file_descriptor")
+        .arg("-Wl,-exported_symbol,_darwin_art_binder_close_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_native_acquire")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_native_release")
         .arg("-Wl,-exported_symbol,_darwin_art_runtime_native_owner_create")
@@ -658,15 +669,6 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg("-Wl,-exported_symbol,_darwin_art_pthread_getname_np")
         .arg("-Wl,-u,_darwin_art_pthread_setname_np")
         .arg("-Wl,-exported_symbol,_darwin_art_pthread_setname_np")
-        // libjnigraphics is a virtual Android platform DSO. Keep its fixed C
-        // ABI entry points dynamically visible so the ELF provider resolver
-        // can bind AndroidBitmap_* without manufacturing a host dylib.
-        .arg("-Wl,-u,_AndroidBitmap_getInfo")
-        .arg("-Wl,-u,_AndroidBitmap_lockPixels")
-        .arg("-Wl,-u,_AndroidBitmap_unlockPixels")
-        .arg("-Wl,-exported_symbol,_AndroidBitmap_getInfo")
-        .arg("-Wl,-exported_symbol,_AndroidBitmap_lockPixels")
-        .arg("-Wl,-exported_symbol,_AndroidBitmap_unlockPixels")
         // The named-JNI owner reaches these TLS errno adapters through
         // indirect NIO calls, so retain them as real runtime ABI roots.
         .arg("-Wl,-u,_darwin_art_bionic_errno_load")
@@ -699,7 +701,6 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg(&graphics_session_object_real)
         .arg(&graphics_phase_object)
         .arg(&graphics_input_object)
-        .arg(&filesystem_object)
         .arg(&network_object)
         .arg(&hwui_object)
         .arg(&surface_object)
@@ -738,6 +739,17 @@ pub(crate) fn audit_runtime_graphics_link_mode(
             openjdkjvmti_archive.display()
         ))
         .arg(&bootstrap)
+        // AOSP Java Binder/Parcel and the Darwin RPC transport boundary are
+        // separate owners. They follow the runtime registrar archive, then
+        // libbinder is rescanned to satisfy JNI members selected here.
+        .arg(root.join("_build/binder-jni/libbinder-jni-darwin.a"))
+        .arg(root.join("_build/binder-jni/libbinder-rpc-boundary-darwin.a"))
+        // Rust's process Binder endpoint resolves these three narrow Bionic
+        // descriptor hooks with dlsym.  They have no static caller, so link
+        // their single boundary object directly instead of force-loading the
+        // unrelated RPC archive members.
+        .arg(root.join("_build/binder-jni/fd-transport.o"))
+        .arg(root.join("_build/surfaceflinger-core/libbinder-darwin.a"))
         // DexFiles discovers this AOSP descriptor through dlsym; retain only
         // the debugger-interface member instead of force-loading the runtime
         // archive (which duplicates ICU/ART providers).
@@ -800,6 +812,13 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg(&openjdkjvm_archive)
         .arg(&os_constants_archive)
         .arg(&android_util_log_archive)
+        .arg(&application_shared_memory_archive)
+        .arg(&debugstore_archive)
+        .arg(&activity_thread_archive)
+        .arg(&bionic_dlwarning_object)
+        .arg(&classloader_factory_jni)
+        .arg(&trace_archive)
+        .arg(&perfetto_library)
         .arg(&virtual_ref_base_ptr_archive)
         .arg(format!(
             "-Wl,-force_load,{}",
@@ -839,6 +858,7 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg(root.join("_build/androidfw-foundation/libandroidfw-darwin.a"))
         .arg(root.join("_build/ui-types-foundation/libui-types.a"))
         .arg(root.join("_build/nativehelper-device-foundation/libnativehelper-device-darwin.a"))
+        .arg(root.join("_build/system-properties/libsystem-properties-jni-darwin.a"))
         .arg(root.join("_build/graphics-foundations/libutils-darwin.a"))
         .arg(root.join("_build/graphics-foundations/libutils-binder-darwin.a"))
         .arg(root.join("_build/graphics-foundations/libcutils-darwin.a"))
@@ -859,6 +879,7 @@ pub(crate) fn audit_runtime_graphics_link_mode(
             "-lz",
             "-lresolv",
             "-Wl,-rpath,@loader_path/../angle-source/out/DarwinArtRelease",
+            "-Wl,-rpath,@loader_path/../tracing-perfetto/perfetto-out",
             "-framework",
             "CoreFoundation",
             "-framework",
@@ -887,6 +908,10 @@ pub(crate) fn audit_runtime_graphics_link_mode(
             "CoreVideo",
             "-framework",
             "VideoToolbox",
+            "-framework",
+            "Network",
+            "-framework",
+            "SystemConfiguration",
             "-o",
         ])
         .arg(&runtime_library);

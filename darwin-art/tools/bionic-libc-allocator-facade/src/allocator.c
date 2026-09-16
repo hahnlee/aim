@@ -8,6 +8,8 @@ _Static_assert(sizeof(void*) == 8, "Android arm64 and Darwin arm64 use 64-bit po
 _Static_assert(sizeof(size_t) == 8, "Android arm64 and Darwin arm64 use 64-bit size_t");
 _Static_assert(sizeof(int) == 4, "Android arm64 and Darwin arm64 use 32-bit int");
 
+extern void darwin_art_bionic_errno_store(int32_t android_errno);
+
 static void* DarwinMalloc(size_t size) {
   const int saved_errno = errno;
   void* result = malloc(size);
@@ -77,10 +79,16 @@ void* darwin_art_bionic_realloc(void* pointer, size_t size) {
   return darwin_art_bionic_realloc_result(pointer, size).pointer;
 }
 
-int darwin_art_bionic_mallopt(int param, int value) {
-  (void)param;
-  (void)value;
-  return 1;
+void* darwin_art_bionic_reallocarray(void* pointer, size_t count, size_t size) {
+  if (count != 0 && size > SIZE_MAX / count) {
+    darwin_art_bionic_errno_store(DARWIN_ART_BIONIC_ENOMEM);
+    return NULL;
+  }
+  const size_t total = count * size;
+  void* result = darwin_art_bionic_realloc(pointer, total);
+  if (result == NULL && total != 0)
+    darwin_art_bionic_errno_store(DARWIN_ART_BIONIC_ENOMEM);
+  return result;
 }
 
 size_t darwin_art_bionic_malloc_usable_size(const void* pointer) {
@@ -155,8 +163,6 @@ char* darwin_art_bionic_strndup(const char* source, size_t maximum) {
   return result;
 }
 
-extern void darwin_art_bionic_errno_store(int32_t android_errno);
-
 char* darwin_art_bionic_tempnam_unsupported(const char* directory,
                                             const char* prefix) {
   (void)directory;
@@ -222,6 +228,11 @@ static const DarwinArtBionicAllocatorBinding kBindings[] = {
          DARWIN_ART_BIONIC_ALLOC_DARWIN_OWNS_BLOCK |
          DARWIN_ART_BIONIC_ALLOC_FULL_RETURN_CODE},
     {"realloc", (DarwinArtBionicAllocatorFunction)darwin_art_bionic_realloc,
+     DARWIN_ART_BIONIC_ALLOC_FIXED_REGISTER_ABI |
+         DARWIN_ART_BIONIC_ALLOC_DARWIN_OWNS_BLOCK |
+         DARWIN_ART_BIONIC_ALLOC_NEEDS_ERRNO_RESULT_SEAM},
+    {"reallocarray",
+     (DarwinArtBionicAllocatorFunction)darwin_art_bionic_reallocarray,
      DARWIN_ART_BIONIC_ALLOC_FIXED_REGISTER_ABI |
          DARWIN_ART_BIONIC_ALLOC_DARWIN_OWNS_BLOCK |
          DARWIN_ART_BIONIC_ALLOC_NEEDS_ERRNO_RESULT_SEAM},

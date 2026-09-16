@@ -42,14 +42,22 @@ loader_target="$tmp/loader-target"
 CARGO_TARGET_DIR="$loader_target" cargo build --quiet --release \
   --manifest-path "$root/crates/darwin-art-elf-loader/Cargo.toml"
 loader="$loader_target/release/libdarwin_art_elf_loader.a"
+CARGO_TARGET_DIR="$loader_target" cargo build --quiet --release \
+  --manifest-path "$root/tools/bionic-fdsan-owner/Cargo.toml"
+fdsan="$loader_target/release/libbionic_fdsan_owner.a"
 [[ -f "$loader" ]] || missing "$loader"
 sdk="$(xcrun --sdk macosx --show-sdk-path)"
 host_cc="$(xcrun --find clang)"
 host_cxx="$(xcrun --find clang++)"
+"$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++17 -Wall -Wextra -Werror \
+  -I"$dir/src" "$dir/probes/unix_address.cc" -o "$tmp/unix-address"
+"$tmp/unix-address"
 includes=(-I"$dir/include"
           -I"$root/tools/bionic-central-fd-broker/include"
           -I"$root/tools/bionic-dns-facade/include"
-          -I"$root/tools/bionic-errno-tls/include")
+          -I"$root/tools/bionic-errno-tls/include"
+          -I"$root/tools/bionic-fs-facade/include"
+          -I"$root/tools/bionic-ioctl-facade/include")
 build_runner() {
   local sanitizer="$1"
   local output="$2"
@@ -57,6 +65,18 @@ build_runner() {
   "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
     -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
     -c "$dir/src/adapter.cc" -o "$tmp/adapter-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/sync_fence_merge.cc" -o "$tmp/merge-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/sync_fence_broker.cc" -o "$tmp/merge-broker-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/fdsan.cc" -o "$tmp/fdsan-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/fdsan_symbols.cc" -o "$tmp/fdsan-symbols-$sanitizer.o"
   "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
     -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
     -c "$root/tools/bionic-central-fd-broker/src/fd_broker.cc" \
@@ -74,8 +94,10 @@ build_runner() {
     -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
     -I"$root/crates/darwin-art-elf-loader/include" \
     "$dir/probes/runner.cc" "$tmp/adapter-$sanitizer.o" \
+    "$tmp/merge-$sanitizer.o" "$tmp/merge-broker-$sanitizer.o" \
     "$tmp/broker-$sanitizer.o" "$tmp/dns-$sanitizer.o" \
-    "$tmp/errno-$sanitizer.o" "$loader" -framework Security -lresolv \
+    "$tmp/errno-$sanitizer.o" "$tmp/fdsan-$sanitizer.o" \
+    "$tmp/fdsan-symbols-$sanitizer.o" "$fdsan" "$loader" -framework Security -lresolv \
     -o "$output"
 }
 build_runner address,undefined "$tmp/runner-asan"

@@ -22,17 +22,26 @@ impl PackageRegistry {
         validate_record(record)?;
         fs::create_dir_all(&self.directory)?;
         fs::set_permissions(&self.directory, fs::Permissions::from_mode(0o700))?;
+        let app_id = crate::app_ids::allocate(&self.directory, package)?;
+        let record = with_app_id(record, app_id);
+        validate_record(&record)?;
+        let destination = self.directory.join(format!("{package}.launch"));
+        match fs::read(&destination) {
+            Ok(existing) if existing == record => return Ok(()),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let stage = self
             .directory
             .join(format!(".{package}.register-{}", std::process::id()));
-        let destination = self.directory.join(format!("{package}.launch"));
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&stage)?;
         let result = output
-            .write_all(record)
+            .write_all(&record)
             .and_then(|()| output.sync_all())
             .and_then(|()| fs::set_permissions(&stage, fs::Permissions::from_mode(0o400)))
             .and_then(|()| fs::rename(&stage, &destination))
@@ -49,6 +58,28 @@ impl PackageRegistry {
         let record = fs::read(self.directory.join(format!("{package}.launch")))?;
         validate_record(&record)?;
         Ok(record)
+    }
+
+    pub(crate) fn app_id(&self, package: &str) -> Result<u32, ProfileError> {
+        self.resolve(package)?; // Uninstalled/tombstoned packages are not live.
+        crate::app_ids::lookup(&self.directory, package)
+    }
+
+    /// Upgrade installed launch metadata before exposing a mounted profile.
+    /// Validate every input before writing any; preserve all APK/data paths.
+    /// Each publication is atomic and rerunning after interruption is safe.
+    pub(crate) fn migrate_app_ids(&self) -> Result<(), ProfileError> {
+        let listing = self.list()?;
+        let listing = std::str::from_utf8(&listing)
+            .map_err(|_| ProfileError::Daemon("package listing is not UTF-8".into()))?;
+        let records = listing
+            .lines()
+            .map(|package| self.resolve(package).map(|record| (package, record)))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (package, record) in records {
+            self.register(package, &record)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn unregister(&self, package: &str) -> Result<(), ProfileError> {
@@ -112,9 +143,79 @@ fn validate_record(record: &[u8]) -> Result<(), ProfileError> {
     Ok(())
 }
 
+fn with_app_id(record: &[u8], app_id: u32) -> Vec<u8> {
+    let mut result = Vec::with_capacity(record.len() + 20);
+    for line in record.split_inclusive(|byte| *byte == b'\n') {
+        // App IDs are registry-owned, never accepted from installation input.
+        if !line.starts_with(b"app_id=") {
+            result.extend_from_slice(line);
+        }
+    }
+    result.extend_from_slice(format!("app_id={app_id}\n").as_bytes());
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caller_cannot_supply_privileged_app_id() {
+        assert_eq!(
+            with_app_id(b"darwin-art-launch-v1\napp_id=1000\napp_id=0\n", 10000),
+            b"darwin-art-launch-v1\napp_id=10000\n"
+        );
+    }
+
+    #[test]
+    fn migration_preserves_metadata_and_reloads_ids() {
+        let directory = std::env::temp_dir().join(format!(
+            "darwin-registry-migration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let registry = PackageRegistry {
+            directory: directory.clone(),
+        };
+        let legacy = b"darwin-art-launch-v1\napk=/packages/a/base.apk\nmetadata=unchanged\n";
+        fs::write(directory.join("org.example.a.launch"), legacy).unwrap();
+        fs::write(directory.join("org.example.b.launch"), legacy).unwrap();
+        registry.migrate_app_ids().unwrap();
+        let first = registry.resolve("org.example.a").unwrap();
+        assert_eq!(first, with_app_id(legacy, 10000));
+        assert_eq!(
+            registry.resolve("org.example.b").unwrap(),
+            with_app_id(legacy, 10001)
+        );
+        let before = fs::metadata(directory.join("org.example.a.launch"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        registry.migrate_app_ids().unwrap();
+        assert_eq!(registry.resolve("org.example.a").unwrap(), first);
+        assert_eq!(
+            fs::metadata(directory.join("org.example.a.launch"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
+        fs::write(directory.join("org.example.c.launch"), b"corrupt").unwrap();
+        assert!(registry.migrate_app_ids().is_err());
+        assert_eq!(registry.resolve("org.example.a").unwrap(), first);
+        fs::remove_file(directory.join("org.example.c.launch")).unwrap();
+        fs::remove_file(directory.join("app-ids")).unwrap();
+        assert!(registry.migrate_app_ids().is_err());
+        assert_eq!(registry.resolve("org.example.a").unwrap(), first);
+        for entry in fs::read_dir(&directory).unwrap() {
+            fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        fs::remove_dir(directory).unwrap();
+    }
 
     #[test]
     fn package_names_cannot_escape_the_registry() {

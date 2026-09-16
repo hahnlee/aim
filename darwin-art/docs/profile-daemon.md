@@ -49,9 +49,10 @@ bundles at `~/Applications/Darwin ART Apps.localized`. These are Chrome-style
 application shims, not copied runtimes. Their Info.plist records the Android
 package and profile plus the Android label, version, and extracted APK icon. A
 small native launcher locates the installed manager bundle, selects the profile,
-asks `darwin-artd` to resolve the immutable launch record, and daemonizes the
-normal package launcher. The Android process therefore remains daemon-owned
-after the shim exits.
+and invokes the low-level package launcher to resolve the immutable launch
+record. That launcher asks `darwin-artd` to daemonize the final app host. The
+manager and Finder shims use its asynchronous handoff mode, while direct shell
+calls remain synchronous for the requested window duration.
 
 Synchronization rewrites a bundle only when its metadata, icon, launcher, or
 manager location changes. Stale-package and deleted-profile cleanup first

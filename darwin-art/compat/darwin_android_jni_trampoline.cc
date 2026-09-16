@@ -55,6 +55,12 @@ struct ShortyPlan {
   size_t android_stack_size = 0;
 };
 
+enum class CallShape {
+  kRegular,
+  kCritical,
+  kLifecycle,
+};
+
 // Private area after the Android stack tail. The unwind callback is ordinary
 // C code and may clobber caller-saved argument registers.
 constexpr size_t kJniThunkScratchBytes = 224;
@@ -113,7 +119,10 @@ bool TypeSize(char type, size_t* size) {
   }
 }
 
-bool PlanShorty(const char* shorty, ShortyPlan* plan, std::string* error) {
+bool PlanShorty(const char* shorty,
+                CallShape shape,
+                ShortyPlan* plan,
+                std::string* error) {
   if (shorty == nullptr) {
     *error = "regular JNI shorty is null";
     return false;
@@ -123,12 +132,20 @@ bool PlanShorty(const char* shorty, ShortyPlan* plan, std::string* error) {
     *error = "regular JNI shorty has an invalid return type or length";
     return false;
   }
-  size_t gp_count = 2;  // JNIEnv* and jobject/jclass.
+  if (shape == CallShape::kCritical && shorty[0] == 'L') {
+    *error = "CriticalNative shorty cannot return a reference";
+    return false;
+  }
+  size_t gp_count = shape == CallShape::kRegular ? 2 : 0;
   size_t fp_count = 0;
   size_t darwin_offset = 0;
   size_t android_offset = 0;
   for (size_t index = 1; index < length; ++index) {
     const char type = shorty[index];
+    if (shape == CallShape::kCritical && type == 'L') {
+      *error = "CriticalNative shorty cannot contain reference arguments";
+      return false;
+    }
     size_t size = 0;
     if (!TypeSize(type, &size)) {
       *error = "regular JNI shorty contains V or a non-scalar argument";
@@ -157,6 +174,17 @@ bool PlanShorty(const char* shorty, ShortyPlan* plan, std::string* error) {
   plan->android_stack_size =
       guest_stack_size + (android_offset == 0 ? 0 : 16) + kJniThunkScratchBytes;
   return true;
+}
+
+bool PlanLifecycleShorty(const char* shorty,
+                         ShortyPlan* plan,
+                         std::string* error) {
+  if (shorty == nullptr ||
+      (std::strcmp(shorty, "ILL") != 0 && std::strcmp(shorty, "VLL") != 0)) {
+    *error = "lifecycle shorty must be ILL or VLL";
+    return false;
+  }
+  return PlanShorty(shorty, CallShape::kLifecycle, plan, error);
 }
 
 constexpr uint32_t EncodeUnsignedLoadStore(uint32_t opcode,
@@ -279,16 +307,19 @@ struct GeneratedThunk {
 struct CacheKey {
   uintptr_t target;
   std::string shorty;
+  CallShape shape;
 
   bool operator==(const CacheKey& other) const {
-    return target == other.target && shorty == other.shorty;
+    return target == other.target && shorty == other.shorty &&
+           shape == other.shape;
   }
 };
 
 struct CacheKeyHash {
   size_t operator()(const CacheKey& key) const {
     return std::hash<uintptr_t>{}(key.target) ^
-           (std::hash<std::string>{}(key.shorty) << 1u);
+           (std::hash<std::string>{}(key.shorty) << 1u) ^
+           (static_cast<size_t>(key.shape) << 2u);
   }
 };
 
@@ -301,30 +332,52 @@ struct TrampolineSet {
   std::vector<uintptr_t> requested_entries;
 };
 
-TrampolineSet* CreateRegularTrampolines(void* proxy_jni_env,
-                                        const TrampolineRequest* requests,
-                                        size_t request_count,
-                                        std::string* error) {
+static TrampolineSet* CreateTrampolines(void* proxy,
+                                 const TrampolineRequest* requests,
+                                 size_t request_count,
+                                 std::string* error,
+                                 CallShape shape) {
   if (error != nullptr) {
     error->clear();
   }
   std::string local_error;
-  if (proxy_jni_env == nullptr || requests == nullptr || request_count == 0 ||
-      request_count > kMaxRequests) {
-    local_error = "invalid regular JNI trampoline request set";
+  const bool needs_proxy = shape != CallShape::kCritical;
+  if ((needs_proxy && proxy == nullptr) || requests == nullptr ||
+      request_count == 0 || request_count > kMaxRequests) {
+    local_error = shape == CallShape::kLifecycle
+                      ? "invalid lifecycle trampoline request set"
+                      : shape == CallShape::kCritical
+                            ? "invalid CriticalNative trampoline request set"
+                            : "invalid regular JNI trampoline request set";
+    if (error) *error = local_error;
+    return nullptr;
   }
   std::vector<ShortyPlan> plans(request_count);
   for (size_t index = 0; local_error.empty() && index < request_count; ++index) {
+    const bool valid_shorty =
+        shape == CallShape::kLifecycle
+            ? PlanLifecycleShorty(requests[index].shorty, &plans[index],
+                                  &local_error)
+            : PlanShorty(requests[index].shorty, shape, &plans[index],
+                         &local_error);
     if (requests[index].android_target == nullptr ||
         requests[index].entry_mask == 0 ||
         (requests[index].entry_mask & (requests[index].entry_mask - 1u)) != 0 ||
-        !PlanShorty(requests[index].shorty, &plans[index], &local_error)) {
+        !valid_shorty) {
       if (local_error.empty()) {
-        local_error = "invalid regular JNI target or entry identity";
+        local_error = shape == CallShape::kLifecycle
+                          ? "invalid lifecycle target or entry identity"
+                          : shape == CallShape::kCritical
+                                ? "invalid CriticalNative target or entry identity"
+                                : "invalid regular JNI target or entry identity";
       }
     }
-    if (plans[index].android_stack_size > 4080) {
-      local_error = "regular JNI Android stack tail exceeds encoder limit";
+    if (local_error.empty() && plans[index].android_stack_size > 4080) {
+      local_error = shape == CallShape::kLifecycle
+                        ? "lifecycle Android stack tail exceeds encoder limit"
+                        : shape == CallShape::kCritical
+                              ? "CriticalNative Android stack tail exceeds encoder limit"
+                              : "regular JNI Android stack tail exceeds encoder limit";
     }
   }
   if (!local_error.empty()) {
@@ -340,16 +393,19 @@ TrampolineSet* CreateRegularTrampolines(void* proxy_jni_env,
   size_t generated_size = 0;
   for (size_t index = 0; index < request_count; ++index) {
     CacheKey key{reinterpret_cast<uintptr_t>(requests[index].android_target),
-                 requests[index].shorty};
+                 requests[index].shorty, shape};
     auto [position, inserted] = cache.emplace(std::move(key), generated.size());
     if (!inserted) {
       request_to_generated[index] = position->second;
       generated[position->second].mask |= requests[index].entry_mask;
       continue;
     }
-    const size_t instruction_count = 51u + plans[index].moves.size() * 2u;
+    const bool substitutes_proxy = shape != CallShape::kCritical;
+    const size_t instruction_count =
+        (substitutes_proxy ? 51u : 50u) + plans[index].moves.size() * 2u;
+    const size_t literal_count = substitutes_proxy ? 4u : 3u;
     const size_t thunk_size = instruction_count * kInstructionSize +
-                              4u * kLiteralSize;
+                              literal_count * kLiteralSize;
     generated_size = RoundUp(generated_size, 16);
     request_to_generated[index] = generated.size();
     generated.push_back(
@@ -385,6 +441,7 @@ TrampolineSet* CreateRegularTrampolines(void* proxy_jni_env,
   constexpr uint32_t kX9 = 9;
   constexpr uint32_t kX29 = 29;
   constexpr uint32_t kSp = 31;
+  const bool substitutes_proxy = shape != CallShape::kCritical;
   for (size_t index = 0; index < generated.size(); ++index) {
     const GeneratedThunk& thunk = generated[index];
     const size_t source_request = thunk.source_request;
@@ -407,9 +464,11 @@ TrampolineSet* CreateRegularTrampolines(void* proxy_jni_env,
               EncodeStore(kX9, kSp, move.android_offset, move.size));
       cursor += 4;
     }
-    const size_t push_literal = thunk.offset + thunk.size - 32u;
-    const size_t pop_literal = thunk.offset + thunk.size - 24u;
-    const size_t proxy_literal = thunk.offset + thunk.size - 16u;
+    const size_t literal_count = substitutes_proxy ? 4u : 3u;
+    const size_t push_literal =
+        thunk.offset + thunk.size - literal_count * kLiteralSize;
+    const size_t pop_literal = push_literal + kLiteralSize;
+    const size_t proxy_literal = pop_literal + kLiteralSize;
     const size_t target_literal = thunk.offset + thunk.size - 8u;
     // NativeBridge thunks are the actual JNI entrypoint on Darwin and do not
     // pass through ART's quick JNI entrypoints. Publish the same managed frame
@@ -441,8 +500,10 @@ TrampolineSet* CreateRegularTrampolines(void* proxy_jni_env,
               EncodeLoad(reg, kSp, scratch_offset + 128u + reg * 8u, 8));
       cursor += 4;
     }
-    Write32(bytes, cursor, EncodeLdrLiteralX(0, cursor, proxy_literal));
-    cursor += 4;
+    if (substitutes_proxy) {
+      Write32(bytes, cursor, EncodeLdrLiteralX(0, cursor, proxy_literal));
+      cursor += 4;
+    }
     Write32(bytes, cursor, EncodeLdrLiteralX(16, cursor, target_literal));
     cursor += 4;
     Write32(bytes, cursor, 0xd63f0200u);  // blr x16
@@ -482,7 +543,9 @@ TrampolineSet* CreateRegularTrampolines(void* proxy_jni_env,
             reinterpret_cast<uintptr_t>(&darwin_art_unwindstack_push_quick_frame));
     Write64(bytes, pop_literal,
             reinterpret_cast<uintptr_t>(&darwin_art_unwindstack_pop_quick_frame));
-    Write64(bytes, proxy_literal, reinterpret_cast<uintptr_t>(proxy_jni_env));
+    if (substitutes_proxy) {
+      Write64(bytes, proxy_literal, reinterpret_cast<uintptr_t>(proxy));
+    }
     Write64(bytes, target_literal,
             reinterpret_cast<uintptr_t>(
                 requests[source_request].android_target));
@@ -533,6 +596,29 @@ TrampolineSet* CreateRegularTrampolines(void* proxy_jni_env,
   }
   g_live_count.fetch_add(1, std::memory_order_relaxed);
   return trampolines;
+}
+
+TrampolineSet* CreateRegularTrampolines(void* proxy_jni_env,
+                                        const TrampolineRequest* requests,
+                                        size_t request_count,
+                                        std::string* error) {
+  return CreateTrampolines(proxy_jni_env, requests, request_count, error,
+                           CallShape::kRegular);
+}
+
+TrampolineSet* CreateCriticalTrampolines(const TrampolineRequest* requests,
+                                         size_t request_count,
+                                         std::string* error) {
+  return CreateTrampolines(nullptr, requests, request_count, error,
+                           CallShape::kCritical);
+}
+
+TrampolineSet* CreateLifecycleTrampolines(void* proxy_java_vm,
+                                          const TrampolineRequest* requests,
+                                          size_t request_count,
+                                          std::string* error) {
+  return CreateTrampolines(proxy_java_vm, requests, request_count, error,
+                           CallShape::kLifecycle);
 }
 
 void DestroyRegularTrampolines(TrampolineSet* trampolines) {

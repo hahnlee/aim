@@ -23,6 +23,7 @@ long long darwin_art_bionic_atoll(const char*);
 DarwinArtBionicDiv darwin_art_bionic_div(int, int);
 DarwinArtBionicLongLongDiv darwin_art_bionic_lldiv(long long, long long);
 long long darwin_art_bionic_strtoll(const char*, char**, int);
+intmax_t darwin_art_bionic_strtoimax(const char*, char**, int);
 unsigned long darwin_art_bionic_strtoul(const char*, char**, int);
 unsigned long long darwin_art_bionic_strtoull(const char*, char**, int);
 uint64_t darwin_art_bionic_strtoumax(const char*, char**, int);

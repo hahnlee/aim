@@ -36,8 +36,16 @@ esac
 [[ -f "$lock_file" ]] || { echo "android-graphics-jni: missing $lock_file" >&2; exit 2; }
 # shellcheck disable=SC1090
 source "$lock_file"
+source "$project_root/upstream/android16-ndk-bitmap.lock"
+source "$project_root/upstream/android16-ndk-image-decoder.lock"
+image_decoder_patch="$project_root/patches/frameworks-base/0017-ndk-image-decoder-input.patch"
+image_decoder_rgba_patch="$project_root/patches/frameworks-base/0019-ndk-image-decoder-rgba.patch"
+bitmap_buffer_patch="$project_root/patches/frameworks-base/0015-darwin-bitmap-buffer-access.patch"
+bitmap_rgba_patch="$project_root/patches/frameworks-base/0016-ndk-bitmap-rgba-compression.patch"
 
 sync_needed=0
+[[ -f "$aosp/frameworks/base/native/graphics/jni/bitmap.cpp" ]] || sync_needed=1
+[[ -f "$aosp/frameworks/base/native/graphics/jni/imagedecoder.cpp" ]] || sync_needed=1
 [[ -n "${DARWIN_ART_LIBJPEG_TURBO_ROOT+x}" || -f "$aosp/external/libjpeg-turbo/Android.bp" ]] || sync_needed=1
 [[ -n "${DARWIN_ART_LIBULTRAHDR_ROOT+x}" || -f "$aosp/external/libultrahdr/Android.bp" ]] || sync_needed=1
 [[ -n "${DARWIN_ART_FRAMEWORKS_NATIVE_GUI_INCLUDE+x}" || -f "$aosp/frameworks/native/libs/gui/include/gui/TraceUtils.h" ]] || sync_needed=1
@@ -71,6 +79,10 @@ verify_hash "$source_hwui/jni/PathIterator.cpp" "$PATH_ITERATOR_UNPATCHED_SHA256
 verify_hash "$source_hwui/jni/android_graphics_HardwareRenderer.cpp" "$HARDWARE_RENDERER_UNPATCHED_SHA256"
 verify_hash "$source_hwui/platform/darwin/utils/SharedLib.cpp" "$DARWIN_SHARED_LIB_SHA256"
 verify_hash "$critical_patch" "$CRITICAL_JNI_PATCH_SHA256"
+verify_hash "$bitmap_buffer_patch" "$BITMAP_BUFFER_ACCESS_PATCH_SHA256"
+verify_hash "$image_decoder_patch" "$NDK_IMAGE_DECODER_INPUT_PATCH_SHA256"
+verify_hash "$image_decoder_rgba_patch" "$NDK_IMAGE_DECODER_RGBA_PATCH_SHA256"
+verify_hash "$bitmap_rgba_patch" "$BITMAP_RGBA_COMPRESSION_PATCH_SHA256"
 verify_hash "$lazy_native_window_patch" "$LAZY_NATIVE_WINDOW_PATCH_SHA256"
 verify_hash "$globalref_jni_patch" "$GLOBALREF_JNI_PATCH_SHA256"
 verify_hash "$thread_detach_patch" "$THREAD_DETACH_PATCH_SHA256"
@@ -202,6 +214,8 @@ patch -s -d "$patched_hwui" -p1 < "$lazy_native_window_patch"
 patch -s -d "$patched_hwui" -p1 < "$thread_detach_patch"
 patch -s -d "$patched_hwui" -p1 < "$require_jni_env_patch"
 patch -s -d "$patched_hwui" -p1 < "$globalref_jni_patch"
+patch -s -d "$patched_hwui" -p1 < "$bitmap_buffer_patch"
+patch -s -d "$patched_hwui" -p1 < "$bitmap_rgba_patch"
 gpu_mode=1
 if [[ "$cpu_diagnostic" == 1 ]]; then
   gpu_mode=0
@@ -297,7 +311,7 @@ fi
 # objects.
 patch_identity="$(for patch_file in "$critical_patch" "$lazy_native_window_patch" \
     "$thread_detach_patch" "$require_jni_env_patch" "$globalref_jni_patch" \
-    "$hwui_gpu_patch" "$project_root/compat/darwin_hwui_jni_attachment.h"; do sha256 "$patch_file"; done |
+    "$hwui_gpu_patch" "$bitmap_buffer_patch" "$bitmap_rgba_patch" "$project_root/compat/darwin_hwui_jni_attachment.h"; do sha256 "$patch_file"; done |
     shasum -a 256 | awk '{print $1}')"
 
 compile_cached() {
@@ -420,11 +434,45 @@ darwin_shared_object="$object_dir/platform_darwin_utils_SharedLib.o"
 compile_cached "platform/darwin/utils/SharedLib.cpp" \
   "$patched_hwui/platform/darwin/utils/SharedLib.cpp" "$darwin_shared_object"
 objects+=("$darwin_shared_object")
-android_bitmap_provider_object="$object_dir/darwin_android_bitmap_provider.o"
-compile_cached "compat/darwin_android_bitmap_provider.cc" \
-  "$project_root/compat/darwin_android_bitmap_provider.cc" \
-  "$android_bitmap_provider_object"
-objects+=("$android_bitmap_provider_object")
+# Original NDK entry points use AOSP's Bitmap owner for validation, pixel
+# references, compression and hardware-buffer access. No handwritten mirror.
+verify_hash "$aosp/frameworks/base/native/graphics/jni/bitmap.cpp" "$NDK_BITMAP_SHA256"
+verify_hash "$source_hwui/apex/android_bitmap.cpp" "$APEX_BITMAP_SHA256"
+verify_hash "$source_hwui/apex/include/android/graphics/bitmap.h" "$APEX_BITMAP_HEADER_SHA256"
+compile_cached "native/graphics/jni/bitmap.cpp" \
+  "$aosp/frameworks/base/native/graphics/jni/bitmap.cpp" "$object_dir/ndk_bitmap.o" \
+  -fvisibility=default
+compile_cached "apex/android_bitmap.cpp" \
+  "$patched_hwui/apex/android_bitmap.cpp" "$object_dir/apex_android_bitmap.o"
+objects+=("$object_dir/ndk_bitmap.o" "$object_dir/apex_android_bitmap.o")
+
+# Keep the NDK decoder's public input contracts beside its original sources.
+# The only Darwin implementation here transfers an owned host stream from the
+# Rust Android descriptor table; decoding remains in AOSP ImageDecoder/Skia.
+ndk_source="$aosp/frameworks/base/native/graphics/jni"
+patched_ndk="$build_dir/patched-ndk"
+mkdir -p "$patched_ndk"
+verify_hash "$ndk_source/imagedecoder.cpp" "$NDK_IMAGE_DECODER_SHA256"
+verify_hash "$ndk_source/aassetstreamadaptor.cpp" "$NDK_ASSET_STREAM_SHA256"
+verify_hash "$ndk_source/aassetstreamadaptor.h" "$NDK_ASSET_STREAM_HEADER_SHA256"
+cp "$ndk_source/imagedecoder.cpp" "$ndk_source/aassetstreamadaptor.cpp" \
+  "$ndk_source/aassetstreamadaptor.h" "$patched_ndk/"
+patch -s -d "$patched_ndk" -p1 < "$image_decoder_patch"
+patch -s -d "$patched_ndk" -p1 < "$image_decoder_rgba_patch"
+patch_identity="$(printf '%s\n%s\n%s\n' "$patch_identity" \
+  "$(sha256 "$patched_ndk/aassetstreamadaptor.h")" \
+  "$(sha256 "$project_root/compat/graphics/image_decoder_input.h")" |
+  shasum -a 256 | awk '{print $1}')"
+compile_cached "native/graphics/jni/imagedecoder.cpp" \
+  "$patched_ndk/imagedecoder.cpp" "$object_dir/ndk_imagedecoder.o" -fvisibility=default
+compile_cached "native/graphics/jni/aassetstreamadaptor.cpp" \
+  "$patched_ndk/aassetstreamadaptor.cpp" "$object_dir/ndk_asset_stream.o"
+compile_cached "graphics/image_decoder_input.cc" \
+  "$project_root/compat/graphics/image_decoder_input.cc" "$object_dir/ndk_image_input.o" \
+  -I"$project_root/tools/bionic-fs-facade/include" \
+  -I"$project_root/tools/bionic-ioctl-facade/include"
+objects+=("$object_dir/ndk_imagedecoder.o" "$object_dir/ndk_asset_stream.o" \
+  "$object_dir/ndk_image_input.o")
 
 jni_archive="$build_dir/libandroid-graphics-jni-darwin.a"
 registrar_archive="$build_dir/libandroid-graphics-layoutlib-registrar-darwin.a"
@@ -432,7 +480,7 @@ rm -f "$jni_archive" "$registrar_archive"
 "$ar" rcs "$jni_archive" "${objects[@]}"
 "$ar" rcs "$registrar_archive" "$registrar_object"
 jni_members="$({ "$ar" -t "$jni_archive" || true; } | grep -v '^__\.SYMDEF' | wc -l | tr -d ' ')"
-[[ "$jni_members" == 62 ]] || { echo "android-graphics-jni: JNI archive member count=$jni_members expected=62" >&2; exit 3; }
+[[ "$jni_members" == 66 ]] || { echo "android-graphics-jni: JNI archive member count=$jni_members expected=66" >&2; exit 3; }
 
 combined_object="$build_dir/android-graphics-jni-force-loaded.o"
 "$cxx" -r -arch arm64 -Wl,-force_load,"$registrar_archive" \

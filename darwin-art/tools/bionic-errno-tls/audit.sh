@@ -97,7 +97,7 @@ EOF
 diff -u "$temp_root/expected-undefined" "$temp_root/undefined" ||
   fail 'TLS/host errno dependency drift'
 definitions="$(nm -gU "$temp_root/errno_tls.o")"
-for symbol in __errno errno_capture_host errno_from_darwin errno_load \
+for symbol in __errno errno_capture_host errno_from_darwin errno_to_darwin errno_load \
               errno_publish_result errno_resolve errno_set_from_darwin errno_store; do
   grep -F " _darwin_art_bionic_$symbol" <<<"$definitions" >/dev/null ||
     fail "missing prefixed definition $symbol"
@@ -119,8 +119,11 @@ fi
 "$temp_root/native-smoke-sanitized" >/dev/null
 
 allocator="$project_root/tools/bionic-libc-allocator-facade"
+check_hash "$allocator/src/allocator.c" "$ALLOCATOR_SOURCE_SHA256"
+check_hash "$allocator/src/allocator_options.c" "$ALLOCATOR_OPTIONS_SOURCE_SHA256"
 "$host_cc" "${host_flags[@]}" -I"$allocator/include" \
   "$script_dir/src/errno_tls.c" "$allocator/src/allocator.c" \
+  "$allocator/src/allocator_options.c" \
   "$script_dir/probes/allocator_seam.c" -o "$temp_root/allocator-seam"
 "$temp_root/allocator-seam"
 

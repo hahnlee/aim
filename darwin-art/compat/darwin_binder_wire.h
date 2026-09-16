@@ -6,6 +6,12 @@
 
 namespace darwin_art {
 
+// Register transport on a runtime RemoteBinder class from the caller's loader.
+// Needed both for app-created endpoints and Binder-imported system callbacks.
+bool RegisterRemoteBinderNatives(JNIEnv* env, jclass endpoint);
+bool RegisterSystemServicesNatives(JNIEnv* env, jclass endpoint);
+jobject ConnectSystemBinder(JNIEnv* env, const char* socket_path);
+
 // Starts the process-local Binder reader used to receive callbacks from a
 // remote Android Service after the initiating Java transact() has returned.
 bool StartRemoteBinderDispatcher(JNIEnv* env, jint control_fd);
@@ -38,8 +44,8 @@ int ServeRemoteBinder(JNIEnv* env, jint control_fd, jobject local_binder);
 // Releases browser-side global Binder references associated with a channel.
 void CloseRemoteBinderChannel(JNIEnv* env, jint control_fd);
 
-// Connects to system_server-lite's package-registry Binder and returns the
-// daemon-owned immutable launch record. Empty means unavailable/not installed.
+// Resolves the package-registry Binder through the system service directory,
+// then returns its immutable launch record. Protocol exceptions are preserved.
 std::string QuerySystemPackageRecord(JNIEnv* env, const char* socket_path,
                                      const char* package_name);
 

@@ -80,3 +80,39 @@ pub(crate) fn verify_dex_contract(
     }
     Ok(())
 }
+
+// The probe's diagnostic enumerates class_defs, not referenced type strings.
+// These classes must have a single owner in original services.jar.
+pub(crate) fn verify_service_definitions_external(output: &str) -> Result<()> {
+    for name in [
+        "Lcom/android/server/pm/AbstractStatsBase;",
+        "Lcom/android/server/pm/AbstractStatsBase$1;",
+        "Lcom/android/server/pm/dex/PackageDexUsage;",
+        "Lcom/android/server/pm/dex/PackageDexUsage$DexUseInfo;",
+        "Lcom/android/server/pm/dex/PackageDexUsage$PackageUseInfo;",
+    ] {
+        if output.contains(&format!("={name}")) {
+            return Err(format!("support DEX shadows original services.jar class {name}").into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod service_ownership_tests {
+    #[test]
+    fn rejects_copied_original_but_allows_adapter() {
+        assert!(
+            super::verify_service_definitions_external(
+                "class[2]=Lcom/android/server/pm/dex/PackageDexUsage;"
+            )
+            .is_err()
+        );
+        assert!(
+            super::verify_service_definitions_external(
+                "class[2]=Lcom/android/server/pm/dex/DexUsageStore;"
+            )
+            .is_ok()
+        );
+    }
+}

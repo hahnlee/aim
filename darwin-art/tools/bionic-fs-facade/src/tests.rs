@@ -12,6 +12,90 @@ mod tests {
         fn darwin_art_bionic_errno_load() -> i32;
     }
 
+    unsafe extern "C" fn open_binder(flags: c_int, mode: u32, error: *mut c_int) -> c_int {
+        assert_eq!(flags, O_RDWR | O_CLOEXEC);
+        assert_eq!(mode, 0);
+        unsafe { *error = 0 };
+        0x4000_0123
+    }
+
+    unsafe extern "C" fn duplicate_host_descriptor(
+        fd: c_int,
+        host_fd: *mut c_int,
+    ) -> c_int {
+        if host_fd.is_null() {
+            return -1;
+        }
+        // SAFETY: this focused callback is invoked with one live test fd and
+        // transfers the successful duplicate to the facade.
+        let duplicate = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned();
+        match duplicate {
+            Ok(duplicate) => {
+                unsafe { host_fd.write(duplicate.into_raw_fd()) };
+                1
+            }
+            Err(_) => -1,
+        }
+    }
+
+    #[test]
+    fn fstat_borrows_metadata_from_an_external_descriptor_owner() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        assert_eq!(
+            darwin_art_bionic_fs_bind_host_descriptor_resolver(Some(
+                duplicate_host_descriptor
+            )),
+            0
+        );
+        let path = std::env::temp_dir().join(format!(
+            "darwin-art-external-fstat-{}",
+            std::process::id()
+        ));
+        let external = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        external.set_len(65_536).unwrap();
+        let facade = Facade::new(File::open("/").unwrap(), b"/", b"/").unwrap();
+        let mut status = AndroidStat::default();
+        assert_eq!(
+            unsafe { facade.fstat(external.as_raw_fd(), &mut status) },
+            0
+        );
+        assert_eq!(status.st_size, 65_536);
+        assert_eq!(status.st_mode & ANDROID_S_IFREG, ANDROID_S_IFREG);
+        assert_eq!(darwin_art_bionic_fs_bind_host_descriptor_resolver(None), 0);
+        drop(external);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn exact_dev_binder_open_uses_single_process_device_hook() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        assert_eq!(
+            darwin_art_bionic_fs_bind_binder_device_open(Some(open_binder)),
+            0
+        );
+        assert_eq!(
+            darwin_art_bionic_fs_bind_binder_device_open(Some(open_binder)),
+            -1
+        );
+        assert_eq!(
+            unsafe {
+                darwin_art_bionic_fs_open_core(
+                    c"/dev/binder".as_ptr(),
+                    O_RDWR | O_CLOEXEC,
+                    0,
+                )
+            },
+            0x4000_0123
+        );
+        assert_eq!(darwin_art_bionic_fs_bind_binder_device_open(None), 0);
+    }
+
     #[test]
     fn proc_executable_readlink_has_android_identity_and_linux_truncation() {
         let facade = Facade::new(File::open("/").unwrap(), b"/system", b"/system").unwrap();
@@ -72,6 +156,30 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_take_restore_preserves_flags_and_reuse_clears_them() {
+        let mut table = DescriptorTable::default();
+        let fd = table
+            .insert_with_flags(Descriptor::Random(RandomDeviceKind::Random), true)
+            .unwrap();
+        let descriptor = table.take(fd).unwrap();
+        assert_eq!(table.fd_flags(fd), Some(FD_CLOEXEC));
+        table.next = fd; // Simulate allocation wrapping to the leased slot.
+        let other = table.insert(Descriptor::Random(RandomDeviceKind::Urandom)).unwrap();
+        assert_ne!(other, fd);
+        table.restore(fd, descriptor);
+        assert_eq!(table.fd_flags(fd), Some(FD_CLOEXEC));
+
+        let descriptor = table.close_entry(fd).unwrap();
+        assert_eq!(table.fd_flags(fd), None);
+        drop(descriptor);
+        let reused = table
+            .insert_with_flags(Descriptor::Random(RandomDeviceKind::Urandom), false)
+            .unwrap();
+        assert_eq!(reused, fd);
+        assert_eq!(table.fd_flags(reused), Some(0));
+    }
+
+    #[test]
     fn unknown_darwin_errno_publishes_eio_and_marks_capability_failure() {
         let facade = Facade::new(File::open("/").unwrap(), b"/system", b"/system").unwrap();
         Facade::set_android_errno(2);
@@ -97,7 +205,62 @@ mod tests {
             assert!(!directory.is_null());
             assert_eq!(facade.closedir(directory), 0);
         }
-        assert!(facade.directories.lock().unwrap().streams.is_empty());
+        assert!(facade.directories.lock().unwrap().is_empty());
+        assert!(facade.descriptors.lock().unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn opendir_initializes_close_on_exec_and_fdopendir_preserves_it() {
+        let facade = Facade::new(File::open("/").unwrap(), b"/system", b"/system").unwrap();
+        let directory = facade.opendir(b"/system");
+        assert!(!directory.is_null());
+        let opendir_fd = facade.dirfd(directory);
+        assert_eq!(facade.fcntl(opendir_fd, 1, 0), FD_CLOEXEC);
+        assert_eq!(facade.closedir(directory), 0);
+
+        let plain_fd = facade.open(b"/system", O_RDONLY | O_DIRECTORY);
+        assert!(plain_fd >= 10_000);
+        assert_eq!(facade.fcntl(plain_fd, 1, 0), 0);
+        let plain_directory = facade.fdopendir(plain_fd);
+        assert!(!plain_directory.is_null());
+        // AOSP fdopendir adopts the supplied descriptor and does not alter
+        // its descriptor flags.
+        assert_eq!(facade.fcntl(plain_fd, 1, 0), 0);
+        assert_eq!(facade.closedir(plain_directory), 0);
+
+        let cloexec_fd = facade.open(b"/system", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        assert!(cloexec_fd >= 10_000);
+        let cloexec_directory = facade.fdopendir(cloexec_fd);
+        assert!(!cloexec_directory.is_null());
+        assert_eq!(facade.fcntl(cloexec_fd, 1, 0), FD_CLOEXEC);
+        assert_eq!(facade.closedir(cloexec_directory), 0);
+    }
+
+    #[test]
+    fn directory_fd_preserves_guest_identity_until_closedir() {
+        let facade = Facade::new(File::open("/").unwrap(), b"/system", b"/system").unwrap();
+        let fd = facade.open(b"/system", 0);
+        assert!(fd >= 0);
+        let directory = facade.fdopendir(fd);
+        assert!(!directory.is_null());
+        assert_eq!(facade.dirfd(directory), fd);
+        assert!(facade.descriptors.lock().unwrap().entries.contains_key(&fd));
+        assert!(!facade.readdir(directory).is_null());
+        assert_eq!(facade.closedir(directory), 0);
+        assert!(!facade.descriptors.lock().unwrap().entries.contains_key(&fd));
+        assert_eq!(facade.dirfd(directory), -1);
+        assert_eq!(unsafe { darwin_art_bionic_errno_load() }, ANDROID_EBADF);
+    }
+
+    #[test]
+    fn failed_fdopendir_preserves_callers_descriptor() {
+        let facade = Facade::new(File::open("/").unwrap(), b"/system", b"/system").unwrap();
+        let fd = facade.descriptors.lock().unwrap()
+            .insert(Descriptor::File(File::open("/dev/null").unwrap())).unwrap();
+        assert!(facade.fdopendir(fd).is_null());
+        assert_eq!(unsafe { darwin_art_bionic_errno_load() }, ANDROID_ENOTDIR);
+        assert!(facade.descriptors.lock().unwrap().entries.contains_key(&fd));
+        assert_eq!(facade.close(fd), 0);
     }
 
     struct BlockingEntropy {
@@ -234,7 +397,7 @@ mod tests {
         fs::write(&outside, b"outside").unwrap();
         std::os::unix::fs::symlink(&outside, private_root.join("escape")).unwrap();
         let mut facade = Facade::new(File::open("/").unwrap(), b"/", b"/").unwrap();
-        facade.private_root = Some(private_root.clone());
+        facade.private_root = Some(private_data::PrivateDataRoot::open(private_root.clone()).unwrap());
         assert_eq!(facade.open(private_root.join("escape").as_os_str().as_bytes(), O_RDONLY), -1);
         fs::remove_dir_all(private_root).unwrap();
         fs::remove_file(outside).unwrap();
@@ -249,13 +412,16 @@ mod tests {
         ));
         fs::create_dir_all(&private_root).unwrap();
         let mut facade = Facade::new(File::open("/").unwrap(), b"/", b"/").unwrap();
-        facade.private_root = Some(private_root.clone());
+        facade.private_root = Some(private_data::PrivateDataRoot::open(private_root.clone()).unwrap());
         assert_eq!(facade.mkdir(b"/data/fcntl", 0o755), 0);
         let fd = facade.open(b"/data/fcntl/file", O_RDWR | O_CREAT | O_TRUNC);
         assert!(fd >= 10_000);
 
-        assert_eq!(facade.fcntl(fd, 1, 0), 1);
+        assert_eq!(facade.fcntl(fd, 1, 0), 0);
         assert_eq!(facade.fcntl(fd, 2, 1), 0);
+        assert_eq!(facade.fcntl(fd, 1, 0), 1);
+        assert_eq!(facade.fcntl(fd, 2, 0), 0);
+        assert_eq!(facade.fcntl(fd, 1, 0), 0);
         assert_eq!(facade.fcntl(fd, 3, 0) & O_ACCMODE, O_RDWR);
         assert_eq!(facade.fcntl(fd, 4, (O_APPEND | O_NONBLOCK) as isize), 0);
         let status = facade.fcntl(fd, 3, 0);
@@ -265,6 +431,31 @@ mod tests {
         assert_eq!(facade.fcntl(fd, 4, O_CREAT as isize), -1);
         assert_eq!(facade.close(fd), 0);
         fs::remove_dir_all(private_root).unwrap();
+    }
+
+    #[test]
+    fn descriptor_flags_follow_android_dup_and_reuse_rules() {
+        let facade = Facade::new(File::open("/").unwrap(), b"/system", b"/system").unwrap();
+        let original = facade.open(b"/dev/null", O_RDONLY | O_CLOEXEC);
+        assert!(original >= 10_000);
+        assert_eq!(facade.fcntl(original, 1, 0), FD_CLOEXEC);
+
+        let plain = facade.fcntl(original, 0, 0);
+        assert!(plain >= 10_000);
+        assert_eq!(facade.fcntl(plain, 1, 0), 0);
+
+        let cloexec = facade.fcntl(original, 1030, 0);
+        assert!(cloexec >= 10_000);
+        assert_eq!(facade.fcntl(cloexec, 1, 0), FD_CLOEXEC);
+
+        assert_eq!(facade.close(cloexec), 0);
+        let reused = facade.open(b"/dev/urandom", O_RDONLY);
+        assert_eq!(reused, cloexec);
+        assert_eq!(facade.fcntl(reused, 1, 0), 0);
+
+        assert_eq!(facade.close(reused), 0);
+        assert_eq!(facade.close(plain), 0);
+        assert_eq!(facade.close(original), 0);
     }
 
     #[test]
@@ -280,7 +471,7 @@ mod tests {
         let missing = private_root.join("copy.so");
 
         let mut facade = Facade::new(File::open("/").unwrap(), b"/", b"/").unwrap();
-        facade.private_root = Some(private_root.clone());
+        facade.private_root = Some(private_data::PrivateDataRoot::open(private_root.clone()).unwrap());
 
         let input_fd = facade.open(existing.as_os_str().as_bytes(), O_RDONLY);
         assert!(input_fd >= 10_000);
@@ -514,6 +705,109 @@ mod tests {
     }
 
     #[test]
+    fn mkdirat_retains_dirfd_cwd_and_mount_authority() {
+        // This fixture supplies a process environment mount. Isolate it from
+        // parallel tests constructing their own Facades in the parent process.
+        const CHILD: &str = "DARWIN_ART_MKDIRAT_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::mkdirat_retains_dirfd_cwd_and_mount_authority"])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let _serial = PROCESS_TEST_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "darwin-art-mkdirat-{}-{:?}",
+            std::process::id(),
+            thread::current().id()
+        ));
+        fs::create_dir_all(base.join("root/system")).unwrap();
+        fs::create_dir_all(base.join("data/work")).unwrap();
+        fs::write(base.join("data/work/file"), b"file").unwrap();
+
+        let previous = std::env::var_os("DARWIN_ART_ANDROID_PRIVATE_DATA_ROOT");
+        // SAFETY: this test serializes the process-wide environment mutation.
+        unsafe { std::env::set_var("DARWIN_ART_ANDROID_PRIVATE_DATA_ROOT", base.join("data")) };
+        let facade = Facade::new(File::open(base.join("root")).unwrap(), b"/", b"/").unwrap();
+        // SAFETY: restore the caller's process environment before exercising the facade.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("DARWIN_ART_ANDROID_PRIVATE_DATA_ROOT", value),
+                None => std::env::remove_var("DARWIN_ART_ANDROID_PRIVATE_DATA_ROOT"),
+            }
+        }
+
+        let directory_fd = facade.open(b"/data/work", O_RDONLY | O_DIRECTORY);
+        assert!(directory_fd >= 10_000);
+        fs::rename(base.join("data"), base.join("retained-data")).unwrap();
+        fs::create_dir(base.join("data")).unwrap();
+        assert_eq!(facade.mkdir_at(directory_fd, b"dirfd-child", 0o751), 0);
+        assert!(base.join("retained-data/work/dirfd-child").is_dir());
+        assert!(!base.join("data/work/dirfd-child").exists());
+
+        assert_eq!(facade.mkdir_at(directory_fd, b".", 0o700), -1);
+        assert_eq!(unsafe { darwin_art_bionic_errno_load() }, ANDROID_EEXIST);
+        assert_eq!(facade.mkdir_at(directory_fd, b"..", 0o700), -1);
+        assert_eq!(unsafe { darwin_art_bionic_errno_load() }, ANDROID_EEXIST);
+        assert_eq!(facade.mkdir_at(directory_fd, b"", 0o700), -1);
+        assert_eq!(unsafe { darwin_art_bionic_errno_load() }, ANDROID_ENOENT);
+        assert_eq!(facade.mkdir_at(-7, b"missing", 0o700), -1);
+        assert_eq!(unsafe { darwin_art_bionic_errno_load() }, ANDROID_EBADF);
+        assert_eq!(facade.mkdir_at(-7, b"/data/absolute", 0o750), 0);
+        assert!(base.join("retained-data/absolute").is_dir());
+
+        let file_fd = facade.open(b"/data/work/file", O_RDONLY);
+        assert!(file_fd >= 10_000);
+        assert_eq!(facade.mkdir_at(file_fd, b"child", 0o700), -1);
+        assert_eq!(unsafe { darwin_art_bionic_errno_load() }, ANDROID_ENOTDIR);
+        assert_eq!(facade.close(file_fd), 0);
+
+        assert_eq!(facade.chdir(b"/data/work"), 0);
+        fs::rename(base.join("retained-data/work"), base.join("retained-data/moved-work"))
+            .unwrap();
+        fs::create_dir(base.join("retained-data/work")).unwrap();
+        assert_eq!(facade.mkdir_at(AT_FDCWD, b"cwd-child", 0o700), 0);
+        assert!(base.join("retained-data/moved-work/cwd-child").is_dir());
+
+        let system_fd = facade.open(b"/system", O_RDONLY | O_DIRECTORY);
+        assert!(system_fd >= 10_000);
+        assert_eq!(facade.mkdir_at(system_fd, b"new", 0o700), -1);
+        assert_eq!(unsafe { darwin_art_bionic_errno_load() }, ANDROID_EROFS);
+        assert_eq!(facade.close(system_fd), 0);
+        assert_eq!(facade.mkdir_at(directory_fd, b"../../system/escape", 0o700), -1);
+        assert_eq!(unsafe { darwin_art_bionic_errno_load() }, ANDROID_EROFS);
+        assert_eq!(facade.close(directory_fd), 0);
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn fchown_does_not_acknowledge_unstored_overlay_ownership() {
+        let facade = Facade::new(File::open("/").unwrap(), b"/", b"/").unwrap();
+        let node = Arc::new(Mutex::new(OverlayFile {
+            inode: 99,
+            mode: ANDROID_S_IFREG | 0o600,
+            data: b"unchanged".to_vec(),
+        }));
+        let fd = facade.descriptors.lock().unwrap().insert_with_flags(
+            Descriptor::Overlay(OverlayDescriptor {
+                node: node.clone(), offset: 0, readable: true, writable: true,
+            }),
+            false,
+        ).unwrap();
+        assert_eq!(facade.fchown(fd, 12345, 23456), -1);
+        assert_eq!(unsafe { darwin_art_bionic_errno_load() }, ANDROID_EOPNOTSUPP);
+        assert_eq!(node.lock().unwrap().data, b"unchanged");
+        assert_eq!(node.lock().unwrap().mode, ANDROID_S_IFREG | 0o600);
+        assert_eq!(facade.close(fd), 0);
+        assert_eq!(facade.fchown(fd, 12345, 23456), -1);
+        assert_eq!(unsafe { darwin_art_bionic_errno_load() }, ANDROID_EBADF);
+    }
+
+    #[test]
     fn private_data_seed_creates_only_authorized_overlay_hierarchy() {
         let facade = Facade::new(File::open("/").unwrap(), b"/", b"/").unwrap();
         assert_eq!(
@@ -532,12 +826,68 @@ mod tests {
     }
 
     #[test]
+    fn system_data_atomic_rename_persists_and_is_not_in_app_namespace() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "darwin-art-system-data-{}-{:?}", std::process::id(), thread::current().id()
+        ));
+        let system_root = root.join("system/private-data");
+        let app_root = root.join("app/private-data");
+        fs::create_dir_all(&app_root).unwrap();
+        let helper = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib/system-private-data.sh");
+        let provision = || std::process::Command::new("bash")
+            .args(["-c", "source \"$1\"; prepare_system_private_data \"$2\"", "test"])
+            .arg(helper).arg(&system_root).status().unwrap();
+        assert!(provision().success());
+        assert_eq!(fs::metadata(&system_root).unwrap().permissions().mode() & 0o777, 0o500);
+        let mut system = Facade::new(File::open("/").unwrap(), b"/", b"/").unwrap();
+        system.private_root = Some(private_data::PrivateDataRoot::open(system_root.clone()).unwrap());
+        let temporary = b"/data/system/package-dex-usage.list.new";
+        let final_path = b"/data/system/package-dex-usage.list";
+        let fd = system.open(temporary, O_WRONLY | O_CREAT | O_TRUNC);
+        assert!(fd >= 10_000);
+        let bytes = b"PACKAGE_MANAGER__PACKAGE_DEX_USAGE__2\n";
+        assert_eq!(unsafe { system.write(fd, bytes.as_ptr().cast(), bytes.len()) }, bytes.len() as isize);
+        assert_eq!(system.fsync(fd), 0);
+        assert_eq!(system.close(fd), 0);
+        assert_eq!(system.rename_path(temporary, final_path), 0);
+        assert!(provision().success());
+        let mut reopened = Facade::new(File::open("/").unwrap(), b"/", b"/").unwrap();
+        reopened.private_root = Some(private_data::PrivateDataRoot::open(system_root.clone()).unwrap());
+        let fd = reopened.open(final_path, O_RDONLY);
+        assert!(fd >= 10_000);
+        let mut actual = vec![0; bytes.len()];
+        assert_eq!(unsafe { reopened.read(fd, actual.as_mut_ptr().cast(), actual.len()) }, bytes.len() as isize);
+        assert_eq!(actual, bytes);
+        assert_eq!(reopened.close(fd), 0);
+        let mut app = Facade::new(File::open("/").unwrap(), b"/", b"/").unwrap();
+        app.private_root = Some(private_data::PrivateDataRoot::open(app_root).unwrap());
+        assert_eq!(app.open(final_path, O_RDONLY), -1);
+        // A preexisting symlink must not grant the service a different directory.
+        fs::set_permissions(&system_root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::rename(system_root.join("system"), root.join("saved-system")).unwrap();
+        std::os::unix::fs::symlink(root.join("saved-system"), system_root.join("system")).unwrap();
+        assert!(!provision().success());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn process_owner_cross_thread_rollback_duplicate_and_quiescent_uninstall() {
         let _serial = PROCESS_TEST_LOCK.lock().unwrap();
         assert_eq!(
             darwin_art_bionic_fs_process_uninstall(),
             PROCESS_OWNER_NOT_INSTALLED
         );
+        // Missing root authority must not install a substitute filesystem.
+        assert_eq!(
+            unsafe {
+                darwin_art_bionic_fs_process_install(
+                    -1, b"/".as_ptr(), 1, b"/".as_ptr(), 1,
+                )
+            },
+            PROCESS_OWNER_INVALID_ARGUMENT
+        );
+        assert_eq!(darwin_art_bionic_fs_process_uninstall(), PROCESS_OWNER_NOT_INSTALLED);
         let root = File::open("/").unwrap();
         // SAFETY: all byte slices and the borrowed directory fd remain live
         // through each synchronous installation attempt.
@@ -682,15 +1032,22 @@ mod tests {
         )
         .unwrap();
         assert!(meminfo.contains("MemTotal:        8388608 kB"));
+        // ProcfsMemoryUtil requires every one of these fields before it will
+        // construct a snapshot. The device provider supplies one complete,
+        // internally consistent Android view rather than leaking Darwin's
+        // differently-defined process accounting fields.
+        for path in [b"/proc/self/status".as_slice(), b"/proc/4242/status"] {
+            let status = String::from_utf8(Facade::synthetic_proc_contents(path).unwrap()).unwrap();
+            for field in ["Uid:", "VmHWM:", "VmRSS:", "RssAnon:", "RssShmem:", "VmSwap:"] {
+                assert!(status.contains(field), "missing {field} from {status}");
+            }
+        }
         assert_eq!(
-            Facade::synthetic_proc_contents(b"/proc/4242/status"),
-            Facade::synthetic_proc_contents(b"/proc/self/status")
+            Facade::synthetic_proc_contents(b"/proc/self/oom_score_adj"),
+            Some(b"0\n".to_vec())
         );
-        let status = String::from_utf8(
-            Facade::synthetic_proc_contents(b"/proc/self/status").unwrap(),
-        )
-        .unwrap();
-        assert!(status.ends_with(&format!("Cpus_allowed_list:\t0-{}\n", online - 1)));
+        assert!(Facade::synthetic_proc_contents(b"/proc/self/cmdline")
+            .is_some_and(|contents| contents.ends_with(&[0])));
         assert_eq!(
             Facade::synthetic_proc_contents(
                 format!(

@@ -86,6 +86,9 @@ int main(void) {
             [profileRoot stringByAppendingPathComponent:@"native-cache"];
         environment[@"DARWIN_ART_DAEMONIZED_LOG"] =
             [profileRoot stringByAppendingPathComponent:@"managed-apps.log"];
+        // The low-level launcher owns setup and daemonizes the final host.
+        // Keep the Finder shim short-lived after that ownership handoff.
+        environment[@"DARWIN_ART_ASYNC_LAUNCH"] = @"1";
 
         NSError *error = nil;
         if (!DARRun(runtime, control, @[@"ensure"], environment, &error)) {
@@ -106,19 +109,13 @@ int main(void) {
         }
         NSString *launcher = [runtime URLByAppendingPathComponent:
                                        @"tools/run-android-apk-app.sh"].path;
-        NSData *result = DARRun(runtime, control,
-                                @[@"daemonize", package, launcher, @"--record",
-                                  recordURL.path, @"86400"], environment, &error);
+        NSData *result = DARRun(runtime, launcher,
+                                @[@"--record", recordURL.path, @"86400"], environment, &error);
         if (!result) {
             [NSFileManager.defaultManager removeItemAtURL:recordURL error:nil];
             DARShowError(error);
             return 1;
         }
-        // darwin-artd acknowledges the supervised process before the launcher
-        // script has necessarily opened its record. Keep the short-lived shim
-        // alive long enough for exec and record ingestion; the Android window is
-        // already launching independently during this grace period.
-        [NSThread sleepForTimeInterval:5.0];
         [NSFileManager.defaultManager removeItemAtURL:recordURL error:nil];
     }
     return 0;

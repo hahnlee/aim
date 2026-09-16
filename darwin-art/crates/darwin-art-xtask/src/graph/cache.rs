@@ -89,6 +89,13 @@ fn depfile_dependencies(depfile: &Path) -> io::Result<Vec<PathBuf>> {
 /// ART core object directory.  The archive member list remains authoritative,
 /// so stale objects that are no longer members cannot leak into the Ninja
 /// graph.
+fn matches_required_source(source: &Path, required: &str) -> bool {
+    // Adapter paths are relative to compat; runtime modules start with ../.
+    // Compare the subsystem path, not the basename: app/process_entry.cc must
+    // never satisfy a missing system/process_entry.cc producer.
+    source.ends_with(required.strip_prefix("../").unwrap_or(required))
+}
+
 pub(crate) fn cached_native_objects_from_dirs(
     object_dirs: &[&Path],
     archive: &Path,
@@ -151,10 +158,9 @@ pub(crate) fn cached_native_objects_from_dirs(
         }
     }
     if required_sources.iter().any(|required| {
-        let required_name = Path::new(required).file_name();
         !by_name
             .values()
-            .any(|object| object.source.file_name() == required_name)
+            .any(|object| matches_required_source(&object.source, required))
     }) {
         // A source-list change must not be hidden by an older archive cache.
         // Let the canonical builder materialize the missing TU and its
@@ -199,7 +205,7 @@ pub(crate) fn emit_cached_native_graph(
     archive: &str,
     rules_emitted: &mut bool,
 ) {
-    emit_cached_native_graph_with_inputs(graph, objects, archive, rules_emitted, &[]);
+    emit_cached_native_graph_with_inputs(graph, objects, archive, rules_emitted, &[], &[]);
 }
 
 pub(crate) fn emit_cached_native_graph_with_inputs(
@@ -208,8 +214,14 @@ pub(crate) fn emit_cached_native_graph_with_inputs(
     archive: &str,
     rules_emitted: &mut bool,
     extra_archive_inputs: &[PathBuf],
+    object_order_only_inputs: &[PathBuf],
 ) {
-    let mut object_paths = emit_cached_native_object_edges(graph, objects, rules_emitted);
+    let mut object_paths = emit_cached_native_object_edges_with_order_only(
+        graph,
+        objects,
+        rules_emitted,
+        object_order_only_inputs,
+    );
     object_paths.extend(extra_archive_inputs.iter().map(|path| ninja_path(path)));
     graph.push_str("build ");
     graph.push_str(archive);
@@ -222,10 +234,11 @@ pub(crate) fn emit_cached_native_graph_with_inputs(
 /// objects are members of both the headless and graphics archives, but each
 /// object must have exactly one Ninja producer so edits invalidate both
 /// consumers without duplicate output declarations.
-pub(crate) fn emit_cached_native_object_edges(
+pub(crate) fn emit_cached_native_object_edges_with_order_only(
     graph: &mut String,
     objects: &[CachedNativeObject],
     rules_emitted: &mut bool,
+    order_only_inputs: &[PathBuf],
 ) -> Vec<String> {
     if !*rules_emitted {
         graph.push_str("rule native_cached_cpp\n");
@@ -312,9 +325,16 @@ pub(crate) fn emit_cached_native_object_edges(
                     .join(" "),
             );
         }
+        let mut order_only = order_only_inputs
+            .iter()
+            .map(|input| ninja_path(input))
+            .collect::<Vec<_>>();
         if needs_dependency_scan {
+            order_only.push(ninja_path(&depfile));
+        }
+        if !order_only.is_empty() {
             graph.push_str(" || ");
-            graph.push_str(&ninja_path(&depfile));
+            graph.push_str(&order_only.join(" "));
         }
         graph.push('\n');
         graph.push_str("  compile_command = ");
@@ -341,9 +361,29 @@ pub(crate) fn emit_cached_native_object_edges(
 
 #[cfg(test)]
 mod tests {
-    use super::{CachedNativeObject, dependency_scan_command, depfile_dependencies};
+    use super::{
+        CachedNativeObject, dependency_scan_command, depfile_dependencies,
+        emit_cached_native_object_edges_with_order_only,
+    };
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn required_source_retains_subsystem_identity() {
+        let required = "../runtime/framework/system/process_entry.cc";
+        assert!(!super::matches_required_source(
+            PathBuf::from("/repo/compat/../runtime/framework/app/process_entry.cc").as_path(),
+            required,
+        ));
+        assert!(super::matches_required_source(
+            PathBuf::from("/repo/compat/../runtime/framework/system/process_entry.cc").as_path(),
+            required,
+        ));
+        assert!(super::matches_required_source(
+            PathBuf::from("/repo/compat/binder/service_endpoint.cc").as_path(),
+            "binder/service_endpoint.cc",
+        ));
+    }
 
     fn object(command: &str, shell_quoted: bool) -> CachedNativeObject {
         CachedNativeObject {
@@ -404,5 +444,35 @@ mod tests {
         );
         assert!(scan.contains("'-DART_BASE_ADDRESS_MIN_DELTA=(-0x1000000)'"));
         assert!(!scan.contains(" -c "));
+    }
+
+    #[test]
+    fn cached_object_waits_for_shared_shadow_publication() {
+        let id = format!("{}", std::process::id());
+        let cached = CachedNativeObject {
+            object: PathBuf::from(format!("/tmp/darwin-art-{id}-object.o")),
+            source: PathBuf::from(format!("/tmp/darwin-art-{id}-source.cc")),
+            command: format!(
+                "clang++ -c /tmp/darwin-art-{id}-source.cc -o /tmp/darwin-art-{id}-object.o"
+            ),
+            shell_quoted: false,
+        };
+        let marker = PathBuf::from(format!("/tmp/darwin-art-{id}-shadow-ready"));
+        let mut graph = String::new();
+        let mut rules = false;
+        emit_cached_native_object_edges_with_order_only(
+            &mut graph,
+            &[cached],
+            &mut rules,
+            std::slice::from_ref(&marker),
+        );
+        assert!(
+            graph.lines().any(|line| {
+                line.starts_with("build /tmp/darwin-art-")
+                    && line.contains("-object.o: native_cached_cpp")
+                    && line.contains(&format!("|| {}", marker.display()))
+            }),
+            "cached object edge lacks the shared-shadow order-only barrier: {graph}"
+        );
     }
 }

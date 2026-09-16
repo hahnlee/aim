@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <inttypes.h>
 #include <locale.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -60,6 +61,30 @@ __attribute__((visibility("default"))) int bionic_numeric_fixture_basic(void) {
   if (strtoull_l(text, &end, 10, (locale_t)(uintptr_t)1) != UINT64_MAX ||
       *end != '\0')
     return 14;
+  text = "9223372036854775807!";
+  errno = 707;
+  if (strtoimax(text, &end, 10) != INTMAX_MAX || Offset(text, end) != 19 ||
+      errno != 707)
+    return 15;
+  text = "-9223372036854775808!";
+  errno = 708;
+  if (strtoimax(text, &end, 10) != INTMAX_MIN || Offset(text, end) != 20 ||
+      errno != 708)
+    return 16;
+  text = "9223372036854775808!";
+  errno = 0;
+  if (strtoimax(text, &end, 10) != INTMAX_MAX || Offset(text, end) != 19 ||
+      errno != ERANGE)
+    return 17;
+  text = "-9223372036854775809!";
+  errno = 0;
+  if (strtoimax(text, &end, 10) != INTMAX_MIN || Offset(text, end) != 20 ||
+      errno != ERANGE)
+    return 18;
+  text = "123";
+  errno = 709;
+  if (strtoimax(text, &end, 1) != 0 || end != text || errno != EINVAL)
+    return 19;
   return 42;
 }
 

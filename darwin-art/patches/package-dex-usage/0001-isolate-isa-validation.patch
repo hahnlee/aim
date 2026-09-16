@@ -1,0 +1,20 @@
+--- a/PackageDexUsage.java
++++ b/PackageDexUsage.java
+@@ -24,7 +24,7 @@
+ import com.android.internal.annotations.VisibleForTesting;
+ import com.android.internal.util.FastPrintWriter;
+ import com.android.server.pm.AbstractStatsBase;
+-import com.android.server.pm.PackageManagerServiceUtils;
++import dev.darwinart.runtime.pm.DexInstructionSets;
+
+ import dalvik.system.VMRuntime;
+
+@@ -123,7 +123,7 @@
+     /* package */ boolean record(String owningPackageName, String dexPath, int ownerUserId,
+             String loaderIsa, boolean primaryOrSplit,
+             String loadingPackageName, String classLoaderContext, boolean overwriteCLC) {
+-        if (!PackageManagerServiceUtils.checkISA(loaderIsa)) {
++        if (!DexInstructionSets.checkISA(loaderIsa)) {
+             throw new IllegalArgumentException("loaderIsa " + loaderIsa + " is unsupported");
+         }
+         if (classLoaderContext == null) {

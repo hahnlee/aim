@@ -25,6 +25,8 @@ void* darwin_art_bionic_memmove(void* destination, const void* source, size_t le
 void* darwin_art_bionic___memmove_chk(void* destination, const void* source,
                                       size_t length, size_t destination_size);
 void* darwin_art_bionic_memset(void* destination, int value, size_t length);
+void* darwin_art_bionic_memset_explicit(void* destination, int value,
+                                        size_t length);
 void* darwin_art_bionic___memset_chk(void* destination, int value,
                                      size_t length, size_t destination_size);
 int darwin_art_bionic_strcmp(const char* left, const char* right);

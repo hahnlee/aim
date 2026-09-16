@@ -20,7 +20,44 @@ pub(super) fn inspection_from_bytes(bytes: &[u8]) -> Result<DarwinArtElfInspecti
         .into_iter()
         .map(|name| cstring_from_dynamic(name, "DT_NEEDED"))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(DarwinArtElfInspection { soname, needed })
+    let runpath = metadata
+        .runpath
+        .map(|bytes| cstring_from_dynamic(bytes, "DT_RUNPATH"))
+        .transpose()?;
+    Ok(DarwinArtElfInspection {
+        flags_1: metadata.flags_1,
+        soname,
+        needed,
+        runpath,
+    })
+}
+
+/// # Safety
+/// Inspection is live and output is writable. Borrowed string lasts until
+/// inspection_destroy; null means no DT_RUNPATH, not an empty present string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn darwin_art_elf_inspection_runpath(
+    inspection: *const DarwinArtElfInspection,
+    output: *mut *const c_char,
+    error: *mut DarwinArtElfErrorBuffer,
+) -> DarwinArtElfStatus {
+    ffi_call(error, || {
+        if output.is_null() {
+            return Err(FfiFailure::Invalid("runpath output is null"));
+        }
+        unsafe {
+            *output = ptr::null();
+        }
+        let inspection =
+            unsafe { inspection.as_ref() }.ok_or(FfiFailure::Invalid("inspection is null"))?;
+        unsafe {
+            *output = inspection
+                .runpath
+                .as_ref()
+                .map_or(ptr::null(), |path| path.as_ptr());
+        }
+        Ok(())
+    })
 }
 
 pub(super) fn validate_discovery_component(bytes: &[u8], what: &str) -> Result<(), FfiFailure> {
@@ -36,55 +73,6 @@ pub(super) fn validate_discovery_component(bytes: &[u8], what: &str) -> Result<(
         )));
     }
     Ok(())
-}
-
-fn read_discovery_file(
-    broker: &ReadOnlyBroker,
-    component: &[u8],
-    root_is_elf: Option<&mut bool>,
-) -> Result<Vec<u8>, FfiFailure> {
-    validate_discovery_component(component, "ELF graph filename")?;
-    let opened = broker.open(component).map_err(|error| {
-        FfiFailure::Io(format!("secure ELF graph component open failed: {error}"))
-    })?;
-    if !opened.metadata().is_file() {
-        return Err(FfiFailure::InvalidOwned(
-            "ELF graph component is not a regular file".to_owned(),
-        ));
-    }
-    let declared = usize::try_from(opened.metadata().len()).map_err(|_| {
-        FfiFailure::Bounds("ELF graph component size does not fit usize".to_owned())
-    })?;
-    let mut file = opened.into_file();
-    let mut bytes = Vec::with_capacity(4);
-    while bytes.len() < 4 {
-        let mut prefix = [0_u8; 4];
-        let read = file
-            .read(&mut prefix[..4 - bytes.len()])
-            .map_err(|error| FfiFailure::Io(format!("secure ELF graph read failed: {error}")))?;
-        if read == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&prefix[..read]);
-    }
-    if let Some(root_is_elf) = root_is_elf {
-        *root_is_elf = bytes.as_slice() == b"\x7fELF";
-    }
-    if declared == 0 || declared > MAX_DISCOVERY_FILE_SIZE {
-        return Err(FfiFailure::Bounds(format!(
-            "ELF graph component is outside the 1..={MAX_DISCOVERY_FILE_SIZE} byte file cap"
-        )));
-    }
-    bytes.reserve_exact(declared.saturating_sub(bytes.len()));
-    let mut file = file.take((MAX_DISCOVERY_FILE_SIZE + 1 - bytes.len()) as u64);
-    file.read_to_end(&mut bytes)
-        .map_err(|error| FfiFailure::Io(format!("secure ELF graph read failed: {error}")))?;
-    if bytes.len() != declared {
-        return Err(FfiFailure::Io(
-            "ELF graph component changed size while its authorized descriptor was read".to_owned(),
-        ));
-    }
-    Ok(bytes)
 }
 
 pub(super) fn discover_sibling_graph(
@@ -109,117 +97,17 @@ pub(super) fn discover_sibling_graph(
     let broker = ReadOnlyBroker::from_directory(directory)
         .map_err(|error| FfiFailure::Io(format!("invalid trusted library directory: {error}")))?;
 
-    let mut queue = VecDeque::from([(root_component.to_vec(), None::<Vec<u8>>)]);
-    let mut queued = HashSet::from([root_component.to_vec()]);
-    let mut discovered_sonames = HashSet::<Vec<u8>>::new();
-    let mut names = Vec::<CString>::new();
-    let mut graph_bytes = Vec::<Vec<u8>>::new();
-    let mut total_size = 0_usize;
-    let mut root_soname = None::<CString>;
-
-    let mut first_component = true;
-    while let Some((component, expected_soname)) = queue.pop_front() {
-        if let Some(expected) = expected_soname.as_ref()
-            && discovered_sonames.contains(expected)
-        {
-            continue;
-        }
-        if graph_bytes.len() >= MAX_DISCOVERY_FILES {
-            return Err(FfiFailure::Bounds(format!(
-                "ELF sibling graph exceeds the {MAX_DISCOVERY_FILES}-file cap"
-            )));
-        }
-        let bytes = read_discovery_file(
-            &broker,
-            &component,
-            first_component.then_some(&mut *root_is_elf),
-        )?;
-        if first_component {
-            first_component = false;
-            if !*root_is_elf {
-                return Err(FfiFailure::Format("invalid ELF: bad magic".to_owned()));
-            }
-        }
-        total_size = total_size
-            .checked_add(bytes.len())
-            .ok_or_else(|| FfiFailure::Bounds("ELF graph total size overflow".to_owned()))?;
-        if total_size > MAX_DISCOVERY_TOTAL_SIZE {
-            return Err(FfiFailure::Bounds(format!(
-                "ELF sibling graph exceeds the {MAX_DISCOVERY_TOTAL_SIZE}-byte total cap"
-            )));
-        }
-        let metadata = inspect_elf_metadata(&bytes).map_err(FfiFailure::Load)?;
-        if let Some(embedded) = metadata.soname.as_ref() {
-            validate_discovery_component(embedded, "embedded DT_SONAME")?;
-            if let Some(expected) = expected_soname.as_ref()
-                && embedded != expected
-            {
-                return Err(FfiFailure::Format(format!(
-                    "dependency embedded DT_SONAME does not exactly match requested sibling {}",
-                    String::from_utf8_lossy(expected)
-                )));
-            }
-        }
-        // DT_SONAME is optional for Android DSOs loaded by an explicit APK
-        // path. Bionic retains the requested filename as that object's lookup
-        // identity when it is absent. Dependencies similarly inherit their
-        // exact DT_NEEDED component.
-        let logical_soname = metadata
-            .soname
-            .clone()
-            .unwrap_or_else(|| expected_soname.clone().unwrap_or_else(|| component.clone()));
-        validate_discovery_component(&logical_soname, "logical ELF SONAME")?;
-        if providers.contains(&logical_soname) {
-            return Err(FfiFailure::Format(
-                "real ELF graph member collides with a builtin provider SONAME".to_owned(),
-            ));
-        }
-        if !discovered_sonames.insert(logical_soname.clone()) {
-            return Err(FfiFailure::Format(
-                "two graph paths produced the same logical SONAME".to_owned(),
-            ));
-        }
-        std::str::from_utf8(&logical_soname).map_err(|_| {
-            FfiFailure::Format(
-                "logical SONAME is not UTF-8; the closed graph namespace cannot key it".to_owned(),
-            )
-        })?;
-        let name = cstring_from_dynamic(logical_soname, "logical SONAME")?;
-        if root_soname.is_none() {
-            root_soname = Some(name.clone());
-        }
-        names.push(name);
-        graph_bytes.push(bytes);
-
-        for needed in metadata.needed_libraries {
-            validate_discovery_component(&needed, "DT_NEEDED dependency filename")?;
-            if providers.contains(&needed) || discovered_sonames.contains(&needed) {
-                continue;
-            }
-            std::str::from_utf8(&needed).map_err(|_| {
-                FfiFailure::Format(
-                    "DT_NEEDED dependency filename is not UTF-8; the closed graph namespace cannot key it"
-                        .to_owned(),
-                )
-            })?;
-            if queued.insert(needed.clone()) {
-                queue.push_back((needed.clone(), Some(needed)));
-            }
-        }
-    }
-
-    let mut sources = Vec::with_capacity(names.len());
-    for (name, bytes) in names.iter().zip(&graph_bytes) {
-        sources.push(DarwinArtElfGraphSource {
-            soname: name.as_ptr(),
-            bytes: bytes.as_ptr(),
-            length: bytes.len(),
-        });
-    }
-    Ok(DarwinArtElfDiscoveredGraph {
-        root_soname: root_soname.expect("nonempty discovery has one root"),
-        _names: names,
-        _bytes: graph_bytes,
-        sources,
-    })
+    super::ffi_graph_discovery::discover_admitted_graph(
+        root_component,
+        providers,
+        root_is_elf,
+        |component, _needed_by| {
+            broker
+                .open(component)
+                .map(|opened| (opened.into_file(), 0))
+                .map_err(|error| {
+                    FfiFailure::Io(format!("secure ELF graph component open failed: {error}"))
+                })
+        },
+    )
 }

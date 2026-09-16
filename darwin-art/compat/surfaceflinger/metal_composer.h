@@ -41,6 +41,25 @@ struct DarwinArtMetalComposerLayer {
   int32_t destination_top = 0;
   int32_t destination_right = 0;
   int32_t destination_bottom = 0;
+  // SurfaceControl geometry is retained independently from a buffer's source
+  // and destination rectangles. Structural parents commonly have no buffer,
+  // but their transform and crop still constrain every descendant.
+  int32_t position_x = 0;
+  int32_t position_y = 0;
+  float scale_x = 1.0f;
+  float scale_y = 1.0f;
+  bool has_crop = false;
+  int32_t crop_left = 0;
+  int32_t crop_top = 0;
+  int32_t crop_right = 0;
+  int32_t crop_bottom = 0;
+  // Resolved display-space ancestor clip. This is produced by the
+  // SurfaceFlinger hierarchy resolver, never by an application producer.
+  bool has_clip = false;
+  int32_t clip_left = 0;
+  int32_t clip_top = 0;
+  int32_t clip_right = 0;
+  int32_t clip_bottom = 0;
   int32_t z = 0;
   float alpha = 1.0f;
   uint32_t transparent_region_count = 0;

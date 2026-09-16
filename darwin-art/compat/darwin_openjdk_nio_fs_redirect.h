@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -268,6 +269,18 @@ static inline int darwin_art_openjdk_nio_ftruncate(int fd, off_t length) {
 
 static inline int darwin_art_openjdk_nio_fstat(int fd, struct stat* status) {
   if (!darwin_art_openjdk_nio_is_virtual_fd(fd)) return fstat(fd, status);
+  if (darwin_art_openjdk_nio_is_central_fd(fd)) {
+    const int host_fd = darwin_art_bionic_fd_export_for_scm(fd);
+    if (host_fd < 0) {
+      darwin_art_openjdk_nio_publish_errno(-1);
+      return -1;
+    }
+    const int result = fstat(host_fd, status);
+    const int saved_errno = errno;
+    (void)close(host_fd);
+    errno = saved_errno;
+    return result;
+  }
   DarwinArtAndroidStat android_status;
   const int result = darwin_art_bionic_fstat(fd, &android_status);
   darwin_art_openjdk_nio_publish_errno(result);
@@ -291,6 +304,30 @@ static inline int darwin_art_openjdk_nio_fstat(int fd, struct stat* status) {
   status->st_ctimespec.tv_nsec = android_status.st_ctim.tv_nsec;
   status->st_birthtimespec = status->st_ctimespec;
   return 0;
+}
+
+static inline int darwin_art_openjdk_nio_ioctl(int fd, unsigned long request,
+                                                void* argument) {
+  if (!darwin_art_openjdk_nio_is_virtual_fd(fd))
+    return ioctl(fd, request, argument);
+  if (darwin_art_openjdk_nio_is_central_fd(fd)) {
+    // FileInputStream.available0() uses FIONREAD on Darwin. Central guest
+    // descriptors are broker-owned capabilities rather than fs-facade slots,
+    // so borrow an SCM-safe host descriptor for this synchronous query.
+    const int host_fd = darwin_art_bionic_fd_export_for_scm(fd);
+    if (host_fd < 0) {
+      darwin_art_openjdk_nio_publish_errno(-1);
+      return -1;
+    }
+    const int result = ioctl(host_fd, request, argument);
+    const int saved_errno = errno;
+    (void)close(host_fd);
+    errno = saved_errno;
+    return result;
+  }
+  const int result = darwin_art_bionic_ioctl(fd, (int)request, argument);
+  darwin_art_openjdk_nio_publish_errno(result);
+  return result;
 }
 
 static inline int darwin_art_openjdk_nio_copy_stat(

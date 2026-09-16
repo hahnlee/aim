@@ -8,9 +8,18 @@ frameworks_native="$source_root/frameworks-native"
 hardware_interfaces="$source_root/hardware-interfaces"
 libhidl="$source_root/system-libhidl"
 libfmq="$source_root/system-libfmq"
+uapi="$source_root/binder-uapi/libc/kernel"
 tool_root="$project_root/_downloads/android16-surfaceflinger-core/tools"
 output_root="$project_root/_build/surfaceflinger-core"
 patch_file="$project_root/patches/frameworks-native/0001-darwin-surfaceflinger-core.patch"
+commit_patch="$project_root/patches/frameworks-native/0002-darwin-surface-commit-wait.patch"
+release_patch="$project_root/patches/frameworks-native/0003-buffer-release-message-length.patch"
+transport_patch="$project_root/patches/frameworks-native/0004-darwin-release-record-transport.patch"
+trigger_patch="$project_root/patches/frameworks-native/0005-darwin-binder-trigger-poll.patch"
+rpc_identity_patch="$project_root/patches/frameworks-native/0006-darwin-binder-rpc-peer-identity.patch"
+rpc_death_log_patch="$project_root/patches/frameworks-native/0007-rpc-binder-death-log-handle.patch"
+platform_syscalls_patch="$project_root/patches/frameworks-native/0008-darwin-binder-platform-syscalls.patch"
+fd_namespace_patch="$project_root/patches/frameworks-native/0009-darwin-binder-fd-namespace.patch"
 
 # shellcheck disable=SC1090
 source "$project_root/upstream/android16-surfaceflinger-core.lock"
@@ -30,13 +39,31 @@ for input in \
   "$frameworks_native/services/surfaceflinger/FrontEnd/RequestedLayerState.cpp" \
   "$frameworks_native/services/surfaceflinger/FrontEnd/LayerCreationArgs.cpp" \
   "$frameworks_native/libs/gui/libgui_flags.aconfig" \
+  "$frameworks_native/libs/input/android/os/IInputConstants.aidl" \
   "$hardware_interfaces/graphics/common/aidl/Android.bp" \
   "$libhidl/base/include/hidl/HidlSupport.h" \
   "$libfmq/base/fmq/MQDescriptorBase.h" \
   "$tool_root/aidl" "$tool_root/hidl-gen" "$tool_root/aconfig" \
-  "$patch_file"; do
+  "$patch_file" "$commit_patch" "$release_patch" "$transport_patch" "$trigger_patch" \
+  "$rpc_identity_patch" "$rpc_death_log_patch" "$platform_syscalls_patch" \
+  "$fd_namespace_patch"; do
   [[ -e "$input" ]] || fail_build "missing input $input"
 done
+
+[[ "$(shasum -a 256 "$commit_patch" | awk '{print $1}')" == "$DARWIN_COMMIT_WAIT_PATCH_SHA256" ]] || \
+  fail_build "commit wait patch identity mismatch"
+[[ "$(shasum -a 256 "$release_patch" | awk '{print $1}')" == "$BUFFER_RELEASE_LENGTH_PATCH_SHA256" ]] || \
+  fail_build "buffer release length patch identity mismatch"
+[[ "$(shasum -a 256 "$transport_patch" | awk '{print $1}')" == "$DARWIN_RELEASE_TRANSPORT_PATCH_SHA256" ]] || \
+  fail_build "release transport patch identity mismatch"
+[[ "$(shasum -a 256 "$rpc_identity_patch" | awk '{print $1}')" == "$DARWIN_BINDER_RPC_PEER_IDENTITY_PATCH_SHA256" ]] || \
+  fail_build "Binder RPC peer identity patch mismatch"
+[[ "$(shasum -a 256 "$rpc_death_log_patch" | awk '{print $1}')" == "$DARWIN_BINDER_RPC_DEATH_LOG_PATCH_SHA256" ]] || \
+  fail_build "Binder RPC death-log patch mismatch"
+[[ "$(shasum -a 256 "$platform_syscalls_patch" | awk '{print $1}')" == "$DARWIN_BINDER_PLATFORM_SYSCALLS_PATCH_SHA256" ]] || \
+  fail_build "Binder platform-syscall patch mismatch"
+[[ "$(shasum -a 256 "$fd_namespace_patch" | awk '{print $1}')" == "$DARWIN_BINDER_FD_NAMESPACE_PATCH_SHA256" ]] || \
+  fail_build "Binder FD namespace patch mismatch"
 
 cxx="$(xcrun --find clang++)"
 ar="$(xcrun --find ar)"
@@ -49,7 +76,11 @@ generation_identity="$(printf '%s\n%s\n%s\n%s\n' \
   "$FRAMEWORKS_NATIVE_REVISION" "$HARDWARE_INTERFACES_REVISION" \
   "$SYSTEM_LIBHIDL_REVISION" "$SYSTEM_LIBFMQ_REVISION"; \
   shasum -a 256 "$patch_file" "$tool_root/aidl" "$tool_root/hidl-gen" \
-    "$tool_root/aconfig")"
+    "$tool_root/aconfig" "$commit_patch" "$release_patch" "$transport_patch" "$trigger_patch" \
+    "$rpc_identity_patch" "$rpc_death_log_patch" "$platform_syscalls_patch" \
+    "$fd_namespace_patch" \
+    "$project_root/compat/surfaceflinger/commit_signal.h"; \
+  printf '%s\n' 'input-aidl:InputConfig+IInputConstants-v1')"
 generation_identity="$(printf '%s' "$generation_identity" | shasum -a 256 | awk '{print $1}')"
 
 if [[ ! -f "$workspace/generation-identity" || \
@@ -58,6 +89,14 @@ if [[ ! -f "$workspace/generation-identity" || \
   mkdir -p "$workspace"
   ditto "$frameworks_native" "$shadow"
   patch -s -d "$shadow" -p1 < "$patch_file"
+  patch -s -d "$shadow" -p1 < "$commit_patch"
+  patch -s -d "$shadow" -p1 < "$release_patch"
+  patch -s -d "$shadow" -p1 < "$transport_patch"
+  patch --batch --fuzz=0 -s -d "$shadow" -p1 < "$trigger_patch"
+  patch --batch --fuzz=0 -s -d "$shadow" -p1 < "$rpc_identity_patch"
+  patch --batch --fuzz=0 -s -d "$shadow" -p1 < "$rpc_death_log_patch"
+  patch --batch --fuzz=0 -s -d "$shadow" -p1 < "$platform_syscalls_patch"
+  patch --batch --fuzz=0 -s -d "$shadow" -p1 < "$fd_namespace_patch"
 
   mkdir -p "$generated/aidl/include" "$generated/aidl/src" \
   "$generated/gui/include" "$generated/gui/src" \
@@ -106,7 +145,8 @@ done < <(find \
 "$tool_root/aidl" --lang=cpp --min_sdk_version=29 --omit_invocation \
   -I"$shadow/libs/input" \
   -h "$generated/input/include" -o "$generated/input/src" \
-  "$shadow/libs/input/android/os/InputConfig.aidl"
+  "$shadow/libs/input/android/os/InputConfig.aidl" \
+  "$shadow/libs/input/android/os/IInputConstants.aidl"
 "$tool_root/aidl" --lang=cpp --min_sdk_version=29 --omit_invocation \
   -I"$shadow/aidl/gui" \
   -h "$generated/platform/include" -o "$generated/platform/src" \
@@ -136,48 +176,7 @@ fi
 artifact_stage="$(mktemp -d "$output_root/artifact.XXXXXX")"
 trap 'rm -rf "$artifact_stage"' EXIT
 
-flags=(
-  -arch arm64 -isysroot "$sdk_root" -std=c++23 -O2 -fPIC
-  -DANDROID_UTILS_REF_BASE_DISABLE_IMPLICIT_CONSTRUCTION
-  -Wall -Wextra -Wconversion
-  -Wno-deprecated-declarations -Wno-deprecated-literal-operator
-  -Wno-invalid-specialization -Wno-unused-parameter
-  -include utility -include atomic
-  -I"$project_root/compat/surfaceflinger"
-  -I"$generated/aidl/include"
-  -I"$generated/gui/include"
-  -I"$generated/input/include"
-  -I"$generated/platform/include"
-  -I"$generated/hidl"
-  -I"$generated/aconfig/include"
-  -I"$libhidl/base/include"
-  -I"$libhidl/transport/include"
-  -I"$libhidl/transport/token/1.0/utils/include"
-  -I"$libfmq/base"
-  -I"$shadow/services/surfaceflinger"
-  -I"$shadow/services/surfaceflinger/common/include"
-  -I"$shadow/services/surfaceflinger/Scheduler/include"
-  -I"$shadow/libs/binder/include"
-  -I"$shadow/libs/binder/ndk/include_cpp"
-  -I"$shadow/libs/binder/ndk/include_ndk"
-  -I"$shadow/libs/gui/include"
-  -I"$shadow/libs/renderengine/include"
-  -I"$shadow/libs/ftl/include"
-  -I"$project_root/_aosp/frameworks/native/include"
-  -I"$project_root/_aosp/frameworks/native/libs/arect/include"
-  -I"$project_root/_aosp/frameworks/native/libs/math/include"
-  -I"$project_root/_aosp/frameworks/native/libs/nativebase/include"
-  -I"$project_root/_aosp/frameworks/native/libs/nativewindow/include"
-  -I"$project_root/_aosp/frameworks/native/libs/ui/include"
-  -I"$project_root/_aosp/frameworks/native/libs/ui/include_types"
-  -I"$project_root/_aosp/hardware/libhardware/include_all"
-  -I"$project_root/_aosp/system/core/libcutils/include"
-  -I"$project_root/_aosp/system/core/libsystem/include"
-  -I"$project_root/_aosp/system/core/libutils/include"
-  -I"$project_root/_aosp/system/core/libutils/binder/include"
-  -I"$project_root/_aosp/system/libbase/include"
-  -I"$project_root/_aosp/system/logging/liblog/include"
-)
+source "$script_dir/lib/surfaceflinger-compile-flags.sh"
 
 object_root="$output_root/objects"
 build_identity="$(printf '%s\n%s\n' "$generation_identity" \
@@ -232,8 +231,10 @@ compile_object "$creation_args_object" "${flags[@]}" -c \
 compile_object "$probe_object" "${flags[@]}" -c \
   "$project_root/probes/surfaceflinger_transaction_handler_compile.cc"
 compile_object "$runtime_probe_object" "${flags[@]}" -c \
+  -include "$project_root/compat/surfaceflinger/transaction_bridge.h" \
   "$project_root/probes/surfaceflinger_transaction_handler_runtime.cc"
 compile_object "$transaction_bridge_object" "${flags[@]}" -c \
+  -include "$project_root/compat/surfaceflinger/transaction_bridge.h" \
   "$project_root/compat/surfaceflinger/transaction_bridge.cc"
 compile_object "$layer_state_factory_object" "${flags[@]}" -c \
   "$project_root/compat/surfaceflinger/layer_state_factory.cc"
@@ -245,6 +246,7 @@ for generated_source in \
   android/gui/FocusRequest.cpp \
   android/gui/FrameTimelineInfo.cpp \
   android/gui/InputApplicationInfo.cpp \
+  android/gui/IWindowInfosReportedListener.cpp \
   android/gui/LayerMetadata.cpp \
   android/gui/TrustedPresentationThresholds.cpp; do
   object="$object_root/generated-$(basename "${generated_source%.cpp}").o"
@@ -254,6 +256,10 @@ done
 
 binder_objects=()
 binder_sources=(
+  IPCThreadState.cpp
+  ProcessState.cpp
+  Static.cpp
+  BufferedTextOutput.cpp
   Binder.cpp
   BpBinder.cpp
   Debug.cpp
@@ -265,21 +271,36 @@ binder_sources=(
   RpcSession.cpp
   RpcServer.cpp
   RpcState.cpp
+  RpcTransportRaw.cpp
   Stability.cpp
   Status.cpp
   TextOutput.cpp
   Utils.cpp
   file.cpp
   OS_unix_base.cpp
+  RecordedTransaction.cpp
 )
 for binder_source in "${binder_sources[@]}"; do
   object="$object_root/binder-${binder_source%.cpp}.o"
+  binder_extra_flags=()
+  if [[ "$binder_source" == RpcTransportRaw.cpp ]]; then
+    # Original libbase supplies the platform TEMP_FAILURE_RETRY macro on Darwin.
+    binder_extra_flags=(-include android-base/macros.h)
+  fi
+  if [[ "$binder_source" == RpcSession.cpp || "$binder_source" == RpcServer.cpp || \
+        "$binder_source" == RpcState.cpp || "$binder_source" == ProcessState.cpp || \
+        "$binder_source" == IPCThreadState.cpp || "$binder_source" == Parcel.cpp || \
+        "$binder_source" == OS_unix_base.cpp ]]; then
+    binder_extra_flags+=( -I"$project_root/compat/binder" )
+  fi
   compile_object "$object" "${flags[@]}" \
+    ${binder_extra_flags[@]+"${binder_extra_flags[@]}"} \
     -DBUILDING_LIBBINDER \
+    -DBINDER_WITH_KERNEL_IPC \
     -DBINDER_ENABLE_LIBLOG_ASSERT \
-    -DBINDER_DISABLE_NATIVE_HANDLE \
     -DBINDER_DISABLE_BLOB \
-    -DBINDER_NO_LIBBASE \
+    -I"$uapi/uapi" -I"$uapi/uapi/asm-arm64" -I"$uapi/android/uapi" \
+    -include "$project_root/compat/binder/device_uapi.h" \
     -include "$project_root/compat/surfaceflinger/binder_socket_darwin.h" \
     -c "$shadow/libs/binder/$binder_source"
   binder_objects+=("$object")
@@ -287,14 +308,30 @@ done
 binder_os_object="$object_root/binder-os-darwin.o"
 compile_object "$binder_os_object" "${flags[@]}" \
   -DBUILDING_LIBBINDER \
+  -DBINDER_WITH_KERNEL_IPC \
   -DBINDER_ENABLE_LIBLOG_ASSERT \
-  -DBINDER_DISABLE_NATIVE_HANDLE \
   -DBINDER_DISABLE_BLOB \
-  -DBINDER_NO_LIBBASE \
   -include "$project_root/compat/surfaceflinger/binder_socket_darwin.h" \
   -I"$shadow/libs/binder" \
   -c "$project_root/compat/surfaceflinger/binder_os_darwin.cc"
 binder_objects+=("$binder_os_object")
+
+# The standalone SurfaceFlinger transaction executable links Binder objects
+# directly, so give it the real Darwin RPC identity boundary and only a
+# test-owned process-registry implementation. The production archive retains
+# unresolved narrow hooks that are supplied by the runtime boundary archive.
+rpc_identity_probe_objects=()
+for rpc_identity_source in \
+  compat/binder/rpc_identity.cc \
+  compat/binder/calling_identity.cc \
+  compat/binder/peer_credentials.cc \
+  tools/tests/surfaceflinger-binder-platform-syscalls-fixture.cc \
+  tools/tests/surfaceflinger-binder-process-registry-fixture.cc; do
+  object="$object_root/rpc-identity-probe-$(basename "${rpc_identity_source%.*}").o"
+  compile_object "$object" "${flags[@]}" -I"$project_root/compat" \
+    -c "$project_root/$rpc_identity_source"
+  rpc_identity_probe_objects+=("$object")
+done
 
 fence_object="$object_root/ui-Fence.o"
 compile_object "$fence_object" "${flags[@]}" \
@@ -315,13 +352,18 @@ aconfig_runtime_object="$object_root/generated-libgui-aconfig.o"
 compile_object "$aconfig_runtime_object" "${flags[@]}" -c \
   "$generated/aconfig/com_android_graphics_libgui_flags.cc"
 gui_runtime_objects+=("$aconfig_runtime_object")
-for gui_source in LayerMetadata.cpp LayerState.cpp ITransactionCompletedListener.cpp HdrMetadata.cpp WindowInfo.cpp; do
+for gui_source in LayerMetadata.cpp LayerState.cpp ITransactionCompletedListener.cpp HdrMetadata.cpp WindowInfo.cpp DisplayLuts.cpp BufferReleaseChannel.cpp; do
   object="$object_root/gui-${gui_source%.cpp}.o"
-  compile_object "$object" "${flags[@]}" -c "$shadow/libs/gui/$gui_source"
+  compile_object "$object" "${flags[@]}" \
+    -I"$project_root/_aosp/external/fmtlib/include" -c "$shadow/libs/gui/$gui_source"
   gui_runtime_objects+=("$object")
 done
 
 archive="$artifact_stage/libsurfaceflinger-frontend-darwin.a"
+release_transport_object="$object_root/release-record-transport.o"
+compile_object "$release_transport_object" "${flags[@]}" -c \
+  "$project_root/compat/surfaceflinger/release_record_transport.cc"
+gui_runtime_objects+=("$release_transport_object")
 "$ar" rcs "$archive" "$handler_object" "$lifecycle_object" \
   "$hierarchy_object" "$requested_layer_object" "$creation_args_object" \
   "$probe_object" "$transaction_bridge_object" "$layer_state_factory_object"
@@ -349,6 +391,7 @@ runtime_probe="$artifact_stage/surfaceflinger-transaction-runtime"
   "$layer_state_factory_object" \
   "${gui_runtime_objects[@]}" \
   "${binder_objects[@]}" \
+  "${rpc_identity_probe_objects[@]}" \
   "$fence_object" \
   "$fence_sync_object" \
   "$fence_time_object" \
@@ -356,8 +399,23 @@ runtime_probe="$artifact_stage/surfaceflinger-transaction-runtime"
   "$project_root/_build/graphics-foundations/libutils-darwin.a" \
   "$project_root/_build/graphics-foundations/libcutils-darwin.a" \
   "$project_root/_build/graphics-foundations/liblog-darwin.a" \
+  "$project_root/_build/libbase-foundation/libandroid-base-darwin.a" \
   -o "$runtime_probe"
 "$runtime_probe"
+bash "$script_dir/test-release-record-transport.sh"
+
+native_handle_test="$artifact_stage/parcel-native-handle-test"
+"$cxx" "${flags[@]}" -c "$project_root/tools/tests/parcel-native-handle-test.cc" \
+  -o "$artifact_stage/parcel-native-handle-test.o"
+"$cxx" -arch arm64 -isysroot "$sdk_root" -Wl,-dead_strip "$artifact_stage/parcel-native-handle-test.o" \
+  "$binder_archive" \
+  "${rpc_identity_probe_objects[@]}" \
+  "$project_root/_build/graphics-foundations/libutils-darwin.a" \
+  "$project_root/_build/graphics-foundations/libcutils-darwin.a" \
+  "$project_root/_build/graphics-foundations/liblog-darwin.a" \
+  "$project_root/_build/libbase-foundation/libandroid-base-darwin.a" \
+  -o "$native_handle_test"
+"$native_handle_test"
 
 nm -u "$archive" | awk '$1 ~ /^_/ { print $1 }' | sort -u \
   > "$artifact_stage/undefined-symbols.txt"

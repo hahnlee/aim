@@ -1,0 +1,40 @@
+--- a/linker_config.cpp
++++ b/linker_config.cpp
+@@ -29,1 +29,2 @@
+ #include "linker_config.h"
++#include "filesystem/linker_config_fs.h"
+@@ -184,1 +185,1 @@
+-  if (!android::base::ReadFileToString(ld_config_file_path, &content)) {
++  if (!darwin_art::filesystem::ReadGuestConfig(ld_config_file_path, &content)) {
+@@ -239,1 +240,1 @@
+-      if (access(value.c_str(), R_OK) != 0) {
++      if (darwin_art::filesystem::GuestLinkerAccess(value.c_str(), R_OK) != 0) {
+@@ -247,1 +248,1 @@
+-      } else if (realpath(value.c_str(), buf)) {
++      } else if (darwin_art::filesystem::GuestLinkerRealpath(value.c_str(), buf)) {
+@@ -488,1 +489,1 @@
+-    if (!android::base::ReadFileToString(version_file, &content)) {
++    if (!darwin_art::filesystem::ReadGuestConfig(version_file, &content)) {
+--- a/linker_utils.cpp
++++ b/linker_utils.cpp
+@@ -29,1 +29,2 @@
+ #include "linker_utils.h"
++#include "filesystem/linker_config_fs.h"
+@@ -207,3 +208,3 @@
+-  if (realpath(original_path, resolved_path) != nullptr) {
+-    struct stat s;
+-    if (stat(resolved_path, &s) == -1) {
++  if (darwin_art::filesystem::GuestLinkerRealpath(original_path, resolved_path) != nullptr) {
++    DarwinArtAndroidStat s;
++    if (darwin_art::filesystem::GuestLinkerStat(resolved_path, &s) == -1) {
+@@ -228,1 +229,1 @@
+-      if (realpath(zip_path.c_str(), resolved_path) == nullptr) {
++      if (darwin_art::filesystem::GuestLinkerRealpath(zip_path.c_str(), resolved_path) == nullptr) {
+@@ -235,2 +236,2 @@
+-      struct stat s;
+-      if (stat(normalized_path.c_str(), &s) == 0 && S_ISDIR(s.st_mode)) {
++      DarwinArtAndroidStat s;
++      if (darwin_art::filesystem::GuestLinkerStat(normalized_path.c_str(), &s) == 0 && S_ISDIR(s.st_mode)) {
+@@ -247,1 +248,1 @@
+-  static bool ret = (getpid() == 1 && access("/proc/self/exe", F_OK) == -1);
++  static bool ret = (getpid() == 1 && darwin_art::filesystem::GuestLinkerAccess("/proc/self/exe", F_OK) == -1);

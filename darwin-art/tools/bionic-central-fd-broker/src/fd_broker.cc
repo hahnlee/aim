@@ -179,7 +179,7 @@ DarwinArtFdBrokerImpl *Impl(DarwinArtFdBroker *broker) {
   return reinterpret_cast<DarwinArtFdBrokerImpl *>(broker);
 }
 bool ValidOwnerKind(DarwinArtFdKind kind) {
-  return kind >= DARWIN_ART_FD_FS_FILE && kind <= DARWIN_ART_FD_PIPE &&
+  return kind >= DARWIN_ART_FD_FS_FILE && kind <= DARWIN_ART_FD_BINDER &&
          kind != DARWIN_ART_FD_EPOLL;
 }
 uint32_t MakeToken(size_t slot, uint32_t generation) {
@@ -876,6 +876,23 @@ darwin_art_fd_broker_export_host_fd(DarwinArtFdBroker *broker, int fd,
   }
   SetResult(result, value < 0 ? -1 : 0, value < 0 ? error : 0);
   return value < 0 ? DARWIN_ART_FD_BROKER_UNSUPPORTED : DARWIN_ART_FD_BROKER_OK;
+}
+extern "C" DarwinArtFdBrokerStatus
+darwin_art_fd_broker_get_kind(DarwinArtFdBroker *broker, int fd,
+                              DarwinArtFdKind *kind) {
+  if (!broker || !kind)
+    return DARWIN_ART_FD_BROKER_INVALID_ARGUMENT;
+  auto *impl = Impl(broker);
+  Lease lease;
+  {
+    std::lock_guard lock(impl->mutex);
+    const auto status = AcquireLocked(impl, fd, std::nullopt, &lease);
+    if (status != DARWIN_ART_FD_BROKER_OK)
+      return status;
+    *kind = lease.description->kind;
+    ReleaseLocked(impl, lease);
+  }
+  return DARWIN_ART_FD_BROKER_OK;
 }
 extern "C" DarwinArtFdBrokerStatus
 darwin_art_fd_broker_close(DarwinArtFdBroker *broker, int fd,

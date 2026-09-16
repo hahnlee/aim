@@ -1,0 +1,28 @@
+diff --git a/libs/binder/IPCThreadState.cpp b/libs/binder/IPCThreadState.cpp
+index 22a87fc9f..f23ddb90e 100644
+--- a/libs/binder/IPCThreadState.cpp
++++ b/libs/binder/IPCThreadState.cpp
+@@ -35,6 +35,9 @@
+ #include "Utils.h"
+ #include "binder_module.h"
+
++#define DARWIN_ART_BINDER_IPC_THREAD_STATE_SYSCALLS
++#include "platform_syscalls.h"
++
+ #if (defined(__ANDROID__) || defined(__Fuchsia__)) && !defined(BINDER_WITH_KERNEL_IPC)
+ #error Android and Fuchsia are expected to have BINDER_WITH_KERNEL_IPC
+ #endif
+diff --git a/libs/binder/ProcessState.cpp b/libs/binder/ProcessState.cpp
+index 2bb3dcd08..de6134520 100644
+--- a/libs/binder/ProcessState.cpp
++++ b/libs/binder/ProcessState.cpp
+@@ -40,6 +40,9 @@
+ #include <unistd.h>
+ #include <mutex>
+
++#define DARWIN_ART_BINDER_PROCESS_STATE_SYSCALLS
++#include "platform_syscalls.h"
++
+ #define BINDER_VM_SIZE ((1 * 1024 * 1024) - sysconf(_SC_PAGE_SIZE) * 2)
+ #define DEFAULT_MAX_BINDER_THREADS 15
+ #define DEFAULT_ENABLE_ONEWAY_SPAM_DETECTION 1

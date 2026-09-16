@@ -40,6 +40,14 @@ int main(void) {
   CHECK(output == 11 && errno == 27001);
   CHECK(darwin_art_bionic_errno_set_from_darwin(ENOTSUP) == 1);
   CHECK(darwin_art_bionic_errno_load() == 95 && errno == 27001);
+  int host_output = 779;
+  CHECK(darwin_art_bionic_errno_to_darwin(38, &host_output) == 1);
+  CHECK(host_output == ENOSYS && errno == 27001);
+  CHECK(darwin_art_bionic_errno_load() == 95);
+  CHECK(darwin_art_bionic_errno_to_darwin(0x3fffffff, &host_output) == 0);
+  CHECK(host_output == ENOSYS && errno == 27001);
+  CHECK(darwin_art_bionic_errno_to_darwin(38, NULL) == 0);
+  CHECK(darwin_art_bionic_errno_load() == 95);
   output = 778;
   CHECK(darwin_art_bionic_errno_from_darwin(0x3fffffff, &output) == 0);
   CHECK(output == 778 && darwin_art_bionic_errno_load() == 95 && errno == 27001);

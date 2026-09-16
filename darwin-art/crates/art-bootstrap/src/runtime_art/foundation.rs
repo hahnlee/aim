@@ -3,6 +3,7 @@ use super::*;
 pub(crate) fn build_runtime_platform(root: &Path) -> Result<()> {
     let artbase = root.join("_aosp/art/libartbase");
     let patched_artbase = root.join("_build/foundation/patched-source/libartbase");
+    let patched_artbase_base = patched_artbase.join("base");
     let libdexfile = root.join("_aosp/art/libdexfile");
     let runtime = root.join("_aosp/art/runtime");
     let palette_include = root.join("_aosp/art/libartpalette/include");
@@ -16,6 +17,7 @@ pub(crate) fn build_runtime_platform(root: &Path) -> Result<()> {
 
     let includes = [
         patched_artbase.as_path(),
+        patched_artbase_base.as_path(),
         artbase.as_path(),
         libdexfile.as_path(),
         runtime.as_path(),
@@ -68,6 +70,7 @@ pub(crate) fn build_runtime_platform(root: &Path) -> Result<()> {
 pub(crate) fn build_runtime_core(root: &Path) -> Result<()> {
     let artbase = root.join("_aosp/art/libartbase");
     let patched_artbase = root.join("_build/foundation/patched-source/libartbase");
+    let patched_artbase_base = patched_artbase.join("base");
     let libdexfile = root.join("_aosp/art/libdexfile");
     let runtime = root.join("_aosp/art/runtime");
     let runtime_base = runtime.join("base");
@@ -156,6 +159,7 @@ pub(crate) fn build_runtime_core(root: &Path) -> Result<()> {
     let includes = [
         patched_runtime.as_path(),
         patched_artbase.as_path(),
+        patched_artbase_base.as_path(),
         artbase.as_path(),
         libdexfile.as_path(),
         runtime.as_path(),
@@ -219,6 +223,7 @@ pub(crate) fn probe_park(root: &Path) -> Result<()> {
     let generator = root.join("_aosp/art/tools/cpp-define-generator");
     let artbase = root.join("_aosp/art/libartbase");
     let patched_artbase = root.join("_build/foundation/patched-source/libartbase");
+    let patched_artbase_base = patched_artbase.join("base");
     let libdexfile = root.join("_aosp/art/libdexfile");
     let runtime = root.join("_aosp/art/runtime");
     let runtime_base = runtime.join("base");
@@ -234,6 +239,7 @@ pub(crate) fn probe_park(root: &Path) -> Result<()> {
         generated.as_path(),
         generator.as_path(),
         patched_artbase.as_path(),
+        patched_artbase_base.as_path(),
         artbase.as_path(),
         libdexfile.as_path(),
         runtime.as_path(),

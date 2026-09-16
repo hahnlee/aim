@@ -155,6 +155,7 @@ check "$root/tools/bionic-format-facade/sources.lock" "$FORMAT_LOCK_SHA256"
 check "$root/tools/bionic-format-facade/src/format.cc" "$FORMAT_PROVIDER_SHA256"
 check "$root/tools/bionic-format-facade/src/aapcs64_entry.S" "$FORMAT_ENTRY_SHA256"
 check "$root/tools/bionic-libc-allocator-facade/src/allocator.c" "$ALLOCATOR_PROVIDER_SHA256"
+check "$root/tools/bionic-libc-allocator-facade/src/allocator_options.c" "$ALLOCATOR_OPTIONS_PROVIDER_SHA256"
 check "$root/tools/bionic-errno-tls/src/errno_tls.c" "$ERRNO_PROVIDER_SHA256"
 "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g -Wall -Wextra -Werror \
   "${san[@]}" "${includes[@]}" -c "$dir/src/syslog.cc" -o "$tmp/syslog.o"
@@ -177,6 +178,9 @@ done
 "$host_cc" -arch arm64 -isysroot "$sdk" -std=c17 -O1 -g -Wall -Wextra -Werror \
   "${san[@]}" -I"$root/tools/bionic-libc-allocator-facade/include" \
   -c "$root/tools/bionic-libc-allocator-facade/src/allocator.c" -o "$tmp/allocator.o"
+"$host_cc" -arch arm64 -isysroot "$sdk" -std=c17 -O1 -g -Wall -Wextra -Werror \
+  "${san[@]}" -I"$root/tools/bionic-libc-allocator-facade/include" \
+  -c "$root/tools/bionic-libc-allocator-facade/src/allocator_options.c" -o "$tmp/allocator_options.o"
 "$host_cc" -arch arm64 -isysroot "$sdk" -std=c17 -O1 -g -Wall -Wextra -Werror \
   "${san[@]}" -I"$root/tools/bionic-errno-tls/include" -I"$root/tools/bionic-errno-tls/generated" \
   -c "$root/tools/bionic-errno-tls/src/errno_tls.c" -o "$tmp/errno.o"
@@ -206,7 +210,7 @@ check "$liblog" "$AOSP_LIBLOG_SHA256"
   -I"$root/_aosp/system/logging/liblog/include" \
   "$dir/probes/elf_runner.cc" "$tmp/syslog.o" "$tmp/entry.o" "$tmp/format.o" \
   "$tmp/format-entry.o" \
-  "$tmp/allocator.o" "$tmp/errno.o" "$loader_target/release/libdarwin_art_elf_loader.a" \
+  "$tmp/allocator.o" "$tmp/allocator_options.o" "$tmp/errno.o" "$loader_target/release/libdarwin_art_elf_loader.a" \
   "$liblog" -framework Security -o "$tmp/elf-runner"
 set +e
 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \

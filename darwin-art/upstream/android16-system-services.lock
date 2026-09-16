@@ -1,0 +1,6 @@
+# Original PS16K image identified by android16-linker-config.lock.
+# Its framework.jar also matches FRAMEWORK_SHA256 in bootclasspath.lock.
+# Byte-for-byte system service DEX container, not decompiled/rebuilt Java.
+SYSTEM_SERVICES_PATH=/system/framework/services.jar
+SYSTEM_SERVICES_SHA256=b6e5fb14170b4472d6e7c0ad47a46e4d95eadfeaba872d4d1be366f7d510ed22
+SYSTEM_SERVICES_BYTES=22106720

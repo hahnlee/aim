@@ -168,6 +168,12 @@ fn build(root: &Path, full: bool) -> Result<(), String> {
         },
         cargo(),
         ["run", "-q", "-p", "art-bootstrap", "--", command],
+    )?;
+    run_command(
+        root,
+        "immutable Android system image",
+        "bash",
+        ["tools/build-android-system-image.sh"],
     )
 }
 

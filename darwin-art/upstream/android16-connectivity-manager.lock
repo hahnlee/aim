@@ -1,0 +1,22 @@
+# Original Android 16 connectivity framework artifact extracted from the pinned PS16K image.
+FRAMEWORK_CONNECTIVITY_PATH=_build/android16-bootclasspath-original/apex/com.android.tethering/javalib/framework-connectivity.jar
+FRAMEWORK_CONNECTIVITY_SHA256=00cde56178229bdbe58c2d59e7c2fdc99b6f630773d347923ed1a7535f8dac32
+ICONNECTIVITY_MANAGER_DESCRIPTOR=android.net.IConnectivityManager
+GET_ACTIVE_NETWORK_SIGNATURE='android.net.Network getActiveNetwork()'
+GET_ACTIVE_NETWORK_TRANSACTION=1
+GET_ACTIVE_NETWORK_INFO_SIGNATURE='android.net.NetworkInfo getActiveNetworkInfo()'
+GET_ACTIVE_NETWORK_INFO_TRANSACTION=3
+GET_ALL_NETWORKS_SIGNATURE='android.net.Network[] getAllNetworks()'
+GET_ALL_NETWORKS_TRANSACTION=9
+GET_LINK_PROPERTIES_SIGNATURE='android.net.LinkProperties getLinkProperties(android.net.Network)'
+GET_LINK_PROPERTIES_TRANSACTION=14
+GET_NETWORK_CAPABILITIES_SIGNATURE='android.net.NetworkCapabilities getNetworkCapabilities(android.net.Network,java.lang.String,java.lang.String)'
+GET_NETWORK_CAPABILITIES_TRANSACTION=16
+IS_ACTIVE_NETWORK_METERED_SIGNATURE='boolean isActiveNetworkMetered()'
+IS_ACTIVE_NETWORK_METERED_TRANSACTION=20
+REQUEST_NETWORK_SIGNATURE='android.net.NetworkRequest requestNetwork(int,android.net.NetworkCapabilities,int,android.os.Messenger,int,android.os.IBinder,int,int,java.lang.String,java.lang.String,int)'
+REQUEST_NETWORK_TRANSACTION=42
+LISTEN_FOR_NETWORK_SIGNATURE='android.net.NetworkRequest listenForNetwork(android.net.NetworkCapabilities,android.os.Messenger,android.os.IBinder,int,java.lang.String,java.lang.String,int)'
+LISTEN_FOR_NETWORK_TRANSACTION=45
+RELEASE_NETWORK_REQUEST_SIGNATURE='void releaseNetworkRequest(android.net.NetworkRequest)'
+RELEASE_NETWORK_REQUEST_TRANSACTION=47

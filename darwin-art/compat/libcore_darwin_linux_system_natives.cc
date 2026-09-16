@@ -103,6 +103,31 @@ jstring DarwinLinuxGetenv(JNIEnv* env, jobject, jstring java_name) {
   return value == nullptr ? nullptr : env->NewStringUTF(value);
 }
 
+void DarwinLinuxSetenv(JNIEnv* env, jobject, jstring java_name,
+                       jstring java_value, jboolean overwrite) {
+  ScopedUtfChars name(env, java_name);
+  if (name.c_str() == nullptr) {
+    return;
+  }
+  ScopedUtfChars value(env, java_value);
+  if (value.c_str() == nullptr) {
+    return;
+  }
+  if (::setenv(name.c_str(), value.c_str(), overwrite) == -1) {
+    ThrowErrno(env, "setenv", errno);
+  }
+}
+
+void DarwinLinuxUnsetenv(JNIEnv* env, jobject, jstring java_name) {
+  ScopedUtfChars name(env, java_name);
+  if (name.c_str() == nullptr) {
+    return;
+  }
+  if (::unsetenv(name.c_str()) == -1) {
+    ThrowErrno(env, "unsetenv", errno);
+  }
+}
+
 jobject DarwinLinuxGetpwuid(JNIEnv* env, jobject, jint uid) {
   const long configured_size = sysconf(_SC_GETPW_R_SIZE_MAX);
   const size_t buffer_size = configured_size > 0

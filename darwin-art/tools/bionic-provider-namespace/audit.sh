@@ -34,17 +34,17 @@ diff -u "$tmp/manifest-libc-imports" "$tmp/actual-libc-imports" ||
   fail 'canonical libc import universe no longer matches pinned ELF'
 
 python3 "$here/generate_manifests.py" "$tmp/generated"
-for generated in ownership.tsv unsupported-libc.tsv ownership.inc unsupported.inc unsupported_symbols.inc unsupported_count.inc; do
+for generated in ownership.tsv unsupported-libc.tsv ownership.inc unsupported.inc unsupported_symbols.inc unsupported_count.inc liblog_versions.inc; do
   diff -u "$here/generated/$generated" "$tmp/generated/$generated" ||
     fail "generated $generated drift"
 done
 
-[[ "$(tail -n +2 "$here/generated/ownership.tsv" | awk -F '\t' '$1=="libc.so"{n++}END{print n+0}')" == 603 ]] ||
+[[ "$(tail -n +2 "$here/generated/ownership.tsv" | awk -F '\t' '$1=="libc.so"{n++}END{print n+0}')" == 620 ]] ||
   fail 'expected pinned libc++ owners plus reviewed extensions'
 [[ "$(tail -n +2 "$here/generated/ownership.tsv" | awk -F '\t' '$1=="libdl.so"{n++}END{print n+0}')" == 7 ]] ||
   fail 'expected seven closed guest libdl owners'
-[[ "$(tail -n +2 "$here/generated/ownership.tsv" | awk -F '\t' '$1=="liblog.so"{n++}END{print n+0}')" == 20 ]] ||
-  fail 'expected 19 liblog symbols plus one system version alias'
+[[ "$(tail -n +2 "$here/generated/ownership.tsv" | awk -F '\t' '$1=="liblog.so"{n++}END{print n+0}')" == 19 ]] ||
+  fail 'expected 19 liblog symbols with original default versions'
 [[ "$(tail -n +2 "$here/generated/ownership.tsv" | awk -F '\t' '$1=="libbinder_ndk.so"{n++}END{print n+0}')" == 39 ]] ||
   fail 'expected complete Chromium Binder NDK surface'
 [[ "$(tail -n +2 "$here/generated/ownership.tsv" | awk -F '\t' '$1=="libaaudio.so"{n++}END{print n+0}')" == 30 ]] ||
@@ -88,6 +88,7 @@ _darwin_art_bionic_float_conversion_resolve
 _darwin_art_bionic_format_resolve
 _darwin_art_bionic_formatted_stdio_resolve
 _darwin_art_bionic_fs_resolve
+_darwin_art_bionic_ftw_resolve
 _darwin_art_bionic_ioctl_resolve
 _darwin_art_bionic_libc_leaf_resolve
 _darwin_art_bionic_locale_resolve
@@ -96,6 +97,7 @@ _darwin_art_bionic_namespace_bind
 _darwin_art_bionic_numeric_resolve
 _darwin_art_bionic_process_state_data_resolve
 _darwin_art_bionic_process_state_resolve
+_darwin_art_bionic_property_client_resolve
 _darwin_art_bionic_pthread_resolve
 _darwin_art_bionic_scanf_resolve
 _darwin_art_bionic_sendfile_resolve
@@ -140,4 +142,4 @@ if grep -E '(_dlopen|_dlsym|_dlvsym|_NSLookupSymbolInImage|__dyld_)' <<<"$undefi
   fail 'host loader undefined reference present'
 fi
 
-echo 'bionic-provider-namespace: PASS libcxx=160/160 extensions=603 liblog-symbols=20 binder-ndk=39 aaudio=30 aliases=13 owned=784 unsupported=0 duplicate-triple=0 exact-version=yes resolver=closed teardown=ordered+quiescent asan+ubsan+tsan=yes'
+echo 'bionic-provider-namespace: PASS libcxx=160/160 libc-rows=620 liblog-rows=19 binder-ndk=39 aaudio=30 owned=800 unsupported=0 duplicate-triple=0 exact-version+original-default=yes resolver=closed teardown=ordered+quiescent asan+ubsan+tsan=yes'

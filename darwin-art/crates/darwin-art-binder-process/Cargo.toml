@@ -1,0 +1,16 @@
+[package]
+name = "darwin-art-binder-process"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+darwin-art-binder-device = { path = "../darwin-art-binder-device" }
+darwin-art-profile = { path = "../darwin-art-profile" }
+
+[lib]
+name = "darwin_art_binder_process"
+path = "src/lib.rs"
+
+[dev-dependencies]
+libc = "0.2"

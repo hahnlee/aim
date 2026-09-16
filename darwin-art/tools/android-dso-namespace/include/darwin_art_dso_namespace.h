@@ -41,6 +41,11 @@ void* darwin_art_bionic_android_dlopen_ext(const char*, int, const DarwinArtAndr
 void* darwin_art_bionic_dlsym(void*, const char*);
 int darwin_art_bionic_dlclose(void*);
 char* darwin_art_bionic_dlerror(void);
+/* Real resident MoltenVK owner only; fallback function pointers are not readiness. */
+int darwin_art_bionic_vulkan_provider_ready(void);
+/* 0=resolved, 1=unavailable, 2=unsupported version, 3=bad argument.
+ * Writes zero on failure when output is valid. Does not acquire a new host DSO. */
+int darwin_art_bionic_vulkan_symbol(const char*, const char*, uintptr_t*);
 
 /* 0=resolved, 1=SONAME denied, 2=symbol denied, 3=version mismatch, 4=bad input. */
 int darwin_art_dso_resolve(const char*, const char*, const char*, DarwinArtDsoResolution*);
@@ -48,4 +53,3 @@ int darwin_art_dso_resolve(const char*, const char*, const char*, DarwinArtDsoRe
 #ifdef __cplusplus
 }
 #endif
-

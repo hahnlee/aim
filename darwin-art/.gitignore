@@ -6,3 +6,6 @@
 .ninja_log
 .ninja_deps
 tools/__pycache__/
+__pycache__/
+*.pyc
+hs_err_pid*.log

@@ -15,6 +15,11 @@ fn main() {
 }
 
 fn main_result() -> Result<(), Box<dyn Error>> {
+    // SAFETY: this is the first startup action, before runtime/AppKit threads
+    // or other environment consumers are created by this executable.
+    unsafe {
+        darwin_art_profile::wait_for_process_registration()?;
+    }
     // Android blocks its runtime-control signals before creating any process
     // threads, then ART's Signal Catcher consumes them with sigwait(). Do the
     // same at the Mach-O process boundary so AppKit/frame-clock workers cannot
@@ -47,6 +52,52 @@ fn main_result() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os();
     let program = arguments.next().unwrap_or_else(|| "darwin-art-host".into());
     let mut values = arguments.collect::<Vec<_>>();
+    if values
+        .first()
+        .is_some_and(|value| value == "--start-system-service")
+    {
+        let started = darwin_art_host::system_service_start::start(&values[1..], env::vars_os())?;
+        println!(
+            "pid={}\nbinder={}\ncompositor={}",
+            started.pid,
+            started.endpoints.binder.display(),
+            started.endpoints.compositor.display()
+        );
+        return Ok(());
+    }
+    if values
+        .first()
+        .is_some_and(|value| value == "--prepare-external-storage")
+    {
+        if values.len() != 4 {
+            return Err(
+                "--prepare-external-storage requires storage root, app-data directory and package"
+                    .into(),
+            );
+        }
+        let package = values[3].to_str().ok_or("package must be UTF-8")?;
+        let files = darwin_art_host::external_storage::prepare(
+            std::path::Path::new(&values[1]),
+            std::path::Path::new(&values[2]),
+            package,
+        )?;
+        println!("{}", files.display());
+        return Ok(());
+    }
+    if values
+        .first()
+        .is_some_and(|value| value == "--prepare-system-image")
+    {
+        if values.len() != 3 {
+            return Err("--prepare-system-image requires archive and shared store".into());
+        }
+        let installed = darwin_art_host::system_image::prepare(
+            std::path::Path::new(&values[1]),
+            std::path::Path::new(&values[2]),
+        )?;
+        println!("{}", installed.display());
+        return Ok(());
+    }
     if values.first().is_some_and(|value| value == "--dex2oat") {
         return run_embedded_art_tool(&values, "--dex2oat", c"darwin_art_run_dex2oat", "dex2oat");
     }

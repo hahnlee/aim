@@ -9,12 +9,12 @@
 #include "darwin_libcore_natives.h"
 #include "darwin_openjdk_natives.h"
 #include "darwin_provider_owners.h"
-#include "runtime_filesystem_probe.h"
 #include "runtime_graphics_probe.h"
 #include "runtime_graphics_state.h"
 #include "runtime_jni_scope.h"
 #include "runtime_process_state.h"
 #include "runtime.h"
+#include "../runtime/framework/app/process_registration.h"
 #include "gc/heap.h"
 #include "thread-current-inl.h"
 #include "thread-inl.h"
@@ -22,10 +22,6 @@
 
 extern "C" int darwin_art_install_context_loader(JNIEnv* env,
                                                    jobject app_loader);
-extern "C" __attribute__((weak)) jstring
-Java_java_lang_Runtime_nativeLoad(JNIEnv* env, jclass ignored, jstring filename,
-                                  jobject loader, jclass caller);
-
 namespace darwin_art_registration_phase {
 
 namespace {
@@ -213,10 +209,6 @@ int start(JNIEnv* env, art::Thread* self) {
       std::cerr << "ART Darwin JNI: registration local frame allocation failed\n";
       return 34;
     }
-    if (!InstallProbeAndroidSystemRoot()) {
-      std::cerr << "ART Android filesystem: test system root install failed\n";
-      return 40;
-    }
     if (!darwin_art::RegisterEarlySystemLog(env)) {
       std::cerr << "ART Darwin libcore: early System.log registration failed\n";
       return 16;
@@ -238,14 +230,33 @@ int start(JNIEnv* env, art::Thread* self) {
       std::cerr << "ART Darwin ICU: charset native registration failed\n";
       return 20;
     }
-    if (!darwin_art::RegisterFrameworkNatives(env)) {
-      std::cerr << "ART Darwin framework: native registration failed\n";
-      return 26;
-    }
     return 0;
   }();
   if (registration_status != 0) return registration_status;
   art::Runtime::Current()->FinishMinimalForDarwinProbe();
+
+  // Android registers libandroid_runtime's framework JNI surface only after
+  // ART has completed Runtime::Start().  In particular, the original Binder
+  // registrar resolves Binder.execTransact and may initialize Binder's Java
+  // class.  Doing that before the root class initializers and VarHandle
+  // intrinsics are complete recursively initializes java.lang.System and
+  // leaves AtomicInteger's VarHandle null in a non-boot-image runtime.
+  //
+  // Keep a separate local-reference lifetime on this side of
+  // FinishMinimalForDarwinProbe(): that function asserts the earlier
+  // registration frame is empty, just like the individual JNI_OnLoad calls
+  // used by Android's process bootstrap.
+  {
+    darwin_art_jni_scope::ScopedLocalFrame framework_frame(env);
+    if (!framework_frame.valid()) {
+      std::cerr << "ART Darwin framework: registration local frame allocation failed\n";
+      return 34;
+    }
+    if (!darwin_art::RegisterFrameworkNatives(env)) {
+      std::cerr << "ART Darwin framework: native registration failed\n";
+      return 26;
+    }
+  }
   if (!verify_compaction(env)) return 42;
   if (!verify_socket_close(env)) return 43;
   if (!darwin_art::InstallFrameworkResourceRuntime(env)) {
@@ -271,28 +282,9 @@ int finish(const Inputs& inputs) {
   }
   JNIEnv* env = inputs.env;
 
-  // Some core-oj images resolve Runtime.nativeLoad after the normal
-  // libopenjdk registrar has completed. Rebind the exact Android 16
-  // three-argument entry point here so app System.loadLibrary calls always
-  // reach JavaVMExt/NativeBridge through the installed PathClassLoader.
-  jclass runtime_class = env->FindClass("java/lang/Runtime");
-  if (runtime_class == nullptr || env->ExceptionCheck()) return 4;
-  if (Java_java_lang_Runtime_nativeLoad == nullptr) {
-    // The headless flavor intentionally excludes the OpenJDK libcore native
-    // table; graphics/full-libcore builds provide the strong implementation.
-    env->DeleteLocalRef(runtime_class);
-    return 0;
-  }
-  const JNINativeMethod runtime_load = {
-      const_cast<char*>("nativeLoad"),
-      const_cast<char*>("(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/String;"),
-      reinterpret_cast<void*>(&Java_java_lang_Runtime_nativeLoad),
-  };
-  if (env->RegisterNatives(runtime_class, &runtime_load, 1) != JNI_OK ||
-      env->ExceptionCheck()) {
-    return 4;
-  }
-  env->DeleteLocalRef(runtime_class);
+  const int framework_status =
+      darwin_art::framework::app::FinishFrameworkRegistration(env, true);
+  if (framework_status != 0) return framework_status;
 
   // ActivityThread performs this after minimal runtime startup. Keep this
   // JNI-only bridge independent from the process/activity entry TU.
@@ -315,23 +307,6 @@ int finish(const Inputs& inputs) {
     }
   }
 
-  jclass looper_class = env->FindClass("android/os/Looper");
-  jmethodID prepare_main_looper =
-      looper_class == nullptr
-          ? nullptr
-          : env->GetStaticMethodID(looper_class, "prepareMainLooper", "()V");
-  if (prepare_main_looper != nullptr) {
-    env->CallStaticVoidMethod(looper_class, prepare_main_looper);
-  }
-  env->DeleteLocalRef(looper_class);
-  if (prepare_main_looper == nullptr || env->ExceptionCheck()) {
-    std::cerr << "ART Android framework: Looper.prepareMainLooper() failed\n";
-    if (env->ExceptionCheck()) {
-      env->ExceptionDescribe();
-      env->ExceptionClear();
-    }
-    return 25;
-  }
   return 0;
 }
 

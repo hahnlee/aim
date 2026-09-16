@@ -1,0 +1,4 @@
+# GenerateLinkerConfiguration invokes linkerconfig --target /linkerconfig.
+# --strict is not part of the Android normal-boot invocation.
+SYSTEM_CORE_REVISION=68be0c2c0006a0740d0b1809abe4717308f90d15
+INIT_BUILTINS_SHA256=bfe22c4ac2129eb8a976b0510113d5fd75258bb03cae72b845e7dd74a7d110b3

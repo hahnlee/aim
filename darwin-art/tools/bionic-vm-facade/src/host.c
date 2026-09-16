@@ -29,9 +29,14 @@ void* darwin_art_host_vm_map(void* address, size_t length, int protection,
   /* Without MAP_FIXED, both Linux and Darwin interpret a non-null address as
    * a placement hint. PartitionAlloc relies on this for its second cage. */
   int flags = (android_flags & 1) != 0 ? MAP_SHARED : MAP_PRIVATE;
-  if ((android_flags & 0x20) != 0) flags |= MAP_ANON;
+  const int anonymous = (android_flags & 0x20) != 0;
+  if (anonymous) flags |= MAP_ANON;
   if ((android_flags & 0x10) != 0) flags |= MAP_FIXED;
-  if ((android_flags & 0x4000) != 0) flags |= MAP_NORESERVE;
+  /* Linux accepts MAP_NORESERVE for both anonymous and file-backed Binder
+   * arenas. Darwin rejects MAP_NORESERVE on a POSIX shared-memory fd with
+   * EINVAL, and has no equivalent reservation behavior for that mapping.
+   * Preserve the hint only where Darwin implements it. */
+  if (anonymous && (android_flags & 0x4000) != 0) flags |= MAP_NORESERVE;
   void* result = mmap(address, length, protection, flags, fd, offset);
   *host_error = result == MAP_FAILED ? errno : 0;
   errno = saved;

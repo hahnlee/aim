@@ -10,6 +10,25 @@
 #include <unistd.h>
 
 int main(int argc, char** argv) {
+  // The Android 16 boot image plus a Chromium process exceeds the historical
+  // 16K fault-method table.  Publish well beyond that boundary before testing
+  // MAP_JIT so the signal-safe registry cannot regress to the smaller size.
+  constexpr uintptr_t kRegistryBase = UINT64_C(0x100000000);
+  constexpr uintptr_t kRegistryStride = UINT64_C(0x2000);
+  constexpr size_t kRegistryEntries = 32768;
+  for (size_t index = 0; index < kRegistryEntries; ++index) {
+    const uintptr_t code = kRegistryBase + index * kRegistryStride;
+    const uintptr_t method = UINT64_C(0x400000000) + index * 8;
+    DarwinArtRegisterJitMethod(code, 64, method);
+  }
+  for (size_t index : {size_t{0}, size_t{16383}, size_t{16384},
+                       kRegistryEntries - 1}) {
+    const uintptr_t code = kRegistryBase + index * kRegistryStride;
+    const uintptr_t method = UINT64_C(0x400000000) + index * 8;
+    assert(DarwinArtLookupJitCode(code + 32));
+    assert(DarwinArtLookupJitMethod(code + 32) == method);
+  }
+
   const size_t size = static_cast<size_t>(getpagesize());
   void* code = DarwinArtMapJitCode(size);
   if (code == MAP_FAILED) { perror("MAP_JIT"); return 1; }
@@ -60,5 +79,6 @@ int main(int argc, char** argv) {
   done.store(true, std::memory_order_release);
   reader.join();
   assert(munmap(code, size) == 0);
-  printf("JIT memory PASS: nested thread-local W^X, concurrent execution=%zu\n", executions.load());
+  printf("JIT memory PASS: registry=%zu nested thread-local W^X, concurrent execution=%zu\n",
+         kRegistryEntries, executions.load());
 }

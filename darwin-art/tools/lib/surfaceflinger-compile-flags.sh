@@ -1,0 +1,44 @@
+# Shared original frameworks/native compilation boundary. Callers provide the
+# verified shadow/generated trees and toolchain paths; no source staging here.
+flags=(
+  -arch arm64 -isysroot "$sdk_root" -std=c++23 -O2 -fPIC
+  -DANDROID_UTILS_REF_BASE_DISABLE_IMPLICIT_CONSTRUCTION
+  -Wall -Wextra -Wconversion
+  -Wno-deprecated-declarations -Wno-deprecated-literal-operator
+  -Wno-invalid-specialization -Wno-unused-parameter
+  -include utility -include atomic
+  -I"$project_root/compat/surfaceflinger"
+  -I"$generated/aidl/include"
+  -I"$generated/gui/include"
+  -I"$generated/input/include"
+  -I"$generated/platform/include"
+  -I"$generated/hidl"
+  -I"$generated/aconfig/include"
+  -I"$libhidl/base/include"
+  -I"$libhidl/transport/include"
+  -I"$libhidl/transport/token/1.0/utils/include"
+  -I"$libfmq/base"
+  -I"$shadow/services/surfaceflinger"
+  -I"$shadow/services/surfaceflinger/common/include"
+  -I"$shadow/services/surfaceflinger/Scheduler/include"
+  -I"$shadow/libs/binder/include"
+  -I"$shadow/libs/binder/ndk/include_cpp"
+  -I"$shadow/libs/binder/ndk/include_ndk"
+  -I"$shadow/libs/gui/include"
+  -I"$shadow/libs/renderengine/include"
+  -I"$shadow/libs/ftl/include"
+  -I"$project_root/_aosp/frameworks/native/include"
+  -I"$project_root/_aosp/frameworks/native/libs/arect/include"
+  -I"$project_root/_aosp/frameworks/native/libs/math/include"
+  -I"$project_root/_aosp/frameworks/native/libs/nativebase/include"
+  -I"$project_root/_aosp/frameworks/native/libs/nativewindow/include"
+  -I"$project_root/_aosp/frameworks/native/libs/ui/include"
+  -I"$project_root/_aosp/frameworks/native/libs/ui/include_types"
+  -I"$project_root/_aosp/hardware/libhardware/include_all"
+  -I"$project_root/_aosp/system/core/libcutils/include"
+  -I"$project_root/_aosp/system/core/libsystem/include"
+  -I"$project_root/_aosp/system/core/libutils/include"
+  -I"$project_root/_aosp/system/core/libutils/binder/include"
+  -I"$project_root/_aosp/system/libbase/include"
+  -I"$project_root/_aosp/system/logging/liblog/include"
+)

@@ -1,0 +1,49 @@
+diff --git a/core/jni/android_os_Parcel.cpp b/core/jni/android_os_Parcel.cpp
+--- a/core/jni/android_os_Parcel.cpp
++++ b/core/jni/android_os_Parcel.cpp
+@@ -47,6 +47,10 @@
+
+ #include "core_jni_helpers.h"
+
++#if defined(__APPLE__)
++#include <rpc_identity.h>
++#endif
++
+ //#undef ALOGV
+ //#define ALOGV(...) fprintf(stderr, __VA_ARGS__)
+
+@@ -851,13 +855,34 @@ static void android_os_Parcel_enforceInterface(JNIEnv* env, jclass clazz, jlong n
+     Parcel* parcel = reinterpret_cast<Parcel*>(nativePtr);
++#if defined(__APPLE__)
++    ALOGI("Darwin RPC Parcel enforce: native=%p name=%p", parcel, name);
++#endif
+     if (parcel != nullptr) {
+         InterfaceDescriptorString descriptor(env, name);
++#if defined(__APPLE__)
++        ALOGI("Darwin RPC Parcel enforce: descriptor=%p length=%zu rpc=%d data=%p size=%zu pos=%zu",
++              descriptor.str(), descriptor.size(), parcel->isForRpc(), parcel->data(),
++              parcel->dataSize(), parcel->dataPosition());
++#endif
++#if defined(__APPLE__)
++        int32_t oldPolicy = 0;
++        (void)darwin_art_binder_rpc_strict_mode_get(&oldPolicy);
++        const bool isValid =
++                parcel->enforceInterface(reinterpret_cast<const char16_t*>(descriptor.str()),
++                                         descriptor.size(), nullptr);
++#else
+         IPCThreadState* threadState = IPCThreadState::self();
+         const int32_t oldPolicy = threadState->getStrictModePolicy();
+         const bool isValid =
+                 parcel->enforceInterface(reinterpret_cast<const char16_t*>(descriptor.str()),
+                                          descriptor.size(), threadState);
++#endif
+         if (isValid) {
++#if defined(__APPLE__)
++            int32_t newPolicy = 0;
++            (void)darwin_art_binder_rpc_strict_mode_get(&newPolicy);
++#else
+             const int32_t newPolicy = threadState->getStrictModePolicy();
++#endif
+             if (oldPolicy != newPolicy) {
+                 // Need to keep the Java-level thread-local strict
+                 // mode policy in sync for the libcore

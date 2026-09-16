@@ -1,0 +1,14 @@
+--- a/native_loader.cpp
++++ b/native_loader.cpp
+@@ -1,3 +1,4 @@
++#include "filesystem/linker_config_fs.h"
+ /*
+  * Copyright (C) 2015 The Android Open Source Project
+  *
+@@ -281,3 +282,3 @@
+-  struct stat st;
+-  if (stat("/system/lib64/libsobridge.so", &st) != 0 &&
+-      stat("/system/lib64/libwalkstack.so", &st) != 0) {
++  DarwinArtAndroidStat st;
++  if (darwin_art::filesystem::GuestLinkerStat("/system/lib64/libsobridge.so", &st) != 0 &&
++      darwin_art::filesystem::GuestLinkerStat("/system/lib64/libwalkstack.so", &st) != 0) {

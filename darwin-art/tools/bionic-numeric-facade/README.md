@@ -1,8 +1,8 @@
 # Bionic integer numeric facade
 
-This standalone provider closes the six integer-parsing imports made by the
-pinned Android 35 arm64 `libc++_shared.so`: `strtol`, `strtoll`, `strtoul`,
-`strtoull`, `strtoll_l`, and `strtoull_l`.
+This standalone provider closes the seven integer-parsing imports made by the
+pinned Android 35 arm64 `libc++_shared.so`: `strtol`, `strtoll`, `strtoimax`,
+`strtoul`, `strtoull`, `strtoll_l`, and `strtoull_l`.
 
 The parser is a host-independent transcription of the pinned Bionic
 `libc/bionic/strtol.cpp` behavior. It accepts base 0 or 2 through 36, including
@@ -24,6 +24,6 @@ resolver. They need separate coherent algorithms and ABI gates.
 
 Run `./audit.sh`. The gate verifies source hashes and semantic anchors, exact
 libc++ demand, API-35 `@@LIBC` exports, Android header signatures, a real
-Android arm64 ELF with exactly six numeric imports plus `__errno`, differential
+Android arm64 ELF with exactly seven numeric imports plus `__errno`, differential
 tests against the pinned AOSP implementation, 8x1000 TLS stress, C
 ASan/UBSan, Rust clippy/formatting, and target cleanliness.

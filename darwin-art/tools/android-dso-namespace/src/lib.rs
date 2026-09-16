@@ -10,9 +10,12 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+mod loader_open;
 mod vulkan_acquire_fences;
+mod vulkan_library;
 mod vulkan_wsi;
 mod vulkan_wsi_backend;
+pub use loader_open::darwin_art_bionic_android_dlopen_ext;
 use vulkan_wsi_backend::*;
 
 pub const PROVIDER_LOADER_LIBDL: u32 = 1;
@@ -2223,69 +2226,6 @@ pub unsafe extern "C" fn darwin_art_bionic_dlopen(
 }
 
 #[no_mangle]
-/// Opens an Android DSO with Android extended-loader parameters.
-///
-/// # Safety
-///
-/// `filename` must be null or a valid C string. A non-null `extinfo` must
-/// point to a readable `AndroidDlExtInfo` for the duration of the callback.
-pub unsafe extern "C" fn darwin_art_bionic_android_dlopen_ext(
-    filename: *const c_char,
-    flags: c_int,
-    extinfo: *const AndroidDlExtInfo,
-) -> *mut c_void {
-    if !filename.is_null() {
-        let name = unsafe { CStr::from_ptr(filename) }.to_bytes();
-        let leaf = name.rsplit(|byte| *byte == b'/').next().unwrap_or(name);
-        if leaf == b"libandroid.so" || leaf == b"libnativewindow.so" {
-            if std::env::var_os("DARWIN_ART_DEBUG_ANATIVEWINDOW").is_some() {
-                eprintln!(
-                    "ART Android libdl: opened virtual {}",
-                    String::from_utf8_lossy(leaf)
-                );
-            }
-            return if leaf == b"libandroid.so" {
-                libandroid_handle()
-            } else {
-                libnativewindow_handle()
-            };
-        }
-        if let Some(handle) = virtual_graphics_handle(leaf) {
-            if std::env::var_os("DARWIN_ART_DEBUG_GRAPHICS_DSO").is_some() {
-                eprintln!(
-                    "ART Android libdl: opened virtual {}",
-                    String::from_utf8_lossy(leaf)
-                );
-            }
-            return handle;
-        }
-    }
-    let Some(loader) = loader() else {
-        return ptr::null_mut();
-    };
-    let mut error = [0 as c_char; ERROR_CAPACITY];
-    let result = unsafe {
-        (loader.open.expect("validated"))(
-            loader.context,
-            filename,
-            flags,
-            extinfo,
-            error.as_mut_ptr(),
-            error.len(),
-        )
-    };
-    if result.is_null() {
-        let message = call_error(&error);
-        set_error(if message.is_empty() {
-            "Android dlopen failed"
-        } else {
-            &message
-        });
-    }
-    result
-}
-
-#[no_mangle]
 /// Looks up an exported symbol in a loader-owned handle.
 ///
 /// # Safety
@@ -2331,23 +2271,7 @@ pub unsafe extern "C" fn darwin_art_bionic_dlsym(
         return result;
     }
     if handle == vulkan_handle {
-        if symbol.is_null() {
-            set_error("null Android Vulkan DSO symbol");
-            return ptr::null_mut();
-        }
-        let result = unsafe { vulkan_get_instance_proc_addr(ptr::null_mut(), symbol) };
-        if std::env::var_os("DARWIN_ART_DEBUG_GRAPHICS_DSO").is_some() {
-            let name = unsafe { CStr::from_ptr(symbol) };
-            eprintln!(
-                "ART Android libdl: libvulkan.so dlsym {} resolved={}",
-                name.to_string_lossy(),
-                !result.is_null()
-            );
-        }
-        if result.is_null() {
-            set_error("Android Vulkan entrypoint is unavailable");
-        }
-        return result;
+        return unsafe { vulkan_library::legacy_lookup(symbol) };
     }
     if symbol.is_null() {
         set_error("dlsym symbol is null");
@@ -2617,11 +2541,23 @@ mod tests {
         unsafe extern "C" fn open(
             _: *mut c_void,
             filename: *const c_char,
-            _: c_int,
-            _: *const AndroidDlExtInfo,
+            flags: c_int,
+            extinfo: *const AndroidDlExtInfo,
             error: *mut c_char,
             _: usize,
         ) -> *mut c_void {
+            if let Some(info) = unsafe { extinfo.as_ref() } {
+                if info.flags != 0 {
+                    assert_eq!(flags, 2);
+                    assert_eq!(info.library_namespace as usize, 0xfeed);
+                    assert_eq!(info.library_fd, 73);
+                    let message = b"explicit request rejected by linker\0";
+                    unsafe {
+                        ptr::copy_nonoverlapping(message.as_ptr().cast(), error, message.len());
+                    }
+                    return ptr::null_mut();
+                }
+            }
             if !filename.is_null() && unsafe { CStr::from_ptr(filename) }.to_bytes() == b"bad.so" {
                 let message = b"virtual SONAME denied\0";
                 unsafe {
@@ -2683,6 +2619,37 @@ mod tests {
             close: Some(close),
         };
         assert_eq!(unsafe { darwin_art_loader_bind(&callbacks) }, 0);
+        let explicit = AndroidDlExtInfo {
+            flags: 0x200,
+            reserved_addr: ptr::null_mut(),
+            reserved_size: 0,
+            relro_fd: -1,
+            library_fd: 73,
+            library_fd_offset: 0,
+            library_namespace: 0xfeedusize as *mut c_void,
+        };
+        for name in [
+            c"libandroid.so",
+            c"libnativewindow.so",
+            c"libEGL.so",
+            c"libGLESv2.so",
+            c"libvulkan.so",
+        ] {
+            assert!(
+                unsafe { darwin_art_bionic_android_dlopen_ext(name.as_ptr(), 2, &explicit) }
+                    .is_null()
+            );
+            assert_eq!(
+                unsafe { CStr::from_ptr(darwin_art_bionic_dlerror()) }.to_bytes(),
+                b"explicit request rejected by linker"
+            );
+            assert!(darwin_art_bionic_dlerror().is_null());
+        }
+        // An explicit file is not substituted by a basename-matching token.
+        assert_eq!(
+            unsafe { darwin_art_bionic_dlopen(c"/private/libEGL.so".as_ptr(), 2) } as usize,
+            0x1234
+        );
         let good = CString::new("good.so").unwrap();
         let symbol = CString::new("fixture_symbol").unwrap();
         let handle = unsafe { darwin_art_bionic_dlopen(good.as_ptr(), 2) };

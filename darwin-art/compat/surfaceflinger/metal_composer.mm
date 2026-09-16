@@ -364,6 +364,28 @@ extern "C" bool darwin_art_metal_composer_compose(
     [encoder setFragmentBytes:&transparent_region
                         length:sizeof(transparent_region)
                        atIndex:1];
+    if (layer.has_clip) {
+      const int32_t clip_left = std::clamp(
+          layer.clip_left, 0, static_cast<int32_t>(compose_width));
+      const int32_t clip_top = std::clamp(
+          layer.clip_top, 0, static_cast<int32_t>(compose_height));
+      const int32_t clip_right = std::clamp(
+          layer.clip_right, clip_left, static_cast<int32_t>(compose_width));
+      const int32_t clip_bottom = std::clamp(
+          layer.clip_bottom, clip_top, static_cast<int32_t>(compose_height));
+      if (clip_right <= clip_left || clip_bottom <= clip_top) {
+        [source release];
+        continue;
+      }
+      [encoder setScissorRect:MTLScissorRect{
+                                  static_cast<NSUInteger>(clip_left),
+                                  static_cast<NSUInteger>(clip_top),
+                                  static_cast<NSUInteger>(clip_right - clip_left),
+                                  static_cast<NSUInteger>(clip_bottom - clip_top)}];
+    } else {
+      [encoder setScissorRect:MTLScissorRect{0, 0, compose_width,
+                                             compose_height}];
+    }
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:vertices.size()];

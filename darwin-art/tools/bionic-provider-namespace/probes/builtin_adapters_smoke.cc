@@ -15,6 +15,7 @@ struct Expected {
   const char *symbol;
   const char *version;
   DarwinArtBionicProviderId owner;
+  bool default_version;
 };
 
 constexpr Expected kExpected[] = {
@@ -63,6 +64,11 @@ extern "C" SymbolFunction darwin_art_bionic_errno_resolve(const char *s) {
 extern "C" SymbolFunction darwin_art_bionic_fs_resolve(const char *s) {
   return OneArg(DARWIN_ART_BIONIC_PROVIDER_FILESYSTEM, s);
 }
+extern "C" SymbolFunction darwin_art_bionic_ftw_resolve(const char *s) {
+  if (std::strcmp(s, "ftw") == 0 || std::strcmp(s, "nftw") == 0)
+    return OneArg(DARWIN_ART_BIONIC_PROVIDER_FILESYSTEM, s);
+  return nullptr;
+}
 extern "C" SymbolFunction darwin_art_bionic_time_resolve(const char *s) {
   return OneArg(DARWIN_ART_BIONIC_PROVIDER_TIME, s);
 }
@@ -91,6 +97,11 @@ extern "C" void *darwin_art_bionic_pthread_resolve(const char *soname,
 extern "C" SymbolFunction
 darwin_art_bionic_process_state_resolve(const char *s) {
   return OneArg(DARWIN_ART_BIONIC_PROVIDER_PROCESS_STATE, s);
+}
+extern "C" SymbolFunction darwin_art_bionic_property_client_resolve(const char* s) {
+  if (std::strcmp(s, "__system_property_set") == 0)
+    return OneArg(DARWIN_ART_BIONIC_PROVIDER_PROCESS_STATE, s);
+  return nullptr;
 }
 extern "C" uintptr_t
 darwin_art_bionic_process_state_data_resolve(const char *s) {
@@ -185,6 +196,9 @@ extern "C" void *darwin_art_bionic_socket_broker_resolve(const char *soname,
        (std::strcmp(version, "LIBC_Q") == 0 &&
         (std::strcmp(symbol, "android_fdsan_close_with_tag") == 0 ||
          std::strcmp(symbol, "android_fdsan_create_owner_tag") == 0 ||
+         std::strcmp(symbol, "android_fdsan_get_error_level") == 0 ||
+         std::strcmp(symbol, "android_fdsan_get_owner_tag") == 0 ||
+         std::strcmp(symbol, "android_fdsan_set_error_level") == 0 ||
          std::strcmp(symbol, "android_fdsan_exchange_owner_tag") == 0)))) {
     ++calls[owner];
     return reinterpret_cast<void *>(&Stub);
@@ -308,9 +322,14 @@ extern "C" void *darwin_art_android_aaudio_resolve(
 }
 extern "C" uintptr_t darwin_art_liblog_provider_resolve(const char *symbol,
                                                         const char *version) {
-  if (symbol == nullptr || (version != nullptr && version[0] != '\0' &&
-                            std::strcmp(version, "LIBLOG") != 0))
-    std::abort();
+  bool matches = false;
+  for (const auto& expected : kExpected) {
+    if (expected.owner == DARWIN_ART_BIONIC_PROVIDER_LIBLOG && symbol &&
+        std::strcmp(expected.symbol, symbol) == 0 &&
+        ((version && std::strcmp(expected.version, version) == 0) ||
+         ((!version || !version[0]) && expected.default_version))) matches = true;
+  }
+  if (!matches) std::abort();
   ++calls[DARWIN_ART_BIONIC_PROVIDER_LIBLOG];
   return reinterpret_cast<uintptr_t>(&Stub);
 }
@@ -354,8 +373,8 @@ int main() {
       return 11;
   }
   constexpr size_t kExpectedCalls[] = {
-      66, 13, 1, 74, 21, 64, 104, 1, 47, 63, 10, 5, 8, 3, 4, 5,  20,
-      10, 2,  4, 3,  2,  4,   3,  3,  1, 1, 4, 1, 21, 37, 15, 85, 10, 39, 30};
+      67, 14, 1, 79, 21, 64, 109, 1, 48, 63, 11, 5, 8, 3, 4, 5,  19,
+      10, 2,  4, 3,  2,  4,   3,  3,  1, 1, 4, 1, 21, 40, 15, 85, 10, 39, 30};
   for (size_t index = 0; index < calls.size(); ++index) {
     if (calls[index] != kExpectedCalls[index]) {
       std::fprintf(stderr,
@@ -370,6 +389,6 @@ int main() {
     return 13;
   darwin_art_bionic_namespace_destroy(instance);
   std::fprintf(stderr, "bionic-provider-builtin-adapters: PASS providers=36 "
-                       "routes=784 version-aliases=exact\n");
+                       "routes=800 version-aliases=exact\n");
   return 0;
 }

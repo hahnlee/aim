@@ -1,0 +1,9 @@
+# Android 16 IShortcutService contract used by the desktop endpoint.
+FRAMEWORK_SHORTCUT_PATH=_prebuilt/android-16/bootclasspath/framework.jar
+FRAMEWORK_SHORTCUT_SHA256=ae3d578e3c4cd28ad822d0bc7b35fa308800f440472f54f2aff8aa5c1e22cd91
+ISHORTCUT_SERVICE_DESCRIPTOR=android.content.pm.IShortcutService
+REPORT_SHORTCUT_USED_SIGNATURE='void reportShortcutUsed(java.lang.String,java.lang.String,int)'
+REPORT_SHORTCUT_USED_TRANSACTION=14
+GET_SHORTCUTS_SIGNATURE='android.content.pm.ParceledListSlice getShortcuts(java.lang.String,int,int)'
+GET_SHORTCUTS_TRANSACTION=23
+SHORTCUT_SERVICE_NAME=shortcut

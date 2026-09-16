@@ -1,0 +1,95 @@
+diff --git a/libs/binder/RpcServer.cpp b/libs/binder/RpcServer.cpp
+index 5326f2cf50..73892f2c93 100644
+--- a/libs/binder/RpcServer.cpp
++++ b/libs/binder/RpcServer.cpp
+@@ -26,6 +26,10 @@
+ #include <thread>
+ #include <vector>
+
++#if defined(__APPLE__)
++#include <rpc_identity.h>
++#endif
++
+ #include <binder/Functional.h>
+ #include <binder/Parcel.h>
+ #include <binder/RpcServer.h>
+@@ -548,6 +552,18 @@ void RpcServer::establishConnection(
+             session = it->second;
+         }
+
++#if defined(__APPLE__)
++        // The UNIX peer credential is the only authenticated host boundary.
++        // Bind it once to the AOSP RpcSession before any transaction can run.
++        if (!darwin_art_binder_rpc_identity_bind(session.get(), clientFdForLog)) {
++            ALOGE("Rejecting Binder RPC connection with invalid peer identity");
++            if (requestingNewSession) {
++                server->mSessions.erase(sessionId);
++            }
++            return;
++        }
++#endif
++
+         if (incoming) {
+             LOG_ALWAYS_FATAL_IF(OK != session->addOutgoingConnection(std::move(client), true),
+                                 "server state must already be initialized");
+diff --git a/libs/binder/RpcSession.cpp b/libs/binder/RpcSession.cpp
+index f0ddb1d19f..4d23f08a12 100644
+--- a/libs/binder/RpcSession.cpp
++++ b/libs/binder/RpcSession.cpp
+@@ -27,6 +27,10 @@
+ #include "RpcWireFormat.h"
+ #include "Utils.h"
+
++#if defined(__APPLE__)
++#include <rpc_identity.h>
++#endif
++
+ #if defined(__ANDROID__) && !defined(__ANDROID_RECOVERY__)
+ #include <jni.h>
+ extern "C" JavaVM* AndroidRuntimeGetJavaVM();
+@@ -60,6 +64,9 @@ RpcSession::RpcSession(std::unique_ptr<RpcTransportCtx> ctx) : mCtx(std::move(ctx
+     mRpcBinderState = std::make_unique<RpcState>();
+ }
+ RpcSession::~RpcSession() {
++#if defined(__APPLE__)
++    darwin_art_binder_rpc_identity_forget(this);
++#endif
+     LOG_RPC_DETAIL("RpcSession destroyed %p", this);
+
+     RpcMutexLockGuard _l(mMutex);
+diff --git a/libs/binder/RpcState.cpp b/libs/binder/RpcState.cpp
+index ae37a58e22..b0cc0c373f 100644
+--- a/libs/binder/RpcState.cpp
++++ b/libs/binder/RpcState.cpp
+@@ -23,6 +23,10 @@
+ #include <binder/IPCThreadState.h>
+ #include <binder/RpcServer.h>
+
++#if defined(__APPLE__)
++#include <rpc_identity.h>
++#endif
++
+ #include "Constants.h"
+ #include "Debug.h"
+ #include "RpcWireFormat.h"
+@@ -999,7 +1003,20 @@ status_t RpcState::processTransact(const sp<RpcSession>& session,
+                 bool origAllowNested = connection->allowNested;
+                 connection->allowNested = !oneway;
+
++#if defined(__APPLE__)
++                if (!darwin_art_binder_rpc_identity_enter(session.get(), transaction->flags)) {
++                    ALOGE("Rejecting Binder RPC transaction without authenticated identity");
++                    replyStatus = PERMISSION_DENIED;
++                } else {
++                    auto identityGuard = make_scope_guard([]() {
++                        darwin_art_binder_rpc_identity_leave();
++                    });
++                    replyStatus =
++                            target->transact(transaction->code, data, &reply, transaction->flags);
++                }
++#else
+                 replyStatus = target->transact(transaction->code, data, &reply, transaction->flags);
++#endif
+
+                 connection->allowNested = origAllowNested;
+             } else {

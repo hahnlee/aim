@@ -1,5 +1,11 @@
 #include "darwin_framework_natives.h"
 #include "darwin_binder_wire.h"
+#include "diagnostics/view_resources.h"
+#include "binder/calling_identity.h"
+#include "binder/context_manager.h"
+#include "binder/peer_credentials.h"
+#include "binder/process_registry.h"
+#include "binder/wire_dispatch_policy.h"
 #include "darwin_android_platform.h"
 #include "darwin_android_time.h"
 #include "../tools/bionic-socket-broker-adapter/include/darwin_art_bionic_socket_broker.h"
@@ -19,6 +25,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -34,10 +41,22 @@ extern "C" int darwin_art_bionic_socket_broker_close(int);
 extern "C" int darwin_art_bionic_fd_export_for_scm(int);
 extern "C" int darwin_art_bionic_fd_import_from_scm(int);
 
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+#include <binder/Parcel.h>
+#include <utils/String16.h>
+#include <utils/String8.h>
+
+#include "android_os_Parcel.h"
+#include "android_util_Binder.h"
+
+int register_android_os_Binder(JNIEnv* env);
+namespace android {
+int register_android_os_Parcel(JNIEnv* env);
+}  // namespace android
+#endif
+
 namespace {
 
-std::mutex g_context_binder_mutex;
-jobject g_context_binder = nullptr;
 JavaVM* g_framework_vm = nullptr;
 
 struct DarwinParcel {
@@ -456,24 +475,19 @@ jlong BinderGetNativeFinalizer(JNIEnv*, jclass) {
 }
 
 jint BinderGetCallingUid() {
-  // Treat the host bridge as Android's system UID until per-app identities are
-  // introduced with the Binder compatibility layer.
-  return 1000;
+  return darwin_art::binder::CurrentIdentity().uid;
 }
 
-jint BinderGetCallingPid() { return static_cast<jint>(getpid()); }
+jint BinderGetCallingPid() { return darwin_art::binder::CurrentIdentity().pid; }
 
 jboolean BinderIsDirectlyHandlingTransactionNative() {
-  // Java Binder.transact() invokes local Binder.onTransact() directly. AOSP's
-  // native predicate is true only while the kernel Binder driver is delivering
-  // an incoming transaction, which this process-local path is not.
-  return JNI_FALSE;
+  return darwin_art::binder::CurrentIdentity().remote ? JNI_TRUE : JNI_FALSE;
 }
 
 // These identity operations are @CriticalNative in Android 16, so their
 // callback ABI intentionally has no JNIEnv/jclass pair.
-jlong BinderClearCallingIdentity() { return 0; }
-void BinderRestoreCallingIdentity(jlong) {}
+jlong BinderClearCallingIdentity() { return darwin_art::binder::ClearIdentity(); }
+void BinderRestoreCallingIdentity(jlong token) { darwin_art::binder::RestoreIdentity(token); }
 void BinderFlushPendingCommands() {}
 
 thread_local jint g_binder_thread_strict_mode_policy = 0;
@@ -575,6 +589,12 @@ struct DarwinInputChannelState {
   std::deque<darwin_art::DarwinArtInputPacket> packets;
   bool pointer_active = false;
   DarwinArtPointerEventV2 last_pointer{};
+  int32_t input_left = 0;
+  int32_t input_top = 0;
+  int32_t input_right = 0;
+  int32_t input_bottom = 0;
+  bool input_geometry_valid = false;
+  uint64_t focus_order = 0;
   struct FinishAck {
     jint sequence = 0;
     bool handled = false;
@@ -598,6 +618,7 @@ struct DarwinInputChannelState {
 
 constexpr uint32_t kInputFrameMagic = 0x44414950;  // DAIP
 constexpr uint32_t kInputFrameVersion = 1;
+constexpr uint32_t kInputWindowFrameMagic = 0x44415747;  // DAWG
 struct DarwinInputFrame {
   uint32_t magic = kInputFrameMagic;
   uint32_t version = kInputFrameVersion;
@@ -606,6 +627,18 @@ struct DarwinInputFrame {
   darwin_art::DarwinArtInputPacket payload{};
 };
 static_assert(std::is_trivially_copyable_v<DarwinInputFrame>);
+
+struct DarwinInputWindowFrame {
+  uint32_t magic = kInputWindowFrameMagic;
+  uint32_t version = kInputFrameVersion;
+  int32_t left = 0;
+  int32_t top = 0;
+  int32_t right = 0;
+  int32_t bottom = 0;
+  uint32_t visible = 0;
+  uint32_t reserved = 0;
+};
+static_assert(std::is_trivially_copyable_v<DarwinInputWindowFrame>);
 
 bool IsValidInputPacket(const darwin_art::DarwinArtInputPacket& packet) {
   switch (packet.kind) {
@@ -661,10 +694,11 @@ size_t DecodeRemoteInputFramesLocked(DarwinInputChannelState* channel) {
     uint32_t leading_magic = 0;
     std::memcpy(&leading_magic, channel->remote_rx.data() + consumed_bytes,
                 sizeof(leading_magic));
-    if (leading_magic == 0x4441414b) {
-      // ACK frames may be interleaved with input frames on the full-duplex
-      // stream. Leave the ACK at the front for the ACK decoder instead of
-      // treating it as a corrupt input frame and dropping subsequent bytes.
+    if (leading_magic == 0x4441414b ||
+        leading_magic == kInputWindowFrameMagic) {
+      // Control frames may be interleaved with input frames on the
+      // full-duplex stream. Leave them at the front for their decoder instead
+      // of treating them as corrupt input and dropping subsequent bytes.
       break;
     }
     if (frame.magic != kInputFrameMagic ||
@@ -707,6 +741,40 @@ struct DarwinInputAckFrame {
   uint32_t handled = 0;
 };
 static_assert(std::is_trivially_copyable_v<DarwinInputAckFrame>);
+
+bool DecodeRemoteInputWindowFrameLocked(DarwinInputChannelState* channel) {
+  if (channel == nullptr ||
+      channel->remote_rx.size() < sizeof(DarwinInputWindowFrame)) {
+    return false;
+  }
+  uint32_t magic = 0;
+  std::memcpy(&magic, channel->remote_rx.data(), sizeof(magic));
+  if (magic != kInputWindowFrameMagic) return false;
+  DarwinInputWindowFrame frame{};
+  std::memcpy(&frame, channel->remote_rx.data(), sizeof(frame));
+  if (frame.version != kInputFrameVersion || frame.visible > 1) {
+    channel->remote_rx.clear();
+    return true;
+  }
+  const bool valid = frame.visible != 0 && frame.right > frame.left &&
+                     frame.bottom > frame.top;
+  channel->input_left = frame.left;
+  channel->input_top = frame.top;
+  channel->input_right = frame.right;
+  channel->input_bottom = frame.bottom;
+  channel->input_geometry_valid = valid;
+  channel->remote_rx.erase(
+      channel->remote_rx.begin(),
+      channel->remote_rx.begin() +
+          static_cast<ptrdiff_t>(sizeof(DarwinInputWindowFrame)));
+  if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
+    std::cerr << "ART Android InputWindow geometry name=" << channel->name
+              << " visible=" << (valid ? 1 : 0) << " frame=[" << frame.left
+              << "," << frame.top << "," << frame.right << ","
+              << frame.bottom << "]\n";
+  }
+  return true;
+}
 
 bool SendRemoteAckFrame(DarwinInputChannelState* channel, jint sequence,
                         bool handled) {
@@ -765,6 +833,10 @@ void DecodeRemoteAckFramesLocked(DarwinInputChannelState* channel) {
 
 std::mutex g_focused_input_channel_mutex;
 std::weak_ptr<DarwinInputChannelState> g_focused_input_channel;
+std::weak_ptr<DarwinInputChannelState> g_touch_input_channel;
+int32_t g_touch_offset_x = 0;
+int32_t g_touch_offset_y = 0;
+std::atomic<uint64_t> g_next_input_focus_order{1};
 
 // AOSP's InputDispatcher sends CANCEL when a focused window changes while a
 // pointer stream is active. Keep that boundary in the channel itself so the
@@ -822,10 +894,60 @@ void SetFocusedInputChannel(
     std::lock_guard<std::mutex> lock(g_focused_input_channel_mutex);
     previous = g_focused_input_channel.lock();
     g_focused_input_channel = channel;
+    if (channel != nullptr) {
+      std::lock_guard<std::mutex> packet_lock(channel->packet_mutex);
+      channel->focus_order =
+          g_next_input_focus_order.fetch_add(1, std::memory_order_relaxed);
+    }
   }
   if (previous != nullptr && previous != channel) {
     QueueFocusLossCancel(previous);
   }
+}
+
+void UpdateInputWindowGeometry(JNIEnv* env, DarwinInputReceiver* receiver) {
+  if (env == nullptr || receiver == nullptr || receiver->view_root == nullptr ||
+      receiver->channel == nullptr) {
+    return;
+  }
+  jclass root_class = env->GetObjectClass(receiver->view_root);
+  jfieldID frame_field =
+      root_class == nullptr
+          ? nullptr
+          : env->GetFieldID(root_class, "mWinFrame", "Landroid/graphics/Rect;");
+  jobject frame = frame_field == nullptr
+                      ? nullptr
+                      : env->GetObjectField(receiver->view_root, frame_field);
+  jclass rect_class = frame == nullptr ? nullptr : env->GetObjectClass(frame);
+  jfieldID left_field = rect_class == nullptr
+                            ? nullptr
+                            : env->GetFieldID(rect_class, "left", "I");
+  jfieldID top_field = rect_class == nullptr
+                           ? nullptr
+                           : env->GetFieldID(rect_class, "top", "I");
+  jfieldID right_field = rect_class == nullptr
+                             ? nullptr
+                             : env->GetFieldID(rect_class, "right", "I");
+  jfieldID bottom_field = rect_class == nullptr
+                              ? nullptr
+                              : env->GetFieldID(rect_class, "bottom", "I");
+  if (left_field != nullptr && top_field != nullptr && right_field != nullptr &&
+      bottom_field != nullptr && !env->ExceptionCheck()) {
+    const int32_t left = env->GetIntField(frame, left_field);
+    const int32_t top = env->GetIntField(frame, top_field);
+    const int32_t right = env->GetIntField(frame, right_field);
+    const int32_t bottom = env->GetIntField(frame, bottom_field);
+    std::lock_guard<std::mutex> lock(receiver->channel->packet_mutex);
+    receiver->channel->input_left = left;
+    receiver->channel->input_top = top;
+    receiver->channel->input_right = right;
+    receiver->channel->input_bottom = bottom;
+    receiver->channel->input_geometry_valid = right > left && bottom > top;
+  }
+  if (env->ExceptionCheck()) env->ExceptionClear();
+  if (rect_class != nullptr) env->DeleteLocalRef(rect_class);
+  if (frame != nullptr) env->DeleteLocalRef(frame);
+  if (root_class != nullptr) env->DeleteLocalRef(root_class);
 }
 
 void ClearFocusedInputChannel(
@@ -835,6 +957,12 @@ void ClearFocusedInputChannel(
     std::lock_guard<std::mutex> lock(g_focused_input_channel_mutex);
     focused = g_focused_input_channel.lock();
     if (focused == nullptr || focused == channel) g_focused_input_channel.reset();
+    const auto touch = g_touch_input_channel.lock();
+    if (touch == nullptr || touch == channel) {
+      g_touch_input_channel.reset();
+      g_touch_offset_x = 0;
+      g_touch_offset_y = 0;
+    }
   }
   if (focused != nullptr && focused == channel) {
     QueueFocusLossCancel(focused);
@@ -864,7 +992,20 @@ darwin_art::DarwinArtInputEnqueueResult EnqueueFocusedPacket(
   if (channel == nullptr) {
     return darwin_art::DarwinArtInputEnqueueResult::kNoFocusedChannel;
   }
-  if (channel->remote_endpoint_fd >= 0) {
+  bool has_local_receiver = false;
+  {
+    std::lock_guard<std::mutex> lock(channel->packet_mutex);
+    has_local_receiver =
+        channel->consumer != nullptr &&
+        !channel->consumer->disposed.load(std::memory_order_acquire) &&
+        channel->looper_consumer.load(std::memory_order_acquire);
+  }
+  // A parcel-imported client retains the full-duplex endpoint used by the
+  // system InputDispatcher. AppKit is the platform InputReader boundary for
+  // this process, so an attached ViewRoot receiver consumes through its local
+  // bounded queue and ALooper wakeup. Server-only/import-only endpoints still
+  // use the remote transport.
+  if (channel->remote_endpoint_fd >= 0 && !has_local_receiver) {
     return SendRemoteInputFrame(channel.get(), packet)
                ? darwin_art::DarwinArtInputEnqueueResult::kQueued
                : darwin_art::DarwinArtInputEnqueueResult::kBackpressured;
@@ -905,9 +1046,14 @@ darwin_art::DarwinArtInputEnqueueResult EnqueueFocusedPacket(
   channel->pending_input.store(true, std::memory_order_release);
   if (channel->write_fd >= 0) {
     const uint8_t token = 1;
-    (void)darwin_art_bionic_socket_broker_send(
+    const intptr_t sent = darwin_art_bionic_socket_broker_send(
         channel->write_fd, &token, sizeof(token),
         kAndroidMsgDontWait | kAndroidMsgNoSignal);
+    if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
+      std::cerr << "ART Android InputChannel wake write_fd="
+                << channel->write_fd << " read_fd=" << channel->read_fd
+                << " sent=" << sent << " errno=" << errno << "\n";
+    }
   }
   return darwin_art::DarwinArtInputEnqueueResult::kQueued;
 }
@@ -1122,10 +1268,29 @@ jlongArray InputChannelOpenPair(JNIEnv* env, jclass, jstring name) {
   };
   jlongArray result = env->NewLongArray(2);
   if (result != nullptr) env->SetLongArrayRegion(result, 0, 2, values);
+  if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
+    std::cerr << "ART Android InputChannel open-pair name=" << state->name
+              << " read_fd=" << state->read_fd
+              << " write_fd=" << state->write_fd << "\n";
+  }
   return result;
 }
 
 jlong InputChannelReadParcel(JNIEnv* env, jobject, jobject parcel_object) {
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+  android::Parcel* parcel = android::parcelForJavaObject(env, parcel_object);
+  if (parcel == nullptr) return 0;
+  const jint initialized = parcel->readInt32();
+  if (initialized != 1) return 0;
+  jobject token = android::javaObjectForIBinder(env, parcel->readStrongBinder());
+  const android::String8 name_utf8(parcel->readString16());
+  jstring name = env->NewStringUTF(name_utf8.c_str());
+  const int borrowed_endpoint_fd = parcel->readFileDescriptor();
+  const int endpoint_fd =
+      borrowed_endpoint_fd < 0
+          ? -1
+          : darwin_art_bionic_socket_broker_dup(borrowed_endpoint_fd);
+#else
   DarwinParcel* parcel = JavaParcel(env, parcel_object);
   if (parcel == nullptr) return 0;
   const jlong parcel_pointer = reinterpret_cast<jlong>(parcel);
@@ -1139,6 +1304,7 @@ jlong InputChannelReadParcel(JNIEnv* env, jobject, jobject parcel_object) {
   jobject token = ParcelReadStrongBinder(env, nullptr, parcel_pointer);
   jstring name = ParcelReadString(env, nullptr, parcel_pointer);
   const int endpoint_fd = ParcelReadGuestFileDescriptor(parcel_pointer);
+#endif
   if (name == nullptr || endpoint_fd < 0) {
     env->DeleteLocalRef(token);
     env->DeleteLocalRef(name);
@@ -1177,32 +1343,115 @@ jlong InputChannelReadParcel(JNIEnv* env, jobject, jobject parcel_object) {
   }
   auto* channel = new (std::nothrow)
       DarwinInputChannel{state, false, false};
+  if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
+    std::cerr << "ART Android InputChannel parcel-import name=" << state->name
+              << " endpoint_fd=" << state->remote_endpoint_fd
+              << " local_read_fd=" << state->read_fd << "\n";
+  }
   return static_cast<jlong>(reinterpret_cast<std::uintptr_t>(channel));
 }
 
 void InputChannelWriteParcel(JNIEnv* env, jobject, jobject parcel_object,
                              jlong pointer) {
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+  android::Parcel* parcel = android::parcelForJavaObject(env, parcel_object);
+#else
   DarwinParcel* parcel = JavaParcel(env, parcel_object);
+#endif
   if (parcel == nullptr) return;
-  const jlong parcel_pointer = reinterpret_cast<jlong>(parcel);
   const auto* channel = InputChannel(pointer);
   if (channel == nullptr || channel->disposed || channel->state == nullptr ||
       channel->state->connection_token == nullptr) {
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+    (void)parcel->writeInt32(0);
+#else
+    const jlong parcel_pointer = reinterpret_cast<jlong>(parcel);
     ParcelWriteInt(parcel_pointer, 0);
+#endif
     return;
   }
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+  android::status_t status = parcel->writeInt32(1);
+  if (status == android::OK) {
+    status = parcel->writeStrongBinder(
+        android::ibinderForJavaObject(env,
+                                     channel->state->connection_token));
+  }
+  if (status == android::OK) {
+    status = parcel->writeString16(
+        android::String16(channel->state->name.c_str()));
+  }
+#else
+  const jlong parcel_pointer = reinterpret_cast<jlong>(parcel);
   ParcelWriteInt(parcel_pointer, 1);
   ParcelWriteStrongBinder(env, nullptr, parcel_pointer,
                           channel->state->connection_token);
   jstring name = env->NewStringUTF(channel->state->name.c_str());
   ParcelWriteString(env, nullptr, parcel_pointer, name);
+#endif
   const int endpoint_fd =
       channel->state->remote_endpoint_fd >= 0
           ? channel->state->remote_endpoint_fd
           : (channel->server ? channel->state->read_fd
                              : channel->state->write_fd);
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+  if (status == android::OK) {
+    status = parcel->writeDupFileDescriptor(endpoint_fd);
+  }
+  if (status != android::OK && !env->ExceptionCheck()) {
+    jclass exception = env->FindClass("java/lang/IllegalStateException");
+    if (exception != nullptr) {
+      env->ThrowNew(exception, "Unable to write framework InputChannel");
+    }
+    env->DeleteLocalRef(exception);
+  }
+#else
   (void)ParcelWriteGuestFileDescriptor(parcel_pointer, endpoint_fd);
   env->DeleteLocalRef(name);
+#endif
+}
+
+void InputWindowPublish(JNIEnv* env, jclass, jobject input_channel, jint left,
+                        jint top, jint right, jint bottom, jboolean visible) {
+  if (env == nullptr || input_channel == nullptr) return;
+  jclass channel_class = env->GetObjectClass(input_channel);
+  jfieldID pointer_field =
+      channel_class == nullptr ? nullptr
+                               : env->GetFieldID(channel_class, "mPtr", "J");
+  const jlong pointer = pointer_field == nullptr
+                            ? 0
+                            : env->GetLongField(input_channel, pointer_field);
+  if (channel_class != nullptr) env->DeleteLocalRef(channel_class);
+  auto* channel = InputChannel(pointer);
+  if (channel == nullptr || channel->disposed || !channel->server ||
+      channel->state == nullptr || channel->state->read_fd < 0 ||
+      env->ExceptionCheck()) {
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    return;
+  }
+  DarwinInputWindowFrame frame;
+  frame.left = left;
+  frame.top = top;
+  frame.right = right;
+  frame.bottom = bottom;
+  frame.visible = visible == JNI_TRUE ? 1u : 0u;
+  const auto* bytes = reinterpret_cast<const uint8_t*>(&frame);
+  size_t offset = 0;
+  std::lock_guard<std::mutex> lock(channel->state->remote_tx_mutex);
+  while (offset < sizeof(frame)) {
+    const intptr_t sent = darwin_art_bionic_socket_broker_send(
+        channel->state->read_fd, bytes + offset, sizeof(frame) - offset,
+        kAndroidMsgNoSignal);
+    if (sent <= 0) break;
+    offset += static_cast<size_t>(sent);
+  }
+  if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
+    std::cerr << "ART Android WMS InputWindow publish name="
+              << channel->state->name << " visible="
+              << (frame.visible != 0 ? 1 : 0) << " frame=[" << left << ","
+              << top << "," << right << "," << bottom << "] sent="
+              << offset << "/" << sizeof(frame) << "\n";
+  }
 }
 
 // Build the same framework InputEvent objects used by the owner dispatch path.
@@ -1398,6 +1647,12 @@ void CleanupReceiverRefs(JNIEnv* env, DarwinInputReceiver* receiver) {
 int InputChannelTransportCallback(int fd, int events, void* data) {
   auto* channel = static_cast<DarwinInputChannelState*>(data);
   if (channel == nullptr || fd < 0) return 0;
+  if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
+    std::cerr << "ART Android InputChannel callback-enter fd=" << fd
+              << " events=0x" << std::hex << events << std::dec
+              << " read_fd=" << channel->read_fd
+              << " remote_fd=" << channel->remote_endpoint_fd << "\n";
+  }
   // A closed peer makes poll(2) report HUP/ERR forever on a registered fd.
   // Remove the receiver at that boundary instead of returning 1 and waking
   // the ART owner in a tight callback loop with no payload.
@@ -1456,6 +1711,7 @@ int InputChannelTransportCallback(int fd, int events, void* data) {
     for (;;) {
       const size_t before = channel->remote_rx.size();
       DecodeRemoteAckFramesLocked(channel);
+      (void)DecodeRemoteInputWindowFrameLocked(channel);
       (void)DecodeRemoteInputFramesLocked(channel);
       if (channel->remote_rx.size() == before) break;
     }
@@ -1713,6 +1969,57 @@ jlong InputReceiverInit(JNIEnv* env, jclass, jobject weak_receiver,
     std::lock_guard<std::mutex> lock(receiver->channel->packet_mutex);
     receiver->channel->consumer = receiver_shared;
   }
+  // The framework constructs this native receiver for
+  // ViewRootImpl.WindowInputEventReceiver. Capture the enclosing ViewRoot at
+  // that standard ownership boundary; no presenter or probe should have to
+  // discover and inject it later.
+  jclass weak_class = env->GetObjectClass(weak_receiver);
+  jmethodID weak_get = weak_class == nullptr
+                           ? nullptr
+                           : env->GetMethodID(weak_class, "get",
+                                              "()Ljava/lang/Object;");
+  jobject java_receiver = weak_get == nullptr
+                              ? nullptr
+                              : env->CallObjectMethod(weak_receiver, weak_get);
+  jclass java_receiver_class = java_receiver == nullptr
+                                   ? nullptr
+                                   : env->GetObjectClass(java_receiver);
+  jfieldID view_root_field =
+      java_receiver_class == nullptr
+          ? nullptr
+          : env->GetFieldID(java_receiver_class, "this$0",
+                            "Landroid/view/ViewRootImpl;");
+  jobject view_root = view_root_field == nullptr
+                          ? nullptr
+                          : env->GetObjectField(java_receiver, view_root_field);
+  if (view_root != nullptr && !env->ExceptionCheck()) {
+    darwin_art::diagnostics::LogViewRootResources(env, view_root);
+    receiver->view_root = env->NewGlobalRef(view_root);
+    UpdateInputWindowGeometry(env, receiver);
+  }
+  jmethodID focus_event =
+      java_receiver_class == nullptr
+          ? nullptr
+          : env->GetMethodID(java_receiver_class, "onFocusEvent", "(Z)V");
+  jmethodID touch_mode_event =
+      java_receiver_class == nullptr
+          ? nullptr
+          : env->GetMethodID(java_receiver_class, "onTouchModeChanged", "(Z)V");
+  if (java_receiver != nullptr && focus_event != nullptr &&
+      touch_mode_event != nullptr && !env->ExceptionCheck()) {
+    env->CallVoidMethod(java_receiver, focus_event, JNI_TRUE);
+    env->CallVoidMethod(java_receiver, touch_mode_event, JNI_TRUE);
+    if (!env->ExceptionCheck()) {
+      receiver->focused = true;
+      receiver->touch_mode = true;
+      SetFocusedInputChannel(receiver->channel);
+    }
+  }
+  if (env->ExceptionCheck()) env->ExceptionClear();
+  if (view_root != nullptr) env->DeleteLocalRef(view_root);
+  if (java_receiver_class != nullptr) env->DeleteLocalRef(java_receiver_class);
+  if (java_receiver != nullptr) env->DeleteLocalRef(java_receiver);
+  if (weak_class != nullptr) env->DeleteLocalRef(weak_class);
   receiver->looper = darwin_art_android_platform_prepare_current_looper();
   if (receiver->looper != nullptr && receiver->channel->read_fd >= 0) {
     // ALOOPER_EVENT_INPUT is the NDK value used by InputEventReceiver's
@@ -1738,6 +2045,25 @@ jlong InputReceiverInit(JNIEnv* env, jclass, jobject weak_receiver,
           receiver->remote_transport_registered.load(
               std::memory_order_acquire),
       std::memory_order_release);
+  // Registration is the InputDispatcher focus-selection boundary for the
+  // single key macOS application window. Focus callbacks above preserve the
+  // framework state; channel selection must not depend on reflection success.
+  SetFocusedInputChannel(receiver->channel);
+  if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
+    std::cerr << "ART Android InputChannel receiver-init name="
+              << receiver->channel->name
+              << " view_root=" << (receiver->view_root != nullptr ? 1 : 0)
+              << " local_transport="
+              << (receiver->transport_registered.load(std::memory_order_acquire)
+                      ? 1
+                      : 0)
+              << " remote_transport="
+              << (receiver->remote_transport_registered.load(
+                      std::memory_order_acquire)
+                      ? 1
+                      : 0)
+              << "\n";
+  }
   return static_cast<jlong>(
       reinterpret_cast<std::uintptr_t>(receiver));
 }
@@ -1981,6 +2307,21 @@ constexpr jint kDarwinKeyCharacterMapParcelMagic = 0x44414b4d;  // DAKM
 constexpr jint kDarwinKeyCharacterMapParcelVersion = 1;
 
 jlong KeyMapReadFromParcel(JNIEnv* env, jclass, jobject parcel_object) {
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+  android::Parcel* parcel = android::parcelForJavaObject(env, parcel_object);
+  int32_t magic = 0;
+  int32_t version = 0;
+  int32_t device_id = 0;
+  if (parcel == nullptr || parcel->readInt32(&magic) != android::NO_ERROR ||
+      parcel->readInt32(&version) != android::NO_ERROR ||
+      magic != kDarwinKeyCharacterMapParcelMagic ||
+      version != kDarwinKeyCharacterMapParcelVersion ||
+      parcel->readInt32(&device_id) != android::NO_ERROR) {
+    return 0;
+  }
+  auto* map = new (std::nothrow) DarwinKeyCharacterMap{device_id};
+  return static_cast<jlong>(reinterpret_cast<std::uintptr_t>(map));
+#else
   DarwinParcel* parcel = JavaParcel(env, parcel_object);
   if (parcel == nullptr ||
       ParcelReadInt(reinterpret_cast<jlong>(parcel)) !=
@@ -1992,9 +2333,22 @@ jlong KeyMapReadFromParcel(JNIEnv* env, jclass, jobject parcel_object) {
   const jint device_id = ParcelReadInt(reinterpret_cast<jlong>(parcel));
   auto* map = new (std::nothrow) DarwinKeyCharacterMap{device_id};
   return static_cast<jlong>(reinterpret_cast<std::uintptr_t>(map));
+#endif
 }
 void KeyMapWriteToParcel(JNIEnv* env, jclass, jlong pointer,
                          jobject parcel_object) {
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+  android::Parcel* parcel = android::parcelForJavaObject(env, parcel_object);
+  const auto* map = KeyMap(pointer);
+  if (parcel == nullptr || map == nullptr) return;
+  if (parcel->writeInt32(kDarwinKeyCharacterMapParcelMagic) != android::NO_ERROR ||
+      parcel->writeInt32(kDarwinKeyCharacterMapParcelVersion) != android::NO_ERROR ||
+      parcel->writeInt32(map->device_id) != android::NO_ERROR) {
+    jclass type = env->FindClass("java/lang/IllegalStateException");
+    if (type != nullptr) env->ThrowNew(type, "Could not parcel key character map");
+    env->DeleteLocalRef(type);
+  }
+#else
   DarwinParcel* parcel = JavaParcel(env, parcel_object);
   const auto* map = KeyMap(pointer);
   if (parcel == nullptr || map == nullptr) return;
@@ -2002,6 +2356,7 @@ void KeyMapWriteToParcel(JNIEnv* env, jclass, jlong pointer,
   ParcelWriteInt(parcel_pointer, kDarwinKeyCharacterMapParcelMagic);
   ParcelWriteInt(parcel_pointer, kDarwinKeyCharacterMapParcelVersion);
   ParcelWriteInt(parcel_pointer, map->device_id);
+#endif
 }
 
 std::atomic<jint> g_next_key_event_id{1};
@@ -2031,100 +2386,8 @@ jstring KeyEventCodeToString(JNIEnv* env, jclass, jint key_code) {
   return env->NewStringUTF(value.c_str());
 }
 
-jobject CreateDarwinContextBinder(JNIEnv* env) {
-  const bool debug_binder = std::getenv("DARWIN_ART_DEBUG_BINDER") != nullptr;
-  {
-    std::lock_guard<std::mutex> lock(g_context_binder_mutex);
-    if (g_context_binder != nullptr) {
-      return env->NewLocalRef(g_context_binder);
-    }
-  }
-  // There is no system_server on the Darwin host. The fixture installs a
-  // process-local IServiceManager/IDisplayManager pair whose only real answer
-  // is a 360x640, 60 Hz display; all unrelated services return null/defaults.
-  if (debug_binder) std::fprintf(stderr, "DARWIN binder: resolving DarwinServiceBridge\n");
-  jclass bridge = env->FindClass("dev/darwinart/simple/DarwinServiceBridge");
-  if (bridge == nullptr) {
-    if (debug_binder) std::fprintf(stderr, "DARWIN binder: FindClass miss, trying context loader\n");
-    env->ExceptionClear();
-    jclass thread_class = env->FindClass("java/lang/Thread");
-    jmethodID current_thread = thread_class == nullptr
-                                   ? nullptr
-                                   : env->GetStaticMethodID(
-                                         thread_class, "currentThread",
-                                         "()Ljava/lang/Thread;");
-    jobject thread = current_thread == nullptr
-                         ? nullptr
-                         : env->CallStaticObjectMethod(thread_class,
-                                                       current_thread);
-    jmethodID get_loader = thread_class == nullptr
-                               ? nullptr
-                               : env->GetMethodID(
-                                     thread_class, "getContextClassLoader",
-                                     "()Ljava/lang/ClassLoader;");
-    jobject loader = get_loader == nullptr
-                         ? nullptr
-                         : env->CallObjectMethod(thread, get_loader);
-    jclass loader_class = loader == nullptr
-                              ? nullptr
-                              : env->GetObjectClass(loader);
-    jmethodID load_class = loader_class == nullptr
-                               ? nullptr
-                               : env->GetMethodID(
-                                     loader_class, "loadClass",
-                                     "(Ljava/lang/String;)Ljava/lang/Class;");
-    jstring name = env->NewStringUTF("dev.darwinart.simple.DarwinServiceBridge");
-    jobject loaded = load_class == nullptr
-                         ? nullptr
-                         : env->CallObjectMethod(loader, load_class, name);
-    if (!env->ExceptionCheck()) {
-      bridge = static_cast<jclass>(loaded);
-      if (debug_binder) std::fprintf(stderr, "DARWIN binder: context loader resolved bridge=%p\n", (void*)bridge);
-    } else {
-      if (debug_binder) std::fprintf(stderr, "DARWIN binder: context loader threw while resolving bridge\n");
-      if (debug_binder) env->ExceptionDescribe();
-      env->ExceptionClear();
-      env->DeleteLocalRef(loaded);
-    }
-    env->DeleteLocalRef(name);
-    env->DeleteLocalRef(loader_class);
-    env->DeleteLocalRef(loader);
-    env->DeleteLocalRef(thread);
-    env->DeleteLocalRef(thread_class);
-  }
-  jmethodID create = bridge == nullptr
-                         ? nullptr
-                         : env->GetStaticMethodID(bridge, "createContextBinder",
-                                                  "()Landroid/os/Binder;");
-  if (debug_binder) std::fprintf(stderr, "DARWIN binder: bridge=%p create=%p\n", (void*)bridge, (void*)create);
-  jobject result = create == nullptr
-                       ? nullptr
-                       : env->CallStaticObjectMethod(bridge, create);
-  if (env->ExceptionCheck()) {
-    if (debug_binder) {
-      std::fprintf(stderr, "DARWIN binder: createContextBinder threw\n");
-      env->ExceptionDescribe();
-    }
-    env->ExceptionClear();
-  }
-  if (debug_binder) std::fprintf(stderr, "DARWIN binder: result=%p\n", (void*)result);
-  if (result != nullptr) {
-    jobject candidate = env->NewGlobalRef(result);
-    if (candidate != nullptr) {
-      std::lock_guard<std::mutex> lock(g_context_binder_mutex);
-      if (g_context_binder == nullptr) {
-        g_context_binder = candidate;
-      } else {
-        env->DeleteGlobalRef(candidate);
-      }
-    }
-  }
-  env->DeleteLocalRef(bridge);
-  return result;
-}
-
 jobject BinderInternalGetContextObject(JNIEnv* env, jclass) {
-  return CreateDarwinContextBinder(env);
+  return darwin_art::GetSystemContextObject(env);
 }
 
 void BinderInternalHandleGc(JNIEnv*, jclass) {
@@ -2136,7 +2399,7 @@ void BinderInternalHandleGc(JNIEnv*, jclass) {
 }
 
 jobject ServiceManagerProxyGetNativeServiceManager(JNIEnv* env, jobject) {
-  return CreateDarwinContextBinder(env);
+  return darwin_art::GetSystemContextObject(env);
 }
 
 bool Register(JNIEnv* env, const char* class_name, JNINativeMethod* methods,
@@ -2209,6 +2472,9 @@ struct WireMessage {
 };
 
 struct WireConnection {
+  std::optional<darwin_art::binder::PeerCredentials> peer;
+  bool peer_checked = false;
+  int32_t peer_android_uid = -1;
   uint64_t generation = 0;
   uint32_t next_sequence = 1;
   uint32_t next_local_target = 2;
@@ -2485,7 +2751,7 @@ bool ExportParcel(JNIEnv* env, int fd, DarwinParcel* parcel,
 
 jobject NewRemoteBinder(JNIEnv* env, int fd, uint32_t target) {
   jclass remote_class =
-      env->FindClass("dev/darwinart/probe/ProbeContext$RemoteServiceBinder");
+      env->FindClass("dev/darwinart/runtime/os/RemoteBinder");
   if (remote_class == nullptr) {
     env->ExceptionClear();
     jclass thread_class = env->FindClass("java/lang/Thread");
@@ -2513,7 +2779,7 @@ jobject NewRemoteBinder(JNIEnv* env, int fd, uint32_t target) {
             : env->GetMethodID(loader_class, "loadClass",
                                "(Ljava/lang/String;)Ljava/lang/Class;");
     jstring name = env->NewStringUTF(
-        "dev.darwinart.probe.ProbeContext$RemoteServiceBinder");
+        "dev.darwinart.runtime.os.RemoteBinder");
     jobject loaded = load_class == nullptr
                          ? nullptr
                          : env->CallObjectMethod(loader, load_class, name);
@@ -2527,12 +2793,12 @@ jobject NewRemoteBinder(JNIEnv* env, int fd, uint32_t target) {
     env->DeleteLocalRef(thread_class);
   }
   jmethodID constructor =
-      remote_class == nullptr
+      !darwin_art::RegisterRemoteBinderNatives(env, remote_class)
           ? nullptr
-          : env->GetMethodID(remote_class, "<init>", "(III)V");
+          : env->GetMethodID(remote_class, "<init>", "(II)V");
   jobject result = constructor == nullptr
                        ? nullptr
-                       : env->NewObject(remote_class, constructor, -1, fd,
+                       : env->NewObject(remote_class, constructor, fd,
                                         static_cast<jint>(target));
   env->DeleteLocalRef(remote_class);
   return result;
@@ -2615,14 +2881,34 @@ bool DispatchWireTransaction(JNIEnv* env, int fd, WireMessage* request) {
       local == connection->second.local_binders.end()) {
     return false;
   }
+  if (!connection->second.peer_checked) {
+    darwin_art::binder::PeerCredentials peer{};
+    if (darwin_art::binder::ReadPeerCredentials(fd, &peer)) {
+      connection->second.peer = peer;
+      connection->second.peer_android_uid = darwin_art_runtime_registered_process_uid(peer.pid);
+    }
+    connection->second.peer_checked = true;
+  }
+  // Unknown/inherited channels must not impersonate this server. Android UID
+  // requires package registry resolution; Darwin's host UID is not that UID.
+  const auto& peer = connection->second.peer;
+  const int32_t caller_pid = (request->header.flags & kBinderFlagOneWay) != 0 || !peer
+                                ? 0 : static_cast<int32_t>(peer->pid);
+  darwin_art::binder::IncomingIdentity caller(caller_pid, connection->second.peer_android_uid);
   jobject data = ObtainJavaParcel(env);
   jobject reply = ObtainJavaParcel(env);
   DarwinParcel* data_native = JavaParcel(env, data);
   DarwinParcel* reply_native = JavaParcel(env, reply);
-  bool success = data != nullptr && reply != nullptr && data_native != nullptr &&
-                 reply_native != nullptr &&
-                 ImportParcel(env, fd, request, data_native);
-  if (success) {
+  const bool request_imported =
+      data != nullptr && reply != nullptr && data_native != nullptr &&
+      reply_native != nullptr && ImportParcel(env, fd, request, data_native);
+  if (!request_imported) {
+    RecycleJavaParcel(env, reply);
+    RecycleJavaParcel(env, data);
+    return false;
+  }
+  bool transaction_handled = false;
+  {
     jclass binder_class = env->FindClass("android/os/IBinder");
     jmethodID transact = binder_class == nullptr
                              ? nullptr
@@ -2636,8 +2922,8 @@ bool DispatchWireTransaction(JNIEnv* env, int fd, WireMessage* request) {
                   local->second, transact,
                   static_cast<jint>(request->header.code), data, reply,
                   static_cast<jint>(request->header.flags));
-    success = transact != nullptr && transacted == JNI_TRUE &&
-              !env->ExceptionCheck();
+    transaction_handled = transact != nullptr && transacted == JNI_TRUE &&
+                          !env->ExceptionCheck();
     if (std::getenv("DARWIN_ART_DEBUG_BINDER") != nullptr) {
       std::cerr << "ART Binder wire: dispatched fd=" << fd
                 << " code=" << request->header.code
@@ -2673,7 +2959,7 @@ bool DispatchWireTransaction(JNIEnv* env, int fd, WireMessage* request) {
     env->DeleteLocalRef(exception_class);
     env->DeleteLocalRef(exception);
     if (env->ExceptionCheck()) env->ExceptionClear();
-    success = false;
+    transaction_handled = false;
   }
   // Even a Binder one-way call gets an internal transport ACK. Android's
   // driver can deliver nested callbacks while dispatching it; the ACK keeps
@@ -2681,26 +2967,36 @@ bool DispatchWireTransaction(JNIEnv* env, int fd, WireMessage* request) {
   WireHeader response;
   response.type = kWireReply;
   response.sequence = request->header.sequence;
-  response.status = success ? 0 : -1;
+  response.status = darwin_art::binder::DecideWireDispatch(
+                        transaction_handled, false)
+                        .response_status;
   std::vector<WireBinder> binders;
   std::vector<uint8_t> bytes;
   std::vector<int> descriptors;
-  if (success && (request->header.flags & kBinderFlagOneWay) == 0) {
-    success = ExportParcel(env, fd, reply_native, &response, &binders, &bytes,
-                           &descriptors);
-    response.status = success ? 0 : -1;
+  if (transaction_handled &&
+      (request->header.flags & kBinderFlagOneWay) == 0) {
+    transaction_handled = ExportParcel(env, fd, reply_native, &response,
+                                       &binders, &bytes, &descriptors);
+    response.status = darwin_art::binder::DecideWireDispatch(
+                          transaction_handled, false)
+                          .response_status;
   }
-  success = SendWireMessage(fd, response, binders, bytes, descriptors) && success;
+  const bool response_sent =
+      SendWireMessage(fd, response, binders, bytes, descriptors);
+  const auto decision = darwin_art::binder::DecideWireDispatch(
+      transaction_handled, response_sent);
   if (std::getenv("DARWIN_ART_DEBUG_BINDER") != nullptr) {
     std::cerr << "ART Binder wire: reply fd=" << fd
               << " sequence=" << response.sequence
               << " status=" << response.status
-              << " bytes=" << response.data_size << " sent=" << success
+              << " bytes=" << response.data_size
+              << " handled=" << transaction_handled
+              << " sent=" << response_sent
               << "\n";
   }
   RecycleJavaParcel(env, reply);
   RecycleJavaParcel(env, data);
-  return success;
+  return decision.keep_channel;
 }
 
 void CloseRemoteBinderChannelGeneration(JNIEnv* env, int control_fd,
@@ -2827,9 +3123,57 @@ void ClearFrameworkInputPending() {
 DarwinArtInputEnqueueResult EnqueueFrameworkPointerPacket(
     const DarwinArtPointerEventV2& packet) {
   std::shared_ptr<DarwinInputChannelState> channel;
-  {
+  int32_t offset_x = 0;
+  int32_t offset_y = 0;
+  if (packet.action == DARWIN_ART_POINTER_DOWN) {
+    std::vector<std::shared_ptr<DarwinInputChannelState>> candidates;
+    {
+      std::lock_guard<std::mutex> registry_lock(g_input_channel_registry_mutex);
+      std::erase_if(g_input_channel_registry,
+                    [](const auto& candidate) { return candidate.expired(); });
+      candidates.reserve(g_input_channel_registry.size());
+      for (const auto& candidate : g_input_channel_registry) {
+        if (auto state = candidate.lock(); state != nullptr) {
+          candidates.push_back(std::move(state));
+        }
+      }
+    }
+    uint64_t selected_order = 0;
+    for (const auto& candidate : candidates) {
+      std::lock_guard<std::mutex> packet_lock(candidate->packet_mutex);
+      const bool receiver_alive =
+          candidate->consumer != nullptr &&
+          !candidate->consumer->disposed.load(std::memory_order_acquire) &&
+          candidate->looper_consumer.load(std::memory_order_acquire);
+      const bool inside = candidate->input_geometry_valid &&
+          packet.x >= candidate->input_left &&
+          packet.y >= candidate->input_top &&
+          packet.x < candidate->input_right &&
+          packet.y < candidate->input_bottom;
+      if (receiver_alive && inside && candidate->focus_order >= selected_order) {
+        channel = candidate;
+        offset_x = candidate->input_left;
+        offset_y = candidate->input_top;
+        selected_order = candidate->focus_order;
+      }
+    }
+    std::lock_guard<std::mutex> focus_lock(g_focused_input_channel_mutex);
+    if (channel == nullptr) channel = g_focused_input_channel.lock();
+    if (channel != nullptr && selected_order == 0) {
+      std::lock_guard<std::mutex> packet_lock(channel->packet_mutex);
+      if (channel->input_geometry_valid) {
+        offset_x = channel->input_left;
+        offset_y = channel->input_top;
+      }
+    }
+    g_touch_input_channel = channel;
+    g_touch_offset_x = offset_x;
+    g_touch_offset_y = offset_y;
+  } else {
     std::lock_guard<std::mutex> lock(g_focused_input_channel_mutex);
-    channel = g_focused_input_channel.lock();
+    channel = g_touch_input_channel.lock();
+    offset_x = g_touch_offset_x;
+    offset_y = g_touch_offset_y;
   }
   if (channel == nullptr) {
     return DarwinArtInputEnqueueResult::kNoFocusedChannel;
@@ -2837,7 +3181,21 @@ DarwinArtInputEnqueueResult EnqueueFrameworkPointerPacket(
   DarwinArtInputPacket input;
   input.kind = DarwinArtInputPacketKind::kPointer;
   input.pointer = packet;
-  return EnqueueFocusedPacket(channel, input);
+  input.pointer.x -= static_cast<float>(offset_x);
+  input.pointer.y -= static_cast<float>(offset_y);
+  const DarwinArtInputEnqueueResult result =
+      EnqueueFocusedPacket(channel, input);
+  if (packet.action == DARWIN_ART_POINTER_UP ||
+      packet.action == DARWIN_ART_POINTER_CANCEL) {
+    std::lock_guard<std::mutex> lock(g_focused_input_channel_mutex);
+    const auto active = g_touch_input_channel.lock();
+    if (active == nullptr || active == channel) {
+      g_touch_input_channel.reset();
+      g_touch_offset_x = 0;
+      g_touch_offset_y = 0;
+    }
+  }
+  return result;
 }
 
 bool DequeueFrameworkPointerPacket(DarwinArtPointerEventV2* packet) {
@@ -3231,6 +3589,31 @@ void CloseRemoteBinderChannel(JNIEnv* env, jint control_fd) {
   g_wire_condition.notify_all();
 }
 
+jobject ConnectSystemBinder(JNIEnv* env, const char* socket_path) {
+  if (env == nullptr || env->ExceptionCheck() || socket_path == nullptr) return nullptr;
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  if (*socket_path == '\0' || std::strlen(socket_path) >= sizeof(address.sun_path)) return nullptr;
+  std::memcpy(address.sun_path, socket_path, std::strlen(socket_path) + 1);
+  const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) return nullptr;
+  if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+    close(fd);
+    return nullptr;
+  }
+  jobject root = NewRemoteBinder(env, fd, 1);
+  if (root == nullptr || env->ExceptionCheck() || !StartRemoteBinderDispatcher(env, fd)) {
+    env->DeleteLocalRef(root);
+    CloseRemoteBinderChannel(env, fd);
+    close(fd);
+    return nullptr;
+  }
+  // Process-lifetime manager capability. The dispatcher releases Binder refs
+  // at EOF; retain the fd until process exit so stale Java endpoints cannot
+  // alias a newly reused descriptor. SystemServices creates only one channel.
+  return root;
+}
+
 std::string QuerySystemPackageRecord(JNIEnv* env, const char* socket_path,
                                      const char* package_name) {
   if (env == nullptr || socket_path == nullptr || *socket_path == '\0' ||
@@ -3250,6 +3633,27 @@ std::string QuerySystemPackageRecord(JNIEnv* env, const char* socket_path,
     close(fd);
     return {};
   }
+  jobject manager = NewRemoteBinder(env, fd, 1);
+  jclass services = manager == nullptr ? nullptr
+      : env->FindClass("dev/darwinart/runtime/os/SystemServices");
+  jmethodID lookup = services == nullptr ? nullptr : env->GetStaticMethodID(
+      services, "lookup", "(Landroid/os/IBinder;Ljava/lang/String;)Landroid/os/IBinder;");
+  jstring service_name = lookup == nullptr ? nullptr
+      : env->NewStringUTF("darwin.package_registry");
+  jobject service = service_name == nullptr ? nullptr
+      : env->CallStaticObjectMethod(services, lookup, manager, service_name);
+  env->DeleteLocalRef(service_name);
+  env->DeleteLocalRef(services);
+  env->DeleteLocalRef(manager);
+  if (service == nullptr || env->ExceptionCheck()) {
+    env->DeleteLocalRef(service);
+    CloseRemoteBinderChannel(env, fd);
+    close(fd);
+    return {};
+  }
+  jclass service_class = env->GetObjectClass(service);
+  jmethodID transact = service_class == nullptr ? nullptr : env->GetMethodID(
+      service_class, "transact", "(ILandroid/os/Parcel;Landroid/os/Parcel;I)Z");
   jobject data = ObtainJavaParcel(env);
   jobject reply = ObtainJavaParcel(env);
   jclass parcel_class = data == nullptr ? nullptr : env->GetObjectClass(data);
@@ -3277,8 +3681,8 @@ std::string QuerySystemPackageRecord(JNIEnv* env, const char* socket_path,
     jstring package = env->NewStringUTF(package_name);
     env->CallVoidMethod(data, write_token, descriptor);
     env->CallVoidMethod(data, write_string, package);
-    if (!env->ExceptionCheck() &&
-        TransactRemoteBinder(env, fd, 1, 1, data, reply, 0) == JNI_TRUE) {
+    if (transact != nullptr && !env->ExceptionCheck() &&
+        env->CallBooleanMethod(service, transact, 1, data, reply, 0) == JNI_TRUE) {
       env->CallVoidMethod(reply, read_exception);
       jstring record = env->ExceptionCheck()
                            ? nullptr
@@ -3296,12 +3700,20 @@ std::string QuerySystemPackageRecord(JNIEnv* env, const char* socket_path,
     env->DeleteLocalRef(package);
     env->DeleteLocalRef(descriptor);
   }
-  if (env->ExceptionCheck()) env->ExceptionClear();
+  jthrowable failure = env->ExceptionOccurred();
+  if (failure != nullptr) env->ExceptionClear();
   env->DeleteLocalRef(parcel_class);
+  env->DeleteLocalRef(service_class);
+  env->DeleteLocalRef(service);
   if (data != nullptr) RecycleJavaParcel(env, data);
   if (reply != nullptr) RecycleJavaParcel(env, reply);
   CloseRemoteBinderChannel(env, fd);
   close(fd);
+  if (failure != nullptr) {
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->Throw(failure);
+    env->DeleteLocalRef(failure);
+  }
   return result;
 }
 
@@ -3378,6 +3790,7 @@ bool SetFrameworkViewRootFocus(JNIEnv* env, jobject view_root, bool focused) {
                        (!focused || touch_mode != nullptr) &&
                        !env->ExceptionCheck();
   if (receiver != nullptr && changed) {
+    UpdateInputWindowGeometry(env, receiver);
     receiver->focused = focused;
     if (focused) {
       receiver->touch_mode = true;
@@ -3538,6 +3951,15 @@ bool RegisterFrameworkBinderNatives(JNIEnv* env) {
       g_framework_vm == nullptr) {
     return false;
   }
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+  // Binder, BinderInternal, BinderProxy and Parcel share native object layouts.
+  // Switch their AOSP owners as one registration unit; mixing either side's
+  // Parcel pointer with the other side's Binder conversion is invalid.
+  if (::register_android_os_Binder(env) < 0 ||
+      android::register_android_os_Parcel(env) < 0) {
+    return false;
+  }
+#else
   JNINativeMethod parcel_methods[] = {
       {const_cast<char*>("nativeMarkSensitive"), const_cast<char*>("(J)V"),
        reinterpret_cast<void*>(&ParcelMarkSensitive)},
@@ -3698,6 +4120,7 @@ bool RegisterFrameworkBinderNatives(JNIEnv* env) {
                 static_cast<jint>(std::size(binder_internal_methods)))) {
     return false;
   }
+#endif
 
   JNINativeMethod service_manager_proxy_methods[] = {
       {const_cast<char*>("getNativeServiceManager"),
@@ -3735,6 +4158,17 @@ bool RegisterFrameworkBinderNatives(JNIEnv* env) {
   };
   if (!Register(env, "android/view/InputChannel", input_channel_methods,
                 static_cast<jint>(std::size(input_channel_methods)))) {
+    return false;
+  }
+
+  JNINativeMethod input_window_publisher_methods[] = {
+      {const_cast<char*>("nativePublish"),
+       const_cast<char*>("(Landroid/view/InputChannel;IIIIZ)V"),
+       reinterpret_cast<void*>(&InputWindowPublish)},
+  };
+  if (!Register(env, "dev/darwinart/runtime/wm/WindowInputPublisher",
+                input_window_publisher_methods,
+                static_cast<jint>(std::size(input_window_publisher_methods)))) {
     return false;
   }
 

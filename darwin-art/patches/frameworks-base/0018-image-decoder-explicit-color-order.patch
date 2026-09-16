@@ -1,0 +1,12 @@
+--- a/hwui/ImageDecoder.cpp
++++ b/hwui/ImageDecoder.cpp
+@@ -174,7 +174,8 @@
+                 return false;
+             }
+             break;
+-        case kN32_SkColorType:
++        case kRGBA_8888_SkColorType:
++        case kBGRA_8888_SkColorType:
+             break;
+         case kRGBA_F16_SkColorType:
+             break;

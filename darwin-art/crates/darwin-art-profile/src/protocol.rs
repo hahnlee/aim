@@ -14,7 +14,17 @@ pub(crate) const OP_LIST: u16 = 7;
 pub(crate) const OP_PROCESSES: u16 = 8;
 pub(crate) const OP_DAEMONIZE: u16 = 9;
 pub(crate) const OP_UNREGISTER: u16 = 10;
-const RESPONSE_BIT: u16 = 0x8000;
+pub(crate) const OP_PROCESS_IDENTITY: u16 = 11;
+pub(crate) const OP_START_RUNTIME: u16 = 12;
+pub(crate) const OP_RUNTIME_READY: u16 = 13;
+pub(crate) const OP_RUNTIME_LOST: u16 = 14;
+pub(crate) const OP_BINDER_SESSION: u16 = 15;
+pub(crate) const OP_BINDER_TRANSFER_DEPOSIT: u16 = 16;
+pub(crate) const OP_BINDER_TRANSFER_TAKE: u16 = 17;
+pub(crate) const OP_START_BOUND_SERVICE: u16 = 18;
+pub(crate) const OP_ACTIVATE_BOUND_SERVICE: u16 = 19;
+pub(crate) const STATUS_NOT_FOUND: u32 = 2;
+pub(crate) const RESPONSE_BIT: u16 = 0x8000;
 
 pub(crate) struct Message {
     pub operation: u16,

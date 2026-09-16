@@ -69,6 +69,14 @@ void* darwin_art_bionic_memset(void* destination, int value, size_t length) {
   return destination;
 }
 
+void* darwin_art_bionic_memset_explicit(void* destination, int value,
+                                        size_t length) {
+  volatile unsigned char* output = (volatile unsigned char*)destination;
+  for (size_t index = 0; index < length; ++index)
+    output[index] = (unsigned char)value;
+  return destination;
+}
+
 void* darwin_art_bionic___memset_chk(void* destination, int value,
                                      size_t length, size_t destination_size) {
   if (length > destination_size) __builtin_trap();
@@ -750,6 +758,8 @@ static const DarwinArtBionicLeafBinding kBindings[] = {
     {"memmove", (DarwinArtBionicFunction)darwin_art_bionic_memmove},
     {"memrchr", (DarwinArtBionicFunction)darwin_art_bionic_memrchr},
     {"memset", (DarwinArtBionicFunction)darwin_art_bionic_memset},
+    {"memset_explicit",
+     (DarwinArtBionicFunction)darwin_art_bionic_memset_explicit},
     {"qsort", (DarwinArtBionicFunction)darwin_art_bionic_qsort},
     {"stpcpy", (DarwinArtBionicFunction)darwin_art_bionic_stpcpy},
     {"strcasecmp", (DarwinArtBionicFunction)darwin_art_bionic_strcasecmp},

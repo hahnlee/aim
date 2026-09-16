@@ -71,10 +71,62 @@ pub(super) fn adapter_jobs(
                 .arg("-I")
                 .arg(staged.root.join("_aosp/system/core/libcutils/include"));
         }
+        if matches!(
+            adapter_source,
+            "darwin_framework_binder_natives.cc"
+                | "binder/context_manager.cc"
+                | "binder/platform_syscalls.cc"
+                | "binder/service_endpoint.cc"
+                | "../runtime/framework/app/kernel_binder_client.cc"
+                | "../runtime/framework/system/kernel_binder_service.cc"
+        ) {
+            // Binder/Parcel object layouts and the service/context endpoints
+            // switch as one AOSP-owned unit. The Darwin boundary archive owns
+            // only UNIX connection, peer identity and worker-thread entry.
+            adapter_command
+                .arg("-DDARWIN_ART_ORIGINAL_BINDER_JNI")
+                .arg("-I")
+                .arg(
+                    staged
+                        .root
+                        .join("_build/binder-jni/patched-source/core/jni"),
+                )
+                .arg("-I")
+                .arg(
+                    staged.root.join(
+                        "_build/surfaceflinger-core/work/frameworks-native/libs/binder/include",
+                    ),
+                )
+                .arg("-I")
+                .arg(staged.root.join("_aosp/system/core/libutils/include"))
+                .arg("-I")
+                .arg(staged.root.join("_aosp/system/core/libsystem/include"))
+                .arg("-I")
+                .arg(&staged.libcutils_include)
+                .arg("-I")
+                .arg(staged.root.join("_aosp/system/logging/liblog/include"));
+        }
+        if adapter_source == "binder/platform_syscalls.cc" {
+            for include in [
+                "tools/bionic-fs-facade/include",
+                "tools/bionic-ioctl-facade/include",
+                "tools/bionic-vm-facade/include",
+            ] {
+                adapter_command.arg("-I").arg(staged.root.join(include));
+            }
+        }
         if adapter_source == "darwin_os_constants.cc" {
             adapter_command
                 .arg("-I")
                 .arg(staged.root.join("_build/os-constants/generated"));
+        }
+        if adapter_source == "../runtime/framework/connectivity/network_path_platform.mm" {
+            adapter_command.args(["-fobjc-arc", "-fblocks"]);
+        }
+        if adapter_source == "loader/android_dlwarning.cc" {
+            adapter_command
+                .arg("-I")
+                .arg(staged.root.join("_aosp/bionic-linker-config/linker"));
         }
         if real_graphics && adapter_source == "darwin_icu_jni_bridge.cc" {
             adapter_command.arg("-I").arg(staged.root.join("include"));
@@ -90,6 +142,7 @@ pub(super) fn adapter_jobs(
         if matches!(
             adapter_source,
             "darwin_runtime_adapters.cc"
+                | "darwin_framework_animation_natives.cc"
                 | "darwin_android_asset_manager.cc"
                 | "darwin_android_platform.mm"
                 | "darwin_android_native_window.cc"
@@ -99,6 +152,8 @@ pub(super) fn adapter_jobs(
                 | "darwin_runtime_elf_lifecycle.cc"
                 | "darwin_runtime_elf_resolver.cc"
                 | "darwin_runtime_native_loader.cc"
+                | "loader/bionic_provider_set.cc"
+                | "loader/bionic_symbol_lookup.cc"
                 | "darwin_runtime_jni_registration.cc"
                 | "darwin_provider_owners.cc"
                 | "darwin_jni_proxy_lookup.cc"
@@ -115,6 +170,18 @@ pub(super) fn adapter_jobs(
                 "tools/bionic-ioctl-facade/include",
                 "tools/bionic-strftime-facade/include",
                 "tools/bionic-vm-facade/include",
+            ] {
+                adapter_command.arg("-I").arg(staged.root.join(include));
+            }
+        }
+        if matches!(
+            adapter_source,
+            "filesystem/archive_filesystem.cc" | "process/procfs_jni.cc"
+        ) {
+            for include in [
+                "tools/bionic-fs-facade/include",
+                "tools/bionic-ioctl-facade/include",
+                "tools/bionic-errno-tls/include",
             ] {
                 adapter_command.arg("-I").arg(staged.root.join(include));
             }

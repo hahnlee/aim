@@ -49,11 +49,20 @@ android::ResolvedComposerState ResolveLayerState(
   resolved.state.bufferTransform = source.transform;
   resolved.state.x = source.x;
   resolved.state.y = source.y;
+  resolved.state.matrix.dsdx = source.scale_x;
+  resolved.state.matrix.dtdx = 0.0f;
+  resolved.state.matrix.dtdy = 0.0f;
+  resolved.state.matrix.dsdy = source.scale_y;
   resolved.state.z = source.z;
   resolved.state.color.a = source.alpha;
   resolved.state.destinationFrame =
       android::Rect(source.destination_left, source.destination_top,
                     source.destination_right, source.destination_bottom);
+  resolved.state.crop = android::FloatRect(
+      static_cast<float>(source.crop_left),
+      static_cast<float>(source.crop_top),
+      static_cast<float>(source.crop_right),
+      static_cast<float>(source.crop_bottom));
   return resolved;
 }
 

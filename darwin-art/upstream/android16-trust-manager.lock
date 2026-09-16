@@ -1,0 +1,8 @@
+# Android 16 framework trust-manager contract used by the desktop endpoint.
+FRAMEWORK_TRUST_PATH=_prebuilt/android-16/bootclasspath/framework.jar
+FRAMEWORK_TRUST_SHA256=ae3d578e3c4cd28ad822d0bc7b35fa308800f440472f54f2aff8aa5c1e22cd91
+ITRUST_MANAGER_DESCRIPTOR=android.app.trust.ITrustManager
+IS_DEVICE_LOCKED_SIGNATURE='boolean isDeviceLocked(int,int)'
+IS_DEVICE_LOCKED_TRANSACTION=10
+IS_DEVICE_SECURE_SIGNATURE='boolean isDeviceSecure(int,int)'
+IS_DEVICE_SECURE_TRANSACTION=11

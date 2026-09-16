@@ -432,8 +432,19 @@ mod tests {
                 .len(),
             2
         );
-        assert_eq!(read_instruction(&code, 6), ADRP | 9);
-        assert_eq!(read_instruction(&code, 12), ADRP | 20);
+        // These sites can straddle a 4 KiB page even in this small allocation.
+        // Verify the decoded target, not an assumed zero ADRP page displacement.
+        for (index, register) in [(6, 9), (12, 20)] {
+            let instruction = read_instruction(&code, index);
+            assert_eq!(instruction & ADRP_REGISTER_MASK, ADRP | register);
+            let immediate = ((instruction >> 29) & 3) | (((instruction >> 5) & 0x7ffff) << 2);
+            let pages = ((immediate as i64) << 43) >> 43;
+            let pc_page = (code.as_ptr() as usize + index * 4) & !0xfff;
+            assert_eq!(
+                pc_page.wrapping_add_signed((pages << 12) as isize),
+                guard & !0xfff
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,5 @@
+--- a/zip_archive.cc
++++ b/zip_archive.cc
+@@ -701,1 +701,1 @@
+-  const int fd = ::android::base::utf8::open(fileName, O_RDONLY | O_BINARY | O_CLOEXEC, 0);
++  const int fd = ::darwin_art_archive_open(fileName, O_RDONLY | O_BINARY | O_CLOEXEC, 0);

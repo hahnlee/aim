@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 
 #include "jni.h"
+#include "loader/classloader_namespaces.h"
 #include "nativebridge/native_bridge.h"
 #include "nativeloader/native_loader.h"
 
@@ -90,12 +91,13 @@ void NativeLoaderFreeErrorMessage(char* message) {
   std::free(message);
 }
 
-// Bionic's NativeLoader initializes linker-namespace policy here. Darwin's
-// namespace graph is initialized lazily by OpenNativeLibrary, but ART's public
-// JNI_CreateJavaVM entry point still owns and calls this AOSP lifecycle hook.
-void InitializeNativeLoader() {}
+void InitializeNativeLoader() {
+  darwin_art::loader::InitializeClassLoaderNamespaces();
+}
 
-void ResetNativeLoader() {}
+void ResetNativeLoader() {
+  darwin_art::loader::ResetClassLoaderNamespaces();
+}
 
 }  // extern "C"
 }  // namespace android

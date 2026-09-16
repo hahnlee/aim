@@ -1,4 +1,7 @@
 use std::env;
+mod directory;
+mod inode;
+use inode::Inode;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
@@ -318,18 +321,6 @@ impl<'a> ExtentView<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
-struct Inode {
-    nid: u64,
-    offset: u64,
-    size: u64,
-    mode: u16,
-    layout: u16,
-    inode_size: u64,
-    xattr_size: u64,
-    compressed_blocks: u32,
-}
-
 struct Erofs<'a> {
     view: ExtentView<'a>,
     block: u64,
@@ -366,34 +357,7 @@ impl<'a> Erofs<'a> {
             "locating EROFS inode",
         )?;
         let first = self.view.read(offset, 64)?;
-        let format = le16(&first, 0)?;
-        if format & !0xf != 0 {
-            return Err(invalid("reserved EROFS inode format bits").into());
-        }
-        let extended = format & 1 != 0;
-        let layout = (format >> 1) & 7;
-        let inode_size = if extended { 64 } else { 32 };
-        let size = if extended {
-            le64(&first, 8)?
-        } else {
-            u64::from(le32(&first, 8)?)
-        };
-        let count = u64::from(le16(&first, 2)?);
-        let xattr_size = if count == 0 {
-            0
-        } else {
-            add(12, mul(count - 1, 4, "sizing xattrs")?, "sizing xattrs")?
-        };
-        Ok(Inode {
-            nid,
-            offset,
-            size,
-            mode: le16(&first, 4)?,
-            layout,
-            inode_size,
-            xattr_size,
-            compressed_blocks: le32(&first, 16)?,
-        })
+        inode::decode(nid, offset, &first)
     }
     fn flat_data(&mut self, inode: &Inode, maximum: u64) -> Result<Vec<u8>> {
         if inode.size > maximum {
@@ -436,29 +400,9 @@ impl<'a> Erofs<'a> {
             return Err(invalid("EROFS path parent is not a directory").into());
         }
         let data = self.flat_data(directory, 64 * 1024 * 1024)?;
-        for block in data.chunks(self.block as usize) {
-            if block.len() < 12 {
-                return Err(invalid("truncated EROFS directory block").into());
-            }
-            let first_name = usize::from(le16(block, 8)?);
-            if first_name == 0 || first_name % 12 != 0 || first_name > block.len() {
-                return Err(invalid("invalid EROFS directory name offset").into());
-            }
-            let count = first_name / 12;
-            for i in 0..count {
-                let entry = i * 12;
-                let start = usize::from(le16(block, entry + 8)?);
-                let end = if i + 1 == count {
-                    block.len()
-                } else {
-                    usize::from(le16(block, entry + 20)?)
-                };
-                if start > end || end > block.len() || end - start > 255 {
-                    return Err(invalid("invalid EROFS directory entry").into());
-                }
-                if &block[start..end] == wanted {
-                    return self.inode(le64(block, entry)?);
-                }
+        for (nid, name) in directory::entries(&data, self.block as usize)? {
+            if name == wanted {
+                return self.inode(nid);
             }
         }
         Err(invalid(format!(
@@ -482,9 +426,6 @@ impl<'a> Erofs<'a> {
         let mut inode = self.inode(self.root)?;
         for component in components {
             inode = self.child(&inode, component.as_bytes())?;
-        }
-        if inode.mode & 0xf000 != 0x8000 {
-            return Err(invalid("target path is not a regular file").into());
         }
         Ok(inode)
     }
@@ -682,6 +623,7 @@ fn extract(
             .create_new(true)
             .open(output_path)?;
         output.write_all(&decoded)?;
+        inode.persist(&output)?;
         output.sync_all()?;
         return Ok((decoded.len() as u64, sha256(&decoded), 0));
     }
@@ -707,11 +649,18 @@ fn extract(
             if index.kind > 1 || u64::from(index.low) >= fs.block {
                 return Err(invalid("unsupported EROFS head index").into());
             }
-            heads.push((
-                mul(lcn as u64, fs.block, "locating logical cluster")? + u64::from(index.low),
-                lcn,
-                index,
-            ));
+            let start =
+                mul(lcn as u64, fs.block, "locating logical cluster")? + u64::from(index.low);
+            // erofs-utils z_erofs_fini_full_indexes emits a final PLAIN
+            // index at EOF when clusterofs != 0. It terminates the previous
+            // extent; it does not describe an additional data extent.
+            if index.kind == 0 && lcn + 1 == total && start == inode.size {
+                continue;
+            }
+            if start >= inode.size {
+                return Err(invalid("EROFS head lies beyond file contents").into());
+            }
+            heads.push((start, lcn, index));
         }
     }
     if heads.is_empty() || heads[0].0 != 0 {
@@ -732,7 +681,10 @@ fn extract(
             heads[i + 1].0
         };
         if start != written || end <= start {
-            return Err(invalid("overlapping or holed EROFS compression extents").into());
+            return Err(invalid(format!(
+                "overlapping or holed EROFS compression extents: head={i}/{} lcn={lcn} start={start} end={end} written={written} size={} kind={} low={}",
+                heads.len(), inode.size, head.kind, head.low
+            )).into());
         }
         let expected = usize::try_from(end - start)?;
         let pblk = u64::from(
@@ -797,6 +749,7 @@ fn extract(
         ))
         .into());
     }
+    inode.persist(&output)?;
     output.sync_all()?;
     Ok((written, hasher.finish(), heads.len()))
 }
@@ -912,12 +865,14 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+mod symlink;
+
 fn run() -> Result<()> {
     let mut args = env::args_os();
     let program = args.next().unwrap_or_default();
     let input = args.next().map(PathBuf::from).ok_or_else(|| {
         invalid(format!(
-            "usage: {} INPUT-system.img OUTPUT [APEX_NAME | --path INTERNAL_PATH]",
+            "usage: {} INPUT-system.img OUTPUT [APEX_NAME | --path INTERNAL_PATH | --symlink INTERNAL_PATH | --stat INTERNAL_PATH]",
             PathBuf::from(program).display()
         ))
     })?;
@@ -926,11 +881,19 @@ fn run() -> Result<()> {
         .map(PathBuf::from)
         .ok_or_else(|| invalid("missing OUTPUT.apex"))?;
     let selector = args.next().and_then(|value| value.into_string().ok());
-    let (target_path, expected_prefix) = if selector.as_deref() == Some("--path") {
+    let preserve_link = selector.as_deref() == Some("--symlink");
+    let metadata_only = selector.as_deref() == Some("--stat");
+    if metadata_only && output != Path::new("-") {
+        return Err(invalid("--stat requires OUTPUT '-' (stdout only)").into());
+    }
+    let (target_path, expected_prefix) = if selector.as_deref() == Some("--path")
+        || preserve_link
+        || metadata_only
+    {
         let path = args
             .next()
             .and_then(|value| value.into_string().ok())
-            .ok_or_else(|| invalid("--path requires an internal absolute path"))?;
+            .ok_or_else(|| invalid("path selector requires an internal absolute path"))?;
         (path, None)
     } else {
         let apex_name = selector.unwrap_or_else(|| DEFAULT_APEX_NAME.to_owned());
@@ -961,6 +924,29 @@ fn run() -> Result<()> {
     };
     let mut fs = Erofs::open(view)?;
     let inode = fs.target_path(&target_path)?;
+    if metadata_only {
+        println!(
+            "mode={:o} uid={} gid={} size={}",
+            inode.mode, inode.uid, inode.gid, inode.size
+        );
+        return Ok(());
+    }
+    if preserve_link {
+        return symlink::extract(&mut fs, &inode, &output);
+    }
+    if output == Path::new("-") {
+        if inode.mode & 0xf000 != 0x4000 {
+            return Err(invalid("listing target is not a directory").into());
+        }
+        let data = fs.flat_data(&inode, 64 * 1024 * 1024)?;
+        for (_, name) in directory::entries(&data, fs.block as usize)? {
+            println!("{}", std::str::from_utf8(&name)?);
+        }
+        return Ok(());
+    }
+    if inode.mode & 0xf000 != 0x8000 {
+        return Err(invalid("target path is not a regular file").into());
+    }
     let (bytes, digest, pclusters) = extract(&mut fs, &inode, &output, expected_prefix)?;
     println!(
         "super-i18n-apex-extract: input={} output={}",

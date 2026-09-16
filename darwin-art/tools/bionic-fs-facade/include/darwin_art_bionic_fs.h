@@ -71,6 +71,8 @@ typedef struct DarwinArtHostStatvfs {
 } DarwinArtHostStatvfs;
 
 typedef void (*DarwinArtBionicFsFunction)(void);
+typedef int (*DarwinArtBionicFsHostDescriptorResolver)(int guest_fd,
+                                                        int* host_fd);
 
 typedef enum DarwinArtBionicFsProcessOwnerStatus {
   DARWIN_ART_BIONIC_FS_PROCESS_OWNER_OK = 0,
@@ -123,6 +125,8 @@ int64_t darwin_art_bionic_lseek(int fd, int64_t offset, int whence);
 int darwin_art_bionic_close(int fd);
 int darwin_art_bionic_access(const char* path, int mode);
 int darwin_art_bionic_fstat(int fd, DarwinArtAndroidStat* status);
+int darwin_art_bionic_fstatat(int fd, const char* path,
+                            DarwinArtAndroidStat* status, int flags);
 int darwin_art_bionic_fdatasync(int fd);
 int darwin_art_bionic_fsync(int fd);
 int darwin_art_bionic_fs_fsync_core(int fd);
@@ -132,12 +136,14 @@ intptr_t darwin_art_bionic_readlink(const char* path, char* buffer,
                                     size_t size);
 char* darwin_art_bionic_getcwd(char* buffer, size_t size);
 int darwin_art_bionic_chdir(const char* path);
+int darwin_art_bionic_fchdir(int fd);
 int darwin_art_bionic_chmod(const char* path, uint32_t mode);
 void* darwin_art_bionic_opendir(const char* path);
 void* darwin_art_bionic_fdopendir(int fd);
 DarwinArtAndroidDirent* darwin_art_bionic_readdir(void* directory);
 void darwin_art_bionic_rewinddir(void* directory);
 int darwin_art_bionic_closedir(void* directory);
+int darwin_art_bionic_dirfd(void* directory);
 int darwin_art_bionic_fchmod(int fd, uint32_t mode);
 int darwin_art_bionic_fchown(int fd, uint32_t owner, uint32_t group);
 int darwin_art_bionic_fchmodat(int directory_fd, const char* path,
@@ -147,6 +153,7 @@ int darwin_art_bionic_posix_fallocate(int fd, int64_t offset, int64_t length);
 int darwin_art_bionic_isatty(int fd);
 int darwin_art_bionic_link(const char* old_path, const char* new_path);
 int darwin_art_bionic_mkdir(const char* path, uint32_t mode);
+int darwin_art_bionic_mkdirat(int directory_fd, const char* path, uint32_t mode);
 int darwin_art_bionic_mkstemp(char* path_template);
 int darwin_art_bionic_mkstemp64(char* path_template);
 int64_t darwin_art_bionic_pathconf(const char* path, int name);
@@ -189,6 +196,18 @@ int darwin_art_bionic_fs_owns_fd_core(int fd);
 int darwin_art_bionic_fs_open_core(const char* path, int flags, uint32_t mode);
 int darwin_art_bionic_fs_openat_core(int directory_fd, const char* path,
                                      int flags, uint32_t mode);
+
+typedef int (*DarwinArtBionicSpecialDeviceOpen)(int flags, uint32_t mode,
+                                                int* android_errno);
+/* Process-global VFS device hook. Only the exact absolute /dev/binder path is
+ * delegated; normal filesystem resolution remains owned by the facade. */
+int darwin_art_bionic_fs_bind_binder_device_open(
+    DarwinArtBionicSpecialDeviceOpen callback);
+/* Binds the process descriptor broker used only after the filesystem owner
+ * does not recognize an fd. A successful callback transfers one host dup to
+ * the filesystem facade, which retains Android stat layout ownership. */
+int darwin_art_bionic_fs_bind_host_descriptor_resolver(
+    DarwinArtBionicFsHostDescriptorResolver callback);
 intptr_t darwin_art_bionic_fs_read_core(int fd, void* buffer, size_t count);
 intptr_t darwin_art_bionic_fs_pread_core(int fd, void* buffer, size_t count,
                                          int64_t offset);
@@ -205,6 +224,9 @@ int darwin_art_bionic_fs_close_core(int fd);
 int darwin_art_bionic_fs_flock_core(int fd, int operation);
 int darwin_art_bionic_fs_fcntl_core(int fd, int command, intptr_t argument);
 int darwin_art_bionic_fs_fstat_core(int fd, DarwinArtAndroidStat* status);
+int darwin_art_bionic_fs_fchdir_core(int fd);
+int darwin_art_bionic_fs_fstatat_core(int fd, const char* path,
+                                    DarwinArtAndroidStat* status, int flags);
 int darwin_art_bionic_fs_stat_core(const char* path,
                                    DarwinArtAndroidStat* status);
 int darwin_art_bionic_fs_lstat_core(const char* path,
@@ -219,6 +241,7 @@ void* darwin_art_bionic_fs_fdopendir_core(int fd);
 DarwinArtAndroidDirent* darwin_art_bionic_fs_readdir_core(void* directory);
 void darwin_art_bionic_fs_rewinddir_core(void* directory);
 int darwin_art_bionic_fs_closedir_core(void* directory);
+int darwin_art_bionic_fs_dirfd_core(void* directory);
 int darwin_art_bionic_fs_fchmod_core(int fd, uint32_t mode);
 int darwin_art_bionic_fs_fchown_core(int fd, uint32_t owner, uint32_t group);
 int darwin_art_bionic_fs_fchmodat_core(int directory_fd, const char* path,
@@ -230,6 +253,8 @@ int darwin_art_bionic_fs_isatty_core(int fd);
 int darwin_art_bionic_fs_link_core(const char* old_path,
                                    const char* new_path);
 int darwin_art_bionic_fs_mkdir_core(const char* path, uint32_t mode);
+int darwin_art_bionic_fs_mkdirat_core(int directory_fd, const char* path,
+                                     uint32_t mode);
 int64_t darwin_art_bionic_fs_pathconf_core(const char* path, int name);
 char* darwin_art_bionic_fs_realpath_core(const char* path, char* resolved);
 int darwin_art_bionic_fs_remove_core(const char* path);
@@ -261,14 +286,6 @@ __attribute__((visibility("hidden"))) int
 darwin_art_bionic_fs_host_record_lock(int host_fd, int android_command,
                                       intptr_t android_lock,
                                       int* host_errno);
-/* Opens a private-root-relative path by walking every component with
- * O_NOFOLLOW. Android flags are translated here, immediately before the
- * Darwin openat syscall; host_errno is written without changing caller errno. */
-__attribute__((visibility("hidden"))) int
-darwin_art_bionic_fs_host_openat_private(int root_fd, const char* relative,
-                                         int android_flags, uint32_t mode,
-                                         int* host_errno);
-
 /* Host topology is queried through the native shim so Rust never infers it
  * from process affinity (which may describe a virtual guest restriction). */
 __attribute__((visibility("hidden"))) long

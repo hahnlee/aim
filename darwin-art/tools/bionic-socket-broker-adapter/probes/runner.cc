@@ -1,5 +1,7 @@
 #include "darwin_art_bionic_dns.h"
+#include "darwin_art_bionic_binder_fd.h"
 #include "darwin_art_bionic_errno.h"
+#include "darwin_art_bionic_fs.h"
 #include "darwin_art_bionic_socket_broker.h"
 #include "darwin_art_elf_loader.h"
 
@@ -26,6 +28,33 @@
 namespace {
 
 std::atomic<int> g_filesystem_closes{0};
+std::atomic<int> g_binder_closes{0};
+DarwinArtBionicSpecialDeviceOpen g_binder_open = nullptr;
+
+extern "C" int darwin_art_bionic_fs_bind_binder_device_open(
+    DarwinArtBionicSpecialDeviceOpen callback) {
+  g_binder_open = callback;
+  return 0;
+}
+
+int BinderIoctl(void *, uint64_t object, uint64_t request, void *, int *error) {
+  if (object != 42 || request != UINT64_C(0xc0046209)) {
+    *error = 22;
+    return -1;
+  }
+  *error = 0;
+  return 17;
+}
+
+int BinderClose(void *, uint64_t object, int *error) {
+  if (object != 42) {
+    *error = 22;
+    return -1;
+  }
+  g_binder_closes.fetch_add(1, std::memory_order_relaxed);
+  *error = 0;
+  return 0;
+}
 
 struct HttpFixtureResult {
   int32_t connected_family;
@@ -188,6 +217,41 @@ int main(int argc, char **argv) {
         "stale central token cannot fall through before activation");
   Check(darwin_art_bionic_socket_broker_activate() == 0,
         "activate socket broker owner");
+  DarwinArtFdOwnerV1 binder_callbacks{};
+  binder_callbacks.abi_version = DARWIN_ART_FD_OWNER_ABI_V7;
+  binder_callbacks.struct_size = sizeof(binder_callbacks);
+  binder_callbacks.ioctl = &BinderIoctl;
+  binder_callbacks.close = &BinderClose;
+  DarwinArtFdOwnerHandle binder_owner = 0;
+  Check(darwin_art_bionic_binder_fd_install_owner(&binder_callbacks,
+                                                   &binder_owner) ==
+            DARWIN_ART_FD_BROKER_OK &&
+            binder_owner != 0 && g_binder_open != nullptr,
+        "install Binder device owner");
+  int binder_fd = -1;
+  Check(darwin_art_bionic_binder_fd_publish(binder_owner, 42, &binder_fd) ==
+            DARWIN_ART_FD_BROKER_OK &&
+            binder_fd >= 0,
+        "publish Binder guest descriptor");
+  int handled = 0;
+  int binder_ioctl_result = -1;
+  int binder_ioctl_error = -1;
+  Check(darwin_art_bionic_fd_broker_ioctl_dispatch(
+            binder_fd, UINT32_C(0xc0046209), nullptr, &handled,
+            &binder_ioctl_result, &binder_ioctl_error) == 0 &&
+            handled == 1 && binder_ioctl_result == 17 &&
+            binder_ioctl_error == 0,
+        "dispatch Binder ioctl through central FD owner");
+  const int binder_duplicate = darwin_art_bionic_socket_broker_dup(binder_fd);
+  Check(binder_duplicate >= 0 &&
+            darwin_art_bionic_socket_broker_close(binder_fd) == 0 &&
+            g_binder_closes.load(std::memory_order_relaxed) == 0 &&
+            darwin_art_bionic_socket_broker_close(binder_duplicate) == 0 &&
+            g_binder_closes.load(std::memory_order_relaxed) == 1,
+        "Binder duplicate shares connection until last close");
+  Check(darwin_art_bionic_binder_fd_uninstall_owner(binder_owner) ==
+            DARWIN_ART_FD_BROKER_OK && g_binder_open == nullptr,
+        "uninstall quiescent Binder device owner");
   Check(darwin_art_bionic_socket_broker_resolve("libc.so", "sendmmsg",
                                                 "LIBC") != nullptr,
         "sendmmsg resolver entry");
@@ -743,7 +807,7 @@ int main(int argc, char **argv) {
         "DNS free drains before reset and deactivate");
   std::fprintf(stderr, "bionic-socket-broker-adapter: PASS Android-ELF=yes "
                        "HTTP=127.0.0.1 pipe-poll=blocking eventfd-epoll=yes "
-                       "central-token=yes owner=v6 "
+                       "central-token=yes binder-fd=ioctl+dup-last-close owner=v7 "
                        "close=generic "
                        "DNS=retired deactivate-race=100 host-errno=preserved "
                        "Internet=no\n");

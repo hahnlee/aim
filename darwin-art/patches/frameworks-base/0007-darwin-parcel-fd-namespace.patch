@@ -1,0 +1,35 @@
+diff --git a/core/jni/android_os_Parcel.cpp b/core/jni/android_os_Parcel.cpp
+--- a/core/jni/android_os_Parcel.cpp
++++ b/core/jni/android_os_Parcel.cpp
+@@ -51,7 +51,11 @@
+ #if defined(__APPLE__)
+ #include <rpc_identity.h>
+ #endif
+
++#if defined(__APPLE__)
++#include <fd_transport.h>
++#endif
++
+ //#undef ALOGV
+ //#define ALOGV(...) fprintf(stderr, __VA_ARGS__)
+
+@@ -530,11 +534,19 @@ static jobject android_os_Parcel_readFileDescriptor(JNIEnv* env, jclass clazz, j
+     if (parcel != NULL) {
+         int fd = parcel->readFileDescriptor();
+         if (fd < 0) return NULL;
++#if defined(__APPLE__)
++        fd = darwin_art_binder_duplicate_file_descriptor(fd);
++#else
+         fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
++#endif
+         if (fd < 0) return NULL;
+         jobject jifd = jniCreateFileDescriptor(env, fd);
+         if (jifd == NULL) {
++#if defined(__APPLE__)
++            darwin_art_binder_close_file_descriptor(fd);
++#else
+             close(fd);
++#endif
+         }
+         return jifd;
+     }

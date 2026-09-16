@@ -19,6 +19,16 @@ check_hash "$project_root/crates/darwin-art-fs-broker/Cargo.toml" \
   "$FS_BROKER_CARGO_SHA256"
 check_hash "$project_root/crates/darwin-art-fs-broker/src/lib.rs" \
   "$FS_BROKER_SOURCE_SHA256"
+check_hash "$project_root/crates/darwin-art-fs-broker/src/inode_metadata.rs" \
+  "$FS_BROKER_INODE_METADATA_SHA256"
+check_hash "$project_root/crates/darwin-art-fs-broker/src/guest_path.rs" \
+  "$FS_BROKER_GUEST_PATH_SHA256"
+check_hash "$project_root/crates/darwin-art-fs-broker/src/guest_path/relative.rs" \
+  "$FS_BROKER_RELATIVE_PATH_SHA256"
+check_hash "$project_root/crates/darwin-art-fs-broker/src/guest_path/origin.rs" \
+  "$FS_BROKER_MOUNT_ORIGIN_SHA256"
+check_hash "$project_root/crates/darwin-art-fs-broker/src/guest_path/directory_name.rs" \
+  "$FS_BROKER_DIRECTORY_NAME_SHA256"
 check_hash "$project_root/crates/darwin-art-prefix/Cargo.toml" \
   "$PREFIX_CARGO_SHA256"
 check_hash "$project_root/crates/darwin-art-prefix/src/lib.rs" \
@@ -62,12 +72,16 @@ print('bionic-fs-facade: libc++ random_device source PASS open=token+O_RDONLY')
 PY
 
 symbols=(chdir close closedir fchmod fchmodat fdopendir fstat ftruncate getcwd
-         isatty link lstat mkdir open openat opendir pathconf read readdir readlink realpath
+         isatty link lstat mkdir mkdirat open openat opendir pathconf read readdir readlink realpath
          remove rename stat statvfs symlink truncate unlinkat utimensat)
 diff -u <(printf '%s\n' "${symbols[@]}") \
   <(tail -n +2 "$script_dir/manifests/imports.tsv" | cut -f1) ||
   fail 'filesystem facade import manifest drift'
 for symbol in "${symbols[@]}"; do
+  # mkdirat is an original libcutils import, not part of libc++'s demand
+  # manifest. Validate its actual NDK libc export below instead of inventing
+  # a libc++ classification for it.
+  [[ "$symbol" != mkdirat ]] || continue
   awk -F '\t' -v wanted="$symbol" '$1==wanted && $2=="FUNC" && $3=="B" {found=1} END{exit !found}' \
     "$project_root/tools/bionic-libc-leaf-facade/imports/ndk-r28c-api35-arm64-libc.tsv" ||
     fail "libc import classification drift: $symbol"
@@ -79,6 +93,10 @@ android_cc="$toolchain/aarch64-linux-android35-clang"
 readelf="$toolchain/llvm-readelf"
 [[ -x "$android_cc" && -x "$readelf" ]] || fail 'missing pinned NDK toolchain'
 check_hash "$ndk_root/source.properties" "$NDK_SOURCE_PROPERTIES_SHA256"
+"$readelf" --dyn-syms --wide \
+  "$toolchain/../sysroot/usr/lib/aarch64-linux-android/35/libc.so" |
+  awk '$4=="FUNC" && $5=="GLOBAL" && $7!="UND" && $8=="mkdirat@@LIBC" {found=1} END{exit !found}' ||
+  fail 'NDK mkdirat@LIBC export drift'
 check_hash "$ndk_root/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/aarch64-linux-android/asm/fcntl.h" \
   "$NDK_ANDROID_ARM64_FCNTL_SHA256"
 check_hash "$ndk_root/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/linux/fcntl.h" \
@@ -111,6 +129,9 @@ sdk_root="$(xcrun --sdk macosx --show-sdk-path)"
 host_flags=(-arch arm64 -isysroot "$sdk_root" -std=c17 -O2 -Wall -Wextra
             -Werror -Wpedantic -I"$script_dir/include"
             -I"$project_root/tools/bionic-ioctl-facade/include")
+"$host_cc" "${host_flags[@]}" "$script_dir/probes/fortify_io.c" \
+  -o "$temp_root/fortify-io"
+"$temp_root/fortify-io"
 "$host_cc" "${host_flags[@]}" -c "$script_dir/src/shims.c" \
   -o "$temp_root/shims.o"
 nm -u "$temp_root/shims.o" | sed 's/^[[:space:]]*//' | sort \
@@ -121,7 +142,6 @@ ___stack_chk_fail
 ___stack_chk_guard
 _abort
 _bzero
-_close
 _closedir
 _darwin_art_bionic_errno_load
 _darwin_art_bionic_errno_store
@@ -129,12 +149,15 @@ _darwin_art_bionic_fs_chdir_core
 _darwin_art_bionic_fs_chmod_core
 _darwin_art_bionic_fs_close_core
 _darwin_art_bionic_fs_closedir_core
+_darwin_art_bionic_fs_dirfd_core
+_darwin_art_bionic_fs_fchdir_core
 _darwin_art_bionic_fs_fchmod_core
 _darwin_art_bionic_fs_fchmodat_core
 _darwin_art_bionic_fs_fchown_core
 _darwin_art_bionic_fs_fdopendir_core
 _darwin_art_bionic_fs_flock_core
 _darwin_art_bionic_fs_fstat_core
+_darwin_art_bionic_fs_fstatat_core
 _darwin_art_bionic_fs_fsync_core
 _darwin_art_bionic_fs_ftruncate_core
 _darwin_art_bionic_fs_getcwd_core
@@ -143,10 +166,12 @@ _darwin_art_bionic_fs_link_core
 _darwin_art_bionic_fs_lseek_core
 _darwin_art_bionic_fs_lstat_core
 _darwin_art_bionic_fs_mkdir_core
+_darwin_art_bionic_fs_mkdirat_core
 _darwin_art_bionic_fs_open_core
 _darwin_art_bionic_fs_openat_core
 _darwin_art_bionic_fs_opendir_core
 _darwin_art_bionic_fs_pathconf_core
+_darwin_art_bionic_fs_posix_fallocate_core
 _darwin_art_bionic_fs_pread_core
 _darwin_art_bionic_fs_pwrite_core
 _darwin_art_bionic_fs_read_core
@@ -165,24 +190,19 @@ _darwin_art_bionic_fs_unlinkat_core
 _darwin_art_bionic_fs_utimensat_core
 _darwin_art_bionic_fs_write_core
 _darwin_art_bionic_fs_writev_core
-_dup
 _fcntl
 _fdopendir
 _fpathconf
-_free
 _fstatvfs
 _getenv
 _getpid
 _mach_task_self_
 _mach_vm_region_recurse
 _memcpy
-_openat
 _proc_pidinfo
 _readdir
 _rewinddir
-_strdup
 _strlen
-_strsep
 _sysconf
 _write
 EOF
@@ -238,16 +258,19 @@ __errno
 chdir
 close
 closedir
+dirfd
 fchmod
 fchmodat
 fdopendir
 fstat
+fstatat
 ftruncate
 getcwd
 isatty
 link
 lstat
 mkdir
+mkdirat
 open
 openat
 opendir
@@ -302,4 +325,4 @@ UBSAN_OPTIONS=halt_on_error=1 BIONIC_FS_C_SANITIZER=undefined \
   --manifest-path "$script_dir/Cargo.toml" -- "$fixture" "$temp_root/root"
 cargo fmt --manifest-path "$script_dir/Cargo.toml" -- --check
 
-echo 'bionic-fs-facade: PASS AndroidELF libc-imports=29 errno=1 immutable-root+private-/data path+cwd+DIR+fdopendir random=Security+typed-fd sendfile=virtual-copy owner=process-wide+quiescent stat128/dirent280/statvfs112 closed-resolver ASan+UBSan'
+echo 'bionic-fs-facade: PASS AndroidELF libc-imports=32 errno=1 immutable-root+private-/data path+cwd+DIR+fdopendir+dirfd+fstatat-empty random=Security+typed-fd sendfile=virtual-copy owner=process-wide+quiescent stat128/dirent280/statvfs112 closed-resolver ASan+UBSan'

@@ -2,12 +2,23 @@
 set -euo pipefail
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
+source "$project_root/tools/lib/sign-runtime-images.sh"
+source "$project_root/tools/lib/package-system-root.sh"
 source_root="$project_root/apps/DarwinARTManager"
 app="$project_root/_build/Darwin ART Manager.app"
 contents="$app/Contents"
 binary="$contents/MacOS/DarwinARTManager"
 shim_launcher="$contents/Resources/DarwinARTAppLauncher"
 sdk="$(xcrun --sdk macosx --show-sdk-path)"
+unwind_provider="$project_root/_build/android-unwind-provider/libdarwin_art_android_unwind.so"
+
+# Conscrypt uses the Android unwind ABI even for Java-only APKs. Reject an
+# incomplete runtime before removing the existing app bundle, not at launch.
+[[ -f "$unwind_provider" ]] || {
+  echo "manager runtime input missing: $unwind_provider" >&2
+  exit 69
+}
+native_baseline="$(bash "$project_root/tools/prepare-runtime-system-root.sh")"
 
 [[ "$app" == "$project_root/_build/Darwin ART Manager.app" ]] || {
   echo "refusing unexpected manager output: $app" >&2
@@ -72,6 +83,10 @@ for helper in darwin-artctl darwin-artd darwin-art-apk-install \
   copy_file "$project_root/target/release/$helper" "target/release/$helper"
 done
 copy_file "$project_root/tools/run-android-apk-app.sh" tools/run-android-apk-app.sh
+copy_file "$project_root/tools/lib/system-private-data.sh" tools/lib/system-private-data.sh
+copy_file "$project_root/tools/lib/runtime-system-image.sh" tools/lib/runtime-system-image.sh
+copy_file "$project_root/tools/lib/system-service-environment.sh" tools/lib/system-service-environment.sh
+copy_file "$project_root/tools/lib/runtime-system-service.sh" tools/lib/runtime-system-service.sh
 copy_file "$project_root/tools/prepare-darwin-art-host.sh" tools/prepare-darwin-art-host.sh
 copy_file "$project_root/tools/declare-darwin-x18-abi.sh" tools/declare-darwin-x18-abi.sh
 copy_file "$project_root/config/darwin-art-host.entitlements" config/darwin-art-host.entitlements
@@ -86,6 +101,7 @@ copy_file "$project_root/_build/android16-framework-compat/framework-compat.jar"
 copy_file "$project_root/_build/bootclasspath/core-icu4j-api36.jar" \
   _build/bootclasspath/core-icu4j-api36.jar
 copy_file "$project_root/_build/button-dex/dex/classes.dex" _build/button-dex/dex/classes.dex
+copy_file "$project_root/_build/runtime-support-dex/dex/classes.dex" _build/runtime-support-dex/dex/classes.dex
 copy_tree "$project_root/_build/icu-runtime-adapters/runtime" _build/icu-runtime-adapters/runtime
 copy_file "$project_root/_prebuilt/android-16/bootclasspath/core-libart.jar" \
   _prebuilt/android-16/bootclasspath/core-libart.jar
@@ -93,6 +109,13 @@ copy_file "$project_root/_prebuilt/android-16/bootclasspath/framework-location.j
   _prebuilt/android-16/bootclasspath/framework-location.jar
 copy_file "$project_root/_prebuilt/android-16/resources/framework-res.apk" \
   _prebuilt/android-16/resources/framework-res.apk
+# System/APEX/linkerconfig belong to the bundled runtime, not to each APK or
+# writable profile. The launch-root cutover is separate from packaging.
+source "$project_root/tools/lib/system-services-artifact.sh"
+services_jar="$(darwin_art_prepare_system_services_artifact)"
+darwin_art_package_system_root \
+  "$native_baseline" "$runtime/android/system-root.tar" \
+  "$project_root/_build/android16-system-fonts" "$project_root/_prebuilt/android-16/resources/framework-res.apk" "$services_jar"
 copy_file "$project_root/probes/button/fonts.xml" probes/button/fonts.xml
 copy_file "$project_root/_aosp/external/skia/resources/fonts/Roboto-Regular.ttf" \
   _aosp/external/skia/resources/fonts/Roboto-Regular.ttf
@@ -110,21 +133,26 @@ for relative in \
   copy_file "$project_root/_build/android16-ps16k-r07/extracted/$relative" \
     "_build/android16-ps16k-r07/extracted/$relative"
 done
-if [[ -f "$project_root/_build/android-unwind-provider/libdarwin_art_android_unwind.so" ]]; then
-  copy_file "$project_root/_build/android-unwind-provider/libdarwin_art_android_unwind.so" \
-    _build/android-unwind-provider/libdarwin_art_android_unwind.so
-fi
+copy_file "$unwind_provider" _build/android-unwind-provider/libdarwin_art_android_unwind.so
 for library in "$project_root/_build/angle-source/out/DarwinArtRelease/"*.dylib; do
   copy_file "$library" "_build/angle-source/out/DarwinArtRelease/$(basename "$library")"
 done
 copy_file "$project_root/_build/moltenvk/libMoltenVK.dylib" \
   _build/moltenvk/libMoltenVK.dylib
+copy_file "$project_root/_build/tracing-perfetto/perfetto-out/libperfetto_c.dylib" \
+  _build/tracing-perfetto/perfetto-out/libperfetto_c.dylib
 copy_file "$project_root/_build/moltenvk/LICENSE" _build/moltenvk/LICENSE
 
 runtime_dylib="$runtime/_build/runtime-graphics-link-probe/libdarwin_art_runtime_graphics.dylib"
+# Ship the resolver, original inventory and every selected component. Verify
+# relocation before signing; developer paths must not remain launch inputs.
+python3 "$project_root/tools/bootclasspath/package_runtime.py" "$runtime"
 lz4_source="$(brew --prefix lz4)/lib/liblz4.1.dylib"
 copy_file "$lz4_source" _build/runtime-graphics-link-probe/liblz4.1.dylib
 install_name_tool -change "$lz4_source" @loader_path/liblz4.1.dylib "$runtime_dylib"
+zstd_source="$(brew --prefix zstd)/lib/libzstd.1.dylib"
+copy_file "$zstd_source" _build/runtime-graphics-link-probe/libzstd.1.dylib
+install_name_tool -change "$zstd_source" @loader_path/libzstd.1.dylib "$runtime_dylib"
 
 chmod +x "$runtime/tools/run-android-apk-app.sh" \
   "$runtime/tools/declare-darwin-x18-abi.sh" \
@@ -135,10 +163,7 @@ chmod +x "$runtime/tools/run-android-apk-app.sh" \
 codesign --force --sign - --options runtime --timestamp=none \
   --entitlements "$project_root/config/darwin-art-host.entitlements" \
   "$runtime/target/release/darwin-art-host" >/dev/null
-find "$runtime" -type f \( -name '*.dylib' -o -name '*.so' \) -print0 |
-  while IFS= read -r -d '' library; do
-    codesign --force --sign - --timestamp=none "$library" >/dev/null
-  done
+darwin_art_sign_runtime_images "$runtime"
 for helper in "$runtime/target/release/"*; do
   [[ "$helper" == "$runtime/target/release/darwin-art-host" ]] && continue
   codesign --force --sign - --timestamp=none "$helper" >/dev/null

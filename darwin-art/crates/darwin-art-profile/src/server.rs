@@ -1,14 +1,19 @@
+use crate::bound_service_process::{BoundServiceProcessRequest, BoundServiceProcessResponse};
+use crate::bound_service_registry::{
+    BoundServiceRecord, BoundServiceRegistry, BoundServiceSlot, RESTART_REAP_TIMEOUT,
+};
 use crate::filesystem::ProfileFilesystem;
+use crate::process_incarnation::ProcessIncarnation;
+use crate::process_registry::{ProcessLease, ProcessRegistry};
 use crate::registry::PackageRegistry;
 use crate::{ProfileError, ProfilePaths, protocol, write_path};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -20,10 +25,17 @@ pub struct DaemonConfig {
 }
 
 struct State {
+    binder: crate::binder_service::BinderService,
     filesystem: Mutex<ProfileFilesystem>,
     paths: ProfilePaths,
     registry: Mutex<PackageRegistry>,
-    processes: Mutex<BTreeMap<u32, ProcessEntry>>,
+    processes: Mutex<ProcessRegistry>,
+    runtime_services: crate::runtime_service_state::RuntimeServiceState,
+    application_launches:
+        Mutex<BTreeMap<String, crate::application_launch_template::ApplicationLaunchTemplate>>,
+    bound_services: BoundServiceRegistry,
+    start_gate: Mutex<()>,
+    bound_service_gate: Mutex<()>,
     lease_gate: Mutex<()>,
     leases: AtomicUsize,
     handlers: AtomicUsize,
@@ -31,15 +43,10 @@ struct State {
     last_activity: Mutex<Instant>,
 }
 
-struct ProcessEntry {
-    package: String,
-    leases: usize,
-}
-
 struct HandlerGuard(Arc<State>);
 struct LeaseGuard {
     state: Arc<State>,
-    pid: Option<u32>,
+    process: Option<ProcessLease>,
 }
 
 impl Drop for HandlerGuard {
@@ -52,14 +59,8 @@ impl Drop for HandlerGuard {
 impl Drop for LeaseGuard {
     fn drop(&mut self) {
         self.state.leases.fetch_sub(1, Ordering::SeqCst);
-        if let Some(pid) = self.pid {
-            let mut processes = self.state.processes.lock().unwrap();
-            if let Some(process) = processes.get_mut(&pid) {
-                process.leases -= 1;
-                if process.leases == 0 {
-                    processes.remove(&pid);
-                }
-            }
+        if let Some(process) = self.process {
+            self.state.processes.lock().unwrap().release(process);
         }
     }
 }
@@ -82,10 +83,16 @@ pub fn run_daemon(config: DaemonConfig) -> Result<(), ProfileError> {
     fs::set_permissions(&config.paths.socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
     let state = Arc::new(State {
+        binder: Default::default(),
         filesystem: Mutex::new(ProfileFilesystem::new(config.paths.clone())),
         paths: config.paths.clone(),
         registry: Mutex::new(PackageRegistry::new(&config.paths)),
-        processes: Mutex::new(BTreeMap::new()),
+        processes: Mutex::new(ProcessRegistry::default()),
+        runtime_services: Default::default(),
+        application_launches: Default::default(),
+        bound_services: BoundServiceRegistry::default(),
+        start_gate: Mutex::new(()),
+        bound_service_gate: Mutex::new(()),
         lease_gate: Mutex::new(()),
         leases: AtomicUsize::new(0),
         handlers: AtomicUsize::new(0),
@@ -93,6 +100,15 @@ pub fn run_daemon(config: DaemonConfig) -> Result<(), ProfileError> {
         last_activity: Mutex::new(Instant::now()),
     });
     while !state.shutdown.load(Ordering::SeqCst) {
+        if !crate::listener_wait::wait_readable(listener.as_fd(), Duration::from_millis(50))? {
+            if state.leases.load(Ordering::SeqCst) == 0
+                && state.handlers.load(Ordering::SeqCst) == 0
+                && state.last_activity.lock().unwrap().elapsed() >= config.idle_timeout
+            {
+                break;
+            }
+            continue;
+        }
         match listener.accept() {
             Ok((stream, _)) => {
                 // Darwin inherits O_NONBLOCK from the listening socket. Client
@@ -109,13 +125,9 @@ pub fn run_daemon(config: DaemonConfig) -> Result<(), ProfileError> {
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                if state.leases.load(Ordering::SeqCst) == 0
-                    && state.handlers.load(Ordering::SeqCst) == 0
-                    && state.last_activity.lock().unwrap().elapsed() >= config.idle_timeout
-                {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(50));
+                // Another acceptor cannot consume this listener, but a
+                // readiness notification can still race a peer disconnect.
+                continue;
             }
             Err(error) => return Err(error.into()),
         }
@@ -137,12 +149,15 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
             require_empty(&message.payload)?;
             let filesystem = state.filesystem.lock().unwrap();
             match filesystem.ensure() {
-                Ok(path) => protocol::write_response(
-                    &mut stream,
-                    message.operation,
-                    0,
-                    write_path(path.as_os_str()),
-                )?,
+                Ok(path) => {
+                    state.registry.lock().unwrap().migrate_app_ids()?;
+                    protocol::write_response(
+                        &mut stream,
+                        message.operation,
+                        0,
+                        write_path(path.as_os_str()),
+                    )?;
+                }
                 Err(error) => protocol::write_response(
                     &mut stream,
                     message.operation,
@@ -153,6 +168,10 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
         }
         protocol::OP_ACQUIRE => {
             let identity = parse_process_identity(&message.payload)?;
+            let incarnation = identity
+                .as_ref()
+                .map(|(pid, _)| crate::peer_process::verify_registration(&stream, *pid))
+                .transpose()?;
             let gate = state.lease_gate.lock().unwrap();
             if state.shutdown.load(Ordering::SeqCst) {
                 protocol::write_response(
@@ -172,28 +191,35 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                 )?;
                 return Ok(());
             }
-            state.leases.fetch_add(1, Ordering::SeqCst);
-            if let Some((pid, package)) = &identity {
-                let mut processes = state.processes.lock().unwrap();
-                let process = processes.entry(*pid).or_insert_with(|| ProcessEntry {
-                    package: package.clone(),
-                    leases: 0,
-                });
-                if process.package != *package {
-                    state.leases.fetch_sub(1, Ordering::SeqCst);
+            let process = match identity
+                .as_ref()
+                .map(|(pid, package)| {
+                    let mut processes = state.processes.lock().unwrap();
+                    let current = ProcessIncarnation::read(*pid)?;
+                    if Some(current) != incarnation {
+                        return Err(ProfileError::Daemon(
+                            "process changed before registration".into(),
+                        ));
+                    }
+                    processes.acquire(*pid, package, current, false)
+                })
+                .transpose()
+            {
+                Ok(process) => process,
+                Err(error) => {
                     protocol::write_response(
                         &mut stream,
                         message.operation,
                         22,
-                        b"PID is already registered to another package",
+                        error.to_string().as_bytes(),
                     )?;
                     return Ok(());
                 }
-                process.leases += 1;
-            }
+            };
+            state.leases.fetch_add(1, Ordering::SeqCst);
             let _lease = LeaseGuard {
                 state: Arc::clone(state),
-                pid: identity.map(|(pid, _)| pid),
+                process,
             };
             drop(gate);
             protocol::write_response(&mut stream, message.operation, 0, b"")?;
@@ -244,8 +270,28 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
             let package = std::str::from_utf8(&message.payload)
                 .map_err(|_| ProfileError::Daemon("package is not UTF-8".into()))?;
             state.filesystem.lock().unwrap().ensure()?;
-            let record = state.registry.lock().unwrap().resolve(package)?;
-            protocol::write_response(&mut stream, message.operation, 0, &record)?;
+            let resolved = { state.registry.lock().unwrap().resolve(package) };
+            match resolved {
+                Ok(record) => {
+                    protocol::write_response(&mut stream, message.operation, 0, &record)?;
+                }
+                Err(ProfileError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                    protocol::write_response(
+                        &mut stream,
+                        message.operation,
+                        protocol::STATUS_NOT_FOUND,
+                        b"package is not installed",
+                    )?;
+                }
+                Err(error) => {
+                    protocol::write_response(
+                        &mut stream,
+                        message.operation,
+                        1,
+                        error.to_string().as_bytes(),
+                    )?;
+                }
+            }
         }
         protocol::OP_LIST => {
             require_empty(&message.payload)?;
@@ -259,14 +305,40 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                 .processes
                 .lock()
                 .unwrap()
-                .iter()
-                .map(|(pid, process)| format!("{pid}\t{}", process.package))
+                .processes()
+                .map(|(pid, package)| format!("{pid}\t{package}"))
                 .collect::<Vec<_>>()
                 .join("\n");
             if !processes.is_empty() {
                 processes.push('\n');
             }
             protocol::write_response(&mut stream, message.operation, 0, processes.as_bytes())?;
+        }
+        protocol::OP_PROCESS_IDENTITY => {
+            if message.payload.len() != 4 {
+                return Err(ProfileError::Daemon(
+                    "process identity request requires a PID".into(),
+                ));
+            }
+            let pid = u32::from_le_bytes(message.payload[..4].try_into().unwrap());
+            let incarnation = ProcessIncarnation::read(pid)?;
+            let (package, registered_uid) = {
+                let processes = state.processes.lock().unwrap();
+                let package = processes
+                    .package(pid, incarnation)
+                    .ok_or_else(|| ProfileError::Daemon("process is not registered".into()))?
+                    .to_owned();
+                (package, processes.android_uid(pid, incarnation))
+            };
+            let uid = if let Some(uid) = registered_uid {
+                uid
+            } else if package == "android.system" {
+                1000
+            } else {
+                state.registry.lock().unwrap().app_id(&package)?
+            };
+            let identity = crate::ProcessIdentity { pid, uid, package };
+            protocol::write_response(&mut stream, message.operation, 0, &identity.encode())?;
         }
         protocol::OP_UNREGISTER => {
             if message.payload.len() < 2 || message.payload[0] > 1 {
@@ -283,13 +355,7 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                 .map_err(|_| ProfileError::Daemon("package is not UTF-8".into()))?;
             crate::registry::validate_package(package)?;
             let _gate = state.lease_gate.lock().unwrap();
-            if state
-                .processes
-                .lock()
-                .unwrap()
-                .values()
-                .any(|process| process.package == package)
-            {
+            if state.processes.lock().unwrap().contains_package(package) {
                 protocol::write_response(
                     &mut stream,
                     message.operation,
@@ -311,59 +377,487 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
             }
         }
         protocol::OP_DAEMONIZE => {
-            let (package, arguments, environment) = parse_daemonize(&message.payload)?;
+            let (package, arguments, mut environment) = parse_daemonize(&message.payload)?;
             crate::registry::validate_package(&package)?;
-            state.filesystem.lock().unwrap().ensure()?;
-            let log_path = environment
-                .iter()
-                .find(|(key, _)| key.to_str() == Some("DARWIN_ART_DAEMONIZED_LOG"))
-                .map(|(_, value)| std::path::PathBuf::from(value));
-            let mut command = Command::new(&arguments[0]);
-            command
-                .args(&arguments[1..])
-                .env_clear()
-                .envs(environment)
-                // Never inherit the daemon's current directory. The manager
-                // bundle is replaced atomically during upgrades, so an older
-                // daemon may still point at a deleted bundle/worktree. A
-                // stable profile directory is sufficient for the launcher
-                // (which resolves paths from its own executable) and keeps
-                // getcwd()/shell helpers valid for the Android host.
-                .current_dir(&state.paths.profile_root)
-                .stdin(Stdio::null());
-            if let Some(log_path) = log_path {
-                let log = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .mode(0o600)
-                    .open(log_path)?;
-                command.stdout(Stdio::from(log.try_clone()?));
-                command.stderr(Stdio::from(log));
+            let android_uid = if package == "android.system" {
+                1000
+            } else {
+                state.registry.lock().unwrap().app_id(&package)?
+            };
+            environment.retain(|(name, _)| name != "DARWIN_ART_ANDROID_UID");
+            environment.push((
+                "DARWIN_ART_ANDROID_UID".into(),
+                android_uid.to_string().into(),
+            ));
+            let application_template =
+                crate::application_launch_template::ApplicationLaunchTemplate::capture(
+                    &package,
+                    &arguments,
+                    &environment,
+                )?;
+            let _start = state.start_gate.lock().unwrap();
+            if state.runtime_services.contains_package(&package) {
+                return protocol::write_response(
+                    &mut stream,
+                    message.operation,
+                    16,
+                    b"package is owned by a runtime service instance",
+                )
+                .map_err(Into::into);
             }
+            state.filesystem.lock().unwrap().ensure()?;
+            let mut command = crate::process_command::prepare_command(
+                &arguments,
+                &environment,
+                &state.paths.profile_root,
+            )?;
             let mut child = command.spawn()?;
             let pid = child.id();
-            {
-                let _gate = state.lease_gate.lock().unwrap();
-                state.leases.fetch_add(1, Ordering::SeqCst);
+            let on_exit = match register_child(state, pid, &package) {
+                Ok(on_exit) => on_exit,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            };
+            if let Some(template) = application_template {
                 state
-                    .processes
+                    .application_launches
                     .lock()
-                    .unwrap()
-                    .insert(pid, ProcessEntry { package, leases: 1 });
+                    .map_err(|_| {
+                        ProfileError::Daemon("application launch registry is poisoned".into())
+                    })?
+                    .insert(package.clone(), template);
             }
-            let owner = Arc::clone(state);
             thread::spawn(move || {
                 let _ = child.wait();
-                let _gate = owner.lease_gate.lock().unwrap();
-                owner.processes.lock().unwrap().remove(&pid);
-                owner.leases.fetch_sub(1, Ordering::SeqCst);
-                *owner.last_activity.lock().unwrap() = Instant::now();
+                on_exit();
             });
             protocol::write_response(&mut stream, message.operation, 0, &pid.to_le_bytes())?;
+        }
+        protocol::OP_START_RUNTIME => {
+            let result = start_runtime(state, &message.payload);
+            match result {
+                Ok(response) => {
+                    protocol::write_response(&mut stream, message.operation, 0, &response)?
+                }
+                Err(error) => protocol::write_response(
+                    &mut stream,
+                    message.operation,
+                    5,
+                    error.to_string().as_bytes(),
+                )?,
+            }
+        }
+        protocol::OP_START_BOUND_SERVICE => {
+            let result = start_bound_service(state, &message.payload, &stream);
+            match result {
+                Ok(response) => protocol::write_response(
+                    &mut stream,
+                    message.operation,
+                    0,
+                    &response.encode()?,
+                )?,
+                Err(error) => {
+                    let status = if error.to_string().contains("not authorized") {
+                        13
+                    } else {
+                        22
+                    };
+                    protocol::write_response(
+                        &mut stream,
+                        message.operation,
+                        status,
+                        error.to_string().as_bytes(),
+                    )?
+                }
+            }
+        }
+        protocol::OP_ACTIVATE_BOUND_SERVICE => {
+            let result = activate_bound_service(state, &message.payload, &stream);
+            match result {
+                Ok(()) => protocol::write_response(&mut stream, message.operation, 0, b""),
+                Err(error) => protocol::write_response(
+                    &mut stream,
+                    message.operation,
+                    22,
+                    error.to_string().as_bytes(),
+                ),
+            }?
+        }
+        protocol::OP_RUNTIME_READY => {
+            let result = (|| {
+                let ready =
+                    crate::runtime_service_protocol::ReadyRequest::decode(&message.payload)?;
+                let (pid, incarnation) = crate::peer_process::identity(&stream)?;
+                state
+                    .runtime_services
+                    .publish_ready(pid, incarnation, ready)
+            })();
+            match result {
+                Ok(()) => protocol::write_response(&mut stream, message.operation, 0, b"")?,
+                Err(error) => protocol::write_response(
+                    &mut stream,
+                    message.operation,
+                    5,
+                    error.to_string().as_bytes(),
+                )?,
+            }
+        }
+        protocol::OP_RUNTIME_LOST => {
+            let result = (|| {
+                let lost = crate::runtime_service_protocol::LossRequest::decode(&message.payload)?;
+                let (pid, incarnation) = crate::peer_process::identity(&stream)?;
+                state
+                    .runtime_services
+                    .publish_runtime_lost(pid, incarnation, lost)
+            })();
+            match result {
+                Ok(()) => protocol::write_response(&mut stream, message.operation, 0, b"")?,
+                Err(error) => protocol::write_response(
+                    &mut stream,
+                    message.operation,
+                    5,
+                    error.to_string().as_bytes(),
+                )?,
+            }
+        }
+        protocol::OP_BINDER_SESSION => {
+            require_empty(&message.payload)?;
+            let peer = binder_peer(state, &stream)?;
+            protocol::write_response(&mut stream, message.operation, 0, b"")?;
+            return state.binder.serve(stream, peer);
+        }
+        protocol::OP_BINDER_TRANSFER_DEPOSIT => {
+            let token = parse_transfer_token(&message.payload)?;
+            let peer = binder_peer(state, &stream)?;
+            match state.binder.receive_deposit(peer, token, &stream) {
+                Ok(()) => protocol::write_response(&mut stream, message.operation, 0, b"")?,
+                Err(error) => protocol::write_response(
+                    &mut stream,
+                    message.operation,
+                    22,
+                    error.to_string().as_bytes(),
+                )?,
+            }
+        }
+        protocol::OP_BINDER_TRANSFER_TAKE => {
+            let (source, token) = parse_transfer_key(&message.payload)?;
+            let peer = binder_peer(state, &stream)?;
+            match state.binder.prepare_take(peer, source, token) {
+                Ok(delivery) => {
+                    protocol::write_response(&mut stream, message.operation, 0, b"")?;
+                    delivery.send(&stream)?;
+                }
+                Err(error) => protocol::write_response(
+                    &mut stream,
+                    message.operation,
+                    22,
+                    error.to_string().as_bytes(),
+                )?,
+            }
         }
         _ => protocol::write_response(&mut stream, message.operation, 38, b"unknown operation")?,
     }
     Ok(())
+}
+
+fn binder_peer(
+    state: &State,
+    stream: &UnixStream,
+) -> Result<darwin_art_binder_device::routing_authority::PeerIdentity, ProfileError> {
+    let (pid, incarnation) = crate::peer_process::identity(stream)?;
+    let (package, registered_uid) = {
+        let processes = state
+            .processes
+            .lock()
+            .map_err(|_| ProfileError::Daemon("process registry is poisoned".into()))?;
+        let package = processes
+            .package(pid, incarnation)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                ProfileError::Daemon("Binder peer is not a registered process".into())
+            })?;
+        (package, processes.android_uid(pid, incarnation))
+    };
+    // Binder credentials describe the exact executing process, not merely its
+    // installed package. In particular, isolated service processes retain the
+    // UID allocated by system_server for this launch incarnation.
+    let android_uid = if let Some(uid) = registered_uid {
+        uid
+    } else if package == "android.system" {
+        1000
+    } else {
+        state
+            .registry
+            .lock()
+            .map_err(|_| ProfileError::Daemon("package registry is poisoned".into()))?
+            .app_id(&package)?
+    };
+    darwin_art_binder_device::routing_authority::PeerIdentity::verified(
+        pid,
+        android_uid,
+        incarnation.parts(),
+    )
+    .ok_or_else(|| ProfileError::Daemon("invalid Binder peer identity".into()))
+}
+
+fn parse_transfer_token(
+    payload: &[u8],
+) -> Result<darwin_art_binder_device::authority_protocol::TransferToken, ProfileError> {
+    if payload.len() != 8 {
+        return Err(ProfileError::Daemon(
+            "Binder transfer token must be 8 bytes".into(),
+        ));
+    }
+    let raw = u64::from_le_bytes(payload.try_into().unwrap());
+    darwin_art_binder_device::authority_protocol::TransferToken::from_nonzero(raw)
+        .ok_or_else(|| ProfileError::Daemon("Binder transfer token is zero".into()))
+}
+
+fn parse_transfer_key(
+    payload: &[u8],
+) -> Result<
+    (
+        darwin_art_binder_device::authority_protocol::ConnectionToken,
+        darwin_art_binder_device::authority_protocol::TransferToken,
+    ),
+    ProfileError,
+> {
+    if payload.len() != 16 {
+        return Err(ProfileError::Daemon(
+            "Binder transfer key must be 16 bytes".into(),
+        ));
+    }
+    let source = u64::from_le_bytes(payload[..8].try_into().unwrap());
+    let source =
+        darwin_art_binder_device::authority_protocol::ConnectionToken::from_nonzero(source)
+            .ok_or_else(|| ProfileError::Daemon("Binder transfer source is zero".into()))?;
+    Ok((source, parse_transfer_token(&payload[8..])?))
+}
+
+fn register_child(
+    state: &Arc<State>,
+    pid: u32,
+    package: &str,
+) -> Result<Box<dyn FnOnce() + Send>, ProfileError> {
+    register_child_with_uid(state, pid, package, None)
+}
+
+fn register_child_with_uid(
+    state: &Arc<State>,
+    pid: u32,
+    package: &str,
+    android_uid: Option<u32>,
+) -> Result<Box<dyn FnOnce() + Send>, ProfileError> {
+    let _gate = state.lease_gate.lock().unwrap();
+    if state.shutdown.load(Ordering::SeqCst) {
+        return Err(ProfileError::Daemon("daemon is shutting down".into()));
+    }
+    let mut processes = state.processes.lock().unwrap();
+    let incarnation = ProcessIncarnation::read(pid)?;
+    let lease = processes.acquire_with_uid(pid, package, incarnation, true, android_uid)?;
+    state.leases.fetch_add(1, Ordering::SeqCst);
+    let owner = Arc::clone(state);
+    Ok(Box::new(move || {
+        let _gate = owner.lease_gate.lock().unwrap();
+        owner.processes.lock().unwrap().child_exited(lease);
+        owner.leases.fetch_sub(1, Ordering::SeqCst);
+        *owner.last_activity.lock().unwrap() = Instant::now();
+    }))
+}
+
+fn start_bound_service(
+    state: &Arc<State>,
+    payload: &[u8],
+    stream: &UnixStream,
+) -> Result<BoundServiceProcessResponse, ProfileError> {
+    // A same-user Unix socket is sufficient for profile administration, but
+    // not for process creation.  The only caller allowed to exercise this
+    // operation is the daemon-spawned, incarnation-checked android.system
+    // child.  In particular, an app cannot self-register as system and then
+    // obtain a process-spawn capability.
+    let (peer_pid, peer_incarnation) = crate::peer_process::identity(stream)?;
+    let is_system = state
+        .processes
+        .lock()
+        .map_err(|_| ProfileError::Daemon("process registry is poisoned".into()))?
+        .is_child_owner(peer_pid, peer_incarnation, "android.system");
+    if !is_system {
+        return Err(ProfileError::Daemon(
+            "bound-service requester is not authorized: expected android.system child".into(),
+        ));
+    }
+    let request = BoundServiceProcessRequest::decode(payload)?;
+    validate_bound_service_request(state, &request)?;
+    let identity = request.identity();
+    let _gate = state.bound_service_gate.lock().unwrap();
+    if state
+        .processes
+        .lock()
+        .map_err(|_| ProfileError::Daemon("process registry is poisoned".into()))?
+        .contains_unowned_package(&request.package)
+    {
+        return Err(ProfileError::Daemon(
+            "bound-service package already has a caller-owned process".into(),
+        ));
+    }
+    if let BoundServiceSlot::Existing(existing) =
+        state
+            .bound_services
+            .await_slot(&identity, request.start_sequence, RESTART_REAP_TIMEOUT)?
+    {
+        return Ok(existing);
+    }
+
+    let system_template = state.runtime_services.system_launch_template()?;
+    let application_template = state
+        .application_launches
+        .lock()
+        .map_err(|_| ProfileError::Daemon("application launch registry is poisoned".into()))?
+        .get(&request.package)
+        .cloned()
+        .ok_or_else(|| {
+            ProfileError::Daemon("bound-service package has no daemon launch template".into())
+        })?;
+    let launch = application_template.bound_service_launch(request.clone(), &system_template)?;
+
+    let service_uid = request.uid;
+    let (response, child) =
+        crate::bound_service_process::spawn(&launch, &state.paths.profile_root, |pid| {
+            register_child_with_uid(state, pid, &request.package, Some(service_uid))
+        })?;
+    state.bound_services.insert(
+        identity.clone(),
+        BoundServiceRecord::new(response, child.activation()),
+    )?;
+    let owner = Arc::clone(state);
+    let retired_identity = identity.clone();
+    let retired_pid = response.pid;
+    let retired_start_sequence = response.start_sequence;
+    let retired_incarnation = response.incarnation;
+    if let Err(error) = child.supervise(move || {
+        let _ = owner.bound_services.remove_incarnation(
+            &retired_identity,
+            retired_pid,
+            retired_start_sequence,
+            retired_incarnation,
+        );
+    }) {
+        // `OwnedBoundServiceChild::Drop` has already killed/reaped the child
+        // and run the process-lease callback.  Retire only our exact record.
+        state.bound_services.remove_incarnation(
+            &identity,
+            response.pid,
+            response.start_sequence,
+            response.incarnation,
+        )?;
+        return Err(error);
+    }
+    Ok(response)
+}
+
+fn activate_bound_service(
+    state: &Arc<State>,
+    payload: &[u8],
+    stream: &UnixStream,
+) -> Result<(), ProfileError> {
+    let (peer_pid, peer_incarnation) = crate::peer_process::identity(stream)?;
+    let is_system = state
+        .processes
+        .lock()
+        .map_err(|_| ProfileError::Daemon("process registry is poisoned".into()))?
+        .is_child_owner(peer_pid, peer_incarnation, "android.system");
+    if !is_system {
+        return Err(ProfileError::Daemon(
+            "bound-service requester is not authorized: expected android.system child".into(),
+        ));
+    }
+    let handle = BoundServiceProcessResponse::decode(payload)?;
+    let _gate = state.bound_service_gate.lock().unwrap();
+    let activation = state.bound_services.activation(handle)?;
+    crate::bound_service_process::OwnedBoundServiceChild::activate(&activation)
+}
+
+fn validate_bound_service_request(
+    state: &Arc<State>,
+    request: &BoundServiceProcessRequest,
+) -> Result<(), ProfileError> {
+    crate::registry::validate_package(&request.package)?;
+    let installed_uid = if request.package == "android.system" {
+        1000
+    } else {
+        state.registry.lock().unwrap().app_id(&request.package)?
+    };
+    if !request.isolated && installed_uid != request.uid {
+        return Err(ProfileError::Daemon(
+            "bound-service UID does not match installed package identity".into(),
+        ));
+    }
+    if request.package == "android.system" && request.uid != 1000 {
+        return Err(ProfileError::Daemon(
+            "android.system may not launch a non-system service identity".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn start_runtime(state: &Arc<State>, payload: &[u8]) -> Result<Vec<u8>, ProfileError> {
+    let request = crate::runtime_service_protocol::StartRuntimeRequest::decode(payload)?;
+    let instance = {
+        let _start = state.start_gate.lock().unwrap();
+        if let Some(previous) = state.runtime_services.conflicting_instance(&request)? {
+            if request.package != "android.system" {
+                return Err(ProfileError::Daemon(
+                    "only the profile system runtime supports generation replacement".into(),
+                ));
+            }
+            // Serialize the final idle check with system-server-owned child
+            // creation. Once the old runtime is failed, no late bound-service
+            // request may cross the generation boundary before it is reaped.
+            let _bound_services = state.bound_service_gate.lock().unwrap();
+            if state
+                .processes
+                .lock()
+                .map_err(|_| ProfileError::Daemon("process registry is poisoned".into()))?
+                .contains_package_other_than(&request.package)
+            {
+                return Err(ProfileError::Daemon(
+                    "cannot replace the system runtime while Android applications are running"
+                        .into(),
+                ));
+            }
+            previous.fail("runtime generation superseded by a new build")?;
+            previous.wait_exited(crate::runtime_service_launch::START_TIMEOUT)?;
+        }
+        if !state.runtime_services.contains_package(&request.package)
+            && state
+                .processes
+                .lock()
+                .unwrap()
+                .contains_package(&request.package)
+        {
+            return Err(ProfileError::Daemon(
+                "package already has an unversioned process".into(),
+            ));
+        }
+        state.filesystem.lock().unwrap().ensure()?;
+        let (instance, fresh) = state.runtime_services.reserve(&request)?;
+        if fresh {
+            crate::runtime_service_launch::launch(
+                Arc::clone(&instance),
+                &request,
+                &state.paths.profile_root,
+                &state.paths.socket,
+                |pid| register_child(state, pid, &request.package),
+            )?;
+        }
+        instance
+    };
+    instance
+        .wait_ready(crate::runtime_service_launch::START_TIMEOUT)?
+        .encode()
 }
 
 fn unregister_package_files(

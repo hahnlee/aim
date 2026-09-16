@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[dependencies]
+darwin-art-binder-device = { path = "../darwin-art-binder-device" }
+libc = "0.2"
+
 [lib]
 name = "darwin_art_profile"
 path = "src/lib.rs"

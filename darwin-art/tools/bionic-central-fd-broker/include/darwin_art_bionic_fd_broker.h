@@ -17,6 +17,7 @@ typedef enum DarwinArtFdKind {
   DARWIN_ART_FD_SOCKET = 4,
   DARWIN_ART_FD_EPOLL = 5,
   DARWIN_ART_FD_PIPE = 6,
+  DARWIN_ART_FD_BINDER = 7,
 } DarwinArtFdKind;
 
 typedef enum DarwinArtFdBrokerStatus {
@@ -204,6 +205,9 @@ darwin_art_fd_broker_set_status_flags_io(DarwinArtFdBroker *broker,
 DarwinArtFdBrokerStatus
 darwin_art_fd_broker_get_offset(DarwinArtFdBroker *broker, int guest_fd,
                                 int64_t *offset);
+DarwinArtFdBrokerStatus darwin_art_fd_broker_get_kind(DarwinArtFdBroker *broker,
+                                                      int guest_fd,
+                                                      DarwinArtFdKind *kind);
 DarwinArtFdBrokerStatus
 darwin_art_fd_broker_export_host_fd(DarwinArtFdBroker *broker, int guest_fd,
                                     int *host_fd, DarwinArtFdIoResult *result);

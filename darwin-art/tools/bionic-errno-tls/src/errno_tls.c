@@ -57,6 +57,17 @@ int darwin_art_bionic_errno_set_from_darwin(int darwin_errno) {
   return translated;
 }
 
+int darwin_art_bionic_errno_to_darwin(int32_t android_errno, int* darwin_errno) {
+  if (darwin_errno == NULL) return 0;
+  for (size_t index = 0; index < sizeof(kMappings) / sizeof(kMappings[0]); ++index) {
+    if (kMappings[index].android_errno == android_errno) {
+      *darwin_errno = kMappings[index].darwin_errno;
+      return 1;
+    }
+  }
+  return 0;
+}
+
 int darwin_art_bionic_errno_capture_host(void) {
   const int saved_host_errno = errno;
   int32_t translated_errno;

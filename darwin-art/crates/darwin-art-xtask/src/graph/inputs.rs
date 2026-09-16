@@ -17,6 +17,7 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
     // policy/command generation itself changes.
     let mut paths = vec![
         PathBuf::from("sources.lock"),
+        PathBuf::from("compat/filesystem/archive_open.cc"),
         PathBuf::from("bootclasspath.lock"),
         // The canonical builder writes this stamp after preparing the shared
         // runtime cache. Including it prevents a graph emitted before
@@ -26,8 +27,6 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
         PathBuf::from("tools/audit-android16-graphics-closure.sh"),
         PathBuf::from("tools/audit-jit-layout.sh"),
         PathBuf::from("tools/jit-layout-smoke.cc"),
-        PathBuf::from("probes/runtime_filesystem_probe.cc"),
-        PathBuf::from("probes/runtime_filesystem_probe.h"),
         PathBuf::from("probes/runtime_network_probe.cc"),
         PathBuf::from("probes/runtime_network_probe.h"),
         PathBuf::from("probes/runtime_acceptance_phases.cc"),
@@ -103,6 +102,7 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
         PathBuf::from("compat/darwin_audio_track.h"),
         PathBuf::from("compat/darwin_android_asset_manager.h"),
         PathBuf::from("compat/darwin_android_platform.h"),
+        PathBuf::from("compat/network/multinetwork.h"),
         PathBuf::from("compat/darwin_provider_owners.cc"),
         PathBuf::from("compat/darwin_provider_owners.h"),
         // Remote unwind's Mach task cache is header-only; keep it explicit so
@@ -153,6 +153,10 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
         "patches/art",
         "patches/boringssl",
         "patches/libcore-openjdk",
+        "patches/application-shared-memory",
+        "patches/ziparchive",
+        "patches/package-dex-usage",
+        "tools/tests/package-dex-usage",
         "crates/darwin-art-elf-loader/src",
         "tools/android-jni-proxy/include",
         "tools/android-jni-proxy/generated",
@@ -170,6 +174,7 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
         collect_files(&root.join(directory), root, &mut paths);
     }
     collect_compat_support_files(&root.join("compat"), root, &mut paths);
+    collect_files(&root.join("tools/system-properties"), root, &mut paths);
     for script in [
         "build-bionic-runtime-provider-closure.sh",
         "build-android16-android-runtime-host.sh",
@@ -187,10 +192,68 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
         "build-android16-libcore-memory-darwin.sh",
         "build-android16-android-util-log.sh",
         "build-android16-virtual-ref-base-ptr.sh",
+        "build-android16-application-shared-memory.sh",
+        "build-android16-debugstore.sh",
+        "build-android16-activity-thread.sh",
+        "build-android16-system-properties.sh",
+        "build-android16-tracing-perfetto.sh",
     ] {
         paths.push(PathBuf::from("tools").join(script));
     }
     paths.extend([
+        PathBuf::from("upstream/android16-application-shared-memory.lock"),
+        PathBuf::from("upstream/android16-debugstore.lock"),
+        PathBuf::from("upstream/android16-activity-thread.lock"),
+        PathBuf::from("upstream/android16-system-properties.lock"),
+        PathBuf::from("tools/activity-thread/bindings.h"),
+        PathBuf::from("runtime/framework/app/activity_thread_jni.h"),
+        PathBuf::from("compat/loader/android_dlwarning.cc"),
+        PathBuf::from("upstream/android16-bionic-linker-config.sources"),
+        PathBuf::from("upstream/android16-tracing-perfetto.lock"),
+        PathBuf::from("upstream/android16-tracing-perfetto.sources"),
+        PathBuf::from("patches/tracing-perfetto/0001-explicit-dynamic-track-name.patch"),
+        PathBuf::from("tools/tracing-perfetto-smoke.cc"),
+        PathBuf::from("tools/debugstore/Cargo.toml"),
+        PathBuf::from("tools/debugstore/Cargo.lock"),
+        PathBuf::from("tools/debugstore/build.rs"),
+        PathBuf::from("tools/debugstore/smoke.cc"),
+        PathBuf::from("compat/memory/application_memory.cc"),
+        PathBuf::from("compat/memory/application_descriptor.cc"),
+        PathBuf::from("compat/memory/application_descriptor.h"),
+        PathBuf::from("compat/binder/context_manager.h"),
+        PathBuf::from("compat/loader/classloader_identity.h"),
+        PathBuf::from("compat/loader/library_search.h"),
+        PathBuf::from("compat/loader/elf_graph_cache.h"),
+        PathBuf::from("compat/loader/namespace_elf_group.h"),
+        PathBuf::from("compat/window/locked_surface.h"),
+        PathBuf::from("compat/window/hardware_buffer_jni.h"),
+        PathBuf::from("runtime/framework/wm/client_transaction.h"),
+        PathBuf::from("runtime/framework/wm/window_title.h"),
+        PathBuf::from("runtime/framework/app/main_loop.h"),
+        PathBuf::from("runtime/framework/app/process_entry.h"),
+        PathBuf::from("runtime/framework/system/process_entry.h"),
+        PathBuf::from("runtime/framework/connectivity/network_path_abi.h"),
+        PathBuf::from("runtime/framework/connectivity/network_provider_jni.h"),
+        PathBuf::from("runtime/framework/power/power_state_platform.h"),
+        PathBuf::from("runtime/framework/power/power_state_jni.h"),
+        PathBuf::from("runtime/framework/app/process_registration.h"),
+        PathBuf::from("runtime/framework/pm/DexInstructionSets.java"),
+        PathBuf::from("runtime/framework/pm/DexUsageStore.java"),
+        PathBuf::from("runtime/framework/pm/DexLoadReports.java"),
+        PathBuf::from("runtime/framework/pm/InstalledApplicationInfo.java"),
+        PathBuf::from("runtime/framework/pm/InstalledManifestMetadata.java"),
+        PathBuf::from("runtime/framework/pm/InstalledPackageRecord.java"),
+        PathBuf::from("runtime/framework/pm/installed_record_source.h"),
+        PathBuf::from("runtime/framework/pm/PackageManagerEndpoint.java"),
+        PathBuf::from("runtime/framework/pm/PackageRecords.java"),
+        PathBuf::from("upstream/android16-package-dex-usage.lock"),
+        PathBuf::from("tools/build-android16-package-dex-usage.sh"),
+        PathBuf::from("tools/test-android16-package-dex-usage.sh"),
+        PathBuf::from("tools/binder-context-manager-test.cc"),
+        PathBuf::from("tools/tests/application-descriptor-table.h"),
+        PathBuf::from("compat/memory/system_region.cc"),
+        PathBuf::from("tools/application-shared-memory-layout-test.cc"),
+        PathBuf::from("tools/system-region-test.cc"),
         PathBuf::from("probes/android-elf-jni-fixture/child.c"),
         PathBuf::from("probes/android-elf-jni-fixture/child.exports.map"),
         PathBuf::from("probes/android-elf-jni-fixture/exports.map"),
@@ -217,9 +280,7 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
 pub(crate) fn is_probe_only_input(path: &Path) -> bool {
     matches!(
         path.to_string_lossy().as_ref(),
-        "probes/runtime_filesystem_probe.cc"
-            | "probes/runtime_filesystem_probe.h"
-            | "probes/runtime_network_probe.cc"
+        "probes/runtime_network_probe.cc"
             | "probes/runtime_network_probe.h"
             | "probes/runtime_acceptance_phases.cc"
             | "probes/runtime_acceptance_phases.h"

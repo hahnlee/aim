@@ -22,6 +22,15 @@ Owner* Create(const char* root_soname,
               size_t provider_count,
               std::string* error);
 
+// Namespace discovery supplies the exact admitted guest path for each source,
+// in source order. Copies paths; never reconstructs them from SONAME or resolves
+// them again. Legacy Create remains for the old single-directory loader only.
+Owner* CreateWithPaths(const char* root_soname,
+                      const DarwinArtElfGraphSource* sources, size_t source_count,
+                      const char* const* source_paths,
+                      const char* const* provider_sonames, size_t provider_count,
+                      std::string* error);
+
 // Called synchronously by the loader's dependency-first lifecycle callback.
 int Publish(Owner *owner, uintptr_t start, uintptr_t end);
 

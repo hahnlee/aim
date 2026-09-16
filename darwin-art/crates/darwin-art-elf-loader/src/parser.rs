@@ -6,12 +6,27 @@
 use super::*;
 
 pub(super) fn parse_image(bytes: &[u8]) -> Result<ParsedImage, LoadError> {
-    parse_image_with_policy(bytes, false)
+    parse_image_with_appcompat(bytes, None)
+}
+
+pub(super) fn parse_image_with_appcompat(
+    bytes: &[u8],
+    appcompat_16kb: Option<bool>,
+) -> Result<ParsedImage, LoadError> {
+    parse_image_with_policy_and_appcompat(bytes, false, appcompat_16kb)
 }
 
 pub(super) fn parse_image_with_policy(
     bytes: &[u8],
     metadata_only: bool,
+) -> Result<ParsedImage, LoadError> {
+    parse_image_with_policy_and_appcompat(bytes, metadata_only, None)
+}
+
+fn parse_image_with_policy_and_appcompat(
+    bytes: &[u8],
+    metadata_only: bool,
+    appcompat_16kb: Option<bool>,
 ) -> Result<ParsedImage, LoadError> {
     if bytes.len() < ELF64_EHDR_SIZE || bytes.len() < EI_NIDENT {
         return Err(LoadError::Format("truncated ELF header"));
@@ -50,6 +65,11 @@ pub(super) fn parse_image_with_policy(
     let mut dynamic = None;
     let mut relro = None;
     let mut tls = None;
+    // AOSP tests RW adjacency in the original program-header table, not in
+    // the filtered/sorted PT_LOAD vector. Even an intervening PT_DYNAMIC
+    // breaks that adjacency.
+    let mut previous_rw_index = None;
+    let mut compat_rw_headers_adjacent = true;
     for index in 0..program_count {
         let offset = program_offset + index * ELF64_PHDR_SIZE;
         let header = ProgramHeader {
@@ -64,6 +84,12 @@ pub(super) fn parse_image_with_policy(
         match header.kind {
             PT_LOAD => {
                 validate_load(bytes, &header)?;
+                if header.flags & (PF_R | PF_W) == (PF_R | PF_W) {
+                    if previous_rw_index.is_some_and(|previous| previous + 1 != index) {
+                        compat_rw_headers_adjacent = false;
+                    }
+                    previous_rw_index = Some(index);
+                }
                 loads.push(header);
             }
             PT_DYNAMIC => {
@@ -112,6 +138,24 @@ pub(super) fn parse_image_with_policy(
             operation: "getpagesize",
             code: 0,
         })?;
+    let minimum_alignment = loads
+        .iter()
+        .filter_map(|load| (load.alignment > 1).then_some(load.alignment))
+        .min()
+        .map(|alignment| alignment.min(page_size as u64))
+        .unwrap_or(page_size as u64);
+    let effective_compat = appcompat_16kb == Some(true)
+        && page_size == 16 * 1024
+        && minimum_alignment == ANDROID_COMPAT_PAGE_SIZE as u64;
+    if appcompat_16kb.is_some()
+        && page_size >= 16 * 1024
+        && minimum_alignment < page_size as u64
+        && !effective_compat
+    {
+        return Err(LoadError::Protection(
+            "program alignment is smaller than system page size without effective 16KiB app compat",
+        ));
+    }
     let page_mask = page_size as u64 - 1;
     let minimum = loads.first().unwrap().virtual_address & !page_mask;
     let maximum_unaligned = loads
@@ -153,6 +197,12 @@ pub(super) fn parse_image_with_policy(
         }
     }
 
+    if appcompat_16kb.is_some() && protection_overlap && !effective_compat {
+        return Err(LoadError::Protection(
+            "host page permission overlap requires effective 16KiB app compat",
+        ));
+    }
+
     let direct_syscall_count = loads
         .iter()
         .filter(|load| load.flags & PF_X != 0)
@@ -170,7 +220,17 @@ pub(super) fn parse_image_with_policy(
     let direct_syscall_pages =
         super::direct_syscall::veneer_page_count(direct_syscall_count, page_size)?;
 
-    let (image_offset, reservation_size, compat_boundary) = if protection_overlap {
+    let compat_requested = match appcompat_16kb {
+        Some(true) => effective_compat,
+        Some(false) => false,
+        None => protection_overlap,
+    };
+    let (image_offset, reservation_size, compat_boundary) = if compat_requested {
+        if !compat_rw_headers_adjacent {
+            return Err(LoadError::Protection(
+                "Android 16 compat requires adjacent RW program headers",
+            ));
+        }
         let boundary = rx_rw_compat_boundary(&loads, relro.as_ref(), page_size)?.ok_or(
             LoadError::Protection(
                 "host page permission overlap is not eligible for Android 16 RX|RW compat",
@@ -266,6 +326,7 @@ pub(super) fn parse_image_with_policy(
                 image_size,
                 reservation_size,
                 image_offset,
+                compat_layout: compat_boundary.is_some(),
                 stack_guard_offset,
                 direct_syscall_shim_offset,
                 direct_syscall_shim_size: direct_syscall_bytes,
@@ -305,6 +366,7 @@ pub(super) fn parse_image_with_policy(
         image_size,
         reservation_size,
         image_offset,
+        compat_layout: compat_boundary.is_some(),
         stack_guard_offset,
         direct_syscall_shim_offset,
         direct_syscall_shim_size: direct_syscall_bytes,
@@ -389,7 +451,16 @@ fn rx_rw_compat_boundary(
         return Ok(None);
     };
     let boundary = if let Some(relro) = relro {
-        let alignment = first_rw.alignment.max(ANDROID_COMPAT_PAGE_SIZE as u64);
+        // A RELRO segment is eligible only when it is the exact prefix of the
+        // first RW segment.  Comparing page-rounded addresses would also admit
+        // a RELRO that starts later in the same guest page, which is not the
+        // linker contract and can expose bytes before the actual prefix.
+        if relro.virtual_address != first_rw.virtual_address {
+            return Ok(None);
+        }
+        // The compat layout is assembled using the guest 4 KiB granularity,
+        // regardless of a first RW segment's p_align (which may be 16 KiB).
+        let alignment = ANDROID_COMPAT_PAGE_SIZE as u64;
         let load_start = first_rw.virtual_address & !(alignment - 1);
         let load_end = first_rw
             .virtual_address
@@ -689,6 +760,9 @@ pub(super) fn parse_dynamic_with_policy(
             DT_TEXTREL if !metadata_only => {
                 return Err(LoadError::Capability(Capability::TextRelocations));
             }
+            DT_RUNPATH if metadata_only => {
+                set_once(&mut info.runpath_offset, value, "duplicate DT_RUNPATH")?;
+            }
             DT_RPATH | DT_RUNPATH if !metadata_only => {
                 return Err(LoadError::Capability(Capability::Rpath));
             }
@@ -775,7 +849,7 @@ pub(super) fn validate_dynamic_capabilities(info: &DynamicInfo) -> Result<(), Lo
         }));
     }
     if let Some(flags) = info.flags_1
-        && flags & !DF_1_NOW != 0
+        && flags & !(DF_1_NOW | DF_1_GLOBAL) != 0
     {
         return Err(LoadError::Capability(Capability::DynamicFlags {
             tag: DT_FLAGS_1,
@@ -849,6 +923,51 @@ mod tests {
         assert_eq!(
             rx_rw_compat_boundary(&loads, Some(&relro), 16 * 1024).unwrap(),
             Some(0x113a000)
+        );
+    }
+
+    #[test]
+    fn android16_rx_rw_compat_rejects_relro_not_at_first_rw_vaddr() {
+        let loads = vec![
+            load(0, 0x2000, PF_R | PF_X),
+            load(0x2000, 0x4000, PF_R | PF_W),
+        ];
+        let relro = ProgramHeader {
+            kind: PT_GNU_RELRO,
+            flags: PF_R,
+            offset: 0x2001,
+            // This is in the same guest 4 KiB page as first_rw, but is not its
+            // exact prefix. Page-rounded equality must not make it eligible.
+            virtual_address: 0x2001,
+            file_size: 0x100,
+            memory_size: 0x100,
+            alignment: 1,
+        };
+        assert_eq!(
+            rx_rw_compat_boundary(&loads, Some(&relro), 16 * 1024).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn android16_rx_rw_compat_rounds_relro_end_to_guest_page_with_16k_p_align() {
+        let mut first_rw = load(0x20000, 0x6000, PF_R | PF_W);
+        first_rw.alignment = 16 * 1024;
+        let loads = vec![load(0, 0x2000, PF_R | PF_X), first_rw];
+        let relro = ProgramHeader {
+            kind: PT_GNU_RELRO,
+            flags: PF_R,
+            offset: 0x20000,
+            virtual_address: 0x20000,
+            file_size: 0x3000,
+            memory_size: 0x3000,
+            alignment: 1,
+        };
+        // 0x23000 is 4 KiB aligned but not 16 KiB aligned. The compat
+        // boundary follows the guest page size, not first_rw.p_align.
+        assert_eq!(
+            rx_rw_compat_boundary(&loads, Some(&relro), 16 * 1024).unwrap(),
+            Some(0x23000)
         );
     }
 

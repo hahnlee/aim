@@ -191,18 +191,24 @@ sdk="$(xcrun --sdk macosx --show-sdk-path)"
 host_cxx="$(xcrun --find clang++)"
 icu_root="$repo_root/_build/icu-foundation"
 allocator_src="$repo_root/tools/bionic-libc-allocator-facade/src/allocator.c"
+allocator_options_src="$repo_root/tools/bionic-libc-allocator-facade/src/allocator_options.c"
 allocator_inc="$repo_root/tools/bionic-libc-allocator-facade/include"
+check "$allocator_src" "$ALLOCATOR_SOURCE_SHA256"
+check "$allocator_options_src" "$ALLOCATOR_OPTIONS_SOURCE_SHA256"
 for sanitizer in address undefined; do
   san_dir="$build_root/differential-$sanitizer"
   mkdir -p "$san_dir"
   clang -arch arm64 -isysroot "$sdk" -std=c17 -O1 -Wall -Wextra -Werror \
     -fsanitize="$sanitizer" -fno-omit-frame-pointer -I"$allocator_inc" \
     -c "$allocator_src" -o "$san_dir/allocator.o"
+  clang -arch arm64 -isysroot "$sdk" -std=c17 -O1 -Wall -Wextra -Werror \
+    -fsanitize="$sanitizer" -fno-omit-frame-pointer -I"$allocator_inc" \
+    -c "$allocator_options_src" -o "$san_dir/allocator_options.o"
   "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -Wall -Wextra -Werror \
     -fsanitize="$sanitizer" -fno-omit-frame-pointer \
     -I"$repo_root/tools/bionic-errno-tls/include" \
     "$script_dir/probes/differential.cc" \
-    -Wl,-force_load,"$archive" "$san_dir/allocator.o" "$float_archive" \
+    -Wl,-force_load,"$archive" "$san_dir/allocator.o" "$san_dir/allocator_options.o" "$float_archive" \
     -Wl,-force_load,"$icu_root/libandroidicuinit-darwin.a" \
     "$icu_root/libicuuc-common-darwin.a" "$icu_root/libicuuc-stubdata-darwin.a" \
     -o "$san_dir/differential"

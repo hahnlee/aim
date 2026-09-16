@@ -31,7 +31,36 @@ struct AndroidNativeWindowAbi {
 constexpr int kNativeWindowIsValid = 17;
 constexpr int kNativeWindowSetBuffersDataspace = 19;
 constexpr int kNativeWindowDataspace = 20;
+
+int32_t QueryWindow(ANativeWindow* native_window, int what) {
+  auto* window = reinterpret_cast<AndroidNativeWindowAbi*>(native_window);
+  int value = 0;
+  const int status = window->query(window, what, &value);
+  return status < 0 ? status : value;
+}
 }  // namespace
+
+// AOSP nativebase's incStrong/decStrong dispatch to these callbacks. The
+// public facade must accept any Android Surface owner, not cast it to Darwin.
+extern "C" void ANativeWindow_acquire(ANativeWindow* native_window) {
+  auto* window = reinterpret_cast<AndroidNativeWindowAbi*>(native_window);
+  window->common.inc_ref(&window->common);
+}
+
+extern "C" void ANativeWindow_release(ANativeWindow* native_window) {
+  auto* window = reinterpret_cast<AndroidNativeWindowAbi*>(native_window);
+  window->common.dec_ref(&window->common);
+}
+
+extern "C" int32_t ANativeWindow_getWidth(ANativeWindow* window) {
+  return QueryWindow(window, 0);
+}
+extern "C" int32_t ANativeWindow_getHeight(ANativeWindow* window) {
+  return QueryWindow(window, 1);
+}
+extern "C" int32_t ANativeWindow_getFormat(ANativeWindow* window) {
+  return QueryWindow(window, 2);
+}
 
 extern "C" int32_t ANativeWindow_setBuffersDataSpace(
     ANativeWindow* native_window, int32_t dataspace) {
@@ -56,23 +85,22 @@ extern "C" int32_t ANativeWindow_getBuffersDataSpace(
   return dataspace;
 }
 
-// Frame-rate hints are advisory on Android: SurfaceFlinger may change the
-// display mode, but rendering remains correct when the hint is ignored.  The
-// Metal compositor owns the display cadence in Darwin ART, so accept the
-// NDK calls as successful no-ops rather than leaving the API unresolved for
-// engines (notably Unity/Swappy) that resolve them lazily.
+// Match AOSP's NDK facade: the producer owns frame-rate validation/state.
+// Do not convert an unimplemented producer operation into successful advice.
 extern "C" int32_t ANativeWindow_setFrameRate(
-    ANativeWindow* native_window, float, int8_t) {
-  auto* window = reinterpret_cast<AndroidNativeWindowAbi*>(native_window);
-  if (window == nullptr || window->query == nullptr) return -EINVAL;
-  int valid = 0;
-  return window->query(window, kNativeWindowIsValid, &valid) == 0 && valid
-             ? 0
-             : -EINVAL;
+    ANativeWindow* native_window, float frame_rate, int8_t compatibility) {
+  return ANativeWindow_setFrameRateWithChangeStrategy(native_window, frame_rate,
+      compatibility, ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS);
 }
 
 extern "C" int32_t ANativeWindow_setFrameRateWithChangeStrategy(
     ANativeWindow* native_window, float frame_rate, int8_t compatibility,
-    int8_t) {
-  return ANativeWindow_setFrameRate(native_window, frame_rate, compatibility);
+    int8_t strategy) {
+  auto* window = reinterpret_cast<AndroidNativeWindowAbi*>(native_window);
+  int valid = 0;
+  if (!window || !window->query || !window->perform ||
+      window->query(window, kNativeWindowIsValid, &valid) != 0 || !valid) return -EINVAL;
+  // system/window.h: NATIVE_WINDOW_SET_FRAME_RATE, default variadic promotions.
+  return window->perform(window, 40, static_cast<double>(frame_rate),
+      static_cast<int>(compatibility), static_cast<int>(strategy));
 }

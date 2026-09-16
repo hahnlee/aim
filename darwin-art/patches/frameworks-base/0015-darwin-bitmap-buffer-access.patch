@@ -1,0 +1,46 @@
+--- a/hwui/Bitmap.h
++++ b/hwui/Bitmap.h
+@@ -29,5 +29,5 @@
+ #include <optional>
+
+-#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
++#if defined(__ANDROID__) || defined(__APPLE__)
+ #include <android/hardware_buffer.h>
+ #endif
+@@ -142,5 +142,5 @@
+     PixelStorageType pixelStorageType() const { return mPixelStorageType; }
+
+-#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
++#if defined(__ANDROID__) || defined(__APPLE__)
+      AHardwareBuffer* hardwareBuffer();
+ #endif
+@@ -232,5 +232,5 @@
+         } heap;
+-#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
++#if defined(__ANDROID__) || defined(__APPLE__)
+         struct {
+             AHardwareBuffer* buffer;
+             uint64_t size;
+--- a/hwui/Bitmap.cpp
++++ b/hwui/Bitmap.cpp
+@@ -388,5 +388,5 @@
+         case PixelStorageType::Hardware:
+-#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
++#if defined(__ANDROID__) || defined(__APPLE__)
+             auto buffer = mPixelStorage.hardware.buffer;
+             AHardwareBuffer_release(buffer);
+             mPixelStorage.hardware.buffer = nullptr;
+@@ -421,5 +421,5 @@
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) || defined(__APPLE__)
+         case PixelStorageType::Hardware:
+             return mPixelStorage.hardware.size;
+ #endif
+         default:
+@@ -459,5 +459,5 @@
+-#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
++#if defined(__ANDROID__) || defined(__APPLE__)
+ AHardwareBuffer* Bitmap::hardwareBuffer() {
+     if (isHardware()) {
+         return mPixelStorage.hardware.buffer;
+     }

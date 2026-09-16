@@ -36,6 +36,20 @@ fn compile(source: &str, object: &Path, sdk: &str, includes: &[&str]) {
 }
 
 fn main() {
+    let lock = std::fs::read_to_string("sources.lock").unwrap();
+    let expected = lock
+        .lines()
+        .find_map(|line| line.strip_prefix("BIONIC_DEVICE_API_HEADER_SHA256="))
+        .unwrap();
+    let hash = output(
+        Command::new("shasum").args(["-a", "256", "upstream/get_device_api_level_inlines.h"]),
+        "bionic device API source hash",
+    );
+    assert_eq!(
+        hash.split_whitespace().next(),
+        Some(expected),
+        "original bionic source drift"
+    );
     assert_eq!(env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("macos"));
     assert_eq!(env::var("CARGO_CFG_TARGET_ARCH").as_deref(), Ok("aarch64"));
     let output_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
@@ -44,6 +58,7 @@ fn main() {
         "SDK lookup",
     );
     let shims = output_dir.join("shims.o");
+    let device_api_level = output_dir.join("device_api_level.o");
     let setjmp = output_dir.join("setjmp.o");
     let errno = output_dir.join("errno.o");
     let archive = output_dir.join("libdarwin_art_bionic_process_state.a");
@@ -76,6 +91,12 @@ fn main() {
         );
     }
     compile("src/shims.c", &shims, &sdk, &["include"]);
+    compile(
+        "src/device_api_level.c",
+        &device_api_level,
+        &sdk,
+        &["include"],
+    );
     assert!(
         Command::new("clang")
             .args([
@@ -109,6 +130,7 @@ fn main() {
         .arg("rcs")
         .arg(&archive)
         .arg(&shims)
+        .arg(&device_api_level)
         .arg(&setjmp)
         .arg(&errno);
     if standalone {
@@ -125,6 +147,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../bionic-syscall-facade/include/darwin_art_bionic_syscall.h");
     for source in [
         "src/shims.c",
+        "src/device_api_level.c",
+        "upstream/get_device_api_level_inlines.h",
+        "sources.lock",
         "src/setjmp_arm64.S",
         "include/darwin_art_bionic_process_state.h",
         "../bionic-errno-tls/src/errno_tls.c",

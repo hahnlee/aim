@@ -31,6 +31,58 @@ pub(crate) struct RuntimeBootstrapStaging {
     pub(crate) operator_source: PathBuf,
 }
 
+/// Materialize the flavor-independent ART source shadow before any compiler
+/// is allowed to consume it. Patches are applied and audited in a private
+/// candidate tree; published files are replaced only after the complete
+/// candidate is valid, and the identity marker is published last.
+pub(crate) fn prepare_runtime_shadow(root: &Path) -> Result<PathBuf> {
+    let runtime = root.join("_aosp/art/runtime");
+    let patched_source_dir = root.join("_build/runtime-common/patched-source");
+    let patched_runtime = patched_source_dir.join("runtime");
+    let shadow_identity = runtime_shadow_identity(&runtime, root)?;
+    let shadow_identity_path = patched_source_dir.join(".darwin-art-shadow-identity");
+
+    let shadow_is_current = || {
+        fs::read_to_string(&shadow_identity_path)
+            .is_ok_and(|cached| cached.trim() == shadow_identity)
+            && PATCHED_RUNTIME_SOURCES
+                .iter()
+                .all(|source| patched_runtime.join(source).is_file())
+    };
+    if !shadow_is_current() {
+        let _shadow_lock = acquire_shadow_lock(&patched_source_dir)?;
+        if !shadow_is_current() {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            let candidate_dir = patched_source_dir.with_extension(format!(
+                "darwin-art-candidate-{}-{nonce}",
+                std::process::id()
+            ));
+            let candidate = ShadowCandidate(candidate_dir);
+            let candidate_runtime = candidate.0.join("runtime");
+            fs::create_dir_all(&candidate_runtime)?;
+            copy_runtime_sources(&runtime, &candidate_runtime)?;
+            for patch in PATCHED_RUNTIME_PATCHES {
+                apply_patch_if_needed(&root.join(patch), &candidate.0)?;
+            }
+            audit_nterp_admission(&candidate_runtime)?;
+
+            fs::create_dir_all(&patched_runtime)?;
+            for source in PATCHED_RUNTIME_SOURCES {
+                let destination = patched_runtime.join(source);
+                if let Some(parent) = destination.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                copy_if_changed(&candidate_runtime.join(source), &destination)?;
+            }
+            publish_text_file(&shadow_identity_path, &format!("{shadow_identity}\n"))?;
+        }
+    }
+    audit_nterp_admission(&patched_runtime)?;
+    Ok(patched_runtime)
+}
+
 pub(crate) fn prepare(root: &Path, flavor: RuntimeFlavor) -> Result<RuntimeBootstrapStaging> {
     let real_graphics = flavor.real_graphics();
     build_shell_gate(root, "build-android-elf-jni-fixture.sh")?;
@@ -105,8 +157,7 @@ pub(crate) fn prepare(root: &Path, flavor: RuntimeFlavor) -> Result<RuntimeBoots
     // The patched ART runtime sources are identical between the headless and
     // graphics flavors.  A shared shadow is the source-level half of the
     // cross-flavor object cache; adapter sources remain flavor-local below.
-    let patched_source_dir = root.join("_build/runtime-common/patched-source");
-    let patched_runtime = patched_source_dir.join("runtime");
+    let patched_runtime = prepare_runtime_shadow(root)?;
     let object_dir = build_dir.join("objects");
     let runtime_core_object_dir = root.join("_build/runtime-common/objects");
     fs::create_dir_all(&object_dir)?;
@@ -116,33 +167,6 @@ pub(crate) fn prepare(root: &Path, flavor: RuntimeFlavor) -> Result<RuntimeBoots
         format!("{RUNTIME_CACHE_IDENTITY}\n"),
     )?;
     fs::create_dir_all(&runtime_generated_dir)?;
-
-    let shadow_identity = runtime_shadow_identity(&runtime, root)?;
-    let shadow_identity_path = patched_source_dir.join(".darwin-art-shadow-identity");
-    let shadow_current = fs::read_to_string(&shadow_identity_path)
-        .is_ok_and(|cached| cached.trim() == shadow_identity)
-        && PATCHED_RUNTIME_SOURCES
-            .iter()
-            .all(|source| patched_runtime.join(source).is_file());
-    if !shadow_current {
-        let _shadow_lock = acquire_shadow_lock(&patched_source_dir)?;
-        let shadow_current = fs::read_to_string(&shadow_identity_path)
-            .is_ok_and(|cached| cached.trim() == shadow_identity)
-            && PATCHED_RUNTIME_SOURCES
-                .iter()
-                .all(|source| patched_runtime.join(source).is_file());
-        if shadow_current {
-            // Another bootstrap completed publication while we waited.
-        } else {
-            fs::create_dir_all(&patched_runtime)?;
-            copy_runtime_sources(&runtime, &patched_runtime)?;
-            for patch in PATCHED_RUNTIME_PATCHES {
-                apply_patch_if_needed(&root.join(patch), &patched_source_dir)?;
-            }
-            fs::write(shadow_identity_path, format!("{shadow_identity}\n"))?;
-        }
-    }
-    audit_nterp_admission(&patched_runtime)?;
 
     let runtime_includes = vec![
         public_include,
@@ -286,6 +310,14 @@ impl Drop for ShadowLock {
     }
 }
 
+struct ShadowCandidate(PathBuf);
+
+impl Drop for ShadowCandidate {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn acquire_shadow_lock(shadow_dir: &Path) -> Result<ShadowLock> {
     let lock = shadow_dir.with_extension("lock");
     fs::create_dir_all(shadow_dir)?;
@@ -395,6 +427,14 @@ fn copy_if_changed(source: &Path, destination: &Path) -> Result<()> {
     let temporary =
         destination.with_extension(format!("darwin-art-copy-tmp-{}", std::process::id()));
     fs::write(&temporary, source_bytes)?;
+    fs::rename(temporary, destination)?;
+    Ok(())
+}
+
+fn publish_text_file(destination: &Path, contents: &str) -> Result<()> {
+    let temporary =
+        destination.with_extension(format!("darwin-art-publish-tmp-{}", std::process::id()));
+    fs::write(&temporary, contents)?;
     fs::rename(temporary, destination)?;
     Ok(())
 }

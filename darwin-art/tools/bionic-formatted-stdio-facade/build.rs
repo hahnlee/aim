@@ -61,6 +61,7 @@ fn main() {
     let format = out.join("format.o");
     let format_entry = out.join("format-entry.o");
     let allocator = out.join("allocator.o");
+    let allocator_options = out.join("allocator_options.o");
     let audit_dependencies = out.join("audit-dependency-shims.o");
     compile(
         "clang++",
@@ -120,6 +121,15 @@ fn main() {
     compile(
         "clang",
         Some("c17"),
+        "../bionic-libc-allocator-facade/src/allocator_options.c",
+        &allocator_options,
+        &sdk,
+        &["../bionic-libc-allocator-facade/include"],
+        sanitizer.as_deref(),
+    );
+    compile(
+        "clang",
+        Some("c17"),
         "../bionic-stdio-facade/probes/audit_dependency_shims.c",
         &audit_dependencies,
         &sdk,
@@ -138,6 +148,7 @@ fn main() {
                 &format,
                 &format_entry,
                 &allocator,
+                &allocator_options,
                 &audit_dependencies,
             ])
             .status()
@@ -169,6 +180,7 @@ fn main() {
         "../bionic-format-facade/src/format.cc",
         "../bionic-format-facade/src/aapcs64_entry.S",
         "../bionic-libc-allocator-facade/src/allocator.c",
+        "../bionic-libc-allocator-facade/src/allocator_options.c",
         "../bionic-stdio-facade/probes/audit_dependency_shims.c",
     ] {
         println!("cargo:rerun-if-changed={source}");

@@ -1,0 +1,70 @@
+--- a/ServiceManagement.cpp
++++ b/ServiceManagement.cpp
+@@ -27,1 +27,5 @@
+-#include <fstream>
++#include <sstream>
++#include "filesystem/guest_config.h"
++#include "filesystem/guest_directory.h"
++#include "filesystem/guest_file.h"
++#include "filesystem/linker_config_fs.h"
+@@ -51,1 +55,1 @@
+-#if !defined(__ANDROID_RECOVERY__) && defined(__ANDROID__)
++#if !defined(__ANDROID_RECOVERY__) && (defined(__ANDROID__) || defined(DARWIN_ART_ANDROID_HIDL_POLICY))
+@@ -80,1 +84,3 @@
+-    std::ifstream ifs("/proc/self/cmdline");
++    std::string contents;
++    if (!darwin_art::filesystem::ReadGuestConfig("/proc/self/cmdline", &contents)) return "";
++    std::istringstream ifs(contents);
+@@ -121,1 +127,1 @@
+-    std::unique_ptr<DIR, decltype(&closedir)> dir(opendir(kTasks.c_str()), closedir);
++    auto dir = darwin_art::filesystem::GuestDirectory::Open(kTasks.c_str());
+@@ -124,2 +130,3 @@
+-    dirent* dp;
+-    while ((dp = readdir(dir.get())) != nullptr) {
++    DarwinArtAndroidDirent entry{};
++    const auto* dp = &entry;
++    while (dir->Next(&entry) == darwin_art::filesystem::GuestDirectory::Result::Entry) {
+@@ -129,2 +136,3 @@
+-        std::fstream fs(kTasks + dp->d_name + "/comm");
+-        if (!fs) {
++        auto file = darwin_art::filesystem::GuestFile::Open(kTasks + dp->d_name + "/comm", true);
++        std::string contents;
++        if (!file || !file->ReadAll(&contents)) {
+@@ -135,1 +143,2 @@
+-        std::string oldComm;
++        std::istringstream fs(contents);
++        std::string oldComm;
+@@ -140,2 +149,1 @@
+-            if (!fs.seekg(0, fs.beg)) continue;
+-            fs << newName;
++            if (!file->WriteAtStart(newName)) continue;
+@@ -365,1 +373,1 @@
+-        if (access("/dev/hwbinder", F_OK|R_OK|W_OK) != 0) {
++        if (darwin_art::filesystem::GuestLinkerAccess("/dev/hwbinder", F_OK|R_OK|W_OK) != 0) {
+@@ -394,1 +402,1 @@
+-    std::unique_ptr<DIR, decltype(&closedir)> dir(opendir(path.c_str()), closedir);
++    auto dir = darwin_art::filesystem::GuestDirectory::Open(path.c_str());
+@@ -399,2 +407,3 @@
+-    dirent* dp;
+-    while ((dp = readdir(dir.get())) != nullptr) {
++    DarwinArtAndroidDirent entry{};
++    const auto* dp = &entry;
++    while (dir->Next(&entry) == darwin_art::filesystem::GuestDirectory::Result::Entry) {
+@@ -458,1 +467,1 @@
+-    std::unique_ptr<DIR, decltype(&closedir)> dir(opendir(proc.c_str()), closedir);
++    auto dir = darwin_art::filesystem::GuestDirectory::Open(proc.c_str());
+@@ -460,2 +469,3 @@
+-    dirent* dp;
+-    while ((dp = readdir(dir.get())) != nullptr) {
++    DarwinArtAndroidDirent entry{};
++    const auto* dp = &entry;
++    while (dir->Next(&entry) == darwin_art::filesystem::GuestDirectory::Result::Entry) {
+@@ -465,2 +475,3 @@
+-        std::ifstream ifs{mapsPath};
+-        if (!ifs.is_open()) continue;
++        std::string contents;
++        if (!darwin_art::filesystem::ReadGuestConfig(mapsPath, &contents)) continue;
++        std::istringstream ifs(contents);
+@@ -544,1 +555,1 @@
+-#if !defined(__ANDROID_RECOVERY__) && defined(__ANDROID__)
++#if !defined(__ANDROID_RECOVERY__) && (defined(__ANDROID__) || defined(DARWIN_ART_ANDROID_HIDL_POLICY))

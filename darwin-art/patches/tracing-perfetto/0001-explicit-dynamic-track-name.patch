@@ -1,0 +1,13 @@
+--- a/tracing_sdk.cpp
++++ b/tracing_sdk.cpp
+@@ -181,8 +181,8 @@
+   if (is_counter_) {
+     PerfettoTeCounterTrackRegister(&registered_track_, name_.data(),
+-                                   parent_uuid_);
++                                   parent_uuid_, false);
+   } else {
+     PerfettoTeNamedTrackRegister(&registered_track_, name_.data(), id_,
+-                                 parent_uuid_);
++                                 parent_uuid_, false);
+   }
+ }

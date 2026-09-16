@@ -311,6 +311,7 @@ class Owner {
 
   std::vector<PreparedImage> publication_order;
   std::string library_directory;
+  std::unordered_map<std::string, std::string> admitted_paths;
   size_t next_publication = 0;
   std::vector<PublishedImage> published;
 };
@@ -391,6 +392,35 @@ Owner* Create(const char* root_soname,
   return nullptr;
 }
 
+Owner* CreateWithPaths(const char* root_soname,
+                      const DarwinArtElfGraphSource* sources, size_t source_count,
+                      const char* const* source_paths,
+                      const char* const* provider_sonames, size_t provider_count,
+                      std::string* error) try {
+  if (error) error->clear();
+  if (!sources || !source_paths || !source_count) {
+    if (error) *error = "missing admitted ELF source paths";
+    return nullptr;
+  }
+  std::unordered_map<std::string, std::string> paths;
+  for (size_t i = 0; i < source_count; ++i) {
+    if (!sources[i].soname || !source_paths[i] || source_paths[i][0] != '/' ||
+        !paths.emplace(sources[i].soname, source_paths[i]).second) {
+      if (error) *error = "invalid or duplicate admitted ELF source path";
+      return nullptr;
+    }
+  }
+  // Create prepares metadata only; no image is published before paths are set.
+  std::unique_ptr<Owner> owner(Create(root_soname, "/", sources, source_count,
+                                     provider_sonames, provider_count, error));
+  if (!owner) return nullptr;
+  owner->admitted_paths = std::move(paths);
+  return owner.release();
+} catch (...) {
+  if (error) *error = "ELF admitted-path allocation failed";
+  return nullptr;
+}
+
 int Publish(Owner* owner, uintptr_t start, uintptr_t end) try {
   if (owner == nullptr || start >= end ||
       owner->next_publication >= owner->publication_order.size()) {
@@ -407,7 +437,13 @@ int Publish(Owner* owner, uintptr_t start, uintptr_t end) try {
   image->start = start;
   image->end = end;
   image->soname = prepared.soname;
-  image->path = owner->library_directory + "/" + prepared.soname;
+  if (owner->admitted_paths.empty()) {
+    image->path = owner->library_directory + "/" + prepared.soname;
+  } else {
+    const auto path = owner->admitted_paths.find(prepared.soname);
+    if (path == owner->admitted_paths.end()) return -1;
+    image->path = path->second;
+  }
   image->phdrs = prepared.phdrs;
   if (std::getenv("DARWIN_ART_DEBUG_ELF_IMAGES") != nullptr) {
     std::fprintf(stderr,

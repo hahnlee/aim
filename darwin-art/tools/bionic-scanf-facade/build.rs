@@ -86,6 +86,7 @@ fn main() {
         "numeric provider",
     );
     let allocator = out.join("allocator.o");
+    let allocator_options = out.join("allocator_options.o");
     run(
         Command::new("clang")
             .args(&flags)
@@ -99,6 +100,20 @@ fn main() {
             ])
             .arg(&allocator),
         "allocator dependency",
+    );
+    run(
+        Command::new("clang")
+            .args(&flags)
+            .arg("-std=c17")
+            .arg("-I")
+            .arg(root.join("tools/bionic-libc-allocator-facade/include"))
+            .args([
+                "-c",
+                "../bionic-libc-allocator-facade/src/allocator_options.c",
+                "-o",
+            ])
+            .arg(&allocator_options),
+        "allocator options dependency",
     );
     let stdio_audit_dependencies = out.join("stdio-audit-dependencies.o");
     run(
@@ -126,6 +141,7 @@ fn main() {
         Command::new("ar").arg("rcs").arg(&support).args([
             &numeric,
             &allocator,
+            &allocator_options,
             &stdio_audit_dependencies,
         ]),
         "support",
@@ -188,6 +204,8 @@ fn main() {
         "src/scanf.cc",
         "src/aapcs64_entry.S",
         "include/darwin_art_bionic_scanf.h",
+        "../bionic-libc-allocator-facade/src/allocator.c",
+        "../bionic-libc-allocator-facade/src/allocator_options.c",
         "../bionic-stdio-facade/include/darwin_art_bionic_stdio.h",
         "../bionic-stdio-facade/probes/audit_dependency_shims.c",
     ] {

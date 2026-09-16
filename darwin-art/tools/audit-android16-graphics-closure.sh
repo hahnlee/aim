@@ -69,10 +69,10 @@ fi
 # force-load module ownership; N means normal provider extraction.
 archive_specs=(
   'F|1|_build/android-graphics-jni/libandroid-graphics-layoutlib-registrar-darwin.a'
-  'F|62|_build/android-graphics-jni/libandroid-graphics-jni-darwin.a'
+  'F|66|_build/android-graphics-jni/libandroid-graphics-jni-darwin.a'
   'F|88|_build/hwui-static-foundation/libhwui-static-darwin.a'
   'F|5|_build/hwui-static-foundation/libandroid-graphics-apex-common-darwin.a'
-  'F|956|_build/skia-metal-gpu/libskia.a'
+  'F|957|_build/skia-metal-gpu/libskia.a'
   'N|2|_build/skia-metal-gpu/libskcms.a'
   'N|36|_build/androidfw-foundation/libandroidfw-darwin.a'
   'N|5|_build/hostgraphics/libhostgraphics-darwin.a'
@@ -284,6 +284,24 @@ executable_resolved_count="$(wc -l < "$executable_resolved" | tr -d ' ')"
 if [[ "$executable_resolved_count" != "$expected_executable_provider_resolved_count" ]]; then
   echo "graphics-closure: executable-provider classification count changed" >&2
   exit 3
+fi
+
+# ART's actual platform owners are linked by audit-runtime-graphics-link. Do
+# not replace AAsset, FD or GPU providers with executable test doubles here.
+# This phase proves archive order/identity only; the enclosing full runtime
+# audit must still perform its strict final link and symbol/provider checks.
+if [[ "$audit_mode" == art-runtime ]]; then
+  [[ "$missing_symbol_count" == 0 && "$expected_missing_module_count" == 0 ]]
+  mkdir -p "$build_dir"
+  cp "$link_order" "$build_dir/link-order.txt"
+  cp "$all_definitions" "$build_dir/all-provider-definitions.txt"
+  cp "$closure_object" "$build_dir/$closure_object_name"
+  cp "$relocatable_undefined" "$build_dir/relocatable-undefined-symbols.txt"
+  cp "$provider_order_leaks" "$build_dir/provider-order-leaks.txt"
+  cp "$missing_mangled" "$build_dir/missing-skia-android-utils.txt"
+  echo "graphics-closure: ART relocatable verified archive-members=$member_total external-imports=$executable_resolved_count"
+  echo "graphics-closure: final runtime link/provider verification REQUIRED (not executable acceptance)"
+  exit 0
 fi
 
 main_source="$stage_dir/closure_main.cpp"

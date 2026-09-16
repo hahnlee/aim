@@ -59,6 +59,7 @@ struct ActivityCandidate {
     launcher: bool,
     alias: bool,
     screen_orientation: Option<i32>,
+    hardware_accelerated: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -66,6 +67,11 @@ struct ServiceCandidate {
     depth: usize,
     name: String,
     process: Option<String>,
+    isolated_process: bool,
+    enabled: bool,
+    exported: Option<bool>,
+    has_intent_filter: bool,
+    permission: Option<String>,
     metadata: Vec<ManifestMetadata>,
 }
 
@@ -84,6 +90,7 @@ struct ProviderCandidate {
     name: String,
     authorities: String,
     init_order: u32,
+    grant_uri_permissions: bool,
     metadata: Vec<ManifestMetadata>,
 }
 
@@ -108,16 +115,21 @@ struct ManifestInfo {
     launch_component: String,
     activity_themes: Vec<(String, u32)>,
     activity_aliases: Vec<(String, String)>,
-    services: Vec<(String, String)>,
+    services: Vec<(String, String, bool, Option<String>, bool, bool)>,
     receivers: Vec<(String, String, bool, bool)>,
     service_metadata: Vec<(String, Vec<ManifestMetadata>)>,
-    providers: Vec<(String, String, u32, Vec<ManifestMetadata>)>,
+    providers: Vec<(String, String, u32, bool, Vec<ManifestMetadata>)>,
+    requested_permissions: Vec<String>,
     application_metadata: Vec<ManifestMetadata>,
     version_code: u32,
     version_name: String,
     theme: u32,
     target_sdk: u32,
     debuggable: bool,
+    has_code: bool,
+    hardware_accelerated: bool,
+    supports_rtl: bool,
+    launch_activity_hardware_accelerated: bool,
     label: String,
     label_res: u32,
     application_icon_res: u32,
@@ -645,6 +657,7 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
     let mut offset = usize::from(u16le(input, 2, "XML header size")?);
     let mut pool = None;
     let mut depth = 0_usize;
+    let mut requested_permissions = Vec::new();
     let mut package = None;
     let mut application = None;
     let mut application_process = None;
@@ -656,6 +669,11 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
     let mut application_theme = None;
     let mut target_sdk = None;
     let mut debuggable = false;
+    let mut has_code = true;
+    let mut application_hardware_accelerated = None;
+    // Android defaults android:supportsRtl to false when the application
+    // attribute is absent. Keep that default at the manifest boundary.
+    let mut application_supports_rtl = false;
     let mut current: Option<ActivityCandidate> = None;
     let mut launchers = Vec::new();
     let mut activities = Vec::new();
@@ -731,6 +749,23 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
                         "targetSdkVersion",
                     )?;
                 }
+                "uses-permission" | "uses-permission-sdk-23" if depth == 2 => {
+                    if let Some(name) =
+                        find_attribute(input, strings, attrs, attr_count, attr_size, "name")?
+                    {
+                        if name.is_empty()
+                            || name.len() > 255
+                            || !name.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_')
+                            })
+                        {
+                            return Err("uses-permission has an invalid name".to_owned());
+                        }
+                        if !requested_permissions.contains(&name) {
+                            requested_permissions.push(name);
+                        }
+                    }
+                }
                 "application" => {
                     application_depth = Some(depth);
                     application =
@@ -754,6 +789,27 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
                         attr_count,
                         attr_size,
                         "debuggable",
+                    )?
+                    .unwrap_or(false);
+                    has_code = find_boolean_attribute(
+                        input, strings, attrs, attr_count, attr_size, "hasCode",
+                    )?
+                    .unwrap_or(true);
+                    application_hardware_accelerated = find_boolean_attribute(
+                        input,
+                        strings,
+                        attrs,
+                        attr_count,
+                        attr_size,
+                        "hardwareAccelerated",
+                    )?;
+                    application_supports_rtl = find_boolean_attribute(
+                        input,
+                        strings,
+                        attrs,
+                        attr_count,
+                        attr_size,
+                        "supportsRtl",
                     )?
                     .unwrap_or(false);
                 }
@@ -835,6 +891,14 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
                         attr_size,
                         "screenOrientation",
                     )?;
+                    let hardware_accelerated = find_boolean_attribute(
+                        input,
+                        strings,
+                        attrs,
+                        attr_count,
+                        attr_size,
+                        "hardwareAccelerated",
+                    )?;
                     current = Some(ActivityCandidate {
                         depth,
                         component_name,
@@ -846,6 +910,7 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
                         launcher: false,
                         alias: tag == "activity-alias",
                         screen_orientation,
+                        hardware_accelerated,
                     });
                 }
                 "service" => {
@@ -856,20 +921,48 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
                         input, strings, attrs, attr_count, attr_size, "enabled",
                     )?
                     .unwrap_or(true);
-                    if enabled {
-                        let name =
-                            find_attribute(input, strings, attrs, attr_count, attr_size, "name")?
-                                .ok_or_else(|| "service is missing android:name".to_owned())?;
-                        let process = find_attribute(
-                            input, strings, attrs, attr_count, attr_size, "process",
-                        )?;
-                        current_service = Some(ServiceCandidate {
-                            depth,
-                            name,
-                            process,
-                            metadata: Vec::new(),
-                        });
-                    }
+                    let name =
+                        find_attribute(input, strings, attrs, attr_count, attr_size, "name")?
+                            .ok_or_else(|| "service is missing android:name".to_owned())?;
+                    let process =
+                        find_attribute(input, strings, attrs, attr_count, attr_size, "process")?;
+                    let isolated_process = find_boolean_attribute(
+                        input,
+                        strings,
+                        attrs,
+                        attr_count,
+                        attr_size,
+                        "isolatedProcess",
+                    )?
+                    .unwrap_or(false);
+                    let exported = find_boolean_attribute(
+                        input, strings, attrs, attr_count, attr_size, "exported",
+                    )?;
+                    let permission =
+                        find_attribute(input, strings, attrs, attr_count, attr_size, "permission")?;
+                    current_service = Some(ServiceCandidate {
+                        depth,
+                        name,
+                        process,
+                        isolated_process,
+                        enabled,
+                        exported,
+                        has_intent_filter: false,
+                        permission,
+                        metadata: Vec::new(),
+                    });
+                }
+                "intent-filter"
+                    if current_service
+                        .as_ref()
+                        .is_some_and(|service| service.depth == depth.saturating_sub(1)) =>
+                {
+                    // Android defaults ServiceInfo.exported to true when the
+                    // declaration has an intent filter, and false otherwise.
+                    current_service
+                        .as_mut()
+                        .expect("service depth checked")
+                        .has_intent_filter = true;
                 }
                 "receiver" => {
                     if current_receiver.is_some() {
@@ -929,14 +1022,32 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
                             "initOrder",
                         )?
                         .unwrap_or(0);
+                        let grant_uri_permissions = find_boolean_attribute(
+                            input,
+                            strings,
+                            attrs,
+                            attr_count,
+                            attr_size,
+                            "grantUriPermissions",
+                        )?
+                        .unwrap_or(false);
                         current_provider = Some(ProviderCandidate {
                             depth,
                             name,
                             authorities,
                             init_order,
+                            grant_uri_permissions,
                             metadata: Vec::new(),
                         });
                     }
+                }
+                "grant-uri-permission" if current_provider.is_some() => {
+                    // AOSP treats any declared grant-uri-permission path as an
+                    // authorization for the provider to issue URI grants.
+                    current_provider
+                        .as_mut()
+                        .expect("provider checked")
+                        .grant_uri_permissions = true;
                 }
                 "action" if current.is_some() => {
                     if find_attribute(input, strings, attrs, attr_count, attr_size, "name")?
@@ -999,6 +1110,7 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
                         provider.name,
                         provider.authorities,
                         provider.init_order,
+                        provider.grant_uri_permissions,
                         provider.metadata,
                     ));
                 }
@@ -1037,6 +1149,23 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
         })
         .and_then(|candidate| candidate.screen_orientation);
     let screen_orientation = target_orientation.or(launcher.screen_orientation);
+    let target_sdk = target_sdk.unwrap_or(1);
+    // AOSP PackageParser defaults application hardware acceleration on for
+    // targetSdk >= HONEYCOMB_MR1 (14). An Activity inherits that application
+    // decision unless its own manifest declaration overrides it.
+    let hardware_accelerated = application_hardware_accelerated.unwrap_or(target_sdk >= 14);
+    let target_hardware_accelerated = activities
+        .iter()
+        .find(|candidate| {
+            normalize_activity(&package, &candidate.name)
+                .ok()
+                .as_deref()
+                == Some(activity.as_str())
+        })
+        .and_then(|candidate| candidate.hardware_accelerated);
+    let launch_activity_hardware_accelerated = target_hardware_accelerated
+        .or(launcher.hardware_accelerated)
+        .unwrap_or(hardware_accelerated);
     let activity_themes = activities
         .into_iter()
         .map(|candidate| {
@@ -1073,7 +1202,15 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
             if !service.metadata.is_empty() {
                 service_metadata.push((name.clone(), service.metadata));
             }
-            Ok((name, process))
+            let exported = service.exported.unwrap_or(service.has_intent_filter);
+            Ok((
+                name,
+                process,
+                service.isolated_process,
+                service.permission,
+                exported,
+                service.enabled,
+            ))
         })
         .collect::<Result<Vec<_>>>()?;
     let receivers = receiver_names
@@ -1127,12 +1264,17 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
         receivers,
         service_metadata,
         providers,
+        requested_permissions,
         application_metadata,
         version_code: version_code.unwrap_or(0),
         version_name: version_name.unwrap_or_default(),
         theme,
-        target_sdk: target_sdk.unwrap_or(1),
+        target_sdk,
         debuggable,
+        has_code,
+        hardware_accelerated,
+        supports_rtl: application_supports_rtl,
+        launch_activity_hardware_accelerated,
         label: application_label,
         label_res: application_label_res,
         application_icon_res: application_icon_res.unwrap_or(0),
@@ -1194,21 +1336,24 @@ fn encode_service_metadata(entries: &[(String, Vec<ManifestMetadata>)]) -> Strin
         .join(";")
 }
 
-fn encode_providers(entries: &[(String, String, u32, Vec<ManifestMetadata>)]) -> String {
+fn encode_providers(entries: &[(String, String, u32, bool, Vec<ManifestMetadata>)]) -> String {
     if entries.is_empty() {
         return "none".to_owned();
     }
     entries
         .iter()
-        .map(|(name, authorities, init_order, metadata)| {
-            format!(
-                "{}>{}>{:08x}>{}",
-                hex_bytes(name),
-                hex_bytes(authorities),
-                init_order,
-                encode_application_metadata(metadata)
-            )
-        })
+        .map(
+            |(name, authorities, init_order, grant_uri_permissions, metadata)| {
+                format!(
+                    "{}>{}>{:08x}>{}>{}",
+                    hex_bytes(name),
+                    hex_bytes(authorities),
+                    init_order,
+                    u8::from(*grant_uri_permissions),
+                    encode_application_metadata(metadata)
+                )
+            },
+        )
         .collect::<Vec<_>>()
         .join(";")
 }
@@ -1651,7 +1796,7 @@ fn run() -> Result<()> {
     let (info, dex_source, dex_count, native_libraries, native_root) =
         inspect(Path::new(&path), external_dex.as_deref(), &split_paths)?;
     println!(
-        "apk-app-runtime: package={} application={} activity={} launch_component={} screen_orientation={} descriptor={} activities={} activity_aliases={} services={} receivers={} service_metadata={} providers={} application_metadata={} version_code={} version_name={} theme={:#x} target_sdk={} debuggable={} label={} label_res={:#x} icon={} dex={}-{} native={} native_root={}",
+        "apk-app-runtime: package={} application={} activity={} launch_component={} screen_orientation={} descriptor={} activities={} activity_aliases={} services={} receivers={} service_metadata={} providers={} application_metadata={} permissions={} version_code={} version_name={} theme={:#x} target_sdk={} debuggable={} has_code={} hardware_accelerated={} supports_rtl={} activity_hardware_accelerated={} label={} label_res={:#x} icon={} dex={}-{} manifest_schema=4 native={} native_root={}",
         info.package,
         info.application,
         info.activity,
@@ -1677,7 +1822,20 @@ fn run() -> Result<()> {
         } else {
             info.services
                 .iter()
-                .map(|(name, process)| format!("{name}>{process}"))
+                .map(|(name, process, isolated, permission, exported, enabled)| {
+                    // Permission is hex-encoded to keep the record's `>` and
+                    // comma delimiters unambiguous for arbitrary UTF-8 names.
+                    let encoded_permission = permission
+                        .as_deref()
+                        .map(hex_bytes)
+                        .unwrap_or_else(|| "none".to_owned());
+                    format!(
+                        "{name}>{process}>{}>{encoded_permission}>{}>{}",
+                        u8::from(*isolated),
+                        u8::from(*exported),
+                        u8::from(*enabled),
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(",")
         },
@@ -1695,11 +1853,20 @@ fn run() -> Result<()> {
         encode_service_metadata(&info.service_metadata),
         encode_providers(&info.providers),
         encode_application_metadata(&info.application_metadata),
+        if info.requested_permissions.is_empty() {
+            "none".to_owned()
+        } else {
+            info.requested_permissions.join(",")
+        },
         info.version_code,
         info.version_name,
         info.theme,
         info.target_sdk,
         if info.debuggable { 1 } else { 0 },
+        if info.has_code { 1 } else { 0 },
+        if info.hardware_accelerated { 1 } else { 0 },
+        if info.supports_rtl { 1 } else { 0 },
+        if info.launch_activity_hardware_accelerated { 1 } else { 0 },
         info.label,
         info.label_res,
         info.icon.as_deref().unwrap_or("none"),

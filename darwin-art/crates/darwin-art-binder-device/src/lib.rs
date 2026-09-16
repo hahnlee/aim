@@ -1,0 +1,50 @@
+//! Binder device protocol boundary, not framework service/lifecycle policy.
+//! No device endpoint or transaction execution yet.
+pub mod authority_protocol;
+pub mod command;
+pub mod connection;
+pub mod connection_registry;
+pub mod death_work;
+pub mod device;
+pub mod installed_fds;
+pub mod ioctl;
+#[cfg(target_os = "macos")]
+pub mod mapping;
+pub mod node_ack;
+pub mod node_owner;
+pub mod node_wire;
+pub mod node_work;
+pub mod object_fields;
+pub mod objects;
+#[cfg(target_os = "macos")]
+pub mod owned_transaction;
+pub mod planned_fds;
+pub mod pointer_fixups;
+#[cfg(target_os = "macos")]
+pub mod prepared_transaction;
+#[cfg(target_os = "macos")]
+pub mod receive_arena;
+pub mod reference_command;
+pub mod reference_table;
+#[cfg(target_os = "macos")]
+pub mod remote_objects;
+#[cfg(target_os = "macos")]
+pub mod remote_transaction;
+pub mod routing_authority;
+mod routing_id;
+pub mod scatter_gather;
+pub mod security;
+pub mod session;
+pub mod thread;
+pub mod transaction_fds;
+pub mod transaction_layout;
+pub mod transaction_objects;
+#[cfg(target_os = "macos")]
+pub mod transaction_queue;
+pub mod transaction_request;
+pub mod transaction_snapshot;
+pub mod transaction_wire;
+#[cfg(target_os = "macos")]
+pub mod transfer_image;
+mod work_signal;
+pub mod write_read;

@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -90,6 +91,8 @@ void* DarwinNativeBridgeGetTrampoline2(void* handle,
                                        uint32_t,
                                        JNICallType call_type) {
   ElfLibrary* library = AsElfLibrary(handle);
+  const bool debug_native_bridge =
+      std::getenv("DARWIN_ART_DEBUG_NATIVE_BRIDGE") != nullptr;
   if (library == nullptr || name == nullptr) {
     return nullptr;
   }
@@ -118,12 +121,22 @@ void* DarwinNativeBridgeGetTrampoline2(void* handle,
   std::lock_guard<std::mutex> lock(library->trampoline_mutex);
   if (auto cached = library->exported_jni_trampolines.find(cache_key);
       cached != library->exported_jni_trampolines.end()) {
+    if (debug_native_bridge) {
+      std::fprintf(stderr,
+                   "DARWIN NativeBridge JNI cached name=%s shorty=%s entry=%p\n",
+                   name, shorty, cached->second);
+    }
     return cached->second;
   }
 
   uintptr_t target = 0;
   std::string lookup_error;
   if (!LookupOptionalElfSymbol(library, name, &target, &lookup_error) || target == 0) {
+    if (debug_native_bridge) {
+      std::fprintf(stderr,
+                   "DARWIN NativeBridge JNI missing name=%s shorty=%s error=%s\n",
+                   name, shorty, lookup_error.c_str());
+    }
     return nullptr;
   }
   JavaVM* proxy_vm =
@@ -149,6 +162,11 @@ void* DarwinNativeBridgeGetTrampoline2(void* handle,
   }
   library->trampoline_sets.push_back(trampolines);
   library->exported_jni_trampolines.emplace(cache_key, entry);
+  if (debug_native_bridge) {
+    std::fprintf(stderr,
+                 "DARWIN NativeBridge JNI mapped name=%s shorty=%s target=%p entry=%p\n",
+                 name, shorty, reinterpret_cast<void*>(target), entry);
+  }
   return entry;
 }
 

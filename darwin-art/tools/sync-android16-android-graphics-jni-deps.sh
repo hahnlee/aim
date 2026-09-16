@@ -9,6 +9,8 @@ lock_file="$project_root/upstream/android16-android-graphics-jni.lock"
 [[ -f "$lock_file" ]] || { echo "android-graphics-jni-sync: missing $lock_file" >&2; exit 2; }
 # shellcheck disable=SC1090
 source "$lock_file"
+source "$project_root/upstream/android16-ndk-bitmap.lock"
+source "$project_root/upstream/android16-ndk-image-decoder.lock"
 
 sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
 verify_file() {
@@ -55,6 +57,20 @@ fetch_archive() {
   verify_file "$temporary/$marker" "$marker_hash"
   mv "$temporary" "$destination"
 }
+
+fetch_file "$NDK_BITMAP_PROJECT" "$NDK_BITMAP_REVISION" native/graphics/jni/bitmap.cpp \
+  "$aosp/frameworks/base/native/graphics/jni/bitmap.cpp" "$NDK_BITMAP_SHA256"
+
+for entry in \
+  "imagedecoder.cpp:$NDK_IMAGE_DECODER_SHA256" \
+  "aassetstreamadaptor.cpp:$NDK_ASSET_STREAM_SHA256" \
+  "aassetstreamadaptor.h:$NDK_ASSET_STREAM_HEADER_SHA256" \
+  "libjnigraphics.map.txt:$NDK_JNIGRAPHICS_MAP_SHA256" \
+  "Android.bp:$NDK_JNIGRAPHICS_ANDROID_BP_SHA256"; do
+  relative="native/graphics/jni/${entry%%:*}"
+  fetch_file "$NDK_IMAGE_DECODER_PROJECT" "$NDK_IMAGE_DECODER_REVISION" "$relative" \
+    "$aosp/frameworks/base/$relative" "${entry#*:}"
+done
 
 libjpeg="$aosp/external/libjpeg-turbo"
 fetch_file "$LIBJPEG_TURBO_PROJECT" "$LIBJPEG_TURBO_REVISION" Android.bp \

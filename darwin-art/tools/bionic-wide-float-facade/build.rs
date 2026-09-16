@@ -68,6 +68,7 @@ fn main() {
     let icu_root = root.join("_aosp/external/icu-graphics");
     let provider = out.join("provider.o");
     let allocator = out.join("allocator.o");
+    let allocator_options = out.join("allocator_options.o");
     compile(
         "clang++",
         "-std=c++20",
@@ -92,6 +93,14 @@ fn main() {
         &sdk,
         &[root.join("tools/bionic-libc-allocator-facade/include")],
     );
+    compile(
+        "clang",
+        "-std=c17",
+        "../bionic-libc-allocator-facade/src/allocator_options.c",
+        &allocator_options,
+        &sdk,
+        &[root.join("tools/bionic-libc-allocator-facade/include")],
+    );
     let archive = out.join("libdarwin_art_bionic_wide_float.a");
     assert!(
         Command::new("ar")
@@ -108,6 +117,7 @@ fn main() {
             .arg("rcs")
             .arg(&allocator_archive)
             .arg(&allocator)
+            .arg(&allocator_options)
             .status()
             .expect("archive allocator test dependency")
             .success()
@@ -157,6 +167,7 @@ fn main() {
         "src/provider.cc",
         "include/darwin_art_bionic_wide_float.h",
         "../bionic-libc-allocator-facade/src/allocator.c",
+        "../bionic-libc-allocator-facade/src/allocator_options.c",
         "../bionic-libc-allocator-facade/include/darwin_art_bionic_allocator.h",
         "../bionic-errno-tls/include/darwin_art_bionic_errno.h",
     ] {

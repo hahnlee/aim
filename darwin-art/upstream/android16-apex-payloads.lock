@@ -1,0 +1,8 @@
+# Module identity, SHA256, existing archive relative to repository.
+# Payload preparation only; this is not a declaration of active runtime APEXes.
+com.android.art 45b80195f78c982d8974eabb89fe014246871b2bf5e1f5a5ac39c087518d789e _build/android16-ps16k-r07/extracted/com.google.android.art.apex
+com.android.conscrypt f67fa3784d2fa076a8e6045541ef53dd388d2ef4c47d7c96fcd6ced4c561de0e _build/android16-ps16k-r07/extracted/com.google.android.conscrypt.apex
+com.android.i18n d102f218f387f7e1740df71bbb155b81adb47c95062e0fb6d92098c6e64fcd5c _build/bootclasspath/api36-i18n-extract/com.android.i18n.apex
+com.android.tzdata e57d93e720923540669299578fd4905da4e1608e79970ea05284abe736690d02 _build/timezone-runtime-extract/com.google.android.tzdata6.apex
+com.android.runtime 6993b886c67f428a0032a4dba47c3a4f362c2ce7c7f0030ac96ee8c34408eb5d SYSTEM_IMAGE
+com.android.tethering 75c3536f84dbd28da104da513f6d2d9c37df88599ab15e882272323e5005d191 SYSTEM_IMAGE_CAPEX:/system/apex/com.google.android.tethering.capex

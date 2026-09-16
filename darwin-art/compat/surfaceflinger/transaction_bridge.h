@@ -22,12 +22,18 @@ typedef struct DarwinArtSurfaceFlingerLayerUpdate {
   uint32_t transform;
   float x;
   float y;
+  float scale_x;
+  float scale_y;
   int32_t z;
   float alpha;
   int32_t destination_left;
   int32_t destination_top;
   int32_t destination_right;
   int32_t destination_bottom;
+  int32_t crop_left;
+  int32_t crop_top;
+  int32_t crop_right;
+  int32_t crop_bottom;
 } DarwinArtSurfaceFlingerLayerUpdate;
 
 typedef enum DarwinArtSurfaceFlingerLayerChange {

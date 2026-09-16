@@ -196,6 +196,36 @@ mod tests {
     }
 
     #[test]
+    fn surfaceflinger_edge_tracks_commit_wait_boundary() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let output = root.join(format!(
+            "_build/commit-wait-graph-{}.ninja",
+            std::process::id()
+        ));
+        emit_graph(&output).expect("emit native graph");
+        let graph = fs::read_to_string(&output).unwrap();
+        let edge = graph
+            .lines()
+            .find(|line| line.contains(": surfaceflinger_core "))
+            .unwrap();
+        for input in [
+            "tools/lib/surfaceflinger-compile-flags.sh",
+            "patches/frameworks-native/0002-darwin-surface-commit-wait.patch",
+            "patches/frameworks-native/0003-buffer-release-message-length.patch",
+            "patches/frameworks-native/0004-darwin-release-record-transport.patch",
+            "compat/surfaceflinger/release_record_transport.cc",
+            "compat/surfaceflinger/release_record_transport.h",
+            "tools/test-release-record-transport.sh",
+            "tools/tests/release-record-transport-test.cc",
+            "compat/surfaceflinger/commit_signal.h",
+            "tools/tests/parcel-native-handle-test.cc",
+        ] {
+            assert!(edge.contains(input), "missing SF producer input: {input}");
+        }
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
     fn interpreter_archive_edge_tracks_patch_or_orchestration_changes() {
         let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let output = repository_root.join(format!(
@@ -211,6 +241,22 @@ mod tests {
                 line.starts_with(&format!("build {}: interpreter_core", archive.display()))
             })
             .expect("interpreter archive producer edge");
+        let shadow_marker = repository_root
+            .join("_build/runtime-common/patched-source/.darwin-art-shadow-identity")
+            .to_string_lossy()
+            .into_owned();
+        let shadow_edge = graph
+            .lines()
+            .find(|line| line.starts_with(&format!("build {shadow_marker}: runtime_common_shadow")))
+            .expect("shared ART shadow producer edge");
+        assert!(
+            shadow_edge.contains("patches/art/0027-darwin-string-abi-overlay.patch"),
+            "shadow producer must own the ABI header patch set"
+        );
+        assert!(
+            archive_edge.contains(&shadow_marker),
+            "interpreter must wait for complete shadow publication"
+        );
         assert!(
             archive_edge.contains("patches/art/0074-darwin-interpreter-reference-copy.patch"),
             "interpreter reference-copy patch must invalidate its archive"
@@ -234,6 +280,19 @@ mod tests {
             .lines()
             .find(|line| line.contains(": jit_compiler "))
             .expect("JIT compiler archive producer edge");
+        assert!(
+            jit_edge.contains(&shadow_marker),
+            "JIT must wait for the narrow shadow producer"
+        );
+        assert!(
+            !jit_edge.contains(
+                repository_root
+                    .join(GRAPHICS_BOOTSTRAP_ARCHIVE)
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            "JIT must not serialize behind the full graphics archive"
+        );
         let compiler =
             fs::read_to_string(repository_root.join("crates/art-bootstrap/src/runtime_art/jit.rs"))
                 .expect("read compiler patch registration");
@@ -247,6 +306,66 @@ mod tests {
                 jit_edge.contains(patch),
                 "JIT archive edge is missing {patch}"
             );
+        }
+        fs::remove_file(output).expect("remove emitted graph");
+    }
+
+    #[test]
+    fn every_bootstrap_cli_recipe_has_a_direct_binary_prerequisite() {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let output = repository_root.join(format!(
+            "_build/darwin-art-cli-prerequisite-graph-{}.ninja",
+            std::process::id()
+        ));
+        emit_graph(&output).expect("emit native graph");
+        let graph = fs::read_to_string(&output).expect("read emitted graph");
+        let bootstrap_cli_path = repository_root.join("target/debug/art-bootstrap");
+        let bootstrap_cli = ninja_path(&bootstrap_cli_path);
+        let bootstrap_cli_raw = bootstrap_cli_path.to_string_lossy();
+
+        // Keep this scanner deliberately small: Ninja permits multiple outputs
+        // before the colon, so identify the rule from the post-colon fields
+        // rather than assuming a single output token.
+        let mut cli_rules = Vec::new();
+        let mut current_rule = None;
+        for line in graph.lines() {
+            if let Some(rule) = line.strip_prefix("rule ") {
+                current_rule = Some(rule.trim());
+            } else if line.starts_with("  command = ") && line.contains(bootstrap_cli_raw.as_ref())
+            {
+                if let Some(rule) = current_rule {
+                    cli_rules.push(rule.to_owned());
+                }
+            }
+        }
+        assert!(
+            !cli_rules.is_empty(),
+            "emitted graph has no bootstrap CLI rules"
+        );
+
+        for rule in cli_rules {
+            let edges: Vec<_> = graph
+                .lines()
+                .filter_map(|line| {
+                    let (_, fields) = line.strip_prefix("build ")?.split_once(": ")?;
+                    let mut fields = fields.split_whitespace();
+                    (fields.next() == Some(rule.as_str())).then_some(
+                        fields
+                            .take_while(|field| *field != "||")
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect();
+            assert!(
+                !edges.is_empty(),
+                "missing producer edge for bootstrap CLI rule {rule}"
+            );
+            for edge in edges {
+                assert!(
+                    edge.iter().any(|input| *input == bootstrap_cli.as_str()),
+                    "bootstrap CLI rule {rule} lacks ordinary prerequisite {bootstrap_cli}"
+                );
+            }
         }
         fs::remove_file(output).expect("remove emitted graph");
     }

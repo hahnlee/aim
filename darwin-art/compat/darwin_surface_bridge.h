@@ -37,9 +37,14 @@ typedef struct DarwinArtSurfaceCreateInfo {
   uint32_t height;
   // UTF-8, copied during creation. Null selects a default title.
   const char* title;
-  // When false, the persistent window is created but not ordered onscreen.
-  // Headless build and ABI tests should set this to false.
+  // When false, no persistent window is created. A true request is still
+  // sanitized at the AppKit boundary for Android system/service processes,
+  // which may need a headless Metal target but never own desktop UI.
   bool visible;
+  // Treat width/height as Android logical display pixels and allocate the
+  // scanout backing at the active macOS screen scale. Offscreen and legacy
+  // callers leave this false and continue to request physical pixels.
+  bool scale_to_display;
 } DarwinArtSurfaceCreateInfo;
 
 typedef struct DarwinArtSurfaceProducerMapping {
@@ -134,9 +139,24 @@ bool darwin_art_surface_get_size(
     uint32_t* width,
     uint32_t* height);
 
+bool darwin_art_surface_get_logical_size(
+    DarwinArtSurface* surface,
+    uint32_t* width,
+    uint32_t* height);
+
 DarwinArtSurfaceResult darwin_art_surface_set_title(
     DarwinArtSurface* surface,
     const char* title);
+
+// Publish framework-resolved task metadata without exposing or transferring
+// ownership of the application process's active desktop display target.
+DarwinArtSurfaceResult darwin_art_surface_set_active_title(const char* title);
+
+// UTF-16 variant for Android CharSequence metadata. This preserves embedded
+// non-ASCII and supplementary characters without JNI modified-UTF-8 loss.
+DarwinArtSurfaceResult darwin_art_surface_set_active_title_utf16(
+    const uint16_t* title,
+    size_t length);
 
 // Presents the native macOS document picker on the AppKit main thread.
 // The returned UTF-8 filesystem path is allocated with malloc and must be

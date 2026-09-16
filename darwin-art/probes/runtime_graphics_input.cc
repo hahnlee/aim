@@ -622,6 +622,17 @@ void DebugViewTextState(JNIEnv* env, jobject root) {
       std::getenv("DARWIN_ART_DEBUG_VIEW_TEXT") == nullptr) {
     return;
   }
+  static int remaining_snapshots = 160;
+  static auto last_snapshot = std::chrono::steady_clock::time_point{};
+  const auto now = std::chrono::steady_clock::now();
+  if (remaining_snapshots <= 0 ||
+      (last_snapshot.time_since_epoch().count() != 0 &&
+       now - last_snapshot < std::chrono::milliseconds(250))) {
+    return;
+  }
+  --remaining_snapshots;
+  last_snapshot = now;
+  std::cerr << "ART Android View text snapshot\n";
   jclass view_class = env->FindClass("android/view/View");
   jclass group_class = env->FindClass("android/view/ViewGroup");
   jclass text_class = env->FindClass("android/widget/TextView");
@@ -641,6 +652,37 @@ void DebugViewTextState(JNIEnv* env, jobject root) {
   jmethodID get_bottom = view_class == nullptr
                              ? nullptr
                              : env->GetMethodID(view_class, "getBottom", "()I");
+  jmethodID get_visibility =
+      view_class == nullptr
+          ? nullptr
+          : env->GetMethodID(view_class, "getVisibility", "()I");
+  jmethodID get_alpha = view_class == nullptr
+                            ? nullptr
+                            : env->GetMethodID(view_class, "getAlpha", "()F");
+  jmethodID get_scale_x =
+      view_class == nullptr
+          ? nullptr
+          : env->GetMethodID(view_class, "getScaleX", "()F");
+  jmethodID get_scale_y =
+      view_class == nullptr
+          ? nullptr
+          : env->GetMethodID(view_class, "getScaleY", "()F");
+  jmethodID get_translation_x =
+      view_class == nullptr
+          ? nullptr
+          : env->GetMethodID(view_class, "getTranslationX", "()F");
+  jmethodID get_translation_y =
+      view_class == nullptr
+          ? nullptr
+          : env->GetMethodID(view_class, "getTranslationY", "()F");
+  jmethodID get_layout_direction =
+      view_class == nullptr
+          ? nullptr
+          : env->GetMethodID(view_class, "getLayoutDirection", "()I");
+  jmethodID get_text_alignment =
+      view_class == nullptr
+          ? nullptr
+          : env->GetMethodID(view_class, "getTextAlignment", "()I");
   jmethodID get_child_count =
       group_class == nullptr
           ? nullptr
@@ -653,6 +695,17 @@ void DebugViewTextState(JNIEnv* env, jobject root) {
                            ? nullptr
                            : env->GetMethodID(text_class, "getText",
                                               "()Ljava/lang/CharSequence;");
+  jmethodID get_text_size =
+      text_class == nullptr
+          ? nullptr
+          : env->GetMethodID(text_class, "getTextSize", "()F");
+  jmethodID get_text_color =
+      text_class == nullptr
+          ? nullptr
+          : env->GetMethodID(text_class, "getCurrentTextColor", "()I");
+  jmethodID get_gravity = text_class == nullptr
+                              ? nullptr
+                              : env->GetMethodID(text_class, "getGravity", "()I");
   jmethodID to_string =
       sequence_class == nullptr
           ? nullptr
@@ -661,9 +714,16 @@ void DebugViewTextState(JNIEnv* env, jobject root) {
                      text_class != nullptr && sequence_class != nullptr &&
                      get_id != nullptr && get_left != nullptr &&
                      get_top != nullptr && get_right != nullptr &&
-                     get_bottom != nullptr && get_child_count != nullptr &&
+                     get_bottom != nullptr && get_visibility != nullptr &&
+                     get_alpha != nullptr && get_scale_x != nullptr &&
+                     get_scale_y != nullptr && get_translation_x != nullptr &&
+                     get_translation_y != nullptr &&
+                     get_layout_direction != nullptr &&
+                     get_text_alignment != nullptr && get_child_count != nullptr &&
                      get_child_at != nullptr && get_text != nullptr &&
-                     to_string != nullptr && !env->ExceptionCheck();
+                     get_text_size != nullptr && get_text_color != nullptr &&
+                     get_gravity != nullptr && to_string != nullptr &&
+                     !env->ExceptionCheck();
   std::vector<jobject> pending;
   if (ready) pending.push_back(env->NewLocalRef(root));
   size_t visited = 0;
@@ -684,7 +744,24 @@ void DebugViewTextState(JNIEnv* env, jobject root) {
                 << " bounds=" << env->CallIntMethod(view, get_left) << ","
                 << env->CallIntMethod(view, get_top) << "-"
                 << env->CallIntMethod(view, get_right) << ","
-                << env->CallIntMethod(view, get_bottom) << " text="
+                << env->CallIntMethod(view, get_bottom)
+                << " visibility=" << env->CallIntMethod(view, get_visibility)
+                << " alpha=" << env->CallFloatMethod(view, get_alpha)
+                << " scale=" << env->CallFloatMethod(view, get_scale_x) << ","
+                << env->CallFloatMethod(view, get_scale_y)
+                << " translation="
+                << env->CallFloatMethod(view, get_translation_x) << ","
+                << env->CallFloatMethod(view, get_translation_y)
+                << " layout_direction="
+                << env->CallIntMethod(view, get_layout_direction)
+                << " text_alignment="
+                << env->CallIntMethod(view, get_text_alignment)
+                << " gravity=0x" << std::hex
+                << env->CallIntMethod(view, get_gravity) << std::dec
+                << " text_size=" << env->CallFloatMethod(view, get_text_size)
+                << " color=0x" << std::hex
+                << env->CallIntMethod(view, get_text_color) << std::dec
+                << " text="
                 << (utf == nullptr ? "(null)" : utf) << "\n";
       if (utf != nullptr) env->ReleaseStringUTFChars(text, utf);
       if (text != nullptr) env->DeleteLocalRef(text);
@@ -2069,6 +2146,10 @@ int32_t pump_main_looper(GraphicsState* state) {
     }
     return 75;
   }
+  // Physical AppKit input is consumed by ViewRoot's real InputChannel callback,
+  // not dispatch_pointer_internal(). Sample after the owner Looper drain so
+  // opt-in diagnostics observe that Android-owned path without changing it.
+  DebugViewTextState(env, state->interactive_root);
   if (!RefreshFocusedWindowRoot(state, env)) {
     if (env->ExceptionCheck()) env->ExceptionClear();
   }
@@ -2092,6 +2173,10 @@ int32_t pump_main_looper(GraphicsState* state) {
               << CurrentThreadId() << " status=0\n";
   }
   return 0;
+}
+
+void debug_view_text_state(JNIEnv* env, jobject root) {
+  DebugViewTextState(env, root);
 }
 
 int32_t pump_frame(GraphicsState* state, jlong frame_time_nanos) {

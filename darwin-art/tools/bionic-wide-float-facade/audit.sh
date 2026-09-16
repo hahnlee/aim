@@ -50,6 +50,7 @@ icu_data="$icu_build/runtime/i18n/etc/icu/$ICU_DATA_FILE"
 check "$master" "$LIBC_IMPORT_MANIFEST_SHA256"
 check "$float_root/sources.lock" "$FLOAT_FACADE_LOCK_SHA256"
 check "$allocator_root/src/allocator.c" "$ALLOCATOR_SOURCE_SHA256"
+check "$allocator_root/src/allocator_options.c" "$ALLOCATOR_OPTIONS_SOURCE_SHA256"
 check "$allocator_root/include/darwin_art_bionic_allocator.h" "$ALLOCATOR_HEADER_SHA256"
 check "$icu_lock" "$ICU_FOUNDATION_LOCK_SHA256"
 for archive in "$icu_common" "$icu_stubdata" "$icu_init"; do
@@ -169,6 +170,8 @@ provider_includes=(-I"$dir/include" -I"$float_root/include" -I"$allocator_root/i
   -c "$dir/src/provider.cc" -o "$tmp/provider.o"
 "$host_cc" "${host_flags[@]}" -std=c17 -I"$allocator_root/include" \
   -c "$allocator_root/src/allocator.c" -o "$tmp/allocator.o"
+"$host_cc" "${host_flags[@]}" -std=c17 -I"$allocator_root/include" \
+  -c "$allocator_root/src/allocator_options.c" -o "$tmp/allocator_options.o"
 file "$tmp/provider.o" | grep -F 'Mach-O 64-bit object arm64' >/dev/null ||
   fail 'provider is not Darwin arm64'
 definitions="$(nm -gU "$tmp/provider.o")"
@@ -234,10 +237,13 @@ san=(-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer)
   "${provider_includes[@]}" -c "$dir/src/provider.cc" -o "$tmp/provider-san.o"
 "$host_cc" "${host_flags[@]}" "${san[@]}" -std=c17 -I"$allocator_root/include" \
   -c "$allocator_root/src/allocator.c" -o "$tmp/allocator-san.o"
+"$host_cc" "${host_flags[@]}" "${san[@]}" -std=c17 -I"$allocator_root/include" \
+  -c "$allocator_root/src/allocator_options.c" -o "$tmp/allocator-options-san.o"
 "$host_cxx" "${host_flags[@]}" "${san[@]}" -std=c++20 \
   -I"$dir/include" -I"$icu_root/android_icu4c/include" \
   -I"$icu_root/icu4c/source/common" "$dir/probes/differential.cc" \
   "$tmp/provider-san.o" "$tmp/allocator-san.o" \
+  "$tmp/allocator-options-san.o" \
   -Wl,-force_load,"$float_archive" -Wl,-force_load,"$icu_init" \
   "$icu_common" "$icu_stubdata" -o "$tmp/differential"
 

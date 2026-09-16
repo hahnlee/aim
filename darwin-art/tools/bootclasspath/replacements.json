@@ -1,0 +1,5 @@
+{
+  "/apex/com.android.art/javalib/core-oj.jar": "_build/android16-core-oj-compat/core-oj-compat.jar",
+  "/system/framework/framework.jar": "_build/android16-framework-compat/framework-compat.jar",
+  "/apex/com.android.i18n/javalib/core-icu4j.jar": "_build/bootclasspath/core-icu4j-api36.jar"
+}

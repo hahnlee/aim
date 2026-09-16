@@ -13,6 +13,7 @@ struct Ownership {
   const char *symbol;
   const char *version;
   DarwinArtBionicProviderId owner;
+  bool default_version;
 };
 
 struct Unsupported {
@@ -126,12 +127,7 @@ int CompareKey(const Ownership &entry, const char *soname, const char *symbol) {
 }
 
 bool VersionMatches(const Ownership &entry, const char *version) {
-  /* Some NDK-built compatibility DSOs carry mallopt without a version tag,
-   * while the Android stub advertises it as LIBC. Keep this reviewed route
-   * tolerant of both encodings. Other aliases are explicit manifest rows. */
-  if (std::strcmp(entry.symbol, "mallopt") == 0) return true;
-  if (entry.version[0] == '\0')
-    return version == nullptr || version[0] == '\0';
+  if (version == nullptr || version[0] == '\0') return entry.default_version;
   return version != nullptr && std::strcmp(entry.version, version) == 0;
 }
 
@@ -278,7 +274,8 @@ darwin_art_bionic_namespace_resolve(DarwinArtBionicNamespace *instance,
   }
 
   const uintptr_t address =
-      binding.resolve(binding.context, soname, symbol, version);
+      binding.resolve(binding.context, soname, symbol,
+                      ownership->version[0] ? ownership->version : nullptr);
   {
     std::lock_guard<std::mutex> lock(instance->mutex);
     --instance->in_flight;
@@ -290,6 +287,15 @@ darwin_art_bionic_namespace_resolve(DarwinArtBionicNamespace *instance,
                   ownership->owner);
   }
   return Result(DARWIN_ART_BIONIC_NAMESPACE_OK, ownership->owner, address);
+}
+
+extern "C" DarwinArtBionicNamespaceStatus darwin_art_bionic_namespace_image_status(
+    DarwinArtBionicNamespace* instance, const char* soname) {
+  if (!instance || !soname || !*soname) return DARWIN_ART_BIONIC_NAMESPACE_INVALID_ARGUMENT;
+  std::lock_guard<std::mutex> lock(instance->mutex);
+  if (instance->state != State::kSealed) return DARWIN_ART_BIONIC_NAMESPACE_NOT_SEALED;
+  return KnownSoname(soname) ? DARWIN_ART_BIONIC_NAMESPACE_OK
+                           : DARWIN_ART_BIONIC_NAMESPACE_UNKNOWN_SONAME;
 }
 
 extern "C" DarwinArtBionicNamespaceStatus

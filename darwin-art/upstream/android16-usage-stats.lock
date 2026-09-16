@@ -1,0 +1,8 @@
+# Android 16 framework usage-stats contract used by the desktop endpoint.
+FRAMEWORK_USAGE_STATS_PATH=_prebuilt/android-16/bootclasspath/framework.jar
+FRAMEWORK_USAGE_STATS_SHA256=ae3d578e3c4cd28ad822d0bc7b35fa308800f440472f54f2aff8aa5c1e22cd91
+IUSAGE_STATS_MANAGER_DESCRIPTOR=android.app.usage.IUsageStatsManager
+GET_APP_STANDBY_BUCKET_SIGNATURE='int getAppStandbyBucket(java.lang.String,java.lang.String,int)'
+GET_APP_STANDBY_BUCKET_TRANSACTION=14
+USAGE_STATS_SERVICE_NAME=usagestats
+STANDBY_BUCKET_ACTIVE=10

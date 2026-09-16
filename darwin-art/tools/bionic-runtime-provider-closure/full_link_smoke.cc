@@ -16,6 +16,19 @@
 #include <cstring>
 
 extern "C" uintptr_t darwin_art_bionic_rust_provider_closure_anchor(void);
+extern "C" int darwin_art_ftw_traversal_smoke(void);
+extern "C" int darwin_art_unix_connect_smoke(void);
+extern "C" int darwin_art_property_client_smoke(void);
+extern "C" int darwin_art_property_iteration_smoke(DarwinArtBionicNamespace*);
+extern "C" int darwin_art_signed_numeric_smoke(DarwinArtBionicNamespace*);
+extern "C" int darwin_art_mkdirat_smoke(DarwinArtBionicNamespace*);
+extern "C" int darwin_art_configured_snapshot_smoke(void);
+extern "C" int darwin_art_credentials_snapshot_smoke(void);
+extern "C" int darwin_art_fortify_stream_smoke(DarwinArtBionicNamespace*);
+extern "C" uintptr_t darwin_art_liblog_provider_resolve(const char*, const char*);
+extern "C" int darwin_art_test_log_buf_print(uintptr_t, const char*, const char*);
+extern "C" int darwin_art_log_assert_smoke();
+extern "C" int darwin_art_fdsan_smoke();
 extern "C" int darwin_art_bionic_syslog_activate(const char *guest_program_tag);
 extern "C" void darwin_art_bionic_syslog(int priority, const char *format, ...);
 extern "C" int darwin_art_bionic_stdio_process_install(void);
@@ -53,6 +66,7 @@ struct Expected {
   const char *symbol;
   const char *version;
   DarwinArtBionicProviderId owner;
+  bool default_version;
 };
 
 constexpr Expected kExpected[] = {
@@ -97,6 +111,11 @@ int main() {
       darwin_art_bionic_vm_process_install() != 0) {
     return 20;
   }
+  if (darwin_art_ftw_traversal_smoke() != 0) return 21;
+  if (darwin_art_unix_connect_smoke() != 0) return 23;
+  if (darwin_art_property_client_smoke() != 0) return 24;
+  if (darwin_art_configured_snapshot_smoke() != 0) return 27;
+  if (darwin_art_credentials_snapshot_smoke() != 0) return 31;
   const int guest_socket = darwin_art_bionic_socket_broker_socket(2, 2, 0);
   int reuse = 1;
   uint32_t reuse_length = sizeof(reuse);
@@ -145,6 +164,15 @@ int main() {
   }
   guest_program_tag[0] = 'X';
   __android_log_set_logger(Capture);
+  if (darwin_art_log_assert_smoke() != 0) return 23;
+  const auto buffered_log = darwin_art_liblog_provider_resolve(
+      "__android_log_buf_print", "LIBLOG");
+  if (buffered_log == 0 ||
+      darwin_art_test_log_buf_print(buffered_log, "BufABI",
+                                   "%d %d %d %d %d %.1f") != 1 ||
+      captured_priority != ANDROID_LOG_INFO ||
+      std::strcmp(captured_tag, "BufABI") != 0 ||
+      std::strcmp(captured_message, "1 2 3 4 5 1.5") != 0) return 22;
   darwin_art_bionic_syslog(6, "owned-copy");
   __android_log_set_logger(__android_log_stderr_logger);
   if (captured_priority != ANDROID_LOG_INFO ||
@@ -180,6 +208,10 @@ int main() {
       return 14;
     }
   }
+  if (darwin_art_fortify_stream_smoke(instance) != 0) return 25;
+  if (darwin_art_property_iteration_smoke(instance) != 0) return 28;
+  if (darwin_art_signed_numeric_smoke(instance) != 0) return 29;
+  if (darwin_art_mkdirat_smoke(instance) != 0) return 30;
   const auto open_route =
       darwin_art_bionic_namespace_resolve(instance, "libc.so", "open", "LIBC");
   const auto close_route =
@@ -215,6 +247,7 @@ int main() {
     return 21;
   }
   int32_t pipe_fds[2] = {-1, -1};
+  if (darwin_art_fdsan_smoke() != 0) return 26;
   DarwinArtBionicPollFd readable{-1, POLLIN, 0};
   const char sent = 'p';
   char received = 0;
@@ -251,7 +284,8 @@ int main() {
   close(root_fd);
   rmdir(root_path);
   std::fprintf(stderr, "bionic-runtime-provider-closure: PASS bind_builtins=36 "
-                       "routes=733 actual-resolvers=yes fd=fs+pipe-poll "
-                       "wide-stdio=central-lease syslog-tag=owned-copy\n");
+                       "routes=%zu actual-resolvers=yes fd=fs+pipe-poll "
+                       "wide-stdio=central-lease syslog-tag=owned-copy\n",
+                       sizeof(kExpected) / sizeof(kExpected[0]));
   return 0;
 }

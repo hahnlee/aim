@@ -91,8 +91,10 @@ As with virtual fds, another provider must not invent or accept these tokens.
   explicitly; unknown values become Android `DT_UNKNOWN`.
   `fdopendir` atomically consumes a facade-owned virtual directory descriptor
   into the stream token. A failed conversion leaves that same virtual descriptor
-  open; after success, direct descriptor operations return `EBADF` and
-  `closedir` owns the final host close.
+  open. After success, `dirfd` returns the same guest descriptor, which remains
+  usable for metadata operations until `closedir` invalidates it. The native
+  stream uses a duplicate sharing the same open file description; neither host
+  descriptor nor host DIR pointer escapes to the guest.
 - Android arm64 `struct stat` is materialized as the pinned 128-byte Bionic
   layout; it never exposes a Darwin `struct stat`.
 - `isatty` recognizes facade-owned regular-file/directory descriptors and

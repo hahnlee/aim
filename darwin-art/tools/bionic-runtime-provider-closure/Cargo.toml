@@ -7,12 +7,18 @@ publish = false
 [lib]
 crate-type = ["staticlib"]
 
+[features]
+# Retained for the existing deployed runtime during the Android-owned migration.
+default = ["legacy-binder-ndk"]
+legacy-binder-ndk = ["dep:android-binder-ndk-provider"]
+
 [dependencies]
+bionic-fdsan-owner = { path = "../bionic-fdsan-owner" }
 bionic-fs-facade = { path = "../bionic-fs-facade" }
 bionic-process-state-facade = { path = "../bionic-process-state-facade" }
 bionic-stdio-facade = { path = "../bionic-stdio-facade" }
 bionic-dso-lifecycle-facade = { path = "../bionic-dso-lifecycle-facade" }
 bionic-vm-facade = { path = "../bionic-vm-facade" }
 android-dso-namespace = { path = "../android-dso-namespace" }
-android-binder-ndk-provider = { path = "../android-binder-ndk-provider" }
+android-binder-ndk-provider = { path = "../android-binder-ndk-provider", optional = true }
 android-aaudio-provider = { path = "../android-aaudio-provider" }

@@ -1,6 +1,7 @@
 #include "darwin_angle_egl.h"
 #include "darwin_android_platform.h"
 #include "darwin_surface_bridge.h"
+#include "window/locked_surface.h"
 
 #include <android/hardware_buffer.h>
 #include <android/surface_control.h>
@@ -142,6 +143,9 @@ std::unordered_map<jlong, DarwinAndroidNativeWindow*>
 struct ImportedSurfaceIdentity {
   uint32_t owner_process_id = 0;
   uint32_t layer_id = 0;
+  int32_t width = 0;
+  int32_t height = 0;
+  int32_t format = 1;
 };
 std::unordered_map<jlong, ImportedSurfaceIdentity>
     g_imported_surface_identities;
@@ -537,8 +541,22 @@ int NativeWindowQueue(AndroidNativeWindowAbi* abi, void* native_buffer,
     transaction_observer = window->transaction_observer;
     if (queue_observer == nullptr || queue_observer->callback == nullptr) {
       if (window->surface_control == nullptr) {
+        // A Surface transported to another Android process still queues into
+        // the original BufferQueue layer.  The producer process owns only a
+        // local proxy; creating a new process-owned root here makes the layer
+        // disappear when (for example) Chromium restarts its GPU process.
+        // Reconstruct the imported SurfaceControl identity so a replacement
+        // producer can attach to the SurfaceView-owned layer exactly as it
+        // would through IGraphicBufferProducer on Android.
         window->surface_control = reinterpret_cast<ASurfaceControl*>(
-            darwin_art_android_surface_control_create_root("HWUI ViewRoot"));
+            window->imported_surface_owner_process_id != 0 &&
+                    window->imported_surface_layer_id != 0
+                ? darwin_art_android_surface_control_create_imported(
+                      window->imported_surface_owner_process_id,
+                      window->imported_surface_layer_id,
+                      "Imported BufferQueue producer")
+                : darwin_art_android_surface_control_create_root(
+                      "HWUI ViewRoot"));
       }
       control = window->surface_control;
       if (control != nullptr) ASurfaceControl_acquire(control);
@@ -655,6 +673,19 @@ int NativeWindowQuery(const AndroidNativeWindowAbi* abi, int what, int* value) {
 int NativeWindowPerform(AndroidNativeWindowAbi* abi, int operation, ...) {
   if (abi == nullptr) return -EINVAL;
   auto* window = WindowFromAbi(abi);
+  if (operation == 24) {  // NATIVE_WINDOW_GET_NEXT_FRAME_ID
+    va_list arguments;
+    va_start(arguments, operation);
+    auto* frame_id = va_arg(arguments, uint64_t*);
+    va_end(arguments);
+    if (frame_id == nullptr) return -EINVAL;
+    std::lock_guard<std::mutex> lock(window->mutex);
+    *frame_id = window->queued_frame_number + 1;
+    return 0;
+  }
+  // Frame-rate policy has not yet been connected to IGraphicBufferProducer.
+  // Propagate that missing contract instead of silently accepting the request.
+  if (operation == 40) return -ENOSYS;
   if (operation == 19) {  // NATIVE_WINDOW_SET_BUFFERS_DATASPACE
     va_list arguments;
     va_start(arguments, operation);
@@ -807,20 +838,16 @@ extern "C" void* darwin_art_android_ANativeWindow_fromSurface(void* opaque_env,
                                                                 void* surface) {
   auto* env = static_cast<JNIEnv*>(opaque_env);
   const jobject java_surface = static_cast<jobject>(surface);
-  jlong identity = 0;
-  jclass surface_class =
-      env == nullptr || java_surface == nullptr
-          ? nullptr
-          : env->GetObjectClass(java_surface);
-  jfieldID native_object =
-      surface_class == nullptr
-          ? nullptr
-          : env->GetFieldID(surface_class, "mNativeObject", "J");
-  if (native_object != nullptr && !env->ExceptionCheck()) {
-    identity = env->GetLongField(java_surface, native_object);
+  darwin_art::window::LockedSurface surface_owner(env, java_surface);
+  const jlong identity = surface_owner.identity();
+  if (identity == 0) {
+    if (DebugAndroidNativeWindow()) {
+      std::cerr << "ART Android ANativeWindow: fromSurface rejected pid="
+                << getpid() << " javaSurface=" << surface
+                << " identity=0\n";
+    }
+    return nullptr;
   }
-  if (surface_class != nullptr) env->DeleteLocalRef(surface_class);
-  if (env != nullptr && env->ExceptionCheck()) env->ExceptionClear();
   if (identity != 0) {
     std::lock_guard<std::mutex> lock(g_android_native_window_mutex);
     auto found = g_android_native_windows_by_surface.find(identity);
@@ -842,6 +869,11 @@ extern "C" void* darwin_art_android_ANativeWindow_fromSurface(void* opaque_env,
     if (imported != g_imported_surface_identities.end()) {
       window->imported_surface_owner_process_id = imported->second.owner_process_id;
       window->imported_surface_layer_id = imported->second.layer_id;
+      if (imported->second.width > 0 && imported->second.height > 0) {
+        window->width.store(imported->second.width, std::memory_order_relaxed);
+        window->height.store(imported->second.height, std::memory_order_relaxed);
+      }
+      window->format.store(imported->second.format, std::memory_order_relaxed);
     }
     auto [found, inserted] =
         g_android_native_windows_by_surface.emplace(identity, window);
@@ -857,6 +889,9 @@ extern "C" void* darwin_art_android_ANativeWindow_fromSurface(void* opaque_env,
               << identity << std::dec << " window=" << window
               << " size=" << window->width.load(std::memory_order_relaxed)
               << "x" << window->height.load(std::memory_order_relaxed)
+              << " format=" << window->format.load(std::memory_order_relaxed)
+              << " imported=" << window->imported_surface_owner_process_id
+              << ":" << window->imported_surface_layer_id
               << "\n";
   }
   return window;
@@ -932,8 +967,12 @@ extern "C" bool darwin_art_android_ANativeWindow_set_owned_queue_callback(
     observer->context = context;
     observer->release_context = release_context;
   }
-  std::lock_guard<std::mutex> lock(window->mutex);
-  window->queue_observer = std::move(observer);
+  {
+    std::lock_guard<std::mutex> lock(window->mutex);
+    observer.swap(window->queue_observer);
+  }
+  // Consumer cleanup can reenter the still-retained producer (for example to
+  // return acquired slots). Release the previous observer outside its mutex.
   return true;
 }
 
@@ -1012,17 +1051,26 @@ extern "C" bool darwin_art_android_ANativeWindow_get_surface_control_identity(
 
 extern "C" void
 darwin_art_android_ANativeWindow_register_imported_surface_identity(
-    int64_t surface_identity, uint32_t owner_process_id, uint32_t layer_id) {
+    int64_t surface_identity, uint32_t owner_process_id, uint32_t layer_id,
+    int32_t width, int32_t height, int32_t format) {
   if (surface_identity == 0 || owner_process_id == 0 || layer_id == 0) return;
   std::lock_guard<std::mutex> lock(g_android_native_window_mutex);
   g_imported_surface_identities[surface_identity] = {
       .owner_process_id = owner_process_id,
       .layer_id = layer_id,
+      .width = width,
+      .height = height,
+      .format = format,
   };
   const auto found = g_android_native_windows_by_surface.find(surface_identity);
   if (found != g_android_native_windows_by_surface.end()) {
     found->second->imported_surface_owner_process_id = owner_process_id;
     found->second->imported_surface_layer_id = layer_id;
+    if (width > 0 && height > 0) {
+      found->second->width.store(width, std::memory_order_relaxed);
+      found->second->height.store(height, std::memory_order_relaxed);
+    }
+    found->second->format.store(format, std::memory_order_relaxed);
   }
 }
 

@@ -1,0 +1,15 @@
+# Android 16 ILocaleManager contract used by the desktop endpoint.
+FRAMEWORK_LOCALE_PATH=_prebuilt/android-16/bootclasspath/framework.jar
+FRAMEWORK_LOCALE_SHA256=ae3d578e3c4cd28ad822d0bc7b35fa308800f440472f54f2aff8aa5c1e22cd91
+ILOCAL_MANAGER_DESCRIPTOR=android.app.ILocaleManager
+SET_APPLICATION_LOCALES_SIGNATURE='void setApplicationLocales(java.lang.String,int,android.os.LocaleList,boolean)'
+SET_APPLICATION_LOCALES_TRANSACTION=1
+GET_APPLICATION_LOCALES_SIGNATURE='android.os.LocaleList getApplicationLocales(java.lang.String,int)'
+GET_APPLICATION_LOCALES_TRANSACTION=2
+GET_SYSTEM_LOCALES_SIGNATURE='android.os.LocaleList getSystemLocales()'
+GET_SYSTEM_LOCALES_TRANSACTION=3
+SET_OVERRIDE_LOCALE_CONFIG_SIGNATURE='void setOverrideLocaleConfig(java.lang.String,int,android.app.LocaleConfig)'
+SET_OVERRIDE_LOCALE_CONFIG_TRANSACTION=4
+GET_OVERRIDE_LOCALE_CONFIG_SIGNATURE='android.app.LocaleConfig getOverrideLocaleConfig(java.lang.String,int)'
+GET_OVERRIDE_LOCALE_CONFIG_TRANSACTION=5
+LOCALE_SERVICE_NAME=locale

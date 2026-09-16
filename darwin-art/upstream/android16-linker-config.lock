@@ -1,0 +1,7 @@
+# Android API36 ARM64 google_apis_playstore system image; source-only inputs to
+# AOSP linkerconfig generation, NOT a generated /linkerconfig/ld.config.txt.
+SYSTEM_IMAGE_SHA256=2ebdd63ebcbdc24d2190d1b67e4b78b1aa900a501449ec2a34ac46b3e13f1cfb
+SYSTEM_IMAGE_PS16K_SHA256=3dc5d638594ec40913b77f684497e992e12ecd2554447871f22d4b2f10851485
+# Both locked images were read independently; these two policy payloads match.
+PUBLIC_LIBRARIES_SHA256=63522af72a927a5edb7df539f0f3643f44a91fa11b64cac977796b8ee50bd96f
+LINKER_CONFIG_PROTO_SHA256=d798c4bc8e842a1a18a8564952e3eba9200f87ada0fd7bbcb1867697b962e2a6

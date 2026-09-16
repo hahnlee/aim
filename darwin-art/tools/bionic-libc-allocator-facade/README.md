@@ -1,5 +1,17 @@
 # Bionic allocator state facade
 
+Current runtime note (2026-09-12): the provider closure consumes this allocator.
+`allocator_options.c` owns allocator control requests separately from allocation
+operations. Android `M_PURGE` and `M_PURGE_ALL` invoke Darwin zone pressure relief;
+the value is ignored and zero reclaimed bytes is not failure. Unknown `mallopt`
+requests return zero, replacing the former unconditional success.
+
+The private `android_mallopt` boundary does not provide heapprofd instrumentation
+for the host allocator. Profiling initialization returns false/Android ENOTSUP
+(malformed arguments return EINVAL). The original ActivityThread JNI ignores this
+optional result; no successful profiler initialization is claimed. Profiling and
+other unsupported allocator controls remain explicit compatibility gaps.
+
 This isolated module implements exactly the four allocator imports used by the
 pinned NDK r28c/API 35 ARM64 `libc++_shared.so`: `malloc`, `free`, `realloc`,
 and `posix_memalign`. It does not integrate with the runtime. Every exported

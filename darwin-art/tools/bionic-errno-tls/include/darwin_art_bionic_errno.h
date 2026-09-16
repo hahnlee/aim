@@ -19,6 +19,9 @@ void darwin_art_bionic_errno_store(int32_t android_errno);
  * Bionic TLS are unchanged. All functions preserve Darwin host errno. */
 int darwin_art_bionic_errno_from_darwin(int darwin_errno,
                                         int32_t* android_errno);
+/* Reverse name-derived mapping for host diagnostic boundaries. Preserves both
+ * errno cells and leaves output unchanged when no matching host errno exists. */
+int darwin_art_bionic_errno_to_darwin(int32_t android_errno, int* darwin_errno);
 int darwin_art_bionic_errno_set_from_darwin(int darwin_errno);
 int darwin_art_bionic_errno_capture_host(void);
 

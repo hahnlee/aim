@@ -31,6 +31,7 @@ check_diff_clean() {
 
 check_target_clean
 check_diff_clean
+check_hash "$script_dir/upstream/get_device_api_level_inlines.h" "$BIONIC_DEVICE_API_HEADER_SHA256"
 
 imports="$project_root/tools/bionic-libc-leaf-facade/imports/ndk-r28c-api35-arm64-libc.tsv"
 check_hash "$imports" "$LIBC_IMPORT_MANIFEST_SHA256"
@@ -62,6 +63,10 @@ trap cleanup EXIT
 
 "$android_cc" -std=c17 -Wall -Wextra -Werror -Wpedantic -fsyntax-only "$script_dir/probes/abi.c"
 host_cc="$(xcrun --find clang)"; sdk="$(xcrun --sdk macosx --show-sdk-path)"
+"$host_cc" -arch arm64 -isysroot "$sdk" -std=c17 -Wall -Wextra -Werror -Wpedantic -I"$script_dir/include" \
+  "$script_dir/src/device_api_level.c" "$script_dir/probes/device-api-level-test.c" \
+  -o "$temp_root/device-api-level-test"
+"$temp_root/device-api-level-test"
 "$host_cc" -arch arm64 -isysroot "$sdk" -std=c17 -O2 -Wall -Wextra -Werror \
   -Wpedantic -I"$script_dir/include" -c "$script_dir/src/shims.c" -o "$temp_root/shims.o"
 nm -u "$temp_root/shims.o" | sed 's/^[[:space:]]*//' | sort >"$temp_root/undefined"
@@ -79,6 +84,7 @@ _arc4random_buf
 _bzero
 _darwin_art_bionic_affinity_get
 _darwin_art_bionic_affinity_set
+_darwin_art_bionic_android_get_device_api_level
 _darwin_art_bionic_environ
 _darwin_art_bionic_errno_load
 _darwin_art_bionic_errno_set_from_darwin
@@ -86,9 +92,14 @@ _darwin_art_bionic_errno_store
 _darwin_art_bionic_longjmp
 _darwin_art_bionic_process_getauxval_core
 _darwin_art_bionic_process_getenv_core
+_darwin_art_bionic_process_property_area_serial_core
 _darwin_art_bionic_process_property_find_core
+_darwin_art_bionic_process_property_foreach_core
 _darwin_art_bionic_process_property_get_core
 _darwin_art_bionic_process_property_read_callback_core
+_darwin_art_bionic_process_property_serial_core
+_darwin_art_bionic_process_property_wait_core
+_darwin_art_bionic_process_state_read_credential_ids_core
 _darwin_art_bionic_setjmp
 _exit
 _fork
@@ -106,6 +117,7 @@ _getuid
 _kill
 _mach_task_self_
 _mach_vm_read_overwrite
+_mach_vm_region
 _mach_vm_write
 _nice
 _pthread_getname_np
@@ -132,7 +144,7 @@ _write
 EOF
 diff -u "$temp_root/expected-undefined" "$temp_root/undefined" || fail 'host dependency drift'
 definitions="$(nm -gU "$temp_root/shims.o")"
-for symbol in __system_property_find __system_property_get \
+for symbol in __system_property_find __system_property_foreach __system_property_get \
               __system_property_read_callback getauxval getenv process_state_resolve; do
   grep -F " _darwin_art_bionic_$symbol" <<<"$definitions" >/dev/null ||
     fail "missing prefixed C ABI definition: $symbol"
@@ -143,7 +155,7 @@ if awk '$2 ~ /^[TDS]$/ {print $3}' <<<"$definitions" |
 fi
 host_passthrough="$(rg -n 'getenv\(|getauxval\(|dlopen|dlsym|dyld|RTLD_|/Users' \
   "$script_dir/src" | grep -v 'darwin_art_bionic_' | \
-  grep -vE 'getenv\("DARWIN_ART_DEBUG_(PROPERTIES|MEDIA_CODEC)"\)' || true)"
+  grep -vE 'getenv\("DARWIN_ART_DEBUG_(PROPERTIES|MEDIA_CODEC|FAULT_MAP|NATIVE_TRAP)"\)' || true)"
 if [[ -n "$host_passthrough" ]]; then
   fail 'host global passthrough or dynamic fallback entered facade'
 fi
@@ -172,7 +184,8 @@ diff -u "$temp_root/expected-fixture-undefined" "$temp_root/fixture-undefined" |
 for symbol in bionic_process_fixture_basic bionic_process_fixture_concurrent \
               bionic_process_fixture_verify_pointers bionic_process_fixture_after_teardown \
               bionic_process_fixture_signal_legacy \
-              bionic_process_fixture_sigaction_query; do
+              bionic_process_fixture_sigaction_query \
+              bionic_process_fixture_sigaction_context_recovery; do
   grep -E "GLOBAL DEFAULT +[0-9]+ $symbol\$" "$temp_root/dynsyms" >/dev/null ||
     fail "Android fixture export missing: $symbol"
 done
@@ -182,4 +195,4 @@ CARGO_TARGET_DIR="$temp_root/target" cargo clippy --quiet --features standalone-
 cargo fmt --manifest-path "$script_dir/Cargo.toml" -- --check
 check_target_clean
 check_diff_clean
-echo 'bionic-process-state-facade: PASS AndroidELF imports=9 threads=8x1000 basename-TLS+getentropy-CSPRNG getrlimit-copyout-EFAULT stable-pointers teardown signal-trampoline target-clean diff-clean'
+echo 'bionic-process-state-facade: PASS AndroidELF imports=9 threads=8x1000 basename-TLS+getentropy-CSPRNG getrlimit-copyout-EFAULT stable-pointers teardown signal-trampoline ucontext-recovery target-clean diff-clean'

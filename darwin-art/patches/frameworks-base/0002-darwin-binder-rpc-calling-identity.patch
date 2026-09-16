@@ -1,0 +1,86 @@
+diff --git a/core/jni/android_util_Binder.cpp b/core/jni/android_util_Binder.cpp
+index 35601e2e52a1..d3bfa753cd01 100644
+--- a/core/jni/android_util_Binder.cpp
++++ b/core/jni/android_util_Binder.cpp
+@@ -26,5 +26,8 @@
+ #include <binder/Stability.h>
+ #include <binderthreadstate/CallerUtils.h>
++#if defined(__APPLE__)
++#include <rpc_identity.h>
++#endif
+ #include <cutils/atomic.h>
+ #include <fcntl.h>
+ #include <inttypes.h>
+@@ -1152,29 +1155,72 @@ static void signalExceptionForError(JNIEnv* env, jobject obj, status_t err,
+ // ----------------------------------------------------------------------------
+
+ static jint android_os_Binder_getCallingPid(CRITICAL_JNI_PARAMS)
+ {
++#if defined(__APPLE__)
++    int32_t pid = 0;
++    if (darwin_art_binder_rpc_identity_current(&pid, nullptr, nullptr)) return pid;
++    return IPCThreadState::self()->getCallingPid();
++#else
+     return IPCThreadState::self()->getCallingPid();
++#endif
+ }
+
+ static jint android_os_Binder_getCallingUid(CRITICAL_JNI_PARAMS)
+ {
++#if defined(__APPLE__)
++    int32_t uid = 0;
++    if (darwin_art_binder_rpc_identity_current(nullptr, &uid, nullptr)) return uid;
++    return IPCThreadState::self()->getCallingUid();
++#else
+     return IPCThreadState::self()->getCallingUid();
++#endif
+ }
+
+ static jboolean android_os_Binder_isDirectlyHandlingTransactionNative(CRITICAL_JNI_PARAMS) {
++#if defined(__APPLE__)
++    return IPCThreadState::self()->getServingStackPointer() != nullptr ||
++            darwin_art_binder_rpc_identity_current(nullptr, nullptr, nullptr);
++#else
+     return getCurrentServingCall() == BinderCallType::BINDER;
++#endif
+ }
+
+ static jlong android_os_Binder_clearCallingIdentity(CRITICAL_JNI_PARAMS)
+ {
++#if defined(__APPLE__)
++    if (darwin_art_binder_rpc_identity_current(nullptr, nullptr, nullptr)) {
++        int64_t token = 0;
++        (void)darwin_art_binder_rpc_identity_clear(&token);
++        return token;
++    }
++    return IPCThreadState::self()->clearCallingIdentity();
++#else
+     return IPCThreadState::self()->clearCallingIdentity();
++#endif
+ }
+
+ static void android_os_Binder_restoreCallingIdentity(CRITICAL_JNI_PARAMS_COMMA jlong token)
+ {
++#if defined(__APPLE__)
++    if (darwin_art_binder_rpc_identity_current(nullptr, nullptr, nullptr)) {
++        (void)darwin_art_binder_rpc_identity_restore(token);
++    } else {
++        IPCThreadState::self()->restoreCallingIdentity(token);
++    }
++#else
+     IPCThreadState::self()->restoreCallingIdentity(token);
++#endif
+ }
+
+ static jboolean android_os_Binder_hasExplicitIdentity(CRITICAL_JNI_PARAMS) {
++#if defined(__APPLE__)
++    if (darwin_art_binder_rpc_identity_current(nullptr, nullptr, nullptr)) {
++        bool explicit_identity = false;
++        (void)darwin_art_binder_rpc_identity_effective(nullptr, nullptr, &explicit_identity);
++        return explicit_identity;
++    }
++    return IPCThreadState::self()->hasExplicitIdentity();
++#else
+     return IPCThreadState::self()->hasExplicitIdentity();
++#endif
+ }

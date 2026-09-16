@@ -1,0 +1,6 @@
+# platform/build/soong @ 533c3c2c9166b49caa556518bb547d8f9acf9594
+# Reviewed build-policy sources, not compiled guest/runtime inputs.
+linkerconfig/linkerconfig.go 91991e4d0607b98e9741a4cdaf58c51a8251cf2ee7aaca28533b4d49c546f2f6
+filesystem/filesystem.go ca7bbf6d1fc92259a15784c655ad8243bb14b442dbcc55b33587a63b9ea72b04
+filesystem/system_image.go 8aca405383e9ba818bebc807828113b5324007d7cd8efb8f7af0dbf7346ec1b1
+scripts/conv_linker_config.py 07cdebaa94e1a8fa040a2b6b92f5777da8905244cfc8a03f979194102bf4b0af

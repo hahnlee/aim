@@ -13,6 +13,7 @@
 
 extern "C" long aosp_strtol(const char*, char**, int);
 extern "C" long long aosp_strtoll(const char*, char**, int);
+extern "C" intmax_t aosp_strtoimax(const char*, char**, int);
 extern "C" unsigned long aosp_strtoul(const char*, char**, int);
 extern "C" unsigned long long aosp_strtoull(const char*, char**, int);
 extern "C" int32_t darwin_art_bionic_errno_load(void);
@@ -69,6 +70,8 @@ void CompareCorpus() {
                  darwin_art_bionic_strtol);
       CompareOne("strtoll", input, base, aosp_strtoll,
                  darwin_art_bionic_strtoll);
+      CompareOne("strtoimax", input, base, aosp_strtoimax,
+                 darwin_art_bionic_strtoimax);
       CompareOne("strtoul", input, base, aosp_strtoul,
                  darwin_art_bionic_strtoul);
       CompareOne("strtoull", input, base, aosp_strtoull,
@@ -84,6 +87,8 @@ void CompareCorpus() {
     digits += "!";
     CompareOne("generated strtoll", digits, base, aosp_strtoll,
                darwin_art_bionic_strtoll);
+    CompareOne("generated strtoimax", digits, base, aosp_strtoimax,
+               darwin_art_bionic_strtoimax);
     CompareOne("generated strtoull", digits, base, aosp_strtoull,
                darwin_art_bionic_strtoull);
   }
@@ -147,6 +152,6 @@ int main() {
   CompareCorpus();
   ThreadStress();
   std::puts(
-      "bionic-numeric-facade: differential=PASS AOSP comparisons=5160 "
+      "bionic-numeric-facade: differential=PASS AOSP comparisons=6425 "
       "locale-handle=ignored threads=8x1000 ASan+UBSan=clean");
 }

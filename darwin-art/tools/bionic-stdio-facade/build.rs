@@ -44,8 +44,10 @@ fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let sdk = output(Command::new("xcrun").args(["--sdk", "macosx", "--show-sdk-path"]));
     let shims = out.join("shims.o");
+    let fortify = out.join("fortify.o");
     let errno = out.join("errno.o");
     compile("src/shims.c", &shims, &sdk, &["include"]);
+    compile("src/fortify.c", &fortify, &sdk, &["include"]);
     compile(
         "../bionic-errno-tls/src/errno_tls.c",
         &errno,
@@ -62,6 +64,7 @@ fn main() {
             .arg("rcs")
             .arg(&archive)
             .arg(&shims)
+            .arg(&fortify)
             .arg(&errno)
             .status()
             .unwrap()
@@ -88,6 +91,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BIONIC_STDIO_C_SANITIZER");
     for source in [
         "src/shims.c",
+        "src/fortify.c",
         "include/darwin_art_bionic_stdio.h",
         "../bionic-errno-tls/src/errno_tls.c",
         "../bionic-errno-tls/include/darwin_art_bionic_errno.h",

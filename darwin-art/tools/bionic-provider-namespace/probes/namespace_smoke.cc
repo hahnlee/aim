@@ -19,6 +19,7 @@ struct Expected {
   const char *symbol;
   const char *version;
   DarwinArtBionicProviderId owner;
+  bool default_version;
 };
 
 constexpr Expected kExpected[] = {
@@ -114,10 +115,10 @@ DarwinArtBionicNamespace *Build(Context *contexts, Shared *shared) {
 } // namespace
 
 int main() {
-  Check(darwin_art_bionic_namespace_owned_count() == 784, "owned count");
+  Check(darwin_art_bionic_namespace_owned_count() == 800, "owned count");
   Check(darwin_art_bionic_namespace_unsupported_libc_count() == 0,
         "unsupported count");
-  Check(sizeof(kExpected) / sizeof(kExpected[0]) == 784, "fixture count");
+  Check(sizeof(kExpected) / sizeof(kExpected[0]) == 800, "fixture count");
   Check(kUnsupported.empty(), "unsupported fixture count");
 
   {
@@ -191,12 +192,21 @@ int main() {
         "host soname rejection");
   Check(darwin_art_bionic_namespace_resolve(instance, "libc.so", "strlen",
                                             nullptr)
-                .status == DARWIN_ART_BIONIC_NAMESPACE_UNKNOWN_VERSION,
-        "missing libc version");
+                .status == DARWIN_ART_BIONIC_NAMESPACE_OK,
+        "original libc default version");
   Check(darwin_art_bionic_namespace_resolve(instance, "liblog.so",
                                             "__android_log_write", "LIBC")
                 .status == DARWIN_ART_BIONIC_NAMESPACE_UNKNOWN_VERSION,
         "versioned liblog rejection");
+  Check(darwin_art_bionic_namespace_resolve(instance, "liblog.so",
+            "__android_log_assert", "LIBLOG").status == DARWIN_ART_BIONIC_NAMESPACE_OK,
+        "original assert version admitted");
+  Check(darwin_art_bionic_namespace_resolve(instance, "liblog.so",
+            "__android_log_set_logger", "LIBLOG_R").status == DARWIN_ART_BIONIC_NAMESPACE_OK,
+        "original logger version admitted");
+  Check(darwin_art_bionic_namespace_resolve(instance, "liblog.so",
+            "__android_log_set_logger", "LIBLOG").status == DARWIN_ART_BIONIC_NAMESPACE_UNKNOWN_VERSION,
+        "another symbol's version denied");
   Check(darwin_art_bionic_namespace_resolve(instance, "libc.so",
                                             "dl_iterate_phdr", "LIBC")
                 .status == DARWIN_ART_BIONIC_NAMESPACE_UNSUPPORTED_SYMBOL,
@@ -311,8 +321,8 @@ int main() {
 
   std::fprintf(
       stderr,
-      "bionic-provider-namespace: PASS libcxx=160/160 extensions=603 "
-      "liblog-symbols=20 binder-ndk=39 aaudio=30 aliases=13 owned=784 duplicate-triple=0 threads=12 "
+      "bionic-provider-namespace: PASS libcxx=160/160 libc-rows=620 "
+      "liblog-rows=19 binder-ndk=39 aaudio=30 owned=800 duplicate-triple=0 threads=12 "
       "teardown=ordered+quiescent host-fallback=denied\n");
   return 0;
 }

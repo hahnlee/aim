@@ -56,6 +56,18 @@ static void TestBionicContractEdges(void) {
                                          sizeof(checked) - 1) == checked + 1);
   assert(darwin_art_bionic___memset_chk(checked, 'x', 2,
                                         sizeof(checked)) == checked);
+  unsigned char explicit_bytes[8];
+  memset(explicit_bytes, 0xa5, sizeof(explicit_bytes));
+  assert(darwin_art_bionic_memset_explicit(explicit_bytes, 0,
+                                           sizeof(explicit_bytes)) ==
+         explicit_bytes);
+  for (size_t index = 0; index < sizeof(explicit_bytes); ++index)
+    assert(explicit_bytes[index] == 0);
+  explicit_bytes[0] = 0x3c;
+  assert(darwin_art_bionic_memset_explicit(explicit_bytes, 0xff, 0) ==
+         explicit_bytes);
+  assert(explicit_bytes[0] == 0x3c);
+  assert(darwin_art_bionic_memset_explicit(NULL, 0, 0) == NULL);
   int unsorted[] = {7, -2, 7, 0, 42, -100, 5};
   const int sorted[] = {-100, -2, 0, 5, 7, 7, 42};
   darwin_art_bionic_qsort(unsorted, sizeof(unsorted) / sizeof(unsorted[0]),
@@ -136,7 +148,7 @@ static void TestWideMemory(void) {
 static void TestResolver(void) {
   size_t count = 0;
   const DarwinArtBionicLeafBinding* table = darwin_art_bionic_libc_leaf_table(&count);
-  assert(table != NULL && count == 66);
+  assert(table != NULL && count == 67);
   for (size_t index = 0; index < count; ++index) {
     assert(table[index].address != NULL);
     assert(darwin_art_bionic_libc_leaf_resolve(table[index].import_name) == table[index].address);
@@ -153,6 +165,6 @@ int main(void) {
   TestMemoryAndStrings();
   TestWideMemory();
   TestResolver();
-  puts("bionic-libc-leaf differential: PASS cases=4096 bindings=66");
+  puts("bionic-libc-leaf differential: PASS cases=4096 bindings=67");
   return 0;
 }

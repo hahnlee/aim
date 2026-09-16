@@ -20,6 +20,7 @@ extern "C" void* darwin_art_angle_dso_symbol(const char* soname,
 // Receives generic SurfaceView window geometry from the framework bridge.
 // This is intentionally independent of any APK class.
 void ConfigureDarwinAngleHostSurface(jint x, jint y, jint width, jint height);
+void ConfigureDarwinAngleDisplayTarget(jint width, jint height);
 jint DarwinAngleHostSurfaceWidth();
 jint DarwinAngleHostSurfaceHeight();
 
@@ -43,8 +44,10 @@ using DarwinArtAndroidNativeWindowQueueCallback = void (*)(
 void darwin_art_android_ANativeWindow_set_queue_callback(
     void* window, DarwinArtAndroidNativeWindowQueueCallback callback,
     void* context);
-// Installs an owned consumer callback. Replacement/unregistration waits for
-// callbacks that already captured the observer, then invokes release_context.
+// Installs an owned consumer callback. Replacement/unregistration stops new
+// captures without waiting; already captured observers retain their context.
+// release_context runs after the last capture retires, outside the producer
+// mutex. Callers must retain the producer if their cleanup reenters it.
 // This mirrors BufferQueue's strong listener ownership and prevents a producer
 // queue racing Java consumer teardown from dereferencing a freed context.
 bool darwin_art_android_ANativeWindow_set_owned_queue_callback(
@@ -66,7 +69,8 @@ void darwin_art_android_ANativeWindow_set_surface_control(void* window,
 bool darwin_art_android_ANativeWindow_get_surface_control_identity(
     void* window, uint32_t* owner_process_id, uint32_t* layer_id);
 void darwin_art_android_ANativeWindow_register_imported_surface_identity(
-    int64_t surface_identity, uint32_t owner_process_id, uint32_t layer_id);
+    int64_t surface_identity, uint32_t owner_process_id, uint32_t layer_id,
+    int32_t width, int32_t height, int32_t format);
 bool darwin_art_android_ANativeWindow_get_imported_surface_identity(
     void* window, uint32_t* owner_process_id, uint32_t* layer_id);
 bool darwin_art_android_ANativeWindow_release_if_managed(void* window);
@@ -154,7 +158,10 @@ void darwin_art_android_present_surface_control_state(
     uint64_t what, uint32_t flags, uint32_t mask, uint32_t transform,
     int32_t destination_left,
     int32_t destination_top, int32_t destination_right,
-    int32_t destination_bottom, int32_t z, float alpha,
+    int32_t destination_bottom, int32_t position_x, int32_t position_y,
+    float scale_x, float scale_y, bool has_crop, int32_t crop_left,
+    int32_t crop_top, int32_t crop_right, int32_t crop_bottom, int32_t z,
+    float alpha,
     const int32_t* transparent_region_rects,
     uint32_t transparent_region_count);
 }

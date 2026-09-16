@@ -1,0 +1,121 @@
+--- a/libs/gui/BufferReleaseChannel.cpp
++++ b/libs/gui/BufferReleaseChannel.cpp
+@@ -144,6 +144,22 @@
+     std::lock_guard lock{mMutex};
+     Message message;
+     mFlattenedBuffer.resize(message.getFlattenedSize());
++#ifdef __APPLE__
++    if (!mDarwinReceiver) {
++        mDarwinReceiver = std::make_unique<darwin_art::release_record::Receiver>(
++                message.getFlattenedSize());
++    }
++    android::base::unique_fd receivedFd;
++    if (int status = mDarwinReceiver->receive(mFd, mFlattenedBuffer.data(),
++                                             mFlattenedBuffer.size(), receivedFd); status != 0) {
++        return status;
++    }
++    size_t dataLen = mFlattenedBuffer.size();
++    const void* data = mFlattenedBuffer.data();
++    int fd = receivedFd.get();
++    size_t fdCount = receivedFd.ok() ? 1 : 0;
++    const int* fdData = fdCount ? &fd : nullptr;
++#else
+     std::array<uint8_t, CMSG_SPACE(sizeof(int))> controlMessageBuffer{};
+
+     iovec iov{
+@@ -193,7 +209,14 @@
+         fdCount = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+     }
+
+-    if (status_t err = message.unflatten(data, dataLen, fdData, fdCount); err != OK) {
++#endif
++    status_t err = message.unflatten(data, dataLen, fdData, fdCount);
++#ifdef __APPLE__
++    // Fence::unflatten takes ownership; do not close the same descriptor twice.
++    if (receivedFd.ok() && fdCount == 0) receivedFd.release();
++    if (err == OK && (dataLen != 0 || fdCount != 0)) return BAD_VALUE;
++#endif
++    if (err != OK) {
+         return err;
+     }
+
+@@ -207,6 +230,9 @@
+ status_t BufferReleaseChannel::ProducerEndpoint::writeReleaseFence(
+         const ReleaseCallbackId& callbackId, const sp<Fence>& fence,
+         uint32_t maxAcquiredBufferCount) {
++#ifdef __APPLE__
++    std::lock_guard lock{mDarwinWriteMutex};
++#endif
+     Message message{callbackId, fence ? fence : Fence::NO_FENCE, maxAcquiredBufferCount};
+     mFlattenedBuffer.resize(message.getFlattenedSize());
+     int flattenedFd;
+@@ -224,6 +250,11 @@
+         }
+     }
+
++#ifdef __APPLE__
++    return darwin_art::release_record::send(mFd, mFlattenedBuffer.data(),
++                                            mFlattenedBuffer.size(),
++                                            fence && fence->isValid() ? flattenedFd : -1);
++#else
+     iovec iov{};
+     iov.iov_base = mFlattenedBuffer.data();
+     iov.iov_len = mFlattenedBuffer.size();
+@@ -253,6 +284,7 @@
+     }
+
+     return OK;
++#endif
+ }
+
+ status_t BufferReleaseChannel::ProducerEndpoint::readFromParcel(const android::Parcel* parcel) {
+@@ -276,11 +308,17 @@
+     outProducer.reset();
+
+     int sockets[2];
++#ifdef __APPLE__
++    if (int status = darwin_art::release_record::open(sockets); status != 0) {
++        return status;
++    }
++#else
+     if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sockets)) {
+         ALOGE("[%s] Failed to create socket pair. errorno=%d message='%s'", name.c_str(), errno,
+               strerror(errno));
+         return -errno;
+     }
++#endif
+
+     android::base::unique_fd consumerFd(sockets[0]);
+     android::base::unique_fd producerFd(sockets[1]);
+--- a/libs/gui/include/gui/BufferReleaseChannel.h
++++ b/libs/gui/include/gui/BufferReleaseChannel.h
+@@ -25,6 +25,9 @@
+ #include <gui/ITransactionCompletedListener.h>
+ #include <ui/Fence.h>
+ #include <utils/Errors.h>
++#ifdef __APPLE__
++#include "release_record_transport.h"
++#endif
+
+ namespace android::gui {
+
+@@ -70,6 +73,9 @@
+
+     private:
+         std::mutex mMutex;
++#ifdef __APPLE__
++        std::unique_ptr<darwin_art::release_record::Receiver> mDarwinReceiver;
++#endif
+         std::vector<uint8_t> mFlattenedBuffer GUARDED_BY(mMutex);
+     };
+
+@@ -87,6 +93,9 @@
+
+     private:
+         std::vector<uint8_t> mFlattenedBuffer;
++#ifdef __APPLE__
++        std::mutex mDarwinWriteMutex;
++#endif
+     };
+
+     /**

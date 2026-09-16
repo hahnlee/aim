@@ -31,7 +31,13 @@ static_assert(sizeof(darwin_art_host_services_t) == 32);
 static_assert(offsetof(darwin_art_host_services_t, context) == 8);
 static_assert(offsetof(darwin_art_host_services_t, spawn_service) == 16);
 static_assert(offsetof(darwin_art_host_services_t, release_service) == 24);
-static_assert(sizeof(darwin_art_process_config_t) == 128);
+static_assert(sizeof(darwin_art_native_loader_config_t) == 40);
+static_assert(alignof(darwin_art_native_loader_config_t) == 8);
+static_assert(offsetof(darwin_art_native_loader_config_t, linker_config_path) == 8);
+static_assert(offsetof(darwin_art_native_loader_config_t, executable_path) == 16);
+static_assert(offsetof(darwin_art_native_loader_config_t, library_search_path) == 24);
+static_assert(offsetof(darwin_art_native_loader_config_t, android_unwind_path) == 32);
+static_assert(sizeof(darwin_art_process_config_t) == 136);
 static_assert(alignof(darwin_art_process_config_t) == 8);
 static_assert(offsetof(darwin_art_process_config_t, struct_size) == 0);
 static_assert(offsetof(darwin_art_process_config_t, abi_version) == 4);
@@ -50,6 +56,7 @@ static_assert(offsetof(darwin_art_process_config_t, provider_release) == 96);
 static_assert(offsetof(darwin_art_process_config_t, graphics_session_context) == 104);
 static_assert(offsetof(darwin_art_process_config_t, lifecycle_hooks) == 112);
 static_assert(offsetof(darwin_art_process_config_t, host_services) == 120);
+static_assert(offsetof(darwin_art_process_config_t, native_loader_config) == 128);
 
 static_assert(std::is_standard_layout_v<darwin_art_process_result_t>);
 static_assert(sizeof(darwin_art_process_result_t) == 36);
@@ -71,6 +78,7 @@ static_assert(offsetof(DarwinArtSurfaceCreateInfo, width) == 0);
 static_assert(offsetof(DarwinArtSurfaceCreateInfo, height) == 4);
 static_assert(offsetof(DarwinArtSurfaceCreateInfo, title) == 8);
 static_assert(offsetof(DarwinArtSurfaceCreateInfo, visible) == 16);
+static_assert(offsetof(DarwinArtSurfaceCreateInfo, scale_to_display) == 17);
 
 extern "C" int darwin_art_abi_layout_anchor() {
   return 0;

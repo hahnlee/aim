@@ -12,6 +12,7 @@ isatty	int(int)	direct-register-only	virtual-regular-or-directory-ENOTTY
 link	int(const-char*,const-char*)	direct-register-only	contained-immutable-EROFS
 lstat	int(const-char*,struct-stat*)	direct-register-only	non-symlink-only
 mkdir	int(const-char*,mode_t)	direct-register-only	contained-immutable-EROFS
+mkdirat	int(int,const-char*,mode_t)	direct-register-only	AT_FDCWD-or-valid-dirfd-writable
 open	int(const-char*,int,...)	direct-fixed-registers	read-only-no-vararg-consumption
 openat	int(int,const-char*,int,...)	direct-fixed-registers	AT_FDCWD-only
 opendir	DIR*(const-char*)	direct-register-only	facade-token-only

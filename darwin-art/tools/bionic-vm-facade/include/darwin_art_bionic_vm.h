@@ -9,6 +9,8 @@ extern "C" {
 #endif
 
 typedef void (*DarwinArtBionicVmFunction)(void);
+/* Resolver returns 1 for an ordinary host fd and 2 when a special device's
+ * Android MAP_PRIVATE request requires a shared host view of device memory. */
 typedef int (*DarwinArtBionicVmFdResolver)(int guest_fd, int* host_fd);
 
 void* darwin_art_bionic_mmap(void*, size_t, int, int, int, int64_t);

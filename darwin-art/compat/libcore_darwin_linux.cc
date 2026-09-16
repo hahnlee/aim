@@ -1527,12 +1527,33 @@ void DarwinLinuxMunmap(JNIEnv *env, jobject, jlong address, jlong byte_count) {
   }
 }
 
-jint DarwinNativeGetegid() { return static_cast<jint>(getegid()); }
-jint DarwinNativeGeteuid() { return static_cast<jint>(geteuid()); }
-jint DarwinNativeGetgid() { return static_cast<jint>(getgid()); }
+static bool ReadAndroidCredentialIds(
+    DarwinArtProcessCredentialsOutput* output) {
+  return darwin_art_bionic_process_state_read_credential_ids_core(output) == 0;
+}
+
+jint DarwinNativeGetegid() {
+  DarwinArtProcessCredentialsOutput credentials{};
+  return ReadAndroidCredentialIds(&credentials) ? static_cast<jint>(credentials.egid)
+                                                : static_cast<jint>(getegid());
+}
+jint DarwinNativeGeteuid() {
+  DarwinArtProcessCredentialsOutput credentials{};
+  return ReadAndroidCredentialIds(&credentials) ? static_cast<jint>(credentials.euid)
+                                                : static_cast<jint>(geteuid());
+}
+jint DarwinNativeGetgid() {
+  DarwinArtProcessCredentialsOutput credentials{};
+  return ReadAndroidCredentialIds(&credentials) ? static_cast<jint>(credentials.gid)
+                                                : static_cast<jint>(getgid());
+}
 jint DarwinNativeGetpid() { return static_cast<jint>(getpid()); }
 jint DarwinNativeGetppid() { return static_cast<jint>(getppid()); }
-jint DarwinNativeGetuid() { return static_cast<jint>(getuid()); }
+jint DarwinNativeGetuid() {
+  DarwinArtProcessCredentialsOutput credentials{};
+  return ReadAndroidCredentialIds(&credentials) ? static_cast<jint>(credentials.uid)
+                                                : static_cast<jint>(getuid());
+}
 jint DarwinNativeGettid() {
   uint64_t thread_id = 0;
   if (pthread_threadid_np(nullptr, &thread_id) != 0 ||
@@ -1614,6 +1635,12 @@ JNINativeMethod kAbiSmokeMethods[] = {
     {const_cast<char *>("environment"),
      const_cast<char *>("(Ljava/lang/String;)Ljava/lang/String;"),
      reinterpret_cast<void *>(&DarwinLinuxGetenv)},
+    {const_cast<char *>("setEnvironment"),
+     const_cast<char *>("(Ljava/lang/String;Ljava/lang/String;Z)V"),
+     reinterpret_cast<void *>(&DarwinLinuxSetenv)},
+    {const_cast<char *>("unsetEnvironment"),
+     const_cast<char *>("(Ljava/lang/String;)V"),
+     reinterpret_cast<void *>(&DarwinLinuxUnsetenv)},
     {const_cast<char *>("statPath"),
      const_cast<char *>("(Ljava/lang/String;)Landroid/system/StructStat;"),
      reinterpret_cast<void *>(&DarwinLinuxStat)},

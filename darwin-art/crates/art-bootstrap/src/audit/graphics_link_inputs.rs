@@ -31,6 +31,13 @@ pub(super) struct GraphicsRuntimeInputs {
     pub(super) asynchronous_close_backend: PathBuf,
     pub(super) resource_jni_archive: PathBuf,
     pub(super) android_util_log_archive: PathBuf,
+    pub(super) application_shared_memory_archive: PathBuf,
+    pub(super) debugstore_archive: PathBuf,
+    pub(super) activity_thread_archive: PathBuf,
+    pub(super) bionic_dlwarning_object: PathBuf,
+    pub(super) classloader_factory_jni: PathBuf,
+    pub(super) trace_archive: PathBuf,
+    pub(super) perfetto_library: PathBuf,
     pub(super) virtual_ref_base_ptr_archive: PathBuf,
     pub(super) android_runtime_host: PathBuf,
 }
@@ -84,6 +91,16 @@ impl GraphicsRuntimeInputs {
                 .join("_build/resource-jni-foundation/libandroid-resource-jni-darwin.a"),
             android_util_log_archive: root
                 .join("_build/android-util-log/libandroid-util-log-registrar-darwin.a"),
+            application_shared_memory_archive: root
+                .join("_build/application-shared-memory/libapplication-shared-memory-darwin.a"),
+            debugstore_archive: root.join("_build/debugstore/libdebugstore-darwin.a"),
+            activity_thread_archive: root.join("_build/activity-thread/libactivity-thread-darwin.a"),
+            bionic_dlwarning_object: root
+                .join("_build/bionic-linker-config/linker_dlwarning.o"),
+            classloader_factory_jni: root
+                .join("_build/native-loader-policy/classloader_factory_jni.o"),
+            trace_archive: root.join("_build/tracing-perfetto/libandroid-tracing-perfetto-darwin.a"),
+            perfetto_library: root.join("_build/tracing-perfetto/perfetto-out/libperfetto_c.dylib"),
             virtual_ref_base_ptr_archive: root
                 .join("_build/virtual-ref-base-ptr/libandroid-virtual-ref-base-ptr-darwin.a"),
             android_runtime_host: root
@@ -114,6 +131,13 @@ impl GraphicsRuntimeInputs {
             &inputs.asynchronous_close_backend,
             &inputs.resource_jni_archive,
             &inputs.android_util_log_archive,
+            &inputs.application_shared_memory_archive,
+            &inputs.debugstore_archive,
+            &inputs.activity_thread_archive,
+            &inputs.bionic_dlwarning_object,
+            &inputs.classloader_factory_jni,
+            &inputs.trace_archive,
+            &inputs.perfetto_library,
             &inputs.virtual_ref_base_ptr_archive,
             &inputs.android_runtime_host,
         ] {

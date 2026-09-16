@@ -6,126 +6,13 @@
 #include <vector>
 
 #include "darwin_jni_shorty.h"
+#include "jni/android_varargs.h"
+#include "jni/method_call.h"
 #include "darwin_runtime_adapters_internal.h"
-
-extern "C" intptr_t darwin_art_bionic_fs_resolve_private_host_path(
-    const char *path, char *output, size_t capacity);
 
 namespace android {
 
 namespace {
-
-struct AndroidArm64VaList {
-  uint8_t *stack;
-  uint8_t *gr_top;
-  uint8_t *vr_top;
-  int32_t gr_offs;
-  int32_t vr_offs;
-};
-
-uintptr_t AlignUp(uintptr_t value, uintptr_t alignment) {
-  return (value + alignment - 1u) & ~(alignment - 1u);
-}
-
-uint64_t ReadGuestGeneral(AndroidArm64VaList *args) {
-  const uint8_t *source = nullptr;
-  if (args->gr_offs < 0) {
-    source = args->gr_top + args->gr_offs;
-    args->gr_offs += 8;
-  } else {
-    args->stack = reinterpret_cast<uint8_t *>(
-        AlignUp(reinterpret_cast<uintptr_t>(args->stack), 8));
-    source = args->stack;
-    args->stack += 8;
-  }
-  uint64_t value = 0;
-  std::memcpy(&value, source, sizeof(value));
-  return value;
-}
-
-double ReadGuestFloating(AndroidArm64VaList *args) {
-  const uint8_t *source = nullptr;
-  if (args->vr_offs < 0) {
-    source = args->vr_top + args->vr_offs;
-    args->vr_offs += 16;
-  } else {
-    args->stack = reinterpret_cast<uint8_t *>(
-        AlignUp(reinterpret_cast<uintptr_t>(args->stack), 8));
-    source = args->stack;
-    args->stack += 8;
-  }
-  double value = 0;
-  std::memcpy(&value, source, sizeof(value));
-  return value;
-}
-
-bool DecodeGuestArguments(const std::string &descriptor, void *raw_args,
-                          std::vector<jvalue> *output) {
-  if (raw_args == nullptr || output == nullptr || descriptor.empty() ||
-      descriptor.front() != '(') {
-    return false;
-  }
-  AndroidArm64VaList args{};
-  std::memcpy(&args, raw_args, sizeof(args));
-  for (size_t index = 1;
-       index < descriptor.size() && descriptor[index] != ')';) {
-    char kind = descriptor[index++];
-    if (kind == '[') {
-      while (index < descriptor.size() && descriptor[index] == '[')
-        ++index;
-      if (index >= descriptor.size())
-        return false;
-      kind = descriptor[index++];
-      if (kind == 'L') {
-        const size_t end = descriptor.find(';', index);
-        if (end == std::string::npos)
-          return false;
-        index = end + 1;
-      }
-      kind = 'L';
-    } else if (kind == 'L') {
-      const size_t end = descriptor.find(';', index);
-      if (end == std::string::npos)
-        return false;
-      index = end + 1;
-    }
-
-    jvalue value{};
-    switch (kind) {
-    case 'L':
-      value.l = reinterpret_cast<jobject>(ReadGuestGeneral(&args));
-      break;
-    case 'Z':
-      value.z = static_cast<jboolean>(ReadGuestGeneral(&args));
-      break;
-    case 'B':
-      value.b = static_cast<jbyte>(ReadGuestGeneral(&args));
-      break;
-    case 'C':
-      value.c = static_cast<jchar>(ReadGuestGeneral(&args));
-      break;
-    case 'S':
-      value.s = static_cast<jshort>(ReadGuestGeneral(&args));
-      break;
-    case 'I':
-      value.i = static_cast<jint>(ReadGuestGeneral(&args));
-      break;
-    case 'J':
-      value.j = static_cast<jlong>(ReadGuestGeneral(&args));
-      break;
-    case 'F':
-      value.f = static_cast<jfloat>(ReadGuestFloating(&args));
-      break;
-    case 'D':
-      value.d = static_cast<jdouble>(ReadGuestFloating(&args));
-      break;
-    default:
-      return false;
-    }
-    output->push_back(value);
-  }
-  return descriptor.find(')') != std::string::npos;
-}
 
 bool LookupArguments(ElfLibrary *library, void *method, void *raw_args,
                      std::vector<jvalue> *output) {
@@ -139,7 +26,7 @@ bool LookupArguments(ElfLibrary *library, void *method, void *raw_args,
       return false;
     descriptor = found->second;
   }
-  return DecodeGuestArguments(descriptor, raw_args, output);
+  return darwin_art::jni::DecodeAndroidArguments(descriptor, raw_args, output);
 }
 
 // Android native libraries own every thread that they attach to ART. Some
@@ -226,37 +113,9 @@ void *ProxyFindClass(void *context, const char *name) {
   if (library == nullptr || art_env == nullptr || name == nullptr) {
     return nullptr;
   }
-  void *clazz = nullptr;
-  if (library->app_loader != nullptr) {
-    std::cerr << "DARWIN JNI ProxyFindClass app-loader name=" << name << "\n";
-    jclass loader_class = art_env->FindClass("java/lang/ClassLoader");
-    jmethodID load_class =
-        loader_class == nullptr
-            ? nullptr
-            : art_env->GetMethodID(loader_class, "loadClass",
-                                   "(Ljava/lang/String;)Ljava/lang/Class;");
-    std::string binary(name);
-    for (char &ch : binary) {
-      if (ch == '/')
-        ch = '.';
-    }
-    jstring binary_name = art_env->NewStringUTF(binary.c_str());
-    clazz = load_class == nullptr || binary_name == nullptr
-                ? nullptr
-                : art_env->CallObjectMethod(
-                      static_cast<jobject>(library->app_loader), load_class,
-                      binary_name);
-    if (art_env->ExceptionCheck())
-      art_env->ExceptionClear();
-    std::cerr << "DARWIN JNI ProxyFindClass result=" << clazz << "\n";
-    if (binary_name != nullptr)
-      art_env->DeleteLocalRef(binary_name);
-    if (loader_class != nullptr)
-      art_env->DeleteLocalRef(loader_class);
-  } else {
-    std::cerr << "DARWIN JNI ProxyFindClass boot name=" << name << "\n";
-    clazz = art_env->FindClass(name);
-  }
+  // ART selects the nativeLoad override, current method's loader or system
+  // loader. Keep its slash-name contract and pending exception intact.
+  void *clazz = art_env->FindClass(name);
   if (library->fixture_graph && clazz != nullptr &&
       std::strcmp(name, "darwin/art/nativefixture/NativeFixture") == 0) {
     g_elf_fixture_status.fetch_or(kElfFoundFixtureClass,
@@ -281,17 +140,11 @@ void *ProxyGetMethodId(void *context, void *clazz, const char *name,
   if (method != nullptr) {
     std::lock_guard<std::mutex> lock(library->method_descriptor_mutex);
     library->method_descriptors[method] = signature;
-    library->method_names[method] = name;
   }
   if (std::getenv("DARWIN_ART_DEBUG_JNI_CALLS") != nullptr) {
     std::cerr << "DARWIN JNI method name=" << name
               << " signature=" << signature
               << " static=" << is_static << " id=" << method << "\n";
-  }
-  if (std::strcmp(name, "getDataDirectory") == 0 ||
-      std::strcmp(name, "getCacheDirectory") == 0) {
-    std::cerr << "DARWIN JNI path method name=" << name
-              << " signature=" << signature << " id=" << method << "\n";
   }
   return method;
 }
@@ -306,252 +159,9 @@ uint64_t ProxyCallMethodV(void *context, void *object, void *method,
       !LookupArguments(library, method, android_va_list, &arguments)) {
     return 0;
   }
-  const jvalue *values = arguments.empty() ? nullptr : arguments.data();
-  const jobject receiver = static_cast<jobject>(object);
-  const jclass clazz = static_cast<jclass>(object);
-  const jmethodID id = static_cast<jmethodID>(method);
-  std::string method_name;
-  std::string method_descriptor;
-  {
-    std::lock_guard<std::mutex> lock(library->method_descriptor_mutex);
-    const auto found = library->method_names.find(method);
-    if (found != library->method_names.end())
-      method_name = found->second;
-    const auto descriptor = library->method_descriptors.find(method);
-    if (descriptor != library->method_descriptors.end())
-      method_descriptor = descriptor->second;
-  }
-  std::string debug_name;
-  if (std::getenv("DARWIN_ART_DEBUG_JNI_CALLS") != nullptr)
-    debug_name = method_name;
-  // ContextImpl#getPackageCodePath is backed by PackageManager state on a
-  // device.  The compatibility host has already mounted the immutable APK,
-  // so expose that exact host path to native callers instead of leaving a
-  // framework-side NameNotFoundException pending during Unity bootstrap.
-  if (method_name == "getPackageCodePath" && return_shorty == 'L' &&
-      is_static == 0) {
-    const char *apk_path = std::getenv("DARWIN_ART_APK_APP_RESOURCE_APK");
-    if (apk_path != nullptr && apk_path[0] != '\0') {
-      art_env->ExceptionClear();
-      return reinterpret_cast<uint64_t>(art_env->NewStringUTF(apk_path));
-    }
-  }
-  if (is_static == 2) {
-    // Native Android SDKs commonly extract an embedded helper DEX/JAR into
-    // Context.getCacheDir() and construct a DexClassLoader from that guest
-    // pathname. ART's file loader executes outside the Bionic facade, so map
-    // only a path already authorized by the private /data overlay. Immutable
-    // mounts, host paths, and traversal remain rejected by the facade.
-    jobject translated_dex_path = nullptr;
-    if (method_name == "<init>" &&
-        method_descriptor ==
-            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
-            "Ljava/lang/ClassLoader;)V" &&
-        !arguments.empty() && arguments[0].l != nullptr) {
-      const jstring original_dex_path = static_cast<jstring>(arguments[0].l);
-      const char *guest_path = art_env->GetStringUTFChars(
-          original_dex_path, nullptr);
-      if (guest_path != nullptr) {
-        const intptr_t required =
-            darwin_art_bionic_fs_resolve_private_host_path(guest_path, nullptr, 0);
-        if (required > 0) {
-          std::vector<char> host_path(static_cast<size_t>(required) + 1u, '\0');
-          if (darwin_art_bionic_fs_resolve_private_host_path(
-                  guest_path, host_path.data(), host_path.size()) == required) {
-            translated_dex_path = art_env->NewStringUTF(host_path.data());
-            if (translated_dex_path != nullptr) {
-              arguments[0].l = translated_dex_path;
-              values = arguments.data();
-            }
-          }
-        }
-        art_env->ReleaseStringUTFChars(original_dex_path, guest_path);
-      }
-    }
-    jobject result = art_env->NewObjectA(clazz, id, values);
-    if (translated_dex_path != nullptr)
-      art_env->DeleteLocalRef(translated_dex_path);
-    return reinterpret_cast<uint64_t>(result);
-  }
-  if (is_static != 0) {
-    switch (return_shorty) {
-    case 'L': {
-      jobject result = art_env->CallStaticObjectMethodA(clazz, id, values);
-      if (!debug_name.empty()) {
-        std::cerr << "DARWIN JNI static object name=" << debug_name
-                  << " method=" << method << " result=" << result
-                  << " exception=" << art_env->ExceptionCheck();
-        if (debug_name == "getUserAddedRoots" && result != nullptr &&
-            !art_env->ExceptionCheck()) {
-          std::cerr << " array_length="
-                    << art_env->GetArrayLength(static_cast<jarray>(result));
-        }
-        std::cerr << "\n";
-        if (result == nullptr && art_env->ExceptionCheck()) {
-          jthrowable pending = art_env->ExceptionOccurred();
-          art_env->ExceptionClear();
-          jclass throwable = art_env->FindClass("java/lang/Throwable");
-          jmethodID to_string =
-              throwable == nullptr
-                  ? nullptr
-                  : art_env->GetMethodID(throwable, "toString",
-                                         "()Ljava/lang/String;");
-          jmethodID get_stack_trace =
-              throwable == nullptr
-                  ? nullptr
-                  : art_env->GetMethodID(
-                        throwable, "getStackTrace",
-                        "()[Ljava/lang/StackTraceElement;");
-          jstring description =
-              to_string == nullptr
-                  ? nullptr
-                  : static_cast<jstring>(
-                        art_env->CallObjectMethod(pending, to_string));
-          const char *text =
-              description == nullptr
-                  ? nullptr
-                  : art_env->GetStringUTFChars(description, nullptr);
-          std::cerr << "DARWIN JNI pending exception method=" << debug_name
-                    << " description="
-                    << (text == nullptr ? "<unavailable>" : text)
-                    << "\n";
-          if (text != nullptr)
-            art_env->ReleaseStringUTFChars(description, text);
-          if (description != nullptr)
-            art_env->DeleteLocalRef(description);
-
-          if (art_env->ExceptionCheck())
-            art_env->ExceptionClear();
-          jobjectArray stack =
-              get_stack_trace == nullptr
-                  ? nullptr
-                  : static_cast<jobjectArray>(
-                        art_env->CallObjectMethod(pending, get_stack_trace));
-          jclass stack_element =
-              stack == nullptr
-                  ? nullptr
-                  : art_env->FindClass("java/lang/StackTraceElement");
-          jmethodID stack_to_string =
-              stack_element == nullptr
-                  ? nullptr
-                  : art_env->GetMethodID(stack_element, "toString",
-                                         "()Ljava/lang/String;");
-          if (!art_env->ExceptionCheck() && stack != nullptr &&
-              stack_to_string != nullptr) {
-            const jsize frame_count = art_env->GetArrayLength(stack);
-            for (jsize frame = 0; frame < frame_count; ++frame) {
-              jobject element = art_env->GetObjectArrayElement(stack, frame);
-              jstring line =
-                  element == nullptr
-                      ? nullptr
-                      : static_cast<jstring>(
-                            art_env->CallObjectMethod(element, stack_to_string));
-              const char *line_text =
-                  line == nullptr
-                      ? nullptr
-                      : art_env->GetStringUTFChars(line, nullptr);
-              std::cerr << "DARWIN JNI pending exception frame=" << frame
-                        << " at "
-                        << (line_text == nullptr ? "<unavailable>" : line_text)
-                        << "\n";
-              if (line_text != nullptr)
-                art_env->ReleaseStringUTFChars(line, line_text);
-              if (line != nullptr)
-                art_env->DeleteLocalRef(line);
-              if (element != nullptr)
-                art_env->DeleteLocalRef(element);
-              if (art_env->ExceptionCheck()) {
-                art_env->ExceptionClear();
-                break;
-              }
-            }
-          }
-          if (stack_element != nullptr)
-            art_env->DeleteLocalRef(stack_element);
-          if (stack != nullptr)
-            art_env->DeleteLocalRef(stack);
-          if (throwable != nullptr)
-            art_env->DeleteLocalRef(throwable);
-          if (art_env->ExceptionCheck())
-            art_env->ExceptionClear();
-          art_env->Throw(pending);
-          art_env->DeleteLocalRef(pending);
-        }
-      }
-      return reinterpret_cast<uint64_t>(result);
-    }
-    case 'Z':
-      return art_env->CallStaticBooleanMethodA(clazz, id, values);
-    case 'B':
-      return static_cast<uint64_t>(
-          art_env->CallStaticByteMethodA(clazz, id, values));
-    case 'C':
-      return art_env->CallStaticCharMethodA(clazz, id, values);
-    case 'S':
-      return static_cast<uint64_t>(
-          art_env->CallStaticShortMethodA(clazz, id, values));
-    case 'I':
-      return static_cast<uint64_t>(
-          art_env->CallStaticIntMethodA(clazz, id, values));
-    case 'J':
-      return static_cast<uint64_t>(
-          art_env->CallStaticLongMethodA(clazz, id, values));
-    case 'F': {
-      const jfloat value = art_env->CallStaticFloatMethodA(clazz, id, values);
-      uint32_t bits = 0;
-      std::memcpy(&bits, &value, sizeof(bits));
-      return bits;
-    }
-    case 'D': {
-      const jdouble value = art_env->CallStaticDoubleMethodA(clazz, id, values);
-      uint64_t bits = 0;
-      std::memcpy(&bits, &value, sizeof(bits));
-      return bits;
-    }
-    case 'V':
-      art_env->CallStaticVoidMethodA(clazz, id, values);
-      return 0;
-    default:
-      return 0;
-    }
-  }
-  switch (return_shorty) {
-  case 'L':
-    return reinterpret_cast<uint64_t>(
-        art_env->CallObjectMethodA(receiver, id, values));
-  case 'Z':
-    return art_env->CallBooleanMethodA(receiver, id, values);
-  case 'B':
-    return static_cast<uint64_t>(
-        art_env->CallByteMethodA(receiver, id, values));
-  case 'C':
-    return art_env->CallCharMethodA(receiver, id, values);
-  case 'S':
-    return static_cast<uint64_t>(
-        art_env->CallShortMethodA(receiver, id, values));
-  case 'I':
-    return static_cast<uint64_t>(art_env->CallIntMethodA(receiver, id, values));
-  case 'J':
-    return static_cast<uint64_t>(
-        art_env->CallLongMethodA(receiver, id, values));
-  case 'F': {
-    const jfloat value = art_env->CallFloatMethodA(receiver, id, values);
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    return bits;
-  }
-  case 'D': {
-    const jdouble value = art_env->CallDoubleMethodA(receiver, id, values);
-    uint64_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    return bits;
-  }
-  case 'V':
-    art_env->CallVoidMethodA(receiver, id, values);
-    return 0;
-  default:
-    return 0;
-  }
+  return darwin_art::jni::CallMethodA(
+      art_env, static_cast<jobject>(object), static_cast<jmethodID>(method),
+      arguments.empty() ? nullptr : arguments.data(), return_shorty, is_static);
 }
 
 } // namespace android

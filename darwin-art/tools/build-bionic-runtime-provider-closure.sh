@@ -40,10 +40,20 @@ if "$ar" -t "$rust" | grep -E '^(errno|errno_tls)\.o$' >/dev/null; then
   exit 2
 fi
 float_target="$build/float-target"
-CARGO_TARGET_DIR="$float_target" cargo build --quiet --release \
-  --manifest-path "$root/tools/bionic-float-conversion-facade/Cargo.toml"
-float_source="$(find "$float_target/release/build" \
-  -path '*/out/libdarwin_art_bionic_float_conversion.a' -print -quit)"
+# Cargo may retain several build-script hash directories. Only its current
+# build-script event identifies the archive for this invocation (also when fresh).
+float_source="$(CARGO_TARGET_DIR="$float_target" cargo build --quiet --release \
+  --message-format=json \
+  --manifest-path "$root/tools/bionic-float-conversion-facade/Cargo.toml" |
+  python3 -c 'import json, sys
+paths = set()
+for line in sys.stdin:
+    event = json.loads(line)
+    if event.get("reason") == "build-script-executed" and "/bionic-float-conversion-facade#" in event.get("package_id", ""):
+        paths.add(event["out_dir"] + "/libdarwin_art_bionic_float_conversion.a")
+if len(paths) != 1:
+    raise SystemExit("expected exactly one current float provider build-script output")
+print(next(iter(paths)))')"
 [[ -n "$float_source" && -f "$float_source" ]] || {
   echo 'bionic-runtime-provider-closure: float provider archive missing' >&2
   exit 2
@@ -71,6 +81,9 @@ cxxflags=(-arch arm64 -isysroot "$sdk" -std=c++20 -O2 -Wall -Wextra -Werror)
   -I"$root/tools/bionic-libc-allocator-facade/include" \
   -c "$root/tools/bionic-libc-allocator-facade/src/allocator.c" -o "$objects/allocator.o"
 "$cc" "${cflags[@]}" -std=c17 \
+  -I"$root/tools/bionic-libc-allocator-facade/include" \
+  -c "$root/tools/bionic-libc-allocator-facade/src/allocator_options.c" -o "$objects/allocator_options.o"
+"$cc" "${cflags[@]}" -std=c17 \
   -I"$root/tools/bionic-time-facade/include" \
   -c "$root/tools/bionic-time-facade/src/shims.c" -o "$objects/time.o"
 "$cxx" "${cxxflags[@]}" \
@@ -88,8 +101,25 @@ cxxflags=(-arch arm64 -isysroot "$sdk" -std=c++20 -O2 -Wall -Wextra -Werror)
   -I"$root/tools/bionic-errno-tls/include" \
   -I"$root/tools/bionic-central-fd-broker/include" \
   -I"$root/tools/bionic-dns-facade/include" \
+  -I"$root/tools/bionic-fs-facade/include" \
+  -I"$root/tools/bionic-ioctl-facade/include" \
   -c "$root/tools/bionic-socket-broker-adapter/src/adapter.cc" \
   -o "$objects/socket-broker-adapter.o"
+"$cxx" "${cxxflags[@]}" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/sync_fence_merge.cc" \
+  -o "$objects/sync-fence-merge.o"
+"$cxx" "${cxxflags[@]}" \
+  -I"$root/tools/bionic-central-fd-broker/include" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/sync_fence_broker.cc" \
+  -o "$objects/sync-fence-broker.o"
+"$cxx" "${cxxflags[@]}" \
+  -I"$root/tools/bionic-socket-broker-adapter/include" \
+  -I"$root/tools/bionic-errno-tls/include" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/fdsan.cc" -o "$objects/fdsan.o"
+"$cxx" "${cxxflags[@]}" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/fdsan_property.cc" -o "$objects/fdsan-property.o"
+"$cxx" "${cxxflags[@]}" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/fdsan_symbols.cc" -o "$objects/fdsan-symbols.o"
 "$cxx" "${cxxflags[@]}" \
   -I"$root/tools/bionic-dns-facade/include" \
   -c "$root/tools/bionic-dns-facade/src/dns.cc" -o "$objects/dns.o"
@@ -227,12 +257,16 @@ strftime_source="$root/_aosp/bionic-strftime-facade/platform/bionic/libc/tzcode/
   -I"$root/tools/bionic-format-facade/include" \
   -I"$root/_aosp/system/logging/liblog/include" \
   -c "$root/tools/android-liblog-exec-provider/liblog_provider.cc" -o "$objects/liblog.o"
+"$cxx" "${cxxflags[@]}" \
+  -I"$root/_aosp/system/logging/liblog/include" \
+  -c "$root/tools/android-liblog-exec-provider/assert_abi.cc" -o "$objects/liblog-assert.o"
 "$cc" "${cflags[@]}" \
   -c "$root/tools/android-liblog-exec-provider/aapcs64_log.S" \
   -o "$objects/liblog-aapcs64.o"
 "$cxx" "${cxxflags[@]}" \
   -I"$root/tools/bionic-provider-namespace/include" \
   -I"$root/tools/bionic-provider-namespace/generated" \
+  -I"$root/tools/bionic-stdio-facade/include" \
   -c "$root/tools/bionic-provider-namespace/src/namespace.cc" -o "$objects/namespace.o"
 "$cxx" "${cxxflags[@]}" \
   -I"$root/tools/bionic-provider-namespace/include" \
@@ -243,10 +277,18 @@ strftime_source="$root/_aosp/bionic-strftime-facade/platform/bionic/libc/tzcode/
   -c "$root/tools/bionic-math-facade/src/math.cc" -o "$objects/math.o"
 
 native="$build/libdarwin-art-bionic-native-providers.a"
+bash "$root/tools/build-android16-ftw.sh"
+bash "$root/tools/build-android16-property-client.sh"
+ftw="$root/_build/android16-ftw"
 "$ar" rcs "$native" \
-  "$objects/leaf.o" "$objects/allocator.o" "$objects/time.o" \
+  "$root/_build/android16-property-client/bound-client.o" \
+  "$ftw/fts.c.o" "$ftw/ftw.cpp.o" "$ftw/recallocarray.c.o" "$ftw/bindings.o" \
+  "$ftw/resolver.o" \
+  "$objects/leaf.o" "$objects/allocator.o" "$objects/allocator_options.o" "$objects/time.o" \
   "$objects/pthread.o" "$objects/phdr.o" \
-  "$objects/central-fd-broker.o" "$objects/socket-broker-adapter.o" \
+  "$objects/central-fd-broker.o" "$objects/socket-broker-adapter.o" "$objects/fdsan.o" "$objects/fdsan-property.o" \
+  "$objects/sync-fence-merge.o" "$objects/sync-fence-broker.o" \
+  "$objects/fdsan-symbols.o" \
   "$objects/dns.o" "$objects/locale.o" \
   "$objects/wide-stdio.o" "$objects/wide-stdio-shims.o" \
   "$objects/numeric.o" "$objects/scanf.o" "$objects/scanf-entry.o" \
@@ -261,7 +303,7 @@ native="$build/libdarwin-art-bionic-native-providers.a"
   "$objects/syscall.o" "$objects/syscall-entry.o" \
   "$objects/strerror.o" "$objects/wide-integer.o" "$objects/wide-float.o" \
   "$objects/abort.o" \
-  "$objects/liblog.o" "$objects/liblog-aapcs64.o" "$objects/namespace.o" \
+  "$objects/liblog.o" "$objects/liblog-assert.o" "$objects/liblog-aapcs64.o" "$objects/namespace.o" \
   "$objects/builtin_adapters.o" \
   "$objects/math.o"
 
@@ -270,8 +312,10 @@ binary128="$build/libdarwin-art-bionic-binary128-conversion.a"
 icu="$root/_build/icu-foundation"
 smoke="$build/full-link-smoke"
 "$cxx" "${cxxflags[@]}" \
+  -I"$root/tools/bionic-stdio-facade/include" \
   -I"$root/tools/bionic-provider-namespace/include" \
   -I"$root/tools/bionic-provider-namespace/generated" \
+  -I"$root/tools/bionic-process-state-facade/include" \
   -I"$root/tools/bionic-fs-facade/include" \
   -I"$root/tools/bionic-ioctl-facade/include" \
   -I"$root/tools/bionic-central-fd-broker/include" \
@@ -279,7 +323,20 @@ smoke="$build/full-link-smoke"
   -I"$root/tools/bionic-dns-facade/include" \
   -I"$root/tools/bionic-vm-facade/include" \
   -I"$root/_aosp/system/logging/liblog/include" \
-  "$module/full_link_smoke.cc" -Wl,-force_load,"$binary128" \
+  "$module/full_link_smoke.cc" "$root/tools/android16-ftw/traversal_smoke.cc" \
+  "$module/property_iteration_smoke.cc" \
+  "$module/signed_numeric_smoke.cc" \
+  "$module/mkdirat_smoke.cc" \
+  "$module/credentials_snapshot_smoke.cc" \
+  "$root/tools/bionic-socket-broker-adapter/probes/unix_connect.cc" \
+  "$root/tools/bionic-socket-broker-adapter/probes/fdsan.cc" \
+  "$root/tools/android16-property-client/client_smoke.cc" \
+  "$root/tools/bionic-process-state-facade/probes/configured_snapshot.cc" \
+  "$root/tools/bionic-stdio-facade/probes/fortify_stream.cc" \
+  "$root/tools/android-liblog-exec-provider/buf_print_call_test.S" \
+  "$root/tools/android-liblog-exec-provider/assert_call_test.S" \
+  "$root/tools/android-liblog-exec-provider/assert_call_test.cc" \
+  -Wl,-force_load,"$binary128" \
   "$native" "$float" "$rust" \
   -Wl,-force_load,"$icu/libandroidicuinit-darwin.a" \
   "$icu/libicuuc-common-darwin.a" "$icu/libicuuc-stubdata-darwin.a" \
@@ -301,10 +358,12 @@ _darwin_art_bionic_float_conversion_resolve
 _darwin_art_bionic_format_resolve
 _darwin_art_bionic_formatted_stdio_resolve
 _darwin_art_bionic_fs_resolve
+_darwin_art_bionic_ftw_resolve
 _darwin_art_bionic_libc_leaf_resolve
 _darwin_art_bionic_locale_resolve
 _darwin_art_bionic_numeric_resolve
 _darwin_art_bionic_process_state_resolve
+_darwin_art_bionic_property_client_resolve
 _darwin_art_bionic_pthread_resolve
 _darwin_art_bionic_scanf_resolve
 _darwin_art_bionic_sendfile_resolve
@@ -413,4 +472,4 @@ if otool -L "$smoke" | grep -E '(/opt/homebrew|/usr/local|libicu(uc|i18n))' >/de
   echo 'bionic-runtime-provider-closure: host/dynamic ICU escaped' >&2
   exit 2
 fi
-echo 'bionic-runtime-provider-closure: PASS providers=36 bind_builtins=sealed routes=412 Rust+C+C++=linked duplicate-provider=0 ICU-owner=1 host-fallback=0'
+echo 'bionic-runtime-provider-closure: PASS providers=36 bind_builtins=sealed Rust+C+C++=linked duplicate-provider=0 ICU-owner=1 host-fallback=0'

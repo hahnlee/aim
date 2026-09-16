@@ -1,0 +1,11 @@
+# Android 16 android.os.Process.readProcLines contract and AOSP owner.
+FRAMEWORK_PROCESS_PATH=_prebuilt/android-16/bootclasspath/framework.jar
+FRAMEWORK_PROCESS_SHA256=ae3d578e3c4cd28ad822d0bc7b35fa308800f440472f54f2aff8aa5c1e22cd91
+PROCESS_CLASS_DESCRIPTOR=android.os.Process
+READ_PROC_LINES_SIGNATURE='void readProcLines(java.lang.String,java.lang.String[],long[])'
+READ_PROC_LINES_JNI_SIGNATURE='(Ljava/lang/String;[Ljava/lang/String;[J)V'
+READ_PROC_FILE_JNI_SIGNATURE='(Ljava/lang/String;[I[Ljava/lang/String;[J[F)Z'
+PARSE_PROC_LINE_JNI_SIGNATURE='([BII[I[Ljava/lang/String;[J[F)Z'
+AOSP_PROCESS_SOURCE_REVISION=99b01a65cc4c104933788b3143285ab6bae65827
+AOSP_PROCESS_SOURCE_PATH=core/jni/android_util_Process.cpp
+AOSP_PROCESS_SOURCE_SHA256=766777892bfc062b444f38308de5ac642dc00bd7e96dff445e7fbd39957c73ac

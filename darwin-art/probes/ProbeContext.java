@@ -13,6 +13,7 @@ import android.content.IntentFilter;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
+import dev.darwinart.runtime.os.RemoteBinder;
 import android.content.pm.PackageManager;
 import android.content.pm.ProbeShortcutManager;
 import android.content.pm.ShortcutManager;
@@ -47,12 +48,16 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import android.app.Application;
 import android.app.Service;
 import android.app.job.JobScheduler;
 import android.test.mock.MockContext;
 
 public final class ProbeContext extends ContextWrapper {
+    // Waiting for a newly spawned ART process must not block the caller's
+    // Looper. In particular Chromium needs that Looper to connect its GPU.
+    private static final Executor serviceReadiness = Executors.newFixedThreadPool(4);
     /**
      * Terminal ContextImpl-shaped owner for APIs that deliberately unwrap every
      * ContextWrapper before invoking hidden framework methods. Android's real
@@ -178,58 +183,10 @@ public final class ProbeContext extends ContextWrapper {
         }
     }
 
-    private static final class RemoteServiceBinder extends Binder {
-        final int hostPid;
-        final int controlFd;
-        final int targetId;
-
-        RemoteServiceBinder(int hostPid, int controlFd) {
-            this(hostPid, controlFd, 1);
-        }
-
-        RemoteServiceBinder(int hostPid, int controlFd, int targetId) {
-            this.hostPid = hostPid;
-            this.controlFd = controlFd;
-            this.targetId = targetId;
-            // Generated AIDL stubs return a local service only when this
-            // owner is non-null. A null owner deliberately selects the Proxy
-            // path, matching a Binder in another Android process.
-            attachInterface(null, queryRemoteInterfaceDescriptor(controlFd, targetId));
-        }
-
-        private static String queryRemoteInterfaceDescriptor(int controlFd, int targetId) {
-            Parcel data = Parcel.obtain();
-            Parcel reply = Parcel.obtain();
-            try {
-                if (!nativeRemoteTransact(controlFd, targetId,
-                        IBinder.INTERFACE_TRANSACTION, data, reply, 0)) {
-                    throw new IllegalStateException(
-                            "remote Binder rejected INTERFACE_TRANSACTION");
-                }
-                String descriptor = reply.readString();
-                if (descriptor == null || descriptor.isEmpty()) {
-                    throw new IllegalStateException("remote Binder has no descriptor");
-                }
-                return descriptor;
-            } finally {
-                reply.recycle();
-                data.recycle();
-            }
-        }
-
-        @Override
-        protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
-                throws RemoteException {
-            return nativeRemoteTransact(controlFd, targetId, code, data, reply, flags);
-        }
-    }
-
     private static native int[] nativeSpawnService(
             String component, String instanceName, String processName, boolean isolated,
             Intent intent);
     private static native int nativeReleaseRemoteService(int hostPid, int controlFd);
-    private static native boolean nativeRemoteTransact(
-            int controlFd, int targetId, int code, Parcel data, Parcel reply, int flags);
 
     private static final class MainExecutor implements Executor {
         @Override
@@ -263,15 +220,11 @@ public final class ProbeContext extends ContextWrapper {
         // thread, so consulting that thread's mutable context loader would
         // otherwise make LayoutInflater lose APK-owned custom views.
         classLoader = ProbeContext.class.getClassLoader();
-        applicationInfo = new ApplicationInfo();
-        applicationInfo.packageName = this.packageName;
-        applicationInfo.targetSdkVersion = 36;
-        applicationInfo.nativeLibraryDir = System.getenv(
-                "DARWIN_ART_APK_APP_NATIVE_DIR");
-        ProbePackageManager.applyApplicationPaths(applicationInfo);
-        ProbePackageManager.applyApplicationLabel(applicationInfo, resources);
-        ProbePackageManager.applyApplicationIcon(applicationInfo);
-        ProbePackageManager.applyApplicationMetadata(applicationInfo, resources);
+        try {
+            applicationInfo = packageManager.getApplicationInfo(this.packageName, 0);
+        } catch (PackageManager.NameNotFoundException missing) {
+            throw new IllegalStateException("Context package is not installed", missing);
+        }
         attributionSource = new AttributionSource.Builder(1000)
                 .setPackageName(getPackageName())
                 .build();
@@ -535,7 +488,7 @@ public final class ProbeContext extends ContextWrapper {
             }
             final IBinder binder;
             try {
-                binder = new RemoteServiceBinder(child[0], child[1]);
+                binder = new RemoteBinder(child[1], 1);
             } catch (RuntimeException error) {
                 android.util.Log.w("DarwinServiceBridge",
                         "isolated Service endpoint failed before ready: " + component
@@ -588,7 +541,7 @@ public final class ProbeContext extends ContextWrapper {
             }
             final IBinder binder;
             try {
-                binder = new RemoteServiceBinder(child[0], child[1]);
+                binder = new RemoteBinder(child[1], 1);
             } catch (RuntimeException error) {
                 android.util.Log.w("DarwinServiceBridge",
                         "remote Service endpoint failed before ready: " + component, error);
@@ -621,7 +574,9 @@ public final class ProbeContext extends ContextWrapper {
 
     private void dispatchServiceConnected(Executor executor, ServiceConnection connection,
             ComponentName component, IBinder binder) {
-        executor.execute(() -> {
+        Runnable connected = () -> {
+            BoundServiceRecord current = serviceConnections.get(connection);
+            if (current == null || current.binder != binder) return;
             android.util.Log.i("DarwinServiceBridge", "service connection dispatch " + component
                     + " connection=" + connection.getClass().getName()
                     + " thread=" + Thread.currentThread().getName());
@@ -632,7 +587,26 @@ public final class ProbeContext extends ContextWrapper {
                         + " connection=" + connection.getClass().getName()
                         + " thread=" + Thread.currentThread().getName());
             }
-        });
+        };
+        if (binder instanceof RemoteBinder) {
+            serviceReadiness.execute(() -> {
+                try {
+                    ((RemoteBinder) binder).awaitReady();
+                    executor.execute(connected);
+                } catch (RuntimeException error) {
+                    android.util.Log.w("DarwinServiceBridge",
+                            "Service failed before connection: " + component, error);
+                    executor.execute(() -> {
+                        BoundServiceRecord current = serviceConnections.get(connection);
+                        if (current == null || current.binder != binder) return;
+                        unbindService(connection);
+                        connection.onBindingDied(component);
+                    });
+                }
+            });
+        } else {
+            executor.execute(connected);
+        }
     }
 
     @Override

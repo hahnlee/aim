@@ -8,12 +8,32 @@
 
 use darwin_art_abi::StatusCode;
 
+#[cfg(target_os = "macos")]
+mod bound_service_process_ffi;
 mod lifecycle;
+mod linker_load_flags;
+pub mod linker_namespace;
+#[cfg(unix)]
+mod linker_namespace_ffi;
 mod native_owner;
+#[cfg(target_os = "macos")]
+mod network_path;
 mod owners;
+mod package_records;
+mod process_registry;
 mod provider;
 mod provider_bridge;
 mod provider_kind;
+#[cfg(target_os = "macos")]
+mod scheduling;
+#[cfg(target_os = "macos")]
+mod scheduling_groups;
+#[cfg(target_os = "macos")]
+mod service_endpoint;
+#[cfg(target_os = "macos")]
+mod service_endpoint_ffi;
+#[cfg(target_os = "macos")]
+mod service_readiness;
 mod session;
 mod shutdown;
 

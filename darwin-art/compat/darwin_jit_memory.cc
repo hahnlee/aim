@@ -22,7 +22,13 @@ struct JitMethodEntry {
 // the application's range and caused implicit-null faults to reach the user
 // SIGSEGV handler. Keep ample headroom for boot plus app code while retaining
 // the signal-safe, bounded representation.
-constexpr size_t kJitMethodEntries = 16384;
+// Android's boot image already contributes tens of thousands of compiled
+// methods before a large application such as Chromium starts publishing app
+// AOT and JIT code.  The registry is read from the signal path, so it cannot
+// grow or take a lock after publication.  Keep enough fixed capacity for the
+// boot, framework, application and JIT ranges instead of silently dropping
+// the first app ranges once the old 16K table filled.
+constexpr size_t kJitMethodEntries = 131072;
 // A non-zero reservation marker keeps signal-path readers from observing a
 // slot between its start CAS and the publication of end/method.
 constexpr uintptr_t kJitEntryPublishing = 1u;

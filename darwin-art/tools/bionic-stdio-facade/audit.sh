@@ -35,12 +35,17 @@ ndk="${ANDROID_NDK_ROOT:-$HOME/Library/Android/sdk/ndk/$NDK_REVISION}";inc="$ndk
 check "$ndk/source.properties" "$NDK_SOURCE_PROPERTIES_SHA256";check "$inc/stdio.h" "$NDK_STDIO_SHA256";check "$inc/bits/struct_file.h" "$NDK_STRUCT_FILE_SHA256"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/bionic-stdio.XXXXXX")";trap 'find "$tmp" -depth -delete' EXIT
 "$cc" -std=c17 -Wall -Wextra -Werror -Wpedantic -fsyntax-only "$dir/probes/abi.c"
+clang -std=c17 -Wall -Wextra -Werror -I"$dir/include" \
+  "$dir/src/fortify.c" "$dir/probes/fortify.c" -o "$tmp/fortify"
+"$tmp/fortify"
 clang -arch arm64 -isysroot "$(xcrun --sdk macosx --show-sdk-path)" -std=c17 -O2 -Wall -Wextra -Werror -Wpedantic -I"$dir/include" -c "$dir/src/shims.c" -o "$tmp/shims.o"
 nm -u "$tmp/shims.o"|sed 's/^[[:space:]]*//'|sort >"$tmp/u";cat >"$tmp/e" <<'EOF'
 ___error
 ___stack_chk_fail
 ___stack_chk_guard
 _darwin_art_bionic_atoi
+_darwin_art_bionic___fread_chk
+_darwin_art_bionic___fwrite_chk
 _darwin_art_bionic_errno_load
 _darwin_art_bionic_errno_store
 _darwin_art_bionic_realloc

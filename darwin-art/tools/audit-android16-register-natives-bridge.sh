@@ -304,6 +304,12 @@ common_flags=(-std=c++20 -arch arm64 -isysroot "$macos_sdk" -O2 -Wall -Wextra -W
   "$stage/libdarwin-art-registered-native-bridge.a" \
   -o "$stage/registered-native-bridge-smoke"
 
+"$cxx" "${common_flags[@]}" -O1 -g -fsanitize=address,undefined \
+  "$bridge_root/registered_native_bridge.cc" \
+  "$bridge_root/registered_native_lifetime_test.cc" \
+  -o "$stage/registered-native-lifetime-test"
+"$stage/registered-native-lifetime-test"
+
 file "$stage/registered_native_bridge.o" | grep -F 'Mach-O 64-bit object arm64' >/dev/null ||
   fail "bridge object is not Darwin arm64"
 [[ "$($ar -t "$stage/libdarwin-art-registered-native-bridge.a" | grep -c '\.o$' | tr -d ' ')" == 1 ]] ||

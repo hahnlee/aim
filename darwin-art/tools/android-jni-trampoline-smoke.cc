@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -86,6 +87,11 @@ int main() {
                &error) == nullptr);
     assert(!error.empty());
   }
+  // Reject oversized request counts before allocating any per-request state.
+  error.clear();
+  assert(CreateRegularTrampolines(reinterpret_cast<void*>(uintptr_t{0x5000}),
+             requests, std::numeric_limits<size_t>::max(), &error) == nullptr);
+  assert(!error.empty());
   std::puts("android-jni-trampoline: PASS scalar-ref=ZBCSIJFDL returns=all "
             "gp-fp=independent stack=darwin-natural-to-android-8byte "
             "cache=target+shorty wx=rw-to-rx multipage=309 "

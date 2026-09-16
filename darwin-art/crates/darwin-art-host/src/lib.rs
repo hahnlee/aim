@@ -1,6 +1,9 @@
 #[cfg(target_os = "macos")]
+mod app_display;
+#[cfg(target_os = "macos")]
 mod bootstrap;
 mod config;
+pub mod external_storage;
 mod frame;
 #[cfg(target_os = "macos")]
 mod frame_clock;
@@ -13,13 +16,24 @@ mod gpu_loop;
 mod gpu_test_config;
 #[cfg(target_os = "macos")]
 mod host_services;
+mod macho_load_commands;
+#[cfg(target_os = "macos")]
+mod process_credentials;
+mod process_filesystem;
 #[cfg(target_os = "macos")]
 mod process_signal;
+#[cfg(target_os = "macos")]
+mod process_snapshot;
 mod run;
 #[cfg(target_os = "macos")]
 mod runtime;
+pub mod runtime_identity;
+mod runtime_native_inventory;
 #[cfg(target_os = "macos")]
 mod surface;
+pub mod system_image;
+mod system_service_configuration;
+pub mod system_service_start;
 #[cfg(target_os = "macos")]
 mod teardown;
 

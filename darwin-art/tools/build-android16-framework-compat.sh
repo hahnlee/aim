@@ -48,13 +48,6 @@ javac --release 8 -encoding UTF-8 -d "$classes" -classpath "$android_jar" \
   "$root/tools/android-framework-compat/src/android/util/StatsEvent.java" \
   "$root/tools/android-framework-compat/src/android/util/StatsLog.java" \
   "$root/compat/java/android/media/MediaCommunicationManager.java" \
-  "$root/compat/java/android/net/ConnectivityManager.java" \
-  "$root/compat/java/android/net/LinkProperties.java" \
-  "$root/compat/java/android/net/Network.java" \
-  "$root/compat/java/android/net/NetworkCapabilities.java" \
-  "$root/compat/java/android/net/NetworkInfo.java" \
-  "$root/compat/java/android/net/NetworkRequest.java" \
-  "$root/tools/android-framework-compat/src/android/net/TrafficStats.java" \
   "$root/tools/android-framework-compat/src/android/telephony/TelephonyManager.java" \
   "$root/tools/android-framework-compat/src/dev/darwinart/security/DarwinSecurityProvider.java" \
   "$root/tools/android-framework-compat/src/dev/darwinart/security/DarwinHttpsDiagnostic.java" \
@@ -78,18 +71,6 @@ fi
   "$classes/android/util/StatsLog.class" \
   "$classes/android/media/MediaCommunicationManager.class" \
   "$classes/android/media/MediaCommunicationManager\$SessionCallback.class" \
-  "$classes/android/net/ConnectivityManager.class" \
-  "$classes/android/net/ConnectivityManager\$NetworkCallback.class" \
-  "$classes/android/net/ConnectivityManager\$OnNetworkActiveListener.class" \
-  "$classes/android/net/LinkProperties.class" \
-  "$classes/android/net/Network.class" \
-  "$classes/android/net/NetworkCapabilities.class" \
-  "$classes/android/net/NetworkInfo.class" \
-  "$classes/android/net/NetworkRequest.class" \
-  "$classes/android/net/NetworkRequest\$Builder.class" \
-  "$classes/android/net/NetworkRequest\$1.class" \
-  "$classes/android/net/TrafficStats.class" \
-  "$classes/android/net/TrafficStats\$1.class" \
   "$classes/android/telephony/TelephonyManager.class" \
   "$classes/dev/darwinart/security/DarwinSecurityProvider.class" \
   "$classes/dev/darwinart/security/DarwinHttpsDiagnostic.class" \
@@ -116,6 +97,27 @@ for extra_dex in "$out"/classes[2-9]*.dex; do
   next_dex=$((next_dex + 1))
 done
 (cd "$staged" && zip -q -qr "$out/framework-compat.jar" .)
+
+# Connectivity framework policy remains owned by the pinned Android 16
+# framework-connectivity boot jars. The compatibility output must not publish
+# a process-local definition ahead of those originals on the boot class path.
+connectivity_audit="$patched_root/framework-compat-dex-packages.txt"
+"$HOME/Library/Android/sdk/cmdline-tools/latest/bin/apkanalyzer" \
+  dex packages --defined-only "$out/framework-compat.jar" > "$connectivity_audit"
+for framework_class in \
+  android.net.ConnectivityManager \
+  android.net.LinkProperties \
+  android.net.Network \
+  android.net.NetworkCapabilities \
+  android.net.NetworkInfo \
+  android.net.NetworkRequest; do
+  if awk -v target="$framework_class" \
+      '$1 == "C" && ($NF == target || index($NF, target "$") == 1) { found = 1 }
+       END { exit(found ? 0 : 1) }' "$connectivity_audit"; then
+    echo "android16-framework-compat: shadowed framework class: $framework_class" >&2
+    exit 70
+  fi
+done
 core_out="$root/_build/android16-core-oj-compat"
 mkdir -p "$core_out"
 core_staged="$(mktemp -d "$core_out/staged.XXXXXX")"

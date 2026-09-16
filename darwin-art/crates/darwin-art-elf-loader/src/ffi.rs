@@ -16,12 +16,55 @@ use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
 use std::{fs::File, io::Read};
 
+#[path = "ffi_admitted_graph.rs"]
+mod ffi_admitted_graph;
+#[path = "ffi_discovered_load.rs"]
+mod ffi_discovered_load;
 #[path = "ffi_discovery.rs"]
 mod ffi_discovery;
+#[path = "ffi_discovery_identity.rs"]
+mod ffi_discovery_identity;
+#[path = "ffi_file.rs"]
+mod ffi_file;
+#[path = "ffi_finalization.rs"]
+mod ffi_finalization;
+#[path = "ffi_graph_discovery.rs"]
+mod ffi_graph_discovery;
+#[path = "ffi_graph_load.rs"]
+mod ffi_graph_load;
+#[path = "ffi_group_identity.rs"]
+mod ffi_group_identity;
+#[path = "ffi_initialization.rs"]
+mod ffi_initialization;
+#[path = "ffi_namespace_scopes.rs"]
+mod ffi_namespace_scopes;
+#[path = "ffi_native_owners.rs"]
+mod ffi_native_owners;
+#[path = "ffi_owned_lifecycle.rs"]
+mod ffi_owned_lifecycle;
+#[path = "ffi_page_compat.rs"]
+mod ffi_page_compat;
+use ffi_owned_lifecycle::CallbackDsoLifecycle;
+#[path = "ffi_resident_graph.rs"]
+mod ffi_resident_graph;
+#[path = "ffi_resident_metadata.rs"]
+mod ffi_resident_metadata;
+#[path = "ffi_selected_identity.rs"]
+mod ffi_selected_identity;
+#[path = "ffi_selected_image.rs"]
+mod ffi_selected_image;
+#[path = "ffi_source_owners.rs"]
+mod ffi_source_owners;
 #[path = "ffi_types.rs"]
 mod ffi_types;
 
+#[cfg(test)]
+pub use ffi_discovery::darwin_art_elf_inspection_runpath;
 pub use ffi_types::*;
+#[path = "ffi_dynamic_flags.rs"]
+mod ffi_dynamic_flags;
+#[cfg(test)]
+pub use ffi_dynamic_flags::darwin_art_elf_inspection_flags_1;
 
 use ffi_discovery::{discover_sibling_graph, inspection_from_bytes, validate_discovery_component};
 
@@ -37,44 +80,6 @@ const MAX_DISCOVERY_COMPONENT_SIZE: usize = 255;
 
 unsafe extern "C" {
     fn dup(fd: i32) -> i32;
-}
-
-struct CallbackDsoLifecycle {
-    publish: DarwinArtElfPublishImageCallback,
-    finalize: DarwinArtElfFinalizeImageCallback,
-    context: usize,
-}
-
-// SAFETY: the embedding contract requires the callback context to remain live and permits calls
-// from any graph owner thread until the final graph clone is destroyed.
-unsafe impl Send for CallbackDsoLifecycle {}
-unsafe impl Sync for CallbackDsoLifecycle {}
-
-impl DsoLifecycle for CallbackDsoLifecycle {
-    fn publish_image(&self, range: std::ops::Range<usize>) -> Result<(), String> {
-        // SAFETY: callbacks and context were validated and are retained by this owner.
-        let status = unsafe { (self.publish)(self.context as *mut c_void, range.start, range.end) };
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(format!(
-                "image lifecycle publish callback failed with status {status}"
-            ))
-        }
-    }
-
-    fn finalize_image(&self, range: std::ops::Range<usize>) -> Result<(), String> {
-        // SAFETY: the callback/context lifetime contract extends through synchronous teardown.
-        let status =
-            unsafe { (self.finalize)(self.context as *mut c_void, range.start, range.end) };
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(format!(
-                "image lifecycle finalize callback failed with status {status}"
-            ))
-        }
-    }
 }
 
 enum FfiFailure {
@@ -103,6 +108,7 @@ impl FfiFailure {
                 NamespaceError::SonameMismatch { .. } => DarwinArtElfStatus::Format,
                 NamespaceError::Load { source, .. } => load_error_status(source),
                 NamespaceError::Lifecycle { .. } => DarwinArtElfStatus::Lifecycle,
+                NamespaceError::Scope(_) => DarwinArtElfStatus::InvalidArgument,
             },
         }
     }
@@ -342,11 +348,9 @@ fn lock_image(handle: &DarwinArtElfHandle) -> Result<MutexGuard<'_, LoadedElf>, 
     handle.image.lock().map_err(|_| FfiFailure::Poisoned)
 }
 
-fn lock_graph(
-    handle: &DarwinArtElfGraphHandle,
-) -> Result<MutexGuard<'_, LoadedElfGraph>, FfiFailure> {
-    handle.graph.lock().map_err(|_| FfiFailure::Poisoned)
-}
+#[path = "ffi_graph_owner.rs"]
+mod ffi_graph_owner;
+use ffi_graph_owner::{lock_graph, select_graph_image};
 
 unsafe fn required_utf8(value: *const c_char, field: &'static str) -> Result<String, FfiFailure> {
     if value.is_null() {
@@ -713,129 +717,21 @@ pub unsafe extern "C" fn darwin_art_elf_graph_load_with_lifecycle(
     out_handle: *mut *mut DarwinArtElfGraphHandle,
     error: *mut DarwinArtElfErrorBuffer,
 ) -> DarwinArtElfStatus {
-    ffi_call(error, || {
-        if out_handle.is_null() {
-            return Err(FfiFailure::Invalid("out_handle is null"));
-        }
-        // SAFETY: validated non-null writable out parameter.
-        unsafe { *out_handle = ptr::null_mut() };
-        if source_count == 0 {
-            return Err(FfiFailure::Invalid("ELF graph has no sources"));
-        }
-        if sources.is_null() {
-            return Err(FfiFailure::Invalid("ELF graph sources are null"));
-        }
-        if source_count > MAX_INPUT_SIZE / std::mem::size_of::<DarwinArtElfGraphSource>() {
-            return Err(FfiFailure::Invalid("ELF graph source count is excessive"));
-        }
-        if provider_count != 0 && provider_sonames.is_null() {
-            return Err(FfiFailure::Invalid("ELF graph providers are null"));
-        }
-        if provider_count > MAX_INPUT_SIZE / std::mem::size_of::<*const c_char>() {
-            return Err(FfiFailure::Invalid("ELF graph provider count is excessive"));
-        }
-        // SAFETY: the C contract supplies source_count readable source records.
-        let sources = unsafe { std::slice::from_raw_parts(sources, source_count) };
-        // SAFETY: the C contract supplies provider_count readable string pointers.
-        let providers = unsafe {
-            std::slice::from_raw_parts(
-                if provider_sonames.is_null() {
-                    NonNull::<*const c_char>::dangling().as_ptr()
-                } else {
-                    provider_sonames
-                },
-                provider_count,
-            )
-        };
-        // SAFETY: validated by required_utf8 for this synchronous call.
-        let root = unsafe { required_utf8(root_soname, "root_soname is null")? };
-        let mut namespace = ClosedElfNamespace::new();
-        let mut total_size = 0_usize;
-        for source in sources {
-            // SAFETY: source strings and byte ranges are borrowed for this synchronous call.
-            let soname = unsafe { required_utf8(source.soname, "source SONAME is null")? };
-            if source.length != 0 && source.bytes.is_null() {
-                return Err(FfiFailure::Invalid(
-                    "source bytes are null for nonzero length",
-                ));
-            }
-            total_size = total_size
-                .checked_add(source.length)
-                .ok_or(FfiFailure::Invalid("ELF graph byte size overflow"))?;
-            if total_size > MAX_INPUT_SIZE {
-                return Err(FfiFailure::Invalid("ELF graph exceeds 1 GiB limit"));
-            }
-            // SAFETY: validated null/length shape and guaranteed readable by the C contract.
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    if source.bytes.is_null() {
-                        NonZeroUsize::MIN.get() as *const u8
-                    } else {
-                        source.bytes
-                    },
-                    source.length,
-                )
-            };
-            namespace
-                .add_elf(soname, bytes)
-                .map_err(FfiFailure::Namespace)?;
-        }
-        for &provider in providers {
-            // SAFETY: provider strings are borrowed for this synchronous call.
-            let provider = unsafe { required_utf8(provider, "provider SONAME is null")? };
-            namespace
-                .add_provider(provider)
-                .map_err(FfiFailure::Namespace)?;
-        }
-
-        let lifecycle: Option<Arc<dyn DsoLifecycle>> = if lifecycle.is_null() {
-            None
-        } else {
-            // SAFETY: the C contract supplies one readable lifecycle callback record.
-            let lifecycle = unsafe { &*lifecycle };
-            if lifecycle.abi_version != ABI_VERSION {
-                return Err(FfiFailure::Invalid(
-                    "lifecycle callback ABI version mismatch",
-                ));
-            }
-            let publish = lifecycle
-                .publish_image
-                .ok_or(FfiFailure::Invalid("publish_image callback is null"))?;
-            let finalize = lifecycle
-                .finalize_image
-                .ok_or(FfiFailure::Invalid("finalize_image callback is null"))?;
-            Some(Arc::new(CallbackDsoLifecycle {
-                publish,
-                finalize,
-                context: lifecycle.context as usize,
-            }))
-        };
-        let options = options_from_pointer(options)?;
-        let graph = match options.and_then(|options| {
-            options
-                .resolver
-                .map(|callback| (callback, options.resolver_context))
-        }) {
-            Some((callback, context)) => {
-                let mut resolver = CallbackResolver { callback, context };
-                namespace
-                    .load_with_resolver_and_lifecycle(&root, &mut resolver, lifecycle)
-                    .map_err(FfiFailure::Namespace)?
-            }
-            None => {
-                let mut resolver = crate::RejectAllResolver;
-                namespace
-                    .load_with_resolver_and_lifecycle(&root, &mut resolver, lifecycle)
-                    .map_err(FfiFailure::Namespace)?
-            }
-        };
-        let handle = Box::new(DarwinArtElfGraphHandle {
-            graph: Mutex::new(graph),
-        });
-        // Publish only after recursive relocation and every constructor has succeeded.
-        unsafe { *out_handle = Box::into_raw(handle) };
-        Ok(())
-    })
+    unsafe {
+        ffi_graph_load::darwin_art_elf_graph_load_with_globals(
+            root_soname,
+            sources,
+            source_count,
+            provider_sonames,
+            provider_count,
+            options,
+            lifecycle,
+            ptr::null(),
+            0,
+            out_handle,
+            error,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -903,7 +799,7 @@ pub unsafe extern "C" fn darwin_art_elf_graph_clone(
         let handle = unsafe { handle.as_ref() }.ok_or(FfiFailure::Invalid("handle is null"))?;
         let graph = lock_graph(handle)?.clone();
         let clone = Box::new(DarwinArtElfGraphHandle {
-            graph: Mutex::new(graph),
+            owner: GraphHandleOwner::Graph(Mutex::new(graph)),
         });
         unsafe { *out_handle = Box::into_raw(clone) };
         Ok(())

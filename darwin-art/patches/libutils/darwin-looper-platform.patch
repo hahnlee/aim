@@ -1,0 +1,215 @@
+--- a/Looper.cpp
++++ b/Looper.cpp
+@@ -19,7 +19,7 @@
+
+ #include <utils/Looper.h>
+
+-#include <sys/eventfd.h>
++#include <vector>
+ #include <cinttypes>
+
+ namespace android {
+@@ -34,6 +34,34 @@
+
+ }  // namespace
+
++
++int Looper::controlPoll(int operation, int fd, const epoll_event* event,
++                        const DarwinArtLooperRegistration* removed) {
++    DarwinArtLooperRegistration previous{};
++    if (removed) previous = *removed;
++    else if (operation == EPOLL_CTL_MOD) {
++        auto sequence = mSequenceNumberByFd.find(fd);
++        if (sequence == mSequenceNumberByFd.end()) { errno = ENOENT; return -1; }
++        auto request = mRequests.find(sequence->second);
++        if (request == mRequests.end()) { errno = ENOENT; return -1; }
++        const auto mask = request->second.getEpollEvents();
++        previous = {sequence->second,
++            ((mask & EPOLLIN) ? 1u : 0u) | ((mask & EPOLLOUT) ? 2u : 0u), 0}; if (!previous.mask) previous.mask = 4;
++    }
++    DarwinArtLooperRegistration next{};
++    if (event) {
++        next = {event->data.u64,
++            ((event->events & EPOLLIN) ? 1u : 0u) | ((event->events & EPOLLOUT) ? 2u : 0u), 0};
++        // Android monitors terminal conditions even without INPUT/OUTPUT.
++        // Explicit native error-only mode is distinct from removing a watch.
++        if (next.mask == 0) next.mask = 4;
++    }
++    const auto result = mEpollFd.transition(fd, previous, next);
++    if (result.rollback_error) scheduleEpollRebuildLocked();
++    if (result.operation_error) { errno = result.operation_error; return -1; }
++    return 0;
++}
++
+ // --- WeakMessageHandler ---
+
+ WeakMessageHandler::WeakMessageHandler(const wp<MessageHandler>& handler) :
+@@ -80,7 +108,7 @@
+       mNextRequestSeq(WAKE_EVENT_FD_SEQ + 1),
+       mResponseIndex(0),
+       mNextMessageUptime(LLONG_MAX) {
+-    mWakeEventFd.reset(eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC));
++    mWakeEventFd.initialize();
+     LOG_ALWAYS_FATAL_IF(mWakeEventFd.get() < 0, "Could not make wake event fd: %s", strerror(errno));
+
+     AutoMutex _l(mLock);
+@@ -117,27 +145,17 @@
+ }
+
+ void Looper::rebuildEpollLocked() {
+-    // Close old epoll instance if we have one.
+-    if (mEpollFd >= 0) {
+-#if DEBUG_CALLBACKS
+-        ALOGD("%p ~ rebuildEpollLocked - rebuilding epoll set", this);
+-#endif
+-        mEpollFd.reset();
+-    }
++    LOG_ALWAYS_FATAL_IF(!mEpollFd.reset(), "Could not create native poll set: %s", strerror(errno));
+
+-    // Allocate the new epoll instance and register the WakeEventFd.
+-    mEpollFd.reset(epoll_create1(EPOLL_CLOEXEC));
+-    LOG_ALWAYS_FATAL_IF(mEpollFd < 0, "Could not create epoll instance: %s", strerror(errno));
+-
+     epoll_event wakeEvent = createEpollEvent(EPOLLIN, WAKE_EVENT_FD_SEQ);
+-    int result = epoll_ctl(mEpollFd.get(), EPOLL_CTL_ADD, mWakeEventFd.get(), &wakeEvent);
++    int result = controlPoll(EPOLL_CTL_ADD, mWakeEventFd.get(), &wakeEvent);
+     LOG_ALWAYS_FATAL_IF(result != 0, "Could not add wake event fd to epoll instance: %s",
+                         strerror(errno));
+
+     for (const auto& [seq, request] : mRequests) {
+         epoll_event eventItem = createEpollEvent(request.getEpollEvents(), seq);
+
+-        int epollResult = epoll_ctl(mEpollFd.get(), EPOLL_CTL_ADD, request.fd, &eventItem);
++        int epollResult = controlPoll(EPOLL_CTL_ADD, request.fd, &eventItem);
+         if (epollResult < 0) {
+             ALOGE("Error adding epoll events for fd %d while rebuilding epoll set: %s",
+                   request.fd, strerror(errno));
+@@ -219,7 +237,15 @@
+     mPolling = true;
+
+     struct epoll_event eventItems[EPOLL_MAX_EVENTS];
+-    int eventCount = epoll_wait(mEpollFd.get(), eventItems, EPOLL_MAX_EVENTS, timeoutMillis);
++    DarwinArtLooperReadyEvent nativeEvents[EPOLL_MAX_EVENTS];
++    int eventCount = mEpollFd.wait(nativeEvents, EPOLL_MAX_EVENTS, timeoutMillis);
++    for (int i = 0; i < eventCount; ++i) {
++        const auto flags = nativeEvents[i].flags;
++        eventItems[i] = createEpollEvent(
++                ((flags & 1) ? EPOLLIN : 0) | ((flags & 2) ? EPOLLOUT : 0) |
++                ((flags & 4) ? EPOLLHUP : 0) | ((flags & 8) ? EPOLLERR : 0),
++                nativeEvents[i].token);
++    }
+
+     // No longer idling.
+     mPolling = false;
+@@ -384,7 +410,7 @@
+ #endif
+
+     uint64_t inc = 1;
+-    ssize_t nWrite = TEMP_FAILURE_RETRY(write(mWakeEventFd.get(), &inc, sizeof(uint64_t)));
++    ssize_t nWrite = TEMP_FAILURE_RETRY(mWakeEventFd.signal(inc));
+     if (nWrite != sizeof(uint64_t)) {
+         if (errno != EAGAIN) {
+             LOG_ALWAYS_FATAL("Could not write wake signal to fd %d (returned %zd): %s",
+@@ -399,7 +425,7 @@
+ #endif
+
+     uint64_t counter;
+-    TEMP_FAILURE_RETRY(read(mWakeEventFd.get(), &counter, sizeof(uint64_t)));
++    TEMP_FAILURE_RETRY(mWakeEventFd.drain(&counter));
+ }
+
+ int Looper::addFd(int fd, int ident, int events, Looper_callbackFunc callback, void* data) {
+@@ -446,7 +472,7 @@
+         epoll_event eventItem = createEpollEvent(request.getEpollEvents(), seq);
+         auto seq_it = mSequenceNumberByFd.find(fd);
+         if (seq_it == mSequenceNumberByFd.end()) {
+-            int epollResult = epoll_ctl(mEpollFd.get(), EPOLL_CTL_ADD, fd, &eventItem);
++            int epollResult = controlPoll(EPOLL_CTL_ADD, fd, &eventItem);
+             if (epollResult < 0) {
+                 ALOGE("Error adding epoll events for fd %d: %s", fd, strerror(errno));
+                 return -1;
+@@ -454,7 +480,7 @@
+             mRequests.emplace(seq, request);
+             mSequenceNumberByFd.emplace(fd, seq);
+         } else {
+-            int epollResult = epoll_ctl(mEpollFd.get(), EPOLL_CTL_MOD, fd, &eventItem);
++            int epollResult = controlPoll(EPOLL_CTL_MOD, fd, &eventItem);
+             if (epollResult < 0) {
+                 if (errno == ENOENT) {
+                     // Tolerate ENOENT because it means that an older file descriptor was
+@@ -475,7 +501,7 @@
+                             "being recycled, falling back on EPOLL_CTL_ADD: %s",
+                             this, strerror(errno));
+ #endif
+-                    epollResult = epoll_ctl(mEpollFd.get(), EPOLL_CTL_ADD, fd, &eventItem);
++                    epollResult = controlPoll(EPOLL_CTL_ADD, fd, &eventItem);
+                     if (epollResult < 0) {
+                         ALOGE("Error modifying or adding epoll events for fd %d: %s",
+                                 fd, strerror(errno));
+@@ -539,7 +565,7 @@
+             request_it->second.fd);
+
+     epoll_event eventItem = createEpollEvent(request.getEpollEvents(), seq);
+-    if (epoll_ctl(mEpollFd.get(), EPOLL_CTL_MOD, fd, &eventItem) == -1) return 0;
++    if (controlPoll(EPOLL_CTL_MOD, fd, &eventItem) == -1) return 0;
+
+     return 1;  // success
+ }
+@@ -554,13 +580,16 @@
+         return 0;
+     }
+     const int fd = request_it->second.fd;
++    const auto oldEvents = request_it->second.getEpollEvents();
++    DarwinArtLooperRegistration removed{seq,
++        ((oldEvents & EPOLLIN) ? 1u : 0u) | ((oldEvents & EPOLLOUT) ? 2u : 0u), 0}; if (!removed.mask) removed.mask = 4;
+
+     // Always remove the FD from the request map even if an error occurs while
+     // updating the epoll set so that we avoid accidentally leaking callbacks.
+     mRequests.erase(request_it);
+     mSequenceNumberByFd.erase(fd);
+
+-    int epollResult = epoll_ctl(mEpollFd.get(), EPOLL_CTL_DEL, fd, nullptr);
++    int epollResult = controlPoll(EPOLL_CTL_DEL, fd, nullptr, &removed);
+     if (epollResult < 0) {
+         if (errno == EBADF || errno == ENOENT) {
+             // Tolerate EBADF or ENOENT because it means that the file descriptor was closed
+--- a/include/utils/Looper.h
++++ b/include/utils/Looper.h
+@@ -22,7 +22,9 @@
+ #include <utils/Vector.h>
+ #include <utils/threads.h>
+
+-#include <sys/epoll.h>
++#include <native_poll_types.h>
++#include <wake_fd.h>
++#include <readiness_queue.h>
+
+ #include <android-base/unique_fd.h>
+
+@@ -471,7 +473,7 @@
+
+     const bool mAllowNonCallbacks; // immutable
+
+-    android::base::unique_fd mWakeEventFd;  // immutable
++    darwin_art::looper::WakeFd mWakeEventFd;  // immutable
+     Mutex mLock;
+
+     Vector<MessageEnvelope> mMessageEnvelopes; // guarded by mLock
+@@ -481,7 +483,7 @@
+     // any use of it is racy anyway.
+     volatile bool mPolling;
+
+-    android::base::unique_fd mEpollFd;  // guarded by mLock but only modified on the looper thread
++    darwin_art::looper::ReadinessQueue mEpollFd;  // guarded by mLock but only modified on the looper thread
+     bool mEpollRebuildRequired; // guarded by mLock
+
+     // Locked maps of fds and sequence numbers monitoring requests.
+@@ -499,6 +501,8 @@
+     size_t mResponseIndex;
+     nsecs_t mNextMessageUptime; // set to LLONG_MAX when none
+
++    int controlPoll(int operation, int fd, const epoll_event* event,
++                    const DarwinArtLooperRegistration* removed = nullptr);
+     int pollInner(int timeoutMillis);
+     int removeSequenceNumberLocked(SequenceNumber seq);  // requires mLock
+     void awoken();

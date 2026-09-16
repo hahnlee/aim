@@ -28,7 +28,11 @@ const ANDROID_MAP_NORESERVE: i32 = 0x4000;
 const ANDROID_MAP_STACK: i32 = 0x20000;
 const ANDROID_MREMAP_MAYMOVE: i32 = 0x1;
 
-const MAX_MAPPINGS: usize = 1024;
+// Keep the ordinary Linux-style VMA registry independent from the fixed-size,
+// async-signal-safe JIT view. Chromium legitimately creates more than 1,024
+// VMAs; the lower historic limit made mprotect fail with a synthetic ENOMEM.
+const MAX_MAPPING_SEGMENTS: usize = 65_536;
+const MAX_JIT_RANGES: usize = 4_096;
 const MAP_FAILED: *mut c_void = usize::MAX as *mut c_void;
 const VM_MADVISE_TRACE_LIMIT: usize = 256;
 
@@ -43,7 +47,7 @@ struct JitRange {
 }
 
 struct JitSnapshot {
-    ranges: [JitRange; MAX_MAPPINGS],
+    ranges: [JitRange; MAX_JIT_RANGES],
     count: AtomicUsize,
     readers: AtomicUsize,
 }
@@ -68,7 +72,7 @@ static JIT_SNAPSHOTS: [JitSnapshot; 2] = [const {
                 writable: AtomicBool::new(false),
                 emulated_rwx: AtomicBool::new(false),
             }
-        }; MAX_MAPPINGS],
+        }; MAX_JIT_RANGES],
         count: AtomicUsize::new(0),
         readers: AtomicUsize::new(0),
     }
@@ -114,6 +118,7 @@ unsafe extern "C" {
 
 #[derive(Clone, Copy)]
 struct Mapping {
+    allocation_id: usize,
     requested_length: usize,
     mapped_length: usize,
     protection: i32,
@@ -127,6 +132,7 @@ pub struct Provider {
     mappings: Mutex<BTreeMap<usize, Mapping>>,
     borrowed_ranges: Mutex<BTreeMap<usize, usize>>,
     capability_failure: AtomicBool,
+    next_allocation_id: AtomicUsize,
 }
 
 static ACTIVE: OnceLock<RwLock<Option<Arc<Provider>>>> = OnceLock::new();
@@ -165,6 +171,7 @@ impl Provider {
             mappings: Mutex::new(BTreeMap::new()),
             borrowed_ranges: Mutex::new(BTreeMap::new()),
             capability_failure: AtomicBool::new(false),
+            next_allocation_id: AtomicUsize::new(1),
         })
     }
 
@@ -198,6 +205,14 @@ impl Provider {
 
     pub fn capability_failed(&self) -> bool {
         self.capability_failure.load(Ordering::Acquire)
+    }
+
+    fn next_allocation_id(&self) -> Option<usize> {
+        self.next_allocation_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .ok()
     }
 }
 
@@ -465,6 +480,22 @@ fn trace_madvise_event(
     }
 }
 
+fn trace_vm_failure(
+    operation: &str,
+    address: *mut c_void,
+    length: usize,
+    error: i32,
+    detail: &str,
+) {
+    if std::env::var_os("DARWIN_ART_VM_FAILURE_TRACE").is_none() {
+        return;
+    }
+    eprintln!(
+        "DARWIN VM failure: pid={} operation={operation} address={address:p} length={length:#x} errno={error} detail={detail}",
+        std::process::id()
+    );
+}
+
 fn whole_mapping(mapping: Mapping, length: usize) -> bool {
     length == mapping.requested_length || length == mapping.mapped_length
 }
@@ -528,19 +559,33 @@ fn borrowed_range(ranges: &BTreeMap<usize, usize>, start: usize, length: usize) 
             .is_some_and(|limit| end <= limit)
 }
 
+fn jit_range_count(mappings: &BTreeMap<usize, Mapping>) -> usize {
+    mappings
+        .values()
+        .filter(|mapping| mapping.jit_capable)
+        .count()
+}
+
+fn mapping_table_admissible(mappings: &BTreeMap<usize, Mapping>) -> bool {
+    mappings.len() <= MAX_MAPPING_SEGMENTS && jit_range_count(mappings) <= MAX_JIT_RANGES
+}
+
 fn publish_jit_ranges(mappings: &BTreeMap<usize, Mapping>) {
-    debug_assert!(mappings.len() <= MAX_MAPPINGS);
+    debug_assert!(mapping_table_admissible(mappings));
     let active = ACTIVE_JIT_SNAPSHOT.load(Ordering::Acquire) & 1;
     let target_index = active ^ 1;
     let snapshot = &JIT_SNAPSHOTS[target_index];
     while snapshot.readers.load(Ordering::Acquire) != 0 {
         std::thread::yield_now();
     }
-    let previous_count = snapshot.count.load(Ordering::Relaxed).min(MAX_MAPPINGS);
+    let previous_count = snapshot.count.load(Ordering::Relaxed).min(MAX_JIT_RANGES);
     let mut count = 0;
     for (&base, mapping) in mappings {
         if !mapping.jit_capable {
             continue;
+        }
+        if count == MAX_JIT_RANGES {
+            break;
         }
         let Some(end) = base.checked_add(mapping.mapped_length) else {
             continue;
@@ -609,6 +654,7 @@ fn replace_range(
             mappings.insert(
                 base,
                 Mapping {
+                    allocation_id: mapping.allocation_id,
                     requested_length: prefix_length,
                     mapped_length: prefix_length,
                     protection: mapping.protection,
@@ -625,6 +671,7 @@ fn replace_range(
             mappings.insert(
                 overlap_start,
                 Mapping {
+                    allocation_id: mapping.allocation_id,
                     requested_length: overlap_length,
                     mapped_length: overlap_length,
                     protection,
@@ -639,6 +686,7 @@ fn replace_range(
             mappings.insert(
                 end,
                 Mapping {
+                    allocation_id: mapping.allocation_id,
                     requested_length: suffix_length,
                     mapped_length: suffix_length,
                     protection: mapping.protection,
@@ -649,6 +697,39 @@ fn replace_range(
             );
         }
     }
+    coalesce_mapping_segments(mappings);
+}
+
+fn same_mapping_state(left: Mapping, right: Mapping) -> bool {
+    left.allocation_id == right.allocation_id
+        && left.protection == right.protection
+        && left.anonymous == right.anonymous
+        && left.jit_capable == right.jit_capable
+        && left.jit_activated == right.jit_activated
+}
+
+fn coalesce_mapping_segments(mappings: &mut BTreeMap<usize, Mapping>) {
+    let entries: Vec<(usize, Mapping)> = mappings
+        .iter()
+        .map(|(&base, &mapping)| (base, mapping))
+        .collect();
+    let mut coalesced: BTreeMap<usize, Mapping> = BTreeMap::new();
+    for (base, mapping) in entries {
+        if let Some((&previous_base, previous)) = coalesced.last_key_value() {
+            if previous_base.checked_add(previous.mapped_length) == Some(base)
+                && same_mapping_state(*previous, mapping)
+            {
+                let previous = coalesced
+                    .get_mut(&previous_base)
+                    .expect("last mapping remains present");
+                previous.mapped_length += mapping.mapped_length;
+                previous.requested_length = previous.mapped_length;
+                continue;
+            }
+        }
+        coalesced.insert(base, mapping);
+    }
+    *mappings = coalesced;
 }
 
 fn replacement_table(
@@ -660,7 +741,7 @@ fn replacement_table(
     start.checked_add(length)?;
     let mut replacement = mappings.clone();
     replace_range(&mut replacement, start, length, replacement_protection);
-    (replacement.len() <= MAX_MAPPINGS).then_some(replacement)
+    mapping_table_admissible(&replacement).then_some(replacement)
 }
 
 #[unsafe(no_mangle)]
@@ -680,7 +761,8 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mmap_core(
     let trace = std::env::var_os("DARWIN_ART_VM_TRACE").is_some();
     if trace {
         eprintln!(
-            "DARWIN VM: mmap address={address:p} length={length:#x} protection={protection:#x} flags={flags:#x} fd={fd} offset={offset:#x}"
+            "DARWIN VM: pid={} mmap address={address:p} length={length:#x} protection={protection:#x} flags={flags:#x} fd={fd} offset={offset:#x}",
+            std::process::id()
         );
     }
     let Some(provider) = provider() else {
@@ -711,6 +793,9 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mmap_core(
     let anonymous = mapping_flags == ANDROID_MAP_PRIVATE | ANDROID_MAP_ANONYMOUS
         || mapping_flags == ANDROID_MAP_SHARED | ANDROID_MAP_ANONYMOUS;
     let file_backed = mapping_flags == ANDROID_MAP_PRIVATE || mapping_flags == ANDROID_MAP_SHARED;
+    let mapping_jit_capable = anonymous
+        && mapping_flags == ANDROID_MAP_PRIVATE | ANDROID_MAP_ANONYMOUS
+        && protection == 0;
     if stack_mapping
         && (!address.is_null() || mapping_flags != (ANDROID_MAP_PRIVATE | ANDROID_MAP_ANONYMOUS))
     {
@@ -751,16 +836,40 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mmap_core(
             return MAP_FAILED;
         }
     };
-    if !fixed && mappings.len() >= MAX_MAPPINGS {
+    if !fixed
+        && (mappings.len() >= MAX_MAPPING_SEGMENTS
+            || (mapping_jit_capable && jit_range_count(&mappings) >= MAX_JIT_RANGES))
+    {
+        if trace {
+            eprintln!(
+                "DARWIN VM: pid={} mmap rejected mapping capacity segments={}/{} jit-ranges={}/{}",
+                std::process::id(),
+                mappings.len(),
+                MAX_MAPPING_SEGMENTS,
+                jit_range_count(&mappings),
+                MAX_JIT_RANGES
+            );
+        }
         set_errno(ANDROID_ENOMEM);
         return MAP_FAILED;
     }
+    let Some(allocation_id) = provider.next_allocation_id() else {
+        set_errno(ANDROID_EOVERFLOW);
+        return MAP_FAILED;
+    };
     if fixed
         && (address.is_null()
             || address as usize % provider.page_size != 0
             || !owned_range(&mappings, address as usize, mapped_length))
     {
         set_errno(ANDROID_ENOMEM);
+        trace_vm_failure(
+            "mmap-fixed",
+            address,
+            mapped_length,
+            ANDROID_ENOMEM,
+            &format!("invalid-or-unowned-range mappings={}", mappings.len()),
+        );
         return MAP_FAILED;
     }
     let fixed_replacement = if fixed {
@@ -768,22 +877,34 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mmap_core(
             replacement_table(&mappings, address as usize, mapped_length, None)
         else {
             set_errno(ANDROID_ENOMEM);
+            trace_vm_failure(
+                "mmap-fixed",
+                address,
+                mapped_length,
+                ANDROID_ENOMEM,
+                &format!(
+                    "mapping-capacity segments={}/{} jit-ranges={}/{}",
+                    mappings.len(),
+                    MAX_MAPPING_SEGMENTS,
+                    jit_range_count(&mappings),
+                    MAX_JIT_RANGES
+                ),
+            );
             return MAP_FAILED;
         };
         replacement.insert(
             address as usize,
             Mapping {
+                allocation_id,
                 requested_length: length,
                 mapped_length,
                 protection,
                 anonymous,
-                jit_capable: anonymous
-                    && mapping_flags == ANDROID_MAP_PRIVATE | ANDROID_MAP_ANONYMOUS
-                    && protection == 0,
+                jit_capable: mapping_jit_capable,
                 jit_activated: false,
             },
         );
-        if replacement.len() > MAX_MAPPINGS {
+        if !mapping_table_admissible(&replacement) {
             set_errno(ANDROID_ENOMEM);
             return MAP_FAILED;
         }
@@ -794,6 +915,7 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mmap_core(
     let mut host_error = 0;
     let mut mapped_fd = fd;
     let mut close_mapped_fd = false;
+    let mut host_mapping_flags = flags;
     if file_backed {
         let resolver = match file_descriptor_resolver().read() {
             Ok(resolver) => *resolver,
@@ -810,13 +932,19 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mmap_core(
             let resolution = unsafe { resolver(fd, &mut resolved_fd) };
             if trace {
                 eprintln!(
-                    "DARWIN VM: fd resolver guest_fd={fd} status={resolution} host_fd={resolved_fd}"
+                    "DARWIN VM: pid={} fd resolver guest_fd={fd} status={resolution} host_fd={resolved_fd}",
+                    std::process::id()
                 );
             }
             match resolution {
                 1 if resolved_fd >= 0 => {
                     mapped_fd = resolved_fd;
                     close_mapped_fd = true;
+                }
+                2 if resolved_fd >= 0 && mapping_flags == ANDROID_MAP_PRIVATE => {
+                    mapped_fd = resolved_fd;
+                    close_mapped_fd = true;
+                    host_mapping_flags = (flags & !ANDROID_MAP_PRIVATE) | ANDROID_MAP_SHARED;
                 }
                 0 => {}
                 -1 => return MAP_FAILED,
@@ -835,7 +963,7 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mmap_core(
             address,
             mapped_length,
             host_protection,
-            flags,
+            host_mapping_flags,
             if anonymous { -1 } else { mapped_fd },
             offset,
             &mut host_error,
@@ -856,8 +984,12 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mmap_core(
     }
     if result == MAP_FAILED {
         if trace {
-            eprintln!("DARWIN VM: host mmap failed errno={host_error}");
+            eprintln!(
+                "DARWIN VM: pid={} host mmap failed errno={host_error}",
+                std::process::id()
+            );
         }
+        trace_vm_failure("mmap", address, mapped_length, host_error, "host-mmap");
         fail_host(&provider, host_error);
         return MAP_FAILED;
     }
@@ -870,23 +1002,28 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mmap_core(
         *mappings = fixed_replacement.expect("fixed mapping has replacement metadata");
         publish_jit_ranges(&mappings);
         if trace {
-            eprintln!("DARWIN VM: mmap fixed result={result:p} mapped_length={mapped_length:#x}");
+            eprintln!(
+                "DARWIN VM: pid={} mmap fixed result={result:p} mapped_length={mapped_length:#x}",
+                std::process::id()
+            );
         }
         return result;
     }
     if trace {
-        eprintln!("DARWIN VM: mmap result={result:p} mapped_length={mapped_length:#x}");
+        eprintln!(
+            "DARWIN VM: pid={} mmap result={result:p} mapped_length={mapped_length:#x}",
+            std::process::id()
+        );
     }
     let old = mappings.insert(
         result as usize,
         Mapping {
+            allocation_id,
             requested_length: length,
             mapped_length,
             protection,
             anonymous,
-            jit_capable: anonymous
-                && mapping_flags == ANDROID_MAP_PRIVATE | ANDROID_MAP_ANONYMOUS
-                && protection == 0,
+            jit_capable: mapping_jit_capable,
             jit_activated: false,
         },
     );
@@ -910,10 +1047,18 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_munmap_core(
     length: usize,
 ) -> c_int {
     let Some(provider) = provider() else {
+        trace_vm_failure(
+            "munmap",
+            address,
+            length,
+            ANDROID_EIO,
+            "provider-unavailable",
+        );
         return -1;
     };
     if address.is_null() || length == 0 || address as usize % provider.page_size != 0 {
         set_errno(ANDROID_EINVAL);
+        trace_vm_failure("munmap", address, length, ANDROID_EINVAL, "invalid-range");
         return -1;
     }
     let mut mappings = match provider.mappings.lock() {
@@ -921,25 +1066,54 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_munmap_core(
         Err(_) => {
             provider.capability_failure.store(true, Ordering::Release);
             set_errno(ANDROID_EIO);
+            trace_vm_failure("munmap", address, length, ANDROID_EIO, "mapping-lock");
             return -1;
         }
     };
     let Some(mapped_length) = round_length(length, provider.page_size) else {
         set_errno(ANDROID_EOVERFLOW);
+        trace_vm_failure(
+            "munmap",
+            address,
+            length,
+            ANDROID_EOVERFLOW,
+            "length-overflow",
+        );
         return -1;
     };
     if !owned_range(&mappings, address as usize, mapped_length) {
         set_errno(ANDROID_EINVAL);
+        trace_vm_failure(
+            "munmap",
+            address,
+            mapped_length,
+            ANDROID_EINVAL,
+            &format!("unowned-range mappings={}", mappings.len()),
+        );
         return -1;
     }
     let Some(replacement) = replacement_table(&mappings, address as usize, mapped_length, None)
     else {
         set_errno(ANDROID_ENOMEM);
+        trace_vm_failure(
+            "munmap",
+            address,
+            mapped_length,
+            ANDROID_ENOMEM,
+            &format!(
+                "mapping-capacity segments={}/{} jit-ranges={}/{}",
+                mappings.len(),
+                MAX_MAPPING_SEGMENTS,
+                jit_range_count(&mappings),
+                MAX_JIT_RANGES
+            ),
+        );
         return -1;
     };
     let mut host_error = 0;
     // SAFETY: the side table proves every page in this rounded range is owned.
     if unsafe { darwin_art_host_vm_unmap(address, mapped_length, &mut host_error) } != 0 {
+        trace_vm_failure("munmap", address, mapped_length, host_error, "host-munmap");
         fail_host(&provider, host_error);
         return -1;
     }
@@ -1002,7 +1176,7 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mremap_core(
         }
         return old_address;
     }
-    if flags & ANDROID_MREMAP_MAYMOVE == 0 || mappings.len() >= MAX_MAPPINGS {
+    if flags & ANDROID_MREMAP_MAYMOVE == 0 {
         set_errno(ANDROID_ENOMEM);
         return MAP_FAILED;
     }
@@ -1074,6 +1248,7 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mremap_core(
     mappings.insert(
         moved as usize,
         Mapping {
+            allocation_id: old_mapping.allocation_id,
             requested_length: new_length,
             mapped_length: new_mapped_length,
             protection: old_mapping.protection,
@@ -1102,10 +1277,18 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mprotect_core(
         );
     }
     let Some(provider) = provider() else {
+        trace_vm_failure(
+            "mprotect",
+            address,
+            length,
+            ANDROID_EIO,
+            "provider-unavailable",
+        );
         return -1;
     };
     if address.is_null() || length == 0 || address as usize % provider.page_size != 0 {
         set_errno(ANDROID_EINVAL);
+        trace_vm_failure("mprotect", address, length, ANDROID_EINVAL, "invalid-range");
         return -1;
     }
     let Some(mut host_protection) = host_protection(protection) else {
@@ -1138,6 +1321,13 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mprotect_core(
             eprintln!("DARWIN VM: mprotect rejected range is not provider-owned");
         }
         set_errno(ANDROID_ENOMEM);
+        trace_vm_failure(
+            "mprotect",
+            address,
+            mapped_length,
+            ANDROID_ENOMEM,
+            &format!("unowned-range mappings={}", mappings.len()),
+        );
         return -1;
     }
     if protection & ANDROID_PROT_WRITE != 0
@@ -1154,6 +1344,19 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mprotect_core(
             replacement_table(&mappings, address as usize, mapped_length, Some(protection))
         else {
             set_errno(ANDROID_ENOMEM);
+            trace_vm_failure(
+                "mprotect",
+                address,
+                mapped_length,
+                ANDROID_ENOMEM,
+                &format!(
+                    "mapping-capacity segments={}/{} jit-ranges={}/{}",
+                    mappings.len(),
+                    MAX_MAPPING_SEGMENTS,
+                    jit_range_count(&mappings),
+                    MAX_JIT_RANGES
+                ),
+            );
             return -1;
         };
         Some(replacement)
@@ -1179,17 +1382,23 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_mprotect_core(
         if trace {
             eprintln!("DARWIN VM: host mprotect failed errno={host_error}");
         }
+        trace_vm_failure(
+            "mprotect",
+            address,
+            mapped_length,
+            host_error,
+            "host-mprotect",
+        );
         fail_host(&provider, host_error);
         return -1;
     }
     if provider_owned {
         let mut replacement = replacement.expect("provider-owned range has replacement metadata");
-        if emulated_rwx {
-            let end = address as usize + mapped_length;
-            for (_, mapping) in replacement.range_mut(address as usize..end) {
-                mapping.jit_activated = true;
-            }
+        let end = address as usize + mapped_length;
+        for (_, mapping) in replacement.range_mut(address as usize..end) {
+            mapping.jit_activated = emulated_rwx;
         }
+        coalesce_mapping_segments(&mut replacement);
         *mappings = replacement;
         publish_jit_ranges(&mappings);
     }
@@ -1213,7 +1422,7 @@ pub extern "C" fn darwin_art_bionic_vm_recover_jit_execution_fault(
             snapshot.readers.fetch_sub(1, Ordering::Release);
             continue;
         }
-        let count = snapshot.count.load(Ordering::Relaxed).min(MAX_MAPPINGS);
+        let count = snapshot.count.load(Ordering::Relaxed).min(MAX_JIT_RANGES);
         let mut fault_matches = false;
         for range in &snapshot.ranges[..count] {
             let start = range.start.load(Ordering::Relaxed);
@@ -1289,6 +1498,13 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_madvise_core(
             length,
             advice,
             ANDROID_EIO,
+        );
+        trace_vm_failure(
+            "madvise",
+            address,
+            length,
+            ANDROID_EIO,
+            "provider-unavailable",
         );
         return -1;
     };
@@ -1375,6 +1591,13 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_madvise_core(
             advice,
             ANDROID_ENOMEM,
         );
+        trace_vm_failure(
+            "madvise",
+            address,
+            mapped_length,
+            ANDROID_ENOMEM,
+            &format!("unowned-range mappings={}", mappings.len()),
+        );
         return -1;
     }
     if advice == 4 {
@@ -1436,6 +1659,13 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_madvise_core(
                     advice,
                     host_error,
                 );
+                trace_vm_failure(
+                    "madvise",
+                    segment_start as *mut c_void,
+                    segment_length,
+                    host_error,
+                    "host-advice",
+                );
                 fail_host(&provider, host_error);
                 return -1;
             }
@@ -1455,6 +1685,7 @@ pub unsafe extern "C" fn darwin_art_bionic_vm_madvise_core(
             advice,
             host_error,
         );
+        trace_vm_failure("madvise", address, mapped_length, host_error, "host-advice");
         fail_host(&provider, host_error);
         return -1;
     }
@@ -1469,6 +1700,7 @@ mod tests {
 
     fn executable_jit_mapping(length: usize) -> Mapping {
         Mapping {
+            allocation_id: 1,
             requested_length: length,
             mapped_length: length,
             protection: ANDROID_PROT_READ | ANDROID_PROT_EXEC,
@@ -1480,6 +1712,7 @@ mod tests {
 
     fn writable_jit_mapping(length: usize) -> Mapping {
         Mapping {
+            allocation_id: 1,
             requested_length: length,
             mapped_length: length,
             protection: ANDROID_PROT_READ | ANDROID_PROT_WRITE,
@@ -1523,10 +1756,55 @@ mod tests {
     #[test]
     fn mapping_split_fails_closed_at_snapshot_capacity() {
         let mut mappings = BTreeMap::new();
-        for index in 0..MAX_MAPPINGS {
-            mappings.insert(0x10000 + index * 0x4000, writable_jit_mapping(0x4000));
+        for index in 0..MAX_JIT_RANGES {
+            let mut mapping = writable_jit_mapping(0x4000);
+            mapping.allocation_id = index + 1;
+            mappings.insert(0x10000 + index * 0x4000, mapping);
         }
         assert!(replacement_table(&mappings, 0x11000, 0x1000, None).is_none());
+    }
+
+    #[test]
+    fn restored_protection_coalesces_only_the_original_allocation() {
+        let mut mappings = BTreeMap::new();
+        mappings.insert(0x10000, writable_jit_mapping(0x4000));
+
+        replace_range(&mut mappings, 0x11000, 0x1000, Some(ANDROID_PROT_READ));
+        assert_eq!(mappings.len(), 3);
+        replace_range(
+            &mut mappings,
+            0x11000,
+            0x1000,
+            Some(ANDROID_PROT_READ | ANDROID_PROT_WRITE),
+        );
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[&0x10000].mapped_length, 0x4000);
+
+        let mut adjacent = writable_jit_mapping(0x1000);
+        adjacent.allocation_id = 2;
+        mappings.insert(0x14000, adjacent);
+        coalesce_mapping_segments(&mut mappings);
+        assert_eq!(mappings.len(), 2);
+    }
+
+    #[test]
+    fn ordinary_mapping_table_is_not_limited_by_jit_snapshot_capacity() {
+        let mut mappings = BTreeMap::new();
+        for index in 0..(MAX_JIT_RANGES + 1) {
+            mappings.insert(
+                0x10000 + index * 0x4000,
+                Mapping {
+                    allocation_id: index + 1,
+                    requested_length: 0x1000,
+                    mapped_length: 0x1000,
+                    protection: ANDROID_PROT_READ,
+                    anonymous: false,
+                    jit_capable: false,
+                    jit_activated: false,
+                },
+            );
+        }
+        assert!(mapping_table_admissible(&mappings));
     }
 
     #[test]
@@ -1537,6 +1815,7 @@ mod tests {
         replacement.insert(
             0x11000,
             Mapping {
+                allocation_id: 2,
                 requested_length: 0x1000,
                 mapped_length: 0x1000,
                 protection: ANDROID_PROT_READ,

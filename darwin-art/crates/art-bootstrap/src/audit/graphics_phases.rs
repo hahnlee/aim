@@ -48,6 +48,29 @@ fn cached_bionic_provider_gate(root: &Path) -> Result<()> {
     )
 }
 
+fn cached_bionic_linker_config_gate(root: &Path) -> Result<()> {
+    let outputs = [
+        root.join("_build/bionic-linker-config/libbionic-linker-config.a"),
+        root.join("_build/bionic-linker-config/linker_dlwarning.o"),
+    ];
+    let inputs = [
+        root.join("tools/build-android16-bionic-linker-config.sh"),
+        root.join("upstream/android16-bionic-linker-config.sources"),
+        root.join("patches/native-loader-policy/bionic-config-filesystem.patch"),
+        root.join("compat/filesystem/guest_config.cc"),
+        root.join("compat/filesystem/linker_config_fs.cc"),
+        root.join("compat/loader/warning_basename.h"),
+        root.join("tools/native-loader-policy/bionic_config_types.h"),
+    ];
+    build_shell_gate_cached(
+        root,
+        "build-android16-bionic-linker-config.sh",
+        &[],
+        &inputs,
+        &outputs,
+    )
+}
+
 fn cached_foundation_gate(root: &Path, script: &str, lock: &str, outputs: &[&str]) -> Result<()> {
     let output_paths = outputs
         .iter()
@@ -61,6 +84,47 @@ fn cached_foundation_gate(root: &Path, script: &str, lock: &str, outputs: &[&str
     // already explicit in `run_graphics_upstream_gates`.
     let mut inputs = output_paths.clone();
     inputs.push(root.join(lock));
+    if script == "build-android16-tracing-perfetto.sh" {
+        for path in [
+            "upstream/android16-tracing-perfetto.sources",
+            "patches/tracing-perfetto/0001-explicit-dynamic-track-name.patch",
+            "tools/tracing-perfetto-smoke.cc",
+        ] {
+            inputs.push(root.join(path));
+        }
+    }
+    if script == "build-android16-debugstore.sh" {
+        for path in [
+            "tools/debugstore/Cargo.toml",
+            "tools/debugstore/Cargo.lock",
+            "tools/debugstore/build.rs",
+            "tools/debugstore/smoke.cc",
+        ] {
+            inputs.push(root.join(path));
+        }
+    }
+    if script == "build-android16-activity-thread.sh" {
+        inputs.push(root.join("tools/activity-thread/bindings.h"));
+        inputs.push(
+            root.join("tools/bionic-libc-allocator-facade/include/darwin_art_bionic_allocator.h"),
+        );
+    }
+    if script == "build-android16-application-shared-memory.sh" {
+        for path in [
+            "compat/memory/application_memory.cc",
+            "compat/memory/application_memory.h",
+            "compat/memory/application_descriptor.cc",
+            "compat/memory/application_descriptor.h",
+            "tools/tests/application-descriptor-table.h",
+            "compat/memory/system_region.cc",
+            "compat/memory/system_region.h",
+            "patches/application-shared-memory/0001-darwin-region-capabilities.patch",
+            "tools/application-shared-memory-layout-test.cc",
+            "tools/system-region-test.cc",
+        ] {
+            inputs.push(root.join(path));
+        }
+    }
     build_shell_gate_cached(root, script, &[], &inputs, &output_paths)
 }
 
@@ -74,6 +138,11 @@ pub(super) fn run_graphics_upstream_gates(root: &Path, incremental: bool) -> Res
         cached_bionic_provider_gate(root)?;
     } else {
         build_shell_gate(root, "build-bionic-runtime-provider-closure.sh")?;
+    }
+    if incremental {
+        cached_bionic_linker_config_gate(root)?;
+    } else {
+        build_shell_gate(root, "build-android16-bionic-linker-config.sh")?;
     }
     build_shell_gate_with_args(
         root,
@@ -159,6 +228,29 @@ pub(super) fn run_graphics_upstream_gates(root: &Path, incremental: bool) -> Res
             "build-android16-virtual-ref-base-ptr.sh",
             "upstream/android16-virtual-ref-base-ptr.lock",
             &["_build/virtual-ref-base-ptr/libandroid-virtual-ref-base-ptr-darwin.a"][..],
+        ),
+        (
+            "build-android16-application-shared-memory.sh",
+            "upstream/android16-application-shared-memory.lock",
+            &["_build/application-shared-memory/libapplication-shared-memory-darwin.a"][..],
+        ),
+        (
+            "build-android16-debugstore.sh",
+            "upstream/android16-debugstore.lock",
+            &["_build/debugstore/libdebugstore-darwin.a"][..],
+        ),
+        (
+            "build-android16-activity-thread.sh",
+            "upstream/android16-activity-thread.lock",
+            &["_build/activity-thread/libactivity-thread-darwin.a"][..],
+        ),
+        (
+            "build-android16-tracing-perfetto.sh",
+            "upstream/android16-tracing-perfetto.lock",
+            &[
+                "_build/tracing-perfetto/libandroid-tracing-perfetto-darwin.a",
+                "_build/tracing-perfetto/perfetto-out/libperfetto_c.dylib",
+            ][..],
         ),
     ];
     for (script, lock, outputs) in gates {

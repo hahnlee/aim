@@ -32,6 +32,14 @@ fn main_result() -> Result<(), Box<dyn Error>> {
             println!();
         }
         Some("status") => println!("{}", daemon_status(&paths)?),
+        Some("process-identity") => {
+            let pid: u32 = env::args()
+                .nth(2)
+                .ok_or("process-identity requires PID")?
+                .parse()?;
+            let identity = darwin_art_profile::resolve_process_identity(&paths, pid)?;
+            println!("{}\t{}\t{}", identity.pid, identity.uid, identity.package);
+        }
         Some("profiles") => {
             for profile in list_profile_ids(&paths.profiles_root)? {
                 println!("{profile}");
@@ -102,6 +110,15 @@ fn main_result() -> Result<(), Box<dyn Error>> {
                 std::process::exit(status.code().unwrap_or(1));
             }
         }
+        Some("start-runtime") => {
+            let arguments = env::args_os().skip(2).collect::<Vec<_>>();
+            let response = darwin_art_profile::runtime_service_cli::start_runtime_cli(
+                &paths.socket,
+                &arguments,
+                launch_environment(),
+            )?;
+            println!("{}", response.pid);
+        }
         Some("daemonize") => {
             let mut arguments = env::args_os().skip(2);
             let package = arguments
@@ -110,17 +127,7 @@ fn main_result() -> Result<(), Box<dyn Error>> {
                 .into_string()
                 .map_err(|_| "package is not UTF-8")?;
             let arguments = arguments.collect::<Vec<_>>();
-            let environment = env::vars_os()
-                .filter(|(key, _)| {
-                    let key = key.to_string_lossy();
-                    key.starts_with("DARWIN_ART_")
-                        || key.starts_with("ANDROID_")
-                        || matches!(
-                            key.as_ref(),
-                            "PATH" | "HOME" | "TMPDIR" | "LANG" | "LC_ALL" | "SHELL"
-                        )
-                })
-                .collect::<Vec<_>>();
+            let environment = launch_environment();
             println!(
                 "{}",
                 daemonize_process(&paths, &package, &arguments, &environment)?
@@ -143,8 +150,22 @@ fn main_result() -> Result<(), Box<dyn Error>> {
                 .into());
         }
         _ => {
-            return Err("usage: darwin-artctl {ensure|socket|status|profiles|create-profile ID|delete-profile ID|profile-size ID|shutdown|register PACKAGE RECORD|resolve PACKAGE|uninstall PACKAGE [--keep-data]|list|ps|hold SECONDS|supervise PACKAGE COMMAND [ARGS...]|daemonize PACKAGE COMMAND [ARGS...]|exec PACKAGE COMMAND [ARGS...]}".into());
+            return Err("usage: darwin-artctl {ensure|socket|status|profiles|create-profile ID|delete-profile ID|profile-size ID|shutdown|register PACKAGE RECORD|resolve PACKAGE|uninstall PACKAGE [--keep-data]|list|ps|hold SECONDS|supervise PACKAGE COMMAND [ARGS...]|daemonize PACKAGE COMMAND [ARGS...]|start-runtime PACKAGE KEY_HEX REQUIRED_MASK COMMAND [ARGS...]|exec PACKAGE COMMAND [ARGS...]}".into());
         }
     }
     Ok(())
+}
+
+fn launch_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    env::vars_os()
+        .filter(|(key, _)| {
+            let key = key.to_string_lossy();
+            key.starts_with("DARWIN_ART_")
+                || key.starts_with("ANDROID_")
+                || matches!(
+                    key.as_ref(),
+                    "PATH" | "HOME" | "TMPDIR" | "LANG" | "LC_ALL" | "SHELL"
+                )
+        })
+        .collect()
 }

@@ -36,6 +36,7 @@ impl SymbolResolver for Resolver {
             "__errno" => c"__errno",
             "strtol" => c"strtol",
             "strtoll" => c"strtoll",
+            "strtoimax" => c"strtoimax",
             "strtoll_l" => c"strtoll_l",
             "strtoul" => c"strtoul",
             "strtoull" => c"strtoull",
@@ -72,7 +73,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let bytes = fs::read(fixture)?;
     let mut resolver = Resolver;
-    let mut image = LoadedElf::load_with_resolver(&bytes, &mut resolver)?;
+    let image = LoadedElf::load_with_resolver(&bytes, &mut resolver)?;
     image.run_initializers()?;
 
     // SAFETY: host errno is audit-only and is never guest-resolved.
@@ -107,7 +108,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             assert!(worker.join().expect("numeric worker"));
         }
     });
-    println!("bionic-numeric-facade: PASS integer=6@LIBC base=0,2..36 threads=8x1000");
+    println!("bionic-numeric-facade: PASS integer=7@LIBC base=0,2..36 threads=8x1000");
     Ok(())
 }
 

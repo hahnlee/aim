@@ -198,7 +198,6 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
 
     let object = build_dir.join("darwin_art_runtime_direct_apk.cc.o");
     let graph_object = build_dir.join("darwin_art_runtime_apk_graph.cc.o");
-    let filesystem_object = compile_runtime_filesystem_probe(root, &build_dir)?;
     let network_object = if let Some(path) = env::var_os("DARWIN_ART_NATIVE_NETWORK_OBJECT") {
         PathBuf::from(path)
     } else {
@@ -517,7 +516,6 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
         .arg(&graphics_phase_object)
         .arg(&graphics_input_object)
         .arg(root.join("_build/runtime-graphics-bootstrap/objects/darwin_provider_owners.cc.o"))
-        .arg(&filesystem_object)
         .arg(&graph_object)
         .arg(&network_object)
         .arg(&surface_object)
@@ -603,6 +601,10 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
             "CoreVideo",
             "-framework",
             "VideoToolbox",
+            "-framework",
+            "Network",
+            "-framework",
+            "SystemConfiguration",
             "-o",
         ])
         .arg(&runtime_library);

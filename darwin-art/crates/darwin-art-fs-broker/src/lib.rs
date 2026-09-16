@@ -11,6 +11,9 @@ use std::fs::{File, Metadata};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
 
+pub mod guest_path;
+pub mod inode_metadata;
+
 // Values from Darwin sys/fcntl.h. Keeping the small FFI surface local avoids a
 // dependency and makes the exact authorization flags reviewable.
 const O_RDONLY: c_int = 0x0000_0000;

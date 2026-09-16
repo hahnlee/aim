@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,8 +40,12 @@ void* darwin_art_bionic_malloc(size_t size);
 void* darwin_art_bionic_calloc(size_t count, size_t size);
 void darwin_art_bionic_free(void* pointer);
 void* darwin_art_bionic_realloc(void* pointer, size_t size);
+void* darwin_art_bionic_reallocarray(void* pointer, size_t count, size_t size);
 void* darwin_art_bionic_aligned_alloc(size_t alignment, size_t size);
 int darwin_art_bionic_mallopt(int param, int value);
+/* Platform-private allocator controls. Unsupported profiling is reported as
+ * false/Android ENOTSUP; it is never represented as an installed profiler. */
+bool darwin_art_bionic_android_mallopt(int opcode, void* arg, size_t arg_size);
 size_t darwin_art_bionic_malloc_usable_size(const void* pointer);
 int darwin_art_bionic_posix_memalign(void** output, size_t alignment, size_t size);
 void* darwin_art_bionic_memalign(size_t alignment, size_t size);

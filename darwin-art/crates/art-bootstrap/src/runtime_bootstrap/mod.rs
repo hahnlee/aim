@@ -11,7 +11,7 @@ mod staging;
 
 pub(crate) use archive::finalize;
 pub(crate) use compile::{RuntimeBootstrapCompiled, compile};
-pub(crate) use staging::{RuntimeBootstrapStaging, prepare};
+pub(crate) use staging::{RuntimeBootstrapStaging, prepare, prepare_runtime_shadow};
 
 pub(crate) fn build_runtime_bootstrap_flavor(root: &Path, flavor: RuntimeFlavor) -> Result<()> {
     let staged = prepare(root, flavor)?;

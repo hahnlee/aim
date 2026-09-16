@@ -1,0 +1,9 @@
+# Android 16 IRestrictionsManager contract used by the desktop endpoint.
+FRAMEWORK_RESTRICTIONS_PATH=_prebuilt/android-16/bootclasspath/framework.jar
+FRAMEWORK_RESTRICTIONS_SHA256=ae3d578e3c4cd28ad822d0bc7b35fa308800f440472f54f2aff8aa5c1e22cd91
+IRESTRICTIONS_MANAGER_DESCRIPTOR=android.content.IRestrictionsManager
+GET_APPLICATION_RESTRICTIONS_SIGNATURE='android.os.Bundle getApplicationRestrictions(java.lang.String)'
+GET_APPLICATION_RESTRICTIONS_TRANSACTION=1
+HAS_RESTRICTIONS_PROVIDER_SIGNATURE='boolean hasRestrictionsProvider()'
+HAS_RESTRICTIONS_PROVIDER_TRANSACTION=3
+RESTRICTIONS_SERVICE_NAME=restrictions
