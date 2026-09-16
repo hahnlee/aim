@@ -71,15 +71,15 @@ before work. Append verified progress before ending a work turn.
 - Treat Android as a moving upstream target. Prefer version-pinned AOSP owners,
   generated ABI descriptions and narrow per-release adapters over copying
   policy into a permanent Darwin abstraction.
-- Continuously audit file size and authority. In particular, do not add new
-  production responsibilities to DarwinServiceBridge or another broad service,
-  bridge, manager or utility. A file that acquires policy plus transport plus
-  resource lifetime must be split before it is extended.
+- Continuously audit file size and authority. `DarwinServiceBridge` was retired;
+  do not reintroduce it or add production responsibilities to another broad
+  service, bridge, manager or utility. A file that acquires policy plus
+  transport plus resource lifetime must be split before it is extended.
 - Oversized-owner cleanup is a goal-exit gate, not an instruction to replace the
   active compatibility objective with a refactoring-only objective. Before the
   current goal is declared complete, audit the production paths it changed and
-  extract any remaining mixed responsibilities from DarwinServiceBridge and
-  similar monoliths behind explicit subsystem interfaces and tests.
+  extract any remaining mixed responsibilities from similar monoliths behind
+  explicit subsystem interfaces and tests.
 - Keep each goal acceptance-scoped. Compatibility work for the APKs named in
   the current goal does not imply full platform support; implement the common
   Android contract exposed by their real failures, and record unrelated system

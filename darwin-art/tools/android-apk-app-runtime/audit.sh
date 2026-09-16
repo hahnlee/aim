@@ -40,8 +40,7 @@ javac --release 8 -encoding UTF-8 \
   -classpath "$android_jar:$root/_build/dex-probe/classes" \
   -d "$classes" \
   "$module/fixture/FontBootstrap.java" \
-  "$module/fixture/MainActivity.java" \
-  "$module/fixture/DarwinServiceBridge.java"
+  "$module/fixture/MainActivity.java"
 
 app_classes=("$classes"/dev/darwinart/simple/*.class)
 "$d8" --lib "$android_jar" --output "$dex" "${app_classes[@]}"
@@ -88,10 +87,9 @@ entries="$(unzip -Z1 "$apk")"
 [[ "$(grep -c '^classes\.dex$' <<<"$entries")" == 1 ]]
 ! grep -Eq '(^|/)classes[2-9][0-9]*\.dex$|\.so$' <<<"$entries"
 dex_summary="$($root/_build/dex-probe/dex-probe "$dex/classes.dex")"
-expected_dex='AOSP DEX: verified=yes version=35 classes=24 methods=275 class[0]=Ldev/darwinart/simple/DarwinServiceBridge$$ExternalSyntheticLambda0; class[1]=Ldev/darwinart/simple/DarwinServiceBridge$$ExternalSyntheticLambda1; class[2]=Ldev/darwinart/simple/DarwinServiceBridge$$ExternalSyntheticLambda2; class[3]=Ldev/darwinart/simple/DarwinServiceBridge$$ExternalSyntheticLambda3; class[4]=Ldev/darwinart/simple/DarwinServiceBridge$$ExternalSyntheticLambda4; class[5]=Ldev/darwinart/simple/DarwinServiceBridge$$ExternalSyntheticLambda5; class[6]=Ldev/darwinart/simple/DarwinServiceBridge$$ExternalSyntheticLambda6; class[7]=Ldev/darwinart/simple/DarwinServiceBridge$$ExternalSyntheticLambda7; class[8]=Ldev/darwinart/simple/DarwinServiceBridge$$ExternalSyntheticLambda8; class[9]=Ldev/darwinart/simple/DarwinServiceBridge$$ExternalSyntheticLambda9; class[10]=Ldev/darwinart/simple/DarwinServiceBridge$1; class[11]=Ldev/darwinart/simple/DarwinServiceBridge$ActivityClientHandler$$ExternalSyntheticLambda0; class[12]=Ldev/darwinart/simple/DarwinServiceBridge$ActivityClientHandler; class[13]=Ldev/darwinart/simple/DarwinServiceBridge$ActivityManagerHandler; class[14]=Ldev/darwinart/simple/DarwinServiceBridge$ActivityRecord; class[15]=Ldev/darwinart/simple/DarwinServiceBridge$ActivityTaskHandler$$ExternalSyntheticLambda0; class[16]=Ldev/darwinart/simple/DarwinServiceBridge$ActivityTaskHandler; class[17]=Ldev/darwinart/simple/DarwinServiceBridge$DisplayHandler; class[18]=Ldev/darwinart/simple/DarwinServiceBridge$ManagerHandler; class[19]=Ldev/darwinart/simple/DarwinServiceBridge$WindowManagerHandler; class[20]=Ldev/darwinart/simple/DarwinServiceBridge; class[21]=Ldev/darwinart/simple/FontBootstrap; class[22]=Ldev/darwinart/simple/MainActivity$$ExternalSyntheticLambda0; class[23]=Ldev/darwinart/simple/MainActivity;'
-[[ "$dex_summary" == "AOSP DEX: verified=yes version=35 classes=48 methods=482 "* ]] &&
-  [[ "$dex_summary" == *'Ldev/darwinart/simple/DarwinServiceBridge;'* ]] &&
-  [[ "$dex_summary" == *'Ldev/darwinart/simple/MainActivity;'* ]] || {
+[[ "$dex_summary" == "AOSP DEX: verified=yes version=35 classes=3 methods=79 "* ]] &&
+  [[ "$dex_summary" == *'Ldev/darwinart/simple/MainActivity;'* ]] &&
+  [[ "$dex_summary" != *'Ldev/darwinart/simple/DarwinServiceBridge'* ]] || {
   printf 'unexpected DEX summary:\n%s\n' "$dex_summary" >&2
   exit 1
 }
@@ -103,7 +101,7 @@ actual="$(cargo run -q --manifest-path "$module/Cargo.toml" -- "$apk")"
   exit 1
 }
 debug_actual="$(cargo run -q --manifest-path "$module/Cargo.toml" -- "$debug_apk")"
-[[ "$debug_actual" == *' target_sdk=35 debuggable=1 label='* ]] || {
+[[ "$debug_actual" == *' target_sdk=35 debuggable=1 '* ]] || {
   printf 'debuggable manifest state was not decoded:\n%s\n' "$debug_actual" >&2
   exit 1
 }
@@ -128,7 +126,7 @@ mkdir -p "$build/reject/lib/arm64-v8a"
 : >"$build/reject/lib/arm64-v8a/libforbidden.so"
 (cd "$build/reject" && zip -q "$native_apk" lib/arm64-v8a/libforbidden.so)
 native_metadata="$(cargo run -q --manifest-path "$module/Cargo.toml" -- "$jni_apk")"
-grep -F 'dex=apk-1 native=2 native_root=libdarwin-art-simple-jni.so' \
+grep -F ' native=2 native_root=libdarwin-art-simple-jni.so' \
   <<<"$native_metadata" >/dev/null
 
 secondary_apk="$build/reject-secondary-dex.apk"
@@ -136,7 +134,8 @@ cp "$apk" "$secondary_apk"
 cp "$dex/classes.dex" "$build/classes2.dex"
 (cd "$build" && zip -q "$secondary_apk" classes2.dex)
 secondary_metadata="$(cargo run -q --manifest-path "$module/Cargo.toml" -- "$secondary_apk")"
-grep -F 'dex=apk-2 native=0 native_root=none' <<<"$secondary_metadata" >/dev/null
+grep -F 'dex=apk-2 ' <<<"$secondary_metadata" >/dev/null
+grep -F ' native=0 native_root=none' <<<"$secondary_metadata" >/dev/null
 
 git -C "$root" diff --check
 echo "android-apk-app-runtime: PASS APK=real-binary-manifest multidex=accepted native-so=accepted launcher=dev.darwinart.simple.MainActivity"

@@ -2,16 +2,10 @@
 
 #include "darwin_angle_egl.h"
 #include "darwin_android_platform.h"
-#include "darwin_surface_bridge.h"
 
-#include <iostream>
 #include <cstdlib>
-#include <cstdio>
-#include <atomic>
-#include <cctype>
 #include <cstring>
-#include <filesystem>
-#include <iterator>
+#include <iostream>
 #include <unistd.h>
 
 #include "runtime_graphics_phase.h"
@@ -39,304 +33,6 @@ void DescribeArtThrowableChain(art::Thread* self) {
               << current->Dump() << "\n";
     current = current->GetCause();
   }
-}
-
-jobject find_view_root_for_decor(JNIEnv* env, jobject decor_view) {
-  if (env == nullptr || decor_view == nullptr) return nullptr;
-  jclass global_class = env->FindClass("android/view/WindowManagerGlobal");
-  jmethodID get_instance =
-      global_class == nullptr
-          ? nullptr
-          : env->GetStaticMethodID(global_class, "getInstance",
-                                   "()Landroid/view/WindowManagerGlobal;");
-  jobject global = get_instance == nullptr
-                       ? nullptr
-                       : env->CallStaticObjectMethod(global_class, get_instance);
-  jfieldID views_field = global_class == nullptr
-                             ? nullptr
-                             : env->GetFieldID(global_class, "mViews",
-                                               "Ljava/util/ArrayList;");
-  jfieldID roots_field = global_class == nullptr
-                             ? nullptr
-                             : env->GetFieldID(global_class, "mRoots",
-                                               "Ljava/util/ArrayList;");
-  jobject views = views_field == nullptr || global == nullptr
-                      ? nullptr
-                      : env->GetObjectField(global, views_field);
-  jobject roots = roots_field == nullptr || global == nullptr
-                      ? nullptr
-                      : env->GetObjectField(global, roots_field);
-  jclass list_class = env->FindClass("java/util/ArrayList");
-  jmethodID size = list_class == nullptr
-                       ? nullptr
-                       : env->GetMethodID(list_class, "size", "()I");
-  jmethodID get = list_class == nullptr
-                      ? nullptr
-                      : env->GetMethodID(list_class, "get",
-                                         "(I)Ljava/lang/Object;");
-  jobject result = nullptr;
-  if (views != nullptr && roots != nullptr && size != nullptr && get != nullptr &&
-      !env->ExceptionCheck()) {
-    const jint count = env->CallIntMethod(views, size);
-    for (jint index = count - 1; index >= 0 && !env->ExceptionCheck(); --index) {
-      jobject candidate = env->CallObjectMethod(views, get, index);
-      const bool matches = candidate != nullptr &&
-                           env->IsSameObject(candidate, decor_view) == JNI_TRUE;
-      env->DeleteLocalRef(candidate);
-      if (matches) {
-        result = env->CallObjectMethod(roots, get, index);
-        break;
-      }
-    }
-  }
-  env->DeleteLocalRef(list_class);
-  env->DeleteLocalRef(roots);
-  env->DeleteLocalRef(views);
-  env->DeleteLocalRef(global);
-  env->DeleteLocalRef(global_class);
-  return result;
-}
-
-jboolean InstallTransitionedActivity(JNIEnv* env, jclass, jobject activity,
-                                     jobject decor_view) {
-  auto* state = darwin_art_process::graphics_state_for_callback();
-  if (state == nullptr || env == nullptr || activity == nullptr ||
-      decor_view == nullptr || env->ExceptionCheck()) {
-    return JNI_FALSE;
-  }
-  darwin_art_graphics::begin_activity_transition(state, env);
-  jobject view_root = find_view_root_for_decor(env, decor_view);
-  jclass view_class = env->FindClass("android/view/View");
-  jmethodID find_view_by_id =
-      view_class == nullptr
-          ? nullptr
-          : env->GetMethodID(view_class, "findViewById",
-                             "(I)Landroid/view/View;");
-  constexpr jint kAndroidContentId = 0x01020002;
-  jobject content_root =
-      find_view_by_id == nullptr
-          ? nullptr
-          : env->CallObjectMethod(decor_view, find_view_by_id,
-                                  kAndroidContentId);
-  // ActivityTaskManager may replace the launcher from inside onCreate(),
-  // before the launcher's first present_and_retain call has published frame
-  // dimensions. Android's WindowManager already knows the display at this
-  // point; use the same configured display contract instead of rejecting the
-  // legitimate early transition as a zero-sized window.
-  jint width = state->interactive_width;
-  jint height = state->interactive_height;
-  if (width <= 0 || height <= 0) {
-    const char* scale_text = std::getenv("DARWIN_ART_WINDOW_SCALE");
-    const jint scale = scale_text != nullptr && std::strcmp(scale_text, "2") == 0
-                           ? 2
-                           : 1;
-    width = 360 * scale;
-    height = 640 * scale;
-  }
-  const bool installed =
-      view_root != nullptr && content_root != nullptr && width > 0 && height > 0 &&
-      !env->ExceptionCheck() &&
-      darwin_art_graphics::retain_interactive_view_root(state, env, view_root) &&
-      darwin_art_graphics::retain_hardware_context(state, env, activity) &&
-      darwin_art_graphics::retain_interactive_root(state, env, decor_view,
-                                                   width, height);
-  std::cerr << "ART Android graphics: install activity view_root=" << view_root
-            << " content=" << content_root << " installed=" << (installed ? 1 : 0)
-            << " exception=" << (env->ExceptionCheck() ? 1 : 0) << "\n";
-  env->DeleteLocalRef(content_root);
-  env->DeleteLocalRef(view_class);
-  env->DeleteLocalRef(view_root);
-  if (!installed && env->ExceptionCheck()) {
-    env->ExceptionDescribe();
-    env->ExceptionClear();
-  }
-  return installed ? JNI_TRUE : JNI_FALSE;
-}
-
-jstring ChooseHostDocument(JNIEnv* env, jclass, jstring mime) {
-  const char* test_document = std::getenv("DARWIN_ART_TEST_OPEN_DOCUMENT");
-  const char* mime_value =
-      mime == nullptr ? nullptr : env->GetStringUTFChars(mime, nullptr);
-  char* selected =
-      test_document == nullptr || test_document[0] == '\0'
-          ? darwin_art_host_open_document(mime_value)
-          : ::strdup(test_document);
-  if (mime_value != nullptr) env->ReleaseStringUTFChars(mime, mime_value);
-  if (selected == nullptr) return nullptr;
-  static std::atomic<uint64_t> next_document{1};
-  jstring result = nullptr;
-  try {
-    const std::filesystem::path source(selected);
-    const char* private_data =
-        std::getenv("DARWIN_ART_ANDROID_PRIVATE_DATA_ROOT");
-    const char* guest_data =
-        std::getenv("DARWIN_ART_APK_APP_DATA_GUEST_DIR");
-    const char* package_name = std::getenv("DARWIN_ART_APK_APP_PACKAGE");
-    std::error_code error;
-    const uintmax_t size = std::filesystem::file_size(source, error);
-    constexpr uintmax_t kMaximumDocumentBytes = 512ull * 1024ull * 1024ull;
-    std::string extension = source.extension().string();
-    std::transform(extension.begin(), extension.end(), extension.begin(),
-                   [](unsigned char value) {
-                     return static_cast<char>(std::tolower(value));
-                   });
-    const bool safe_extension =
-        extension.size() <= 32 &&
-        std::all_of(extension.begin(), extension.end(), [](unsigned char value) {
-          return value == '.' || value == '_' || value == '-' ||
-                 std::isalnum(value) != 0;
-        });
-    if (!safe_extension) extension.clear();
-    if (!error && size <= kMaximumDocumentBytes &&
-        std::filesystem::is_regular_file(source, error) && !error &&
-        private_data != nullptr && private_data[0] != '\0' &&
-        guest_data != nullptr && guest_data[0] != '\0' &&
-        package_name != nullptr && package_name[0] != '\0') {
-      const std::filesystem::path directory =
-          std::filesystem::path(private_data) / "user" / "0" / package_name /
-          "files" / "host_documents";
-      std::filesystem::create_directories(directory, error);
-      const std::string filename =
-          "import-" +
-          std::to_string(next_document.fetch_add(1, std::memory_order_relaxed)) +
-          extension;
-      const std::filesystem::path destination =
-          directory / filename;
-      if (!error && std::filesystem::copy_file(
-                        source, destination,
-                        std::filesystem::copy_options::overwrite_existing,
-                        error) &&
-          !error) {
-        const std::filesystem::path guest_path =
-            std::filesystem::path(guest_data) / "files" / "host_documents" /
-            filename;
-        result = env->NewStringUTF(guest_path.c_str());
-      }
-    }
-  } catch (...) {
-    result = nullptr;
-  }
-  darwin_art_host_document_path_free(selected);
-  return result;
-}
-
-jobjectArray ChooseHostSaveDocument(JNIEnv* env, jclass, jstring mime,
-                                    jstring suggested_name) {
-  const char* suggested = suggested_name == nullptr
-                              ? nullptr
-                              : env->GetStringUTFChars(suggested_name, nullptr);
-  const std::string suggested_copy =
-      suggested == nullptr ? std::string() : std::string(suggested);
-  const char* test_destination =
-      std::getenv("DARWIN_ART_TEST_SAVE_DOCUMENT");
-  const char* mime_value =
-      mime == nullptr ? nullptr : env->GetStringUTFChars(mime, nullptr);
-  char* selected =
-      test_destination == nullptr || test_destination[0] == '\0'
-          ? darwin_art_host_save_document(mime_value, suggested)
-          : ::strdup(test_destination);
-  if (mime_value != nullptr) env->ReleaseStringUTFChars(mime, mime_value);
-  if (suggested != nullptr) {
-    env->ReleaseStringUTFChars(suggested_name, suggested);
-  }
-  if (selected == nullptr) return nullptr;
-  jobjectArray result = nullptr;
-  try {
-    static std::atomic<uint64_t> next_export{1};
-    const char* app_data = std::getenv("DARWIN_ART_APK_APP_DATA_DIR");
-    if (app_data != nullptr && app_data[0] != '\0') {
-      std::string extension;
-      if (!suggested_copy.empty()) {
-        extension =
-            std::filesystem::path(suggested_copy).extension().string();
-      }
-      if (mime != nullptr) {
-        const char* mime_value = env->GetStringUTFChars(mime, nullptr);
-        if (mime_value != nullptr) {
-          if (extension.empty()) {
-            if (std::strcmp(mime_value, "image/png") == 0) extension = ".png";
-            else if (std::strcmp(mime_value, "image/jpeg") == 0)
-              extension = ".jpg";
-            else if (std::strcmp(mime_value, "text/plain") == 0)
-              extension = ".txt";
-            else if (std::strcmp(mime_value, "application/pdf") == 0)
-              extension = ".pdf";
-            else if (std::strcmp(mime_value, "audio/mpeg") == 0)
-              extension = ".mp3";
-            else if (std::strcmp(mime_value, "video/mp4") == 0)
-              extension = ".mp4";
-          }
-          env->ReleaseStringUTFChars(mime, mime_value);
-        }
-      }
-      if (extension.size() > 32 ||
-          !std::all_of(
-              extension.begin(), extension.end(), [](unsigned char value) {
-                return value == '.' || value == '_' || value == '-' ||
-                       std::isalnum(value) != 0;
-              })) {
-        extension.clear();
-      }
-      std::error_code error;
-      const std::filesystem::path directory =
-          std::filesystem::path(app_data) / "host_documents" / "exports";
-      std::filesystem::create_directories(directory, error);
-      const std::filesystem::path staging =
-          directory / ("export-" +
-                       std::to_string(next_export.fetch_add(
-                           1, std::memory_order_relaxed)) +
-                       extension);
-      jclass string_class = env->FindClass("java/lang/String");
-      result = string_class == nullptr || error
-                   ? nullptr
-                   : env->NewObjectArray(2, string_class, nullptr);
-      if (result != nullptr) {
-        jstring staged_value = env->NewStringUTF(staging.c_str());
-        jstring destination_value = env->NewStringUTF(selected);
-        env->SetObjectArrayElement(result, 0, staged_value);
-        env->SetObjectArrayElement(result, 1, destination_value);
-        env->DeleteLocalRef(destination_value);
-        env->DeleteLocalRef(staged_value);
-      }
-      if (string_class != nullptr) env->DeleteLocalRef(string_class);
-    }
-  } catch (...) {
-    result = nullptr;
-  }
-  darwin_art_host_document_path_free(selected);
-  return result;
-}
-
-jclass load_activity_class(JNIEnv* env, jclass activity_class,
-                           const char* class_name) {
-  jclass class_class = env->FindClass("java/lang/Class");
-  jmethodID get_class_loader =
-      class_class == nullptr
-          ? nullptr
-          : env->GetMethodID(class_class, "getClassLoader",
-                             "()Ljava/lang/ClassLoader;");
-  jobject loader =
-      get_class_loader == nullptr
-          ? nullptr
-          : env->CallObjectMethod(reinterpret_cast<jobject>(activity_class),
-                                  get_class_loader);
-  jclass loader_class = loader == nullptr ? nullptr : env->GetObjectClass(loader);
-  jmethodID load_class =
-      loader_class == nullptr
-          ? nullptr
-          : env->GetMethodID(loader_class, "loadClass",
-                             "(Ljava/lang/String;)Ljava/lang/Class;");
-  jstring name = env->NewStringUTF(class_name);
-  jclass result =
-      load_class == nullptr || name == nullptr
-          ? nullptr
-          : reinterpret_cast<jclass>(
-                env->CallObjectMethod(loader, load_class, name));
-  env->DeleteLocalRef(name);
-  env->DeleteLocalRef(loader_class);
-  env->DeleteLocalRef(loader);
-  env->DeleteLocalRef(class_class);
-  return result;
 }
 
 void EnsureJavaSurfaceValid(JNIEnv* env, jobject surface) {
@@ -539,157 +235,43 @@ void EnsureViewRootSurfaceValid(JNIEnv* env, jobject view) {
   if (view_class != nullptr) env->DeleteLocalRef(view_class);
 }
 
-void ConfigureHostSurface(JNIEnv* env, jclass, jobject surface_view,
-                          jobject surface, jint x, jint y, jint width,
-                          jint height) {
-  if (std::getenv("DARWIN_ART_DEBUG_SURFACE_JNI") != nullptr) {
-    static unsigned diagnostics = 0;
-    if (surface_view != nullptr && diagnostics++ < 64) {
-      jclass clazz = env->FindClass("android/view/SurfaceView");
-      if (clazz != nullptr) {
-        for (const char* name : {"mDrawFinished", "mHaveFrame",
-                                 "mSurfaceCreated"}) {
-          jfieldID field = env->GetFieldID(clazz, name, "Z");
-          if (field != nullptr) {
-            std::fprintf(stderr, "ART Android SurfaceView: %s=%d view=%p\n",
-                         name, env->GetBooleanField(surface_view, field),
-                         static_cast<void*>(surface_view));
-          } else if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-          }
-        }
-        jfieldID sub_layer = env->GetFieldID(clazz, "mSubLayer", "I");
-        if (sub_layer != nullptr) {
-          std::fprintf(stderr, "ART Android SurfaceView: mSubLayer=%d view=%p\n",
-                       env->GetIntField(surface_view, sub_layer),
-                       static_cast<void*>(surface_view));
-        } else if (env->ExceptionCheck()) {
-          env->ExceptionClear();
-        }
-        env->DeleteLocalRef(clazz);
-      }
-    }
-    jobject global = surface == nullptr ? nullptr : env->NewGlobalRef(surface);
-    std::fprintf(stderr,
-                 "ART Android Surface JNI: configure pid=%d local=%p global=%p "
-                 "geometry=%d,%d %dx%d\n",
-                 getpid(), static_cast<void*>(surface), static_cast<void*>(global),
-                 x, y, width, height);
-    if (global != nullptr) env->DeleteGlobalRef(global);
-  }
-  darwin_art::ConfigureDarwinAngleHostSurface(x, y, width, height);
-  EnsureViewRootSurfaceValid(env, surface_view);
-  EnsureJavaSurfaceValid(env, surface);
-}
-
-void ResizeHostSurface(JNIEnv*, jclass, jint width, jint height) {
-  if (width <= 0 || height <= 0) return;
-  // The Java ActivityTaskManager compatibility service invokes this callback
-  // on an orientation request. The active surface owns the persistent
-  // CAMetalLayer/NSWindow; resizing it on the host actor rotates the visible
-  // window while preserving the Android ViewRoot/Surface contract.
-  DarwinArtSurface* surface = darwin_art_surface_active_gpu();
-  if (surface != nullptr) {
-    const DarwinArtSurfaceResult result = darwin_art_surface_resize(
-        surface, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
-    if (result != DARWIN_ART_SURFACE_OK &&
-        std::getenv("DARWIN_ART_DEBUG_RESIZE") != nullptr) {
-      std::cerr << "ART Android orientation resize failed status=" << result
-                << " size=" << width << "x" << height << "\n";
-    }
-  }
-  if (auto* state = darwin_art_process::graphics_state_for_callback();
-      state != nullptr) {
-    state->interactive_width = width;
-    state->interactive_height = height;
-    state->gpu_render_node_recorded = false;
-  }
-}
-
-bool install_activity_bridge(JNIEnv* env, jclass activity_class,
-                             jobject activity,
-                             darwin_art_graphics::GraphicsState* graphics_state,
-                             const char* app_apk_path) {
-  jclass bridge = load_activity_class(
-      env, activity_class, "dev.darwinart.simple.DarwinServiceBridge");
-  JNINativeMethod methods[] = {
-      {const_cast<char*>("nativeInstallActivity"),
-       const_cast<char*>("(Landroid/app/Activity;Landroid/view/View;)Z"),
-       reinterpret_cast<void*>(&InstallTransitionedActivity)},
-      {const_cast<char*>("nativeChooseDocument"),
-       const_cast<char*>("(Ljava/lang/String;)Ljava/lang/String;"),
-       reinterpret_cast<void*>(&ChooseHostDocument)},
-      {const_cast<char*>("nativeChooseSaveDocument"),
-       const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;"),
-       reinterpret_cast<void*>(&ChooseHostSaveDocument)},
-      {const_cast<char*>("nativeConfigureHostSurface"),
-       const_cast<char*>(
-           "(Landroid/view/SurfaceView;Landroid/view/Surface;IIII)V"),
-       reinterpret_cast<void*>(&ConfigureHostSurface)},
-      {const_cast<char*>("nativeResizeHostSurface"),
-       const_cast<char*>("(II)V"),
-       reinterpret_cast<void*>(&ResizeHostSurface)},
-  };
-  const bool registered =
-      bridge != nullptr && !env->ExceptionCheck() &&
-      env->RegisterNatives(bridge, methods,
-                           static_cast<jint>(std::size(methods))) == JNI_OK;
-  jmethodID install_initial =
-      !registered
+bool CompleteDirectFixtureWindowVisibility(JNIEnv* env, jobject activity,
+                                           jobject decor_view) {
+  // This path is reachable only from DARWIN_ART_DIRECT_APK_FIXTURE. Installed
+  // applications use ActivityThread transactions and never enter this probe.
+  jclass activity_class = env->FindClass("android/app/Activity");
+  jfieldID decor = activity_class == nullptr
+                       ? nullptr
+                       : env->GetFieldID(activity_class, "mDecor",
+                                         "Lcom/android/internal/policy/DecorView;");
+  jfieldID window_added = activity_class == nullptr
+                              ? nullptr
+                              : env->GetFieldID(activity_class, "mWindowAdded", "Z");
+  jfieldID visible_server =
+      activity_class == nullptr
           ? nullptr
-          : env->GetStaticMethodID(bridge, "installInitialActivity",
-                                   "(Landroid/app/Activity;)V");
-  if (install_initial != nullptr && !env->ExceptionCheck()) {
-    env->CallStaticVoidMethod(bridge, install_initial, activity);
-  }
-  const char* configured_orientation =
-      std::getenv("DARWIN_ART_APK_APP_SCREEN_ORIENTATION");
-  if (configured_orientation != nullptr && !env->ExceptionCheck()) {
-    char* end = nullptr;
-    const long parsed = std::strtol(configured_orientation, &end, 10);
-    jmethodID apply_orientation = env->GetStaticMethodID(
-        bridge, "applyManifestOrientation", "(I)V");
-    if (apply_orientation != nullptr && end != configured_orientation &&
-        *end == '\0' && parsed >= INT32_MIN && parsed <= INT32_MAX &&
-        parsed != -1 && !env->ExceptionCheck()) {
-      env->CallStaticVoidMethod(bridge, apply_orientation,
-                                static_cast<jint>(parsed));
+          : env->GetFieldID(activity_class, "mVisibleFromServer", "Z");
+  jfieldID visible_client =
+      activity_class == nullptr
+          ? nullptr
+          : env->GetFieldID(activity_class, "mVisibleFromClient", "Z");
+  jmethodID make_visible =
+      activity_class == nullptr
+          ? nullptr
+          : env->GetMethodID(activity_class, "makeVisible", "()V");
+  const bool valid = decor != nullptr && window_added != nullptr &&
+                     visible_server != nullptr && visible_client != nullptr &&
+                     make_visible != nullptr && !env->ExceptionCheck();
+  if (valid) {
+    env->SetObjectField(activity, decor, decor_view);
+    env->SetBooleanField(activity, window_added, JNI_TRUE);
+    env->SetBooleanField(activity, visible_server, JNI_TRUE);
+    if (env->GetBooleanField(activity, visible_client) == JNI_TRUE) {
+      env->CallVoidMethod(activity, make_visible);
     }
   }
-  // ActivityThread/RuntimeInit installs a process-wide uncaught-exception
-  // delegate before invoking Activity.onCreate().  The detached launcher has
-  // no zygote startup phase; install the support bridge's equivalent now so
-  // Unity's forwarding handler cannot dereference a null delegate and hide
-  // the original asynchronous startup failure.
-  jmethodID install_exception_handler =
-      registered && !env->ExceptionCheck()
-          ? env->GetStaticMethodID(bridge,
-                                  "installDefaultUncaughtExceptionHandler",
-                                  "()V")
-          : nullptr;
-  if (install_exception_handler != nullptr && !env->ExceptionCheck()) {
-    env->CallStaticVoidMethod(bridge, install_exception_handler);
-  }
-  jmethodID install_resource_path =
-      registered && !env->ExceptionCheck()
-          ? env->GetStaticMethodID(bridge, "installApkResourcePath",
-                                   "(Landroid/app/Activity;Ljava/lang/String;)V")
-          : nullptr;
-  jstring apk_path =
-      install_resource_path != nullptr && app_apk_path != nullptr
-          ? env->NewStringUTF(app_apk_path)
-          : nullptr;
-  if (install_resource_path != nullptr && apk_path != nullptr &&
-      !env->ExceptionCheck()) {
-    env->CallStaticVoidMethod(bridge, install_resource_path, activity, apk_path);
-  }
-  env->DeleteLocalRef(apk_path);
-  const bool installed =
-      registered && install_initial != nullptr && !env->ExceptionCheck() &&
-      darwin_art_graphics::retain_service_bridge_class(graphics_state, env,
-                                                       bridge);
-  env->DeleteLocalRef(bridge);
-  return installed;
+  env->DeleteLocalRef(activity_class);
+  return valid && !env->ExceptionCheck();
 }
 
 bool attach_android_window(JNIEnv* env, jobject activity, jobject window,
@@ -753,16 +335,9 @@ bool attach_android_window(JNIEnv* env, jobject activity, jobject window,
   }
   env->CallVoidMethod(global, add_view, decor_view, window_attributes, display,
                       window, static_cast<jint>(0));
-  jmethodID complete_visibility =
-      graphics_state->service_bridge_class == nullptr
-          ? nullptr
-          : env->GetStaticMethodID(
-                graphics_state->service_bridge_class,
-                "completeActivityWindowVisibility",
-                "(Landroid/app/Activity;Landroid/view/View;)V");
-  if (complete_visibility != nullptr && !env->ExceptionCheck()) {
-    env->CallStaticVoidMethod(graphics_state->service_bridge_class,
-                              complete_visibility, activity, decor_view);
+  if (!CompleteDirectFixtureWindowVisibility(env, activity, decor_view)) {
+    env->ExceptionClear();
+    return false;
   }
   // ViewRootImpl normally receives a valid BufferQueue producer from
   // WindowManager before its first traversal.  The detached compositor owns
@@ -1130,21 +705,6 @@ int run(JNIEnv* env, art::Thread* self, jobject activity_instance,
     return 31;
   }
 
-  // ActivityTaskManager is live before Instrumentation invokes onCreate() on
-  // Android. An Activity may redirect to another Activity and finish itself
-  // from onCreate (Chrome's FRE is one example), so publish the initial task
-  // record before app lifecycle code can issue that transaction.
-  if (run_apk_app &&
-      !install_activity_bridge(env, probe_activity_class, activity_instance,
-                               graphics_state, app_apk_path)) {
-    std::cerr << "ART Android activity: local task bridge install failed\n";
-    if (env->ExceptionCheck()) {
-      env->ExceptionDescribe();
-      env->ExceptionClear();
-    }
-    return 33;
-  }
-
   jmethodID probe_on_create =
       run_apk_app
           ? env->GetMethodID(probe_activity_class, "performCreate",
@@ -1382,10 +942,8 @@ int run(JNIEnv* env, art::Thread* self, jobject activity_instance,
     std::cerr << "ART Android graphics: activity context retention failed\n";
     return 33;
   }
-  // A startActivity() issued from onCreate() has already installed and
-  // presented the replacement task through InstallTransitionedActivity.
-  // Do not paint the now-finished launcher's empty content over it or replace
-  // the authoritative input root.
+  // This is the direct-APK fixture only. Production activity replacement is
+  // scheduled by ActivityTaskManagerEndpoint through ActivityThread.
   if (graphics_state != nullptr && !launcher_finishing &&
       graphics_state->interactive_root == nullptr &&
       darwin_art_graphics_phase::present_and_retain(

@@ -358,16 +358,8 @@ public final class ProbeContext extends ContextWrapper {
     @Override
     public void startActivity(Intent intent, Bundle options) {
         if (intent == null) throw new NullPointerException("intent");
-        try {
-            Class<?> bridge = Class.forName(
-                    "dev.darwinart.simple.DarwinServiceBridge", true, classLoader);
-            Method start = bridge.getMethod(
-                    "startActivityFromContext", Intent.class, Bundle.class);
-            start.invoke(null, new Intent(intent), options);
-        } catch (ReflectiveOperationException error) {
-            throw new IllegalStateException(
-                    "ActivityTaskManager bridge is unavailable", error);
-        }
+        throw new UnsupportedOperationException(
+                "ProbeContext does not own ActivityTaskManager lifecycle");
     }
 
     @Override
@@ -392,11 +384,11 @@ public final class ProbeContext extends ContextWrapper {
     public ComponentName startForegroundService(Intent intent) {
         try {
             ComponentName component = startService(intent);
-            android.util.Log.i("DarwinServiceBridge",
+            android.util.Log.i("ProbeContext",
                     "started local foreground Service " + component);
             return component;
         } catch (RuntimeException error) {
-            android.util.Log.e("DarwinServiceBridge",
+            android.util.Log.e("ProbeContext",
                     "could not start local foreground Service", error);
             throw error;
         }
@@ -452,7 +444,7 @@ public final class ProbeContext extends ContextWrapper {
             // bind. Android reports an unavailable explicit service as a
             // failed bind; do not turn that normal capability miss into an
             // uncaught exception on the app's main looper.
-            android.util.Log.w("DarwinServiceBridge",
+            android.util.Log.w("ProbeContext",
                     "service unavailable outside profile package: "
                             + (component == null ? "<implicit>" : component));
             return false;
@@ -470,7 +462,7 @@ public final class ProbeContext extends ContextWrapper {
                             component, null, existing.binder, existing.hostPid,
                             existing.controlFd, isolatedInstanceName, existing.processName);
                     serviceConnections.put(connection, rebound);
-                    android.util.Log.i("DarwinServiceBridge",
+                    android.util.Log.i("ProbeContext",
                             "rebind isolated Service " + component + " instance="
                                     + isolatedInstanceName + " pid=" + existing.hostPid);
                     dispatchServiceConnected(
@@ -482,7 +474,7 @@ public final class ProbeContext extends ContextWrapper {
             int[] child = nativeSpawnService(
                     component.flattenToString(), isolatedInstanceName, processName, true, intent);
             if (child == null || child.length != 2 || child[0] <= 0 || child[1] < 0) {
-                android.util.Log.e("DarwinServiceBridge",
+                android.util.Log.e("ProbeContext",
                         "could not spawn isolated Service " + component);
                 return false;
             }
@@ -490,7 +482,7 @@ public final class ProbeContext extends ContextWrapper {
             try {
                 binder = new RemoteBinder(child[1], 1);
             } catch (RuntimeException error) {
-                android.util.Log.w("DarwinServiceBridge",
+                android.util.Log.w("ProbeContext",
                         "isolated Service endpoint failed before ready: " + component
                                 + " instance=" + isolatedInstanceName, error);
                 nativeReleaseRemoteService(child[0], child[1]);
@@ -500,7 +492,7 @@ public final class ProbeContext extends ContextWrapper {
                     component, null, binder, child[0], child[1], isolatedInstanceName,
                     processName);
             serviceConnections.put(connection, bound);
-            android.util.Log.i("DarwinServiceBridge",
+            android.util.Log.i("ProbeContext",
                     "bind isolated Service " + component + " instance="
                             + isolatedInstanceName + " process=" + processName
                             + " pid=" + child[0]);
@@ -525,7 +517,7 @@ public final class ProbeContext extends ContextWrapper {
                             component, null, existing.binder, existing.hostPid,
                             existing.controlFd, null, processName);
                     serviceConnections.put(connection, rebound);
-                    android.util.Log.i("DarwinServiceBridge",
+                    android.util.Log.i("ProbeContext",
                             "rebind remote Service " + component + " process="
                                     + processName + " pid=" + existing.hostPid);
                     dispatchServiceConnected(executor, connection, component, existing.binder);
@@ -535,7 +527,7 @@ public final class ProbeContext extends ContextWrapper {
             int[] child = nativeSpawnService(
                     component.flattenToString(), "", processName, false, intent);
             if (child == null || child.length != 2 || child[0] <= 0 || child[1] < 0) {
-                android.util.Log.e("DarwinServiceBridge",
+                android.util.Log.e("ProbeContext",
                         "could not spawn remote Service " + component);
                 return false;
             }
@@ -543,14 +535,14 @@ public final class ProbeContext extends ContextWrapper {
             try {
                 binder = new RemoteBinder(child[1], 1);
             } catch (RuntimeException error) {
-                android.util.Log.w("DarwinServiceBridge",
+                android.util.Log.w("ProbeContext",
                         "remote Service endpoint failed before ready: " + component, error);
                 nativeReleaseRemoteService(child[0], child[1]);
                 return false;
             }
             serviceConnections.put(connection, new BoundServiceRecord(
                     component, null, binder, child[0], child[1], null, processName));
-            android.util.Log.i("DarwinServiceBridge",
+            android.util.Log.i("ProbeContext",
                     "bind remote Service " + component + " process=" + processName
                             + " pid=" + child[0]);
             dispatchServiceConnected(executor, connection, component, binder);
@@ -558,7 +550,7 @@ public final class ProbeContext extends ContextWrapper {
         }
         LocalServiceRecord record = ensureLocalService(intent);
         if (record.binder == null) record.binder = record.service.onBind(new Intent(intent));
-        android.util.Log.i("DarwinServiceBridge",
+        android.util.Log.i("ProbeContext",
                 "bind local Service " + record.component + " action=" + intent.getAction()
                         + " isolated=" + isolatedInstanceName + " binder=" + record.binder);
         if (record.binder == null) return false;
@@ -577,13 +569,13 @@ public final class ProbeContext extends ContextWrapper {
         Runnable connected = () -> {
             BoundServiceRecord current = serviceConnections.get(connection);
             if (current == null || current.binder != binder) return;
-            android.util.Log.i("DarwinServiceBridge", "service connection dispatch " + component
+            android.util.Log.i("ProbeContext", "service connection dispatch " + component
                     + " connection=" + connection.getClass().getName()
                     + " thread=" + Thread.currentThread().getName());
             try {
                 connection.onServiceConnected(component, binder);
             } finally {
-                android.util.Log.i("DarwinServiceBridge", "service connection completed " + component
+                android.util.Log.i("ProbeContext", "service connection completed " + component
                         + " connection=" + connection.getClass().getName()
                         + " thread=" + Thread.currentThread().getName());
             }
@@ -594,7 +586,7 @@ public final class ProbeContext extends ContextWrapper {
                     ((RemoteBinder) binder).awaitReady();
                     executor.execute(connected);
                 } catch (RuntimeException error) {
-                    android.util.Log.w("DarwinServiceBridge",
+                    android.util.Log.w("ProbeContext",
                             "Service failed before connection: " + component, error);
                     executor.execute(() -> {
                         BoundServiceRecord current = serviceConnections.get(connection);
@@ -1276,7 +1268,7 @@ public final class ProbeContext extends ContextWrapper {
             }
         }
         if (ACCOUNT_SERVICE.equals(name)) {
-            android.util.Log.i("DarwinServiceBridge",
+            android.util.Log.i("ProbeContext",
                     "constructing framework AccountManager");
             return constructAccountManager();
         }
@@ -1446,7 +1438,7 @@ public final class ProbeContext extends ContextWrapper {
                     Context.class, interfaceClass);
             constructor.setAccessible(true);
             accountManager = constructor.newInstance(this, service);
-            android.util.Log.i("DarwinServiceBridge",
+            android.util.Log.i("ProbeContext",
                     "framework AccountManager installed binder=" + binder);
             return accountManager;
         } catch (ReflectiveOperationException error) {

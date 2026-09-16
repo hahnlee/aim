@@ -415,31 +415,6 @@ jclass LoadContextClass(JNIEnv* env, const char* binary_name) {
   return loaded;
 }
 
-void ActivateCurrentHostSurfaces(GraphicsState* state, JNIEnv* env) {
-  static bool debug_reported = false;
-  jclass bridge = state == nullptr || state->service_bridge_class == nullptr
-                      ? nullptr
-                      : static_cast<jclass>(
-                            env->NewLocalRef(state->service_bridge_class));
-  jmethodID activate =
-      bridge == nullptr
-          ? nullptr
-          : env->GetStaticMethodID(bridge, "activateCurrentHostSurfaces",
-                                   "()V");
-  if (activate != nullptr && !env->ExceptionCheck()) {
-    env->CallStaticVoidMethod(bridge, activate);
-  }
-  if (!debug_reported && std::getenv("DARWIN_ART_DEBUG_POINTER") != nullptr) {
-    std::cerr << "ART Android host surface activation bridge="
-              << (bridge != nullptr) << " method=" << (activate != nullptr)
-              << " exception=" << env->ExceptionCheck() << "\n";
-    if (env->ExceptionCheck()) env->ExceptionDescribe();
-    debug_reported = true;
-  }
-  if (env->ExceptionCheck()) env->ExceptionClear();
-  if (bridge != nullptr) env->DeleteLocalRef(bridge);
-}
-
 void DebugWindowManagerViews(JNIEnv* env) {
   static bool dumped = false;
   if (dumped || std::getenv("DARWIN_ART_DEBUG_WINDOW_LAYERS") == nullptr) return;
@@ -569,22 +544,6 @@ bool sync_interactive_surface_size(GraphicsState* state, JNIEnv* env) {
     std::cerr << "ART Android resize: " << state->interactive_width << "x"
               << state->interactive_height << " -> " << width << "x"
               << height << "\n";
-  }
-  if (state->interactive_view_root != nullptr &&
-      state->service_bridge_class != nullptr) {
-    jmethodID resize_display = env->GetStaticMethodID(
-        state->service_bridge_class, "resizeDisplay", "(II)V");
-    if (resize_display == nullptr || env->ExceptionCheck()) {
-      env->ExceptionClear();
-      return false;
-    }
-    env->CallStaticVoidMethod(state->service_bridge_class, resize_display,
-                              static_cast<jint>(width),
-                              static_cast<jint>(height));
-    if (env->ExceptionCheck()) return false;
-    state->interactive_width = static_cast<jint>(width);
-    state->interactive_height = static_cast<jint>(height);
-    return true;
   }
   state->gpu_render_node_recorded = false;
   const jboolean rendered = present_content(
@@ -991,43 +950,7 @@ bool RefreshFocusedWindowRoot(GraphicsState* state, JNIEnv* env) {
       state->interactive_view_root == nullptr) {
     return false;
   }
-  const jint previous_generation = state->focused_window_generation;
-  jobject candidate = nullptr;
-  if (state->service_bridge_class != nullptr) {
-    if (state->window_topology_generation_method == nullptr) {
-      state->window_topology_generation_method = env->GetStaticMethodID(
-          state->service_bridge_class, "windowTopologyGeneration", "()I");
-    }
-    if (state->focused_window_view_root_method == nullptr) {
-      state->focused_window_view_root_method = env->GetStaticMethodID(
-          state->service_bridge_class, "focusedWindowViewRoot",
-          "()Ljava/lang/Object;");
-    }
-    const jint generation =
-        state->window_topology_generation_method == nullptr
-            ? -1
-            : env->CallStaticIntMethod(
-                  state->service_bridge_class,
-                  state->window_topology_generation_method);
-    if (!env->ExceptionCheck() && state->focused_view_root != nullptr &&
-        generation == state->focused_window_generation) {
-      return true;
-    }
-    if (state->focused_window_view_root_method != nullptr &&
-        !env->ExceptionCheck()) {
-      candidate = env->CallStaticObjectMethod(state->service_bridge_class,
-                                              state->focused_window_view_root_method);
-      state->focused_window_generation = generation;
-    }
-    if (env->ExceptionCheck()) {
-      env->ExceptionClear();
-      candidate = nullptr;
-    }
-  }
-  if (candidate == nullptr) {
-    candidate = env->NewLocalRef(state->interactive_view_root);
-    state->focused_window_generation = -1;
-  }
+  jobject candidate = env->NewLocalRef(state->interactive_view_root);
   if (candidate == nullptr) return false;
   const bool unchanged = state->focused_view_root != nullptr &&
                          env->IsSameObject(state->focused_view_root,
@@ -1039,7 +962,6 @@ bool RefreshFocusedWindowRoot(GraphicsState* state, JNIEnv* env) {
   jobject candidate_global = env->NewGlobalRef(candidate);
   if (candidate_global == nullptr || env->ExceptionCheck()) {
     if (env->ExceptionCheck()) env->ExceptionClear();
-    state->focused_window_generation = previous_generation;
     env->DeleteLocalRef(candidate);
     return state->focused_view_root != nullptr;
   }
@@ -1053,9 +975,6 @@ bool RefreshFocusedWindowRoot(GraphicsState* state, JNIEnv* env) {
       darwin_art::SetFrameworkViewRootFocus(env, candidate, true);
   if (!focused || env->ExceptionCheck()) {
     if (env->ExceptionCheck()) env->ExceptionClear();
-    // Leave the generation stale so the next owner turn retries after the
-    // receiver's native peer has completed initialization.
-    state->focused_window_generation = previous_generation;
     env->DeleteGlobalRef(candidate_global);
     env->DeleteLocalRef(candidate);
     return state->focused_view_root != nullptr;
@@ -2251,14 +2170,6 @@ int32_t pump_frame(GraphicsState* state, jlong frame_time_nanos) {
       darwin_art::DispatchFrameworkPendingVsyncs(env, frame_time_nanos);
   log_slow_frame_stage("dispatch_vsync");
   bool ok = delivered_vsyncs >= 0 && !env->ExceptionCheck();
-  if (ok && delivered_vsyncs > 0) {
-    // Synchronize detached SurfaceView state at display cadence, after the
-    // framework has received its vsync, while keeping JNI reflection off the
-    // input/message fast path.
-    ActivateCurrentHostSurfaces(state, env);
-    ok = !env->ExceptionCheck();
-    log_slow_frame_stage("activate_surfaces");
-  }
   // The vsync callback posts Choreographer work onto the owner Looper. Do not
   // synchronously drain MessageQueue again inside this frame pulse: the host
   // turn before the next display edge will dispatch it, matching Android's

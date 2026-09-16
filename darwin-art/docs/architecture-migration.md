@@ -32,8 +32,8 @@ Android 전체 지원을 주장하지 않는다.
 5. 새 host resource ownership은 가능하면 Rust로 구현하고 C/C++ ABI는 좁힌다.
 6. 하나의 파일이나 service가 policy, transport, storage와 resource lifetime을
    함께 소유하지 않도록 기능을 추가하기 전에 책임을 분리한다.
-7. `DarwinServiceBridge` 같은 기존 monolith는 목표 종료 전에 변경된 범위의
-   책임을 전용 모듈로 이동한다. 단순 파일 분할이나 이름 변경은 완료가 아니다.
+7. 폐기된 `DarwinServiceBridge` 같은 범용 우회 계층을 다시 만들지 않는다.
+   Android subsystem이 이미 소유하는 책임은 옮겨 적지 말고 중복 코드를 삭제한다.
 8. shared Cargo/native/DEX build는 직렬화하고, stale artifact를 acceptance로
    인정하지 않는다.
 
@@ -133,14 +133,30 @@ for Calculator and DeskClock are under
 ## Next boundaries
 
 1. Turn the accepted flows into repeatable clean-profile soak/performance gates.
-2. Continue extracting mixed policy/transport/lifetime responsibilities from
-   `DarwinServiceBridge` and comparable large files as each area is changed.
+2. Keep retired bridge behavior out of production and continue extracting mixed
+   policy/transport/lifetime responsibilities from comparable large files.
 3. Add macOS-integrated providers one capability at a time, with an ADR where
    behavior intentionally differs from Android hardware.
 4. Expand unchanged-APK coverage only after the preceding common contract is
    tested; do not accumulate app-specific compatibility layers.
 
 ## Latest progress
+
+### 2026-09-16 — retired the legacy DarwinServiceBridge
+
+- Deleted the 2,211-line direct-fixture bridge instead of splitting its Android
+  lifecycle, window, display and service policy into new Darwin-owned classes.
+- Ordinary installed APKs continue through `ActivityThread.main()`, framework
+  AMS/WMS/display services, ViewRoot/HWUI and SurfaceFlinger; the direct fixture
+  keeps only a test-scoped window-visibility completion helper.
+- Removed the bridge JNI/cache/input/presentation hooks and excluded its 29
+  classes from fixture DEX inputs. Button DEX now verifies at 192 classes/3603
+  methods and the standalone APK fixture at 3 classes/79 methods.
+- The three changed native presentation/input/state units compile, the fixture
+  APK audit, art-bootstrap tests and SurfaceFlinger geometry test pass. The
+  aggregate graphics audit remains blocked before these units by pre-existing
+  Binder-JNI patch drift; the direct-APK aggregate build likewise stops in the
+  unrelated ClassLoaderFactory native registration.
 
 ### 2026-09-16 — Android signal recovery and bounded goal acceptance
 

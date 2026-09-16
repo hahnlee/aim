@@ -42,21 +42,6 @@ void set_probe_canvas_class(GraphicsState* state, JNIEnv* env,
   }
 }
 
-bool retain_service_bridge_class(GraphicsState* state, JNIEnv* env,
-                                 jclass bridge_class) {
-  if (state == nullptr || env == nullptr || bridge_class == nullptr ||
-      env->ExceptionCheck()) {
-    return false;
-  }
-  if (state->service_bridge_class != nullptr) {
-    env->DeleteGlobalRef(state->service_bridge_class);
-    state->service_bridge_class = nullptr;
-  }
-  state->service_bridge_class =
-      static_cast<jclass>(env->NewGlobalRef(bridge_class));
-  return state->service_bridge_class != nullptr && !env->ExceptionCheck();
-}
-
 bool retain_interactive_root(GraphicsState* state, JNIEnv* env, jobject root,
                              jint width, jint height) {
   if (state == nullptr || env == nullptr || root == nullptr ||
@@ -107,29 +92,6 @@ bool retain_hardware_context(GraphicsState* state, JNIEnv* env, jobject context)
   return state->hardware_context != nullptr && !env->ExceptionCheck();
 }
 
-void begin_activity_transition(GraphicsState* state, JNIEnv* env) {
-  if (state == nullptr || env == nullptr) return;
-  auto clear = [env](jobject* reference) {
-    if (*reference != nullptr) {
-      env->DeleteGlobalRef(*reference);
-      *reference = nullptr;
-    }
-  };
-  clear(&state->gpu_render_node);
-  clear(&state->pressed_view);
-  clear(&state->pointer_dispatch_root);
-  clear(&state->pointer_dispatch_view_root);
-  clear(&state->focused_view_root);
-  state->focused_window_generation = -1;
-  state->gpu_render_node_recorded = false;
-  state->gpu_last_traversal_barrier = -1;
-  state->gpu_ripple_overlay_active = false;
-  state->pointer_stream_active = false;
-  state->pointer_click_candidate = false;
-  state->pointer_dispatch_is_window = false;
-  state->pointer_dispatch_outside_only = false;
-}
-
 void shutdown(GraphicsState* state, JNIEnv* env) {
   if (state == nullptr || env == nullptr) return;
   if (state->gpu_surface != nullptr && state->owner_wake_bound) {
@@ -155,16 +117,6 @@ void shutdown(GraphicsState* state, JNIEnv* env) {
   clear_class(&state->main_looper.handler_class);
   clear_class(&state->main_looper.clock_class);
   state->main_looper = {};
-  if (state->service_bridge_class != nullptr) {
-    jmethodID shutdown_activities =
-        env->GetStaticMethodID(state->service_bridge_class,
-                               "shutdownActivities", "()V");
-    if (shutdown_activities != nullptr) {
-      env->CallStaticVoidMethod(state->service_bridge_class,
-                                shutdown_activities);
-    }
-    if (env->ExceptionCheck()) env->ExceptionClear();
-  }
 #if defined(DARWIN_ART_REAL_GRAPHICS)
   if (state->hwui_animation_context != nullptr) {
     state->hwui_animation_context->destroy();
@@ -196,9 +148,6 @@ void shutdown(GraphicsState* state, JNIEnv* env) {
     env->DeleteGlobalRef(state->focused_view_root);
     state->focused_view_root = nullptr;
   }
-  state->focused_window_view_root_method = nullptr;
-  state->window_topology_generation_method = nullptr;
-  state->focused_window_generation = -1;
   state->pointer_dispatch_offset_x = 0.0f;
   state->pointer_dispatch_offset_y = 0.0f;
   state->pointer_dispatch_is_window = false;
@@ -218,10 +167,6 @@ void shutdown(GraphicsState* state, JNIEnv* env) {
   if (state->probe_canvas_class != nullptr) {
     env->DeleteGlobalRef(state->probe_canvas_class);
     state->probe_canvas_class = nullptr;
-  }
-  if (state->service_bridge_class != nullptr) {
-    env->DeleteGlobalRef(state->service_bridge_class);
-    state->service_bridge_class = nullptr;
   }
   state->gpu_render_node_recorded = false;
   state->gpu_ripple_overlay_active = false;

@@ -47,13 +47,9 @@ struct GraphicsState {
     jmethodID uptime_millis = nullptr;
   } main_looper;
   jclass probe_canvas_class = nullptr;
-  jclass service_bridge_class = nullptr;
   jobject interactive_root = nullptr;
   jobject interactive_view_root = nullptr;
   jobject focused_view_root = nullptr;
-  jmethodID focused_window_view_root_method = nullptr;
-  jmethodID window_topology_generation_method = nullptr;
-  jint focused_window_generation = -1;
   jobject hardware_context = nullptr;
   jobject gpu_render_node = nullptr;
   bool gpu_render_node_recorded = false;
@@ -101,14 +97,11 @@ struct GraphicsState {
 // boundary.  The presentation, input, and shutdown translation units only
 // borrow these slots; this TU owns their storage and cleanup order.
 void set_probe_canvas_class(GraphicsState* state, JNIEnv* env, jclass canvas_class);
-bool retain_service_bridge_class(GraphicsState* state, JNIEnv* env,
-                                 jclass bridge_class);
 bool retain_interactive_root(GraphicsState* state, JNIEnv* env, jobject root,
                              jint width, jint height);
 bool retain_interactive_view_root(GraphicsState* state, JNIEnv* env,
                                   jobject view_root);
 bool retain_hardware_context(GraphicsState* state, JNIEnv* env, jobject context);
-void begin_activity_transition(GraphicsState* state, JNIEnv* env);
 void shutdown(GraphicsState* state, JNIEnv* env);
 
 #if defined(DARWIN_ART_REAL_GRAPHICS)

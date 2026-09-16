@@ -165,9 +165,6 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
             .arg(root.join("probes/ProbeCanvas.java"))
             .arg(root.join("probes/ProbeView.java"))
             .arg(root.join("probes/ProbeContentRoot.java"))
-            // Remaining legacy fixture types are migration debt. They no
-            // longer provide BinderInternal's system service-manager root.
-            .arg(root.join("tools/android-apk-app-runtime/fixture/DarwinServiceBridge.java"))
             .arg(root.join("probes/compile-stubs/android/content/IContentProvider.java"))
             .arg(root.join("probes/compile-stubs/android/app/IApplicationThread.java"))
             .arg(root.join("probes/compile-stubs/android/app/IServiceConnection.java"))
