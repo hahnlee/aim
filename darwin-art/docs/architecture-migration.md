@@ -4168,3 +4168,44 @@ verified Example Domain capture remains historical evidence, not fresh current
 acceptance. Preserve this failure for the next Chromium continuation rather
 than declaring the full original goal complete. App titles still show package
 identifiers. No APK changes, profile reset, fallback, commit or push this turn.
+
+### 2026-09-19 — requested push and read-only Chromium white-body investigation
+
+User requests commit/push followed by cause investigation only. Both Swift
+typechecks and tracked diff check PASS. Committed only the two physical-input
+tools and their checkpoint as bf6540be, pushed origin/main successfully. The
+unrelated untracked top-level darwin-art-profile/ and darwin-art-scm-transfer/
+directories remain untouched. No implementation changes during investigation.
+
+Authoritative ps still reports system80544, Clock80547, Calculator80921,
+browser81610, renderer81625 and GPU81626. Combined default-profile service log
+comparison: historical browser41083 has23 central compose entries (10 with one
+layer,13 with two), with18 selected-layer entries owned by GPU41134. Current
+browser81610 has34 entries, ALL with one layer, and ZERO selected-layer entries
+owned by GPU81626. Neither browser has a central-compose failure log. Current
+transaction13 explicitly selects system80544's transparent root and publishes
+transparent target pixels. Thus the current web-content GPU layer is absent
+from selected central composition; this does not distinguish no creation,
+no buffer submission or earlier IPC/bootstrap loss.
+
+GPU81626 successfully creates a Vulkan device on Apple M2 Pro at01:40:38.475.
+Rejected GLES discovery, persistent-cache error1 and missing APerformanceHint
+functions ALSO occur in the historical visibly successful execution, so none
+is a demonstrated discriminator. Current TCP connections exist, but sockets
+alone do not prove page-load completion or eliminate all network problems.
+Non-stopping one-second GPU/renderer samples saved as
+/tmp/chromium-blank-gpu.sample and /tmp/chromium-blank-renderer.sample show
+CrGpuMain/CrRendererMain waits and live Viz/Compositor/ChildIO threads. These
+samples do not establish deadlock, first disconnect or Root factory failure.
+
+The prior exact Root/direct-SCM handoff loss remains a causally established
+historical blocker and a candidate for this recurrence. Current source still
+leaves managed endpoint attributes/private ancillary framing unadopted; provider
+installation alone does not activate the protected carrier path. However this
+turn has NO current-incarnation Root/channel-to-FD join or first-failure trace:
+do NOT claim that the historical FD loss is proven again. Root/SCM lifecycle
+is the leading investigation candidate, not an established current root cause.
+No debugger attach, restart, runtime build, APK/profile change or fallback.
+Next decisive diagnostic would capture the actual startup Root/SCM handoff and
+first failure together; physical reload of an existing Root is not that gate.
+Visible web-body acceptance and the full original migration goal remain OPEN.
