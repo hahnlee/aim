@@ -4,6 +4,7 @@
 //! and transfers only an O_RDONLY descriptor. The receiver validates and maps
 //! it without copying Parcel, offsets or already-captured scatter/gather bytes.
 
+use crate::descriptor_manifest::{self, DescriptorAttributes, DescriptorBundle};
 use crate::{objects, transaction_layout::TransactionLayout};
 use std::{
     ffi::CString,
@@ -13,10 +14,9 @@ use std::{
 };
 
 const MAGIC: &[u8; 8] = b"DABTX003";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const HEADER_BYTES: usize = 56;
 const MANIFEST_OBJECT_BYTES: usize = 32;
-const MANIFEST_FD_BYTES: usize = 8;
 const MAX_TRANSFER_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -25,6 +25,7 @@ pub enum Error {
     InvalidFormat,
     Objects(objects::Error),
     RemoteObjects(crate::remote_objects::Error),
+    UnsupportedDescriptorAttributes,
 }
 
 impl From<io::Error> for Error {
@@ -108,6 +109,8 @@ pub struct TransferImage {
 
 pub struct TransferFd {
     offset: usize,
+    ordinal: u64,
+    attributes: DescriptorAttributes,
     descriptor: OwnedFd,
 }
 
@@ -118,6 +121,18 @@ impl TransferFd {
 
     pub fn descriptor(&self) -> BorrowedFd<'_> {
         self.descriptor.as_fd()
+    }
+
+    pub fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+
+    pub fn attributes(&self) -> &DescriptorAttributes {
+        &self.attributes
+    }
+
+    pub fn metadata(&self) -> &[u8] {
+        self.attributes.as_bytes()
     }
 }
 
@@ -143,6 +158,27 @@ impl TransferImage {
         objects: &[crate::remote_objects::ManifestObject],
         files: Vec<(usize, OwnedFd)>,
     ) -> Result<Self, Error> {
+        let descriptors = files
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, (offset, descriptor))| {
+                DescriptorBundle::new(
+                    offset,
+                    ordinal as u64,
+                    descriptor,
+                    DescriptorAttributes::empty(),
+                )
+            })
+            .collect();
+        Self::capture_with_objects_and_descriptors(snapshot, extra, objects, descriptors)
+    }
+
+    pub fn capture_with_objects_and_descriptors(
+        snapshot: &crate::transaction_snapshot::TransactionSnapshot,
+        extra: &[u8],
+        objects: &[crate::remote_objects::ManifestObject],
+        files: Vec<DescriptorBundle>,
+    ) -> Result<Self, Error> {
         if extra.len() != snapshot.layout().extra().len() {
             return Err(Error::InvalidFormat);
         }
@@ -154,10 +190,11 @@ impl TransferImage {
             .checked_mul(MANIFEST_OBJECT_BYTES)
             .ok_or(Error::InvalidFormat)?;
         let payload_bytes = snapshot.layout().total();
-        let file_manifest_bytes = files
-            .len()
-            .checked_mul(MANIFEST_FD_BYTES)
-            .ok_or(Error::InvalidFormat)?;
+        let file_manifest_bytes = files.iter().try_fold(0_usize, |total, file| {
+            descriptor_manifest::encoded_len(file.attributes().as_bytes().len())
+                .map_err(|_| Error::InvalidFormat)
+                .and_then(|length| total.checked_add(length).ok_or(Error::InvalidFormat))
+        })?;
         let total = HEADER_BYTES
             .checked_add(manifest_bytes)
             .and_then(|total| total.checked_add(file_manifest_bytes))
@@ -191,10 +228,15 @@ impl TransferImage {
             };
             cursor += MANIFEST_OBJECT_BYTES;
         }
-        for (offset, _) in &files {
-            bytes[cursor..cursor + MANIFEST_FD_BYTES]
-                .copy_from_slice(&(*offset as u64).to_le_bytes());
-            cursor += MANIFEST_FD_BYTES;
+        for file in &files {
+            let encoded = descriptor_manifest::encode(
+                &mut bytes[cursor..],
+                file.offset(),
+                file.ordinal(),
+                file.attributes(),
+            )
+            .map_err(|_| Error::InvalidFormat)?;
+            cursor += encoded;
         }
         let payload = &mut bytes[cursor..];
         payload[snapshot.layout().data()].copy_from_slice(snapshot.data());
@@ -202,7 +244,10 @@ impl TransferImage {
         payload[snapshot.layout().extra()].copy_from_slice(extra);
         drop(writer);
         drop(writable);
-        Self::import_with_fds(readonly, files.into_iter().map(|(_, fd)| fd).collect())
+        Self::import_with_fds(
+            readonly,
+            files.into_iter().map(|file| file.into_parts().2).collect(),
+        )
     }
 
     pub fn import(descriptor: OwnedFd) -> Result<Self, Error> {
@@ -251,14 +296,33 @@ impl TransferImage {
         let manifest_bytes = object_count
             .checked_mul(MANIFEST_OBJECT_BYTES)
             .ok_or(Error::InvalidFormat)?;
-        let payload_offset = HEADER_BYTES
+        if HEADER_BYTES
             .checked_add(manifest_bytes)
-            .and_then(|offset| {
-                file_count
-                    .checked_mul(MANIFEST_FD_BYTES)
-                    .and_then(|bytes| offset.checked_add(bytes))
-            })
+            .filter(|end| *end <= length)
+            .is_none()
+        {
+            return Err(Error::InvalidFormat);
+        }
+        let mut payload_offset = HEADER_BYTES
+            .checked_add(manifest_bytes)
             .ok_or(Error::InvalidFormat)?;
+        let mut decoded_files = Vec::new();
+        decoded_files
+            .try_reserve_exact(file_count)
+            .map_err(|_| Error::InvalidFormat)?;
+        for ordinal in 0..file_count {
+            let source = bytes.get(payload_offset..).ok_or(Error::InvalidFormat)?;
+            let decoded = descriptor_manifest::decode(source).map_err(|_| Error::InvalidFormat)?;
+            if decoded.ordinal != ordinal as u64 {
+                return Err(Error::InvalidFormat);
+            }
+            let attributes = DescriptorAttributes::new(decoded.attributes.to_vec())
+                .map_err(|_| Error::InvalidFormat)?;
+            decoded_files.push((decoded.offset, decoded.ordinal, attributes));
+            payload_offset = payload_offset
+                .checked_add(decoded.encoded_len)
+                .ok_or(Error::InvalidFormat)?;
+        }
         let layout = TransactionLayout::new(data, offsets, extra).ok_or(Error::InvalidFormat)?;
         let logical_length = payload_offset
             .checked_add(layout.total())
@@ -309,12 +373,10 @@ impl TransferImage {
             .try_reserve_exact(file_count)
             .map_err(|_| Error::InvalidFormat)?;
         for (index, descriptor) in files.into_iter().enumerate() {
-            let start = HEADER_BYTES + manifest_bytes + index * MANIFEST_FD_BYTES;
             imported_files.push(TransferFd {
-                offset: usize::try_from(u64::from_le_bytes(
-                    bytes[start..start + MANIFEST_FD_BYTES].try_into().unwrap(),
-                ))
-                .map_err(|_| Error::InvalidFormat)?,
+                offset: decoded_files[index].0,
+                ordinal: decoded_files[index].1,
+                attributes: decoded_files[index].2.clone(),
                 descriptor,
             });
         }
@@ -356,9 +418,29 @@ impl TransferImage {
     }
 
     pub fn try_clone_files(&self) -> io::Result<Vec<OwnedFd>> {
+        if self.files.iter().any(|file| !file.metadata().is_empty()) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "bare descriptor cloning would discard provider attributes",
+            ));
+        }
         self.files
             .iter()
             .map(|file| file.descriptor.try_clone())
+            .collect()
+    }
+
+    pub fn try_clone_descriptors(&self) -> io::Result<Vec<DescriptorBundle>> {
+        self.files
+            .iter()
+            .map(|file| {
+                Ok(DescriptorBundle::new(
+                    file.offset,
+                    file.ordinal,
+                    file.descriptor.try_clone()?,
+                    file.attributes.clone(),
+                ))
+            })
             .collect()
     }
 
@@ -386,10 +468,26 @@ impl TransferImage {
         &self.files
     }
 
-    pub fn take_files(&mut self) -> Vec<(usize, OwnedFd)> {
+    pub fn take_files(&mut self) -> Result<Vec<(usize, OwnedFd)>, Error> {
+        if self.files.iter().any(|file| !file.metadata().is_empty()) {
+            return Err(Error::UnsupportedDescriptorAttributes);
+        }
+        Ok(self
+            .take_descriptors()
+            .into_iter()
+            .map(|file| {
+                let (offset, _, descriptor, _) = file.into_parts();
+                (offset, descriptor)
+            })
+            .collect())
+    }
+
+    pub fn take_descriptors(&mut self) -> Vec<DescriptorBundle> {
         std::mem::take(&mut self.files)
             .into_iter()
-            .map(|file| (file.offset, file.descriptor))
+            .map(|file| {
+                DescriptorBundle::new(file.offset, file.ordinal, file.descriptor, file.attributes)
+            })
             .collect()
     }
 
@@ -400,7 +498,7 @@ impl TransferImage {
 
 fn validate_files(
     objects: &[objects::Object<'_>],
-    files: &[(usize, OwnedFd)],
+    files: &[DescriptorBundle],
 ) -> Result<(), Error> {
     let expected: Vec<_> = objects
         .iter()
@@ -411,7 +509,10 @@ fn validate_files(
         || expected
             .iter()
             .zip(files)
-            .any(|(expected, (actual, _))| expected != actual)
+            .enumerate()
+            .any(|(index, (expected, actual))| {
+                *expected != actual.offset() || actual.ordinal() != index as u64
+            })
     {
         return Err(Error::InvalidFormat);
     }
@@ -431,7 +532,10 @@ fn validate_imported_files(
         || expected
             .iter()
             .zip(files)
-            .any(|(expected, actual)| *expected != actual.offset)
+            .enumerate()
+            .any(|(index, (expected, actual))| {
+                *expected != actual.offset || actual.ordinal != index as u64
+            })
     {
         return Err(Error::InvalidFormat);
     }
@@ -525,6 +629,7 @@ fn usize_field(bytes: &[u8], offset: usize) -> Result<usize, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::descriptor_manifest::{DescriptorAttributes, DescriptorBundle};
     use crate::transaction_snapshot::TransactionSnapshot;
     use std::fs::File;
 
@@ -610,5 +715,106 @@ mod tests {
         .unwrap();
         assert_eq!(imported.files()[0].offset(), 4);
         assert_eq!(imported.data(), data);
+    }
+
+    #[test]
+    fn typed_descriptor_attributes_survive_clone_import_and_take() {
+        let mut data = vec![0_u8; 28];
+        data[4..8].copy_from_slice(&objects::Kind::Fd.tag().to_le_bytes());
+        data[12..16].copy_from_slice(&77_u32.to_le_bytes());
+        let snapshot = TransactionSnapshot::capture(&data, &4_u64.to_le_bytes(), 0).unwrap();
+        let file: OwnedFd = File::open("/dev/null").unwrap().into();
+        let attrs = DescriptorAttributes::new(vec![0x12, 0x34, 0xa5]).unwrap();
+        let image = TransferImage::capture_with_objects_and_descriptors(
+            &snapshot,
+            &[],
+            &[],
+            vec![DescriptorBundle::new(4, 0, file, attrs.clone())],
+        )
+        .unwrap();
+        assert_eq!(image.files()[0].ordinal(), 0);
+        assert_eq!(image.files()[0].metadata(), attrs.as_bytes());
+        let cloned = image.try_clone_descriptors().unwrap();
+        assert_eq!(cloned[0].ordinal(), 0);
+        assert_eq!(cloned[0].attributes().as_bytes(), attrs.as_bytes());
+        assert_eq!(
+            image.try_clone_files().unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+
+        let mut imported = TransferImage::import_with_fds(
+            image.try_clone_descriptor().unwrap(),
+            cloned.into_iter().map(|file| file.into_parts().2).collect(),
+        )
+        .unwrap();
+        assert_eq!(imported.files()[0].metadata(), attrs.as_bytes());
+        assert!(matches!(
+            imported.take_files(),
+            Err(Error::UnsupportedDescriptorAttributes)
+        ));
+        let taken = imported.take_descriptors();
+        assert_eq!(taken[0].ordinal(), 0);
+        assert_eq!(taken[0].attributes().as_bytes(), attrs.as_bytes());
+    }
+
+    #[test]
+    fn descriptor_attributes_and_ordinals_are_bounded_before_capture() {
+        assert!(
+            DescriptorAttributes::new(vec![0; descriptor_manifest::MAX_ATTRIBUTES_BYTES + 1])
+                .is_err()
+        );
+        let data = {
+            let mut data = vec![0_u8; 28];
+            data[4..8].copy_from_slice(&objects::Kind::Fd.tag().to_le_bytes());
+            data[12..16].copy_from_slice(&77_u32.to_le_bytes());
+            data
+        };
+        let snapshot = TransactionSnapshot::capture(&data, &4_u64.to_le_bytes(), 0).unwrap();
+        let file: OwnedFd = File::open("/dev/null").unwrap().into();
+        assert!(matches!(
+            TransferImage::capture_with_objects_and_descriptors(
+                &snapshot,
+                &[],
+                &[],
+                vec![DescriptorBundle::new(
+                    4,
+                    1,
+                    file,
+                    DescriptorAttributes::empty(),
+                )],
+            ),
+            Err(Error::InvalidFormat)
+        ));
+    }
+
+    #[test]
+    fn v4_import_rejects_nonzero_descriptor_reserved_field() {
+        let payload_len = 28 + 8;
+        let total = HEADER_BYTES + descriptor_manifest::ENTRY_HEADER_BYTES + payload_len;
+        let (writable, readonly) = immutable_backing(total).unwrap();
+        let mut writer = WritableView::map(&writable, total).unwrap();
+        let bytes = writer.bytes();
+        bytes.fill(0);
+        bytes[..8].copy_from_slice(MAGIC);
+        bytes[8..12].copy_from_slice(&VERSION.to_le_bytes());
+        bytes[12..16].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
+        bytes[16..24].copy_from_slice(&28_u64.to_le_bytes());
+        bytes[24..32].copy_from_slice(&8_u64.to_le_bytes());
+        bytes[40..48].copy_from_slice(&0_u64.to_le_bytes());
+        bytes[48..56].copy_from_slice(&1_u64.to_le_bytes());
+        let manifest = HEADER_BYTES;
+        bytes[manifest..manifest + 8].copy_from_slice(&4_u64.to_le_bytes());
+        bytes[manifest + 8..manifest + 16].copy_from_slice(&0_u64.to_le_bytes());
+        bytes[manifest + 20] = 1;
+        let payload = manifest + descriptor_manifest::ENTRY_HEADER_BYTES;
+        bytes[payload + 4..payload + 8].copy_from_slice(&objects::Kind::Fd.tag().to_le_bytes());
+        bytes[payload + 28..payload + 36].copy_from_slice(&4_u64.to_le_bytes());
+        drop(writer);
+        drop(writable);
+        let file: OwnedFd = File::open("/dev/null").unwrap().into();
+        assert!(matches!(
+            TransferImage::import_with_fds(readonly, vec![file]),
+            Err(Error::InvalidFormat)
+        ));
     }
 }

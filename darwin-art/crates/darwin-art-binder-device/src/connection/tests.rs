@@ -41,6 +41,30 @@ fn wrong_owner_and_disconnected_target_never_publish() {
 }
 
 #[test]
+fn actual_connection_owner_drop_wakes_indefinite_work_wait() {
+    use std::{sync::mpsc, time::Duration};
+    let owner = ConnectionOwner::new(Session::default());
+    let handle = owner.handle();
+    let observed = handle.work_generation();
+    let (done_tx, done_rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        done_tx
+            .send(handle.wait_for_work_indefinite(observed))
+            .unwrap()
+    });
+    assert!(matches!(
+        done_rx.recv_timeout(Duration::from_millis(20)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    drop(owner); // Real disconnect, not merely a synthetic Signal::close.
+    assert_eq!(
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        crate::work_signal::WaitOutcome::Closed
+    );
+    waiter.join().unwrap();
+}
+
+#[test]
 fn disconnect_cannot_cross_an_active_publication_gate() {
     let (connection, refs) = pair();
     let target = connection.bind_target(refs).unwrap();

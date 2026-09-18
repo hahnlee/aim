@@ -24,6 +24,7 @@ check_hash "$script_dir/include/darwin_art_gdtoa_compat.h" "$COMPAT_SHA256"
 check_hash "$script_dir/include/thread_private.h" "$THREAD_PRIVATE_SHA256"
 check_hash "$script_dir/include/darwin_art_bionic_float_conversion.h" "$HEADER_SHA256"
 check_hash "$script_dir/src/provider.cc" "$PROVIDER_SHA256"
+check_hash "$script_dir/probes/host_state.cc" "$HOST_STATE_HELPER_SHA256"
 check_hash "$script_dir/src/lock_adapter.cc" "$LOCK_ADAPTER_SHA256"
 check_hash "$script_dir/src/main.rs" "$MAIN_SHA256"
 check_hash "$script_dir/probes/fixture.c" "$FIXTURE_SHA256"
@@ -222,9 +223,11 @@ differential_output="$(ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=
 grep -F 'PASS AOSP-corpus=47x4x2 bits+end+errno rounding=4 host-fenv=preserved threads=8x1000 ASan+UBSan(no-shift)=clean' <<< "$differential_output" >/dev/null ||
   fail 'AOSP differential/sanitizer gate failed'
 
-CARGO_TARGET_DIR="$temp_root/cargo-target" cargo run --quiet \
+CARGO_TARGET_DIR="$temp_root/cargo-production" cargo build --quiet --lib \
+  --manifest-path "$script_dir/Cargo.toml"
+CARGO_TARGET_DIR="$temp_root/cargo-target" cargo run --quiet --features audit \
   --manifest-path "$script_dir/Cargo.toml" -- "$fixture"
-CARGO_TARGET_DIR="$temp_root/cargo-target" cargo clippy --quiet \
+CARGO_TARGET_DIR="$temp_root/cargo-target" cargo clippy --quiet --features audit \
   --manifest-path "$script_dir/Cargo.toml" -- -D warnings
 cargo fmt --manifest-path "$script_dir/Cargo.toml" -- --check
 [[ ! -d "$script_dir/target" ]] || fail 'module-local target directory forbidden'

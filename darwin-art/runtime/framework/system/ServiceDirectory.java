@@ -13,11 +13,15 @@ import java.util.Map;
 /** System-owned startup service table; no application lifecycle or host transport. */
 public final class ServiceDirectory extends Binder {
     private final Map<String, IBinder> services;
+    private final ServiceDirectoryAdmission admission = new ServiceDirectoryAdmission();
 
     public ServiceDirectory(Map<String, IBinder> services) {
         this.services = Collections.unmodifiableMap(new HashMap<>(services));
         attachInterface(null, "android.os.IServiceManager");
     }
+
+    /** Native system startup calls this only after genuine Context/policy initialization. */
+    public void publishApplicationLookups() { admission.publish(); }
 
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
@@ -30,6 +34,7 @@ public final class ServiceDirectory extends Binder {
             return super.onTransact(code, data, reply, flags);
         }
         if (reply == null) return false;
+        admission.enforceLookup();
         Log.i("DarwinSystem", "service lookup: enforce code=" + code);
         data.enforceInterface("android.os.IServiceManager");
         String name = data.readString();

@@ -1,8 +1,9 @@
+use crate::DescriptorTransferBinding;
 use crate::{AuthorityTransport, Error, client};
 use darwin_art_binder_device::{authority_protocol::Message, remote_transaction};
+use std::env;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::{env, os::fd::IntoRawFd};
 
 pub type ProcessDispatcher = Dispatcher<darwin_art_profile::BinderAuthorityConnection>;
 
@@ -67,7 +68,7 @@ impl<T: AuthorityTransport> Dispatcher<T> {
                     .transport
                     .take_transfer(sender, transfer)
                     .map_err(|error| Error::Transport(error.0))?;
-                let files = self.install_received_fds(&mut image)?;
+                let files = self.install_received_fds(&mut image, sender, transfer)?;
                 self.state
                     .device
                     .deliver_remote_transaction_with_fds(
@@ -107,7 +108,7 @@ impl<T: AuthorityTransport> Dispatcher<T> {
                     .transport
                     .take_transfer(source, transfer)
                     .map_err(|error| Error::Transport(error.0))?;
-                let files = self.install_received_fds(&mut image)?;
+                let files = self.install_received_fds(&mut image, source, transfer)?;
                 if env::var_os("DARWIN_ART_DEBUG_BINDER").is_some() {
                     let status = image
                         .data()
@@ -164,9 +165,10 @@ impl<T: AuthorityTransport> Dispatcher<T> {
     fn install_received_fds(
         &self,
         image: &mut darwin_art_binder_device::transfer_image::TransferImage,
+        source: darwin_art_binder_device::authority_protocol::ConnectionToken,
+        transfer: darwin_art_binder_device::authority_protocol::TransferToken,
     ) -> Result<Vec<darwin_art_binder_device::installed_fds::InstalledFd>, Error> {
-        let transferred = image.take_files();
-        if transferred.is_empty() {
+        if image.files().is_empty() {
             return Ok(Vec::new());
         }
         let api = self
@@ -175,37 +177,49 @@ impl<T: AuthorityTransport> Dispatcher<T> {
             .lock()
             .map_err(|_| Error::Poisoned)?
             .ok_or_else(|| Error::Transfer("Binder FD transport is not installed".into()))?;
+        if api.bundle.is_none() && image.files().iter().any(|file| !file.metadata().is_empty()) {
+            return Err(Error::Transfer(
+                "descriptor attributes require the V2 provider port".into(),
+            ));
+        }
+        let transferred = image.take_descriptors();
         let mut files = Vec::new();
         files
             .try_reserve_exact(transferred.len())
             .map_err(|_| Error::Transfer("Binder FD ownership allocation failed".into()))?;
-        for (offset, descriptor) in transferred {
+        for descriptor in transferred {
+            let offset = descriptor.offset();
             let end = offset
                 .checked_add(24)
                 .ok_or_else(|| Error::Transfer("Binder FD object offset overflow".into()))?;
-            let source = image
+            let object_source = image
                 .data()
                 .get(offset..end)
                 .ok_or_else(|| Error::Transfer("Binder FD object is outside Parcel data".into()))?;
             let mut object = [0_u8; 24];
-            object.copy_from_slice(source);
-            let number = unsafe { (api.import)(descriptor.into_raw_fd()) };
-            if number < 0 {
-                return Err(Error::Transfer(
-                    "Binder FD could not be installed in receiver namespace".into(),
-                ));
-            }
-            let number = u32::try_from(number)
-                .map_err(|_| Error::Transfer("Binder FD number is outside Android ABI".into()))?;
-            object[8..12].copy_from_slice(&number.to_le_bytes());
-            files.push(darwin_art_binder_device::installed_fds::InstalledFd::new(
+            object.copy_from_slice(object_source);
+            let binding = DescriptorTransferBinding::new(
+                source.get(),
+                transfer.get(),
+                descriptor.ordinal(),
                 offset,
-                object,
-                number,
-                move || {
-                    let _ = unsafe { (api.close)(number as i32) };
-                },
-            ));
+            );
+            let number = api
+                .import_bound(descriptor, binding)
+                .map_err(Error::Transfer)?;
+            let number = u32::try_from(number).map_err(|_| {
+                let _ = unsafe { (api.close)(number) };
+                Error::Transfer("Binder FD number is outside Android ABI".into())
+            })?;
+            object[8..12].copy_from_slice(&number.to_le_bytes());
+            // The installed process provider stays live through Binder buffer
+            // teardown. Inline its close port rather than allocating a boxed
+            // callback after authoritative native descriptor acquisition.
+            files.push(unsafe {
+                darwin_art_binder_device::installed_fds::InstalledFd::new_native(
+                    offset, object, number, api.close,
+                )
+            });
         }
         Ok(files)
     }

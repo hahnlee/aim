@@ -3,9 +3,11 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ptr;
 
+use crate::vulkan_provider::{ready, symbol_lookup};
+
 #[no_mangle]
 pub extern "C" fn darwin_art_bionic_vulkan_provider_ready() -> c_int {
-    i32::from(super::moltenvk().is_some())
+    i32::from(ready())
 }
 
 /// Resolve only from the real backend, never from no-driver fallback PFNs.
@@ -33,10 +35,10 @@ pub unsafe extern "C" fn darwin_art_bionic_vulkan_symbol(
     if !version.is_null() {
         return 2;
     }
-    if super::moltenvk().is_none() {
+    if !ready() {
         return 1;
     }
-    let address = unsafe { super::vulkan_get_instance_proc_addr(ptr::null_mut(), symbol.as_ptr()) };
+    let address = unsafe { symbol_lookup(ptr::null_mut(), symbol.as_ptr()) };
     if address.is_null() {
         return 1;
     }
@@ -53,11 +55,12 @@ pub(super) unsafe fn legacy_lookup(symbol: *const c_char) -> *mut c_void {
         super::set_error("null Android Vulkan DSO symbol");
         return ptr::null_mut();
     }
-    let result = unsafe { super::vulkan_get_instance_proc_addr(ptr::null_mut(), symbol) };
+    let result = unsafe { symbol_lookup(ptr::null_mut(), symbol) };
     if std::env::var_os("DARWIN_ART_DEBUG_GRAPHICS_DSO").is_some() {
         let name = unsafe { CStr::from_ptr(symbol) };
         eprintln!(
-            "ART Android libdl: libvulkan.so dlsym {} resolved={}",
+            "ART Android libdl: pid={} libvulkan.so dlsym {} resolved={}",
+            std::process::id(),
             name.to_string_lossy(),
             !result.is_null()
         );

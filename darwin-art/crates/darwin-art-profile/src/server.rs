@@ -26,6 +26,8 @@ pub struct DaemonConfig {
 
 struct State {
     binder: crate::binder_service::BinderService,
+    fd_deliveries: Mutex<crate::host_fd_delivery::HostFdDeliveryOwner>,
+    scm: crate::scm_service::ScmService,
     filesystem: Mutex<ProfileFilesystem>,
     paths: ProfilePaths,
     registry: Mutex<PackageRegistry>,
@@ -84,6 +86,8 @@ pub fn run_daemon(config: DaemonConfig) -> Result<(), ProfileError> {
     listener.set_nonblocking(true)?;
     let state = Arc::new(State {
         binder: Default::default(),
+        fd_deliveries: crate::host_fd_delivery::transport::new_owner()?,
+        scm: crate::scm_service::ScmService::new()?,
         filesystem: Mutex::new(ProfileFilesystem::new(config.paths.clone())),
         paths: config.paths.clone(),
         registry: Mutex::new(PackageRegistry::new(&config.paths)),
@@ -100,10 +104,14 @@ pub fn run_daemon(config: DaemonConfig) -> Result<(), ProfileError> {
         last_activity: Mutex::new(Instant::now()),
     });
     while !state.shutdown.load(Ordering::SeqCst) {
+        crate::host_fd_delivery::transport::has_pending(&state.fd_deliveries)?;
+        state.scm.has_pending()?;
         if !crate::listener_wait::wait_readable(listener.as_fd(), Duration::from_millis(50))? {
             if state.leases.load(Ordering::SeqCst) == 0
                 && state.handlers.load(Ordering::SeqCst) == 0
                 && state.last_activity.lock().unwrap().elapsed() >= config.idle_timeout
+                && !crate::host_fd_delivery::transport::has_pending(&state.fd_deliveries)?
+                && !state.scm.has_pending()?
             {
                 break;
             }
@@ -115,7 +123,12 @@ pub fn run_daemon(config: DaemonConfig) -> Result<(), ProfileError> {
                 // streams are blocking so an acquire handler remains a lease
                 // until the peer closes instead of treating EAGAIN as EOF.
                 stream.set_nonblocking(false)?;
+                let admission_gate = state.lease_gate.lock().unwrap();
+                if state.shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
                 state.handlers.fetch_add(1, Ordering::SeqCst);
+                drop(admission_gate);
                 let state = Arc::clone(&state);
                 thread::spawn(move || {
                     let _guard = HandlerGuard(Arc::clone(&state));
@@ -195,7 +208,7 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                 .as_ref()
                 .map(|(pid, package)| {
                     let mut processes = state.processes.lock().unwrap();
-                    let current = ProcessIncarnation::read(*pid)?;
+                    let current = ProcessIncarnation::read_live(*pid)?;
                     if Some(current) != incarnation {
                         return Err(ProfileError::Daemon(
                             "process changed before registration".into(),
@@ -241,7 +254,14 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
             require_empty(&message.payload)?;
             let _gate = state.lease_gate.lock().unwrap();
             let leases = state.leases.load(Ordering::SeqCst);
-            if leases == 0 {
+            // The shutdown handler itself is counted. Intake admission uses
+            // this same gate, so no later handler can reserve a delivery once
+            // shutdown is acknowledged; an existing acquisition handler is busy.
+            let other_handlers = state.handlers.load(Ordering::SeqCst).saturating_sub(1);
+            let pending_deliveries =
+                crate::host_fd_delivery::transport::has_pending(&state.fd_deliveries)?;
+            let pending_scm = state.scm.has_pending()?;
+            if leases == 0 && other_handlers == 0 && !pending_deliveries && !pending_scm {
                 protocol::write_response(&mut stream, message.operation, 0, b"")?;
                 state.shutdown.store(true, Ordering::SeqCst);
             } else {
@@ -249,7 +269,7 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                     &mut stream,
                     message.operation,
                     16,
-                    format!("{leases} active lease(s)").as_bytes(),
+                    format!("{leases} active lease(s), {other_handlers} other handler(s), pending_fd_deliveries={pending_deliveries}, pending_scm={pending_scm}").as_bytes(),
                 )?;
             }
         }
@@ -321,7 +341,7 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                 ));
             }
             let pid = u32::from_le_bytes(message.payload[..4].try_into().unwrap());
-            let incarnation = ProcessIncarnation::read(pid)?;
+            let incarnation = ProcessIncarnation::read_live(pid)?;
             let (package, registered_uid) = {
                 let processes = state.processes.lock().unwrap();
                 let package = processes
@@ -411,29 +431,34 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                 &environment,
                 &state.paths.profile_root,
             )?;
-            let mut child = command.spawn()?;
+            let mut child = crate::spawn_owned(&mut command)?;
             let pid = child.id();
-            let on_exit = match register_child(state, pid, &package) {
-                Ok(on_exit) => on_exit,
+            let (incarnation, on_exit) = match register_child_with_uid_and_identity(
+                state, pid, &package, None,
+            ) {
+                Ok(registration) => registration,
                 Err(error) => {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(error);
                 }
             };
+            let waiter = crate::process_wait::ProcessWaitOwner::from_child(
+                child, incarnation, on_exit,
+            );
             if let Some(template) = application_template {
-                state
-                    .application_launches
-                    .lock()
-                    .map_err(|_| {
-                        ProfileError::Daemon("application launch registry is poisoned".into())
-                    })?
-                    .insert(package.clone(), template);
+                let mut launches = match state.application_launches.lock() {
+                    Ok(launches) => launches,
+                    Err(_) => {
+                        let _ = waiter.kill_if_exact_live();
+                        return Err(ProfileError::Daemon(
+                            "application launch registry is poisoned".into(),
+                        ));
+                    }
+                };
+                launches.insert(package.clone(), template);
             }
-            thread::spawn(move || {
-                let _ = child.wait();
-                on_exit();
-            });
+            crate::daemonized_child_wait::supervise(waiter)?;
             protocol::write_response(&mut stream, message.operation, 0, &pid.to_le_bytes())?;
         }
         protocol::OP_START_RUNTIME => {
@@ -474,8 +499,13 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                 }
             }
         }
-        protocol::OP_ACTIVATE_BOUND_SERVICE => {
-            let result = activate_bound_service(state, &message.payload, &stream);
+        protocol::OP_ACTIVATE_BOUND_SERVICE | protocol::OP_CANCEL_BOUND_SERVICE => {
+            let result = control_bound_service(
+                state,
+                &message.payload,
+                &stream,
+                message.operation == protocol::OP_CANCEL_BOUND_SERVICE,
+            );
             match result {
                 Ok(()) => protocol::write_response(&mut stream, message.operation, 0, b""),
                 Err(error) => protocol::write_response(
@@ -547,8 +577,15 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
             let peer = binder_peer(state, &stream)?;
             match state.binder.prepare_take(peer, source, token) {
                 Ok(delivery) => {
-                    protocol::write_response(&mut stream, message.operation, 0, b"")?;
-                    delivery.send(&stream)?;
+                    let destination = crate::host_fd_delivery::transport::destination(&stream)?;
+                    let prepared = crate::host_fd_delivery::transport::prepare(
+                        &state.fd_deliveries, destination, delivery.into_descriptors(),
+                    )?;
+                    let offer = crate::host_fd_delivery::transport::offer(&prepared)?;
+                    protocol::write_response(&mut stream, message.operation, 0, &offer)?;
+                    crate::host_fd_delivery::transport::send_and_admit(
+                        &state.fd_deliveries, &mut stream, prepared,
+                    )?;
                 }
                 Err(error) => protocol::write_response(
                     &mut stream,
@@ -557,6 +594,9 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                     error.to_string().as_bytes(),
                 )?,
             }
+        }
+        protocol::OP_SCM_SERVICE => {
+            return state.scm.serve(&state.processes, &mut stream, &message.payload);
         }
         _ => protocol::write_response(&mut stream, message.operation, 38, b"unknown operation")?,
     }
@@ -651,6 +691,16 @@ fn register_child_with_uid(
     package: &str,
     android_uid: Option<u32>,
 ) -> Result<Box<dyn FnOnce() + Send>, ProfileError> {
+    register_child_with_uid_and_identity(state, pid, package, android_uid)
+        .map(|(_, on_exit)| on_exit)
+}
+
+fn register_child_with_uid_and_identity(
+    state: &Arc<State>,
+    pid: u32,
+    package: &str,
+    android_uid: Option<u32>,
+) -> Result<(ProcessIncarnation, Box<dyn FnOnce() + Send>), ProfileError> {
     let _gate = state.lease_gate.lock().unwrap();
     if state.shutdown.load(Ordering::SeqCst) {
         return Err(ProfileError::Daemon("daemon is shutting down".into()));
@@ -660,13 +710,24 @@ fn register_child_with_uid(
     let lease = processes.acquire_with_uid(pid, package, incarnation, true, android_uid)?;
     state.leases.fetch_add(1, Ordering::SeqCst);
     let owner = Arc::clone(state);
-    Ok(Box::new(move || {
+    Ok((incarnation, Box::new(move || {
         let _gate = owner.lease_gate.lock().unwrap();
         owner.processes.lock().unwrap().child_exited(lease);
+        if let Err(error) = owner.scm.process_died(pid, incarnation) {
+            eprintln!("Darwin ART daemon: {error}");
+        }
         owner.leases.fetch_sub(1, Ordering::SeqCst);
         *owner.last_activity.lock().unwrap() = Instant::now();
-    }))
+    })))
 }
+
+#[cfg(test)]
+#[path = "bound_service_admission_tests.rs"]
+mod bound_service_admission_tests;
+
+#[cfg(test)]
+#[path = "daemon_fd_shutdown_tests.rs"]
+mod daemon_fd_shutdown_tests;
 
 fn start_bound_service(
     state: &Arc<State>,
@@ -703,15 +764,19 @@ fn start_bound_service(
             "bound-service package already has a caller-owned process".into(),
         ));
     }
-    if let BoundServiceSlot::Existing(existing) =
+    let slot =
         state
             .bound_services
-            .await_slot(&identity, request.start_sequence, RESTART_REAP_TIMEOUT)?
-    {
+            .await_slot(&identity, request.start_sequence, RESTART_REAP_TIMEOUT)?;
+    // Admission is after both gate acquisition and any incarnation-reap wait.
+    // The pre-gate peer check cannot authorize using a replacement generation's
+    // template, including the coalesced Existing response path.
+    let system_template = state
+        .runtime_services
+        .system_launch_template(peer_pid, peer_incarnation)?;
+    if let BoundServiceSlot::Existing(existing) = slot {
         return Ok(existing);
     }
-
-    let system_template = state.runtime_services.system_launch_template()?;
     let application_template = state
         .application_launches
         .lock()
@@ -730,7 +795,7 @@ fn start_bound_service(
         })?;
     state.bound_services.insert(
         identity.clone(),
-        BoundServiceRecord::new(response, child.activation()),
+        BoundServiceRecord::new(response, child.control()),
     )?;
     let owner = Arc::clone(state);
     let retired_identity = identity.clone();
@@ -745,23 +810,18 @@ fn start_bound_service(
             retired_incarnation,
         );
     }) {
-        // `OwnedBoundServiceChild::Drop` has already killed/reaped the child
-        // and run the process-lease callback.  Retire only our exact record.
-        state.bound_services.remove_incarnation(
-            &identity,
-            response.pid,
-            response.start_sequence,
-            response.incarnation,
-        )?;
+        // The raw waiter retains process lease AND exact-record retirement.
+        // Failed worker creation is not evidence of child exit/reap.
         return Err(error);
     }
     Ok(response)
 }
 
-fn activate_bound_service(
+fn control_bound_service(
     state: &Arc<State>,
     payload: &[u8],
     stream: &UnixStream,
+    cancel: bool,
 ) -> Result<(), ProfileError> {
     let (peer_pid, peer_incarnation) = crate::peer_process::identity(stream)?;
     let is_system = state
@@ -775,9 +835,17 @@ fn activate_bound_service(
         ));
     }
     let handle = BoundServiceProcessResponse::decode(payload)?;
-    let _gate = state.bound_service_gate.lock().unwrap();
-    let activation = state.bound_services.activation(handle)?;
-    crate::bound_service_process::OwnedBoundServiceChild::activate(&activation)
+    // Starting a replacement may hold the launch gate while waiting for this
+    // exact child to be reaped. Cancellation must never wait behind that gate.
+    let control = state.bound_services.control(handle)?;
+    if cancel {
+        // This acknowledges cancellation admission, NOT process reaping.
+        // Only the child supervisor may retire its registry entry and lease.
+        control.cancel();
+        Ok(())
+    } else {
+        control.activate()
+    }
 }
 
 fn validate_bound_service_request(

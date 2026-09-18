@@ -448,10 +448,11 @@ int Publish(Owner* owner, uintptr_t start, uintptr_t end) try {
   if (std::getenv("DARWIN_ART_DEBUG_ELF_IMAGES") != nullptr) {
     std::fprintf(stderr,
                  "DARWIN ELF image: soname=%s start=%#lx end=%#lx "
-                 "load_bias=%#lx\n",
+                 "load_bias=%#lx pid=%ld\n",
                  image->soname.c_str(), static_cast<unsigned long>(start),
                  static_cast<unsigned long>(end),
-                 static_cast<unsigned long>(image->load_bias));
+                 static_cast<unsigned long>(image->load_bias),
+                 static_cast<long>(getpid()));
   }
   if (std::getenv("DARWIN_ART_DEBUG_STOP_AT_CHROME") != nullptr &&
       image->soname == "libchrome.so") {

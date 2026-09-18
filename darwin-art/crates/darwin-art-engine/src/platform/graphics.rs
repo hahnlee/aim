@@ -74,7 +74,7 @@ impl GraphicsSession {
     /// that policy decision by re-entering the foreign callback.
     pub fn close(&mut self) -> i32 {
         if self.closed {
-            return darwin_art_engine_sys::ENGINE_STATUS_UNAVAILABLE;
+            return 0;
         }
         // Mark the explicit close boundary before entering foreign code.
         // A failed close remains observable to the caller, but Drop must
@@ -236,8 +236,10 @@ mod graphics_session_tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     static FAILED_CLOSE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static CLOSE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" fn close(_: *mut c_void) -> i32 {
+        CLOSE_CALLS.fetch_add(1, Ordering::SeqCst);
         0
     }
 
@@ -268,6 +270,7 @@ mod graphics_session_tests {
 
     #[test]
     fn close_makes_use_after_close_fail_closed() {
+        CLOSE_CALLS.store(0, Ordering::SeqCst);
         let handle = Box::into_raw(Box::new(1_u8)).cast::<c_void>();
         let mut session = GraphicsSession {
             handle: NonNull::new(handle),
@@ -299,10 +302,8 @@ mod graphics_session_tests {
             session.pump_main_looper(),
             darwin_art_engine_sys::ENGINE_STATUS_UNAVAILABLE
         );
-        assert_eq!(
-            session.close(),
-            darwin_art_engine_sys::ENGINE_STATUS_UNAVAILABLE
-        );
+        assert_eq!(session.close(), 0);
+        assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 1);
     }
 
     #[test]

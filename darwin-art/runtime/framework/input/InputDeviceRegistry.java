@@ -1,6 +1,7 @@
 package dev.darwinart.runtime.input;
 
 import android.os.Parcelable;
+import android.view.InputDevice;
 import java.lang.reflect.Method;
 
 /** System-owned Android input-device inventory for the macOS seat. */
@@ -35,8 +36,7 @@ public final class InputDeviceRegistry {
             int id, String name, String descriptor, boolean external) {
         try {
             Class<?> keyMapClass = Class.forName("android.view.KeyCharacterMap");
-            Object keyMap = keyMapClass.getMethod("obtainEmptyMap", int.class)
-                    .invoke(null, Integer.valueOf(id));
+            Object keyMap = SystemKeyboardMaps.load(id);
             Class<?> builderClass = Class.forName("android.view.InputDevice$Builder");
             Object builder = builderClass.getDeclaredConstructor().newInstance();
             invoke(builderClass, builder, "setId", int.class, Integer.valueOf(id));
@@ -45,7 +45,8 @@ public final class InputDeviceRegistry {
             invoke(builderClass, builder, "setDescriptor", String.class, descriptor);
             invoke(builderClass, builder, "setExternal", boolean.class, Boolean.valueOf(external));
             invoke(builderClass, builder, "setSources", int.class, Integer.valueOf(0x101));
-            invoke(builderClass, builder, "setKeyboardType", int.class, Integer.valueOf(4));
+            invoke(builderClass, builder, "setKeyboardType", int.class,
+                    Integer.valueOf(InputDevice.KEYBOARD_TYPE_ALPHABETIC));
             invoke(builderClass, builder, "setKeyCharacterMap", keyMapClass, keyMap);
             invoke(builderClass, builder, "setEnabled", boolean.class, Boolean.TRUE);
             return (Parcelable) builderClass.getMethod("build").invoke(builder);

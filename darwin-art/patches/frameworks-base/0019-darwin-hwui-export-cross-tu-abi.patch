@@ -1,0 +1,178 @@
+diff --git a/libs/hwui/AnimationContext.h b/libs/hwui/AnimationContext.h
+index 0000000..0000000 100644
+--- a/libs/hwui/AnimationContext.h
++++ b/libs/hwui/AnimationContext.h
+@@ -50,4 +50,7 @@
+     // Called by the RenderNode when it has internally pulsed its own animations
+     // this frame and does not need to be run again this frame.
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void notifyAnimationsRan();
+ 
+@@ -78,5 +78,8 @@
+ 
+ public:
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     explicit AnimationContext(renderthread::TimeLord& clock);
+     virtual ~AnimationContext();
+ 
+@@ -88,4 +88,7 @@
+     // Will always add to the next frame list, which is swapped when
+     // startFrame() is called
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void addAnimatingRenderNode(RenderNode& node);
+ 
+diff --git a/libs/hwui/RenderNode.h b/libs/hwui/RenderNode.h
+index 0000000..0000000 100644
+--- a/libs/hwui/RenderNode.h
++++ b/libs/hwui/RenderNode.h
+@@ -200,7 +200,10 @@ public:
+     // This is only modified in MODE_FULL, so it can be safely accessed
+     // on the UI thread.
+     bool hasParents() { return mParentCount; }
+ 
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void onRemovedFromTree(TreeInfo* info);
+ 
+     // Called by CanvasContext to promote a RenderNode to be a root node
+@@ -228,8 +231,14 @@
+ private:
+     void computeOrderingImpl(RenderNodeOp* opState,
+                              std::vector<RenderNodeOp*>* compositedChildrenOfProjectionSurface,
+                              const mat4* transformFromProjectionSurface);
+ 
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void syncProperties();
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void syncDisplayList(TreeObserver& observer, TreeInfo* info);
+     void handleForceDark(TreeInfo* info);
+ 
+diff --git a/libs/hwui/renderthread/TimeLord.h b/libs/hwui/renderthread/TimeLord.h
+index 0000000..0000000 100644
+--- a/libs/hwui/renderthread/TimeLord.h
++++ b/libs/hwui/renderthread/TimeLord.h
+@@ -29,14 +29,20 @@
+ class TimeLord {
+ public:
+     // Public for the Darwin standalone HWUI host, which owns the same
+     // AnimationContext pulse normally driven by CanvasContext.
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     TimeLord();
+     ~TimeLord() {}
+     void setFrameInterval(nsecs_t intervalNanos) { mFrameIntervalNanos = intervalNanos; }
+     nsecs_t frameIntervalNanos() const { return mFrameIntervalNanos; }
+ 
+     // returns true if the vsync is newer, false if it was rejected for staleness
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     bool vsyncReceived(nsecs_t vsync, nsecs_t indendedVsync, int64_t vsyncId,
+                        int64_t frameDeadline, nsecs_t frameInterval);
+     nsecs_t latestVsync() { return mFrameTimeNanos; }
+     nsecs_t computeFrameTimeNanos();
+diff --git a/libs/hwui/pipeline/skia/SkiaDisplayList.h b/libs/hwui/pipeline/skia/SkiaDisplayList.h
+index 0000000..0000000 100644
+--- a/libs/hwui/pipeline/skia/SkiaDisplayList.h
++++ b/libs/hwui/pipeline/skia/SkiaDisplayList.h
+@@ -146,6 +146,9 @@
+     /**
+      *  Calls the provided function once for each child of this DisplayList
+      */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void updateChildren(std::function<void(RenderNode*)> updateFn);
+ 
+     void visit(std::function<void(const RenderNode&)> func) const;
+ 
+diff --git a/libs/hwui/pipeline/skia/RenderNodeDrawable.h b/libs/hwui/pipeline/skia/RenderNodeDrawable.h
+index 0000000..0000000 100644
+--- a/libs/hwui/pipeline/skia/RenderNodeDrawable.h
++++ b/libs/hwui/pipeline/skia/RenderNodeDrawable.h
+@@ -46,18 +46,27 @@
+      * @param node that has to be drawn
+      * @param canvas is a recording canvas used to extract its matrix
+      * @param composeLayer if the node's layer type is RenderLayer this flag determines whether
+      *      we should draw into the contents of the layer or compose the existing contents of the
+      *      layer into the canvas.
+      */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     explicit RenderNodeDrawable(RenderNode* node, SkCanvas* canvas, bool composeLayer = true,
+                                 bool inReorderingSection = false);
+ 
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     ~RenderNodeDrawable();
+ 
+     /**
+      * Draws into the canvas this render node and its children. If the node is marked as a
+      * projection receiver then all projected children (excluding direct children) will be drawn
+      * last. Any projected node not matching those requirements will not be drawn by this function.
+      */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void forceDraw(SkCanvas* canvas) const;
+ 
+diff --git a/libs/hwui/Animator.h b/libs/hwui/Animator.h
+index 0000000..0000000 100644
+--- a/libs/hwui/Animator.h
++++ b/libs/hwui/Animator.h
+@@ -77,7 +77,10 @@
+     void attach(RenderNode* target);
+     virtual void onAttached() {}
+     void detach() { mTarget = nullptr; }
+     void pushStaging(AnimationContext& context);
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     bool animate(AnimationContext& context);
+ 
+     // Returns the remaining time in ms for the animation. Note this should only be called during
+ 
+diff --git a/libs/hwui/AnimatorManager.h b/libs/hwui/AnimatorManager.h
+index 0000000..0000000 100644
+--- a/libs/hwui/AnimatorManager.h
++++ b/libs/hwui/AnimatorManager.h
+@@ -42,9 +42,12 @@
+     void addAnimator(const sp<BaseRenderNodeAnimator>& animator);
+     void removeAnimator(const sp<BaseRenderNodeAnimator>& animator);
+ 
+     void setAnimationHandle(AnimationHandle* handle);
+     bool hasAnimationHandle() { return mAnimationHandle; }
+ 
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void pushStaging();
+     void onAnimatorTargetChanged(BaseRenderNodeAnimator* animator);
+ 
+diff --git a/libs/hwui/RenderProperties.h b/libs/hwui/RenderProperties.h
+index 0000000..0000000 100644
+--- a/libs/hwui/RenderProperties.h
++++ b/libs/hwui/RenderProperties.h
+@@ -507,5 +507,8 @@
+     void debugOutputProperties(std::ostream& output, const int level) const;
+ 
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void updateMatrix();
+ 
+     Outline& mutableOutline() { return mPrimitiveFields.mOutline; }

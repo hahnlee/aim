@@ -1,4 +1,3 @@
-use super::manifest::PATCHED_RUNTIME_SOURCES;
 use super::*;
 use crate::native_build::PendingNativeCompile;
 
@@ -217,30 +216,23 @@ pub(super) fn runtime_jobs(
             let object = staged
                 .runtime_core_object_dir
                 .join(format!("{}.o", source.replace('/', "_")));
-            let source_path = if PATCHED_RUNTIME_SOURCES.contains(&source) {
-                staged.patched_runtime.join(source)
-            } else {
-                staged.runtime.join(source)
-            };
+            let source_path = staged.patched_runtime.join(source);
             let mut command = runtime_bootstrap_cpp_command(includes);
-            command.arg("-I").arg(staged.runtime.join("jit"));
-            command.arg("-iquote").arg(staged.runtime.join("oat"));
+            command.arg("-I").arg(staged.patched_runtime.join("jit"));
+            command
+                .arg("-iquote")
+                .arg(staged.patched_runtime.join("oat"));
             if let Some(parent) = Path::new(source).parent()
                 && !parent.as_os_str().is_empty()
             {
-                // Preserve AOSP quote-include lookup for both staged files
-                // and unchanged sibling headers. The shadow intentionally
-                // copies only selected sources; upstream siblings remain a
-                // read-only fallback instead of becoming implicit missing
-                // generated inputs.
                 command
                     .arg("-iquote")
-                    .arg(staged.patched_runtime.join(parent))
-                    .arg("-iquote")
-                    .arg(staged.runtime.join(parent));
+                    .arg(staged.patched_runtime.join(parent));
             }
             if source == "mirror/var_handle.cc" {
-                command.arg("-iquote").arg(staged.runtime.join("mirror"));
+                command
+                    .arg("-iquote")
+                    .arg(staged.patched_runtime.join("mirror"));
             }
             command
                 .arg("-include")

@@ -35,11 +35,14 @@ pub(crate) fn validate_runtime_link(
             "_darwin_art_surface_pump_events",
             "_darwin_art_surface_close_requested",
             "_darwin_art_appkit_pump_events",
-            "_darwin_art_surface_next_pointer_event",
-            "_darwin_art_surface_next_pointer_event_v2",
-            "_darwin_art_surface_next_key_event_v1",
+            "_darwin_art_surface_set_input_sink",
+            "_darwin_art_android_input_sink_install",
             "_darwin_art_surface_destroy",
             "_darwin_art_provider_install_hooks",
+            "_darwin_art_bionic_install_fd_inheritance_boundary",
+            "_darwin_art_bionic_install_scm_endpoint_provider",
+            "_darwin_art_bionic_uninstall_scm_endpoint_provider",
+            "_darwin_art_bionic_socket_broker_is_active",
             "_darwin_art_provider_clear_hooks",
             "_darwin_art_provider_native_acquire",
             "_darwin_art_provider_native_release",
@@ -62,9 +65,6 @@ pub(crate) fn validate_runtime_link(
             "darwin_art_elf_graph_unload",
             "darwin_art_jni_proxy_init",
             "darwin_art_jni_proxy_java_vm",
-            "darwin_art_elf_jni_fixture_registration_status",
-            "darwin_art_elf_jni_fixture_lifecycle_status",
-            "darwin_art_elf_jni_fixture_namespace_lifecycle_status",
             "darwin_art_bionic_namespace_bind_builtins",
             "darwin_art_bionic_binary128_conversion_resolve",
             "darwin_art_bionic_strtold",
@@ -77,7 +77,6 @@ pub(crate) fn validate_runtime_link(
             "darwin_art_bionic_fs_seed_private_directory",
             "darwin_art_bionic_socket_broker_activate",
             "darwin_art_bionic_socket_broker_deactivate",
-            "darwin_art_bionic_socket_broker_is_active",
             "darwin_art_bionic_socket_broker_resolve",
             "darwin_art_bionic_socket_broker_dns_resolve",
             "darwin_art_bionic_dns_reset_for_test",
@@ -108,8 +107,6 @@ pub(crate) fn validate_runtime_link(
             "ElfJniOnLoadTrampoline",
             "CreateRegularTrampolines",
             "TrampolineEntryMask",
-            "IsTrampolineEntry",
-            "TrampolineLiveCount",
         ] {
             if !all_symbols.contains(required) {
                 return Err(
@@ -117,7 +114,7 @@ pub(crate) fn validate_runtime_link(
                 );
             }
         }
-        println!("audit-runtime-link: C ABI dylib closure complete undefined=0 exports=15");
+        println!("audit-runtime-link: product C ABI/ELF closure verified undefined=0");
         return Ok(());
     }
 

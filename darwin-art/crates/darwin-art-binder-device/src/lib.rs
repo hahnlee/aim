@@ -5,6 +5,8 @@ pub mod command;
 pub mod connection;
 pub mod connection_registry;
 pub mod death_work;
+#[cfg(target_os = "macos")]
+pub mod descriptor_manifest;
 pub mod device;
 pub mod installed_fds;
 pub mod ioctl;

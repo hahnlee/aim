@@ -8,6 +8,14 @@ _Static_assert(DARWIN_ART_FD_OWNER_ABI_V1 == 1 &&
                    DARWIN_ART_FD_OWNER_ABI_V6 == 6 &&
                    DARWIN_ART_FD_OWNER_ABI_V7 == 7,
                "owner ABI drift");
+_Static_assert(DARWIN_ART_FD_DESCRIPTION_SNAPSHOT_ABI_V1 == 1 &&
+                   sizeof(DarwinArtFdDescriptionSnapshotV1) == 32 &&
+                   offsetof(DarwinArtFdDescriptionSnapshotV1, object) == 8 &&
+                   offsetof(DarwinArtFdDescriptionSnapshotV1, owner) == 16 &&
+                   offsetof(DarwinArtFdDescriptionSnapshotV1, kind) == 24 &&
+                   offsetof(DarwinArtFdDescriptionSnapshotV1, status_flags) ==
+                       28,
+               "description snapshot ABI drift");
 _Static_assert(DARWIN_ART_FD_FS_FILE == 1, "file kind drift");
 _Static_assert(DARWIN_ART_FD_FS_RANDOM == 2, "random kind drift");
 _Static_assert(DARWIN_ART_FD_STDIO == 3, "stdio kind drift");
@@ -64,9 +72,18 @@ static DarwinArtFdBrokerStatus (*const socket_operation_signature)(
 static DarwinArtFdBrokerStatus (*const poll_wait_signature)(
     DarwinArtFdBroker *, DarwinArtFdPollEntry *, size_t, int,
     DarwinArtFdIoResult *) = darwin_art_fd_broker_poll_wait;
+static DarwinArtFdBrokerStatus (*const retain_description_signature)(
+    DarwinArtFdBroker *, int, DarwinArtFdOwnerHandle,
+    DarwinArtFdDescriptionOperationV1, void *, DarwinArtFdDescriptionPin **,
+    DarwinArtFdIoResult *) = darwin_art_fd_broker_retain_description;
+static DarwinArtFdBrokerStatus (*const release_description_signature)(
+    DarwinArtFdBroker *,
+    DarwinArtFdDescriptionPin *) = darwin_art_fd_broker_release_description;
 
 int main(void) {
   return publish_signature == 0 || sendfile_signature == 0 ||
          duplicate_with_flags_signature == 0 ||
-         socket_operation_signature == 0 || poll_wait_signature == 0;
+         socket_operation_signature == 0 || poll_wait_signature == 0 ||
+         retain_description_signature == 0 ||
+         release_description_signature == 0;
 }

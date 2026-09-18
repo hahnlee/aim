@@ -9,19 +9,31 @@ mod application_launch_template;
 mod binder_client;
 mod binder_service;
 mod binder_transfer;
+mod bound_service_child_control;
 mod bound_service_client;
 mod bound_service_process;
 mod bound_service_registry;
 pub use binder_client::{BinderAuthorityConnection, connect_binder_authority_at};
-pub use bound_service_client::{activate_bound_service_process, start_bound_service_process};
+pub use darwin_art_scm_transfer::inheritance::{spawn_owned, output_owned};
+#[cfg(target_os = "macos")]
+pub use darwin_art_scm_transfer::inheritance::with_native_operation;
+pub use bound_service_client::{
+    activate_bound_service_process, cancel_bound_service_process, start_bound_service_process,
+};
 pub use bound_service_process::{BoundServiceProcessRequest, BoundServiceProcessResponse};
 mod fd_passing;
 mod filesystem;
+mod host_fd_delivery;
+mod scm_service;
+pub use scm_service::NativeScmEndpointProvider;
 mod listener_wait;
 mod peer_process;
+mod peer_credentials;
 mod process_command;
 mod process_identity;
 mod process_incarnation;
+mod process_wait;
+mod daemonized_child_wait;
 mod process_start_gate;
 pub use process_start_gate::wait_for_process_registration;
 mod package_client;
@@ -32,6 +44,7 @@ pub use process_identity::ProcessIdentity;
 mod registry;
 pub mod runtime_service_cli;
 mod runtime_service_client;
+mod unix_connect;
 pub mod runtime_service_endpoints;
 mod runtime_service_launch;
 pub mod runtime_service_protocol;
@@ -230,10 +243,9 @@ pub fn delete_profile(profiles_root: &Path, profile_id: &str) -> Result<(), Prof
             resident_pids.push(pid.to_owned());
         }
         if !resident_pids.is_empty() {
-            let status = Command::new("/bin/kill")
+            let status = spawn_owned(Command::new("/bin/kill")
                 .arg("-TERM")
-                .args(&resident_pids)
-                .status()?;
+                .args(&resident_pids))?.wait()?;
             if !status.success() {
                 return Err(ProfileError::Daemon(
                     "could not stop profile services".into(),
@@ -585,7 +597,7 @@ fn spawn_daemon(paths: &ProfilePaths) -> Result<(), ProfileError> {
             Ok(())
         });
     }
-    command.spawn()?;
+    spawn_owned(&mut command)?;
     Ok(())
 }
 

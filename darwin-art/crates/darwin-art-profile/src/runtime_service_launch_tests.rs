@@ -9,6 +9,54 @@ use std::process::Child;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
+fn externally_consumed_wait_status_settles_exact_registration() {
+    externally_consumed_wait_status();
+}
+
+#[test]
+fn externally_consumed_status_after_live_check_has_terminal_proof() {
+    externally_consumed_wait_status();
+}
+
+fn externally_consumed_wait_status() {
+    let child = std::process::Command::new("/bin/sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let incarnation = ProcessIncarnation::read(pid).unwrap();
+    let exits = Arc::new(AtomicUsize::new(0));
+    let callback_exits = Arc::clone(&exits);
+    let mut owner = crate::process_wait::ProcessWaitOwner::from_child(
+        child,
+        incarnation,
+        Box::new(move || {
+            callback_exits.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    assert!(matches!(
+        owner.poll(),
+        crate::process_wait::PollOutcome::Pending
+    ));
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
+    let mut status = 0;
+    assert_eq!(
+        unsafe { libc::waitpid(pid as i32, &mut status, 0) },
+        pid as i32
+    );
+    assert!(matches!(
+        owner.poll(),
+        crate::process_wait::PollOutcome::GoneWithoutStatus
+    ));
+    assert_eq!(exits.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        owner.poll(),
+        crate::process_wait::PollOutcome::GoneWithoutStatus
+    ));
+    assert_eq!(exits.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn timeout_reaps_only_owned_child_before_reservation_can_restart() {
     let services = RuntimeServiceState::default();
     let request = StartRuntimeRequest {

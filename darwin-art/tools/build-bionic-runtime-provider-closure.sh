@@ -3,6 +3,25 @@ set -euo pipefail
 export LC_ALL=C
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+mode="all"
+case "${1:-}" in
+  "") ;;
+  --build-only) mode="build-only" ;;
+  --test-only)
+    exec bash "$root/tools/tests/bionic-runtime-provider-closure-acceptance.sh"
+    ;;
+  --help|-h)
+    echo "usage: $0 [--build-only|--test-only]"
+    echo "  (default) build and audit provider archives, then run acceptance"
+    echo "  --build-only build and audit production archives only"
+    echo "  --test-only run acceptance against existing production archives"
+    exit 0
+    ;;
+  *)
+    echo "usage: $0 [--build-only|--test-only]" >&2
+    exit 2
+    ;;
+esac
 module="$root/tools/bionic-runtime-provider-closure"
 build="$root/_build/bionic-runtime-provider-closure"
 objects="$build/objects"
@@ -42,7 +61,7 @@ fi
 float_target="$build/float-target"
 # Cargo may retain several build-script hash directories. Only its current
 # build-script event identifies the archive for this invocation (also when fresh).
-float_source="$(CARGO_TARGET_DIR="$float_target" cargo build --quiet --release \
+float_source="$(CARGO_TARGET_DIR="$float_target" cargo build --quiet --release --lib \
   --message-format=json \
   --manifest-path "$root/tools/bionic-float-conversion-facade/Cargo.toml" |
   python3 -c 'import json, sys
@@ -61,15 +80,29 @@ print(next(iter(paths)))')"
 cp "$float_source" "$build/libdarwin-art-bionic-float-conversion.a"
 
 binary128_target="$build/binary128-target"
-CARGO_TARGET_DIR="$binary128_target" cargo build --quiet --release \
-  --manifest-path "$root/tools/bionic-binary128-conversion-facade/Cargo.toml"
-binary128_source="$(find "$binary128_target/release/build" \
-  -path '*/out/libdarwin_art_bionic_binary128_conversion.a' -print -quit)"
+binary128_source="$(CARGO_TARGET_DIR="$binary128_target" cargo build --quiet --release --lib \
+  --message-format=json \
+  --manifest-path "$root/tools/bionic-binary128-conversion-facade/Cargo.toml" |
+  python3 -c 'import json, sys
+paths = set()
+for line in sys.stdin:
+    event = json.loads(line)
+    if event.get("reason") == "build-script-executed" and "/bionic-binary128-conversion-facade#" in event.get("package_id", ""):
+        paths.add(event["out_dir"] + "/libdarwin_art_bionic_binary128_conversion.a")
+if len(paths) != 1:
+    raise SystemExit("expected exactly one current binary128 provider build-script output")
+print(next(iter(paths)))')"
 [[ -n "$binary128_source" && -f "$binary128_source" ]] || {
   echo 'bionic-runtime-provider-closure: binary128 provider archive missing' >&2
   exit 2
 }
 cp "$binary128_source" "$build/libdarwin-art-bionic-binary128-conversion.a"
+if nm -gU "$build/libdarwin-art-bionic-float-conversion.a" \
+          "$build/libdarwin-art-bionic-binary128-conversion.a" |
+   grep -E '_conversion_test_(prepare_host_state|host_state_is_preserved)$' >/dev/null; then
+  echo 'bionic-runtime-provider-closure: numeric archive contains test host-state mutation' >&2
+  exit 2
+fi
 
 cflags=(-arch arm64 -isysroot "$sdk" -O2 -Wall -Wextra -Werror -Wpedantic)
 cxxflags=(-arch arm64 -isysroot "$sdk" -std=c++20 -O2 -Wall -Wextra -Werror)
@@ -105,6 +138,23 @@ cxxflags=(-arch arm64 -isysroot "$sdk" -std=c++20 -O2 -Wall -Wextra -Werror)
   -I"$root/tools/bionic-ioctl-facade/include" \
   -c "$root/tools/bionic-socket-broker-adapter/src/adapter.cc" \
   -o "$objects/socket-broker-adapter.o"
+"$cxx" "${cxxflags[@]}" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/android_scm_exports.cc" \
+  -o "$objects/android-scm-exports.o"
+"$cxx" "${cxxflags[@]}" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/fd_inheritance.cc" \
+  -o "$objects/fd-inheritance.o"
+"$cxx" "${cxxflags[@]}" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/scm_endpoint_provider.cc" \
+  -o "$objects/scm-endpoint-provider.o"
+"$cxx" "${cxxflags[@]}" \
+  -I"$root/tools/bionic-central-fd-broker/include" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/retained_scm_export.cc" \
+  -o "$objects/retained-scm-export.o"
+"$cxx" "${cxxflags[@]}" \
+  -I"$root/tools/bionic-errno-tls/include" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/eventfd_owner.cc" \
+  -o "$objects/eventfd-owner.o"
 "$cxx" "${cxxflags[@]}" \
   -c "$root/tools/bionic-socket-broker-adapter/src/sync_fence_merge.cc" \
   -o "$objects/sync-fence-merge.o"
@@ -278,7 +328,7 @@ strftime_source="$root/_aosp/bionic-strftime-facade/platform/bionic/libc/tzcode/
 
 native="$build/libdarwin-art-bionic-native-providers.a"
 bash "$root/tools/build-android16-ftw.sh"
-bash "$root/tools/build-android16-property-client.sh"
+bash "$root/tools/build-android16-property-client.sh" --build-only
 ftw="$root/_build/android16-ftw"
 "$ar" rcs "$native" \
   "$root/_build/android16-property-client/bound-client.o" \
@@ -286,7 +336,7 @@ ftw="$root/_build/android16-ftw"
   "$ftw/resolver.o" \
   "$objects/leaf.o" "$objects/allocator.o" "$objects/allocator_options.o" "$objects/time.o" \
   "$objects/pthread.o" "$objects/phdr.o" \
-  "$objects/central-fd-broker.o" "$objects/socket-broker-adapter.o" "$objects/fdsan.o" "$objects/fdsan-property.o" \
+  "$objects/central-fd-broker.o" "$objects/socket-broker-adapter.o" "$objects/android-scm-exports.o" "$objects/fd-inheritance.o" "$objects/scm-endpoint-provider.o" "$objects/retained-scm-export.o" "$objects/eventfd-owner.o" "$objects/fdsan.o" "$objects/fdsan-property.o" \
   "$objects/sync-fence-merge.o" "$objects/sync-fence-broker.o" \
   "$objects/fdsan-symbols.o" \
   "$objects/dns.o" "$objects/locale.o" \
@@ -310,40 +360,6 @@ ftw="$root/_build/android16-ftw"
 float="$build/libdarwin-art-bionic-float-conversion.a"
 binary128="$build/libdarwin-art-bionic-binary128-conversion.a"
 icu="$root/_build/icu-foundation"
-smoke="$build/full-link-smoke"
-"$cxx" "${cxxflags[@]}" \
-  -I"$root/tools/bionic-stdio-facade/include" \
-  -I"$root/tools/bionic-provider-namespace/include" \
-  -I"$root/tools/bionic-provider-namespace/generated" \
-  -I"$root/tools/bionic-process-state-facade/include" \
-  -I"$root/tools/bionic-fs-facade/include" \
-  -I"$root/tools/bionic-ioctl-facade/include" \
-  -I"$root/tools/bionic-central-fd-broker/include" \
-  -I"$root/tools/bionic-socket-broker-adapter/include" \
-  -I"$root/tools/bionic-dns-facade/include" \
-  -I"$root/tools/bionic-vm-facade/include" \
-  -I"$root/_aosp/system/logging/liblog/include" \
-  "$module/full_link_smoke.cc" "$root/tools/android16-ftw/traversal_smoke.cc" \
-  "$module/property_iteration_smoke.cc" \
-  "$module/signed_numeric_smoke.cc" \
-  "$module/mkdirat_smoke.cc" \
-  "$module/credentials_snapshot_smoke.cc" \
-  "$root/tools/bionic-socket-broker-adapter/probes/unix_connect.cc" \
-  "$root/tools/bionic-socket-broker-adapter/probes/fdsan.cc" \
-  "$root/tools/android16-property-client/client_smoke.cc" \
-  "$root/tools/bionic-process-state-facade/probes/configured_snapshot.cc" \
-  "$root/tools/bionic-stdio-facade/probes/fortify_stream.cc" \
-  "$root/tools/android-liblog-exec-provider/buf_print_call_test.S" \
-  "$root/tools/android-liblog-exec-provider/assert_call_test.S" \
-  "$root/tools/android-liblog-exec-provider/assert_call_test.cc" \
-  -Wl,-force_load,"$binary128" \
-  "$native" "$float" "$rust" \
-  -Wl,-force_load,"$icu/libandroidicuinit-darwin.a" \
-  "$icu/libicuuc-common-darwin.a" "$icu/libicuuc-stubdata-darwin.a" \
-  "$root/_build/graphics-foundations/liblog-darwin.a" \
-  -framework Security -lresolv -o "$smoke"
-
-"$smoke"
 symbols="$build/provider-resolvers.txt"
 nm -gU "$native" "$binary128" "$float" "$rust" > "$build/all-symbols.txt" 2>/dev/null
 cat > "$symbols" <<'EOF'
@@ -468,8 +484,8 @@ for symbol in _darwin_art_bionic_malloc_result _darwin_art_bionic_free \
     exit 2
   }
 done
-if otool -L "$smoke" | grep -E '(/opt/homebrew|/usr/local|libicu(uc|i18n))' >/dev/null; then
-  echo 'bionic-runtime-provider-closure: host/dynamic ICU escaped' >&2
-  exit 2
+echo 'bionic-runtime-provider-closure: ARCHIVE_PASS providers=36 bind_builtins=sealed Rust+C+C++=linked duplicate-provider=0 ICU-owner=1'
+if [[ "$mode" == "all" ]]; then
+  exec bash "$root/tools/tests/bionic-runtime-provider-closure-acceptance.sh"
 fi
-echo 'bionic-runtime-provider-closure: PASS providers=36 bind_builtins=sealed Rust+C+C++=linked duplicate-provider=0 ICU-owner=1 host-fallback=0'
+echo "bionic-runtime-provider-closure: build-only complete archives=$build"

@@ -280,6 +280,27 @@ DarwinArtFdBrokerStatus AcquireLocked(DarwinArtFdBrokerImpl *broker, int fd,
   *lease = Lease{slot_index, generation, std::move(description)};
   return DARWIN_ART_FD_BROKER_OK;
 }
+DarwinArtFdBrokerStatus
+RetainDescriptionLocked(DarwinArtFdBrokerImpl *broker, int fd,
+                        DarwinArtFdOwnerHandle expected_owner,
+                        std::shared_ptr<Description> *description) {
+  size_t slot_index = 0;
+  uint32_t generation = 0;
+  Slot *slot = nullptr;
+  const auto status =
+      LookupSlotLocked(broker, fd, &slot_index, &generation, &slot);
+  if (status != DARWIN_ART_FD_BROKER_OK)
+    return status;
+  if (slot->description->owner != expected_owner)
+    return DARWIN_ART_FD_BROKER_WRONG_OWNER;
+  auto owner = broker->owners.find(expected_owner);
+  if (owner == broker->owners.end())
+    return DARWIN_ART_FD_BROKER_STALE;
+  ++slot->description->active;
+  ++owner->second.active;
+  *description = slot->description;
+  return DARWIN_ART_FD_BROKER_OK;
+}
 bool AcquireDescriptionLocked(DarwinArtFdBrokerImpl *broker,
                               const std::shared_ptr<Description> &description) {
   if (!description || description->closing || description->owner == 0)
@@ -568,6 +589,11 @@ DarwinArtFdBrokerStatus Dup2Impl(DarwinArtFdBrokerImpl *broker, int old_fd,
   return DARWIN_ART_FD_BROKER_OK;
 }
 } // namespace
+
+struct DarwinArtFdDescriptionPin {
+  DarwinArtFdBrokerImpl *broker = nullptr;
+  std::shared_ptr<Description> description;
+};
 
 extern "C" DarwinArtFdBroker *darwin_art_fd_broker_create() {
   return reinterpret_cast<DarwinArtFdBroker *>(new DarwinArtFdBrokerImpl());
@@ -876,6 +902,170 @@ darwin_art_fd_broker_export_host_fd(DarwinArtFdBroker *broker, int fd,
   }
   SetResult(result, value < 0 ? -1 : 0, value < 0 ? error : 0);
   return value < 0 ? DARWIN_ART_FD_BROKER_UNSUPPORTED : DARWIN_ART_FD_BROKER_OK;
+}
+extern "C" DarwinArtFdBrokerStatus darwin_art_fd_broker_retain_description(
+    DarwinArtFdBroker *broker, int fd, DarwinArtFdOwnerHandle expected_owner,
+    DarwinArtFdDescriptionOperationV1 operation, void *operation_context,
+    DarwinArtFdDescriptionPin **pin, DarwinArtFdIoResult *result) {
+  if (!broker || expected_owner == 0 || !operation || !pin || !result)
+    return DARWIN_ART_FD_BROKER_INVALID_ARGUMENT;
+  *pin = nullptr;
+  SetResult(result, -1, 0);
+
+  std::unique_ptr<DarwinArtFdDescriptionPin> retained;
+  try {
+    retained = std::make_unique<DarwinArtFdDescriptionPin>();
+  } catch (...) {
+    return DARWIN_ART_FD_BROKER_EXHAUSTED;
+  }
+
+  DarwinArtFdDescriptionSnapshotV1 snapshot{
+      DARWIN_ART_FD_DESCRIPTION_SNAPSHOT_ABI_V1,
+      sizeof(DarwinArtFdDescriptionSnapshotV1),
+      0,
+      0,
+      0,
+      0,
+  };
+  auto *impl = Impl(broker);
+  {
+    std::lock_guard lock(impl->mutex);
+    std::shared_ptr<Description> description;
+    const auto status =
+        RetainDescriptionLocked(impl, fd, expected_owner, &description);
+    if (status != DARWIN_ART_FD_BROKER_OK)
+      return status;
+    retained->broker = impl;
+    retained->description = description;
+    snapshot.object = description->object;
+    snapshot.owner = description->owner;
+    snapshot.kind = static_cast<uint32_t>(description->kind);
+    snapshot.status_flags = description->status_flags;
+  }
+
+  int error = 0;
+  const intptr_t value = operation(operation_context, &snapshot, &error);
+  if (value < 0) {
+    const int callback_error = error;
+    {
+      std::lock_guard lock(impl->mutex);
+      ReleaseDescriptionLocked(impl, retained->description);
+    }
+    retained.reset();
+    SetResult(result, value, callback_error);
+    return DARWIN_ART_FD_BROKER_OK;
+  }
+  *pin = retained.release();
+  SetResult(result, value, 0);
+  return DARWIN_ART_FD_BROKER_OK;
+}
+extern "C" DarwinArtFdBrokerStatus
+darwin_art_fd_broker_retain_exported_description(
+    DarwinArtFdBroker *broker, int fd,
+    DarwinArtFdRetainedExportOperationV1 operation,
+    DarwinArtFdRetainedExportReleaseV1 release_export, void *operation_context,
+    DarwinArtFdDescriptionPin **pin, DarwinArtFdIoResult *result) {
+  if (!broker || !operation || !release_export || !pin || !result)
+    return DARWIN_ART_FD_BROKER_INVALID_ARGUMENT;
+  *pin = nullptr;
+  SetResult(result, -1, 0);
+
+  std::unique_ptr<DarwinArtFdDescriptionPin> retained;
+  try {
+    retained = std::make_unique<DarwinArtFdDescriptionPin>();
+  } catch (...) {
+    return DARWIN_ART_FD_BROKER_EXHAUSTED;
+  }
+
+  DarwinArtFdDescriptionSnapshotV1 snapshot{
+      DARWIN_ART_FD_DESCRIPTION_SNAPSHOT_ABI_V1,
+      sizeof(DarwinArtFdDescriptionSnapshotV1),
+      0,
+      0,
+      0,
+      0,
+  };
+  auto *impl = Impl(broker);
+  {
+    std::lock_guard lock(impl->mutex);
+    size_t slot_index = 0;
+    uint32_t generation = 0;
+    Slot *slot = nullptr;
+    const auto status =
+        LookupSlotLocked(impl, fd, &slot_index, &generation, &slot);
+    if (status != DARWIN_ART_FD_BROKER_OK)
+      return status;
+    if (slot->description->owner == 0 || slot->description->closing)
+      return DARWIN_ART_FD_BROKER_STALE;
+    auto owner = impl->owners.find(slot->description->owner);
+    if (owner == impl->owners.end())
+      return DARWIN_ART_FD_BROKER_STALE;
+    ++slot->description->active;
+    ++owner->second.active;
+    retained->broker = impl;
+    retained->description = slot->description;
+    snapshot.object = slot->description->object;
+    snapshot.owner = slot->description->owner;
+    snapshot.kind = static_cast<uint32_t>(slot->description->kind);
+    snapshot.status_flags = slot->description->status_flags;
+  }
+
+  int host_fd = -1;
+  int export_error = 0;
+  const auto &callbacks = retained->description->callbacks;
+  const int exported =
+      callbacks.export_host_fd == nullptr
+          ? -1
+          : callbacks.export_host_fd(callbacks.context, snapshot.object,
+                                     &host_fd, &export_error);
+  if (exported < 0 || host_fd < 0) {
+    if (host_fd >= 0)
+      release_export(operation_context, host_fd);
+    if (export_error == 0)
+      export_error = exported < 0 ? 95 : 5;
+    {
+      std::lock_guard lock(impl->mutex);
+      ReleaseDescriptionLocked(impl, retained->description);
+    }
+    retained.reset();
+    SetResult(result, -1, export_error);
+    return DARWIN_ART_FD_BROKER_OK;
+  }
+
+  int operation_error = 0;
+  const intptr_t value =
+      operation(operation_context, &snapshot, host_fd, &operation_error);
+  if (value < 0) {
+    const int callback_error = operation_error;
+    release_export(operation_context, host_fd);
+    {
+      std::lock_guard lock(impl->mutex);
+      ReleaseDescriptionLocked(impl, retained->description);
+    }
+    retained.reset();
+    SetResult(result, value, callback_error);
+    return DARWIN_ART_FD_BROKER_OK;
+  }
+  *pin = retained.release();
+  SetResult(result, value, 0);
+  return DARWIN_ART_FD_BROKER_OK;
+}
+extern "C" DarwinArtFdBrokerStatus
+darwin_art_fd_broker_release_description(DarwinArtFdBroker *broker,
+                                         DarwinArtFdDescriptionPin *pin) {
+  if (!broker || !pin)
+    return DARWIN_ART_FD_BROKER_INVALID_ARGUMENT;
+  auto *impl = Impl(broker);
+  std::shared_ptr<Description> description;
+  {
+    std::lock_guard lock(impl->mutex);
+    if (pin->broker != impl || !pin->description)
+      return DARWIN_ART_FD_BROKER_STALE;
+    description = std::move(pin->description);
+    ReleaseDescriptionLocked(impl, description);
+  }
+  delete pin;
+  return DARWIN_ART_FD_BROKER_OK;
 }
 extern "C" DarwinArtFdBrokerStatus
 darwin_art_fd_broker_get_kind(DarwinArtFdBroker *broker, int fd,

@@ -1,0 +1,64 @@
+diff --git a/runtime/runtime.cc b/runtime/runtime.cc
+--- a/runtime/runtime.cc
++++ b/runtime/runtime.cc
+@@ -19,1 +19,2 @@
+-#include "darwin_unwindstack_native.h"
++#include "darwin_unwindstack_native.h"
++#include "art/boot_native_libraries.h"
+@@ -1068,11 +1069,29 @@
+-  class_linker_->RunEarlyRootClinits(self);
+-  InitializeIntrinsics();
+-
+-  self->TransitionFromRunnableToSuspended(ThreadState::kNative);
+-
+-  // InitNativeMethods needs to be after started_ so that the classes
+-  // it touches will have methods linked to the oat file if necessary.
+-  {
+-    ScopedTrace trace2("InitNativeMethods");
+-    InitNativeMethods();
+-  }
++#if defined(__APPLE__)
++  // The detached boot image can initialize System transitively from early
++  // roots. Install its native library tables first, then retain ART's single
++  // common startup lifecycle below. This is boot-image compatibility debt;
++  // the normal Android image keeps its upstream order unchanged.
++  self->TransitionFromRunnableToSuspended(ThreadState::kNative);
++  {
++    ScopedTrace trace2("InitNativeMethods");
++    InitNativeMethods();
++  }
++  {
++    ScopedObjectAccess soa(self);
++    class_linker_->RunEarlyRootClinits(self);
++    InitializeIntrinsics();
++  }
++  WellKnownClasses::LateInit(self->GetJniEnv());
++#else
++  class_linker_->RunEarlyRootClinits(self);
++  InitializeIntrinsics();
++
++  self->TransitionFromRunnableToSuspended(ThreadState::kNative);
++
++  // InitNativeMethods needs to be after started_ so that the classes
++  // it touches will have methods linked to the oat file if necessary.
++  {
++    ScopedTrace trace2("InitNativeMethods");
++    InitNativeMethods();
++  }
++#endif
+@@ -2318,1 +2337,6 @@
+-  // Then set up libjavacore / libopenjdk / libicu_jni ,which are just
++#if defined(__APPLE__)
++  if (!darwin_art::runtime_art::RegisterBootNativeLibraries(env)) {
++    LOG(FATAL) << "Darwin boot native library initialization failed";
++  }
++#else
++  // Then set up libjavacore / libopenjdk / libicu_jni ,which are just
+@@ -2365,3 +2389,4 @@
+-  WellKnownClasses::LateInit(env);
+-
+-  VLOG(startup) << "Runtime::InitNativeMethods exiting";
++  WellKnownClasses::LateInit(env);
++#endif
++
++  VLOG(startup) << "Runtime::InitNativeMethods exiting";

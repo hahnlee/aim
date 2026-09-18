@@ -4,8 +4,9 @@ pub(crate) fn build_interpreter_core(root: &Path) -> Result<()> {
     let artbase = root.join("_aosp/art/libartbase");
     let patched_artbase = root.join("_build/foundation/patched-source/libartbase");
     let libdexfile = root.join("_aosp/art/libdexfile");
-    let runtime = root.join("_aosp/art/runtime");
-    let runtime_abi = root.join("_build/runtime-common/patched-source/runtime");
+    // Same-directory quoted headers must resolve through the sole canonical
+    // ART overlay, including the interpreter-specific patches in its manifest.
+    let runtime = runtime_bootstrap::prepare_runtime_shadow(root)?;
     let runtime_base = runtime.join("base");
     let runtime_arm64 = runtime.join("arch/arm64");
     let generator = root.join("_aosp/art/tools/cpp-define-generator");
@@ -25,7 +26,6 @@ pub(crate) fn build_interpreter_core(root: &Path) -> Result<()> {
     let includes = [
         generated_dir.as_path(),
         generator.as_path(),
-        runtime_abi.as_path(),
         patched_artbase.as_path(),
         artbase.as_path(),
         libdexfile.as_path(),
@@ -43,66 +43,35 @@ pub(crate) fn build_interpreter_core(root: &Path) -> Result<()> {
     let build_dir = root.join("_build/interpreter-core");
     let object_dir = build_dir.join("objects");
     fs::create_dir_all(&object_dir)?;
-    let shadow_source = build_dir.join("patched-source/runtime/interpreter");
-    fs::create_dir_all(&shadow_source)?;
-    fs::copy(
-        runtime.join("interpreter/shadow_frame.h"),
-        shadow_source.join("shadow_frame.h"),
-    )?;
-    run_command(
-        Command::new("patch")
-            .args(["--batch", "--forward", "-p1", "-i"])
-            .arg(root.join("patches/art/0037-darwin-shadow-frame-single-initialization.patch"))
-            .current_dir(build_dir.join("patched-source")),
-    )?;
-    fs::copy(
-        runtime.join("interpreter/unstarted_runtime.cc"),
-        shadow_source.join("unstarted_runtime.cc"),
-    )?;
-    run_command(
-        Command::new("patch")
-            .args(["--batch", "--forward", "-p1", "-i"])
-            .arg(root.join("patches/art/0113-darwin-unstarted-reference-arguments.patch"))
-            .current_dir(build_dir.join("patched-source")),
-    )?;
-    fs::copy(
-        runtime.join("interpreter/interpreter_common.cc"),
-        shadow_source.join("interpreter_common.cc"),
-    )?;
-    run_command(
-        Command::new("patch")
-            .args(["--batch", "--forward", "-p1", "-i"])
-            .arg(root.join("patches/art/0074-darwin-interpreter-reference-copy.patch"))
-            .current_dir(build_dir.join("patched-source")),
-    )?;
     let sources = [
         runtime.join("interpreter/interpreter.cc"),
         runtime.join("interpreter/interpreter_cache.cc"),
-        shadow_source.join("interpreter_common.cc"),
+        runtime.join("interpreter/interpreter_common.cc"),
         runtime.join("interpreter/interpreter_switch_impl0.cc"),
         runtime.join("interpreter/lock_count_data.cc"),
         runtime.join("interpreter/shadow_frame.cc"),
-        shadow_source.join("unstarted_runtime.cc"),
+        runtime.join("interpreter/unstarted_runtime.cc"),
     ];
+    let cache = build_dir.join("interpreter-objects.cache");
+    let compiler_identity = command_output(Command::new("clang++").arg("--version"))?;
     let mut objects = Vec::new();
+    let mut compiled = 0usize;
     for source in sources {
         let file_name = source
             .file_name()
             .ok_or_else(|| format!("source has no file name: {}", source.display()))?;
         let object = object_dir.join(format!("{}.o", file_name.to_string_lossy()));
-        run_command(
-            runtime_cpp_command(&includes)
-                .arg(format!("-I{}", runtime.join("interpreter").display()))
-                .args(["-include", "mirror/object_reference.h"])
-                // Original inl headers use relative includes; force the patched
-                // header first so their include guard selects this implementation.
-                .arg("-include")
-                .arg(shadow_source.join("shadow_frame.h"))
-                .arg("-c")
-                .arg(&source)
-                .arg("-o")
-                .arg(&object),
-        )?;
+        let mut command = runtime_cpp_command(&includes);
+        command
+            .arg(format!("-I{}", runtime.join("interpreter").display()))
+            .args(["-include", "mirror/object_reference.h"])
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object);
+        if compile_cached_probe_tu(&mut command, &object, &cache, &compiler_identity)? {
+            compiled += 1;
+        }
         let kind = command_output(Command::new("file").arg(&object))?;
         if !kind.contains("Mach-O 64-bit object arm64") {
             return Err(format!("unexpected interpreter object format: {kind}").into());
@@ -111,7 +80,9 @@ pub(crate) fn build_interpreter_core(root: &Path) -> Result<()> {
     }
 
     let archive = build_dir.join("libart-interpreter-darwin.a");
-    create_archive(&archive, &objects)?;
+    if compiled != 0 || !archive.is_file() {
+        create_archive(&archive, &objects)?;
+    }
     println!(
         "build-interpreter-core: AOSP C++ interpreter Mach-O objects={} archive={}",
         objects.len(),

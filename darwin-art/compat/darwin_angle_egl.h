@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "darwin_android_native_window.h"
+#include "surfaceflinger/commit_receipt.h"
 
 namespace darwin_art {
 
@@ -13,6 +14,13 @@ namespace darwin_art {
 // dylibs and keeps Android's Java handle objects as the public ABI.
 bool RegisterDarwinAngleEglNatives(JNIEnv* env);
 const char* EglQueryStringAndroid(void* display, std::int32_t name);
+
+// Standard EGL entry points and JNI EGLImpl use the same window backend
+// lifecycle owner. The platform dispatch TU forwards its C ABI wrappers here;
+// it must not create a second display/window registry.
+std::uint32_t EglInitializeHost(void* display, std::int32_t* major,
+                                std::int32_t* minor);
+std::uint32_t TerminateHostDisplay(void* display);
 
 extern "C" void* darwin_art_angle_dso_symbol(const char* soname,
                                               const char* symbol);
@@ -64,6 +72,12 @@ bool darwin_art_android_ANativeWindow_set_transaction_callback(
 uint64_t darwin_art_android_ANativeWindow_next_frame_number(void* window);
 void darwin_art_android_ANativeWindow_release_consumer_slot(
     void* window, int32_t slot, int release_fence);
+// Generation/frame-validated return endpoint used by the SurfaceControl
+// fallback. The endpoint consumes fence and rejects stale identities without
+// touching a newer slot occupant.
+void darwin_art_android_ANativeWindow_release_consumer_frame(
+    void* window, int32_t slot, uint64_t generation, uint64_t frame,
+    int release_fence);
 void darwin_art_android_ANativeWindow_set_surface_control(void* window,
                                                           void* control);
 bool darwin_art_android_ANativeWindow_get_surface_control_identity(
@@ -98,6 +112,7 @@ int32_t darwin_art_android_ANativeWindow_setBuffersGeometry(
 void* darwin_art_android_eglCreateWindowSurface(void* display, void* config,
                                                 void* window,
                                                 const int32_t* attributes);
+int32_t darwin_art_android_eglGetError();
 uint32_t darwin_art_android_eglSwapBuffers(void* display, void* surface);
 uint32_t darwin_art_android_eglDestroySurface(void* display, void* surface);
 uint32_t darwin_art_android_eglMakeCurrent(void* display, void* draw,
@@ -131,11 +146,21 @@ void darwin_art_android_glUseProgram(uint32_t program);
 bool darwin_art_android_begin_hardware_buffer_composition(void* buffer,
                                                           bool clear,
                                                           uint64_t transaction_id);
+// False is a terminal restoration/nested-turn failure, not fallback permission.
+bool darwin_art_android_begin_hardware_buffer_composition_checked(
+    void* buffer, bool clear, uint64_t transaction_id, bool* started);
 void darwin_art_android_set_hardware_buffer_composition_active(bool active);
 // Finishes the current retained-layer submission and returns an Android-owned
 // fence descriptor that becomes readable when ANGLE's Metal queue completes.
 // The caller owns the descriptor. Returns -1 when no GPU work was submitted.
 int darwin_art_android_end_hardware_buffer_composition();
+// False is a terminal EGL restoration failure, potentially after publication;
+// it must not be retried as an unsubmitted transaction. On true, -1 in the
+// output is lossy; callers must never retry a publication based on it alone.
+bool darwin_art_android_end_hardware_buffer_composition_checked(int* present_fence);
+// Restoration health is orthogonal to the exact owned commit receipt.
+bool darwin_art_android_end_hardware_buffer_composition_receipt(
+    DarwinArtSurfaceFlingerReceipt* receipt);
 // Marks the exact BufferQueue slot displaced by a SurfaceControl transaction.
 // Its persistent IOSurface remains canonical until the producer reacquires the
 // slot; the next draw-FBO bind restores it into ANGLE's 2D staging texture.

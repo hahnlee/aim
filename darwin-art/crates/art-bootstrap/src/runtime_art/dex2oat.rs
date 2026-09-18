@@ -176,7 +176,7 @@ pub(crate) fn build_dex2oat(root: &Path) -> Result<PathBuf> {
         })
         .collect::<Vec<_>>();
     source_paths.push(operator_source);
-    source_paths.push(root.join("probes/runtime_dex2oat_entry.cc"));
+    source_paths.push(root.join("runtime/art/tools/dex2oat_entry.cc"));
     source_paths.extend(
         [
             "boot_image_profile.cc",
@@ -186,7 +186,7 @@ pub(crate) fn build_dex2oat(root: &Path) -> Result<PathBuf> {
         ]
         .map(|path| root.join("_aosp/art/profman").join(path)),
     );
-    source_paths.push(root.join("probes/runtime_profman_entry.cc"));
+    source_paths.push(root.join("runtime/art/tools/profman_entry.cc"));
     source_paths.sort();
 
     let mut jobs = Vec::new();

@@ -4,8 +4,6 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <array>
-#include <atomic>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -42,11 +40,6 @@ darwin_art_bionic_fs_sendfile_transfer(
 
 namespace android {
 
-std::atomic<int> g_elf_fixture_status{0};
-std::atomic<uint32_t> g_elf_classified_trampoline_mask{0};
-std::atomic<int> g_elf_fixture_lifecycle{0};
-std::atomic<uint32_t> g_elf_fixture_provider_routes{0};
-std::atomic<int> g_elf_fixture_namespace_lifecycle{0};
 
 namespace {
 
@@ -57,9 +50,6 @@ jint ElfJniOnLoadTrampoline(JavaVM*, void*) {
   ElfLibrary* library = std::exchange(g_pending_on_load, nullptr);
   if (library == nullptr || library->jni_on_load == 0 || library->proxy == nullptr) {
     return JNI_ERR;
-  }
-  if (library->fixture_graph) {
-    g_elf_fixture_status.fetch_or(kElfOnLoadCalled, std::memory_order_relaxed);
   }
   using AndroidJniOnLoad = jint (*)(JavaVM*, void*);
   auto function = reinterpret_cast<AndroidJniOnLoad>(library->jni_on_load);
@@ -171,34 +161,8 @@ void* DarwinNativeBridgeGetTrampoline2(void* handle,
 }
 
 bool DarwinNativeBridgeIsNativeBridgeFunctionPointer(const void* pointer) {
-  // The trampoline allocator owns the process-wide exact-entry classifier.
-  // The mask below is only fixture acceptance instrumentation; generic graph
-  // entries are classified by the same registry without contributing to it.
-  const uint32_t entry_mask =
-      darwin_art::android_jni::TrampolineEntryMask(pointer);
-  const uint32_t observed =
-      g_elf_classified_trampoline_mask.fetch_or(entry_mask,
-                                                std::memory_order_relaxed) |
-      entry_mask;
-  if (observed == kFixtureAllEntryMask) {
-    g_elf_fixture_status.fetch_or(kElfClassifiedTrampolines,
-                                  std::memory_order_relaxed);
-  }
-  return entry_mask != 0;
+  return darwin_art::android_jni::TrampolineEntryMask(pointer) != 0;
 }
 
 }  // extern "C"
 }  // namespace android
-
-extern "C" int darwin_art_elf_jni_fixture_registration_status() {
-  return android::g_elf_fixture_status.load(std::memory_order_relaxed);
-}
-
-extern "C" int darwin_art_elf_jni_fixture_lifecycle_status() {
-  return android::g_elf_fixture_lifecycle.load(std::memory_order_relaxed);
-}
-
-extern "C" int darwin_art_elf_jni_fixture_namespace_lifecycle_status() {
-  return android::g_elf_fixture_namespace_lifecycle.load(
-      std::memory_order_relaxed);
-}

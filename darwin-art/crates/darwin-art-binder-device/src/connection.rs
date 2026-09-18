@@ -27,6 +27,7 @@ mod pool;
 mod threads;
 #[cfg(target_os = "macos")]
 mod transactions;
+pub(crate) mod work_wait;
 pub use owner::ConnectionOwner;
 #[cfg(test)]
 pub(crate) use pool::BR_SPAWN_LOOPER;

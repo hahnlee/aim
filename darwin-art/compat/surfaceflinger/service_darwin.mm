@@ -1,7 +1,15 @@
 #include "service_darwin.h"
 #include "../process/service_endpoint.h"
+#include "../graphics/metal_shared_event_provider.h"
 #include "composition_protocol.h"
 #include "composition_queue.h"
+#include "transaction_reply.h"
+#include "iosurface_backing.h"
+#include "output_registry.h"
+#include "retained_layer_state.h"
+#include "service_ingress.h"
+#include "socket_deadline.h"
+#include "socket_transport.h"
 #include "display_attachment.h"
 #include "layer_geometry.h"
 
@@ -33,6 +41,7 @@
 #include <signal.h>
 #include <set>
 #include <string>
+#include <stdexcept>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/proc.h>
@@ -53,6 +62,16 @@ namespace {
 
 using darwin_art::surfaceflinger::CompositionJob;
 using darwin_art::surfaceflinger::CompositionQueue;
+using darwin_art::surfaceflinger::ImportedCompositionBackings;
+using darwin_art::surfaceflinger::IosurfaceBacking;
+using darwin_art::surfaceflinger::OutputRegistry;
+using darwin_art::surfaceflinger::OutputEpoch;
+using darwin_art::surfaceflinger::OutputRequest;
+using darwin_art::surfaceflinger::OutputResponse;
+using darwin_art::surfaceflinger::OutputTransition;
+using darwin_art::surfaceflinger::CopyTransparentRegion;
+using darwin_art::surfaceflinger::MergeRetainedLayer;
+using darwin_art::surfaceflinger::ServiceIngress;
 using darwin_art::surfaceflinger::RequestHeader;
 using darwin_art::surfaceflinger::RequestKind;
 using darwin_art::surfaceflinger::ResponseHeader;
@@ -61,6 +80,11 @@ using darwin_art::surfaceflinger::kMaximumLayers;
 using darwin_art::surfaceflinger::kProtocolVersion;
 using darwin_art::surfaceflinger::kRequestMagic;
 using darwin_art::surfaceflinger::kResponseMagic;
+using darwin_art::surfaceflinger::ReadAll;
+using darwin_art::surfaceflinger::WriteAll;
+using darwin_art::surfaceflinger::SendDescriptor;
+using darwin_art::surfaceflinger::ReceiveDescriptor;
+using darwin_art::surfaceflinger::Connect;
 
 void ProcessRequest(CompositionJob& job);
 bool ConsumeProducerFence(int descriptor) noexcept;
@@ -76,119 +100,18 @@ bool TraceReparentToNull() {
   return enabled;
 }
 
-bool WriteAll(int fd, const void* data, size_t size) {
-  const auto* bytes = static_cast<const uint8_t*>(data);
-  while (size != 0) {
-    const ssize_t result = write(fd, bytes, size);
-    if (result < 0 && errno == EINTR) continue;
-    if (result <= 0) return false;
-    bytes += result;
-    size -= static_cast<size_t>(result);
-  }
-  return true;
-}
-
-bool ReadAll(int fd, void* data, size_t size) {
-  auto* bytes = static_cast<uint8_t*>(data);
-  while (size != 0) {
-    const ssize_t result = read(fd, bytes, size);
-    if (result < 0 && errno == EINTR) continue;
-    if (result <= 0) return false;
-    bytes += result;
-    size -= static_cast<size_t>(result);
-  }
-  return true;
-}
-
-bool SendDescriptor(int socket_fd, int descriptor) {
-  char marker = descriptor >= 0 ? 1 : 0;
-  iovec vector{.iov_base = &marker, .iov_len = sizeof(marker)};
-  std::array<char, CMSG_SPACE(sizeof(int))> control{};
-  msghdr message{};
-  message.msg_iov = &vector;
-  message.msg_iovlen = 1;
-  if (descriptor >= 0) {
-    message.msg_control = control.data();
-    message.msg_controllen = control.size();
-    cmsghdr* header = CMSG_FIRSTHDR(&message);
-    header->cmsg_level = SOL_SOCKET;
-    header->cmsg_type = SCM_RIGHTS;
-    header->cmsg_len = CMSG_LEN(sizeof(int));
-    std::memcpy(CMSG_DATA(header), &descriptor, sizeof(descriptor));
-  }
-  for (;;) {
-    const ssize_t sent = sendmsg(socket_fd, &message, 0);
-    if (sent < 0 && errno == EINTR) continue;
-    return sent == static_cast<ssize_t>(sizeof(marker));
-  }
-}
-
-bool ReceiveDescriptor(int socket_fd, bool expected, int* descriptor) {
-  if (descriptor == nullptr) return false;
-  *descriptor = -1;
-  char marker = 0;
-  iovec vector{.iov_base = &marker, .iov_len = sizeof(marker)};
-  std::array<char, CMSG_SPACE(sizeof(int))> control{};
-  msghdr message{};
-  message.msg_iov = &vector;
-  message.msg_iovlen = 1;
-  message.msg_control = control.data();
-  message.msg_controllen = control.size();
-  ssize_t received = -1;
-  do {
-    received = recvmsg(socket_fd, &message, 0);
-  } while (received < 0 && errno == EINTR);
-  if (received != static_cast<ssize_t>(sizeof(marker)) ||
-      (message.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) != 0) {
-    return false;
-  }
-  for (cmsghdr* header = CMSG_FIRSTHDR(&message); header != nullptr;
-       header = CMSG_NXTHDR(&message, header)) {
-    if (header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS &&
-        header->cmsg_len >= CMSG_LEN(sizeof(int))) {
-      std::memcpy(descriptor, CMSG_DATA(header), sizeof(*descriptor));
-      break;
-    }
-  }
-  if ((marker != 0) != expected || ((*descriptor >= 0) != expected)) {
-    if (*descriptor >= 0) close(*descriptor);
-    *descriptor = -1;
-    return false;
-  }
-  if (*descriptor >= 0) {
-    const int flags = fcntl(*descriptor, F_GETFD);
-    if (flags < 0 || fcntl(*descriptor, F_SETFD, flags | FD_CLOEXEC) != 0) {
-      close(*descriptor);
-      *descriptor = -1;
-      return false;
-    }
-  }
-  return true;
-}
-
-int Connect(const char* path) {
-  if (path == nullptr || path[0] == '\0') return -1;
-  sockaddr_un address{};
-  address.sun_family = AF_UNIX;
-  if (std::strlen(path) >= sizeof(address.sun_path)) return -1;
-  std::memcpy(address.sun_path, path, std::strlen(path) + 1);
-  const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (fd < 0) return -1;
-  if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-    close(fd);
-    return -1;
-  }
-  return fd;
-}
 
 struct RetainedLayer {
   uint32_t submitting_process_id = 0;
   WireLayer layer{};
+  std::shared_ptr<const IosurfaceBacking> backing;
 };
 
 struct TargetState {
   uint32_t width = 0;
   uint32_t height = 0;
+  std::shared_ptr<const IosurfaceBacking> backing;
+  std::shared_ptr<const OutputEpoch> epoch;
   // Explicit output anchors only. Descendant display membership is derived
   // from the current SurfaceControl parent graph on every composition.
   std::set<uint32_t> root_layers;
@@ -208,6 +131,51 @@ struct ServiceState {
 ServiceState& State() {
   static ServiceState state;
   return state;
+}
+
+OutputRegistry& Outputs() {
+  static OutputRegistry registry;
+  return registry;
+}
+
+// Caller holds ServiceState first, then enters OutputRegistry. Replacing an
+// output preserves its Android anchors; retirement removes only that output.
+void ApplyOutputTransition(ServiceState& state, const OutputTransition& change) {
+  if (change.response.status != 0) return;
+  if (change.previous) {
+    auto target = state.targets.extract(change.previous->identity().iosurface_id);
+    if (change.current) {
+      if (target.empty()) throw std::runtime_error("output target state missing");
+      const auto& identity = change.current->identity();
+      target.key() = identity.iosurface_id;
+      target.mapped().width = identity.logical_width;
+      target.mapped().height = identity.logical_height;
+      target.mapped().backing = change.current->backing();
+      target.mapped().epoch = change.current;
+      if (!state.targets.insert(std::move(target)).inserted)
+        throw std::runtime_error("output target state collision");
+    }
+  } else if (change.current) {
+    const auto& identity = change.current->identity();
+    auto [target, inserted] = state.targets.try_emplace(identity.iosurface_id);
+    if (!inserted) throw std::runtime_error("output target state collision");
+    target->second.width = identity.logical_width;
+    target->second.height = identity.logical_height;
+    target->second.backing = change.current->backing();
+    target->second.epoch = change.current;
+  }
+}
+
+OutputResponse ApplyOutputControl(int descriptor, const OutputRequest& request) {
+  std::lock_guard<std::mutex> lock(State().mutex);
+  auto change = Outputs().Apply(descriptor, request);
+  ApplyOutputTransition(State(), change);
+  return change.response;
+}
+
+void DropOutputControl(int descriptor) noexcept {
+  std::lock_guard<std::mutex> lock(State().mutex);
+  ApplyOutputTransition(State(), Outputs().Drop(descriptor));
 }
 
 uint32_t GlobalLayerId(ServiceState& state, uint32_t process_id,
@@ -372,21 +340,6 @@ bool ConsumeProducerFence(int descriptor) noexcept {
   return received > 0;
 }
 
-uint32_t CopyTransparentRegion(
-    const DarwinArtTransparentRegionRect* source, uint32_t source_count,
-    DarwinArtTransparentRegionRect* destination) {
-  if (source == nullptr || destination == nullptr) return 0;
-  const uint32_t bounded_count = std::min(
-      source_count, static_cast<uint32_t>(kDarwinArtMaxTransparentRegionRects));
-  uint32_t copied = 0;
-  for (uint32_t index = 0; index < bounded_count; ++index) {
-    const auto& rect = source[index];
-    if (rect.right <= rect.left || rect.bottom <= rect.top) continue;
-    destination[copied++] = rect;
-  }
-  return copied;
-}
-
 int32_t ProjectDisplayCoordinate(int32_t coordinate, uint32_t logical_extent,
                                  uint32_t physical_extent) {
   if (logical_extent == 0 || logical_extent == physical_extent)
@@ -436,86 +389,6 @@ void ApplyDisplayProjection(DarwinArtMetalComposerLayer* layer,
                                           physical_width);
     rect.bottom = ProjectDisplayCoordinate(rect.bottom, logical_height,
                                            physical_height);
-  }
-}
-
-void MergeRetainedLayer(WireLayer& destination, const WireLayer& source) {
-  destination.owner_process_id = source.owner_process_id;
-  destination.layer_id = source.layer_id;
-  destination.what = source.what;
-  if ((source.what & DARWIN_ART_SF_REPARENT) != 0) {
-    destination.parent_owner_process_id = source.parent_owner_process_id;
-    destination.parent_id = source.parent_id;
-  }
-  if ((source.what & DARWIN_ART_SF_RELATIVE_LAYER_CHANGED) != 0) {
-    destination.relative_parent_owner_process_id =
-        source.relative_parent_owner_process_id;
-    destination.relative_parent_id = source.relative_parent_id;
-  }
-  if ((source.what & DARWIN_ART_SF_LAYER_CHANGED) != 0) {
-    destination.relative_parent_owner_process_id = 0;
-    destination.relative_parent_id = 0;
-  }
-  if ((source.what & DARWIN_ART_SF_FLAGS_CHANGED) != 0) {
-    destination.flags =
-        (destination.flags & ~source.mask) | (source.flags & source.mask);
-  }
-  if ((source.what & DARWIN_ART_SF_BUFFER_TRANSFORM_CHANGED) != 0)
-    destination.transform = source.transform;
-  if ((source.what & DARWIN_ART_SF_MATRIX_CHANGED) != 0) {
-    destination.scale_x = source.scale_x;
-    destination.scale_y = source.scale_y;
-  }
-  if ((source.what & DARWIN_ART_SF_LAYER_CHANGED) != 0)
-    destination.z = source.z;
-  if ((source.what & DARWIN_ART_SF_ALPHA_CHANGED) != 0)
-    destination.alpha = source.alpha;
-  if ((source.what & DARWIN_ART_SF_TRANSPARENT_REGION_CHANGED) != 0) {
-    destination.transparent_region_count = CopyTransparentRegion(
-        source.transparent_region, source.transparent_region_count,
-        destination.transparent_region);
-  }
-  if ((source.what & DARWIN_ART_SF_BUFFER_CHANGED) != 0) {
-    destination.iosurface_id = source.iosurface_id;
-    destination.width = source.width;
-    destination.height = source.height;
-    destination.producer_bottom_left = source.producer_bottom_left;
-    destination.source_left = source.source_left;
-    destination.source_top = source.source_top;
-    destination.source_right = source.source_right;
-    destination.source_bottom = source.source_bottom;
-    if (destination.destination_right <= destination.destination_left ||
-        destination.destination_bottom <= destination.destination_top) {
-      destination.destination_right = destination.destination_left +
-          static_cast<int32_t>(source.width);
-      destination.destination_bottom = destination.destination_top +
-          static_cast<int32_t>(source.height);
-    }
-  }
-  if ((source.what & DARWIN_ART_SF_POSITION_CHANGED) != 0) {
-    const int32_t width = std::max<int32_t>(
-        0, destination.destination_right - destination.destination_left);
-    const int32_t height = std::max<int32_t>(
-        0, destination.destination_bottom - destination.destination_top);
-    destination.destination_left = source.destination_left;
-    destination.destination_top = source.destination_top;
-    destination.destination_right = source.destination_left + width;
-    destination.destination_bottom = source.destination_top + height;
-    destination.position_x = source.position_x;
-    destination.position_y = source.position_y;
-  }
-  if ((source.what & DARWIN_ART_SF_CROP_CHANGED) != 0) {
-    destination.has_crop = source.has_crop;
-    destination.crop_left = source.crop_left;
-    destination.crop_top = source.crop_top;
-    destination.crop_right = source.crop_right;
-    destination.crop_bottom = source.crop_bottom;
-  }
-  if ((source.what & DARWIN_ART_SF_DESTINATION_FRAME_CHANGED) != 0) {
-    destination.destination_left = source.destination_left;
-    destination.destination_top = source.destination_top;
-    destination.destination_right = source.destination_right;
-    destination.destination_bottom = source.destination_bottom;
   }
 }
 
@@ -633,27 +506,34 @@ void ProcessRequest(CompositionJob& job) {
       job.completion_descriptor = -1;
       return;
     }
+    // Layer transactions resolve after preceding queued structural changes.
+    // Retain the resolved registration under the same State→Registry lock.
+    job.output_epoch = Outputs().Admit(header.target_iosurface_id);
   }
   const bool structural_only =
       request_kind == RequestKind::kStructuralCommit;
   const bool explicit_display_present =
       request_kind == RequestKind::kDisplayPresent;
-  const bool publish_display_dirty =
-      job.publish_display_dirty || targetless_buffer;
   auto completion_guard = std::make_shared<CompletionDescriptorGuard>(
       job.completion_descriptor);
   job.completion_descriptor = -1;
+  if (!structural_only &&
+      (!job.output_epoch || !job.output_epoch->current())) {
+    SignalCompletion(completion_guard->release(), false);
+    return;
+  }
   @autoreleasepool {
     struct TargetSnapshot {
       uint32_t id;
       uint32_t width;
       uint32_t height;
+      std::shared_ptr<const OutputEpoch> epoch;
     };
     std::vector<TargetSnapshot> structural_targets;
-    id<MTLDevice> device = structural_only ? nil : MTLCreateSystemDefaultDevice();
-    IOSurfaceRef target_surface = structural_only
+    auto target_backing = job.output_epoch ? job.output_epoch->backing() : nullptr;
+    IOSurfaceRef target_surface = structural_only || !target_backing
         ? nullptr
-        : IOSurfaceLookup(header.target_iosurface_id);
+        : static_cast<IOSurfaceRef>(target_backing->native_surface());
     const size_t target_surface_width =
         target_surface == nullptr ? 0 : IOSurfaceGetWidth(target_surface);
     const size_t target_surface_height =
@@ -666,9 +546,10 @@ void ProcessRequest(CompositionJob& job) {
     const uint32_t physical_height =
         physical_extent_valid ? static_cast<uint32_t>(target_surface_height) : 0;
     bool valid = structural_only ||
-                 (device != nil && target_surface != nullptr &&
+                 (target_surface != nullptr &&
                   physical_extent_valid);
-    std::vector<IOSurfaceRef> retained_surfaces;
+    std::vector<std::shared_ptr<const IosurfaceBacking>> retained_backings;
+    if (target_backing) retained_backings.push_back(target_backing);
     std::vector<DarwinArtMetalComposerLayer> composition;
     struct ReparentNullTrace {
       uint32_t owner_process_id;
@@ -679,14 +560,21 @@ void ProcessRequest(CompositionJob& job) {
       uint64_t what;
     };
     std::vector<ReparentNullTrace> reparent_null_traces;
+    bool android_committed = false;
     {
       std::lock_guard<std::mutex> lock(State().mutex);
       ServiceState& state = State();
       TargetState* target = nullptr;
       if (!structural_only) {
-        target = &state.targets[header.target_iosurface_id];
-        target->width = header.target_width;
-        target->height = header.target_height;
+        const auto found = state.targets.find(header.target_iosurface_id);
+        if (!job.output_epoch->current() || found == state.targets.end() ||
+            found->second.epoch != job.output_epoch ||
+            found->second.width != header.target_width ||
+            found->second.height != header.target_height) {
+          SignalCompletion(completion_guard->release(), false);
+          return;
+        }
+        target = &found->second;
       }
       std::vector<uint32_t> dead_owners;
       for (const auto& [global_id, retained] : state.layers) {
@@ -794,6 +682,10 @@ void ProcessRequest(CompositionJob& job) {
           }
           MergeRetainedLayer(retained->second.layer, layer);
         }
+        if (inserted || (layer.what & DARWIN_ART_SF_BUFFER_CHANGED) != 0) {
+          retained->second.backing = job.backings
+              ? job.backings->Find(layer.iosurface_id) : nullptr;
+        }
       }
       DarwinArtSurfaceFlingerCommitResult commit{};
       const uint64_t central_transaction_id =
@@ -809,11 +701,14 @@ void ProcessRequest(CompositionJob& job) {
                      static_cast<unsigned long long>(central_transaction_id),
                      updates.size());
         valid = false;
+      } else {
+        android_committed = true;
       }
 
       struct VisibleLayer {
         uint32_t process_id;
         WireLayer layer;
+        std::shared_ptr<const IosurfaceBacking> backing;
       };
       std::map<uint32_t, VisibleLayer> visible_layers;
       const auto parent_by_layer = BuildParentMap(state);
@@ -850,7 +745,8 @@ void ProcessRequest(CompositionJob& job) {
         visible_layers.emplace(
             global_id,
             VisibleLayer{.process_id = retained.submitting_process_id,
-                         .layer = layer});
+                         .layer = layer,
+                         .backing = retained.backing});
       }
       size_t layer_order_count = 0;
       std::vector<uint32_t> layer_order;
@@ -908,10 +804,19 @@ void ProcessRequest(CompositionJob& job) {
                  .right = layer.destination_right,
                  .bottom = layer.destination_bottom});
         if (!resolved.visible) continue;
-        IOSurfaceRef surface = IOSurfaceLookup(layer.iosurface_id);
-        if (surface == nullptr) continue;
+        IOSurfaceRef surface = !found->second.backing ? nullptr
+            : static_cast<IOSurfaceRef>(found->second.backing->native_surface());
+        if (surface == nullptr) {
+          std::fprintf(stderr,
+                       "ART SurfaceFlinger: retained backing missing layer=%u "
+                       "storage=%u transaction=%llu\n",
+                       global_id, layer.iosurface_id,
+                       static_cast<unsigned long long>(header.transaction_id));
+          valid = false;
+          continue;
+        }
         DebugSurfacePixels("source", header.transaction_id, global_id, surface);
-        retained_surfaces.push_back(surface);
+        retained_backings.push_back(found->second.backing);
         composition.push_back({
             .owner_process_id = owner_process_id,
             .layer_id = global_id,
@@ -986,11 +891,16 @@ void ProcessRequest(CompositionJob& job) {
           if (id != 0 && existing_target.width != 0 &&
               existing_target.height != 0) {
             structural_targets.push_back(
-                {id, existing_target.width, existing_target.height});
+                {id, existing_target.width, existing_target.height,
+                 existing_target.epoch});
           }
         }
       }
     }
+
+    // Receipt proves real Android acceptance, not ingress/queue admission.
+    // Send outside State's lock; later GPU failure changes only completion.
+    if (android_committed && job.reply) (void)job.reply->Committed();
 
     if (structural_only) {
       // A structural WMS transaction can move, hide or detach layers after an
@@ -1011,7 +921,7 @@ void ProcessRequest(CompositionJob& job) {
         redraw.header.target_height = target.height;
         redraw.header.layer_count = 0;
         redraw.completion_descriptor = -1;
-        redraw.publish_display_dirty = true;
+        redraw.output_epoch = target.epoch;
         ProcessRequest(redraw);
       }
       SignalCompletion(completion_guard->release(), valid);
@@ -1026,7 +936,14 @@ void ProcessRequest(CompositionJob& job) {
       return;
     }
 
+    // State validation above is the admission linearization point. Already
+    // admitted GPU work may finish on its retained former backing after Drop;
+    // completion publication still checks the live epoch under State lock.
+    // Acquire the +1 device only after early stale/structural returns.
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil) valid = false;
     void* completion = nullptr;
+    bool completion_owned_by_callback = false;
     uint64_t completion_value = 0;
     if (std::getenv("DARWIN_ART_DEBUG_GRAPHICS_DSO") != nullptr &&
         !composition.empty()) {
@@ -1038,6 +955,18 @@ void ProcessRequest(CompositionJob& job) {
                    physical_height, layer.destination_left,
                    layer.destination_top, layer.destination_right,
                    layer.destination_bottom);
+    }
+    if (valid) {
+      // Short submission admission, never hold State across shader/pipeline
+      // creation or Metal encoding. Drop cancels later admission/publication,
+      // not a previously admitted job's retained backing.
+      std::lock_guard<std::mutex> lock(State().mutex);
+      const auto anchor = State().targets.find(header.target_iosurface_id);
+      valid = job.output_epoch->current() &&
+          anchor != State().targets.end() &&
+          anchor->second.epoch == job.output_epoch &&
+          anchor->second.width == header.target_width &&
+          anchor->second.height == header.target_height;
     }
     if (valid &&
         !darwin_art_metal_composer_compose(
@@ -1063,15 +992,36 @@ void ProcessRequest(CompositionJob& job) {
                 ? target_surface
                 : nullptr;
         if (debug_target != nullptr) CFRetain(debug_target);
+        auto completed_backings = std::make_shared<decltype(retained_backings)>(
+            std::move(retained_backings));
+        auto completed_epoch = job.output_epoch;
+        // The provider registry owns the event until this completion tail.
+        // CFRelease would leave its registry entry dangling; retiring before
+        // notification would also abandon the borrowed asynchronous handle.
+        completion_owned_by_callback = true;
         [event notifyListener:listener
                       atValue:completion_value
                         block:^(id<MTLSharedEvent>, uint64_t) {
+                          // Producer fences and display-consumer readiness
+                          // are separate contracts. Every completed target
+                          // must wake its independent HWC/AppKit subscriber.
+                          bool current_output = false;
                           uint32_t notification_status = NOTIFY_STATUS_OK;
-                          if (publish_display_dirty) {
-                            notification_status = notify_post(
-                                publication_notification.c_str());
+                          {
+                            // Linearize publication with Replace/Drop. A
+                            // separate atomic check followed by notify_post
+                            // could wake a replacement sharing the same ID.
+                            std::lock_guard<std::mutex> lock(State().mutex);
+                            const auto anchor = State().targets.find(
+                                header.target_iosurface_id);
+                            current_output = completed_epoch->current() &&
+                                anchor != State().targets.end() &&
+                                anchor->second.epoch == completed_epoch;
+                            if (current_output)
+                              notification_status = notify_post(
+                                  publication_notification.c_str());
                           }
-                          if (publish_display_dirty && std::getenv(
+                          if (std::getenv(
                                   "DARWIN_ART_DEBUG_SURFACE_TRANSACTIONS") !=
                               nullptr) {
                             std::fprintf(
@@ -1088,7 +1038,13 @@ void ProcessRequest(CompositionJob& job) {
                                              header.transaction_id);
                             CFRelease(debug_target);
                           }
+                          // The shared-event callback proves this submitted
+                          // GPU use finished even if its output was retired or
+                          // replaced meanwhile. Output eligibility gates only
+                          // scanout publication above, not buffer-use completion.
                           SignalCompletion(completion_guard->release(), true);
+                          completed_backings->clear();
+                          darwin_art_android_metal_shared_event_release(completion);
                         }];
         [listener release];
       }
@@ -1112,19 +1068,22 @@ void ProcessRequest(CompositionJob& job) {
                    static_cast<unsigned long long>(header.transaction_id),
                    composition.size(), header.target_iosurface_id);
     }
-    if (completion != nullptr) CFRelease(completion);
-    if (target_surface != nullptr) CFRelease(target_surface);
-    for (IOSurfaceRef surface : retained_surfaces) CFRelease(surface);
+    if (completion != nullptr && !completion_owned_by_callback)
+      darwin_art_android_metal_shared_event_release(completion);
     if (device != nil) [device release];
   }
 }
 
-bool HandleRequest(int client) {
+bool HandleRequest(int client, const std::array<char, 8>& prefix) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
   RequestHeader header{};
+  std::memcpy(header.magic, prefix.data(), prefix.size());
   const auto valid_kind = [](uint32_t value) {
     return value <= static_cast<uint32_t>(RequestKind::kLayerTransaction);
   };
-  if (!ReadAll(client, &header, sizeof(header)) ||
+  if (!darwin_art::surfaceflinger::ReadAllUntil(
+          client, reinterpret_cast<unsigned char*>(&header) + prefix.size(),
+          sizeof(header) - prefix.size(), deadline) ||
       std::memcmp(header.magic, kRequestMagic.data(), kRequestMagic.size()) !=
           0 ||
       header.version != kProtocolVersion || !valid_kind(header.kind) ||
@@ -1141,17 +1100,38 @@ bool HandleRequest(int client) {
   }
   std::vector<WireLayer> incoming(header.layer_count);
   if (!incoming.empty() &&
-      !ReadAll(client, incoming.data(), incoming.size() * sizeof(WireLayer))) {
+      !darwin_art::surfaceflinger::ReadAllUntil(
+          client, incoming.data(), incoming.size() * sizeof(WireLayer), deadline)) {
     return false;
   }
   int producer_descriptor = -1;
-  if (!ReceiveDescriptor(client, header.has_producer_fence != 0,
+  if (!darwin_art::surfaceflinger::WaitReadableUntil(client, deadline) ||
+      !ReceiveDescriptor(client, header.has_producer_fence != 0,
                          &producer_descriptor)) {
     return false;
   }
+  // Ingress retains originals until successful queue transfer, including
+  // allocation failure while importing storage or growing the bounded FIFO.
+  CompletionDescriptorGuard producer_guard(producer_descriptor);
+  std::vector<uint32_t> storage_ids;
+  storage_ids.reserve(incoming.size() + 1);
+  storage_ids.push_back(header.target_iosurface_id);
+  for (const auto& layer : incoming) storage_ids.push_back(layer.iosurface_id);
+  auto backings = ImportedCompositionBackings::Import(storage_ids);
   int completion_pipe[2]{-1, -1};
-  int32_t status = 0;
-  if (pipe(completion_pipe) != 0) status = errno;
+  int32_t status = backings ? 0 : EINVAL;
+  std::shared_ptr<const OutputEpoch> output_epoch;
+  if (status == 0 && header.kind == static_cast<uint32_t>(RequestKind::kDisplayPresent)) {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    output_epoch = Outputs().Admit(header.target_iosurface_id);
+    if (!output_epoch || !output_epoch->current() ||
+        output_epoch->identity().logical_width != header.target_width ||
+        output_epoch->identity().logical_height != header.target_height)
+      status = ESTALE;
+  }
+  if (status == 0 && pipe(completion_pipe) != 0) status = errno;
+  CompletionDescriptorGuard completion_read_guard(completion_pipe[0]);
+  CompletionDescriptorGuard completion_write_guard(completion_pipe[1]);
   if (status == 0) {
     for (int descriptor : completion_pipe) {
       const int flags = fcntl(descriptor, F_GETFD);
@@ -1169,29 +1149,49 @@ bool HandleRequest(int client) {
 #endif
   }
   ResponseHeader response{};
+  std::shared_ptr<darwin_art::surfaceflinger::TransactionReply> reply;
+  if (status == 0) {
+    reply = darwin_art::surfaceflinger::TransactionReply::Create(
+        client, completion_pipe[0]);
+    if (!reply) status = ENOMEM;
+  }
+  if (status == 0) {
+    if (CompositionJobs().TryEnqueue(CompositionJob{
+            .header = header,
+            .incoming = std::move(incoming),
+            .producer_descriptor = producer_descriptor,
+            .completion_descriptor = completion_pipe[1],
+            .backings = std::move(backings),
+            .output_epoch = std::move(output_epoch),
+            .reply = reply})) {
+      (void)producer_guard.release();
+      (void)completion_write_guard.release();
+      producer_descriptor = -1;
+      completion_pipe[1] = -1;
+      // Ingress closes only its own descriptor; the worker replies after
+      // real commit without blocking output EOF/control processing.
+      close(completion_read_guard.release());
+      return true;
+    } else {
+      status = EAGAIN;
+    }
+  }
   std::memcpy(response.magic, kResponseMagic.data(), kResponseMagic.size());
   response.version = kProtocolVersion;
   response.status = status;
+  response.commit = darwin_art::surfaceflinger::CommitDisposition::RejectedBeforeCommit;
   response.has_completion_fence = status == 0 ? 1 : 0;
   const bool sent = WriteAll(client, &response, sizeof(response)) &&
                     SendDescriptor(client,
                                    status == 0 ? completion_pipe[0] : -1);
-  if (completion_pipe[0] >= 0) close(completion_pipe[0]);
   if (!sent || status != 0) {
-    if (completion_pipe[1] >= 0) close(completion_pipe[1]);
-    if (producer_descriptor >= 0) close(producer_descriptor);
-    return false;
-  }
-  if (!CompositionJobs().Enqueue(CompositionJob{
-          .header = header,
-          .incoming = std::move(incoming),
-          .producer_descriptor = producer_descriptor,
-          .completion_descriptor = completion_pipe[1]})) {
-    if (producer_descriptor >= 0) close(producer_descriptor);
-    SignalCompletion(completion_pipe[1], false);
     return false;
   }
   return true;
+}
+
+void ComposeIngress(int descriptor, const std::array<char, 8>& prefix) {
+  (void)HandleRequest(descriptor, prefix);
 }
 
 void Serve(std::shared_ptr<darwin_art::process::ServiceEndpoint> endpoint,
@@ -1208,15 +1208,17 @@ void Serve(std::shared_ptr<darwin_art::process::ServiceEndpoint> endpoint,
   }
   const int listener = endpoint->descriptor();
   const int failure = CompositionJobs().failure_descriptor();
+  ServiceIngress ingress(&ApplyOutputControl, &DropOutputControl, &ComposeIngress);
   for (;;) {
     if (!running->load(std::memory_order_acquire)) break;
-    pollfd waiters[2]{
+    std::vector<pollfd> waiters{
         {.fd = listener, .events = POLLIN, .revents = 0},
         {.fd = failure, .events = POLLIN, .revents = 0},
     };
+    ingress.AppendPoll(&waiters);
     int polled = -1;
     do {
-      polled = poll(waiters, 2, -1);
+      polled = poll(waiters.data(), waiters.size(), 1000);
     } while (polled < 0 && errno == EINTR);
     if (polled < 0) {
       CompositionJobs().Fail();
@@ -1227,22 +1229,23 @@ void Serve(std::shared_ptr<darwin_art::process::ServiceEndpoint> endpoint,
       CompositionJobs().Fail();
       break;
     }
-    if ((waiters[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 ||
-        (waiters[0].revents & POLLIN) == 0) {
+    if ((waiters[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
       CompositionJobs().Fail();
       break;
     }
+    for (size_t index = 2; index < waiters.size(); ++index) {
+      if (waiters[index].revents != 0)
+        ingress.Ready(waiters[index].fd, waiters[index].revents);
+    }
+    ingress.ExpirePending();
+    if ((waiters[0].revents & POLLIN) == 0) continue;
     const int client = accept(listener, nullptr, nullptr);
     if (client < 0) {
       if (errno == EINTR) continue;
       CompositionJobs().Fail();
       break;
     }
-#ifdef F_SETNOSIGPIPE
-    (void)fcntl(client, F_SETNOSIGPIPE, 1);
-#endif
-    (void)HandleRequest(client);
-    close(client);
+    (void)ingress.Add(client);
   }
   running->store(false, std::memory_order_release);
 }
@@ -1275,166 +1278,4 @@ extern "C" bool darwin_art_surfaceflinger_service_start() {
                  path);
   });
   return started->load(std::memory_order_acquire);
-}
-
-static int SubmitSurfaceFlingerRequest(
-    RequestKind kind,
-    uint32_t target_iosurface_id, uint32_t target_width,
-    uint32_t target_height, uint64_t transaction_id,
-    const DarwinArtMetalComposerLayer* layers, size_t layer_count,
-    void* producer_event, uint64_t producer_value) {
-  const char* path = std::getenv("DARWIN_ART_SURFACEFLINGER_SOCKET");
-  if (path == nullptr || path[0] == '\0' ||
-      ((producer_event == nullptr) != (producer_value == 0)) ||
-      layer_count > kMaximumLayers ||
-      (layer_count != 0 && layers == nullptr)) {
-    return -1;
-  }
-  int producer_host_descriptor = -1;
-  if (producer_event != nullptr) {
-    const int producer_guest_descriptor =
-        darwin_art_android_metal_shared_event_fence_fd(producer_event,
-                                                       producer_value);
-    if (producer_guest_descriptor < 0) return -1;
-    producer_host_descriptor =
-        darwin_art_bionic_fd_export_for_scm(producer_guest_descriptor);
-    (void)darwin_art_bionic_socket_broker_close(producer_guest_descriptor);
-    if (producer_host_descriptor < 0) return -1;
-  }
-  std::vector<WireLayer> wire_layers;
-  wire_layers.reserve(layer_count);
-  for (size_t index = 0; index < layer_count; ++index) {
-    const DarwinArtMetalComposerLayer& layer = layers[index];
-    auto surface = reinterpret_cast<IOSurfaceRef>(layer.iosurface);
-    const uint32_t surface_id =
-        surface == nullptr ? 0 : IOSurfaceGetID(surface);
-    if (layer.layer_id == 0) continue;
-    WireLayer wire{
-        .owner_process_id = layer.owner_process_id,
-        .layer_id = layer.layer_id,
-        .parent_owner_process_id = layer.parent_owner_process_id,
-        .parent_id = layer.parent_id,
-        .relative_parent_owner_process_id =
-            layer.relative_parent_owner_process_id,
-        .relative_parent_id = layer.relative_parent_id,
-        .iosurface_id = surface_id,
-        .width = layer.width,
-        .height = layer.height,
-        .what = layer.what,
-        .flags = layer.flags,
-        .mask = layer.mask,
-        .transform = layer.transform,
-        .producer_bottom_left = layer.producer_bottom_left ? 1u : 0u,
-        .source_left = layer.source_left,
-        .source_top = layer.source_top,
-        .source_right = layer.source_right,
-        .source_bottom = layer.source_bottom,
-        .destination_left = layer.destination_left,
-        .destination_top = layer.destination_top,
-        .destination_right = layer.destination_right,
-        .destination_bottom = layer.destination_bottom,
-        .position_x = layer.position_x,
-        .position_y = layer.position_y,
-        .scale_x = layer.scale_x,
-        .scale_y = layer.scale_y,
-        .has_crop = layer.has_crop ? 1u : 0u,
-        .crop_left = layer.crop_left,
-        .crop_top = layer.crop_top,
-        .crop_right = layer.crop_right,
-        .crop_bottom = layer.crop_bottom,
-        .z = layer.z,
-        .alpha = layer.alpha,
-        .transparent_region_count = 0,
-    };
-    wire.transparent_region_count = CopyTransparentRegion(
-        layer.transparent_region, layer.transparent_region_count,
-        wire.transparent_region);
-    wire_layers.push_back(wire);
-  }
-  const int fd = Connect(path);
-  if (fd < 0) {
-    std::fprintf(stderr, "ART SurfaceFlinger client: connect failed path=%s errno=%d\n",
-                 path, errno);
-    return -1;
-  }
-  RequestHeader request{};
-  std::memcpy(request.magic, kRequestMagic.data(), kRequestMagic.size());
-  request.version = kProtocolVersion;
-  request.kind = static_cast<uint32_t>(kind);
-  request.process_id = static_cast<uint32_t>(getpid());
-  request.target_iosurface_id = target_iosurface_id;
-  request.target_width = target_width;
-  request.target_height = target_height;
-  request.layer_count = static_cast<uint32_t>(wire_layers.size());
-  request.has_producer_fence = producer_host_descriptor >= 0 ? 1 : 0;
-  request.transaction_id = transaction_id;
-  if (std::getenv("DARWIN_ART_DEBUG_GRAPHICS_DSO") != nullptr) {
-    std::fprintf(stderr,
-                 "ART SurfaceFlinger client: target=%u logical=%ux%u "
-                 "transaction=%llu layers=%zu\n",
-                 target_iosurface_id, target_width, target_height,
-                 static_cast<unsigned long long>(transaction_id),
-                 wire_layers.size());
-  }
-  const bool written =
-      WriteAll(fd, &request, sizeof(request)) &&
-      (wire_layers.empty() ||
-       WriteAll(fd, wire_layers.data(),
-                wire_layers.size() * sizeof(WireLayer))) &&
-      SendDescriptor(fd, producer_host_descriptor);
-  if (producer_host_descriptor >= 0) close(producer_host_descriptor);
-  ResponseHeader response{};
-  const bool response_read = written && ReadAll(fd, &response, sizeof(response));
-  if (!response_read ||
-      std::memcmp(response.magic, kResponseMagic.data(), kResponseMagic.size()) !=
-          0 ||
-      response.version != kProtocolVersion || response.status != 0 ||
-      response.has_completion_fence != 1) {
-    std::fprintf(stderr,
-                 "ART SurfaceFlinger client: response failed written=%d "
-                 "read=%d status=%d fence=%u errno=%d\n",
-                 written, response_read, response.status,
-                 response.has_completion_fence, errno);
-    close(fd);
-    return -1;
-  }
-  int completion_host_descriptor = -1;
-  const bool received =
-      ReceiveDescriptor(fd, true, &completion_host_descriptor);
-  close(fd);
-  if (!received || completion_host_descriptor < 0) return -1;
-  const int completion_guest_descriptor =
-      darwin_art_bionic_fd_import_from_scm(completion_host_descriptor);
-  if (completion_guest_descriptor < 0) {
-    close(completion_host_descriptor);
-    return -1;
-  }
-  return completion_guest_descriptor;
-}
-
-extern "C" int darwin_art_surfaceflinger_service_present(
-    uint32_t target_iosurface_id, uint32_t target_width,
-    uint32_t target_height, uint64_t transaction_id,
-    const DarwinArtMetalComposerLayer* layers, size_t layer_count,
-    void* producer_event, uint64_t producer_value) {
-  return SubmitSurfaceFlingerRequest(
-      RequestKind::kDisplayPresent, target_iosurface_id, target_width,
-      target_height, transaction_id, layers, layer_count, producer_event,
-      producer_value);
-}
-
-extern "C" int darwin_art_surfaceflinger_service_submit(
-    uint64_t transaction_id, const DarwinArtMetalComposerLayer* layers,
-    size_t layer_count) {
-  return SubmitSurfaceFlingerRequest(RequestKind::kLayerTransaction, 0, 0, 0,
-                                     transaction_id, layers, layer_count,
-                                     nullptr, 0);
-}
-
-extern "C" int darwin_art_surfaceflinger_service_commit(
-    uint64_t transaction_id, const DarwinArtMetalComposerLayer* layers,
-    size_t layer_count) {
-  return SubmitSurfaceFlingerRequest(RequestKind::kStructuralCommit, 0, 0, 0,
-                                     transaction_id, layers, layer_count,
-                                     nullptr, 0);
 }

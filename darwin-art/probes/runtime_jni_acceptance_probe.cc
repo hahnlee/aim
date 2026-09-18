@@ -18,7 +18,7 @@
 #include "darwin_jit_eligibility.h"
 #include "gc/heap.h"
 #include "runtime_abi_probe.h"
-#include "runtime_jni_scope.h"
+#include "jni/scoped_local_frame.h"
 #include "handle_scope-inl.h"
 #include "jni/jni_internal.h"
 #include "mirror/class-inl.h"

@@ -11,7 +11,7 @@ use std::process::Command;
 
 use super::verify_sha256;
 use crate::Result;
-use crate::support::{command_output, run_command};
+use crate::support::run_command;
 
 pub(crate) fn materialize_file(
     root: &Path,
@@ -71,29 +71,9 @@ pub(crate) fn materialize_file(
     Ok(())
 }
 
-pub(crate) fn generate_operator_source(
-    root: &Path,
-    local_path: &Path,
-    headers: &[&str],
-    destination: &Path,
-) -> Result<()> {
-    if destination.is_file() {
-        return Ok(());
-    }
-    let parent = destination
-        .parent()
-        .ok_or_else(|| format!("file has no parent: {}", destination.display()))?;
-    fs::create_dir_all(parent)?;
-    let mut generate = Command::new("python3");
-    generate
-        .arg(root.join("_aosp/art/tools/generate_operator_out.py"))
-        .arg(local_path);
-    for header in headers {
-        generate.arg(local_path.join(header));
-    }
-    fs::write(destination, command_output(&mut generate)?)?;
-    Ok(())
-}
+#[path = "source/generated_operator.rs"]
+mod generated_operator;
+pub(crate) use generated_operator::generate_operator_source;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_archive(

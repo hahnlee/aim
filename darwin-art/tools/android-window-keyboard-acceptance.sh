@@ -15,11 +15,11 @@ for apk in "$calculator" "$calendar" "$chrome"; do
 done
 mkdir -p "$output"
 
-cargo run -q --manifest-path "$root/Cargo.toml" -p art-bootstrap -- build-button-dex \
+cargo run -q --manifest-path "$root/Cargo.toml" -p art-bootstrap -- build-runtime-support-dex \
   >"$output/support-dex.log" 2>&1
 cargo run -q --manifest-path "$root/Cargo.toml" -p art-bootstrap -- \
   audit-runtime-graphics-link-incremental >"$output/graphics-link.log" 2>&1
-cargo build -q --manifest-path "$root/Cargo.toml" -p darwin-art-host
+cargo build -q --manifest-path "$root/Cargo.toml" -p darwin-art-host --bin darwin-art-host
 
 common_env=(
   DARWIN_ART_WINDOW_SCALE=2

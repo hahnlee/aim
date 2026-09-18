@@ -181,12 +181,28 @@ pub(crate) fn build_skia(root: &Path) -> Result<()> {
             .arg(format!("-I{}", compat.display()))
             .arg(format!("-I{}", skia.display()))
             .arg(root.join("compat/darwin_surface_bridge.mm"))
+            .arg(root.join("compat/filesystem/document_panel.mm"))
+            .arg(root.join("compat/window/appkit_content_view.mm"))
+            .arg(root.join("compat/input/darwin_hardware_key_translation.mm"))
+            .arg(root.join("compat/window/desktop_root_events.mm"))
+            .arg(root.join("compat/window/desktop_foreground_provider.cc"))
+            .arg(root.join("compat/window/desktop_root_target.mm"))
+            .arg(root.join("compat/window/desktop_root_surface.mm"))
+            .arg(root.join("compat/window/appkit_window_delegate.mm"))
+            .arg(root.join("compat/graphics/metal_display_backing.mm"))
+            .arg(root.join("compat/graphics/surface_backing_owner.mm"))
+            .arg(root.join("compat/graphics/scanout_diagnostic_capture.mm"))
+            .arg("-I")
+            .arg(root.join("tools/bionic-socket-broker-adapter/include"))
+            .arg(root.join("compat/window/composition_fence_monitor.cc"))
             .arg(root.join("probes/darwin_skia_surface_smoke.mm"))
             .arg(&skia_archive)
             .arg(&skcms_archive)
             .args([
                 "-framework",
                 "AppKit",
+                "-framework",
+                "ApplicationServices",
                 "-framework",
                 "CoreGraphics",
                 "-framework",

@@ -7,7 +7,7 @@ use crate::Result;
 pub(crate) use crate::native_cache::{
     FileHashCache, compile_with_dependency_cache, link_with_cache,
 };
-use crate::support::run_command;
+use crate::support::{command_output, run_command};
 
 pub(crate) fn build_elf_loader(root: &Path) -> Result<PathBuf> {
     run_command(
@@ -28,7 +28,10 @@ pub(crate) struct PendingNativeCompile {
 }
 
 pub(crate) fn common_cpp_command(includes: &[&Path]) -> Command {
-    let mut command = Command::new("clang++");
+    let mut command = Command::new(crate::support::support_build_tool("CLANG", "clang++"));
+    if let Some(sdk) = std::env::var_os("DARWIN_ART_SUPPORT_SDK") {
+        command.arg("-isysroot").arg(sdk);
+    }
     command.args([
         "-std=c++20",
         "-O2",
@@ -144,4 +147,83 @@ pub(crate) fn create_archive(archive: &Path, objects: &[PathBuf]) -> Result<()> 
         command.arg(object);
     }
     run_command(&mut command)
+}
+
+/// Cached objects may be unchanged even when a source was removed. Archive
+/// membership must match the current producer list, not historical members.
+pub(crate) fn create_archive_if_needed(
+    archive: &Path,
+    objects: &[PathBuf],
+    compiled: usize,
+) -> Result<()> {
+    let expected = objects
+        .iter()
+        .map(|object| {
+            object
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .ok_or_else(|| format!("object has no file name: {}", object.display()))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let current = if archive.is_file() {
+        command_output(Command::new("ar").arg("-t").arg(archive))?
+            .lines()
+            // Darwin ar lists its linker symbol index as a member. It is
+            // metadata, not a producer object; all actual members stay exact.
+            .filter(|member| {
+                !matches!(
+                    *member,
+                    "__.SYMDEF" | "__.SYMDEF SORTED" | "__.SYMDEF_64" | "__.SYMDEF_64 SORTED"
+                )
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if !archive.is_file() || compiled > 0 || current != expected {
+        create_archive(archive, objects)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    #[test]
+    fn archive_membership_removes_cached_obsolete_objects() {
+        let directory = PathBuf::from(
+            command_output(Command::new("mktemp").arg("-d"))
+                .unwrap()
+                .trim(),
+        );
+        let mut objects = Vec::new();
+        for name in ["one", "two"] {
+            let source = directory.join(format!("{name}.c"));
+            let object = directory.join(format!("{name}.o"));
+            fs::write(&source, format!("int {name}(void) {{ return 1; }}\n")).unwrap();
+            run_command(
+                Command::new("clang")
+                    .arg("-c")
+                    .arg(&source)
+                    .arg("-o")
+                    .arg(&object),
+            )
+            .unwrap();
+            objects.push(object);
+        }
+        let archive = directory.join("fixture.a");
+        create_archive_if_needed(&archive, &objects, 2).unwrap();
+        let before = fs::metadata(&archive).unwrap().modified().unwrap();
+        create_archive_if_needed(&archive, &objects, 0).unwrap();
+        assert_eq!(before, fs::metadata(&archive).unwrap().modified().unwrap());
+        // No source recompilation, but the removed source must leave no member.
+        objects.pop();
+        create_archive_if_needed(&archive, &objects, 0).unwrap();
+        let members = command_output(Command::new("ar").arg("-t").arg(&archive)).unwrap();
+        assert!(members.lines().any(|member| member == "one.o"));
+        assert!(!members.lines().any(|member| member == "two.o"));
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

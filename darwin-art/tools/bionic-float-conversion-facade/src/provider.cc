@@ -111,16 +111,3 @@ extern "C" int darwin_art_bionic_float_conversion_capability(
          name == "AOSP-gdtoa" || name == "C-locale-only" ||
          name == "locale-argument-ignored";
 }
-
-extern "C" void darwin_art_bionic_float_conversion_test_prepare_host_state(
-    void) {
-  errno = 31991;
-  fesetround(FE_DOWNWARD);
-  feraiseexcept(FE_DIVBYZERO);
-}
-
-extern "C" int
-darwin_art_bionic_float_conversion_test_host_state_is_preserved(void) {
-  return errno == 31991 && fegetround() == FE_DOWNWARD &&
-         (fetestexcept(FE_DIVBYZERO) != 0);
-}

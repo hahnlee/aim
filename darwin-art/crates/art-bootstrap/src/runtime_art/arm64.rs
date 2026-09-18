@@ -220,6 +220,7 @@ pub(crate) fn build_runtime_arm64(root: &Path) -> Result<()> {
         "patches/art/0086-darwin-baker-mark-entrypoint-addresses.patch",
         "patches/art/0142-darwin-arm64-generic-jni-tag-handoff.patch",
         "patches/art/0147-darwin-arm64-runtime-method-pointer-boundaries.patch",
+        "patches/art/0192-darwin-native-client-public-entrypoints-arm64.patch",
     ] {
         run_command(
             Command::new("patch")

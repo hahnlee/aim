@@ -660,7 +660,6 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
     return nullptr;
   }
   const char* builtin_providers[] = {
-      kDarwinArtElfJniHostProviderSoname,
       "libc.so",
       "libdl.so",
       "liblog.so",
@@ -788,12 +787,6 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
       SetNativeLoaderError(error_msg, "Rust native owner allocation failed");
       return nullptr;
     }
-    library->fixture_graph = IsExactFixtureGraph(root_soname, sources, source_count);
-    if (library->fixture_graph) {
-      g_elf_fixture_lifecycle.store(0, std::memory_order_relaxed);
-      g_elf_fixture_provider_routes.store(0, std::memory_order_relaxed);
-      g_elf_fixture_namespace_lifecycle.store(0, std::memory_order_relaxed);
-    }
     if (darwin_art_bionic_rust_provider_closure_anchor() == 0) {
       SetNativeLoaderError(error_msg, "Bionic Rust provider closure is unavailable");
       return nullptr;
@@ -848,12 +841,6 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
       return nullptr;
     }
     library->provider_namespace = provider_namespace;
-    if (library->fixture_graph) {
-      g_elf_fixture_namespace_lifecycle.store(1, std::memory_order_relaxed);
-    }
-    if (library->fixture_graph) {
-      g_elf_fixture_namespace_lifecycle.store(2, std::memory_order_relaxed);
-    }
     if (!darwin_art::providers::acquire_vm(&error)) {
       SetNativeLoaderError(error_msg, "Bionic VM setup failed: " + error);
       TeardownProviderNamespace(library.get());
@@ -987,14 +974,6 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
       TeardownProviderNamespace(library.get());
       return nullptr;
     }
-    if (library->fixture_graph &&
-        g_elf_fixture_provider_routes.load(std::memory_order_relaxed) !=
-            kFixtureAllProviderRouteMask) {
-      SetNativeLoaderError(error_msg, "Android ELF did not route all Bionic provider imports");
-      TeardownProviderNamespace(library.get());
-      return nullptr;
-    }
-    if (library->fixture_graph) g_elf_fixture_namespace_lifecycle.store(3, std::memory_order_relaxed);
     JNIEnv* art_env = CurrentArtEnv();
     if (art_env == nullptr || art_env->GetJavaVM(&library->art_vm) != JNI_OK ||
         library->art_vm == nullptr) {
@@ -1010,8 +989,7 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
         library->proxy_storage.data(), library->proxy_storage.size(), &backend);
     if (library->proxy == nullptr ||
         !LookupOptionalElfSymbol(library.get(), "JNI_OnLoad", &library->jni_on_load, &error) ||
-        !LookupOptionalElfSymbol(library.get(), "JNI_OnUnload", &library->jni_on_unload, &error) ||
-        (library->fixture_graph && (library->jni_on_load == 0 || library->jni_on_unload == 0))) {
+        !LookupOptionalElfSymbol(library.get(), "JNI_OnUnload", &library->jni_on_unload, &error)) {
       SetNativeLoaderError(error_msg,
                            library->proxy == nullptr ? "Android JNI proxy initialization failed"
                                                      : "Android ELF lifecycle preflight failed: " + error);
@@ -1024,11 +1002,6 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
       return nullptr;
     }
     *needs_native_bridge = true;
-    if (library->fixture_graph) {
-      g_elf_classified_trampoline_mask.store(0, std::memory_order_relaxed);
-      g_elf_fixture_status.store(kElfOpened | kElfBionicProvidersRouted,
-                                 std::memory_order_relaxed);
-    }
     ElfLibrary* library_value = library.release();
     RuntimeNativeOwner* graph_handle =
         darwin_art_runtime_native_owner_create();

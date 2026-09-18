@@ -2,6 +2,12 @@
 set -euo pipefail
 export LC_ALL=C
 root="$(cd "$(dirname "$0")/.." && pwd)"
+case "${1:-}" in
+  "") run_tests=1 ;;
+  --build-only) run_tests=0 ;;
+  --test-only) exec bash "$root/tools/tests/property-client-logging-test.sh" ;;
+  *) echo "usage: $0 [--build-only|--test-only]" >&2; exit 2 ;;
+esac
 revision=09a271af557444c9a6b3f3146d6d474156fd6cdb
 source_dir="$root/_aosp/android16-property-client"
 out="$root/_build/android16-property-client"
@@ -74,15 +80,7 @@ if grep -Ev '^_darwin_art_bionic_|^(___assert_rtn|___stack_chk_fail|___stack_chk
     "$out/bound-undefined.txt"; then
   echo 'property-client: unexpected client or native logging import' >&2; exit 1
 fi
-xcrun clang -I"$root/tools/bionic-errno-tls/include" \
-  -I"$root/tools/bionic-errno-tls/generated" \
-  -c "$root/tools/bionic-errno-tls/src/errno_tls.c" -o "$out/errno-test.o"
-xcrun clang -I"$root/tools/bionic-strerror-facade/include" \
-  -I"$root/tools/bionic-strerror-facade/generated" \
-  -c "$root/tools/bionic-strerror-facade/src/strerror.c" -o "$out/strerror-test.o"
-xcrun clang -I"$root/tools/bionic-errno-tls/include" \
-  "$root/tools/android16-property-client/logging_test.c" \
-  "$out/errno-test.o" "$out/strerror-test.o" "$out/async_safe_log.o" \
-  -Wl,-dead_strip -o "$out/logging-test"
-"$out/logging-test"
+if [[ "$run_tests" == 1 ]]; then
+  bash "$root/tools/tests/property-client-logging-test.sh"
+fi
 echo 'property-client: client imports bound; service integration pending'

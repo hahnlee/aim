@@ -2,38 +2,45 @@
 //!
 //! Android framework code supplies process identity only. Activation tokens
 //! remain Rust-owned and are represented to native callers by a process-local
-//! opaque handle that is consumed after successful activation.
+//! opaque capability retained until explicit cancellation or handoff release.
 
 use darwin_art_profile::{BoundServiceProcessRequest, BoundServiceProcessResponse};
-use std::collections::BTreeMap;
 use std::ffi::{CStr, c_char};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
-#[derive(Default)]
-struct PreparedProcesses {
-    next: u64,
-    entries: BTreeMap<u64, BoundServiceProcessResponse>,
-}
+use super::bound_service_launch_capability::{
+    cancel_unpublished, forget, insert_prepared, lookup, retry_unpublished,
+};
 
-impl PreparedProcesses {
-    fn insert(&mut self, response: BoundServiceProcessResponse) -> Result<u64, ()> {
-        for _ in 0..u64::MAX {
-            self.next = self.next.wrapping_add(1).max(1);
-            if let std::collections::btree_map::Entry::Vacant(entry) = self.entries.entry(self.next)
-            {
-                entry.insert(response);
-                return Ok(self.next);
-            }
-        }
-        Err(())
+/// Return an unexposed prepare capability to Rust cleanup ownership. Failed
+/// cancellation stays sealed in the ledger and retries at the next prepare.
+///
+/// # Safety
+/// `socket` must be a valid NUL-terminated string throughout the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn darwin_art_runtime_abort_prepared_bound_service_process(
+    socket: *const c_char,
+    handle: u64,
+) -> i32 {
+    if socket.is_null() || handle == 0 {
+        return -1;
     }
-}
-
-fn prepared() -> &'static Mutex<PreparedProcesses> {
-    static PREPARED: OnceLock<Mutex<PreparedProcesses>> = OnceLock::new();
-    PREPARED.get_or_init(|| Mutex::new(PreparedProcesses::default()))
+    std::panic::catch_unwind(|| {
+        let socket = unsafe { CStr::from_ptr(socket) }.to_bytes();
+        if socket.is_empty() {
+            return -1;
+        }
+        let capability = match lookup(handle) {
+            Some(capability) => capability,
+            None => return -1,
+        };
+        if capability.socket() != Path::new(std::ffi::OsStr::from_bytes(socket)) {
+            return -1;
+        }
+        cancel_unpublished(handle, &capability)
+    })
+    .unwrap_or(-4)
 }
 
 /// Prepare a daemon child and publish only its PID and a local opaque handle.
@@ -75,6 +82,7 @@ pub unsafe extern "C" fn darwin_art_runtime_prepare_bound_service_process(
         if socket.is_empty() || package.is_empty() || process_name.is_empty() {
             return -1;
         }
+        retry_unpublished(Path::new(std::ffi::OsStr::from_bytes(socket)));
         let request = BoundServiceProcessRequest {
             package: package.into(),
             process_name: process_name.into(),
@@ -92,12 +100,18 @@ pub unsafe extern "C" fn darwin_art_runtime_prepare_bound_service_process(
                 return -2;
             }
         };
-        let handle = match prepared().lock() {
-            Ok(mut table) => match table.insert(response) {
-                Ok(handle) => handle,
-                Err(()) => return -3,
-            },
-            Err(_) => return -3,
+        let inserted = insert_prepared(Path::new(std::ffi::OsStr::from_bytes(socket)), response);
+        let handle = match inserted {
+            Ok(handle) => handle,
+            Err(()) => {
+                // Never leak a newly owned child merely because local
+                // capability allocation failed. Deadline remains a backstop.
+                let _ = darwin_art_profile::cancel_bound_service_process(
+                    Path::new(std::ffi::OsStr::from_bytes(socket)),
+                    response,
+                );
+                return -3;
+            }
         };
         unsafe {
             output_pid.write(response.pid);
@@ -108,9 +122,8 @@ pub unsafe extern "C" fn darwin_art_runtime_prepare_bound_service_process(
     .unwrap_or(-4)
 }
 
-/// Activate exactly one previously prepared child. Successful activation
-/// consumes the local handle; a transport failure retains it for a bounded
-/// retry by the system process.
+/// Activate exactly one previously prepared child. Retain the capability for
+/// cancellation/handoff; no socket I/O runs under the handle-table mutex.
 ///
 /// # Safety
 /// `socket` must point to a valid NUL-terminated byte string for the duration
@@ -128,44 +141,83 @@ pub unsafe extern "C" fn darwin_art_runtime_activate_bound_service_process(
         if socket.is_empty() {
             return -1;
         }
-        let response = match prepared().lock() {
-            Ok(mut table) => match table.entries.remove(&handle) {
-                Some(response) => response,
-                None => return -1,
-            },
-            Err(_) => return -3,
+        let capability = match lookup(handle) {
+            Some(capability) => capability,
+            None => return -1,
         };
+        if capability.socket() != Path::new(std::ffi::OsStr::from_bytes(socket)) {
+            return -1;
+        }
+        if !capability.begin_activation() {
+            return -1;
+        }
         if let Err(error) = darwin_art_profile::activate_bound_service_process(
-            Path::new(std::ffi::OsStr::from_bytes(socket)),
-            response,
+            capability.socket(),
+            capability.response(),
         ) {
             eprintln!("bound-service process activate: {error}");
-            if let Ok(mut table) = prepared().lock() {
-                table.entries.entry(handle).or_insert(response);
-            }
+            // A cancellation/release that won during I/O must stay terminal.
+            capability.restore_prepared_after_activation_failure();
             return -2;
         }
-        0
+        if capability.finish_activation() {
+            0
+        } else {
+            -1
+        }
     })
     .unwrap_or(-4)
 }
 
-/// Forget a local prepare handle when Java process reservation fails. The
-/// daemon independently kills and reaps an unactivated child at its deadline.
+/// Forget local capability metadata after handoff, confirmed child death, or
+/// acknowledged cancellation.  The daemon independently owns child reaping.
 #[unsafe(no_mangle)]
 pub extern "C" fn darwin_art_runtime_discard_bound_service_process(handle: u64) -> i32 {
     if handle == 0 {
         return -1;
     }
-    std::panic::catch_unwind(|| match prepared().lock() {
-        Ok(mut table) => {
-            if table.entries.remove(&handle).is_some() {
-                0
-            } else {
-                -1
+    std::panic::catch_unwind(|| if forget(handle).is_some() { 0 } else { -1 }).unwrap_or(-4)
+}
+
+/// Admit sticky cancellation. Keep the capability after transport failure so
+/// the system owner can retry; success means admission, not completed reaping.
+///
+/// # Safety
+/// `socket` must be a valid NUL-terminated string throughout the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn darwin_art_runtime_cancel_bound_service_process(
+    socket: *const c_char,
+    handle: u64,
+) -> i32 {
+    if socket.is_null() || handle == 0 {
+        return -1;
+    }
+    std::panic::catch_unwind(|| {
+        let socket = unsafe { CStr::from_ptr(socket) }.to_bytes();
+        if socket.is_empty() {
+            return -1;
+        }
+        let capability = match lookup(handle) {
+            Some(capability) => capability,
+            None => return -1,
+        };
+        if capability.socket() != Path::new(std::ffi::OsStr::from_bytes(socket)) {
+            return -1;
+        }
+        // Serialized only with local release; all daemon I/O remains outside.
+        if !capability.begin_cancellation() {
+            return -1;
+        }
+        match darwin_art_profile::cancel_bound_service_process(
+            capability.socket(),
+            capability.response(),
+        ) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("bound-service process cancel: {error}");
+                -2
             }
         }
-        Err(_) => -3,
     })
     .unwrap_or(-4)
 }
@@ -173,8 +225,136 @@ pub extern "C" fn darwin_art_runtime_discard_bound_service_process(handle: u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bound_service_launch_capability::{CANCELLED, PREPARED};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
+
+    fn response() -> BoundServiceProcessResponse {
+        BoundServiceProcessResponse {
+            pid: 4242,
+            start_sequence: 9,
+            incarnation: [10, 11],
+            activation_token: [0x5a; 16],
+        }
+    }
+
+    #[test]
+    fn cancellation_transport_failure_cannot_reactivate_capability() {
+        let socket = c"/nonexistent/darwin-art-cancellation-test.socket";
+        let handle = insert_prepared(Path::new(socket.to_str().unwrap()), response()).unwrap();
+        assert_eq!(
+            unsafe { darwin_art_runtime_cancel_bound_service_process(socket.as_ptr(), handle) },
+            -2
+        );
+        assert_eq!(
+            unsafe { darwin_art_runtime_activate_bound_service_process(socket.as_ptr(), handle) },
+            -1
+        );
+        assert_eq!(darwin_art_runtime_discard_bound_service_process(handle), 0);
+    }
+
+    #[test]
+    fn unpublished_abort_retains_and_retries_exact_capability() {
+        let directory = std::env::temp_dir().join(format!(
+            "darwin-unpublished-abort-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let socket_path = directory.join("s");
+        let socket = std::ffi::CString::new(socket_path.as_os_str().as_bytes()).unwrap();
+        let handle = insert_prepared(&socket_path, response()).unwrap();
+        assert_eq!(
+            unsafe {
+                darwin_art_runtime_abort_prepared_bound_service_process(socket.as_ptr(), handle)
+            },
+            -2
+        );
+        {
+            let capability = lookup(handle).unwrap();
+            assert!(capability.needs_unpublished_cleanup());
+            assert_eq!(capability.phase(), CANCELLED);
+        }
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut cancel, payload) = accept_message(&listener, 20);
+            assert_eq!(payload, response().encode().unwrap());
+            respond(&mut cancel, 20, &[]);
+        });
+        retry_unpublished(&socket_path);
+        assert!(lookup(handle).is_none());
+        server.join().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unpublished_abort_cannot_cancel_an_activated_capability() {
+        let socket = Path::new("/nonexistent/abort-activated.socket");
+        let handle = insert_prepared(socket, response()).unwrap();
+        let capability = lookup(handle).unwrap();
+        assert!(capability.begin_activation());
+        assert!(capability.finish_activation());
+        assert_eq!(
+            unsafe {
+                darwin_art_runtime_abort_prepared_bound_service_process(
+                    c"/nonexistent/abort-activated.socket".as_ptr(),
+                    handle,
+                )
+            },
+            -1
+        );
+        assert_eq!(darwin_art_runtime_discard_bound_service_process(handle), 0);
+    }
+
+    #[test]
+    fn capability_cannot_cross_socket_scope_and_retries_its_bound_socket() {
+        let directory = std::env::temp_dir().join(format!(
+            "dar-scope-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let socket_a_path = directory.join("a");
+        let socket_b_path = directory.join("b");
+        let socket_a = std::ffi::CString::new(socket_a_path.as_os_str().as_bytes()).unwrap();
+        let socket_b = std::ffi::CString::new(socket_b_path.as_os_str().as_bytes()).unwrap();
+        let handle = insert_prepared(&socket_a_path, response()).unwrap();
+
+        assert_eq!(
+            unsafe { darwin_art_runtime_activate_bound_service_process(socket_b.as_ptr(), handle) },
+            -1
+        );
+        assert_eq!(
+            unsafe { darwin_art_runtime_cancel_bound_service_process(socket_b.as_ptr(), handle) },
+            -1
+        );
+        assert_eq!(lookup(handle).unwrap().phase(), PREPARED);
+
+        assert_eq!(
+            unsafe {
+                darwin_art_runtime_abort_prepared_bound_service_process(socket_a.as_ptr(), handle)
+            },
+            -2
+        );
+        retry_unpublished(&socket_b_path);
+        assert_eq!(lookup(handle).unwrap().phase(), CANCELLED);
+        let listener = UnixListener::bind(&socket_a_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut cancel, payload) = accept_message(&listener, 20);
+            assert_eq!(payload, response().encode().unwrap());
+            respond(&mut cancel, 20, &[]);
+        });
+        retry_unpublished(&socket_a_path);
+        assert!(lookup(handle).is_none());
+        server.join().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     fn accept_message(
         listener: &UnixListener,
@@ -262,6 +442,7 @@ mod tests {
             unsafe { darwin_art_runtime_activate_bound_service_process(socket.as_ptr(), handle) },
             -1
         );
+        assert_eq!(darwin_art_runtime_discard_bound_service_process(handle), 0);
         server.join().unwrap();
         std::fs::remove_dir_all(directory).unwrap();
     }

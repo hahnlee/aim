@@ -200,11 +200,12 @@ pub fn prepare_with_identity(archive: &Path, store: &Path) -> io::Result<Prepare
     // Feed the same opened file that was hashed, not a pathname reopened by tar.
     // bsdtar's normal secure extraction rejects traversal and symlink writes;
     // never use -P/--insecure. Android absolute link *targets* remain unchanged.
-    let output = Command::new("/usr/bin/tar")
+    let output = darwin_art_profile::spawn_owned(Command::new("/usr/bin/tar")
         .args(["-xf", "-", "--no-same-owner", "-C"])
         .arg(&root)
         .stdin(Stdio::from(source))
-        .output()?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped()))?.wait_with_output()?;
     if !output.status.success() {
         return Err(invalid(&format!(
             "system image extraction failed: {}",

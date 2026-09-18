@@ -1,6 +1,7 @@
 #pragma once
 
 #include "metal_composer.h"
+#include "commit_receipt.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -31,5 +32,17 @@ extern "C" int darwin_art_surfaceflinger_service_submit(
 // display target. system_server/WMS owns these transactions on Android and
 // must not fabricate an application IOSurface merely to reach SurfaceFlinger.
 extern "C" int darwin_art_surfaceflinger_service_commit(
+    uint64_t transaction_id, const DarwinArtMetalComposerLayer* layers,
+    size_t layer_count);
+
+extern "C" DarwinArtSurfaceFlingerReceipt darwin_art_surfaceflinger_service_present_receipt(
+    uint32_t target_iosurface_id, uint32_t target_width,
+    uint32_t target_height, uint64_t transaction_id,
+    const DarwinArtMetalComposerLayer* layers, size_t layer_count,
+    void* producer_event, uint64_t producer_value);
+extern "C" DarwinArtSurfaceFlingerReceipt darwin_art_surfaceflinger_service_submit_receipt(
+    uint64_t transaction_id, const DarwinArtMetalComposerLayer* layers,
+    size_t layer_count);
+extern "C" DarwinArtSurfaceFlingerReceipt darwin_art_surfaceflinger_service_commit_receipt(
     uint64_t transaction_id, const DarwinArtMetalComposerLayer* layers,
     size_t layer_count);

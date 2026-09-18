@@ -5,7 +5,7 @@
 #include <chrono>
 #include <cstdint>
 
-#include "runtime_graphics_state.h"
+#include "../runtime/embedding/graphics_state.h"
 
 namespace darwin_art_graphics {
 

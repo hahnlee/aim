@@ -108,19 +108,14 @@ int32_t ProxyDetachCurrentThread(void *context) {
 }
 
 void *ProxyFindClass(void *context, const char *name) {
-  auto *library = static_cast<ElfLibrary *>(context);
+  (void)context;
   JNIEnv *art_env = CurrentArtEnv();
-  if (library == nullptr || art_env == nullptr || name == nullptr) {
+  if (art_env == nullptr || name == nullptr) {
     return nullptr;
   }
   // ART selects the nativeLoad override, current method's loader or system
   // loader. Keep its slash-name contract and pending exception intact.
   void *clazz = art_env->FindClass(name);
-  if (library->fixture_graph && clazz != nullptr &&
-      std::strcmp(name, "darwin/art/nativefixture/NativeFixture") == 0) {
-    g_elf_fixture_status.fetch_or(kElfFoundFixtureClass,
-                                  std::memory_order_relaxed);
-  }
   return clazz;
 }
 

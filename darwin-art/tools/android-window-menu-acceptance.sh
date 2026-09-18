@@ -26,10 +26,10 @@ printf 'run_start=%s pid=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" >"$manifest
 trap 'printf "run_end=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$manifest"' EXIT
 
 # Never validate product APKs with stale compatibility classes. This command
-# is incremental, but also enforces the exact support-DEX class/method contract.
-cargo run -q --manifest-path "$root/Cargo.toml" -p art-bootstrap -- build-button-dex \
+# verifies source inventory, nested closure and original framework ownership.
+cargo run -q --manifest-path "$root/Cargo.toml" -p art-bootstrap -- build-runtime-support-dex \
   >"$run_output/support-dex.log" 2>&1
-cargo build -q --manifest-path "$root/Cargo.toml" -p darwin-art-host
+cargo build -q --manifest-path "$root/Cargo.toml" -p darwin-art-host --bin darwin-art-host
 
 common_env=(
   DARWIN_ART_WINDOW_SCALE=2

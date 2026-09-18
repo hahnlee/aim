@@ -23,13 +23,4 @@ extern "C" bool ACanvas_setBuffer(ACanvas*, const ANativeWindow_Buffer*, int32_t
 
 extern "C" void ACanvas_clipRect(ACanvas*, const ARect*, bool) {}
 
-// The headless flavor has no libcore/OpenJDK loader table.  Resolve the
-// registration seam to a null error string rather than leaving a weak
-// undefined symbol in the runtime dylib; the graphics flavor supplies the
-// strong JVM_NativeLoad-backed implementation.
-extern "C" jstring Java_java_lang_Runtime_nativeLoad(
-    JNIEnv*, jclass, jstring, jobject, jclass) {
-  return nullptr;
-}
-
 #endif

@@ -7,6 +7,7 @@ public class Binder implements IBinder {
 
     public static long clearCallingIdentity() { return 0; }
     public static void restoreCallingIdentity(long token) {}
+    @Override public boolean isBinderAlive() { return true; }
 
     @Override public void linkToDeath(DeathRecipient recipient, int flags)
             throws RemoteException {

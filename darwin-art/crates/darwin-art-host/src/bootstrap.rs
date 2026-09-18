@@ -23,9 +23,21 @@ pub(super) struct RuntimeBootstrap {
 pub(super) fn attach_runtime(
     runtime: &mut HostRuntime,
     library: &Path,
+    execution_image: Option<(&Path, &str, &str)>,
 ) -> Result<RuntimeBootstrap, HostError> {
     let debug_credentials = std::env::var_os("DARWIN_ART_DEBUG_PROCESS_CREDENTIALS").is_some();
-    let mut engine = EngineSession::open(library).map_err(HostError::DynamicLoader)?;
+    let mut engine = match execution_image {
+        Some((execution_path, run_symbol, shutdown_symbol)) => {
+            EngineSession::open_with_execution_image(
+                library,
+                execution_path,
+                run_symbol,
+                shutdown_symbol,
+            )
+        }
+        None => EngineSession::open(library),
+    }
+    .map_err(HostError::DynamicLoader)?;
     if debug_credentials {
         eprintln!("ART process credentials: runtime image opened");
     }

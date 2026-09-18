@@ -15,38 +15,6 @@
 namespace darwin_art::framework_system {
 namespace {
 
-class DarwinMessageQueue {
- public:
-  DarwinMessageQueue()
-      : looper_(darwin_art_android_platform_prepare_current_looper()) {}
-
-  void Poll(jint timeout_millis) {
-    polling_.store(true, std::memory_order_release);
-    (void)darwin_art_android_platform_poll_current_looper_timeout(
-        timeout_millis);
-    polling_.store(false, std::memory_order_release);
-  }
-
-  void Wake() {
-    darwin_art_android_platform_wake_looper(looper_);
-  }
-
-  bool IsPolling() {
-    return polling_.load(std::memory_order_acquire);
-  }
-
-  void* Looper() const { return looper_; }
-
- private:
-  void* looper_ = nullptr;
-  std::atomic<bool> polling_{false};
-};
-
-DarwinMessageQueue* ToMessageQueue(jlong handle) {
-  return reinterpret_cast<DarwinMessageQueue*>(
-      static_cast<std::uintptr_t>(handle));
-}
-
 jlong TimevalToMillis(const timeval& value) {
   return static_cast<jlong>(value.tv_sec) * 1000 + value.tv_usec / 1000;
 }
@@ -97,50 +65,6 @@ jint event_log_write_event(JNIEnv* env, jclass, jint tag, jobjectArray values) {
     std::cerr << '\n';
   }
   return 0;
-}
-
-jlong message_queue_native_init(JNIEnv*, jclass) {
-  return reinterpret_cast<std::uintptr_t>(new DarwinMessageQueue());
-}
-
-void message_queue_native_destroy(JNIEnv*, jclass, jlong handle) {
-  delete ToMessageQueue(handle);
-}
-
-void message_queue_native_poll_once(JNIEnv*, jobject, jlong handle,
-                                    jint timeout_millis) {
-  if (DarwinMessageQueue* queue = ToMessageQueue(handle); queue != nullptr) {
-    queue->Poll(timeout_millis);
-  }
-}
-
-void message_queue_native_wake(JNIEnv*, jclass, jlong handle) {
-  if (DarwinMessageQueue* queue = ToMessageQueue(handle); queue != nullptr) {
-    queue->Wake();
-  }
-}
-
-jboolean message_queue_native_is_polling(JNIEnv*, jclass, jlong handle) {
-  DarwinMessageQueue* queue = ToMessageQueue(handle);
-  return queue != nullptr && queue->IsPolling() ? JNI_TRUE : JNI_FALSE;
-}
-
-void message_queue_native_set_file_descriptor_events(JNIEnv*, jclass, jlong,
-                                                     jint, jint) {
-  // File-descriptor polling will use kqueue. Activity/Handler construction does
-  // not register descriptors, so the first framework gate keeps this explicit.
-}
-
-void* message_queue_looper(JNIEnv* env, jobject queue) {
-  if (env == nullptr || queue == nullptr) return nullptr;
-  jclass queue_class = env->GetObjectClass(queue);
-  if (queue_class == nullptr) return nullptr;
-  jfieldID pointer_field = env->GetFieldID(queue_class, "mPtr", "J");
-  env->DeleteLocalRef(queue_class);
-  if (pointer_field == nullptr || env->ExceptionCheck()) return nullptr;
-  DarwinMessageQueue* native_queue =
-      ToMessageQueue(env->GetLongField(queue, pointer_field));
-  return native_queue == nullptr ? nullptr : native_queue->Looper();
 }
 
 jboolean log_is_loggable(JNIEnv*, jclass, jstring, jint priority) {

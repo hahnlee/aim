@@ -186,8 +186,6 @@ bool IsAuthorizedHostRuntimePath(const char* path) {
          IsExplicitHostFile(path, "DARWIN_ART_APK_APP_RESOURCE_APK") ||
          IsExplicitHostFile(path, "DARWIN_ART_APK_APP_SUPPORT_DEX") ||
          IsExplicitHostFile(path, "DARWIN_ART_FRAMEWORK_RES_APK") ||
-         IsExplicitHostFile(path, "DARWIN_ART_TEST_FONTS_XML") ||
-         IsExplicitHostFile(path, "DARWIN_ART_TEST_FONT") ||
          IsExplicitHostFile(path, "DARWIN_ART_HOST_FONTS_XML") ||
          IsExplicitHostFile(path, "DARWIN_ART_HOST_FONT");
 }

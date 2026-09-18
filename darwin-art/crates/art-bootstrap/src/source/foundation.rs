@@ -1,7 +1,57 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+const FOUNDATION_SHADOW_SOURCES: &[&str] = &[
+    "globals.h",
+    "bit_utils.h",
+    "macros.h",
+    "stl_util_identity.h",
+    "mem_map.h",
+    "mem_map.cc",
+    "mem_map_unix.cc",
+    "os_linux.cc",
+    "scoped_flock.cc",
+    "time_utils.cc",
+    "utils.cc",
+];
+
 pub(crate) fn build_foundation(root: &Path) -> Result<()> {
+    let archives = foundation_archives(root, &root.join("_build/foundation"))?;
+    let includes = archives
+        .includes
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    let probe = root.join("_build/foundation/foundation-probe");
+    run_command(
+        common_cpp_command(&includes)
+            .arg(root.join("probes/foundation.cc"))
+            .arg(&archives.artbase)
+            .arg(&archives.android_base)
+            .arg("-o")
+            .arg(&probe),
+    )?;
+    let output = command_output(&mut Command::new(&probe))?;
+    if output.trim() != "libartbase Darwin: 1.500ms" {
+        return Err(format!("unexpected foundation probe output: {output:?}").into());
+    }
+    println!("build-foundation: {}", output.trim());
+    Ok(())
+}
+
+/// Build-tool clients own a distinct object/shadow/archive namespace. The
+/// immutable upstream inputs are shared, never the mutable build outputs.
+pub(crate) fn build_foundation_archives_at(root: &Path, output: &Path) -> Result<()> {
+    foundation_archives(root, output).map(|_| ())
+}
+
+struct FoundationArchives {
+    includes: Vec<PathBuf>,
+    artbase: PathBuf,
+    android_base: PathBuf,
+}
+
+fn foundation_archives(root: &Path, build_dir: &Path) -> Result<FoundationArchives> {
     let artbase = root.join("_aosp/art/libartbase");
     let libbase = root.join("_aosp/system/libbase");
     let libziparchive = root.join("_aosp/system/libziparchive");
@@ -10,7 +60,6 @@ pub(crate) fn build_foundation(root: &Path) -> Result<()> {
         return Err("foundation sources are missing; run `art-bootstrap sync` first".into());
     }
 
-    let build_dir = root.join("_build/foundation");
     let patched_source_dir = build_dir.join("patched-source");
     let patched_artbase = patched_source_dir.join("libartbase");
     let object_dir = build_dir.join("objects");
@@ -29,21 +78,9 @@ pub(crate) fn build_foundation(root: &Path) -> Result<()> {
     let shadow_identity_path = patched_source_dir.join(".darwin-art-shadow-identity");
     let shadow_current = fs::read_to_string(&shadow_identity_path)
         .is_ok_and(|cached| cached.trim() == shadow_identity)
-        && [
-            "globals.h",
-            "bit_utils.h",
-            "macros.h",
-            "stl_util_identity.h",
-            "mem_map.h",
-            "mem_map.cc",
-            "mem_map_unix.cc",
-            "os_linux.cc",
-            "scoped_flock.cc",
-            "time_utils.cc",
-            "utils.cc",
-        ]
-        .iter()
-        .all(|source| patched_artbase.join("base").join(source).is_file());
+        && FOUNDATION_SHADOW_SOURCES
+            .iter()
+            .all(|source| patched_artbase.join("base").join(source).is_file());
     if !shadow_current {
         let candidate_dir =
             build_dir.join(format!("patched-source.candidate-{}", std::process::id()));
@@ -52,19 +89,7 @@ pub(crate) fn build_foundation(root: &Path) -> Result<()> {
             fs::remove_dir_all(&candidate_dir)?;
         }
         fs::create_dir_all(&candidate_artbase)?;
-        for source in [
-            "globals.h",
-            "bit_utils.h",
-            "macros.h",
-            "stl_util_identity.h",
-            "mem_map.h",
-            "mem_map.cc",
-            "mem_map_unix.cc",
-            "os_linux.cc",
-            "scoped_flock.cc",
-            "time_utils.cc",
-            "utils.cc",
-        ] {
+        for source in FOUNDATION_SHADOW_SOURCES {
             fs::copy(
                 artbase.join("base").join(source),
                 candidate_artbase.join(source),
@@ -78,19 +103,7 @@ pub(crate) fn build_foundation(root: &Path) -> Result<()> {
                     .current_dir(&candidate_dir),
             )?;
         }
-        for source in [
-            "globals.h",
-            "bit_utils.h",
-            "macros.h",
-            "stl_util_identity.h",
-            "mem_map.h",
-            "mem_map.cc",
-            "mem_map_unix.cc",
-            "os_linux.cc",
-            "scoped_flock.cc",
-            "time_utils.cc",
-            "utils.cc",
-        ] {
+        for source in FOUNDATION_SHADOW_SOURCES {
             publish_if_changed(
                 &candidate_artbase.join(source),
                 &patched_artbase.join("base").join(source),
@@ -133,7 +146,9 @@ pub(crate) fn build_foundation(root: &Path) -> Result<()> {
         libbase.join("stringprintf.cpp"),
         libbase.join("strings.cpp"),
     ];
-    let compiler_identity = command_output(Command::new("clang++").arg("--version"))?;
+    let compiler_identity = command_output(
+        Command::new(crate::support::support_build_tool("CLANG", "clang++")).arg("--version"),
+    )?;
     let android_base_jobs = android_base_sources
         .into_iter()
         .map(|source| pending_compile(common_cpp_command(&includes), source, &object_dir))
@@ -266,22 +281,21 @@ pub(crate) fn build_foundation(root: &Path) -> Result<()> {
         compile_pending_native(artbase_jobs, &compiler_identity)?;
     let artbase_archive = build_dir.join("libartbase-darwin.a");
     create_archive_if_needed(&artbase_archive, &artbase_objects, artbase_compiled)?;
-
-    let probe = build_dir.join("foundation-probe");
-    run_command(
-        common_cpp_command(&includes)
-            .arg(root.join("probes/foundation.cc"))
-            .arg(&artbase_archive)
-            .arg(&android_base_archive)
-            .arg("-o")
-            .arg(&probe),
+    fs::write(
+        build_dir.join("current-depfiles.txt"),
+        android_base_objects
+            .iter()
+            .chain(&zip_objects)
+            .chain(&artbase_objects)
+            .map(|object| format!("{}\n", object.with_extension("o.d").display()))
+            .collect::<String>(),
     )?;
-    let output = command_output(&mut Command::new(&probe))?;
-    if output.trim() != "libartbase Darwin: 1.500ms" {
-        return Err(format!("unexpected foundation probe output: {output:?}").into());
-    }
-    println!("build-foundation: {}", output.trim());
-    Ok(())
+
+    Ok(FoundationArchives {
+        includes: includes.iter().map(|path| path.to_path_buf()).collect(),
+        artbase: artbase_archive,
+        android_base: android_base_archive,
+    })
 }
 
 fn pending_compile(
@@ -299,7 +313,7 @@ fn pending_compile(
 
 fn foundation_shadow_identity(root: &Path, artbase: &Path, patches: &[&str]) -> Result<String> {
     let mut digest = Sha256::new();
-    for path in ["globals.h", "mem_map.cc", "mem_map_unix.cc"]
+    for path in FOUNDATION_SHADOW_SOURCES
         .iter()
         .map(|source| artbase.join("base").join(source))
         .chain(patches.iter().map(|patch| root.join(patch)))
@@ -324,26 +338,37 @@ fn publish_if_changed(candidate: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn create_archive_if_needed(archive: &Path, objects: &[PathBuf], compiled: usize) -> Result<()> {
-    let expected = objects
-        .iter()
-        .map(|object| {
-            object
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .ok_or_else(|| format!("object has no file name: {}", object.display()))
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let current = if archive.is_file() {
-        command_output(Command::new("ar").arg("-t").arg(archive))?
-            .lines()
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    if compiled > 0 || current != expected {
-        create_archive(archive, objects)?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foundation_identity_covers_every_staged_source() {
+        let directory = PathBuf::from(
+            command_output(Command::new("mktemp").arg("-d"))
+                .unwrap()
+                .trim(),
+        );
+        let artbase = directory.join("libartbase");
+        fs::create_dir_all(artbase.join("base")).unwrap();
+        for source in FOUNDATION_SHADOW_SOURCES {
+            fs::write(artbase.join("base").join(source), b"original").unwrap();
+        }
+        let before = foundation_shadow_identity(&directory, &artbase, &[]).unwrap();
+        for source in FOUNDATION_SHADOW_SOURCES {
+            let path = artbase.join("base").join(source);
+            fs::write(&path, b"changed").unwrap();
+            assert_ne!(
+                before,
+                foundation_shadow_identity(&directory, &artbase, &[]).unwrap(),
+                "{source}"
+            );
+            fs::write(path, b"original").unwrap();
+        }
+        assert_eq!(
+            before,
+            foundation_shadow_identity(&directory, &artbase, &[]).unwrap()
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
-    Ok(())
 }

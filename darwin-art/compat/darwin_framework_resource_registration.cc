@@ -27,10 +27,8 @@ bool RegisterFrameworkResourceNatives(JNIEnv* env) {
          android::register_android_content_res_ApkAssets(env) >= 0 &&
          android::register_com_android_internal_util_VirtualRefBasePtr(env) >= 0;
 #else
-  // The baseline probe registers its deliberately small AssetManager table in
-  // RegisterFrameworkNatives().
   (void)env;
-  return true;
+  return false;
 #endif
 }
 

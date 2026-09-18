@@ -1,10 +1,11 @@
 #include "runtime_elf_probe.h"
+#include "runtime_acceptance_state.h"
+#include "elf_fixture_journal.h"
 
 #include <cstdint>
 #include <iostream>
 
 #include "darwin_provider_owners.h"
-#include "runtime_process_state.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
 #include "jni/java_vm_ext.h"
@@ -85,10 +86,6 @@ bool run_android_elf_self_test(JNIEnv* env, JavaVM* vm, jobject class_loader,
   return true;
 }
 
-extern "C" int darwin_art_elf_jni_fixture_registration_status();
-extern "C" int darwin_art_elf_jni_fixture_lifecycle_status();
-extern "C" int darwin_art_elf_jni_fixture_namespace_lifecycle_status();
-
 namespace {
 int close_native_library(void* handle, bool needs_native_bridge) {
   char* close_error = nullptr;
@@ -156,8 +153,7 @@ int run_fixture_graph_acceptance(const FixtureGraphAcceptance& input) {
             &generic_load_error);
   }
   if (!generic_loaded || !generic_load_error.empty() ||
-      input.env->ExceptionCheck() ||
-      darwin_art_elf_jni_fixture_registration_status() != 0) {
+      input.env->ExceptionCheck()) {
     std::cerr << "ART Android ELF generic graph load failed, load_error="
               << generic_load_error << "\n";
     return 40;
@@ -177,16 +173,16 @@ int run_fixture_graph_acceptance(const FixtureGraphAcceptance& input) {
     return 40;
   }
 
-  darwin_art_process::record_apk_elf_loaded(input.apk_sha256,
-                                             input.apk_root_sha256);
+  darwin_art_acceptance::record_apk_elf_loaded(input.apk_sha256,
+                                                input.apk_root_sha256);
+  if (!ResetJournal()) return 40;
   char* partial_error = nullptr;
   void* partial_handle = android::OpenNativeLibrary(
       input.env, 35, input.elf_fixture_path, input.app_loader_ref, nullptr,
       nullptr, nullptr, &partial_error);
   const bool partial_cleanup_ok =
       partial_handle == nullptr && partial_error != nullptr &&
-      darwin_art_elf_jni_fixture_lifecycle_status() == 124567 &&
-      darwin_art_elf_jni_fixture_namespace_lifecycle_status() == 5;
+      ReadJournal() == "124567";
   if (partial_handle != nullptr) {
     close_native_library(partial_handle, true);
   }
@@ -195,13 +191,12 @@ int run_fixture_graph_acceptance(const FixtureGraphAcceptance& input) {
   android::NativeLoaderFreeErrorMessage(partial_error);
   if (!partial_cleanup_ok || input.env->ExceptionCheck()) {
     std::cerr << "ART Android ELF JNI: partial failure cleanup failed, lifecycle="
-              << darwin_art_elf_jni_fixture_lifecycle_status()
-              << " namespace="
-              << darwin_art_elf_jni_fixture_namespace_lifecycle_status()
+              << ReadJournal()
               << " error=" << partial_error_text << "\n";
     return 40;
   }
 
+  if (!ResetJournal()) return 41;
   std::string load_error;
   bool loaded = false;
   {
@@ -210,16 +205,10 @@ int run_fixture_graph_acceptance(const FixtureGraphAcceptance& input) {
         input.env, input.elf_fixture_path, input.app_loader_ref,
         input.native_fixture_class, &load_error);
   }
-  const int bridge_status = darwin_art_elf_jni_fixture_registration_status();
-  const int lifecycle_status = darwin_art_elf_jni_fixture_lifecycle_status();
-  const int namespace_status =
-      darwin_art_elf_jni_fixture_namespace_lifecycle_status();
-  if (!loaded || !load_error.empty() || bridge_status != 0x7f ||
-      lifecycle_status != 123 || namespace_status != 3 ||
+  if (!loaded || !load_error.empty() || ReadJournal() != "123" ||
       input.env->ExceptionCheck()) {
     std::cerr << "ART Android ELF JNI: load/registration failed, status="
-              << bridge_status << " lifecycle=" << lifecycle_status
-              << " namespace=" << namespace_status
+              << (loaded ? "loaded" : "failed") << " lifecycle=" << ReadJournal()
               << " load_error=" << load_error << "\n";
     return 41;
   }

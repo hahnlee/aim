@@ -16,6 +16,23 @@ const INSTANCE_ONLY: &[&[u8]] = &[
     b"DARWIN_ART_RUNTIME_INSTANCE_TOKEN",
     b"DARWIN_ART_PROFILE_LEASE_FD",
     b"DARWIN_ART_DESKTOP_PRESENTATION",
+    // Caller handoff policy is not a system-service launch input.
+    b"DARWIN_ART_ASYNC_LAUNCH",
+];
+
+// Pure observability may differ between application launches without changing
+// the Android system-service contract. Forward it at first creation, but do not
+// implicitly restart a live shared service to change its tracing. This is an
+// explicit audited list: a DEBUG prefix alone does not prove semantic safety.
+const DIAGNOSTIC_ONLY: &[&[u8]] = &[
+    b"DARWIN_ART_DEBUG_INPUT_LATENCY",
+    b"DARWIN_ART_DEBUG_POINTER",
+    b"DARWIN_ART_DEBUG_SURFACECONTROL_CAPTURE_PATH",
+    b"DARWIN_ART_DEBUG_SURFACECONTROL_CAPTURE_PIXELS",
+    b"DARWIN_ART_DEBUG_SURFACECONTROL_PIXELS",
+    b"DARWIN_ART_DEBUG_SURFACE_TRANSACTIONS",
+    b"DARWIN_ART_DEBUG_GRAPHICS_DSO",
+    b"DARWIN_ART_VM_FAILURE_TRACE",
 ];
 
 /// Capture only the environment that the profile CLI is permitted to forward
@@ -57,7 +74,10 @@ pub(crate) fn key(
         field(&mut digest, argument.as_os_str().as_bytes());
     }
 
-    let mut entries = environment.iter().collect::<Vec<_>>();
+    let mut entries = environment
+        .iter()
+        .filter(|(name, _)| !DIAGNOSTIC_ONLY.contains(&name.as_os_str().as_bytes()))
+        .collect::<Vec<_>>();
     entries.sort_by(|(left_name, left_value), (right_name, right_value)| {
         left_name
             .as_os_str()
@@ -120,6 +140,7 @@ mod tests {
             env("DARWIN_ART_PROFILE_LEASE_FD", "17"),
             env("DARWIN_ART_RUNTIME_INSTANCE_TOKEN", "token"),
             env("DARWIN_ART_DESKTOP_PRESENTATION", "1"),
+            env("DARWIN_ART_ASYNC_LAUNCH", "1"),
             env("DARWIN_ART_ALPHA", "a"),
             env("UNRELATED", "no"),
             env("HOME", "/tmp/home"),
@@ -172,6 +193,33 @@ mod tests {
             key([7; 32], &arguments, &first),
             key([7; 32], &reordered, &first)
         );
+    }
+
+    #[test]
+    fn diagnostics_are_forwarded_but_do_not_replace_shared_runtime() {
+        let arguments = vec![os("runtime"), os("--system")];
+        let baseline = capture([env("DARWIN_ART_JIT", "1")]).unwrap();
+        for name in DIAGNOSTIC_ONLY {
+            let name = std::str::from_utf8(name).unwrap();
+            for value in ["", "1", "/tmp/new-capture.png"] {
+                let traced = capture([env("DARWIN_ART_JIT", "1"), env(name, value)]).unwrap();
+                assert!(traced.contains(&env(name, value)));
+                assert_eq!(
+                    key([7; 32], &arguments, &baseline),
+                    key([7; 32], &arguments, &traced)
+                );
+            }
+        }
+        for name in [
+            "DARWIN_ART_JIT",
+            "DARWIN_ART_ANGLE_DIRECTORY",
+            "DARWIN_ART_DEBUG_FUTURE_SEMANTIC_OPTION",
+        ] {
+            assert_ne!(
+                key([7; 32], &arguments, &capture([env(name, "one")]).unwrap()),
+                key([7; 32], &arguments, &capture([env(name, "two")]).unwrap())
+            );
+        }
     }
 
     #[test]

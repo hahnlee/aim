@@ -61,6 +61,9 @@ headless_library_target="$root/_build/runtime-link-probe/libdarwin_art_runtime.d
 headless_query="$($ninja -f "$graph" -t query "$headless_library_target" 2>&1)"
 grep -q 'headless_runtime_audit' <<<"$headless_query"
 grep -q 'runtime-bootstrap' <<<"$headless_query"
+bash "$root/tools/tests/production-runtime-graph-boundary-test.sh"
+bash "$root/tools/tests/production-runtime-graph-boundary.sh" \
+  "$graph" "$runtime_library_target" "$headless_library_target"
 
 # Phase edges must remain independently addressable. This is the build-time
 # contract that keeps a graphics-input/framework edit from recompiling the
@@ -71,7 +74,7 @@ phase_rules=(
   runtime_graphics_phase_probe
   runtime_graphics_input_probe
   runtime_graphics_state_probe
-  runtime_graphics_session_probe
+  runtime_graphics_session
   runtime_graphics_gpu_probe
   runtime_jni_acceptance_probe
   runtime_hwui_probe
@@ -80,25 +83,25 @@ phase_rules=(
   runtime_app_presentation_probe
 )
 phase_sources=(
-  runtime_filesystem_probe.cc
-  runtime_network_probe.cc
-  runtime_graphics_phase.cc
-  runtime_graphics_input.cc
-  runtime_graphics_state.cc
-  runtime_graphics_session.cc
-  runtime_graphics_gpu.cc
-  runtime_jni_acceptance_probe.cc
-  runtime_hwui_probe.cc
-  runtime_app_resources.cc
-  runtime_app_activity.cc
-  runtime_app_presentation.cc
+  probes/runtime_filesystem_probe.cc
+  probes/runtime_network_probe.cc
+  probes/runtime_graphics_phase.cc
+  probes/runtime_graphics_input.cc
+  runtime/embedding/graphics_state.cc
+  runtime/embedding/graphics_session.cc
+  probes/runtime_graphics_gpu.cc
+  probes/runtime_jni_acceptance_probe.cc
+  probes/runtime_hwui_probe.cc
+  probes/runtime_app_resources.cc
+  probes/runtime_app_activity.cc
+  probes/runtime_app_presentation.cc
 )
 for index in "${!phase_rules[@]}"; do
   grep -q "^rule ${phase_rules[$index]}$" "$graph" || {
     echo "native-graph: missing phase rule ${phase_rules[$index]}" >&2
     exit 1
   }
-  grep -q "probes/${phase_sources[$index]}" "$graph" || {
+  grep -q "${phase_sources[$index]}" "$graph" || {
     echo "native-graph: missing narrow source edge ${phase_sources[$index]}" >&2
     exit 1
   }
@@ -109,8 +112,8 @@ phase_objects=(
   "$root/_build/runtime-probes/darwin_art_runtime_network_probe.cc.o"
   "$root/_build/runtime-probes/darwin_art_runtime_graphics_phase.cc.o"
   "$root/_build/runtime-probes/darwin_art_runtime_graphics_input.cc.o"
-  "$root/_build/runtime-probes/darwin_art_runtime_graphics_state.cc.o"
-  "$root/_build/runtime-probes/darwin_art_runtime_graphics_session.cc.o"
+  "$root/_build/runtime-embedding/darwin_art_graphics_state.cc.o"
+  "$root/_build/runtime-embedding/darwin_art_graphics_session.cc.o"
   "$root/_build/runtime-probes/darwin_art_runtime_graphics_gpu.cc.o"
   "$root/_build/runtime-probes/darwin_art_runtime_jni_acceptance_probe.cc.o"
   "$root/_build/runtime-probes/darwin_art_runtime_hwui_probe.cc.o"
@@ -148,7 +151,7 @@ for index in "${!phase_objects[@]}"; do
   # later edit to another probe cannot silently widen the phase's direct
   # invalidation set.  Keep this structural check on the generated graph so
   # it does not rely on mtimes or a particular cache state.
-  expected_source="probes/${phase_sources[$index]}"
+  expected_source="${phase_sources[$index]}"
   grep -Fq -- "$expected_source" <<<"$phase_query" || {
     echo "native-graph: phase query lost owner source ${phase_sources[$index]}: $object" >&2
     echo "$phase_query" >&2
@@ -158,7 +161,7 @@ for index in "${!phase_objects[@]}"; do
     if [[ "$other_index" == "$index" ]]; then
       continue
     fi
-    other_source="probes/${phase_sources[$other_index]}"
+    other_source="${phase_sources[$other_index]}"
     if grep -Fq -- "$other_source" <<<"$phase_query"; then
       echo "native-graph: phase query widened to ${phase_sources[$other_index]}: $object" >&2
       echo "$phase_query" >&2

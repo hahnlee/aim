@@ -380,23 +380,6 @@ int darwin_art_bionic_kill(int pid, int signal_number) {
   if (signal_number != 0 && translated == 0) return -1;
   return kill((pid_t)pid, translated);
 }
-void darwin_art_bionic_exit(int status) {
-  char message[128];
-  int length = snprintf(message, sizeof(message),
-                        "DARWIN Bionic exit pid=%d status=%d caller=%p\n",
-                        getpid(), status, __builtin_return_address(0));
-  if (length > 0) (void)write(STDERR_FILENO, message, (size_t)length);
-  exit(status);
-}
-void darwin_art_bionic__exit(int status) {
-  char message[128];
-  int length = snprintf(message, sizeof(message),
-                        "DARWIN Bionic _exit pid=%d status=%d caller=%p\n",
-                        getpid(), status, __builtin_return_address(0));
-  if (length > 0) (void)write(STDERR_FILENO, message, (size_t)length);
-  _exit(status);
-}
-
 int darwin_art_bionic_prctl(int option, uintptr_t arg2, uintptr_t arg3,
                             uintptr_t arg4, uintptr_t arg5) {
   (void)arg3;

@@ -1,6 +1,8 @@
 //! Single owner-thread shutdown path for graphics and headless runs.
 
+use crate::ExecutionLifetime;
 use crate::config::HostError;
+use crate::process_exit::exit_android_process;
 use crate::runtime::HostRuntime;
 use darwin_art_engine::{EngineSession, GraphicsSession, SurfaceSession};
 use darwin_art_runtime::{ProviderBridge, RuntimeError, ShutdownGuard as RuntimeOwnerGuard};
@@ -13,14 +15,14 @@ pub(super) struct RuntimeShutdownGuard<'a> {
     inner: Option<
         RuntimeOwnerGuard<'a, EngineSession, Box<ProviderBridge>, SurfaceSession, GraphicsSession>,
     >,
-    process_exit_on_drop: bool,
+    execution_lifetime: ExecutionLifetime,
 }
 
 impl<'a> RuntimeShutdownGuard<'a> {
-    pub(super) fn new(runtime: &'a mut HostRuntime, process_exit_on_drop: bool) -> Self {
+    pub(super) fn new(runtime: &'a mut HostRuntime, execution_lifetime: ExecutionLifetime) -> Self {
         Self {
             inner: Some(RuntimeOwnerGuard::new(runtime)),
-            process_exit_on_drop,
+            execution_lifetime,
         }
     }
 
@@ -32,7 +34,7 @@ impl<'a> RuntimeShutdownGuard<'a> {
     }
 
     pub(super) fn shutdown(mut self) -> Result<(), HostError> {
-        if self.process_exit_on_drop {
+        if self.execution_lifetime == ExecutionLifetime::AndroidProcess {
             // APK processes must never enter DestroyJavaVM/ELF teardown,
             // including explicit error cleanup paths. The caller has already
             // recorded the failure; preserve it at the OS process boundary.
@@ -40,10 +42,7 @@ impl<'a> RuntimeShutdownGuard<'a> {
             // destructor before `_exit`; APK process boundaries must bypass
             // DestroyJavaVM/ELF teardown entirely.
             std::mem::forget(self.inner.take());
-            unsafe {
-                libc::fflush(std::ptr::null_mut());
-                libc::_exit(1);
-            }
+            exit_android_process(1);
         }
         self.inner
             .take()
@@ -55,15 +54,12 @@ impl<'a> RuntimeShutdownGuard<'a> {
 
 impl Drop for RuntimeShutdownGuard<'_> {
     fn drop(&mut self) {
-        if self.process_exit_on_drop && self.inner.is_some() {
+        if self.execution_lifetime == ExecutionLifetime::AndroidProcess && self.inner.is_some() {
             // An Android APK process is an OS lifetime boundary.  If an
             // in-process error reaches this guard, unloading live Chromium
             // DSOs/DestroyJavaVM is unsafe and unlike AOSP.  Let the kernel
             // reclaim the process instead of running the host teardown path.
-            unsafe {
-                libc::fflush(std::ptr::null_mut());
-                libc::_exit(1);
-            }
+            exit_android_process(1);
         }
     }
 }

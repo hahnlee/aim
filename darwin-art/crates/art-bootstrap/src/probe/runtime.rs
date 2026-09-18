@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) fn build_runtime_host(root: &Path) -> Result<()> {
     let status = Command::new("cargo")
-        .args(["build", "-p", "darwin-art-host"])
+        .args(["build", "-p", "darwin-art-host", "--bin", "darwin-art-host"])
         .current_dir(root)
         .status()?;
     if !status.success() {

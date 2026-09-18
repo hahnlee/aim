@@ -3,6 +3,7 @@ use super::graphics::GraphicsSession;
 use super::process::ProcessRequest;
 use super::process_filesystem::{ProcessFilesystemError, install_with};
 use super::process_snapshot::{ProcessSnapshotError, ProcessSnapshotInputs};
+use super::scm_endpoint::ScmEndpointInstallation;
 use super::surface::SurfaceSession;
 use core::ffi::c_void;
 use darwin_art_engine_sys::{ProcessConfig, ProcessResult, ProviderAcquireFn, ProviderReleaseFn};
@@ -21,6 +22,7 @@ pub struct EngineSession {
     process_entered: AtomicBool,
     process_snapshot_installed: bool,
     process_filesystem_installed: bool,
+    scm_endpoint: ScmEndpointInstallation,
 }
 
 impl EngineSession {
@@ -32,7 +34,33 @@ impl EngineSession {
             process_entered: AtomicBool::new(false),
             process_snapshot_installed: false,
             process_filesystem_installed: false,
+            scm_endpoint: ScmEndpointInstallation::default(),
         })
+    }
+
+    /// Open the product RuntimeEntry image and explicitly bind a secondary
+    /// execution image for the process run/shutdown pair. The product image
+    /// remains the owner of every other ABI (providers, surfaces, snapshots,
+    /// and teardown helpers); the secondary image is only an execution target
+    /// selected by the caller.
+    pub fn open_with_execution_image(
+        product_path: &Path,
+        execution_path: &Path,
+        run_symbol: &str,
+        shutdown_symbol: &str,
+    ) -> Result<Self, String> {
+        let mut session = Self::open(product_path)?;
+        if let Err(error) =
+            session
+                .engine
+                .bind_execution_image(execution_path, run_symbol, shutdown_symbol)
+        {
+            // Keep the product owner on the normal close/drop path when
+            // symbol binding fails; no process has been entered yet.
+            drop(session);
+            return Err(error);
+        }
+        Ok(session)
     }
 
     pub(crate) fn symbols(&self) -> EngineSymbols {
@@ -55,6 +83,47 @@ impl EngineSession {
     /// this `EngineSession` owns the dynamic image.
     pub fn binder_broker_symbols(&self) -> BinderBrokerSymbols {
         self.engine.symbols().binder_broker
+    }
+
+    /// Install the host's one process-local FD inheritance boundary before
+    /// native providers create or receive descriptors. This exact callback
+    /// instance must also protect the host's child-spawn path.
+    pub fn install_fd_inheritance_boundary(
+        &self,
+        boundary: darwin_art_engine_sys::FdInheritanceBoundaryFn,
+    ) -> Result<(), String> {
+        if self.shutdown_taken {
+            return Err("cannot install FD boundary after engine shutdown".into());
+        }
+        let install = self.engine.symbols().provider.install_fd_inheritance;
+        // SAFETY: native side stores this process-lifetime synchronous callback;
+        // the host must keep its code alive until process exit.
+        if unsafe { install(Some(boundary)) } != 0 {
+            return Err(format!(
+                "install native FD inheritance boundary: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Install an inert SCM provider, retaining its context until native
+    /// endpoint/caller drainage and image teardown. Does not activate framing.
+    ///
+    /// # Safety
+    /// Table context/callbacks must be valid for native retain and remain
+    /// callable until native release; callbacks must not unwind across ABI.
+    pub unsafe fn install_scm_endpoint_provider(
+        &self,
+        table: &darwin_art_engine_sys::ScmEndpointProviderV1,
+    ) -> Result<(), String> {
+        if self.shutdown_taken {
+            return Err("cannot install SCM provider after shutdown".into());
+        }
+        unsafe {
+            self.scm_endpoint
+                .install(self.engine.symbols().provider, table)
+        }
     }
 
     /// Install the host/service-owned Android process snapshot through the
@@ -133,7 +202,7 @@ impl EngineSession {
         // SAFETY: `config` and all callback state it references are owned
         // by the caller for this synchronous invocation; the function
         // pointer belongs to this live EngineSession image.
-        let status = unsafe { (self.engine.symbols().process.run_process)(config, &mut result) };
+        let status = unsafe { (self.engine.run_process_symbol())(config, &mut result) };
         if status == 0 { Ok(result) } else { Err(status) }
     }
 
@@ -171,10 +240,15 @@ impl EngineSession {
         unsafe { (self.engine.symbols().surface.appkit_pump_events)(seconds) }
     }
 
-    /// Returns the main-actor callback without borrowing the engine owner.
-    /// The image stays alive through `RuntimeSession`, so the host may call
-    /// this function pointer while the owner thread is running.
-    pub fn appkit_pump_callback(&self) -> darwin_art_engine_sys::AppKitPumpEventsFn {
+    /// Returns a raw callback, without carrying any engine/resource lease.
+    ///
+    /// # Safety
+    ///
+    /// The caller must keep the native image and every state borrowed by the
+    /// pump alive throughout all invocations, invoke it only on the macOS main
+    /// thread, and prevent new invocations before native teardown begins.
+    /// A worker being alive or a later `Finished` message is not that proof.
+    pub unsafe fn appkit_pump_callback(&self) -> darwin_art_engine_sys::AppKitPumpEventsFn {
         self.engine.symbols().surface.appkit_pump_events
     }
 
@@ -183,6 +257,17 @@ impl EngineSession {
         info: &darwin_art_engine_sys::SurfaceCreateInfo,
     ) -> Result<SurfaceSession, i32> {
         SurfaceSession::create(self.symbols(), info)
+    }
+
+    /// Create the pre-VM display target without installing Android input.
+    /// Input sink ownership is adopted explicitly after ART initialization by
+    /// the process owner; this path still returns the paired surface owner so
+    /// failure cleanup cannot leak the native target.
+    pub fn create_display_target(
+        &self,
+        info: &darwin_art_engine_sys::SurfaceCreateInfo,
+    ) -> Result<SurfaceSession, i32> {
+        SurfaceSession::create_display_target(self.symbols(), info)
     }
 
     /// # Safety
@@ -224,7 +309,10 @@ impl EngineSession {
         }
         // SAFETY: the function pointer was resolved from this live,
         // version-checked engine image and takes no arguments.
-        self.shutdown_status = unsafe { (self.engine.symbols().process.shutdown_process)() };
+        self.shutdown_status = unsafe { (self.engine.shutdown_process_symbol())() };
+        if self.shutdown_status == darwin_art_engine_sys::PROCESS_SHUTDOWN_NOT_READY {
+            self.shutdown_taken = false;
+        }
         self.shutdown_status
     }
 
@@ -247,6 +335,13 @@ impl Drop for EngineSession {
         // RuntimeSession teardown marks this callback consumed first, so
         // Drop is idempotent in the successful path.
         let shutdown_status = self.close();
+        if let Err(error) = self
+            .scm_endpoint
+            .uninstall_before_unload(self.engine.symbols().provider)
+        {
+            eprintln!("engine SCM teardown refused unsafe unload: {error}");
+            std::process::abort();
+        }
         if self.process_filesystem_installed {
             // A failed VM shutdown does not prove filesystem users have
             // quiesced. Never release the authority while native threads may
@@ -286,6 +381,12 @@ impl Drop for EngineSession {
 impl NativeResource for EngineSession {
     fn close(&mut self) -> i32 {
         EngineSession::close(self)
+    }
+
+    fn providers_released_by_native_shutdown(&self) -> bool {
+        self.process_entered.load(Ordering::Acquire)
+            && self.shutdown_taken
+            && self.shutdown_status == 0
     }
 }
 

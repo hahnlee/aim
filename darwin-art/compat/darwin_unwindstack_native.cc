@@ -1448,39 +1448,3 @@ bool DarwinNativeUnwindRemote(Maps* maps, JitDebug* jit_debug, DexFiles* dex_fil
 }
 
 }  // namespace unwindstack
-
-namespace {
-
-bool CheckUnwindstackSequence(unwindstack::AndroidUnwinder& unwinder,
-                              const unwindstack::AndroidUnwinderData& data,
-                              const char* const* sequence, size_t sequence_size) {
-  size_t next = 0;
-  for (const auto& frame : data.frames) {
-    const std::string_view name = static_cast<std::string_view>(frame.function_name);
-    if (next < sequence_size && name.find(sequence[next]) != std::string_view::npos) ++next;
-  }
-  if (next == sequence_size) return true;
-  for (const auto& frame : data.frames) {
-    std::fprintf(stderr, "%s\n", unwinder.FormatFrame(frame).c_str());
-  }
-  return false;
-}
-
-}  // namespace
-
-extern "C" bool darwin_art_unwindstack_check_local(const char* const* sequence,
-                                                     size_t sequence_size) {
-  unwindstack::AndroidLocalUnwinder unwinder;
-  unwindstack::AndroidUnwinderData data;
-  return unwinder.Unwind(data) &&
-         CheckUnwindstackSequence(unwinder, data, sequence, sequence_size);
-}
-
-extern "C" bool darwin_art_unwindstack_check_remote(int process_id,
-                                                      const char* const* sequence,
-                                                      size_t sequence_size) {
-  unwindstack::AndroidRemoteUnwinder unwinder(process_id);
-  unwindstack::AndroidUnwinderData data;
-  return unwinder.Unwind(data) &&
-         CheckUnwindstackSequence(unwinder, data, sequence, sequence_size);
-}

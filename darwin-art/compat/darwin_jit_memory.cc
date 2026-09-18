@@ -75,14 +75,6 @@ void DarwinArtRegisterJitMethod(uintptr_t code, size_t size, uintptr_t method) {
   }
 }
 
-extern "C" void darwin_art_debug_entrypoint(uintptr_t method, uintptr_t entrypoint) {
-  constexpr uintptr_t kCorruptInstructionPair = 0xd65f03c09100c3ffULL;
-  if (entrypoint == kCorruptInstructionPair && std::getenv("DARWIN_ART_DEBUG_ENTRYPOINT") != nullptr) {
-    std::fprintf(stderr, "DARWIN entrypoint corruption method=%p entry=%p\n",
-                 reinterpret_cast<void*>(method), reinterpret_cast<void*>(entrypoint));
-  }
-}
-
 uintptr_t DarwinArtLookupJitMethod(uintptr_t pc) {
   if (pc == 0) return 0;
   for (const auto& entry : g_jit_method_entries) {

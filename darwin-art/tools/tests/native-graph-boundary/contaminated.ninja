@@ -1,0 +1,4 @@
+rule compile
+  command = true
+build embedded-fixture: compile probes/runtime_entry_probe.cc
+build product: compile embedded-fixture

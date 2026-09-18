@@ -21,18 +21,14 @@
 // unreachable in headless mode. Production graphics targets link the real
 // implementations from the runtime provider closure.
 namespace darwin_art {
-void NotifyFrameworkInputPending() {}
-void ClearFrameworkInputPending() {}
 DarwinArtInputEnqueueResult EnqueueFrameworkPointerPacket(
     const DarwinArtPointerEventV2&) {
   return DarwinArtInputEnqueueResult::kNoFocusedChannel;
 }
-bool DequeueFrameworkPointerPacket(DarwinArtPointerEventV2*) { return false; }
 DarwinArtInputEnqueueResult EnqueueFrameworkKeyPacket(
     const DarwinArtKeyEventV1&) {
   return DarwinArtInputEnqueueResult::kNoFocusedChannel;
 }
-bool DequeueFrameworkKeyPacket(DarwinArtKeyEventV1*) { return false; }
 }  // namespace darwin_art
 
 struct DarwinArtBionicPollFd {

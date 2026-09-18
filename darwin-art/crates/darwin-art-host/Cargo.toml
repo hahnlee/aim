@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[[bin]]
+name = "darwin-art-fixture-runner"
+path = "../../probes/darwin_art_fixture_runner.rs"
+
 [dependencies]
 darwin-art-abi = { path = "../darwin-art-abi" }
 darwin-art-engine-sys = { path = "../darwin-art-engine-sys" }
@@ -13,3 +17,6 @@ darwin-art-profile = { path = "../darwin-art-profile" }
 darwin-art-binder-process = { path = "../darwin-art-binder-process" }
 libc = "0.2"
 sha2 = "0.10"
+
+[dev-dependencies]
+darwin-art-binder-device = { path = "../darwin-art-binder-device" }

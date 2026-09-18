@@ -1,6 +1,7 @@
 use crate::{AuthorityTransport, Dispatcher};
 use darwin_art_binder_device::{
     authority_protocol::{CallToken, LocalNodeToken, Message, NodeToken, TransferToken},
+    descriptor_manifest::DescriptorBundle,
     device::{ContextManagerReservation, Device, OpenConnection, ProcessIdentity},
     thread::RemoteSubmission,
     transaction_snapshot::TransactionSnapshot,
@@ -8,7 +9,6 @@ use darwin_art_binder_device::{
 };
 use std::{
     collections::{HashMap, VecDeque},
-    os::fd::{FromRawFd, OwnedFd},
     path::Path,
     sync::{
         Arc, Mutex,
@@ -20,6 +20,10 @@ use std::{
 
 const MAX_PENDING_REQUESTS: usize = 128;
 const SLOW_BINDER_REQUEST: Duration = Duration::from_millis(50);
+
+#[cfg(test)]
+#[path = "retained_deposit_tests.rs"]
+mod retained_deposit_tests;
 
 pub type ProcessClient = Client<darwin_art_profile::BinderAuthorityConnection>;
 
@@ -80,7 +84,7 @@ pub(crate) struct State<T: AuthorityTransport> {
     /// Serializes request registration with wire emission without blocking the
     /// sole response dispatcher on `pending`.
     send_order: Mutex<()>,
-    pub closed: AtomicBool,
+    pub closed: Arc<AtomicBool>,
     next_transfer: Mutex<u64>,
     exported_nodes: Mutex<HashMap<LocalNodeToken, ExportedNode>>,
     pub descriptor_api: Mutex<Option<crate::DescriptorApi>>,
@@ -95,6 +99,14 @@ struct ExportedNode {
 
 pub struct Client<T: AuthorityTransport> {
     pub(crate) state: Arc<State<T>>,
+}
+
+impl<T: AuthorityTransport> Drop for State<T> {
+    fn drop(&mut self) {
+        // Metadata leases must become terminal before the actual transport
+        // and device fields are destroyed, even without an explicit close.
+        self.closed.store(true, Ordering::Release);
+    }
 }
 
 struct SubmissionRequest<'a> {
@@ -143,7 +155,7 @@ impl<T: AuthorityTransport> Client<T> {
             device: Arc::new(device),
             pending: Mutex::new(VecDeque::with_capacity(MAX_PENDING_REQUESTS)),
             send_order: Mutex::new(()),
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             next_transfer: Mutex::new(0),
             exported_nodes: Mutex::new(HashMap::new()),
             descriptor_api: Mutex::new(None),
@@ -158,6 +170,12 @@ impl<T: AuthorityTransport> Client<T> {
 
     pub fn device(&self) -> &OpenConnection {
         &self.state.device
+    }
+
+    pub fn authority_lifetime(&self) -> crate::AuthorityLifetime {
+        crate::AuthorityLifetime {
+            closed: Arc::clone(&self.state.closed),
+        }
     }
 
     pub(crate) fn install_descriptor_api(&self, api: crate::DescriptorApi) -> Result<(), Error> {
@@ -373,20 +391,25 @@ impl<T: AuthorityTransport> Client<T> {
         let started = Instant::now();
         let manifest = self.publish_remote_objects(request.objects)?;
         let objects_published = Instant::now();
-        let files = self.capture_remote_fds(request.snapshot)?;
-        let image = TransferImage::capture_with_objects_and_fds(
+        // Allocate before descriptor export: a typed provider grant must bind
+        // the actual export to this transfer, not to a subsequently chosen ID.
+        let transfer = self.allocate_transfer()?;
+        let (files, retained_leases) = self.capture_remote_fds(request.snapshot, transfer)?;
+        let image = TransferImage::capture_with_objects_and_descriptors(
             request.snapshot,
             request.extra,
             &manifest,
             files,
         )
         .map_err(|error| Error::Transfer(format!("{error:?}")))?;
-        let transfer = self.allocate_transfer()?;
         let transfer_captured = Instant::now();
         self.state
             .transport
             .deposit_transfer(transfer, &image)
             .map_err(|error| Error::Transport(error.0))?;
+        // The daemon's installed-ownership ACK ends source export retention;
+        // routing is a separate Binder policy operation.
+        drop(retained_leases);
         let transfer_deposited = Instant::now();
         let response = self.request(
             Message::RouteTransaction {
@@ -454,19 +477,20 @@ impl<T: AuthorityTransport> Client<T> {
         command: &darwin_art_binder_device::device::RemoteReplyCommand,
     ) -> Result<(), Error> {
         let manifest = self.publish_remote_objects(command.objects())?;
-        let files = self.capture_remote_fds(command.snapshot())?;
-        let image = TransferImage::capture_with_objects_and_fds(
+        let transfer = self.allocate_transfer()?;
+        let (files, retained_leases) = self.capture_remote_fds(command.snapshot(), transfer)?;
+        let image = TransferImage::capture_with_objects_and_descriptors(
             command.snapshot(),
             command.extra(),
             &manifest,
             files,
         )
         .map_err(|error| Error::Transfer(format!("{error:?}")))?;
-        let transfer = self.allocate_transfer()?;
         self.state
             .transport
             .deposit_transfer(transfer, &image)
             .map_err(|error| Error::Transport(error.0))?;
+        drop(retained_leases);
         let response = self.request(
             Message::CompleteReply {
                 call: command.call(),
@@ -501,7 +525,14 @@ impl<T: AuthorityTransport> Client<T> {
     fn capture_remote_fds(
         &self,
         snapshot: &TransactionSnapshot,
-    ) -> Result<Vec<(usize, OwnedFd)>, Error> {
+        transfer: TransferToken,
+    ) -> Result<
+        (
+            Vec<DescriptorBundle>,
+            Vec<crate::descriptor_transport::RetainedDescriptorLease>,
+        ),
+        Error,
+    > {
         use darwin_art_binder_device::object_fields::Fields;
         let parsed = snapshot
             .objects()
@@ -511,28 +542,49 @@ impl<T: AuthorityTransport> Client<T> {
             .filter(|object| matches!(object.fields(), Fields::Fd { .. }))
             .count();
         if count == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
+        // Copy the function table out before invoking a provider. No install
+        // mutex is held across an export (or any provider-side RPC).
         let api = self
             .descriptor_api()?
+            .as_ref()
+            .copied()
             .ok_or_else(|| Error::Transfer("Binder FD transport is not installed".into()))?;
         let mut files = Vec::new();
+        let mut retained_leases = Vec::new();
         files
             .try_reserve_exact(count)
             .map_err(|_| Error::Transfer("Binder FD manifest allocation failed".into()))?;
+        if api.retained.is_some() {
+            retained_leases
+                .try_reserve_exact(count)
+                .map_err(|_| Error::Transfer("Binder FD lease allocation failed".into()))?;
+        }
         for object in parsed {
             let Fields::Fd { fd, .. } = object.fields() else {
                 continue;
             };
-            let host = unsafe { (api.export)(fd as i32) };
-            if host < 0 {
-                return Err(Error::Transfer(format!(
-                    "Binder FD {fd} could not be exported"
-                )));
+            let binding = crate::DescriptorTransferBinding::new(
+                self.state.transport.connection().get(),
+                transfer.get(),
+                files.len() as u64,
+                object.offset(),
+            );
+            if api.retained.is_some() {
+                let (file, lease) = api
+                    .export_bound_retained(fd as i32, binding)
+                    .map_err(Error::Transfer)?;
+                files.push(file);
+                retained_leases.push(lease);
+            } else {
+                files.push(
+                    api.export_bound(fd as i32, binding)
+                        .map_err(Error::Transfer)?,
+                );
             }
-            files.push((object.offset(), unsafe { OwnedFd::from_raw_fd(host) }));
         }
-        Ok(files)
+        Ok((files, retained_leases))
     }
 
     fn descriptor_api(

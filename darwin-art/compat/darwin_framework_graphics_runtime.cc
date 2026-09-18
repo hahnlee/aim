@@ -51,14 +51,6 @@ bool ConfigureLayoutlibGraphicsRegistrar(JNIEnv* env) {
 
 namespace darwin_art {
 
-FrameworkGraphicsBackend GetFrameworkGraphicsBackend() {
-#if defined(DARWIN_ART_REAL_GRAPHICS)
-  return FrameworkGraphicsBackend::kAndroidGraphics;
-#else
-  return FrameworkGraphicsBackend::kProbeCanvas;
-#endif
-}
-
 bool InitializeFrameworkGraphicsRuntime() {
 #if defined(DARWIN_ART_REAL_GRAPHICS)
   // This must run before ART initializes java.lang.System. Its static
@@ -84,33 +76,13 @@ void ShutdownFrameworkGraphicsRuntime() {
 #endif
 }
 
-bool InstallFrameworkResourceRuntime(JNIEnv* env) {
-#if defined(DARWIN_ART_REAL_GRAPHICS)
-  return darwin_art_android_runtime_install(env) ==
-         DARWIN_ART_ANDROID_RUNTIME_OK;
-#else
-  (void)env;
-  return true;
-#endif
-}
-
-bool ShutdownFrameworkResourceRuntime(JNIEnv* env) {
-#if defined(DARWIN_ART_REAL_GRAPHICS)
-  return darwin_art_android_runtime_uninstall(env) ==
-         DARWIN_ART_ANDROID_RUNTIME_OK;
-#else
-  (void)env;
-  return true;
-#endif
-}
-
 bool RegisterFrameworkGraphicsNatives(JNIEnv* env) {
 #if defined(DARWIN_ART_REAL_GRAPHICS)
   // Registration is atomic at the upstream libandroid_runtime boundary. In
   // particular, never register DarwinPaint/DarwinRenderNode alongside native
   // Canvas or Bitmap: their jlong values have unrelated C++ object layouts
   // and eventually cross through Canvas/RenderNode drawing APIs. The caller
-  // must invoke this after Runtime::FinishMinimalForDarwinProbe(): the Darwin
+  // must invoke this after Runtime::Start(): the Darwin
   // host uses LayoutlibLoader, whose registrar calls managed System.getProperty.
   if (!ConfigureLayoutlibGraphicsRegistrar(env)) {
     return false;
@@ -119,10 +91,8 @@ bool RegisterFrameworkGraphicsNatives(JNIEnv* env) {
   return register_android_graphics_classes(env) >= 0 &&
          graphics::RegisterOverlayPropertiesNatives(env);
 #else
-  // ProbeCanvas, DarwinPaint, and DarwinRenderNode were registered atomically
-  // by RegisterFrameworkNatives().
   (void)env;
-  return true;
+  return false;
 #endif
 }
 

@@ -137,8 +137,11 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-adapter = (root / "compat/darwin_runtime_adapters.cc").read_text()
-probe = (root / "probes/runtime_entry_probe.cc").read_text()
+adapter = (root / "compat/darwin_runtime_native_loader.cc").read_text()
+lifecycle = (root / "compat/darwin_runtime_elf_lifecycle.cc").read_text()
+registration = (root / "compat/darwin_runtime_jni_registration.cc").read_text()
+resolver = (root / "compat/darwin_runtime_elf_resolver.cc").read_text()
+probe = (root / "probes/runtime_elf_probe.cc").read_text()
 open_start = adapter.index("void* OpenNativeLibrary(")
 discovery_start = adapter.index("darwin_art_elf_discover_sibling_graph(", open_start)
 elf_start = adapter.index("if (discovery_status == DARWIN_ART_ELF_OK) {", discovery_start)
@@ -149,11 +152,11 @@ open_setup = adapter[open_start:discovery_start]
 for flag in ("O_DIRECTORY", "O_CLOEXEC", "O_NOFOLLOW"):
     assert flag in open_setup
 assert "darwin_art_elf_graph_load_with_lifecycle(" in elf
-assert "darwin_art_elf_graph_lookup_root(" in adapter
-assert "darwin_art_elf_graph_unload(" in adapter
+assert "darwin_art_elf_graph_lookup_root(" in adapter + resolver
+assert "darwin_art_elf_graph_unload(" in lifecycle
 assert "darwin_art_bionic_namespace_bind_builtins(" in elf
 assert "darwin_art_bionic_namespace_seal(" in elf
-assert "darwin_art_bionic_namespace_teardown(" in adapter
+assert "darwin_art_bionic_namespace_teardown(" in lifecycle
 assert "darwin_art_elf_load_bytes(" not in adapter
 assert "dlopen(" not in elf and "dlsym(" not in elf
 assert elf.index("darwin_art_bionic_namespace_seal(") < elf.index(
@@ -162,19 +165,18 @@ assert elf.index("darwin_art_elf_graph_load_with_lifecycle(") < elf.index(
     "darwin_art_jni_proxy_init(")
 assert elf.index("darwin_art_elf_graph_load_with_lifecycle(") < elf.index(
     "*needs_native_bridge = true")
-close = adapter[adapter.index("bool CloseNativeLibrary("):
-                  adapter.index("void NativeLoaderFreeErrorMessage")]
-assert close.index("DestroyRegularTrampolines") < close.index("darwin_art_elf_graph_unload")
-assert close.index("darwin_art_elf_graph_unload") < close.index(
-    "TeardownProviderNamespace(library)")
-assert "darwin_art_bionic_namespace_teardown(" in adapter
-assert "kDarwinArtElfJniHostProviderSoname" in adapter
+assert "DestroyRegularTrampolines" in lifecycle
+assert "TeardownProviderNamespace(library)" in lifecycle
+assert "darwin_art_bionic_namespace_teardown(" in lifecycle
+for source in (adapter, lifecycle, registration, resolver):
+    for forbidden in ("fixture_graph", "IsExactFixtureGraph", "g_elf_fixture",
+                      "kDarwinArtElfJniHostProviderSoname",
+                      "darwin_art_fixture_record_lifecycle"):
+        assert forbidden not in source, forbidden
 assert '"libm.so"' in adapter[open_start:elf_start]
-assert "lifecycle_status != 123" in probe
-assert "lifecycle_status() == 124567" in probe
-assert "namespace_lifecycle_status() == 5" in probe
-assert "kMaxRegularMethodsPerGraph = 32" in adapter
-assert "darwin_art_image_registry::ContainsAddress(" in adapter
+assert 'ReadJournal() == "124567"' in probe
+assert 'ReadJournal() != "123"' in probe
+assert "darwin_art_image_registry::ContainsAddress(" in registration
 assert "RegisterNatives=generic+fixture" in probe
 print("register-natives-bridge: local-graph-flow=PASS providers=sealed-before-graph teardown=graph-before-namespace publish=after-complete no-dyld=ELF")
 PY

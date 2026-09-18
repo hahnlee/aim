@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use super::super::{digest_inputs, repository_root};
 use super::GRAPH_VERSION;
 use super::atomic;
-use super::inputs::{graph_inputs, is_probe_only_input};
+use super::inputs::{graph_inputs, is_global_digest_excluded};
 use super::representative::{
     REPRESENTATIVE_EDGES, ToolchainInputs, edge_digest, json_escape, toolchain_inputs,
 };
@@ -30,11 +30,11 @@ pub(crate) struct GraphManifest {
 pub(crate) fn prepare(out: &Path) -> io::Result<GraphManifest> {
     let root = repository_root(out);
     let inputs = graph_inputs(&root);
-    // Probe-only sources are linked by the final dylib edge and therefore
-    // have a narrower invalidation boundary than the bootstrap archives.
+    // Fixtures never enter product archives. Product leaf sources also have
+    // narrower compile/link edges than the shared bootstrap archives.
     let bootstrap_inputs = inputs
         .iter()
-        .filter(|path| !is_probe_only_input(path))
+        .filter(|path| !is_global_digest_excluded(path))
         .cloned()
         .collect::<Vec<_>>();
     let digest = digest_inputs(&root, &bootstrap_inputs)?;

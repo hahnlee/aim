@@ -1,0 +1,4 @@
+rule compile
+  command = true
+build embedded-fixture: compile tools/provider/probes/fixture.c
+build product: compile embedded-fixture

@@ -1,5 +1,7 @@
 #include "../../../compat/surfaceflinger/sync/sync.h"
 #include "darwin_art_bionic_socket_broker.h"
+#include "darwin_art_bionic_fs.h"
+#include "../../tests/fd-inheritance-fixture.h"
 
 #include <csignal>
 #include <cstdint>
@@ -31,6 +33,13 @@ extern "C" int darwin_art_bionic_fs_fcntl_core(int, int, intptr_t) {
 }
 extern "C" int darwin_art_bionic_fs_dup_host_fd_core(int, int *) { return 0; }
 extern "C" int darwin_art_bionic_fs_adopt_host_fd_core(int) { return -1; }
+// This focused fixture does not install Binder owners. Reject that unrelated
+// seam rather than claiming successful registration without a filesystem.
+extern "C" int darwin_art_bionic_fs_bind_binder_device_open(
+    DarwinArtBionicSpecialDeviceOpen open_binder) {
+  (void)open_binder;
+  return -1;
+}
 
 namespace {
 constexpr uint32_t kSyncIocMerge = UINT32_C(0xc0303e03);
@@ -421,6 +430,8 @@ bool RunCompletionCloseStress() {
 } // namespace
 
 int main() {
+  if (!Check(darwin_art::test::InstallNoSpawnFdFixture() == 0,
+             "install explicit no-spawn fixture boundary")) return 1;
   std::signal(SIGPIPE, SIG_IGN);
   if (!Check(darwin_art_bionic_socket_broker_activate() == 0,
              "broker activation failed"))

@@ -30,6 +30,17 @@ cmp "$fonts/system/etc/font_fallback.xml" "$expanded/system/etc/font_fallback.xm
 diff -qr "$fonts/system/fonts" "$expanded/system/fonts"
 cmp "$framework" "$expanded/system/framework/framework-res.apk"
 cmp "$root/_build/android16-system-services/services.jar" "$expanded/system/framework/services.jar"
+source "$root/tools/lib/system-compat-artifact.sh"
+darwin_art_verify_system_compat_config_inventory "$expanded" \
+  "$root/upstream/android16-system-compat-files.lock"
+source "$root/tools/lib/key-character-map-artifact.sh"
+keychars="$(darwin_art_prepare_key_character_map_artifact)"
+darwin_art_verify_key_character_map_inventory "$expanded" \
+  "$root/upstream/android16-key-character-map.lock"
+for name in Generic Virtual; do
+  cmp "$keychars/system/usr/keychars/$name.kcm" \
+    "$expanded/system/usr/keychars/$name.kcm"
+done
 python3 - "$root" "$destination" "$expanded" <<'PY'
 import hashlib
 from pathlib import Path

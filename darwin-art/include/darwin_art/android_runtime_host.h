@@ -23,7 +23,7 @@ enum darwin_art_android_runtime_status {
 // the current attached thread and to the VM returned by JNIEnv::GetJavaVM.
 int darwin_art_android_runtime_install(JNIEnv* env);
 
-// Clears the process JavaVM before DestroyJavaVM. All resource callbacks must
+// Clears the process JavaVM before DestroyJavaVM. All consumers of the published VM must
 // already be quiescent, and this must run on an attached thread of the same VM.
 int darwin_art_android_runtime_uninstall(JNIEnv* env);
 

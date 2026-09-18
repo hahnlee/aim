@@ -4,13 +4,21 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod authority_lifetime;
 mod client;
+mod descriptor_retention;
+mod descriptor_transport;
 mod dispatcher;
 mod fd_endpoint;
 mod routed_write_read;
 mod transport;
 
+pub use authority_lifetime::AuthorityLifetime;
 pub use client::{Client, Error, ProcessClient, SubmissionOutcome, connect, connect_process};
+pub use descriptor_transport::{
+    DescriptorBundleApi, DescriptorRetainedApi, DescriptorTransferBinding, ExportedDescriptor,
+    RetainedDescriptorLease, RetainedExportedDescriptor,
+};
 pub use dispatcher::{Dispatcher, ProcessDispatcher};
 pub use fd_endpoint::{BinderFdEndpoint, BinderFdError, BrokerApi, OwnerCallbacks};
 pub use routed_write_read::{ExecuteError, PhaseMemoryError};
@@ -203,7 +211,10 @@ mod tests {
         let first = std::thread::spawn(move || {
             first_client.set_context_manager_control(BINDER_SET_CONTEXT_MGR_EXT, &first_object)
         });
-        let Message::SetContextManager { local } = outgoing.recv().unwrap() else {
+        let Message::SetContextManager { .. } = outgoing
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+        else {
             panic!("context-manager reservation did not reach authority")
         };
         incoming
@@ -215,15 +226,33 @@ mod tests {
         ));
         assert!(matches!(first.join().unwrap(), Err(Error::Protocol(_))));
 
+        // Protocol mismatch poisons the authority channel. A retry must abort
+        // its local reservation, but cannot send on that closed channel.
+        for _ in 0..2 {
+            assert!(matches!(
+                client.set_context_manager_control(BINDER_SET_CONTEXT_MGR_EXT, &object),
+                Err(Error::Closed)
+            ));
+            assert!(matches!(
+                outgoing.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+        }
+        // Successful authority ACK is a separate fresh connection, not a
+        // fabricated recovery of the poisoned protocol stream.
+        let (client, dispatcher, outgoing, incoming) = endpoint();
+
         let second_client = client.clone();
         let second_object = object;
         let second = std::thread::spawn(move || {
             second_client.set_context_manager_control(BINDER_SET_CONTEXT_MGR_EXT, &second_object)
         });
-        assert!(matches!(
-            outgoing.recv().unwrap(),
-            Message::SetContextManager { local: retry } if retry == local
-        ));
+        let Message::SetContextManager { local } = outgoing
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+        else {
+            panic!("fresh context-manager reservation did not reach authority")
+        };
         let node = NodeToken::new(ConnectionToken::from_nonzero(4).unwrap(), local);
         incoming.send(Message::ContextManagerSet { node }).unwrap();
         dispatcher.dispatch_next().unwrap();
@@ -336,6 +365,8 @@ mod tests {
     #[test]
     fn authority_eof_terminates_accepted_call_and_rejects_later_requests() {
         let (client, dispatcher, outgoing, incoming) = endpoint();
+        let lifetime = client.authority_lifetime();
+        assert!(lifetime.live());
         let target = NodeToken::new(
             ConnectionToken::from_nonzero(7).unwrap(),
             LocalNodeToken::from_nonzero(3).unwrap(),
@@ -369,6 +400,7 @@ mod tests {
             Err(Error::Transport(_))
         ));
         assert!(matches!(client.get_context_manager(), Err(Error::Closed)));
+        assert!(!lifetime.live());
 
         let mut memory = Memory(BTreeMap::from([(0x2200, vec![0; 4])]));
         let mut header = [0_u8; 48];
@@ -389,6 +421,29 @@ mod tests {
             u32::from_le_bytes(memory.0[&0x2200][..4].try_into().unwrap()),
             darwin_art_binder_device::thread::BR_DEAD_REPLY
         );
+    }
+
+    #[test]
+    fn authority_lifetime_explicit_close_is_sticky_across_retained_clones() {
+        let (client, _dispatcher, outgoing, _incoming) = endpoint();
+        let lifetime = client.authority_lifetime();
+        let copy = lifetime.clone();
+        assert!(copy.live());
+        client.close_authority().unwrap();
+        assert_eq!(outgoing.recv().unwrap(), Message::CloseConnection);
+        assert!(!lifetime.live());
+        assert!(!copy.live());
+        assert!(!client.authority_lifetime().live());
+    }
+
+    #[test]
+    fn authority_lifetime_does_not_keep_actual_connection_owner_alive() {
+        let (client, dispatcher, _outgoing, _incoming) = endpoint();
+        let lifetime = client.authority_lifetime();
+        drop(client);
+        assert!(lifetime.live()); // Sole dispatcher still owns the connection.
+        drop(dispatcher);
+        assert!(!lifetime.live());
     }
 
     #[test]
@@ -584,6 +639,17 @@ mod tests {
             &(darwin_art_binder_device::transaction_wire::RECORD_SIZE as u64).to_le_bytes(),
         );
         header[40..48].copy_from_slice(&0x5100_u64.to_le_bytes());
+        assert!(matches!(
+            client.execute_write_read_blocking(
+                18,
+                &mut header,
+                &mut memory,
+                std::time::Duration::MAX
+            ),
+            Err(ExecuteError::Read(
+                darwin_art_binder_device::device::Error::InvalidArgument
+            ))
+        ));
         assert_eq!(
             client
                 .execute_write_read_blocking(
@@ -629,5 +695,72 @@ mod tests {
             darwin_art_binder_device::transaction_wire::BR_TRANSACTION
         );
         assert_eq!(u64::from_le_bytes(join[8..16].try_into().unwrap()), 4);
+        let address = u64::from_le_bytes(memory.0[&0x5100][52..60].try_into().unwrap());
+        let mut free = Kind::FreeBuffer.word().to_le_bytes().to_vec();
+        free.extend_from_slice(&address.to_le_bytes());
+        memory.0.insert(0x5400, free);
+        let mut release = [0_u8; 48];
+        release[..8].copy_from_slice(&12_u64.to_le_bytes());
+        release[16..24].copy_from_slice(&0x5400_u64.to_le_bytes());
+        client
+            .execute_write_read(18, &mut release, &mut memory)
+            .unwrap();
+        // Exercise the production untimed path. The write phase joins once;
+        // wakeup processing must not replay EnterLooper after queued read work.
+        let waiting_client = client.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let mut memory = Memory(BTreeMap::from([
+                (0x5200, Kind::EnterLooper.word().to_le_bytes().to_vec()),
+                (
+                    0x5300,
+                    vec![0; darwin_art_binder_device::transaction_wire::RECORD_SIZE],
+                ),
+            ]));
+            let mut header = [0_u8; 48];
+            header[..8].copy_from_slice(&4_u64.to_le_bytes());
+            header[16..24].copy_from_slice(&0x5200_u64.to_le_bytes());
+            header[24..32].copy_from_slice(
+                &(darwin_art_binder_device::transaction_wire::RECORD_SIZE as u64).to_le_bytes(),
+            );
+            header[40..48].copy_from_slice(&0x5300_u64.to_le_bytes());
+            let result = waiting_client.execute_write_read_indefinite(19, &mut header, &mut memory);
+            done_tx
+                .send((result, header, memory.0.remove(&0x5300).unwrap()))
+                .unwrap();
+        });
+        assert!(matches!(
+            done_rx.recv_timeout(std::time::Duration::from_millis(20)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        client
+            .device()
+            .deliver_remote_transaction(
+                &image,
+                ConnectionToken::from_nonzero(4).unwrap(),
+                RemoteTransaction {
+                    call: None,
+                    sender: ConnectionToken::from_nonzero(9).unwrap(),
+                    sender_pid: 0,
+                    sender_euid: 10_101,
+                    target: LocalNodeToken::from_nonzero(1).unwrap(),
+                    code: 5,
+                    flags: 1,
+                },
+            )
+            .unwrap();
+        let (result, header, bytes) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(
+            result.unwrap(),
+            darwin_art_binder_device::device::WriteReadStatus::Completed
+        );
+        assert_eq!(u64::from_le_bytes(header[8..16].try_into().unwrap()), 4);
+        assert_eq!(
+            u32::from_le_bytes(bytes[..4].try_into().unwrap()),
+            darwin_art_binder_device::transaction_wire::BR_TRANSACTION
+        );
+        waiter.join().unwrap();
     }
 }

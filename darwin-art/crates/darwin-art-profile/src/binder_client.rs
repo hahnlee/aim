@@ -1,7 +1,7 @@
 //! Process-local client for the profile-wide Binder routing authority.
 //! Transaction payload ownership belongs to the Binder endpoint, not here.
 
-use crate::{ProfileError, protocol};
+use crate::{protocol, ProfileError};
 use darwin_art_binder_device::{
     authority_protocol::{self, ConnectionToken, Message, TransferToken},
     transfer_image::TransferImage,
@@ -64,20 +64,7 @@ impl BinderAuthorityConnection {
         key[8..].copy_from_slice(&token.get().to_le_bytes());
         protocol::write_request(&mut stream, protocol::OP_BINDER_TRANSFER_TAKE, &key)?;
         let payload = protocol::expect_ok(&mut stream, protocol::OP_BINDER_TRANSFER_TAKE)?;
-        if !payload.is_empty() {
-            return Err(ProfileError::Daemon(
-                "Binder transfer take returned trailing payload".into(),
-            ));
-        }
-        let mut descriptors = crate::fd_passing::receive_many(&stream)?;
-        if descriptors.is_empty() {
-            return Err(ProfileError::Daemon(
-                "empty Binder transfer envelope".into(),
-            ));
-        }
-        let descriptor = descriptors.remove(0);
-        TransferImage::import_with_fds(descriptor, descriptors)
-            .map_err(|error| ProfileError::Daemon(format!("invalid Binder transfer: {error:?}")))
+        crate::host_fd_delivery::transport::receive(&mut stream, &payload)
     }
 
     /// Calls from multiple binder_thread writers are serialized into complete
@@ -254,13 +241,11 @@ mod tests {
             reader: Mutex::new(first.try_clone().unwrap()),
             writer: Mutex::new(first),
         };
-        assert!(
-            connection
-                .send(Message::ConnectionOpened {
-                    connection: ConnectionToken::from_nonzero(1).unwrap(),
-                    android_uid: 10_001,
-                })
-                .is_err()
-        );
+        assert!(connection
+            .send(Message::ConnectionOpened {
+                connection: ConnectionToken::from_nonzero(1).unwrap(),
+                android_uid: 10_001,
+            })
+            .is_err());
     }
 }

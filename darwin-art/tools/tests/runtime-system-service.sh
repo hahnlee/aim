@@ -11,6 +11,8 @@ if [[ "${1:-}" == --start-system-service ]]; then
   [[ $DARWIN_ART_RUNTIME_TARGET_SDK_VERSION == 36 && $DARWIN_ART_RUNTIME_JAVA_DEBUGGABLE == 0 ]]
   [[ $DARWIN_ART_APK_APP_SUPPORT_DEX == '/data/support dex' ]]
   [[ $DARWIN_ART_APK_APP_RESOURCE_APK == /image/system/framework/framework-res.apk ]]
+  [[ $DARWIN_ART_FRAMEWORK_RES_APK == /image/system/framework/framework-res.apk ]]
+  [[ -z ${DARWIN_ART_APK_APP_ACTIVITY+x} && -z ${DARWIN_ART_APK_APP_DESCRIPTOR+x} ]]
   [[ $DARWIN_ART_ANDROID_FILESYSTEM_ROOT == /image ]]
   [[ $DARWIN_ART_ANDROID_SYSTEM_NATIVE_DIR == /image/system/lib64 ]]
   [[ $DARWIN_ART_RUNTIME_HOST_FILES == '/boot/a:/boot/b:/data/support dex:/image/system/framework/services.jar' ]]
@@ -59,6 +61,9 @@ fi
 export DARWIN_ART_BOOT_CLASSPATH=/boot/a:/boot/b
 export DARWIN_ART_APK_APP_NATIVE_PATH=/app/native.so
 export DARWIN_ART_APP_COMMAND_LINE=app-only-command
+export DARWIN_ART_APK_APP_ACTIVITY=dev.darwinart.probe.ProbeActivity
+export DARWIN_ART_APK_APP_DESCRIPTOR='Ldev/darwinart/probe/ProbeActivity;'
+export DARWIN_ART_FRAMEWORK_RES_APK=/inherited/framework-res.apk
 export DARWIN_ART_RUNTIME_TARGET_SDK_VERSION=29
 export DARWIN_ART_RUNTIME_JAVA_DEBUGGABLE=1
 invoke() {

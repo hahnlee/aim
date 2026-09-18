@@ -178,6 +178,13 @@ std::array<float, 2> TransformTexcoord(uint32_t transform, float u0,
 
 }  // namespace
 
+// Keep SurfaceFlinger on the existing C ABI. The provider retains/registers
+// the raw MTLSharedEvent pointer consumed by the command encoder and by the
+// completion-fence router; this caller intentionally does not include the
+// provider's private header.
+extern "C" void* darwin_art_android_metal_shared_event_create(
+    void* metal_device, uint64_t* signal_value);
+
 extern "C" bool darwin_art_metal_composer_compose(
     void* metal_device, void* target_iosurface, uint32_t target_width,
     uint32_t target_height, const DarwinArtMetalComposerLayer* layers,
@@ -393,16 +400,18 @@ extern "C" bool darwin_art_metal_composer_compose(
   }
   [encoder endEncoding];
 
-  id<MTLSharedEvent> event = [device newSharedEvent];
-  if (event == nil) {
+  uint64_t value = 0;
+  void* raw_event = darwin_art_android_metal_shared_event_create(
+      (__bridge void*)device, &value);
+  id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)raw_event;
+  if (event == nil || value == 0) {
     [target release];
     return false;
   }
-  const uint64_t value = event.signaledValue + 1;
   [command_buffer encodeSignalEvent:event value:value];
   [command_buffer commit];
   [target release];
-  *completion_event = reinterpret_cast<void*>(event);
+  *completion_event = raw_event;
   *completion_value = value;
   return true;
 }

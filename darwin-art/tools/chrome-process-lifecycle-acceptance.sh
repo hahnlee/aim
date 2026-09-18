@@ -22,10 +22,10 @@ fi
 mkdir -p "$output"
 
 cargo run -q --manifest-path "$root/Cargo.toml" -p art-bootstrap -- \
-  build-button-dex >"$output/support-dex.log" 2>&1
+  build-runtime-support-dex >"$output/support-dex.log" 2>&1
 cargo run -q --manifest-path "$root/Cargo.toml" -p art-bootstrap -- \
   audit-runtime-graphics-link-incremental >"$output/graphics-link.log" 2>&1
-cargo build -q --manifest-path "$root/Cargo.toml" -p darwin-art-host
+cargo build -q --manifest-path "$root/Cargo.toml" -p darwin-art-host --bin darwin-art-host
 
 for iteration in 1 2; do
   log="$output/chrome-$iteration.log"

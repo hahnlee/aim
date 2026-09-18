@@ -11,6 +11,14 @@ public final class SystemProcessEntryTest {
             if (!"initialization failed".equals(expected.getMessage())) throw expected;
         }
         if (run(3) != 70) throw new AssertionError("compositor failure accepted");
+        if (run(4) != 70) throw new AssertionError("Binder startup failure accepted");
+        if (run(5) != 70) throw new AssertionError("missing system Context accepted");
+        try {
+            run(6);
+            throw new AssertionError("compat initialization exception swallowed");
+        } catch (IllegalStateException expected) {
+            if (!"compat catalog failed".equals(expected.getMessage())) throw expected;
+        }
         System.out.println("system-process-entry: PASS (isolated JNI, no Probe classes)");
     }
 }

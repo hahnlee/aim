@@ -1,5 +1,6 @@
 #include "application_binding.h"
 #include "process_launch.h"
+#include "connection_death_jni.h"
 #include "../../../compat/binder/process_registry.h"
 #include "../wm/activity_launch_transaction.h"
 #include <cstdlib>
@@ -28,10 +29,11 @@ void Error(JNIEnv* env, const char* message) {
   if (type != nullptr) env->ThrowNew(type, message);
   env->DeleteLocalRef(type);
 }
-jstring Attach(JNIEnv* env, jclass, jobject application, jlong,
-               jstring reserved_process_name, jint expected_uid) {
-  const bool debug = std::getenv("DARWIN_ART_DEBUG_BINDER") != nullptr;
-  if (debug) std::cerr << "ART AMS: attachApplication entered\n";
+// Resolve the authenticated process and installed application independently
+// of scheduling bindApplication. AMS publishes this identity before the app
+// can execute Application.attachBaseContext and call back into system services.
+bool ResolveApplication(JNIEnv* env, jint expected_uid, jstring* package,
+                        jstring* record, jobject* info) {
   android::IPCThreadState* thread = android::IPCThreadState::self();
   const int32_t caller_pid = thread->getCallingPid();
   const int32_t caller_uid = thread->getCallingUid();
@@ -41,25 +43,49 @@ jstring Attach(JNIEnv* env, jclass, jobject application, jlong,
       !darwin_art_runtime_registered_process_identity(caller_pid, &registered) ||
       registered.uid != caller_uid) {
     Error(env, "Application attachment requires a registered Binder caller");
-    return nullptr;
+    return false;
   }
+  *package = env->NewStringUTF(registered.package);
+  *record = *package == nullptr ? nullptr : resolve_package(env, nullptr, *package);
+  if (*record == nullptr || env->ExceptionCheck()) return false;
+  jclass mapper = env->FindClass("dev/darwinart/runtime/pm/InstalledApplicationInfo");
+  jmethodID map = mapper == nullptr ? nullptr : env->GetStaticMethodID(mapper, "fromRecord",
+      "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/pm/ApplicationInfo;");
+  *info = map == nullptr ? nullptr
+                        : env->CallStaticObjectMethod(mapper, map, *package, *record);
+  if (*info == nullptr || env->ExceptionCheck()) return false;
+  jclass info_type = env->GetObjectClass(*info);
+  jfieldID uid = env->GetFieldID(info_type, "uid", "I");
+  const jint installed_uid = uid == nullptr ? -1 : env->GetIntField(*info, uid);
+  const bool isolated_uid = registered.uid >= 99000 && registered.uid <= 99999;
+  return uid != nullptr && !env->ExceptionCheck() && installed_uid >= 0
+      && (isolated_uid || installed_uid == registered.uid);
+}
+
+jstring ResolveAttachedPackage(JNIEnv* env, jclass, jint expected_uid) {
+  if (env->PushLocalFrame(32) < 0) return nullptr;
+  jstring package = nullptr;
+  jstring record = nullptr;
+  jobject info = nullptr;
+  if (!ResolveApplication(env, expected_uid, &package, &record, &info)) {
+    Error(env, "Registered process has no matching installed application");
+    package = nullptr;
+  }
+  return static_cast<jstring>(env->PopLocalFrame(package));
+}
+
+jstring Attach(JNIEnv* env, jclass, jobject application, jlong,
+               jstring reserved_process_name, jint expected_uid) {
+  const bool debug = std::getenv("DARWIN_ART_DEBUG_BINDER") != nullptr;
+  if (debug) std::cerr << "ART AMS: attachApplication entered\n";
   if (env->PushLocalFrame(64) < 0) return nullptr;
   jstring attached_package = nullptr;
   auto bind = [&]() -> bool {
-    jstring package = env->NewStringUTF(registered.package);
+    jstring package = nullptr;
+    jstring record = nullptr;
+    jobject info = nullptr;
+    if (!ResolveApplication(env, expected_uid, &package, &record, &info)) return false;
     attached_package = package;
-    jstring record = package == nullptr ? nullptr : resolve_package(env, nullptr, package);
-    if (record == nullptr || env->ExceptionCheck()) return false;
-    jclass mapper = env->FindClass("dev/darwinart/runtime/pm/InstalledApplicationInfo");
-    jmethodID map = mapper == nullptr ? nullptr : env->GetStaticMethodID(mapper, "fromRecord",
-        "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/pm/ApplicationInfo;");
-    jobject info = map == nullptr ? nullptr : env->CallStaticObjectMethod(mapper, map, package, record);
-    if (info == nullptr || env->ExceptionCheck()) return false;
-    jclass info_type = env->GetObjectClass(info);
-    jfieldID uid = env->GetFieldID(info_type, "uid", "I");
-    const jint installed_uid = uid == nullptr ? -1 : env->GetIntField(info, uid);
-    const bool isolated_uid = registered.uid >= 99000 && registered.uid <= 99999;
-    if (uid == nullptr || (!isolated_uid && installed_uid != registered.uid)) return false;
     const char* text = env->GetStringUTFChars(record, nullptr);
     if (text == nullptr) return false;
     std::string metadata(text);
@@ -118,14 +144,18 @@ void Launch(JNIEnv* env, jclass, jobject application, jstring package,
 bool RegisterActivityManager(JNIEnv* env, jclass endpoint, PackageResolver resolver) {
   if (endpoint == nullptr || resolver == nullptr || env->ExceptionCheck()) return false;
   JNINativeMethod methods[] = {
+      {const_cast<char*>("nativeResolveAttachedPackage"),
+       const_cast<char*>("(I)Ljava/lang/String;"),
+       reinterpret_cast<void*>(&ResolveAttachedPackage)},
       {const_cast<char*>("nativeAttach"),
        const_cast<char*>("(Landroid/os/IBinder;JLjava/lang/String;I)Ljava/lang/String;"),
        reinterpret_cast<void*>(&Attach)},
       {const_cast<char*>("nativeLaunch"),
        const_cast<char*>("(Landroid/os/IBinder;Ljava/lang/String;Ljava/lang/String;)V"),
        reinterpret_cast<void*>(&Launch)}};
-  if (env->RegisterNatives(endpoint, methods, 2) != JNI_OK) return false;
-  if (!RegisterProcessLauncher(env, endpoint)) return false;
+  if (env->RegisterNatives(endpoint, methods, 3) != JNI_OK) return false;
+  if (!RegisterProcessLauncher(env)) return false;
+  if (!RegisterConnectionDeathResources(env)) return false;
   resolve_package = resolver;
   return true;
 }

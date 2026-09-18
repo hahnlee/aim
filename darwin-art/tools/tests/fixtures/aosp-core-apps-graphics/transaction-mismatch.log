@@ -1,0 +1,3 @@
+ART SurfaceFlinger: source pixels transaction=7 layer=3 surface=8 size=720x1280 element=4 hash=mismatch
+ART SurfaceFlinger: central compose queued owner=7 client=4242 transaction=8 layers=1 target=906
+ART SurfaceFlinger: AppKit scanout drain surface=0x123 target=906 request=8

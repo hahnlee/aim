@@ -1,0 +1,26 @@
+diff --git a/core/jni/android_view_KeyCharacterMap.cpp b/core/jni/android_view_KeyCharacterMap.cpp
+--- a/core/jni/android_view_KeyCharacterMap.cpp
++++ b/core/jni/android_view_KeyCharacterMap.cpp
+@@ -69,11 +69,16 @@
+ 
+ jobject android_view_KeyCharacterMap_create(JNIEnv* env, int32_t deviceId,
+                                             std::unique_ptr<KeyCharacterMap> kcm) {
+-    NativeKeyCharacterMap* nativeMap = new NativeKeyCharacterMap(deviceId, std::move(kcm));
+-    if (!nativeMap) {
+-        return nullptr;
+-    }
++    std::unique_ptr<NativeKeyCharacterMap> nativeMap =
++            std::make_unique<NativeKeyCharacterMap>(deviceId, std::move(kcm));
+ 
+-    return env->NewObject(gKeyCharacterMapClassInfo.clazz, gKeyCharacterMapClassInfo.ctor,
+-                          reinterpret_cast<jlong>(nativeMap));
++    jobject result = env->NewObject(gKeyCharacterMapClassInfo.clazz,
++                                    gKeyCharacterMapClassInfo.ctor,
++                                    reinterpret_cast<jlong>(nativeMap.get()));
++    if (result == nullptr) {
++        // Preserve any pending Java exception; nativeMap owns the allocation on failure.
++        return nullptr;
++    }
++    nativeMap.release();
++    return result;
+ }

@@ -14,8 +14,9 @@ public final class ShortcutManagerEndpointTest {
 
     private static ApplicationProcessRegistry identifiedProcess() {
         ApplicationProcessRegistry processes = new ApplicationProcessRegistry();
-        processes.beginAttachment(42, 10042, new Binder(), 1L);
-        processes.identify(42, "org.example.app");
+        IBinder thread = new Binder();
+        processes.beginAttachment(42, 10042, thread, 1L);
+        processes.identify(42, 1L, thread, "org.example.app");
         processes.finishAttachment(42, 1L);
         Binder.setCallingPid(42);
         return processes;

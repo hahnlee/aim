@@ -5,7 +5,9 @@
 #include "main_loop.h"
 #include "process_registration.h"
 
+#include <cstdio>
 #include <iostream>
+#include <unistd.h>
 
 namespace darwin_art::framework::app {
 namespace {
@@ -34,7 +36,9 @@ int RunApplicationProcess(JNIEnv* env, art::Thread* self) {
   if (registration_status != 0) return registration_status;
   if (!StartApplicationBinderPool()) return 28;
   const auto exit = RunPreparedApplicationMainLoop(env);
-  std::cerr << "ART Android application main Looper failed at " << ExitName(exit) << ":\n";
+  std::fprintf(stderr,
+               "ART Android application main Looper failed pid=%d at %s:\n",
+               getpid(), ExitName(exit));
   if (env->ExceptionCheck()) {
     ReportPendingJavaException(env);
   } else {

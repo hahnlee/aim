@@ -1,6 +1,6 @@
 //! Profile process-instance and lease lifetime ownership, independent of IPC.
 use crate::process_incarnation::ProcessIncarnation;
-use crate::{ProfileError, registry::validate_package};
+use crate::{registry::validate_package, ProfileError};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -300,26 +300,20 @@ mod tests {
         let owner = registry
             .acquire(42, "android.system", ProcessIncarnation::fixture(1), true)
             .unwrap();
-        assert!(
-            registry
-                .acquire(
-                    42,
-                    "org.example.other",
-                    ProcessIncarnation::fixture(1),
-                    false
-                )
-                .is_err()
-        );
-        assert!(
-            registry
-                .acquire(42, "android.system", ProcessIncarnation::fixture(1), true)
-                .is_err()
-        );
-        assert!(
-            registry
-                .acquire(0, "android.system", ProcessIncarnation::fixture(1), false)
-                .is_err()
-        );
+        assert!(registry
+            .acquire(
+                42,
+                "org.example.other",
+                ProcessIncarnation::fixture(1),
+                false
+            )
+            .is_err());
+        assert!(registry
+            .acquire(42, "android.system", ProcessIncarnation::fixture(1), true)
+            .is_err());
+        assert!(registry
+            .acquire(0, "android.system", ProcessIncarnation::fixture(1), false)
+            .is_err());
         assert_eq!(
             registry.package(42, ProcessIncarnation::fixture(1)),
             Some("android.system")
@@ -377,10 +371,8 @@ mod tests {
             .acquire_with_uid(42, "org.example.app", incarnation, true, Some(99_042))
             .unwrap();
         assert_eq!(registry.android_uid(42, incarnation), Some(99_042));
-        assert!(
-            registry
-                .acquire_with_uid(42, "org.example.app", incarnation, false, Some(99_043),)
-                .is_err()
-        );
+        assert!(registry
+            .acquire_with_uid(42, "org.example.app", incarnation, false, Some(99_043),)
+            .is_err());
     }
 }

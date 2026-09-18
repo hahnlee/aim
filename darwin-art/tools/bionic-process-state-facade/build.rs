@@ -58,6 +58,7 @@ fn main() {
         "SDK lookup",
     );
     let shims = output_dir.join("shims.o");
+    let process_exit = output_dir.join("process_exit.o");
     let device_api_level = output_dir.join("device_api_level.o");
     let setjmp = output_dir.join("setjmp.o");
     let errno = output_dir.join("errno.o");
@@ -91,6 +92,7 @@ fn main() {
         );
     }
     compile("src/shims.c", &shims, &sdk, &["include"]);
+    compile("src/process_exit.c", &process_exit, &sdk, &["include"]);
     compile(
         "src/device_api_level.c",
         &device_api_level,
@@ -130,6 +132,7 @@ fn main() {
         .arg("rcs")
         .arg(&archive)
         .arg(&shims)
+        .arg(&process_exit)
         .arg(&device_api_level)
         .arg(&setjmp)
         .arg(&errno);
@@ -147,6 +150,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../bionic-syscall-facade/include/darwin_art_bionic_syscall.h");
     for source in [
         "src/shims.c",
+        "src/process_exit.c",
         "src/device_api_level.c",
         "upstream/get_device_api_level_inlines.h",
         "sources.lock",

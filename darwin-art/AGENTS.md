@@ -25,6 +25,9 @@ before work. Append verified progress before ending a work turn.
   must explicitly identify runtime modules versus test-only sources.
 - Do not modify APKs, reset profiles or add CPU fallback to make acceptance pass.
   Report physical interaction failures even when process-level tests pass.
+- User authorizes task-scoped app/runtime/management-daemon termination and
+  restart without repeated confirmation. Resolve exact owned targets first,
+  prefer graceful shutdown, preserve APKs/profiles and unrelated applications.
 - Latest model policy (2026-09-14): ordinary work and debugging stay with the
   main agent (user-preferred model: GPT-5.6 Sol). Delegate bounded implementation
   to Luna high; seek Astra for architecture reviews, consequential programming

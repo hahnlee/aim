@@ -130,9 +130,6 @@ int DropRuntimeElfGraph(void* value, void* context) {
   const DarwinArtElfStatus status = darwin_art_elf_graph_unload(&graph, &error);
   if (status == DARWIN_ART_ELF_OK && library != nullptr) {
     library->graph = nullptr;
-    if (library->fixture_graph) {
-      g_elf_fixture_namespace_lifecycle.store(4, std::memory_order_relaxed);
-    }
   }
   return status == DARWIN_ART_ELF_OK ? 0 : -1;
 }
@@ -187,15 +184,11 @@ int DropRuntimeDsoLifecycle(void* value, void*) {
   return 0;
 }
 
-int DropRuntimeProviderNamespace(void* value, void* context) {
-  auto* library = static_cast<ElfLibrary*>(context);
+int DropRuntimeProviderNamespace(void* value, void*) {
   if (value == nullptr) return -1;
   const auto status = darwin_art_bionic_namespace_teardown(
       static_cast<DarwinArtBionicNamespace*>(value));
   if (status != DARWIN_ART_BIONIC_NAMESPACE_OK) return -1;
-  if (library != nullptr && library->fixture_graph) {
-    g_elf_fixture_namespace_lifecycle.store(5, std::memory_order_relaxed);
-  }
   darwin_art_bionic_namespace_destroy(
       static_cast<DarwinArtBionicNamespace*>(value));
   return 0;

@@ -36,6 +36,8 @@ import dev.darwinart.runtime.uimode.UiModeManagerEndpoint;
 import dev.darwinart.runtime.user.UserManagerEndpoint;
 import dev.darwinart.runtime.usage.UsageStatsManagerEndpoint;
 import dev.darwinart.runtime.wm.ActivityTaskManagerEndpoint;
+import dev.darwinart.runtime.wm.DesktopRootEndpoint;
+import dev.darwinart.runtime.wm.DesktopRootRegistry;
 import dev.darwinart.runtime.wm.DesktopWindowMetadataEndpoint;
 import dev.darwinart.runtime.wm.DesktopWindowMetadataRegistry;
 import dev.darwinart.runtime.wm.WindowManagerEndpoint;
@@ -56,9 +58,12 @@ public final class SystemServiceFactory {
         services.put("activity", activity);
         services.put("activity_task", new ActivityTaskManagerEndpoint(packages, processes));
         services.put("display", new DisplayManagerEndpoint());
-        services.put("window", new WindowManagerEndpoint(windowMetadata));
+        WindowManagerEndpoint windowManager = new WindowManagerEndpoint(processes, windowMetadata);
+        DesktopRootRegistry desktopRoots = windowManager.createDesktopRootRegistry();
+        services.put("window", windowManager);
         services.put("darwin.window_metadata",
                 new DesktopWindowMetadataEndpoint(processes, windowMetadata));
+        services.put("darwin.desktop_root", new DesktopRootEndpoint(processes, desktopRoots));
         services.put("user", new UserManagerEndpoint());
         services.put("content", new ContentServiceEndpoint());
         services.put("clipboard", new ClipboardServiceEndpoint());

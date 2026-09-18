@@ -19,6 +19,7 @@ unwind_provider="$project_root/_build/android-unwind-provider/libdarwin_art_andr
   exit 69
 }
 native_baseline="$(bash "$project_root/tools/prepare-runtime-system-root.sh")"
+cargo run -q --manifest-path "$project_root/Cargo.toml" -p art-bootstrap -- build-runtime-payload-incremental
 
 [[ "$app" == "$project_root/_build/Darwin ART Manager.app" ]] || {
   echo "refusing unexpected manager output: $app" >&2
@@ -100,7 +101,6 @@ copy_file "$project_root/_build/android16-framework-compat/framework-compat.jar"
   _build/android16-framework-compat/framework-compat.jar
 copy_file "$project_root/_build/bootclasspath/core-icu4j-api36.jar" \
   _build/bootclasspath/core-icu4j-api36.jar
-copy_file "$project_root/_build/button-dex/dex/classes.dex" _build/button-dex/dex/classes.dex
 copy_file "$project_root/_build/runtime-support-dex/dex/classes.dex" _build/runtime-support-dex/dex/classes.dex
 copy_tree "$project_root/_build/icu-runtime-adapters/runtime" _build/icu-runtime-adapters/runtime
 copy_file "$project_root/_prebuilt/android-16/bootclasspath/core-libart.jar" \

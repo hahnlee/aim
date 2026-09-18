@@ -47,13 +47,109 @@ fn visible_duration_matches_surface_contract() {
         heap_initial_bytes: 0,
         heap_maximum_bytes: 0,
         visible_seconds: 86_400.001,
-        terminate_android_process: false,
+        execution_lifetime: ExecutionLifetime::ReusableSession,
     };
     assert!(matches!(
         run(&options),
         Err(HostError::InvalidVisibleSeconds(_))
     ));
+    assert!(!options.is_android_process());
+    options.execution_lifetime = ExecutionLifetime::AndroidProcess;
+    assert!(options.is_android_process());
     options.visible_seconds = -0.001;
+    assert!(matches!(
+        run(&options),
+        Err(HostError::InvalidVisibleSeconds(_))
+    ));
+}
+
+#[test]
+fn pre_exit_verification_requires_process_lifetime_before_runtime_loading() {
+    let options = RunOptions {
+        library: PathBuf::from("must-not-load-this-runtime"),
+        core_oj_jar: PathBuf::new(),
+        core_libart_jar: PathBuf::new(),
+        framework_jar: PathBuf::new(),
+        core_icu4j_jar: PathBuf::new(),
+        app_dex: PathBuf::new(),
+        heap_initial_bytes: 0,
+        heap_maximum_bytes: 0,
+        visible_seconds: 0.0,
+        execution_lifetime: ExecutionLifetime::ReusableSession,
+    };
+    let completion = ProcessCompletionObserver::new(|_| panic!("must not run"));
+    assert!(matches!(
+        run_with_completion(&options, completion.clone()),
+        Err(HostError::HostService(message)) if message.contains("AndroidProcess")
+    ));
+    assert!(matches!(
+        run_with_execution_image_and_completion(
+            &options,
+            std::path::Path::new("must-not-load-this-fixture"),
+            "run",
+            "shutdown",
+            completion,
+        ),
+        Err(HostError::HostService(message)) if message.contains("AndroidProcess")
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hosted_reusable_execution_rejects_before_loading_either_image() {
+    let mut options = RunOptions {
+        library: PathBuf::from("must-not-load-this-runtime"),
+        core_oj_jar: PathBuf::new(),
+        core_libart_jar: PathBuf::new(),
+        framework_jar: PathBuf::new(),
+        core_icu4j_jar: PathBuf::new(),
+        app_dex: PathBuf::new(),
+        heap_initial_bytes: 0,
+        heap_maximum_bytes: 0,
+        visible_seconds: 0.0,
+        execution_lifetime: ExecutionLifetime::ReusableSession,
+    };
+    for duration in [0.0, 1.0] {
+        options.visible_seconds = duration;
+        for result in [
+            run(&options),
+            run_with_execution_image(
+                &options,
+                std::path::Path::new("must-not-load-this-fixture"),
+                "run",
+                "shutdown",
+            ),
+        ] {
+            assert!(matches!(
+                result,
+                Err(HostError::UnsupportedExecutionLifetime(
+                    ExecutionLifetime::ReusableSession
+                ))
+            ));
+        }
+        // Both observer APIs retain their earlier lifetime-validation error;
+        // they must not invoke assertions or silently promote process lifetime.
+        let completion = ProcessCompletionObserver::new(|_| panic!("must not run"));
+        assert!(matches!(
+            run_with_completion(&options, completion.clone()),
+            Err(HostError::HostService(message)) if message.contains("AndroidProcess")
+        ));
+        assert!(matches!(
+            run_with_execution_image_and_completion(
+                &options,
+                std::path::Path::new("must-not-load-this-fixture"),
+                "run",
+                "shutdown",
+                completion,
+            ),
+            Err(HostError::HostService(message)) if message.contains("AndroidProcess")
+        ));
+    }
+    let diagnostic =
+        HostError::UnsupportedExecutionLifetime(ExecutionLifetime::ReusableSession).to_string();
+    assert!(diagnostic.contains("pump retirement"));
+    assert!(diagnostic.contains("owned native-task settlement"));
+    options.visible_seconds = f64::NAN;
     assert!(matches!(
         run(&options),
         Err(HostError::InvalidVisibleSeconds(_))

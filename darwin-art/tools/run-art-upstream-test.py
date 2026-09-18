@@ -2123,7 +2123,9 @@ def main() -> int:
             dm_primary_vdex, dex2oat_dm_file, runtime_dm_file,
         ] if dm_invocations else []
         host_arguments = [
-            str(root / "target/debug/darwin-art-host"), "--window-seconds", "0",
+            str(root / "target/debug/darwin-art-fixture-runner"),
+            "--fixture-image", str(root / "_build/native-fixtures/graphics/libdarwin_art_fixture.dylib"),
+            "--window-seconds", "0",
             str(root / "_build/runtime-graphics-link-probe/libdarwin_art_runtime_graphics.dylib"),
             str(root / "_build/android16-core-oj-compat/core-oj-compat.jar"),
             str(root / "_prebuilt/android-16/bootclasspath/core-libart.jar"),
@@ -2209,6 +2211,13 @@ def main() -> int:
                         continue
                     exported_symbols.add(match.group(1))
             export_file = output.with_name(output.name + ".exports")
+            owned_hooks = {
+                match.group(1) for match in definition_pattern.finditer(native_capability_text)
+            }
+            loader_flags = [
+                f"-DDARWIN_ART_TEST_HAS_{hook.decode().upper()}"
+                for hook in (b"JNI_OnLoad", b"JNI_OnUnload") if hook in owned_hooks
+            ]
             export_file.write_text(
                 "\n".join(f"_{name}" for name in sorted(
                     symbol.decode() for symbol in exported_symbols)) + "\n",
@@ -2227,6 +2236,7 @@ def main() -> int:
                 "-Wl,-exported_symbols_list," + str(export_file),
                 *(f"-Wl,-rpath,{path}" for path in rpaths),
                 "-pthread",
+                *loader_flags,
                 "-DART_PAGE_SIZE_AGNOSTIC", "-DBUILDING_LIBART",
                 "-DNDEBUG",
                 "-DART_DEFAULT_GC_TYPE_IS_CMS", "-DART_USE_READ_BARRIER",
@@ -2286,8 +2296,9 @@ def main() -> int:
                 "-idirafter", str(ndk_include),
                 *([str(loader_source)] if include_loader else []),
                 *map(str, sources),
-                str(root / "_build/foundation/libandroid-base-darwin.a"),
                 *map(str, dependencies),
+                "-Wl,-rpath," + str(root / "_build/native-fixtures/graphics"),
+                str(root / "_build/native-fixtures/graphics/libdarwin_art_fixture.dylib"),
                 str(root / "_build/runtime-graphics-link-probe/libdarwin_art_runtime_graphics.dylib"),
                 "-o", str(output),
                 ])

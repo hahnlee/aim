@@ -19,7 +19,7 @@
 //! same fixed-size shape as a ready request: `version | token[16] |
 //! lost_mask[u32]`.
 
-use crate::{ProfileError, registry::validate_package};
+use crate::{registry::validate_package, ProfileError};
 use std::ffi::OsString;
 use std::fmt;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};

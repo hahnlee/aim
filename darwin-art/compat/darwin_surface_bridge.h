@@ -4,13 +4,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "filesystem/document_panel.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 // Opaque owner of one persistent NSWindow, CAMetalLayer, IOSurface, and Metal
 // texture. AppKit lifecycle/presentation calls require the macOS main thread;
-// pointer/key packet dequeue is worker-safe and does not touch AppKit objects.
+// Input sink callbacks are worker-safe and do not touch AppKit objects.
 typedef struct DarwinArtSurface DarwinArtSurface;
 typedef struct DarwinArtGpuFrame DarwinArtGpuFrame;
 
@@ -71,14 +73,7 @@ typedef enum DarwinArtPointerFlags {
   DARWIN_ART_POINTER_FLAG_MOUSE = 1u << 0,
 } DarwinArtPointerFlags;
 
-typedef struct DarwinArtPointerEvent {
-  uint32_t action;
-  float x;
-  float y;
-} DarwinArtPointerEvent;
-
 // Versioned, pointer-free event packet used by the Rust ingress. The legacy
-// three-field packet remains exported for older probes, while new hosts get
 // ordering and Android timing metadata without crossing JNI or borrowing an
 // AppKit object.
 typedef struct DarwinArtPointerEventV2 {
@@ -119,6 +114,35 @@ typedef struct DarwinArtKeyEventV1 {
   uint32_t unicode_char;
 } DarwinArtKeyEventV1;
 
+// A surface has exactly one immutable input sink at a time. The provider
+// retains sink->context once when a binding is published and releases it only
+// after the binding and every in-flight callback have retired. Callbacks are
+// invoked outside the surface lock and must not retain AppKit objects.
+typedef enum DarwinArtSurfaceInputResult {
+  DARWIN_ART_SURFACE_INPUT_NO_SINK = 0,
+  DARWIN_ART_SURFACE_INPUT_QUEUED = 1,
+  DARWIN_ART_SURFACE_INPUT_NO_TARGET = 2,
+  DARWIN_ART_SURFACE_INPUT_BACKPRESSURED = 3,
+  DARWIN_ART_SURFACE_INPUT_INVALID = 4,
+} DarwinArtSurfaceInputResult;
+
+typedef DarwinArtSurfaceInputResult (*DarwinArtSurfacePointerInputCallback)(
+    void* context, const DarwinArtPointerEventV2* event);
+typedef DarwinArtSurfaceInputResult (*DarwinArtSurfaceKeyInputCallback)(
+    void* context, const DarwinArtKeyEventV1* event);
+typedef void (*DarwinArtSurfaceInputContextRetainCallback)(void* context);
+typedef void (*DarwinArtSurfaceInputContextReleaseCallback)(void* context);
+
+typedef struct DarwinArtSurfaceInputSink {
+  uint32_t version;
+  uint32_t size;
+  void* context;
+  DarwinArtSurfaceInputContextRetainCallback retain_context;
+  DarwinArtSurfaceInputContextReleaseCallback release_context;
+  DarwinArtSurfacePointerInputCallback pointer;
+  DarwinArtSurfaceKeyInputCallback key;
+} DarwinArtSurfaceInputSink;
+
 // Creates persistent Apple graphics objects. The returned handle owns them
 // until darwin_art_surface_destroy(). Returns null on failure and writes the
 // reason to out_result when it is non-null.
@@ -144,6 +168,14 @@ bool darwin_art_surface_get_logical_size(
     uint32_t* width,
     uint32_t* height);
 
+// Explicit service-ready attachment for an existing local display. No service
+// startup/retry occurs here. Android extent is independent of AppKit points.
+DarwinArtSurfaceResult darwin_art_surface_attach_output(
+    DarwinArtSurface* surface, const char* ready_endpoint,
+    uint32_t android_width, uint32_t android_height);
+DarwinArtSurfaceResult darwin_art_surface_configure_display_extent(
+    DarwinArtSurface* surface, uint32_t android_width, uint32_t android_height);
+
 DarwinArtSurfaceResult darwin_art_surface_set_title(
     DarwinArtSurface* surface,
     const char* title);
@@ -157,16 +189,6 @@ DarwinArtSurfaceResult darwin_art_surface_set_active_title(const char* title);
 DarwinArtSurfaceResult darwin_art_surface_set_active_title_utf16(
     const uint16_t* title,
     size_t length);
-
-// Presents the native macOS document picker on the AppKit main thread.
-// The returned UTF-8 filesystem path is allocated with malloc and must be
-// released with darwin_art_host_document_path_free(). A null return means
-// cancellation or an invalid calling thread. Android code never sees this
-// host path directly; the runtime stages it behind a content:// provider.
-char* darwin_art_host_open_document(const char* mime_type);
-char* darwin_art_host_save_document(const char* mime_type,
-                                    const char* suggested_name);
-void darwin_art_host_document_path_free(char* path);
 
 // Waits for the previous GPU presentation to finish, then locks the IOSurface
 // for a CPU producer. Only one producer mapping may be active per surface.
@@ -201,7 +223,7 @@ DarwinArtSurfaceResult darwin_art_surface_present(
 DarwinArtSurfaceResult darwin_art_surface_present_async(
     DarwinArtSurface* surface);
 
-// Binds the owner Looper wake token to a surface's AppKit input mailbox.
+// Binds the owner Looper wake token to a surface's AppKit input source.
 // Setting a null callback unbinds it before the owner/runtime is torn down.
 // The callback may be invoked from AppKit event methods and must be
 // non-blocking and thread-safe.
@@ -209,6 +231,14 @@ DarwinArtSurfaceResult darwin_art_surface_set_owner_wake(
     DarwinArtSurface* surface,
     DarwinArtSurfaceOwnerWakeCallback callback,
     void* context);
+
+// Installs or removes the one retained input sink. Passing null removes the
+// current sink immediately; already snapshotted callbacks may finish later.
+// Context release is deferred until those snapshots retire; this does not wait.
+// No fallback mailbox exists: an event with no sink or a terminal sink status
+// is not replayed by the provider.
+DarwinArtSurfaceResult darwin_art_surface_set_input_sink(
+    DarwinArtSurface* surface, const DarwinArtSurfaceInputSink* sink);
 
 // GPU-only frame path. The returned frame wraps the CAMetalLayer drawable
 // directly; callers must submit it with darwin_art_surface_gpu_end(). No
@@ -293,29 +323,6 @@ int32_t darwin_art_appkit_pump_events(double seconds);
 // Worker-safe close-state snapshot. This never touches AppKit and is intended
 // for the ART owner while the process main actor owns event pumping.
 bool darwin_art_surface_close_requested(DarwinArtSurface* surface);
-
-// Removes the oldest pointer event captured by the surface's NSView mailbox.
-// This dequeue is safe from a non-main worker; it touches no AppKit object.
-// Event
-// coordinates are expressed in backing pixels, matching the Android render
-// target even when the host window uses a Retina content scale. Returns false
-// when the queue is empty or either argument is null.
-bool darwin_art_surface_next_pointer_event(
-    DarwinArtSurface* surface,
-    DarwinArtPointerEvent* out_event);
-
-bool darwin_art_surface_next_pointer_event_v2(
-    DarwinArtSurface* surface,
-    DarwinArtPointerEventV2* out_event);
-
-bool darwin_art_surface_next_key_event_v1(
-    DarwinArtSurface* surface,
-    DarwinArtKeyEventV1* out_event);
-
-// Atomically observes the AppKit mailbox and clears Android's
-// probablyHasInput hint only while it is empty. A producer that enqueues after
-// this check publishes a new hint after the mailbox mutex is released.
-bool darwin_art_surface_clear_input_hint_if_empty(DarwinArtSurface* surface);
 
 // Waits for the most recently submitted command buffer, closes the window,
 // and releases all owned Apple objects. Calls from an ART worker are

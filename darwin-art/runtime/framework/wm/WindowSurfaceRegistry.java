@@ -21,6 +21,21 @@ final class WindowSurfaceRegistry {
     private final HashMap<IBinder, WindowManager.LayoutParams> attributes = new HashMap<>();
     private final HashMap<IBinder, Rect> frames = new HashMap<>();
 
+    static final class RelayoutPublication {
+        final Parcelable result;
+        final Rect frame;
+        final int viewVisibility;
+        final WindowManager.LayoutParams effectiveAttributes;
+
+        RelayoutPublication(Parcelable result, Rect frame, int viewVisibility,
+                WindowManager.LayoutParams effectiveAttributes) {
+            this.result = result;
+            this.frame = new Rect(frame);
+            this.viewVisibility = viewVisibility;
+            this.effectiveAttributes = effectiveAttributes == null ? null : copyOf(effectiveAttributes);
+        }
+    }
+
     WindowSurfaceRegistry(DesktopWindowMetadataRegistry registry) {
         metadata = registry;
     }
@@ -32,7 +47,7 @@ final class WindowSurfaceRegistry {
         metadata.update(pid, window, attrs, visibility);
     }
 
-    synchronized Parcelable relayout(int pid, IBinder window, WindowManager.LayoutParams attrs,
+    synchronized RelayoutPublication relayout(int pid, IBinder window, WindowManager.LayoutParams attrs,
             int requestedWidth, int requestedHeight, int visibility, int syncSequenceId) {
         if (window == null) throw new IllegalArgumentException("relayout requires IWindow");
         if (attrs != null) attributes.put(window, copyOf(attrs));
@@ -77,20 +92,30 @@ final class WindowSurfaceRegistry {
             transaction.setPosition(producer, frame.left, frame.top)
                     .setLayer(producer, layer).apply();
         }
-        return createRelayoutResult(producer, frame, syncSequenceId);
+        return new RelayoutPublication(createRelayoutResult(producer, frame, syncSequenceId),
+                frame, visibility, layout);
+    }
+
+    synchronized WindowManager.LayoutParams effectiveAttributes(IBinder window,
+            WindowManager.LayoutParams requested) {
+        WindowManager.LayoutParams effective = requested == null ? attributes.get(window) : requested;
+        return effective == null ? null : copyOf(effective);
     }
 
     synchronized void remove(int pid, IBinder window) {
         metadata.remove(pid, window);
-        SurfaceControl surface = surfaces.remove(window);
+        SurfaceControl surface = surfaces.get(window);
+        if (surface != null && surface.isValid()) {
+            try (SurfaceControl.Transaction transaction = new SurfaceControl.Transaction()) {
+                transaction.reparent(surface, null).apply();
+            }
+            surface.release();
+        }
+        // Do not lose the original layer if transaction/release throws.
+        surfaces.remove(window);
         sizes.remove(window);
         attributes.remove(window);
         frames.remove(window);
-        if (surface == null || !surface.isValid()) return;
-        try (SurfaceControl.Transaction transaction = new SurfaceControl.Transaction()) {
-            transaction.reparent(surface, null).apply();
-        }
-        surface.release();
     }
 
     synchronized Rect frame(IBinder window) {

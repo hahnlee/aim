@@ -14,7 +14,12 @@ pub(crate) fn print_help() {
     println!("  build-androidfw  build the complete Android resource framework archive");
     println!("  build-resource-jni  build Android's four complete resource JNI registrars");
     println!("  build-android-util-log  build Android's complete android.util.Log JNI owner");
-    println!("  build-android-runtime-host  own ART's process JavaVM for AndroidRuntime callbacks");
+    println!(
+        "  build-framework-java-vm-provider  build the graphics-independent process JavaVM seam"
+    );
+    println!(
+        "  build-android-runtime-host  audit upstream HostRuntime and JavaVM ownership fixtures"
+    );
     println!("  build-binder-jni  build pinned AOSP Binder/Parcel JNI and RPC boundary archives");
     println!("  build-libcore-linux  build the complete libcore.io.Linux Darwin registrar");
     println!("  build-os-constants  preserve all Android/Linux constants on Darwin");
@@ -40,6 +45,15 @@ pub(crate) fn print_help() {
     println!("  build-elf-jni-dex  add the isolated Android ELF JNI fixture class");
     println!("  build-network-dex  add the isolated Android network JNI fixture class");
     println!("  build-button-dex  compile the isolated real android.widget.Button probe");
+    println!(
+        "  build-runtime-support-classes  compile explicit production Java inputs without fixture outputs"
+    );
+    println!("  build-dex-inspector  build the independent pinned AOSP DEX verifier");
+    println!("  build-runtime-support-dex  compile and verify production-only Android support DEX");
+    println!("  build-runtime-support-dex-incremental  refresh the production support DEX graph");
+    println!(
+        "  build-runtime-payload-incremental  refresh native runtime and production support DEX"
+    );
     println!("  build-runtime-platform  compile ART host platform sources as Mach-O");
     println!("  build-runtime-core  apply Darwin monitor patches and compile runtime core");
     println!("  probe-park  stress Darwin's pthread-backed LockSupport primitive");
@@ -64,10 +78,22 @@ pub(crate) fn print_help() {
     println!(
         "  build-runtime-graphics-phase-probe  compile the cached graphics presentation phase"
     );
-    println!("  build-runtime-graphics-input-probe  compile the cached graphics input probe");
-    println!("  build-runtime-graphics-state-probe  compile the graphics state owner probe");
     println!(
-        "  build-runtime-graphics-session-probe  compile the opaque graphics session ABI probe"
+        "  build-runtime-graphics-probe  compile the standalone Android graphics probe object"
+    );
+    println!("  build-runtime-graphics-input-probe  compile the cached graphics input probe");
+    println!("  build-runtime-graphics-state  compile the production graphics state owner");
+    println!("  build-runtime-graphics-session        compile the opaque graphics session ABI");
+    println!("  build-runtime-native-registration    compile Android/ART native registration");
+    println!(
+        "  build-runtime-native-core            compile shared product core without fixture/platform audits"
+    );
+    println!(
+        "  build-runtime-fixture-client         link headless tests against the product runtime"
+    );
+    println!("  build-binder-recipient-test          build isolated genuine ART/BinderProxy JNI-list fixture");
+    println!(
+        "  build-runtime-graphics-fixture-client link graphics tests against the product runtime"
     );
     println!("  build-runtime-jni-acceptance-probe  compile the DEX/JNI acceptance phase");
     println!("  build-runtime-app-bootstrap-probe  compile the detached app class bootstrap phase");

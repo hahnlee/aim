@@ -21,8 +21,6 @@ void* darwin_art_bionic_binary128_conversion_resolve(const char* soname,
                                                       const char* symbol,
                                                       const char* version);
 int darwin_art_bionic_binary128_conversion_capability(const char* capability);
-void darwin_art_bionic_binary128_conversion_test_prepare_host_state(void);
-int darwin_art_bionic_binary128_conversion_test_host_state_is_preserved(void);
 
 #ifdef __cplusplus
 }

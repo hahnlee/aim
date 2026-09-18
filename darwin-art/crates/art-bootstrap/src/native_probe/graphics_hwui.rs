@@ -115,6 +115,80 @@ pub(crate) fn build_runtime_graphics_input_probe(root: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn build_runtime_event_ingress(root: &Path) -> Result<()> {
+    let output = env::var_os("DARWIN_ART_NATIVE_EVENT_INGRESS_OBJECT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("_build/runtime-embedding/darwin_art_event_ingress.cc.o"));
+    let build_dir = output
+        .parent()
+        .ok_or_else(|| format!("event ingress output has no parent: {}", output.display()))?;
+    let includes = [
+        root.join("include"),
+        root.join("compat"),
+        root.join("_build/runtime-arm64/generated"),
+        root.join("_build/runtime-common/patched-source/runtime"),
+        root.join("_build/foundation/patched-source/libartbase"),
+        root.join("_aosp/art/libartbase"),
+        root.join("_aosp/art/libdexfile"),
+        root.join("_aosp/art/libelffile"),
+        root.join("_aosp/art/cmdline"),
+        root.join("_aosp/art/libnativebridge/include"),
+        root.join("_aosp/art/runtime"),
+        root.join("_aosp/art/runtime/base"),
+        root.join("_aosp/system/libbase/include"),
+        root.join("_aosp/external/tinyxml2"),
+        root.join("_aosp/libnativehelper/include_jni"),
+        root.join("_aosp/libnativehelper/header_only_include"),
+        root.join("_aosp/libnativehelper/platform_header_only_include"),
+        root.join("tools/bionic-provider-namespace/include"),
+        PathBuf::from("/opt/homebrew/include"),
+    ];
+    let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let object = compile_runtime_event_ingress(root, build_dir, &include_refs)?;
+    if object != output {
+        fs::copy(&object, &output)?;
+    }
+    println!("build-runtime-event-ingress: {}", output.display());
+    Ok(())
+}
+
+pub(crate) fn build_runtime_vsync_source(root: &Path) -> Result<()> {
+    let output = env::var_os("DARWIN_ART_NATIVE_VSYNC_SOURCE_OBJECT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("_build/runtime-embedding/darwin_art_vsync_source.cc.o"));
+    let build_dir = output
+        .parent()
+        .ok_or_else(|| format!("vsync source output has no parent: {}", output.display()))?;
+    let includes = [
+        root.join("include"),
+        root.join("compat"),
+        root.join("_build/runtime-arm64/generated"),
+        root.join("_build/runtime-common/patched-source/runtime"),
+        root.join("_build/foundation/patched-source/libartbase"),
+        root.join("_aosp/art/libartbase"),
+        root.join("_aosp/art/libdexfile"),
+        root.join("_aosp/art/libelffile"),
+        root.join("_aosp/art/cmdline"),
+        root.join("_aosp/art/libnativebridge/include"),
+        root.join("_aosp/art/runtime"),
+        root.join("_aosp/art/runtime/base"),
+        root.join("_aosp/system/libbase/include"),
+        root.join("_aosp/external/tinyxml2"),
+        root.join("_aosp/libnativehelper/include_jni"),
+        root.join("_aosp/libnativehelper/header_only_include"),
+        root.join("_aosp/libnativehelper/platform_header_only_include"),
+        root.join("tools/bionic-provider-namespace/include"),
+        PathBuf::from("/opt/homebrew/include"),
+    ];
+    let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let object = compile_runtime_vsync_source(root, build_dir, &include_refs)?;
+    if object != output {
+        fs::copy(&object, &output)?;
+    }
+    println!("build-runtime-vsync-source: {}", output.display());
+    Ok(())
+}
+
 pub(crate) fn build_runtime_hwui_probe(root: &Path) -> Result<()> {
     let output = env::var_os("DARWIN_ART_NATIVE_OUTPUT")
         .map(PathBuf::from)

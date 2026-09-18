@@ -5,7 +5,7 @@
 //! by the caller.
 
 use crate::registry::validate_package;
-use crate::{ProfileError, protocol};
+use crate::{protocol, ProfileError};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;

@@ -84,8 +84,17 @@ impl RuntimeInstance {
         self.token
     }
 
-    fn launch_request(&self) -> Result<StartRuntimeRequest, ProfileError> {
+    fn launch_request(
+        &self,
+        peer_pid: u32,
+        peer_incarnation: ProcessIncarnation,
+    ) -> Result<StartRuntimeRequest, ProfileError> {
         let data = self.lock_data()?;
+        if data.pid != Some(peer_pid) || data.incarnation != Some(peer_incarnation) {
+            return Err(invalid(
+                "runtime launch template requester is not its exact child",
+            ));
+        }
         if matches!(
             data.status,
             RuntimeStatus::Failed { .. } | RuntimeStatus::Exited
@@ -274,7 +283,7 @@ impl RuntimeInstance {
                     let incarnation = data
                         .incarnation
                         .ok_or_else(|| invalid("ready runtime has no process identity"))?;
-                    let current = ProcessIncarnation::read(pid)?;
+                    let current = ProcessIncarnation::read_live(pid)?;
                     if current != incarnation {
                         return Err(invalid("ready runtime process identity changed"));
                     }
@@ -472,7 +481,11 @@ impl RuntimeServiceState {
     /// processes must be derived from the single authenticated system runtime
     /// configuration instead of accepting an executable or environment from
     /// Java framework policy.
-    pub(crate) fn system_launch_template(&self) -> Result<StartRuntimeRequest, ProfileError> {
+    pub(crate) fn system_launch_template(
+        &self,
+        peer_pid: u32,
+        peer_incarnation: ProcessIncarnation,
+    ) -> Result<StartRuntimeRequest, ProfileError> {
         let instances = self
             .instances
             .lock()
@@ -482,7 +495,7 @@ impl RuntimeServiceState {
             .cloned()
             .ok_or_else(|| invalid("system runtime launch template is unavailable"))?;
         drop(instances);
-        instance.launch_request()
+        instance.launch_request(peer_pid, peer_incarnation)
     }
 }
 

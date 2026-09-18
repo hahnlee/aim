@@ -16,18 +16,12 @@ impl Registry {
         self.lookup(key)?.max_threads().map_err(Error::Connection)
     }
 
-    pub(crate) fn enter_idle_wait(&self, key: &Key, thread_id: u64) -> Result<bool, Error> {
-        let connection = self.lookup(key)?;
-        let thread = connection.thread(thread_id).map_err(Error::Connection)?;
-        let thread = thread.lock().map_err(|_| Error::Poisoned)?;
-        connection
-            .enter_idle_wait(&thread)
-            .map_err(Error::Connection)
-    }
-
-    pub(crate) fn leave_idle_wait(&self, key: &Key, thread_id: u64) -> Result<(), Error> {
-        self.lookup(key)?
-            .leave_idle_wait(thread_id)
+    pub(crate) fn prepare_thread_work_wait(
+        &self,
+        key: &Key,
+        thread_id: u64,
+    ) -> Result<connection::work_wait::ThreadWorkWait, Error> {
+        connection::work_wait::ThreadWorkWait::new(self.lookup(key)?, thread_id)
             .map_err(Error::Connection)
     }
 

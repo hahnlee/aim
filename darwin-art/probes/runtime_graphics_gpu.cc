@@ -8,7 +8,8 @@
 #include "darwin_surface_bridge.h"
 #include "mirror/throwable.h"
 #include "runtime_graphics_gpu.h"
-#include "runtime_graphics_state.h"
+#include "../runtime/embedding/graphics_state.h"
+#include "graphics_fixture_state.h"
 #include "runtime_frame_probe.h"
 #include "runtime_hwui_probe.h"
 #include "thread-current-inl.h"
@@ -546,7 +547,8 @@ void debug_product_view_root(JNIEnv* env, jobject view) {
 
 int prepare_gpu_surface(GraphicsState* state, jint width, jint height) {
   if (state == nullptr) return 1;
-  if (state->gpu_surface != nullptr) return 0;
+  auto* fixture = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state);
+  if (fixture->gpu_surface != nullptr) return 0;
   const bool run_apk_app = std::getenv("DARWIN_ART_APK_APP_PACKAGE") != nullptr;
   const char* app_label = std::getenv("DARWIN_ART_APK_WINDOW_TITLE");
   if (app_label == nullptr) app_label = std::getenv("DARWIN_ART_APK_APP_LABEL");
@@ -560,18 +562,25 @@ int prepare_gpu_surface(GraphicsState* state, jint width, jint height) {
       .scale_to_display = run_apk_app,
   };
   DarwinArtSurfaceResult result = DARWIN_ART_SURFACE_OK;
-  state->gpu_surface = darwin_art_surface_create(&info, &result);
-  if (state->gpu_surface == nullptr) {
+  fixture->gpu_surface = darwin_art_surface_create(&info, &result);
+  if (fixture->gpu_surface == nullptr) {
     std::cerr << "ART HWUI GPU: surface initialization failed status="
               << result << "\n";
     return static_cast<int>(result);
   }
-  darwin_art_surface_set_active_gpu(state->gpu_surface);
+  // This fixture explicitly owns raw host-event queuing/manual dispatch.
+  // Production surfaces install the Android ingress sink through the Rust
+  // owner and never consume this retained fixture queue.
+  if (!darwin_art_graphics_fixture::install_surface_input_sink(state)) {
+    std::cerr << "ART HWUI GPU: fixture input sink installation failed\n";
+    return DARWIN_ART_SURFACE_ALLOCATION_FAILED;
+  }
+  darwin_art_surface_set_active_gpu(fixture->gpu_surface);
   // This is the display/HWC creation boundary. Configure the stable output
   // extent once here; individual BLAST queues retain their own dimensions.
   darwin_art::ConfigureDarwinAngleDisplayTarget(width, height);
   const uint32_t surface_id =
-      darwin_art_surface_gpu_iosurface_id(state->gpu_surface);
+      darwin_art_surface_gpu_iosurface_id(fixture->gpu_surface);
   if (surface_id != 0) {
     const std::string encoded = std::to_string(surface_id);
     setenv("DARWIN_ART_HOST_IOSURFACE_ID", encoded.c_str(), 1);
@@ -584,18 +593,23 @@ int prepare_gpu_surface(GraphicsState* state, jint width, jint height) {
 }
 
 int refresh_gpu_surface_identity(GraphicsState* state) {
-  if (state == nullptr || state->gpu_surface == nullptr) return 1;
+  if (state == nullptr) return 1;
+  auto* fixture = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state);
+  if (fixture->gpu_surface == nullptr) return 1;
   const char* app_label = std::getenv("DARWIN_ART_APK_WINDOW_TITLE");
   if (app_label == nullptr) app_label = std::getenv("DARWIN_ART_APK_APP_LABEL");
   if (app_label == nullptr || app_label[0] == '\0') return 0;
   return static_cast<int>(
-      darwin_art_surface_set_title(state->gpu_surface, app_label));
+      darwin_art_surface_set_title(fixture->gpu_surface, app_label));
 }
 
 jboolean attach_hardware_hierarchy_on_owner(GraphicsState* state, JNIEnv* env,
                                             jobject view) {
+  auto* fixture = state == nullptr
+                      ? nullptr
+                      : darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state);
   if (state == nullptr || env == nullptr || view == nullptr ||
-      state->hardware_context == nullptr) {
+      fixture == nullptr || fixture->hardware_context == nullptr) {
     return JNI_FALSE;
   }
   std::cerr << "ART HWUI GPU: owner-thread attach begin\n";
@@ -635,7 +649,7 @@ jboolean attach_hardware_hierarchy_on_owner(GraphicsState* state, JNIEnv* env,
   jboolean result = (attach == nullptr || env->ExceptionCheck())
                         ? JNI_FALSE
                         : env->CallStaticBooleanMethod(
-                              helper, attach, view, state->hardware_context);
+                              helper, attach, view, fixture->hardware_context);
   if (result == JNI_TRUE && !env->ExceptionCheck()) {
     jclass view_class = env->FindClass("android/view/View");
     jfieldID attach_info_field =
@@ -694,10 +708,11 @@ jboolean attach_hardware_hierarchy_on_owner(GraphicsState* state, JNIEnv* env,
 jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
                                   jint width, jint height) {
   if (state == nullptr) return JNI_FALSE;
+  auto* fixture = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state);
   if (!darwin_art::hwui_gpu_enabled()) {
     return JNI_FALSE;
   }
-  if (state->gpu_surface == nullptr) {
+  if (fixture->gpu_surface == nullptr) {
     if (prepare_gpu_surface(state, width, height) != 0) {
       return JNI_FALSE;
     }
@@ -731,12 +746,12 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
       if (retained_root != nullptr) env->DeleteLocalRef(retained_root);
       return JNI_TRUE;
     }
-    if (state->gpu_render_node == nullptr ||
-        !env->IsSameObject(state->gpu_render_node, retained_root)) {
-      if (state->gpu_render_node != nullptr) {
-        env->DeleteGlobalRef(state->gpu_render_node);
+    if (darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node == nullptr ||
+        !env->IsSameObject(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node, retained_root)) {
+      if (darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node != nullptr) {
+        env->DeleteGlobalRef(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node);
       }
-      state->gpu_render_node = env->NewGlobalRef(retained_root);
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node = env->NewGlobalRef(retained_root);
     }
     jclass retained_class = env->FindClass("android/graphics/RenderNode");
     jfieldID native_field =
@@ -752,33 +767,33 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
       node->mValid = true;
       darwin_art_hwui::sync_recorded_render_node_tree(node);
       if (darwin_art_hwui::node_subtree_has_animators(node)) {
-        if (state->hwui_animation_context == nullptr) {
-          state->hwui_time_lord = std::make_unique<
+        if (darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_animation_context == nullptr) {
+          darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_time_lord = std::make_unique<
               android::uirenderer::renderthread::TimeLord>();
-          state->hwui_time_lord->setFrameInterval(16666666);
-          state->hwui_animation_context =
+          darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_time_lord->setFrameInterval(16666666);
+          darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_animation_context =
               std::make_unique<android::uirenderer::AnimationContext>(
-                  *state->hwui_time_lord);
+                  *darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_time_lord);
         }
         darwin_art_hwui::register_node_subtree_animators(
-            node, *state->hwui_animation_context);
+            node, *darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_animation_context);
       }
     }
     const bool presented = node != nullptr && !env->ExceptionCheck() &&
                            darwin_art_hwui::render_node_to_surface(
-                               env, view, retained_root, state->gpu_surface,
-                               width, height, state->gpu_ripple_overlay_active,
-                               state->gpu_ripple_overlay_x,
-                               state->gpu_ripple_overlay_y,
-                               state->gpu_ripple_overlay_started);
+                               env, view, retained_root, fixture->gpu_surface,
+                               width, height, darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_active,
+                               darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_x,
+                               darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_y,
+                               darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_started);
     if (env->ExceptionCheck()) env->ExceptionClear();
     if (retained_class != nullptr) env->DeleteLocalRef(retained_class);
     env->DeleteLocalRef(retained_root);
     if (!presented) return JNI_FALSE;
     darwin_art_frame_probe::record_dimensions(width, height);
-    state->gpu_render_node_recorded = true;
+    darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node_recorded = true;
     if (traversal_generation >= 0) {
-      state->gpu_last_traversal_barrier = traversal_generation;
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_last_traversal_barrier = traversal_generation;
     }
     return JNI_TRUE;
   }
@@ -793,7 +808,7 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
   }
   const bool completed_traversal =
       traversal_generation >= 0 &&
-      traversal_generation != state->gpu_last_traversal_barrier;
+      traversal_generation != darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_last_traversal_barrier;
   bool view_needs_recording =
       pending_root_traversal != 0 || completed_traversal;
   jclass dirty_view_class = env->FindClass("android/view/View");
@@ -836,12 +851,12 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
   // ACTION_MOVE remains replay-only while the hierarchy is clean. Re-recording
   // every 16 ms would replace display-list-owned CanvasProperty references and
   // make native RenderNode animations appear static.
-  if (state->gpu_render_node_recorded && state->pending_pressed_action == 0 &&
+  if (darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node_recorded && darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pending_pressed_action == 0 &&
       !view_needs_recording) {
     return darwin_art_hwui::render_node_to_surface(
-               env, view, state->gpu_render_node, state->gpu_surface, width, height,
-               state->gpu_ripple_overlay_active, state->gpu_ripple_overlay_x,
-               state->gpu_ripple_overlay_y, state->gpu_ripple_overlay_started)
+               env, view, fixture->gpu_render_node, fixture->gpu_surface, width, height,
+               darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_active, darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_x,
+               darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_y, darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_started)
                ? JNI_TRUE
                : JNI_FALSE;
   }
@@ -950,7 +965,7 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
       render_node_class == nullptr
           ? nullptr
           : env->GetMethodID(render_node_class, "setPosition", "(IIII)Z");
-  if (state->gpu_render_node == nullptr && render_node_create != nullptr &&
+  if (darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node == nullptr && render_node_create != nullptr &&
       animation_host_create != nullptr &&
       animation_host_interface != nullptr &&
       !env->ExceptionCheck()) {
@@ -962,7 +977,7 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
                                                node_name, host);
     std::cerr << "ART HWUI GPU: RenderNode.create node=" << node << "\n";
     if (node != nullptr && !env->ExceptionCheck()) {
-      state->gpu_render_node = env->NewGlobalRef(node);
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node = env->NewGlobalRef(node);
     }
     env->DeleteLocalRef(host);
     env->DeleteLocalRef(node);
@@ -981,16 +996,16 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
       env->CallBooleanMethod(view, is_attached_to_window) == JNI_TRUE;
   if (env->ExceptionCheck()) env->ExceptionClear();
   env->DeleteLocalRef(attached_view_class);
-  if (state->gpu_render_node != nullptr && state->hardware_context != nullptr &&
-      !state->gpu_render_node_recorded && !has_attached_view_root &&
-      state->interactive_view_root == nullptr) {
+  if (fixture->gpu_render_node != nullptr && fixture->hardware_context != nullptr &&
+      !darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node_recorded && !has_attached_view_root &&
+      fixture->interactive_view_root == nullptr) {
     attach_hardware_hierarchy_on_owner(state, env, view);
   }
   jobject java_canvas =
-      state->gpu_render_node == nullptr || begin_recording == nullptr ||
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node == nullptr || begin_recording == nullptr ||
               env->ExceptionCheck()
           ? nullptr
-          : env->CallObjectMethod(state->gpu_render_node, begin_recording, width,
+          : env->CallObjectMethod(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node, begin_recording, width,
                                   height);
   if (java_canvas == nullptr || native_render_node == nullptr ||
       end_recording == nullptr || set_position == nullptr ||
@@ -1009,10 +1024,10 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
         std::cerr << self->GetException()->Dump() << "\n";
       }
     }
-    if (java_canvas != nullptr && state->gpu_render_node != nullptr &&
+    if (java_canvas != nullptr && darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node != nullptr &&
         end_recording != nullptr) {
       env->ExceptionClear();
-      env->CallVoidMethod(state->gpu_render_node, end_recording);
+      env->CallVoidMethod(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node, end_recording);
       env->ExceptionClear();
     }
     env->ExceptionClear();
@@ -1037,13 +1052,13 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
     // recording, including failure paths, so RenderNode never remains in the
     // "recording in progress" state for the next frame.
     if (env->ExceptionCheck()) env->ExceptionClear();
-    env->CallVoidMethod(state->gpu_render_node, end_recording);
+    env->CallVoidMethod(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node, end_recording);
     recording_ended = true;
     const bool ok = !env->ExceptionCheck();
     if (!ok) env->ExceptionClear();
     return ok;
   };
-  env->CallBooleanMethod(state->gpu_render_node, set_position, 0, 0, width, height);
+  env->CallBooleanMethod(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node, set_position, 0, 0, width, height);
   if (env->ExceptionCheck()) {
     env->ExceptionClear();
     finish_recording();
@@ -1107,7 +1122,7 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
     env->DeleteLocalRef(render_node_class);
     return JNI_FALSE;
   }
-  const bool first_recording = !state->gpu_render_node_recorded;
+  const bool first_recording = !darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node_recorded;
   // Recording a dirty display list is not itself a layout traversal. Android
   // ViewRootImpl measures/layouts only when the hierarchy requests it; doing
   // so on every Metal frame cancels ViewPager's active fake drag and its
@@ -1208,18 +1223,18 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
   // on every vsync. Detached legacy probes without hierarchy bookkeeping are
   // initialized dirty by their first recording and no longer need this
   // compatibility invalidation either.
-  const uint32_t pending_pressed_action = state->pending_pressed_action;
-  const jfloat pending_pressed_x = state->pending_pressed_x;
-  const jfloat pending_pressed_y = state->pending_pressed_y;
-  state->pending_pressed_action = 0;
-  if (pending_pressed_action != 0 && state->pressed_view != nullptr &&
+  const uint32_t pending_pressed_action = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pending_pressed_action;
+  const jfloat pending_pressed_x = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pending_pressed_x;
+  const jfloat pending_pressed_y = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pending_pressed_y;
+  darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pending_pressed_action = 0;
+  if (pending_pressed_action != 0 && darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view != nullptr &&
       set_pressed != nullptr && !env->ExceptionCheck()) {
     if (drawable_hotspot_changed != nullptr) {
-      env->CallVoidMethod(state->pressed_view, drawable_hotspot_changed,
+      env->CallVoidMethod(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view, drawable_hotspot_changed,
                           pending_pressed_x, pending_pressed_y);
       dump_pending_exception("View.drawableHotspotChanged");
     }
-    env->CallVoidMethod(state->pressed_view, set_pressed,
+    env->CallVoidMethod(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view, set_pressed,
                         pending_pressed_action == 1 ? JNI_TRUE : JNI_FALSE);
     dump_pending_exception("View.setPressed");
   }
@@ -1252,7 +1267,7 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
 
   auto* node = reinterpret_cast<android::uirenderer::RenderNode*>(
       static_cast<std::uintptr_t>(env->GetLongField(
-          state->gpu_render_node, native_render_node)));
+          darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node, native_render_node)));
   if (node == nullptr) {
     std::cerr << "ART HWUI GPU: Java RenderNode native pointer missing\n";
     return JNI_FALSE;
@@ -1285,22 +1300,22 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
     return JNI_FALSE;
   }
   if (darwin_art_hwui::node_subtree_has_animators(node)) {
-    if (state->hwui_animation_context == nullptr) {
-      state->hwui_time_lord = std::make_unique<
+    if (darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_animation_context == nullptr) {
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_time_lord = std::make_unique<
           android::uirenderer::renderthread::TimeLord>();
-      state->hwui_time_lord->setFrameInterval(16666666);
-      state->hwui_animation_context =
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_time_lord->setFrameInterval(16666666);
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_animation_context =
           std::make_unique<android::uirenderer::AnimationContext>(
-              *state->hwui_time_lord);
+              *darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_time_lord);
     }
     darwin_art_hwui::register_node_subtree_animators(
-        node, *state->hwui_animation_context);
+        node, *darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_animation_context);
   }
 
   if (!darwin_art_hwui::render_node_to_surface(
-          env, view, state->gpu_render_node, state->gpu_surface, width, height,
-          state->gpu_ripple_overlay_active, state->gpu_ripple_overlay_x,
-          state->gpu_ripple_overlay_y, state->gpu_ripple_overlay_started)) {
+          env, view, fixture->gpu_render_node, fixture->gpu_surface, width, height,
+          darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_active, darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_x,
+          darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_y, darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_started)) {
     std::cerr << "ART HWUI GPU: drawable submit failed\n";
     return JNI_FALSE;
   }
@@ -1308,9 +1323,9 @@ jboolean present_gpu_content(GraphicsState* state, JNIEnv* env, jobject view,
   // callback. Publish only the drawable dimensions so GPU-only APK
   // acceptance can validate the presented surface without a readback.
   darwin_art_frame_probe::record_dimensions(width, height);
-  state->gpu_render_node_recorded = true;
+  darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node_recorded = true;
   if (traversal_generation >= 0) {
-    state->gpu_last_traversal_barrier = traversal_generation;
+    darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_last_traversal_barrier = traversal_generation;
   }
   return JNI_TRUE;
 }

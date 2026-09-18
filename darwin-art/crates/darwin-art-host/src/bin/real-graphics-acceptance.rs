@@ -1,4 +1,4 @@
-use darwin_art_host::{HostOutcome, OwnedFrame, RunOptions, run};
+use darwin_art_host::{ExecutionLifetime, HostOutcome, OwnedFrame, RunOptions, run};
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
@@ -111,7 +111,7 @@ fn parse_options() -> Result<RunOptions, Box<dyn Error>> {
         heap_initial_bytes: 64 * 1024 * 1024,
         heap_maximum_bytes: 64 * 1024 * 1024,
         visible_seconds: 0.0,
-        terminate_android_process: false,
+        execution_lifetime: ExecutionLifetime::ReusableSession,
     })
 }
 

@@ -2,8 +2,7 @@ use crate::config::{HostError, HostOutcome, RunOptions};
 use crate::frame_clock::FrameClock;
 use crate::frame_timing;
 use crate::gpu_input::{
-    dispatch_queued_events, dispatch_synthetic_keys, pulse_frame_with_latency,
-    pump_frame_with_latency, pump_main_looper,
+    dispatch_synthetic_keys, pulse_frame_with_latency, pump_frame_with_latency, pump_main_looper,
 };
 use crate::gpu_test_config::GpuTestConfig;
 use crate::runtime::HostRuntime;
@@ -191,10 +190,6 @@ pub(super) fn run(
                 let slice_ms = (test_hold_ms - held_ms).min(16);
                 let pump_status = owned_surface_wait_slice(runtime, slice_ms as f64 / 1000.0);
                 if pump_status == 7 {
-                    // Surface shutdown enqueues a terminal CANCEL for an
-                    // active pointer stream. Drain it before leaving so the
-                    // Android hierarchy cannot retain pressed state.
-                    let _ = dispatch_queued_events(runtime);
                     break;
                 }
                 if pump_status != 0 {
@@ -204,14 +199,8 @@ pub(super) fn run(
                     });
                     break;
                 }
-                match dispatch_queued_events(runtime) {
-                    Ok(dispatched) => {
-                        frames_presented += dispatched;
-                        if debug_latency && dispatched > 0 {
-                            last_input_dispatch = Some(Instant::now());
-                        }
-                    }
-                    Err(error) => loop_error = Some(error),
+                if let Err(error) = pump_main_looper(runtime) {
+                    loop_error = Some(error);
                 }
                 if loop_error.is_none() {
                     // ACTION_MOVE is dispatched before the pulse so the
@@ -319,7 +308,7 @@ pub(super) fn run(
                     });
                     break;
                 }
-                if let Err(error) = dispatch_queued_events(runtime) {
+                if let Err(error) = pump_main_looper(runtime) {
                     loop_error = Some(error);
                     break;
                 }
@@ -395,12 +384,9 @@ pub(super) fn run(
                         });
                         break;
                     }
-                    match dispatch_queued_events(runtime) {
-                        Ok(dispatched) => frames_presented += dispatched,
-                        Err(error) => {
-                            loop_error = Some(error);
-                            break;
-                        }
+                    if let Err(error) = pump_main_looper(runtime) {
+                        loop_error = Some(error);
+                        break;
                     }
                     if let Err(error) = pump_frame_with_latency(
                         runtime,
@@ -429,7 +415,7 @@ pub(super) fn run(
                 });
                 break;
             }
-            if let Err(error) = dispatch_queued_events(runtime) {
+            if let Err(error) = pump_main_looper(runtime) {
                 loop_error = Some(error);
                 break;
             }
@@ -468,7 +454,7 @@ pub(super) fn run(
                 });
                 break;
             }
-            if let Err(error) = dispatch_queued_events(runtime) {
+            if let Err(error) = pump_main_looper(runtime) {
                 loop_error = Some(error);
                 break;
             }
@@ -520,7 +506,7 @@ pub(super) fn run(
                     });
                     break;
                 }
-                if let Err(error) = dispatch_queued_events(runtime) {
+                if let Err(error) = pump_main_looper(runtime) {
                     loop_error = Some(error);
                     break;
                 }
@@ -579,7 +565,7 @@ pub(super) fn run(
                     });
                     break;
                 }
-                if let Err(error) = dispatch_queued_events(runtime) {
+                if let Err(error) = pump_main_looper(runtime) {
                     loop_error = Some(error);
                     break;
                 }
@@ -637,12 +623,9 @@ pub(super) fn run(
                         });
                         break;
                     }
-                    match dispatch_queued_events(runtime) {
-                        Ok(dispatched) => frames_presented += dispatched,
-                        Err(error) => {
-                            loop_error = Some(error);
-                            break;
-                        }
+                    if let Err(error) = pump_main_looper(runtime) {
+                        loop_error = Some(error);
+                        break;
                     }
                     if let Err(error) = pump_frame_with_latency(
                         runtime,
@@ -700,7 +683,6 @@ pub(super) fn run(
         }
         let pump_status = owned_surface_wait_slice(runtime, slice);
         if pump_status == 7 {
-            let _ = dispatch_queued_events(runtime);
             break;
         }
         if pump_status != 0 {
@@ -710,14 +692,8 @@ pub(super) fn run(
             });
             break;
         }
-        match dispatch_queued_events(runtime) {
-            Ok(dispatched) => {
-                frames_presented += dispatched;
-                if debug_latency && dispatched > 0 {
-                    last_input_dispatch = Some(Instant::now());
-                }
-            }
-            Err(error) => loop_error = Some(error),
+        if let Err(error) = pump_main_looper(runtime) {
+            loop_error = Some(error);
         }
         if loop_error.is_none()
             && let Err(error) = pump_main_looper(runtime)

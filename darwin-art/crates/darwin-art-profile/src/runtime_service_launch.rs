@@ -1,12 +1,12 @@
 //! Owned Darwin child supervision for the runtime service startup protocol.
 //! Android service owners, not this worker, publish readiness.
 use crate::process_incarnation::ProcessIncarnation;
+use crate::process_wait::{PollOutcome, ProcessWaitOwner};
 use crate::runtime_service_endpoints::RuntimeEndpoints;
 use crate::runtime_service_protocol::StartRuntimeRequest;
 use crate::runtime_service_state::RuntimeInstance;
 use crate::{PROFILE_SOCKET_ENV, ProfileError, process_command::prepare_command};
 use std::path::Path;
-use std::process::Child;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,30 +15,25 @@ pub(crate) const INSTANCE_TOKEN_ENV: &str = "DARWIN_ART_RUNTIME_INSTANCE_TOKEN";
 type ExitCallback = Box<dyn FnOnce() + Send>;
 
 struct OwnedChild {
-    child: Child,
+    waiter: ProcessWaitOwner,
     instance: Arc<RuntimeInstance>,
-    on_exit: Option<ExitCallback>,
 }
 
 impl Drop for OwnedChild {
     fn drop(&mut self) {
-        // Covers timeout, spawn-worker failure and unwinding. Only this Child
-        // handle is signaled, never a package/PID search or another instance.
-        if !matches!(self.child.try_wait(), Ok(Some(_))) {
-            let _ = self.child.kill();
-            if let Err(error) = self.child.wait() {
-                eprintln!("darwin-artd: runtime child reap failed: {error}");
-                // Do not publish exit/allow replacement without proof of reap.
-                let _ = self
-                    .instance
-                    .fail(format!("runtime child reap failed: {error}"));
-                return;
-            }
-        }
-        if let Some(on_exit) = self.on_exit.take() {
-            on_exit();
-        }
-        let _ = self.instance.exited();
+        // If this owner is dropped before a terminal outcome, its Drop keeps
+        // the exact callback/identity in a quarantine watcher. No lease is
+        // released here; ProcessWaitOwner settles only Reaped/Gone.
+    }
+}
+
+impl OwnedChild {
+    fn cancel_and_retain_wait(&self) {
+        // The launch policy requests cancellation; the host owner decides
+        // whether the exact captured incarnation may be signalled.  If wait
+        // ownership was lost or probing is unknown, quarantine keeps the
+        // callback and reservation instead of guessing terminal state.
+        let _ = self.waiter.kill_if_exact_live();
     }
 }
 
@@ -106,7 +101,7 @@ fn launch_with_timeout(
             return Err(error.into());
         }
     };
-    let child = match command.spawn() {
+    let child = match crate::spawn_owned(&mut command) {
         Ok(child) => child,
         Err(error) => {
             let _ = instance.fail(error.to_string());
@@ -114,58 +109,109 @@ fn launch_with_timeout(
             return Err(error.into());
         }
     };
-    let mut owned = OwnedChild {
-        child,
-        instance: Arc::clone(&instance),
-        on_exit: None,
+    let pid = child.id();
+    let incarnation = match ProcessIncarnation::read(pid) {
+        Ok(incarnation) => incarnation,
+        Err(error) => {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = instance.fail(error.to_string());
+            return Err(error);
+        }
     };
-    let pid = owned.child.id();
-    let registration = (|| {
-        owned.on_exit = Some(register(pid)?);
-        instance.attach(pid, ProcessIncarnation::read(pid)?)
-    })();
+    let callback = match register(pid) {
+        Ok(callback) => callback,
+        Err(error) => {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = instance.fail(error.to_string());
+            return Err(error);
+        }
+    };
+    let callback_instance = Arc::clone(&instance);
+    let waiter = ProcessWaitOwner::from_child(
+        child,
+        incarnation,
+        Box::new(move || {
+            callback();
+            let _ = callback_instance.exited();
+        }),
+    );
+    let mut owned = OwnedChild {
+        waiter,
+        instance: Arc::clone(&instance),
+    };
+    let registration = instance.attach(pid, incarnation);
     if let Err(error) = registration {
         let _ = instance.fail(error.to_string());
-        return Err(error); // owned Drop kills/reaps before permitting retry.
+        owned.cancel_and_retain_wait();
+        return Err(error); // the owner quarantines before permitting callback reuse.
     }
     if let Err(error) = gate.release() {
         let _ = instance.fail(error.to_string());
+        owned.cancel_and_retain_wait();
         return Err(error.into()); // OwnedChild reaps before reservation reuse.
     }
-    std::thread::Builder::new()
+    let transfer = Arc::new(std::sync::Mutex::new(Some(owned)));
+    let worker_transfer = Arc::clone(&transfer);
+    let result = std::thread::Builder::new()
         .name("runtime-service-child".into())
         .spawn(move || {
+            let mut owned = worker_transfer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+                .expect("runtime-service wait owner transfers once");
             let deadline = Instant::now() + timeout;
             loop {
-                match owned.child.try_wait() {
-                    Ok(Some(status)) => {
+                match owned.waiter.poll() {
+                    PollOutcome::Reaped(status) => {
                         let _ = owned
                             .instance
                             .fail(format!("runtime child exited: {status}"));
                         return;
                     }
-                    Err(error) => {
-                        let _ = owned
-                            .instance
-                            .fail(format!("runtime child wait failed: {error}"));
-                        return;
+                    PollOutcome::GoneWithoutStatus => return,
+                    PollOutcome::Pending
+                    | PollOutcome::OwnershipUnavailableLive
+                    | PollOutcome::TerminalAwaitingReap
+                    | PollOutcome::Unknown(_) => {
+                        std::thread::sleep(Duration::from_millis(10));
                     }
-                    Ok(None) => {}
                 }
                 let snapshot = match owned.instance.snapshot() {
                     Ok(snapshot) => snapshot,
-                    Err(_) => return,
+                    Err(_) => {
+                        owned.cancel_and_retain_wait();
+                        return;
+                    }
                 };
                 if snapshot.is_failed || snapshot.is_exited {
+                    owned.cancel_and_retain_wait();
                     return;
                 }
                 if !snapshot.is_ready && Instant::now() >= deadline {
                     let _ = owned.instance.fail("runtime service readiness timed out");
+                    owned.cancel_and_retain_wait();
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-        })?;
+        });
+    if let Err(error) = result {
+        let _ = instance.fail(error.to_string());
+        if let Some(owned) = transfer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            owned.cancel_and_retain_wait();
+            drop(owned);
+        }
+        return Err(error.into());
+    }
     Ok(())
 }
 

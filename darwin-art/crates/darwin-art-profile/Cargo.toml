@@ -5,7 +5,9 @@ edition = "2024"
 publish = false
 
 [dependencies]
+darwin-art-engine-sys = { path = "../darwin-art-engine-sys" }
 darwin-art-binder-device = { path = "../darwin-art-binder-device" }
+darwin-art-scm-transfer = { path = "../darwin-art-scm-transfer" }
 libc = "0.2"
 
 [lib]

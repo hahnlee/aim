@@ -5,9 +5,9 @@
 //! profile daemon combines its live system-runtime command with the exact
 //! installed application's previously accepted launch environment.
 
-use crate::ProfileError;
 use crate::bound_service_process::{BoundServiceProcessLaunch, BoundServiceProcessRequest};
 use crate::runtime_service_protocol::StartRuntimeRequest;
+use crate::ProfileError;
 use std::ffi::{OsStr, OsString};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -260,14 +260,12 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            ApplicationLaunchTemplate::capture(
-                "org.example",
-                &args("/app.apk"),
-                &common("org.other")
-            )
-            .is_err()
-        );
+        assert!(ApplicationLaunchTemplate::capture(
+            "org.example",
+            &args("/app.apk"),
+            &common("org.other")
+        )
+        .is_err());
         let mut system = common("org.example");
         system.push(("DARWIN_ART_SYSTEM_SERVER_MODE".into(), "1".into()));
         assert!(

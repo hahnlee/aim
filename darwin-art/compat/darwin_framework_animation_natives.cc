@@ -1,4 +1,5 @@
 #include "darwin_framework_natives.h"
+#include "../runtime/framework/looper/message_queue_jni.h"
 
 #include "darwin_android_platform.h"
 #include "darwin_android_time.h"
@@ -20,9 +21,6 @@
 #include <vector>
 
 namespace {
-
-extern "C" void darwin_art_graphics_debug_vsync(JNIEnv*)
-    __attribute__((weak));
 
 constexpr auto kDisplayFrameInterval = std::chrono::nanoseconds(16'666'667);
 
@@ -259,9 +257,6 @@ class DarwinDisplayEventReceiver {
     (void)events;
     if (source_timestamp != 0) {
       retained->DispatchPending(env, source_timestamp);
-      if (darwin_art_graphics_debug_vsync != nullptr) {
-        darwin_art_graphics_debug_vsync(env);
-      }
     }
     return 1;
   }

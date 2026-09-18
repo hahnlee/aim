@@ -7,6 +7,7 @@
 //! error back through `bindServiceInstance`.
 
 use crate::ProfileError;
+use crate::bound_service_child_control::BoundServiceChildControl;
 use crate::bound_service_process::{BoundServiceIdentity, BoundServiceProcessResponse};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
@@ -20,20 +21,20 @@ pub(crate) struct BoundServiceRecord {
     pub(crate) pid: u32,
     pub(crate) incarnation: [u64; 2],
     pub(crate) activation_token: [u8; 16],
-    pub(crate) activation: Arc<Mutex<Option<crate::process_start_gate::StartGate>>>,
+    pub(crate) control: Arc<BoundServiceChildControl>,
 }
 
 impl BoundServiceRecord {
     pub(crate) fn new(
         response: BoundServiceProcessResponse,
-        activation: Arc<Mutex<Option<crate::process_start_gate::StartGate>>>,
+        control: Arc<BoundServiceChildControl>,
     ) -> Self {
         Self {
             start_sequence: response.start_sequence,
             pid: response.pid,
             incarnation: response.incarnation,
             activation_token: response.activation_token,
-            activation,
+            control,
         }
     }
 
@@ -138,10 +139,10 @@ impl BoundServiceRegistry {
         Ok(removed)
     }
 
-    pub(crate) fn activation(
+    pub(crate) fn control(
         &self,
         handle: BoundServiceProcessResponse,
-    ) -> Result<Arc<Mutex<Option<crate::process_start_gate::StartGate>>>, ProfileError> {
+    ) -> Result<Arc<BoundServiceChildControl>, ProfileError> {
         self.records
             .lock()
             .map_err(|_| poisoned())?
@@ -152,7 +153,7 @@ impl BoundServiceRegistry {
                     && record.incarnation == handle.incarnation
                     && record.activation_token == handle.activation_token
             })
-            .map(|record| Arc::clone(&record.activation))
+            .map(|record| Arc::clone(&record.control))
             .ok_or_else(|| ProfileError::Daemon("unknown or stale bound-service handle".into()))
     }
 }
@@ -195,7 +196,7 @@ mod tests {
         registry
             .insert(
                 key.clone(),
-                BoundServiceRecord::new(old, Arc::new(Mutex::new(None))),
+                BoundServiceRecord::new(old, Arc::new(BoundServiceChildControl::new(None))),
             )
             .unwrap();
         let waiting = Arc::clone(&registry);
@@ -222,7 +223,7 @@ mod tests {
         registry
             .insert(
                 key.clone(),
-                BoundServiceRecord::new(existing, Arc::new(Mutex::new(None))),
+                BoundServiceRecord::new(existing, Arc::new(BoundServiceChildControl::new(None))),
             )
             .unwrap();
         match registry
@@ -232,5 +233,22 @@ mod tests {
             BoundServiceSlot::Existing(actual) => assert_eq!(actual, existing),
             BoundServiceSlot::Vacant => panic!("existing incarnation was lost"),
         }
+    }
+
+    #[test]
+    fn control_lookup_requires_the_exact_incarnation_handle() {
+        let registry = BoundServiceRegistry::default();
+        let key = identity();
+        let existing = response(7);
+        registry
+            .insert(
+                key,
+                BoundServiceRecord::new(existing, Arc::new(BoundServiceChildControl::new(None))),
+            )
+            .unwrap();
+        assert!(registry.control(existing).is_ok());
+        let mut stale = existing;
+        stale.activation_token[0] ^= 1;
+        assert!(registry.control(stale).is_err());
     }
 }

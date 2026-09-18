@@ -415,17 +415,64 @@ fn system_launch_template_is_owned_by_the_live_system_reservation() {
         .push(("DARWIN_ART_TEMPLATE_MARKER".into(), "trusted".into()));
     let (instance, fresh) = state.reserve(&system).unwrap();
     assert!(fresh);
-    assert_eq!(state.system_launch_template().unwrap(), system);
+    let incarnation = ProcessIncarnation::fixture(1);
+    assert!(state.system_launch_template(42, incarnation).is_err());
+    instance.attach(42, incarnation).unwrap();
+    assert_eq!(
+        state.system_launch_template(42, incarnation).unwrap(),
+        system
+    );
+    assert!(state.system_launch_template(43, incarnation).is_err());
+    assert!(
+        state
+            .system_launch_template(42, ProcessIncarnation::fixture(2))
+            .is_err()
+    );
 
     instance.exited().unwrap();
-    assert!(state.system_launch_template().is_err());
+    assert!(state.system_launch_template(42, incarnation).is_err());
 }
 
 #[test]
 fn application_runtime_cannot_be_used_as_the_system_launch_template() {
     let state = RuntimeServiceState::default();
     state.reserve(&request(ReadinessMask::BINDER)).unwrap();
-    assert!(state.system_launch_template().is_err());
+    assert!(
+        state
+            .system_launch_template(42, ProcessIncarnation::fixture(1))
+            .is_err()
+    );
+}
+
+#[test]
+fn old_system_request_cannot_use_replacement_generations_template() {
+    let state = RuntimeServiceState::default();
+    let mut old_request = request(ReadinessMask::BINDER);
+    old_request.package = "android.system".into();
+    let old_incarnation = ProcessIncarnation::fixture(1);
+    let (old, _) = state.reserve(&old_request).unwrap();
+    old.attach(42, old_incarnation).unwrap();
+    assert_eq!(
+        state.system_launch_template(42, old_incarnation).unwrap(),
+        old_request
+    );
+    old.fail("generation replaced").unwrap();
+    assert!(state.system_launch_template(42, old_incarnation).is_err());
+    old.exited().unwrap();
+
+    let mut replacement_request = old_request;
+    replacement_request.key = RuntimeKey([0x22; 32]);
+    let (replacement, fresh) = state.reserve(&replacement_request).unwrap();
+    assert!(fresh);
+    let replacement_incarnation = ProcessIncarnation::fixture(2);
+    replacement.attach(42, replacement_incarnation).unwrap();
+    assert!(state.system_launch_template(42, old_incarnation).is_err());
+    assert_eq!(
+        state
+            .system_launch_template(42, replacement_incarnation)
+            .unwrap(),
+        replacement_request
+    );
 }
 
 #[test]

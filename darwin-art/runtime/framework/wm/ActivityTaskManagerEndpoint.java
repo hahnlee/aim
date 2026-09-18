@@ -85,6 +85,9 @@ public final class ActivityTaskManagerEndpoint extends Binder {
 
             ApplicationProcessRegistry.AttachedApplication attached =
                     processes.requireCaller(Binder.getCallingPid(), caller, callingPackage);
+            if (attached.uid != Binder.getCallingUid()) {
+                throw new SecurityException("Activity caller UID does not match attached process");
+            }
             ComponentName component = intent == null ? null : intent.getComponent();
             if (component == null) {
                 reply.writeNoException();

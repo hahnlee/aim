@@ -8,6 +8,10 @@ Test-only substitutes cover Android service classes and native framework,
 compositor and Binder dependencies. Checks cover explicit resolver registration,
 endpoint arguments/return propagation, missing socket rejection, preserved Java
 initialization exceptions and compositor failure preventing Binder publication.
+Internal kernel Binder setup precedes system Context creation; Context and
+compatibility-policy initialization precede external Binder readiness;
+missing Context and catalog exceptions prevent publication. Those dependency
+implementations are test substitutes, not original framework initialization proof.
 The production classpath builder is also checked for the image service JAR,
 support DEX, spaces in paths, and rejection of relative/parent/list injection
 without changing the prior result on failure.

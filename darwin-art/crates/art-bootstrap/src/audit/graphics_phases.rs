@@ -149,12 +149,10 @@ pub(super) fn run_graphics_upstream_gates(root: &Path, incremental: bool) -> Res
         "audit-android16-graphics-closure.sh",
         &["--art-runtime"],
     )?;
+    // Publish the same process VM seam as headless. The separate upstream
+    // HostRuntime audit compiles test fixtures and is not a product prerequisite.
+    build_framework_java_vm_provider(root)?;
     let gates = [
-        (
-            "build-android16-android-runtime-host.sh",
-            "upstream/android16-android-runtime-host.lock",
-            &["_build/android-runtime-host/libandroid-runtime-darwin-host.a"][..],
-        ),
         (
             "build-android16-libcore-darwin-linux.sh",
             "upstream/android16-libcore-darwin-linux.lock",

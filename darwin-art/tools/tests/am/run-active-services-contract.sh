@@ -39,6 +39,17 @@ test "$(transaction_for publishService)" = "$PUBLISH_SERVICE_TRANSACTION"
 test "$(transaction_for serviceDoneExecuting)" = "$SERVICE_DONE_EXECUTING_TRANSACTION"
 test "$(transaction_for unbindFinished)" = "$UNBIND_FINISHED_TRANSACTION"
 
+# Assert the pinned wire contract, not just a positive-PID Java fixture.
+# The framework sends no reply Parcel and FLAG_ONEWAY; Binder reports PID 0.
+done_proxy="$out/service-done-executing-proxy.smali"
+"$apkanalyzer" dex code --class 'android.app.IActivityManager$Stub$Proxy' \
+  --method 'serviceDoneExecuting(Landroid/os/IBinder;IIILandroid/content/Intent;)V' \
+  "$framework" > "$done_proxy"
+rg -Fq 'const/4 v2, 0x0' "$done_proxy"
+rg -Fq 'const/4 v3, 0x1' "$done_proxy"
+rg -Fq 'const/16 v4, 0x3f' "$done_proxy"
+rg -Fq 'invoke-interface {v1, v4, v0, v2, v3}, Landroid/os/IBinder;->transact(ILandroid/os/Parcel;Landroid/os/Parcel;I)Z' "$done_proxy"
+
 endpoint="$root/runtime/framework/am/ActivityManagerEndpoint.java"
 grep -Fq 'transaction("serviceDoneExecuting")' "$endpoint"
 grep -Fq 'transaction("unbindFinished")' "$endpoint"

@@ -1,5 +1,7 @@
 #include "darwin_angle_egl.h"
 
+#include "graphics/egl_error_state.h"
+
 #include <cstdint>
 
 // Standard EGL entry points are supplied by the project ANGLE dylibs.  These
@@ -12,6 +14,23 @@ extern "C" void* eglCreateWindowSurface(void* display, void* config,
                                          const std::int32_t* attributes) {
   return darwin_art_android_eglCreateWindowSurface(
       display, config, native_window, attributes);
+}
+
+extern "C" std::int32_t darwin_art_android_eglGetError() {
+  return darwin_art::graphics::ConsumeEglError();
+}
+
+extern "C" std::int32_t eglGetError() {
+  return darwin_art_android_eglGetError();
+}
+
+extern "C" std::uint32_t eglInitialize(void* display, std::int32_t* major,
+                                        std::int32_t* minor) {
+  return darwin_art::EglInitializeHost(display, major, minor);
+}
+
+extern "C" std::uint32_t eglTerminate(void* display) {
+  return darwin_art::TerminateHostDisplay(display);
 }
 
 extern "C" std::uint32_t eglSwapBuffers(void* display, void* surface) {

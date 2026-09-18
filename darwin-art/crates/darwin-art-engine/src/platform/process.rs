@@ -7,8 +7,8 @@
 
 use core::ffi::c_void;
 use darwin_art_engine_sys::{
-    FrameCallback, HostServices, LifecycleHooks, ProcessConfig, ProviderAcquireFn,
-    ProviderReleaseFn,
+    BinderAuthorityHooks, FrameCallback, HostServices, LifecycleHooks, ProcessConfig,
+    ProviderAcquireFn, ProviderReleaseFn,
 };
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
 use super::graphics::GraphicsSession;
+use super::surface::SurfaceSession;
 use darwin_art_runtime::ProviderBridge;
 
 pub use super::native_loader_input::{InputError, NativeLoaderInput};
@@ -39,8 +40,10 @@ pub struct CallbackBindings<'a> {
     provider_acquire: Option<ProviderAcquireFn>,
     provider_release: Option<ProviderReleaseFn>,
     graphics_session: Option<&'a GraphicsSession>,
+    desktop_surface: Option<&'a SurfaceSession>,
     lifecycle_hooks: Option<&'a LifecycleHooks>,
     host_services: Option<&'a HostServices>,
+    binder_authority_hooks: Option<&'a BinderAuthorityHooks>,
 }
 
 impl<'a> CallbackBindings<'a> {
@@ -73,8 +76,10 @@ impl<'a> CallbackBindings<'a> {
             provider_acquire,
             provider_release,
             graphics_session: None,
+            desktop_surface: None,
             lifecycle_hooks: None,
             host_services: None,
+            binder_authority_hooks: None,
         })
     }
 
@@ -86,9 +91,17 @@ impl<'a> CallbackBindings<'a> {
         self
     }
 
+    /// Attach the explicit pre-VM display target for this synchronous ART
+    /// call. The borrowed surface remains alive for the complete invocation;
+    /// its opaque handle is copied only into the additive ProcessConfig tail.
+    pub fn with_desktop_surface(mut self, surface: Option<&'a SurfaceSession>) -> Self {
+        self.desktop_surface = surface;
+        self
+    }
+
     /// Attach the Rust-owned lifecycle bridge for the synchronous ART call.
     /// Direct/native callers may omit it and use the compatibility state
-    /// machine retained inside the probe.
+    /// machine retained by the native process owner.
     pub fn with_lifecycle_hooks(mut self, hooks: Option<&'a LifecycleHooks>) -> Self {
         self.lifecycle_hooks = hooks;
         self
@@ -96,6 +109,13 @@ impl<'a> CallbackBindings<'a> {
 
     pub fn with_host_services(mut self, services: Option<&'a HostServices>) -> Self {
         self.host_services = services;
+        self
+    }
+
+    /// Attach the exact process Binder-authority lifetime for this synchronous
+    /// native invocation. The table is borrowed and must outlive the call.
+    pub fn with_binder_authority_hooks(mut self, hooks: Option<&'a BinderAuthorityHooks>) -> Self {
+        self.binder_authority_hooks = hooks;
         self
     }
 }
@@ -193,6 +213,18 @@ impl<'a> ProcessRequest<'a> {
             self.native_loader_config
                 .as_ref()
                 .map_or(core::ptr::null(), NativeLoaderInput::as_ptr),
+        )
+        .with_desktop_surface_context(
+            self.callbacks
+                .desktop_surface
+                .map_or(core::ptr::null_mut(), |surface| surface.handle()),
+        )
+        .with_binder_authority_hooks(
+            self.callbacks
+                .binder_authority_hooks
+                .map_or(core::ptr::null(), |hooks| {
+                    hooks as *const BinderAuthorityHooks
+                }),
         )
     }
 }

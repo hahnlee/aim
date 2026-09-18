@@ -1,4 +1,5 @@
 #include "sync_fence_broker.h"
+#include "fd_inheritance.h"
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -67,7 +68,9 @@ int MergeBrokerFences(DarwinArtFdBroker* broker, int first, int second,
       if (!ReadPipe(native[i].value)) { *error = 22; return -1; }
     }
     int pair[2];
-    if (pipe(pair) != 0) { *error = errno == EMFILE ? 24 : 12; return -1; }
+    if (darwin_art::bionic::fd_inheritance::CreateCloseOnExecPipe(pair) != 0) {
+      *error = errno == EMFILE ? 24 : 12; return -1;
+    }
     HostFd read{pair[0]}, write{pair[1]};
     if (fcntl(read.value, F_SETFD, FD_CLOEXEC) != 0 ||
         fcntl(write.value, F_SETFD, FD_CLOEXEC) != 0) {

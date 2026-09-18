@@ -9,6 +9,13 @@
 #include "fdsan_symbols.h"
 #include "sync_fence_broker.h"
 #include "unix_endpoints.h"
+#include "eventfd_owner.h"
+#include "android_scm_exports.h"
+#include "fd_inheritance.h"
+#include "retained_scm_export.h"
+#include "scm_endpoint_lease.h"
+
+namespace native_fd = darwin_art::bionic::fd_inheritance;
 
 #include <arpa/inet.h>
 #include <arpa/nameser.h>
@@ -165,17 +172,7 @@ struct DnsQueryState {
   bool cancelled = false;
 };
 
-// Darwin has no eventfd primitive.  The host descriptor pair is only a
-// readiness transport; Android's counter semantics live here so repeated
-// writes coalesce into one readiness token and a read observes the complete
-// counter (or one for EFD_SEMAPHORE).
-struct EventFdState {
-  std::mutex mutex;
-  uint64_t counter = 0;
-  bool semaphore = false;
-  bool signaled = false;
-  int signal_fd = -1;
-};
+using EventFdState = darwin_art::eventfd::State;
 
 struct HostFdObject {
   explicit HostFdObject(int host_fd, int host_peer_fd = -1,
@@ -186,6 +183,9 @@ struct HostFdObject {
         dns(std::move(dns_state)), event(std::move(event_state)) {}
 
   int fd = -1;
+  // Exact object/Description lifetime, not a guest-FD-number registry. Empty
+  // until the reviewed complete managed path is adopted; legacy pair stays off.
+  darwin_art::bionic::scm::EndpointLease scm_endpoint;
   int peer_fd = -1;
   std::shared_ptr<TimerState> timer;
   std::shared_ptr<DnsQueryState> dns;
@@ -754,87 +754,12 @@ bool TranslateOption(int android_level, int android_option, int *host_level,
   return false;
 }
 
-bool EnsureEventFdSignaled(const std::shared_ptr<EventFdState> &state) {
-  if (state == nullptr)
-    return true;
-  std::lock_guard lock(state->mutex);
-  if (state->counter == 0 || state->signaled)
-    return true;
-  const uint64_t token = 1;
-  const ssize_t result =
-      send(state->signal_fd, &token, sizeof(token), MSG_DONTWAIT);
-  if (result == sizeof(token)) {
-    state->signaled = true;
-    return true;
-  }
-  return result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
-}
-
-intptr_t EventFdRead(HostFdObject *descriptor, void *bytes, size_t count,
-                     int *android_errno) {
-  if (count < sizeof(uint64_t) || bytes == nullptr) {
-    *android_errno = 22;
-    return -1;
-  }
-  auto state = descriptor->event;
-  std::lock_guard lock(state->mutex);
-  if (state->counter == 0) {
-    *android_errno = 11;
-    return -1;
-  }
-  uint64_t token = 0;
-  (void)recv(descriptor->fd, &token, sizeof(token), MSG_DONTWAIT);
-  state->signaled = false;
-  const uint64_t value = state->semaphore ? 1 : state->counter;
-  state->counter -= value;
-  std::memcpy(bytes, &value, sizeof(value));
-  if (state->counter != 0) {
-    const uint64_t next_token = 1;
-    const ssize_t result =
-        send(state->signal_fd, &next_token, sizeof(next_token), MSG_DONTWAIT);
-    if (result == sizeof(next_token))
-      state->signaled = true;
-  }
-  *android_errno = 0;
-  return sizeof(uint64_t);
-}
-
-intptr_t EventFdWrite(HostFdObject *descriptor, const void *bytes, size_t count,
-                      int *android_errno) {
-  if (count != sizeof(uint64_t) || bytes == nullptr) {
-    *android_errno = 22;
-    return -1;
-  }
-  uint64_t value = 0;
-  std::memcpy(&value, bytes, sizeof(value));
-  if (value == UINT64_MAX) {
-    *android_errno = 22;
-    return -1;
-  }
-  auto state = descriptor->event;
-  std::lock_guard lock(state->mutex);
-  if (value > UINT64_MAX - state->counter) {
-    *android_errno = 11;
-    return -1;
-  }
-  const bool was_empty = state->counter == 0;
-  state->counter += value;
-  if (was_empty && value != 0 && !state->signaled) {
-    const uint64_t token = 1;
-    const ssize_t result =
-        send(state->signal_fd, &token, sizeof(token), MSG_DONTWAIT);
-    if (result == sizeof(token))
-      state->signaled = true;
-  }
-  *android_errno = 0;
-  return sizeof(uint64_t);
-}
-
 intptr_t OwnerRead(void *, uint64_t object, void *bytes, size_t count,
                    int *android_errno) {
   auto *socket = reinterpret_cast<HostFdObject *>(object);
   if (socket->event != nullptr)
-    return EventFdRead(socket, bytes, count, android_errno);
+    return darwin_art::eventfd::Read(socket->event, socket->fd, bytes, count,
+                                     android_errno);
   const auto started = std::chrono::steady_clock::now();
   const int status_flags = fcntl(socket->fd, F_GETFL);
   const ssize_t result = recv(socket->fd, bytes, count, 0);
@@ -870,7 +795,8 @@ intptr_t OwnerWrite(void *, uint64_t object, const void *bytes, size_t count,
                     int *android_errno) {
   auto *socket = reinterpret_cast<HostFdObject *>(object);
   if (socket->event != nullptr)
-    return EventFdWrite(socket, bytes, count, android_errno);
+    return darwin_art::eventfd::Write(socket->event, bytes, count,
+                                      android_errno);
   const ssize_t result = send(socket->fd, bytes, count, 0);
   if (SocketDebugEnabled()) {
     uint32_t control = 0;
@@ -889,7 +815,12 @@ intptr_t OwnerWrite(void *, uint64_t object, const void *bytes, size_t count,
 int OwnerPoll(void *, uint64_t object, int16_t events, int16_t *revents,
               int *android_errno) {
   auto *socket = reinterpret_cast<HostFdObject *>(object);
-  (void)EnsureEventFdSignaled(socket->event);
+  int signal_errno = 0;
+  if (darwin_art::eventfd::EnsureSignaled(socket->event, &signal_errno) != 0) {
+    *android_errno = AndroidErrno(signal_errno);
+    *revents = 0;
+    return -1;
+  }
   pollfd descriptor{socket->fd, events, 0};
   const int result = poll(&descriptor, 1, 0);
   if (result < 0) {
@@ -924,7 +855,12 @@ int OwnerPollMany(void *, const uint64_t *objects, const int16_t *events,
   std::vector<pollfd> descriptors(count);
   for (size_t index = 0; index < count; ++index) {
     const auto *object = reinterpret_cast<const HostFdObject *>(objects[index]);
-    (void)EnsureEventFdSignaled(object->event);
+    int signal_errno = 0;
+    if (darwin_art::eventfd::EnsureSignaled(object->event, &signal_errno) !=
+        0) {
+      *android_errno = AndroidErrno(signal_errno);
+      return -1;
+    }
     descriptors[index] = pollfd{object->fd, events[index], 0};
   }
   const int result =
@@ -954,7 +890,7 @@ int OwnerPollMany(void *, const uint64_t *objects, const int16_t *events,
 
 uint64_t OwnerCreatePollWake(void *, int *android_errno) {
   int descriptors[2] = {-1, -1};
-  if (pipe(descriptors) != 0) {
+  if (native_fd::CreateCloseOnExecPipe(descriptors) != 0) {
     *android_errno = AndroidErrno(errno);
     return 0;
   }
@@ -1025,7 +961,12 @@ int OwnerPollManyWithWake(void *, const uint64_t *objects,
   std::vector<pollfd> descriptors(count + 1);
   for (size_t index = 0; index < count; ++index) {
     const auto *object = reinterpret_cast<const HostFdObject *>(objects[index]);
-    (void)EnsureEventFdSignaled(object->event);
+    int signal_errno = 0;
+    if (darwin_art::eventfd::EnsureSignaled(object->event, &signal_errno) !=
+        0) {
+      *android_errno = AndroidErrno(signal_errno);
+      return -1;
+    }
     descriptors[index] = pollfd{object->fd, events[index], 0};
   }
   descriptors[count] = pollfd{wake->read_fd, POLLIN, 0};
@@ -1076,7 +1017,8 @@ intptr_t PipeOwnerRead(void *, uint64_t object, void *bytes, size_t count,
                        int *android_errno) {
   auto *pipe = reinterpret_cast<HostFdObject *>(object);
   if (pipe->event != nullptr)
-    return EventFdRead(pipe, bytes, count, android_errno);
+    return darwin_art::eventfd::Read(pipe->event, pipe->fd, bytes, count,
+                                     android_errno);
   const auto started = std::chrono::steady_clock::now();
   const int status_flags = fcntl(pipe->fd, F_GETFL);
   const ssize_t result = read(pipe->fd, bytes, count);
@@ -1101,7 +1043,7 @@ intptr_t PipeOwnerWrite(void *, uint64_t object, const void *bytes,
                         size_t count, int *android_errno) {
   auto *pipe = reinterpret_cast<HostFdObject *>(object);
   if (pipe->event != nullptr)
-    return EventFdWrite(pipe, bytes, count, android_errno);
+    return darwin_art::eventfd::Write(pipe->event, bytes, count, android_errno);
   const ssize_t result =
       write(pipe->peer_fd >= 0 ? pipe->peer_fd : pipe->fd, bytes, count);
   *android_errno = result < 0 ? AndroidErrno(errno) : 0;
@@ -1431,12 +1373,7 @@ int OwnerClose(void *context, uint64_t object, int *android_errno) {
   auto *socket = reinterpret_cast<HostFdObject *>(object);
   if (socket->fence_merge)
     socket->fence_merge->Cancel();
-  if (socket->event != nullptr) {
-    std::lock_guard lock(socket->event->mutex);
-    socket->event->counter = 0;
-    socket->event->signaled = false;
-    socket->event->signal_fd = -1;
-  }
+  darwin_art::eventfd::Retire(socket->event);
   if (socket->timer != nullptr) {
     std::lock_guard lock(socket->timer->mutex);
     socket->timer->closing = true;
@@ -2019,6 +1956,29 @@ DarwinArtFdSocketRequestV1 Request(uint32_t operation) {
 
 } // namespace
 
+extern "C" int darwin_art_bionic_binder_fd_acquire_process(
+    void **process_cookie, DarwinArtFdBroker **broker) {
+  if (process_cookie == nullptr || broker == nullptr)
+    return -1;
+  *process_cookie = nullptr;
+  *broker = nullptr;
+  Process *process = AcquireProcess();
+  if (process == nullptr || process->broker == nullptr) {
+    if (process != nullptr)
+      ReleaseProcess(process);
+    return -1;
+  }
+  *process_cookie = process;
+  *broker = process->broker;
+  return 0;
+}
+
+extern "C" void darwin_art_bionic_binder_fd_release_process(
+    void *process_cookie) {
+  if (process_cookie != nullptr)
+    ReleaseProcess(static_cast<Process *>(process_cookie));
+}
+
 extern "C" int darwin_art_bionic_socket_broker_install_unix_endpoint(
     const void *address, uint32_t length, const char *host_path) {
   PreserveErrno preserve;
@@ -2178,7 +2138,7 @@ extern "C" int darwin_art_bionic_socket_broker_socket(int domain, int type,
     return Fail(94, -1);
   if (!TranslateProtocol(protocol, &host_protocol))
     return Fail(93, -1);
-  const int fd = socket(host_domain, host_type, host_protocol);
+  const int fd = native_fd::CreateCloseOnExecSocket(host_domain, host_type, host_protocol);
   if (fd < 0)
     return Fail(AndroidErrno(errno), -1);
   if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 ||
@@ -2239,7 +2199,7 @@ extern "C" int darwin_art_bionic_socket_broker_pipe2(int32_t descriptors[2],
     return Fail(38, -1);
 
   int host[2] = {-1, -1};
-  if (pipe(host) != 0)
+  if (native_fd::CreateCloseOnExecPipe(host) != 0)
     return Fail(AndroidErrno(errno), -1);
   if (fcntl(host[0], F_SETFD, FD_CLOEXEC) != 0 ||
       fcntl(host[1], F_SETFD, FD_CLOEXEC) != 0 ||
@@ -2311,7 +2271,7 @@ extern "C" int darwin_art_bionic_socket_broker_eventfd(uint32_t initial_value,
   if (process == nullptr)
     return Fail(38, -1);
   int host[2] = {-1, -1};
-  if (socketpair(AF_UNIX, SOCK_DGRAM, 0, host) != 0)
+  if (native_fd::CreateCloseOnExecSocketPair(AF_UNIX, SOCK_DGRAM, 0, host) != 0)
     return Fail(AndroidErrno(errno), -1);
   const bool nonblocking = (flags & kAndroidONonblock) != 0;
   if (fcntl(host[0], F_SETFD, FD_CLOEXEC) != 0 ||
@@ -2324,10 +2284,13 @@ extern "C" int darwin_art_bionic_socket_broker_eventfd(uint32_t initial_value,
     (void)close(host[1]);
     return Fail(error, -1);
   }
-  auto event = std::make_shared<EventFdState>();
-  event->counter = initial_value;
-  event->semaphore = (flags & 1) != 0;
-  event->signal_fd = host[1];
+  auto event = darwin_art::eventfd::Create(initial_value, (flags & 1) != 0,
+                                           host[1]);
+  if (event == nullptr) {
+    (void)close(host[0]);
+    (void)close(host[1]);
+    return Fail(12, -1);
+  }
   auto *object = new (std::nothrow)
       HostFdObject{host[0], host[1], nullptr, nullptr, event};
   if (object == nullptr) {
@@ -2335,7 +2298,13 @@ extern "C" int darwin_art_bionic_socket_broker_eventfd(uint32_t initial_value,
     (void)close(host[1]);
     return Fail(12, -1);
   }
-  (void)EnsureEventFdSignaled(event);
+  int signal_errno = 0;
+  if (darwin_art::eventfd::EnsureSignaled(event, &signal_errno) != 0) {
+    delete object;
+    (void)close(host[0]);
+    (void)close(host[1]);
+    return Fail(AndroidErrno(signal_errno), -1);
+  }
   process->objects.fetch_add(1, std::memory_order_release);
   int guest_fd = -1;
   const auto status = darwin_art_fd_broker_publish_with_flags(
@@ -2361,7 +2330,7 @@ extern "C" int darwin_art_bionic_socket_broker_timerfd_create(int clock_id,
   if (process == nullptr)
     return Fail(38, -1);
   int host[2] = {-1, -1};
-  if (socketpair(AF_UNIX, SOCK_DGRAM, 0, host) != 0)
+  if (native_fd::CreateCloseOnExecSocketPair(AF_UNIX, SOCK_DGRAM, 0, host) != 0)
     return Fail(AndroidErrno(errno), -1);
   const bool nonblocking = (flags & kAndroidONonblock) != 0;
   if (fcntl(host[0], F_SETFD, FD_CLOEXEC) != 0 ||
@@ -2576,7 +2545,7 @@ darwin_art_bionic_socket_broker_socketpair(int domain, int type, int protocol,
   if (process == nullptr)
     return Fail(38, -1);
   int host[2] = {-1, -1};
-  if (socketpair(AF_UNIX, host_type, 0, host) != 0)
+  if (native_fd::CreateCloseOnExecSocketPair(AF_UNIX, host_type, 0, host) != 0)
     return Fail(AndroidErrno(errno), -1);
 #ifdef SO_NOSIGPIPE
   // socket() applies this policy to every broker-owned socket. Keep
@@ -3526,9 +3495,70 @@ extern "C" int darwin_art_bionic_fd_import_from_scm(int host_fd) {
   return guest_fd;
 }
 
+struct ScmExportContext {
+  Process* process = nullptr;
+  std::vector<std::unique_ptr<darwin_art::bionic::scm::RetainedScmExport>>*
+      retained = nullptr;
+};
+
+using CarrierExport = darwin_art::bionic::scm::ScopedCarrierExport;
+
+bool CreateCarrierExport(Process *process, int guest_descriptor,
+                         std::unique_ptr<CarrierExport> *carrier) {
+  if (process == nullptr || carrier == nullptr)
+    return false;
+  const bool central_namespace =
+      (static_cast<uint32_t>(guest_descriptor) & kCentralBrokerTokenTopMask) ==
+      kCentralBrokerTokenMarker;
+  DarwinArtFdIoResult result{};
+  const auto status = CarrierExport::Create(
+      process->broker, guest_descriptor, central_namespace,
+      &darwin_art_bionic_fd_export_for_scm, carrier, &result);
+  if (status == DARWIN_ART_FD_BROKER_OK && *carrier != nullptr)
+    return true;
+  if (result.android_errno != 0)
+    darwin_art_bionic_errno_store(result.android_errno);
+  else if (central_namespace)
+    darwin_art_bionic_errno_store(BrokerFailure(status));
+  return false;
+}
+
+int ExportDescriptorForSend(void* opaque, int guest_descriptor,
+                            bool* borrowed) {
+  auto* context = static_cast<ScmExportContext*>(opaque);
+  if (context == nullptr || context->process == nullptr ||
+      context->retained == nullptr || borrowed == nullptr)
+    return Fail(14, -1);
+  *borrowed = false;
+  if ((static_cast<uint32_t>(guest_descriptor) & kCentralBrokerTokenTopMask) !=
+      kCentralBrokerTokenMarker)
+    return darwin_art_bionic_fd_export_for_scm(guest_descriptor);
+
+  std::unique_ptr<darwin_art::bionic::scm::RetainedScmExport> retained;
+  DarwinArtFdIoResult result{};
+  const auto status =
+      darwin_art::bionic::scm::RetainedScmExport::Create(
+          context->process->broker, guest_descriptor, &retained, &result);
+  if (status != DARWIN_ART_FD_BROKER_OK || retained == nullptr) {
+    darwin_art_bionic_errno_store(
+        result.android_errno != 0 ? result.android_errno
+                                  : BrokerFailure(status));
+    return -1;
+  }
+  const int host_fd = retained->host_fd();
+  try {
+    context->retained->push_back(std::move(retained));
+  } catch (const std::bad_alloc&) {
+    darwin_art_bionic_errno_store(12);
+    return -1;
+  }
+  *borrowed = true;
+  return host_fd;
+}
+
 static intptr_t SendMessageOnHostSocket(
-    int host_socket, int guest_fd, const AndroidMsghdr *android_message,
-    int android_flags) {
+    Process* process, const CarrierExport &carrier, int guest_fd,
+    const AndroidMsghdr *android_message, int android_flags) {
   if (android_message == nullptr ||
       (android_message->vector_count != 0 &&
        android_message->vectors == nullptr) ||
@@ -3553,62 +3583,24 @@ static intptr_t SendMessageOnHostSocket(
     vectors[index].iov_base = android_message->vectors[index].base;
     vectors[index].iov_len = android_message->vectors[index].length;
   }
-  std::vector<int> exported;
-  if (android_message->control_length != 0) {
-    if (android_message->control == nullptr)
-      return Fail(14, intptr_t{-1});
-    const auto *bytes = static_cast<const uint8_t *>(android_message->control);
-    size_t offset = 0;
-    while (offset + sizeof(AndroidCmsghdr) <= android_message->control_length) {
-      const auto *header =
-          reinterpret_cast<const AndroidCmsghdr *>(bytes + offset);
-      if (header->length < sizeof(AndroidCmsghdr) ||
-          header->length > android_message->control_length - offset) {
-        for (int host_fd : exported)
-          (void)close(host_fd);
-        return Fail(22, intptr_t{-1});
-      }
-      if (header->level != kAndroidSolSocket || header->type != SCM_RIGHTS) {
-        for (int host_fd : exported)
-          (void)close(host_fd);
-        return Fail(95, intptr_t{-1});
-      }
-      const size_t payload = header->length - sizeof(AndroidCmsghdr);
-      if (payload % sizeof(int) != 0) {
-        for (int host_fd : exported)
-          (void)close(host_fd);
-        return Fail(22, intptr_t{-1});
-      }
-      const auto *guest_fds = reinterpret_cast<const int *>(
-          bytes + offset + sizeof(AndroidCmsghdr));
-      for (size_t index = 0; index < payload / sizeof(int); ++index) {
-        const int host_fd =
-            darwin_art_bionic_fd_export_for_scm(guest_fds[index]);
-        if (host_fd < 0) {
-          if (SocketDebugEnabled()) {
-            std::fprintf(stderr,
-                         "DARWIN socket: pid=%d tid=%llu sendmsg fd=%d export guest_fd=%d "
-                         "failed errno=%d\n",
-                         getpid(), static_cast<unsigned long long>(SocketDebugThreadId()),
-                         guest_fd, guest_fds[index], errno);
-          }
-          for (int exported_fd : exported)
-            (void)close(exported_fd);
-          return -1;
-        }
-        if (SocketDebugEnabled()) {
-          std::fprintf(stderr,
-                       "DARWIN socket: pid=%d tid=%llu sendmsg fd=%d export guest_fd=%d "
-                       "host_fd=%d\n",
-                       getpid(), static_cast<unsigned long long>(SocketDebugThreadId()),
-                       guest_fd, guest_fds[index], host_fd);
-        }
-        exported.push_back(host_fd);
-      }
-      constexpr size_t alignment = sizeof(size_t);
-      offset += (header->length + alignment - 1) & ~(alignment - 1);
-    }
+  const int host_socket = carrier.host_fd();
+  darwin_art::bionic::scm::ExportedRights owned_exports;
+  std::vector<std::unique_ptr<darwin_art::bionic::scm::RetainedScmExport>>
+      retained_exports;
+  ScmExportContext export_context{process, &retained_exports};
+  const auto export_status = owned_exports.DecodeRetained(
+      android_message->control, android_message->control_length,
+      &ExportDescriptorForSend, &export_context);
+  using ExportStatus = darwin_art::bionic::scm::ExportStatus;
+  switch (export_status) {
+    case ExportStatus::Ok: break;
+    case ExportStatus::DescriptorFailure: return -1;
+    case ExportStatus::MissingControl: return Fail(14, intptr_t{-1});
+    case ExportStatus::InvalidControl: return Fail(22, intptr_t{-1});
+    case ExportStatus::Unsupported: return Fail(95, intptr_t{-1});
+    case ExportStatus::OutOfMemory: return Fail(12, intptr_t{-1});
   }
+  const auto exported = owned_exports.descriptors();
   std::vector<uint8_t> control;
   if (!exported.empty()) {
     control.resize(CMSG_SPACE(exported.size() * sizeof(int)));
@@ -3645,8 +3637,7 @@ static intptr_t SendMessageOnHostSocket(
                  exported.size(), android_flags, result,
                  result < 0 ? error : 0);
   }
-  for (int host_fd : exported)
-    (void)close(host_fd);
+  owned_exports.Clear();
   if (result < 0)
     return Fail(AndroidErrno(error), intptr_t{-1});
   return static_cast<intptr_t>(result);
@@ -3655,35 +3646,45 @@ static intptr_t SendMessageOnHostSocket(
 extern "C" intptr_t darwin_art_bionic_socket_broker_sendmsg(
     int fd, const AndroidMsghdr *android_message, int android_flags) {
   PreserveErrno preserve;
-  const int host_socket = darwin_art_bionic_fd_export_for_scm(fd);
-  if (host_socket < 0) return -1;
+  ProcessLease process_lease;
+  Process* process = process_lease.get();
+  if (process == nullptr)
+    return Fail(38, intptr_t{-1});
+  std::unique_ptr<CarrierExport> carrier;
+  if (!CreateCarrierExport(process, fd, &carrier))
+    return -1;
   const intptr_t result = SendMessageOnHostSocket(
-      host_socket, fd, android_message, android_flags);
-  (void)close(host_socket);
+      process, *carrier, fd, android_message, android_flags);
   return result;
 }
 
 extern "C" int darwin_art_bionic_socket_broker_sendmmsg(
-  int fd, AndroidMmsghdr* messages, uint32_t count, int flags) {
+    int fd, AndroidMmsghdr* messages, uint32_t count, int flags) {
   PreserveErrno preserve;
+  ProcessLease process_lease;
+  Process* process = process_lease.get();
+  if (process == nullptr)
+    return Fail(38, -1);
   // Linux validates the descriptor even for an empty batch, then treats a
   // larger vlen as a bounded batch rather than returning EINVAL.
   if (count == 0) {
-    const int host = darwin_art_bionic_fd_export_for_scm(fd);
-    if (host < 0) return -1;
+    std::unique_ptr<CarrierExport> carrier;
+    if (!CreateCarrierExport(process, fd, &carrier))
+      return -1;
     int socket_type = 0;
     socklen_t socket_type_length = sizeof(socket_type);
     const int socket_result = getsockopt(
-        host, SOL_SOCKET, SO_TYPE, &socket_type, &socket_type_length);
+        carrier->host_fd(), SOL_SOCKET, SO_TYPE, &socket_type,
+        &socket_type_length);
     const int socket_errno = errno;
-    (void)close(host);
     if (socket_result < 0) return Fail(AndroidErrno(socket_errno), -1);
     return 0;
   }
   if (messages == nullptr) return Fail(14, -1);
   const uint32_t limit = std::min(count, kAndroidSendMmsgMax);
-  const int host_socket = darwin_art_bionic_fd_export_for_scm(fd);
-  if (host_socket < 0) return -1;
+  std::unique_ptr<CarrierExport> carrier;
+  if (!CreateCarrierExport(process, fd, &carrier))
+    return -1;
 
   const int32_t prior_errno = darwin_art_bionic_errno_load();
   uint32_t sent = 0;
@@ -3706,25 +3707,21 @@ extern "C" int darwin_art_bionic_socket_broker_sendmmsg(
       }
     }
     const intptr_t result = SendMessageOnHostSocket(
-        host_socket, fd, &messages[sent].msg_hdr, flags);
+        process, *carrier, fd, &messages[sent].msg_hdr, flags);
     if (result < 0) {
       if (sent != 0) {
         // sendmmsg returns the number of completed messages after a partial
         // batch; errno is not part of that successful return.
         darwin_art_bionic_errno_store(prior_errno);
-        (void)close(host_socket);
         return static_cast<int>(sent);
       }
-      (void)close(host_socket);
       return -1;
     }
     if (static_cast<uint64_t>(result) > UINT32_MAX) {
       if (sent != 0) {
         darwin_art_bionic_errno_store(prior_errno);
-        (void)close(host_socket);
         return static_cast<int>(sent);
       }
-      (void)close(host_socket);
       return Fail(75, -1);
     }
     messages[sent].msg_len = static_cast<uint32_t>(result);
@@ -3733,7 +3730,6 @@ extern "C" int darwin_art_bionic_socket_broker_sendmmsg(
     // batch at that point and does not attempt later messages.
     if (requested_known && static_cast<uint64_t>(result) < requested) break;
   }
-  (void)close(host_socket);
   return static_cast<int>(sent);
 }
 
@@ -3942,7 +3938,7 @@ extern "C" int darwin_art_bionic_socket_broker_res_nquery(uint64_t network,
     return -38;
 
   int host_descriptors[2] = {-1, -1};
-  if (pipe(host_descriptors) != 0 ||
+  if (native_fd::CreateCloseOnExecPipe(host_descriptors) != 0 ||
       fcntl(host_descriptors[0], F_SETFD, FD_CLOEXEC) != 0 ||
       fcntl(host_descriptors[1], F_SETFD, FD_CLOEXEC) != 0) {
     const int error = host_descriptors[0] < 0 ? AndroidErrno(errno) : 5;

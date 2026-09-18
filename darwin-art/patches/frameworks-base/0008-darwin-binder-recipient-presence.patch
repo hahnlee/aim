@@ -1,0 +1,44 @@
+diff --git a/core/jni/android_util_Binder.cpp b/core/jni/android_util_Binder.cpp
+--- a/core/jni/android_util_Binder.cpp
++++ b/core/jni/android_util_Binder.cpp
+@@ -16,7 +16,8 @@
+ #define LOG_TAG "JavaBinder"
+ // #define LOG_NDEBUG 0
+ 
+ #include "android_util_Binder.h"
++#include "proxy_death_recipient.h"
+ 
+ #include <android-base/stringprintf.h>
+ #include <binder/BpBinder.h>
+@@ -945,7 +946,31 @@
+ BinderProxyNativeData* getBPNativeData(JNIEnv* env, jobject obj) {
+     return (BinderProxyNativeData *) env->GetLongField(obj, gBinderProxyOffsets.mNativeData);
+ }
+ 
++DeathRecipientPresence QueryProxyDeathRecipient(JNIEnv* env, jobject obj,
++                                               jobject recipient) {
++    // Resource evidence only. Public BinderProxy unlink owns Java-list cleanup.
++    // The caller must have completed its unique link attempt and never relink.
++    if (env->ExceptionCheck() || obj == nullptr || recipient == nullptr ||
++        gBinderProxyOffsets.mClass == nullptr || gBinderProxyOffsets.mNativeData == nullptr) {
++        return DeathRecipientPresence::UNSUPPORTED;
++    }
++    const bool proxy = env->IsInstanceOf(obj, gBinderProxyOffsets.mClass);
++    if (env->ExceptionCheck() || !proxy) return DeathRecipientPresence::UNSUPPORTED;
++    BinderProxyNativeData* nd = getBPNativeData(env, obj);
++    if (env->ExceptionCheck() || nd == nullptr || nd->mObject == nullptr ||
++        nd->mOrgue == nullptr || nd->mObject->localBinder() != nullptr) {
++        return DeathRecipientPresence::UNSUPPORTED;
++    }
++    // BinderProxy's rooted Java argument retains native data for this call.
++    // find() owns the list mutex; keep a strong list and result during inspection.
++    sp<DeathRecipientList> list = nd->mOrgue;
++    sp<JavaRecipient<IBinder::DeathRecipient>> found = list->find(recipient);
++    if (env->ExceptionCheck()) return DeathRecipientPresence::UNSUPPORTED;
++    return found == nullptr ? DeathRecipientPresence::ABSENT
++                            : DeathRecipientPresence::PRESENT;
++}
++
+ // If the argument is a JavaBBinder, return the Java object that was used to create it.
+ // Otherwise return a BinderProxy for the IBinder. If a previous call was passed the
+ // same IBinder, and the original BinderProxy is still alive, return the same BinderProxy.

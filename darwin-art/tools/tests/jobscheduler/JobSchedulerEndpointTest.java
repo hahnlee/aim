@@ -16,8 +16,9 @@ public final class JobSchedulerEndpointTest {
 
     private static ApplicationProcessRegistry processes() {
         ApplicationProcessRegistry result = new ApplicationProcessRegistry();
-        result.beginAttachment(42, 10042, new Binder(), 1L);
-        result.identify(42, "org.example.app");
+        IBinder thread = new Binder();
+        result.beginAttachment(42, 10042, thread, 1L);
+        result.identify(42, 1L, thread, "org.example.app");
         result.finishAttachment(42, 1L);
         Binder.setCallingPid(42);
         return result;

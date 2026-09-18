@@ -44,7 +44,8 @@ for unit in linker_config linker_utils linker_debug async_safe_log; do
 done
 xcrun clang++ "${flags[@]}" -include "$root/compat/loader/warning_basename.h" \
   -Dbasename=darwin_art_linker_gnu_basename \
-  -c "$src/linker/linker_dlwarning.cpp" -o "$out/linker_dlwarning.o"
+  -c "$src/linker/linker_dlwarning.cpp" \
+  -MMD -MF "$out/linker_dlwarning.o.d" -o "$out/linker_dlwarning.o"
 for unit in guest_config linker_config_fs; do
   xcrun clang++ "${flags[@]}" -c "$root/compat/filesystem/$unit.cc" -o "$out/$unit.o"
 done

@@ -2,6 +2,7 @@
 #include "../display/configuration.h"
 #include "../pm/declared_providers.h"
 #include "../system/application_shared_memory.h"
+#include "../compat/policy_binding.h"
 namespace darwin_art::framework::am {
 bool DispatchApplicationBinding(JNIEnv* env, jobject endpoint, jobject info,
     jobject resources, jstring process_name, const char* encoded) {
@@ -20,7 +21,7 @@ bool DispatchApplicationBinding(JNIEnv* env, jobject endpoint, jobject info,
   jfieldID default_compat = env->GetStaticFieldID(
       compat_type, "DEFAULT_COMPATIBILITY_INFO", "Landroid/content/res/CompatibilityInfo;");
   if (default_compat == nullptr) return fail();
-  jobject compat = env->GetStaticObjectField(compat_type, default_compat);
+  jobject compatibility_info = env->GetStaticObjectField(compat_type, default_compat);
   jobject providers = pm::DeclaredProviders(env, info,
       encoded);
   if (providers == nullptr || env->ExceptionCheck()) return fail();
@@ -35,10 +36,11 @@ bool DispatchApplicationBinding(JNIEnv* env, jobject endpoint, jobject info,
   jmethodID bundle_ctor = env->GetMethodID(bundle_type, "<init>", "()V");
   if (bundle_ctor == nullptr) return fail();
   jobject settings = env->NewObject(bundle_type, bundle_ctor);
-  jlongArray changes = env->NewLongArray(0);
+  compat::ApplicationChanges changes;
+  if (!compat::EvaluateApplicationChanges(env, info, &changes)) return fail();
   jobject application_memory =
       system::DuplicateApplicationSharedMemoryReader(env);
-  if (settings == nullptr || changes == nullptr || application_memory == nullptr ||
+  if (settings == nullptr || application_memory == nullptr ||
       env->ExceptionCheck()) return fail();
   jclass endpoint_type = env->GetObjectClass(endpoint);
   jmethodID bind = env->GetMethodID(endpoint_type, "bindApplication",
@@ -55,10 +57,10 @@ bool DispatchApplicationBinding(JNIEnv* env, jobject endpoint, jobject info,
   args[1].l = info;
   args[5].l = provider_list;
   args[16].l = config;
-  args[17].l = compat;
+  args[17].l = compatibility_info;
   args[19].l = settings;
-  args[23].l = changes;
-  args[24].l = changes;
+  args[23].l = changes.disabled;
+  args[24].l = changes.loggable;
   // serializedSystemFontMap is nullable SharedMemory. The following raw
   // FileDescriptor is not: the generated AIDL proxy always writes it.
   args[26].l = application_memory;

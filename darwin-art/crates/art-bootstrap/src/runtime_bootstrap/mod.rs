@@ -7,6 +7,7 @@ mod compile;
 mod manifest;
 mod runtime_jobs;
 mod seed_jobs;
+mod source_overlay;
 mod staging;
 
 pub(crate) use archive::finalize;

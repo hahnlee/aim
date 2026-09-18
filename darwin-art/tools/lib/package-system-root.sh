@@ -3,11 +3,27 @@
 # Native and service-code extraction belong to their separate pinned producers.
 darwin_art_package_system_root() (
   set -euo pipefail
-  local input="$1" destination="$2" fonts="$3" framework="$4" required resource_stage helper_root services
+  local input="$1" destination="$2" fonts="$3" framework="$4" required resource_stage helper_root services compat keychars
   helper_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || return
   services="${5:-$helper_root/_build/android16-system-services/services.jar}"
   source "$helper_root/tools/lib/system-services-artifact.sh" || return
   darwin_art_verify_system_services "$services" || return
+  source "$helper_root/tools/lib/system-compat-artifact.sh" || return
+  if [[ $# -ge 6 ]]; then
+    compat="$6"
+  else
+    compat="$(darwin_art_prepare_system_compat_config_artifact)" || return
+  fi
+  darwin_art_verify_system_compat_config_inventory "$compat" \
+    "$helper_root/upstream/android16-system-compat-files.lock" || return
+  source "$helper_root/tools/lib/key-character-map-artifact.sh" || return
+  if [[ $# -ge 7 ]]; then
+    keychars="$7"
+  else
+    keychars="$(darwin_art_prepare_key_character_map_artifact)" || return
+  fi
+  darwin_art_verify_key_character_map_inventory "$keychars" \
+    "$helper_root/upstream/android16-key-character-map.lock" || return
   [[ "$input" = /* && -d "$input" && ! -L "$input" && "$input" != / ]] || return 64
   [[ "$destination" = /* && ! -e "$destination" && ! -L "$destination" ]] || return 64
   [[ "$destination" != "$input/"* ]] || return 64
@@ -22,6 +38,9 @@ darwin_art_package_system_root() (
   [[ ! -e "$input/system/fonts" && ! -L "$input/system/fonts" &&
      ! -e "$input/system/framework" && ! -L "$input/system/framework" &&
      ! -e "$input/system/etc/fonts.xml" && ! -L "$input/system/etc/fonts.xml" &&
+     ! -e "$input/system/etc/compatconfig" && ! -L "$input/system/etc/compatconfig" &&
+     ! -e "$input/system/usr/keychars" && ! -L "$input/system/usr/keychars" &&
+     ! -e "$input/system/system_ext" && ! -L "$input/system/system_ext" &&
      ! -e "$input/system/etc/font_fallback.xml" && ! -L "$input/system/etc/font_fallback.xml" ]] || return 65
   for required in apex system linkerconfig; do
     [[ -d "$input/$required" && ! -L "$input/$required" ]] || return 69
@@ -61,6 +80,10 @@ darwin_art_package_system_root() (
   # not the subsequent append. Never publish two versions of the same file.
   /usr/bin/tar -cf "$destination" -X "$resource_stage/boot-entries" \
     -C "$input" apex system linkerconfig || return
+  /usr/bin/tar -rf "$destination" \
+    -C "$compat" system/etc/compatconfig system/system_ext/etc/compatconfig || return
+  /usr/bin/tar -rf "$destination" \
+    -C "$keychars" system/usr/keychars || return
   /usr/bin/tar -rf "$destination" \
     -C "$fonts" system/etc/fonts.xml system/etc/font_fallback.xml system/fonts \
     -C "$resource_stage" system/framework || return

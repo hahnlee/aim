@@ -74,21 +74,44 @@ where
     S: NativeResource,
     G: NativeResource,
 {
-    let mut first_status = session
-        .begin_shutdown()
-        .err()
-        .map(|error| error.status() as i32);
+    session.begin_shutdown()?;
+    // Stop ingress only. Native teardown still borrows every allocation.
+    if let Some(graphics) = session.graphics_ingress_for_shutdown_mut()? {
+        let status = graphics.close();
+        if status != 0 {
+            return Err(RuntimeError::EngineFailure { status });
+        }
+    }
+    let mut waits = 0_u64;
+    let mut native_providers_released = false;
+    if let Some(engine) = session.engine_mut() {
+        loop {
+            let status = engine.close();
+            if status == darwin_art_engine_sys::PROCESS_SHUTDOWN_NOT_READY {
+                if waits % 1000 == 0 {
+                    eprintln!("ART shutdown pending: waiting for native teardown readiness");
+                }
+                waits = waits.saturating_add(1);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            if status != 0 {
+                // Failure is not permission to unload a live VM's providers.
+                return Err(RuntimeError::EngineFailure { status });
+            }
+            break;
+        }
+        native_providers_released = engine.providers_released_by_native_shutdown();
+    }
+    let mut first_status = None;
     let mut remember = |status: i32| {
         if status != 0 && first_status.is_none() {
             first_status = Some(status);
         }
     };
 
-    // The ART graphics shutdown callback still owns a borrowed surface handle
-    // (it clears the owner-wake callback and drains GPU work). Remove the
-    // Surface subsystem lease first, but keep the SurfaceSession alive until
-    // GraphicsSession::close has completed. Destroying the surface first
-    // leaves a dangling handle in GraphicsState and aborts during teardown.
+    // Native shutdown has succeeded. Retire leases in installation-reverse
+    // order; only now may the borrowed surface allocation be destroyed.
     if session.surface().is_some() {
         if let Err(error) = session.remove_expected_subsystem(Subsystem::Surface) {
             remember(error.status() as i32);
@@ -98,9 +121,6 @@ where
     if session.graphics().is_some() {
         if let Err(error) = session.remove_expected_subsystem(Subsystem::Graphics) {
             remember(error.status() as i32);
-        }
-        if let Ok(Some(graphics)) = session.graphics_for_shutdown_mut() {
-            remember(graphics.close());
         }
     }
 
@@ -125,12 +145,6 @@ where
         remember(error.status() as i32);
     }
 
-    // DestroyJavaVM may still execute provider-backed code, so the engine
-    // closes before provider hooks are cleared and the image is dropped.
-    if let Some(engine) = session.engine_mut() {
-        remember(engine.close());
-    }
-
     // The ART shutdown callback finalizes the bound graphics session while
     // the VM is still attached. Only after that callback returns may the
     // Rust owner invoke its destroy function. Keep the engine image mapped
@@ -146,7 +160,9 @@ where
     // provider hooks while that image is still owned; releasing the engine
     // first would turn this callback into a use-after-unload.
     if let Some(provider) = session.provider_mut() {
-        remember(provider.adopt_native_shutdown());
+        if native_providers_released {
+            remember(provider.adopt_native_shutdown());
+        }
         remember(provider.clear());
     }
     if let Err(error) = session.release_provider() {
@@ -230,6 +246,46 @@ mod tests {
     }
 
     #[test]
+    fn pre_entry_close_releases_real_provider_bridge_lease() {
+        use crate::{ProviderBridge, ProviderKind};
+        static LIVE: AtomicUsize = AtomicUsize::new(0);
+        static RELEASES: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn acquire(_: u32, _: i32) -> i32 {
+            LIVE.fetch_add(1, Ordering::SeqCst);
+            0
+        }
+        unsafe extern "C" fn release(_: u32) -> i32 {
+            assert_eq!(LIVE.fetch_sub(1, Ordering::SeqCst), 1);
+            RELEASES.fetch_add(1, Ordering::SeqCst);
+            0
+        }
+        unsafe extern "C" fn clear() {
+            assert_eq!(LIVE.load(Ordering::SeqCst), 0);
+        }
+        struct PreEntryEngine;
+        impl NativeResource for PreEntryEngine {
+            fn close(&mut self) -> i32 {
+                0
+            }
+            // No native process teardown: default false preserves leases.
+        }
+        let mut session = RuntimeSession::<PreEntryEngine, ProviderBridge, Probe, Probe>::new();
+        session.start().unwrap();
+        assert!(session.attach_engine(PreEntryEngine).is_ok());
+        let provider = ProviderBridge::from_callbacks(acquire, release, clear);
+        provider
+            .acquire_process_lease(ProviderKind::Network, -1)
+            .unwrap();
+        assert!(session.attach_provider(provider).is_ok());
+        session.install_subsystem(Subsystem::Engine).unwrap();
+        session.install_subsystem(Subsystem::ElfNamespace).unwrap();
+        session.shutdown_native().unwrap();
+        assert_eq!(LIVE.load(Ordering::SeqCst), 0);
+        assert_eq!(RELEASES.load(Ordering::SeqCst), 1);
+        assert!(session.is_empty());
+    }
+
+    #[test]
     fn dropped_guard_runs_the_same_reverse_shutdown_transaction() {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut session = RuntimeSession::<Probe, Probe, Probe, Probe>::new();
@@ -293,9 +349,9 @@ mod tests {
             &*events.lock().unwrap(),
             &[
                 "graphics",
+                "engine",
                 "surface",
                 "drop-surface",
-                "engine",
                 "finalize-graphics",
                 "drop-graphics",
                 "provider-clear",

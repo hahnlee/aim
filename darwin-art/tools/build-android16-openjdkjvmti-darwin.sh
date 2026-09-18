@@ -12,6 +12,14 @@ patch_file="$project_root/patches/openjdkjvmti/0001-darwin-monotonic-jvmti-time.
 allocator_patch_file="$project_root/patches/openjdkjvmti/0002-darwin-malloc-size.patch"
 search_patch_file="$project_root/patches/openjdkjvmti/0003-darwin-in-memory-dex-file.patch"
 search_classes_patch_file="$project_root/patches/openjdkjvmti/0004-darwin-search-lazy-system-classes.patch"
+runtime_shadow="$project_root/_build/runtime-common/patched-source"
+runtime_shadow_identity="$runtime_shadow/.darwin-art-shadow-identity"
+[[ -s "$runtime_shadow_identity" &&
+   -f "$runtime_shadow/runtime/gc/allocator_type.h" &&
+   -f "$runtime_shadow/runtime/jit/jit_options.h" ]] || {
+  echo 'openjdkjvmti-darwin: complete canonical ART shadow missing; run prepare-runtime-common-shadow first' >&2
+  exit 2
+}
 
 # shellcheck disable=SC1090
 source "$project_root/upstream/android16-openjdkjvmti.lock"
@@ -34,6 +42,12 @@ mkdir -p "$object_root"
   exit 5
 }
 patched_source_root="$build_root/patched-source"
+patched_identity="$(shasum -a 256 "$patch_file" "$allocator_patch_file" \
+  "$search_patch_file" "$search_classes_patch_file" \
+  "$source_root/ti_timers.cc" "$source_root/ti_allocator.cc" \
+  "$source_root/ti_search.cc" | shasum -a 256 | awk '{print $1}')"
+if [[ ! -f "$patched_source_root/.darwin-art-identity" ]] ||
+   [[ "$(< "$patched_source_root/.darwin-art-identity")" != "$patched_identity" ]]; then
 rm -rf "$patched_source_root"
 mkdir -p "$patched_source_root"
 cp "$source_root/ti_timers.cc" "$patched_source_root/ti_timers.cc"
@@ -43,6 +57,8 @@ patch --batch --forward -p1 -d "$patched_source_root" < "$patch_file" >/dev/null
 patch --batch --forward -p1 -d "$patched_source_root" < "$allocator_patch_file" >/dev/null
 patch --batch --forward -p1 -d "$patched_source_root" < "$search_patch_file" >/dev/null
 patch --batch --forward -p1 -d "$patched_source_root" < "$search_classes_patch_file" >/dev/null
+printf '%s\n' "$patched_identity" > "$patched_source_root/.darwin-art-identity"
+fi
 
 sources=(
   alloc_manager.cc deopt_manager.cc events.cc object_tagging.cc OpenjdkJvmTi.cc
@@ -103,6 +119,7 @@ for relative in "${sources[@]}"; do
   objects+=("$object")
   if [[ ! -f "$object" || "$source" -nt "$object" ||
         "$0" -nt "$object" ||
+        "$runtime_shadow_identity" -nt "$object" ||
         "$source_root/.darwin-art-identity" -nt "$object" ]]; then
     clang++ "${common_flags[@]}" -c "$source" -o "$object"
   fi

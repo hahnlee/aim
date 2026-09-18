@@ -30,10 +30,26 @@ pub(crate) fn build_runtime_platform(root: &Path) -> Result<()> {
     ];
     let build_dir = root.join("_build/runtime-platform");
     let object_dir = build_dir.join("objects");
+    let patched_source_root = build_dir.join("patched-source");
+    let patched_runtime = patched_source_root.join("runtime");
     fs::create_dir_all(&object_dir)?;
+    fs::create_dir_all(&patched_runtime)?;
+
+    // Keep the Darwin fatal-signal exit adaptation as a reviewable patch over
+    // one pristine AOSP source.  The other platform files remain directly
+    // sourced from _aosp and retain their upstream host behavior.
+    let runtime_linux = runtime.join("runtime_linux.cc");
+    let staged_runtime_linux = patched_runtime.join("runtime_linux.cc");
+    fs::copy(&runtime_linux, &staged_runtime_linux)?;
+    run_command(
+        Command::new("patch")
+            .args(["--batch", "--forward", "-p1", "-i"])
+            .arg(root.join("patches/art/0195-darwin-fatal-signal-process-exit.patch"))
+            .current_dir(&patched_source_root),
+    )?;
 
     let sources = [
-        runtime.join("runtime_linux.cc"),
+        staged_runtime_linux,
         runtime.join("thread_linux.cc"),
         runtime.join("monitor_linux.cc"),
     ];

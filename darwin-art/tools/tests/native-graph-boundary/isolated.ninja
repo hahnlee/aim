@@ -1,0 +1,4 @@
+rule compile
+  command = true
+build product: compile runtime/embedding/process_entry.cc
+build genuine-fixture: compile probes/runtime_entry_probe.cc

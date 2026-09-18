@@ -10,6 +10,15 @@
 // unit makes a drift in either declaration fail during the native build rather
 // than becoming an opaque runtime failure.
 static_assert(std::is_standard_layout_v<darwin_art_process_config_t>);
+static_assert(std::is_standard_layout_v<darwin_art_binder_authority_hooks_t>);
+static_assert(sizeof(darwin_art_binder_authority_hooks_t) == 40);
+static_assert(alignof(darwin_art_binder_authority_hooks_t) == 8);
+static_assert(offsetof(darwin_art_binder_authority_hooks_t, struct_size) == 0);
+static_assert(offsetof(darwin_art_binder_authority_hooks_t, abi_version) == 4);
+static_assert(offsetof(darwin_art_binder_authority_hooks_t, context) == 8);
+static_assert(offsetof(darwin_art_binder_authority_hooks_t, retain) == 16);
+static_assert(offsetof(darwin_art_binder_authority_hooks_t, live) == 24);
+static_assert(offsetof(darwin_art_binder_authority_hooks_t, release) == 32);
 static_assert(std::is_standard_layout_v<darwin_art_lifecycle_hooks_t>);
 static_assert(sizeof(darwin_art_lifecycle_hooks_t) == 48);
 static_assert(alignof(darwin_art_lifecycle_hooks_t) == 8);
@@ -37,7 +46,9 @@ static_assert(offsetof(darwin_art_native_loader_config_t, linker_config_path) ==
 static_assert(offsetof(darwin_art_native_loader_config_t, executable_path) == 16);
 static_assert(offsetof(darwin_art_native_loader_config_t, library_search_path) == 24);
 static_assert(offsetof(darwin_art_native_loader_config_t, android_unwind_path) == 32);
-static_assert(sizeof(darwin_art_process_config_t) == 136);
+static_assert(sizeof(darwin_art_process_config_t) == 152);
+static_assert(offsetof(darwin_art_process_config_t, desktop_surface_context) == 136);
+static_assert(offsetof(darwin_art_process_config_t, binder_authority_hooks) == 144);
 static_assert(alignof(darwin_art_process_config_t) == 8);
 static_assert(offsetof(darwin_art_process_config_t, struct_size) == 0);
 static_assert(offsetof(darwin_art_process_config_t, abi_version) == 4);
@@ -79,6 +90,16 @@ static_assert(offsetof(DarwinArtSurfaceCreateInfo, height) == 4);
 static_assert(offsetof(DarwinArtSurfaceCreateInfo, title) == 8);
 static_assert(offsetof(DarwinArtSurfaceCreateInfo, visible) == 16);
 static_assert(offsetof(DarwinArtSurfaceCreateInfo, scale_to_display) == 17);
+static_assert(std::is_standard_layout_v<DarwinArtSurfaceInputSink>);
+static_assert(sizeof(DarwinArtSurfaceInputSink) == 48);
+static_assert(alignof(DarwinArtSurfaceInputSink) == 8);
+static_assert(offsetof(DarwinArtSurfaceInputSink, version) == 0);
+static_assert(offsetof(DarwinArtSurfaceInputSink, size) == 4);
+static_assert(offsetof(DarwinArtSurfaceInputSink, context) == 8);
+static_assert(offsetof(DarwinArtSurfaceInputSink, retain_context) == 16);
+static_assert(offsetof(DarwinArtSurfaceInputSink, release_context) == 24);
+static_assert(offsetof(DarwinArtSurfaceInputSink, pointer) == 32);
+static_assert(offsetof(DarwinArtSurfaceInputSink, key) == 40);
 
 extern "C" int darwin_art_abi_layout_anchor() {
   return 0;

@@ -2,6 +2,7 @@
 
 import CoreGraphics
 import Foundation
+import AppKit
 
 private func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("macos-window-input: \(message)\n".utf8))
@@ -69,6 +70,14 @@ let bounds = waitForWindow(ownerPID: ownerPID, timeoutSeconds: 15)
 let contentOrigin = CGPoint(x: bounds.minX, y: bounds.maxY - contentHeight)
 
 if mode == "click-content" {
+    // A title-bar click cannot select a target hidden behind another app at
+    // the same position. Raise the requested macOS process before HID input;
+    // this does not inject Android focus or call the guest input dispatcher.
+    guard let application = NSRunningApplication(processIdentifier: ownerPID),
+          application.activate(options: []) else {
+        fail("could not activate macOS process \(ownerPID)")
+    }
+    usleep(150_000)
     // A real title-bar click activates and orders the target window before input.
     // Content coordinates remain Android logical pixels/macOS points; AppKit's
     // backing-scale conversion maps them to the Retina Android surface exactly once.

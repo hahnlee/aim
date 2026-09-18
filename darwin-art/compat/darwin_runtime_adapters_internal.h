@@ -10,7 +10,6 @@
 
 #include "darwin_android_jni_trampoline.h"
 #include "darwin_android_elf_image_registry.h"
-#include "darwin_art_elf_jni_fixture_identity.h"
 #include "darwin_art_elf_loader.h"
 #include "darwin_art_bionic_dso_lifecycle.h"
 #include "darwin_art_bionic_provider_namespace.h"
@@ -34,45 +33,9 @@ inline constexpr uint32_t kNativeOwnerNamespace = 100;
 inline constexpr uint32_t kNativeOwnerAndroidUnwind = 105;
 inline constexpr uint32_t kNativeOwnerGraph = 110;
 inline constexpr uint32_t kNativeOwnerGraphHandle = 120;
-inline constexpr int kElfOpened = 1 << 0;
-inline constexpr int kElfOnLoadCalled = 1 << 1;
-inline constexpr int kElfFoundFixtureClass = 1 << 2;
-inline constexpr int kElfCapturedRegistration = 1 << 3;
-inline constexpr int kElfInstalledRegistration = 1 << 4;
-inline constexpr int kElfClassifiedTrampolines = 1 << 5;
-inline constexpr int kElfBionicProvidersRouted = 1 << 6;
-inline constexpr uint32_t kFixtureErrnoRouteMask = 1u << 0;
-inline constexpr uint32_t kFixtureStrlenRouteMask = 1u << 1;
-inline constexpr uint32_t kFixtureOpenRouteMask = 1u << 2;
-inline constexpr uint32_t kFixtureReadRouteMask = 1u << 3;
-inline constexpr uint32_t kFixtureCloseRouteMask = 1u << 4;
-inline constexpr uint32_t kFixtureScanfRouteMask = 1u << 5;
-inline constexpr uint32_t kFixtureVsscanfRouteMask = 1u << 6;
-inline constexpr uint32_t kFixtureSwprintfRouteMask = 1u << 7;
-inline constexpr uint32_t kFixtureIoctlRouteMask = 1u << 8;
-inline constexpr uint32_t kFixtureStrftimeRouteMask = 1u << 9;
-inline constexpr uint32_t kFixtureSendfileRouteMask = 1u << 10;
-inline constexpr uint32_t kFixtureAllProviderRouteMask =
-    kFixtureErrnoRouteMask | kFixtureStrlenRouteMask | kFixtureOpenRouteMask |
-    kFixtureReadRouteMask | kFixtureCloseRouteMask | kFixtureScanfRouteMask |
-    kFixtureVsscanfRouteMask | kFixtureSwprintfRouteMask |
-    kFixtureIoctlRouteMask | kFixtureStrftimeRouteMask |
-    kFixtureSendfileRouteMask;
-inline constexpr uint32_t kFixtureNativeAddEntryMask = 1u << 0;
-inline constexpr uint32_t kFixtureNativeSpillEntryMask = 1u << 1;
-inline constexpr uint32_t kFixtureNativeUsesEnvEntryMask = 1u << 2;
-inline constexpr uint32_t kFixtureAllEntryMask = 0xffu;
-
-extern std::atomic<int> g_elf_fixture_status;
-extern std::atomic<uint32_t> g_elf_classified_trampoline_mask;
-extern std::atomic<int> g_elf_fixture_lifecycle;
-extern std::atomic<uint32_t> g_elf_fixture_provider_routes;
-extern std::atomic<int> g_elf_fixture_namespace_lifecycle;
-
 struct ElfLibrary {
   uint64_t magic = kElfLibraryMagic;
   RuntimeNativeOwner* native_owner = nullptr;
-  bool fixture_graph = false;
   DarwinArtElfGraphHandle* graph = nullptr;
   DarwinArtElfHandle* android_unwind_provider = nullptr;
   DarwinArtBionicNamespace* provider_namespace = nullptr;
@@ -119,9 +82,6 @@ bool LookupOptionalElfSymbol(ElfLibrary* library,
                              const char* name,
                              uintptr_t* address,
                              std::string* error);
-bool IsExactFixtureGraph(const char* root_soname,
-                         const DarwinArtElfGraphSource* sources,
-                         size_t source_count);
 DarwinArtElfResolveStatus ResolveRuntimeProvider(
     void* context,
     const DarwinArtElfSymbolRequest* request,
@@ -165,9 +125,8 @@ uint64_t ProxyCallMethodV(void* context, void* object, void* method,
                           void* android_va_list, int32_t return_shorty,
                           int32_t is_static);
 
-// Debug-only wrappers used to observe an APK's Unity lifecycle JNI calls at
-// the registration boundary. They are inert unless
-// DARWIN_ART_DEBUG_UNITY_LIFECYCLE is set by the host.
+// Debug-only wrappers observe selected Unity lifecycle calls without changing
+// the normal JNI registration path when the debug environment gate is absent.
 void* MaybeWrapUnityLifecycleNative(const char* name, const char* signature,
                                     void* target);
 

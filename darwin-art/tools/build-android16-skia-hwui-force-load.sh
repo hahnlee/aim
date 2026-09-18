@@ -9,6 +9,7 @@ sources_lock="$project_root/sources.lock"
 build_dir="$project_root/_build/skia-hwui-force-load"
 shadow_skia="$build_dir/source"
 coretext_patch="$project_root/patches/skia/0001-darwin-hwui-disable-coretext-utils.patch"
+cross_tu_abi_patch="$project_root/patches/skia/0002-darwin-hwui-export-cross-tu-abi.patch"
 codecs_dir="$project_root/_build/graphics-codecs"
 freetype="$project_root/_aosp/external/freetype"
 freetype_archive="$codecs_dir/libft2-darwin.a"
@@ -59,6 +60,7 @@ verify_sha "$skia/client_utils/android/FrontBufferedStream.cpp" \
 verify_sha "$libwebp_root/Android.bp" "$WEBP_ANDROID_BP_SHA256"
 verify_sha "$libwebp_root/src/webp/decode.h" "$WEBP_DECODE_HEADER_SHA256"
 verify_sha "$coretext_patch" "$DARWIN_CORETEXT_PATCH_SHA256"
+verify_sha "$cross_tu_abi_patch" "$SKIA_CROSS_TU_ABI_PATCH_SHA256"
 
 required_archives=("$freetype_archive" "$libpng_archive" "$zlib_archive" \
   "$libjpeg_archive" \
@@ -87,12 +89,17 @@ while IFS= read -r entry; do
         "$shadow_skia/third_party/$(basename "$third_party_entry")"
     done < <(find "$entry" -mindepth 1 -maxdepth 1 -print | sort)
     ln -s "$libwebp_root" "$shadow_skia/third_party/externals/libwebp"
+  elif [[ "$name" == include ]]; then
+    # Headers are a patch boundary. Keep a real copy so provider-only
+    # visibility annotations cannot mutate or follow the pristine checkout.
+    cp -R "$entry" "$shadow_skia/$name"
   else
     ln -s "$entry" "$shadow_skia/$name"
   fi
 done < <(find "$skia" -mindepth 1 -maxdepth 1 -print | sort)
 cp "$skia/BUILD.gn" "$shadow_skia/BUILD.gn"
 patch -d "$shadow_skia" -p1 < "$coretext_patch"
+patch -d "$shadow_skia" -p1 < "$cross_tu_abi_patch"
 
 gn_args="is_official_build=true is_debug=false target_cpu=\"arm64\" \
 skia_enable_gpu=false skia_enable_graphite=false skia_enable_pdf=false \

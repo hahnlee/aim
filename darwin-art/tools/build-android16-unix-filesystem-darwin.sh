@@ -2,6 +2,12 @@
 set -euo pipefail
 export LC_ALL=C
 
+mode="${1:---archive-and-test}"
+[[ $# -le 1 && ( "$mode" == --archive-only || "$mode" == --archive-and-test ) ]] || {
+  echo 'usage: build-android16-unix-filesystem-darwin.sh [--archive-only|--archive-and-test]' >&2
+  exit 2
+}
+
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 project_root="$(cd "$script_dir/.." && pwd)"
 lock_file="$project_root/upstream/android16-unix-filesystem-darwin.lock"
@@ -150,10 +156,8 @@ for required in \
   "$nativehelper_archive" \
   "$liblog_include/android/log.h" \
   "$liblog_archive" \
-  "$project_root/probes/android16_unix_filesystem_jni.c" \
   "$project_root/compat/darwin_libcore_filesystem_bridge.c" \
-  "$project_root/compat/darwin_libcore_filesystem_bridge.h" \
-  "$project_root/probes/unix-filesystem/UnixFileSystemDarwinSmoke.java"; do
+  "$project_root/compat/darwin_libcore_filesystem_bridge.h"; do
   [[ -e "$required" ]] || fail "missing build dependency: $required"
 done
 
@@ -230,38 +234,6 @@ for method in initIDs canonicalize0 getBooleanAttributes0 getNameMax0 \
     fail "native definition missing: $method"
 done
 
-probe_object="$objects/android16_unix_filesystem_jni.o"
-"$cc" "${common_flags[@]}" \
-  -c "$project_root/probes/android16_unix_filesystem_jni.c" \
-  -o "$probe_object"
-managed_library="$stage/libunix-filesystem-darwin-managed.dylib"
-"$cc" -arch arm64 -isysroot "$sdk_root" -dynamiclib \
-  "$probe_object" -Wl,-force_load,"$archive" \
-  -Wl,-force_load,"$nativehelper_archive" \
-  "$liblog_archive" \
-  -Wl,-exported_symbol,_JNI_OnLoad \
-  -Wl,-dead_strip \
-  -Wl,-undefined,dynamic_lookup -framework CoreFoundation \
-  -o "$managed_library"
-retained_undefined="$stage/managed-retained-undefined.txt"
-nm -u "$managed_library" | sed 's/^[[:space:]]*//' | sort -u \
-  > "$retained_undefined"
-if grep -F '_IO_fd_fdID' "$retained_undefined" >/dev/null; then
-  fail "dead-strip retained unrelated FileDescriptor state"
-fi
-grep -Fx '_JVM_GetLastErrorString' "$retained_undefined" >/dev/null ||
-  fail "libopenjdkjvm provider contract disappeared"
-
-classes="$stage/classes"
-mkdir -p "$classes"
-javac --release 17 -encoding UTF-8 -d "$classes" \
-  "$project_root/probes/unix-filesystem/UnixFileSystemDarwinSmoke.java"
-managed_output="$(java -cp "$classes" \
-  dev.darwinart.probe.UnixFileSystemDarwinSmoke "$managed_library")"
-expected='managed-unixfs: methods=12 list0=alpha.txt,beta.txt canonicalize=pass attributes=pass permissions=pass space=pass'
-[[ "$managed_output" == "$expected" ]] ||
-  fail "managed acceptance failed: $managed_output"
-
 undefined="$stage/archive-undefined.txt"
 nm -u "$archive" | sed 's/^[[:space:]]*//' | sort -u > "$undefined"
 mkdir -p "$build_dir"
@@ -270,6 +242,7 @@ cp "$method_manifest" "$build_dir/unix-filesystem-methods.tsv"
 cp "$closure_manifest" "$build_dir/unix-filesystem-closure-sources.txt"
 cp "$symbols" "$build_dir/archive-symbols.txt"
 cp "$undefined" "$build_dir/archive-undefined.txt"
-cp "$retained_undefined" "$build_dir/managed-retained-undefined.txt"
-
-echo "unix-filesystem: sources=$closure_count/$source_count methods=$method_count list0=pass managed=pass archive=Mach-O-arm64"
+echo "unix-filesystem: sources=$closure_count/$source_count methods=$method_count archive=Mach-O-arm64"
+if [[ "$mode" == --archive-and-test ]]; then
+  bash "$script_dir/test-android16-unix-filesystem-darwin.sh" --prepared
+fi

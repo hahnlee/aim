@@ -7,4 +7,5 @@ public interface IBinder {
 
     void linkToDeath(DeathRecipient recipient, int flags) throws RemoteException;
     boolean unlinkToDeath(DeathRecipient recipient, int flags);
+    boolean isBinderAlive();
 }

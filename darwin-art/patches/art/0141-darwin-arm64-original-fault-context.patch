@@ -1,7 +1,7 @@
 diff --git a/runtime/fault_handler.cc b/runtime/fault_handler.cc
 --- a/runtime/fault_handler.cc
 +++ b/runtime/fault_handler.cc
-@@ -17,6 +17,17 @@
+@@ -17,6 +17,15 @@
  
  #include "fault_handler.h"
  
@@ -9,37 +9,36 @@ diff --git a/runtime/fault_handler.cc b/runtime/fault_handler.cc
 +#include <mach/arm/thread_status.h>
 +#include <mach/mach.h>
 +#include <mach/mach_vm.h>
-+#include <stdlib.h>
 +#include <unistd.h>
 +
-+#include "darwin_jit_memory.h"
-+extern "C" bool darwin_art_unwindstack_lookup_image(uintptr_t, uintptr_t*, uintptr_t*);
++#include "diagnostics/fault_log_buffer.h"
 +#endif
 +
  #include <string.h>
  #include <sys/mman.h>
  #include <sys/ucontext.h>
-@@ -37,6 +44,113 @@ namespace art HIDDEN {
+@@ -37,6 +46,125 @@ namespace art HIDDEN {
  // Static fault manger object accessed by signal handler.
  FaultManager fault_manager;
  
 +#if defined(__APPLE__) && defined(__aarch64__)
 +void DumpDarwinOriginalFaultContext(siginfo_t* siginfo, void* context) {
 +  // This runs only after ART's generated-code handlers declined the signal.
-+  // Keep it async-signal-safe so a transient JNI frame cannot hide the first
-+  // failure behind a fault in stack walking or symbolization.
-+  char line[768];
-+  size_t used = 0u;
-+  constexpr char prefix[] = "ART original generated-code fault";
-+  for (size_t index = 0u; index != sizeof(prefix) - 1u; ++index) {
-+    line[used++] = prefix[index];
-+  }
++  // Bounded raw context first; no allocation, locks or symbol lookup. Mach
++  // instruction/map queries below are best-effort, not a signal-safety promise.
++  char line[2048];
++  darwin_art::diagnostics::FaultLogBuffer output(line, sizeof(line));
++  output.AppendLiteral("ART unhandled native fault");
 +  auto append_hex = [&](const char* label, uintptr_t value) {
-+    while (*label != '\0') line[used++] = *label++;
-+    for (int shift = static_cast<int>(sizeof(value) * 8u) - 4; shift >= 0; shift -= 4) {
-+      const unsigned digit = (value >> shift) & 0xfu;
-+      line[used++] = digit < 10u ? '0' + digit : 'a' + digit - 10u;
++    output.AppendLiteral(label);
++    // Existing labels include 0x; AppendHex supplies that prefix itself.
++    char digits[sizeof(value) * 2u + 1u];
++    for (size_t index = 0; index < sizeof(value) * 2u; ++index) {
++      const unsigned shift = (sizeof(value) * 2u - index - 1u) * 4u;
++      digits[index] = "0123456789abcdef"[(value >> shift) & 0xfu];
 +    }
++    digits[sizeof(value) * 2u] = '\0';
++    output.AppendLiteral(digits);
 +  };
 +  arm_thread_state64_t& state =
 +      reinterpret_cast<ucontext_t*>(context)->uc_mcontext->__ss;
@@ -52,40 +51,66 @@ diff --git a/runtime/fault_handler.cc b/runtime/fault_handler.cc
 +  append_hex(" raw_pc=0x", state.__pc);
 +  append_hex(" raw_lr=0x", state.__lr);
 +#endif
-+  if (getenv("DARWIN_ART_DEBUG_FAULT_MAP") != nullptr) {
++  append_hex(" pid=0x", static_cast<uintptr_t>(getpid()));
++  append_hex(" sp=0x", arm_thread_state64_get_sp(state));
++  append_hex(" fp=0x", arm_thread_state64_get_fp(state));
++  append_hex(" lr=0x", arm_thread_state64_get_lr(state));
++  append_hex(" addr=0x", reinterpret_cast<uintptr_t>(siginfo->si_addr));
++  append_hex(" code=0x", static_cast<uintptr_t>(siginfo->si_code));
++  for (size_t index = 0u; index <= 28u; ++index) {
++    char label[] = " x00=0x";
++    label[2] = '0' + index / 10u;
++    label[3] = '0' + index % 10u;
++    append_hex(label, state.__x[index]);
++  }
++  // Emit mandatory context before any best-effort Mach IPC diagnostic.
++  const auto mandatory = output.Finish();
++  const ssize_t ignored_context = write(STDERR_FILENO, mandatory.data, mandatory.size);
++  (void)ignored_context;
++  darwin_art::diagnostics::FaultLogBuffer provenance(line, sizeof(line));
++  provenance.AppendLiteral("ART native fault provenance");
++  auto append_provenance = [&](const char* label, uintptr_t value) {
++    provenance.AppendLiteral(label);
++    provenance.AppendHex(value);
++  };
++  append_provenance(" pid=", static_cast<uintptr_t>(getpid()));
++  append_provenance(" pc=", arm_thread_state64_get_pc(state));
++  append_provenance(" lr=", arm_thread_state64_get_lr(state));
++  {
 +    mach_vm_address_t region =
 +        static_cast<mach_vm_address_t>(arm_thread_state64_get_pc(state));
 +    mach_vm_size_t region_size = 0;
-+    vm_region_basic_info_data_64_t info;
++    vm_region_basic_info_data_64_t info = {};
 +    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
 +    mach_port_t object = MACH_PORT_NULL;
 +    const kern_return_t kr = mach_vm_region(
 +        mach_task_self(), &region, &region_size, VM_REGION_BASIC_INFO_64,
 +        reinterpret_cast<vm_region_info_t>(&info), &count, &object);
-+    append_hex(" fault_map_kr=0x", static_cast<uintptr_t>(kr));
-+    append_hex(" fault_map_base=0x", static_cast<uintptr_t>(region));
-+    append_hex(" fault_map_size=0x", static_cast<uintptr_t>(region_size));
-+    append_hex(" fault_map_prot=0x", static_cast<uintptr_t>(
++    append_provenance(" map_kr=", static_cast<uintptr_t>(kr));
++    append_provenance(" map_base=", static_cast<uintptr_t>(region));
++    append_provenance(" map_size=", static_cast<uintptr_t>(region_size));
++    const auto pc = static_cast<mach_vm_address_t>(arm_thread_state64_get_pc(state));
++    append_provenance(" map_contains_pc=", kr == KERN_SUCCESS &&
++        pc >= region && pc - region < region_size);
++    append_provenance(" map_prot=", static_cast<uintptr_t>(
 +        kr == KERN_SUCCESS ? info.protection : 0));
-+    append_hex(" fault_map_max=0x", static_cast<uintptr_t>(
++    append_provenance(" map_max=", static_cast<uintptr_t>(
 +        kr == KERN_SUCCESS ? info.max_protection : 0));
++    if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
 +  }
-+  append_hex(" sp=0x", arm_thread_state64_get_sp(state));
-+  append_hex(" lr=0x", arm_thread_state64_get_lr(state));
-+  if (getenv("DARWIN_ART_DEBUG_FAULT_MAP") != nullptr) {
-+    uintptr_t image_start = 0;
-+    uintptr_t image_end = 0;
-+    if (darwin_art_unwindstack_lookup_image(arm_thread_state64_get_pc(state), &image_start,
-+                                            &image_end)) {
-+      append_hex(" image_start=0x", image_start);
-+      append_hex(" image_end=0x", image_end);
-+    }
-+    image_start = 0;
-+    image_end = 0;
-+    if (darwin_art_unwindstack_lookup_image(arm_thread_state64_get_lr(state), &image_start,
-+                                            &image_end)) {
-+      append_hex(" lr_image_start=0x", image_start);
-+      append_hex(" lr_image_end=0x", image_end);
++  {
++    uint32_t pc_words[4] = {};
++    mach_vm_size_t pc_copied = 0;
++    const kern_return_t pc_kr = mach_vm_read_overwrite(
++        mach_task_self(), arm_thread_state64_get_pc(state), sizeof(pc_words),
++        reinterpret_cast<mach_vm_address_t>(pc_words), &pc_copied);
++    append_provenance(" pc_read_kr=", static_cast<uintptr_t>(pc_kr));
++    append_provenance(" pc_read_bytes=", pc_copied);
++    if (pc_kr == KERN_SUCCESS && pc_copied == sizeof(pc_words)) {
++      append_provenance(" pc_word0=", pc_words[0]);
++      append_provenance(" pc_word1=", pc_words[1]);
++      append_provenance(" pc_word2=", pc_words[2]);
++      append_provenance(" pc_word3=", pc_words[3]);
 +    }
 +    const mach_vm_address_t lr =
 +        static_cast<mach_vm_address_t>(arm_thread_state64_get_lr(state));
@@ -95,37 +120,22 @@ diff --git a/runtime/fault_handler.cc b/runtime/fault_handler.cc
 +    const kern_return_t read_kr = mach_vm_read_overwrite(
 +        mach_task_self(), start, sizeof(words),
 +        reinterpret_cast<mach_vm_address_t>(words), &copied);
-+    append_hex(" lr_read_kr=0x", static_cast<uintptr_t>(read_kr));
++    append_provenance(" lr_read_kr=", static_cast<uintptr_t>(read_kr));
++    append_provenance(" lr_read_bytes=", copied);
 +    if (read_kr == KERN_SUCCESS && copied == sizeof(words)) {
-+      append_hex(" lr_m16=0x", words[0]);
-+      append_hex(" lr_m12=0x", words[1]);
-+      append_hex(" lr_m8=0x", words[2]);
-+      append_hex(" lr_m4=0x", words[3]);
++      append_provenance(" lr_m16=", words[0]);
++      append_provenance(" lr_m12=", words[1]);
++      append_provenance(" lr_m8=", words[2]);
++      append_provenance(" lr_m4=", words[3]);
 +    }
 +  }
-+  append_hex(" addr=0x", reinterpret_cast<uintptr_t>(siginfo->si_addr));
-+  append_hex(" code=0x", static_cast<uintptr_t>(siginfo->si_code));
-+  for (size_t index = 0u; index <= 8u; ++index) {
-+    char label[] = " x0=0x";
-+    label[2] = '0' + index;
-+    append_hex(label, state.__x[index]);
++  if (provenance.truncated()) {
++    constexpr char marker[] = "ART native fault provenance truncated\n";
++    const ssize_t ignored_marker = write(STDERR_FILENO, marker, sizeof(marker) - 1u);
++    (void)ignored_marker;
 +  }
-+  for (size_t index = 15u; index <= 21u; ++index) {
-+    char label[] = " x00=0x";
-+    label[2] = '0' + index / 10u;
-+    label[3] = '0' + index % 10u;
-+    append_hex(label, state.__x[index]);
-+  }
-+  for (size_t index = 22u; index <= 27u; ++index) {
-+    char label[] = " x00=0x";
-+    label[2] = '0' + index / 10u;
-+    label[3] = '0' + index % 10u;
-+    append_hex(label, state.__x[index]);
-+  }
-+  append_hex(" x28=0x", state.__x[28]);
-+  append_hex(" jit_write_depth=0x", DarwinArtJitWriteDepth());
-+  line[used++] = '\n';
-+  const ssize_t ignored = write(STDERR_FILENO, line, used);
++  const auto result = provenance.Finish();
++  const ssize_t ignored = write(STDERR_FILENO, result.data, result.size);
 +  (void)ignored;
 +}
 +#endif
@@ -133,7 +143,7 @@ diff --git a/runtime/fault_handler.cc b/runtime/fault_handler.cc
  // These need to be NO_INLINE since some debuggers do not read the inline-info to set a breakpoint
  // if they aren't.
  extern "C" NO_INLINE __attribute__((visibility("default"))) void art_sigsegv_fault() {
-@@ -311,6 +362,10 @@ bool FaultManager::HandleSigsegvFault(int sig, siginfo_t* info, void* context) {
+@@ -311,6 +439,10 @@ bool FaultManager::HandleSigsegvFault(int sig, siginfo_t* info, void* context) {
      return true;
    }
  
@@ -144,7 +154,7 @@ diff --git a/runtime/fault_handler.cc b/runtime/fault_handler.cc
    // Set a breakpoint in this function to catch unhandled signals.
    art_sigsegv_fault();
    return false;
-@@ -626,6 +681,14 @@ JavaStackTraceHandler::JavaStackTraceHandler(FaultManager* manager) : FaultHand
+@@ -626,6 +758,14 @@ JavaStackTraceHandler::JavaStackTraceHandler(FaultManager* manager) : FaultHand
  }
  
  bool JavaStackTraceHandler::Action([[maybe_unused]] int sig, siginfo_t* siginfo, void* context) {

@@ -9,12 +9,15 @@ import android.os.RemoteException;
 public final class RemoteBinder extends Binder {
     public final int controlFd;
     public final int targetId;
+    public final long channelGeneration;
     private boolean ready;
 
-    public RemoteBinder(int controlFd, int targetId) {
-        if (controlFd < 0 || targetId <= 0) throw new IllegalArgumentException("Invalid Binder endpoint");
+    public RemoteBinder(int controlFd, int targetId, long channelGeneration) {
+        if (controlFd < 0 || targetId <= 0 || channelGeneration == 0)
+            throw new IllegalArgumentException("Invalid Binder endpoint");
         this.controlFd = controlFd;
         this.targetId = targetId;
+        this.channelGeneration = channelGeneration;
     }
 
     public synchronized void awaitReady() {
@@ -22,7 +25,7 @@ public final class RemoteBinder extends Binder {
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
-            if (!nativeTransact(controlFd, targetId, IBinder.INTERFACE_TRANSACTION, data, reply, 0)) {
+            if (!nativeTransact(controlFd, channelGeneration, targetId, IBinder.INTERFACE_TRANSACTION, data, reply, 0)) {
                 throw new IllegalStateException("Remote Binder rejected descriptor query");
             }
             String descriptor = reply.readString();
@@ -38,11 +41,11 @@ public final class RemoteBinder extends Binder {
     }
 
     private static native boolean nativeTransact(
-            int controlFd, int targetId, int code, Parcel data, Parcel reply, int flags);
+            int controlFd, long channelGeneration, int targetId, int code, Parcel data, Parcel reply, int flags);
 
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
-        return nativeTransact(controlFd, targetId, code, data, reply, flags);
+        return nativeTransact(controlFd, channelGeneration, targetId, code, data, reply, flags);
     }
 }

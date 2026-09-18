@@ -14,6 +14,18 @@ public final class ApplicationProcessRegistry {
         BOUND_SERVICE
     }
 
+    public enum CancellationKind { CANCELLED, ATTACHMENT_OWNED, STALE_OR_GONE }
+
+    public static final class BoundServiceCancellation {
+        public final CancellationKind kind;
+        public final AttachedApplication attachment;
+
+        private BoundServiceCancellation(CancellationKind outcome, AttachedApplication owner) {
+            kind = outcome;
+            attachment = owner;
+        }
+    }
+
     public static final class AttachedApplication {
         public final int pid;
         public final IBinder thread;
@@ -49,6 +61,7 @@ public final class ApplicationProcessRegistry {
         String packageName;
         String processName;
         boolean attachmentFinished;
+        boolean launchCancelled;
 
         ProcessRecord(
                 IBinder applicationThread,
@@ -68,13 +81,22 @@ public final class ApplicationProcessRegistry {
 
     private final HashMap<Integer, ProcessRecord> processes = new HashMap<>();
 
+    /** Exact identified caller admission, including bindApplication in flight. */
+    public synchronized boolean hasCallerIncarnation(
+            int pid, long sequence, IBinder thread, int uid) {
+        ProcessRecord record = processes.get(pid);
+        return record != null && !record.launchCancelled && record.packageName != null
+                && record.startSequence == sequence && record.uid == uid
+                && record.thread != null && record.thread.equals(thread);
+    }
+
     public synchronized void beginAttachment(int pid, int uid, IBinder thread, long sequence) {
         if (pid <= 0 || uid < 0 || thread == null || sequence < 0) {
             throw new IllegalArgumentException("Invalid application attachment");
         }
         ProcessRecord reserved = processes.get(pid);
         if (reserved != null) {
-            if (reserved.thread != null || reserved.startSequence != sequence
+            if (reserved.launchCancelled || reserved.thread != null || reserved.startSequence != sequence
                     || reserved.uid != uid
                     || reserved.attachmentFinished) {
                 throw new IllegalStateException(
@@ -105,7 +127,9 @@ public final class ApplicationProcessRegistry {
                 || startSequence < 0) {
             throw new IllegalArgumentException("Invalid service process reservation");
         }
-        if (processes.containsKey(pid)) {
+        ProcessRecord previous = processes.get(pid);
+        if (previous != null && (!previous.launchCancelled
+                || previous.startSequence == startSequence)) {
             throw new IllegalStateException("Process PID is already reserved");
         }
         processes.put(pid, new ProcessRecord(
@@ -124,11 +148,43 @@ public final class ApplicationProcessRegistry {
                 || record.attachmentFinished) {
             throw new IllegalStateException("No matching unactivated service process reservation");
         }
-        processes.remove(pid);
+        // Keep the exact cancelled reservation: a queued service attach must
+        // not fall through the external ACTIVITY launch path. Only a fresh,
+        // explicit daemon-backed reservation may replace this tombstone.
+        record.launchCancelled = true;
     }
 
-    public synchronized void identify(int pid, String packageName) {
-        ProcessRecord record = require(pid);
+    /** Atomically arbitrate cancellation against beginAttachment's exact claim. */
+    public synchronized BoundServiceCancellation claimBoundServiceCancellation(
+            int pid, long startSequence) {
+        ProcessRecord record = processes.get(pid);
+        if (record == null || record.initialWork != InitialWork.BOUND_SERVICE
+                || record.startSequence != startSequence) {
+            return new BoundServiceCancellation(CancellationKind.STALE_OR_GONE, null);
+        }
+        if (record.thread != null) {
+            return new BoundServiceCancellation(
+                    CancellationKind.ATTACHMENT_OWNED, snapshot(pid, record));
+        }
+        record.launchCancelled = true;
+        return new BoundServiceCancellation(CancellationKind.CANCELLED, null);
+    }
+
+    /**
+     * Publishes the package identity for one exact attachment incarnation.
+     */
+    public synchronized void identify(
+            int pid, long sequence, IBinder applicationThread, String packageName) {
+        ProcessRecord record = processes.get(pid);
+        if (record == null || record.startSequence != sequence
+                || record.thread == null || applicationThread == null
+                || !record.thread.equals(applicationThread) || record.attachmentFinished) {
+            throw new IllegalStateException("No matching attachment incarnation");
+        }
+        identify(record, packageName);
+    }
+
+    private static void identify(ProcessRecord record, String packageName) {
         if (packageName == null || packageName.isEmpty()) {
             throw new IllegalStateException("Invalid application identity");
         }
@@ -149,9 +205,14 @@ public final class ApplicationProcessRegistry {
         return snapshot(pid, record);
     }
 
-    public synchronized void abortAttachment(int pid) {
+    /** Rolls back only the exact in-progress attachment incarnation. */
+    public synchronized void abortAttachment(int pid, long sequence, IBinder applicationThread) {
         ProcessRecord record = processes.get(pid);
-        if (record != null && !record.attachmentFinished) processes.remove(pid);
+        if (record != null && !record.attachmentFinished && record.startSequence == sequence
+                && record.thread != null && applicationThread != null
+                && record.thread.equals(applicationThread)) {
+            processes.remove(pid);
+        }
     }
 
     public synchronized AttachedApplication finishAttachment(int pid, long sequence) {
@@ -165,11 +226,11 @@ public final class ApplicationProcessRegistry {
         return snapshot(pid, record);
     }
 
-    /** Removes exactly one completed process incarnation after its app-thread Binder dies. */
+    /** Removes exactly one process incarnation after its app-thread Binder dies. */
     public synchronized AttachedApplication retireAttached(
             int pid, long sequence, IBinder applicationThread) {
         ProcessRecord record = processes.get(pid);
-        if (record == null || !record.attachmentFinished || record.startSequence != sequence
+        if (record == null || record.startSequence != sequence
                 || applicationThread == null || !applicationThread.equals(record.thread)) {
             return null;
         }
@@ -181,10 +242,17 @@ public final class ApplicationProcessRegistry {
     public synchronized AttachedApplication requireCaller(
             int pid, IBinder suppliedThread, String callingPackage) {
         ProcessRecord record = require(pid);
-        if (!record.attachmentFinished || record.packageName == null
-                || suppliedThread == null || !record.thread.equals(suppliedThread)
+        if (record.packageName == null
+                || suppliedThread == null || record.thread == null
+                || !record.thread.equals(suppliedThread)
                 || !record.packageName.equals(callingPackage)) {
-            throw new SecurityException("Activity caller does not match attached process");
+            throw new SecurityException("Activity caller does not match attached process"
+                    + " pid=" + pid + " finished=" + record.attachmentFinished
+                    + " packageKnown=" + (record.packageName != null)
+                    + " threadMatch=" + (record.thread != null
+                            && record.thread.equals(suppliedThread))
+                    + " packageMatch=" + (record.packageName != null
+                            && record.packageName.equals(callingPackage)));
         }
         return snapshot(pid, record);
     }
@@ -242,6 +310,22 @@ public final class ApplicationProcessRegistry {
         ProcessRecord record = require(pid);
         if (record.packageName == null) throw new SecurityException("Unidentified application process");
         return record.packageName;
+    }
+
+    /**
+     * Returns an immutable identity snapshot for an identified attachment.
+     * Identification is sufficient during bindApplication; callers must not
+     * wait for attachmentFinished before authenticating framework callbacks.
+     */
+    public synchronized AttachedApplication requireIdentifiedAttachment(int pid, int uid) {
+        if (uid < 0) throw new SecurityException("Invalid caller uid");
+        ProcessRecord record = require(pid);
+        if (record.uid != uid || record.thread == null
+                || record.packageName == null || record.packageName.isEmpty()
+                || record.processName == null || record.processName.isEmpty()) {
+            throw new SecurityException("Caller is not the identified attachment");
+        }
+        return snapshot(pid, record);
     }
 
     private ProcessRecord require(int pid) {

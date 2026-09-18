@@ -5,6 +5,7 @@
 //! returned by the native window.  The native-buffer token is retained until
 //! queue-present gives it back to the window.
 
+use crate::vulkan_wsi_backend as backend;
 use std::collections::HashMap;
 use std::ffi::{c_void, CStr};
 use std::ptr;
@@ -218,7 +219,10 @@ fn from_handle(value: VkHandle) -> usize {
 
 fn trace_failure(operation: &str, result: i32) {
     if std::env::var_os("DARWIN_ART_DEBUG_GRAPHICS_DSO").is_some() {
-        eprintln!("ART Android Vulkan WSI: {operation} result={result}");
+        eprintln!(
+            "ART Android Vulkan WSI: pid={} {operation} result={result}",
+            std::process::id()
+        );
     }
 }
 
@@ -226,14 +230,18 @@ fn trace_present(result: i32, image_index: usize) {
     if std::env::var_os("DARWIN_ART_DEBUG_GRAPHICS_DSO").is_some()
         && PRESENT_TRACE_COUNT.fetch_add(1, Ordering::Relaxed) < 4
     {
-        eprintln!("ART Android Vulkan WSI: present image={image_index} result={result}");
+        eprintln!(
+            "ART Android Vulkan WSI: pid={} present image={image_index} result={result}",
+            std::process::id()
+        );
     }
 }
 
 fn trace_swapchain_request(info: &VkSwapchainCreateInfoKHR) {
     if std::env::var_os("DARWIN_ART_DEBUG_GRAPHICS_DSO").is_some() {
         eprintln!(
-            "ART Android Vulkan WSI: create-swapchain request min={} format={} color={} extent={}x{} layers={} usage={:#x} sharing={} pre={} alpha={} mode={}",
+            "ART Android Vulkan WSI: pid={} create-swapchain request min={} format={} color={} extent={}x{} layers={} usage={:#x} sharing={} pre={} alpha={} mode={}",
+            std::process::id(),
             info.min_image_count,
             info.image_format,
             info.image_color_space,
@@ -258,7 +266,7 @@ fn current_surface(surface_handle: usize) -> Result<(usize, VkExtent2D, u64), i3
     let surface = registry
         .get(&surface_handle)
         .ok_or(VK_ERROR_SURFACE_LOST_KHR)?;
-    let extent_result = unsafe { super::wsi_backend_window_size(surface.window) };
+    let extent_result = unsafe { backend::wsi_backend_window_size(surface.window) };
     let mut state = surface.state.lock().expect("Vulkan surface poisoned");
     let (width, height) = extent_result.map_err(|_| VK_ERROR_SURFACE_LOST_KHR)?;
     if width == 0 || height == 0 {
@@ -291,14 +299,14 @@ fn surface_caps(extent: VkExtent2D) -> VkSurfaceCapabilitiesKHR {
 
 fn close_fence(fence: i32) {
     if fence >= 0 {
-        unsafe { super::wsi_backend_close_fd(fence) };
+        unsafe { backend::wsi_backend_close_fd(fence) };
     }
 }
 
 fn cancel_native(window: usize, native_buffer: usize, fence: i32) {
     // The native bridge owns a supplied fence (and closes it on cancellation).
     // Never close it again here: Darwin's broker descriptors are not reusable.
-    unsafe { super::wsi_backend_window_cancel(window, native_buffer, fence) };
+    unsafe { backend::wsi_backend_window_cancel(window, native_buffer, fence) };
 }
 
 fn destroy_slots(device: usize, window: usize, slots: &mut [ImageSlot]) {
@@ -310,8 +318,8 @@ fn destroy_slots(device: usize, window: usize, slots: &mut [ImageSlot]) {
             cancel_native(window, slot.native_buffer, -1);
             slot.acquired = false;
         }
-        unsafe { super::wsi_backend_destroy_image(device, slot.image as usize, slot.memory) };
-        unsafe { super::wsi_backend_destroy_semaphore(device, slot.completion_semaphore) };
+        unsafe { backend::wsi_backend_destroy_image(device, slot.image as usize, slot.memory) };
+        unsafe { backend::wsi_backend_destroy_semaphore(device, slot.completion_semaphore) };
     }
 }
 
@@ -365,7 +373,7 @@ fn acquire_next(
         if swapchain.closing.load(Ordering::Acquire) {
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
-        match unsafe { super::wsi_backend_window_dequeue(window) } {
+        match unsafe { backend::wsi_backend_window_dequeue(window) } {
             Ok((ahb, native_buffer, native_fence)) => {
                 // A non-negative native fence is not expected from the Darwin
                 // queue.  The bridge owns no wait primitive here; close it
@@ -393,7 +401,7 @@ fn acquire_next(
                 drop(slots);
                 if semaphore != 0 || fence != 0 {
                     let signal_result = unsafe {
-                        super::wsi_backend_signal_acquire(
+                        backend::wsi_backend_signal_acquire(
                             device,
                             from_handle(semaphore),
                             from_handle(fence),
@@ -456,15 +464,15 @@ unsafe extern "C" fn create_android_surface(
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     let window = info.window as usize;
-    if !super::wsi_backend_window_acquire(window) {
+    if !backend::wsi_backend_window_acquire(window) {
         *output = 0;
         trace_failure("create-surface-window", VK_ERROR_SURFACE_LOST_KHR);
         return VK_ERROR_SURFACE_LOST_KHR;
     }
-    let extent = match super::wsi_backend_window_size(window) {
+    let extent = match backend::wsi_backend_window_size(window) {
         Ok((width, height)) if width != 0 && height != 0 => VkExtent2D { width, height },
         _ => {
-            super::wsi_backend_window_release(window);
+            backend::wsi_backend_window_release(window);
             *output = 0;
             trace_failure("create-surface-size", VK_ERROR_INITIALIZATION_FAILED);
             return VK_ERROR_INITIALIZATION_FAILED;
@@ -501,11 +509,11 @@ unsafe extern "C" fn destroy_surface(
         .remove(&handle);
     if let Some(surface) = removed {
         if surface.instance == instance as usize {
-            super::wsi_backend_window_release(surface.window);
+            backend::wsi_backend_window_release(surface.window);
         } else {
             // Vulkan requires the matching instance.  Keep cleanup safe even
             // for a malformed caller rather than leaking the ANativeWindow.
-            super::wsi_backend_window_release(surface.window);
+            backend::wsi_backend_window_release(surface.window);
         }
     }
 }
@@ -620,7 +628,7 @@ unsafe extern "C" fn create_swapchain(
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     if std::env::var_os("DARWIN_ART_DEBUG_GRAPHICS_DSO").is_some() {
-        eprintln!("ART Android Vulkan WSI: requested swapchain type={} surface={:#x} count={} format={} colorspace={} size={}x{} layers={} usage={:#x} transform={:#x} alpha={:#x} mode={} flags={:#x}", info.s_type,info.surface,info.min_image_count,info.image_format,info.image_color_space,info.image_extent.width,info.image_extent.height,info.image_array_layers,info.image_usage,info.pre_transform,info.composite_alpha,info.present_mode,info.flags);
+        eprintln!("ART Android Vulkan WSI: pid={} requested swapchain type={} surface={:#x} count={} format={} colorspace={} size={}x{} layers={} usage={:#x} transform={:#x} alpha={:#x} mode={} flags={:#x}", std::process::id(), info.s_type,info.surface,info.min_image_count,info.image_format,info.image_color_space,info.image_extent.width,info.image_extent.height,info.image_array_layers,info.image_usage,info.pre_transform,info.composite_alpha,info.present_mode,info.flags);
     }
     if info.surface == 0
         || info.min_image_count != 3
@@ -647,7 +655,7 @@ unsafe extern "C" fn create_swapchain(
         return VK_ERROR_OUT_OF_DATE_KHR;
     }
     let device_value = device as usize;
-    let geometry_result = super::wsi_backend_window_geometry(window, extent.width, extent.height);
+    let geometry_result = backend::wsi_backend_window_geometry(window, extent.width, extent.height);
     if geometry_result != 0 {
         trace_failure("create-swapchain-geometry", geometry_result);
         return if geometry_result == VK_ERROR_OUT_OF_DATE_KHR {
@@ -658,7 +666,7 @@ unsafe extern "C" fn create_swapchain(
     }
     let mut slots: Vec<ImageSlot> = Vec::with_capacity(3);
     for _ in 0..3 {
-        let (ahb, native_buffer, fence) = match super::wsi_backend_window_dequeue(window) {
+        let (ahb, native_buffer, fence) = match backend::wsi_backend_window_dequeue(window) {
             Ok(value) => value,
             Err(error) => {
                 destroy_slots(device_value, window, &mut slots);
@@ -677,7 +685,7 @@ unsafe extern "C" fn create_swapchain(
             );
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
-        let Ok((buffer_width, buffer_height)) = super::wsi_backend_buffer_size(ahb) else {
+        let Ok((buffer_width, buffer_height)) = backend::wsi_backend_buffer_size(ahb) else {
             cancel_native(window, native_buffer, -1);
             destroy_slots(device_value, window, &mut slots);
             trace_failure("create-swapchain-buffer-size", VK_ERROR_OUT_OF_DATE_KHR);
@@ -689,7 +697,7 @@ unsafe extern "C" fn create_swapchain(
             trace_failure("create-swapchain-buffer-extent", VK_ERROR_OUT_OF_DATE_KHR);
             return VK_ERROR_OUT_OF_DATE_KHR;
         }
-        let (image, memory) = match super::wsi_backend_import_image(
+        let (image, memory) = match backend::wsi_backend_import_image(
             device_value,
             ahb,
             info.image_format as u32,
@@ -715,11 +723,11 @@ unsafe extern "C" fn create_swapchain(
             }
         };
         let completion_semaphore =
-            match super::wsi_backend_create_completion_semaphore(device_value) {
+            match backend::wsi_backend_create_completion_semaphore(device_value) {
                 Ok(value) if value != 0 => value,
                 Ok(_) => {
                     cancel_native(window, native_buffer, -1);
-                    unsafe { super::wsi_backend_destroy_image(device_value, image, memory) };
+                    unsafe { backend::wsi_backend_destroy_image(device_value, image, memory) };
                     destroy_slots(device_value, window, &mut slots);
                     trace_failure(
                         "create-swapchain-completion-semaphore",
@@ -729,7 +737,7 @@ unsafe extern "C" fn create_swapchain(
                 }
                 Err(error) => {
                     cancel_native(window, native_buffer, -1);
-                    unsafe { super::wsi_backend_destroy_image(device_value, image, memory) };
+                    unsafe { backend::wsi_backend_destroy_image(device_value, image, memory) };
                     destroy_slots(device_value, window, &mut slots);
                     trace_failure("create-swapchain-completion-semaphore", error);
                     return error;
@@ -784,7 +792,7 @@ unsafe extern "C" fn destroy_swapchain(
     // This is deliberately outside the global swapchain registry lock.  The
     // backend serializes queue work and guarantees all imported images are no
     // longer in use after wait-idle.
-    let _ = super::wsi_backend_wait_idle(device_value);
+    let _ = backend::wsi_backend_wait_idle(device_value);
     let mut slots = swapchain
         .slots
         .lock()
@@ -965,7 +973,7 @@ unsafe extern "C" fn queue_present(queue: VkQueue, present_info: *const VkPresen
             overall = VK_ERROR_INITIALIZATION_FAILED;
             continue;
         }
-        let result = match super::wsi_backend_present(
+        let result = match backend::wsi_backend_present(
             queue as usize,
             swapchain.device,
             wait_semaphores
@@ -978,7 +986,7 @@ unsafe extern "C" fn queue_present(queue: VkQueue, present_info: *const VkPresen
             Ok(fence_fd) => {
                 let native_buffer = slots[image_index].native_buffer;
                 let queue_result =
-                    super::wsi_backend_window_queue(swapchain.window, native_buffer, fence_fd);
+                    backend::wsi_backend_window_queue(swapchain.window, native_buffer, fence_fd);
                 if queue_result == 0 {
                     slots[image_index].acquired = false;
                     VK_SUCCESS

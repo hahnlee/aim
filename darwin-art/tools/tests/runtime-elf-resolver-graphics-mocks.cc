@@ -1,0 +1,46 @@
+// Test-only dynamic symbols for the other 38 entries in the real graphics
+// table. Their ABI is irrelevant here because the test only invokes
+// AndroidBitmap_unlockPixels; defining them keeps this isolated executable
+// from resolving any host/global provider.
+#define GRAPHICS_MOCK(name) extern "C" int name(...) { return 0; }
+
+GRAPHICS_MOCK(AImageDecoder_resultToString)
+GRAPHICS_MOCK(AImageDecoder_createFromAAsset)
+GRAPHICS_MOCK(AImageDecoder_createFromFd)
+GRAPHICS_MOCK(AImageDecoder_createFromBuffer)
+GRAPHICS_MOCK(AImageDecoder_delete)
+GRAPHICS_MOCK(AImageDecoder_setAndroidBitmapFormat)
+GRAPHICS_MOCK(AImageDecoder_setUnpremultipliedRequired)
+GRAPHICS_MOCK(AImageDecoder_setDataSpace)
+GRAPHICS_MOCK(AImageDecoder_getHeaderInfo)
+GRAPHICS_MOCK(AImageDecoder_getMinimumStride)
+GRAPHICS_MOCK(AImageDecoder_decodeImage)
+GRAPHICS_MOCK(AImageDecoder_setTargetSize)
+GRAPHICS_MOCK(AImageDecoder_computeSampledSize)
+GRAPHICS_MOCK(AImageDecoder_setCrop)
+GRAPHICS_MOCK(AImageDecoder_isAnimated)
+GRAPHICS_MOCK(AImageDecoder_getRepeatCount)
+GRAPHICS_MOCK(AImageDecoder_advanceFrame)
+GRAPHICS_MOCK(AImageDecoder_rewind)
+GRAPHICS_MOCK(AImageDecoder_getFrameInfo)
+GRAPHICS_MOCK(AImageDecoder_setInternallyHandleDisposePrevious)
+GRAPHICS_MOCK(AImageDecoderHeaderInfo_getWidth)
+GRAPHICS_MOCK(AImageDecoderHeaderInfo_getHeight)
+GRAPHICS_MOCK(AImageDecoderHeaderInfo_getMimeType)
+GRAPHICS_MOCK(AImageDecoderHeaderInfo_getAlphaFlags)
+GRAPHICS_MOCK(AImageDecoderHeaderInfo_getAndroidBitmapFormat)
+GRAPHICS_MOCK(AImageDecoderHeaderInfo_getDataSpace)
+GRAPHICS_MOCK(AImageDecoderFrameInfo_create)
+GRAPHICS_MOCK(AImageDecoderFrameInfo_delete)
+GRAPHICS_MOCK(AImageDecoderFrameInfo_getDuration)
+GRAPHICS_MOCK(AImageDecoderFrameInfo_getFrameRect)
+GRAPHICS_MOCK(AImageDecoderFrameInfo_hasAlphaWithinBounds)
+GRAPHICS_MOCK(AImageDecoderFrameInfo_getDisposeOp)
+GRAPHICS_MOCK(AImageDecoderFrameInfo_getBlendOp)
+GRAPHICS_MOCK(AndroidBitmap_getInfo)
+GRAPHICS_MOCK(AndroidBitmap_getDataSpace)
+GRAPHICS_MOCK(AndroidBitmap_lockPixels)
+GRAPHICS_MOCK(AndroidBitmap_compress)
+GRAPHICS_MOCK(AndroidBitmap_getHardwareBuffer)
+
+#undef GRAPHICS_MOCK

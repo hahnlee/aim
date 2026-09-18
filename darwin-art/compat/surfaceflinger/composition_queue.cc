@@ -127,6 +127,16 @@ bool CompositionQueue::Enqueue(CompositionJob job) {
   return true;
 }
 
+bool CompositionQueue::TryEnqueue(CompositionJob job) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!started_ || failed_ || pending_.size() + ready_.size() >= kCapacity) {
+    return false;
+  }
+  pending_.push_back(std::move(job));
+  pending_available_.notify_one();
+  return true;
+}
+
 void CompositionQueue::Abort() {
   Transition(false);
 }

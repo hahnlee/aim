@@ -5,13 +5,25 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::Duration;
 
 pub(crate) fn wait_readable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
-    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "poll timeout is not representable",
+            )
+        })?;
     let mut descriptor = libc::pollfd {
         fd: fd.as_raw_fd(),
         events: libc::POLLIN,
         revents: 0,
     };
     loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let timeout_ms = remaining
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(i32::MAX as u128) as i32;
         // SAFETY: the borrowed descriptor remains live for this bounded call.
         let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
         if result >= 0 {
@@ -20,6 +32,9 @@ pub(crate) fn wait_readable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
             return Err(error);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
         }
     }
 }

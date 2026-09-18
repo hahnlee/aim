@@ -5,7 +5,7 @@ pub(super) fn compile_surface_objects(
     build_dir: &Path,
     probe_cache: &Path,
     compiler_identity: &str,
-) -> Result<(PathBuf, PathBuf)> {
+) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let surface_object = build_dir.join("darwin_surface_bridge.mm.o");
     let mut surface_command = Command::new("clang++");
     surface_command
@@ -78,5 +78,22 @@ pub(super) fn compile_surface_objects(
         probe_cache,
         compiler_identity,
     )?;
-    Ok((surface_object, surface_gpu_object))
+    let document_panel_object = build_dir.join("document_panel.mm.o");
+    let mut document_panel_command = Command::new("clang++");
+    document_panel_command
+        .args(["-std=c++20", "-fobjc-arc", "-Wall", "-Wextra", "-c"])
+        .arg(root.join("compat/filesystem/document_panel.mm"))
+        .arg("-I")
+        .arg(root.join("compat"))
+        .arg("-I")
+        .arg(root.join("include"))
+        .arg("-o")
+        .arg(&document_panel_object);
+    let _ = compile_cached_probe_tu(
+        &mut document_panel_command,
+        &document_panel_object,
+        probe_cache,
+        compiler_identity,
+    )?;
+    Ok((surface_object, surface_gpu_object, document_panel_object))
 }

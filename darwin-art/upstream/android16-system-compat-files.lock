@@ -1,0 +1,15 @@
+# Original Android 16 compatibility XMLs from the locked PS16K system image.
+# Fields: SHA256 PARTITION READER_PATH ARCHIVE_PATH.
+# READER_PATH is the path inside the selected EROFS partition; ARCHIVE_PATH
+# is the canonical path in the packaged system-root artifact.
+d92339fad7335a72cf968f2f835aa179abcfef70895e44ec23e2dad553dfdcf3  system  /system/etc/compatconfig/SystemUI-core-compat-config.xml  /system/etc/compatconfig/SystemUI-core-compat-config.xml
+fc6833929b02527717fc7f26de5a2e2a8d8f6ecd254c8abfd4772912ca09656d  system  /system/etc/compatconfig/TeleService-platform-compat-config.xml  /system/etc/compatconfig/TeleService-platform-compat-config.xml
+c4b959378228b3259ae2ba4e7c2e680f18f6713800433e739dcf5332efde81d1  system  /system/etc/compatconfig/calendar-provider-compat-config.xml  /system/etc/compatconfig/calendar-provider-compat-config.xml
+c19af86d45c46de022efd00cb042a48a9f2be07ebb3f3b7e03480c71af8fdb8a  system  /system/etc/compatconfig/contacts-provider-platform-compat-config.xml  /system/etc/compatconfig/contacts-provider-platform-compat-config.xml
+953836fc1af65267e93efe8d7b4d3a2362979f13762aeb42c2f6a9b23917f644  system  /system/etc/compatconfig/documents-ui-compat-config.xml  /system/etc/compatconfig/documents-ui-compat-config.xml
+139c375eb21da44b0f7a088027796271c02e6080af489f581aad5b0cbd5e2d41  system  /system/etc/compatconfig/framework-location-compat-config.xml  /system/etc/compatconfig/framework-location-compat-config.xml
+d92339fad7335a72cf968f2f835aa179abcfef70895e44ec23e2dad553dfdcf3  system  /system/etc/compatconfig/framework-ondeviceintelligence-platform-compat-config.xml  /system/etc/compatconfig/framework-ondeviceintelligence-platform-compat-config.xml
+93c493c341478e6903b541dedc7b43650d320728607e4a8671ed17ff799a3eef  system  /system/etc/compatconfig/framework-platform-compat-config.xml  /system/etc/compatconfig/framework-platform-compat-config.xml
+367f401f36560c9e6420bb4091e5de58451f338f5bcca9f3a925749b3a5fac10  system  /system/etc/compatconfig/icu4j-platform-compat-config.xml  /system/etc/compatconfig/icu4j-platform-compat-config.xml
+cbd61c73bb065bc1ca354cbbc0fe12368b8d7e76b00cca93030e7ec9755feb14  system  /system/etc/compatconfig/services-platform-compat-config.xml  /system/etc/compatconfig/services-platform-compat-config.xml
+e695ef17003b332aae1095de2aaf9d18ebbb6b7d432023ab95b70574bb4de214  system_ext  /etc/compatconfig/settings-platform-compat-config.xml  /system/system_ext/etc/compatconfig/settings-platform-compat-config.xml

@@ -223,7 +223,7 @@ fn run_command<const N: usize>(
     program: &str,
     arguments: [&std::ffi::OsStr; N],
 ) -> Result<Vec<u8>, ProfileError> {
-    let output = Command::new(program).args(arguments).output()?;
+    let output = crate::output_owned(Command::new(program).args(arguments))?;
     if !output.status.success() {
         return Err(ProfileError::Daemon(format!(
             "{} failed: {}",

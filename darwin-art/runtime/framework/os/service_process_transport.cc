@@ -1,12 +1,15 @@
 #include "service_process_transport.h"
 
+#include "../../../compat/binder/wire_channel_lifetime.h"
 #include "../../../compat/darwin_binder_wire.h"
-#include "../../../probes/runtime_process_state.h"
+#include "../../../compat/process/host_services.h"
 
+#include <bit>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <unistd.h>
 
@@ -55,7 +58,7 @@ class ScopedSpawn final {
     if (process_owned_) {
       process_owned_ = false;
       if (host_pid_ >= 0) {
-        darwin_art_process::release_service_process(host_pid_);
+        darwin_art::process::ReleaseServiceProcess(host_pid_);
       }
     }
   }
@@ -67,9 +70,9 @@ class ScopedSpawn final {
   bool committed_ = false;
 };
 
-jintArray SpawnService(JNIEnv* env, jclass, jstring component,
-                       jstring instance_name, jstring process_name,
-                       jboolean isolated, jobject intent) {
+jlongArray SpawnService(JNIEnv* env, jclass, jstring component,
+                        jstring instance_name, jstring process_name,
+                        jboolean isolated, jobject intent) {
   const bool debug_timing =
       std::getenv("DARWIN_ART_DEBUG_SLOW_FRAME") != nullptr;
   const auto started = std::chrono::steady_clock::now();
@@ -93,7 +96,7 @@ jintArray SpawnService(JNIEnv* env, jclass, jstring component,
 
   int32_t host_pid = -1;
   int32_t control_fd = -1;
-  const int32_t spawn_status = darwin_art_process::spawn_service_process(
+  const int32_t spawn_status = darwin_art::process::SpawnServiceProcess(
       component_utf.c_str(), instance_utf.c_str(), process_utf.c_str(),
       isolated == JNI_TRUE, &host_pid, &control_fd);
   log_stage("spawn");
@@ -103,15 +106,29 @@ jintArray SpawnService(JNIEnv* env, jclass, jstring component,
   const bool intent_sent =
       intent != nullptr && darwin_art::SendServiceBindIntent(env, control_fd, intent);
   log_stage("bind-intent");
+  // Capture the exact established lifetime before starting the dispatcher.
+  // The worker may retire the channel immediately after startup; retaining
+  // this object lets us reject that race instead of reconstructing authority
+  // from the descriptor alone.
+  const std::shared_ptr<darwin_art::binder::WireChannelLifetime> lifetime =
+      intent_sent
+          ? darwin_art::CaptureEstablishedRemoteBinderChannelLifetime(control_fd)
+          : nullptr;
   const bool dispatcher_started =
       intent_sent && darwin_art::StartRemoteBinderDispatcher(env, control_fd);
   log_stage("dispatcher");
-  if (!dispatcher_started) return nullptr;
+  if (!dispatcher_started || lifetime == nullptr || !lifetime->Live()) {
+    return nullptr;
+  }
+  const uint64_t generation = lifetime->Generation();
+  if (generation == 0) return nullptr;
 
-  const jint values[2] = {host_pid, control_fd};
-  jintArray result = env->NewIntArray(2);
+  const jlong values[3] = {
+      static_cast<jlong>(host_pid), static_cast<jlong>(control_fd),
+      std::bit_cast<jlong>(generation)};
+  jlongArray result = env->NewLongArray(3);
   if (result == nullptr || env->ExceptionCheck()) return nullptr;
-  env->SetIntArrayRegion(result, 0, 2, values);
+  env->SetLongArrayRegion(result, 0, 3, values);
   if (env->ExceptionCheck()) return nullptr;
 
   // The Java result now owns the process/fd pair. Every JNI failure above
@@ -125,7 +142,7 @@ jint ReleaseRemoteService(JNIEnv* env, jclass, jint host_pid, jint control_fd) {
   darwin_art::CloseRemoteBinderChannel(env, control_fd);
   const int close_status = control_fd < 0 ? -1 : close(control_fd);
   const int32_t release_status =
-      darwin_art_process::release_service_process(host_pid);
+      darwin_art::process::ReleaseServiceProcess(host_pid);
   return close_status == 0 && release_status == 0 ? 0 : -1;
 }
 
@@ -162,7 +179,7 @@ bool RegisterServiceProcessTransport(JNIEnv* env, jclass endpoint) {
       {const_cast<char*>("nativeSpawnService"),
        const_cast<char*>(
            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
-           "ZLandroid/content/Intent;)[I"),
+           "ZLandroid/content/Intent;)[J"),
        reinterpret_cast<void*>(&SpawnService)},
       {const_cast<char*>("nativeReleaseRemoteService"),
        const_cast<char*>("(II)I"),

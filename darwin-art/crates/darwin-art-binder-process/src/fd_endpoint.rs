@@ -18,7 +18,6 @@ use std::{
     os::fd::IntoRawFd,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
 };
 
 const OWNER_ABI_V7: u32 = 7;
@@ -26,8 +25,6 @@ const BROKER_OK: u32 = 0;
 const ANDROID_EBADF: i32 = 9;
 const ANDROID_EFAULT: i32 = 14;
 const ANDROID_EINVAL: i32 = 22;
-const ANDROID_ETIMEDOUT: i32 = 110;
-const BLOCKING_IOCTL_LIMIT: Duration = Duration::from_secs(60 * 60);
 const RECEIVE_ARENA_BYTES: usize = 1024 * 1024;
 
 type ReadFn = unsafe extern "C" fn(*mut c_void, u64, *mut c_void, usize, *mut i32) -> isize;
@@ -254,18 +251,10 @@ fn dispatch_ioctl<T: AuthorityTransport>(
         .copy_from(argument as u64, &mut bytes)
         .map_err(|_| ANDROID_EFAULT)?;
     if request == BINDER_WRITE_READ {
-        let status = endpoint
+        endpoint
             .client
-            .execute_write_read_blocking(
-                current_thread_id(),
-                &mut bytes,
-                &mut memory,
-                BLOCKING_IOCTL_LIMIT,
-            )
+            .execute_write_read_indefinite(current_thread_id(), &mut bytes, &mut memory)
             .map_err(map_execute_error)?;
-        if status == darwin_art_binder_device::device::WriteReadStatus::TimedOut {
-            return Err(ANDROID_ETIMEDOUT);
-        }
     } else if matches!(request, BINDER_SET_CONTEXT_MGR | BINDER_SET_CONTEXT_MGR_EXT) {
         endpoint
             .client
@@ -504,6 +493,8 @@ mod tests {
             export: export_file,
             import: import_file,
             close: close_file,
+            bundle: None,
+            retained: None,
         }
     }
 
@@ -570,6 +561,97 @@ mod tests {
             0
         );
         assert_eq!(u64::from_le_bytes(header[8..16].try_into().unwrap()), 4);
+    }
+
+    #[test]
+    fn production_ioctl_waits_for_work_without_an_idle_deadline() {
+        use darwin_art_binder_device::{
+            authority_protocol::LocalNodeToken, command::Kind,
+            remote_transaction::RemoteTransaction, transaction_snapshot::TransactionSnapshot,
+        };
+        use std::{sync::mpsc, time::Duration};
+        let connection = Device::default()
+            .open(ProcessIdentity::new(35, 1000).unwrap())
+            .unwrap();
+        let (client, _) = Client::new(NoTransport, connection);
+        let endpoint = BinderFdEndpoint::install(
+            client,
+            BrokerApi {
+                install_owner: install,
+                publish,
+                uninstall_owner: uninstall,
+                descriptor: descriptor_api(),
+            },
+        )
+        .unwrap();
+        let mut node = [0_u8; 24];
+        node[..4].copy_from_slice(
+            &darwin_art_binder_device::objects::Kind::Binder
+                .tag()
+                .to_le_bytes(),
+        );
+        endpoint
+            .client()
+            .device()
+            .execute_control::<()>(BINDER_SET_CONTEXT_MGR_EXT, &mut node)
+            .unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let endpoint_ref = &endpoint;
+            let waiter = scope.spawn(move || {
+                let callbacks = endpoint_ref.callbacks();
+                let write = Kind::EnterLooper.word().to_le_bytes();
+                let mut read = [0_u8; darwin_art_binder_device::transaction_wire::RECORD_SIZE];
+                let mut header = [0_u8; 48];
+                header[..8].copy_from_slice(&4_u64.to_le_bytes());
+                header[16..24].copy_from_slice(&(write.as_ptr() as u64).to_le_bytes());
+                header[24..32].copy_from_slice(&(read.len() as u64).to_le_bytes());
+                header[40..48].copy_from_slice(&(read.as_mut_ptr() as u64).to_le_bytes());
+                let mut error = -1;
+                let result = unsafe {
+                    callbacks.ioctl.unwrap()(
+                        callbacks.context,
+                        1,
+                        BINDER_WRITE_READ,
+                        header.as_mut_ptr().cast(),
+                        &mut error,
+                    )
+                };
+                done_tx.send((result, error, header, read)).unwrap();
+            });
+            assert!(matches!(
+                done_rx.recv_timeout(Duration::from_millis(20)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            let snapshot = TransactionSnapshot::capture(b"wake", &[], 0).unwrap();
+            let image = TransferImage::capture(&snapshot, &[]).unwrap();
+            endpoint
+                .client()
+                .device()
+                .deliver_remote_transaction(
+                    &image,
+                    ConnectionToken::from_nonzero(1).unwrap(),
+                    RemoteTransaction {
+                        call: None,
+                        sender: ConnectionToken::from_nonzero(2).unwrap(),
+                        sender_pid: 0,
+                        sender_euid: 1000,
+                        target: LocalNodeToken::from_nonzero(1).unwrap(),
+                        code: 7,
+                        flags: 1,
+                    },
+                )
+                .unwrap();
+            let (result, error, header, read) =
+                done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!((result, error), (0, 0));
+            assert_eq!(u64::from_le_bytes(header[8..16].try_into().unwrap()), 4);
+            assert_eq!(
+                u32::from_le_bytes(read[..4].try_into().unwrap()),
+                darwin_art_binder_device::transaction_wire::BR_TRANSACTION
+            );
+            waiter.join().unwrap();
+        });
     }
 
     #[test]

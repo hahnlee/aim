@@ -1,6 +1,7 @@
 use super::manifest::{
     PATCHED_RUNTIME_PATCHES, PATCHED_RUNTIME_SOURCES, RUNTIME_SHADOW_IDENTITY_VERSION,
 };
+use super::source_overlay;
 use super::*;
 use darwin_art_build_contract::{RUNTIME_CACHE_IDENTITY, RuntimeFlavor};
 
@@ -14,7 +15,6 @@ pub(crate) struct RuntimeBootstrapStaging {
     pub(crate) runtime_core_object_dir: PathBuf,
     pub(crate) patched_runtime: PathBuf,
     pub(crate) libprofile: PathBuf,
-    pub(crate) runtime: PathBuf,
     pub(crate) android_jni_include: PathBuf,
     pub(crate) nativehelper_full_include: PathBuf,
     pub(crate) nativehelper_platform_headers: PathBuf,
@@ -45,9 +45,7 @@ pub(crate) fn prepare_runtime_shadow(root: &Path) -> Result<PathBuf> {
     let shadow_is_current = || {
         fs::read_to_string(&shadow_identity_path)
             .is_ok_and(|cached| cached.trim() == shadow_identity)
-            && PATCHED_RUNTIME_SOURCES
-                .iter()
-                .all(|source| patched_runtime.join(source).is_file())
+            && source_overlay::is_complete(&runtime, &patched_runtime).unwrap_or(false)
     };
     if !shadow_is_current() {
         let _shadow_lock = acquire_shadow_lock(&patched_source_dir)?;
@@ -61,31 +59,51 @@ pub(crate) fn prepare_runtime_shadow(root: &Path) -> Result<PathBuf> {
             ));
             let candidate = ShadowCandidate(candidate_dir);
             let candidate_runtime = candidate.0.join("runtime");
-            fs::create_dir_all(&candidate_runtime)?;
-            copy_runtime_sources(&runtime, &candidate_runtime)?;
+            source_overlay::validate_patch_targets(root)?;
+            source_overlay::create_candidate(&runtime, &candidate_runtime)?;
             for patch in PATCHED_RUNTIME_PATCHES {
                 apply_patch_if_needed(&root.join(patch), &candidate.0)?;
             }
             audit_nterp_admission(&candidate_runtime)?;
-
-            fs::create_dir_all(&patched_runtime)?;
-            for source in PATCHED_RUNTIME_SOURCES {
-                let destination = patched_runtime.join(source);
-                if let Some(parent) = destination.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                copy_if_changed(&candidate_runtime.join(source), &destination)?;
-            }
+            audit_runtime_startup(&candidate_runtime)?;
+            source_overlay::publish(&runtime, &candidate_runtime, &patched_runtime)?;
             publish_text_file(&shadow_identity_path, &format!("{shadow_identity}\n"))?;
         }
     }
     audit_nterp_admission(&patched_runtime)?;
+    audit_runtime_startup(&patched_runtime)?;
     Ok(patched_runtime)
+}
+
+fn audit_runtime_startup(runtime: &Path) -> Result<()> {
+    let source = fs::read_to_string(runtime.join("runtime.cc"))?;
+    let header = fs::read_to_string(runtime.join("runtime.h"))?;
+    if source.contains("MinimalForDarwinProbe") || header.contains("MinimalForDarwinProbe") {
+        return Err("product ART shadow still owns the duplicate Minimal startup path".into());
+    }
+    let startup = function_body(&source, "bool Runtime::Start")?;
+    for call in [
+        "CreateJit();",
+        "StartDaemonThreads();",
+        "CreateSystemClassLoader(this)",
+    ] {
+        if startup.matches(call).count() != 1 {
+            return Err(format!("ART Runtime::Start must own one {call}").into());
+        }
+    }
+    let libraries = function_body(&source, "void Runtime::InitNativeMethods")?;
+    if libraries
+        .matches("RegisterBootNativeLibraries(env)")
+        .count()
+        != 1
+    {
+        return Err("ART boot-native initialization lacks the strong Darwin provider".into());
+    }
+    Ok(())
 }
 
 pub(crate) fn prepare(root: &Path, flavor: RuntimeFlavor) -> Result<RuntimeBootstrapStaging> {
     let real_graphics = flavor.real_graphics();
-    build_shell_gate(root, "build-android-elf-jni-fixture.sh")?;
     let build_paths = BuildPaths::from_root(root);
     build_elf_loader(root)?;
 
@@ -135,7 +153,6 @@ pub(crate) fn prepare(root: &Path, flavor: RuntimeFlavor) -> Result<RuntimeBoots
     let elf_loader_include = root.join("crates/darwin-art-elf-loader/include");
     let jni_proxy_include = root.join("tools/android-jni-proxy/include");
     let jni_proxy_generated = root.join("tools/android-jni-proxy/generated");
-    let elf_fixture_generated = root.join("_build/android-elf-jni-fixture/generated");
     let openjdk_math_source = root.join("_aosp/libcore/ojluni/src/main/native/Math.c");
     let (ndk_include, ndk_arch_include) = find_ndk_headers()?;
 
@@ -162,16 +179,19 @@ pub(crate) fn prepare(root: &Path, flavor: RuntimeFlavor) -> Result<RuntimeBoots
     let runtime_core_object_dir = root.join("_build/runtime-common/objects");
     fs::create_dir_all(&object_dir)?;
     fs::create_dir_all(&runtime_core_object_dir)?;
-    fs::write(
-        root.join("_build/runtime-common/cache-identity"),
-        format!("{RUNTIME_CACHE_IDENTITY}\n"),
+    // Both runtime flavors prepare the same shared cache. Keep this identity
+    // inode/mtime stable when its bytes are unchanged, otherwise the second
+    // flavor makes Ninja see the shared cache as newer than its bootstrap
+    // stamp on every warm invocation.
+    publish_text_file(
+        &root.join("_build/runtime-common/cache-identity"),
+        &format!("{RUNTIME_CACHE_IDENTITY}\n"),
     )?;
     fs::create_dir_all(&runtime_generated_dir)?;
 
     let runtime_includes = vec![
         public_include,
         compat,
-        elf_fixture_generated,
         elf_loader_include,
         jni_proxy_include.clone(),
         generated_dir,
@@ -284,7 +304,6 @@ pub(crate) fn prepare(root: &Path, flavor: RuntimeFlavor) -> Result<RuntimeBoots
         runtime_core_object_dir,
         patched_runtime,
         libprofile,
-        runtime,
         android_jni_include,
         nativehelper_full_include,
         nativehelper_platform_headers,
@@ -330,17 +349,6 @@ fn acquire_shadow_lock(shadow_dir: &Path) -> Result<ShadowLock> {
             Err(error) => return Err(error.into()),
         }
     }
-}
-
-fn copy_runtime_sources(runtime: &Path, patched_runtime: &Path) -> Result<()> {
-    for source in PATCHED_RUNTIME_SOURCES {
-        let destination = patched_runtime.join(source);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        copy_if_changed(&runtime.join(source), &destination)?;
-    }
-    Ok(())
 }
 
 /// Fail closed if a legacy Darwin-only Nterp disable patch survives in the
@@ -399,6 +407,7 @@ fn runtime_shadow_identity(runtime: &Path, root: &Path) -> Result<String> {
     let mut digest = Sha256::new();
     digest.update(RUNTIME_SHADOW_IDENTITY_VERSION.as_bytes());
     digest.update([0]);
+    source_overlay::update_identity(&mut digest, runtime)?;
     for path in PATCHED_RUNTIME_SOURCES
         .iter()
         .map(|source| runtime.join(source))
@@ -419,24 +428,56 @@ fn runtime_shadow_identity(runtime: &Path, root: &Path) -> Result<String> {
 /// like a full ART source edit and recompiled hundreds of unchanged TUs.
 /// Compare bytes first, then publish changed content through a sibling temp
 /// file so an interrupted preparation cannot leave a truncated header/source.
-fn copy_if_changed(source: &Path, destination: &Path) -> Result<()> {
-    let source_bytes = fs::read(source)?;
-    if destination.is_file() && fs::read(destination)? == source_bytes {
+fn publish_text_file(destination: &Path, contents: &str) -> Result<()> {
+    if fs::read(destination).ok().as_deref() == Some(contents.as_bytes()) {
         return Ok(());
     }
-    let temporary =
-        destination.with_extension(format!("darwin-art-copy-tmp-{}", std::process::id()));
-    fs::write(&temporary, source_bytes)?;
-    fs::rename(temporary, destination)?;
-    Ok(())
-}
-
-fn publish_text_file(destination: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let temporary =
         destination.with_extension(format!("darwin-art-publish-tmp-{}", std::process::id()));
     fs::write(&temporary, contents)?;
     fs::rename(temporary, destination)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::publish_text_file;
+    use std::fs;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn identical_identity_publish_preserves_mtime() {
+        let root = std::env::temp_dir().join(format!(
+            "darwin-art-stable-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let path = root.join("runtime-common/cache-identity");
+        publish_text_file(&path, "identity-v1\n").expect("initial identity");
+        let before = fs::metadata(&path)
+            .expect("identity metadata")
+            .modified()
+            .expect("identity mtime");
+        thread::sleep(Duration::from_millis(20));
+        publish_text_file(&path, "identity-v1\n").expect("stable identity");
+        let after = fs::metadata(&path)
+            .expect("identity metadata")
+            .modified()
+            .expect("identity mtime");
+        assert_eq!(before, after);
+        assert_eq!(
+            fs::read_to_string(&path).expect("identity bytes"),
+            "identity-v1\n"
+        );
+        fs::remove_dir_all(root).expect("test cleanup");
+    }
 }
 
 /// Apply one ART shadow-tree patch exactly once.
@@ -451,13 +492,13 @@ fn publish_text_file(destination: &Path, contents: &str) -> Result<()> {
 fn apply_patch_if_needed(patch_file: &Path, patched_source_dir: &Path) -> Result<()> {
     let mut forward = Command::new("patch");
     forward
-        .args(["--batch", "--forward", "--dry-run", "-p1", "-i"])
+        .args(["--posix", "--batch", "--forward", "--dry-run", "-p1", "-i"])
         .arg(patch_file)
         .current_dir(patched_source_dir);
     if forward.status()?.success() {
         return run_command(
             Command::new("patch")
-                .args(["--batch", "--forward", "-p1", "-i"])
+                .args(["--posix", "--batch", "--forward", "-p1", "-i"])
                 .arg(patch_file)
                 .current_dir(patched_source_dir),
         );
@@ -465,7 +506,7 @@ fn apply_patch_if_needed(patch_file: &Path, patched_source_dir: &Path) -> Result
 
     let mut reverse = Command::new("patch");
     reverse
-        .args(["--batch", "--reverse", "--dry-run", "-p1", "-i"])
+        .args(["--posix", "--batch", "--reverse", "--dry-run", "-p1", "-i"])
         .arg(patch_file)
         .current_dir(patched_source_dir);
     if reverse.status()?.success() {
@@ -474,7 +515,7 @@ fn apply_patch_if_needed(patch_file: &Path, patched_source_dir: &Path) -> Result
 
     run_command(
         Command::new("patch")
-            .args(["--batch", "--forward", "-p1", "-i"])
+            .args(["--posix", "--batch", "--forward", "-p1", "-i"])
             .arg(patch_file)
             .current_dir(patched_source_dir),
     )

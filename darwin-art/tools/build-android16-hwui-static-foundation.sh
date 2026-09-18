@@ -16,6 +16,7 @@ darwin_thread_detach_patch="$project_root/patches/frameworks-base/0010-darwin-hw
 darwin_require_jni_patch="$project_root/patches/frameworks-base/0011-darwin-hwui-require-jni-env.patch"
 darwin_common_pool_patch="$project_root/patches/frameworks-base/0013-darwin-hwui-common-pool-shutdown.patch"
 darwin_common_pool_explicit_patch="$project_root/patches/frameworks-base/0014-darwin-hwui-common-pool-explicit-shutdown.patch"
+darwin_cross_tu_abi_patch="$project_root/patches/frameworks-base/0019-darwin-hwui-export-cross-tu-abi.patch"
 
 # shellcheck disable=SC1090
 source "$lock_file"
@@ -61,6 +62,7 @@ verify_sha "$darwin_angle_surface_patch" "$DARWIN_ANGLE_SURFACE_PATCH_SHA256"
 verify_sha "$darwin_wide_gamut_patch" "$DARWIN_WIDE_GAMUT_PATCH_SHA256"
 verify_sha "$darwin_common_pool_patch" "$DARWIN_COMMON_POOL_PATCH_SHA256"
 verify_sha "$darwin_common_pool_explicit_patch" "$DARWIN_COMMON_POOL_EXPLICIT_PATCH_SHA256"
+verify_sha "$darwin_cross_tu_abi_patch" "$HWUI_CROSS_TU_ABI_PATCH_SHA256"
 
 sources=(
   canvas/CanvasFrontend.cpp
@@ -266,6 +268,7 @@ patch_identity="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$HWUI_SOURCE_MANIFEST_SHA25
   "$DARWIN_REQUIRE_JNI_PATCH_SHA256" \
   "$DARWIN_COMMON_POOL_PATCH_SHA256" \
   "$DARWIN_COMMON_POOL_EXPLICIT_PATCH_SHA256" \
+  "$HWUI_CROSS_TU_ABI_PATCH_SHA256" \
   "$BITMAP_BUFFER_ACCESS_PATCH_SHA256" \
   "$IMAGE_DECODER_COLOR_ORDER_PATCH_SHA256" \
   "$(shasum -a 256 "$project_root/compat/darwin_hwui_jni_attachment.h" | awk '{print $1}')" \
@@ -283,6 +286,8 @@ if [[ ! -f "$patched_marker" || "$(<"$patched_marker")" != "$patch_identity" ]];
   patch -d "$fresh_shadow" -p1 < "$darwin_require_jni_patch"
   patch -d "$fresh_shadow" -p1 < "$darwin_common_pool_patch"
   patch -d "$fresh_shadow" -p1 < "$darwin_common_pool_explicit_patch"
+  # This patch is rooted at frameworks/base; the producer shadow is libs/hwui.
+  patch --batch --forward -d "$fresh_shadow" -p3 < "$darwin_cross_tu_abi_patch"
   patch -d "$fresh_shadow" -p1 < "$bitmap_buffer_patch"
   patch -d "$fresh_shadow" -p1 < "$decoder_color_patch"
   printf '%s\n' "$patch_identity" > "$fresh_shadow/.darwin-art-patched-source"

@@ -26,6 +26,7 @@ check_hash "$script_dir/manifests/demand.tsv" "$DEMAND_SHA256"
 check_hash "$script_dir/manifests/imports.tsv" "$IMPORTS_SHA256"
 check_hash "$script_dir/include/darwin_art_bionic_binary128_conversion.h" "$HEADER_SHA256"
 check_hash "$script_dir/src/provider.cc" "$PROVIDER_SHA256"
+check_hash "$script_dir/probes/host_state.cc" "$HOST_STATE_HELPER_SHA256"
 check_hash "$script_dir/src/entry.S" "$ENTRY_SHA256"
 check_hash "$script_dir/src/main.rs" "$MAIN_SHA256"
 check_hash "$script_dir/probes/fixture.c" "$FIXTURE_SHA256"
@@ -149,12 +150,22 @@ run_with_icu() {
 }
 
 cargo fmt --manifest-path "$script_dir/Cargo.toml" -- --check
-CARGO_TARGET_DIR="$build_root/clippy" cargo clippy --quiet --all-targets \
+CARGO_TARGET_DIR="$build_root/production-target" cargo build --quiet --lib \
+  --manifest-path "$script_dir/Cargo.toml"
+CARGO_TARGET_DIR="$build_root/clippy" cargo clippy --quiet --all-targets --features audit \
   --manifest-path "$script_dir/Cargo.toml" -- -D warnings
-run_with_icu env CARGO_TARGET_DIR="$build_root/target" cargo run --quiet \
-  --manifest-path "$script_dir/Cargo.toml" -- "$fixture"
 
-archive="$(find "$build_root/target/debug/build" -path '*/out/libdarwin_art_bionic_binary128_conversion.a' -print | head -1)"
+archive="$(CARGO_TARGET_DIR="$build_root/target" cargo build --quiet --features audit \
+  --message-format=json --manifest-path "$script_dir/Cargo.toml" |
+  python3 -c 'import json, sys
+paths = set()
+for line in sys.stdin:
+    event = json.loads(line)
+    if event.get("reason") == "build-script-executed" and "/bionic-binary128-conversion-facade#" in event.get("package_id", ""):
+        paths.add(event["out_dir"] + "/libdarwin_art_bionic_binary128_conversion.a")
+if len(paths) != 1:
+    raise SystemExit("expected exactly one current binary128 provider build-script output")
+print(next(iter(paths)))')"
 [[ -f "$archive" ]] || fail 'product archive missing'
 cp "$archive" "$build_root/libdarwin-art-bionic-binary128-conversion.a"
 members="$(ar -t "$archive" | grep -v '^__.SYMDEF')"
@@ -218,9 +229,11 @@ done
 for sanitizer in address undefined; do
   target="$build_root/cargo-$sanitizer"
   run_with_icu env BIONIC_BINARY128_C_SANITIZER="$sanitizer" CARGO_TARGET_DIR="$target" \
-    cargo run --quiet --manifest-path "$script_dir/Cargo.toml" -- "$fixture" >/dev/null
+    cargo run --quiet --features audit --manifest-path "$script_dir/Cargo.toml" -- "$fixture" >/dev/null
 done
 
+run_with_icu env CARGO_TARGET_DIR="$build_root/target" cargo run --quiet --features audit \
+  --manifest-path "$script_dir/Cargo.toml" -- "$fixture"
 runner="$build_root/target/debug/bionic-binary128-conversion-facade"
 [[ -x "$runner" ]] || fail 'runner missing'
 if otool -L "$runner" | grep -Ei '(homebrew|/opt/|libicu|libandroidicu|libgcc|quadmath)' >/dev/null; then

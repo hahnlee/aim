@@ -56,14 +56,21 @@ fn run() -> Result<(), String> {
         Some("dev") => dev::run(args),
         Some("native-graph") => {
             let mut out = None;
+            let mut with_support = false;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--out" => out = args.next().map(PathBuf::from),
+                    "--with-support" => with_support = true,
                     value => return Err(format!("unknown native-graph option: {value}")),
                 }
             }
             let out = out.ok_or_else(|| "native-graph requires --out <path>".to_owned())?;
-            emit_graph(&out).map_err(|error| error.to_string())
+            if with_support {
+                graph::emit::emit_graph_with_support(&out, true)
+            } else {
+                emit_graph(&out)
+            }
+            .map_err(|error| error.to_string())
         }
         _ => Err("usage: cargo run -p darwin-art-xtask -- native-graph --out <path>".to_owned()),
     }
@@ -130,7 +137,10 @@ mod tests {
     use super::*;
     use crate::graph::emit::{emit_graph, interpreter_core_inputs};
     use crate::graph::foundation::{FoundationFamily, is_foundation_family_input};
-    use crate::graph::inputs::{graph_inputs, is_probe_only_input, probe_content_stamp};
+    use crate::graph::inputs::{
+        graph_inputs, is_global_digest_excluded, native_owner_content_stamp, probe_content_stamp,
+    };
+    use crate::graph::provider_inputs;
 
     #[test]
     fn shell_quote_is_stable_for_normal_repository_paths() {
@@ -196,6 +206,114 @@ mod tests {
     }
 
     #[test]
+    fn unix_filesystem_archive_and_managed_audit_have_separate_inputs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let output = root.join(format!(
+            "_build/unixfs-boundary-{}.ninja",
+            std::process::id()
+        ));
+        emit_graph(&output).expect("emit native graph");
+        let graph = fs::read_to_string(&output).unwrap();
+        let archive = graph
+            .lines()
+            .find(|line| line.contains(": unix_filesystem_archive "))
+            .unwrap();
+        assert!(!archive.contains("/probes/"));
+        assert!(!archive.contains("test-android16-unix-filesystem-darwin.sh"));
+        assert!(graph.contains("build-android16-unix-filesystem-darwin.sh --archive-only"));
+        let audit = graph
+            .lines()
+            .find(|line| line.contains(": unix_filesystem_managed_test "))
+            .unwrap();
+        for input in [
+            "libopenjdk-unix-filesystem-darwin.a",
+            "test-android16-unix-filesystem-darwin.sh",
+            "probes/android16_unix_filesystem_jni.c",
+            "probes/unix-filesystem/UnixFileSystemDarwinSmoke.java",
+        ] {
+            assert!(audit.contains(input), "managed audit omitted {input}");
+        }
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn async_close_audit_is_not_a_libcore_archive_dependency() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let output = root.join(format!(
+            "_build/async-boundary-{}.ninja",
+            std::process::id()
+        ));
+        emit_graph(&output).expect("emit native graph");
+        let graph = fs::read_to_string(&output).unwrap();
+        let archive = graph
+            .lines()
+            .find(|line| line.contains(": libcore_linux_archive "))
+            .unwrap();
+        assert!(!archive.contains("android16_asynchronous_close_monitor_smoke.cc"));
+        assert!(!archive.contains("android16_asynchronous_close_monitor_jni.cc"));
+        assert!(!archive.contains("android16_libcore_darwin_linux_smoke.cc"));
+        for output in [
+            "darwin_linux_method_table.inc",
+            "libcore-darwin-linux-methods.tsv",
+            "libandroid-system-os-constants-darwin.a",
+        ] {
+            assert!(
+                archive.contains(output),
+                "libcore producer omitted {output}"
+            );
+        }
+        assert!(graph.contains("build-android16-libcore-darwin-linux.sh --archive-only"));
+        assert!(!archive.contains("android16_os_constants_jni.cc"));
+        assert!(!archive.contains("probes/"));
+        let os_audit = graph
+            .lines()
+            .find(|line| line.contains(": os_constants_test "))
+            .unwrap();
+        for input in [
+            "test-android16-os-constants-darwin.sh",
+            "android16_os_constants_jni.cc",
+            "libandroid-system-os-constants-darwin.a",
+            "android16_os_constants_values.inc",
+            "derived-values.tsv",
+        ] {
+            assert!(
+                os_audit.contains(input),
+                "OsConstants audit omitted {input}"
+            );
+        }
+        let libcore_audit = graph
+            .lines()
+            .find(|line| line.contains(": libcore_linux_test "))
+            .unwrap();
+        for input in [
+            "libcore-darwin-linux.a",
+            "darwin_linux_method_table.inc",
+            "libcore-darwin-linux-methods.tsv",
+            "test-android16-libcore-darwin-linux.sh",
+            "android16_libcore_darwin_linux_smoke.cc",
+        ] {
+            assert!(
+                libcore_audit.contains(input),
+                "libcore audit omitted {input}"
+            );
+        }
+        let audit = graph
+            .lines()
+            .find(|line| line.contains(": async_close_test "))
+            .unwrap();
+        for input in [
+            "libandroidio-darwin.a",
+            "libcore-io-asynchronous-close-monitor-registrar-darwin.a",
+            "test-android16-asynchronous-close-monitor.sh",
+            "android16_asynchronous_close_monitor_smoke.cc",
+            "android16_asynchronous_close_monitor_jni.cc",
+        ] {
+            assert!(audit.contains(input), "async audit omitted {input}");
+        }
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
     fn surfaceflinger_edge_tracks_commit_wait_boundary() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let output = root.join(format!(
@@ -213,14 +331,42 @@ mod tests {
             "patches/frameworks-native/0002-darwin-surface-commit-wait.patch",
             "patches/frameworks-native/0003-buffer-release-message-length.patch",
             "patches/frameworks-native/0004-darwin-release-record-transport.patch",
+            "patches/frameworks-native/0005-darwin-binder-trigger-poll.patch",
+            "patches/frameworks-native/0006-darwin-binder-rpc-peer-identity.patch",
+            "patches/frameworks-native/0007-rpc-binder-death-log-handle.patch",
+            "patches/frameworks-native/0008-darwin-binder-platform-syscalls.patch",
+            "patches/frameworks-native/0009-darwin-binder-fd-namespace.patch",
+            "tools/sync-android16-hostgraphics.sh",
             "compat/surfaceflinger/release_record_transport.cc",
             "compat/surfaceflinger/release_record_transport.h",
-            "tools/test-release-record-transport.sh",
-            "tools/tests/release-record-transport-test.cc",
             "compat/surfaceflinger/commit_signal.h",
-            "tools/tests/parcel-native-handle-test.cc",
         ] {
             assert!(edge.contains(input), "missing SF producer input: {input}");
+        }
+        assert!(!edge.contains("/probes/"));
+        assert!(!edge.contains("/tools/tests/"));
+        assert!(!edge.contains("surfaceflinger-transaction-runtime"));
+        let audit = graph
+            .lines()
+            .find(|line| line.contains(": surfaceflinger_core_test "))
+            .unwrap();
+        for input in [
+            "tools/test-android16-surfaceflinger-core.sh",
+            "tools/test-release-record-transport.sh",
+            "tools/tests/release-record-transport-test.cc",
+            "tools/tests/parcel-native-handle-test.cc",
+            "probes/surfaceflinger_transaction_handler_compile.cc",
+            "probes/surfaceflinger_transaction_handler_runtime.cc",
+            "surfaceflinger-transaction-runtime",
+            "libsurfaceflinger-frontend-darwin.a",
+            "libbinder-darwin.a",
+            "libgui-transaction-darwin.a",
+            "libui-fence-darwin.a",
+        ] {
+            assert!(
+                audit.contains(input),
+                "missing SF audit input/output: {input}"
+            );
         }
         fs::remove_file(output).unwrap();
     }
@@ -311,6 +457,51 @@ mod tests {
     }
 
     #[test]
+    fn jit_layout_audit_has_a_real_success_stamp_output() {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let output = repository_root.join(format!(
+            "_build/darwin-art-jit-layout-graph-{}.ninja",
+            std::process::id()
+        ));
+        emit_graph(&output).expect("emit native graph");
+        let graph = fs::read_to_string(&output).expect("read emitted graph");
+        let alias = graph
+            .lines()
+            .find(|line| line.starts_with("build jit-layout-audit: phony "))
+            .expect("JIT layout phony alias");
+        assert!(
+            alias.contains("jit-layout-audit.stamp"),
+            "JIT layout alias must depend on its materialized stamp"
+        );
+        let stamp_edge = graph
+            .lines()
+            .find(|line| line.contains(": jit_layout_audit "))
+            .expect("JIT layout stamp producer edge");
+        assert!(
+            stamp_edge.contains("jit-layout-audit.stamp"),
+            "JIT layout rule must declare the stamp as its output"
+        );
+        assert!(
+            stamp_edge.contains("tools/audit-jit-layout.sh")
+                && stamp_edge.contains("tools/jit-layout-smoke.cc"),
+            "JIT layout stamp must track the audit inputs"
+        );
+        let rule_start = graph
+            .find("rule jit_layout_audit\n")
+            .expect("JIT layout rule");
+        let rule = graph[rule_start..]
+            .split_once("\n\n")
+            .expect("JIT layout rule body")
+            .0;
+        assert!(
+            rule.contains("audit-jit-layout.sh && touch")
+                && rule.contains("jit-layout-audit.stamp"),
+            "JIT layout stamp must only be published after a successful audit"
+        );
+        fs::remove_file(output).expect("remove emitted graph");
+    }
+
+    #[test]
     fn every_bootstrap_cli_recipe_has_a_direct_binary_prerequisite() {
         let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let output = repository_root.join(format!(
@@ -372,19 +563,28 @@ mod tests {
 
     #[test]
     fn probe_sources_do_not_invalidate_the_bootstrap_archive() {
-        assert!(is_probe_only_input(Path::new(
+        assert!(is_global_digest_excluded(Path::new(
             "probes/runtime_link_probe.cc"
         )));
-        assert!(is_probe_only_input(Path::new(
+        assert!(is_global_digest_excluded(Path::new(
             "compat/darwin_surface_bridge.mm"
         )));
-        assert!(is_probe_only_input(Path::new(
+        assert!(is_global_digest_excluded(Path::new(
+            "compat/window/appkit_content_view.mm"
+        )));
+        assert!(is_global_digest_excluded(Path::new(
+            "compat/input/darwin_hardware_key_translation.mm"
+        )));
+        assert!(is_global_digest_excluded(Path::new(
             "compat/darwin_surface_gpu_bridge.mm"
         )));
-        assert!(is_probe_only_input(Path::new(
-            "probes/runtime_process_options.cc"
+        assert!(is_global_digest_excluded(Path::new(
+            "probes/runtime_fixture_options.cc"
         )));
-        assert!(!is_probe_only_input(Path::new(
+        assert!(!is_global_digest_excluded(Path::new(
+            "runtime/embedding/process_config.cc"
+        )));
+        assert!(!is_global_digest_excluded(Path::new(
             "compat/darwin_runtime_adapters.cc"
         )));
     }
@@ -475,5 +675,61 @@ mod tests {
             fs::read_to_string(third).expect("changed stamp content")
         );
         fs::remove_dir_all(root).expect("probe stamp test cleanup");
+    }
+
+    #[test]
+    fn production_owner_stamp_rejects_fixture_dependencies() {
+        let root = Path::new("/nonexistent");
+        for fixture in [
+            "probes/runtime_graphics_vsync_diagnostic.cc",
+            "probes/headless_graphics_fixture_natives.h",
+            "probes/runtime_entry_probe.cc",
+            "tools/bionic-float-conversion-facade/probes/host_state.cc",
+            "tools/bionic-socket-broker-adapter/probes/fdsan.cc",
+            "tools/tests/native-window-transaction-admission-test.cc",
+        ] {
+            assert_eq!(
+                native_owner_content_stamp(root, "product", &[fixture])
+                    .expect_err("fixture must be rejected before reading files")
+                    .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+    }
+
+    #[test]
+    fn provider_manifest_keeps_numeric_audit_inputs_off_production_edge() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = provider_inputs::collect(&root).expect("provider input manifest");
+        let production = &manifest.production;
+        let audit = &manifest.audit;
+        for input in [
+            "tools/bionic-float-conversion-facade/build.rs",
+            "tools/bionic-float-conversion-facade/src/lib.rs",
+            "tools/bionic-binary128-conversion-facade/build.rs",
+            "tools/bionic-binary128-conversion-facade/src/lib.rs",
+            "tools/bionic-abort-facade/src/provider.c",
+            "tools/bionic-errno-tls/src/errno_tls.c",
+        ] {
+            assert!(
+                production.iter().any(|path| path == Path::new(input)),
+                "production provider input missing: {input}"
+            );
+        }
+        for input in [
+            "tools/bionic-float-conversion-facade/probes/host_state.cc",
+            "tools/bionic-binary128-conversion-facade/probes/host_state.cc",
+        ] {
+            assert!(
+                audit.iter().any(|path| path == Path::new(input)),
+                "numeric audit input missing: {input}"
+            );
+        }
+        for path in production {
+            let text = path.to_string_lossy();
+            assert!(!text.starts_with("probes/") && !text.contains("/probes/"));
+            assert!(!text.ends_with("/audit.sh"));
+            assert!(!text.ends_with("/src/main.rs"));
+        }
     }
 }

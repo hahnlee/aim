@@ -183,7 +183,7 @@ public final class ProbeContext extends ContextWrapper {
         }
     }
 
-    private static native int[] nativeSpawnService(
+    private static native long[] nativeSpawnService(
             String component, String instanceName, String processName, boolean isolated,
             Intent intent);
     private static native int nativeReleaseRemoteService(int hostPid, int controlFd);
@@ -471,25 +471,30 @@ public final class ProbeContext extends ContextWrapper {
                 }
             }
             String processName = resolveServiceProcessName(component, isolatedInstanceName);
-            int[] child = nativeSpawnService(
+            long[] child = nativeSpawnService(
                     component.flattenToString(), isolatedInstanceName, processName, true, intent);
-            if (child == null || child.length != 2 || child[0] <= 0 || child[1] < 0) {
+            if (child == null || child.length != 3 || child[0] <= 0
+                    || child[0] > Integer.MAX_VALUE || child[1] < 0
+                    || child[1] > Integer.MAX_VALUE || child[2] == 0) {
                 android.util.Log.e("ProbeContext",
                         "could not spawn isolated Service " + component);
                 return false;
             }
+            final int hostPid = (int) child[0];
+            final int controlFd = (int) child[1];
+            final long channelGeneration = child[2];
             final IBinder binder;
             try {
-                binder = new RemoteBinder(child[1], 1);
+                binder = new RemoteBinder(controlFd, 1, channelGeneration);
             } catch (RuntimeException error) {
                 android.util.Log.w("ProbeContext",
                         "isolated Service endpoint failed before ready: " + component
                                 + " instance=" + isolatedInstanceName, error);
-                nativeReleaseRemoteService(child[0], child[1]);
+                nativeReleaseRemoteService(hostPid, controlFd);
                 return false;
             }
             BoundServiceRecord bound = new BoundServiceRecord(
-                    component, null, binder, child[0], child[1], isolatedInstanceName,
+                    component, null, binder, hostPid, controlFd, isolatedInstanceName,
                     processName);
             serviceConnections.put(connection, bound);
             android.util.Log.i("ProbeContext",
@@ -524,24 +529,29 @@ public final class ProbeContext extends ContextWrapper {
                     return true;
                 }
             }
-            int[] child = nativeSpawnService(
+            long[] child = nativeSpawnService(
                     component.flattenToString(), "", processName, false, intent);
-            if (child == null || child.length != 2 || child[0] <= 0 || child[1] < 0) {
+            if (child == null || child.length != 3 || child[0] <= 0
+                    || child[0] > Integer.MAX_VALUE || child[1] < 0
+                    || child[1] > Integer.MAX_VALUE || child[2] == 0) {
                 android.util.Log.e("ProbeContext",
                         "could not spawn remote Service " + component);
                 return false;
             }
+            final int hostPid = (int) child[0];
+            final int controlFd = (int) child[1];
+            final long channelGeneration = child[2];
             final IBinder binder;
             try {
-                binder = new RemoteBinder(child[1], 1);
+                binder = new RemoteBinder(controlFd, 1, channelGeneration);
             } catch (RuntimeException error) {
                 android.util.Log.w("ProbeContext",
                         "remote Service endpoint failed before ready: " + component, error);
-                nativeReleaseRemoteService(child[0], child[1]);
+                nativeReleaseRemoteService(hostPid, controlFd);
                 return false;
             }
             serviceConnections.put(connection, new BoundServiceRecord(
-                    component, null, binder, child[0], child[1], null, processName));
+                    component, null, binder, hostPid, controlFd, null, processName));
             android.util.Log.i("ProbeContext",
                     "bind remote Service " + component + " process=" + processName
                             + " pid=" + child[0]);

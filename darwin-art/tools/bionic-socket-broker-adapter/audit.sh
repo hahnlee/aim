@@ -53,6 +53,8 @@ host_cxx="$(xcrun --find clang++)"
   -I"$dir/src" "$dir/probes/unix_address.cc" -o "$tmp/unix-address"
 "$tmp/unix-address"
 includes=(-I"$dir/include"
+          -I"$dir/src"
+          -iquote "$root/compat"
           -I"$root/tools/bionic-central-fd-broker/include"
           -I"$root/tools/bionic-dns-facade/include"
           -I"$root/tools/bionic-errno-tls/include"
@@ -65,6 +67,18 @@ build_runner() {
   "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
     -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
     -c "$dir/src/adapter.cc" -o "$tmp/adapter-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/android_scm_exports.cc" -o "$tmp/scm-exports-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/fd_inheritance.cc" -o "$tmp/fd-inheritance-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/retained_scm_export.cc" -o "$tmp/retained-scm-export-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/eventfd_owner.cc" -o "$tmp/eventfd-owner-$sanitizer.o"
   "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
     -Wall -Wextra -Werror "${san[@]}" "${includes[@]}" \
     -c "$dir/src/sync_fence_merge.cc" -o "$tmp/merge-$sanitizer.o"
@@ -94,6 +108,13 @@ build_runner() {
     -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
     -I"$root/crates/darwin-art-elf-loader/include" \
     "$dir/probes/runner.cc" "$tmp/adapter-$sanitizer.o" \
+    "$root/tools/tests/binder-retained-provider-fixture.cc" \
+    "$root/compat/binder/fd_transport.cc" \
+    "$root/compat/binder/retained_export_lease.cc" \
+    "$tmp/scm-exports-$sanitizer.o" \
+    "$tmp/fd-inheritance-$sanitizer.o" \
+    "$tmp/retained-scm-export-$sanitizer.o" \
+    "$tmp/eventfd-owner-$sanitizer.o" \
     "$tmp/merge-$sanitizer.o" "$tmp/merge-broker-$sanitizer.o" \
     "$tmp/broker-$sanitizer.o" "$tmp/dns-$sanitizer.o" \
     "$tmp/errno-$sanitizer.o" "$tmp/fdsan-$sanitizer.o" \

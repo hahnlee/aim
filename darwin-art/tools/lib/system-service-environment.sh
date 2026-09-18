@@ -7,5 +7,8 @@ darwin_art_system_service_environment() (
   for name in ${!DARWIN_ART_APK_@} ${!DARWIN_ART_APP_@}; do
     unset "$name"
   done
+  # Screenshot/log destinations belong to the acceptance harness, never to
+  # the stable Android system runtime configuration.
+  unset DARWIN_ART_ACCEPTANCE_OUTPUT
   exec env "$@"
 )

@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+darwin-art-engine-sys = { path = "../darwin-art-engine-sys" }
 darwin-art-binder-device = { path = "../darwin-art-binder-device" }
 darwin-art-profile = { path = "../darwin-art-profile" }
 

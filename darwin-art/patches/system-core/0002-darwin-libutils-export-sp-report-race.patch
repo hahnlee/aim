@@ -1,0 +1,24 @@
+diff --git a/libutils/binder/include/utils/StrongPointer.h b/libutils/binder/include/utils/StrongPointer.h
+index 0000000..0000000 100644
+--- a/libutils/binder/include/utils/StrongPointer.h
++++ b/libutils/binder/include/utils/StrongPointer.h
+@@ -194,3 +194,6 @@
+ // For code size reasons, we do not want these inlined or templated.
++#if defined(__APPLE__)
++__attribute__((visibility("default")))
++#endif
+ void sp_report_race();
+ 
+diff --git a/libutils/binder/StrongPointer.cpp b/libutils/binder/StrongPointer.cpp
+index 0000000..0000000 100644
+--- a/libutils/binder/StrongPointer.cpp
++++ b/libutils/binder/StrongPointer.cpp
+@@ -21,4 +21,7 @@
+ namespace android {
+ 
+-void sp_report_race() { LOG_ALWAYS_FATAL("sp<> assignment detected data race"); }
++#if defined(__APPLE__)
++__attribute__((visibility("default")))
++#endif
++void sp_report_race() { LOG_ALWAYS_FATAL("sp<> assignment detected data race"); }
+ }

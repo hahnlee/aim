@@ -1,5 +1,8 @@
 use super::super::native_probe_commands::core_probe_includes;
-use super::super::native_probe_commands::{CoreProbeObjects, compile_core_probe_objects};
+use super::super::native_probe_commands::{
+    FixtureCoreObjects, RuntimeCoreObjects, compile_fixture_core_objects,
+    compile_native_registration, compile_runtime_core_objects,
+};
 use super::*;
 use crate::build_context::BuildPaths;
 
@@ -211,6 +214,7 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
         .into());
     }
     let surface_object = root.join("_build/runtime-link-probe/darwin_surface_bridge.mm.o");
+    let document_panel_object = root.join("_build/runtime-link-probe/document_panel.mm.o");
     let runtime_library = build_dir.join("libdarwin_art_runtime_direct_apk.dylib");
     let includes = [
         root.join("include"),
@@ -246,12 +250,10 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
     let compiler_identity = command_output(Command::new("clang++").arg("--version"))?;
     // The direct APK flavor has an independent cache from the GPU graphics
     // probe.  A command-line flavor change must never reuse a real-HWUI TU.
-    // Core probe objects are flavor-neutral. Keep their output/cache under
-    // the shared native-probes tree so CPU, Graphics, and direct-APK links
-    // all reuse the same dependency-fingerprinted objects. Flavor-specific
-    // objects continue to use the APK-local cache below.
+    // Tests reuse the production objects and their cache; fixture objects
+    // have a separate output root and cannot enter the production closure.
     let build_paths = BuildPaths::from_root(root);
-    let core_build_dir = build_paths.native_output("native-probes/core");
+    let core_build_dir = build_paths.native_output("native-runtime/core");
     fs::create_dir_all(&core_build_dir)?;
     let core_probe_cache = core_build_dir.join("core-probe-hashes.cache");
     let core_includes = core_probe_includes(root, &build_paths, &runtime);
@@ -260,34 +262,94 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
         .map(PathBuf::as_path)
         .collect::<Vec<_>>();
     let probe_cache = build_dir.join("runtime-direct-apk-probe-hashes.cache");
-    let CoreProbeObjects {
-        elf: elf_probe_object,
-        abi: abi_probe_object,
+    let RuntimeCoreObjects {
+        boot_native_registration: boot_native_registration_object,
+        boot_native_libraries: boot_native_libraries_object,
         process_state: process_state_object,
-        process_options: process_options_object,
-        shutdown: shutdown_probe_object,
-        frame: frame_probe_object,
-    } = compile_core_probe_objects(
+        process_config: process_config_object,
+        process_shutdown: process_shutdown_object,
+        vm_shutdown: vm_shutdown_object,
+        app_process_shutdown: app_process_shutdown_object,
+        ..
+    } = compile_runtime_core_objects(
         root,
         &core_build_dir,
         &core_include_refs,
         &core_probe_cache,
         &compiler_identity,
     )?;
+    let fixture_build_dir = build_paths.native_output("native-probes/core");
+    fs::create_dir_all(&fixture_build_dir)?;
+    let fixture_cache = fixture_build_dir.join("fixture-hashes.cache");
+    let FixtureCoreObjects {
+        elf: elf_probe_object,
+        abi: abi_probe_object,
+        acceptance: acceptance_state_object,
+        fixture_options: fixture_options_object,
+        graphics_fixture_state: graphics_fixture_state_object,
+        shutdown: shutdown_probe_object,
+        frame: frame_probe_object,
+    } = compile_fixture_core_objects(
+        root,
+        &fixture_build_dir,
+        &core_include_refs,
+        &fixture_cache,
+        &compiler_identity,
+    )?;
     // The runtime entry point is intentionally kept as a thin orchestrator;
     // its registration phase is a separate TU and every flavor must link it
     // explicitly.  The direct-APK flavor used to omit this edge, which only
     // surfaced when the APK-specific dylib was linked after the TU split.
-    let registration_object = build_dir.join("darwin_art_runtime_registration_phase.cc.o");
-    let mut registration_command = runtime_cpp_command(&include_refs);
-    registration_command
+    let registration_object = compile_native_registration(
+        root,
+        &build_dir,
+        &include_refs,
+        &probe_cache,
+        &compiler_identity,
+        &[],
+    )?;
+    let registration_fixture_object =
+        build_dir.join("darwin_art_runtime_registration_fixture.cc.o");
+    let mut registration_fixture_command = runtime_cpp_command(&include_refs);
+    registration_fixture_command
+        .arg("-DDARWIN_ART_DIRECT_APK_RUNTIME")
         .arg("-c")
-        .arg(root.join("probes/runtime_registration_phase.cc"))
+        .arg(root.join("probes/runtime_registration_fixture.cc"))
         .arg("-o")
-        .arg(&registration_object);
+        .arg(&registration_fixture_object);
     let _ = compile_cached_probe_tu(
-        &mut registration_command,
-        &registration_object,
+        &mut registration_fixture_command,
+        &registration_fixture_object,
+        &probe_cache,
+        &compiler_identity,
+    )?;
+    let headless_graphics_fixture_object =
+        build_dir.join("darwin_art_headless_graphics_fixture_natives.cc.o");
+    let mut headless_graphics_fixture_command = runtime_cpp_command(&include_refs);
+    headless_graphics_fixture_command
+        .arg("-DDARWIN_ART_DIRECT_APK_RUNTIME")
+        .arg("-c")
+        .arg(root.join("probes/headless_graphics_fixture_natives.cc"))
+        .arg("-o")
+        .arg(&headless_graphics_fixture_object);
+    let _ = compile_cached_probe_tu(
+        &mut headless_graphics_fixture_command,
+        &headless_graphics_fixture_object,
+        &probe_cache,
+        &compiler_identity,
+    )?;
+    let headless_resources_fixture_object =
+        build_dir.join("darwin_art_headless_resources_fixture_natives.cc.o");
+    let mut headless_resources_fixture_command = runtime_cpp_command(&include_refs);
+    headless_resources_fixture_command
+        .arg("-DDARWIN_ART_DIRECT_APK_RUNTIME")
+        .arg("-c")
+        .arg(root.join("probes/headless_resources_fixture_natives.cc"))
+        .arg("-o")
+        .arg(&headless_resources_fixture_object);
+    let _ = compile_cached_probe_tu(
+        &mut headless_resources_fixture_command,
+        &headless_resources_fixture_object,
         &probe_cache,
         &compiler_identity,
     )?;
@@ -380,14 +442,14 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
     let graphics_phase_object = compile_runtime_graphics_phase(root, &build_dir, &include_refs)?;
     let graphics_input_object =
         compile_runtime_graphics_input_probe(root, &build_dir, &include_refs)?;
-    let graphics_state_object = compile_runtime_graphics_state_probe_cpu(
+    let graphics_state_object = compile_runtime_graphics_state_cpu(
         root,
         &build_dir,
         &include_refs,
         &ndk_include,
         &ndk_arch_include,
     )?;
-    let graphics_session_object = compile_runtime_graphics_session_probe_cpu(
+    let graphics_session_object = compile_runtime_graphics_session_cpu(
         root,
         &build_dir,
         &include_refs,
@@ -421,8 +483,7 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
     )?;
     let network_loader_object =
         compile_runtime_network_loader_probe(root, &build_dir, &include_refs)?;
-    let context_loader_object =
-        compile_runtime_context_loader_probe(root, &build_dir, &include_refs)?;
+    let context_loader_object = compile_system_class_loader(root, &build_dir, &include_refs)?;
     let app_bootstrap_object =
         compile_runtime_app_bootstrap_probe(root, &build_dir, &include_refs)?;
     let _app_resources_object =
@@ -481,13 +542,15 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
         .arg("-Wl,-exported_symbol,_darwin_art_surface_pump_events")
         .arg("-Wl,-exported_symbol,_darwin_art_surface_close_requested")
         .arg("-Wl,-exported_symbol,_darwin_art_appkit_pump_events")
-        .arg("-Wl,-exported_symbol,_darwin_art_surface_next_pointer_event")
-        .arg("-Wl,-exported_symbol,_darwin_art_surface_next_pointer_event_v2")
-        .arg("-Wl,-exported_symbol,_darwin_art_surface_next_key_event_v1")
+        .arg("-Wl,-exported_symbol,_darwin_art_surface_set_input_sink")
         .arg("-Wl,-exported_symbol,_darwin_art_surface_destroy")
         .arg("-Wl,-exported_symbol,_darwin_art_surface_active_gpu")
         .arg("-Wl,-exported_symbol,_darwin_art_surface_gpu_active_canvas")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_install_hooks")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_install_fd_inheritance_boundary")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_install_scm_endpoint_provider")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_uninstall_scm_endpoint_provider")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_socket_broker_is_active")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_clear_hooks")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_native_acquire")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_native_release")
@@ -498,11 +561,22 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
         .arg(&object)
         .arg(&elf_probe_object)
         .arg(&abi_probe_object)
+        .arg(&acceptance_state_object)
         .arg(&process_state_object)
-        .arg(&process_options_object)
+        .arg(&process_config_object)
+        .arg(&process_shutdown_object)
+        .arg(&vm_shutdown_object)
+        .arg(&app_process_shutdown_object)
+        .arg(&fixture_options_object)
+        .arg(&graphics_fixture_state_object)
         .arg(&shutdown_probe_object)
         .arg(&frame_probe_object)
         .arg(&registration_object)
+        .arg(&boot_native_registration_object)
+        .arg(&boot_native_libraries_object)
+        .arg(&registration_fixture_object)
+        .arg(&headless_graphics_fixture_object)
+        .arg(&headless_resources_fixture_object)
         .arg(&graphics_probe_object)
         .arg(&graphics_state_object)
         .arg(&network_loader_object)
@@ -519,6 +593,15 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
         .arg(&graph_object)
         .arg(&network_object)
         .arg(&surface_object)
+        .arg(&document_panel_object)
+        .arg(root.join("compat/input/darwin_hardware_key_translation.mm"))
+        .arg(root.join("compat/window/desktop_root_events.mm"))
+        .arg(root.join("compat/window/desktop_foreground_provider.cc"))
+        .arg(root.join("compat/window/desktop_root_target.mm"))
+        .arg("-fobjc-arc")
+        .arg(root.join("compat/window/desktop_root_surface.mm"))
+        .arg(root.join("compat/window/appkit_window_delegate.mm"))
+        .arg(root.join("compat/window/appkit_content_view.mm"))
         .arg(root.join("_build/skia-metal-gpu/libskia.a"))
         .arg(root.join("_build/skia-metal-gpu/libskcms.a"))
         .arg(&bootstrap)
@@ -583,6 +666,8 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
             "-lresolv",
             "-framework",
             "AppKit",
+            "-framework",
+            "ApplicationServices",
             "-framework",
             "IOSurface",
             "-framework",

@@ -21,13 +21,20 @@ pub(crate) fn build_native_graph(root: &Path, target: &str) -> Result<()> {
             | "headless-runtime-audit"
             | "graphics-foundation"
             | "foundation"
+            | "runtime-support-dex"
+            | "runtime-payload"
     ) {
         return Err(format!("unsupported native graph target: {target}").into());
     }
     let graph_dir = root.join("_build/native-graph");
     fs::create_dir_all(&graph_dir)?;
-    let graph = graph_dir.join("build.ninja");
-    run_xtask_native_graph(root, &graph)?;
+    let with_support = matches!(target, "runtime-support-dex" | "runtime-payload");
+    let graph = graph_dir.join(if with_support {
+        "support.ninja"
+    } else {
+        "build.ninja"
+    });
+    run_xtask_native_graph(root, &graph, with_support)?;
     let ninja = root.join("_aosp/external/skia/third_party/ninja/ninja");
     if !ninja.is_file() {
         return Err(format!("pinned Ninja is missing: {}", ninja.display()).into());
@@ -41,7 +48,7 @@ pub(crate) fn build_native_graph(root: &Path, target: &str) -> Result<()> {
     )
 }
 
-fn run_xtask_native_graph(root: &Path, graph: &Path) -> Result<()> {
+fn run_xtask_native_graph(root: &Path, graph: &Path, with_support: bool) -> Result<()> {
     let binary = root.join("target/debug/darwin-art-xtask");
     if xtask_needs_rebuild(root, &binary)? {
         run_command(
@@ -53,12 +60,15 @@ fn run_xtask_native_graph(root: &Path, graph: &Path) -> Result<()> {
     if !binary.is_file() {
         return Err(format!("darwin-art-xtask binary is missing: {}", binary.display()).into());
     }
-    run_command(
-        Command::new(&binary)
-            .args(["native-graph", "--out"])
-            .arg(graph)
-            .current_dir(root),
-    )
+    let mut command = Command::new(&binary);
+    command
+        .args(["native-graph", "--out"])
+        .arg(graph)
+        .current_dir(root);
+    if with_support {
+        command.arg("--with-support");
+    }
+    run_command(&mut command)
 }
 
 fn xtask_needs_rebuild(root: &Path, binary: &Path) -> Result<bool> {

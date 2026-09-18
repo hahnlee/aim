@@ -46,23 +46,6 @@ void register_jdk_internal_misc_VM(JNIEnv* env);
 void register_java_lang_invoke_MethodHandle(JNIEnv* env);
 void register_java_lang_invoke_VarHandle(JNIEnv* env);
 extern "C" void register_java_lang_Runtime(JNIEnv* env);
-// Keep the standard JNI name available as a resolver fallback.  Android's
-// Runtime.nativeLoad is normally installed through RegisterNatives, but a
-// managed Runtime class loaded from an app/core-oj image can resolve the
-// symbol before that table is visible.  The fallback delegates to the same
-// OpenJDK JVM_NativeLoad implementation used by the registered entry point.
-extern "C" jstring JVM_NativeLoad(JNIEnv*, jstring, jobject, jclass);
-extern "C" JNIEXPORT jstring Java_java_lang_Runtime_nativeLoad(
-    JNIEnv* env, jclass ignored, jstring filename, jobject loader,
-    jclass caller) {
-  return JVM_NativeLoad(env, filename, loader, caller);
-}
-extern "C" JNIEXPORT jstring
-Java_java_lang_Runtime_nativeLoad__Ljava_lang_String_2Ljava_lang_ClassLoader_2Ljava_lang_Class_2(
-    JNIEnv* env, jclass ignored, jstring filename, jobject loader,
-    jclass caller) {
-  return Java_java_lang_Runtime_nativeLoad(env, ignored, filename, loader, caller);
-}
 extern "C" void register_java_sun_nio_fs_UnixNativeDispatcher(JNIEnv* env);
 extern "C" void register_sun_nio_ch_IOUtil(JNIEnv* env);
 extern "C" void register_sun_nio_ch_FileChannelImpl(JNIEnv* env);

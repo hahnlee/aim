@@ -1,10 +1,8 @@
 use super::abi::EngineSymbols;
 use core::ffi::c_void;
 use darwin_art_engine_sys::{
-    KeyEventV1, PointerEvent, PointerEventV2, SurfaceCloseRequestedFn, SurfaceDestroyFn,
-    SurfaceGetSizeFn, SurfaceNextKeyEventV1Fn, SurfaceNextPointerEventFn,
-    SurfaceNextPointerEventV2Fn, SurfacePresentAsyncFn, SurfacePresentFn, SurfacePumpEventsFn,
-    SurfaceResizeFn, SurfaceUpdateFn,
+    SurfaceCloseRequestedFn, SurfaceDestroyFn, SurfaceGetSizeFn, SurfacePresentAsyncFn,
+    SurfacePresentFn, SurfacePumpEventsFn, SurfaceResizeFn, SurfaceUpdateFn,
 };
 use darwin_art_runtime::NativeResource;
 use std::{mem::size_of, ptr::NonNull};
@@ -21,9 +19,7 @@ pub struct SurfaceSession {
     present_async: Option<SurfacePresentAsyncFn>,
     pump_events: SurfacePumpEventsFn,
     close_requested: SurfaceCloseRequestedFn,
-    next_pointer_event: SurfaceNextPointerEventFn,
-    next_pointer_event_v2: Option<SurfaceNextPointerEventV2Fn>,
-    next_key_event_v1: Option<SurfaceNextKeyEventV1Fn>,
+    install_android_input_sink: darwin_art_engine_sys::SurfaceInstallAndroidInputSinkFn,
     destroy: SurfaceDestroyFn,
     armed: bool,
     close_status: Option<i32>,
@@ -40,9 +36,7 @@ impl SurfaceSession {
             present_async: symbols.surface.present_async,
             pump_events: symbols.surface.pump_events,
             close_requested: symbols.surface.close_requested,
-            next_pointer_event: symbols.surface.next_pointer_event,
-            next_pointer_event_v2: symbols.surface.next_pointer_event_v2,
-            next_key_event_v1: symbols.surface.next_key_event_v1,
+            install_android_input_sink: symbols.surface.install_android_input_sink,
             destroy: symbols.surface.destroy,
             armed: true,
             close_status: None,
@@ -59,12 +53,26 @@ impl SurfaceSession {
         // SAFETY: callback belongs to the live engine image represented by
         // this symbol table.
         let handle = unsafe { (symbols.surface.active)() };
-        (!handle.is_null()).then(|| Self::from_parts(handle, symbols))
+        if handle.is_null() {
+            return None;
+        }
+        let mut session = Self::from_parts(handle, symbols);
+        // A surface published by the runtime still needs an explicit owner
+        // ingress before host code can enter its frame loop. Fail closed and
+        // destroy the unpublished Rust hand-off if installation is rejected.
+        let sink_status = unsafe { (session.install_android_input_sink)(handle) };
+        if sink_status != 0 {
+            let _ = session.close();
+            None
+        } else {
+            Some(session)
+        }
     }
 
-    pub(crate) fn create(
+    fn create_with_sink(
         symbols: EngineSymbols,
         info: &darwin_art_engine_sys::SurfaceCreateInfo,
+        install_input_sink: bool,
     ) -> Result<Self, i32> {
         let mut status = -1;
         // SAFETY: info is a valid POD for the duration of this call.
@@ -72,8 +80,38 @@ impl SurfaceSession {
         if handle.is_null() {
             Err(status)
         } else {
-            Ok(Self::from_parts(handle, symbols))
+            let mut session = Self::from_parts(handle, symbols);
+            if !install_input_sink {
+                return Ok(session);
+            }
+            // Production display surfaces receive AppKit input only through
+            // the Android InputChannel ingress. A sink installation failure
+            // leaves no live surface with an implicit mailbox route.
+            let sink_status = unsafe { (session.install_android_input_sink)(handle) };
+            if sink_status != 0 {
+                let _ = session.close();
+                Err(sink_status)
+            } else {
+                Ok(session)
+            }
         }
+    }
+
+    pub(crate) fn create(
+        symbols: EngineSymbols,
+        info: &darwin_art_engine_sys::SurfaceCreateInfo,
+    ) -> Result<Self, i32> {
+        Self::create_with_sink(symbols, info, true)
+    }
+
+    /// Create the explicit pre-VM display target without installing the
+    /// Android input sink. The sink is attached only after ART has initialized
+    /// its input ownership; cleanup remains the ordinary paired surface close.
+    pub(crate) fn create_display_target(
+        symbols: EngineSymbols,
+        info: &darwin_art_engine_sys::SurfaceCreateInfo,
+    ) -> Result<Self, i32> {
+        Self::create_with_sink(symbols, info, false)
     }
 
     pub fn update_words(&self, pixels: &[u32]) -> i32 {
@@ -146,36 +184,6 @@ impl SurfaceSession {
         unsafe { (self.close_requested)(handle.as_ptr()) }
     }
 
-    pub fn next_pointer_event(&self, event: &mut PointerEvent) -> bool {
-        let Some(handle) = self.handle.filter(|_| self.armed) else {
-            return false;
-        };
-        // SAFETY: event is writable POD and the handle is live.
-        unsafe { (self.next_pointer_event)(handle.as_ptr(), event) }
-    }
-
-    pub fn next_pointer_event_v2(&self, event: &mut PointerEventV2) -> bool {
-        let Some(handle) = self.handle.filter(|_| self.armed) else {
-            return false;
-        };
-        let Some(next) = self.next_pointer_event_v2 else {
-            return false;
-        };
-        // SAFETY: event is writable POD and the handle is live.
-        unsafe { next(handle.as_ptr(), event) }
-    }
-
-    pub fn next_key_event_v1(&self, event: &mut KeyEventV1) -> bool {
-        let Some(handle) = self.handle.filter(|_| self.armed) else {
-            return false;
-        };
-        let Some(next) = self.next_key_event_v1 else {
-            return false;
-        };
-        // SAFETY: event is writable POD and the handle is live.
-        unsafe { next(handle.as_ptr(), event) }
-    }
-
     pub fn close(&mut self) -> i32 {
         if !self.armed {
             return self.close_status.unwrap_or(0);
@@ -235,10 +243,15 @@ impl NativeResource for SurfaceSession {
 
 #[cfg(test)]
 mod surface_session_tests {
+    use super::super::abi::{
+        BinderBrokerSymbols, EngineSymbols, GraphicsSymbols, ProcessSymbols, ProviderSymbols,
+        SurfaceSymbols,
+    };
     use super::SurfaceSession;
     use core::ffi::c_void;
     use core::ptr::NonNull;
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use darwin_art_engine_sys::*;
     use std::sync::Mutex;
 
     static DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -265,11 +278,189 @@ mod surface_session_tests {
         false
     }
 
-    unsafe extern "C" fn next_event(
-        _: *mut c_void,
-        _: *mut darwin_art_engine_sys::PointerEvent,
-    ) -> bool {
+    unsafe extern "C" fn install_sink(_: *mut c_void) -> i32 {
+        0
+    }
+
+    static CREATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static INSTALL_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn create_surface(
+        _: *const SurfaceCreateInfo,
+        status: *mut i32,
+    ) -> *mut c_void {
+        CREATE_CALLS.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: the caller supplies a valid output pointer for this test ABI.
+        unsafe { *status = 0 };
+        Box::into_raw(Box::new(1_u8)).cast()
+    }
+
+    unsafe extern "C" fn destroy_surface(handle: *mut c_void) -> i32 {
+        DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: every test-created handle is one Box allocation.
+        unsafe { drop(Box::from_raw(handle.cast::<u8>())) };
+        0
+    }
+
+    unsafe extern "C" fn install_test_sink(_: *mut c_void) -> i32 {
+        INSTALL_CALLS.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+
+    unsafe extern "C" fn update_test(_: *mut c_void, _: *const c_void, _: usize) -> i32 {
+        0
+    }
+    unsafe extern "C" fn present_test(_: *mut c_void) -> i32 {
+        0
+    }
+    unsafe extern "C" fn pump_test(_: *mut c_void, _: f64) -> i32 {
+        0
+    }
+    unsafe extern "C" fn close_requested_test(_: *mut c_void) -> bool {
         false
+    }
+    unsafe extern "C" fn active_surface_test() -> *mut c_void {
+        std::ptr::null_mut()
+    }
+    unsafe extern "C" fn appkit_pump_test(_: f64) -> i32 {
+        0
+    }
+    unsafe extern "C" fn run_process_test(_: *const ProcessConfig, _: *mut ProcessResult) -> i32 {
+        0
+    }
+    unsafe extern "C" fn shutdown_process_test() -> i32 {
+        0
+    }
+    unsafe extern "C" fn prepare_process_exit_test() -> i32 {
+        0
+    }
+    unsafe extern "C" fn install_snapshot_test(_: *const ProcessSnapshotConfig) -> i32 {
+        0
+    }
+    unsafe extern "C" fn uninstall_snapshot_test() -> i32 {
+        0
+    }
+    unsafe extern "C" fn install_filesystem_test(
+        _: i32,
+        _: *const u8,
+        _: usize,
+        _: *const u8,
+        _: usize,
+    ) -> i32 {
+        0
+    }
+    unsafe extern "C" fn uninstall_filesystem_test() -> i32 {
+        0
+    }
+    unsafe extern "C" fn install_fd_boundary_test(
+        _: Option<darwin_art_engine_sys::FdInheritanceBoundaryFn>,
+    ) -> i32 {
+        0
+    }
+
+    unsafe extern "C" fn install_provider_test(
+        _: *mut c_void,
+        _: Option<ProviderAcquireFn>,
+        _: Option<ProviderReleaseFn>,
+    ) {
+    }
+    unsafe extern "C" fn install_scm_test(
+        _: *const darwin_art_engine_sys::ScmEndpointProviderV1,
+    ) -> i32 {
+        0
+    }
+    unsafe extern "C" fn uninstall_scm_test() -> i32 {
+        0
+    }
+    unsafe extern "C" fn socket_broker_inactive_test() -> i32 {
+        0
+    }
+    unsafe extern "C" fn clear_provider_test() {}
+    unsafe extern "C" fn acquire_provider_test(_: u32, _: i32) -> i32 {
+        0
+    }
+    unsafe extern "C" fn release_provider_test(_: u32) -> i32 {
+        0
+    }
+    unsafe extern "C" fn binder_install_test(_: *const c_void, _: *mut u64) -> u32 {
+        0
+    }
+    unsafe extern "C" fn binder_publish_test(_: u64, _: u64, _: *mut i32) -> u32 {
+        0
+    }
+    unsafe extern "C" fn binder_uninstall_test(_: u64) -> u32 {
+        0
+    }
+    unsafe extern "C" fn binder_file_test(_: i32) -> i32 {
+        0
+    }
+    unsafe extern "C" fn binder_retained_file_test(
+        _: i32,
+        _: *const darwin_art_engine_sys::DescriptorTransferBinding,
+        _: *mut darwin_art_engine_sys::RetainedExportedDescriptor,
+    ) -> i32 {
+        -1
+    }
+    unsafe extern "C" fn binder_release_export_test(_: *mut c_void) {}
+
+    fn test_symbols() -> EngineSymbols {
+        EngineSymbols {
+            process: ProcessSymbols {
+                run_process: run_process_test,
+                shutdown_process: shutdown_process_test,
+                prepare_process_exit: prepare_process_exit_test,
+                install_process_snapshot: install_snapshot_test,
+                uninstall_process_snapshot: uninstall_snapshot_test,
+                install_process_filesystem: install_filesystem_test,
+                uninstall_process_filesystem: uninstall_filesystem_test,
+            },
+            surface: SurfaceSymbols {
+                create: create_surface,
+                resize: None,
+                get_size: None,
+                update: update_test,
+                present: present_test,
+                present_async: None,
+                pump_events: pump_test,
+                close_requested: close_requested_test,
+                install_android_input_sink: install_test_sink,
+                destroy: destroy_surface,
+                active: active_surface_test,
+                appkit_pump_events: appkit_pump_test,
+            },
+            graphics: GraphicsSymbols {
+                create: None,
+                close: None,
+                destroy: None,
+                dispatch_pointer: None,
+                dispatch_pointer_v2: None,
+                dispatch_key_v1: None,
+                pump_main_looper: None,
+                wait_main_looper: None,
+                wake_main_looper: None,
+                pump_frame: None,
+            },
+            provider: ProviderSymbols {
+                install_fd_inheritance: install_fd_boundary_test,
+                install_scm_endpoint: install_scm_test,
+                uninstall_scm_endpoint: uninstall_scm_test,
+                socket_broker_is_active: socket_broker_inactive_test,
+                install_hooks: install_provider_test,
+                clear_hooks: clear_provider_test,
+                native_acquire: acquire_provider_test,
+                native_release: release_provider_test,
+            },
+            binder_broker: BinderBrokerSymbols {
+                install_owner: binder_install_test,
+                publish: binder_publish_test,
+                uninstall_owner: binder_uninstall_test,
+                export_file: binder_file_test,
+                export_retained_file: binder_retained_file_test,
+                release_export_lease: binder_release_export_test,
+                import_file: binder_file_test,
+                close_file: binder_file_test,
+            },
+        }
     }
 
     #[test]
@@ -285,9 +476,7 @@ mod surface_session_tests {
             present_async: None,
             pump_events: pump,
             close_requested,
-            next_pointer_event: next_event,
-            next_pointer_event_v2: None,
-            next_key_event_v1: None,
+            install_android_input_sink: install_sink,
             destroy,
             armed: true,
             close_status: None,
@@ -310,9 +499,7 @@ mod surface_session_tests {
             present_async: None,
             pump_events: pump,
             close_requested,
-            next_pointer_event: next_event,
-            next_pointer_event_v2: None,
-            next_key_event_v1: None,
+            install_android_input_sink: install_sink,
             destroy,
             armed: true,
             close_status: None,
@@ -331,6 +518,31 @@ mod surface_session_tests {
             session.pump_events(0.1),
             darwin_art_engine_sys::ENGINE_STATUS_UNAVAILABLE
         );
-        assert!(!session.next_pointer_event(&mut darwin_art_engine_sys::PointerEvent::default()));
+    }
+
+    #[test]
+    fn display_target_skips_sink_but_closes_native_surface() {
+        let _lock = DESTROY_TEST_LOCK.lock().unwrap();
+        CREATE_CALLS.store(0, Ordering::SeqCst);
+        INSTALL_CALLS.store(0, Ordering::SeqCst);
+        DESTROY_CALLS.store(0, Ordering::SeqCst);
+        let info = SurfaceCreateInfo {
+            width: 320,
+            height: 240,
+            title: core::ptr::null(),
+            visible: true,
+            scale_to_display: false,
+        };
+        let symbols = test_symbols();
+        let session = SurfaceSession::create_display_target(symbols, &info).unwrap();
+        assert_eq!(CREATE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(INSTALL_CALLS.load(Ordering::SeqCst), 0);
+        drop(session);
+        assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 1);
+
+        let session = SurfaceSession::create(symbols, &info).unwrap();
+        assert_eq!(INSTALL_CALLS.load(Ordering::SeqCst), 1);
+        drop(session);
+        assert_eq!(DESTROY_CALLS.load(Ordering::SeqCst), 2);
     }
 }

@@ -1,7 +1,7 @@
 //! Long-lived, peer-authenticated Binder routing control sessions.
 //! Payload storage remains in each process-local endpoint.
 
-use crate::{ProfileError, binder_transfer::TransferTable};
+use crate::{binder_transfer::TransferTable, ProfileError};
 use darwin_art_binder_device::{
     authority_protocol::{self, ConnectionToken, Message, TransferToken},
     routing_authority::{Outbound, PeerIdentity, RoutingAuthority, Session},
@@ -11,12 +11,12 @@ use std::{
     io,
     net::Shutdown,
     os::{
-        fd::{AsFd, OwnedFd},
+        fd::OwnedFd,
         unix::net::UnixStream,
     },
     sync::{
-        Arc, Mutex,
         mpsc::{self, SyncSender},
+        Arc, Mutex,
     },
     thread,
 };
@@ -35,11 +35,10 @@ struct Endpoint {
 pub(crate) struct TransferDelivery(Vec<OwnedFd>);
 
 impl TransferDelivery {
-    pub(crate) fn send(self, stream: &UnixStream) -> Result<(), ProfileError> {
-        let descriptors: Vec<_> = self.0.iter().map(AsFd::as_fd).collect();
-        crate::fd_passing::send_many(stream, &descriptors)?;
-        Ok(())
+    pub(crate) fn into_descriptors(self) -> Vec<OwnedFd> {
+        self.0
     }
+
 }
 
 #[derive(Default)]
@@ -345,9 +344,9 @@ impl BinderService {
             .map_err(transfer_failed)
     }
 
-    /// Consumes one routed carrier and transfers its sole table-owned
-    /// descriptor to the authenticated destination. A failed send drops the
-    /// descriptor here; it can never be replayed under the same token.
+    /// Consumes one routed bundle for the authenticated destination. The
+    /// caller hands it to the host delivery owner before native enqueue;
+    /// this one-shot Binder token cannot be replayed on a delivery failure.
     pub(crate) fn prepare_take(
         &self,
         peer: PeerIdentity,

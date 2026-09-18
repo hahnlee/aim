@@ -10,13 +10,19 @@ final class ConnectionRecord {
     final IntentBindRecord binding;
     final long flags;
     final int callingUid;
+    final ServiceConnectionOwner owner;
+    boolean admitted;
+    boolean pendingAdmission;
 
     ConnectionRecord(IServiceConnection endpoint, IntentBindRecord intentBinding,
-            long bindFlags, int callerUid) {
+            long bindFlags, int callerUid, ServiceConnectionOwner connectionOwner) {
         connection = endpoint;
         connectionBinder = endpoint.asBinder();
         binding = intentBinding;
         flags = bindFlags;
         callingUid = callerUid;
+        if (connectionOwner == null) throw new IllegalArgumentException("Missing connection owner");
+        owner = connectionOwner;
     }
+
 }

@@ -4,15 +4,23 @@ use super::*;
 mod baseline;
 #[path = "dex_commands/button.rs"]
 mod button;
+#[path = "dex_commands/dex_inspector.rs"]
+mod dex_inspector;
 #[path = "dex_commands/elf_jni.rs"]
 mod elf_jni;
+#[path = "dex_commands/fixture_framework_inputs.rs"]
+mod fixture_framework_inputs;
 #[path = "dex_commands/network.rs"]
 mod network;
+#[path = "dex_commands/runtime_support.rs"]
+mod runtime_support;
 
 pub(crate) use baseline::build_dex_probe;
 pub(crate) use button::build_button_dex_probe;
+pub(crate) use dex_inspector::build_dex_inspector;
 pub(crate) use elf_jni::build_elf_jni_dex_probe;
 pub(crate) use network::build_network_dex_probe;
+pub(crate) use runtime_support::{build_runtime_support_classes, build_runtime_support_dex};
 
 pub(crate) fn find_d8() -> Result<PathBuf> {
     let sdk_root = android_sdk_root()?;
@@ -82,17 +90,25 @@ pub(crate) fn verify_dex_contract(
 }
 
 // The probe's diagnostic enumerates class_defs, not referenced type strings.
-// These classes must have a single owner in original services.jar.
+// These classes must retain their original framework/services bootclasspath owner.
 pub(crate) fn verify_service_definitions_external(output: &str) -> Result<()> {
     for name in [
+        "Landroid/os/ServiceManager;",
         "Lcom/android/server/pm/AbstractStatsBase;",
         "Lcom/android/server/pm/AbstractStatsBase$1;",
         "Lcom/android/server/pm/dex/PackageDexUsage;",
         "Lcom/android/server/pm/dex/PackageDexUsage$DexUseInfo;",
         "Lcom/android/server/pm/dex/PackageDexUsage$PackageUseInfo;",
     ] {
-        if output.contains(&format!("={name}")) {
-            return Err(format!("support DEX shadows original services.jar class {name}").into());
+        if output.split_whitespace().any(|entry| {
+            let Some((index, descriptor)) = entry.split_once("]=") else {
+                return false;
+            };
+            index.strip_prefix("class[").is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit())
+            }) && descriptor == name
+        }) {
+            return Err(format!("support DEX shadows original bootclasspath class {name}").into());
         }
     }
     Ok(())
@@ -100,6 +116,17 @@ pub(crate) fn verify_service_definitions_external(output: &str) -> Result<()> {
 
 #[cfg(test)]
 mod service_ownership_tests {
+    #[test]
+    fn compile_signature_may_be_referenced_but_not_defined() {
+        assert!(super::verify_service_definitions_external(
+            "type=Landroid/os/ServiceManager; class[2]=Ldev/darwinart/runtime/wm/DesktopRootClient;"
+        ).is_ok());
+        assert!(
+            super::verify_service_definitions_external("class[2]=Landroid/os/ServiceManager;")
+                .is_err()
+        );
+    }
+
     #[test]
     fn rejects_copied_original_but_allows_adapter() {
         assert!(

@@ -10,6 +10,8 @@ use std::ffi::{c_void, CStr};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use crate::vulkan_backend::raw_device_symbol as backend_raw_device_symbol;
+
 const VK_SUCCESS: i32 = 0;
 const VK_TIMEOUT: i32 = 2;
 const VK_ERROR_INITIALIZATION_FAILED: i32 = -3;
@@ -111,7 +113,7 @@ fn clear_after_reset(device: usize, fences: &[*mut c_void], result: i32) {
 fn raw_device_symbol(device: usize, name: &CStr) -> *mut c_void {
     // The parent WSI backend owns the device-proc lookup and returns a native
     // driver address without exposing that address through the Android DSO.
-    unsafe { super::wsi_backend_raw_device_symbol(device, name) }
+    unsafe { backend_raw_device_symbol(device, name) }
 }
 
 fn fence_slice<'a>(fences: *const *mut c_void, count: u32) -> Result<&'a [*mut c_void], i32> {

@@ -7,12 +7,13 @@
 
 use crate::process_command::prepare_command;
 use crate::process_incarnation::ProcessIncarnation;
+use crate::process_wait::{PollOutcome, ProcessWaitOwner};
 use crate::{ProfileError, registry::validate_package};
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::Child;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -249,93 +250,107 @@ impl BoundServiceProcessResponse {
 /// A daemon-owned child.  The process lease callback is run only after the
 /// child has been waited, including the spawn-worker failure/drop path.
 pub(crate) struct OwnedBoundServiceChild {
-    child: Child,
-    activation: Arc<Mutex<Option<crate::process_start_gate::StartGate>>>,
-    on_exit: Option<Box<dyn FnOnce() + Send>>,
+    waiter: Option<ProcessWaitOwner>,
+    control: Arc<crate::bound_service_child_control::BoundServiceChildControl>,
 }
 
 impl OwnedBoundServiceChild {
     pub(crate) fn new(
         child: Child,
-        activation: Arc<Mutex<Option<crate::process_start_gate::StartGate>>>,
+        incarnation: ProcessIncarnation,
+        control: Arc<crate::bound_service_child_control::BoundServiceChildControl>,
         on_exit: Box<dyn FnOnce() + Send>,
     ) -> Self {
         Self {
-            child,
-            activation,
-            on_exit: Some(on_exit),
+            waiter: Some(ProcessWaitOwner::from_child(child, incarnation, on_exit)),
+            control,
         }
     }
 
-    pub(crate) fn activation(&self) -> Arc<Mutex<Option<crate::process_start_gate::StartGate>>> {
-        Arc::clone(&self.activation)
+    pub(crate) fn control(
+        &self,
+    ) -> Arc<crate::bound_service_child_control::BoundServiceChildControl> {
+        Arc::clone(&self.control)
     }
 
     pub(crate) fn activate(
-        activation: &Arc<Mutex<Option<crate::process_start_gate::StartGate>>>,
+        control: &Arc<crate::bound_service_child_control::BoundServiceChildControl>,
     ) -> Result<(), ProfileError> {
-        let gate = activation
-            .lock()
-            .map_err(|_| ProfileError::Daemon("bound-service activation lock poisoned".into()))?
-            .take()
-            .ok_or_else(|| invalid("bound-service process is already activated or expired"))?;
-        gate.release()
-            .map_err(|error| ProfileError::Daemon(format!("bound-service activation: {error}")))
+        control.activate()
     }
 
     pub(crate) fn supervise(
         mut self,
         after_exit: impl FnOnce() + Send + 'static,
     ) -> Result<(), ProfileError> {
-        let process_exit = self
-            .on_exit
+        let mut waiter = self
+            .waiter
             .take()
-            .expect("bound-service child must have a process callback");
-        self.on_exit = Some(Box::new(move || {
-            process_exit();
-            after_exit();
-        }));
-        thread::Builder::new()
+            .expect("bound-service child supervisor may only start once");
+        waiter.add_completion(Box::new(after_exit));
+        let transfer = Arc::new(std::sync::Mutex::new(Some(waiter)));
+        let worker_transfer = Arc::clone(&transfer);
+        let control = Arc::clone(&self.control);
+        let result = thread::Builder::new()
             .name("bound-service-child".into())
             .spawn(move || {
+                let mut waiter = worker_transfer
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                    .expect("bound-service wait owner transfers once");
                 let deadline = Instant::now() + ACTIVATION_TIMEOUT;
+                let mut kill_requested = false;
                 loop {
-                    match self.child.try_wait() {
-                        Ok(Some(_)) | Err(_) => break,
-                        Ok(None) => {}
+                    match waiter.poll() {
+                        PollOutcome::Reaped(_) | PollOutcome::GoneWithoutStatus => break,
+                        PollOutcome::Unknown(_) => {}
+                        PollOutcome::Pending
+                        | PollOutcome::OwnershipUnavailableLive
+                        | PollOutcome::TerminalAwaitingReap => {}
                     }
-                    let waiting = self
-                        .activation
-                        .lock()
-                        .map(|gate| gate.is_some())
-                        .unwrap_or(false);
-                    if waiting && Instant::now() >= deadline {
-                        let _ = self.activation.lock().map(|mut gate| gate.take());
+                    if !kill_requested
+                        && (control.cancelled()
+                            || (Instant::now() >= deadline && control.expired_waiting()))
+                    {
+                        if matches!(waiter.kill_if_exact_live(), Ok(true)) {
+                            kill_requested = true;
+                        }
+                    }
+                    if matches!(
+                        waiter.poll(),
+                        PollOutcome::Reaped(_) | PollOutcome::GoneWithoutStatus
+                    ) {
+                        break;
                     }
                     thread::sleep(Duration::from_millis(10));
                 }
-                if let Some(on_exit) = self.on_exit.take() {
-                    on_exit();
-                }
             })
-            .map(|_| ())
-            .map_err(|error| ProfileError::Daemon(format!("bound-service supervisor: {error}")))
+            .map(|_| ());
+        if result.is_err() {
+            // Abandoning the prepared launch is caller policy. The waiter
+            // retains BOTH completion callbacks after the closure is dropped.
+            self.control.cancel();
+            if let Some(waiter) = transfer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                let _ = waiter.kill_if_exact_live();
+                drop(waiter);
+            }
+        }
+        result.map_err(|error| ProfileError::Daemon(format!("bound-service supervisor: {error}")))
     }
 }
 
 impl Drop for OwnedBoundServiceChild {
     fn drop(&mut self) {
-        let live = match self.child.try_wait() {
-            Ok(Some(_)) => false,
-            Ok(None) | Err(_) => true,
-        };
-        if live {
-            let _ = self.activation.lock().map(|mut gate| gate.take());
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-        if let Some(on_exit) = self.on_exit.take() {
-            on_exit();
+        // Cancellation is caller policy; the wait owner itself remains in
+        // quarantine and settles the callback only after Reaped/Gone.
+        if let Some(waiter) = self.waiter.as_ref() {
+            self.control.cancel();
+            let _ = waiter.kill_if_exact_live();
         }
     }
 }
@@ -351,8 +366,9 @@ pub(crate) fn spawn(
     // Do not let a service child attach or publish Binder state before the
     // daemon has installed its authenticated PID/incarnation owner record.
     let gate = crate::process_start_gate::StartGate::prepare(&mut command)?;
-    let activation = Arc::new(Mutex::new(Some(gate)));
-    let child = command.spawn()?;
+    let control =
+        Arc::new(crate::bound_service_child_control::BoundServiceChildControl::new(Some(gate)));
+    let child = crate::spawn_owned(&mut command)?;
     let pid = child.id();
     let on_exit = match on_child_registered(pid) {
         Ok(on_exit) => on_exit,
@@ -390,7 +406,7 @@ pub(crate) fn spawn(
             incarnation: incarnation.parts(),
             activation_token,
         },
-        OwnedBoundServiceChild::new(child, activation, on_exit),
+        OwnedBoundServiceChild::new(child, incarnation, control, on_exit),
     ))
 }
 
@@ -572,12 +588,25 @@ mod tests {
     }
 
     #[test]
-    fn owned_child_reaps_on_supervisor_spawn_failure_path() {
-        let mut child = std::process::Command::new("/bin/cat").spawn().unwrap();
-        let _ = child.kill();
-        let _ = child.wait();
-        let _owned =
-            OwnedBoundServiceChild::new(child, Arc::new(Mutex::new(None)), Box::new(|| {}));
+    fn dropping_owned_child_retains_completion_until_actual_reap() {
+        let child = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let pid = child.id();
+        let incarnation = ProcessIncarnation::read(pid).unwrap();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let owned = OwnedBoundServiceChild::new(
+            child,
+            incarnation,
+            Arc::new(crate::bound_service_child_control::BoundServiceChildControl::new(None)),
+            Box::new(move || {
+                assert!(matches!(
+                    ProcessIncarnation::observe(pid).unwrap(),
+                    crate::process_incarnation::ProcessObservation::Absent
+                ));
+                completed_tx.send(()).unwrap();
+            }),
+        );
+        drop(owned);
+        completed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 
     #[test]
@@ -592,6 +621,19 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "subprocess fixture for post-activation cancellation"]
+    fn activation_child_hold_fixture() {
+        println!("BEFORE");
+        std::io::stdout().flush().unwrap();
+        // SAFETY: this isolated subprocess has not started application
+        // threads and is the only code accessing its startup environment.
+        let result = unsafe { crate::wait_for_process_registration() };
+        println!("AFTER {}", result.is_ok());
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_secs(10));
+    }
+
+    #[test]
     fn prepared_child_waits_for_exactly_one_activation() {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
@@ -603,8 +645,10 @@ mod tests {
             ])
             .stdout(Stdio::piped());
         let gate = crate::process_start_gate::StartGate::prepare(&mut command).unwrap();
-        let activation = Arc::new(Mutex::new(Some(gate)));
+        let control =
+            Arc::new(crate::bound_service_child_control::BoundServiceChildControl::new(Some(gate)));
         let mut child = command.spawn().unwrap();
+        let incarnation = ProcessIncarnation::read(child.id()).unwrap();
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         while !line.contains("BEFORE") {
@@ -615,13 +659,94 @@ mod tests {
         let (exited_tx, exited_rx) = mpsc::channel();
         let owned = OwnedBoundServiceChild::new(
             child,
-            Arc::clone(&activation),
+            incarnation,
+            Arc::clone(&control),
             Box::new(move || exited_tx.send(()).unwrap()),
         );
         owned.supervise(|| {}).unwrap();
         assert!(exited_rx.recv_timeout(Duration::from_millis(50)).is_err());
-        OwnedBoundServiceChild::activate(&activation).unwrap();
-        assert!(OwnedBoundServiceChild::activate(&activation).is_err());
+        OwnedBoundServiceChild::activate(&control).unwrap();
+        assert!(OwnedBoundServiceChild::activate(&control).is_err());
         exited_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn cancellation_reaps_before_process_lease_callback() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "bound_service_process::tests::activation_child_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .stdout(Stdio::piped());
+        let gate = crate::process_start_gate::StartGate::prepare(&mut command).unwrap();
+        let control =
+            Arc::new(crate::bound_service_child_control::BoundServiceChildControl::new(Some(gate)));
+        let mut child = command.spawn().unwrap();
+        let incarnation = ProcessIncarnation::read(child.id()).unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains("BEFORE") {
+            line.clear();
+            assert!(output.read_line(&mut line).unwrap() > 0);
+        }
+
+        let (exited_tx, exited_rx) = mpsc::channel();
+        let owned = OwnedBoundServiceChild::new(
+            child,
+            incarnation,
+            Arc::clone(&control),
+            Box::new(move || exited_tx.send(()).unwrap()),
+        );
+        owned.supervise(|| {}).unwrap();
+        assert!(exited_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        control.cancel();
+        exited_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(control.cancelled());
+    }
+
+    #[test]
+    fn cancellation_after_activation_reaps_before_process_lease_callback() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "bound_service_process::tests::activation_child_hold_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .stdout(Stdio::piped());
+        let gate = crate::process_start_gate::StartGate::prepare(&mut command).unwrap();
+        let control =
+            Arc::new(crate::bound_service_child_control::BoundServiceChildControl::new(Some(gate)));
+        let mut child = command.spawn().unwrap();
+        let incarnation = ProcessIncarnation::read(child.id()).unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains("BEFORE") {
+            line.clear();
+            assert!(output.read_line(&mut line).unwrap() > 0);
+        }
+
+        let (exited_tx, exited_rx) = mpsc::channel();
+        let owned = OwnedBoundServiceChild::new(
+            child,
+            incarnation,
+            Arc::clone(&control),
+            Box::new(move || exited_tx.send(()).unwrap()),
+        );
+        owned.supervise(|| {}).unwrap();
+        control.activate().unwrap();
+        line.clear();
+        while !line.contains("AFTER true") {
+            line.clear();
+            assert!(output.read_line(&mut line).unwrap() > 0);
+        }
+        assert!(exited_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        control.cancel();
+        exited_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(control.cancelled());
     }
 }

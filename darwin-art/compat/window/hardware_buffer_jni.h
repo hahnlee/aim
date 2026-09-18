@@ -10,6 +10,8 @@
 
 namespace darwin_art::hardware_buffer {
 
+bool RegisterHardwareBufferNatives(JNIEnv* env);
+
 // These are the native methods used by android.hardware.HardwareBuffer.  A
 // Java mNativeObject value is always a raw Darwin AHardwareBuffer*.
 void HardwareBufferFinalizer(void* opaque);

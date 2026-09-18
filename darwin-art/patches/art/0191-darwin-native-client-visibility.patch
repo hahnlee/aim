@@ -1,0 +1,115 @@
+diff --git a/runtime/thread_list.h b/runtime/thread_list.h
+--- a/runtime/thread_list.h
++++ b/runtime/thread_list.h
+@@ -174,1 +174,1 @@
+-  void RunEmptyCheckpoint()
++  EXPORT void RunEmptyCheckpoint()
+diff --git a/runtime/interpreter/mterp/nterp.h b/runtime/interpreter/mterp/nterp.h
+--- a/runtime/interpreter/mterp/nterp.h
++++ b/runtime/interpreter/mterp/nterp.h
+@@ -34,3 +34,3 @@
+-bool IsNterpSupported();
+-bool CanRuntimeUseNterp();
+-const void* GetNterpEntryPoint();
++EXPORT bool IsNterpSupported();
++EXPORT bool CanRuntimeUseNterp();
++EXPORT const void* GetNterpEntryPoint();
+diff --git a/runtime/interpreter/interpreter.h b/runtime/interpreter/interpreter.h
+--- a/runtime/interpreter/interpreter.h
++++ b/runtime/interpreter/interpreter.h
+@@ -42,1 +42,1 @@
+-extern void EnterInterpreterFromInvoke(Thread* self, ArtMethod* method,
++extern EXPORT void EnterInterpreterFromInvoke(Thread* self, ArtMethod* method,
+diff --git a/runtime/parsed_options.h b/runtime/parsed_options.h
+--- a/runtime/parsed_options.h
++++ b/runtime/parsed_options.h
+@@ -55,1 +55,1 @@
+-  static bool Parse(const RuntimeOptions& options,
++  EXPORT static bool Parse(const RuntimeOptions& options,
+diff --git a/runtime/jit/profiling_info.h b/runtime/jit/profiling_info.h
+--- a/runtime/jit/profiling_info.h
++++ b/runtime/jit/profiling_info.h
+@@ -131,1 +131,1 @@
+-  InlineCache* GetInlineCache(uint32_t dex_pc);
++  EXPORT InlineCache* GetInlineCache(uint32_t dex_pc);
+@@ -215,2 +215,2 @@
+-  ScopedProfilingInfoUse(jit::Jit* jit, ArtMethod* method, Thread* self);
+-  ~ScopedProfilingInfoUse();
++  EXPORT ScopedProfilingInfoUse(jit::Jit* jit, ArtMethod* method, Thread* self);
++  EXPORT ~ScopedProfilingInfoUse();
+diff --git a/runtime/instrumentation.h b/runtime/instrumentation.h
+--- a/runtime/instrumentation.h
++++ b/runtime/instrumentation.h
+@@ -73,1 +73,5 @@
+-struct InstrumentationListener {
++#if defined(__APPLE__)
++struct __attribute__((type_visibility("default"))) InstrumentationListener {
++#else
++struct InstrumentationListener {
++#endif
+@@ -117,1 +121,1 @@
+-  virtual void FieldWritten(Thread* thread,
++  EXPORT virtual void FieldWritten(Thread* thread,
+diff --git a/runtime/common_throws.h b/runtime/common_throws.h
+--- a/runtime/common_throws.h
++++ b/runtime/common_throws.h
+@@ -221,1 +221,1 @@
+-void ThrowNoSuchMethodError(ObjPtr<mirror::Class> c,
++EXPORT void ThrowNoSuchMethodError(ObjPtr<mirror::Class> c,
+diff --git a/runtime/ti/agent.h b/runtime/ti/agent.h
+--- a/runtime/ti/agent.h
++++ b/runtime/ti/agent.h
+@@ -43,1 +43,1 @@
+-  explicit AgentSpec(const std::string& arg);
++  EXPORT explicit AgentSpec(const std::string& arg);
+diff --git a/runtime/jit/jit_code_cache.h b/runtime/jit/jit_code_cache.h
+--- a/runtime/jit/jit_code_cache.h
++++ b/runtime/jit/jit_code_cache.h
+@@ -358,1 +358,1 @@
+-  bool IsOsrCompiled(ArtMethod* method) REQUIRES(!Locks::jit_lock_);
++  EXPORT bool IsOsrCompiled(ArtMethod* method) REQUIRES(!Locks::jit_lock_);
+diff --git a/runtime/jit/jit.h b/runtime/jit/jit.h
+--- a/runtime/jit/jit.h
++++ b/runtime/jit/jit.h
+@@ -305,1 +305,1 @@
+-  OsrData* PrepareForOsr(ArtMethod* method, uint32_t dex_pc, uint32_t* vregs)
++  EXPORT OsrData* PrepareForOsr(ArtMethod* method, uint32_t dex_pc, uint32_t* vregs)
+diff --git a/runtime/plugin.h b/runtime/plugin.h
+--- a/runtime/plugin.h
++++ b/runtime/plugin.h
+@@ -53,1 +53,1 @@
+-  bool Unload();
++  EXPORT bool Unload();
+@@ -62,1 +62,1 @@
+-  Plugin(const Plugin& other);
++  EXPORT Plugin(const Plugin& other);
+diff --git a/runtime/mirror/throwable.h b/runtime/mirror/throwable.h
+--- a/runtime/mirror/throwable.h
++++ b/runtime/mirror/throwable.h
+@@ -46,1 +46,1 @@
+-  ObjPtr<Throwable> GetCause() REQUIRES_SHARED(Locks::mutator_lock_);
++  EXPORT ObjPtr<Throwable> GetCause() REQUIRES_SHARED(Locks::mutator_lock_);
+diff --git a/runtime/runtime.h b/runtime/runtime.h
+--- a/runtime/runtime.h
++++ b/runtime/runtime.h
+@@ -317,1 +317,1 @@
+-  void DetachCurrentThread(bool should_run_callbacks = true) REQUIRES(!Locks::mutator_lock_);
++  EXPORT void DetachCurrentThread(bool should_run_callbacks = true) REQUIRES(!Locks::mutator_lock_);
+diff --git a/runtime/gc/heap.h b/runtime/gc/heap.h
+--- a/runtime/gc/heap.h
++++ b/runtime/gc/heap.h
+@@ -904,1 +904,1 @@
+-  uint64_t GetGcCount() const;
++  EXPORT uint64_t GetGcCount() const;
+diff --git a/runtime/entrypoints/runtime_asm_entrypoints.h b/runtime/entrypoints/runtime_asm_entrypoints.h
+--- a/runtime/entrypoints/runtime_asm_entrypoints.h
++++ b/runtime/entrypoints/runtime_asm_entrypoints.h
+@@ -47,1 +47,1 @@
+-extern "C" void art_quick_to_interpreter_bridge(ArtMethod*);
++extern "C" EXPORT void art_quick_to_interpreter_bridge(ArtMethod*);
+diff --git a/runtime/entrypoints/quick/quick_default_externs.h b/runtime/entrypoints/quick/quick_default_externs.h
+--- a/runtime/entrypoints/quick/quick_default_externs.h
++++ b/runtime/entrypoints/quick/quick_default_externs.h
+@@ -109,1 +109,1 @@
+-extern "C" void art_quick_to_interpreter_bridge(art::ArtMethod*);
++extern "C" EXPORT void art_quick_to_interpreter_bridge(art::ArtMethod*);

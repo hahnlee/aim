@@ -1,6 +1,6 @@
 //! Package-manager app IDs, independent of Darwin uid and process IDs.
 //! Access is serialized by PackageRegistry's daemon mutex.
-use crate::{ProfileError, registry::validate_package};
+use crate::{registry::validate_package, ProfileError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};

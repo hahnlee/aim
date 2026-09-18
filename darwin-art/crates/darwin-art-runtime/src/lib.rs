@@ -9,6 +9,8 @@
 use darwin_art_abi::StatusCode;
 
 #[cfg(target_os = "macos")]
+mod bound_service_launch_capability;
+#[cfg(target_os = "macos")]
 mod bound_service_process_ffi;
 mod lifecycle;
 mod linker_load_flags;
@@ -36,6 +38,8 @@ mod service_endpoint_ffi;
 mod service_readiness;
 mod session;
 mod shutdown;
+#[cfg(test)]
+mod shutdown_tests;
 
 pub use lifecycle::RuntimeLifecycle;
 pub use native_owner::{

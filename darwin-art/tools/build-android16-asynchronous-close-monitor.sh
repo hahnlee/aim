@@ -2,6 +2,12 @@
 set -euo pipefail
 export LC_ALL=C
 
+mode="${1:---archive-and-test}"
+[[ $# -le 1 && ( "$mode" == --archive-only || "$mode" == --archive-and-test ) ]] || {
+  echo 'usage: build-android16-asynchronous-close-monitor.sh [--archive-only|--archive-and-test]' >&2
+  exit 2
+}
+
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 project_root="$(cd "$script_dir/.." && pwd)"
 lock_file="$project_root/upstream/android16-asynchronous-close-monitor.lock"
@@ -42,15 +48,11 @@ materialize luni/src/main/native/AsynchronousCloseMonitor.cpp "$MONITOR_CPP_SHA2
 materialize luni/src/main/native/AsynchronousCloseMonitor.h "$MONITOR_H_SHA256"
 materialize luni/src/main/native/libcore_io_AsynchronousCloseMonitor.cpp \
   "$REGISTRAR_CPP_SHA256"
-materialize luni/src/main/java/libcore/io/AsynchronousCloseMonitor.java \
-  "$MANAGED_CLASS_SHA256"
-materialize luni/src/main/java/libcore/io/IoBridge.java "$IO_BRIDGE_SHA256"
 
 native_bp="$source_root/luni/src/main/native/Android.bp"
 native_code_bp="$source_root/NativeCode.bp"
 registrar_source="$source_root/luni/src/main/native/libcore_io_AsynchronousCloseMonitor.cpp"
 register_source="$source_root/luni/src/main/native/Register.cpp"
-io_bridge="$source_root/luni/src/main/java/libcore/io/IoBridge.java"
 
 stage="$(mktemp -d "${TMPDIR:-/tmp}/darwin-art-async-close.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
@@ -99,8 +101,6 @@ register_line="$(grep -n 'REGISTER(register_libcore_io_AsynchronousCloseMonitor)
 linux_line="$(grep -n 'REGISTER(register_libcore_io_Linux);' \
   "$register_source" | cut -d: -f1)"
 [[ "$register_line" -lt "$linux_line" ]] || fail "upstream registration order changed"
-grep -F 'AsynchronousCloseMonitor.signalBlockedThreads(oldFd);' \
-  "$io_bridge" >/dev/null || fail "IoBridge signal-before-close contract missing"
 method_count="$(grep -c 'NATIVE_METHOD(AsynchronousCloseMonitor,' \
   "$registrar_source")"
 [[ "$method_count" == "$REGISTRAR_METHOD_COUNT" ]] ||
@@ -117,8 +117,6 @@ liblog_archive="$project_root/_build/graphics-foundations/liblog-darwin.a"
 for required in \
   "$project_root/compat/AsynchronousCloseMonitor.h" \
   "$project_root/compat/darwin_asynchronous_close_monitor.cc" \
-  "$project_root/probes/android16_asynchronous_close_monitor_smoke.cc" \
-  "$project_root/probes/android16_asynchronous_close_monitor_jni.cc" \
   "$nativehelper/include/nativehelper/JNIHelp.h" \
   "$nativehelper/include_platform/nativehelper/JNIPlatformHelp.h" \
   "$nativehelper/include_platform_header_only/nativehelper/jni_macros.h" \
@@ -179,68 +177,12 @@ done
 grep -F ' T register_libcore_io_AsynchronousCloseMonitor(_JNIEnv*)' \
   "$registrar_definitions" >/dev/null || fail "registrar definition missing"
 
-smoke="$stage/asynchronous-close-monitor-smoke"
-"$cxx" "${common_flags[@]}" \
-  "$project_root/probes/android16_asynchronous_close_monitor_smoke.cc" \
-  "$backend_object" "$liblog_archive" -o "$smoke"
-smoke_output="$($smoke)"
-[[ "$smoke_output" == 'async-close: two-blocked-readers=EINTR signaled=2' ]] ||
-  fail "blocking smoke failed: $smoke_output"
-
-jni_object="$stage/asynchronous-close-monitor-jni.o"
-"$cxx" "${common_flags[@]}" \
-  -c "$project_root/probes/android16_asynchronous_close_monitor_jni.cc" \
-  -o "$jni_object"
-managed_library="$stage/libasynchronous-close-monitor-managed.dylib"
-"$cxx" -arch arm64 -isysroot "$sdk_root" -dynamiclib \
-  "$jni_object" "$registrar_object" "$backend_object" \
-  -Wl,-force_load,"$nativehelper_archive" "$liblog_archive" \
-  -o "$managed_library"
-
-java_sources="$stage/java-sources"
-java_classes="$stage/java-classes"
-mkdir -p "$java_sources/libcore/io" "$java_sources/dev/darwinart/probe" \
-  "$java_classes"
-cat > "$java_sources/libcore/io/AsynchronousCloseMonitor.java" <<'JAVA'
-package libcore.io;
-
-import java.io.FileDescriptor;
-
-public final class AsynchronousCloseMonitor {
-    private AsynchronousCloseMonitor() {}
-    public static native void signalBlockedThreads(FileDescriptor fd);
-}
-JAVA
-cat > "$java_sources/dev/darwinart/probe/AsynchronousCloseMonitorSmoke.java" <<'JAVA'
-package dev.darwinart.probe;
-
-import java.io.FileInputStream;
-import libcore.io.AsynchronousCloseMonitor;
-
-public final class AsynchronousCloseMonitorSmoke {
-    public static void main(String[] args) throws Exception {
-        if (args.length != 1) throw new IllegalArgumentException("dylib required");
-        System.load(args[0]);
-        try (FileInputStream input = new FileInputStream("/dev/null")) {
-            AsynchronousCloseMonitor.signalBlockedThreads(input.getFD());
-        }
-        System.out.println("managed-async-close: registrar=pass signature=FileDescriptor->void");
-    }
-}
-JAVA
-javac --release 17 -encoding UTF-8 -d "$java_classes" \
-  "$java_sources/libcore/io/AsynchronousCloseMonitor.java" \
-  "$java_sources/dev/darwinart/probe/AsynchronousCloseMonitorSmoke.java"
-managed_output="$(java -cp "$java_classes" \
-  dev.darwinart.probe.AsynchronousCloseMonitorSmoke "$managed_library")"
-[[ "$managed_output" == \
-   'managed-async-close: registrar=pass signature=FileDescriptor->void' ]] ||
-  fail "managed registrar smoke failed: $managed_output"
-
 mkdir -p "$build_dir"
 cp "$backend_archive" "$build_dir/libandroidio-darwin.a"
 cp "$registrar_archive" \
   "$build_dir/libcore-io-asynchronous-close-monitor-registrar-darwin.a"
-cp "$smoke" "$build_dir/asynchronous-close-monitor-smoke"
-
-echo "async-close: libandroidio=1 registrar=1 signal=SIGUSR2 blocked-readers=2/EINTR managed=pass"
+cp "$source_manifest" "$build_dir/libandroidio-sources.txt"
+echo "async-close: archives=libandroidio+registrar arch=arm64"
+if [[ "$mode" == --archive-and-test ]]; then
+  bash "$script_dir/test-android16-asynchronous-close-monitor.sh" --prepared
+fi

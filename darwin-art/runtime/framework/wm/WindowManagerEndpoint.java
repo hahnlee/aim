@@ -3,17 +3,33 @@ package dev.darwinart.runtime.wm;
 import android.os.Binder;
 import android.os.Parcel;
 import android.os.RemoteException;
+import dev.darwinart.runtime.am.ApplicationProcessRegistry;
 
 /** System-process owner for the pinned Android 16 IWindowManager contract. */
 public final class WindowManagerEndpoint extends Binder {
     private static final String DESCRIPTOR = "android.view.IWindowManager";
-    private final WindowSessionEndpoint session;
+    private final ApplicationProcessRegistry processes;
+    private final DesktopWindowMetadataRegistry metadata;
+    private final WindowSessionWindowOwnership windows = new WindowSessionWindowOwnership();
+    private final WindowPublicationController publications = new WindowPublicationController();
     private final int openSessionCode = transaction("openSession");
     private final int hasNavigationBarCode = transaction("hasNavigationBar");
 
-    public WindowManagerEndpoint(DesktopWindowMetadataRegistry metadata) {
-        session = new WindowSessionEndpoint(metadata);
+    public WindowManagerEndpoint(ApplicationProcessRegistry processes,
+            DesktopWindowMetadataRegistry metadata) {
+        if (processes == null || metadata == null) throw new NullPointerException();
+        this.processes = processes;
+        this.metadata = metadata;
         attachInterface(null, DESCRIPTOR);
+    }
+
+    /** Creates the root registry joined to this endpoint's publication owner. */
+    public DesktopRootRegistry createDesktopRootRegistry() {
+        return new DesktopRootRegistry(publications.bindingOwner());
+    }
+
+    DesktopRootRegistry createDesktopRootRegistry(DesktopForegroundAuthority.Provider authority) {
+        return new DesktopRootRegistry(publications.bindingOwner(), authority);
     }
 
     private static int transaction(String name) {
@@ -34,6 +50,9 @@ public final class WindowManagerEndpoint extends Binder {
             data.enforceInterface(DESCRIPTOR);
             data.readStrongBinder(); // IWindowSessionCallback
             data.enforceNoDataAvail();
+            WindowSessionIdentity identity = new WindowSessionIdentity(processes,
+                    Binder.getCallingPid(), Binder.getCallingUid());
+            WindowSessionEndpoint session = new WindowSessionEndpoint(metadata, identity, windows, publications);
             reply.writeNoException();
             reply.writeStrongBinder(session);
             return true;

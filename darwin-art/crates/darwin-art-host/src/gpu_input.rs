@@ -3,10 +3,8 @@
 use crate::config::HostError;
 use crate::frame_timing;
 use crate::runtime::HostRuntime;
-use crate::surface::{
-    owned_surface_next_key_event_v1, owned_surface_next_pointer_event_v2, owned_surface_wait_slice,
-};
-use darwin_art_engine_sys::{KeyEventV1, PointerEventV2};
+use crate::surface::owned_surface_wait_slice;
+use darwin_art_engine_sys::KeyEventV1;
 use std::time::{Duration, Instant};
 
 pub(super) fn pump_frame_with_latency(
@@ -65,47 +63,6 @@ pub(super) fn pump_main_looper(runtime: &mut HostRuntime) -> Result<(), HostErro
     Ok(())
 }
 
-pub(super) fn dispatch_queued_events(runtime: &mut HostRuntime) -> Result<u64, HostError> {
-    let mut dispatched = 0_u64;
-    let mut event = PointerEventV2::default();
-    let dispatch = |event: PointerEventV2| -> Result<(), HostError> {
-        let dispatch_status = runtime
-            .graphics()
-            .map_or(-1, |graphics| graphics.dispatch_pointer_v2(&event));
-        if dispatch_status != 0 {
-            return Err(HostError::RuntimeFailed(dispatch_status));
-        }
-        Ok(())
-    };
-    let mut key_event = KeyEventV1::default();
-    // The focused channel owns one sequence-ordered packet queue. Its typed
-    // dequeue APIs return false when the opposite kind is at the head, so
-    // alternate one pointer and one key attempt per pass to preserve
-    // cross-kind ordering without moving JNI work off the owner thread.
-    loop {
-        let mut progressed = false;
-        if owned_surface_next_pointer_event_v2(runtime, &mut event) {
-            dispatch(event)?;
-            dispatched += 1;
-            progressed = true;
-        }
-        if owned_surface_next_key_event_v1(runtime, &mut key_event) {
-            let dispatch_status = runtime
-                .graphics()
-                .map_or(-1, |graphics| graphics.dispatch_key_v1(&key_event));
-            if dispatch_status != 0 {
-                return Err(HostError::RuntimeFailed(dispatch_status));
-            }
-            dispatched += 1;
-            progressed = true;
-        }
-        if !progressed {
-            break;
-        }
-    }
-    Ok(dispatched)
-}
-
 pub(super) fn dispatch_synthetic_keys(
     runtime: &mut HostRuntime,
     sequence: &[(u32, u32)],
@@ -155,7 +112,6 @@ pub(super) fn dispatch_synthetic_keys(
                         status: pump_status,
                     });
                 }
-                dispatched += dispatch_queued_events(runtime)?;
                 // Keep the test-only interval on the same owner-turn contract
                 // as the product loop: drain framework/native Looper work
                 // once, then publish a display edge. pump_frame deliberately

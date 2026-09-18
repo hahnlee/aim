@@ -1,6 +1,6 @@
 use super::common::{build_runtime_native_owner, require_file};
 use super::graphics_core_probes::{
-    CoreProbeObjects, compile_core_probe_objects, core_probe_includes,
+    RuntimeCoreObjects, compile_runtime_core_objects, core_probe_includes,
 };
 use super::graphics_link_checks::validate_graphics_runtime_link;
 use super::graphics_link_inputs::GraphicsRuntimeInputs;
@@ -34,6 +34,9 @@ pub(crate) fn audit_runtime_graphics_link_mode(
     run_upstream_gates: bool,
     incremental: bool,
 ) -> Result<()> {
+    // Fast links must refresh the same canonical JavaVM provider too; archive
+    // presence alone does not establish source/compiler identity.
+    build_framework_java_vm_provider(root)?;
     // The final dylib embeds libartbase and exports its production C++ ABI.
     // Rebuild that provider through its dependency cache before linking so a
     // compile-contract change (for example ART_STATIC_LIBARTBASE) cannot be
@@ -63,6 +66,7 @@ pub(crate) fn audit_runtime_graphics_link_mode(
     let runtime_native_owner_archive = build_runtime_native_owner(root)?;
     build_shell_gate(root, "build-android16-system-properties.sh")?;
     build_shell_gate(root, "build-android16-binder-jni.sh")?;
+    build_shell_gate(root, "build-android16-input-keymaps.sh")?;
     run_command(
         Command::new("bash").arg(root.join("tools/build-android16-openjdkjvmti-darwin.sh")),
     )?;
@@ -70,13 +74,6 @@ pub(crate) fn audit_runtime_graphics_link_mode(
     let runtime = root.join("_aosp/art/runtime");
     let build_paths = BuildPaths::from_root(root);
     let build_dir = build_paths.native_output("runtime-graphics-link-probe");
-    let object = build_dir.join("darwin_art_runtime.cc.o");
-    let network_object = if let Some(path) = env::var_os("DARWIN_ART_NATIVE_NETWORK_OBJECT") {
-        PathBuf::from(path)
-    } else {
-        compile_runtime_network_probe(root, &build_dir)?
-    };
-    require_file(&network_object, "runtime network object is missing")?;
     let runtime_library = build_dir.join("libdarwin_art_runtime_graphics.dylib");
     let GraphicsRuntimeInputs {
         graphics_closure,
@@ -131,153 +128,39 @@ pub(crate) fn audit_runtime_graphics_link_mode(
     let includes = core_probe_includes(root, &build_paths, &runtime);
     let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let (ndk_include, ndk_arch_include) = find_ndk_headers()?;
-    let hwui_object = if let Some(path) = env::var_os("DARWIN_ART_NATIVE_HWUI_OBJECT") {
-        PathBuf::from(path)
-    } else {
-        compile_runtime_hwui_probe(
-            root,
-            &build_dir,
-            &include_refs,
-            &ndk_include,
-            &ndk_arch_include,
-        )?
-    };
     // Keep the process probe flavor-neutral. The linked compatibility object is
     // the sole owner of DARWIN_ART_REAL_GRAPHICS and chooses the real backend.
     let compiler_identity = command_output(Command::new("clang++").arg("--version"))?;
     let probe_cache = build_dir.join("runtime-graphics-probe-hashes.cache");
-    let core_build_dir = build_paths.native_output("native-probes/core");
+    let core_build_dir = build_paths.native_output("native-runtime/core");
     fs::create_dir_all(&core_build_dir)?;
     let core_probe_cache = core_build_dir.join("core-probe-hashes.cache");
-    let CoreProbeObjects {
-        elf: elf_probe_object,
-        abi: abi_probe_object,
+    let RuntimeCoreObjects {
+        boot_native_registration: boot_native_registration_object,
+        boot_native_libraries: boot_native_libraries_object,
+        vm_bootstrap: vm_bootstrap_object,
+        process_entry: process_entry_object,
         process_state: process_state_object,
-        process_options: process_options_object,
-        shutdown: shutdown_probe_object,
-        frame: frame_probe_object,
-    } = compile_core_probe_objects(
+        process_config: process_config_object,
+        process_shutdown: process_shutdown_object,
+        vm_shutdown: vm_shutdown_object,
+        app_process_shutdown: app_process_shutdown_object,
+    } = compile_runtime_core_objects(
         root,
         &core_build_dir,
         &include_refs,
         &core_probe_cache,
         &compiler_identity,
     )?;
-    let graphics_probe_object = if let Some(path) = env::var_os("DARWIN_ART_NATIVE_GRAPHICS_OBJECT")
-        && Path::new(&path).is_file()
-    {
-        PathBuf::from(path)
-    } else {
-        let graphics_probe_object = env::var_os("DARWIN_ART_NATIVE_GRAPHICS_OBJECT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| build_dir.join("darwin_art_runtime_graphics_probe.cc.o"));
-        if let Some(parent) = graphics_probe_object.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut graphics_probe_command = runtime_cpp_command(&include_refs);
-        graphics_probe_command
-            .args(["-include", "mirror/object_reference.h"])
-            .arg("-idirafter")
-            .arg(&ndk_arch_include)
-            .arg("-idirafter")
-            .arg(&ndk_include)
-            .arg("-DLOG_TAG=\"DarwinArtHWUI\"")
-            .arg("-DSK_BUILD_FOR_ANDROID_FRAMEWORK")
-            .arg("-include")
-            .arg("log/log_main.h")
-            .arg("-DDARWIN_ART_REAL_GRAPHICS")
-            .arg("-DDARWIN_ART_HWUI_GPU")
-            .arg("-DDARWIN_ART_AOSP_COMPAT_LSEEK64")
-            .arg("-c")
-            .arg("-I")
-            .arg(root.join("_aosp/frameworks/base/libs/hwui"))
-            .arg("-I")
-            .arg(root.join("_aosp/frameworks/base/libs/hwui/hwui"))
-            .arg("-I")
-            .arg(root.join("_aosp/frameworks/base/libs/hwui/pipeline/skia"))
-            .arg("-I")
-            .arg(root.join("_aosp/frameworks/base/libs/androidfw/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/frameworks/base/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/frameworks/native/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/system/incremental_delivery/incfs/util/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/system/core/libutils/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/system/core/libsystem/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/system/core/libcutils/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/system/core/libutils/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/system/incremental_delivery/incfs/util/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/frameworks/native/libs/ui/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/frameworks/native/libs/ui/include_types"))
-            .arg("-I")
-            .arg(root.join("_aosp/frameworks/native/libs/nativewindow/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/frameworks/native/libs/arect/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/system/logging/liblog/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/external/skia"))
-            .arg("-I")
-            .arg(root.join("_aosp/external/skia/include/core"))
-            .arg("-I")
-            .arg(root.join("_aosp/external/skia/include/effects"))
-            .arg("-I")
-            .arg(root.join("_aosp/external/skia/include/private"))
-            .arg("-I")
-            .arg(root.join("_aosp/external/skia/include/android"))
-            .arg("-I")
-            .arg(root.join("_aosp/external/skia/include/utils"))
-            .arg("-I")
-            .arg(root.join("_aosp/external/skia/include/codec"))
-            .arg("-I")
-            .arg(root.join("_aosp/frameworks/minikin/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/external/harfbuzz_ng/src"))
-            .arg("-I")
-            .arg(root.join("_aosp/external/googletest/googletest/include"))
-            .arg(root.join("probes/runtime_graphics_probe.cc"))
-            .arg("-o")
-            .arg(&graphics_probe_object);
-        let _ = compile_cached_probe_tu(
-            &mut graphics_probe_command,
-            &graphics_probe_object,
-            &probe_cache,
-            &compiler_identity,
-        )?;
-        graphics_probe_object
-    };
-    let graphics_phase_object = compile_runtime_graphics_phase(root, &build_dir, &include_refs)?;
-    let graphics_gpu_object = if let Some(path) =
-        env::var_os("DARWIN_ART_NATIVE_GRAPHICS_GPU_OBJECT")
-        && Path::new(&path).is_file()
-    {
-        PathBuf::from(path)
-    } else {
-        compile_runtime_graphics_gpu_probe(
-            root,
-            &build_dir,
-            &include_refs,
-            &ndk_include,
-            &ndk_arch_include,
-        )?
-    };
-    let graphics_input_object =
-        compile_runtime_graphics_input_probe(root, &build_dir, &include_refs)?;
+    let event_ingress_object = compile_runtime_event_ingress(root, &build_dir, &include_refs)?;
+    let vsync_source_object = compile_runtime_vsync_source(root, &build_dir, &include_refs)?;
     let graphics_state_object = if let Some(path) =
         env::var_os("DARWIN_ART_NATIVE_GRAPHICS_STATE_OBJECT")
         && Path::new(&path).is_file()
     {
         PathBuf::from(path)
     } else {
-        compile_runtime_graphics_state_probe(
+        compile_runtime_graphics_state(
             root,
             &build_dir,
             &include_refs,
@@ -285,210 +168,89 @@ pub(crate) fn audit_runtime_graphics_link_mode(
             &ndk_arch_include,
         )?
     };
-    let graphics_session_object_real = compile_runtime_graphics_session_probe(
+    let graphics_session_object_real = compile_runtime_graphics_session(
         root,
         &build_dir,
         &include_refs,
         &ndk_include,
         &ndk_arch_include,
     )?;
-    let jni_acceptance_object =
-        compile_runtime_jni_acceptance_probe(root, &build_dir, &include_refs)?;
-    let mut probe_command = runtime_cpp_command(&include_refs);
-    probe_command
-        .args(["-include", "mirror/object_reference.h"])
-        .arg("-idirafter")
-        .arg(ndk_arch_include)
-        .arg("-idirafter")
-        .arg(ndk_include)
-        .arg("-Wno-macro-redefined")
-        .arg("-DDARWIN_ART_REAL_GRAPHICS")
-        .arg("-DDARWIN_ART_HWUI_GPU")
-        .arg("-DDARWIN_ART_AOSP_COMPAT_LSEEK64")
-        .arg("-DLOG_TAG=\"DarwinArtHWUI\"")
-        .arg("-DSK_BUILD_FOR_ANDROID_FRAMEWORK")
-        .arg("-include")
-        .arg("log/log_main.h")
-        .arg("-I")
-        .arg(root.join("_aosp/external/skia"))
-        .arg("-I")
-        .arg(root.join("_aosp/external/skia/include/core"))
-        .arg("-I")
-        .arg(root.join("_aosp/external/skia/include/effects"))
-        .arg("-I")
-        .arg(root.join("_aosp/external/skia/include/utils"))
-        .arg("-I")
-        .arg(root.join("_aosp/external/skia/include/private"))
-        .arg("-I")
-        .arg(root.join("_aosp/external/skia/include/android"))
-        .arg("-I")
-        .arg(root.join("_aosp/external/skia/include/codec"))
-        .arg("-I")
-        .arg(root.join("_aosp/system/logging/liblog/include"))
-        .arg("-I")
-        .arg(root.join("_aosp/system/core/libcutils/include"))
-        .arg("-I")
-        .arg(root.join("_aosp/system/core/libutils/include"))
-        .arg("-I")
-        .arg(root.join("_aosp/frameworks/base/libs/hwui"))
-        .arg("-I")
-        .arg(root.join("_aosp/frameworks/base/libs/hwui/hwui"))
-        .arg("-I")
-        .arg(root.join("_aosp/frameworks/base/libs/hwui/pipeline/skia"))
-        .arg("-I")
-        .arg(root.join("_aosp/frameworks/base/libs/androidfw/include"))
-        .arg("-I")
-        .arg(root.join("_aosp/frameworks/native/libs/ui/include"))
-        .arg("-I")
-        .arg(root.join("_aosp/frameworks/native/libs/ui/include_types"))
-        .arg("-I")
-        .arg(root.join("_aosp/frameworks/minikin/include"))
-        .arg("-I")
-        .arg(root.join("_aosp/external/googletest/googletest/include"))
-        .arg("-I")
-        .arg(root.join("_aosp/external/harfbuzz_ng/src"))
-        .arg("-I")
-        .arg(root.join("_aosp/system/core/libutils/include"))
-        .arg("-I")
-        .arg(root.join("_aosp/system/incremental_delivery/incfs/util/include"))
-        .arg("-I")
-        .arg(root.join("_aosp/system/core/libsystem/include"))
-        .arg("-c")
-        .arg(root.join("probes/runtime_entry_probe.cc"))
-        .arg("-o")
-        .arg(&object);
-    let _ = compile_cached_probe_tu(
-        &mut probe_command,
-        &object,
+    let registration_object = compile_native_registration(
+        root,
+        &build_dir,
+        &include_refs,
         &probe_cache,
         &compiler_identity,
+        &["-DDARWIN_ART_REAL_GRAPHICS", "-DDARWIN_ART_HWUI_GPU"],
     )?;
-    let registration_object = build_dir.join("darwin_art_runtime_registration_phase.cc.o");
-    let mut registration_command = runtime_cpp_command(&include_refs);
-    registration_command
-        .arg("-DDARWIN_ART_REAL_GRAPHICS")
-        .arg("-DDARWIN_ART_HWUI_GPU")
-        .arg("-c")
-        .arg(root.join("probes/runtime_registration_phase.cc"))
-        .arg("-o")
-        .arg(&registration_object);
-    let _ = compile_cached_probe_tu(
-        &mut registration_command,
-        &registration_object,
-        &probe_cache,
-        &compiler_identity,
-    )?;
-    let network_loader_object =
-        compile_runtime_network_loader_probe(root, &build_dir, &include_refs)?;
-    let context_loader_object =
-        compile_runtime_context_loader_probe(root, &build_dir, &include_refs)?;
-    let mut arttest_objects = Vec::new();
-    for (label, source) in [
-        ("runtime_state", "_aosp/art/test/common/runtime_state.cc"),
-        ("stack_inspect", "_aosp/art/test/common/stack_inspect.cc"),
-        (
-            "native_methods_178",
-            "_aosp/art/test/178-app-image-native-method/native_methods.cc",
-        ),
-        ("registration", "probes/runtime_upstream_arttest.cc"),
-    ] {
-        let arttest_object = build_dir.join(format!("darwin_art_arttest_{label}.cc.o"));
-        let mut arttest_command = runtime_cpp_command(&include_refs);
-        arttest_command
-            .arg("-I")
-            .arg(root.join("_aosp/art/test/common"))
-            .arg("-I")
-            .arg(root.join("_aosp/libnativehelper-full/include"))
-            .arg("-I")
-            .arg(root.join("_aosp/system/logging/liblog/include"))
-            // Headers included from AOSP's runtime directory otherwise find
-            // their unpatched sibling first. Preload the Darwin base-relative
-            // CompressedReference definition so JNI test helpers decode into
-            // the native heap window just like the linked runtime.
-            .arg("-include")
-            .arg(
-                root.join("_build/runtime-common/patched-source/runtime/mirror/object_reference.h"),
-            )
-            .arg("-c")
-            .arg(root.join(source))
-            .arg("-o")
-            .arg(&arttest_object);
-        let _ = compile_cached_probe_tu(
-            &mut arttest_command,
-            &arttest_object,
-            &probe_cache,
-            &compiler_identity,
-        )?;
-        arttest_objects.push(arttest_object);
-    }
-    let app_bootstrap_object = if let Some(path) =
-        env::var_os("DARWIN_ART_NATIVE_APP_BOOTSTRAP_OBJECT")
-        && Path::new(&path).is_file()
-    {
-        PathBuf::from(path)
-    } else {
-        compile_runtime_app_bootstrap_probe(root, &build_dir, &include_refs)?
-    };
-    let _compiled_app_resources =
-        compile_runtime_app_resources_probe(root, &build_dir, &include_refs)?;
-    let _compiled_app_activity =
-        compile_runtime_app_activity_probe(root, &build_dir, &include_refs)?;
-    let app_presentation_object = if let Some(path) =
-        env::var_os("DARWIN_ART_NATIVE_APP_PRESENTATION_OBJECT")
-        && Path::new(&path).is_file()
-    {
-        PathBuf::from(path)
-    } else {
-        compile_runtime_app_presentation_probe(root, &build_dir, &include_refs)?
-    };
-    let app_resources_object = app_resources_object_path(&build_dir);
-    require_file(
-        &app_resources_object,
-        "graphics app resources object is missing",
-    )?;
-    let app_activity_object = app_activity_object_path(&build_dir);
-    require_file(
-        &app_activity_object,
-        "graphics app activity object is missing",
-    )?;
-    let (surface_object, surface_gpu_object) =
+    let context_loader_object = compile_system_class_loader(root, &build_dir, &include_refs)?;
+    let (surface_object, surface_gpu_object, document_panel_object) =
         compile_surface_objects(root, &build_dir, &probe_cache, &compiler_identity)?;
 
     // Android's libart is a shared-library boundary for the in-APEX
     // libarttest/JVMTI clients.  An ld64 `-exported_symbol` option turns the
     // complete dylib export table into an allowlist, so the small host ABI
-    // list below used to hide ordinary AOSP C++ definitions.  Export every
-    // external definition from the pinned libart provider archives and union
-    // it with the fixed Darwin C ABI below.  The graphics bootstrap archive
+    // list below used to hide ordinary AOSP C++ definitions. Export genuine
+    // provider-owned definitions, unioned with exact Darwin cross-image ABI.
+    // Mixed archives must not implicitly publish host/fixture observations.
+    // The graphics bootstrap archive
     // is not the whole provider boundary: runtime-core owns synchronization
     // primitives and libartbase owns allocators used directly by unchanged
     // AOSP native run-tests.  Keeping the provider set here (at the
     // production dylib boundary) avoids test-specific link shims.
     let art_export_list = build_dir.join("aosp-libart.exports");
+    use super::provider_export_policy::{ProviderClass, allows, validate_bionic_imports};
+    validate_bionic_imports(&command_output(
+        Command::new("nm").arg("-u").arg(&openjdk_named_jni_owner),
+    )?)?;
     let art_export_providers = [
-        bootstrap.clone(),
-        root.join("_build/runtime-core/libart-core-darwin.a"),
-        root.join("_build/foundation/libartbase-darwin.a"),
+        (bootstrap.clone(), ProviderClass::MixedArt),
+        (
+            root.join("_build/runtime-core/libart-core-darwin.a"),
+            ProviderClass::PinnedUpstream,
+        ),
+        (
+            root.join("_build/foundation/libartbase-darwin.a"),
+            ProviderClass::PinnedUpstream,
+        ),
         // AOSP libopenjdk declares libopenjdkjvm as a shared dependency.  The
         // Darwin aggregate is the process libart/libopenjdkjvm provider, so
         // publish that pinned module's complete public JVM_/jio_ ABI for the
         // sibling RTLD_LOCAL named-JNI image instead of cloning its TU there.
-        openjdkjvm_archive.clone(),
+        (openjdkjvm_archive.clone(), ProviderClass::PinnedUpstream),
         // libopenjdk_native_defaults also declares libnativehelper#impl as a
         // shared dependency.  Keep that genuine provider visible across the
         // same process boundary; jni_util must not rely on a private symbol
         // accidentally present in the aggregate image.
-        root.join("_build/nativehelper-device-foundation/libnativehelper-device-darwin.a"),
+        (
+            root.join("_build/nativehelper-device-foundation/libnativehelper-device-darwin.a"),
+            ProviderClass::PinnedUpstream,
+        ),
         // OpenJDK's RTLD_LOCAL named-JNI owner is loaded after libart.  Its
         // NIO implementation is the AOSP module closure and must resolve the
         // process-wide Bionic facade ABI through the runtime boundary, not
         // through ad-hoc per-owner copies or test-specific stubs.
-        root.join("_build/bionic-runtime-provider-closure/libdarwin-art-bionic-native-providers.a"),
-        root.join("_build/bionic-runtime-provider-closure/libdarwin-art-bionic-rust-providers.a"),
-        root.join("_build/bionic-runtime-provider-closure/libdarwin-art-bionic-float-conversion.a"),
+        (
+            root.join(
+                "_build/bionic-runtime-provider-closure/libdarwin-art-bionic-native-providers.a",
+            ),
+            ProviderClass::DarwinBionic,
+        ),
+        (
+            root.join(
+                "_build/bionic-runtime-provider-closure/libdarwin-art-bionic-rust-providers.a",
+            ),
+            ProviderClass::DarwinBionic,
+        ),
+        (
+            root.join(
+                "_build/bionic-runtime-provider-closure/libdarwin-art-bionic-float-conversion.a",
+            ),
+            ProviderClass::DarwinBionic,
+        ),
     ];
     let mut art_exports = Vec::new();
-    for provider in &art_export_providers {
+    for (provider, class) in &art_export_providers {
         let provider_symbols = command_output(Command::new("nm").args(["-gU"]).arg(provider))?;
         let provider_exports = provider_symbols
             .lines()
@@ -506,6 +268,7 @@ pub(crate) fn audit_runtime_graphics_link_mode(
                 }
             })
             .filter(|symbol| symbol.starts_with('_'))
+            .filter(|symbol| allows(*class, symbol))
             // Rust provider archives also contain compiler-builtins/std
             // implementation members. They are not standalone shared-ABI
             // definitions and must not become forced linker roots.
@@ -564,32 +327,6 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg("-Wl,-exported_symbol,_darwin_art_run_dex2oat")
         .arg("-Wl,-exported_symbol,_darwin_art_run_profman")
         .arg("-Wl,-exported_symbol,_darwin_art_shutdown_process")
-        .arg("-Wl,-exported_symbol,_darwin_art_upstream_open_file_for_reading")
-        .arg("-Wl,-exported_symbol,_darwin_art_upstream_fd_file_read_fully")
-        .arg("-Wl,-exported_symbol,_Java_Main_makeVisiblyInitialized")
-        .arg("-Wl,-exported_symbol,_Java_Test_nativeMethodVoid")
-        .arg("-Wl,-exported_symbol,_Java_Test_nativeMethod")
-        .arg("-Wl,-exported_symbol,_Java_Test_nativeMethodWithManyParameters")
-        .arg("-Wl,-exported_symbol,_Java_TestFast_nativeMethodVoid")
-        .arg("-Wl,-exported_symbol,_Java_TestFast_nativeMethod")
-        .arg("-Wl,-exported_symbol,_Java_TestFast_nativeMethodWithManyParameters")
-        .arg("-Wl,-exported_symbol,_Java_TestCritical_nativeMethodVoid")
-        .arg("-Wl,-exported_symbol,_Java_TestCritical_nativeMethod")
-        .arg("-Wl,-exported_symbol,_Java_TestCritical_nativeMethodWithManyParameters")
-        .arg("-Wl,-exported_symbol,_Java_CriticalSignatures_nativeILFFFFD")
-        .arg("-Wl,-exported_symbol,_Java_CriticalSignatures_nativeLIFFFFD")
-        .arg("-Wl,-exported_symbol,_Java_CriticalSignatures_nativeFLIFFFD")
-        .arg("-Wl,-exported_symbol,_Java_CriticalSignatures_nativeDDIIIIII")
-        .arg("-Wl,-exported_symbol,_Java_CriticalSignatures_nativeDFFILIII")
-        .arg("-Wl,-exported_symbol,_Java_CriticalSignatures_nativeDDFILIII")
-        .arg("-Wl,-exported_symbol,_Java_CriticalSignatures_nativeDDIFII")
-        .arg("-Wl,-exported_symbol,_Java_CriticalSignatures_nativeFullArgs")
-        .arg("-Wl,-exported_symbol,_Java_CriticalSignatures_nativeDFDFDFDFDFIJ")
-        .arg("-Wl,-exported_symbol,_Java_CriticalClinitCheck_nativeMethodVoid")
-        .arg("-Wl,-exported_symbol,_Java_CriticalClinitCheck_nativeMethod")
-        .arg("-Wl,-exported_symbol,_Java_CriticalClinitCheck_nativeMethodWithManyParameters")
-        .arg("-Wl,-exported_symbol,_Java_Main_b189235039CallThrough")
-        .arg("-Wl,-exported_symbol,_Java_Main_b189235039CheckLocks")
         .arg("-Wl,-exported_symbol,_darwin_art_dispatch_pointer")
         .arg("-Wl,-exported_symbol,_darwin_art_unwindstack_quick_frames")
         .arg("-Wl,-exported_symbol,_darwin_art_walk_managed_frames")
@@ -613,19 +350,24 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg("-Wl,-exported_symbol,_darwin_art_surface_pump_events")
         .arg("-Wl,-exported_symbol,_darwin_art_surface_close_requested")
         .arg("-Wl,-exported_symbol,_darwin_art_appkit_pump_events")
-        .arg("-Wl,-exported_symbol,_darwin_art_surface_next_pointer_event")
-        .arg("-Wl,-exported_symbol,_darwin_art_surface_next_pointer_event_v2")
-        .arg("-Wl,-exported_symbol,_darwin_art_surface_next_key_event_v1")
+        .arg("-Wl,-exported_symbol,_darwin_art_surface_set_input_sink")
+        .arg("-Wl,-exported_symbol,_darwin_art_android_input_sink_install")
         .arg("-Wl,-exported_symbol,_darwin_art_surface_destroy")
         .arg("-Wl,-exported_symbol,_darwin_art_surface_active_gpu")
         .arg("-Wl,-exported_symbol,_darwin_art_surface_gpu_active_canvas")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_install_hooks")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_install_fd_inheritance_boundary")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_install_scm_endpoint_provider")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_uninstall_scm_endpoint_provider")
+        .arg("-Wl,-exported_symbol,_darwin_art_bionic_socket_broker_is_active")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_clear_hooks")
         .arg("-Wl,-exported_symbol,_darwin_art_bionic_process_state_install_configured")
         .arg("-Wl,-exported_symbol,_darwin_art_bionic_process_state_process_uninstall")
         .arg("-Wl,-exported_symbol,_darwin_art_bionic_fs_process_install")
         .arg("-Wl,-exported_symbol,_darwin_art_bionic_fs_process_uninstall")
         .arg("-Wl,-exported_symbol,_darwin_art_binder_export_file_descriptor")
+        .arg("-Wl,-exported_symbol,_darwin_art_binder_export_retained_file_descriptor")
+        .arg("-Wl,-exported_symbol,_darwin_art_binder_release_export_lease")
         .arg("-Wl,-exported_symbol,_darwin_art_binder_import_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_binder_close_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_native_acquire")
@@ -654,12 +396,6 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg("-Wl,-exported_symbol,__ZN3art6mirror5Class30FindDeclaredDirectMethodByNameENSt3__117basic_string_viewIcNS2_11char_traitsIcEEEENS_11PointerSizeE")
         .arg("-Wl,-exported_symbol,__ZN3art8CodeInfoC1EPKNS_20OatQuickMethodHeaderE")
         .arg("-Wl,-exported_symbol,__ZNK3art3jit12JitCodeCache10ContainsPcEPKv")
-        // AOSP hidden-api run-tests consume the public DexFileLoader overload
-        // and its no-file sentinel from libarttest. Keep those libdexfile
-        // symbols visible from the runtime image; the implementation remains
-        // owned by the linked libdexfile archive.
-        .arg("-Wl,-exported_symbol,__ZN3art13DexFileLoader12kInvalidFileE")
-        .arg("-Wl,-exported_symbol,__ZN3art13DexFileLoader4OpenEbbbPNS_22DexFileLoaderErrorCodeEPNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEPNS3_6vectorINS3_10unique_ptrIKNS_7DexFileENS3_14default_deleteISE_EEEENS7_ISH_EEEE")
         .arg("-Wl,-exported_symbol,_EnsureFrontOfChain")
         .arg("-Wl,-exported_symbol,_darwin_art_sigchain_owns_signal")
         .arg("-Wl,-exported_symbol,_darwin_art_sigchain_sigaction")
@@ -679,32 +415,24 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg("-Wl,-exported_symbol,_darwin_art_bionic_errno_set_from_darwin")
         .arg("-Wl,-dead_strip")
         .arg(format!("-Wl,-map,{}", link_map.display()))
-        .arg(&object)
+        .arg(&process_entry_object)
+        .arg(&vm_bootstrap_object)
         .arg(&registration_object)
-        .arg(&elf_probe_object)
-        .arg(&abi_probe_object)
+        .arg(&boot_native_registration_object)
+        .arg(&boot_native_libraries_object)
         .arg(&process_state_object)
-        .arg(&process_options_object)
-        .arg(&shutdown_probe_object)
-        .arg(&frame_probe_object)
-        .arg(&graphics_probe_object)
-        .arg(&graphics_gpu_object)
+        .arg(&process_config_object)
+        .arg(&process_shutdown_object)
+        .arg(&vm_shutdown_object)
+        .arg(&app_process_shutdown_object)
         .arg(&graphics_state_object)
-        .arg(&network_loader_object)
         .arg(&context_loader_object)
-        .args(&arttest_objects)
-        .arg(&app_bootstrap_object)
-        .arg(&app_resources_object)
-        .arg(&app_activity_object)
-        .arg(&app_presentation_object)
-        .arg(&jni_acceptance_object)
         .arg(&graphics_session_object_real)
-        .arg(&graphics_phase_object)
-        .arg(&graphics_input_object)
-        .arg(&network_object)
-        .arg(&hwui_object)
+        .arg(&event_ingress_object)
+        .arg(&vsync_source_object)
         .arg(&surface_object)
         .arg(&surface_gpu_object)
+        .arg(&document_panel_object)
         // The relocatable graphics closure is the sole owner of HWUI's
         // process-singleton pools; resolve it before optional providers.
         .arg(&graphics_closure)
@@ -743,6 +471,7 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         // separate owners. They follow the runtime registrar archive, then
         // libbinder is rescanned to satisfy JNI members selected here.
         .arg(root.join("_build/binder-jni/libbinder-jni-darwin.a"))
+        .arg(root.join("_build/android16-input-keymaps/libandroid-input-keymaps.a"))
         .arg(root.join("_build/binder-jni/libbinder-rpc-boundary-darwin.a"))
         // Rust's process Binder endpoint resolves these three narrow Bionic
         // descriptor hooks with dlsym.  They have no static caller, so link
@@ -891,6 +620,8 @@ pub(crate) fn audit_runtime_graphics_link_mode(
             "-framework",
             "AppKit",
             "-framework",
+            "ApplicationServices",
+            "-framework",
             "IOSurface",
             "-framework",
             "Metal",
@@ -915,7 +646,9 @@ pub(crate) fn audit_runtime_graphics_link_mode(
             "-o",
         ])
         .arg(&runtime_library);
-    super::art_test_exports::apply(&mut linker);
+    super::art_test_exports::apply_runtime_abi(&mut linker);
+    super::embedding_exports::apply(&mut linker);
+    super::native_client_exports::apply(&mut linker, true);
     let description = describe_command(&linker);
     let link_stamp = build_dir.join("runtime-graphics-link.fingerprint");
     let output = link_with_cache(&mut linker, &runtime_library, &link_stamp)?;

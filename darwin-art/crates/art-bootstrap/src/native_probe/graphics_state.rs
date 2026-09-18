@@ -23,14 +23,68 @@ pub(crate) fn compile_runtime_graphics_input_probe(
     Ok(object)
 }
 
-pub(crate) fn compile_runtime_graphics_state_probe(
+/// Compile the Android-owned host input boundary.  Unlike the legacy fixture
+/// input TU, this source only creates framework MotionEvent/KeyEvent packets
+/// and submits them to ViewRootImpl's InputChannel; it has no hit-testing or
+/// direct performClick path and is therefore eligible for the product graph.
+pub(crate) fn compile_runtime_event_ingress(
+    root: &Path,
+    build_dir: &Path,
+    includes: &[&Path],
+) -> Result<PathBuf> {
+    let object = env::var_os("DARWIN_ART_NATIVE_EVENT_INGRESS_OBJECT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| build_dir.join("darwin_art_event_ingress.cc.o"));
+    if let Some(parent) = object.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let cache_path = build_dir.join("runtime-event-ingress-hashes.cache");
+    let compiler_identity = command_output(Command::new("clang++").arg("--version"))?;
+    let mut command = runtime_cpp_command(includes);
+    command
+        .arg("-c")
+        .arg(root.join("runtime/framework/input/event_ingress.cc"))
+        .arg("-o")
+        .arg(&object);
+    let _ = compile_cached_probe_tu(&mut command, &object, &cache_path, &compiler_identity)?;
+    Ok(object)
+}
+
+/// Compile the Android display-edge producer separately from the fixture
+/// RenderNode/presentation code.  The production object only dispatches the
+/// framework vsync callback and asks the Darwin HWC provider to scan out the
+/// latched IOSurface.
+pub(crate) fn compile_runtime_vsync_source(
+    root: &Path,
+    build_dir: &Path,
+    includes: &[&Path],
+) -> Result<PathBuf> {
+    let object = env::var_os("DARWIN_ART_NATIVE_VSYNC_SOURCE_OBJECT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| build_dir.join("darwin_art_vsync_source.cc.o"));
+    if let Some(parent) = object.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let cache_path = build_dir.join("runtime-vsync-source-hashes.cache");
+    let compiler_identity = command_output(Command::new("clang++").arg("--version"))?;
+    let mut command = runtime_cpp_command(includes);
+    command
+        .arg("-c")
+        .arg(root.join("runtime/framework/display/vsync_source.cc"))
+        .arg("-o")
+        .arg(&object);
+    let _ = compile_cached_probe_tu(&mut command, &object, &cache_path, &compiler_identity)?;
+    Ok(object)
+}
+
+pub(crate) fn compile_runtime_graphics_state(
     root: &Path,
     build_dir: &Path,
     includes: &[&Path],
     ndk_include: &Path,
     ndk_arch_include: &Path,
 ) -> Result<PathBuf> {
-    compile_runtime_graphics_state_probe_flavor(
+    compile_runtime_graphics_state_flavor(
         root,
         build_dir,
         includes,
@@ -43,14 +97,14 @@ pub(crate) fn compile_runtime_graphics_state_probe(
 /// Compile the state bridge for the direct-APK/headless flavor.  That flavor
 /// deliberately does not pull HWUI/RenderThread types into its ABI; it still
 /// needs the same opaque GraphicsState layout for the common lifecycle code.
-pub(crate) fn compile_runtime_graphics_state_probe_cpu(
+pub(crate) fn compile_runtime_graphics_state_cpu(
     root: &Path,
     build_dir: &Path,
     includes: &[&Path],
     ndk_include: &Path,
     ndk_arch_include: &Path,
 ) -> Result<PathBuf> {
-    compile_runtime_graphics_state_probe_flavor(
+    compile_runtime_graphics_state_flavor(
         root,
         build_dir,
         includes,
@@ -60,7 +114,7 @@ pub(crate) fn compile_runtime_graphics_state_probe_cpu(
     )
 }
 
-fn compile_runtime_graphics_state_probe_flavor(
+fn compile_runtime_graphics_state_flavor(
     root: &Path,
     build_dir: &Path,
     includes: &[&Path],
@@ -71,9 +125,9 @@ fn compile_runtime_graphics_state_probe_flavor(
     let object = if real_graphics {
         env::var_os("DARWIN_ART_NATIVE_GRAPHICS_STATE_OBJECT")
             .map(PathBuf::from)
-            .unwrap_or_else(|| build_dir.join("darwin_art_runtime_graphics_state.cc.o"))
+            .unwrap_or_else(|| build_dir.join("darwin_art_graphics_state.cc.o"))
     } else {
-        build_dir.join("darwin_art_runtime_graphics_state_cpu.cc.o")
+        build_dir.join("darwin_art_graphics_state_cpu.cc.o")
     };
     if let Some(parent) = object.parent() {
         fs::create_dir_all(parent)?;
@@ -151,19 +205,17 @@ fn compile_runtime_graphics_state_probe_flavor(
     }
     command
         .arg("-c")
-        .arg(root.join("probes/runtime_graphics_state.cc"))
+        .arg(root.join("runtime/embedding/graphics_state.cc"))
         .arg("-o")
         .arg(&object);
     let _ = compile_cached_probe_tu(&mut command, &object, &cache_path, &compiler_identity)?;
     Ok(object)
 }
 
-pub(crate) fn build_runtime_graphics_state_probe(root: &Path) -> Result<()> {
+pub(crate) fn build_runtime_graphics_state(root: &Path) -> Result<()> {
     let output = env::var_os("DARWIN_ART_NATIVE_GRAPHICS_STATE_OBJECT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            root.join("_build/runtime-link-probe/darwin_art_runtime_graphics_state.cc.o")
-        });
+        .unwrap_or_else(|| root.join("_build/runtime-link-probe/darwin_art_graphics_state.cc.o"));
     let build_dir = output
         .parent()
         .ok_or_else(|| format!("graphics state output has no parent: {}", output.display()))?;
@@ -185,7 +237,7 @@ pub(crate) fn build_runtime_graphics_state_probe(root: &Path) -> Result<()> {
     ];
     let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let (ndk_include, ndk_arch_include) = find_ndk_headers()?;
-    let object = compile_runtime_graphics_state_probe(
+    let object = compile_runtime_graphics_state(
         root,
         build_dir,
         &include_refs,
@@ -195,6 +247,6 @@ pub(crate) fn build_runtime_graphics_state_probe(root: &Path) -> Result<()> {
     if object != output {
         fs::copy(&object, &output)?;
     }
-    println!("build-runtime-graphics-state-probe: {}", output.display());
+    println!("build-runtime-graphics-state: {}", output.display());
     Ok(())
 }

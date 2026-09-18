@@ -19,7 +19,9 @@
 #include "runtime_graphics_gpu.h"
 #include "runtime_graphics_probe.h"
 #include "runtime_graphics_probe_internal.h"
-#include "runtime_process_state.h"
+#include "graphics_fixture_state.h"
+#include "fixture_motion_event_recycler.h"
+#include "../runtime/art/process_state.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
@@ -114,7 +116,7 @@ bool DispatchDueMainMessages(GraphicsState* state, JNIEnv* env,
                    "queue\n";
     }
   }
-  auto& cache = state->main_looper;
+  auto& cache = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->main_looper;
   if (cache.looper_class == nullptr) {
     jclass looper = env->FindClass("android/os/Looper");
     jclass queue = env->FindClass("android/os/MessageQueue");
@@ -371,6 +373,13 @@ bool DispatchDueMainMessages(GraphicsState* state, JNIEnv* env,
   return ok;
 }
 
+bool ProgressFixtureOwner(void* opaque, JNIEnv* env) {
+  auto* state = static_cast<GraphicsState*>(opaque);
+  if (!DispatchDueMainMessages(state, env)) return false;
+  auto* fixture = darwin_art_graphics_fixture::GetGraphicsFixtureState(state);
+  return fixture != nullptr && !fixture->retiring.load(std::memory_order_acquire);
+}
+
 // Native compositor callbacks do not have a Java caller frame, so FindClass
 // only sees the boot class loader. Resolve APK/runtime helper classes through
 // the process thread's context loader instead.
@@ -526,32 +535,35 @@ void DebugWindowManagerViews(JNIEnv* env) {
 }
 
 bool sync_interactive_surface_size(GraphicsState* state, JNIEnv* env) {
-  if (state == nullptr || env == nullptr || state->gpu_surface == nullptr ||
-      state->interactive_root == nullptr) {
+  if (state == nullptr || env == nullptr) {
+    return true;
+  }
+  auto* fixture = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state);
+  if (fixture->gpu_surface == nullptr || fixture->interactive_root == nullptr) {
     return true;
   }
   uint32_t width = 0;
   uint32_t height = 0;
-  if (!darwin_art_surface_get_size(state->gpu_surface, &width, &height) ||
+  if (!darwin_art_surface_get_size(fixture->gpu_surface, &width, &height) ||
       width == 0 || height == 0) {
     return false;
   }
-  if (state->interactive_width == static_cast<jint>(width) &&
-      state->interactive_height == static_cast<jint>(height)) {
+  if (fixture->interactive_width == static_cast<jint>(width) &&
+      fixture->interactive_height == static_cast<jint>(height)) {
     return true;
   }
   if (std::getenv("DARWIN_ART_DEBUG_RESIZE") != nullptr) {
-    std::cerr << "ART Android resize: " << state->interactive_width << "x"
-              << state->interactive_height << " -> " << width << "x"
+    std::cerr << "ART Android resize: " << fixture->interactive_width << "x"
+              << fixture->interactive_height << " -> " << width << "x"
               << height << "\n";
   }
-  state->gpu_render_node_recorded = false;
+  darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node_recorded = false;
   const jboolean rendered = present_content(
-      state, env, nullptr, state->interactive_root, static_cast<jint>(width),
+      state, env, nullptr, fixture->interactive_root, static_cast<jint>(width),
       static_cast<jint>(height));
   if (rendered == JNI_TRUE) {
-    state->interactive_width = static_cast<jint>(width);
-    state->interactive_height = static_cast<jint>(height);
+    fixture->interactive_width = static_cast<jint>(width);
+    fixture->interactive_height = static_cast<jint>(height);
     return true;
   }
   return false;
@@ -562,18 +574,20 @@ jclass LoadProbeAnimationHost(JNIEnv* env) {
 }
 
 void ClearPointerDispatchRoot(GraphicsState* state, JNIEnv* env) {
-  if (state->pointer_dispatch_root != nullptr) {
-    env->DeleteGlobalRef(state->pointer_dispatch_root);
-    state->pointer_dispatch_root = nullptr;
+  if (state == nullptr || env == nullptr) return;
+  auto* fixture = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state);
+  if (fixture->pointer_dispatch_root != nullptr) {
+    env->DeleteGlobalRef(fixture->pointer_dispatch_root);
+    fixture->pointer_dispatch_root = nullptr;
   }
-  if (state->pointer_dispatch_view_root != nullptr) {
-    env->DeleteGlobalRef(state->pointer_dispatch_view_root);
-    state->pointer_dispatch_view_root = nullptr;
+  if (fixture->pointer_dispatch_view_root != nullptr) {
+    env->DeleteGlobalRef(fixture->pointer_dispatch_view_root);
+    fixture->pointer_dispatch_view_root = nullptr;
   }
-  state->pointer_dispatch_offset_x = 0.0f;
-  state->pointer_dispatch_offset_y = 0.0f;
-  state->pointer_dispatch_is_window = false;
-  state->pointer_dispatch_outside_only = false;
+  fixture->pointer_dispatch_offset_x = 0.0f;
+  fixture->pointer_dispatch_offset_y = 0.0f;
+  fixture->pointer_dispatch_is_window = false;
+  fixture->pointer_dispatch_outside_only = false;
 }
 
 void DebugViewTextState(JNIEnv* env, jobject root) {
@@ -906,7 +920,7 @@ bool SelectPointerDispatchRoot(GraphicsState* state, JNIEnv* env,
           selected_view_root = env->NewLocalRef(layer_root);
           selected_x = left;
           selected_y = top;
-          state->pointer_dispatch_outside_only = true;
+          darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_outside_only = true;
         }
         if (layer_token != nullptr) env->DeleteLocalRef(layer_token);
         if (window_frame != nullptr) env->DeleteLocalRef(window_frame);
@@ -929,31 +943,33 @@ bool SelectPointerDispatchRoot(GraphicsState* state, JNIEnv* env,
   if (views != nullptr) env->DeleteLocalRef(views);
   if (global != nullptr) env->DeleteLocalRef(global);
   if (global_class != nullptr) env->DeleteLocalRef(global_class);
+  auto* fixture = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state);
   jobject dispatch_root = selected == nullptr ? main_root : selected;
-  state->pointer_dispatch_root = env->NewGlobalRef(dispatch_root);
+  fixture->pointer_dispatch_root = env->NewGlobalRef(dispatch_root);
   jobject dispatch_view_root = selected_view_root == nullptr
-                                   ? state->interactive_view_root
+                                   ? fixture->interactive_view_root
                                    : selected_view_root;
   if (dispatch_view_root != nullptr) {
-    state->pointer_dispatch_view_root = env->NewGlobalRef(dispatch_view_root);
+    fixture->pointer_dispatch_view_root = env->NewGlobalRef(dispatch_view_root);
   }
-  state->pointer_dispatch_offset_x = static_cast<jfloat>(selected_x);
-  state->pointer_dispatch_offset_y = static_cast<jfloat>(selected_y);
-  state->pointer_dispatch_is_window = selected != nullptr;
+  darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_offset_x = static_cast<jfloat>(selected_x);
+  darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_offset_y = static_cast<jfloat>(selected_y);
+  darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_is_window = selected != nullptr;
   if (selected != nullptr) env->DeleteLocalRef(selected);
   if (selected_view_root != nullptr) env->DeleteLocalRef(selected_view_root);
-  return state->pointer_dispatch_root != nullptr && !env->ExceptionCheck();
+  return darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_root != nullptr && !env->ExceptionCheck();
 }
 
 bool RefreshFocusedWindowRoot(GraphicsState* state, JNIEnv* env) {
-  if (state == nullptr || env == nullptr ||
-      state->interactive_view_root == nullptr) {
+  if (state == nullptr || env == nullptr) {
     return false;
   }
-  jobject candidate = env->NewLocalRef(state->interactive_view_root);
+  auto* fixture = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state);
+  if (fixture->interactive_view_root == nullptr) return false;
+  jobject candidate = env->NewLocalRef(fixture->interactive_view_root);
   if (candidate == nullptr) return false;
-  const bool unchanged = state->focused_view_root != nullptr &&
-                         env->IsSameObject(state->focused_view_root,
+  const bool unchanged = fixture->focused_view_root != nullptr &&
+                         env->IsSameObject(fixture->focused_view_root,
                                            candidate) == JNI_TRUE;
   if (unchanged) {
     env->DeleteLocalRef(candidate);
@@ -963,7 +979,7 @@ bool RefreshFocusedWindowRoot(GraphicsState* state, JNIEnv* env) {
   if (candidate_global == nullptr || env->ExceptionCheck()) {
     if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(candidate);
-    return state->focused_view_root != nullptr;
+    return fixture->focused_view_root != nullptr;
   }
   // Probe the new receiver before retiring the old one. A popup ViewRoot can
   // be visible in WindowManagerGlobal for one owner turn before its
@@ -972,34 +988,38 @@ bool RefreshFocusedWindowRoot(GraphicsState* state, JNIEnv* env) {
   // cancels the previous channel; clearing its Java focus afterward cannot
   // clear the newly published channel.
   const bool focused =
-      darwin_art::SetFrameworkViewRootFocus(env, candidate, true);
+      darwin_art_graphics_fixture::set_view_root_focus(env, candidate, true);
   if (!focused || env->ExceptionCheck()) {
     if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteGlobalRef(candidate_global);
     env->DeleteLocalRef(candidate);
-    return state->focused_view_root != nullptr;
+    return fixture->focused_view_root != nullptr;
   }
-  jobject previous_root = state->focused_view_root;
-  state->focused_view_root = candidate_global;
+  jobject previous_root = fixture->focused_view_root;
+  fixture->focused_view_root = candidate_global;
   if (previous_root != nullptr) {
-    darwin_art::SetFrameworkViewRootFocus(env, previous_root, false);
+    darwin_art_graphics_fixture::set_view_root_focus(env, previous_root, false);
     if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteGlobalRef(previous_root);
   }
   // InputDispatcher publishes focus before it releases the next key/pointer
   // packet. onFocusEvent posts ViewRootImpl's focus message, so drain that
   // owner-Looper work here before dispatching the event selected below.
-  if (state->focused_view_root != nullptr && !env->ExceptionCheck() &&
+  if (fixture->focused_view_root != nullptr && !env->ExceptionCheck() &&
       !DispatchDueMainMessages(state, env)) {
-    env->ExceptionClear();
+    // A posted focus message may fail during owner progress. Keep that
+    // failure visible to the caller; submitted focus is not completed work.
+    env->DeleteLocalRef(candidate);
+    return false;
   }
   if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
     std::cerr << "ART Android focused window changed="
-              << (state->focused_view_root != nullptr ? 1 : 0)
+              << (fixture->focused_view_root != nullptr ? 1 : 0)
               << " root=" << candidate << "\n";
   }
   env->DeleteLocalRef(candidate);
-  return state->focused_view_root != nullptr && !env->ExceptionCheck();
+  return fixture->focused_view_root != nullptr && !env->ExceptionCheck() &&
+         !fixture->retiring.load(std::memory_order_acquire);
 }
 
 int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
@@ -1012,14 +1032,14 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
   const bool down = action == 0u;
   const bool terminal = action == 1u || action == 3u;
   if (!down && !state->pointer_stream_active) return 78;
-  if (!down && state->pointer_dispatch_outside_only) {
+  if (!down && darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_outside_only) {
     // ACTION_OUTSIDE is a one-shot Android window event. AppKit still closes
     // its physical pointer stream with UP/CANCEL, so consume that tail rather
     // than synthesizing an invalid gesture for the popup or Activity.
     if (terminal) {
       state->pointer_stream_active = false;
       state->pointer_down_time_nanos = 0;
-      state->pointer_click_candidate = false;
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_click_candidate = false;
       ClearPointerDispatchRoot(state, env);
     }
     return 0;
@@ -1088,11 +1108,14 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
                 "(JJII[Landroid/view/MotionEvent$PointerProperties;"
                 "[Landroid/view/MotionEvent$PointerCoords;IIFFIIIII)"
                 "Landroid/view/MotionEvent;");
+  jmethodID recycle = motion_event_class == nullptr || env->ExceptionCheck()
+                          ? nullptr
+                          : env->GetMethodID(motion_event_class, "recycle", "()V");
   if (obtain == nullptr || properties_constructor == nullptr ||
       coords_constructor == nullptr || pointer_id_field == nullptr ||
       tool_type_field == nullptr || coords_x_field == nullptr ||
       coords_y_field == nullptr || pressure_field == nullptr ||
-      size_field == nullptr || env->ExceptionCheck()) {
+      size_field == nullptr || recycle == nullptr || env->ExceptionCheck()) {
     env->ExceptionClear();
     if (pointer_coords_class != nullptr) env->DeleteLocalRef(pointer_coords_class);
     if (pointer_properties_class != nullptr)
@@ -1103,8 +1126,8 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
   constexpr uint32_t kPointerFlagMouse = 1u << 0;
   const bool mouse_source = (pointer_flags & kPointerFlagMouse) != 0;
   const jint android_source = mouse_source ? 0x2002 : 0x1002;
-  const jint android_action = state->pointer_dispatch_outside_only ? 4 : action;
-  const jfloat pressure = terminal || state->pointer_dispatch_outside_only
+  const jint android_action = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_outside_only ? 4 : action;
+  const jfloat pressure = terminal || darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_outside_only
                               ? 0.0f
                               : 1.0f;
   jobject properties =
@@ -1147,13 +1170,15 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
       static_cast<jfloat>(1.0f), static_cast<jint>(mouse_source ? 1 : 0),
       static_cast<jint>(0), android_source, static_cast<jint>(0),
       static_cast<jint>(0));
+  darwin_art_graphics_fixture::FixtureMotionEventRecycler original_event(
+      env, event, recycle);
   if (coords_array != nullptr) env->DeleteLocalRef(coords_array);
   if (properties_array != nullptr) env->DeleteLocalRef(properties_array);
   if (coords != nullptr) env->DeleteLocalRef(coords);
   if (properties != nullptr) env->DeleteLocalRef(properties);
   env->DeleteLocalRef(pointer_coords_class);
   env->DeleteLocalRef(pointer_properties_class);
-  if (event == nullptr || env->ExceptionCheck()) {
+  if (event == nullptr || !original_event.valid() || env->ExceptionCheck()) {
     env->ExceptionClear();
     env->DeleteLocalRef(event);
     env->DeleteLocalRef(motion_event_class);
@@ -1172,11 +1197,11 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
     env->DeleteLocalRef(motion_event_class);
     return 81;
   }
-  jobject dispatch_root = state->pointer_dispatch_root == nullptr
+  jobject dispatch_root = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_root == nullptr
                               ? root
-                              : state->pointer_dispatch_root;
-  const jfloat local_x = x - state->pointer_dispatch_offset_x;
-  const jfloat local_y = y - state->pointer_dispatch_offset_y;
+                              : darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_root;
+  const jfloat local_x = x - darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_offset_x;
+  const jfloat local_y = y - darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_offset_y;
   if (down && std::getenv("DARWIN_ART_DEBUG_POINTER") != nullptr) {
     jclass state_view_class = env->FindClass("android/view/View");
     jmethodID has_window_focus =
@@ -1197,11 +1222,11 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
         find_clickable_view_at(env, dispatch_root, local_x, local_y);
     std::cerr << "ART Android MotionEvent target x=" << x << " y=" << y
               << " local_x=" << local_x << " local_y=" << local_y
-              << " offset_x=" << state->pointer_dispatch_offset_x
-              << " offset_y=" << state->pointer_dispatch_offset_y
+              << " offset_x=" << darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_offset_x
+              << " offset_y=" << darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_offset_y
               << " focused=" << (window_focused ? 1 : 0)
               << " touch_mode=" << (touch_mode ? 1 : 0)
-              << " outside=" << (state->pointer_dispatch_outside_only ? 1 : 0)
+              << " outside=" << (darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_outside_only ? 1 : 0)
               << " hit=" << debug_hit;
     if (debug_hit != nullptr) {
       jmethodID is_focusable =
@@ -1288,10 +1313,10 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
     if (env->ExceptionCheck()) env->ExceptionClear();
   }
   if (down) {
-    state->pointer_down_x = x;
-    state->pointer_down_y = y;
-    state->pointer_click_candidate = !state->pointer_dispatch_outside_only;
-    state->pointer_touch_slop = 8;
+    darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_down_x = x;
+    darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_down_y = y;
+    darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_click_candidate = !darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_outside_only;
+    darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_touch_slop = 8;
     jclass view_class = env->FindClass("android/view/View");
     jmethodID get_context =
         view_class == nullptr
@@ -1317,7 +1342,7 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
             : env->GetMethodID(config_class, "getScaledTouchSlop", "()I");
     if (config != nullptr && get_touch_slop != nullptr &&
         !env->ExceptionCheck()) {
-      state->pointer_touch_slop =
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_touch_slop =
           std::max<jint>(1, env->CallIntMethod(config, get_touch_slop));
     }
     if (env->ExceptionCheck()) env->ExceptionClear();
@@ -1325,12 +1350,12 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
     if (config_class != nullptr) env->DeleteLocalRef(config_class);
     if (context != nullptr) env->DeleteLocalRef(context);
     if (view_class != nullptr) env->DeleteLocalRef(view_class);
-  } else if (action == 2u && state->pointer_click_candidate) {
-    const float dx = x - state->pointer_down_x;
-    const float dy = y - state->pointer_down_y;
-    const float slop = static_cast<float>(state->pointer_touch_slop);
+  } else if (action == 2u && darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_click_candidate) {
+    const float dx = x - darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_down_x;
+    const float dy = y - darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_down_y;
+    const float slop = static_cast<float>(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_touch_slop);
     if (dx * dx + dy * dy > slop * slop) {
-      state->pointer_click_candidate = false;
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_click_candidate = false;
     }
   }
   jmethodID offset_location =
@@ -1342,14 +1367,13 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
     env->DeleteLocalRef(motion_event_class);
     return 82;
   }
-  if (state->pointer_dispatch_offset_x != 0.0f ||
-      state->pointer_dispatch_offset_y != 0.0f) {
+  if (darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_offset_x != 0.0f ||
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_offset_y != 0.0f) {
     env->CallVoidMethod(event, offset_location,
-                        -state->pointer_dispatch_offset_x,
-                        -state->pointer_dispatch_offset_y);
+                        -darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_offset_x,
+                        -darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_offset_y);
   }
   jclass root_class = env->GetObjectClass(dispatch_root);
-  jmethodID recycle = env->GetMethodID(motion_event_class, "recycle", "()V");
   if (recycle == nullptr || env->ExceptionCheck()) {
     env->ExceptionClear();
     ClearPointerDispatchRoot(state, env);
@@ -1358,18 +1382,18 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
     env->DeleteLocalRef(motion_event_class);
     return 82;
   }
-  const bool has_view_root = state->pointer_dispatch_view_root != nullptr;
+  const bool has_view_root = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_view_root != nullptr;
   // Legacy probes can still run without a WindowManager attachment. Keep
   // their bounded click shim isolated from the APK path; a real ViewRoot owns
   // click cancellation, touch slop, and PerformClick scheduling itself.
   if (!has_view_root && down) {
-    if (state->pressed_view != nullptr) {
-      env->DeleteGlobalRef(state->pressed_view);
-      state->pressed_view = nullptr;
+    if (darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view != nullptr) {
+      env->DeleteGlobalRef(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view);
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view = nullptr;
     }
     jobject hit = find_clickable_view_at(env, dispatch_root, local_x, local_y);
     if (hit != nullptr && !env->ExceptionCheck()) {
-      state->pressed_view = env->NewGlobalRef(hit);
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view = env->NewGlobalRef(hit);
     }
     if (hit != nullptr) env->DeleteLocalRef(hit);
   }
@@ -1393,17 +1417,35 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
     if (env->ExceptionCheck()) env->ExceptionClear();
   }
   jclass view_root_class =
-      has_view_root ? env->GetObjectClass(state->pointer_dispatch_view_root)
+      has_view_root ? env->GetObjectClass(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_view_root)
                     : nullptr;
-  // Product APKs enter through the InputChannel-bound
-  // WindowInputEventReceiver created by ViewRootImpl.setView(). This mirrors
-  // Android's native input transport boundary and keeps ViewRoot's input
-  // stages, finish acknowledgements, touch mode, and gesture ownership intact.
+  // TEST ONLY: submit the shared wire ABI to a genuine imported channel.
+  // Its real receiver constructs/owns its own Java event; this local event
+  // remains fixture-owned for diagnostics and the detached DecorView path.
   if (has_view_root) {
-    bool framework_handled = false;
-    enqueued = darwin_art::DispatchFrameworkInputEvent(
-        env, state->pointer_dispatch_view_root, event, &framework_handled);
-    consumed = framework_handled ? JNI_TRUE : JNI_FALSE;
+    darwin_art::DarwinArtInputPacket packet;
+    packet.kind = darwin_art::DarwinArtInputPacketKind::kPointer;
+    packet.pointer.version = 2;
+    packet.pointer.size = sizeof(packet.pointer);
+    packet.pointer.action = android_action;
+    packet.pointer.flags = pointer_flags;
+    packet.pointer.event_time_nanos = event_time_nanos;
+    packet.pointer.down_time_nanos = down_time_nanos;
+    packet.pointer.pointer_count = 1;
+    packet.pointer.x = local_x;
+    packet.pointer.y = local_y;
+    packet.pointer.raw_x = x;
+    packet.pointer.raw_y = y;
+    packet.pointer.pressure = pressure;
+    packet.pointer.size_value = 1.0f;
+    const auto framework_result =
+        darwin_art_graphics_fixture::DispatchFixtureInputPacket(
+            darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state), env,
+            darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)
+                ->pointer_dispatch_view_root,
+            packet, ProgressFixtureOwner, state);
+    enqueued = framework_result.delivered && !framework_result.failed;
+    consumed = framework_result.handled ? JNI_TRUE : JNI_FALSE;
     // Opt-in lifecycle diagnostics for real APKs. ViewRoot owns the gesture
     // target in this path, so inspect the hit view after each terminal edge
     // without changing dispatch semantics or forcing performClick().
@@ -1519,14 +1561,14 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
     }
     consumed = env->CallBooleanMethod(dispatch_root, dispatch_touch, event);
   }
-  if (!enqueued && terminal && state->pressed_view != nullptr) {
+  if (!enqueued && terminal && darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view != nullptr) {
     jobject hit = action == 1u && !env->ExceptionCheck()
                       ? find_clickable_view_at(env, dispatch_root, local_x, local_y)
                       : nullptr;
     const bool same_target =
         hit != nullptr && !env->ExceptionCheck() &&
-        env->IsSameObject(hit, state->pressed_view) == JNI_TRUE;
-    if (state->pointer_click_candidate && same_target &&
+        env->IsSameObject(hit, darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view) == JNI_TRUE;
+    if (darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_click_candidate && same_target &&
         !env->ExceptionCheck()) {
       jclass view_class = env->FindClass("android/view/View");
       jfieldID perform_click_runnable =
@@ -1546,21 +1588,21 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
       jobject runnable =
           perform_click_runnable == nullptr
               ? nullptr
-              : env->GetObjectField(state->pressed_view,
+              : env->GetObjectField(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view,
                                     perform_click_runnable);
       if (runnable != nullptr && remove_callbacks != nullptr &&
           !env->ExceptionCheck()) {
-        env->CallBooleanMethod(state->pressed_view, remove_callbacks, runnable);
+        env->CallBooleanMethod(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view, remove_callbacks, runnable);
       }
       if (perform_click != nullptr && !env->ExceptionCheck()) {
-        env->CallBooleanMethod(state->pressed_view, perform_click);
+        env->CallBooleanMethod(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view, perform_click);
       }
       if (runnable != nullptr) env->DeleteLocalRef(runnable);
       if (view_class != nullptr) env->DeleteLocalRef(view_class);
     }
     if (hit != nullptr) env->DeleteLocalRef(hit);
-    env->DeleteGlobalRef(state->pressed_view);
-    state->pressed_view = nullptr;
+    env->DeleteGlobalRef(darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view);
+    darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view = nullptr;
   }
   const int64_t dispatch_end = MonotonicNanos();
   const bool dispatch_ok = !env->ExceptionCheck();
@@ -1568,13 +1610,11 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
     std::cerr << "ART Android MotionEvent dispatch exception\n";
     env->ExceptionDescribe();
   }
-  // ViewRootImpl takes ownership of an enqueued InputEvent and recycles it
-  // after the InputStage chain finishes. DecorView dispatch does not, so the
-  // bounded fallback owns the explicit recycle call.
+  // The imported receiver owns a separate event constructed from the packet.
+  // This local diagnostic/DecorView event always remains fixture-owned.
   bool recycle_ok = true;
-  if (!enqueued) {
-    env->CallVoidMethod(event, recycle);
-    recycle_ok = !env->ExceptionCheck();
+  {
+    recycle_ok = original_event.Recycle();
     if (!recycle_ok && std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
       std::cerr << "ART Android MotionEvent recycle exception\n";
       env->ExceptionDescribe();
@@ -1584,7 +1624,7 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
     std::cerr << "ART Android MotionEvent ABI2 action=" << action
               << " consumed=" << (consumed == JNI_TRUE ? 1 : 0)
               << " path=" << (enqueued ? "input-channel" : "decor")
-              << " window=" << (state->pointer_dispatch_is_window ? 1 : 0)
+              << " window=" << (darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_dispatch_is_window ? 1 : 0)
               << " dispatch_us="
               << (dispatch_end > dispatch_start
                       ? (dispatch_end - dispatch_start) / 1000
@@ -1608,18 +1648,18 @@ int32_t dispatch_motion_event(GraphicsState* state, JNIEnv* env, jobject root,
     }
     state->pointer_stream_active = false;
     state->pointer_down_time_nanos = 0;
-    state->pointer_click_candidate = false;
+    darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pointer_click_candidate = false;
     DebugViewTextState(env, dispatch_root);
     ClearPointerDispatchRoot(state, env);
   }
   const bool compat_ripple = CompatRippleOverlayEnabled();
-  state->gpu_ripple_overlay_active = compat_ripple && action != 3u;
+  darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_active = compat_ripple && action != 3u;
   if (compat_ripple && down) {
-    state->gpu_ripple_overlay_x = x;
-    state->gpu_ripple_overlay_y = y;
-    state->gpu_ripple_overlay_started = std::chrono::steady_clock::now();
+    darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_x = x;
+    darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_y = y;
+    darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_started = std::chrono::steady_clock::now();
   }
-  if (action != 2u) state->gpu_render_node_recorded = false;
+  if (action != 2u) darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node_recorded = false;
   env->DeleteLocalRef(view_root_class);
   env->DeleteLocalRef(root_class);
   env->DeleteLocalRef(input_host);
@@ -1715,8 +1755,7 @@ int32_t dispatch_pointer_internal(GraphicsState* state, uint32_t action, float x
     return 71;
   }
   art::Thread* art_thread = darwin_art_process::owner_thread_for_callback();
-  jobject root = state->interactive_root;
-  if (art_thread == nullptr || root == nullptr) return 72;
+  if (art_thread == nullptr) return 72;
   if (art::Thread::Current() != art_thread ||
       art_thread->GetState() != art::ThreadState::kNative) {
     return 73;
@@ -1724,6 +1763,11 @@ int32_t dispatch_pointer_internal(GraphicsState* state, uint32_t action, float x
 
   art::ScopedObjectAccess soa(art_thread);
   JNIEnv* env = art_thread->GetJniEnv();
+  darwin_art_graphics_fixture::GraphicsFixtureInvocation invocation(state, env);
+  auto* fixture = invocation.get();
+  if (fixture == nullptr) return 74;
+  jobject root = fixture->interactive_root;
+  if (root == nullptr) return 72;
   if (MotionEventBridgeEnabled()) {
     // The host keeps pulsing the retained RenderNode after ACTION_UP so
     // animations can finish. Those replay samples are not Android pointer
@@ -1772,10 +1816,10 @@ int32_t dispatch_pointer_internal(GraphicsState* state, uint32_t action, float x
     return 74;
   }
 
-  jobject& pressed_view = state->pressed_view;
-  uint32_t& pending_action = state->pending_pressed_action;
-  jfloat& pending_x = state->pending_pressed_x;
-  jfloat& pending_y = state->pending_pressed_y;
+  jobject& pressed_view = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pressed_view;
+  uint32_t& pending_action = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pending_pressed_action;
+  jfloat& pending_x = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pending_pressed_x;
+  jfloat& pending_y = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->pending_pressed_y;
   if (action == 0u) {
     if (std::getenv("DARWIN_ART_APK_APP_EXPECT_WIDGETS") != nullptr &&
         hit == nullptr) {
@@ -1785,12 +1829,12 @@ int32_t dispatch_pointer_internal(GraphicsState* state, uint32_t action, float x
       return 76;
     }
     if (CompatRippleOverlayEnabled()) {
-      state->gpu_ripple_overlay_active = true;
-      state->gpu_ripple_overlay_x = x;
-      state->gpu_ripple_overlay_y = y;
-      state->gpu_ripple_overlay_started = std::chrono::steady_clock::now();
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_active = true;
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_x = x;
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_y = y;
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_started = std::chrono::steady_clock::now();
     } else {
-      state->gpu_ripple_overlay_active = false;
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_ripple_overlay_active = false;
     }
     if (pressed_view != nullptr) {
       env->CallVoidMethod(pressed_view, set_pressed, JNI_FALSE);
@@ -1829,8 +1873,8 @@ int32_t dispatch_pointer_internal(GraphicsState* state, uint32_t action, float x
   env->DeleteLocalRef(view_class);
   const bool rendered =
       !env->ExceptionCheck() &&
-      present_content(state, env, nullptr, root, state->interactive_width,
-                      state->interactive_height) == JNI_TRUE;
+      present_content(state, env, nullptr, root, fixture->interactive_width,
+                      fixture->interactive_height) == JNI_TRUE;
   if (env->ExceptionCheck()) {
     std::cerr << "ART Android input: click dispatch threw\n"
               << art_thread->GetException()->Dump() << "\n";
@@ -1886,8 +1930,7 @@ int32_t dispatch_pointer_v2(GraphicsState* state,
 int32_t dispatch_key_v1(GraphicsState* state,
                         const DarwinArtKeyEventV1* event) {
   if (state == nullptr || event == nullptr || event->version != 1 ||
-      event->size < sizeof(DarwinArtKeyEventV1) || event->action > 1 ||
-      state->interactive_view_root == nullptr) {
+      event->size < sizeof(DarwinArtKeyEventV1) || event->action > 1) {
     return 85;
   }
   art::Thread* art_thread = darwin_art_process::owner_thread_for_callback();
@@ -1897,11 +1940,14 @@ int32_t dispatch_key_v1(GraphicsState* state,
   }
   art::ScopedObjectAccess soa(art_thread);
   JNIEnv* env = art_thread->GetJniEnv();
+  darwin_art_graphics_fixture::GraphicsFixtureInvocation invocation(state, env);
+  auto* fixture = invocation.get();
+  if (fixture == nullptr || fixture->interactive_view_root == nullptr) return 85;
   if (!RefreshFocusedWindowRoot(state, env)) {
     env->ExceptionClear();
     return 86;
   }
-  jobject dispatch_view_root = state->focused_view_root;
+  jobject dispatch_view_root = fixture->focused_view_root;
   jclass key_event_class = env->FindClass("android/view/KeyEvent");
   jmethodID constructor =
       key_event_class == nullptr
@@ -1952,73 +1998,45 @@ int32_t dispatch_key_v1(GraphicsState* state,
   if (event->action == 1 && key_index < state->key_down_time_nanos.size()) {
     state->key_down_time_nanos[key_index] = 0;
   }
-  bool handled = false;
-  const bool delivered =
-      key_event != nullptr && !env->ExceptionCheck() &&
-      darwin_art::DispatchFrameworkInputEvent(
-          env, dispatch_view_root, key_event, &handled);
-  bool delivered_to_focused_view = false;
-  if (delivered && !handled) {
-    // The compatibility InputChannel owns a detached receiver, so an event that
-    // finishes unhandled does not continue through ViewPostImeInputStage as it
-    // would under Android's WindowManager-managed ViewRootImpl. Complete that
-    // terminal stage generically by dispatching to the currently focused View.
-    // The finished-event result prevents a second delivery when the channel
-    // path already consumed the event.
-    jclass root_class = env->GetObjectClass(dispatch_view_root);
-    jmethodID get_view = root_class == nullptr
-                             ? nullptr
-                             : env->GetMethodID(root_class, "getView",
-                                                "()Landroid/view/View;");
-    jobject root = get_view == nullptr
-                       ? nullptr
-                       : env->CallObjectMethod(dispatch_view_root, get_view);
-    jclass view_class = root == nullptr ? nullptr : env->GetObjectClass(root);
-    jmethodID find_focus = view_class == nullptr
-                               ? nullptr
-                               : env->GetMethodID(view_class, "findFocus",
-                                                  "()Landroid/view/View;");
-    jobject focus = find_focus == nullptr
-                        ? nullptr
-                        : env->CallObjectMethod(root, find_focus);
-    jclass focus_class = focus == nullptr ? nullptr : env->GetObjectClass(focus);
-    jmethodID dispatch = focus_class == nullptr
-                             ? nullptr
-                             : env->GetMethodID(focus_class, "dispatchKeyEvent",
-                                                "(Landroid/view/KeyEvent;)Z");
-    if (dispatch != nullptr && !env->ExceptionCheck()) {
-      delivered_to_focused_view = true;
-      handled = env->CallBooleanMethod(focus, dispatch, key_event) == JNI_TRUE;
-    }
-    env->DeleteLocalRef(focus_class);
-    env->DeleteLocalRef(focus);
-    env->DeleteLocalRef(view_class);
-    env->DeleteLocalRef(root);
-    env->DeleteLocalRef(root_class);
-  }
+  darwin_art::DarwinArtInputPacket packet;
+  packet.kind = darwin_art::DarwinArtInputPacketKind::kKey;
+  packet.key = *event;
+  packet.key.event_time_nanos = event_time_nanos;
+  packet.key.down_time_nanos = down_time_nanos;
+  const auto framework_result =
+      key_event != nullptr && !env->ExceptionCheck()
+          ? darwin_art_graphics_fixture::DispatchFixtureInputPacket(
+                fixture, env, dispatch_view_root, packet, ProgressFixtureOwner, state)
+          : darwin_art_graphics_fixture::FixtureInputDispatchResult{};
+  const bool delivered = framework_result.delivered;
+  const bool handled = framework_result.handled;
+  // The genuine receiver executes ViewRoot's full InputStage chain. Its
+  // unhandled ACK is terminal; dispatching again to a focused View would be a
+  // second delivery, not completion of the framework's original event.
   if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
     const bool activity_window =
         env->IsSameObject(dispatch_view_root,
-                          state->interactive_view_root) == JNI_TRUE;
+                          fixture->interactive_view_root) == JNI_TRUE;
     std::cerr << "ART Android KeyEvent action=" << event->action
               << " key=" << event->key_code
               << " device=" << event->device_id
               << " window=" << (activity_window ? "activity" : "subwindow")
               << " path=input-channel"
-              << (delivered_to_focused_view ? "+focused-view" : "")
               << " delivered=" << (delivered ? 1 : 0)
               << " handled=" << (handled ? 1 : 0)
               << "\n";
   }
   env->DeleteLocalRef(key_event);
   env->DeleteLocalRef(key_event_class);
+  const bool dispatch_failed = framework_result.failed || env->ExceptionCheck() ||
+      fixture->retiring.load(std::memory_order_acquire);
   if (env->ExceptionCheck()) {
     if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
       env->ExceptionDescribe();
     }
     env->ExceptionClear();
   }
-  return delivered ? 0 : 86;
+  return delivered && !dispatch_failed ? 0 : 86;
 }
 
 int32_t pump_main_looper(GraphicsState* state) {
@@ -2031,19 +2049,22 @@ int32_t pump_main_looper(GraphicsState* state) {
   }
   art::ScopedObjectAccess soa(art_thread);
   JNIEnv* env = art_thread->GetJniEnv();
+  darwin_art_graphics_fixture::GraphicsFixtureInvocation invocation(state, env);
+  auto* fixture = invocation.get();
+  if (fixture == nullptr) return 74;
   const bool trace_main_queue =
       std::getenv("DARWIN_ART_DEBUG_MAIN_QUEUE_TRACE") != nullptr;
   if (trace_main_queue) {
     std::cerr << "ART Android Looper trace: pump enter tid="
               << CurrentThreadId() << "\n";
   }
-  if (state->gpu_surface != nullptr && !state->owner_wake_bound) {
+  if (fixture->gpu_surface != nullptr && !fixture->owner_wake_bound) {
     void* looper = darwin_art_android_platform_prepare_current_looper();
     if (looper != nullptr &&
         darwin_art_surface_set_owner_wake(
-            state->gpu_surface, darwin_art_android_platform_wake_looper,
+            fixture->gpu_surface, darwin_art_android_platform_wake_looper,
             looper) == DARWIN_ART_SURFACE_OK) {
-      state->owner_wake_bound = true;
+      fixture->owner_wake_bound = true;
     }
   }
   // Refresh on both sides of the owner-Looper drain. The pre-drain pass
@@ -2065,23 +2086,31 @@ int32_t pump_main_looper(GraphicsState* state) {
     }
     return 75;
   }
+  // Raw AppKit input is fixture-owned only when this retained sink was
+  // explicitly installed. Drain its mixed-kind queue on the Android owner
+  // thread, preserving packet order and fixture-side event construction.
+  for (;;) {
+    darwin_art_graphics_fixture::FixtureQueuedInput packet;
+    if (!darwin_art_graphics_fixture::take_surface_input(state, &packet)) {
+      break;
+    }
+    const int32_t dispatch_status =
+        packet.kind == darwin_art_graphics_fixture::FixtureQueuedInput::Kind::kPointer
+            ? dispatch_pointer_v2(state, &packet.pointer)
+            : dispatch_key_v1(state, &packet.key);
+    if (dispatch_status != 0) {
+      std::cerr << "ART Android fixture input sink dispatch failed status="
+                << dispatch_status << "\n";
+      return dispatch_status;
+    }
+  }
+  (void)darwin_art_graphics_fixture::acknowledge_surface_input_if_empty(state);
   // Physical AppKit input is consumed by ViewRoot's real InputChannel callback,
   // not dispatch_pointer_internal(). Sample after the owner Looper drain so
   // opt-in diagnostics observe that Android-owned path without changing it.
-  DebugViewTextState(env, state->interactive_root);
+  DebugViewTextState(env, fixture->interactive_root);
   if (!RefreshFocusedWindowRoot(state, env)) {
     if (env->ExceptionCheck()) env->ExceptionClear();
-  }
-  // AppKit publishes the Android input hint before waking this owner. Clear
-  // it only while the surface mailbox is empty and its framework messages have
-  // been delivered; a producer racing this check reasserts the hint after the
-  // same mailbox mutex is released.
-  if (state->gpu_surface != nullptr) {
-    (void)darwin_art_surface_clear_input_hint_if_empty(state->gpu_surface);
-  } else {
-    // Headless runs have no AppKit mailbox, but must still leave a clean
-    // process-global hint for a subsequent owner session.
-    darwin_art::ClearFrameworkInputPending();
   }
   // SurfaceView lifecycle repair is display-paced in pump_frame(). Keeping it
   // out of this short owner-Looper poll avoids traversing the full
@@ -2112,6 +2141,9 @@ int32_t pump_frame(GraphicsState* state, jlong frame_time_nanos) {
   }
   art::ScopedObjectAccess soa(art_thread);
   JNIEnv* env = art_thread->GetJniEnv();
+  darwin_art_graphics_fixture::GraphicsFixtureInvocation invocation(state, env);
+  auto* fixture = invocation.get();
+  if (fixture == nullptr) return 74;
   const bool debug_slow_frame =
       std::getenv("DARWIN_ART_DEBUG_SLOW_FRAME") != nullptr;
   const auto frame_started = std::chrono::steady_clock::now();
@@ -2136,10 +2168,10 @@ int32_t pump_frame(GraphicsState* state, jlong frame_time_nanos) {
   // remain asynchronous consumers below.
   DebugWindowManagerViews(env);
 #if defined(DARWIN_ART_REAL_GRAPHICS)
-  auto* animation_context = state->hwui_animation_context.get();
-  auto* time_lord = state->hwui_time_lord.get();
-  jobject render_node = state->gpu_render_node;
-  if (state->interactive_view_root == nullptr && animation_context != nullptr &&
+  auto* animation_context = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_animation_context.get();
+  auto* time_lord = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->hwui_time_lord.get();
+  jobject render_node = darwin_art_graphics_fixture::EnsureGraphicsFixtureState(state)->gpu_render_node;
+  if (fixture->interactive_view_root == nullptr && animation_context != nullptr &&
       time_lord != nullptr &&
       render_node != nullptr) {
     jclass render_node_class = env->FindClass("android/graphics/RenderNode");
@@ -2176,8 +2208,8 @@ int32_t pump_frame(GraphicsState* state, jlong frame_time_nanos) {
   // callback->Handler ordering and preventing MessageQueue.next() from
   // blocking the RenderThread-equivalent pulse behind unrelated UI work.
   log_slow_frame_stage("post_vsync_message_enqueue");
-  if (ok && delivered_vsyncs > 0 && state->interactive_root != nullptr) {
-    debug_product_view_root(env, state->interactive_root);
+  if (ok && delivered_vsyncs > 0 && fixture->interactive_root != nullptr) {
+    debug_product_view_root(env, fixture->interactive_root);
   }
   if (!ok) {
     if (env->ExceptionCheck() && art_thread->GetException() != nullptr) {
@@ -2193,11 +2225,11 @@ int32_t pump_frame(GraphicsState* state, jlong frame_time_nanos) {
   // ANativeWindow queue above; replaying that root here would submit every
   // frame twice and bypass HWUI's damage tracking. Only detached legacy probes
   // retain the bounded host presentation path.
-  if (ok && state->interactive_root != nullptr &&
-      state->interactive_view_root == nullptr) {
-    ok = present_content(state, env, nullptr, state->interactive_root,
-                         state->interactive_width,
-                         state->interactive_height) == JNI_TRUE &&
+  if (ok && fixture->interactive_root != nullptr &&
+      fixture->interactive_view_root == nullptr) {
+    ok = present_content(state, env, nullptr, fixture->interactive_root,
+                         fixture->interactive_width,
+                         fixture->interactive_height) == JNI_TRUE &&
          !env->ExceptionCheck();
     if (!ok && env->ExceptionCheck()) {
       std::cerr << "ART Android frame presentation threw\n"
@@ -2209,13 +2241,13 @@ int32_t pump_frame(GraphicsState* state, jlong frame_time_nanos) {
   // buffer submission, latching, and composition. The Darwin HWC backend must
   // still scan the completed display IOSurface out to CAMetalLayer. This is a
   // GPU texture blit only: it neither calls View.draw nor replays a RenderNode.
-  if (ok && state->interactive_view_root != nullptr &&
-      state->gpu_surface != nullptr) {
+  if (ok && fixture->interactive_view_root != nullptr &&
+      fixture->gpu_surface != nullptr) {
     // HWC scanout is an AppKit-actor command. Do not synchronously wait for
     // nextDrawable here: the ART owner must remain free to drain Android
     // Looper work while the main actor presents the persistent IOSurface.
     const DarwinArtSurfaceResult present =
-        darwin_art_surface_present_async(state->gpu_surface);
+        darwin_art_surface_present_async(fixture->gpu_surface);
     log_slow_frame_stage("enqueue_scanout");
     ok = present == DARWIN_ART_SURFACE_OK ||
          present == DARWIN_ART_SURFACE_DRAWABLE_UNAVAILABLE;
@@ -2227,23 +2259,3 @@ int32_t pump_frame(GraphicsState* state, jlong frame_time_nanos) {
 }
 
 }  // namespace darwin_art_graphics
-
-extern "C" DARWIN_ART_EXPORT int32_t darwin_art_dispatch_pointer(
-    uint32_t, float, float) {
-  return DARWIN_ART_STATUS_GRAPHICS_SESSION_INVALID;
-}
-
-extern "C" DARWIN_ART_EXPORT int32_t darwin_art_dispatch_pointer_v2(
-    const DarwinArtPointerEventV2*) {
-  return DARWIN_ART_STATUS_GRAPHICS_SESSION_INVALID;
-}
-
-extern "C" DARWIN_ART_EXPORT int32_t darwin_art_dispatch_key_v1(
-    const DarwinArtKeyEventV1*) {
-  return DARWIN_ART_STATUS_GRAPHICS_SESSION_INVALID;
-}
-
-extern "C" DARWIN_ART_EXPORT int32_t darwin_art_pump_framework_frame(
-    jlong) {
-  return DARWIN_ART_STATUS_GRAPHICS_SESSION_INVALID;
-}

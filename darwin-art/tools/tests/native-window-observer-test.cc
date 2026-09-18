@@ -11,6 +11,7 @@
 struct Context {
   void* window;
   int releases = 0;
+  bool clear_during_release = false;
 };
 static void Queue(void*, AHardwareBuffer*, int32_t, int, int32_t) {}
 static void Release(void* opaque) {
@@ -19,6 +20,11 @@ static void Release(void* opaque) {
   // producer. This takes the actual producer mutex, not a mocked lock.
   assert(darwin_art_android_ANativeWindow_next_frame_number(context->window) == 1);
   ++context->releases;
+  if (context->clear_during_release) {
+    context->clear_during_release = false;
+    assert(darwin_art_android_ANativeWindow_set_owned_queue_callback(
+        context->window, nullptr, nullptr, nullptr));
+  }
 }
 int main() {
   // Bound a regression deadlock without terminating any app/profile process.
@@ -43,6 +49,18 @@ int main() {
   assert(darwin_art_android_ANativeWindow_set_owned_queue_callback(
       window, nullptr, nullptr, nullptr));
   assert(first.releases == 1 && second.releases == 1);
+  Context third{window}, fourth{window};
+  third.clear_during_release = true;
+  assert(darwin_art_android_ANativeWindow_set_owned_queue_callback(
+      window, Queue, &third, Release));
+  // Releasing the predecessor can itself retire the installed successor.
+  // Both callbacks must run outside the producer mutex and only once.
+  assert(darwin_art_android_ANativeWindow_set_owned_queue_callback(
+      window, Queue, &fourth, Release));
+  assert(third.releases == 1 && fourth.releases == 1);
+  assert(darwin_art_android_ANativeWindow_set_owned_queue_callback(
+      window, nullptr, nullptr, nullptr));
+  assert(third.releases == 1 && fourth.releases == 1);
   assert(darwin_art_android_ANativeWindow_set_owned_queue_callback(
       window, nullptr, nullptr, nullptr));
   assert(first.releases == 1 && second.releases == 1);

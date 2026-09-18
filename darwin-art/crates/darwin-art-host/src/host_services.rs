@@ -11,7 +11,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 
-use crate::RunOptions;
+use crate::{ExecutionLifetime, RunOptions};
 
 const CHILD_CONTROL_FD: RawFd = 3;
 unsafe extern "C" {
@@ -135,8 +135,7 @@ impl ServiceProcessManager {
                 Ok(())
             });
         }
-        let child = command
-            .spawn()
+        let child = darwin_art_profile::spawn_owned(&mut command)
             .map_err(|error| format!("could not spawn Android service: {error}"));
         // into_raw_fd transferred ownership out of Rust; the parent must
         // close its copy regardless of whether spawn succeeded.
@@ -418,7 +417,7 @@ pub fn run_service_child(control_fd: RawFd) -> Result<(), String> {
         heap_initial_bytes: 64 * 1024 * 1024,
         heap_maximum_bytes: 256 * 1024 * 1024,
         visible_seconds: 0.0,
-        terminate_android_process: true,
+        execution_lifetime: ExecutionLifetime::AndroidProcess,
     };
     crate::run(&options)
         .map(|_| ())

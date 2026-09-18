@@ -52,8 +52,9 @@ public final class JobSchedulerServiceTest {
     private static final class Processes {
         final ApplicationProcessRegistry value = new ApplicationProcessRegistry();
         Processes() {
-            value.beginAttachment(PID, UID, new Binder(), 1L);
-            value.identify(PID, PACKAGE);
+            IBinder thread = new Binder();
+            value.beginAttachment(PID, UID, thread, 1L);
+            value.identify(PID, 1L, thread, PACKAGE);
             value.finishAttachment(PID, 1L);
             Binder.setCallingPid(PID);
         }

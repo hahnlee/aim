@@ -1,5 +1,6 @@
 #pragma once
 #include "darwin_art_linker_namespace.h"
+#include "graphics_ndk_symbols.h"
 #include <cstdint>
 #include <string>
 
@@ -9,6 +10,4 @@ bool PublishGraphicsNdkImage(LinkerRegistry*, uint64_t namespace_id,
 bool IsGraphicsNdkImage(const LinkerImageLease*);
 int ResolveGraphicsNdkImage(const LinkerImageLease*, const char* symbol,
     const char* version, uintptr_t* out, std::string* error);
-// Strong original implementation references, scoped to the public NDK module.
-uintptr_t GraphicsNdkSymbol(const char* symbol);
 }

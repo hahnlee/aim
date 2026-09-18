@@ -11,12 +11,13 @@
 #include "runtime_graphics_phase.h"
 #include "runtime_graphics_gpu.h"
 #include "runtime_graphics_probe.h"
-#include "runtime_graphics_state.h"
-#include "runtime_jni_scope.h"
+#include "graphics_fixture_state.h"
+#include "../runtime/embedding/graphics_state.h"
+#include "jni/scoped_local_frame.h"
 #include "runtime_app_resources.h"
 #include "runtime_app_activity.h"
 #include "darwin_binder_wire.h"
-#include "runtime_process_state.h"
+#include "../runtime/art/process_state.h"
 #include "mirror/throwable.h"
 #include "obj_ptr-inl.h"
 #include "thread-current-inl.h"
@@ -390,7 +391,7 @@ bool attach_android_window(JNIEnv* env, jobject activity, jobject window,
   }
   const bool retained =
       view_root != nullptr && !env->ExceptionCheck() &&
-      darwin_art_graphics::retain_interactive_view_root(
+      darwin_art_graphics_fixture::retain_interactive_view_root(
           graphics_state, env, view_root);
   env->DeleteLocalRef(view_root);
   env->DeleteLocalRef(list_class);
@@ -937,15 +938,16 @@ int run(JNIEnv* env, art::Thread* self, jobject activity_instance,
           : env->CallObjectMethod(content_root, get_child_at,
                                   static_cast<jint>(0));
   if (graphics_state != nullptr &&
-      !darwin_art_graphics::retain_hardware_context(graphics_state, env,
-                                                    activity_instance)) {
+      !darwin_art_graphics_fixture::retain_hardware_context(
+          graphics_state, env, activity_instance)) {
     std::cerr << "ART Android graphics: activity context retention failed\n";
     return 33;
   }
   // This is the direct-APK fixture only. Production activity replacement is
   // scheduled by ActivityTaskManagerEndpoint through ActivityThread.
   if (graphics_state != nullptr && !launcher_finishing &&
-      graphics_state->interactive_root == nullptr &&
+      darwin_art_graphics_fixture::EnsureGraphicsFixtureState(graphics_state)
+              ->interactive_root == nullptr &&
       darwin_art_graphics_phase::present_and_retain(
           graphics_state, env, decor_view, content_root_class, content_root,
           probe_view_class, probe_view, run_apk_app, expect_apk_widgets,

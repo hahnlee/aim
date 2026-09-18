@@ -11,6 +11,7 @@ mod help;
 mod native_build;
 mod native_cache;
 mod native_graph;
+mod native_link_recipe;
 mod support;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;

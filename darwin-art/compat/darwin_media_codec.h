@@ -10,8 +10,4 @@ namespace darwin_art {
 // unit or cache invalidation boundary.
 bool RegisterDarwinMediaCodecNatives(JNIEnv* env);
 
-// Runs the public Java configure/setOutputSurface/release contract and checks
-// that native producer references survive and retire at the AOSP boundaries.
-bool VerifyDarwinMediaCodecSurfaceLifecycle(JNIEnv* env);
-
 }  // namespace darwin_art

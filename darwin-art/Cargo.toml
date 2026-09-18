@@ -10,6 +10,7 @@ members = [
     "crates/darwin-art-engine",
     "crates/darwin-art-runtime",
     "crates/darwin-art-looper-transport",
+    "crates/darwin-art-scm-transfer",
     "crates/darwin-art-binder-device",
     "crates/darwin-art-binder-process",
     "crates/darwin-art-build-contract",

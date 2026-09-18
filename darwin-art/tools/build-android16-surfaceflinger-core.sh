@@ -1,6 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
+mode="${1:---archive-and-test}"
+[[ $# -le 1 && ( "$mode" == --archive-only || "$mode" == --archive-and-test ) ]] || {
+  echo 'usage: build-android16-surfaceflinger-core.sh [--archive-only|--archive-and-test]' >&2
+  exit 2
+}
+
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 project_root="$(cd "$script_dir/.." && pwd)"
 source_root="$project_root/_aosp/android16-surfaceflinger-core"
@@ -214,8 +220,6 @@ lifecycle_object="$object_root/LayerLifecycleManager.o"
 hierarchy_object="$object_root/LayerHierarchy.o"
 requested_layer_object="$object_root/RequestedLayerState.o"
 creation_args_object="$object_root/LayerCreationArgs.o"
-probe_object="$object_root/transaction-handler-compile-probe.o"
-runtime_probe_object="$object_root/transaction-handler-runtime-probe.o"
 transaction_bridge_object="$object_root/transaction-bridge.o"
 layer_state_factory_object="$object_root/layer-state-factory.o"
 compile_object "$handler_object" "${flags[@]}" -c \
@@ -228,11 +232,6 @@ compile_object "$requested_layer_object" "${flags[@]}" -c \
   "$shadow/services/surfaceflinger/FrontEnd/RequestedLayerState.cpp"
 compile_object "$creation_args_object" "${flags[@]}" -c \
   "$shadow/services/surfaceflinger/FrontEnd/LayerCreationArgs.cpp"
-compile_object "$probe_object" "${flags[@]}" -c \
-  "$project_root/probes/surfaceflinger_transaction_handler_compile.cc"
-compile_object "$runtime_probe_object" "${flags[@]}" -c \
-  -include "$project_root/compat/surfaceflinger/transaction_bridge.h" \
-  "$project_root/probes/surfaceflinger_transaction_handler_runtime.cc"
 compile_object "$transaction_bridge_object" "${flags[@]}" -c \
   -include "$project_root/compat/surfaceflinger/transaction_bridge.h" \
   "$project_root/compat/surfaceflinger/transaction_bridge.cc"
@@ -316,23 +315,6 @@ compile_object "$binder_os_object" "${flags[@]}" \
   -c "$project_root/compat/surfaceflinger/binder_os_darwin.cc"
 binder_objects+=("$binder_os_object")
 
-# The standalone SurfaceFlinger transaction executable links Binder objects
-# directly, so give it the real Darwin RPC identity boundary and only a
-# test-owned process-registry implementation. The production archive retains
-# unresolved narrow hooks that are supplied by the runtime boundary archive.
-rpc_identity_probe_objects=()
-for rpc_identity_source in \
-  compat/binder/rpc_identity.cc \
-  compat/binder/calling_identity.cc \
-  compat/binder/peer_credentials.cc \
-  tools/tests/surfaceflinger-binder-platform-syscalls-fixture.cc \
-  tools/tests/surfaceflinger-binder-process-registry-fixture.cc; do
-  object="$object_root/rpc-identity-probe-$(basename "${rpc_identity_source%.*}").o"
-  compile_object "$object" "${flags[@]}" -I"$project_root/compat" \
-    -c "$project_root/$rpc_identity_source"
-  rpc_identity_probe_objects+=("$object")
-done
-
 fence_object="$object_root/ui-Fence.o"
 compile_object "$fence_object" "${flags[@]}" \
   -UANDROID_UTILS_REF_BASE_DISABLE_IMPLICIT_CONSTRUCTION -c \
@@ -366,7 +348,7 @@ compile_object "$release_transport_object" "${flags[@]}" -c \
 gui_runtime_objects+=("$release_transport_object")
 "$ar" rcs "$archive" "$handler_object" "$lifecycle_object" \
   "$hierarchy_object" "$requested_layer_object" "$creation_args_object" \
-  "$probe_object" "$transaction_bridge_object" "$layer_state_factory_object"
+  "$transaction_bridge_object" "$layer_state_factory_object"
 binder_archive="$artifact_stage/libbinder-darwin.a"
 gui_archive="$artifact_stage/libgui-transaction-darwin.a"
 fence_archive="$artifact_stage/libui-fence-darwin.a"
@@ -377,45 +359,10 @@ fence_archive="$artifact_stage/libui-fence-darwin.a"
 definitions="$(nm -gUC "$archive")"
 for symbol in \
   'android::surfaceflinger::frontend::TransactionHandler::queueTransaction(android::QueuedTransactionState&&)' \
-  'android::surfaceflinger::frontend::TransactionHandler::flushTransactions()' \
-  '_darwin_art_surfaceflinger_frontend_has_pending'; do
+  'android::surfaceflinger::frontend::TransactionHandler::flushTransactions()'; do
   grep -F " T $symbol" <<<"$definitions" >/dev/null ||
     fail_build "missing frontend definition $symbol"
 done
-
-runtime_probe="$artifact_stage/surfaceflinger-transaction-runtime"
-"$cxx" -arch arm64 -isysroot "$sdk_root" -Wl,-dead_strip \
-  "$runtime_probe_object" "$handler_object" \
-  "$lifecycle_object" "$hierarchy_object" "$requested_layer_object" \
-  "$creation_args_object" "$transaction_bridge_object" \
-  "$layer_state_factory_object" \
-  "${gui_runtime_objects[@]}" \
-  "${binder_objects[@]}" \
-  "${rpc_identity_probe_objects[@]}" \
-  "$fence_object" \
-  "$fence_sync_object" \
-  "$fence_time_object" \
-  "$project_root/_build/ui-types-foundation/libui-types.a" \
-  "$project_root/_build/graphics-foundations/libutils-darwin.a" \
-  "$project_root/_build/graphics-foundations/libcutils-darwin.a" \
-  "$project_root/_build/graphics-foundations/liblog-darwin.a" \
-  "$project_root/_build/libbase-foundation/libandroid-base-darwin.a" \
-  -o "$runtime_probe"
-"$runtime_probe"
-bash "$script_dir/test-release-record-transport.sh"
-
-native_handle_test="$artifact_stage/parcel-native-handle-test"
-"$cxx" "${flags[@]}" -c "$project_root/tools/tests/parcel-native-handle-test.cc" \
-  -o "$artifact_stage/parcel-native-handle-test.o"
-"$cxx" -arch arm64 -isysroot "$sdk_root" -Wl,-dead_strip "$artifact_stage/parcel-native-handle-test.o" \
-  "$binder_archive" \
-  "${rpc_identity_probe_objects[@]}" \
-  "$project_root/_build/graphics-foundations/libutils-darwin.a" \
-  "$project_root/_build/graphics-foundations/libcutils-darwin.a" \
-  "$project_root/_build/graphics-foundations/liblog-darwin.a" \
-  "$project_root/_build/libbase-foundation/libandroid-base-darwin.a" \
-  -o "$native_handle_test"
-"$native_handle_test"
 
 nm -u "$archive" | awk '$1 ~ /^_/ { print $1 }' | sort -u \
   > "$artifact_stage/undefined-symbols.txt"
@@ -432,7 +379,8 @@ mv "$gui_archive" "$output_root/libgui-transaction-darwin.a"
 mv "$fence_archive" "$output_root/libui-fence-darwin.a"
 mv "$artifact_stage/undefined-symbols.txt" "$output_root/undefined-symbols.txt"
 mv "$artifact_stage/source-identity.txt" "$output_root/source-identity.txt"
-ditto "$runtime_probe" "$output_root/surfaceflinger-transaction-runtime"
 
-echo "surfaceflinger-core-build: AOSP TransactionHandler=PASS"
-echo "surfaceflinger-core-build: archive=$output_root/libsurfaceflinger-frontend-darwin.a"
+echo "surfaceflinger-core-build: archives=frontend,binder,gui,fence arch=arm64"
+if [[ "$mode" == --archive-and-test ]]; then
+  bash "$script_dir/test-android16-surfaceflinger-core.sh" --prepared
+fi

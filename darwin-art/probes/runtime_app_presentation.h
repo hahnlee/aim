@@ -2,7 +2,7 @@
 
 #include <jni.h>
 
-#include "runtime_graphics_state.h"
+#include "../runtime/embedding/graphics_state.h"
 
 namespace art {
 class Thread;

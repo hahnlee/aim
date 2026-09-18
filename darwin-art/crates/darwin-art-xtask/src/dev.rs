@@ -10,6 +10,7 @@ use crate::graph::inputs::graph_inputs;
 #[derive(Debug, Default, Eq, PartialEq)]
 struct ChangePlan {
     rust: bool,
+    support: bool,
     native: bool,
     foundation: bool,
     audits: BTreeSet<PathBuf>,
@@ -74,6 +75,9 @@ fn classify(root: &Path, paths: &[PathBuf]) -> ChangePlan {
     for path in paths {
         let text = path.to_string_lossy();
         let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
+        plan.support |= text.starts_with("runtime/framework/")
+            || text == "tools/build-android16-package-dex-usage.sh"
+            || text == "tools/dex-inspect.cc";
         plan.rust |= path.extension().is_some_and(|extension| extension == "rs")
             || matches!(file_name, "Cargo.toml" | "Cargo.lock" | "config.toml");
         let foundation = text.starts_with("patches/")
@@ -149,6 +153,20 @@ fn check(root: &Path, mut arguments: Vec<String>) -> Result<(), String> {
     }
     if plan.native || full {
         build(root, full)?;
+    } else if plan.support {
+        run_command(
+            root,
+            "production support DEX",
+            cargo(),
+            [
+                "run",
+                "-q",
+                "-p",
+                "art-bootstrap",
+                "--",
+                "build-runtime-support-dex-incremental",
+            ],
+        )?;
     }
     Ok(())
 }
@@ -168,6 +186,19 @@ fn build(root: &Path, full: bool) -> Result<(), String> {
         },
         cargo(),
         ["run", "-q", "-p", "art-bootstrap", "--", command],
+    )?;
+    run_command(
+        root,
+        "production runtime payload",
+        cargo(),
+        [
+            "run",
+            "-q",
+            "-p",
+            "art-bootstrap",
+            "--",
+            "build-runtime-payload-incremental",
+        ],
     )?;
     run_command(
         root,
@@ -353,6 +384,12 @@ mod tests {
         );
         assert!(rust.rust);
         assert!(!rust.native);
+        let java = classify(
+            &root,
+            &[PathBuf::from("runtime/framework/support-sources.txt")],
+        );
+        assert!(java.support);
+        assert!(!java.native);
 
         let provider = classify(&root, &[PathBuf::from("tools/bionic-vm-facade/src/host.c")]);
         assert!(provider.native);

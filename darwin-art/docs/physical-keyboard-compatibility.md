@@ -14,17 +14,39 @@ forwarded directly: on macOS it can differ from that clock by accumulated
 system-sleep time, which makes a current event appear older than a renderer's
 document time origin.
 
-This establishes the correct framework event route, but character mapping is
-not complete. `KeyMapGetCharacter` in
-`compat/darwin_framework_binder_natives.cc` currently contains a small,
-hard-coded US-QWERTY table for letters, digits, and common punctuation. The
-native map object stores only a device id, and display-label, event synthesis,
-fallback-action, and overlay operations are absent or conservative stubs.
+The original hard-coded US-QWERTY evaluator and identity-only DAKM Parcel
+payload have now been removed from the source tree. Framework input registration
+delegates to pinned original KeyEvent/KeyCharacterMap JNI; SystemKeyboardMaps
+selects original Generic/Virtual resources through the guest filesystem factory.
+Both production flavors linked successfully after the allocation-handoff fix;
+source/link fixture boundaries and exact warm no-work also pass.
+A fresh normal Calculator generation physically computes 2+3=5 and accepts
+hardware 2,3,Return as 23 through the original-map path before that fix. Actual
+original JNI null/pending-exception allocation, transfer/delete and bad_alloc
+tests pass with genuine production providers. Post-guard APK acceptance, device
+identity and Chromium modifier interaction remain unverified.
 
 The table was introduced as a bootstrap compatibility bridge so unmodified
 AOSP applications could accept physical-keyboard input while the common event
 pipeline was brought up. It is not the target architecture and must not grow
 into a second keyboard-layout implementation one switch case at a time.
+
+Physical Chromium testing on 2026-09-18 proves a concrete modifier defect:
+CGHID Control+A arrives as Android key code 29 with meta state 4096 but inserts
+`a`; Shift+semicolon arrives with meta state 1 and correctly produces `:`.
+The transport preserves these modifiers; the replacement evaluator does not.
+That pre-cutover implementation also fabricated a FULL map for `obtainEmptyMap`
+and parceled device identity instead of map contents. Original evaluator/Parcel
+component execution now passes exact modifiers, fallback and full payload
+round-trips, but original JNI/device identity and physical acceptance remain open.
+
+The bounded correction is pinned original AOSP evaluator, JNI and Parcel
+ownership, with genuine Generic and Virtual resources selected by the system
+input-device owner. Physical device 1 and virtual device -1 remain distinct;
+restore original empty-map semantics. Missing/malformed resources fail visibly.
+A Ctrl-only suppression branch is not a fix: original matching also owns
+alternate characters and fallback actions. This adoption does not claim
+arbitrary macOS layout, hotplug or IME support.
 
 ## Android contract
 
@@ -54,7 +76,10 @@ Authoritative AOSP implementations:
 
 ## Observable compatibility gaps
 
-Applications can currently distinguish Darwin ART from Android in these ways:
+These gaps were observed in the pre-cutover implementation. Original evaluator
+component tests now cover map queries, modifier matching and full Parcel payload,
+but product-level coverage is not yet complete. Host layout, hotplug and IME
+items remain separate follow-up work:
 
 - The active macOS layout and actual keyboard device do not affect the fixed
   US-QWERTY character table.
@@ -90,11 +115,13 @@ Android InputDevice / KeyCharacterMap / KeyEvent
 InputChannel -> ViewRootImpl -> application
 ```
 
-Rust should own device identity, validated map data, cache lifetime, layout
-generations, and hotplug transitions. AppKit/Carbon adapters may obtain the
+Rust should own host device identity, immutable host-overlay data, cache lifetime,
+layout generations, and hotplug transitions. Original Android map parsing,
+evaluation and serialization stay with pinned AOSP owners, not a parallel Rust
+reimplementation. AppKit/Carbon adapters may obtain the
 active macOS input source and use `UCKeyTranslate` to compile a deterministic
-host-layout overlay. JNI C++ remains a narrow ABI adapter over immutable map
-queries; it must not own a parallel mutable keyboard model.
+host-layout overlay. JNI C++ retains original Android map ownership and queries;
+it must not own a parallel mutable host keyboard model.
 
 The runtime should parse Android `.kl` and `.kcm` data so Android's generic and
 device-specific maps remain the semantic baseline. A host-generated overlay
@@ -105,10 +132,11 @@ built, not as an untracked process-global lookup during an arbitrary JNI call.
 
 ## Delivery milestones
 
-1. Replace the C++ switch with an immutable Rust-owned map and table lookup,
-   while preserving current US-QWERTY behavior.
-2. Parse Android `.kl` and `.kcm` files and select generic/device-specific maps
-   using stable input-device descriptors.
+1. Replace the C++ switch and identity-only Parcel bridge with pinned original
+   AOSP evaluator/JNI/serialization. Package original Generic/Virtual maps and
+   select them explicitly at the system input-device owner; preserve empty maps.
+2. Extend device-specific map selection using stable input-device descriptors,
+   retaining original Android `.kl` and `.kcm` owners.
 3. Compile macOS TIS/`UCKeyTranslate` layouts into overlays; cover ANSI, ISO,
    JIS, Shift, Caps Lock, Option/Alt, AltGr-equivalent, and dead keys.
 4. Publish device hotplug and layout changes with Android-style generations
@@ -118,7 +146,8 @@ built, not as an untracked process-global lookup during an arbitrary JNI call.
 
 ## Completion criteria
 
-This work is complete only when all of the following hold:
+The broader keyboard follow-up (not the current bounded Probe-removal goal)
+is complete only when all of the following hold:
 
 - `KeyMapGetCharacter` contains no hard-coded US-layout switch.
 - Physical keyboard events remain external `FULL` keyboard events; the

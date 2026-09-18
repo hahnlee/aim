@@ -9,6 +9,7 @@ extern "C" {
 
 typedef struct DarwinArtFdBroker DarwinArtFdBroker;
 typedef uint64_t DarwinArtFdOwnerHandle;
+typedef struct DarwinArtFdDescriptionPin DarwinArtFdDescriptionPin;
 
 typedef enum DarwinArtFdKind {
   DARWIN_ART_FD_FS_FILE = 1,
@@ -37,6 +38,31 @@ typedef struct DarwinArtFdIoResult {
   intptr_t value;
   int android_errno;
 } DarwinArtFdIoResult;
+
+typedef struct DarwinArtFdDescriptionSnapshotV1 {
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint64_t object;
+  DarwinArtFdOwnerHandle owner;
+  uint32_t kind;
+  int32_t status_flags;
+} DarwinArtFdDescriptionSnapshotV1;
+
+typedef intptr_t (*DarwinArtFdDescriptionOperationV1)(
+    void *context, const DarwinArtFdDescriptionSnapshotV1 *snapshot,
+    int *android_errno);
+// Retained-export operation: the broker resolves and retains one exact
+// Description, invokes its owner export callback on that Description object,
+// then supplies the duplicated host descriptor together with the same
+// immutable snapshot. The caller owns the host descriptor on success and the
+// returned pin keeps the Description alive until explicit release.
+// The operation borrows the FD until a nonnegative return and must not close
+// it on failure. Required provider cleanup runs once on export/operation
+// failure, outside the broker mutex and before the Description pin is released.
+typedef intptr_t (*DarwinArtFdRetainedExportOperationV1)(
+    void *context, const DarwinArtFdDescriptionSnapshotV1 *snapshot,
+    int host_fd, int *android_errno);
+typedef void (*DarwinArtFdRetainedExportReleaseV1)(void *context, int host_fd);
 
 typedef struct DarwinArtFdPollEntry {
   int fd;
@@ -142,6 +168,7 @@ enum {
   DARWIN_ART_FD_OWNER_ABI_V5 = 5,
   DARWIN_ART_FD_OWNER_ABI_V6 = 6,
   DARWIN_ART_FD_OWNER_ABI_V7 = 7,
+  DARWIN_ART_FD_DESCRIPTION_SNAPSHOT_ABI_V1 = 1,
   DARWIN_ART_FD_SOCKET_REQUEST_ABI_V1 = 1,
   DARWIN_ART_FD_SOCKET_ACCEPT_RESULT_ABI_V1 = 1,
   DARWIN_ART_FD_CLOEXEC = 1,
@@ -211,6 +238,23 @@ DarwinArtFdBrokerStatus darwin_art_fd_broker_get_kind(DarwinArtFdBroker *broker,
 DarwinArtFdBrokerStatus
 darwin_art_fd_broker_export_host_fd(DarwinArtFdBroker *broker, int guest_fd,
                                     int *host_fd, DarwinArtFdIoResult *result);
+// Acquires the exact open-file description once, invokes |operation| with a
+// copied snapshot without the broker mutex, and returns an opaque pin only
+// when the operation succeeds. The pin keeps the description active across
+// logical close/dup2 until release; expected_owner must match exactly.
+DarwinArtFdBrokerStatus darwin_art_fd_broker_retain_description(
+    DarwinArtFdBroker *broker, int guest_fd,
+    DarwinArtFdOwnerHandle expected_owner,
+    DarwinArtFdDescriptionOperationV1 operation, void *operation_context,
+    DarwinArtFdDescriptionPin **pin, DarwinArtFdIoResult *result);
+DarwinArtFdBrokerStatus
+darwin_art_fd_broker_release_description(DarwinArtFdBroker *broker,
+                                         DarwinArtFdDescriptionPin *pin);
+DarwinArtFdBrokerStatus darwin_art_fd_broker_retain_exported_description(
+    DarwinArtFdBroker *broker, int guest_fd,
+    DarwinArtFdRetainedExportOperationV1 operation,
+    DarwinArtFdRetainedExportReleaseV1 release_export, void *operation_context,
+    DarwinArtFdDescriptionPin **pin, DarwinArtFdIoResult *result);
 DarwinArtFdBrokerStatus darwin_art_fd_broker_close(DarwinArtFdBroker *broker,
                                                    int guest_fd,
                                                    DarwinArtFdIoResult *result);

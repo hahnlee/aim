@@ -37,24 +37,33 @@
 #include "runtime_hwui_probe.h"
 #include "runtime_elf_probe.h"
 #include "runtime_abi_probe.h"
-#include "runtime_process_state.h"
-#include "runtime_process_options.h"
+#include "../runtime/art/process_state.h"
+#include "../runtime/embedding/process_config.h"
+#include "runtime_fixture_options.h"
+#include "process/host_services.h"
 #include "runtime_acceptance_phases.h"
-#include "runtime_jni_scope.h"
+#include "jni/scoped_local_frame.h"
 #include "runtime_frame_probe.h"
 #include "runtime_graphics_probe.h"
 #include "runtime_graphics_gpu.h"
-#include "runtime_graphics_session.h"
+#include "graphics_fixture_state.h"
+#include "../runtime/embedding/graphics_session.h"
 #include "runtime_graphics_phase.h"
 #include "runtime_jni_acceptance_probe.h"
-#include "runtime_registration_phase.h"
+#include "runtime_registration_fixture.h"
+#if !defined(DARWIN_ART_REAL_GRAPHICS)
+#include "headless_graphics_fixture_natives.h"
+#include "headless_resources_fixture_natives.h"
+#endif
+#include "../runtime/art/native_registration.h"
+#include "../runtime/art/system_class_loader.h"
 #include "../runtime/framework/app/process_entry.h"
 #include "../runtime/framework/system/process_entry.h"
 #include "runtime_upstream_test.h"
 #include "surfaceflinger/service_darwin.h"
 #include "runtime_app_bootstrap.h"
 #include "runtime_app_presentation.h"
-#include "darwin_media_codec.h"
+#include "media_codec_surface_fixture.h"
 #include "handle_scope-inl.h"
 #include "interpreter/unstarted_runtime.h"
 #include "jni/java_vm_ext.h"
@@ -76,8 +85,6 @@
 #include "runtime_apk_graph.h"
 #endif
 
-extern "C" int darwin_art_install_context_loader(JNIEnv* env,
-                                                   jobject app_loader);
 extern "C" bool darwin_art_register_upstream_arttest(JNIEnv* env,
                                                        jclass harness);
 
@@ -119,20 +126,54 @@ bool ConfigureAndroidLogTags() {
   return true;
 }
 
+#if !defined(DARWIN_ART_REAL_GRAPHICS)
+bool RegisterHeadlessFixtureNatives(JNIEnv* env) {
+  return darwin_art_headless_fixture::RegisterGraphicsNatives(env) &&
+         darwin_art_headless_fixture::RegisterResourceNatives(env);
+}
+#endif
+
 jstring NativeResolveDaemonPackage(JNIEnv* env, jclass, jstring package_name) {
   return darwin_art::framework::pm::QueryInstalledRecord(
       env, std::getenv("DARWIN_ART_PROFILE_SOCKET"), package_name);
 }
 
+class FixtureGraphicsCleanupOnFailure final {
+ public:
+  explicit FixtureGraphicsCleanupOnFailure(art::Thread* owner)
+      : owner_(owner) {}
+
+  FixtureGraphicsCleanupOnFailure(
+      const FixtureGraphicsCleanupOnFailure&) = delete;
+  FixtureGraphicsCleanupOnFailure& operator=(
+      const FixtureGraphicsCleanupOnFailure&) = delete;
+
+  void MarkSuccess() { succeeded_ = true; }
+
+  ~FixtureGraphicsCleanupOnFailure() {
+    if (succeeded_ || owner_ == nullptr || art::Thread::Current() != owner_) {
+      return;
+    }
+    art::ScopedObjectAccess soa(owner_);
+    JNIEnv* env = owner_->GetJniEnv();
+    if (env != nullptr) {
+      darwin_art_graphics_fixture::ClearAllProbeCanvasState(env);
+    }
+  }
+
+ private:
+  art::Thread* owner_ = nullptr;
+  bool succeeded_ = false;
+};
 
 }  // namespace
 
 extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
     const darwin_art_process_config_t* config,
     darwin_art_process_result_t* run_result) {
-  darwin_art_process::ProcessConfigBounds config_bounds;
+  darwin_art::embedding::ProcessConfigBounds config_bounds;
   std::string config_error;
-  const int config_status = darwin_art_process::ValidateProcessConfig(
+  const int config_status = darwin_art::embedding::ValidateProcessConfig(
       config, run_result, &config_bounds, &config_error);
   if (config_status != 0) {
     std::cerr << "darwin_art_run_process: " << config_error << "\n";
@@ -157,7 +198,7 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
                   sizeof(config->host_services)
           ? config->host_services
           : nullptr;
-  if (!darwin_art_process::record_host_services(host_services)) {
+  if (!darwin_art::process::InstallHostServices(host_services)) {
     std::cerr << "darwin_art_run_process: invalid host-services sidecar\n";
     return 64;
   }
@@ -176,50 +217,58 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
       config->graphics_session_context);
   darwin_art_process::record_graphics_state(graphics_state);
   darwin_art_process::ScopedRunBoundary process_boundary;
-  darwin_art_process::ProcessOptions process_options;
+  darwin_art::embedding::ProcessConfigOptions process_config;
+  darwin_art_process::FixtureOptions fixture_options;
   std::string options_error;
-  const int options_status =
-      darwin_art_process::LoadProcessOptions(&process_options, &options_error);
-  if (options_status != 0) {
+  const int process_config_status =
+      darwin_art::embedding::LoadProcessConfig(&process_config, &options_error);
+  if (process_config_status != 0) {
     std::cerr << options_error << "\n";
-    return options_status;
+    return process_config_status;
   }
-  const char* elf_fixture_path = process_options.elf_fixture_path.c_str();
-  const char* generic_elf_path = process_options.generic_elf_path.c_str();
-  const char* apk_elf_path = process_options.apk_elf_path.c_str();
-  const char* apk_sha256 = process_options.apk_sha256.c_str();
-  const char* apk_root_sha256 = process_options.apk_root_sha256.c_str();
-  const char* direct_apk_path = process_options.direct_apk_path.c_str();
-  const char* direct_apk_root = process_options.direct_apk_root.c_str();
+  const int fixture_options_status =
+      darwin_art_process::LoadRuntimeFixtureOptions(&fixture_options,
+                                                    &options_error);
+  if (fixture_options_status != 0) {
+    std::cerr << options_error << "\n";
+    return fixture_options_status;
+  }
+  const char* elf_fixture_path = fixture_options.elf_fixture_path.c_str();
+  const char* generic_elf_path = fixture_options.generic_elf_path.c_str();
+  const char* apk_elf_path = fixture_options.apk_elf_path.c_str();
+  const char* apk_sha256 = fixture_options.apk_sha256.c_str();
+  const char* apk_root_sha256 = fixture_options.apk_root_sha256.c_str();
+  const char* direct_apk_path = fixture_options.direct_apk_path.c_str();
+  const char* direct_apk_root = fixture_options.direct_apk_root.c_str();
   const char* libcxx_collections_path =
-      process_options.libcxx_collections_path.c_str();
-  const char* libcxx_exception_path = process_options.libcxx_exception_path.c_str();
-  const char* tls_fixture_path = process_options.tls_fixture_path.c_str();
-  const char* network_fixture_path = process_options.network_fixture_path.c_str();
-  const char* apk_app_package = process_options.apk_app_package.c_str();
-  const char* apk_app_activity = process_options.apk_app_activity.c_str();
-  const char* apk_app_descriptor = process_options.apk_app_descriptor.c_str();
-  const char* apk_app_support_dex = process_options.apk_app_support_dex.c_str();
-  const char* apk_app_native_path = process_options.apk_app_native_path.c_str();
-  const char* framework_res_apk = process_options.framework_res_apk.c_str();
-  const bool run_elf_jni_fixture = process_options.run_elf_jni_fixture;
-  const bool run_generic_elf = process_options.run_generic_elf;
-  const bool run_apk_elf = process_options.run_apk_elf;
-  const bool run_direct_apk = process_options.run_direct_apk;
-  const bool run_libcxx_acceptance = process_options.run_libcxx_acceptance;
-  const bool run_tls_acceptance = process_options.run_tls_acceptance;
-  const bool run_network_acceptance = process_options.run_network_acceptance;
+      fixture_options.libcxx_collections_path.c_str();
+  const char* libcxx_exception_path = fixture_options.libcxx_exception_path.c_str();
+  const char* tls_fixture_path = fixture_options.tls_fixture_path.c_str();
+  const char* network_fixture_path = fixture_options.network_fixture_path.c_str();
+  const char* apk_app_package = process_config.apk_app_package.c_str();
+  const char* apk_app_activity = process_config.apk_app_activity.c_str();
+  const char* apk_app_descriptor = process_config.apk_app_descriptor.c_str();
+  const char* apk_app_support_dex = process_config.apk_app_support_dex.c_str();
+  const char* apk_app_native_path = process_config.apk_app_native_path.c_str();
+  const char* framework_res_apk = process_config.framework_res_apk.c_str();
+  const bool run_elf_jni_fixture = fixture_options.run_elf_jni_fixture;
+  const bool run_generic_elf = fixture_options.run_generic_elf;
+  const bool run_apk_elf = fixture_options.run_apk_elf;
+  const bool run_direct_apk = fixture_options.run_direct_apk;
+  const bool run_libcxx_acceptance = fixture_options.run_libcxx_acceptance;
+  const bool run_tls_acceptance = fixture_options.run_tls_acceptance;
+  const bool run_network_acceptance = fixture_options.run_network_acceptance;
   const bool has_apk_app_identity_environment =
-      process_options.has_apk_app_identity_environment;
-  const bool run_apk_app = process_options.run_apk_app;
+      process_config.has_apk_app_identity_environment;
+  const bool run_apk_app = process_config.run_apk_app;
   const bool run_system_server =
       run_apk_app && std::getenv("DARWIN_ART_SYSTEM_SERVER_MODE") != nullptr;
-  const bool run_framework_button = process_options.run_framework_button;
-  const bool use_framework_resources = process_options.use_framework_resources;
-  const jint window_scale = process_options.window_scale;
+  const bool run_framework_button = fixture_options.run_framework_button;
+  const bool use_framework_resources = process_config.use_framework_resources;
+  const jint window_scale = process_config.window_scale;
   constexpr jint kApkFrameWidth = 360;
   constexpr jint kApkFrameHeight = 640;
-  const bool expect_apk_widgets = process_options.expect_apk_widgets;
+  const bool expect_apk_widgets = run_apk_app && fixture_options.expect_apk_widgets;
 
   // Android's native launchers initialize libbase logging before creating the
   // VM. Honor the same global ANDROID_LOG_TAGS contract so ART DEBUG lifecycle
@@ -620,13 +669,13 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
   JNIEnv* env = self->GetJniEnv();
 
   process_boundary.set_art_thread(self);
+  FixtureGraphicsCleanupOnFailure fixture_cleanup(self);
   if (config->provider_acquire != nullptr) {
     darwin_art::providers::darwin_art_provider_install_hooks(
         config->provider_context, config->provider_acquire,
         config->provider_release);
-    darwin_art_process::record_provider_hooks_installed();
   }
-  return [&]() -> int32_t {
+  const int32_t process_status = [&]() -> int32_t {
 
   art::interpreter::UnstartedRuntime::Initialize();
   art::ScopedObjectAccess soa(self);
@@ -640,9 +689,26 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
   art::ClassLinker* class_linker = art::Runtime::Current()->GetClassLinker();
   art::StackHandleScope<32> hs(self);
   const int runtime_start_status =
-      darwin_art_registration_phase::start(env, self);
+      darwin_art::runtime_art::StartNativeRegistration(env, self);
   if (runtime_start_status != 0) {
     return runtime_start_status;
+  }
+  // Fixture ownership is a compile-time property, never a product selector.
+#if defined(DARWIN_ART_REAL_GRAPHICS)
+  constexpr bool headless_fixture = false;
+#else
+  constexpr bool headless_fixture = true;
+#endif
+#if !defined(DARWIN_ART_REAL_GRAPHICS)
+  if (headless_fixture && !RegisterHeadlessFixtureNatives(env)) {
+    std::cerr << "ART headless fixture: native registration failed\n";
+    return 35;
+  }
+#endif
+  const int fixture_registration_status =
+      darwin_art_registration_fixture::run_checks(env);
+  if (fixture_registration_status != 0) {
+    return fixture_registration_status;
   }
   // Registration completes ART's minimal-start phase, including the JIT
   // creation point. Observe the effective state here rather than immediately
@@ -686,8 +752,7 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
       apk_app_support_dex, apk_app_native_path, activity_descriptor,
       run_direct_apk, direct_apk_path,
       run_elf_jni_fixture, run_network_acceptance,
-      darwin_art::GetFrameworkGraphicsBackend() ==
-          darwin_art::FrameworkGraphicsBackend::kProbeCanvas,
+      headless_fixture,
       &app_classes);
   if (app_status != 0) {
     std::cerr << "ART application class load failed status=" << app_status
@@ -718,7 +783,7 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
     return 39;
   }
   if (std::getenv("DARWIN_ART_TEST_MEDIA_CODEC_SURFACE") != nullptr &&
-      !darwin_art::VerifyDarwinMediaCodecSurfaceLifecycle(env)) {
+      !darwin_art::media_fixture::VerifyMediaCodecSurfaceLifecycle(env)) {
     std::cerr << "ART Android MediaCodec: output Surface acceptance failed\n";
     return 40;
   }
@@ -808,11 +873,12 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
     return 21;
   }
 
-  const int registration_status = darwin_art_registration_phase::finish(
+  const int registration_status = darwin_art_registration_fixture::finish(
       {.env = env,
        .self = self,
        .app_loader_ref = app_loader_ref,
        .probe_canvas_class = probe_canvas_class,
+       .headless_fixture = headless_fixture,
        .graphics_state = graphics_state});
   if (registration_status != 0) {
     return registration_status;
@@ -825,7 +891,7 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
   const bool managed_process_native_path =
       run_apk_app || std::getenv("DARWIN_ART_UPSTREAM_MAIN") != nullptr;
   if (managed_process_native_path &&
-      !process_options.apk_app_native_path.empty()) {
+      !process_config.apk_app_native_path.empty()) {
     if (darwin_art_app::install_native_library_path(
             env, app_loader_ref, apk_app_native_path) != 0) {
       std::cerr << "ART Android APK: PathClassLoader native path setup failed\n";
@@ -1015,18 +1081,18 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
         env, self, activity_instance, probe_activity_class, probe_context_class,
         probe_resources_class, probe_view_class, probe_canvas_class,
         content_root_class, package_manager, true, use_framework_resources,
-        expect_apk_widgets, !process_options.apk_app_native_path.empty(),
+        expect_apk_widgets, !process_config.apk_app_native_path.empty(),
         run_framework_button, window_scale, framework_res_apk, apk_app_package,
-        apk_app_activity, process_options.apk_app_resource_apk.c_str(),
+        apk_app_activity, process_config.apk_app_resource_apk.c_str(),
         graphics_state);
   } else {
     presentation_status = darwin_art_presentation::run(
         env, self, activity_instance, probe_activity_class, probe_context_class,
         probe_resources_class, probe_view_class, probe_canvas_class,
         content_root_class, package_manager, false, use_framework_resources,
-        expect_apk_widgets, !process_options.apk_app_native_path.empty(),
+        expect_apk_widgets, !process_config.apk_app_native_path.empty(),
         run_framework_button, window_scale, framework_res_apk, apk_app_package,
-        apk_app_activity, process_options.apk_app_resource_apk.c_str(),
+        apk_app_activity, process_config.apk_app_resource_apk.c_str(),
         graphics_state);
   }
   if (presentation_status != 0) {
@@ -1086,4 +1152,8 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
   run_result->frame_height = static_cast<uint32_t>(frame_dimensions.height);
   return 0;
   }();
+  if (process_status == 0) {
+    fixture_cleanup.MarkSuccess();
+  }
+  return process_status;
 }

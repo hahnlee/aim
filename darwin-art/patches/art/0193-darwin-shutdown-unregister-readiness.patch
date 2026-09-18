@@ -1,0 +1,13 @@
+--- a/runtime/thread_list.h
++++ b/runtime/thread_list.h
+@@ -237,6 +237,11 @@
+   size_t Size() REQUIRES(Locks::thread_list_lock_) { return list_.size(); }
+ 
++  // Embedding readiness must include unregister operations already removed
++  // from list_. The actual ART shutdown synchronization remains authoritative.
++  bool HasUnregisteringThreads() const REQUIRES(Locks::thread_list_lock_) {
++    return unregistering_count_ != 0;
++  }
+   void CheckOnly1Thread(Thread* self) REQUIRES(!Locks::thread_list_lock_) {
+     MutexLock mu(self, *Locks::thread_list_lock_);
+     CHECK_EQ(Size(), 1u);

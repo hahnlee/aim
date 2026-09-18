@@ -1,0 +1,105 @@
+diff --git a/include/core/SkPaint.h b/include/core/SkPaint.h
+index 0000000..0000000 100644
+--- a/include/core/SkPaint.h
++++ b/include/core/SkPaint.h
+@@ -52,3 +52,6 @@
+     */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     SkPaint();
+ 
+@@ -99,3 +102,6 @@
+     */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     ~SkPaint();
+ 
+@@ -240,3 +246,6 @@
+     */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void setColor(SkColor color);
+ 
+@@ -473,3 +482,6 @@
+     */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void setBlendMode(SkBlendMode mode);
+ 
+diff --git a/include/core/SkCanvas.h b/include/core/SkCanvas.h
+index 0000000..0000000 100644
+--- a/include/core/SkCanvas.h
++++ b/include/core/SkCanvas.h
+@@ -594,3 +594,6 @@
+     */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     int save();
+ 
+@@ -618,3 +621,6 @@
+     */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     int saveLayer(const SkRect* bounds, const SkPaint* paint);
+ 
+@@ -869,3 +875,6 @@
+     */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void restore();
+ 
+@@ -906,3 +915,6 @@
+     */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void translate(SkScalar dx, SkScalar dy);
+ 
+@@ -1012,3 +1024,6 @@
+     */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void clipRect(const SkRect& rect, SkClipOp op, bool doAntiAlias);
+ 
+@@ -1238,3 +1253,6 @@
+     */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void drawColor(const SkColor4f& color, SkBlendMode mode = SkBlendMode::kSrcOver);
+ 
+@@ -1394,3 +1412,6 @@
+     */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void drawRect(const SkRect& rect, const SkPaint& paint);
+ 
+@@ -1480,3 +1501,6 @@
+     */
++#if defined(__APPLE__)
++    __attribute__((visibility("default")))
++#endif
+     void drawCircle(SkScalar cx, SkScalar cy, SkScalar radius, const SkPaint& paint);
+ 
+diff --git a/include/core/SkColor.h b/include/core/SkColor.h
+index 0000000..0000000 100644
+--- a/include/core/SkColor.h
++++ b/include/core/SkColor.h
+@@ -437,3 +437,7 @@
+ 
+-template <> SK_API SkColor4f SkColor4f::FromColor(SkColor);
++#if defined(__APPLE__)
++template <> __attribute__((visibility("default"))) SkColor4f SkColor4f::FromColor(SkColor);
++#else
++template <> SK_API SkColor4f SkColor4f::FromColor(SkColor);
++#endif
+ template <> SK_API SkColor   SkColor4f::toSkColor() const;

@@ -1,9 +1,9 @@
 #include "runtime_acceptance_phases.h"
+#include "runtime_acceptance_state.h"
 
 #include <iostream>
 
 #include "runtime_network_probe.h"
-#include "runtime_process_state.h"
 
 namespace darwin_art_network_phase {
 
@@ -13,7 +13,7 @@ int run(JNIEnv* env, const char* fixture_path, jobject app_loader,
                                       fixture_class) != 0) {
     return 47;
   }
-  darwin_art_process::record_network_elf_loaded();
+  darwin_art_acceptance::record_network_elf_loaded();
   BoundedLoopbackHttpServer server;
   if (!server.Start()) {
     std::cerr << "ART Android network loopback listener failed\n";

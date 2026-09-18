@@ -3,16 +3,15 @@ use crate::ProfileError;
 use crate::process_incarnation::ProcessIncarnation;
 use std::ffi::c_void;
 use std::io;
-use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 
 pub(crate) fn verify_registration(
     stream: &UnixStream,
     claimed: u32,
 ) -> Result<ProcessIncarnation, ProfileError> {
-    let before = ProcessIncarnation::read(claimed)?;
+    let before = ProcessIncarnation::read_live(claimed)?;
     verify_relationship(stream, claimed)?;
-    if ProcessIncarnation::read(claimed)? != before {
+    if ProcessIncarnation::read_live(claimed)? != before {
         return Err(ProfileError::Daemon(
             "process changed during authentication".into(),
         ));
@@ -21,32 +20,11 @@ pub(crate) fn verify_registration(
 }
 
 pub(crate) fn identity(stream: &UnixStream) -> Result<(u32, ProcessIncarnation), ProfileError> {
-    let pid = peer_pid(stream)?;
-    Ok((pid, ProcessIncarnation::read(pid)?))
+    crate::peer_credentials::identity(stream)
 }
 
 fn peer_pid(stream: &UnixStream) -> Result<u32, ProfileError> {
-    let mut peer: i32 = 0;
-    let mut length = size_of::<i32>() as u32;
-    // SDK sys/un.h: SOL_LOCAL=0, LOCAL_PEERPID=2. Never use packet-supplied PID.
-    if unsafe {
-        getsockopt(
-            stream.as_raw_fd(),
-            0,
-            2,
-            (&mut peer as *mut i32).cast(),
-            &mut length,
-        )
-    } != 0
-    {
-        return Err(io::Error::last_os_error().into());
-    }
-    if length != size_of::<i32>() as u32 || peer <= 0 {
-        return Err(ProfileError::Daemon(
-            "invalid process registration identity".into(),
-        ));
-    }
-    Ok(peer as u32)
+    identity(stream).map(|(pid, _)| pid)
 }
 
 fn verify_relationship(stream: &UnixStream, claimed: u32) -> Result<(), ProfileError> {
@@ -91,7 +69,6 @@ fn verify_relationship(stream: &UnixStream, claimed: u32) -> Result<(), ProfileE
 }
 
 unsafe extern "C" {
-    fn getsockopt(fd: i32, level: i32, name: i32, value: *mut c_void, length: *mut u32) -> i32;
     fn proc_listpids(kind: u32, info: u32, buffer: *mut c_void, size: i32) -> i32;
 }
 

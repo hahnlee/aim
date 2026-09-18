@@ -4,7 +4,7 @@
 //! compiler orchestration cannot silently change which upstream files are
 //! copied or patched.
 
-pub(super) const RUNTIME_SHADOW_IDENTITY_VERSION: &str = "runtime-shadow-v45";
+pub(super) const RUNTIME_SHADOW_IDENTITY_VERSION: &str = "runtime-shadow-v50";
 
 pub(super) const PATCHED_RUNTIME_SOURCES: &[&str] = &[
     "runtime.cc",
@@ -31,6 +31,8 @@ pub(super) const PATCHED_RUNTIME_SOURCES: &[&str] = &[
     "gc/space/image_space.cc",
     "entrypoints/quick/quick_alloc_entrypoints.cc",
     "entrypoints/quick/quick_entrypoints.h",
+    "entrypoints/runtime_asm_entrypoints.h",
+    "entrypoints/quick/quick_default_externs.h",
     "entrypoints/quick/quick_entrypoints_list.h",
     "entrypoints/quick/callee_save_frame.h",
     "entrypoints/quick/quick_trampoline_entrypoints.cc",
@@ -55,6 +57,22 @@ pub(super) const PATCHED_RUNTIME_SOURCES: &[&str] = &[
     "thread.cc",
     "thread.h",
     "thread_list.cc",
+    "thread_list.h",
+    "interpreter/mterp/nterp.h",
+    "interpreter/interpreter.h",
+    "interpreter/shadow_frame.h",
+    "interpreter/unstarted_runtime.cc",
+    "interpreter/interpreter_common.cc",
+    "parsed_options.h",
+    "jit/profiling_info.h",
+    "instrumentation.h",
+    "common_throws.h",
+    "ti/agent.h",
+    "jit/jit_code_cache.h",
+    "jit/jit.h",
+    "plugin.h",
+    "mirror/throwable.h",
+    "gc/heap.h",
     "trace.cc",
     "gc/collector/garbage_collector.cc",
     "gc/collector/mark_compact.cc",
@@ -78,6 +96,9 @@ pub(super) const PATCHED_RUNTIME_SOURCES: &[&str] = &[
 ];
 
 pub(super) const PATCHED_RUNTIME_PATCHES: &[&str] = &[
+    "patches/art/0037-darwin-shadow-frame-single-initialization.patch",
+    "patches/art/0074-darwin-interpreter-reference-copy.patch",
+    "patches/art/0113-darwin-unstarted-reference-arguments.patch",
     "patches/art/0006-darwin-standard-signal-set.patch",
     "patches/art/0007-darwin-thread-cpu-time.patch",
     "patches/art/0008-darwin-nonfutex-suspend-barrier.patch",
@@ -100,7 +121,6 @@ pub(super) const PATCHED_RUNTIME_PATCHES: &[&str] = &[
     "patches/art/0181-darwin-register-boot-oat-local-visitor.patch",
     "patches/art/0025-darwin-morecore-diagnostics.patch",
     "patches/art/0027-darwin-string-abi-overlay.patch",
-    "patches/art/0028-darwin-minimal-runtime-start.patch",
     "patches/art/0029-darwin-arm64-native-stack-pcs.patch",
     "patches/art/0030-darwin-large-object-bitmap-window.patch",
     "patches/art/0031-darwin-class-loader-native-path-elements.patch",
@@ -113,7 +133,6 @@ pub(super) const PATCHED_RUNTIME_PATCHES: &[&str] = &[
     "patches/art/0067-homogeneous-compaction-jit-roots.patch",
     "patches/art/0070-darwin-imt-conflict-receiver.patch",
     "patches/art/0072-darwin-polymorphic-runtime-boundary.patch",
-    "patches/art/0041-darwin-jit-startup.patch",
     "patches/art/0042-darwin-compressed32-jit-gc-boundaries.patch",
     "patches/art/0046-darwin-compressed32-managed-return-boundaries.patch",
     "patches/art/0048-darwin-compressed32-generic-jni-return.patch",
@@ -129,29 +148,23 @@ pub(super) const PATCHED_RUNTIME_PATCHES: &[&str] = &[
     "patches/art/0132-darwin-sigbus-user-sigsegv-chain.patch",
     "patches/art/0106-darwin-runtime-virtual-fd-export.patch",
     "patches/art/0107-darwin-embedded-openjdkjvmti-plugin.patch",
-    "patches/art/0108-darwin-minimal-start-runtime-phases.patch",
     "patches/art/0109-darwin-null-cmdline-sigquit.patch",
     "patches/art/0110-darwin-native-allocation-accounting.patch",
     "patches/art/0111-darwin-android-trace-clock.patch",
     "patches/art/0114-darwin-image-logical-address-window.patch",
     "patches/art/0115-darwin-generic-jni-remote-unwind.patch",
     "patches/art/0116-darwin-native-bridge-preinitialize.patch",
-    "patches/art/0117-darwin-minimal-start-native-bridge.patch",
-    "patches/art/0118-darwin-minimal-start-system-loader.patch",
     "patches/art/0119-darwin-native-bridge-signals.patch",
     "patches/art/0120-darwin-hprof-private-path.patch",
     "patches/art/0125-darwin-runtime-image-logical-addresses.patch",
     "patches/art/0126-darwin-backtrace-collector.patch",
     "patches/art/0143-darwin-compiled-jni-frame-publication.patch",
     "patches/art/0150-darwin-oat-quick-method-header-image-identity.patch",
-    "patches/art/0151-darwin-embedded-openjdk-loader.patch",
-    "patches/art/0152-darwin-minimal-start-tail.patch",
     "patches/art/0153-darwin-boot-oat-logical-location.patch",
     "patches/art/0155-darwin-allocation-entrypoint-class-reference-boundary.patch",
     "patches/art/0156-darwin-dex-cookie-identity-trace.patch",
     "patches/art/0157-darwin-define-class-dex-registration-trace.patch",
     "patches/art/0158-darwin-register-dex-trace.patch",
-    "patches/art/0160-darwin-libcore-before-early-clinits.patch",
     "patches/art/0164-darwin-clone-dex-for-child-loader.patch",
     "patches/art/0165-darwin-publish-aot-unwind-maps.patch",
     "patches/art/0166-darwin-oat-quick-code-host-address.patch",
@@ -163,6 +176,9 @@ pub(super) const PATCHED_RUNTIME_PATCHES: &[&str] = &[
     "patches/art/0173-darwin-publish-jit-method-ranges.patch",
     "patches/art/0174-darwin-publish-oat-method-ranges.patch",
     "patches/art/0175-darwin-publish-native-registration.patch",
+    "patches/art/0190-darwin-runtime-start-boot-native-provider.patch",
+    "patches/art/0191-darwin-native-client-visibility.patch",
+    "patches/art/0193-darwin-shutdown-unregister-readiness.patch",
 ];
 
 #[cfg(test)]
@@ -199,7 +215,19 @@ mod tests {
         assert!(
             !PATCHED_RUNTIME_PATCHES.contains(&"patches/art/0039-darwin-jit-primitive-gate.patch")
         );
-        assert!(PATCHED_RUNTIME_PATCHES.contains(&"patches/art/0041-darwin-jit-startup.patch"));
+        assert!(
+            PATCHED_RUNTIME_PATCHES
+                .contains(&"patches/art/0190-darwin-runtime-start-boot-native-provider.patch")
+        );
+        assert!(!PATCHED_RUNTIME_PATCHES.contains(&"patches/art/0041-darwin-jit-startup.patch"));
+        assert!(
+            PATCHED_RUNTIME_PATCHES
+                .contains(&"patches/art/0191-darwin-native-client-visibility.patch")
+        );
+        assert!(
+            !PATCHED_RUNTIME_PATCHES
+                .contains(&"patches/art/0192-darwin-native-client-public-entrypoints-arm64.patch")
+        );
         assert!(
             PATCHED_RUNTIME_PATCHES
                 .contains(&"patches/art/0042-darwin-compressed32-jit-gc-boundaries.patch")

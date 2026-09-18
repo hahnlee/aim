@@ -5,5 +5,17 @@ edition = "2024"
 publish = false
 build = "build.rs"
 
+[features]
+audit = []
+
+[lib]
+name = "bionic_float_conversion_facade"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bionic-float-conversion-facade"
+path = "src/main.rs"
+required-features = ["audit"]
+
 [dependencies]
 darwin-art-elf-loader = { path = "../../crates/darwin-art-elf-loader" }

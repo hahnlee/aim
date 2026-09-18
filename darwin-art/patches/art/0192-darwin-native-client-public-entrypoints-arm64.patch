@@ -1,0 +1,38 @@
+diff --git a/runtime/arch/arm64/asm_support_arm64.S b/runtime/arch/arm64/asm_support_arm64.S
+--- a/runtime/arch/arm64/asm_support_arm64.S
++++ b/runtime/arch/arm64/asm_support_arm64.S
+@@ -114,7 +114,25 @@
+ .macro ENTRY name
+     ENTRY_ALIGNED \name, 16
+ .endm
+ 
++.macro ENTRY_PUBLIC_ALIGNED name, alignment
++#if defined(__APPLE__)
++    .global _\name
++    .balign \alignment
++_\name:
++#else
++    .type \name, #function
++    .global \name
++    .balign \alignment
++\name:
++#endif
++    .cfi_startproc
++.endm
++
++.macro ENTRY_PUBLIC name
++    ENTRY_PUBLIC_ALIGNED \name, 16
++.endm
++
+ .macro END name
+     .cfi_endproc
+ #if !defined(__APPLE__)
+diff --git a/runtime/arch/arm64/quick_entrypoints_arm64.S b/runtime/arch/arm64/quick_entrypoints_arm64.S
+--- a/runtime/arch/arm64/quick_entrypoints_arm64.S
++++ b/runtime/arch/arm64/quick_entrypoints_arm64.S
+@@ -713,1 +713,1 @@
+-ENTRY art_quick_osr_stub
++ENTRY_PUBLIC art_quick_osr_stub
+@@ -1888,1 +1888,1 @@
+-ENTRY art_quick_to_interpreter_bridge
++ENTRY_PUBLIC art_quick_to_interpreter_bridge

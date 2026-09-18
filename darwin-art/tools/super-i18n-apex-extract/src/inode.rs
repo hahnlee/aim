@@ -1,7 +1,7 @@
 //! EROFS on-disk inode decoding; never projects Darwin file ownership.
 //! Layout reference: Linux v6.12 fs/erofs/erofs_fs.h,
 //! erofs_inode_compact and erofs_inode_extended.
-use crate::{Result, add, invalid, le16, le32, le64, mul};
+use crate::{add, invalid, le16, le32, le64, mul, Result};
 
 #[derive(Clone, Debug)]
 pub(super) struct Inode {
@@ -19,7 +19,7 @@ pub(super) struct Inode {
 
 impl Inode {
     pub fn persist(&self, output: &std::fs::File) -> std::io::Result<()> {
-        use darwin_art_fs_broker::inode_metadata::{AndroidInodeMetadata, write_new};
+        use darwin_art_fs_broker::inode_metadata::{write_new, AndroidInodeMetadata};
         write_new(
             output,
             AndroidInodeMetadata {

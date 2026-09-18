@@ -15,6 +15,7 @@ mod platform {
     pub(crate) mod process_credentials;
     pub(crate) mod process_filesystem;
     pub(crate) mod process_snapshot;
+    pub(crate) mod scm_endpoint;
     pub(crate) mod surface;
 
     pub use abi::BinderBrokerSymbols;

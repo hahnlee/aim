@@ -49,9 +49,9 @@ pub(super) fn adapter_jobs(
             && matches!(
                 adapter_source,
                 "darwin_framework_natives.cc"
-                    | "darwin_framework_render_node_natives.cc"
                     | "darwin_framework_resource_registration.cc"
                     | "darwin_framework_graphics_runtime.cc"
+                    | "darwin_runtime_elf_resolver.cc"
             )
         {
             adapter_command
@@ -59,7 +59,22 @@ pub(super) fn adapter_jobs(
                 .arg("-I")
                 .arg(&staged.libcutils_include);
         }
-        if adapter_source == "darwin_framework_natives.cc" {
+        if adapter_source == "loader/graphics_ndk_symbols.cc" {
+            adapter_command
+                .arg("-I")
+                .arg(staged.root.join("_aosp/frameworks/native/include"));
+        }
+        if adapter_source == "window/composition_fence_monitor.cc" {
+            adapter_command.arg("-I").arg(
+                staged
+                    .root
+                    .join("tools/bionic-socket-broker-adapter/include"),
+            );
+        }
+        if matches!(
+            adapter_source,
+            "darwin_framework_natives.cc" | "window/surface_jni.cc"
+        ) {
             // Surface.java's nativeLockCanvas contract includes the pinned
             // NDK Canvas ABI from HWUI's apex export set in every flavor.
             adapter_command.arg("-I").arg(
@@ -77,6 +92,8 @@ pub(super) fn adapter_jobs(
                 | "binder/context_manager.cc"
                 | "binder/platform_syscalls.cc"
                 | "binder/service_endpoint.cc"
+                | "binder/native_endpoint_lifetime.cc"
+                | "../runtime/framework/wm/root_key_server_jni.cc"
                 | "../runtime/framework/app/kernel_binder_client.cc"
                 | "../runtime/framework/system/kernel_binder_service.cc"
         ) {
@@ -120,7 +137,22 @@ pub(super) fn adapter_jobs(
                 .arg("-I")
                 .arg(staged.root.join("_build/os-constants/generated"));
         }
-        if adapter_source == "../runtime/framework/connectivity/network_path_platform.mm" {
+        if matches!(
+            adapter_source,
+            "../runtime/framework/connectivity/network_path_platform.mm"
+                | "../runtime/framework/wm/desktop_root_client_jni.mm"
+                | "filesystem/document_panel.mm"
+                | "window/desktop_root_events.mm"
+                | "window/desktop_root_target.mm"
+                | "window/desktop_root_surface.mm"
+                | "window/appkit_window_delegate.mm"
+                | "window/appkit_content_view.mm"
+                | "graphics/metal_display_backing.mm"
+                | "graphics/surface_backing_owner.mm"
+                | "graphics/scanout_diagnostic_capture.mm"
+        ) {
+            // These providers own strong/weak AppKit or Metal references. ARC is a
+            // resource-lifetime requirement, not merely a syntax preference.
             adapter_command.args(["-fobjc-arc", "-fblocks"]);
         }
         if adapter_source == "loader/android_dlwarning.cc" {
@@ -145,6 +177,9 @@ pub(super) fn adapter_jobs(
                 | "darwin_framework_animation_natives.cc"
                 | "darwin_android_asset_manager.cc"
                 | "darwin_android_platform.mm"
+                | "graphics/hardware_buffer_owner.mm"
+                | "looper/android_looper_owner.cc"
+                | "looper/android_choreographer_owner.cc"
                 | "darwin_android_native_window.cc"
                 | "darwin_android_sync.cc"
                 | "darwin_android_surface_texture.cc"
@@ -176,7 +211,8 @@ pub(super) fn adapter_jobs(
         }
         if matches!(
             adapter_source,
-            "filesystem/archive_filesystem.cc" | "process/procfs_jni.cc"
+            "filesystem/archive_filesystem.cc" | "filesystem/guest_config.cc"
+                | "filesystem/guest_file.cc" | "process/procfs_jni.cc"
         ) {
             for include in [
                 "tools/bionic-fs-facade/include",
@@ -185,6 +221,11 @@ pub(super) fn adapter_jobs(
             ] {
                 adapter_command.arg("-I").arg(staged.root.join(include));
             }
+        }
+        if adapter_source == "looper/android_looper_owner.cc" {
+            adapter_command
+                .arg("-I")
+                .arg(staged.root.join("tools/bionic-errno-tls/include"));
         }
         if adapter_source == "darwin_android_elf_image_registry.cc" {
             adapter_command.arg("-I").arg(

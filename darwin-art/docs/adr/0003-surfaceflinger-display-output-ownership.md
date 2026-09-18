@@ -24,9 +24,15 @@ scale. Producers must not apply a second macOS scale while choosing a target.
   registered display root. Historical descendant buffers are not display
   anchors. Missing ancestors, cycles, detached trees, and ambiguous output
   membership fail instead of selecting an arbitrary target.
-- A buffer transaction completes only when the selected output's Metal
-  composition completes. Structural commits remain target-independent and do
-  not masquerade as presentation fences.
+- Android transaction acceptance is target-independent. A commit receipt must
+  follow actual AOSP acceptance and retained-state publication, not merely
+  enqueue. Presentation is a separate outcome: an authenticated retired output
+  may leave a transaction committed without scheduling a new display frame.
+  Unknown targets or geometry mismatches are not authenticated retirement.
+- Present fences describe actual Metal composition; previous-buffer release
+  fences describe the exact prior submission occurrence's outstanding reads.
+  Neither enqueue acknowledgment nor absence of a current output proves safe
+  buffer reuse. Lost replies after submission remain unknown, not rejected.
 - The Darwin output boundary owns the IOSurface and backing extent. Android
   source crops and destinations remain in Android pixels until final output
   projection; AppKit scans out backing pixels without applying another Retina
@@ -48,3 +54,25 @@ This follows Android's guest contract and isolates the real macOS display
 provider, so it is not an architectural divergence from AOSP. The ADR records
 the Darwin provider boundary and the incremental path to explicit output
 registration.
+
+## Implementation gap verified 2026-09-18
+
+The current client still latches its registry before central submission. Physical
+Calculator close reproduces retired-target ESTALE followed by post-commit abort.
+The accepted correction separates prepared client state, central Android commit
+receipt, and optional Darwin presentation. It must preserve outstanding read
+fences per previous occurrence, including repeated use of the same buffer.
+This correction is not implemented merely by this ADR update. Output retirement
+must remain immediate; converting ESTALE to success or delaying retirement is
+not an ownership fix.
+
+Incremental implementation verified on 2026-09-18: protocol11 carries an explicit
+Committed receipt only after original AOSP acceptance/retained publication.
+TransactionReply owns duplicated CLOEXEC socket/completion-read descriptors;
+ingress returns after enqueue without waiting or shutting down its socket.
+Unresolved destruction is close-only (EOF/unknown); response writes are bounded,
+one-shot and SIGPIPE-protected outside the state mutex. Queue insertion failures
+keep original descriptors in ingress RAII until successful transfer. Both
+products, exact warm build and real Calculator click/keyboard interactions pass.
+This removes enqueue-as-commit acknowledgment; it does not implement prepared
+local state, no-output settlement or exact previous-read release fences.

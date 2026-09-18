@@ -1,14 +1,27 @@
 //! Platform boundary for Android WSI. Pixels stay in shared IOSurface storage.
-use super::*;
-
-pub(super) unsafe fn wsi_backend_raw_device_symbol(device: usize, name: &CStr) -> *mut c_void {
-    let address = unsafe { moltenvk_instance_symbol(c"vkGetDeviceProcAddr") };
-    if address.is_null() {
-        return ptr::null_mut();
-    }
-    let get: VulkanGetDeviceProcAddr = unsafe { std::mem::transmute(address) };
-    unsafe { get(device as *mut c_void, name.as_ptr()) }
-}
+use crate::vulkan_android_memory::{
+    forget_image_format, moltenvk_allocate_memory, moltenvk_bind_image_memory,
+    moltenvk_create_image, moltenvk_free_memory, moltenvk_get_android_hardware_buffer_properties,
+};
+use crate::vulkan_android_sync::{
+    moltenvk_create_semaphore, moltenvk_destroy_semaphore, moltenvk_get_semaphore_fd,
+    moltenvk_signal_wsi_acquire,
+};
+use crate::vulkan_backend::raw_device_symbol;
+use crate::vulkan_types::{
+    AHardwareBufferDesc, VulkanAndroidHardwareBufferProperties,
+    VulkanExternalMemoryImageCreateInfo, VulkanImageCreateInfo,
+    VulkanImportAndroidHardwareBufferInfo, VulkanMemoryAllocateInfo,
+    VulkanMemoryDedicatedAllocateInfo, VulkanSemaphoreCreateInfo, VulkanSemaphoreGetFdInfo,
+    VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID,
+    VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+    VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+    VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+    VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+};
+use crate::{darwin_art_android_platform_symbol, vulkan_acquire_fences};
+use std::ffi::c_void;
+use std::ptr;
 
 macro_rules! platform {
     ($name:literal, $ty:ty, $fail:expr) => {{
@@ -205,11 +218,9 @@ pub(super) unsafe fn wsi_backend_import_image(
     Ok((image as usize, memory as usize))
 }
 pub(super) unsafe fn wsi_backend_destroy_image(device: usize, image: usize, memory: usize) {
-    if let Some(images) = VULKAN_IMAGE_FORMATS.get() {
-        images.lock().unwrap().remove(&image);
-    }
+    forget_image_format(image);
     if image != 0 {
-        let address = unsafe { wsi_backend_raw_device_symbol(device, c"vkDestroyImage") };
+        let address = unsafe { raw_device_symbol(device, c"vkDestroyImage") };
         if !address.is_null() {
             let destroy: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void) =
                 unsafe { std::mem::transmute(address) };
@@ -277,7 +288,7 @@ pub(super) unsafe fn wsi_backend_present(
     waits: &[usize],
     completion: usize,
 ) -> Result<i32, i32> {
-    let address = unsafe { wsi_backend_raw_device_symbol(device, c"vkQueueSubmit") };
+    let address = unsafe { raw_device_symbol(device, c"vkQueueSubmit") };
     if address.is_null() {
         return Err(-3);
     }
@@ -330,7 +341,7 @@ pub(super) unsafe fn wsi_backend_present(
     }
 }
 pub(super) unsafe fn wsi_backend_wait_idle(device: usize) -> i32 {
-    let address = unsafe { wsi_backend_raw_device_symbol(device, c"vkDeviceWaitIdle") };
+    let address = unsafe { raw_device_symbol(device, c"vkDeviceWaitIdle") };
     if address.is_null() {
         return -3;
     }

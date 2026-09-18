@@ -88,7 +88,10 @@ fn dependency_fingerprint(
         dependency_hashes.push('\n');
     }
     Ok(Some(format!(
-        "cache-format=1\ncompiler={compiler_identity}\ncommand={command_description}\n{dependency_hashes}"
+        "cache-format=1\ncompiler={compiler_identity}\n{}command={command_description}\n{dependency_hashes}",
+        std::env::var("DARWIN_ART_SUPPORT_TOOLCHAIN_IDENTITY")
+            .map(|identity| format!("support-toolchain={identity}\n"))
+            .unwrap_or_default()
     )))
 }
 
@@ -249,6 +252,10 @@ pub(crate) fn link_with_cache(
 
 fn link_fingerprint(command: &Command, output: &Path) -> String {
     let mut digest = Sha256::new();
+    if let Ok(identity) = std::env::var("DARWIN_ART_SUPPORT_TOOLCHAIN_IDENTITY") {
+        digest.update(identity.as_bytes());
+        digest.update([0]);
+    }
     digest.update(command.get_program().to_string_lossy().as_bytes());
     digest.update([0]);
     let output = output.to_string_lossy();

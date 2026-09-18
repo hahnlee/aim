@@ -1,5 +1,7 @@
 #include "runtime_graphics_phase.h"
 
+#include "graphics_fixture_state.h"
+
 #include <cstddef>
 #include <iostream>
 #include <string>
@@ -135,8 +137,9 @@ int present_and_retain(darwin_art_graphics::GraphicsState* state,
   }
 
   if (retain_interactive &&
-      !darwin_art_graphics::retain_interactive_root(state, env, decor_view, width,
-                                                     height)) {
+      !darwin_art_graphics_fixture::retain_interactive_root(state, env,
+                                                            decor_view, width,
+                                                            height)) {
     std::cerr << "ART Android input: retaining DecorView failed\n";
     return 33;
   }

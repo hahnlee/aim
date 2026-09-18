@@ -11,13 +11,26 @@ final class IntentBindRecord {
     final String resolvedType;
     final long bindSequence;
     final ArrayList<ConnectionRecord> connections = new ArrayList<>();
+    final ServiceNotificationController.State notification =
+            new ServiceNotificationController.State();
+    int pendingBinds;
     boolean requested;
     boolean bindScheduled;
+    boolean unbindRequested;
     boolean unbindScheduled;
     boolean publicationReceived;
     boolean hasBound;
     boolean doRebind;
+    boolean bindCallbackPending;
+    boolean rebindCallbackPending;
     IBinder publishedBinder;
+
+    boolean hasAdmittedConnections() {
+        for (ConnectionRecord connection : connections) {
+            if (connection.admitted) return true;
+        }
+        return false;
+    }
 
     IntentBindRecord(ServiceRecord owner, Intent requestedIntent, String type, long sequence) {
         service = owner;

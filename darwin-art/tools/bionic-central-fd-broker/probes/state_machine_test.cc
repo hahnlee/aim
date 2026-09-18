@@ -362,6 +362,177 @@ void Expect(DarwinArtFdBrokerStatus actual, DarwinArtFdBrokerStatus expected) {
   assert(actual == expected);
 }
 
+struct DescriptionOperationContext {
+  DarwinArtFdBroker *broker = nullptr;
+  int guest_fd = -1;
+  uint64_t expected_object = 0;
+  bool close_during_operation = false;
+  bool fail = false;
+  size_t calls = 0;
+};
+
+intptr_t DescriptionOperation(void *context,
+                              const DarwinArtFdDescriptionSnapshotV1 *snapshot,
+                              int *android_errno) {
+  auto *operation = static_cast<DescriptionOperationContext *>(context);
+  assert(snapshot != nullptr);
+  assert(snapshot->abi_version == DARWIN_ART_FD_DESCRIPTION_SNAPSHOT_ABI_V1);
+  assert(snapshot->struct_size == sizeof(*snapshot));
+  assert(snapshot->object == operation->expected_object);
+  assert(snapshot->kind == DARWIN_ART_FD_FS_FILE);
+  assert(snapshot->status_flags == 0);
+  ++operation->calls;
+  if (operation->close_during_operation) {
+    DarwinArtFdIoResult close_result{};
+    Expect(darwin_art_fd_broker_close(operation->broker, operation->guest_fd,
+                                      &close_result),
+           DARWIN_ART_FD_BROKER_OK);
+    assert(close_result.value == 0 && close_result.android_errno == 0);
+    operation->guest_fd = -1;
+  }
+  if (operation->fail) {
+    *android_errno = 77;
+    return -1;
+  }
+  *android_errno = 0;
+  return static_cast<intptr_t>(snapshot->object);
+}
+
+bool WaitForClosed(Fake *fake, uint64_t object, bool closed) {
+  for (size_t attempt = 0; attempt < 100000; ++attempt) {
+    {
+      std::lock_guard lock(fake->mutex);
+      if (fake->objects.at(object).closed == closed)
+        return true;
+    }
+    std::this_thread::yield();
+  }
+  return false;
+}
+
+void CloseTestFd(DarwinArtFdBroker *broker, int fd) {
+  DarwinArtFdIoResult result{};
+  Expect(darwin_art_fd_broker_close(broker, fd, &result),
+         DARWIN_ART_FD_BROKER_OK);
+  assert(result.value == 0 && result.android_errno == 0);
+}
+
+void TestRetainedDescription(DarwinArtFdBroker *broker,
+                             DarwinArtFdOwnerHandle file_owner,
+                             DarwinArtFdOwnerHandle wrong_owner, Fake *fake) {
+  int logical_close_fd = -1;
+  Expect(
+      darwin_art_fd_broker_publish(broker, file_owner, 800, &logical_close_fd),
+      DARWIN_ART_FD_BROKER_OK);
+  DescriptionOperationContext logical_close{
+      broker, logical_close_fd, 800, true, false, 0};
+  DarwinArtFdDescriptionPin *pin = nullptr;
+  DarwinArtFdIoResult result{};
+  Expect(darwin_art_fd_broker_retain_description(
+             broker, logical_close_fd, file_owner, &DescriptionOperation,
+             &logical_close, &pin, &result),
+         DARWIN_ART_FD_BROKER_OK);
+  assert(pin != nullptr && result.value == 800 && result.android_errno == 0);
+  {
+    std::lock_guard lock(fake->mutex);
+    assert(!fake->objects.at(800).closed);
+  }
+  assert(darwin_art_fd_broker_destroy(broker) == DARWIN_ART_FD_BROKER_BUSY);
+  Expect(darwin_art_fd_broker_release_description(broker, pin),
+         DARWIN_ART_FD_BROKER_OK);
+  assert(WaitForClosed(fake, 800, true));
+
+  int failed_fd = -1;
+  Expect(darwin_art_fd_broker_publish(broker, file_owner, 801, &failed_fd),
+         DARWIN_ART_FD_BROKER_OK);
+  DescriptionOperationContext failed{broker, failed_fd, 801, false, true, 0};
+  pin = nullptr;
+  result = {};
+  Expect(darwin_art_fd_broker_retain_description(broker, failed_fd, file_owner,
+                                                 &DescriptionOperation, &failed,
+                                                 &pin, &result),
+         DARWIN_ART_FD_BROKER_OK);
+  assert(pin == nullptr && failed.calls == 1 && result.value == -1 &&
+         result.android_errno == 77);
+  CloseTestFd(broker, failed_fd);
+  assert(WaitForClosed(fake, 801, true));
+
+  int wrong_fd = -1;
+  Expect(darwin_art_fd_broker_publish(broker, file_owner, 802, &wrong_fd),
+         DARWIN_ART_FD_BROKER_OK);
+  DescriptionOperationContext wrong{broker, wrong_fd, 802, false, false, 0};
+  pin = nullptr;
+  result = {};
+  Expect(darwin_art_fd_broker_retain_description(broker, wrong_fd, wrong_owner,
+                                                 &DescriptionOperation, &wrong,
+                                                 &pin, &result),
+         DARWIN_ART_FD_BROKER_WRONG_OWNER);
+  assert(pin == nullptr && wrong.calls == 0);
+  CloseTestFd(broker, wrong_fd);
+  assert(WaitForClosed(fake, 802, true));
+
+  int source_fd = -1;
+  int target_fd = -1;
+  Expect(darwin_art_fd_broker_publish(broker, file_owner, 803, &source_fd),
+         DARWIN_ART_FD_BROKER_OK);
+  Expect(darwin_art_fd_broker_publish(broker, file_owner, 804, &target_fd),
+         DARWIN_ART_FD_BROKER_OK);
+  DescriptionOperationContext duplicated{broker, target_fd, 804,
+                                         false,  false,     0};
+  pin = nullptr;
+  result = {};
+  Expect(darwin_art_fd_broker_retain_description(broker, target_fd, file_owner,
+                                                 &DescriptionOperation,
+                                                 &duplicated, &pin, &result),
+         DARWIN_ART_FD_BROKER_OK);
+  assert(pin != nullptr && result.value == 804);
+  Expect(darwin_art_fd_broker_dup2(broker, source_fd, target_fd, &result),
+         DARWIN_ART_FD_BROKER_OK);
+  CloseTestFd(broker, source_fd);
+  CloseTestFd(broker, target_fd);
+  {
+    std::lock_guard lock(fake->mutex);
+    assert(!fake->objects.at(804).closed);
+  }
+  Expect(darwin_art_fd_broker_release_description(broker, pin),
+         DARWIN_ART_FD_BROKER_OK);
+  assert(WaitForClosed(fake, 804, true));
+  assert(WaitForClosed(fake, 803, true));
+
+  int repeated_fd = -1;
+  Expect(darwin_art_fd_broker_publish(broker, file_owner, 805, &repeated_fd),
+         DARWIN_ART_FD_BROKER_OK);
+  DescriptionOperationContext repeated{broker, repeated_fd, 805,
+                                       false,  false,       0};
+  DarwinArtFdDescriptionPin *first = nullptr;
+  DarwinArtFdDescriptionPin *second = nullptr;
+  Expect(darwin_art_fd_broker_retain_description(
+             broker, repeated_fd, file_owner, &DescriptionOperation, &repeated,
+             &first, &result),
+         DARWIN_ART_FD_BROKER_OK);
+  Expect(darwin_art_fd_broker_retain_description(
+             broker, repeated_fd, file_owner, &DescriptionOperation, &repeated,
+             &second, &result),
+         DARWIN_ART_FD_BROKER_OK);
+  assert(first != nullptr && second != nullptr && repeated.calls == 2);
+  CloseTestFd(broker, repeated_fd);
+  {
+    std::lock_guard lock(fake->mutex);
+    assert(!fake->objects.at(805).closed);
+  }
+  Expect(darwin_art_fd_broker_release_description(broker, first),
+         DARWIN_ART_FD_BROKER_OK);
+  {
+    std::lock_guard lock(fake->mutex);
+    assert(!fake->objects.at(805).closed);
+  }
+  Expect(darwin_art_fd_broker_release_description(broker, second),
+         DARWIN_ART_FD_BROKER_OK);
+  Expect(darwin_art_fd_broker_flush_deferred_closes(broker),
+         DARWIN_ART_FD_BROKER_OK);
+  assert(WaitForClosed(fake, 805, true));
+}
+
 DarwinArtFdSocketRequestV1 SocketRequest(uint32_t operation) {
   DarwinArtFdSocketRequestV1 request{};
   request.abi_version = DARWIN_ART_FD_SOCKET_REQUEST_ABI_V1;
@@ -386,6 +557,8 @@ int main() {
   fake.objects.emplace(102, ObjectState{"v1", "", 0, false});
   fake.objects.emplace(103, ObjectState{});
   fake.objects.emplace(kAliasReplacementObject, ObjectState{});
+  for (uint64_t object = 800; object <= 805; ++object)
+    fake.objects.emplace(object, ObjectState{});
 
   DarwinArtFdBroker *broker = darwin_art_fd_broker_create();
   assert(broker != nullptr);
@@ -410,6 +583,8 @@ int main() {
   Expect(darwin_art_fd_broker_install_owner(broker, DARWIN_ART_FD_FS_FILE,
                                             &callbacks, &second_file_owner),
          DARWIN_ART_FD_BROKER_OK);
+
+  TestRetainedDescription(broker, file_owner, random_owner, &fake);
 
   int file_fd = -1;
   int random_fd = -1;

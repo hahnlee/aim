@@ -1,4 +1,7 @@
 #include "runtime_app_bootstrap.h"
+#include "runtime_acceptance_state.h"
+
+#include "../runtime/art/system_class_loader.h"
 
 #include <cstring>
 #include <cerrno>
@@ -17,14 +20,10 @@
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "runtime.h"
-#include "runtime_process_state.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
 
 namespace darwin_art_app {
-
-extern "C" int darwin_art_install_context_loader(JNIEnv* env,
-                                                   jobject app_loader);
 
 int load_classes(JNIEnv* env,
                  art::Thread* self,
@@ -40,7 +39,7 @@ int load_classes(JNIEnv* env,
                  const char* direct_apk_path,
                  bool run_elf_jni_fixture,
                  bool run_network_acceptance,
-                 bool probe_canvas_backend,
+                 bool headless_fixture,
                  ClassSet* out) {
   if (out == nullptr || self == nullptr || class_linker == nullptr ||
       app_dex == nullptr || activity_descriptor == nullptr) {
@@ -206,7 +205,7 @@ int load_classes(JNIEnv* env,
     return 21;
   }
 
-  if (probe_canvas_backend) {
+  if (headless_fixture) {
     out->canvas = find("Ldev/darwinart/probe/ProbeCanvas;");
     if (out->canvas == nullptr) {
       std::cerr << "ART Android window: ProbeCanvas lookup failed\n";
@@ -230,7 +229,7 @@ int load_classes(JNIEnv* env,
                 << direct_error << "\n";
       return 46;
     }
-    darwin_art_process::record_direct_apk_loaded();
+    darwin_art_acceptance::record_direct_apk_loaded();
   }
   if (run_elf_jni_fixture) {
     out->native_fixture = find("Ldarwin/art/nativefixture/NativeFixture;");

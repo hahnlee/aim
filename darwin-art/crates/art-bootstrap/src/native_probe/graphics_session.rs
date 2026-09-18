@@ -1,13 +1,13 @@
 use super::*;
 
-pub(crate) fn compile_runtime_graphics_session_probe(
+pub(crate) fn compile_runtime_graphics_session(
     root: &Path,
     build_dir: &Path,
     includes: &[&Path],
     ndk_include: &Path,
     ndk_arch_include: &Path,
 ) -> Result<PathBuf> {
-    compile_runtime_graphics_session_probe_flavor(
+    compile_runtime_graphics_session_flavor(
         root,
         build_dir,
         includes,
@@ -17,14 +17,14 @@ pub(crate) fn compile_runtime_graphics_session_probe(
     )
 }
 
-pub(crate) fn compile_runtime_graphics_session_probe_cpu(
+pub(crate) fn compile_runtime_graphics_session_cpu(
     root: &Path,
     build_dir: &Path,
     includes: &[&Path],
     ndk_include: &Path,
     ndk_arch_include: &Path,
 ) -> Result<PathBuf> {
-    compile_runtime_graphics_session_probe_flavor(
+    compile_runtime_graphics_session_flavor(
         root,
         build_dir,
         includes,
@@ -34,7 +34,7 @@ pub(crate) fn compile_runtime_graphics_session_probe_cpu(
     )
 }
 
-fn compile_runtime_graphics_session_probe_flavor(
+fn compile_runtime_graphics_session_flavor(
     root: &Path,
     build_dir: &Path,
     includes: &[&Path],
@@ -45,17 +45,17 @@ fn compile_runtime_graphics_session_probe_flavor(
     let object = if real_graphics {
         env::var_os("DARWIN_ART_NATIVE_GRAPHICS_SESSION_OBJECT")
             .map(PathBuf::from)
-            .unwrap_or_else(|| build_dir.join("darwin_art_runtime_graphics_session.cc.o"))
+            .unwrap_or_else(|| build_dir.join("darwin_art_graphics_session.cc.o"))
     } else {
-        build_dir.join("darwin_art_runtime_graphics_session_cpu.cc.o")
+        build_dir.join("darwin_art_graphics_session_cpu.cc.o")
     };
     if let Some(parent) = object.parent() {
         fs::create_dir_all(parent)?;
     }
     let cache_path = if real_graphics {
-        build_dir.join("runtime-probe-graphics-session-hashes.cache")
+        build_dir.join("runtime-graphics-session-hashes.cache")
     } else {
-        build_dir.join("runtime-probe-graphics-session-cpu-hashes.cache")
+        build_dir.join("runtime-graphics-session-cpu-hashes.cache")
     };
     let compiler_identity = command_output(Command::new("clang++").arg("--version"))?;
     let mut command = runtime_cpp_command(includes);
@@ -104,7 +104,7 @@ fn compile_runtime_graphics_session_probe_flavor(
         .arg("-I")
         .arg(root.join("_aosp/system/logging/liblog/include"))
         .arg("-c")
-        .arg(root.join("probes/runtime_graphics_session.cc"))
+        .arg(root.join("runtime/embedding/graphics_session.cc"))
         .arg("-o")
         .arg(&object);
     let _ = compile_cached_probe_tu(&mut command, &object, &cache_path, &compiler_identity)?;
@@ -114,12 +114,10 @@ fn compile_runtime_graphics_session_probe_flavor(
 /// Compile the small JavaVMExt network-loader boundary separately from the
 /// large managed Activity entry probe.  Network fixture changes now
 /// invalidate this TU only instead of recompiling the managed entry point.
-pub(crate) fn build_runtime_graphics_session_probe(root: &Path) -> Result<()> {
+pub(crate) fn build_runtime_graphics_session(root: &Path) -> Result<()> {
     let output = env::var_os("DARWIN_ART_NATIVE_GRAPHICS_SESSION_OBJECT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            root.join("_build/runtime-link-probe/darwin_art_runtime_graphics_session.cc.o")
-        });
+        .unwrap_or_else(|| root.join("_build/runtime-link-probe/darwin_art_graphics_session.cc.o"));
     let build_dir = output.parent().ok_or_else(|| {
         format!(
             "graphics session output has no parent: {}",
@@ -144,7 +142,7 @@ pub(crate) fn build_runtime_graphics_session_probe(root: &Path) -> Result<()> {
     ];
     let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let (ndk_include, ndk_arch_include) = find_ndk_headers()?;
-    let object = compile_runtime_graphics_session_probe(
+    let object = compile_runtime_graphics_session(
         root,
         build_dir,
         &include_refs,
@@ -154,6 +152,6 @@ pub(crate) fn build_runtime_graphics_session_probe(root: &Path) -> Result<()> {
     if object != output {
         fs::copy(&object, &output)?;
     }
-    println!("build-runtime-graphics-session-probe: {}", output.display());
+    println!("build-runtime-graphics-session: {}", output.display());
     Ok(())
 }

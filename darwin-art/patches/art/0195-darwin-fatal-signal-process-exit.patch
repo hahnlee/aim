@@ -1,0 +1,26 @@
+diff --git a/runtime/runtime_linux.cc b/runtime/runtime_linux.cc
+--- a/runtime/runtime_linux.cc
++++ b/runtime/runtime_linux.cc
+@@ -17,7 +17,10 @@
+ #include "runtime.h"
+ 
+ #include <signal.h>
++#if defined(__APPLE__)
++#include <unistd.h>
++#endif
+ 
+ #include <iostream>
+ 
+ #include "base/memory_tool.h"
+@@ -58,7 +61,11 @@ void HandleUnexpectedSignalLinux(int signal_number, siginfo_t* info, void* raw_c
+   sigaction(signal_number, &action, nullptr);
+   // ...and re-raise so we die with the appropriate status.
+   kill(getpid(), signal_number);
+ #else
++#if defined(__APPLE__)
++  _exit(EXIT_FAILURE);
++#else
+   exit(EXIT_FAILURE);
++#endif
+ #endif
+ }

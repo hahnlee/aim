@@ -8,7 +8,18 @@
 //! slice, STL object, or borrowed string crosses this boundary.
 
 use core::ffi::{c_char, c_void};
+
+mod binder_descriptor;
+mod scm_endpoint;
+pub use scm_endpoint::*;
+pub use binder_descriptor::{
+    BINDER_DESCRIPTOR_ATTRIBUTES_BYTES, BinderExportLeaseReleaseFn, BinderRetainedExportFn,
+    DescriptorTransferBinding, RetainedExportedDescriptor,
+};
 use darwin_art_abi::{AbiHeader, StatusCode};
+
+/// Existing native ABI status: teardown has not committed; retain all owners.
+pub const PROCESS_SHUTDOWN_NOT_READY: i32 = 67;
 
 mod process_credentials;
 mod process_snapshot;
@@ -42,6 +53,22 @@ pub type LifecycleBeginFn = unsafe extern "C" fn(context: *mut c_void) -> i32;
 pub type LifecycleFinishFn =
     unsafe extern "C" fn(context: *mut c_void, runtime_created: i32) -> i32;
 pub type LifecycleFailedFn = unsafe extern "C" fn(context: *mut c_void, status: i32);
+
+pub type BinderAuthorityRetainFn = unsafe extern "C" fn(context: *mut c_void) -> *mut c_void;
+pub type BinderAuthorityLiveFn = unsafe extern "C" fn(retained: *mut c_void) -> i32;
+pub type BinderAuthorityReleaseFn = unsafe extern "C" fn(retained: *mut c_void);
+
+pub const BINDER_AUTHORITY_HOOKS_ABI_VERSION: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BinderAuthorityHooks {
+    pub header: AbiHeader,
+    pub context: *mut c_void,
+    pub retain: Option<BinderAuthorityRetainFn>,
+    pub live: Option<BinderAuthorityLiveFn>,
+    pub release: Option<BinderAuthorityReleaseFn>,
+}
 
 #[repr(C)]
 pub struct ServiceSpawnRequest {
@@ -144,6 +171,8 @@ pub struct ProcessConfig {
     pub lifecycle_hooks: *const LifecycleHooks,
     pub host_services: *const HostServices,
     pub native_loader_config: *const NativeLoaderConfig,
+    pub desktop_surface_context: *mut c_void,
+    pub binder_authority_hooks: *const BinderAuthorityHooks,
 }
 
 impl ProcessConfig {
@@ -180,6 +209,8 @@ impl ProcessConfig {
             lifecycle_hooks: core::ptr::null(),
             host_services: core::ptr::null(),
             native_loader_config: core::ptr::null(),
+            desktop_surface_context: core::ptr::null_mut(),
+            binder_authority_hooks: core::ptr::null(),
         }
     }
 
@@ -204,6 +235,16 @@ impl ProcessConfig {
 
     pub const fn with_native_loader_config(mut self, config: *const NativeLoaderConfig) -> Self {
         self.native_loader_config = config;
+        self
+    }
+
+    pub const fn with_desktop_surface_context(mut self, context: *mut c_void) -> Self {
+        self.desktop_surface_context = context;
+        self
+    }
+
+    pub const fn with_binder_authority_hooks(mut self, hooks: *const BinderAuthorityHooks) -> Self {
+        self.binder_authority_hooks = hooks;
         self
     }
 }
@@ -262,6 +303,7 @@ pub type SurfacePresentFn = unsafe extern "C" fn(*mut c_void) -> i32;
 pub type SurfacePresentAsyncFn = unsafe extern "C" fn(*mut c_void) -> i32;
 pub type SurfacePumpEventsFn = unsafe extern "C" fn(*mut c_void, f64) -> i32;
 pub type SurfaceCloseRequestedFn = unsafe extern "C" fn(*mut c_void) -> bool;
+pub type SurfaceInstallAndroidInputSinkFn = unsafe extern "C" fn(*mut c_void) -> i32;
 pub type AppKitPumpEventsFn = unsafe extern "C" fn(f64) -> i32;
 
 #[cfg(test)]
@@ -271,7 +313,7 @@ mod tests {
 
     #[test]
     fn process_config_layout_is_owned_by_raw_ffi_crate() {
-        assert_eq!(size_of::<ProcessConfig>(), 136);
+        assert_eq!(size_of::<ProcessConfig>(), 152);
         assert_eq!(align_of::<ProcessConfig>(), 8);
         assert_eq!(offset_of!(ProcessConfig, header), 0);
         assert_eq!(
@@ -298,6 +340,8 @@ mod tests {
         assert_eq!(offset_of!(ProcessConfig, lifecycle_hooks), 112);
         assert_eq!(offset_of!(ProcessConfig, host_services), 120);
         assert_eq!(offset_of!(ProcessConfig, native_loader_config), 128);
+        assert_eq!(offset_of!(ProcessConfig, desktop_surface_context), 136);
+        assert_eq!(offset_of!(ProcessConfig, binder_authority_hooks), 144);
         let defaults = ProcessConfig::new(
             core::ptr::null(),
             core::ptr::null(),
@@ -313,6 +357,26 @@ mod tests {
             None,
         );
         assert!(defaults.native_loader_config.is_null());
+        assert!(defaults.desktop_surface_context.is_null());
+        assert!(defaults.binder_authority_hooks.is_null());
+        let desktop_surface = 1usize as *mut c_void;
+        assert_eq!(
+            defaults
+                .with_desktop_surface_context(desktop_surface)
+                .desktop_surface_context,
+            desktop_surface
+        );
+    }
+
+    #[test]
+    fn binder_authority_hooks_layout_matches_native_abi() {
+        assert_eq!(size_of::<BinderAuthorityHooks>(), 40);
+        assert_eq!(align_of::<BinderAuthorityHooks>(), 8);
+        assert_eq!(offset_of!(BinderAuthorityHooks, header), 0);
+        assert_eq!(offset_of!(BinderAuthorityHooks, context), 8);
+        assert_eq!(offset_of!(BinderAuthorityHooks, retain), 16);
+        assert_eq!(offset_of!(BinderAuthorityHooks, live), 24);
+        assert_eq!(offset_of!(BinderAuthorityHooks, release), 32);
     }
 
     #[test]
@@ -423,14 +487,6 @@ mod tests {
 
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
-pub struct PointerEvent {
-    pub action: u32,
-    pub x: f32,
-    pub y: f32,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-#[repr(C)]
 pub struct PointerEventV2 {
     pub version: u32,
     pub size: u32,
@@ -470,10 +526,6 @@ pub struct KeyEventV1 {
     pub unicode_char: u32,
 }
 
-pub type SurfaceNextPointerEventFn = unsafe extern "C" fn(*mut c_void, *mut PointerEvent) -> bool;
-pub type SurfaceNextPointerEventV2Fn =
-    unsafe extern "C" fn(*mut c_void, *mut PointerEventV2) -> bool;
-pub type SurfaceNextKeyEventV1Fn = unsafe extern "C" fn(*mut c_void, *mut KeyEventV1) -> bool;
 pub type SurfaceDestroyFn = unsafe extern "C" fn(*mut c_void) -> i32;
 pub type SurfaceActiveFn = unsafe extern "C" fn() -> *mut c_void;
 pub type DispatchPointerFn = unsafe extern "C" fn(u32, f32, f32) -> i32;
@@ -499,6 +551,11 @@ pub type ProviderInstallHooksFn = unsafe extern "C" fn(
     release: Option<ProviderReleaseFn>,
 );
 pub type ProviderClearHooksFn = unsafe extern "C" fn();
+/// Synchronous native FD operation; no input wait, spawn or reentrancy.
+pub type NativeFdOperationFn = unsafe extern "C" fn(*mut c_void) -> isize;
+pub type FdInheritanceBoundaryFn =
+    unsafe extern "C" fn(Option<NativeFdOperationFn>, *mut c_void) -> isize;
+pub type FdInheritanceInstallFn = unsafe extern "C" fn(Option<FdInheritanceBoundaryFn>) -> i32;
 pub type ProviderNativeAcquireFn = unsafe extern "C" fn(kind: u32, authority_fd: i32) -> i32;
 pub type ProviderNativeReleaseFn = unsafe extern "C" fn(kind: u32) -> i32;
 pub type BinderFdInstallOwnerFn =

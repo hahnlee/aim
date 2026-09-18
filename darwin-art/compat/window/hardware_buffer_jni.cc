@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 
 namespace {
 
@@ -159,5 +160,48 @@ jlong HardwareBufferNativeEstimateSize(jlong handle) {
 }
 
 jlong HardwareBufferNativeGetId(jlong handle) { return handle; }
+
+bool RegisterHardwareBufferNatives(JNIEnv* env) {
+  JNINativeMethod methods[] = {
+      {const_cast<char*>("nCreateHardwareBuffer"),
+       const_cast<char*>("(IIIIJ)J"),
+       reinterpret_cast<void*>(&HardwareBufferNativeCreate)},
+      {const_cast<char*>("nCreateFromGraphicBuffer"),
+       const_cast<char*>("(Landroid/graphics/GraphicBuffer;)J"),
+       reinterpret_cast<void*>(&HardwareBufferNativeCreateFromGraphicBuffer)},
+      {const_cast<char*>("nGetNativeFinalizer"), const_cast<char*>("()J"),
+       reinterpret_cast<void*>(&HardwareBufferNativeGetFinalizer)},
+      {const_cast<char*>("nWriteHardwareBufferToParcel"),
+       const_cast<char*>("(JLandroid/os/Parcel;)V"),
+       reinterpret_cast<void*>(&HardwareBufferNativeWriteToParcel)},
+      {const_cast<char*>("nReadHardwareBufferFromParcel"),
+       const_cast<char*>("(Landroid/os/Parcel;)J"),
+       reinterpret_cast<void*>(&HardwareBufferNativeReadFromParcel)},
+      {const_cast<char*>("nIsSupported"), const_cast<char*>("(IIIIJ)Z"),
+       reinterpret_cast<void*>(&HardwareBufferNativeIsSupported)},
+      {const_cast<char*>("nGetWidth"), const_cast<char*>("(J)I"),
+       reinterpret_cast<void*>(&HardwareBufferNativeGetWidth)},
+      {const_cast<char*>("nGetHeight"), const_cast<char*>("(J)I"),
+       reinterpret_cast<void*>(&HardwareBufferNativeGetHeight)},
+      {const_cast<char*>("nGetFormat"), const_cast<char*>("(J)I"),
+       reinterpret_cast<void*>(&HardwareBufferNativeGetFormat)},
+      {const_cast<char*>("nGetLayers"), const_cast<char*>("(J)I"),
+       reinterpret_cast<void*>(&HardwareBufferNativeGetLayers)},
+      {const_cast<char*>("nGetUsage"), const_cast<char*>("(J)J"),
+       reinterpret_cast<void*>(&HardwareBufferNativeGetUsage)},
+      {const_cast<char*>("nEstimateSize"), const_cast<char*>("(J)J"),
+       reinterpret_cast<void*>(&HardwareBufferNativeEstimateSize)},
+      {const_cast<char*>("nGetId"), const_cast<char*>("(J)J"),
+       reinterpret_cast<void*>(&HardwareBufferNativeGetId)},
+  };
+  if (env == nullptr) return false;
+  jclass clazz = env->FindClass("android/hardware/HardwareBuffer");
+  if (clazz == nullptr) return false;
+  const bool registered =
+      env->RegisterNatives(clazz, methods, static_cast<jint>(std::size(methods))) ==
+      JNI_OK;
+  env->DeleteLocalRef(clazz);
+  return registered;
+}
 
 }  // namespace darwin_art::hardware_buffer

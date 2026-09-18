@@ -94,7 +94,7 @@ fn main_result() -> Result<(), Box<dyn Error>> {
                 .into_string()
                 .map_err(|_| "package is not UTF-8")?;
             let program = arguments.next().ok_or("supervise requires command")?;
-            let mut child = Command::new(program).args(arguments).spawn()?;
+            let mut child = darwin_art_profile::spawn_owned(Command::new(program).args(arguments))?;
             let lease = match ProfileLease::connect_process_pid(&paths.socket, child.id(), &package)
             {
                 Ok(lease) => lease,

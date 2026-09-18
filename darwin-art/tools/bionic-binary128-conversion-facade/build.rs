@@ -96,7 +96,64 @@ fn main() {
         "provider",
     );
 
+    let audit = env::var_os("CARGO_FEATURE_AUDIT").is_some();
     let entry = out.join("entry.o");
+    if audit {
+        let host_state = out.join("audit_host_state.o");
+        run(
+            Command::new("clang++")
+                .args(&common)
+                .args(["-std=c++20", "-c", "probes/host_state.cc", "-o"])
+                .arg(&host_state),
+            "audit host state",
+        );
+        // This object belongs only to the audit binary, not the runtime archive.
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade={}",
+            host_state.display()
+        );
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade=-L{}",
+            out.display()
+        );
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade=-Wl,-force_load,{}",
+            out.join("libdarwin_art_bionic_binary128_conversion.a")
+                .display()
+        );
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade=-Wl,-force_load,{}",
+            out.join("libbinary128_allocator_test.a").display()
+        );
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade=-L{}",
+            root.join("_build/bionic-float-conversion-facade").display()
+        );
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade=-Wl,-force_load,{}",
+            root.join(
+                "_build/bionic-float-conversion-facade/libdarwin-art-bionic-float-conversion.a"
+            )
+            .display()
+        );
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade=-Wl,-force_load,{}",
+            root.join("_build/icu-foundation/libandroidicuinit-darwin.a")
+                .display()
+        );
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade={}",
+            root.join("_build/icu-foundation/libicuuc-common-darwin.a")
+                .display()
+        );
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade={}",
+            root.join("_build/icu-foundation/libicuuc-stubdata-darwin.a")
+                .display()
+        );
+        println!("cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade=-lc++");
+        println!("cargo:rerun-if-changed=probes/host_state.cc");
+    }
     run(
         Command::new("clang")
             .args([
@@ -120,72 +177,77 @@ fn main() {
         "archive",
     );
 
-    let allocator = out.join("allocator.o");
-    run(
-        Command::new("clang")
-            .args(&common)
-            .arg("-std=c17")
-            .arg("-I")
-            .arg(root.join("tools/bionic-libc-allocator-facade/include"))
-            .args([
-                "-c",
-                "../bionic-libc-allocator-facade/src/allocator.c",
-                "-o",
-            ])
-            .arg(&allocator),
-        "allocator test dependency",
-    );
-    let allocator_options = out.join("allocator_options.o");
-    run(
-        Command::new("clang")
-            .args(&common)
-            .arg("-std=c17")
-            .arg("-I")
-            .arg(root.join("tools/bionic-libc-allocator-facade/include"))
-            .args([
-                "-c",
-                "../bionic-libc-allocator-facade/src/allocator_options.c",
-                "-o",
-            ])
-            .arg(&allocator_options),
-        "allocator options test dependency",
-    );
-    let allocator_archive = out.join("libbinary128_allocator_test.a");
-    run(
-        Command::new("ar")
-            .arg("rcs")
-            .arg(&allocator_archive)
-            .arg(&allocator)
-            .arg(&allocator_options),
-        "allocator archive",
-    );
-
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=darwin_art_bionic_binary128_conversion");
-    println!("cargo:rustc-link-lib=static=binary128_allocator_test");
-    println!(
-        "cargo:rustc-link-search=native={}",
-        root.join("_build/bionic-float-conversion-facade").display()
-    );
-    println!("cargo:rustc-link-lib=static=darwin-art-bionic-float-conversion");
-    println!(
-        "cargo:rustc-link-arg=-Wl,-force_load,{}",
-        root.join("_build/icu-foundation/libandroidicuinit-darwin.a")
-            .display()
-    );
-    println!(
-        "cargo:rustc-link-arg={}",
-        root.join("_build/icu-foundation/libicuuc-common-darwin.a")
-            .display()
-    );
-    println!(
-        "cargo:rustc-link-arg={}",
-        root.join("_build/icu-foundation/libicuuc-stubdata-darwin.a")
-            .display()
-    );
     println!("cargo:rustc-link-lib=c++");
 
-    if let Some(value) = sanitizer.as_deref() {
+    if audit {
+        let allocator = out.join("allocator.o");
+        run(
+            Command::new("clang")
+                .args(&common)
+                .arg("-std=c17")
+                .arg("-I")
+                .arg(root.join("tools/bionic-libc-allocator-facade/include"))
+                .args([
+                    "-c",
+                    "../bionic-libc-allocator-facade/src/allocator.c",
+                    "-o",
+                ])
+                .arg(&allocator),
+            "allocator test dependency",
+        );
+        let allocator_options = out.join("allocator_options.o");
+        run(
+            Command::new("clang")
+                .args(&common)
+                .arg("-std=c17")
+                .arg("-I")
+                .arg(root.join("tools/bionic-libc-allocator-facade/include"))
+                .args([
+                    "-c",
+                    "../bionic-libc-allocator-facade/src/allocator_options.c",
+                    "-o",
+                ])
+                .arg(&allocator_options),
+            "allocator options test dependency",
+        );
+        let allocator_archive = out.join("libbinary128_allocator_test.a");
+        run(
+            Command::new("ar")
+                .arg("rcs")
+                .arg(&allocator_archive)
+                .arg(&allocator)
+                .arg(&allocator_options),
+            "allocator archive",
+        );
+
+        println!("cargo:rustc-link-lib=static=binary128_allocator_test");
+        println!(
+            "cargo:rustc-link-search=native={}",
+            root.join("_build/bionic-float-conversion-facade").display()
+        );
+        println!("cargo:rustc-link-lib=static=darwin-art-bionic-float-conversion");
+        println!(
+            "cargo:rustc-link-arg=-Wl,-force_load,{}",
+            root.join("_build/icu-foundation/libandroidicuinit-darwin.a")
+                .display()
+        );
+        println!(
+            "cargo:rustc-link-arg={}",
+            root.join("_build/icu-foundation/libicuuc-common-darwin.a")
+                .display()
+        );
+        println!(
+            "cargo:rustc-link-arg={}",
+            root.join("_build/icu-foundation/libicuuc-stubdata-darwin.a")
+                .display()
+        );
+        println!("cargo:rerun-if-changed=../bionic-libc-allocator-facade/src/allocator.c");
+        println!("cargo:rerun-if-changed=../bionic-libc-allocator-facade/src/allocator_options.c");
+    }
+
+    if audit && let Some(value) = sanitizer.as_deref() {
         let runtime_name = match value {
             "address" => "clang_rt.asan_osx_dynamic",
             "undefined" => "clang_rt.ubsan_osx_dynamic",
@@ -200,14 +262,21 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", runtime_dir.display());
         println!("cargo:rustc-link-lib=dylib={runtime_name}");
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", runtime_dir.display());
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade=-L{}",
+            runtime_dir.display()
+        );
+        println!("cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade=-l{runtime_name}");
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-binary128-conversion-facade=-Wl,-rpath,{}",
+            runtime_dir.display()
+        );
     }
     println!("cargo:rerun-if-env-changed=BIONIC_BINARY128_C_SANITIZER");
     for source in [
         "build.rs",
         "src/provider.cc",
         "src/entry.S",
-        "../bionic-libc-allocator-facade/src/allocator.c",
-        "../bionic-libc-allocator-facade/src/allocator_options.c",
         "include/darwin_art_bionic_binary128_conversion.h",
     ] {
         println!("cargo:rerun-if-changed={source}");

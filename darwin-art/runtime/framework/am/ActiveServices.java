@@ -5,7 +5,6 @@ import android.app.IServiceConnection;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
-import android.content.res.CompatibilityInfo;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.RemoteException;
@@ -16,65 +15,96 @@ import java.util.HashMap;
 
 /** Android service lifecycle owner for system_server's ActivityManager endpoint. */
 public final class ActiveServices implements SystemServiceBindings {
-    interface ProcessLauncher {
-        int start(String packageName, String processName, int uid, boolean isolated,
-                long startSequence);
-    }
-
     private static final int FIRST_ISOLATED_UID = 99000;
     private static final int LAST_ISOLATED_UID = 99999;
-    // Android 16 ActivityManager.PROCESS_STATE_SERVICE. This value is part of
-    // the version-pinned IApplicationThread contract and is inlined here
-    // because the public SDK compile jar omits the hidden constant.
-    private static final int PROCESS_STATE_SERVICE = 10;
 
     private final PackageRecords.Source packages;
     private final ApplicationProcessRegistry processes;
-    private final ProcessLauncher launcher;
+    private final ServiceProcessLaunchController processLaunches;
     private final HashMap<String, ServiceRecord> services = new HashMap<>();
     private final HashMap<IBinder, ServiceRecord> servicesByToken = new HashMap<>();
-    private final HashMap<IBinder, ArrayList<ConnectionRecord>> connections = new HashMap<>();
-    private final HashMap<IBinder, IBinder.DeathRecipient> connectionDeaths = new HashMap<>();
+    /** Guest callback capabilities; entries exist only for the current live lane. */
+    private final HashMap<IBinder, ServiceRecord.LifecycleLane> lifecycleByToken = new HashMap<>();
+    private final ServiceConnectionIndex connectionIndex = new ServiceConnectionIndex();
+    private final ServiceNotificationController notifications =
+            new ServiceNotificationController(this, connectionIndex,
+                    this::canNotifyConnectionLocked, this::removeConnection);
+    private final ServiceLifecycleController lifecycleDispatcher =
+            new ServiceLifecycleController(this);
+    private final ServiceConnectionResourceController connectionResources =
+            new ServiceConnectionResourceController(this);
     private long nextSequence = 1;
     private int nextIsolatedUid = FIRST_ISOLATED_UID;
 
     ActiveServices(PackageRecords.Source packageSource, ApplicationProcessRegistry processRegistry,
-            ProcessLauncher processLauncher) {
+            ProcessLaunchTransport processLauncher) {
         packages = packageSource;
         processes = processRegistry;
-        launcher = processLauncher;
+        processLaunches = new ServiceProcessLaunchController(this,
+                new ServiceProcessLaunchController.StatePort() {
+                    @Override public ArrayList<ServiceRecord> servicesLocked() {
+                        return new ArrayList<>(servicesByToken.values());
+                    }
+                    @Override public long nextSequenceLocked() { return nextSequence(); }
+                    @Override public void launchFailedLocked(ConnectionRecord initiating, long revision,
+                            Throwable failure) {
+                        if (initiating == null || !connectionIndex.contains(initiating)
+                                || servicesByToken.get(initiating.binding.service.canonicalToken)
+                                    != initiating.binding.service) return;
+                        ServiceRecord service = initiating.binding.service;
+                        if (service.ownerRevision != revision) return;
+                        if (service.applicationThread != null && processes.hasCallerIncarnation(
+                                service.ownerPid, service.ownerStartSequence,
+                                service.applicationThread.asBinder(), service.uid)) return;
+                        try { removeConnection(initiating); }
+                        catch (RemoteException cleanup) { failure.addSuppressed(cleanup); }
+                    }
+                }, processes, processLauncher);
     }
 
-    public synchronized int bindServiceInstance(int callingPid, int callingUid, IBinder caller,
+    public int bindServiceInstance(int callingPid, int callingUid, IBinder caller,
             IBinder activityToken, Intent intent, String resolvedType, IBinder connectionBinder,
             long flags, String instanceName, String callingPackage, int userId)
             throws RemoteException {
-        if (userId != 0 || intent == null || connectionBinder == null) return 0;
-        ApplicationProcessRegistry.AttachedApplication callingProcess =
-                processes.requireCaller(callingPid, caller, callingPackage);
-        if (callingProcess.uid >= 0 && callingProcess.uid != callingUid) {
-            throw new SecurityException("Binder UID does not match attached application");
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            PendingServiceConnectionBind pending;
+            synchronized (this) {
+                if (userId != 0 || intent == null || connectionBinder == null) return 0;
+                ApplicationProcessRegistry.AttachedApplication callingProcess =
+                        processes.requireCaller(callingPid, caller, callingPackage);
+                if (callingProcess.uid >= 0 && callingProcess.uid != callingUid) {
+                    throw new SecurityException("Binder UID does not match attached application");
+                }
+                pending = bindServiceLocked(intent, resolvedType, connectionBinder, flags, instanceName,
+                        callingUid, ServiceConnectionOwner.application(callingProcess));
+            }
+            return finishPendingBind(pending);
         }
-        return bindServiceLocked(intent, resolvedType, connectionBinder, flags, instanceName,
-                callingUid);
     }
 
     @Override
-    public synchronized int bindService(Intent intent, IServiceConnection connection)
+    public int bindService(Intent intent, IServiceConnection connection)
             throws RemoteException {
-        if (intent == null || connection == null) return 0;
-        return bindServiceLocked(intent, null, connection.asBinder(), 0, null,
-                android.os.Process.SYSTEM_UID);
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            PendingServiceConnectionBind pending;
+            synchronized (this) {
+                if (intent == null || connection == null) return 0;
+                pending = bindServiceLocked(intent, null, connection.asBinder(), 0, null,
+                        android.os.Process.SYSTEM_UID, ServiceConnectionOwner.system());
+            }
+            return finishPendingBind(pending);
+        }
     }
 
-    private int bindServiceLocked(Intent intent, String resolvedType, IBinder connectionBinder,
-            long flags, String instanceName, int clientUid) throws RemoteException {
+    private PendingServiceConnectionBind bindServiceLocked(Intent intent, String resolvedType,
+            IBinder connectionBinder, long flags, String instanceName, int clientUid,
+            ServiceConnectionOwner owner) throws RemoteException {
         ComponentName component = intent.getComponent();
-        if (component == null) return 0;
+        if (component == null) return null;
         String packageName = component.getPackageName();
         ServiceInfo info = InstalledServiceInfo.service(packageName,
                 packages.resolveInstalledPackage(packageName), component.getClassName());
-        if (info == null || !info.enabled || info.applicationInfo == null) return 0;
+        if (info == null || !info.enabled || info.applicationInfo == null) return null;
         if (instanceName != null && instanceName.isEmpty()) {
             throw new IllegalArgumentException("Empty isolated service instance name");
         }
@@ -85,6 +115,7 @@ public final class ActiveServices implements SystemServiceBindings {
 
         String key = serviceKey(component, instanceName);
         ServiceRecord service = services.get(key);
+        boolean newService = service == null;
         if (service == null) {
             String processName = info.processName;
             if (processName == null || processName.isEmpty()) processName = packageName;
@@ -92,7 +123,7 @@ public final class ActiveServices implements SystemServiceBindings {
             int uid = isolated ? allocateIsolatedUid() : info.applicationInfo.uid;
             service = new ServiceRecord(component, instanceName, processName, uid, isolated, info);
             services.put(key, service);
-            servicesByToken.put(service.token, service);
+            servicesByToken.put(service.canonicalToken, service);
         }
 
         Intent.FilterComparison comparison = new Intent.FilterComparison(intent);
@@ -103,190 +134,350 @@ public final class ActiveServices implements SystemServiceBindings {
         }
         IServiceConnection endpoint = IServiceConnection.Stub.asInterface(connectionBinder);
         if (endpoint == null) throw new IllegalArgumentException("Invalid service connection");
-        ConnectionRecord connection = new ConnectionRecord(endpoint, binding, flags, clientUid);
-        IBinder.DeathRecipient death = connectionDeaths.get(connection.connectionBinder);
-        if (death == null) {
-            death = new ConnectionDeathRecipient(connection.connectionBinder);
+        ConnectionRecord connection = new ConnectionRecord(endpoint, binding, flags, clientUid, owner);
+        IBinder.DeathRecipient existingDeath = connectionIndex.death(connection.connectionBinder);
+        if (existingDeath instanceof ServiceConnectionDeathRegistration
+                && ((ServiceConnectionDeathRegistration) existingDeath).state
+                == ServiceConnectionDeathRegistration.State.LINKING) {
+            if (!binding.hasAdmittedConnections() && binding.pendingBinds == 0) {
+                service.bindings.remove(comparison, binding);
+            }
+            if (newService && service.bindings.isEmpty() && service.pendingBinds == 0) {
+                removeService(key, service);
+            }
+            return null;
+        }
+        connectionIndex.add(connection);
+        connection.pendingAdmission = true;
+        binding.pendingBinds++;
+        service.pendingBinds++;
+        ServiceConnectionDeathRegistration registration = null;
+        if (existingDeath == null) {
+            registration = new ServiceConnectionDeathRegistration(
+                    connection.connectionBinder, this::onConnectionDeath);
+            connectionIndex.setDeath(connection.connectionBinder, registration);
+        }
+        return new PendingServiceConnectionBind(
+                key, service, binding, connection,
+                registration == null ? existingDeath : registration, registration);
+    }
+
+    /** Completes the link outside AMS, then publishes lifecycle demand only on success. */
+    private int finishPendingBind(PendingServiceConnectionBind pending) throws RemoteException {
+        if (pending == null) return 0;
+        Throwable linkFailure = null;
+        if (pending.registration != null) {
             try {
-                connection.connectionBinder.linkToDeath(death, 0);
-            } catch (RemoteException dead) {
-                service.bindings.remove(new Intent.FilterComparison(binding.intent));
-                if (service.bindings.isEmpty()) removeService(key, service);
+                pending.registration.linkOutsideLock();
+            } catch (RemoteException | RuntimeException | Error failure) {
+                linkFailure = failure;
+            }
+        }
+        int result = 0;
+        synchronized (this) {
+            ServiceConnectionDeathRegistration registration = pending.registration;
+            if (registration != null) {
+                boolean unlink = linkFailure == null
+                        ? registration.finishLinkLocked()
+                        : registration.failLinkLocked(!(linkFailure instanceof RemoteException));
+                if (unlink) connectionResources.enqueueLocked(registration);
+            }
+            boolean admitted = linkFailure == null
+                    && (registration == null || registration.isLinkedLocked())
+                    && connectionIndex.contains(pending.connection)
+                    && connectionIndex.death(pending.connection.connectionBinder)
+                        == pending.expectedDeath
+                    && ownerStillAdmissibleLocked(pending);
+            if (admitted) {
+                pending.connection.admitted = true;
+                releasePendingPinLocked(pending.connection);
+                if (!pending.service.stopScheduled) pending.service.retiring = false;
+                result = finishAdmittedBindLocked(pending);
+            } else {
+                rejectPendingBindLocked(pending);
+            }
+        }
+        Throwable cleanupFailure = connectionResources.drain();
+        Throwable notificationFailure = result == 0 ? null
+                : notifications.dispatchOne(pending.connection);
+        if (linkFailure != null) {
+            if (cleanupFailure != null && cleanupFailure != linkFailure) {
+                linkFailure.addSuppressed(cleanupFailure);
+            }
+            if (notificationFailure != null && notificationFailure != linkFailure) {
+                linkFailure.addSuppressed(notificationFailure);
+            }
+            if (linkFailure instanceof RemoteException) {
+                if (cleanupFailure != null) throw (RemoteException) linkFailure;
                 return 0;
             }
-            connectionDeaths.put(connection.connectionBinder, death);
+            rethrow(linkFailure);
         }
-        binding.connections.add(connection);
-        connections.computeIfAbsent(connection.connectionBinder, unused -> new ArrayList<>())
-                .add(connection);
+        if (cleanupFailure != null) {
+            if (notificationFailure != null && notificationFailure != cleanupFailure) {
+                cleanupFailure.addSuppressed(notificationFailure);
+            }
+            rethrow(cleanupFailure);
+        }
+        if (notificationFailure instanceof RemoteException) {
+            if (notificationFailure.getSuppressed().length != 0) {
+                throw (RemoteException) notificationFailure;
+            }
+            return 0;
+        }
+        if (notificationFailure != null) rethrow(notificationFailure);
+        return result;
+    }
 
+    private boolean ownerStillAdmissibleLocked(PendingServiceConnectionBind pending) {
+        return pending.service.bindings.get(new Intent.FilterComparison(pending.binding.intent))
+                        == pending.binding
+                && services.get(pending.serviceKey) == pending.service
+                && servicesByToken.get(pending.service.canonicalToken) == pending.service
+                && !pending.service.stopScheduled
+                && pending.connection.owner.isCurrent(processes);
+    }
+
+    /** Caller owns the ActiveServices monitor. */
+    private int finishAdmittedBindLocked(PendingServiceConnectionBind pending)
+            throws RemoteException {
+        ConnectionRecord connection = pending.connection;
+        ServiceRecord service = pending.service;
+        IntentBindRecord binding = pending.binding;
         ApplicationProcessRegistry.AttachedApplication attached =
-                processes.findAttached(packageName, service.processName, service.uid);
+                processes.findAttached(service.component.getPackageName(), service.processName,
+                        service.uid);
         if (attached != null) {
             attachAndSchedule(service, attached);
-        } else if (!service.processRequested) {
-            service.processRequested = true;
-            try {
-                launcher.start(packageName, service.processName, service.uid, service.isolated,
-                        nextSequence());
-            } catch (RuntimeException | Error error) {
-                service.processRequested = false;
-                removeConnection(connection);
-                if (service.bindings.isEmpty()) removeService(key, service);
-                throw error;
-            }
-        }
-        if (binding.publicationReceived) {
-            try {
-                notifyConnected(connection, binding.publishedBinder);
-            } catch (RemoteException deadClient) {
-                removeConnectionsLocked(connection.connectionBinder, false);
-                return 0;
-            }
+        } else {
+            processLaunches.requestLocked(service, connection);
         }
         return 1;
     }
 
-    @Override
-    public synchronized boolean unbindService(IServiceConnection connection)
+    /** Caller owns the ActiveServices monitor. */
+    private void rejectPendingBindLocked(PendingServiceConnectionBind pending)
             throws RemoteException {
-        return connection != null && unbindService(connection.asBinder());
+        if (pending.connection.admitted) return;
+        ServiceConnectionIndex.Detached detached = connectionIndex.remove(pending.connection);
+        releasePendingPinLocked(pending.connection);
+        unlinkDetached(detached);
+        settleDetached(detached);
+        planLifecycleLocked(pending.service);
     }
 
-    public synchronized void onProcessAttached(
+    private void releasePendingPinLocked(ConnectionRecord connection) {
+        if (!connection.pendingAdmission) return;
+        connection.pendingAdmission = false;
+        if (connection.binding.pendingBinds <= 0 || connection.binding.service.pendingBinds <= 0) {
+            throw new IllegalStateException("Unowned pending service connection pin");
+        }
+        connection.binding.pendingBinds--;
+        connection.binding.service.pendingBinds--;
+    }
+
+    @Override
+    public boolean unbindService(IServiceConnection connection) throws RemoteException {
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            synchronized (this) {
+                return connection != null && removeConnectionsLocked(connection.asBinder(), true);
+            }
+        }
+    }
+
+    public void onProcessAttached(
             ApplicationProcessRegistry.AttachedApplication attached) throws RemoteException {
-        if (attached == null || attached.thread == null) return;
-        boolean ownsLiveService = false;
-        // A failed create/bind callback may retire this record or request a
-        // replacement process. Iterate a snapshot so the owner-death
-        // transition cannot invalidate this traversal.
-        for (ServiceRecord service : new ArrayList<>(services.values())) {
-            if (service.component.getPackageName().equals(attached.packageName)
-                    && service.processName.equals(attached.processName)
-                    && service.uid == attached.uid) {
-                ownsLiveService |= attachAndSchedule(service, attached);
-            }
-        }
-        // AOSP does not keep a freshly attached service-only process when the
-        // binding that requested it vanished before attach completed. Ask the
-        // real ActivityThread to leave its Looper instead of retaining an
-        // inert Darwin child forever. Main/activity processes are outside this
-        // service lifecycle decision.
-        if (!ownsLiveService
-                && attached.initialWork
-                        == ApplicationProcessRegistry.InitialWork.BOUND_SERVICE) {
-            IApplicationThread thread = IApplicationThread.Stub.asInterface(attached.thread);
-            if (thread != null) thread.scheduleExit();
-        }
-    }
-
-    /** Applies a process-death transition for one attached process snapshot. */
-    public synchronized void onProcessGone(
-            ApplicationProcessRegistry.AttachedApplication gone) {
-        if (gone == null || gone.thread == null) return;
-        for (ServiceRecord service : new ArrayList<>(servicesByToken.values())) {
-            if (isOwner(service, gone)) {
-                transitionAfterOwnerGone(service, gone.pid, gone.startSequence, gone.thread);
-            }
-        }
-    }
-
-    public synchronized void publishService(
-            int callingPid, IBinder token, Intent intent, IBinder published) throws RemoteException {
-        ServiceRecord service = servicesByToken.get(token);
-        if (service == null) throw new IllegalArgumentException("Unknown service token");
-        if (intent == null) throw new IllegalArgumentException("Missing service publication intent");
-        ApplicationProcessRegistry.AttachedApplication caller =
-                processes.requireAttachedProcess(callingPid);
-        requireOwner(service, caller);
-        IntentBindRecord binding = service.bindings.get(new Intent.FilterComparison(intent));
-        if (binding != null && binding.bindScheduled && !binding.publicationReceived) {
-            binding.publicationReceived = true;
-            binding.publishedBinder = published;
-            for (ConnectionRecord connection : new ArrayList<>(binding.connections)) {
-                try {
-                    notifyConnected(connection, published);
-                } catch (RemoteException deadClient) {
-                    removeConnectionsLocked(connection.connectionBinder, false);
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            synchronized (this) {
+                if (attached == null || attached.thread == null) return;
+                // A failed create/bind callback may retire this record or request a
+                // replacement process. Iterate a snapshot so the owner-death
+                // transition cannot invalidate this traversal.
+                for (ServiceRecord service : new ArrayList<>(services.values())) {
+                    if (service.component.getPackageName().equals(attached.packageName)
+                            && service.processName.equals(attached.processName)
+                            && service.uid == attached.uid) {
+                        attachAndSchedule(service, attached);
+                    }
                 }
             }
         }
-        finishExecutingCallback(service);
+        // Attachment without pending service work is not permission to quit
+        // ActivityThread's main Looper. Cached/isolated process retirement is
+        // AMS process policy, not a service callback or a BOUND_SERVICE test.
     }
 
-    public synchronized void unbindFinished(
+    /** Applies a process-death transition for one attached process snapshot. */
+    public void onProcessGone(
+            ApplicationProcessRegistry.AttachedApplication gone) {
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            synchronized (this) {
+                if (gone == null || gone.thread == null) return;
+                processLaunches.processGoneLocked(gone);
+                // Remove every connection made by this exact client before deciding
+                // which services have surviving demand. The ledger detaches all rows
+                // atomically; lifecycle work cannot observe a partially detached client.
+                ServiceConnectionIndex.Detached detached = connectionIndex.detachClient(gone);
+                unlinkDetached(detached);
+                for (ServiceRecord service : new ArrayList<>(servicesByToken.values())) {
+                    if (isOwner(service, gone)) {
+                        transitionAfterOwnerGone(service, gone.pid, gone.startSequence, gone.thread);
+                    }
+                }
+                try {
+                    settleDetached(detached);
+                } catch (RemoteException impossible) {
+                    throw new IllegalStateException("Service disconnect failed", impossible);
+                }
+            }
+        }
+    }
+
+    public void publishService(
+            int callingPid, IBinder token, Intent intent, IBinder published) throws RemoteException {
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            IntentBindRecord publishedBinding;
+            ServiceRecord service;
+            ApplicationProcessRegistry.AttachedApplication caller;
+            synchronized (this) {
+                ServiceRecord.LifecycleLane lane = requireLiveLifecycleLaneLocked(token);
+                service = lane.service;
+                if (intent == null) throw new IllegalArgumentException("Missing service publication intent");
+                if (callingPid <= 0) {
+                    throw new SecurityException("Synchronous service publication needs owner PID");
+                }
+                caller = processes.requireAttachedProcess(callingPid);
+                requireOwner(service, caller);
+                IntentBindRecord binding = service.bindings.get(new Intent.FilterComparison(intent));
+                if (binding != null && binding.bindScheduled && !binding.publicationReceived) {
+                    notifications.publishLocked(binding, published);
+                }
+                // An outbound connected callback may replace the process owner. The
+                // old publication must not consume the replacement's reserved callback.
+                if (!isOwner(service, caller) || !isCurrentLifecycleLaneLocked(lane)
+                        || (binding != null
+                        && service.bindings.get(new Intent.FilterComparison(intent)) != binding)) return;
+                lifecycleDispatcher.publishedLocked(service, binding);
+                publishedBinding = binding;
+            }
+            if (publishedBinding != null) notifications.dispatchBinding(publishedBinding);
+        }
+    }
+
+    public void unbindFinished(
             int callingPid, IBinder token, Intent intent) throws RemoteException {
-        ServiceRecord service = servicesByToken.get(token);
-        if (service == null || intent == null) return;
-        requireOwner(service, processes.requireAttachedProcess(callingPid));
-        IntentBindRecord binding = service.bindings.get(new Intent.FilterComparison(intent));
-        if (binding != null) {
-            binding.unbindScheduled = false;
-            binding.doRebind = true;
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            synchronized (this) {
+                ServiceRecord.LifecycleLane lane = requireLiveLifecycleLaneLocked(token);
+                ServiceRecord service = lane.service;
+                if (intent == null) return;
+                if (callingPid <= 0) {
+                    throw new SecurityException("Synchronous unbind completion needs owner PID");
+                }
+                requireOwner(service, processes.requireAttachedProcess(callingPid));
+                IntentBindRecord binding = service.bindings.get(new Intent.FilterComparison(intent));
+                lifecycleDispatcher.unbindFinishedLocked(service, binding, true);
+            }
         }
-        finishExecutingCallback(service);
     }
 
-    public synchronized void serviceDoneExecuting(
-            int callingUid, IBinder token, int type, int startId, int result, Intent intent)
+    public void serviceDoneExecuting(
+            int callingPid, int callingUid, IBinder token, int type, int startId, int result,
+            Intent intent)
             throws RemoteException {
-        ServiceRecord service = servicesByToken.get(token);
-        if (service == null) return;
-        if (callingUid < 0 || service.uid != callingUid) {
-            throw new SecurityException("Service completion came from another UID");
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            synchronized (this) {
+                ServiceRecord.LifecycleLane lane = requireLiveLifecycleLaneLocked(token);
+                ServiceRecord service = lane.service;
+                if (callingUid < 0 || service.uid != callingUid
+                        || lane.attachedOwner.uid != callingUid) {
+                    throw new SecurityException("Service completion came from another UID");
+                }
+                if (callingPid == 0) {
+                    // Binder does not expose a sender PID for FLAG_ONEWAY calls. The
+                    // capability still carries the exact app incarnation; retirement
+                    // removes that tuple from the registry before replacement.
+                    if (!processes.hasCallerIncarnation(lane.ownerPid,
+                            lane.ownerStartSequence, lane.ownerThread, callingUid)) {
+                        throw new SecurityException("Service completion owner is retired");
+                    }
+                } else {
+                    if (callingPid < 0 || callingPid != lane.ownerPid) {
+                        throw new SecurityException("Service completion came from another process");
+                    }
+                    requireOwner(service, processes.requireAttachedProcess(callingPid));
+                }
+                lifecycleDispatcher.doneLocked(service, type, intent);
+            }
         }
-        finishExecutingCallback(service);
     }
 
-    public synchronized boolean unbindService(IBinder connectionBinder) throws RemoteException {
-        return removeConnectionsLocked(connectionBinder, true);
+    public boolean unbindService(IBinder connectionBinder) throws RemoteException {
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            synchronized (this) {
+                return removeConnectionsLocked(connectionBinder, true);
+            }
+        }
     }
 
     private boolean removeConnectionsLocked(IBinder connectionBinder, boolean unlinkDeath)
             throws RemoteException {
-        ArrayList<ConnectionRecord> records = connections.remove(connectionBinder);
-        if (records == null || records.isEmpty()) return false;
-        IBinder.DeathRecipient death = connectionDeaths.remove(connectionBinder);
-        if (unlinkDeath && death != null) connectionBinder.unlinkToDeath(death, 0);
-        for (ConnectionRecord connection : new ArrayList<>(records)) {
+        ServiceConnectionIndex.Detached detached = connectionIndex.detachBinder(connectionBinder);
+        if (detached.isEmpty()) return false;
+        if (unlinkDeath) unlinkDetached(detached);
+        settleDetached(detached);
+        return true;
+    }
+
+    private void unlinkDetached(ServiceConnectionIndex.Detached detached) {
+        for (ServiceConnectionIndex.DeathPin pin : detached.deaths()) {
+            if (pin.recipient instanceof ServiceConnectionDeathRegistration) {
+                ServiceConnectionDeathRegistration registration =
+                        (ServiceConnectionDeathRegistration) pin.recipient;
+                if (registration.claimUnlinkLocked()) connectionResources.enqueueLocked(registration);
+            } else {
+                throw new IllegalStateException("Unknown service connection death owner");
+            }
+        }
+    }
+
+    private void settleDetached(ServiceConnectionIndex.Detached detached) throws RemoteException {
+        for (ConnectionRecord connection : detached.records()) {
+            notifications.detachLocked(connection);
+            releasePendingPinLocked(connection);
             IntentBindRecord binding = connection.binding;
-            binding.connections.remove(connection);
-            if (binding.connections.isEmpty()) {
+            ServiceRecord current = binding.service;
+            if (servicesByToken.get(current.canonicalToken) != current
+                    || current.bindings.get(new Intent.FilterComparison(binding.intent)) != binding) {
+                continue;
+            }
+            if (!binding.hasAdmittedConnections()) {
                 ServiceRecord service = binding.service;
                 // scheduleBindService and publishService are asynchronous. AOSP
                 // retains the IntentBindRecord and ServiceRecord token when the
                 // final client disconnects, then lets the app finish onBind and
                 // publish before the queued unbind runs. Removing either here
                 // makes that ordinary race look like a forged publication.
-                if (binding.bindScheduled && !binding.unbindScheduled
+                if (binding.bindScheduled && binding.hasBound && !binding.unbindScheduled
                         && service.applicationThread != null) {
-                    try {
-                        scheduleUnbind(service, binding);
-                    } catch (RemoteException error) { // Includes DeadObjectException.
-                        transitionAfterOwnerGone(service, service.ownerPid,
-                                service.ownerStartSequence, service.applicationThread.asBinder());
-                    }
-                } else if (!binding.bindScheduled) {
-                    service.bindings.remove(new Intent.FilterComparison(binding.intent));
+                    binding.unbindRequested = true;
+                    planLifecycleLocked(service);
+                } else if (!binding.bindScheduled && binding.pendingBinds == 0) {
+                    service.bindings.remove(new Intent.FilterComparison(binding.intent), binding);
                 }
                 retireIfUnowned(service);
             }
+            planLifecycleLocked(current);
         }
-        return true;
     }
 
-    private final class ConnectionDeathRecipient implements IBinder.DeathRecipient {
-        private final IBinder connectionBinder;
-
-        ConnectionDeathRecipient(IBinder binder) {
-            connectionBinder = binder;
-        }
-
-        @Override
-        public void binderDied() {
-            synchronized (ActiveServices.this) {
+    private void onConnectionDeath(ServiceConnectionDeathRegistration registration) {
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            synchronized (this) {
+                registration.dead = true;
+                if (connectionIndex.death(registration.binder) != registration) return;
                 try {
-                    removeConnectionsLocked(connectionBinder, false);
+                    removeConnectionsLocked(registration.binder, false);
                 } catch (RemoteException impossible) {
                     throw new RuntimeException(impossible);
                 }
@@ -296,145 +487,118 @@ public final class ActiveServices implements SystemServiceBindings {
 
     private boolean attachAndSchedule(ServiceRecord service,
             ApplicationProcessRegistry.AttachedApplication attached) throws RemoteException {
+        if (!processes.hasCallerIncarnation(attached.pid, attached.startSequence,
+                attached.thread, attached.uid)) return false;
         IApplicationThread thread = IApplicationThread.Stub.asInterface(attached.thread);
         if (thread == null) throw new IllegalStateException("Attached process has no app thread");
+        if (service.lifecycleLane != null
+                && !service.lifecycleLane.closed
+                && (service.ownerPid != attached.pid
+                    || service.ownerStartSequence != attached.startSequence
+                    || !service.lifecycleLane.ownerThread.equals(attached.thread))) {
+            return false;
+        }
+        if ((service.lifecycleLane == null || service.lifecycleLane.closed)
+                && service.ownerRevision == Long.MAX_VALUE) {
+            throw new IllegalStateException("Service owner revision exhausted");
+        }
         service.applicationThread = thread;
         service.ownerPid = attached.pid;
         service.ownerStartSequence = attached.startSequence;
+        if (service.lifecycleLane == null || service.lifecycleLane.closed) {
+            service.ownerRevision++;
+            ServiceRecord.LifecycleLane lane = new ServiceRecord.LifecycleLane(service, attached);
+            service.lifecycleLane = lane;
+            // The canonical ServiceRecord identity stays system-server-only.  Every
+            // process incarnation receives a new callback capability, so an old
+            // Binder token cannot reach a replacement with the same PID/UID.
+            service.token = lane.callbackToken;
+            lifecycleByToken.put(lane.callbackToken, lane);
+        }
         service.processRequested = false;
         if (!hasConnections(service)) {
             retireIfUnowned(service);
             return false;
         }
-        if (!service.createScheduled) {
-            long identity = Binder.clearCallingIdentity();
-            try {
-                thread.scheduleCreateService(service.token, service.serviceInfo,
-                        CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO,
-                        PROCESS_STATE_SERVICE);
-            } catch (RemoteException error) { // Includes DeadObjectException.
-                transitionAfterOwnerGone(service, service.ownerPid,
-                        service.ownerStartSequence, attached.thread);
-                return false;
-            } finally {
-                Binder.restoreCallingIdentity(identity);
-            }
-            service.createScheduled = true;
-            service.executingCallbacks++;
-        }
-        for (IntentBindRecord binding : service.bindings.values()) {
-            if (!binding.connections.isEmpty() && !binding.bindScheduled) {
-                long identity = Binder.clearCallingIdentity();
-                try {
-                    thread.scheduleBindService(service.token, binding.intent, binding.doRebind,
-                            PROCESS_STATE_SERVICE, binding.bindSequence);
-                } catch (RemoteException error) { // Includes DeadObjectException.
-                    transitionAfterOwnerGone(service, service.ownerPid,
-                            service.ownerStartSequence, attached.thread);
-                    return false;
-                } finally {
-                    Binder.restoreCallingIdentity(identity);
-                }
-                binding.requested = true;
-                binding.bindScheduled = true;
-                binding.hasBound = true;
-                binding.unbindScheduled = false;
-                binding.doRebind = false;
-                service.executingCallbacks++;
-            }
-        }
+        planLifecycleLocked(service);
         return hasConnections(service);
     }
 
-    private static void notifyConnected(ConnectionRecord connection, IBinder binder)
-            throws RemoteException {
-        long identity = Binder.clearCallingIdentity();
-        try {
-            connection.connection.connected(connection.binding.service.component, binder, false);
-        } finally {
-            Binder.restoreCallingIdentity(identity);
-        }
+    /** Policy admission only; notification transport runs after this monitor is released. */
+    private boolean canNotifyConnectionLocked(ConnectionRecord connection,
+            IBinder.DeathRecipient recipient) {
+        ServiceRecord service = connection.binding.service;
+        ServiceRecord.LifecycleLane lane = service.lifecycleLane;
+        return connection.admitted && connectionIndex.contains(connection)
+                && recipient instanceof ServiceConnectionDeathRegistration
+                && connectionIndex.death(connection.connectionBinder) == recipient
+                && ((ServiceConnectionDeathRegistration) recipient).isLinkedLocked()
+                && connection.owner.isCurrent(processes)
+                && servicesByToken.get(service.canonicalToken) == service
+                && services.get(serviceKey(service.component, service.instanceName)) == service
+                && service.bindings.get(new Intent.FilterComparison(connection.binding.intent))
+                        == connection.binding
+                && lane != null && processes.hasCallerIncarnation(lane.ownerPid,
+                        lane.ownerStartSequence, lane.ownerThread, service.uid);
     }
 
-    private void removeConnection(ConnectionRecord connection) {
-        connection.binding.connections.remove(connection);
-        ArrayList<ConnectionRecord> records = connections.get(connection.connectionBinder);
-        if (records != null) {
-            records.remove(connection);
-            if (records.isEmpty()) {
-                connections.remove(connection.connectionBinder);
-                IBinder.DeathRecipient death = connectionDeaths.remove(
-                        connection.connectionBinder);
-                if (death != null) connection.connectionBinder.unlinkToDeath(death, 0);
-            }
-        }
-        if (connection.binding.connections.isEmpty()) {
-            connection.binding.service.bindings.remove(
-                    new Intent.FilterComparison(connection.binding.intent));
-        }
+    private void removeConnection(ConnectionRecord connection) throws RemoteException {
+        ServiceConnectionIndex.Detached detached = connectionIndex.remove(connection);
+        unlinkDetached(detached);
+        settleDetached(detached);
     }
 
     private void removeService(String key, ServiceRecord service) {
         services.remove(key, service);
-        servicesByToken.remove(service.token, service);
-    }
-
-    private void scheduleUnbind(ServiceRecord service, IntentBindRecord binding)
-            throws RemoteException {
-        long identity = Binder.clearCallingIdentity();
-        try {
-            service.applicationThread.scheduleUnbindService(service.token, binding.intent);
-        } catch (RemoteException error) { // Includes DeadObjectException.
-            transitionAfterOwnerGone(service, service.ownerPid,
-                    service.ownerStartSequence, service.applicationThread.asBinder());
-            return;
-        } finally {
-            Binder.restoreCallingIdentity(identity);
-        }
-        binding.unbindScheduled = true;
-        binding.hasBound = false;
-        service.executingCallbacks++;
+        servicesByToken.remove(service.canonicalToken, service);
+        invalidateLifecycleCapabilityLocked(service.lifecycleLane);
     }
 
     private void retireIfUnowned(ServiceRecord service) throws RemoteException {
         if (hasConnections(service) || service.retiring) return;
         service.retiring = true;
+        planLifecycleLocked(service);
+    }
+
+    private void planLifecycleLocked(ServiceRecord service) {
+        lifecycleDispatcher.markDirtyLocked(service);
+    }
+
+    boolean lifecycleCanonicalLocked(ServiceRecord service) {
+        return servicesByToken.get(service.canonicalToken) == service;
+    }
+
+    void removeLifecycleCatalogKeyLocked(ServiceRecord service) {
         services.remove(serviceKey(service.component, service.instanceName), service);
-        maybeStopOrRemove(service);
     }
 
-    private void finishExecutingCallback(ServiceRecord service) throws RemoteException {
-        if (service.executingCallbacks > 0) service.executingCallbacks--;
-        maybeStopOrRemove(service);
+    void removeLifecycleServiceLocked(ServiceRecord service) {
+        removeLifecycleCatalogKeyLocked(service);
+        servicesByToken.remove(service.canonicalToken, service);
+        service.bindings.clear();
+        if (service.lifecycleLane != null) {
+            invalidateLifecycleCapabilityLocked(service.lifecycleLane);
+            lifecycleDispatcher.closeLocked(service.lifecycleLane);
+        }
     }
 
-    private void maybeStopOrRemove(ServiceRecord service) throws RemoteException {
-        if (!service.retiring || service.executingCallbacks != 0) return;
-        if (service.createScheduled && !service.stopScheduled
-                && service.applicationThread != null) {
-            long identity = Binder.clearCallingIdentity();
-            try {
-                service.applicationThread.scheduleStopService(service.token);
-            } catch (RemoteException error) { // Includes DeadObjectException.
-                transitionAfterOwnerGone(service, service.ownerPid,
-                        service.ownerStartSequence, service.applicationThread.asBinder());
-                return;
-            } finally {
-                Binder.restoreCallingIdentity(identity);
-            }
-            service.stopScheduled = true;
-            service.executingCallbacks++;
+    /** Called by the dispatcher with ActiveServices held after an IPC failure. */
+    void lifecycleTransportFailedLocked(ServiceLifecycleOperation operation, Throwable failure,
+            boolean terminalOwner) {
+        if (!operation.matchesOwner()) return;
+        operation.lane.transportSealed = true;
+        operation.lane.transportFailure = failure;
+        if (!terminalOwner) {
             return;
         }
-        if (!service.createScheduled || service.stopScheduled) {
-            servicesByToken.remove(service.token, service);
-            service.bindings.clear();
-        }
+        ApplicationProcessRegistry.AttachedApplication gone = processes.retireAttached(
+                operation.ownerPid, operation.ownerSequence, operation.ownerThread);
+        onProcessGone(gone == null ? operation.lane.attachedOwner : gone);
     }
 
     private static boolean hasConnections(ServiceRecord service) {
         for (IntentBindRecord binding : service.bindings.values()) {
-            if (!binding.connections.isEmpty()) return true;
+            if (binding.hasAdmittedConnections()) return true;
         }
         return false;
     }
@@ -449,6 +613,34 @@ public final class ActiveServices implements SystemServiceBindings {
     }
 
     /**
+     * Resolves and authenticates a guest callback capability while ActiveServices is held.
+     * The registry tuple check is deliberate: Binder token identity alone must not survive
+     * process retirement or authorize a same-PID replacement.
+     */
+    private ServiceRecord.LifecycleLane requireLiveLifecycleLaneLocked(IBinder token) {
+        ServiceRecord.LifecycleLane lane = token == null ? null : lifecycleByToken.get(token);
+        if (lane == null || lane.closed || lane.service.lifecycleLane != lane
+                || servicesByToken.get(lane.service.canonicalToken) != lane.service
+                || !processes.hasCallerIncarnation(lane.ownerPid, lane.ownerStartSequence,
+                        lane.ownerThread, lane.service.uid)) {
+            throw new SecurityException("Unknown or retired service callback capability");
+        }
+        return lane;
+    }
+
+    private boolean isCurrentLifecycleLaneLocked(ServiceRecord.LifecycleLane lane) {
+        return lane != null && !lane.closed && lane.service.lifecycleLane == lane
+                && lifecycleByToken.get(lane.callbackToken) == lane
+                && servicesByToken.get(lane.service.canonicalToken) == lane.service;
+    }
+
+    private void invalidateLifecycleCapabilityLocked(ServiceRecord.LifecycleLane lane) {
+        if (lane == null) return;
+        lifecycleByToken.remove(lane.callbackToken, lane);
+        if (lane.service.lifecycleLane == lane) lane.service.token = lane.service.canonicalToken;
+    }
+
+    /**
      * Clears callbacks belonging to a dead owner while retaining live client
      * records. Existing clients request a fresh process; an ownerless service
      * is retired without sending more Binder work to the dead process.
@@ -460,6 +652,13 @@ public final class ActiveServices implements SystemServiceBindings {
                 || service.ownerStartSequence != startSequence
                 || !service.applicationThread.asBinder().equals(threadBinder)) return;
 
+        ServiceRecord.LifecycleLane oldLane = service.lifecycleLane;
+        if (oldLane != null) {
+            invalidateLifecycleCapabilityLocked(oldLane);
+            lifecycleDispatcher.closeLocked(oldLane);
+        }
+        service.lifecycleLane = null;
+
         service.applicationThread = null;
         service.ownerPid = 0;
         service.ownerStartSequence = -1;
@@ -467,19 +666,27 @@ public final class ActiveServices implements SystemServiceBindings {
         service.stopScheduled = false;
         service.processRequested = false;
         service.executingCallbacks = 0;
+        service.createCallbackPending = false;
+        service.stopCallbackPending = false;
 
         ArrayList<Intent.FilterComparison> emptyBindings = new ArrayList<>();
         for (java.util.Map.Entry<Intent.FilterComparison, IntentBindRecord> entry
                 : service.bindings.entrySet()) {
             IntentBindRecord binding = entry.getValue();
             binding.bindScheduled = false;
+            binding.unbindRequested = false;
             binding.unbindScheduled = false;
             binding.requested = false;
             binding.hasBound = false;
             binding.publicationReceived = false;
+            notifications.invalidateLocked(binding);
             binding.publishedBinder = null;
             binding.doRebind = false;
-            if (binding.connections.isEmpty()) emptyBindings.add(entry.getKey());
+            binding.bindCallbackPending = false;
+            binding.rebindCallbackPending = false;
+            if (!binding.hasAdmittedConnections() && binding.pendingBinds == 0) {
+                emptyBindings.add(entry.getKey());
+            }
         }
         for (Intent.FilterComparison key : emptyBindings) {
             IntentBindRecord binding = service.bindings.remove(key);
@@ -488,30 +695,24 @@ public final class ActiveServices implements SystemServiceBindings {
 
         if (hasConnections(service)) {
             service.retiring = false;
-            service.processRequested = true;
-            try {
-                launcher.start(service.component.getPackageName(), service.processName, service.uid,
-                        service.isolated, nextSequence());
-            } catch (RuntimeException | Error error) {
-                service.processRequested = false;
+            ApplicationProcessRegistry.AttachedApplication replacement = processes.findAttached(
+                    service.component.getPackageName(), service.processName, service.uid);
+            if (replacement != null) {
+                try { attachAndSchedule(service, replacement); }
+                catch (RemoteException failure) {
+                    throw new IllegalStateException("Replacement owner admission failed", failure);
+                }
+            } else {
+                processLaunches.requestLocked(service, null);
             }
         } else {
             service.retiring = true;
-            services.remove(serviceKey(service.component, service.instanceName), service);
-            servicesByToken.remove(service.token, service);
-            service.bindings.clear();
+            planLifecycleLocked(service);
         }
     }
 
     private void removeIndexedConnections(IntentBindRecord binding) {
-        if (binding == null) return;
-        ArrayList<IBinder> emptyKeys = new ArrayList<>();
-        for (java.util.Map.Entry<IBinder, ArrayList<ConnectionRecord>> entry
-                : connections.entrySet()) {
-            entry.getValue().removeIf(connection -> connection.binding == binding);
-            if (entry.getValue().isEmpty()) emptyKeys.add(entry.getKey());
-        }
-        for (IBinder key : emptyKeys) connections.remove(key);
+        unlinkDetached(connectionIndex.detachBinding(binding));
     }
 
     private static void requireOwner(ServiceRecord service,
@@ -548,5 +749,49 @@ public final class ActiveServices implements SystemServiceBindings {
 
     private static String serviceKey(ComponentName component, String instanceName) {
         return component.flattenToString() + "\u0000" + (instanceName == null ? "" : instanceName);
+    }
+
+    /** Performs queued Binder resource tails with no ActiveServices lock held. */
+    private void drainDeferredTails() {
+        if (Thread.holdsLock(this)) return;
+        Throwable failure = null;
+        long epoch = processLaunches.beginDrain();
+        java.util.IdentityHashMap<ServiceConnectionDeathRegistration, Boolean> triedUnlinks =
+                new java.util.IdentityHashMap<>();
+        boolean progressed;
+        do {
+            progressed = false;
+            Throwable unlinkFailure = connectionResources.drain(triedUnlinks);
+            if (unlinkFailure != null) {
+                if (failure == null) failure = unlinkFailure;
+                else if (failure != unlinkFailure) failure.addSuppressed(unlinkFailure);
+            }
+            try {
+                progressed |= processLaunches.drain(epoch);
+            } catch (RuntimeException | Error next) {
+                progressed = true;
+                if (failure == null) failure = next;
+                else if (failure != next) failure.addSuppressed(next);
+            }
+            try {
+                progressed |= lifecycleDispatcher.drain();
+            } catch (RuntimeException | Error next) {
+                progressed = true;
+                if (failure == null) failure = next;
+                else if (failure != next) failure.addSuppressed(next);
+            }
+        } while (progressed);
+        if (failure != null) rethrow(failure);
+    }
+
+    /** Java resource scopes preserve the primary error if a transport tail fails. */
+    private final class DeferredTailScope implements AutoCloseable {
+        @Override public void close() { drainDeferredTails(); }
+    }
+
+    private static void rethrow(Throwable failure) {
+        if (failure instanceof RuntimeException) throw (RuntimeException) failure;
+        if (failure instanceof Error) throw (Error) failure;
+        throw new AssertionError(failure);
     }
 }

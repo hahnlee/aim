@@ -285,8 +285,11 @@ operations, but Rust owns the lifetime and the graph that decides when each
 native artifact is rebuilt.
 
 The production probe is split into independently cached phase objects:
-fixture/environment selection (`runtime_process_options.cc`), shutdown and
-finalizers (`runtime_shutdown_probe.cc`), network acceptance
+production process configuration (`runtime/embedding/process_config.cc`),
+fixture selection (`probes/runtime_fixture_options.cc`), production shutdown
+coordination (`runtime/embedding/process_shutdown.cc`, with ART VM and
+framework app owners), and fixture finalizers (`runtime_shutdown_probe.cc`),
+network acceptance
 (`runtime_acceptance_phases.cc`), and graphics presentation/JNI orchestration
 (`runtime_graphics_phase.cc`) and pointer/frame input dispatch
 (`runtime_graphics_input.cc`). RenderNode recording/orchestration remains in

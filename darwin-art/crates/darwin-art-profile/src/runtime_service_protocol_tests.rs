@@ -187,22 +187,18 @@ fn bounds_and_pid_contract_are_enforced() {
     request.arguments = vec![OsString::from("x")];
     request.environment = vec![(OsString::from("K"), OsString::from("v")); MAX_ENVC + 1];
     assert!(request.encode().is_err());
-    assert!(
-        StartRuntimeResponse {
-            pid: 0,
-            token: InstanceToken([0; 16]),
-        }
-        .encode()
-        .is_err()
-    );
-    assert!(
-        StartRuntimeResponse {
-            pid: i32::MAX as u32 + 1,
-            token: InstanceToken([0; 16]),
-        }
-        .encode()
-        .is_err()
-    );
+    assert!(StartRuntimeResponse {
+        pid: 0,
+        token: InstanceToken([0; 16]),
+    }
+    .encode()
+    .is_err());
+    assert!(StartRuntimeResponse {
+        pid: i32::MAX as u32 + 1,
+        token: InstanceToken([0; 16]),
+    }
+    .encode()
+    .is_err());
 }
 
 #[test]

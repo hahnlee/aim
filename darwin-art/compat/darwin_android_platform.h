@@ -1,5 +1,7 @@
 #pragma once
 
+#include "graphics/hardware_buffer_owner.h"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -50,21 +52,6 @@ extern "C" int darwin_art_android_shared_memory_get_info(
 extern "C" int darwin_art_android_shared_memory_adopt(
     int fd, size_t size, int protection);
 
-// Creates a Metal 2D texture over the exact IOSurface storage owned by an
-// AHardwareBuffer. The device must be the MTLDevice exported by ANGLE's EGL
-// display. The returned Objective-C object is retained until the matching
-// release call.
-struct AHardwareBuffer;
-extern "C" void* darwin_art_android_hardware_buffer_metal_texture(
-    AHardwareBuffer* buffer, void* metal_device);
-// Vulkan's Android external-memory contract exposes FORMAT_R8G8B8A8_UNORM.
-// Use an RGBA Metal view of the same IOSurface instead of the BGRA view used
-// by EGL and the host compositor.
-extern "C" void* darwin_art_android_hardware_buffer_vulkan_metal_texture(
-    AHardwareBuffer* buffer, void* metal_device);
-extern "C" void* darwin_art_android_iosurface_metal_texture(
-    void* iosurface, uint32_t width, uint32_t height, void* metal_device);
-extern "C" void darwin_art_android_metal_texture_release(void* texture);
 // Creates a Metal shared event on the supplied MTLDevice and reserves the
 // next monotonically increasing signal value. The returned event is retained
 // until release. A fence descriptor created from it becomes readable only
@@ -84,13 +71,6 @@ extern "C" int darwin_art_android_metal_shared_event_import_fence(
     void* shared_event, uint64_t signal_value, int fence_fd);
 extern "C" void darwin_art_android_metal_shared_event_release(
     void* shared_event);
-extern "C" void* darwin_art_android_hardware_buffer_native_window_buffer(
-    AHardwareBuffer* buffer);
-extern "C" AHardwareBuffer*
-darwin_art_android_hardware_buffer_from_client_buffer(void* client_buffer);
-extern "C" void* darwin_art_android_hardware_buffer_iosurface(
-    AHardwareBuffer* buffer);
-
 // Framework SurfaceControl JNI and NDK libandroid clients share one retained
 // compositor graph. These entry points create the display-root identity and
 // reset a reusable transaction without exposing the private implementation.
@@ -108,6 +88,11 @@ extern "C" void darwin_art_android_surface_transaction_clear(
     void* transaction);
 extern "C" void darwin_art_android_surface_transaction_merge(
     void* destination, void* source);
+// Internal two-phase merge hook. The caller supplies an empty operation-local
+// disposal transaction and destroys it only after leaving any state mutex.
+// Structural merge performs no resource release or callback invocation.
+extern "C" bool darwin_art_android_surface_transaction_merge_deferred(
+    void* destination, void* source, void* disposal);
 // Internal ownership hook: runs only if an unapplied transaction is cleared
 // or deleted. A successful apply consumes it without invoking the callback.
 extern "C" void darwin_art_android_surface_transaction_set_on_discard(
@@ -121,7 +106,21 @@ extern "C" void darwin_art_android_surface_transaction_set_transparent_region_hi
 extern "C" size_t darwin_art_android_surface_control_copy_transparent_region(
     void* control, int32_t* rects, size_t capacity);
 struct ASurfaceTransactionStats;
+struct AHardwareBuffer;
+struct ASurfaceControl;
+extern "C" bool ASurfaceTransactionStats_getPreviousBufferMetadata(
+    ASurfaceTransactionStats* stats, ASurfaceControl* control,
+    AHardwareBuffer** buffer, uint64_t* submission_cookie);
+extern "C" bool
+darwin_art_android_surface_transaction_set_buffer_with_cookie_checked(
+    void* transaction, void* control, AHardwareBuffer* buffer, int fence_fd,
+    uint64_t submission_cookie);
 // discard owns its fence; -1 is ready, -2 requires quarantine after fence failure.
+// A false checked result transfers no callback-context ownership.
+extern "C" bool darwin_art_android_surface_transaction_set_buffer_callbacks_checked(
+    void* transaction, void* control, void* context,
+    void (*complete)(void*, ASurfaceTransactionStats*),
+    void (*discard)(void*, int));
 extern "C" void darwin_art_android_surface_transaction_set_buffer_callbacks(
     void* transaction, void* control, void* context,
     void (*complete)(void*, ASurfaceTransactionStats*),

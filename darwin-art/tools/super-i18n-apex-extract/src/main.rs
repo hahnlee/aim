@@ -161,6 +161,32 @@ struct LogicalExtent {
     length: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Partition {
+    System,
+    SystemExt,
+}
+
+impl Partition {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "system" => Ok(Self::System),
+            "system_ext" => Ok(Self::SystemExt),
+            _ => Err(invalid(format!(
+                "unsupported LP partition {value:?}; expected system or system_ext"
+            ))
+            .into()),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::SystemExt => "system_ext",
+        }
+    }
+}
+
 fn descriptor(
     header: &[u8],
     offset: usize,
@@ -182,7 +208,11 @@ fn descriptor(
     Ok((start, count))
 }
 
-fn lp_system(disk: &Disk, super_region: Region) -> Result<(Vec<LogicalExtent>, u64, (u16, u16))> {
+fn lp_partition(
+    disk: &Disk,
+    super_region: Region,
+    wanted_partition: Partition,
+) -> Result<(Vec<LogicalExtent>, u64, (u16, u16))> {
     let geometry = disk.read(add(super_region.offset, 4096, "locating LP geometry")?, 52)?;
     if le32(&geometry, 0)? != LP_GEOMETRY_MAGIC || le32(&geometry, 4)? != 52 {
         return Err(invalid("invalid LP geometry").into());
@@ -240,9 +270,13 @@ fn lp_system(disk: &Disk, super_region: Region) -> Result<(Vec<LogicalExtent>, u
     for i in 0..pn {
         let e = &tables[po + i * 52..po + (i + 1) * 52];
         let end = e[..36].iter().position(|b| *b == 0).unwrap_or(36);
-        if &e[..end] == b"system" {
+        if &e[..end] == wanted_partition.name().as_bytes() {
             if partition.is_some() {
-                return Err(invalid("duplicate LP system partition").into());
+                return Err(invalid(format!(
+                    "duplicate LP {} partition",
+                    wanted_partition.name()
+                ))
+                .into());
             }
             partition = Some((
                 usize::try_from(le32(e, 40)?)?,
@@ -250,9 +284,10 @@ fn lp_system(disk: &Disk, super_region: Region) -> Result<(Vec<LogicalExtent>, u
             ));
         }
     }
-    let (first, count) = partition.ok_or_else(|| invalid("LP system partition missing"))?;
+    let (first, count) = partition
+        .ok_or_else(|| invalid(format!("LP {} partition missing", wanted_partition.name())))?;
     if count == 0 || first.checked_add(count).is_none_or(|v| v > en) {
-        return Err(invalid("system LP extents invalid").into());
+        return Err(invalid(format!("{} LP extents invalid", wanted_partition.name())).into());
     }
     let mut extents = Vec::with_capacity(count);
     let mut logical = 0u64;
@@ -263,7 +298,9 @@ fn lp_system(disk: &Disk, super_region: Region) -> Result<(Vec<LogicalExtent>, u
         let target = le64(e, 12)?;
         let source = usize::try_from(le32(e, 20)?)?;
         if sectors == 0 || kind != 0 || source >= bn {
-            return Err(invalid("unsupported LP system extent").into());
+            return Err(
+                invalid(format!("unsupported LP {} extent", wanted_partition.name())).into(),
+            );
         }
         let length = mul(sectors, SECTOR, "sizing LP extent")?;
         let physical = add(
@@ -281,7 +318,11 @@ fn lp_system(disk: &Disk, super_region: Region) -> Result<(Vec<LogicalExtent>, u
             physical,
             length,
         });
-        logical = add(logical, length, "sizing system")?;
+        logical = add(
+            logical,
+            length,
+            &format!("sizing {}", wanted_partition.name()),
+        )?;
     }
     Ok((extents, logical, (major, minor)))
 }
@@ -872,7 +913,7 @@ fn run() -> Result<()> {
     let program = args.next().unwrap_or_default();
     let input = args.next().map(PathBuf::from).ok_or_else(|| {
         invalid(format!(
-            "usage: {} INPUT-system.img OUTPUT [APEX_NAME | --path INTERNAL_PATH | --symlink INTERNAL_PATH | --stat INTERNAL_PATH]",
+            "usage: {} INPUT-system.img OUTPUT [--partition system|system_ext] [APEX_NAME | --path INTERNAL_PATH | --symlink INTERNAL_PATH | --stat INTERNAL_PATH]",
             PathBuf::from(program).display()
         ))
     })?;
@@ -880,7 +921,34 @@ fn run() -> Result<()> {
         .next()
         .map(PathBuf::from)
         .ok_or_else(|| invalid("missing OUTPUT.apex"))?;
-    let selector = args.next().and_then(|value| value.into_string().ok());
+    let first = args.next();
+    let (partition, selector) = if first.as_deref() == Some(std::ffi::OsStr::new("--partition")) {
+        let value = args
+            .next()
+            .ok_or_else(|| invalid("--partition requires system or system_ext"))?;
+        let value = value
+            .into_string()
+            .map_err(|_| invalid("--partition value must be valid UTF-8"))?;
+        let partition = Partition::parse(&value)?;
+        let selector = args
+            .next()
+            .map(|value| {
+                value
+                    .into_string()
+                    .map_err(|_| invalid("selector must be valid UTF-8"))
+            })
+            .transpose()?;
+        (partition, selector)
+    } else {
+        let selector = first
+            .map(|value| {
+                value
+                    .into_string()
+                    .map_err(|_| invalid("selector must be valid UTF-8"))
+            })
+            .transpose()?;
+        (Partition::System, selector)
+    };
     let preserve_link = selector.as_deref() == Some("--symlink");
     let metadata_only = selector.as_deref() == Some("--stat");
     if metadata_only && output != Path::new("-") {
@@ -897,6 +965,13 @@ fn run() -> Result<()> {
         (path, None)
     } else {
         let apex_name = selector.unwrap_or_else(|| DEFAULT_APEX_NAME.to_owned());
+        if partition != Partition::System {
+            return Err(invalid(format!(
+                "--partition {} requires an explicit path selector",
+                partition.name()
+            ))
+            .into());
+        }
         if apex_name.is_empty()
             || apex_name == "."
             || apex_name == ".."
@@ -914,11 +989,11 @@ fn run() -> Result<()> {
     }
     let disk = Disk::open(&input)?;
     let (super_region, gpt) = gpt_super(&disk)?;
-    let (extents, system_size, lp) = lp_system(&disk, super_region)?;
+    let (extents, partition_size, lp) = lp_partition(&disk, super_region, partition)?;
     let view = ExtentView {
         disk: &disk,
         extents,
-        size: system_size,
+        size: partition_size,
         reads: 0,
         bytes: 0,
     };
@@ -958,11 +1033,13 @@ fn run() -> Result<()> {
         gpt.0, gpt.1, super_region.offset, super_region.size
     );
     println!(
-        "lp.version={}.{} system.extents={} system.size={}",
+        "lp.version={}.{} {}.extents={} {}.size={}",
         lp.0,
         lp.1,
+        partition.name(),
         fs.view.extents.len(),
-        system_size
+        partition.name(),
+        partition_size
     );
     println!(
         "erofs.block_size={} erofs.incompat={:#x} target.nid={} target.compressed_blocks={} target.pclusters={}",
@@ -988,6 +1065,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partition_selector_accepts_only_supported_lp_names() {
+        assert_eq!(Partition::parse("system").unwrap(), Partition::System);
+        assert_eq!(
+            Partition::parse("system_ext").unwrap(),
+            Partition::SystemExt
+        );
+        assert!(Partition::parse("product").is_err());
+        assert!(Partition::parse("system-ext").is_err());
+    }
+
     #[test]
     fn hashes_known_vector() {
         assert_eq!(

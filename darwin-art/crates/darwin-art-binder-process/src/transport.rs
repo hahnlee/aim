@@ -6,12 +6,7 @@ use darwin_art_binder_device::{
 #[derive(Debug)]
 pub struct TransportError(pub String);
 
-#[derive(Clone, Copy)]
-pub struct DescriptorApi {
-    pub export: unsafe extern "C" fn(i32) -> i32,
-    pub import: unsafe extern "C" fn(i32) -> i32,
-    pub close: unsafe extern "C" fn(i32) -> i32,
-}
+pub use crate::descriptor_transport::DescriptorApi;
 
 pub trait AuthorityTransport: Send + Sync + 'static {
     fn connection(&self) -> ConnectionToken;

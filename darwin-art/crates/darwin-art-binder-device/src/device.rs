@@ -156,28 +156,37 @@ impl OpenConnection {
         generation: u64,
         timeout: Duration,
     ) -> Result<WorkWait, Error<E>> {
+        self.wait_for_work_thread(thread_id, generation, Some(timeout))
+    }
+
+    pub fn wait_for_work_for_thread_indefinite<E>(
+        &self,
+        thread_id: u64,
+        generation: u64,
+    ) -> Result<WorkWait, Error<E>> {
+        self.wait_for_work_thread(thread_id, generation, None)
+    }
+
+    fn wait_for_work_thread<E>(
+        &self,
+        thread_id: u64,
+        generation: u64,
+        timeout: Option<Duration>,
+    ) -> Result<WorkWait, Error<E>> {
         let key = self.key.as_ref().ok_or(Error::Closed)?;
-        let entered = self
+        let registration = self
             .registry
-            .enter_idle_wait(key, thread_id)
+            .prepare_thread_work_wait(key, thread_id)
             .map_err(Error::Registry)?;
-        let waited = self
-            .registry
-            .wait_for_work(key, generation, timeout)
-            .map(|outcome| match outcome {
-                crate::work_signal::WaitOutcome::Changed => WorkWait::Changed,
-                crate::work_signal::WaitOutcome::Closed => WorkWait::Closed,
-                crate::work_signal::WaitOutcome::TimedOut => WorkWait::TimedOut,
-            });
-        let cleanup = if entered {
-            self.registry.leave_idle_wait(key, thread_id)
-        } else {
-            Ok(())
+        let waited = match registration.wait(generation, timeout) {
+            crate::work_signal::WaitOutcome::Changed => WorkWait::Changed,
+            crate::work_signal::WaitOutcome::Closed => WorkWait::Closed,
+            crate::work_signal::WaitOutcome::TimedOut => WorkWait::TimedOut,
         };
-        match (waited, cleanup) {
-            (Ok(outcome), Ok(())) => Ok(outcome),
-            (Err(error), _) | (_, Err(error)) => Err(Error::Registry(error)),
-        }
+        registration
+            .finish()
+            .map_err(|error| Error::Registry(connection_registry::Error::Connection(error)))?;
+        Ok(waited)
     }
 
     /// Back the original ProcessState mmap with one read-only client view. The
@@ -307,8 +316,8 @@ impl OpenConnection {
     }
 
     /// Execute writes once, then wait and retry only the read half. `timeout`
-    /// bounds host interruption/testing; the production guest-FD adapter can
-    /// pass a long bounded interval and recheck its own cancellation state.
+    /// bounds host interruption/testing. The production routed guest-FD adapter
+    /// uses its explicit indefinite read API instead of an idle deadline.
     pub fn execute_write_read_blocking<M: ClientMemory>(
         &self,
         thread_id: u64,
@@ -316,6 +325,9 @@ impl OpenConnection {
         memory: &mut M,
         timeout: Duration,
     ) -> Result<WriteReadStatus, Error<M::Error>> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(Error::InvalidArgument)?;
         let request = ioctl::Request::decode(header)
             .map_err(|error| Error::Ioctl(ioctl::Error::Header(error)))?;
         let mut generation = self.work_generation()?;
@@ -324,11 +336,8 @@ impl OpenConnection {
             return Ok(WriteReadStatus::Completed);
         }
 
-        let deadline = Instant::now().checked_add(timeout);
         loop {
-            let remaining = deadline
-                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-                .unwrap_or(Duration::MAX);
+            let remaining = deadline.saturating_duration_since(Instant::now());
             match self.wait_for_work_for_thread(thread_id, generation, remaining)? {
                 WorkWait::Closed => return Ok(WriteReadStatus::Closed),
                 WorkWait::TimedOut => return Ok(WriteReadStatus::TimedOut),
@@ -519,6 +528,12 @@ mod tests {
         ]));
         let mut header =
             write_read_header_sized(0x1000, 4, 0x2000, crate::transaction_wire::RECORD_SIZE);
+        let before = header;
+        assert!(matches!(
+            connection.execute_write_read_blocking(7, &mut header, &mut memory, Duration::MAX),
+            Err(Error::InvalidArgument)
+        ));
+        assert_eq!(header, before); // Invalid deadline never executes writes.
         assert_eq!(
             connection
                 .execute_write_read_blocking(7, &mut header, &mut memory, Duration::ZERO)

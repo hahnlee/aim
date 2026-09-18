@@ -13,8 +13,8 @@ use darwin_art_engine_sys::{
     ProcessSnapshotUninstallFn, ProviderClearHooksFn, ProviderInstallHooksFn,
     ProviderNativeAcquireFn, ProviderNativeReleaseFn, RunProcessFn, ShutdownProcessFn,
     SurfaceActiveFn, SurfaceCloseRequestedFn, SurfaceCreateFn, SurfaceDestroyFn, SurfaceGetSizeFn,
-    SurfaceNextKeyEventV1Fn, SurfaceNextPointerEventFn, SurfaceNextPointerEventV2Fn,
-    SurfacePresentAsyncFn, SurfacePresentFn, SurfacePumpEventsFn, SurfaceResizeFn, SurfaceUpdateFn,
+    SurfaceInstallAndroidInputSinkFn, SurfacePresentAsyncFn, SurfacePresentFn, SurfacePumpEventsFn,
+    SurfaceResizeFn, SurfaceUpdateFn,
 };
 use darwin_art_engine_sys::{
     BinderCloseFileFn, BinderExportFileFn, BinderFdInstallOwnerFn, BinderFdPublishFn,
@@ -40,6 +40,19 @@ pub(crate) struct ProcessSymbols {
     pub uninstall_process_filesystem: ProcessFilesystemUninstallFn,
 }
 
+// Execution images may provide only the process entry/shutdown pair. Keep
+// these aliases separate from the product's full ProcessSymbols table: the
+// selected image is an explicit caller-owned execution target, not a second
+// provider of the product ABI.
+pub(crate) type ProcessRunFn = RunProcessFn;
+pub(crate) type ShutdownFn = ShutdownProcessFn;
+
+#[derive(Clone, Copy)]
+pub(crate) struct ExecutionSymbols {
+    pub run_process: ProcessRunFn,
+    pub shutdown_process: ShutdownFn,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct SurfaceSymbols {
     pub create: SurfaceCreateFn,
@@ -50,9 +63,7 @@ pub(crate) struct SurfaceSymbols {
     pub present_async: Option<SurfacePresentAsyncFn>,
     pub pump_events: SurfacePumpEventsFn,
     pub close_requested: SurfaceCloseRequestedFn,
-    pub next_pointer_event: SurfaceNextPointerEventFn,
-    pub next_pointer_event_v2: Option<SurfaceNextPointerEventV2Fn>,
-    pub next_key_event_v1: Option<SurfaceNextKeyEventV1Fn>,
+    pub install_android_input_sink: SurfaceInstallAndroidInputSinkFn,
     pub destroy: SurfaceDestroyFn,
     pub active: SurfaceActiveFn,
     pub appkit_pump_events: AppKitPumpEventsFn,
@@ -74,6 +85,10 @@ pub(crate) struct GraphicsSymbols {
 
 #[derive(Clone, Copy)]
 pub(crate) struct ProviderSymbols {
+    pub install_fd_inheritance: darwin_art_engine_sys::FdInheritanceInstallFn,
+    pub install_scm_endpoint: darwin_art_engine_sys::ScmEndpointProviderInstallFn,
+    pub uninstall_scm_endpoint: darwin_art_engine_sys::ScmEndpointProviderUninstallFn,
+    pub socket_broker_is_active: darwin_art_engine_sys::SocketBrokerIsActiveFn,
     pub install_hooks: ProviderInstallHooksFn,
     pub clear_hooks: ProviderClearHooksFn,
     pub native_acquire: ProviderNativeAcquireFn,
@@ -86,6 +101,8 @@ pub struct BinderBrokerSymbols {
     pub publish: BinderFdPublishFn,
     pub uninstall_owner: BinderFdUninstallOwnerFn,
     pub export_file: BinderExportFileFn,
+    pub export_retained_file: darwin_art_engine_sys::BinderRetainedExportFn,
+    pub release_export_lease: darwin_art_engine_sys::BinderExportLeaseReleaseFn,
     pub import_file: BinderImportFileFn,
     pub close_file: BinderCloseFileFn,
 }
@@ -101,7 +118,13 @@ pub(crate) struct EngineSymbols {
 
 pub(crate) struct LoadedEngine {
     _library: DynamicLibrary,
+    execution_image: Option<ExecutionImage>,
     symbols: EngineSymbols,
+}
+
+struct ExecutionImage {
+    _library: DynamicLibrary,
+    symbols: ExecutionSymbols,
 }
 
 impl LoadedEngine {
@@ -132,14 +155,8 @@ impl LoadedEngine {
                     present_async: library.symbol(b"darwin_art_surface_present_async\0").ok(),
                     pump_events: library.symbol(b"darwin_art_surface_pump_events\0")?,
                     close_requested: library.symbol(b"darwin_art_surface_close_requested\0")?,
-                    next_pointer_event: library
-                        .symbol(b"darwin_art_surface_next_pointer_event\0")?,
-                    next_pointer_event_v2: library
-                        .symbol(b"darwin_art_surface_next_pointer_event_v2\0")
-                        .ok(),
-                    next_key_event_v1: library
-                        .symbol(b"darwin_art_surface_next_key_event_v1\0")
-                        .ok(),
+                    install_android_input_sink: library
+                        .symbol(b"darwin_art_android_input_sink_install\0")?,
                     destroy: library.symbol(b"darwin_art_surface_destroy\0")?,
                     active: library.symbol(b"darwin_art_surface_active_gpu\0")?,
                     appkit_pump_events: library.symbol(b"darwin_art_appkit_pump_events\0")?,
@@ -173,6 +190,14 @@ impl LoadedEngine {
                         .ok(),
                 },
                 provider: ProviderSymbols {
+                    install_fd_inheritance: library
+                        .symbol(b"darwin_art_bionic_install_fd_inheritance_boundary\0")?,
+                    install_scm_endpoint: library
+                        .symbol(b"darwin_art_bionic_install_scm_endpoint_provider\0")?,
+                    uninstall_scm_endpoint: library
+                        .symbol(b"darwin_art_bionic_uninstall_scm_endpoint_provider\0")?,
+                    socket_broker_is_active: library
+                        .symbol(b"darwin_art_bionic_socket_broker_is_active\0")?,
                     install_hooks: library.symbol(b"darwin_art_provider_install_hooks\0")?,
                     clear_hooks: library.symbol(b"darwin_art_provider_clear_hooks\0")?,
                     native_acquire: library.symbol(b"darwin_art_provider_native_acquire\0")?,
@@ -185,6 +210,10 @@ impl LoadedEngine {
                     uninstall_owner: library
                         .symbol(b"darwin_art_bionic_binder_fd_uninstall_owner\0")?,
                     export_file: library.symbol(b"darwin_art_binder_export_file_descriptor\0")?,
+                    export_retained_file: library
+                        .symbol(b"darwin_art_binder_export_retained_file_descriptor\0")?,
+                    release_export_lease: library
+                        .symbol(b"darwin_art_binder_release_export_lease\0")?,
                     import_file: library.symbol(b"darwin_art_binder_import_file_descriptor\0")?,
                     close_file: library.symbol(b"darwin_art_binder_close_file_descriptor\0")?,
                 },
@@ -192,8 +221,55 @@ impl LoadedEngine {
         };
         Ok(Self {
             _library: library,
+            execution_image: None,
             symbols,
         })
+    }
+
+    pub(crate) fn bind_execution_image(
+        &mut self,
+        path: &Path,
+        run_symbol: &str,
+        shutdown_symbol: &str,
+    ) -> Result<(), String> {
+        if run_symbol.is_empty() || shutdown_symbol.is_empty() {
+            return Err("execution entry symbol names must not be empty".to_owned());
+        }
+        let run_symbol = CString::new(run_symbol)
+            .map_err(|_| "execution run symbol contains an interior NUL".to_owned())?;
+        let shutdown_symbol = CString::new(shutdown_symbol)
+            .map_err(|_| "execution shutdown symbol contains an interior NUL".to_owned())?;
+        let library = DynamicLibrary::open(path)?;
+        // SAFETY: the caller supplies the fixed ABI entry names and the
+        // selected image remains mapped by `execution_image` for the full
+        // EngineSession lifetime.
+        let symbols = unsafe {
+            ExecutionSymbols {
+                run_process: library.symbol(run_symbol.as_bytes_with_nul())?,
+                shutdown_process: library.symbol(shutdown_symbol.as_bytes_with_nul())?,
+            }
+        };
+        self.execution_image = Some(ExecutionImage {
+            _library: library,
+            symbols,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn run_process_symbol(&self) -> ProcessRunFn {
+        self.execution_image
+            .as_ref()
+            .map_or(self.symbols.process.run_process, |image| {
+                image.symbols.run_process
+            })
+    }
+
+    pub(crate) fn shutdown_process_symbol(&self) -> ShutdownFn {
+        self.execution_image
+            .as_ref()
+            .map_or(self.symbols.process.shutdown_process, |image| {
+                image.symbols.shutdown_process
+            })
     }
 
     pub(crate) fn symbols(&self) -> EngineSymbols {
@@ -257,7 +333,7 @@ impl DynamicLibrary {
         }
     }
 
-    unsafe fn symbol<T: Copy>(&self, name: &'static [u8]) -> Result<T, String> {
+    unsafe fn symbol<T: Copy>(&self, name: &[u8]) -> Result<T, String> {
         debug_assert_eq!(name.last(), Some(&0));
         // SAFETY: clearing and reading the loader error is required by dlsym.
         unsafe { dlerror() };
@@ -271,6 +347,16 @@ impl DynamicLibrary {
         }
         // SAFETY: T is the fixed function-pointer type associated with name.
         Ok(unsafe { transmute_copy(&symbol) })
+    }
+}
+
+impl Drop for LoadedEngine {
+    fn drop(&mut self) {
+        // The execution image can contain the selected run/shutdown entry
+        // points. Drop it explicitly before the product image, regardless of
+        // field declaration order, so no secondary callback can outlive the
+        // product runtime it was selected to execute.
+        self.execution_image.take();
     }
 }
 

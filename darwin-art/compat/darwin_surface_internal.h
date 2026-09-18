@@ -1,6 +1,13 @@
 #pragma once
 
 #include "darwin_surface_bridge.h"
+#include "input/surface_input_sink.h"
+#include "window/surface_scanout_owner.h"
+#include "window/appkit_content_view.h"
+#include "window/desktop_root_events.h"
+#include "window/desktop_root_target.h"
+#include "surfaceflinger/output_owner.h"
+#include "graphics/surface_backing_owner.h"
 
 #import <AppKit/AppKit.h>
 #import <IOSurface/IOSurface.h>
@@ -9,101 +16,47 @@
 
 #include <cstddef>
 #include <atomic>
-#include <condition_variable>
-#include <deque>
+#include <memory>
 #include <mutex>
-#include <thread>
-
-struct DarwinArtSurface;
-
-@interface DarwinArtMetalView : NSView
-@property(nonatomic, readonly) CAMetalLayer* metalLayer;
-- (instancetype)initWithFrame:(NSRect)frame
-                       device:(id<MTLDevice>)device
-                    pixelSize:(CGSize)pixelSize
-                 contentScale:(CGFloat)contentScale;
-- (BOOL)nextPointerEvent:(DarwinArtPointerEvent*)outEvent;
-- (BOOL)nextPointerEventV2:(DarwinArtPointerEventV2*)outEvent;
-- (BOOL)nextKeyEventV1:(DarwinArtKeyEventV1*)outEvent;
-- (BOOL)clearInputHintIfEmpty;
-- (void)cancelPointerStream;
-- (void)updateDrawableSize;
-- (void)setOwnerSurface:(DarwinArtSurface*)surface;
-- (void)signalOwnerWake;
-@end
 
 // Shared host-owned surface state. GPU-only state is deliberately opaque so
 // this header can be compiled by the CPU surface bridge without any Skia
 // dependency. The GPU bridge owns the object stored in gpu_state.
 struct DarwinArtSurface {
-  // Protects the IOSurface/Metal backing tuple while a native producer on a
-  // separate Android GL thread refreshes its retained target during resize.
-  mutable std::mutex backing_mutex;
-  uint32_t width = 0;
-  uint32_t height = 0;
-  uint32_t logical_width = 0;
-  uint32_t logical_height = 0;
+  // Only the AppKit surface owner changes this control connection. GPU/child
+  // producers never receive it; EOF is authoritative remote retirement.
+  std::unique_ptr<darwin_art::surfaceflinger::OutputOwner> output_owner;
+  darwin_art::graphics::SurfaceBackingOwner backing_owner;
+  // AppKit-only cached immutable publication. Off-actor consumers Acquire()
+  // from backing_owner; they never read this shared_ptr variable directly.
+  darwin_art::graphics::SurfaceBackingOwner::Handle backing;
+  darwin_art::graphics::SurfaceBackingOwner::Handle mapped_backing;
+  // Completion metadata only; not allocation ownership or GPU admission.
+  mutable std::mutex submission_mutex;
   bool scale_to_display = false;
-  size_t bytes_per_row = 0;
-  IOSurfaceRef io_surface = nullptr;
   id<MTLDevice> device = nil;
   id<MTLCommandQueue> command_queue = nil;
-  id<MTLTexture> io_surface_texture = nil;
   id<MTLCommandBuffer> last_command_buffer = nil;
   // Direct RenderThread GPU submissions are produced off the AppKit actor;
   // keep their completion handle separate from the main-actor IOSurface blit.
   id<MTLCommandBuffer> last_gpu_command_buffer = nil;
-  mutable std::mutex presentation_mutex;
-  bool presentation_closing = false;
-  bool presentation_scheduled = false;
-  uint64_t presentation_requested = 0;
-  // Scheduler telemetry is intentionally atomic so display-clock and fence
-  // monitor threads can account for requests without taking the AppKit
-  // presentation mutex. These counters are diagnostic only and do not alter
-  // the bounded latest-wins policy.
-  std::atomic<uint64_t> scanout_requests{0};
-  std::atomic<uint64_t> scanout_fence_gated{0};
-  std::atomic<uint64_t> scanout_coalesced{0};
-  // A display tick does not need to enqueue another AppKit blit when the
-  // latest SurfaceFlinger composition or embedded IOSurface frame is already
-  // in flight or has been presented. Surfaces with neither dirty source keep
-  // the legacy every-tick behavior.
-  std::atomic<uint64_t> scanout_last_requested_generation{0};
-  std::atomic<uint64_t> scanout_last_requested_embedded_frame{0};
-  // Central SurfaceFlinger can recompose this display because system_server
-  // changed the retained layer tree without an app-owned present fence. A
-  // Darwin notify check token is the platform display-consumer wakeup for
-  // those cross-process compositions; it is polled only at display-clock
-  // edges and therefore cannot call into AppKit from the service process.
-  std::atomic<int> scanout_notification_token{-1};
-  std::atomic<bool> scanout_reimport_backing{false};
-  std::atomic<uint64_t> scanout_dirty_skipped{0};
-  std::atomic<uint64_t> scanout_present_calls{0};
-  std::atomic<int32_t> last_scanout_status{DARWIN_ART_SURFACE_OK};
-  // SurfaceFlinger composition completion is a separate readiness boundary
-  // from the display clock.  The producer registers each returned Android
-  // fence here; a single monitor thread advances the ready generation only
-  // after the broker reports that exact composition complete.
-  struct CompositionFence {
-    int descriptor = -1;
-    uint64_t generation = 0;
-    bool ready = false;
-  };
-  mutable std::mutex composition_mutex;
-  std::condition_variable composition_available;
-  std::deque<CompositionFence> composition_fences;
-  std::thread composition_monitor;
-  bool composition_monitor_started = false;
-  bool composition_monitor_stop = false;
-  uint64_t composition_next_generation = 0;
-  std::atomic<uint64_t> composition_submitted_generation{0};
-  std::atomic<uint64_t> composition_ready_generation{0};
+  // A single opaque owner serializes notify/fence readiness, dirty-generation
+  // claims, and latest-wins presentation requests without exposing those
+  // containers to the surface bridge.
+  std::unique_ptr<darwin_art::window::SurfaceScanoutOwner> scanout_owner;
   // Worker-thread frame pulses request scanout through a single latest-wins
   // AppKit command. The generation/mutex pair bounds the main-queue backlog
   // to one block while guaranteeing that a request arriving during a blit
   // schedules one trailing main turn instead of being lost.
   NSWindow* window = nil;
   id window_delegate = nil;
+  // Host lifecycle facts only; Android WMS owns focus selection. Initialized
+  // before publication, immutable until destruction; owner-thread acquisition
+  // must exclude concurrent surface destruction.
+  std::shared_ptr<darwin_art::window::DesktopRootEvents> desktop_root_events;
+  // Exact process-root capability retained independently of the raw surface
+  // pointer so an owner Looper can bind after surface publication.
+  std::shared_ptr<darwin_art::window::DesktopRootTarget> desktop_root_target;
   DarwinArtMetalView* view = nil;
   bool visible = false;
   // Updated only by AppKit callbacks and read by the ART owner thread. This
@@ -115,7 +68,9 @@ struct DarwinArtSurface {
   mutable std::mutex owner_wake_mutex;
   DarwinArtSurfaceOwnerWakeCallback owner_wake_callback = nullptr;
   void* owner_wake_context = nullptr;
-  bool producer_mapped = false;
+  mutable std::mutex input_sink_mutex;
+  std::shared_ptr<DarwinArtSurfaceInputSinkBinding> input_sink;
+  std::atomic<bool> producer_mapped{false};
   void* gpu_state = nullptr;
   // Geometry and publication state for a SurfaceView whose EGL producer
   // renders directly into io_surface.  The Android GL thread publishes only

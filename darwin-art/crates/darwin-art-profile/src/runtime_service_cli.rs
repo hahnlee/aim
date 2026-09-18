@@ -7,7 +7,7 @@
 use crate::runtime_service_protocol::{
     ReadinessMask, RuntimeKey, StartRuntimeRequest, StartRuntimeResponse,
 };
-use crate::{ProfileError, runtime_service_client};
+use crate::{runtime_service_client, ProfileError};
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;

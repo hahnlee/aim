@@ -32,6 +32,13 @@ impl Connection {
         self.work_signal.wait_after(generation, timeout)
     }
 
+    pub(crate) fn wait_for_work_indefinite(
+        &self,
+        generation: u64,
+    ) -> crate::work_signal::WaitOutcome {
+        self.work_signal.wait_after_indefinite(generation)
+    }
+
     pub(crate) fn thread(&self, id: u64) -> Result<Arc<Mutex<crate::thread::Thread>>, Error> {
         if id == 0 {
             return Err(Error::Io(libc::EINVAL));

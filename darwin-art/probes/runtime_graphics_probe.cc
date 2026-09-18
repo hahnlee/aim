@@ -41,7 +41,7 @@
 #include "runtime_network_probe.h"
 #include "runtime_elf_probe.h"
 #include "runtime_abi_probe.h"
-#include "runtime_process_state.h"
+#include "../runtime/art/process_state.h"
 #include "runtime_frame_probe.h"
 #include "darwin_icu_natives.h"
 #include "darwin_libcore_natives.h"
@@ -66,7 +66,7 @@
 
 #include "runtime_graphics_probe.h"
 #include "runtime_graphics_gpu.h"
-#include "runtime_graphics_state.h"
+#include "graphics_fixture_state.h"
 
 namespace darwin_art_graphics {
 
@@ -77,11 +77,11 @@ jboolean present_content(GraphicsState* state, JNIEnv* env, jclass, jobject view
       height > 4096) {
     return JNI_FALSE;
   }
-  const darwin_art::FrameworkGraphicsBackend graphics_backend =
-      darwin_art::GetFrameworkGraphicsBackend();
-  const bool use_real_graphics =
-      graphics_backend ==
-      darwin_art::FrameworkGraphicsBackend::kAndroidGraphics;
+#if defined(DARWIN_ART_REAL_GRAPHICS)
+  constexpr bool kHeadlessFixture = false;
+#else
+  constexpr bool kHeadlessFixture = true;
+#endif
 #if defined(DARWIN_ART_REAL_GRAPHICS)
   if (darwin_art::hwui_gpu_enabled()) {
     return present_gpu_content(state, env, view, width, height);
@@ -109,8 +109,9 @@ jboolean present_content(GraphicsState* state, JNIEnv* env, jclass, jobject view
     env->DeleteLocalRef(bitmap_config_class);
     env->DeleteLocalRef(bitmap_class);
   };
-  if (!use_real_graphics) {
-    canvas_class = state->probe_canvas_class;
+  if (kHeadlessFixture) {
+    canvas_class =
+        darwin_art_graphics_fixture::LookupProbeCanvasClass(state);
     if (canvas_class == nullptr) {
       std::cerr << "ART Android view: ProbeCanvas class is not rooted\n";
       return JNI_FALSE;
@@ -171,10 +172,10 @@ jboolean present_content(GraphicsState* state, JNIEnv* env, jclass, jobject view
     }
     env->DeleteLocalRef(bitmap_config);
   }
-  const bool real_target_missing = use_real_graphics && bitmap == nullptr;
+  const bool real_target_missing = !kHeadlessFixture && bitmap == nullptr;
   if (canvas == nullptr || real_target_missing || env->ExceptionCheck()) {
     std::cerr << "ART Android view: "
-              << (use_real_graphics
+              << (!kHeadlessFixture
                       ? "Bitmap/Canvas(Bitmap) setup failed\n"
                       : "ProbeCanvas setup failed\n");
     art::Thread* self = art::Thread::Current();
@@ -242,7 +243,7 @@ jboolean present_content(GraphicsState* state, JNIEnv* env, jclass, jobject view
     release_render_target();
     return JNI_FALSE;
   }
-  if (!use_real_graphics) {
+  if (kHeadlessFixture) {
     pixels = static_cast<jintArray>(env->CallObjectMethod(canvas, snapshot));
   } else {
     const jsize pixel_count = static_cast<jsize>(width * height);

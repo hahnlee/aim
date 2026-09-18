@@ -4,6 +4,8 @@
 #include "darwin_art_bionic_fs.h"
 #include "darwin_art_bionic_socket_broker.h"
 #include "darwin_art_elf_loader.h"
+#include "../../tests/fd-inheritance-fixture.h"
+#include "../../tests/binder-retained-provider-fixture.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -204,6 +206,8 @@ extern "C" int darwin_art_bionic_socket_broker_select(
     AndroidSelectTimevalSmoke *timeout);
 
 int main(int argc, char **argv) {
+  Check(darwin_art::test::InstallNoSpawnFdFixture() == 0,
+        "install explicit no-spawn fixture boundary");
   if (argc != 2)
     return 10;
   std::ifstream input(argv[1], std::ios::binary);
@@ -659,6 +663,27 @@ int main(int argc, char **argv) {
             darwin_art_bionic_socket_broker_close(event_fd) == 0 &&
             darwin_art_bionic_socket_broker_close(epoll_fd) == 0,
         "eventfd readiness through epoll");
+  const int duplicate_source_fd =
+      darwin_art_bionic_socket_broker_eventfd(0, 0x800);
+  const int duplicate_event_fd = duplicate_source_fd >= 0
+                                    ? darwin_art_bionic_socket_broker_dup(
+                                          duplicate_source_fd)
+                                    : -1;
+  uint64_t duplicate_value = 7;
+  uint64_t duplicate_read = 0;
+  Check(duplicate_source_fd >= 0 && duplicate_event_fd >= 0 &&
+            darwin_art_bionic_socket_broker_close(duplicate_source_fd) == 0 &&
+            darwin_art_bionic_socket_broker_write(duplicate_event_fd,
+                                                  &duplicate_value,
+                                                  sizeof(duplicate_value)) ==
+                sizeof(duplicate_value) &&
+            darwin_art_bionic_socket_broker_read(duplicate_event_fd,
+                                                 &duplicate_read,
+                                                 sizeof(duplicate_read)) ==
+                sizeof(duplicate_read) &&
+            duplicate_read == duplicate_value &&
+            darwin_art_bionic_socket_broker_close(duplicate_event_fd) == 0,
+        "eventfd broker dup survives original close");
   Check(darwin_art_bionic_socket_broker_live_objects() == 0,
         "all central socket objects closed");
   const int counter_fd =
@@ -709,6 +734,7 @@ int main(int argc, char **argv) {
         "unload Android HTTP fixture");
   Check(darwin_art_bionic_socket_broker_deactivate() == 0,
         "deactivate quiescent socket owner");
+  TestRetainedBinderProvider();
   Check(darwin_art_bionic_socket_broker_close(10001) == -1 &&
             g_filesystem_closes.load(std::memory_order_relaxed) == 3,
         "filesystem close works after network deactivation");

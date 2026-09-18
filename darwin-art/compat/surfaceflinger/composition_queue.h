@@ -37,6 +37,10 @@ class CompositionQueue {
              std::shared_ptr<std::atomic<bool>> running = nullptr);
   // Descriptor ownership transfers only when this returns true.
   bool Enqueue(CompositionJob job);
+  // Accept-loop ingress must not block behind a producer fence or full queue:
+  // the same loop also services output-owner EOF/control messages.
+  // Descriptor ownership transfers only on success, as with Enqueue.
+  bool TryEnqueue(CompositionJob job);
 
   // Borrowed read end for the owning accept loop. It becomes readable exactly
   // once when the queue stops; the queue owns both ends.

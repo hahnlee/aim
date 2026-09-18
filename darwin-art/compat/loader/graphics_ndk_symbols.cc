@@ -1,4 +1,4 @@
-#include "graphics_ndk_image.h"
+#include "graphics_ndk_symbols.h"
 #include <android/bitmap.h>
 #include <android/imagedecoder.h>
 #include <cstring>

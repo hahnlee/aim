@@ -1,8 +1,12 @@
 use std::ptr;
 
+use crate::ProcessCompletionObserver;
+#[cfg(target_os = "macos")]
+use crate::appkit_actor::WorkerMessage;
 #[cfg(target_os = "macos")]
 use crate::bootstrap::attach_runtime;
 use crate::config::{HostError, HostOutcome, RunOptions, build_process_request};
+use crate::execution::ExecutionImageBinding;
 use crate::frame::{FrameHost, receive_frame};
 #[cfg(target_os = "macos")]
 use crate::gpu_loop::run as run_gpu_loop;
@@ -12,68 +16,32 @@ use crate::runtime::HostRuntime;
 #[cfg(target_os = "macos")]
 use crate::teardown::RuntimeShutdownGuard;
 #[cfg(target_os = "macos")]
-use darwin_art_binder_process::{BinderFdEndpoint, BrokerApi};
+use crate::{process_binder::ApplicationBinderProcess, process_exit::exit_android_process};
+#[cfg(target_os = "macos")]
+use darwin_art_binder_process::BrokerApi;
 #[cfg(target_os = "macos")]
 use darwin_art_engine::EngineSession;
-use darwin_art_engine_sys::AppKitPumpEventsFn;
 use darwin_art_runtime::{ProviderBridge, ProviderKind, Subsystem};
-use std::sync::mpsc::{self, SyncSender, TryRecvError};
-use std::thread;
-use std::time::Instant;
+#[cfg(target_os = "macos")]
+use std::sync::mpsc::SyncSender;
 
+#[cfg(target_os = "macos")]
+use crate::binder_authority::BinderAuthorityBinding;
 #[cfg(target_os = "macos")]
 use crate::process_filesystem::open_filesystem_authority;
 #[cfg(target_os = "macos")]
 use std::os::fd::AsRawFd;
 
-#[cfg(target_os = "macos")]
-unsafe extern "C" {
-    fn _exit(status: i32) -> !;
-}
-
-#[cfg(target_os = "macos")]
-fn exit_android_process(status: i32) -> ! {
-    // Android application processes are disposed as one OS lifetime. libc
-    // `exit` would run host C++ static destructors while Chromium task runners
-    // are still live, which is neither Android behavior nor race-free.
-    // Flush stdio explicitly because _exit intentionally skips libc teardown.
-    unsafe { libc::fflush(std::ptr::null_mut()) };
-    unsafe { _exit(status) }
-}
-
-pub fn run(options: &RunOptions) -> Result<HostOutcome, HostError> {
+pub(crate) fn run_internal(
+    options: RunOptions,
+    execution_image: Option<ExecutionImageBinding>,
+    completion: Option<ProcessCompletionObserver>,
+) -> Result<HostOutcome, HostError> {
     #[cfg(target_os = "macos")]
     {
-        return run_with_appkit_actor(options.clone());
-    }
-    #[cfg(not(target_os = "macos"))]
-    run_owner(options, None)
-}
-
-#[cfg(target_os = "macos")]
-enum WorkerMessage {
-    AppKitPump(AppKitPumpEventsFn),
-    Finished(Result<HostOutcome, HostError>),
-}
-
-#[cfg(target_os = "macos")]
-// Let AppKit sleep for one display interval while idle. nextEventMatchingMask:
-// returns immediately when an NSEvent arrives, so this is event-driven rather
-// than a 2 ms polling loop; the ART owner is still woken through the surface
-// mailbox and Android input remains on its original sequence.
-const APPKIT_PUMP_QUANTUM_SECONDS: f64 = 0.016;
-
-#[cfg(target_os = "macos")]
-fn run_with_appkit_actor(options: RunOptions) -> Result<HostOutcome, HostError> {
-    let (sender, receiver) = mpsc::sync_channel::<WorkerMessage>(2);
-    let worker = thread::Builder::new()
-        .name("darwin-art-ui-owner".to_owned())
-        .spawn(move || {
-            // Android's main/UI Looper runs at an interactive scheduling
-            // priority. Keep the ART owner from being deprioritized behind
-            // Chromium helper work while AppKit remains on its own main
-            // actor. This changes scheduling priority only; JNI/Looper
-            // sequence affinity is unchanged.
+        return crate::appkit_actor::run(options.is_android_process(), move |sender| {
+            // Android UI ownership remains on this worker; the Darwin actor
+            // handles only scheduling and main-thread event dispatch.
             let qos_status = unsafe {
                 libc::pthread_set_qos_class_self_np(
                     libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE,
@@ -83,86 +51,37 @@ fn run_with_appkit_actor(options: RunOptions) -> Result<HostOutcome, HostError> 
             if qos_status != 0 && std::env::var_os("DARWIN_ART_DEBUG_FRAME_TIMING").is_some() {
                 eprintln!("DARWIN_ART owner QoS setup failed status={qos_status}");
             }
-            let result = run_owner(&options, Some(&sender));
-            let _ = sender.send(WorkerMessage::Finished(result));
-        })
-        .map_err(|error| HostError::HostService(format!("spawn ART UI owner: {error}")))?;
-
-    let mut appkit_pump: Option<AppKitPumpEventsFn> = None;
-    let mut appkit_pump_count = 0_u64;
-    let mut appkit_pump_total_us = 0_u64;
-    let mut appkit_pump_max_us = 0_u64;
-    let result = loop {
-        match receiver.try_recv() {
-            Ok(WorkerMessage::AppKitPump(callback)) => appkit_pump = Some(callback),
-            Ok(WorkerMessage::Finished(result)) => break result,
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                break Err(HostError::HostService(
-                    "ART UI owner disconnected before completion".to_owned(),
-                ));
-            }
-        }
-
-        if let Some(callback) = appkit_pump {
-            // Keep NSApplication responsive while the ART worker is blocked
-            // in framework work or waiting for a marshalled Surface call.
-            // The callback itself is main-thread-only and never invokes JNI.
-            let pump_started = Instant::now();
-            let status = unsafe { callback(APPKIT_PUMP_QUANTUM_SECONDS) };
-            let elapsed_us = pump_started.elapsed().as_micros() as u64;
-            appkit_pump_count += 1;
-            appkit_pump_total_us = appkit_pump_total_us.saturating_add(elapsed_us);
-            appkit_pump_max_us = appkit_pump_max_us.max(elapsed_us);
-            // APK runs intentionally terminate the Android process with
-            // _exit after the owner loop, so the outer actor never reaches
-            // its final summary. Emit bounded snapshots while the actor is
-            // alive to keep the split-path metric observable in those runs.
-            if std::env::var_os("DARWIN_ART_DEBUG_FRAME_TIMING").is_some()
-                && appkit_pump_count % 1024 == 0
-            {
-                eprintln!(
-                    "DARWIN_ART appkit-pump count={} avg_us={} max_us={} quantum_us={}",
-                    appkit_pump_count,
-                    appkit_pump_total_us / appkit_pump_count,
-                    appkit_pump_max_us,
-                    (APPKIT_PUMP_QUANTUM_SECONDS * 1_000_000.0) as u64,
-                );
-            }
-            if status != 0 {
-                break Err(HostError::SurfaceFailed {
-                    operation: "appkit_main_actor_pump",
-                    status,
-                });
-            }
-        } else {
-            thread::sleep(std::time::Duration::from_millis(1));
-        }
-    };
-    if std::env::var_os("DARWIN_ART_DEBUG_FRAME_TIMING").is_some() {
-        let average_us = appkit_pump_total_us.checked_div(appkit_pump_count.max(1));
-        eprintln!(
-            "DARWIN_ART appkit-pump count={} avg_us={} max_us={} quantum_us={}",
-            appkit_pump_count,
-            average_us.unwrap_or(0),
-            appkit_pump_max_us,
-            (APPKIT_PUMP_QUANTUM_SECONDS * 1_000_000.0) as u64,
-        );
+            run_owner(
+                &options,
+                Some(sender),
+                execution_image.as_ref(),
+                completion.as_ref(),
+            )
+        });
     }
-    let _ = worker.join();
-    result
+    #[cfg(not(target_os = "macos"))]
+    run_owner(
+        &options,
+        None,
+        execution_image.as_ref(),
+        completion.as_ref(),
+    )
 }
 
 fn run_owner(
     options: &RunOptions,
     #[cfg(target_os = "macos")] appkit_sender: Option<&SyncSender<WorkerMessage>>,
     #[cfg(not(target_os = "macos"))] _appkit_sender: Option<&()>,
+    execution_image: Option<&ExecutionImageBinding>,
+    completion: Option<&ProcessCompletionObserver>,
 ) -> Result<HostOutcome, HostError> {
     options.validate()?;
 
     #[cfg(not(target_os = "macos"))]
     {
         let _ = options;
+        let _ = execution_image;
+        let _ = completion;
         Err(HostError::UnsupportedPlatform)
     }
 
@@ -172,7 +91,7 @@ fn run_owner(
         // Only the bounded native test loop consumes this cooperative flag.
         // ActivityThread owns an unbounded Android Looper; swallowing SIGTERM
         // there prevents the process supervisor from terminating the app.
-        if options.visible_seconds > 0.0 && !options.terminate_android_process {
+        if options.visible_seconds > 0.0 && !options.is_android_process() {
             crate::process_signal::install().map_err(|error| {
                 HostError::HostService(format!("install SIGTERM handler: {error}"))
             })?;
@@ -185,17 +104,33 @@ fn run_owner(
         // early return, including loader/provider attach failures, now drops
         // through the same owner-thread shutdown path.
         let mut shutdown_guard =
-            RuntimeShutdownGuard::new(&mut runtime, options.terminate_android_process);
+            RuntimeShutdownGuard::new(&mut runtime, options.execution_lifetime);
 
-        let bootstrap = attach_runtime(shutdown_guard.runtime(), &options.library)
-            .inspect_err(|error| eprintln!("ART host bootstrap failed: {error}"))?;
+        let bootstrap = attach_runtime(
+            shutdown_guard.runtime(),
+            &options.library,
+            execution_image.map(|binding| {
+                (
+                    binding.path.as_path(),
+                    binding.run_symbol.as_str(),
+                    binding.shutdown_symbol.as_str(),
+                )
+            }),
+        )
+        .inspect_err(|error| eprintln!("ART host bootstrap failed: {error}"))?;
         if debug_startup {
             eprintln!("ART process credentials: runtime bootstrap complete");
         }
         let graphics_attached = bootstrap.graphics_attached;
         if let (Some(sender), Some(engine)) = (appkit_sender, shutdown_guard.runtime().engine()) {
+            // SAFETY: hosted execution admits AndroidProcess only. Its shutdown
+            // guard never unloads the native image or performs VM teardown;
+            // errors exit the process. The main actor seals pumping before
+            // authorizing successful process exit. Reusable hosted execution
+            // must not reach this registration until retirement is supported.
+            let callback = unsafe { engine.appkit_pump_callback() };
             sender
-                .send(WorkerMessage::AppKitPump(engine.appkit_pump_callback()))
+                .send(WorkerMessage::AppKitPump(callback))
                 .map_err(|_| HostError::HostService("AppKit actor disconnected".to_owned()))?;
         }
 
@@ -233,7 +168,8 @@ fn run_owner(
                 .runtime()
                 .engine()
                 .ok_or_else(|| HostError::RuntimeFailed(-1))?;
-            crate::app_display::create(engine, options)?
+            crate::app_display::create(engine, options)
+                .inspect_err(|error| eprintln!("ART host desktop target failed: {error}"))?
         };
         if let Some(surface) = app_display {
             shutdown_guard
@@ -247,7 +183,7 @@ fn run_owner(
         }
 
         // The native entrypoint receives a Rust-owned lifecycle bridge. It is
-        // kept alive through the later shutdown call, so the C++ probe only
+        // kept alive through the later shutdown call, so the native entry only
         // reports ART-specific runtime handles and never owns the production
         // phase machine.
         let lifecycle_hooks = shutdown_guard.runtime().native_lifecycle_hooks();
@@ -269,10 +205,32 @@ fn run_owner(
         // AOSP application processes retain ProcessState and its Binder pool
         // until the OS reaps the zygote child. These outer owners therefore
         // live through ART, HWUI and the GPU loop and are reclaimed by `_exit`.
-        let mut _binder_endpoint = None;
-        let mut _binder_dispatcher = None;
+        let mut binder_process = options
+            .is_android_process()
+            .then(ApplicationBinderProcess::new);
         let process = {
             let runtime = shutdown_guard.runtime();
+            runtime
+                .engine()
+                .ok_or(HostError::RuntimeFailed(-1))?
+                .install_fd_inheritance_boundary(darwin_art_profile::with_native_operation)
+                .map_err(HostError::HostService)?;
+            let profile_socket = if options.is_android_process() {
+                let socket = std::env::var_os(darwin_art_profile::PROFILE_SOCKET_ENV)
+                    .map(std::path::PathBuf::from)
+                    .ok_or_else(|| {
+                        HostError::HostService(
+                            "Android app process has no profile authority socket".into(),
+                        )
+                    })?;
+                crate::process_scm_endpoint::install(
+                    runtime.engine().ok_or(HostError::RuntimeFailed(-1))?,
+                    &socket,
+                )?;
+                Some(socket)
+            } else {
+                None
+            };
             let Some(provider) = runtime.provider() else {
                 let _ = shutdown_guard.shutdown();
                 return Err(HostError::RuntimeFailed(-1));
@@ -310,51 +268,19 @@ fn run_owner(
             if debug_startup {
                 eprintln!("ART process credentials: VM authority installed");
             }
-            if options.terminate_android_process {
-                let socket = std::env::var_os(darwin_art_profile::PROFILE_SOCKET_ENV)
-                    .map(std::path::PathBuf::from)
-                    .ok_or_else(|| {
-                        HostError::HostService(
-                            "Android app process has no profile Binder authority socket".into(),
-                        )
-                    })?;
-                let (client, dispatcher) = darwin_art_binder_process::connect_process(
-                    &socket,
-                    std::process::id() as i32,
-                )
-                .map_err(|error| {
-                    if debug_startup {
-                        eprintln!(
-                            "ART process credentials: Binder authority connect failed: {error:?}"
-                        );
-                    }
-                    HostError::HostService(format!("connect Binder authority: {error:?}"))
-                })?;
-                if debug_startup {
-                    eprintln!("ART process credentials: Binder authority connected");
-                }
-                let reader = std::thread::Builder::new()
-                    .name("darwin-art-binder-dispatch".into())
-                    .spawn(move || {
-                        let result = dispatcher.run();
-                        if let Err(error) = &result {
-                            eprintln!("ART Binder authority dispatcher stopped: {error:?}");
-                        }
-                        result
-                    })
-                    .map_err(|error| {
-                        HostError::HostService(format!("spawn Binder dispatcher: {error}"))
-                    })?;
-                client.get_context_manager().map_err(|error| {
-                    HostError::HostService(format!("resolve Binder context manager: {error:?}"))
-                })?;
+            if options.is_android_process() {
+                let socket = profile_socket
+                    .as_ref()
+                    .expect("profile selected before provider acquisition");
                 let broker = runtime
                     .engine()
                     .ok_or_else(|| HostError::RuntimeFailed(-1))?
                     .binder_broker_symbols();
-                _binder_endpoint = Some(
-                    BinderFdEndpoint::install(
-                        client,
+                binder_process
+                    .as_mut()
+                    .expect("APK Binder process boundary armed before acquisition")
+                    .connect(
+                        &socket,
                         BrokerApi {
                             install_owner: broker.install_owner,
                             publish: broker.publish,
@@ -363,18 +289,24 @@ fn run_owner(
                                 export: broker.export_file,
                                 import: broker.import_file,
                                 close: broker.close_file,
+                                bundle: None,
+                                retained: Some(darwin_art_binder_process::DescriptorRetainedApi {
+                                    export: broker.export_retained_file,
+                                    release: broker.release_export_lease,
+                                }),
                             },
                         },
                     )
-                    .map_err(|error| {
-                        HostError::HostService(format!("install Binder FD endpoint: {error:?}"))
-                    })?,
-                );
-                _binder_dispatcher = Some(reader);
+                    .inspect_err(|error| eprintln!("ART APK Binder startup failed: {error}"))?;
                 if debug_startup {
                     eprintln!("ART process credentials: Binder endpoint installed");
                 }
             }
+            let binder_authority = binder_process.as_ref().and_then(|process| {
+                process
+                    .authority_lifetime()
+                    .map(BinderAuthorityBinding::new)
+            });
             let request = match build_process_request(
                 options,
                 ptr::from_mut(&mut frame_host).cast(),
@@ -383,8 +315,10 @@ fn run_owner(
                 Some(ProviderBridge::acquire_callback()),
                 Some(ProviderBridge::release_callback()),
                 runtime.graphics(),
+                runtime.surface(),
                 Some(&lifecycle_hooks),
                 Some(&host_services),
+                binder_authority.as_ref().map(|binding| binding.hooks()),
             ) {
                 Ok(inputs) => inputs,
                 Err(error) => {
@@ -421,10 +355,17 @@ fn run_owner(
         // same Rust shutdown transaction as ART/graphics instead of leaving
         // a short-lived foreign owner between process return and the frame
         // loop.
-        let active_surface = shutdown_guard
-            .runtime()
-            .engine()
-            .and_then(EngineSession::active_surface);
+        // app_display may already own this published native surface. Do not
+        // create a second wrapper (or reinstall its sink) before discovering
+        // that RuntimeSession rejects the duplicate resource attachment.
+        let active_surface = if shutdown_guard.runtime().surface().is_some() {
+            None
+        } else {
+            shutdown_guard
+                .runtime()
+                .engine()
+                .and_then(EngineSession::active_surface)
+        };
         let has_active_surface = if let Some(surface) = active_surface {
             shutdown_guard
                 .runtime()
@@ -436,7 +377,7 @@ fn run_owner(
                 .map_err(|error| HostError::RuntimeFailed(error.status() as i32))?;
             true
         } else {
-            false
+            shutdown_guard.runtime().surface().is_some()
         };
         if has_active_surface {
             let debug_boundaries = std::env::var_os("DARWIN_ART_DEBUG_FRAME_TIMING").is_some();
@@ -455,7 +396,7 @@ fn run_owner(
                     outcome.is_ok()
                 );
             }
-            if options.terminate_android_process {
+            if options.is_android_process() {
                 // An Android app process ends at the OS lifetime boundary.
                 // AOSP does not unload the live app NativeLoader graph or
                 // destroy ART while Chromium workers may still execute it;
@@ -473,14 +414,12 @@ fn run_owner(
                         service_cleanup.is_ok()
                     );
                 }
-                let status = match (&outcome, &service_cleanup) {
-                    (Ok(_), Ok(())) => 0,
-                    (Err(error), _) | (_, Err(error)) => {
-                        eprintln!("darwin-art-host: {error}");
-                        1
-                    }
-                };
-                exit_android_process(status);
+                exit_with_actor_completion(
+                    outcome.as_ref(),
+                    service_cleanup,
+                    completion,
+                    appkit_sender,
+                );
             }
             // Keep Android Service processes and their Binder channels alive
             // while the browser runtime stops its native/Java threads. Killing
@@ -535,13 +474,13 @@ fn run_owner(
             frames_presented: 0,
             last_frame: frame_host.last_frame,
         };
-        if options.terminate_android_process {
+        if options.is_android_process() {
             // See the visible process path above: app-process exit is an OS
             // boundary, not an in-process ART/NativeLoader teardown.
-            service_processes
+            let service_cleanup = service_processes
                 .terminate_for_process_exit()
-                .map_err(HostError::HostService)?;
-            exit_android_process(0);
+                .map_err(HostError::HostService);
+            exit_with_actor_completion(Ok(&outcome), service_cleanup, completion, appkit_sender);
         }
         shutdown_guard.shutdown()?;
         service_processes
@@ -549,4 +488,31 @@ fn run_owner(
             .map_err(HostError::HostService)?;
         Ok(outcome)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn exit_with_actor_completion(
+    outcome: Result<&HostOutcome, &HostError>,
+    cleanup: Result<(), HostError>,
+    completion: Option<&ProcessCompletionObserver>,
+    actor: Option<&SyncSender<WorkerMessage>>,
+) -> ! {
+    if outcome.is_err() || cleanup.is_err() {
+        exit_android_process(crate::process_completion::exit_status(
+            outcome, cleanup, None,
+        ));
+    }
+    let (request, wait) = crate::process_completion::actor_completion_gate();
+    let authorized = actor
+        .ok_or_else(|| HostError::HostService("Android process has no AppKit actor".into()))
+        .and_then(|actor| {
+            actor
+                .send(WorkerMessage::ProcessCompletion(request))
+                .map_err(|_| {
+                    HostError::HostService("AppKit actor disconnected before completion".into())
+                })
+        })
+        .and_then(|_| wait.wait());
+    let status = crate::process_completion::exit_status(outcome, authorized, completion);
+    exit_android_process(status);
 }

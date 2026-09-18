@@ -3,8 +3,11 @@
 #include <jni.h>
 
 #include <string>
+#include <cstdint>
+#include <memory>
 
 namespace darwin_art {
+namespace binder { class WireChannelLifetime; }
 
 // Register transport on a runtime RemoteBinder class from the caller's loader.
 // Needed both for app-created endpoints and Binder-imported system callbacks.
@@ -33,9 +36,18 @@ jobject ReceiveServiceBindIntent(JNIEnv* env, jint control_fd);
 // Transports an Android Binder transaction over the service process channel.
 // The Parcel byte stream, Binder object table, and owned file descriptors are
 // transferred as one versioned message; descriptors use SCM_RIGHTS.
-jboolean TransactRemoteBinder(JNIEnv* env, jint control_fd, jint target_id,
+jboolean TransactRemoteBinder(JNIEnv* env, jint control_fd, uint64_t generation, jint target_id,
                               jint code, jobject data, jobject reply,
                               jint flags);
+
+// Returns only the exact still-established generation. It never creates a
+// channel or restores a retired lifetime from a numeric file descriptor.
+std::shared_ptr<binder::WireChannelLifetime> FindRemoteBinderChannelLifetime(
+    jint control_fd, uint64_t generation);
+// Resource-owner metadata port, not a proxy authority lookup. Call only while
+// the caller owns the established channel descriptor.
+std::shared_ptr<binder::WireChannelLifetime>
+CaptureEstablishedRemoteBinderChannelLifetime(jint control_fd);
 
 // Legacy synchronous child endpoint. New service processes should use
 // StartServingRemoteBinder and keep their owner thread in Looper.loop().

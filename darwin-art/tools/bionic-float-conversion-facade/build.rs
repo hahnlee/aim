@@ -133,6 +133,43 @@ fn main() {
     let mut archive_command = Command::new("ar");
     archive_command.arg("rcs").arg(&archive).args(&objects);
     run(&mut archive_command, "archive");
+    if env::var_os("CARGO_FEATURE_AUDIT").is_some() {
+        let host_state = out.join("audit_host_state.o");
+        run(
+            Command::new("clang++")
+                .args([
+                    "-arch",
+                    "arm64",
+                    "-isysroot",
+                    &sdk,
+                    "-std=c++20",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-c",
+                    "probes/host_state.cc",
+                    "-o",
+                ])
+                .arg(&host_state),
+            "audit host state",
+        );
+        // Bin-only linkage: the separately published native archive stays fixture-free.
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-float-conversion-facade={}",
+            host_state.display()
+        );
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-float-conversion-facade=-L{}",
+            out.display()
+        );
+        println!(
+            "cargo:rustc-link-arg-bin=bionic-float-conversion-facade=-Wl,-force_load,{}",
+            out.join("libdarwin_art_bionic_float_conversion.a")
+                .display()
+        );
+        println!("cargo:rustc-link-arg-bin=bionic-float-conversion-facade=-lc++");
+        println!("cargo:rerun-if-changed=probes/host_state.cc");
+    }
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=darwin_art_bionic_float_conversion");
     println!("cargo:rustc-link-lib=c++");

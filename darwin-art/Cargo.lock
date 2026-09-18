@@ -314,6 +314,7 @@ name = "darwin-art-binder-process"
 version = "0.1.0"
 dependencies = [
  "darwin-art-binder-device",
+ "darwin-art-engine-sys",
  "darwin-art-profile",
  "libc",
 ]
@@ -354,6 +355,7 @@ name = "darwin-art-host"
 version = "0.1.0"
 dependencies = [
  "darwin-art-abi",
+ "darwin-art-binder-device",
  "darwin-art-binder-process",
  "darwin-art-engine",
  "darwin-art-engine-sys",
@@ -386,6 +388,8 @@ name = "darwin-art-profile"
 version = "0.1.0"
 dependencies = [
  "darwin-art-binder-device",
+ "darwin-art-engine-sys",
+ "darwin-art-scm-transfer",
  "libc",
 ]
 
@@ -405,6 +409,13 @@ name = "darwin-art-rust-demangle"
 version = "0.1.0"
 dependencies = [
  "rustc-demangle",
+]
+
+[[package]]
+name = "darwin-art-scm-transfer"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

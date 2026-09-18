@@ -109,7 +109,7 @@ rg -q 'darwin_art_bionic_socket_broker_dns_resolve' "$adapter" ||
 rg -q 'kCentralBrokerTokenMarker' "$adapter" ||
   fail 'central close token classification missing'
 rg -q 'DARWIN_ART_ANDROID_NETWORK_FIXTURE' \
-  "$root/probes/runtime_process_options.cc" ||
+  "$root/probes/runtime_fixture_options.cc" ||
   fail 'actual ART network fixture option missing'
 rg -q 'nativeLoopbackHttp' "$root/probes/runtime_acceptance_phases.cc" ||
   fail 'actual ART network acceptance phase missing'

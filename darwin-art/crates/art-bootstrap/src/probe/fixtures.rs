@@ -83,6 +83,7 @@ pub(crate) fn prepare_private_apk_native_fixture(root: &Path) -> Result<PrivateA
         "libdarwin-art-jni-fixture.so",
         "libdarwin-art-jni-child.so",
         "libdarwin-art-jni-grandchild.so",
+        "libdarwin-art-jni-host.so",
     ];
     let temporary_base = env::temp_dir();
     let mut temporary_root = None;
@@ -142,7 +143,7 @@ pub(crate) fn prepare_private_apk_native_fixture(root: &Path) -> Result<PrivateA
             .arg(&cleanup.extracted_root)
             .arg(root_soname),
     )?;
-    if !extraction_output.starts_with("apk-native-extract: PASS files=6 stored=0 deflated=6 ")
+    if !extraction_output.starts_with("apk-native-extract: PASS files=7 stored=0 deflated=7 ")
         || !extraction_output.contains(
             "crc=verified mode=dir0500+file0400 publish=atomic root=libdarwin-art-generic-root.so",
         )

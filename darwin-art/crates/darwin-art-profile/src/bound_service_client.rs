@@ -24,17 +24,34 @@ pub fn activate_bound_service_process(
     socket: &Path,
     handle: BoundServiceProcessResponse,
 ) -> Result<(), ProfileError> {
+    control_bound_service_process(socket, handle, protocol::OP_ACTIVATE_BOUND_SERVICE)
+}
+
+/// Admit sticky cancellation of the exact daemon-owned child. Success does
+/// not prove that waitpid has completed; the daemon retains the slot until reap.
+pub fn cancel_bound_service_process(
+    socket: &Path,
+    handle: BoundServiceProcessResponse,
+) -> Result<(), ProfileError> {
+    control_bound_service_process(socket, handle, protocol::OP_CANCEL_BOUND_SERVICE)
+}
+
+fn control_bound_service_process(
+    socket: &Path,
+    handle: BoundServiceProcessResponse,
+    operation: u16,
+) -> Result<(), ProfileError> {
     let mut stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
     let payload = handle.encode()?;
-    protocol::write_request(&mut stream, protocol::OP_ACTIVATE_BOUND_SERVICE, &payload)?;
-    let response = protocol::expect_ok(&mut stream, protocol::OP_ACTIVATE_BOUND_SERVICE)?;
+    protocol::write_request(&mut stream, operation, &payload)?;
+    let response = protocol::expect_ok(&mut stream, operation)?;
     if response.is_empty() {
         Ok(())
     } else {
         Err(ProfileError::InvalidResponse(
-            "unexpected bound-service activation payload".into(),
+            "unexpected bound-service control payload".into(),
         ))
     }
 }

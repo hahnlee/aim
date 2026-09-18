@@ -133,6 +133,8 @@ long darwin_art_bionic_lrand48(void);
 long darwin_art_bionic_mrand48(void);
 uint32_t darwin_art_bionic_arc4random(void);
 int darwin_art_bionic_getpid(void);
+void darwin_art_bionic_exit(int status) __attribute__((noreturn));
+void darwin_art_bionic__exit(int status) __attribute__((noreturn));
 int darwin_art_bionic_kill(int pid, int signal_number);
 unsigned darwin_art_bionic_geteuid(void);
 int darwin_art_bionic_getpagesize(void);

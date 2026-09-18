@@ -17,7 +17,7 @@ use super::cache::{
 use super::foundation::{
     FoundationFamily, cached_foundation_objects, foundation_input_list, foundation_inputs,
 };
-use super::inputs::{collect_files, is_probe_only_input};
+use super::inputs::collect_files;
 use super::manifest::prepare as prepare_manifest;
 use super::probe_manifest;
 use super::representative::emit_representative_edges;
@@ -52,6 +52,49 @@ use bootstrap_shadow_manifest::RUNTIME_SHADOW_IDENTITY_VERSION;
 mod tests {
     use super::{shadow_identity, shadow_identity_matches};
     use std::fs;
+
+    #[test]
+    fn both_runtime_flavors_track_provider_archive_changes() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let output = root.join(format!(
+            "_build/provider-link-boundary-{}.ninja",
+            std::process::id()
+        ));
+        super::emit_graph(&output).expect("emit native graph");
+        let graph = fs::read_to_string(&output).expect("read native graph");
+        for rule in [": headless_runtime_audit ", ": graphics_audit "] {
+            let edge = graph
+                .lines()
+                .find(|line| line.contains(rule))
+                .expect("runtime link edge");
+            for archive in [
+                "libdarwin-art-bionic-rust-providers.a",
+                "libdarwin-art-bionic-native-providers.a",
+                "libdarwin-art-bionic-float-conversion.a",
+                "libdarwin-art-bionic-binary128-conversion.a",
+            ] {
+                assert!(edge.contains(archive), "{rule} omits {archive}");
+            }
+        }
+        for rule in [
+            ": bionic_provider_closure ",
+            ": bionic_provider_acceptance ",
+        ] {
+            let edge = graph
+                .lines()
+                .find(|line| line.contains(rule))
+                .expect("provider producer/audit edge");
+            for archive in [
+                "libandroidicuinit-darwin.a",
+                "libicuuc-common-darwin.a",
+                "libicuuc-stubdata-darwin.a",
+                "liblog-darwin.a",
+            ] {
+                assert!(edge.contains(archive), "{rule} omits real read {archive}");
+            }
+        }
+        fs::remove_file(output).expect("remove test graph");
+    }
 
     #[test]
     fn graph_shadow_identity_matches_bootstrap_manifest() {
@@ -169,6 +212,10 @@ fn runtime_common_shadow_inputs(root: &Path) -> Vec<PathBuf> {
 }
 
 pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
+    emit_graph_with_support(out, false)
+}
+
+pub(crate) fn emit_graph_with_support(out: &Path, with_support: bool) -> io::Result<()> {
     let manifest = prepare_manifest(out)?;
     let root = manifest.root;
     let inputs = manifest.inputs;
@@ -268,9 +315,9 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     let graphics_input_object_path =
         native_output_root.join("runtime-probes/darwin_art_runtime_graphics_input.cc.o");
     let graphics_state_object_path =
-        native_output_root.join("runtime-probes/darwin_art_runtime_graphics_state.cc.o");
+        native_output_root.join("runtime-embedding/darwin_art_graphics_state.cc.o");
     let graphics_session_object_path =
-        native_output_root.join("runtime-probes/darwin_art_runtime_graphics_session.cc.o");
+        native_output_root.join("runtime-embedding/darwin_art_graphics_session.cc.o");
     let jni_acceptance_object_path =
         native_output_root.join("runtime-probes/darwin_art_runtime_jni_acceptance_probe.cc.o");
     let app_bootstrap_object_path =
@@ -285,8 +332,10 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     let graphics_ready_path = cache_dir.join("graphics-bootstrap.ready");
     let runtime_stamp_path = cache_dir.join("runtime-bootstrap.stamp");
     let runtime_ready_path = cache_dir.join("runtime-bootstrap.ready");
+    let jit_layout_stamp_path = cache_dir.join("jit-layout-audit.stamp");
     let stamp = ninja_path(&stamp_path);
     let runtime_stamp = ninja_path(&runtime_stamp_path);
+    let jit_layout_stamp = ninja_path(&jit_layout_stamp_path);
     let archive = ninja_path(&archive_path);
     let runtime_archive = ninja_path(&runtime_archive_path);
     let hwui_foundation_archive = ninja_path(&hwui_foundation_archive_path);
@@ -361,14 +410,20 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         None
     };
     let network_object_for_shell = network_object_path.to_string_lossy().into_owned();
+    let fallback_adapter_sources = super::inputs::bootstrap_fallback_adapter_sources();
     let bootstrap_input_list = bootstrap_inputs
         .iter()
-        .map(|path| ninja_path(&root.join(path)))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let probe_only_input_list = inputs
-        .iter()
-        .filter(|path| is_probe_only_input(path))
+        .chain(
+            inputs
+                .iter()
+                .filter(|path| super::inputs::is_bootstrap_fallback_header(path)),
+        )
+        // A new adapter has no persisted object command yet. Its source may
+        // deliberately be excluded from the broad ART digest, but the
+        // canonical fallback still reads it and must track that dependency.
+        // Otherwise a second edit before graph regeneration can reuse an
+        // archive compiled from the previous provider implementation.
+        .chain(fallback_adapter_sources.iter())
         .map(|path| ninja_path(&root.join(path)))
         .collect::<Vec<_>>()
         .join(" ");
@@ -425,36 +480,9 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     // rather than copied into the large ART/HWUI bootstrap archive. Keep it
     // on its own narrow Ninja edge so a Rust facade edit rebuilds four small
     // provider archives and relinks, without recompiling the C++ runtime.
-    let mut bionic_provider_inputs = vec![
-        PathBuf::from("tools/build-bionic-runtime-provider-closure.sh"),
-        PathBuf::from("upstream/android35-libcxx-provider-coverage.lock"),
-    ];
-    if let Ok(entries) = fs::read_dir(root.join("tools")) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("");
-            if path.is_dir()
-                && (name.starts_with("bionic-")
-                    || matches!(
-                        name,
-                        "android-bionic-pthread-provider"
-                            | "android-aaudio-provider"
-                            | "android-binder-ndk-provider"
-                            | "android-dso-namespace"
-                            | "android-dl-iterate-phdr-provider"
-                            | "android-liblog-exec-provider"
-                    ))
-            {
-                collect_files(&path, &root, &mut bionic_provider_inputs);
-            }
-        }
-    }
-    bionic_provider_inputs.sort();
-    bionic_provider_inputs.dedup();
-    let bionic_provider_input_list = bionic_provider_inputs
+    let provider_manifest = super::provider_inputs::collect(&root)?;
+    let bionic_provider_input_list = provider_manifest
+        .production
         .iter()
         .filter(|path| root.join(path).is_file())
         .map(|path| ninja_path(&root.join(path)))
@@ -518,6 +546,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str(&format!("# input-digest: {digest}\n"));
     graph.push_str(&format!("# compiler: {} sdk: {SDK_NAME}\n", toolchain.cxx));
     graph.push_str("ninja_required_version = 1.10\n\n");
+    graph.push_str("pool runtime_bootstrap_fallback\n  depth = 1\n\n");
     graph.push_str("rule art_bootstrap_cli\n");
     graph.push_str("  command = cd ");
     graph.push_str(&shell_quote(&root_for_shell));
@@ -602,6 +631,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         // intentionally a separate output: an existing archive alone must
         // not make Ninja accept an incomplete canonical fallback.
         graph.push_str("rule graphics_bootstrap\n");
+        graph.push_str("  pool = runtime_bootstrap_fallback\n");
         graph.push_str("  command = cd ");
         graph.push_str(&shell_quote(&root_for_shell));
         graph.push_str(" && DARWIN_ART_NATIVE_OUTPUT_ROOT=");
@@ -660,6 +690,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         // marker is absent after an interrupted or source-incomplete fallback
         // and therefore forces the canonical builder to run again.
         graph.push_str("rule runtime_bootstrap\n");
+        graph.push_str("  pool = runtime_bootstrap_fallback\n");
         graph.push_str("  command = cd ");
         graph.push_str(&shell_quote(&root_for_shell));
         graph.push_str(" && DARWIN_ART_NATIVE_OUTPUT_ROOT=");
@@ -693,11 +724,13 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str(&runtime_archive);
     graph.push('\n');
 
+    let input_keymaps_archive = super::input_keymaps::emit(&mut graph, &root);
     // The headless C ABI dylib is a first-class graph artifact as well.  Keep
     // its producer on the canonical audit path so a stale bootstrap archive
     // can never be force-loaded behind Ninja's back, and so reproducibility
     // checks exercise the same edge users build in CI.
     graph.push_str("rule headless_runtime_audit\n");
+    graph.push_str("  pool = runtime_bootstrap_fallback\n");
     graph.push_str("  command = cd ");
     graph.push_str(&shell_quote(&root_for_shell));
     graph.push_str(" && ");
@@ -711,6 +744,19 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str(&runtime_archive);
     graph.push(' ');
     graph.push_str(&bootstrap_cli_target);
+    // The headless linker consumes the same provider archives as graphics.
+    // Track those products directly: a provider-only edit must relink both
+    // runtime flavors even when the ART bootstrap archive is unchanged.
+    for archive in [
+        &bionic_rust_provider_archive,
+        &bionic_native_provider_archive,
+        &bionic_float_provider_archive,
+        &bionic_binary128_provider_archive,
+        &input_keymaps_archive,
+    ] {
+        graph.push(' ');
+        graph.push_str(archive);
+    }
     for input in &bootstrap_inputs {
         graph.push(' ');
         graph.push_str(&ninja_path(&root.join(input)));
@@ -1121,7 +1167,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("rule bionic_provider_closure\n");
     graph.push_str("  command = cd ");
     graph.push_str(&shell_quote(&root_for_shell));
-    graph.push_str(" && tools/build-bionic-runtime-provider-closure.sh\n");
+    graph.push_str(" && bash tools/build-bionic-runtime-provider-closure.sh --build-only\n");
     graph.push_str("  description = RUST/C Bionic provider closure\n");
     graph.push_str("  restat = 1\n\n");
     graph.push_str("build ");
@@ -1134,6 +1180,54 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str(&bionic_binary128_provider_archive);
     graph.push_str(": bionic_provider_closure ");
     graph.push_str(&bionic_provider_input_list);
+    let provider_foundation_inputs = [
+        icu_init_archive.clone(),
+        icu_common_archive.clone(),
+        icu_stubdata_archive.clone(),
+        ninja_path(&root.join("_build/graphics-foundations/liblog-darwin.a")),
+    ];
+    // These archives are read by the production symbol ownership gate, not
+    // just by acceptance. ICU has producer edges above; liblog is an existing
+    // graphics-foundations artifact, as on the graphics closure edge.
+    for archive in &provider_foundation_inputs {
+        graph.push(' ');
+        graph.push_str(archive);
+    }
+    graph.push('\n');
+
+    // Acceptance consumes produced archives; archives never depend backward
+    // on this fixture executable. Invoke this explicitly for release testing.
+    let provider_acceptance =
+        ninja_path(&root.join("_build/bionic-runtime-provider-closure/acceptance.stamp"));
+    graph.push_str("rule bionic_provider_acceptance\n  command = cd ");
+    graph.push_str(&shell_quote(&root_for_shell));
+    graph.push_str(
+        " && bash tools/tests/bionic-runtime-provider-closure-acceptance.sh && touch $out\n",
+    );
+    graph.push_str("  description = TEST produced Bionic provider archives\n\n");
+    graph.push_str("build ");
+    graph.push_str(&provider_acceptance);
+    graph.push_str(": bionic_provider_acceptance ");
+    for archive in &provider_foundation_inputs {
+        graph.push_str(archive);
+        graph.push(' ');
+    }
+    for archive in [
+        &bionic_rust_provider_archive,
+        &bionic_native_provider_archive,
+        &bionic_float_provider_archive,
+        &bionic_binary128_provider_archive,
+    ] {
+        graph.push_str(archive);
+        graph.push(' ');
+    }
+    for input in &provider_manifest.audit {
+        graph.push_str(&ninja_path(&root.join(input)));
+        graph.push(' ');
+    }
+    graph.push('\n');
+    graph.push_str("build bionic-provider-acceptance: phony ");
+    graph.push_str(&provider_acceptance);
     graph.push('\n');
 
     graph.push_str("rule runtime_network_probe\n");
@@ -1177,94 +1271,20 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("rule runtime_graphics_probe\n");
     graph.push_str("  command = cd ");
     graph.push_str(&shell_quote(&root_for_shell));
-    // The graphics translation unit is materialized by the same audit
-    // command that links the probe dylib.  Pass every split probe output
-    // through here; otherwise this edge silently falls back to the legacy
-    // runtime-graphics-link-probe directory and can link a mixed stale/new
-    // object set before the final audit edge runs.
-    graph.push_str(" && rm -f ");
+    graph.push_str(" && DARWIN_ART_NATIVE_GRAPHICS_OBJECT=");
     graph.push_str(&shell_quote(&graphics_object_path.to_string_lossy()));
-    graph.push(' ');
-    graph.push_str(&shell_quote(
-        &graphics_object_path.with_extension("o.d").to_string_lossy(),
-    ));
-    graph.push(' ');
-    graph.push_str(&shell_quote(
-        &graphics_object_path
-            .with_extension("o.fingerprint")
-            .to_string_lossy(),
-    ));
-    graph.push_str(" && DARWIN_ART_NATIVE_OUTPUT_ROOT=");
-    graph.push_str(&shell_quote(&native_output_for_shell));
-    graph.push_str(" DARWIN_ART_NATIVE_NETWORK_OBJECT=");
-    graph.push_str(&shell_quote(&network_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_OBJECT=");
-    graph.push_str(&shell_quote(&graphics_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_GPU_OBJECT=");
-    graph.push_str(&shell_quote(&graphics_gpu_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_PHASE_OBJECT=");
-    graph.push_str(&shell_quote(&graphics_phase_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_INPUT_OBJECT=");
-    graph.push_str(&shell_quote(&graphics_input_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_STATE_OBJECT=");
-    graph.push_str(&shell_quote(&graphics_state_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_SESSION_OBJECT=");
-    graph.push_str(&shell_quote(
-        &graphics_session_object_path.to_string_lossy(),
-    ));
-    graph.push_str(" DARWIN_ART_NATIVE_JNI_ACCEPTANCE_OBJECT=");
-    graph.push_str(&shell_quote(&jni_acceptance_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_HWUI_OBJECT=");
-    graph.push_str(&shell_quote(&hwui_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_APP_BOOTSTRAP_OBJECT=");
-    graph.push_str(&shell_quote(&app_bootstrap_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_APP_PRESENTATION_OBJECT=");
-    graph.push_str(&shell_quote(
-        &app_presentation_object_path.to_string_lossy(),
-    ));
-    graph.push_str(" DARWIN_ART_NATIVE_APP_RESOURCES_OBJECT=");
-    graph.push_str(&shell_quote(&app_resources_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_APP_ACTIVITY_OBJECT=");
-    graph.push_str(&shell_quote(&app_activity_object_path.to_string_lossy()));
     graph.push(' ');
     graph.push_str(&bootstrap_cli);
-    graph.push_str(" audit-runtime-graphics-link-fast\n");
+    graph.push_str(" build-runtime-graphics-probe\n");
     graph.push_str("  description = CXX runtime_graphics_probe\n");
     graph.push_str("  restat = 1\n\n");
     graph.push_str("build ");
     graph.push_str(&graphics_object);
     graph.push_str(": runtime_graphics_probe ");
     append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
-    // This edge invokes the fast linker, which refreshes the JIT producer.
-    // Order it after the explicit producers: otherwise both patch/compile the
-    // same staged ART sources concurrently before the final link edge.
-    graph.push_str(&jit_archive);
-    graph.push(' ');
-    graph.push_str(&interpreter_archive);
-    graph.push(' ');
     graph.push_str(&graphics_probe_inputs);
     graph.push(' ');
     graph.push_str(&ninja_path(&graphics_probe_stamp));
-    graph.push(' ');
-    graph.push_str(&graphics_phase_object);
-    graph.push(' ');
-    graph.push_str(&graphics_input_object);
-    graph.push(' ');
-    graph.push_str(&graphics_state_object);
-    graph.push(' ');
-    graph.push_str(&ninja_path(&graphics_session_object_path));
-    graph.push(' ');
-    graph.push_str(&jni_acceptance_object);
-    graph.push(' ');
-    graph.push_str(&hwui_object);
-    graph.push(' ');
-    graph.push_str(&app_bootstrap_object);
-    graph.push(' ');
-    graph.push_str(&graphics_gpu_object);
-    graph.push(' ');
-    graph.push_str(&app_activity_object);
-    graph.push(' ');
-    graph.push_str(&app_presentation_object);
     graph.push('\n');
     graph.push_str("rule runtime_graphics_gpu_probe\n");
     graph.push_str("  command = cd ");
@@ -1327,7 +1347,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str(&shell_quote(&graphics_state_object_path.to_string_lossy()));
     graph.push(' ');
     graph.push_str(&bootstrap_cli);
-    graph.push_str(" build-runtime-graphics-state-probe\n");
+    graph.push_str(" build-runtime-graphics-state\n");
     graph.push_str("  description = CXX runtime_graphics_state\n");
     graph.push_str("  restat = 1\n\n");
     graph.push_str("build ");
@@ -1338,7 +1358,7 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push(' ');
     graph.push_str(&ninja_path(&graphics_state_stamp));
     graph.push('\n');
-    graph.push_str("rule runtime_graphics_session_probe\n");
+    graph.push_str("rule runtime_graphics_session\n");
     graph.push_str("  command = cd ");
     graph.push_str(&shell_quote(&root_for_shell));
     graph.push_str(" && DARWIN_ART_NATIVE_GRAPHICS_SESSION_OBJECT=");
@@ -1347,13 +1367,13 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     ));
     graph.push(' ');
     graph.push_str(&bootstrap_cli);
-    graph.push_str(" build-runtime-graphics-session-probe\n");
+    graph.push_str(" build-runtime-graphics-session\n");
     graph.push_str("  description = CXX runtime_graphics_session\n");
     graph.push_str("  restat = 1\n\n");
     let graphics_session_object = ninja_path(&graphics_session_object_path);
     graph.push_str("build ");
     graph.push_str(&graphics_session_object);
-    graph.push_str(": runtime_graphics_session_probe ");
+    graph.push_str(": runtime_graphics_session ");
     append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     graph.push_str(&graphics_session_inputs);
     graph.push(' ');
@@ -1459,11 +1479,32 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("rule libcore_linux_archive\n");
     graph.push_str("  command = cd ");
     graph.push_str(&shell_quote(&root_for_shell));
-    graph.push_str(" && tools/build-android16-libcore-darwin-linux.sh\n");
+    graph.push_str(" && tools/build-android16-libcore-darwin-linux.sh --archive-only\n");
     graph.push_str("  description = libcore Linux compatibility archive\n");
     graph.push_str("  restat = 1\n\n");
     graph.push_str("build ");
     graph.push_str(&libcore_linux_archive);
+    graph.push_str(" | ");
+    for output in [
+        "_build/libcore-darwin-linux/darwin_linux_method_table.inc",
+        "_build/libcore-darwin-linux/libcore-darwin-linux-methods.tsv",
+        "_build/libcore-darwin-linux/libcore-darwin-linux-unsupported-abi.tsv",
+        "_build/libcore-darwin-linux/libcore-darwin-linux-counts.txt",
+        "_build/libcore-darwin-linux/libcore-darwin-linux-definitions.txt",
+        "_build/os-constants/libandroid-system-os-constants-darwin.a",
+        "_build/os-constants/android16-os-constants-values.tsv",
+        "_build/os-constants/generated/android16_os_constants_values.inc",
+        "_build/os-constants/generated/android16_os_constants_errno.inc",
+        "_build/os-constants/generated/android16_os_constants_sysconf.inc",
+        "_build/os-constants/generated/names.txt",
+        "_build/os-constants/generated/expressions.tsv",
+        "_build/os-constants/generated/derived-values.tsv",
+        "_build/asynchronous-close-monitor/libandroidio-darwin.a",
+        "_build/asynchronous-close-monitor/libcore-io-asynchronous-close-monitor-registrar-darwin.a",
+    ] {
+        graph.push_str(&ninja_path(&root.join(output)));
+        graph.push(' ');
+    }
     graph.push_str(": libcore_linux_archive ");
     for input in [
         "tools/build-android16-libcore-darwin-linux.sh",
@@ -1479,9 +1520,8 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         "tools/bionic-socket-broker-adapter/include/darwin_art_bionic_socket_broker.h",
         "tools/build-android16-asynchronous-close-monitor.sh",
         "upstream/android16-asynchronous-close-monitor.lock",
-        "probes/android16_asynchronous_close_monitor_smoke.cc",
-        "probes/android16_asynchronous_close_monitor_jni.cc",
         "tools/build-android16-os-constants-darwin.sh",
+        "compat/darwin_os_constants.cc",
         "upstream/android16-os-constants.lock",
         "upstream/android16-os-constants-values.tsv",
     ] {
@@ -1489,10 +1529,105 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         graph.push(' ');
     }
     graph.push('\n');
+    let libcore_test_stamp = ninja_path(&root.join("_build/libcore-darwin-linux/acceptance.stamp"));
+    graph.push_str("rule libcore_linux_test\n  command = cd ");
+    graph.push_str(&shell_quote(&root_for_shell));
+    graph.push_str(
+        " && bash tools/test-android16-libcore-darwin-linux.sh --prepared && touch $out\n",
+    );
+    graph.push_str("  description = Libcore Linux native/managed ABI acceptance\n\n");
+    graph.push_str("build ");
+    graph.push_str(&libcore_test_stamp);
+    graph.push_str(": libcore_linux_test ");
+    graph.push_str(&libcore_linux_archive);
+    graph.push(' ');
+    for input in [
+        "tools/test-android16-libcore-darwin-linux.sh",
+        "upstream/android16-libcore-darwin-linux.lock",
+        "probes/android16_libcore_darwin_linux_smoke.cc",
+        "_build/libcore-darwin-linux/darwin_linux_method_table.inc",
+        "_build/libcore-darwin-linux/libcore-darwin-linux-methods.tsv",
+        "_build/libcore-darwin-linux/libcore-darwin-linux-unsupported-abi.tsv",
+        "_build/libcore-darwin-linux/libcore-darwin-linux-counts.txt",
+        "compat/libcore_darwin_linux.cc",
+        "compat/libcore_darwin_linux_system_natives.cc",
+        "compat/libcore_darwin_linux_syscalls.cc",
+        "compat/libcore_darwin_linux.h",
+        "compat/darwin_os_constants.h",
+        "_build/asynchronous-close-monitor/libandroidio-darwin.a",
+        "_build/nativehelper-foundation/libnativehelper_jvm.a",
+        "_build/graphics-foundations/liblog-darwin.a",
+        "_build/os-constants/libandroid-system-os-constants-darwin.a",
+    ] {
+        graph.push_str(&ninja_path(&root.join(input)));
+        graph.push(' ');
+    }
+    graph.push_str("\nbuild libcore-linux-test: phony ");
+    graph.push_str(&libcore_test_stamp);
+    graph.push('\n');
+    let os_test_stamp = ninja_path(&root.join("_build/os-constants/acceptance.stamp"));
+    graph.push_str("rule os_constants_test\n  command = cd ");
+    graph.push_str(&shell_quote(&root_for_shell));
+    graph.push_str(
+        " && bash tools/test-android16-os-constants-darwin.sh --prepared && touch $out\n",
+    );
+    graph.push_str("  description = OsConstants managed Android ABI acceptance\n\n");
+    graph.push_str("build ");
+    graph.push_str(&os_test_stamp);
+    graph.push_str(": os_constants_test ");
+    for input in [
+        "tools/test-android16-os-constants-darwin.sh",
+        "upstream/android16-os-constants.lock",
+        "probes/android16_os_constants_jni.cc",
+        "compat/darwin_os_constants.h",
+        "_build/os-constants/libandroid-system-os-constants-darwin.a",
+        "_build/os-constants/android16-os-constants-values.tsv",
+        "_build/os-constants/generated/android16_os_constants_values.inc",
+        "_build/os-constants/generated/android16_os_constants_errno.inc",
+        "_build/os-constants/generated/android16_os_constants_sysconf.inc",
+        "_build/os-constants/generated/names.txt",
+        "_build/os-constants/generated/expressions.tsv",
+        "_build/os-constants/generated/derived-values.tsv",
+        "_build/nativehelper-foundation/libnativehelper_jvm.a",
+        "_build/graphics-foundations/liblog-darwin.a",
+    ] {
+        graph.push_str(&ninja_path(&root.join(input)));
+        graph.push(' ');
+    }
+    graph.push_str("\nbuild os-constants-test: phony ");
+    graph.push_str(&os_test_stamp);
+    graph.push('\n');
+    let async_test_stamp =
+        ninja_path(&root.join("_build/asynchronous-close-monitor/acceptance.stamp"));
+    graph.push_str("rule async_close_test\n  command = cd ");
+    graph.push_str(&shell_quote(&root_for_shell));
+    graph.push_str(
+        " && bash tools/test-android16-asynchronous-close-monitor.sh --prepared && touch $out\n",
+    );
+    graph.push_str("  description = Asynchronous close managed/native acceptance\n\n");
+    graph.push_str("build ");
+    graph.push_str(&async_test_stamp);
+    graph.push_str(": async_close_test ");
+    for input in [
+        "_build/asynchronous-close-monitor/libandroidio-darwin.a",
+        "_build/asynchronous-close-monitor/libcore-io-asynchronous-close-monitor-registrar-darwin.a",
+        "tools/test-android16-asynchronous-close-monitor.sh",
+        "upstream/android16-asynchronous-close-monitor.lock",
+        "probes/android16_asynchronous_close_monitor_smoke.cc",
+        "probes/android16_asynchronous_close_monitor_jni.cc",
+        "_build/nativehelper-foundation/libnativehelper_jvm.a",
+        "_build/graphics-foundations/liblog-darwin.a",
+    ] {
+        graph.push_str(&ninja_path(&root.join(input)));
+        graph.push(' ');
+    }
+    graph.push_str("\nbuild asynchronous-close-monitor-test: phony ");
+    graph.push_str(&async_test_stamp);
+    graph.push('\n');
     graph.push_str("rule unix_filesystem_archive\n");
     graph.push_str("  command = cd ");
     graph.push_str(&shell_quote(&root_for_shell));
-    graph.push_str(" && tools/build-android16-unix-filesystem-darwin.sh\n");
+    graph.push_str(" && tools/build-android16-unix-filesystem-darwin.sh --archive-only\n");
     graph.push_str("  description = Unix filesystem compatibility archive\n");
     graph.push_str("  restat = 1\n\n");
     graph.push_str("build ");
@@ -1509,48 +1644,52 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         "tools/bionic-fs-facade/include/darwin_art_bionic_stat.h",
         "tools/bionic-ioctl-facade/include/darwin_art_bionic_ioctl.h",
         "tools/bionic-errno-tls/include/darwin_art_bionic_errno.h",
-        "probes/android16_unix_filesystem_jni.c",
-        "probes/unix-filesystem/UnixFileSystemDarwinSmoke.java",
     ] {
         graph.push_str(&ninja_path(&root.join(input)));
         graph.push(' ');
     }
     graph.push('\n');
+    // Managed fixtures audit the produced archive, never become prerequisites
+    // of it. Keep this independently requestable gate in the same graph.
+    let unix_filesystem_test_stamp =
+        ninja_path(&root.join("_build/unix-filesystem-darwin/managed-acceptance.stamp"));
+    graph.push_str("rule unix_filesystem_managed_test\n");
+    graph.push_str("  command = cd ");
+    graph.push_str(&shell_quote(&root_for_shell));
+    graph.push_str(
+        " && bash tools/test-android16-unix-filesystem-darwin.sh --prepared && touch $out\n",
+    );
+    graph.push_str("  description = Unix filesystem managed fixture acceptance\n\n");
+    graph.push_str("build ");
+    graph.push_str(&unix_filesystem_test_stamp);
+    graph.push_str(": unix_filesystem_managed_test ");
+    graph.push_str(&unix_filesystem_archive);
+    graph.push(' ');
+    for input in [
+        "tools/test-android16-unix-filesystem-darwin.sh",
+        "probes/android16_unix_filesystem_jni.c",
+        "probes/unix-filesystem/UnixFileSystemDarwinSmoke.java",
+        "_build/nativehelper-device-foundation/libnativehelper-device-darwin.a",
+        "_build/graphics-foundations/liblog-darwin.a",
+    ] {
+        graph.push_str(&ninja_path(&root.join(input)));
+        graph.push(' ');
+    }
+    graph.push_str("\nbuild unix-filesystem-managed-test: phony ");
+    graph.push_str(&unix_filesystem_test_stamp);
+    graph.push('\n');
     graph.push_str("rule graphics_audit\n");
+    graph.push_str("  pool = runtime_bootstrap_fallback\n");
     graph.push_str("  command = cd ");
     graph.push_str(&shell_quote(&root_for_shell));
     graph.push_str(" && DARWIN_ART_NATIVE_OUTPUT_ROOT=");
     graph.push_str(&shell_quote(&native_output_for_shell));
-    graph.push_str(" DARWIN_ART_NATIVE_NETWORK_OBJECT=");
-    graph.push_str(&shell_quote(&network_object_for_shell));
-    graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_OBJECT=");
-    graph.push_str(&shell_quote(&graphics_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_GPU_OBJECT=");
-    graph.push_str(&shell_quote(&graphics_gpu_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_PHASE_OBJECT=");
-    graph.push_str(&shell_quote(&graphics_phase_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_INPUT_OBJECT=");
-    graph.push_str(&shell_quote(&graphics_input_object_path.to_string_lossy()));
     graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_STATE_OBJECT=");
     graph.push_str(&shell_quote(&graphics_state_object_path.to_string_lossy()));
     graph.push_str(" DARWIN_ART_NATIVE_GRAPHICS_SESSION_OBJECT=");
     graph.push_str(&shell_quote(
         &graphics_session_object_path.to_string_lossy(),
     ));
-    graph.push_str(" DARWIN_ART_NATIVE_JNI_ACCEPTANCE_OBJECT=");
-    graph.push_str(&shell_quote(&jni_acceptance_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_HWUI_OBJECT=");
-    graph.push_str(&shell_quote(&hwui_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_APP_BOOTSTRAP_OBJECT=");
-    graph.push_str(&shell_quote(&app_bootstrap_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_APP_PRESENTATION_OBJECT=");
-    graph.push_str(&shell_quote(
-        &app_presentation_object_path.to_string_lossy(),
-    ));
-    graph.push_str(" DARWIN_ART_NATIVE_APP_RESOURCES_OBJECT=");
-    graph.push_str(&shell_quote(&app_resources_object_path.to_string_lossy()));
-    graph.push_str(" DARWIN_ART_NATIVE_APP_ACTIVITY_OBJECT=");
-    graph.push_str(&shell_quote(&app_activity_object_path.to_string_lossy()));
     // The full upstream closure is a separate release/CI gate.  The Ninja
     // graph is the developer inner loop and must only relink/audit against
     // already materialized foundation artifacts.
@@ -1562,6 +1701,8 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("build ");
     graph.push_str(&runtime_library);
     graph.push_str(": graphics_audit ");
+    graph.push_str(&input_keymaps_archive);
+    graph.push(' ');
     append_bootstrap_cli_prerequisite(&mut graph, &bootstrap_cli_target);
     // The fast audit consumes these foundation artifacts directly.  Keep them
     // as real Ninja prerequisites so a missing or rebuilt foundation cannot
@@ -1610,33 +1751,9 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push(' ');
     graph.push_str(&boringssl_archive);
     graph.push(' ');
-    graph.push_str(&network_object);
-    graph.push(' ');
-    graph.push_str(&graphics_object);
-    graph.push(' ');
-    graph.push_str(&graphics_gpu_object);
-    graph.push(' ');
-    graph.push_str(&graphics_phase_object);
-    graph.push(' ');
-    graph.push_str(&graphics_input_object);
-    graph.push(' ');
     graph.push_str(&graphics_state_object);
     graph.push(' ');
     graph.push_str(&graphics_session_object);
-    graph.push(' ');
-    graph.push_str(&jni_acceptance_object);
-    graph.push(' ');
-    graph.push_str(&hwui_object);
-    graph.push(' ');
-    graph.push_str(&app_bootstrap_object);
-    graph.push(' ');
-    graph.push_str(&app_resources_object);
-    graph.push(' ');
-    graph.push_str(&app_activity_object);
-    graph.push(' ');
-    graph.push_str(&app_presentation_object);
-    graph.push(' ');
-    graph.push_str(&probe_only_input_list);
     graph.push(' ');
     graph.push_str(&runtime_owner_archive);
     graph.push(' ');
@@ -1658,20 +1775,31 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
     graph.push_str("rule jit_layout_audit\n");
     graph.push_str("  command = cd ");
     graph.push_str(&shell_quote(&root_for_shell));
-    graph.push_str(" && tools/audit-jit-layout.sh\n");
+    graph.push_str(" && tools/audit-jit-layout.sh && touch ");
+    graph.push_str(&shell_quote(&jit_layout_stamp_path.to_string_lossy()));
+    graph.push('\n');
     graph.push_str("  description = JIT metadata-first MAP_JIT layout smoke\n");
     graph.push_str("  restat = 1\n\n");
-    graph.push_str("build jit-layout-audit: jit_layout_audit ");
+    graph.push_str("build jit-layout-audit: phony ");
+    graph.push_str(&jit_layout_stamp);
+    graph.push_str("\n");
+    graph.push_str("build ");
+    graph.push_str(&jit_layout_stamp);
+    graph.push_str(": jit_layout_audit ");
     graph.push_str(&ninja_path(&root.join("tools/audit-jit-layout.sh")));
     graph.push(' ');
     graph.push_str(&ninja_path(&root.join("tools/jit-layout-smoke.cc")));
+    graph.push(' ');
+    graph.push_str(&ninja_path(
+        &root.join("config/darwin-art-host.entitlements"),
+    ));
     graph.push('\n');
     graph.push_str("\nrule surfaceflinger_core\n");
     graph.push_str("  command = ");
     graph.push_str(&shell_quote(&format!(
         "{root_for_shell}/tools/build-android16-surfaceflinger-core.sh"
     )));
-    graph.push_str("\n  description = AOSP SurfaceFlinger frontend (Darwin)\n");
+    graph.push_str(" --archive-only\n  description = AOSP SurfaceFlinger frontend (Darwin)\n");
     graph.push_str("  restat = 1\n\n");
     graph.push_str("build ");
     graph.push_str(&surfaceflinger_frontend_archive);
@@ -1680,7 +1808,6 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         &surfaceflinger_binder_archive,
         &surfaceflinger_gui_archive,
         &surfaceflinger_fence_archive,
-        &surfaceflinger_runtime_probe,
     ] {
         graph.push_str(output);
         graph.push(' ');
@@ -1690,22 +1817,23 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         "tools/build-android16-surfaceflinger-core.sh",
         "tools/lib/surfaceflinger-compile-flags.sh",
         "tools/sync-android16-surfaceflinger-core.sh",
+        "tools/sync-android16-hostgraphics.sh",
         "upstream/android16-surfaceflinger-core.lock",
         "patches/frameworks-native/0001-darwin-surfaceflinger-core.patch",
         "patches/frameworks-native/0002-darwin-surface-commit-wait.patch",
         "patches/frameworks-native/0003-buffer-release-message-length.patch",
         "patches/frameworks-native/0004-darwin-release-record-transport.patch",
+        "patches/frameworks-native/0005-darwin-binder-trigger-poll.patch",
+        "patches/frameworks-native/0006-darwin-binder-rpc-peer-identity.patch",
+        "patches/frameworks-native/0007-rpc-binder-death-log-handle.patch",
+        "patches/frameworks-native/0008-darwin-binder-platform-syscalls.patch",
+        "patches/frameworks-native/0009-darwin-binder-fd-namespace.patch",
         "compat/surfaceflinger/release_record_transport.cc",
         "compat/surfaceflinger/release_record_transport.h",
-        "tools/test-release-record-transport.sh",
-        "tools/tests/release-record-transport-test.cc",
         "compat/surfaceflinger/commit_signal.h",
-        "tools/tests/parcel-native-handle-test.cc",
         "compat/surfaceflinger/tracing_perfetto.h",
         "compat/surfaceflinger/transaction_bridge.cc",
         "compat/surfaceflinger/transaction_bridge.h",
-        "probes/surfaceflinger_transaction_handler_compile.cc",
-        "probes/surfaceflinger_transaction_handler_runtime.cc",
         "compat/surfaceflinger/binder_os_darwin.cc",
         "compat/surfaceflinger/binder_socket_darwin.h",
         "compat/surfaceflinger/endian.h",
@@ -1722,17 +1850,67 @@ pub(crate) fn emit_graph(out: &Path) -> io::Result<()> {
         &surfaceflinger_binder_archive,
         &surfaceflinger_gui_archive,
         &surfaceflinger_fence_archive,
-        &surfaceflinger_runtime_probe,
     ] {
         graph.push_str(output);
         graph.push(' ');
     }
+    graph.push('\n');
+    let surfaceflinger_test_stamp =
+        ninja_path(&root.join("_build/surfaceflinger-core/acceptance.stamp"));
+    graph.push_str("rule surfaceflinger_core_test\n  command = cd ");
+    graph.push_str(&shell_quote(&root_for_shell));
+    graph.push_str(
+        " && bash tools/test-android16-surfaceflinger-core.sh --prepared && touch $out\n",
+    );
+    graph.push_str("  description = SurfaceFlinger transaction/Parcel fixture acceptance\n\n");
+    graph.push_str("build ");
+    graph.push_str(&surfaceflinger_test_stamp);
+    graph.push_str(" | ");
+    graph.push_str(&surfaceflinger_runtime_probe);
+    graph.push_str(": surfaceflinger_core_test ");
+    for archive in [
+        &surfaceflinger_frontend_archive,
+        &surfaceflinger_binder_archive,
+        &surfaceflinger_gui_archive,
+        &surfaceflinger_fence_archive,
+    ] {
+        graph.push_str(archive);
+        graph.push(' ');
+    }
+    for input in [
+        "tools/test-android16-surfaceflinger-core.sh",
+        "tools/lib/surfaceflinger-compile-flags.sh",
+        "upstream/android16-surfaceflinger-core.lock",
+        "tools/test-release-record-transport.sh",
+        "tools/tests/release-record-transport-test.cc",
+        "tools/tests/parcel-native-handle-test.cc",
+        "probes/surfaceflinger_transaction_handler_compile.cc",
+        "probes/surfaceflinger_transaction_handler_runtime.cc",
+        "compat/binder/rpc_identity.cc",
+        "compat/binder/calling_identity.cc",
+        "compat/binder/peer_credentials.cc",
+        "tools/tests/surfaceflinger-binder-platform-syscalls-fixture.cc",
+        "tools/tests/surfaceflinger-binder-process-registry-fixture.cc",
+        "_build/ui-types-foundation/libui-types.a",
+        "_build/graphics-foundations/libutils-darwin.a",
+        "_build/graphics-foundations/libcutils-darwin.a",
+        "_build/graphics-foundations/liblog-darwin.a",
+        "_build/libbase-foundation/libandroid-base-darwin.a",
+    ] {
+        graph.push_str(&ninja_path(&root.join(input)));
+        graph.push(' ');
+    }
+    graph.push_str("\nbuild surfaceflinger-core-test: phony ");
+    graph.push_str(&surfaceflinger_test_stamp);
     graph.push('\n');
     graph.push_str("build graph-input-digest: phony ");
     graph.push_str(&ninja_path(&digest_path));
     graph.push('\n');
 
     emit_representative_edges(&mut graph, &root, &cache_dir, &toolchain)?;
+    if with_support {
+        super::runtime_support::emit(&mut graph, &root)?;
+    }
 
     atomic::write(out, graph.as_bytes())?;
     println!(

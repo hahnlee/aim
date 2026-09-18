@@ -1,0 +1,20 @@
+#pragma once
+
+#import <AppKit/AppKit.h>
+
+namespace darwin_art::window {
+
+// The caller supplies an already-resolved UTF-8 title. A null, empty, or
+// malformed title uses the generic native-surface title; Android resource and
+// package-name lookup remain outside this macOS provider.
+NSString* DecodeSurfaceWindowTitle(const char* resolved_utf8_title);
+
+// Projects an optional launcher icon supplied by the caller through
+// DARWIN_ART_APK_APP_ICON onto the native application and window. Missing or
+// malformed icon data leaves both existing AppKit icon properties unchanged.
+// Image representations retain their native pixel dimensions while the image
+// is given the conventional 128-point AppKit display size.
+void ApplySurfaceApplicationIdentity(NSApplication* application,
+                                     NSWindow* window);
+
+}  // namespace darwin_art::window

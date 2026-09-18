@@ -2,7 +2,7 @@
 set -euo pipefail
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 project_root="$(cd "$script_dir/.." && pwd)"
-bash "$script_dir/build-android16-surfaceflinger-core.sh"
+bash "$script_dir/build-android16-surfaceflinger-core.sh" --archive-only
 # ServiceManagement consumes the same guest filesystem and device-property
 # owners as original NativeLoader. Rebuild and validate them before linking.
 bash "$script_dir/build-android16-native-loader-policy.sh"

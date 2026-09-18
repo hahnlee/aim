@@ -46,7 +46,7 @@ int load_classes(JNIEnv* env,
                  const char* direct_apk_path,
                  bool run_elf_jni_fixture,
                  bool run_network_acceptance,
-                 bool probe_canvas_backend,
+                 bool headless_fixture,
                  ClassSet* out);
 
 int load_native_library(JNIEnv* env, art::Thread* self, jobject app_loader,

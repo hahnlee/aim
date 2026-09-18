@@ -65,6 +65,7 @@ thread_state_patch="$root/patches/frameworks-base/0004-darwin-binder-rpc-thread-
 parcel_state_patch="$root/patches/frameworks-base/0005-darwin-parcel-rpc-thread-state.patch"
 critical_jni_patch="$root/patches/frameworks-base/0006-darwin-core-critical-jni-abi.patch"
 fd_namespace_patch="$root/patches/frameworks-base/0007-darwin-parcel-fd-namespace.patch"
+recipient_presence_patch="$root/patches/frameworks-base/0008-darwin-binder-recipient-presence.patch"
 [[ "$(sha256 "$thread_patch")" == "$DARWIN_BINDER_RPC_THREAD_ATTACH_PATCH_SHA256" ]] || {
   echo "binder-jni: Darwin thread-attachment patch hash mismatch" >&2
   exit 1
@@ -93,6 +94,10 @@ fd_namespace_patch="$root/patches/frameworks-base/0007-darwin-parcel-fd-namespac
   echo "binder-jni: Darwin Parcel FD namespace patch hash mismatch" >&2
   exit 1
 }
+[[ "$(sha256 "$recipient_presence_patch")" == "$DARWIN_BINDER_RECIPIENT_PRESENCE_PATCH_SHA256" ]] || {
+  echo "binder-jni: Darwin recipient-presence patch hash mismatch" >&2
+  exit 1
+}
 patched_root="$out/patched-source"
 patch_fingerprint="$({
   shasum -a 256 "$source_root/core/jni/android_os_Parcel.cpp" \
@@ -101,7 +106,8 @@ patch_fingerprint="$({
     "$source_root/core/jni/android_util_Binder.h" \
     "$helpers/core_jni_helpers.h" "$thread_patch" \
     "$identity_patch" "$context_patch" "$thread_state_patch" \
-    "$parcel_state_patch" "$critical_jni_patch" "$fd_namespace_patch"
+    "$parcel_state_patch" "$critical_jni_patch" "$fd_namespace_patch" \
+    "$recipient_presence_patch" "$root/compat/binder/proxy_death_recipient.h"
 } | shasum -a 256 | awk '{print $1}')"
 if [[ ! -f "$patched_root/.fingerprint" || \
       "$(<"$patched_root/.fingerprint")" != "$patch_fingerprint" ]]; then
@@ -118,6 +124,7 @@ if [[ ! -f "$patched_root/.fingerprint" || \
   patch --batch --fuzz=0 -d "$patched_stage" -p1 < "$parcel_state_patch"
   patch --batch --fuzz=0 -d "$patched_stage" -p1 < "$critical_jni_patch"
   patch --batch --fuzz=0 -d "$patched_stage" -p1 < "$fd_namespace_patch"
+  patch --batch --fuzz=0 -d "$patched_stage" -p1 < "$recipient_presence_patch"
   printf '%s\n' "$patch_fingerprint" > "$patched_stage/.fingerprint"
   rm -rf -- "$patched_root"
   mv "$patched_stage" "$patched_root"
@@ -177,8 +184,18 @@ xcrun clang++ "${flags[@]}" -I"$root/compat" \
 boundary_objects+=("$rpc_identity_object")
 fd_transport_object="$out/fd-transport.o"
 xcrun clang++ "${flags[@]}" -I"$root/compat" \
-  -c "$root/compat/binder/fd_transport.cc" -o "$fd_transport_object"
+  -c "$root/compat/binder/fd_transport.cc" \
+  -MMD -MF "$fd_transport_object.d" -o "$fd_transport_object"
 boundary_objects+=("$fd_transport_object")
+retained_export_lease_object="$out/retained-export-lease.o"
+xcrun clang++ "${flags[@]}" -I"$root/compat" \
+  -I"$root/tools/bionic-central-fd-broker/include" \
+  -I"$root/tools/bionic-socket-broker-adapter/include" \
+  -I"$root/tools/bionic-socket-broker-adapter/src" \
+  -c "$root/compat/binder/retained_export_lease.cc" \
+  -MMD -MF "$retained_export_lease_object.d" \
+  -o "$retained_export_lease_object"
+boundary_objects+=("$retained_export_lease_object")
 xcrun libtool -static -o "$out/libbinder-rpc-boundary-darwin.a" \
   "${boundary_objects[@]}"
 nm -gU "$out/libbinder-jni-darwin.a" | c++filt > "$out/exports.txt"
@@ -188,6 +205,10 @@ nm -gU "$out/libbinder-rpc-boundary-darwin.a" | c++filt \
   > "$out/boundary-exports.txt"
 rg -Fq 'darwin_art::binder::ConnectRpcContext' "$out/boundary-exports.txt"
 rg -Fq 'darwin_art::binder::ServeRpcContext' "$out/boundary-exports.txt"
+rg -Fq 'darwin_art_binder_export_retained_file_descriptor' \
+  "$out/boundary-exports.txt"
+rg -Fq 'darwin_art_binder_release_export_lease' \
+  "$out/boundary-exports.txt"
 shasum -a 256 "$source_root/core/jni/android_os_Parcel.cpp" \
   "$source_root/core/jni/android_os_Parcel.h" \
   "$source_root/core/jni/android_util_Binder.cpp" \
@@ -207,8 +228,13 @@ shasum -a 256 "$source_root/core/jni/android_os_Parcel.cpp" \
   "$parcel_state_patch" \
   "$critical_jni_patch" \
   "$fd_namespace_patch" \
+  "$recipient_presence_patch" \
+  "$root/compat/binder/proxy_death_recipient.h" \
   "$root/compat/binder/fd_transport.h" \
   "$root/compat/binder/fd_transport.cc" \
+  "$root/compat/binder/retained_export_lease.h" \
+  "$root/compat/binder/retained_export_lease.cc" \
+  "$root/tools/bionic-socket-broker-adapter/include/darwin_art_bionic_binder_fd.h" \
   "$root/upstream/android16-binder-jni.lock" \
   "$root/tools/build-android16-binder-jni.sh" > "$out/source-identity.txt"
 echo "binder-jni: pinned AOSP Binder/Parcel JNI archive compiled; production registration NOT changed"

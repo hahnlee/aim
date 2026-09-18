@@ -23,6 +23,8 @@ fdsan="$root/target/release/libbionic_fdsan_owner.a"
 }
 
 includes=(-I"$adapter/include"
+          -I"$root/tools/bionic-fs-facade/include"
+          -I"$root/tools/bionic-ioctl-facade/include"
           -I"$root/tools/bionic-central-fd-broker/include"
           -I"$root/tools/bionic-dns-facade/include"
           -I"$root/tools/bionic-errno-tls/include")
@@ -32,6 +34,14 @@ common=(-arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g
 
 "$host_cxx" "${common[@]}" -c "$adapter/src/adapter.cc" \
   -o "$tmp/adapter.o"
+"$host_cxx" "${common[@]}" -c "$adapter/src/android_scm_exports.cc" \
+  -o "$tmp/scm-exports.o"
+"$host_cxx" "${common[@]}" -c "$adapter/src/fd_inheritance.cc" \
+  -o "$tmp/fd-inheritance.o"
+"$host_cxx" "${common[@]}" -c "$adapter/src/retained_scm_export.cc" \
+  -o "$tmp/retained-scm-export.o"
+"$host_cxx" "${common[@]}" -c "$adapter/src/eventfd_owner.cc" \
+  -o "$tmp/eventfd-owner.o"
 "$host_cxx" "${common[@]}" -c "$adapter/src/sync_fence_merge.cc" \
   -o "$tmp/sync-fence-merge.o"
 "$host_cxx" "${common[@]}" -c "$adapter/src/sync_fence_broker.cc" \
@@ -51,7 +61,7 @@ common=(-arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g
   -c "$root/tools/bionic-errno-tls/src/errno_tls.c" -o "$tmp/errno.o"
 "$host_cxx" "${common[@]}" \
   "$adapter/probes/sync_fence_merge_test.cc" \
-  "$tmp/adapter.o" "$tmp/sync-fence-merge.o" "$tmp/sync-fence-broker.o" \
+  "$tmp/adapter.o" "$tmp/scm-exports.o" "$tmp/fd-inheritance.o" "$tmp/retained-scm-export.o" "$tmp/eventfd-owner.o" "$tmp/sync-fence-merge.o" "$tmp/sync-fence-broker.o" \
   "$tmp/broker.o" "$tmp/dns.o" "$tmp/sync.o" "$tmp/fdsan.o" \
   "$tmp/errno.o" "$fdsan" "$loader" \
   -framework Security -lresolv -o "$tmp/sync-fence-merge"

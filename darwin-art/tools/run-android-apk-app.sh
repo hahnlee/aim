@@ -10,6 +10,8 @@ source "$root/tools/lib/system-private-data.sh"
 source "$root/tools/lib/runtime-system-image.sh"
 source "$root/tools/lib/system-service-environment.sh"
 source "$root/tools/lib/runtime-system-service.sh"
+source "$root/tools/lib/app-launch-arguments.sh"
+source "$root/tools/lib/chromium-launch-arguments.sh"
 installed_record=""
 split_apks=()
 if [[ "${1:-}" == "--record" ]]; then
@@ -463,12 +465,11 @@ system_root="$(darwin_art_prepare_runtime_system_image "$root" "$host" "$image_m
 fonts_xml="$system_root/system/etc/fonts.xml"
 roboto="$system_root/system/fonts/Roboto-Regular.ttf"
 framework_res="$system_root/system/framework/framework-res.apk"
-if [[ ! -f "$support_dex" ]]; then
-  if [[ -n "$installed_record" ]]; then
+if [[ "$image_mode" == development ]]; then
+  cargo run -q --manifest-path "$root/Cargo.toml" -p art-bootstrap -- build-runtime-support-dex-incremental >/dev/null
+elif [[ ! -f "$support_dex" ]]; then
     echo "installed run requires prebuilt support DEX; run cargo xtask build" >&2
     exit 69
-  fi
-  cargo run -q -p art-bootstrap -- build-button-dex >/dev/null
 fi
 if [[ -n "$profile_mount" ]]; then
   # The production support DEX is also loaded by the profile's system server. ART
@@ -549,6 +550,7 @@ else
 fi
 app_data_dir="$app_data_root/$package"
 mkdir -p "$app_data_dir"
+darwin_art_load_app_launch_arguments "$app_data_dir/launch-arguments"
 private_data_root="$app_data_dir/private-data"
 mkdir -p "$private_data_root"
 chmod 0700 "$private_data_root"
@@ -578,22 +580,13 @@ chmod 0700 "$guest_app_data" "$guest_app_data/files" \
   "$guest_device_data/databases" "$guest_device_data/shared_prefs"
 
 # Chromium reads its Android command line from an app-private file. Keep that
-# transport independent from any temporary GPU policy: acceptance tests and
-# normal launches still need to deliver intents/FRE policy when a graphics
-# workaround is explicitly disabled.
+# transport delivers first-run switches and the required Graphite/Vulkan backend
+# for normal launches as well as acceptance tests. Contradictory GPU switches
+# are rejected; they must not silently select a fallback rendering path.
 if [[ "$package" == "org.chromium.chrome" ]]; then
   export DARWIN_ART_APP_COMMAND_LINE_FILE="${DARWIN_ART_APP_COMMAND_LINE_FILE:-chrome-command-line}"
   chromium_command_line="${DARWIN_ART_APP_COMMAND_LINE:-}"
-  # A standalone compatibility runtime has no Play Store/FRE account broker.
-  # Match the non-interactive first-run configuration used by the acceptance
-  # harness so the real ChromeTabbedActivity can replace its splash screen
-  # when launched from the Manager/Finder shim as well.
-  for chromium_switch in --no-first-run --disable-fre --disable-background-networking; do
-    case " $chromium_command_line " in
-      *" $chromium_switch "*) ;;
-      *) chromium_command_line="${chromium_command_line:+$chromium_command_line }$chromium_switch" ;;
-    esac
-  done
+  chromium_command_line="$(darwin_art_configure_chromium_launch_arguments "$chromium_command_line")"
   export DARWIN_ART_APP_COMMAND_LINE="$chromium_command_line"
 fi
 if [[ -n "${DARWIN_ART_APP_COMMAND_LINE_FILE:-}" ]]; then
@@ -696,13 +689,21 @@ fi
 # Android P+ Chrome enables its direct-rendering display compositor and needs
 # a thread-safe Graphite/Dawn backing. The packaged MoltenVK provider is the
 # Vulkan ICD for that Android contract; the guest still sees libvulkan.so and
-# never receives a Darwin dlopen handle. We intentionally do not synthesize
-# VK_KHR_android_surface, so this does not advertise Android Vulkan WSI to APKs.
+# never receives a Darwin dlopen handle. Keep this provider check scoped to
+# Chrome's launch contract; other APKs retain their existing Vulkan behavior.
 if [[ -z "${DARWIN_ART_MOLTENVK_DYLIB:-}" ]]; then
   moltenvk_candidate="$root/_build/moltenvk/libMoltenVK.dylib"
   if [[ -f "$moltenvk_candidate" ]]; then
     export DARWIN_ART_MOLTENVK_DYLIB="$moltenvk_candidate"
   fi
+fi
+if [[ "$package" == "org.chromium.chrome" ]]; then
+  [[ "${DARWIN_ART_MOLTENVK_DYLIB:-}" == /* &&
+     -f "${DARWIN_ART_MOLTENVK_DYLIB:-}" &&
+     ! -L "${DARWIN_ART_MOLTENVK_DYLIB:-}" ]] || {
+    echo "Chrome Vulkan launch requires an absolute regular MoltenVK provider" >&2
+    exit 69
+  }
 fi
 
 # Platform Conscrypt/libssl uses the Android LIBC_R unwind contract even for

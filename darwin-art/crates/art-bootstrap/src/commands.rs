@@ -11,7 +11,8 @@ use crate::build_context::BuildPaths;
 use crate::help;
 use crate::native_build::{
     FileHashCache, PendingNativeCompile, build_elf_loader, common_cpp_command, compile_cpp,
-    compile_pending_native, compile_with_dependency_cache, create_archive, link_with_cache,
+    compile_pending_native, compile_with_dependency_cache, create_archive,
+    create_archive_if_needed, link_with_cache,
 };
 use crate::support::{command_output, describe_command, run_command};
 
@@ -26,6 +27,13 @@ pub(crate) fn run() -> Result<()> {
 
     match command.as_str() {
         "doctor" => doctor(),
+        "build-runtime-payload-incremental" => {
+            crate::native_graph::build_native_graph(&root, "runtime-payload")
+        }
+        "build-runtime-support-dex-incremental" => {
+            crate::native_graph::build_native_graph(&root, "runtime-support-dex")
+        }
+        "build-framework-java-vm-provider" => build_framework_java_vm_provider(&root).map(|_| ()),
         "sync" => sync_sources(&root),
         "sync-jit-sources" => sync_jit_sources(&root),
         "probe-asm" => probe_asm(&root),
@@ -104,6 +112,9 @@ pub(crate) fn run() -> Result<()> {
         "build-elf-jni-dex" => build_elf_jni_dex_probe(&root),
         "build-network-dex" => build_network_dex_probe(&root),
         "build-button-dex" => build_button_dex_probe(&root),
+        "build-runtime-support-classes" => build_runtime_support_classes(&root),
+        "build-dex-inspector" => build_dex_inspector(&root).map(|_| ()),
+        "build-runtime-support-dex" => build_runtime_support_dex(&root),
         "build-runtime-platform" => build_runtime_platform(&root),
         "build-runtime-core" => build_runtime_core(&root),
         "probe-park" => probe_park(&root),
@@ -116,7 +127,11 @@ pub(crate) fn run() -> Result<()> {
         "build-android16-boot-image" => build_android16_boot_image(&root),
         "build-jit-libelffile" => build_jit_libelffile(&root).map(|_| ()),
         "prepare-runtime-common-shadow" => prepare_runtime_shadow(&root).map(|_| ()),
+        "build-runtime-native-core" => build_runtime_native_core(&root),
         "build-runtime-bootstrap" => build_runtime_bootstrap(&root),
+        "build-runtime-fixture-client" => build_runtime_fixture_client(&root, false),
+        "build-binder-recipient-test" => build_binder_recipient_test(&root),
+        "build-runtime-graphics-fixture-client" => build_runtime_fixture_client(&root, true),
         "build-runtime-bootstrap-internal" => build_runtime_bootstrap_inner(&root),
         "build-runtime-graphics-bootstrap" => build_runtime_graphics_bootstrap(&root),
         "build-graphics-foundation" => build_graphics_foundation(&root),
@@ -126,10 +141,14 @@ pub(crate) fn run() -> Result<()> {
         "build-runtime-filesystem-probe" => build_runtime_filesystem_probe(&root),
         "build-runtime-network-probe" => build_runtime_network_probe(&root),
         "build-runtime-graphics-phase-probe" => build_runtime_graphics_phase_probe(&root),
+        "build-runtime-graphics-probe" => build_runtime_graphics_probe(&root),
         "build-runtime-graphics-gpu-probe" => build_runtime_graphics_gpu_probe(&root),
         "build-runtime-graphics-input-probe" => build_runtime_graphics_input_probe(&root),
-        "build-runtime-graphics-state-probe" => build_runtime_graphics_state_probe(&root),
-        "build-runtime-graphics-session-probe" => build_runtime_graphics_session_probe(&root),
+        "build-runtime-event-ingress" => build_runtime_event_ingress(&root),
+        "build-runtime-vsync-source" => build_runtime_vsync_source(&root),
+        "build-runtime-graphics-state" => build_runtime_graphics_state(&root),
+        "build-runtime-graphics-session" => build_runtime_graphics_session(&root),
+        "build-runtime-native-registration" => build_runtime_native_registration(&root),
         "build-runtime-jni-acceptance-probe" => build_runtime_jni_acceptance_probe(&root),
         "build-runtime-app-bootstrap-probe" => build_runtime_app_bootstrap_probe(&root),
         "build-runtime-app-resources-probe" => build_runtime_app_resources_probe(&root),

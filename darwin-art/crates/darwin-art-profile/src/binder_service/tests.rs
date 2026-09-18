@@ -1,4 +1,5 @@
 use super::*;
+use std::os::fd::AsFd;
 use darwin_art_binder_device::authority_protocol::{
     CallToken, LocalNodeToken, NodeToken, TransactionFailure, TransferToken,
 };
@@ -335,21 +336,19 @@ fn data_plane_crosses_real_scm_rights_boundaries_exactly_once() {
     authority_protocol::decode(&mut callee).unwrap();
 
     let (take_sender, take_receiver) = UnixStream::pair().unwrap();
-    service
+    let descriptors = service
         .prepare_take(peer(20), caller_id, transfer(33))
         .unwrap()
-        .send(&take_sender)
-        .unwrap();
+        .into_descriptors();
+    crate::fd_passing::send_one(&take_sender, descriptors[0].as_fd()).unwrap();
     let received = crate::fd_passing::receive_one(&take_receiver).unwrap();
     assert_eq!(
         TransferImage::import(received).unwrap().data(),
         b"immutable parcel"
     );
-    assert!(
-        service
-            .prepare_take(peer(20), caller_id, transfer(33))
-            .is_err()
-    );
+    assert!(service
+        .prepare_take(peer(20), caller_id, transfer(33))
+        .is_err());
 
     authority_protocol::encode(&mut caller, Message::CloseConnection).unwrap();
     authority_protocol::encode(&mut callee, Message::CloseConnection).unwrap();

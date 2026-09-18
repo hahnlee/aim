@@ -70,7 +70,9 @@ struct DarwinArtMetalComposerLayer {
 // Darwin's HWC/Composer backend. Every layer and the display target remain
 // IOSurface-backed Metal textures. The command buffer waits on the producer
 // event in the GPU timeline and signals a retained completion event after the
-// atomic display composition. The caller owns completion_event.
+// atomic display composition. The caller retires completion_event through
+// darwin_art_android_metal_shared_event_release, never CFRelease/objc release,
+// and must keep that provider ownership until asynchronous consumers finish.
 extern "C" bool darwin_art_metal_composer_compose(
     void* metal_device, void* target_iosurface, uint32_t target_width,
     uint32_t target_height, const DarwinArtMetalComposerLayer* layers,

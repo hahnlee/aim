@@ -65,7 +65,12 @@ pub(crate) fn probe_runtime_dex_flavor_impl(
         prepare_icu_bootclasspath(root)?;
         root.join("_build/bootclasspath/core-icu4j.jar")
     };
-    let executable = root.join("target/debug/darwin-art-host");
+    let executable = root.join("target/debug/darwin-art-fixture-runner");
+    let fixture_library = root.join(if real_graphics {
+        "_build/native-fixtures/graphics/libdarwin_art_fixture.dylib"
+    } else {
+        "_build/native-fixtures/headless/libdarwin_art_fixture.dylib"
+    });
     let runtime_library = root.join(if real_graphics {
         "_build/runtime-graphics-link-probe/libdarwin_art_runtime_graphics.dylib"
     } else {
@@ -91,6 +96,7 @@ pub(crate) fn probe_runtime_dex_flavor_impl(
     });
     for input in [
         &executable,
+        &fixture_library,
         &runtime_library,
         &core_oj,
         &core_libart,
@@ -108,6 +114,24 @@ pub(crate) fn probe_runtime_dex_flavor_impl(
     }
 
     let mut command = Command::new(&executable);
+    // The client owns access to its immutable test inputs. Publish exact
+    // capabilities through the same filesystem contract as ordinary APK
+    // launchers, rather than teaching the product about fixture filenames.
+    let mut host_files = env::var("DARWIN_ART_RUNTIME_HOST_FILES").unwrap_or_default();
+    for input in [
+        &core_oj,
+        &core_libart,
+        &framework,
+        &core_icu4j,
+        &classes_dex,
+    ] {
+        if !host_files.is_empty() {
+            host_files.push(':');
+        }
+        host_files.push_str(&input.to_string_lossy());
+    }
+    command.env("DARWIN_ART_RUNTIME_HOST_FILES", &host_files);
+    command.arg("--fixture-image").arg(&fixture_library);
     if show_window {
         // Keep normal window probes short; the capture script controls its
         // own interaction hold time through DARWIN_ART_TEST_POINTER_HOLD_MS.
@@ -147,8 +171,17 @@ pub(crate) fn probe_runtime_dex_flavor_impl(
                 }
             }
             command
-                .env("DARWIN_ART_TEST_FONTS_XML", fonts_xml)
-                .env("DARWIN_ART_TEST_FONT", roboto);
+                .env("DARWIN_ART_TEST_FONTS_XML", &fonts_xml)
+                .env("DARWIN_ART_TEST_FONT", &roboto)
+                .env(
+                    "DARWIN_ART_RUNTIME_HOST_FILES",
+                    format!(
+                        "{}:{}:{}",
+                        host_files,
+                        fonts_xml.display(),
+                        roboto.display()
+                    ),
+                );
             if button {
                 let framework_res = root.join("_prebuilt/android-16/resources/framework-res.apk");
                 if !framework_res.is_file() {
@@ -174,13 +207,9 @@ pub(crate) fn probe_runtime_dex_flavor_impl(
         }
     }
     if apk_app {
-        // A real APK's classes.dex is loaded as the application image, but the
-        // detached Darwin window still needs the same framework-side helper
-        // classes as the native Button GPU gate (AnimationHost, service
-        // bridge, and probe Resources/Context shims).  Using the baseline
-        // support DEX here silently makes RenderNode.create unavailable and
-        // causes the otherwise valid APK to fail before its first frame.
-        build_button_dex_probe(root)?;
+        // Unchanged APK fixtures use the same production Android subsystem
+        // support as installed apps, never a Probe Activity/Context classpath.
+        build_runtime_support_dex(root)?;
     }
     if apk_app {
         let framework_res = root.join("_prebuilt/android-16/resources/framework-res.apk");
@@ -203,7 +232,7 @@ pub(crate) fn probe_runtime_dex_flavor_impl(
             )
             .env(
                 "DARWIN_ART_APK_APP_SUPPORT_DEX",
-                root.join("_build/button-dex/dex/classes.dex"),
+                root.join("_build/runtime-support-dex/dex/classes.dex"),
             )
             .env("DARWIN_ART_APK_APP_RESOURCE_APK", &classes_dex)
             .env("DARWIN_ART_FRAMEWORK_RES_APK", framework_res);
@@ -268,6 +297,9 @@ pub(crate) fn probe_runtime_dex_flavor_impl(
             .into());
         }
         let extracted = prepare_private_apk_native_fixture(root)?;
+        let private_data = extracted.temporary_root.join("data");
+        fs::create_dir(&private_data)?;
+        command.env("DARWIN_ART_ANDROID_PRIVATE_DATA_ROOT", &private_data);
         let extracted_root = extracted
             .extracted_root
             .join("libdarwin-art-generic-root.so");

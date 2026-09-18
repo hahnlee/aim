@@ -229,6 +229,7 @@ void* MaybeWrapUnityLifecycleNative(const char* name, const char* signature,
   return target;
 }
 
+
 int32_t ProxyRegisterNatives(void* context,
                              void* clazz,
                              const DarwinArtJniNativeMethod* methods,
@@ -259,19 +260,6 @@ int32_t ProxyRegisterNatives(void* context,
               << library->proxy << " env=" << art_env << "\n";
     return DARWIN_ART_JNI_ERR;
   }
-  constexpr std::array<std::pair<const char*, const char*>, 8> kFixtureExpected = {{
-      {"nativeAdd", "(IJI)J"},
-      {"nativeSpill", kDarwinArtElfJniFixtureSpillSignature},
-      {"nativeUsesEnv", "()I"},
-      {"nativeNarrowStack", "(IIIIIIZBCSIJLjava/lang/Object;)I"},
-      {"nativeEcho", "(Ljava/lang/Object;)Ljava/lang/Object;"},
-      {"nativeFloat", "(F)F"},
-      {"nativeDouble", "(D)D"},
-      {"nativeVoid", "()V"},
-  }};
-  if (library->fixture_graph && count != static_cast<int32_t>(kFixtureExpected.size())) {
-    return DARWIN_ART_JNI_ERR;
-  }
   for (size_t index = 0; index < static_cast<size_t>(count); ++index) {
     const bool image_contains = darwin_art_image_registry::ContainsAddress(
         library->image_registry,
@@ -279,11 +267,6 @@ int32_t ProxyRegisterNatives(void* context,
     if (methods[index].name == nullptr || methods[index].signature == nullptr ||
         methods[index].function == nullptr ||
         !image_contains) {
-      return DARWIN_ART_JNI_ERR;
-    }
-    if (library->fixture_graph &&
-        (std::strcmp(methods[index].name, kFixtureExpected[index].first) != 0 ||
-         std::strcmp(methods[index].signature, kFixtureExpected[index].second) != 0)) {
       return DARWIN_ART_JNI_ERR;
     }
     jmethodID method = art_env->GetStaticMethodID(
@@ -307,9 +290,6 @@ int32_t ProxyRegisterNatives(void* context,
       return DARWIN_ART_JNI_ERR;
     }
   }
-  if (library->fixture_graph) {
-    g_elf_fixture_status.fetch_or(kElfCapturedRegistration, std::memory_order_relaxed);
-  }
   JavaVM* proxy_vm =
       static_cast<JavaVM*>(darwin_art_jni_proxy_java_vm(library->proxy));
   void* proxy_env = nullptr;
@@ -324,13 +304,11 @@ int32_t ProxyRegisterNatives(void* context,
     if (!DescriptorToShorty(methods[index].signature, &shorties[index])) {
       return DARWIN_ART_JNI_ERR;
     }
-    const uint32_t entry_mask =
-        library->fixture_graph ? (uint32_t{1} << index) : uint32_t{1};
     requests[index] = {
         MaybeWrapUnityLifecycleNative(methods[index].name,
                                       methods[index].signature,
                                       methods[index].function),
-        shorties[index].c_str(), entry_mask};
+        shorties[index].c_str(), uint32_t{1}};
     std::cerr << "DARWIN JNI RegisterNatives method name="
               << methods[index].name << " sig=" << methods[index].signature
               << " target=" << methods[index].function << "\n";
@@ -355,26 +333,6 @@ int32_t ProxyRegisterNatives(void* context,
       !all_entries_valid) {
     darwin_art::android_jni::DestroyRegularTrampolines(trampolines);
     return DARWIN_ART_JNI_ERR;
-  }
-  if (library->fixture_graph) {
-    void* native_add_entry = darwin_art::android_jni::TrampolineEntry(trampolines, 0);
-    void* native_spill_entry = darwin_art::android_jni::TrampolineEntry(trampolines, 1);
-    void* native_uses_env_entry = darwin_art::android_jni::TrampolineEntry(trampolines, 2);
-    const auto* native_add_bytes = static_cast<const uint8_t*>(native_add_entry);
-    if (!darwin_art::android_jni::IsTrampolineEntry(native_add_entry) ||
-        !darwin_art::android_jni::IsTrampolineEntry(native_spill_entry) ||
-        !darwin_art::android_jni::IsTrampolineEntry(native_uses_env_entry) ||
-        darwin_art::android_jni::IsTrampolineEntry(native_add_bytes + 4) ||
-        darwin_art::android_jni::TrampolineEntryMask(native_add_entry) !=
-            kFixtureNativeAddEntryMask ||
-        darwin_art::android_jni::TrampolineEntryMask(native_spill_entry) !=
-            kFixtureNativeSpillEntryMask ||
-        darwin_art::android_jni::TrampolineEntryMask(native_uses_env_entry) !=
-            kFixtureNativeUsesEnvEntryMask ||
-        darwin_art::android_jni::TrampolineEntryMask(native_add_bytes + 4) != 0) {
-      darwin_art::android_jni::DestroyRegularTrampolines(trampolines);
-      return DARWIN_ART_JNI_ERR;
-    }
   }
   std::vector<JNINativeMethod> bridged_methods(static_cast<size_t>(count));
   for (size_t index = 0; index < bridged_methods.size(); ++index) {
@@ -422,9 +380,6 @@ int32_t ProxyRegisterNatives(void* context,
   }
   std::cerr << "DARWIN JNI RegisterNatives installed count=" << count
             << " sets=" << library->trampoline_sets.size() << "\n";
-  if (library->fixture_graph) {
-    g_elf_fixture_status.fetch_or(kElfInstalledRegistration, std::memory_order_relaxed);
-  }
   return DARWIN_ART_JNI_OK;
 }
 

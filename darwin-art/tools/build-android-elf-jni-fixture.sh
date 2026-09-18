@@ -46,7 +46,7 @@ common_flags=(-std=c17 -O2 -fPIC -fvisibility=hidden -fno-builtin -Wall -Wextra 
   -Wl,-z,now -Wl,-z,norelro -Wl,-z,max-page-size=16384)
 
 "$android_clang" "${common_flags[@]}" -Wl,-soname,libdarwin-art-jni-host.so \
-  "$fixture_root/host_provider.c" -o "$host_provider"
+  "$fixture_root/host_provider.c" -lc -o "$host_provider"
 "$android_clang" "${common_flags[@]}" \
   -Wl,-soname,libdarwin-art-jni-grandchild.so \
   -Wl,--version-script,"$fixture_root/grandchild.exports.map" \
@@ -209,6 +209,7 @@ mkdir -p "$build_dir"
 publish_if_changed "$output" "$build_dir/libdarwin-art-jni-fixture.so"
 publish_if_changed "$child" "$build_dir/libdarwin-art-jni-child.so"
 publish_if_changed "$grandchild" "$build_dir/libdarwin-art-jni-grandchild.so"
+publish_if_changed "$host_provider" "$build_dir/libdarwin-art-jni-host.so"
 publish_if_changed "$generic_root" "$build_dir/libdarwin-art-generic-root.so"
 publish_if_changed "$generic_child" "$build_dir/libdarwin-art-generic-child.so"
 publish_if_changed "$generic_grandchild" "$build_dir/libdarwin-art-generic-grandchild.so"

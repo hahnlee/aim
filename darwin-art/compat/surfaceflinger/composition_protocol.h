@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <type_traits>
 #include <vector>
 
@@ -11,7 +12,7 @@ namespace darwin_art::surfaceflinger {
 
 inline constexpr std::array<char, 8> kRequestMagic{'D', 'A', 'R', 'T', 'S', 'F', '0', '7'};
 inline constexpr std::array<char, 8> kResponseMagic{'D', 'A', 'R', 'T', 'S', 'F', 'R', '7'};
-inline constexpr uint32_t kProtocolVersion = 10;
+inline constexpr uint32_t kProtocolVersion = 11;
 inline constexpr uint32_t kMaximumLayers = 4096;
 
 enum class RequestKind : uint32_t {
@@ -72,11 +73,17 @@ struct WireLayer {
       kDarwinArtMaxTransparentRegionRects];
 };
 
+enum class CommitDisposition : uint32_t {
+  Unknown = 0,
+  RejectedBeforeCommit = 1,
+  Committed = 2,
+};
+
 struct ResponseHeader {
   char magic[8];
   uint32_t version;
   int32_t status;
-  uint32_t reserved;
+  CommitDisposition commit;
   uint32_t has_completion_fence;
 };
 
@@ -86,11 +93,13 @@ struct CompositionJob {
   int producer_descriptor = -1;
   int completion_descriptor = -1;
   bool fence_failed = false;
-  // Internal service scheduling state, never serialized. Only a redraw
-  // caused by a target-independent structural commit must wake the external
-  // display consumer; ordinary app presents already return a completion
-  // fence to that producer.
-  bool publish_display_dirty = false;
+  // Native storage is acquired before the server response and survives queue
+  // delay/fence waits. This is not part of the wire ABI.
+  std::shared_ptr<const class ImportedCompositionBackings> backings;
+  // Output identity is not a wire handle. Admission retains the exact epoch;
+  // its backing survives retirement, but retirement forbids publication.
+  std::shared_ptr<const class OutputEpoch> output_epoch;
+  std::shared_ptr<class TransactionReply> reply;
 };
 
 static_assert(std::is_trivially_copyable_v<RequestHeader>);

@@ -6,11 +6,14 @@ use std::fmt;
 use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
-use darwin_art_engine::{CallbackBindings, GraphicsSession, ProcessRequest, ProcessRequestError};
+use darwin_art_engine::{
+    CallbackBindings, GraphicsSession, ProcessRequest, ProcessRequestError, SurfaceSession,
+};
 use darwin_art_engine_sys::ProcessResult;
-use darwin_art_engine_sys::{HostServices, LifecycleHooks};
+use darwin_art_engine_sys::{BinderAuthorityHooks, HostServices, LifecycleHooks};
 use darwin_art_runtime::ProviderBridge;
 
+use crate::ExecutionLifetime;
 use crate::OwnedFrame;
 
 #[derive(Debug)]
@@ -31,14 +34,16 @@ pub struct RunOptions {
     pub heap_initial_bytes: u64,
     pub heap_maximum_bytes: u64,
     pub visible_seconds: f64,
-    /// Android app processes are one-shot zygote children and are not reused
-    /// after destroying their JavaVM.
-    pub terminate_android_process: bool,
+    pub execution_lifetime: ExecutionLifetime,
 }
 
 const MAX_VISIBLE_SECONDS: f64 = 86_400.0;
 
 impl RunOptions {
+    pub fn is_android_process(&self) -> bool {
+        self.execution_lifetime == ExecutionLifetime::AndroidProcess
+    }
+
     pub(crate) fn validate(&self) -> Result<(), HostError> {
         if !self.visible_seconds.is_finite()
             || self.visible_seconds < 0.0
@@ -60,8 +65,10 @@ pub(crate) fn build_process_request<'a>(
     provider_acquire: Option<darwin_art_engine_sys::ProviderAcquireFn>,
     provider_release: Option<darwin_art_engine_sys::ProviderReleaseFn>,
     graphics_session: Option<&'a GraphicsSession>,
+    desktop_surface: Option<&'a SurfaceSession>,
     lifecycle_hooks: Option<&'a LifecycleHooks>,
     host_services: Option<&'a HostServices>,
+    binder_authority_hooks: Option<&'a BinderAuthorityHooks>,
 ) -> Result<ProcessRequest<'a>, HostError> {
     // SAFETY: FrameHost, ProviderBridge, and the optional graphics session are
     // owned by the caller for the complete synchronous engine invocation.
@@ -80,7 +87,9 @@ pub(crate) fn build_process_request<'a>(
             HostError::InvalidCallbackBinding(kind)
         }
     })?
-    .with_graphics_session(graphics_session);
+    .with_graphics_session(graphics_session)
+    .with_desktop_surface(desktop_surface)
+    .with_binder_authority_hooks(binder_authority_hooks);
     let request = ProcessRequest::new(
         &options.core_oj_jar,
         &options.core_libart_jar,
@@ -111,6 +120,7 @@ pub enum HostError {
     ProcessState(String),
     Filesystem(String),
     InvalidVisibleSeconds(f64),
+    UnsupportedExecutionLifetime(ExecutionLifetime),
     RuntimeFailed(i32),
     ShutdownFailed(i32),
     SurfaceFailed {
@@ -140,6 +150,10 @@ impl fmt::Display for HostError {
             Self::InvalidVisibleSeconds(seconds) => write!(
                 formatter,
                 "visible seconds must be finite and in the range 0..=86400: {seconds}"
+            ),
+            Self::UnsupportedExecutionLifetime(lifetime) => write!(
+                formatter,
+                "hosted {lifetime:?} requires pump retirement and owned native-task settlement; this execution lifetime is not currently supported"
             ),
             Self::RuntimeFailed(status) => {
                 write!(

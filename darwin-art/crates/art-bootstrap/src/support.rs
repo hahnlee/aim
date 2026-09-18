@@ -43,3 +43,12 @@ pub(crate) fn describe_command(command: &Command) -> String {
         .join(" ");
     format!("{program} {args}")
 }
+/// Absolute tools selected by the support-only graph. Other build commands
+/// retain their ordinary environment; these are build inputs, not APK flags.
+pub(crate) fn support_build_tool(
+    name: &str,
+    fallback: impl AsRef<std::ffi::OsStr>,
+) -> std::ffi::OsString {
+    std::env::var_os(format!("DARWIN_ART_SUPPORT_{name}"))
+        .unwrap_or_else(|| fallback.as_ref().to_owned())
+}

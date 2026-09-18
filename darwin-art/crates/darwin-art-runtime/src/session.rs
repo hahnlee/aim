@@ -18,6 +18,13 @@ use darwin_art_engine_sys::LifecycleHooks;
 pub trait NativeResource {
     fn close(&mut self) -> i32;
 
+    /// True only when native process teardown actually released providers.
+    /// A successful pre-entry close is not that event. Default to normal
+    /// counted provider release rather than discarding ownership records.
+    fn providers_released_by_native_shutdown(&self) -> bool {
+        false
+    }
+
     /// Complete native destruction after the owning process has shut down but
     /// before the dynamic image containing the callback is released. Most
     /// resources have no second phase; resources whose destroy callback lives
@@ -151,6 +158,20 @@ impl<E, P, S, G> RuntimeSession<E, P, S, G> {
         Ok(self.owners.graphics_mut())
     }
 
+    /// Stop ingress while retaining the allocation and subsystem lease.
+    pub(crate) fn graphics_ingress_for_shutdown_mut(
+        &mut self,
+    ) -> Result<Option<&mut G>, RuntimeError> {
+        self.lifecycle.assert_owner()?;
+        if self.phase() != RuntimePhase::ShuttingDown {
+            return Err(RuntimeError::InvalidTransition {
+                from: self.phase(),
+                to: RuntimePhase::ShuttingDown,
+            });
+        }
+        Ok(self.owners.graphics_mut())
+    }
+
     /// Run resource-specific destruction after the process owner has closed,
     /// while the engine image is still mapped.
     pub fn finalize_graphics(&mut self) -> Result<(), RuntimeError>
@@ -208,11 +229,9 @@ impl<E, P, S, G> RuntimeSession<E, P, S, G> {
 
     /// Close and release every native resource in dependency order.
     ///
-    /// Graphics and surface are closed before ART. Provider hooks remain
-    /// installed while the engine performs its shutdown callback, then are
-    /// cleared before the engine image is released. Every step continues
-    /// after an error and returns the first failure, preserving the native
-    /// rollback contract on early returns.
+    /// Graphics ingress closes first, but every allocation, lease and provider
+    /// remains live until ART shutdown succeeds. Native readiness defers are
+    /// retried on this owner thread; failure does not authorize image unload.
     pub fn shutdown_native(&mut self) -> Result<(), RuntimeError>
     where
         E: NativeResource,
@@ -260,6 +279,22 @@ impl<E, P, S, G> RuntimeSession<E, P, S, G> {
 impl<E, P, S, G> Default for RuntimeSession<E, P, S, G> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<E, P, S, G> Drop for RuntimeSession<E, P, S, G> {
+    fn drop(&mut self) {
+        if self.engine().is_some()
+            && matches!(
+                self.phase(),
+                RuntimePhase::ShuttingDown | RuntimePhase::Failed
+            )
+        {
+            // A failed teardown leaves the VM's borrowed pointers and code
+            // live. Abort before RuntimeOwners can drop any dependent resource.
+            // Deferred (67) teardown normally stays inside the owner retry loop.
+            std::process::abort();
+        }
     }
 }
 
@@ -372,8 +407,8 @@ mod tests {
             &*events.borrow(),
             &[
                 "graphics-close",
-                "surface-close",
                 "engine-close",
+                "surface-close",
                 "provider-clear"
             ]
         );

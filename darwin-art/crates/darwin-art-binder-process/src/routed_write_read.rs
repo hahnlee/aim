@@ -162,6 +162,34 @@ impl<T: AuthorityTransport> Client<T> {
         memory: &mut M,
         timeout: Duration,
     ) -> Result<device::WriteReadStatus, ExecuteError<M::Error>> {
+        self.execute_write_read_wait(thread_id, header, memory, Some(timeout))
+    }
+
+    /// Original blocking Binder ioctl: execute writes once, then await eligible
+    /// read work without imposing an application idle lifetime.
+    pub fn execute_write_read_indefinite<M: ClientMemory>(
+        &self,
+        thread_id: u64,
+        header: &mut [u8],
+        memory: &mut M,
+    ) -> Result<device::WriteReadStatus, ExecuteError<M::Error>> {
+        self.execute_write_read_wait(thread_id, header, memory, None)
+    }
+
+    fn execute_write_read_wait<M: ClientMemory>(
+        &self,
+        thread_id: u64,
+        header: &mut [u8],
+        memory: &mut M,
+        timeout: Option<Duration>,
+    ) -> Result<device::WriteReadStatus, ExecuteError<M::Error>> {
+        let deadline = timeout
+            .map(|timeout| {
+                Instant::now()
+                    .checked_add(timeout)
+                    .ok_or(ExecuteError::Read(device::Error::InvalidArgument))
+            })
+            .transpose()?;
         let request = ioctl::Request::decode(header).map_err(ExecuteError::Header)?;
         let mut generation = self
             .state
@@ -173,17 +201,19 @@ impl<T: AuthorityTransport> Client<T> {
             return Ok(device::WriteReadStatus::Completed);
         }
 
-        let deadline = Instant::now().checked_add(timeout);
         loop {
-            let remaining = deadline
-                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-                .unwrap_or(Duration::MAX);
-            match self
-                .state
-                .device
-                .wait_for_work_for_thread::<M::Error>(thread_id, generation, remaining)
-                .map_err(ExecuteError::Read)?
-            {
+            let waited = match deadline {
+                Some(deadline) => self.state.device.wait_for_work_for_thread::<M::Error>(
+                    thread_id,
+                    generation,
+                    deadline.saturating_duration_since(Instant::now()),
+                ),
+                None => self
+                    .state
+                    .device
+                    .wait_for_work_for_thread_indefinite::<M::Error>(thread_id, generation),
+            };
+            match waited.map_err(ExecuteError::Read)? {
                 device::WorkWait::Closed => return Ok(device::WriteReadStatus::Closed),
                 device::WorkWait::TimedOut => return Ok(device::WriteReadStatus::TimedOut),
                 device::WorkWait::Changed => {}

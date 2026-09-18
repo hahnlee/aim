@@ -18,12 +18,11 @@ darwin_art_start_runtime_system_service() (
   DARWIN_ART_RUNTIME_JAVA_DEBUGGABLE=0 \
   DARWIN_ART_DAEMONIZED_LOG="${profile_mount%/mnt}/darwin-artd.log" \
   DARWIN_ART_ANDROID_SHARED_STORAGE_ROOT="$profile_mount/storage" \
+  DARWIN_ART_FRAMEWORK_RES_APK="$framework_res" \
   DARWIN_ART_APK_APP_PACKAGE=android \
   DARWIN_ART_APK_APP_APPLICATION=android.app.Application \
-  DARWIN_ART_APK_APP_ACTIVITY=dev.darwinart.probe.ProbeActivity \
   DARWIN_ART_APK_APP_LAUNCH_COMPONENT=none \
   DARWIN_ART_APK_APP_SCREEN_ORIENTATION=-1 \
-  DARWIN_ART_APK_APP_DESCRIPTOR=Ldev/darwinart/probe/ProbeActivity\; \
   DARWIN_ART_APK_APP_ACTIVITIES=none \
   DARWIN_ART_APK_APP_ACTIVITY_ALIASES=none \
   DARWIN_ART_APK_APP_SERVICES=none \

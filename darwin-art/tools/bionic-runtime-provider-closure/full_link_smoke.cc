@@ -3,14 +3,17 @@
 #include "darwin_art_bionic_fs.h"
 #include "darwin_art_bionic_socket_broker.h"
 #include "darwin_art_bionic_vm.h"
+#include "../bionic-socket-broker-adapter/src/fd_inheritance.h"
 
 #include <android/log.h>
 
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #include <cstdint>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -73,6 +76,21 @@ constexpr Expected kExpected[] = {
 #include "ownership.inc"
 };
 
+pid_t fixture_owner;
+pthread_t fixture_thread;
+// This functional fixture creates FDs on one thread, and forks fatal-check
+// children only after creation returns. Children must never enter FD creation.
+// This is NOT production Rust lock/spawn evidence; native_boundary.rs proves
+// that separately using the actual shared Rust inheritance guard.
+intptr_t FixtureFdOperation(darwin_art::bionic::fd_inheritance::FdOperation operation,
+                           void *context) {
+  if (getpid() != fixture_owner || !pthread_equal(pthread_self(), fixture_thread)) {
+    errno = EPERM;
+    return -1;
+  }
+  return operation(context);
+}
+
 int captured_priority = 0;
 char captured_tag[32]{};
 char captured_message[32]{};
@@ -91,6 +109,10 @@ void Capture(const __android_log_message *message) {
 } // namespace
 
 int main() {
+  fixture_owner = getpid();
+  fixture_thread = pthread_self();
+  if (darwin_art_bionic_install_fd_inheritance_boundary(&FixtureFdOperation) != 0)
+    return 32;
   if (darwin_art_bionic_rust_provider_closure_anchor() == 0)
     return 10;
   char root_path[] = "/tmp/darwin-art-provider-closure.XXXXXX";

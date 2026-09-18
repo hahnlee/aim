@@ -10,6 +10,7 @@ extern "C" {
 
 #define DARWIN_ART_ABI_VERSION 1u
 #define DARWIN_ART_NATIVE_LOADER_CONFIG_ABI_VERSION 1u
+#define DARWIN_ART_BINDER_AUTHORITY_HOOKS_ABI_VERSION 1u
 
 // Process lifecycle errors are kept outside the existing run-stage values.
 // Shutdown is intentionally not idempotent: a duplicate call is reported so
@@ -109,6 +110,22 @@ typedef struct darwin_art_host_services {
   darwin_art_release_service_t release_service;
 } darwin_art_host_services_t;
 
+// Optional exact Binder-authority identity retained by the Rust host. The
+// retained value is an opaque clone of one authenticated endpoint lifetime;
+// callbacks are atomic metadata operations and perform no Binder or JNI I/O.
+typedef void* (*darwin_art_binder_authority_retain_t)(void* context);
+typedef int32_t (*darwin_art_binder_authority_live_t)(void* retained);
+typedef void (*darwin_art_binder_authority_release_t)(void* retained);
+
+typedef struct darwin_art_binder_authority_hooks {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  void* context;
+  darwin_art_binder_authority_retain_t retain;
+  darwin_art_binder_authority_live_t live;
+  darwin_art_binder_authority_release_t release;
+} darwin_art_binder_authority_hooks_t;
+
 // Optional additive Android NativeLoader input owned by the Rust host. The
 // four paths are borrowed for the duration of darwin_art_run_process; callers
 // must provide absolute guest/host paths as required by the selected loader
@@ -150,6 +167,14 @@ typedef struct darwin_art_process_config {
   // Optional additive NativeLoader configuration. Older callers may provide a
   // prefix ending at host_services; the engine checks struct_size before use.
   const darwin_art_native_loader_config_t* native_loader_config;
+  // Optional exact desktop target, borrowed from the host surface owner for
+  // the entire synchronous call. Only input activation is deferred until ART
+  // has its genuine owner thread; no global active-surface selection occurs.
+  // Older callers may provide the prefix ending at native_loader_config.
+  void* desktop_surface_context;
+  // Optional exact Binder authority lifetime. Older callers may provide the
+  // prefix ending at desktop_surface_context.
+  const darwin_art_binder_authority_hooks_t* binder_authority_hooks;
 } darwin_art_process_config_t;
 
 typedef struct darwin_art_process_result {

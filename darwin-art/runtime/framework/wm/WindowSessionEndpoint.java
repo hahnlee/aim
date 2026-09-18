@@ -8,7 +8,7 @@ import android.os.RemoteException;
 import android.view.InputChannel;
 import android.view.WindowManager;
 import dev.darwinart.runtime.display.BuiltInDisplayConfiguration;
-import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** Per-process window-session Binder owned by the system window service. */
 final class WindowSessionEndpoint extends Binder {
@@ -17,13 +17,20 @@ final class WindowSessionEndpoint extends Binder {
     private static final int ADD_FLAG_IN_TOUCH_MODE = 2;
     private static final int RELAYOUT_RES_FIRST_TIME = 2;
     private final WindowSurfaceRegistry surfaces;
-    private final HashMap<android.os.IBinder, InputChannel> serverInputChannels =
-            new HashMap<>();
+    private final WindowSessionIdentity identity;
+    private final WindowSessionWindowOwnership windows;
+    private final WindowPublicationController publications;
+    private final ConcurrentHashMap<WindowSessionWindowOwnership.Registration, InputChannel>
+            serverInputChannels = new ConcurrentHashMap<>();
     private final int addToDisplayAsUserCode = transaction("addToDisplayAsUser");
     private final int removeCode = transaction("remove");
     private final int relayoutCode = transaction("relayout");
 
-    WindowSessionEndpoint(DesktopWindowMetadataRegistry metadata) {
+    WindowSessionEndpoint(DesktopWindowMetadataRegistry metadata, WindowSessionIdentity identity,
+            WindowSessionWindowOwnership windows, WindowPublicationController publications) {
+        this.identity = identity;
+        this.windows = windows;
+        this.publications = publications;
         surfaces = new WindowSurfaceRegistry(metadata);
         attachInterface(null, DESCRIPTOR);
     }
@@ -42,18 +49,27 @@ final class WindowSessionEndpoint extends Binder {
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
+        if (code != removeCode && code != relayoutCode && code != addToDisplayAsUserCode)
+            return super.onTransact(code, data, reply, flags);
+        identity.requireCaller(Binder.getCallingPid(), Binder.getCallingUid());
         if (code == removeCode) {
             data.enforceInterface(DESCRIPTOR);
             android.os.IBinder window = data.readStrongBinder();
             data.enforceNoDataAvail();
-            InputChannel serverChannel = serverInputChannels.remove(window);
-            if (serverChannel != null) {
-                WindowInputPublisher.remove(serverChannel);
-                serverChannel.dispose();
+            WindowSessionWindowOwnership.Registration registration = windows.beginCleanup(this, window);
+            try {
+                identity.requireCaller(Binder.getCallingPid(), Binder.getCallingUid());
+                windows.retire(this, registration);
+                window = registration.window();
+                publications.remove(registration);
+                surfaces.remove(identity.pid(), window);
+                serverInputChannels.remove(registration);
+                windows.release(this, registration);
+                reply.writeNoException();
+                return true;
+            } finally {
+                windows.end(this, registration);
             }
-            surfaces.remove(Binder.getCallingPid(), window);
-            reply.writeNoException();
-            return true;
         }
         if (code == relayoutCode) {
             data.enforceInterface(DESCRIPTOR);
@@ -67,59 +83,104 @@ final class WindowSessionEndpoint extends Binder {
             data.readInt(); // sequence
             int lastSyncSequenceId = data.readInt();
             data.enforceNoDataAvail();
-            Parcelable result = surfaces.relayout(Binder.getCallingPid(), window, attrs,
-                    requestedWidth, requestedHeight, viewVisibility, lastSyncSequenceId);
-            WindowInputPublisher.publish(serverInputChannels.get(window), surfaces.frame(window));
-            reply.writeNoException();
-            reply.writeInt(RELAYOUT_RES_FIRST_TIME);
-            reply.writeInt(1);
-            result.writeToParcel(reply, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
-            return true;
+            WindowSessionWindowOwnership.Registration registration = windows.begin(this, window);
+            try {
+                identity.requireCaller(Binder.getCallingPid(), Binder.getCallingUid());
+                window = registration.window();
+                InputChannel serverChannel = serverInputChannels.get(registration);
+                if (serverChannel == null) throw new IllegalStateException("window has no input channel");
+                publications.validateRelayout(registration, surfaces.effectiveAttributes(window, attrs));
+                WindowSurfaceRegistry.RelayoutPublication publication =
+                        surfaces.relayout(identity.pid(), window, attrs,
+                        requestedWidth, requestedHeight, viewVisibility, lastSyncSequenceId);
+                publications.relayout(registration, publication.frame,
+                        publication.viewVisibility, publication.effectiveAttributes);
+                reply.writeNoException();
+                reply.writeInt(RELAYOUT_RES_FIRST_TIME);
+                reply.writeInt(1);
+                publication.result.writeToParcel(reply, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
+                return true;
+            } finally {
+                windows.end(this, registration);
+            }
         }
-        if (code != addToDisplayAsUserCode) return super.onTransact(code, data, reply, flags);
         data.enforceInterface(DESCRIPTOR);
         android.os.IBinder window = data.readStrongBinder();
         WindowManager.LayoutParams attrs =
                 data.readTypedObject(WindowManager.LayoutParams.CREATOR);
         int viewVisibility = data.readInt();
-        data.readInt(); // layer stack id
+        int displayId = data.readInt();
         data.readInt(); // user id
         data.readInt(); // requested visible inset types
         int scaleArrayLength = data.readInt();
         data.enforceNoDataAvail();
 
-        surfaces.add(Binder.getCallingPid(), window, attrs, viewVisibility);
-
-        InputChannel oldServerChannel = serverInputChannels.remove(window);
-        if (oldServerChannel != null) oldServerChannel.dispose();
-        InputChannel[] channels;
+        WindowSessionWindowOwnership.Registration registration = windows.claim(this, window);
+        InputChannel[] channels = null;
+        boolean committed = false;
+        boolean adopted = false;
+        Throwable failure = null;
         try {
+            identity.requireCaller(Binder.getCallingPid(), Binder.getCallingUid());
+            window = registration.window();
             channels = InputChannel.openInputChannelPair(
                     "darwin-art-window-"
                             + Integer.toHexString(System.identityHashCode(window)));
+            surfaces.add(identity.pid(), window, attrs, viewVisibility);
+            serverInputChannels.put(registration, channels[1]);
+            publications.register(registration, identity, channels[1], attrs, displayId);
+            adopted = true;
+            if (System.getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != null) {
+                android.util.Log.i("DarwinWindowSession", "add input channel window="
+                        + Integer.toHexString(System.identityHashCode(window))
+                        + " client=" + channels[0] + " server=" + channels[1]);
+            }
+            reply.writeNoException();
+            reply.writeInt(ADD_FLAG_APP_VISIBLE | ADD_FLAG_IN_TOUCH_MODE);
+            reply.writeInt(1);
+            channels[0].writeToParcel(reply, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
+            reply.writeInt(0); // InsetsState: the built-in display has no decor sources.
+            reply.writeInt(0); // InsetsSourceControl.Array
+            reply.writeInt(1);
+            new Rect(0, 0, BuiltInDisplayConfiguration.WIDTH_PIXELS,
+                    BuiltInDisplayConfiguration.HEIGHT_PIXELS)
+                    .writeToParcel(reply, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
+            float[] scale = new float[Math.max(0, scaleArrayLength)];
+            if (scale.length > 0) scale[0] = 1.0f;
+            reply.writeFloatArray(scale);
+            windows.ready(this, registration);
+            publications.ready(registration);
+            committed = true;
+            return true;
         } catch (java.io.IOException error) {
-            throw new IllegalStateException("cannot create Android input channel", error);
+            IllegalStateException rejected =
+                    new IllegalStateException("cannot create Android input channel", error);
+            failure = rejected;
+            throw rejected;
+        } catch (RuntimeException | Error error) {
+            failure = error;
+            throw error;
+        } finally {
+            try {
+                if (!committed) {
+                    windows.retire(this, registration);
+                    if (channels != null) {
+                        boolean owned = adopted || publications.ownsOriginal(channels[1]);
+                        if (owned) publications.remove(registration);
+                        channels[0].dispose();
+                        if (!owned) channels[1].dispose();
+                    }
+                    surfaces.remove(identity.pid(), registration.window());
+                    serverInputChannels.remove(registration);
+                    windows.release(this, registration);
+                }
+            } catch (RuntimeException | Error cleanupError) {
+                // Keep the original registration if old resources are unresolved.
+                if (failure == null) throw cleanupError;
+                if (cleanupError != failure) failure.addSuppressed(cleanupError);
+            } finally {
+                windows.end(this, registration);
+            }
         }
-        serverInputChannels.put(window, channels[1]);
-        if (System.getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != null) {
-            android.util.Log.i("DarwinWindowSession", "add input channel window="
-                    + Integer.toHexString(System.identityHashCode(window))
-                    + " client=" + channels[0] + " server=" + channels[1]);
-        }
-
-        reply.writeNoException();
-        reply.writeInt(ADD_FLAG_APP_VISIBLE | ADD_FLAG_IN_TOUCH_MODE);
-        reply.writeInt(1);
-        channels[0].writeToParcel(reply, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
-        reply.writeInt(0); // InsetsState: the built-in display has no decor sources.
-        reply.writeInt(0); // InsetsSourceControl.Array
-        reply.writeInt(1);
-        new Rect(0, 0, BuiltInDisplayConfiguration.WIDTH_PIXELS,
-                BuiltInDisplayConfiguration.HEIGHT_PIXELS)
-                .writeToParcel(reply, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
-        float[] scale = new float[Math.max(0, scaleArrayLength)];
-        if (scale.length > 0) scale[0] = 1.0f;
-        reply.writeFloatArray(scale);
-        return true;
     }
 }

@@ -27,12 +27,14 @@ public final class ActivityManagerEndpoint extends Binder {
     private final ApplicationProcessRegistry processes;
     private final SettingsProviderEndpoint settingsProvider = new SettingsProviderEndpoint();
     private final ActiveServices activeServices;
+    private final BoundServiceProcessLauncher processLauncher;
 
     public ActivityManagerEndpoint(
             PackageRecords.Source packages, ApplicationProcessRegistry processes) {
         this.packages = packages;
         this.processes = processes;
-        activeServices = new ActiveServices(packages, processes, this::startBoundServiceProcess);
+        processLauncher = new BoundServiceProcessLauncher(processes);
+        activeServices = new ActiveServices(packages, processes, processLauncher);
         attachInterface(null, "android.app.IActivityManager");
     }
 
@@ -52,46 +54,10 @@ public final class ActivityManagerEndpoint extends Binder {
         }
     }
 
+    private static native String nativeResolveAttachedPackage(int expectedUid);
     private static native String nativeAttach(IBinder application, long startSequence,
             String reservedProcessName, int expectedUid);
     private static native void nativeLaunch(IBinder application, String packageName, String record);
-    private static native long[] nativePrepareBoundServiceProcess(
-            String packageName, String processName, int uid, boolean isolated, long startSequence);
-    private static native void nativeActivateBoundServiceProcess(long handle);
-    private static native void nativeDiscardBoundServiceProcess(long handle);
-
-    int startBoundServiceProcess(
-            String packageName, String processName, int uid, boolean isolated, long startSequence) {
-        if (packageName == null || packageName.isEmpty()
-                || processName == null || processName.isEmpty() || uid < 0
-                || startSequence < 0) {
-            throw new IllegalArgumentException("Invalid service process identity");
-        }
-        long[] prepared = nativePrepareBoundServiceProcess(
-                packageName, processName, uid, isolated, startSequence);
-        if (prepared == null || prepared.length != 2
-                || prepared[0] <= 0 || prepared[0] > Integer.MAX_VALUE
-                || prepared[1] == 0) {
-            throw new IllegalStateException("Invalid prepared service process");
-        }
-        int pid = (int) prepared[0];
-        long handle = prepared[1];
-        boolean reserved = false;
-        boolean activated = false;
-        try {
-            processes.reserveBoundServiceProcess(
-                    pid, packageName, processName, uid, startSequence);
-            reserved = true;
-            nativeActivateBoundServiceProcess(handle);
-            activated = true;
-            return pid;
-        } finally {
-            if (!activated) {
-                if (reserved) processes.cancelBoundServiceProcess(pid, startSequence);
-                nativeDiscardBoundServiceProcess(handle);
-            }
-        }
-    }
 
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
@@ -117,7 +83,8 @@ public final class ActivityManagerEndpoint extends Binder {
             Intent intent = data.readTypedObject(Intent.CREATOR);
             data.enforceNoDataAvail();
             activeServices.serviceDoneExecuting(
-                    Binder.getCallingUid(), token, type, startId, result, intent);
+                    Binder.getCallingPid(), Binder.getCallingUid(),
+                    token, type, startId, result, intent);
             return true;
         }
         if (code == getProcessMemoryInfoCode) {
@@ -200,16 +167,36 @@ public final class ActivityManagerEndpoint extends Binder {
             long sequence = data.readLong();
             data.enforceNoDataAvail();
             if (app == null || sequence < 0) throw new IllegalArgumentException("Invalid attachment");
-            processes.beginAttachment(pid, Binder.getCallingUid(), app, sequence);
+            int callerUid = Binder.getCallingUid();
+            processes.beginAttachment(pid, callerUid, app, sequence);
             try {
+                // Binder credentials and the native process registry are the
+                // authority for package identity. Publish that identity before
+                // bindApplication: Application.attachBaseContext may call back
+                // into AMS/ATMS while the bind transaction is still running.
+                String trustedPackage = nativeResolveAttachedPackage(callerUid);
+                if (trustedPackage == null || trustedPackage.isEmpty()) {
+                    throw new SecurityException("Attachment has no authenticated package");
+                }
+                processes.identify(pid, sequence, app, trustedPackage);
                 ApplicationProcessRegistry.AttachedApplication target =
                         processes.attachmentTarget(pid, sequence);
+                // Observe this exact incarnation before entering native bind.
+                // A Binder death can race with bindApplication and must not
+                // remove a later process that reuses the same PID.
+                observeProcessDeath(target);
+                // linkToDeath reports an already-dead Binder synchronously.
+                // Re-read the keyed record so that case cannot proceed into a
+                // native bind after the registry has retired the incarnation.
+                target = processes.attachmentTarget(pid, sequence);
                 String packageName = nativeAttach(
                         app, sequence, target.processName, target.uid);
-                if (packageName == null) throw new IllegalStateException("Attachment has no package");
-                processes.identify(pid, packageName);
+                if (packageName == null || !trustedPackage.equals(packageName)
+                        || !target.packageName.equals(packageName)) {
+                    throw new SecurityException("Native attachment identity does not match");
+                }
             } catch (Throwable error) {
-                processes.abortAttachment(pid);
+                processes.abortAttachment(pid, sequence, app);
                 if (error instanceof RemoteException) throw (RemoteException) error;
                 if (error instanceof RuntimeException) throw (RuntimeException) error;
                 if (error instanceof Error) throw (Error) error;
@@ -222,7 +209,7 @@ public final class ActivityManagerEndpoint extends Binder {
                 data.enforceNoDataAvail();
                 ApplicationProcessRegistry.AttachedApplication attached =
                         processes.finishAttachment(pid, sequence);
-                observeProcessDeath(attached);
+                processLauncher.onAttached(attached);
                 IBinder app = attached.thread;
                 String packageName = attached.packageName;
                 String record = packageName == null
@@ -240,15 +227,26 @@ public final class ActivityManagerEndpoint extends Binder {
         return true;
     }
 
-    private void observeProcessDeath(ApplicationProcessRegistry.AttachedApplication attached) {
+    private void observeProcessDeath(ApplicationProcessRegistry.AttachedApplication attached)
+            throws RemoteException {
         IBinder.DeathRecipient recipient = () -> {
-            ApplicationProcessRegistry.AttachedApplication gone = processes.retireAttached(
-                    attached.pid, attached.startSequence, attached.thread);
-            if (gone != null) activeServices.onProcessGone(gone);
+            processes.retireAttached(attached.pid, attached.startSequence, attached.thread);
+            // This obituary already proves death of its captured Binder. A
+            // failed attachment may have removed the registry row first; that
+            // must not suppress exact launch/client resource cleanup. Both
+            // owners reject stale incarnation identities independently.
+            activeServices.onProcessGone(attached);
         };
         try {
             attached.thread.linkToDeath(recipient, 0);
-        } catch (RemoteException alreadyDead) {
+        } catch (RemoteException registrationFailure) {
+            boolean terminal;
+            try { terminal = !attached.thread.isBinderAlive(); }
+            catch (RuntimeException | Error queryFailure) {
+                if (queryFailure != registrationFailure) registrationFailure.addSuppressed(queryFailure);
+                throw registrationFailure;
+            }
+            if (!terminal) throw registrationFailure;
             recipient.binderDied();
         }
     }

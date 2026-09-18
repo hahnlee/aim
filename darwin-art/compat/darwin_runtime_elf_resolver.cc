@@ -1,10 +1,7 @@
-#include <CommonCrypto/CommonDigest.h>
-
 #include <dlfcn.h>
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -18,10 +15,9 @@
 #include "darwin_android_media_ndk.h"
 #include "darwin_angle_egl.h"
 #include "loader/bionic_symbol_lookup.h"
-
-extern "C" void AndroidBitmap_getInfo(void) __attribute__((weak_import));
-extern "C" void AndroidBitmap_lockPixels(void) __attribute__((weak_import));
-extern "C" void AndroidBitmap_unlockPixels(void) __attribute__((weak_import));
+#if defined(DARWIN_ART_REAL_GRAPHICS)
+#include "loader/graphics_ndk_symbols.h"
+#endif
 
 namespace android {
 namespace {
@@ -38,28 +34,6 @@ char* AndroidBasename(const char* path) {
   const char* begin = end;
   while (begin > path && begin[-1] != '/') --begin;
   return const_cast<char*>(begin);
-}
-
-std::string Sha256(const uint8_t* bytes, size_t size) {
-  std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> digest{};
-  CC_SHA256(bytes, static_cast<CC_LONG>(size), digest.data());
-  constexpr char kHex[] = "0123456789abcdef";
-  std::string result(digest.size() * 2, '\0');
-  for (size_t index = 0; index < digest.size(); ++index) {
-    result[index * 2] = kHex[digest[index] >> 4];
-    result[index * 2 + 1] = kHex[digest[index] & 0xf];
-  }
-  return result;
-}
-
-void FixtureRecordLifecycle(int phase) {
-  if (phase < 1 || phase > 7) {
-    g_elf_fixture_lifecycle.store(-phase, std::memory_order_relaxed);
-    return;
-  }
-  int observed = g_elf_fixture_lifecycle.load(std::memory_order_relaxed);
-  while (!g_elf_fixture_lifecycle.compare_exchange_weak(
-      observed, observed * 10 + phase, std::memory_order_relaxed)) {}
 }
 
 void SetResolverError(DarwinArtElfErrorBuffer* error, const char* message) {
@@ -108,6 +82,25 @@ DarwinArtElfResolveStatus ResolvePlatformProvider(
     uintptr_t* out_address,
     DarwinArtElfErrorBuffer* error) {
   if (out_address) *out_address = 0;
+#if defined(DARWIN_ART_REAL_GRAPHICS)
+  // libjnigraphics imports belong to the original NDK graphics module, not
+  // Darwin's global symbol namespace. Headless intentionally has no owner.
+  const bool graphics_version = request->version_soname != nullptr &&
+      request->version_name != nullptr &&
+      std::strcmp(request->version_soname, "libjnigraphics.so") == 0 &&
+      std::strcmp(request->version_name, "LIBJNIGRAPHICS") == 0;
+  const bool graphics_unversioned = request->version_soname == nullptr &&
+      request->version_name == nullptr;
+  if (NeedsLibrary(request, "libjnigraphics.so") &&
+      (graphics_version || graphics_unversioned)) {
+    const uintptr_t address =
+        darwin_art::loader::GraphicsNdkSymbol(request->symbol);
+    if (address != 0) {
+      *out_address = address;
+      return DARWIN_ART_ELF_RESOLVE_FOUND;
+    }
+  }
+#endif
   if (request->version_soname != nullptr || request->version_name != nullptr) {
     if (request->version_soname != nullptr && request->version_name != nullptr &&
         std::strcmp(request->version_soname, "libandroid.so") == 0) {
@@ -181,18 +174,6 @@ DarwinArtElfResolveStatus ResolvePlatformProvider(
     }
     consider(library->z_provider);
   }
-  if (NeedsLibrary(request, "libjnigraphics.so") &&
-      (std::strcmp(request->symbol, "AndroidBitmap_getInfo") == 0 ||
-       std::strcmp(request->symbol, "AndroidBitmap_lockPixels") == 0 ||
-       std::strcmp(request->symbol, "AndroidBitmap_unlockPixels") == 0)) {
-    if (std::strcmp(request->symbol, "AndroidBitmap_getInfo") == 0) {
-      consider_address(reinterpret_cast<void*>(&AndroidBitmap_getInfo));
-    } else if (std::strcmp(request->symbol, "AndroidBitmap_lockPixels") == 0) {
-      consider_address(reinterpret_cast<void*>(&AndroidBitmap_lockPixels));
-    } else {
-      consider_address(reinterpret_cast<void*>(&AndroidBitmap_unlockPixels));
-    }
-  }
   if (NeedsLibrary(request, "libandroid.so")) {
     consider_address(darwin_art_android_asset_manager_symbol(request->symbol));
     consider_address(darwin_art_android_platform_symbol(request->symbol));
@@ -216,45 +197,6 @@ DarwinArtElfResolveStatus ResolvePlatformProvider(
 
 }  // namespace
 
-bool IsExactFixtureGraph(const char* root_soname,
-                         const DarwinArtElfGraphSource* sources,
-                         size_t source_count) {
-  if (root_soname == nullptr ||
-      std::strcmp(root_soname, kDarwinArtElfJniFixtureSoname) != 0 ||
-      sources == nullptr || source_count != 3) {
-    return false;
-  }
-  struct Expected {
-    const char* soname;
-    size_t size;
-    const char* sha256;
-  };
-  const Expected expected[] = {
-      {kDarwinArtElfJniFixtureSoname, kDarwinArtElfJniFixtureSize,
-       kDarwinArtElfJniFixtureSha256},
-      {kDarwinArtElfJniChildSoname, kDarwinArtElfJniChildSize,
-       kDarwinArtElfJniChildSha256},
-      {kDarwinArtElfJniGrandchildSoname, kDarwinArtElfJniGrandchildSize,
-       kDarwinArtElfJniGrandchildSha256},
-  };
-  for (const Expected& member : expected) {
-    bool found = false;
-    for (size_t index = 0; index < source_count; ++index) {
-      const DarwinArtElfGraphSource& source = sources[index];
-      if (source.soname != nullptr &&
-          std::strcmp(source.soname, member.soname) == 0) {
-        if (found || source.bytes == nullptr || source.length != member.size ||
-            Sha256(source.bytes, source.length) != member.sha256) {
-          return false;
-        }
-        found = true;
-      }
-    }
-    if (!found) return false;
-  }
-  return true;
-}
-
 DarwinArtElfResolveStatus ResolveRuntimeProvider(
     void* context,
     const DarwinArtElfSymbolRequest* request,
@@ -267,31 +209,6 @@ DarwinArtElfResolveStatus ResolveRuntimeProvider(
     return DARWIN_ART_ELF_RESOLVE_ERROR;
   }
   auto* library = static_cast<ElfLibrary*>(context);
-  if (std::strcmp(request->symbol, "darwin_art_fixture_record_lifecycle") == 0) {
-    if (library == nullptr || !library->fixture_graph) {
-      SetResolverError(error, "fixture lifecycle provider is reserved to the fixture graph");
-      return DARWIN_ART_ELF_RESOLVE_ERROR;
-    }
-    if (request->version_soname != nullptr || request->version_name != nullptr) {
-      SetResolverError(error, "fixture lifecycle provider must be unversioned");
-      return DARWIN_ART_ELF_RESOLVE_ERROR;
-    }
-    bool provider_is_explicit = false;
-    for (size_t index = 0; index < request->needed_library_count; ++index) {
-      const char* soname = request->needed_libraries[index];
-      provider_is_explicit = provider_is_explicit ||
-                             (soname != nullptr &&
-                              std::strcmp(soname,
-                                          kDarwinArtElfJniHostProviderSoname) == 0);
-    }
-    if (!provider_is_explicit) {
-      SetResolverError(error, "fixture lifecycle provider is not explicit");
-      return DARWIN_ART_ELF_RESOLVE_ERROR;
-    }
-    *out_address = reinterpret_cast<uintptr_t>(&FixtureRecordLifecycle);
-    return DARWIN_ART_ELF_RESOLVE_FOUND;
-  }
-
   if (library == nullptr || library->provider_namespace == nullptr) {
     SetResolverError(error, "Bionic provider namespace is unavailable");
     return DARWIN_ART_ELF_RESOLVE_ERROR;
@@ -388,33 +305,6 @@ DarwinArtElfResolveStatus ResolveRuntimeProvider(
         " version=" + (provider_version == nullptr ? "<null>" : provider_version);
     SetResolverError(error, detail.c_str());
     return DARWIN_ART_ELF_RESOLVE_ERROR;
-  }
-  uint32_t route = 0;
-  if (std::strcmp(request->symbol, "__errno") == 0) {
-    route = kFixtureErrnoRouteMask;
-  } else if (std::strcmp(request->symbol, "strlen") == 0) {
-    route = kFixtureStrlenRouteMask;
-  } else if (std::strcmp(request->symbol, "open") == 0) {
-    route = kFixtureOpenRouteMask;
-  } else if (std::strcmp(request->symbol, "read") == 0) {
-    route = kFixtureReadRouteMask;
-  } else if (std::strcmp(request->symbol, "close") == 0) {
-    route = kFixtureCloseRouteMask;
-  } else if (std::strcmp(request->symbol, "sscanf") == 0) {
-    route = kFixtureScanfRouteMask;
-  } else if (std::strcmp(request->symbol, "vsscanf") == 0) {
-    route = kFixtureVsscanfRouteMask;
-  } else if (std::strcmp(request->symbol, "swprintf") == 0) {
-    route = kFixtureSwprintfRouteMask;
-  } else if (std::strcmp(request->symbol, "ioctl") == 0) {
-    route = kFixtureIoctlRouteMask;
-  } else if (std::strcmp(request->symbol, "strftime_l") == 0) {
-    route = kFixtureStrftimeRouteMask;
-  } else if (std::strcmp(request->symbol, "sendfile") == 0) {
-    route = kFixtureSendfileRouteMask;
-  }
-  if (route != 0 && library->fixture_graph) {
-    g_elf_fixture_provider_routes.fetch_or(route, std::memory_order_relaxed);
   }
   *out_address = result.address;
   return DARWIN_ART_ELF_RESOLVE_FOUND;

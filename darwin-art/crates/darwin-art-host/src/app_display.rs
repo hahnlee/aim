@@ -21,7 +21,7 @@ pub(crate) fn create(
     // turn the process into a headless runtime probe.
     // The shared system service also has process-scoped ART lifetime, but
     // owns no application window. Lifetime policy is not display ownership.
-    if !options.terminate_android_process
+    if !options.is_android_process()
         || std::env::var("DARWIN_ART_DESKTOP_PRESENTATION").as_deref() != Ok("1")
     {
         return Ok(None);
@@ -57,7 +57,7 @@ pub(crate) fn create(
         scale_to_display: false,
     };
     engine
-        .create_surface(&info)
+        .create_display_target(&info)
         .map(Some)
         .map_err(|status| HostError::SurfaceFailed {
             operation: "android_app_display_create",

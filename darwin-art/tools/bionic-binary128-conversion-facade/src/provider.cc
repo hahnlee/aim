@@ -247,16 +247,3 @@ extern "C" int darwin_art_bionic_binary128_conversion_capability(
          name == "Android-unsigned-wchar32" || name == "ICU76-iswspace" ||
          name == "conversion-only-no-binary128-arithmetic";
 }
-
-extern "C" void darwin_art_bionic_binary128_conversion_test_prepare_host_state(
-    void) {
-  errno = 31997;
-  fesetround(FE_DOWNWARD);
-  feraiseexcept(FE_DIVBYZERO);
-}
-
-extern "C" int
-darwin_art_bionic_binary128_conversion_test_host_state_is_preserved(void) {
-  return errno == 31997 && fegetround() == FE_DOWNWARD &&
-         (fetestexcept(FE_DIVBYZERO) != 0);
-}

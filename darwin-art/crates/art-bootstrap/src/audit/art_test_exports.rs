@@ -4,9 +4,9 @@ use std::process::Command;
 // public C++ surface. Keep the Mach-O export policy independent of the runtime
 // link recipe so native corpus coverage does not inflate graphics_link.rs.
 const ART_TEST_EXPORTS: &[&str] = &[
-    // test/common/runtime_state.cc is linked once into the Darwin runtime
-    // image.  AOSP test DSOs such as 912-classes forward to these C JNI
-    // entrypoints exactly as they do when linked against libarttest.so.
+    // These JNI names belong to the separate fixture helper image. Product
+    // apply_runtime_abi below deliberately excludes them; tests may use this
+    // inventory when linking against the helper as against AOSP libarttest.so.
     "_Java_Main_hasJit",
     "_Java_Main_ensureJitCompiled",
     "_Java_Main_compiledWithOptimizing",
@@ -45,6 +45,10 @@ const ART_TEST_EXPORTS: &[&str] = &[
     "_Java_Main_stopJit",
     "_Java_Main_waitForCompilation",
     "__ZN3art6GetTidEv",
+    // Public libdexfile provider ABI consumed by the upstream libarttest
+    // client in either runtime flavor; not a fixture implementation export.
+    "__ZN3art13DexFileLoader12kInvalidFileE",
+    "__ZN3art13DexFileLoader4OpenEbbbPNS_22DexFileLoaderErrorCodeEPNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEPNS3_6vectorINS3_10unique_ptrIKNS_7DexFileENS3_14default_deleteISE_EEEENS7_ISH_EEEE",
     "__ZNK3art11ImageHeader10IsAppImageEv",
     "__ZN3art5Locks26thread_suspend_count_lock_E",
     "__ZN3art5Locks17thread_list_lock_E",
@@ -130,8 +134,13 @@ const ART_TEST_EXPORTS: &[&str] = &[
     "_artQuickGetProxyReferenceArgumentAt",
 ];
 
-pub(super) fn apply(command: &mut Command) {
-    for symbol in ART_TEST_EXPORTS {
+pub(super) fn apply_runtime_abi(command: &mut Command) {
+    // Native test clients may consume the genuine ART C++ provider ABI, but
+    // their Java_Main JNI implementation belongs to the fixture image.
+    for symbol in ART_TEST_EXPORTS
+        .iter()
+        .filter(|symbol| !symbol.starts_with("_Java_"))
+    {
         command.arg(format!("-Wl,-exported_symbol,{symbol}"));
     }
 }

@@ -8,6 +8,7 @@ build="$root/_build/skia-metal-gpu"
 probe="$build/skia-metal-gpu-smoke"
 shadow_skia="$build/source"
 coretext_patch="$root/patches/skia/0001-darwin-hwui-disable-coretext-utils.patch"
+cross_tu_abi_patch="$root/patches/skia/0002-darwin-hwui-export-cross-tu-abi.patch"
 freetype_archive="$root/_build/graphics-codecs/libft2-darwin.a"
 png_archive="$root/_build/graphics-codecs/libpng-darwin.a"
 zlib_archive="$root/_build/graphics-codecs/libz-darwin.a"
@@ -16,6 +17,7 @@ libjpeg_root="$root/_aosp/external/libjpeg-turbo"
 libwebp_root="$root/_aosp/external/webp"
 liblog_archive="$root/_build/graphics-foundations/liblog-darwin.a"
 libcutils_archive="$root/_build/graphics-foundations/libcutils-darwin.a"
+cross_tu_abi_patch_sha="f4bf93980e3fde49c5a717309896e228af4245d458c92aa114bccb8868d74c56"
 
 fail() { echo "skia-metal-gpu: $1" >&2; exit 2; }
 
@@ -27,14 +29,17 @@ fail() { echo "skia-metal-gpu: $1" >&2; exit 2; }
   fail "missing pinned GN/Ninja"
 for input in "$coretext_patch" "$freetype_archive" "$png_archive" \
              "$zlib_archive" "$jpeg_archive" "$liblog_archive" \
-             "$libcutils_archive"; do
+             "$libcutils_archive" "$cross_tu_abi_patch"; do
   [[ -f "$input" ]] || fail "missing pinned input $input"
 done
+[[ "$(shasum -a 256 "$cross_tu_abi_patch" | awk '{print $1}')" == \
+   "$cross_tu_abi_patch_sha" ]] || fail "cross-TU ABI patch checksum drift"
 
 # Keep the patched source overlay stable between invocations. Recreating the
 # symlink farm invalidates every GN depfile and turns a one-file change into a
 # full Skia rebuild.
-shadow_identity="$(shasum -a 256 "$skia/BUILD.gn" "$coretext_patch" | shasum -a 256 | awk '{print $1}')"
+shadow_identity="$(shasum -a 256 "$skia/BUILD.gn" "$coretext_patch" \
+  "$cross_tu_abi_patch" | shasum -a 256 | awk '{print $1}')"
 if [[ ! -f "$shadow_skia/.darwin-art-identity" ]] ||
    [[ "$(cat "$shadow_skia/.darwin-art-identity")" != "$shadow_identity" ]]; then
   rm -rf "$shadow_skia"
@@ -49,12 +54,17 @@ if [[ ! -f "$shadow_skia/.darwin-art-identity" ]] ||
           "$shadow_skia/third_party/$(basename "$third_party_entry")"
       done < <(find "$entry" -mindepth 1 -maxdepth 1 -print | sort)
       ln -s "$libwebp_root" "$shadow_skia/third_party/externals/libwebp"
+    elif [[ "$name" == include ]]; then
+      # Provider headers are patched in the shadow only; keep the upstream
+      # checkout immutable and avoid symlink-following patch side effects.
+      cp -R "$entry" "$shadow_skia/$name"
     else
       ln -s "$entry" "$shadow_skia/$name"
     fi
   done < <(find "$skia" -mindepth 1 -maxdepth 1 -print | sort)
   cp "$skia/BUILD.gn" "$shadow_skia/BUILD.gn"
   patch -d "$shadow_skia" -p1 < "$coretext_patch"
+  patch -d "$shadow_skia" -p1 < "$cross_tu_abi_patch"
   printf '%s\n' "$shadow_identity" > "$shadow_skia/.darwin-art-identity"
 fi
 

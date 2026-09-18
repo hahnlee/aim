@@ -1,6 +1,9 @@
 #include "process_registration.h"
 #include "../os/service_process_transport.h"
 #include "../wm/desktop_window_metadata.h"
+#include "../wm/desktop_root_client_jni.h"
+#include "../wm/root_key_decision_jni.h"
+#include "../wm/desktop_foreground_authority_jni.h"
 
 #include <iostream>
 
@@ -10,6 +13,9 @@ int FinishFrameworkRegistration(JNIEnv* env, bool prepare_looper) {
   if (env == nullptr || env->ExceptionCheck()) return 4;
   if (!darwin_art::framework::os::RegisterSystemServiceClientTransport(env)) return 4;
   if (!darwin_art::framework::wm::RegisterDesktopWindowMetadataClient(env)) return 4;
+  if (!darwin_art::framework::wm::RegisterDesktopRootClient(env)) return 4;
+  if (!darwin_art::framework::wm::RegisterRootKeyDecisionClient(env)) return 4;
+  if (!darwin_art::framework::wm::RegisterDesktopForegroundAuthority(env)) return 4;
 
   // The boot JNI owner already installed AOSP Runtime's complete native
   // table before entering this phase. Do not replace nativeLoad from an app

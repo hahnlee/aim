@@ -156,18 +156,21 @@ registrar in parallel in 9.69s, and the next archive query reported `no work
 to do` in 0.01s. The HWUI 81+5 object set uses the source-locked shell edge
 only during its first cache population.
 
-The process probe is now split at the first stable boundary: environment and
-fixture-mode validation lives in `probes/runtime_process_options.cc` and is a
-separately cached object. The ART orchestration object therefore only changes
-when the process lifecycle or JNI/HWUI implementation changes; adding a new
-fixture selector recompiles the options object and relinks the probe instead of
-recompiling the full ART TU.
+The process probe is now split at the first stable boundary: production ABI
+and installed-APK/framework environment validation lives in
+`runtime/embedding/process_config.cc`, while fixture-mode validation lives in
+`probes/runtime_fixture_options.cc`; both are separately cached objects. The
+ART orchestration object therefore only changes when the process lifecycle or
+JNI/HWUI implementation changes; adding a new fixture selector recompiles only
+the fixture-options object and relinks the probe instead of recompiling the
+full ART TU.
 
-Shutdown/finalizer ordering is similarly isolated in
-`probes/runtime_shutdown_probe.cc`. It consumes a value snapshot of the
-process acceptance state, performs the owner-thread ART/DSO teardown, and is a
-separate cached object; the main probe only exports the ABI wrapper and builds
-that snapshot.
+Shutdown/finalizer ordering is similarly split across production owners:
+`runtime/embedding/process_shutdown.cc` coordinates the lifecycle,
+`runtime/framework/app/process_shutdown.cc` quiesces framework threads, and
+`runtime/art/vm_shutdown.cc` detaches/destroys ART. The probe retains only the
+post-VM fixture assertions and acceptance reporting before it asks the
+coordinator to complete process-state cleanup.
 
 The runtime adapter uses the same per-TU cache boundary. Platform-only
 compatibility shims are compiled as `darwin_runtime_platform_stubs.cc`, while

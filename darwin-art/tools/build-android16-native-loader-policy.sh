@@ -84,7 +84,7 @@ xcrun clang++ "${flags[@]}" -Wno-writable-strings \
   -I"$root/_aosp/system/core/libutils/include" \
   -I"$root/_aosp/system/core/libsystem/include" \
   -c "$source_root/com_android_internal_os_ClassLoaderFactory.cpp" \
-  -o "$out/classloader_factory_jni.o"
+  -MMD -MF "$out/classloader_factory_jni.o.d" -o "$out/classloader_factory_jni.o"
 xcrun clang++ "${flags[@]}" -c "$root/compat/filesystem/guest_config.cc" -o "$out/guest_config.o"
 xcrun clang++ "${flags[@]}" -c "$root/compat/filesystem/guest_file.cc" -o "$out/guest_file.o"
 xcrun clang++ "${flags[@]}" -c "$root/compat/filesystem/guest_directory.cc" -o "$out/guest_directory.o"

@@ -1,4 +1,4 @@
-use crate::{Result, invalid, le16, le64};
+use crate::{invalid, le16, le64, Result};
 
 /// Parse flat EROFS directory blocks without copying their file contents.
 pub fn entries(data: &[u8], block_size: usize) -> Result<Vec<(u64, Vec<u8>)>> {
