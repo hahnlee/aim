@@ -4118,3 +4118,53 @@ Tracked-only diff --check passed before staging, but full staged check reports
 preexisting header EOF blanks and unified-patch context whitespace; retain patch
 bytes rather than corrupt locked patches. Goal remains incomplete; user pauses
 implementation at this checkpoint. Commit requested; push not requested.
+
+### 2026-09-19 — Calculator/DeskClock physical input verified; HID target checks
+
+User resumes work specifically on the last Calculator/DeskClock input failures.
+Read AGENTS, Current goal and latest checkpoint. The old windows49913/51530
+occupied the same360x668 macOS-point rectangle. An activation request for
+Calculator returned true while DeskClock remained foreground and above it;
+the purported Calculator sequence actually changed DeskClock. After graceful
+DeskClock termination, the same physical Calculator1,+,2,= sequence rendered3.
+This establishes a harness targeting failure, not an arithmetic-runtime fix.
+
+Normal installed-record DeskClock relaunch initially rejected replacement of
+the shared system runtime while old applications remained live. Gracefully
+terminated the exact registered Calculator/Chrome actors; ordinary startup
+replaced the system with80544 and launched unchanged DeskClock80547 and
+Calculator80921. APKs and existing profiles/data were preserved. A registered
+PID precedes completed UI startup: an early new-Calculator sequence was blank,
+while input after its rendered keypad was ready succeeded. No Android input,
+lifecycle or graphics implementation was changed to pass these checks.
+
+Bounded Luna implementation changed only external macos-window-input.swift and
+macos-window-keyboard.swift. They request documented activateAllWindows, check
+the frontmost visible layer-zero owner at the title-bar/event point before
+posting, refresh geometry and reject a wrong target explicitly. A physical
+title-bar click can activate a visible inactive target; no-focus mode retains
+its original no-programmatic-activation semantics. Pumping the sender's main
+run loop refreshes NSWorkspace's cached foreground PID after that click.
+Keyboard events revalidate foreground ownership individually. Physical HID
+delivery and macOS-point/Retina mapping remain unchanged.
+
+Main-agent live verification with both applications running side by side:
+Clock -> Stopwatch tab transition, start and pause PASS; running capture2.61s,
+paused3.96s, and later start/pause capture7.77s. Calculator pointer1,+,2,= PASS3;
+physical keyboard4,+,5,Enter PASS9, proving a changed result. Fresh captures:
+/tmp/deskclock-fixed-pointer.png, /tmp/calculator-fixed-pointer.png,
+/tmp/calculator-keyboard-nine.png and final Calculator/DeskClock captures.
+When Calculator was moved over DeskClock, no-focus pointer, normal pointer and
+keyboard tools each rejected the covered80547 target (actual owner80921) with
+exit64. Normal activation failures timed out in5s without posting into the
+covering app. Restored the windows to separate locations afterward. Both Swift
+typechecks and scoped diff --check PASS; no shared native/DEX rebuild needed.
+
+Chrome was relaunched normally as81610 with current children81625/81626.
+Restoration is NOT a new rendering PASS: physical example.com address entry
+and reload reached the address bar, but fresh /tmp/chromium-restored-latest.png
+and /tmp/chromium-restored-reload.png still have a white body. The preceding
+verified Example Domain capture remains historical evidence, not fresh current
+acceptance. Preserve this failure for the next Chromium continuation rather
+than declaring the full original goal complete. App titles still show package
+identifiers. No APK changes, profile reset, fallback, commit or push this turn.
