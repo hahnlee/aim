@@ -69,7 +69,8 @@ void ReleaseImageReaderCallbackContext(void* context) {
 }
 
 void ImageReaderQueueBuffer(void* context, AHardwareBuffer* buffer,
-                            int32_t slot, int fence, int32_t dataspace) {
+                            int32_t slot, uint64_t, uint64_t, int fence,
+                            int32_t dataspace) {
   auto* reader = static_cast<DarwinImageReader*>(context);
   if (reader == nullptr || buffer == nullptr) {
     if (fence >= 0) (void)darwin_art_bionic_socket_broker_close(fence);

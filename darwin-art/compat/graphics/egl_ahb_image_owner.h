@@ -113,7 +113,8 @@ std::optional<LocalPresentation> PrepareLocalPresentation(
 void MarkHardwareBufferReleased(AHardwareBuffer* buffer, bool debug);
 
 void BindImageTexture(EglEnum target, EglImageHandle image,
-                      const EglAhbImageBackend& backend, bool debug);
+                      const EglAhbImageBackend& backend, bool debug,
+                      bool bind_client_texture = false);
 void SynchronizeIosurfaceToAhbClientTextures(
     const EglAhbImageBackend& backend, bool debug);
 void SynchronizeAhbImagesToIosurface(const EglAhbImageBackend& backend,

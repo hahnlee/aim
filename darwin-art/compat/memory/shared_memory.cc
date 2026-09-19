@@ -1,6 +1,7 @@
 // Darwin backing for Android shared-memory descriptors. No framework policy.
 #include "../darwin_android_platform.h"
 #include "shared_memory.h"
+#include "shared_memory_handle.h"
 #include <cerrno>
 #include <climits>
 #include <cstdint>
@@ -125,8 +126,11 @@ extern "C" int ASharedMemory_setProt(int fd, int protection) {
     darwin_art_bionic_errno_set_from_darwin(EINVAL);
     return -1;
   }
+  darwin_art::memory::SharedMemoryHandle handle(fd);
+  if (!handle.valid()) return -1;
+  const int native_fd = handle.native();
   SharedMemoryState state{};
-  if (!ReadSharedMemoryMarker(fd, &state)) {
+  if (!ReadSharedMemoryMarker(native_fd, &state)) {
     std::lock_guard<std::mutex> lock(g_shared_memory_mutex);
     g_shared_memory.erase(fd);
     if (std::getenv("DARWIN_ART_DEBUG_SHARED_MEMORY") != nullptr)
@@ -140,13 +144,13 @@ extern "C" int ASharedMemory_setProt(int fd, int protection) {
     return -1;
   }
   state.protection = protection;
-  if (!WriteSharedMemoryMarker(fd, state)) {
+  if (!WriteSharedMemoryMarker(native_fd, state)) {
     darwin_art_bionic_errno_set_from_darwin(errno);
     return -1;
   }
   {
     std::lock_guard<std::mutex> lock(g_shared_memory_mutex);
-    g_shared_memory.insert_or_assign(fd, state);
+    if (!handle.filesystem_owned()) g_shared_memory.insert_or_assign(fd, state);
   }
   // Darwin has no ashmem-wide future-mapping protection seal. Individual
   // mappings still receive the requested protection through mmap/mprotect.
@@ -154,6 +158,9 @@ extern "C" int ASharedMemory_setProt(int fd, int protection) {
 }
 
 extern "C" int darwin_art_android_shared_memory_close(int fd) {
+  // FS may own virtual entropy/byte descriptors without any exportable host
+  // FD. Closing belongs to that owner and must not require a backing alias.
+  if (darwin_art_bionic_fs_owns_fd_core(fd) != 0) return 0;
   SharedMemoryState state{};
   const bool is_shared_memory = ReadSharedMemoryMarker(fd, &state);
   {
@@ -201,6 +208,18 @@ extern "C" int darwin_art_android_shared_memory_dup(int fd) {
   return duplicate;
 }
 
+extern "C" int darwin_art_android_shared_memory_get_guest_info(
+    int fd, size_t *size, int *protection) {
+  if (size == nullptr || protection == nullptr) return -1;
+  darwin_art::memory::SharedMemoryHandle handle(fd);
+  if (!handle.valid()) return -1;
+  SharedMemoryState state{};
+  if (!ReadSharedMemoryMarker(handle.native(), &state)) return 0;
+  *size = state.size;
+  *protection = state.protection;
+  return 1;
+}
+
 extern "C" int darwin_art_android_shared_memory_get_info(
     int fd, size_t* size, int* protection) {
   if (size == nullptr || protection == nullptr) return -1;
@@ -241,15 +260,21 @@ extern "C" int darwin_art_android_shared_memory_adopt(
 extern "C" int darwin_art_android_shared_memory_fcntl(
     int fd, int command, intptr_t argument, int* result) {
   if (result == nullptr) return 0;
+  if (command != 1033 && command != 1034 &&
+      darwin_art_bionic_fs_owns_fd_core(fd) != 0) return 0;
+  darwin_art::memory::SharedMemoryHandle handle(fd);
+  if (!handle.valid()) { *result = -1; return 1; }
+  // Guest descriptor flags/dup/status belong to FS, never this temporary dup.
+  if (handle.filesystem_owned() && command != 1033 && command != 1034) return 0;
+  const int native_fd = handle.native();
   SharedMemoryState state{};
-  if (!ReadSharedMemoryMarker(fd, &state)) {
+  if (!ReadSharedMemoryMarker(native_fd, &state)) {
     std::lock_guard<std::mutex> lock(g_shared_memory_mutex);
     g_shared_memory.erase(fd);
     return 0;
   }
   std::lock_guard<std::mutex> lock(g_shared_memory_mutex);
-  g_shared_memory.insert_or_assign(fd, state);
-  auto found = g_shared_memory.find(fd);
+  if (!handle.filesystem_owned()) g_shared_memory.insert_or_assign(fd, state);
   if (std::getenv("DARWIN_ART_DEBUG_SHARED_MEMORY") != nullptr)
     std::fprintf(stderr,
                  "ART Android ashmem: pid=%d tid=%llu fcntl fd=%d command=%d "
@@ -269,30 +294,31 @@ extern "C" int darwin_art_android_shared_memory_fcntl(
   constexpr int kSealFutureWrite = 0x10;
   if (command == kAndroidFGetSeals) {
     *result = kSealShrink | kSealGrow |
-              ((found->second.protection & PROT_WRITE) == 0
+              ((state.protection & PROT_WRITE) == 0
                    ? kSealFutureWrite
                    : 0);
     if (std::getenv("DARWIN_ART_DEBUG_SHARED_MEMORY") != nullptr)
       std::fprintf(stderr,
                    "ART Android ashmem: fcntl fd=%d F_GET_SEALS result=%#x "
                    "protection=%#x\n",
-                   fd, *result, found->second.protection);
+                   fd, *result, state.protection);
     return 1;
   }
   if (command == kAndroidFAddSeals) {
     if ((argument & kSealFutureWrite) != 0) {
-      found->second.protection &= ~PROT_WRITE;
-      if (!WriteSharedMemoryMarker(fd, found->second)) {
+      state.protection &= ~PROT_WRITE;
+      if (!WriteSharedMemoryMarker(native_fd, state)) {
         *result = -1;
         return 1;
       }
+      if (!handle.filesystem_owned()) g_shared_memory.insert_or_assign(fd, state);
     }
     *result = 0;
     if (std::getenv("DARWIN_ART_DEBUG_SHARED_MEMORY") != nullptr)
       std::fprintf(stderr,
                    "ART Android ashmem: fcntl fd=%d F_ADD_SEALS result=0 "
                    "protection=%#x\n",
-                   fd, found->second.protection);
+                   fd, state.protection);
     return 1;
   }
   int host_command = -1;
@@ -312,7 +338,7 @@ extern "C" int darwin_art_android_shared_memory_fcntl(
                 : fcntl(fd, host_command, argument);
   if (*result >= 0 &&
       (command == kAndroidFDupfd || command == kAndroidFDupfdCloexec)) {
-    g_shared_memory.emplace(*result, found->second);
+    g_shared_memory.emplace(*result, state);
   }
   return 1;
 }
@@ -320,8 +346,11 @@ extern "C" int darwin_art_android_shared_memory_fcntl(
 extern "C" int darwin_art_android_shared_memory_ioctl(
     int fd, uint32_t request, void*, int* result, int* android_errno) {
   if (result == nullptr || android_errno == nullptr) return 0;
+  if (((request >> 8) & 0xff) != 0x77) return 0;
+  darwin_art::memory::SharedMemoryHandle handle(fd);
+  if (!handle.valid()) { *result = -1; *android_errno = EBADF; return 1; }
   SharedMemoryState state{};
-  if (!ReadSharedMemoryMarker(fd, &state)) {
+  if (!ReadSharedMemoryMarker(handle.native(), &state)) {
     std::lock_guard<std::mutex> lock(g_shared_memory_mutex);
     g_shared_memory.erase(fd);
     if (std::getenv("DARWIN_ART_DEBUG_SHARED_MEMORY") != nullptr)
@@ -330,22 +359,21 @@ extern "C" int darwin_art_android_shared_memory_ioctl(
     return 0;
   }
   std::lock_guard<std::mutex> lock(g_shared_memory_mutex);
-  g_shared_memory.insert_or_assign(fd, state);
-  const auto found = g_shared_memory.find(fd);
+  if (!handle.filesystem_owned()) g_shared_memory.insert_or_assign(fd, state);
   if (std::getenv("DARWIN_ART_DEBUG_SHARED_MEMORY") != nullptr)
     std::fprintf(stderr, "ART Android ashmem: ioctl fd=%d request=%#x\n", fd,
                  request);
   constexpr uint32_t kAshmemGetSize = 0x00007704;
   constexpr uint32_t kAshmemGetProtectionMask = 0x00007706;
   if (request == kAshmemGetSize) {
-    *result = found->second.size > static_cast<size_t>(INT_MAX)
+    *result = state.size > static_cast<size_t>(INT_MAX)
                   ? -1
-                  : static_cast<int>(found->second.size);
+                  : static_cast<int>(state.size);
     *android_errno = *result < 0 ? EOVERFLOW : 0;
     return 1;
   }
   if (request == kAshmemGetProtectionMask) {
-    *result = found->second.protection;
+    *result = state.protection;
     *android_errno = 0;
     return 1;
   }

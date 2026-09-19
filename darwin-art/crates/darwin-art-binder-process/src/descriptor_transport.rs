@@ -8,26 +8,9 @@ use darwin_art_binder_device::descriptor_manifest::{
 };
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 
-pub use darwin_art_engine_sys::{DescriptorTransferBinding, RetainedExportedDescriptor};
+pub use darwin_art_engine_sys::{DescriptorTransferBinding, RetainedExportedDescriptor, ExportedDescriptor};
 const _: () =
     assert!(MAX_ATTRIBUTES_BYTES == darwin_art_engine_sys::BINDER_DESCRIPTOR_ATTRIBUTES_BYTES);
-
-#[repr(C)]
-pub struct ExportedDescriptor {
-    pub host_fd: i32,
-    pub attributes_length: u32,
-    pub attributes: [u8; MAX_ATTRIBUTES_BYTES],
-}
-
-impl Default for ExportedDescriptor {
-    fn default() -> Self {
-        Self {
-            host_fd: -1,
-            attributes_length: 0,
-            attributes: [0; MAX_ATTRIBUTES_BYTES],
-        }
-    }
-}
 
 pub use crate::descriptor_retention::{DescriptorRetainedApi, RetainedDescriptorLease};
 

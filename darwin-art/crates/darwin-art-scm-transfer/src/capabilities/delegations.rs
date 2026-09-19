@@ -39,6 +39,37 @@ impl CapabilityRegistry {
         if !binding.valid_for(self.authority) {
             return Err(CapabilityError::WrongBinding);
         }
+        // An exact Binder binding identifies one descriptor, including when
+        // its Bind reply is lost. Never mint an ambiguous second cancellation
+        // target for the same source session/transfer/ordinal/object offset.
+        if matches!(binding, Binding::Binder { .. })
+            && self.delegations.values().any(|entry| {
+                entry.record.source == holder.process() && entry.record.binding == binding
+            })
+        {
+            return Err(CapabilityError::WrongBinding);
+        }
+        if let Binding::Binder {
+            source_connection,
+            transfer,
+            ..
+        } = binding
+        {
+            let existing = self
+                .delegations
+                .values()
+                .filter(|entry| {
+                    matches!(
+                        entry.record.binding, Binding::Binder {
+                            source_connection: session, transfer: token, ..
+                        } if session == source_connection && token == transfer
+                    )
+                })
+                .count();
+            if existing >= crate::MAX_PAYLOADS {
+                return Err(CapabilityError::QuotaExceeded);
+            }
+        }
         if self.delegations.len() >= MAX_DELEGATIONS {
             return Err(CapabilityError::QuotaExceeded);
         }

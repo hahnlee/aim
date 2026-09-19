@@ -14,7 +14,7 @@ mod scm_endpoint;
 pub use scm_endpoint::*;
 pub use binder_descriptor::{
     BINDER_DESCRIPTOR_ATTRIBUTES_BYTES, BinderExportLeaseReleaseFn, BinderRetainedExportFn,
-    DescriptorTransferBinding, RetainedExportedDescriptor,
+    DescriptorTransferBinding, RetainedExportedDescriptor, ExportedDescriptor, BinderBoundExportFn, BinderBoundImportFn,
 };
 use darwin_art_abi::{AbiHeader, StatusCode};
 

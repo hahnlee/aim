@@ -395,6 +395,12 @@ impl<T: AuthorityTransport> Client<T> {
         // the actual export to this transfer, not to a subsequently chosen ID.
         let transfer = self.allocate_transfer()?;
         let (files, retained_leases) = self.capture_remote_fds(request.snapshot, transfer)?;
+        let mut transfer_receipt = files
+            .iter()
+            .any(|file| !file.attributes().as_bytes().is_empty())
+            .then(|| {
+                crate::transfer_receipts::Source::new(self.state.transport.as_ref(), transfer)
+            });
         let image = TransferImage::capture_with_objects_and_descriptors(
             request.snapshot,
             request.extra,
@@ -449,7 +455,12 @@ impl<T: AuthorityTransport> Client<T> {
             );
         }
         match response {
-            Message::RouteAccepted { call } => Ok(SubmissionOutcome::Accepted(call)),
+            Message::RouteAccepted { call } => {
+                if let Some(receipt) = &mut transfer_receipt {
+                    receipt.routed();
+                }
+                Ok(SubmissionOutcome::Accepted(call))
+            }
             Message::RouteRejected { reason } => Ok(SubmissionOutcome::Rejected(reason)),
             _ => unreachable!("response kind checked by dispatcher"),
         }
@@ -479,6 +490,12 @@ impl<T: AuthorityTransport> Client<T> {
         let manifest = self.publish_remote_objects(command.objects())?;
         let transfer = self.allocate_transfer()?;
         let (files, retained_leases) = self.capture_remote_fds(command.snapshot(), transfer)?;
+        let mut transfer_receipt = files
+            .iter()
+            .any(|file| !file.attributes().as_bytes().is_empty())
+            .then(|| {
+                crate::transfer_receipts::Source::new(self.state.transport.as_ref(), transfer)
+            });
         let image = TransferImage::capture_with_objects_and_descriptors(
             command.snapshot(),
             command.extra(),
@@ -512,6 +529,9 @@ impl<T: AuthorityTransport> Client<T> {
             return Err(Error::Protocol(
                 "reply acknowledgement call mismatch".into(),
             ));
+        }
+        if let Some(receipt) = &mut transfer_receipt {
+            receipt.routed();
         }
         Ok(())
     }

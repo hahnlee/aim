@@ -5,6 +5,8 @@
 //! invokes the separate authorizer API after proving a transfer.
 
 mod attributes;
+mod binder_batch;
+pub use binder_batch::BinderManifestItem;
 mod delegations;
 mod holders;
 mod scm_batch;

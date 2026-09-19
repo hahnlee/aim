@@ -11,6 +11,7 @@ mod descriptor_transport;
 mod dispatcher;
 mod fd_endpoint;
 mod routed_write_read;
+mod transfer_receipts;
 mod transport;
 
 pub use authority_lifetime::AuthorityLifetime;

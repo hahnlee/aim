@@ -13,7 +13,7 @@ extern "C" int darwin_art_bionic_socket_broker_dup(int) { std::abort(); }
 extern "C" int darwin_art_bionic_socket_broker_close(int) { std::abort(); }
 extern "C" int darwin_art_bionic_fd_export_for_scm(int) { std::abort(); }
 extern "C" int darwin_art_bionic_fd_import_from_scm(int) { std::abort(); }
-extern "C" int darwin_art_android_shared_memory_get_info(int, size_t*, int*) {
+extern "C" int darwin_art_android_shared_memory_get_guest_info(int, size_t*, int*) {
   std::abort();
 }
 extern "C" int darwin_art_android_shared_memory_adopt(int, size_t, int) {

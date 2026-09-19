@@ -10,7 +10,7 @@ fn state() -> Arc<State> {
     Arc::new(State {
         binder: Default::default(),
         fd_deliveries: crate::host_fd_delivery::transport::new_owner().unwrap(),
-        scm: crate::scm_service::ScmService::new().unwrap(),
+        scm: std::sync::Arc::new(crate::scm_service::ScmService::new().unwrap()),
         filesystem: Mutex::new(ProfileFilesystem::new(paths.clone())),
         registry: Mutex::new(PackageRegistry::new(&paths)),
         paths,

@@ -588,6 +588,77 @@ DarwinArtFdBrokerStatus Dup2Impl(DarwinArtFdBrokerImpl *broker, int old_fd,
   SetResult(result, new_fd, 0);
   return DARWIN_ART_FD_BROKER_OK;
 }
+
+DarwinArtFdBrokerStatus
+PublishBatch(DarwinArtFdBrokerImpl *broker,
+             const DarwinArtFdPublishBatchEntryV1 *entries, size_t count,
+             int *guest_fds) {
+  constexpr size_t kMaxBatch = DARWIN_ART_FD_BROKER_MAX_PUBLISH_BATCH;
+  if (!broker || !entries || !guest_fds || count == 0 || count > kMaxBatch)
+    return DARWIN_ART_FD_BROKER_INVALID_ARGUMENT;
+
+  // Every check, allocation and reservation stays under one namespace lock.
+  // A free slot is not removed until every Description has been allocated, so
+  // all failure paths leave both the namespace and output array untouched.
+  std::lock_guard lock(broker->mutex);
+  std::array<Owner *, kMaxBatch> owners{};
+  for (size_t index = 0; index < count; ++index) {
+    if (entries[index].owner == 0 ||
+        (entries[index].descriptor_flags &
+         ~static_cast<int32_t>(DARWIN_ART_FD_CLOEXEC)) != 0)
+      return DARWIN_ART_FD_BROKER_INVALID_ARGUMENT;
+    auto found = broker->owners.find(entries[index].owner);
+    if (found == broker->owners.end())
+      return DARWIN_ART_FD_BROKER_STALE;
+    if (found->second.draining)
+      return DARWIN_ART_FD_BROKER_DRAINING;
+    owners[index] = &found->second;
+  }
+
+  std::array<size_t, kMaxBatch> selected{};
+  size_t selected_count = 0;
+  for (size_t position = broker->free_slots.size();
+       position != 0 && selected_count != count; --position) {
+    const size_t slot_index = broker->free_slots[position - 1];
+    if (!broker->slots[slot_index].retired)
+      selected[selected_count++] = slot_index;
+  }
+  if (selected_count != count)
+    return DARWIN_ART_FD_BROKER_EXHAUSTED;
+
+  std::array<std::shared_ptr<Description>, kMaxBatch> descriptions;
+  try {
+    for (size_t index = 0; index < count; ++index) {
+      auto description = std::make_shared<Description>();
+      description->owner = entries[index].owner;
+      description->kind = owners[index]->kind;
+      description->callbacks = owners[index]->callbacks;
+      description->object = entries[index].object;
+      description->status_flags = entries[index].status_flags;
+      descriptions[index] = std::move(description);
+    }
+  } catch (...) {
+    // No provider callback runs here: opaque objects remain caller-owned when
+    // Description allocation cannot complete.
+    return DARWIN_ART_FD_BROKER_EXHAUSTED;
+  }
+
+  for (size_t index = 0; index < count; ++index) {
+    const size_t slot_index = selected[index];
+    auto free_slot = std::find(broker->free_slots.begin(),
+                               broker->free_slots.end(), slot_index);
+    if (free_slot == broker->free_slots.end())
+      std::terminate();
+    broker->free_slots.erase(free_slot);
+    Slot &slot = broker->slots[slot_index];
+    slot.live = true;
+    slot.descriptor_flags = entries[index].descriptor_flags;
+    slot.description = std::move(descriptions[index]);
+    ++owners[index]->live_descriptions;
+    guest_fds[index] = static_cast<int>(MakeToken(slot_index, slot.generation));
+  }
+  return DARWIN_ART_FD_BROKER_OK;
+}
 } // namespace
 
 struct DarwinArtFdDescriptionPin {
@@ -739,6 +810,25 @@ darwin_art_fd_broker_publish(DarwinArtFdBroker *broker,
                              int *guest_fd) {
   return darwin_art_fd_broker_publish_with_flags(broker, owner, object, 0, 0,
                                                  guest_fd);
+}
+extern "C" DarwinArtFdBrokerStatus
+darwin_art_fd_broker_publish_batch_with_flags(
+    DarwinArtFdBroker *broker, const DarwinArtFdPublishBatchEntryV1 *entries,
+    size_t count, int *guest_fds) {
+  return PublishBatch(Impl(broker), entries, count, guest_fds);
+}
+extern "C" DarwinArtFdBrokerStatus darwin_art_fd_broker_publish_pair_with_flags(
+    DarwinArtFdBroker *broker, DarwinArtFdOwnerHandle owner,
+    const uint64_t objects[2], const int status_flags[2],
+    const int descriptor_flags[2], int guest_fds[2]) {
+  if (!objects || !status_flags || !descriptor_flags || !guest_fds)
+    return DARWIN_ART_FD_BROKER_INVALID_ARGUMENT;
+  const DarwinArtFdPublishBatchEntryV1 entries[2] = {
+      {owner, objects[0], status_flags[0], descriptor_flags[0]},
+      {owner, objects[1], status_flags[1], descriptor_flags[1]},
+  };
+  return darwin_art_fd_broker_publish_batch_with_flags(broker, entries, 2,
+                                                       guest_fds);
 }
 extern "C" DarwinArtFdBrokerStatus
 darwin_art_fd_broker_dup(DarwinArtFdBroker *broker, int old_fd, int *new_fd) {

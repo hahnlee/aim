@@ -22,7 +22,15 @@ typedef struct DarwinArtBinderRetainedExportedDescriptor {
   void *lease;
 } DarwinArtBinderRetainedExportedDescriptor;
 
+typedef struct DarwinArtBinderExportedDescriptor {
+  int32_t host_fd;
+  uint32_t attributes_length;
+  uint8_t attributes[DARWIN_ART_BINDER_DESCRIPTOR_ATTRIBUTES_BYTES];
+} DarwinArtBinderExportedDescriptor;
+
 #ifdef __cplusplus
+static_assert(sizeof(DarwinArtBinderExportedDescriptor) == 264,
+              "Binder bound descriptor ABI drift");
 static_assert(sizeof(DarwinArtBinderTransferBinding) == 32,
               "Binder transfer binding ABI drift");
 static_assert(offsetof(DarwinArtBinderRetainedExportedDescriptor, lease) ==
@@ -43,3 +51,9 @@ extern "C" int darwin_art_binder_export_retained_file_descriptor(
     int guest_fd, const DarwinArtBinderTransferBinding *binding,
     DarwinArtBinderRetainedExportedDescriptor *result);
 extern "C" void darwin_art_binder_release_export_lease(void *lease);
+extern "C" int darwin_art_binder_export_bound_file_descriptor(
+    int guest_fd, const DarwinArtBinderTransferBinding *binding,
+    DarwinArtBinderExportedDescriptor *result);
+extern "C" int darwin_art_binder_import_bound_file_descriptor(
+    int host_fd, const DarwinArtBinderTransferBinding *binding,
+    const uint8_t *attributes, size_t attributes_length);

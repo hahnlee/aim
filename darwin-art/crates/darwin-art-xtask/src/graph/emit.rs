@@ -534,6 +534,12 @@ pub(crate) fn emit_graph_with_support(out: &Path, with_support: bool) -> io::Res
         "crates/darwin-art-runtime",
         "crates/darwin-art-engine-sys",
         "crates/darwin-art-abi",
+        "crates/darwin-art-profile",
+        "crates/darwin-art-scm-transfer",
+        "crates/darwin-art-binder-process",
+        "crates/darwin-art-binder-device",
+        "crates/darwin-art-engine",
+        "crates/darwin-art-build-contract",
     ] {
         collect_files(&root.join(directory), &root, &mut runtime_owner_inputs);
     }

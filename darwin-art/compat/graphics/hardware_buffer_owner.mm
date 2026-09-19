@@ -350,6 +350,15 @@ extern "C" void AHardwareBuffer_describe(const AHardwareBuffer* buffer,
   if (buffer != nullptr && out != nullptr) *out = buffer->description;
 }
 
+extern "C" void darwin_art_android_hardware_buffer_mark_cpu_rgba(
+    AHardwareBuffer* buffer) {
+  if (buffer == nullptr || buffer->surface == nullptr) return;
+  IOSurfaceSetValue(buffer->surface, CFSTR("DarwinArtStorageRGBA"),
+                    kCFBooleanTrue);
+  IOSurfaceSetValue(buffer->surface, CFSTR("DarwinArtProducerTopLeft"),
+                    kCFBooleanTrue);
+}
+
 extern "C" int AHardwareBuffer_lock(AHardwareBuffer* buffer, uint64_t,
                                      int32_t, const ARect*, void** out) {
   if (buffer == nullptr || out == nullptr || buffer->surface == nullptr)
@@ -395,15 +404,76 @@ extern "C" int AHardwareBuffer_unlock(AHardwareBuffer* buffer,
 
 struct HardwareBufferWire {
   uint32_t magic;
-  uint32_t surface_id;
-  AHardwareBuffer_Desc description;
+  DarwinArtHardwareBufferIdentity identity;
 };
+
+extern "C" int darwin_art_android_hardware_buffer_export_identity(
+    const AHardwareBuffer* buffer, DarwinArtHardwareBufferIdentity* out) {
+  if (buffer == nullptr || buffer->surface == nullptr || out == nullptr)
+    return -EINVAL;
+  const uint32_t id = IOSurfaceGetID(buffer->surface);
+  if (id == 0) return -ENOENT;
+  out->surface_id = id;
+  out->description = {
+      .width = buffer->description.width,
+      .height = buffer->description.height,
+      .layers = buffer->description.layers,
+      .format = buffer->description.format,
+      .usage = buffer->description.usage,
+      .stride = buffer->description.stride,
+  };
+  return 0;
+}
+
+extern "C" int darwin_art_android_hardware_buffer_import_identity(
+    const DarwinArtHardwareBufferIdentity* identity, AHardwareBuffer** out) {
+  if (out == nullptr) return -EINVAL;
+  *out = nullptr;
+  if (identity == nullptr || identity->surface_id == 0)
+    return -EINVAL;
+  const auto& wire = identity->description;
+  AHardwareBuffer_Desc desc{};
+  desc.width = wire.width;
+  desc.height = wire.height;
+  desc.layers = wire.layers;
+  desc.format = wire.format;
+  desc.usage = wire.usage;
+  desc.stride = wire.stride;
+  if (!IsHardwareBufferDescriptionSupported(&desc)) return -EINVAL;
+  const size_t bytes_per_pixel = BytesPerPixel(desc.format);
+  if (desc.width > INT32_MAX || desc.height > INT32_MAX ||
+      static_cast<size_t>(desc.width) > SIZE_MAX / bytes_per_pixel)
+    return -EOVERFLOW;
+  IOSurfaceRef surface = IOSurfaceLookup(identity->surface_id);
+  if (surface == nullptr) return -ENOENT;
+  const size_t row_bytes = IOSurfaceGetBytesPerRow(surface);
+  const bool valid = IOSurfaceGetWidth(surface) == desc.width &&
+                     IOSurfaceGetHeight(surface) == desc.height &&
+                     IOSurfaceGetBytesPerElement(surface) == bytes_per_pixel &&
+                     IOSurfaceGetPixelFormat(surface) == kDarwinBgraPixelFormat &&
+                     row_bytes >= static_cast<size_t>(desc.width) * bytes_per_pixel &&
+                     row_bytes % bytes_per_pixel == 0 &&
+                     row_bytes / bytes_per_pixel <= INT32_MAX &&
+                     (desc.stride == 0 ||
+                      desc.stride == row_bytes / bytes_per_pixel);
+  if (!valid) {
+    CFRelease(surface);
+    return -EINVAL;
+  }
+  *out = WrapSurface(surface, desc);
+  if (*out == nullptr) {
+    CFRelease(surface);
+    return -ENOMEM;
+  }
+  return 0;
+}
 
 extern "C" int AHardwareBuffer_sendHandleToUnixSocket(
     const AHardwareBuffer* buffer, int socket_fd) {
-  if (buffer == nullptr || buffer->surface == nullptr) return -EINVAL;
-  const HardwareBufferWire wire{0x44414842u, IOSurfaceGetID(buffer->surface),
-                                buffer->description};
+  HardwareBufferWire wire{0x44414842u, {}};
+  const int result = darwin_art_android_hardware_buffer_export_identity(
+      buffer, &wire.identity);
+  if (result != 0) return result;
   const intptr_t written =
       darwin_art_bionic_socket_broker_write(socket_fd, &wire, sizeof(wire));
   return written == sizeof(wire) ? 0 : -EIO;
@@ -417,12 +487,6 @@ extern "C" int AHardwareBuffer_recvHandleFromUnixSocket(int socket_fd,
   const intptr_t read =
       darwin_art_bionic_socket_broker_read(socket_fd, &wire, sizeof(wire));
   if (read != sizeof(wire) || wire.magic != 0x44414842u) return -EIO;
-  IOSurfaceRef surface = IOSurfaceLookup(wire.surface_id);
-  if (surface == nullptr) return -ENOENT;
-  *out = WrapSurface(surface, wire.description);
-  if (*out == nullptr) {
-    CFRelease(surface);
-    return -ENOMEM;
-  }
-  return 0;
+  return darwin_art_android_hardware_buffer_import_identity(&wire.identity,
+                                                            out);
 }

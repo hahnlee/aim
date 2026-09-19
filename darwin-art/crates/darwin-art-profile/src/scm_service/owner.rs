@@ -1,6 +1,7 @@
 //! Authenticated transfer ledger composition, separate from native transport.
 //! The containing service holds ONE mutex across validation/reservation/commit.
 use crate::ProfileError;
+use super::credentials::Credentials;
 use darwin_art_scm_transfer::{
     AuthorityEpoch, MAX_GLOBAL_LEASES, MAX_PAYLOADS, MAX_PROCESS_LEASES, PreparedTransfer,
     ProcessEpoch, Retirement, ScmTransferLeaseOwner, TransferKey, TrustedReceiveContext,
@@ -24,17 +25,20 @@ struct Ledger {
     managed: Vec<(u64, DelegationId)>,
     receiver: Option<ProcessEpoch>,
     settled: Option<DeliveryDisposition>,
+    credentials: Credentials,
 }
 
 pub(super) struct Prepared {
     pub response: Vec<u8>,
     pub metadata: OwnedFd,
     pub transfer: PreparedTransfer,
+    pub credentials: Credentials,
 }
 
 pub(super) struct Owner {
     leases: ScmTransferLeaseOwner,
-    registry: CapabilityRegistry,
+    pub(super) registry: CapabilityRegistry,
+    pub(super) binder_deliveries: HashMap<(u64, u64), super::binder_capabilities::BinderLedger>,
     ledger: HashMap<TransferKey, Ledger>,
 }
 
@@ -43,6 +47,7 @@ impl Owner {
         Ok(Self {
             leases: ScmTransferLeaseOwner::new(authority, MAX_GLOBAL_LEASES, MAX_PROCESS_LEASES),
             registry: CapabilityRegistry::new(authority).map_err(failed)?,
+            binder_deliveries: HashMap::new(),
             ledger: HashMap::new(),
         })
     }
@@ -58,7 +63,27 @@ impl Owner {
         payloads: &[OwnedFd],
         managed: &[(u64, u128)],
     ) -> Result<Prepared, ProfileError> {
-        if payloads.is_empty() || payloads.len() > MAX_PAYLOADS || managed.len() > payloads.len() {
+        self.prepare_authenticated(
+            peer,
+            Credentials { pid: peer.pid as i32, uid: 0, gid: 0 },
+            carrier,
+            payloads,
+            managed,
+        )
+    }
+
+    pub fn prepare_authenticated(
+        &mut self,
+        peer: ProcessEpoch,
+        credentials: Credentials,
+        carrier: u128,
+        payloads: &[OwnedFd],
+        managed: &[(u64, u128)],
+    ) -> Result<Prepared, ProfileError> {
+        if !credentials.valid()
+            || payloads.len() > MAX_PAYLOADS
+            || managed.len() > payloads.len()
+        {
             return Err(failed("invalid full native payload count"));
         }
         let carrier = self
@@ -109,7 +134,12 @@ impl Owner {
                 manifest.push((*ordinal, id));
                 raw_manifest.push((*ordinal, id.get()));
             }
-            let response = super::wire::encode_prepared(key, payloads.len(), &raw_manifest)?;
+            let response = super::wire::encode_prepared_authenticated(
+                key,
+                payloads.len(),
+                &raw_manifest,
+                credentials,
+            )?;
             let metadata = super::metadata::create(&response)?;
             self.leases.arm_enqueued(send, key).map_err(failed)?;
             Ok((response, metadata))
@@ -134,14 +164,16 @@ impl Owner {
                 send,
                 count: payloads.len(),
                 managed: manifest,
-                receiver: None,
-                settled: None,
+            receiver: None,
+            settled: None,
+            credentials,
             },
         );
         Ok(Prepared {
             response,
             metadata,
             transfer,
+            credentials,
         })
     }
 
@@ -154,6 +186,19 @@ impl Owner {
         received: &[(u64, u128)],
         publish: &[u64],
     ) -> Result<Vec<(u64, ClaimedDelivery)>, ProfileError> {
+        self.admit_authoritative(peer, carrier, key, count, received, publish)
+            .map(|(_, claims)| claims)
+    }
+
+    pub fn admit_authoritative(
+        &mut self,
+        peer: ProcessEpoch,
+        carrier: u128,
+        key: TransferKey,
+        count: usize,
+        received: &[(u64, u128)],
+        publish: &[u64],
+    ) -> Result<(Credentials, Vec<(u64, ClaimedDelivery)>), ProfileError> {
         let carrier = self
             .registry
             .authenticated_holder_id(peer, self.registry.authority(), carrier)
@@ -211,7 +256,8 @@ impl Owner {
             .get_mut(&key)
             .expect("validated ledger")
             .receiver = Some(peer);
-        Ok(result)
+        let credentials = self.ledger.get(&key).expect("validated ledger").credentials;
+        Ok((credentials, result))
     }
 
     pub fn settle(
@@ -252,6 +298,8 @@ impl Owner {
         let source = self.registry.source_died(peer);
         let receiver = self.registry.receiver_died(peer);
         let leases = self.leases.sender_died(peer);
+        self.binder_deliveries
+            .retain(|_, ledger| ledger.receiver != Some(peer));
         for ledger in self.ledger.values_mut() {
             if ledger.receiver == Some(peer) {
                 ledger.settled = Some(DeliveryDisposition::Aborted);

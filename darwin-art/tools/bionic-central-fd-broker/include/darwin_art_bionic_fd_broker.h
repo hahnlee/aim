@@ -11,6 +11,13 @@ typedef struct DarwinArtFdBroker DarwinArtFdBroker;
 typedef uint64_t DarwinArtFdOwnerHandle;
 typedef struct DarwinArtFdDescriptionPin DarwinArtFdDescriptionPin;
 
+typedef struct DarwinArtFdPublishBatchEntryV1 {
+  DarwinArtFdOwnerHandle owner;
+  uint64_t object;
+  int32_t status_flags;
+  int32_t descriptor_flags;
+} DarwinArtFdPublishBatchEntryV1;
+
 typedef enum DarwinArtFdKind {
   DARWIN_ART_FD_FS_FILE = 1,
   DARWIN_ART_FD_FS_RANDOM = 2,
@@ -169,6 +176,8 @@ enum {
   DARWIN_ART_FD_OWNER_ABI_V6 = 6,
   DARWIN_ART_FD_OWNER_ABI_V7 = 7,
   DARWIN_ART_FD_DESCRIPTION_SNAPSHOT_ABI_V1 = 1,
+  DARWIN_ART_FD_PUBLISH_BATCH_ABI_V1 = 1,
+  DARWIN_ART_FD_BROKER_MAX_PUBLISH_BATCH = 16,
   DARWIN_ART_FD_SOCKET_REQUEST_ABI_V1 = 1,
   DARWIN_ART_FD_SOCKET_ACCEPT_RESULT_ABI_V1 = 1,
   DARWIN_ART_FD_CLOEXEC = 1,
@@ -202,6 +211,18 @@ darwin_art_fd_broker_publish(DarwinArtFdBroker *broker,
 DarwinArtFdBrokerStatus darwin_art_fd_broker_publish_with_flags(
     DarwinArtFdBroker *broker, DarwinArtFdOwnerHandle owner, uint64_t object,
     int status_flags, int descriptor_flags, int *guest_fd);
+// Publishes all entries as one namespace transaction. On failure no entry is
+// installed and |guest_fds| is left untouched; opaque objects remain owned by
+// their callers. The bounded count keeps the reservation transaction local.
+DarwinArtFdBrokerStatus darwin_art_fd_broker_publish_batch_with_flags(
+    DarwinArtFdBroker *broker, const DarwinArtFdPublishBatchEntryV1 *entries,
+    size_t count, int *guest_fds);
+// Convenience form for the common socketpair case. It has the same
+// all-or-none and caller-owned-object failure contract as the batch API.
+DarwinArtFdBrokerStatus darwin_art_fd_broker_publish_pair_with_flags(
+    DarwinArtFdBroker *broker, DarwinArtFdOwnerHandle owner,
+    const uint64_t objects[2], const int status_flags[2],
+    const int descriptor_flags[2], int guest_fds[2]);
 DarwinArtFdBrokerStatus darwin_art_fd_broker_dup(DarwinArtFdBroker *broker,
                                                  int old_fd, int *new_fd);
 DarwinArtFdBrokerStatus darwin_art_fd_broker_dup2(DarwinArtFdBroker *broker,

@@ -19,10 +19,17 @@ UNUSED_BOUNDARY(int, AHardwareBuffer_allocate,
                 (const AHardwareBuffer_Desc*, AHardwareBuffer**))
 UNUSED_BOUNDARY(void, AHardwareBuffer_acquire, (AHardwareBuffer*))
 UNUSED_BOUNDARY(void, AHardwareBuffer_release, (AHardwareBuffer*))
+UNUSED_BOUNDARY(void, AHardwareBuffer_describe,
+                (const AHardwareBuffer*, AHardwareBuffer_Desc*))
+UNUSED_BOUNDARY(int, AHardwareBuffer_lock,
+                (AHardwareBuffer*, uint64_t, int32_t, const ARect*, void**))
+UNUSED_BOUNDARY(int, AHardwareBuffer_unlock, (AHardwareBuffer*, int32_t*))
 UNUSED_BOUNDARY(void*, darwin_art_android_hardware_buffer_native_window_buffer,
                 (AHardwareBuffer*))
 UNUSED_BOUNDARY(AHardwareBuffer*, darwin_art_android_hardware_buffer_from_client_buffer,
                 (void*))
+UNUSED_BOUNDARY(void, darwin_art_android_hardware_buffer_mark_cpu_rgba,
+                (AHardwareBuffer*))
 UNUSED_BOUNDARY(void, ASurfaceControl_acquire, (ASurfaceControl*))
 UNUSED_BOUNDARY(void, ASurfaceControl_release, (ASurfaceControl*))
 UNUSED_BOUNDARY(void*, darwin_art_android_surface_control_create_root, (const char*))

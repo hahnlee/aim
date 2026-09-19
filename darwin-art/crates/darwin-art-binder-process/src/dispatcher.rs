@@ -68,7 +68,21 @@ impl<T: AuthorityTransport> Dispatcher<T> {
                     .transport
                     .take_transfer(sender, transfer)
                     .map_err(|error| Error::Transport(error.0))?;
+                let mut receipt = image
+                    .files()
+                    .iter()
+                    .any(|file| !file.metadata().is_empty())
+                    .then(|| {
+                        crate::transfer_receipts::Receiver::new(
+                            self.state.transport.as_ref(),
+                            sender,
+                            transfer,
+                        )
+                    });
                 let files = self.install_received_fds(&mut image, sender, transfer)?;
+                if let Some(receipt) = &mut receipt {
+                    receipt.finish()?;
+                }
                 self.state
                     .device
                     .deliver_remote_transaction_with_fds(
@@ -108,7 +122,21 @@ impl<T: AuthorityTransport> Dispatcher<T> {
                     .transport
                     .take_transfer(source, transfer)
                     .map_err(|error| Error::Transport(error.0))?;
+                let mut receipt = image
+                    .files()
+                    .iter()
+                    .any(|file| !file.metadata().is_empty())
+                    .then(|| {
+                        crate::transfer_receipts::Receiver::new(
+                            self.state.transport.as_ref(),
+                            source,
+                            transfer,
+                        )
+                    });
                 let files = self.install_received_fds(&mut image, source, transfer)?;
+                if let Some(receipt) = &mut receipt {
+                    receipt.finish()?;
+                }
                 if env::var_os("DARWIN_ART_DEBUG_BINDER").is_some() {
                     let status = image
                         .data()

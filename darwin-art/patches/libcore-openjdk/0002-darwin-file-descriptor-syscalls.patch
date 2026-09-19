@@ -22,7 +22,7 @@
 +extern int darwin_art_bionic_fs_owns_fd_core(int fd)
 +    __attribute__((weak_import));
 +extern int darwin_art_bionic_fsync(int fd) __attribute__((weak_import));
-+extern int darwin_art_bionic_fd_export_for_scm(int fd)
++extern int darwin_art_bionic_fd_dup_host_fd_core(int fd, int* native_fd)
 +    __attribute__((weak_import));
 +#endif
 +
@@ -37,12 +37,12 @@
 +#if defined(__APPLE__)
 +    const int debug = getenv("DARWIN_ART_DEBUG_LIBCORE_IO") != NULL;
 +    if ((((unsigned int)fd) & 0x40000000u) != 0) {
-+        if (darwin_art_bionic_fd_export_for_scm == NULL) {
++        if (darwin_art_bionic_fd_dup_host_fd_core == NULL) {
 +            if (debug) fprintf(stderr, "DARWIN FileDescriptor.sync broker fd=%d unavailable\n", fd);
 +            return -1;
 +        }
-+        int host_fd = darwin_art_bionic_fd_export_for_scm(fd);
-+        if (host_fd < 0) {
++        int host_fd = -1;
++        if (darwin_art_bionic_fd_dup_host_fd_core(fd, &host_fd) < 1) {
 +            if (debug) fprintf(stderr, "DARWIN FileDescriptor.sync broker fd=%d export failed errno=%d\n", fd, errno);
 +            return -1;
 +        }
@@ -105,8 +105,8 @@
 +        (darwin_art_bionic_fs_owns_fd_core != NULL &&
 +         darwin_art_bionic_fs_owns_fd_core(fd) != 0);
 +    if (is_virtual) {
-+        if (darwin_art_bionic_fd_export_for_scm == NULL) return JNI_FALSE;
-+        host_fd = darwin_art_bionic_fd_export_for_scm(fd);
++        if (darwin_art_bionic_fd_dup_host_fd_core == NULL) return JNI_FALSE;
++        if (darwin_art_bionic_fd_dup_host_fd_core(fd, &host_fd) < 1) return JNI_FALSE;
 +        if (host_fd < 0) return JNI_FALSE;
 +    }
 +    int flags = TEMP_FAILURE_RETRY(fcntl(host_fd, F_GETFL));

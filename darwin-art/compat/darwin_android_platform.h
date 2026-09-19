@@ -49,6 +49,10 @@ extern "C" int darwin_art_android_platform_remove_fd(void* looper, int fd);
 // processes and re-adopts the received descriptor into the local provider.
 extern "C" int darwin_art_android_shared_memory_get_info(
     int fd, size_t* size, int* protection);
+// Guest metadata resolves FS-owned descriptors; native get_info above does
+// not consult the guest namespace and is used only before native adoption.
+extern "C" int darwin_art_android_shared_memory_get_guest_info(
+    int fd, size_t* size, int* protection);
 extern "C" int darwin_art_android_shared_memory_adopt(
     int fd, size_t size, int protection);
 

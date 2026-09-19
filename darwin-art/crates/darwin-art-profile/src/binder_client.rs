@@ -1,7 +1,7 @@
 //! Process-local client for the profile-wide Binder routing authority.
 //! Transaction payload ownership belongs to the Binder endpoint, not here.
 
-use crate::{protocol, ProfileError};
+use crate::{ProfileError, protocol};
 use darwin_art_binder_device::{
     authority_protocol::{self, ConnectionToken, Message, TransferToken},
     transfer_image::TransferImage,
@@ -34,7 +34,10 @@ impl BinderAuthorityConnection {
         token: TransferToken,
         image: &TransferImage,
     ) -> Result<(), ProfileError> {
-        let mut stream = UnixStream::connect(&self.socket)?;
+        let mut stream = crate::unix_connect::connect_with_timeout(
+            &self.socket,
+            std::time::Duration::from_secs(5),
+        )?;
         protocol::write_request(
             &mut stream,
             protocol::OP_BINDER_TRANSFER_DEPOSIT,
@@ -58,13 +61,58 @@ impl BinderAuthorityConnection {
         source: ConnectionToken,
         token: TransferToken,
     ) -> Result<TransferImage, ProfileError> {
-        let mut stream = UnixStream::connect(&self.socket)?;
+        let mut stream = crate::unix_connect::connect_with_timeout(
+            &self.socket,
+            std::time::Duration::from_secs(5),
+        )?;
         let mut key = [0_u8; 16];
         key[..8].copy_from_slice(&source.get().to_le_bytes());
         key[8..].copy_from_slice(&token.get().to_le_bytes());
         protocol::write_request(&mut stream, protocol::OP_BINDER_TRANSFER_TAKE, &key)?;
-        let payload = protocol::expect_ok(&mut stream, protocol::OP_BINDER_TRANSFER_TAKE)?;
-        crate::host_fd_delivery::transport::receive(&mut stream, &payload)
+        let result = (|| {
+            let payload = protocol::expect_ok(&mut stream, protocol::OP_BINDER_TRANSFER_TAKE)?;
+            crate::host_fd_delivery::transport::receive(&mut stream, &payload)
+        })();
+        if result.is_err() {
+            if let Err(error) = self.settle_received_transfer(source, token, false) {
+                eprintln!("Binder failed TAKE capability cleanup: {error}");
+            }
+        }
+        result
+    }
+
+    pub fn cancel_unrouted_transfer(&self, token: TransferToken) -> Result<(), ProfileError> {
+        self.transfer_control(
+            protocol::OP_BINDER_TRANSFER_CANCEL,
+            &token.get().to_le_bytes(),
+        )
+    }
+    pub fn settle_received_transfer(
+        &self,
+        source: ConnectionToken,
+        token: TransferToken,
+        finished: bool,
+    ) -> Result<(), ProfileError> {
+        let mut body = [0; 17];
+        body[..8].copy_from_slice(&source.get().to_le_bytes());
+        body[8..16].copy_from_slice(&token.get().to_le_bytes());
+        body[16] = if finished { 1 } else { 2 };
+        self.transfer_control(protocol::OP_BINDER_TRANSFER_SETTLE, &body)
+    }
+    fn transfer_control(&self, operation: u16, body: &[u8]) -> Result<(), ProfileError> {
+        let mut stream = crate::unix_connect::connect_with_timeout(
+            &self.socket,
+            std::time::Duration::from_secs(5),
+        )?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+        protocol::write_request(&mut stream, operation, body)?;
+        if !protocol::expect_ok(&mut stream, operation)?.is_empty() {
+            return Err(ProfileError::Daemon(
+                "Binder transfer control returned trailing payload".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Calls from multiple binder_thread writers are serialized into complete
@@ -130,7 +178,8 @@ pub fn connect_binder_authority_at(
             "Binder authority socket must be absolute".into(),
         ));
     }
-    let mut stream = UnixStream::connect(socket)?;
+    let mut stream =
+        crate::unix_connect::connect_with_timeout(socket, std::time::Duration::from_secs(5))?;
     protocol::write_request(&mut stream, protocol::OP_BINDER_SESSION, b"")?;
     let response = protocol::expect_ok(&mut stream, protocol::OP_BINDER_SESSION)?;
     if !response.is_empty() {
@@ -241,11 +290,13 @@ mod tests {
             reader: Mutex::new(first.try_clone().unwrap()),
             writer: Mutex::new(first),
         };
-        assert!(connection
-            .send(Message::ConnectionOpened {
-                connection: ConnectionToken::from_nonzero(1).unwrap(),
-                android_uid: 10_001,
-            })
-            .is_err());
+        assert!(
+            connection
+                .send(Message::ConnectionOpened {
+                    connection: ConnectionToken::from_nonzero(1).unwrap(),
+                    android_uid: 10_001,
+                })
+                .is_err()
+        );
     }
 }

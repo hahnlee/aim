@@ -24,6 +24,8 @@ std::uint32_t TerminateHostDisplay(void* display);
 
 extern "C" void* darwin_art_angle_dso_symbol(const char* soname,
                                               const char* symbol);
+extern "C" void darwin_art_android_egl_bind_direct_image_texture(
+    std::uint32_t target, void* image);
 
 // Receives generic SurfaceView window geometry from the framework bridge.
 // This is intentionally independent of any APK class.
@@ -36,10 +38,52 @@ jint DarwinAngleHostSurfaceHeight();
 
 struct AHardwareBuffer;
 
+// A transported SurfaceTexture producer uses its Browser-owned BufferQueue.
+// The client owns this transport context; the native-window facade owns one
+// context reference and calls release exactly once after its last operation.
+struct DarwinArtRemoteNativeWindowHooks {
+  void* context = nullptr;
+  void (*release)(void*) = nullptr;
+  int (*dequeue)(void*, AHardwareBuffer**, void**, int*) = nullptr;
+  int (*queue)(void*, void*, int, int32_t) = nullptr;
+  int (*cancel)(void*, void*, int) = nullptr;
+  int (*prepare)(void*, int32_t, int32_t) = nullptr;
+  int (*set_present_mode)(void*, int32_t) = nullptr;
+  uint64_t (*next_frame)(void*) = nullptr;
+};
+
+struct DarwinArtRemoteOwnerDequeue {
+  AHardwareBuffer* buffer = nullptr;  // +1 caller-owned reference
+  void* native_buffer = nullptr;      // borrowed queue slot identity
+  int acquire_fence = -1;             // caller-owned descriptor
+  int32_t slot = -1;
+  uint64_t generation = 0;
+  uint64_t lease = 0;
+};
+
+enum {
+  DARWIN_ART_ANDROID_PRESENT_MODE_MAILBOX = 1,
+  DARWIN_ART_ANDROID_PRESENT_MODE_FIFO = 2,
+};
+
 extern "C" {
 void* darwin_art_android_ANativeWindow_fromSurface(void* env, void* surface);
 void* darwin_art_android_ANativeWindow_create(int32_t width, int32_t height,
                                                int32_t format);
+void* darwin_art_android_ANativeWindow_create_remote(
+    int32_t width, int32_t height, int32_t format,
+    DarwinArtRemoteNativeWindowHooks hooks);
+int darwin_art_android_ANativeWindow_remote_owner_dequeue(
+    void* window, DarwinArtRemoteOwnerDequeue* out);
+int darwin_art_android_ANativeWindow_remote_owner_queue(
+    void* window, int32_t slot, uint64_t generation, uint64_t lease,
+    void* native_buffer, int fence, int32_t dataspace);
+int darwin_art_android_ANativeWindow_remote_owner_cancel(
+    void* window, int32_t slot, uint64_t generation, uint64_t lease,
+    int fence);
+int darwin_art_android_ANativeWindow_remote_owner_quarantine(
+    void* window, int32_t slot, uint64_t generation, uint64_t lease,
+    int fence);
 void darwin_art_android_ANativeWindow_acquire(void* window);
 int32_t darwin_art_android_ANativeWindow_getFormat(void* window);
 int32_t darwin_art_android_ANativeWindow_getWidth(void* window);
@@ -47,11 +91,15 @@ int32_t darwin_art_android_ANativeWindow_getHeight(void* window);
 void* darwin_art_android_ANativeWindow_toSurface(void* env, void* window);
 void darwin_art_android_ANativeWindow_release(void* window);
 using DarwinArtAndroidNativeWindowQueueCallback = void (*)(
-    void* context, AHardwareBuffer* buffer, int32_t slot, int fence,
-    int32_t dataspace);
+    void* context, AHardwareBuffer* buffer, int32_t slot, uint64_t generation,
+    uint64_t frame, int fence, int32_t dataspace);
 void darwin_art_android_ANativeWindow_set_queue_callback(
     void* window, DarwinArtAndroidNativeWindowQueueCallback callback,
     void* context);
+// Retains consumer routing after callback retirement so late producer queues
+// return their slot instead of falling through to a display root.
+void darwin_art_android_ANativeWindow_set_consumer_bound(void* window,
+                                                         bool consumer_bound);
 // Installs an owned consumer callback. Replacement/unregistration stops new
 // captures without waiting; already captured observers retain their context.
 // release_context runs after the last capture retires, outside the producer
@@ -61,6 +109,15 @@ void darwin_art_android_ANativeWindow_set_queue_callback(
 bool darwin_art_android_ANativeWindow_set_owned_queue_callback(
     void* window, DarwinArtAndroidNativeWindowQueueCallback callback,
     void* context, void (*release_context)(void*));
+bool darwin_art_android_ANativeWindow_has_queue_callback(void* window);
+bool darwin_art_android_ANativeWindow_is_consumer_bound(void* window);
+// MAILBOX is available only when this producer is attached to a live
+// SurfaceTexture consumer. The mode setter owns queue policy and rejects
+// MAILBOX when displaced slots cannot be returned to that consumer.
+bool darwin_art_android_ANativeWindow_supports_mailbox(void* window);
+int32_t darwin_art_android_ANativeWindow_set_present_mode(void* window,
+                                                           int32_t mode);
+int32_t darwin_art_android_ANativeWindow_get_present_mode(void* window);
 // BLAST receives the actual buffer transaction before it is applied. Returning
 // true transfers transaction ownership to the callback. Registration context
 // is owned only on success and released after replacement and in-flight calls.
@@ -72,9 +129,9 @@ bool darwin_art_android_ANativeWindow_set_transaction_callback(
 uint64_t darwin_art_android_ANativeWindow_next_frame_number(void* window);
 void darwin_art_android_ANativeWindow_release_consumer_slot(
     void* window, int32_t slot, int release_fence);
-// Generation/frame-validated return endpoint used by the SurfaceControl
-// fallback. The endpoint consumes fence and rejects stale identities without
-// touching a newer slot occupant.
+// Generation/frame-validated return endpoint used by SurfaceTexture and the
+// SurfaceControl fallback. The endpoint consumes fence and rejects stale
+// identities without touching a newer slot occupant.
 void darwin_art_android_ANativeWindow_release_consumer_frame(
     void* window, int32_t slot, uint64_t generation, uint64_t frame,
     int release_fence);
@@ -106,6 +163,8 @@ int32_t darwin_art_android_ANativeWindow_cancel_hardware_buffer(
 int32_t darwin_art_android_ANativeWindow_lock(void* window, void* buffer,
                                               void* dirty_bounds);
 int32_t darwin_art_android_ANativeWindow_unlockAndPost(void* window);
+// Cancels a software lock without publishing its pixels or notifying a consumer.
+int32_t darwin_art_android_ANativeWindow_cancel_locked_buffer(void* window);
 int32_t darwin_art_android_ANativeWindow_setBuffersGeometry(
     void* window, int32_t width, int32_t height, int32_t format);
 

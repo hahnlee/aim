@@ -44,6 +44,8 @@ int main() {
     NativeWindowDequeuedBuffer output;
     assert(queue.Dequeue(&output) == 0);
     assert(output.buffer->width == 72 && output.buffer->height == 128);
+    assert(output.lease.slot >= 0 && output.lease.generation == 1 &&
+           output.lease.lease != 0);
     assert(queue.Generation() == 1);
     assert(queue.UpdateGeometry(80, 160) == -EBUSY);
     assert(queue.Cancel(output.native_buffer, -1) == 0);
@@ -80,10 +82,13 @@ int main() {
     allocation_failure = -1;
     assert(queue.Dequeue(&a) == 0);
     assert(queue.Generation() == 1);
+    const NativeWindowDequeueLease a_lease = a.lease;
     assert(queue.PrepareGeometry(32, 32) == -EBUSY); // producer still dequeued
     NativeWindowQueuedBuffer first;
-    assert(queue.Queue(a.native_buffer, &first) == 0);
+    assert(queue.Queue(a_lease, a.native_buffer, &first) == 0);
     assert(first.buffer == a.buffer && first.token.frame == 1);
+    NativeWindowQueuedBuffer duplicate;
+    assert(queue.Queue(a_lease, a.native_buffer, &duplicate) == -EINVAL);
     assert(queue.NextFrame() == 2);
     assert(queue.PrepareGeometry(32, 32) == 0);
     assert(queue.Generation() != first.token.generation);
@@ -118,6 +123,53 @@ int main() {
     queue.Return(third.token, -1, false);
     assert(queue.Cancel(nullptr, 84) == -EINVAL);
     assert(closed_fences == ++closed);
+  }
+  assert(live_buffers == 0);
+  {
+    // Cancel transfers its fence into the slot's reuse dependency. A later
+    // dequeue cannot reuse that slot until the dependency is signalled.
+    signaled = false;
+    NativeWindowBufferQueue queue(16, 16);
+    NativeWindowDequeuedBuffer first;
+    assert(queue.Dequeue(&first) == 0);
+    const int closed_before_cancel = closed_fences;
+    assert(queue.Cancel(first.lease, 201) == 0);
+    assert(closed_fences == closed_before_cancel);
+    assert(queue.Cancel(first.lease, 204) == -EINVAL);
+    assert(closed_fences == closed_before_cancel + 1);
+    NativeWindowDequeuedBuffer second;
+    assert(queue.Dequeue(&second) == 0);
+    assert(queue.Cancel(second.lease, 202) == 0);
+    NativeWindowDequeuedBuffer third;
+    assert(queue.Dequeue(&third) == 0);
+    assert(queue.Cancel(third.lease, 203) == 0);
+    assert(queue.Dequeue(&first) == -EBUSY);
+    signaled = true;
+    assert(queue.Dequeue(&first) == 0);
+    assert(queue.Cancel(first.lease, -1) == 0);
+  }
+  assert(live_buffers == 0);
+  {
+    // A remote producer may die after importing a dequeued buffer. Unknown
+    // completion cannot become a reusable slot, even with no fence supplied.
+    signaled = true;
+    NativeWindowBufferQueue queue(16, 16);
+    NativeWindowDequeuedBuffer exposed;
+    assert(queue.Dequeue(&exposed) == 0);
+    void* quarantined_buffer = exposed.native_buffer;
+    assert(queue.Quarantine(exposed.lease, -1) == 0);
+    assert(queue.Cancel(exposed.lease, -1) == -EINVAL);
+    NativeWindowQueuedBuffer stale;
+    assert(queue.Queue(exposed.lease, quarantined_buffer, &stale) == -EINVAL);
+    assert(live_buffers == 3);
+    assert(queue.PrepareGeometry(16, 16) == 0);
+    assert(live_buffers == 4);  // quarantined old storage + fresh pool
+    for (int index = 0; index < 3; ++index) {
+      NativeWindowDequeuedBuffer fresh;
+      assert(queue.Dequeue(&fresh) == 0);
+      assert(fresh.native_buffer != quarantined_buffer);
+      assert(queue.Cancel(fresh.lease, -1) == 0);
+    }
   }
   assert(live_buffers == 0);
   std::puts("native-window buffer queue: partial allocation/resize/exact return/fences/leases PASS");

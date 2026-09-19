@@ -9,6 +9,7 @@ probe="$build/skia-metal-gpu-smoke"
 shadow_skia="$build/source"
 coretext_patch="$root/patches/skia/0001-darwin-hwui-disable-coretext-utils.patch"
 cross_tu_abi_patch="$root/patches/skia/0002-darwin-hwui-export-cross-tu-abi.patch"
+ahb_gl_patch="$root/patches/skia/0003-darwin-ahb-gl-texture-2d.patch"
 freetype_archive="$root/_build/graphics-codecs/libft2-darwin.a"
 png_archive="$root/_build/graphics-codecs/libpng-darwin.a"
 zlib_archive="$root/_build/graphics-codecs/libz-darwin.a"
@@ -29,7 +30,7 @@ fail() { echo "skia-metal-gpu: $1" >&2; exit 2; }
   fail "missing pinned GN/Ninja"
 for input in "$coretext_patch" "$freetype_archive" "$png_archive" \
              "$zlib_archive" "$jpeg_archive" "$liblog_archive" \
-             "$libcutils_archive" "$cross_tu_abi_patch"; do
+             "$libcutils_archive" "$cross_tu_abi_patch" "$ahb_gl_patch"; do
   [[ -f "$input" ]] || fail "missing pinned input $input"
 done
 [[ "$(shasum -a 256 "$cross_tu_abi_patch" | awk '{print $1}')" == \
@@ -116,12 +117,21 @@ android_gpu_sources=(
   src/gpu/ganesh/surface/SkSurface_AndroidFactories.cpp
 )
 android_gpu_dir="$build/android-gpu-objects"
+android_gpu_overlay="$build/android-gpu-source"
 mkdir -p "$android_gpu_dir"
+mkdir -p "$android_gpu_overlay/src/gpu/ganesh/gl"
+cp "$skia/src/gpu/ganesh/gl/AHardwareBufferGL.cpp" \
+  "$android_gpu_overlay/src/gpu/ganesh/gl/AHardwareBufferGL.cpp"
+patch -s -d "$android_gpu_overlay" -p1 < "$ahb_gl_patch"
 android_gpu_objects=()
 for source in "${android_gpu_sources[@]}"; do
+  source_path="$shadow_skia/$source"
+  if [[ "$source" == src/gpu/ganesh/gl/AHardwareBufferGL.cpp ]]; then
+    source_path="$android_gpu_overlay/$source"
+  fi
   object="$android_gpu_dir/${source//\//_}.o"
   command_file="$object.command"
-  source_sha="$(shasum -a 256 "$shadow_skia/$source" | awk '{print $1}')"
+  source_sha="$(shasum -a 256 "$source_path" | awk '{print $1}')"
   command=(
     clang++ -std=c++17 -O3 -DNDEBUG -arch arm64 -isysroot "$sdk"
     -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -fno-exceptions -fno-rtti
@@ -133,7 +143,7 @@ for source in "${android_gpu_sources[@]}"; do
     -I"$root/_aosp/frameworks/native/opengl/include"
     -I"$root/_aosp/frameworks/native/libs/arect/include"
     -I"$nativewindow_headers"
-    -c "$shadow_skia/$source" -o "$object"
+    -c "$source_path" -o "$object"
   )
   command_text="$(printf '%q ' "${command[@]}")"
   command_sha="$(printf '%s\n%s\n' "$source_sha" "$command_text" | shasum -a 256 | awk '{print $1}')"

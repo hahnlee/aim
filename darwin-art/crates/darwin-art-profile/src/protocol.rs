@@ -25,6 +25,9 @@ pub(crate) const OP_START_BOUND_SERVICE: u16 = 18;
 pub(crate) const OP_ACTIVATE_BOUND_SERVICE: u16 = 19;
 pub(crate) const OP_CANCEL_BOUND_SERVICE: u16 = 20;
 pub(crate) const OP_SCM_SERVICE: u16 = 21;
+pub(crate) const OP_BINDER_CAPABILITY: u16 = 22;
+pub(crate) const OP_BINDER_TRANSFER_CANCEL: u16 = 23;
+pub(crate) const OP_BINDER_TRANSFER_SETTLE: u16 = 24;
 pub(crate) const STATUS_NOT_FOUND: u32 = 2;
 pub(crate) const RESPONSE_BIT: u16 = 0x8000;
 

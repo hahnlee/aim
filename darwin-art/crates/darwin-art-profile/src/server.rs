@@ -27,7 +27,7 @@ pub struct DaemonConfig {
 struct State {
     binder: crate::binder_service::BinderService,
     fd_deliveries: Mutex<crate::host_fd_delivery::HostFdDeliveryOwner>,
-    scm: crate::scm_service::ScmService,
+    scm: Arc<crate::scm_service::ScmService>,
     filesystem: Mutex<ProfileFilesystem>,
     paths: ProfilePaths,
     registry: Mutex<PackageRegistry>,
@@ -84,10 +84,11 @@ pub fn run_daemon(config: DaemonConfig) -> Result<(), ProfileError> {
     let listener = UnixListener::bind(&config.paths.socket)?;
     fs::set_permissions(&config.paths.socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
+    let scm = Arc::new(crate::scm_service::ScmService::new()?);
     let state = Arc::new(State {
-        binder: Default::default(),
+        binder: crate::binder_service::BinderService::with_descriptor_authority(scm.clone()),
         fd_deliveries: crate::host_fd_delivery::transport::new_owner()?,
-        scm: crate::scm_service::ScmService::new()?,
+        scm,
         filesystem: Mutex::new(ProfileFilesystem::new(config.paths.clone())),
         paths: config.paths.clone(),
         registry: Mutex::new(PackageRegistry::new(&config.paths)),
@@ -433,19 +434,17 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
             )?;
             let mut child = crate::spawn_owned(&mut command)?;
             let pid = child.id();
-            let (incarnation, on_exit) = match register_child_with_uid_and_identity(
-                state, pid, &package, None,
-            ) {
-                Ok(registration) => registration,
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(error);
-                }
-            };
-            let waiter = crate::process_wait::ProcessWaitOwner::from_child(
-                child, incarnation, on_exit,
-            );
+            let (incarnation, on_exit) =
+                match register_child_with_uid_and_identity(state, pid, &package, None) {
+                    Ok(registration) => registration,
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(error);
+                    }
+                };
+            let waiter =
+                crate::process_wait::ProcessWaitOwner::from_child(child, incarnation, on_exit);
             if let Some(template) = application_template {
                 let mut launches = match state.application_launches.lock() {
                     Ok(launches) => launches,
@@ -576,16 +575,21 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
             let (source, token) = parse_transfer_key(&message.payload)?;
             let peer = binder_peer(state, &stream)?;
             match state.binder.prepare_take(peer, source, token) {
-                Ok(delivery) => {
+                Ok(mut delivery) => {
                     let destination = crate::host_fd_delivery::transport::destination(&stream)?;
                     let prepared = crate::host_fd_delivery::transport::prepare(
-                        &state.fd_deliveries, destination, delivery.into_descriptors(),
+                        &state.fd_deliveries,
+                        destination,
+                        delivery.take_descriptors(),
                     )?;
                     let offer = crate::host_fd_delivery::transport::offer(&prepared)?;
                     protocol::write_response(&mut stream, message.operation, 0, &offer)?;
                     crate::host_fd_delivery::transport::send_and_admit(
-                        &state.fd_deliveries, &mut stream, prepared,
+                        &state.fd_deliveries,
+                        &mut stream,
+                        prepared,
                     )?;
+                    delivery.native_admitted();
                 }
                 Err(error) => protocol::write_response(
                     &mut stream,
@@ -595,8 +599,63 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                 )?,
             }
         }
+        protocol::OP_BINDER_CAPABILITY => {
+            let peer = binder_peer(state, &stream)?;
+            return crate::binder_capability_service::serve(
+                &state.binder,
+                peer,
+                &mut stream,
+                &message.payload,
+            );
+        }
+        protocol::OP_BINDER_TRANSFER_CANCEL => {
+            let token = parse_transfer_token(&message.payload)?;
+            let peer = binder_peer(state, &stream)?;
+            let result = state.binder.cancel_unrouted_transfer(peer, token);
+            match result {
+                Ok(()) => protocol::write_response(&mut stream, message.operation, 0, b"")?,
+                Err(error) => protocol::write_response(
+                    &mut stream,
+                    message.operation,
+                    22,
+                    error.to_string().as_bytes(),
+                )?,
+            }
+        }
+        protocol::OP_BINDER_TRANSFER_SETTLE => {
+            if message.payload.len() != 17 {
+                return Err(ProfileError::Daemon(
+                    "invalid Binder transfer settlement length".into(),
+                ));
+            }
+            let (source, token) = parse_transfer_key(&message.payload[..16])?;
+            let outcome = match message.payload[16] {
+                1 => darwin_art_scm_transfer::capabilities::DeliveryDisposition::Finished,
+                2 => darwin_art_scm_transfer::capabilities::DeliveryDisposition::Aborted,
+                _ => {
+                    return Err(ProfileError::Daemon(
+                        "invalid Binder transfer disposition".into(),
+                    ));
+                }
+            };
+            let peer = binder_peer(state, &stream)?;
+            let result = state
+                .binder
+                .settle_received_transfer(peer, source, token, outcome);
+            match result {
+                Ok(()) => protocol::write_response(&mut stream, message.operation, 0, b"")?,
+                Err(error) => protocol::write_response(
+                    &mut stream,
+                    message.operation,
+                    22,
+                    error.to_string().as_bytes(),
+                )?,
+            }
+        }
         protocol::OP_SCM_SERVICE => {
-            return state.scm.serve(&state.processes, &mut stream, &message.payload);
+            return state
+                .scm
+                .serve(&state.processes, &mut stream, &message.payload);
         }
         _ => protocol::write_response(&mut stream, message.operation, 38, b"unknown operation")?,
     }
@@ -710,15 +769,18 @@ fn register_child_with_uid_and_identity(
     let lease = processes.acquire_with_uid(pid, package, incarnation, true, android_uid)?;
     state.leases.fetch_add(1, Ordering::SeqCst);
     let owner = Arc::clone(state);
-    Ok((incarnation, Box::new(move || {
-        let _gate = owner.lease_gate.lock().unwrap();
-        owner.processes.lock().unwrap().child_exited(lease);
-        if let Err(error) = owner.scm.process_died(pid, incarnation) {
-            eprintln!("Darwin ART daemon: {error}");
-        }
-        owner.leases.fetch_sub(1, Ordering::SeqCst);
-        *owner.last_activity.lock().unwrap() = Instant::now();
-    })))
+    Ok((
+        incarnation,
+        Box::new(move || {
+            let _gate = owner.lease_gate.lock().unwrap();
+            owner.processes.lock().unwrap().child_exited(lease);
+            if let Err(error) = owner.scm.process_died(pid, incarnation) {
+                eprintln!("Darwin ART daemon: {error}");
+            }
+            owner.leases.fetch_sub(1, Ordering::SeqCst);
+            *owner.last_activity.lock().unwrap() = Instant::now();
+        }),
+    ))
 }
 
 #[cfg(test)]

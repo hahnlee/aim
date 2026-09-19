@@ -368,6 +368,8 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg("-Wl,-exported_symbol,_darwin_art_binder_export_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_binder_export_retained_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_binder_release_export_lease")
+        .arg("-Wl,-exported_symbol,_darwin_art_binder_export_bound_file_descriptor")
+        .arg("-Wl,-exported_symbol,_darwin_art_binder_import_bound_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_binder_import_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_binder_close_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_provider_native_acquire")
@@ -451,11 +453,14 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         // RenderThread contain process-singleton state, and a second archive
         // edge would create a distinct pool that shutdown cannot join.
         .arg(root.join("_build/android-graphics-jni/libandroid-graphics-jni-darwin.a"))
-        // HWUI is an Android EGL/GLES client.  Keep its standard C ABI bound
-        // to the project-built ANGLE dylibs instead of manufacturing another
-        // static GL implementation in the compatibility archive.  Android-
-        // specific ANativeWindow/AHardwareBuffer behavior remains in the
-        // platform dispatch bridge linked below.
+        // HWUI's Skia backend calls Android AHardwareBuffer EGL extensions by
+        // direct relocation. Bind only those four entries to the same Android
+        // EGL dispatch used by guest DSOs; ordinary EGL/GLES stays in ANGLE.
+        // A direct object edge must precede libEGL because the bootstrap
+        // archive is demand-loaded after the graphics closure's relocations.
+        .arg(root.join(
+            "_build/runtime-graphics-bootstrap/objects/graphics_egl_ahb_direct_exports.cc.o",
+        ))
         .arg(root.join("_build/angle-source/out/DarwinArtRelease/libEGL.dylib"))
         .arg(root.join("_build/angle-source/out/DarwinArtRelease/libGLESv2.dylib"))
         // Keep OpenJDK JVMTI in the same ART image on Darwin. Its implementation

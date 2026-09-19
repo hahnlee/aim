@@ -8,7 +8,7 @@ diff --git a/runtime/native/dalvik_system_VMDebug.cc b/runtime/native/dalvik_sys
  #include <string.h>
  #include <unistd.h>
  
-@@ -62,6 +63,9 @@ extern "C" int darwin_art_bionic_fd_export_for_scm(int guest_fd);
+@@ -62,6 +63,9 @@ extern "C" int darwin_art_bionic_fd_dup_host_fd_core(int guest_fd, int* native_fd);
  
  namespace art HIDDEN {
  

@@ -6,6 +6,7 @@
 #include "darwin_art_elf_loader.h"
 #include "../../tests/fd-inheritance-fixture.h"
 #include "../../tests/binder-retained-provider-fixture.h"
+#include "../../tests/scm-pair-fixture.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -187,6 +188,15 @@ extern "C" int darwin_art_bionic_fs_adopt_host_fd_core(int host_fd) {
   return -1;
 }
 
+// This network fixture has no FS owner; reject file groups after consuming
+// native inputs. Actual FS group admission has separate production-owner tests.
+extern "C" int darwin_art_bionic_fs_adopt_group(
+    const DarwinArtFsOwnedDescriptor *entries, size_t count,
+    DarwinArtFsCommitGroup, void *, int *) {
+  for (size_t i = 0; i < count; ++i) if (entries[i].host_fd >= 0) (void)close(entries[i].host_fd);
+  return 9;
+}
+
 struct AndroidSelectTimevalSmoke {
   int64_t seconds;
   int64_t microseconds;
@@ -208,6 +218,8 @@ extern "C" int darwin_art_bionic_socket_broker_select(
 int main(int argc, char **argv) {
   Check(darwin_art::test::InstallNoSpawnFdFixture() == 0,
         "install explicit no-spawn fixture boundary");
+  darwin_art::test::ScmPairFixture pair_fixture;
+  Check(pair_fixture.Install() == 0, "install test-only pair provider");
   if (argc != 2)
     return 10;
   std::ifstream input(argv[1], std::ios::binary);
@@ -221,6 +233,39 @@ int main(int argc, char **argv) {
         "stale central token cannot fall through before activation");
   Check(darwin_art_bionic_socket_broker_activate() == 0,
         "activate socket broker owner");
+  // Real managed native datagram consumption, with only pair authority mocked.
+  int record_pair[2] = {-1, -1};
+  Check(darwin_art_bionic_socket_broker_socketpair(1, 2, 0, record_pair) == 0,
+        "create managed datagram pair");
+  int32_t managed_passcred = 1;
+  uint32_t managed_passcred_length = sizeof(managed_passcred);
+  Check(darwin_art_bionic_socket_broker_setsockopt(
+              record_pair[1], 1, 16, &managed_passcred,
+              sizeof(managed_passcred)) == 0 &&
+            darwin_art_bionic_socket_broker_getsockopt(
+                record_pair[1], 1, 16, &managed_passcred,
+                &managed_passcred_length) == 0 && managed_passcred == 1,
+        "enable managed SO_PASSCRED request marker");
+  const char record_byte = 'r';
+  char record_output = 0;
+  Check(darwin_art_bionic_socket_broker_send(record_pair[0], &record_byte, 1, 0) == 1 &&
+            darwin_art_bionic_socket_broker_read(record_pair[1], &record_output, 0) == 0 &&
+            darwin_art_bionic_socket_broker_recv(record_pair[1], &record_output, 0, 2) == -1 &&
+            darwin_art_bionic_socket_broker_recv(record_pair[1], &record_output, 1, 0) == 1 &&
+            record_output == record_byte,
+        "zero read and rejected zero peek preserve the datagram");
+  Check(darwin_art_bionic_socket_broker_send(record_pair[0], &record_byte, 1, 0) == 1 &&
+            darwin_art_bionic_socket_broker_recv(record_pair[1], &record_output, 0, 0) == 0 &&
+            darwin_art_bionic_socket_broker_recv(record_pair[1], &record_output, 1, 0x40) == -1,
+        "zero recv consumes one datagram");
+  Check(darwin_art_bionic_socket_broker_send(record_pair[0], &record_byte, 1, 0) == 1 &&
+            darwin_art_bionic_socket_broker_recvfrom(record_pair[1], &record_output, 0, 0, nullptr, nullptr) == 0 &&
+            darwin_art_bionic_socket_broker_recv(record_pair[1], &record_output, 1, 0x40) == -1,
+        "zero recvfrom consumes one datagram");
+  Check(darwin_art_bionic_socket_broker_close(record_pair[0]) == 0 &&
+            darwin_art_bionic_socket_broker_close(record_pair[1]) == 0,
+        "close managed datagram pair");
+
   DarwinArtFdOwnerV1 binder_callbacks{};
   binder_callbacks.abi_version = DARWIN_ART_FD_OWNER_ABI_V7;
   binder_callbacks.struct_size = sizeof(binder_callbacks);
@@ -482,6 +527,23 @@ int main(int argc, char **argv) {
         "close non-socket sendmmsg descriptors");
   const int timeout_socket = darwin_art_bionic_socket_broker_socket(2, 1, 0);
   Check(timeout_socket >= 0, "create timeout option socket");
+  // Unmanaged carriers have no authenticated SCM provider.  PASSCRED must be
+  // rejected at enable time, before a later recvmsg could consume a record
+  // without a daemon-authoritative identity.
+  constexpr int kAndroidSolSocket = 1;
+  constexpr int kAndroidSoPasscred = 16;
+  int32_t passcred = 1;
+  Check(darwin_art_bionic_socket_broker_setsockopt(
+              timeout_socket, kAndroidSolSocket, kAndroidSoPasscred, &passcred,
+              sizeof(passcred)) == -1 &&
+            darwin_art_bionic_errno_load() == 92,
+        "reject unmanaged SO_PASSCRED before receive");
+  uint32_t passcred_length = sizeof(passcred);
+  passcred = -1;
+  Check(darwin_art_bionic_socket_broker_getsockopt(
+              timeout_socket, kAndroidSolSocket, kAndroidSoPasscred, &passcred,
+              &passcred_length) == 0 && passcred == 0,
+        "unmanaged SO_PASSCRED remains disabled after rejection");
   for (int option : {20, 21}) {
     struct TimeoutValue { int64_t seconds; int64_t micros; };
     const TimeoutValue requested{1, 200000};
@@ -734,6 +796,9 @@ int main(int argc, char **argv) {
         "unload Android HTTP fixture");
   Check(darwin_art_bionic_socket_broker_deactivate() == 0,
         "deactivate quiescent socket owner");
+  Check(darwin_art_bionic_uninstall_scm_endpoint_provider() == 0 &&
+            pair_fixture.references.load() == 1,
+        "drain test-only pair provider");
   TestRetainedBinderProvider();
   Check(darwin_art_bionic_socket_broker_close(10001) == -1 &&
             g_filesystem_closes.load(std::memory_order_relaxed) == 3,

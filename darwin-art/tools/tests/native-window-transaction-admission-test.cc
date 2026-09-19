@@ -136,6 +136,23 @@ extern "C" void AHardwareBuffer_acquire(AHardwareBuffer* buffer) {
 extern "C" void AHardwareBuffer_release(AHardwareBuffer* buffer) {
   if (buffer != nullptr && --buffer->references == 0) delete buffer;
 }
+// Software Canvas mapping is outside this transaction admission fixture.
+// Keep its newly linked resource boundaries explicit and fail on unexpected use.
+extern "C" void AHardwareBuffer_describe(const AHardwareBuffer*,
+                                          AHardwareBuffer_Desc*) {
+  std::abort();
+}
+extern "C" int AHardwareBuffer_lock(AHardwareBuffer*, uint64_t, int32_t,
+                                     const ARect*, void**) {
+  std::abort();
+}
+extern "C" int AHardwareBuffer_unlock(AHardwareBuffer*, int32_t*) {
+  std::abort();
+}
+extern "C" void darwin_art_android_hardware_buffer_mark_cpu_rgba(
+    AHardwareBuffer*) {
+  std::abort();
+}
 extern "C" int AHardwareBuffer_allocate(const AHardwareBuffer_Desc* description,
                                           AHardwareBuffer** out) {
   if (description == nullptr || out == nullptr) return -22;
@@ -273,6 +290,34 @@ extern "C" bool darwin_art_android_surface_transaction_set_buffer_callbacks_chec
 
 int main() {
   {
+    // A SurfaceTexture parcel has producer geometry but no SurfaceControl.
+    // The remote Vulkan WSI must see that geometry without inventing a layer.
+    imported_surface_identity = 0x4441534600000041ll;
+    darwin_art_android_ANativeWindow_register_imported_surface_identity(
+        imported_surface_identity, 0, 0, 720, 1280, 1);
+    JNINativeInterface table{};
+    table.GetObjectClass = SurfaceGetObjectClass;
+    table.GetFieldID = SurfaceGetFieldID;
+    table.GetObjectField = SurfaceGetObjectField;
+    table.GetLongField = SurfaceGetLongField;
+    table.MonitorEnter = SurfaceMonitorEnter;
+    table.MonitorExit = SurfaceMonitorExit;
+    table.ExceptionCheck = SurfaceExceptionCheck;
+    table.DeleteLocalRef = SurfaceDeleteLocalRef;
+    JNIEnv env{&table};
+    void* imported = darwin_art_android_ANativeWindow_fromSurface(
+        &env, reinterpret_cast<void*>(0x64));
+    assert(imported != nullptr);
+    assert(darwin_art_android_ANativeWindow_getWidth(imported) == 720);
+    assert(darwin_art_android_ANativeWindow_getHeight(imported) == 1280);
+    uint32_t owner = 99;
+    uint32_t layer = 99;
+    assert(!darwin_art_android_ANativeWindow_get_imported_surface_identity(
+        imported, &owner, &layer));
+    assert(owner == 99 && layer == 99);
+    darwin_art_android_ANativeWindow_release(imported);
+  }
+  {
     // Surface parcel metadata is registered before the producer facade is
     // created.  The real fromSurface path must republish those dimensions
     // into the queue, then expose matching AHardwareBuffer dimensions on the
@@ -363,6 +408,12 @@ int main() {
     void* opaque = darwin_art_android_ANativeWindow_create(16, 16, 1);
     auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
     assert(window);
+    // A plain SurfaceControl producer has no consumer callback capable of
+    // returning displaced frames, so MAILBOX must remain unavailable.
+    assert(!darwin_art_android_ANativeWindow_supports_mailbox(opaque));
+    assert(darwin_art_android_ANativeWindow_set_present_mode(
+               opaque, DARWIN_ART_ANDROID_PRESENT_MODE_MAILBOX) ==
+           -ENOTSUP);
     AndroidNativeWindowBufferAbi output{};
     g_fail_next_allocation = true;
     assert(darwin_art_android_ANativeWindow_lock(opaque, &output, nullptr) ==

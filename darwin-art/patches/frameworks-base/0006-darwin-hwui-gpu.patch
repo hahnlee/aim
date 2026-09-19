@@ -177,3 +177,20 @@ diff --git a/AutoBackendTextureRelease.cpp b/AutoBackendTextureRelease.cpp
      }
 +#endif
  }
+diff --git a/pipeline/skia/SkiaRecordingCanvas.cpp b/pipeline/skia/SkiaRecordingCanvas.cpp
+--- a/pipeline/skia/SkiaRecordingCanvas.cpp
++++ b/pipeline/skia/SkiaRecordingCanvas.cpp
+@@ -33 +33 @@
+-#ifdef __ANDROID__ // Layoutlib does not support Layers
++#if defined(__ANDROID__) || defined(__APPLE__) // Layoutlib does not support Layers
+@@ -154 +154 @@ void SkiaRecordingCanvas::drawLayer(uirenderer::DeferredLayerUpdater* layerUpdater) {
+-#ifdef __ANDROID__ // Layoutlib does not support Layers
++#if defined(__ANDROID__) || defined(__APPLE__) // Layoutlib does not support Layers
+diff --git a/pipeline/skia/LayerDrawable.cpp b/pipeline/skia/LayerDrawable.cpp
+--- a/pipeline/skia/LayerDrawable.cpp
++++ b/pipeline/skia/LayerDrawable.cpp
+@@ -21 +21,3 @@
+-#include <shaders/shaders.h>
++#if !defined(__APPLE__)
++#include <shaders/shaders.h>
++#endif

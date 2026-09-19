@@ -14,6 +14,10 @@
 #include "fd_inheritance.h"
 #include "retained_scm_export.h"
 #include "scm_endpoint_lease.h"
+#include "socket_endpoint_exports.h"
+#include "scm_channel.h"
+#include "scm_guest_group.h"
+#include "scm_android_receive.h"
 
 namespace native_fd = darwin_art::bionic::fd_inheritance;
 
@@ -202,6 +206,15 @@ struct HostFdObject {
   std::atomic<uint32_t> debug_poll_logs{0};
 };
 
+// All data sent by a managed socket goes through the authenticated SCM
+// envelope, including plain write()/send() and zero-length records.  The
+// helper is declared with the HostFdObject owner so socket callbacks never
+// need to manufacture a carrier export or consult a guest descriptor.
+ssize_t ManagedSendVectors(HostFdObject *socket, const iovec *vectors,
+                           size_t vector_count, int flags,
+                           const sockaddr *name = nullptr,
+                           socklen_t name_length = 0);
+
 constexpr uint32_t kSocketDebugReadEagainLogLimit = 128;
 constexpr uint32_t kSocketDebugPollLogLimit = 128;
 constexpr uint32_t kSocketDebugSelectLogLimit = 256;
@@ -302,12 +315,6 @@ struct AndroidCmsghdr {
   int32_t type;
 };
 
-struct AndroidUcred {
-  int32_t process_id;
-  uint32_t user_id;
-  uint32_t group_id;
-};
-
 // Android's timeval is two 64-bit fields. Darwin's tv_usec is a signed
 // 32-bit field, so socket-option conversion must be field-wise rather than a
 // raw 16-byte copy.
@@ -317,8 +324,6 @@ struct AndroidTimeval {
 };
 
 static_assert(sizeof(AndroidTimeval) == 16);
-
-static_assert(sizeof(AndroidUcred) == 12);
 
 // Linux UAPI tcp_info as exposed by Android's API-35 arm64 headers. Keep the
 // byte layout independent from Darwin's unrelated tcp_connection_info type.
@@ -607,7 +612,7 @@ bool TranslateFlags(int android, int *host) {
   constexpr int kKnown = kAndroidMsgOob | kAndroidMsgPeek |
                          kAndroidMsgDontRoute | kAndroidMsgDontWait |
                          kAndroidMsgEor | kAndroidMsgWaitAll |
-                         kAndroidMsgNoSignal;
+                         kAndroidMsgNoSignal | 0x40000000; // MSG_CMSG_CLOEXEC
   if ((android & ~kKnown) != 0)
     return false;
   int value = 0;
@@ -754,6 +759,49 @@ bool TranslateOption(int android_level, int android_option, int *host_level,
   return false;
 }
 
+ssize_t ManagedReadDiscard(HostFdObject *socket, const iovec *vectors,
+                           size_t vector_count, int flags, bool read_zero_no_consume = false,
+                           void *name = nullptr,
+                           socklen_t *name_length = nullptr) {
+  using namespace darwin_art::bionic::scm;
+  bool has_bytes = false;
+  for (size_t i = 0; i < vector_count; ++i) has_bytes |= vectors[i].iov_len != 0;
+  if ((flags & MSG_PEEK) != 0) { errno = EOPNOTSUPP; return -1; }
+  if (!has_bytes && read_zero_no_consume) return 0;
+  SCMChannel channel(socket->scm_endpoint, socket->fd);
+  ReceiveResult received;
+  const NativeMessage message{vectors, vector_count, name,
+                              name_length != nullptr ? *name_length : 0, flags};
+  ReceiveOptions options{};
+  options.flags = flags;
+  if (channel.Receive(message, options, &received) != 0) return -1;
+  if (name_length != nullptr) *name_length = received.name_length();
+  if (received.private_envelope()) {
+    if (received.Admit(nullptr, 0) != 0 || received.Finish() != 0) return -1;
+    for (size_t i = 0; i < received.payload_count(); ++i)
+      if (!received.DiscardPayloadFd(i)) return -1;
+    if (!received.Commit()) return -1;
+  }
+  return received.bytes();
+}
+
+ssize_t ManagedSendVectors(HostFdObject *socket, const iovec *vectors,
+                           size_t vector_count, int flags,
+                           const sockaddr *name, socklen_t name_length) {
+  if (socket == nullptr || !socket->scm_endpoint.installed() ||
+      (vector_count != 0 && vectors == nullptr)) {
+    errno = EINVAL;
+    return -1;
+  }
+  using namespace darwin_art::bionic::scm;
+  SCMChannel channel(socket->scm_endpoint, socket->fd);
+  const NativeMessage message{vectors, vector_count, name, name_length, flags};
+  ssize_t sent = -1;
+  if (channel.Send(message, nullptr, 0, nullptr, 0, &sent) != 0)
+    return -1;
+  return sent;
+}
+
 intptr_t OwnerRead(void *, uint64_t object, void *bytes, size_t count,
                    int *android_errno) {
   auto *socket = reinterpret_cast<HostFdObject *>(object);
@@ -762,7 +810,10 @@ intptr_t OwnerRead(void *, uint64_t object, void *bytes, size_t count,
                                      android_errno);
   const auto started = std::chrono::steady_clock::now();
   const int status_flags = fcntl(socket->fd, F_GETFL);
-  const ssize_t result = recv(socket->fd, bytes, count, 0);
+  const iovec vector{bytes, count};
+  const ssize_t result = socket->scm_endpoint.installed()
+      ? ManagedReadDiscard(socket, &vector, 1, 0, true)
+      : recv(socket->fd, bytes, count, 0);
   const int host_errno = result < 0 ? errno : 0;
   if (std::getenv("DARWIN_ART_DEBUG_SLOW_FRAME") != nullptr) {
     const auto elapsed_us =
@@ -797,7 +848,10 @@ intptr_t OwnerWrite(void *, uint64_t object, const void *bytes, size_t count,
   if (socket->event != nullptr)
     return darwin_art::eventfd::Write(socket->event, bytes, count,
                                       android_errno);
-  const ssize_t result = send(socket->fd, bytes, count, 0);
+  const iovec vector{const_cast<void *>(bytes), count};
+  const ssize_t result = socket->scm_endpoint.installed()
+      ? ManagedSendVectors(socket, &vector, 1, 0)
+      : send(socket->fd, bytes, count, 0);
   if (SocketDebugEnabled()) {
     uint32_t control = 0;
     if (count == sizeof(control))
@@ -1413,7 +1467,7 @@ int OwnerExportHostFd(void *, uint64_t object, int *host_fd,
     *android_errno = 9;
     return -1;
   }
-  const int duplicate = dup(descriptor->fd);
+  const int duplicate = fcntl(descriptor->fd, F_DUPFD_CLOEXEC, 0);
   if (duplicate < 0) {
     *android_errno = AndroidErrno(errno);
     return -1;
@@ -1570,8 +1624,11 @@ intptr_t OwnerSocketOperation(void *context, uint64_t object,
     return -1;
   }
   if (request->operation == DARWIN_ART_FD_SOCKET_SEND) {
-    const ssize_t result =
-        send(socket->fd, request->input_bytes, request->byte_count, flags);
+    const iovec vector{const_cast<void *>(request->input_bytes),
+                       request->byte_count};
+    const ssize_t result = socket->scm_endpoint.installed()
+        ? ManagedSendVectors(socket, &vector, 1, flags)
+        : send(socket->fd, request->input_bytes, request->byte_count, flags);
     if (SocketDebugEnabled()) {
       std::fprintf(stderr,
                    "DARWIN socket send host_fd=%d count=%zu flags=0x%x "
@@ -1583,8 +1640,10 @@ intptr_t OwnerSocketOperation(void *context, uint64_t object,
     return result;
   }
   if (request->operation == DARWIN_ART_FD_SOCKET_RECV) {
-    const ssize_t result =
-        recv(socket->fd, request->output_bytes, request->byte_count, flags);
+    const iovec vector{request->output_bytes, request->byte_count};
+    const ssize_t result = socket->scm_endpoint.installed()
+        ? ManagedReadDiscard(socket, &vector, 1, flags)
+        : recv(socket->fd, request->output_bytes, request->byte_count, flags);
     const int host_errno = result < 0 ? errno : 0;
     if (SocketDebugEnabled() &&
         ShouldLogSocketRead(socket, result, host_errno)) {
@@ -1611,22 +1670,30 @@ intptr_t OwnerSocketOperation(void *context, uint64_t object,
       return -1;
     }
     ssize_t result = -1;
+    sockaddr_storage storage{};
+    socklen_t length = 0;
     if (request->address == nullptr && request->address_length == 0) {
       // Bionic implements send() in terms of sendto(..., nullptr, 0). POSIX
       // requires that form to use the peer of an already-connected socket.
-      result =
-          send(socket->fd, request->input_bytes, request->byte_count, flags);
+      const iovec vector{const_cast<void *>(request->input_bytes),
+                         request->byte_count};
+      result = socket->scm_endpoint.installed()
+          ? ManagedSendVectors(socket, &vector, 1, flags)
+          : send(socket->fd, request->input_bytes, request->byte_count, flags);
     } else {
-      sockaddr_storage storage{};
-      socklen_t length = 0;
       if (!ToHostAddress(request->address, request->address_length, &storage,
                          &length)) {
         *android_errno = 22;
         return -1;
       }
-      result =
-          sendto(socket->fd, request->input_bytes, request->byte_count, flags,
-                 reinterpret_cast<const sockaddr *>(&storage), length);
+      const iovec vector{const_cast<void *>(request->input_bytes),
+                         request->byte_count};
+      result = socket->scm_endpoint.installed()
+          ? ManagedSendVectors(socket, &vector, 1, flags,
+                               reinterpret_cast<const sockaddr *>(&storage),
+                               length)
+          : sendto(socket->fd, request->input_bytes, request->byte_count,
+                   flags, reinterpret_cast<const sockaddr *>(&storage), length);
     }
     if (SocketDebugEnabled()) {
       std::fprintf(stderr,
@@ -1646,8 +1713,13 @@ intptr_t OwnerSocketOperation(void *context, uint64_t object,
     sockaddr_storage storage{};
     socklen_t length = sizeof(storage);
     const bool wants_address = request->output_address != nullptr;
+    const iovec vector{request->output_bytes, request->byte_count};
     const ssize_t result =
-        wants_address
+        socket->scm_endpoint.installed()
+            ? ManagedReadDiscard(socket, &vector, 1, flags, false,
+                                 wants_address ? &storage : nullptr,
+                                 wants_address ? &length : nullptr)
+        : wants_address
             ? recvfrom(socket->fd, request->output_bytes, request->byte_count,
                        flags, reinterpret_cast<sockaddr *>(&storage), &length)
             : recv(socket->fd, request->output_bytes, request->byte_count,
@@ -1689,6 +1761,14 @@ intptr_t OwnerSocketOperation(void *context, uint64_t object,
         }
         int32_t enabled = 0;
         std::memcpy(&enabled, request->option_input, sizeof(enabled));
+        // Darwin cannot provide Linux SCM_CREDENTIALS for an unmanaged
+        // carrier. Reject the option before any receive can consume data;
+        // managed endpoints obtain the authenticated triple from daemon
+        // Admit instead.
+        if (!socket->scm_endpoint.installed() && enabled != 0) {
+          *android_errno = 92;
+          return -1;
+        }
         socket->pass_credentials.store(enabled != 0, std::memory_order_release);
         if (SocketDebugEnabled()) {
           std::fprintf(stderr,
@@ -1977,6 +2057,92 @@ extern "C" void darwin_art_bionic_binder_fd_release_process(
     void *process_cookie) {
   if (process_cookie != nullptr)
     ReleaseProcess(static_cast<Process *>(process_cookie));
+}
+
+int darwin_art::bionic::scm::RetainExportedEndpoint(
+    void *process_cookie, const DarwinArtFdDescriptionSnapshotV1 &snapshot,
+    DarwinArtScmGrantV2 *attributes,
+    DarwinArtScmEndpointProviderV1 *provider) noexcept {
+  if (attributes == nullptr || provider == nullptr || process_cookie == nullptr)
+    return -EINVAL;
+  *attributes = {};
+  *provider = {};
+  auto *process = static_cast<Process *>(process_cookie);
+  if (snapshot.kind != DARWIN_ART_FD_SOCKET)
+    return 0;
+  if (snapshot.owner != process->socket_owner || snapshot.object == 0)
+    return -EINVAL;
+  const auto &endpoint =
+      reinterpret_cast<const HostFdObject *>(snapshot.object)->scm_endpoint;
+  const auto *installed = endpoint.attributes();
+  if (installed == nullptr)
+    return 0;
+  const int status = endpoint.RetainProvider(provider);
+  if (status != 0)
+    return -status;
+  std::memcpy(attributes->authority, installed->authority.data(), 16);
+  attributes->carrier = installed->carrier;
+  std::memcpy(attributes->holder, installed->holder.data(), 16);
+  attributes->side = installed->side;
+  return 1;
+}
+
+int darwin_art::bionic::scm::ImportBinderEndpoint(
+    int host_fd, const DarwinArtScmBinderBindingV2 &binding,
+    const uint8_t *attributes, std::size_t length) noexcept {
+  PreserveErrno preserve;
+  ProcessLease process_lease;
+  Process *process = process_lease.get();
+  int type = 0;
+  socklen_t type_length = sizeof(type);
+  const int flags = host_fd >= 0 ? fcntl(host_fd, F_GETFL) : -1;
+  if (process == nullptr || host_fd < 0 || attributes == nullptr || length != 40 ||
+      flags < 0 || getsockopt(host_fd, SOL_SOCKET, SO_TYPE, &type, &type_length) != 0) {
+    if (host_fd >= 0) (void)close(host_fd);
+    return Fail(22, -1);
+  }
+  // Native Binder intake already protects descriptors under the shared
+  // inheritance guard. Atomic F_DUPFD_CLOEXEC is used on every export.
+  const int fd_flags = fcntl(host_fd, F_GETFD);
+  if (fd_flags < 0 || (fd_flags & FD_CLOEXEC) == 0) {
+    (void)close(host_fd);
+    return Fail(22, -1);
+  }
+  auto *object = new (std::nothrow) HostFdObject{host_fd};
+  if (object == nullptr) {
+    (void)close(host_fd);
+    return Fail(12, -1);
+  }
+  process->objects.fetch_add(1, std::memory_order_release);
+  DarwinArtScmEndpointProviderV1 provider{};
+  DarwinArtScmGrantV2 grant{};
+  int status = AcquireProvider(&provider);
+  if (status == 0) {
+    status = provider.claim_binder(provider.context, &binding, attributes,
+                                   static_cast<uint32_t>(length), &grant);
+    if (status == 0) {
+      status = object->scm_endpoint.AdoptConfirmedGrant(provider, grant);
+      if (status != 0)
+        (void)provider.release_holder(provider.context, grant.holder);
+    }
+    provider.release(provider.context);
+  }
+  int guest_fd = -1;
+  if (status == 0) {
+    const auto published = darwin_art_fd_broker_publish_with_flags(
+        process->broker, process->socket_owner,
+        reinterpret_cast<uint64_t>(object),
+        (flags & O_NONBLOCK) != 0 ? DARWIN_ART_FD_STATUS_NONBLOCK : 0,
+        DARWIN_ART_FD_CLOEXEC, &guest_fd);
+    if (published != DARWIN_ART_FD_BROKER_OK)
+      status = published == DARWIN_ART_FD_BROKER_EXHAUSTED ? EMFILE : EBADF;
+  }
+  if (status != 0) {
+    int ignored = 0;
+    (void)OwnerClose(process, reinterpret_cast<uint64_t>(object), &ignored);
+    return Fail(AndroidErrno(status), -1);
+  }
+  return guest_fd;
 }
 
 extern "C" int darwin_art_bionic_socket_broker_install_unix_endpoint(
@@ -2496,6 +2662,54 @@ darwin_art_bionic_socket_broker_readv(int fd, const void *vectors, int count) {
   if (count < 0 || count > 1024 || (count != 0 && vectors == nullptr))
     return Fail(22, intptr_t{-1});
   const auto *iov = static_cast<const AndroidIovec *>(vectors);
+  if ((static_cast<uint32_t>(fd) & kCentralBrokerTokenTopMask) ==
+      kCentralBrokerTokenMarker) {
+    ProcessLease process_lease;
+    Process *process = process_lease.get();
+    if (process == nullptr) return Fail(9, intptr_t{-1});
+    DarwinArtFdKind kind{};
+    const auto kind_status = darwin_art_fd_broker_get_kind(process->broker, fd, &kind);
+    if (kind_status != DARWIN_ART_FD_BROKER_OK)
+      return Fail(BrokerFailure(kind_status), intptr_t{-1});
+    if (kind == DARWIN_ART_FD_SOCKET) {
+      struct ReadVectorOperation {
+        const AndroidIovec *vectors;
+        int count;
+        bool managed = false;
+      } operation{iov, count};
+      DarwinArtFdDescriptionPin *pin = nullptr;
+      DarwinArtFdIoResult result{};
+      const auto status = darwin_art_fd_broker_retain_description(
+          process->broker, fd, process->socket_owner,
+          [](void *opaque, const DarwinArtFdDescriptionSnapshotV1 *snapshot,
+             int *error) -> intptr_t {
+            auto &operation = *static_cast<ReadVectorOperation *>(opaque);
+            auto *socket = reinterpret_cast<HostFdObject *>(snapshot->object);
+            if (!socket->scm_endpoint.installed()) { *error = 0; return 0; }
+            operation.managed = true;
+            std::array<iovec, 1024> native{};
+            size_t total = 0;
+            for (int i = 0; i < operation.count; ++i) {
+              const auto &input = operation.vectors[i];
+              if (input.length > static_cast<size_t>(SSIZE_MAX) - total) {
+                *error = 22; return -1;
+              }
+              total += input.length;
+              native[i] = {input.base, input.length};
+            }
+            const ssize_t bytes = ManagedReadDiscard(
+                socket, native.data(), static_cast<size_t>(operation.count), 0, true);
+            *error = bytes < 0 ? AndroidErrno(errno) : 0;
+            return bytes;
+          }, &operation, &pin, &result);
+      if (pin != nullptr)
+        (void)darwin_art_fd_broker_release_description(process->broker, pin);
+      if (status != DARWIN_ART_FD_BROKER_OK)
+        return Fail(BrokerFailure(status), intptr_t{-1});
+      if (operation.managed)
+        return result.value < 0 ? Fail(result.android_errno, intptr_t{-1}) : result.value;
+    }
+  }
   intptr_t total = 0;
   for (int index = 0; index < count; ++index) {
     const intptr_t result = darwin_art_bionic_socket_broker_read(
@@ -2515,6 +2729,54 @@ darwin_art_bionic_socket_broker_writev(int fd, const void *vectors, int count) {
   if (count < 0 || count > 1024 || (count != 0 && vectors == nullptr))
     return Fail(22, intptr_t{-1});
   const auto *iov = static_cast<const AndroidIovec *>(vectors);
+  if ((static_cast<uint32_t>(fd) & kCentralBrokerTokenTopMask) ==
+      kCentralBrokerTokenMarker) {
+    ProcessLease process_lease;
+    Process *process = process_lease.get();
+    if (process == nullptr) return Fail(9, intptr_t{-1});
+    DarwinArtFdKind kind{};
+    const auto kind_status =
+        darwin_art_fd_broker_get_kind(process->broker, fd, &kind);
+    if (kind_status != DARWIN_ART_FD_BROKER_OK)
+      return Fail(BrokerFailure(kind_status), intptr_t{-1});
+    if (kind == DARWIN_ART_FD_SOCKET) {
+      struct WriteVectorOperation {
+        const AndroidIovec *vectors;
+        int count;
+        bool managed = false;
+      } operation{iov, count};
+      DarwinArtFdDescriptionPin *pin = nullptr;
+      DarwinArtFdIoResult result{};
+      const auto status = darwin_art_fd_broker_retain_description(
+          process->broker, fd, process->socket_owner,
+          [](void *opaque, const DarwinArtFdDescriptionSnapshotV1 *snapshot,
+             int *error) -> intptr_t {
+            auto &operation = *static_cast<WriteVectorOperation *>(opaque);
+            if (snapshot == nullptr || snapshot->kind != DARWIN_ART_FD_SOCKET)
+              return 0;
+            auto *socket = reinterpret_cast<HostFdObject *>(snapshot->object);
+            if (!socket->scm_endpoint.installed()) return 0;
+            operation.managed = true;
+            std::array<iovec, 1024> native{};
+            for (int index = 0; index < operation.count; ++index) {
+              const auto &input = operation.vectors[index];
+              native[index] = {input.base, input.length};
+            }
+            const ssize_t bytes = ManagedSendVectors(
+                socket, native.data(), static_cast<size_t>(operation.count), 0);
+            *error = bytes < 0 ? AndroidErrno(errno) : 0;
+            return bytes;
+          },
+          &operation, &pin, &result);
+      if (pin != nullptr)
+        (void)darwin_art_fd_broker_release_description(process->broker, pin);
+      if (status != DARWIN_ART_FD_BROKER_OK)
+        return Fail(BrokerFailure(status), intptr_t{-1});
+      if (operation.managed)
+        return result.value < 0 ? Fail(result.android_errno, intptr_t{-1})
+                                : result.value;
+    }
+  }
   intptr_t total = 0;
   for (int index = 0; index < count; ++index) {
     const intptr_t result = darwin_art_bionic_socket_broker_write(
@@ -2588,27 +2850,44 @@ darwin_art_bionic_socket_broker_socketpair(int domain, int type, int protocol,
   const int descriptor_flags =
       (type & kAndroidSockCloexec) != 0 ? DARWIN_ART_FD_CLOEXEC : 0;
   int guest[2] = {-1, -1};
-  auto status = darwin_art_fd_broker_publish_with_flags(
-      process->broker, process->socket_owner, reinterpret_cast<uint64_t>(first),
-      status_flags, descriptor_flags, &guest[0]);
+  DarwinArtScmEndpointProviderV1 provider{};
+  const int acquired = darwin_art::bionic::scm::AcquireProvider(&provider);
+  if (acquired != 0) {
+    int ignored = 0;
+    (void)OwnerClose(process, reinterpret_cast<uint64_t>(first), &ignored);
+    (void)OwnerClose(process, reinterpret_cast<uint64_t>(second), &ignored);
+    return Fail(AndroidErrno(acquired), -1);
+  }
+  // Both objects exist unpublished. The registration receipt retains both
+  // authenticated holders through one complete central namespace commit.
+  darwin_art::bionic::scm::PairInstallReceipt receipt(
+      first->scm_endpoint, second->scm_endpoint, provider);
+  provider.release(provider.context);
+  const int registered = receipt.Register();
+  if (registered != 0) {
+    // Receipt targets must outlive its destructor; its failed Register clears
+    // native attributes and leaves grant rollback with the Rust provider.
+    receipt.RollbackUnpublished();
+    int ignored = 0;
+    (void)OwnerClose(process, reinterpret_cast<uint64_t>(first), &ignored);
+    (void)OwnerClose(process, reinterpret_cast<uint64_t>(second), &ignored);
+    return Fail(AndroidErrno(registered), -1);
+  }
+  const DarwinArtFdPublishBatchEntryV1 entries[] = {
+      {process->socket_owner, reinterpret_cast<uint64_t>(first), status_flags, descriptor_flags},
+      {process->socket_owner, reinterpret_cast<uint64_t>(second), status_flags, descriptor_flags}};
+  const auto status = darwin_art_fd_broker_publish_batch_with_flags(
+      process->broker, entries, 2, guest);
   if (status != DARWIN_ART_FD_BROKER_OK) {
+    // Clear the receipt BEFORE destroying either target, outside broker locks.
+    // ResetUnpublished relinquishes both confirmed holders exactly once.
+    receipt.RollbackUnpublished();
     int ignored = 0;
     (void)OwnerClose(process, reinterpret_cast<uint64_t>(first), &ignored);
     (void)OwnerClose(process, reinterpret_cast<uint64_t>(second), &ignored);
     return Fail(BrokerFailure(status), -1);
   }
-  status = darwin_art_fd_broker_publish_with_flags(
-      process->broker, process->socket_owner,
-      reinterpret_cast<uint64_t>(second), status_flags, descriptor_flags,
-      &guest[1]);
-  if (status != DARWIN_ART_FD_BROKER_OK) {
-    DarwinArtFdIoResult ignored_result{};
-    (void)darwin_art_fd_broker_close_owned(
-        process->broker, process->socket_owner, guest[0], &ignored_result);
-    int ignored = 0;
-    (void)OwnerClose(process, reinterpret_cast<uint64_t>(second), &ignored);
-    return Fail(BrokerFailure(status), -1);
-  }
+  if (!receipt.Commit()) std::abort();
   descriptors[0] = guest[0];
   descriptors[1] = guest[1];
   return 0;
@@ -3372,15 +3651,22 @@ extern "C" int darwin_art_bionic_fd_export_for_scm(int guest_fd) {
     Process *process = lease.get();
     if (process == nullptr)
       return Fail(9, -1);
-    int host_fd = -1;
+    std::unique_ptr<darwin_art::bionic::scm::RetainedScmExport> retained;
     DarwinArtFdIoResult result{};
-    const auto status = darwin_art_fd_broker_export_host_fd(
-        process->broker, guest_fd, &host_fd, &result);
-    if (status != DARWIN_ART_FD_BROKER_OK || host_fd < 0)
+    const auto status = darwin_art::bionic::scm::RetainedScmExport::Create(
+        process->broker, guest_fd, &retained, &result);
+    if (status != DARWIN_ART_FD_BROKER_OK || retained == nullptr)
       return Fail(result.android_errno != 0 ? result.android_errno
                                             : BrokerFailure(status),
                   -1);
-    return host_fd;
+    DarwinArtScmGrantV2 attributes{};
+    DarwinArtScmEndpointProviderV1 provider{};
+    const int managed = darwin_art::bionic::scm::RetainExportedEndpoint(
+        process, retained->snapshot(), &attributes, &provider);
+    if (provider.context != nullptr) provider.release(provider.context);
+    if (managed != 0)
+      return Fail(managed == 1 ? 95 : AndroidErrno(-managed), -1);
+    return retained->take_host_fd();
   }
   int host_fd = -1;
   const int filesystem =
@@ -3389,8 +3675,13 @@ extern "C" int darwin_art_bionic_fd_export_for_scm(int guest_fd) {
     return host_fd;
   if (filesystem < 0)
     return -1;
-  const int shared = darwin_art_android_shared_memory_dup(guest_fd);
-  return shared == -2 ? Fail(9, -1) : shared;
+  size_t shared_size = 0;
+  int shared_protection = 0;
+  if (darwin_art_android_shared_memory_get_info(
+          guest_fd, &shared_size, &shared_protection) != 1)
+    return Fail(9, -1);
+  const int shared = fcntl(guest_fd, F_DUPFD_CLOEXEC, 0);
+  return shared < 0 ? Fail(AndroidErrno(errno), -1) : shared;
 }
 
 extern "C" int darwin_art_bionic_fd_dup_host_fd_core(int guest_fd,
@@ -3411,6 +3702,15 @@ extern "C" int darwin_art_bionic_fd_dup_host_fd_core(int guest_fd,
     if (status != DARWIN_ART_FD_BROKER_OK)
       return Fail(BrokerFailure(status), -1);
     binder_mapping = kind == DARWIN_ART_FD_BINDER;
+    // Trusted local metadata/VM resolver, never an IPC export. It may borrow
+    // managed backing without serializing or stripping endpoint attributes.
+    DarwinArtFdIoResult result{};
+    const auto exported = darwin_art_fd_broker_export_host_fd(
+        process->broker, guest_fd, host_fd, &result);
+    if (exported != DARWIN_ART_FD_BROKER_OK)
+      return Fail(result.android_errno != 0 ? result.android_errno
+                                             : BrokerFailure(exported), -1);
+    return binder_mapping ? 2 : 1;
   }
 
   const int exported = darwin_art_bionic_fd_export_for_scm(guest_fd);
@@ -3432,27 +3732,11 @@ extern "C" int darwin_art_bionic_fd_import_from_scm(int host_fd) {
   const bool is_pipe =
       !is_socket && fstat(host_fd, &status) == 0 && S_ISFIFO(status.st_mode);
   if (!is_socket && !is_pipe) {
-    size_t shared_size = 0;
-    int shared_protection = 0;
-    if (darwin_art_android_shared_memory_get_info(host_fd, &shared_size,
-                                                  &shared_protection) == 1) {
-      if (std::getenv("DARWIN_ART_DEBUG_BINDER") != nullptr) {
-        std::fprintf(stderr,
-                     "ART Binder SCM: import host_fd=%d as=shared-memory "
-                     "size=%zu protection=%d\n",
-                     host_fd, shared_size, shared_protection);
-      }
-      return host_fd;
-    }
-    const int guest_fd = darwin_art_bionic_fs_adopt_host_fd_core(host_fd);
-    if (std::getenv("DARWIN_ART_DEBUG_BINDER") != nullptr) {
-      std::fprintf(stderr,
-                   "ART Binder SCM: import host_fd=%d mode=0%o as=file "
-                   "guest_fd=%d errno=%d\n",
-                   host_fd, static_cast<unsigned>(status.st_mode), guest_fd,
-                   errno);
-    }
-    return guest_fd;
+    const DarwinArtFsOwnedDescriptor entry{host_fd, DARWIN_ART_FD_CLOEXEC};
+    int guest_fd = -1;
+    const int error = darwin_art_bionic_fs_adopt_group(
+        &entry, 1, nullptr, nullptr, &guest_fd);
+    return error == 0 ? guest_fd : Fail(error, -1);
   }
 
   ProcessLease lease;
@@ -3499,9 +3783,115 @@ struct ScmExportContext {
   Process* process = nullptr;
   std::vector<std::unique_ptr<darwin_art::bionic::scm::RetainedScmExport>>*
       retained = nullptr;
+  HostFdObject *carrier = nullptr;
+  size_t ordinal = 0;
+  size_t managed_count = 0;
+  std::array<darwin_art::bionic::scm::ManagedPayload, 16> managed{};
 };
 
 using CarrierExport = darwin_art::bionic::scm::ScopedCarrierExport;
+
+HostFdObject *ManagedCarrierObject(Process *process, const CarrierExport &carrier) {
+  const auto *snapshot = carrier.snapshot();
+  if (snapshot == nullptr || snapshot->kind != DARWIN_ART_FD_SOCKET ||
+      snapshot->owner != process->socket_owner || snapshot->object == 0)
+    return nullptr;
+  auto *object = reinterpret_cast<HostFdObject *>(snapshot->object);
+  return object->scm_endpoint.installed() ? object : nullptr;
+}
+
+void ClosePreparedCentral(void *context, uint64_t object) noexcept {
+  int ignored = 0;
+  (void)OwnerClose(context, object, &ignored);
+}
+
+int PrepareReceivedPayload(Process *process, int native,
+                           darwin_art::bionic::scm::GrantLease *grant,
+                           int descriptor_flags,
+                           darwin_art::bionic::scm::PreparedGuestDescriptor *prepared) {
+  int type = 0;
+  socklen_t type_length = sizeof(type);
+  const bool socket = getsockopt(native, SOL_SOCKET, SO_TYPE, &type, &type_length) == 0;
+  struct stat status{};
+  const int flags = fcntl(native, F_GETFL);
+  if (flags < 0 || (!socket && fstat(native, &status) != 0)) {
+    const int error = AndroidErrno(errno);
+    (void)close(native);
+    return error;
+  }
+  const bool pipe = !socket && S_ISFIFO(status.st_mode);
+  if (!socket && grant != nullptr && grant->valid()) {
+    (void)close(native);
+    return 22;
+  }
+  *prepared = {};
+  prepared->filesystem_fd = -1;
+  prepared->descriptor_flags = descriptor_flags;
+  if (!socket && !pipe) {
+    // Includes ashmem backing; memory operations resolve this guest FS handle.
+    prepared->filesystem_fd = native;
+    return 0;
+  }
+  auto *object = new (std::nothrow) HostFdObject{native};
+  if (object == nullptr) { (void)close(native); return 12; }
+  process->objects.fetch_add(1, std::memory_order_release);
+  if (grant != nullptr && grant->valid() && !grant->AdoptInto(object->scm_endpoint)) {
+    const int error = AndroidErrno(errno);
+    ClosePreparedCentral(process, reinterpret_cast<uint64_t>(object));
+    return error;
+  }
+  prepared->central = {socket ? process->socket_owner : process->pipe_owner,
+      reinterpret_cast<uint64_t>(object),
+      (flags & O_NONBLOCK) != 0 ? DARWIN_ART_FD_STATUS_NONBLOCK : 0,
+      descriptor_flags};
+  return 0;
+}
+
+intptr_t ReceiveManagedMessage(Process *process, HostFdObject *socket,
+                               AndroidMsghdr *android, int android_flags,
+                               int host_flags, const iovec *vectors,
+                               size_t vector_count, int pass_credentials) {
+  // The pointer is a request marker only. scm_android_receive authenticates
+  // and emits the daemon Admit credentials; its contents are never used as an
+  // identity supplied by this process.
+  darwin_art::bionic::scm::android::VerifiedPeerCredentials credential_marker{};
+  const darwin_art::bionic::scm::NativeMessage message{
+      vectors, vector_count, nullptr, 0, host_flags};
+  darwin_art::bionic::scm::ReceiveOptions options{};
+  options.flags = host_flags;
+  darwin_art::bionic::scm::SCMChannel channel(socket->scm_endpoint, socket->fd);
+  darwin_art::bionic::scm::GuestDescriptorGroup group(
+      process->broker, process, &ClosePreparedCentral);
+  const auto decode_address = [](void *, const sockaddr *host,
+                                 socklen_t host_length, void *address,
+                                 uint32_t capacity, uint32_t *length) {
+    return FromHostAddress(host, host_length, address, capacity, length);
+  };
+  const auto prepare_payload = [](void *context, int native,
+                                  darwin_art::bionic::scm::GrantLease *grant,
+                                  int descriptor_flags,
+                                  darwin_art::bionic::scm::PreparedGuestDescriptor *prepared) {
+    return PrepareReceivedPayload(static_cast<Process *>(context), native, grant,
+                                  descriptor_flags, prepared);
+  };
+  const darwin_art::bionic::scm::android::ReceiveRequest request{
+      {android->name, android->name == nullptr ? 0u : android->name_length},
+      {android->control, android->control_length},
+      (android_flags & 0x40000000) != 0 ? DARWIN_ART_FD_CLOEXEC : 0,
+      pass_credentials != 0 ? &credential_marker : nullptr};
+  const darwin_art::bionic::scm::android::Callbacks callbacks{
+      process, prepare_payload, &ClosePreparedCentral, decode_address,
+      &AndroidErrno};
+  darwin_art::bionic::scm::android::ReceiveOutput output{};
+  ssize_t bytes = -1;
+  const int status = darwin_art::bionic::scm::android::ReceiveManagedMessage(
+      channel, message, options, group, request, callbacks, &output, &bytes);
+  if (status != 0) return Fail(status, intptr_t{-1});
+  android->control_length = output.control_length;
+  android->name_length = output.name_length;
+  android->flags = output.flags;
+  return bytes;
+}
 
 bool CreateCarrierExport(Process *process, int guest_descriptor,
                          std::unique_ptr<CarrierExport> *carrier) {
@@ -3531,8 +3921,11 @@ int ExportDescriptorForSend(void* opaque, int guest_descriptor,
     return Fail(14, -1);
   *borrowed = false;
   if ((static_cast<uint32_t>(guest_descriptor) & kCentralBrokerTokenTopMask) !=
-      kCentralBrokerTokenMarker)
-    return darwin_art_bionic_fd_export_for_scm(guest_descriptor);
+      kCentralBrokerTokenMarker) {
+    const int result = darwin_art_bionic_fd_export_for_scm(guest_descriptor);
+    if (result >= 0) ++context->ordinal;
+    return result;
+  }
 
   std::unique_ptr<darwin_art::bionic::scm::RetainedScmExport> retained;
   DarwinArtFdIoResult result{};
@@ -3546,12 +3939,29 @@ int ExportDescriptorForSend(void* opaque, int guest_descriptor,
     return -1;
   }
   const int host_fd = retained->host_fd();
+  DarwinArtScmGrantV2 endpoint{};
+  DarwinArtScmEndpointProviderV1 provider{};
+  const int managed = darwin_art::bionic::scm::RetainExportedEndpoint(
+      context->process, retained->snapshot(), &endpoint, &provider);
+  if (provider.context != nullptr) provider.release(provider.context);
+  if (managed < 0) return Fail(AndroidErrno(-managed), -1);
+  if (managed == 1 &&
+      (context->carrier == nullptr || context->managed_count == context->managed.size() ||
+       std::memcmp(endpoint.authority,
+                   context->carrier->scm_endpoint.attributes()->authority.data(), 16) != 0))
+    return Fail(95, -1);
   try {
     context->retained->push_back(std::move(retained));
   } catch (const std::bad_alloc&) {
     darwin_art_bionic_errno_store(12);
     return -1;
   }
+  if (managed == 1) {
+    auto &entry = context->managed[context->managed_count++];
+    entry.ordinal = context->ordinal;
+    std::memcpy(entry.holder.data(), endpoint.holder, 16);
+  }
+  ++context->ordinal;
   *borrowed = true;
   return host_fd;
 }
@@ -3587,7 +3997,8 @@ static intptr_t SendMessageOnHostSocket(
   darwin_art::bionic::scm::ExportedRights owned_exports;
   std::vector<std::unique_ptr<darwin_art::bionic::scm::RetainedScmExport>>
       retained_exports;
-  ScmExportContext export_context{process, &retained_exports};
+  HostFdObject *managed_carrier = ManagedCarrierObject(process, carrier);
+  ScmExportContext export_context{process, &retained_exports, managed_carrier};
   const auto export_status = owned_exports.DecodeRetained(
       android_message->control, android_message->control_length,
       &ExportDescriptorForSend, &export_context);
@@ -3601,6 +4012,18 @@ static intptr_t SendMessageOnHostSocket(
     case ExportStatus::OutOfMemory: return Fail(12, intptr_t{-1});
   }
   const auto exported = owned_exports.descriptors();
+  if (managed_carrier != nullptr) {
+    using namespace darwin_art::bionic::scm;
+    SCMChannel channel(managed_carrier->scm_endpoint, host_socket);
+    const NativeMessage message{vectors.data(), vectors.size(), address,
+                                address_length, host_flags};
+    ssize_t sent = -1;
+    if (channel.Send(message, exported.data(), exported.size(),
+                     export_context.managed.data(), export_context.managed_count,
+                     &sent) != 0)
+      return Fail(AndroidErrno(errno), intptr_t{-1});
+    return sent;
+  }
   std::vector<uint8_t> control;
   if (!exported.empty()) {
     control.resize(CMSG_SPACE(exported.size() * sizeof(int)));
@@ -3741,7 +4164,6 @@ darwin_art_bionic_socket_broker_recvmsg(int fd, AndroidMsghdr *android_message,
       (android_message->vector_count != 0 &&
        android_message->vectors == nullptr) ||
       android_message->vector_count > static_cast<size_t>(INT_MAX) ||
-      android_message->name != nullptr ||
       (android_message->control_length != 0 &&
        android_message->control == nullptr)) {
     return Fail(android_message == nullptr ? 14 : 95, intptr_t{-1});
@@ -3761,15 +4183,29 @@ darwin_art_bionic_socket_broker_recvmsg(int fd, AndroidMsghdr *android_message,
     vectors[index].iov_base = android_message->vectors[index].base;
     vectors[index].iov_len = android_message->vectors[index].length;
   }
+  ProcessLease process_lease;
+  Process *process = process_lease.get();
+  if (process == nullptr) return Fail(38, intptr_t{-1});
+  std::unique_ptr<CarrierExport> carrier;
+  if (!CreateCarrierExport(process, fd, &carrier)) return -1;
+  if (HostFdObject *socket = ManagedCarrierObject(process, *carrier)) {
+    return ReceiveManagedMessage(process, socket, android_message, android_flags,
+                                 host_flags, vectors.data(), vectors.size(),
+                                 socket->pass_credentials.load(std::memory_order_acquire) ? 1 : 0);
+  }
+  // SO_PASSCRED is only supported by managed SCM endpoints.  The unmanaged
+  // path must reject before recvmsg so a caller never consumes a record that
+  // it cannot accompany with authenticated credentials.
+  if (pass_credentials != 0)
+    return Fail(92, intptr_t{-1});
+  if (android_message->name != nullptr) return Fail(95, intptr_t{-1});
   std::vector<uint8_t> host_control(android_message->control_length);
   msghdr message{};
   message.msg_iov = vectors.data();
   message.msg_iovlen = static_cast<int>(vectors.size());
   message.msg_control = host_control.empty() ? nullptr : host_control.data();
   message.msg_controllen = host_control.size();
-  const int host_socket = darwin_art_bionic_fd_export_for_scm(fd);
-  if (host_socket < 0)
-    return -1;
+  const int host_socket = carrier->host_fd();
   ssize_t result;
   do {
     result = ::recvmsg(host_socket, &message, host_flags);
@@ -3793,7 +4229,6 @@ darwin_art_bionic_socket_broker_recvmsg(int fd, AndroidMsghdr *android_message,
                  android_flags, result, message.msg_flags,
                  result < 0 ? error : 0);
   }
-  (void)close(host_socket);
   if (result < 0)
     return Fail(AndroidErrno(error), intptr_t{-1});
 
@@ -3835,35 +4270,6 @@ darwin_art_bionic_socket_broker_recvmsg(int fd, AndroidMsghdr *android_message,
       }
     }
     output_offset += android_space;
-  }
-  if (pass_credentials != 0) {
-    constexpr size_t alignment = sizeof(size_t);
-    constexpr size_t credential_length =
-        sizeof(AndroidCmsghdr) + sizeof(AndroidUcred);
-    constexpr size_t credential_space =
-        (credential_length + alignment - 1) & ~(alignment - 1);
-    if (output_offset + credential_space <= android_message->control_length) {
-      auto *android_header = reinterpret_cast<AndroidCmsghdr *>(
-          static_cast<uint8_t *>(android_message->control) + output_offset);
-      android_header->length = credential_length;
-      android_header->level = kAndroidSolSocket;
-      android_header->type = 2; // Linux SCM_CREDENTIALS.
-      const AndroidUcred credentials{static_cast<int32_t>(getpid()), getuid(),
-                                     getgid()};
-      std::memcpy(reinterpret_cast<uint8_t *>(android_header) +
-                      sizeof(AndroidCmsghdr),
-                  &credentials, sizeof(credentials));
-      output_offset += credential_space;
-      if (SocketDebugEnabled()) {
-        std::fprintf(stderr,
-                     "DARWIN socket: recvmsg fd=%d synthesized "
-                     "SCM_CREDENTIALS pid=%d uid=%u gid=%u\n",
-                     fd, credentials.process_id, credentials.user_id,
-                     credentials.group_id);
-      }
-    } else {
-      android_message->flags |= MSG_CTRUNC;
-    }
   }
   android_message->control_length = output_offset;
   return static_cast<intptr_t>(result);

@@ -32,7 +32,8 @@ struct MockBuffer {
 struct MockWindow {
   std::mutex mutex;
   int references = 1;
-  void (*callback)(void*, AHardwareBuffer*, int32_t, int, int32_t) = nullptr;
+  void (*callback)(void*, AHardwareBuffer*, int32_t, uint64_t, uint64_t, int,
+                   int32_t) = nullptr;
   void* callback_context = nullptr;
   void (*release_context)(void*) = nullptr;
   bool deferred_release = false;
@@ -68,7 +69,8 @@ MockBuffer* NewBuffer(uint32_t width, uint32_t height, int32_t format,
 
 void Emit(MockWindow* window, MockBuffer* buffer, int32_t slot, int fence,
           int32_t dataspace = 0) {
-  void (*callback)(void*, AHardwareBuffer*, int32_t, int, int32_t) = nullptr;
+  void (*callback)(void*, AHardwareBuffer*, int32_t, uint64_t, uint64_t, int,
+                   int32_t) = nullptr;
   void* context = nullptr;
   {
     std::lock_guard<std::mutex> lock(window->mutex);
@@ -76,8 +78,8 @@ void Emit(MockWindow* window, MockBuffer* buffer, int32_t slot, int fence,
     context = window->callback_context;
   }
   assert(callback != nullptr);
-  callback(context, reinterpret_cast<AHardwareBuffer*>(buffer), slot, fence,
-           dataspace);
+  callback(context, reinterpret_cast<AHardwareBuffer*>(buffer), slot, 1, 1,
+           fence, dataspace);
 }
 
 bool Wait(std::condition_variable& cv, std::mutex& mutex,
@@ -280,8 +282,8 @@ void TestDeferredObserverClose() {
     std::lock_guard<std::mutex> lock(window->mutex);
     window->deferred_release = true;
   }
-  void (*captured_callback)(void*, AHardwareBuffer*, int32_t, int, int32_t) =
-      nullptr;
+  void (*captured_callback)(void*, AHardwareBuffer*, int32_t, uint64_t,
+                            uint64_t, int, int32_t) = nullptr;
   void* captured_context = nullptr;
   {
     std::lock_guard<std::mutex> lock(window->mutex);
@@ -298,7 +300,7 @@ void TestDeferredObserverClose() {
   // unregisters it. The retained observer must return that exact slot/fence,
   // rather than merely closing the descriptor after the reader is gone.
   captured_callback(captured_context, reinterpret_cast<AHardwareBuffer*>(buffer),
-                    35, fence_pipe[0], 0);
+                    35, 1, 1, fence_pipe[0], 0);
   {
     std::lock_guard<std::mutex> lock(window->mutex);
     assert(window->pending_release_context != nullptr);
@@ -460,7 +462,7 @@ void darwin_art_android_ANativeWindow_release(void* window) {
   delete native_window;
 }
 bool darwin_art_android_ANativeWindow_set_owned_queue_callback(
-    void* window, void (*callback)(void*, AHardwareBuffer*, int32_t, int, int32_t),
+    void* window, DarwinArtAndroidNativeWindowQueueCallback callback,
     void* context, void (*release_context)(void*)) {
   auto* native_window = static_cast<MockWindow*>(window);
   void (*old_release)(void*) = nullptr;

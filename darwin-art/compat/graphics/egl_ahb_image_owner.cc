@@ -416,7 +416,7 @@ EglBoolean DestroyAndroidImage(EglDisplayHandle display, EglImageHandle image,
       owned->metal_image = nullptr;
       owned->metal_texture = nullptr;
     }
-    if (owned->bound)
+    if (owned->bound && owned->pbuffer != nullptr)
       api.release_tex_image(owned->display, owned->pbuffer, kEglBackBuffer);
     if (owned->client_staging_texture != 0)
       api.gl_delete_textures(1, &owned->client_staging_texture);
@@ -442,7 +442,8 @@ void RestoreBufferQueueSlotIfNeeded(
     std::uint32_t texture, const EglAhbImageBackend& backend, bool debug);
 
 void BindImageTexture(EglEnum target, EglImageHandle image,
-                      const EglAhbImageBackend& backend, bool debug) {
+                      const EglAhbImageBackend& backend, bool debug,
+                      bool bind_client_texture) {
   if (debug) {
     std::cerr << "ART Android EGL: glEGLImageTargetTexture2DOES target=0x"
               << std::hex << target << std::dec << " image=" << image
@@ -470,6 +471,21 @@ void BindImageTexture(EglEnum target, EglImageHandle image,
         using Function = void (*)(std::uint32_t, EglImageHandle);
         auto function = reinterpret_cast<Function>(
             api.get_proc_address("glEGLImageTargetTexture2DOES"));
+        if (bind_client_texture) {
+          // HWUI/Skia samples the texture name it just generated. Producer
+          // SharedImage bindings use a private staging name instead, because
+          // their client name is reused across rotating BufferQueue slots.
+          while (api.gl_get_error() != 0) {
+          }
+          if (function != nullptr) function(target, owned.metal_image);
+          owned.bound = function != nullptr && api.gl_get_error() == 0;
+          if (debug) {
+            std::cerr << "ART Android EGL: bound consumer AHB image texture="
+                      << client_texture << " native_image=" << owned.metal_image
+                      << " success=" << owned.bound << "\n";
+          }
+          return;
+        }
         const std::uint32_t guest_texture = GuestTextureForHostTextureLocked(
             owned.owner_context, static_cast<std::uint32_t>(client_texture));
         // One Chromium texture name is rebound across rotating BufferQueue

@@ -291,6 +291,21 @@ darwin_art_bionic_fs_host_record_lock(int host_fd, int android_command,
 __attribute__((visibility("hidden"))) long
 darwin_art_bionic_fs_host_cpu_count(int online);
 
+/* Trusted synchronous group admission. Consumes distinct native FDs on every
+ * outcome. Callback runs under the FS table lock: no RPC/wait/FS reentry or
+ * managed-object destruction. Zero commits; positive Android errno rolls back.
+ * Outputs are untouched on failure. count <= 16 and a complete nonnull input
+ * array are call preconditions; violating them does not transfer ownership.
+ * Central-only groups bypass this port and commit directly. */
+typedef struct DarwinArtFsOwnedDescriptor {
+  int host_fd;
+  uint32_t descriptor_flags;
+} DarwinArtFsOwnedDescriptor;
+typedef int (*DarwinArtFsCommitGroup)(void*, const int*, size_t);
+int darwin_art_bionic_fs_adopt_group(
+    const DarwinArtFsOwnedDescriptor* entries, size_t count,
+    DarwinArtFsCommitGroup commit, void* context, int* guest_fds);
+
 #ifdef __cplusplus
 }
 #endif

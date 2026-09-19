@@ -145,6 +145,24 @@ cxxflags=(-arch arm64 -isysroot "$sdk" -std=c++20 -O2 -Wall -Wextra -Werror)
   -c "$root/tools/bionic-socket-broker-adapter/src/fd_inheritance.cc" \
   -o "$objects/fd-inheritance.o"
 "$cxx" "${cxxflags[@]}" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/ancillary_intake.cc" \
+  -o "$objects/scm-ancillary-intake.o"
+"$cxx" "${cxxflags[@]}" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/scm_channel.cc" \
+  -o "$objects/scm-channel.o"
+"$cxx" "${cxxflags[@]}" \
+  -I"$root/tools/bionic-central-fd-broker/include" \
+  -I"$root/tools/bionic-fs-facade/include" \
+  -I"$root/tools/bionic-ioctl-facade/include" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/scm_guest_group.cc" \
+  -o "$objects/scm-guest-group.o"
+"$cxx" "${cxxflags[@]}" \
+  -I"$root/tools/bionic-central-fd-broker/include" \
+  -I"$root/tools/bionic-fs-facade/include" \
+  -I"$root/tools/bionic-ioctl-facade/include" \
+  -c "$root/tools/bionic-socket-broker-adapter/src/scm_android_receive.cc" \
+  -o "$objects/scm-android-receive.o"
+"$cxx" "${cxxflags[@]}" \
   -c "$root/tools/bionic-socket-broker-adapter/src/scm_endpoint_provider.cc" \
   -o "$objects/scm-endpoint-provider.o"
 "$cxx" "${cxxflags[@]}" \
@@ -336,7 +354,7 @@ ftw="$root/_build/android16-ftw"
   "$ftw/resolver.o" \
   "$objects/leaf.o" "$objects/allocator.o" "$objects/allocator_options.o" "$objects/time.o" \
   "$objects/pthread.o" "$objects/phdr.o" \
-  "$objects/central-fd-broker.o" "$objects/socket-broker-adapter.o" "$objects/android-scm-exports.o" "$objects/fd-inheritance.o" "$objects/scm-endpoint-provider.o" "$objects/retained-scm-export.o" "$objects/eventfd-owner.o" "$objects/fdsan.o" "$objects/fdsan-property.o" \
+  "$objects/central-fd-broker.o" "$objects/socket-broker-adapter.o" "$objects/android-scm-exports.o" "$objects/fd-inheritance.o" "$objects/scm-endpoint-provider.o" "$objects/scm-ancillary-intake.o" "$objects/scm-channel.o" "$objects/scm-guest-group.o" "$objects/scm-android-receive.o" "$objects/retained-scm-export.o" "$objects/eventfd-owner.o" "$objects/fdsan.o" "$objects/fdsan-property.o" \
   "$objects/sync-fence-merge.o" "$objects/sync-fence-broker.o" \
   "$objects/fdsan-symbols.o" \
   "$objects/dns.o" "$objects/locale.o" \

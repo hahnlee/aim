@@ -29,8 +29,12 @@ struct PreparedBuffers {
     description.height = static_cast<uint32_t>(height);
     description.layers = 1;
     description.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+    // Shared IOSurface storage supports both GPU submission and the standard
+    // software Canvas producer. Declare CPU access before allocating the pool.
     description.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
-                        AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER;
+                        AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER |
+                        AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
+                        AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN;
     for (auto& buffer : buffers)
       if (AHardwareBuffer_allocate(&description, &buffer) != 0 || !buffer)
         return false;
@@ -67,7 +71,8 @@ bool NativeWindowBufferQueue::Active(const Slot& slot) const {
 }
 void NativeWindowBufferQueue::ReclaimRetiredLocked() {
   for (auto& slot : slots_) {
-    if (!slot.retired || !slot.buffer || slot.dequeued || slot.held) continue;
+    if (!slot.retired || !slot.buffer || slot.dequeued || slot.held ||
+        slot.quarantined) continue;
     if (slot.release_fence >= 0 && sync_wait(slot.release_fence, 0) != 0)
       continue;
     Close(slot.release_fence);
@@ -89,9 +94,15 @@ int NativeWindowBufferQueue::PrepareLocked(int32_t width, int32_t height,
       return -EBUSY;
     active_held |= slot.held;
   }
-  if (active != 0 && active != 3) return -EBUSY;
+  const bool has_quarantine = std::any_of(
+      slots_.begin(), slots_.end(), [](const Slot& slot) {
+        return slot.quarantined && slot.buffer != nullptr;
+      });
+  if (active != 0 && active != 3 && !has_quarantine) return -EBUSY;
   if (active_held && std::any_of(slots_.begin(), slots_.end(),
-      [](const Slot& slot) { return slot.retired && slot.buffer; }))
+      [](const Slot& slot) {
+        return slot.retired && !slot.quarantined && slot.buffer;
+      }))
     return -EBUSY;
   if (!lazy_initial_pool && generation_ == UINT64_MAX) return -EBUSY;
   PreparedBuffers prepared;
@@ -148,6 +159,7 @@ int NativeWindowBufferQueue::UpdateGeometry(int32_t width, int32_t height) {
 }
 int NativeWindowBufferQueue::Dequeue(NativeWindowDequeuedBuffer* output) {
   if (!output) return -EINVAL;
+  *output = NativeWindowDequeuedBuffer{};
   std::lock_guard lock(mutex_);
   ReclaimRetiredLocked();
   if (std::none_of(slots_.begin(), slots_.end(),
@@ -164,39 +176,121 @@ int NativeWindowBufferQueue::Dequeue(NativeWindowDequeuedBuffer* output) {
     Close(slot.release_fence);
     slot.release_fence = -1;
     slot.dequeued = true;
+    if (lease_ == UINT64_MAX) {
+      slot.dequeued = false;
+      return -EBUSY;
+    }
+    slot.lease = ++lease_;
     next_slot_ = (index + 1) % slots_.size();
-    *output = {.buffer = slot.buffer, .native_buffer = slot.native_buffer};
+    *output = {.buffer = slot.buffer,
+               .native_buffer = slot.native_buffer,
+               .acquire_fence = -1,
+               .lease = {static_cast<int32_t>(index), slot.generation,
+                         slot.lease}};
     return 0;
   }
   return -EBUSY;
 }
+int NativeWindowBufferQueue::QueueLocked(NativeWindowDequeueLease lease,
+                                          void* native,
+                                          NativeWindowQueuedBuffer* output) {
+  if (lease.slot < 0 || static_cast<size_t>(lease.slot) >= slots_.size())
+    return -EINVAL;
+  auto& found = slots_[static_cast<size_t>(lease.slot)];
+  if (!found.dequeued || found.native_buffer != native ||
+      found.generation != lease.generation || found.lease != lease.lease)
+    return -EINVAL;
+  if (frame_ == UINT64_MAX) return -EBUSY;
+  found.dequeued = false;
+  found.lease = 0;
+  found.held = true;
+  found.frame = ++frame_;
+  output->token = {lease.slot, found.generation, found.frame};
+  AHardwareBuffer_acquire(found.buffer);
+  output->buffer = found.buffer;
+  return 0;
+}
 int NativeWindowBufferQueue::Queue(void* native,
                                    NativeWindowQueuedBuffer* output) {
   if (!native || !output) return -EINVAL;
-  // Release an old output resource before entering the policy mutex.
   *output = NativeWindowQueuedBuffer{};
   std::lock_guard lock(mutex_);
   auto found = std::find_if(slots_.begin(), slots_.end(),
       [native](const Slot& slot) { return slot.native_buffer == native; });
   if (found == slots_.end() || !found->dequeued) return -EINVAL;
-  if (frame_ == UINT64_MAX) return -EBUSY;
-  found->dequeued = false;
-  found->held = true;
-  found->frame = ++frame_;
-  output->token = {static_cast<int32_t>(found - slots_.begin()),
-                   found->generation, found->frame};
-  AHardwareBuffer_acquire(found->buffer);
-  output->buffer = found->buffer;
+  return QueueLocked({static_cast<int32_t>(found - slots_.begin()),
+                      found->generation, found->lease}, native, output);
+}
+int NativeWindowBufferQueue::Queue(NativeWindowDequeueLease lease,
+                                   void* native,
+                                   NativeWindowQueuedBuffer* output) {
+  if (!native || !output) return -EINVAL;
+  *output = NativeWindowQueuedBuffer{};
+  std::lock_guard lock(mutex_);
+  return QueueLocked(lease, native, output);
+}
+int NativeWindowBufferQueue::CancelLocked(NativeWindowDequeueLease lease,
+                                          int fence) {
+  if (lease.slot < 0 || static_cast<size_t>(lease.slot) >= slots_.size()) {
+    Close(fence);
+    return -EINVAL;
+  }
+  auto& found = slots_[static_cast<size_t>(lease.slot)];
+  if (!found.dequeued || found.generation != lease.generation ||
+      found.lease != lease.lease) {
+    Close(fence);
+    return -EINVAL;
+  }
+  // A cancelled dequeue may have an acquire/reuse dependency. Keep the
+  // producer-owned fence on the slot until the next successful dequeue has
+  // waited for it; closing it here makes immediate slot reuse unsafe.
+  found.dequeued = false;
+  found.lease = 0;
+  Close(found.release_fence);
+  found.release_fence = fence;
   return 0;
 }
 int NativeWindowBufferQueue::Cancel(void* native, int fence) {
-  Close(fence);
-  if (!native) return -EINVAL;
+  if (!native) {
+    Close(fence);
+    return -EINVAL;
+  }
   std::lock_guard lock(mutex_);
   auto found = std::find_if(slots_.begin(), slots_.end(),
       [native](const Slot& slot) { return slot.native_buffer == native; });
-  if (found == slots_.end() || !found->dequeued) return -EINVAL;
-  found->dequeued = false;
+  if (found == slots_.end() || !found->dequeued) {
+    Close(fence);
+    return -EINVAL;
+  }
+  return CancelLocked({static_cast<int32_t>(found - slots_.begin()),
+                       found->generation, found->lease}, fence);
+}
+int NativeWindowBufferQueue::Cancel(NativeWindowDequeueLease lease, int fence) {
+  std::lock_guard lock(mutex_);
+  return CancelLocked(lease, fence);
+}
+int NativeWindowBufferQueue::Quarantine(NativeWindowDequeueLease lease,
+                                         int fence) {
+  std::lock_guard lock(mutex_);
+  if (lease.slot < 0 || static_cast<size_t>(lease.slot) >= slots_.size()) {
+    Close(fence);
+    return -EINVAL;
+  }
+  auto& slot = slots_[static_cast<size_t>(lease.slot)];
+  if (!slot.dequeued || slot.generation != lease.generation ||
+      slot.lease != lease.lease) {
+    Close(fence);
+    return -EINVAL;
+  }
+  // No completion fence proves that the remote GPU has finished. Keep both
+  // storage and any supplied dependency until queue destruction; only an
+  // explicit new-generation prepare can replace capacity.
+  slot.dequeued = false;
+  slot.lease = 0;
+  slot.retired = true;
+  slot.quarantined = true;
+  Close(slot.release_fence);
+  slot.release_fence = fence;
   return 0;
 }
 void NativeWindowBufferQueue::Return(NativeWindowFrameToken token,

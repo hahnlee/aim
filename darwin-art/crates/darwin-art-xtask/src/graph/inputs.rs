@@ -34,6 +34,7 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
         PathBuf::from("tools/build-android16-skia-metal-gpu.sh"),
         PathBuf::from("patches/skia/0001-darwin-hwui-disable-coretext-utils.patch"),
         PathBuf::from("patches/skia/0002-darwin-hwui-export-cross-tu-abi.patch"),
+        PathBuf::from("patches/skia/0003-darwin-ahb-gl-texture-2d.patch"),
         PathBuf::from("tools/audit-jit-layout.sh"),
         PathBuf::from("tools/jit-layout-smoke.cc"),
         PathBuf::from("probes/runtime_network_probe.cc"),
@@ -261,6 +262,8 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
         PathBuf::from("compat/window/native_window_transaction_consumer.h"),
         PathBuf::from("compat/window/native_window_buffer_queue.cc"),
         PathBuf::from("compat/window/native_window_buffer_queue.h"),
+        PathBuf::from("compat/window/remote_surface_producer.cc"),
+        PathBuf::from("compat/window/remote_surface_producer.h"),
         PathBuf::from("compat/window/surface_transaction_builder.cc"),
         PathBuf::from("compat/window/surface_transaction_builder.h"),
         PathBuf::from("probes/runtime_graphics_vsync_diagnostic.cc"),
@@ -422,6 +425,7 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
         PathBuf::from("compat/memory/application_memory.cc"),
         PathBuf::from("compat/memory/application_descriptor.cc"),
         PathBuf::from("compat/memory/application_descriptor.h"),
+        PathBuf::from("compat/memory/shared_memory_handle.h"),
         PathBuf::from("compat/binder/context_manager.h"),
         PathBuf::from("compat/loader/classloader_identity.h"),
         PathBuf::from("compat/loader/library_search.h"),
@@ -760,6 +764,8 @@ pub(crate) fn is_global_digest_excluded(path: &Path) -> bool {
             | "compat/window/native_window_transaction_consumer.h"
             | "compat/window/native_window_buffer_queue.cc"
             | "compat/window/native_window_buffer_queue.h"
+            | "compat/window/remote_surface_producer.cc"
+            | "compat/window/remote_surface_producer.h"
             | "compat/window/surface_transaction_builder.cc"
             | "compat/window/surface_transaction_builder.h"
             | "probes/runtime_graphics_vsync_diagnostic.cc"

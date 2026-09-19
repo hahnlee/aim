@@ -1,4 +1,8 @@
 //! Private Unix descriptor-transfer ownership, not Binder or Android policy.
+mod binder_capabilities;
+mod credentials;
+#[cfg(test)]
+mod binder_test_support;
 mod client_transport;
 mod native_endpoint;
 pub use native_endpoint::NativeScmEndpointProvider;
@@ -53,12 +57,22 @@ impl ScmService {
         {
             return Err(failed("peer is not a registered runtime process"));
         }
+        let (kernel_uid, kernel_gid) = crate::peer_credentials::effective_ids(stream)?;
+        let registered_uid = processes
+            .lock()
+            .map_err(|_| failed("process registry poisoned"))?
+            .android_uid(pid, birth);
+        let credentials = credentials::Credentials {
+            pid: i32::try_from(pid).map_err(|_| failed("peer PID exceeds Android range"))?,
+            uid: registered_uid.unwrap_or(kernel_uid),
+            gid: kernel_gid,
+        };
         let epoch = process_epoch(pid, birth);
         self.participants
             .lock()
             .map_err(|_| failed("participants poisoned"))?
             .track(epoch, birth)?;
-        transport::serve(&self.owner, epoch, stream, request)
+        transport::serve(&self.owner, epoch, credentials, stream, request)
     }
 
     pub(crate) fn has_pending(&self) -> Result<bool, ProfileError> {

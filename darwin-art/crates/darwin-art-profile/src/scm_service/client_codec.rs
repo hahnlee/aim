@@ -3,6 +3,7 @@
 //! still need same-authority admission and complete FD ownership before publish.
 
 use super::*;
+use super::super::credentials::Credentials;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct PairOffer {
@@ -17,6 +18,23 @@ pub(crate) struct PreparedOffer {
     pub key: TransferKey,
     pub payload_count: usize,
     pub managed: Vec<(u64, u128)>,
+    pub credentials: Credentials,
+    pub authenticated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AdmittedGrant {
+    pub ordinal: u64,
+    pub authority: u128,
+    pub carrier: u64,
+    pub holder: u128,
+    pub side: u32,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct AdmittedResponse {
+    pub credentials: Credentials,
+    pub claims: Vec<AdmittedGrant>,
 }
 
 pub(crate) fn encode_request(request: &Request) -> Result<Vec<u8>, ProfileError> {
@@ -133,11 +151,24 @@ pub(crate) fn decode_prepared(bytes: &[u8]) -> Result<PreparedOffer, ProfileErro
         ensure_count(payload_count)?;
         let count = reader.u16()? as usize;
         let managed = read_items(&mut reader, count, payload_count, true)?;
+        let (credentials, authenticated) = if reader.bytes.len().saturating_sub(reader.position) == 12 {
+            let credentials = Credentials {
+                pid: i32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
+                uid: u32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
+                gid: u32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
+            };
+            if !credentials.valid() { return Err(WireError::InvalidCount); }
+            (credentials, true)
+        } else {
+            (Credentials { pid: 1, uid: 0, gid: 0 }, false)
+        };
         reader.finish()?;
         Ok(PreparedOffer {
             key,
             payload_count,
             managed,
+            credentials,
+            authenticated,
         })
     })()
     .map_err(invalid)
@@ -148,7 +179,7 @@ pub(crate) fn decode_prepared(bytes: &[u8]) -> Result<PreparedOffer, ProfileErro
 pub(crate) fn decode_admitted(
     bytes: &[u8],
     expected: &[u64],
-) -> Result<Vec<(u64, u128)>, ProfileError> {
+) -> Result<Vec<AdmittedGrant>, ProfileError> {
     (|| {
         let mut reader = Reader::new(response_body(bytes, Operation::Admit)?);
         let count = reader.u16()? as usize;
@@ -163,21 +194,81 @@ pub(crate) fn decode_admitted(
             let received = reader.u64()?;
             let holder = reader.u128()?;
             ensure_id(holder)?;
+            let authority = reader.u128()?;
+            ensure_authority(authority)?;
+            let carrier = reader.u64()?;
+            ensure_id(carrier as u128)?;
+            let side = reader.u8()? as u32;
+            if side > 1 { return Err(WireError::InconsistentPair); }
             if received != ordinal || ordinal >= MAX_ITEMS as u64 {
                 return Err(WireError::InvalidPublishedOrdinal);
             }
             if expected[..index].contains(&ordinal) {
                 return Err(WireError::DuplicateOrdinal);
             }
-            if claims.iter().any(|&(_, previous)| previous == holder) {
+            if claims.iter().any(|previous: &AdmittedGrant| previous.holder == holder) {
                 return Err(WireError::DuplicateId);
             }
-            claims.push((ordinal, holder));
+            claims.push(AdmittedGrant { ordinal, authority, carrier, holder, side });
+        }
+        if reader.bytes.len().saturating_sub(reader.position) == 12 {
+            let credentials = Credentials {
+                pid: i32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
+                uid: u32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
+                gid: u32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
+            };
+            if !credentials.valid() { return Err(WireError::InvalidCount); }
         }
         reader.finish()?;
         Ok(claims)
     })()
     .map_err(invalid)
+}
+
+pub(crate) fn decode_admitted_authenticated(
+    bytes: &[u8],
+    expected: &[u64],
+) -> Result<AdmittedResponse, ProfileError> {
+    let body = response_body(bytes, Operation::Admit).map_err(invalid)?;
+    if body.len() < 12 {
+        return Err(invalid(WireError::Truncated));
+    }
+    let claims_end = body.len() - 12;
+    let mut legacy = Vec::new();
+    legacy.try_reserve_exact(expected.len()).map_err(|_| invalid(WireError::Allocation))?;
+    let mut reader = Reader::new(&body[..claims_end]);
+    let count = reader.u16().map_err(invalid)? as usize;
+    if count != expected.len() || count > MAX_ITEMS {
+        return Err(invalid(WireError::InvalidCount));
+    }
+    for (index, &ordinal) in expected.iter().enumerate() {
+        let received = reader.u64().map_err(invalid)?;
+        let holder = reader.u128().map_err(invalid)?;
+        ensure_id(holder).map_err(invalid)?;
+        let authority = reader.u128().map_err(invalid)?;
+        ensure_authority(authority).map_err(invalid)?;
+        let carrier = reader.u64().map_err(invalid)?;
+        ensure_id(carrier as u128).map_err(invalid)?;
+        let side = reader.u8().map_err(invalid)? as u32;
+        if side > 1 || received != ordinal || ordinal >= MAX_ITEMS as u64 {
+            return Err(invalid(WireError::InvalidPublishedOrdinal));
+        }
+        if expected[..index].contains(&ordinal) {
+            return Err(invalid(WireError::DuplicateOrdinal));
+        }
+        if legacy.iter().any(|previous: &AdmittedGrant| previous.holder == holder) {
+            return Err(invalid(WireError::DuplicateId));
+        }
+        legacy.push(AdmittedGrant { ordinal, authority, carrier, holder, side });
+    }
+    reader.finish().map_err(invalid)?;
+    let credentials = Credentials {
+        pid: i32::from_le_bytes(body[claims_end..claims_end + 4].try_into().unwrap()),
+        uid: u32::from_le_bytes(body[claims_end + 4..claims_end + 8].try_into().unwrap()),
+        gid: u32::from_le_bytes(body[claims_end + 8..].try_into().unwrap()),
+    };
+    if !credentials.valid() { return Err(invalid(WireError::InvalidCount)); }
+    Ok(AdmittedResponse { credentials, claims: legacy })
 }
 
 #[cfg(test)]

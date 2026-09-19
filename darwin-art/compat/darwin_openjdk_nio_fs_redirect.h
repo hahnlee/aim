@@ -270,8 +270,8 @@ static inline int darwin_art_openjdk_nio_ftruncate(int fd, off_t length) {
 static inline int darwin_art_openjdk_nio_fstat(int fd, struct stat* status) {
   if (!darwin_art_openjdk_nio_is_virtual_fd(fd)) return fstat(fd, status);
   if (darwin_art_openjdk_nio_is_central_fd(fd)) {
-    const int host_fd = darwin_art_bionic_fd_export_for_scm(fd);
-    if (host_fd < 0) {
+    int host_fd = -1;
+    if (darwin_art_bionic_fd_dup_host_fd_core(fd, &host_fd) < 1) {
       darwin_art_openjdk_nio_publish_errno(-1);
       return -1;
     }
@@ -313,9 +313,9 @@ static inline int darwin_art_openjdk_nio_ioctl(int fd, unsigned long request,
   if (darwin_art_openjdk_nio_is_central_fd(fd)) {
     // FileInputStream.available0() uses FIONREAD on Darwin. Central guest
     // descriptors are broker-owned capabilities rather than fs-facade slots,
-    // so borrow an SCM-safe host descriptor for this synchronous query.
-    const int host_fd = darwin_art_bionic_fd_export_for_scm(fd);
-    if (host_fd < 0) {
+    // so borrow a private host descriptor for this synchronous query.
+    int host_fd = -1;
+    if (darwin_art_bionic_fd_dup_host_fd_core(fd, &host_fd) < 1) {
       darwin_art_openjdk_nio_publish_errno(-1);
       return -1;
     }
@@ -385,8 +385,8 @@ static inline off_t darwin_art_openjdk_nio_lseek(int fd, off_t offset,
   // Central-broker descriptors do not belong to the filesystem facade. A
   // duplicate shares the underlying open-file description (and therefore its
   // position), while keeping the host descriptor number out of guest state.
-  const int host_fd = darwin_art_bionic_fd_export_for_scm(fd);
-  if (host_fd < 0) {
+  int host_fd = -1;
+  if (darwin_art_bionic_fd_dup_host_fd_core(fd, &host_fd) < 1) {
     darwin_art_openjdk_nio_publish_errno(-1);
     return (off_t)-1;
   }
@@ -405,8 +405,8 @@ static inline void* darwin_art_openjdk_nio_mmap(void* address, size_t length,
 
   // mmap retains the vnode after this duplicate is closed, so this is a
   // zero-copy bridge from the Android virtual descriptor to Darwin VM.
-  const int host_fd = darwin_art_bionic_fd_export_for_scm(fd);
-  if (host_fd < 0) {
+  int host_fd = -1;
+  if (darwin_art_bionic_fd_dup_host_fd_core(fd, &host_fd) < 1) {
     darwin_art_openjdk_nio_publish_errno(-1);
     return MAP_FAILED;
   }

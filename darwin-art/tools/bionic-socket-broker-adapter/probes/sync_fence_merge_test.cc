@@ -33,6 +33,15 @@ extern "C" int darwin_art_bionic_fs_fcntl_core(int, int, intptr_t) {
 }
 extern "C" int darwin_art_bionic_fs_dup_host_fd_core(int, int *) { return 0; }
 extern "C" int darwin_art_bionic_fs_adopt_host_fd_core(int) { return -1; }
+// No managed receive reaches this fixture's unsupported FS boundary.
+extern "C" int darwin_art_bionic_fs_adopt_group(
+    const DarwinArtFsOwnedDescriptor *entries, size_t count,
+    DarwinArtFsCommitGroup, void *, int *) {
+  if (entries != nullptr && count <= 16) {
+    for (size_t i = 0; i < count; ++i) if (entries[i].host_fd >= 0) ::close(entries[i].host_fd);
+  }
+  return 9;
+}
 // This focused fixture does not install Binder owners. Reject that unrelated
 // seam rather than claiming successful registration without a filesystem.
 extern "C" int darwin_art_bionic_fs_bind_binder_device_open(

@@ -269,7 +269,7 @@ impl ScmTransferLeaseOwner {
         if self.terminated_carriers.contains(&send.endpoint.carrier) {
             return Err(LeaseError::CarrierTerminated);
         }
-        if payloads.is_empty() || payloads.len() > MAX_PAYLOADS {
+        if payloads.len() > MAX_PAYLOADS {
             return Err(LeaseError::InvalidPayloadCount);
         }
         if self.leases.len() >= self.max_global

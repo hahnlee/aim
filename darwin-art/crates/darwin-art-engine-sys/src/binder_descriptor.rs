@@ -24,6 +24,27 @@ impl DescriptorTransferBinding {
 }
 
 #[repr(C)]
+pub struct ExportedDescriptor {
+    pub host_fd: i32,
+    pub attributes_length: u32,
+    pub attributes: [u8; BINDER_DESCRIPTOR_ATTRIBUTES_BYTES],
+}
+
+impl Default for ExportedDescriptor {
+    fn default() -> Self {
+        Self { host_fd: -1, attributes_length: 0,
+               attributes: [0; BINDER_DESCRIPTOR_ATTRIBUTES_BYTES] }
+    }
+}
+
+pub type BinderBoundExportFn = unsafe extern "C" fn(
+    i32, *const DescriptorTransferBinding, *mut ExportedDescriptor,
+) -> i32;
+pub type BinderBoundImportFn = unsafe extern "C" fn(
+    i32, *const DescriptorTransferBinding, *const u8, usize,
+) -> i32;
+
+#[repr(C)]
 pub struct RetainedExportedDescriptor {
     pub host_fd: i32,
     pub attributes_length: u32,
@@ -55,6 +76,7 @@ mod tests {
     #[test]
     fn host_arm64_layout_matches_native_port() {
         assert_eq!(size_of::<DescriptorTransferBinding>(), 32);
+        assert_eq!(size_of::<ExportedDescriptor>(), 264);
         assert_eq!(
             core::mem::offset_of!(RetainedExportedDescriptor, lease),
             264

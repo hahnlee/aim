@@ -339,6 +339,8 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
         .arg("-Wl,-exported_symbol,_darwin_art_binder_export_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_binder_export_retained_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_binder_release_export_lease")
+        .arg("-Wl,-exported_symbol,_darwin_art_binder_export_bound_file_descriptor")
+        .arg("-Wl,-exported_symbol,_darwin_art_binder_import_bound_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_binder_import_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_binder_close_file_descriptor")
         .arg("-Wl,-exported_symbol,_darwin_art_bionic_fs_process_uninstall")

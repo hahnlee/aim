@@ -1,11 +1,11 @@
 use super::*;
-use std::os::fd::AsFd;
 use darwin_art_binder_device::authority_protocol::{
     CallToken, LocalNodeToken, NodeToken, TransactionFailure, TransferToken,
 };
 use darwin_art_binder_device::{
     transaction_snapshot::TransactionSnapshot, transfer_image::TransferImage,
 };
+use std::os::fd::AsFd;
 
 fn peer(pid: u32) -> PeerIdentity {
     PeerIdentity::verified(pid, 10_000 + pid, [pid as u64, 0]).unwrap()
@@ -346,9 +346,11 @@ fn data_plane_crosses_real_scm_rights_boundaries_exactly_once() {
         TransferImage::import(received).unwrap().data(),
         b"immutable parcel"
     );
-    assert!(service
-        .prepare_take(peer(20), caller_id, transfer(33))
-        .is_err());
+    assert!(
+        service
+            .prepare_take(peer(20), caller_id, transfer(33))
+            .is_err()
+    );
 
     authority_protocol::encode(&mut caller, Message::CloseConnection).unwrap();
     authority_protocol::encode(&mut callee, Message::CloseConnection).unwrap();

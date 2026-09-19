@@ -10,7 +10,7 @@ fn key() -> TransferKey {
 }
 
 fn header(operation: Operation, body: &[u8]) -> Vec<u8> {
-    let mut bytes = vec![1, operation as u8, 0, 0];
+    let mut bytes = vec![2, operation as u8, 0, 0];
     bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
     bytes.extend_from_slice(body);
     bytes
@@ -97,7 +97,7 @@ fn response_encoders_are_versioned_little_endian_and_bounded() {
     let encoded = encode_prepared(key(), 16, &[(8, 0xabcd)]).unwrap();
     assert_eq!(
         &encoded[..8],
-        &[1, Operation::Prepare as u8, 0, 0, 52, 0, 0, 0]
+        &[2, Operation::Prepare as u8, 0, 0, 52, 0, 0, 0]
     );
     assert_eq!(&encoded[8..], &body);
 }
@@ -126,7 +126,7 @@ fn admitted_encoder_uses_explicit_published_ordinals() {
     let encoded = encode_admitted(&[(7, claims[0])]).unwrap();
     assert_eq!(
         &encoded[..8],
-        &[1, Operation::Admit as u8, 0, 0, 26, 0, 0, 0]
+        &[2, Operation::Admit as u8, 0, 0, 51, 0, 0, 0]
     );
     assert_eq!(u16::from_le_bytes(encoded[8..10].try_into().unwrap()), 1);
     assert_eq!(u64::from_le_bytes(encoded[10..18].try_into().unwrap()), 7);
@@ -134,6 +134,12 @@ fn admitted_encoder_uses_explicit_published_ordinals() {
         u128::from_le_bytes(encoded[18..34].try_into().unwrap()),
         claims[0].grant.id()
     );
+    assert_eq!(
+        u128::from_le_bytes(encoded[34..50].try_into().unwrap()),
+        authority.instance
+    );
+    assert_eq!(u64::from_le_bytes(encoded[50..58].try_into().unwrap()), 1);
+    assert_eq!(encoded[58], 0);
 }
 
 #[test]

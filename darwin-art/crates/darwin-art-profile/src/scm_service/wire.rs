@@ -9,17 +9,19 @@
 pub(super) mod client;
 
 use crate::ProfileError;
+use super::credentials::Credentials;
 use darwin_art_scm_transfer::{
     TransferKey,
     capabilities::{ClaimedDelivery, DeliveryDisposition, RegisteredPair},
 };
 
+const WIRE_VERSION: u8 = 2;
 const HEADER_SIZE: usize = 8;
 const MAX_BODY_SIZE: usize = 1024;
 const MAX_FRAME_SIZE: usize = HEADER_SIZE + MAX_BODY_SIZE;
 const MAX_ITEMS: usize = 16;
 
-/// Version one private SCM operation tags.
+/// Version two private SCM operation tags.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum Operation {
@@ -111,7 +113,7 @@ impl std::fmt::Display for WireError {
             Self::ZeroId => "identifier must be non-zero",
             Self::ZeroAuthority => "authority instance must be non-zero",
             Self::ZeroTicket => "transfer ticket must be non-zero",
-            Self::InvalidCount => "payload count must be in 1..=16",
+        Self::InvalidCount => "payload count must be in 0..=16",
             Self::TooManyItems => "item count exceeds the private wire bound",
             Self::DuplicateOrdinal => "duplicate managed or published ordinal",
             Self::DuplicateId => "duplicate delegation, holder, or published ID",
@@ -151,7 +153,7 @@ fn ensure_key(key: TransferKey) -> Result<(), WireError> {
 }
 
 fn ensure_count(count: usize) -> Result<(), WireError> {
-    if (1..=MAX_ITEMS).contains(&count) {
+    if count <= MAX_ITEMS {
         Ok(())
     } else {
         Err(WireError::InvalidCount)
@@ -275,7 +277,7 @@ fn frame(operation: Operation, body: Vec<u8>) -> Result<Vec<u8>, ProfileError> {
     let total = HEADER_SIZE.checked_add(body.len()).ok_or_else(allocation)?;
     let mut bytes = Vec::new();
     bytes.try_reserve(total).map_err(|_| allocation())?;
-    bytes.extend_from_slice(&[1, operation as u8, 0, 0]);
+    bytes.extend_from_slice(&[WIRE_VERSION, operation as u8, 0, 0]);
     bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
     bytes.extend(body);
     Ok(bytes)
@@ -294,7 +296,7 @@ fn read_header(bytes: &[u8]) -> Result<(Operation, &[u8]), WireError> {
     if bytes.len() < HEADER_SIZE || bytes.len() > MAX_FRAME_SIZE {
         return Err(WireError::Truncated);
     }
-    if bytes[0] != 1 {
+    if bytes[0] != WIRE_VERSION {
         return Err(WireError::WrongVersion);
     }
     if bytes[2..4] != [0, 0] {
@@ -457,8 +459,8 @@ pub(crate) fn encode_prepared(
     managed: &[(u64, u128)],
 ) -> Result<Vec<u8>, ProfileError> {
     ensure_key(key).map_err(invalid)?;
-    let payload_count =
-        u16::try_from(payload_count).map_err(|_| invalid(WireError::InvalidCount))?;
+    let payload_count = u16::try_from(payload_count)
+        .map_err(|_| invalid(WireError::InvalidCount))?;
     ensure_managed(payload_count as usize, managed, true).map_err(invalid)?;
     let mut body = body_with_capacity(16 + 8 + 2 + 2 + managed.len() * 24)?;
     push_u128(&mut body, key.authority.instance);
@@ -472,13 +474,41 @@ pub(crate) fn encode_prepared(
     frame(Operation::Prepare, body)
 }
 
+pub(crate) fn encode_prepared_authenticated(
+    key: TransferKey,
+    payload_count: usize,
+    managed: &[(u64, u128)],
+    credentials: Credentials,
+) -> Result<Vec<u8>, ProfileError> {
+    ensure_key(key).map_err(invalid)?;
+    if !credentials.valid() {
+        return Err(invalid(WireError::InvalidCount));
+    }
+    let payload_count =
+        u16::try_from(payload_count).map_err(|_| invalid(WireError::InvalidCount))?;
+    ensure_managed(payload_count as usize, managed, true).map_err(invalid)?;
+    let mut body = body_with_capacity(16 + 8 + 2 + 2 + 4 + 4 + 4 + managed.len() * 24)?;
+    push_u128(&mut body, key.authority.instance);
+    push_u64(&mut body, key.ticket);
+    push_u16(&mut body, payload_count);
+    push_u16(&mut body, managed.len() as u16);
+    for &(ordinal, delegation) in managed {
+        push_u64(&mut body, ordinal);
+        push_u128(&mut body, delegation);
+    }
+    body.extend_from_slice(&credentials.pid.to_le_bytes());
+    body.extend_from_slice(&credentials.uid.to_le_bytes());
+    body.extend_from_slice(&credentials.gid.to_le_bytes());
+    frame(Operation::Prepare, body)
+}
+
 /// Encode published claims, preserving the exact ordinal mapping returned by
 /// the daemon ledger.  The native guardian/FD group is carried separately.
 pub(crate) fn encode_admitted(claims: &[(u64, ClaimedDelivery)]) -> Result<Vec<u8>, ProfileError> {
     if claims.len() > MAX_ITEMS {
         return Err(invalid(WireError::TooManyItems));
     }
-    let mut body = body_with_capacity(2 + claims.len() * 24)?;
+    let mut body = body_with_capacity(2 + claims.len() * 49)?;
     push_u16(&mut body, claims.len() as u16);
     for (index, &(ordinal, claim)) in claims.iter().enumerate() {
         if ordinal >= MAX_ITEMS as u64 {
@@ -500,7 +530,48 @@ pub(crate) fn encode_admitted(claims: &[(u64, ClaimedDelivery)]) -> Result<Vec<u
         }
         push_u64(&mut body, ordinal);
         push_u128(&mut body, holder);
+        let endpoint = claim.endpoint;
+        push_u128(&mut body, endpoint.carrier.authority.instance);
+        push_u64(&mut body, endpoint.carrier.serial);
+        body.push(match endpoint.side {
+            darwin_art_scm_transfer::Side::A => 0,
+            darwin_art_scm_transfer::Side::B => 1,
+        });
     }
+    frame(Operation::Admit, body)
+}
+
+pub(crate) fn encode_admitted_authenticated(
+    claims: &[(u64, ClaimedDelivery)],
+    credentials: Credentials,
+) -> Result<Vec<u8>, ProfileError> {
+    if !credentials.valid() || claims.len() > MAX_ITEMS {
+        return Err(invalid(WireError::TooManyItems));
+    }
+    let mut body = body_with_capacity(2 + claims.len() * 49 + 12)?;
+    push_u16(&mut body, claims.len() as u16);
+    for (index, &(ordinal, claim)) in claims.iter().enumerate() {
+        if ordinal >= MAX_ITEMS as u64 || claims[..index].iter().any(|(previous, _)| *previous == ordinal) {
+            return Err(invalid(WireError::InvalidPublishedOrdinal));
+        }
+        let holder = claim.grant.id();
+        ensure_id(holder).map_err(invalid)?;
+        if claims[..index].iter().any(|(_, previous)| previous.grant.id() == holder) {
+            return Err(invalid(WireError::DuplicateId));
+        }
+        push_u64(&mut body, ordinal);
+        push_u128(&mut body, holder);
+        let endpoint = claim.endpoint;
+        push_u128(&mut body, endpoint.carrier.authority.instance);
+        push_u64(&mut body, endpoint.carrier.serial);
+        body.push(match endpoint.side {
+            darwin_art_scm_transfer::Side::A => 0,
+            darwin_art_scm_transfer::Side::B => 1,
+        });
+    }
+    body.extend_from_slice(&credentials.pid.to_le_bytes());
+    body.extend_from_slice(&credentials.uid.to_le_bytes());
+    body.extend_from_slice(&credentials.gid.to_le_bytes());
     frame(Operation::Admit, body)
 }
 

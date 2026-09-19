@@ -3,6 +3,11 @@
 #include "../darwin_android_native_window.h"
 #include "../darwin_angle_egl.h"
 #include "../darwin_android_surface_texture.h"
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+#include "remote_surface_producer.h"
+#include <binder/Parcel.h>
+#include "android_os_Parcel.h"
+#endif
 #include <android/graphics/canvas.h>
 
 #include <algorithm>
@@ -208,6 +213,7 @@ jlong SurfaceNativeGetFromBlastBufferQueue(JNIEnv*, jclass, jlong old_surface,
   return window == nullptr ? old_surface : reinterpret_cast<jlong>(window);
 }
 constexpr uint64_t kDarwinSurfaceParcelMagic = 0x4441534600000000ull;
+constexpr uint64_t kDarwinRemoteSurfaceParcelMagic = 0x4441534700000000ull;
 
 jlong SurfaceNativeReadFromParcel(JNIEnv* env, jclass, jlong old_handle,
                                   jobject parcel) {
@@ -219,9 +225,11 @@ jlong SurfaceNativeReadFromParcel(JNIEnv* env, jclass, jlong old_handle,
   const jlong token = read_long == nullptr
                           ? 0
                           : env->CallLongMethod(parcel, read_long);
+  const uint64_t wire_magic =
+      static_cast<uint64_t>(token) & 0xffffffff00000000ull;
   if (env->ExceptionCheck() ||
-      (static_cast<uint64_t>(token) & 0xffffffff00000000ull) !=
-          kDarwinSurfaceParcelMagic) {
+      (wire_magic != kDarwinSurfaceParcelMagic &&
+       wire_magic != kDarwinRemoteSurfaceParcelMagic)) {
     env->DeleteLocalRef(parcel_class);
     return 0;
   }
@@ -237,7 +245,33 @@ jlong SurfaceNativeReadFromParcel(JNIEnv* env, jclass, jlong old_handle,
   const jint format =
       read_int == nullptr ? 1 : env->CallIntMethod(parcel, read_int);
   env->DeleteLocalRef(parcel_class);
-  if (owner_process_id > 0 && layer_id > 0 && !env->ExceptionCheck()) {
+  if (wire_magic == kDarwinRemoteSurfaceParcelMagic) {
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+    android::Parcel* native_parcel = android::parcelForJavaObject(env, parcel);
+    android::sp<android::IBinder> endpoint =
+        native_parcel == nullptr ? nullptr : native_parcel->readStrongBinder();
+    DarwinArtRemoteNativeWindowHooks hooks{};
+    if (env->ExceptionCheck() || width <= 0 || height <= 0 ||
+        owner_process_id != 0 || layer_id != 0 || endpoint == nullptr ||
+        !darwin_art::window::CreateRemoteSurfaceProducerClient(endpoint,
+                                                                &hooks)) {
+      return 0;
+    }
+    void* remote = darwin_art_android_ANativeWindow_create_remote(
+        width, height, format, hooks);
+    if (remote == nullptr) {
+      if (hooks.release != nullptr) hooks.release(hooks.context);
+      return 0;
+    }
+    return reinterpret_cast<jlong>(remote);
+#else
+    return 0;
+#endif
+  }
+  // A SurfaceTexture producer has no SurfaceControl layer, but its BufferQueue
+  // dimensions still cross this Parcel.  Preserve the geometry for the
+  // receiving ANativeWindow independently of the optional layer identity.
+  if (width > 0 && height > 0 && !env->ExceptionCheck()) {
     darwin_art_android_ANativeWindow_register_imported_surface_identity(
         token, static_cast<uint32_t>(owner_process_id),
         static_cast<uint32_t>(layer_id), width, height, format);
@@ -257,6 +291,25 @@ jlong SurfaceNativeReadFromParcel(JNIEnv* env, jclass, jlong old_handle,
 void SurfaceNativeWriteToParcel(JNIEnv* env, jclass, jlong handle,
                                 jobject parcel) {
   if (env == nullptr || parcel == nullptr) return;
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+  void* native_window = reinterpret_cast<void*>(static_cast<uintptr_t>(handle));
+  const bool remote_texture =
+      native_window != nullptr &&
+      darwin_art_android_ANativeWindow_is_managed(native_window) &&
+      darwin_art_android_ANativeWindow_has_queue_callback(native_window) &&
+      darwin_art_android_ANativeWindow_is_consumer_bound(native_window);
+  android::sp<android::IBinder> remote_endpoint;
+  if (remote_texture) {
+    remote_endpoint =
+        darwin_art::window::CreateRemoteSurfaceProducerEndpoint(native_window);
+    if (remote_endpoint == nullptr) {
+      ThrowSurfaceException(env, "java/lang/IllegalStateException");
+      return;
+    }
+  }
+#else
+  constexpr bool remote_texture = false;
+#endif
   jclass parcel_class = env->GetObjectClass(parcel);
   jmethodID write_long =
       parcel_class == nullptr
@@ -264,7 +317,8 @@ void SurfaceNativeWriteToParcel(JNIEnv* env, jclass, jlong handle,
           : env->GetMethodID(parcel_class, "writeLong", "(J)V");
   if (write_long != nullptr) {
     const uint64_t identity =
-        kDarwinSurfaceParcelMagic |
+        (remote_texture ? kDarwinRemoteSurfaceParcelMagic
+                        : kDarwinSurfaceParcelMagic) |
         (handle == 0 ? 0ull : static_cast<uint64_t>(handle) & 0xffffffffull);
     env->CallVoidMethod(parcel, write_long, static_cast<jlong>(identity));
     jmethodID write_int =
@@ -285,6 +339,16 @@ void SurfaceNativeWriteToParcel(JNIEnv* env, jclass, jlong handle,
                           static_cast<jint>(owner_process_id));
       env->CallVoidMethod(parcel, write_int, static_cast<jint>(layer_id));
       env->CallVoidMethod(parcel, write_int, format);
+#if defined(DARWIN_ART_ORIGINAL_BINDER_JNI)
+      if (remote_texture && !env->ExceptionCheck()) {
+        android::Parcel* native_parcel =
+            android::parcelForJavaObject(env, parcel);
+        if (native_parcel == nullptr ||
+            native_parcel->writeStrongBinder(remote_endpoint) != android::OK) {
+          ThrowSurfaceException(env, "java/lang/IllegalStateException");
+        }
+      }
+#endif
       if (std::getenv("DARWIN_ART_DEBUG_ANATIVEWINDOW") != nullptr) {
         std::cerr << "ART Android Surface parcel: write pid=" << getpid()
                   << " token=0x" << std::hex << identity << std::dec

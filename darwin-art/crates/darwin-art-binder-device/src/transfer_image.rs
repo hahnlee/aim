@@ -468,6 +468,19 @@ impl TransferImage {
         &self.files
     }
 
+    /// Consume a validated image into its unchanged private transport group.
+    /// Attribute bytes remain in the immutable carrier; this is not a bare
+    /// provider export or permission to import payloads without their manifest.
+    pub fn into_transport_descriptors(self) -> Result<Vec<OwnedFd>, Error> {
+        let mut group = Vec::new();
+        group
+            .try_reserve_exact(self.files.len() + 1)
+            .map_err(|error| Error::Io(io::Error::new(io::ErrorKind::OutOfMemory, error)))?;
+        group.push(self.descriptor);
+        group.extend(self.files.into_iter().map(|file| file.descriptor));
+        Ok(group)
+    }
+
     pub fn take_files(&mut self) -> Result<Vec<(usize, OwnedFd)>, Error> {
         if self.files.iter().any(|file| !file.metadata().is_empty()) {
             return Err(Error::UnsupportedDescriptorAttributes);

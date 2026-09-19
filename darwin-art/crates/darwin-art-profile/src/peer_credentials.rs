@@ -102,10 +102,25 @@ pub(crate) fn identity(stream: &UnixStream) -> Result<(u32, ProcessIncarnation),
     Ok((pid, birth))
 }
 
+/// Read credentials from the authenticated socket itself. Native managed
+/// receive never performs this lookup.
+pub(crate) fn effective_ids(stream: &UnixStream) -> Result<(u32, u32), ProfileError> {
+    let mut uid = 0_u32;
+    let mut gid = 0_u32;
+    if unsafe { getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok((uid, gid))
+}
+
 #[link(name = "bsm")]
 unsafe extern "C" {
     fn audit_token_to_pid(token: AuditToken) -> libc::pid_t;
     fn audit_token_to_pidversion(token: AuditToken) -> i32;
+}
+unsafe extern "C" {
+    fn getpeereid(socket: libc::c_int, effective_user: *mut u32, effective_group: *mut u32)
+        -> libc::c_int;
 }
 unsafe extern "C" {
     fn proc_pidinfo(

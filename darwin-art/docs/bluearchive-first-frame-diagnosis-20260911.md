@@ -1,208 +1,50 @@
 # Blue Archive first-frame diagnosis — 2026-09-11
 
-## Result
+Historical app evidence; current acceptance scope is in
+[architecture-migration.md](architecture-migration.md).
 
-**Current result (18:16 KST): the nativeRender GC acknowledgment / black
-first-frame blocker below is historical, not reproduced by the current
-runtime.** The thread-local sigchain mask fix (`eb90d025`) is present. A fresh
-unchanged base + arm64 split run with a 15-second requested window exited 0,
-returned normally from nativeRender 1,204 times, and captured 14 scanouts.
-The final `scanout-000014.png` visibly shows the game's Notice, the 654.38 MB
-essential-file download prompt, and Cancel/Confirm controls; mean=0.578154,
-standard deviation=0.227205. No new runtime patch was needed.
+## Verified result
 
-Current evidence:
-
-- Runtime SHA-256: `8cbfe9de1038e39bcda5f1c8ed87104b7083e223ee2c2a491e86f1a35c47624d`.
-- Prepared host SHA-256: `eea5168a5cb4c391eb1e286e557ec6b5d11f27cc178740061adeb32cc46dfa6d`.
-- Log and PNG directory: `_build/bluearchive-current.J9Jxq6/`.
-- Log SHA-256: `22dd8166c734c64a68cd42f4f5a1fed33282c94ad4e9c2a69054383b83681954`.
-- Synthetic Android (514,504) DOWN/UP consumed=1, hold=81,793us. The
-  pre-input frame already shows "Resetting the game data...", so this run
-  does **not** independently prove a Cancel-dismiss transition. The earlier
-  verified Cancel evidence remains in `docs/art-jit-compatibility.md`.
+After thread-local sigchain mask fix `eb90d025`, unchanged Blue Archive
+1.93.454564 base + arm64 split returns normally from nativeRender: 1,204 calls
+and 14 scanouts in the requested 15-second window, exit 0. Final scanout shows
+Notice, the 654.38 MB download prompt and Cancel/Confirm controls.
 
 Physical-button input, Confirm/download, login and gameplay remain unverified.
-Do not change semaphore acknowledgments or thread suspension based solely on
-the superseded logs below. A new current-identity reproduction is required.
+The synthetic tap is consumed but the pre-input frame already shows resetting;
+this run does not independently prove Cancel dismissal. Earlier Cancel evidence
+is indexed in [art-jit-compatibility.md](art-jit-compatibility.md).
 
-## Historical result before the thread-local sigchain fix
+## Reproduction identity
 
-The pre-fix unmodified Blue Archive 1.93.454564 base + arm64 split did **not**
-pass title/menu/interactive-game acceptance. A normal 40-second run exited 0,
-but its actual composed 1280x720 scanout is entirely black. Unity initialization,
-Vulkan creation, CoreAudio output and a successful host exit are not proof of
-game UI progress.
+| Input / artifact | SHA-256 |
+| --- | --- |
+| base.apk | `25479ffb2e0710285a6f11e5666273b97edb68f3d6ae16ba78fd388fd7cd45e8` |
+| arm64 split | `2049eeaba16d4f6b29c51d0dc5551c1e3e8598274dcfce140c3e816d47602ee4` |
+| Runtime | `8cbfe9de1038e39bcda5f1c8ed87104b7083e223ee2c2a491e86f1a35c47624d` |
+| Prepared host | `eea5168a5cb4c391eb1e286e557ec6b5d11f27cc178740061adeb32cc46dfa6d` |
+| Log | `22dd8166c734c64a68cd42f4f5a1fed33282c94ad4e9c2a69054383b83681954` |
 
-Original installed APK SHA-256 values, unchanged during this investigation:
+Artifacts: `_build/bluearchive-current.J9Jxq6/`, final `scanout-000014.png`
+(RGB mean 0.578154, std 0.227205). Hashes identify this run, not later products.
 
-- base.apk: `25479ffb2e0710285a6f11e5666273b97edb68f3d6ae16ba78fd388fd7cd45e8`
-- split-0.apk: `2049eeaba16d4f6b29c51d0dc5551c1e3e8598274dcfce140c3e816d47602ee4`
+## Findings still relevant
 
-No APK, account, login, game consent or purchase was modified. The existing
-user change in `crates/art-bootstrap/src/runtime_art/foundation.rs` was untouched.
+- Before the fix, first nativeRender waited in IL2CPP GC stop/start-world
+  acknowledgment (`+0x19c955c`, sem_getvalue/usleep), with black 1280x720 scanouts.
+  Guest suspend/resume signals 30/24 map to Darwin 29/24. pthread_kill success
+  did not establish handler execution/acknowledgment.
+- Moving dispatcher `sigprocmask(previous_mask)` before special-handler return
+  regressed startup and was reverted. Dispatcher-active mask is not necessarily
+  interrupted ucontext mask. Preserve real nested suspend/resume and ART-handled
+  fault regressions; do not manufacture GC acknowledgments.
+- sem_post's mutex/map path lacks POSIX async-signal safety. This is a separate
+  review finding, not an observed deadlock or established cause of that run.
+- Diagnostic-only instrumentation (`a60d9674`) is opt-in via frame-prefix,
+  Unity-stall and pthread-signal variables; it is not a compatibility fix or
+  an unrestricted performance measurement.
 
-## Evidence
-
-### Rebuilt-runtime retest (14:26 KST)
-
-Original base/split inputs were restored and both SHA-256 values above were
-reverified. A 30-second run against the rebuilt runtime
-`c767a68f1f8ecef797ba773754e7163ba78e86d3facd74f21386da0fff96c0a5`
-and prepared host
-`eea5168a5cb4c391eb1e286e557ec6b5d11f27cc178740061adeb32cc46dfa6d`
-exited 0; its host PID 65797 is no longer running. Log:
-`/tmp/bluearchive-astra-rebuilt-acceptance.log`.
-
-The run enabled `DARWIN_ART_DEBUG_UNITY_LIFECYCLE=1`,
-`DARWIN_ART_DEBUG_UNITY_STALL=1`, `DARWIN_ART_DEBUG_PTHREAD_SIGNALS=1`,
-`DARWIN_ART_DEBUG_INPUT_LATENCY=1`, `DARWIN_ART_DEBUG_POINTER=1`, scale=2,
-and `DARWIN_ART_TEST_POINTER_SEQUENCE='0,0,0;320,180,10000'`.
-The scanout prefix was the absolute path to
-`_build/bluearchive-acceptance-20260911/rebuilt`.
-
-All four `rebuilt-000001.png` through `rebuilt-000004.png` are 1280x720,
-mean=0/std=0; the final PNG was also visually checked. The center tap reaches
-Android coordinates (640,360); DOWN and UP both report InputChannel consumed=1.
-This is successful input delivery, **not** meaningful game interaction.
-
-The first nativeRender still never returns. The watchdog again captures
-`__semwait_signal -> nanosleep -> usleep -> libil2cpp.so+0x19c964c`
-`-> +0x19bf874`; the image base is 0x310000000. GC Finalizer token 19 receives
-one signal 30/24 pair followed by repeated signal 30 submissions, all returning
-0. Thus caching the diagnostic getenv lookup and the standalone 2,000-cycle
-PASS did not fix the original game's GC acknowledgment stall. The APK-path
-blocker is resolved; the native first-frame blocker remains open.
-
-Artifacts are under `_build/bluearchive-acceptance-20260911/` (ignored):
-
-- `scanout-000002.png`: actual scanout-source Metal blit readback; 1280x720,
-  ImageMagick RGB mean=0, standard deviation=0.
-- `calculator-000002.png`: control run through the same capture path; genuine
-  Calculator UI, 720x1280, mean=0.66885, standard deviation=0.257452. Run exit 0.
-- `lifecycle-000001.png`, `lifecycle-000002.png`: both black despite actual
-  InputChannel DOWN/UP delivery, `consumed=1`, including a center tap after 15s.
-
-Logs:
-
-- `/tmp/bluearchive-astra-diagnostic-run.log`: normal 40s run, exit 0;
-  exactly two scanout artifacts, Unity/Vulkan/CoreAudio initialized.
-- `/tmp/bluearchive-astra-lifecycle.log`: nativeResume, nativeRecreateGfxState,
-  and nativeFocusChanged(focused=1) return without exceptions; first
-  nativeRender enters but does not return. Synthetic input is consumed but
-  produces no visible game response. This run was explicitly terminated for
-  further diagnosis, not classified as a clean exit.
-- `/tmp/bluearchive-astra-debug.log`: SIGQUIT managed thread dump; UnityMain
-  is Native inside UnityPlayer.nativeRender. Version-check Java work has not
-  started, unlike the historical five-minute file-checking phase.
-- `/tmp/bluearchive-astra-all-stall.log`: self-process Mach snapshots of the
-  target and other process threads, all inspected snapshots return status 0.
-- `/tmp/bluearchive-astra-signals.log` and `/tmp/bluearchive-astra-mask.log`:
-  guest pthread signal delivery and mask/disposition evidence.
-
-An initial normal 600s run was externally SIGKILLed (exit 137) after roughly
-two minutes, with no preceding fatal marker. Its cause was not determined;
-it is not a successful soak. External sample/LLDB attach attempts hung and
-were stopped; the usable native snapshots came from inside the process.
-
-## Native wait classification
-
-The first nativeRender is sleeping in:
-
-`__semwait_signal -> nanosleep -> usleep -> libil2cpp.so+0x19c964c`
-`-> libil2cpp.so+0x19bf874`.
-
-Disassembly of the original ELF shows that `+0x19c955c` repeatedly calls
-sem_getvalue and usleep(3000), waiting for GC stop/start-world acknowledgments.
-Its warning reference is the embedded Boehm GC string
-`GC Warning: Lost some threads while stopping or starting world?!`.
-
-The original ELF initializes suspend signal 30 and resume signal 24 at
-`+0x19c8dc8` and `+0x19c8de0`. The shared provider maps these to Darwin
-SIGINFO (29) and SIGXCPU (24), respectively. This mapping is consistent across
-the pthread and process-state providers.
-
-The GC Finalizer (guest pthread token 19) receives one successful suspend /
-resume pair, then repeated suspend attempts. All observed pthread_kill calls
-return 0. The all-thread snapshot finds it back in the ordinary guest
-CondWait path (`libil2cpp.so+0x192b690`), not stuck inside sem_post or a signal
-handler. Other Unity workers are in ordinary futex waits.
-
-Mask instrumentation proves the Finalizer starts with SIGINFO **unblocked**
-(host mask `0xef7ef857`) before ART attachment, after attachment, and when it
-is named GC Finalizer. The registered host action is non-default/non-ignored
-and has flags `0x42` (SA_SIGINFO | SA_RESTART). ART attachment does not change
-this mask. Earlier engine helper threads inherit `0xfffef857`, but are not the
-token to which the repeated failed-to-ack suspend attempts are addressed.
-
-Therefore an initial bad mask, missing thread-token mapping, ESRCH, absent
-handler, renderer deadlock, or network/file-check latency does not explain
-the evidence. The remaining boundary is handling/restoration **after the
-first nested suspend/resume signal cycle**. pthread_kill success establishes
-signal submission, not execution or acknowledgment of the guest handler.
-
-## Next concrete regression/fix boundary
-
-### Rejected special-handler mask experiment (14:37 KST)
-
-The blocked mask `0xfffef857` matches ART FaultManager's special-handler mask
-(all signals except ABRT/BUS/FPE/ILL/SEGV, with unmaskable KILL/STOP removed).
-This fingerprint motivates examining the ART fault chain, but does not prove
-that its mask-changing operation leaked across the kernel return boundary.
-Pinned AOSP `sigchain.cc` also returns immediately when a special handler
-returns true, relying on signal return to restore the interrupted mask.
-
-A one-line experiment moved Darwin's `sigprocmask(previous_mask)` before the
-handled return. The real guest signal 100-cycle probe and official incremental
-closure both passed, but Blue Archive regressed to an earlier startup stall
-(CPU approximately 99%, no nativeRender entry and no scanout artifact). Its
-15-second visible-window timer was never reached. PID 72684 did not exit after
-TERM and was explicitly KILLed; exit 137 is not an acceptance success. Log:
-`/tmp/bluearchive-special-mask-run.log`. The source experiment was immediately
-reverted. Baseline artifact rebuild log:
-`/tmp/bluearchive-special-mask-revert-build.log`.
-
-Do not retain that reorder as a fix. `previous_mask` at this location is the
-dispatcher-active mask, not necessarily the interrupted mask from ucontext.
-A next focused test must distinguish direct kernel delivery from ordinary
-function chaining and assert the interrupted mask at that exact boundary,
-including a real condition-variable waiter and ART-handled faults. The generic
-GC-only signal-cycle test does not exercise the ART special-handler branch.
-
-Build a two-cycle guest signal test using the actual process-state trampoline:
-worker waits on the provider condition variable; suspend handler posts an
-ack semaphore and waits in sigsuspend for restart; repeat suspend/resume and
-assert every ack plus restoration of the pre-signal mask. Record the worker's
-mask immediately after the first cycle and the trampoline entry/exit masks.
-Compare nested signal restoration with Android/POSIX sigsuspend/sigreturn
-semantics before changing the runtime. Do not bypass GC or manufacture ack
-counts to make the game advance.
-
-Separately, current sem_post uses std::mutex and an unordered-map lookup and
-thus does not satisfy POSIX async-signal-safe sem_post requirements. This is
-a real review finding, but no observed thread is deadlocked there in this
-run; it must not be asserted as the demonstrated cause of this black screen.
-
-## Diagnostic-only source status
-
-Opt-in instrumentation is committed in `a60d9674` (diagnostic-only; it is
-disabled unless the explicit environment variables are set):
-
-- `compat/darwin_surface_bridge.mm` (`DARWIN_ART_DIAGNOSTIC_FRAME_PREFIX`);
-- `compat/darwin_runtime_jni_registration.cc` (self-process nativeRender
-  watchdog, `DARWIN_ART_DEBUG_UNITY_STALL`, optional `_ALL`);
-- `tools/android-bionic-pthread-provider/src/provider.cc`
-  (`DARWIN_ART_DEBUG_PTHREAD_SIGNALS`).
-
-Do not classify these as a compatibility fix. Capture does no GPU
-readback/allocation/wait when unset. Watcher code is only reachable with the
-existing Unity lifecycle diagnostic wrapper plus its explicit stall option;
-its completion flag has static lifetime, thread rights are retained/released,
-and each successful thread_suspend is paired with thread_resume before
-symbolization/logging. Stack walking is bounded and uses checked self-memory
-reads. This is diagnostic stop-the-thread sampling, not an unrestricted
-production performance measurement.
-
-Incremental graphics closure/link passes with registrar=51, fake-symbols=0,
-host-icu=0, host-fmt=0, CoreText=0. `git diff --check` passes. All Blue Archive,
-sampler and debugger processes started for this investigation are stopped.
+A new stall needs current artifact identities plus nativeRender return, scanout
+pixels and meaningful physical input evidence before changing suspension or
+semaphore contracts. Unity/Vulkan startup and exit 0 alone are insufficient.
+Detailed superseded traces and rejected experiments live in Git history.

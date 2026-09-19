@@ -26,7 +26,62 @@ public:
   ~EndpointLease() noexcept { Reset(); }
   const Attributes *attributes() const noexcept { return installed_ ? &attributes_ : nullptr; }
 
+  // Retain the exact installed provider context for a transport operation.
+  // The returned table owns one context reference and must be released by its
+  // caller.  This keeps transport code from reaching into an opaque host FD
+  // object or inventing a second description lookup.
+  int RetainProvider(DarwinArtScmEndpointProviderV1 *owned) const noexcept {
+    if (owned == nullptr) return EINVAL;
+    *owned = {};
+    if (!installed_ || provider_.context == nullptr || provider_.retain == nullptr ||
+        provider_.release == nullptr || provider_.prepare == nullptr ||
+        provider_.admit == nullptr || provider_.settle == nullptr) return ENOENT;
+    void *retained = provider_.retain(provider_.context);
+    if (retained == nullptr) return ENOMEM;
+    *owned = provider_;
+    owned->context = retained;
+    return 0;
+  }
+
+  bool installed() const noexcept { return installed_; }
+
+  // Install one authenticated daemon grant into this still-unpublished
+  // description.  The provider table is borrowed for this call; the lease
+  // retains its context and owns holder cleanup until it is destroyed.  A
+  // failed adoption leaves both the raw grant and this object untouched.
+  int AdoptConfirmedGrant(const DarwinArtScmEndpointProviderV1 &provider,
+                          const DarwinArtScmGrantV2 &grant) noexcept {
+    if (installed_ || provider.abi_version != DARWIN_ART_SCM_ENDPOINT_ABI_VERSION ||
+        provider.struct_size != sizeof(provider) || provider.context == nullptr ||
+        provider.retain == nullptr || provider.release == nullptr ||
+        provider.release_holder == nullptr || grant.carrier == 0 || grant.side > 1 ||
+        !Nonzero(grant.authority) || !Nonzero(grant.holder)) return EINVAL;
+    void *retained = provider.retain(provider.context);
+    if (retained == nullptr) return ENOMEM;
+    provider_ = provider;
+    provider_.context = retained;
+    std::memcpy(attributes_.authority.data(), grant.authority, 16);
+    attributes_.carrier = grant.carrier;
+    std::memcpy(attributes_.holder.data(), grant.holder, 16);
+    attributes_.side = grant.side;
+    installed_ = true;
+    owns_grant_ = true;
+    return 0;
+  }
+
+  // Short spelling retained for native SCM callers; Binder import uses the
+  // explicit name above at its confirmation boundary.
+  int Adopt(const DarwinArtScmEndpointProviderV1 &provider,
+            const DarwinArtScmGrantV2 &grant) noexcept {
+    return AdoptConfirmedGrant(provider, grant);
+  }
+
 private:
+  static bool Nonzero(const uint8_t *bytes) noexcept {
+    if (bytes == nullptr) return false;
+    for (size_t i = 0; i < 16; ++i) if (bytes[i] != 0) return true;
+    return false;
+  }
   friend class PairInstallReceipt;
   void Set(const DarwinArtScmEndpointProviderV1 &provider, void *retained,
            const DarwinArtScmPairOfferV1 &offer, uint32_t side) noexcept {
@@ -108,6 +163,11 @@ public:
     armed_ = false;
     return true;
   }
+
+  // Failure of atomic namespace publication leaves both targets unpublished.
+  // Clear before their destruction; final holder cleanup must stay outside
+  // broker/inheritance locks. Safe to call again from this receipt's destructor.
+  void RollbackUnpublished() noexcept { Clear(); }
 
 private:
   static bool Valid(const DarwinArtScmEndpointProviderV1 &provider) noexcept {

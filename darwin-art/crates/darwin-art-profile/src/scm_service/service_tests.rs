@@ -38,7 +38,7 @@ fn listener() -> (SocketPath, UnixListener) {
 fn register_request() -> Vec<u8> {
     // SCM v1 header: version, operation, reserved bits, body length.
     vec![
-        1,
+        2,
         super::wire::Operation::RegisterPair as u8,
         0,
         0,

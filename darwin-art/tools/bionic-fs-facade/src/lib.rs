@@ -22,6 +22,7 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 
 mod canonical_path;
 mod descriptor_table;
+mod descriptor_group;
 mod directory;
 mod filesystem_namespace;
 mod immutable_open;

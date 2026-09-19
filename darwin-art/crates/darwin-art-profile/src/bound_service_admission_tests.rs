@@ -33,7 +33,7 @@ fn existing_admission(
     // No mount, package files or child process is created by this Existing fixture.
     let state = Arc::new(State {
         fd_deliveries: crate::host_fd_delivery::transport::new_owner().unwrap(),
-        scm: crate::scm_service::ScmService::new().unwrap(),
+        scm: std::sync::Arc::new(crate::scm_service::ScmService::new().unwrap()),
         binder: Default::default(),
         filesystem: Mutex::new(ProfileFilesystem::new(paths.clone())),
         registry: Mutex::new(PackageRegistry::new(&paths)),

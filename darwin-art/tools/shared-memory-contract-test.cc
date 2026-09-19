@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -15,6 +16,20 @@ extern "C" int darwin_art_bionic_errno_set_from_darwin(int error) {
   errno = error;
   return 0;
 }
+// Test-only FS resolver port; backing/protection use actual Darwin objects.
+static int test_guest_backing = -1;
+extern "C" int darwin_art_bionic_fs_dup_host_fd_core(int fd, int *native) {
+  if (fd == 10002) { errno = EOPNOTSUPP; return -1; }
+  if (fd == 10001) { errno = EBADF; return -1; }
+  if (fd != 10000) return 0;
+  *native = fcntl(test_guest_backing, F_DUPFD_CLOEXEC, 0);
+  return *native >= 0 ? 1 : -1;
+}
+extern "C" int darwin_art_bionic_fs_owns_fd_core(int fd) {
+  return fd == 10000 || fd == 10002;
+}
+extern "C" int darwin_art_android_shared_memory_fcntl(int, int, intptr_t, int*);
+extern "C" int darwin_art_android_shared_memory_ioctl(int, uint32_t, void*, int*, int*);
 extern "C" int darwin_art_bionic_ioctl_bind_shared_memory(
     int (*callback)(int, uint32_t, void*, int*, int*)) {
   assert(callback != nullptr);
@@ -39,6 +54,27 @@ int main() {
   int protection = 0;
   assert(darwin_art_android_shared_memory_get_info(fd, &size, &protection) == 1);
   assert(size == 4096 && protection == PROT_READ);
+  test_guest_backing = fd;
+  assert(darwin_art_android_shared_memory_get_info(10000, &size, &protection) == 0);
+  assert(darwin_art_android_shared_memory_get_guest_info(10000, &size, &protection) == 1);
+  assert(size == 4096 && protection == PROT_READ);
+  assert(ASharedMemory_setProt(10000, PROT_READ) == 0);
+  assert(ASharedMemory_setProt(10001, PROT_READ) == -1);
+  int resolved_result = -1;
+  assert(darwin_art_android_shared_memory_fcntl(10000, 1, 0, &resolved_result) == 0);
+  assert(darwin_art_android_shared_memory_fcntl(10000, 1034, 0, &resolved_result) == 1);
+  assert(resolved_result == (2 | 4 | 16));
+  int resolved_errno = -1;
+  assert(darwin_art_android_shared_memory_ioctl(10000, 0x7704, nullptr,
+      &resolved_result, &resolved_errno) == 1);
+  assert(resolved_result == 4096 && resolved_errno == 0);
+  assert(darwin_art_android_shared_memory_close(10000) == 0);
+  assert(darwin_art_android_shared_memory_close(10002) == 0);
+  assert(darwin_art_android_shared_memory_fcntl(10002, 1, 0, &resolved_result) == 0);
+  assert(ASharedMemory_setProt(10002, PROT_READ) == -1 && errno == EOPNOTSUPP);
+  assert(darwin_art_android_shared_memory_ioctl(10002, 0x541b, nullptr,
+      &resolved_result, &resolved_errno) == 0);
+  assert(fcntl(fd, F_GETFD) >= 0);
   int sockets[2];
   assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
   pid_t child = fork();

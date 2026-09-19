@@ -31,6 +31,7 @@ flags=(
 "$cxx" "${flags[@]}" \
   "$root/compat/window/native_window_transaction_consumer.cc" \
   "$root/compat/window/native_window_buffer_queue.cc" \
+  "$root/compat/window/native_window_software_queue.cc" \
   "$root/compat/window/locked_surface.cc" \
   "$root/tools/tests/native-window-transaction-admission-test.cc" \
   "$stage/lifetime.o" \

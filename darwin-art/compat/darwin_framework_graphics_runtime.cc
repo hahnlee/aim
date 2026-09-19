@@ -9,6 +9,9 @@
 #include "darwin_art/android_runtime_host.h"
 #include "darwin_android_graphics_registration.h"
 extern "C" void darwin_art_hwui_shutdown_common_pool();
+namespace android {
+int register_android_graphics_TextureLayer(JNIEnv* env);
+}
 #endif
 
 namespace {
@@ -89,6 +92,7 @@ bool RegisterFrameworkGraphicsNatives(JNIEnv* env) {
   }
   init_android_graphics();
   return register_android_graphics_classes(env) >= 0 &&
+         android::register_android_graphics_TextureLayer(env) >= 0 &&
          graphics::RegisterOverlayPropertiesNatives(env);
 #else
   (void)env;

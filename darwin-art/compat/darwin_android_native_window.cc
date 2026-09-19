@@ -4,6 +4,7 @@
 #include "window/locked_surface.h"
 #include "window/native_window_transaction_consumer.h"
 #include "window/native_window_buffer_queue.h"
+#include "window/native_window_software_queue.h"
 
 #include <android/hardware_buffer.h>
 #include <android/surface_control.h>
@@ -96,6 +97,10 @@ struct DarwinAndroidNativeWindow {
   std::atomic<int32_t> width{0};
   std::atomic<int32_t> height{0};
   std::atomic<int32_t> format{1};
+  // Android Vulkan WSI values are declared in darwin_angle_egl.h. Ordinary
+  // SurfaceControl producers remain FIFO until a real consumer selects a
+  // different mode.
+  std::atomic<int32_t> present_mode{2};
   // Android propagates the producer color space through BufferQueue.  The
   // Darwin queue stores the same state on its ANativeWindow producer so HWUI
   // can negotiate wide-color surfaces without a host-side policy override.
@@ -104,10 +109,16 @@ struct DarwinAndroidNativeWindow {
   std::shared_ptr<DarwinAndroidNativeWindowBuffer> locked;
   std::shared_ptr<DarwinAndroidNativeWindowBuffer> published;
   std::unique_ptr<darwin_art::window::NativeWindowBufferQueue> gpu_queue;
+  // Present only on a transported SurfaceTexture producer. In this mode the
+  // Browser process remains the sole queue/slot owner.
+  DarwinArtRemoteNativeWindowHooks remote{};
+  std::unique_ptr<darwin_art::window::NativeWindowSoftwareQueue>
+      software_queue;
   ASurfaceControl* surface_control = nullptr;
   uint32_t imported_surface_owner_process_id = 0;
   uint32_t imported_surface_layer_id = 0;
   std::shared_ptr<NativeWindowQueueObserver> queue_observer;
+  bool consumer_bound = false;
   std::shared_ptr<NativeWindowTransactionObserver> transaction_observer;
   std::unique_ptr<darwin_art::window::NativeWindowTransactionConsumer>
       transaction_consumer;
@@ -193,6 +204,8 @@ void ReleaseNativeWindow(DarwinAndroidNativeWindow* window) {
   if (window->surface_control != nullptr) {
     ASurfaceControl_release(window->surface_control);
   }
+  if (window->remote.release != nullptr)
+    window->remote.release(window->remote.context);
   delete window;
 }
 
@@ -318,6 +331,11 @@ int NativeWindowDequeue(AndroidNativeWindowAbi* abi, void** out_buffer,
                         int* out_fence) {
   auto* window = WindowFromAbi(abi);
   if (window == nullptr || !out_buffer || !out_fence) return -EINVAL;
+  if (window->remote.dequeue != nullptr) {
+    AHardwareBuffer* buffer = nullptr;
+    return window->remote.dequeue(window->remote.context, &buffer, out_buffer,
+                                  out_fence);
+  }
   if (window->gpu_queue == nullptr) return -ENOMEM;
   darwin_art::window::NativeWindowDequeuedBuffer dequeued;
   const int status = window->gpu_queue->Dequeue(&dequeued);
@@ -343,14 +361,20 @@ struct NativeWindowOperationPin {
   DarwinAndroidNativeWindow* window;
 };
 
-int NativeWindowQueue(AndroidNativeWindowAbi* abi, void* native_buffer,
-                      int fence) {
+int NativeWindowQueueImpl(
+    AndroidNativeWindowAbi* abi, void* native_buffer, int fence,
+    const darwin_art::window::NativeWindowDequeueLease* remote_lease,
+    int32_t remote_dataspace) {
   auto* window = WindowFromAbi(abi);
   if (window == nullptr) {
     CloseFence(fence);
     return -EINVAL;
   }
   NativeWindowOperationPin operation(window);
+  if (window->remote.queue != nullptr)
+    return window->remote.queue(
+        window->remote.context, native_buffer, fence,
+        window->dataspace.load(std::memory_order_acquire));
   darwin_art::window::NativeWindowQueuedBuffer queued;
   AHardwareBuffer* buffer = nullptr;
   std::shared_ptr<NativeWindowQueueObserver> queue_observer;
@@ -359,20 +383,34 @@ int NativeWindowQueue(AndroidNativeWindowAbi* abi, void* native_buffer,
   uint64_t generation = 0;
   uint64_t queued_frame = 0;
   int32_t dataspace = 0;
+  bool consumer_bound = false;
   std::shared_ptr<NativeWindowTransactionObserver> transaction_observer;
   {
     std::lock_guard<std::mutex> lock(window->mutex);
     if (window->gpu_queue == nullptr) { CloseFence(fence); return -ENOMEM; }
-    const int status = window->gpu_queue->Queue(native_buffer, &queued);
+    if (remote_lease != nullptr &&
+        (window->queue_observer == nullptr ||
+         window->queue_observer->callback == nullptr)) {
+      (void)window->gpu_queue->Cancel(*remote_lease, fence);
+      return -ENODEV;
+    }
+    const int status = remote_lease == nullptr
+                           ? window->gpu_queue->Queue(native_buffer, &queued)
+                           : window->gpu_queue->Queue(*remote_lease,
+                                                      native_buffer, &queued);
     if (status != 0) { CloseFence(fence); return status; }
     buffer = queued.buffer;
     slot_index = queued.token.slot;
     generation = queued.token.generation;
     queued_frame = queued.token.frame;
     queue_observer = window->queue_observer;
-    dataspace = window->dataspace.load(std::memory_order_acquire);
+    consumer_bound = window->consumer_bound;
+    dataspace = remote_lease == nullptr
+                    ? window->dataspace.load(std::memory_order_acquire)
+                    : remote_dataspace;
     transaction_observer = window->transaction_observer;
-    if (queue_observer == nullptr || queue_observer->callback == nullptr) {
+    if ((queue_observer == nullptr || queue_observer->callback == nullptr) &&
+        !consumer_bound) {
       if (window->surface_control == nullptr) {
         // A Surface transported to another Android process still queues into
         // the original BufferQueue layer.  The producer process owns only a
@@ -399,7 +437,19 @@ int NativeWindowQueue(AndroidNativeWindowAbi* abi, void* native_buffer,
     // The callback is arbitrary consumer code and may release the producer.
     // Keep this window alive across the unlocked callback invocation.
     queue_observer->callback(queue_observer->context, buffer, slot_index,
-                             fence, dataspace);
+                             generation, queued_frame, fence, dataspace);
+    return 0;
+  }
+  if (consumer_bound) {
+    ReturnNativeWindowFrame(
+        window,
+        {.control = nullptr,
+         .buffer = buffer,
+         .slot = slot_index,
+         .generation = generation,
+         .frame = queued_frame,
+         .control_retained = false},
+        fence, false);
     return 0;
   }
   if (DebugAndroidNativeWindow()) {
@@ -445,9 +495,16 @@ int NativeWindowQueue(AndroidNativeWindowAbi* abi, void* native_buffer,
   return submitted ? 0 : -ENOMEM;
 }
 
+int NativeWindowQueue(AndroidNativeWindowAbi* abi, void* native_buffer,
+                      int fence) {
+  return NativeWindowQueueImpl(abi, native_buffer, fence, nullptr, 0);
+}
+
 int NativeWindowCancel(AndroidNativeWindowAbi* abi, void* native_buffer,
                        int fence) {
   auto* window = WindowFromAbi(abi);
+  if (window != nullptr && window->remote.cancel != nullptr)
+    return window->remote.cancel(window->remote.context, native_buffer, fence);
   if (window == nullptr || window->gpu_queue == nullptr) {
     CloseFence(fence);
     return -EINVAL;
@@ -582,6 +639,13 @@ extern "C" void* darwin_art_android_ANativeWindow_fromSurface(void* opaque_env,
   auto* window = new (std::nothrow) DarwinAndroidNativeWindow();
   if (window == nullptr) return nullptr;
   InitializeNativeWindowAbi(window);
+  try {
+    window->software_queue =
+        std::make_unique<darwin_art::window::NativeWindowSoftwareQueue>(window);
+  } catch (const std::bad_alloc&) {
+    delete window;
+    return nullptr;
+  }
   window->java_surface_identity = identity;
   window->width.store(darwin_art::DarwinAngleHostSurfaceWidth(),
                       std::memory_order_relaxed);
@@ -661,6 +725,13 @@ extern "C" void* darwin_art_android_ANativeWindow_create(
   auto* window = new (std::nothrow) DarwinAndroidNativeWindow();
   if (window == nullptr) return nullptr;
   InitializeNativeWindowAbi(window);
+  try {
+    window->software_queue =
+        std::make_unique<darwin_art::window::NativeWindowSoftwareQueue>(window);
+  } catch (const std::bad_alloc&) {
+    delete window;
+    return nullptr;
+  }
   window->width.store(width, std::memory_order_relaxed);
   window->height.store(height, std::memory_order_relaxed);
   window->format.store(format, std::memory_order_relaxed);
@@ -684,6 +755,103 @@ extern "C" void* darwin_art_android_ANativeWindow_create(
     return nullptr;
   }
   return window;
+}
+
+extern "C" void* darwin_art_android_ANativeWindow_create_remote(
+    int32_t width, int32_t height, int32_t format,
+    DarwinArtRemoteNativeWindowHooks hooks) {
+  if (width <= 0 || height <= 0 || format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM ||
+      hooks.context == nullptr ||
+      hooks.release == nullptr || hooks.dequeue == nullptr ||
+      hooks.queue == nullptr || hooks.cancel == nullptr ||
+      hooks.prepare == nullptr || hooks.set_present_mode == nullptr)
+    return nullptr;
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(
+      darwin_art_android_ANativeWindow_create(width, height, format));
+  if (window == nullptr) return nullptr;
+  // The new pointer has not escaped yet. Retire its local queue so failure of
+  // the transport can never fall back to a process-owned display root.
+  window->gpu_queue.reset();
+  window->remote = hooks;
+  window->consumer_bound = true;
+  return window;
+}
+
+extern "C" int darwin_art_android_ANativeWindow_remote_owner_dequeue(
+    void* opaque, DarwinArtRemoteOwnerDequeue* out) {
+  if (out == nullptr) return -EINVAL;
+  *out = DarwinArtRemoteOwnerDequeue{};
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
+  if (window == nullptr) return -EINVAL;
+  NativeWindowOperationPin operation(window);
+  darwin_art::window::NativeWindowDequeuedBuffer dequeued;
+  {
+    std::lock_guard<std::mutex> lock(window->mutex);
+    if (window->gpu_queue == nullptr || window->queue_observer == nullptr ||
+        window->queue_observer->callback == nullptr)
+      return -ENODEV;
+    const int status = window->gpu_queue->Dequeue(&dequeued);
+    if (status != 0) return status;
+    if (dequeued.buffer == nullptr || dequeued.native_buffer == nullptr) {
+      (void)window->gpu_queue->Cancel(dequeued.lease,
+                                     dequeued.acquire_fence);
+      return -EIO;
+    }
+    AHardwareBuffer_acquire(dequeued.buffer);
+  }
+  *out = {.buffer = dequeued.buffer,
+          .native_buffer = dequeued.native_buffer,
+          .acquire_fence = dequeued.acquire_fence,
+          .slot = dequeued.lease.slot,
+          .generation = dequeued.lease.generation,
+          .lease = dequeued.lease.lease};
+  return 0;
+}
+
+extern "C" int darwin_art_android_ANativeWindow_remote_owner_queue(
+    void* opaque, int32_t slot, uint64_t generation, uint64_t lease,
+    void* native_buffer, int fence, int32_t dataspace) {
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
+  if (window == nullptr) {
+    CloseFence(fence);
+    return -EINVAL;
+  }
+  const darwin_art::window::NativeWindowDequeueLease key{slot, generation,
+                                                          lease};
+  return NativeWindowQueueImpl(&window->abi, native_buffer, fence, &key,
+                               dataspace);
+}
+
+extern "C" int darwin_art_android_ANativeWindow_remote_owner_cancel(
+    void* opaque, int32_t slot, uint64_t generation, uint64_t lease,
+    int fence) {
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
+  if (window == nullptr) {
+    CloseFence(fence);
+    return -EINVAL;
+  }
+  NativeWindowOperationPin operation(window);
+  if (window->gpu_queue == nullptr) {
+    CloseFence(fence);
+    return -ENODEV;
+  }
+  return window->gpu_queue->Cancel({slot, generation, lease}, fence);
+}
+
+extern "C" int darwin_art_android_ANativeWindow_remote_owner_quarantine(
+    void* opaque, int32_t slot, uint64_t generation, uint64_t lease,
+    int fence) {
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
+  if (window == nullptr) {
+    CloseFence(fence);
+    return -EINVAL;
+  }
+  NativeWindowOperationPin operation(window);
+  if (window->gpu_queue == nullptr) {
+    CloseFence(fence);
+    return -ENODEV;
+  }
+  return window->gpu_queue->Quarantine({slot, generation, lease}, fence);
 }
 
 extern "C" void darwin_art_android_ANativeWindow_acquire(void* opaque) {
@@ -748,6 +916,73 @@ extern "C" bool darwin_art_android_ANativeWindow_set_owned_queue_callback(
   return true;
 }
 
+extern "C" void darwin_art_android_ANativeWindow_set_consumer_bound(
+    void* opaque, bool consumer_bound) {
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
+  if (window == nullptr) return;
+  std::lock_guard<std::mutex> lock(window->mutex);
+  window->consumer_bound = consumer_bound;
+}
+
+extern "C" bool darwin_art_android_ANativeWindow_has_queue_callback(
+    void* opaque) {
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
+  if (window == nullptr) return false;
+  std::lock_guard<std::mutex> lock(window->mutex);
+  return window->queue_observer != nullptr &&
+         window->queue_observer->callback != nullptr;
+}
+
+extern "C" bool darwin_art_android_ANativeWindow_is_consumer_bound(
+    void* opaque) {
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
+  if (window == nullptr) return false;
+  std::lock_guard<std::mutex> lock(window->mutex);
+  return window->consumer_bound;
+}
+
+extern "C" bool darwin_art_android_ANativeWindow_supports_mailbox(
+    void* opaque) {
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
+  if (window == nullptr) return false;
+  if (window->remote.set_present_mode != nullptr) return true;
+  std::lock_guard<std::mutex> lock(window->mutex);
+  return window->consumer_bound && window->queue_observer != nullptr &&
+         window->queue_observer->callback != nullptr;
+}
+
+extern "C" int32_t darwin_art_android_ANativeWindow_set_present_mode(
+    void* opaque, int32_t mode) {
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
+  if (window == nullptr ||
+      (mode != DARWIN_ART_ANDROID_PRESENT_MODE_MAILBOX &&
+       mode != DARWIN_ART_ANDROID_PRESENT_MODE_FIFO))
+    return -EINVAL;
+  if (window->remote.set_present_mode != nullptr) {
+    NativeWindowOperationPin operation(window);
+    const int status = window->remote.set_present_mode(window->remote.context,
+                                                        mode);
+    if (status == 0) window->present_mode.store(mode, std::memory_order_release);
+    return status;
+  }
+  std::lock_guard<std::mutex> lock(window->mutex);
+  if (mode == DARWIN_ART_ANDROID_PRESENT_MODE_MAILBOX &&
+      (window->queue_observer == nullptr ||
+       window->queue_observer->callback == nullptr ||
+       !window->consumer_bound)) {
+    return -ENOTSUP;
+  }
+  window->present_mode.store(mode, std::memory_order_release);
+  return 0;
+}
+
+extern "C" int32_t darwin_art_android_ANativeWindow_get_present_mode(
+    void* opaque) {
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
+  return window == nullptr ? -EINVAL
+                           : window->present_mode.load(std::memory_order_acquire);
+}
+
 extern "C" bool darwin_art_android_ANativeWindow_set_transaction_callback(
     void* opaque, DarwinArtAndroidNativeWindowTransactionCallback callback,
     void* context, void (*release_context)(void*)) {
@@ -777,6 +1012,8 @@ extern "C" uint64_t darwin_art_android_ANativeWindow_next_frame_number(
     void* opaque) {
   auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
   if (window == nullptr) return 0;
+  if (window->remote.next_frame != nullptr)
+    return window->remote.next_frame(window->remote.context);
   std::lock_guard<std::mutex> lock(window->mutex);
   return window->gpu_queue != nullptr ? window->gpu_queue->NextFrame() : 0;
 }
@@ -837,7 +1074,13 @@ extern "C" void
 darwin_art_android_ANativeWindow_register_imported_surface_identity(
     int64_t surface_identity, uint32_t owner_process_id, uint32_t layer_id,
     int32_t width, int32_t height, int32_t format) {
-  if (surface_identity == 0 || owner_process_id == 0 || layer_id == 0) return;
+  // SurfaceControl-backed windows carry an owner/layer pair.  A plain
+  // SurfaceTexture BufferQueue has neither, but still needs its parcelled
+  // geometry when the remote producer facade is constructed.
+  if (surface_identity == 0 || width <= 0 || height <= 0 ||
+      ((owner_process_id == 0) != (layer_id == 0))) {
+    return;
+  }
   std::lock_guard<std::mutex> lock(g_android_native_window_mutex);
   // Reserve registry storage before mutating queue or facade geometry. This
   // void ABI cannot report allocation/busy failure, so preserve the prior
@@ -967,10 +1210,18 @@ extern "C" int32_t darwin_art_android_ANativeWindow_cancel_hardware_buffer(
 }
 
 extern "C" int32_t darwin_art_android_ANativeWindow_lock(
-    void* opaque, void* buffer, void*) {
+    void* opaque, void* buffer, void* dirty_bounds) {
   auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
   auto* native_buffer = static_cast<AndroidNativeWindowBufferAbi*>(buffer);
   if (window == nullptr || native_buffer == nullptr) return -22;
+  NativeWindowOperationPin operation(window);
+  if (window->software_queue != nullptr &&
+      darwin_art_android_ANativeWindow_has_queue_callback(window)) {
+    return window->software_queue->Lock(
+        reinterpret_cast<ANativeWindow_Buffer*>(buffer),
+        static_cast<ARect*>(dirty_bounds));
+  }
+  if (darwin_art_android_ANativeWindow_is_consumer_bound(window)) return -95;
   const int32_t width = window->width.load(std::memory_order_relaxed);
   const int32_t height = window->height.load(std::memory_order_relaxed);
   const int32_t format = window->format.load(std::memory_order_relaxed);
@@ -1018,6 +1269,10 @@ extern "C" int32_t darwin_art_android_ANativeWindow_unlockAndPost(
     void* opaque) {
   auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
   if (window == nullptr) return -22;
+  NativeWindowOperationPin operation(window);
+  if (window->software_queue != nullptr &&
+      window->software_queue->HasLock())
+    return window->software_queue->UnlockAndPost();
   {
     std::lock_guard<std::mutex> lock(window->mutex);
     if (window->locked == nullptr) return -22;
@@ -1041,10 +1296,34 @@ extern "C" int32_t darwin_art_android_ANativeWindow_unlockAndPost(
   return 0;
 }
 
+extern "C" int32_t darwin_art_android_ANativeWindow_cancel_locked_buffer(
+    void* opaque) {
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
+  if (window == nullptr) return -22;
+  NativeWindowOperationPin operation(window);
+  if (window->software_queue != nullptr &&
+      window->software_queue->HasLock())
+    return window->software_queue->Cancel();
+  std::lock_guard<std::mutex> lock(window->mutex);
+  if (window->locked == nullptr) return -22;
+  window->locked.reset();
+  return 0;
+}
+
 extern "C" int32_t darwin_art_android_ANativeWindow_prepare_swapchain(
     void* opaque, int32_t width, int32_t height) {
   auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
   if (window == nullptr) return -EINVAL;
+  if (window->remote.prepare != nullptr) {
+    NativeWindowOperationPin operation(window);
+    const int status = window->remote.prepare(window->remote.context, width,
+                                               height);
+    if (status == 0) {
+      window->width.store(width, std::memory_order_release);
+      window->height.store(height, std::memory_order_release);
+    }
+    return status;
+  }
   std::lock_guard<std::mutex> lock(window->mutex);
   return PrepareGpuSwapchainLocked(window, width, height);
 }
@@ -1054,6 +1333,24 @@ extern "C" int32_t darwin_art_android_ANativeWindow_setBuffersGeometry(
   auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
   if (window == nullptr) return -22;
   if (width < 0 || height < 0) return -22;
+  if (window->remote.prepare != nullptr) {
+    const int32_t new_width = width > 0 ? width : window->width.load();
+    const int32_t new_height = height > 0 ? height : window->height.load();
+    const int32_t new_format = format != 0 ? format : window->format.load();
+    if (new_width <= 0 || new_height <= 0) return -EINVAL;
+    // The owner queue allocates RGBA8888 AHardwareBuffers. A remote producer
+    // cannot claim another format without changing that backing allocation.
+    if (new_format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM) return -EINVAL;
+    if (new_width != window->width.load() ||
+        new_height != window->height.load() ||
+        new_format != window->format.load()) {
+      const int result = darwin_art_android_ANativeWindow_prepare_swapchain(
+          window, new_width, new_height);
+      if (result != 0) return result;
+    }
+    window->format.store(new_format, std::memory_order_release);
+    return 0;
+  }
   std::lock_guard<std::mutex> lock(window->mutex);
   const int32_t new_width = width > 0
                                 ? width

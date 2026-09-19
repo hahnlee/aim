@@ -33,6 +33,24 @@ macro_rules! platform {
     }};
 }
 
+#[repr(C)]
+#[derive(Default)]
+struct HardwareBufferDescription {
+    width: u32,
+    height: u32,
+    layers: u32,
+    format: u32,
+    usage: u64,
+    stride: u32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct HardwareBufferIdentity {
+    surface_id: u32,
+    description: HardwareBufferDescription,
+}
+
 pub(super) unsafe fn wsi_backend_window_acquire(window: usize) -> bool {
     let valid = platform!(
         c"darwin_art_android_ANativeWindow_is_managed",
@@ -84,6 +102,22 @@ pub(super) unsafe fn wsi_backend_window_geometry(window: usize, w: u32, h: u32) 
     );
     unsafe { set(window as *mut c_void, w as i32, h as i32) }
 }
+pub(super) unsafe fn wsi_backend_window_supports_mailbox(window: usize) -> bool {
+    let supports = platform!(
+        c"darwin_art_android_ANativeWindow_supports_mailbox",
+        unsafe extern "C" fn(*mut c_void) -> bool,
+        false
+    );
+    unsafe { supports(window as *mut c_void) }
+}
+pub(super) unsafe fn wsi_backend_window_set_present_mode(window: usize, mode: i32) -> i32 {
+    let set = platform!(
+        c"darwin_art_android_ANativeWindow_set_present_mode",
+        unsafe extern "C" fn(*mut c_void, i32) -> i32,
+        -3
+    );
+    unsafe { set(window as *mut c_void, mode) }
+}
 pub(super) unsafe fn wsi_backend_window_dequeue(window: usize) -> Result<(usize, usize, i32), i32> {
     let dequeue = platform!(
         c"darwin_art_android_ANativeWindow_dequeue_hardware_buffer",
@@ -123,6 +157,20 @@ pub(super) unsafe fn wsi_backend_buffer_size(ahb: usize) -> Result<(u32, u32), i
     let mut desc = AHardwareBufferDesc::default();
     unsafe { describe(ahb as *const c_void, &mut desc) };
     Ok((desc.width, desc.height))
+}
+pub(super) unsafe fn wsi_backend_buffer_identity(ahb: usize) -> Result<u32, i32> {
+    let export = platform!(
+        c"darwin_art_android_hardware_buffer_export_identity",
+        unsafe extern "C" fn(*const c_void, *mut HardwareBufferIdentity) -> i32,
+        Err(-3)
+    );
+    let mut identity = HardwareBufferIdentity::default();
+    let status = unsafe { export(ahb as *const c_void, &mut identity) };
+    if status != 0 || identity.surface_id == 0 {
+        Err(if status != 0 { status } else { -3 })
+    } else {
+        Ok(identity.surface_id)
+    }
 }
 pub(super) unsafe fn wsi_backend_close_fd(fd: i32) {
     if fd < 0 {

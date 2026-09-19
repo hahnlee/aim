@@ -104,6 +104,8 @@ pub struct BinderBrokerSymbols {
     pub export_retained_file: darwin_art_engine_sys::BinderRetainedExportFn,
     pub release_export_lease: darwin_art_engine_sys::BinderExportLeaseReleaseFn,
     pub import_file: BinderImportFileFn,
+    pub export_bound_file: darwin_art_engine_sys::BinderBoundExportFn,
+    pub import_bound_file: darwin_art_engine_sys::BinderBoundImportFn,
     pub close_file: BinderCloseFileFn,
 }
 
@@ -210,6 +212,10 @@ impl LoadedEngine {
                     uninstall_owner: library
                         .symbol(b"darwin_art_bionic_binder_fd_uninstall_owner\0")?,
                     export_file: library.symbol(b"darwin_art_binder_export_file_descriptor\0")?,
+                    export_bound_file: library
+                        .symbol(b"darwin_art_binder_export_bound_file_descriptor\0")?,
+                    import_bound_file: library
+                        .symbol(b"darwin_art_binder_import_bound_file_descriptor\0")?,
                     export_retained_file: library
                         .symbol(b"darwin_art_binder_export_retained_file_descriptor\0")?,
                     release_export_lease: library

@@ -1,7 +1,7 @@
 //! Long-lived, peer-authenticated Binder routing control sessions.
 //! Payload storage remains in each process-local endpoint.
 
-use crate::{binder_transfer::TransferTable, ProfileError};
+use crate::{ProfileError, binder_transfer::TransferTable};
 use darwin_art_binder_device::{
     authority_protocol::{self, ConnectionToken, Message, TransferToken},
     routing_authority::{Outbound, PeerIdentity, RoutingAuthority, Session},
@@ -10,16 +10,15 @@ use std::{
     collections::HashMap,
     io,
     net::Shutdown,
-    os::{
-        fd::OwnedFd,
-        unix::net::UnixStream,
-    },
+    os::{fd::OwnedFd, unix::net::UnixStream},
     sync::{
-        mpsc::{self, SyncSender},
         Arc, Mutex,
+        mpsc::{self, SyncSender},
     },
     thread,
 };
+
+mod descriptor_authority;
 
 const OUTBOUND_CAPACITY: usize = 128;
 
@@ -32,13 +31,25 @@ struct Endpoint {
 
 /// One routed transfer removed from the service table. It can be sent once or
 /// dropped; neither outcome can put the descriptor back under the old token.
-pub(crate) struct TransferDelivery(Vec<OwnedFd>);
+pub(crate) struct TransferDelivery {
+    descriptors: Vec<OwnedFd>,
+    receipt: Option<descriptor_authority::DeliveryReceipt>,
+}
 
 impl TransferDelivery {
-    pub(crate) fn into_descriptors(self) -> Vec<OwnedFd> {
-        self.0
+    pub(crate) fn take_descriptors(&mut self) -> Vec<OwnedFd> {
+        std::mem::take(&mut self.descriptors)
     }
-
+    pub(crate) fn native_admitted(&mut self) {
+        if let Some(receipt) = &mut self.receipt {
+            receipt.admit();
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn into_descriptors(mut self) -> Vec<OwnedFd> {
+        self.native_admitted();
+        self.take_descriptors()
+    }
 }
 
 #[derive(Default)]
@@ -46,6 +57,7 @@ pub(crate) struct BinderService {
     authority: RoutingAuthority,
     endpoints: Mutex<HashMap<ConnectionToken, Endpoint>>,
     transfers: Mutex<TransferTable>,
+    descriptor_authority: Option<Arc<crate::scm_service::ScmService>>,
 }
 
 impl BinderService {
@@ -177,6 +189,7 @@ impl BinderService {
                             .discard_pending(session.connection(), transfer)
                             .map_err(transfer_failed)?;
                         drop(transfers);
+                        self.discard_descriptor_transfer(session.connection(), transfer);
                         self.enqueue(
                             sender,
                             Message::RouteRejected {
@@ -227,6 +240,7 @@ impl BinderService {
                         .discard_pending(session.connection(), transfer)
                         .map_err(transfer_failed)?;
                     drop(transfers);
+                    self.discard_descriptor_transfer(session.connection(), transfer);
                     self.enqueue(sender, Message::ReplyAccepted { call })?;
                 }
             }
@@ -308,12 +322,7 @@ impl BinderService {
         token: TransferToken,
         descriptors: Vec<OwnedFd>,
     ) -> Result<(), ProfileError> {
-        let connection = self.connection_for_peer(peer)?;
-        self.transfers
-            .lock()
-            .map_err(|_| poisoned())?
-            .deposit(connection, token, descriptors)
-            .map_err(transfer_failed)
+        self.deposit_descriptors(peer, token, descriptors)
     }
 
     /// Receives exactly one immutable transfer carrier from the authenticated
@@ -330,18 +339,14 @@ impl BinderService {
         self.deposit(peer, token, descriptors)
     }
 
+    #[cfg(test)]
     pub(crate) fn take(
         &self,
         peer: PeerIdentity,
         source: ConnectionToken,
         token: TransferToken,
     ) -> Result<Vec<OwnedFd>, ProfileError> {
-        let destination = self.connection_for_peer(peer)?;
-        self.transfers
-            .lock()
-            .map_err(|_| poisoned())?
-            .take(destination, source, token)
-            .map_err(transfer_failed)
+        self.take_descriptors(peer, source, token)
     }
 
     /// Consumes one routed bundle for the authenticated destination. The
@@ -353,23 +358,7 @@ impl BinderService {
         source: ConnectionToken,
         token: TransferToken,
     ) -> Result<TransferDelivery, ProfileError> {
-        self.take(peer, source, token).map(TransferDelivery)
-    }
-
-    fn connection_for_peer(&self, peer: PeerIdentity) -> Result<ConnectionToken, ProfileError> {
-        let endpoints = self.endpoints.lock().map_err(|_| poisoned())?;
-        let mut matches = endpoints
-            .iter()
-            .filter_map(|(connection, endpoint)| (endpoint.peer == peer).then_some(*connection));
-        let connection = matches
-            .next()
-            .ok_or_else(|| ProfileError::Daemon("Binder peer has no active session".into()))?;
-        if matches.next().is_some() {
-            return Err(ProfileError::Daemon(
-                "Binder peer has multiple active sessions".into(),
-            ));
-        }
-        Ok(connection)
+        self.prepare_descriptor_take(peer, source, token)
     }
 
     fn remove(&self, connection: ConnectionToken) -> Vec<Outbound> {
@@ -382,8 +371,20 @@ impl BinderService {
             return Vec::new();
         };
         let _ = endpoint.shutdown.shutdown(Shutdown::Both);
-        if let Ok(mut transfers) = self.transfers.lock() {
-            transfers.remove_connection(connection);
+        loop {
+            let removed =
+                self.transfers.lock().ok().and_then(|mut transfers| {
+                    transfers.remove_next_connection_transfer(connection)
+                });
+            let Some(key) = removed else {
+                break;
+            };
+            self.discard_descriptor_transfer(key.source, key.token);
+        }
+        if let Some(authority) = &self.descriptor_authority {
+            if let Err(error) = authority.binder_session_closed(endpoint.peer, connection.get()) {
+                eprintln!("Binder descriptor session cleanup failed: {error}");
+            }
         }
         self.authority
             .close(&endpoint.session)
@@ -412,3 +413,6 @@ fn poisoned() -> ProfileError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod descriptor_authority_tests;

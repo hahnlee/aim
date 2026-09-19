@@ -71,11 +71,17 @@ fn wrong_process_and_replay_are_rejected() {
 #[test]
 fn source_death_removes_pending_but_committed_unrouted_survives() {
     let (mut registry, pair, pending) = setup();
+    let committed_binding = Binding::Binder {
+        source_connection: 4,
+        transfer: 9,
+        ordinal: 2,
+        object_offset: 64,
+    };
     let committed = registry
-        .prepare_delegation(pair.holder_b, binding())
+        .prepare_delegation(pair.holder_b, committed_binding)
         .unwrap();
     registry
-        .commit_source_export(pair.holder_b, committed, binding())
+        .commit_source_export(pair.holder_b, committed, committed_binding)
         .unwrap();
     registry.source_died(source()).unwrap();
     assert_eq!(

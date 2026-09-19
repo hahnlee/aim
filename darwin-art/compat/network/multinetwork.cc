@@ -10,7 +10,7 @@
 
 extern "C" void darwin_art_bionic_errno_store(int32_t android_errno);
 extern "C" int darwin_art_bionic_errno_set_from_darwin(int darwin_errno);
-extern "C" int darwin_art_bionic_fd_export_for_scm(int guest_fd);
+extern "C" int darwin_art_bionic_fd_dup_host_fd_core(int guest_fd, int* native_fd);
 extern "C" int darwin_art_bionic_socket_broker_close(int guest_fd);
 extern "C" int darwin_art_bionic_socket_broker_res_nquery(
     uint64_t network, const char* name, int ns_class, int ns_type,
@@ -88,8 +88,8 @@ extern "C" int AndroidSetSocketNetwork(uint64_t network, int guest_fd) {
   // Guest descriptors are central-broker tokens, never Darwin descriptors.
   // Export a leased duplicate and validate the actual object as a socket even
   // when clearing a binding, matching Android's EBADF/ENOTSOCK behavior.
-  const int host_fd = darwin_art_bionic_fd_export_for_scm(guest_fd);
-  if (host_fd < 0) return -1;
+  int host_fd = -1;
+  if (darwin_art_bionic_fd_dup_host_fd_core(guest_fd, &host_fd) < 1) return -1;
   int socket_type = 0;
   socklen_t length = sizeof(socket_type);
   const int result = getsockopt(host_fd, SOL_SOCKET, SO_TYPE, &socket_type,

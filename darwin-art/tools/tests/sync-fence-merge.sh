@@ -38,6 +38,16 @@ common=(-arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g
   -o "$tmp/scm-exports.o"
 "$host_cxx" "${common[@]}" -c "$adapter/src/fd_inheritance.cc" \
   -o "$tmp/fd-inheritance.o"
+"$host_cxx" "${common[@]}" -c "$adapter/src/scm_endpoint_provider.cc" \
+  -o "$tmp/scm_endpoint_provider.o"
+"$host_cxx" "${common[@]}" -c "$adapter/src/ancillary_intake.cc" \
+  -o "$tmp/ancillary_intake.o"
+"$host_cxx" "${common[@]}" -c "$adapter/src/scm_channel.cc" \
+  -o "$tmp/scm_channel.o"
+"$host_cxx" "${common[@]}" -c "$adapter/src/scm_guest_group.cc" \
+  -o "$tmp/scm_guest_group.o"
+"$host_cxx" "${common[@]}" -c "$adapter/src/scm_android_receive.cc" \
+  -o "$tmp/scm_android_receive.o"
 "$host_cxx" "${common[@]}" -c "$adapter/src/retained_scm_export.cc" \
   -o "$tmp/retained-scm-export.o"
 "$host_cxx" "${common[@]}" -c "$adapter/src/eventfd_owner.cc" \
@@ -62,6 +72,8 @@ common=(-arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g
 "$host_cxx" "${common[@]}" \
   "$adapter/probes/sync_fence_merge_test.cc" \
   "$tmp/adapter.o" "$tmp/scm-exports.o" "$tmp/fd-inheritance.o" "$tmp/retained-scm-export.o" "$tmp/eventfd-owner.o" "$tmp/sync-fence-merge.o" "$tmp/sync-fence-broker.o" \
+  "$tmp/scm_endpoint_provider.o" "$tmp/ancillary_intake.o" "$tmp/scm_channel.o" \
+  "$tmp/scm_guest_group.o" "$tmp/scm_android_receive.o" \
   "$tmp/broker.o" "$tmp/dns.o" "$tmp/sync.o" "$tmp/fdsan.o" \
   "$tmp/errno.o" "$fdsan" "$loader" \
   -framework Security -lresolv -o "$tmp/sync-fence-merge"

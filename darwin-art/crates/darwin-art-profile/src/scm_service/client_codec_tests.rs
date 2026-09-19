@@ -69,6 +69,8 @@ fn server_pair_and_prepare_responses_decode_without_minting_client_grants() {
             key: key(),
             payload_count: 16,
             managed: vec![(3, 10), (9, 11)],
+            credentials: crate::scm_service::credentials::Credentials { pid: 1, uid: 0, gid: 0 },
+            authenticated: false,
         }
     );
     assert!(decode_pair(&prepared).is_err());
@@ -104,18 +106,40 @@ fn invalid_last_item_never_encodes_a_valid_prefix() {
 
 #[test]
 fn admitted_response_requires_exact_order_and_no_duplicate_holders() {
-    let mut body = body_with_capacity(50).unwrap();
+    let mut body = body_with_capacity(100).unwrap();
     push_u16(&mut body, 2);
-    push_items(&mut body, &[(9, 10), (3, 11)]);
+    for (ordinal, holder, side) in [(9, 10, 0), (3, 11, 1)] {
+        push_u64(&mut body, ordinal);
+        push_u128(&mut body, holder);
+        push_u128(&mut body, key().authority.instance);
+        push_u64(&mut body, 77);
+        body.push(side);
+    }
     let bytes = frame(Operation::Admit, body).unwrap();
     assert_eq!(
         decode_admitted(&bytes, &[9, 3]).unwrap(),
-        vec![(9, 10), (3, 11)]
+        vec![
+            AdmittedGrant {
+                ordinal: 9,
+                authority: key().authority.instance,
+                carrier: 77,
+                holder: 10,
+                side: 0,
+            },
+            AdmittedGrant {
+                ordinal: 3,
+                authority: key().authority.instance,
+                carrier: 77,
+                holder: 11,
+                side: 1,
+            },
+        ]
     );
     assert!(decode_admitted(&bytes, &[3, 9]).is_err());
     assert!(decode_admitted(&bytes, &[9]).is_err());
     let mut duplicate = bytes.clone();
-    duplicate[HEADER_SIZE + 2 + 24 + 8..].copy_from_slice(&10u128.to_le_bytes());
+    let holder_offset = HEADER_SIZE + 2 + 49 + 8;
+    duplicate[holder_offset..holder_offset + 16].copy_from_slice(&10u128.to_le_bytes());
     assert!(decode_admitted(&duplicate, &[9, 3]).is_err());
     let mut reserved = bytes.clone();
     reserved[2] = 1;

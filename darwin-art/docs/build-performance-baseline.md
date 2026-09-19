@@ -1,117 +1,44 @@
 # Build-performance baseline
 
-This document defines the measurement contract for the current build graph.
-It is deliberately separate from the build implementation: the measurement
-tool invokes the existing commands unchanged and writes command output only to
-a temporary directory.
+Measurement rules for existing build commands. Current developer commands and
+inner-loop timings are in [build-system.md](build-system.md); native cache
+contracts are in [native-build-graph.md](native-build-graph.md).
 
-## Measurement contract
+## Measure
 
-From the repository root, run:
+From `darwin-art/`:
 
 ```sh
 tools/measure-build-performance.sh --all
 ```
 
-The default invocation measures only `cargo check --workspace`. Selectors are
-available when a full native measurement is not appropriate:
+Default is `--cargo-check`; optional selectors are `--graphics-bootstrap` and
+`--audit-graphics`. They invoke workspace check, runtime graphics bootstrap and
+full graphics link audit respectively, with output-only verbosity. Use
+`--keep-output` to retain raw temporary logs.
 
-```sh
-tools/measure-build-performance.sh --cargo-check
-tools/measure-build-performance.sh --graphics-bootstrap
-tools/measure-build-performance.sh --audit-graphics
-```
+Record command, source/toolchain identity, warm/cold state, exit, `/usr/bin/time -p`
+wall time and reported compile/cache signals. Signals are heuristic; fast exit
+alone is not a cache hit. A no-op needs successful consecutive warm runs with
+unchanged products and exact Ninja no-work where applicable. No wall-time
+budget is established. Measurement does not delete build trees or change flags.
 
-The selected commands are:
+## Historical reference samples
 
-| Label | Existing command |
-| --- | --- |
-| `cargo-check` | `cargo check --workspace` (measured with Cargo's output-only `-v`) |
-| `graphics-bootstrap` | `cargo run -p art-bootstrap -- build-runtime-graphics-bootstrap` (measured with output-only `-v`) |
-| `audit-graphics` | `cargo run -p art-bootstrap -- audit-runtime-graphics-link` (measured with output-only `-v`) |
+These workloads and workspace shapes differ; do not compare them as equivalent
+or treat them as fresh current-source acceptance.
 
-For each command the tool records exit status, `/usr/bin/time -p` wall time,
-and heuristic counts of compile/build versus fresh/cache messages. The counts
-are diagnostic signals, not a correctness gate: some native shell gates emit
-no cache message even when their artifacts are reusable. Use
-`--keep-output` when the raw command logs are needed for investigation.
+| Date | State / invocation | Wall (s) |
+| --- | --- | ---: |
+| 2026-08-21 | Warm Cargo workspace check, original / consolidated workspace | 0.08 / 0.16 |
+| 2026-08-21 | Warm Cargo graphics bootstrap | 4.06 |
+| 2026-08-21 | Warm full / fast Cargo graphics link audit | 58.88 / 4.62 |
+| 2026-08-21 | Warm native graph structural audit | 1.99 |
+| 2026-08-21 | Warm direct CLI runtime / fast graphics link audit | 14.60 / 3.41 |
+| 2026-08-21 | Warm incremental direct CLI graphics audit | 24.81 |
+| 2026-08-29 | Warm Cargo build-foundation; source/archive mtimes stable, next graph no-work | 1.47 |
 
-The measurement is safe to repeat. It does not delete `_build`, `target`, or
-any source tree, and it does not alter compiler flags, source sync, generated
-artifacts, or gate behavior. Only the temporary log directory is removed on
-exit (unless `--keep-output` is supplied).
-
-## Baseline table
-
-Record one row per command and state whether the run was warm (all existing
-artifacts/cache available) or intentionally cold. Do not compare cold and
-warm rows as if they were the same workload.
-
-| Date | State | Command | Exit | Wall (s) | Compiled signal | Cached signal |
-| --- | --- | --- | ---: | ---: | ---: | ---: |
-| 2026-08-21 | warm/no-op | `cargo check --workspace` | 0 | 0.08 | 0 | 13 |
-| 2026-08-21 | warm/no-op | `build-runtime-graphics-bootstrap` | 0 | 4.06 | 0 | 12 |
-| 2026-08-21 | warm/no-op | `audit-runtime-graphics-link` | 0 | 58.88 | 0 | 11 |
-| 2026-08-21 | warm/no-op | `audit-native-graph.sh` | 0 | 1.99 | 0 | 1035 |
-| 2026-08-21 | warm/no-op | `audit-runtime-graphics-link-fast` | 0 | 4.62 | 0 | 11 |
-
-The first safe no-op criterion is unchanged output plus a successful exit on a
-second consecutive warm run. A useful future criterion is a measured wall-time
-budget, but the repository does not yet have enough stable samples to choose
-one. A cache hit must never be inferred from a short run alone; retain the
-reported signals and the source/toolchain revision with each baseline.
-
-## Post-workspace sample
-
-After consolidating the core Rust crates and adding the ABI/runtime/xtask
-packages, a warm `cargo check --workspace -v` measured **0.16 s**, exit 0,
-compiled signal 0, cached signal 19. This is recorded separately from the
-original baseline so future graph changes can be compared without mixing
-different workspace shapes.
-
-After the shared core-probe cache and host ownership boundaries landed, a
-warm direct-CLI sample measured:
-
-| Date | State | Command | Exit | Wall (s) |
-| --- | --- | --- | ---: | ---: |
-| 2026-08-21 | warm/no-op | `target/debug/art-bootstrap audit-runtime-link` | 0 | 14.60 |
-| 2026-08-21 | warm/no-op | `target/debug/art-bootstrap audit-runtime-graphics-link-fast` | 0 | 3.41 |
-| 2026-08-21 | warm/incremental | `target/debug/art-bootstrap audit-runtime-graphics-link-incremental` | 0 | 24.81 |
-| 2026-08-29 | warm/no-op | `cargo run -q -p art-bootstrap -- build-foundation` | 0 | 1.47 |
-
-The six flavor-neutral core probe objects are now shared under
-`_build/native-probes/core`; the warm samples therefore do not recompile those
-objects once the CPU and graphics audits have populated the cache. These rows
-are direct CLI timings (not the older Cargo wrapper rows) and should not be
-compared to the 58.88 s full upstream graphics audit as if they were the same
-workload. The incremental row includes the graphics closure audit and final
-link/symbol checks while reusing all 14 source-pinned foundation products; its
-first run after a stamp/input change remains a cold foundation build.
-The 2026-08-29 foundation sample also preserved the patched-source and archive
-mtimes; regenerating the native graph immediately afterward reported
-`ninja: no work to do` for `graphics-bootstrap`.
-
-## Known bottlenecks
-
-The current graph is dominated by the production dylib link and serial full
-acceptance gates rather than by Rust type-checking:
-
-- `probes/runtime_graphics_probe.cc` owns RenderNode orchestration while
-  `probes/runtime_graphics_gpu.cc` owns the direct Metal presenter; the
-  phase/input/shutdown/GPU objects are separate cache products.
-- `crates/art-bootstrap/src/main.rs` combines source materialization, patching,
-  native compilation, archive/link orchestration, audit, and probes.
-- The full graphics audit intentionally reruns serial upstream source/ABI
-  gates; use `audit-runtime-graphics-link-fast` for the inner loop.
-- The workspace still contains independent `tools/*` Cargo projects outside
-  the main Rust graph, so provider-specific edits should use their local audit
-  before the full workspace gate.
-- The remaining broad bootstrap stamps do not affect the promoted warm graph,
-  but their phase-local invalidation still needs an explicit mutation test.
-
-These are observations to validate with the baseline, not permission for the
-measurement script to change the graph. The intended follow-up is to finish
-the phase-local invalidation audit and remove the remaining broad bootstrap
-stamps while keeping runtime ownership and lifecycle state in Rust behind a
-narrow unsafe FFI boundary. Each structural change should preserve this
-measurement contract.
+All rows exited 0. Link cost and serial full audits dominated these samples.
+Use the fast/incremental inner loop and owning-provider audits appropriately;
+validate phase-local invalidation before removing broad bootstrap stamps.
+Past cache narratives and per-run logs live in Git history.

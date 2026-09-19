@@ -35,6 +35,7 @@ const VK_FORMAT_R8G8B8A8_UNORM: i32 = 37;
 const SURFACE_FORMATS: [i32; 2] = [VK_FORMAT_R8G8B8A8_UNORM, 43];
 const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: i32 = 0;
 const VK_PRESENT_MODE_FIFO_KHR: i32 = 2;
+const VK_PRESENT_MODE_MAILBOX_KHR: i32 = 1;
 const VK_IMAGE_USAGE_TRANSFER_SRC_BIT: u32 = 1;
 const VK_IMAGE_USAGE_TRANSFER_DST_BIT: u32 = 2;
 const VK_IMAGE_USAGE_SAMPLED_BIT: u32 = 4;
@@ -169,7 +170,7 @@ struct SurfaceState {
 }
 
 struct ImageSlot {
-    ahb: usize,
+    surface_id: u32,
     native_buffer: usize,
     image: VkHandle,
     memory: usize,
@@ -388,10 +389,19 @@ fn acquire_next(
                     cancel_native(window, native_buffer, -1);
                     return VK_ERROR_OUT_OF_DATE_KHR;
                 }
+                let surface_id = match unsafe { backend::wsi_backend_buffer_identity(ahb) } {
+                    Ok(id) => id,
+                    Err(_) => {
+                        drop(slots);
+                        cancel_native(window, native_buffer, -1);
+                        return VK_ERROR_OUT_OF_DATE_KHR;
+                    }
+                };
                 let Some(index) = slots
                     .iter()
-                    .position(|slot| slot.ahb == ahb && !slot.acquired)
+                    .position(|slot| slot.surface_id == surface_id && !slot.acquired)
                 else {
+                    trace_failure("acquire-unknown-buffer-identity", VK_ERROR_OUT_OF_DATE_KHR);
                     drop(slots);
                     cancel_native(window, native_buffer, -1);
                     return VK_ERROR_OUT_OF_DATE_KHR;
@@ -593,19 +603,29 @@ unsafe extern "C" fn get_surface_present_modes(
     if count.is_null() {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    if current_surface(from_handle(surface)).is_err() {
+    let Ok((window, _, _)) = current_surface(from_handle(surface)) else {
         return VK_ERROR_SURFACE_LOST_KHR;
-    }
+    };
+    let mailbox = unsafe { backend::wsi_backend_window_supports_mailbox(window) };
     if modes.is_null() {
-        *count = 1;
+        *count = if mailbox { 2 } else { 1 };
         return VK_SUCCESS;
     }
     if *count == 0 {
         return VK_INCOMPLETE;
     }
-    *modes = VK_PRESENT_MODE_FIFO_KHR;
-    *count = 1;
-    VK_SUCCESS
+    let available = [VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_MAILBOX_KHR];
+    let available_count = if mailbox { 2 } else { 1 };
+    let written = (*count as usize).min(available_count);
+    for (index, mode) in available.iter().take(written).enumerate() {
+        *modes.add(index) = *mode;
+    }
+    *count = written as u32;
+    if written < available_count {
+        VK_INCOMPLETE
+    } else {
+        VK_SUCCESS
+    }
 }
 
 unsafe extern "C" fn create_swapchain(
@@ -630,6 +650,12 @@ unsafe extern "C" fn create_swapchain(
     if std::env::var_os("DARWIN_ART_DEBUG_GRAPHICS_DSO").is_some() {
         eprintln!("ART Android Vulkan WSI: pid={} requested swapchain type={} surface={:#x} count={} format={} colorspace={} size={}x{} layers={} usage={:#x} transform={:#x} alpha={:#x} mode={} flags={:#x}", std::process::id(), info.s_type,info.surface,info.min_image_count,info.image_format,info.image_color_space,info.image_extent.width,info.image_extent.height,info.image_array_layers,info.image_usage,info.pre_transform,info.composite_alpha,info.present_mode,info.flags);
     }
+    let surface_handle = from_handle(info.surface);
+    let Ok((window, extent, generation)) = current_surface(surface_handle) else {
+        trace_failure("create-swapchain-surface", VK_ERROR_OUT_OF_DATE_KHR);
+        return VK_ERROR_OUT_OF_DATE_KHR;
+    };
+    let mailbox = info.present_mode == VK_PRESENT_MODE_MAILBOX_KHR;
     if info.surface == 0
         || info.min_image_count != 3
         || !SURFACE_FORMATS.contains(&info.image_format)
@@ -637,7 +663,8 @@ unsafe extern "C" fn create_swapchain(
         || info.image_extent.width == 0
         || info.image_extent.height == 0
         || info.image_array_layers != 1
-        || info.present_mode != VK_PRESENT_MODE_FIFO_KHR
+        || (info.present_mode != VK_PRESENT_MODE_FIFO_KHR
+            && (!mailbox || !unsafe { backend::wsi_backend_window_supports_mailbox(window) }))
         || info.image_usage & !SUPPORTED_USAGE != 0
         || info.pre_transform != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
         || info.composite_alpha != VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
@@ -645,14 +672,15 @@ unsafe extern "C" fn create_swapchain(
         trace_failure("create-swapchain-unsupported", VK_ERROR_FEATURE_NOT_PRESENT);
         return VK_ERROR_FEATURE_NOT_PRESENT;
     }
-    let surface_handle = from_handle(info.surface);
-    let Ok((window, extent, generation)) = current_surface(surface_handle) else {
-        trace_failure("create-swapchain-surface", VK_ERROR_OUT_OF_DATE_KHR);
-        return VK_ERROR_OUT_OF_DATE_KHR;
-    };
     if extent.width != info.image_extent.width || extent.height != info.image_extent.height {
         trace_failure("create-swapchain-extent", VK_ERROR_OUT_OF_DATE_KHR);
         return VK_ERROR_OUT_OF_DATE_KHR;
+    }
+    let mode_result =
+        unsafe { backend::wsi_backend_window_set_present_mode(window, info.present_mode) };
+    if mode_result != 0 {
+        trace_failure("create-swapchain-present-mode", mode_result);
+        return VK_ERROR_FEATURE_NOT_PRESENT;
     }
     let device_value = device as usize;
     let geometry_result = backend::wsi_backend_window_geometry(window, extent.width, extent.height);
@@ -676,7 +704,16 @@ unsafe extern "C" fn create_swapchain(
             }
         };
         close_fence(fence);
-        if slots.iter().any(|slot: &ImageSlot| slot.ahb == ahb) {
+        let surface_id = match backend::wsi_backend_buffer_identity(ahb) {
+            Ok(id) => id,
+            Err(_) => {
+                cancel_native(window, native_buffer, -1);
+                destroy_slots(device_value, window, &mut slots);
+                trace_failure("create-swapchain-buffer-identity", VK_ERROR_OUT_OF_DATE_KHR);
+                return VK_ERROR_OUT_OF_DATE_KHR;
+            }
+        };
+        if slots.iter().any(|slot: &ImageSlot| slot.surface_id == surface_id) {
             cancel_native(window, native_buffer, -1);
             destroy_slots(device_value, window, &mut slots);
             trace_failure(
@@ -744,7 +781,7 @@ unsafe extern "C" fn create_swapchain(
                 }
             };
         slots.push(ImageSlot {
-            ahb,
+            surface_id,
             native_buffer,
             image: as_handle(image),
             memory,

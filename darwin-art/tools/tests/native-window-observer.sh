@@ -17,6 +17,7 @@ xcrun clang++ -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -I"$root/_aosp/frameworks/native/libs/arect/include" \
   "$root/compat/darwin_android_native_window.cc" \
   "$root/compat/window/native_window_buffer_queue.cc" \
+  "$root/compat/window/native_window_software_queue.cc" \
   "$root/compat/window/native_window_transaction_consumer.cc" \
   "$root/compat/window/locked_surface.cc" \
   "$root/compat/media/consumer_buffer.cc" \

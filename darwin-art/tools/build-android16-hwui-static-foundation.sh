@@ -72,6 +72,7 @@ sources=(
   effects/GainmapRenderer.cpp
   pipeline/skia/BackdropFilterDrawable.cpp
   pipeline/skia/HolePunch.cpp
+  pipeline/skia/LayerDrawable.cpp
   pipeline/skia/SkiaCpuPipeline.cpp
   pipeline/skia/SkiaDisplayList.cpp
   pipeline/skia/SkiaGpuPipeline.cpp
@@ -432,8 +433,9 @@ apex_archive="$stage/libandroid-graphics-apex-common-darwin.a"
 file "$archive" | grep -F 'current ar archive' >/dev/null
 lipo -info "$archive" | grep -F 'architecture: arm64' >/dev/null
 member_count="$("$ar" -t "$archive" | grep -v '^__\.SYMDEF' | wc -l | tr -d ' ')"
-[[ "$member_count" == 88 ]] || {
-    echo "hwui-static-foundation: archive member count expected=88 actual=$member_count" >&2
+expected_member_count=$((HWUI_SOURCE_COUNT + 1))  # Generated HWUIProperties.sysprop.cpp.
+[[ "$member_count" == "$expected_member_count" ]] || {
+    echo "hwui-static-foundation: archive member count expected=$expected_member_count actual=$member_count" >&2
   exit 3
 }
 apex_member_count="$("$ar" -t "$apex_archive" | grep -v '^__\.SYMDEF' | wc -l | tr -d ' ')"

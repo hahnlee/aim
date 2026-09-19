@@ -35,13 +35,26 @@ int ReleaseHolder(void *, const uint8_t *) {
   assert(darwin_art_bionic_uninstall_scm_endpoint_provider() == EBUSY);
   return ENOSYS;
 }
+int Prepare(void *, const DarwinArtScmPrepareRequestV2 *, DarwinArtScmPreparedV2 *) { return ENOSYS; }
+int Admit(void *, const DarwinArtScmAdmitRequestV2 *, DarwinArtScmAdmissionV2 *) { return ENOSYS; }
+int Settle(void *, const uint8_t *, uint64_t, uint32_t) {
+  assert(darwin_art_bionic_uninstall_scm_endpoint_provider() == EBUSY);
+  return ENOSYS;
+}
+int Bind(void *, const uint8_t *, const DarwinArtScmBinderBindingV2 *, uint8_t *) { return ENOSYS; }
+int Cancel(void *, const DarwinArtScmBinderBindingV2 *) {
+  assert(darwin_art_bionic_uninstall_scm_endpoint_provider() == EBUSY);
+  return ENOSYS;
+}
+int Claim(void *, const DarwinArtScmBinderBindingV2 *, const uint8_t *, uint32_t, DarwinArtScmGrantV2 *) { return ENOSYS; }
 } // namespace
 
 int main() {
   using darwin_art::bionic::scm::AcquireProvider;
   Context context;
   context.table = {DARWIN_ART_SCM_ENDPOINT_ABI_VERSION, sizeof(context.table),
-                   &context, &Retain, &Release, &Register, &ReleaseHolder};
+                   &context, &Retain, &Release, &Register, &ReleaseHolder,
+                   &Prepare, &Admit, &Settle, &Bind, &Cancel, &Claim};
   DarwinArtScmEndpointProviderV1 acquired{};
   assert(AcquireProvider(&acquired) == ENOSYS);
   assert(darwin_art_bionic_install_scm_endpoint_provider(nullptr) == EINVAL);
@@ -60,6 +73,12 @@ int main() {
   assert(darwin_art_bionic_uninstall_scm_endpoint_provider() == EBUSY);
   DarwinArtScmEndpointProviderV1 stopped{};
   assert(AcquireProvider(&stopped) == ENOSYS);
+  assert(acquired.prepare(acquired.context, nullptr, nullptr) == ESHUTDOWN);
+  assert(acquired.admit(acquired.context, nullptr, nullptr) == ESHUTDOWN);
+  assert(acquired.bind_binder(acquired.context, nullptr, nullptr, nullptr) == ESHUTDOWN);
+  assert(acquired.claim_binder(acquired.context, nullptr, nullptr, 0, nullptr) == ESHUTDOWN);
+  assert(acquired.settle(acquired.context, nullptr, 0, DARWIN_ART_SCM_ABORTED) == ENOSYS);
+  assert(acquired.cancel_binder(acquired.context, nullptr) == ENOSYS);
   void *existing = acquired.retain(acquired.context);
   assert(existing != nullptr);
   uint8_t holder[16]{};

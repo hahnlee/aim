@@ -13,7 +13,8 @@ struct Context {
   int releases = 0;
   bool clear_during_release = false;
 };
-static void Queue(void*, AHardwareBuffer*, int32_t, int, int32_t) {}
+static void Queue(void*, AHardwareBuffer*, int32_t, uint64_t, uint64_t, int,
+                  int32_t) {}
 static void Release(void* opaque) {
   auto* context = static_cast<Context*>(opaque);
   // Real consumer teardown may return slots or query its still-retained

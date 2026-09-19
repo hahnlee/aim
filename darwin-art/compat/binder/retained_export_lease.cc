@@ -3,9 +3,11 @@
 #include "darwin_art_bionic_binder_fd.h"
 #include "darwin_art_bionic_socket_broker.h"
 #include "retained_scm_export.h"
+#include "socket_endpoint_exports.h"
 
 #include <cerrno>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <new>
 #include <unistd.h>
@@ -26,6 +28,8 @@ struct RetainedExportLease final {
 
   ~RetainedExportLease() noexcept {
     const int saved_errno = errno;
+    if (pending_binding && provider.context != nullptr)
+      (void)provider.cancel_binder(provider.context, &binding);
     // The Description pin must be released before the Process reference.  The
     // broker is owned by Process and can otherwise be destroyed too early.
     retained.reset();
@@ -33,6 +37,8 @@ struct RetainedExportLease final {
       darwin_art_bionic_binder_fd_release_process(process_cookie);
       process_cookie = nullptr;
     }
+    if (provider.context != nullptr)
+      provider.release(provider.context);
     errno = saved_errno;
   }
 
@@ -41,6 +47,9 @@ struct RetainedExportLease final {
 
   void *process_cookie = nullptr;
   std::unique_ptr<RetainedScmExport> retained;
+  DarwinArtScmEndpointProviderV1 provider{};
+  DarwinArtScmBinderBindingV2 binding{};
+  bool pending_binding = false;
 };
 
 struct ProcessCookieGuard final {
@@ -102,6 +111,38 @@ int ExportRetainedFileDescriptorImpl(
       return -1;
     }
     process_guard.cookie = nullptr;
+    DarwinArtScmGrantV2 endpoint{};
+    const int managed = darwin_art::bionic::scm::RetainExportedEndpoint(
+        lease->process_cookie, lease->retained->snapshot(), &endpoint,
+        &lease->provider);
+    if (managed < 0) {
+      errno = -managed;
+      delete lease;
+      return -1;
+    }
+    if (managed == 1) {
+      lease->binding = {binding->source_connection, binding->transfer,
+                        binding->ordinal, binding->object_offset};
+      // Allocate and retain every owner before minting a delegation. A known
+      // binding receipt covers cancellation even if the reply is interrupted.
+      lease->pending_binding = true;
+      const int status = lease->provider.bind_binder(
+          lease->provider.context, endpoint.holder, &lease->binding,
+          result->attributes);
+      constexpr uint8_t header[] = {1, 0, 0, 0, 1, 0, 0, 0};
+      bool delegation_nonzero = false;
+      for (size_t i = 24; i < 40; ++i) delegation_nonzero |= result->attributes[i] != 0;
+      if (status != 0 ||
+          std::memcmp(result->attributes, header, sizeof(header)) != 0 ||
+          !delegation_nonzero ||
+          std::memcmp(result->attributes + 8, endpoint.authority, 16) != 0) {
+        errno = status != 0 ? status : EPROTO;
+        delete lease;
+        ClearResult(result);
+        return -1;
+      }
+      result->attributes_length = 40;
+    }
     result->host_fd = lease->retained->take_host_fd();
     if (result->host_fd < 0) {
       delete lease;

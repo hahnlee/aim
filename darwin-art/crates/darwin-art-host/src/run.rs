@@ -289,7 +289,10 @@ fn run_owner(
                                 export: broker.export_file,
                                 import: broker.import_file,
                                 close: broker.close_file,
-                                bundle: None,
+                                bundle: Some(darwin_art_binder_process::DescriptorBundleApi {
+                                    export: broker.export_bound_file,
+                                    import: broker.import_bound_file,
+                                }),
                                 retained: Some(darwin_art_binder_process::DescriptorRetainedApi {
                                     export: broker.export_retained_file,
                                     release: broker.release_export_lease,

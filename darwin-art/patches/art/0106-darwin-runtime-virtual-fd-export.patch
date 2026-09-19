@@ -8,12 +8,12 @@
  #include <string.h>
  #include <unistd.h>
  
-@@ -56,7 +57,31 @@
+@@ -56,7 +57,32 @@
  #include "trace.h"
  #include "trace_profile.h"
  
 +#if defined(__APPLE__)
-+extern "C" int darwin_art_bionic_fd_export_for_scm(int guest_fd);
++extern "C" int darwin_art_bionic_fd_dup_host_fd_core(int guest_fd, int* native_fd);
 +#endif
 +
  namespace art HIDDEN {
@@ -25,7 +25,8 @@
 +  // so export a duplicate of its underlying open-file description only at
 +  // this native boundary. The trace writer then owns and closes the host fd,
 +  // exactly as it owns DupCloexec()'s result on Android.
-+  int copy = darwin_art_bionic_fd_export_for_scm(fd);
++  int copy = -1;
++  if (darwin_art_bionic_fd_dup_host_fd_core(fd, &copy) < 1) return -1;
 +  if (copy >= 0 && fcntl(copy, F_SETFD, FD_CLOEXEC) != 0) {
 +    int saved_errno = errno;
 +    close(copy);
@@ -40,7 +41,7 @@
  
  static jobjectArray VMDebug_getVmFeatureList(JNIEnv* env, jclass) {
    ScopedObjectAccess soa(Thread::ForEnv(env));
-@@ -114,7 +139,7 @@
+@@ -114,7 +140,7 @@
      return;
    }
  

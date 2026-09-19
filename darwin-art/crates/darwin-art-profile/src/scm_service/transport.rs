@@ -1,5 +1,6 @@
 //! Private request/response I/O. No socket wait runs under the ownership mutex.
 use super::{
+    credentials::Credentials,
     failed,
     owner::Owner,
     wire::{self, Request},
@@ -37,6 +38,7 @@ impl Drop for PairRollback<'_> {
 pub(super) fn serve(
     owner: &Mutex<Owner>,
     peer: ProcessEpoch,
+    credentials: Credentials,
     stream: &mut UnixStream,
     bytes: &[u8],
 ) -> Result<(), ProfileError> {
@@ -78,17 +80,21 @@ pub(super) fn serve(
                 payload_count,
                 managed,
             } => {
-                let payloads = fd_passing::receive_many_until(
-                    stream,
-                    Instant::now() + Duration::from_secs(5),
-                )?;
+                let payloads = if payload_count == 0 {
+                    Vec::new()
+                } else {
+                    fd_passing::receive_many_until(
+                        stream,
+                        Instant::now() + Duration::from_secs(5),
+                    )?
+                };
                 if payloads.len() != payload_count {
                     return Err(failed("full native payload group mismatch"));
                 }
                 let prepared = owner
                     .lock()
                     .map_err(|_| failed("owner poisoned"))?
-                    .prepare(peer, carrier_holder, &payloads, &managed)?;
+                    .prepare_authenticated(peer, credentials, carrier_holder, &payloads, &managed)?;
                 reply(stream, &mut responded, &prepared.response)?;
                 fd_passing::send_many(
                     stream,
@@ -107,7 +113,7 @@ pub(super) fn serve(
                 managed,
                 publish_ordinals,
             } => {
-                let claims = owner.lock().map_err(|_| failed("owner poisoned"))?.admit(
+                let (credentials, claims) = owner.lock().map_err(|_| failed("owner poisoned"))?.admit_authoritative(
                     peer,
                     carrier_holder,
                     key,
@@ -115,7 +121,7 @@ pub(super) fn serve(
                     &managed,
                     &publish_ordinals,
                 )?;
-                reply(stream, &mut responded, &wire::encode_admitted(&claims)?)?;
+                reply(stream, &mut responded, &wire::encode_admitted_authenticated(&claims, credentials)?)?;
             }
             Request::Settle { key, disposition } => {
                 owner.lock().map_err(|_| failed("owner poisoned"))?.settle(

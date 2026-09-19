@@ -184,6 +184,8 @@ xcrun clang++ "${flags[@]}" -I"$root/compat" \
 boundary_objects+=("$rpc_identity_object")
 fd_transport_object="$out/fd-transport.o"
 xcrun clang++ "${flags[@]}" -I"$root/compat" \
+  -I"$root/tools/bionic-central-fd-broker/include" \
+  -I"$root/tools/bionic-socket-broker-adapter/src" \
   -c "$root/compat/binder/fd_transport.cc" \
   -MMD -MF "$fd_transport_object.d" -o "$fd_transport_object"
 boundary_objects+=("$fd_transport_object")
@@ -235,6 +237,9 @@ shasum -a 256 "$source_root/core/jni/android_os_Parcel.cpp" \
   "$root/compat/binder/retained_export_lease.h" \
   "$root/compat/binder/retained_export_lease.cc" \
   "$root/tools/bionic-socket-broker-adapter/include/darwin_art_bionic_binder_fd.h" \
+  "$root/tools/bionic-socket-broker-adapter/src/socket_endpoint_exports.h" \
+  "$root/tools/bionic-socket-broker-adapter/src/scm_endpoint_provider.h" \
+  "$root/tools/bionic-central-fd-broker/include/darwin_art_bionic_fd_broker.h" \
   "$root/upstream/android16-binder-jni.lock" \
   "$root/tools/build-android16-binder-jni.sh" > "$out/source-identity.txt"
 echo "binder-jni: pinned AOSP Binder/Parcel JNI archive compiled; production registration NOT changed"

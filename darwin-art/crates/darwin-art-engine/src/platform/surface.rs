@@ -394,6 +394,17 @@ mod surface_session_tests {
     unsafe extern "C" fn binder_file_test(_: i32) -> i32 {
         0
     }
+    unsafe extern "C" fn binder_bound_export_test(
+        _: i32,
+        _: *const darwin_art_engine_sys::DescriptorTransferBinding,
+        _: *mut darwin_art_engine_sys::ExportedDescriptor,
+    ) -> i32 { -1 }
+    unsafe extern "C" fn binder_bound_import_test(
+        _: i32,
+        _: *const darwin_art_engine_sys::DescriptorTransferBinding,
+        _: *const u8,
+        _: usize,
+    ) -> i32 { -1 }
     unsafe extern "C" fn binder_retained_file_test(
         _: i32,
         _: *const darwin_art_engine_sys::DescriptorTransferBinding,
@@ -455,6 +466,8 @@ mod surface_session_tests {
                 publish: binder_publish_test,
                 uninstall_owner: binder_uninstall_test,
                 export_file: binder_file_test,
+                export_bound_file: binder_bound_export_test,
+                import_bound_file: binder_bound_import_test,
                 export_retained_file: binder_retained_file_test,
                 release_export_lease: binder_release_export_test,
                 import_file: binder_file_test,

@@ -172,7 +172,8 @@ struct ReaderState final : std::enable_shared_from_this<ReaderState> {
   friend struct ObserverContext;
 
   static void QueueCallback(void* opaque, AHardwareBuffer* buffer,
-                            int32_t slot, int fence, int32_t dataspace) {
+                            int32_t slot, uint64_t, uint64_t, int fence,
+                            int32_t dataspace) {
     auto* context = static_cast<ObserverContext*>(opaque);
     if (context == nullptr || context->state == nullptr) {
       if (fence >= 0) (void)darwin_art_bionic_socket_broker_close(fence);

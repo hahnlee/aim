@@ -430,6 +430,14 @@ while IFS= read -r relative_source; do
   fi
   objects+=("$object")
 done < "$sources_file"
+# Ordinary Android TextureView uses this Android-only JNI cohort. It is not
+# part of the verified common source set or Layoutlib's 51-class registrar.
+texture_layer_source="$patched_hwui/jni/android_graphics_TextureLayer.cpp"
+verify_hash "$texture_layer_source" "$ANDROID_RUNTIME_TEXTURE_LAYER_SHA256"
+texture_layer_object="$object_dir/jni_android_graphics_TextureLayer.o"
+compile_cached "Android runtime: jni/android_graphics_TextureLayer.cpp" \
+  "$texture_layer_source" "$texture_layer_object"
+objects+=("$texture_layer_object")
 darwin_shared_object="$object_dir/platform_darwin_utils_SharedLib.o"
 compile_cached "platform/darwin/utils/SharedLib.cpp" \
   "$patched_hwui/platform/darwin/utils/SharedLib.cpp" "$darwin_shared_object"
@@ -480,12 +488,17 @@ rm -f "$jni_archive" "$registrar_archive"
 "$ar" rcs "$jni_archive" "${objects[@]}"
 "$ar" rcs "$registrar_archive" "$registrar_object"
 jni_members="$({ "$ar" -t "$jni_archive" || true; } | grep -v '^__\.SYMDEF' | wc -l | tr -d ' ')"
-[[ "$jni_members" == 66 ]] || { echo "android-graphics-jni: JNI archive member count=$jni_members expected=66" >&2; exit 3; }
+[[ "$jni_members" == 67 ]] || { echo "android-graphics-jni: JNI archive member count=$jni_members expected=67" >&2; exit 3; }
 
 combined_object="$build_dir/android-graphics-jni-force-loaded.o"
 "$cxx" -r -arch arm64 -Wl,-force_load,"$registrar_archive" \
   -Wl,-force_load,"$jni_archive" -o "$combined_object"
 combined_definitions="$(nm -aC "$combined_object")"
+grep -F 'android::register_android_graphics_TextureLayer(_JNIEnv*)' \
+  <<<"$combined_definitions" >/dev/null || {
+  echo "android-graphics-jni: Android runtime TextureLayer registrar missing" >&2
+  exit 3
+}
 while IFS= read -r registration; do
   class_name="${registration%% -> *}"
   function="${registration#* -> }"
@@ -508,7 +521,7 @@ fi
 nm -u "$combined_object" | awk '$1 ~ /^_/ { print $1 }' | sort -u \
   > "$build_dir/force-loaded-undefined-symbols.txt"
 undefined_count="$(wc -l < "$build_dir/force-loaded-undefined-symbols.txt" | tr -d ' ')"
-echo "android-graphics-jni: common-sources=$source_count host-extra=1 archive-members=$jni_members critical-jni-abi=android"
+echo "android-graphics-jni: common-sources=$source_count android-runtime-extra=1 host-extra=1 archive-members=$jni_members critical-jni-abi=android"
 echo "android-graphics-jni: force-load registrar=$registration_count unresolved-transitive=$undefined_count"
 if [[ "$mode" == objects ]]; then
   exit 0

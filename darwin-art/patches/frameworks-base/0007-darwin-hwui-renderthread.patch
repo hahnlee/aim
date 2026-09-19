@@ -284,3 +284,12 @@ diff --git a/platform/host/renderthread/CacheManager.cpp b/platform/host/rendert
 +}
 +
  void CacheManager::setupCacheLimits() {}
+diff --git a/renderthread/DrawFrameTask.cpp b/renderthread/DrawFrameTask.cpp
+--- a/renderthread/DrawFrameTask.cpp
++++ b/renderthread/DrawFrameTask.cpp
+@@ -143 +143 @@
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) || defined(__APPLE__)
+@@ -181 +181 @@
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) || defined(__APPLE__)

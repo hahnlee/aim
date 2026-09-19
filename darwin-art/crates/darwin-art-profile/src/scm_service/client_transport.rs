@@ -67,7 +67,7 @@ pub(crate) fn prepare(
 ) -> Result<PreparedDelivery, ProfileError> {
     let mut items = Vec::new();
     // Bound before allocation; the server remains the authorization owner.
-    if payloads.is_empty() || payloads.len() > 16 || managed.len() > payloads.len() {
+    if payloads.len() > 16 || managed.len() > payloads.len() {
         return Err(failed("invalid client payload manifest"));
     }
     items.try_reserve_exact(managed.len()).map_err(failed)?;
@@ -80,7 +80,9 @@ pub(crate) fn prepare(
             managed: items,
         },
     )?;
-    fd_passing::send_many(&stream, payloads)?;
+    if !payloads.is_empty() {
+        fd_passing::send_many(&stream, payloads)?;
+    }
     let bytes = protocol::expect_ok(&mut stream, protocol::OP_SCM_SERVICE)?;
     // Acquire the complete native group under the existing shared inheritance
     // boundary, then keep RAII ownership through all response validation.
@@ -112,7 +114,7 @@ pub(crate) fn prepare(
 pub(crate) fn admit(
     mut stream: UnixStream,
     admission: &Request,
-) -> Result<Vec<(u64, u128)>, ProfileError> {
+) -> Result<Vec<client::AdmittedGrant>, ProfileError> {
     let Request::Admit {
         publish_ordinals, ..
     } = admission
@@ -122,6 +124,18 @@ pub(crate) fn admit(
     request(&mut stream, admission)?;
     let bytes = protocol::expect_ok(&mut stream, protocol::OP_SCM_SERVICE)?;
     client::decode_admitted(&bytes, publish_ordinals)
+}
+
+pub(crate) fn admit_authenticated(
+    mut stream: UnixStream,
+    admission: &Request,
+) -> Result<client::AdmittedResponse, ProfileError> {
+    let Request::Admit { publish_ordinals, .. } = admission else {
+        return Err(failed("client admission requires Admit operation"));
+    };
+    request(&mut stream, admission)?;
+    let bytes = protocol::expect_ok(&mut stream, protocol::OP_SCM_SERVICE)?;
+    client::decode_admitted_authenticated(&bytes, publish_ordinals)
 }
 
 pub(crate) fn settle_or_release(

@@ -69,8 +69,8 @@ fi
 # force-load module ownership; N means normal provider extraction.
 archive_specs=(
   'F|1|_build/android-graphics-jni/libandroid-graphics-layoutlib-registrar-darwin.a'
-  'F|66|_build/android-graphics-jni/libandroid-graphics-jni-darwin.a'
-  'F|88|_build/hwui-static-foundation/libhwui-static-darwin.a'
+  'F|67|_build/android-graphics-jni/libandroid-graphics-jni-darwin.a'
+  'F|89|_build/hwui-static-foundation/libhwui-static-darwin.a'
   'F|5|_build/hwui-static-foundation/libandroid-graphics-apex-common-darwin.a'
   'F|957|_build/skia-metal-gpu/libskia.a'
   'N|2|_build/skia-metal-gpu/libskcms.a'
@@ -350,6 +350,12 @@ if [[ "$audit_mode" == art-runtime || "$audit_mode" == host-layoutlib ]]; then
     '_ANativeWindow_setBuffersDataSpace:' \
     '  mov x0, #0' \
     '  ret' \
+    '.globl _ASurfaceTexture_fromSurfaceTexture' \
+    '_ASurfaceTexture_fromSurfaceTexture:' \
+    '  brk #0' \
+    '.globl _ASurfaceTexture_release' \
+    '_ASurfaceTexture_release:' \
+    '  brk #0' \
     '.globl _sync_wait' \
     '_sync_wait:' \
     '  mov x0, #0' \

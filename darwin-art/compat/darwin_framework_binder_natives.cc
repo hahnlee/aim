@@ -636,7 +636,7 @@ bool SendWireMessage(int fd, const WireHeader& header,
   for (size_t index = 0; index < file_descriptors.size(); ++index) {
     size_t size = 0;
     int protection = 0;
-    if (darwin_art_android_shared_memory_get_info(
+    if (darwin_art_android_shared_memory_get_guest_info(
             file_descriptors[index], &size, &protection) == 1) {
       fd_metadata[index] = {kWireFdSharedMemory, protection,
                             static_cast<uint64_t>(size)};

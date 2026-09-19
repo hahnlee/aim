@@ -1,7 +1,15 @@
 # Runtime architecture requirements
 
 Read the Current goal and latest checkpoint in docs/architecture-migration.md
-before work. Append verified progress before ending a work turn.
+before work. Update verified status before ending a work turn; replace
+superseded facts instead of appending a turn-by-turn log.
+
+- Keep non-ADR work documents focused on current scope, decisions, open work
+  and acceptance evidence. Keep architecture-migration.md within 150 lines
+  and its Latest progress within five compact items. Fold completed work into
+  status; omit old PIDs, repetitive test logs and rejected experiments unless
+  needed to reproduce an open failure. Git history holds past diagnostics;
+  preserve uncommitted findings when condensing. ADRs retain decision history.
 
 - Production APK execution is an Android compatibility runtime, not a probe.
   Do not add production behavior to test fixtures or Probe classes. Existing

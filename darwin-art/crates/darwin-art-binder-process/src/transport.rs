@@ -18,6 +18,21 @@ pub trait AuthorityTransport: Send + Sync + 'static {
         token: TransferToken,
         image: &TransferImage,
     ) -> Result<(), TransportError>;
+    fn cancel_unrouted_transfer(&self, _token: TransferToken) -> Result<(), TransportError> {
+        Err(TransportError(
+            "transport has no exact source cleanup port".into(),
+        ))
+    }
+    fn settle_received_transfer(
+        &self,
+        _source: ConnectionToken,
+        _token: TransferToken,
+        _finished: bool,
+    ) -> Result<(), TransportError> {
+        Err(TransportError(
+            "transport has no exact receiver settlement port".into(),
+        ))
+    }
     fn take_transfer(
         &self,
         source: ConnectionToken,
@@ -50,6 +65,20 @@ impl AuthorityTransport for darwin_art_profile::BinderAuthorityConnection {
         image: &TransferImage,
     ) -> Result<(), TransportError> {
         self.deposit_transfer(token, image)
+            .map_err(|error| TransportError(error.to_string()))
+    }
+
+    fn cancel_unrouted_transfer(&self, token: TransferToken) -> Result<(), TransportError> {
+        self.cancel_unrouted_transfer(token)
+            .map_err(|error| TransportError(error.to_string()))
+    }
+    fn settle_received_transfer(
+        &self,
+        source: ConnectionToken,
+        token: TransferToken,
+        finished: bool,
+    ) -> Result<(), TransportError> {
+        self.settle_received_transfer(source, token, finished)
             .map_err(|error| TransportError(error.to_string()))
     }
 

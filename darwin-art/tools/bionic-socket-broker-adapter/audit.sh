@@ -75,6 +75,21 @@ build_runner() {
     -c "$dir/src/fd_inheritance.cc" -o "$tmp/fd-inheritance-$sanitizer.o"
   "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
     -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/scm_endpoint_provider.cc" -o "$tmp/scm-endpoint-provider-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/ancillary_intake.cc" -o "$tmp/scm-ancillary-intake-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/scm_channel.cc" -o "$tmp/scm-channel-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/scm_guest_group.cc" -o "$tmp/scm-guest-group-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
+    -c "$dir/src/scm_android_receive.cc" -o "$tmp/scm-android-receive-$sanitizer.o"
+  "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
+    -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
     -c "$dir/src/retained_scm_export.cc" -o "$tmp/retained-scm-export-$sanitizer.o"
   "$host_cxx" -arch arm64 -isysroot "$sdk" -std=c++20 -O1 -g \
     -Wall -Wextra -Werror -Wpedantic "${san[@]}" "${includes[@]}" \
@@ -114,6 +129,11 @@ build_runner() {
     "$tmp/scm-exports-$sanitizer.o" \
     "$tmp/fd-inheritance-$sanitizer.o" \
     "$tmp/retained-scm-export-$sanitizer.o" \
+    "$tmp/scm-endpoint-provider-$sanitizer.o" \
+    "$tmp/scm-ancillary-intake-$sanitizer.o" \
+    "$tmp/scm-channel-$sanitizer.o" \
+    "$tmp/scm-guest-group-$sanitizer.o" \
+    "$tmp/scm-android-receive-$sanitizer.o" \
     "$tmp/eventfd-owner-$sanitizer.o" \
     "$tmp/merge-$sanitizer.o" "$tmp/merge-broker-$sanitizer.o" \
     "$tmp/broker-$sanitizer.o" "$tmp/dns-$sanitizer.o" \
@@ -129,7 +149,9 @@ TSAN_OPTIONS=halt_on_error=1 "$tmp/runner-tsan" "$fixture"
 
 rg -q 'darwin_art_fd_broker_socket_operation' "$dir/src/adapter.cc" ||
   fail 'adapter bypassed broker v3 socket lease'
-if rg -n 'kTokenMarker|g_slots|F_DUPFD_CLOEXEC' "$dir/src/adapter.cc" >/dev/null; then
+# Native close-on-exec duplicates are private backing, not guest namespace
+# allocation. Guest descriptors still come exclusively from the central owner.
+if rg -n 'kTokenMarker|g_slots' "$dir/src/adapter.cc" >/dev/null; then
   fail 'adapter reintroduced private descriptor namespace'
 fi
 mkdir -p "$root/_build/bionic-socket-broker-adapter"

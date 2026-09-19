@@ -643,6 +643,8 @@ extern "C" void* darwin_art_android_platform_symbol(const char* symbol) {
   ROUTE(darwin_art_android_ANativeWindow_getHeight);
   ROUTE(darwin_art_android_ANativeWindow_setBuffersGeometry);
   ROUTE(darwin_art_android_ANativeWindow_prepare_swapchain);
+  ROUTE(darwin_art_android_ANativeWindow_supports_mailbox);
+  ROUTE(darwin_art_android_ANativeWindow_set_present_mode);
   ROUTE(darwin_art_android_ANativeWindow_dequeue_hardware_buffer);
   ROUTE(darwin_art_android_ANativeWindow_queue_hardware_buffer);
   ROUTE(darwin_art_android_ANativeWindow_cancel_hardware_buffer);
@@ -657,6 +659,7 @@ extern "C" void* darwin_art_android_platform_symbol(const char* symbol) {
   ROUTE(AHardwareBuffer_release);
   ROUTE(AHardwareBuffer_sendHandleToUnixSocket);
   ROUTE(AHardwareBuffer_unlock);
+  ROUTE(darwin_art_android_hardware_buffer_export_identity);
   ROUTE(darwin_art_android_hardware_buffer_metal_texture);
   ROUTE(darwin_art_android_hardware_buffer_vulkan_metal_texture);
   ROUTE(darwin_art_android_hardware_buffer_vulkan_metal_texture_for_format);

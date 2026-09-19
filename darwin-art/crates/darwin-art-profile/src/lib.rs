@@ -6,6 +6,8 @@ compile_error!("darwin-art-profile requires macOS; no weaker filesystem fallback
 
 mod app_ids;
 mod application_launch_template;
+mod binder_capability_wire;
+mod binder_capability_service;
 mod binder_client;
 mod binder_service;
 mod binder_transfer;

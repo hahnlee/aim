@@ -19,7 +19,8 @@ bool verify_release_order = false;
 int fail_write = 0, writes = 0, returns = 0, buffer_refs = 0;
 struct Window {
   int refs = 1;
-  void (*callback)(void*, AHardwareBuffer*, int32_t, int, int32_t) = nullptr;
+  void (*callback)(void*, AHardwareBuffer*, int32_t, uint64_t, uint64_t, int,
+                   int32_t) = nullptr;
   void* context = nullptr;
   void (*destroy)(void*) = nullptr;
 } *window = nullptr;
@@ -49,7 +50,7 @@ template<class T> T Method(const char* name) {
 }
 void Enqueue() {
   assert(window && window->callback);
-  window->callback(window->context, &buffer, 1, -1, 42);
+  window->callback(window->context, &buffer, 1, 1, 1, -1, 42);
 }
 }
 
@@ -64,7 +65,7 @@ extern "C" void darwin_art_android_ANativeWindow_release(void* value) {
   if (--window->refs == 0) { delete window; window = nullptr; }
 }
 extern "C" bool darwin_art_android_ANativeWindow_set_owned_queue_callback(
-    void* value, void (*callback)(void*, AHardwareBuffer*, int32_t, int, int32_t),
+    void* value, DarwinArtAndroidNativeWindowQueueCallback callback,
     void* context, void (*destroy)(void*)) {
   assert(value == window);
   auto old = window->destroy; auto old_context = window->context;

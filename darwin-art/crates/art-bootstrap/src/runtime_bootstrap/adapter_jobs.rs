@@ -73,7 +73,7 @@ pub(super) fn adapter_jobs(
         }
         if matches!(
             adapter_source,
-            "darwin_framework_natives.cc" | "window/surface_jni.cc"
+            "darwin_framework_natives.cc" | "window/surface_jni.cc" | "window/texture_view_jni.cc"
         ) {
             // Surface.java's nativeLockCanvas contract includes the pinned
             // NDK Canvas ABI from HWUI's apex export set in every flavor.
@@ -89,6 +89,8 @@ pub(super) fn adapter_jobs(
         if matches!(
             adapter_source,
             "darwin_framework_binder_natives.cc"
+                | "window/surface_jni.cc"
+                | "window/remote_surface_producer.cc"
                 | "binder/context_manager.cc"
                 | "binder/platform_syscalls.cc"
                 | "binder/service_endpoint.cc"

@@ -2382,6 +2382,12 @@ void GlEglImageTargetTexture2dOes(std::uint32_t target, EGLImage image) {
                                          DebugGraphicsDso());
 }
 
+extern "C" void darwin_art_android_egl_bind_direct_image_texture(
+    std::uint32_t target, void* image) {
+  darwin_art::graphics::BindImageTexture(target, image, AhbImageBackend(),
+                                         DebugGraphicsDso(), true);
+}
+
 void* EglGetProcAddressMetal(const char* symbol) {
   if (symbol == nullptr) return nullptr;
   if (std::getenv("DARWIN_ART_DEBUG_ANGLE") != nullptr) {

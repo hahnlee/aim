@@ -7,6 +7,7 @@
 #include "window/sync_fence_jni.h"
 #include "window/surface_control_jni.h"
 #include "window/surface_jni.h"
+#include "window/texture_view_jni.h"
 #include "input/velocity_tracker_jni.h"
 #include "media/framework_media_jni.h"
 #include "media/image_reader_jni.h"
@@ -342,6 +343,8 @@ bool RegisterFrameworkNatives(JNIEnv* env) {
   if (!RegisterDarwinSurfaceTextureNatives(env)) {
     return false;
   }
+
+  if (!darwin_art::window::RegisterTextureViewNatives(env)) return false;
 
   if (!darwin_art::RegisterDarwinAngleEglNatives(env)) {
     return false;

@@ -11,12 +11,12 @@ pub mod support_java;
 /// A mismatch disables cache promotion until the canonical builder repopulates
 /// `_build/runtime-common`.
 pub const RUNTIME_CACHE_IDENTITY: &str =
-    "darwin-art-runtime-core-cache-v33-product-fixture-separation";
+    "darwin-art-runtime-core-cache-v34-remote-surface-producer";
 
 /// Identity of the generated native Ninja graph. Keeping this beside the
 /// runtime cache contract prevents the canonical builder and graph emitter
 /// from silently disagreeing about graph format or edge ownership.
-pub const NATIVE_GRAPH_VERSION: &str = "darwin-art-native-graph-v42-typed-client-receipt";
+pub const NATIVE_GRAPH_VERSION: &str = "darwin-art-native-graph-v44-remote-surface-producer";
 
 /// Canonical adapter translation units for the two runtime flavors.  Keeping
 /// this list in the dependency-free contract crate prevents the Cargo
@@ -83,6 +83,7 @@ pub const HEADLESS_ADAPTER_SOURCES: &[&str] = &[
     "darwin_angle_egl.cc",
     "graphics/composition_buffer_lease.cc",
     "graphics/egl_ahb_image_owner.cc",
+    "graphics/egl_ahb_direct_exports.cc",
     "graphics/composition_consumer.cc",
     "graphics/egl_context_dispatch.cc",
     "darwin_android_native_window.cc",
@@ -93,12 +94,15 @@ pub const HEADLESS_ADAPTER_SOURCES: &[&str] = &[
     "window/surface_control_ready_transaction.cc",
     "window/surface_control_submit_darwin.mm",
     "window/surface_jni.cc",
+    "window/remote_surface_producer.cc",
+    "window/texture_view_jni.cc",
     "window/blast_transaction_state.cc",
     "window/surface_transaction_merge.cc",
     "window/surface_transaction_builder.cc",
     "window/surface_transaction_lifetime.cc",
     "window/native_window_transaction_consumer.cc",
     "window/native_window_buffer_queue.cc",
+    "window/native_window_software_queue.cc",
     "window/surface_transaction_submission.cc",
     "window/blast_buffer_queue_jni.cc",
     "window/hardware_buffer_jni.cc",
@@ -304,6 +308,7 @@ pub const GRAPHICS_ADAPTER_SOURCES: &[&str] = &[
     "darwin_angle_egl.cc",
     "graphics/composition_buffer_lease.cc",
     "graphics/egl_ahb_image_owner.cc",
+    "graphics/egl_ahb_direct_exports.cc",
     "graphics/composition_consumer.cc",
     "graphics/egl_context_dispatch.cc",
     "darwin_android_native_window.cc",
@@ -314,12 +319,15 @@ pub const GRAPHICS_ADAPTER_SOURCES: &[&str] = &[
     "window/surface_control_ready_transaction.cc",
     "window/surface_control_submit_darwin.mm",
     "window/surface_jni.cc",
+    "window/remote_surface_producer.cc",
+    "window/texture_view_jni.cc",
     "window/blast_transaction_state.cc",
     "window/surface_transaction_merge.cc",
     "window/surface_transaction_builder.cc",
     "window/surface_transaction_lifetime.cc",
     "window/native_window_transaction_consumer.cc",
     "window/native_window_buffer_queue.cc",
+    "window/native_window_software_queue.cc",
     "window/surface_transaction_submission.cc",
     "window/blast_buffer_queue_jni.cc",
     "window/hardware_buffer_jni.cc",
@@ -481,12 +489,15 @@ pub const COMMON_ADAPTER_SOURCES: &[&str] = &[
     "window/surface_control_ready_transaction.cc",
     "window/surface_control_submit_darwin.mm",
     "window/surface_jni.cc",
+    "window/remote_surface_producer.cc",
+    "window/texture_view_jni.cc",
     "window/blast_transaction_state.cc",
     "window/surface_transaction_merge.cc",
     "window/surface_transaction_builder.cc",
     "window/surface_transaction_lifetime.cc",
     "window/native_window_transaction_consumer.cc",
     "window/native_window_buffer_queue.cc",
+    "window/native_window_software_queue.cc",
     "window/surface_transaction_submission.cc",
     "window/blast_buffer_queue_jni.cc",
     "filesystem/process_authority.cc",
@@ -635,6 +646,7 @@ mod tests {
                 "../runtime/framework/input/input_routing.cc",
                 "../runtime/framework/input/key_character_map_jni.cc",
                 "window/native_window_buffer_queue.cc",
+                "window/native_window_software_queue.cc",
                 "../runtime/embedding/session_lifetime.cc",
                 "graphics/metal_shared_event_provider.mm",
                 "graphics/metal_display_backing.mm",

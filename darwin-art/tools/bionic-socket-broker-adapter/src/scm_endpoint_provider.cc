@@ -23,7 +23,9 @@ bool Valid(const DarwinArtScmEndpointProviderV1 &table) noexcept {
   return table.abi_version == DARWIN_ART_SCM_ENDPOINT_ABI_VERSION &&
          table.struct_size == sizeof(table) && table.context != nullptr &&
          table.retain != nullptr && table.release != nullptr &&
-         table.register_pair != nullptr && table.release_holder != nullptr;
+         table.register_pair != nullptr && table.release_holder != nullptr &&
+         table.prepare != nullptr && table.admit != nullptr && table.settle != nullptr &&
+         table.bind_binder != nullptr && table.cancel_binder != nullptr && table.claim_binder != nullptr;
 }
 
 void *Retain(void *context) noexcept {
@@ -72,9 +74,73 @@ int ReleaseHolder(void *context, const uint8_t *holder) noexcept {
   return status;
 }
 
+// A context pin covers callback execution without holding the installation
+// mutex during transport. Stop acquisition rejects new prepare/admit; cleanup
+// stays available so a received group can settle before genuine quiescence.
+int Prepare(void *context, const DarwinArtScmPrepareRequestV2 *request,
+            DarwinArtScmPreparedV2 *result) noexcept {
+  auto *instance = static_cast<Instance *>(Retain(context));
+  if (instance == nullptr) return ENOMEM;
+  bool accepting;
+  { std::lock_guard lock(g_mutex); accepting = instance->accepting; }
+  const int status = accepting
+      ? instance->original.prepare(instance->original.context, request, result)
+      : ESHUTDOWN;
+  Release(instance);
+  return status;
+}
+int Admit(void *context, const DarwinArtScmAdmitRequestV2 *request,
+          DarwinArtScmAdmissionV2 *result) noexcept {
+  auto *instance = static_cast<Instance *>(Retain(context));
+  if (instance == nullptr) return ENOMEM;
+  bool accepting;
+  { std::lock_guard lock(g_mutex); accepting = instance->accepting; }
+  const int status = accepting
+      ? instance->original.admit(instance->original.context, request, result)
+      : ESHUTDOWN;
+  Release(instance);
+  return status;
+}
+int Settle(void *context, const uint8_t *authority, uint64_t ticket,
+           uint32_t outcome) noexcept {
+  auto *instance = static_cast<Instance *>(Retain(context));
+  if (instance == nullptr) return ENOMEM;
+  const int status = instance->original.settle(
+      instance->original.context, authority, ticket, outcome);
+  Release(instance);
+  return status;
+}
+
+int BindBinder(void *context, const uint8_t *holder,
+               const DarwinArtScmBinderBindingV2 *binding, uint8_t *attrs) noexcept {
+  auto *instance = static_cast<Instance *>(Retain(context));
+  if (instance == nullptr) return ENOMEM;
+  bool accepting;
+  { std::lock_guard lock(g_mutex); accepting = instance->accepting; }
+  const int status = accepting ? instance->original.bind_binder(
+      instance->original.context, holder, binding, attrs) : ESHUTDOWN;
+  Release(instance); return status;
+}
+int CancelBinder(void *context, const DarwinArtScmBinderBindingV2 *binding) noexcept {
+  auto *instance = static_cast<Instance *>(Retain(context));
+  if (instance == nullptr) return ENOMEM;
+  const int status = instance->original.cancel_binder(instance->original.context, binding);
+  Release(instance); return status;
+}
+int ClaimBinder(void *context, const DarwinArtScmBinderBindingV2 *binding,
+                const uint8_t *attrs, uint32_t length, DarwinArtScmGrantV2 *grant) noexcept {
+  auto *instance = static_cast<Instance *>(Retain(context));
+  if (instance == nullptr) return ENOMEM;
+  bool accepting;
+  { std::lock_guard lock(g_mutex); accepting = instance->accepting; }
+  const int status = accepting ? instance->original.claim_binder(
+      instance->original.context, binding, attrs, length, grant) : ESHUTDOWN;
+  Release(instance); return status;
+}
+
 DarwinArtScmEndpointProviderV1 Wrapped(Instance *instance) noexcept {
   return {DARWIN_ART_SCM_ENDPOINT_ABI_VERSION, sizeof(DarwinArtScmEndpointProviderV1),
-          instance, &Retain, &Release, &RegisterPair, &ReleaseHolder};
+          instance, &Retain, &Release, &RegisterPair, &ReleaseHolder, &Prepare, &Admit, &Settle, &BindBinder, &CancelBinder, &ClaimBinder};
 }
 } // namespace
 

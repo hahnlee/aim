@@ -5,10 +5,16 @@
 #import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
 #include <cassert>
+#include <cerrno>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <vector>
+
+extern char** environ;
 
 // Only the socket transport is mocked. Allocation, alias lifetime, lock/stride,
 // IOSurface import and Metal textures execute the actual production owner.
@@ -37,8 +43,28 @@ extern "C" intptr_t darwin_art_bionic_socket_broker_read(
   return static_cast<intptr_t>(count);
 }
 
-int main() {
+int main(int argc, char** argv) {
   @autoreleasepool {
+    if (argc == 3 && std::strcmp(argv[1], "--import-id") == 0) {
+      DarwinArtHardwareBufferIdentity remote{};
+      remote.surface_id = static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10));
+      remote.description.width = 7;
+      remote.description.height = 3;
+      remote.description.layers = 1;
+      remote.description.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+      remote.description.stride = 8;
+      AHardwareBuffer* received = nullptr;
+      if (darwin_art_android_hardware_buffer_import_identity(&remote, &received) != 0)
+        return 2;
+      void* pixels = nullptr;
+      const bool shared = AHardwareBuffer_lock(received, 0, -1, nullptr,
+                                               &pixels) == 0 &&
+                          pixels != nullptr &&
+                          static_cast<unsigned char*>(pixels)[0] == 0x5a;
+      if (pixels != nullptr) (void)AHardwareBuffer_unlock(received, nullptr);
+      AHardwareBuffer_release(received);
+      return shared ? 0 : 3;
+    }
     AHardwareBuffer_Desc desc{};
     desc.width = 7;
     desc.height = 3;
@@ -87,6 +113,44 @@ int main() {
     assert(AHardwareBuffer_unlock(buffer, &fence) == 0 && fence == -1);
     assert(AHardwareBuffer_unlock(buffer, &fence) < 0);
 
+    DarwinArtHardwareBufferIdentity identity{};
+    assert(darwin_art_android_hardware_buffer_export_identity(buffer, &identity) == 0);
+    assert(identity.surface_id == IOSurfaceGetID(surface));
+    AHardwareBuffer* direct_import = nullptr;
+    assert(darwin_art_android_hardware_buffer_import_identity(&identity,
+                                                               &direct_import) == 0);
+    assert(direct_import != nullptr && direct_import != buffer);
+    auto direct_surface = static_cast<IOSurfaceRef>(
+        darwin_art_android_hardware_buffer_iosurface(direct_import));
+    assert(IOSurfaceGetID(direct_surface) == IOSurfaceGetID(surface));
+    AHardwareBuffer_release(direct_import);
+    auto forged = identity;
+    forged.description.width++;
+    assert(darwin_art_android_hardware_buffer_import_identity(&forged,
+                                                               &direct_import) == -EINVAL);
+    assert(direct_import == nullptr);
+    forged = identity;
+    forged.description.format = AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_420;
+    assert(darwin_art_android_hardware_buffer_import_identity(&forged,
+                                                               &direct_import) == -EINVAL);
+    forged = identity;
+    forged.description.stride++;
+    assert(darwin_art_android_hardware_buffer_import_identity(&forged,
+                                                               &direct_import) == -EINVAL);
+    forged = identity;
+    forged.surface_id = 0;
+    assert(darwin_art_android_hardware_buffer_import_identity(&forged,
+                                                               &direct_import) == -EINVAL);
+    char surface_id_arg[32]{};
+    std::snprintf(surface_id_arg, sizeof(surface_id_arg), "%u", identity.surface_id);
+    char* child_argv[] = {argv[0], const_cast<char*>("--import-id"),
+                          surface_id_arg, nullptr};
+    pid_t child = -1;
+    assert(posix_spawn(&child, argv[0], nullptr, nullptr, child_argv, environ) == 0);
+    int child_status = 0;
+    assert(waitpid(child, &child_status, 0) == child);
+    assert(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+
     assert(AHardwareBuffer_sendHandleToUnixSocket(buffer, 123) == 0);
     AHardwareBuffer* imported = nullptr;
     assert(AHardwareBuffer_recvHandleFromUnixSocket(123, &imported) == 0);
@@ -131,6 +195,6 @@ int main() {
     AHardwareBuffer_release(buffer);
     assert(darwin_art_android_hardware_buffer_from_client_buffer(alias) == nullptr);
     assert(darwin_art_android_hardware_buffer_from_client_buffer(buffer) == nullptr);
-    std::puts("hardware-buffer-owner: storage, ABI aliases, nested locks, import lifetime PASS");
+    std::puts("hardware-buffer-owner: storage, ABI aliases, nested locks, cross-process import PASS");
   }
 }
