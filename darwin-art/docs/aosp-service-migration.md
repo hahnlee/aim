@@ -113,5 +113,16 @@ independent windows (separate logical displays or display plus per-task bounds),
 key each geometry revision to the live root/task, and settle host size requests,
 framework frames/configuration and input mapping for the same revision. Stale
 or closed roots must reject delayed resize publications.
+`ActivityClientControllerEndpoint` must handle requested-orientation operations;
+the PM projection must retain each activity's own orientation and `configChanges`
+instead of applying the launcher orientation to all activities. Display changes
+must notify registered AOSP display clients so their cached `DisplayInfo` updates.
+WMS must relayout every root and popup from the same snapshot, including input
+frames; `MATCH_PARENT` is relative to task bounds, not the old buffer. A host
+resize report includes content points, backing pixels and scale, and must be
+acknowledged without holding a WMS monitor across an AppKit main-thread wait.
+Verification includes a second app unaffected by a resize, popup clipping and
+pointer targets, configuration handling versus relaunch, close/stale revisions,
+allocation failure and both runtime flavors.
 See the [pinned Android 16 `IWindow.aidl`](https://android.googlesource.com/platform/frameworks/base/+/99b01a65cc4c104933788b3143285ab6bae65827/core/java/android/view/IWindow.aidl)
 and [`LoadedApk.registerAppInfoToArt`](https://android.googlesource.com/platform/frameworks/base/+/99b01a65cc4c104933788b3143285ab6bae65827/core/java/android/app/LoadedApk.java).
