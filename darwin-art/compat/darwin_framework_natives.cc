@@ -1,4 +1,5 @@
 #include "darwin_framework_natives.h"
+#include "sensor/system_sensor_manager_jni.h"
 #include "../runtime/framework/looper/message_queue_jni.h"
 #include "../runtime/framework/wm/desktop_window_metadata.h"
 #include "../runtime/framework/camera/camera_metadata_jni.h"
@@ -251,6 +252,9 @@ bool RegisterFrameworkNatives(JNIEnv* env) {
     return false;
   }
   if (!darwin_art::input::RegisterVelocityTrackerNatives(env)) {
+    return false;
+  }
+  if (!darwin_art::sensor::RegisterSystemSensorManagerNatives(env)) {
     return false;
   }
 

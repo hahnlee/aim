@@ -24,7 +24,7 @@ Android pixels/density distinct from macOS points/backing scale.
 [AGENTS.md](../AGENTS.md) contains engineering rules;
 [ARCHITECTURE.md](../ARCHITECTURE.md) describes subsystem boundaries.
 Decisions: [ADRs](adr/), [foreground authority](adr/0004-fresh-desktop-foreground-authority.md),
-[managed SCM lifetime](adr/0005-managed-scm-transfer-lifetime.md), [remote SurfaceTexture](adr/0006-remote-surface-texture-producer.md).
+[managed SCM lifetime](adr/0005-managed-scm-transfer-lifetime.md), [remote SurfaceTexture](adr/0006-remote-surface-texture-producer.md), [sensor inventory](adr/0007-sensor-inventory-boundary.md).
 
 Goal exit requires all of:
 1. Production source/header/link closures exclude fixtures in both flavors;
@@ -42,8 +42,8 @@ Component tests are separate from app evidence.
 
 | Area | Verified state / remaining gate |
 | --- | --- |
-| Production closure | TextureView/SurfaceTexture, upstream TextureLayer and SCM/Binder/FS adoption build/link in both flavors; focused tests pass. Post-fix graphics/headless audits pass with exact no-work repeat. |
-| Chromium | Physical Gemini click now opens the visible “Verify it's you” sheet without a crash; closing and reopening works. Browser consumes multiple GPU SurfaceTexture frames. Normal host previously rendered local-page body at 720×1280. Stable Example Domain, reload/navigation and fresh Retina Vulkan acceptance remain open. |
+| Production closure | TextureView/SurfaceTexture, upstream TextureLayer, SCM/Binder/FS and shared sensor JNI/NDK adoption build/link in both flavors. Graphics/headless audits pass with exact no-work repeat. |
+| Chromium | Unchanged normal Browser opens Example Domain with heading/body, physical URL entry, three Learn more→IANA→back cycles, menu reload and restart restoration. Fresh 2× capture and Graphite/Dawn Vulkan→MoltenVK Apple M2 Pro device are verified. Gemini sheet click/close/reopen also passes. Longer soak remains open. |
 | Calculator / DeskClock | Latest physical Calculator pointer `1+2=3`, keyboard `4+5=9`, and DeskClock Stopwatch start/pause pass. Titles still show package IDs instead of localized labels. These checks predate TextureView changes. |
 | Input / WMS | Exact-root key ingress, readiness/focus fences, bounded first-key queue and receiver lifecycle owners are adopted; global key enqueue and Init focus shortcut removed. BinderProxy root capture now uses genuine AOSP nodes and native terminal metadata. |
 | Services | Exact-client/SYSTEM connection ledger, process-shared demand, launch capability owner, lifecycle lanes and ordered notifications are adopted; transport runs outside the ActiveServices monitor. Race fixtures and isolated genuine BinderProxy recipient-query JNI pass, not wire-obituary or reusable-shutdown proof. |
@@ -56,10 +56,6 @@ Component tests are separate from app evidence.
   to direct SCM handoff: a reciprocal endpoint exported at state258 arrives in
   GPU at state290, then browser EOF invalidates Root and GPU callback. This
   establishes the observed failure chain, not the exact kernel-GC mechanism.
-- Some earlier blank generations selected no GPU content layer; the latest
-  ordinary launch selects a real GPU layer and its source/target captures show
-  local-page body text. Nine white pixel samples fall between text and do not
-  prove a blank source. GLES/cache/performance-hint logs are not discriminators.
 - User confirms Gemini-logo clicks triggered prior crashes. Physical tracing
   found missing TextureView JNI, lost parcel geometry, incomplete remote
   BufferQueue/MAILBOX transport, and HWUI's Android-only layer-consumption
@@ -68,22 +64,24 @@ Component tests are separate from app evidence.
   ANGLE rejected `GL_TEXTURE_EXTERNAL_OES`. The consumer image attached to a
   private staging texture, leaving Skia's own texture black. Direct imports now
   use 2D and attach to Skia's name; the Gemini sheet renders and reopens.
-- Crash-handler `recvmsg` errno 95 was traced to unsupported native datagram
-  credential preflight. Managed authenticated SCM work is separately tested;
-  repeat crash-handler behavior after the latest repairs remains unverified.
+- Crash-handler `recvmsg` errno 95 came from unsupported native datagram
+  credential preflight; repeat crash-handler behavior remains unverified.
 - Temporary GPU tracing verifies Root creation, source attachment, demand receipt
   and natural frame ticks. Callback endpoint changes from error 0 to 1 after its
   first tick and pending frames accumulate. Same-generation reciprocal handoff
   joins Channel EOF→Root disconnection→GPU notification; lifetime repair is open.
+- Repeated link navigation previously crashed at unregistered Android 16
+  `SystemSensorManager.nativeClassInit`. The sensor-owned JNI now registers
+  the pinned table and shares an honest zero-mapped-sensor inventory with NDK;
+  the same physical navigation succeeds three times without the exception.
 
 ## Next boundaries
 
-1. Preserve the passing two-flavor/headless and no-work build gates for the
-   repaired remote SurfaceTexture/HWUI/Skia path; retain Gemini evidence.
-2. Establish stable Example Domain rendering plus physical reload/navigation,
-   tab/menu/focus and exact Vulkan backend evidence. Verify actual GPU frame
-   updates separately from native UI/input acknowledgements. Transient recovery
-   and debugger-delayed captures do not establish content acceptance.
+1. Preserve passing two-flavor/headless and no-work build gates for the
+   repaired SurfaceTexture/HWUI/Skia and sensor paths; retain physical evidence.
+2. Extend Chromium tab/focus/soak coverage after the verified Example Domain,
+   reload, link/back, Retina and Vulkan path; distinguish GPU content frames
+   from native UI/input acknowledgements in future failures.
 3. Managed SCM adoption must meet ADR0005: authenticated bounded custody before
    sender release; managed-carrier/Binder propagation; full-control intake for
    every consuming variant; discard/truncation, close/crash and alias semantics.
@@ -116,6 +114,8 @@ Component tests are separate from app evidence.
   establish a green parallel workspace suite.
 - Camera/Bluetooth/biometrics/complete host-font integration and long app soak,
   memory/performance testing remain follow-up work outside this goal.
+- Sensor inventory means no mapped Android sensors, not no host hardware;
+  IOHID mapping, event queues and direct channels remain future integration.
 
 ## Acceptance commands
 
@@ -132,19 +132,19 @@ bash tools/audit-profile-daemon.sh
 cargo test --workspace
 ```
 
-Chromium requires launcher-policy regression and fresh physical Graphite/Dawn
-Vulkan acceptance; live processes and stale captures do not prove rendering.
+Chromium physical Graphite/Dawn Vulkan acceptance is recorded above; rerun
+on subsequent graphics changes rather than treating live processes as proof.
 
 ## Latest progress
 
-- **Runtime:** TextureView/SurfaceTexture, upstream TextureLayer and SCM/Binder
-  adoption passes both graphics/headless audits and an exact no-work repeat.
-  Direct EGL import and Skia 2D AHB sampling are in the production closure.
+- **Runtime:** Shared Java/NDK sensor owner removed fake NDK queue creation
+  and the missing JNI crash. Graphics/headless audits and exact no-work pass;
+  Direct EGL import and Skia 2D AHB sampling remain in production closure.
 - **Ownership:** ABI2 SCM and Binder callbacks pass genuine RPC. Binder receipt,
   manifest/session and broker/FS/engine checks pass. Native tests cover guardian
   retention, lost ACK cleanup and zero-width record semantics; provider/FS ports
   remain labeled component evidence.
-- **Physical:** Unchanged Chromium Gemini click displays the verification
-  sheet; close/reopen works without a crash. GPU frames reach the Browser,
-  and HWUI samples their visible pixels. Example Domain and Retina acceptance
-  remain open.
+- **Physical:** Unchanged normal Chromium displays Example Domain, survives
+  three IANA link/back cycles, reload and restart. Fresh 2× window capture,
+  Graphite/Dawn Vulkan and MoltenVK Apple M2 Pro are evidenced; Gemini sheet
+  close/reopen also passes.

@@ -7,7 +7,6 @@
 #include "darwin_surface_bridge.h"
 #include "surfaceflinger/transaction_bridge.h"
 #include "surfaceflinger/service_darwin.h"
-
 #include "darwin_angle_egl.h"
 #include "darwin_art_bionic_socket_broker.h"
 #include "window/surface_transaction_merge.h"
@@ -81,11 +80,6 @@ struct AInputEvent {
   float touch_minor = 1;
   float orientation = 0;
 };
-struct ASensorManager {};
-struct ASensorEventQueue {};
-struct ASensor {};
-ASensorManager g_sensor_manager;
-
 namespace {
 
 using SurfaceTransaction = darwin_art::window::SurfaceTransaction;
@@ -273,40 +267,6 @@ extern "C" float AMotionEvent_getHistoricalTouchMajor(const AInputEvent*, size_t
                                                         size_t) {
   return 0;
 }
-
-extern "C" ASensorManager* ASensorManager_getInstanceForPackage(const char*) {
-  return &g_sensor_manager;
-}
-
-extern "C" ASensorManager* ASensorManager_getInstance() {
-  return &g_sensor_manager;
-}
-
-extern "C" int ASensorManager_getSensorList(ASensorManager*, ASensorList* list) {
-  if (list != nullptr) *list = nullptr;
-  return 0;
-}
-extern "C" const ASensor* ASensorManager_getDefaultSensor(ASensorManager*, int) {
-  return nullptr;
-}
-extern "C" ASensorEventQueue* ASensorManager_createEventQueue(
-    ASensorManager* manager, ALooper* looper, int, ALooper_callbackFunc, void*) {
-  if (manager == nullptr || looper == nullptr) return nullptr;
-  return new (std::nothrow) ASensorEventQueue();
-}
-extern "C" int ASensorManager_destroyEventQueue(ASensorManager*, ASensorEventQueue* queue) {
-  delete queue; return 0;
-}
-extern "C" int ASensorEventQueue_enableSensor(ASensorEventQueue*, const ASensor*) { return -EINVAL; }
-extern "C" int ASensorEventQueue_disableSensor(ASensorEventQueue*, const ASensor*) { return -EINVAL; }
-extern "C" int ASensorEventQueue_setEventRate(ASensorEventQueue*, const ASensor*, int32_t) { return -EINVAL; }
-extern "C" ssize_t ASensorEventQueue_getEvents(ASensorEventQueue*, ASensorEvent*, size_t) { return 0; }
-extern "C" int ASensorEventQueue_hasEvents(ASensorEventQueue*) { return 0; }
-extern "C" const char* ASensor_getName(const ASensor*) { return ""; }
-extern "C" float ASensor_getResolution(const ASensor*) { return 0.0f; }
-extern "C" int ASensor_getType(const ASensor*) { return 0; }
-extern "C" const char* ASensor_getVendor(const ASensor*) { return ""; }
-extern "C" int ASensor_getMinDelay(ASensor const*) { return 0; }
 
 extern "C" ASurfaceControl* ASurfaceControl_createFromWindow(
     ANativeWindow* window, const char* name) {
