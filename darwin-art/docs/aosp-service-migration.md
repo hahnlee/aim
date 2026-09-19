@@ -92,3 +92,26 @@ one orientation/resize configuration and relayout transaction; the host applies
 the resulting backing pixels and Retina scale. Reviving the retired fixture
 `DarwinServiceBridge` orientation path would reintroduce production policy in
 a probe and would not solve the lifecycle contract.
+
+For Android 16, the minimum production path is: ActivityTask resolves the
+focused activity's requested orientation and `configChanges` from its installed
+manifest; DisplayManager publishes one versioned logical geometry; WMS updates
+window frames and dispatches `WindowStateResizeItem` through the existing client
+transaction scheduler (the pinned `IWindow.aidl` directs callers away from a
+direct `IWindow.resized` call). ActivityTask sends
+`ActivityConfigurationChangeItem`, or uses the framework relaunch path when the
+app does not handle the changed configuration. The exact app window backing is
+then resized to the published physical pixel extent, and AppKit input maps
+through the same snapshot. A physical resize must take this route too; merely
+changing the IOSurface size or directly calling `onConfigurationChanged` is
+insufficient. Acceptance requires both portrait/landscape and manual resize to
+preserve ViewRoot/Unity extent, pointer coordinates and a fresh Retina frame.
+Today every app reports display ID 0 while each macOS window owns a separate
+scanout. A mutable process-global width/height would therefore resize unrelated
+apps. The migration must choose and document an Android representation for
+independent windows (separate logical displays or display plus per-task bounds),
+key each geometry revision to the live root/task, and settle host size requests,
+framework frames/configuration and input mapping for the same revision. Stale
+or closed roots must reject delayed resize publications.
+See the [pinned Android 16 `IWindow.aidl`](https://android.googlesource.com/platform/frameworks/base/+/99b01a65cc4c104933788b3143285ab6bae65827/core/java/android/view/IWindow.aidl)
+and [`LoadedApk.registerAppInfoToArt`](https://android.googlesource.com/platform/frameworks/base/+/99b01a65cc4c104933788b3143285ab6bae65827/core/java/android/app/LoadedApk.java).
