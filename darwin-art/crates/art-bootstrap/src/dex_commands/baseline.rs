@@ -151,6 +151,7 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(root.join("runtime/framework/pm/InstalledActivityInfo.java"))
         .arg(root.join("runtime/framework/pm/InstalledPackageInfo.java"))
         .arg(root.join("runtime/framework/pm/InstalledServiceInfo.java"))
+        .arg(root.join("runtime/framework/pm/InstalledProviderInfo.java"))
         .arg(root.join("runtime/framework/pm/InstalledPackageRecord.java"))
         .arg(root.join("runtime/framework/pm/PackageRecords.java"))
         .arg(root.join("runtime/framework/pm/DexLoadReports.java"))
@@ -422,6 +423,7 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledActivityInfo.class"))
         .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledPackageInfo.class"))
         .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledServiceInfo.class"))
+        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledProviderInfo.class"))
         .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledPackageRecord.class"))
         .arg(class_dir.join("dev/darwinart/runtime/pm/PackageRecords.class"))
         .arg(class_dir.join("dev/darwinart/runtime/pm/PackageRecords$Source.class"))
@@ -598,6 +600,7 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
             "Ldev/darwinart/runtime/pm/InstalledActivityInfo;",
             "Ldev/darwinart/runtime/pm/InstalledPackageInfo;",
             "Ldev/darwinart/runtime/pm/InstalledServiceInfo;",
+            "Ldev/darwinart/runtime/pm/InstalledProviderInfo;",
             "Ldev/darwinart/runtime/pm/InstalledPackageRecord;",
             "Ldev/darwinart/runtime/pm/PackageRecords;",
             "Ldev/darwinart/runtime/pm/PackageManagerEndpoint;",

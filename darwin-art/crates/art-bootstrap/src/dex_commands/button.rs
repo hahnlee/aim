@@ -446,6 +446,9 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
         .arg(baseline(
             "dev/darwinart/runtime/pm/InstalledServiceInfo.class",
         ))
+        .arg(baseline(
+            "dev/darwinart/runtime/pm/InstalledProviderInfo.class",
+        ))
         .arg(baseline("dev/darwinart/probe/ProbeResources.class"))
         .arg(baseline("dev/darwinart/probe/ProbeXmlResourceParser.class"))
         .arg(button("dev/darwinart/probe/FontBootstrap.class"))
@@ -549,6 +552,7 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
             "Ldev/darwinart/runtime/job/JobSchedulerService;",
             "Ldev/darwinart/runtime/job/JobServiceContext;",
             "Ldev/darwinart/runtime/pm/InstalledServiceInfo;",
+            "Ldev/darwinart/runtime/pm/InstalledProviderInfo;",
             "Ldev/darwinart/probe/JitInvokeCustom;",
             "Ldev/darwinart/system/DarwinSystemServer;",
             "Ldev/darwinart/runtime/pm/InstalledApplicationInfo;",

@@ -21,7 +21,9 @@ APK; callers must obtain records through the installed-package authority.
 an `ApplicationInfo` or interprets SDK/debuggable/application metadata merely to
 check code ownership. This also keeps future manifest parsing out of each DEX
 report. `InstalledApplicationInfo` consumes the same identity and publishes the
-record's split paths, but its remaining `legacyManifestHint` mapping is explicitly
+record's split paths plus manifest-derived split names in matching order, as
+required by `LoadedApk` ART profile registration. Its remaining `legacyManifestHint` mapping is
+explicitly
 unfinished migration debt, not original AOSP manifest parsing.
 
 `InstalledApplicationInfo` maps an installed package record to the framework
@@ -54,3 +56,8 @@ environment value explicitly. A system binding caller must supply the target
 package's installed record instead, never the system process environment.
 This does not yet supply all AOSP provider policy fields (process, permissions,
 export policy) or execute providers; ActivityThread owns their lifecycle.
+The system PM endpoint answers `getProviderInfo` for a declared provider from
+the requested installed package, with `GET_META_DATA` controlling the Bundle.
+This is a compatibility transaction, not an upstream PMS replacement. See
+[`docs/aosp-service-migration.md`](../../../docs/aosp-service-migration.md)
+for the full service inventory and replacement sequence.

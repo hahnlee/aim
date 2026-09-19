@@ -52,6 +52,21 @@ public final class InstalledApplicationInfo {
         info.publicSourceDir = info.sourceDir;
         String[] splits = installed.splitPaths();
         if (splits.length != 0) {
+            String encodedNames = installed.legacyManifestHint("split_names");
+            if (encodedNames == null || encodedNames.isEmpty()) {
+                throw new IllegalArgumentException("Installed split names are missing");
+            }
+            String[] names = encodedNames.split(",", -1);
+            if (names.length != splits.length) {
+                throw new IllegalArgumentException("Installed split names do not match split paths");
+            }
+            java.util.HashSet<String> seenNames = new java.util.HashSet<>();
+            for (String name : names) {
+                if (name.isEmpty() || !seenNames.add(name)) {
+                    throw new IllegalArgumentException("Invalid or duplicate installed split name");
+                }
+            }
+            info.splitNames = names;
             info.splitSourceDirs = splits;
             info.splitPublicSourceDirs = splits.clone();
         }

@@ -18,7 +18,11 @@ public final class InstalledManifestMetadata {
 
     /** Returns null when the installed record has no application meta-data. */
     public static Bundle fromRecord(InstalledPackageRecord installed) {
-        String encoded = installed.legacyManifestHint("application_metadata");
+        return fromEncoded(installed, installed.legacyManifestHint("application_metadata"));
+    }
+
+    /** Decodes the same inspector value format for application and provider meta-data. */
+    static Bundle fromEncoded(InstalledPackageRecord installed, String encoded) {
         if (encoded == null || encoded.equals("none")) return null;
         if (encoded.isEmpty()) throw malformed("empty application metadata");
 
@@ -75,7 +79,7 @@ public final class InstalledManifestMetadata {
         return (int) result;
     }
 
-    private static String decodeUtf8Hex(String value, String label) {
+    static String decodeUtf8Hex(String value, String label) {
         if ((value.length() & 1) != 0) throw malformed("odd " + label + " hex");
         ByteArrayOutputStream bytes = new ByteArrayOutputStream(value.length() / 2);
         for (int index = 0; index < value.length(); index += 2) {

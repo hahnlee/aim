@@ -4,6 +4,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.ComponentName;
 import android.content.pm.ServiceInfo;
+import android.content.pm.ProviderInfo;
 import android.os.Binder;
 import android.os.Parcel;
 import android.os.Parcelable;
@@ -19,6 +20,7 @@ public final class PackageManagerEndpoint extends Binder {
     private final int getApplicationInfoCode = transaction("getApplicationInfo");
     private final int getPackageInfoCode = transaction("getPackageInfo");
     private final int getServiceInfoCode = transaction("getServiceInfo");
+    private final int getProviderInfoCode = transaction("getProviderInfo");
     private final int getTargetSdkVersionCode = transaction("getTargetSdkVersion");
     private final PackageRecords.Source packages;
     private final DexLoadReports reports;
@@ -97,6 +99,23 @@ public final class PackageManagerEndpoint extends Binder {
                 String packageName = component.getPackageName();
                 result = InstalledServiceInfo.service(packageName,
                         packages.resolveInstalledPackage(packageName), component.getClassName());
+            }
+            reply.writeNoException();
+            reply.writeTypedObject(result, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
+            return true;
+        }
+        if (code == getProviderInfoCode) {
+            data.enforceInterface("android.content.pm.IPackageManager");
+            ComponentName component = data.readTypedObject(ComponentName.CREATOR);
+            long queryFlags = data.readLong();
+            int userId = data.readInt();
+            data.enforceNoDataAvail();
+            ProviderInfo result = null;
+            if (userId == 0 && component != null) {
+                String packageName = component.getPackageName();
+                result = InstalledProviderInfo.provider(packageName,
+                        packages.resolveInstalledPackage(packageName),
+                        component.getClassName(), queryFlags);
             }
             reply.writeNoException();
             reply.writeTypedObject(result, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);

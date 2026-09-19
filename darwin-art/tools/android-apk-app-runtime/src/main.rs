@@ -1515,6 +1515,7 @@ type Inspection = (
     usize,
     Vec<String>,
     Option<String>,
+    Vec<String>,
 );
 
 fn read_archive(path: &Path) -> Result<(Vec<u8>, Vec<ZipEntry>)> {
@@ -1527,7 +1528,7 @@ fn read_archive(path: &Path) -> Result<(Vec<u8>, Vec<ZipEntry>)> {
     Ok((input, entries))
 }
 
-fn manifest_identity(input: &[u8]) -> Result<(String, u32, String)> {
+fn manifest_identity(input: &[u8]) -> Result<(String, u32, String, Option<String>)> {
     if u16le(input, 0, "XML type")? != RES_XML {
         return Err("split AndroidManifest.xml is not binary Android XML".to_owned());
     }
@@ -1577,14 +1578,18 @@ fn manifest_identity(input: &[u8]) -> Result<(String, u32, String)> {
             let version_name =
                 find_attribute(input, strings, attrs, attr_count, attr_size, "versionName")?
                     .unwrap_or_default();
-            return Ok((package, version_code, version_name));
+            let split_name = find_attribute(input, strings, attrs, attr_count, attr_size, "split")?;
+            return Ok((package, version_code, version_name, split_name));
         }
         offset = checked_add(offset, chunk_size, "XML chunk advance")?;
     }
     Err("split manifest has no manifest element".to_owned())
 }
 
-fn split_is_abi_only(input: &[u8], entries: &[ZipEntry]) -> Result<(String, u32, String)> {
+fn split_is_abi_only(
+    input: &[u8],
+    entries: &[ZipEntry],
+) -> Result<(String, u32, String, Option<String>)> {
     let mut manifest = None;
     let mut native_count = 0_usize;
     for entry in entries {
@@ -1663,6 +1668,7 @@ fn inspect(
     let base_identity = manifest_identity(&manifest)?;
     let base_info = parse_manifest(&manifest)?;
     let mut native_candidates = native_candidates_for_archive(&input, &entries)?;
+    let mut split_names = Vec::new();
     let mut native_names = native_candidates
         .iter()
         .map(|(name, _)| name.clone())
@@ -1670,6 +1676,24 @@ fn inspect(
     for split_path in split_paths {
         let (split_input, split_entries) = read_archive(split_path)?;
         let split_identity = split_is_abi_only(&split_input, &split_entries)?;
+        let split_name = split_identity.3.as_ref().ok_or_else(|| {
+            format!(
+                "split APK manifest has no split name: {}",
+                split_path.display()
+            )
+        })?;
+        if split_name.is_empty()
+            || split_name
+                .chars()
+                .any(|character| matches!(character, ',' | ' ' | '\n' | '\r'))
+            || split_names.contains(split_name)
+        {
+            return Err(format!(
+                "invalid or duplicate split name: {}",
+                split_path.display()
+            ));
+        }
+        split_names.push(split_name.clone());
         if split_identity.0 != base_identity.0
             || split_identity.1 != base_identity.1
             || (!split_identity.2.is_empty() && split_identity.2 != base_identity.2)
@@ -1759,7 +1783,14 @@ fn inspect(
     } else {
         dex_entries.len()
     };
-    Ok((info, dex_source, dex_count, native_libraries, native_root))
+    Ok((
+        info,
+        dex_source,
+        dex_count,
+        native_libraries,
+        native_root,
+        split_names,
+    ))
 }
 
 fn descriptor(class_name: &str) -> String {
@@ -1793,10 +1824,15 @@ fn run() -> Result<()> {
             ));
         }
     }
-    let (info, dex_source, dex_count, native_libraries, native_root) =
+    let (info, dex_source, dex_count, native_libraries, native_root, split_names) =
         inspect(Path::new(&path), external_dex.as_deref(), &split_paths)?;
+    let split_names_field = if split_names.is_empty() {
+        String::new()
+    } else {
+        format!(" split_names={}", split_names.join(","))
+    };
     println!(
-        "apk-app-runtime: package={} application={} activity={} launch_component={} screen_orientation={} descriptor={} activities={} activity_aliases={} services={} receivers={} service_metadata={} providers={} application_metadata={} permissions={} version_code={} version_name={} theme={:#x} target_sdk={} debuggable={} has_code={} hardware_accelerated={} supports_rtl={} activity_hardware_accelerated={} label={} label_res={:#x} icon={} dex={}-{} manifest_schema=4 native={} native_root={}",
+        "apk-app-runtime: package={} application={} activity={} launch_component={} screen_orientation={} descriptor={} activities={} activity_aliases={} services={} receivers={} service_metadata={} providers={} application_metadata={} permissions={} version_code={} version_name={} theme={:#x} target_sdk={} debuggable={} has_code={} hardware_accelerated={} supports_rtl={} activity_hardware_accelerated={} label={} label_res={:#x} icon={} dex={}-{} manifest_schema=4 native={}{} native_root={}",
         info.package,
         info.application,
         info.activity,
@@ -1866,13 +1902,18 @@ fn run() -> Result<()> {
         if info.has_code { 1 } else { 0 },
         if info.hardware_accelerated { 1 } else { 0 },
         if info.supports_rtl { 1 } else { 0 },
-        if info.launch_activity_hardware_accelerated { 1 } else { 0 },
+        if info.launch_activity_hardware_accelerated {
+            1
+        } else {
+            0
+        },
         info.label,
         info.label_res,
         info.icon.as_deref().unwrap_or("none"),
         dex_source,
         dex_count,
         native_libraries.len(),
+        split_names_field,
         native_root.as_deref().unwrap_or("none")
     );
     if !info.activity_label.is_empty() || info.activity_label_res != 0 {

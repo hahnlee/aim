@@ -448,6 +448,7 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
         PathBuf::from("runtime/framework/pm/DexLoadReports.java"),
         PathBuf::from("runtime/framework/pm/InstalledApplicationInfo.java"),
         PathBuf::from("runtime/framework/pm/InstalledManifestMetadata.java"),
+        PathBuf::from("runtime/framework/pm/InstalledProviderInfo.java"),
         PathBuf::from("runtime/framework/pm/InstalledPackageRecord.java"),
         PathBuf::from("runtime/framework/pm/installed_record_source.h"),
         PathBuf::from("runtime/framework/pm/PackageManagerEndpoint.java"),

@@ -18,7 +18,8 @@ public final class InstalledApplicationInfoTest {
         String record = record("/packages/other/base.apk",
                 "split=/packages/other/config.apk\nsplit=/packages/other/abi.apk\n", "10042",
                 "apk-app-runtime: package=other application=other.App "
-                        + "target_sdk=36 has_code=0 debuggable=1 supports_rtl=1");
+                        + "target_sdk=36 has_code=0 debuggable=1 supports_rtl=1 "
+                        + "split_names=config.foo,config.arm64_v8a");
         ApplicationInfo info = InstalledApplicationInfo.fromRecord("other", record);
         check(info.packageName.equals("other") && info.className.equals("other.App"));
         check(info.sourceDir.equals("/packages/other/base.apk"));
@@ -26,6 +27,9 @@ public final class InstalledApplicationInfoTest {
         check(info.splitSourceDirs != null && info.splitPublicSourceDirs != null);
         check(info.splitSourceDirs != info.splitPublicSourceDirs);
         check(info.splitSourceDirs.length == 2);
+        check(info.splitNames.length == 2);
+        check(info.splitNames[0].equals("config.foo"));
+        check(info.splitNames[1].equals("config.arm64_v8a"));
         check(info.splitSourceDirs[0].equals("/packages/other/config.apk"));
         check(info.splitSourceDirs[1].equals("/packages/other/abi.apk"));
         info.splitSourceDirs[0] = "/foreign.apk";
@@ -68,6 +72,15 @@ public final class InstalledApplicationInfoTest {
                     record.replace("target_sdk=36", "target_sdk=bad"));
             throw new AssertionError("silently accepted corrupt SDK");
         } catch (NumberFormatException expected) {}
+        for (String malformed : new String[] {
+                "split_names=config.foo", "split_names=config.foo,config.foo",
+                "split_names=config.foo,", "no_split_names=missing"}) {
+            try {
+                InstalledApplicationInfo.fromRecord("other",
+                        record.replace("split_names=config.foo,config.arm64_v8a", malformed));
+                throw new AssertionError("accepted malformed split names: " + malformed);
+            } catch (IllegalArgumentException expected) {}
+        }
         String metadataPrefix = "apk-app-runtime: package=other application=none application_metadata=";
         for (String malformed : new String[] {
                 "zz:i:00000001", "74657374:x:00000001", "74657374:i:1",

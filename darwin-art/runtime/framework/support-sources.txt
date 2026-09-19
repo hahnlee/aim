@@ -66,6 +66,7 @@ runtime/framework/pm/InstalledPackageInfo.java
 runtime/framework/pm/InstalledPackageRecord.java
 runtime/framework/pm/InstalledResourceValue.java
 runtime/framework/pm/InstalledServiceInfo.java
+runtime/framework/pm/InstalledProviderInfo.java
 runtime/framework/pm/PackageManagerEndpoint.java
 runtime/framework/pm/PackageRecords.java
 runtime/framework/power/DarwinPowerStateProvider.java
