@@ -36,12 +36,6 @@ superseded facts instead of appending a turn-by-turn log.
 - User authorizes task-scoped app/runtime/management-daemon termination and
   restart without repeated confirmation. Resolve exact owned targets first,
   prefer graceful shutdown, preserve APKs/profiles and unrelated applications.
-- Latest model policy (2026-09-14): ordinary work and debugging stay with the
-  main agent (user-preferred model: GPT-5.6 Sol). Delegate bounded implementation
-  to Luna high; seek Astra for architecture reviews, consequential programming
-  decisions and higher-level judgment. Keep
-  shared native/DEX builds serialized and integration/acceptance with the main
-  agent. Parallel work does not relax Android ownership or acceptance criteria.
 - Before adding production code, identify its Android subsystem owner and the
   narrow Darwin boundary (if any). Split unrelated responsibilities out of an
   oversized file before extending it; do not append another subsystem to it.
@@ -95,11 +89,3 @@ superseded facts instead of appending a turn-by-turn log.
   the current goal does not imply full platform support; implement the common
   Android contract exposed by their real failures, and record unrelated system
   integrations as follow-up work rather than expanding the active goal.
-- Conserve cost by assigning bounded implementation to Luna high. The main
-  agent performs ordinary debugging and integration directly, seeking Astra
-  review for structural or higher-level decisions. The main agent retains
-  shared-build serialization and verification of actual acceptance evidence.
-  A preferred model in these instructions does not change the active model;
-  never claim a model switch that has not occurred.
-  Retire completed agents promptly and never duplicate a shared
-  native or DEX build across agents.
