@@ -7,6 +7,7 @@
 #include "window/appkit_window_delegate.h"
 #include "window/application_identity.h"
 #include "window/desktop_root_surface.h"
+#include "window/root_geometry.h"
 #include "graphics/metal_display_backing.h"
 #include "graphics/scanout_diagnostic_capture.h"
 
@@ -90,12 +91,7 @@ CGFloat WindowScale(bool visible, bool automatic) {
 
 }  // namespace
 
-static DarwinArtSurfaceResult ResizeSurfaceBacking(DarwinArtSurface* surface,
-                                                   uint32_t width,
-                                                   uint32_t height,
-                                                   bool update_window,
-                                                   uint32_t logical_width = 0,
-                                                   uint32_t logical_height = 0);
+
 
 DarwinArtSurface::~DarwinArtSurface() {
     // Retained NSViews/cancellation callbacks cannot keep a dangling owner.
@@ -470,7 +466,7 @@ static DarwinArtSurface* CreateSurfaceOnMain(
     [surface->view setOwnerSurface:surface];
     if (visible) {
       id<NSWindowDelegate> delegate =
-          darwin_art::window::CreateSurfaceWindowDelegate(surface, &ResizeSurfaceBacking);
+          darwin_art::window::CreateSurfaceWindowDelegate(surface, &ResizeSurfaceBackingOnMain);
       if (delegate == nil) {
         delete surface;
         return finish(DARWIN_ART_SURFACE_ALLOCATION_FAILED, nullptr);
@@ -478,6 +474,10 @@ static DarwinArtSurface* CreateSurfaceOnMain(
       surface->window_delegate = delegate;
       surface->window.delegate = delegate;
       surface->window.contentView = surface->view;
+      // The creation extent is not a user resize fact for Android geometry.
+      darwin_art::window::RootGeometryReports::Process().NoteKnownExtent(
+          static_cast<uint32_t>(std::ceil(NSWidth(frame))),
+          static_cast<uint32_t>(std::ceil(NSHeight(frame))));
       [surface->window makeFirstResponder:surface->view];
       [surface->window center];
       [surface->window makeKeyAndOrderFront:nil];
@@ -533,12 +533,12 @@ DarwinArtSurface* darwin_art_surface_create(
   return RunOnMainSync([&] { return CreateSurfaceOnMain(&info, out_result); });
 }
 
-static DarwinArtSurfaceResult ResizeSurfaceBacking(DarwinArtSurface* surface,
-                                                   uint32_t width,
-                                                   uint32_t height,
-                                                   bool update_window,
-                                                   uint32_t logical_width,
-                                                   uint32_t logical_height) {
+DarwinArtSurfaceResult ResizeSurfaceBackingOnMain(DarwinArtSurface* surface,
+                                                  uint32_t width,
+                                                  uint32_t height,
+                                                  bool update_window,
+                                                  uint32_t logical_width,
+                                                  uint32_t logical_height) {
   if (!IsMainThread()) return DARWIN_ART_SURFACE_NOT_MAIN_THREAD;
   if (surface == nullptr || !IsValidDimension(width) ||
       !IsValidDimension(height)) {
@@ -638,7 +638,7 @@ static DarwinArtSurfaceResult ResizeSurfaceBacking(DarwinArtSurface* surface,
 DarwinArtSurfaceResult darwin_art_surface_resize(
     DarwinArtSurface* surface, uint32_t width, uint32_t height) {
   return RunOnMainSync([&] {
-    return ResizeSurfaceBacking(surface, width, height, true);
+    return ResizeSurfaceBackingOnMain(surface, width, height, true, 0, 0);
   });
 }
 

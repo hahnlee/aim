@@ -17,6 +17,7 @@ import dev.darwinart.runtime.connectivity.ConnectivityServiceState;
 import dev.darwinart.runtime.connectivity.InstalledConnectivityPermissionEnforcer;
 import dev.darwinart.runtime.connectivity.NetworkPathProvider;
 import dev.darwinart.runtime.display.DisplayManagerEndpoint;
+import dev.darwinart.runtime.display.TaskDisplayRegistry;
 import dev.darwinart.runtime.input.InputManagerEndpoint;
 import dev.darwinart.runtime.inputmethod.InputMethodManagerEndpoint;
 import dev.darwinart.runtime.job.JobSchedulerEndpoint;
@@ -37,9 +38,11 @@ import dev.darwinart.runtime.user.UserManagerEndpoint;
 import dev.darwinart.runtime.usage.UsageStatsManagerEndpoint;
 import dev.darwinart.runtime.wm.ActivityTaskManagerEndpoint;
 import dev.darwinart.runtime.wm.DesktopRootEndpoint;
+import dev.darwinart.runtime.wm.DesktopRootGeometryEndpoint;
 import dev.darwinart.runtime.wm.DesktopRootRegistry;
 import dev.darwinart.runtime.wm.DesktopWindowMetadataEndpoint;
 import dev.darwinart.runtime.wm.DesktopWindowMetadataRegistry;
+import dev.darwinart.runtime.wm.TaskGeometryController;
 import dev.darwinart.runtime.wm.WindowManagerEndpoint;
 import java.util.HashMap;
 
@@ -54,13 +57,21 @@ public final class SystemServiceFactory {
         DesktopWindowMetadataRegistry windowMetadata = new DesktopWindowMetadataRegistry();
         services.put("darwin.package_registry", packages);
         services.put("package", new PackageManagerEndpoint(packages, processes::isCallerSameApp));
-        ActivityManagerEndpoint activity = new ActivityManagerEndpoint(packages, processes);
+        // Display, WMS and ActivityTask share one per-task geometry owner.
+        TaskDisplayRegistry taskDisplays = new TaskDisplayRegistry();
+        WindowManagerEndpoint windowManager =
+                new WindowManagerEndpoint(processes, windowMetadata, taskDisplays);
+        TaskGeometryController taskGeometry =
+                TaskGeometryController.create(processes, taskDisplays, windowManager);
+        taskGeometry.install();
+        ActivityManagerEndpoint activity =
+                new ActivityManagerEndpoint(packages, processes, taskGeometry);
         services.put("activity", activity);
         services.put("activity_task", new ActivityTaskManagerEndpoint(packages, processes));
-        services.put("display", new DisplayManagerEndpoint());
-        WindowManagerEndpoint windowManager = new WindowManagerEndpoint(processes, windowMetadata);
+        services.put("display", new DisplayManagerEndpoint(taskDisplays));
         DesktopRootRegistry desktopRoots = windowManager.createDesktopRootRegistry();
         services.put("window", windowManager);
+        services.put("darwin.root_geometry", new DesktopRootGeometryEndpoint(taskGeometry));
         services.put("darwin.window_metadata",
                 new DesktopWindowMetadataEndpoint(processes, windowMetadata));
         services.put("darwin.desktop_root", new DesktopRootEndpoint(processes, desktopRoots));

@@ -99,6 +99,7 @@ SurfaceControlPresentation MakePresentation(
       .relative_parent_id = control.relative_parent_id,
       .source = source,
       .destination = destination,
+      .explicit_geometry = control.has_geometry,
       .alpha = control.alpha,
       .z_order = control.z_order,
       .name = control.name,

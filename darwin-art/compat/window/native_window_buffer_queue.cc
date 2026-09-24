@@ -84,26 +84,23 @@ int NativeWindowBufferQueue::PrepareLocked(int32_t width, int32_t height,
                                           bool lazy_initial_pool) {
   if (width <= 0 || height <= 0) return -EINVAL;
   ReclaimRetiredLocked();
+  // Android BufferQueue never refuses new producer dimensions because the
+  // consumer still reads older buffers: those retire and are freed on release.
+  // Only a producer-owned (dequeued) buffer blocks the transition. Retired
+  // storage is bounded by the frames the consumer holds, not by generations;
+  // release completion lags composition, so a generation cap would fail
+  // swapchain recreation during a live resize.
   size_t active = 0;
-  bool active_held = false;
   for (const auto& slot : slots_) {
     if (!Active(slot)) continue;
     ++active;
     if (slot.dequeued) return -EBUSY;
-    if (slot.release_fence >= 0 && sync_wait(slot.release_fence, 0) != 0)
-      return -EBUSY;
-    active_held |= slot.held;
   }
   const bool has_quarantine = std::any_of(
       slots_.begin(), slots_.end(), [](const Slot& slot) {
         return slot.quarantined && slot.buffer != nullptr;
       });
   if (active != 0 && active != 3 && !has_quarantine) return -EBUSY;
-  if (active_held && std::any_of(slots_.begin(), slots_.end(),
-      [](const Slot& slot) {
-        return slot.retired && !slot.quarantined && slot.buffer;
-      }))
-    return -EBUSY;
   if (!lazy_initial_pool && generation_ == UINT64_MAX) return -EBUSY;
   PreparedBuffers prepared;
   if (!prepared.Allocate(width, height)) return -ENOMEM;
@@ -117,10 +114,16 @@ int NativeWindowBufferQueue::PrepareLocked(int32_t width, int32_t height,
     catch (const std::length_error&) { return -ENOMEM; }
   for (auto& slot : slots_) {
     if (!Active(slot)) continue;
-    Close(slot.release_fence);
-    slot.release_fence = -1;
-    if (slot.held) slot.retired = true;
-    else { AHardwareBuffer_release(slot.buffer); slot = {}; }
+    const bool reading = slot.release_fence >= 0 &&
+        sync_wait(slot.release_fence, 0) != 0;
+    if (slot.held || reading) {
+      // ReclaimRetiredLocked frees it once released and its fence signals.
+      slot.retired = true;
+    } else {
+      Close(slot.release_fence);
+      AHardwareBuffer_release(slot.buffer);
+      slot = {};
+    }
   }
   // Lazy allocation preserves generation1; explicit geometry preparation
   // advances identity even before the first dequeue, matching the old ABI.

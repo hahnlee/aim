@@ -158,7 +158,8 @@ public final class DesktopRootWindowBindingTest {
         processes.beginAttachment(4101, 10101, thread, 1);
         processes.identify(4101, 1, thread, "fixture.binding");
         Binder.setCallingIdentity(4101, 10101);
-        WindowManagerEndpoint manager = new WindowManagerEndpoint(processes, new DesktopWindowMetadataRegistry());
+        WindowManagerEndpoint manager = new WindowManagerEndpoint(processes, new DesktopWindowMetadataRegistry(),
+                new dev.darwinart.runtime.display.TaskDisplayRegistry());
         DesktopRootEndpoint roots = new DesktopRootEndpoint(processes, manager.createDesktopRootRegistry(HOST));
         WindowSessionEndpoint session = session(manager);
         Binder window = new Binder();

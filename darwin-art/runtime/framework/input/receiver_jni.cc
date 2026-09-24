@@ -19,6 +19,7 @@
 #include "view_root_input_jni.h"
 #include "../looper/message_queue_jni.h"
 #include "../wm/desktop_root_client_jni.h"
+#include "../wm/desktop_root_geometry_jni.h"
 
 #include <atomic>
 #include <bit>
@@ -410,7 +411,8 @@ jlong InputReceiverInit(JNIEnv* env, jclass, jobject weak_receiver,
                 !receiver->disposed.load(std::memory_order_acquire);
     }
     if (current && receiver->view_root != nullptr &&
-        !framework::wm::EnsureDesktopRootClient(env, input_channel)) {
+        (!framework::wm::EnsureDesktopRootClient(env, input_channel) ||
+         !framework::wm::EnsureDesktopRootGeometryClient(env))) {
       // The receiver is committed already: retire this exact resource on
       // attachment exceptions rather than leaking a failed Java constructor.
       jthrowable attachment_exception = env->ExceptionOccurred();

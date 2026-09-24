@@ -30,6 +30,8 @@ javac --release 8 -encoding UTF-8 -d "$out_dir" \
   "$repo_dir/runtime/framework/wm/WindowInputEndpoint.java" \
   "$repo_dir/runtime/framework/wm/WindowPublicationDriver.java" \
   "$repo_dir/runtime/framework/wm/WindowPublicationController.java" \
+  "$repo_dir/runtime/framework/display/DisplayGeometry.java" \
+  "$repo_dir/runtime/framework/display/TaskDisplayRegistry.java" \
   "$repo_dir/runtime/framework/wm/WindowSurfaceRegistry.java" \
   "$repo_dir/runtime/framework/wm/WindowSessionEndpoint.java" \
   "$repo_dir/runtime/framework/wm/WindowManagerEndpoint.java" \

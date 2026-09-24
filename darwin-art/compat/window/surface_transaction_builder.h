@@ -34,6 +34,9 @@ class SurfaceTransactionBuilder final {
                                      uint64_t submission_cookie);
   bool SetGeometry(ASurfaceControl* control, const ARect& source,
                    const ARect& destination, int32_t transform);
+  // layer_state_t::destinationFrame: scale the whole buffer into `frame`
+  // (layer-local coordinates). Keeps an explicit source set in this update.
+  bool SetDestinationFrame(ASurfaceControl* control, const ARect& frame);
   bool SetCrop(ASurfaceControl* control, const ARect& crop);
   bool SetPosition(ASurfaceControl* control, int32_t x, int32_t y);
   bool SetBufferTransform(ASurfaceControl* control, int32_t transform);

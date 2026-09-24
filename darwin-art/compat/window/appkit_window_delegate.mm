@@ -1,6 +1,7 @@
 #include "appkit_window_delegate.h"
 #include "../darwin_surface_internal.h"
 #include "display_output.h"
+#include "root_geometry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -37,6 +38,8 @@
   if (self.surface != nullptr) {
     RetireDisplayOutput(self.surface);
     self.surface->window_closed.store(true, std::memory_order_release);
+    // Delayed task revisions must not resize a closed root; stop reports.
+    if (self.surface->visible) darwin_art::window::RootGeometryReports::Process().Close();
   }
   auto terminal = root == nullptr ? darwin_art::window::DesktopRootEvents::DeferredClose()
                                   : root->PrepareClose();
@@ -58,6 +61,20 @@
   const CGFloat scale = view.metalLayer.contentsScale > 0.0
                             ? view.metalLayer.contentsScale : 1.0;
   const NSRect bounds = view.bounds;
+  if (surface->visible) {
+    // Report the host fact; Android ActivityTask owns the resulting task
+    // extent, and its revision resizes the backing (root_geometry.mm).
+    const bool reported = darwin_art::window::RootGeometryReports::Process().Publish(
+        static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.width))),
+        static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.height))));
+    if (darwin_art::window::RootGeometryOwned(surface)) {
+      if (reported) {
+        std::cerr << "DARWIN_ART window resize reported points="
+                  << bounds.size.width << "x" << bounds.size.height << "\n";
+      }
+      return;
+    }
+  }
   const uint32_t width = static_cast<uint32_t>(std::max<CGFloat>(
       1.0, std::ceil(bounds.size.width * scale)));
   const uint32_t height = static_cast<uint32_t>(std::max<CGFloat>(

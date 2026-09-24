@@ -127,10 +127,12 @@ manifest_schema="$(sed -n 's/^apk-app-runtime: .* manifest_schema=\([^ ]*\) .*/\
 manifest_schema_needs_refresh=0
 if [[ -n "$installed_record" ]]; then
   # Installed records carry an immutable metadata snapshot. Schema 4 adds the
-  # service permission/exported/enabled projection required by system services.
+  # service permission/exported/enabled projection required by system services;
+  # schema 6 adds each Activity's own screenOrientation, configChanges and
+  # hardware acceleration.
   case "$manifest_schema" in
-    ""|0|1|2|3) manifest_schema_needs_refresh=1 ;;
-    4) ;;
+    ""|0|1|2|3|4|5) manifest_schema_needs_refresh=1 ;;
+    6) ;;
     *)
       echo "installed package metadata schema is unsupported: $manifest_schema" >&2
       exit 69
@@ -155,8 +157,8 @@ if [[ "$manifest_schema_needs_refresh" == "1" ]]; then
   refreshed_metadata="$($metadata_tool "${refresh_arguments[@]}")"
   refreshed_schema="$(sed -n 's/^apk-app-runtime: .* manifest_schema=\([^ ]*\) .*/\1/p' \
     <<<"$refreshed_metadata")"
-  [[ "$refreshed_schema" == "4" ]] || {
-    echo "rebuilt APK metadata tool does not support manifest schema 4" >&2
+  [[ "$refreshed_schema" == "6" ]] || {
+    echo "rebuilt APK metadata tool does not support manifest schema 6" >&2
     exit 69
   }
   metadata="$refreshed_metadata"

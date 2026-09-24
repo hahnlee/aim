@@ -66,7 +66,8 @@ void MergeRetainedLayer(WireLayer& destination, const WireLayer& source) {
     destination.source_top = source.source_top;
     destination.source_right = source.source_right;
     destination.source_bottom = source.source_bottom;
-    if (destination.destination_right <= destination.destination_left ||
+    if ((source.what & DARWIN_ART_SF_BUFFER_DEFINES_BOUNDS) != 0 ||
+        destination.destination_right <= destination.destination_left ||
         destination.destination_bottom <= destination.destination_top) {
       destination.destination_right = destination.destination_left +
           static_cast<int32_t>(source.width);

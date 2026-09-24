@@ -53,14 +53,52 @@ public final class InstalledActivityInfo {
             InstalledApplicationInfo.applyLabel(
                     info, installed, "activity_label", "activity_label_res");
         }
-        if ("1".equals(installed.legacyManifestHint("activity_hardware_accelerated"))) {
-            info.flags |= ActivityInfo.FLAG_HARDWARE_ACCELERATED;
-        }
 
         info.theme = theme;
-        String orientation = installed.legacyManifestHint("screen_orientation");
-        if (orientation != null) info.screenOrientation = Integer.parseInt(orientation);
+        applyWindowPolicy(info, installed, declarationName, activityName);
         return info;
+    }
+
+    /**
+     * Applies the declaring activity's own screenOrientation and configChanges.
+     * Records from schema 5 carry one entry per activity; older records only
+     * describe the launcher and must not leak its orientation to other activities.
+     */
+    private static void applyWindowPolicy(ActivityInfo info, InstalledPackageRecord installed,
+            String declarationName, String activityName) {
+        int orientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+        int configChanges = 0;
+        boolean accelerated = false;
+        String windows = installed.legacyManifestHint("activity_windows");
+        if (windows != null) {
+            if (!windows.equals("none")) {
+                for (String declaration : windows.split(",")) {
+                    int delimiter = declaration.lastIndexOf('=');
+                    if (delimiter <= 0
+                            || !declarationName.equals(declaration.substring(0, delimiter))) {
+                        continue;
+                    }
+                    // orientation:configChanges:hardwareAccelerated
+                    String[] fields = declaration.substring(delimiter + 1).split(":");
+                    if (fields.length != 3) {
+                        throw new IllegalArgumentException("malformed activity window record");
+                    }
+                    orientation = Integer.parseInt(fields[0]);
+                    configChanges = Integer.decode(fields[1]);
+                    accelerated = "1".equals(fields[2]);
+                    break;
+                }
+            }
+        } else if (activityName.equals(installed.legacyManifestHint("launch_component"))) {
+            String legacy = installed.legacyManifestHint("screen_orientation");
+            if (legacy != null) orientation = Integer.parseInt(legacy);
+            accelerated = "1".equals(installed.legacyManifestHint("activity_hardware_accelerated"));
+        }
+        if (accelerated) info.flags |= ActivityInfo.FLAG_HARDWARE_ACCELERATED;
+        info.screenOrientation = orientation;
+        // PackageParser: recreateOnConfigChanges defaults to 0, so MCC/MNC are
+        // handled by the Activity unless it explicitly asks to be recreated.
+        info.configChanges = configChanges | ActivityInfo.CONFIG_MCC | ActivityInfo.CONFIG_MNC;
     }
 
     private static String aliasTarget(InstalledPackageRecord installed, String activityName) {

@@ -96,9 +96,11 @@ int main() {
     assert(queue.Dequeue(&b) == 0 && b.buffer != a.buffer);
     NativeWindowQueuedBuffer second;
     assert(queue.Queue(b.native_buffer, &second) == 0);
-    assert(queue.PrepareGeometry(64, 64) == -EBUSY); // two held generations
+    // A held generation retires instead of blocking new producer geometry.
+    assert(queue.PrepareGeometry(64, 64) == 0);
     queue.ReturnCurrentSlot(first.token.slot, 7);
-    assert(queue.PrepareGeometry(64, 64) == -EBUSY); // old GPU not finished
+    // An unsignalled release fence retires with its storage, not EBUSY.
+    assert(queue.PrepareGeometry(64, 64) == 0);
     signaled = true;
     assert(queue.PrepareGeometry(64, 64) == 0);
     queue.Return(second.token, -1, false);
@@ -170,6 +172,40 @@ int main() {
       assert(fresh.native_buffer != quarantined_buffer);
       assert(queue.Cancel(fresh.lease, -1) == 0);
     }
+  }
+  assert(live_buffers == 0);
+  {
+    // A geometry change never waits for the consumer: every held generation
+    // retires and its storage is freed exactly when its frame is returned.
+    signaled = true;
+    NativeWindowBufferQueue queue(16, 16);
+    NativeWindowQueuedBuffer held[3];
+    for (int generation = 0; generation < 3; ++generation) {
+      NativeWindowDequeuedBuffer buffer;
+      assert(queue.Dequeue(&buffer) == 0);
+      assert(queue.Queue(buffer.native_buffer, &held[generation]) == 0);
+      const int size = 32 + 16 * generation;
+      assert(queue.PrepareGeometry(size, size) == 0);
+    }
+    assert(live_buffers == 3 + 3);  // one held frame per generation + pool
+    queue.Return(held[0].token, -1, false);
+    held[0] = NativeWindowQueuedBuffer{};  // consumer drops its reference
+    assert(queue.PrepareGeometry(96, 96) == 0);
+    assert(live_buffers == 2 + 3);
+    queue.Return(held[1].token, -1, false);
+    queue.Return(held[2].token, -1, false);
+    // A fence-pending retired slot is freed only after the fence signals.
+    signaled = false;
+    NativeWindowDequeuedBuffer pending;
+    assert(queue.Dequeue(&pending) == 0);
+    assert(queue.Cancel(pending.lease, 301) == 0);
+    const int before = live_buffers;
+    assert(queue.PrepareGeometry(128, 128) == 0);
+    assert(live_buffers > before - 3);  // pending storage retained, not freed
+    signaled = true;
+    NativeWindowDequeuedBuffer fresh;
+    assert(queue.Dequeue(&fresh) == 0 && fresh.buffer->width == 128);
+    assert(queue.Cancel(fresh.lease, -1) == 0);
   }
   assert(live_buffers == 0);
   std::puts("native-window buffer queue: partial allocation/resize/exact return/fences/leases PASS");

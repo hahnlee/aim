@@ -33,6 +33,14 @@
 #include "nativeloader/native_loader.h"
 
 namespace android {
+
+// Guest libdl opens carry bionic rtld flags into image creation; ART's
+// OpenNativeLibrary entry point (System.loadLibrary) is always RTLD_LOCAL.
+void* OpenNativeLibraryWithRequest(JNIEnv* env, const char* path, jobject loader,
+                                   const char* caller_location,
+                                   bool* needs_native_bridge, char** error_msg,
+                                   const darwin_art::loader::GuestOpenRequest& request);
+
 namespace {
 
 std::mutex& ElfLibraryRegistryMutex() {
@@ -130,9 +138,20 @@ class ScopedGuestLoaderAttachment {
   bool attached_here_ = false;
 };
 
+// RTLD_NODELETE is sticky across reopen; RTLD_GLOBAL is fixed at creation.
+void ApplyGuestReopenFlags(void* handle,
+                           const darwin_art::loader::GuestOpenRequest& request) {
+  if (ElfLibrary* library = AsElfLibrary(handle);
+      library != nullptr && request.nodelete) {
+    library->rtld_nodelete.store(true, std::memory_order_relaxed);
+  }
+}
+
 void* GuestDsoOpen(void* context, const char* path, int flags, const DarwinArtAndroidDlExtInfo* info,
                   char* error, size_t capacity) {
-  if (const char* rejection = darwin_art::loader::LegacyOpenRequestError(flags, info)) {
+  darwin_art::loader::GuestOpenRequest request;
+  if (const char* rejection =
+          darwin_art::loader::ParseGuestOpenRequest(flags, info, &request)) {
     CopyLoaderError(rejection, error, capacity);
     return nullptr;
   }
@@ -141,6 +160,8 @@ void* GuestDsoOpen(void* context, const char* path, int flags, const DarwinArtAn
     CopyLoaderError("invalid Android guest loader context", error, capacity);
     return nullptr;
   }
+  // Resident built-in provider: process lifetime (NODELETE) and already
+  // visible to every image that names it, so GLOBAL/NODELETE are satisfied.
   if (std::strcmp(path, "libmediandk.so") == 0) {
     if (std::getenv("DARWIN_ART_DEBUG_GUEST_LIBDL") != nullptr)
       std::fprintf(stderr, "DARWIN guest libdl open builtin path=%s\n", path);
@@ -154,6 +175,7 @@ void* GuestDsoOpen(void* context, const char* path, int flags, const DarwinArtAn
           CurrentArtEnv(), path, static_cast<jobject>(owner->app_loader));
       existing != nullptr && existing->graph_handle != nullptr) {
     existing->guest_open_refs.fetch_add(1, std::memory_order_relaxed);
+    ApplyGuestReopenFlags(existing->graph_handle, request);
     if (std::getenv("DARWIN_ART_DEBUG_GUEST_LIBDL") != nullptr) {
       std::fprintf(stderr,
                    "DARWIN guest libdl open reuse path=%s handle=%p refs=%u\n",
@@ -175,9 +197,12 @@ void* GuestDsoOpen(void* context, const char* path, int flags, const DarwinArtAn
   }
   bool needs_bridge = false;
   char* native_error = nullptr;
-  void* handle = OpenNativeLibrary(attachment.env(), 35, path,
-                                   static_cast<jobject>(owner->app_loader), nullptr,
-                                   nullptr, &needs_bridge, &native_error);
+  void* handle = OpenNativeLibraryWithRequest(
+      attachment.env(), path, static_cast<jobject>(owner->app_loader), nullptr,
+      &needs_bridge, &native_error, request);
+  // A resident image reused inside OpenNativeLibrary keeps its original
+  // RTLD_GLOBAL state; only NODELETE promotes.
+  if (handle != nullptr) ApplyGuestReopenFlags(handle, request);
   if (handle == nullptr || !needs_bridge) {
     const std::string message = native_error == nullptr
                                     ? "Android guest ELF open failed"
@@ -196,8 +221,54 @@ void* GuestDsoOpen(void* context, const char* path, int flags, const DarwinArtAn
   return handle;
 }
 
-void* GuestDsoLookup(void*, void* handle, const char* symbol, const char*,
+// bionic dlsym_linear_lookup for RTLD_DEFAULT (arm64 handle 0): scan the
+// caller namespace in load order, skipping images not loaded RTLD_GLOBAL
+// (target SDK >= 23 rule). Only graph roots are indexed here, and the callback
+// ABI carries no caller address, so the caller local-group fallback and
+// RTLD_NEXT remain unimplemented and fail explicitly.
+void* LookupDefaultScopeElfSymbol(ElfLibrary* owner, const char* symbol,
+                                  std::string* error) {
+  std::vector<ElfLibrary*> scope;
+  {
+    std::lock_guard<std::mutex> lock(ElfLibraryRegistryMutex());
+    for (ElfLibrary* library : ElfLibraries()) {
+      // RTLD_GLOBAL images are never unloaded by dlclose, so the snapshot
+      // stays valid outside the registry lock (until VM shutdown).
+      if (library != nullptr &&
+          library->rtld_global.load(std::memory_order_acquire) &&
+          library->graph != nullptr &&
+          library->loader_namespace_id == owner->loader_namespace_id) {
+        scope.push_back(library);
+      }
+    }
+  }
+  for (ElfLibrary* library : scope) {
+    uintptr_t address = 0;
+    if (!LookupOptionalElfSymbol(library, symbol, &address, error)) return nullptr;
+    if (address != 0) return reinterpret_cast<void*>(address);
+  }
+  *error = std::string("Android dlsym(RTLD_DEFAULT) symbol not found in RTLD_GLOBAL scope: ") +
+           symbol;
+  return nullptr;
+}
+
+void* GuestDsoLookup(void* context, void* handle, const char* symbol, const char*,
                     char* error, size_t capacity) {
+  if (handle == nullptr) {
+    auto* owner = static_cast<ElfLibrary*>(context);
+    if (owner == nullptr || owner->magic != kElfLibraryMagic || symbol == nullptr) {
+      CopyLoaderError("invalid Android dlsym(RTLD_DEFAULT) request", error, capacity);
+      return nullptr;
+    }
+    std::string lookup_error;
+    void* address = LookupDefaultScopeElfSymbol(owner, symbol, &lookup_error);
+    if (address == nullptr) CopyLoaderError(lookup_error, error, capacity);
+    if (std::getenv("DARWIN_ART_DEBUG_GUEST_LIBDL") != nullptr) {
+      std::fprintf(stderr, "DARWIN guest libdl lookup RTLD_DEFAULT symbol=%s result=%p\n",
+                   symbol, address);
+    }
+    return address;
+  }
   if (IsMediaNdkHandle(handle)) {
     void* address = darwin_art_android_media_ndk_symbol(symbol);
     if (address != nullptr) return address;
@@ -230,11 +301,17 @@ void* GuestDsoLookup(void*, void* handle, const char* symbol, const char*,
 
 int GuestDsoClose(void*, void* handle, char* error, size_t capacity) {
   if (IsMediaNdkHandle(handle)) return 0;
-  if (ElfLibrary* library = AsElfLibrary(handle);
-      library != nullptr &&
-      library->guest_open_refs.load(std::memory_order_relaxed) != 0) {
-    library->guest_open_refs.fetch_sub(1, std::memory_order_relaxed);
-    return 0;
+  if (ElfLibrary* library = AsElfLibrary(handle); library != nullptr) {
+    if (library->guest_open_refs.load(std::memory_order_relaxed) != 0) {
+      library->guest_open_refs.fetch_sub(1, std::memory_order_relaxed);
+      return 0;
+    }
+    // bionic soinfo::can_unload: RTLD_GLOBAL/RTLD_NODELETE images stay mapped.
+    if (!darwin_art::loader::GuestImageUnloadable(
+            library->rtld_global.load(std::memory_order_relaxed),
+            library->rtld_nodelete.load(std::memory_order_relaxed))) {
+      return 0;
+    }
   }
   char* native_error = nullptr;
   const bool closed = CloseNativeLibrary(handle, true, &native_error);
@@ -509,9 +586,18 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
                                     const char* path,
                                     jobject loader,
                                     const char* caller_location,
-                                    jstring library_path,
+                                    jstring,
                                     bool* needs_native_bridge,
                                     char** error_msg) {
+  return OpenNativeLibraryWithRequest(env, path, loader, caller_location,
+                                      needs_native_bridge, error_msg,
+                                      darwin_art::loader::GuestOpenRequest{});
+}
+
+void* OpenNativeLibraryWithRequest(JNIEnv* env, const char* path, jobject loader,
+                                   const char* caller_location,
+                                   bool* needs_native_bridge, char** error_msg,
+                                   const darwin_art::loader::GuestOpenRequest& request) {
   if (needs_native_bridge != nullptr) *needs_native_bridge = false;
   if (std::getenv("DARWIN_ART_DEBUG_GUEST_LIBDL") != nullptr) {
     std::fprintf(stderr,
@@ -1017,6 +1103,10 @@ extern "C" void* OpenNativeLibrary(JNIEnv* env,
       return nullptr;
     }
     library_value->graph_handle = graph_handle;
+    // Publish rtld flags only for a fully linked image: RTLD_DEFAULT scope
+    // snapshots rely on GLOBAL images never being torn down by dlclose.
+    library_value->rtld_nodelete.store(request.nodelete, std::memory_order_relaxed);
+    library_value->rtld_global.store(request.global, std::memory_order_release);
     if (std::getenv("DARWIN_ART_DEBUG_GUEST_LIBDL") != nullptr) {
       std::fprintf(stderr,
                    "DARWIN ELF loader: published handle=%p JNI_OnLoad=%p\n",

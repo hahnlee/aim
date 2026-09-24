@@ -64,6 +64,12 @@ struct ElfLibrary {
   std::string cached_root_soname;
   void* graph_handle = nullptr;
   std::atomic<uint32_t> guest_open_refs{0};
+  // bionic rtld_flags of this graph root. RTLD_GLOBAL is recorded only when a
+  // guest dlopen creates the image (System.loadLibrary is RTLD_LOCAL) and
+  // places it in the namespace's dlsym(RTLD_DEFAULT) scope. NODELETE may be
+  // promoted by a later guest dlopen. Either flag makes dlclose retain it.
+  std::atomic<bool> rtld_global{false};
+  std::atomic<bool> rtld_nodelete{false};
   darwin_art::android_jni::TrampolineSet* trampolines = nullptr;
   // JNI_OnLoad may register methods on more than one app class.  Each
   // RegisterNatives call gets an independent executable trampoline mapping;

@@ -54,6 +54,10 @@ typedef enum DarwinArtSurfaceFlingerLayerChange {
   // need to interpret this payload; Darwin's retained GPU composer consumes
   // the bounded rectangles after it has applied the frontend's layer order.
   DARWIN_ART_SF_TRANSPARENT_REGION_CHANGED = UINT64_C(0x200000000),
+  // Private: this buffered layer never set a destination frame, so its
+  // bounds follow each new buffer's size at the retained origin (AOSP
+  // Layer bounds with an unset layer_state_t::destinationFrame).
+  DARWIN_ART_SF_BUFFER_DEFINES_BOUNDS = UINT64_C(0x400000000),
 } DarwinArtSurfaceFlingerLayerChange;
 
 typedef struct DarwinArtSurfaceFlingerCommitResult {

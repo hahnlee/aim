@@ -119,6 +119,10 @@ extern "C" bool
 darwin_art_android_surface_transaction_set_buffer_with_cookie_checked(
     void* transaction, void* control, AHardwareBuffer* buffer, int fence_fd,
     uint64_t submission_cookie);
+struct ARect;
+// SurfaceControl.Transaction#setDestinationFrame for the Darwin transaction.
+extern "C" bool darwin_art_android_surface_transaction_set_destination_frame(
+    void* transaction, void* control, ARect frame);
 // discard owns its fence; -1 is ready, -2 requires quarantine after fence failure.
 // A false checked result transfers no callback-context ownership.
 extern "C" bool darwin_art_android_surface_transaction_set_buffer_callbacks_checked(

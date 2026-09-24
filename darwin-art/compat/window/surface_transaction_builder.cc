@@ -1,5 +1,7 @@
 #include "surface_transaction_builder.h"
 
+#include <cstdint>
+
 #include <android/hardware_buffer.h>
 
 #include <algorithm>
@@ -319,6 +321,13 @@ darwin_art_android_surface_transaction_set_buffer_with_cookie_checked(
       control, buffer, fence_fd, submission_cookie);
 }
 
+extern "C" bool darwin_art_android_surface_transaction_set_destination_frame(
+    void* opaque, void* opaque_control, ARect frame) {
+  auto* transaction = reinterpret_cast<SurfaceTransaction*>(opaque);
+  auto* control = reinterpret_cast<ASurfaceControl*>(opaque_control);
+  return SurfaceTransactionBuilder(transaction).SetDestinationFrame(control, frame);
+}
+
 bool SurfaceTransactionBuilder::SetGeometry(ASurfaceControl* control,
                                             const ARect& source,
                                             const ARect& destination,
@@ -330,6 +339,21 @@ bool SurfaceTransactionBuilder::SetGeometry(ASurfaceControl* control,
   update->has_geometry = true;
   update->transform = transform;
   update->has_transform = true;
+  return true;
+}
+
+bool SurfaceTransactionBuilder::SetDestinationFrame(ASurfaceControl* control,
+                                                    const ARect& frame) {
+  SurfaceTransaction::Update* update = nullptr;
+  if (!EnsureUpdate(control, &update)) return false;
+  if (!update->has_geometry) {
+    // Whole-buffer source: every presentation consumer clamps the source to
+    // the current buffer extent, so later buffer-size changes stay unscaled
+    // sources scaled into this frame, as SurfaceFlinger does.
+    update->source = ARect{0, 0, INT32_MAX, INT32_MAX};
+  }
+  update->destination = frame;
+  update->has_geometry = true;
   return true;
 }
 

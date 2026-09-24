@@ -59,6 +59,7 @@ struct ActivityCandidate {
     launcher: bool,
     alias: bool,
     screen_orientation: Option<i32>,
+    config_changes: Option<u32>,
     hardware_accelerated: Option<bool>,
 }
 
@@ -114,6 +115,9 @@ struct ManifestInfo {
     activity: String,
     launch_component: String,
     activity_themes: Vec<(String, u32)>,
+    // Per-activity window policy: (activity, screenOrientation, configChanges,
+    // hardwareAccelerated resolved against the application default).
+    activity_windows: Vec<(String, i32, u32, bool)>,
     activity_aliases: Vec<(String, String)>,
     services: Vec<(String, String, bool, Option<String>, bool, bool)>,
     receivers: Vec<(String, String, bool, bool)>,
@@ -899,6 +903,16 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
                         attr_size,
                         "hardwareAccelerated",
                     )?;
+                    // android:configChanges is an attrs.xml flag whose bit
+                    // values are ActivityInfo.CONFIG_* constants.
+                    let config_changes = find_integer_attribute(
+                        input,
+                        strings,
+                        attrs,
+                        attr_count,
+                        attr_size,
+                        "configChanges",
+                    )?;
                     current = Some(ActivityCandidate {
                         depth,
                         component_name,
@@ -910,6 +924,7 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
                         launcher: false,
                         alias: tag == "activity-alias",
                         screen_orientation,
+                        config_changes,
                         hardware_accelerated,
                     });
                 }
@@ -1166,6 +1181,21 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
     let launch_activity_hardware_accelerated = target_hardware_accelerated
         .or(launcher.hardware_accelerated)
         .unwrap_or(hardware_accelerated);
+    let activity_windows = activities
+        .iter()
+        .map(|candidate| {
+            Ok((
+                normalize_activity(&package, &candidate.name)?,
+                candidate.screen_orientation.unwrap_or(-1),
+                candidate.config_changes.unwrap_or(0),
+                // AOSP PackageParser: the Activity inherits the application's
+                // hardware acceleration unless it declares its own value.
+                candidate
+                    .hardware_accelerated
+                    .unwrap_or(hardware_accelerated),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let activity_themes = activities
         .into_iter()
         .map(|candidate| {
@@ -1259,6 +1289,7 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
         activity,
         launch_component,
         activity_themes,
+        activity_windows,
         activity_aliases,
         services,
         receivers,
@@ -1832,7 +1863,7 @@ fn run() -> Result<()> {
         format!(" split_names={}", split_names.join(","))
     };
     println!(
-        "apk-app-runtime: package={} application={} activity={} launch_component={} screen_orientation={} descriptor={} activities={} activity_aliases={} services={} receivers={} service_metadata={} providers={} application_metadata={} permissions={} version_code={} version_name={} theme={:#x} target_sdk={} debuggable={} has_code={} hardware_accelerated={} supports_rtl={} activity_hardware_accelerated={} label={} label_res={:#x} icon={} dex={}-{} manifest_schema=4 native={}{} native_root={}",
+        "apk-app-runtime: package={} application={} activity={} launch_component={} screen_orientation={} descriptor={} activities={} activity_windows={} activity_aliases={} services={} receivers={} service_metadata={} providers={} application_metadata={} permissions={} version_code={} version_name={} theme={:#x} target_sdk={} debuggable={} has_code={} hardware_accelerated={} supports_rtl={} activity_hardware_accelerated={} label={} label_res={:#x} icon={} dex={}-{} manifest_schema=6 native={}{} native_root={}",
         info.package,
         info.application,
         info.activity,
@@ -1844,6 +1875,17 @@ fn run() -> Result<()> {
             .map(|(name, theme)| format!("{name}={theme:#x}"))
             .collect::<Vec<_>>()
             .join(","),
+        if info.activity_windows.is_empty() {
+            "none".to_owned()
+        } else {
+            info.activity_windows
+                .iter()
+                .map(|(name, orientation, changes, accelerated)| {
+                    format!("{name}={orientation}:{changes:#x}:{}", u8::from(*accelerated))
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        },
         if info.activity_aliases.is_empty() {
             "none".to_owned()
         } else {

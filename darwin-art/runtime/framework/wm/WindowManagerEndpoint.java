@@ -4,23 +4,31 @@ import android.os.Binder;
 import android.os.Parcel;
 import android.os.RemoteException;
 import dev.darwinart.runtime.am.ApplicationProcessRegistry;
+import dev.darwinart.runtime.display.TaskDisplayRegistry;
 
 /** System-process owner for the pinned Android 16 IWindowManager contract. */
 public final class WindowManagerEndpoint extends Binder {
     private static final String DESCRIPTOR = "android.view.IWindowManager";
     private final ApplicationProcessRegistry processes;
-    private final DesktopWindowMetadataRegistry metadata;
+    private final WindowSurfaceRegistry surfaces;
     private final WindowSessionWindowOwnership windows = new WindowSessionWindowOwnership();
     private final WindowPublicationController publications = new WindowPublicationController();
     private final int openSessionCode = transaction("openSession");
     private final int hasNavigationBarCode = transaction("hasNavigationBar");
 
     public WindowManagerEndpoint(ApplicationProcessRegistry processes,
-            DesktopWindowMetadataRegistry metadata) {
-        if (processes == null || metadata == null) throw new NullPointerException();
+            DesktopWindowMetadataRegistry metadata, TaskDisplayRegistry displays) {
+        if (processes == null || metadata == null || displays == null) {
+            throw new NullPointerException();
+        }
         this.processes = processes;
-        this.metadata = metadata;
+        surfaces = new WindowSurfaceRegistry(metadata, displays);
         attachInterface(null, DESCRIPTOR);
+    }
+
+    /** The WMS-wide window layout owner used by task geometry dispatch. */
+    WindowSurfaceRegistry surfaces() {
+        return surfaces;
     }
 
     /** Creates the root registry joined to this endpoint's publication owner. */
@@ -52,7 +60,7 @@ public final class WindowManagerEndpoint extends Binder {
             data.enforceNoDataAvail();
             WindowSessionIdentity identity = new WindowSessionIdentity(processes,
                     Binder.getCallingPid(), Binder.getCallingUid());
-            WindowSessionEndpoint session = new WindowSessionEndpoint(metadata, identity, windows, publications);
+            WindowSessionEndpoint session = new WindowSessionEndpoint(surfaces, identity, windows, publications);
             reply.writeNoException();
             reply.writeStrongBinder(session);
             return true;

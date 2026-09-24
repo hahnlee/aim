@@ -10,13 +10,19 @@ import java.lang.reflect.Method;
 public final class DisplayManagerEndpoint extends Binder {
     private static final String DESCRIPTOR = "android.hardware.display.IDisplayManager";
     private final DefaultDisplayRegistry displays = new DefaultDisplayRegistry();
+    private final TaskDisplayRegistry tasks;
     private final int getDisplayInfoCode = transaction("getDisplayInfo");
     private final int getDisplayIdsCode = transaction("getDisplayIds");
     private final int isUidPresentOnDisplayCode = transaction("isUidPresentOnDisplay");
     private final int preferredWideGamutCode = transaction("getPreferredWideGamutColorSpaceId");
     private final int overlaySupportCode = transaction("getOverlaySupport");
+    private final int registerCallbackCode = transaction("registerCallback");
+    private final int registerCallbackWithEventMaskCode =
+            transaction("registerCallbackWithEventMask");
 
-    public DisplayManagerEndpoint() {
+    public DisplayManagerEndpoint(TaskDisplayRegistry tasks) {
+        if (tasks == null) throw new NullPointerException("tasks");
+        this.tasks = tasks;
         attachInterface(null, DESCRIPTOR);
     }
 
@@ -51,9 +57,20 @@ public final class DisplayManagerEndpoint extends Binder {
             int displayId = data.readInt();
             data.enforceNoDataAvail();
             reply.writeNoException();
+            // Display 0 is the calling process's own task display.
             reply.writeTypedObject(
-                    displays.getDisplayInfo(displayId),
+                    displays.getDisplayInfo(displayId, tasks.geometry(Binder.getCallingPid())),
                     Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
+            return true;
+        }
+        if (code == registerCallbackCode || code == registerCallbackWithEventMaskCode) {
+            data.enforceInterface(DESCRIPTOR);
+            android.os.IBinder callback = data.readStrongBinder();
+            long mask = code == registerCallbackWithEventMaskCode ? data.readLong() : 0;
+            data.enforceNoDataAvail();
+            if (callback == null) throw new IllegalArgumentException("display callback is null");
+            tasks.registerCallback(Binder.getCallingPid(), callback, mask);
+            reply.writeNoException();
             return true;
         }
         if (code == getDisplayIdsCode) {

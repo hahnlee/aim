@@ -189,6 +189,8 @@ pub(crate) fn build_skia(root: &Path) -> Result<()> {
             .arg(root.join("compat/window/desktop_root_target.mm"))
             .arg(root.join("compat/window/desktop_root_surface.mm"))
             .arg(root.join("compat/window/appkit_window_delegate.mm"))
+            .arg(root.join("compat/window/root_geometry.cc"))
+            .arg(root.join("compat/window/root_geometry_host.mm"))
             .arg(root.join("compat/graphics/metal_display_backing.mm"))
             .arg(root.join("compat/graphics/surface_backing_owner.mm"))
             .arg(root.join("compat/graphics/scanout_diagnostic_capture.mm"))

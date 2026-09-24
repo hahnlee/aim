@@ -94,9 +94,16 @@ struct DarwinAndroidNativeWindow {
   AndroidNativeWindowAbi abi{};
   jlong java_surface_identity = 0;
   std::atomic<uint32_t> references{1};
+  // Consumer default size (BufferQueue default buffer size): what BLAST sets
+  // and what NATIVE_WINDOW_WIDTH/HEIGHT report.
   std::atomic<int32_t> width{0};
   std::atomic<int32_t> height{0};
   std::atomic<int32_t> format{1};
+  // Android Surface mReqWidth/mReqHeight: once a producer (Vulkan WSI) fixes
+  // its buffer dimensions, a consumer default-size change must not reallocate
+  // that producer's buffers. The producer recreates on its own surface
+  // callbacks, as with AOSP libvulkan.
+  std::atomic<bool> producer_dimensions{false};
   // Android Vulkan WSI values are declared in darwin_angle_egl.h. Ordinary
   // SurfaceControl producers remain FIFO until a real consumer selects a
   // different mode.
@@ -1325,7 +1332,30 @@ extern "C" int32_t darwin_art_android_ANativeWindow_prepare_swapchain(
     return status;
   }
   std::lock_guard<std::mutex> lock(window->mutex);
-  return PrepareGpuSwapchainLocked(window, width, height);
+  const int status = PrepareGpuSwapchainLocked(window, width, height);
+  if (status == 0) window->producer_dimensions.store(true, std::memory_order_release);
+  return status;
+}
+
+extern "C" int32_t darwin_art_android_ANativeWindow_set_default_buffer_size(
+    void* opaque, int32_t width, int32_t height, int32_t format) {
+  auto* window = static_cast<DarwinAndroidNativeWindow*>(opaque);
+  if (window == nullptr || width <= 0 || height <= 0) return -EINVAL;
+  // Transported producers own their queue; keep their existing contract.
+  if (window->remote.prepare != nullptr ||
+      !window->producer_dimensions.load(std::memory_order_acquire)) {
+    return darwin_art_android_ANativeWindow_setBuffersGeometry(opaque, width, height,
+                                                               format);
+  }
+  std::lock_guard<std::mutex> lock(window->mutex);
+  window->width.store(width, std::memory_order_relaxed);
+  window->height.store(height, std::memory_order_relaxed);
+  if (format != 0) window->format.store(format, std::memory_order_relaxed);
+  if (DebugAndroidNativeWindow()) {
+    std::cerr << "ART Android ANativeWindow: default size " << width << "x" << height
+              << " producer dimensions retained\n";
+  }
+  return 0;
 }
 
 extern "C" int32_t darwin_art_android_ANativeWindow_setBuffersGeometry(

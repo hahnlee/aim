@@ -1,7 +1,6 @@
 #include "activity_launch_transaction.h"
 
 #include "client_transaction.h"
-#include "../display/configuration.h"
 
 namespace darwin_art::framework::wm {
 namespace {
@@ -15,10 +14,34 @@ jobject Construct(JNIEnv* env, const char* name, const char* signature,
                                 : env->NewObjectA(type, constructor, arguments);
 }
 
+// ActivityTask resolves the launched Activity's task geometry (including its
+// requested orientation) and returns {global, override} for LaunchActivityItem.
+bool TaskLaunchConfiguration(JNIEnv* env, jobject application_binder, jobject info,
+                             jobject* current, jobject* override) {
+  jclass owner = env->FindClass("dev/darwinart/runtime/wm/TaskGeometryController");
+  jmethodID resolve = owner == nullptr
+      ? nullptr
+      : env->GetStaticMethodID(owner, "launchConfiguration",
+            "(Landroid/os/IBinder;Landroid/content/pm/ActivityInfo;)"
+            "[Landroid/content/res/Configuration;");
+  auto configurations = resolve == nullptr
+      ? nullptr
+      : static_cast<jobjectArray>(env->CallStaticObjectMethod(
+            owner, resolve, application_binder, info));
+  if (configurations == nullptr || env->ExceptionCheck() ||
+      env->GetArrayLength(configurations) != 2) {
+    return false;
+  }
+  *current = env->GetObjectArrayElement(configurations, 0);
+  *override = env->GetObjectArrayElement(configurations, 1);
+  return *current != nullptr && *override != nullptr && !env->ExceptionCheck();
+}
+
 bool ScheduleResolvedWithinFrame(JNIEnv* env, jobject application_binder,
                                  jobject previous_activity_token,
                                  jobject activity_token, jobject intent,
-                                 jobject info, bool register_token) {
+                                 jobject info, jobject current, jobject override,
+                                 bool register_token) {
   jclass stub = env->FindClass("android/app/IApplicationThread$Stub");
   jmethodID as_interface = stub == nullptr
                                ? nullptr
@@ -30,27 +53,12 @@ bool ScheduleResolvedWithinFrame(JNIEnv* env, jobject application_binder,
                                    ? nullptr
                                    : env->CallStaticObjectMethod(
                                          stub, as_interface, application_binder);
-
-  jclass resources = env->FindClass("android/content/res/Resources");
-  jmethodID get_system = resources == nullptr
-                             ? nullptr
-                             : env->GetStaticMethodID(
-                                   resources, "getSystem",
-                                   "()Landroid/content/res/Resources;");
-  jobject system_resources = get_system == nullptr
-                                 ? nullptr
-                                 : env->CallStaticObjectMethod(resources, get_system);
-  jmethodID get_configuration = resources == nullptr
-                                    ? nullptr
-                                    : env->GetMethodID(
-                                          resources, "getConfiguration",
-                                          "()Landroid/content/res/Configuration;");
-  jobject base_configuration = get_configuration == nullptr
-                                   ? nullptr
-                                   : env->CallObjectMethod(system_resources,
-                                                           get_configuration);
-  jobject current = display::ConfigurationForBuiltInDisplay(env, base_configuration);
-  jobject override = Construct(env, "android/content/res/Configuration", "()V");
+  if (current == nullptr || override == nullptr) {
+    if (info == nullptr ||
+        !TaskLaunchConfiguration(env, application_binder, info, &current, &override)) {
+      return false;
+    }
+  }
   if (activity_token == nullptr) {
     activity_token = Construct(env, "android/os/Binder", "()V");
   }
@@ -72,11 +80,13 @@ bool ScheduleResolvedWithinFrame(JNIEnv* env, jobject application_binder,
       controller == nullptr
           ? nullptr
           : env->GetStaticMethodID(controller, "registerActivityToken",
-                                   "(Landroid/os/IBinder;Landroid/os/IBinder;)V");
+                                   "(Landroid/os/IBinder;Landroid/os/IBinder;"
+                                   "Landroid/content/pm/ActivityInfo;"
+                                   "Landroid/content/res/Configuration;)V");
   if (register_token_method == nullptr || env->ExceptionCheck()) return false;
   if (register_token) {
     env->CallStaticVoidMethod(controller, register_token_method,
-                              application_binder, activity_token);
+                              application_binder, activity_token, info, current);
     if (env->ExceptionCheck()) return false;
   }
 
@@ -136,9 +146,11 @@ bool ScheduleResolvedWithinFrame(JNIEnv* env, jobject application_binder,
 
 jboolean ScheduleResolved(JNIEnv* env, jclass, jobject application,
                           jobject previous_activity_token,
-                          jobject activity_token, jobject intent, jobject info) {
+                          jobject activity_token, jobject intent, jobject info,
+                          jobject current, jobject override) {
   return ScheduleResolvedActivityLaunch(env, application, previous_activity_token,
-                                        activity_token, intent, info)
+                                        activity_token, intent, info, current,
+                                        override)
              ? JNI_TRUE
              : JNI_FALSE;
 }
@@ -261,21 +273,24 @@ bool ScheduleActivityLaunch(JNIEnv* env, jobject application_binder,
     return finish(false);
   }
   return finish(ScheduleResolvedWithinFrame(env, application_binder, nullptr,
-                                            nullptr, intent, info, true));
+                                            nullptr, intent, info, nullptr,
+                                            nullptr, true));
 }
 
 bool ScheduleResolvedActivityLaunch(JNIEnv* env, jobject application_binder,
                                     jobject previous_activity_token,
                                     jobject activity_token, jobject intent,
-                                    jobject activity_info) {
+                                    jobject activity_info, jobject current,
+                                    jobject override) {
   if (env == nullptr || application_binder == nullptr || intent == nullptr ||
-      activity_info == nullptr || env->ExceptionCheck() ||
-      env->PushLocalFrame(64) < 0) {
+      activity_info == nullptr || current == nullptr || override == nullptr ||
+      env->ExceptionCheck() || env->PushLocalFrame(64) < 0) {
     return false;
   }
   const bool result =
       ScheduleResolvedWithinFrame(env, application_binder, previous_activity_token,
-                                  activity_token, intent, activity_info, false);
+                                  activity_token, intent, activity_info, current,
+                                  override, false);
   env->PopLocalFrame(nullptr);
   return result;
 }
@@ -286,7 +301,9 @@ bool RegisterActivityLaunchScheduler(JNIEnv* env, jclass endpoint) {
       const_cast<char*>("nativeScheduleActivity"),
       const_cast<char*>("(Landroid/os/IBinder;Landroid/os/IBinder;"
                         "Landroid/os/IBinder;Landroid/content/Intent;"
-                        "Landroid/content/pm/ActivityInfo;)Z"),
+                        "Landroid/content/pm/ActivityInfo;"
+                        "Landroid/content/res/Configuration;"
+                        "Landroid/content/res/Configuration;)Z"),
       reinterpret_cast<void*>(&ScheduleResolved),
   }, {
       const_cast<char*>("nativeScheduleFinishActivity"),

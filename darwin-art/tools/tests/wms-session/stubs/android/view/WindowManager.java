@@ -13,6 +13,7 @@ public interface WindowManager {
         public int type;
         public int flags;
         public IBinder token;
+        public final android.graphics.Rect surfaceInsets = new android.graphics.Rect();
         public int width = 100;
         public int height = 100;
         public int gravity;

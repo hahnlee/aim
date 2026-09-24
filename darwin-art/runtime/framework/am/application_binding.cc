@@ -14,7 +14,7 @@ bool DispatchApplicationBinding(JNIEnv* env, jobject endpoint, jobject info,
                                              "()Landroid/content/res/Configuration;");
   if (configuration == nullptr) return fail();
   jobject config = env->CallObjectMethod(resources, configuration);
-  config = display::ConfigurationForBuiltInDisplay(env, config);
+  config = display::ConfigurationForApplicationTask(env, endpoint, config);
   if (config == nullptr || env->ExceptionCheck()) return fail();
   jclass compat_type = env->FindClass("android/content/res/CompatibilityInfo");
   if (compat_type == nullptr) return fail();

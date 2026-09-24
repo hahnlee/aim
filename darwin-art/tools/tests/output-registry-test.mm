@@ -134,7 +134,9 @@ void TestRegistryTransitions() {
   assert(migrated.response.status == 0 && migrated.current != nullptr);
   assert(migrated.current->identity().generation == 3);
   assert(!migrated.previous->current());
-  assert(registry.Admit(first.id) == nullptr);
+  // A producer that named the scanout just before its live owner replaced it
+  // still addresses that owner: the old id resolves to the current epoch.
+  assert(registry.Admit(first.id) == migrated.current);
   assert(registry.Admit(replacement.id) == migrated.current);
 
   std::weak_ptr<const darwin_art::surfaceflinger::IosurfaceBacking> retained =
@@ -144,6 +146,7 @@ void TestRegistryTransitions() {
          dropped.previous == migrated.current);
   assert(!dropped.previous->current());
   assert(registry.Admit(replacement.id) == nullptr);
+  assert(registry.Admit(first.id) == nullptr);  // Owner gone: no alias.
   migrated.current.reset();
   assert(!retained.expired());
   dropped.previous.reset();

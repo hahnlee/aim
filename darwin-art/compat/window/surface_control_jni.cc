@@ -348,6 +348,15 @@ void SurfaceControlNativeSetWindowCrop(JNIEnv*, jclass, jlong transaction,
                               SurfaceControl(control), crop);
 }
 
+void SurfaceControlNativeSetDestinationFrame(JNIEnv*, jclass, jlong transaction,
+                                            jlong control, jint left, jint top,
+                                            jint right, jint bottom) {
+  if (left >= right || top >= bottom) return;  // Empty frame: keep buffer size.
+  (void)darwin_art_android_surface_transaction_set_destination_frame(
+      SurfaceTransaction(transaction), SurfaceControl(control),
+      ARect{left, top, right, bottom});
+}
+
 void SurfaceControlNativeSetBufferTransform(JNIEnv*, jclass, jlong transaction,
                                             jlong control, jint transform) {
   ASurfaceTransaction_setBufferTransform(SurfaceTransaction(transaction),
@@ -487,7 +496,7 @@ bool RegisterSurfaceControlNatives(JNIEnv* env) {
        reinterpret_cast<void*>(&SurfaceControlNativeTransactionNoop2)},
       {const_cast<char*>("nativeSetDestinationFrame"),
        const_cast<char*>("(JJIIII)V"),
-       reinterpret_cast<void*>(&SurfaceControlNativeTransactionNoop2)},
+       reinterpret_cast<void*>(&SurfaceControlNativeSetDestinationFrame)},
       {const_cast<char*>("nativeSetCornerRadius"), const_cast<char*>("(JJF)V"),
        reinterpret_cast<void*>(&SurfaceControlNativeTransactionNoop2)},
       {const_cast<char*>("nativeSetShadowRadius"), const_cast<char*>("(JJF)V"),

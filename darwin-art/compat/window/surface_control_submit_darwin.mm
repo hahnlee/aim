@@ -216,7 +216,10 @@ SurfaceControlSubmitResult SubmitSurfaceControlDarwin(
             .relative_parent_id = presentation.relative_parent_id,
             .what = static_cast<uint64_t>(
                 DARWIN_ART_SF_BUFFER_CHANGED |
-                (presentation.reparented ? DARWIN_ART_SF_REPARENT : 0)),
+                (presentation.reparented ? DARWIN_ART_SF_REPARENT : 0) |
+                // Unset destination frame: bounds follow this buffer.
+                (presentation.explicit_geometry
+                     ? 0 : DARWIN_ART_SF_BUFFER_DEFINES_BOUNDS)),
             .flags = 0,
             .mask = 0,
             .transform = static_cast<uint32_t>(presentation.transform),

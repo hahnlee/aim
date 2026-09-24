@@ -551,6 +551,15 @@ mod tests {
                     return ptr::null_mut();
                 }
             }
+            if flags & 0x4 != 0 {
+                // RTLD_NOLOAD is linker policy; the original flags arrive intact.
+                assert_eq!(flags, 0x106);
+                let message = b"RTLD_NOLOAD reached linker\0";
+                unsafe {
+                    ptr::copy_nonoverlapping(message.as_ptr().cast(), error, message.len());
+                }
+                return ptr::null_mut();
+            }
             if !filename.is_null() && unsafe { CStr::from_ptr(filename) }.to_bytes() == b"bad.so" {
                 let message = b"virtual SONAME denied\0";
                 unsafe {
@@ -675,6 +684,16 @@ mod tests {
         assert!(
             !unsafe { darwin_art_bionic_dlsym(native_window_handle, describe_name.as_ptr()) }
                 .is_null()
+        );
+        // bionic RTLD_NOW|RTLD_GLOBAL on a resident provider is its handle.
+        assert_eq!(
+            unsafe { darwin_art_bionic_dlopen(native_window.as_ptr(), 0x102) },
+            native_window_handle
+        );
+        assert!(unsafe { darwin_art_bionic_dlopen(native_window.as_ptr(), 0x106) }.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(darwin_art_bionic_dlerror()) }.to_bytes(),
+            b"RTLD_NOLOAD reached linker"
         );
         assert_eq!(
             unsafe { darwin_art_bionic_dlclose(native_window_handle) },

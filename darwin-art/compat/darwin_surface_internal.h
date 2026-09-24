@@ -92,6 +92,13 @@ struct DarwinArtSurface {
 // atomic only removes the raw-pointer data race at the publication boundary.
 extern std::atomic<DarwinArtSurface*> g_active_gpu_surface;
 
+// AppKit main thread only. Reallocates the scanout backing to `width`x`height`
+// physical pixels publishing `logical_*` Android pixels to SurfaceFlinger
+// (0 derives them from the backing scale); `update_window` resizes the window.
+DarwinArtSurfaceResult ResizeSurfaceBackingOnMain(DarwinArtSurface* surface,
+    uint32_t width, uint32_t height, bool update_window, uint32_t logical_width,
+    uint32_t logical_height);
+
 // Weak no-op in the CPU bridge; the GPU bridge supplies the strong cleanup
 // implementation when it is linked into the graphics runtime.
 void darwin_art_surface_gpu_forget(DarwinArtSurface* surface);

@@ -123,7 +123,8 @@ postMouseEvent(source: source, type: .mouseMoved, point: startCorner)
 usleep(50_000)
 postMouseEvent(source: source, type: .leftMouseDown, point: startCorner)
 
-let steps = 10
+// RESIZE_STEPS=1 produces a single drag event (one host resize fact).
+let steps = max(1, Int(ProcessInfo.processInfo.environment["RESIZE_STEPS"] ?? "10") ?? 10)
 for step in 1...steps {
     let fraction = CGFloat(step) / CGFloat(steps)
     let point = CGPoint(x: startCorner.x + (desiredCorner.x - startCorner.x) * fraction,

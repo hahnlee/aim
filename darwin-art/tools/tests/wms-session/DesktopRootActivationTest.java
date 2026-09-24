@@ -66,7 +66,8 @@ public final class DesktopRootActivationTest {
         final Foreground foreground;
         final ApplicationProcessRegistry processes = new ApplicationProcessRegistry();
         final DesktopWindowMetadataRegistry metadata = new DesktopWindowMetadataRegistry();
-        final WindowManagerEndpoint manager = new WindowManagerEndpoint(processes, metadata);
+        final WindowManagerEndpoint manager = new WindowManagerEndpoint(processes, metadata,
+                new dev.darwinart.runtime.display.TaskDisplayRegistry());
         final DesktopRootEndpoint roots;
 
         Fixture(int initialForegroundPid) {

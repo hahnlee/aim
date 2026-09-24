@@ -601,6 +601,8 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
         .arg("-fobjc-arc")
         .arg(root.join("compat/window/desktop_root_surface.mm"))
         .arg(root.join("compat/window/appkit_window_delegate.mm"))
+        .arg(root.join("compat/window/root_geometry.cc"))
+        .arg(root.join("compat/window/root_geometry_host.mm"))
         .arg(root.join("compat/window/appkit_content_view.mm"))
         .arg(root.join("_build/skia-metal-gpu/libskia.a"))
         .arg(root.join("_build/skia-metal-gpu/libskcms.a"))

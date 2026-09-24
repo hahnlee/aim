@@ -83,46 +83,34 @@ complete. The same boundary now carries actual ABI split names so
    and physical APK behavior is verified. Do not count DTO tests as lifecycle
    or UI acceptance.
 
-The urgent display example is shared: Blue Archive declares
-`userLandscape` (`screenOrientation=11`), which reaches `ActivityInfo`, but the
-current host and Android display are fixed to portrait `360×640dp`. AppKit
-resizing reallocates the IOSurface while Android ViewRoot/Unity and input keep
-the old display geometry. AOSP ActivityTask/Display/Window owners must publish
-one orientation/resize configuration and relayout transaction; the host applies
-the resulting backing pixels and Retina scale. Reviving the retired fixture
-`DarwinServiceBridge` orientation path would reintroduce production policy in
-a probe and would not solve the lifecycle contract.
+Orientation and resize are Android-owned (ADR 0008). Each attached process owns
+one desktop task whose revisioned `DisplayGeometry` lives in
+`TaskDisplayRegistry`; `getDisplayInfo(0)` answers with the caller's task, so a
+resize never changes another process's DisplayInfo, bounds or input mapping.
+`TaskGeometryController` (ActivityTask) is the only writer: it resolves each
+Activity's own `screenOrientation`/`configChanges` from PackageManager (manifest
+schema 6 also carries per-Activity hardware acceleration), applies the launch
+orientation before `bindApplication`, handles `setRequestedOrientation` and the
+Activity revealed by a finish, and adopts host resize reports in content
+points. A revision is published as DisplayManager `EVENT_DISPLAY_BASIC_CHANGED`,
+then one `ClientTransaction` with `ConfigurationChangeItem`, per-Activity
+`ActivityConfigurationChangeItem` or `ActivityRelaunchItem` + lifecycle item,
+and a `WindowStateResizeItem` per remaining window, then the host root.
+Transactions triggered by an app's synchronous call leave from a dedicated
+dispatcher thread. WMS keeps one layer per window, computes relayout frames,
+`MATCH_PARENT`, surface insets, `ClientWindowFrames.seq` and the merged
+configuration from the same revision. The AppKit root reports facts only and
+applies a revision to the window, backing pixels and SurfaceFlinger extent;
+closed roots, stale revisions and failed allocations never advance it.
 
-For Android 16, the minimum production path is: ActivityTask resolves the
-focused activity's requested orientation and `configChanges` from its installed
-manifest; DisplayManager publishes one versioned logical geometry; WMS updates
-window frames and dispatches `WindowStateResizeItem` through the existing client
-transaction scheduler (the pinned `IWindow.aidl` directs callers away from a
-direct `IWindow.resized` call). ActivityTask sends
-`ActivityConfigurationChangeItem`, or uses the framework relaunch path when the
-app does not handle the changed configuration. The exact app window backing is
-then resized to the published physical pixel extent, and AppKit input maps
-through the same snapshot. A physical resize must take this route too; merely
-changing the IOSurface size or directly calling `onConfigurationChanged` is
-insufficient. Acceptance requires both portrait/landscape and manual resize to
-preserve ViewRoot/Unity extent, pointer coordinates and a fresh Retina frame.
-Today every app reports display ID 0 while each macOS window owns a separate
-scanout. A mutable process-global width/height would therefore resize unrelated
-apps. The migration must choose and document an Android representation for
-independent windows (separate logical displays or display plus per-task bounds),
-key each geometry revision to the live root/task, and settle host size requests,
-framework frames/configuration and input mapping for the same revision. Stale
-or closed roots must reject delayed resize publications.
-`ActivityClientControllerEndpoint` must handle requested-orientation operations;
-the PM projection must retain each activity's own orientation and `configChanges`
-instead of applying the launcher orientation to all activities. Display changes
-must notify registered AOSP display clients so their cached `DisplayInfo` updates.
-WMS must relayout every root and popup from the same snapshot, including input
-frames; `MATCH_PARENT` is relative to task bounds, not the old buffer. A host
-resize report includes content points, backing pixels and scale, and must be
-acknowledged without holding a WMS monitor across an AppKit main-thread wait.
-Verification includes a second app unaffected by a resize, popup clipping and
-pointer targets, configuration handling versus relaunch, close/stale revisions,
-allocation failure and both runtime flavors.
+Supporting contracts fixed with it: guest Vulkan WSI follows libvulkan
+(extent changes never return `OUT_OF_DATE`; creation honours `imageExtent`),
+the native window keeps producer dimensions separate from the BLAST default
+size, `SurfaceControl.Transaction#setDestinationFrame` reaches SurfaceFlinger
+and layers without one take their bounds from each buffer, and the emulated
+Binder driver no longer delivers one-way process work to a thread waiting
+for its own reply. Remaining gaps: Activities behind a new top Activity are
+paused but not stopped/hidden, `ACTION_OUTSIDE` for popups is not delivered,
+and density does not yet follow a screen's backing scale.
 See the [pinned Android 16 `IWindow.aidl`](https://android.googlesource.com/platform/frameworks/base/+/99b01a65cc4c104933788b3143285ab6bae65827/core/java/android/view/IWindow.aidl)
 and [`LoadedApk.registerAppInfoToArt`](https://android.googlesource.com/platform/frameworks/base/+/99b01a65cc4c104933788b3143285ab6bae65827/core/java/android/app/LoadedApk.java).

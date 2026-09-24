@@ -2,6 +2,7 @@
 #include "../os/service_process_transport.h"
 #include "../wm/desktop_window_metadata.h"
 #include "../wm/desktop_root_client_jni.h"
+#include "../wm/desktop_root_geometry_jni.h"
 #include "../wm/root_key_decision_jni.h"
 #include "../wm/desktop_foreground_authority_jni.h"
 
@@ -14,6 +15,7 @@ int FinishFrameworkRegistration(JNIEnv* env, bool prepare_looper) {
   if (!darwin_art::framework::os::RegisterSystemServiceClientTransport(env)) return 4;
   if (!darwin_art::framework::wm::RegisterDesktopWindowMetadataClient(env)) return 4;
   if (!darwin_art::framework::wm::RegisterDesktopRootClient(env)) return 4;
+  if (!darwin_art::framework::wm::RegisterDesktopRootGeometryClient(env)) return 4;
   if (!darwin_art::framework::wm::RegisterRootKeyDecisionClient(env)) return 4;
   if (!darwin_art::framework::wm::RegisterDesktopForegroundAuthority(env)) return 4;
 

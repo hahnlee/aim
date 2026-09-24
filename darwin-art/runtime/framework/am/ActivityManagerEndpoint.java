@@ -8,12 +8,20 @@ import android.os.Parcelable;
 import android.os.RemoteException;
 import android.content.Intent;
 import android.util.Log;
+import android.content.pm.ActivityInfo;
 import dev.darwinart.runtime.content.SettingsProviderEndpoint;
+import dev.darwinart.runtime.pm.InstalledActivityInfo;
 import dev.darwinart.runtime.pm.PackageRecords;
 import java.lang.reflect.Field;
 
 /** System-process application attachment owner. Unsupported AMS calls stay unsupported. */
 public final class ActivityManagerEndpoint extends Binder {
+    /** ActivityTask owner of each attached process's desktop task geometry. */
+    public interface TaskLifecycle {
+        void prepareProcess(int pid, IBinder thread, ActivityInfo launchActivity);
+        void removeProcess(int pid, IBinder thread);
+    }
+
     private final int attachCode = transaction("attachApplication");
     private final int finishCode = transaction("finishAttachApplication");
     private final int getContentProviderCode = transaction("getContentProvider");
@@ -28,11 +36,14 @@ public final class ActivityManagerEndpoint extends Binder {
     private final SettingsProviderEndpoint settingsProvider = new SettingsProviderEndpoint();
     private final ActiveServices activeServices;
     private final BoundServiceProcessLauncher processLauncher;
+    private final TaskLifecycle tasks;
 
-    public ActivityManagerEndpoint(
-            PackageRecords.Source packages, ApplicationProcessRegistry processes) {
+    public ActivityManagerEndpoint(PackageRecords.Source packages,
+            ApplicationProcessRegistry processes, TaskLifecycle tasks) {
+        if (tasks == null) throw new NullPointerException("tasks");
         this.packages = packages;
         this.processes = processes;
+        this.tasks = tasks;
         processLauncher = new BoundServiceProcessLauncher(processes);
         activeServices = new ActiveServices(packages, processes, processLauncher);
         attachInterface(null, "android.app.IActivityManager");
@@ -189,6 +200,14 @@ public final class ActivityManagerEndpoint extends Binder {
                 // Re-read the keyed record so that case cannot proceed into a
                 // native bind after the registry has retired the incarnation.
                 target = processes.attachmentTarget(pid, sequence);
+                // bindApplication must already carry the launch Activity's
+                // task orientation, so resolve the task before binding.
+                ActivityInfo launchActivity = target.initialWork
+                        == ApplicationProcessRegistry.InitialWork.ACTIVITY
+                        ? InstalledActivityInfo.launchActivity(trustedPackage,
+                                packages.resolveInstalledPackage(trustedPackage))
+                        : null;
+                tasks.prepareProcess(pid, app, launchActivity);
                 String packageName = nativeAttach(
                         app, sequence, target.processName, target.uid);
                 if (packageName == null || !trustedPackage.equals(packageName)
@@ -197,6 +216,7 @@ public final class ActivityManagerEndpoint extends Binder {
                 }
             } catch (Throwable error) {
                 processes.abortAttachment(pid, sequence, app);
+                tasks.removeProcess(pid, app);
                 if (error instanceof RemoteException) throw (RemoteException) error;
                 if (error instanceof RuntimeException) throw (RuntimeException) error;
                 if (error instanceof Error) throw (Error) error;
@@ -236,6 +256,7 @@ public final class ActivityManagerEndpoint extends Binder {
             // must not suppress exact launch/client resource cleanup. Both
             // owners reject stale incarnation identities independently.
             activeServices.onProcessGone(attached);
+            tasks.removeProcess(attached.pid, attached.thread);
         };
         try {
             attached.thread.linkToDeath(recipient, 0);

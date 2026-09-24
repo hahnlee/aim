@@ -10,13 +10,12 @@ pub mod support_java;
 /// Bump when the common runtime/adapters include or command contract changes.
 /// A mismatch disables cache promotion until the canonical builder repopulates
 /// `_build/runtime-common`.
-pub const RUNTIME_CACHE_IDENTITY: &str =
-    "darwin-art-runtime-core-cache-v34-remote-surface-producer";
+pub const RUNTIME_CACHE_IDENTITY: &str = "darwin-art-runtime-core-cache-v35-root-geometry";
 
 /// Identity of the generated native Ninja graph. Keeping this beside the
 /// runtime cache contract prevents the canonical builder and graph emitter
 /// from silently disagreeing about graph format or edge ownership.
-pub const NATIVE_GRAPH_VERSION: &str = "darwin-art-native-graph-v44-remote-surface-producer";
+pub const NATIVE_GRAPH_VERSION: &str = "darwin-art-native-graph-v45-root-geometry";
 
 /// Canonical adapter translation units for the two runtime flavors.  Keeping
 /// this list in the dependency-free contract crate prevents the Cargo
@@ -39,6 +38,8 @@ pub const HEADLESS_ADAPTER_SOURCES: &[&str] = &[
     "window/desktop_root_target.mm",
     "window/desktop_root_surface.mm",
     "window/appkit_window_delegate.mm",
+    "window/root_geometry.cc",
+    "window/root_geometry_host.mm",
     "window/appkit_content_view.mm",
     "window/application_identity.mm",
     "window/surface_scanout_owner.mm",
@@ -132,6 +133,7 @@ pub const HEADLESS_ADAPTER_SOURCES: &[&str] = &[
     "../runtime/framework/wm/client_transaction.cc",
     "../runtime/framework/wm/activity_launch_transaction.cc",
     "../runtime/framework/wm/desktop_window_metadata.cc",
+    "../runtime/framework/wm/desktop_root_geometry_jni.cc",
     "../runtime/framework/wm/desktop_root_client_jni.mm",
     "../runtime/framework/wm/desktop_foreground_authority_jni.cc",
     "../runtime/framework/wm/root_key_server_jni.cc",
@@ -266,6 +268,8 @@ pub const GRAPHICS_ADAPTER_SOURCES: &[&str] = &[
     "window/desktop_root_target.mm",
     "window/desktop_root_surface.mm",
     "window/appkit_window_delegate.mm",
+    "window/root_geometry.cc",
+    "window/root_geometry_host.mm",
     "window/appkit_content_view.mm",
     "window/application_identity.mm",
     "window/surface_scanout_owner.mm",
@@ -359,6 +363,7 @@ pub const GRAPHICS_ADAPTER_SOURCES: &[&str] = &[
     "../runtime/framework/wm/client_transaction.cc",
     "../runtime/framework/wm/activity_launch_transaction.cc",
     "../runtime/framework/wm/desktop_window_metadata.cc",
+    "../runtime/framework/wm/desktop_root_geometry_jni.cc",
     "../runtime/framework/wm/desktop_root_client_jni.mm",
     "../runtime/framework/wm/desktop_foreground_authority_jni.cc",
     "../runtime/framework/wm/root_key_server_jni.cc",

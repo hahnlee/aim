@@ -2,11 +2,26 @@
 //! bound linker owner; a platform provider must not erase that request.
 use super::*;
 
+// Android arm64 bionic libdl ABI (libc/include/dlfcn.h), not Darwin values.
+const RTLD_LAZY: c_int = 0x1;
+const RTLD_NOW: c_int = 0x2;
+const RTLD_GLOBAL: c_int = 0x100;
+const RTLD_NODELETE: c_int = 0x1000;
+
+/// Flags a resident built-in provider satisfies without linker state: any
+/// binding mode (bionic always binds eagerly), RTLD_LOCAL/RTLD_GLOBAL (the
+/// provider is already visible to every image naming it) and RTLD_NODELETE
+/// (it lives for the process). RTLD_NOLOAD and unknown bits are not provider
+/// policy; they reach the bound linker, which validates or rejects them.
+fn resident_provider_flags(flags: c_int) -> bool {
+    flags & !(RTLD_LAZY | RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE) == 0
+}
+
 fn legacy_provider_request(name: &[u8], flags: c_int, extension_flags: u64) -> bool {
     // Existing bare provider tokens remain migration debt. Explicit paths,
-    // namespace/FD/reservation requests and nontrivial dlopen flags must reach
-    // the linker with their original identity, even for a familiar basename.
-    !name.contains(&b'/') && matches!(flags, 1 | 2) && extension_flags == 0
+    // namespace/FD/reservation requests and flags a resident provider cannot
+    // satisfy must reach the linker with their original identity.
+    !name.contains(&b'/') && resident_provider_flags(flags) && extension_flags == 0
 }
 
 fn canonical_system_graphics_provider(name: &[u8]) -> Option<*mut c_void> {
@@ -47,7 +62,7 @@ pub unsafe extern "C" fn darwin_art_bionic_android_dlopen_ext(
         // libdl provider instead of passing it to a transitional callback that
         // may eventually reach macOS dyld. Aliases and extended requests stay
         // on the regular linker path.
-        if matches!(flags, 1 | 2) && extension_flags == 0 {
+        if resident_provider_flags(flags) && extension_flags == 0 {
             if let Some(handle) = canonical_system_graphics_provider(name) {
                 return handle;
             }
@@ -83,8 +98,12 @@ mod tests {
     use super::*;
     #[test]
     fn explicit_loader_contract_never_becomes_a_bare_provider() {
-        assert!(legacy_provider_request(b"libEGL.so", 2, 0));
-        for flags in [0, 3, 4, 0x102, 0x1002, -1] {
+        // bionic RTLD_LOCAL/LAZY/NOW combinations plus GLOBAL/NODELETE.
+        for flags in [0, 1, 2, 3, 0x100, 0x102, 0x1002, 0x1102] {
+            assert!(legacy_provider_request(b"libEGL.so", flags, 0));
+        }
+        // RTLD_NOLOAD and unknown bits are linker policy, never provider hits.
+        for flags in [4, 0x104, 0x8, 0x200, 0x2002, -1] {
             assert!(!legacy_provider_request(b"libEGL.so", flags, 0));
         }
         for extensions in [1, 0x10, 0x200, u64::MAX] {

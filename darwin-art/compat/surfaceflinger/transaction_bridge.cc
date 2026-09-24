@@ -43,7 +43,8 @@ android::ResolvedComposerState ResolveLayerState(
   // not let the private wire bit alter AOSP transaction merge semantics.
   resolved.state.what =
       source.what & ~static_cast<uint64_t>(
-                          DARWIN_ART_SF_TRANSPARENT_REGION_CHANGED);
+                          DARWIN_ART_SF_TRANSPARENT_REGION_CHANGED |
+                          DARWIN_ART_SF_BUFFER_DEFINES_BOUNDS);
   resolved.state.flags = source.flags;
   resolved.state.mask = source.mask;
   resolved.state.bufferTransform = source.transform;

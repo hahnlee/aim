@@ -704,7 +704,7 @@ void BlastBufferQueueNativeUpdate(JNIEnv*, jclass, jlong handle,
     queue->native_window = darwin_art_android_ANativeWindow_create(
         queue->width, queue->height, queue->format);
   } else {
-    (void)darwin_art_android_ANativeWindow_setBuffersGeometry(
+    (void)darwin_art_android_ANativeWindow_set_default_buffer_size(
         queue->native_window, queue->width, queue->height, queue->format);
   }
   darwin_art_android_ANativeWindow_set_surface_control(

@@ -167,6 +167,9 @@ struct Surface {
 struct SurfaceState {
     extent: VkExtent2D,
     generation: u64,
+    // AOSP libvulkan orphans every older swapchain of a surface when a new
+    // one is created; only the current swapchain may acquire or present.
+    current_swapchain: usize,
 }
 
 struct ImageSlot {
@@ -183,10 +186,10 @@ struct Swapchain {
     device: usize,
     surface: usize,
     window: usize,
-    extent: VkExtent2D,
-    generation: u64,
     slots: Mutex<Vec<ImageSlot>>,
 }
+
+const MAX_IMAGE_EXTENT: u32 = 4096;
 
 static NEXT_HANDLE: AtomicUsize = AtomicUsize::new(0x1000);
 static PRESENT_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -283,13 +286,38 @@ fn current_surface(surface_handle: usize) -> Result<(usize, VkExtent2D, u64), i3
     Ok((surface.window, state.extent, state.generation))
 }
 
+/// Android's staleness rule (libvulkan swapchain.cpp): a swapchain is out of
+/// date only when orphaned by a newer swapchain or when its surface is lost.
+/// Window extent changes never invalidate it; buffers keep the dimensions set
+/// at creation and the application recreates on its own surface callbacks.
+fn current_swapchain_window(surface_handle: usize, swapchain_handle: usize) -> Result<usize, i32> {
+    let registry = surfaces().lock().expect("Vulkan surface registry poisoned");
+    let surface = registry
+        .get(&surface_handle)
+        .ok_or(VK_ERROR_SURFACE_LOST_KHR)?;
+    let state = surface.state.lock().expect("Vulkan surface poisoned");
+    if state.current_swapchain != swapchain_handle {
+        return Err(VK_ERROR_OUT_OF_DATE_KHR);
+    }
+    Ok(surface.window)
+}
+
 fn surface_caps(extent: VkExtent2D) -> VkSurfaceCapabilitiesKHR {
     VkSurfaceCapabilitiesKHR {
         min_image_count: 3,
         max_image_count: 3,
         current_extent: extent,
-        min_image_extent: extent,
-        max_image_extent: extent,
+        // AOSP GetPhysicalDeviceSurfaceCapabilitiesKHR: the window size is
+        // current, but any extent in [1, max(4096, current)] may be created;
+        // the swapchain fixes its buffer dimensions to the requested extent.
+        min_image_extent: VkExtent2D {
+            width: 1,
+            height: 1,
+        },
+        max_image_extent: VkExtent2D {
+            width: extent.width.max(MAX_IMAGE_EXTENT),
+            height: extent.height.max(MAX_IMAGE_EXTENT),
+        },
         max_image_array_layers: 1,
         supported_transforms: VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
         current_transform: VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
@@ -355,15 +383,10 @@ fn acquire_next(
     if swapchain.device != device {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    let Ok((window, current_extent, generation)) = current_surface(swapchain.surface) else {
-        return VK_ERROR_OUT_OF_DATE_KHR;
+    let window = match current_swapchain_window(swapchain.surface, swapchain_handle) {
+        Ok(window) => window,
+        Err(error) => return error,
     };
-    if generation != swapchain.generation
-        || current_extent.width != swapchain.extent.width
-        || current_extent.height != swapchain.extent.height
-    {
-        return VK_ERROR_OUT_OF_DATE_KHR;
-    }
     let start = Instant::now();
     let deadline = if timeout == u64::MAX {
         None
@@ -500,6 +523,7 @@ unsafe extern "C" fn create_android_surface(
                 state: Mutex::new(SurfaceState {
                     extent,
                     generation: 1,
+                    current_swapchain: 0,
                 }),
             },
         );
@@ -651,7 +675,7 @@ unsafe extern "C" fn create_swapchain(
         eprintln!("ART Android Vulkan WSI: pid={} requested swapchain type={} surface={:#x} count={} format={} colorspace={} size={}x{} layers={} usage={:#x} transform={:#x} alpha={:#x} mode={} flags={:#x}", std::process::id(), info.s_type,info.surface,info.min_image_count,info.image_format,info.image_color_space,info.image_extent.width,info.image_extent.height,info.image_array_layers,info.image_usage,info.pre_transform,info.composite_alpha,info.present_mode,info.flags);
     }
     let surface_handle = from_handle(info.surface);
-    let Ok((window, extent, generation)) = current_surface(surface_handle) else {
+    let Ok((window, extent, _generation)) = current_surface(surface_handle) else {
         trace_failure("create-swapchain-surface", VK_ERROR_OUT_OF_DATE_KHR);
         return VK_ERROR_OUT_OF_DATE_KHR;
     };
@@ -672,10 +696,15 @@ unsafe extern "C" fn create_swapchain(
         trace_failure("create-swapchain-unsupported", VK_ERROR_FEATURE_NOT_PRESENT);
         return VK_ERROR_FEATURE_NOT_PRESENT;
     }
-    if extent.width != info.image_extent.width || extent.height != info.image_extent.height {
+    let caps = surface_caps(extent);
+    if info.image_extent.width > caps.max_image_extent.width
+        || info.image_extent.height > caps.max_image_extent.height
+    {
         trace_failure("create-swapchain-extent", VK_ERROR_OUT_OF_DATE_KHR);
         return VK_ERROR_OUT_OF_DATE_KHR;
     }
+    // Buffers use the requested extent, not the live window size.
+    let extent = info.image_extent;
     let mode_result =
         unsafe { backend::wsi_backend_window_set_present_mode(window, info.present_mode) };
     if mode_result != 0 {
@@ -713,7 +742,10 @@ unsafe extern "C" fn create_swapchain(
                 return VK_ERROR_OUT_OF_DATE_KHR;
             }
         };
-        if slots.iter().any(|slot: &ImageSlot| slot.surface_id == surface_id) {
+        if slots
+            .iter()
+            .any(|slot: &ImageSlot| slot.surface_id == surface_id)
+        {
             cancel_native(window, native_buffer, -1);
             destroy_slots(device_value, window, &mut slots);
             trace_failure(
@@ -804,12 +836,30 @@ unsafe extern "C" fn create_swapchain(
                 device: device_value,
                 surface: surface_handle,
                 window,
-                extent,
-                generation,
                 slots: Mutex::new(slots),
             }),
         );
+    if let Some(surface) = surfaces()
+        .lock()
+        .expect("Vulkan surface registry poisoned")
+        .get(&surface_handle)
+    {
+        surface
+            .state
+            .lock()
+            .expect("Vulkan surface poisoned")
+            .current_swapchain = handle;
+    }
     *output = as_handle(handle);
+    if std::env::var_os("DARWIN_ART_DEBUG_GRAPHICS_DSO").is_some() {
+        eprintln!(
+            "ART Android Vulkan WSI: pid={} created-swapchain handle={handle:#x} old={:#x} extent={}x{}",
+            std::process::id(),
+            from_handle(info.old_swapchain),
+            extent.width,
+            extent.height
+        );
+    }
     VK_SUCCESS
 }
 
@@ -819,6 +869,9 @@ unsafe extern "C" fn destroy_swapchain(
     _allocator: *const c_void,
 ) {
     let handle = from_handle(swapchain);
+    if std::env::var_os("DARWIN_ART_DEBUG_GRAPHICS_DSO").is_some() {
+        eprintln!("ART Android Vulkan WSI: pid={} destroy-swapchain handle={handle:#x}", std::process::id());
+    }
     let removed = swapchains()
         .lock()
         .expect("Vulkan swapchain registry poisoned")
@@ -839,7 +892,7 @@ unsafe extern "C" fn destroy_swapchain(
 
 unsafe extern "C" fn get_swapchain_images(
     device: VkDevice,
-    swapchain: VkHandle,
+    swapchain_handle: VkHandle,
     count: *mut u32,
     images: *mut VkHandle,
 ) -> i32 {
@@ -850,7 +903,7 @@ unsafe extern "C" fn get_swapchain_images(
         let registry = swapchains()
             .lock()
             .expect("Vulkan swapchain registry poisoned");
-        registry.get(&from_handle(swapchain)).cloned()
+        registry.get(&from_handle(swapchain_handle)).cloned()
     };
     let Some(swapchain) = swapchain else {
         return VK_ERROR_OUT_OF_DATE_KHR;
@@ -870,6 +923,14 @@ unsafe extern "C" fn get_swapchain_images(
     let written = capacity.min(slots.len());
     for (index, slot) in slots.iter().take(written).enumerate() {
         *images.add(index) = slot.image;
+    }
+    if std::env::var_os("DARWIN_ART_DEBUG_GRAPHICS_DSO").is_some() {
+        let handles: Vec<_> = slots.iter().take(written).map(|slot| slot.image).collect();
+        eprintln!(
+            "ART Android Vulkan WSI: pid={} swapchain-images handle={:#x} images={handles:x?}",
+            std::process::id(),
+            from_handle(swapchain_handle)
+        );
     }
     *count = written as u32;
     if written < slots.len() {
@@ -975,21 +1036,11 @@ unsafe extern "C" fn queue_present(queue: VkQueue, present_info: *const VkPresen
             overall = VK_ERROR_OUT_OF_DATE_KHR;
             continue;
         }
-        let Ok((_window, extent, generation)) = current_surface(swapchain.surface) else {
+        if let Err(error) = current_swapchain_window(swapchain.surface, swapchain_handle) {
             if !info.results.is_null() {
-                *info.results.add(index) = VK_ERROR_OUT_OF_DATE_KHR;
+                *info.results.add(index) = error;
             }
-            overall = VK_ERROR_OUT_OF_DATE_KHR;
-            continue;
-        };
-        if generation != swapchain.generation
-            || extent.width != swapchain.extent.width
-            || extent.height != swapchain.extent.height
-        {
-            if !info.results.is_null() {
-                *info.results.add(index) = VK_ERROR_OUT_OF_DATE_KHR;
-            }
-            overall = VK_ERROR_OUT_OF_DATE_KHR;
+            overall = error;
             continue;
         }
         let mut slots = swapchain
@@ -1166,6 +1217,19 @@ mod tests {
         assert_eq!(caps.min_image_count, 3);
         assert_eq!(caps.max_image_count, 3);
         assert_eq!(caps.supported_usage_flags, SUPPORTED_USAGE);
+        // AOSP: current extent is the window; creation may use [1, 4096+].
+        assert_eq!(
+            (caps.current_extent.width, caps.current_extent.height),
+            (720, 1280)
+        );
+        assert_eq!(
+            (caps.min_image_extent.width, caps.min_image_extent.height),
+            (1, 1)
+        );
+        assert_eq!(
+            (caps.max_image_extent.width, caps.max_image_extent.height),
+            (4096, 4096)
+        );
         assert_eq!(VK_FORMAT_R8G8B8A8_UNORM, 37);
         assert_eq!(SURFACE_FORMATS, [37, 43]);
         assert_eq!(VK_COLOR_SPACE_SRGB_NONLINEAR_KHR, 0);

@@ -7,7 +7,6 @@ import android.os.Parcelable;
 import android.os.RemoteException;
 import android.view.InputChannel;
 import android.view.WindowManager;
-import dev.darwinart.runtime.display.BuiltInDisplayConfiguration;
 import java.util.concurrent.ConcurrentHashMap;
 
 /** Per-process window-session Binder owned by the system window service. */
@@ -26,12 +25,12 @@ final class WindowSessionEndpoint extends Binder {
     private final int removeCode = transaction("remove");
     private final int relayoutCode = transaction("relayout");
 
-    WindowSessionEndpoint(DesktopWindowMetadataRegistry metadata, WindowSessionIdentity identity,
+    WindowSessionEndpoint(WindowSurfaceRegistry surfaces, WindowSessionIdentity identity,
             WindowSessionWindowOwnership windows, WindowPublicationController publications) {
         this.identity = identity;
         this.windows = windows;
         this.publications = publications;
-        surfaces = new WindowSurfaceRegistry(metadata);
+        this.surfaces = surfaces;
         attachInterface(null, DESCRIPTOR);
     }
 
@@ -142,8 +141,8 @@ final class WindowSessionEndpoint extends Binder {
             reply.writeInt(0); // InsetsState: the built-in display has no decor sources.
             reply.writeInt(0); // InsetsSourceControl.Array
             reply.writeInt(1);
-            new Rect(0, 0, BuiltInDisplayConfiguration.WIDTH_PIXELS,
-                    BuiltInDisplayConfiguration.HEIGHT_PIXELS)
+            // Attached frame: the owning task's current bounds.
+            surfaces.taskBounds(identity.pid())
                     .writeToParcel(reply, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
             float[] scale = new float[Math.max(0, scaleArrayLength)];
             if (scale.length > 0) scale[0] = 1.0f;

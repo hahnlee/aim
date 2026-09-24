@@ -150,14 +150,26 @@ impl Queue {
     /// from the queue and never changes receive-buffer ownership.
     pub fn read(&mut self, output: &mut [u8]) -> Result<usize, Error> {
         Ok(self
-            .read_for_thread(0, output)?
+            .read_for_thread(0, true, output)?
             .map_or(0, |delivery| delivery.bytes))
     }
 
-    pub(crate) fn next_route(&self, thread_id: u64) -> Option<Next> {
+    /// Kernel Binder delivery rule: targeted work (replies, completions) goes
+    /// to its thread; an untargeted one-way transaction is asynchronous
+    /// process work and only goes to a thread that may take process work
+    /// (a looper with no transaction in flight), never to a thread blocked
+    /// waiting for its own reply.
+    fn deliverable(pending: &Pending, thread_id: u64, accept_async: bool) -> bool {
+        match pending.route.target_thread {
+            Some(id) => id == thread_id,
+            None => accept_async || pending.header.reply || pending.header.flags & 1 == 0,
+        }
+    }
+
+    pub(crate) fn next_route(&self, thread_id: u64, accept_async: bool) -> Option<Next> {
         self.pending
             .iter()
-            .find(|pending| pending.route.target_thread.is_none_or(|id| id == thread_id))
+            .find(|pending| Self::deliverable(pending, thread_id, accept_async))
             .map(|pending| Next {
                 call: pending.route.call,
                 reply: pending.header.reply,
@@ -167,12 +179,13 @@ impl Queue {
     pub(crate) fn read_for_thread(
         &mut self,
         thread_id: u64,
+        accept_async: bool,
         output: &mut [u8],
     ) -> Result<Option<Delivery>, Error> {
         let Some(position) = self
             .pending
             .iter()
-            .position(|pending| pending.route.target_thread.is_none_or(|id| id == thread_id))
+            .position(|pending| Self::deliverable(pending, thread_id, accept_async))
         else {
             return Ok(None);
         };
@@ -369,13 +382,21 @@ mod tests {
             .unwrap();
         assert!(
             queue
-                .read_for_thread(12, &mut [0; transaction_wire::RECORD_SIZE])
+                .read_for_thread(12, true, &mut [0; transaction_wire::RECORD_SIZE])
                 .unwrap()
                 .is_none()
         );
-        assert!(queue.read_for_thread(11, &mut [0; 3]).unwrap().is_none());
+        assert!(
+            queue
+                .read_for_thread(11, true, &mut [0; 3])
+                .unwrap()
+                .is_none()
+        );
         let mut completion = [0; 4];
-        let delivery = queue.read_for_thread(11, &mut completion).unwrap().unwrap();
+        let delivery = queue
+            .read_for_thread(11, true, &mut completion)
+            .unwrap()
+            .unwrap();
         assert!(delivery.completion);
         assert_eq!(
             u32::from_le_bytes(completion),
@@ -384,12 +405,57 @@ mod tests {
         assert_eq!(queue.free(address), Err(Error::UnknownBuffer));
 
         let mut reply = [0; transaction_wire::RECORD_SIZE];
-        let delivery = queue.read_for_thread(11, &mut reply).unwrap().unwrap();
+        let delivery = queue
+            .read_for_thread(11, true, &mut reply)
+            .unwrap()
+            .unwrap();
         assert!(!delivery.completion);
         assert_eq!(
             u32::from_le_bytes(reply[..4].try_into().unwrap()),
             transaction_wire::BR_REPLY
         );
         queue.free(address).unwrap();
+    }
+
+    #[test]
+    fn oneway_is_process_work_and_never_nests_on_a_waiting_thread() {
+        let _guard = crate::mapping::MAPPING_TEST_LOCK.lock().unwrap();
+        let mut queue = Queue::new(32).unwrap();
+        let snapshot = TransactionSnapshot::capture(b"event", &[], 0).unwrap();
+        let oneway = queue
+            .enqueue(
+                &snapshot,
+                Header {
+                    flags: 1,
+                    ..header()
+                },
+            )
+            .unwrap();
+        // A thread blocked waiting for its own reply must not execute it.
+        assert!(queue.next_route(11, false).is_none());
+        let mut output = [0; transaction_wire::RECORD_SIZE];
+        assert!(
+            queue
+                .read_for_thread(11, false, &mut output)
+                .unwrap()
+                .is_none()
+        );
+        // A synchronous call may still be taken by that thread (nesting).
+        let sync = queue.enqueue(&snapshot, header()).unwrap();
+        let delivery = queue
+            .read_for_thread(11, false, &mut output)
+            .unwrap()
+            .unwrap();
+        assert!(!delivery.reply);
+        queue.free(sync).unwrap();
+        // An idle looper takes the one-way transaction.
+        assert!(
+            queue
+                .read_for_thread(12, true, &mut output)
+                .unwrap()
+                .is_some()
+        );
+        queue.free(oneway).unwrap();
+        assert!(!queue.has_pending());
     }
 }

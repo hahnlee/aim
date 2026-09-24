@@ -44,6 +44,8 @@ runtime/framework/content/ClipboardServiceEndpoint.java
 runtime/framework/content/ContentServiceEndpoint.java
 runtime/framework/content/SettingsProviderEndpoint.java
 runtime/framework/display/BuiltInDisplayConfiguration.java
+runtime/framework/display/DisplayGeometry.java
+runtime/framework/display/TaskDisplayRegistry.java
 runtime/framework/display/DefaultDisplayRegistry.java
 runtime/framework/display/DisplayManagerEndpoint.java
 runtime/framework/input/InputDeviceRegistry.java
@@ -112,3 +114,8 @@ runtime/framework/wm/DesktopForegroundAuthority.java
 runtime/framework/wm/WindowSessionWindowOwnership.java
 runtime/framework/wm/WindowSessionEndpoint.java
 runtime/framework/wm/WindowSurfaceRegistry.java
+runtime/framework/wm/TaskGeometryPolicy.java
+runtime/framework/wm/TaskClientTransactions.java
+runtime/framework/wm/TaskGeometryController.java
+runtime/framework/wm/DesktopRootGeometryEndpoint.java
+runtime/framework/wm/DesktopRootGeometryClient.java

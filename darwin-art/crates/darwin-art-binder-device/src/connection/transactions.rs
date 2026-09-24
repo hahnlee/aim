@@ -110,11 +110,12 @@ impl Connection {
     pub(crate) fn next_transaction_route(
         &self,
         thread_id: u64,
+        accept_async: bool,
     ) -> Result<Option<transaction_queue::Next>, Error> {
         let transactions = self.transactions.lock().map_err(|_| Error::Poisoned)?;
         Ok(transactions
             .as_ref()
-            .and_then(|queue| queue.next_route(thread_id)))
+            .and_then(|queue| queue.next_route(thread_id, accept_async)))
     }
 
     pub(crate) fn has_untargeted_transaction(&self) -> Result<bool, Error> {
@@ -127,12 +128,13 @@ impl Connection {
     pub(crate) fn read_transaction_for_thread(
         &self,
         thread_id: u64,
+        accept_async: bool,
         output: &mut [u8],
     ) -> Result<Option<transaction_queue::Delivery>, Error> {
         let mut transactions = self.transactions.lock().map_err(|_| Error::Poisoned)?;
         match transactions.as_mut() {
             Some(queue) => queue
-                .read_for_thread(thread_id, output)
+                .read_for_thread(thread_id, accept_async, output)
                 .map_err(Error::TransactionQueue),
             None => Ok(None),
         }

@@ -10,9 +10,9 @@ Chromium `example.com` rendering with physical input, navigation/reload, Retina
 output and Graphite/Dawn → Vulkan → MoltenVK → Metal. GL, direct Dawn Metal,
 disabled GPU/Graphite and CPU fallback do not satisfy acceptance.
 
-Next compatibility work is Android-owned orientation/resize and Blue Archive's
-native startup fault. The service inventory and intended AOSP migration are in
-[aosp-service-migration.md](aosp-service-migration.md).
+Android-owned orientation/resize (ADR 0008) and Blue Archive's native startup
+fault are fixed; see the verified state below. The service inventory and AOSP
+migration are in [aosp-service-migration.md](aosp-service-migration.md).
 
 ## Ownership and completion gates
 
@@ -42,33 +42,28 @@ Component tests are not application acceptance. See [AGENTS.md](../AGENTS.md),
 | Production closure | TextureView/SurfaceTexture, upstream TextureLayer, SCM/Binder/FS and shared sensor JNI/NDK build/link in both flavors. Graphics/headless audits and exact no-work repeat pass. |
 | Chromium | Unchanged Browser renders Example Domain; physical URL entry, three IANA link/back cycles, reload, restart restoration and Gemini sheet close/reopen pass. Fresh 2× capture confirms Graphite/Dawn Vulkan → MoltenVK on Apple M2 Pro. Longer soak remains open. |
 | Calculator / DeskClock | Physical Calculator pointer and keyboard arithmetic and DeskClock Stopwatch start/pause pass. Localized window labels remain incomplete. |
-| Input / WMS | Exact-root ingress, readiness/focus fences, bounded first-key queue and receiver lifetime are adopted. Parent/process-death cleanup and full resize/configuration settlement remain open. |
+| Input / WMS | Exact-root ingress, readiness/focus fences, bounded first-key queue and receiver lifetime are adopted. Parent/process-death cleanup remains open. |
+| Orientation / resize | Per-task revisioned geometry: launch orientation, `setRequestedOrientation`, real AppKit edge resize → DisplayManager callback, config/relaunch/`WindowStateResizeItem` transactions, WMS frames/insets and host backing on one revision. Physical: Calculator/DeskClock relaunch, Chromium/Blue Archive config change, five-point click map, popup through resize, two-app isolation, close mid-resize. |
+| Blue Archive | Unchanged full-split APK starts landscape `1280×720` (2×), renders Unity frames, survives a 24-drag live-resize stress (240 revisions, 67 swapchain recreations, no fault) without relaunch, and takes physical clicks on Android dialogs and Unity UI. GMS is absent (game shows its notice). |
 | Services | Exact-client connection ledger, process-shared demand and service lifecycle lanes are adopted. Real remote death and reusable shutdown are not proven. |
 | Graphics / SCM | Retained backing, fences and scanout diagnostics pass. ABI2 SCM/Binder callbacks and focused lifetime tests pass; unchanged-APK managed-transfer acceptance remains open. |
 | Source licensing | Original work uses Apache-2.0; upstream notices and OpenJDK GPLv2 + Classpath scope are recorded in the repository's licensing documents. Binary distribution/source matching remains a separate gate. |
 
 ## Active failures
 
-- **Blue Archive:** provider lookup and ABI split-name projection now reach Unity
-  initialization. Full-split launch then SIGSEGVs at
-  `darwin_art_bionic_memcpy`; no playable frame is verified. Diagnose the
-  source pointer's allocation/mapping owner rather than masking `memcpy`.
-- **Orientation:** Blue Archive's `screenOrientation=11` reaches `ActivityInfo`,
-  but display/WMS and the host window remain fixed portrait `360×640dp`.
-- **Resize:** AppKit reallocates IOSurface backing while Android ViewRoot, Unity,
-  WMS frames and input retain old geometry. Implement one root/task-scoped,
-  revisioned Android geometry transaction; do not add a mutable global size.
+- **Activity visibility:** an Activity behind a new top Activity is paused but
+  never stopped or hidden, so translucent/unfinished top windows show it.
+- **Popups:** `ACTION_OUTSIDE` is not delivered; outside taps reach the parent.
+- **Blue Archive:** gameplay beyond the title/download notice is unverified
+  (GMS unavailable; the 657 MB download was not started).
 - **SCM:** authenticated custody, carrier propagation, all consumer variants,
   discard/truncation, close/crash and alias semantics remain before adoption.
 
 ## Next work
 
-1. Implement ActivityTask/Display/WMS-owned orientation and resize using the
-   pinned Android 16 client transactions; keep AppKit as a narrow provider.
-2. Trace and repair Blue Archive's invalid native source pointer, then verify an
-   unchanged full-split APK with a real captured frame and physical input.
-3. Re-run Calculator/DeskClock resize and locale/label checks, then extend
-   Chromium focus/tab/soak coverage.
+1. Add Activity stop/visibility transitions and popup `ACTION_OUTSIDE`.
+2. Let density follow the host backing scale through the same revision path.
+3. Run locale/label checks, then extend Chromium focus/tab/soak coverage.
 4. Close relevant WMS/Binder/SCM lifetime gaps and audit changed files for mixed
    ownership before declaring migration complete.
 
@@ -80,6 +75,9 @@ work. Ordinary app/service processes still use host `_exit()`; reusable sessions
 and complete VM/image quiescence are unproven. Provider manifests do not yet
 cover every dynamic shell/build input. Parallel Binder mapping/shared-lock and
 Runtime foreign-copy flock failures remain unresolved.
+`android-window-menu/keyboard-acceptance.sh` still drive fixed-duration launches
+and `DARWIN_ART_TEST_*` pointer hooks that only the fixture GPU loop reads;
+Android app processes ignore both, so those suites do not complete.
 
 ## Acceptance commands
 
@@ -91,6 +89,7 @@ cargo run -q -p art-bootstrap -- audit-runtime-graphics-link-fast
 bash tools/aosp-core-apps-graphics-acceptance.sh
 bash tools/android-window-menu-acceptance.sh
 bash tools/android-window-keyboard-acceptance.sh
+bash tools/android-window-geometry-acceptance.sh
 bash tools/audit-art-jit.sh
 bash tools/audit-profile-daemon.sh
 cargo test --workspace
@@ -98,9 +97,14 @@ cargo test --workspace
 
 ## Latest progress
 
-- **Runtime:** shared Java/NDK sensor ownership removed the missing JNI crash;
-  graphics/headless and exact no-work gates pass.
-- **Blue Archive:** PM provider lookup and actual ABI split names remove two
-  startup failures; Unity now exposes the native `memcpy` fault.
-- **Physical:** Chromium navigation, reload, restart, Gemini sheet, fresh Retina
-  capture and Vulkan/MoltenVK path pass on unchanged APK bytes.
+- **Geometry:** ActivityTask/Display/WMS own per-task orientation and resize
+  revisions; AppKit reports points and applies revisions (ADR 0008).
+- **Blue Archive:** guest `dlopen` accepts `RTLD_GLOBAL`, so Unity uses the media
+  NDK instead of its NULL-base JNI fallback; landscape frames and input verified.
+- **Graphics/transport:** WSI extent semantics, BLAST producer dimensions,
+  destination frames and one-way Binder delivery now follow AOSP/kernel rules.
+- **Live resize:** SF aliases replaced output ids to the live owner and commits
+  superseded transactions without presenting (ADR 0003); the producer queue
+  retires consumer-held generations instead of failing (no generation cap —
+  release completion lags composition); the signal trampoline honours
+  `SA_RESETHAND`; native traps name their `dladdr` symbol.

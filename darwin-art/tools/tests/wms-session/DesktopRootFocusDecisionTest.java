@@ -111,7 +111,8 @@ public final class DesktopRootFocusDecisionTest {
             processes.beginAttachment(PID, UID, appThread, 1);
             processes.identify(PID, 1, appThread, "fixture.focus." + PID);
             Binder.setCallingIdentity(PID, UID);
-            manager = new WindowManagerEndpoint(processes, new DesktopWindowMetadataRegistry());
+            manager = new WindowManagerEndpoint(processes, new DesktopWindowMetadataRegistry(),
+                new dev.darwinart.runtime.display.TaskDisplayRegistry());
             roots = new DesktopRootEndpoint(processes, manager.createDesktopRootRegistry(foreground));
             session = openSession();
             addWindow(window);

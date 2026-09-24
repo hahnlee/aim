@@ -36,7 +36,9 @@ public final class ActivityTaskManagerEndpoint extends Binder {
             IBinder previousActivityToken,
             IBinder activityToken,
             Intent intent,
-            ActivityInfo activityInfo);
+            ActivityInfo activityInfo,
+            android.content.res.Configuration current,
+            android.content.res.Configuration override);
 
     static native boolean nativeScheduleFinishActivity(
             IBinder applicationThread, IBinder activityToken, IBinder previousActivityToken);
@@ -107,11 +109,15 @@ public final class ActivityTaskManagerEndpoint extends Binder {
             }
             IBinder previousToken = activityClient.topActivityToken(attached.thread);
             IBinder activityToken = new Binder();
-            if (!nativeScheduleActivity(
-                    attached.thread, previousToken, activityToken, intent, info)) {
+            // The launched Activity's orientation is applied to its task first;
+            // LaunchActivityItem then carries that task revision.
+            android.content.res.Configuration[] configuration =
+                    TaskGeometryController.launchConfiguration(attached.thread, info);
+            if (!nativeScheduleActivity(attached.thread, previousToken, activityToken, intent,
+                    info, configuration[0], configuration[1])) {
                 throw new IllegalStateException("Activity launch transaction was rejected");
             }
-            activityClient.commitLaunch(attached.thread, activityToken);
+            activityClient.commitLaunch(attached.thread, activityToken, info, configuration[0]);
             reply.writeNoException();
             reply.writeInt(0); // ActivityManager.START_SUCCESS.
             return true;

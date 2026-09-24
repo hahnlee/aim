@@ -11,10 +11,12 @@ bool ScheduleActivityLaunch(JNIEnv* env, jobject application_binder,
 
 // Schedules a manifest-resolved Intent through the same original AOSP client
 // transaction path used for the initial launcher Activity.
+// {current, override} come from the ActivityTask task geometry owner.
 bool ScheduleResolvedActivityLaunch(JNIEnv* env, jobject application_binder,
                                     jobject previous_activity_token,
                                     jobject activity_token, jobject intent,
-                                    jobject activity_info);
+                                    jobject activity_info, jobject current,
+                                    jobject override);
 
 bool RegisterActivityLaunchScheduler(JNIEnv* env, jclass endpoint);
 

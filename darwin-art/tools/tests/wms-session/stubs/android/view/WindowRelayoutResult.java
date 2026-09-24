@@ -14,6 +14,7 @@ public class WindowRelayoutResult implements Parcelable {
         public Rect frame = new Rect();
         public Rect displayFrame = new Rect();
         public Rect parentFrame = new Rect();
+        public int seq;
     }
     @Override public void writeToParcel(Parcel dest, int flags) {}
     @Override public int describeContents() { return 0; }

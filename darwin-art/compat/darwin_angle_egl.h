@@ -167,6 +167,10 @@ int32_t darwin_art_android_ANativeWindow_unlockAndPost(void* window);
 int32_t darwin_art_android_ANativeWindow_cancel_locked_buffer(void* window);
 int32_t darwin_art_android_ANativeWindow_setBuffersGeometry(
     void* window, int32_t width, int32_t height, int32_t format);
+// BLAST consumer default size. Reallocates buffers only while no producer has
+// fixed its own dimensions through prepare_swapchain.
+int32_t darwin_art_android_ANativeWindow_set_default_buffer_size(
+    void* window, int32_t width, int32_t height, int32_t format);
 
 void* darwin_art_android_eglCreateWindowSurface(void* display, void* config,
                                                 void* window,

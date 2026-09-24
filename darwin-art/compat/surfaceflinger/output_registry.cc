@@ -4,6 +4,7 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <iterator>
 #include <limits>
 
 namespace darwin_art::surfaceflinger {
@@ -49,6 +50,7 @@ OutputTransition OutputRegistry::Apply(int connection, const OutputRequest& requ
       result.response.generation = identity.generation;
       existing->second->current_.store(false, std::memory_order_release);
       by_surface_.erase(identity.iosurface_id);
+      replaced_.erase(connection);
       owners_.erase(existing);
       return result;
     }
@@ -80,6 +82,7 @@ OutputTransition OutputRegistry::Apply(int connection, const OutputRequest& requ
   // Finish potentially allocating the new index before invalidating the old
   // epoch. Rejected imports never disturb existing output ownership.
   by_surface_.insert_or_assign(identity.iosurface_id, epoch);
+  ForgetReplacedId(identity.iosurface_id);
   if (registering) {
     try {
       owners_.emplace(connection, epoch);
@@ -89,8 +92,13 @@ OutputTransition OutputRegistry::Apply(int connection, const OutputRequest& requ
     }
   } else {
     existing->second->current_.store(false, std::memory_order_release);
-    if (existing->second->identity().iosurface_id != identity.iosurface_id)
-      by_surface_.erase(existing->second->identity().iosurface_id);
+    const uint32_t previous_id = existing->second->identity().iosurface_id;
+    if (previous_id != identity.iosurface_id) {
+      by_surface_.erase(previous_id);
+      auto& history = replaced_[connection];
+      history.push_back(previous_id);
+      if (history.size() > kReplacedHistory) history.pop_front();
+    }
     existing->second = epoch;
   }
   result.current = epoch;
@@ -107,14 +115,32 @@ OutputTransition OutputRegistry::Drop(int connection) {
   result.previous = existing->second;
   existing->second->current_.store(false, std::memory_order_release);
   by_surface_.erase(existing->second->identity().iosurface_id);
+  replaced_.erase(connection);
   owners_.erase(existing);
   return result;
+}
+
+void OutputRegistry::ForgetReplacedId(uint32_t iosurface_id) {
+  for (auto& [connection, history] : replaced_) {
+    (void)connection;
+    for (auto id = history.begin(); id != history.end();) {
+      id = *id == iosurface_id ? history.erase(id) : std::next(id);
+    }
+  }
 }
 
 std::shared_ptr<const OutputEpoch> OutputRegistry::Admit(uint32_t iosurface_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto existing = by_surface_.find(iosurface_id);
-  return existing == by_surface_.end() ? nullptr : existing->second;
+  if (existing != by_surface_.end()) return existing->second;
+  for (const auto& [connection, history] : replaced_) {
+    for (const uint32_t id : history) {
+      if (id != iosurface_id) continue;
+      const auto owner = owners_.find(connection);
+      return owner == owners_.end() ? nullptr : owner->second;
+    }
+  }
+  return nullptr;
 }
 
 }  // namespace darwin_art::surfaceflinger

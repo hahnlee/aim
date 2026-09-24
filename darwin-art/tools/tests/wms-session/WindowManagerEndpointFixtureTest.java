@@ -39,7 +39,8 @@ public final class WindowManagerEndpointFixtureTest {
         final ApplicationProcessRegistry processes = new ApplicationProcessRegistry();
         final DesktopWindowMetadataRegistry metadata = new DesktopWindowMetadataRegistry();
         final WindowManagerEndpoint manager =
-                new WindowManagerEndpoint(processes, metadata);
+                new WindowManagerEndpoint(processes, metadata,
+                new dev.darwinart.runtime.display.TaskDisplayRegistry());
 
         WindowSessionEndpoint open(int pid, int uid, IBinder callback) throws Exception {
             Binder.setCallingIdentity(pid, uid);

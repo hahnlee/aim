@@ -82,8 +82,10 @@ impl Registry {
             .lock()
             .map_err(|_| DeliveryError::Registry(Error::Poisoned))?;
         let connection = self.lookup(key).map_err(DeliveryError::Registry)?;
+        // Evaluated before this delivery changes the thread's call state.
+        let accept_async = thread.can_wait_for_process_work();
         let next = connection
-            .next_transaction_route(thread.id())
+            .next_transaction_route(thread.id(), accept_async)
             .map_err(|error| DeliveryError::Registry(Error::Connection(error)))?;
         if let Some(next) = next
             && let Some(call) = next.call
@@ -97,7 +99,7 @@ impl Registry {
             }
         }
         let delivery = connection
-            .read_transaction_for_thread(thread.id(), output)
+            .read_transaction_for_thread(thread.id(), accept_async, output)
             .map_err(|error| DeliveryError::Registry(Error::Connection(error)))?;
         if let Some(delivery) = delivery
             && let Some(call) = delivery.call

@@ -90,6 +90,10 @@ struct SurfaceControlPresentation final {
   uint32_t relative_parent_id = 0;
   ARect source{};
   ARect destination{};
+  // False when no destination frame was ever set: SurfaceFlinger then takes
+  // the layer bounds from each new buffer, as AOSP does for an unset
+  // layer_state_t::destinationFrame.
+  bool explicit_geometry = false;
   float alpha = 1.0f;
   int32_t z_order = 0;
   std::string name;

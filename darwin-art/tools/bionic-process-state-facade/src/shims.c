@@ -1,5 +1,6 @@
 #include "darwin_art_bionic_process_state.h"
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -669,9 +670,19 @@ static void TraceNativeTrap(void* host_context) {
         copied != sizeof(words)) {
       break;
     }
+    Dl_info symbol;
+    // Return addresses name the call site's function via the preceding byte.
+    const int named = words[1] != 0 && dladdr((const void*)(words[1] - 1), &symbol) != 0;
     length = snprintf(line, sizeof(line),
-                      "DARWIN native trap frame[%zu]=%p fp=%p\n", depth,
-                      (void*)words[1], (void*)frame);
+                      "DARWIN native trap frame[%zu]=%p fp=%p %s+0x%lx (%s)\n", depth,
+                      (void*)words[1], (void*)frame,
+                      named && symbol.dli_sname != NULL ? symbol.dli_sname : "?",
+                      named && symbol.dli_saddr != NULL
+                          ? (unsigned long)(words[1] - (uintptr_t)symbol.dli_saddr) : 0ul,
+                      named && symbol.dli_fname != NULL
+                          ? (strrchr(symbol.dli_fname, '/') != NULL
+                                 ? strrchr(symbol.dli_fname, '/') + 1 : symbol.dli_fname)
+                          : "?");
     if (length > 0)
       (void)write(STDERR_FILENO, line,
                   (size_t)length < sizeof(line) ? (size_t)length
@@ -688,7 +699,8 @@ static void DarwinArtAndroidSignalTrampoline(int host_signal,
   if (host_signal <= 0 || host_signal >= NSIG) return;
   const int android_signal = AndroidSignal(host_signal);
 #if defined(__aarch64__)
-  if (android_signal == 5) TraceNativeTrap(host_context);
+  // Opt-in frame dump for traps and aborts (DARWIN_ART_DEBUG_NATIVE_TRAP).
+  if (android_signal == 5 || android_signal == 6) TraceNativeTrap(host_context);
   uint32_t unresolved_syndrome = 0;
   uintptr_t unresolved_pc = 0;
   // Guest RWX translation is runtime-internal and must precede Android's
@@ -782,6 +794,17 @@ static void DarwinArtAndroidSignalTrampoline(int host_signal,
   }
   const int flags = atomic_load_explicit(&gAndroidSignalFlags[host_signal],
                                          memory_order_relaxed);
+  // Linux SA_RESETHAND: the disposition becomes SIG_DFL on handler entry.
+  // ART sigchain owns the host action and invokes this trampoline as the
+  // app's action, so the host flag alone never resets the guest disposition.
+  // Without this, a crash handler that returns from a synchronous fault is
+  // re-entered forever instead of letting the re-fault terminate the process.
+  if (((uint32_t)flags & UINT32_C(0x80000000)) != 0) {
+    atomic_store_explicit(&gAndroidSignalHandlers[host_signal],
+                          (uintptr_t)SIG_DFL, memory_order_release);
+    atomic_store_explicit(&gAndroidSignalFlags[host_signal],
+                          flags & ~(int)UINT32_C(0x80000000), memory_order_relaxed);
+  }
   if ((flags & 4) != 0) {
     _Alignas(16) unsigned char android_info[128];
     AndroidSignalContext android_context;

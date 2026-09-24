@@ -148,6 +148,7 @@ pub(super) fn adapter_jobs(
                 | "window/desktop_root_target.mm"
                 | "window/desktop_root_surface.mm"
                 | "window/appkit_window_delegate.mm"
+                | "window/root_geometry_host.mm"
                 | "window/appkit_content_view.mm"
                 | "graphics/metal_display_backing.mm"
                 | "graphics/surface_backing_owner.mm"

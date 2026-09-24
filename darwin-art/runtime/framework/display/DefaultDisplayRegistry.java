@@ -6,7 +6,7 @@ import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 
-/** Android-owned inventory for the compositor's built-in logical display. */
+/** Android-owned DisplayInfo projection of one task's logical display 0. */
 final class DefaultDisplayRegistry {
     private static final int MODE_ID = 1;
     private static final int DISPLAY_TYPE_INTERNAL = 1;
@@ -15,7 +15,7 @@ final class DefaultDisplayRegistry {
         return new int[] {Display.DEFAULT_DISPLAY};
     }
 
-    Parcelable getDisplayInfo(int displayId) {
+    Parcelable getDisplayInfo(int displayId, DisplayGeometry geometry) {
         if (displayId != Display.DEFAULT_DISPLAY) return null;
         try {
             Class<?> infoClass = Class.forName("android.view.DisplayInfo");
@@ -27,17 +27,19 @@ final class DefaultDisplayRegistry {
             set(infoClass, info, "type", DISPLAY_TYPE_INTERNAL);
             set(infoClass, info, "state", Display.STATE_ON);
             set(infoClass, info, "committedState", Display.STATE_ON);
-            int width = BuiltInDisplayConfiguration.WIDTH_PIXELS;
-            int height = BuiltInDisplayConfiguration.HEIGHT_PIXELS;
-            int densityDpi = BuiltInDisplayConfiguration.DENSITY_DPI;
+            // A desktop task's display has no rotation: its natural extent is
+            // the current task extent, so nominal sizes follow the same bounds.
+            int width = geometry.widthPixels;
+            int height = geometry.heightPixels;
+            int densityDpi = geometry.densityDpi;
             set(infoClass, info, "logicalWidth", width);
             set(infoClass, info, "logicalHeight", height);
             set(infoClass, info, "appWidth", width);
             set(infoClass, info, "appHeight", height);
-            set(infoClass, info, "smallestNominalAppWidth", width);
-            set(infoClass, info, "smallestNominalAppHeight", height);
-            set(infoClass, info, "largestNominalAppWidth", width);
-            set(infoClass, info, "largestNominalAppHeight", height);
+            set(infoClass, info, "smallestNominalAppWidth", Math.min(width, height));
+            set(infoClass, info, "smallestNominalAppHeight", Math.min(width, height));
+            set(infoClass, info, "largestNominalAppWidth", Math.max(width, height));
+            set(infoClass, info, "largestNominalAppHeight", Math.max(width, height));
             set(infoClass, info, "logicalDensityDpi", densityDpi);
             set(infoClass, info, "physicalXDpi", (float) densityDpi);
             set(infoClass, info, "physicalYDpi", (float) densityDpi);

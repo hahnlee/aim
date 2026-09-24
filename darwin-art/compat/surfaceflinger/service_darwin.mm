@@ -138,6 +138,33 @@ OutputRegistry& Outputs() {
   return registry;
 }
 
+// Caller holds ServiceState. The producer named a scanout its live owner
+// replaced or resized (an AppKit resize) while the frame was in flight, or
+// read the id and extent across that change. The output registry is
+// authoritative: address the owner's current output and extent (Android
+// anchors migrate on Replace). Outputs of dropped owners stay unresolved.
+void RetargetToCurrentOutput(RequestHeader& header,
+                             std::shared_ptr<const OutputEpoch>& epoch) {
+  if (!epoch || !epoch->current()) epoch = Outputs().Admit(header.target_iosurface_id);
+  if (!epoch || !epoch->current()) return;
+  const auto& identity = epoch->identity();
+  if (identity.iosurface_id == header.target_iosurface_id &&
+      identity.logical_width == header.target_width &&
+      identity.logical_height == header.target_height) return;
+  if (std::getenv("DARWIN_ART_DEBUG_SURFACE_TRANSACTIONS") != nullptr) {
+    std::fprintf(stderr,
+                 "ART SurfaceFlinger: retarget replaced output pid=%u "
+                 "transaction=%llu from=%u to=%u extent=%ux%u\n",
+                 header.process_id,
+                 static_cast<unsigned long long>(header.transaction_id),
+                 header.target_iosurface_id, identity.iosurface_id,
+                 identity.logical_width, identity.logical_height);
+  }
+  header.target_iosurface_id = identity.iosurface_id;
+  header.target_width = identity.logical_width;
+  header.target_height = identity.logical_height;
+}
+
 // Caller holds ServiceState first, then enters OutputRegistry. Replacing an
 // output preserves its Android anchors; retirement removes only that output.
 void ApplyOutputTransition(ServiceState& state, const OutputTransition& change) {
@@ -517,8 +544,19 @@ void ProcessRequest(CompositionJob& job) {
   auto completion_guard = std::make_shared<CompletionDescriptorGuard>(
       job.completion_descriptor);
   job.completion_descriptor = -1;
+  if (!structural_only && request_kind == RequestKind::kDisplayPresent &&
+      (!job.output_epoch || !job.output_epoch->current())) {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    RetargetToCurrentOutput(header, job.output_epoch);
+  }
   if (!structural_only &&
       (!job.output_epoch || !job.output_epoch->current())) {
+    std::fprintf(stderr,
+                 "ART SurfaceFlinger: output not current before commit pid=%u "
+                 "transaction=%llu target=%u\n",
+                 header.process_id,
+                 static_cast<unsigned long long>(header.transaction_id),
+                 header.target_iosurface_id);
     SignalCompletion(completion_guard->release(), false);
     return;
   }
@@ -561,6 +599,7 @@ void ProcessRequest(CompositionJob& job) {
     };
     std::vector<ReparentNullTrace> reparent_null_traces;
     bool android_committed = false;
+    bool output_superseded = false;
     {
       std::lock_guard<std::mutex> lock(State().mutex);
       ServiceState& state = State();
@@ -571,6 +610,12 @@ void ProcessRequest(CompositionJob& job) {
             found->second.epoch != job.output_epoch ||
             found->second.width != header.target_width ||
             found->second.height != header.target_height) {
+          std::fprintf(stderr,
+                       "ART SurfaceFlinger: output anchor changed before commit "
+                       "pid=%u transaction=%llu target=%u\n",
+                       header.process_id,
+                       static_cast<unsigned long long>(header.transaction_id),
+                       header.target_iosurface_id);
           SignalCompletion(completion_guard->release(), false);
           return;
         }
@@ -967,6 +1012,10 @@ void ProcessRequest(CompositionJob& job) {
           anchor->second.epoch == job.output_epoch &&
           anchor->second.width == header.target_width &&
           anchor->second.height == header.target_height;
+      // ADR 0003: an output replaced or retired after admission leaves the
+      // committed Android transaction without a new frame; it is not a
+      // submission failure. No GPU work has been issued for it yet.
+      output_superseded = !valid && android_committed;
     }
     if (valid &&
         !darwin_art_metal_composer_compose(
@@ -1051,7 +1100,17 @@ void ProcessRequest(CompositionJob& job) {
     } else {
       valid = false;
     }
-    if (!valid) {
+    if (!valid && output_superseded) {
+      if (std::getenv("DARWIN_ART_DEBUG_SURFACE_TRANSACTIONS") != nullptr) {
+        std::fprintf(stderr,
+                     "ART SurfaceFlinger: committed without present; output "
+                     "superseded pid=%u transaction=%llu target=%u\n",
+                     header.process_id,
+                     static_cast<unsigned long long>(header.transaction_id),
+                     header.target_iosurface_id);
+      }
+      SignalCompletion(completion_guard->release(), true);
+    } else if (!valid) {
       std::fprintf(stderr,
                    "ART SurfaceFlinger: central compose failed pid=%u "
                    "transaction=%llu layers=%zu target=%u\n",
@@ -1124,10 +1183,19 @@ bool HandleRequest(int client, const std::array<char, 8>& prefix) {
   if (status == 0 && header.kind == static_cast<uint32_t>(RequestKind::kDisplayPresent)) {
     std::lock_guard<std::mutex> lock(State().mutex);
     output_epoch = Outputs().Admit(header.target_iosurface_id);
+    RetargetToCurrentOutput(header, output_epoch);
     if (!output_epoch || !output_epoch->current() ||
         output_epoch->identity().logical_width != header.target_width ||
         output_epoch->identity().logical_height != header.target_height)
       status = ESTALE;
+  }
+  if (status != 0) {
+    std::fprintf(stderr,
+                 "ART SurfaceFlinger: request rejected pid=%u transaction=%llu "
+                 "kind=%u target=%u status=%d\n",
+                 header.process_id,
+                 static_cast<unsigned long long>(header.transaction_id),
+                 header.kind, header.target_iosurface_id, status);
   }
   if (status == 0 && pipe(completion_pipe) != 0) status = errno;
   CompletionDescriptorGuard completion_read_guard(completion_pipe[0]);

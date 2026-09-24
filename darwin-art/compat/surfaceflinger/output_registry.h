@@ -4,6 +4,7 @@
 #include "output_lifetime_protocol.h"
 
 #include <atomic>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -53,6 +54,13 @@ class OutputRegistry {
   uint64_t next_serial_ = 1;
   std::map<int, std::shared_ptr<OutputEpoch>> owners_;
   std::map<uint32_t, std::shared_ptr<OutputEpoch>> by_surface_;
+  // Recently replaced IOSurface ids of each live owner. A producer that named
+  // the scanout just before an AppKit resize replaced it is still addressing
+  // that owner; Admit resolves it to the owner's current epoch. Retire/Drop
+  // (and reuse of the id by a registration) end the alias.
+  static constexpr size_t kReplacedHistory = 4;
+  std::map<int, std::deque<uint32_t>> replaced_;  // Oldest first.
+  void ForgetReplacedId(uint32_t iosurface_id);
 };
 
 }  // namespace darwin_art::surfaceflinger
