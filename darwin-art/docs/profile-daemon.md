@@ -1,13 +1,12 @@
 # Darwin ART profile daemon
 
-`darwin-artd` is the per-profile owner of state shared by Android application
-processes. It is deliberately closer to Wine's `wineserver` boundary than to
-an app-launch helper: applications request resources and hold leases, while the
-daemon alone owns their lifecycle.
+`darwin-artd` is the per-profile owner of shared host state. Applications request
+resources and retain leases; the daemon owns mounts, install records and managed
+process lifetimes. Android-observable policy belongs in `android.system`.
 
-## Filesystem ownership
+## Profile and filesystem
 
-Each profile has one case-sensitive APFS sparse bundle at:
+Each profile uses a case-sensitive APFS sparse bundle:
 
 ```text
 ~/Library/Application Support/DarwinART/profiles/<profile>/
@@ -17,97 +16,45 @@ Each profile has one case-sensitive APFS sparse bundle at:
   mnt/
 ```
 
-The daemon creates the image as `APFSX`, mounts it without Finder browsing,
-verifies that differently-cased names coexist, and initializes Android data,
-package, emulated-storage, and run directories. The socket and lock stay on the
-host volume so they remain reachable while the guest volume is detached.
+The daemon creates `APFSX`, verifies case sensitivity and initializes Android
+data, packages, emulated storage and runtime directories. Socket and lock remain
+on the host volume. One advisory lock selects the daemon; peer credentials limit
+IPC to the profile owner.
 
-The Rust launcher opens a versioned Unix-socket lease and carries its descriptor
-through `exec(2)` into each `darwin-art-host`, publishing the real process PID
-and package name through `darwin-artctl ps`. The host restores close-on-exec
-before it launches children; each Android Service child receives a distinct
-lease through the same exec bridge. Shutdown and idle detach are prohibited
-while any lease is live. Keeping profile IPC out of the latency-sensitive ART
-host link also avoids coupling runtime rebuilds to daemon implementation
-changes. A single advisory lock makes one daemon authoritative for a profile,
-and peer credentials restrict IPC to the profile owner.
+Every launched host inherits a versioned Unix-socket lease and publishes its real
+PID/package through `darwin-artctl ps`. Service children receive distinct leases.
+Live leases prevent detach and shutdown. The daemon owns managed child handles,
+reaps exits and redirects output to `managed-apps.log`; shell backgrounding is
+not a lifetime mechanism.
 
-The daemon can also spawn a registered long-lived process with an explicit
-argument vector and allowlisted environment. It owns the child handle, records
-the real PID/package in `darwin-artctl ps`, holds a profile lease for the whole
-lifetime, and reaps the child on exit. This is how `android.system` remains
-alive after the application that first caused startup has exited; shell
-backgrounding is not part of the lifetime contract. Manager-launched
-applications use this same operation, so closing the AppKit process does not
-terminate Android applications. Their output is redirected to the selected
-profile's `managed-apps.log`.
+## Host and Android ownership
 
-## macOS application exposure
+- `darwin-artd`: mounts, immutable install records, process handles and other
+  macOS capabilities.
+- `android.system`: ART-backed shared Android Binder services and Java state.
+- app/service ART processes: consume Binder APIs and never read another
+  package's registry files directly.
 
-The AppKit manager projects the installed-package registry into signed `.app`
-bundles at `~/Applications/Darwin ART Apps.localized`. These are Chrome-style
-application shims, not copied runtimes. Their Info.plist records the Android
-package and profile plus the Android label, version, and extracted APK icon. A
-small native launcher locates the installed manager bundle, selects the profile,
-and invokes the low-level package launcher to resolve the immutable launch
-record. That launcher asks `darwin-artd` to daemonize the final app host. The
-manager and Finder shims use its asynchronous handoff mode, while direct shell
-calls remain synchronous for the requested window duration.
+`android.system` remains alive independently of the app that triggered startup
+and publishes its Binder endpoint below `mnt/run`. Local, remote and isolated
+Android services retain framework lifecycle ownership; the daemon only provides
+the process and lease mechanism.
 
-Synchronization rewrites a bundle only when its metadata, icon, launcher, or
-manager location changes. Stale-package and deleted-profile cleanup first
-validates the `DARManagedAppShim` ownership marker and exact profile, so it can
-never remove an unrelated application from the user's Applications directory.
+Each package's writable state lives under
+`mnt/data/apps/<package>/private-data/user/0/<package>` and appears as
+`/data/user/0/<package>`. The filesystem facade translates only the authorized
+writable mount. SharedPreferences, SQLite databases and journals survive app and
+daemon relaunch.
 
-## ART system services
+## Installed applications
 
-The first persistent framework process is `android.system`, an ART-backed
-`system_server-lite` started by `darwin-artd`. It publishes an Android
-Binder/Parcel endpoint at `mnt/run/system-server-lite.sock`. The initial
-`IPackageRegistry` service resolves immutable package launch records by asking
-the daemon, while application-side `PackageManager` uses Binder to resolve
-installed packages, explicit Activity and Service components, and
-package-scoped launcher intents.
+The AppKit manager projects installed records into signed shims at
+`~/Applications/Darwin ART Apps.localized`. A shim stores package/profile and
+display metadata, then asks the manager and daemon to launch the immutable
+record. It contains no copied runtime. Synchronization rewrites changed shims
+only; deletion validates the ownership marker and exact profile.
 
-This separation is intentional:
-
-- `darwin-artd` owns macOS authority, filesystem mounts, install records, and
-  process handles;
-- `android.system` owns Android-observable service APIs and Java object state;
-- application/service ART processes consume those APIs over Binder and never
-  read another package's registry files directly.
-
-Android Service instances use the existing framework lifecycle bridge. Local
-services execute in their application process; declared remote and isolated
-services receive distinct ART host processes, Binder channels, and daemon
-leases. `onCreate`, `onBind`, asynchronous `ServiceConnection`, rebind,
-`onUnbind`, and final process release remain Android-side decisions. Moving
-additional ActivityManager policy into `android.system` is an extension of the
-same Binder boundary, not a new per-app environment bridge.
-
-## Persistent application data
-
-Each installed package receives private storage below
-`mnt/data/apps/<package>/private-data/user/0/<package>`. Guest paths remain
-`/data/user/0/<package>`. The Rust filesystem facade validates and translates
-only that writable `/data` mount before a host SQLite connection is opened;
-immutable mounts cannot be converted into writable host paths. Framework
-SharedPreferences uses atomic XML in `shared_prefs`, and SQLite databases plus
-journals live in `databases`. Both survive application and daemon relaunch.
-
-The compatibility gate uses unchanged installed AOSP Calculator, Calendar, and
-DeskClock packages. Each package must launch twice by package name with no
-reinstall, while `darwin-artctl ps` continues to report exactly one
-`android.system`. Calculator must retain a valid `Expressions.db` schema;
-Calendar and DeskClock must reopen their Android binary-XML (`ABX`) preference
-files without a SharedPreferences read error. A cross-package
-`PackageManager.getPackageInfo()` request must complete through the system
-Binder after the originating app and system process have different PIDs.
-
-## Install and launch
-
-The normal interface separates one-time APK inspection/installation from
-package launch:
+Normal usage separates installation from launch:
 
 ```sh
 cargo xtask build
@@ -117,20 +64,22 @@ tools/darwin-art run com.example.app
 tools/darwin-art ps
 ```
 
-Installation copies the unchanged APK into an immutable, content-addressed
-package directory and atomically registers a versioned launch record under the
-profile's case-sensitive guest volume. A deoptimized sidecar DEX, when needed,
-is copied into the same persistent package-code area. Later `run PACKAGE`
-operations resolve that record through `darwin-artd`; they do not inspect the
-APK, invoke Cargo, rebuild native code, or reinstall the package. Records and
-application data survive daemon detach/restart.
+Install copies the unchanged APK into a content-addressed directory and
+atomically registers a versioned record. A required deoptimized DEX is persisted
+with package code. `run PACKAGE` resolves that record; it does not inspect or
+reinstall the APK, invoke Cargo or rebuild native code.
 
-`tools/run-android-apk-app.sh` remains the low-level installer/launcher used by
-this interface. Setting `DARWIN_ART_APP_DATA_ROOT` is an explicit test override
-that retains the legacy caller-owned storage paths and does not start the
-profile daemon.
+`tools/run-android-apk-app.sh` remains the low-level installer/launcher.
+`DARWIN_ART_APP_DATA_ROOT` is a test-only caller-owned storage override and does
+not start the profile daemon.
 
-## Operations
+## Acceptance and operations
+
+The unchanged Calculator, Calendar and DeskClock gate launches every package
+twice without reinstall and retains exactly one `android.system`. It verifies
+Calculator SQLite, Calendar/DeskClock binary preferences and cross-process
+PackageManager lookup. Run the daemon audit after lifecycle, filesystem, install
+or service-process changes.
 
 ```sh
 cargo build --release -p darwin-art-profile --bins
@@ -146,9 +95,6 @@ target/release/darwin-artctl shutdown
 tools/audit-profile-daemon.sh
 ```
 
-The IPC envelope is versioned (`DARTD001`, protocol version 1). Privileged host
-capabilities belong in the daemon; Android-observable shared services belong in
-the persistent ART system process and reach applications through Binder.
-Profile deletion refuses while an application lease is active, stops the
-profile-owned `android.system`, detaches the APFSX volume, and only then removes
-the exact validated profile directory.
+IPC uses envelope `DARTD001`, protocol version 1. Profile deletion refuses live
+leases, stops the profile-owned system process, detaches APFSX and removes only
+the validated profile directory.

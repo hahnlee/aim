@@ -1,206 +1,79 @@
 # ART Android ELF JNI integration boundary
 
-This gate is a deliberately narrow ART integration proof. It is not general
-Android `.so` compatibility.
+This is the current contract for loading Android AArch64 ELF JNI graphs through
+ART on macOS. It is not a claim of general Android `.so` compatibility.
+Historical experiment and stage logs live in Git.
 
-## Accepted image
+## Ownership and admission
 
-`tools/build-android-elf-jni-fixture.sh` builds a root, child, and grandchild
-AArch64 `ET_DYN` graph and generates an identity header from all three exact byte
-lengths and SHA-256 values. The adapter delegates the caller-selected parent
-directory as trusted host authority, then the filesystem broker opens the root
-and recursively named siblings as byte components with `O_NOFOLLOW`,
-`O_NONBLOCK`, regular-file checks, and fixed file/count/total-size caps. The
-same authorized descriptor supplies metadata and bytes. Provider SONAMEs are
-never opened from disk; RPATH/RUNPATH, dyld lookup, and alternate paths are not
-consulted for an Android ELF graph.
+The host selects one trusted package directory. The filesystem broker opens the
+root and recursively named siblings with `O_NOFOLLOW`, regular-file checks and
+fixed file/count/size caps. The same descriptor supplies metadata and bytes.
+SONAME providers are never reopened from disk; RPATH/RUNPATH, dyld search and
+alternate paths are excluded. The host must prevent concurrent writes to
+authorized inodes.
 
-Selecting and opening the parent directory is host policy, not an ancestor
-symlink sandbox: only its final component is opened with `O_NOFOLLOW`. The host
-must also prevent concurrent writes to authorized inodes. Filename walking is
-byte-preserving, including a non-UTF-8 root basename, but the current
-`ClosedElfNamespace` uses Rust `String` keys. Embedded non-UTF-8 SONAME or
-DT_NEEDED values therefore fail with an explicit namespace-capability error
-after byte-component validation.
+The closed namespace contains the discovered graph plus explicit reviewed
+Bionic/host providers. Unknown libraries, symbols, relocations and malformed
+metadata fail before publication. Android system libraries are providers, not
+disk siblings. Non-UTF-8 path components are preserved, while non-UTF-8
+SONAME/DT_NEEDED remains unsupported by the current string-keyed namespace.
 
-The discovery gate also uses the pinned NDK r28c `libc++_shared.so`: a sibling
-root discovers it while `libc.so`, `libdl.so`, and `libm.so` are poisoned disk
-entries and must be skipped as providers. Metadata inspection deliberately
-accepts tags independently from execution support. The later load stage now
-validates and seals one GNU RELRO range and recognizes the pinned libc++'s
-zero-valued `DT_AARCH64_BTI_PLT` tag. It also accepts the bounded local
-`PT_TLS`/`R_AARCH64_TLSDESC` model documented by the loader; imported/static TLS,
-nonzero BTI requirements, malformed RELRO, and unsupported relocations remain
-explicit capability checks.
+## Implemented contract
 
-The root needs the real child plus explicit virtual host/Bionic providers. The
-child needs the real grandchild plus those providers; the grandchild is a pure
-leaf. Discovery is recursive and capped; this is no longer a root-plus-one-child
-special case. The host provider exports one reviewed fixed-register `void(int)`
-lifecycle recorder; unknown SONAMEs and symbols fail closed. The root and child
-have initializer/finalizer arrays and no GNU RELRO or TLS. The root's constructor
-and `NativeAdd` reach a real child export through eager
-`R_AARCH64_JUMP_SLOT` relocation.
-Before any graph constructor runs, the adapter installs a process-wide Bionic
-filesystem owner from that same preopened directory authority. The root
-constructor proves the TLS-free path by opening, reading, and closing synthetic
-`/dev/random`; the synthetic device uses Security.framework entropy and never
-enters the host mount. Every filesystem call and ioctl fd-kind lookup holds a
-short owner lease. Teardown stops new leases and drains in-flight calls only
-after graph finalizers/unmapping. Simultaneously live graphs share the one owner
-only when the trusted directory device/inode identity matches; a different
-authority fails closed.
+- Recursive root → child → grandchild discovery and eager relocation.
+- Immutable image ranges, GNU RELRO sealing and reverse dependency teardown.
+- Local AArch64 TLSDESC with per-thread aligned blocks and live-thread unload
+  rejection. Imported/static TLS and TLS destructors remain unsupported.
+- Exact pinned NDK `libc++_shared.so` import census (160/160) and execution,
+  including collection and cross-frame exception fixtures.
+- APK extraction for bounded arm64 stored/deflated entries with ZIP agreement,
+  CRC verification and atomic read-only publication.
+- `extractNativeLibs=false` read-only 16 KiB-aligned APK slices without copying.
+- Closed Bionic filesystem, descriptor, numeric-loopback network and DNS
+  providers with process-scoped leases.
+- Guest `libdl` standalone `dlopen`/`dlsym`/`dlclose`/`dlerror` and
+  `android_dlopen_ext` ownership.
 
-## ART lifecycle
+## ART and JNI lifecycle
 
-`JavaVMExt::LoadNativeLibrary` calls the Darwin `OpenNativeLibrary` seam. Mach-O
-libraries keep their existing `dlopen`/`dlclose` ownership. A broker-discovered
-ELF receives a private Rust graph handle. The C ABI stages the
-complete closure, resolves it only against graph scope plus the explicit
-provider, and runs every constructor before returning the still-private handle.
-The adapter creates no lifecycle/provider/graph handle until discovery has
-completed, and publishes only after graph construction and JNI-proxy preflight. It is tagged
-`needs_native_bridge=true`; close dispatch is therefore atomic between the ELF
-handle and the raw dyld handle.
+`JavaVMExt::LoadNativeLibrary` keeps Mach-O on `dlopen` and gives an admitted ELF
+graph a private Rust handle. Discovery, relocation, constructors and JNI proxy
+preflight complete before publication. ART receives
+`needs_native_bridge=true`; close dispatch distinguishes ELF and dyld handles.
 
-ART looks up `JNI_OnLoad` through `NativeBridgeGetTrampoline2`. The fixed
-lifecycle trampoline substitutes the closed proxy `JavaVM*`; the Android image
-never sees ART's real function tables. The bounded proxy implements
-`GetEnv`, `FindClass`, `RegisterNatives`, `ThrowNew`, and a bounded forwarding
-subset for modified UTF-8, local/global references, byte-array region access,
-and exception observation/clearing. Each
-forwarded operation obtains the current ART thread's `JNIEnv` for that call
-only; no synchronous-load pointer or ART function table is retained or exposed
-to guest code.
+`JNI_OnLoad` runs through a closed proxy `JavaVM/JNIEnv`; guest code never gets
+ART's raw function tables. The bounded proxy covers class lookup, one table of
+up to 32 regular-JNI registrations, scalar/reference descriptors, modified
+UTF-8, references, byte arrays and exception observation. Named JNI,
+CriticalNative, aggregates/HFA and unreviewed varargs remain rejected.
 
-The RegisterNatives backend now accepts one table of up to 32 static regular-JNI
-methods per graph. It parses arbitrary scalar/reference descriptors into
-Z/B/C/S/I/J/F/D/L/V shorties, verifies every declared Java method, and rejects
-a second table, instance methods, CriticalNative, aggregates/HFA, and
-unreviewed varargs. The generic graph proves this path independently by
-registering and calling a one-method `(IJI)J` table before the hash-identified
-eight-method fixture replaces it. That generic method creates and reads a Java
-string, round-trips a byte array across local/global/local reference ownership,
-and raises, observes, then clears an array-bounds exception through the proxy
-after `JNI_OnLoad`. This proves the registered native body can use the bounded
-forwarding subset. Ordinary named-JNI lookup remains
-rejected.
-The backend creates
-one cache-owned executable page while writable, emits the cached thunks, flushes
-the instruction cache, changes the page to read/execute, and publishes its
-generation/range. Every guest function pointer must first belong to an exact
-currently published image range in that graph. A deliberate address `1`
-registration is rejected before code generation.
-`NativeBridgeIsNativeBridgeFunctionPointer` recognizes only
-the callable entries, never a literal or arbitrary address in that range.
-Its source-derived entry mask distinguishes all eight methods, so duplicate
-classification of one address cannot satisfy the complete-table acceptance gate.
-Only those Darwin-entry thunks are passed to ART `RegisterNatives`; raw ELF
-function pointers are never installed.
+Generated Darwin-entry thunks repack Android ARM64 regular-JNI arguments. Their
+page transitions RW → RX, belongs to the `ElfLibrary`, and is unpublished before
+graph finalization. Raw ELF pointers never enter ART. Registration failure
+unregisters the class and destroys the unpublished generation. Shutdown requires
+external quiescence and returns executable-page and graph counts to zero.
 
-No global `ART_TARGET_ANDROID` change is needed. ART's registration path still
-asks `NativeBridgeIsNativeBridgeFunctionPointer` about every installed pointer;
-the non-Android Darwin branch then retains each already-repacked Darwin entry
-as the method target. The observed complete-table mask is part of runtime acceptance.
+Per-image `__cxa_finalize(dso_handle)` callbacks drain before ELF finalizers;
+dependents finish before dependencies and no global finalize shortcut is used.
+The signal-chain seam restores ART's dispatcher at the front while retaining a
+displaced handler as the next action.
 
-Registration is transactional for the reviewed fresh-class boundary. Every
-thunk must exist and ART must register the complete table before the backend
-returns `JNI_OK`. A failure unregisters that class, unpublishes the generation,
-and unmaps the page. On success the `ElfLibrary` owns the executable page and ELF
-graph together. ART shutdown provides the required external quiescence, then
-the close seam unpublishes/unmaps the thunks before finalizing the root and then
-the child, each before its mapping is released.
-The shutdown acceptance also requires the global live-page count to return to
-zero after `DestroyJavaVM`. The host recorder observes the exact sequence child
-constructor → root constructor → `JNI_OnLoad` → root C++ callback →
-root ELF finalizer → child C++ callback → child ELF finalizer. Thus
-constructor order, child relocation, actual JNI registration, and reverse graph
-finalization are one real ART process gate.
-The fixture's `JNI_OnUnload` is a reviewed no-op. Both root and child define a
-hidden/local `__dso_handle`, register an observable callback through the Bionic
-`__cxa_atexit` provider, and keep that handle out of `.dynsym`. The graph
-publishes each live range before constructors. Unload observes root callback →
-root ELF finalizer → child callback → child ELF finalizer, then unmaps. The
-provider rejects null-handle registrations for graph owners and routes
-simultaneously live owners by disjoint image ranges.
+## Evidence and open work
 
-This is per-image lifecycle composition rather than two independent teardown
-systems. For each image, its Bionic `__cxa_finalize(dso_handle)` registrations
-drain to quiescence before its `DT_FINI_ARRAY`/`DT_FINI`; the live range is then
-unpublished and unmapped. Dependents complete that sequence before dependencies,
-and no process-global `__cxa_finalize(NULL)` is used as a shortcut.
+The actual-ART gates prove recursive constructors/finalizers, generic and fixed
+RegisterNatives tables, JNI ABI repacking, W^X thunks, pinned libc++, local TLS,
+APK extraction/slices and loopback network quiescence. Run:
 
-Retaining `JavaVMExt::LoadNativeLibrary` also retains its legacy target-SDK
-signal-chain repair call. `darwin_sigchain.cc` therefore provides the real
-`EnsureFrontOfChain` behavior: if another action displaced ART's dispatcher,
-it becomes the next action and the dispatcher is restored at the front.
+```sh
+cargo run -q -p art-bootstrap -- probe-runtime-elf-jni
+cargo run -q -p art-bootstrap -- probe-runtime-network
+bash tools/audit-android16-register-natives-bridge.sh
+bash tools/android-apk-native-extract/audit.sh
+```
 
-## Acceptance stages
-
-1. ARM64 ELF map/relocate/init and closed lookup: complete.
-2. ART open with `needs_native_bridge=true` and atomic ELF-vs-Mach-O ownership:
-   complete.
-3. Proxy `JavaVM/JNIEnv` → real ELF `JNI_OnLoad` → `FindClass` → eight-method
-   `RegisterNatives` table reached: complete.
-4. Regular-JNI scalar/reference shorty generation, actual ART registration,
-   narrow and FP stack repacking, and Z/B/C/S/I/J/F/D/L/V return paths:
-   complete for the graph root.
-5. Recursive sibling `DT_NEEDED` discovery, including the reviewed
-   root→child→grandchild graph, explicit providers,
-   transactional constructors, and reverse finalizers: complete.
-   A second actual-ART graph has the same two-level dependency topology but no
-   Bionic imports and exports `JNI_OnLoad` without `JNI_OnUnload`; it proves the
-   generic path is not coupled to fixture route masks or optional lifecycle
-   exports.
-6. Closed Bionic namespace against the exact pinned libc++ import census:
-   160/160 complete. The final `sendfile` route copies an immutable input into
-   the private writable `/data` overlay through central virtual descriptors.
-7. Real pinned NDK libc++ execution: complete for collections (189) and an
-   Android-libunwind cross-frame exception cleanup/catch (73), with sequential
-   unload and a process-wide copied-PHDR snapshot source for
-   `dl_iterate_phdr`.
-8. Local-definition AArch64 `TLSDESC`: complete with per-thread aligned guest
-   blocks, opaque descriptor tokens, thread-exit reclamation, and live-thread
-   unload rejection. Imported/static TLS and TLS destructors remain incomplete.
-9. APK native extraction: complete for bounded Android arm64 entries using
-   stored/deflated ZIP records, central/local agreement, CRC verification,
-   atomic read-only publication, and actual-ART execution of the sealed
-   six-DSO directory. A separate actual-ART process also exercises the
-   `extractNativeLibs=false` path: three 16 KiB-aligned STORED DSOs remain in a
-   mode-0400 APK and are mapped as read-only fd slices with no copy or extraction.
-10. Numeric-loopback network and central-FD composition: complete for the
-    isolated ART JNI gate. The exact namespace now has 32 owners and 185 routes;
-    `socket`/`connect`/`send`/`recv` use broker ABI-v3 typed leases, DNS shares
-    the same process admission lifetime, and marker-safe `close` delegates
-    non-broker descriptors to the filesystem owner. `probe-runtime-network`
-    executes JavaVMExt → JNI_OnLoad → registered `(I)I` HTTP and verifies zero
-    socket/DNS/trampoline state after shutdown. External DNS/Internet,
-    class-loader namespace caching, broader JNI proxy coverage, and
-    CriticalNative remain incomplete.
-11. Guest `libdl`: a closed standalone owner executes `dlopen`, `dlsym`,
-    `dlclose`, `dlerror`, and `android_dlopen_ext` with refcounts and lifecycle
-    ordering. Production still needs ClassLoader-scoped dynamic sibling
-    insertion, generation handles, and a use lease for returned symbol pointers.
-
-Stage 4 explicitly repacks the two calling conventions. The fixture gate
-compiles and disassembles the same source for both targets: Android uses
-reference `sp+0`, `f4` `sp+8`, `f5` `sp+16`, and `d4` `sp+24`; Darwin uses
-offsets 0, 8, 12, and 16. The generated thunk preserves x1-x7/v0-v7,
-substitutes x0 with the proxy `JNIEnv`, and moves only the stack tail into
-Android eight-byte slots. A second method forces 1/2/4/8-byte integer-like
-values onto the stack. The planner tracks GP and FP banks independently,
-caches identical target+shorty thunks, and rejects V arguments and unknown
-aggregate/HFA/varargs spellings. CriticalNative is outside this regular-JNI API.
-
-`nativeUsesEnv` runs after `JNI_OnLoad`, calls proxy `GetVersion` and
-`FindClass`, and succeeds only because each backend call obtains
-`Thread::Current()->GetJniEnv()`. The generic registered native additionally
-uses modified-UTF-8, byte-array region, local/global reference, and exception
-observation/clearing entries. No load-thread `JNIEnv` is retained. The remaining
-JNI table is null and fail-closed, so this bounded subset must not be described
-as general `.so` support.
-
-The executable page currently uses Darwin's anonymous RW mapping followed by
-an irreversible transition to RX. This is W^X and passes the development
-binary gate on Apple Silicon, but hardened-runtime deployment still needs an
-explicit `MAP_JIT`/code-signing entitlement policy and acceptance test.
+Remaining production work includes ClassLoader-scoped dynamic sibling insertion,
+generation handles and use leases for returned `dlsym` pointers, broader JNI
+coverage, external DNS/Internet policy and complete NativeLoader cutover. The
+anonymous RW→RX page passes development Apple Silicon gates; hardened runtime
+still needs explicit `MAP_JIT`/entitlement acceptance.
