@@ -9,3 +9,6 @@
 .ninja_log
 .ninja_deps
 tools/__pycache__/
+
+# Generated compiler dependency file
+/darwin-art/darwin_android_platform.d
