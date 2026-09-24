@@ -1,4 +1,5 @@
 [package]
+license.workspace = true
 name = "bionic-binary128-conversion-facade"
 version = "0.1.0"
 edition = "2024"

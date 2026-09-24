@@ -45,6 +45,7 @@ Component tests are not application acceptance. See [AGENTS.md](../AGENTS.md),
 | Input / WMS | Exact-root ingress, readiness/focus fences, bounded first-key queue and receiver lifetime are adopted. Parent/process-death cleanup and full resize/configuration settlement remain open. |
 | Services | Exact-client connection ledger, process-shared demand and service lifecycle lanes are adopted. Real remote death and reusable shutdown are not proven. |
 | Graphics / SCM | Retained backing, fences and scanout diagnostics pass. ABI2 SCM/Binder callbacks and focused lifetime tests pass; unchanged-APK managed-transfer acceptance remains open. |
+| Source licensing | Original work uses Apache-2.0; upstream notices and OpenJDK GPLv2 + Classpath scope are recorded in the repository's licensing documents. Binary distribution/source matching remains a separate gate. |
 
 ## Active failures
 

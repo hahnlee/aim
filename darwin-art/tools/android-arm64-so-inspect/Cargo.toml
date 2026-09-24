@@ -1,4 +1,5 @@
 [package]
+license.workspace = true
 name = "android-arm64-so-inspect"
 version = "0.1.0"
 edition = "2021"

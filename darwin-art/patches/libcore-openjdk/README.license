@@ -1,0 +1,10 @@
+These patches modify AOSP libcore's OpenJDK-derived implementation.
+License: GPL-2.0-only WITH Classpath-exception-2.0
+
+Darwin ART retains the upstream Classpath exception for its modifications to
+covered files. The repository's default Apache-2.0 license does not replace
+these terms. Preserve each target file's original copyright and license header.
+
+The target revisions, modification descriptions, and full upstream notices are
+in ../../../licensing/OPENJDK.md and ../../../licensing/third-party/.
+The exception is not a blanket grant for unrelated GPL code.

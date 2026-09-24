@@ -1,0 +1,18 @@
+Darwin ART
+Copyright 2026 Darwin ART contributors.
+
+Original Darwin ART work is licensed under the Apache License, Version 2.0.
+Third-party materials retain their respective copyrights and licenses.
+See LICENSING.md and THIRD_PARTY_NOTICES.md for the scope of this license.
+
+This project contains or adapts work from the Android Open Source Project,
+OpenJDK, FreeBSD, Skia, and other projects identified in THIRD_PARTY_NOTICES.md.
+OpenJDK-derived files and patches identified in licensing/OPENJDK.md remain
+under GPL version 2 with the Classpath exception; they are not relicensed
+under Apache-2.0. The Classpath exception is retained for our modifications
+to covered files. Original notices are preserved in source files and in
+licensing/third-party/.
+
+This notice is informational and does not modify any component's license.
+Project and product names identify their respective upstreams and do not
+imply sponsorship or endorsement.

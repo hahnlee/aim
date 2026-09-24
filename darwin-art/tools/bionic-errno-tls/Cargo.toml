@@ -1,4 +1,5 @@
 [package]
+license.workspace = true
 name = "bionic-errno-tls"
 version = "0.1.0"
 edition = "2024"

@@ -1,5 +1,18 @@
 # Contributing
 
+## Licensing
+
+Independent original contributions are submitted under Apache-2.0. Contributions
+to upstream-derived files and patches must preserve the upstream license,
+copyrights, notices, and applicable exceptions. In particular, retain the
+Classpath exception for modifications to covered OpenJDK code; do not relabel
+that code as Apache-2.0. See [LICENSING.md](LICENSING.md) and the
+[OpenJDK modification inventory](licensing/OPENJDK.md).
+
+Record the upstream project, exact revision, applicable license, and local
+changes when importing or adapting code. Include required notices in the same
+change. Do not remove headers to fit a file under the repository default.
+
 ## Commits
 
 Use Conventional Commits for every commit:

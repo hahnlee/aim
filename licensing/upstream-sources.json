@@ -1,0 +1,95 @@
+{
+  "description": "Verbatim upstream license/notice snapshots, verified against immutable source URLs. Not a binary SBOM.",
+  "files": [
+    {
+      "file": "licensing/third-party/libcore-LICENSE",
+      "project": "platform/libcore",
+      "revision": "080fac8bb8670bc7fbc895050caf4b13c4d6cd12",
+      "upstream_path": "LICENSE",
+      "revision_lock": "darwin-art/sources.lock",
+      "source_url": "https://android.googlesource.com/platform/libcore/+/080fac8bb8670bc7fbc895050caf4b13c4d6cd12/LICENSE",
+      "sha256": "067d8f7f645efe1131a9df13aa80ec2910d4ff898f9b14d337443a4202d56ab6"
+    },
+    {
+      "file": "licensing/third-party/libcore-NOTICE",
+      "project": "platform/libcore",
+      "revision": "080fac8bb8670bc7fbc895050caf4b13c4d6cd12",
+      "upstream_path": "NOTICE",
+      "revision_lock": "darwin-art/sources.lock",
+      "source_url": "https://android.googlesource.com/platform/libcore/+/080fac8bb8670bc7fbc895050caf4b13c4d6cd12/NOTICE",
+      "sha256": "ded3eab76e881c8c18ab9e4ed9e888b1afcac41435913930f88f8188cecb2e8f"
+    },
+    {
+      "file": "licensing/third-party/libcore-ojluni-LICENSE",
+      "project": "platform/libcore",
+      "revision": "080fac8bb8670bc7fbc895050caf4b13c4d6cd12",
+      "upstream_path": "ojluni/src/main/LICENSE",
+      "revision_lock": "darwin-art/sources.lock",
+      "source_url": "https://android.googlesource.com/platform/libcore/+/080fac8bb8670bc7fbc895050caf4b13c4d6cd12/ojluni/src/main/LICENSE",
+      "sha256": "46d411827d56eda34df30f901bfa4ea020119b2e38b6b7efb6a32e91461457a2"
+    },
+    {
+      "file": "licensing/third-party/libcore-ojluni-NOTICE",
+      "project": "platform/libcore",
+      "revision": "080fac8bb8670bc7fbc895050caf4b13c4d6cd12",
+      "upstream_path": "ojluni/src/main/NOTICE",
+      "revision_lock": "darwin-art/sources.lock",
+      "source_url": "https://android.googlesource.com/platform/libcore/+/080fac8bb8670bc7fbc895050caf4b13c4d6cd12/ojluni/src/main/NOTICE",
+      "sha256": "4e1144ff2b1369e7b9e8a1a3fb94ea3deee99d5b327cd94b423d148dfa34d25f"
+    },
+    {
+      "file": "licensing/third-party/art-openjdkjvm-LICENSE",
+      "project": "platform/art",
+      "revision": "ed6c006bd06ae060bd9698fd2cb25c4865512ec3",
+      "upstream_path": "openjdkjvm/LICENSE",
+      "revision_lock": "darwin-art/upstream/android16-openjdkjvm-darwin.lock",
+      "source_url": "https://android.googlesource.com/platform/art/+/ed6c006bd06ae060bd9698fd2cb25c4865512ec3/openjdkjvm/LICENSE",
+      "sha256": "b2fdb88151f747b40f4a8b17ceba930136c8c1be873611972b413bce2c2eb587"
+    },
+    {
+      "file": "licensing/third-party/art-openjdkjvmti-LICENSE",
+      "project": "platform/art",
+      "revision": "9fac16b7c1e3599509612e9f9567283a00b16ac1",
+      "upstream_path": "openjdkjvmti/LICENSE",
+      "revision_lock": "darwin-art/upstream/android16-openjdkjvmti.lock",
+      "source_url": "https://android.googlesource.com/platform/art/+/9fac16b7c1e3599509612e9f9567283a00b16ac1/openjdkjvmti/LICENSE",
+      "sha256": "d5dde6ff1463281d19c920f2a3241bb12055ac78f0d2a27b4c8b457dc45db5d9"
+    },
+    {
+      "file": "licensing/third-party/skia-LICENSE",
+      "project": "platform/external/skia",
+      "revision": "bcb0f77c44783b1800ba37641ba7ecab04f05e07",
+      "upstream_path": "LICENSE",
+      "revision_lock": "darwin-art/sources.lock",
+      "source_url": "https://android.googlesource.com/platform/external/skia/+/bcb0f77c44783b1800ba37641ba7ecab04f05e07/LICENSE",
+      "sha256": "5f787c1dee3c56547f09ccc2906ab5f5293c4d8dd6c8654e573216c38e908dbd"
+    },
+    {
+      "file": "licensing/third-party/skia-NOTICE",
+      "project": "platform/external/skia",
+      "revision": "bcb0f77c44783b1800ba37641ba7ecab04f05e07",
+      "upstream_path": "NOTICE",
+      "revision_lock": "darwin-art/sources.lock",
+      "source_url": "https://android.googlesource.com/platform/external/skia/+/bcb0f77c44783b1800ba37641ba7ecab04f05e07/NOTICE",
+      "sha256": "b9810289c5b3026adbff0fd4e033d9af4dd20a45c1e2ed381f28db61a6b6fd29"
+    },
+    {
+      "file": "licensing/third-party/boringssl-LICENSE",
+      "project": "platform/external/boringssl",
+      "revision": "ecc1358826150d6a1851c517c325b0e6c0e1b8be",
+      "upstream_path": "src/LICENSE",
+      "revision_lock": "darwin-art/upstream/android16-system-natives-darwin.lock",
+      "source_url": "https://android.googlesource.com/platform/external/boringssl/+/ecc1358826150d6a1851c517c325b0e6c0e1b8be/src/LICENSE",
+      "sha256": "756a61a8300d105ae68e7f2993e27d41a765c946f3400422e2403b01e7ded527"
+    },
+    {
+      "file": "licensing/third-party/boringssl-NOTICE",
+      "project": "platform/external/boringssl",
+      "revision": "ecc1358826150d6a1851c517c325b0e6c0e1b8be",
+      "upstream_path": "NOTICE",
+      "revision_lock": "darwin-art/upstream/android16-system-natives-darwin.lock",
+      "source_url": "https://android.googlesource.com/platform/external/boringssl/+/ecc1358826150d6a1851c517c325b0e6c0e1b8be/NOTICE",
+      "sha256": "756a61a8300d105ae68e7f2993e27d41a765c946f3400422e2403b01e7ded527"
+    }
+  ]
+}

@@ -22,3 +22,11 @@ cd darwin-art
 See [`darwin-art/README.md`](darwin-art/README.md) for supported Android APIs,
 build inputs, reproducible gates, architecture, and current compatibility
 boundaries.
+
+## License
+
+Original Darwin ART code is licensed under [Apache-2.0](LICENSE).
+Third-party code and upstream-derived modifications retain their own licenses,
+including [OpenJDK's GPLv2 with the Classpath exception](licensing/OPENJDK.md).
+See [license scope](LICENSING.md), [NOTICE](NOTICE), and
+[third-party notices](THIRD_PARTY_NOTICES.md).

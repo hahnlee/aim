@@ -56,3 +56,6 @@ members = [
 ]
 default-members = ["crates/art-bootstrap", "crates/darwin-art-host", "crates/darwin-art-prefix"]
 resolver = "2"
+
+[workspace.package]
+license = "Apache-2.0"
