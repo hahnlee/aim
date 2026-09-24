@@ -1,6 +1,6 @@
 # Android ClassLoader native-library state
 
-This standalone gate fixes the ownership contract that the Darwin ART adapter
+This standalone gate fixes the ownership contract that the AIM adapter
 must apply before one Android ELF graph can be shared with ART. It does not call
 Darwin `dlopen`, `dlsym`, `dlclose`, dyld, or the production runtime adapter.
 

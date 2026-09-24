@@ -8,7 +8,7 @@ Android applications may open a system library by an absolute path such as
 `/system/lib64/libEGL.so`. On AOSP, Bionic opens that path and uses the
 descriptor's device, inode and offset to reuse an already loaded image.
 
-Darwin ART implements selected Android system libraries with host-native
+AIM implements selected Android system libraries with host-native
 providers. Those providers are resident Android linker images, but no duplicate
 ELF file exists in the guest filesystem and therefore no inode can represent
 their identity. Requiring a placeholder file would create a second, false

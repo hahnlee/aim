@@ -1,4 +1,4 @@
-# Darwin ART ELF loader vertical slice
+# AIM ELF loader vertical slice
 
 This standalone crate proves a bounded Android `.so` execution path on Apple
 Silicon. It reserves one Darwin virtual-address range for an AArch64 `ET_DYN`,

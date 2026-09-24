@@ -1,4 +1,4 @@
-# Darwin ART virtual prefix
+# AIM virtual prefix
 
 This crate routes Android-visible byte paths into an immutable mount identifier
 and a normalized mount-relative byte path. It deliberately does not require

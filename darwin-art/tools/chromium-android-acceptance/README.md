@@ -1,7 +1,7 @@
 # Chromium Android acceptance
 
 This gate runs an official, unmodified arm64 `chrome_public_apk` through the
-Darwin ART compatibility runtime. It does not inject JavaScript into Chromium
+AIM compatibility runtime. It does not inject JavaScript into Chromium
 or replace its Android Activity, Service, Binder, renderer, GPU, file, media,
 input, or TLS paths.
 

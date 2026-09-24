@@ -1,4 +1,4 @@
-# Darwin ART compatibility runtime
+# AIM compatibility runtime
 
 This is the active work index. Keep only current scope, verified state, open
 failures and acceptance commands here; Git history holds retired diagnostics.

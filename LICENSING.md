@@ -1,6 +1,6 @@
 # Licensing
 
-Original work contributed to Darwin ART is licensed under the
+Original work contributed to AIM is licensed under the
 [Apache License, Version 2.0](LICENSE), unless a file or the exceptions below
 specifies otherwise. Copyright remains with the respective contributors.
 This grant covers our original contributions, not rights in third-party work.
@@ -29,7 +29,7 @@ For an independent new source file, use:
 
 ```text
 SPDX-License-Identifier: Apache-2.0
-Copyright 2026 Darwin ART contributors
+Copyright 2026 AIM contributors
 ```
 
 Use the actual copyright holder and year where known. Preserve existing

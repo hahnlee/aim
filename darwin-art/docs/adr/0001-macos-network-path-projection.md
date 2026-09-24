@@ -5,7 +5,7 @@ Status: accepted for the current Chromium compatibility slice
 ## Context
 
 Android 16 applications obtain connectivity through the original
-`ConnectivityManager` and `IConnectivityManager`. Darwin ART previously
+`ConnectivityManager` and `IConnectivityManager`. AIM previously
 shadowed those framework classes with a process-local, always-connected Wi-Fi
 model. That bypass cannot represent host changes, cost, Binder identity, or
 Android callback ordering.

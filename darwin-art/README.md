@@ -1,4 +1,4 @@
-# Darwin ART
+# AIM — Android Runtime for macOS
 
 For normal development, start with the unified build interface:
 
@@ -13,7 +13,7 @@ graph. Package ownership and rebuild boundaries are documented in
 [`docs/build-system.md`](docs/build-system.md). Individual provider manifests
 and bootstrap subcommands are internal diagnostic interfaces.
 
-Experimental Apple Silicon port of Android Runtime. ART remains C++/ARM64
+Experimental Apple Silicon Android Runtime for macOS. ART remains C++/ARM64
 assembly and is compiled as Mach-O. Rust owns the bootstrap tooling, Darwin
 integration, launcher, and eventually the Android ELF compatibility loader.
 
@@ -43,8 +43,8 @@ tools/darwin-art run com.example.app
 tools/darwin-art ps
 ```
 
-The native macOS manager is the product owner, not a front end for a source-tree
-CLI. Its AppKit bundle contains the runtime, compatibility libraries, graphics
+The AIM native macOS manager is the product owner, not a front end for a
+source-tree CLI. Its AppKit bundle contains the runtime, compatibility libraries, graphics
 backend, profile daemon, APK tools, framework resources, fonts, and ICU data.
 It installs unchanged APKs, launches and gracefully terminates applications,
 uninstalls code with an explicit keep/delete-data choice, opens private data,
@@ -59,8 +59,8 @@ open "_build/Darwin ART Manager.app"
 ```
 
 The build command above is a developer packaging step; the resulting `.app`
-can be moved and launched without Cargo, the repository, or an external Darwin
-ART installation. `DARWIN_ART_PROFILE` remains an internal testing override;
+can be moved and launched without Cargo, the repository, or an external AIM
+installation. `DARWIN_ART_PROFILE` remains an internal testing override;
 normal launches use the manager-owned default profile. Managed application
 output is appended to
 `~/Library/Application Support/DarwinART/profiles/<profile>/managed-apps.log`
@@ -74,10 +74,10 @@ under `~/Applications/Darwin ART Apps.localized`. Each `.app` carries the
 Android label, version, and APK icon, so Finder, Spotlight, and Launchpad can
 discover and launch it without opening the manager first. A shim contains only
 the profile/package identity and a small native launcher; all applications
-share the compatibility runtime embedded in Darwin ART Manager. Non-default
+share the compatibility runtime embedded in the AIM manager. Non-default
 profiles receive a profile suffix in the macOS app name. Refresh/install keeps
 these bundles synchronized, uninstall removes stale package shims, and profile
-deletion removes only bundles carrying Darwin ART's matching ownership marker.
+deletion removes only bundles carrying AIM's matching ownership marker.
 
 Physical-keyboard status and the remaining Android `.kl`/`.kcm` compatibility
 work are documented in
@@ -500,7 +500,7 @@ Its success lines are `ART Darwin Runtime::Create: ok`,
 `ART Darwin DEX interpreter: Hello.answer()=42`, followed by
 `ART Darwin JNI: hostPageSize()=16384 nativeRoundTrip()=42`, and
 `ART runtime native: System.arraycopy()=42`, the Java-emitted
-`Hello from Darwin ART main: 안녕`,
+`Hello from AIM main: 안녕`,
 `ART Android framework: ProbeActivity().probeValue()=42`,
 `ART Android window: Activity.attach()=PhoneWindow+DecorView`,
 `ART Android view: Activity.setContentView()->DecorView.draw(Canvas)=640x360`,

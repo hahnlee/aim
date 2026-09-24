@@ -5,7 +5,7 @@ task cannot: Darwin reserves x18 and XNU clears it when scheduling a thread
 unless the task opts into the custom-x18 ABI. XNU also provides a compatibility
 contract for Mach-O tasks whose declared SDK predates macOS 13.
 
-`declare-darwin-x18-abi.sh` applies that task ABI declaration to the Darwin ART
+`declare-darwin-x18-abi.sh` applies that task ABI declaration to the AIM
 host before it is signed. It does not modify an APK or any guest DSO. Every
 thread in the host process then preserves x18, covering guest-internal code as
 well as JNI and provider calls.

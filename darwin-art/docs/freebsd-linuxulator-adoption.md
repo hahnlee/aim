@@ -1,6 +1,6 @@
 # FreeBSD Linuxulator reference gate
 
-This repository carries a small, immutable FreeBSD Linuxulator reference slice as an independent oracle for the Darwin ART compatibility layer. It is not a plan to compile Linuxulator on macOS, and none of the vendored kernel code is linked into the runtime.
+This repository carries a small, immutable FreeBSD Linuxulator reference slice as an independent oracle for the AIM compatibility layer. It is not a plan to compile Linuxulator on macOS, and none of the vendored kernel code is linked into the runtime.
 
 ## Pin and gate
 
@@ -29,7 +29,7 @@ The Bionic differential currently compares 200 shared constants. Two differences
 
 ## Adoption boundary
 
-| Linuxulator material | Darwin ART use | Constraint |
+| Linuxulator material | AIM use | Constraint |
 | --- | --- | --- |
 | arm64 syscall number/name/status table | Generate dispatch coverage and unsupported-syscall reports | Bionic/Linux UAPI remains authoritative when FreeBSD support is absent or stale |
 | Linux errno numbers and symbolic conversion tables | Test Linux-facing errno values and design symbolic Darwin-to-Linux mappings | FreeBSD host errno numbers and lossy choices must not be copied as Darwin mappings |

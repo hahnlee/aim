@@ -1,4 +1,4 @@
-# Darwin ART profile daemon
+# AIM profile daemon
 
 `darwin-artd` is the per-profile owner of shared host state. Applications request
 resources and retain leases; the daemon owns mounts, install records and managed

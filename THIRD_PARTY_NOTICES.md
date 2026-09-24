@@ -1,6 +1,6 @@
 # Third-party notices
 
-Darwin ART acknowledges the following upstream work. The root Apache-2.0
+AIM acknowledges the following upstream work. The root Apache-2.0
 license applies only within the scope described in [LICENSING.md](LICENSING.md).
 Original copyright holders retain their rights. Full upstream notices must
 travel with any redistributed covered sources or binaries.
@@ -11,7 +11,7 @@ travel with any redistributed covered sources or binaries.
   and related ports use source revisions recorded in
   [`darwin-art/sources.lock`](darwin-art/sources.lock), `darwin-art/upstream/`,
   and provider `sources.lock` files. Patches retain the target file's terms;
-  AOSP is not uniformly Apache-2.0. Our patches are Darwin ART modifications,
+  AOSP is not uniformly Apache-2.0. Our patches are AIM modifications,
   not unmodified upstream releases. [Upstream](https://android.googlesource.com/).
 - **OpenJDK / Android libcore and ART OpenJDK providers.** Copyright notices
   include Oracle and/or its affiliates, the Android Open Source Project,

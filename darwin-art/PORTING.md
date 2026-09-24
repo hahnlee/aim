@@ -182,7 +182,7 @@
       and execute exports. The loader applies checked `R_AARCH64_RELATIVE`,
       `ABS64`, `GLOB_DAT`, and `JUMP_SLOT` relocations through a closed,
       GNU-version-aware resolver with no Darwin global-symbol fallback.
-- [ ] Generate both ARM64 PCS boundaries: Darwin ART calls into Android-ABI JNI
+- [ ] Generate both ARM64 PCS boundaries: AIM calls into Android-ABI JNI
       methods, and Android code calls a proxy `JNIEnv`/`JavaVM` table rather
       than the incompatible Mach-O function table directly.
 - [ ] Provide coherent virtual `libdl`, `liblog`, and Bionic `libc` facades for

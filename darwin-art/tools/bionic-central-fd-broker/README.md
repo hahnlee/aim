@@ -1,7 +1,7 @@
 # Bionic central descriptor broker
 
 This standalone gate specifies the one process-wide guest descriptor namespace
-that the Darwin ART Bionic providers must eventually share. It does not modify
+that the AIM Bionic providers must eventually share. It does not modify
 or integrate the current filesystem, stdio, socket, sendfile, or ioctl providers.
 
 Each published descriptor is a positive 31-bit token with a broker marker, a

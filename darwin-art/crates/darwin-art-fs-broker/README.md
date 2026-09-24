@@ -1,4 +1,4 @@
-# Darwin ART filesystem broker gate
+# AIM filesystem broker gate
 
 This standalone crate is the first read-only filesystem authorization gate for
 a previously selected mount. `ReadOnlyBroker` owns a directory file descriptor;

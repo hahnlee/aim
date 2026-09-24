@@ -4,7 +4,7 @@ This source-derived gate isolates the exception boundary that the basic libc++
 consumer intentionally leaves out.
 
 An ordinary NDK shared-library link makes a cleanup landing pad import
-`_Unwind_Resume@LIBC_R` from `libc.so`. Darwin ART's provider namespace is
+`_Unwind_Resume@LIBC_R` from `libc.so`. AIM's provider namespace is
 deliberately closed over the pinned libc++ `@LIBC` universe, so silently routing
 that request to Darwin's unwinder would be an ABI violation.
 

@@ -1,6 +1,6 @@
 # Build system
 
-Darwin ART uses two build engines behind one developer entry point:
+AIM uses two build engines behind one developer entry point:
 
 - Cargo owns all Rust code, dependency resolution, orchestration, and process
   lifetime code. Every Rust package is a member of the root workspace and uses

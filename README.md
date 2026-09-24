@@ -1,9 +1,9 @@
-# Darwin ART
+# AIM (Android Runtime for macOS)
 
-This repository contains a Darwin-native Android compatibility runtime. The
-active implementation lives in [`darwin-art`](darwin-art/README.md) and runs
-Android 16 ART, framework code, DEX, framework widgets, and bounded Android
-ARM64 native libraries directly on Apple Silicon without a Linux VM.
+AIM is a Darwin-native Android compatibility runtime. The active implementation
+lives in [`darwin-art`](darwin-art/README.md) and runs Android 16 ART, framework
+code, DEX, framework widgets, and bounded Android ARM64 native libraries
+directly on Apple Silicon without a Linux VM.
 
 ## Start here
 
@@ -25,7 +25,7 @@ boundaries.
 
 ## License
 
-Original Darwin ART code is licensed under [Apache-2.0](LICENSE).
+Original AIM code is licensed under [Apache-2.0](LICENSE).
 Third-party code and upstream-derived modifications retain their own licenses,
 including [OpenJDK's GPLv2 with the Classpath exception](licensing/OPENJDK.md).
 See [license scope](LICENSING.md), [NOTICE](NOTICE), and

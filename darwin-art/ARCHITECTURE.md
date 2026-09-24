@@ -2,7 +2,7 @@
 
 ## Product rule
 
-Darwin ART preserves every behavior that an Android application can observe and
+AIM preserves every behavior that an Android application can observe and
 uses macOS for the underlying mechanism. This is the same boundary Wine uses:
 guest ABI and namespace above, host kernel and devices below.
 
