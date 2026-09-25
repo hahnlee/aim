@@ -193,21 +193,9 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
             "dev/darwinart/probe/ProbeSharedPreferences$EditorImpl.class",
         ))
         .arg(baseline("dev/darwinart/probe/ProbePackageManager.class"))
-        .arg(baseline(
-            "dev/darwinart/runtime/pm/InstalledApplicationInfo.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/pm/InstalledManifestMetadata.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/pm/InstalledResourceValue.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/pm/InstalledActivityInfo.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/pm/InstalledPackageInfo.class",
-        ))
+        .arg(baseline("dev/darwinart/runtime/pm/InstalledPackageInfos.class"))
+        .arg(baseline("dev/darwinart/runtime/pm/InstalledPackageParser.class"))
+        .arg(baseline("dev/darwinart/runtime/pm/ServiceResolver.class"))
         .arg(baseline(
             "dev/darwinart/runtime/pm/InstalledPackageRecord.class",
         ))
@@ -443,12 +431,6 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
         .arg(button(
             "dev/darwinart/runtime/job/JobServiceContext$ServiceConnection.class",
         ))
-        .arg(baseline(
-            "dev/darwinart/runtime/pm/InstalledServiceInfo.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/pm/InstalledProviderInfo.class",
-        ))
         .arg(baseline("dev/darwinart/probe/ProbeResources.class"))
         .arg(baseline("dev/darwinart/probe/ProbeXmlResourceParser.class"))
         .arg(button("dev/darwinart/probe/FontBootstrap.class"))
@@ -551,15 +533,11 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
             "Ldev/darwinart/runtime/job/JobSchedulerEndpoint;",
             "Ldev/darwinart/runtime/job/JobSchedulerService;",
             "Ldev/darwinart/runtime/job/JobServiceContext;",
-            "Ldev/darwinart/runtime/pm/InstalledServiceInfo;",
-            "Ldev/darwinart/runtime/pm/InstalledProviderInfo;",
+            "Ldev/darwinart/runtime/pm/InstalledPackageInfos;",
+            "Ldev/darwinart/runtime/pm/InstalledPackageParser;",
+            "Ldev/darwinart/runtime/pm/ServiceResolver;",
             "Ldev/darwinart/probe/JitInvokeCustom;",
             "Ldev/darwinart/system/DarwinSystemServer;",
-            "Ldev/darwinart/runtime/pm/InstalledApplicationInfo;",
-            "Ldev/darwinart/runtime/pm/InstalledManifestMetadata;",
-            "Ldev/darwinart/runtime/pm/InstalledResourceValue;",
-            "Ldev/darwinart/runtime/pm/InstalledActivityInfo;",
-            "Ldev/darwinart/runtime/pm/InstalledPackageInfo;",
             "Ldev/darwinart/runtime/pm/InstalledPackageRecord;",
             "Ldev/darwinart/runtime/pm/PackageRecords;",
             "Ldev/darwinart/runtime/pm/PackageManagerEndpoint;",

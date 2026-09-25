@@ -9,13 +9,14 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * BatteryService: publishes the sticky ACTION_BATTERY_CHANGED from the host
- * power source and the power-connection and low-battery transitions.
+ * power source and the power-connection and low-battery transitions, and
+ * serves the same reading to the batteryproperties and batterystats binders.
  *
  * <p>A host without an internal battery (a desktop Mac) reports a
  * not-present, AC-powered battery at full level, so apps reading level/scale
  * see no low-battery condition.</p>
  */
-public final class BatteryService {
+public final class BatteryService implements BatteryHealth {
     // config_lowBatteryWarningLevel / config_lowBatteryCloseWarningBump defaults.
     static final int LOW_BATTERY_WARNING_LEVEL = 20;
     static final int LOW_BATTERY_CLOSE_WARNING_LEVEL = LOW_BATTERY_WARNING_LEVEL + 5;
@@ -83,6 +84,16 @@ public final class BatteryService {
 
     public void start() {
         poller.scheduleWithFixedDelay(this::update, 0, POLL_SECONDS, TimeUnit.SECONDS);
+    }
+
+    @Override
+    public synchronized Snapshot snapshot() {
+        return last == null ? null : new Snapshot(last.level * 100 / last.scale, last.status);
+    }
+
+    @Override
+    public void scheduleUpdate() {
+        poller.execute(this::update);
     }
 
     synchronized void update() {

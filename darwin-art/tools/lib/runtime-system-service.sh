@@ -18,6 +18,7 @@ darwin_art_start_runtime_system_service() (
   DARWIN_ART_RUNTIME_JAVA_DEBUGGABLE=0 \
   DARWIN_ART_DAEMONIZED_LOG="${profile_mount%/mnt}/darwin-artd.log" \
   DARWIN_ART_ANDROID_SHARED_STORAGE_ROOT="$profile_mount/storage" \
+  DARWIN_ART_ANDROID_PACKAGE_ROOT="$profile_mount/packages" \
   DARWIN_ART_FRAMEWORK_RES_APK="$framework_res" \
   DARWIN_ART_APK_APP_PACKAGE=android \
   DARWIN_ART_APK_APP_APPLICATION=android.app.Application \

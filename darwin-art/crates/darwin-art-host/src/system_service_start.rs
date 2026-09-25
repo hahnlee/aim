@@ -198,6 +198,7 @@ impl Inputs {
             "DARWIN_ART_ANDROID_PRIVATE_DATA_ROOT",
             "DARWIN_ART_APK_APP_DATA_DIR",
             "DARWIN_ART_ANDROID_SHARED_STORAGE_ROOT",
+            "DARWIN_ART_ANDROID_PACKAGE_ROOT",
             "ANDROID_DATA",
         ] {
             result
@@ -325,6 +326,7 @@ mod tests {
             ("DARWIN_ART_ANDROID_PRIVATE_DATA_ROOT", "/private"),
             ("DARWIN_ART_APK_APP_DATA_DIR", "/data"),
             ("DARWIN_ART_ANDROID_SHARED_STORAGE_ROOT", "/storage"),
+            ("DARWIN_ART_ANDROID_PACKAGE_ROOT", "/packages"),
         ]
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))
@@ -364,7 +366,11 @@ mod tests {
                 .files
                 .contains(&("android-unwind".into(), "/providers/unwind.so".into()))
         );
-        assert_eq!(inputs.directories.len(), 4);
+        assert_eq!(inputs.directories.len(), 5);
+        assert!(inputs.directories.contains(&(
+            "DARWIN_ART_ANDROID_PACKAGE_ROOT".into(),
+            "/packages".into()
+        )));
         assert!(Inputs::collect(&command(), &env, Path::new("/other-image")).is_err());
         env.iter_mut()
             .find(|(k, _)| k == "DARWIN_ART_APK_APP_SUPPORT_DEX")

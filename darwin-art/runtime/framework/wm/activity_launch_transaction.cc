@@ -223,7 +223,7 @@ bool ScheduleActivityLaunch(JNIEnv* env, jobject application_binder,
     return result;
   };
 
-  jclass mapper = env->FindClass("dev/darwinart/runtime/pm/InstalledActivityInfo");
+  jclass mapper = env->FindClass("dev/darwinart/runtime/pm/InstalledPackageInfos");
   jmethodID map = mapper == nullptr
                       ? nullptr
                       : env->GetStaticMethodID(

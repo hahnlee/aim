@@ -27,12 +27,8 @@ mkdir -p "$out/classes"
   "$root/runtime/framework/am/ServiceConnectionResourceController.java" \
   "$root/runtime/framework/am/ServiceLifecycleController.java" \
   "$root/runtime/framework/am/ServiceLifecycleOperation.java" \
-  "$root/runtime/framework/pm/PackageRecords.java" \
-  "$root/runtime/framework/pm/InstalledPackageRecord.java" \
-  "$root/runtime/framework/pm/InstalledManifestMetadata.java" \
-  "$root/runtime/framework/pm/InstalledResourceValue.java" \
-  "$root/runtime/framework/pm/InstalledApplicationInfo.java" \
-  "$root/runtime/framework/pm/InstalledServiceInfo.java" \
+  "$root/runtime/framework/pm/ServiceResolver.java" \
+  "$root/tools/tests/am/TestServices.java" \
   "$root/tools/tests/am/ActiveServicesProcessGoneTest.java" \
   "$root/tools/tests/am/ActiveServicesProcessLaunchTest.java" \
   "$root/tools/tests/am/ServiceConnectionDeathRegistrationTest.java" \

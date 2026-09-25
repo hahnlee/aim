@@ -14,6 +14,7 @@ mkdir -p "$out/classes"
   "$root/runtime/framework/am/BroadcastRegistry.java" \
   "$root/runtime/framework/am/SystemBroadcasts.java" \
   "$root/runtime/framework/power/BatteryStateProvider.java" \
+  "$root/runtime/framework/power/BatteryHealth.java" \
   "$root/runtime/framework/power/BatteryService.java" \
   "$root/tools/tests/broadcast/BroadcastRegistryTest.java" \
   "$root/tools/tests/broadcast/BatteryServiceTest.java"

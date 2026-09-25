@@ -10,7 +10,7 @@ import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.RemoteException;
 import dev.darwinart.runtime.am.ApplicationProcessRegistry;
-import dev.darwinart.runtime.pm.InstalledActivityInfo;
+import dev.darwinart.runtime.pm.InstalledPackageInfos;
 import dev.darwinart.runtime.pm.PackageRecords;
 import java.lang.reflect.Field;
 
@@ -100,8 +100,8 @@ public final class ActivityTaskManagerEndpoint extends Binder {
                 throw new SecurityException("Cross-package activity launch is not installed");
             }
             String record = packages.resolveInstalledPackage(attached.packageName);
-            ActivityInfo info = InstalledActivityInfo.activity(
-                    attached.packageName, record, component.getClassName());
+            ActivityInfo info = InstalledPackageInfos.activity(attached.packageName, record,
+                    component.getClassName(), InstalledPackageInfos.STOCK_PM_FLAGS);
             if (info == null) {
                 reply.writeNoException();
                 reply.writeInt(-92); // ActivityManager.START_CLASS_NOT_FOUND.

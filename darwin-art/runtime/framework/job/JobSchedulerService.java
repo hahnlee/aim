@@ -9,8 +9,7 @@ import dev.darwinart.runtime.am.SystemServiceBindings;
 import dev.darwinart.runtime.connectivity.ConnectivityProjection;
 import dev.darwinart.runtime.connectivity.ConnectivitySnapshot;
 import dev.darwinart.runtime.connectivity.ConnectivityState;
-import dev.darwinart.runtime.pm.InstalledServiceInfo;
-import dev.darwinart.runtime.pm.PackageRecords;
+import dev.darwinart.runtime.pm.ServiceResolver;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -48,7 +47,7 @@ public final class JobSchedulerService implements JobServiceContext.Listener {
         }
     }
 
-    private final PackageRecords.Source packages;
+    private final ServiceResolver services;
     private final ApplicationProcessRegistry processes;
     private final SystemServiceBindings bindings;
     private final ConnectivityState connectivity;
@@ -62,10 +61,10 @@ public final class JobSchedulerService implements JobServiceContext.Listener {
             });
     private long nextGeneration = 1;
 
-    public JobSchedulerService(PackageRecords.Source packageSource,
+    public JobSchedulerService(ServiceResolver serviceResolver,
             ApplicationProcessRegistry processRegistry, SystemServiceBindings serviceBindings,
             ConnectivityState connectivityState) {
-        packages = packageSource;
+        services = serviceResolver;
         processes = processRegistry;
         bindings = serviceBindings;
         connectivity = connectivityState;
@@ -206,8 +205,7 @@ public final class JobSchedulerService implements JobServiceContext.Listener {
         if (!caller.packageName.equals(job.getService().getPackageName())) {
             throw new SecurityException("JobInfo service package does not match its caller");
         }
-        ServiceInfo service = InstalledServiceInfo.service(caller.packageName,
-                packages.resolveInstalledPackage(caller.packageName), job.getService().getClassName());
+        ServiceInfo service = services.service(job.getService());
         if (service == null || service.applicationInfo == null || service.applicationInfo.uid != caller.uid
                 || !"android.permission.BIND_JOB_SERVICE".equals(service.permission)) {
             throw new SecurityException("JobInfo service is not an owned BIND_JOB_SERVICE service");

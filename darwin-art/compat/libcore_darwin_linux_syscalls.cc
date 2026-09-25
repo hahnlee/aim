@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <string>
 #include <unordered_set>
@@ -96,8 +97,21 @@ bool DarwinWhenceFromAndroid(int android_whence, int* darwin_whence) {
   }
 }
 
+// errno in this file is a Darwin value (host calls set it, and ThrowErrno
+// translates Darwin to Android). Providers report Android errno values, so
+// publish the Darwin value that ThrowErrno maps back to the same Android one.
 void PublishAndroidErrno() {
-  errno = g_providers.load_errno == nullptr ? EIO : g_providers.load_errno();
+  const int android_error =
+      g_providers.load_errno == nullptr ? 0 : g_providers.load_errno();
+  for (int darwin_error = 1; darwin_error < 256; ++darwin_error) {
+    int mapped = 0;
+    if (os_constants::AndroidErrnoFromDarwin(darwin_error, &mapped) &&
+        mapped == android_error) {
+      errno = darwin_error;
+      return;
+    }
+  }
+  errno = EIO;
 }
 
 int AdoptHostFd(int host_fd) {
@@ -522,8 +536,35 @@ int Rename(const char* old_path, const char* new_path) {
   return rename(old_path, new_path);
 }
 
+namespace {
+// Mappings made through the Bionic VM owner, which must also unmap them.
+std::mutex g_provider_mappings_mutex;
+std::map<uintptr_t, size_t> g_provider_mappings;
+}  // namespace
+
 void* Mmap(void* address, size_t byte_count, int linux_prot,
            int linux_flags, int fd, off_t offset) {
+  // A descriptor that is not a host fd is a guest descriptor (for example a
+  // central-broker token for a file opened through the guest filesystem).
+  // Only the Bionic VM owner can resolve and map it; it takes Linux flags.
+  if (fd >= 0 && g_providers.mmap != nullptr && fcntl(fd, F_GETFD) == -1 &&
+      errno == EBADF) {
+    // Linux MAP_POPULATE only prefaults; apply it as the host path does.
+    constexpr int kLinuxMapPopulate = 0x8000;
+    void* mapped = g_providers.mmap(address, byte_count, linux_prot,
+                                    linux_flags & ~kLinuxMapPopulate, fd,
+                                    static_cast<int64_t>(offset));
+    if (mapped == MAP_FAILED) {
+      PublishAndroidErrno();
+      return MAP_FAILED;
+    }
+    if ((linux_flags & kLinuxMapPopulate) != 0) {
+      (void)madvise(mapped, byte_count, MADV_WILLNEED);
+    }
+    std::lock_guard<std::mutex> lock(g_provider_mappings_mutex);
+    g_provider_mappings[reinterpret_cast<uintptr_t>(mapped)] = byte_count;
+    return mapped;
+  }
   const int flags = TranslateMmapFlags(linux_flags);
   if (flags == -1) {
     return MAP_FAILED;
@@ -538,6 +579,20 @@ void* Mmap(void* address, size_t byte_count, int linux_prot,
 }
 
 int Munmap(void* address, size_t byte_count) {
+  bool provider_owned = false;
+  {
+    std::lock_guard<std::mutex> lock(g_provider_mappings_mutex);
+    auto found = g_provider_mappings.find(reinterpret_cast<uintptr_t>(address));
+    if (found != g_provider_mappings.end() && found->second == byte_count) {
+      g_provider_mappings.erase(found);
+      provider_owned = true;
+    }
+  }
+  if (provider_owned && g_providers.munmap != nullptr) {
+    const int result = g_providers.munmap(address, byte_count);
+    if (result == -1) PublishAndroidErrno();
+    return result;
+  }
   return munmap(address, byte_count);
 }
 

@@ -30,6 +30,8 @@ does not make the service's boot, state, permission and Binder dependencies work
 | `device_policy` | `admin.DevicePolicyManagerEndpoint` | AOSP DevicePolicyManagerService. |
 | `power` | `power.PowerManagerEndpoint` | AOSP PowerManagerService; retain `DarwinPowerStateProvider` as host facts. |
 | `thermalservice` | `power.ThermalServiceEndpoint` | AOSP ThermalManagerService; host thermal observations remain provider data. |
+| `batteryproperties` | `power.BatteryPropertiesRegistrarEndpoint` | AOSP BatteryService over an IHealth HAL provider backed by IOPowerSources. |
+| `batterystats` | `power.BatteryStatsEndpoint` | AOSP BatteryStatsService; charging state only, no history. |
 | `restrictions` | `restrictions.RestrictionsManagerEndpoint` | AOSP RestrictionsManagerService. |
 | `trust` | `trust.TrustManagerEndpoint` | AOSP TrustManagerService and auth/trust policy. |
 | `uimode` | `uimode.UiModeManagerEndpoint` | AOSP UiModeManagerService, configuration propagation. |

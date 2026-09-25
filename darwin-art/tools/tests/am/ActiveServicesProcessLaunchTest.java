@@ -10,7 +10,7 @@ import android.os.Binder;
 import android.os.DeadObjectException;
 import android.os.IBinder;
 import android.os.RemoteException;
-import dev.darwinart.runtime.pm.PackageRecords;
+import dev.darwinart.runtime.pm.ServiceResolver;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -27,12 +27,6 @@ public final class ActiveServicesProcessLaunchTest {
     private static final Intent INTENT_B = new Intent()
             .setComponent(new ComponentName(PACKAGE, SERVICE_B));
     private static final int UID = 10042;
-    private static final String RECORD = "darwin-art-launch-v1\n"
-            + "apk=/packages/example/base.apk\n"
-            + "app_id=10042\n"
-            + "metadata=apk-app-runtime: package=example application=example.App "
-            + "services=example.FirstService>example:shared>0>none>0>1,"
-            + "example.SecondService>example:shared>0>none>0>1\n";
 
     private interface CreateCallback {
         void run(IBinder token) throws RemoteException;
@@ -182,8 +176,9 @@ public final class ActiveServicesProcessLaunchTest {
             processes.beginAttachment(42, UID, client, 1);
             processes.identify(42, 1, client, PACKAGE);
             processes.finishAttachment(42, 1);
-            PackageRecords.Source packages = packageName -> PACKAGE.equals(packageName)
-                    ? RECORD : null;
+            ServiceResolver packages = TestServices.resolver(PACKAGE, UID,
+                    "example.FirstService", "example:shared",
+                    "example.SecondService", "example:shared");
             backend.registry = processes;
             launcher = new BoundServiceProcessLauncher(processes, backend);
             active = new ActiveServices(packages, processes, launcher);

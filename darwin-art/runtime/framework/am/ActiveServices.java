@@ -8,8 +8,7 @@ import android.content.pm.ServiceInfo;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.RemoteException;
-import dev.darwinart.runtime.pm.InstalledServiceInfo;
-import dev.darwinart.runtime.pm.PackageRecords;
+import dev.darwinart.runtime.pm.ServiceResolver;
 import java.util.ArrayList;
 import java.util.HashMap;
 
@@ -18,7 +17,7 @@ public final class ActiveServices implements SystemServiceBindings {
     private static final int FIRST_ISOLATED_UID = 99000;
     private static final int LAST_ISOLATED_UID = 99999;
 
-    private final PackageRecords.Source packages;
+    private final ServiceResolver serviceResolver;
     private final ApplicationProcessRegistry processes;
     private final ServiceProcessLaunchController processLaunches;
     private final HashMap<String, ServiceRecord> services = new HashMap<>();
@@ -42,9 +41,9 @@ public final class ActiveServices implements SystemServiceBindings {
     private long nextSequence = 1;
     private int nextIsolatedUid = FIRST_ISOLATED_UID;
 
-    ActiveServices(PackageRecords.Source packageSource, ApplicationProcessRegistry processRegistry,
+    ActiveServices(ServiceResolver serviceResolver, ApplicationProcessRegistry processRegistry,
             ProcessLaunchTransport processLauncher) {
-        packages = packageSource;
+        this.serviceResolver = serviceResolver;
         processes = processRegistry;
         processLaunches = new ServiceProcessLaunchController(this,
                 new ServiceProcessLaunchController.StatePort() {
@@ -860,9 +859,7 @@ public final class ActiveServices implements SystemServiceBindings {
     /** Resolves the manifest service and returns its live record, creating it on demand. */
     private ServiceRecord retrieveServiceLocked(ComponentName component, String instanceName,
             int callingUid) {
-        String packageName = component.getPackageName();
-        ServiceInfo info = InstalledServiceInfo.service(packageName,
-                packages.resolveInstalledPackage(packageName), component.getClassName());
+        ServiceInfo info = serviceResolver.service(component);
         if (info == null || !info.enabled || info.applicationInfo == null) return null;
         if (!info.exported && callingUid != android.os.Process.SYSTEM_UID
                 && callingUid != info.applicationInfo.uid) {
@@ -879,7 +876,9 @@ public final class ActiveServices implements SystemServiceBindings {
         ServiceRecord service = services.get(key);
         if (service == null) {
             String processName = info.processName;
-            if (processName == null || processName.isEmpty()) processName = packageName;
+            if (processName == null || processName.isEmpty()) {
+                processName = component.getPackageName();
+            }
             if (isolated) processName = processName + ":" + instanceName;
             int uid = isolated ? allocateIsolatedUid() : info.applicationInfo.uid;
             service = new ServiceRecord(component, instanceName, processName, uid, isolated, info);

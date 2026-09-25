@@ -31,6 +31,7 @@ impl Fixture {
             b"/",
             Some(&private),
             Some(&storage),
+            None,
         )
         .unwrap();
         let guest = namespace.guest_root.as_ref().unwrap();
@@ -108,6 +109,7 @@ fn shared_mount_requires_complete_namespace_and_retains_cwd_authority() {
             b"/system",
             None,
             Some(&storage),
+            None,
         )
         .is_err()
     );
@@ -117,6 +119,7 @@ fn shared_mount_requires_complete_namespace_and_retains_cwd_authority() {
         b"/storage",
         None,
         Some(&storage),
+        None,
     )
     .unwrap();
     assert_eq!(namespace.cwd.snapshot().unwrap(), b"/storage");

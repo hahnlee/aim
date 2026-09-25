@@ -12,7 +12,12 @@ pub(super) struct FilesystemNamespace {
     pub broker: ReadOnlyBroker,
     pub guest_root: Option<Arc<GuestRoot>>,
     pub cwd: WorkingDirectory,
+    /// Installed package code is mounted read-only at `/data/app` (mount 4).
+    pub packages: bool,
 }
+
+/// Guest prefix of installed package code, as under Android's `/data/app`.
+pub(super) const PACKAGE_PREFIX: &[u8] = b"/data/app";
 
 impl FilesystemNamespace {
     #[cfg(test)]
@@ -22,7 +27,7 @@ impl FilesystemNamespace {
         cwd: &[u8],
         private: Option<&PrivateDataRoot>,
     ) -> Result<Self, &'static str> {
-        Self::with_storage(root, guest_mount, cwd, private, None)
+        Self::with_storage(root, guest_mount, cwd, private, None, None)
     }
 
     pub fn with_storage(
@@ -31,9 +36,13 @@ impl FilesystemNamespace {
         cwd: &[u8],
         private: Option<&PrivateDataRoot>,
         storage: Option<&super::writable_mount::WritableMount>,
+        packages: Option<&File>,
     ) -> Result<Self, &'static str> {
         if storage.is_some() && guest_mount != b"/" {
             return Err("shared storage requires a complete guest namespace");
+        }
+        if packages.is_some() && guest_mount != b"/" {
+            return Err("installed packages require a complete guest namespace");
         }
         let mut prefix = MountTable::new();
         prefix
@@ -49,6 +58,11 @@ impl FilesystemNamespace {
             prefix
                 .add_mount(3, MountKind::Shared, true, storage.guest_prefix())
                 .map_err(|_| "invalid shared storage mount")?;
+        }
+        if packages.is_some() {
+            prefix
+                .add_mount(4, MountKind::Immutable, false, PACKAGE_PREFIX)
+                .map_err(|_| "invalid installed package mount")?;
         }
         prefix.seal().map_err(|_| "could not seal guest mount")?;
         if !cwd.starts_with(b"/") || cwd.contains(&0) {
@@ -75,6 +89,16 @@ impl FilesystemNamespace {
                         .map_err(|_| "could not duplicate data root")?,
                 )
                 .map_err(|_| "could not mount data root")?;
+        }
+        if let (Some(guest), Some(packages)) = (&mut guest_root, packages) {
+            guest
+                .mount_directory(
+                    PACKAGE_PREFIX,
+                    packages
+                        .try_clone()
+                        .map_err(|_| "could not duplicate package root")?,
+                )
+                .map_err(|_| "could not mount installed packages")?;
         }
         let broker = ReadOnlyBroker::from_directory(root).map_err(|_| "invalid mount root")?;
         if let (Some(guest), Some(storage)) = (&mut guest_root, storage) {
@@ -126,6 +150,7 @@ impl FilesystemNamespace {
             broker,
             guest_root,
             cwd,
+            packages: packages.is_some(),
         })
     }
 }

@@ -10,7 +10,7 @@ import android.content.res.CompatibilityInfo;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.RemoteException;
-import dev.darwinart.runtime.pm.PackageRecords;
+import dev.darwinart.runtime.pm.ServiceResolver;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -24,11 +24,6 @@ public final class ActiveServicesStartedServiceTest {
     private static final int UID = 10042;
     private static final ComponentName COMPONENT = new ComponentName(PACKAGE, "example.Download");
     private static final Intent INTENT = new Intent().setComponent(COMPONENT);
-    private static final String RECORD = "darwin-art-launch-v1\n"
-            + "apk=/packages/example/base.apk\n"
-            + "app_id=10042\n"
-            + "metadata=apk-app-runtime: package=example application=example.App "
-            + "services=example.Download>example>0>none>0>1\n";
 
     private static final class AppThread extends Binder implements IApplicationThread {
         final List<String> calls = new ArrayList<>();
@@ -83,7 +78,8 @@ public final class ActiveServicesStartedServiceTest {
             processes.beginAttachment(41, UID, app, 1);
             processes.identify(41, 1, app, PACKAGE);
             attached = processes.finishAttachment(41, 1);
-            PackageRecords.Source packages = name -> PACKAGE.equals(name) ? RECORD : null;
+            ServiceResolver packages = TestServices.resolver(PACKAGE, UID,
+                    "example.Download", PACKAGE);
             active = new ActiveServices(packages, processes, launches);
         }
 

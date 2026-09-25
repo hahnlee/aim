@@ -12,6 +12,7 @@ use std::marker::PhantomData;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::FileExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::ptr;
@@ -469,12 +470,25 @@ impl Facade {
             .map(PathBuf::from)
             .map(|path| writable_mount::WritableMount::open(path, b"/storage"))
             .transpose()?;
+        // Installed package code (the profile's package store), read-only at
+        // /data/app as Android's PackageManagerService and apps see it.
+        let package_root = std::env::var_os("DARWIN_ART_ANDROID_PACKAGE_ROOT")
+            .filter(|value| !value.is_empty())
+            .map(|path| {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(PathBuf::from(path))
+                    .map_err(|_| "invalid installed package root")
+            })
+            .transpose()?;
         let namespace = filesystem_namespace::FilesystemNamespace::with_storage(
             root,
             guest_mount,
             cwd,
             private_root.as_ref(),
             storage_root.as_ref(),
+            package_root.as_ref(),
         )?;
         if let (Some(private), Some(guest)) = (&mut private_root, &namespace.guest_root) {
             private
@@ -556,7 +570,10 @@ impl Facade {
                     || (resolution.mount_id == 2 && resolution.writable)
                     || (resolution.mount_id == 3
                         && resolution.writable
-                        && self.storage_root.is_some()) =>
+                        && self.storage_root.is_some())
+                    || (resolution.mount_id == 4
+                        && !resolution.writable
+                        && self.namespace.packages) =>
             {
                 Ok(resolution)
             }

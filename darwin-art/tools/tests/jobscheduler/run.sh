@@ -69,11 +69,7 @@ mkdir -p "$out/service-classes"
   "$root/runtime/framework/am/SystemServiceBindings.java" \
   "$root/runtime/framework/connectivity/ConnectivityState.java" \
   "$root/runtime/framework/connectivity/ConnectivitySnapshot.java" \
-  "$root/runtime/framework/pm/InstalledPackageRecord.java" \
-  "$root/runtime/framework/pm/PackageRecords.java" \
-  "$root/runtime/framework/pm/InstalledManifestMetadata.java" \
-  "$root/runtime/framework/pm/InstalledApplicationInfo.java" \
-  "$root/runtime/framework/pm/InstalledServiceInfo.java" \
+  "$root/runtime/framework/pm/ServiceResolver.java" \
   "$root/runtime/framework/job/JobRecord.java" \
   "$root/runtime/framework/job/JobServiceContext.java" \
   "$root/runtime/framework/job/JobSchedulerService.java" \

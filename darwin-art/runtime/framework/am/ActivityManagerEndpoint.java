@@ -12,7 +12,7 @@ import android.content.Intent;
 import android.util.Log;
 import android.content.pm.ActivityInfo;
 import dev.darwinart.runtime.content.SettingsProviderEndpoint;
-import dev.darwinart.runtime.pm.InstalledActivityInfo;
+import dev.darwinart.runtime.pm.InstalledPackageInfos;
 import dev.darwinart.runtime.pm.PackageRecords;
 import java.lang.reflect.Field;
 
@@ -62,7 +62,8 @@ public final class ActivityManagerEndpoint extends Binder {
         this.processes = processes;
         this.tasks = tasks;
         processLauncher = new BoundServiceProcessLauncher(processes);
-        activeServices = new ActiveServices(packages, processes, processLauncher);
+        activeServices = new ActiveServices(InstalledPackageInfos.serviceResolver(packages),
+                processes, processLauncher);
         broadcasts = new BroadcastTransactions(processes);
         attachInterface(null, "android.app.IActivityManager");
     }
@@ -328,7 +329,7 @@ public final class ActivityManagerEndpoint extends Binder {
                 // task orientation, so resolve the task before binding.
                 ActivityInfo launchActivity = target.initialWork
                         == ApplicationProcessRegistry.InitialWork.ACTIVITY
-                        ? InstalledActivityInfo.launchActivity(trustedPackage,
+                        ? InstalledPackageInfos.launchActivity(trustedPackage,
                                 packages.resolveInstalledPackage(trustedPackage))
                         : null;
                 tasks.prepareProcess(pid, app, launchActivity);

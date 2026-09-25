@@ -10,7 +10,7 @@ import android.os.Binder;
 import android.os.DeadObjectException;
 import android.os.IBinder;
 import android.os.RemoteException;
-import dev.darwinart.runtime.pm.PackageRecords;
+import dev.darwinart.runtime.pm.ServiceResolver;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.HashMap;
@@ -25,11 +25,6 @@ public final class ActiveServicesProcessGoneTest {
     private static final String SERVICE = "example.Service";
     private static final Intent SERVICE_INTENT = new Intent()
             .setComponent(new ComponentName(PACKAGE, SERVICE));
-    private static final String RECORD = "darwin-art-launch-v1\n"
-            + "apk=/packages/example/base.apk\n"
-            + "app_id=10042\n"
-            + "metadata=apk-app-runtime: package=example application=example.App "
-            + "services=example.Service>example:client\n";
 
     /** Controlled phased transport used only to exercise ActiveServices policy. */
     private static final class LaunchTransport implements ProcessLaunchTransport {
@@ -265,8 +260,8 @@ public final class ActiveServicesProcessGoneTest {
             processes.beginAttachment(41, 10042, owner, 1);
             processes.identify(41, 1, owner, PACKAGE);
             attached = processes.finishAttachment(41, 1);
-            PackageRecords.Source packages = packageName -> PACKAGE.equals(packageName)
-                    ? RECORD : null;
+            ServiceResolver packages = TestServices.resolver(PACKAGE, 10042,
+                    "example.Service", "example:client");
             transport = new LaunchTransport(() -> launches++);
             active = new ActiveServices(packages, processes, transport);
             transport.activeMonitor = active;

@@ -3,22 +3,24 @@ package dev.darwinart.runtime.pm;
 import java.util.ArrayList;
 import java.util.HashSet;
 
-/** Immutable installation transport data, not parsed manifest or permission policy. */
+/**
+ * Immutable install-ledger state of one package (code paths, app id, native
+ * directory): what PackageManagerService keeps in its PackageSetting. The
+ * manifest itself is parsed by AOSP ({@link InstalledPackageParser}).
+ */
 public final class InstalledPackageRecord {
     public final String packageName;
     public final String baseApk;
     public final int appId;
     private final String[] splits;
-    private final String metadata;
     private final String nativeLibraryDirectory;
 
     private InstalledPackageRecord(String name, String apk, int uid,
-            ArrayList<String> splitPaths, String hints, String nativeDirectory) {
+            ArrayList<String> splitPaths, String nativeDirectory) {
         packageName = name;
         baseApk = apk;
         appId = uid;
         splits = splitPaths.toArray(new String[0]);
-        metadata = hints;
         nativeLibraryDirectory = nativeDirectory;
     }
 
@@ -35,7 +37,6 @@ public final class InstalledPackageRecord {
         }
         String apk = null;
         String uid = null;
-        String hints = null;
         String nativeDirectory = null;
         ArrayList<String> splitPaths = new ArrayList<>();
         HashSet<String> seen = new HashSet<>();
@@ -48,12 +49,11 @@ public final class InstalledPackageRecord {
                 requireAbsolutePath(value);
                 if (!splitPaths.contains(value)) splitPaths.add(value);
                 else throw new IllegalArgumentException("Duplicate installed split");
-            } else if (key.equals("apk") || key.equals("app_id") || key.equals("metadata")
+            } else if (key.equals("apk") || key.equals("app_id")
                     || key.equals("native_library_dir")) {
                 if (!seen.add(key)) throw new IllegalArgumentException("Duplicate installed field: " + key);
                 if (key.equals("apk")) apk = value;
                 if (key.equals("app_id")) uid = value;
-                if (key.equals("metadata")) hints = value;
                 if (key.equals("native_library_dir")) nativeDirectory = value;
             }
         }
@@ -66,13 +66,7 @@ public final class InstalledPackageRecord {
         if (uid != null && (appId < 10000 || appId > 19999)) {
             throw new IllegalArgumentException("App ID is outside the installed registry range");
         }
-        InstalledPackageRecord result =
-                new InstalledPackageRecord(name, apk, appId, splitPaths, hints, nativeDirectory);
-        String declared = result.legacyManifestHint("package");
-        if (declared != null && !name.equals(declared)) {
-            throw new IllegalArgumentException("Package record identity mismatch");
-        }
-        return result;
+        return new InstalledPackageRecord(name, apk, appId, splitPaths, nativeDirectory);
     }
 
     private static void requireAbsolutePath(String path) {
@@ -82,6 +76,33 @@ public final class InstalledPackageRecord {
     }
 
     public String[] splitPaths() { return splits.clone(); }
+
+    // Guest mount of the profile package store (bionic fs facade mount 4).
+    private static final String GUEST_PACKAGE_ROOT = "/data/app";
+
+    /**
+     * The ledger records installed code at its host location. System
+     * processes read the same files through the read-only /data/app mount;
+     * returns null when this process has no such mount.
+     */
+    static String guestCodePath(String hostPath) {
+        String root = System.getenv("DARWIN_ART_ANDROID_PACKAGE_ROOT");
+        if (root == null || root.isEmpty() || hostPath == null) return null;
+        String prefix = root.endsWith("/") ? root : root + "/";
+        if (!hostPath.startsWith(prefix)) return null;
+        return GUEST_PACKAGE_ROOT + "/" + hostPath.substring(prefix.length());
+    }
+
+    /** Inverse of {@link #guestCodePath}; paths outside /data/app are returned unchanged. */
+    static String hostCodePath(String path) {
+        String root = System.getenv("DARWIN_ART_ANDROID_PACKAGE_ROOT");
+        if (root == null || root.isEmpty() || path == null
+                || !path.startsWith(GUEST_PACKAGE_ROOT + "/")) {
+            return path;
+        }
+        String prefix = root.endsWith("/") ? root : root + "/";
+        return prefix + path.substring(GUEST_PACKAGE_ROOT.length() + 1);
+    }
 
     public boolean ownsPrimaryCodePath(String path) {
         if (baseApk.equals(path)) return true;
@@ -101,28 +122,5 @@ public final class InstalledPackageRecord {
         if (nativeLibraryDirectory != null) return nativeLibraryDirectory;
         int separator = baseApk.lastIndexOf('/');
         return baseApk.substring(0, separator) + "/android-elf/arm64-v8a";
-    }
-
-    /** True only when the installed Binary AndroidManifest declared the permission. */
-    public boolean declaresPermission(String permission) {
-        if (permission == null || permission.isEmpty()) return false;
-        String declared = legacyManifestHint("permissions");
-        if (declared == null || declared.equals("none")) return false;
-        for (String name : declared.split(",")) {
-            if (permission.equals(name)) return true;
-        }
-        return false;
-    }
-
-    /** Migration-only launcher hints. Not a substitute for AOSP manifest parsing. */
-    String legacyManifestHint(String key) {
-        String result = null;
-        if (metadata == null) return null;
-        for (String token : metadata.split(" ")) {
-            if (!token.startsWith(key + "=")) continue;
-            if (result != null) throw new IllegalArgumentException("Duplicate manifest hint: " + key);
-            result = token.substring(key.length() + 1);
-        }
-        return result;
     }
 }

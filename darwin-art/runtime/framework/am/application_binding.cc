@@ -1,13 +1,14 @@
 #include "application_binding.h"
 #include "../display/configuration.h"
-#include "../pm/declared_providers.h"
 #include "../system/application_shared_memory.h"
 #include "../compat/policy_binding.h"
 namespace darwin_art::framework::am {
 bool DispatchApplicationBinding(JNIEnv* env, jobject endpoint, jobject info,
-    jobject resources, jstring process_name, const char* encoded) {
+    jobject resources, jstring process_name, jobject providers) {
   if (env->ExceptionCheck() || endpoint == nullptr || info == nullptr ||
-      resources == nullptr || env->PushLocalFrame(64) < 0) return false;
+      resources == nullptr || providers == nullptr || env->PushLocalFrame(64) < 0) {
+    return false;
+  }
   auto fail = [&]() { env->PopLocalFrame(nullptr); return false; };
   jclass resource_type = env->GetObjectClass(resources);
   jmethodID configuration = env->GetMethodID(resource_type, "getConfiguration",
@@ -22,9 +23,6 @@ bool DispatchApplicationBinding(JNIEnv* env, jobject endpoint, jobject info,
       compat_type, "DEFAULT_COMPATIBILITY_INFO", "Landroid/content/res/CompatibilityInfo;");
   if (default_compat == nullptr) return fail();
   jobject compatibility_info = env->GetStaticObjectField(compat_type, default_compat);
-  jobject providers = pm::DeclaredProviders(env, info,
-      encoded);
-  if (providers == nullptr || env->ExceptionCheck()) return fail();
   jclass list_type = env->FindClass("android/content/pm/ProviderInfoList");
   if (list_type == nullptr) return fail();
   jmethodID list_ctor = env->GetMethodID(list_type, "<init>", "(Ljava/util/List;)V");

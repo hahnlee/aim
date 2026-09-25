@@ -10,10 +10,12 @@ Chromium `example.com` rendering with physical input, navigation/reload, Retina
 output and Graphite/Dawn → Vulkan → MoltenVK → Metal. GL, direct Dawn Metal,
 disabled GPU/Graphite and CPU fallback do not satisfy acceptance.
 
-**Next work item: boot AOSP PackageManagerService (#30).** Start with AOSP
-package parsing (`ParsingPackageUtils`/`PackageInfoUtils`) feeding the package
-endpoint, then the PMS boot closure, and retire the `Installed*Info`
-projection. It is the root cause of #1, #2, #3, #24, #31 and #33.
+**Next work item: boot AOSP PackageManagerService (#30).** Stage 1 is done:
+the package endpoint, AMS/JobScheduler service lookup, activity launch and
+bindApplication (ApplicationInfo and providers) use AOSP `PackageParser2` and
+`PackageInfoCommonUtils`, and the `Installed*Info` projection is gone. Next is
+the PMS boot closure (Settings, parse cache, permissions), which is the root
+cause of #1, #2, #3, #24, #31 and #33.
 
 Android-owned orientation/resize (ADR 0008) and Blue Archive's native startup
 fault are fixed; see the verified state below. The service inventory and AOSP
@@ -66,7 +68,7 @@ Open failures are GitHub issues; the ones blocking the current goal:
 
 ## Next work
 
-0. Boot AOSP PackageManagerService, parsing first (#30).
+0. Boot AOSP PackageManagerService on the AOSP parser (#30).
 1. Add Activity stop/visibility transitions and popup `ACTION_OUTSIDE` (#16, #17).
 2. Let density follow the host backing scale through the same revision path (#27).
 3. Run locale/label checks, then extend Chromium focus/tab/soak coverage (#19, #22).
@@ -109,16 +111,19 @@ cargo test --workspace
 - **JNI unwind publication:** the NativeBridge thunk trusted `x28` as the managed
   SP, which holds only under generic JNI; JIT-compiled JNI stubs faulted the
   registry push on download threads. Push validates the SP; pop is keyed.
-- **Logging/libandroid:** host liblog keeps Android's default-priority fallback
-  (Log.d/v visible); libbinder builds with Soong's `-DNDEBUG` (its debug
-  remote-ref paths faulted); libandroid exports socket tagging (`net.c`).
 - **System services:** AMS receiver registration, sticky redelivery and
   unordered broadcasts (`BroadcastRegistry`), `BatteryService` sticky
   `BATTERY_CHANGED` from IOPowerSources, `getMemoryInfo` over ProcessList
   levels, `getProcessesInErrorState`; NMS posts/cancels notifications and
   keeps per-app channels (unknown channel is dropped as in NMS).
-- **Build/daemon parity:** Soong's `-DNDEBUG -UDEBUG` on the shared
-  frameworks/native, ziparchive, androidfw, liblog/libutils and nativehelper
-  builds (log volume ~20× lower); symbol pins sort in the C locale; absent
-  weak platform imports are reported; SCM capability/lease tombstones retire
-  the oldest unreferenced death instead of sealing after 256 process exits.
+- **Build/logging parity:** Soong's `-DNDEBUG -UDEBUG` on the shared native
+  builds; host liblog keeps Android's default-priority fallback; SCM
+  tombstones retire the oldest unreferenced death instead of sealing.
+- **AOSP package parsing (#30 stage 1):** the system process reads installed
+  APKs through a read-only `/data/app` mount and parses them with
+  `PackageParser2` (v3 signatures, splits); caller query flags are honored and
+  bind uses `STOCK_PM_FLAGS` as AMS does. libcore `mmap` of guest fds goes
+  through the Bionic VM facade with Android errno. `batteryproperties` and
+  `batterystats` are published (Chromium crashed on a null `BatteryManager`,
+  #39). All eight installed APKs launch; core-apps and geometry acceptance
+  and `cargo test --workspace` pass.

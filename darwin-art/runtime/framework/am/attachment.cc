@@ -5,7 +5,6 @@
 #include "../wm/activity_launch_transaction.h"
 #include <cstdlib>
 #include <iostream>
-#include <string>
 #include <sys/types.h>
 
 // This runtime unit links the original libbinder object code but intentionally
@@ -48,11 +47,17 @@ bool ResolveApplication(JNIEnv* env, jint expected_uid, jstring* package,
   *package = env->NewStringUTF(registered.package);
   *record = *package == nullptr ? nullptr : resolve_package(env, nullptr, *package);
   if (*record == nullptr || env->ExceptionCheck()) return false;
-  jclass mapper = env->FindClass("dev/darwinart/runtime/pm/InstalledApplicationInfo");
-  jmethodID map = mapper == nullptr ? nullptr : env->GetStaticMethodID(mapper, "fromRecord",
-      "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/pm/ApplicationInfo;");
+  // ActivityManagerService binds with the ApplicationInfo that
+  // ActivityTaskSupervisor.resolveIntent generated under STOCK_PM_FLAGS
+  // (GET_SHARED_LIBRARY_FILES), so metaData is absent; apps request it with
+  // PackageManager.getApplicationInfo(..., GET_META_DATA).
+  constexpr jlong kStockPmFlags = 0x400;
+  jclass mapper = env->FindClass("dev/darwinart/runtime/pm/InstalledPackageInfos");
+  jmethodID map = mapper == nullptr ? nullptr : env->GetStaticMethodID(mapper, "applicationInfo",
+      "(Ljava/lang/String;Ljava/lang/String;J)Landroid/content/pm/ApplicationInfo;");
   *info = map == nullptr ? nullptr
-                        : env->CallStaticObjectMethod(mapper, map, *package, *record);
+                        : env->CallStaticObjectMethod(mapper, map, *package, *record,
+                                                      kStockPmFlags);
   if (*info == nullptr || env->ExceptionCheck()) return false;
   jclass info_type = env->GetObjectClass(*info);
   jfieldID uid = env->GetFieldID(info_type, "uid", "I");
@@ -86,16 +91,6 @@ jstring Attach(JNIEnv* env, jclass, jobject application, jlong,
     jobject info = nullptr;
     if (!ResolveApplication(env, expected_uid, &package, &record, &info)) return false;
     attached_package = package;
-    const char* text = env->GetStringUTFChars(record, nullptr);
-    if (text == nullptr) return false;
-    std::string metadata(text);
-    env->ReleaseStringUTFChars(record, text);
-    std::string providers = "none";
-    const auto position = metadata.find(" providers=");
-    if (position != std::string::npos) {
-      const auto start = position + 11;
-      providers = metadata.substr(start, metadata.find_first_of(" \n", start) - start);
-    }
     jclass stub = env->FindClass("android/app/IApplicationThread$Stub");
     jmethodID as_interface = stub == nullptr ? nullptr : env->GetStaticMethodID(stub,
         "asInterface", "(Landroid/os/IBinder;)Landroid/app/IApplicationThread;");
@@ -108,8 +103,17 @@ jstring Attach(JNIEnv* env, jclass, jobject application, jlong,
     if (endpoint == nullptr || resources == nullptr || env->ExceptionCheck()) return false;
     jstring process_name = reserved_process_name == nullptr ? package
                                                             : reserved_process_name;
+    // ContentProviderHelper.generateApplicationProvidersLocked: the
+    // providers declared for this process, from the parsed package.
+    jclass infos = env->FindClass("dev/darwinart/runtime/pm/InstalledPackageInfos");
+    jmethodID process_providers = infos == nullptr ? nullptr : env->GetStaticMethodID(
+        infos, "processProviders",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/util/List;");
+    jobject providers = process_providers == nullptr ? nullptr
+        : env->CallStaticObjectMethod(infos, process_providers, package, record, process_name);
+    if (providers == nullptr || env->ExceptionCheck()) return false;
     const bool dispatched = DispatchApplicationBinding(
-        env, endpoint, info, resources, process_name, providers.c_str());
+        env, endpoint, info, resources, process_name, providers);
     if (debug) {
       std::cerr << "ART AMS: bindApplication dispatched=" << dispatched
                 << " exception=" << env->ExceptionCheck() << "\n";

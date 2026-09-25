@@ -1,4 +1,5 @@
-import dev.darwinart.runtime.pm.InstalledPackageRecord;
+package dev.darwinart.runtime.pm;
+
 import java.util.Arrays;
 
 public final class InstalledPackageRecordTest {
@@ -23,8 +24,7 @@ public final class InstalledPackageRecordTest {
         String body = "apk=/installed/base.apk\n"
                 + "split=/installed/config.apk\n"
                 + "split=/installed/abi.apk\n"
-                + "app_id=10042\n"
-                + "metadata=apk-app-runtime: package=owner target_sdk=not-a-number\n";
+                + "app_id=10042\n";
         InstalledPackageRecord installed =
                 InstalledPackageRecord.fromRecord("owner", record(body));
         check(installed.packageName.equals("owner"));
@@ -50,8 +50,6 @@ public final class InstalledPackageRecordTest {
                 "apk=/installed/base.apk\napk=/installed/other.apk\n");
         rejects("duplicate app ID", "owner",
                 "apk=/installed/base.apk\napp_id=10042\napp_id=10043\n");
-        rejects("duplicate metadata", "owner",
-                "apk=/installed/base.apk\nmetadata=package=owner\nmetadata=package=owner\n");
         rejects("duplicate split", "owner",
                 "apk=/installed/base.apk\nsplit=/installed/config.apk\n"
                         + "split=/installed/config.apk\n");
@@ -70,8 +68,6 @@ public final class InstalledPackageRecordTest {
                     record("apk=/installed/base.apk\napp_id=" + uid + "\n")).appId
                     == Integer.parseInt(uid));
         }
-        rejects("package mismatch", "owner",
-                "apk=/installed/base.apk\nmetadata=package=other\n");
         rejects("invalid package", "bad/name", "apk=/installed/base.apk\n");
         try {
             InstalledPackageRecord.fromRecord("owner", "apk=/installed/base.apk\n");
@@ -79,8 +75,18 @@ public final class InstalledPackageRecordTest {
         } catch (IllegalArgumentException expected) {
             // Expected validation failure.
         }
-        rejects("duplicate package hint", "owner",
-                "apk=/installed/base.apk\nmetadata=package=owner package=owner\n");
+
+        // The runner mounts the host package store at PACKAGE_ROOT.
+        String root = System.getenv("DARWIN_ART_ANDROID_PACKAGE_ROOT");
+        check("/profile/packages".equals(root));
+        check(InstalledPackageRecord.guestCodePath("/profile/packages/owner/1/base.apk")
+                .equals("/data/app/owner/1/base.apk"));
+        check(InstalledPackageRecord.guestCodePath("/profile/packagesX/base.apk") == null);
+        check(InstalledPackageRecord.guestCodePath("/elsewhere/base.apk") == null);
+        check(InstalledPackageRecord.hostCodePath("/data/app/owner/1/split.apk")
+                .equals("/profile/packages/owner/1/split.apk"));
+        check(InstalledPackageRecord.hostCodePath("/data/user/0/owner")
+                .equals("/data/user/0/owner"));
         System.out.println("InstalledPackageRecord validation PASS (typed registry fixture)");
     }
 }

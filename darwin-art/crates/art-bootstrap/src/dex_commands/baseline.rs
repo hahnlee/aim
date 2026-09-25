@@ -145,13 +145,9 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(root.join("probes/ProbeResources.java"))
         .arg(root.join("probes/ProbePackageManager.java"))
         // Runtime PM ownership, not a test fixture.
-        .arg(root.join("runtime/framework/pm/InstalledApplicationInfo.java"))
-        .arg(root.join("runtime/framework/pm/InstalledManifestMetadata.java"))
-        .arg(root.join("runtime/framework/pm/InstalledResourceValue.java"))
-        .arg(root.join("runtime/framework/pm/InstalledActivityInfo.java"))
-        .arg(root.join("runtime/framework/pm/InstalledPackageInfo.java"))
-        .arg(root.join("runtime/framework/pm/InstalledServiceInfo.java"))
-        .arg(root.join("runtime/framework/pm/InstalledProviderInfo.java"))
+        .arg(root.join("runtime/framework/pm/InstalledPackageInfos.java"))
+        .arg(root.join("runtime/framework/pm/InstalledPackageParser.java"))
+        .arg(root.join("runtime/framework/pm/ServiceResolver.java"))
         .arg(root.join("runtime/framework/pm/InstalledPackageRecord.java"))
         .arg(root.join("runtime/framework/pm/PackageRecords.java"))
         .arg(root.join("runtime/framework/pm/DexLoadReports.java"))
@@ -417,13 +413,9 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(&calendar_provider_class)
         .arg(&resources_class)
         .arg(&package_manager_class)
-        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledApplicationInfo.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledManifestMetadata.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledResourceValue.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledActivityInfo.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledPackageInfo.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledServiceInfo.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledProviderInfo.class"))
+        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledPackageInfos.class"))
+        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledPackageParser.class"))
+        .arg(class_dir.join("dev/darwinart/runtime/pm/ServiceResolver.class"))
         .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledPackageRecord.class"))
         .arg(class_dir.join("dev/darwinart/runtime/pm/PackageRecords.class"))
         .arg(class_dir.join("dev/darwinart/runtime/pm/PackageRecords$Source.class"))
@@ -594,13 +586,9 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
             "Ldev/darwinart/runtime/input/SystemKeyboardMaps;",
             "Ldev/darwinart/probe/JitInvokeCustom;",
             "Ldev/darwinart/probe/ProbePackageManager;",
-            "Ldev/darwinart/runtime/pm/InstalledApplicationInfo;",
-            "Ldev/darwinart/runtime/pm/InstalledManifestMetadata;",
-            "Ldev/darwinart/runtime/pm/InstalledResourceValue;",
-            "Ldev/darwinart/runtime/pm/InstalledActivityInfo;",
-            "Ldev/darwinart/runtime/pm/InstalledPackageInfo;",
-            "Ldev/darwinart/runtime/pm/InstalledServiceInfo;",
-            "Ldev/darwinart/runtime/pm/InstalledProviderInfo;",
+            "Ldev/darwinart/runtime/pm/InstalledPackageInfos;",
+            "Ldev/darwinart/runtime/pm/InstalledPackageParser;",
+            "Ldev/darwinart/runtime/pm/ServiceResolver;",
             "Ldev/darwinart/runtime/pm/InstalledPackageRecord;",
             "Ldev/darwinart/runtime/pm/PackageRecords;",
             "Ldev/darwinart/runtime/pm/PackageManagerEndpoint;",

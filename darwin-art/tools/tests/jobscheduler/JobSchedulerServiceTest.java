@@ -5,6 +5,8 @@ import android.app.job.JobInfo;
 import android.app.job.JobParameters;
 import android.content.ComponentName;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.ServiceInfo;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.Parcel;
@@ -13,7 +15,7 @@ import dev.darwinart.runtime.am.ApplicationProcessRegistry;
 import dev.darwinart.runtime.am.SystemServiceBindings;
 import dev.darwinart.runtime.connectivity.ConnectivitySnapshot;
 import dev.darwinart.runtime.connectivity.ConnectivityState;
-import dev.darwinart.runtime.pm.PackageRecords;
+import dev.darwinart.runtime.pm.ServiceResolver;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,25 +29,31 @@ public final class JobSchedulerServiceTest {
     private static final String CALLBACK_DESCRIPTOR = "android.app.job.IJobCallback";
     private static final int ACKNOWLEDGE_START = IBinder.FIRST_CALL_TRANSACTION + 2;
     private static final int JOB_FINISHED = IBinder.FIRST_CALL_TRANSACTION + 6;
-    private static final String BIND_PERMISSION_HEX =
-            "616e64726f69642e7065726d697373696f6e2e42494e445f4a4f425f53455256494345";
 
     private static void check(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
     }
 
-    private static final class Packages implements PackageRecords.Source {
-        private final Map<String, String> records = new HashMap<>();
+    private static final class Packages implements ServiceResolver {
+        private final Map<String, Integer> uids = new HashMap<>();
         void add(String packageName, int uid) {
-            records.put(packageName,
-                    "darwin-art-launch-v1\n"
-                    + "apk=/tmp/" + packageName + ".apk\n"
-                    + "app_id=" + uid + "\n"
-                    + "metadata=services=" + SERVICE + ">" + packageName
-                    + ":job>0>" + BIND_PERMISSION_HEX + ">0>1\n");
+            uids.put(packageName, uid);
         }
-        @Override public String resolveInstalledPackage(String packageName) {
-            return records.get(packageName);
+        @Override public ServiceInfo service(ComponentName component) {
+            Integer uid = uids.get(component.getPackageName());
+            if (uid == null || !SERVICE.equals(component.getClassName())) return null;
+            ApplicationInfo application = new ApplicationInfo();
+            application.packageName = component.getPackageName();
+            application.uid = uid;
+            application.enabled = true;
+            ServiceInfo info = new ServiceInfo();
+            info.packageName = component.getPackageName();
+            info.name = SERVICE;
+            info.processName = component.getPackageName() + ":job";
+            info.applicationInfo = application;
+            info.enabled = true;
+            info.permission = "android.permission.BIND_JOB_SERVICE";
+            return info;
         }
     }
 

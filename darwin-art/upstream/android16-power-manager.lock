@@ -1,4 +1,4 @@
-# Android 16 framework power-manager contract used by the desktop endpoint.
+# Android 16 framework power-manager and battery contracts used by the desktop endpoints.
 FRAMEWORK_POWER_PATH=_prebuilt/android-16/bootclasspath/framework.jar
 FRAMEWORK_POWER_SHA256=ae3d578e3c4cd28ad822d0bc7b35fa308800f440472f54f2aff8aa5c1e22cd91
 IPOWER_MANAGER_DESCRIPTOR=android.os.IPowerManager
@@ -6,3 +6,15 @@ IS_INTERACTIVE_SIGNATURE='boolean isInteractive()'
 IS_INTERACTIVE_TRANSACTION=21
 IS_DISPLAY_INTERACTIVE_SIGNATURE='boolean isDisplayInteractive(int)'
 IS_DISPLAY_INTERACTIVE_TRANSACTION=22
+IBATTERY_PROPERTIES_REGISTRAR_DESCRIPTOR=android.os.IBatteryPropertiesRegistrar
+GET_PROPERTY_SIGNATURE='int getProperty(int,android.os.BatteryProperty)'
+GET_PROPERTY_TRANSACTION=1
+SCHEDULE_UPDATE_SIGNATURE='void scheduleUpdate()'
+SCHEDULE_UPDATE_TRANSACTION=2
+IBATTERY_STATS_DESCRIPTOR=com.android.internal.app.IBatteryStats
+IS_CHARGING_SIGNATURE='boolean isCharging()'
+IS_CHARGING_TRANSACTION=17
+COMPUTE_BATTERY_TIME_REMAINING_SIGNATURE='long computeBatteryTimeRemaining()'
+COMPUTE_BATTERY_TIME_REMAINING_TRANSACTION=18
+COMPUTE_CHARGE_TIME_REMAINING_SIGNATURE='long computeChargeTimeRemaining()'
+COMPUTE_CHARGE_TIME_REMAINING_TRANSACTION=19

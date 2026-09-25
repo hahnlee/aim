@@ -37,6 +37,12 @@ public final class SystemCompatPolicy {
         return current().getDisabledChanges(application);
     }
 
+    /** PlatformCompat.isChangeEnabled for a package being parsed or queried. */
+    public static boolean isChangeEnabled(long changeId, ApplicationInfo application) {
+        if (application == null) throw new NullPointerException("ApplicationInfo");
+        return current().isChangeEnabled(changeId, application);
+    }
+
     public static long[] loggableChanges(ApplicationInfo application) {
         if (application == null) throw new NullPointerException("ApplicationInfo");
         return current().getLoggableChanges(application);

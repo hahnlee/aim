@@ -24,7 +24,10 @@ import dev.darwinart.runtime.job.JobSchedulerEndpoint;
 import dev.darwinart.runtime.job.JobSchedulerService;
 import dev.darwinart.runtime.locale.LocaleManagerEndpoint;
 import dev.darwinart.runtime.notification.NotificationManagerEndpoint;
+import dev.darwinart.runtime.pm.InstalledPackageInfos;
+import dev.darwinart.runtime.power.BatteryPropertiesRegistrarEndpoint;
 import dev.darwinart.runtime.power.BatteryService;
+import dev.darwinart.runtime.power.BatteryStatsEndpoint;
 import dev.darwinart.runtime.power.DarwinBatteryStateProvider;
 import dev.darwinart.runtime.power.DarwinPowerStateProvider;
 import dev.darwinart.runtime.power.PowerManagerEndpoint;
@@ -69,7 +72,11 @@ public final class SystemServiceFactory {
         ActivityManagerEndpoint activity =
                 new ActivityManagerEndpoint(packages, processes, taskGeometry);
         services.put("activity", activity);
-        new BatteryService(new DarwinBatteryStateProvider(), activity.systemBroadcasts()).start();
+        BatteryService battery =
+                new BatteryService(new DarwinBatteryStateProvider(), activity.systemBroadcasts());
+        battery.start();
+        services.put("batteryproperties", new BatteryPropertiesRegistrarEndpoint(battery));
+        services.put("batterystats", new BatteryStatsEndpoint(battery));
         services.put("activity_task", new ActivityTaskManagerEndpoint(packages, processes));
         services.put("display", new DisplayManagerEndpoint(taskDisplays));
         DesktopRootRegistry desktopRoots = windowManager.createDesktopRootRegistry();
@@ -101,7 +108,8 @@ public final class SystemServiceFactory {
         NetworkPathProvider networkPath = new NetworkPathProvider();
         ConnectivityServiceState connectivity = new ConnectivityServiceState(networkPath);
         JobSchedulerService jobs = new JobSchedulerService(
-                packages, processes, activity.systemServiceBindings(), connectivity);
+                InstalledPackageInfos.serviceResolver(packages), processes,
+                activity.systemServiceBindings(), connectivity);
         services.put("jobscheduler", new JobSchedulerEndpoint(processes, jobs));
         services.put("connectivity", new ConnectivityManagerEndpoint(
                 new InstalledConnectivityPermissionEnforcer(packages, processes), connectivity,

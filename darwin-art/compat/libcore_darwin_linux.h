@@ -56,9 +56,11 @@ struct LinuxSyscallProviders {
   int (*rename)(const char *, const char *);
   int (*adopt_host_fd)(int);
   int32_t (*load_errno)();
+  void *(*mmap)(void *, size_t, int, int, int, int64_t);
+  int (*munmap)(void *, size_t);
 };
 
-inline constexpr uint32_t kLinuxSyscallProviderAbiVersion = 3;
+inline constexpr uint32_t kLinuxSyscallProviderAbiVersion = 4;
 void InstallLinuxSyscallProviders(uint32_t abi_version, size_t provider_size,
                                   const LinuxSyscallProviders &providers);
 

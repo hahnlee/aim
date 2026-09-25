@@ -23,7 +23,7 @@ import java.util.HashMap;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import dev.darwinart.runtime.pm.InstalledApplicationInfo;
+import dev.darwinart.runtime.pm.InstalledPackageInfos;
 import static dev.darwinart.runtime.pm.PackageRecords.nativeResolveInstalledPackage;
 
 /** Minimal package policy for framework feature gates before system_server exists. */
@@ -69,7 +69,8 @@ public final class ProbePackageManager extends MockPackageManager {
 
     private static ApplicationInfo installedApplicationInfo(
             String requestedPackage, String record) {
-        ApplicationInfo info = InstalledApplicationInfo.fromRecord(requestedPackage, record);
+        ApplicationInfo info = InstalledPackageInfos.applicationInfo(requestedPackage, record,
+                InstalledPackageInfos.STOCK_PM_FLAGS);
         if (info == null) return null;
         // The launcher environment describes only the package being run. Do
         // not stamp that label onto records for unrelated installed packages

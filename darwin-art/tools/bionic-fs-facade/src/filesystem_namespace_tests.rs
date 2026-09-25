@@ -71,3 +71,35 @@ fn invalid_cwd_does_not_publish_or_consume_other_authorities() {
     let ns = FilesystemNamespace::new(f.root(), b"/system", b"/system", None).unwrap();
     assert_eq!(ns.cwd.snapshot().unwrap(), b"/system");
 }
+
+#[test]
+fn installed_packages_mount_read_only_at_data_app_under_private_data() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.0.join("packages/example/1/sha")).unwrap();
+    fs::write(f.0.join("packages/example/1/sha/base.apk"), b"apk").unwrap();
+    fs::create_dir_all(f.0.join("private/user/0")).unwrap();
+    let private = PrivateDataRoot::open(f.0.join("private")).unwrap();
+    let packages = File::open(f.0.join("packages")).unwrap();
+    let ns = FilesystemNamespace::with_storage(
+        f.root(), b"/", b"/", Some(&private), None, Some(&packages),
+    )
+    .unwrap();
+    assert!(ns.packages);
+    let resolved = ns.prefix.resolve(b"/", b"/data/app/example/1/sha/base.apk").unwrap();
+    assert_eq!(resolved.mount_id, 4);
+    assert!(!resolved.writable);
+    // Private app data under /data keeps its own mount.
+    assert_eq!(ns.prefix.resolve(b"/", b"/data/user/0").unwrap().mount_id, 2);
+    let guest = ns.guest_root.as_ref().unwrap();
+    let opened = guest.open(b"/data/app/example/1/sha/base.apk").unwrap();
+    assert_eq!(
+        opened.node.metadata().ino(),
+        fs::metadata(f.0.join("packages/example/1/sha/base.apk")).unwrap().ino()
+    );
+    assert!(guest.open(b"/data/app/example/1/sha").unwrap().node.metadata().is_dir());
+    // The package mount needs a complete guest namespace.
+    assert!(FilesystemNamespace::with_storage(
+        f.root(), b"/system", b"/system", None, None, Some(&packages),
+    )
+    .is_err());
+}

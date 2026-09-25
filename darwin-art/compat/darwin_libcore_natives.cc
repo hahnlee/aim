@@ -30,6 +30,8 @@ extern "C" int64_t darwin_art_bionic_lseek(int, int64_t, int);
 extern "C" int darwin_art_bionic_access(const char*, int);
 extern "C" int darwin_art_bionic_remove(const char*);
 extern "C" int darwin_art_bionic_rename(const char*, const char*);
+extern "C" void* darwin_art_bionic_mmap64(void*, size_t, int, int, int, int64_t);
+extern "C" int darwin_art_bionic_munmap(void*, size_t);
 extern "C" int darwin_art_bionic_fs_adopt_host_fd_core(int);
 extern "C" intptr_t darwin_art_bionic_sendfile(int, int, int64_t*, size_t);
 
@@ -1365,6 +1367,8 @@ bool RegisterLibcoreNatives(JNIEnv* env) {
           .rename = &darwin_art_bionic_rename,
           .adopt_host_fd = &darwin_art_bionic_fs_adopt_host_fd_core,
           .load_errno = &darwin_art_bionic_errno_load,
+          .mmap = &darwin_art_bionic_mmap64,
+          .munmap = &darwin_art_bionic_munmap,
       });
 #endif
   // NativeAllocationRegistry is part of libcore's boot class path rather than

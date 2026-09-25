@@ -52,17 +52,45 @@ public final class PackageManagerEndpoint extends Binder {
         }
     }
 
+    /**
+     * Intent resolution within one installed package (an explicit component or
+     * package). Resolution across every installed package needs the package
+     * index PackageManagerService keeps and is not answered here (#30, #24).
+     */
+    private List<ResolveInfo> queryPackageActivities(Intent intent, String resolvedType,
+            long flags) {
+        if (intent == null || intent.getSelector() != null) return null;
+        ComponentName component = intent.getComponent();
+        String packageName = component != null ? component.getPackageName() : intent.getPackage();
+        if (packageName == null) return null;
+        String record = packages.resolveInstalledPackage(packageName);
+        if (record == null) return new java.util.ArrayList<>();
+        if (component == null) {
+            return InstalledPackageInfos.queryIntentActivities(packageName, record, intent,
+                    resolvedType, flags);
+        }
+        java.util.ArrayList<ResolveInfo> explicit = new java.util.ArrayList<>();
+        android.content.pm.ActivityInfo activity = InstalledPackageInfos.activity(packageName,
+                record, component.getClassName(), flags);
+        if (activity != null) {
+            ResolveInfo resolved = new ResolveInfo();
+            resolved.activityInfo = activity;
+            explicit.add(resolved);
+        }
+        return explicit;
+    }
+
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
         if (code == getApplicationInfoCode) {
             data.enforceInterface("android.content.pm.IPackageManager");
             String packageName = data.readString();
-            data.readLong(); // query flags; the current registry has one installed-state view.
+            long queryFlags = data.readLong();
             int userId = data.readInt();
             data.enforceNoDataAvail();
             ApplicationInfo result = userId == 0 && packageName != null
-                    ? InstalledApplicationInfo.fromRecord(
-                            packageName, packages.resolveInstalledPackage(packageName))
+                    ? InstalledPackageInfos.applicationInfo(packageName,
+                            packages.resolveInstalledPackage(packageName), queryFlags)
                     : null;
             reply.writeNoException();
             reply.writeTypedObject(result, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
@@ -71,12 +99,12 @@ public final class PackageManagerEndpoint extends Binder {
         if (code == getPackageInfoCode) {
             data.enforceInterface("android.content.pm.IPackageManager");
             String packageName = data.readString();
-            data.readLong();
+            long queryFlags = data.readLong();
             int userId = data.readInt();
             data.enforceNoDataAvail();
             PackageInfo result = userId == 0 && packageName != null
-                    ? InstalledPackageInfo.fromRecord(
-                            packageName, packages.resolveInstalledPackage(packageName))
+                    ? InstalledPackageInfos.packageInfo(packageName,
+                            packages.resolveInstalledPackage(packageName), queryFlags)
                     : null;
             reply.writeNoException();
             reply.writeTypedObject(result, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
@@ -87,8 +115,9 @@ public final class PackageManagerEndpoint extends Binder {
             String packageName = data.readString();
             data.enforceNoDataAvail();
             ApplicationInfo result = packageName == null ? null
-                    : InstalledApplicationInfo.fromRecord(
-                            packageName, packages.resolveInstalledPackage(packageName));
+                    : InstalledPackageInfos.applicationInfo(packageName,
+                            packages.resolveInstalledPackage(packageName),
+                            InstalledPackageInfos.STOCK_PM_FLAGS);
             reply.writeNoException();
             reply.writeInt(result == null ? -1 : result.targetSdkVersion);
             return true;
@@ -96,14 +125,15 @@ public final class PackageManagerEndpoint extends Binder {
         if (code == getServiceInfoCode) {
             data.enforceInterface("android.content.pm.IPackageManager");
             ComponentName component = data.readTypedObject(ComponentName.CREATOR);
-            data.readLong(); // query flags; the installed record is the authoritative view.
+            long queryFlags = data.readLong();
             int userId = data.readInt();
             data.enforceNoDataAvail();
             ServiceInfo result = null;
             if (userId == 0 && component != null) {
                 String packageName = component.getPackageName();
-                result = InstalledServiceInfo.service(packageName,
-                        packages.resolveInstalledPackage(packageName), component.getClassName());
+                result = InstalledPackageInfos.service(packageName,
+                        packages.resolveInstalledPackage(packageName), component.getClassName(),
+                        queryFlags);
             }
             reply.writeNoException();
             reply.writeTypedObject(result, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
@@ -117,7 +147,7 @@ public final class PackageManagerEndpoint extends Binder {
             int userId = data.readInt();
             data.enforceNoDataAvail();
             List<ResolveInfo> result = userId == 0
-                    ? InstalledLaunchIntents.query(intent, resolvedType, queryFlags, packages)
+                    ? queryPackageActivities(intent, resolvedType, queryFlags)
                     : null;
             if (result == null) return super.onTransact(code, data, reply, flags);
             reply.writeNoException();
@@ -134,7 +164,7 @@ public final class PackageManagerEndpoint extends Binder {
             ProviderInfo result = null;
             if (userId == 0 && component != null) {
                 String packageName = component.getPackageName();
-                result = InstalledProviderInfo.provider(packageName,
+                result = InstalledPackageInfos.provider(packageName,
                         packages.resolveInstalledPackage(packageName),
                         component.getClassName(), queryFlags);
             }
