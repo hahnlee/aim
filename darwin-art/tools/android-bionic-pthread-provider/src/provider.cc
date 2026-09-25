@@ -1703,13 +1703,19 @@ extern "C" int darwin_art_bionic_pthread_mutex_init(
   if (parsed != 0) return parsed;
   ProviderState& state = State();
   std::lock_guard<std::mutex> lock(state.mutexes_mutex);
+  // Bionic pthread_mutex_init overwrites the object and never reports EBUSY.
+  // Memory freed without pthread_mutex_destroy (BoringSSL per-thread state,
+  // for one) is reused by the allocator, so a live side-table entry at this
+  // address belongs to a dead lifetime: retire it, so every thread's lookup
+  // cache falls through to the new generation, and install a replacement.
   const auto found = state.mutexes.find(mutex);
   if (found != state.mutexes.end()) {
-    std::lock_guard<std::mutex> lifecycle_lock(
-        found->second->lifecycle_mutex);
-    if (found->second->lifecycle != MutexEntry::Lifecycle::kDestroyed) {
-      return kAndroidEbusy;
+    {
+      std::lock_guard<std::mutex> lifecycle_lock(
+          found->second->lifecycle_mutex);
+      found->second->lifecycle = MutexEntry::Lifecycle::kDestroyed;
     }
+    found->second->lifecycle_condition.notify_all();
   }
   auto entry = std::make_shared<MutexEntry>();
   const int result = InitializeHostMutex(entry, kind);
@@ -1999,11 +2005,17 @@ extern "C" int darwin_art_bionic_pthread_rwlock_init(
     std::lock_guard<std::mutex> state_lock(state.rwlocks_mutex);
     const auto found = state.rwlocks.find(visible);
     if (found != state.rwlocks.end()) {
+      // Bionic pthread_rwlock_init overwrites the object and never reports
+      // EBUSY; a live entry here is a lifetime whose memory was freed without
+      // pthread_rwlock_destroy (BoringSSL's CRYPTO_MUTEX_init aborts on any
+      // failure). Retire it, waking its waiters, and install a new generation.
       const std::shared_ptr<RwlockEntry> existing = found->second;
-      std::lock_guard<std::mutex> entry_lock(existing->mutex);
-      if (existing->lifecycle == RwlockEntry::Lifecycle::kAlive) {
-        return kAndroidEbusy;
+      {
+        std::lock_guard<std::mutex> entry_lock(existing->mutex);
+        existing->lifecycle = RwlockEntry::Lifecycle::kDestroyed;
       }
+      existing->readers_condition.notify_all();
+      existing->writers_condition.notify_all();
       found->second = replacement;
     } else {
       state.rwlocks.emplace(visible, replacement);

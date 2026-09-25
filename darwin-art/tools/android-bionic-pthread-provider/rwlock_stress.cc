@@ -77,6 +77,13 @@ int RunRound() {
   // Bionic leaves an idle rwlock unchanged, so repeated destroy succeeds.
   if (darwin_art_bionic_pthread_rwlock_destroy(&rwlock) != 0) return 11;
   if (darwin_art_bionic_pthread_rwlock_init(&rwlock, nullptr) != 0) return 14;
+  if (darwin_art_bionic_pthread_rwlock_rdlock(&rwlock) != 0) return 16;
+  if (darwin_art_bionic_pthread_rwlock_unlock(&rwlock) != 0) return 17;
+  // Allocator reuse of a lock freed without destroy: Bionic init succeeds and
+  // the new lifetime starts unlocked.
+  if (darwin_art_bionic_pthread_rwlock_init(&rwlock, nullptr) != 0) return 18;
+  if (darwin_art_bionic_pthread_rwlock_wrlock(&rwlock) != 0) return 19;
+  if (darwin_art_bionic_pthread_rwlock_unlock(&rwlock) != 0) return 24;
   if (darwin_art_bionic_pthread_rwlock_destroy(&rwlock) != 0) return 15;
   if (darwin_art_bionic_pthread_provider_reset() != 0) return 12;
   return 0;
@@ -105,6 +112,6 @@ int main() {
   }
   const int boundary = CheckLazyResetAndPshared();
   if (boundary != 0) return boundary;
-  std::puts("pthread-rwlock-stress: PASS rounds=20 readers=4 concurrent>=2 writer=10000-progress wrong-unlock=EPERM destroy-held=EBUSY double-destroy=Bionic-0 lazy-reset=clean ASan=clean");
+  std::puts("pthread-rwlock-stress: PASS rounds=20 readers=4 concurrent>=2 writer=10000-progress wrong-unlock=EPERM destroy-held=EBUSY double-destroy=Bionic-0 reinit-live=Bionic-0 lazy-reset=clean ASan=clean");
   return 0;
 }

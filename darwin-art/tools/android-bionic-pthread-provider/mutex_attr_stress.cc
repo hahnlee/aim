@@ -100,6 +100,18 @@ int RunRound() {
       darwin_art_bionic_pthread_mutex_destroy(&reused) != 0) {
     return 11;
   }
+  // Allocator reuse of a mutex freed without destroy: Bionic init succeeds
+  // and the new lifetime starts unlocked.
+  DarwinArtAndroidPthreadMutex leaked{};
+  if (darwin_art_bionic_pthread_mutex_init(&leaked, nullptr) != 0 ||
+      darwin_art_bionic_pthread_mutex_lock(&leaked) != 0 ||
+      darwin_art_bionic_pthread_mutex_unlock(&leaked) != 0 ||
+      darwin_art_bionic_pthread_mutex_init(&leaked, nullptr) != 0 ||
+      darwin_art_bionic_pthread_mutex_trylock(&leaked) != 0 ||
+      darwin_art_bionic_pthread_mutex_unlock(&leaked) != 0 ||
+      darwin_art_bionic_pthread_mutex_destroy(&leaked) != 0) {
+    return 13;
+  }
   if (darwin_art_bionic_pthread_provider_reset() != 0) return 12;
   return 0;
 }
@@ -111,6 +123,6 @@ int main() {
     const int result = RunRound();
     if (result != 0) return result;
   }
-  std::puts("pthread-mutex-attr-stress: PASS rounds=100 normal+recursive+errorcheck recursive-depth=2 self=EDEADLK wrong-owner=EPERM held-destroy=EBUSY address-reuse=fresh-generation destroyed-attr=EINVAL pshared+PI=ENOTSUP ASan=clean");
+  std::puts("pthread-mutex-attr-stress: PASS rounds=100 normal+recursive+errorcheck recursive-depth=2 self=EDEADLK wrong-owner=EPERM held-destroy=EBUSY address-reuse=fresh-generation reinit-live=Bionic-0 destroyed-attr=EINVAL pshared+PI=ENOTSUP ASan=clean");
   return 0;
 }
