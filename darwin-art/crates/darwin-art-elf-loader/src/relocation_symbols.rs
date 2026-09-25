@@ -110,7 +110,18 @@ impl LoadedElf {
             })?;
         let address = match result {
             Some(symbol) => symbol.address(),
-            None if symbol.binding == STB_WEAK => 0,
+            None if symbol.binding == STB_WEAK => {
+                // Bionic binds an absent weak import to zero too. A versioned
+                // import names a platform library ABI (e.g. LIBANDROID) that
+                // an Android device would satisfy, so report the gap.
+                if let Some((requirement, _)) = version {
+                    eprintln!(
+                        "DARWIN ELF loader: weak platform import absent: {name}@{} ({})",
+                        requirement.name, requirement.soname
+                    );
+                }
+                0
+            }
             None => {
                 return Err(LoadError::UnresolvedSymbol {
                     symbol: name.to_owned(),
