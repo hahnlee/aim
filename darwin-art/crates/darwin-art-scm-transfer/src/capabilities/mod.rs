@@ -28,7 +28,7 @@ mod claim_tests;
 mod tests;
 
 use crate::{AuthorityEpoch, CarrierId, ProcessEpoch};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 pub const MAX_HOLDERS: usize = 1_024;
@@ -98,6 +98,8 @@ pub struct CapabilityRegistry {
     holders: HashMap<u128, holders::HolderRecord>,
     delegations: HashMap<u128, delegations::Delegation>,
     dead_processes: HashSet<ProcessEpoch>,
+    /// Death order, oldest first, for retiring unreferenced tombstones.
+    dead_order: VecDeque<ProcessEpoch>,
     sealed: bool,
 }
 
@@ -113,6 +115,7 @@ impl CapabilityRegistry {
             holders: HashMap::new(),
             delegations: HashMap::new(),
             dead_processes: HashSet::new(),
+            dead_order: VecDeque::new(),
             sealed: false,
         })
     }
@@ -193,16 +196,49 @@ impl CapabilityRegistry {
         if self.dead_processes.contains(&process) {
             return Ok(());
         }
-        if self.dead_processes.len() >= MAX_DEAD_PROCESSES {
+        // Every participant exit records a tombstone. A process epoch never
+        // becomes live again, and death cleanup already dropped its holders,
+        // pending sends and receiver-side delegations; a tombstone only has
+        // to outlive records that still name the epoch. Retire the oldest
+        // unreferenced one before treating the bound as exhausted.
+        if self.dead_processes.len() >= MAX_DEAD_PROCESSES && !self.retire_oldest_tombstone() {
             self.sealed = true;
             return Err(CapabilityError::QuotaExceeded);
         }
-        if self.dead_processes.try_reserve(1).is_err() {
+        if self.dead_processes.try_reserve(1).is_err() || self.dead_order.try_reserve(1).is_err()
+        {
             self.sealed = true;
             return Err(CapabilityError::QuotaExceeded);
         }
         self.dead_processes.insert(process);
+        self.dead_order.push_back(process);
         Ok(())
+    }
+
+    fn references_process(&self, process: ProcessEpoch) -> bool {
+        self.holders.values().any(|holder| holder.process() == process)
+            || self.delegations.values().any(|delegation| {
+                let record = delegation.record;
+                record.source == process
+                    || matches!(record.state,
+                        DelegationState::Committed { receiver: Some(receiver) }
+                            | DelegationState::Claimed { receiver, .. }
+                        if receiver == process)
+            })
+    }
+
+    fn retire_oldest_tombstone(&mut self) -> bool {
+        let Some(position) = self
+            .dead_order
+            .iter()
+            .position(|process| !self.references_process(*process))
+        else {
+            return false;
+        };
+        if let Some(process) = self.dead_order.remove(position) {
+            self.dead_processes.remove(&process);
+        }
+        true
     }
 
     pub(crate) fn is_dead(&self, process: ProcessEpoch) -> bool {

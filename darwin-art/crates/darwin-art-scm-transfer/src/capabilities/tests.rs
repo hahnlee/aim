@@ -183,7 +183,7 @@ fn zero_binding_fields_are_rejected_before_delegation() {
 }
 
 #[test]
-fn tombstone_saturation_seals_minting_but_still_cleans_dead_holders() {
+fn tombstone_bound_retires_oldest_unreferenced_death() {
     let mut registry = CapabilityRegistry::new(authority()).unwrap();
     registry.register_pair(source()).unwrap();
     for instance in 10..10 + MAX_DEAD_PROCESSES as u128 {
@@ -191,18 +191,17 @@ fn tombstone_saturation_seals_minting_but_still_cleans_dead_holders() {
             .source_died(ProcessEpoch { pid: 100, instance })
             .unwrap();
     }
-    assert_eq!(
-        registry.source_died(source()),
-        Err(CapabilityError::QuotaExceeded)
-    );
+    // A long session outlives the tombstone bound: the oldest death no record
+    // names is retired instead of sealing every later operation.
+    registry.source_died(source()).unwrap();
     assert_eq!(registry.holder_count(), 0);
     assert_eq!(registry.carrier_count(), 0);
-    assert_eq!(
-        registry.register_pair(receiver()),
-        Err(CapabilityError::QuotaExceeded)
-    );
-    assert_eq!(
-        registry.source_died(receiver()),
-        Err(CapabilityError::QuotaExceeded)
-    );
+    assert!(!registry.is_dead(ProcessEpoch { pid: 100, instance: 10 }));
+    assert!(registry.is_dead(ProcessEpoch { pid: 100, instance: 11 }));
+    assert!(registry.is_dead(source()));
+    assert!(matches!(
+        registry.register_pair(source()),
+        Err(CapabilityError::SourceDead)
+    ));
+    registry.register_pair(receiver()).unwrap();
 }

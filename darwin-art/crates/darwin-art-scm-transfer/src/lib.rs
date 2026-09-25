@@ -5,7 +5,7 @@
 //! implement a daemon wire protocol. The caller supplies already-authenticated
 //! sender and receiver grants and performs the actual ancillary-FD transfer.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 mod guardian;
 use guardian::{duplicate, guardian_is_eof, make_guardian};
 pub mod capabilities;
@@ -191,6 +191,8 @@ pub struct ScmTransferLeaseOwner {
     leases: HashMap<TransferKey, Lease>,
     process_counts: HashMap<ProcessEpoch, usize>,
     dead_senders: HashSet<ProcessEpoch>,
+    /// Sender deaths, oldest first, for retiring unreferenced tombstones.
+    dead_sender_order: VecDeque<ProcessEpoch>,
     terminated_carriers: HashSet<CarrierId>,
     sealed: bool,
     max_global: usize,
@@ -206,6 +208,7 @@ impl ScmTransferLeaseOwner {
             leases: HashMap::new(),
             process_counts: HashMap::new(),
             dead_senders: HashSet::new(),
+            dead_sender_order: VecDeque::new(),
             terminated_carriers: HashSet::new(),
             sealed: false,
             max_global: max_global.min(MAX_GLOBAL_LEASES),
@@ -497,11 +500,25 @@ impl ScmTransferLeaseOwner {
         if self.dead_senders.contains(&sender) {
             return Ok(());
         }
+        // Every sender exit records a tombstone; an epoch never becomes live
+        // again, so only leases still naming it need the tombstone. Retire the
+        // oldest unreferenced one before treating the bound as exhausted.
         if self.dead_senders.len() >= MAX_TOMBSTONES {
-            self.sealed = true;
-            return Err(LeaseError::Sealed);
+            let leases = &self.leases;
+            let Some(position) = self
+                .dead_sender_order
+                .iter()
+                .position(|dead| !leases.values().any(|lease| lease.send.sender == *dead))
+            else {
+                self.sealed = true;
+                return Err(LeaseError::Sealed);
+            };
+            if let Some(retired) = self.dead_sender_order.remove(position) {
+                self.dead_senders.remove(&retired);
+            }
         }
         self.dead_senders.insert(sender);
+        self.dead_sender_order.push_back(sender);
         Ok(())
     }
 
@@ -684,6 +701,33 @@ mod tests {
         owner.sender_died(sender()).unwrap();
         assert_eq!(owner.state(key).unwrap(), LeaseState::TerminalSender);
         assert!(owner.admit_import(receive(), key, 1).is_ok());
+        let next = owner.mint_key().unwrap();
+        let (next_payload, _next_peer) = socket_pair();
+        assert!(matches!(
+            owner.prepare(send(), next, &[next_payload.as_fd()]),
+            Err(LeaseError::SenderDead)
+        ));
+        drop(prepared);
+        assert_eq!(owner.retire_if_eof(key).unwrap(), Retirement::Retired);
+    }
+
+    #[test]
+    fn sender_tombstones_retire_oldest_unreferenced_death() {
+        let (payload, _peer) = socket_pair();
+        let mut owner = ScmTransferLeaseOwner::new(AUTHORITY, 8, 4);
+        // The first dead sender still names a queued lease; it must survive.
+        let key = owner.mint_key().unwrap();
+        let prepared = owner.prepare(send(), key, &[payload.as_fd()]).unwrap();
+        owner.arm_enqueued(send(), key).unwrap();
+        owner.sender_died(sender()).unwrap();
+        for instance in 10..10 + MAX_TOMBSTONES as u128 {
+            owner
+                .sender_died(ProcessEpoch { pid: 30, instance })
+                .unwrap();
+        }
+        assert!(owner.dead_senders.contains(&sender()));
+        assert!(!owner.dead_senders.contains(&ProcessEpoch { pid: 30, instance: 10 }));
+        assert!(owner.dead_senders.contains(&ProcessEpoch { pid: 30, instance: 11 }));
         let next = owner.mint_key().unwrap();
         let (next_payload, _next_peer) = socket_pair();
         assert!(matches!(
