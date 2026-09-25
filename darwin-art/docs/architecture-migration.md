@@ -10,6 +10,11 @@ Chromium `example.com` rendering with physical input, navigation/reload, Retina
 output and Graphite/Dawn → Vulkan → MoltenVK → Metal. GL, direct Dawn Metal,
 disabled GPU/Graphite and CPU fallback do not satisfy acceptance.
 
+**Next work item: boot AOSP PackageManagerService (#30).** Start with AOSP
+package parsing (`ParsingPackageUtils`/`PackageInfoUtils`) feeding the package
+endpoint, then the PMS boot closure, and retire the `Installed*Info`
+projection. It is the root cause of #1, #2, #3, #24, #31 and #33.
+
 Android-owned orientation/resize (ADR 0008) and Blue Archive's native startup
 fault are fixed; see the verified state below. The service inventory and AOSP
 migration are in [aosp-service-migration.md](aosp-service-migration.md).
@@ -61,6 +66,7 @@ Open failures are GitHub issues; the ones blocking the current goal:
 
 ## Next work
 
+0. Boot AOSP PackageManagerService, parsing first (#30).
 1. Add Activity stop/visibility transitions and popup `ACTION_OUTSIDE` (#16, #17).
 2. Let density follow the host backing scale through the same revision path (#27).
 3. Run locale/label checks, then extend Chromium focus/tab/soak coverage (#19, #22).
