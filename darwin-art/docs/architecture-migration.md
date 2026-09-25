@@ -51,39 +51,31 @@ Component tests are not application acceptance. See [AGENTS.md](../AGENTS.md),
 
 ## Active failures
 
-- **Activity visibility:** an Activity behind a new top Activity is paused but
-  never stopped or hidden, so translucent/unfinished top windows show it.
-- **Popups:** `ACTION_OUTSIDE` is not delivered; outside taps reach the parent.
-- **Permissions/features:** `IActivityManager.checkPermissionForDevice` is
-  unhandled, so an empty reply reads back as `PERMISSION_GRANTED` for every
-  permission; `IPackageManager.hasSystemFeature` reads back false, and
-  `resolveContentProvider`/`resolveService`/`getNameForUid`/`getReceiverInfo`
-  are unhandled. These need the platform permission table and SystemConfig.
-- **Broadcasts:** only unordered delivery to runtime-registered receivers;
-  ordered broadcasts and manifest receivers are unsupported, and permission
-  grants/protected broadcasts are not modeled.
-- **SCM:** authenticated custody, carrier propagation, all consumer variants,
-  discard/truncation, close/crash and alias semantics remain before adoption.
+Open failures are GitHub issues; the ones blocking the current goal:
+
+- Activity behind a new top Activity is never stopped (#16); window close and
+  Cmd+Q have no Android lifecycle (#15); popup `ACTION_OUTSIDE` (#17).
+- Permission checks read back as granted (#1); PackageManager features and
+  queries (#2); broadcasts beyond unordered registered delivery (#3).
+- SCM managed-transfer adoption (#18); process-death cleanup (#20).
 
 ## Next work
 
-1. Add Activity stop/visibility transitions and popup `ACTION_OUTSIDE`.
-2. Let density follow the host backing scale through the same revision path.
-3. Run locale/label checks, then extend Chromium focus/tab/soak coverage.
-4. Close relevant WMS/Binder/SCM lifetime gaps and audit changed files for mixed
-   ownership before declaring migration complete.
+1. Add Activity stop/visibility transitions and popup `ACTION_OUTSIDE` (#16, #17).
+2. Let density follow the host backing scale through the same revision path (#27).
+3. Run locale/label checks, then extend Chromium focus/tab/soak coverage (#19, #22).
+4. Close relevant WMS/Binder/SCM lifetime gaps (#18, #20) and audit changed
+   files for mixed ownership before declaring migration complete.
 
 ## Known limits
 
 Acceptance remains APK-scoped. Camera, Bluetooth, biometrics, complete host-font
 integration, external sensor mapping and long memory/performance soak are later
-work. Ordinary app/service processes still use host `_exit()`; reusable sessions
-and complete VM/image quiescence are unproven. Provider manifests do not yet
-cover every dynamic shell/build input. Parallel Binder mapping/shared-lock and
-Runtime foreign-copy flock failures remain unresolved.
-`android-window-menu/keyboard-acceptance.sh` still drive fixed-duration launches
-and `DARWIN_ART_TEST_*` pointer hooks that only the fixture GPU loop reads;
-Android app processes ignore both, so those suites do not complete.
+work. Ordinary app/service processes still use host `_exit()` (#20); reusable
+sessions and complete VM/image quiescence are unproven. Provider manifests do
+not yet cover every dynamic shell/build input. Parallel Binder mapping and
+foreign-copy flock test failures need a reproduction (#21). The window menu
+and keyboard suites cannot complete against production processes (#29).
 
 ## Acceptance commands
 

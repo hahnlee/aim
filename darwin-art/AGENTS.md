@@ -4,8 +4,12 @@ Read the Current goal and latest checkpoint in docs/architecture-migration.md
 before work. Update verified status before ending a work turn; replace
 superseded facts instead of appending a turn-by-turn log.
 
-- Keep non-ADR work documents focused on current scope, decisions, open work
-  and acceptance evidence. Keep architecture-migration.md within 150 lines
+- Track open work, bugs and follow-ups as GitHub issues (CONTRIBUTING.md,
+  "Tracking work"), never as TODO lists or gate checklists in repository
+  documents. File an issue for each gap you find, even outside the current
+  task, and reference issue numbers from documents and commits.
+- Keep non-ADR work documents focused on current scope, decisions and
+  acceptance evidence. Keep architecture-migration.md within 150 lines
   and its Latest progress within five compact items. Fold completed work into
   status; omit old PIDs, repetitive test logs and rejected experiments unless
   needed to reproduce an open failure. Git history holds past diagnostics;

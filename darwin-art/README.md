@@ -590,4 +590,6 @@ never automatically deleted or replaced.
 - Swift/Objective-C: only where AppKit or platform APIs are substantially easier
   to expose than through Rust FFI.
 
-See [PORTING.md](PORTING.md) for the execution gates.
+Open work, bugs and missing platform contracts are tracked as
+[GitHub issues](https://github.com/hahnlee/aim/issues); see
+[CONTRIBUTING.md](../CONTRIBUTING.md#tracking-work).

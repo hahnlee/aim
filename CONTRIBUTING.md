@@ -13,6 +13,25 @@ Record the upstream project, exact revision, applicable license, and local
 changes when importing or adapting code. Include required notices in the same
 change. Do not remove headers to fit a file under the repository default.
 
+## Tracking work
+
+Open work is tracked in [GitHub issues](https://github.com/hahnlee/aim/issues),
+not in repository documents. That covers bugs, missing Android contracts,
+porting gates, follow-ups and investigations.
+
+- File an issue for every gap found while working, including ones outside the
+  current change. Record the symptom, how it was found (logs, transaction
+  codes, reproduction), the expected AOSP behavior, the owning subsystem and
+  acceptance criteria.
+- Do not add TODO lists, gate checklists or backlog sections to Markdown files.
+  `darwin-art/docs/architecture-migration.md` stays a short index of the
+  current goal, verified state and acceptance commands, and refers to issues
+  by number for open failures.
+- ADRs under `darwin-art/docs/adr/` record decisions. Link the issue that
+  prompted the decision.
+- Reference the issue in commits that resolve it (`Fixes #123` in the body),
+  and close it only after the acceptance criteria pass.
+
 ## Commits
 
 Use Conventional Commits for every commit:
