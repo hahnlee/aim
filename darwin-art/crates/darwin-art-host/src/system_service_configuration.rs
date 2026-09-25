@@ -47,6 +47,12 @@ pub(crate) fn capture(
         if !is_forwarded_name(name_bytes) {
             continue;
         }
+        // Launchers pass diagnostics through as `${NAME:-}`. The consumers
+        // test presence (`getenv != NULL`), so an empty switch must mean off:
+        // forwarding it enabled per-frame pixel hashing in every session.
+        if DIAGNOSTIC_ONLY.contains(&name_bytes) && value.is_empty() {
+            continue;
+        }
         if selected
             .insert(name_bytes.to_vec(), (name, value))
             .is_some()
@@ -201,7 +207,12 @@ mod tests {
         let baseline = capture([env("DARWIN_ART_JIT", "1")]).unwrap();
         for name in DIAGNOSTIC_ONLY {
             let name = std::str::from_utf8(name).unwrap();
-            for value in ["", "1", "/tmp/new-capture.png"] {
+            assert_eq!(
+                capture([env("DARWIN_ART_JIT", "1"), env(name, "")]).unwrap(),
+                baseline,
+                "an empty diagnostic switch is off and must not be forwarded"
+            );
+            for value in ["1", "/tmp/new-capture.png"] {
                 let traced = capture([env("DARWIN_ART_JIT", "1"), env(name, value)]).unwrap();
                 assert!(traced.contains(&env(name, value)));
                 assert_eq!(

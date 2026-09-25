@@ -76,6 +76,10 @@ public final class ActiveServicesProcessLaunchTest {
 
         @Override public void scheduleUnbindService(IBinder token, Intent intent)
                 throws RemoteException {}
+        @Override public void scheduleServiceArgs(IBinder token,
+                android.content.pm.ParceledListSlice args) {
+            throw new AssertionError("bound-only fixture received start arguments");
+        }
         @Override public void scheduleStopService(IBinder token) throws RemoteException {}
         @Override public void scheduleExit() {}
     }

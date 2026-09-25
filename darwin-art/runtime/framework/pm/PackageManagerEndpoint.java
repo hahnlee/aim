@@ -1,7 +1,10 @@
 package dev.darwinart.runtime.pm;
 
+import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
+import android.content.pm.ParceledListSlice;
+import android.content.pm.ResolveInfo;
 import android.content.ComponentName;
 import android.content.pm.ServiceInfo;
 import android.content.pm.ProviderInfo;
@@ -12,6 +15,7 @@ import android.os.RemoteException;
 import com.android.server.pm.dex.DexUsageStore;
 import java.lang.reflect.Field;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /** System PM Binder dispatch. Unsupported methods remain unsupported, never default-success. */
@@ -22,6 +26,7 @@ public final class PackageManagerEndpoint extends Binder {
     private final int getServiceInfoCode = transaction("getServiceInfo");
     private final int getProviderInfoCode = transaction("getProviderInfo");
     private final int getTargetSdkVersionCode = transaction("getTargetSdkVersion");
+    private final int queryIntentActivitiesCode = transaction("queryIntentActivities");
     private final PackageRecords.Source packages;
     private final DexLoadReports reports;
 
@@ -102,6 +107,22 @@ public final class PackageManagerEndpoint extends Binder {
             }
             reply.writeNoException();
             reply.writeTypedObject(result, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
+            return true;
+        }
+        if (code == queryIntentActivitiesCode) {
+            data.enforceInterface("android.content.pm.IPackageManager");
+            Intent intent = data.readTypedObject(Intent.CREATOR);
+            String resolvedType = data.readString();
+            long queryFlags = data.readLong();
+            int userId = data.readInt();
+            data.enforceNoDataAvail();
+            List<ResolveInfo> result = userId == 0
+                    ? InstalledLaunchIntents.query(intent, resolvedType, queryFlags, packages)
+                    : null;
+            if (result == null) return super.onTransact(code, data, reply, flags);
+            reply.writeNoException();
+            reply.writeTypedObject(new ParceledListSlice<>(result),
+                    Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
             return true;
         }
         if (code == getProviderInfoCode) {

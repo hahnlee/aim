@@ -116,6 +116,10 @@ final class ServiceLifecycleController {
                 }
             }
         }
+        // ActiveServices.realStartServiceLocked: create, bindings, then start args.
+        if (service.createScheduled && !service.retiring && !service.pendingStarts.isEmpty()) {
+            return reserveLocked(service, null, ServiceLifecycleOperation.Kind.ARGS);
+        }
         if (service.retiring && service.pendingBinds == 0 && service.createScheduled && !service.stopScheduled
                 && service.executingCallbacks == 0 && !hasPendingUnbind(service)) {
             return reserveLocked(service, null, ServiceLifecycleOperation.Kind.STOP);
@@ -125,7 +129,11 @@ final class ServiceLifecycleController {
 
     private ServiceLifecycleOperation reserveLocked(ServiceRecord service,
             IntentBindRecord binding, ServiceLifecycleOperation.Kind kind) {
-        ServiceLifecycleOperation operation = new ServiceLifecycleOperation(service, binding, kind);
+        java.util.List<android.app.ServiceStartArgs> args =
+                kind == ServiceLifecycleOperation.Kind.ARGS
+                        ? StartedServiceRequests.takePending(service) : null;
+        ServiceLifecycleOperation operation =
+                new ServiceLifecycleOperation(service, binding, kind, args);
         switch (kind) {
             case CREATE:
                 service.createScheduled = true;
@@ -138,6 +146,10 @@ final class ServiceLifecycleController {
                 binding.bindCallbackPending = !operation.rebind;
                 binding.rebindCallbackPending = operation.rebind;
                 binding.doRebind = false;
+                break;
+            case ARGS:
+                // One SERVICE_DONE_EXECUTING_START arrives per delivered start.
+                service.executingCallbacks += args.size() - 1;
                 break;
             case UNBIND:
                 binding.unbindRequested = false;
@@ -168,13 +180,16 @@ final class ServiceLifecycleController {
     }
 
     /** Android 16 ActivityThread's actual completion kinds, not inferred binding identity. */
-    void doneLocked(ServiceRecord service, int type, Intent intent) {
+    void doneLocked(ServiceRecord service, int type, int startId, int result, Intent intent) {
         IntentBindRecord binding = intent == null ? null
                 : service.bindings.get(new Intent.FilterComparison(intent));
         switch (type) {
             case 0: // CREATE / anonymous
                 if (!service.createCallbackPending) return;
                 service.createCallbackPending = false;
+                break;
+            case 1: // START
+                if (!StartedServiceRequests.done(service, startId, result)) return;
                 break;
             case 2: // STOP
                 if (!service.stopCallbackPending) return;
@@ -208,6 +223,7 @@ final class ServiceLifecycleController {
     }
 
     private static boolean hasDemand(ServiceRecord service) {
+        if (StartedServiceRequests.hasDemand(service)) return true;
         for (IntentBindRecord binding : service.bindings.values()) {
             if (binding.hasAdmittedConnections()) return true;
         }

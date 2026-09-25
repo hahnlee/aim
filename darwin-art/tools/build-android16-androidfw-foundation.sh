@@ -200,6 +200,8 @@ mkdir -p "$object_dir"
 
 common_flags=(
   -std=gnu++23 -arch arm64 -O2 -fPIC -fno-rtti -fvisibility=hidden
+  # Soong global cflags: ALOGV/LOG_NDEBUG tracing and debug asserts are off.
+  -DNDEBUG -UDEBUG
   -Wall -Werror -Wunreachable-code -DSTATIC_ANDROIDFW_FOR_TOOLS
   # Apple Clang diagnoses unchanged Android 16 source/libc++ constructs that
   # Android's pinned host toolchain accepts. Keep these compatibility flags
@@ -291,7 +293,7 @@ for symbol in \
 done
 
 undefined_manifest="$stage_dir/androidfw-undefined-symbols.txt"
-nm -u "$combined" | awk '$1 ~ /^_/ { print $1 }' | sort -u \
+nm -u "$combined" | awk '$1 ~ /^_/ { print $1 }' | LC_ALL=C sort -u \
   > "$undefined_manifest"
 undefined_count="$(wc -l < "$undefined_manifest" | tr -d ' ')"
 undefined_sha="$(shasum -a 256 "$undefined_manifest" | awk '{print $1}')"

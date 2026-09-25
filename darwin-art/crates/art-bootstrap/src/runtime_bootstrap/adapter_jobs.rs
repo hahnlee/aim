@@ -92,6 +92,7 @@ pub(super) fn adapter_jobs(
                 | "window/surface_jni.cc"
                 | "window/remote_surface_producer.cc"
                 | "binder/context_manager.cc"
+                | "binder/ndk_parcel_host.cc"
                 | "binder/platform_syscalls.cc"
                 | "binder/service_endpoint.cc"
                 | "binder/native_endpoint_lifetime.cc"
@@ -124,6 +125,19 @@ pub(super) fn adapter_jobs(
                 .arg(&staged.libcutils_include)
                 .arg("-I")
                 .arg(staged.root.join("_aosp/system/logging/liblog/include"));
+        }
+        if adapter_source == "binder/ndk_parcel_host.cc" {
+            // HWUI's Bitmap parcel JNI uses the NDK AParcel API; its host
+            // implementation shares the pinned libbinder_ndk headers.
+            let ndk = staged.root.join("_aosp/frameworks/native/libs/binder/ndk");
+            adapter_command
+                .arg("-D__INTRODUCED_IN(n)=")
+                .arg("-I")
+                .arg(ndk.join("include_ndk"))
+                .arg("-I")
+                .arg(ndk.join("include_platform"))
+                .arg("-I")
+                .arg(staged.root.join("_aosp/system/libbase/include"));
         }
         if adapter_source == "binder/platform_syscalls.cc" {
             for include in [

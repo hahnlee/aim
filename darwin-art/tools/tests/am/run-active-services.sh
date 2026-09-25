@@ -14,6 +14,7 @@ mkdir -p "$out/classes"
   "$root/runtime/framework/am/SystemServiceBindings.java" \
   "$root/runtime/framework/am/ActiveServices.java" \
   "$root/runtime/framework/am/ServiceRecord.java" \
+  "$root/runtime/framework/am/StartedServiceRequests.java" \
   "$root/runtime/framework/am/IntentBindRecord.java" \
   "$root/runtime/framework/am/ConnectionRecord.java" \
   "$root/runtime/framework/am/ServiceConnectionOwner.java" \
@@ -34,10 +35,13 @@ mkdir -p "$out/classes"
   "$root/runtime/framework/pm/InstalledServiceInfo.java" \
   "$root/tools/tests/am/ActiveServicesProcessGoneTest.java" \
   "$root/tools/tests/am/ActiveServicesProcessLaunchTest.java" \
-  "$root/tools/tests/am/ServiceConnectionDeathRegistrationTest.java"
+  "$root/tools/tests/am/ServiceConnectionDeathRegistrationTest.java" \
+  "$root/tools/tests/am/ActiveServicesStartedServiceTest.java"
 "$java_home/bin/java" -ea -cp "$out/classes:$android_jar" \
   dev.darwinart.runtime.am.ServiceConnectionDeathRegistrationTest
 "$java_home/bin/java" -ea -cp "$out/classes:$android_jar" \
   dev.darwinart.runtime.am.ActiveServicesProcessGoneTest "$@"
 "$java_home/bin/java" -ea -cp "$out/classes:$android_jar" \
   dev.darwinart.runtime.am.ActiveServicesProcessLaunchTest
+"$java_home/bin/java" -ea -cp "$out/classes:$android_jar" \
+  dev.darwinart.runtime.am.ActiveServicesStartedServiceTest

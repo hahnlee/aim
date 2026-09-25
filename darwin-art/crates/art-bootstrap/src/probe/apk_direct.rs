@@ -692,6 +692,8 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
             "Network",
             "-framework",
             "SystemConfiguration",
+            "-framework",
+            "IOKit",
             "-o",
         ])
         .arg(&runtime_library);

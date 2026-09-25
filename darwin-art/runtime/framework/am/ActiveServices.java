@@ -33,6 +33,12 @@ public final class ActiveServices implements SystemServiceBindings {
             new ServiceLifecycleController(this);
     private final ServiceConnectionResourceController connectionResources =
             new ServiceConnectionResourceController(this);
+    private final java.util.concurrent.ScheduledExecutorService restartScheduler =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "ServiceRestart");
+                thread.setDaemon(true);
+                return thread;
+            });
     private long nextSequence = 1;
     private int nextIsolatedUid = FIRST_ISOLATED_UID;
 
@@ -101,30 +107,10 @@ public final class ActiveServices implements SystemServiceBindings {
             ServiceConnectionOwner owner) throws RemoteException {
         ComponentName component = intent.getComponent();
         if (component == null) return null;
-        String packageName = component.getPackageName();
-        ServiceInfo info = InstalledServiceInfo.service(packageName,
-                packages.resolveInstalledPackage(packageName), component.getClassName());
-        if (info == null || !info.enabled || info.applicationInfo == null) return null;
-        if (instanceName != null && instanceName.isEmpty()) {
-            throw new IllegalArgumentException("Empty isolated service instance name");
-        }
-        boolean isolated = instanceName != null;
-        if (isolated && (info.flags & ServiceInfo.FLAG_ISOLATED_PROCESS) == 0) {
-            throw new SecurityException("Service is not declared isolatedProcess");
-        }
-
         String key = serviceKey(component, instanceName);
-        ServiceRecord service = services.get(key);
-        boolean newService = service == null;
-        if (service == null) {
-            String processName = info.processName;
-            if (processName == null || processName.isEmpty()) processName = packageName;
-            if (isolated) processName = processName + ":" + instanceName;
-            int uid = isolated ? allocateIsolatedUid() : info.applicationInfo.uid;
-            service = new ServiceRecord(component, instanceName, processName, uid, isolated, info);
-            services.put(key, service);
-            servicesByToken.put(service.canonicalToken, service);
-        }
+        boolean newService = services.get(key) == null;
+        ServiceRecord service = retrieveServiceLocked(component, instanceName, clientUid);
+        if (service == null) return null;
 
         Intent.FilterComparison comparison = new Intent.FilterComparison(intent);
         IntentBindRecord binding = service.bindings.get(comparison);
@@ -276,6 +262,107 @@ public final class ActiveServices implements SystemServiceBindings {
         connection.binding.service.pendingBinds--;
     }
 
+    /** IActivityManager.startService; returns the started component or null. */
+    public ComponentName startService(int callingPid, int callingUid, IBinder caller,
+            Intent intent, String callingPackage, int userId) throws RemoteException {
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            synchronized (this) {
+                if (userId != 0 || intent == null || intent.getComponent() == null) return null;
+                ApplicationProcessRegistry.AttachedApplication callingProcess =
+                        processes.requireCaller(callingPid, caller, callingPackage);
+                if (callingProcess.uid >= 0 && callingProcess.uid != callingUid) {
+                    throw new SecurityException("Binder UID does not match attached application");
+                }
+                ServiceRecord service = retrieveServiceLocked(intent.getComponent(), null, callingUid);
+                if (service == null) return null;
+                StartedServiceRequests.start(service, intent);
+                if (!service.stopScheduled) service.retiring = false;
+                ApplicationProcessRegistry.AttachedApplication attached = processes.findAttached(
+                        service.component.getPackageName(), service.processName, service.uid);
+                if (attached != null) {
+                    attachAndSchedule(service, attached);
+                } else {
+                    processLaunches.requestLocked(service, null);
+                }
+                return service.component;
+            }
+        }
+    }
+
+    /** IActivityManager.stopService: 1 if a started service was stopped, else 0. */
+    public int stopService(int callingPid, int callingUid, IBinder caller, Intent intent,
+            int userId) throws RemoteException {
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            synchronized (this) {
+                if (userId != 0 || intent == null || intent.getComponent() == null) return 0;
+                ApplicationProcessRegistry.AttachedApplication callingProcess =
+                        processes.requireAttachedProcess(callingPid);
+                if (caller == null || !caller.equals(callingProcess.thread)) {
+                    throw new SecurityException("stopService caller does not match attached process");
+                }
+                if (callingProcess.uid >= 0 && callingProcess.uid != callingUid) {
+                    throw new SecurityException("Binder UID does not match attached application");
+                }
+                ServiceRecord service = services.get(serviceKey(intent.getComponent(), null));
+                if (service == null || service.stopScheduled) return 0;
+                if (!service.serviceInfo.exported && callingUid != service.uid) {
+                    throw new SecurityException("Not allowed to stop unexported service");
+                }
+                if (!StartedServiceRequests.stop(service)) return 0;
+                retireIfUnowned(service);
+                planLifecycleLocked(service);
+                return 1;
+            }
+        }
+    }
+
+    /** IActivityManager.stopServiceToken (Service.stopSelfResult). */
+    public boolean stopServiceToken(int callingPid, ComponentName className, IBinder token,
+            int startId) throws RemoteException {
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            synchronized (this) {
+                ServiceRecord service = requireServiceCallerLocked(callingPid, className, token);
+                if (!StartedServiceRequests.stopSelf(service, startId)) return false;
+                retireIfUnowned(service);
+                planLifecycleLocked(service);
+                return true;
+            }
+        }
+    }
+
+    /** IActivityManager.setServiceForeground (startForeground / stopForeground). */
+    public void setServiceForeground(int callingPid, ComponentName className, IBinder token,
+            int id, boolean hasNotification, int flags, int foregroundServiceType) {
+        synchronized (this) {
+            ServiceRecord service = requireServiceCallerLocked(callingPid, className, token);
+            if (hasNotification && !service.startRequested && !hasConnections(service)) {
+                throw new IllegalStateException("startForeground on a service without demand");
+            }
+            StartedServiceRequests.setForeground(service, id, hasNotification, flags,
+                    foregroundServiceType);
+        }
+    }
+
+    public int getForegroundServiceType(int callingPid, ComponentName className, IBinder token) {
+        synchronized (this) {
+            ServiceRecord service = requireServiceCallerLocked(callingPid, className, token);
+            return service.foreground ? service.foregroundServiceType : 0;
+        }
+    }
+
+    /** Service self-calls carry the owner lane capability and must come from its process. */
+    private ServiceRecord requireServiceCallerLocked(int callingPid, ComponentName className,
+            IBinder token) {
+        ServiceRecord.LifecycleLane lane = requireLiveLifecycleLaneLocked(token);
+        if (callingPid <= 0 || callingPid != lane.ownerPid) {
+            throw new SecurityException("Service call came from another process");
+        }
+        if (className == null || !className.equals(lane.service.component)) {
+            throw new SecurityException("Service token does not match " + className);
+        }
+        return lane.service;
+    }
+
     @Override
     public boolean unbindService(IServiceConnection connection) throws RemoteException {
         try (DeferredTailScope tails = new DeferredTailScope()) {
@@ -407,7 +494,7 @@ public final class ActiveServices implements SystemServiceBindings {
                     }
                     requireOwner(service, processes.requireAttachedProcess(callingPid));
                 }
-                lifecycleDispatcher.doneLocked(service, type, intent);
+                lifecycleDispatcher.doneLocked(service, type, startId, result, intent);
             }
         }
     }
@@ -516,12 +603,12 @@ public final class ActiveServices implements SystemServiceBindings {
             lifecycleByToken.put(lane.callbackToken, lane);
         }
         service.processRequested = false;
-        if (!hasConnections(service)) {
+        if (!hasDemand(service)) {
             retireIfUnowned(service);
             return false;
         }
         planLifecycleLocked(service);
-        return hasConnections(service);
+        return hasDemand(service);
     }
 
     /** Policy admission only; notification transport runs after this monitor is released. */
@@ -555,7 +642,7 @@ public final class ActiveServices implements SystemServiceBindings {
     }
 
     private void retireIfUnowned(ServiceRecord service) throws RemoteException {
-        if (hasConnections(service) || service.retiring) return;
+        if (hasDemand(service) || service.retiring) return;
         service.retiring = true;
         planLifecycleLocked(service);
     }
@@ -594,6 +681,11 @@ public final class ActiveServices implements SystemServiceBindings {
         ApplicationProcessRegistry.AttachedApplication gone = processes.retireAttached(
                 operation.ownerPid, operation.ownerSequence, operation.ownerThread);
         onProcessGone(gone == null ? operation.lane.attachedOwner : gone);
+    }
+
+    /** Android keeps a service while it is started or has a bound client. */
+    private static boolean hasDemand(ServiceRecord service) {
+        return StartedServiceRequests.hasDemand(service) || hasConnections(service);
     }
 
     private static boolean hasConnections(ServiceRecord service) {
@@ -665,6 +757,7 @@ public final class ActiveServices implements SystemServiceBindings {
         service.createScheduled = false;
         service.stopScheduled = false;
         service.processRequested = false;
+        StartedServiceRequests.ownerGone(service);
         service.executingCallbacks = 0;
         service.createCallbackPending = false;
         service.stopCallbackPending = false;
@@ -693,7 +786,7 @@ public final class ActiveServices implements SystemServiceBindings {
             removeIndexedConnections(binding);
         }
 
-        if (hasConnections(service)) {
+        if (hasDemand(service)) {
             service.retiring = false;
             ApplicationProcessRegistry.AttachedApplication replacement = processes.findAttached(
                     service.component.getPackageName(), service.processName, service.uid);
@@ -702,12 +795,45 @@ public final class ActiveServices implements SystemServiceBindings {
                 catch (RemoteException failure) {
                     throw new IllegalStateException("Replacement owner admission failed", failure);
                 }
-            } else {
+            } else if (hasConnections(service)) {
                 processLaunches.requestLocked(service, null);
+            } else {
+                scheduleServiceRestartLocked(service);
             }
         } else {
             service.retiring = true;
             planLifecycleLocked(service);
+        }
+    }
+
+    /** A started-only service relaunches its process after the AOSP restart backoff. */
+    private void scheduleServiceRestartLocked(ServiceRecord service) {
+        if (service.restartScheduled) return;
+        service.restartScheduled = true;
+        long delay = StartedServiceRequests.nextRestartDelay(service,
+                android.os.SystemClock.uptimeMillis());
+        restartScheduler.schedule(() -> performServiceRestart(service), delay,
+                java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    private void performServiceRestart(ServiceRecord service) {
+        try (DeferredTailScope tails = new DeferredTailScope()) {
+            synchronized (this) {
+                service.restartScheduled = false;
+                if (servicesByToken.get(service.canonicalToken) != service
+                        || service.applicationThread != null || !hasDemand(service)) return;
+                ApplicationProcessRegistry.AttachedApplication attached = processes.findAttached(
+                        service.component.getPackageName(), service.processName, service.uid);
+                if (attached == null) {
+                    processLaunches.requestLocked(service, null);
+                    return;
+                }
+                try {
+                    attachAndSchedule(service, attached);
+                } catch (RemoteException failure) {
+                    throw new IllegalStateException("Service restart admission failed", failure);
+                }
+            }
         }
     }
 
@@ -729,6 +855,38 @@ public final class ActiveServices implements SystemServiceBindings {
     private long nextSequence() {
         if (nextSequence == Long.MAX_VALUE) throw new IllegalStateException("Sequence exhausted");
         return nextSequence++;
+    }
+
+    /** Resolves the manifest service and returns its live record, creating it on demand. */
+    private ServiceRecord retrieveServiceLocked(ComponentName component, String instanceName,
+            int callingUid) {
+        String packageName = component.getPackageName();
+        ServiceInfo info = InstalledServiceInfo.service(packageName,
+                packages.resolveInstalledPackage(packageName), component.getClassName());
+        if (info == null || !info.enabled || info.applicationInfo == null) return null;
+        if (!info.exported && callingUid != android.os.Process.SYSTEM_UID
+                && callingUid != info.applicationInfo.uid) {
+            throw new SecurityException("Not allowed to use unexported service " + component);
+        }
+        if (instanceName != null && instanceName.isEmpty()) {
+            throw new IllegalArgumentException("Empty isolated service instance name");
+        }
+        boolean isolated = instanceName != null;
+        if (isolated && (info.flags & ServiceInfo.FLAG_ISOLATED_PROCESS) == 0) {
+            throw new SecurityException("Service is not declared isolatedProcess");
+        }
+        String key = serviceKey(component, instanceName);
+        ServiceRecord service = services.get(key);
+        if (service == null) {
+            String processName = info.processName;
+            if (processName == null || processName.isEmpty()) processName = packageName;
+            if (isolated) processName = processName + ":" + instanceName;
+            int uid = isolated ? allocateIsolatedUid() : info.applicationInfo.uid;
+            service = new ServiceRecord(component, instanceName, processName, uid, isolated, info);
+            services.put(key, service);
+            servicesByToken.put(service.canonicalToken, service);
+        }
+        return service;
     }
 
     private int allocateIsolatedUid() {

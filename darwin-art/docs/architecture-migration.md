@@ -44,7 +44,7 @@ Component tests are not application acceptance. See [AGENTS.md](../AGENTS.md),
 | Calculator / DeskClock | Physical Calculator pointer and keyboard arithmetic and DeskClock Stopwatch start/pause pass. Localized window labels remain incomplete. |
 | Input / WMS | Exact-root ingress, readiness/focus fences, bounded first-key queue and receiver lifetime are adopted. Parent/process-death cleanup remains open. |
 | Orientation / resize | Per-task revisioned geometry: launch orientation, `setRequestedOrientation`, real AppKit edge resize → DisplayManager callback, config/relaunch/`WindowStateResizeItem` transactions, WMS frames/insets and host backing on one revision. Physical: Calculator/DeskClock relaunch, Chromium/Blue Archive config change, five-point click map, popup through resize, two-app isolation, close mid-resize. |
-| Blue Archive | Unchanged full-split APK starts landscape `1280×720` (2×), renders Unity frames, survives a 24-drag live-resize stress (240 revisions, 67 swapchain recreations, no fault) without relaunch, and takes physical clicks on Android dialogs and Unity UI. GMS is absent (game shows its notice). |
+| Blue Archive | Unchanged full-split APK starts landscape `1280×720` (2×), renders Unity frames, survives a 24-drag live-resize stress (240 revisions, 67 swapchain recreations, no fault) without relaunch, and takes physical clicks on Android dialogs and Unity UI. The Nexon patcher downloads and verifies all 1464 files (~650 MB), preprocessing completes and the login title screen renders; a CoreAudio process tap measures non-silent output there (peak 0.12). GMS is absent (game shows its notice). |
 | Services | Exact-client connection ledger, process-shared demand and service lifecycle lanes are adopted. Real remote death and reusable shutdown are not proven. |
 | Graphics / SCM | Retained backing, fences and scanout diagnostics pass. ABI2 SCM/Binder callbacks and focused lifetime tests pass; unchanged-APK managed-transfer acceptance remains open. |
 | Source licensing | Original work uses Apache-2.0; upstream notices and OpenJDK GPLv2 + Classpath scope are recorded in the repository's licensing documents. Binary distribution/source matching remains a separate gate. |
@@ -54,8 +54,14 @@ Component tests are not application acceptance. See [AGENTS.md](../AGENTS.md),
 - **Activity visibility:** an Activity behind a new top Activity is paused but
   never stopped or hidden, so translucent/unfinished top windows show it.
 - **Popups:** `ACTION_OUTSIDE` is not delivered; outside taps reach the parent.
-- **Blue Archive:** gameplay beyond the title/download notice is unverified
-  (GMS unavailable; the 657 MB download was not started).
+- **Permissions/features:** `IActivityManager.checkPermissionForDevice` is
+  unhandled, so an empty reply reads back as `PERMISSION_GRANTED` for every
+  permission; `IPackageManager.hasSystemFeature` reads back false, and
+  `resolveContentProvider`/`resolveService`/`getNameForUid`/`getReceiverInfo`
+  are unhandled. These need the platform permission table and SystemConfig.
+- **Broadcasts:** only unordered delivery to runtime-registered receivers;
+  ordered broadcasts and manifest receivers are unsupported, and permission
+  grants/protected broadcasts are not modeled.
 - **SCM:** authenticated custody, carrier propagation, all consumer variants,
   discard/truncation, close/crash and alias semantics remain before adoption.
 
@@ -97,14 +103,24 @@ cargo test --workspace
 
 ## Latest progress
 
-- **Geometry:** ActivityTask/Display/WMS own per-task orientation and resize
-  revisions; AppKit reports points and applies revisions (ADR 0008).
-- **Blue Archive:** guest `dlopen` accepts `RTLD_GLOBAL`, so Unity uses the media
-  NDK instead of its NULL-base JNI fallback; landscape frames and input verified.
-- **Graphics/transport:** WSI extent semantics, BLAST producer dimensions,
-  destination frames and one-way Binder delivery now follow AOSP/kernel rules.
-- **Live resize:** SF aliases replaced output ids to the live owner and commits
-  superseded transactions without presenting (ADR 0003); the producer queue
-  retires consumer-held generations instead of failing (no generation cap —
-  release completion lags composition); the signal trampoline honours
-  `SA_RESETHAND`; native traps name their `dladdr` symbol.
+- **Blue Archive download:** app processes run `RuntimeInit.redirectLogStreams`
+  and `commonInit` (FATAL EXCEPTION pre-handler, kill-on-crash, `http.agent`);
+  that exposed a swallowed NPE from a null `getLaunchIntentForPackage`, now
+  resolved by PM `queryIntentActivities` for MAIN/INFO and MAIN/LAUNCHER
+  (manifest schema 8 records MAIN/INFO).
+- **JNI unwind publication:** the NativeBridge thunk trusted `x28` as the managed
+  SP, which holds only under generic JNI; JIT-compiled JNI stubs faulted the
+  registry push on download threads. Push validates the SP; pop is keyed.
+- **Logging/libandroid:** host liblog keeps Android's default-priority fallback
+  (Log.d/v visible); libbinder builds with Soong's `-DNDEBUG` (its debug
+  remote-ref paths faulted); libandroid exports socket tagging (`net.c`).
+- **System services:** AMS receiver registration, sticky redelivery and
+  unordered broadcasts (`BroadcastRegistry`), `BatteryService` sticky
+  `BATTERY_CHANGED` from IOPowerSources, `getMemoryInfo` over ProcessList
+  levels, `getProcessesInErrorState`; NMS posts/cancels notifications and
+  keeps per-app channels (unknown channel is dropped as in NMS).
+- **Build/daemon parity:** Soong's `-DNDEBUG -UDEBUG` on the shared
+  frameworks/native, ziparchive, androidfw, liblog/libutils and nativehelper
+  builds (log volume ~20× lower); symbol pins sort in the C locale; absent
+  weak platform imports are reported; SCM capability/lease tombstones retire
+  the oldest unreferenced death instead of sealing after 256 process exits.

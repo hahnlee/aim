@@ -424,6 +424,16 @@ darwin_art_unwindstack_push_quick_frame(void* managed_sp) {
   if (managed_sp == nullptr || pthread_threadid_np(nullptr, &thread_id) != 0 || thread_id == 0) {
     return;
   }
+  // A managed quick frame is 16-byte aligned on this thread's stack, and the
+  // copied frame words below must lie inside it. Anything else is not a
+  // managed SP (for example x28 under a compiled JNI stub).
+  const uintptr_t sp = reinterpret_cast<uintptr_t>(managed_sp);
+  const uintptr_t stack_top = reinterpret_cast<uintptr_t>(pthread_get_stackaddr_np(pthread_self()));
+  const uintptr_t stack_size = pthread_get_stacksize_np(pthread_self());
+  if ((sp & 15u) != 0 || stack_size > stack_top || sp < stack_top - stack_size ||
+      sp > stack_top - 28u * sizeof(uint64_t)) {
+    return;
+  }
   DarwinArtQuickFrameSlot* slot = FindLocalQuickFrameSlot(thread_id, true);
   if (slot == nullptr) return;
   const uint64_t art_main_thread_id = __atomic_load_n(

@@ -132,6 +132,7 @@ final class ServiceProcessLaunchController {
     }
 
     private static boolean demanded(ServiceRecord service) {
+        if (StartedServiceRequests.hasDemand(service)) return true;
         for (IntentBindRecord binding : service.bindings.values()) {
             if (binding.hasAdmittedConnections()) return true;
         }

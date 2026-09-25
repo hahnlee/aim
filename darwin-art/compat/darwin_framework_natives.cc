@@ -302,6 +302,10 @@ bool RegisterFrameworkNatives(JNIEnv* env) {
        reinterpret_cast<void*>(&darwin_art::process::ParseProcLine)},
       {const_cast<char*>("sendSignal"), const_cast<char*>("(II)V"),
        reinterpret_cast<void*>(&ProcessSendSignal)},
+      {const_cast<char*>("getFreeMemory"), const_cast<char*>("()J"),
+       reinterpret_cast<void*>(&darwin_art::process::GetFreeMemory)},
+      {const_cast<char*>("getTotalMemory"), const_cast<char*>("()J"),
+       reinterpret_cast<void*>(&darwin_art::process::GetTotalMemory)},
   };
   if (!Register(env, "android/os/Process", process_methods,
                 static_cast<jint>(std::size(process_methods)))) {

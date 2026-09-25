@@ -1,0 +1,34 @@
+--- a/libcutils/ashmem-host.cpp
++++ b/libcutils/ashmem-host.cpp
+@@ -68,6 +68,23 @@
+ }
+ 
+ int ashmem_create_region(const char* /*ignored*/, size_t size) {
++#if defined(__APPLE__)
++    // ActivityThread points TMPDIR at the app's Android cache path, which does
++    // not name a host directory; tmpfile() follows TMPDIR and fails. Create the
++    // same unlinked regular file directly in the host temporary directory.
++    char path[] = "/tmp/android-ashmem.XXXXXX";
++    unique_fd fd(mkstemp(path));
++    if (fd == -1) {
++        return -1;
++    }
++    if (unlink(path) == -1) {
++        return -1;
++    }
++    if (TEMP_FAILURE_RETRY(ftruncate(fd, size)) == -1) {
++        return -1;
++    }
++    return fd.release();
++#else
+     // Files returned by tmpfile are automatically removed.
+     std::unique_ptr<FILE, decltype(&fclose)> tmp(tmpfile(), &fclose);
+ 
+@@ -86,6 +103,7 @@
+         return -1;
+     }
+     return dupfd.release();
++#endif
+ }
+ 
+ int ashmem_set_prot_region(int /*fd*/, int /*prot*/) {

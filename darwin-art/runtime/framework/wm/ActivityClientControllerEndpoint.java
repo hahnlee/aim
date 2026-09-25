@@ -116,6 +116,18 @@ public final class ActivityClientControllerEndpoint extends Binder {
         return result;
     }
 
+    /** Activity presence of one process: 2 resumed, 1 paused only, 0 none. */
+    public static int activityPresence(IBinder applicationThread) {
+        synchronized (activityLock) {
+            ArrayDeque<IBinder> stack = activityStacks.get(applicationThread);
+            if (stack == null || stack.isEmpty()) return 0;
+            for (IBinder token : stack) {
+                if (activityRecords.get(token).state == State.RESUMED) return 2;
+            }
+            return 1;
+        }
+    }
+
     /** Records the configuration carried by a scheduled task transaction. */
     static void reported(IBinder token, Configuration configuration) {
         synchronized (activityLock) {

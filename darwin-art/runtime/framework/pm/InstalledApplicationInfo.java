@@ -75,6 +75,11 @@ public final class InstalledApplicationInfo {
         info.deviceProtectedDataDir = "/data/user_de/0/" + packageName;
         info.nativeLibraryDir = installed.nativeLibraryDirectory();
         applyLabel(info, installed, "label", "label_res");
+        // android:icon of <application>; PackageItemInfo.icon is the resource
+        // apps use for notification small icons and launcher entries.
+        String iconResource = installed.legacyManifestHint("icon_res");
+        info.icon = iconResource == null || iconResource.isEmpty()
+                ? 0 : Integer.decode(iconResource);
         String application = installed.legacyManifestHint("application");
         if (application != null && !application.equals("none")) info.className = application;
         info.metaData = InstalledManifestMetadata.fromRecord(installed);

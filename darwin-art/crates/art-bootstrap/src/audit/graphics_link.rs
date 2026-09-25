@@ -648,6 +648,8 @@ pub(crate) fn audit_runtime_graphics_link_mode(
             "Network",
             "-framework",
             "SystemConfiguration",
+            "-framework",
+            "IOKit",
             "-o",
         ])
         .arg(&runtime_library);

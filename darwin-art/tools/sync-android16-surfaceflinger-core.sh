@@ -156,7 +156,16 @@ download_gitiles_tool() {
 }
 
 download_gitiles_tool darwin-x86/bin/hidl-gen "$tool_root/hidl-gen" "$HIDL_GEN_SHA256"
-download_gitiles_tool darwin-x86/bin/aconfig "$tool_root/aconfig" "$ACONFIG_SHA256"
+if [[ "$(uname -m)" == arm64 ]] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+  # prebuilts/build-tools has only a darwin-x86 aconfig; without Rosetta it
+  # cannot execute, so build the same tool from the pinned platform/build source.
+  if [[ ! -x "$tool_root/aconfig" || "$(file -b "$tool_root/aconfig")" != *arm64* ]]; then
+    DARWIN_ART_SURFACEFLINGER_CORE_TOOLS="$tool_root" \
+      "$project_root/tools/build-android16-aconfig-host.sh"
+  fi
+else
+  download_gitiles_tool darwin-x86/bin/aconfig "$tool_root/aconfig" "$ACONFIG_SHA256"
+fi
 
 aidl_zip="$download_root/build-tools-r36-macosx.zip"
 if [[ ! -f "$aidl_zip" ]]; then

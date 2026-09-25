@@ -33,6 +33,34 @@ final class ServiceRecord {
     int executingCallbacks;
     boolean createCallbackPending;
     boolean stopCallbackPending;
+
+    /** One Context.startService request awaiting ServiceStartArgs delivery. */
+    static final class StartItem {
+        final int id;
+        final android.content.Intent intent;
+
+        StartItem(int startId, android.content.Intent startIntent) {
+            id = startId;
+            intent = startIntent;
+        }
+    }
+
+    // Started-service demand, as AOSP ServiceRecord.startRequested/pendingStarts.
+    boolean startRequested;
+    /** START_NOT_STICKY for the latest delivered start: do not restart after death. */
+    boolean stopIfKilled;
+    int lastStartId;
+    final java.util.ArrayDeque<StartItem> pendingStarts = new java.util.ArrayDeque<>();
+    /** Delivered start arguments whose SERVICE_DONE_EXECUTING_START has not arrived. */
+    int deliveredStarts;
+    boolean foreground;
+    int foregroundId;
+    int foregroundServiceType;
+    // AOSP ServiceRecord restart backoff after owner death.
+    int crashCount;
+    long restartDelayMillis;
+    long lastStartUptimeMillis;
+    boolean restartScheduled;
     /** Exact-owner transport admission; accessed only while ActiveServices is held. */
     static final class LifecycleLane {
         final ServiceRecord service;

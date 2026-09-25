@@ -12,6 +12,8 @@ jboolean ReadProcFile(JNIEnv*, jobject, jstring, jintArray, jobjectArray,
                       jlongArray, jfloatArray);
 jboolean ParseProcLine(JNIEnv*, jobject, jbyteArray, jint, jint, jintArray,
                        jobjectArray, jlongArray, jfloatArray);
+jlong GetFreeMemory(JNIEnv*, jobject);
+jlong GetTotalMemory(JNIEnv*, jobject);
 
 }  // namespace darwin_art::process
 

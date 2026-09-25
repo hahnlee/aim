@@ -1,8 +1,11 @@
 package android.app;
 
+import android.content.IIntentReceiver;
 import android.content.Intent;
+import android.content.pm.ParceledListSlice;
 import android.content.pm.ServiceInfo;
 import android.content.res.CompatibilityInfo;
+import android.os.Bundle;
 import android.os.IBinder;
 import android.os.IInterface;
 import android.os.RemoteException;
@@ -14,8 +17,13 @@ public interface IApplicationThread extends IInterface {
     void scheduleBindService(IBinder token, Intent intent, boolean rebind, int processState,
             long bindSeq) throws RemoteException;
     void scheduleUnbindService(IBinder token, Intent intent) throws RemoteException;
+    void scheduleServiceArgs(IBinder token, ParceledListSlice args) throws RemoteException;
     void scheduleStopService(IBinder token) throws RemoteException;
     void scheduleExit() throws RemoteException;
+    void scheduleRegisteredReceiver(IIntentReceiver receiver, Intent intent, int resultCode,
+            String data, Bundle extras, boolean ordered, boolean sticky, boolean assumeDelivered,
+            int sendingUser, int processState, int sendingUid, String sendingPackage)
+            throws RemoteException;
 
     abstract class Stub {
         public static IApplicationThread asInterface(IBinder binder) { return null; }

@@ -126,6 +126,8 @@ extern "C" AMediaCodec* AMediaCodec_createDecoderByType(const char* mime) {
     return AMediaCodec_createCodecByName("c2.darwin.avc.decoder");
   if (std::strcmp(mime, "video/x-vnd.on2.vp9") == 0)
     return AMediaCodec_createCodecByName("c2.darwin.vp9.decoder");
+  if (std::getenv("DARWIN_ART_DEBUG_MEDIA_CODEC"))
+    fprintf(stderr, "ART NDK MediaCodec: no decoder for mime=%s\n", mime);
   return nullptr;
 }
 

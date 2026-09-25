@@ -71,6 +71,14 @@ int Run(JNIEnv* env, const char* socket_path, InstalledRecordResolver resolver) 
     return 70;
   }
 
+  jclass battery_state = LoadClass(
+      env, loader, load, "dev.darwinart.runtime.power.DarwinBatteryStateProvider");
+  if (battery_state == nullptr || env->ExceptionCheck() ||
+      !darwin_art::framework::power::RegisterBatteryStateProvider(env,
+                                                                  battery_state)) {
+    return 70;
+  }
+
   jclass activity = LoadClass(
       env, loader, load, "dev.darwinart.runtime.am.ActivityManagerEndpoint");
   if (activity == nullptr || env->ExceptionCheck()) return 70;

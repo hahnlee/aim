@@ -69,6 +69,7 @@ launch_app() {
     DARWIN_ART_DEBUG_INPUT_LATENCY=1 \
     DARWIN_ART_DEBUG_POINTER=1 \
     DARWIN_ART_DEBUG_SURFACE_TRANSACTIONS=1 \
+    DARWIN_ART_DEBUG_SURFACECONTROL_PIXELS=1 \
   "$root/tools/run-android-apk-app.sh" "$apk" 0 >"$metadata_log" 2>&1
   wait_for_package "$package"
 }

@@ -524,6 +524,8 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
             "Network",
             "-framework",
             "SystemConfiguration",
+            "-framework",
+            "IOKit",
             "-o",
         ])
         .arg(&runtime_library);

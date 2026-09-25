@@ -1,8 +1,7 @@
 diff --git a/libs/binder/OS_unix_base.cpp b/libs/binder/OS_unix_base.cpp
 --- a/libs/binder/OS_unix_base.cpp
 +++ b/libs/binder/OS_unix_base.cpp
-@@ -23,7 +23,11 @@
- #include <log/log.h>
+@@ -23,6 +23,10 @@
  #include <string.h>
  #include <sys/socket.h>
 
@@ -13,7 +12,7 @@ diff --git a/libs/binder/OS_unix_base.cpp b/libs/binder/OS_unix_base.cpp
  using android::binder::ReadFully;
 
  namespace android::binder::os {
-@@ -56,7 +60,11 @@ status_t getRandomBytes(uint8_t* data, size_t size) {
+@@ -56,7 +60,11 @@
  }
 
  status_t dupFileDescriptor(int oldFd, int* newFd) {
@@ -28,8 +27,7 @@ diff --git a/libs/binder/OS_unix_base.cpp b/libs/binder/OS_unix_base.cpp
 diff --git a/libs/binder/Parcel.cpp b/libs/binder/Parcel.cpp
 --- a/libs/binder/Parcel.cpp
 +++ b/libs/binder/Parcel.cpp
-@@ -52,5 +52,9 @@
- #include "RpcState.h"
+@@ -53,6 +53,10 @@
  #include "Static.h"
  #include "Utils.h"
 
@@ -38,7 +36,9 @@ diff --git a/libs/binder/Parcel.cpp b/libs/binder/Parcel.cpp
 +#endif
 +
  // A lot of code in this file uses definitions from the
-@@ -145,7 +149,11 @@ static void FdTagClose(int fd, const void* addr) {
+ // Linux kernel header for Binder <linux/android/binder.h>
+ // which is included indirectly via "binder_module.h".
+@@ -144,7 +148,11 @@
  }
  static void FdTagClose(int fd, const void* addr) {
      (void)addr;
@@ -50,7 +50,19 @@ diff --git a/libs/binder/Parcel.cpp b/libs/binder/Parcel.cpp
  }
  #endif
 
-@@ -1625,7 +1633,11 @@ status_t Parcel::writeDupFileDescriptor(int fd)
+@@ -608,7 +616,11 @@
+                     // If this is a file descriptor, we need to dup it so the
+                     // new Parcel now owns its own fd, and can declare that we
+                     // officially know we have fds.
++#if defined(__APPLE__)
++                    flat->handle = darwin_art_binder_duplicate_file_descriptor(flat->handle);
++#else
+                     flat->handle = fcntl(flat->handle, F_DUPFD_CLOEXEC, 0);
++#endif
+                     flat->cookie = 1;
+                     kernelFields->mHasFds = kernelFields->mFdsKnown = true;
+                     if (!mAllowFds) {
+@@ -1625,7 +1637,11 @@
      }
      status_t err = writeFileDescriptor(dupFd, true /*takeOwnership*/);
      if (err != OK) {
@@ -62,3 +74,55 @@ diff --git a/libs/binder/Parcel.cpp b/libs/binder/Parcel.cpp
      }
      return err;
  }
+@@ -2380,10 +2396,18 @@
+     }
+
+     for (int i=0 ; err==NO_ERROR && i<numFds ; i++) {
++#if defined(__APPLE__)
++        h->data[i] = darwin_art_binder_duplicate_file_descriptor(readFileDescriptor());
++#else
+         h->data[i] = fcntl(readFileDescriptor(), F_DUPFD_CLOEXEC, 0);
++#endif
+         if (h->data[i] < 0) {
+             for (int j = 0; j < i; j++) {
++#if defined(__APPLE__)
++                darwin_art_binder_close_file_descriptor(h->data[j]);
++#else
+                 close(h->data[j]);
++#endif
+             }
+             native_handle_delete(h);
+             return nullptr;
+@@ -2586,13 +2610,21 @@
+     status_t err = NO_ERROR;
+     for (size_t i=0 ; i<fd_count && err==NO_ERROR ; i++) {
+         int fd = this->readFileDescriptor();
++#if defined(__APPLE__)
++        if (fd < 0 || ((fds[i] = darwin_art_binder_duplicate_file_descriptor(fd)) < 0)) {
++#else
+         if (fd < 0 || ((fds[i] = fcntl(fd, F_DUPFD_CLOEXEC, 0)) < 0)) {
++#endif
+             err = BAD_VALUE;
+             ALOGE("fcntl(F_DUPFD_CLOEXEC) failed in Parcel::read, i is %zu, fds[i] is %d, fd_count is %zu, error: %s",
+                   i, fds[i], fd_count, strerror(fd < 0 ? -fd : errno));
+             // Close all the file descriptors that were dup-ed.
+             for (size_t j=0; j<i ;j++) {
++#if defined(__APPLE__)
++                darwin_art_binder_close_file_descriptor(fds[j]);
++#else
+                 close(fds[j]);
++#endif
+             }
+         }
+     }
+@@ -2781,6 +2813,10 @@
+             flat_binder_object* flat =
+                     reinterpret_cast<flat_binder_object*>(newData + kf->mObjects[i]);
+             if (flat->hdr.type == BINDER_TYPE_FD) {
++#if defined(__APPLE__)
++                flat->handle = darwin_art_binder_duplicate_file_descriptor(flat->handle);
++#else
+                 flat->handle = fcntl(flat->handle, F_DUPFD_CLOEXEC, 0);
++#endif
+             }
+         }

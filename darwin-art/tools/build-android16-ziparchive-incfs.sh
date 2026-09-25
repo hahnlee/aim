@@ -58,6 +58,8 @@ cp "$source_root/zip_archive.cc" "$stage/source/zip_archive.cc"
 
 flags=(
   -arch arm64 -isysroot "$sdk" -std=c++20 -O2 -fPIC
+  # Soong global cflags: ALOGV/LOG_NDEBUG tracing and debug asserts are off.
+  -DNDEBUG -UDEBUG
   -Wall -Werror -Wno-missing-field-initializers -Wconversion
   -Wno-sign-conversion -Wold-style-cast
   -DZLIB_CONST -D_FILE_OFFSET_BITS=64 -DZIPARCHIVE_DISABLE_CALLBACK_API=1
@@ -89,7 +91,7 @@ lipo -info "$archive" | grep -F 'architecture: arm64' >/dev/null
 force_loaded="$stage/ziparchive-for-incfs-force-loaded.o"
 "$cxx" -r -arch arm64 -isysroot "$sdk" -Wl,-force_load,"$archive" \
   -o "$force_loaded"
-nm -u "$force_loaded" | awk '$1 ~ /^_/ { print $1 }' | sort -u > "$stage/undefined.txt"
+nm -u "$force_loaded" | awk '$1 ~ /^_/ { print $1 }' | LC_ALL=C sort -u > "$stage/undefined.txt"
 undefined_count="$(wc -l < "$stage/undefined.txt" | tr -d ' ')"
 undefined_sha="$(sha256 "$stage/undefined.txt")"
 [[ "$undefined_count" == "$UNDEFINED_SYMBOL_COUNT" &&

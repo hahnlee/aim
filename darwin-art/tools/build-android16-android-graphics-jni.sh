@@ -42,6 +42,7 @@ image_decoder_patch="$project_root/patches/frameworks-base/0017-ndk-image-decode
 image_decoder_rgba_patch="$project_root/patches/frameworks-base/0019-ndk-image-decoder-rgba.patch"
 bitmap_buffer_patch="$project_root/patches/frameworks-base/0015-darwin-bitmap-buffer-access.patch"
 bitmap_rgba_patch="$project_root/patches/frameworks-base/0016-ndk-bitmap-rgba-compression.patch"
+bitmap_parcel_patch="$project_root/patches/frameworks-base/0020-darwin-hwui-bitmap-parcel.patch"
 
 sync_needed=0
 [[ -f "$aosp/frameworks/base/native/graphics/jni/bitmap.cpp" ]] || sync_needed=1
@@ -83,6 +84,7 @@ verify_hash "$bitmap_buffer_patch" "$BITMAP_BUFFER_ACCESS_PATCH_SHA256"
 verify_hash "$image_decoder_patch" "$NDK_IMAGE_DECODER_INPUT_PATCH_SHA256"
 verify_hash "$image_decoder_rgba_patch" "$NDK_IMAGE_DECODER_RGBA_PATCH_SHA256"
 verify_hash "$bitmap_rgba_patch" "$BITMAP_RGBA_COMPRESSION_PATCH_SHA256"
+verify_hash "$bitmap_parcel_patch" "$BITMAP_PARCEL_PATCH_SHA256"
 verify_hash "$lazy_native_window_patch" "$LAZY_NATIVE_WINDOW_PATCH_SHA256"
 verify_hash "$globalref_jni_patch" "$GLOBALREF_JNI_PATCH_SHA256"
 verify_hash "$thread_detach_patch" "$THREAD_DETACH_PATCH_SHA256"
@@ -216,6 +218,7 @@ patch -s -d "$patched_hwui" -p1 < "$require_jni_env_patch"
 patch -s -d "$patched_hwui" -p1 < "$globalref_jni_patch"
 patch -s -d "$patched_hwui" -p1 < "$bitmap_buffer_patch"
 patch -s -d "$patched_hwui" -p1 < "$bitmap_rgba_patch"
+patch -s -d "$patched_hwui" -p1 < "$bitmap_parcel_patch"
 gpu_mode=1
 if [[ "$cpu_diagnostic" == 1 ]]; then
   gpu_mode=0
@@ -299,6 +302,11 @@ common_flags=(
   -I"$aosp/external/skia/src/codec"
 )
 common_flags+=( -iquote "$project_root/compat" )
+# Bitmap/Gainmap parcel JNI keeps AOSP's AParcel format; the host AParcel
+# subset lives in compat/binder/ndk_parcel_host.cc.
+common_flags+=( -DDARWIN_ART_BINDER_PARCEL
+  -I"$aosp/frameworks/native/libs/binder/ndk/include_ndk"
+  -I"$aosp/frameworks/native/libs/binder/ndk/include_platform" )
 if [[ "$gpu_mode" == 1 ]]; then
   common_flags+=( -DDARWIN_ART_HWUI_GPU )
 else
@@ -311,7 +319,7 @@ fi
 # objects.
 patch_identity="$(for patch_file in "$critical_patch" "$lazy_native_window_patch" \
     "$thread_detach_patch" "$require_jni_env_patch" "$globalref_jni_patch" \
-    "$hwui_gpu_patch" "$bitmap_buffer_patch" "$bitmap_rgba_patch" "$project_root/compat/darwin_hwui_jni_attachment.h"; do sha256 "$patch_file"; done |
+    "$hwui_gpu_patch" "$bitmap_buffer_patch" "$bitmap_rgba_patch" "$bitmap_parcel_patch" "$project_root/compat/darwin_hwui_jni_attachment.h"; do sha256 "$patch_file"; done |
     shasum -a 256 | awk '{print $1}')"
 
 compile_cached() {

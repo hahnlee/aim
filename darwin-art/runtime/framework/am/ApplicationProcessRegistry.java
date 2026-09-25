@@ -266,6 +266,19 @@ public final class ApplicationProcessRegistry {
         return snapshot(pid, record);
     }
 
+    /** Attached processes running as {@code uid}, in no particular order. */
+    public synchronized java.util.List<AttachedApplication> attachedForUid(int uid) {
+        java.util.ArrayList<AttachedApplication> result = new java.util.ArrayList<>();
+        for (Map.Entry<Integer, ProcessRecord> entry : processes.entrySet()) {
+            ProcessRecord record = entry.getValue();
+            if (record.attachmentFinished && record.thread != null && record.uid == uid
+                    && record.packageName != null && record.processName != null) {
+                result.add(snapshot(entry.getKey(), record));
+            }
+        }
+        return result;
+    }
+
     public synchronized AttachedApplication findAttached(
             String packageName, String processName, int uid) {
         for (Map.Entry<Integer, ProcessRecord> entry : processes.entrySet()) {

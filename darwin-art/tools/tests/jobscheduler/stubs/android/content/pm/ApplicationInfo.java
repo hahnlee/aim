@@ -12,6 +12,7 @@ public class ApplicationInfo extends PackageItemInfo {
     public String processName;
     public String sourceDir;
     public String publicSourceDir;
+    public String[] splitNames;
     public String[] splitSourceDirs;
     public String[] splitPublicSourceDirs;
     public String dataDir;

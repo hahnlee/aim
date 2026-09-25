@@ -24,6 +24,8 @@ import dev.darwinart.runtime.job.JobSchedulerEndpoint;
 import dev.darwinart.runtime.job.JobSchedulerService;
 import dev.darwinart.runtime.locale.LocaleManagerEndpoint;
 import dev.darwinart.runtime.notification.NotificationManagerEndpoint;
+import dev.darwinart.runtime.power.BatteryService;
+import dev.darwinart.runtime.power.DarwinBatteryStateProvider;
 import dev.darwinart.runtime.power.DarwinPowerStateProvider;
 import dev.darwinart.runtime.power.PowerManagerEndpoint;
 import dev.darwinart.runtime.power.ThermalServiceEndpoint;
@@ -67,6 +69,7 @@ public final class SystemServiceFactory {
         ActivityManagerEndpoint activity =
                 new ActivityManagerEndpoint(packages, processes, taskGeometry);
         services.put("activity", activity);
+        new BatteryService(new DarwinBatteryStateProvider(), activity.systemBroadcasts()).start();
         services.put("activity_task", new ActivityTaskManagerEndpoint(packages, processes));
         services.put("display", new DisplayManagerEndpoint(taskDisplays));
         DesktopRootRegistry desktopRoots = windowManager.createDesktopRootRegistry();

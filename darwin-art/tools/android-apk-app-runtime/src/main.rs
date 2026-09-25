@@ -57,6 +57,7 @@ struct ActivityCandidate {
     label_res: Option<u32>,
     main: bool,
     launcher: bool,
+    info: bool,
     alias: bool,
     screen_orientation: Option<i32>,
     config_changes: Option<u32>,
@@ -119,6 +120,7 @@ struct ManifestInfo {
     // hardwareAccelerated resolved against the application default).
     activity_windows: Vec<(String, i32, u32, bool)>,
     activity_aliases: Vec<(String, String)>,
+    info_activities: Vec<String>,
     services: Vec<(String, String, bool, Option<String>, bool, bool)>,
     receivers: Vec<(String, String, bool, bool)>,
     service_metadata: Vec<(String, Vec<ManifestMetadata>)>,
@@ -680,6 +682,9 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
     let mut application_supports_rtl = false;
     let mut current: Option<ActivityCandidate> = None;
     let mut launchers = Vec::new();
+    // MAIN/INFO declarations, which PackageManager.getLaunchIntentForPackage
+    // prefers over MAIN/LAUNCHER.
+    let mut info_activities = Vec::new();
     let mut activities = Vec::new();
     let mut activity_aliases = Vec::new();
     let mut service_names = Vec::new();
@@ -922,6 +927,7 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
                         label_res: activity_label_res,
                         main: false,
                         launcher: false,
+                        info: false,
                         alias: tag == "activity-alias",
                         screen_orientation,
                         config_changes,
@@ -1073,11 +1079,16 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
                     }
                 }
                 "category" if current.is_some() => {
-                    if find_attribute(input, strings, attrs, attr_count, attr_size, "name")?
+                    match find_attribute(input, strings, attrs, attr_count, attr_size, "name")?
                         .as_deref()
-                        == Some("android.intent.category.LAUNCHER")
                     {
-                        current.as_mut().expect("checked").launcher = true;
+                        Some("android.intent.category.LAUNCHER") => {
+                            current.as_mut().expect("checked").launcher = true;
+                        }
+                        Some("android.intent.category.INFO") => {
+                            current.as_mut().expect("checked").info = true;
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -1096,6 +1107,9 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
                 }
                 if candidate.main && candidate.launcher {
                     launchers.push(candidate.clone());
+                }
+                if candidate.main && candidate.info {
+                    info_activities.push(candidate.component_name.clone());
                 }
                 if candidate.alias {
                     activity_aliases.push(candidate);
@@ -1214,6 +1228,10 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
             ))
         })
         .collect::<Result<Vec<_>>>()?;
+    let info_activities = info_activities
+        .iter()
+        .map(|name| normalize_activity(&package, name))
+        .collect::<Result<Vec<_>>>()?;
     let mut service_metadata = Vec::new();
     let services = service_names
         .into_iter()
@@ -1291,6 +1309,7 @@ fn parse_manifest(input: &[u8]) -> Result<ManifestInfo> {
         activity_themes,
         activity_windows,
         activity_aliases,
+        info_activities,
         services,
         receivers,
         service_metadata,
@@ -1863,7 +1882,7 @@ fn run() -> Result<()> {
         format!(" split_names={}", split_names.join(","))
     };
     println!(
-        "apk-app-runtime: package={} application={} activity={} launch_component={} screen_orientation={} descriptor={} activities={} activity_windows={} activity_aliases={} services={} receivers={} service_metadata={} providers={} application_metadata={} permissions={} version_code={} version_name={} theme={:#x} target_sdk={} debuggable={} has_code={} hardware_accelerated={} supports_rtl={} activity_hardware_accelerated={} label={} label_res={:#x} icon={} dex={}-{} manifest_schema=6 native={}{} native_root={}",
+        "apk-app-runtime: package={} application={} activity={} launch_component={} screen_orientation={} descriptor={} activities={} activity_windows={} activity_aliases={} info_activities={} services={} receivers={} service_metadata={} providers={} application_metadata={} permissions={} version_code={} version_name={} theme={:#x} target_sdk={} debuggable={} has_code={} hardware_accelerated={} supports_rtl={} activity_hardware_accelerated={} label={} label_res={:#x} icon={} icon_res={:#x} dex={}-{} manifest_schema=8 native={}{} native_root={}",
         info.package,
         info.application,
         info.activity,
@@ -1894,6 +1913,11 @@ fn run() -> Result<()> {
                 .map(|(alias, target)| format!("{alias}>{target}"))
                 .collect::<Vec<_>>()
                 .join(",")
+        },
+        if info.info_activities.is_empty() {
+            "none".to_owned()
+        } else {
+            info.info_activities.join(",")
         },
         if info.services.is_empty() {
             "none".to_owned()
@@ -1952,6 +1976,7 @@ fn run() -> Result<()> {
         info.label,
         info.label_res,
         info.icon.as_deref().unwrap_or("none"),
+        info.application_icon_res,
         dex_source,
         dex_count,
         native_libraries.len(),

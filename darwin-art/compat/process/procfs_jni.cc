@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -334,6 +335,58 @@ jboolean ParseProcLine(JNIEnv* env, jobject, jbyteArray buffer,
       out_strings, out_longs, out_floats);
   env->ReleaseByteArrayElements(buffer, bytes, 0);
   return result;
+}
+
+namespace {
+
+// Sums the kB values of the requested /proc/meminfo tags, as
+// meminfo::ReadMeminfoFile does; false when the file or a tag is missing.
+bool ReadMeminfoKib(std::initializer_list<const char*> tags, uint64_t* total) {
+  const int fd = darwin_art_bionic_open("/proc/meminfo",
+                                        DARWIN_ART_ANDROID_O_CLOEXEC, 0);
+  if (fd < 0) return false;
+  std::string contents;
+  char buffer[4096];
+  for (;;) {
+    const intptr_t count = darwin_art_bionic_read(fd, buffer, sizeof(buffer));
+    if (count <= 0) break;
+    contents.append(buffer, static_cast<size_t>(count));
+  }
+  (void)darwin_art_bionic_close(fd);
+  uint64_t sum = 0;
+  for (const char* tag : tags) {
+    size_t position = 0;
+    const size_t length = std::strlen(tag);
+    for (;;) {
+      position = contents.find(tag, position);
+      if (position == std::string::npos) return false;
+      if (position == 0 || contents[position - 1] == '\n') break;
+      position += length;
+    }
+    sum += std::strtoull(contents.c_str() + position + length, nullptr, 10);
+  }
+  *total = sum;
+  return true;
+}
+
+}  // namespace
+
+// android_os_Process_getFreeMemory: MemFree + Cached, in bytes.
+jlong GetFreeMemory(JNIEnv* env, jobject) {
+  uint64_t kib = 0;
+  if (!ReadMeminfoKib({"MemFree:", "Cached:"}, &kib)) {
+    Throw(env, "java/lang/RuntimeException", "Failed to read /proc/meminfo");
+    return -1;
+  }
+  return static_cast<jlong>(kib * 1024);
+}
+
+// android_os_Process_getTotalMemory reports sysinfo(2) totalram, which is the
+// kernel's MemTotal; the guest kernel view is the facade's /proc/meminfo.
+jlong GetTotalMemory(JNIEnv*, jobject) {
+  uint64_t kib = 0;
+  if (!ReadMeminfoKib({"MemTotal:"}, &kib)) return -1;
+  return static_cast<jlong>(kib * 1024);
 }
 
 }  // namespace darwin_art::process

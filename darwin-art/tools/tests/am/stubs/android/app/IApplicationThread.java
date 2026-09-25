@@ -1,6 +1,7 @@
 package android.app;
 
 import android.content.Intent;
+import android.content.pm.ParceledListSlice;
 import android.content.pm.ServiceInfo;
 import android.content.res.CompatibilityInfo;
 import android.os.IBinder;
@@ -14,6 +15,7 @@ public interface IApplicationThread extends IInterface {
     void scheduleBindService(IBinder token, Intent intent, boolean rebind, int processState,
             long bindSeq) throws RemoteException;
     void scheduleUnbindService(IBinder token, Intent intent) throws RemoteException;
+    void scheduleServiceArgs(IBinder token, ParceledListSlice args) throws RemoteException;
     void scheduleStopService(IBinder token) throws RemoteException;
     void scheduleExit() throws RemoteException;
 

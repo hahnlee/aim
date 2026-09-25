@@ -1,0 +1,29 @@
+--- a/liblog/properties.cpp
++++ b/liblog/properties.cpp
+@@ -298,6 +298,18 @@
+ 
+ #else
+ 
++#if defined(__APPLE__)
++// Darwin hosts the Android device runtime, which has no log.tag properties:
++// keep the device fallback (the caller's default priority) rather than the
++// host-tool INFO floor, so Log.d/Log.v reach the log as they do on Android.
++int __android_log_is_loggable(int prio, const char*, int default_prio) {
++  int minimum_priority = __android_log_get_minimum_priority();
++  if (minimum_priority == ANDROID_LOG_DEFAULT) {
++    minimum_priority = default_prio;
++  }
++  return prio >= minimum_priority;
++}
++#else
+ int __android_log_is_loggable(int prio, const char*, int) {
+   int minimum_priority = __android_log_get_minimum_priority();
+   if (minimum_priority == ANDROID_LOG_DEFAULT) {
+@@ -305,6 +317,7 @@
+   }
+   return prio >= minimum_priority;
+ }
++#endif
+ 
+ int __android_log_is_loggable_len(int prio, const char*, size_t, int def) {
+   return __android_log_is_loggable(prio, nullptr, def);

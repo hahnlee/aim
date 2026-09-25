@@ -23,7 +23,13 @@ runtime/framework/am/ServiceProcessLaunchController.java
 runtime/framework/am/ServiceConnectionResourceController.java
 runtime/framework/am/IntentBindRecord.java
 runtime/framework/am/ServiceRecord.java
+runtime/framework/am/StartedServiceRequests.java
+runtime/framework/am/RunningAppProcesses.java
+runtime/framework/am/ProcessStateQueries.java
+runtime/framework/am/BroadcastRegistry.java
+runtime/framework/am/BroadcastTransactions.java
 runtime/framework/am/SystemServiceBindings.java
+runtime/framework/am/SystemBroadcasts.java
 runtime/framework/appops/AppOpsServiceEndpoint.java
 runtime/framework/audio/AudioServiceEndpoint.java
 runtime/framework/camera/CameraServiceEndpoint.java
@@ -58,11 +64,13 @@ runtime/framework/job/JobSchedulerService.java
 runtime/framework/job/JobServiceContext.java
 runtime/framework/locale/LocaleManagerEndpoint.java
 runtime/framework/notification/NotificationManagerEndpoint.java
+runtime/framework/notification/NotificationRecords.java
 runtime/framework/os/RemoteBinder.java
 runtime/framework/os/SystemServices.java
 runtime/framework/pm/DexLoadReports.java
 runtime/framework/pm/InstalledActivityInfo.java
 runtime/framework/pm/InstalledApplicationInfo.java
+runtime/framework/pm/InstalledLaunchIntents.java
 runtime/framework/pm/InstalledManifestMetadata.java
 runtime/framework/pm/InstalledPackageInfo.java
 runtime/framework/pm/InstalledPackageRecord.java
@@ -71,6 +79,9 @@ runtime/framework/pm/InstalledServiceInfo.java
 runtime/framework/pm/InstalledProviderInfo.java
 runtime/framework/pm/PackageManagerEndpoint.java
 runtime/framework/pm/PackageRecords.java
+runtime/framework/power/BatteryService.java
+runtime/framework/power/BatteryStateProvider.java
+runtime/framework/power/DarwinBatteryStateProvider.java
 runtime/framework/power/DarwinPowerStateProvider.java
 runtime/framework/power/PowerManagerEndpoint.java
 runtime/framework/power/PowerStateProvider.java

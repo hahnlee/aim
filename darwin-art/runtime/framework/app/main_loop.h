@@ -4,6 +4,7 @@
 namespace darwin_art::framework::app {
 enum class ApplicationMainLoopExit {
   kInvalidEnvironment,
+  kRuntimeInit,
   kLooperLookup,
   kWrongLooper,
   kActivityThreadLookup,

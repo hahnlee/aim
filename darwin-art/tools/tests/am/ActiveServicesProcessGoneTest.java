@@ -184,6 +184,10 @@ public final class ActiveServicesProcessGoneTest {
             }
             if (unbindCallback != null) unbindCallback.run(token, intent);
         }
+        @Override public void scheduleServiceArgs(IBinder token,
+                android.content.pm.ParceledListSlice args) {
+            throw new AssertionError("bound-only fixture received start arguments");
+        }
         @Override public void scheduleStopService(IBinder token) throws RemoteException {
             if (callbackProbe != null) callbackProbe.run();
             stops++;

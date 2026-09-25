@@ -136,6 +136,8 @@ libtool_bin="$(xcrun --find libtool)"
 
 common_flags=(
   -std=c11
+  # Soong global cflags: ALOGV/LOG_NDEBUG tracing and debug asserts are off.
+  -DNDEBUG -UDEBUG
   -arch arm64
   -fPIC
   -fno-common

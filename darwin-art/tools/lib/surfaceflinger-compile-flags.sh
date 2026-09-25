@@ -2,6 +2,8 @@
 # verified shadow/generated trees and toolchain paths; no source staging here.
 flags=(
   -arch arm64 -isysroot "$sdk_root" -std=c++23 -O2 -fPIC
+  # Soong global cflags: ALOGV/LOG_NDEBUG tracing and debug asserts are off.
+  -DNDEBUG -UDEBUG
   -DANDROID_UTILS_REF_BASE_DISABLE_IMPLICIT_CONSTRUCTION
   -Wall -Wextra -Wconversion
   -Wno-deprecated-declarations -Wno-deprecated-literal-operator

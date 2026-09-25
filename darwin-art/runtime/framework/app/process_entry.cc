@@ -14,6 +14,7 @@ namespace {
 const char* ExitName(ApplicationMainLoopExit exit) {
   switch (exit) {
     case ApplicationMainLoopExit::kInvalidEnvironment: return "invalid-environment";
+    case ApplicationMainLoopExit::kRuntimeInit: return "runtime-init";
     case ApplicationMainLoopExit::kLooperLookup: return "looper-lookup";
     case ApplicationMainLoopExit::kWrongLooper: return "wrong-looper";
     case ApplicationMainLoopExit::kActivityThreadLookup: return "activity-thread-lookup";

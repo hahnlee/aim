@@ -17,6 +17,17 @@ ApplicationMainLoopExit RunPreparedApplicationMainLoop(JNIEnv* env) {
     return ApplicationMainLoopExit::kInvalidEnvironment;
   }
   auto run = [&]() -> ApplicationMainLoopExit {
+    // ZygoteInit.zygoteInit runs these before RuntimeInit.applicationInit
+    // reaches ActivityThread.main: log streams, the FATAL EXCEPTION logging
+    // pre-handler, the kill-on-crash default handler and http.agent.
+    jclass runtime_init = env->FindClass("com/android/internal/os/RuntimeInit");
+    if (runtime_init == nullptr) return ApplicationMainLoopExit::kRuntimeInit;
+    for (const char* name : {"redirectLogStreams", "commonInit"}) {
+      jmethodID method = env->GetStaticMethodID(runtime_init, name, "()V");
+      if (method == nullptr) return ApplicationMainLoopExit::kRuntimeInit;
+      env->CallStaticVoidMethod(runtime_init, method);
+      if (env->ExceptionCheck()) return ApplicationMainLoopExit::kRuntimeInit;
+    }
     jclass activity_thread = env->FindClass("android/app/ActivityThread");
     if (activity_thread == nullptr) return ApplicationMainLoopExit::kActivityThreadLookup;
     jmethodID current = env->GetStaticMethodID(activity_thread, "currentActivityThread",

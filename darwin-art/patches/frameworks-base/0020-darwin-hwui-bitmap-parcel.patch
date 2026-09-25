@@ -1,0 +1,102 @@
+--- a/jni/Bitmap.cpp
++++ b/jni/Bitmap.cpp
+@@ -4,6 +4,12 @@
+ #include <android-base/unique_fd.h>
+ #ifdef __linux__
+ #include <com_android_graphics_hwui_flags.h>
++#elif defined(DARWIN_ART_BINDER_PARCEL)
++// aconfig flags are Android-only; the Darwin build keeps the legacy mutability.
++namespace com::android::graphics::hwui::flags {
++constexpr bool bitmap_parcel_ashmem_as_immutable() { return false; }
++}
++#include <sys/mman.h>
+ #endif
+ #include <hwui/Bitmap.h>
+ #include <hwui/Paint.h>
+@@ -31,7 +37,7 @@
+ #include "SkRefCnt.h"
+ #include "SkStream.h"
+ #include "SkTypes.h"
+-#ifdef __linux__  // Only Linux support parcel
++#if defined(__linux__) || defined(DARWIN_ART_BINDER_PARCEL)  // Only Linux support parcel
+ #include "android/binder_parcel.h"
+ #endif
+ #include "android_nio_utils.h"
+@@ -619,7 +625,7 @@
+ ///////////////////////////////////////////////////////////////////////////////
+ 
+ // TODO: Move somewhere else
+-#ifdef __linux__  // Only Linux support parcel
++#if defined(__linux__) || defined(DARWIN_ART_BINDER_PARCEL)  // Only Linux support parcel
+ #define ON_ERROR_RETURN(X) \
+     if ((error = (X)) != STATUS_OK) return error
+ 
+@@ -739,7 +745,7 @@
+ }
+ 
+ static jobject Bitmap_createFromParcel(JNIEnv* env, jobject, jobject parcel) {
+-#ifdef __linux__ // Only Linux support parcel
++#if defined(__linux__) || defined(DARWIN_ART_BINDER_PARCEL) // Only Linux support parcel
+     if (parcel == NULL) {
+         jniThrowNullPointerException(env, "parcel cannot be null");
+         return NULL;
+@@ -847,7 +853,7 @@
+ #endif
+ }
+ 
+-#ifdef __linux__  // Only Linux support parcel
++#if defined(__linux__) || defined(DARWIN_ART_BINDER_PARCEL)  // Only Linux support parcel
+ // Returns whether this bitmap should be written to the parcel as mutable.
+ static bool shouldParcelAsMutable(SkBitmap& bitmap, AParcel* parcel) {
+     // If the bitmap is immutable, then parcel as immutable.
+@@ -868,7 +874,7 @@
+ 
+ static jboolean Bitmap_writeToParcel(JNIEnv* env, jobject, jlong bitmapHandle, jint density,
+                                      jobject parcel) {
+-#ifdef __linux__ // Only Linux support parcel
++#if defined(__linux__) || defined(DARWIN_ART_BINDER_PARCEL) // Only Linux support parcel
+     if (parcel == NULL) {
+         ALOGD("------- writeToParcel null parcel\n");
+         return JNI_FALSE;
+--- a/jni/Gainmap.cpp
++++ b/jni/Gainmap.cpp
+@@ -229,7 +229,7 @@
+ // ----------------------------------------------------------------------------
+ 
+ static void Gainmap_writeToParcel(JNIEnv* env, jobject, jlong nativeObject, jobject parcel) {
+-#ifdef __ANDROID__  // Layoutlib does not support parcel
++#if defined(__ANDROID__) || defined(DARWIN_ART_BINDER_PARCEL)  // Layoutlib does not support parcel
+     if (parcel == NULL) {
+         ALOGD("write null parcel\n");
+         return;
+@@ -269,7 +269,7 @@
+ }
+ 
+ static void Gainmap_readFromParcel(JNIEnv* env, jobject, jlong nativeObject, jobject parcel) {
+-#ifdef __ANDROID__  // Layoutlib does not support parcel
++#if defined(__ANDROID__) || defined(DARWIN_ART_BINDER_PARCEL)  // Layoutlib does not support parcel
+     if (parcel == NULL) {
+         jniThrowNullPointerException(env, "parcel cannot be null");
+         return;
+--- a/jni/ScopedParcel.cpp
++++ b/jni/ScopedParcel.cpp
+@@ -15,7 +15,7 @@
+  */
+ #include "ScopedParcel.h"
+ 
+-#ifdef __linux__  // Only Linux support parcel
++#if defined(__linux__) || defined(DARWIN_ART_BINDER_PARCEL)  // Only Linux support parcel
+ 
+ using namespace android;
+ 
+--- a/jni/ScopedParcel.h
++++ b/jni/ScopedParcel.h
+@@ -15,7 +15,7 @@
+  */
+ #include "SkData.h"
+ 
+-#ifdef __linux__  // Only Linux support parcel
++#if defined(__linux__) || defined(DARWIN_ART_BINDER_PARCEL)  // Only Linux support parcel
+ #include <android-base/unique_fd.h>
+ #include <android/binder_parcel.h>
+ #include <android/binder_parcel_jni.h>

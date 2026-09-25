@@ -4,7 +4,12 @@ extern "C" __attribute__((weak)) void darwin_art_unwindstack_push_quick_frame(
     void* managed_sp) {
   (void)managed_sp;
 }
-extern "C" __attribute__((weak)) void darwin_art_unwindstack_pop_quick_frame() {}
+extern "C" __attribute__((weak)) bool darwin_art_unwindstack_pop_quick_frame_if(
+    void* managed_sp, uint64_t frame_kind) {
+  (void)managed_sp;
+  (void)frame_kind;
+  return false;
+}
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -402,7 +407,7 @@ static TrampolineSet* CreateTrampolines(void* proxy,
     }
     const bool substitutes_proxy = shape != CallShape::kCritical;
     const size_t instruction_count =
-        (substitutes_proxy ? 51u : 50u) + plans[index].moves.size() * 2u;
+        (substitutes_proxy ? 53u : 52u) + plans[index].moves.size() * 2u;
     const size_t literal_count = substitutes_proxy ? 4u : 3u;
     const size_t thunk_size = instruction_count * kInstructionSize +
                               literal_count * kLiteralSize;
@@ -470,10 +475,11 @@ static TrampolineSet* CreateTrampolines(void* proxy,
     const size_t pop_literal = push_literal + kLiteralSize;
     const size_t proxy_literal = pop_literal + kLiteralSize;
     const size_t target_literal = thunk.offset + thunk.size - 8u;
-    // NativeBridge thunks are the actual JNI entrypoint on Darwin and do not
-    // pass through ART's quick JNI entrypoints. Publish the same managed frame
-    // contract around the guest call so a concurrent remote unwind can cross
-    // this host-only ABI boundary.
+    // Publish the managed frame around the guest call so a concurrent remote
+    // unwind can cross this host-only ABI boundary. x28 holds the managed SP
+    // only under art_quick_generic_jni_trampoline; a compiled JNI stub leaves
+    // an arbitrary callee-saved value there, so the push validates it and the
+    // pop removes only the frame keyed by that same value.
     for (uint32_t reg = 0; reg < 8; ++reg) {
       Write32(bytes, cursor,
               EncodeVectorStore(reg, kSp, scratch_offset + reg * 16u));
@@ -514,6 +520,10 @@ static TrampolineSet* CreateTrampolines(void* proxy,
     Write32(bytes, cursor,
             EncodeVectorStore(0, kSp, scratch_offset + 208u));  // str q0, result
     cursor += 4;
+    Write32(bytes, cursor, 0xaa1c03e0u);  // mov x0, x28
+    cursor += 4;
+    Write32(bytes, cursor, 0xaa1f03e1u);  // mov x1, xzr (quick frame kind)
+    cursor += 4;
     Write32(bytes, cursor, EncodeLdrLiteralX(16, cursor, pop_literal));
     cursor += 4;
     Write32(bytes, cursor, 0xd63f0200u);  // blr x16
@@ -542,7 +552,7 @@ static TrampolineSet* CreateTrampolines(void* proxy,
     Write64(bytes, push_literal,
             reinterpret_cast<uintptr_t>(&darwin_art_unwindstack_push_quick_frame));
     Write64(bytes, pop_literal,
-            reinterpret_cast<uintptr_t>(&darwin_art_unwindstack_pop_quick_frame));
+            reinterpret_cast<uintptr_t>(&darwin_art_unwindstack_pop_quick_frame_if));
     if (substitutes_proxy) {
       Write64(bytes, proxy_literal, reinterpret_cast<uintptr_t>(proxy));
     }

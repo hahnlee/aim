@@ -12,6 +12,7 @@ trap 'rm -rf -- "$out"' EXIT
   "$root/probes/compile-stubs/android/content/res/CompatibilityInfo.java" \
   "$root/runtime/framework/am/ApplicationProcessRegistry.java" \
   "$root/runtime/framework/am/ServiceRecord.java" \
+  "$root/runtime/framework/am/StartedServiceRequests.java" \
   "$root/runtime/framework/am/ServiceLifecycleOperation.java" \
   "$root/runtime/framework/am/IntentBindRecord.java" \
   "$root/runtime/framework/am/ConnectionRecord.java" \

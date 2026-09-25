@@ -14,6 +14,7 @@ mkdir -p "$out/classes"
   "$root/runtime/framework/am/SystemServiceBindings.java" \
   "$root/runtime/framework/am/ActiveServices.java" \
   "$root/runtime/framework/am/ServiceRecord.java" \
+  "$root/runtime/framework/am/StartedServiceRequests.java" \
   "$root/runtime/framework/am/IntentBindRecord.java" \
   "$root/runtime/framework/am/ConnectionRecord.java" \
   "$root/runtime/framework/am/ServiceConnectionOwner.java" \

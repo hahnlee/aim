@@ -6,6 +6,8 @@ import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.RemoteException;
+import android.app.Notification;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.util.Log;
 import android.content.pm.ActivityInfo;
@@ -31,6 +33,21 @@ public final class ActivityManagerEndpoint extends Binder {
     private final int serviceDoneExecutingCode = transaction("serviceDoneExecuting");
     private final int unbindFinishedCode = transaction("unbindFinished");
     private final int getProcessMemoryInfoCode = transaction("getProcessMemoryInfo");
+    private final int startServiceCode = transaction("startService");
+    private final int stopServiceCode = transaction("stopService");
+    private final int stopServiceTokenCode = transaction("stopServiceToken");
+    private final int setServiceForegroundCode = transaction("setServiceForeground");
+    private final int getForegroundServiceTypeCode = transaction("getForegroundServiceType");
+    private final int getRunningAppProcessesCode = transaction("getRunningAppProcesses");
+    private final int getMemoryInfoCode = transaction("getMemoryInfo");
+    private final int getProcessesInErrorStateCode = transaction("getProcessesInErrorState");
+    private final int frozenBinderTransactionDetectedCode =
+            transaction("frozenBinderTransactionDetected");
+    private final int registerReceiverWithFeatureCode =
+            transaction("registerReceiverWithFeature");
+    private final int unregisterReceiverCode = transaction("unregisterReceiver");
+    private final int broadcastIntentWithFeatureCode = transaction("broadcastIntentWithFeature");
+    private final BroadcastTransactions broadcasts;
     private final PackageRecords.Source packages;
     private final ApplicationProcessRegistry processes;
     private final SettingsProviderEndpoint settingsProvider = new SettingsProviderEndpoint();
@@ -46,12 +63,18 @@ public final class ActivityManagerEndpoint extends Binder {
         this.tasks = tasks;
         processLauncher = new BoundServiceProcessLauncher(processes);
         activeServices = new ActiveServices(packages, processes, processLauncher);
+        broadcasts = new BroadcastTransactions(processes);
         attachInterface(null, "android.app.IActivityManager");
     }
 
     /** Android system-service-only entry; this is not exposed on IActivityManager. */
     public SystemServiceBindings systemServiceBindings() {
         return activeServices;
+    }
+
+    /** Android system-service-only broadcast entry; not exposed on IActivityManager. */
+    public SystemBroadcasts systemBroadcasts() {
+        return broadcasts;
     }
 
     private static int transaction(String name) {
@@ -78,10 +101,43 @@ public final class ActivityManagerEndpoint extends Binder {
                     + " attach=" + attachCode + " finish=" + finishCode
                     + " reply=" + (reply != null));
         }
+        if (code == registerReceiverWithFeatureCode || code == unregisterReceiverCode
+                || code == broadcastIntentWithFeatureCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            if (reply == null) return false;
+            if (code == registerReceiverWithFeatureCode) {
+                broadcasts.register(data, reply);
+            } else if (code == unregisterReceiverCode) {
+                broadcasts.unregister(data, reply);
+            } else {
+                return broadcasts.broadcast(data, reply);
+            }
+            return true;
+        }
+        if (code == getMemoryInfoCode || code == getProcessesInErrorStateCode
+                || code == frozenBinderTransactionDetectedCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            if (code == frozenBinderTransactionDetectedCode) {
+                ProcessStateQueries.frozenBinderTransactionDetected(data);
+                return true;
+            }
+            data.enforceNoDataAvail();
+            if (reply == null) return false;
+            if (code == getMemoryInfoCode) {
+                ProcessStateQueries.writeMemoryInfo(reply);
+            } else {
+                ProcessStateQueries.writeProcessesInErrorState(reply);
+            }
+            return true;
+        }
         if (code != attachCode && code != finishCode && code != getContentProviderCode
                 && code != bindServiceInstanceCode && code != unbindServiceCode
                 && code != publishServiceCode && code != serviceDoneExecutingCode
-                && code != unbindFinishedCode && code != getProcessMemoryInfoCode) {
+                && code != unbindFinishedCode && code != getProcessMemoryInfoCode
+                && code != startServiceCode && code != stopServiceCode
+                && code != stopServiceTokenCode && code != setServiceForegroundCode
+                && code != getForegroundServiceTypeCode
+                && code != getRunningAppProcessesCode) {
             return super.onTransact(code, data, reply, flags);
         }
         if (reply == null && code != serviceDoneExecutingCode) return false;
@@ -131,6 +187,74 @@ public final class ActivityManagerEndpoint extends Binder {
                     connection, bindFlags, instanceName, callingPackage, userId);
             reply.writeNoException();
             reply.writeInt(result);
+            return true;
+        }
+        if (code == getRunningAppProcessesCode) {
+            data.enforceNoDataAvail();
+            reply.writeNoException();
+            reply.writeTypedList(RunningAppProcesses.forCaller(processes, Binder.getCallingUid()),
+                    Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
+            return true;
+        }
+        if (code == startServiceCode) {
+            IBinder caller = data.readStrongBinder();
+            Intent intent = data.readTypedObject(Intent.CREATOR);
+            data.readString(); // resolvedType; explicit components only.
+            data.readBoolean(); // requireForeground: startForeground is tracked when called.
+            String callingPackage = data.readString();
+            data.readString(); // callingFeatureId
+            int userId = data.readInt();
+            data.enforceNoDataAvail();
+            ComponentName started = activeServices.startService(Binder.getCallingPid(),
+                    Binder.getCallingUid(), caller, intent, callingPackage, userId);
+            reply.writeNoException();
+            reply.writeTypedObject(started, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
+            return true;
+        }
+        if (code == stopServiceCode) {
+            IBinder caller = data.readStrongBinder();
+            Intent intent = data.readTypedObject(Intent.CREATOR);
+            data.readString(); // resolvedType
+            int userId = data.readInt();
+            data.enforceNoDataAvail();
+            int stopped = activeServices.stopService(Binder.getCallingPid(),
+                    Binder.getCallingUid(), caller, intent, userId);
+            reply.writeNoException();
+            reply.writeInt(stopped);
+            return true;
+        }
+        if (code == stopServiceTokenCode) {
+            ComponentName className = data.readTypedObject(ComponentName.CREATOR);
+            IBinder token = data.readStrongBinder();
+            int startId = data.readInt();
+            data.enforceNoDataAvail();
+            boolean stopped = activeServices.stopServiceToken(
+                    Binder.getCallingPid(), className, token, startId);
+            reply.writeNoException();
+            reply.writeBoolean(stopped);
+            return true;
+        }
+        if (code == setServiceForegroundCode) {
+            ComponentName className = data.readTypedObject(ComponentName.CREATOR);
+            IBinder token = data.readStrongBinder();
+            int id = data.readInt();
+            Notification notification = data.readTypedObject(Notification.CREATOR);
+            int foregroundFlags = data.readInt();
+            int foregroundServiceType = data.readInt();
+            data.enforceNoDataAvail();
+            activeServices.setServiceForeground(Binder.getCallingPid(), className, token, id,
+                    notification != null, foregroundFlags, foregroundServiceType);
+            reply.writeNoException();
+            return true;
+        }
+        if (code == getForegroundServiceTypeCode) {
+            ComponentName className = data.readTypedObject(ComponentName.CREATOR);
+            IBinder token = data.readStrongBinder();
+            data.enforceNoDataAvail();
+            int type = activeServices.getForegroundServiceType(
+                    Binder.getCallingPid(), className, token);
+            reply.writeNoException();
+            reply.writeInt(type);
             return true;
         }
         if (code == unbindServiceCode) {
@@ -256,6 +380,7 @@ public final class ActivityManagerEndpoint extends Binder {
             // must not suppress exact launch/client resource cleanup. Both
             // owners reject stale incarnation identities independently.
             activeServices.onProcessGone(attached);
+            broadcasts.registry.processGone(attached.pid);
             tasks.removeProcess(attached.pid, attached.thread);
         };
         try {

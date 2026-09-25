@@ -29,6 +29,7 @@ pub(crate) fn foundation_inputs(root: &Path) -> Vec<PathBuf> {
         PathBuf::from("compat/graphics/image_decoder_input.h"),
         PathBuf::from("patches/frameworks-base/0015-darwin-bitmap-buffer-access.patch"),
         PathBuf::from("patches/frameworks-base/0016-ndk-bitmap-rgba-compression.patch"),
+        PathBuf::from("patches/frameworks-base/0020-darwin-hwui-bitmap-parcel.patch"),
         PathBuf::from("tools/build-android16-icu-foundation.sh"),
         PathBuf::from("upstream/android16-icu-foundation.lock"),
         PathBuf::from("patches/frameworks-base/0001-darwin-android-critical-jni-abi.patch"),
@@ -77,6 +78,7 @@ pub(crate) fn is_foundation_family_input(path: &Path, family: FoundationFamily) 
     if matches!(
         path.as_ref(),
         "patches/frameworks-base/0016-ndk-bitmap-rgba-compression.patch"
+            | "patches/frameworks-base/0020-darwin-hwui-bitmap-parcel.patch"
             | "patches/frameworks-base/0017-ndk-image-decoder-input.patch"
             | "patches/frameworks-base/0019-ndk-image-decoder-rgba.patch"
             | "compat/graphics/image_decoder_input.cc"

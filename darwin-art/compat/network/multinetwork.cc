@@ -101,6 +101,39 @@ extern "C" int AndroidSetSocketNetwork(uint64_t network, int guest_fd) {
   return -1;
 }
 
+// frameworks/base/native/android/net.c forwards socket tagging to
+// libnetd_client tagSocket/untagSocket, which return 0 or a negative Android
+// errno after netd validates the descriptor as a socket. The tag only feeds
+// netd's per-socket traffic-accounting map; Darwin has no NetworkStats owner
+// consuming that map, so validation is the whole observable contract here.
+int ValidateTaggedSocket(int guest_fd) {
+  constexpr int kAndroidEbadf = 9;
+  constexpr int kAndroidEnotsock = 88;
+  if (guest_fd < 0) return -kAndroidEbadf;
+  int host_fd = -1;
+  if (darwin_art_bionic_fd_dup_host_fd_core(guest_fd, &host_fd) < 1) {
+    return -kAndroidEbadf;
+  }
+  int socket_type = 0;
+  socklen_t length = sizeof(socket_type);
+  const int result = getsockopt(host_fd, SOL_SOCKET, SO_TYPE, &socket_type,
+                                &length);
+  (void)close(host_fd);
+  return result == 0 ? 0 : -kAndroidEnotsock;
+}
+
+extern "C" int AndroidTagSocketWithUid(int guest_fd, uint32_t, uint32_t) {
+  return ValidateTaggedSocket(guest_fd);
+}
+
+extern "C" int AndroidTagSocket(int guest_fd, uint32_t) {
+  return ValidateTaggedSocket(guest_fd);
+}
+
+extern "C" int AndroidUntagSocket(int guest_fd) {
+  return ValidateTaggedSocket(guest_fd);
+}
+
 extern "C" int AndroidResNquery(uint64_t network, const char* name,
                                   int ns_class, int ns_type, uint32_t flags) {
   if (!IsKnownNetwork(network)) return -kAndroidEnonet;
@@ -150,6 +183,9 @@ extern "C" void* darwin_art_android_multinetwork_symbol(
   DARWIN_MULTINETWORK_SYMBOL("android_res_nsend", AndroidResNsend);
   DARWIN_MULTINETWORK_SYMBOL("android_res_nresult", AndroidResNresult);
   DARWIN_MULTINETWORK_SYMBOL("android_res_cancel", AndroidResCancel);
+  DARWIN_MULTINETWORK_SYMBOL("android_tag_socket_with_uid", AndroidTagSocketWithUid);
+  DARWIN_MULTINETWORK_SYMBOL("android_tag_socket", AndroidTagSocket);
+  DARWIN_MULTINETWORK_SYMBOL("android_untag_socket", AndroidUntagSocket);
 #undef DARWIN_MULTINETWORK_SYMBOL
   return nullptr;
 }

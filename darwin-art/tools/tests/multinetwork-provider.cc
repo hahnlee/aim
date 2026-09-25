@@ -18,12 +18,13 @@ extern "C" int darwin_art_bionic_errno_set_from_darwin(int value) {
   g_android_errno = value == EBADF ? 9 : value == ENOTSOCK ? 88 : 5;
   return g_android_errno;
 }
-extern "C" int darwin_art_bionic_fd_export_for_scm(int fd) {
+extern "C" int darwin_art_bionic_fd_dup_host_fd_core(int fd, int* native_fd) {
   if (fd < 0) {
     g_android_errno = 9;
     return -1;
   }
-  return dup(fd);
+  *native_fd = dup(fd);
+  return 1;
 }
 extern "C" int darwin_art_bionic_socket_broker_res_nquery(
     uint64_t, const char*, int, int, uint32_t) {
@@ -78,6 +79,14 @@ int main() {
   assert(pipe(pipes) == 0);
   assert(set_socket(0, pipes[0]) == -1 && g_android_errno == 88);
   assert(set_socket(0, -1) == -1 && g_android_errno == 9);
+  using TagWithUid = int (*)(int, uint32_t, uint32_t);
+  using Untag = int (*)(int);
+  auto tag = Resolve<TagWithUid>("android_tag_socket_with_uid");
+  auto untag = Resolve<Untag>("android_untag_socket");
+  // libnetd_client tagSocket/untagSocket return negative errno values.
+  assert(tag(sockets[0], 7, 10042) == 0 && untag(sockets[0]) == 0);
+  assert(tag(pipes[0], 7, 10042) == -88 && untag(pipes[0]) == -88);
+  assert(tag(-1, 7, 10042) == -9 && untag(-1) == -9);
   close(sockets[0]);
   close(sockets[1]);
   close(pipes[0]);
