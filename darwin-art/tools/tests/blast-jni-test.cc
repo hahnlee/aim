@@ -244,6 +244,15 @@ extern "C" void* darwin_art_android_ANativeWindow_create(int32_t width,
   return g_last_window;
 }
 
+extern "C" int32_t darwin_art_android_ANativeWindow_set_default_buffer_size(
+    void* window, int32_t width, int32_t height, int32_t format) {
+  assert(window != nullptr);
+  assert(width > 0);
+  assert(height > 0);
+  assert(format > 0);
+  return 0;
+}
+
 extern "C" void darwin_art_android_ANativeWindow_acquire(void* window) {
   assert(window != nullptr);
   ++static_cast<FakeWindow*>(window)->references;

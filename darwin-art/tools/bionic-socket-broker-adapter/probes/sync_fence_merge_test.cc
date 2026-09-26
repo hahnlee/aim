@@ -4,6 +4,7 @@
 #include "../../tests/fd-inheritance-fixture.h"
 
 #include <csignal>
+#include <unistd.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>

@@ -370,13 +370,16 @@ public final class DesktopRootFocusDecisionTest {
         check(revoke.originalChannelToken == null && revoke.factSerial == 1
                         && revoke.epoch > 0,
                 "zero-window revoke retains fact serial and epoch while clearing channel");
+        int beforeClose = callback.seen.size();
         fixture.fact(DesktopRootRegistry.CLOSED, fixture.rootIncarnation, 2, false);
         pump();
-        check(last(callback).originalChannelToken == null && last(callback).factSerial == 2
-                && last(callback).sequence > revoke.sequence,
-                "closed zero-window root delivers exact terminal revocation");
+        // CLOSED seals the root's input admission itself; its subscription is
+        // retired at once rather than kept alive for a terminal callback ACK
+        // (WindowPublicationController.unbind).
+        check(callback.seen.size() == beforeClose,
+                "closed root must not receive another focus decision");
         check(((java.util.Map<?, ?>) field(field(fixture.publications, "rootDecisions"),
-                "subscriptions")).isEmpty(), "ACKed terminal subscription was not released");
+                "subscriptions")).isEmpty(), "closed root subscription was not released");
     }
 
     private static void testDeathDropsSubscription() throws Exception {

@@ -2,6 +2,7 @@
 #include "runtime/framework/input/root_key_routing.h"
 #include "runtime/framework/input/input_routing_focus.h"
 #include "runtime/framework/input/input_transport.h"
+#include "compat/binder/wire_channel_lifetime.h"
 #include <cassert>
 #include <cstdio>
 

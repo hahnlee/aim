@@ -103,10 +103,7 @@ impl HostCommands {
                 listeners.busy += 1;
                 break (stream, listeners.generation);
             }
-            let (next, timeout) = self
-                .idle
-                .wait_timeout(listeners, COMMAND_TIMEOUT)
-                .unwrap();
+            let (next, timeout) = self.idle.wait_timeout(listeners, COMMAND_TIMEOUT).unwrap();
             listeners = next;
             if timeout.timed_out() && listeners.idle.is_empty() {
                 return Ok((
