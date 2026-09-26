@@ -26,6 +26,8 @@ public final class ConnectivityManagerEndpoint extends Binder {
             IBinder.FIRST_CALL_TRANSACTION + 15;
     static final int TRANSACTION_IS_ACTIVE_NETWORK_METERED =
             IBinder.FIRST_CALL_TRANSACTION + 19;
+    static final int TRANSACTION_GET_GLOBAL_PROXY = IBinder.FIRST_CALL_TRANSACTION + 29;
+    static final int TRANSACTION_GET_PROXY_FOR_NETWORK = IBinder.FIRST_CALL_TRANSACTION + 31;
     static final int TRANSACTION_REQUEST_NETWORK = IBinder.FIRST_CALL_TRANSACTION + 41;
     static final int TRANSACTION_LISTEN_FOR_NETWORK = IBinder.FIRST_CALL_TRANSACTION + 44;
     static final int TRANSACTION_RELEASE_NETWORK_REQUEST = IBinder.FIRST_CALL_TRANSACTION + 46;
@@ -164,6 +166,23 @@ public final class ConnectivityManagerEndpoint extends Binder {
                         declaredMethodsFlag);
                 reply.writeNoException();
                 reply.writeTypedObject(request, 1);
+                return true;
+            }
+            case TRANSACTION_GET_GLOBAL_PROXY: {
+                // The global proxy is the device-owner override
+                // (Settings.Global.GLOBAL_HTTP_PROXY_*); none is set here.
+                data.enforceNoDataAvail();
+                reply.writeNoException();
+                reply.writeTypedObject(null, 1);
+                return true;
+            }
+            case TRANSACTION_GET_PROXY_FOR_NETWORK: {
+                // ConnectivityService.getProxyForNetwork: with no global
+                // proxy, the network's own proxy; one host network here.
+                data.readTypedObject(android.net.Network.CREATOR);
+                data.enforceNoDataAvail();
+                reply.writeNoException();
+                reply.writeTypedObject(state.activeNetworkProxy(), 1);
                 return true;
             }
             case TRANSACTION_RELEASE_NETWORK_REQUEST: {

@@ -63,6 +63,28 @@ jobjectArray NativeSnapshot(JNIEnv* env, jclass, jlong raw_handle) {
   return result;
 }
 
+// {kind, host, port, exclusions, pacUrl} of the host proxy configuration.
+jobjectArray NativeHostProxy(JNIEnv* env, jclass) {
+  DarwinArtNetworkProxyFacts facts{};
+  if (darwin_art_network_proxy_snapshot(&facts) != 0 || facts.abi_version != 1 ||
+      facts.struct_size != sizeof(facts)) {
+    facts = {};
+  }
+  jclass string_class = env->FindClass("java/lang/String");
+  if (string_class == nullptr) return nullptr;
+  jobjectArray result = env->NewObjectArray(5, string_class, nullptr);
+  if (result == nullptr) return nullptr;
+  char number[16];
+  std::snprintf(number, sizeof(number), "%u", facts.kind);
+  env->SetObjectArrayElement(result, 0, env->NewStringUTF(number));
+  env->SetObjectArrayElement(result, 1, env->NewStringUTF(facts.host));
+  std::snprintf(number, sizeof(number), "%u", facts.port);
+  env->SetObjectArrayElement(result, 2, env->NewStringUTF(number));
+  env->SetObjectArrayElement(result, 3, env->NewStringUTF(facts.exclusions));
+  env->SetObjectArrayElement(result, 4, env->NewStringUTF(facts.pac_url));
+  return result;
+}
+
 void NativeDestroy(JNIEnv*, jclass, jlong raw_handle) {
   darwin_art_network_path_destroy(reinterpret_cast<void*>(raw_handle));
 }
@@ -78,6 +100,8 @@ bool RegisterNetworkPathProvider(JNIEnv* env, jclass provider_class) {
        reinterpret_cast<void*>(NativeSnapshot)},
       {const_cast<char*>("nativeDestroy"), const_cast<char*>("(J)V"),
        reinterpret_cast<void*>(NativeDestroy)},
+      {const_cast<char*>("nativeHostProxy"), const_cast<char*>("()[Ljava/lang/String;"),
+       reinterpret_cast<void*>(NativeHostProxy)},
   };
   return env->RegisterNatives(provider_class, methods, std::size(methods)) == JNI_OK;
 }
