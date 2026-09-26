@@ -1,6 +1,6 @@
 use super::common::{build_runtime_native_owner, require_file};
 use super::graphics_core_probes::{
-    RuntimeCoreObjects, compile_runtime_core_objects, core_probe_includes,
+    RuntimeCoreObjects, compile_runtime_core_objects, core_probe_includes, jni_entrypoints,
 };
 use super::graphics_link_checks::validate_graphics_runtime_link;
 use super::graphics_link_inputs::GraphicsRuntimeInputs;
@@ -107,6 +107,7 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         trace_archive,
         perfetto_library,
         virtual_ref_base_ptr_archive,
+        native_library_helper_archive,
         android_runtime_host,
     } = GraphicsRuntimeInputs::load(root, &build_paths)?;
 
@@ -138,6 +139,8 @@ pub(crate) fn audit_runtime_graphics_link_mode(
     let RuntimeCoreObjects {
         boot_native_registration: boot_native_registration_object,
         boot_native_libraries: boot_native_libraries_object,
+        art_service: art_service_object,
+        art_tools_process: art_tools_process_object,
         vm_bootstrap: vm_bootstrap_object,
         process_entry: process_entry_object,
         process_state: process_state_object,
@@ -305,6 +308,12 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         return Err("OpenJDK NIO archive has no JNI entrypoints".into());
     }
     art_exports.extend(nio_jni_exports);
+    // service-art.jar's ArtJni natives resolve in this image (ADR 0009).
+    let art_service_exports = jni_entrypoints(&art_service_object)?;
+    if art_service_exports.len() != 5 {
+        return Err("libartservice must define the five ArtJni natives".into());
+    }
+    art_exports.extend(art_service_exports);
     art_exports.extend(super::graphics_bitmap::bitmap_exports(root)?);
     art_exports.sort_unstable();
     art_exports.dedup();
@@ -422,6 +431,8 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg(&registration_object)
         .arg(&boot_native_registration_object)
         .arg(&boot_native_libraries_object)
+        .arg(&art_service_object)
+        .arg(&art_tools_process_object)
         .arg(&process_state_object)
         .arg(&process_config_object)
         .arg(&process_shutdown_object)
@@ -554,6 +565,7 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg(&trace_archive)
         .arg(&perfetto_library)
         .arg(&virtual_ref_base_ptr_archive)
+        .arg(&native_library_helper_archive)
         .arg(format!(
             "-Wl,-force_load,{}",
             resource_jni_archive.display()

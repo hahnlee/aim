@@ -46,6 +46,7 @@ mkdir -p "$out/classes"
   "$root/tools/tests/connectivity/stubs/android/os/Binder.java" \
   "$root/tools/tests/connectivity/stubs/android/os/IBinder.java" \
   "$root/tools/tests/connectivity/stubs/android/os/Parcel.java" \
+  "$root/tools/tests/connectivity/stubs/android/os/Parcelable.java" \
   "$root/tools/tests/connectivity/stubs/android/os/RemoteException.java" \
   "$root/runtime/framework/usage/UsageStatsManagerEndpoint.java" \
   "$root/tools/tests/usagestats/UsageStatsManagerEndpointTest.java"

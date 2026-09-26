@@ -10,7 +10,6 @@ const CORE: &[&str] = &[
     "_darwin_art_surface_set_owner_wake",
     // Real receiver, transport and balanced provider operations consumed by
     // separate clients. Synthetic roots/service scaffolding stay test-owned.
-    "__ZN10darwin_art24QuerySystemPackageRecordEP7_JNIEnvPKcS3_",
     "__ZN10darwin_art24ReceiveServiceBindIntentEP7_JNIEnvi",
     "__ZN10darwin_art24StartServingRemoteBinderEP7_JNIEnviP8_jobject",
     "__ZN10darwin_art30DispatchFrameworkPendingVsyncsEP7_JNIEnvx",

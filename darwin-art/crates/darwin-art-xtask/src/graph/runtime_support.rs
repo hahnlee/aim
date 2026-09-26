@@ -57,7 +57,7 @@ pub(crate) fn emit(graph: &mut String, root: &Path) -> io::Result<()> {
     // Actual compile signatures, adapter implementations, verifier and its
     // pinned AOSP foundation closure; no generated output/fixture directory.
     for directory in [
-        "runtime/framework/compile-stubs",
+        "tools/hidden-api-signatures",
         "runtime/framework/pm",
         "_aosp/art/libartbase",
         "_aosp/art/libdexfile",
@@ -68,10 +68,41 @@ pub(crate) fn emit(graph: &mut String, root: &Path) -> io::Result<()> {
     ] {
         collect_files(&root.join(directory), &mut inputs)?;
     }
+    // Signature classpath inputs: the generator's ASM, the resolved runtime
+    // boot classpath, the pinned services.jar and the system_server classpath.
+    let boot = Command::new("python3")
+        .arg(root.join("tools/bootclasspath/resolve.py"))
+        .output()?;
+    if !boot.status.success() {
+        return Err(invalid("cannot resolve the runtime boot classpath"));
+    }
+    for jar in env::split_paths(String::from_utf8(boot.stdout).map_err(invalid)?.trim()) {
+        inputs.insert(jar);
+    }
+    for file in [
+        "tools/bootclasspath/resolve.py",
+        "_prebuilt/android-16/tools/asm-9.6.jar",
+        "_build/android16-system-services/services.jar",
+        "upstream/android16-systemserverclasspath.lock",
+    ] {
+        inputs.insert(root.join(file));
+    }
+    // The rest of SYSTEMSERVERCLASSPATH, extracted from the pinned image.
+    let lock = fs::read_to_string(root.join("upstream/android16-systemserverclasspath.lock"))?;
+    for line in lock.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if let [_, "classpath", path] = fields[..] {
+            if path != "/system/framework/services.jar" {
+                inputs.insert(
+                    root.join("_build/android16-systemserverclasspath-original")
+                        .join(path.trim_start_matches('/')),
+                );
+            }
+        }
+    }
     for file in [
         "tools/dex-inspect.cc",
         "_aosp/art/tools/generate_operator_out.py",
-        "tools/build-android16-package-dex-usage.sh",
         "compat/android_base_logging.cc",
         "sources.lock",
         "patches/art/0002-darwin-dynamic-page-size.patch",
@@ -81,6 +112,8 @@ pub(crate) fn emit(graph: &mut String, root: &Path) -> io::Result<()> {
         "patches/art/0102-darwin-logical-pthread-names.patch",
         "patches/art/0112-darwin-artbase-private-paths.patch",
         "patches/art/0039-darwin-memmap-exact-anonymous.patch",
+        "patches/art/0196-darwin-fd-file-guest-open.patch",
+        "patches/art/0197-darwin-os-guest-stat.patch",
     ] {
         inputs.insert(root.join(file));
     }

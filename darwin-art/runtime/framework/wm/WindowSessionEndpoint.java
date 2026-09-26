@@ -151,11 +151,6 @@ final class WindowSessionEndpoint extends Binder {
             publications.ready(registration);
             committed = true;
             return true;
-        } catch (java.io.IOException error) {
-            IllegalStateException rejected =
-                    new IllegalStateException("cannot create Android input channel", error);
-            failure = rejected;
-            throw rejected;
         } catch (RuntimeException | Error error) {
             failure = error;
             throw error;

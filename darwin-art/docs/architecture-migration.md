@@ -10,12 +10,16 @@ Chromium `example.com` rendering with physical input, navigation/reload, Retina
 output and Graphite/Dawn → Vulkan → MoltenVK → Metal. GL, direct Dawn Metal,
 disabled GPU/Graphite and CPU fallback do not satisfy acceptance.
 
-**Next work item: boot AOSP PackageManagerService (#30).** Stage 1 is done:
-the package endpoint, AMS/JobScheduler service lookup, activity launch and
-bindApplication (ApplicationInfo and providers) use AOSP `PackageParser2` and
-`PackageInfoCommonUtils`, and the `Installed*Info` projection is gone. Next is
-the PMS boot closure (Settings, parse cache, permissions), which is the root
-cause of #1, #2, #3, #24, #31 and #33.
+AOSP PackageManagerService owns packages (#30, ADR 0009): the system process
+runs `PackageManagerService.main` with its AOSP owners (Settings in the
+profile's `/data/system`, UserManager, PermissionManager, AppOps, domain
+verification, ART Service) and PMS itself serves `package`. Only installd,
+apexd, artd and vold preparation are Darwin providers. Installs are
+PackageInstaller sessions (`darwin-art install` → `cmd package install`);
+launches take the launch activity, code paths, uid, label and icon from
+PackageManager. The install ledger, Rust manifest inspector and package
+endpoint are gone; existing profiles migrate into PMS Settings with their uids
+and app data.
 
 Android-owned orientation/resize (ADR 0008) and Blue Archive's native startup
 fault are fixed; see the verified state below. The service inventory and AOSP
@@ -52,6 +56,7 @@ Component tests are not application acceptance. See [AGENTS.md](../AGENTS.md),
 | Input / WMS | Exact-root ingress, readiness/focus fences, bounded first-key queue and receiver lifetime are adopted. Parent/process-death cleanup remains open. |
 | Orientation / resize | Per-task revisioned geometry: launch orientation, `setRequestedOrientation`, real AppKit edge resize → DisplayManager callback, config/relaunch/`WindowStateResizeItem` transactions, WMS frames/insets and host backing on one revision. Physical: Calculator/DeskClock relaunch, Chromium/Blue Archive config change, five-point click map, popup through resize, two-app isolation, close mid-resize. |
 | Blue Archive | Unchanged full-split APK starts landscape `1280×720` (2×), renders Unity frames, survives a 24-drag live-resize stress (240 revisions, 67 swapchain recreations, no fault) without relaunch, and takes physical clicks on Android dialogs and Unity UI. The Nexon patcher downloads and verifies all 1464 files (~650 MB), preprocessing completes and the login title screen renders; a CoreAudio process tap measures non-silent output there (peak 0.12). GMS is absent (game shows its notice). |
+| Package manager | PMS scans `/data/app` and the pinned image's system partition (79 system packages); permissions, signatures (v3), privileged flags, features and PM queries are PMS answers. `default` was migrated with a pre-migration clone backup; all eight APKs launch from PMS and Blue Archive reaches its title screen on its existing downloads. System features are limited to the image's `/system` XMLs (#46). |
 | Services | Exact-client connection ledger, process-shared demand and service lifecycle lanes are adopted. Real remote death and reusable shutdown are not proven. |
 | Graphics / SCM | Retained backing, fences and scanout diagnostics pass. ABI2 SCM/Binder callbacks and focused lifetime tests pass; unchanged-APK managed-transfer acceptance remains open. |
 | Source licensing | Original work uses Apache-2.0; upstream notices and OpenJDK GPLv2 + Classpath scope are recorded in the repository's licensing documents. Binary distribution/source matching remains a separate gate. |
@@ -62,13 +67,13 @@ Open failures are GitHub issues; the ones blocking the current goal:
 
 - Activity behind a new top Activity is never stopped (#16); window close and
   Cmd+Q have no Android lifecycle (#15); popup `ACTION_OUTSIDE` (#17).
-- Permission checks read back as granted (#1); PackageManager features and
-  queries (#2); broadcasts beyond unordered registered delivery (#3).
+- Broadcasts beyond unordered registered delivery (#3); AppOps foreground
+  state (#44); framework-compat class replacements (#45); device features
+  (#46).
 - SCM managed-transfer adoption (#18); process-death cleanup (#20).
 
 ## Next work
 
-0. Boot AOSP PackageManagerService on the AOSP parser (#30).
 1. Add Activity stop/visibility transitions and popup `ACTION_OUTSIDE` (#16, #17).
 2. Let density follow the host backing scale through the same revision path (#27).
 3. Run locale/label checks, then extend Chromium focus/tab/soak coverage (#19, #22).
@@ -103,27 +108,22 @@ cargo test --workspace
 
 ## Latest progress
 
-- **Blue Archive download:** app processes run `RuntimeInit.redirectLogStreams`
-  and `commonInit` (FATAL EXCEPTION pre-handler, kill-on-crash, `http.agent`);
-  that exposed a swallowed NPE from a null `getLaunchIntentForPackage`, now
-  resolved by PM `queryIntentActivities` for MAIN/INFO and MAIN/LAUNCHER
-  (manifest schema 8 records MAIN/INFO).
-- **JNI unwind publication:** the NativeBridge thunk trusted `x28` as the managed
-  SP, which holds only under generic JNI; JIT-compiled JNI stubs faulted the
-  registry push on download threads. Push validates the SP; pop is keyed.
+- **AOSP PackageManagerService (#30):** bootstrap mirrors SystemServer
+  (RuntimeInit, AppOps, SensorPrivacy, PMS, UserManager, ART Service,
+  boot phases, user unlock); `ActivityManagerInternal` is published for PMS
+  broadcasts and isolated uid owners. Install path: session staging on the
+  writable `/data/app` mount, `Linux.mkdir`/`fsync`/`posix_fallocate`/
+  `readlink` through the fs facade (`/proc/self/fd` names), StrictJarFile and
+  SecurityLog JNI, guest `user.dir`, artd with dexopt off.
+- **Launch from PackageManager:** `launcher-info` gives the launch activity,
+  `/data/app` code paths, uid, label and icon; the native loader and
+  androidfw open guest `/data/app` paths through the process namespace.
+  Uids for process identity come from `packages.list`.
+- **Ledger migration:** installs move into the `/data/app` layout and
+  `packages.xml` keeps ledger app ids; copied or renamed profiles relocate.
+- **Blue Archive download:** app processes run `RuntimeInit` (FATAL
+  EXCEPTION pre-handler, kill-on-crash, `http.agent`); the patcher downloads
+  and verifies all files and the title screen renders.
 - **System services:** AMS receiver registration, sticky redelivery and
-  unordered broadcasts (`BroadcastRegistry`), `BatteryService` sticky
-  `BATTERY_CHANGED` from IOPowerSources, `getMemoryInfo` over ProcessList
-  levels, `getProcessesInErrorState`; NMS posts/cancels notifications and
-  keeps per-app channels (unknown channel is dropped as in NMS).
-- **Build/logging parity:** Soong's `-DNDEBUG -UDEBUG` on the shared native
-  builds; host liblog keeps Android's default-priority fallback; SCM
-  tombstones retire the oldest unreferenced death instead of sealing.
-- **AOSP package parsing (#30 stage 1):** the system process reads installed
-  APKs through a read-only `/data/app` mount and parses them with
-  `PackageParser2` (v3 signatures, splits); caller query flags are honored and
-  bind uses `STOCK_PM_FLAGS` as AMS does. libcore `mmap` of guest fds goes
-  through the Bionic VM facade with Android errno. `batteryproperties` and
-  `batterystats` are published (Chromium crashed on a null `BatteryManager`,
-  #39). All eight installed APKs launch; core-apps and geometry acceptance
-  and `cargo test --workspace` pass.
+  unordered broadcasts with PMS permissions and visibility allow-lists,
+  `BatteryService` from IOPowerSources, NMS channels.

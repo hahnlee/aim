@@ -12,8 +12,8 @@ use std::marker::PhantomData;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::FileExt;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::ptr;
 use std::rc::Rc;
@@ -22,9 +22,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 
 mod canonical_path;
-mod descriptor_table;
 mod descriptor_group;
+mod descriptor_table;
 mod directory;
+mod extended_attributes;
 mod filesystem_namespace;
 mod immutable_open;
 #[cfg(test)]
@@ -119,6 +120,7 @@ const PATHCONF_MAX: c_int = 19;
 
 unsafe extern "C" {
     fn darwin_art_bionic_errno_store(android_errno: i32);
+    fn darwin_art_bionic_errno_load() -> i32;
     fn darwin_art_bionic_errno_set_from_darwin(darwin_errno: i32) -> c_int;
     #[link_name = "close"]
     fn host_close(fd: c_int) -> c_int;
@@ -406,6 +408,8 @@ pub struct Facade {
     overlay: Mutex<OverlayState>,
     private_root: Option<PrivateDataRoot>,
     storage_root: Option<writable_mount::WritableMount>,
+    /// `/data/app` when this process owns installed code (the system server).
+    package_root: Option<writable_mount::WritableMount>,
     directories: Mutex<DirectoryTable>,
     entropy: Arc<dyn EntropyBackend>,
     capability_failure: AtomicBool,
@@ -472,16 +476,38 @@ impl Facade {
             .transpose()?;
         // Installed package code (the profile's package store), read-only at
         // /data/app as Android's PackageManagerService and apps see it.
-        let package_root = std::env::var_os("DARWIN_ART_ANDROID_PACKAGE_ROOT")
+        let package_root_path = std::env::var_os("DARWIN_ART_ANDROID_PACKAGE_ROOT")
             .filter(|value| !value.is_empty())
-            .map(|path| {
+            .map(PathBuf::from);
+        // The system server's PackageManagerService owns /data/app and
+        // writes installs there; every other process reads it.
+        let packages_writable = package_root_path.is_some()
+            && std::env::var_os("DARWIN_ART_ANDROID_PACKAGE_ROOT_WRITABLE")
+                .is_some_and(|value| value == "1");
+        let mut package_writer = if packages_writable {
+            package_root_path
+                .clone()
+                .map(|path| writable_mount::WritableMount::open(path, b"/data/app"))
+                .transpose()?
+        } else {
+            None
+        };
+        let package_root = match (&package_writer, package_root_path) {
+            (Some(writer), _) => Some(
+                writer
+                    .directory()
+                    .try_clone()
+                    .map_err(|_| "invalid installed package root")?,
+            ),
+            (None, Some(path)) => Some(
                 std::fs::OpenOptions::new()
                     .read(true)
                     .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                    .open(PathBuf::from(path))
-                    .map_err(|_| "invalid installed package root")
-            })
-            .transpose()?;
+                    .open(path)
+                    .map_err(|_| "invalid installed package root")?,
+            ),
+            (None, None) => None,
+        };
         let namespace = filesystem_namespace::FilesystemNamespace::with_storage(
             root,
             guest_mount,
@@ -489,11 +515,17 @@ impl Facade {
             private_root.as_ref(),
             storage_root.as_ref(),
             package_root.as_ref(),
+            packages_writable,
         )?;
         if let (Some(private), Some(guest)) = (&mut private_root, &namespace.guest_root) {
             private
                 .attach_guest_root(guest.clone())
                 .map_err(|_| "private data root differs from guest mount")?;
+        }
+        if let (Some(packages), Some(guest)) = (&mut package_writer, &namespace.guest_root) {
+            packages
+                .attach_guest_root(guest.clone())
+                .map_err(|_| "package root differs from guest mount")?;
         }
         if let (Some(storage), Some(guest)) = (&mut storage_root, &namespace.guest_root) {
             storage
@@ -510,6 +542,7 @@ impl Facade {
             overlay: Mutex::new(OverlayState::default()),
             private_root,
             storage_root,
+            package_root: package_writer,
             directories: Mutex::new(DirectoryTable::default()),
             entropy,
             capability_failure: AtomicBool::new(false),
@@ -526,6 +559,11 @@ impl Facade {
 
     pub fn has_capability_failure(&self) -> bool {
         self.capability_failure.load(Ordering::Acquire)
+    }
+
+    fn android_errno() -> i32 {
+        // SAFETY: the standalone Bionic errno module is linked for the facade lifetime.
+        unsafe { darwin_art_bionic_errno_load() }
     }
 
     fn set_android_errno(value: i32) {
@@ -572,8 +610,8 @@ impl Facade {
                         && resolution.writable
                         && self.storage_root.is_some())
                     || (resolution.mount_id == 4
-                        && !resolution.writable
-                        && self.namespace.packages) =>
+                        && self.namespace.packages
+                        && resolution.writable == self.package_root.is_some()) =>
             {
                 Ok(resolution)
             }
@@ -798,6 +836,31 @@ impl Facade {
             return Err(ANDROID_EACCES);
         }
         self.private_path(&resolution.relative_path)
+    }
+
+    /// The host backing of a guest path in any writable mount (private
+    /// data, shared storage, the system server's /data/app).
+    fn resolve_writable_host_path(&self, path: &[u8]) -> Result<PathBuf, c_int> {
+        let resolution = self.resolve(path)?;
+        if resolution.mount_id == 2 && resolution.writable {
+            return self.private_path(&resolution.relative_path);
+        }
+        let root = self
+            .writable_root(resolution.mount_id)
+            .filter(|_| resolution.writable)
+            .ok_or(ANDROID_EACCES)?;
+        let relative = &resolution.relative_path;
+        if relative.contains(&0)
+            || (!relative.is_empty()
+                && relative.split(|byte| *byte == b'/').any(|component| {
+                    component.is_empty() || component == b"." || component == b".."
+                }))
+        {
+            return Err(ANDROID_EINVAL);
+        }
+        Ok(root
+            .path()
+            .join(std::ffi::OsString::from_vec(relative.to_vec())))
     }
 
     fn random_device(path: &[u8]) -> Option<RandomDeviceKind> {
@@ -2190,6 +2253,18 @@ impl Facade {
             }
             return copied as isize;
         }
+        if let Some(fd) = Self::proc_self_fd(path) {
+            let target = match self.descriptor_guest_path(fd) {
+                Ok(target) => target,
+                Err(error) => return self.fail(error) as isize,
+            };
+            let copied = target.len().min(size);
+            // SAFETY: as above, the caller provides size writable bytes.
+            unsafe {
+                ptr::copy_nonoverlapping(target.as_ptr(), buffer.cast::<u8>(), copied);
+            }
+            return copied as isize;
+        }
         let resolution = match self.resolve(path) {
             Ok(resolution) => resolution,
             Err(error) => return self.fail(error) as isize,
@@ -2204,6 +2279,52 @@ impl Facade {
             }
             Err(error) => self.fail_broker(&error) as isize,
         }
+    }
+
+    /// The descriptor number in `/proc/self/fd/N` or `/proc/thread-self/fd/N`.
+    fn proc_self_fd(path: &[u8]) -> Option<c_int> {
+        let number = path
+            .strip_prefix(b"/proc/self/fd/")
+            .or_else(|| path.strip_prefix(b"/proc/thread-self/fd/"))?;
+        if number.is_empty() || !number.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        std::str::from_utf8(number).ok()?.parse().ok()
+    }
+
+    /// The guest name the kernel reports for an open descriptor's link.
+    fn descriptor_guest_path(&self, fd: c_int) -> Result<Vec<u8>, c_int> {
+        let file = {
+            let descriptors = self.descriptors.lock().map_err(|_| ANDROID_EIO)?;
+            match descriptors.entries.get(&fd) {
+                Some(Descriptor::File(file) | Descriptor::PrivateFile(file)) => {
+                    file.try_clone().map_err(|_| ANDROID_EIO)?
+                }
+                Some(Descriptor::Random(kind)) => {
+                    return Ok(match kind {
+                        RandomDeviceKind::Random => b"/dev/random".to_vec(),
+                        RandomDeviceKind::Urandom => b"/dev/urandom".to_vec(),
+                    });
+                }
+                // Overlay nodes have no name outside this process.
+                Some(Descriptor::Overlay(_)) => return Err(ANDROID_EOPNOTSUPP),
+                None => return Err(ANDROID_ENOENT),
+            }
+        };
+        let guest = self
+            .namespace
+            .guest_root
+            .as_ref()
+            .ok_or(ANDROID_EOPNOTSUPP)?;
+        guest.node_path(&file).map_err(|error| {
+            error.raw_os_error().map_or(ANDROID_EIO, |raw| {
+                if raw == libc::ENOENT {
+                    ANDROID_ENOENT
+                } else {
+                    ANDROID_EIO
+                }
+            })
+        })
     }
 
     fn reject_fd_mutation(&self, fd: c_int) -> c_int {
@@ -2251,7 +2372,14 @@ impl Facade {
             Err(error) => return self.fail(error),
         };
         if resolution.mount_id != 2 {
-            return self.fail(ANDROID_EROFS);
+            // Shared storage and the system server's /data/app.
+            return match self.writable_root(resolution.mount_id) {
+                Some(root) => match root.chmod(&resolution.relative_path, mode) {
+                    Ok(()) => 0,
+                    Err(error) => self.fail_io(&error),
+                },
+                None => self.fail(ANDROID_EROFS),
+            };
         }
         if let Some(root) = self.private_root.as_ref() {
             return match root.chmod(&resolution.relative_path, mode) {

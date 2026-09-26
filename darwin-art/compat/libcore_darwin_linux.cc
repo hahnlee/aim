@@ -23,7 +23,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <string>
+#include <string_view>
 #include <vector>
+
+#include "process/guest_environment.h"
 
 #include <nativehelper/JNIHelp.h>
 #include <nativehelper/JNIPlatformHelp.h>
@@ -32,6 +36,18 @@
 extern "C" int darwin_art_bionic_fs_chmod_core(const char *, uint32_t)
     __attribute__((weak_import));
 extern "C" int darwin_art_bionic_fs_fchmod_core(int, uint32_t)
+    __attribute__((weak_import));
+extern "C" int darwin_art_bionic_fs_mkdir_core(const char *, uint32_t)
+    __attribute__((weak_import));
+extern "C" ssize_t darwin_art_bionic_fs_getxattr_core(const char *, const char *,
+                                                     void *, size_t, int)
+    __attribute__((weak_import));
+extern "C" int darwin_art_bionic_fs_setxattr_core(const char *, const char *,
+                                                 const void *, size_t, int, int)
+    __attribute__((weak_import));
+extern "C" int darwin_art_bionic_fs_removexattr_core(const char *, const char *, int)
+    __attribute__((weak_import));
+extern "C" ssize_t darwin_art_bionic_fs_listxattr_core(const char *, char *, size_t, int)
     __attribute__((weak_import));
 struct DarwinArtAndroidStatvfs {
   uint64_t f_bsize;
@@ -239,6 +255,64 @@ void DarwinLinuxRemove(JNIEnv *env, jobject, jstring java_path) {
   }
 }
 
+jobject DarwinLinuxLstat(JNIEnv *env, jobject, jstring java_path) {
+  ScopedUtfChars path(env, java_path);
+  if (path.c_str() == nullptr) {
+    return nullptr;
+  }
+  struct stat status{};
+  if (Lstat(path.c_str(), &status) == -1) {
+    ThrowErrno(env, "lstat", errno);
+    return nullptr;
+  }
+  return MakeStructStat(env, status);
+}
+
+void DarwinLinuxUnlink(JNIEnv *env, jobject, jstring java_path) {
+  ScopedUtfChars path(env, java_path);
+  if (path.c_str() != nullptr && Unlink(path.c_str()) == -1) {
+    ThrowErrno(env, "unlink", errno);
+  }
+}
+
+jstring DarwinLinuxReadlink(JNIEnv *env, jobject, jstring java_path) {
+  ScopedUtfChars path(env, java_path);
+  if (path.c_str() == nullptr) {
+    return nullptr;
+  }
+  std::vector<char> buffer(4096);
+  const ssize_t length = Readlink(path.c_str(), buffer.data(), buffer.size());
+  if (length == -1) {
+    ThrowErrno(env, "readlink", errno);
+    return nullptr;
+  }
+  if (static_cast<size_t>(length) == buffer.size()) {
+    jniThrowErrnoException(env, "readlink", 36);  // ENAMETOOLONG
+    return nullptr;
+  }
+  return env->NewStringUTF(std::string(buffer.data(), length).c_str());
+}
+
+void DarwinLinuxSymlink(JNIEnv *env, jobject, jstring java_old_path,
+                        jstring java_new_path) {
+  ScopedUtfChars old_path(env, java_old_path);
+  ScopedUtfChars new_path(env, java_new_path);
+  if (old_path.c_str() != nullptr && new_path.c_str() != nullptr &&
+      Symlink(old_path.c_str(), new_path.c_str()) == -1) {
+    ThrowErrno(env, "symlink", errno);
+  }
+}
+
+void DarwinLinuxLink(JNIEnv *env, jobject, jstring java_old_path,
+                     jstring java_new_path) {
+  ScopedUtfChars old_path(env, java_old_path);
+  ScopedUtfChars new_path(env, java_new_path);
+  if (old_path.c_str() != nullptr && new_path.c_str() != nullptr &&
+      Link(old_path.c_str(), new_path.c_str()) == -1) {
+    ThrowErrno(env, "link", errno);
+  }
+}
+
 void DarwinLinuxRename(JNIEnv *env, jobject, jstring java_old_path,
                        jstring java_new_path) {
   ScopedUtfChars old_path(env, java_old_path);
@@ -295,6 +369,148 @@ void DarwinLinuxChmod(JNIEnv *env, jobject, jstring java_path, jint mode) {
     }
   } else if (chmod(path.c_str(), static_cast<mode_t>(mode)) == -1) {
     ThrowErrno(env, "chmod", errno);
+  }
+}
+
+void DarwinLinuxMkdir(JNIEnv *env, jobject, jstring java_path, jint mode) {
+  ScopedUtfChars path(env, java_path);
+  if (path.c_str() == nullptr)
+    return;
+  if (darwin_art_bionic_fs_mkdir_core != nullptr) {
+    if (darwin_art_bionic_fs_mkdir_core(path.c_str(),
+                                        static_cast<uint32_t>(mode)) == -1) {
+      const int android_error = darwin_art_bionic_errno_load == nullptr
+                                    ? EIO
+                                    : darwin_art_bionic_errno_load();
+      jniThrowErrnoException(env, "mkdir", android_error);
+    }
+  } else if (mkdir(path.c_str(), static_cast<mode_t>(mode)) == -1) {
+    ThrowErrno(env, "mkdir", errno);
+  }
+}
+
+// Linux extended attributes through the guest filesystem (user namespace).
+// Same shape as libcore_io_Linux.cpp: size query, read, retry on ERANGE.
+namespace {
+bool XattrProviderAvailable(JNIEnv *env, const char *operation) {
+  if (darwin_art_bionic_fs_getxattr_core != nullptr &&
+      darwin_art_bionic_fs_setxattr_core != nullptr &&
+      darwin_art_bionic_fs_removexattr_core != nullptr &&
+      darwin_art_bionic_fs_listxattr_core != nullptr &&
+      darwin_art_bionic_errno_load != nullptr) {
+    return true;
+  }
+  DarwinUnsupported(env, operation);
+  return false;
+}
+
+void ThrowGuestErrno(JNIEnv *env, const char *operation) {
+  jniThrowErrnoException(env, operation, darwin_art_bionic_errno_load());
+}
+}  // namespace
+
+jbyteArray DarwinLinuxGetxattr(JNIEnv *env, jobject, jstring java_path,
+                               jstring java_name) {
+  ScopedUtfChars path(env, java_path);
+  if (path.c_str() == nullptr) return nullptr;
+  ScopedUtfChars name(env, java_name);
+  if (name.c_str() == nullptr) return nullptr;
+  if (!XattrProviderAvailable(env, "getxattr")) return nullptr;
+  constexpr int kAndroidErange = 34;
+  while (true) {
+    const ssize_t size =
+        darwin_art_bionic_fs_getxattr_core(path.c_str(), name.c_str(), nullptr, 0, 0);
+    if (size < 0) {
+      ThrowGuestErrno(env, "getxattr");
+      return nullptr;
+    }
+    std::vector<char> value(static_cast<size_t>(size));
+    const ssize_t length = darwin_art_bionic_fs_getxattr_core(
+        path.c_str(), name.c_str(), value.data(), value.size(), 0);
+    if (length < 0) {
+      // The value grew since the size query; ask again.
+      if (darwin_art_bionic_errno_load() == kAndroidErange) continue;
+      ThrowGuestErrno(env, "getxattr");
+      return nullptr;
+    }
+    jbyteArray array = env->NewByteArray(static_cast<jsize>(length));
+    if (array == nullptr) return nullptr;
+    env->SetByteArrayRegion(array, 0, static_cast<jsize>(length),
+                            reinterpret_cast<const jbyte *>(value.data()));
+    return array;
+  }
+}
+
+void DarwinLinuxSetxattr(JNIEnv *env, jobject, jstring java_path, jstring java_name,
+                         jbyteArray java_value, jint flags) {
+  ScopedUtfChars path(env, java_path);
+  if (path.c_str() == nullptr) return;
+  ScopedUtfChars name(env, java_name);
+  if (name.c_str() == nullptr) return;
+  if (java_value == nullptr) {
+    jniThrowNullPointerException(env, "value");
+    return;
+  }
+  if (!XattrProviderAvailable(env, "setxattr")) return;
+  const jsize length = env->GetArrayLength(java_value);
+  std::vector<jbyte> value(static_cast<size_t>(length));
+  env->GetByteArrayRegion(java_value, 0, length, value.data());
+  if (darwin_art_bionic_fs_setxattr_core(path.c_str(), name.c_str(), value.data(),
+                                         value.size(), flags, 0) != 0) {
+    ThrowGuestErrno(env, "setxattr");
+  }
+}
+
+void DarwinLinuxRemovexattr(JNIEnv *env, jobject, jstring java_path, jstring java_name) {
+  ScopedUtfChars path(env, java_path);
+  if (path.c_str() == nullptr) return;
+  ScopedUtfChars name(env, java_name);
+  if (name.c_str() == nullptr) return;
+  if (!XattrProviderAvailable(env, "removexattr")) return;
+  if (darwin_art_bionic_fs_removexattr_core(path.c_str(), name.c_str(), 0) != 0) {
+    ThrowGuestErrno(env, "removexattr");
+  }
+}
+
+jobjectArray DarwinLinuxListxattr(JNIEnv *env, jobject, jstring java_path) {
+  ScopedUtfChars path(env, java_path);
+  if (path.c_str() == nullptr) return nullptr;
+  if (!XattrProviderAvailable(env, "listxattr")) return nullptr;
+  constexpr int kAndroidErange = 34;
+  while (true) {
+    const ssize_t size = darwin_art_bionic_fs_listxattr_core(path.c_str(), nullptr, 0, 0);
+    if (size < 0) {
+      ThrowGuestErrno(env, "listxattr");
+      return nullptr;
+    }
+    std::vector<char> names(static_cast<size_t>(size));
+    const ssize_t length =
+        darwin_art_bionic_fs_listxattr_core(path.c_str(), names.data(), names.size(), 0);
+    if (length < 0) {
+      if (darwin_art_bionic_errno_load() == kAndroidErange) continue;
+      ThrowGuestErrno(env, "listxattr");
+      return nullptr;
+    }
+    std::vector<std::string> entries;
+    for (size_t start = 0; start < static_cast<size_t>(length);) {
+      const size_t end = std::find(names.begin() + start, names.begin() + length, '\0') -
+                         names.begin();
+      entries.emplace_back(names.data() + start, end - start);
+      start = end + 1;
+    }
+    jclass string_class = env->FindClass("java/lang/String");
+    if (string_class == nullptr) return nullptr;
+    jobjectArray result =
+        env->NewObjectArray(static_cast<jsize>(entries.size()), string_class, nullptr);
+    env->DeleteLocalRef(string_class);
+    if (result == nullptr) return nullptr;
+    for (size_t index = 0; index < entries.size(); ++index) {
+      jstring entry = env->NewStringUTF(entries[index].c_str());
+      if (entry == nullptr) return nullptr;
+      env->SetObjectArrayElement(result, static_cast<jsize>(index), entry);
+      env->DeleteLocalRef(entry);
+    }
+    return result;
   }
 }
 
@@ -1307,6 +1523,33 @@ jobject DarwinLinuxFstat(JNIEnv *env, jobject, jobject java_fd) {
   return MakeStructStat(env, status);
 }
 
+void DarwinLinuxFsync(JNIEnv *env, jobject, jobject java_fd) {
+  int fd = -1;
+  if (!GetJavaFd(env, java_fd, "fsync", &fd)) return;
+  if (Fsync(fd) == -1) {
+    ThrowErrno(env, "fsync", errno);
+  }
+}
+
+// The facade's descriptors have no separate metadata flush.
+void DarwinLinuxFdatasync(JNIEnv *env, jobject, jobject java_fd) {
+  int fd = -1;
+  if (!GetJavaFd(env, java_fd, "fdatasync", &fd)) return;
+  if (Fsync(fd) == -1) {
+    ThrowErrno(env, "fdatasync", errno);
+  }
+}
+
+void DarwinLinuxPosixFallocate(JNIEnv *env, jobject, jobject java_fd,
+                               jlong offset, jlong length) {
+  int fd = -1;
+  if (!GetJavaFd(env, java_fd, "posix_fallocate", &fd)) return;
+  const int error = PosixFallocate(fd, offset, length);
+  if (error != 0) {
+    jniThrowErrnoException(env, "posix_fallocate", error);
+  }
+}
+
 void DarwinLinuxFtruncate(JNIEnv *env, jobject, jobject java_fd,
                           jlong length) {
   int fd = -1;
@@ -1563,35 +1806,56 @@ jint DarwinNativeGettid() {
   return static_cast<jint>(thread_id);
 }
 
-// java.lang.ProcessEnvironment asks the native layer for the host process
+// java.lang.ProcessEnvironment asks the native layer for the process
 // environment during static initialization.  Android exposes this as a
 // byte[][] (alternating key/value strings), not as a Java String map.  Keep
 // the conversion at the JNI boundary so the guest sees the exact OpenJDK
-// contract while the values still come from the profile-scoped host process.
+// contract.  Variables the guest process snapshot defines (ANDROID_ROOT,
+// ANDROID_DATA, ANDROID_STORAGE, EXTERNAL_STORAGE) carry their Android
+// values, as Android's init sets them; the host's values for the same names
+// locate ART's own host runtime files and stay visible only to native code.
+// Other entries are the profile-scoped host environment.
+using darwin_art::process::EnvironmentName;
+using darwin_art::process::GuestEnvironmentEntry;
+
 extern "C" jobjectArray Java_java_lang_ProcessEnvironment_environ(JNIEnv *env,
                                                                   jclass) {
   extern char **environ;
+  std::vector<const char*> entries;
+  for (char **entry = environ; entry != nullptr && *entry != nullptr; ++entry) {
+    const char* guest = GuestEnvironmentEntry(EnvironmentName(*entry));
+    entries.push_back(guest != nullptr ? guest : *entry);
+  }
+  char** guest_environ =
+      &darwin_art_bionic_environ == nullptr ? nullptr : darwin_art_bionic_environ;
+  for (char** guest = guest_environ; guest != nullptr && *guest != nullptr; ++guest) {
+    const std::string_view name = EnvironmentName(*guest);
+    bool present = false;
+    for (char **entry = environ; entry != nullptr && *entry != nullptr; ++entry) {
+      if (EnvironmentName(*entry) == name) {
+        present = true;
+        break;
+      }
+    }
+    if (!present) entries.push_back(*guest);
+  }
   jclass byte_array_class = env->FindClass("[B");
   if (byte_array_class == nullptr)
     return nullptr;
-  size_t count = 0;
-  for (char **entry = environ; entry != nullptr && *entry != nullptr; ++entry) {
-    ++count;
-  }
-  if (count > static_cast<size_t>(std::numeric_limits<jsize>::max())) {
+  if (entries.size() > static_cast<size_t>(std::numeric_limits<jsize>::max())) {
     env->DeleteLocalRef(byte_array_class);
     jniThrowException(env, "java/lang/OutOfMemoryError",
                       "environment too large");
     return nullptr;
   }
-  jobjectArray result =
-      env->NewObjectArray(static_cast<jsize>(count), byte_array_class, nullptr);
+  jobjectArray result = env->NewObjectArray(static_cast<jsize>(entries.size()),
+                                            byte_array_class, nullptr);
   env->DeleteLocalRef(byte_array_class);
   if (result == nullptr)
     return nullptr;
   jsize index = 0;
-  for (char **entry = environ; entry != nullptr && *entry != nullptr; ++entry) {
-    const size_t length = std::strlen(*entry);
+  for (const char* entry : entries) {
+    const size_t length = std::strlen(entry);
     if (length > static_cast<size_t>(std::numeric_limits<jsize>::max())) {
       jniThrowException(env, "java/lang/OutOfMemoryError",
                         "environment entry too large");
@@ -1601,7 +1865,7 @@ extern "C" jobjectArray Java_java_lang_ProcessEnvironment_environ(JNIEnv *env,
     if (bytes == nullptr)
       return nullptr;
     env->SetByteArrayRegion(bytes, 0, static_cast<jsize>(length),
-                            reinterpret_cast<const jbyte *>(*entry));
+                            reinterpret_cast<const jbyte *>(entry));
     env->SetObjectArrayElement(result, index++, bytes);
     env->DeleteLocalRef(bytes);
     if (env->ExceptionCheck())

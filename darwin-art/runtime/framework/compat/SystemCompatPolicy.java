@@ -23,8 +23,9 @@ public final class SystemCompatPolicy {
         int definitions = 0;
         for (File file : SystemCompatCatalog.files(Environment.getRootDirectory(), new File("/apex"))) {
             Config config = SystemCompatConfigReader.read(file);
-            for (com.android.server.compat.config.Change change : config.getCompatChange()) {
-                loaded.addChange(new CompatChange(change));
+            // R8 erased getCompatChange()'s List<Change> signature.
+            for (Object change : config.getCompatChange()) {
+                loaded.addChange(new CompatChange((com.android.server.compat.config.Change) change));
                 definitions++;
             }
         }

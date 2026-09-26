@@ -26,25 +26,10 @@ std::string JavaString(JNIEnv* env, jstring value) {
   return result;
 }
 
-jstring ResolveInstalledPackage(JNIEnv* env, jclass, jstring package_name) {
-  const std::string package = JavaString(env, package_name);
-  const char* socket_path = std::getenv("DARWIN_ART_SYSTEM_SERVER_SOCKET");
-  const std::string record = darwin_art::QuerySystemPackageRecord(
-      env, socket_path, package.c_str());
-  return record.empty() ? nullptr : env->NewStringUTF(record.c_str());
-}
-
 bool InstallPackageManagerNatives(JNIEnv* env, jobject package_manager) {
+  // The probe PackageManager has no installed-package source to bind.
   jclass package_manager_class = env->GetObjectClass(package_manager);
-  jclass record_endpoint = env->FindClass("dev/darwinart/runtime/pm/PackageRecords");
-  JNINativeMethod methods[] = {
-      {const_cast<char*>("nativeResolveInstalledPackage"),
-       const_cast<char*>("(Ljava/lang/String;)Ljava/lang/String;"),
-       reinterpret_cast<void*>(&ResolveInstalledPackage)},
-  };
-  const bool installed = package_manager_class != nullptr && record_endpoint != nullptr &&
-                         env->RegisterNatives(record_endpoint, methods, 1) == JNI_OK;
-  env->DeleteLocalRef(record_endpoint);
+  const bool installed = package_manager_class != nullptr;
   const char* verify_package = std::getenv("DARWIN_ART_VERIFY_SYSTEM_PACKAGE");
   if (installed && verify_package != nullptr && *verify_package != '\0') {
     jmethodID get_package_info = env->GetMethodID(

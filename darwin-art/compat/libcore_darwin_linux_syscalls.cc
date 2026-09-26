@@ -492,6 +492,88 @@ intptr_t Sendfile(int output_fd, int input_fd, int64_t* offset,
   return result;
 }
 
+extern "C" int darwin_art_bionic_fs_lstat_core(const char*, DarwinArtAndroidStat*)
+    __attribute__((weak_import));
+extern "C" int darwin_art_bionic_fs_unlinkat_core(int, const char*, int)
+    __attribute__((weak_import));
+extern "C" intptr_t darwin_art_bionic_fs_readlink_core(const char*, char*, size_t)
+    __attribute__((weak_import));
+extern "C" int darwin_art_bionic_fs_symlink_core(const char*, const char*)
+    __attribute__((weak_import));
+extern "C" int darwin_art_bionic_fs_link_core(const char*, const char*)
+    __attribute__((weak_import));
+extern "C" int darwin_art_bionic_fs_fsync_core(int) __attribute__((weak_import));
+extern "C" int darwin_art_bionic_fs_posix_fallocate_core(int, int64_t, int64_t)
+    __attribute__((weak_import));
+
+int Lstat(const char* path, struct stat* status) {
+  if (darwin_art_bionic_fs_lstat_core != nullptr && !IsAuthorizedHostRuntimePath(path)) {
+    DarwinArtAndroidStat android_status{};
+    if (darwin_art_bionic_fs_lstat_core(path, &android_status) == -1) {
+      PublishAndroidErrno();
+      return -1;
+    }
+    AndroidStatToDarwin(android_status, status);
+    return 0;
+  }
+  return lstat(path, status);
+}
+
+int Unlink(const char* path) {
+  if (darwin_art_bionic_fs_unlinkat_core != nullptr && !IsAuthorizedHostRuntimePath(path)) {
+    constexpr int kAndroidAtFdcwd = -100;
+    const int result = darwin_art_bionic_fs_unlinkat_core(kAndroidAtFdcwd, path, 0);
+    if (result == -1) PublishAndroidErrno();
+    return result;
+  }
+  return unlink(path);
+}
+
+ssize_t Readlink(const char* path, char* buffer, size_t size) {
+  if (darwin_art_bionic_fs_readlink_core != nullptr && !IsAuthorizedHostRuntimePath(path)) {
+    const intptr_t result = darwin_art_bionic_fs_readlink_core(path, buffer, size);
+    if (result == -1) PublishAndroidErrno();
+    return static_cast<ssize_t>(result);
+  }
+  return readlink(path, buffer, size);
+}
+
+int Symlink(const char* target, const char* link_path) {
+  if (darwin_art_bionic_fs_symlink_core != nullptr && !IsAuthorizedHostRuntimePath(link_path)) {
+    const int result = darwin_art_bionic_fs_symlink_core(target, link_path);
+    if (result == -1) PublishAndroidErrno();
+    return result;
+  }
+  return symlink(target, link_path);
+}
+
+int Link(const char* old_path, const char* new_path) {
+  if (darwin_art_bionic_fs_link_core != nullptr && !IsAuthorizedHostRuntimePath(old_path) &&
+      !IsAuthorizedHostRuntimePath(new_path)) {
+    const int result = darwin_art_bionic_fs_link_core(old_path, new_path);
+    if (result == -1) PublishAndroidErrno();
+    return result;
+  }
+  return link(old_path, new_path);
+}
+
+int Fsync(int fd) {
+  if (darwin_art_bionic_fs_fsync_core != nullptr && !IsHostFd(fd)) {
+    const int result = darwin_art_bionic_fs_fsync_core(fd);
+    if (result == -1) PublishAndroidErrno();
+    return result;
+  }
+  return fsync(fd);
+}
+
+int PosixFallocate(int fd, int64_t offset, int64_t length) {
+  if (darwin_art_bionic_fs_posix_fallocate_core != nullptr && !IsHostFd(fd)) {
+    // Returns an Android errno value, as posix_fallocate returns an error.
+    return darwin_art_bionic_fs_posix_fallocate_core(fd, offset, length);
+  }
+  return ENOTSUP;
+}
+
 int Access(const char* path, int mode) {
   if ((mode & ~7) != 0) {
     errno = EINVAL;

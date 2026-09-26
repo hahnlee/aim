@@ -123,7 +123,6 @@ impl PropertyArea {
 
     // Only an authorized property-service update may call this. This API is
     // deliberately not exposed as an unprivileged native setter.
-    #[allow(dead_code)]
     pub fn update(&self, name: &[u8], value: &[u8]) -> Result<(), &'static str> {
         validate(name, value)?;
         // Same order as wait: notification lock, then entry lock. Holding

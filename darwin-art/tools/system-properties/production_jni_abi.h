@@ -15,7 +15,7 @@ const prop_info* darwin_art_bionic___system_property_find(const char* name);
 void darwin_art_bionic___system_property_read_callback(
     const prop_info* property,
     void (*callback)(void*, const char*, const char*, uint32_t), void* cookie);
-int darwin_art_aosp_system_property_set(const char* key, const char* value);
+int darwin_art_bionic_property_service_set(const char* key, const char* value);
 int32_t darwin_art_bionic_errno_load(void);
 void darwin_art_bionic_errno_store(int32_t android_errno);
 /* Returns one and writes a Darwin errno only when the Android value has an
@@ -33,7 +33,7 @@ inline int darwin_art_system_property_set_for_jni(const char* key,
                                                   const char* value) {
   errno = 0;
   darwin_art_bionic_errno_store(0);
-  const int result = darwin_art_aosp_system_property_set(key, value);
+  const int result = darwin_art_bionic_property_service_set(key, value);
   if (result != 0) {
     const int32_t android_errno = darwin_art_bionic_errno_load();
     int darwin_errno;

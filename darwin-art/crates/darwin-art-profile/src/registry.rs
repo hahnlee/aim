@@ -6,19 +6,27 @@ use std::path::PathBuf;
 
 const RECORD_VERSION: &[u8] = b"darwin-art-launch-v1\n";
 
+/// The install ledger that preceded PackageManagerService. It is read once,
+/// by the migration into PMS Settings (settings_migration); PMS owns every
+/// installed package afterwards.
 pub(crate) struct PackageRegistry {
     directory: PathBuf,
+    /// The package store (`/data/app`); installs are kept in PMS's layout.
+    store: PathBuf,
 }
 
 impl PackageRegistry {
     pub(crate) fn new(paths: &ProfilePaths) -> Self {
         Self {
             directory: paths.mount.join("system/package-registry"),
+            store: paths.mount.join("packages"),
         }
     }
 
     pub(crate) fn register(&self, package: &str, record: &[u8]) -> Result<(), ProfileError> {
         validate_package(package)?;
+        validate_record(record)?;
+        let record = &crate::package_layout::adopt(&self.store, package, record)?;
         validate_record(record)?;
         fs::create_dir_all(&self.directory)?;
         fs::set_permissions(&self.directory, fs::Permissions::from_mode(0o700))?;
@@ -60,11 +68,6 @@ impl PackageRegistry {
         Ok(record)
     }
 
-    pub(crate) fn app_id(&self, package: &str) -> Result<u32, ProfileError> {
-        self.resolve(package)?; // Uninstalled/tombstoned packages are not live.
-        crate::app_ids::lookup(&self.directory, package)
-    }
-
     /// Upgrade installed launch metadata before exposing a mounted profile.
     /// Validate every input before writing any; preserve all APK/data paths.
     /// Each publication is atomic and rerunning after interruption is safe.
@@ -82,10 +85,28 @@ impl PackageRegistry {
         Ok(())
     }
 
-    pub(crate) fn unregister(&self, package: &str) -> Result<(), ProfileError> {
-        validate_package(package)?;
-        fs::remove_file(self.directory.join(format!("{package}.launch")))?;
-        File::open(&self.directory)?.sync_all()?;
+    /// Writes PackageManagerService Settings for the ledger's installs before
+    /// the first PMS boot (settings_migration).
+    pub(crate) fn migrate_settings(&self) -> Result<(), ProfileError> {
+        let listing = self.list()?;
+        let listing = std::str::from_utf8(&listing)
+            .map_err(|_| ProfileError::Daemon("package listing is not UTF-8".into()))?;
+        let packages = listing
+            .lines()
+            .map(|package| {
+                let record = self.resolve(package)?;
+                crate::settings_migration::LedgerPackage::from_record(&self.store, package, &record)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mount = self
+            .store
+            .parent()
+            .ok_or_else(|| ProfileError::Daemon("package store has no profile mount".into()))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        crate::settings_migration::migrate(mount, &packages, now)?;
         Ok(())
     }
 
@@ -180,6 +201,7 @@ mod tests {
         fs::create_dir(&directory).unwrap();
         let registry = PackageRegistry {
             directory: directory.clone(),
+            store: directory.join("packages"),
         };
         let legacy = b"darwin-art-launch-v1\napk=/packages/a/base.apk\nmetadata=unchanged\n";
         fs::write(directory.join("org.example.a.launch"), legacy).unwrap();

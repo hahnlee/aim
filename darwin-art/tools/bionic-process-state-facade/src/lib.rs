@@ -29,6 +29,7 @@ const ANDROID_ENOENT: i32 = 2;
 const ANDROID_E2BIG: i32 = 7;
 const ANDROID_EIO: i32 = 5;
 const ANDROID_EFAULT: i32 = 14;
+const ANDROID_EINVAL: i32 = 22;
 const AT_PAGESZ: u64 = 6;
 const AT_HWCAP: u64 = 16;
 const AT_SECURE: u64 = 23;
@@ -319,6 +320,35 @@ pub unsafe extern "C" fn darwin_art_bionic_process_property_get_core(
         )
     };
     (source.value.len() - 1) as c_int
+}
+
+#[unsafe(no_mangle)]
+/// Publishes a value the property service has accepted into this process's
+/// property area, as init's area write becomes visible to its setter. The
+/// property-service client calls this only after the service's success
+/// reply; it is not a native setter. Returns 0, or -1 with errno set.
+///
+/// # Safety
+/// `name` and `value` must point to readable NUL-terminated strings.
+pub unsafe extern "C" fn darwin_art_bionic_process_property_apply_service_update_core(
+    name: *const c_char,
+    value: *const c_char,
+) -> c_int {
+    let (Some(name), Some(value)) = (unsafe { c_bytes(name) }, unsafe { c_bytes(value) }) else {
+        set_errno(ANDROID_EFAULT);
+        return -1;
+    };
+    let Some(snapshot) = active_snapshot() else {
+        missing_snapshot();
+        return -1;
+    };
+    match snapshot.properties.update(name, value) {
+        Ok(()) => 0,
+        Err(_) => {
+            set_errno(ANDROID_EINVAL);
+            -1
+        }
+    }
 }
 
 #[unsafe(no_mangle)]

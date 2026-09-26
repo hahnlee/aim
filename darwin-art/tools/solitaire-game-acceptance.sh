@@ -22,7 +22,7 @@ env \
   DARWIN_ART_TEST_POINTER_AFTER_DRAG_SEQUENCE='240,390,1200' \
   "$root/tools/run-android-apk-app.sh" "$apk" 8 >"$log" 2>&1
 
-grep -a -F 'apk-app-runtime: package=net.sourceforge.solitaire_cg' "$log" >/dev/null
+grep -a -F 'darwin-art: launch package=net.sourceforge.solitaire_cg ' "$log" >/dev/null
 grep -a -F 'net.sourceforge.solitaire_cg.SolitaireView' "$log" >/dev/null
 grep -a -F 'MotionEvent ABI2 action=0 consumed=1 path=input-channel' "$log" >/dev/null
 grep -a -E 'MotionEvent ABI2 action=2 .*path=input-channel' "$log" >/dev/null

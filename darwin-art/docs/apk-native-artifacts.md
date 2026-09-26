@@ -8,7 +8,7 @@ Android logical SONAMEs, and the untouched APK remains the source of truth.
 
 Native execution has two distinct domains:
 
-1. **Complete Darwin** — an install-time-produced arm64 `MH_DYLIB` graph using
+1. **Complete Darwin** — a converter-produced arm64 `MH_DYLIB` graph using
    dyld, Darwin PCS, libSystem, Darwin pthread/TLS/unwind, and macOS graphics or
    other platform providers. No Android ELF calling convention, Bionic runtime
    state, ELF relocation, raw Linux syscall, or `.so` dependency may remain.
@@ -54,11 +54,14 @@ graph and hashes are independently revalidated. The resolver consumes only a
 sealed cache directory after publication. Code-signature policy remains part
 of conversion admission before untrusted converted artifacts are accepted.
 
-## Install-time conversion transaction
+## Conversion transaction
 
-`darwin-art-apk-install` owns the conversion attempt. An optional converter is
-identified by the SHA-256 of an absolute, regular, non-symlink executable and
-is invoked once for the entire installed ELF directory. It receives the APK
+PackageManagerService installs the APK and extracts its Android ELF graph into
+the package's `nativeLibraryDir` (ADR 0009). `darwin-art-native-resolve` owns
+the conversion attempt, made once per APK identity before the first launch
+that names a converter. An optional converter is identified by the SHA-256 of
+an absolute, regular, non-symlink executable and is invoked once for the
+entire installed ELF directory. It receives the APK
 hash, runtime ABI, immutable ELF directory, and a fresh private output
 directory. It may emit only the exact `lib*.dylib` set corresponding to the
 installed `lib*.so` set; it does not get to author admission contracts.
@@ -71,7 +74,7 @@ ELF and output dylib, creates the contracts, revalidates the exact graph, seals
 it, and publishes it atomically.
 
 Converter rejection, process failure, a missing member, an extra member, or any
-invalid dylib discards the whole private staging directory. The installer then
+invalid dylib discards the whole private staging directory. The resolver then
 selects the unchanged Android ELF graph and writes an advisory negative cache
 bound to the APK graph hash, runtime ABI, and converter hash. An unchanged
 failed graph is not converted again on every launch; changing any of those

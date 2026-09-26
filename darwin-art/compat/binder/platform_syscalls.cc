@@ -3,11 +3,13 @@
 #include "darwin_art_bionic_fs.h"
 #include "darwin_art_bionic_ioctl.h"
 #include "darwin_art_bionic_vm.h"
+#include "../../tools/bionic-process-state-facade/include/darwin_art_bionic_process_state.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 extern "C" int32_t darwin_art_bionic_errno_load(void);
 
@@ -121,4 +123,13 @@ extern "C" int darwin_art_binder_platform_munmap(void *address, size_t length) {
   if (result < 0)
     PublishAndroidErrno();
   return result;
+}
+
+// Android processes see their Android uid from getuid(); IPCThreadState
+// seeds a thread's own calling uid from it.
+extern "C" uid_t darwin_art_binder_platform_getuid(void) {
+  DarwinArtProcessCredentialsOutput credentials{};
+  return darwin_art_bionic_process_state_read_credential_ids_core(&credentials) == 0
+             ? static_cast<uid_t>(credentials.uid)
+             : getuid();
 }

@@ -299,9 +299,10 @@ else
   quoted_undefined="$stage/provider-undefined.txt"
   sed -n 's/^  "\(.*\)", referenced from:$/\1/p' "$closure_log" > "$quoted_undefined"
   blocker_count="$(wc -l < "$quoted_undefined" | tr -d ' ')"
-  if [[ "$blocker_count" != 2 ]] ||
+  if [[ "$blocker_count" != 3 ]] ||
      ! grep -Fx 'android::AndroidRuntime::getJNIEnv()' "$quoted_undefined" >/dev/null ||
-     ! grep -Fx '_darwin_art_bionic_fs_adopt_host_fd_core' "$quoted_undefined" >/dev/null; then
+     ! grep -Fx '_darwin_art_bionic_fs_adopt_host_fd_core' "$quoted_undefined" >/dev/null ||
+     ! grep -Fx '_darwin_art_bionic_fs_dup_host_fd_core' "$quoted_undefined" >/dev/null; then
     echo "resource-jni: unexpected provider closure failure" >&2
     cat "$closure_log" >&2
     exit 3

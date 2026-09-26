@@ -136,6 +136,21 @@ fi
 
 verify_hash platform/frameworks/base "$FRAMEWORKS_BASE_REVISION" \
   "$androidfw_root/PathUtils.cpp" "$ANDROIDFW_PATHUTILS_SHA256"
+
+# Guest file opens: idmaps and the overlay APK an idmap names are device
+# paths, opened through the same guest filesystem hook as APK archives.
+guest_open_patch="$project_root/patches/frameworks-base/0022-darwin-androidfw-guest-file-open.patch"
+[[ "$(shasum -a 256 "$guest_open_patch" | awk '{print $1}')" == "$ANDROIDFW_GUEST_OPEN_PATCH_SHA256" ]] || {
+  echo "androidfw-foundation: guest file open patch changed" >&2
+  exit 3
+}
+patched_root="$stage_dir/androidfw"
+mkdir -p "$patched_root"
+for source in "${androidfw_sources[@]}"; do cp -p "$androidfw_root/$source" "$patched_root/"; done
+patch -d "$patched_root" -p1 --no-backup-if-mismatch < "$guest_open_patch" >/dev/null || {
+  echo "androidfw-foundation: guest file open patch no longer applies" >&2
+  exit 3
+}
 verify_hash "$INCREMENTAL_DELIVERY_PROJECT" "$INCREMENTAL_DELIVERY_REVISION" \
   "$incfs_root/util/map_ptr.cpp" "$INCFS_MAP_PTR_SHA256"
 verify_hash "$INCREMENTAL_DELIVERY_PROJECT" "$INCREMENTAL_DELIVERY_REVISION" \
@@ -231,7 +246,8 @@ objects=()
 for source in "${androidfw_sources[@]}"; do
   object="$object_dir/${source%.cpp}.o"
   echo "androidfw-foundation: compile $source"
-  "$cxx" "${common_flags[@]}" -c "$androidfw_root/$source" -o "$object"
+  "$cxx" "${common_flags[@]}" -include "$project_root/compat/filesystem/archive_open.h" \
+    -c "$patched_root/$source" -o "$object"
   objects+=("$object")
 done
 

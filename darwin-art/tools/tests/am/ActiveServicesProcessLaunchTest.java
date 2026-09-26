@@ -10,7 +10,6 @@ import android.os.Binder;
 import android.os.DeadObjectException;
 import android.os.IBinder;
 import android.os.RemoteException;
-import dev.darwinart.runtime.pm.ServiceResolver;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -176,7 +175,7 @@ public final class ActiveServicesProcessLaunchTest {
             processes.beginAttachment(42, UID, client, 1);
             processes.identify(42, 1, client, PACKAGE);
             processes.finishAttachment(42, 1);
-            ServiceResolver packages = TestServices.resolver(PACKAGE, UID,
+            PackageQueries packages = TestServices.resolver(PACKAGE, UID,
                     "example.FirstService", "example:shared",
                     "example.SecondService", "example:shared");
             backend.registry = processes;

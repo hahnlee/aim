@@ -15,7 +15,6 @@
 #include "../art/vm_bootstrap.h"
 #include "../framework/app/process_entry.h"
 #include "../framework/input/event_ingress.h"
-#include "../framework/pm/installed_record_source.h"
 #include "../framework/system/process_entry.h"
 #include "graphics_session.h"
 #include "process_config.h"
@@ -27,11 +26,6 @@
 
 namespace darwin_art::embedding {
 namespace {
-
-jstring ResolveInstalledPackage(JNIEnv* env, jclass, jstring package_name) {
-  return darwin_art::framework::pm::QueryInstalledRecord(
-      env, std::getenv("DARWIN_ART_PROFILE_SOCKET"), package_name);
-}
 
 bool HasTail(const darwin_art_process_config_t* config, size_t offset,
              size_t size) {
@@ -127,6 +121,16 @@ int32_t RunProcess(const darwin_art_process_config_t* config,
     std::cerr << "darwin_art_run_process: invalid service classpath inputs\n";
     return 70;
   }
+  // ART looks for a prebuilt odex of an APEX jar under the system and then
+  // the system_ext partition (file_utils GetSystemExtRoot). This image has no
+  // separate system_ext partition: /system_ext is /system/system_ext, as on
+  // Android devices without one. ART's roots are host paths.
+  if (!process_config.android_filesystem_root.empty() &&
+      std::getenv("SYSTEM_EXT_ROOT") == nullptr &&
+      setenv("SYSTEM_EXT_ROOT",
+             (process_config.android_filesystem_root + "/system/system_ext").c_str(), 0) != 0) {
+    return 70;
+  }
   runtime_art::VmBootstrapResult vm;
   const int vm_status = runtime_art::CreateVm(config, bounds, class_path, &vm);
   if (vm_status != 0) return vm_status;
@@ -171,8 +175,7 @@ int32_t RunProcess(const darwin_art_process_config_t* config,
 
   if (system_server) {
     const int status = darwin_art::framework::system::RunSystemProcess(
-        env, std::getenv("DARWIN_ART_SYSTEM_SERVER_SOCKET"),
-        &ResolveInstalledPackage);
+        env, std::getenv("DARWIN_ART_SYSTEM_SERVER_SOCKET"));
     result->hello_answer = 0;
     result->native_round_trip = 0;
     result->arraycopy_result = 0;

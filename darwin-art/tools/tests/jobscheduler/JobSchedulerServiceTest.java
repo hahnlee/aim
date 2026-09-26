@@ -15,7 +15,7 @@ import dev.darwinart.runtime.am.ApplicationProcessRegistry;
 import dev.darwinart.runtime.am.SystemServiceBindings;
 import dev.darwinart.runtime.connectivity.ConnectivitySnapshot;
 import dev.darwinart.runtime.connectivity.ConnectivityState;
-import dev.darwinart.runtime.pm.ServiceResolver;
+import dev.darwinart.runtime.am.PackageQueries;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,12 +34,18 @@ public final class JobSchedulerServiceTest {
         if (!condition) throw new AssertionError(message);
     }
 
-    private static final class Packages implements ServiceResolver {
+    private static final class Packages implements PackageQueries {
         private final Map<String, Integer> uids = new HashMap<>();
         void add(String packageName, int uid) {
             uids.put(packageName, uid);
         }
-        @Override public ServiceInfo service(ComponentName component) {
+        @Override public void addIsolatedUid(int isolatedUid, int ownerUid) {
+            throw new AssertionError("job services run in their app process");
+        }
+        @Override public void removeIsolatedUid(int isolatedUid) {
+            throw new AssertionError("job services run in their app process");
+        }
+        @Override public ServiceInfo service(ComponentName component, int userId) {
             Integer uid = uids.get(component.getPackageName());
             if (uid == null || !SERVICE.equals(component.getClassName())) return null;
             ApplicationInfo application = new ApplicationInfo();

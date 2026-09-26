@@ -21,7 +21,7 @@ final class BroadcastTransactions implements SystemBroadcasts {
 
     private final ApplicationProcessRegistry processes;
     final BroadcastRegistry registry = new BroadcastRegistry(
-            BroadcastTransactions::scheduleRegisteredReceiver);
+            BroadcastTransactions::scheduleRegisteredReceiver, ApplicationPackages::hasPermission);
 
     BroadcastTransactions(ApplicationProcessRegistry processes) {
         this.processes = processes;
@@ -77,10 +77,13 @@ final class BroadcastTransactions implements SystemBroadcasts {
         int userId = data.readInt();
         data.enforceNoDataAvail();
         if (resultTo != null || serialized) return false;
+        // As in AMS, a process may broadcast once attachApplication has
+        // identified it, including from Application.onCreate.
         ApplicationProcessRegistry.AttachedApplication caller =
-                processes.requireAttachedProcess(Binder.getCallingPid());
+                processes.requireIdentifiedAttachment(Binder.getCallingPid(),
+                        Binder.getCallingUid());
         registry.broadcast(caller.uid, caller.packageName, intent, resolvedType,
-                requiredPermissions != null && requiredPermissions.length > 0, sticky, userId);
+                requiredPermissions, null, null, sticky, userId);
         reply.writeNoException();
         reply.writeInt(BROADCAST_SUCCESS);
         return true;
@@ -88,8 +91,37 @@ final class BroadcastTransactions implements SystemBroadcasts {
 
     @Override
     public void broadcastAsSystem(Intent intent, boolean sticky) {
-        registry.broadcast(SYSTEM_UID, "android", intent, null, false, sticky,
+        registry.broadcast(SYSTEM_UID, "android", intent, null, null, null, null, sticky,
                 BroadcastRegistry.USER_ALL);
+    }
+
+    /**
+     * ActivityManagerInternal.broadcastIntentWithCallback: an unordered
+     * broadcast from the system; {@code resultTo} receives the intent once
+     * every receiver has been sent it, as the final receiver of a
+     * non-ordered broadcast does.
+     */
+    int broadcastWithCallback(Intent intent, IIntentReceiver resultTo,
+            String[] requiredPermissions, int userId, int[] appIdAllowList,
+            java.util.function.BiFunction<Integer, Bundle, Bundle> filterExtrasForReceiver) {
+        BroadcastRegistry.ReceiverIntent receiverIntent = filterExtrasForReceiver == null
+                ? null
+                : (uid, sent) -> {
+                    if (sent.getExtras() == null) return sent;
+                    Bundle extras = filterExtrasForReceiver.apply(uid, sent.getExtras());
+                    return extras == null ? null : new Intent(sent).replaceExtras(extras);
+                };
+        registry.broadcast(SYSTEM_UID, "android", intent, null, requiredPermissions,
+                appIdAllowList, receiverIntent, false, userId);
+        if (resultTo != null) {
+            try {
+                // Activity.RESULT_OK, the initial result of a system broadcast.
+                resultTo.performReceive(intent, -1, null, null, false, false, userId);
+            } catch (RemoteException ignored) {
+                // The final receiver's process is gone.
+            }
+        }
+        return BROADCAST_SUCCESS;
     }
 
     private static void scheduleRegisteredReceiver(IBinder thread, IBinder receiver,

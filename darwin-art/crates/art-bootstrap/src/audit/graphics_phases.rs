@@ -223,6 +223,11 @@ pub(super) fn run_graphics_upstream_gates(root: &Path, incremental: bool) -> Res
             &["_build/android-util-log/libandroid-util-log-registrar-darwin.a"][..],
         ),
         (
+            "build-android16-native-library-helper.sh",
+            "upstream/android16-native-library-helper.lock",
+            &["_build/native-library-helper/libandroid-native-library-helper-darwin.a"][..],
+        ),
+        (
             "build-android16-virtual-ref-base-ptr.sh",
             "upstream/android16-virtual-ref-base-ptr.lock",
             &["_build/virtual-ref-base-ptr/libandroid-virtual-ref-base-ptr-darwin.a"][..],

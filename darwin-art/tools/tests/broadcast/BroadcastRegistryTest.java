@@ -17,6 +17,8 @@ public final class BroadcastRegistryTest {
     private static final int SYSTEM_UID = 1000;
     private static final String ACTION = "example.ACTION";
     private static final String OTHER_ACTION = "example.OTHER";
+    // Held by APP_UID (and the system) in these tests' permission state.
+    private static final String SEND_PERMISSION = "example.permission.SEND";
 
     private static final class Delivered {
         final IBinder receiver;
@@ -38,7 +40,9 @@ public final class BroadcastRegistryTest {
     private static BroadcastRegistry registry() {
         delivered.clear();
         return new BroadcastRegistry((thread, receiver, intent, sticky, user, uid, pkg) ->
-                delivered.add(new Delivered(receiver, intent, sticky, uid)));
+                delivered.add(new Delivered(receiver, intent, sticky, uid)),
+                (uid, permission) -> uid == SYSTEM_UID
+                        || (uid == APP_UID && SEND_PERMISSION.equals(permission)));
     }
 
     private static ApplicationProcessRegistry.AttachedApplication app(int uid, String pkg) {
@@ -53,7 +57,8 @@ public final class BroadcastRegistryTest {
     public static void main(String[] args) {
         deliversToMatchingReceivers();
         nonExportedReceiversOnlyHearOwnUidAndSystem();
-        permissionGuardedReceiversOnlyHearOwnUid();
+        permissionsDecideReachability();
+        allowListAndExtrasFilterNarrowDelivery();
         packageTargetedBroadcastsSkipOtherPackages();
         stickyIsReturnedAndRedelivered();
         unregisterAndProcessDeathStopDelivery();
@@ -66,9 +71,9 @@ public final class BroadcastRegistryTest {
         Binder receiver = new Binder();
         check(registry.register(app(APP_UID, "app"), receiver, new IntentFilter(ACTION), null, 0,
                 BroadcastRegistry.RECEIVER_EXPORTED) == null, "no sticky yet");
-        registry.broadcast(OTHER_UID, "other", new Intent(OTHER_ACTION), null, false, false, 0);
+        registry.broadcast(OTHER_UID, "other", new Intent(OTHER_ACTION), null, null, null, null, false, 0);
         check(delivered.isEmpty(), "non-matching action is not delivered");
-        registry.broadcast(OTHER_UID, "other", new Intent(ACTION), null, false, false, 0);
+        registry.broadcast(OTHER_UID, "other", new Intent(ACTION), null, null, null, null, false, 0);
         check(delivered.size() == 1 && delivered.get(0).receiver == receiver
                 && !delivered.get(0).sticky && delivered.get(0).sendingUid == OTHER_UID,
                 "matching broadcast reaches the exported receiver");
@@ -78,22 +83,46 @@ public final class BroadcastRegistryTest {
         BroadcastRegistry registry = registry();
         registry.register(app(APP_UID, "app"), new Binder(), new IntentFilter(ACTION), null, 0,
                 BroadcastRegistry.RECEIVER_NOT_EXPORTED);
-        registry.broadcast(OTHER_UID, "other", new Intent(ACTION), null, false, false, 0);
+        registry.broadcast(OTHER_UID, "other", new Intent(ACTION), null, null, null, null, false, 0);
         check(delivered.isEmpty(), "another app cannot reach a non-exported receiver");
-        registry.broadcast(APP_UID, "app", new Intent(ACTION), null, false, false, 0);
-        registry.broadcast(SYSTEM_UID, "android", new Intent(ACTION), null, false, false,
+        registry.broadcast(APP_UID, "app", new Intent(ACTION), null, null, null, null, false, 0);
+        registry.broadcast(SYSTEM_UID, "android", new Intent(ACTION), null, null, null, null, false,
                 BroadcastRegistry.USER_ALL);
         check(delivered.size() == 2, "own uid and system reach a non-exported receiver");
     }
 
-    private static void permissionGuardedReceiversOnlyHearOwnUid() {
+    private static void permissionsDecideReachability() {
         BroadcastRegistry registry = registry();
         registry.register(app(APP_UID, "app"), new Binder(), new IntentFilter(ACTION),
-                "example.permission.SEND", 0, BroadcastRegistry.RECEIVER_EXPORTED);
-        registry.broadcast(OTHER_UID, "other", new Intent(ACTION), null, false, false, 0);
-        check(delivered.isEmpty(), "unmodeled permission grants do not reach other uids");
-        registry.broadcast(APP_UID, "app", new Intent(ACTION), null, false, false, 0);
-        check(delivered.size() == 1, "own uid reaches its permission-guarded receiver");
+                SEND_PERMISSION, 0, BroadcastRegistry.RECEIVER_EXPORTED);
+        registry.broadcast(OTHER_UID, "other", new Intent(ACTION), null, null, null, null, false,
+                0);
+        check(delivered.isEmpty(), "a sender without the receiver's permission is skipped");
+        registry.broadcast(APP_UID, "app", new Intent(ACTION), null, null, null, null, false, 0);
+        check(delivered.size() == 1, "a sender holding the permission reaches the receiver");
+        BroadcastRegistry open = registry();
+        open.register(app(OTHER_UID, "other"), new Binder(), new IntentFilter(ACTION), null, 0,
+                BroadcastRegistry.RECEIVER_EXPORTED);
+        open.broadcast(SYSTEM_UID, "android", new Intent(ACTION), null,
+                new String[] {SEND_PERMISSION}, null, null, false, 0);
+        check(delivered.isEmpty(), "a receiver without the broadcast's permission is skipped");
+    }
+
+    private static void allowListAndExtrasFilterNarrowDelivery() {
+        BroadcastRegistry registry = registry();
+        registry.register(app(APP_UID, "app"), new Binder(), new IntentFilter(ACTION), null, 0,
+                BroadcastRegistry.RECEIVER_EXPORTED);
+        registry.register(app(OTHER_UID, "other"), new Binder(), new IntentFilter(ACTION), null,
+                0, BroadcastRegistry.RECEIVER_EXPORTED);
+        registry.broadcast(SYSTEM_UID, "android", new Intent(ACTION), null, null,
+                new int[] {APP_UID}, null, false, 0);
+        check(delivered.size() == 1 && delivered.get(0).intent.getPackage() == null,
+                "only allow-listed app ids receive");
+        delivered.clear();
+        registry.broadcast(SYSTEM_UID, "android", new Intent(ACTION).putExtra("secret", 1), null,
+                null, null, (uid, sent) -> uid == APP_UID ? sent : null, false, 0);
+        check(delivered.size() == 1 && delivered.get(0).intent.getIntExtra("secret", 0) == 1,
+                "a receiver's intent can withhold the broadcast from another uid");
     }
 
     private static void packageTargetedBroadcastsSkipOtherPackages() {
@@ -101,24 +130,24 @@ public final class BroadcastRegistryTest {
         registry.register(app(APP_UID, "app"), new Binder(), new IntentFilter(ACTION), null, 0,
                 BroadcastRegistry.RECEIVER_EXPORTED);
         registry.broadcast(OTHER_UID, "other", new Intent(ACTION).setPackage("elsewhere"), null,
-                false, false, 0);
+                null, null, null, false, 0);
         check(delivered.isEmpty(), "a broadcast for another package is not delivered");
         registry.broadcast(OTHER_UID, "other", new Intent(ACTION).setPackage("app"), null,
-                false, false, 0);
+                null, null, null, false, 0);
         check(delivered.size() == 1, "a broadcast for the receiver's package is delivered");
     }
 
     private static void stickyIsReturnedAndRedelivered() {
         BroadcastRegistry registry = registry();
         Intent battery = new Intent(Intent.ACTION_BATTERY_CHANGED).putExtra("level", 80);
-        registry.broadcast(SYSTEM_UID, "android", battery, null, false, true,
+        registry.broadcast(SYSTEM_UID, "android", battery, null, null, null, null, true,
                 BroadcastRegistry.USER_ALL);
         Intent query = registry.register(app(APP_UID, "app"), null,
                 new IntentFilter(Intent.ACTION_BATTERY_CHANGED), null, 0, 0);
         check(query != null && query.getIntExtra("level", -1) == 80,
                 "a null receiver reads the current sticky");
         registry.broadcast(SYSTEM_UID, "android",
-                new Intent(Intent.ACTION_BATTERY_CHANGED).putExtra("level", 79), null, false,
+                new Intent(Intent.ACTION_BATTERY_CHANGED).putExtra("level", 79), null, null, null, null,
                 true, BroadcastRegistry.USER_ALL);
         Binder receiver = new Binder();
         delivered.clear();
@@ -139,12 +168,12 @@ public final class BroadcastRegistryTest {
         registry.register(owner, first, new IntentFilter(ACTION), null, 0,
                 BroadcastRegistry.RECEIVER_EXPORTED);
         registry.unregister(first);
-        registry.broadcast(OTHER_UID, "other", new Intent(ACTION), null, false, false, 0);
+        registry.broadcast(OTHER_UID, "other", new Intent(ACTION), null, null, null, null, false, 0);
         check(delivered.isEmpty(), "an unregistered receiver is not delivered");
         registry.register(owner, new Binder(), new IntentFilter(ACTION), null, 0,
                 BroadcastRegistry.RECEIVER_EXPORTED);
         registry.processGone(owner.pid);
-        registry.broadcast(OTHER_UID, "other", new Intent(ACTION), null, false, false, 0);
+        registry.broadcast(OTHER_UID, "other", new Intent(ACTION), null, null, null, null, false, 0);
         check(delivered.isEmpty(), "process death removes its registrations");
     }
 

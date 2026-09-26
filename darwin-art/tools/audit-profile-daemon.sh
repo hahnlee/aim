@@ -35,16 +35,15 @@ fi
 touch "$mount/run/AuditCase" "$mount/run/auditcase"
 [[ "$(find "$mount/run" -maxdepth 1 \( -name AuditCase -o -name auditcase \) | wc -l | tr -d ' ')" == "2" ]]
 
-record="$mount/run/audit.launch"
+# Installed packages are PackageManagerService's packages.list (ADR 0009);
+# write the line PMS writes for a shell-installed package.
+package_list="$mount/data/apps/android.system/private-data/system/packages.list"
+mkdir -p "$(dirname "$package_list")"
 printf '%s\n' \
-  'darwin-art-launch-v1' \
-  'apk=/packages/org.example.audit/1/base.apk' \
-  'dex=/packages/org.example.audit/1/base.apk' \
-  'sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
-  'metadata=audit' >"$record"
-"$ctl" register org.example.audit "$record"
+  'com.android.shell 2000 0 /data/user_de/0/com.android.shell platform:privapp:targetSdkVersion=36 none 0 36 1 @system' \
+  'org.example.audit 10077 0 /data/user/0/org.example.audit default:targetSdkVersion=36 none 0 1 1 @null' \
+  >"$package_list"
 [[ "$("$ctl" list)" == "org.example.audit" ]]
-cmp "$record" <("$ctl" resolve org.example.audit)
 
 "$ctl" exec org.example.audit /bin/sleep 2 &
 lease_pid=$!
@@ -68,5 +67,4 @@ done
 [[ ! -S "$DARWIN_ART_PROFILE_ROOT/default/control.sock" ]]
 mount="$($ctl ensure)"
 [[ "$("$ctl" list)" == "org.example.audit" ]]
-cmp "$record" <("$ctl" resolve org.example.audit)
-echo "profile-daemon-audit: PASS case-sensitive=true registry-persistent=true process-exec-leased=true lease-protected=true"
+echo "profile-daemon-audit: PASS case-sensitive=true package-list-persistent=true process-exec-leased=true lease-protected=true"

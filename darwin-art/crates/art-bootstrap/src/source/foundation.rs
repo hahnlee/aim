@@ -13,6 +13,10 @@ const FOUNDATION_SHADOW_SOURCES: &[&str] = &[
     "scoped_flock.cc",
     "time_utils.cc",
     "utils.cc",
+    // FdFile and the headers its relative includes name.
+    "unix_file/fd_file.cc",
+    "unix_file/fd_file.h",
+    "unix_file/random_access_file.h",
 ];
 
 pub(crate) fn build_foundation(root: &Path) -> Result<()> {
@@ -73,6 +77,8 @@ fn foundation_archives(root: &Path, build_dir: &Path) -> Result<FoundationArchiv
         "patches/art/0102-darwin-logical-pthread-names.patch",
         "patches/art/0112-darwin-artbase-private-paths.patch",
         "patches/art/0039-darwin-memmap-exact-anonymous.patch",
+        "patches/art/0196-darwin-fd-file-guest-open.patch",
+        "patches/art/0197-darwin-os-guest-stat.patch",
     ];
     let shadow_identity = foundation_shadow_identity(root, &artbase, &foundation_patches)?;
     let shadow_identity_path = patched_source_dir.join(".darwin-art-shadow-identity");
@@ -90,10 +96,11 @@ fn foundation_archives(root: &Path, build_dir: &Path) -> Result<FoundationArchiv
         }
         fs::create_dir_all(&candidate_artbase)?;
         for source in FOUNDATION_SHADOW_SOURCES {
-            fs::copy(
-                artbase.join("base").join(source),
-                candidate_artbase.join(source),
-            )?;
+            let candidate = candidate_artbase.join(source);
+            if let Some(parent) = candidate.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(artbase.join("base").join(source), candidate)?;
         }
         for patch in foundation_patches {
             run_command(
@@ -251,7 +258,7 @@ fn foundation_archives(root: &Path, build_dir: &Path) -> Result<FoundationArchiv
         patched_artbase.join("base/scoped_flock.cc"),
         artbase.join("base/socket_peer_is_trusted.cc"),
         patched_artbase.join("base/time_utils.cc"),
-        artbase.join("base/unix_file/fd_file.cc"),
+        patched_artbase.join("base/unix_file/fd_file.cc"),
         artbase.join("base/unix_file/random_access_file_utils.cc"),
         patched_artbase.join("base/utils.cc"),
         artbase.join("base/zip_archive.cc"),
@@ -331,6 +338,9 @@ fn publish_if_changed(candidate: &Path, destination: &Path) -> Result<()> {
     if destination.is_file() && fs::read(destination)? == bytes {
         return Ok(());
     }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let temporary =
         destination.with_extension(format!("darwin-art-copy-tmp-{}", std::process::id()));
     fs::write(&temporary, bytes)?;
@@ -350,7 +360,7 @@ mod tests {
                 .trim(),
         );
         let artbase = directory.join("libartbase");
-        fs::create_dir_all(artbase.join("base")).unwrap();
+        fs::create_dir_all(artbase.join("base/unix_file")).unwrap();
         for source in FOUNDATION_SHADOW_SOURCES {
             fs::write(artbase.join("base").join(source), b"original").unwrap();
         }

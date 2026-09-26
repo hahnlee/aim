@@ -1,5 +1,7 @@
 package android.provider;
 
+import java.util.Collections;
+import java.util.Set;
 import java.util.concurrent.Executor;
 
 /**
@@ -15,12 +17,23 @@ public final class DeviceConfig {
         void onPropertiesChanged(Properties properties);
     }
 
+    /** A namespace's stored values: none, in this runtime. */
     public static final class Properties {
+        private final String mNamespace;
+
+        Properties(String namespace) { mNamespace = namespace; }
+
+        public String getNamespace() { return mNamespace; }
+        public Set<String> getKeyset() { return Collections.emptySet(); }
         public String getString(String key, String fallback) { return fallback; }
         public boolean getBoolean(String key, boolean fallback) { return fallback; }
         public int getInt(String key, int fallback) { return fallback; }
         public long getLong(String key, long fallback) { return fallback; }
         public float getFloat(String key, float fallback) { return fallback; }
+    }
+
+    public static String getProperty(String namespace, String name) {
+        return null;
     }
 
     public static String getString(String namespace, String key, String fallback) {
@@ -44,7 +57,7 @@ public final class DeviceConfig {
     }
 
     public static Properties getProperties(String namespace, String... keys) {
-        return new Properties();
+        return new Properties(namespace);
     }
 
     public static void addOnPropertiesChangedListener(

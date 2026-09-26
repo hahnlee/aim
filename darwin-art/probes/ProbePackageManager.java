@@ -23,8 +23,6 @@ import java.util.HashMap;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import dev.darwinart.runtime.pm.InstalledPackageInfos;
-import static dev.darwinart.runtime.pm.PackageRecords.nativeResolveInstalledPackage;
 
 /** Minimal package policy for framework feature gates before system_server exists. */
 public final class ProbePackageManager extends MockPackageManager {
@@ -67,22 +65,18 @@ public final class ProbePackageManager extends MockPackageManager {
         return end < 0 ? metadata.substring(start) : metadata.substring(start, end);
     }
 
+    /**
+     * Probe processes run without PackageManagerService or an install
+     * ledger: no other package is installed, so every installed-package
+     * lookup finds nothing.
+     */
+    private static String nativeResolveInstalledPackage(String packageName) {
+        return null;
+    }
+
     private static ApplicationInfo installedApplicationInfo(
             String requestedPackage, String record) {
-        ApplicationInfo info = InstalledPackageInfos.applicationInfo(requestedPackage, record,
-                InstalledPackageInfos.STOCK_PM_FLAGS);
-        if (info == null) return null;
-        // The launcher environment describes only the package being run. Do
-        // not stamp that label onto records for unrelated installed packages
-        // (for example Play Services queried by an SDK).
-        String runningPackage = System.getenv("DARWIN_ART_APK_APP_PACKAGE");
-        if (runningPackage != null && runningPackage.equals(requestedPackage)) {
-            info.nativeLibraryDir = System.getenv("DARWIN_ART_APK_APP_NATIVE_DIR");
-            applyApplicationPaths(info);
-            applyApplicationLabel(info, null);
-            applyApplicationIcon(info);
-        }
-        return info;
+        return null;
     }
 
     private static boolean recordDeclaresPermission(String record, String permission) {
@@ -450,13 +444,7 @@ public final class ProbePackageManager extends MockPackageManager {
         ActivityInfo configured = source == null ? new ActivityInfo() : source;
         configured.packageName = packageName;
         configured.name = activityName;
-        if (System.getenv("DARWIN_ART_APK_APP_PACKAGE") != null) {
-            configured.applicationInfo = installedApplicationInfo(packageName,
-                    nativeResolveInstalledPackage(packageName));
-            if (configured.applicationInfo == null) {
-                throw new IllegalStateException("Installed package record missing: " + packageName);
-            }
-        } else if (configured.applicationInfo == null) {
+        if (configured.applicationInfo == null) {
             configured.applicationInfo = new ApplicationInfo();
         }
         configured.applicationInfo.packageName = packageName;

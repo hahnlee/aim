@@ -1,5 +1,6 @@
 package dev.darwinart.runtime.am;
 
+import android.app.ActivityManager;
 import android.os.Binder;
 import android.os.Debug;
 import android.os.IBinder;
@@ -12,8 +13,6 @@ import android.content.Intent;
 import android.util.Log;
 import android.content.pm.ActivityInfo;
 import dev.darwinart.runtime.content.SettingsProviderEndpoint;
-import dev.darwinart.runtime.pm.InstalledPackageInfos;
-import dev.darwinart.runtime.pm.PackageRecords;
 import java.lang.reflect.Field;
 
 /** System-process application attachment owner. Unsupported AMS calls stay unsupported. */
@@ -47,30 +46,39 @@ public final class ActivityManagerEndpoint extends Binder {
             transaction("registerReceiverWithFeature");
     private final int unregisterReceiverCode = transaction("unregisterReceiver");
     private final int broadcastIntentWithFeatureCode = transaction("broadcastIntentWithFeature");
+    private final int getInfoForIntentSenderCode = transaction("getInfoForIntentSender");
+    private final int sendIntentSenderCode = transaction("sendIntentSender");
     private final BroadcastTransactions broadcasts;
-    private final PackageRecords.Source packages;
     private final ApplicationProcessRegistry processes;
     private final SettingsProviderEndpoint settingsProvider = new SettingsProviderEndpoint();
     private final ActiveServices activeServices;
     private final BoundServiceProcessLauncher processLauncher;
     private final TaskLifecycle tasks;
 
-    public ActivityManagerEndpoint(PackageRecords.Source packages,
-            ApplicationProcessRegistry processes, TaskLifecycle tasks) {
+    public ActivityManagerEndpoint(ApplicationProcessRegistry processes, TaskLifecycle tasks) {
         if (tasks == null) throw new NullPointerException("tasks");
-        this.packages = packages;
         this.processes = processes;
         this.tasks = tasks;
         processLauncher = new BoundServiceProcessLauncher(processes);
-        activeServices = new ActiveServices(InstalledPackageInfos.serviceResolver(packages),
+        activeServices = new ActiveServices(ApplicationPackages.INSTANCE,
                 processes, processLauncher);
         broadcasts = new BroadcastTransactions(processes);
         attachInterface(null, "android.app.IActivityManager");
     }
 
     /** Android system-service-only entry; this is not exposed on IActivityManager. */
+    /** ActivityManagerService.setSystemProcess for this process's ActivityThread. */
+    public void setSystemProcess(IBinder applicationThread) {
+        processes.setSystemProcess(android.os.Process.myPid(), applicationThread);
+    }
+
     public SystemServiceBindings systemServiceBindings() {
         return activeServices;
+    }
+
+    /** The ActivityManagerInternal this endpoint's state answers. */
+    public android.app.ActivityManagerInternal localService() {
+        return new ActivityManagerLocal(broadcasts);
     }
 
     /** Android system-service-only broadcast entry; not exposed on IActivityManager. */
@@ -92,7 +100,7 @@ public final class ActivityManagerEndpoint extends Binder {
     private static native String nativeResolveAttachedPackage(int expectedUid);
     private static native String nativeAttach(IBinder application, long startSequence,
             String reservedProcessName, int expectedUid);
-    private static native void nativeLaunch(IBinder application, String packageName, String record);
+    private static native void nativeLaunch(IBinder application, String packageName, int uid);
 
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
@@ -113,6 +121,41 @@ public final class ActivityManagerEndpoint extends Binder {
             } else {
                 return broadcasts.broadcast(data, reply);
             }
+            return true;
+        }
+        if (code == getInfoForIntentSenderCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            data.readStrongBinder(); // IIntentSender
+            data.enforceNoDataAvail();
+            if (reply == null) return false;
+            // ActivityManagerService.getInfoForIntentSender. This service
+            // issues no PendingIntentRecords, so every sender is one the
+            // caller made itself (a local IIntentSender): unknown creator.
+            reply.writeNoException();
+            reply.writeTypedObject(new ActivityManager.PendingIntentInfo(null,
+                    android.os.Process.INVALID_UID, false,
+                    ActivityManager.INTENT_SENDER_UNKNOWN),
+                    Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
+            return true;
+        }
+        if (code == sendIntentSenderCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            data.readStrongBinder(); // IApplicationThread caller
+            android.content.IIntentSender target =
+                    android.content.IIntentSender.Stub.asInterface(data.readStrongBinder());
+            IBinder allowlistToken = data.readStrongBinder();
+            int resultCode = data.readInt();
+            Intent intent = data.readTypedObject(Intent.CREATOR);
+            String resolvedType = data.readString();
+            android.content.IIntentReceiver finishedReceiver =
+                    android.content.IIntentReceiver.Stub.asInterface(data.readStrongBinder());
+            String requiredPermission = data.readString();
+            android.os.Bundle options = data.readTypedObject(android.os.Bundle.CREATOR);
+            data.enforceNoDataAvail();
+            if (reply == null) return false;
+            reply.writeNoException();
+            reply.writeInt(sendIntentSender(target, allowlistToken, resultCode, intent,
+                    resolvedType, finishedReceiver, requiredPermission, options));
             return true;
         }
         if (code == getMemoryInfoCode || code == getProcessesInErrorStateCode
@@ -329,8 +372,7 @@ public final class ActivityManagerEndpoint extends Binder {
                 // task orientation, so resolve the task before binding.
                 ActivityInfo launchActivity = target.initialWork
                         == ApplicationProcessRegistry.InitialWork.ACTIVITY
-                        ? InstalledPackageInfos.launchActivity(trustedPackage,
-                                packages.resolveInstalledPackage(trustedPackage))
+                        ? ApplicationPackages.launchActivity(trustedPackage, callerUid)
                         : null;
                 tasks.prepareProcess(pid, app, launchActivity);
                 String packageName = nativeAttach(
@@ -357,10 +399,8 @@ public final class ActivityManagerEndpoint extends Binder {
                 processLauncher.onAttached(attached);
                 IBinder app = attached.thread;
                 String packageName = attached.packageName;
-                String record = packageName == null
-                        ? null : packages.resolveInstalledPackage(packageName);
                 if (attached.initialWork == ApplicationProcessRegistry.InitialWork.ACTIVITY) {
-                    nativeLaunch(app, packageName, record);
+                    nativeLaunch(app, packageName, attached.uid);
                 }
                 activeServices.onProcessAttached(attached);
             } catch (RuntimeException | Error error) {
@@ -370,6 +410,39 @@ public final class ActivityManagerEndpoint extends Binder {
         }
         reply.writeNoException();
         return true;
+    }
+
+    /**
+     * ActivityManagerService.sendIntentSender for a sender that is not a
+     * PendingIntentRecord, the only kind this service sees (it issues none):
+     * the sender is called directly and the finish is reported at once.
+     * Intent creator tokens are not issued by this runtime.
+     */
+    private static int sendIntentSender(android.content.IIntentSender target,
+            IBinder allowlistToken, int code, Intent intent, String resolvedType,
+            android.content.IIntentReceiver finishedReceiver, String requiredPermission,
+            android.os.Bundle options) {
+        if (target == null) throw new IllegalArgumentException("Null IIntentSender");
+        if (intent == null) {
+            Log.wtf("DarwinActivityManager", "Can't use null intent with direct IIntentSender call");
+            intent = new Intent(Intent.ACTION_MAIN);
+        }
+        if (allowlistToken != null) {
+            Log.wtf("DarwinActivityManager", "Send a non-null allowlistToken to a non-PI target;"
+                    + " intent: " + intent);
+        }
+        try {
+            target.send(code, intent, resolvedType, null, null, requiredPermission, options);
+        } catch (RemoteException ignored) {
+        }
+        if (finishedReceiver != null) {
+            try {
+                finishedReceiver.performReceive(intent, 0, null, null, false, false,
+                        android.os.UserHandle.getCallingUserId());
+            } catch (RemoteException ignored) {
+            }
+        }
+        return 0;
     }
 
     private void observeProcessDeath(ApplicationProcessRegistry.AttachedApplication attached)

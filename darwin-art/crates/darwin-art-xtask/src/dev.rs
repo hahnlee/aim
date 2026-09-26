@@ -75,9 +75,7 @@ fn classify(root: &Path, paths: &[PathBuf]) -> ChangePlan {
     for path in paths {
         let text = path.to_string_lossy();
         let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
-        plan.support |= text.starts_with("runtime/framework/")
-            || text == "tools/build-android16-package-dex-usage.sh"
-            || text == "tools/dex-inspect.cc";
+        plan.support |= text.starts_with("runtime/framework/") || text == "tools/dex-inspect.cc";
         plan.rust |= path.extension().is_some_and(|extension| extension == "rs")
             || matches!(file_name, "Cargo.toml" | "Cargo.lock" | "config.toml");
         let foundation = text.starts_with("patches/")

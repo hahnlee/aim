@@ -200,10 +200,13 @@ compile_object() {
   shift
   local fingerprint_file="$object.fingerprint"
   local fingerprint
+  # Sources name only the .cpp; the Darwin shim headers they include
+  # (compat/binder) must also invalidate the object.
   fingerprint="$({ printf '%q\n' "$cxx" "$@"; \
     for input in "$@"; do \
       if [[ -f "$input" ]]; then shasum -a 256 "$input"; fi; \
     done; \
+    shasum -a 256 "$project_root"/compat/binder/*.h; \
   } | shasum -a 256 | awk '{print $1}')"
   if [[ -f "$object" && -f "$fingerprint_file" && \
         "$(<"$fingerprint_file")" == "$fingerprint" ]]; then

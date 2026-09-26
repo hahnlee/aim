@@ -64,6 +64,6 @@ pub(crate) fn probe_runtime_apk_jni_app(root: &Path, show_window: bool) -> Resul
 }
 
 fn probe_runtime_apk_variant(root: &Path, show_window: bool, apk_jni: bool) -> Result<()> {
-    build_shell_gate(root, "android-apk-app-runtime/audit.sh")?;
+    build_shell_gate(root, "fixtures/simple-apk/build.sh")?;
     probe_runtime_dex_flavor_impl(root, show_window, true, false, false, false, true, apk_jni)
 }

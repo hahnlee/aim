@@ -16,6 +16,12 @@ darwin_art_package_system_root() (
   fi
   darwin_art_verify_system_compat_config_inventory "$compat" \
     "$helper_root/upstream/android16-system-compat-files.lock" || return
+  source "$helper_root/tools/lib/systemserver-classpath-artifact.sh" || return
+  local server_jars
+  server_jars="$(darwin_art_prepare_systemserver_classpath_artifact)" || return
+  source "$helper_root/tools/lib/system-partition-artifact.sh" || return
+  local system_partition
+  system_partition="$(darwin_art_prepare_system_partition_artifact)" || return
   source "$helper_root/tools/lib/key-character-map-artifact.sh" || return
   if [[ $# -ge 7 ]]; then
     keychars="$7"
@@ -68,6 +74,36 @@ darwin_art_package_system_root() (
   cp -p "$framework" "$resource_stage/system/framework/framework-res.apk" || return
   cp -p "$services" "$resource_stage/system/framework/services.jar" || return
   darwin_art_verify_system_services "$resource_stage/system/framework/services.jar" || return
+  # system_server classpath JARs at their device paths. services.jar is the
+  # separately verified artifact above; a JAR a native APEX payload already
+  # carries must be the identical file.
+  local expected kind path server_list
+  server_list="$resource_stage/server-entries"
+  : > "$server_list"
+  mkdir -p "$resource_stage/server" || return
+  while read -r expected kind path extra; do
+    [[ -z "${expected:-}" || "$expected" == \#* || "$expected" == IMAGE_SHA256=* ]] && continue
+    [[ "$path" == /system/framework/services.jar ]] && continue
+    if [[ -e "$input$path" ]]; then
+      [[ "$(shasum -a 256 "$input$path" | awk '{print $1}')" == "$expected" ]] || return 65
+      continue
+    fi
+    mkdir -p "$resource_stage/server$(dirname "$path")" || return
+    cp -p "$server_jars$path" "$resource_stage/server$path" || return
+    chmod 0444 "$resource_stage/server$path" || return
+    touch -r "$framework" "$resource_stage/server$path" || return
+    printf '%s\n' "${path#/}" >> "$server_list"
+  done < "$helper_root/upstream/android16-systemserverclasspath.lock"
+  # derive_classpath's environment file (its /data/system/environ/classpath);
+  # this image's classpaths are fixed when it is assembled.
+  mkdir -p "$resource_stage/server/system/etc" || return
+  {
+    printf 'export SYSTEMSERVERCLASSPATH %s\n' "$(darwin_art_systemserver_classpath classpath)"
+    printf 'export STANDALONE_SYSTEMSERVER_JARS %s\n' "$(darwin_art_systemserver_classpath standalone)"
+  } > "$resource_stage/server/system/etc/classpath" || return
+  chmod 0444 "$resource_stage/server/system/etc/classpath" || return
+  touch -r "$framework" "$resource_stage/server/system/etc/classpath" || return
+  printf '%s\n' system/etc/classpath >> "$server_list"
   # This directory is packaging structure, not a runtime-generated resource.
   # Give it a stable source timestamp so identical inputs produce identical
   # archive identities across builds instead of a new shared image each time.
@@ -89,5 +125,48 @@ darwin_art_package_system_root() (
     -C "$resource_stage" system/framework || return
   /usr/bin/tar -rf "$destination" -C "$resource_stage/boot" \
     -T "$resource_stage/boot-entries" || return
+  /usr/bin/tar -rf "$destination" -C "$resource_stage/server" \
+    -T "$server_list" || return
+  # System packages and platform configuration PackageManagerService scans.
+  local partition_list="$resource_stage/partition-entries"
+  # A JAR already packaged from the system_server classpath is the same file.
+  darwin_art_system_partition_entries | grep -Fxv -f "$server_list" > "$partition_list" || return
+  while read -r path; do
+    [[ ! -e "$input/$path" && ! -L "$input/$path" ]] || {
+      echo "system partition entry collides with the native image: $path" >&2
+      return 65
+    }
+  done < "$partition_list"
+  /usr/bin/tar -rf "$destination" -C "$system_partition" -T "$partition_list" || return
+  # As on the device, /system_ext names the system_ext partition, which this
+  # root keeps at /system/system_ext (DeviceProtos reads its flag proto there).
+  mkdir -p "$resource_stage/root-links" || return
+  ln -s system/system_ext "$resource_stage/root-links/system_ext" || return
+  /usr/bin/tar -rf "$destination" -C "$resource_stage/root-links" system_ext || return
+  # idmaps of the immutable framework overlays. AOSP's zygote runs
+  # `idmap2 create-multiple` into /data/resource-cache on every boot; this
+  # image is fixed, so they are created once here with the same policies
+  # OverlayConfig requests (partition policy, overlayable enforced for
+  # targetSdk >= Q) and read from /system/etc/resource-cache (ADR 0009).
+  local idmap2="$helper_root/_build/android16-idmap2/idmap2" guest_root="$resource_stage/idmap-root"
+  local cache="$resource_stage/idmap/system/etc/resource-cache" overlays=()
+  [[ -x "$idmap2" ]] || bash "$helper_root/tools/build-android16-idmap2.sh" >&2 || return
+  mkdir -p "$guest_root/system/framework" "$guest_root/product" "$cache" || return
+  ln -s "$resource_stage/system/framework/framework-res.apk" \
+    "$guest_root/system/framework/framework-res.apk" || return
+  ln -s "$system_partition/product/overlay" "$guest_root/product/overlay" || return
+  while read -r path; do
+    [[ "$path" == product/overlay/*.apk ]] && overlays+=(--overlay-apk-path "/$path")
+  done < "$partition_list"
+  (( ${#overlays[@]} > 0 )) || return 65
+  DARWIN_ART_IDMAP2_GUEST_ROOT="$guest_root" "$idmap2" create-multiple \
+    --target-apk-path /system/framework/framework-res.apk "${overlays[@]}" \
+    --policy public --policy product --idmap-dir "$cache" > "$resource_stage/idmaps" || return
+  # idmap2 leaves out an overlay that overlays nothing it may (the emulator
+  # characteristics RRO carries no resources), exactly as it would on device.
+  [[ -s "$resource_stage/idmaps" ]] || return 65
+  chmod 0444 "$cache"/* || return
+  touch -r "$framework" "$cache"/* "$cache" || return
+  /usr/bin/tar -rf "$destination" -C "$resource_stage/idmap" system/etc/resource-cache || return
   chmod a-w "$destination" || return
 )

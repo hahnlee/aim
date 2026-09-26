@@ -12,7 +12,9 @@ pub(super) struct FilesystemNamespace {
     pub broker: ReadOnlyBroker,
     pub guest_root: Option<Arc<GuestRoot>>,
     pub cwd: WorkingDirectory,
-    /// Installed package code is mounted read-only at `/data/app` (mount 4).
+    /// Installed package code is mounted at `/data/app` (mount 4):
+    /// read-only for apps, writable for the system server whose
+    /// PackageManagerService owns it.
     pub packages: bool,
 }
 
@@ -27,7 +29,7 @@ impl FilesystemNamespace {
         cwd: &[u8],
         private: Option<&PrivateDataRoot>,
     ) -> Result<Self, &'static str> {
-        Self::with_storage(root, guest_mount, cwd, private, None, None)
+        Self::with_storage(root, guest_mount, cwd, private, None, None, false)
     }
 
     pub fn with_storage(
@@ -37,6 +39,7 @@ impl FilesystemNamespace {
         private: Option<&PrivateDataRoot>,
         storage: Option<&super::writable_mount::WritableMount>,
         packages: Option<&File>,
+        packages_writable: bool,
     ) -> Result<Self, &'static str> {
         if storage.is_some() && guest_mount != b"/" {
             return Err("shared storage requires a complete guest namespace");
@@ -61,7 +64,16 @@ impl FilesystemNamespace {
         }
         if packages.is_some() {
             prefix
-                .add_mount(4, MountKind::Immutable, false, PACKAGE_PREFIX)
+                .add_mount(
+                    4,
+                    if packages_writable {
+                        MountKind::Shared
+                    } else {
+                        MountKind::Immutable
+                    },
+                    packages_writable,
+                    PACKAGE_PREFIX,
+                )
                 .map_err(|_| "invalid installed package mount")?;
         }
         prefix.seal().map_err(|_| "could not seal guest mount")?;

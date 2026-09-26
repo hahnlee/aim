@@ -5,12 +5,10 @@
 
 namespace darwin_art::framework::system {
 
-// Launch configuration and installed-record transport are supplied by the host
-// entry. No APK activity/graphics fixture is a prerequisite of this process.
-using InstalledRecordResolver = jstring (*)(JNIEnv*, jclass, jstring);
+// Launch configuration is supplied by the host entry. No APK activity/graphics
+// fixture is a prerequisite of this process.
 bool BuildSystemClassPath(const char* image_root, const char* support_dex,
                           std::string* result);
-int RunSystemProcess(JNIEnv* env, const char* socket_path,
-                     InstalledRecordResolver resolver);
+int RunSystemProcess(JNIEnv* env, const char* socket_path);
 
 }  // namespace darwin_art::framework::system

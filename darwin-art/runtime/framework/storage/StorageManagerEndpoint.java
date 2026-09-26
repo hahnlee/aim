@@ -5,6 +5,7 @@ import android.os.Environment;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.os.Process;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.storage.StorageVolume;
@@ -12,7 +13,9 @@ import dev.darwinart.runtime.am.ApplicationProcessRegistry;
 import java.io.File;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** System-server owner for the Android 16 IStorageManager volume contract. */
 public final class StorageManagerEndpoint extends Binder {
@@ -20,6 +23,19 @@ public final class StorageManagerEndpoint extends Binder {
     private static final int PRIMARY_USER = 0;
 
     private final int getVolumeListCode = transaction("getVolumeList");
+    private final int unlockCeStorageCode = transaction("unlockCeStorage");
+    private final int lockCeStorageCode = transaction("lockCeStorage");
+    private final int isCeStorageUnlockedCode = transaction("isCeStorageUnlocked");
+    private final int prepareUserStorageCode = transaction("prepareUserStorage");
+    private final int getAllocatableBytesCode = transaction("getAllocatableBytes");
+    private final int allocateBytesCode = transaction("allocateBytes");
+    private final int getVolumesCode = transaction("getVolumes");
+    /**
+     * Users whose credential-encrypted storage is unlocked. This host keeps
+     * no per-user CE keys, so there is no secret for vold to check: unlocking
+     * is the user lifecycle's decision alone, as for an unsecured user.
+     */
+    private final Set<Integer> ceUnlockedUsers = ConcurrentHashMap.newKeySet();
     private final ApplicationProcessRegistry processes;
     private final String primaryPath;
 
@@ -85,6 +101,71 @@ public final class StorageManagerEndpoint extends Binder {
             throws RemoteException {
         if (code == INTERFACE_TRANSACTION) {
             if (reply != null) reply.writeString(DESCRIPTOR);
+            return true;
+        }
+        if (reply != null && (code == unlockCeStorageCode || code == lockCeStorageCode)) {
+            data.enforceInterface(DESCRIPTOR);
+            int userId = data.readInt();
+            if (code == unlockCeStorageCode) data.createByteArray();
+            data.enforceNoDataAvail();
+            // StorageManagerService requires STORAGE_INTERNAL: the system.
+            if (Binder.getCallingUid() != Process.SYSTEM_UID) {
+                throw new SecurityException("CE storage state is owned by the system");
+            }
+            if (code == unlockCeStorageCode) ceUnlockedUsers.add(userId);
+            else ceUnlockedUsers.remove(userId);
+            reply.writeNoException();
+            return true;
+        }
+        if (reply != null && (code == getAllocatableBytesCode || code == allocateBytesCode)) {
+            data.enforceInterface(DESCRIPTOR);
+            String volumeUuid = data.readString();
+            long requested = code == allocateBytesCode ? data.readLong() : 0;
+            int allocationFlags = data.readInt();
+            data.readString(); // calling package
+            data.enforceNoDataAvail();
+            long allocatable = InternalVolume.allocatableBytes(volumeUuid, allocationFlags);
+            if (code == allocateBytesCode && allocatable < requested) {
+                // No cached data to free: the volume lacks the space.
+                InternalVolume.writeAllocationFailure(reply, requested, allocatable);
+                return true;
+            }
+            reply.writeNoException();
+            if (code == getAllocatableBytesCode) reply.writeLong(allocatable);
+            return true;
+        }
+        if (reply != null && code == prepareUserStorageCode) {
+            data.enforceInterface(DESCRIPTOR);
+            String volumeUuid = data.readString();
+            int userId = data.readInt();
+            int storageFlags = data.readInt();
+            data.enforceNoDataAvail();
+            // StorageManagerService requires STORAGE_INTERNAL: the system.
+            if (Binder.getCallingUid() != Process.SYSTEM_UID) {
+                throw new SecurityException("User storage is prepared by the system");
+            }
+            try {
+                UserStorage.prepare(volumeUuid, userId, storageFlags);
+            } catch (java.io.IOException error) {
+                throw new IllegalStateException(error);
+            }
+            reply.writeNoException();
+            return true;
+        }
+        if (reply != null && code == getVolumesCode) {
+            data.enforceInterface(DESCRIPTOR);
+            data.readInt(); // flags
+            data.enforceNoDataAvail();
+            reply.writeNoException();
+            InternalVolume.writeVolumes(reply);
+            return true;
+        }
+        if (reply != null && code == isCeStorageUnlockedCode) {
+            data.enforceInterface(DESCRIPTOR);
+            int userId = data.readInt();
+            data.enforceNoDataAvail();
+            reply.writeNoException();
+            reply.writeBoolean(ceUnlockedUsers.contains(userId));
             return true;
         }
         if (code != getVolumeListCode || reply == null) {

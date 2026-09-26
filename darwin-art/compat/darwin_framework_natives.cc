@@ -21,6 +21,9 @@
 #include "process/process_name.h"
 #include "process/procfs_jni.h"
 #include "process/scheduling_jni.h"
+#include "content/overlay_config_jni.h"
+#include "content/strict_jar_file_jni.h"
+#include "security/security_log_jni.h"
 #include "memory/application_memory_jni.h"
 #include "diagnostics/debugstore_jni.h"
 #include "graphics/graphics_environment.h"
@@ -46,6 +49,10 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include "security/verity_utils_jni.h"
+#include "security/selinux_jni.h"
+#include "process/identity_jni.h"
+
 #include <android/surface_control.h>
 #include <android/hardware_buffer.h>
 #include <android/graphics/canvas.h>
@@ -56,6 +63,8 @@
 
 namespace android {
 int register_android_util_Log(JNIEnv* env);
+int register_android_util_EventLog(JNIEnv* env);
+int register_com_android_internal_content_NativeLibraryHelper(JNIEnv* env);
 int register_com_android_internal_os_ClassLoaderFactory(JNIEnv* env);
 }  // namespace android
 
@@ -223,6 +232,10 @@ bool RegisterFrameworkNatives(JNIEnv* env) {
   if (android::register_android_util_Log(env) < 0 || env->ExceptionCheck()) {
     return false;
   }
+  // AndroidRuntime registers EventLog next to Log (gRegJNI order).
+  if (android::register_android_util_EventLog(env) < 0 || env->ExceptionCheck()) {
+    return false;
+  }
 #endif
   JNINativeMethod charset_utils_methods[] = {
       {const_cast<char*>("toModifiedUtf8Bytes"),
@@ -283,6 +296,12 @@ bool RegisterFrameworkNatives(JNIEnv* env) {
        reinterpret_cast<void*>(&darwin_art::process::SetThreadPriority)},
       {const_cast<char*>("setThreadPriority"), const_cast<char*>("(II)V"),
        reinterpret_cast<void*>(&darwin_art::process::SetThreadPriorityForTid)},
+      {const_cast<char*>("getGidForName"), const_cast<char*>("(Ljava/lang/String;)I"),
+       reinterpret_cast<void*>(&darwin_art::process::GetGidForName)},
+      {const_cast<char*>("getUidForName"), const_cast<char*>("(Ljava/lang/String;)I"),
+       reinterpret_cast<void*>(&darwin_art::process::GetUidForName)},
+      {const_cast<char*>("setCanSelfBackground"), const_cast<char*>("(Z)V"),
+       reinterpret_cast<void*>(&darwin_art::process::SetCanSelfBackground)},
       {const_cast<char*>("getThreadPriority"), const_cast<char*>("(I)I"),
        reinterpret_cast<void*>(&darwin_art::process::GetThreadPriority)},
       {const_cast<char*>("getProcessGroup"), const_cast<char*>("(I)I"),
@@ -416,6 +435,10 @@ bool RegisterFrameworkNatives(JNIEnv* env) {
   JNINativeMethod system_clock_methods[] = {
       {const_cast<char*>("currentThreadTimeMillis"), const_cast<char*>("()J"),
        reinterpret_cast<void*>(&system_clock_current_thread_time_millis)},
+      {const_cast<char*>("currentThreadTimeMicro"), const_cast<char*>("()J"),
+       reinterpret_cast<void*>(&system_clock_current_thread_time_micro)},
+      {const_cast<char*>("currentTimeMicro"), const_cast<char*>("()J"),
+       reinterpret_cast<void*>(&system_clock_current_time_micro)},
       {const_cast<char*>("elapsedRealtime"), const_cast<char*>("()J"),
        reinterpret_cast<void*>(&system_clock_elapsed_realtime)},
       {const_cast<char*>("elapsedRealtimeNanos"), const_cast<char*>("()J"),
@@ -427,6 +450,25 @@ bool RegisterFrameworkNatives(JNIEnv* env) {
   };
   if (!Register(env, "android/os/SystemClock", system_clock_methods,
                 static_cast<jint>(std::size(system_clock_methods)))) {
+    return false;
+  }
+  if (!darwin_art::security::RegisterVerityUtilsNatives(env)) {
+    return false;
+  }
+  if (!darwin_art::security::RegisterSELinuxNatives(env)) {
+    return false;
+  }
+  if (!darwin_art::security::RegisterSecurityLogNatives(env)) {
+    return false;
+  }
+  if (!darwin_art::content::RegisterOverlayConfigNatives(env)) {
+    return false;
+  }
+  if (!darwin_art::content::RegisterStrictJarFileNatives(env)) {
+    return false;
+  }
+  if (android::register_com_android_internal_content_NativeLibraryHelper(env) < 0 ||
+      env->ExceptionCheck()) {
     return false;
   }
 

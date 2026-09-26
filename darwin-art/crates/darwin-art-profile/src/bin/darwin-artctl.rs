@@ -1,11 +1,10 @@
 use darwin_art_profile::{
     ProfileLease, ProfilePaths, create_profile, daemon_status, daemonize_process, delete_profile,
     ensure_daemon, list_packages, list_processes, list_profile_ids, profile_allocated_bytes,
-    register_package, resolve_package, shutdown_daemon, unregister_package,
+    shutdown_daemon,
 };
 use std::env;
 use std::error::Error;
-use std::fs;
 use std::io::{self, Write};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -61,26 +60,38 @@ fn main_result() -> Result<(), Box<dyn Error>> {
             );
         }
         Some("shutdown") => shutdown_daemon(&paths)?,
-        Some("register") => {
-            let package = env::args().nth(2).ok_or("register requires package")?;
-            let record = env::args_os()
-                .nth(3)
-                .ok_or("register requires record file")?;
-            register_package(&paths, &package, &fs::read(record)?)?;
-        }
-        Some("resolve") => {
-            let package = env::args().nth(2).ok_or("resolve requires package")?;
-            io::stdout().write_all(&resolve_package(&paths, &package)?)?;
-        }
         Some("uninstall") => {
+            // PackageManagerService removes the package (`pm uninstall`);
+            // --keep-data is `-k`, keeping the app's data and caches.
             let package = env::args().nth(2).ok_or("uninstall requires package")?;
             let keep_data = env::args()
                 .nth(3)
                 .is_some_and(|value| value == "--keep-data");
-            unregister_package(&paths, &package, !keep_data)?;
+            let mut arguments = vec!["cmd", "package", "uninstall"];
+            if keep_data {
+                arguments.push("-k");
+            }
+            arguments.push(&package);
+            let (status, output) =
+                darwin_art_profile::run_host_command_at(&paths.socket, &arguments)?;
+            io::stdout().write_all(&output)?;
+            if status != 0 {
+                std::process::exit(status as i32);
+            }
         }
         Some("list") => print!("{}", list_packages(&paths)?),
         Some("ps") => print!("{}", list_processes(&paths)?),
+        Some("cmd" | "dumpsys" | "launcher-info" | "archive-info") => {
+            // `cmd SERVICE ARGS...` and `dumpsys SERVICE ARGS...` in the
+            // running system server, as adb shell runs them.
+            let arguments = env::args().skip(1).collect::<Vec<_>>();
+            let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+            let (status, output) =
+                darwin_art_profile::run_host_command_at(&paths.socket, &arguments)?;
+            io::stdout().write_all(&output)?;
+            io::stdout().flush()?;
+            std::process::exit(status as i32);
+        }
         Some("hold") => {
             let seconds = env::args().nth(2).ok_or("hold requires seconds")?.parse()?;
             let _lease = ProfileLease::connect(&paths.socket)?;

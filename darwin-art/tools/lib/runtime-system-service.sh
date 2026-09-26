@@ -11,6 +11,13 @@ darwin_art_start_runtime_system_service() (
   [[ "$#" == 5 ]] || { echo "invalid system runtime command" >&2; return 64; }
   local system_server_private="$profile_mount/data/apps/android.system/private-data"
   local system_server_command=("$host" --window-seconds 0 "$@" "$support_dex")
+  # SYSTEMSERVERCLASSPATH as derive_classpath exported it for this image.
+  local server_classpath
+  server_classpath="$(sed -n 's/^export SYSTEMSERVERCLASSPATH //p' \
+    "$system_server_root/system/etc/classpath")"
+  [[ -n "$server_classpath" ]] || { echo "image exports no SYSTEMSERVERCLASSPATH" >&2; return 69; }
+  server_classpath="$(tr ':' '\n' <<<"$server_classpath" | \
+    sed "s#^#$system_server_root#" | paste -sd: -)"
   prepare_system_private_data "$system_server_private" || return
   darwin_art_system_service_environment \
   DARWIN_ART_SYSTEM_SERVER_MODE=1 \
@@ -19,6 +26,7 @@ darwin_art_start_runtime_system_service() (
   DARWIN_ART_DAEMONIZED_LOG="${profile_mount%/mnt}/darwin-artd.log" \
   DARWIN_ART_ANDROID_SHARED_STORAGE_ROOT="$profile_mount/storage" \
   DARWIN_ART_ANDROID_PACKAGE_ROOT="$profile_mount/packages" \
+  DARWIN_ART_ANDROID_PACKAGE_ROOT_WRITABLE=1 \
   DARWIN_ART_FRAMEWORK_RES_APK="$framework_res" \
   DARWIN_ART_APK_APP_PACKAGE=android \
   DARWIN_ART_APK_APP_APPLICATION=android.app.Application \
@@ -47,7 +55,7 @@ darwin_art_start_runtime_system_service() (
   DARWIN_ART_ANDROID_FILESYSTEM_ROOT="$system_server_root" \
   DARWIN_ART_ANDROID_SYSTEM_ROOT="$system_server_root/system" \
   DARWIN_ART_ANDROID_SYSTEM_NATIVE_DIR="$system_server_root/system/lib64" \
-  DARWIN_ART_RUNTIME_HOST_FILES="$DARWIN_ART_BOOT_CLASSPATH:$support_dex:$system_server_root/system/framework/services.jar" \
+  DARWIN_ART_RUNTIME_HOST_FILES="$DARWIN_ART_BOOT_CLASSPATH:$support_dex:$server_classpath" \
   DARWIN_ART_DEBUG_SURFACECONTROL_CAPTURE_PATH="${DARWIN_ART_DEBUG_SURFACECONTROL_CAPTURE_PATH:-}" \
   DARWIN_ART_DEBUG_SURFACECONTROL_CAPTURE_PIXELS="${DARWIN_ART_DEBUG_SURFACECONTROL_CAPTURE_PIXELS:-}" \
   DARWIN_ART_DEBUG_SURFACECONTROL_PIXELS="${DARWIN_ART_DEBUG_SURFACECONTROL_PIXELS:-}" \

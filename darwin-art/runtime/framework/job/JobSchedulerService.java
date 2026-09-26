@@ -9,7 +9,7 @@ import dev.darwinart.runtime.am.SystemServiceBindings;
 import dev.darwinart.runtime.connectivity.ConnectivityProjection;
 import dev.darwinart.runtime.connectivity.ConnectivitySnapshot;
 import dev.darwinart.runtime.connectivity.ConnectivityState;
-import dev.darwinart.runtime.pm.ServiceResolver;
+import dev.darwinart.runtime.am.PackageQueries;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -20,6 +20,8 @@ import java.util.concurrent.TimeUnit;
 
 /** Android-owned admission, constraint and execution state for scheduled jobs. */
 public final class JobSchedulerService implements JobServiceContext.Listener {
+    // UserHandle.PER_USER_RANGE: a uid is userId * PER_USER_RANGE + appId.
+    private static final int PER_USER_RANGE = 100000;
     public static final int RESULT_FAILURE = 0;
     public static final int RESULT_SUCCESS = 1;
     private static final long EXECUTION_HANDSHAKE_TIMEOUT_MS = 8_000;
@@ -47,7 +49,7 @@ public final class JobSchedulerService implements JobServiceContext.Listener {
         }
     }
 
-    private final ServiceResolver services;
+    private final PackageQueries services;
     private final ApplicationProcessRegistry processes;
     private final SystemServiceBindings bindings;
     private final ConnectivityState connectivity;
@@ -61,7 +63,7 @@ public final class JobSchedulerService implements JobServiceContext.Listener {
             });
     private long nextGeneration = 1;
 
-    public JobSchedulerService(ServiceResolver serviceResolver,
+    public JobSchedulerService(PackageQueries serviceResolver,
             ApplicationProcessRegistry processRegistry, SystemServiceBindings serviceBindings,
             ConnectivityState connectivityState) {
         services = serviceResolver;
@@ -205,7 +207,8 @@ public final class JobSchedulerService implements JobServiceContext.Listener {
         if (!caller.packageName.equals(job.getService().getPackageName())) {
             throw new SecurityException("JobInfo service package does not match its caller");
         }
-        ServiceInfo service = services.service(job.getService());
+        ServiceInfo service = services.service(job.getService(),
+                caller.uid / PER_USER_RANGE);
         if (service == null || service.applicationInfo == null || service.applicationInfo.uid != caller.uid
                 || !"android.permission.BIND_JOB_SERVICE".equals(service.permission)) {
             throw new SecurityException("JobInfo service is not an owned BIND_JOB_SERVICE service");

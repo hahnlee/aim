@@ -28,6 +28,14 @@ int Stat(const char *path, struct stat *status);
 int Access(const char *path, int mode);
 int Remove(const char *path);
 int Rename(const char *old_path, const char *new_path);
+int Lstat(const char *path, struct stat *status);
+int Unlink(const char *path);
+ssize_t Readlink(const char *path, char *buffer, size_t size);
+int Symlink(const char *target, const char *link_path);
+int Link(const char *old_path, const char *new_path);
+int Fsync(int fd);
+// Returns 0 or an Android errno value.
+int PosixFallocate(int fd, int64_t offset, int64_t length);
 bool IsAuthorizedHostRuntimePath(const char *path);
 int64_t Lseek(int fd, int64_t offset, int android_whence);
 intptr_t Sendfile(int output_fd, int input_fd, int64_t *offset,

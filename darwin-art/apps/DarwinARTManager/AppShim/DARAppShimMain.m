@@ -95,28 +95,14 @@ int main(void) {
             DARShowError(error);
             return 1;
         }
-        NSData *record = DARRun(runtime, control, @[@"resolve", package], environment, &error);
-        if (!record) {
-            DARShowError(error);
-            return 1;
-        }
-        NSURL *recordURL = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
-            URLByAppendingPathComponent:[NSString stringWithFormat:@"darwin-art-shim-%@.record",
-                                                                   NSUUID.UUID.UUIDString]];
-        if (![record writeToURL:recordURL options:NSDataWritingAtomic error:&error]) {
-            DARShowError(error);
-            return 1;
-        }
         NSString *launcher = [runtime URLByAppendingPathComponent:
                                        @"tools/run-android-apk-app.sh"].path;
-        NSData *result = DARRun(runtime, launcher,
-                                @[@"--record", recordURL.path, @"86400"], environment, &error);
+        NSData *result = DARRun(runtime, launcher, @[@"--package", package, @"86400"],
+                                environment, &error);
         if (!result) {
-            [NSFileManager.defaultManager removeItemAtURL:recordURL error:nil];
             DARShowError(error);
             return 1;
         }
-        [NSFileManager.defaultManager removeItemAtURL:recordURL error:nil];
     }
     return 0;
 }

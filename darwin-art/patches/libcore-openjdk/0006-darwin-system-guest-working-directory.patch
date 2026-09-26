@@ -1,0 +1,30 @@
+--- a/ojluni/src/main/native/System.c
++++ b/ojluni/src/main/native/System.c
+@@ -176,12 +176,27 @@
+     return (*env)->NewString(env, chars, len);
+ }
+ 
++#if defined(__APPLE__)
++// The Android process's filesystem namespace (bionic-fs-facade).
++extern char* darwin_art_bionic_fs_getcwd_core(char*, size_t) __attribute__((weak_import));
++#endif
++
+ static jobjectArray System_specialProperties(JNIEnv* env, jclass ignored) {
+     jclass stringClass = (*env)->FindClass(env, "java/lang/String");
+     jobjectArray result = (*env)->NewObjectArray(env, 4, stringClass, NULL);
+ 
+     char path[PATH_MAX];
++#if defined(__APPLE__)
++    // user.dir is the guest working directory, as getcwd(3) reports it to
++    // the Android process, not the host process's directory.
++    char* process_path = darwin_art_bionic_fs_getcwd_core != NULL
++            ? darwin_art_bionic_fs_getcwd_core(path, sizeof(path)) : NULL;
++    if (process_path == NULL) {
++        process_path = getcwd(path, sizeof(path));
++    }
++#else
+     char* process_path = getcwd(path, sizeof(path));
++#endif
+     char user_dir[PATH_MAX + 10] = "user.dir=";
+     strncat(user_dir, process_path, PATH_MAX);
+     jstring user_dir_str = (*env)->NewStringUTF(env, user_dir);

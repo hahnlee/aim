@@ -39,7 +39,13 @@ def fields(data):
         yield number, wire, value
 
 
-def boot_jars(data, sdk=36):
+# packages/modules/common/proto/classpaths.proto Classpath values.
+BOOTCLASSPATH = 1
+SYSTEMSERVERCLASSPATH = 2
+STANDALONE_SYSTEMSERVER_JARS = 4
+
+
+def boot_jars(data, sdk=36, classpath=BOOTCLASSPATH):
     result = []
     for number, wire, value in fields(data):
         if number != 1:
@@ -52,7 +58,7 @@ def boot_jars(data, sdk=36):
                 if key in entry or kind != (0 if key == 2 else 2):
                     raise ValueError("duplicate or mistyped classpath field")
                 entry[key] = item
-        if entry.get(2) != 1:  # BOOTCLASSPATH, not DEX2OATBOOTCLASSPATH
+        if entry.get(2) != classpath:
             continue
         path = entry[1].decode("utf-8")
         pure = PurePosixPath(path)

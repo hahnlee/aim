@@ -32,6 +32,7 @@ impl Fixture {
             Some(&private),
             Some(&storage),
             None,
+            false,
         )
         .unwrap();
         let guest = namespace.guest_root.as_ref().unwrap();
@@ -110,6 +111,7 @@ fn shared_mount_requires_complete_namespace_and_retains_cwd_authority() {
             None,
             Some(&storage),
             None,
+            false,
         )
         .is_err()
     );
@@ -120,6 +122,7 @@ fn shared_mount_requires_complete_namespace_and_retains_cwd_authority() {
         None,
         Some(&storage),
         None,
+        false,
     )
     .unwrap();
     assert_eq!(namespace.cwd.snapshot().unwrap(), b"/storage");
@@ -184,4 +187,55 @@ fn configured_storage_child() {
     assert_eq!(with_active(-1, |facade| facade.close(fd)), 0);
     assert_eq!(darwin_art_bionic_fs_process_uninstall(), PROCESS_OWNER_OK);
     assert_eq!(with_active(-1, |_| 0), -1);
+}
+
+#[test]
+fn writable_package_root_creates_install_session_directories() {
+    let f = Fixture::new();
+    fs::create_dir(f.0.join("packages")).unwrap();
+    let mut private = PrivateDataRoot::open(f.0.join("data")).unwrap();
+    let mut packages =
+        writable_mount::WritableMount::open(f.0.join("packages"), b"/data/app").unwrap();
+    let package_directory = packages.directory().try_clone().unwrap();
+    let namespace = filesystem_namespace::FilesystemNamespace::with_storage(
+        File::open(f.0.join("root")).unwrap(),
+        b"/",
+        b"/",
+        Some(&private),
+        None,
+        Some(&package_directory),
+        true,
+    )
+    .unwrap();
+    let guest = namespace.guest_root.as_ref().unwrap();
+    private.attach_guest_root(guest.clone()).unwrap();
+    packages.attach_guest_root(guest.clone()).unwrap();
+    let mut facade = Facade::new(File::open(f.0.join("root")).unwrap(), b"/", b"/").unwrap();
+    facade.namespace = namespace;
+    facade.private_root = Some(private);
+    facade.package_root = Some(packages);
+    assert_eq!(
+        facade.mkdir(b"/data/app/vmdl1.tmp", 0o775),
+        0,
+        "errno {}",
+        Facade::android_errno()
+    );
+    assert!(f.0.join("packages/vmdl1.tmp").is_dir());
+    // PackageInstallerSession names its staged file through /proc/self/fd.
+    let fd = facade.open(b"/data/app/vmdl1.tmp/base.apk", O_CREAT | O_EXCL | O_WRONLY);
+    assert!(fd >= 10_000, "errno {}", Facade::android_errno());
+    let mut target = [0 as c_char; 256];
+    let link = format!("/proc/self/fd/{fd}");
+    let length = facade.readlink(link.as_bytes(), target.as_mut_ptr(), target.len());
+    let target: Vec<u8> = target[..length.max(0) as usize]
+        .iter()
+        .map(|b| *b as u8)
+        .collect();
+    assert_eq!(target, b"/data/app/vmdl1.tmp/base.apk");
+    assert_eq!(facade.close(fd), 0);
+    assert_eq!(
+        facade.readlink(link.as_bytes(), [0 as c_char; 8].as_mut_ptr(), 8),
+        -1
+    );
+    assert_eq!(Facade::android_errno(), ANDROID_ENOENT);
 }

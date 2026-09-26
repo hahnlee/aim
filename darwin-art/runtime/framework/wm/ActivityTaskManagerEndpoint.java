@@ -10,8 +10,7 @@ import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.RemoteException;
 import dev.darwinart.runtime.am.ApplicationProcessRegistry;
-import dev.darwinart.runtime.pm.InstalledPackageInfos;
-import dev.darwinart.runtime.pm.PackageRecords;
+import dev.darwinart.runtime.am.ApplicationPackages;
 import java.lang.reflect.Field;
 
 /** ActivityTaskManager Binder root; unsupported transactions fail explicitly. */
@@ -21,12 +20,9 @@ public final class ActivityTaskManagerEndpoint extends Binder {
     private final int startActivityCode = transaction("startActivity");
     private final ActivityClientControllerEndpoint activityClient =
             new ActivityClientControllerEndpoint();
-    private final PackageRecords.Source packages;
     private final ApplicationProcessRegistry processes;
 
-    public ActivityTaskManagerEndpoint(
-            PackageRecords.Source packages, ApplicationProcessRegistry processes) {
-        this.packages = packages;
+    public ActivityTaskManagerEndpoint(ApplicationProcessRegistry processes) {
         this.processes = processes;
         attachInterface(null, "android.app.IActivityTaskManager");
     }
@@ -99,9 +95,8 @@ public final class ActivityTaskManagerEndpoint extends Binder {
             if (!attached.packageName.equals(component.getPackageName())) {
                 throw new SecurityException("Cross-package activity launch is not installed");
             }
-            String record = packages.resolveInstalledPackage(attached.packageName);
-            ActivityInfo info = InstalledPackageInfos.activity(attached.packageName, record,
-                    component.getClassName(), InstalledPackageInfos.STOCK_PM_FLAGS);
+            ActivityInfo info = ApplicationPackages.activity(
+                    component, android.os.UserHandle.getUserId(attached.uid));
             if (info == null) {
                 reply.writeNoException();
                 reply.writeInt(-92); // ActivityManager.START_CLASS_NOT_FOUND.

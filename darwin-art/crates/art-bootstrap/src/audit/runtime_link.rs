@@ -1,6 +1,6 @@
 use super::common::{build_runtime_native_owner, require_file};
 use super::graphics_core_probes::{
-    RuntimeCoreObjects, compile_runtime_core_objects, core_probe_includes,
+    RuntimeCoreObjects, compile_runtime_core_objects, core_probe_includes, jni_entrypoints,
 };
 use super::runtime_link_checks::validate_runtime_link;
 use super::*;
@@ -75,6 +75,8 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
     let RuntimeCoreObjects {
         boot_native_registration: boot_native_registration_object,
         boot_native_libraries: boot_native_libraries_object,
+        art_service: art_service_object,
+        art_tools_process: art_tools_process_object,
         vm_bootstrap: vm_bootstrap_object,
         process_entry: process_entry_object,
         process_state: process_state_object,
@@ -279,6 +281,12 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
         return Err("OpenJDK NIO archive has no JNI entrypoints".into());
     }
     art_exports.extend(nio_jni_exports);
+    // service-art.jar's ArtJni natives resolve in this image (ADR 0009).
+    let art_service_exports = jni_entrypoints(&art_service_object)?;
+    if art_service_exports.len() != 5 {
+        return Err("libartservice must define the five ArtJni natives".into());
+    }
+    art_exports.extend(art_service_exports);
     art_exports.sort_unstable();
     art_exports.dedup();
     if art_exports.is_empty() {
@@ -370,6 +378,8 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
         .arg(&registration_object)
         .arg(&boot_native_registration_object)
         .arg(&boot_native_libraries_object)
+        .arg(&art_service_object)
+        .arg(&art_tools_process_object)
         .arg(&graphics_state_object)
         .arg(&context_loader_object)
         .arg(&graphics_session_object)

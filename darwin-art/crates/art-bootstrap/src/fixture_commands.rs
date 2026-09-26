@@ -1,7 +1,7 @@
 use super::*;
 
 fn prepare_apk_jni_native(root: &Path) -> Result<PathBuf> {
-    let apk = root.join("_build/android-apk-app-runtime/simple-jni.apk");
+    let apk = root.join("_build/simple-apk-fixture/simple-jni.apk");
     let output = Command::new("unzip")
         .args(["-p"])
         .arg(&apk)
@@ -14,7 +14,7 @@ fn prepare_apk_jni_native(root: &Path) -> Result<PathBuf> {
         )
         .into());
     }
-    let directory = root.join("_build/android-apk-app-runtime/native-root");
+    let directory = root.join("_build/simple-apk-fixture/native-root");
     fs::create_dir_all(&directory)?;
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
     let library = directory.join("libdarwin-art-simple-jni.so");
@@ -81,9 +81,9 @@ pub(crate) fn probe_runtime_dex_flavor_impl(
     let framework = root.join("_prebuilt/android-16/bootclasspath/framework.jar");
     let classes_dex = root.join(if apk_app {
         if apk_jni {
-            "_build/android-apk-app-runtime/simple-jni.apk"
+            "_build/simple-apk-fixture/simple-jni.apk"
         } else {
-            "_build/android-apk-app-runtime/simple-no-native.apk"
+            "_build/simple-apk-fixture/simple-no-native.apk"
         }
     } else if network {
         "_build/network-runtime-probe/dex/classes.dex"

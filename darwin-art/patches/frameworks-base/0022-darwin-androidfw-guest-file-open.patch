@@ -1,0 +1,59 @@
+--- a/ApkAssets.cpp
++++ b/ApkAssets.cpp
+@@ -80,7 +80,7 @@
+   }
+ 
+   std::string overlay_path(loaded_idmap->OverlayApkPath());
+-  auto fd = unique_fd(base::utf8::open(overlay_path.c_str(), O_RDONLY | O_CLOEXEC));
++  auto fd = unique_fd(darwin_art_archive_open(overlay_path.c_str(), O_RDONLY | O_CLOEXEC));
+   std::unique_ptr<AssetsProvider> overlay_assets;
+   if (IsFabricatedOverlayName(overlay_path) && IsFabricatedOverlay(fd)) {
+     // Fabricated overlays do not contain resource definitions. All of the overlay resource values
+--- a/AssetsProvider.cpp
++++ b/AssetsProvider.cpp
+@@ -52,7 +52,7 @@
+ }
+ 
+ std::unique_ptr<Asset> AssetsProvider::CreateAssetFromFile(const std::string& path) {
+-  base::unique_fd fd(base::utf8::open(path.c_str(), O_RDONLY | O_CLOEXEC));
++  base::unique_fd fd(darwin_art_archive_open(path.c_str(), O_RDONLY | O_CLOEXEC));
+   if (!fd.ok()) {
+     LOG(ERROR) << "Failed to open file '" << path << "': " << base::SystemErrorCodeToString(errno);
+     return {};
+--- a/Asset.cpp
++++ b/Asset.cpp
+@@ -133,7 +133,7 @@
+  */
+ /*static*/ Asset* Asset::createFromFile(const char* fileName, AccessMode mode)
+ {
+-    return createFromFd(open(fileName, O_RDONLY | O_BINARY), fileName, mode);
++    return createFromFd(darwin_art_archive_open(fileName, O_RDONLY | O_BINARY), fileName, mode);
+ }
+ 
+ /*
+@@ -209,7 +209,7 @@
+     long uncompressedLen, compressedLen;
+     int fd;
+ 
+-    fd = open(fileName, O_RDONLY | O_BINARY);
++    fd = darwin_art_archive_open(fileName, O_RDONLY | O_BINARY);
+     if (fd < 0)
+         return NULL;
+ 
+@@ -685,14 +685,14 @@
+         }
+         *outStart = mMap->offset();
+         *outLength = mMap->length();
+-        return open(fname, O_RDONLY | O_BINARY);
++        return darwin_art_archive_open(fname, O_RDONLY | O_BINARY);
+     }
+     if (mFileName == NULL) {
+         return -1;
+     }
+     *outStart = mStart;
+     *outLength = mLength;
+-    return open(mFileName, O_RDONLY | O_BINARY);
++    return darwin_art_archive_open(mFileName, O_RDONLY | O_BINARY);
+ }
+ 
+ incfs::map_ptr<void> _FileAsset::ensureAlignment(const incfs::IncFsFileMap& map)

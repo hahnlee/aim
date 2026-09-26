@@ -488,6 +488,27 @@ jobject ServiceManagerProxyGetNativeServiceManager(JNIEnv* env, jobject) {
   return darwin_art::GetSystemContextObject(env);
 }
 
+// libbinder waitForService: block until the name is published. Publication
+// is the Java service directory, so poll its checkService lookup.
+jobject ServiceManagerWaitForServiceNative(JNIEnv* env, jclass service_manager,
+                                           jstring name) {
+  jmethodID check = env->GetStaticMethodID(service_manager, "checkService",
+                                           "(Ljava/lang/String;)Landroid/os/IBinder;");
+  if (check == nullptr || name == nullptr) return nullptr;
+  constexpr int kPollMillis = 100;
+  for (int waited = 0;; waited += kPollMillis) {
+    jobject service = env->CallStaticObjectMethod(service_manager, check, name);
+    if (service != nullptr || env->ExceptionCheck()) return service;
+    if (waited > 0 && waited % 5000 == 0) {
+      const char* text = env->GetStringUTFChars(name, nullptr);
+      std::cerr << "ServiceManager: waited " << waited << " ms for service "
+                << (text == nullptr ? "?" : text) << "\n";
+      if (text != nullptr) env->ReleaseStringUTFChars(name, text);
+    }
+    usleep(kPollMillis * 1000);
+  }
+}
+
 bool Register(JNIEnv* env, const char* class_name, JNINativeMethod* methods,
               jint method_count) {
   jclass klass = env->FindClass(class_name);
@@ -1856,113 +1877,6 @@ jobject ConnectSystemBinder(JNIEnv* env, const char* socket_path) {
   return root;
 }
 
-std::string QuerySystemPackageRecord(JNIEnv* env, const char* socket_path,
-                                     const char* package_name) {
-  if (env == nullptr || socket_path == nullptr || *socket_path == '\0' ||
-      package_name == nullptr || *package_name == '\0') {
-    return {};
-  }
-  const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (fd < 0) return {};
-  sockaddr_un address{};
-  address.sun_family = AF_UNIX;
-  if (std::strlen(socket_path) >= sizeof(address.sun_path)) {
-    close(fd);
-    return {};
-  }
-  std::memcpy(address.sun_path, socket_path, std::strlen(socket_path) + 1);
-  if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-    close(fd);
-    return {};
-  }
-  WireHandle owner;
-  {
-    auto transaction = g_wire_registry.Lock();
-    owner = EstablishWireConnection(transaction, fd);
-  }
-  jobject manager = NewRemoteBinder(env, owner, 1);
-  jclass services = manager == nullptr ? nullptr
-      : env->FindClass("dev/darwinart/runtime/os/SystemServices");
-  jmethodID lookup = services == nullptr ? nullptr : env->GetStaticMethodID(
-      services, "lookup", "(Landroid/os/IBinder;Ljava/lang/String;)Landroid/os/IBinder;");
-  jstring service_name = lookup == nullptr ? nullptr
-      : env->NewStringUTF("darwin.package_registry");
-  jobject service = service_name == nullptr ? nullptr
-      : env->CallStaticObjectMethod(services, lookup, manager, service_name);
-  env->DeleteLocalRef(service_name);
-  env->DeleteLocalRef(services);
-  env->DeleteLocalRef(manager);
-  if (service == nullptr || env->ExceptionCheck()) {
-    env->DeleteLocalRef(service);
-    CloseRemoteBinderChannel(env, fd);
-    close(fd);
-    return {};
-  }
-  jclass service_class = env->GetObjectClass(service);
-  jmethodID transact = service_class == nullptr ? nullptr : env->GetMethodID(
-      service_class, "transact", "(ILandroid/os/Parcel;Landroid/os/Parcel;I)Z");
-  jobject data = ObtainJavaParcel(env);
-  jobject reply = ObtainJavaParcel(env);
-  jclass parcel_class = data == nullptr ? nullptr : env->GetObjectClass(data);
-  jmethodID write_token = parcel_class == nullptr
-                              ? nullptr
-                              : env->GetMethodID(parcel_class, "writeInterfaceToken",
-                                                 "(Ljava/lang/String;)V");
-  jmethodID write_string = parcel_class == nullptr
-                               ? nullptr
-                               : env->GetMethodID(parcel_class, "writeString",
-                                                  "(Ljava/lang/String;)V");
-  jmethodID read_exception = parcel_class == nullptr
-                                 ? nullptr
-                                 : env->GetMethodID(parcel_class, "readException", "()V");
-  jmethodID read_string = parcel_class == nullptr
-                              ? nullptr
-                              : env->GetMethodID(parcel_class, "readString",
-                                                 "()Ljava/lang/String;");
-  std::string result;
-  if (data != nullptr && reply != nullptr && write_token != nullptr &&
-      write_string != nullptr && read_exception != nullptr &&
-      read_string != nullptr && !env->ExceptionCheck()) {
-    jstring descriptor = env->NewStringUTF(
-        "dev.darwinart.system.IPackageRegistry");
-    jstring package = env->NewStringUTF(package_name);
-    env->CallVoidMethod(data, write_token, descriptor);
-    env->CallVoidMethod(data, write_string, package);
-    if (transact != nullptr && !env->ExceptionCheck() &&
-        env->CallBooleanMethod(service, transact, 1, data, reply, 0) == JNI_TRUE) {
-      env->CallVoidMethod(reply, read_exception);
-      jstring record = env->ExceptionCheck()
-                           ? nullptr
-                           : static_cast<jstring>(
-                                 env->CallObjectMethod(reply, read_string));
-      if (record != nullptr && !env->ExceptionCheck()) {
-        const char* utf = env->GetStringUTFChars(record, nullptr);
-        if (utf != nullptr) {
-          result = utf;
-          env->ReleaseStringUTFChars(record, utf);
-        }
-      }
-      env->DeleteLocalRef(record);
-    }
-    env->DeleteLocalRef(package);
-    env->DeleteLocalRef(descriptor);
-  }
-  jthrowable failure = env->ExceptionOccurred();
-  if (failure != nullptr) env->ExceptionClear();
-  env->DeleteLocalRef(parcel_class);
-  env->DeleteLocalRef(service_class);
-  env->DeleteLocalRef(service);
-  if (data != nullptr) RecycleJavaParcel(env, data);
-  if (reply != nullptr) RecycleJavaParcel(env, reply);
-  CloseRemoteBinderChannel(env, fd);
-  close(fd);
-  if (failure != nullptr) {
-    if (env->ExceptionCheck()) env->ExceptionClear();
-    env->Throw(failure);
-    env->DeleteLocalRef(failure);
-  }
-  return result;
-}
 
 bool RegisterFrameworkBinderNatives(JNIEnv* env) {
   if (env == nullptr || env->GetJavaVM(&g_framework_vm) != JNI_OK ||
@@ -2148,6 +2062,16 @@ bool RegisterFrameworkBinderNatives(JNIEnv* env) {
   if (!Register(env, "android/os/ServiceManagerProxy",
                 service_manager_proxy_methods,
                 static_cast<jint>(std::size(service_manager_proxy_methods)))) {
+    return false;
+  }
+
+  JNINativeMethod service_manager_methods[] = {
+      {const_cast<char*>("waitForServiceNative"),
+       const_cast<char*>("(Ljava/lang/String;)Landroid/os/IBinder;"),
+       reinterpret_cast<void*>(&ServiceManagerWaitForServiceNative)},
+  };
+  if (!Register(env, "android/os/ServiceManager", service_manager_methods,
+                static_cast<jint>(std::size(service_manager_methods)))) {
     return false;
   }
 

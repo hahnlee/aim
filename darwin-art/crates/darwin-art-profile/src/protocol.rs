@@ -8,12 +8,11 @@ pub(crate) const OP_ENSURE: u16 = 1;
 pub(crate) const OP_ACQUIRE: u16 = 2;
 pub(crate) const OP_STATUS: u16 = 3;
 pub(crate) const OP_SHUTDOWN: u16 = 4;
-pub(crate) const OP_REGISTER: u16 = 5;
-pub(crate) const OP_RESOLVE: u16 = 6;
+// 5 and 6 were the install ledger's register and resolve.
 pub(crate) const OP_LIST: u16 = 7;
 pub(crate) const OP_PROCESSES: u16 = 8;
 pub(crate) const OP_DAEMONIZE: u16 = 9;
-pub(crate) const OP_UNREGISTER: u16 = 10;
+// 10 was the install ledger's unregister.
 pub(crate) const OP_PROCESS_IDENTITY: u16 = 11;
 pub(crate) const OP_START_RUNTIME: u16 = 12;
 pub(crate) const OP_RUNTIME_READY: u16 = 13;
@@ -28,7 +27,15 @@ pub(crate) const OP_SCM_SERVICE: u16 = 21;
 pub(crate) const OP_BINDER_CAPABILITY: u16 = 22;
 pub(crate) const OP_BINDER_TRANSFER_CANCEL: u16 = 23;
 pub(crate) const OP_BINDER_TRANSFER_SETTLE: u16 = 24;
-pub(crate) const STATUS_NOT_FOUND: u32 = 2;
+pub(crate) const OP_INSTALLD: u16 = 25;
+pub(crate) const OP_PROPERTY_SET: u16 = 26;
+/// The system server listening for host commands (request: empty).
+pub(crate) const OP_HOST_COMMAND_LISTEN: u16 = 27;
+/// A host command relayed to the system server (request: NUL-separated args).
+pub(crate) const OP_HOST_COMMAND: u16 = 28;
+/// One chunk of a host command's output, ahead of its OP_HOST_COMMAND
+/// response (`dumpsys` output exceeds one frame).
+pub(crate) const OP_HOST_COMMAND_OUTPUT: u16 = 29;
 pub(crate) const RESPONSE_BIT: u16 = 0x8000;
 
 pub(crate) struct Message {

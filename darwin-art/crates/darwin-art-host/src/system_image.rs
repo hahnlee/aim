@@ -35,7 +35,19 @@ fn validate(root: &Path) -> io::Result<()> {
     }
     for entry in fs::read_dir(root)? {
         let entry = entry?;
-        if !["apex", "system", "linkerconfig"]
+        // `/system_ext` is the device's link to the system_ext partition.
+        if entry.file_name() == "system_ext" {
+            if !entry.file_type()?.is_symlink()
+                || fs::read_link(entry.path())? != Path::new("system/system_ext")
+            {
+                return Err(invalid(
+                    "system image system_ext entry is not the partition link",
+                ));
+            }
+            continue;
+        }
+        // `product` carries the product partition's framework overlays.
+        if !["apex", "system", "linkerconfig", "product"]
             .iter()
             .any(|name| entry.file_name() == *name)
             || !entry.file_type()?.is_dir()
@@ -200,12 +212,15 @@ pub fn prepare_with_identity(archive: &Path, store: &Path) -> io::Result<Prepare
     // Feed the same opened file that was hashed, not a pathname reopened by tar.
     // bsdtar's normal secure extraction rejects traversal and symlink writes;
     // never use -P/--insecure. Android absolute link *targets* remain unchanged.
-    let output = darwin_art_profile::spawn_owned(Command::new("/usr/bin/tar")
-        .args(["-xf", "-", "--no-same-owner", "-C"])
-        .arg(&root)
-        .stdin(Stdio::from(source))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped()))?.wait_with_output()?;
+    let output = darwin_art_profile::spawn_owned(
+        Command::new("/usr/bin/tar")
+            .args(["-xf", "-", "--no-same-owner", "-C"])
+            .arg(&root)
+            .stdin(Stdio::from(source))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )?
+    .wait_with_output()?;
     if !output.status.success() {
         return Err(invalid(&format!(
             "system image extraction failed: {}",

@@ -27,7 +27,7 @@ mkdir -p "$out/classes"
   "$root/runtime/framework/am/ServiceLifecycleController.java" \
   "$root/runtime/framework/am/BoundServiceProcessLauncher.java" \
   "$root/runtime/framework/am/ProcessLaunchTransport.java" \
-  "$root/runtime/framework/pm/ServiceResolver.java" \
+  "$root/runtime/framework/am/PackageQueries.java" \
   "$root/tools/tests/am/TestServices.java" \
   "$root/tools/tests/am/BoundServiceProcessLauncherTest.java"
 "$java_home/bin/java" -ea -cp "$out/classes:$android_jar" \

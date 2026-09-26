@@ -22,11 +22,17 @@ impl GuestRoot {
     /// Naming query only. I/O must continue to use the original directory FD.
     /// A candidate is accepted only if guest resolution selects the same inode.
     pub fn directory_path(&self, directory: &File) -> io::Result<Vec<u8>> {
-        let metadata = directory.metadata()?;
-        if !metadata.is_dir() {
+        if !directory.metadata()?.is_dir() {
             return Err(io::Error::from_raw_os_error(20));
         }
-        let target = host_name(directory)?;
+        self.node_path(directory)
+    }
+
+    /// The guest name of any open node (Linux `/proc/self/fd/N`), under the
+    /// same rule: guest resolution of the name must select the same inode.
+    pub fn node_path(&self, node: &File) -> io::Result<Vec<u8>> {
+        let metadata = node.metadata()?;
+        let target = host_name(node)?;
         let mut roots = vec![(b"/".as_slice(), &self.root.root)];
         roots.extend(
             self.mounts

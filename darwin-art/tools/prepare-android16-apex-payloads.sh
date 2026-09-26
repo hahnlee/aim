@@ -20,6 +20,10 @@ while read -r module expected relative; do
     archive="$out/sources/$module.apex"
     "$root/target/release/super-i18n-apex-extract" "$image" "$archive" \
       --path "/system/apex/$module.apex"
+  elif [[ "$relative" == SYSTEM_IMAGE_APEX:* ]]; then
+    archive="$out/sources/$module.apex"
+    "$root/target/release/super-i18n-apex-extract" "$image" "$archive" \
+      --path "${relative#SYSTEM_IMAGE_APEX:}"
   elif [[ "$relative" == SYSTEM_IMAGE_CAPEX:* ]]; then
     device_path="${relative#SYSTEM_IMAGE_CAPEX:}"
     compressed="$out/sources/$module.capex"

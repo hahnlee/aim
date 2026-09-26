@@ -12,233 +12,71 @@ source "$root/tools/lib/system-service-environment.sh"
 source "$root/tools/lib/runtime-system-service.sh"
 source "$root/tools/lib/app-launch-arguments.sh"
 source "$root/tools/lib/chromium-launch-arguments.sh"
-installed_record=""
-split_apks=()
-if [[ "${1:-}" == "--record" ]]; then
-  installed_record="${2:-}"
-  seconds="${3:-86400}"
-  [[ -f "$installed_record" ]] || {
-    echo "installed launch record does not exist: $installed_record" >&2
-    exit 66
-  }
-  [[ "$(sed -n '1p' "$installed_record")" == "darwin-art-launch-v1" ]] || {
-    echo "installed launch record version is unsupported" >&2
-    exit 65
-  }
-  apk="$(sed -n 's/^apk=//p' "$installed_record")"
-  app_dex="$(sed -n 's/^dex=//p' "$installed_record")"
-  metadata="$(sed -n 's/^metadata=//p' "$installed_record")"
-  while IFS= read -r split_apk; do
-    [[ -z "$split_apk" ]] || split_apks+=("$split_apk")
-  done < <(sed -n 's/^split=//p' "$installed_record")
-else
-  apk="${1:-}"
-  if [[ "${2:-}" == "--split" ]]; then
-    shift
-    while [[ "${1:-}" == "--split" ]]; do
-      [[ -n "${2:-}" ]] || {
-        echo "--split requires an APK path" >&2
-        exit 64
-      }
-      split_apks+=("$2")
-      shift 2
-    done
-    seconds="${1:-86400}"
-  elif [[ "${2:-}" == *.apk ]]; then
-    # Convenience form for the common original base.apk plus one ABI split.
-    split_apks+=("$2")
-    seconds="${3:-86400}"
-  else
-    seconds="${2:-86400}"
-  fi
-fi
-[[ -n "$apk" ]] || {
-  echo "usage: $0 BASE_APK [VISIBLE_SECONDS] | $0 BASE_APK --split ABI_APK [VISIBLE_SECONDS] | --record RECORD [VISIBLE_SECONDS]" >&2
+source "$root/tools/lib/package-manager-launch.sh"
+# Installs go through PackageManagerService (a PackageInstaller session) and
+# launches take the package's launch facts from PackageManager (ADR 0009):
+#   --install BASE_APK [--split SPLIT_APK]...      install only
+#   --package PACKAGE [VISIBLE_SECONDS]            launch an installed package
+#   BASE_APK [--split SPLIT_APK]... [VISIBLE_SECONDS]  install, then launch
+#   --launcher-info PACKAGE...                     print label, version, icon
+usage() {
+  echo "usage: $0 --install BASE_APK [--split APK]... | --package PACKAGE [VISIBLE_SECONDS] | BASE_APK [--split APK]... [VISIBLE_SECONDS] | --launcher-info PACKAGE..." >&2
   exit 64
 }
-source_apk="$(cd "$(dirname "$apk")" && pwd)/$(basename "$apk")"
-[[ -f "$source_apk" ]] || {
-  echo "APK does not exist: $source_apk" >&2
-  exit 66
-}
-normalized_split_apks=()
-if [[ ${#split_apks[@]} -gt 0 ]]; then
-for split_apk in "${split_apks[@]}"; do
-  split_apk="$(cd "$(dirname "$split_apk")" && pwd)/$(basename "$split_apk")"
-  [[ -f "$split_apk" ]] || {
-    echo "split APK does not exist: $split_apk" >&2
-    exit 66
-  }
-  [[ "$split_apk" != *:* ]] || {
-    echo "split APK path cannot contain ':' (splitSourceDirs uses ':' delimiter): $split_apk" >&2
-    exit 64
-  }
-  normalized_split_apks+=("$split_apk")
-done
-fi
-if [[ ${#normalized_split_apks[@]} -gt 0 ]]; then
-  split_apks=("${normalized_split_apks[@]}")
+mode=launch
+package=""
+apk=""
+split_apks=()
+seconds=86400
+info_packages=()
+if [[ "${1:-}" == "--launcher-info" ]]; then
+  mode=info
+  shift
+  [[ $# -ge 1 ]] || usage
+  info_packages=("$@")
+elif [[ "${1:-}" == "--package" ]]; then
+  package="${2:-}"
+  [[ -n "$package" ]] || usage
+  seconds="${3:-86400}"
 else
-  split_apks=()
+  mode=install-launch
+  if [[ "${1:-}" == "--install" ]]; then
+    mode=install
+    shift
+  fi
+  apk="${1:-}"
+  [[ -n "$apk" ]] || usage
+  shift
+  while [[ "${1:-}" == "--split" ]]; do
+    [[ -n "${2:-}" ]] || usage
+    split_apks+=("$2")
+    shift 2
+  done
+  # Convenience form for the common original base.apk plus one ABI split.
+  if [[ "${1:-}" == *.apk ]]; then
+    split_apks+=("$1")
+    shift
+  fi
+  if [[ "$mode" == install ]]; then
+    [[ $# == 0 ]] || usage
+  else
+    seconds="${1:-86400}"
+  fi
 fi
 [[ "$seconds" =~ ^([0-9]+)(\.[0-9]+)?$ ]] || {
   echo "VISIBLE_SECONDS must be a non-negative number" >&2
   exit 64
 }
-
-if [[ -z "$installed_record" ]]; then
-  app_dex="$source_apk"
-  external_dex="${source_apk%.apk}.dex"
-  if ! unzip -Z1 "$source_apk" | grep -Fx 'classes.dex' >/dev/null; then
-    [[ -f "$external_dex" ]] || {
-      echo "preoptimized APK requires its deoptimized DEX sidecar: $external_dex" >&2
-      exit 69
-    }
-    app_dex="$external_dex"
-  fi
-  metadata_tool="$root/target/release/android-apk-app-runtime"
-  metadata_arguments=("$source_apk")
-  [[ "$app_dex" == "$source_apk" ]] || metadata_arguments+=("$app_dex")
-  if [[ ${#split_apks[@]} -gt 0 ]]; then
-    for split_apk in "${split_apks[@]}"; do
-      metadata_arguments+=(--split "$split_apk")
-    done
-  fi
-  if [[ "$app_dex" == "$source_apk" ]]; then
-    if [[ -x "$metadata_tool" ]]; then
-      metadata="$("$metadata_tool" "${metadata_arguments[@]}")"
-    else
-      metadata="$(cargo run -q --release \
-        --manifest-path "$root/tools/android-apk-app-runtime/Cargo.toml" -- \
-        "${metadata_arguments[@]}")"
-    fi
-  else
-    if [[ -x "$metadata_tool" ]]; then
-      metadata="$("$metadata_tool" "${metadata_arguments[@]}")"
-    else
-      metadata="$(cargo run -q --release \
-        --manifest-path "$root/tools/android-apk-app-runtime/Cargo.toml" -- \
-        "${metadata_arguments[@]}")"
-    fi
-  fi
-fi
-metadata_refreshed=0
-manifest_schema="$(sed -n 's/^apk-app-runtime: .* manifest_schema=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-manifest_schema_needs_refresh=0
-if [[ -n "$installed_record" ]]; then
-  # Installed records carry an immutable metadata snapshot. Schema 4 adds the
-  # service permission/exported/enabled projection required by system services;
-  # schema 6 adds each Activity's own screenOrientation, configChanges and
-  # hardware acceleration; schema 7 adds the application icon resource;
-  # schema 8 adds MAIN/INFO activities for launch-intent resolution.
-  case "$manifest_schema" in
-    ""|0|1|2|3|4|5|6|7) manifest_schema_needs_refresh=1 ;;
-    8) ;;
-    *)
-      echo "installed package metadata schema is unsupported: $manifest_schema" >&2
-      exit 69
-      ;;
-  esac
-fi
-if [[ "$manifest_schema_needs_refresh" == "1" ]]; then
-  # Installed launch records are immutable package payload references, but
-  # their PackageManager projection is versioned runtime state. Re-inspect the
-  # unchanged installed APK when that projection schema advances, just as
-  # Android rebuilds package settings from package manifests after an OTA.
-  metadata_tool="$root/target/release/android-apk-app-runtime"
-  [[ -x "$metadata_tool" ]] || {
-    echo "installed package metadata is stale; rebuild the runtime before launch" >&2
-    exit 69
-  }
-  refresh_arguments=("$source_apk")
-  [[ "$app_dex" == "$source_apk" ]] || refresh_arguments+=("$app_dex")
+if [[ "$mode" != launch && "$mode" != info ]]; then
+  apk="$(cd "$(dirname "$apk")" && pwd)/$(basename "$apk")"
+  [[ -f "$apk" ]] || { echo "APK does not exist: $apk" >&2; exit 66; }
+  normalized_split_apks=()
   for split_apk in "${split_apks[@]}"; do
-    refresh_arguments+=(--split "$split_apk")
+    split_apk="$(cd "$(dirname "$split_apk")" && pwd)/$(basename "$split_apk")"
+    [[ -f "$split_apk" ]] || { echo "split APK does not exist: $split_apk" >&2; exit 66; }
+    normalized_split_apks+=("$split_apk")
   done
-  refreshed_metadata="$($metadata_tool "${refresh_arguments[@]}")"
-  refreshed_schema="$(sed -n 's/^apk-app-runtime: .* manifest_schema=\([^ ]*\) .*/\1/p' \
-    <<<"$refreshed_metadata")"
-  [[ "$refreshed_schema" == "7" ]] || {
-    echo "rebuilt APK metadata tool does not support manifest schema 7" >&2
-    exit 69
-  }
-  metadata="$refreshed_metadata"
-  metadata_refreshed=1
-fi
-package="$(sed -n 's/^apk-app-runtime: package=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-application="$(sed -n 's/^apk-app-runtime: .* application=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-activity="$(sed -n 's/^apk-app-runtime: .* activity=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-launch_component="$(sed -n 's/^apk-app-runtime: .* launch_component=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-screen_orientation="$(sed -n 's/^apk-app-runtime: .* screen_orientation=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-if [[ -z "$screen_orientation" ]]; then
-  # v1 launch records predate orientation metadata. Re-inspect the source APK
-  # when the already-built metadata tool is available; otherwise preserve the
-  # old unspecified-orientation behavior instead of rejecting the record.
-  screen_orientation=-1
-  metadata_tool="$root/target/release/android-apk-app-runtime"
-  if [[ -x "$metadata_tool" ]]; then
-    refresh_arguments=("$source_apk")
-    [[ "$app_dex" == "$source_apk" ]] || refresh_arguments+=("$app_dex")
-    for split_apk in "${split_apks[@]}"; do
-      refresh_arguments+=(--split "$split_apk")
-    done
-    if [[ "$app_dex" == "$source_apk" ]]; then
-      if refreshed_metadata="$($metadata_tool "${refresh_arguments[@]}")"; then
-        :
-      else
-        refreshed_metadata=""
-      fi
-    else
-      if refreshed_metadata="$($metadata_tool "${refresh_arguments[@]}")"; then
-        :
-      else
-        refreshed_metadata=""
-      fi
-    fi
-    refreshed_orientation="$(sed -n 's/^apk-app-runtime: .* screen_orientation=\([^ ]*\) .*/\1/p' <<<"$refreshed_metadata")"
-    [[ -z "$refreshed_orientation" ]] || screen_orientation="$refreshed_orientation"
-  fi
-fi
-descriptor="$(sed -n 's/^apk-app-runtime: .* descriptor=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-activities="$(sed -n 's/^apk-app-runtime: .* activities=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-activity_aliases="$(sed -n 's/^apk-app-runtime: .* activity_aliases=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-services="$(sed -n 's/^apk-app-runtime: .* services=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-receivers="$(sed -n 's/^apk-app-runtime: .* receivers=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-service_metadata="$(sed -n 's/^apk-app-runtime: .* service_metadata=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-application_metadata="$(sed -n 's/^apk-app-runtime: .* application_metadata=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-providers="$(sed -n 's/^apk-app-runtime: .* providers=\([^ ]*\) application_metadata=.*/\1/p' <<<"$metadata")"
-version_code="$(sed -n 's/^apk-app-runtime: .* version_code=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-version_name="$(sed -n 's/^apk-app-runtime: .* version_name=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-theme="$(sed -n 's/^apk-app-runtime: .* theme=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-target_sdk="$(sed -n 's/^apk-app-runtime: .* target_sdk=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-requested_permissions="$(sed -n 's/^apk-app-runtime: .* permissions=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-debuggable="$(sed -n 's/^apk-app-runtime: .* debuggable=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-hardware_accelerated="$(sed -n 's/^apk-app-runtime: .* hardware_accelerated=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-activity_hardware_accelerated="$(sed -n 's/^apk-app-runtime: .* activity_hardware_accelerated=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-label="$(sed -n 's/^apk-app-runtime: .* label=\(.*\) label_res=.*/\1/p' <<<"$metadata")"
-label_res="$(sed -n 's/^apk-app-runtime: .* label_res=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-activity_label="$(sed -n 's/^apk-app-runtime-activity-label: label=\(.*\) label_res=.*/\1/p' <<<"$metadata")"
-activity_label_res="$(sed -n 's/^apk-app-runtime-activity-label: .* label_res=\([^ ]*\)$/\1/p' <<<"$metadata")"
-application_icon_res="$(sed -n 's/^apk-app-runtime-application-icon: res=\([^ ]*\)$/\1/p' <<<"$metadata")"
-icon="$(sed -n 's/^apk-app-runtime: .* icon=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-native_count="$(sed -n 's/^apk-app-runtime: .* native=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-native_root="$(sed -n 's/^apk-app-runtime: .* native_root=\([^ ]*\)$/\1/p' <<<"$metadata")"
-[[ -n "$package" && -n "$application" && -n "$activity" && -n "$launch_component" && -n "$screen_orientation" && -n "$descriptor" && -n "$activities" && -n "$activity_aliases" && -n "$services" && -n "$receivers" && -n "$service_metadata" && -n "$application_metadata" && -n "$requested_permissions" && -n "$version_code" && -n "$theme" && -n "$target_sdk" && -n "$debuggable" && -n "$hardware_accelerated" && -n "$activity_hardware_accelerated" && -n "$label" && -n "$label_res" && -n "$icon" && -n "$native_count" && -n "$native_root" ]] || {
-  echo "could not decode inspected APK metadata" >&2
-  exit 65
-}
-if [[ -n "${DARWIN_ART_APK_ACTIVITY_OVERRIDE:-}" ]]; then
-  requested_activity="$DARWIN_ART_APK_ACTIVITY_OVERRIDE"
-  requested_entry="$(tr ',' '\n' <<<"$activities" | \
-    sed -n "s#^${requested_activity}=##p" | head -1)"
-  [[ -n "$requested_entry" ]] || {
-    echo "requested Activity is not declared by the APK: $requested_activity" >&2
-    exit 65
-  }
-  activity="$requested_activity"
-  launch_component="$requested_activity"
-  descriptor="L$(tr '.' '/' <<<"$activity");"
-  theme="$requested_entry"
+  split_apks=("${normalized_split_apks[@]}")
 fi
 
 runtime_abi="darwin-art-darwin-native-v1"
@@ -252,18 +90,6 @@ profile_mount="$("$profile_ctl" ensure)"
 export DARWIN_ART_PROFILE_CTL="$profile_ctl"
 export DARWIN_ART_PROFILE_SOCKET
 DARWIN_ART_PROFILE_SOCKET="$("$profile_ctl" socket)"
-if [[ "$metadata_refreshed" == "1" ]]; then
-  # Publish the regenerated PackageManager projection through the profile
-  # authority before system_server resolves the service declaration. Preserve
-  # every identity/path/app-id field from the existing launch record.
-  record_stage="$(mktemp "$profile_mount/run/launch-record.XXXXXX")"
-  while IFS= read -r record_line; do
-    [[ "$record_line" == metadata=* ]] || printf '%s\n' "$record_line"
-  done <"$installed_record" >"$record_stage"
-  printf 'metadata=%s\n' "$metadata" >>"$record_stage"
-  "$profile_ctl" register "$package" "$record_stage"
-  rm -f "$record_stage"
-fi
 # App-data isolation changes only the package sandbox. Android system services
 # remain profile-scoped and common to every APK, just as they are on a device.
 # Darwin's sockaddr_un.sun_path is only 104 bytes, so keep process-control
@@ -274,134 +100,10 @@ chmod 0700 "$system_socket_dir"
 profile_socket_id="$(printf '%s' "$profile_mount" | shasum -a 256 | awk '{print substr($1, 1, 16)}')"
 export DARWIN_ART_SYSTEM_SERVER_SOCKET="$system_socket_dir/$profile_socket_id.system.sock"
 export DARWIN_ART_SURFACEFLINGER_SOCKET="$system_socket_dir/$profile_socket_id.sf.sock"
-if [[ -n "${DARWIN_ART_APK_INSTALL_ROOT:-}" ]]; then
-  install_root="$DARWIN_ART_APK_INSTALL_ROOT"
-elif [[ -n "$profile_mount" ]]; then
-  install_root="$profile_mount/packages"
-else
-  install_root="$root/_build/installed-apps"
-fi
 native_cache_root="${DARWIN_ART_NATIVE_CACHE_ROOT:-$root/_build/native-artifact-cache}"
-native_converter="${DARWIN_ART_NATIVE_CONVERTER:-none}"
-installer="$root/target/release/darwin-art-apk-install"
 native_resolver="$root/target/release/darwin-art-native-resolve"
-if [[ -z "$installed_record" ]]; then
-  if [[ ! -x "$installer" || ! -x "$native_resolver" ]]; then
-    cargo build -q --release -p darwin-art-apk-install
-    cargo build -q --release -p darwin-art-native-artifact --bin darwin-art-native-resolve
-  fi
-  extractor="none"
-  if [[ "$native_count" != "0" ]]; then
-    extractor="$root/target/release/android-apk-native-extract"
-    if [[ ! -x "$extractor" ]]; then
-      cargo build -q --release \
-        --manifest-path "$root/tools/android-apk-native-extract/Cargo.toml"
-    fi
-  fi
-  install_arguments=("$source_apk" "$install_root" "$package" "$version_code"
-    "$native_root" "$extractor" "$runtime_abi" "$native_cache_root"
-    "$native_converter")
-  for split_apk in "${split_apks[@]}"; do
-    install_arguments+=("$split_apk")
-  done
-  install_output="$("$installer" "${install_arguments[@]}")"
-  apk_sha256="$(sed -n 's/^apk-install: .* apk_sha256=\([^ ]*\) .*/\1/p' \
-    <<<"$install_output")"
-elif [[ -n "$installed_record" ]]; then
-  apk_sha256="$(sed -n 's/^sha256=//p' "$installed_record")"
-  install_output="apk-install: cached package=$package apk_sha256=$apk_sha256"
-fi
-[[ "$apk_sha256" =~ ^[0-9a-f]{64}$ ]] || {
-  echo "could not decode installed APK identity" >&2
-  exit 65
-}
-if [[ -z "$installed_record" ]]; then
-  installed_directory="$install_root/$package/$version_code/$apk_sha256"
-  apk="$installed_directory/base.apk"
-else
-  installed_directory="$(dirname "$apk")"
-  # Launch records may predate the installer migration that provisions the
-  # writable Android oat cache. Reuse the installer's permission-safe helper
-  # so ART can publish anonymous vdex without opening the APK payload.
-  if [[ ! -x "$installer" ]]; then
-    cargo build -q --release -p darwin-art-apk-install
-  fi
-  "$installer" --ensure-oat "$installed_directory" >/dev/null
-fi
-installed_split_apks=()
-if [[ -z "$installed_record" ]]; then
-  for index in "${!split_apks[@]}"; do
-    installed_split_apks+=("$installed_directory/split-$index.apk")
-  done
-else
-  installed_split_apks=("${split_apks[@]}")
-fi
-[[ -f "$apk" ]] || {
-  echo "installed APK is missing: $apk" >&2
-  exit 69
-}
-if [[ -z "$installed_record" && "$app_dex" == "$source_apk" ]]; then
-  app_dex="$apk"
-fi
-
-if [[ -z "$installed_record" && -n "$profile_mount" ]]; then
-  if [[ "$app_dex" != "$apk" ]]; then
-    code_directory="$profile_mount/system/package-code/$package/$apk_sha256"
-    mkdir -p "$code_directory"
-    persistent_dex="$code_directory/classes.dex"
-    if [[ ! -f "$persistent_dex" ]]; then
-      dex_stage="$code_directory/.classes.dex.$$.stage"
-      cp "$app_dex" "$dex_stage"
-      chmod 0400 "$dex_stage"
-      mv "$dex_stage" "$persistent_dex"
-    fi
-    app_dex="$persistent_dex"
-  fi
-  record_stage="$(mktemp "$profile_mount/run/launch-record.XXXXXX")"
-  {
-    printf 'darwin-art-launch-v1\n'
-    printf 'apk=%s\n' "$apk"
-    printf 'dex=%s\n' "$app_dex"
-    printf 'sha256=%s\n' "$apk_sha256"
-    printf 'native_library_dir=%s\n' "$installed_directory/android-elf/arm64-v8a"
-    for split_apk in "${installed_split_apks[@]}"; do
-      printf 'split=%s\n' "$split_apk"
-    done
-    printf 'metadata=%s\n' "$metadata"
-  } >"$record_stage"
-  "$profile_ctl" register "$package" "$record_stage"
-  rm -f "$record_stage"
-  if [[ "${DARWIN_ART_INSTALL_ONLY:-0}" == "1" ]]; then
-    if [[ "${DARWIN_ART_PACKAGED_RUNTIME:-0}" == "1" ]]; then
-      host="$root/target/release/darwin-art-host"
-    else
-      host="$root/target/debug/darwin-art-host"
-    fi
-    if [[ -n "${DARWIN_ART_HOST_BUNDLE:-}" ]]; then
-      host="$DARWIN_ART_HOST_BUNDLE/Contents/MacOS/darwin-art-host"
-    fi
-    [[ -x "$host" ]] || {
-      echo "darwin-art host is missing; run cargo xtask build before installing" >&2
-      exit 69
-    }
-    if [[ "${DARWIN_ART_PACKAGED_RUNTIME:-0}" == "1" ]]; then
-      "$root/tools/prepare-darwin-art-host.sh" "$host" packaged
-    else
-      "$root/tools/prepare-darwin-art-host.sh" "$host" development
-    fi
-    echo "$metadata"
-    echo "$install_output"
-    echo "darwin-art: installed package=$package"
-    exit 0
-  fi
-else
-  for runtime_binary in "$native_resolver"; do
-    [[ -x "$runtime_binary" ]] || {
-      echo "installed run requires a prebuilt runtime; run cargo xtask build" >&2
-      exit 69
-    }
-  done
-fi
+[[ -x "$native_resolver" ]] ||
+  cargo build -q --release -p darwin-art-native-artifact --bin darwin-art-native-resolve
 
 if [[ "${DARWIN_ART_PACKAGED_RUNTIME:-0}" == "1" ]]; then
   host="$root/target/release/darwin-art-host"
@@ -493,7 +195,6 @@ if [[ -n "$profile_mount" ]]; then
   fi
   support_dex="$support_dex_cache/classes.dex"
 fi
-export DARWIN_ART_RUNTIME_HOST_FILES="$DARWIN_ART_BOOT_CLASSPATH:$support_dex:$app_dex"
 for input in "$host" "$runtime" "$core_oj" "$core_libart" "$framework" "$framework_location" "$core_icu" "$conscrypt" "$framework_bluetooth" "$framework_mediaprovider" "$framework_permission" "$framework_permission_s" "$okhttp" "$support_dex" "$fonts_xml" "$roboto" "$framework_res"; do
   [[ -f "$input" ]] || {
     echo "runtime input is missing: $input" >&2
@@ -515,37 +216,126 @@ icu_runtime="$root/_build/icu-runtime-adapters/runtime"
 export ANDROID_I18N_ROOT="$icu_runtime/i18n"
 export ANDROID_DATA="$icu_runtime/data"
 export ANDROID_TZDATA_ROOT="$icu_runtime/tzdata"
+icu_runtime="$root/_build/icu-runtime-adapters/runtime"
+export ANDROID_I18N_ROOT="$icu_runtime/i18n"
+export ANDROID_DATA="$icu_runtime/data"
+export ANDROID_TZDATA_ROOT="$icu_runtime/tzdata"
+export DARWIN_ART_FRAMEWORK_RES_APK="$framework_res"
+export DARWIN_ART_TEST_FONTS_XML="/system/etc/fonts.xml"
+export DARWIN_ART_TEST_FONT="/system/fonts/Roboto-Regular.ttf"
+# Minikin opens font files below the native graphics boundary rather than
+# through the Java guest-filesystem facade. Keep the guest paths above for the
+# Android contract, and grant the runtime's bootstrap seam these two explicit
+# host capabilities so native font loading resolves the same immutable files.
+export DARWIN_ART_HOST_FONTS_XML="$fonts_xml"
+export DARWIN_ART_HOST_FONT="$roboto"
+export DARWIN_ART_ANDROID_FILESYSTEM_ROOT="$system_root"
+export DARWIN_ART_ANDROID_SYSTEM_ROOT="$system_root/system"
+export DARWIN_ART_ANDROID_SYSTEM_NATIVE_DIR="$system_root/system/lib64"
+# Installed code at /data/app, read-only, where PackageManagerService's
+# ApplicationInfo names it (sourceDir, splitSourceDirs, nativeLibraryDir).
+if [[ -n "$profile_mount" ]]; then
+  export DARWIN_ART_ANDROID_PACKAGE_ROOT="$profile_mount/packages"
+fi
+# Retina remains the default for the desktop host, but callers may select the
+# logical phone surface (scale 1) for Android configuration-sensitive tests.
+export DARWIN_ART_WINDOW_SCALE="${DARWIN_ART_WINDOW_SCALE:-2}"
+
+# A project-built ANGLE exposes Metal textures as EGLImages, which is required
+# for Android AHardwareBuffer storage identity. Prefer it over the older ANGLE
+# bundled with Android Studio; an explicit environment override remains first.
+if [[ -z "${DARWIN_ART_ANGLE_DIRECTORY:-}" ]]; then
+  angle_candidate="$root/_build/angle-source/out/DarwinArtRelease"
+  if [[ -f "$angle_candidate/libEGL.dylib" &&
+        -f "$angle_candidate/libGLESv2.dylib" ]]; then
+    export DARWIN_ART_ANGLE_DIRECTORY="$angle_candidate"
+  fi
+fi
+if [[ -z "${DARWIN_ART_ANGLE_DIRECTORY:-}" && -n "${ANDROID_HOME:-}" ]]; then
+  angle_candidate="$ANDROID_HOME/emulator/lib64/gles_angle"
+  if [[ -f "$angle_candidate/libEGL.dylib" &&
+        -f "$angle_candidate/libGLESv2.dylib" ]]; then
+    export DARWIN_ART_ANGLE_DIRECTORY="$angle_candidate"
+  fi
+fi
+
+# Android P+ Chrome enables its direct-rendering display compositor and needs
+# a thread-safe Graphite/Dawn backing. The packaged MoltenVK provider is the
+# Vulkan ICD for that Android contract; the guest still sees libvulkan.so and
+# never receives a Darwin dlopen handle. Keep this provider check scoped to
+# Chrome's launch contract; other APKs retain their existing Vulkan behavior.
+if [[ -z "${DARWIN_ART_MOLTENVK_DYLIB:-}" ]]; then
+  moltenvk_candidate="$root/_build/moltenvk/libMoltenVK.dylib"
+  if [[ -f "$moltenvk_candidate" ]]; then
+    export DARWIN_ART_MOLTENVK_DYLIB="$moltenvk_candidate"
+  fi
+fi
+# Platform Conscrypt/libssl uses the Android LIBC_R unwind contract even for
+# APKs that have no packaged native libraries. Prepare it independently of
+# the APK native-count so Java-only apps get the same provider as native APKs.
+unwind_provider="$root/_build/android-unwind-provider/libdarwin_art_android_unwind.so"
+if [[ "${DARWIN_ART_PACKAGED_RUNTIME:-0}" == "1" && ! -f "$unwind_provider" ]]; then
+  echo "installed run requires prebuilt Android unwind provider" >&2
+  exit 69
+elif [[ "${DARWIN_ART_PACKAGED_RUNTIME:-0}" != "1" ]]; then
+  "$root/tools/build-android-unwind-provider.sh" "$unwind_provider" >/dev/null
+fi
+export DARWIN_ART_ANDROID_UNWIND_PROVIDER="$unwind_provider"
+
+# The profile's system server (PackageManagerService among its services)
+# answers every package question below; start it before resolving the app.
+runtime_start="$(darwin_art_start_runtime_system_service \
+  "$host" "$profile_mount" "$system_root" "$system_archive" "$shared_image_store" \
+  "$framework_res" "$support_dex" "$runtime" "$core_oj" "$core_libart" "$framework" "$boot_tail" \
+  )"
+darwin_art_apply_runtime_endpoints "$runtime_start"
+
+if [[ "$mode" == info ]]; then
+  # A home screen's view of each package: PackageManager's label, version
+  # and icon (host path), one block per package.
+  for package in "${info_packages[@]}"; do
+    darwin_art_pm_launcher_info "$profile_ctl" "$profile_mount" "$package" || continue
+    printf 'package=%s\nlabel=%s\nversionCode=%s\nicon=%s\n\n' \
+      "$package" "$pm_label" "$pm_version_code" "$pm_icon"
+  done
+  exit 0
+fi
+if [[ "$mode" != launch ]]; then
+  package="$(darwin_art_pm_install "$profile_ctl" "$profile_mount" "$apk" "${split_apks[@]}")"
+  echo "darwin-art: installed package=$package"
+  [[ "$mode" != install ]] || exit 0
+fi
+darwin_art_pm_launcher_info "$profile_ctl" "$profile_mount" "$package"
+activity="$pm_activity"
+apk="$pm_source_dir"
+app_dex="$apk"
+apk_sha256="$(shasum -a 256 "$apk" | awk '{print $1}')"
+echo "darwin-art: launch package=$package activity=$activity uid=$pm_uid target_sdk=$pm_target_sdk"
+export DARWIN_ART_RUNTIME_HOST_FILES="$DARWIN_ART_BOOT_CLASSPATH:$support_dex:$app_dex"
+
+if [[ "$package" == "org.chromium.chrome" ]]; then
+  [[ "${DARWIN_ART_MOLTENVK_DYLIB:-}" == /* &&
+     -f "${DARWIN_ART_MOLTENVK_DYLIB:-}" &&
+     ! -L "${DARWIN_ART_MOLTENVK_DYLIB:-}" ]] || {
+    echo "Chrome Vulkan launch requires an absolute regular MoltenVK provider" >&2
+    exit 69
+  }
+fi
+
 export DARWIN_ART_APK_APP_PACKAGE="$package"
 # The launcher grants exactly this Activity host one macOS desktop target.
 # system_server and daemon-created service/renderer children explicitly strip
 # the capability while retaining their Android graphics/IOSurface paths.
 export DARWIN_ART_DESKTOP_PRESENTATION=1
-export DARWIN_ART_APK_APP_APPLICATION="$application"
 export DARWIN_ART_APK_APP_ACTIVITY="$activity"
-export DARWIN_ART_APK_APP_LAUNCH_COMPONENT="$launch_component"
-export DARWIN_ART_APK_APP_SCREEN_ORIENTATION="$screen_orientation"
-export DARWIN_ART_APK_APP_DESCRIPTOR="$descriptor"
-export DARWIN_ART_APK_APP_ACTIVITIES="$activities"
-export DARWIN_ART_APK_APP_ACTIVITY_ALIASES="$activity_aliases"
-export DARWIN_ART_APK_APP_SERVICES="$services"
-export DARWIN_ART_APK_APP_RECEIVERS="$receivers"
-export DARWIN_ART_APK_APP_SERVICE_METADATA="$service_metadata"
-export DARWIN_ART_APK_APP_PROVIDERS="$providers"
-export DARWIN_ART_APK_APP_METADATA="$application_metadata"
-export DARWIN_ART_APK_APP_VERSION_CODE="$version_code"
-export DARWIN_ART_APK_APP_VERSION_NAME="$version_name"
-export DARWIN_ART_APK_APP_THEME="$theme"
-export DARWIN_ART_APK_APP_TARGET_SDK="$target_sdk"
-export DARWIN_ART_APK_APP_REQUESTED_PERMISSIONS="$requested_permissions"
-export DARWIN_ART_RUNTIME_TARGET_SDK_VERSION="$target_sdk"
-export DARWIN_ART_RUNTIME_JAVA_DEBUGGABLE="$debuggable"
+export DARWIN_ART_APK_APP_DESCRIPTOR="L$(tr '.' '/' <<<"$activity");"
+export DARWIN_ART_RUNTIME_TARGET_SDK_VERSION="$pm_target_sdk"
+export DARWIN_ART_RUNTIME_JAVA_DEBUGGABLE="$pm_debuggable"
 export DARWIN_ART_APK_APP_APK_SHA256="$apk_sha256"
 export DARWIN_ART_NATIVE_RUNTIME_ABI="$runtime_abi"
-export DARWIN_ART_APK_APP_LABEL="$label"
-export DARWIN_ART_APK_APP_LABEL_RES="$label_res"
-export DARWIN_ART_APK_ACTIVITY_LABEL="$activity_label"
-export DARWIN_ART_APK_ACTIVITY_LABEL_RES="${activity_label_res:-0}"
-export DARWIN_ART_APK_APP_ICON_RES="${application_icon_res:-0}"
+# The window's title and icon: the application label and icon PackageManager
+# loads from the app's resources.
+export DARWIN_ART_APK_APP_LABEL="$pm_label"
 if [[ -n "${DARWIN_ART_APP_DATA_ROOT:-}" ]]; then
   app_data_root="$DARWIN_ART_APP_DATA_ROOT"
 else
@@ -636,106 +426,24 @@ external_storage_dir="$("$host" --prepare-external-storage \
   "$shared_storage_root" "$app_data_dir" "$package")"
 export DARWIN_ART_ANDROID_SHARED_STORAGE_ROOT="$shared_storage_root"
 export DARWIN_ART_APK_APP_EXTERNAL_DIR="/storage/emulated/0/Android/data/$package/files"
-if [[ "$icon" != "none" ]]; then
-  icon_file="$(mktemp "${TMPDIR:-/tmp}/darwin-art-apk-icon.XXXXXX")"
-  unzip -p "$apk" "$icon" >"$icon_file"
-  chmod 0400 "$icon_file"
-  export DARWIN_ART_APK_APP_ICON="$icon_file"
-else
-  unset DARWIN_ART_APK_APP_ICON
-fi
+icon_file="$(mktemp "${TMPDIR:-/tmp}/darwin-art-apk-icon.XXXXXX")"
+cp "$pm_icon" "$icon_file"
+chmod 0400 "$icon_file"
+export DARWIN_ART_APK_APP_ICON="$icon_file"
 export DARWIN_ART_APK_APP_SUPPORT_DEX="$support_dex"
 export DARWIN_ART_APK_APP_RESOURCE_APK="$apk"
-split_source_dirs=""
-for split_apk in "${installed_split_apks[@]}"; do
-  if [[ -n "$split_source_dirs" ]]; then
-    split_source_dirs="$split_source_dirs:$split_apk"
-  else
-    split_source_dirs="$split_apk"
-  fi
-done
-export DARWIN_ART_APK_APP_SPLIT_SOURCE_DIRS="$split_source_dirs"
-export DARWIN_ART_FRAMEWORK_RES_APK="$framework_res"
-export DARWIN_ART_TEST_FONTS_XML="/system/etc/fonts.xml"
-export DARWIN_ART_TEST_FONT="/system/fonts/Roboto-Regular.ttf"
-# Minikin opens font files below the native graphics boundary rather than
-# through the Java guest-filesystem facade. Keep the guest paths above for the
-# Android contract, and grant the runtime's bootstrap seam these two explicit
-# host capabilities so native font loading resolves the same immutable files.
-export DARWIN_ART_HOST_FONTS_XML="$fonts_xml"
-export DARWIN_ART_HOST_FONT="$roboto"
-export DARWIN_ART_ANDROID_FILESYSTEM_ROOT="$system_root"
-export DARWIN_ART_ANDROID_SYSTEM_ROOT="$system_root/system"
-export DARWIN_ART_ANDROID_SYSTEM_NATIVE_DIR="$system_root/system/lib64"
-# Retina remains the default for the desktop host, but callers may select the
-# logical phone surface (scale 1) for Android configuration-sensitive tests.
-export DARWIN_ART_WINDOW_SCALE="${DARWIN_ART_WINDOW_SCALE:-2}"
-
-# A project-built ANGLE exposes Metal textures as EGLImages, which is required
-# for Android AHardwareBuffer storage identity. Prefer it over the older ANGLE
-# bundled with Android Studio; an explicit environment override remains first.
-if [[ -z "${DARWIN_ART_ANGLE_DIRECTORY:-}" ]]; then
-  angle_candidate="$root/_build/angle-source/out/DarwinArtRelease"
-  if [[ -f "$angle_candidate/libEGL.dylib" &&
-        -f "$angle_candidate/libGLESv2.dylib" ]]; then
-    export DARWIN_ART_ANGLE_DIRECTORY="$angle_candidate"
-  fi
-fi
-if [[ -z "${DARWIN_ART_ANGLE_DIRECTORY:-}" && -n "${ANDROID_HOME:-}" ]]; then
-  angle_candidate="$ANDROID_HOME/emulator/lib64/gles_angle"
-  if [[ -f "$angle_candidate/libEGL.dylib" &&
-        -f "$angle_candidate/libGLESv2.dylib" ]]; then
-    export DARWIN_ART_ANGLE_DIRECTORY="$angle_candidate"
-  fi
-fi
-
-# Android P+ Chrome enables its direct-rendering display compositor and needs
-# a thread-safe Graphite/Dawn backing. The packaged MoltenVK provider is the
-# Vulkan ICD for that Android contract; the guest still sees libvulkan.so and
-# never receives a Darwin dlopen handle. Keep this provider check scoped to
-# Chrome's launch contract; other APKs retain their existing Vulkan behavior.
-if [[ -z "${DARWIN_ART_MOLTENVK_DYLIB:-}" ]]; then
-  moltenvk_candidate="$root/_build/moltenvk/libMoltenVK.dylib"
-  if [[ -f "$moltenvk_candidate" ]]; then
-    export DARWIN_ART_MOLTENVK_DYLIB="$moltenvk_candidate"
-  fi
-fi
-if [[ "$package" == "org.chromium.chrome" ]]; then
-  [[ "${DARWIN_ART_MOLTENVK_DYLIB:-}" == /* &&
-     -f "${DARWIN_ART_MOLTENVK_DYLIB:-}" &&
-     ! -L "${DARWIN_ART_MOLTENVK_DYLIB:-}" ]] || {
-    echo "Chrome Vulkan launch requires an absolute regular MoltenVK provider" >&2
-    exit 69
-  }
-fi
-
-# Platform Conscrypt/libssl uses the Android LIBC_R unwind contract even for
-# APKs that have no packaged native libraries. Prepare it independently of
-# the APK native-count so Java-only apps get the same provider as native APKs.
-unwind_provider="$root/_build/android-unwind-provider/libdarwin_art_android_unwind.so"
-if [[ -n "$installed_record" && ! -f "$unwind_provider" ]]; then
-  echo "installed run requires prebuilt Android unwind provider" >&2
-  exit 69
-elif [[ -z "$installed_record" ]]; then
-  "$root/tools/build-android-unwind-provider.sh" "$unwind_provider" >/dev/null
-fi
-export DARWIN_ART_ANDROID_UNWIND_PROVIDER="$unwind_provider"
-
-if [[ "$native_count" != "0" ]]; then
-  [[ "$native_root" != "none" ]] || {
-    echo "APK native metadata did not select an arm64 root library" >&2
-    exit 65
-  }
-  native_directory="$installed_directory/android-elf/arm64-v8a"
-  [[ -f "$native_directory/$native_root" ]] || {
-    echo "installed APK native root is missing" >&2
-    exit 69
-  }
-  export DARWIN_ART_APK_APP_NATIVE_PATH="$native_directory/$native_root"
+export DARWIN_ART_APK_APP_SPLIT_SOURCE_DIRS="$pm_split_source_dirs"
+# nativeLibraryDir as PackageManagerService extracted it at install.
+native_directory="$pm_native_library_dir"
+if compgen -G "$native_directory/*.so" >/dev/null; then
+  # The native namespace's presence marker names the library directory.
+  export DARWIN_ART_APK_APP_NATIVE_PATH="$native_directory"
   export DARWIN_ART_APK_APP_NATIVE_DIR="$native_directory"
   darwin_directory="$native_cache_root/$apk_sha256/$runtime_abi"
+  # An optional converter turns the installed Android graph into a complete
+  # Darwin graph once per APK identity; without one the ELF graph loads.
   native_resolution="$("$native_resolver" "$apk_sha256" "$runtime_abi" \
-    "$native_directory" "$darwin_directory")"
+    "$native_directory" "$darwin_directory" "${DARWIN_ART_NATIVE_CONVERTER:-none}")"
   native_backend="$(sed -n 's/^native-resolve: PASS backend=\([^ ]*\) .*/\1/p' \
     <<<"$native_resolution")"
   case "$native_backend" in
@@ -761,9 +469,7 @@ else
   unset DARWIN_ART_APK_DARWIN_DIRECTORY
 fi
 
-echo "$metadata"
-echo "$install_output"
-[[ "$native_count" == "0" ]] || echo "$native_resolution"
+[[ -z "${native_resolution:-}" ]] || echo "$native_resolution"
 # A separately signed development host permits late debugger attachment while
 # retaining the normal profile exec path, ASLR, and initial signal behavior.
 if [[ -n "${DARWIN_ART_DEBUG_HOST:-}" ]]; then
@@ -820,52 +526,42 @@ if [[ "${DARWIN_ART_LLDB:-0}" == "fs-stat" ]]; then
 fi
 host_command=("$host" --window-seconds "$seconds" \
   "$runtime" "$core_oj" "$core_libart" "$framework" "$boot_tail" "$app_dex")
-if [[ -n "$profile_mount" ]]; then
-  runtime_start="$(darwin_art_start_runtime_system_service \
-    "$host" "$profile_mount" "$system_root" "$system_archive" "$shared_image_store" \
-    "$framework_res" "$support_dex" "$runtime" "$core_oj" "$core_libart" "$framework" "$boot_tail" \
-    )"
-  darwin_art_apply_runtime_endpoints "$runtime_start"
-  # The profile daemon must own the final host Child. A caller-owned
-  # exec lease made the host's lifetime depend on this shell (and left the
-  # manager/app shim with a second, unrelated owner). daemonize registers
-  # the host PID before acknowledging it, so the shell can safely wait for
-  # that exact process through the authoritative profile ps view.
-  host_pid="$("$profile_ctl" daemonize "$package" "${host_command[@]}")"
-  [[ "$host_pid" =~ ^[1-9][0-9]*$ ]] || {
-    echo "darwin-artd returned an invalid application PID: $host_pid" >&2
-    exit 69
-  }
+# The profile daemon must own the final host Child. A caller-owned
+# exec lease made the host's lifetime depend on this shell (and left the
+# manager/app shim with a second, unrelated owner). daemonize registers
+# the host PID before acknowledging it, so the shell can safely wait for
+# that exact process through the authoritative profile ps view.
+host_pid="$("$profile_ctl" daemonize "$package" "${host_command[@]}")"
+[[ "$host_pid" =~ ^[1-9][0-9]*$ ]] || {
+  echo "darwin-artd returned an invalid application PID: $host_pid" >&2
+  exit 69
+}
 
-  # Manager/Finder shims use this explicit handoff mode: the shell performs
-  # all package/runtime setup, transfers final-host ownership to darwin-artd,
-  # and returns once that transfer is acknowledged. Ordinary invocations
-  # remain synchronous and retain their requested window duration.
-  if [[ "${DARWIN_ART_ASYNC_LAUNCH:-0}" == "1" ]]; then
-    exit 0
-  fi
-
-  wait_for_daemon_process() {
-    local pid="$1" expected_package="$2" processes
-    while :; do
-      # Do not use kill -0 or parent/child relationships: the profile daemon's
-      # process registry is the ownership authority and is incarnation-safe.
-      processes="$("$profile_ctl" ps)" || {
-        echo "could not query darwin-artd process ownership" >&2
-        return 69
-      }
-      if ! awk -F '\t' -v expected_pid="$pid" -v expected_package="$expected_package" \
-          '$1 == expected_pid && $2 == expected_package { found = 1 }
-           END { exit(found ? 0 : 1) }' <<<"$processes"; then
-        return 0
-      fi
-      sleep 0.1
-    done
-  }
-  wait_for_daemon_process "$host_pid" "$package"
-  status=$?
-  exit "$status"
+# Manager/Finder shims use this explicit handoff mode: the shell performs
+# all package/runtime setup, transfers final-host ownership to darwin-artd,
+# and returns once that transfer is acknowledged. Ordinary invocations
+# remain synchronous and retain their requested window duration.
+if [[ "${DARWIN_ART_ASYNC_LAUNCH:-0}" == "1" ]]; then
+  exit 0
 fi
-"${host_command[@]}"
+
+wait_for_daemon_process() {
+  local pid="$1" expected_package="$2" processes
+  while :; do
+    # Do not use kill -0 or parent/child relationships: the profile daemon's
+    # process registry is the ownership authority and is incarnation-safe.
+    processes="$("$profile_ctl" ps)" || {
+      echo "could not query darwin-artd process ownership" >&2
+      return 69
+    }
+    if ! awk -F '\t' -v expected_pid="$pid" -v expected_package="$expected_package" \
+        '$1 == expected_pid && $2 == expected_package { found = 1 }
+         END { exit(found ? 0 : 1) }' <<<"$processes"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+}
+wait_for_daemon_process "$host_pid" "$package"
 status=$?
 exit "$status"

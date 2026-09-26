@@ -79,7 +79,6 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
     let hello_source = generate_large_field_fixture(root, &build_dir)?;
 
     let android_platform_jar = find_android_platform_jar()?;
-    run_command(Command::new("bash").arg(root.join("tools/build-android16-package-dex-usage.sh")))?;
     let android_mock_jar = android_platform_jar
         .parent()
         .ok_or("Android platform jar has no parent")?
@@ -116,7 +115,6 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         compile_signatures_dir,
         find_android_core_system_modules()?,
         android_platform_jar.clone(),
-        root.join("_build/package-dex-usage-runtime/package-dex-usage.jar"),
     ])?;
     let mut javac = Command::new("javac");
     javac
@@ -144,14 +142,6 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(root.join("probes/ProbeCalendarProvider.java"))
         .arg(root.join("probes/ProbeResources.java"))
         .arg(root.join("probes/ProbePackageManager.java"))
-        // Runtime PM ownership, not a test fixture.
-        .arg(root.join("runtime/framework/pm/InstalledPackageInfos.java"))
-        .arg(root.join("runtime/framework/pm/InstalledPackageParser.java"))
-        .arg(root.join("runtime/framework/pm/ServiceResolver.java"))
-        .arg(root.join("runtime/framework/pm/InstalledPackageRecord.java"))
-        .arg(root.join("runtime/framework/pm/PackageRecords.java"))
-        .arg(root.join("runtime/framework/pm/DexLoadReports.java"))
-        .arg(root.join("runtime/framework/pm/PackageManagerEndpoint.java"))
         .arg(root.join("runtime/framework/storage/StorageManagerEndpoint.java"))
         .arg(root.join("runtime/framework/os/RemoteBinder.java"))
         .arg(root.join("runtime/framework/os/SystemServices.java"))
@@ -172,6 +162,8 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(root.join("runtime/framework/am/ServiceProcessLaunchController.java"))
         .arg(root.join("runtime/framework/am/ServiceConnectionResourceController.java"))
         .arg(root.join("runtime/framework/am/ActiveServices.java"))
+        .arg(root.join("runtime/framework/am/PackageQueries.java"))
+        .arg(root.join("runtime/framework/am/ApplicationPackages.java"))
         .arg(root.join("runtime/framework/am/ActivityManagerEndpoint.java"))
         .arg(root.join("runtime/framework/am/ActivityManagerClient.java"))
         .arg(root.join("runtime/framework/display/BuiltInDisplayConfiguration.java"))
@@ -586,13 +578,6 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
             "Ldev/darwinart/runtime/input/SystemKeyboardMaps;",
             "Ldev/darwinart/probe/JitInvokeCustom;",
             "Ldev/darwinart/probe/ProbePackageManager;",
-            "Ldev/darwinart/runtime/pm/InstalledPackageInfos;",
-            "Ldev/darwinart/runtime/pm/InstalledPackageParser;",
-            "Ldev/darwinart/runtime/pm/ServiceResolver;",
-            "Ldev/darwinart/runtime/pm/InstalledPackageRecord;",
-            "Ldev/darwinart/runtime/pm/PackageRecords;",
-            "Ldev/darwinart/runtime/pm/PackageManagerEndpoint;",
-            "Ldev/darwinart/runtime/pm/DexLoadReports;",
             "Ldev/darwinart/probe/ProbeResources;",
         ],
     )?;

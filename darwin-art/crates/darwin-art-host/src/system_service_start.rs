@@ -124,9 +124,11 @@ impl Inputs {
         let mut host_files = required(env, "DARWIN_ART_BOOT_CLASSPATH")?.to_os_string();
         host_files.push(":");
         host_files.push(&command[8]);
-        let system_services = image.join("system/framework/services.jar");
-        host_files.push(":");
-        host_files.push(system_services.as_os_str());
+        let system_server_classpath = system_server_classpath(image)?;
+        for jar in &system_server_classpath {
+            host_files.push(":");
+            host_files.push(jar.as_os_str());
+        }
         if required(env, "DARWIN_ART_RUNTIME_HOST_FILES")? != host_files {
             return Err(invalid(
                 "host file grants differ from the inventoried system boot inputs",
@@ -158,9 +160,11 @@ impl Inputs {
             required(env, "DARWIN_ART_BOOT_CLASSPATH")?,
         )?;
         result.paths("abi-boot-tail", &command[7])?;
-        result
-            .files
-            .push(("system-services".into(), system_services));
+        for (index, jar) in system_server_classpath.into_iter().enumerate() {
+            result
+                .files
+                .push((format!("system-server-classpath-{index}"), jar));
+        }
         for index in [4, 5, 6, 8] {
             result
                 .files
@@ -222,6 +226,37 @@ fn optional<'a>(environment: &'a [(OsString, OsString)], name: &str) -> Option<&
         .iter()
         .find(|(key, _)| key == name)
         .map(|(_, value)| value.as_os_str())
+}
+
+/// SYSTEMSERVERCLASSPATH from the image's derive_classpath environment file,
+/// resolved under the image root.
+fn system_server_classpath(image: &Path) -> io::Result<Vec<PathBuf>> {
+    let environment = std::fs::read_to_string(image.join("system/etc/classpath"))?;
+    let mut exported = environment
+        .lines()
+        .filter_map(|line| line.strip_prefix("export SYSTEMSERVERCLASSPATH "));
+    let classpath = exported
+        .next()
+        .ok_or_else(|| invalid("image exports no SYSTEMSERVERCLASSPATH"))?;
+    if exported.next().is_some() {
+        return Err(invalid("image exports SYSTEMSERVERCLASSPATH twice"));
+    }
+    classpath
+        .split(':')
+        .map(|entry| {
+            let relative = entry
+                .strip_prefix('/')
+                .filter(|relative| !relative.is_empty() && entry.ends_with(".jar"))
+                .ok_or_else(|| invalid("invalid SYSTEMSERVERCLASSPATH entry"))?;
+            if Path::new(relative)
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err(invalid("invalid SYSTEMSERVERCLASSPATH entry"));
+            }
+            Ok(image.join(relative))
+        })
+        .collect()
 }
 
 fn required<'a>(environment: &'a [(OsString, OsString)], name: &str) -> io::Result<&'a OsStr> {
@@ -293,22 +328,65 @@ mod tests {
         assert!(inputs.paths("boot", OsStr::new("relative")).is_err());
     }
 
+    fn image_with_classpath(label: &str) -> PathBuf {
+        let image = std::env::temp_dir().join(format!(
+            "darwin-system-image-{label}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(image.join("system/etc")).unwrap();
+        std::fs::write(
+            image.join("system/etc/classpath"),
+            "export SYSTEMSERVERCLASSPATH /system/framework/services.jar:\
+             /apex/com.android.permission/javalib/service-permission.jar\n\
+             export STANDALONE_SYSTEMSERVER_JARS /apex/x/javalib/service-x.jar\n",
+        )
+        .unwrap();
+        image
+    }
+
+    #[test]
+    fn system_server_classpath_comes_from_the_image_environment() {
+        let image = image_with_classpath("parse");
+        assert_eq!(
+            system_server_classpath(&image).unwrap(),
+            [
+                image.join("system/framework/services.jar"),
+                image.join("apex/com.android.permission/javalib/service-permission.jar"),
+            ]
+        );
+        for invalid in [
+            "export BOOTCLASSPATH /x.jar\n",
+            "export SYSTEMSERVERCLASSPATH relative.jar\n",
+            "export SYSTEMSERVERCLASSPATH /a/../b.jar\n",
+            "export SYSTEMSERVERCLASSPATH /a.jar\nexport SYSTEMSERVERCLASSPATH /b.jar\n",
+        ] {
+            std::fs::write(image.join("system/etc/classpath"), invalid).unwrap();
+            assert!(system_server_classpath(&image).is_err(), "{invalid}");
+        }
+    }
+
     #[test]
     fn inventory_covers_explicit_providers_boot_data_and_storage() {
+        let image = image_with_classpath("inventory");
+        let image_text = image.to_str().unwrap().to_owned();
+        let host_files = format!(
+            "/boot/original:/boot/replacement:/data/support.dex:{image_text}/system/framework/services.jar:\
+             {image_text}/apex/com.android.permission/javalib/service-permission.jar"
+        );
         let mut env: Vec<(OsString, OsString)> = [
             ("DARWIN_ART_SYSTEM_SERVER_MODE", "1"),
             ("DARWIN_ART_APK_APP_PACKAGE", "android"),
-            ("DARWIN_ART_ANDROID_FILESYSTEM_ROOT", "/image"),
-            ("DARWIN_ART_ANDROID_SYSTEM_ROOT", "/image/system"),
+            ("DARWIN_ART_ANDROID_FILESYSTEM_ROOT", image_text.as_str()),
+            (
+                "DARWIN_ART_ANDROID_SYSTEM_ROOT",
+                &format!("{image_text}/system"),
+            ),
             (
                 "DARWIN_ART_ANDROID_SYSTEM_NATIVE_DIR",
-                "/image/system/lib64",
+                &format!("{image_text}/system/lib64"),
             ),
             ("DARWIN_ART_APK_APP_SUPPORT_DEX", "/data/support.dex"),
-            (
-                "DARWIN_ART_RUNTIME_HOST_FILES",
-                "/boot/original:/boot/replacement:/data/support.dex:/image/system/framework/services.jar",
-            ),
+            ("DARWIN_ART_RUNTIME_HOST_FILES", host_files.as_str()),
             (
                 "DARWIN_ART_BOOT_CLASSPATH",
                 "/boot/original:/boot/replacement",
@@ -331,7 +409,7 @@ mod tests {
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
-        let inputs = Inputs::collect(&command(), &env, Path::new("/image")).unwrap();
+        let inputs = Inputs::collect(&command(), &env, &image).unwrap();
         assert_eq!(
             inputs.native,
             [
@@ -343,10 +421,10 @@ mod tests {
             ]
             .map(PathBuf::from)
         );
-        assert_eq!(inputs.files.len(), 20);
+        assert_eq!(inputs.files.len(), 21);
         assert!(inputs.files.contains(&(
-            "system-services".into(),
-            "/image/system/framework/services.jar".into()
+            "system-server-classpath-1".into(),
+            image.join("apex/com.android.permission/javalib/service-permission.jar")
         )));
         assert_eq!(
             inputs
@@ -367,10 +445,11 @@ mod tests {
                 .contains(&("android-unwind".into(), "/providers/unwind.so".into()))
         );
         assert_eq!(inputs.directories.len(), 5);
-        assert!(inputs.directories.contains(&(
-            "DARWIN_ART_ANDROID_PACKAGE_ROOT".into(),
-            "/packages".into()
-        )));
+        assert!(
+            inputs
+                .directories
+                .contains(&("DARWIN_ART_ANDROID_PACKAGE_ROOT".into(), "/packages".into()))
+        );
         assert!(Inputs::collect(&command(), &env, Path::new("/other-image")).is_err());
         env.iter_mut()
             .find(|(k, _)| k == "DARWIN_ART_APK_APP_SUPPORT_DEX")

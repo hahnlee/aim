@@ -32,6 +32,9 @@ struct State {
     paths: ProfilePaths,
     registry: Mutex<PackageRegistry>,
     processes: Mutex<ProcessRegistry>,
+    /// init's property service, opened once the profile filesystem is up.
+    properties: Mutex<Option<crate::property_service::PropertyService>>,
+    host_commands: crate::host_commands::HostCommands,
     runtime_services: crate::runtime_service_state::RuntimeServiceState,
     application_launches:
         Mutex<BTreeMap<String, crate::application_launch_template::ApplicationLaunchTemplate>>,
@@ -93,6 +96,8 @@ pub fn run_daemon(config: DaemonConfig) -> Result<(), ProfileError> {
         paths: config.paths.clone(),
         registry: Mutex::new(PackageRegistry::new(&config.paths)),
         processes: Mutex::new(ProcessRegistry::default()),
+        properties: Mutex::new(None),
+        host_commands: Default::default(),
         runtime_services: Default::default(),
         application_launches: Default::default(),
         bound_services: BoundServiceRegistry::default(),
@@ -164,7 +169,11 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
             let filesystem = state.filesystem.lock().unwrap();
             match filesystem.ensure() {
                 Ok(path) => {
-                    state.registry.lock().unwrap().migrate_app_ids()?;
+                    {
+                        let registry = state.registry.lock().unwrap();
+                        registry.migrate_app_ids()?;
+                        registry.migrate_settings()?;
+                    }
                     protocol::write_response(
                         &mut stream,
                         message.operation,
@@ -274,51 +283,15 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                 )?;
             }
         }
-        protocol::OP_REGISTER => {
-            let separator = message
-                .payload
-                .iter()
-                .position(|byte| *byte == 0)
-                .ok_or_else(|| ProfileError::Daemon("register request has no package".into()))?;
-            let package = std::str::from_utf8(&message.payload[..separator])
-                .map_err(|_| ProfileError::Daemon("package is not UTF-8".into()))?;
-            let record = &message.payload[separator + 1..];
-            state.filesystem.lock().unwrap().ensure()?;
-            state.registry.lock().unwrap().register(package, record)?;
-            protocol::write_response(&mut stream, message.operation, 0, b"")?;
-        }
-        protocol::OP_RESOLVE => {
-            let package = std::str::from_utf8(&message.payload)
-                .map_err(|_| ProfileError::Daemon("package is not UTF-8".into()))?;
-            state.filesystem.lock().unwrap().ensure()?;
-            let resolved = { state.registry.lock().unwrap().resolve(package) };
-            match resolved {
-                Ok(record) => {
-                    protocol::write_response(&mut stream, message.operation, 0, &record)?;
-                }
-                Err(ProfileError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-                    protocol::write_response(
-                        &mut stream,
-                        message.operation,
-                        protocol::STATUS_NOT_FOUND,
-                        b"package is not installed",
-                    )?;
-                }
-                Err(error) => {
-                    protocol::write_response(
-                        &mut stream,
-                        message.operation,
-                        1,
-                        error.to_string().as_bytes(),
-                    )?;
-                }
-            }
-        }
         protocol::OP_LIST => {
             require_empty(&message.payload)?;
             state.filesystem.lock().unwrap().ensure()?;
-            let packages = state.registry.lock().unwrap().list()?;
-            protocol::write_response(&mut stream, message.operation, 0, &packages)?;
+            let packages = crate::package_list::read(&state.paths.mount)?
+                .into_iter()
+                .filter(|entry| entry.is_third_party())
+                .map(|entry| entry.name + "\n")
+                .collect::<String>();
+            protocol::write_response(&mut stream, message.operation, 0, packages.as_bytes())?;
         }
         protocol::OP_PROCESSES => {
             require_empty(&message.payload)?;
@@ -356,46 +329,10 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
             } else if package == "android.system" {
                 1000
             } else {
-                state.registry.lock().unwrap().app_id(&package)?
+                crate::package_list::uid(&state.paths.mount, &package)?
             };
             let identity = crate::ProcessIdentity { pid, uid, package };
             protocol::write_response(&mut stream, message.operation, 0, &identity.encode())?;
-        }
-        protocol::OP_UNREGISTER => {
-            if message.payload.len() < 2 || message.payload[0] > 1 {
-                protocol::write_response(
-                    &mut stream,
-                    message.operation,
-                    22,
-                    b"unregister requires a data policy and package",
-                )?;
-                return Ok(());
-            }
-            let remove_data = message.payload[0] == 1;
-            let package = std::str::from_utf8(&message.payload[1..])
-                .map_err(|_| ProfileError::Daemon("package is not UTF-8".into()))?;
-            crate::registry::validate_package(package)?;
-            let _gate = state.lease_gate.lock().unwrap();
-            if state.processes.lock().unwrap().contains_package(package) {
-                protocol::write_response(
-                    &mut stream,
-                    message.operation,
-                    16,
-                    b"package is running",
-                )?;
-                return Ok(());
-            }
-            state.filesystem.lock().unwrap().ensure()?;
-            let registry = state.registry.lock().unwrap();
-            match unregister_package_files(&state.paths, &registry, package, remove_data) {
-                Ok(()) => protocol::write_response(&mut stream, message.operation, 0, b"")?,
-                Err(error) => protocol::write_response(
-                    &mut stream,
-                    message.operation,
-                    5,
-                    error.to_string().as_bytes(),
-                )?,
-            }
         }
         protocol::OP_DAEMONIZE => {
             let (package, arguments, mut environment) = parse_daemonize(&message.payload)?;
@@ -403,7 +340,7 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
             let android_uid = if package == "android.system" {
                 1000
             } else {
-                state.registry.lock().unwrap().app_id(&package)?
+                crate::package_list::uid(&state.paths.mount, &package)?
             };
             environment.retain(|(name, _)| name != "DARWIN_ART_ANDROID_UID");
             environment.push((
@@ -552,6 +489,98 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                 )?,
             }
         }
+        protocol::OP_INSTALLD => {
+            // installd is a system-server-only service.
+            let result = (|| {
+                let (pid, incarnation) = crate::peer_process::identity(&stream)?;
+                if !state.processes.lock().unwrap().is_child_owner(
+                    pid,
+                    incarnation,
+                    "android.system",
+                ) {
+                    return Err(ProfileError::Daemon(
+                        "installd caller is not authorized: expected android.system child".into(),
+                    ));
+                }
+                let request = crate::installd::Request::decode(&message.payload)?;
+                state.filesystem.lock().unwrap().ensure()?;
+                crate::installd::Installd::new(&state.paths).execute(&request)
+            })();
+            match result {
+                Ok(reply) => protocol::write_response(&mut stream, message.operation, 0, &reply)?,
+                Err(error) => protocol::write_response(
+                    &mut stream,
+                    message.operation,
+                    installd_status(&error),
+                    error.to_string().as_bytes(),
+                )?,
+            }
+        }
+        protocol::OP_HOST_COMMAND_LISTEN => {
+            require_empty(&message.payload)?;
+            let (pid, incarnation) = crate::peer_process::identity(&stream)?;
+            if !state
+                .processes
+                .lock()
+                .unwrap()
+                .is_child_owner(pid, incarnation, "android.system")
+            {
+                protocol::write_response(&mut stream, message.operation, 1, b"")?;
+                return Ok(());
+            }
+            protocol::write_response(&mut stream, message.operation, 0, b"")?;
+            state.host_commands.listen(stream);
+            return Ok(());
+        }
+        protocol::OP_HOST_COMMAND => {
+            // Same-user clients only (verify_same_user), as adb is to its device.
+            let (status, output) = match state.host_commands.run(&message.payload) {
+                Ok(reply) => reply,
+                Err(error) => (
+                    crate::host_commands::STATUS_UNAVAILABLE,
+                    error.to_string().into_bytes(),
+                ),
+            };
+            crate::host_commands::write_reply(&mut stream, status, &output)?;
+        }
+        protocol::OP_PROPERTY_SET => {
+            let result = (|| {
+                let (pid, incarnation) = crate::peer_process::identity(&stream)?;
+                let system_caller = state.processes.lock().unwrap().is_child_owner(
+                    pid,
+                    incarnation,
+                    "android.system",
+                );
+                let (name, value) = crate::property_service::decode_request(&message.payload)?;
+                state.filesystem.lock().unwrap().ensure()?;
+                let mut properties = state.properties.lock().unwrap();
+                if properties.is_none() {
+                    *properties = Some(crate::property_service::PropertyService::open(
+                        state
+                            .paths
+                            .mount
+                            .join("system/properties/persistent_properties"),
+                    )?);
+                }
+                Ok::<_, ProfileError>(properties.as_mut().unwrap().set(
+                    system_caller,
+                    &name,
+                    &value,
+                ))
+            })();
+            match result {
+                Ok(Ok(())) => protocol::write_response(&mut stream, message.operation, 0, b"")?,
+                Ok(Err(rejected)) => {
+                    protocol::write_response(&mut stream, message.operation, rejected as u32, b"")?
+                }
+                Err(error) => protocol::write_response(
+                    &mut stream,
+                    message.operation,
+                    crate::property_service::SetError::SetFailed as u32,
+                    error.to_string().as_bytes(),
+                )?,
+            }
+        }
         protocol::OP_BINDER_SESSION => {
             require_empty(&message.payload)?;
             let peer = binder_peer(state, &stream)?;
@@ -688,11 +717,7 @@ fn binder_peer(
     } else if package == "android.system" {
         1000
     } else {
-        state
-            .registry
-            .lock()
-            .map_err(|_| ProfileError::Daemon("package registry is poisoned".into()))?
-            .app_id(&package)?
+        crate::package_list::uid(&state.paths.mount, &package)?
     };
     darwin_art_binder_device::routing_authority::PeerIdentity::verified(
         pid,
@@ -918,7 +943,7 @@ fn validate_bound_service_request(
     let installed_uid = if request.package == "android.system" {
         1000
     } else {
-        state.registry.lock().unwrap().app_id(&request.package)?
+        crate::package_list::uid(&state.paths.mount, &request.package)?
     };
     if !request.isolated && installed_uid != request.uid {
         return Err(ProfileError::Daemon(
@@ -990,79 +1015,25 @@ fn start_runtime(state: &Arc<State>, payload: &[u8]) -> Result<Vec<u8>, ProfileE
         .encode()
 }
 
-fn unregister_package_files(
-    paths: &ProfilePaths,
-    registry: &PackageRegistry,
-    package: &str,
-    remove_data: bool,
-) -> Result<(), ProfileError> {
-    registry.resolve(package)?;
-    let trash = paths.mount.join("run").join(format!(
-        ".uninstall.{}.{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    fs::create_dir(&trash)?;
-    let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
-    let mut candidates = vec![
-        (
-            paths.mount.join("packages").join(package),
-            trash.join("package"),
-        ),
-        (
-            paths.mount.join("system/package-code").join(package),
-            trash.join("code"),
-        ),
-    ];
-    if remove_data {
-        candidates.push((
-            paths.mount.join("data/apps").join(package),
-            trash.join("data"),
-        ));
+/// Android errno for an installd failure, as installd reports it.
+fn installd_status(error: &ProfileError) -> u32 {
+    match error {
+        ProfileError::Io(error) => error.raw_os_error().map_or(5, darwin_to_android_errno),
+        _ if error.to_string().contains("not authorized") => 1, // EPERM
+        _ => 22,                                                // EINVAL
     }
-    for (source, destination) in candidates {
-        if !source.exists() {
-            continue;
-        }
-        if let Err(error) = fs::rename(&source, &destination) {
-            for (restore_from, restore_to) in moved.into_iter().rev() {
-                let _ = fs::rename(restore_from, restore_to);
-            }
-            let _ = fs::remove_dir(&trash);
-            return Err(error.into());
-        }
-        moved.push((destination, source));
-    }
-    if let Err(error) = registry.unregister(package) {
-        for (restore_from, restore_to) in moved.into_iter().rev() {
-            let _ = fs::rename(restore_from, restore_to);
-        }
-        let _ = fs::remove_dir(&trash);
-        return Err(error);
-    }
-    if make_tree_removable(&trash).is_ok() {
-        let _ = fs::remove_dir_all(&trash);
-    }
-    Ok(())
 }
 
-fn make_tree_removable(path: &std::path::Path) -> Result<(), ProfileError> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Ok(());
+/// Darwin and Android (Linux) errno differ above ERANGE (34).
+fn darwin_to_android_errno(errno: i32) -> u32 {
+    match errno {
+        1..=34 => errno as u32,
+        35 => 11,  // EAGAIN
+        63 => 36,  // ENAMETOOLONG
+        66 => 39,  // ENOTEMPTY
+        69 => 122, // EDQUOT
+        _ => 5,    // EIO
     }
-    if metadata.is_dir() {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-        for entry in fs::read_dir(path)? {
-            make_tree_removable(&entry?.path())?;
-        }
-    } else {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
 }
 
 fn parse_daemonize(
@@ -1268,40 +1239,5 @@ mod tests {
         valid.extend_from_slice(&0_u32.to_le_bytes());
         valid.push(0);
         assert!(parse_daemonize(&valid).is_err());
-    }
-
-    #[test]
-    fn unregister_removes_code_and_honors_the_data_policy() {
-        let paths = temporary_paths("unregister");
-        let package = "com.example.app";
-        fs::create_dir_all(paths.mount.join("run")).unwrap();
-        fs::create_dir_all(paths.mount.join("packages").join(package)).unwrap();
-        fs::create_dir_all(paths.mount.join("system/package-code").join(package)).unwrap();
-        fs::create_dir_all(paths.mount.join("data/apps").join(package)).unwrap();
-        let registry = PackageRegistry::new(&paths);
-        registry
-            .register(package, b"darwin-art-launch-v1\npackage=com.example.app\n")
-            .unwrap();
-
-        unregister_package_files(&paths, &registry, package, false).unwrap();
-
-        assert!(registry.resolve(package).is_err());
-        assert!(!paths.mount.join("packages").join(package).exists());
-        assert!(
-            !paths
-                .mount
-                .join("system/package-code")
-                .join(package)
-                .exists()
-        );
-        assert!(paths.mount.join("data/apps").join(package).exists());
-
-        fs::create_dir_all(paths.mount.join("packages").join(package)).unwrap();
-        registry
-            .register(package, b"darwin-art-launch-v1\npackage=com.example.app\n")
-            .unwrap();
-        unregister_package_files(&paths, &registry, package, true).unwrap();
-        assert!(!paths.mount.join("data/apps").join(package).exists());
-        fs::remove_dir_all(paths.profiles_root).unwrap();
     }
 }

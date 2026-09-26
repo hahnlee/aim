@@ -24,3 +24,31 @@
 +  }
  
    jobject fdescObj =
+--- a/android_content_res_ApkAssets.cpp
++++ b/android_content_res_ApkAssets.cpp
+@@ -274,6 +274,25 @@
+     fprintf(stderr, "duping %d to %d", fd, newfd);
+     return newfd;
+ }
++#elif defined(__APPLE__)
++extern "C" int darwin_art_bionic_fs_dup_host_fd_core(int fd, int* host_fd);
++
++// A java.io.FileDescriptor holds the process's Android descriptor; the host
++// androidfw reads a Darwin one. Take an independent Darwin duplicate of an
++// Android file descriptor; any other descriptor is already a host one.
++int DupFdCloExec(int fd) {
++    int host = -1;
++    const int duplicated = darwin_art_bionic_fs_dup_host_fd_core(fd, &host);
++    if (duplicated == 1) {
++        fcntl(host, F_SETFD, FD_CLOEXEC);
++        return host;
++    }
++    if (duplicated < 0) {
++        errno = EBADF;
++        return -1;
++    }
++    return fcntl(fd, F_DUPFD_CLOEXEC, 0);
++}
+ #else
+ int DupFdCloExec(int fd) {
+     int newfd = fcntl(fd, F_DUPFD_CLOEXEC, 0);

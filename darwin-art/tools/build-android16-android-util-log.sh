@@ -53,9 +53,12 @@ materialize core/jni/include/android_runtime/AndroidRuntime.h \
 materialize core/jni/platform/host/HostRuntime.cpp "$HOST_RUNTIME_CPP_SHA256"
 materialize core/jni/AndroidRuntime.cpp "$ANDROID_RUNTIME_CPP_SHA256"
 materialize core/java/android/util/Log.java "$LOG_JAVA_SHA256"
+materialize core/jni/android_util_EventLog.cpp "$EVENTLOG_CPP_SHA256"
+materialize core/jni/eventlog_helper.h "$EVENTLOG_HELPER_H_SHA256"
 
 android_bp="$source_root/core/jni/Android.bp"
 log_source="$source_root/core/jni/android_util_Log.cpp"
+eventlog_source="$source_root/core/jni/android_util_EventLog.cpp"
 host_runtime="$source_root/core/jni/platform/host/HostRuntime.cpp"
 android_runtime="$source_root/core/jni/AndroidRuntime.cpp"
 managed_log="$source_root/core/java/android/util/Log.java"
@@ -94,6 +97,20 @@ method_sha="$(sha256 "$method_manifest")"
 [[ "$method_count" == "$NATIVE_METHOD_COUNT" &&
    "$method_sha" == "$NATIVE_METHOD_MANIFEST_SHA256" ]] ||
   fail "native table changed count=$method_count sha=$method_sha"
+
+eventlog_methods="$(python3 - "$eventlog_source" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text()
+start = text.index('static const JNINativeMethod gRegisterMethods[]')
+end = text.index('\n};', start)
+print(len(re.findall(r'\{\s*"([^"]+)"\s*,', text[start:end])))
+PY
+)"
+[[ "$eventlog_methods" == "$EVENTLOG_NATIVE_METHOD_COUNT" ]] ||
+  fail "EventLog native table changed count=$eventlog_methods"
 
 for declaration in \
   'native boolean isLoggable' \
@@ -191,10 +208,12 @@ object="$stage/android_util_Log.o"
 "$cxx" "${common_flags[@]}" -c "$log_source" -o "$object"
 [[ "$(file "$object")" == *"Mach-O 64-bit object arm64"* ]] ||
   fail "registrar object is not Darwin arm64"
+eventlog_object="$stage/android_util_EventLog.o"
+"$cxx" "${common_flags[@]}" -c "$eventlog_source" -o "$eventlog_object"
 archive="$stage/libandroid-util-log-registrar-darwin.a"
-"$libtool_bin" -static -o "$archive" "$object"
+"$libtool_bin" -static -o "$archive" "$object" "$eventlog_object"
 member_count="$({ ar -t "$archive" || true; } | grep -v '^__\.SYMDEF' | wc -l | tr -d ' ')"
-[[ "$member_count" == 1 && "$(lipo -archs "$archive")" == arm64 ]] ||
+[[ "$member_count" == 2 && "$(lipo -archs "$archive")" == arm64 ]] ||
   fail "registrar archive identity mismatch"
 definitions="$stage/definitions.txt"
 nm -gU "$archive" | c++filt | sort -u > "$definitions"
@@ -202,6 +221,8 @@ grep -F ' T android::register_android_util_Log(_JNIEnv*)' \
   "$definitions" >/dev/null || fail "registrar definition missing"
 grep -F ' T android::android_util_Log_isVerboseLogEnabled(char const*)' \
   "$definitions" >/dev/null || fail "verbose-log definition missing"
+grep -F ' T android::register_android_util_EventLog(_JNIEnv*)' \
+  "$definitions" >/dev/null || fail "EventLog registrar definition missing"
 
 log_imports="$stage/android-log-imports.txt"
 nm -u "$object" | grep '^___android_log_' | sort -u > "$log_imports"
@@ -288,4 +309,4 @@ fi
 
 mkdir -p "$build_dir"
 cp "$archive" "$build_dir/libandroid-util-log-registrar-darwin.a"
-echo "android-util-log: owner=$OWNER_MODULE members=1 methods=$method_count liblog-imports=$log_import_count managed=pass payload=$LOGGER_ENTRY_MAX_PAYLOAD"
+echo "android-util-log: owner=$OWNER_MODULE members=2 eventlog-methods=$eventlog_methods methods=$method_count liblog-imports=$log_import_count managed=pass payload=$LOGGER_ENTRY_MAX_PAYLOAD"

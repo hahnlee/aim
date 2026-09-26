@@ -39,7 +39,7 @@ fi
 for symbol in \
   _darwin_art_bionic___system_property_find \
   _darwin_art_bionic___system_property_read_callback \
-  _darwin_art_aosp_system_property_set \
+  _darwin_art_bionic_property_service_set \
   _darwin_art_bionic_errno_to_darwin; do
   grep -Fx "$symbol" "$production_imports" >/dev/null || {
     echo "system-properties: production JNI missing owner import: $symbol" >&2

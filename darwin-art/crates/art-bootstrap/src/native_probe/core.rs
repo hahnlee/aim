@@ -35,6 +35,8 @@ pub(crate) fn core_probe_includes(
         runtime.join("base"),
         runtime.join("arch/arm64"),
         root.join("_aosp/art/libartpalette/include"),
+        root.join("_aosp/art/libarttools/include"),
+        root.join("_aosp/system/core/fs_mgr/libfstab/include"),
         root.join("_aosp/system/libbase/include"),
         root.join("_aosp/system/unwinding/libunwindstack/include"),
         root.join("_aosp/external/tinyxml2"),
@@ -46,6 +48,12 @@ pub(crate) fn core_probe_includes(
         root.join("tools/bionic-fs-facade/include"),
         root.join("tools/bionic-ioctl-facade/include"),
         root.join("tools/bionic-socket-broker-adapter/include"),
+        // JNIHelp.h for libartservice. After header_only_include: on a
+        // case-insensitive volume its Utils.h would shadow nativehelper/utils.h.
+        root.join("_aosp/libnativehelper-full/include"),
+        root.join("_aosp/system/logging/liblog/include"),
+        // The pinned fmt the runtime links, ahead of any host installation.
+        root.join("_aosp/external/fmtlib/include"),
         PathBuf::from("/opt/homebrew/include"),
     ]
 }
@@ -53,6 +61,10 @@ pub(crate) fn core_probe_includes(
 pub(crate) struct RuntimeCoreObjects {
     pub(crate) boot_native_registration: PathBuf,
     pub(crate) boot_native_libraries: PathBuf,
+    /// libartservice: service-art.jar's ArtJni natives (ADR 0009).
+    pub(crate) art_service: PathBuf,
+    /// libarttools EnsureNoProcessInDir for Darwin processes.
+    pub(crate) art_tools_process: PathBuf,
     pub(crate) vm_bootstrap: PathBuf,
     pub(crate) process_entry: PathBuf,
     pub(crate) process_state: PathBuf,
@@ -97,6 +109,24 @@ pub(crate) fn compile_runtime_core_objects(
             compiler_identity,
             "compat/art/boot_native_libraries.cc",
             "darwin_art_boot_native_libraries.cc.o",
+        )?,
+        art_service: compile_probe(
+            root,
+            build_dir,
+            include_refs,
+            probe_cache,
+            compiler_identity,
+            "_aosp/art/libartservice/service/native/service.cc",
+            "art_libartservice_service.cc.o",
+        )?,
+        art_tools_process: compile_probe(
+            root,
+            build_dir,
+            include_refs,
+            probe_cache,
+            compiler_identity,
+            "compat/art/process_dir_monitor.cc",
+            "darwin_art_process_dir_monitor.cc.o",
         )?,
         vm_bootstrap: compile_probe(
             root,
@@ -296,4 +326,15 @@ fn compile_probe(
         .arg(&object);
     let _ = compile_cached_probe_tu(&mut command, &object, probe_cache, compiler_identity)?;
     Ok(object)
+}
+
+/// JNI entry points (`_Java_*`) an object defines, for the runtime export list.
+pub(crate) fn jni_entrypoints(object: &Path) -> Result<Vec<String>> {
+    let symbols = command_output(Command::new("nm").args(["-gU"]).arg(object))?;
+    Ok(symbols
+        .lines()
+        .filter_map(|line| line.split_whitespace().last())
+        .filter(|symbol| symbol.starts_with("_Java_"))
+        .map(str::to_owned)
+        .collect())
 }

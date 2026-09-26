@@ -10,6 +10,7 @@ native_root="$source_root/libcore/ojluni/src/main/native"
 build_dir="$project_root/_build/system-natives-darwin"
 patch_file="$project_root/patches/libcore-openjdk/0004-darwin-system-boringssl-version-header.patch"
 library_name_patch="$project_root/patches/libcore-openjdk/0005-android-guest-jni-library-suffix.patch"
+working_directory_patch="$project_root/patches/libcore-openjdk/0006-darwin-system-guest-working-directory.patch"
 boringssl_patch="$project_root/patches/boringssl/0001-darwin-cxx17.patch"
 
 # shellcheck disable=SC1090
@@ -108,6 +109,8 @@ grep -F '#define OPENSSL_VERSION_TEXT "OpenSSL 1.1.1 (compatible; BoringSSL)"' \
   fail "Darwin BoringSSL header patch checksum mismatch"
 [[ "$(sha256 "$library_name_patch")" == "$ANDROID_LIBRARY_NAME_PATCH_SHA256" ]] ||
   fail "Android JNI library-name patch checksum mismatch"
+[[ "$(sha256 "$working_directory_patch")" == "$GUEST_WORKING_DIRECTORY_PATCH_SHA256" ]] ||
+  fail "guest working-directory patch checksum mismatch"
 [[ "$(sha256 "$boringssl_patch")" == "$BORINGSSL_DARWIN_PATCH_SHA256" ]] ||
   fail "Darwin BoringSSL C++ standard patch checksum mismatch"
 
@@ -144,6 +147,7 @@ cp "$native_root/System.c" "$patched_root/ojluni/src/main/native/System.c"
 cp "$native_root/jvm_md.h" "$patched_root/ojluni/src/main/native/jvm_md.h"
 patch --batch --forward -p1 -d "$patched_root" < "$patch_file" >/dev/null
 patch --batch --forward -p1 -d "$patched_root" < "$library_name_patch" >/dev/null
+patch --batch --forward -p1 -d "$patched_root" < "$working_directory_patch" >/dev/null
 patched_source="$patched_root/ojluni/src/main/native/System.c"
 patched_jvm_md="$patched_root/ojluni/src/main/native/jvm_md.h"
 [[ "$(sha256 "$patched_source")" == "$PATCHED_SYSTEM_C_SHA256" ]] ||
@@ -406,6 +410,7 @@ device_library="$stage/libsystem-natives-device-closure.dylib"
   "$project_root/_build/icu-foundation/libicuuc-common-darwin.a" \
   "$project_root/_build/icu-foundation/libicuuc-stubdata-darwin.a" \
   -Wl,-exported_symbol,_register_java_lang_System \
+  -Wl,-U,_darwin_art_bionic_fs_getcwd_core \
   -Wl,-dead_strip -framework CoreFoundation -o "$device_library"
 device_undefined="$stage/device-retained-undefined.txt"
 nm -u "$device_library" | sed 's/^[[:space:]]*//' | sort -u > "$device_undefined"
@@ -427,6 +432,7 @@ managed_library="$stage/libsystem-natives-managed.dylib"
   "$managed_object" "$file_input_stream" "$openjdkjvm" \
   "$device_nativehelper" "$liblog" \
   -Wl,-exported_symbol,_JNI_OnLoad -Wl,-dead_strip \
+  -Wl,-U,_darwin_art_bionic_fs_getcwd_core \
   -framework CoreFoundation -o "$managed_library"
 classes="$stage/classes"
 mkdir -p "$classes"

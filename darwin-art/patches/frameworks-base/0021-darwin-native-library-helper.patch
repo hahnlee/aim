@@ -1,0 +1,140 @@
+--- a/core/jni/com_android_internal_content_FileSystemUtils.cpp
++++ b/core/jni/com_android_internal_content_FileSystemUtils.cpp
+@@ -23,7 +23,6 @@
+ #include <android-base/unique_fd.h>
+ #include <fcntl.h>
+ #include <inttypes.h>
+-#include <linux/fs.h>
+ #include <sys/ioctl.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+@@ -62,14 +61,12 @@
+ 
+     ALOGD("Punching hole in file - start: %" PRIu64 " len:%" PRIu64 "", start, alignedLength);
+ 
+-    int result =
+-            fallocate(fd.get(), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, start, alignedLength);
+-    if (result < 0) {
+-        ALOGE("fallocate failed to punch hole: %m");
+-        return false;
+-    }
+-
+-    return true;
++    // Darwin: behave as Linux does on a filesystem without FALLOC_FL_PUNCH_HOLE;
++    // installed APK and library files are left exactly as written.
++    (void)fd;
++    errno = EOPNOTSUPP;
++    ALOGE("fallocate failed to punch hole: %m");
++    return false;
+ }
+ 
+ bool punchHoles(const char *filePath, const uint64_t offset,
+--- a/core/jni/com_android_internal_content_NativeLibraryHelper.cpp
++++ b/core/jni/com_android_internal_content_NativeLibraryHelper.cpp
+@@ -25,12 +25,16 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <inttypes.h>
+-#include <linux/fs.h>
+ #include <nativehelper/ScopedUtfChars.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/stat.h>
+-#include <sys/statfs.h>
++#include <sys/mount.h>
++#if defined(__APPLE__)
++extern "C" intptr_t darwin_art_bionic_fs_resolve_writable_host_path(const char* path, char* output,
++                                                                    size_t capacity);
++extern "C" int darwin_art_bionic_fs_dup_host_fd_core(int fd, int* host_fd);
++#endif
+ #include <sys/types.h>
+ #include <time.h>
+ #include <unistd.h>
+@@ -184,15 +188,7 @@
+         return INSTALL_FAILED_CONTAINER_ERROR;
+     }
+ 
+-    // If a filesystem like f2fs supports per-file compression, set the compression bit before data
+-    // writes
+-    unsigned int flags;
+-    if (ioctl(fd, FS_IOC_GETFLAGS, &flags) == -1) {
+-        ALOGE("Failed to call FS_IOC_GETFLAGS on %s: %s\n", localTmpFileName, strerror(errno));
+-    } else if ((flags & FS_COMPR_FL) == 0) {
+-        flags |= FS_COMPR_FL;
+-        ioctl(fd, FS_IOC_SETFLAGS, &flags);
+-    }
++    // Darwin: APFS has no FS_IOC_GETFLAGS per-file compression bit to set.
+ 
+     if (!zipFile->uncompressEntry(zipEntry, fd)) {
+         ALOGE("Failed uncompressing %s to %s\n", fileName, localTmpFileName);
+@@ -244,7 +240,8 @@
+         ALOGW("Failed to stat file :%s", localFileName);
+     }
+ 
+-    if (result == 0 && fsInfo.f_type == EXT4_SUPER_MAGIC) {
++    // Darwin: extracted files are never on ext4, where AOSP punches their padding.
++    if (false) {
+         ALOGD("Punching extracted elf file %s on fs:%" PRIu64 "", fileName,
+               static_cast<uint64_t>(fsInfo.f_type));
+         if (!punchHolesInElf64(localFileName, 0)) {
+@@ -275,6 +272,23 @@
+     install_status_t ret = INSTALL_SUCCEEDED;
+ 
+     ScopedUtfChars nativeLibPath(env, *javaNativeLibPath);
++    const char* libPath = nativeLibPath.c_str();
++#if defined(__APPLE__)
++    // Darwin: the Java path is the guest library directory under /data/app;
++    // the host file operations below use its backing directory.
++    std::string hostLibPath;
++    if (libPath != nullptr) {
++        const intptr_t length = darwin_art_bionic_fs_resolve_writable_host_path(libPath, nullptr, 0);
++        if (length > 0) {
++            hostLibPath.resize(static_cast<size_t>(length) + 1);
++            if (darwin_art_bionic_fs_resolve_writable_host_path(
++                        libPath, hostLibPath.data(), hostLibPath.size()) == length) {
++                hostLibPath.resize(static_cast<size_t>(length));
++                libPath = hostLibPath.c_str();
++            }
++        }
++    }
++#endif
+ 
+     uint32_t uncompLen;
+     uint32_t when;
+@@ -319,7 +333,7 @@
+                 ALOGI("16kB AppCompat: Library '%s' is not PAGE(%zu)-aligned - falling back to "
+                       "extraction from apk\n",
+                       fileName, kPageSize);
+-                return extractNativeLibFromApk(zipFile, zipEntry, fileName, nativeLibPath.c_str(),
++                return extractNativeLibFromApk(zipFile, zipEntry, fileName, libPath,
+                                                when, uncompLen, crc);
+             }
+ 
+@@ -346,7 +360,7 @@
+         return INSTALL_SUCCEEDED;
+     }
+ 
+-    return extractNativeLibFromApk(zipFile, zipEntry, fileName, nativeLibPath.c_str(), when,
++    return extractNativeLibFromApk(zipFile, zipEntry, fileName, libPath, when,
+                                    uncompLen, crc);
+ }
+ 
+@@ -626,7 +640,18 @@
+         return 0;
+     }
+ 
++#if defined(__APPLE__)
++    // Darwin: take a host duplicate of the process's Android descriptor.
++    int dupedFd = -1;
++    if (darwin_art_bionic_fs_dup_host_fd_core(fd, &dupedFd) == 1) {
++        fcntl(dupedFd, F_SETFD, FD_CLOEXEC);
++    } else {
++        dupedFd = -1;
++        errno = EBADF;
++    }
++#else
+     int dupedFd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
++#endif
+     if (dupedFd == -1) {
+         jniThrowExceptionFmt(env, "java/lang/IllegalArgumentException",
+                              "Failed to dup FileDescriptor: %s", strerror(errno));

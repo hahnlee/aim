@@ -10,7 +10,6 @@ import android.os.Binder;
 import android.os.DeadObjectException;
 import android.os.IBinder;
 import android.os.RemoteException;
-import dev.darwinart.runtime.pm.ServiceResolver;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.HashMap;
@@ -260,7 +259,7 @@ public final class ActiveServicesProcessGoneTest {
             processes.beginAttachment(41, 10042, owner, 1);
             processes.identify(41, 1, owner, PACKAGE);
             attached = processes.finishAttachment(41, 1);
-            ServiceResolver packages = TestServices.resolver(PACKAGE, 10042,
+            PackageQueries packages = TestServices.resolver(PACKAGE, 10042,
                     "example.Service", "example:client");
             transport = new LaunchTransport(() -> launches++);
             active = new ActiveServices(packages, processes, transport);

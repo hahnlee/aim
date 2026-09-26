@@ -1,3 +1,4 @@
+#include "filesystem/archive_open.h"
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -23,6 +24,7 @@
 #include "loader/classloader_identity.h"
 #include "loader/classloader_namespaces.h"
 #include "loader/library_search.h"
+#include "loader/runtime_module_jni.h"
 #include "loader/guest_open_request.h"
 #include "filesystem/process_authority.h"
 #include "darwin_android_media_ndk.h"
@@ -689,6 +691,11 @@ void* OpenNativeLibraryWithRequest(JNIEnv* env, const char* path, jobject loader
       std::fprintf(stderr, "DARWIN native loader: builtin SONAME=%s\n", path);
     return static_cast<void*>(&g_media_ndk_handle_tag);
   }
+  if (void* module = darwin_art::loader::OpenRuntimeModuleJniLibrary(
+          path, caller_location, std::getenv("DARWIN_ART_ANDROID_FILESYSTEM_ROOT"));
+      module != nullptr) {
+    return module;
+  }
   // Android's NativeLoader searches the ClassLoader namespace when
   // Runtime.loadLibrary0 deliberately falls back to a bare SONAME.  There is
   // no bionic linker namespace on Darwin, so resolve that SONAME against the
@@ -778,9 +785,11 @@ void* OpenNativeLibraryWithRequest(JNIEnv* env, const char* path, jobject loader
     for (const std::string& soname : cached_sonames) {
       if (soname != requested_component) providers.push_back(soname.c_str());
     }
-    ScopedFd opened_directory(open(parent_path.c_str(),
-                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC |
-                                       O_NOFOLLOW));
+    // An application's nativeLibraryDir is a guest path (/data/app/...),
+    // resolved through the process's Android filesystem namespace.
+    ScopedFd opened_directory(darwin_art_archive_open(parent_path.c_str(),
+                                                      O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                                          O_NOFOLLOW));
     if (opened_directory.get() < 0) {
       discovery_status = DARWIN_ART_ELF_IO;
     } else {

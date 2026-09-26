@@ -164,49 +164,48 @@ static NSString *const DARErrorDomain = @"dev.darwinart.manager";
                 }];
 }
 
-- (NSString *)recordValue:(NSString *)key record:(NSString *)record {
-    NSString *prefix = [key stringByAppendingString:@"="];
-    __block NSString *value = nil;
-    [record enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
-        if ([line hasPrefix:prefix]) {
-            value = [line substringFromIndex:prefix.length];
-            *stop = YES;
+// The launcher's `--launcher-info` blocks: PackageManager's label, version
+// and icon for each installed package, keyed by package.
+- (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)launcherInfo:
+        (NSArray<NSString *> *)packages {
+    if (packages.count == 0) return @{};
+    NSString *launcher = [self.runtimeRootURL URLByAppendingPathComponent:
+                                                   @"tools/run-android-apk-app.sh"].path;
+    NSError *error = nil;
+    NSString *text = [self runProgram:launcher
+                            arguments:[@[@"--launcher-info"] arrayByAddingObjectsFromArray:packages]
+                                error:&error];
+    if (error) return @{};
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    __block NSMutableDictionary<NSString *, NSString *> *current = nil;
+    [text enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
+        (void)stop;
+        NSRange equals = [line rangeOfString:@"="];
+        if (equals.location == NSNotFound) {
+            current = nil;
+            return;
         }
+        NSString *key = [line substringToIndex:equals.location];
+        NSString *value = [line substringFromIndex:NSMaxRange(equals)];
+        if ([key isEqualToString:@"package"]) {
+            current = [NSMutableDictionary dictionary];
+            result[value] = current;
+        }
+        current[key] = value;
     }];
-    return value ?: @"";
-}
-
-- (NSString *)metadataValue:(NSString *)metadata
-                       after:(NSString *)start
-                      before:(NSString *)end {
-    NSRange begin = [metadata rangeOfString:start];
-    if (begin.location == NSNotFound) return @"";
-    NSUInteger location = NSMaxRange(begin);
-    NSRange finish = [metadata rangeOfString:end
-                                     options:0
-                                       range:NSMakeRange(location, metadata.length - location)];
-    if (finish.location == NSNotFound) return @"";
-    return [metadata substringWithRange:NSMakeRange(location, finish.location - location)];
+    return result;
 }
 
 - (DARInstalledApp *)installedAppForPackage:(NSString *)package
-                                     record:(NSString *)record {
-    NSString *metadata = [self recordValue:@"metadata" record:record];
+                                       info:(NSDictionary<NSString *, NSString *> *)info {
     DARInstalledApp *app = [[DARInstalledApp alloc] init];
     app.packageName = package;
-    app.displayName = [self metadataValue:metadata after:@" label=" before:@" label_res="];
-    if (!app.displayName.length) app.displayName = package;
-    NSString *versionName = [self metadataValue:metadata after:@" version_name=" before:@" theme="];
-    NSString *versionCode = [self metadataValue:metadata after:@" version_code=" before:@" version_name="];
-    app.version = versionName.length ? versionName : versionCode;
-    NSString *icon = [self metadataValue:metadata after:@" icon=" before:@" dex="];
-    NSString *apk = [self recordValue:@"apk" record:record];
-    if (apk.length && icon.length && ![icon isEqualToString:@"none"]) {
-        NSError *iconError = nil;
-        NSData *data = [self runDataProgram:@"/usr/bin/unzip"
-                                  arguments:@[@"-p", apk, icon]
-                                      error:&iconError];
-        if (!iconError && data.length && [[NSImage alloc] initWithData:data]) app.iconData = data;
+    app.displayName = info[@"label"].length ? info[@"label"] : package;
+    app.version = info[@"versionCode"] ?: @"";
+    NSString *icon = info[@"icon"];
+    if (icon.length) {
+        NSData *data = [NSData dataWithContentsOfFile:icon];
+        if (data.length && [[NSImage alloc] initWithData:data]) app.iconData = data;
     }
     return app;
 }
@@ -224,14 +223,16 @@ static NSString *const DARErrorDomain = @"dev.darwinart.manager";
         NSString *status = [self runProgram:ctl arguments:@[@"status"] error:&error];
         if (error) return dispatch_async(dispatch_get_main_queue(), ^{ handler(nil, error); });
 
-        NSMutableArray<DARInstalledApp *> *apps = [NSMutableArray array];
+        NSMutableArray<NSString *> *packages = [NSMutableArray array];
         [packagesText enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
             (void)stop;
-            if (!line.length) return;
-            NSError *recordError = nil;
-            NSString *record = [self runProgram:ctl arguments:@[@"resolve", line] error:&recordError];
-            [apps addObject:[self installedAppForPackage:line record:recordError ? @"" : record]];
+            if (line.length) [packages addObject:line];
         }];
+        NSDictionary *infos = [self launcherInfo:packages];
+        NSMutableArray<DARInstalledApp *> *apps = [NSMutableArray array];
+        for (NSString *package in packages) {
+            [apps addObject:[self installedAppForPackage:package info:infos[package] ?: @{}]];
+        }
         NSMutableDictionary<NSString *, NSMutableArray<NSNumber *> *> *processes =
             [NSMutableDictionary dictionary];
         [processText enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
@@ -283,9 +284,8 @@ static NSString *const DARErrorDomain = @"dev.darwinart.manager";
 - (void)installAPKAtURL:(NSURL *)url completion:(DARRuntimeActionHandler)handler {
     NSString *installer = [self.runtimeRootURL URLByAppendingPathComponent:
                                                      @"tools/run-android-apk-app.sh"].path;
-    [self runActionProgram:@"/usr/bin/env"
-                 arguments:@[@"DARWIN_ART_INSTALL_ONLY=1", installer, url.path, @"0"]
-                completion:handler];
+    // A PackageInstaller session in the profile's PackageManagerService.
+    [self runActionProgram:installer arguments:@[@"--install", url.path] completion:handler];
 }
 
 - (void)uninstallPackage:(NSString *)package
@@ -299,35 +299,15 @@ static NSString *const DARErrorDomain = @"dev.darwinart.manager";
 }
 
 - (void)launchPackage:(NSString *)package completion:(DARRuntimeActionHandler)handler {
-    NSString *ctl = self.controlProgram;
-    NSError *error = nil;
-    NSString *record = [self runProgram:ctl arguments:@[@"resolve", package] error:&error];
-    if (error) {
-        handler(error);
-        return;
-    }
-    NSURL *recordURL = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
-        URLByAppendingPathComponent:[NSString stringWithFormat:@"darwin-art-launch-%@.record",
-                                                               NSUUID.UUID.UUIDString]];
-    if (![record writeToURL:recordURL atomically:YES encoding:NSUTF8StringEncoding error:&error]) {
-        handler(error);
-        return;
-    }
     NSString *launcher = [self.runtimeRootURL URLByAppendingPathComponent:
                                                    @"tools/run-android-apk-app.sh"].path;
     // The launcher daemonizes the final host and waits synchronously by
     // default. The manager asks only for an asynchronous handoff so the
     // manager task does not own or wait on the app window.
     [self runActionProgram:@"/usr/bin/env"
-                 arguments:@[@"DARWIN_ART_ASYNC_LAUNCH=1", launcher, @"--record", recordURL.path,
+                 arguments:@[@"DARWIN_ART_ASYNC_LAUNCH=1", launcher, @"--package", package,
                              @"86400"]
-                completion:^(NSError *launchError) {
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
-                                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                        [NSFileManager.defaultManager removeItemAtURL:recordURL error:nil];
-                    });
-                    handler(launchError);
-                }];
+                completion:handler];
 }
 
 - (void)stopPackage:(NSString *)package

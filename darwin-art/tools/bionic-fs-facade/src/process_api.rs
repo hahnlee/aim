@@ -281,6 +281,55 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_resolve_private_host_path(
     })
 }
 
+#[unsafe(no_mangle)]
+/// Resolves an Android `/data` path to the process-authorized host backing path.
+///
+/// This is intentionally narrower than a general guest-to-host escape hatch:
+/// immutable mounts and paths outside the private overlay are rejected. Passing
+/// a null/zero output buffer returns the required byte count without a trailing
+/// NUL. A non-null buffer receives a NUL-terminated path.
+///
+/// # Safety
+///
+/// `path` must be a readable NUL-terminated Android byte path. When `output` is
+/// non-null, it must be writable for `capacity` bytes.
+pub unsafe extern "C" fn darwin_art_bionic_fs_resolve_writable_host_path(
+    path: *const c_char,
+    output: *mut c_char,
+    capacity: usize,
+) -> isize {
+    let Some(path) = (unsafe { path_bytes(path) }) else {
+        Facade::set_android_errno(ANDROID_EFAULT);
+        return -1;
+    };
+    with_active(-1, |facade| {
+        let host_path = match facade.resolve_writable_host_path(path) {
+            Ok(path) => path,
+            Err(error) => return facade.fail(error) as isize,
+        };
+        let bytes = host_path.as_os_str().as_bytes();
+        if output.is_null() || capacity == 0 {
+            return isize::try_from(bytes.len()).unwrap_or_else(|_| {
+                facade.fail(ANDROID_ERANGE);
+                -1
+            });
+        }
+        let Some(required) = bytes.len().checked_add(1) else {
+            return facade.fail(ANDROID_ERANGE) as isize;
+        };
+        if capacity < required {
+            return facade.fail(ANDROID_ERANGE) as isize;
+        }
+        // SAFETY: the caller's writable-buffer contract and capacity check
+        // cover both the byte path and its trailing NUL.
+        unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), output.cast(), bytes.len());
+            *output.add(bytes.len()) = 0;
+        }
+        bytes.len() as isize
+    })
+}
+
 pub const IOCTL_FD_INFO_ABI_VERSION: u32 = 1;
 pub const IOCTL_FD_OTHER: c_int = 0;
 pub const IOCTL_FD_RANDOM_DEVICE: c_int = 1;
@@ -739,13 +788,18 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_lstat_core(
 /// # Safety
 /// Path is readable/NUL-terminated; status is a writable Android stat object.
 pub unsafe extern "C" fn darwin_art_bionic_fs_fstatat_core(
-    fd: c_int, path: *const c_char, status: *mut AndroidStat, flags: c_int,
+    fd: c_int,
+    path: *const c_char,
+    status: *mut AndroidStat,
+    flags: c_int,
 ) -> c_int {
     let Some(path) = (unsafe { path_bytes(path) }) else {
         Facade::set_android_errno(ANDROID_EFAULT);
         return -1;
     };
-    with_active(-1, |facade| unsafe { facade.fstatat(fd, path, status, flags) })
+    with_active(-1, |facade| unsafe {
+        facade.fstatat(fd, path, status, flags)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -1122,3 +1176,110 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_utimensat_core(
 
 #[cfg(test)]
 include!("tests.rs");
+
+/// # Safety
+///
+/// `path` and `name` must be readable NUL-terminated byte strings; `value`
+/// must be writable for `size` bytes (or null with `size` zero).
+unsafe fn xattr_buffer<'a>(value: *mut c_void, size: usize) -> Option<&'a mut [u8]> {
+    if size == 0 {
+        return Some(&mut []);
+    }
+    if value.is_null() {
+        return None;
+    }
+    // SAFETY: caller contract.
+    Some(unsafe { slice::from_raw_parts_mut(value.cast::<u8>(), size) })
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// See `xattr_buffer`. `no_follow` selects lgetxattr.
+pub unsafe extern "C" fn darwin_art_bionic_fs_getxattr_core(
+    path: *const c_char,
+    name: *const c_char,
+    value: *mut c_void,
+    size: usize,
+    no_follow: c_int,
+) -> isize {
+    let (Some(path), Some(name), Some(value)) = (
+        unsafe { path_bytes(path) },
+        unsafe { path_bytes(name) },
+        unsafe { xattr_buffer(value, size) },
+    ) else {
+        Facade::set_android_errno(ANDROID_EFAULT);
+        return -1;
+    };
+    with_active(-1, |facade| {
+        facade.get_xattr(path, name, value, no_follow != 0)
+    })
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `path`/`name` are NUL-terminated; `value` is readable for `size` bytes.
+pub unsafe extern "C" fn darwin_art_bionic_fs_setxattr_core(
+    path: *const c_char,
+    name: *const c_char,
+    value: *const c_void,
+    size: usize,
+    flags: c_int,
+    no_follow: c_int,
+) -> c_int {
+    let (Some(path), Some(name)) = (unsafe { path_bytes(path) }, unsafe { path_bytes(name) })
+    else {
+        Facade::set_android_errno(ANDROID_EFAULT);
+        return -1;
+    };
+    if value.is_null() && size != 0 {
+        Facade::set_android_errno(ANDROID_EFAULT);
+        return -1;
+    }
+    let value: &[u8] = if size == 0 {
+        &[]
+    } else {
+        // SAFETY: caller contract.
+        unsafe { slice::from_raw_parts(value.cast::<u8>(), size) }
+    };
+    with_active(-1, |facade| {
+        facade.set_xattr(path, name, value, flags, no_follow != 0)
+    })
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `path` and `name` must be readable NUL-terminated byte strings.
+pub unsafe extern "C" fn darwin_art_bionic_fs_removexattr_core(
+    path: *const c_char,
+    name: *const c_char,
+    no_follow: c_int,
+) -> c_int {
+    let (Some(path), Some(name)) = (unsafe { path_bytes(path) }, unsafe { path_bytes(name) })
+    else {
+        Facade::set_android_errno(ANDROID_EFAULT);
+        return -1;
+    };
+    with_active(-1, |facade| facade.remove_xattr(path, name, no_follow != 0))
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `path` is NUL-terminated; `list` is writable for `size` bytes.
+pub unsafe extern "C" fn darwin_art_bionic_fs_listxattr_core(
+    path: *const c_char,
+    list: *mut c_char,
+    size: usize,
+    no_follow: c_int,
+) -> isize {
+    let (Some(path), Some(list)) = (unsafe { path_bytes(path) }, unsafe {
+        xattr_buffer(list.cast(), size)
+    }) else {
+        Facade::set_android_errno(ANDROID_EFAULT);
+        return -1;
+    };
+    with_active(-1, |facade| facade.list_xattr(path, list, no_follow != 0))
+}

@@ -2,6 +2,7 @@
 #include "darwin_art_bionic_fs.h"
 #include "darwin_art_bionic_errno.h"
 #include <cerrno>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
@@ -27,7 +28,21 @@ int OpenArchive(const char* path) {
   }
   return host; // Independent native descriptor, owned by AOSP ZipArchive.
 }
+bool StatGuest(const char* path, struct stat* status) {
+  DarwinArtAndroidStat guest{};
+  if (darwin_art_bionic_fs_stat_core(path, &guest) != 0) {
+    errno = HostError(darwin_art_bionic_errno_load());
+    return false;
+  }
+  *status = {};
+  // Android and Darwin share the S_IF* type and permission bit values.
+  status->st_mode = static_cast<mode_t>(guest.st_mode);
+  status->st_size = guest.st_size;
+  status->st_nlink = static_cast<nlink_t>(guest.st_nlink);
+  return true;
+}
 }
 void darwin_art_install_archive_filesystem(bool enabled) {
   darwin_art_set_archive_opener(enabled ? &OpenArchive : nullptr);
+  darwin_art_set_archive_stat(enabled ? &StatGuest : nullptr);
 }

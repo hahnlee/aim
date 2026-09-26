@@ -183,6 +183,8 @@ pub(super) fn validate_graphics_runtime_link(
         "register_android_content_res_ApkAssets",
         "register_com_android_internal_util_VirtualRefBasePtr",
         "register_android_util_Log",
+        "register_android_util_EventLog",
+        "register_com_android_internal_content_NativeLibraryHelper",
         "darwin_art_android_runtime_install",
         "darwin_art_android_runtime_uninstall",
         "darwin_art::libcore_darwin::RegisterLinuxNatives",

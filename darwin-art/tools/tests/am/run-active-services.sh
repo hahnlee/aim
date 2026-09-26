@@ -27,7 +27,7 @@ mkdir -p "$out/classes"
   "$root/runtime/framework/am/ServiceConnectionResourceController.java" \
   "$root/runtime/framework/am/ServiceLifecycleController.java" \
   "$root/runtime/framework/am/ServiceLifecycleOperation.java" \
-  "$root/runtime/framework/pm/ServiceResolver.java" \
+  "$root/runtime/framework/am/PackageQueries.java" \
   "$root/tools/tests/am/TestServices.java" \
   "$root/tools/tests/am/ActiveServicesProcessGoneTest.java" \
   "$root/tools/tests/am/ActiveServicesProcessLaunchTest.java" \

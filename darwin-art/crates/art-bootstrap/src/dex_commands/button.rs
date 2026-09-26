@@ -52,7 +52,6 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
         .arg(root.join("probes/button/ProbeView.java"))
         .arg(root.join("runtime/framework/system/DarwinSystemServer.java"))
         .arg(root.join("runtime/framework/system/SystemServiceFactory.java"))
-        .arg(root.join("runtime/framework/appops/AppOpsServiceEndpoint.java"))
         .arg(root.join("runtime/framework/usage/UsageStatsManagerEndpoint.java"))
         .arg(root.join("runtime/framework/restrictions/RestrictionsManagerEndpoint.java"))
         .arg(root.join("runtime/framework/job/JobSchedulerEndpoint.java"))
@@ -100,8 +99,7 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
     let baseline = |relative: &str| baseline_classes.join(relative);
     let button = |relative: &str| class_dir.join(relative);
     let mut d8 = Command::new(find_d8()?);
-    d8.arg(root.join("_build/package-dex-usage-runtime/package-dex-usage.jar"))
-        .args(["--min-api", "26"])
+    d8.args(["--min-api", "26"])
         .arg("--lib")
         .arg(&android_platform_jar)
         .arg("--classpath")
@@ -193,20 +191,6 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
             "dev/darwinart/probe/ProbeSharedPreferences$EditorImpl.class",
         ))
         .arg(baseline("dev/darwinart/probe/ProbePackageManager.class"))
-        .arg(baseline("dev/darwinart/runtime/pm/InstalledPackageInfos.class"))
-        .arg(baseline("dev/darwinart/runtime/pm/InstalledPackageParser.class"))
-        .arg(baseline("dev/darwinart/runtime/pm/ServiceResolver.class"))
-        .arg(baseline(
-            "dev/darwinart/runtime/pm/InstalledPackageRecord.class",
-        ))
-        .arg(baseline("dev/darwinart/runtime/pm/PackageRecords.class"))
-        .arg(baseline(
-            "dev/darwinart/runtime/pm/PackageRecords$Source.class",
-        ))
-        .arg(baseline("dev/darwinart/runtime/pm/DexLoadReports.class"))
-        .arg(baseline(
-            "dev/darwinart/runtime/pm/PackageManagerEndpoint.class",
-        ))
         .arg(baseline("dev/darwinart/runtime/os/SystemServices.class"))
         .arg(baseline(
             "dev/darwinart/runtime/system/ServiceDirectory.class",
@@ -319,9 +303,6 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
         ))
         .arg(button(
             "dev/darwinart/runtime/power/ThermalServiceEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/appops/AppOpsServiceEndpoint.class",
         ))
         .arg(button(
             "dev/darwinart/runtime/restrictions/RestrictionsManagerEndpoint.class",
@@ -513,7 +494,6 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
             "Ldev/darwinart/runtime/power/DarwinPowerStateProvider;",
             "Ldev/darwinart/runtime/power/PowerManagerEndpoint;",
             "Ldev/darwinart/runtime/power/ThermalServiceEndpoint;",
-            "Ldev/darwinart/runtime/appops/AppOpsServiceEndpoint;",
             "Ldev/darwinart/runtime/connectivity/ConnectivityState;",
             "Ldev/darwinart/runtime/connectivity/ConnectivityCallbackRegistry;",
             "Ldev/darwinart/runtime/connectivity/ConnectivitySnapshot;",
@@ -533,15 +513,8 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
             "Ldev/darwinart/runtime/job/JobSchedulerEndpoint;",
             "Ldev/darwinart/runtime/job/JobSchedulerService;",
             "Ldev/darwinart/runtime/job/JobServiceContext;",
-            "Ldev/darwinart/runtime/pm/InstalledPackageInfos;",
-            "Ldev/darwinart/runtime/pm/InstalledPackageParser;",
-            "Ldev/darwinart/runtime/pm/ServiceResolver;",
             "Ldev/darwinart/probe/JitInvokeCustom;",
             "Ldev/darwinart/system/DarwinSystemServer;",
-            "Ldev/darwinart/runtime/pm/InstalledPackageRecord;",
-            "Ldev/darwinart/runtime/pm/PackageRecords;",
-            "Ldev/darwinart/runtime/pm/PackageManagerEndpoint;",
-            "Ldev/darwinart/runtime/pm/DexLoadReports;",
             "Ljavax/microedition/khronos/egl/DarwinEGL10;",
         ],
     )?;

@@ -26,6 +26,12 @@ void SetThreadPriorityForTid(JNIEnv* env, jclass, jint tid, jint priority) {
 void SetThreadPriority(JNIEnv* env, jclass klass, jint priority) {
   SetThreadPriorityForTid(env, klass, 0, priority);
 }
+// android_util_Process.cpp keeps this per-thread mark for its
+// GUARD_THREAD_PRIORITY check, which release builds compile out.
+thread_local bool can_self_background = true;
+void SetCanSelfBackground(JNIEnv*, jclass, jboolean allowed) {
+  can_self_background = allowed == JNI_TRUE;
+}
 jint GetThreadPriority(JNIEnv* env, jclass, jint tid) {
   int value = 0;
   SchedulingError(env, darwin_art_thread_get_nice(tid, &value));

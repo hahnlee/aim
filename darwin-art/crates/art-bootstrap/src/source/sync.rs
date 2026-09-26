@@ -463,6 +463,43 @@ pub(crate) fn sync_sources(root: &Path) -> Result<()> {
         "asm_defines.def",
         lock_value(&lock, "ART_ASM_DEFINES_DEF_SHA256")?,
     )?;
+    // The ART module's service-art.jar JNI (libartservice), built into this
+    // runtime's ART (ADR 0009).
+    for (remote, key) in [
+        (
+            "libartservice/service/Android.bp",
+            "ART_LIBARTSERVICE_ANDROID_BP_SHA256",
+        ),
+        (
+            "libartservice/service/native/service.cc",
+            "ART_LIBARTSERVICE_SERVICE_CC_SHA256",
+        ),
+        (
+            "libartservice/service/native/service.h",
+            "ART_LIBARTSERVICE_SERVICE_H_SHA256",
+        ),
+        (
+            "libarttools/include/tools/tools.h",
+            "ART_LIBARTTOOLS_TOOLS_H_SHA256",
+        ),
+    ] {
+        materialize_file(
+            root,
+            "platform/art",
+            revision,
+            remote,
+            &format!("_aosp/art/{remote}"),
+            lock_value(&lock, key)?,
+        )?;
+    }
+    materialize_file(
+        root,
+        "platform/system/core",
+        lock_value(&lock, "SYSTEM_CORE_REVISION")?,
+        "fs_mgr/libfstab/include/fstab/fstab.h",
+        "_aosp/system/core/fs_mgr/libfstab/include/fstab/fstab.h",
+        lock_value(&lock, "SYSTEM_CORE_FSTAB_H_SHA256")?,
+    )?;
     materialize_file(
         root,
         "platform/art",

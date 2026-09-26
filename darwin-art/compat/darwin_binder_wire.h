@@ -56,9 +56,5 @@ int ServeRemoteBinder(JNIEnv* env, jint control_fd, jobject local_binder);
 // Releases browser-side global Binder references associated with a channel.
 void CloseRemoteBinderChannel(JNIEnv* env, jint control_fd);
 
-// Resolves the package-registry Binder through the system service directory,
-// then returns its immutable launch record. Protocol exceptions are preserved.
-std::string QuerySystemPackageRecord(JNIEnv* env, const char* socket_path,
-                                     const char* package_name);
 
 }  // namespace darwin_art

@@ -11,11 +11,9 @@ struct CompiledSupport {
     directory: PathBuf,
     classes: PathBuf,
     inventory: Vec<PathBuf>,
-    adapters: PathBuf,
 }
 
 fn compile_runtime_support(root: &Path) -> Result<CompiledSupport> {
-    run_command(Command::new("bash").arg(root.join("tools/build-android16-package-dex-usage.sh")))?;
     let manifest = fs::read_to_string(root.join("runtime/framework/support-sources.txt"))?;
     let sources = production_sources(&manifest)?;
     let build_dir = root.join("_build/runtime-support-java");
@@ -34,78 +32,8 @@ fn compile_runtime_support(root: &Path) -> Result<CompiledSupport> {
     let signatures = staging.join("compile-signatures");
     fs::create_dir_all(&classes)?;
     fs::create_dir_all(&signatures)?;
-    let platform = pinned_path("PLATFORM", find_android_platform_jar)?;
-    let core = pinned_path("CORE", find_android_core_system_modules)?;
-    let adapters = staging.join("package-dex-usage.jar");
-    // Pin a single atomically published adapter generation for Javac and D8.
-    fs::copy(
-        root.join("_build/package-dex-usage-runtime/package-dex-usage.jar"),
-        &adapters,
-    )?;
-    let mut signature_compiler = Command::new(crate::support::support_build_tool("JAVAC", "javac"));
-    signature_compiler
-        .args([
-            "--release",
-            "8",
-            "-encoding",
-            "UTF-8",
-            "-sourcepath",
-            "",
-            "-classpath",
-        ])
-        .arg(&platform)
-        .arg("-d")
-        .arg(&signatures);
-    for signature in [
-        "android/net/NetworkCapabilities.java",
-        "android/app/IApplicationThread.java",
-        "android/app/IServiceConnection.java",
-        "android/app/ServiceStartArgs.java",
-        "android/content/pm/ParceledListSlice.java",
-        "android/content/IContentProvider.java",
-        "android/content/IIntentReceiver.java",
-        "android/content/res/CompatibilityInfo.java",
-        "android/view/InputChannel.java",
-        "android/view/InsetsState.java",
-        "android/view/IWindow.java",
-        "android/util/MergedConfiguration.java",
-        "android/window/ActivityWindowInfo.java",
-        "android/window/ClientWindowFrames.java",
-        "android/app/servertransaction/ClientTransactionItem.java",
-        "android/app/servertransaction/ActivityLifecycleItem.java",
-        "android/app/servertransaction/ClientTransaction.java",
-        "android/app/servertransaction/ConfigurationChangeItem.java",
-        "android/app/servertransaction/ActivityConfigurationChangeItem.java",
-        "android/app/servertransaction/ActivityRelaunchItem.java",
-        "android/app/servertransaction/ResumeActivityItem.java",
-        "android/app/servertransaction/PauseActivityItem.java",
-        "android/app/servertransaction/WindowStateResizeItem.java",
-        "android/os/ServiceManager.java",
-        "com/android/internal/compat/AndroidBuildClassifier.java",
-        "com/android/internal/pm/parsing/IPackageCacher.java",
-        "com/android/internal/pm/parsing/PackageInfoCommonUtils.java",
-        "com/android/internal/pm/parsing/PackageParser2.java",
-        "com/android/internal/pm/parsing/pkg/AndroidPackageInternal.java",
-        "com/android/internal/pm/parsing/pkg/ParsedPackage.java",
-        "com/android/internal/pm/pkg/component/ParsedActivity.java",
-        "com/android/internal/pm/pkg/component/ParsedComponent.java",
-        "com/android/internal/pm/pkg/component/ParsedIntentInfo.java",
-        "com/android/internal/pm/pkg/component/ParsedMainComponent.java",
-        "com/android/internal/pm/pkg/component/ParsedProvider.java",
-        "com/android/internal/pm/pkg/component/ParsedService.java",
-        "com/android/internal/pm/pkg/parsing/ParsingPackageUtils.java",
-        "com/android/server/SystemConfig.java",
-        "com/android/server/pm/pkg/AndroidPackage.java",
-        "com/android/server/compat/CompatConfig.java",
-        "com/android/server/compat/CompatChange.java",
-        "com/android/server/compat/config/Config.java",
-        "com/android/server/compat/config/Change.java",
-        "com/android/server/compat/config/XmlParser.java",
-    ] {
-        signature_compiler.arg(root.join("runtime/framework/compile-stubs").join(signature));
-    }
-    run_command(&mut signature_compiler)?;
-    let boot = env::join_paths([&signatures, &core, &platform, &adapters])?;
+    generate_platform_signatures(root, &staging, &signatures)?;
+    let boot = env::join_paths([&signatures])?;
     let mut javac = Command::new(crate::support::support_build_tool("JAVAC", "javac"));
     javac
         .args([
@@ -120,8 +48,6 @@ fn compile_runtime_support(root: &Path) -> Result<CompiledSupport> {
             "-bootclasspath",
         ])
         .arg(&boot)
-        .arg("-classpath")
-        .arg(&adapters)
         .arg("-d")
         .arg(&classes);
     for source in &sources {
@@ -163,8 +89,69 @@ fn compile_runtime_support(root: &Path) -> Result<CompiledSupport> {
         directory: staging,
         classes,
         inventory,
-        adapters,
     })
+}
+
+/// Signature-only class files for the exact pinned runtime: the system
+/// process boot classpath plus services.jar. Production owners compile
+/// against these, so hidden framework and service APIs keep their real
+/// access, generics, nesting and constants.
+fn generate_platform_signatures(root: &Path, staging: &Path, output: &Path) -> Result<()> {
+    let tool = staging.join("hidden-api-signatures");
+    fs::create_dir_all(&tool)?;
+    let asm = root.join("_prebuilt/android-16/tools/asm-9.6.jar");
+    run_command(
+        Command::new(crate::support::support_build_tool("JAVAC", "javac"))
+            .args(["--release", "11", "-encoding", "UTF-8", "-classpath"])
+            .arg(&asm)
+            .arg("-d")
+            .arg(&tool)
+            .arg(root.join("tools/hidden-api-signatures/HiddenApiSignatures.java")),
+    )?;
+    let boot = command_output(
+        Command::new(crate::support::support_build_tool("PYTHON", "python3"))
+            .arg(root.join("tools/bootclasspath/resolve.py")),
+    )?;
+    // The same JDK as the pinned javac.
+    let java =
+        PathBuf::from(crate::support::support_build_tool("JAVAC", "javac")).with_file_name("java");
+    let mut generator = Command::new(java);
+    generator
+        .arg("-classpath")
+        .arg(env::join_paths([&tool, &asm])?)
+        .arg("HiddenApiSignatures")
+        .arg(output);
+    for jar in env::split_paths(boot.trim()) {
+        generator.arg(jar);
+    }
+    generator.arg(root.join("_build/android16-system-services/services.jar"));
+    // The rest of SYSTEMSERVERCLASSPATH (service-art.jar, ...), after
+    // services.jar in derive_classpath order.
+    for jar in system_server_classpath_jars(root)? {
+        generator.arg(jar);
+    }
+    run_command(&mut generator)
+}
+
+/// SYSTEMSERVERCLASSPATH JARs other than services.jar, extracted from the
+/// pinned image (upstream/android16-systemserverclasspath.lock).
+pub(crate) fn system_server_classpath_jars(root: &Path) -> Result<Vec<PathBuf>> {
+    let lock = fs::read_to_string(root.join("upstream/android16-systemserverclasspath.lock"))?;
+    let extracted = root.join("_build/android16-systemserverclasspath-original");
+    Ok(lock
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            match (fields.next(), fields.next(), fields.next()) {
+                (Some(_), Some("classpath"), Some(path))
+                    if path != "/system/framework/services.jar" =>
+                {
+                    Some(extracted.join(path.trim_start_matches('/')))
+                }
+                _ => None,
+            }
+        })
+        .collect())
 }
 
 pub(crate) fn build_runtime_support_dex(root: &Path) -> Result<()> {
@@ -177,8 +164,7 @@ pub(crate) fn build_runtime_support_dex(root: &Path) -> Result<()> {
         .arg("--lib")
         .arg(pinned_path("PLATFORM", find_android_platform_jar)?)
         .arg("--output")
-        .arg(&dex_dir)
-        .arg(&compiled.adapters);
+        .arg(&dex_dir);
     for class in &compiled.inventory {
         d8.arg(compiled.classes.join(class));
     }
@@ -317,7 +303,6 @@ fn verify_production_dex(output: &str, inventory: &[PathBuf]) -> Result<()> {
     for name in &definitions {
         if !name.starts_with("Ldev/darwinart/runtime/")
             && !name.starts_with("Ldev/darwinart/system/")
-            && *name != "Lcom/android/server/pm/dex/DexUsageStore;"
         {
             return Err(format!("support DEX contains non-production definition {name}").into());
         }
@@ -329,8 +314,6 @@ fn verify_production_dex(output: &str, inventory: &[PathBuf]) -> Result<()> {
         }
     }
     for required in [
-        "Lcom/android/server/pm/dex/DexUsageStore;",
-        "Ldev/darwinart/runtime/pm/DexInstructionSets;",
         "Ldev/darwinart/runtime/wm/WindowInputPublisher;",
         "Ldev/darwinart/runtime/wm/WindowSurfaceRegistry$RelayoutPublication;",
         "Ldev/darwinart/system/DarwinSystemServer;",
@@ -395,14 +378,12 @@ mod tests {
     #[test]
     fn support_dex_rejects_contamination_and_missing_nested_definitions() {
         let names = [
-            "Lcom/android/server/pm/dex/DexUsageStore;",
-            "Ldev/darwinart/runtime/pm/DexInstructionSets;",
             "Ldev/darwinart/runtime/wm/WindowInputPublisher;",
             "Ldev/darwinart/runtime/wm/WindowSurfaceRegistry$RelayoutPublication;",
             "Ldev/darwinart/system/DarwinSystemServer;",
         ];
         let valid = format!(
-            "AOSP DEX: verified=yes version=38 classes=5 methods=10 {}",
+            "AOSP DEX: verified=yes version=38 classes=3 methods=10 {}",
             names
                 .iter()
                 .enumerate()
@@ -421,7 +402,7 @@ mod tests {
             "Lcom/android/server/pm/dex/PackageDexUsage;",
         ] {
             assert!(
-                verify_production_dex(&format!("{valid} class[5]={forbidden}"), &inventory)
+                verify_production_dex(&format!("{valid} class[3]={forbidden}"), &inventory)
                     .is_err()
             );
         }

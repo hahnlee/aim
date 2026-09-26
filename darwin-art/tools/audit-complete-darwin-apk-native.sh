@@ -3,10 +3,10 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 runtime_abi="darwin-art-darwin-native-v1"
-apk="$root/_build/android-apk-app-runtime/simple-jni.apk"
-install_root="$(mktemp -d "${TMPDIR:-/tmp}/darwin-art-native-install.XXXXXX")"
+apk="$root/_build/simple-apk-fixture/simple-jni.apk"
+# The fixture is installed through PackageManagerService in its own profile.
+export DARWIN_ART_PROFILE="${DARWIN_ART_PROFILE:-native-audit}"
 cache_root="$(mktemp -d "${TMPDIR:-/tmp}/darwin-art-native-cache.XXXXXX")"
-fallback_install_root="$(mktemp -d "${TMPDIR:-/tmp}/darwin-art-native-fallback-install.XXXXXX")"
 fallback_cache_root="$(mktemp -d "${TMPDIR:-/tmp}/darwin-art-native-fallback-cache.XXXXXX")"
 converter="$(mktemp "${TMPDIR:-/tmp}/darwin-art-native-converter.XXXXXX")"
 run_log="$(mktemp "${TMPDIR:-/tmp}/darwin-art-complete-darwin.XXXXXX")"
@@ -16,10 +16,8 @@ dylib="libdarwin-art-simple-jni.dylib"
 child_dylib="libdarwin-art-simple-zchild.dylib"
 
 cleanup() {
-  chmod -R u+w "$install_root" "$cache_root" "$fallback_install_root" \
-    "$fallback_cache_root" 2>/dev/null || true
-  rm -rf "$install_root" "$cache_root" "$fallback_install_root" \
-    "$fallback_cache_root"
+  chmod -R u+w "$cache_root" "$fallback_cache_root" 2>/dev/null || true
+  rm -rf "$cache_root" "$fallback_cache_root"
   rm -f "$converter" "$run_log" "$fallback_run_log"
 }
 trap cleanup EXIT
@@ -40,44 +38,39 @@ xcrun clang -std=c17 -O2 -fPIC -fvisibility=hidden -Wall -Wextra -Werror \
   -arch arm64 -dynamiclib \
   -I "$DARWIN_ART_FIXTURE_ROOT/_aosp/libnativehelper/include_jni" \
   -Wl,-install_name,@loader_path/libdarwin-art-simple-zchild.dylib \
-  "$DARWIN_ART_FIXTURE_ROOT/tools/android-apk-app-runtime/fixture/native_child.c" \
+  "$DARWIN_ART_FIXTURE_ROOT/tools/fixtures/simple-apk/native_child.c" \
   -o "$output/libdarwin-art-simple-zchild.dylib"
 xcrun clang -std=c17 -O2 -fPIC -fvisibility=hidden -Wall -Wextra -Werror \
   -arch arm64 -dynamiclib \
   -I "$DARWIN_ART_FIXTURE_ROOT/_aosp/libnativehelper/include_jni" \
   -Wl,-install_name,@loader_path/libdarwin-art-simple-jni.dylib \
   -L "$output" -ldarwin-art-simple-zchild \
-  "$DARWIN_ART_FIXTURE_ROOT/tools/android-apk-app-runtime/fixture/native_app.c" \
+  "$DARWIN_ART_FIXTURE_ROOT/tools/fixtures/simple-apk/native_app.c" \
   -o "$output/libdarwin-art-simple-jni.dylib"
 CONVERTER
 chmod 0700 "$converter"
 
-"$root/tools/android-apk-app-runtime/audit.sh" >/dev/null
-cargo build -q -p darwin-art-apk-install -p darwin-art-native-artifact \
-  --bins
-cargo build -q --release \
-  --manifest-path "$root/tools/android-apk-native-extract/Cargo.toml"
+"$root/tools/fixtures/simple-apk/build.sh" >/dev/null
+cargo build -q --release -p darwin-art-native-artifact --bin darwin-art-native-resolve
+resolver="$root/target/release/darwin-art-native-resolve"
 
-metadata="$(cargo run -q \
-  --manifest-path "$root/tools/android-apk-app-runtime/Cargo.toml" -- "$apk")"
-package="$(sed -n 's/^apk-app-runtime: package=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-version_code="$(sed -n 's/^apk-app-runtime: .* version_code=\([^ ]*\) .*/\1/p' <<<"$metadata")"
-install_output="$(DARWIN_ART_FIXTURE_ROOT="$root" \
-  "$root/target/debug/darwin-art-apk-install" \
-  "$apk" "$install_root" "$package" "$version_code" "$logical" \
-  "$root/target/release/android-apk-native-extract" \
-  "$runtime_abi" "$cache_root" "$converter")"
-grep -F 'native_backend=darwin conversion=published:2' <<<"$install_output" >/dev/null
-apk_sha="$(sed -n 's/^apk-install: .* apk_sha256=\([^ ]*\) .*/\1/p' \
-  <<<"$install_output")"
-installed="$install_root/$package/$version_code/$apk_sha"
-elf_directory="$installed/android-elf/arm64-v8a"
-elf="$elf_directory/$logical"
-cache_parent="$cache_root/$apk_sha"
-cache="$cache_parent/$runtime_abi"
+# Install through PackageManagerService; NativeLibraryHelper extracts the
+# Android graph into the package's nativeLibraryDir.
+install_log="$("$root/tools/run-android-apk-app.sh" --install "$apk")"
+package="$(sed -n 's/^darwin-art: installed package=//p' <<<"$install_log")"
+[[ "$package" == dev.darwinart.simple ]]
+ctl="$root/target/release/darwin-artctl"
+mount="$("$ctl" ensure)"
+source "$root/tools/lib/package-manager-launch.sh"
+darwin_art_pm_launcher_info "$ctl" "$mount" "$package"
+elf_directory="$pm_native_library_dir"
+[[ -f "$elf_directory/$logical" ]]
+apk_sha="$(shasum -a 256 "$pm_source_dir" | awk '{print $1}')"
+cache="$cache_root/$apk_sha/$runtime_abi"
 
-resolution="$("$root/target/debug/darwin-art-native-resolve" \
-  "$apk_sha" "$runtime_abi" "$elf_directory" "$cache")"
+resolution="$(DARWIN_ART_FIXTURE_ROOT="$root" "$resolver" \
+  "$apk_sha" "$runtime_abi" "$elf_directory" "$cache" "$converter")"
+grep -F 'native_backend=darwin conversion=published:2' <<<"$resolution" >/dev/null
 grep -F 'backend=darwin libraries=2' <<<"$resolution" >/dev/null
 file "$cache/$dylib" | grep -F 'Mach-O 64-bit dynamically linked shared library arm64' >/dev/null
 file "$cache/$child_dylib" | grep -F 'Mach-O 64-bit dynamically linked shared library arm64' >/dev/null
@@ -86,11 +79,10 @@ otool -L "$cache/$dylib" | grep -F '@loader_path/libdarwin-art-simple-zchild.dyl
 ! otool -L "$cache/$dylib" | grep -F '.so' >/dev/null
 
 if ! DARWIN_ART_APK_MANAGED_NATIVE_LOAD=0 \
-  DARWIN_ART_APK_INSTALL_ROOT="$install_root" \
   DARWIN_ART_NATIVE_CACHE_ROOT="$cache_root" \
   DARWIN_ART_NATIVE_CONVERTER="$converter" \
   DARWIN_ART_FIXTURE_ROOT="$root" \
-  "$root/tools/run-android-apk-app.sh" "$apk" 0 >"$run_log" 2>&1; then
+  "$root/tools/run-android-apk-app.sh" --package "$package" 0 >"$run_log" 2>&1; then
   cat "$run_log" >&2
   exit 1
 fi
@@ -98,29 +90,23 @@ grep -F 'DARWIN native loader: complete graph root=' "$run_log" >/dev/null
 grep -F 'ART Android APK JNI: JavaVMExt+NativeBridge load ok' "$run_log" >/dev/null
 
 # A converter that exits successfully without the exact output graph is still
-# an incomplete conversion. The installer must delete its private stage, cache
-# one graph-level ELF decision, and the runtime must load the complete original
-# Android graph without considering any Darwin member.
-fallback_first="$("$root/target/debug/darwin-art-apk-install" \
-  "$apk" "$fallback_install_root" "$package" "$version_code" "$logical" \
-  "$root/target/release/android-apk-native-extract" \
-  "$runtime_abi" "$fallback_cache_root" /usr/bin/true)"
+# an incomplete conversion: its private stage is deleted, one graph-level ELF
+# decision is cached, and the runtime loads the complete original Android
+# graph without considering any Darwin member.
+fallback="$fallback_cache_root/$apk_sha/$runtime_abi"
+fallback_first="$("$resolver" "$apk_sha" "$runtime_abi" "$elf_directory" "$fallback" /usr/bin/true)"
 grep -F 'native_backend=elf conversion=attempted:incomplete-conversion:2' \
   <<<"$fallback_first" >/dev/null
-fallback_second="$("$root/target/debug/darwin-art-apk-install" \
-  "$apk" "$fallback_install_root" "$package" "$version_code" "$logical" \
-  "$root/target/release/android-apk-native-extract" \
-  "$runtime_abi" "$fallback_cache_root" /usr/bin/true)"
+fallback_second="$("$resolver" "$apk_sha" "$runtime_abi" "$elf_directory" "$fallback" /usr/bin/true)"
 grep -F 'native_backend=elf conversion=cached:cached-incomplete-conversion:2' \
   <<<"$fallback_second" >/dev/null
-[[ ! -d "$fallback_cache_root/$apk_sha/$runtime_abi" ]]
-[[ -f "$fallback_cache_root/$apk_sha/$runtime_abi.elf-fallback" ]]
+[[ ! -d "$fallback" ]]
+[[ -f "$fallback.elf-fallback" ]]
 
 if ! DARWIN_ART_APK_MANAGED_NATIVE_LOAD=0 \
-  DARWIN_ART_APK_INSTALL_ROOT="$fallback_install_root" \
   DARWIN_ART_NATIVE_CACHE_ROOT="$fallback_cache_root" \
   DARWIN_ART_NATIVE_CONVERTER=/usr/bin/true \
-  "$root/tools/run-android-apk-app.sh" "$apk" 0 >"$fallback_run_log" 2>&1; then
+  "$root/tools/run-android-apk-app.sh" --package "$package" 0 >"$fallback_run_log" 2>&1; then
   cat "$fallback_run_log" >&2
   exit 1
 fi

@@ -10,7 +10,6 @@ import android.content.res.CompatibilityInfo;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.RemoteException;
-import dev.darwinart.runtime.pm.ServiceResolver;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -78,7 +77,7 @@ public final class ActiveServicesStartedServiceTest {
             processes.beginAttachment(41, UID, app, 1);
             processes.identify(41, 1, app, PACKAGE);
             attached = processes.finishAttachment(41, 1);
-            ServiceResolver packages = TestServices.resolver(PACKAGE, UID,
+            PackageQueries packages = TestServices.resolver(PACKAGE, UID,
                     "example.Download", PACKAGE);
             active = new ActiveServices(packages, processes, launches);
         }

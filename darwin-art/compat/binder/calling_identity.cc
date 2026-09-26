@@ -2,15 +2,34 @@
 #include "process_registry.h"
 #include <unistd.h>
 
+#include <atomic>
+
 namespace darwin_art::binder {
 namespace {
+// The process's own uid once the daemon has registered it. A lookup made
+// before registration (-1) is not cached, so later calls see the real uid.
+int32_t SelfUid() {
+  static std::atomic<int32_t> cached{-1};
+  int32_t uid = cached.load(std::memory_order_acquire);
+  if (uid < 0) {
+    uid = darwin_art_runtime_registered_process_uid(getpid());
+    if (uid >= 0) cached.store(uid, std::memory_order_release);
+
+  }
+  return uid;
+}
 Identity Self() {
-  static const int32_t uid = darwin_art_runtime_registered_process_uid(getpid());
-  return {static_cast<int32_t>(getpid()), uid, false, false};
+  return {static_cast<int32_t>(getpid()), SelfUid(), false, false};
 }
 thread_local Identity identity = Self();
 }
-Identity CurrentIdentity() { return identity; }
+Identity CurrentIdentity() {
+  // A thread's own identity may have been captured before registration.
+  if (!identity.remote && !identity.explicit_identity && identity.uid < 0) {
+    identity.uid = SelfUid();
+  }
+  return identity;
+}
 IncomingIdentity::IncomingIdentity(int32_t pid, int32_t uid) : previous_(identity) {
   identity = {pid, uid, false, true};
 }

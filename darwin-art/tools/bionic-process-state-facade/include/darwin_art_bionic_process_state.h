@@ -151,6 +151,9 @@ uintptr_t darwin_art_bionic_process_state_data_resolve(const char* name);
 
 char* darwin_art_bionic_process_getenv_core(const char* name);
 int darwin_art_bionic_process_property_get_core(const char* name, char* value);
+/* Publishes a value the property service accepted; see properties.rs. */
+int darwin_art_bionic_process_property_apply_service_update_core(const char* name,
+                                                                 const char* value);
 const void* darwin_art_bionic_process_property_find_core(const char* name);
 void darwin_art_bionic_process_property_read_callback_core(
     const void* property,

@@ -1,3 +1,4 @@
+#include <sys/time.h>
 #include "darwin_framework_system_natives.h"
 
 #include "darwin_android_platform.h"
@@ -98,6 +99,22 @@ jlong system_clock_current_thread_time_millis(JNIEnv*, jclass) {
     return 0;
   }
   return static_cast<jlong>(value.tv_sec) * 1'000 + value.tv_nsec / 1'000'000;
+}
+
+// android_os_SystemClock.cpp: systemTime(SYSTEM_TIME_THREAD) / 1000.
+jlong system_clock_current_thread_time_micro(JNIEnv*, jclass) {
+  timespec value{};
+  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) != 0) {
+    return 0;
+  }
+  return static_cast<jlong>(value.tv_sec) * 1'000'000 + value.tv_nsec / 1'000;
+}
+
+// android_os_SystemClock.cpp: wall-clock gettimeofday in microseconds.
+jlong system_clock_current_time_micro(JNIEnv*, jclass) {
+  timeval value{};
+  gettimeofday(&value, nullptr);
+  return static_cast<jlong>(value.tv_sec) * 1'000'000 + value.tv_usec;
 }
 
 }  // namespace darwin_art::framework_system

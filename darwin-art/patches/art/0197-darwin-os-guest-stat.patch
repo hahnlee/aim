@@ -1,0 +1,69 @@
+--- a/libartbase/base/os_linux.cc
++++ b/libartbase/base/os_linux.cc
+@@ -28,6 +28,15 @@
+ #include "os.h"
+ #include "unix_file/fd_file.h"
+ 
++#if defined(__APPLE__)
++#include <cerrno>
++#include <unistd.h>
++
++// Guest status through libziparchive's archive filesystem hook.
++bool darwin_art_archive_stat(const char* path, struct stat* status)
++    __attribute__((weak_import));
++#endif
++
+ namespace art {
+ 
+ #if defined(__APPLE__)
+@@ -37,6 +46,23 @@
+ 
+ FileWithRange FileWithRange::Invalid() { return {.file = nullptr, .start = 0, .length = 0}; }
+ 
++#if defined(__APPLE__)
++// Darwin: the status of a guest device path (/system, /apex, /data, ...) the
++// host does not have, from the process's Android filesystem namespace, so
++// ART sees the same files as the rest of the process.
++static bool GuestStat(const char* name, struct stat* st) {
++  return ::darwin_art_archive_stat != nullptr && ::darwin_art_archive_stat(name, st);
++}
++#endif
++
++static bool StatPath(const char* name, struct stat* st) {
++  if (stat(name, st) == 0) return true;
++#if defined(__APPLE__)
++  if (errno == ENOENT && name[0] == '/') return GuestStat(name, st);
++#endif
++  return false;
++}
++
+ File* OS::OpenFileForReading(const char* name) {
+   return OpenFileWithFlags(name, O_RDONLY);
+ }
+@@ -95,7 +121,7 @@
+ 
+ bool OS::FileExists(const char* name, bool check_file_type) {
+   struct stat st;
+-  if (stat(name, &st) == 0) {
++  if (StatPath(name, &st)) {
+     if (check_file_type) {
+       return S_ISREG(st.st_mode);  // TODO: Deal with symlinks?
+     } else {
+@@ -108,7 +134,7 @@
+ 
+ bool OS::DirectoryExists(const char* name) {
+   struct stat st;
+-  if (stat(name, &st) == 0) {
++  if (StatPath(name, &st)) {
+     return S_ISDIR(st.st_mode);  // TODO: Deal with symlinks?
+   } else {
+     return false;
+@@ -117,7 +143,7 @@
+ 
+ int64_t OS::GetFileSizeBytes(const char* name) {
+   struct stat st;
+-  if (stat(name, &st) == 0) {
++  if (StatPath(name, &st)) {
+     return st.st_size;  // TODO: Deal with symlinks? According to the documentation,
+                         // the st_size for a symlink is "the length of the pathname
+                         // it contains, without a terminating null byte."

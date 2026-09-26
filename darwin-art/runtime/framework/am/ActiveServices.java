@@ -8,16 +8,17 @@ import android.content.pm.ServiceInfo;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.RemoteException;
-import dev.darwinart.runtime.pm.ServiceResolver;
 import java.util.ArrayList;
 import java.util.HashMap;
 
 /** Android service lifecycle owner for system_server's ActivityManager endpoint. */
 public final class ActiveServices implements SystemServiceBindings {
+    // UserHandle.PER_USER_RANGE: a uid is userId * PER_USER_RANGE + appId.
+    private static final int PER_USER_RANGE = 100000;
     private static final int FIRST_ISOLATED_UID = 99000;
     private static final int LAST_ISOLATED_UID = 99999;
 
-    private final ServiceResolver serviceResolver;
+    private final PackageQueries packages;
     private final ApplicationProcessRegistry processes;
     private final ServiceProcessLaunchController processLaunches;
     private final HashMap<String, ServiceRecord> services = new HashMap<>();
@@ -41,9 +42,9 @@ public final class ActiveServices implements SystemServiceBindings {
     private long nextSequence = 1;
     private int nextIsolatedUid = FIRST_ISOLATED_UID;
 
-    ActiveServices(ServiceResolver serviceResolver, ApplicationProcessRegistry processRegistry,
+    ActiveServices(PackageQueries packageQueries, ApplicationProcessRegistry processRegistry,
             ProcessLaunchTransport processLauncher) {
-        this.serviceResolver = serviceResolver;
+        packages = packageQueries;
         processes = processRegistry;
         processLaunches = new ServiceProcessLaunchController(this,
                 new ServiceProcessLaunchController.StatePort() {
@@ -636,7 +637,9 @@ public final class ActiveServices implements SystemServiceBindings {
 
     private void removeService(String key, ServiceRecord service) {
         services.remove(key, service);
-        servicesByToken.remove(service.canonicalToken, service);
+        if (servicesByToken.remove(service.canonicalToken, service) && service.isolated) {
+            packages.removeIsolatedUid(service.uid);
+        }
         invalidateLifecycleCapabilityLocked(service.lifecycleLane);
     }
 
@@ -660,7 +663,9 @@ public final class ActiveServices implements SystemServiceBindings {
 
     void removeLifecycleServiceLocked(ServiceRecord service) {
         removeLifecycleCatalogKeyLocked(service);
-        servicesByToken.remove(service.canonicalToken, service);
+        if (servicesByToken.remove(service.canonicalToken, service) && service.isolated) {
+            packages.removeIsolatedUid(service.uid);
+        }
         service.bindings.clear();
         if (service.lifecycleLane != null) {
             invalidateLifecycleCapabilityLocked(service.lifecycleLane);
@@ -859,7 +864,7 @@ public final class ActiveServices implements SystemServiceBindings {
     /** Resolves the manifest service and returns its live record, creating it on demand. */
     private ServiceRecord retrieveServiceLocked(ComponentName component, String instanceName,
             int callingUid) {
-        ServiceInfo info = serviceResolver.service(component);
+        ServiceInfo info = packages.service(component, callingUid / PER_USER_RANGE);
         if (info == null || !info.enabled || info.applicationInfo == null) return null;
         if (!info.exported && callingUid != android.os.Process.SYSTEM_UID
                 && callingUid != info.applicationInfo.uid) {
@@ -881,6 +886,7 @@ public final class ActiveServices implements SystemServiceBindings {
             }
             if (isolated) processName = processName + ":" + instanceName;
             int uid = isolated ? allocateIsolatedUid() : info.applicationInfo.uid;
+            if (isolated) packages.addIsolatedUid(uid, info.applicationInfo.uid);
             service = new ServiceRecord(component, instanceName, processName, uid, isolated, info);
             services.put(key, service);
             servicesByToken.put(service.canonicalToken, service);

@@ -39,6 +39,7 @@ pub(super) struct GraphicsRuntimeInputs {
     pub(super) trace_archive: PathBuf,
     pub(super) perfetto_library: PathBuf,
     pub(super) virtual_ref_base_ptr_archive: PathBuf,
+    pub(super) native_library_helper_archive: PathBuf,
     pub(super) android_runtime_host: PathBuf,
 }
 
@@ -103,6 +104,8 @@ impl GraphicsRuntimeInputs {
             perfetto_library: root.join("_build/tracing-perfetto/perfetto-out/libperfetto_c.dylib"),
             virtual_ref_base_ptr_archive: root
                 .join("_build/virtual-ref-base-ptr/libandroid-virtual-ref-base-ptr-darwin.a"),
+            native_library_helper_archive: root
+                .join("_build/native-library-helper/libandroid-native-library-helper-darwin.a"),
             android_runtime_host: root
                 .join("_build/android-runtime-host/libandroid-runtime-darwin-host.a"),
         };
@@ -139,6 +142,7 @@ impl GraphicsRuntimeInputs {
             &inputs.trace_archive,
             &inputs.perfetto_library,
             &inputs.virtual_ref_base_ptr_archive,
+            &inputs.native_library_helper_archive,
             &inputs.android_runtime_host,
         ] {
             require_file(input, "real-graphics runtime input is missing")?;

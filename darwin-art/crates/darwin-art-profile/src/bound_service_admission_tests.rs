@@ -39,6 +39,8 @@ fn existing_admission(
         registry: Mutex::new(PackageRegistry::new(&paths)),
         paths,
         processes: Mutex::new(ProcessRegistry::default()),
+        properties: Mutex::new(None),
+        host_commands: Default::default(),
         runtime_services: Default::default(),
         application_launches: Default::default(),
         bound_services: Default::default(),

@@ -96,6 +96,7 @@ impl Facade {
         match mount_id {
             2 => self.private_root.as_deref(),
             3 => self.storage_root.as_ref(),
+            4 => self.package_root.as_ref(),
             _ => None,
         }
     }

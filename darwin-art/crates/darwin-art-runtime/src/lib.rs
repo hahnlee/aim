@@ -12,6 +12,8 @@ use darwin_art_abi::StatusCode;
 mod bound_service_launch_capability;
 #[cfg(target_os = "macos")]
 mod bound_service_process_ffi;
+mod host_command_ffi;
+mod installd_ffi;
 mod lifecycle;
 mod linker_load_flags;
 pub mod linker_namespace;
@@ -21,8 +23,8 @@ mod native_owner;
 #[cfg(target_os = "macos")]
 mod network_path;
 mod owners;
-mod package_records;
 mod process_registry;
+mod property_ffi;
 mod provider;
 mod provider_bridge;
 mod provider_kind;

@@ -40,12 +40,7 @@ xcrun clang -arch arm64 -isysroot "$sdk" -mmacosx-version-min=14.0 \
 cargo build --manifest-path "$project_root/Cargo.toml" -q --release \
   -p darwin-art-host \
   -p darwin-art-profile --bins \
-  -p darwin-art-apk-install \
   -p darwin-art-native-artifact --bin darwin-art-native-resolve
-cargo build -q --release \
-  --manifest-path "$project_root/tools/android-apk-app-runtime/Cargo.toml"
-cargo build -q --release \
-  --manifest-path "$project_root/tools/android-apk-native-extract/Cargo.toml"
 "$project_root/tools/materialize-moltenvk.sh" >/dev/null
 runtime="$contents/Resources/DarwinART"
 host_app="$runtime/DarwinARTHost.app"
@@ -79,8 +74,7 @@ copy_tree() {
 }
 
 copy_file "$project_root/target/release/darwin-art-host" target/release/darwin-art-host
-for helper in darwin-artctl darwin-artd darwin-art-apk-install \
-  darwin-art-native-resolve android-apk-app-runtime android-apk-native-extract; do
+for helper in darwin-artctl darwin-artd darwin-art-native-resolve; do
   copy_file "$project_root/target/release/$helper" "target/release/$helper"
 done
 copy_file "$project_root/tools/run-android-apk-app.sh" tools/run-android-apk-app.sh
@@ -88,6 +82,7 @@ copy_file "$project_root/tools/lib/system-private-data.sh" tools/lib/system-priv
 copy_file "$project_root/tools/lib/runtime-system-image.sh" tools/lib/runtime-system-image.sh
 copy_file "$project_root/tools/lib/system-service-environment.sh" tools/lib/system-service-environment.sh
 copy_file "$project_root/tools/lib/runtime-system-service.sh" tools/lib/runtime-system-service.sh
+copy_file "$project_root/tools/lib/package-manager-launch.sh" tools/lib/package-manager-launch.sh
 copy_file "$project_root/tools/prepare-darwin-art-host.sh" tools/prepare-darwin-art-host.sh
 copy_file "$project_root/tools/declare-darwin-x18-abi.sh" tools/declare-darwin-x18-abi.sh
 copy_file "$project_root/config/darwin-art-host.entitlements" config/darwin-art-host.entitlements

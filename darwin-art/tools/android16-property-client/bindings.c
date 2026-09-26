@@ -7,11 +7,13 @@
 #include "darwin_art_bionic_process_state.h"
 #include "darwin_art_bionic_socket_broker.h"
 
-extern int darwin_art_aosp_system_property_set(const char*, const char*);
+// Guest __system_property_set reaches the profile's property service (ADR
+// 0009); see darwin-art-runtime property_ffi.rs.
+extern int darwin_art_bionic_property_service_set(const char*, const char*);
 typedef void (*PropertyFunction)(void);
 PropertyFunction darwin_art_bionic_property_client_resolve(const char* name) {
   if (name != NULL && darwin_art_bionic_strcmp(name, "__system_property_set") == 0)
-    return (PropertyFunction)darwin_art_aosp_system_property_set;
+    return (PropertyFunction)darwin_art_bionic_property_service_set;
   return NULL;
 }
 

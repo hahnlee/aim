@@ -13,7 +13,8 @@ import java.util.List;
  * Runtime-registered broadcast receivers and sticky broadcasts
  * (ActivityManagerService.registerReceiverWithFeature / BroadcastQueue).
  *
- * <p>Delivery covers unordered broadcasts to registered receivers. Ordered
+ * <p>Delivery covers unordered broadcasts to registered receivers, with
+ * permissions from PermissionManagerService. Ordered
  * broadcasts (result receivers) and manifest-declared receivers need the
  * receiver-process launch and finishReceiver chain, which this owner does not
  * implement; callers report those requests as unsupported.</p>
@@ -25,6 +26,16 @@ final class BroadcastRegistry {
     static final int RECEIVER_NOT_EXPORTED = 0x4;
     // Process.SYSTEM_UID: system broadcasts reach non-exported receivers.
     private static final int SYSTEM_UID = 1000;
+
+    /** Permission state: PermissionManagerService's answer for a uid. */
+    interface Permissions {
+        boolean granted(int uid, String permission);
+    }
+
+    /** A receiver's copy of the broadcast, or null to withhold it from that uid. */
+    interface ReceiverIntent {
+        Intent forReceiver(int receiverUid, Intent intent);
+    }
 
     /** Transport for IApplicationThread.scheduleRegisteredReceiver. */
     interface Delivery {
@@ -75,13 +86,17 @@ final class BroadcastRegistry {
 
     // UserHandle.USER_ALL.
     static final int USER_ALL = -1;
+    // UserHandle.PER_USER_RANGE: uid = userId * PER_USER_RANGE + appId.
+    private static final int PER_USER_RANGE = 100000;
 
     private final Delivery delivery;
+    private final Permissions permissions;
     private final List<Registration> registrations = new ArrayList<>();
     private final List<Sticky> stickies = new ArrayList<>();
 
-    BroadcastRegistry(Delivery delivery) {
+    BroadcastRegistry(Delivery delivery, Permissions permissions) {
         this.delivery = delivery;
+        this.permissions = permissions;
     }
 
     /**
@@ -148,10 +163,15 @@ final class BroadcastRegistry {
     /**
      * Unordered delivery to every matching registered receiver the sender may
      * reach; a sticky broadcast also replaces the stored sticky intent that
-     * {@link Intent#filterEquals} it.
+     * {@link Intent#filterEquals} it. As BroadcastQueue skips receivers: a
+     * receiver's required permission must be held by the sender, the
+     * broadcast's required permissions by the receiver, an app-id allow list
+     * limits the receiving apps and {@code receiverIntent} may withhold or
+     * narrow the broadcast per receiver.
      */
     void broadcast(int sendingUid, String sendingPackage, Intent intent, String resolvedType,
-            boolean permissionGated, boolean sticky, int userId) {
+            String[] requiredPermissions, int[] appIdAllowList, ReceiverIntent receiverIntent,
+            boolean sticky, int userId) {
         if (intent == null) throw new IllegalArgumentException("intent is null");
         if (intent.hasFileDescriptors()) {
             throw new IllegalArgumentException("File descriptors passed in Intent");
@@ -174,14 +194,11 @@ final class BroadcastRegistry {
                         && sendingUid != SYSTEM_UID) {
                     continue;
                 }
-                // Permission grants are not modeled; a permission-guarded
-                // receiver, or a broadcast requiring receiver permissions,
-                // reaches only its own uid.
-                if ((registration.requiredPermission != null || permissionGated)
-                        && registration.uid != sendingUid) {
+                if (targetPackage != null && !targetPackage.equals(registration.packageName)) {
                     continue;
                 }
-                if (targetPackage != null && !targetPackage.equals(registration.packageName)) {
+                if (appIdAllowList != null
+                        && !contains(appIdAllowList, registration.uid % PER_USER_RANGE)) {
                     continue;
                 }
                 if (!matches(registration.filter, intent, resolvedType)) continue;
@@ -189,8 +206,31 @@ final class BroadcastRegistry {
             }
         }
         for (Registration target : targets) {
-            deliver(target, intent, sticky, userId, sendingUid, sendingPackage);
+            if (target.requiredPermission != null
+                    && !permissions.granted(sendingUid, target.requiredPermission)) {
+                continue;
+            }
+            if (!holdsAll(target.uid, requiredPermissions)) continue;
+            Intent delivered =
+                    receiverIntent == null ? intent : receiverIntent.forReceiver(target.uid, intent);
+            if (delivered == null) continue;
+            deliver(target, delivered, sticky, userId, sendingUid, sendingPackage);
         }
+    }
+
+    private boolean holdsAll(int uid, String[] required) {
+        if (required == null) return true;
+        for (String permission : required) {
+            if (permission != null && !permissions.granted(uid, permission)) return false;
+        }
+        return true;
+    }
+
+    private static boolean contains(int[] values, int value) {
+        for (int candidate : values) {
+            if (candidate == value) return true;
+        }
+        return false;
     }
 
     private void deliver(Registration target, Intent intent, boolean sticky, int userId,

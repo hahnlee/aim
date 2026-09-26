@@ -212,9 +212,9 @@ jboolean ScheduleFinish(JNIEnv* env, jclass, jobject application_binder,
 }  // namespace
 
 bool ScheduleActivityLaunch(JNIEnv* env, jobject application_binder,
-                            jstring package_name, jstring installed_record) {
+                            jstring package_name, jint uid) {
   if (env == nullptr || application_binder == nullptr || package_name == nullptr ||
-      installed_record == nullptr || env->ExceptionCheck() ||
+      env->ExceptionCheck() ||
       env->PushLocalFrame(64) < 0) {
     return false;
   }
@@ -223,16 +223,14 @@ bool ScheduleActivityLaunch(JNIEnv* env, jobject application_binder,
     return result;
   };
 
-  jclass mapper = env->FindClass("dev/darwinart/runtime/pm/InstalledPackageInfos");
-  jmethodID map = mapper == nullptr
+  jclass packages = env->FindClass("dev/darwinart/runtime/am/ApplicationPackages");
+  jmethodID map = packages == nullptr
                       ? nullptr
                       : env->GetStaticMethodID(
-                            mapper, "launchActivity",
-                            "(Ljava/lang/String;Ljava/lang/String;)"
-                            "Landroid/content/pm/ActivityInfo;");
+                            packages, "launchActivity",
+                            "(Ljava/lang/String;I)Landroid/content/pm/ActivityInfo;");
   jobject info = map == nullptr ? nullptr : env->CallStaticObjectMethod(
-                                                mapper, map, package_name,
-                                                installed_record);
+                                                packages, map, package_name, uid);
   jclass info_type = info == nullptr ? nullptr : env->GetObjectClass(info);
   jfieldID name_field = info_type == nullptr
                             ? nullptr

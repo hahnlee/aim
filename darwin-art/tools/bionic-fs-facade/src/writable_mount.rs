@@ -25,6 +25,7 @@ use std::sync::Arc;
 mod file;
 #[cfg(test)]
 mod origin_tests;
+mod xattr;
 
 // A retained parent plus a single leaf is the boundary for Darwin *at calls.
 // No host pathname is reopened after the authority has been acquired.

@@ -18,14 +18,19 @@ public final class SettingsProviderEndpoint extends Binder {
     private final Parcelable holder;
 
     public SettingsProviderEndpoint() {
-        attachInterface(null, "android.content.IContentProvider");
         providerInterface = (IContentProvider) Proxy.newProxyInstance(
                 IContentProvider.class.getClassLoader(),
                 new Class<?>[] {IContentProvider.class},
                 (ignored, method, arguments) -> {
                     if ("asBinder".equals(method.getName())) return this;
+                    // In-process callers (the system server) reach the
+                    // provider directly, as AOSP's local Transport does.
+                    if ("call".equals(method.getName()) && arguments.length == 5) {
+                        return call((String) arguments[1], (String) arguments[3]);
+                    }
                     throw new UnsupportedOperationException(method.getName());
                 });
+        attachInterface(providerInterface, "android.content.IContentProvider");
         holder = createHolder();
     }
 
@@ -63,13 +68,17 @@ public final class SettingsProviderEndpoint extends Binder {
         String key = data.readString();
         data.readBundle();
         data.enforceNoDataAvail();
-        if (!"settings".equals(authority)) throw new IllegalArgumentException("Unknown authority");
-
-        Bundle result = new Bundle();
-        if ("android_id".equals(key)) result.putString("value", stableAndroidId());
+        Bundle result = call(authority, key);
         reply.writeNoException();
         reply.writeBundle(result);
         return true;
+    }
+
+    private static Bundle call(String authority, String key) {
+        if (!"settings".equals(authority)) throw new IllegalArgumentException("Unknown authority");
+        Bundle result = new Bundle();
+        if ("android_id".equals(key)) result.putString("value", stableAndroidId());
+        return result;
     }
 
     private static String stableAndroidId() {

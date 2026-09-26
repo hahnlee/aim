@@ -18,6 +18,8 @@ void *darwin_art_binder_platform_mmap(void *address, size_t length,
                                       int protection, int flags, int fd,
                                       off_t offset);
 int darwin_art_binder_platform_munmap(void *address, size_t length);
+// The process's Android uid (IPCThreadState's own calling uid).
+uid_t darwin_art_binder_platform_getuid(void);
 
 #ifdef __cplusplus
 }
@@ -37,4 +39,5 @@ int darwin_art_binder_platform_munmap(void *address, size_t length);
 #elif defined(DARWIN_ART_BINDER_IPC_THREAD_STATE_SYSCALLS)
 #define close darwin_art_binder_platform_close
 #define ioctl darwin_art_binder_platform_ioctl
+#define getuid darwin_art_binder_platform_getuid
 #endif

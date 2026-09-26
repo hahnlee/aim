@@ -1,6 +1,7 @@
 #include "libcore_darwin_linux.h"
 
 #include "darwin_os_constants.h"
+#include "process/guest_environment.h"
 
 #include <pwd.h>
 #include <sys/utsname.h>
@@ -99,7 +100,7 @@ jstring DarwinLinuxGetenv(JNIEnv* env, jobject, jstring java_name) {
   if (name.c_str() == nullptr) {
     return nullptr;
   }
-  const char* value = std::getenv(name.c_str());
+  const char* value = darwin_art::process::GuestGetenv(name.c_str());
   return value == nullptr ? nullptr : env->NewStringUTF(value);
 }
 
@@ -159,11 +160,19 @@ jobject DarwinLinuxUname(JNIEnv* env, jobject) {
   return MakeStructUtsname(env, host);
 }
 
+extern "C" int darwin_art_bionic_strerror_r(int android_errno, char* buffer, size_t size)
+    __attribute__((weak_import));
+
 jstring DarwinLinuxStrerror(JNIEnv* env, jobject, jint error_number) {
-  // Darwin exposes the XSI/POSIX int-returning strerror_r, unlike the
-  // pointer-returning GNU/Bionic interface used by the upstream default path.
-  // A private buffer preserves strerror's thread-safety across NewStringUTF.
+  // error_number is an Android (Linux) errno: describe it with Bionic's
+  // messages, not the host's (Darwin numbers differ above ERANGE). A private
+  // buffer preserves strerror's thread-safety across NewStringUTF.
   std::array<char, BUFSIZ> buffer {};
+  if (darwin_art_bionic_strerror_r != nullptr) {
+    darwin_art_bionic_strerror_r(error_number, buffer.data(), buffer.size());
+    return env->NewStringUTF(buffer.data());
+  }
+  // Host-only images (the libcore ABI smoke) have no Bionic owner.
   const int result = strerror_r(error_number, buffer.data(), buffer.size());
   if (result != 0 && buffer[0] == '\0') {
     // Match upstream's POSIX strerror_r fallback: strerror never converts an

@@ -13,13 +13,6 @@ name = "android-aaudio-provider"
 version = "0.1.0"
 
 [[package]]
-name = "android-apk-app-runtime"
-version = "0.1.0"
-dependencies = [
- "flate2",
-]
-
-[[package]]
 name = "android-apk-native-extract"
 version = "0.1.0"
 dependencies = [
@@ -293,14 +286,6 @@ dependencies = [
 [[package]]
 name = "darwin-art-abi"
 version = "0.1.0"
-
-[[package]]
-name = "darwin-art-apk-install"
-version = "0.1.0"
-dependencies = [
- "darwin-art-native-artifact",
- "sha2",
-]
 
 [[package]]
 name = "darwin-art-binder-device"

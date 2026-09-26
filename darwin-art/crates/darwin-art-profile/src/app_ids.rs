@@ -1,6 +1,6 @@
 //! Package-manager app IDs, independent of Darwin uid and process IDs.
 //! Access is serialized by PackageRegistry's daemon mutex.
-use crate::{registry::validate_package, ProfileError};
+use crate::{ProfileError, registry::validate_package};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -10,14 +10,6 @@ use std::path::Path;
 const FIRST: u32 = 10_000;
 const LAST: u32 = 19_999;
 const VERSION: &str = "darwin-art-app-ids-v1";
-
-pub(crate) fn lookup(directory: &Path, package: &str) -> Result<u32, ProfileError> {
-    validate_package(package)?;
-    let ids = parse(&fs::read_to_string(directory.join("app-ids"))?)?;
-    ids.get(package)
-        .copied()
-        .ok_or_else(|| ProfileError::Daemon("package app ID is not assigned".into()))
-}
 
 fn parse(text: &str) -> Result<BTreeMap<String, u32>, ProfileError> {
     let invalid = || ProfileError::Daemon("invalid package app-ID database".into());

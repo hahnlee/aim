@@ -2,16 +2,17 @@
 #include "../../../runtime/framework/am/application_binding.h"
 #include "../../../runtime/framework/system/system_context.h"
 #include "../../../runtime/framework/compat/policy_binding.h"
+#include "../../../runtime/framework/pm/installd/installd_jni.h"
+#include "../../../runtime/framework/system/host_command_jni.h"
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace {
 int mode;
 int served;
 bool policy_ready;
 bool kernel_ready;
-jstring Resolve(JNIEnv* env, jclass, jstring) {
-  return env->NewStringUTF("installed-record");
-}
 }
 extern "C" int darwin_art_install_context_loader(JNIEnv*, jobject loader) {
   return loader == nullptr ? 4 : 0;
@@ -64,9 +65,13 @@ bool InitializeSystemPolicy(JNIEnv* env, jobject context) {
 }
 }
 namespace darwin_art::framework::am {
-bool RegisterActivityManager(JNIEnv*, jclass endpoint, PackageResolver resolver) {
-  return endpoint != nullptr && resolver == &Resolve;
+bool RegisterActivityManager(JNIEnv*, jclass endpoint) { return endpoint != nullptr; }
 }
+namespace darwin_art::framework::pm {
+bool RegisterDarwinInstalld(JNIEnv*, jclass installd) { return installd != nullptr; }
+}
+namespace darwin_art::framework::system {
+bool RegisterHostCommandService(JNIEnv*, jclass service) { return service != nullptr; }
 }
 namespace darwin_art {
 int ServeBinderServiceEndpoint(JNIEnv*, jobject binder, const char* socket) {
@@ -78,10 +83,15 @@ int ServeBinderServiceEndpoint(JNIEnv*, jobject binder, const char* socket) {
 extern "C" JNIEXPORT jint JNICALL Java_SystemProcessEntryTest_run(
     JNIEnv* env, jclass, jint requested) {
   mode = requested;
+  // SYSTEMSERVERCLASSPATH as derive_classpath exported it in the image
+  // (the harness writes system/etc/classpath under DARWIN_ART_TEST_IMAGE).
+  const char* image = std::getenv("DARWIN_ART_TEST_IMAGE");
   std::string classpath;
   if (!darwin_art::framework::system::BuildSystemClassPath(
-          "/image with spaces", "/support/code.dex", &classpath) ||
-      classpath != "/image with spaces/system/framework/services.jar:/support/code.dex") return 74;
+          image, "/support/code.dex", &classpath) ||
+      classpath != std::string(image) + "/system/framework/services.jar:" + image +
+                       "/apex/com.android.art/javalib/service-art.jar:/support/code.dex")
+    return 74;
   const std::string previous = classpath;
   const char* invalid_paths[] = {nullptr, "relative", "/", "/image:extra", "/image/.."};
   for (const char* invalid : invalid_paths) {
@@ -89,12 +99,12 @@ extern "C" JNIEXPORT jint JNICALL Java_SystemProcessEntryTest_run(
             invalid, "/support/code.dex", &classpath) || classpath != previous) return 75;
   }
   if (darwin_art::framework::system::BuildSystemClassPath(
-          "/image", "/support:/extra", &classpath) || classpath != previous) return 76;
+          image, "/support:/extra", &classpath) || classpath != previous) return 76;
   served = 0;
   policy_ready = false;
   kernel_ready = false;
   int result = darwin_art::framework::system::RunSystemProcess(
-      env, mode == 1 ? nullptr : "/test/explicit-socket", &Resolve);
+      env, mode == 1 ? nullptr : "/test/explicit-socket");
   if ((mode == 0 && served != 1) || (mode != 0 && served != 0)) return 72;
   return result;
 }

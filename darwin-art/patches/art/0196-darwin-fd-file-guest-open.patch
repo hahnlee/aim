@@ -1,0 +1,53 @@
+--- a/libartbase/base/unix_file/fd_file.cc
++++ b/libartbase/base/unix_file/fd_file.cc
+@@ -49,6 +49,14 @@
+ #include "base/stl_util.h"
+ #endif
+ 
++#if defined(__APPLE__)
++// Darwin: a read-only open of a guest device path (/system, /apex, /data,
++// ...) resolves in this process's Android filesystem namespace through the
++// guest read-only opener, like libziparchive's archive opens. Writable opens
++// reach FdFile through OS::OpenFileWithFlags, which maps private data paths.
++int darwin_art_archive_open(const char* path, int flags, ...) __attribute__((weak_import));
++#endif
++
+ namespace unix_file {
+ 
+ // f2fs decompress issue.
+@@ -304,7 +312,17 @@
+         LOG(ERROR) << warning;
+       }
+     }
++  }
++}
++
++static int OpenPath(const char* path, int flags, mode_t mode) {
++#if defined(__APPLE__)
++  if ((flags & O_ACCMODE) == O_RDONLY && (flags & (O_CREAT | O_TRUNC)) == 0 &&
++      darwin_art_archive_open != nullptr) {
++    return darwin_art_archive_open(path, flags, mode);
+   }
++#endif
++  return open(path, flags, mode);
+ }
+ 
+ bool FdFile::Open(const std::string& path, int flags) {
+@@ -315,7 +333,7 @@
+   static_assert(O_RDONLY == 0, "Readonly flag has unexpected value.");
+   DCHECK_EQ(fd_, kInvalidFd) << path;
+   read_only_mode_ = ((flags & O_ACCMODE) == O_RDONLY);
+-  fd_ = TEMP_FAILURE_RETRY(open(path.c_str(), flags, mode));
++  fd_ = TEMP_FAILURE_RETRY(OpenPath(path.c_str(), flags, mode));
+   if (fd_ == kInvalidFd) {
+     return false;
+   }
+@@ -689,7 +707,7 @@
+   // Try to figure out whether file_path_ is still referring to the one on disk.
+   bool is_current = false;
+   struct stat this_stat, current_stat;
+-  int cur_fd = TEMP_FAILURE_RETRY(open(file_path_.c_str(), O_RDONLY | O_CLOEXEC));
++  int cur_fd = TEMP_FAILURE_RETRY(OpenPath(file_path_.c_str(), O_RDONLY | O_CLOEXEC, 0));
+   if (cur_fd > 0) {
+     // File still exists.
+     if (fstat(fd_, &this_stat) == 0 && fstat(cur_fd, &current_stat) == 0) {

@@ -10,12 +10,15 @@ if [[ "${1:-}" == --start-system-service ]]; then
   [[ $DARWIN_ART_SYSTEM_SERVER_MODE == 1 && $DARWIN_ART_APK_APP_PACKAGE == android ]]
   [[ $DARWIN_ART_RUNTIME_TARGET_SDK_VERSION == 36 && $DARWIN_ART_RUNTIME_JAVA_DEBUGGABLE == 0 ]]
   [[ $DARWIN_ART_APK_APP_SUPPORT_DEX == '/data/support dex' ]]
-  [[ $DARWIN_ART_APK_APP_RESOURCE_APK == /image/system/framework/framework-res.apk ]]
-  [[ $DARWIN_ART_FRAMEWORK_RES_APK == /image/system/framework/framework-res.apk ]]
+  [[ $DARWIN_ART_APK_APP_RESOURCE_APK == "$DARWIN_ART_TEST_IMAGE/system/framework/framework-res.apk" ]]
+  [[ $DARWIN_ART_FRAMEWORK_RES_APK == "$DARWIN_ART_TEST_IMAGE/system/framework/framework-res.apk" ]]
   [[ -z ${DARWIN_ART_APK_APP_ACTIVITY+x} && -z ${DARWIN_ART_APK_APP_DESCRIPTOR+x} ]]
-  [[ $DARWIN_ART_ANDROID_FILESYSTEM_ROOT == /image ]]
-  [[ $DARWIN_ART_ANDROID_SYSTEM_NATIVE_DIR == /image/system/lib64 ]]
-  [[ $DARWIN_ART_RUNTIME_HOST_FILES == '/boot/a:/boot/b:/data/support dex:/image/system/framework/services.jar' ]]
+  [[ $DARWIN_ART_ANDROID_FILESYSTEM_ROOT == "$DARWIN_ART_TEST_IMAGE" ]]
+  [[ $DARWIN_ART_ANDROID_SYSTEM_NATIVE_DIR == "$DARWIN_ART_TEST_IMAGE/system/lib64" ]]
+  # SYSTEMSERVERCLASSPATH from the image's derive_classpath environment file.
+  [[ $DARWIN_ART_RUNTIME_HOST_FILES == "/boot/a:/boot/b:/data/support dex:$DARWIN_ART_TEST_IMAGE/system/framework/services.jar:$DARWIN_ART_TEST_IMAGE/apex/com.android.art/javalib/service-art.jar" ]]
+  # PackageManagerService owns /data/app in the system server.
+  [[ $DARWIN_ART_ANDROID_PACKAGE_ROOT_WRITABLE == 1 ]]
   [[ -z ${DARWIN_ART_APK_APP_NATIVE_PATH+x} && -z ${DARWIN_ART_APP_COMMAND_LINE+x} ]]
   [[ $DARWIN_ART_APK_APP_PROVIDERS == none && $DARWIN_ART_APK_APP_RECEIVERS == none ]]
   [[ -d $DARWIN_ART_ANDROID_PRIVATE_DATA_ROOT/system ]]
@@ -49,6 +52,11 @@ done
 fixture="$(mktemp -d /tmp/darwin-system-service-test.XXXXXX)"
 trap 'chmod -R u+w "$fixture"; rm -rf -- "$fixture"' EXIT
 cp "$root/tools/tests/runtime-system-service.sh" "$fixture/host"
+export DARWIN_ART_TEST_IMAGE="$fixture/image"
+mkdir -p "$DARWIN_ART_TEST_IMAGE/system/etc"
+printf '%s\n' \
+  'export SYSTEMSERVERCLASSPATH /system/framework/services.jar:/apex/com.android.art/javalib/service-art.jar' \
+  >"$DARWIN_ART_TEST_IMAGE/system/etc/classpath"
 chmod 0700 "$fixture/host"
 mkdir -p "$fixture/bundle/android" "$fixture/bundle/_build/android-system-image"
 touch "$fixture/bundle/android/system-root.tar" "$fixture/bundle/_build/android-system-image/system-root.tar"
@@ -67,8 +75,8 @@ export DARWIN_ART_FRAMEWORK_RES_APK=/inherited/framework-res.apk
 export DARWIN_ART_RUNTIME_TARGET_SDK_VERSION=29
 export DARWIN_ART_RUNTIME_JAVA_DEBUGGABLE=1
 invoke() {
-  darwin_art_start_runtime_system_service "$fixture/host" "$fixture/mnt" /image \
-    '/bundle/system image.tar' /store /image/system/framework/framework-res.apk \
+  darwin_art_start_runtime_system_service "$fixture/host" "$fixture/mnt" "$DARWIN_ART_TEST_IMAGE" \
+    '/bundle/system image.tar' /store "$DARWIN_ART_TEST_IMAGE/system/framework/framework-res.apk" \
     '/data/support dex' /bundle/runtime.dylib /boot/oj /boot/libart /boot/framework /boot/a:/boot/b
 }
 reply="$(invoke)"

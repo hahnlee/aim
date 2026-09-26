@@ -6,12 +6,16 @@ import java.util.Map;
 
 /** System-process ownership of attached Android application processes. */
 public final class ApplicationProcessRegistry {
+    // Process.SYSTEM_UID.
+    private static final int SYSTEM_UID = 1000;
     private static final int FIRST_ISOLATED_UID = 99000;
     private static final int LAST_ISOLATED_UID = 99999;
 
     public enum InitialWork {
         ACTIVITY,
-        BOUND_SERVICE
+        BOUND_SERVICE,
+        /** The system server itself (ActivityManagerService.setSystemProcess). */
+        SYSTEM
     }
 
     public enum CancellationKind { CANCELLED, ATTACHMENT_OWNED, STALE_OR_GONE }
@@ -114,6 +118,20 @@ public final class ApplicationProcessRegistry {
         // reserved by the system process and never enter this fallback.
         processes.put(pid, new ProcessRecord(
                 thread, sequence, null, null, uid, InitialWork.ACTIVITY));
+    }
+
+    /**
+     * ActivityManagerService.setSystemProcess: the system server is the
+     * attached "system" process of package "android", so its own framework
+     * calls (receiver registration, broadcasts) are admitted like an app's.
+     */
+    public synchronized void setSystemProcess(int pid, IBinder thread) {
+        if (pid <= 0 || thread == null) throw new IllegalArgumentException("Invalid system process");
+        if (processes.containsKey(pid)) throw new IllegalStateException("System process already set");
+        ProcessRecord record = new ProcessRecord(
+                thread, 0, "android", "system", SYSTEM_UID, InitialWork.SYSTEM);
+        record.attachmentFinished = true;
+        processes.put(pid, record);
     }
 
     public synchronized void reserveBoundServiceProcess(

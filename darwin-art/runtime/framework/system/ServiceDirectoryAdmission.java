@@ -14,6 +14,12 @@ final class ServiceDirectoryAdmission {
         }
     }
 
+    void enforcePublication() {
+        if (Binder.getCallingPid() != systemPid) {
+            throw new SecurityException("Only the system process may add services");
+        }
+    }
+
     void publish() {
         if (Binder.getCallingPid() != systemPid) {
             throw new SecurityException("Only the system process may publish services");

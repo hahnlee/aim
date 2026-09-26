@@ -3,8 +3,12 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <sys/stat.h>
 
-namespace { std::atomic<DarwinArtArchiveOpener> guest_opener{nullptr}; }
+namespace {
+std::atomic<DarwinArtArchiveOpener> guest_opener{nullptr};
+std::atomic<DarwinArtArchiveStat> guest_stat{nullptr};
+}
 void darwin_art_set_archive_opener(DarwinArtArchiveOpener opener) {
   guest_opener.store(opener, std::memory_order_release);
 }
@@ -20,4 +24,15 @@ int darwin_art_archive_open(const char* path, int flags, ...) {
     if (std::strncmp(path, root, std::strlen(root)) == 0 && opener != nullptr) return opener(path);
   }
   return open(path, flags);
+}
+void darwin_art_set_archive_stat(DarwinArtArchiveStat stat) {
+  guest_stat.store(stat, std::memory_order_release);
+}
+bool darwin_art_archive_stat(const char* path, struct stat* status) {
+  const auto stat = guest_stat.load(std::memory_order_acquire);
+  if (stat == nullptr || path == nullptr || status == nullptr) {
+    errno = ENOENT;
+    return false;
+  }
+  return stat(path, status);
 }

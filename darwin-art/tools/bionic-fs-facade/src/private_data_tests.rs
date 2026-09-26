@@ -240,3 +240,63 @@ fn configured_mutations_follow_guest_links_and_enforce_mount_permissions() {
     assert!(retained.join("real/retained").is_dir());
     assert!(!data.join("real/retained").exists());
 }
+
+#[test]
+fn private_data_keeps_linux_user_extended_attributes() {
+    let temporary = TestDirectory::new();
+    let root = temporary.0.join("root");
+    fs::create_dir_all(root.join("user/0")).unwrap();
+    let mut facade = Facade::new(File::open("/").unwrap(), b"/", b"/").unwrap();
+    facade.private_root = Some(private_data::PrivateDataRoot::open(root.clone()).unwrap());
+    let errno = || Facade::android_errno();
+
+    // UserDataPreparer: a missing user.serial is ENODATA, then it is set.
+    let mut value = [0u8; 16];
+    assert_eq!(
+        facade.get_xattr(b"/data/user/0", b"user.serial", &mut value, false),
+        -1
+    );
+    assert_eq!(errno(), 61);
+    assert_eq!(
+        facade.set_xattr(b"/data/user/0", b"user.serial", b"0", 1, false),
+        0
+    );
+    assert_eq!(
+        facade.set_xattr(b"/data/user/0", b"user.serial", b"1", 1, false),
+        -1
+    );
+    assert_eq!(errno(), 17); // XATTR_CREATE on an existing attribute
+    assert_eq!(
+        facade.get_xattr(b"/data/user/0", b"user.serial", &mut [], false),
+        1
+    );
+    assert_eq!(
+        facade.get_xattr(b"/data/user/0", b"user.serial", &mut value, false),
+        1
+    );
+    assert_eq!(&value[..1], b"0");
+    let mut names = [0u8; 64];
+    let listed = facade.list_xattr(b"/data/user/0", &mut names, false);
+    assert_eq!(&names[..listed as usize], b"user.serial\0");
+    assert_eq!(
+        facade.remove_xattr(b"/data/user/0", b"user.serial", false),
+        0
+    );
+    assert_eq!(
+        facade.get_xattr(b"/data/user/0", b"user.serial", &mut value, false),
+        -1
+    );
+    assert_eq!(errno(), 61);
+
+    // Only the user namespace exists; a missing path is ENOENT.
+    assert_eq!(
+        facade.set_xattr(b"/data/user/0", b"security.selinux", b"x", 0, false),
+        -1
+    );
+    assert_eq!(errno(), 95);
+    assert_eq!(
+        facade.get_xattr(b"/data/user/9", b"user.serial", &mut value, false),
+        -1
+    );
+    assert_eq!(errno(), 2);
+}

@@ -3,6 +3,7 @@
 #include "darwin_framework_natives.h"
 #include <iostream>
 #include "darwin_libcore_filesystem_bridge.h"
+#include "process/guest_environment.h"
 #if defined(DARWIN_ART_FULL_LIBCORE_LINUX)
 #include "AsynchronousCloseMonitor.h"
 #include "../tools/bionic-socket-broker-adapter/include/darwin_art_bionic_socket_broker.h"
@@ -977,7 +978,7 @@ jstring LinuxGetenv(JNIEnv* env, jobject, jstring name) {
   if (utf_name == nullptr) {
     return nullptr;
   }
-  const char* value = std::getenv(utf_name);
+  const char* value = darwin_art::process::GuestGetenv(utf_name);
   env->ReleaseStringUTFChars(name, utf_name);
   return value == nullptr ? nullptr : env->NewStringUTF(value);
 }

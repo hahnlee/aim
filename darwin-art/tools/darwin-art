@@ -12,12 +12,13 @@ require_build() {
 command="${1:-}"
 case "$command" in
   install)
-    apk="${2:-}"
-    [[ -n "$apk" ]] || {
-      echo "usage: darwin-art install APK" >&2
+    # A PackageInstaller session in the profile's PackageManagerService.
+    shift
+    [[ $# -ge 1 ]] || {
+      echo "usage: darwin-art install APK [--split SPLIT_APK]..." >&2
       exit 64
     }
-    DARWIN_ART_INSTALL_ONLY=1 "$root/tools/run-android-apk-app.sh" "$apk" 0
+    "$root/tools/run-android-apk-app.sh" --install "$@"
     ;;
   run)
     package="${2:-}"
@@ -27,14 +28,10 @@ case "$command" in
       exit 64
     }
     require_build
-    mount="$($ctl ensure)"
-    record="$(mktemp "$mount/run/resolved-launch.XXXXXX")"
-    cleanup() { rm -f "$record"; }
-    trap cleanup EXIT
-    "$ctl" resolve "$package" >"$record"
-    "$root/tools/run-android-apk-app.sh" --record "$record" "$seconds"
+    "$root/tools/run-android-apk-app.sh" --package "$package" "$seconds"
     ;;
   list)
+    # Installed apps, from PackageManagerService's packages.list.
     require_build
     "$ctl" ensure >/dev/null
     "$ctl" list
@@ -45,7 +42,7 @@ case "$command" in
     "$ctl" ps
     ;;
   *)
-    echo "usage: darwin-art {install APK|run PACKAGE [VISIBLE_SECONDS]|list|ps}" >&2
+    echo "usage: darwin-art {install APK [--split SPLIT_APK]...|run PACKAGE [VISIBLE_SECONDS]|list|ps}" >&2
     exit 64
     ;;
 esac

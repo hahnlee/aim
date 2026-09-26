@@ -6,8 +6,8 @@ compile_error!("darwin-art-profile requires macOS; no weaker filesystem fallback
 
 mod app_ids;
 mod application_launch_template;
-mod binder_capability_wire;
 mod binder_capability_service;
+mod binder_capability_wire;
 mod binder_client;
 mod binder_service;
 mod binder_transfer;
@@ -15,42 +15,49 @@ mod bound_service_child_control;
 mod bound_service_client;
 mod bound_service_process;
 mod bound_service_registry;
+mod package_list;
 pub use binder_client::{BinderAuthorityConnection, connect_binder_authority_at};
-pub use darwin_art_scm_transfer::inheritance::{spawn_owned, output_owned};
-#[cfg(target_os = "macos")]
-pub use darwin_art_scm_transfer::inheritance::with_native_operation;
 pub use bound_service_client::{
     activate_bound_service_process, cancel_bound_service_process, start_bound_service_process,
 };
 pub use bound_service_process::{BoundServiceProcessRequest, BoundServiceProcessResponse};
+#[cfg(target_os = "macos")]
+pub use darwin_art_scm_transfer::inheritance::with_native_operation;
+pub use darwin_art_scm_transfer::inheritance::{output_owned, spawn_owned};
 mod fd_passing;
+mod host_commands;
+mod installd;
+mod property_service;
+pub use host_commands::{HostCommandListener, run_host_command_at};
 mod filesystem;
 mod host_fd_delivery;
+mod package_layout;
 mod scm_service;
+mod settings_migration;
 pub use scm_service::NativeScmEndpointProvider;
+mod daemonized_child_wait;
 mod listener_wait;
-mod peer_process;
 mod peer_credentials;
+mod peer_process;
 mod process_command;
 mod process_identity;
 mod process_incarnation;
-mod process_wait;
-mod daemonized_child_wait;
 mod process_start_gate;
+mod process_wait;
 pub use process_start_gate::wait_for_process_registration;
 mod package_client;
-pub use package_client::resolve_package_at;
+pub use package_client::{InstalldRequest, installd_at, property_set_at};
 mod process_registry;
 mod protocol;
 pub use process_identity::ProcessIdentity;
 mod registry;
 pub mod runtime_service_cli;
 mod runtime_service_client;
-mod unix_connect;
 pub mod runtime_service_endpoints;
 mod runtime_service_launch;
 pub mod runtime_service_protocol;
 mod runtime_service_state;
+mod unix_connect;
 pub use runtime_service_client::{
     publish_runtime_lost, publish_runtime_ready, start_runtime_service,
 };
@@ -245,9 +252,8 @@ pub fn delete_profile(profiles_root: &Path, profile_id: &str) -> Result<(), Prof
             resident_pids.push(pid.to_owned());
         }
         if !resident_pids.is_empty() {
-            let status = spawn_owned(Command::new("/bin/kill")
-                .arg("-TERM")
-                .args(&resident_pids))?.wait()?;
+            let status =
+                spawn_owned(Command::new("/bin/kill").arg("-TERM").args(&resident_pids))?.wait()?;
             if !status.success() {
                 return Err(ProfileError::Daemon(
                     "could not stop profile services".into(),
@@ -441,24 +447,6 @@ pub fn shutdown_daemon(paths: &ProfilePaths) -> Result<(), ProfileError> {
     request(paths, protocol::OP_SHUTDOWN, &[]).map(|_| ())
 }
 
-pub fn register_package(
-    paths: &ProfilePaths,
-    package: &str,
-    record: &[u8],
-) -> Result<(), ProfileError> {
-    registry::validate_package(package)?;
-    let mut payload = Vec::with_capacity(package.len() + 1 + record.len());
-    payload.extend_from_slice(package.as_bytes());
-    payload.push(0);
-    payload.extend_from_slice(record);
-    request(paths, protocol::OP_REGISTER, &payload).map(|_| ())
-}
-
-pub fn resolve_package(paths: &ProfilePaths, package: &str) -> Result<Vec<u8>, ProfileError> {
-    registry::validate_package(package)?;
-    request(paths, protocol::OP_RESOLVE, package.as_bytes())
-}
-
 pub fn resolve_process_identity(
     paths: &ProfilePaths,
     pid: u32,
@@ -488,18 +476,7 @@ pub fn resolve_process_identity_at(
     ProcessIdentity::decode(&response, pid)
 }
 
-pub fn unregister_package(
-    paths: &ProfilePaths,
-    package: &str,
-    remove_data: bool,
-) -> Result<(), ProfileError> {
-    registry::validate_package(package)?;
-    let mut payload = Vec::with_capacity(package.len() + 1);
-    payload.push(u8::from(remove_data));
-    payload.extend_from_slice(package.as_bytes());
-    request(paths, protocol::OP_UNREGISTER, &payload).map(|_| ())
-}
-
+/// Installed third-party packages, from PackageManagerService's packages.list.
 pub fn list_packages(paths: &ProfilePaths) -> Result<String, ProfileError> {
     let bytes = request(paths, protocol::OP_LIST, &[])?;
     String::from_utf8(bytes).map_err(|error| ProfileError::InvalidResponse(error.to_string()))

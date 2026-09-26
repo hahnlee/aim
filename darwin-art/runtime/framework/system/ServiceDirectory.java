@@ -6,22 +6,38 @@ import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.RemoteException;
 import android.util.Log;
+import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
-/** System-owned startup service table; no application lifecycle or host transport. */
+/**
+ * System-owned service table: the startup services plus those AOSP system
+ * services publish with ServiceManager.addService. No application lifecycle or
+ * host transport.
+ */
 public final class ServiceDirectory extends Binder {
+    // android-16.0.0_r1 IServiceManager.aidl.
+    private static final int TRANSACTION_ADD_SERVICE = FIRST_CALL_TRANSACTION + 4;
+    private static final int TRANSACTION_LIST_SERVICES = FIRST_CALL_TRANSACTION + 5;
     private final Map<String, IBinder> services;
     private final ServiceDirectoryAdmission admission = new ServiceDirectoryAdmission();
 
     public ServiceDirectory(Map<String, IBinder> services) {
-        this.services = Collections.unmodifiableMap(new HashMap<>(services));
+        this.services = new ConcurrentHashMap<>(services);
         attachInterface(null, "android.os.IServiceManager");
     }
 
     /** Native system startup calls this only after genuine Context/policy initialization. */
     public void publishApplicationLookups() { admission.publish(); }
+
+    /**
+     * A service published in this process, as its local Binder: libbinder
+     * resolves an in-process lookup to the local object, never a proxy.
+     */
+    IBinder localService(String name) {
+        return name == null ? null : services.get(name);
+    }
 
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
@@ -29,7 +45,10 @@ public final class ServiceDirectory extends Binder {
         // android-16.0.0_r1 IServiceManager.aidl:
         // getService=1, getService2=2, checkService=3, checkService2=4.
         // ServiceManagerProxy redirects both public lookups to checkService2.
-        // Publication/lazy-service contracts remain unsupported.
+        // Lazy services, notifications and declared (VINTF) instances remain
+        // unsupported.
+        if (code == TRANSACTION_ADD_SERVICE) return addService(data, reply);
+        if (code == TRANSACTION_LIST_SERVICES) return listServices(data, reply);
         if (code < FIRST_CALL_TRANSACTION || code > FIRST_CALL_TRANSACTION + 3) {
             return super.onTransact(code, data, reply, flags);
         }
@@ -53,6 +72,41 @@ public final class ServiceDirectory extends Binder {
             reply.writeStrongBinder(service);
         }
         Log.i("DarwinSystem", "service lookup: reply complete name=" + name);
+        return true;
+    }
+
+    /**
+     * servicemanager admits publication only from system identities; here that
+     * is the system process itself, which hosts every AOSP system service.
+     */
+    private boolean addService(Parcel data, Parcel reply) {
+        if (reply == null) return false;
+        admission.enforcePublication();
+        data.enforceInterface("android.os.IServiceManager");
+        String name = data.readString();
+        IBinder service = data.readStrongBinder();
+        data.readBoolean(); // allowIsolated: isolated processes are not admitted yet
+        data.readInt(); // dumpPriority
+        data.enforceNoDataAvail();
+        if (name == null || name.isEmpty() || name.length() > 127 || service == null) {
+            throw new IllegalArgumentException("Invalid service registration: " + name);
+        }
+        services.put(name, service);
+        Log.i("DarwinSystem", "service published: " + name);
+        reply.writeNoException();
+        return true;
+    }
+
+    private boolean listServices(Parcel data, Parcel reply) {
+        if (reply == null) return false;
+        admission.enforceLookup();
+        data.enforceInterface("android.os.IServiceManager");
+        data.readInt(); // dumpPriority: every service is listed at every priority
+        data.enforceNoDataAvail();
+        ArrayList<String> names = new ArrayList<>(services.keySet());
+        Collections.sort(names);
+        reply.writeNoException();
+        reply.writeStringArray(names.toArray(new String[0]));
         return true;
     }
 

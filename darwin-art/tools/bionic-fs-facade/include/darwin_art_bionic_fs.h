@@ -103,6 +103,10 @@ int darwin_art_bionic_fs_seed_private_directory(const char* path);
  * Immutable mounts and traversal outside the private overlay are rejected. */
 intptr_t darwin_art_bionic_fs_resolve_private_host_path(
     const char* path, char* output, size_t capacity);
+/* As resolve_private_host_path, for any writable mount: private data,
+ * shared storage and the system server's /data/app. */
+intptr_t darwin_art_bionic_fs_resolve_writable_host_path(const char* path, char* output,
+                                                         size_t capacity);
 
 /* Fixed-register forms intentionally capture the Android AAPCS64 mode slot.
  * Calls without O_CREAT leave mode unspecified and the implementation ignores it. */
@@ -236,6 +240,14 @@ intptr_t darwin_art_bionic_fs_readlink_core(const char* path, char* buffer,
 char* darwin_art_bionic_fs_getcwd_core(char* buffer, size_t size);
 int darwin_art_bionic_fs_chdir_core(const char* path);
 int darwin_art_bionic_fs_chmod_core(const char* path, uint32_t mode);
+// Linux getxattr/setxattr/removexattr/listxattr (l* variants with no_follow).
+ssize_t darwin_art_bionic_fs_getxattr_core(const char* path, const char* name, void* value,
+                                           size_t size, int no_follow);
+int darwin_art_bionic_fs_setxattr_core(const char* path, const char* name, const void* value,
+                                       size_t size, int flags, int no_follow);
+int darwin_art_bionic_fs_removexattr_core(const char* path, const char* name, int no_follow);
+ssize_t darwin_art_bionic_fs_listxattr_core(const char* path, char* list, size_t size,
+                                            int no_follow);
 void* darwin_art_bionic_fs_opendir_core(const char* path);
 void* darwin_art_bionic_fs_fdopendir_core(int fd);
 DarwinArtAndroidDirent* darwin_art_bionic_fs_readdir_core(void* directory);

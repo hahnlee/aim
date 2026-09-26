@@ -183,7 +183,7 @@ A real, no-native APK with a binary manifest and a single app-only
 `classes.dex` can launch its `MAIN/LAUNCHER` Activity into the Darwin window:
 
 ```bash
-./tools/android-apk-app-runtime/audit.sh
+./tools/fixtures/simple-apk/build.sh
 cargo run -q -p art-bootstrap -- probe-runtime-apk-app-window
 # Or pass another APK in the current programmatic-UI subset:
 ./tools/run-android-apk-app.sh path/to/app.apk 30

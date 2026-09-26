@@ -24,7 +24,6 @@ does not make the service's boot, state, permission and Binder dependencies work
 | `audio` | `audio.AudioServiceEndpoint` | AOSP AudioService policy with CoreAudio output/input provider. |
 | `media.camera` | `camera.CameraServiceEndpoint` | Android camera service/API contract with AVFoundation capture provider. |
 | `alarm` | `alarm.AlarmManagerEndpoint` | AOSP AlarmManagerService scheduling and wakeup semantics. |
-| `appops` | `appops.AppOpsServiceEndpoint` | AOSP AppOpsService policy and persistence. |
 | `shortcut` | `shortcut.ShortcutManagerEndpoint` | AOSP ShortcutService. |
 | `mount` | `storage.StorageManagerEndpoint` | AOSP StorageManagerService/vold guest contract with filesystem provider. |
 | `device_policy` | `admin.DevicePolicyManagerEndpoint` | AOSP DevicePolicyManagerService. |
