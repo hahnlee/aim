@@ -17,6 +17,8 @@ resize="$root/tools/macos-window-resize.swift"
 move="$root/tools/macos-window-move.swift"
 title_bar_points=28
 mkdir -p "$output"
+source "$root/tools/lib/acceptance-app-cleanup.sh"
+trap 'darwin_art_acceptance_quit_started "$root"' EXIT
 
 for required in "$calculator" "$clock" "$ctl" "$daemon_log"; do
   [[ -e "$required" ]] || { echo "missing acceptance input: $required" >&2; exit 66; }
@@ -56,8 +58,10 @@ wait_text() {
 
 offset="$(log_offset)"
 calc_pid="$(launch "$calculator" com.android.calculator2)"
+darwin_art_acceptance_track "$calc_pid"
 wait_text "$calc_pid" calculator-ready '^(DEL|CLR)$' || fail "Calculator keypad not visible"
 clock_pid="$(launch "$clock" com.android.deskclock)"
+darwin_art_acceptance_track "$clock_pid"
 wait_text "$clock_pid" deskclock-ready 'ALARM|TIMER|STOPWATCH' || fail "DeskClock not visible"
 # Separate the windows so the edge drag belongs to Calculator only.
 swift "$move" "$clock_pid" 520 0 >/dev/null

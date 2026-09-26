@@ -15,7 +15,7 @@ public final class InputChannel {
     public static void resetStats() { opened=0; disposed=0; }
     public static int openedCount() { return opened; }
     public static int disposedCount() { return disposed; }
-    public static InputChannel[] openInputChannelPair(String name) throws java.io.IOException {
+    public static InputChannel[] openInputChannelPair(String name) {
         ++opened;
         android.os.IBinder token = new android.os.Binder();
         return new InputChannel[] { new InputChannel(name + ":client", token), new InputChannel(name + ":server", token) };

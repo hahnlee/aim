@@ -9,6 +9,7 @@ javac --release 8 -encoding UTF-8 -d "$stage" \
   "$root/tools/tests/wm/desktop-root-stubs/android/os/Binder.java" \
   "$root/tools/tests/wm/desktop-root-stubs/android/os/Parcel.java" \
   "$root/tools/tests/wm/desktop-root-stubs/android/os/Process.java" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/runtime/framework/am/ApplicationProcessRegistry.java" \
   "$root/runtime/framework/wm/WindowSessionIdentity.java" \
   "$root/runtime/framework/wm/DesktopRootWindowBindingOwner.java" \

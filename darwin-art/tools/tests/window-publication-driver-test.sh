@@ -12,6 +12,7 @@ trap 'rm -rf -- "$stage"' EXIT HUP INT TERM
 javac --release 8 -encoding UTF-8 -d "$stage" \
   $(find "$root/tools/tests/wm-publication/src" -name '*.java' -print) \
   "$root/tools/tests/wm/desktop-root-stubs/android/os/Parcel.java" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/runtime/framework/wm/DesktopRootFocusDecision.java" \
   "$root/runtime/framework/wm/DesktopRootFocusDecisionTransport.java" \
   "$root/runtime/framework/wm/WindowRootFocusDecisionDelivery.java" \
