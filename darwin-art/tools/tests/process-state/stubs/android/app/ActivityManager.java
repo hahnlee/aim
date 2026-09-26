@@ -1,6 +1,6 @@
 package android.app;
 
-/** Test stub: MemoryInfo with its hidden threshold fields. */
+/** Test stub: MemoryInfo with its hidden (public @hide) threshold fields. */
 public class ActivityManager {
     public static class MemoryInfo implements android.os.Parcelable {
         public long advertisedMem;
@@ -8,10 +8,10 @@ public class ActivityManager {
         public long totalMem;
         public long threshold;
         public boolean lowMemory;
-        long hiddenAppThreshold;
-        long secondaryServerThreshold;
-        long visibleAppThreshold;
-        long foregroundAppThreshold;
+        public long hiddenAppThreshold;
+        public long secondaryServerThreshold;
+        public long visibleAppThreshold;
+        public long foregroundAppThreshold;
 
         public long hidden(String name) {
             switch (name) {

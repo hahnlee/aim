@@ -22,8 +22,6 @@ import java.util.Objects;
  */
 final class NotificationRecords {
     private static final String TAG = "NotificationService";
-    // UserHandle.PER_USER_RANGE: the uid block owned by each Android user.
-    private static final int PER_USER_RANGE = 100000;
 
     private static final class Posted {
         final String tag;
@@ -152,11 +150,10 @@ final class NotificationRecords {
         if (app == null) return result;
         for (Posted posted : app.posted) {
             if (posted.userId != userId) continue;
-            // Public constructor; score is unused since Android 7.
+            // NotificationRecord.sbn: no group key override here.
             result.add(new StatusBarNotification(packageName, packageName, posted.id, posted.tag,
-                    uid, posted.pid, 0, posted.notification,
-                    UserHandle.getUserHandleForUid(posted.userId * PER_USER_RANGE),
-                    posted.postTime));
+                    uid, posted.pid, posted.notification, UserHandle.of(posted.userId),
+                    null, posted.postTime));
         }
         return result;
     }

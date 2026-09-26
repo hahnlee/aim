@@ -3,7 +3,6 @@ package dev.darwinart.runtime.am;
 import android.app.ActivityManager;
 import android.os.Parcel;
 import android.os.Parcelable;
-import java.lang.reflect.Field;
 
 /**
  * Read-only AMS process-state queries: memory pressure levels and freezer
@@ -11,6 +10,8 @@ import java.lang.reflect.Field;
  */
 final class ProcessStateQueries {
     // ProcessList oom_adj values that getMemoryInfo reports thresholds for.
+    // The pinned services.jar inlines them and keeps no fields to compile
+    // against, so they are transcribed.
     private static final int FOREGROUND_APP_ADJ = 0;
     private static final int VISIBLE_APP_ADJ = 100;
     private static final int SERVICE_ADJ = 500;
@@ -30,15 +31,15 @@ final class ProcessStateQueries {
         ActivityManager.MemoryInfo info = new ActivityManager.MemoryInfo();
         long homeAppMem = memLevel(HOME_APP_ADJ);
         long cachedAppMem = memLevel(CACHED_APP_MIN_ADJ);
-        info.advertisedMem = processLong("getAdvertisedMem");
-        info.availMem = processLong("getFreeMemory");
-        info.totalMem = processLong("getTotalMemory");
+        info.advertisedMem = android.os.Process.getAdvertisedMem();
+        info.availMem = android.os.Process.getFreeMemory();
+        info.totalMem = android.os.Process.getTotalMemory();
         info.threshold = homeAppMem;
         info.lowMemory = info.availMem < homeAppMem + (cachedAppMem - homeAppMem) / 2;
-        setHiddenLong(info, "hiddenAppThreshold", cachedAppMem);
-        setHiddenLong(info, "secondaryServerThreshold", memLevel(SERVICE_ADJ));
-        setHiddenLong(info, "visibleAppThreshold", memLevel(VISIBLE_APP_ADJ));
-        setHiddenLong(info, "foregroundAppThreshold", memLevel(FOREGROUND_APP_ADJ));
+        info.hiddenAppThreshold = cachedAppMem;
+        info.secondaryServerThreshold = memLevel(SERVICE_ADJ);
+        info.visibleAppThreshold = memLevel(VISIBLE_APP_ADJ);
+        info.foregroundAppThreshold = memLevel(FOREGROUND_APP_ADJ);
         reply.writeNoException();
         reply.writeTypedObject(info, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
     }
@@ -60,24 +61,5 @@ final class ProcessStateQueries {
             if (adj <= OOM_ADJ[i]) return OOM_MIN_FREE_KIB[i] * 1024;
         }
         return OOM_MIN_FREE_KIB[OOM_ADJ.length - 1] * 1024;
-    }
-
-    /** Hidden android.os.Process memory accessors used by ProcessList. */
-    private static long processLong(String name) {
-        try {
-            return (long) android.os.Process.class.getMethod(name).invoke(null);
-        } catch (ReflectiveOperationException error) {
-            throw new IllegalStateException("Process." + name, error);
-        }
-    }
-
-    private static void setHiddenLong(ActivityManager.MemoryInfo info, String name, long value) {
-        try {
-            Field field = ActivityManager.MemoryInfo.class.getDeclaredField(name);
-            field.setAccessible(true);
-            field.setLong(info, value);
-        } catch (ReflectiveOperationException error) {
-            throw new IllegalStateException("ActivityManager.MemoryInfo." + name, error);
-        }
     }
 }
