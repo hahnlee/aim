@@ -171,7 +171,8 @@ final class JobServiceContext {
             if (reply == null || (code != TRANSACTION_ACKNOWLEDGE_START
                     && code != TRANSACTION_ACKNOWLEDGE_STOP
                     && code != TRANSACTION_JOB_FINISHED)) {
-                return super.onTransact(code, data, reply, flags);
+                return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
             }
             data.enforceInterface(CALLBACK_DESCRIPTOR);
             int jobId = data.readInt();

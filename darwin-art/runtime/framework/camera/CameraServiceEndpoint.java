@@ -40,7 +40,8 @@ public final class CameraServiceEndpoint extends Binder {
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
         if (code < IBinder.FIRST_CALL_TRANSACTION) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         data.enforceInterface(DESCRIPTOR);
         switch (code) {
@@ -90,7 +91,8 @@ public final class CameraServiceEndpoint extends Binder {
                 // or devices there is no state to update.
                 return true;
             default:
-                return super.onTransact(code, data, reply, flags);
+                return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
     }
 

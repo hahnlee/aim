@@ -37,7 +37,8 @@ public final class PowerManagerEndpoint extends Binder {
             return true;
         }
         if (code != TRANSACTION_IS_INTERACTIVE && code != TRANSACTION_IS_DISPLAY_INTERACTIVE) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         if (reply == null) return false;
         data.enforceInterface(DESCRIPTOR);

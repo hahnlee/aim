@@ -50,7 +50,8 @@ public final class ServiceDirectory extends Binder {
         if (code == TRANSACTION_ADD_SERVICE) return addService(data, reply);
         if (code == TRANSACTION_LIST_SERVICES) return listServices(data, reply);
         if (code < FIRST_CALL_TRANSACTION || code > FIRST_CALL_TRANSACTION + 3) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         if (reply == null) return false;
         admission.enforceLookup();

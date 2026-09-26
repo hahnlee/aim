@@ -175,7 +175,8 @@ public final class ConnectivityManagerEndpoint extends Binder {
                 return true;
             }
             default:
-                return super.onTransact(code, data, reply, flags);
+                return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
     }
 }

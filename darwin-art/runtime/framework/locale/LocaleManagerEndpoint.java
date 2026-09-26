@@ -39,7 +39,8 @@ public final class LocaleManagerEndpoint extends Binder {
         if ((code != TRANSACTION_GET_APPLICATION_LOCALES
                         && code != TRANSACTION_GET_SYSTEM_LOCALES)
                 || reply == null) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
 
         data.enforceInterface(DESCRIPTOR);

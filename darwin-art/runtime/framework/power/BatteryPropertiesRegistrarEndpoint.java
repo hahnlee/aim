@@ -44,7 +44,8 @@ public final class BatteryPropertiesRegistrarEndpoint extends Binder {
             return true;
         }
         if (code != TRANSACTION_GET_PROPERTY || reply == null) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         data.enforceInterface(DESCRIPTOR);
         int id = data.readInt();

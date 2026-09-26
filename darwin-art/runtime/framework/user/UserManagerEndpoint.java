@@ -50,7 +50,8 @@ public final class UserManagerEndpoint extends Binder {
                 reply.writeTypedObject(new Bundle(), Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
                 return true;
             }
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         data.enforceInterface("android.os.IUserManager");
         int userId = data.readInt();

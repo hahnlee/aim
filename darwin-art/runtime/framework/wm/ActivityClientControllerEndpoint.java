@@ -321,7 +321,8 @@ public final class ActivityClientControllerEndpoint extends Binder {
                 && code != finishActivityCode
                 && code != setRequestedOrientationCode
                 && code != getRequestedOrientationCode) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         data.enforceInterface("android.app.IActivityClientController");
         IBinder token = data.readStrongBinder();

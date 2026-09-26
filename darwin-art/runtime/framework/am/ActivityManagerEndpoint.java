@@ -192,7 +192,8 @@ public final class ActivityManagerEndpoint extends Binder {
                 && code != stopServiceTokenCode && code != setServiceForegroundCode
                 && code != getForegroundServiceTypeCode
                 && code != getRunningAppProcessesCode) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         if (reply == null && code != serviceDoneExecutingCode) return false;
         data.enforceInterface("android.app.IActivityManager");

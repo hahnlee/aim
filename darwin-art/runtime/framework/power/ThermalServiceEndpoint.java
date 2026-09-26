@@ -72,7 +72,8 @@ public final class ThermalServiceEndpoint extends Binder {
                 && code != TRANSACTION_GET_CURRENT_COOLING_DEVICES_WITH_TYPE
                 && code != TRANSACTION_GET_THERMAL_HEADROOM
                 && code != TRANSACTION_GET_THERMAL_HEADROOM_THRESHOLDS) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         if (reply == null) return false;
         data.enforceInterface(DESCRIPTOR);
@@ -130,7 +131,8 @@ public final class ThermalServiceEndpoint extends Binder {
                 }
                 return true;
             default:
-                return super.onTransact(code, data, reply, flags);
+                return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
     }
 

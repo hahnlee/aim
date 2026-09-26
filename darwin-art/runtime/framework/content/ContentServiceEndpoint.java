@@ -57,7 +57,8 @@ public final class ContentServiceEndpoint extends Binder {
             if (reply != null) reply.writeNoException();
             return true;
         }
-        return super.onTransact(code, data, reply, flags);
+        return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
     }
 
     private void register(Uri uri, boolean descendants, IBinder observer, int userId)

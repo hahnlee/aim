@@ -169,7 +169,8 @@ public final class StorageManagerEndpoint extends Binder {
             return true;
         }
         if (code != getVolumeListCode || reply == null) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
 
         data.enforceInterface(DESCRIPTOR);

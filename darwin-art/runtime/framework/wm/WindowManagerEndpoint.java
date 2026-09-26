@@ -65,7 +65,8 @@ public final class WindowManagerEndpoint extends Binder {
             reply.writeStrongBinder(session);
             return true;
         }
-        if (code != hasNavigationBarCode) return super.onTransact(code, data, reply, flags);
+        if (code != hasNavigationBarCode) return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         data.enforceInterface(DESCRIPTOR);
         int displayId = data.readInt();
         data.enforceNoDataAvail();

@@ -76,7 +76,8 @@ public final class JobSchedulerEndpoint extends Binder {
         }
         if (code < TRANSACTION_SCHEDULE || code > TRANSACTION_NOTE_PENDING_USER_REQUESTED_APP_STOP
                 || reply == null) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
 
         data.enforceInterface(DESCRIPTOR);

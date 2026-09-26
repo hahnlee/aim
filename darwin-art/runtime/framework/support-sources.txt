@@ -71,6 +71,7 @@ runtime/framework/notification/NotificationManagerEndpoint.java
 runtime/framework/notification/NotificationRecords.java
 runtime/framework/os/RemoteBinder.java
 runtime/framework/os/SystemServices.java
+runtime/framework/os/UnsupportedTransactions.java
 runtime/framework/pm/apex/DarwinApexService.java
 runtime/framework/pm/installd/DarwinInstalld.java
 runtime/framework/pm/art/DarwinArtd.java

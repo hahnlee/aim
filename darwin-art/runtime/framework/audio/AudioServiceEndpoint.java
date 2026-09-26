@@ -175,7 +175,8 @@ public final class AudioServiceEndpoint extends Binder {
             return true;
         }
         // Deliberately leave unrelated IAudioService operations unsupported.
-        return super.onTransact(code, data, reply, flags);
+        return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
     }
 
     private static boolean validStreamType(int streamType) {
