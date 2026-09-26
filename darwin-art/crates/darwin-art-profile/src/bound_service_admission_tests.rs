@@ -40,6 +40,7 @@ fn existing_admission(
         paths,
         processes: Mutex::new(ProcessRegistry::default()),
         properties: Mutex::new(None),
+        build_identity: String::new(),
         host_commands: Default::default(),
         runtime_services: Default::default(),
         application_launches: Default::default(),

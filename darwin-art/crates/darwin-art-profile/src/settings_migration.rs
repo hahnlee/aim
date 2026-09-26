@@ -87,6 +87,16 @@ pub(crate) fn settings_path(mount: &Path) -> PathBuf {
 
 /// Writes `packages.xml` for `packages` unless PMS settings already exist.
 /// Returns whether it wrote the file.
+/// Whether PackageManagerService Settings are still to be written: once PMS
+/// (or an earlier migration) owns them, the ledger is no longer an input.
+pub(crate) fn pending(mount: &Path) -> bool {
+    let settings = settings_path(mount);
+    let directory = settings.parent().expect("settings has a parent");
+    !(settings.exists()
+        || directory.join("packages-backup.xml").exists()
+        || directory.join("packages-reserve-copy.xml").exists())
+}
+
 pub(crate) fn migrate(
     mount: &Path,
     packages: &[LedgerPackage],

@@ -119,6 +119,58 @@ fn move_install(store: &Path, package: &str, legacy: &Path) -> Result<PathBuf, P
     Ok(target)
 }
 
+/// Gives the owner (the system server) write access to every install
+/// directory in the store and its `lib`/`oat` trees, as installd's system-owned
+/// `/data/app` directories are. PackageManagerService extracts native
+/// libraries into `lib/<isa>` on install and again when the build fingerprint
+/// changes; a read-only directory fails that scan and PMS deletes the package
+/// as invalid. Installed files (APKs, libraries) keep their modes.
+pub(crate) fn open_code_directories(store: &Path) -> Result<(), ProfileError> {
+    let buckets = match fs::read_dir(store) {
+        Ok(buckets) => buckets,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for bucket in buckets {
+        let bucket = bucket?.path();
+        if !bucket
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("~~"))
+        {
+            continue;
+        }
+        for install in fs::read_dir(&bucket)? {
+            open_directory_tree(&install?.path(), 0)?;
+        }
+    }
+    Ok(())
+}
+
+fn open_directory_tree(directory: &Path, depth: usize) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(directory)?;
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    let mut permissions = metadata.permissions();
+    if permissions.mode() & 0o700 != 0o700 {
+        permissions.set_mode(permissions.mode() | 0o700);
+        fs::set_permissions(directory, permissions)?;
+    }
+    // install/, lib/, lib/<isa>/, oat/, oat/<isa>/
+    if depth < 2 {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if depth == 0 && name != "lib" && name != "oat" {
+                continue;
+            }
+            open_directory_tree(&entry.path(), depth + 1)?;
+        }
+    }
+    Ok(())
+}
+
 /// `android-elf/arm64-v8a` becomes PMS's `lib/arm64`.
 fn adopt_native_directory(install: &Path) -> Result<(), ProfileError> {
     let legacy = install.join(LEGACY_NATIVE);
@@ -232,6 +284,39 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn code_directories_become_owner_writable_and_files_keep_their_modes() {
+        let store = store("open");
+        let install = store.join("~~bucket/org.example-abc");
+        fs::create_dir_all(install.join("lib/arm64")).unwrap();
+        fs::create_dir_all(install.join("oat/arm64")).unwrap();
+        fs::create_dir_all(install.join("other")).unwrap();
+        fs::write(install.join("base.apk"), b"base").unwrap();
+        fs::write(install.join("lib/arm64/libx.so"), b"elf").unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let set = |path: &Path, mode: u32| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap()
+        };
+        set(&install.join("base.apk"), 0o400);
+        set(&install.join("lib/arm64/libx.so"), 0o400);
+        for directory in ["lib/arm64", "lib", "oat/arm64", "oat", "other"] {
+            set(&install.join(directory), 0o500);
+        }
+        set(&install, 0o500);
+        open_code_directories(&store).unwrap();
+        for directory in ["", "lib", "lib/arm64", "oat", "oat/arm64"] {
+            assert_eq!(mode(&install.join(directory)), 0o700, "{directory}");
+        }
+        // Only the PMS-owned trees are opened; installed files stay read-only.
+        assert_eq!(mode(&install.join("other")), 0o500);
+        assert_eq!(mode(&install.join("base.apk")), 0o400);
+        assert_eq!(mode(&install.join("lib/arm64/libx.so")), 0o400);
+        // PMS can now extract into lib/arm64.
+        fs::write(install.join("lib/arm64/tmp.extract"), b"x").unwrap();
+        set(&install.join("other"), 0o700);
+        fs::remove_dir_all(&store).unwrap();
     }
 
     fn legacy_install(store: &Path) -> PathBuf {
