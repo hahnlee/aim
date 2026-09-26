@@ -55,6 +55,7 @@ mkdir -p "$out/classes"
   "$root/tools/tests/jobscheduler/stubs/android/os/PersistableBundle.java" \
   "$root/tools/tests/jobscheduler/stubs/android/content/ClipData.java" \
   "$root/tools/tests/jobscheduler/stubs/dev/darwinart/runtime/job/JobSchedulerService.java" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/runtime/framework/am/ApplicationProcessRegistry.java" \
   "$root/runtime/framework/job/JobSchedulerEndpoint.java" \
   "$root/tools/tests/jobscheduler/JobSchedulerEndpointTest.java"
@@ -67,6 +68,8 @@ mkdir -p "$out/service-classes"
       ! -path '*/stubs/dev/darwinart/runtime/job/JobSchedulerService.java' -print) \
   "$root/runtime/framework/am/ApplicationProcessRegistry.java" \
   "$root/runtime/framework/am/SystemServiceBindings.java" \
+  "$root/tools/tests/connectivity/stubs/android/net/ProxyInfo.java" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/runtime/framework/connectivity/ConnectivityState.java" \
   "$root/runtime/framework/connectivity/ConnectivitySnapshot.java" \
   "$root/runtime/framework/am/PackageQueries.java" \

@@ -23,7 +23,7 @@ public final class ProxyInfo implements Parcelable {
     public int getPort() { return port; }
 
     public int describeContents() { return 0; }
-    @Override public void writeToParcel(Parcel dest, int flags) {
+    public void writeToParcel(Parcel dest, int flags) {
         dest.writeString(host);
         dest.writeInt(port);
     }

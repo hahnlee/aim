@@ -51,6 +51,7 @@ mkdir -p "$out/classes"
   "$root/tools/tests/shortcut/stubs/android/os/Parcelable.java" \
   "$root/tools/tests/shortcut/stubs/android/os/RemoteException.java" \
   "$root/tools/tests/shortcut/stubs/android/content/pm/ParceledListSlice.java" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/runtime/framework/am/ApplicationProcessRegistry.java" \
   "$root/runtime/framework/shortcut/ShortcutManagerEndpoint.java" \
   "$root/tools/tests/shortcut/ShortcutManagerEndpointTest.java"

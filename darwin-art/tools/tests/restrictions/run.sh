@@ -51,6 +51,7 @@ mkdir -p "$out/classes"
   "$root/tools/tests/restrictions/stubs/android/os/Parcelable.java" \
   "$root/tools/tests/connectivity/stubs/android/os/RemoteException.java" \
   "$root/tools/tests/restrictions/stubs/android/os/Bundle.java" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/runtime/framework/restrictions/RestrictionsManagerEndpoint.java" \
   "$root/tools/tests/restrictions/RestrictionsManagerEndpointTest.java"
 "$java_home/bin/java" -ea -cp "$out/classes" \

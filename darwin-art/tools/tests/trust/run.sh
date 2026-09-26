@@ -47,7 +47,9 @@ javac --release 8 -encoding UTF-8 -d "$out" \
   "$root/tools/tests/connectivity/stubs/android/os/Binder.java" \
   "$root/tools/tests/connectivity/stubs/android/os/IBinder.java" \
   "$root/tools/tests/connectivity/stubs/android/os/Parcel.java" \
+  "$root/tools/tests/connectivity/stubs/android/os/Parcelable.java" \
   "$root/tools/tests/connectivity/stubs/android/os/RemoteException.java" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/runtime/framework/trust/TrustManagerEndpoint.java" \
   "$root/tools/tests/trust/TrustManagerEndpointTest.java"
 java -ea -cp "$out" dev.darwinart.runtime.trust.TrustManagerEndpointTest

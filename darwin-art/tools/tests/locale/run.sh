@@ -51,6 +51,7 @@ mkdir -p "$out/classes"
   "$root/tools/tests/locale/stubs/android/os/LocaleList.java" \
   "$root/tools/tests/locale/stubs/android/content/res/Configuration.java" \
   "$root/tools/tests/locale/stubs/android/content/res/Resources.java" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/runtime/framework/locale/LocaleManagerEndpoint.java" \
   "$root/tools/tests/locale/LocaleManagerEndpointTest.java"
 "$java_home/bin/java" -ea -cp "$out/classes" \
