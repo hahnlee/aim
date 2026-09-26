@@ -447,7 +447,11 @@ static DarwinArtSurface* CreateSurfaceOnMain(
       surface->window.releasedWhenClosed = NO;
       surface->window.title =
           darwin_art::window::DecodeSurfaceWindowTitle(create_info->title);
+      // The green button and View > Enter Full Screen take the root to macOS
+      // fullscreen; the resulting content resize is a host geometry fact.
+      surface->window.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
       darwin_art::window::ApplySurfaceApplicationIdentity(application, surface->window);
+      darwin_art::window::InstallSurfaceApplicationMenu(application, surface->window.title);
       const auto root_result = darwin_art::window::InitializeDesktopRoot(surface);
       if (root_result != DARWIN_ART_SURFACE_OK) {
         delete surface;
