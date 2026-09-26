@@ -20,7 +20,6 @@ skip_reason() {
       tools/tests/system-services.sh) echo "needs the pinned system image" ;;
     tools/tests/android-system-image-build.sh) echo "builds the system image" ;;
     tools/tests/binder-recipient/*) echo "needs its fixture arguments" ;;
-    tools/tests/image-reader-ndk-runtime.sh) echo "uses hidden product symbols (#115)" ;;
     *) return 1 ;;
   esac
 }
