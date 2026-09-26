@@ -21,6 +21,12 @@ usually ends the process.
   root as hidden and ActivityTask moves the task to the back: the visible
   Activities lose app visibility and pause and stop. The process and its
   services keep running, so a download service keeps downloading.
+- **Back on the task's root is Home too.** As ActivityClientController.
+  onBackPressed does for a task root started from the launcher, the system
+  server moves the task to the back: it asks the host (HOST_HIDE on the root
+  geometry receiver) to close the root as its close button would, and the
+  host's hidden report stops the task. Back anywhere else finishes that
+  Activity.
 - **Dock reopen and Deminimize return to the app.** The window is shown again,
   the Activities regain app visibility and the top one resumes through the
   restart path (`onRestart` → `onStart` → `onResume`). It is not recreated.

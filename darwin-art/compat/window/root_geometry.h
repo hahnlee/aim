@@ -121,6 +121,10 @@ class RootGeometryApplier final {
 // AppKit main thread: applies `publication` to the process's visible root.
 RootGeometryStatus ApplyProcessRootGeometry(
     const RootGeometryPublication& publication);
+// AppKit main thread: the system server moved this process's task to the
+// back; closes the root as its close button does (ADR 0011: ordered out and
+// reported hidden). False without a visible root window.
+bool HideProcessRoot();
 // Any thread: whether this process published a visible desktop root.
 bool ProcessHasVisibleRoot();
 // The visible root's Android raster scale, or 0 without a visible root.

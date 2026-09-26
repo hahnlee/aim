@@ -37,6 +37,9 @@ public final class ActivityClientControllerEndpoint extends Binder {
         // ActivityRecord.mOccludesParent from the Activity's window style.
         final boolean occludesParent;
         State state = State.RESUMED;
+        // The Activity the launcher started this task with (the process's
+        // initial launch): Back there moves the task to the back.
+        boolean launcherRoot;
         int requestedOrientation;
         // Merged configuration most recently sent to the Activity by a launch,
         // configuration change or relaunch transaction.
@@ -103,6 +106,9 @@ public final class ActivityClientControllerEndpoint extends Binder {
         boolean occludesParent = ActivityWindowStyle.occludesParent(info);
         synchronized (activityLock) {
             commitLaunchLocked(applicationThread, token, info, occludesParent, reported);
+            ArrayDeque<IBinder> stack = activityStacks.get(applicationThread);
+            ActivityRecord record = activityRecords.get(token);
+            if (record != null && stack != null && stack.size() == 1) record.launcherRoot = true;
         }
         UidProcessStates.changed();
         scheduleIdleTimeout(token);
@@ -544,19 +550,27 @@ public final class ActivityClientControllerEndpoint extends Binder {
             return true;
         }
         if (code == onBackPressedCode) {
-            // Activity.onBackPressed with no app handler. AOSP moves a task
-            // root launched from the launcher to the back instead; that needs
-            // the host to hide the window (#100), so every Activity takes the
-            // request-finish path: the app finishes itself (finishActivity).
+            // ActivityClientController.onBackPressed: Back on the task's root
+            // started from the launcher moves the task to the back, keeping
+            // its state as Home does; anywhere else the Activity finishes
+            // itself through the request-finish callback (finishActivity).
             IBinder callback = data.readStrongBinder();
             data.enforceNoDataAvail();
+            IBinder moveToBack = null;
+            boolean known;
             synchronized (activityLock) {
-                if (activityRecords.get(token) == null) {
-                    if (reply != null) reply.writeNoException();
-                    return true;
+                ActivityRecord record = activityRecords.get(token);
+                known = record != null;
+                ArrayDeque<IBinder> stack =
+                        record == null ? null : activityStacks.get(record.applicationThread);
+                if (record != null && record.launcherRoot && stack != null
+                        && token.equals(stack.peekFirst())) {
+                    moveToBack = record.applicationThread;
                 }
             }
-            if (callback != null) {
+            if (moveToBack != null) {
+                TaskGeometryController.requireInstance().requestHostHide(moveToBack);
+            } else if (known && callback != null) {
                 android.app.IRequestFinishCallback.Stub.asInterface(callback).requestFinish();
             }
             if (reply != null) reply.writeNoException();

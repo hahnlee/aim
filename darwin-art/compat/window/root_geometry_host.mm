@@ -85,6 +85,18 @@ RootGeometryStatus ApplyProcessRootGeometry(
   return status;
 }
 
+bool HideProcessRoot() {
+  if (![NSThread isMainThread]) return false;
+  DarwinArtSurface* surface = g_active_gpu_surface.load(std::memory_order_acquire);
+  if (surface == nullptr || !surface->visible || surface->window == nil ||
+      !surface->window.visible) {
+    return false;
+  }
+  // windowShouldClose: orders the window out and publishes the hidden root.
+  [surface->window performClose:nil];
+  return true;
+}
+
 uint32_t ProcessRootRasterScale() {
   return ProcessHasVisibleRoot() ? RootGeometryReports::Process().backing_scale() : 0;
 }
