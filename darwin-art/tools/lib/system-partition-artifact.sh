@@ -28,7 +28,8 @@ darwin_art_verify_system_partition() (
   [[ "$input" = /* && -d "$input" && ! -L "$input" ]] || return 64
   while read -r identity path extra; do
     [[ -z "${identity:-}" || "$identity" == \#* ]] && continue
-    [[ -z "${extra:-}" && ( "$path" == /system/* || "$path" == /product/overlay/* ) &&
+    [[ -z "${extra:-}" && ( "$path" == /system/* || "$path" == /product/overlay/* ||
+       "$path" == /vendor/etc/permissions/* ) &&
        "$path" != *..* ]] || return 64
     file="$input$path"
     if [[ "$identity" == link:* ]]; then

@@ -46,8 +46,9 @@ fn validate(root: &Path) -> io::Result<()> {
             }
             continue;
         }
-        // `product` carries the product partition's framework overlays.
-        if !["apex", "system", "linkerconfig", "product"]
+        // `product` carries the product partition's framework overlays and
+        // `vendor` the device's feature declarations.
+        if !["apex", "system", "linkerconfig", "product", "vendor"]
             .iter()
             .any(|name| entry.file_name() == *name)
             || !entry.file_type()?.is_dir()
