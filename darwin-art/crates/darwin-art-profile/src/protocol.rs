@@ -36,6 +36,9 @@ pub(crate) const OP_HOST_COMMAND: u16 = 28;
 /// One chunk of a host command's output, ahead of its OP_HOST_COMMAND
 /// response (`dumpsys` output exceeds one frame).
 pub(crate) const OP_HOST_COMMAND_OUTPUT: u16 = 29;
+/// The running daemon's executable identity (`binary_identity`), so a
+/// launcher can tell it from the installed daemon binary.
+pub(crate) const OP_BUILD_IDENTITY: u16 = 30;
 pub(crate) const RESPONSE_BIT: u16 = 0x8000;
 
 pub(crate) struct Message {

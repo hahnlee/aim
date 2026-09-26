@@ -203,6 +203,20 @@ fn build(root: &Path, full: bool) -> Result<(), String> {
         "immutable Android system image",
         "bash",
         ["tools/build-android-system-image.sh"],
+    )?;
+    // The launcher's own binaries: the release profile daemon and control
+    // (tools/darwin-art, run-android-apk-app.sh) and the debug runtime host.
+    run_command(
+        root,
+        "profile daemon and control",
+        cargo(),
+        ["build", "-q", "--release", "-p", "darwin-art-profile", "--bins"],
+    )?;
+    run_command(
+        root,
+        "runtime host",
+        cargo(),
+        ["build", "-q", "-p", "darwin-art-host"],
     )
 }
 

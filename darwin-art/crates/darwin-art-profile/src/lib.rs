@@ -405,8 +405,93 @@ impl Drop for ProfileLease {
     }
 }
 
+/// A daemon binary's build identity: its size and modification time. A
+/// rebuilt `darwin-artd` differs from the one a running daemon was started from.
+pub(crate) fn binary_identity(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(format!(
+        "{}:{}.{:09}",
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec()
+    ))
+}
+
+fn daemon_binary() -> PathBuf {
+    env::var_os("DARWIN_ART_DAEMON")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::current_exe()
+                .unwrap_or_else(|_| PathBuf::from("darwin-artctl"))
+                .with_file_name("darwin-artd")
+        })
+}
+
+/// Whether the running daemon was started from a different build than the
+/// installed `darwin-artd`. A daemon too old to answer is stale as well.
+fn running_daemon_is_stale(paths: &ProfilePaths) -> bool {
+    let Some(installed) = binary_identity(&daemon_binary()) else {
+        return false;
+    };
+    match request(paths, protocol::OP_BUILD_IDENTITY, &[]) {
+        Ok(running) => running != installed.as_bytes(),
+        // Unreachable: nothing to compare. Any other failure is a daemon that
+        // does not know this operation, i.e. an older build.
+        Err(ProfileError::Io(error))
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+/// Replaces a stale daemon that serves nobody; a busy one is kept (its
+/// processes and leases belong to it) and reported instead of reused silently.
+fn replace_stale_daemon(paths: &ProfilePaths) -> Result<bool, ProfileError> {
+    if !running_daemon_is_stale(paths) {
+        return Ok(false);
+    }
+    let idle = daemon_status(paths)
+        .map(|status| status.split_whitespace().any(|field| field == "leases=0"))
+        .unwrap_or(false)
+        && list_processes(paths).map(|list| list.trim().is_empty()).unwrap_or(false);
+    if !idle {
+        eprintln!(
+            "darwin-artctl: warning: the running darwin-artd is older than {}; it serves \
+             processes, so it is kept. Stop them and run `darwin-artctl shutdown` to update it.",
+            daemon_binary().display()
+        );
+        return Ok(false);
+    }
+    eprintln!("darwin-artctl: restarting the stale darwin-artd with the installed build");
+    // The daemon may close the connection as it exits instead of replying;
+    // its socket disappearing is the completion that matters.
+    let _ = shutdown_daemon(paths);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while paths.socket.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    Ok(true)
+}
+
 pub fn ensure_daemon(paths: &ProfilePaths) -> Result<PathBuf, ProfileError> {
-    match request(paths, protocol::OP_ENSURE, &[]) {
+    let running = request(paths, protocol::OP_ENSURE, &[]);
+    let running = match running {
+        Ok(bytes) if replace_stale_daemon(paths)? => {
+            drop(bytes);
+            Err(ProfileError::Io(io::Error::from(io::ErrorKind::NotFound)))
+        }
+        other => other,
+    };
+    match running {
         Ok(bytes) => return Ok(PathBuf::from(OsString::from_vec(bytes))),
         Err(ProfileError::Io(error))
             if matches!(
@@ -531,13 +616,7 @@ fn request(paths: &ProfilePaths, operation: u16, payload: &[u8]) -> Result<Vec<u
 
 fn spawn_daemon(paths: &ProfilePaths) -> Result<(), ProfileError> {
     std::fs::create_dir_all(&paths.profile_root)?;
-    let daemon = env::var_os("DARWIN_ART_DAEMON")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            env::current_exe()
-                .unwrap_or_else(|_| PathBuf::from("darwin-artctl"))
-                .with_file_name("darwin-artd")
-        });
+    let daemon = daemon_binary();
     let log_path = paths.profile_root.join("darwin-artd.log");
     // A crashed or repeatedly restarted runtime must not turn its diagnostic
     // log into unbounded profile storage. Keep one bounded previous log; the

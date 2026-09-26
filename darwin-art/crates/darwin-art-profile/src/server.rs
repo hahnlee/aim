@@ -34,6 +34,9 @@ struct State {
     processes: Mutex<ProcessRegistry>,
     /// init's property service, opened once the profile filesystem is up.
     properties: Mutex<Option<crate::property_service::PropertyService>>,
+    // The executable this daemon started from, captured before a rebuild can
+    // replace the file.
+    build_identity: String,
     host_commands: crate::host_commands::HostCommands,
     runtime_services: crate::runtime_service_state::RuntimeServiceState,
     application_launches:
@@ -105,6 +108,10 @@ pub fn run_daemon(config: DaemonConfig) -> Result<(), ProfileError> {
         registry: Mutex::new(PackageRegistry::new(&config.paths)),
         processes: Mutex::new(ProcessRegistry::default()),
         properties: Mutex::new(None),
+        build_identity: std::env::current_exe()
+            .ok()
+            .and_then(|path| crate::binary_identity(&path))
+            .unwrap_or_default(),
         host_commands: Default::default(),
         runtime_services: Default::default(),
         application_launches: Default::default(),
@@ -694,6 +701,15 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
             return state
                 .scm
                 .serve(&state.processes, &mut stream, &message.payload);
+        }
+        protocol::OP_BUILD_IDENTITY => {
+            require_empty(&message.payload)?;
+            protocol::write_response(
+                &mut stream,
+                message.operation,
+                0,
+                state.build_identity.as_bytes(),
+            )?;
         }
         _ => protocol::write_response(&mut stream, message.operation, 38, b"unknown operation")?,
     }
