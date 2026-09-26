@@ -6,6 +6,7 @@
 #include "receiver_registry.h"
 #include "input_routing.h"
 #include "receiver_finish_owner.h"
+#include "key_fallback.h"
 
 #include <atomic>
 #include <cstdint>
@@ -29,6 +30,8 @@ struct InputReceiver {
   std::shared_ptr<InputChannelResources> channel;
   uint32_t next_sequence = 1;
   mutable ReceiverFinishOwner finishes;
+  // Unhandled-key fallbacks for keys dispatched to this receiver.
+  mutable KeyFallbackOwner key_fallbacks;
   bool touch_mode = false;
   void* looper = nullptr;
   ReceiverId registry_id = 0;

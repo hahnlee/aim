@@ -147,6 +147,7 @@ pub const HEADLESS_ADAPTER_SOURCES: &[&str] = &[
     "../runtime/framework/input/root_key_ingress.cc",
     "../runtime/framework/input/root_key_ingress_registry.cc",
     "../runtime/framework/input/receiver_jni.cc",
+    "../runtime/framework/input/key_fallback.cc",
     "../runtime/framework/input/receiver_transport_policy.cc",
     "../runtime/framework/input/receiver_input_consumer.cc",
     "../runtime/framework/input/receiver_packet_consumption.cc",
@@ -387,6 +388,7 @@ pub const GRAPHICS_ADAPTER_SOURCES: &[&str] = &[
     "../runtime/framework/input/root_key_ingress.cc",
     "../runtime/framework/input/root_key_ingress_registry.cc",
     "../runtime/framework/input/receiver_jni.cc",
+    "../runtime/framework/input/key_fallback.cc",
     "../runtime/framework/input/receiver_transport_policy.cc",
     "../runtime/framework/input/receiver_input_consumer.cc",
     "../runtime/framework/input/receiver_packet_consumption.cc",
@@ -648,6 +650,7 @@ mod tests {
             for owner in [
                 "looper/reusable_task.cc",
                 "../runtime/framework/input/receiver_jni.cc",
+                "../runtime/framework/input/key_fallback.cc",
                 "../runtime/framework/input/receiver_transport_policy.cc",
                 "../runtime/framework/input/receiver_input_consumer.cc",
                 "../runtime/framework/input/receiver_packet_consumption.cc",

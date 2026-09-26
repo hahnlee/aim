@@ -218,6 +218,7 @@ FrameworkInputEventDispatchResult DispatchInputPacketToReceiver(
   auto original = context;
   original.origin.sequence = packet.kind == DarwinArtInputPacketKind::kPointer
                                  ? packet.pointer.sequence : packet.key.sequence;
+  if (packet.kind == DarwinArtInputPacketKind::kKey) original.key = &packet.key;
   return DispatchInputPacketImpl(
       env, packet,
       [&original](JNIEnv* callback_env, jobject event) {

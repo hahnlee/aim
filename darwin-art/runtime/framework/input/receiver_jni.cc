@@ -293,6 +293,31 @@ void InputReceiverFinish(JNIEnv* env, jclass, jlong pointer, jint sequence,
       }
     }
   }
+  // Outside the callback admission: the fallback lookup runs Java code.
+  if (receiver != nullptr && receiver->channel != nullptr) {
+    const auto follow_ups = receiver->key_fallbacks.Finished(
+        env, static_cast<uint32_t>(sequence), handled == JNI_TRUE);
+    const auto recipient = receiver->routing_recipient.lock();
+    bool queued = false;
+    for (const auto& key : follow_ups) {
+      // Queued behind the original, never dispatched reentrantly.
+      darwin_art::DarwinArtInputPacket packet;
+      packet.kind = darwin_art::DarwinArtInputPacketKind::kKey;
+      packet.key = key;
+      queued = EnqueueInputRoutingPacket(receiver->channel->Routing(), packet,
+                                         recipient == nullptr ? 0 : recipient->id) ||
+               queued;
+      if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
+        std::cerr << "ART Android InputEvent unhandled-key follow-up pid=" << getpid()
+                  << " key=" << key.key_code << " action=" << key.action
+                  << " flags=0x" << std::hex << key.flags << std::dec << "\n";
+      }
+    }
+    if (queued) {
+      WakePending();
+      (void)receiver->channel->Endpoint()->WakeLocal();
+    }
+  }
   if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
     std::cerr << "ART Android InputEvent finish pid=" << getpid()
               << " sequence=" << sequence

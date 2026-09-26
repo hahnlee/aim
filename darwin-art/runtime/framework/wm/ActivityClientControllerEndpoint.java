@@ -86,6 +86,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
     private final int activityDestroyedCode = transaction("activityDestroyed");
     private final int activityRelaunchedCode = transaction("activityRelaunched");
     private final int finishActivityCode = transaction("finishActivity");
+    private final int onBackPressedCode = transaction("onBackPressed");
     private final int setRequestedOrientationCode = transaction("setRequestedOrientation");
     private final int getRequestedOrientationCode = transaction("getRequestedOrientation");
 
@@ -421,6 +422,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
                 && code != activityDestroyedCode
                 && code != activityRelaunchedCode
                 && code != finishActivityCode
+                && code != onBackPressedCode
                 && code != setRequestedOrientationCode
                 && code != getRequestedOrientationCode) {
             return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
@@ -539,6 +541,25 @@ public final class ActivityClientControllerEndpoint extends Binder {
                 }
             }
             UidProcessStates.changed();
+            return true;
+        }
+        if (code == onBackPressedCode) {
+            // Activity.onBackPressed with no app handler. AOSP moves a task
+            // root launched from the launcher to the back instead; that needs
+            // the host to hide the window (#100), so every Activity takes the
+            // request-finish path: the app finishes itself (finishActivity).
+            IBinder callback = data.readStrongBinder();
+            data.enforceNoDataAvail();
+            synchronized (activityLock) {
+                if (activityRecords.get(token) == null) {
+                    if (reply != null) reply.writeNoException();
+                    return true;
+                }
+            }
+            if (callback != null) {
+                android.app.IRequestFinishCallback.Stub.asInterface(callback).requestFinish();
+            }
+            if (reply != null) reply.writeNoException();
             return true;
         }
         if (code == finishActivityCode) {

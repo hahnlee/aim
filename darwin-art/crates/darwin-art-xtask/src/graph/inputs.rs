@@ -128,6 +128,7 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
         PathBuf::from("runtime/framework/input/root_key_ingress_registry.h"),
         PathBuf::from("runtime/framework/input/root_key_ingress_lifetime.h"),
         PathBuf::from("runtime/framework/input/receiver_jni.cc"),
+        PathBuf::from("runtime/framework/input/key_fallback.cc"),
         PathBuf::from("runtime/framework/input/receiver_transport_policy.cc"),
         PathBuf::from("runtime/framework/input/receiver_transport_policy.h"),
         PathBuf::from("runtime/framework/input/receiver_input_consumer.cc"),
@@ -612,6 +613,8 @@ pub(crate) fn is_global_digest_excluded(path: &Path) -> bool {
             | "runtime/framework/input/event_ingress.h"
             | "runtime/framework/input/channel_owner.cc"
             | "runtime/framework/input/receiver_jni.cc"
+            | "runtime/framework/input/key_fallback.cc"
+            | "runtime/framework/input/key_fallback.h"
             | "runtime/framework/input/receiver_transport_policy.cc"
             | "runtime/framework/input/receiver_transport_policy.h"
             | "runtime/framework/input/receiver_input_consumer.cc"
