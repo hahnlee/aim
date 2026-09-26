@@ -10,10 +10,7 @@ use std::sync::Arc;
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nonce = crate::test_nonce();
         let path = std::env::temp_dir().join(format!(
             "darwin-writable-mount-{}-{nonce}",
             std::process::id()

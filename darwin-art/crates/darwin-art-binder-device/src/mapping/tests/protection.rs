@@ -54,6 +54,22 @@ fn protection_at(request: usize) -> Option<i32> {
 
 #[test]
 fn actual_vm_protection_and_owner_drop() {
+    // Any other test thread may mmap the released range before the check
+    // (#21), so inspect in a copy of this binary running only this test.
+    const ISOLATED: &str = "DARWIN_ART_MAPPING_PROTECTION_ISOLATED";
+    if std::env::var_os(ISOLATED).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "mapping::tests::protection::actual_vm_protection_and_owner_drop",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env(ISOLATED, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
     let _guard = MAPPING_TEST_LOCK.lock().unwrap();
     let map = ReceiveMapping::new(32768).unwrap();
     let reader = map.client_address();
@@ -64,8 +80,8 @@ fn actual_vm_protection_and_owner_drop() {
         Some(libc::PROT_READ | libc::PROT_WRITE)
     );
     drop(map);
-    // No heap allocations between Drop and inspection; serialize the crate's
-    // mapping tests so another test cannot intentionally reuse these regions.
+    // No heap allocations between Drop and inspection, and no other test
+    // runs in this process.
     assert_eq!(protection_at(reader), None);
     assert_eq!(protection_at(writer), None);
 }

@@ -96,17 +96,27 @@ impl Directory {
         }
     }
     fn lock(&self) -> io::Result<File> {
-        let fd = unsafe {
-            libc::openat(
-                self.0.as_raw_fd(),
-                c".external-storage.lock".as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600u32,
-            )
+        // Two publishers creating the lock at once can see a transient ENOENT
+        // from openat(O_CREAT) on macOS (#21); the name is ours, so retry.
+        let mut attempts = 0;
+        let fd = loop {
+            let fd = unsafe {
+                libc::openat(
+                    self.0.as_raw_fd(),
+                    c".external-storage.lock".as_ptr(),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    0o600u32,
+                )
+            };
+            if fd >= 0 {
+                break fd;
+            }
+            let error = io::Error::last_os_error();
+            attempts += 1;
+            if error.raw_os_error() != Some(libc::ENOENT) || attempts == 8 {
+                return Err(error);
+            }
         };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
         let file = unsafe { File::from_raw_fd(fd) };
         let metadata = file.metadata()?;
         if !metadata.is_file()

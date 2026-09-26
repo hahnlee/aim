@@ -6,10 +6,7 @@ struct TestDirectory(PathBuf);
 
 impl TestDirectory {
     fn new() -> Self {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nonce = crate::test_nonce();
         let path = std::env::temp_dir().join(format!(
             "darwin-private-authority-{}-{nonce}",
             std::process::id()

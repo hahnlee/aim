@@ -328,13 +328,18 @@ mod tests {
 
     impl TempTree {
         fn new() -> Self {
+            // Parallel tests can read the same clock value (#21).
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let nonce = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("clock")
                 .as_nanos();
-            let path =
-                std::env::temp_dir().join(format!("art-overlay-{}-{nonce}", std::process::id()));
-            fs::create_dir_all(&path).expect("temp tree");
+            let path = std::env::temp_dir().join(format!(
+                "art-overlay-{}-{nonce}-{serial}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).expect("temp tree");
             Self(path)
         }
     }

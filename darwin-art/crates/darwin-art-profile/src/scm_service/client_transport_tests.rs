@@ -19,12 +19,15 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        // Parallel tests can read the same clock value (#21).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "dart-scm-client-{}-{suffix}.sock",
+            "da-scmc-{}-{suffix}-{serial}.sock",
             std::process::id()
         ));
         let listener = UnixListener::bind(&path).unwrap();

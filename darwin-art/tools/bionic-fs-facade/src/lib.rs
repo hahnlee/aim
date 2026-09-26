@@ -3030,3 +3030,18 @@ pub const PROCESS_OWNER_BUSY: c_int = 5;
 // safety boundary. Keep it in the parent module's scope so the internal
 // filesystem model stays private while the ABI lifecycle remains reviewable.
 include!("process_api.rs");
+
+/// Unique fixture suffix for tests running in parallel: the macOS clock has
+/// microsecond resolution, so a timestamp alone collides between threads.
+#[cfg(test)]
+pub(crate) fn test_nonce() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!(
+        "{nanos}-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}

@@ -120,6 +120,17 @@ mod tests {
 
     #[test]
     fn failed_other_owner_commit_restores_entries_flags_provenance_and_allocator() {
+        // Another test thread can reuse a closed descriptor number before the
+        // check (#21), so check in a copy of this binary running only this test.
+        if std::env::var_os("DARWIN_ART_DESCRIPTOR_GROUP_ISOLATED").is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["descriptor_group::tests::failed_other_owner_commit_restores_entries_flags_provenance_and_allocator", "--exact", "--test-threads=1"])
+                .env("DARWIN_ART_DESCRIPTOR_GROUP_ISOLATED", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
         let mut table = DescriptorTable::default();
         let old = table.insert(Descriptor::File(File::open("/dev/null").unwrap())).unwrap();
         drop(table.close_entry(old));

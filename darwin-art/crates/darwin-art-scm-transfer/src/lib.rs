@@ -636,6 +636,14 @@ mod tests {
         })
     }
 
+    fn inode(fd: RawFd) -> io::Result<u64> {
+        let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, status.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { status.assume_init() }.st_ino)
+    }
+
     #[test]
     fn admission_retains_alias_until_eof_and_imported_fd_stays_live() {
         let (original, peer) = socket_pair();
@@ -643,6 +651,7 @@ mod tests {
         let key = owner.mint_key().unwrap();
         let prepared = owner.prepare(send(), key, &[original.as_fd()]).unwrap();
         let alias_fd = owner.alias_fd_for_test(key);
+        let alias_inode = inode(alias_fd).unwrap();
         let receiver_fd = duplicate(original.as_fd()).unwrap();
         owner.arm_enqueued(send(), key).unwrap();
         let imported_guardian = duplicate(prepared.guardian_writer()).unwrap();
@@ -678,8 +687,12 @@ mod tests {
         drop(prepared);
         drop(original);
         assert_eq!(owner.retire_if_eof(key).unwrap(), Retirement::Retired);
-        assert_eq!(unsafe { libc::fcntl(alias_fd, libc::F_GETFD) }, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        // Another test thread may already reuse the number (#21); the alias
+        // is closed when the number no longer names the same socket.
+        match inode(alias_fd) {
+            Ok(current) => assert_ne!(current, alias_inode),
+            Err(error) => assert_eq!(error.raw_os_error(), Some(libc::EBADF)),
+        }
         let byte = [b'P'];
         assert_eq!(
             unsafe { libc::write(peer.as_raw_fd(), byte.as_ptr().cast(), 1) },
