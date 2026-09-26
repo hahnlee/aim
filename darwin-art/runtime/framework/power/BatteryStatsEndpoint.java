@@ -36,7 +36,8 @@ public final class BatteryStatsEndpoint extends Binder {
         if (reply == null || (code != TRANSACTION_IS_CHARGING
                 && code != TRANSACTION_COMPUTE_BATTERY_TIME_REMAINING
                 && code != TRANSACTION_COMPUTE_CHARGE_TIME_REMAINING)) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         data.enforceInterface(DESCRIPTOR);
         data.enforceNoDataAvail();

@@ -23,7 +23,8 @@ public final class DesktopWindowMetadataEndpoint extends Binder {
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
-        if (code != TRANSACTION_REGISTER || reply == null) return super.onTransact(code, data, reply, flags);
+        if (code != TRANSACTION_REGISTER || reply == null) return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         data.enforceInterface(DESCRIPTOR);
         IBinder receiver = data.readStrongBinder();
         data.enforceNoDataAvail();

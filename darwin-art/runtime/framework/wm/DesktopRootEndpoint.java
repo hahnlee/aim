@@ -28,7 +28,8 @@ public final class DesktopRootEndpoint extends Binder {
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
         if (code != TRANSACTION_REGISTER || reply == null) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         data.enforceInterface(DESCRIPTOR);
         long incarnation = data.readLong();
@@ -66,7 +67,8 @@ public final class DesktopRootEndpoint extends Binder {
                 throws RemoteException {
             if ((code != TRANSACTION_FACT && code != TRANSACTION_BIND_WINDOW
                     && code != TRANSACTION_ATTACH_FOCUS_DECISIONS) || reply == null) {
-                return super.onTransact(code, data, reply, flags);
+                return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
             }
             data.enforceInterface(DESCRIPTOR);
             if (code == TRANSACTION_ATTACH_FOCUS_DECISIONS) {

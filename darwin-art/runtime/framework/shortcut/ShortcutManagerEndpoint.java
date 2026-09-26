@@ -36,10 +36,12 @@ public final class ShortcutManagerEndpoint extends Binder {
         }
         if (code != TRANSACTION_REPORT_SHORTCUT_USED
                 && code != TRANSACTION_GET_SHORTCUTS) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         if (reply == null) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
 
         data.enforceInterface(DESCRIPTOR);

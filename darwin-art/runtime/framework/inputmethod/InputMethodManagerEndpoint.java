@@ -27,7 +27,8 @@ public final class InputMethodManagerEndpoint extends Binder {
         if (code != getInputMethodListCode && code != getEnabledInputMethodListCode
                 && code != getInputMethodListLegacyCode
                 && code != getEnabledInputMethodListLegacyCode) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         if (reply == null) return false;
         data.enforceInterface(DESCRIPTOR);

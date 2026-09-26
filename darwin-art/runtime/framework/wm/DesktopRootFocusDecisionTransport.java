@@ -114,7 +114,8 @@ public final class DesktopRootFocusDecisionTransport {
         @Override
         protected final boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
-            if (code != TRANSACTION_DECISION) return super.onTransact(code, data, reply, flags);
+            if (code != TRANSACTION_DECISION) return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
             if (data == null || reply == null || (flags & IBinder.FLAG_ONEWAY) != 0) return false;
             data.enforceInterface(DESCRIPTOR);
             int version = data.readInt();

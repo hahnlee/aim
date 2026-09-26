@@ -29,9 +29,11 @@ public final class RestrictionsManagerEndpoint extends Binder {
         }
         if (code != TRANSACTION_GET_APPLICATION_RESTRICTIONS
                 && code != TRANSACTION_HAS_RESTRICTIONS_PROVIDER) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
-        if (reply == null) return super.onTransact(code, data, reply, flags);
+        if (reply == null) return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
 
         data.enforceInterface(DESCRIPTOR);
         if (code == TRANSACTION_GET_APPLICATION_RESTRICTIONS) {

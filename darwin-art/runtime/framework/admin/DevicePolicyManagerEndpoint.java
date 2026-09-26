@@ -54,7 +54,8 @@ public final class DevicePolicyManagerEndpoint extends Binder {
         if (code != getActiveAdminsCode && code != getDeviceOwnerComponentCode
                 && code != getDeviceOwnerComponentOnUserCode && code != hasDeviceOwnerCode
                 && code != getProfileOwnerAsUserCode) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
 
         data.enforceInterface(DESCRIPTOR);

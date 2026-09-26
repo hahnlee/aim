@@ -53,6 +53,7 @@ public final class InputManagerEndpoint extends Binder {
             reply.writeIntArray(devices.inputDeviceIds());
             return true;
         }
-        return super.onTransact(code, data, reply, flags);
+        return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
     }
 }

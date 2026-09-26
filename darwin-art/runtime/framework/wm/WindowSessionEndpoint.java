@@ -49,7 +49,8 @@ final class WindowSessionEndpoint extends Binder {
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
         if (code != removeCode && code != relayoutCode && code != addToDisplayAsUserCode)
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         identity.requireCaller(Binder.getCallingPid(), Binder.getCallingUid());
         if (code == removeCode) {
             data.enforceInterface(DESCRIPTOR);

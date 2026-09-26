@@ -64,7 +64,8 @@ public final class ActivityTaskManagerEndpoint extends Binder {
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
         if (code != getActivityClientControllerCode && code != startActivityCode) {
-            return super.onTransact(code, data, reply, flags);
+            return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
+                || super.onTransact(code, data, reply, flags);
         }
         data.enforceInterface("android.app.IActivityTaskManager");
         if (code == startActivityCode) {
