@@ -5,7 +5,22 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
+
+namespace {
+// The Android raster scale for this root: DARWIN_ART_WINDOW_SCALE pins it (as
+// at window creation), otherwise it is the display's backing scale, so a 2x
+// scanout stays a 2x Android raster on every display.
+uint32_t RasterScale(NSWindow* window) {
+  const char* pinned = std::getenv("DARWIN_ART_WINDOW_SCALE");
+  if (pinned != nullptr && std::strcmp(pinned, "2") == 0) return 2;
+  if (pinned != nullptr && std::strcmp(pinned, "1") == 0) return 1;
+  const CGFloat scale = window == nil ? 1.0 : window.backingScaleFactor;
+  return static_cast<uint32_t>(std::clamp<CGFloat>(std::round(scale), 1.0, 4.0));
+}
+}  // namespace
 
 @interface DarwinArtSurfaceWindowDelegate : NSObject <NSWindowDelegate>
 @property(nonatomic, weak) DarwinArtMetalView* view;
@@ -66,7 +81,8 @@
     // extent, and its revision resizes the backing (root_geometry.mm).
     const bool reported = darwin_art::window::RootGeometryReports::Process().Publish(
         static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.width))),
-        static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.height))));
+        static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.height))),
+        RasterScale(surface->window));
     if (darwin_art::window::RootGeometryOwned(surface)) {
       if (reported) {
         std::cerr << "DARWIN_ART window resize reported points="
@@ -99,9 +115,33 @@
               << height << "\n";
   }
 }
+- (void)windowDidChangeBackingProperties:(NSNotification*)notification {
+  (void)notification;
+  DarwinArtMetalView* view = self.view;
+  DarwinArtSurface* surface = self.surface;
+  if (surface == nullptr || view == nil || [view ownerSurface] != surface ||
+      !surface->visible || !darwin_art::window::RootGeometryOwned(surface)) {
+    return;
+  }
+  // The window moved to a display of another backing scale. The layer takes
+  // the new scale; Android answers the host fact with a revision that changes
+  // density and the raster together, and that revision resizes the backing.
+  const uint32_t scale = RasterScale(surface->window);
+  view.metalLayer.contentsScale = scale;
+  [view updateDrawableSize];
+  const NSRect bounds = view.bounds;
+  if (darwin_art::window::RootGeometryReports::Process().Publish(
+          static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.width))),
+          static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.height))),
+          scale)) {
+    std::cerr << "DARWIN_ART window backing scale reported scale=" << scale << "\n";
+  }
+}
 @end
 
 namespace darwin_art::window {
+uint32_t SurfaceRasterScale(NSWindow* window) { return RasterScale(window); }
+
 id<NSWindowDelegate> CreateSurfaceWindowDelegate(DarwinArtSurface* surface,
                                                SurfaceResize resize) {
   if (![NSThread isMainThread] || surface == nullptr || resize == nullptr)

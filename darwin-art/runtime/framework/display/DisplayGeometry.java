@@ -46,8 +46,13 @@ public final class DisplayGeometry {
     }
 
     public DisplayGeometry withExtent(long nextRevision, int width, int height) {
+        return withExtent(nextRevision, width, height, densityDpi);
+    }
+
+    /** A revision that changes the raster density together with the extent. */
+    public DisplayGeometry withExtent(long nextRevision, int width, int height, int density) {
         if (nextRevision <= revision) throw new IllegalArgumentException("revision must advance");
-        return new DisplayGeometry(nextRevision, width, height, densityDpi);
+        return new DisplayGeometry(nextRevision, width, height, density);
     }
 
     public boolean sameExtent(int width, int height) {

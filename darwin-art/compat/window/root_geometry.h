@@ -9,11 +9,14 @@
 namespace darwin_art::window {
 
 // Host fact: the desktop root's content extent in macOS points after a user or
-// window-manager resize. Android pixels and density are never derived here.
+// window-manager resize, and the backing scale of the display it is on (a
+// window moved between 1x and 2x displays). Android pixels and density are
+// never derived here.
 struct RootGeometryReport {
   uint64_t serial = 0;
   uint32_t points_width = 0;
   uint32_t points_height = 0;
+  uint32_t backing_scale = 0;
 };
 
 // Process-wide latest-wins slot between AppKit (producer) and the Android
@@ -24,16 +27,21 @@ class RootGeometryReports final {
  public:
   static RootGeometryReports& Process();
 
-  // AppKit main thread. Returns true when a new report was published.
-  bool Publish(uint32_t points_width, uint32_t points_height);
+  // AppKit main thread. Returns true when a new report was published. A zero
+  // backing scale leaves the last known scale unchanged.
+  bool Publish(uint32_t points_width, uint32_t points_height,
+               uint32_t backing_scale = 0);
   // AppKit main thread. Records an extent the root now has because Android
   // geometry (or window creation) set it, not because the user resized.
-  void NoteKnownExtent(uint32_t points_width, uint32_t points_height);
+  void NoteKnownExtent(uint32_t points_width, uint32_t points_height,
+                       uint32_t backing_scale = 0);
   // Blocks until a report newer than `after_serial` exists. False once closed.
   bool Await(uint64_t after_serial, RootGeometryReport* report);
   // Root closed or process shutdown; wakes the consumer permanently.
   void Close();
   uint64_t latest_serial() const;
+  // The root's current backing scale: the latest report's, else creation's.
+  uint32_t backing_scale() const;
 
   RootGeometryReports() = default;
   RootGeometryReports(const RootGeometryReports&) = delete;
@@ -45,6 +53,7 @@ class RootGeometryReports final {
   RootGeometryReport latest_{};
   uint32_t known_width_ = 0;
   uint32_t known_height_ = 0;
+  uint32_t known_scale_ = 0;
   bool moved_from_known_ = false;
   bool closed_ = false;
 };
@@ -99,6 +108,8 @@ RootGeometryStatus ApplyProcessRootGeometry(
     const RootGeometryPublication& publication);
 // Any thread: whether this process published a visible desktop root.
 bool ProcessHasVisibleRoot();
+// The visible root's Android raster scale, or 0 without a visible root.
+uint32_t ProcessRootRasterScale();
 // AppKit main thread: whether Android task geometry owns this root's extent.
 bool RootGeometryOwned(DarwinArtSurface* surface);
 

@@ -85,6 +85,10 @@ RootGeometryStatus ApplyProcessRootGeometry(
   return status;
 }
 
+uint32_t ProcessRootRasterScale() {
+  return ProcessHasVisibleRoot() ? RootGeometryReports::Process().backing_scale() : 0;
+}
+
 bool ProcessHasVisibleRoot() {
   DarwinArtSurface* surface = g_active_gpu_surface.load(std::memory_order_acquire);
   return surface != nullptr && surface->visible;
