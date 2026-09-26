@@ -30,6 +30,8 @@ javac --release 8 -encoding UTF-8 -d "$out_dir" \
   "$repo_dir/runtime/framework/wm/WindowFocusPublicationDelivery.java" \
   "$repo_dir/runtime/framework/wm/WindowInputEndpoint.java" \
   "$repo_dir/runtime/framework/wm/WindowPublicationDriver.java" \
+  $(find "$repo_dir/tools/tests/wm/window-id-stubs" -name '*.java' -print) \
+  "$repo_dir/runtime/framework/wm/WindowIdRegistry.java" \
   "$repo_dir/runtime/framework/wm/WindowPublicationController.java" \
   "$repo_dir/runtime/framework/display/DisplayGeometry.java" \
   "$repo_dir/runtime/framework/display/HostDisplayFacts.java" \

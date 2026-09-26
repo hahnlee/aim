@@ -25,6 +25,7 @@ final class WindowSessionEndpoint extends Binder {
     private final int removeCode = transaction("remove");
     private final int relayoutCode = transaction("relayout");
     private final int relayoutAsyncCode = transaction("relayoutAsync");
+    private final int getWindowIdCode = transaction("getWindowId");
     private final int setOnBackInvokedCallbackInfoCode =
             transaction("setOnBackInvokedCallbackInfo");
     // WindowState.mOnBackInvokedCallbackInfo: the callback system back
@@ -68,7 +69,8 @@ final class WindowSessionEndpoint extends Binder {
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
         if (code != removeCode && code != relayoutCode && code != addToDisplayAsUserCode
-                && code != relayoutAsyncCode && code != setOnBackInvokedCallbackInfoCode)
+                && code != relayoutAsyncCode && code != setOnBackInvokedCallbackInfoCode
+                && code != getWindowIdCode)
             return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
                 || super.onTransact(code, data, reply, flags);
         requireSessionCaller(flags);
@@ -93,6 +95,20 @@ final class WindowSessionEndpoint extends Binder {
             } finally {
                 windows.end(this, registration);
             }
+        }
+        if (code == getWindowIdCode) {
+            data.enforceInterface(DESCRIPTOR);
+            android.os.IBinder window = data.readStrongBinder();
+            data.enforceNoDataAvail();
+            WindowSessionWindowOwnership.Registration registration = windows.begin(this, window);
+            try {
+                requireSessionCaller(flags);
+                reply.writeNoException();
+                reply.writeStrongInterface(publications.windowId(registration));
+            } finally {
+                windows.end(this, registration);
+            }
+            return true;
         }
         if (code == setOnBackInvokedCallbackInfoCode) {
             data.enforceInterface(DESCRIPTOR);

@@ -52,6 +52,17 @@ public final class WindowFocusPublicationDelivery {
     private boolean draining;
     private boolean lostHead;
 
+    /** Told of each focus publication the window accepted, after its batch settled. */
+    interface FocusListener {
+        void focusChanged(Object windowToken, boolean focused);
+    }
+
+    private volatile FocusListener focusListener;
+
+    void setFocusListener(FocusListener listener) {
+        focusListener = listener;
+    }
+
     public WindowFocusPublicationDelivery(WindowFocusRegistry registry, Transport transport) {
         if (registry == null || transport == null)
             throw new IllegalArgumentException("registry/transport is null");
@@ -232,6 +243,15 @@ public final class WindowFocusPublicationDelivery {
             pendingAttempt = null;
             quarantineReason = null;
             cursor = 0;
+        }
+        FocusListener listener = focusListener;
+        if (listener == null) return;
+        for (int i = 0; i < values.length; i++) {
+            WindowFocusRegistry.Publication publication = batch.publications.get(i);
+            if (publication.kind == WindowFocusRegistry.PublicationKind.FOCUS
+                    && values[i] == WindowFocusRegistry.Disposition.ACCEPTED) {
+                listener.focusChanged(publication.windowToken, publication.focused);
+            }
         }
     }
 

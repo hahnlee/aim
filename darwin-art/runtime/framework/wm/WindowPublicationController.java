@@ -36,6 +36,10 @@ final class WindowPublicationController implements DesktopRootWindowBindingOwner
 
     private final WindowFocusRegistry registry = new WindowFocusRegistry();
     private final WindowPublicationDriver driver = new WindowPublicationDriver(registry);
+    private final WindowIdRegistry windowIds = new WindowIdRegistry(registry);
+    {
+        driver.setFocusListener(windowIds);
+    }
     private final WindowRootActivationPolicy activationPolicy = new WindowRootActivationPolicy(registry);
     private final WindowRootFocusDecisions rootDecisions = new WindowRootFocusDecisions(
             this, registry, activationPolicy, driver, this::originalToken);
@@ -131,7 +135,13 @@ final class WindowPublicationController implements DesktopRootWindowBindingOwner
         }
     }
 
+    /** IWindowSession.getWindowId: the window's IWindowId. */
+    android.view.IWindowId windowId(WindowSessionWindowOwnership.Registration registration) {
+        return windowIds.windowId(registration, registration.window());
+    }
+
     synchronized void remove(WindowSessionWindowOwnership.Registration registration) {
+        windowIds.remove(registration);
         Entry entry = entries.get(registration.window());
         if (entry == null) return; // An ADD may fail before publication registration.
         if (entry.registration != registration) throw new SecurityException("stale window retirement");
