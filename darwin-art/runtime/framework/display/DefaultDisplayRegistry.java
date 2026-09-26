@@ -54,17 +54,20 @@ final class DefaultDisplayRegistry {
             Constructor<?> modeConstructor = modeClass.getDeclaredConstructor(
                     int.class, int.class, int.class, float.class);
             modeConstructor.setAccessible(true);
-            Object mode = modeConstructor.newInstance(MODE_ID, width, height, 60.0f);
+            // The root's display paces vsync (ProcessFrameIntervalNanos).
+            float refreshRate = host == null ? 60.0f : host.refreshRate;
+            Object mode = modeConstructor.newInstance(MODE_ID, width, height, refreshRate);
             Object modes = Array.newInstance(modeClass, 1);
             Array.set(modes, 0, mode);
             set(infoClass, info, "modeId", MODE_ID);
             set(infoClass, info, "defaultModeId", MODE_ID);
             set(infoClass, info, "supportedModes", modes);
             set(infoClass, info, "appsSupportedModes", modes);
-            set(infoClass, info, "supportedRefreshRates", new float[] {60.0f});
-            set(infoClass, info, "refreshRateOverride", 60.0f);
-            set(infoClass, info, "renderFrameRate", 60.0f);
-            set(infoClass, info, "presentationDeadlineNanos", 16_666_666L);
+            set(infoClass, info, "supportedRefreshRates", new float[] {refreshRate});
+            set(infoClass, info, "refreshRateOverride", refreshRate);
+            set(infoClass, info, "renderFrameRate", refreshRate);
+            set(infoClass, info, "presentationDeadlineNanos",
+                    (long) (1_000_000_000L / refreshRate));
             set(infoClass, info, "canHostTasks", true);
             return (Parcelable) info;
         } catch (ReflectiveOperationException error) {

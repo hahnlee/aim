@@ -1,3 +1,6 @@
+#include <CoreVideo/CoreVideo.h>
+#include <mutex>
+#include <unordered_map>
 #include "root_geometry.h"
 
 #include "../darwin_surface_internal.h"
@@ -103,6 +106,42 @@ uint32_t ProcessRootRasterScale() {
 
 uint32_t ProcessRootDisplayId() {
   return ProcessHasVisibleRoot() ? RootGeometryReports::Process().display_id() : 0;
+}
+
+double DisplayRefreshRate(uint32_t display_id) {
+  constexpr double kDefaultRate = 60.0;
+  if (display_id == 0) return kDefaultRate;
+  static std::mutex mutex;
+  static std::unordered_map<uint32_t, double> rates;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto found = rates.find(display_id);
+    if (found != rates.end()) return found->second;
+  }
+  double rate = kDefaultRate;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  CVDisplayLinkRef link = nullptr;
+  if (CVDisplayLinkCreateWithCGDisplay(display_id, &link) == kCVReturnSuccess &&
+      link != nullptr) {
+    const CVTime period = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link);
+    if ((period.flags & kCVTimeIsIndefinite) == 0 && period.timeValue > 0 &&
+        period.timeScale > 0) {
+      rate = static_cast<double>(period.timeScale) / static_cast<double>(period.timeValue);
+    }
+    CVDisplayLinkRelease(link);
+  }
+#pragma clang diagnostic pop
+  if (!(rate >= 1.0 && rate <= 1000.0)) rate = kDefaultRate;
+  std::lock_guard<std::mutex> lock(mutex);
+  rates[display_id] = rate;
+  return rate;
+}
+
+int64_t ProcessFrameIntervalNanos() {
+  uint32_t display = ProcessRootDisplayId();
+  if (display == 0) display = CGMainDisplayID();
+  return static_cast<int64_t>(1'000'000'000.0 / DisplayRefreshRate(display) + 0.5);
 }
 
 bool ProcessHasVisibleRoot() {
