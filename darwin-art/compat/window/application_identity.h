@@ -18,9 +18,8 @@ void ApplySurfaceApplicationIdentity(NSApplication* application,
                                      NSWindow* window);
 
 // Installs the standard macOS main menu for an Android desktop window once per
-// process: the application menu (hide items) and View > Enter Full Screen
-// (Cmd+Ctrl+F). Quitting is not offered here: Cmd+Q has no Android lifecycle
-// yet (#15).
+// process: the application menu (hide items, Quit), View > Enter Full Screen
+// (Cmd+Ctrl+F) and Window > Minimize.
 void InstallSurfaceApplicationMenu(NSApplication* application, NSString* title);
 
 }  // namespace darwin_art::window

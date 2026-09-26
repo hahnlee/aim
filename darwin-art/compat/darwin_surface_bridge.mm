@@ -452,6 +452,7 @@ static DarwinArtSurface* CreateSurfaceOnMain(
       surface->window.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
       darwin_art::window::ApplySurfaceApplicationIdentity(application, surface->window);
       darwin_art::window::InstallSurfaceApplicationMenu(application, surface->window.title);
+      darwin_art::window::InstallSurfaceApplicationDelegate(application);
       const auto root_result = darwin_art::window::InitializeDesktopRoot(surface);
       if (root_result != DARWIN_ART_SURFACE_OK) {
         delete surface;

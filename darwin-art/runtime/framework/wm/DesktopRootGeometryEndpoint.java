@@ -50,8 +50,11 @@ public final class DesktopRootGeometryEndpoint extends Binder {
             int pointsHeight = data.readInt();
             int hostScale = data.readInt();
             int hostDisplay = data.readInt();
+            boolean hidden = data.readBoolean();
+            boolean quit = data.readBoolean();
             data.enforceNoDataAvail();
             tasks.hostResized(pid, serial, pointsWidth, pointsHeight, hostScale, hostDisplay);
+            tasks.hostTaskState(pid, serial, hidden, quit);
             if (reply != null) reply.writeNoException();
             return true;
         }

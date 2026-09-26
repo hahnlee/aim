@@ -36,6 +36,40 @@ bool RootGeometryReports::Publish(uint32_t points_width, uint32_t points_height,
   return true;
 }
 
+bool RootGeometryReports::PublishHidden(bool hidden) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_ || latest_.quit || latest_.hidden == hidden) return false;
+    if (latest_.serial == 0) {
+      latest_.points_width = known_width_;
+      latest_.points_height = known_height_;
+      latest_.backing_scale = known_scale_;
+      latest_.display_id = known_display_;
+    }
+    ++latest_.serial;
+    latest_.hidden = hidden;
+  }
+  changed_.notify_all();
+  return true;
+}
+
+bool RootGeometryReports::PublishQuit() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_ || latest_.quit) return false;
+    if (latest_.serial == 0) {
+      latest_.points_width = known_width_;
+      latest_.points_height = known_height_;
+      latest_.backing_scale = known_scale_;
+      latest_.display_id = known_display_;
+    }
+    ++latest_.serial;
+    latest_.quit = true;
+  }
+  changed_.notify_all();
+  return true;
+}
+
 void RootGeometryReports::NoteKnownExtent(uint32_t points_width,
                                           uint32_t points_height,
                                           uint32_t backing_scale,

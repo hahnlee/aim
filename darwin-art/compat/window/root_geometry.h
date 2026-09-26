@@ -19,6 +19,11 @@ struct RootGeometryReport {
   uint32_t backing_scale = 0;
   // CGDirectDisplayID of the screen the root is on (0 unknown).
   uint32_t display_id = 0;
+  // The user hid the root (closed or minimized its window): the task goes to
+  // the background, as Android's Home does.
+  bool hidden = false;
+  // The user quit the app (Cmd+Q): the task is removed, as from Recents.
+  bool quit = false;
 };
 
 // Process-wide latest-wins slot between AppKit (producer) and the Android
@@ -37,6 +42,11 @@ class RootGeometryReports final {
   // geometry (or window creation) set it, not because the user resized.
   void NoteKnownExtent(uint32_t points_width, uint32_t points_height,
                        uint32_t backing_scale = 0, uint32_t display_id = 0);
+  // AppKit main thread. The root was hidden or shown by the user; true when
+  // this changed the reported state.
+  bool PublishHidden(bool hidden);
+  // AppKit main thread. The user asked to quit; reported once.
+  bool PublishQuit();
   // Blocks until a report newer than `after_serial` exists. False once closed.
   bool Await(uint64_t after_serial, RootGeometryReport* report);
   // Root closed or process shutdown; wakes the consumer permanently.
