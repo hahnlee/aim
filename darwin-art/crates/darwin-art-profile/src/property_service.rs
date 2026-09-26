@@ -5,11 +5,18 @@
 //! messages) with the system server as the only permitted writer, as the
 //! platform policy grants few property writes to other domains. `persist.*`
 //! values survive restarts, as init's persistent_properties does.
+//!
+//! Every accepted value is published for all processes, as init's shared
+//! property area is: `dynamic_properties` holds the service's values and
+//! `generation` is bumped after it, before the setter gets its reply. Each
+//! process folds a newer generation into its own area before a read
+//! (bionic-process-state-facade `property_publication`).
 
 use crate::ProfileError;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 /// bionic PROP_VALUE_MAX.
@@ -28,6 +35,8 @@ pub(crate) enum SetError {
 
 pub(crate) struct PropertyService {
     persistent_path: PathBuf,
+    publication: PathBuf,
+    generation: u64,
     values: BTreeMap<String, String>,
 }
 
@@ -43,8 +52,9 @@ fn legal_name(name: &str) -> bool {
 }
 
 impl PropertyService {
-    /// The service over `persistent_path`, with the persisted values loaded.
-    pub(crate) fn open(persistent_path: PathBuf) -> Result<Self, ProfileError> {
+    /// The service over `persistent_path`, with the persisted values loaded
+    /// and published under `publication`.
+    pub(crate) fn open(persistent_path: PathBuf, publication: PathBuf) -> Result<Self, ProfileError> {
         let mut values = BTreeMap::new();
         match fs::read_to_string(&persistent_path) {
             Ok(text) => {
@@ -58,10 +68,20 @@ impl PropertyService {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        Ok(Self {
+        // Generations only grow, across daemon restarts too, so a process
+        // never mistakes a new publication for one it already folded in.
+        let generation = fs::read(publication.join("generation"))
+            .ok()
+            .and_then(|bytes| bytes.get(..8).map(|word| u64::from_le_bytes(word.try_into().unwrap())))
+            .unwrap_or(0);
+        let mut service = Self {
             persistent_path,
+            publication,
+            generation,
             values,
-        })
+        };
+        service.publish()?;
+        Ok(service)
     }
 
     pub(crate) fn set(
@@ -89,13 +109,41 @@ impl PropertyService {
             return Err(SetError::ReadOnlyProperty);
         }
         let previous = self.values.insert(name.to_owned(), value.to_owned());
-        if name.starts_with("persist.") && self.persist().is_err() {
+        if (name.starts_with("persist.") && self.persist().is_err()) || self.publish().is_err() {
             match previous {
                 Some(previous) => self.values.insert(name.to_owned(), previous),
                 None => self.values.remove(name),
             };
             return Err(SetError::SetFailed);
         }
+        Ok(())
+    }
+
+    /// Rewrites `dynamic_properties`, then bumps `generation`: a process that
+    /// sees the new generation reads the complete new values.
+    fn publish(&mut self) -> std::io::Result<()> {
+        fs::create_dir_all(&self.publication)?;
+        let stage = self
+            .publication
+            .join(format!(".dynamic_properties.{}", std::process::id()));
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&stage)?;
+        for (name, value) in &self.values {
+            writeln!(output, "{name}={value}")?;
+        }
+        output.sync_all()?;
+        fs::rename(&stage, self.publication.join("dynamic_properties"))?;
+        let next = self.generation + 1;
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.publication.join("generation"))?
+            .write_all_at(&next.to_le_bytes(), 0)?;
+        self.generation = next;
         Ok(())
     }
 
@@ -153,7 +201,7 @@ mod tests {
             std::env::temp_dir().join(format!("darwin-properties-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let path = root.join("persistent_properties");
-        (path.clone(), PropertyService::open(path).unwrap())
+        (path.clone(), PropertyService::open(path, root.join("publication")).unwrap())
     }
 
     #[test]
@@ -195,7 +243,8 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             "persist.sys.locale=ko-KR\n"
         );
-        let reopened = PropertyService::open(path).unwrap();
+        let reopened =
+            PropertyService::open(path.clone(), path.parent().unwrap().join("publication")).unwrap();
         assert_eq!(
             reopened
                 .values
@@ -204,6 +253,35 @@ mod tests {
             Some("ko-KR")
         );
         assert!(!reopened.values.contains_key("sys.transient"));
+    }
+
+    #[test]
+    fn publishes_values_before_bumping_the_generation() {
+        let (path, mut properties) = service("publish");
+        let publication = path.parent().unwrap().join("publication");
+        let generation = || {
+            u64::from_le_bytes(fs::read(publication.join("generation")).unwrap()[..8].try_into().unwrap())
+        };
+        assert_eq!(generation(), 1);
+        properties.set(true, "persist.sys.timezone", "Asia/Seoul").unwrap();
+        properties.set(true, "sys.boot_completed", "1").unwrap();
+        assert_eq!(generation(), 3);
+        assert_eq!(
+            fs::read_to_string(publication.join("dynamic_properties")).unwrap(),
+            "persist.sys.timezone=Asia/Seoul\nsys.boot_completed=1\n"
+        );
+        // A rejected write publishes nothing.
+        assert!(properties.set(false, "sys.x", "1").is_err());
+        assert_eq!(generation(), 3);
+        // Persisted values are published again, with a later generation,
+        // when the service reopens.
+        let reopened = PropertyService::open(path, publication.clone()).unwrap();
+        assert_eq!(generation(), 4);
+        assert_eq!(
+            fs::read_to_string(publication.join("dynamic_properties")).unwrap(),
+            "persist.sys.timezone=Asia/Seoul\n"
+        );
+        drop(reopened);
     }
 
     #[test]

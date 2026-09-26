@@ -84,6 +84,14 @@ pub fn run_daemon(config: DaemonConfig) -> Result<(), ProfileError> {
         )));
     }
     remove_stale_socket(&config.paths)?;
+    // The previous daemon's published values (sys.boot_completed and the
+    // like) end with it, as init's area does at reboot. The generation stays
+    // so it keeps growing; the property service republishes when it opens.
+    match fs::remove_file(config.paths.profile_root.join("properties/dynamic_properties")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     let listener = UnixListener::bind(&config.paths.socket)?;
     fs::set_permissions(&config.paths.socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
@@ -560,6 +568,7 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                             .paths
                             .mount
                             .join("system/properties/persistent_properties"),
+                        state.paths.profile_root.join("properties"),
                     )?);
                 }
                 Ok::<_, ProfileError>(properties.as_mut().unwrap().set(

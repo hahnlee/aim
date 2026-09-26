@@ -33,7 +33,7 @@ pub unsafe extern "C" fn darwin_art_bionic_process_property_wait_core(
             timeout.nanoseconds as u32,
         ))
     };
-    let Some(snapshot) = active_snapshot() else {
+    let Some(snapshot) = property_snapshot() else {
         missing_snapshot();
         return -1;
     };
