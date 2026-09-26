@@ -191,11 +191,17 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temporary_directory(name: &str) -> PathBuf {
+        // Parallel tests can read the same clock value (#21).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("darwin-art-{name}-{}-{nonce}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "darwin-art-{name}-{}-{nonce}-{serial}",
+            std::process::id()
+        ))
     }
 
     #[test]

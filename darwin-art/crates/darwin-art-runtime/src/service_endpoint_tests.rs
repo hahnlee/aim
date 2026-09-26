@@ -111,10 +111,17 @@ fn different_process_copy_cannot_unpublish_or_unlock_owner() {
     );
     assert_eq!(io::Error::last_os_error().kind(), io::ErrorKind::WouldBlock);
     drop(inherited);
-    assert_eq!(
-        unsafe { libc::flock(independent.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-        0
-    );
+    // A child another test is spawning holds a copy of every descriptor
+    // between fork and exec (#21); the lock frees once that exec happens.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while unsafe { libc::flock(independent.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        assert_eq!(io::Error::last_os_error().kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the owner lock stayed held"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 #[test]

@@ -85,9 +85,8 @@ Acceptance remains APK-scoped. Camera, Bluetooth, biometrics, complete host-font
 integration, external sensor mapping and long memory/performance soak are later
 work. Ordinary app/service processes still use host `_exit()` (#20); reusable
 sessions and complete VM/image quiescence are unproven. Provider manifests do
-not yet cover every dynamic shell/build input. Parallel Binder mapping and
-foreign-copy flock test failures need a reproduction (#21). The window menu
-and keyboard suites cannot complete against production processes (#29).
+not yet cover every dynamic shell/build input. The window menu and keyboard
+suites cannot complete against production processes (#29).
 
 ## Acceptance commands
 

@@ -14,13 +14,17 @@ impl Drop for SocketPath {
 fn existing_admission(
     exact_template_owner: bool,
 ) -> Result<BoundServiceProcessResponse, ProfileError> {
+    // Parallel tests can read the same clock value (#21).
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let socket_path = SocketPath(
-        std::env::temp_dir().join(format!("da-admit-{}-{nonce}.sock", std::process::id())),
-    );
+    let socket_path = SocketPath(std::env::temp_dir().join(format!(
+        "da-admit-{}-{nonce}-{serial}.sock",
+        std::process::id()
+    )));
     let listener = UnixListener::bind(&socket_path.0).unwrap();
     let _client = UnixStream::connect(&socket_path.0).unwrap();
     let (stream, _) = listener.accept().unwrap();

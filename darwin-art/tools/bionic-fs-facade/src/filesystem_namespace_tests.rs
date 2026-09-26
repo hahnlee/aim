@@ -5,10 +5,7 @@ use std::os::unix::fs::{MetadataExt, symlink};
 struct Fixture(std::path::PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nonce = crate::test_nonce();
         let path =
             std::env::temp_dir().join(format!("darwin-namespace-{}-{nonce}", std::process::id()));
         fs::create_dir(&path).unwrap();

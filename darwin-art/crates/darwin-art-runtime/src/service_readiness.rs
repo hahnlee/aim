@@ -164,8 +164,11 @@ mod tests {
     fn exercise_publication(operation: u16) {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixListener;
+        // Parallel tests can read the same clock value (#21).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "dar-ready-{}-{}",
+            "dar-ready-{}-{serial}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

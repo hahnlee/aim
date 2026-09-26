@@ -193,12 +193,15 @@ fn run_drop_child(mode: &str) -> bool {
 }
 
 fn assert_drop_aborts(mode: &str, test_name: &str) {
+    // Parallel tests can read the same clock value (#21).
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock before epoch")
         .as_nanos();
     let directory = env::temp_dir().join(format!(
-        "darwin-art-runtime-drop-{}-{unique}",
+        "darwin-art-runtime-drop-{}-{unique}-{serial}",
         std::process::id()
     ));
     fs::create_dir(&directory).expect("create owned shutdown test directory");

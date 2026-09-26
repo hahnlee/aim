@@ -5,14 +5,18 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> Self {
+        // Parallel tests can read the same clock value (#21).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "darwin-art-native-link-recipe-test-{}",
+            "darwin-art-native-link-recipe-test-{}-{}-{serial}",
+            std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        fs::create_dir_all(&path).unwrap();
+        fs::create_dir(&path).unwrap();
         Self(path)
     }
 

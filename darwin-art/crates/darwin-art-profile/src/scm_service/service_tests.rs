@@ -23,12 +23,15 @@ impl Drop for SocketPath {
 }
 
 fn listener() -> (SocketPath, UnixListener) {
+    // Parallel tests can read the same clock value (#21).
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     let path = std::env::temp_dir().join(format!(
-        "darwin-art-scm-service-{}-{suffix}.sock",
+        "da-scm-{}-{suffix}-{serial}.sock",
         std::process::id()
     ));
     let listener = UnixListener::bind(&path).unwrap();
