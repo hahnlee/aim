@@ -36,6 +36,13 @@ public final class ActivityTaskManagerEndpoint extends Binder {
             android.content.res.Configuration current,
             android.content.res.Configuration override);
 
+    /**
+     * Starts the package's launcher Activity in its running process, as the
+     * attach launch does; the Activity registers as the task's launcher root.
+     */
+    static native boolean nativeScheduleLauncherActivity(
+            IBinder applicationThread, String packageName, int uid);
+
     static native boolean nativeScheduleFinishActivity(
             IBinder applicationThread, IBinder activityToken, IBinder previousActivityToken);
 

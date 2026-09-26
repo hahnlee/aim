@@ -293,6 +293,15 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
             }
             if (quit) {
                 ActivityClientControllerEndpoint.removeTask(thread, pid);
+            } else if (!hidden && ActivityClientControllerEndpoint.taskEmpty(thread)) {
+                // Reopening a task whose last Activity finished starts the
+                // launcher Activity again, as launching the app would.
+                ApplicationProcessRegistry.AttachedApplication attached =
+                        processes.requireAttachedProcess(pid);
+                if (!ActivityTaskManagerEndpoint.nativeScheduleLauncherActivity(
+                        thread, attached.packageName, attached.uid)) {
+                    Log.w(TAG, "launcher Activity not started on reopen pid=" + pid);
+                }
             } else {
                 ActivityClientControllerEndpoint.setTaskHidden(thread, hidden);
             }
