@@ -63,7 +63,16 @@ int register_android_os_Parcel(JNIEnv* env);
 }  // namespace android
 #endif
 
+namespace android {
+// libutils misc.cpp: runs the property change callbacks.
+void report_sysprop_change();
+}  // namespace android
+
 namespace {
+
+// IBinder.SYSPROPS_TRANSACTION ('_SPR').
+constexpr uint32_t kSyspropsTransaction =
+    ('_' << 24) | ('S' << 16) | ('P' << 8) | 'R';
 
 JavaVM* g_framework_vm = nullptr;
 
@@ -1111,6 +1120,13 @@ bool DispatchWireTransaction(JNIEnv* env, const WireHandle& owner, WireMessage* 
                 << " exception=" << env->ExceptionCheck() << "\n";
     }
     env->DeleteLocalRef(binder_class);
+  }
+  // JavaBBinder::onTransact: a SYSPROPS_TRANSACTION poke (SystemPropPoker)
+  // also runs BBinder's handling, which reports the property change to the
+  // callbacks SystemProperties.addChangeCallback registered.
+  if (request->header.code == kSyspropsTransaction && !env->ExceptionCheck()) {
+    android::report_sysprop_change();
+    transaction_handled = true;
   }
   if (env->ExceptionCheck()) {
     jthrowable exception = env->ExceptionOccurred();

@@ -346,10 +346,8 @@ strftime_source="$root/_aosp/bionic-strftime-facade/platform/bionic/libc/tzcode/
 
 native="$build/libdarwin-art-bionic-native-providers.a"
 bash "$root/tools/build-android16-ftw.sh"
-bash "$root/tools/build-android16-property-client.sh" --build-only
 ftw="$root/_build/android16-ftw"
 "$ar" rcs "$native" \
-  "$root/_build/android16-property-client/bound-client.o" \
   "$ftw/fts.c.o" "$ftw/ftw.cpp.o" "$ftw/recallocarray.c.o" "$ftw/bindings.o" \
   "$ftw/resolver.o" \
   "$objects/leaf.o" "$objects/allocator.o" "$objects/allocator_options.o" "$objects/time.o" \
@@ -397,7 +395,6 @@ _darwin_art_bionic_libc_leaf_resolve
 _darwin_art_bionic_locale_resolve
 _darwin_art_bionic_numeric_resolve
 _darwin_art_bionic_process_state_resolve
-_darwin_art_bionic_property_client_resolve
 _darwin_art_bionic_pthread_resolve
 _darwin_art_bionic_scanf_resolve
 _darwin_art_bionic_sendfile_resolve

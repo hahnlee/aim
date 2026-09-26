@@ -21,7 +21,6 @@
 extern "C" uintptr_t darwin_art_bionic_rust_provider_closure_anchor(void);
 extern "C" int darwin_art_ftw_traversal_smoke(void);
 extern "C" int darwin_art_unix_connect_smoke(void);
-extern "C" int darwin_art_property_client_smoke(void);
 extern "C" int darwin_art_property_iteration_smoke(DarwinArtBionicNamespace*);
 extern "C" int darwin_art_signed_numeric_smoke(DarwinArtBionicNamespace*);
 extern "C" int darwin_art_mkdirat_smoke(DarwinArtBionicNamespace*);
@@ -29,6 +28,13 @@ extern "C" int darwin_art_configured_snapshot_smoke(void);
 extern "C" int darwin_art_credentials_snapshot_smoke(void);
 extern "C" int darwin_art_fortify_stream_smoke(DarwinArtBionicNamespace*);
 extern "C" uintptr_t darwin_art_liblog_provider_resolve(const char*, const char*);
+
+// The property service client lives in darwin-art-runtime (property_ffi),
+// outside these provider archives; with no service there is no setter here.
+extern "C" int darwin_art_bionic_property_service_set(const char*, const char*) {
+  errno = ENOSYS;
+  return -1;
+}
 extern "C" int darwin_art_test_log_buf_print(uintptr_t, const char*, const char*);
 extern "C" int darwin_art_log_assert_smoke();
 extern "C" int darwin_art_fdsan_smoke();
@@ -135,7 +141,6 @@ int main() {
   }
   if (darwin_art_ftw_traversal_smoke() != 0) return 21;
   if (darwin_art_unix_connect_smoke() != 0) return 23;
-  if (darwin_art_property_client_smoke() != 0) return 24;
   if (darwin_art_configured_snapshot_smoke() != 0) return 27;
   if (darwin_art_credentials_snapshot_smoke() != 0) return 31;
   const int guest_socket = darwin_art_bionic_socket_broker_socket(2, 2, 0);

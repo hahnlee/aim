@@ -98,10 +98,8 @@ extern "C" SymbolFunction
 darwin_art_bionic_process_state_resolve(const char *s) {
   return OneArg(DARWIN_ART_BIONIC_PROVIDER_PROCESS_STATE, s);
 }
-extern "C" SymbolFunction darwin_art_bionic_property_client_resolve(const char* s) {
-  if (std::strcmp(s, "__system_property_set") == 0)
-    return OneArg(DARWIN_ART_BIONIC_PROVIDER_PROCESS_STATE, s);
-  return nullptr;
+extern "C" int darwin_art_bionic_property_service_set(const char*, const char*) {
+  return 0;
 }
 extern "C" uintptr_t
 darwin_art_bionic_process_state_data_resolve(const char *s) {

@@ -6,7 +6,6 @@ export LC_ALL=C
 # Keep every fixture/probe input here: build-bionic-runtime-provider-closure.sh
 # must be able to publish an archive without reading any of these paths.
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-bash "$root/tools/tests/property-client-logging-test.sh"
 bash "$root/tools/tests/numeric-provider-production-boundary.sh"
 module="$root/tools/bionic-runtime-provider-closure"
 build="$root/_build/bionic-runtime-provider-closure"
@@ -28,7 +27,6 @@ test_sources=(
   "$module/credentials_snapshot_smoke.cc"
   "$root/tools/bionic-socket-broker-adapter/probes/unix_connect.cc"
   "$root/tools/bionic-socket-broker-adapter/probes/fdsan.cc"
-  "$root/tools/android16-property-client/client_smoke.cc"
   "$root/tools/bionic-process-state-facade/probes/configured_snapshot.cc"
   "$root/tools/bionic-stdio-facade/probes/fortify_stream.cc"
   "$root/tools/android-liblog-exec-provider/buf_print_call_test.S"
