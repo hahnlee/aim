@@ -84,6 +84,17 @@ public final class ApplicationProcessRegistry {
     }
 
     private final HashMap<Integer, ProcessRecord> processes = new HashMap<>();
+    private volatile Runnable changeListener;
+
+    /** Observes attach and death of processes (the uid process state owner). */
+    public void setChangeListener(Runnable listener) {
+        changeListener = listener;
+    }
+
+    private void notifyChanged() {
+        Runnable listener = changeListener;
+        if (listener != null) listener.run();
+    }
 
     /** Exact identified caller admission, including bindApplication in flight. */
     public synchronized boolean hasCallerIncarnation(
@@ -241,6 +252,7 @@ public final class ApplicationProcessRegistry {
             throw new IllegalStateException("No matching unfinished attachment");
         }
         record.attachmentFinished = true;
+        notifyChanged();
         return snapshot(pid, record);
     }
 
@@ -254,6 +266,7 @@ public final class ApplicationProcessRegistry {
         }
         AttachedApplication gone = snapshot(pid, record);
         processes.remove(pid);
+        notifyChanged();
         return gone;
     }
 
@@ -282,6 +295,19 @@ public final class ApplicationProcessRegistry {
             throw new SecurityException("Application process is not attached");
         }
         return snapshot(pid, record);
+    }
+
+    /** Every attached process, in no particular order. */
+    public synchronized java.util.List<AttachedApplication> attached() {
+        java.util.ArrayList<AttachedApplication> result = new java.util.ArrayList<>();
+        for (Map.Entry<Integer, ProcessRecord> entry : processes.entrySet()) {
+            ProcessRecord record = entry.getValue();
+            if (record.attachmentFinished && record.thread != null
+                    && record.packageName != null && record.processName != null) {
+                result.add(snapshot(entry.getKey(), record));
+            }
+        }
+        return result;
     }
 
     /** Attached processes running as {@code uid}, in no particular order. */
