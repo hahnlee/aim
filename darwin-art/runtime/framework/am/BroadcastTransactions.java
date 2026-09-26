@@ -10,7 +10,6 @@ import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.RemoteException;
-import dev.darwinart.runtime.wm.ActivityClientControllerEndpoint;
 
 /** IActivityManager receiver registration and broadcast transactions. */
 final class BroadcastTransactions implements SystemBroadcasts {
@@ -132,8 +131,7 @@ final class BroadcastTransactions implements SystemBroadcasts {
         IApplicationThread.Stub.asInterface(thread).scheduleRegisteredReceiver(
                 IIntentReceiver.Stub.asInterface(receiver), intent, 0, null, null,
                 false, sticky, true, sendingUser,
-                RunningAppProcesses.processState(
-                        ActivityClientControllerEndpoint.activityPresence(thread)),
+                UidProcessStates.processState(thread),
                 sendingUid, sendingPackage);
     }
 }

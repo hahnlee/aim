@@ -54,6 +54,7 @@ Component tests are not application acceptance. See [AGENTS.md](../AGENTS.md),
 | Chromium | Unchanged Browser renders Example Domain; physical URL entry, three IANA link/back cycles, reload, restart restoration and Gemini sheet close/reopen pass. Fresh 2× capture confirms Graphite/Dawn Vulkan → MoltenVK on Apple M2 Pro. Longer soak remains open. |
 | Calculator / DeskClock | Physical Calculator pointer and keyboard arithmetic and DeskClock Stopwatch start/pause pass. Localized window labels remain incomplete. |
 | Input / WMS | Exact-root ingress, readiness/focus fences, bounded first-key queue and receiver lifetime are adopted. Parent/process-death cleanup remains open. |
+| Uid process state | Each process's Activities give its OomAdjuster state (resumed/paused → TOP with all capabilities, stopping → LAST_ACTIVITY, stopped → CACHED_ACTIVITY, none → SERVICE); the minimum per uid goes to `AppOpsService.updateUidProcState` on every change, and broadcasts and `getRunningAppProcesses` use the same state. `dumpsys appops`: DeskClock `state=top capability=LCMNFUAT`, `cch` after its process dies. |
 | Activity visibility | Activities hidden behind an occluding Activity (window style from `AttributeCache`) lose app visibility and are stopped when the new top Activity reports idle (10 s idle timeout); their windows release their layers. Finishing the top Activity restores visibility and restarts them. Physical: DeskClock → city list → back. |
 | Orientation / resize | Per-task revisioned geometry: launch orientation, `setRequestedOrientation`, real AppKit edge resize → DisplayManager callback, config/relaunch/`WindowStateResizeItem` transactions, WMS frames/insets and host backing on one revision. Physical: Calculator/DeskClock relaunch, Chromium/Blue Archive config change, five-point click map, popup through resize, two-app isolation, close mid-resize. |
 | Blue Archive | Unchanged full-split APK starts landscape `1280×720` (2×), renders Unity frames, survives a 24-drag live-resize stress (240 revisions, 67 swapchain recreations, no fault) without relaunch, and takes physical clicks on Android dialogs and Unity UI. The Nexon patcher downloads and verifies all 1464 files (~650 MB), preprocessing completes and the login title screen renders; a CoreAudio process tap measures non-silent output there (peak 0.12). GMS is absent (game shows its notice). |
@@ -68,8 +69,8 @@ Open failures are GitHub issues; the ones blocking the current goal:
 
 - Window close and Cmd+Q have no Android lifecycle (#15); popup
   `ACTION_OUTSIDE` (#17).
-- Broadcasts beyond unordered registered delivery (#3); AppOps foreground
-  state (#44); framework-compat class replacements (#45).
+- Broadcasts beyond unordered registered delivery (#3); framework-compat
+  class replacements (#45).
 - SCM managed-transfer adoption (#18); process-death cleanup (#20).
 
 ## Next work

@@ -54,6 +54,7 @@ public final class ActivityManagerEndpoint extends Binder {
     private final ActiveServices activeServices;
     private final BoundServiceProcessLauncher processLauncher;
     private final TaskLifecycle tasks;
+    private final UidProcessStates uidStates;
 
     public ActivityManagerEndpoint(ApplicationProcessRegistry processes, TaskLifecycle tasks) {
         if (tasks == null) throw new NullPointerException("tasks");
@@ -63,6 +64,7 @@ public final class ActivityManagerEndpoint extends Binder {
         activeServices = new ActiveServices(ApplicationPackages.INSTANCE,
                 processes, processLauncher);
         broadcasts = new BroadcastTransactions(processes);
+        uidStates = new UidProcessStates(processes);
         attachInterface(null, "android.app.IActivityManager");
     }
 
@@ -70,6 +72,14 @@ public final class ActivityManagerEndpoint extends Binder {
     /** ActivityManagerService.setSystemProcess for this process's ActivityThread. */
     public void setSystemProcess(IBinder applicationThread) {
         processes.setSystemProcess(android.os.Process.myPid(), applicationThread);
+    }
+
+    /**
+     * ActivityManagerService's AppOpsService (created by SystemServer here):
+     * uid process state and capability changes are reported to it.
+     */
+    public void setAppOpsService(com.android.server.appop.AppOpsService appOps) {
+        uidStates.attach(appOps);
     }
 
     public SystemServiceBindings systemServiceBindings() {

@@ -1,5 +1,6 @@
 package dev.darwinart.runtime.wm;
 
+import android.app.ActivityManager;
 import android.app.servertransaction.ActivityLifecycleItem;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
@@ -12,6 +13,7 @@ import android.os.RemoteException;
 import android.text.TextUtils;
 import android.util.Log;
 import android.view.IWindow;
+import dev.darwinart.runtime.am.UidProcessStates;
 import java.lang.reflect.Field;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -101,6 +103,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
         synchronized (activityLock) {
             commitLaunchLocked(applicationThread, token, info, occludesParent, reported);
         }
+        UidProcessStates.changed();
         scheduleIdleTimeout(token);
     }
 
@@ -118,6 +121,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
             if (previous != null) activityRecords.get(previous).state = State.PAUSED;
             commitLaunchLocked(applicationThread, token, info, occludesParent, reported);
         }
+        UidProcessStates.changed();
         scheduleIdleTimeout(token);
     }
 
@@ -144,20 +148,29 @@ public final class ActivityClientControllerEndpoint extends Binder {
     }
 
     /**
-     * Activity presence of one process: 2 resumed, 1 visible but not resumed,
-     * 0 no visible Activity (none, or all stopping/stopped).
+     * OomAdjuster's Activity contribution to one process's state: TOP for a
+     * resumed or paused (visible) Activity, LAST_ACTIVITY while one stops,
+     * CACHED_ACTIVITY for stopped ones, NONEXISTENT without Activities.
      */
-    public static int activityPresence(IBinder applicationThread) {
+    public static int processState(IBinder applicationThread) {
         synchronized (activityLock) {
             ArrayDeque<IBinder> stack = activityStacks.get(applicationThread);
-            if (stack == null || stack.isEmpty()) return 0;
-            int presence = 0;
+            int result = ActivityManager.PROCESS_STATE_NONEXISTENT;
+            if (stack == null) return result;
             for (IBinder token : stack) {
-                State state = activityRecords.get(token).state;
-                if (state == State.RESUMED) return 2;
-                if (state == State.PAUSED) presence = 1;
+                switch (activityRecords.get(token).state) {
+                    case RESUMED:
+                    case PAUSED:
+                        return ActivityManager.PROCESS_STATE_TOP;
+                    case STOPPING:
+                        result = Math.min(result, ActivityManager.PROCESS_STATE_LAST_ACTIVITY);
+                        break;
+                    case STOPPED:
+                        result = Math.min(result, ActivityManager.PROCESS_STATE_CACHED_ACTIVITY);
+                        break;
+                }
             }
-            return presence;
+            return result;
         }
     }
 
@@ -176,6 +189,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
             if (stack == null) return;
             for (IBinder token : stack) activityRecords.remove(token);
         }
+        UidProcessStates.changed();
     }
 
     private static void commitLaunchLocked(IBinder applicationThread, IBinder token,
@@ -205,6 +219,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
             for (IBinder token : stopping) activityRecords.get(token).state = State.STOPPING;
         }
         if (stopping.isEmpty()) return;
+        UidProcessStates.changed();
         WindowSurfaceRegistry windows = TaskGeometryController.requireInstance().windows();
         ArrayList<android.app.servertransaction.ClientTransactionItem> items = new ArrayList<>();
         for (IBinder token : stopping) {
@@ -338,6 +353,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
                     record.state = State.STOPPED;
                 }
             }
+            UidProcessStates.changed();
             return true;
         }
         if (code == willActivityBeVisibleCode) {
@@ -356,6 +372,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
             synchronized (activityLock) {
                 requireActivityLocked(token).state = State.RESUMED;
             }
+            UidProcessStates.changed();
             return true;
         }
         if (code == activityPausedCode) {
@@ -363,6 +380,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
             synchronized (activityLock) {
                 requireActivityLocked(token).state = State.PAUSED;
             }
+            UidProcessStates.changed();
             reply.writeNoException();
             return true;
         }
@@ -417,6 +435,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
                     if (stack != null) stack.remove(token);
                 }
             }
+            UidProcessStates.changed();
             return true;
         }
         if (code == finishActivityCode) {
@@ -462,6 +481,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
                     }
                 }
             }
+            UidProcessStates.changed();
             // ResumeActivityItem restarts a stopped Activity; its windows
             // regain app visibility for the restart's relayout.
             if (revealedHidden != null) {

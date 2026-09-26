@@ -91,6 +91,8 @@ public final class SystemServerBootstrap {
                 new File(systemDir, "appops.xml"), appOpsThread.getThreadHandler(),
                 systemContext);
         appOps.publish();
+        ((ActivityManagerEndpoint) ServiceManager.getService(Context.ACTIVITY_SERVICE))
+                .setAppOpsService(appOps);
         TimingsTraceAndSlog t = new TimingsTraceAndSlog();
         services.startBootPhase(t, SystemService.PHASE_WAIT_FOR_DEFAULT_DISPLAY);
 
