@@ -50,6 +50,10 @@ public final class ConnectivityServiceState implements ConnectivityState, AutoCl
     @Override
     public ConnectivitySnapshot snapshot() { return published; }
 
+    /** The host network's proxy, read live from the host provider. */
+    @Override
+    public android.net.ProxyInfo activeNetworkProxy() { return hostFacts.activeNetworkProxy(); }
+
     @Override
     public synchronized void addListener(Listener listener) {
         if (listener == null) throw new NullPointerException("listener");

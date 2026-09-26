@@ -48,6 +48,7 @@ runtime/framework/connectivity/ConnectivityState.java
 runtime/framework/connectivity/ConnectivityStateOwner.java
 runtime/framework/connectivity/HttpNetworkProbeTransport.java
 runtime/framework/connectivity/NetworkPathProvider.java
+runtime/framework/connectivity/HostProxyService.java
 runtime/framework/connectivity/NetworkProbeTransport.java
 runtime/framework/connectivity/NetworkValidationMonitor.java
 runtime/framework/content/ClipboardServiceEndpoint.java
