@@ -6,6 +6,7 @@
 #include <pthread.h>
 
 #include <atomic>
+#include <iterator>
 #include <mutex>
 
 namespace darwin_art::framework::wm {
@@ -100,6 +101,18 @@ jint Apply(JNIEnv*, jclass, jlong revision, jlong host_serial, jint android_widt
   return static_cast<jint>(request.status);
 }
 
+void HideOnMain(void* context) {
+  *static_cast<bool*>(context) = window::HideProcessRoot();
+}
+
+// Binder-free applier thread, like Apply: waits for the AppKit main thread.
+jboolean Hide(JNIEnv*, jclass) {
+  if (pthread_main_np() != 0) return JNI_FALSE;
+  bool hidden = false;
+  dispatch_sync_f(dispatch_get_main_queue(), &hidden, &HideOnMain);
+  return hidden ? JNI_TRUE : JNI_FALSE;
+}
+
 }  // namespace
 
 bool RegisterDesktopRootGeometryClient(JNIEnv* env) {
@@ -119,8 +132,10 @@ bool RegisterDesktopRootGeometryClient(JNIEnv* env) {
        reinterpret_cast<void*>(&HostScale)},
       {const_cast<char*>("nativeHostDisplay"), const_cast<char*>("()I"),
        reinterpret_cast<void*>(&HostDisplay)},
+      {const_cast<char*>("nativeHide"), const_cast<char*>("()Z"),
+       reinterpret_cast<void*>(&Hide)},
   };
-  const bool registered = env->RegisterNatives(client, methods, 5) == JNI_OK &&
+  const bool registered = env->RegisterNatives(client, methods, std::size(methods)) == JNI_OK &&
       !env->ExceptionCheck();
   jmethodID registration = registered
       ? env->GetStaticMethodID(client, "register", "()V") : nullptr;

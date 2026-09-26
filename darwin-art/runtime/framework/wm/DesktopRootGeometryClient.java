@@ -41,6 +41,9 @@ public final class DesktopRootGeometryClient {
     private static native int nativeApply(long revision, long hostSerial, int androidWidth,
             int androidHeight, int pointsWidth, int pointsHeight);
 
+    /** Closes the process root as its close button does (task to the back). */
+    private static native boolean nativeHide();
+
     public static void register() throws RemoteException {
         synchronized (LOCK) {
             if (registered || !nativeHasRoot()) return;
@@ -57,6 +60,17 @@ public final class DesktopRootGeometryClient {
 
                 @Override
                 protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) {
+                    if (code == TaskGeometryController.HOST_HIDE) {
+                        data.enforceInterface(TaskGeometryController.HOST_RECEIVER_DESCRIPTOR);
+                        data.enforceNoDataAvail();
+                        // Serialized with revisions; never waits on AppKit here.
+                        if (!applier.post(() -> {
+                            if (!nativeHide()) Log.w(TAG, "task to back: no visible root");
+                        })) {
+                            Log.e(TAG, "task to back dropped after shutdown");
+                        }
+                        return true;
+                    }
                     if (code != TaskGeometryController.HOST_PUBLISH) return false;
                     data.enforceInterface(TaskGeometryController.HOST_RECEIVER_DESCRIPTOR);
                     long revision = data.readLong();

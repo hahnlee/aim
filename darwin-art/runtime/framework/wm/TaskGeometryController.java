@@ -41,6 +41,9 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
     static final String HOST_RECEIVER_DESCRIPTOR =
             "dev.darwinart.runtime.wm.IDesktopRootGeometryReceiver";
     static final int HOST_PUBLISH = IBinder.FIRST_CALL_TRANSACTION;
+    // Orders the task's root out, as the close button does (ADR 0011); the
+    // host then reports the root hidden and the task stops.
+    static final int HOST_HIDE = IBinder.FIRST_CALL_TRANSACTION + 1;
     static final int HOST_STATUS_APPLIED = 0;
 
     private static volatile TaskGeometryController instance;
@@ -292,6 +295,33 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
                 ActivityClientControllerEndpoint.removeTask(thread, pid);
             } else {
                 ActivityClientControllerEndpoint.setTaskHidden(thread, hidden);
+            }
+        });
+    }
+
+    /**
+     * ActivityTaskManager moving the task of {@code thread} to the back
+     * (moveActivityTaskToBack): the host hides the root window and reports it,
+     * which stops the task through {@link #hostTaskState}.
+     */
+    void requestHostHide(IBinder thread) {
+        dispatch(() -> {
+            synchronized (this) {
+                for (Task task : tasks.values()) {
+                    if (task.thread != thread) continue;
+                    if (task.hostReceiver == null || task.hostClosed || task.hidden) return;
+                    Parcel data = Parcel.obtain();
+                    try {
+                        data.writeInterfaceToken(HOST_RECEIVER_DESCRIPTOR);
+                        task.hostReceiver.transact(HOST_HIDE, data, null, IBinder.FLAG_ONEWAY);
+                    } catch (RemoteException error) {
+                        task.hostReceiver = null;
+                        Log.w(TAG, "host root receiver lost pid=" + task.pid);
+                    } finally {
+                        data.recycle();
+                    }
+                    return;
+                }
             }
         });
     }
