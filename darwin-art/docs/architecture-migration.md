@@ -102,6 +102,7 @@ bash tools/android-window-geometry-acceptance.sh
 bash tools/audit-art-jit.sh
 bash tools/audit-profile-daemon.sh
 cargo test --workspace
+tools/tests/run-standalone.sh   # every tools/tests component/contract/JVM script
 ```
 
 ## Latest progress

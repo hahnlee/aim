@@ -370,9 +370,11 @@ int main() {
         result.owner != expected.owner || result.address == 0)
       return 11;
   }
+  // Process state (index 6): __system_property_set resolves directly to the
+  // property service client, without a resolver call.
   constexpr size_t kExpectedCalls[] = {
-      67, 14, 1, 79, 21, 64, 109, 1, 48, 63, 11, 5, 8, 3, 4, 5,  19,
-      10, 2,  4, 3,  2,  4,   3,  3,  1, 1, 4, 1, 21, 40, 15, 85, 10, 39, 30};
+      67, 14, 1, 79, 21, 64, 108, 1, 48, 63, 11, 5, 8, 3, 4, 5,  19,
+      10, 2,  4, 3,  2,  4,   3,  3,  1, 1, 4, 1, 21, 40, 13, 85, 10, 39, 30};
   for (size_t index = 0; index < calls.size(); ++index) {
     if (calls[index] != kExpectedCalls[index]) {
       std::fprintf(stderr,
@@ -387,6 +389,6 @@ int main() {
     return 13;
   darwin_art_bionic_namespace_destroy(instance);
   std::fprintf(stderr, "bionic-provider-builtin-adapters: PASS providers=36 "
-                       "routes=800 version-aliases=exact\n");
+                       "routes=798 version-aliases=exact\n");
   return 0;
 }

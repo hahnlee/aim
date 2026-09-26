@@ -1,7 +1,5 @@
 #include "darwin_art_bionic_builtin_adapters.h"
 
-#include <cstring>
-
 namespace {
 
 using SymbolFunction = void (*)(void);
@@ -108,8 +106,17 @@ uintptr_t Pthread(void *, const char *soname, const char *symbol,
   return reinterpret_cast<uintptr_t>(
       darwin_art_bionic_pthread_resolve(soname, symbol, version));
 }
+// Adapters never import host libc: compare symbol names locally.
+bool SameSymbol(const char *symbol, const char *name) {
+  if (symbol == nullptr) return false;
+  while (*symbol != '\0' && *symbol == *name) {
+    ++symbol;
+    ++name;
+  }
+  return *symbol == *name;
+}
 uintptr_t ProcessState(void *, const char *, const char *symbol, const char *) {
-  if (symbol != nullptr && std::strcmp(symbol, "__system_property_set") == 0)
+  if (SameSymbol(symbol, "__system_property_set"))
     return reinterpret_cast<uintptr_t>(&darwin_art_bionic_property_service_set);
   const uintptr_t data = darwin_art_bionic_process_state_data_resolve(symbol);
   if (data != 0) return data;

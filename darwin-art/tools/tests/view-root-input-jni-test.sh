@@ -29,6 +29,7 @@ clang++ -arch arm64 -isysroot "$sdk_path" -std=c++20 -O1 -g \
   "$source" "$root/runtime/framework/input/receiver_admission.cc" \
   "$root/runtime/framework/input/receiver_jni_resources.cc" \
   "$root/runtime/framework/input/receiver_focus_jni.cc" \
+  "$root/runtime/framework/input/key_fallback.cc" \
   "$root/tools/tests/view-root-input-jni-test.cc" \
   -o "$stage/test"
 "$stage/test"

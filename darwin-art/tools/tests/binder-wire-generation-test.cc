@@ -20,6 +20,9 @@ extern "C" int darwin_art_android_shared_memory_adopt(int, size_t, int) {
   std::abort();
 }
 extern "C" int32_t darwin_art_runtime_registered_process_uid(uint32_t) { return -1; }
+namespace android {
+void report_sysprop_change() { std::abort(); }
+}  // namespace android
 
 namespace {
 struct Object {
