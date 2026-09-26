@@ -11,6 +11,9 @@ namespace darwin_art::window {
 uint32_t SurfaceRasterScale(NSWindow* window);
 // CGDirectDisplayID of the screen showing a desktop root window, 0 if none.
 uint32_t SurfaceDisplayId(NSWindow* window);
+// Installs the process's NSApplication delegate once: Dock reopen shows a
+// hidden root, Quit asks Android to remove the task.
+void InstallSurfaceApplicationDelegate(NSApplication* application);
 
 // Backing allocation stays with the surface owner. This AppKit delegate
 // reports host resize/lifecycle facts, not Android display/focus policy.

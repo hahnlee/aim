@@ -30,7 +30,7 @@ public final class DesktopRootGeometryClient {
     private static native boolean nativeHasRoot();
     /**
      * Blocks until a host report newer than {@code afterSerial}:
-     * {serial, width, height, backing scale, CGDirectDisplayID}.
+     * {serial, width, height, backing scale, CGDirectDisplayID, hidden, quit}.
      */
     private static native long[] nativeAwaitReport(long afterSerial);
     /** The root's Android raster scale (the display backing scale), or 0. */
@@ -115,6 +115,8 @@ public final class DesktopRootGeometryClient {
                 data.writeInt((int) report[2]);
                 data.writeInt((int) report[3]);
                 data.writeInt((int) report[4]);
+                data.writeBoolean(report[5] != 0);
+                data.writeBoolean(report[6] != 0);
                 // Synchronous: this dedicated thread holds no lock, and the
                 // reply orders reports before the next latest-wins drain.
                 if (!service.transact(DesktopRootGeometryEndpoint.TRANSACTION_REPORT, data,

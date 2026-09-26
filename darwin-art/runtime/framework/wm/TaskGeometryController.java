@@ -52,6 +52,8 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
         // Android raster scale: Android pixels per host point, and density
         // 160 * scale. It follows the backing scale of the root's display.
         int scale = BuiltInDisplayConfiguration.SCALE;
+        // The user backgrounded the task's root (window closed or minimized).
+        boolean hidden;
         IBinder hostReceiver;
         long hostSerial;
         long hostAppliedRevision = -1;
@@ -267,6 +269,31 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
             int hostDisplay) {
         dispatch(() -> applyHostResize(pid, serial, pointsWidth, pointsHeight, hostScale,
                 hostDisplay));
+    }
+
+    /**
+     * The user backgrounded the root (closed or minimized its window), brought
+     * it back (Dock reopen), or quit the app. ActivityTask owns the result:
+     * the task moves to the back or front, or is removed.
+     */
+    void hostTaskState(int pid, long serial, boolean hidden, boolean quit) {
+        dispatch(() -> {
+            IBinder thread;
+            boolean changed;
+            synchronized (this) {
+                Task task = tasks.get(pid);
+                if (task == null || task.hostClosed) return;
+                changed = task.hidden != hidden;
+                if (!changed && !quit) return;
+                task.hidden = hidden;
+                thread = task.thread;
+            }
+            if (quit) {
+                ActivityClientControllerEndpoint.removeTask(thread, pid);
+            } else {
+                ActivityClientControllerEndpoint.setTaskHidden(thread, hidden);
+            }
+        });
     }
 
     private static boolean validScale(int scale) {

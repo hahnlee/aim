@@ -55,6 +55,11 @@ void InstallSurfaceApplicationMenu(NSApplication* application, NSString* title) 
   [app_menu addItemWithTitle:@"Show All"
                       action:@selector(unhideAllApplications:)
                keyEquivalent:@""];
+  [app_menu addItem:[NSMenuItem separatorItem]];
+  // Quit removes the Android task (the application delegate asks ActivityTask).
+  [app_menu addItemWithTitle:[@"Quit " stringByAppendingString:name]
+                      action:@selector(terminate:)
+               keyEquivalent:@"q"];
   app_item.submenu = app_menu;
   [main addItem:app_item];
 
@@ -69,6 +74,17 @@ void InstallSurfaceApplicationMenu(NSApplication* application, NSString* title) 
       NSEventModifierFlagCommand | NSEventModifierFlagControl;
   view_item.submenu = view_menu;
   [main addItem:view_item];
+
+  // Minimize backgrounds the task like closing the window does.
+  NSMenuItem* window_item = [[NSMenuItem alloc] initWithTitle:@"Window" action:nil
+                                                keyEquivalent:@""];
+  NSMenu* window_menu = [[NSMenu alloc] initWithTitle:@"Window"];
+  [window_menu addItemWithTitle:@"Minimize"
+                         action:@selector(performMiniaturize:)
+                  keyEquivalent:@"m"];
+  window_item.submenu = window_menu;
+  [main addItem:window_item];
+  application.windowsMenu = window_menu;
 
   application.mainMenu = main;
 }

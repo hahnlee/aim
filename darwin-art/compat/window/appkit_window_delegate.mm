@@ -62,6 +62,33 @@ void PublishRootFact(DarwinArtMetalView* view, NSWindow* window, const char* wha
   [view cancelPointerStream];
   (void)fact.Deliver();
 }
+// The red button backgrounds the app instead of ending it (Android's Home):
+// the window is hidden and the task stops; the Dock reopens it.
+- (BOOL)windowShouldClose:(NSWindow*)sender {
+  DarwinArtSurface* surface = self.surface;
+  if (surface == nullptr || !surface->visible ||
+      !darwin_art::window::RootGeometryOwned(surface)) {
+    return YES;
+  }
+  [self.view cancelPointerStream];
+  [sender orderOut:nil];
+  (void)darwin_art::window::RootGeometryReports::Process().PublishHidden(true);
+  std::cerr << "DARWIN_ART window hidden (task to background)\n";
+  return NO;
+}
+- (void)windowDidMiniaturize:(NSNotification*)notification {
+  (void)notification;
+  if (self.surface != nullptr && self.surface->visible) {
+    [self.view cancelPointerStream];
+    (void)darwin_art::window::RootGeometryReports::Process().PublishHidden(true);
+  }
+}
+- (void)windowDidDeminiaturize:(NSNotification*)notification {
+  (void)notification;
+  if (self.surface != nullptr && self.surface->visible) {
+    (void)darwin_art::window::RootGeometryReports::Process().PublishHidden(false);
+  }
+}
 - (void)windowWillClose:(NSNotification*)notification {
   (void)notification;
   auto root = self.surface == nullptr ? nullptr : self.surface->desktop_root_events;
@@ -160,7 +187,78 @@ void PublishRootFact(DarwinArtMetalView* view, NSWindow* window, const char* wha
 }
 @end
 
+// The Android app process's NSApplication delegate: the Dock reopens a hidden
+// task and Quit removes it (Android's Recents swipe), with a bounded fallback
+// if the system server never ends the process.
+@interface DarwinArtApplicationDelegate : NSObject <NSApplicationDelegate>
+@end
+
+@implementation DarwinArtApplicationDelegate
+- (BOOL)applicationShouldHandleReopen:(NSApplication*)application
+                    hasVisibleWindows:(BOOL)visible {
+  (void)application;
+  DarwinArtSurface* surface = g_active_gpu_surface.load(std::memory_order_acquire);
+  if (surface == nullptr || surface->window == nil || !surface->visible) return YES;
+  NSWindow* window = surface->window;
+  if (window.miniaturized) {
+    [window deminiaturize:nil];
+  } else if (!visible || !window.visible) {
+    [window makeKeyAndOrderFront:nil];
+    if (darwin_art::window::RootGeometryReports::Process().PublishHidden(false)) {
+      std::cerr << "DARWIN_ART window reopened (task to front)\n";
+    }
+  }
+  return NO;
+}
+// This process pumps AppKit itself and never runs -finishLaunching, so
+// NSApplication's own reopen and quit Apple Event handlers are not installed.
+- (void)handleReopenEvent:(NSAppleEventDescriptor*)event
+           withReplyEvent:(NSAppleEventDescriptor*)reply {
+  (void)event;
+  (void)reply;
+  NSApplication* application = NSApplication.sharedApplication;
+  BOOL visible = NO;
+  for (NSWindow* window in application.windows) visible = visible || window.visible;
+  (void)[self applicationShouldHandleReopen:application hasVisibleWindows:visible];
+}
+- (void)handleQuitEvent:(NSAppleEventDescriptor*)event
+         withReplyEvent:(NSAppleEventDescriptor*)reply {
+  (void)event;
+  (void)reply;
+  [NSApplication.sharedApplication terminate:nil];
+}
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)application {
+  if (!darwin_art::window::RootGeometryReports::Process().PublishQuit()) {
+    return NSTerminateNow;
+  }
+  std::cerr << "DARWIN_ART quit requested (task removal)\n";
+  // The system server destroys the Activities and ends this process; if it
+  // has not within five seconds, terminate as AppKit would.
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+                 dispatch_get_main_queue(), ^{
+                   [application replyToApplicationShouldTerminate:YES];
+                 });
+  return NSTerminateLater;
+}
+@end
+
 namespace darwin_art::window {
+void InstallSurfaceApplicationDelegate(NSApplication* application) {
+  static DarwinArtApplicationDelegate* delegate = nil;
+  if (application == nil || application.delegate != nil) return;
+  delegate = [[DarwinArtApplicationDelegate alloc] init];
+  application.delegate = delegate;
+  NSAppleEventManager* events = NSAppleEventManager.sharedAppleEventManager;
+  [events setEventHandler:delegate
+              andSelector:@selector(handleReopenEvent:withReplyEvent:)
+            forEventClass:kCoreEventClass
+               andEventID:kAEReopenApplication];
+  [events setEventHandler:delegate
+              andSelector:@selector(handleQuitEvent:withReplyEvent:)
+            forEventClass:kCoreEventClass
+               andEventID:kAEQuitApplication];
+}
+
 uint32_t SurfaceRasterScale(NSWindow* window) { return RasterScale(window); }
 uint32_t SurfaceDisplayId(NSWindow* window) { return DisplayId(window); }
 

@@ -278,6 +278,108 @@ public final class ActivityClientControllerEndpoint extends Binder {
         }
     }
 
+    /**
+     * ActivityTaskManager moveTaskToBack / moveTaskToFront for the user hiding
+     * or reopening the task's root: every visible Activity loses app
+     * visibility and pauses and stops; reopening restores visibility and
+     * resumes the top Activity (restart from stopped), as Home and returning
+     * to the app do on Android.
+     */
+    static void setTaskHidden(IBinder applicationThread, boolean hidden) {
+        ArrayList<IBinder> stopping = new ArrayList<>();
+        IBinder top;
+        boolean topWasResumed = false;
+        boolean resumeTop = false;
+        synchronized (activityLock) {
+            ArrayDeque<IBinder> stack = activityStacks.get(applicationThread);
+            if (stack == null || stack.isEmpty()) return;
+            top = stack.peekLast();
+            if (hidden) {
+                for (IBinder token : stack) {
+                    ActivityRecord record = activityRecords.get(token);
+                    if (record.state == State.RESUMED || record.state == State.PAUSED) {
+                        if (token == top) topWasResumed = record.state == State.RESUMED;
+                        record.state = State.STOPPING;
+                        stopping.add(token);
+                    }
+                }
+            } else {
+                ActivityRecord record = activityRecords.get(top);
+                if (record.state == State.STOPPING || record.state == State.STOPPED) {
+                    record.state = State.RESUMED;
+                    resumeTop = true;
+                }
+            }
+        }
+        if (stopping.isEmpty() && !resumeTop) return;
+        WindowSurfaceRegistry windows = TaskGeometryController.requireInstance().windows();
+        ArrayList<android.app.servertransaction.ClientTransactionItem> items = new ArrayList<>();
+        for (IBinder token : stopping) {
+            dispatchAppVisibility(windows, token, false);
+            if (token == top && topWasResumed) {
+                items.add(new android.app.servertransaction.PauseActivityItem(token));
+            }
+            items.add(TaskClientTransactions.stop(token));
+        }
+        if (resumeTop) {
+            dispatchAppVisibility(windows, top, true);
+            items.add(new android.app.servertransaction.ResumeActivityItem(
+                    top, false /* isForward */, false /* shouldSendCompatFakeFocus */));
+        }
+        try {
+            TaskClientTransactions.schedule(applicationThread, items);
+        } catch (RemoteException error) {
+            Log.w(TAG, "task visibility transaction not delivered", error);
+        }
+        UidProcessStates.changed();
+        Log.i(TAG, (hidden ? "task to back, stopping " + stopping.size() : "task to front")
+                + " activities");
+    }
+
+    /**
+     * ActivityTaskManager removeTask for the user quitting the app: every
+     * Activity is destroyed (the executor pauses and stops it first), then
+     * the process ends once they are gone or after a bounded wait (ADR 0011).
+     */
+    static void removeTask(IBinder applicationThread, int pid) {
+        ArrayList<IBinder> tokens = new ArrayList<>();
+        synchronized (activityLock) {
+            ArrayDeque<IBinder> stack = activityStacks.get(applicationThread);
+            if (stack != null) {
+                for (java.util.Iterator<IBinder> top = stack.descendingIterator(); top.hasNext(); ) {
+                    tokens.add(top.next());
+                }
+            }
+        }
+        ArrayList<android.app.servertransaction.ClientTransactionItem> items = new ArrayList<>();
+        for (IBinder token : tokens) {
+            items.add(new android.app.servertransaction.DestroyActivityItem(token, true));
+        }
+        try {
+            TaskClientTransactions.schedule(applicationThread, items);
+        } catch (RemoteException error) {
+            Log.w(TAG, "task removal transaction not delivered", error);
+        }
+        Log.i(TAG, "remove task pid=" + pid + " destroying " + tokens.size() + " activities");
+        long deadline = android.os.SystemClock.uptimeMillis() + 5_000;
+        Runnable[] reap = new Runnable[1];
+        reap[0] = () -> {
+            boolean gone;
+            synchronized (activityLock) {
+                ArrayDeque<IBinder> stack = activityStacks.get(applicationThread);
+                gone = stack == null || stack.isEmpty();
+            }
+            if (gone || android.os.SystemClock.uptimeMillis() >= deadline) {
+                Log.i(TAG, "remove task pid=" + pid + " ending process"
+                        + (gone ? "" : " after timeout"));
+                android.os.Process.killProcess(pid);
+            } else {
+                TaskGeometryController.requireInstance().post(reap[0], 100);
+            }
+        };
+        TaskGeometryController.requireInstance().post(reap[0], 100);
+    }
+
     private static void scheduleIdleTimeout(IBinder token) {
         TaskGeometryController.requireInstance().post(() -> {
             IBinder applicationThread;

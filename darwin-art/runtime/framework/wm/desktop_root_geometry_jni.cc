@@ -58,14 +58,16 @@ jlongArray AwaitReport(JNIEnv* env, jclass, jlong after_serial) {
           static_cast<uint64_t>(after_serial), &report)) {
     return nullptr;
   }
-  jlongArray result = env->NewLongArray(5);
+  jlongArray result = env->NewLongArray(7);
   if (result == nullptr) return nullptr;
-  const jlong values[5] = {static_cast<jlong>(report.serial),
+  const jlong values[7] = {static_cast<jlong>(report.serial),
                            static_cast<jlong>(report.points_width),
                            static_cast<jlong>(report.points_height),
                            static_cast<jlong>(report.backing_scale),
-                           static_cast<jlong>(report.display_id)};
-  env->SetLongArrayRegion(result, 0, 5, values);
+                           static_cast<jlong>(report.display_id),
+                           report.hidden ? 1 : 0,
+                           report.quit ? 1 : 0};
+  env->SetLongArrayRegion(result, 0, 7, values);
   return result;
 }
 
