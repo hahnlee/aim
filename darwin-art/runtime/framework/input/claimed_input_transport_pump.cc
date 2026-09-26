@@ -206,12 +206,12 @@ bool ProxyPacket(void* context, const DarwinArtInputPacket& packet) {
 }
 
 void ProxyWindow(void* context, int32_t left, int32_t top, int32_t right,
-                 int32_t bottom, bool visible) {
+                 int32_t bottom, bool visible, uint32_t input_flags) {
   auto* bridge = static_cast<ClaimedInputTransportPump::Control::PumpBridge*>(
       context);
   if (bridge != nullptr && bridge->user.on_window != nullptr)
     bridge->user.on_window(bridge->user.context, left, top, right, bottom,
-                           visible);
+                           visible, input_flags);
 }
 
 void ProxyAck(void* context, uint32_t sequence, bool handled) {
@@ -235,10 +235,10 @@ InputTransportConsumptionResult ProxyPacketConsumption(
 
 InputTransportConsumptionResult ProxyWindowConsumption(
     void* context, int32_t left, int32_t top, int32_t right,
-    int32_t bottom, bool visible) {
+    int32_t bottom, bool visible, uint32_t input_flags) {
   auto* bridge = static_cast<ClaimedInputTransportPump::Control::PumpBridge*>(context);
   return bridge->user.on_window_consumption(bridge->user.context, left, top,
-                                          right, bottom, visible);
+                                          right, bottom, visible, input_flags);
 }
 
 void ProxyProgress(void* context, InputTransportStatus status) {

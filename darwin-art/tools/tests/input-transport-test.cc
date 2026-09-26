@@ -554,7 +554,7 @@ int main() {
         ++state.packet_calls;
         return state.packet;
       },
-      .on_window_consumption = [](void* context, int32_t, int32_t, int32_t, int32_t, bool) {
+      .on_window_consumption = [](void* context, int32_t, int32_t, int32_t, int32_t, bool, uint32_t) {
         auto& state = *static_cast<Consumption*>(context);
         ++state.window_calls;
         return state.window;

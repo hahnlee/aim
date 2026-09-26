@@ -13,6 +13,7 @@ namespace darwin_art::input {
 struct InputRoutingSelectionSnapshot {
   bool eligible = false;
   InputWindowFrame frame;
+  uint32_t input_flags = 0;
   uint64_t focus_order = 0;
   uint64_t generation = 0;
   ReceiverId consumer_id = 0;

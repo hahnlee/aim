@@ -118,11 +118,13 @@ int ChannelEndpoint::BorrowParcelFd(bool server_side) const {
   return server_side ? transport->ReadFd() : transport->WriteFd();
 }
 InputTransportStatus ChannelEndpoint::PublishWindow(
-    int32_t left, int32_t top, int32_t right, int32_t bottom, bool visible) {
+    int32_t left, int32_t top, int32_t right, int32_t bottom, bool visible,
+    uint32_t input_flags) {
   const auto transport = Transport();
   return transport == nullptr ? InputTransportStatus::kTerminal
       : SendInputTransportWindowOnFd(transport.get(), transport->ReadFd(),
-                                     left, top, right, bottom, visible);
+                                     left, top, right, bottom, visible,
+                                     input_flags);
 }
 InputTransportStatus ChannelEndpoint::PublishFocus(uint64_t epoch,
                                                    bool focused) {

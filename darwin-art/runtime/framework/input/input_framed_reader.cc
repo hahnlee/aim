@@ -14,7 +14,7 @@ bool ValidPacket(const DarwinArtInputPacket& packet) {
     case DarwinArtInputPacketKind::kPointer:
       return packet.pointer.version == 2 &&
              packet.pointer.size >= sizeof(DarwinArtPointerEventV2) &&
-             packet.pointer.action <= DARWIN_ART_POINTER_CANCEL &&
+             packet.pointer.action <= DARWIN_ART_POINTER_OUTSIDE &&
              packet.pointer.pointer_count > 0;
     case DarwinArtInputPacketKind::kKey:
       return packet.key.version == 1 &&
@@ -153,7 +153,7 @@ InputTransportStatus FrameInputReader::Pump(
       if (callbacks.on_window_consumption != nullptr) {
         result = ValidateConsumption(callbacks.on_window_consumption(
             callbacks.context, frame.left, frame.top, frame.right, frame.bottom,
-            frame.visible != 0));
+            frame.visible != 0, frame.input_flags));
         if (result == InputTransportConsumptionResult::kDeferred)
           return InputTransportStatus::kBackpressured;
       }
@@ -161,7 +161,8 @@ InputTransportStatus FrameInputReader::Pump(
       record->consumed = true;
       if (callbacks.on_window != nullptr) {
         callbacks.on_window(callbacks.context, frame.left, frame.top,
-                            frame.right, frame.bottom, frame.visible != 0);
+                            frame.right, frame.bottom, frame.visible != 0,
+                            frame.input_flags);
       }
       if (result == InputTransportConsumptionResult::kConsumedStop)
         return InputTransportStatus::kAccepted;

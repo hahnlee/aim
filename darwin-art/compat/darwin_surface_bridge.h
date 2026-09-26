@@ -64,6 +64,9 @@ typedef enum DarwinArtPointerAction {
   DARWIN_ART_POINTER_UP = 1,
   DARWIN_ART_POINTER_MOVE = 2,
   DARWIN_ART_POINTER_CANCEL = 3,
+  // MotionEvent.ACTION_OUTSIDE. Produced only by Android pointer routing for
+  // a window that watches outside touches; host ingress never carries it.
+  DARWIN_ART_POINTER_OUTSIDE = 4,
 } DarwinArtPointerAction;
 
 typedef enum DarwinArtPointerFlags {

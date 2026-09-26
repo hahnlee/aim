@@ -44,7 +44,8 @@ class WindowInputEndpointLease final {
   // returned unchanged; no terminal result implies that buffered TX settled.
   darwin_art::input::InputTransportStatus PublishWindow(
       WindowInputEndpointLeaseToken token, std::int32_t left, std::int32_t top,
-      std::int32_t right, std::int32_t bottom, bool visible);
+      std::int32_t right, std::int32_t bottom, bool visible,
+      std::uint32_t input_flags = 0);
   darwin_art::input::InputTransportStatus PublishFocus(
       WindowInputEndpointLeaseToken token, std::uint64_t epoch, bool focused);
 

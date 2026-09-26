@@ -100,31 +100,74 @@ std::vector<InputRoutingHandle> InputRoutingDomainTransaction::Candidates() {
 }
 
 DarwinArtInputEnqueueResult RouteFrameworkPointerPacket(
-    const DarwinArtPointerEventV2& packet, InputRoutingAdmission* admission) {
+    const DarwinArtPointerEventV2& packet, InputRoutingAdmission* admission,
+    std::vector<InputRoutingAdmission>* outside) {
   if (!admission) return DarwinArtInputEnqueueResult::kNoFocusedChannel;
   *admission = {};
+  if (outside) outside->clear();
   auto domain = LockInputRoutingDomain();
   InputRoutingHandle channel;
   InputRoutingSelectionSnapshot selection;
   int32_t offset_x = 0, offset_y = 0;
   if (packet.action == DARWIN_ART_POINTER_DOWN) {
-    uint64_t selected_order = 0;
+    // InputDispatcher::findTouchedWindowAtLocked: front to back (WMS layer,
+    // then the more recently focused, then the later window), the first
+    // touchable window that contains the point or is touch modal takes the
+    // stream; the watching windows above it receive ACTION_OUTSIDE.
+    struct Candidate {
+      InputRoutingHandle channel;
+      InputRoutingSelectionSnapshot facts;
+      size_t added;
+    };
+    std::vector<Candidate> ordered;
+    size_t added = 0;
     for (const auto& candidate : domain.Candidates()) {
-      const auto facts = SnapshotInputRoutingSelection(candidate);
-      if (facts.eligible && packet.x >= facts.frame.left && packet.y >= facts.frame.top &&
-          packet.x < facts.frame.right && packet.y < facts.frame.bottom &&
-          facts.focus_order >= selected_order) {
-        channel = candidate;
-        selection = facts;
-        selected_order = facts.focus_order;
+      auto facts = SnapshotInputRoutingSelection(candidate);
+      if (facts.eligible) ordered.push_back({candidate, std::move(facts), added});
+      ++added;
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const Candidate& a, const Candidate& b) {
+      const uint32_t layer_a = InputWindowLayer(a.facts.input_flags);
+      const uint32_t layer_b = InputWindowLayer(b.facts.input_flags);
+      if (layer_a != layer_b) return layer_a > layer_b;
+      if (a.facts.focus_order != b.facts.focus_order)
+        return a.facts.focus_order > b.facts.focus_order;
+      return a.added > b.added;
+    });
+    std::vector<const Candidate*> watching;
+    for (const auto& candidate : ordered) {
+      const uint32_t flags = candidate.facts.input_flags;
+      if (flags & kInputWindowNotTouchable) continue;
+      const auto& frame = candidate.facts.frame;
+      if ((packet.x >= frame.left && packet.y >= frame.top && packet.x < frame.right &&
+           packet.y < frame.bottom) || (flags & kInputWindowTouchModal)) {
+        channel = candidate.channel;
+        selection = candidate.facts;
+        break;
       }
+      if (flags & kInputWindowWatchOutsideTouch) watching.push_back(&candidate);
     }
     if (!channel) {
+      watching.clear();
       channel = domain.Focused();
       selection = SnapshotInputRoutingSelection(channel);
     }
     offset_x = selection.frame.left;
     offset_y = selection.frame.top;
+    if (!outside) watching.clear();
+    for (const Candidate* watcher : watching) {
+      InputRoutingAdmission event;
+      if (!ValidateInputRoutingSelection(watcher->channel, watcher->facts, &event)) continue;
+      // Same-uid windows keep ACTION_OUTSIDE coordinates, in their frame.
+      event.packet.kind = darwin_art::DarwinArtInputPacketKind::kPointer;
+      event.packet.pointer = packet;
+      event.packet.pointer.action = DARWIN_ART_POINTER_OUTSIDE;
+      event.packet.pointer.x -= static_cast<float>(watcher->facts.frame.left);
+      event.packet.pointer.y -= static_cast<float>(watcher->facts.frame.top);
+      event.offset_x = watcher->facts.frame.left;
+      event.offset_y = watcher->facts.frame.top;
+      outside->push_back(std::move(event));
+    }
   } else {
     const auto capture = domain.Captured();
     channel = capture.channel;

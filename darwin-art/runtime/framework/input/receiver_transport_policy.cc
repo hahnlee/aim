@@ -15,13 +15,14 @@ InputTransportConsumptionResult ConsumePacket(void* context, const DarwinArtInpu
   return policy->consumer->ConsumePacket(packet);
 }
 InputTransportConsumptionResult ApplyWindow(void* context, int32_t left, int32_t top,
-                 int32_t right, int32_t bottom, bool visible) {
+                 int32_t right, int32_t bottom, bool visible, uint32_t input_flags) {
   const auto* policy = static_cast<ReceiverTransportPolicy*>(context);
   if (policy == nullptr || policy->channel == nullptr || policy->consumer == nullptr)
     return InputTransportConsumptionResult::kDeferred;
   const auto ready = policy->consumer->BeforeControl();
   if (ready != InputTransportConsumptionResult::kConsumed) return ready;
-  PublishInputRoutingWmsFrame(policy->channel->Routing(), left, top, right, bottom, visible);
+  PublishInputRoutingWmsFrame(policy->channel->Routing(), left, top, right, bottom, visible,
+                              input_flags);
   if (policy->wake_pending != nullptr) policy->wake_pending();
   return InputTransportConsumptionResult::kConsumed;
 }

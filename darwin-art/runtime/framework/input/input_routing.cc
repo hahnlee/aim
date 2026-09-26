@@ -690,14 +690,14 @@ void TerminateInputRoutingTransport(
 
 bool PublishInputRoutingWmsFrame(const InputRoutingHandle& state, int32_t left,
                                 int32_t top, int32_t right, int32_t bottom,
-                                bool visible) {
+                                bool visible, uint32_t input_flags) {
   if (state == nullptr) return false;
   {
     auto domain = LockInputRoutingDomain();
     std::lock_guard<std::mutex> lock(state->data.mutex);
     auto next_window = state->data.window;
     const auto transition = next_window.PublishWmsFrame(
-        {left, top, right, bottom}, visible);
+        {left, top, right, bottom}, visible, input_flags);
     const bool revoke = transition.Revoked();
     if (revoke) {
       PrepareGenerationAdvanceLocked(&state->data);
@@ -862,7 +862,7 @@ InputRoutingSelectionSnapshot SnapshotInputRoutingSelection(const InputRoutingHa
   const auto& data = channel->data;
   return {data.window.Eligible() && data.consumer_id != 0 &&
               !routing_internal::IsRoutingEndpointTerminatedLocked(data, data.endpoint),
-          data.window.Frame(), data.focus_order, data.generation,
+          data.window.Frame(), data.window.Flags(), data.focus_order, data.generation,
           data.consumer_id, data.recipient, data.endpoint, data.transport_ready,
           data.focus_cache.focus_ready, data.focus_cache.grant,
           data.focus_cache.revoked, data.focus_cache.focus_epoch,

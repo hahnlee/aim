@@ -39,7 +39,9 @@ struct WindowFrame {
   int32_t right = 0;
   int32_t bottom = 0;
   uint32_t visible = 0;
-  uint32_t reserved = 0;
+  // InputWindowFlags (input_window_state.h): the WMS window's touch-modal,
+  // watch-outside-touch and not-touchable input policy.
+  uint32_t input_flags = 0;
 };
 
 struct AckFrame {

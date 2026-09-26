@@ -22,7 +22,8 @@ struct InputTransportPumpCallbacks {
   // Returning false leaves the complete packet at the front of rx and
   // reports kBackpressured; policy can retry after draining its queue.
   bool (*on_packet)(void*, const DarwinArtInputPacket&) = nullptr;
-  void (*on_window)(void*, int32_t, int32_t, int32_t, int32_t, bool) = nullptr;
+  // Window frame, visibility and InputWindowFlags from the WMS publication.
+  void (*on_window)(void*, int32_t, int32_t, int32_t, int32_t, bool, uint32_t) = nullptr;
   void (*on_ack)(void*, uint32_t, bool) = nullptr;
   // kDeferred leaves the complete focus frame at the front of rx and reports
   // kBackpressured. kConsumedStop consumes it and returns kAccepted without
@@ -49,7 +50,7 @@ struct InputTransportPumpCallbacks {
   InputTransportConsumptionResult (*on_packet_consumption)(
       void*, const DarwinArtInputPacket&) = nullptr;
   InputTransportConsumptionResult (*on_window_consumption)(
-      void*, int32_t, int32_t, int32_t, int32_t, bool) = nullptr;
+      void*, int32_t, int32_t, int32_t, int32_t, bool, uint32_t) = nullptr;
   // Original packet identity, ACK v2 only. Legacy v1 stays on on_ack.
   void (*on_ack64)(void*, uint64_t, bool) = nullptr;
 };

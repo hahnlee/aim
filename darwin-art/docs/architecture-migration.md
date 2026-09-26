@@ -53,7 +53,7 @@ Component tests are not application acceptance. See [AGENTS.md](../AGENTS.md),
 | Production closure | TextureView/SurfaceTexture, upstream TextureLayer, SCM/Binder/FS and shared sensor JNI/NDK build/link in both flavors. Graphics/headless audits and exact no-work repeat pass. |
 | Chromium | Unchanged Browser renders Example Domain; physical URL entry, three IANA link/back cycles, reload, restart restoration and Gemini sheet close/reopen pass. Fresh 2× capture confirms Graphite/Dawn Vulkan → MoltenVK on Apple M2 Pro. Longer soak remains open. |
 | Calculator / DeskClock | Physical Calculator pointer and keyboard arithmetic and DeskClock Stopwatch start/pause pass. Localized window labels remain incomplete. |
-| Input / WMS | Exact-root ingress, readiness/focus fences, bounded first-key queue and receiver lifetime are adopted. Parent/process-death cleanup remains open. |
+| Input / WMS | Exact-root ingress, readiness/focus fences, bounded first-key queue and receiver lifetime are adopted. WMS publishes each window's layer and touch-modal/watch-outside/not-touchable policy; a DOWN goes to the top touchable window containing it or touch modal, and watchers above it get `ACTION_OUTSIDE`. Physical: a click outside DeskClock's overflow menu dismisses it without reaching the tab behind; menu items still open Settings. Parent/process-death cleanup remains open. |
 | Uid process state | Each process's Activities give its OomAdjuster state (resumed/paused → TOP with all capabilities, stopping → LAST_ACTIVITY, stopped → CACHED_ACTIVITY, none → SERVICE); the minimum per uid goes to `AppOpsService.updateUidProcState` on every change, and broadcasts and `getRunningAppProcesses` use the same state. `dumpsys appops`: DeskClock `state=top capability=LCMNFUAT`, `cch` after its process dies. |
 | Activity visibility | Activities hidden behind an occluding Activity (window style from `AttributeCache`) lose app visibility and are stopped when the new top Activity reports idle (10 s idle timeout); their windows release their layers. Finishing the top Activity restores visibility and restarts them. Physical: DeskClock → city list → back. |
 | Orientation / resize | Per-task revisioned geometry: launch orientation, `setRequestedOrientation`, real AppKit edge resize → DisplayManager callback, config/relaunch/`WindowStateResizeItem` transactions, WMS frames/insets and host backing on one revision. Physical: Calculator/DeskClock relaunch, Chromium/Blue Archive config change, five-point click map, popup through resize, two-app isolation, close mid-resize. |
@@ -67,18 +67,16 @@ Component tests are not application acceptance. See [AGENTS.md](../AGENTS.md),
 
 Open failures are GitHub issues; the ones blocking the current goal:
 
-- Window close and Cmd+Q have no Android lifecycle (#15); popup
-  `ACTION_OUTSIDE` (#17).
+- Window close and Cmd+Q have no Android lifecycle (#15).
 - Broadcasts beyond unordered registered delivery (#3); framework-compat
   class replacements (#45).
 - SCM managed-transfer adoption (#18); process-death cleanup (#20).
 
 ## Next work
 
-1. Deliver popup `ACTION_OUTSIDE` and touch-modal consumption (#17).
-2. Let density follow the host backing scale through the same revision path (#27).
-3. Run locale/label checks, then extend Chromium focus/tab/soak coverage (#19, #22).
-4. Close relevant WMS/Binder/SCM lifetime gaps (#18, #20) and audit changed
+1. Let density follow the host backing scale through the same revision path (#27).
+2. Run locale/label checks, then extend Chromium focus/tab/soak coverage (#19, #22).
+3. Close relevant WMS/Binder/SCM lifetime gaps (#18, #20) and audit changed
    files for mixed ownership before declaring migration complete.
 
 ## Known limits
