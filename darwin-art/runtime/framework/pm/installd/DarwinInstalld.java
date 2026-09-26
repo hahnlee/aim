@@ -158,6 +158,10 @@ public final class DarwinInstalld extends IInstalld.Stub {
                     "Failed to ensure dirs for " + userId);
         }
     }
+    // Refused, never implemented as a delete: UserDataPreparer calls this for
+    // boot-time reconciliation of user 0 after a failed prepare, and would
+    // delete the whole profile's Android data (#42). It belongs to real user
+    // removal only, which this runtime does not offer.
     @Override public void destroyUserData(String uuid, int userId, int flags) {
         throw unsupported("destroyUserData");
     }
