@@ -11,6 +11,7 @@ mod process_owner;
 mod process_snapshot_abi;
 mod properties;
 mod property_iteration_abi;
+mod property_publication;
 mod property_versions;
 mod property_wait_abi;
 use credentials::Credentials;
@@ -219,6 +220,14 @@ fn set_errno(value: i32) {
     unsafe { darwin_art_bionic_errno_store(value) };
 }
 
+/// The active snapshot with the property service's newer published values
+/// folded into its property area, for property reads.
+fn property_snapshot() -> Option<Arc<Snapshot>> {
+    let snapshot = active_snapshot()?;
+    property_publication::refresh(&snapshot.properties);
+    Some(snapshot)
+}
+
 fn active_snapshot() -> Option<Arc<Snapshot>> {
     match active_slot().read() {
         Ok(active) => active.clone(),
@@ -290,7 +299,7 @@ pub unsafe extern "C" fn darwin_art_bionic_process_property_get_core(
         unsafe { value.write(0) };
         return 0;
     };
-    let Some(snapshot) = active_snapshot() else {
+    let Some(snapshot) = property_snapshot() else {
         missing_snapshot();
         // SAFETY: non-null value is writable by ABI contract.
         unsafe { value.write(0) };
@@ -361,7 +370,7 @@ pub unsafe extern "C" fn darwin_art_bionic_process_property_find_core(
         set_errno(ANDROID_EFAULT);
         return ptr::null();
     };
-    let Some(snapshot) = active_snapshot() else {
+    let Some(snapshot) = property_snapshot() else {
         missing_snapshot();
         return ptr::null();
     };
@@ -395,7 +404,7 @@ pub unsafe extern "C" fn darwin_art_bionic_process_property_read_callback_core(
         set_errno(ANDROID_EFAULT);
         return;
     }
-    let Some(snapshot) = active_snapshot() else {
+    let Some(snapshot) = property_snapshot() else {
         missing_snapshot();
         return;
     };

@@ -90,6 +90,17 @@ final class BroadcastTransactions implements SystemBroadcasts {
 
     @Override
     public void broadcastAsSystem(Intent intent, boolean sticky) {
+        if (Intent.ACTION_TIMEZONE_CHANGED.equals(intent.getAction())) {
+            // ActivityManagerService UPDATE_TIME_ZONE: every process drops its
+            // cached default before receivers see the change.
+            for (ApplicationProcessRegistry.AttachedApplication process : processes.attached()) {
+                try {
+                    IApplicationThread.Stub.asInterface(process.thread).updateTimeZone();
+                } catch (RemoteException ignored) {
+                    // The process is gone.
+                }
+            }
+        }
         registry.broadcast(SYSTEM_UID, "android", intent, null, null, null, null, sticky,
                 BroadcastRegistry.USER_ALL);
     }

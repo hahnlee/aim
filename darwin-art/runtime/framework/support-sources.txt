@@ -79,6 +79,7 @@ runtime/framework/power/BatteryService.java
 runtime/framework/power/BatteryStatsEndpoint.java
 runtime/framework/power/BatteryStateProvider.java
 runtime/framework/power/DarwinBatteryStateProvider.java
+runtime/framework/time/HostTimeZoneService.java
 runtime/framework/power/DarwinPowerStateProvider.java
 runtime/framework/power/PowerManagerEndpoint.java
 runtime/framework/power/PowerStateProvider.java

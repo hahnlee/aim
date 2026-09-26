@@ -4,7 +4,7 @@
 //! stable handles and invokes the guest callback without holding the area lock.
 
 use crate::{
-    ANDROID_EFAULT, ANDROID_EIO, CAPABILITY_FAILURE, active_snapshot, missing_snapshot, set_errno,
+    ANDROID_EFAULT, ANDROID_EIO, CAPABILITY_FAILURE, missing_snapshot, property_snapshot, set_errno,
 };
 use std::ffi::{c_int, c_void};
 use std::sync::atomic::Ordering;
@@ -23,7 +23,7 @@ pub unsafe extern "C" fn darwin_art_bionic_process_property_foreach_core(
         set_errno(ANDROID_EFAULT);
         return -1;
     };
-    let Some(snapshot) = active_snapshot() else {
+    let Some(snapshot) = property_snapshot() else {
         missing_snapshot();
         return -1;
     };

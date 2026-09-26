@@ -16,6 +16,7 @@
 #include "kernel_binder_service.h"
 #include "../connectivity/network_provider_jni.h"
 #include "../power/power_state_jni.h"
+#include "../time/host_time_zone_jni.h"
 #include "../pm/installd/installd_jni.h"
 #include "host_command_jni.h"
 #include "../app/process_registration.h"
@@ -158,6 +159,13 @@ int Run(JNIEnv* env, const char* socket_path) {
   if (battery_state == nullptr || env->ExceptionCheck() ||
       !darwin_art::framework::power::RegisterBatteryStateProvider(env,
                                                                   battery_state)) {
+    return 70;
+  }
+
+  jclass host_time_zone = LoadClass(
+      env, loader, load, "dev.darwinart.runtime.time.HostTimeZoneService");
+  if (host_time_zone == nullptr || env->ExceptionCheck() ||
+      !darwin_art::framework::time::RegisterHostTimeZoneProvider(env, host_time_zone)) {
     return 70;
   }
 

@@ -214,6 +214,7 @@ pub const HEADLESS_ADAPTER_SOURCES: &[&str] = &[
     "../runtime/framework/connectivity/network_provider_jni.cc",
     "../runtime/framework/power/power_state_platform.mm",
     "../runtime/framework/power/power_state_jni.cc",
+    "../runtime/framework/time/host_time_zone_jni.cc",
     "../runtime/framework/am/application_binding.cc",
     "../runtime/framework/am/attachment.cc",
     "../runtime/framework/am/process_launch.cc",
@@ -453,6 +454,7 @@ pub const GRAPHICS_ADAPTER_SOURCES: &[&str] = &[
     "../runtime/framework/connectivity/network_provider_jni.cc",
     "../runtime/framework/power/power_state_platform.mm",
     "../runtime/framework/power/power_state_jni.cc",
+    "../runtime/framework/time/host_time_zone_jni.cc",
     "../runtime/framework/camera/camera_metadata_jni.cc",
     "../runtime/framework/am/application_binding.cc",
     "../runtime/framework/am/attachment.cc",
@@ -501,6 +503,7 @@ pub const GRAPHICS_ADAPTER_SOURCES: &[&str] = &[
     "../runtime/framework/connectivity/network_provider_jni.cc",
     "../runtime/framework/power/power_state_platform.mm",
     "../runtime/framework/power/power_state_jni.cc",
+    "../runtime/framework/time/host_time_zone_jni.cc",
 ];
 
 pub const COMMON_ADAPTER_SOURCES: &[&str] = &[
@@ -508,6 +511,7 @@ pub const COMMON_ADAPTER_SOURCES: &[&str] = &[
     "../runtime/framework/connectivity/network_provider_jni.cc",
     "../runtime/framework/power/power_state_platform.mm",
     "../runtime/framework/power/power_state_jni.cc",
+    "../runtime/framework/time/host_time_zone_jni.cc",
     "window/surface_control_jni.cc",
     "window/surface_control_state.cc",
     "window/surface_control_registry.cc",

@@ -77,6 +77,7 @@ public final class SystemServiceFactory {
         BatteryService battery =
                 new BatteryService(new DarwinBatteryStateProvider(), activity.systemBroadcasts());
         battery.start();
+        new dev.darwinart.runtime.time.HostTimeZoneService(activity.systemBroadcasts()).start();
         services.put("batteryproperties", new BatteryPropertiesRegistrarEndpoint(battery));
         services.put("batterystats", new BatteryStatsEndpoint(battery));
         services.put("activity_task", new ActivityTaskManagerEndpoint(processes));

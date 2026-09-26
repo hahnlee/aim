@@ -3,7 +3,7 @@ use super::*;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn darwin_art_bionic_process_property_area_serial_core() -> u32 {
-    let Some(snapshot) = active_snapshot() else {
+    let Some(snapshot) = property_snapshot() else {
         missing_snapshot();
         return 0;
     };
@@ -14,7 +14,7 @@ pub extern "C" fn darwin_art_bionic_process_property_area_serial_core() -> u32 {
 pub extern "C" fn darwin_art_bionic_process_property_serial_core(
     property: *const std::ffi::c_void,
 ) -> u32 {
-    let Some(snapshot) = active_snapshot() else {
+    let Some(snapshot) = property_snapshot() else {
         missing_snapshot();
         return 0;
     };
