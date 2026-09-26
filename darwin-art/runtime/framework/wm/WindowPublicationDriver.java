@@ -24,6 +24,10 @@ final class WindowPublicationDriver implements WindowFocusPublicationDelivery.Tr
         handler = new Handler(thread.getLooper());
     }
 
+    void setFocusListener(WindowFocusPublicationDelivery.FocusListener listener) {
+        delivery.setFocusListener(listener);
+    }
+
     synchronized void retain(WindowInputEndpoint endpoint) {
         endpoints.add(endpoint);
     }

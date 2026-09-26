@@ -29,6 +29,7 @@ public final class UidProcessStates {
     private final SparseIntArray reportedStates = new SparseIntArray();
     private final SparseIntArray reportedCapabilities = new SparseIntArray();
     private AppOpsService appOps;
+    private final UidObserverController observers = new UidObserverController();
 
     UidProcessStates(ApplicationProcessRegistry processes) {
         if (processes == null) throw new NullPointerException("processes");
@@ -38,6 +39,11 @@ public final class UidProcessStates {
         handler = new Handler(thread.getLooper());
         instance = this;
         processes.setChangeListener(UidProcessStates::changed);
+    }
+
+    /** The registered IUidObservers these states are reported to. */
+    UidObserverController observers() {
+        return observers;
     }
 
     /** ActivityManagerService's AppOpsService, once SystemServer created it. */
@@ -108,6 +114,9 @@ public final class UidProcessStates {
             return;
         }
         appOps.updateUidProcState(uid, state, capability);
+        observers.dispatch(uid, reportedStates.indexOfKey(uid) >= 0
+                ? previous : ActivityManager.PROCESS_STATE_NONEXISTENT, state,
+                reportedCapabilities.get(uid), capability);
         if (state == ActivityManager.PROCESS_STATE_NONEXISTENT) {
             reportedStates.delete(uid);
             reportedCapabilities.delete(uid);

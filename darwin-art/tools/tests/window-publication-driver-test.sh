@@ -25,6 +25,8 @@ javac --release 8 -encoding UTF-8 -d "$stage" \
   "$root/runtime/framework/wm/WindowInputEndpoint.java" \
   "$root/runtime/framework/wm/WindowPublicationDriver.java" \
   "$root/runtime/framework/wm/WindowRootActivationPolicy.java" \
+  $(find "$root/tools/tests/wm/window-id-stubs" -name '*.java' -print) \
+  "$root/runtime/framework/wm/WindowIdRegistry.java" \
   "$root/runtime/framework/wm/WindowPublicationController.java"
 java -ea -cp "$stage" dev.darwinart.runtime.wm.WindowPublicationDriverTest
 echo 'WMS publication driver/controller: real production classes with deterministic fixture seam PASS'

@@ -7,5 +7,6 @@ public interface IWindowSession {
         public static final int TRANSACTION_remove = 3;
         public static final int TRANSACTION_relayoutAsync = 4;
         public static final int TRANSACTION_setOnBackInvokedCallbackInfo = 5;
+        public static final int TRANSACTION_getWindowId = 6;
     }
 }

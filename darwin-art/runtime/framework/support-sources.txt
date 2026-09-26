@@ -14,6 +14,7 @@ runtime/framework/am/ActivityManagerEndpoint.java
 runtime/framework/am/ActivityManagerLocal.java
 runtime/framework/am/ApplicationProcessRegistry.java
 runtime/framework/am/UidProcessStates.java
+runtime/framework/am/UidObserverController.java
 runtime/framework/am/ConnectionRecord.java
 runtime/framework/am/ServiceConnectionOwner.java
 runtime/framework/am/ServiceConnectionIndex.java
@@ -116,6 +117,7 @@ runtime/framework/wm/WindowInputEndpoint.java
 runtime/framework/wm/WindowPublicationDriver.java
 runtime/framework/wm/WindowRootActivationPolicy.java
 runtime/framework/wm/WindowPublicationController.java
+runtime/framework/wm/WindowIdRegistry.java
 runtime/framework/wm/WindowFocusRegistry.java
 runtime/framework/wm/WindowFocusPublicationDelivery.java
 runtime/framework/wm/WindowManagerEndpoint.java

@@ -48,6 +48,12 @@ public final class ActivityManagerEndpoint extends Binder {
     private final int broadcastIntentWithFeatureCode = transaction("broadcastIntentWithFeature");
     private final int getInfoForIntentSenderCode = transaction("getInfoForIntentSender");
     private final int sendIntentSenderCode = transaction("sendIntentSender");
+    private final int registerUidObserverCode = transaction("registerUidObserver");
+    private final int registerUidObserverForUidsCode =
+            transaction("registerUidObserverForUids");
+    private final int unregisterUidObserverCode = transaction("unregisterUidObserver");
+    private final int addUidToObserverCode = transaction("addUidToObserver");
+    private final int removeUidFromObserverCode = transaction("removeUidFromObserver");
     private final int handleApplicationWtfCode = transaction("handleApplicationWtf");
     private final int setRenderThreadCode = transaction("setRenderThread");
     private final int publishContentProvidersCode = transaction("publishContentProviders");
@@ -233,6 +239,42 @@ public final class ActivityManagerEndpoint extends Binder {
             reply.writeNoException();
             reply.writeInt(sendIntentSender(target, allowlistToken, resultCode, intent,
                     resolvedType, finishedReceiver, requiredPermission, options));
+            return true;
+        }
+        if (code == registerUidObserverCode || code == registerUidObserverForUidsCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            android.app.IUidObserver observer =
+                    android.app.IUidObserver.Stub.asInterface(data.readStrongBinder());
+            int which = data.readInt();
+            int cutpoint = data.readInt();
+            data.readString(); // Calling package.
+            int[] uids = code == registerUidObserverForUidsCode ? data.createIntArray() : null;
+            data.enforceNoDataAvail();
+            IBinder token = uidStates.observers().register(observer, which, cutpoint,
+                    code == registerUidObserverForUidsCode && uids == null ? new int[0] : uids);
+            if (reply != null) {
+                reply.writeNoException();
+                if (code == registerUidObserverForUidsCode) reply.writeStrongBinder(token);
+            }
+            return true;
+        }
+        if (code == unregisterUidObserverCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            android.app.IUidObserver observer =
+                    android.app.IUidObserver.Stub.asInterface(data.readStrongBinder());
+            data.enforceNoDataAvail();
+            uidStates.observers().unregister(observer);
+            if (reply != null) reply.writeNoException();
+            return true;
+        }
+        if (code == addUidToObserverCode || code == removeUidFromObserverCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            IBinder token = data.readStrongBinder();
+            data.readString(); // Calling package.
+            int uid = data.readInt();
+            data.enforceNoDataAvail();
+            uidStates.observers().updateFilter(token, uid, code == addUidToObserverCode);
+            if (reply != null) reply.writeNoException();
             return true;
         }
         if (code == handleApplicationWtfCode) {
