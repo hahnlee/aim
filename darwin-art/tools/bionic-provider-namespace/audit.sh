@@ -97,6 +97,7 @@ _darwin_art_bionic_namespace_bind
 _darwin_art_bionic_numeric_resolve
 _darwin_art_bionic_process_state_data_resolve
 _darwin_art_bionic_process_state_resolve
+_darwin_art_bionic_property_service_set
 _darwin_art_bionic_pthread_resolve
 _darwin_art_bionic_scanf_resolve
 _darwin_art_bionic_sendfile_resolve
@@ -141,4 +142,4 @@ if grep -E '(_dlopen|_dlsym|_dlvsym|_NSLookupSymbolInImage|__dyld_)' <<<"$undefi
   fail 'host loader undefined reference present'
 fi
 
-echo 'bionic-provider-namespace: PASS libcxx=160/160 libc-rows=620 liblog-rows=19 binder-ndk=39 aaudio=30 owned=800 unsupported=0 duplicate-triple=0 exact-version+original-default=yes resolver=closed teardown=ordered+quiescent asan+ubsan+tsan=yes'
+echo 'bionic-provider-namespace: PASS libcxx=160/160 libc-rows=620 liblog-rows=19 binder-ndk=39 aaudio=30 owned=798 unsupported=0 duplicate-triple=0 exact-version+original-default=yes resolver=closed teardown=ordered+quiescent asan+ubsan+tsan=yes'

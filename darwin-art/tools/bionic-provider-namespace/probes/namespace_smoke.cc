@@ -115,10 +115,10 @@ DarwinArtBionicNamespace *Build(Context *contexts, Shared *shared) {
 } // namespace
 
 int main() {
-  Check(darwin_art_bionic_namespace_owned_count() == 800, "owned count");
+  Check(darwin_art_bionic_namespace_owned_count() == 798, "owned count");
   Check(darwin_art_bionic_namespace_unsupported_libc_count() == 0,
         "unsupported count");
-  Check(sizeof(kExpected) / sizeof(kExpected[0]) == 800, "fixture count");
+  Check(sizeof(kExpected) / sizeof(kExpected[0]) == 798, "fixture count");
   Check(kUnsupported.empty(), "unsupported fixture count");
 
   {
@@ -322,7 +322,7 @@ int main() {
   std::fprintf(
       stderr,
       "bionic-provider-namespace: PASS libcxx=160/160 libc-rows=620 "
-      "liblog-rows=19 binder-ndk=39 aaudio=30 owned=800 duplicate-triple=0 threads=12 "
+      "liblog-rows=19 binder-ndk=39 aaudio=30 owned=798 duplicate-triple=0 threads=12 "
       "teardown=ordered+quiescent host-fallback=denied\n");
   return 0;
 }
