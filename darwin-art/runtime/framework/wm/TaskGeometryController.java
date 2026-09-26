@@ -85,6 +85,22 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
         if (!dispatcher.post(work)) throw new IllegalStateException("task geometry dispatcher stopped");
     }
 
+    /**
+     * Runs Activity visibility work after {@code delayMillis} on the thread
+     * that publishes task revisions, so stop/visibility transactions and
+     * relaunch lifecycle items leave in one order.
+     */
+    void post(Runnable work, long delayMillis) {
+        if (!dispatcher.postDelayed(work, delayMillis)) {
+            throw new IllegalStateException("task geometry dispatcher stopped");
+        }
+    }
+
+    /** The WMS-wide window layout owner. */
+    WindowSurfaceRegistry windows() {
+        return windows;
+    }
+
     /** ActivityTask owner joined to {@code windowManager}'s window layout. */
     public static TaskGeometryController create(ApplicationProcessRegistry processes,
             TaskDisplayRegistry displays, WindowManagerEndpoint windowManager) {
@@ -318,7 +334,7 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
                     activity.configChanges, activity.targetSdkVersion);
             if (changes != 0 && TaskGeometryPolicy.shouldRelaunch(changes, handled)) {
                 TaskClientTransactions.relaunch(items, activity.token, changes, global, override,
-                        activity.resumed);
+                        activity.lifecycleState);
                 relaunched.add(activity.token);
             } else {
                 items.add(TaskClientTransactions.activityConfiguration(activity.token, override));

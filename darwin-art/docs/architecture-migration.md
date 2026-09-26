@@ -54,6 +54,7 @@ Component tests are not application acceptance. See [AGENTS.md](../AGENTS.md),
 | Chromium | Unchanged Browser renders Example Domain; physical URL entry, three IANA link/back cycles, reload, restart restoration and Gemini sheet close/reopen pass. Fresh 2× capture confirms Graphite/Dawn Vulkan → MoltenVK on Apple M2 Pro. Longer soak remains open. |
 | Calculator / DeskClock | Physical Calculator pointer and keyboard arithmetic and DeskClock Stopwatch start/pause pass. Localized window labels remain incomplete. |
 | Input / WMS | Exact-root ingress, readiness/focus fences, bounded first-key queue and receiver lifetime are adopted. Parent/process-death cleanup remains open. |
+| Activity visibility | Activities hidden behind an occluding Activity (window style from `AttributeCache`) lose app visibility and are stopped when the new top Activity reports idle (10 s idle timeout); their windows release their layers. Finishing the top Activity restores visibility and restarts them. Physical: DeskClock → city list → back. |
 | Orientation / resize | Per-task revisioned geometry: launch orientation, `setRequestedOrientation`, real AppKit edge resize → DisplayManager callback, config/relaunch/`WindowStateResizeItem` transactions, WMS frames/insets and host backing on one revision. Physical: Calculator/DeskClock relaunch, Chromium/Blue Archive config change, five-point click map, popup through resize, two-app isolation, close mid-resize. |
 | Blue Archive | Unchanged full-split APK starts landscape `1280×720` (2×), renders Unity frames, survives a 24-drag live-resize stress (240 revisions, 67 swapchain recreations, no fault) without relaunch, and takes physical clicks on Android dialogs and Unity UI. The Nexon patcher downloads and verifies all 1464 files (~650 MB), preprocessing completes and the login title screen renders; a CoreAudio process tap measures non-silent output there (peak 0.12). GMS is absent (game shows its notice). |
 | Package manager | PMS scans `/data/app` and the pinned image's system partition (79 system packages); permissions, signatures (v3), privileged flags, features and PM queries are PMS answers. `default` was migrated in place; all eight APKs launch from PMS and Blue Archive reaches its title screen on its existing downloads. System features describe the host: faketouch (mouse/trackpad, no touchscreen), both screen orientations, audio output, GLES 3.0 (ANGLE Metal) and Vulkan 1.3 level 1 (MoltenVK, the image's vendor XMLs). |
@@ -65,15 +66,15 @@ Component tests are not application acceptance. See [AGENTS.md](../AGENTS.md),
 
 Open failures are GitHub issues; the ones blocking the current goal:
 
-- Activity behind a new top Activity is never stopped (#16); window close and
-  Cmd+Q have no Android lifecycle (#15); popup `ACTION_OUTSIDE` (#17).
+- Window close and Cmd+Q have no Android lifecycle (#15); popup
+  `ACTION_OUTSIDE` (#17).
 - Broadcasts beyond unordered registered delivery (#3); AppOps foreground
   state (#44); framework-compat class replacements (#45).
 - SCM managed-transfer adoption (#18); process-death cleanup (#20).
 
 ## Next work
 
-1. Add Activity stop/visibility transitions and popup `ACTION_OUTSIDE` (#16, #17).
+1. Deliver popup `ACTION_OUTSIDE` and touch-modal consumption (#17).
 2. Let density follow the host backing scale through the same revision path (#27).
 3. Run locale/label checks, then extend Chromium focus/tab/soak coverage (#19, #22).
 4. Close relevant WMS/Binder/SCM lifetime gaps (#18, #20) and audit changed

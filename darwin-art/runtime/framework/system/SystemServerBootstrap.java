@@ -7,6 +7,7 @@ import android.os.ArtModuleServiceManager;
 import android.os.Process;
 import android.os.ServiceManager;
 import android.os.SystemClock;
+import com.android.internal.policy.AttributeCache;
 import com.android.server.LocalManagerRegistry;
 import com.android.server.LocalServices;
 import com.android.server.SystemConfig;
@@ -103,6 +104,8 @@ public final class SystemServerBootstrap {
         LocalManagerRegistry.addManager(
                 DexUseManagerLocal.class, DexUseManagerLocal.createInstance(systemContext));
         services.startService(UserManagerService.LifeCycle.class);
+        // Resources of packages' themes (Activity window styles).
+        AttributeCache.init(systemContext);
         // ActivityManagerService.setSystemProcess
         IApplicationThread systemThread =
                 ActivityThread.currentActivityThread().getApplicationThread();

@@ -7,7 +7,9 @@ import android.app.servertransaction.ClientTransaction;
 import android.app.servertransaction.ClientTransactionItem;
 import android.app.servertransaction.ConfigurationChangeItem;
 import android.app.servertransaction.PauseActivityItem;
+import android.app.servertransaction.ActivityLifecycleItem;
 import android.app.servertransaction.ResumeActivityItem;
+import android.app.servertransaction.StopActivityItem;
 import android.app.servertransaction.WindowStateResizeItem;
 import android.content.res.Configuration;
 import android.graphics.Rect;
@@ -40,17 +42,30 @@ final class TaskClientTransactions {
 
     /**
      * The framework relaunch path for an Activity that does not handle
-     * {@code changes}. The lifecycle item returns it to its current state.
+     * {@code changes}. The lifecycle item returns it to its current
+     * {@link ActivityLifecycleItem} state.
      */
     static void relaunch(List<ClientTransactionItem> items, IBinder token, int changes,
-            Configuration global, Configuration override, boolean resumed) {
+            Configuration global, Configuration override, int lifecycleState) {
         items.add(new ActivityRelaunchItem(token, null, null, changes,
                 new MergedConfiguration(new Configuration(global), new Configuration(override)),
                 false /* preserveWindow */, new ActivityWindowInfo()));
-        items.add(resumed
-                ? new ResumeActivityItem(token, false /* isForward */,
-                        false /* shouldSendCompatFakeFocus */)
-                : new PauseActivityItem(token));
+        switch (lifecycleState) {
+            case ActivityLifecycleItem.ON_RESUME:
+                items.add(new ResumeActivityItem(token, false /* isForward */,
+                        false /* shouldSendCompatFakeFocus */));
+                break;
+            case ActivityLifecycleItem.ON_STOP:
+                items.add(stop(token));
+                break;
+            default:
+                items.add(new PauseActivityItem(token));
+        }
+    }
+
+    /** ActivityTaskSupervisor stop of an Activity that is no longer visible. */
+    static ClientTransactionItem stop(IBinder token) {
+        return new StopActivityItem(token);
     }
 
     static ClientTransactionItem windowResize(IBinder window, Rect frame, Rect display,
