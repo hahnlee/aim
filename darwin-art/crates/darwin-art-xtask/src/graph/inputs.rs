@@ -442,6 +442,7 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
         PathBuf::from("runtime/framework/power/power_state_platform.h"),
         PathBuf::from("runtime/framework/power/power_state_jni.h"),
         PathBuf::from("runtime/framework/time/host_time_zone_jni.h"),
+        PathBuf::from("runtime/framework/display/host_display_facts_jni.h"),
         PathBuf::from("runtime/framework/app/process_registration.h"),
         PathBuf::from("tools/binder-context-manager-test.cc"),
         PathBuf::from("tools/tests/application-descriptor-table.h"),

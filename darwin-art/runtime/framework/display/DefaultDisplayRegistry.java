@@ -10,21 +10,27 @@ import java.lang.reflect.Field;
 final class DefaultDisplayRegistry {
     private static final int MODE_ID = 1;
     private static final int DISPLAY_TYPE_INTERNAL = 1;
+    private static final int DISPLAY_TYPE_EXTERNAL = 2;
 
     int[] getDisplayIds(boolean includeDisabled) {
         return new int[] {Display.DEFAULT_DISPLAY};
     }
 
-    Parcelable getDisplayInfo(int displayId, DisplayGeometry geometry) {
+    /**
+     * {@code host} is the macOS display the task's root is on, when known: it
+     * names the display and gives its type and physical pixel density.
+     */
+    Parcelable getDisplayInfo(int displayId, DisplayGeometry geometry, HostDisplayFacts host) {
         if (displayId != Display.DEFAULT_DISPLAY) return null;
         try {
             Class<?> infoClass = Class.forName("android.view.DisplayInfo");
             Object info = infoClass.getDeclaredConstructor().newInstance();
             set(infoClass, info, "displayId", Display.DEFAULT_DISPLAY);
             set(infoClass, info, "layerStack", Display.DEFAULT_DISPLAY);
-            set(infoClass, info, "name", "Built-in Display");
+            set(infoClass, info, "name", host == null ? "Built-in Display" : host.name);
             set(infoClass, info, "uniqueId", "local:darwin-art:0");
-            set(infoClass, info, "type", DISPLAY_TYPE_INTERNAL);
+            set(infoClass, info, "type",
+                    host == null || host.builtIn ? DISPLAY_TYPE_INTERNAL : DISPLAY_TYPE_EXTERNAL);
             set(infoClass, info, "state", Display.STATE_ON);
             set(infoClass, info, "committedState", Display.STATE_ON);
             // A desktop task's display has no rotation: its natural extent is
@@ -41,8 +47,8 @@ final class DefaultDisplayRegistry {
             set(infoClass, info, "largestNominalAppWidth", Math.max(width, height));
             set(infoClass, info, "largestNominalAppHeight", Math.max(width, height));
             set(infoClass, info, "logicalDensityDpi", densityDpi);
-            set(infoClass, info, "physicalXDpi", (float) densityDpi);
-            set(infoClass, info, "physicalYDpi", (float) densityDpi);
+            set(infoClass, info, "physicalXDpi", host == null ? (float) densityDpi : host.xDpi);
+            set(infoClass, info, "physicalYDpi", host == null ? (float) densityDpi : host.yDpi);
 
             Class<?> modeClass = Class.forName("android.view.Display$Mode");
             Constructor<?> modeConstructor = modeClass.getDeclaredConstructor(

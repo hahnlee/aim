@@ -482,7 +482,8 @@ static DarwinArtSurface* CreateSurfaceOnMain(
       darwin_art::window::RootGeometryReports::Process().NoteKnownExtent(
           static_cast<uint32_t>(std::ceil(NSWidth(frame))),
           static_cast<uint32_t>(std::ceil(NSHeight(frame))),
-          darwin_art::window::SurfaceRasterScale(surface->window));
+          darwin_art::window::SurfaceRasterScale(surface->window),
+          darwin_art::window::SurfaceDisplayId(surface->window));
       [surface->window makeFirstResponder:surface->view];
       [surface->window center];
       [surface->window makeKeyAndOrderFront:nil];

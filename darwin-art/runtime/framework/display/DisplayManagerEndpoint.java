@@ -59,7 +59,9 @@ public final class DisplayManagerEndpoint extends Binder {
             reply.writeNoException();
             // Display 0 is the calling process's own task display.
             reply.writeTypedObject(
-                    displays.getDisplayInfo(displayId, tasks.geometry(Binder.getCallingPid())),
+                    displays.getDisplayInfo(displayId, tasks.geometry(Binder.getCallingPid()),
+                            HostDisplayFacts.describe(
+                                    tasks.hostDisplay(Binder.getCallingPid()))),
                     Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
             return true;
         }

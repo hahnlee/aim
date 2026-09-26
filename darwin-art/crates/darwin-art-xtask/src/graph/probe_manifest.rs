@@ -362,6 +362,7 @@ pub(crate) fn collect(root: &Path) -> io::Result<ProbeGraphInputs> {
             "runtime/framework/power/power_state_platform.h",
             "runtime/framework/power/power_state_jni.h",
             "runtime/framework/time/host_time_zone_jni.h",
+            "runtime/framework/display/host_display_facts_jni.h",
             "runtime/art/native_registration.cc",
             "runtime/art/native_registration.h",
             "runtime/art/process_state.h",

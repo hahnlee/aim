@@ -8,18 +8,20 @@ RootGeometryReports& RootGeometryReports::Process() {
 }
 
 bool RootGeometryReports::Publish(uint32_t points_width, uint32_t points_height,
-                                  uint32_t backing_scale) {
+                                  uint32_t backing_scale, uint32_t display_id) {
   if (points_width == 0 || points_height == 0) return false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (closed_) return false;
     const uint32_t current_scale = latest_.serial != 0 ? latest_.backing_scale : known_scale_;
     const uint32_t scale = backing_scale != 0 ? backing_scale : current_scale;
+    const uint32_t current_display = latest_.serial != 0 ? latest_.display_id : known_display_;
+    const uint32_t display = display_id != 0 ? display_id : current_display;
     const bool same_as_latest = latest_.serial != 0 &&
         latest_.points_width == points_width && latest_.points_height == points_height &&
-        latest_.backing_scale == scale;
+        latest_.backing_scale == scale && latest_.display_id == display;
     const bool known = known_width_ == points_width && known_height_ == points_height &&
-        known_scale_ == scale;
+        known_scale_ == scale && known_display_ == display;
     // AppKit echoes of an extent Android (or window creation) set are not
     // facts; a user returning to that extent after resizing away still is.
     if (same_as_latest || (known && !moved_from_known_)) return false;
@@ -28,6 +30,7 @@ bool RootGeometryReports::Publish(uint32_t points_width, uint32_t points_height,
     latest_.points_width = points_width;
     latest_.points_height = points_height;
     latest_.backing_scale = scale;
+    latest_.display_id = display;
   }
   changed_.notify_all();
   return true;
@@ -35,11 +38,13 @@ bool RootGeometryReports::Publish(uint32_t points_width, uint32_t points_height,
 
 void RootGeometryReports::NoteKnownExtent(uint32_t points_width,
                                           uint32_t points_height,
-                                          uint32_t backing_scale) {
+                                          uint32_t backing_scale,
+                                          uint32_t display_id) {
   std::lock_guard<std::mutex> lock(mutex_);
   known_width_ = points_width;
   known_height_ = points_height;
   if (backing_scale != 0) known_scale_ = backing_scale;
+  if (display_id != 0) known_display_ = display_id;
   moved_from_known_ = false;
 }
 
@@ -64,6 +69,12 @@ uint32_t RootGeometryReports::backing_scale() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return latest_.serial != 0 && latest_.backing_scale != 0 ? latest_.backing_scale
                                                              : known_scale_;
+}
+
+uint32_t RootGeometryReports::display_id() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return latest_.serial != 0 && latest_.display_id != 0 ? latest_.display_id
+                                                          : known_display_;
 }
 
 uint64_t RootGeometryReports::latest_serial() const {

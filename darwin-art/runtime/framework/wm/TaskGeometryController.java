@@ -222,7 +222,7 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
      * Desktop root receiver registration for the calling application process,
      * with the root's raster scale (0 when the host does not know it).
      */
-    void registerHost(int pid, IBinder receiver, int hostScale) {
+    void registerHost(int pid, IBinder receiver, int hostScale, int hostDisplay) {
         if (receiver == null) throw new IllegalArgumentException("host receiver is null");
         ApplicationProcessRegistry.AttachedApplication attached =
                 processes.requireAttachedProcess(pid);
@@ -238,6 +238,7 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
                 if (task == null || task.thread != attached.thread) return;
                 task.hostReceiver = receiver;
                 task.hostClosed = false;
+                boolean displayMoved = displays.storeHostDisplay(pid, hostDisplay);
                 if (validScale(hostScale) && hostScale != task.scale) {
                     // The root opened on a display of another backing scale:
                     // keep the task's size in points, change its raster.
@@ -251,6 +252,7 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
                             "host scale " + hostScale);
                     return;
                 }
+                if (displayMoved) displays.notifyChanged(pid);
                 publishHostLocked(task);
             }
         });
@@ -261,8 +263,10 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
      * backing scale, in host content points. The window owner chooses the task
      * extent; Android pixels and density follow the root's raster scale.
      */
-    void hostResized(int pid, long serial, int pointsWidth, int pointsHeight, int hostScale) {
-        dispatch(() -> applyHostResize(pid, serial, pointsWidth, pointsHeight, hostScale));
+    void hostResized(int pid, long serial, int pointsWidth, int pointsHeight, int hostScale,
+            int hostDisplay) {
+        dispatch(() -> applyHostResize(pid, serial, pointsWidth, pointsHeight, hostScale,
+                hostDisplay));
     }
 
     private static boolean validScale(int scale) {
@@ -270,12 +274,15 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
     }
 
     private void applyHostResize(int pid, long serial, int pointsWidth, int pointsHeight,
-            int hostScale) {
+            int hostScale, int hostDisplay) {
         synchronized (this) {
             Task task = tasks.get(pid);
             if (task == null || task.hostReceiver == null || task.hostClosed) return;
             if (serial <= task.hostSerial) return; // Stale or replayed host report.
             task.hostSerial = serial;
+            // The root's screen names Android's display; a move alone is an
+            // EVENT_DISPLAY_BASIC_CHANGED for the task's display clients.
+            boolean displayMoved = displays.storeHostDisplay(pid, hostDisplay);
             int scale = validScale(hostScale) ? hostScale : task.scale;
             int width = TaskGeometryPolicy.pixelsFromPoints(pointsWidth, scale);
             int height = TaskGeometryPolicy.pixelsFromPoints(pointsHeight, scale);
@@ -286,6 +293,7 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
             }
             if (scale == task.scale && task.geometry.sameExtent(width, height)) {
                 // Echo of a published extent: settle the host with the same revision.
+                if (displayMoved) displays.notifyChanged(pid);
                 publishHostLocked(task);
                 return;
             }
