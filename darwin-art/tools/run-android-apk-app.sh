@@ -526,6 +526,17 @@ if [[ "${DARWIN_ART_LLDB:-0}" == "fs-stat" ]]; then
 fi
 host_command=("$host" --window-seconds "$seconds" \
   "$runtime" "$core_oj" "$core_libart" "$framework" "$boot_tail" "$app_dex")
+# Launching a package whose application process is running brings that
+# process back, as launching a running macOS app does, instead of starting a
+# second process for the package (#85).
+running_pid="$("$profile_ctl" ps |
+  awk -F '\t' -v package="$package" '$2 == package { print $1; exit }')"
+if [[ -n "$running_pid" ]]; then
+  if swift "$root/tools/macos-app-reopen.swift" "$running_pid"; then
+    echo "darwin-art: reopened running package=$package pid=$running_pid"
+    exit 0
+  fi
+fi
 # The profile daemon must own the final host Child. A caller-owned
 # exec lease made the host's lifetime depend on this shell (and left the
 # manager/app shim with a second, unrelated owner). daemonize registers

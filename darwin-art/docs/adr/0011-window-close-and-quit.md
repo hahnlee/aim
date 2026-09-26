@@ -45,5 +45,6 @@ menu.
 
 Closing a window no longer means losing the app's state, which matches both
 Android's Home and the macOS convention for single-window apps that stay in
-the Dock. Launching an already running, hidden package again through the
-launcher does not yet bring its window back; the Dock icon does.
+the Dock. Launching a package whose application process is running brings
+that process back through the same reopen event (as LaunchServices does for a
+running macOS app) instead of starting a second process for the package.
