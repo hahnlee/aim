@@ -483,13 +483,12 @@ fn replace_stale_daemon(paths: &ProfilePaths) -> Result<bool, ProfileError> {
 }
 
 pub fn ensure_daemon(paths: &ProfilePaths) -> Result<PathBuf, ProfileError> {
-    let running = request(paths, protocol::OP_ENSURE, &[]);
-    let running = match running {
-        Ok(bytes) if replace_stale_daemon(paths)? => {
-            drop(bytes);
-            Err(ProfileError::Io(io::Error::from(io::ErrorKind::NotFound)))
-        }
-        other => other,
+    // Replace a stale daemon before asking it to mount: an older build may
+    // fail requests the installed one handles.
+    let running = if paths.socket.exists() && replace_stale_daemon(paths)? {
+        Err(ProfileError::Io(io::Error::from(io::ErrorKind::NotFound)))
+    } else {
+        request(paths, protocol::OP_ENSURE, &[])
     };
     match running {
         Ok(bytes) => return Ok(PathBuf::from(OsString::from_vec(bytes))),

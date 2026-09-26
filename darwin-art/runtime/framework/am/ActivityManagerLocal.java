@@ -208,9 +208,14 @@ public final class ActivityManagerLocal extends ActivityManagerInternal {
         throw unsupported("getBackgroundStartPrivileges");
     }
 
+    /**
+     * ActivityManagerConstants.DEFAULT_BOOT_TIME_TEMP_ALLOWLIST_DURATION: the
+     * temp-allowlist window PMS attaches to package broadcasts. No DeviceConfig
+     * override exists in this runtime.
+     */
     @Override
     public long getBootTimeTempAllowListDuration() {
-        throw unsupported("getBootTimeTempAllowListDuration");
+        return 20 * 1000;
     }
 
     @Override

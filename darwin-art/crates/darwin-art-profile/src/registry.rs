@@ -88,6 +88,16 @@ impl PackageRegistry {
     /// Writes PackageManagerService Settings for the ledger's installs before
     /// the first PMS boot (settings_migration).
     pub(crate) fn migrate_settings(&self) -> Result<(), ProfileError> {
+        let mount = self
+            .store
+            .parent()
+            .ok_or_else(|| ProfileError::Daemon("package store has no profile mount".into()))?;
+        if !crate::settings_migration::pending(mount) {
+            // PMS owns package state: ledger records whose code PMS has since
+            // removed are history, not an error.
+            crate::package_layout::open_code_directories(&self.store)?;
+            return Ok(());
+        }
         let listing = self.list()?;
         let listing = std::str::from_utf8(&listing)
             .map_err(|_| ProfileError::Daemon("package listing is not UTF-8".into()))?;
@@ -107,6 +117,7 @@ impl PackageRegistry {
             .unwrap_or_default()
             .as_millis() as u64;
         crate::settings_migration::migrate(mount, &packages, now)?;
+        crate::package_layout::open_code_directories(&self.store)?;
         Ok(())
     }
 
