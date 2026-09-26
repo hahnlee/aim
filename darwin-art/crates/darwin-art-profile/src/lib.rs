@@ -479,7 +479,38 @@ fn replace_stale_daemon(paths: &ProfilePaths) -> Result<bool, ProfileError> {
     while paths.socket.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
     }
+    // The socket goes first; the old daemon still unmounts the image and
+    // holds its lock, and a replacement started before it exits fails with
+    // "already running". Its lock is released only when it has exited.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while daemon_lock_held(paths)? {
+        if Instant::now() >= deadline {
+            return Err(ProfileError::Daemon(
+                "the stale darwin-artd did not exit after shutdown".into(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
     Ok(true)
+}
+
+/// Whether a daemon holds this profile's lock (server `acquire_lock`).
+fn daemon_lock_held(paths: &ProfilePaths) -> Result<bool, ProfileError> {
+    let lock = match std::fs::File::open(paths.profile_root.join("darwin-artd.lock")) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    // SAFETY: an owned descriptor; closing it drops this probe's lock.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(false);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Ok(true)
+    } else {
+        Err(error.into())
+    }
 }
 
 pub fn ensure_daemon(paths: &ProfilePaths) -> Result<PathBuf, ProfileError> {

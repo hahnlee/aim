@@ -10,11 +10,11 @@ darwin_art_acceptance_track() {
 
 darwin_art_acceptance_quit_started() {
   local root="$1" pid
-  for pid in "${darwin_art_acceptance_started_pids[@]}"; do
+  for pid in ${darwin_art_acceptance_started_pids[@]+"${darwin_art_acceptance_started_pids[@]}"}; do
     kill -0 "$pid" 2>/dev/null || continue
     swift "$root/tools/macos-app-quit.swift" "$pid" >/dev/null 2>&1 || true
   done
-  for pid in "${darwin_art_acceptance_started_pids[@]}"; do
+  for pid in ${darwin_art_acceptance_started_pids[@]+"${darwin_art_acceptance_started_pids[@]}"}; do
     for _ in {1..40}; do
       kill -0 "$pid" 2>/dev/null || break
       sleep 0.25
