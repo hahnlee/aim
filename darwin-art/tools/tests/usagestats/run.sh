@@ -48,6 +48,7 @@ mkdir -p "$out/classes"
   "$root/tools/tests/connectivity/stubs/android/os/Parcel.java" \
   "$root/tools/tests/connectivity/stubs/android/os/Parcelable.java" \
   "$root/tools/tests/connectivity/stubs/android/os/RemoteException.java" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/runtime/framework/usage/UsageStatsManagerEndpoint.java" \
   "$root/tools/tests/usagestats/UsageStatsManagerEndpointTest.java"
 "$java_home/bin/java" -ea -cp "$out/classes" \

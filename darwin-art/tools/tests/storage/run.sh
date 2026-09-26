@@ -17,6 +17,7 @@ done
 
 "$java_home/bin/javac" --release 8 -encoding UTF-8 -d "$tmp/classes" \
   -classpath "$signatures" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/runtime/framework/am/ApplicationProcessRegistry.java" \
   "$root/runtime/framework/storage/StorageManagerEndpoint.java" \
   "$root/runtime/framework/storage/UserStorage.java" \

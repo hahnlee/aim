@@ -28,6 +28,12 @@ namespace darwin_art::framework::power {
 bool RegisterPowerStateProvider(JNIEnv*, jclass owner) { return owner != nullptr; }
 bool RegisterBatteryStateProvider(JNIEnv*, jclass owner) { return owner != nullptr; }
 }
+namespace darwin_art::framework::display {
+bool RegisterHostDisplayFacts(JNIEnv*, jclass owner) { return owner != nullptr; }
+}
+namespace darwin_art::framework::time {
+bool RegisterHostTimeZoneProvider(JNIEnv*, jclass owner) { return owner != nullptr; }
+}
 namespace darwin_art::framework::wm {
 bool RegisterActivityLaunchScheduler(JNIEnv*, jclass owner) { return owner != nullptr; }
 }

@@ -73,7 +73,9 @@ javac --release 8 -encoding UTF-8 -d "$out" \
   "$root/tools/tests/connectivity/stubs/android/os/IBinder.java" \
   "$root/tools/tests/connectivity/stubs/android/os/Looper.java" \
   "$root/tools/tests/connectivity/stubs/android/os/Parcel.java" \
+  "$root/tools/tests/connectivity/stubs/android/os/Parcelable.java" \
   "$root/tools/tests/connectivity/stubs/android/os/RemoteException.java" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/runtime/framework/power/ThermalServiceEndpoint.java" \
   "$root/tools/tests/power/ThermalServiceEndpointTest.java"
 java -ea -cp "$out" dev.darwinart.runtime.power.ThermalServiceEndpointTest
