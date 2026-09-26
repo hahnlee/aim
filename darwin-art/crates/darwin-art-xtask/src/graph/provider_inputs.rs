@@ -9,7 +9,6 @@ const PROVIDER_RECIPE: &str = "tools/build-bionic-runtime-provider-closure.sh";
 // being swept in by a broad tools/bionic-* directory walk.
 const RECIPE_PATHS: &[&str] = &[
     "tools/build-android16-ftw.sh",
-    "tools/build-android16-property-client.sh",
     "tools/bionic-strftime-facade/src/upstream_shim.h",
     "tools/bionic-strerror-facade/src/strerror.c",
     "tools/bionic-wide-stdio-facade/src/provider.cc",
@@ -81,16 +80,6 @@ const NESTED_RECIPE_PATHS: &[(&str, &[&str])] = &[
             "tools/android16-ftw/ndk_declarations.h",
             "tools/android16-ftw/bindings.c",
             "tools/android16-ftw/resolver.c",
-        ],
-    ),
-    (
-        "tools/build-android16-property-client.sh",
-        &[
-            "tools/android16-property-client/sources.tsv",
-            "tools/android16-property-client/bindings.c",
-            "tools/android16-property-client/logging.c",
-            "tools/build-android16-bionic-linker-config.sh",
-            "tools/native-loader-policy/bionic_config_types.h",
         ],
     ),
     (
@@ -193,7 +182,6 @@ const SUPPORT_DIRS: &[&str] = &[
 
 const ACCEPTANCE_INPUTS: &[&str] = &[
     "tools/tests/bionic-runtime-provider-closure-acceptance.sh",
-    "tools/tests/property-client-logging-test.sh",
     "tools/tests/numeric-provider-production-boundary.sh",
     "tools/bionic-runtime-provider-closure/full_link_smoke.cc",
     "tools/android16-ftw/traversal_smoke.cc",
@@ -203,8 +191,6 @@ const ACCEPTANCE_INPUTS: &[&str] = &[
     "tools/bionic-runtime-provider-closure/credentials_snapshot_smoke.cc",
     "tools/bionic-socket-broker-adapter/probes/unix_connect.cc",
     "tools/bionic-socket-broker-adapter/probes/fdsan.cc",
-    "tools/android16-property-client/client_smoke.cc",
-    "tools/android16-property-client/logging_test.c",
     "tools/bionic-process-state-facade/probes/configured_snapshot.cc",
     "tools/bionic-stdio-facade/probes/fortify_stream.cc",
     "tools/android-liblog-exec-provider/buf_print_call_test.S",
@@ -256,11 +242,6 @@ pub(crate) fn collect(root: &Path) -> io::Result<ProviderInputManifest> {
         collect_support_dir(root, Path::new(directory), &mut production)?;
     }
     collect_existing_tree(root, Path::new("_aosp/android16-ftw"), &mut production)?;
-    collect_existing_tree(
-        root,
-        Path::new("_aosp/android16-property-client"),
-        &mut production,
-    )?;
     collect_existing_tree(
         root,
         Path::new("_aosp/bionic-linker-config"),
@@ -645,7 +626,6 @@ fn validate_quoted_tool_paths(
 fn is_audit_dispatch(line: &str, path: &str) -> bool {
     [
         "tools/tests/bionic-runtime-provider-closure-acceptance.sh",
-        "tools/tests/property-client-logging-test.sh",
     ]
     .iter()
     .any(|dispatch| path == *dispatch && line.contains(&format!("bash \"$root/{dispatch}\"")))
@@ -680,14 +660,14 @@ mod tests {
     #[test]
     fn audit_dispatches_are_exact_but_fixture_sources_are_rejected() {
         let (exact, dirs) = allowed_tool_paths();
-        let logging_compile =
-            r#"clang -c \"$root/tools/android16-property-client/logging_test.c\""#;
-        assert!(validate_quoted_tool_paths(logging_compile, &exact, &dirs).is_err());
+        let smoke_compile =
+            r#"clang -c \"$root/tools/android16-ftw/traversal_smoke.cc\""#;
+        assert!(validate_quoted_tool_paths(smoke_compile, &exact, &dirs).is_err());
         let provider_fixture =
             r#"clang -c \"$root/tools/bionic-runtime-provider-closure/fixture.cc\""#;
         assert!(validate_quoted_tool_paths(provider_fixture, &exact, &dirs).is_err());
         let dispatch =
-            r#"--test-only) exec bash "$root/tools/tests/property-client-logging-test.sh" ;;"#;
+            r#"exec bash "$root/tools/tests/bionic-runtime-provider-closure-acceptance.sh""#;
         assert!(validate_quoted_tool_paths(dispatch, &exact, &dirs).is_ok());
     }
 
@@ -746,9 +726,8 @@ bar = { path = "../../bar" }
     }
 
     #[test]
-    fn acceptance_keeps_ftw_and_property_fixture_inputs_separate() {
+    fn acceptance_keeps_ftw_fixture_inputs_separate() {
         assert!(ACCEPTANCE_INPUTS.contains(&"tools/android16-ftw/traversal_smoke.cc"));
-        assert!(ACCEPTANCE_INPUTS.contains(&"tools/android16-property-client/client_smoke.cc"));
         assert!(!RECIPE_PATHS.iter().any(|path| path.contains("/probes/")));
     }
 }

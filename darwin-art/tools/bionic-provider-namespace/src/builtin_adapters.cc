@@ -1,5 +1,7 @@
 #include "darwin_art_bionic_builtin_adapters.h"
 
+#include <cstring>
+
 namespace {
 
 using SymbolFunction = void (*)(void);
@@ -14,7 +16,9 @@ extern "C" uintptr_t darwin_art_bionic_time_data_resolve(const char *);
 extern "C" void *darwin_art_bionic_pthread_resolve(const char *, const char *,
                                                    const char *);
 extern "C" SymbolFunction darwin_art_bionic_process_state_resolve(const char *);
-extern "C" SymbolFunction darwin_art_bionic_property_client_resolve(const char *);
+// init's property service client (darwin-art-runtime property_ffi): the
+// setter every process's __system_property_set resolves to.
+extern "C" int darwin_art_bionic_property_service_set(const char *, const char *);
 extern "C" uintptr_t darwin_art_bionic_process_state_data_resolve(const char *);
 extern "C" void *darwin_art_dl_phdr_resolve(const char *, const char *,
                                             const char *);
@@ -105,8 +109,8 @@ uintptr_t Pthread(void *, const char *soname, const char *symbol,
       darwin_art_bionic_pthread_resolve(soname, symbol, version));
 }
 uintptr_t ProcessState(void *, const char *, const char *symbol, const char *) {
-  const auto client = darwin_art_bionic_property_client_resolve(symbol);
-  if (client != nullptr) return Address(client);
+  if (symbol != nullptr && std::strcmp(symbol, "__system_property_set") == 0)
+    return reinterpret_cast<uintptr_t>(&darwin_art_bionic_property_service_set);
   const uintptr_t data = darwin_art_bionic_process_state_data_resolve(symbol);
   if (data != 0) return data;
   return Address(darwin_art_bionic_process_state_resolve(symbol));

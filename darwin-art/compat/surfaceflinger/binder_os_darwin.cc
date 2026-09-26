@@ -4,6 +4,10 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 
+namespace android {
+void report_sysprop_change();
+}
+
 namespace android::binder::os {
 
 void trace_begin(uint64_t, const char*) {}
@@ -22,8 +26,11 @@ uint64_t GetThreadId() {
   return thread_id;
 }
 
+// libbinder's SYSPROPS_TRANSACTION hook, as OS_android.cpp: run the process's
+// property change callbacks (libutils misc.cpp).
 bool report_sysprop_change() {
-  return false;
+  android::report_sysprop_change();
+  return true;
 }
 
 }  // namespace android::binder::os
