@@ -450,8 +450,13 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
         HashSet<IBinder> relaunched = new HashSet<>();
         for (ActivityClientControllerEndpoint.ActivitySnapshot activity
                 : ActivityClientControllerEndpoint.activities(task.thread)) {
+            // ActivityRecord.shouldRelaunchLocked: a size change that crosses
+            // none of the Activity's resource thresholds is not a change.
             int changes = activity.reported == null ? ~0
-                    : TaskGeometryPolicy.reportableChanges(activity.reported.diff(merged));
+                    : TaskGeometryPolicy.reportableChanges(
+                            android.window.SizeConfigurationBuckets.filterDiff(
+                                    activity.reported.diff(merged), activity.reported, merged,
+                                    activity.sizeConfigurations));
             int handled = TaskGeometryPolicy.handledChanges(
                     activity.configChanges, activity.targetSdkVersion);
             if (changes != 0 && TaskGeometryPolicy.shouldRelaunch(changes, handled)) {

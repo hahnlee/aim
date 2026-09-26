@@ -37,6 +37,9 @@ public final class ActivityClientControllerEndpoint extends Binder {
         // ActivityRecord.mOccludesParent from the Activity's window style.
         final boolean occludesParent;
         State state = State.RESUMED;
+        // ActivityRecord.mSizeConfigurations: the size thresholds the
+        // Activity's resources use (reportSizeConfigurations), or null.
+        android.window.SizeConfigurationBuckets sizeConfigurations;
         // ActivityManager.TaskDescription the Activity set, or null.
         android.app.ActivityManager.TaskDescription taskDescription;
         // The Activity the launcher started this task with (the process's
@@ -66,6 +69,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
         final int configChanges;
         final int targetSdkVersion;
         final Configuration reported;
+        final android.window.SizeConfigurationBuckets sizeConfigurations;
 
         ActivitySnapshot(IBinder token, ActivityRecord record) {
             this.token = token;
@@ -76,6 +80,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
             targetSdkVersion = record.info == null || record.info.applicationInfo == null
                     ? 10_000 : record.info.applicationInfo.targetSdkVersion;
             reported = record.reported == null ? null : new Configuration(record.reported);
+            sizeConfigurations = record.sizeConfigurations;
         }
     }
 
@@ -93,6 +98,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
     private final int finishActivityCode = transaction("finishActivity");
     private final int onBackPressedCode = transaction("onBackPressed");
     private final int getTaskForActivityCode = transaction("getTaskForActivity");
+    private final int reportSizeConfigurationsCode = transaction("reportSizeConfigurations");
     private final int setTaskDescriptionCode = transaction("setTaskDescription");
     private final int setRequestedOrientationCode = transaction("setRequestedOrientation");
     private final int getRequestedOrientationCode = transaction("getRequestedOrientation");
@@ -455,6 +461,7 @@ public final class ActivityClientControllerEndpoint extends Binder {
                 && code != finishActivityCode
                 && code != onBackPressedCode
                 && code != getTaskForActivityCode
+                && code != reportSizeConfigurationsCode
                 && code != setTaskDescriptionCode
                 && code != setRequestedOrientationCode
                 && code != getRequestedOrientationCode) {
@@ -584,6 +591,17 @@ public final class ActivityClientControllerEndpoint extends Binder {
             if (emptied != null) {
                 TaskGeometryController.requireInstance().requestHostHide(emptied);
             }
+            return true;
+        }
+        if (code == reportSizeConfigurationsCode) {
+            android.window.SizeConfigurationBuckets buckets = data.readTypedObject(
+                    android.window.SizeConfigurationBuckets.CREATOR);
+            data.enforceNoDataAvail();
+            synchronized (activityLock) {
+                ActivityRecord record = activityRecords.get(token);
+                if (record != null) record.sizeConfigurations = buckets;
+            }
+            if (reply != null) reply.writeNoException();
             return true;
         }
         if (code == getTaskForActivityCode) {
