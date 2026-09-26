@@ -45,6 +45,49 @@ fn zone_from_localtime_link(link: &std::path::Path) -> Option<String> {
     valid.then(|| zone.to_owned())
 }
 
+/// A host sysctl string (`hw.model`, `machdep.cpu.brand_string`), or None.
+fn sysctl_string(name: &str) -> Option<String> {
+    let name = std::ffi::CString::new(name).ok()?;
+    let mut length: libc::size_t = 0;
+    // SAFETY: size query with a null buffer.
+    if unsafe {
+        libc::sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut length, std::ptr::null_mut(), 0)
+    } != 0
+        || length == 0
+    {
+        return None;
+    }
+    let mut buffer = vec![0u8; length];
+    // SAFETY: buffer is writable for `length` bytes.
+    if unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    buffer.truncate(length);
+    let text = String::from_utf8(buffer).ok()?;
+    let text = text.trim_end_matches('\0').trim();
+    // Property values are bounded (PROP_VALUE_MAX) and single-line.
+    (!text.is_empty() && text.len() < 92 && !text.contains('\n')).then(|| text.to_owned())
+}
+
+/// ADR 0010 host facts: the Mac's model and SoC name.
+fn host_identity() -> Vec<(Vec<u8>, Vec<u8>)> {
+    [("ro.product.model", "hw.model"), ("ro.soc.model", "machdep.cpu.brand_string")]
+        .into_iter()
+        .filter_map(|(property, sysctl)| {
+            sysctl_string(sysctl).map(|value| (property.as_bytes().to_vec(), value.into_bytes()))
+        })
+        .collect()
+}
+
 pub(super) fn inputs() -> Result<ProcessSnapshotInputs, String> {
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     if page_size <= 0 || !(page_size as u64).is_power_of_two() {
@@ -70,6 +113,7 @@ pub(super) fn inputs() -> Result<ProcessSnapshotInputs, String> {
         .collect(),
         properties: {
             let mut properties = build_properties()?;
+            properties.extend(host_identity());
             if let Some(zone) = host_time_zone() {
                 properties.push((b"persist.sys.timezone".to_vec(), zone.into_bytes()));
             }
@@ -134,6 +178,27 @@ mod tests {
         let directory = std::fs::File::open("/").unwrap();
         next.install_process_filesystem(directory.as_fd(), b"/", b"/")
             .unwrap();
+    }
+    #[test]
+    fn device_identity_is_the_runtime_on_this_mac() {
+        let input = inputs().unwrap();
+        let value = |name: &[u8]| {
+            input
+                .properties
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| String::from_utf8(value.clone()).unwrap())
+        };
+        assert_eq!(value(b"ro.product.manufacturer").as_deref(), Some("Apple"));
+        assert_eq!(
+            value(b"ro.build.fingerprint").as_deref(),
+            Some("Apple/aim_darwin_arm64/aim_darwin_arm64:16/BP22.250325.006/13344233:user/dev-keys")
+        );
+        assert_eq!(value(b"ro.product.model"), sysctl_string("hw.model"));
+        assert!(value(b"ro.product.model").is_some_and(|model| model.starts_with("Mac")));
+        let names: Vec<_> = input.properties.iter().map(|(key, _)| key).collect();
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(names.len(), unique.len(), "a property is set twice");
     }
     #[test]
     fn time_zone_comes_from_the_localtime_link() {
