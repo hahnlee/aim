@@ -7,7 +7,11 @@ without expanding the logical partition. From the product partition it copies
 the static overlays that target the framework ("android"): every process
 loads them over framework-res.apk as immutable framework overlays. The
 partitions' aconfig flag protos decide which featureFlag-gated manifest
-elements PackageManagerService parses. From vendor.img (next to IMAGE) it
+elements PackageManagerService parses. The aconfig storage files of every
+partition and image APEX are laid out as aconfigd publishes them at boot for
+the new flag storage readers: /metadata/aconfig/maps/CONTAINER.{package,flag}.map
+and /metadata/aconfig/boot/CONTAINER.{val,info} (no local overrides: the
+values are the image's). From vendor.img (next to IMAGE) it
 copies the feature declarations that describe what the host provides: the
 Vulkan level/version/compute XMLs match the MoltenVK provider (Vulkan 1.3 with
 every level 1 feature). Dexpreopt output (`oat/` directories)
@@ -22,7 +26,9 @@ import argparse
 import hashlib
 import re
 from pathlib import Path, PurePosixPath
+import struct
 import subprocess
+import tempfile
 
 TREES = ("/system/app", "/system/priv-app", "/system/etc/permissions", "/system/etc/sysconfig")
 # The aconfig flag protos (DeviceProtos) that decide manifest featureFlag
@@ -33,6 +39,20 @@ FLAG_PROTOS = {
     "/system/system_ext/etc/aconfig_flags.pb": (["--partition", "system_ext"],
                                                  "/etc/aconfig_flags.pb"),
 }
+# Partition containers whose etc/aconfig holds storage files.
+STORAGE_PARTITIONS = (
+    ("system", False, [], "/system/etc/aconfig"),
+    ("system_ext", False, ["--partition", "system_ext"], "/etc/aconfig"),
+    ("product", False, ["--partition", "product"], "/etc/aconfig"),
+    ("vendor", True, ["--partition", "vendor"], "/etc/aconfig"),
+)
+# aconfigd's name for each storage file of a container.
+STORAGE_FILES = (
+    ("package.map", "maps/{}.package.map"),
+    ("flag.map", "maps/{}.flag.map"),
+    ("flag.val", "boot/{}.val"),
+    ("flag.info", "boot/{}.info"),
+)
 FILES = ("/system/etc/selinux/plat_mac_permissions.xml",)
 # vendor.img feature XMLs whose capabilities the host graphics provider has.
 VENDOR_FILES = tuple(f"/vendor/etc/permissions/android.hardware.vulkan.{name}.xml"
@@ -52,6 +72,65 @@ FRAMEWORK_OVERLAYS = tuple(f"/product/overlay/{name}.apk" for name in (
 def digest(path):
     with path.open("rb") as source:
         return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def storage_container(package_map):
+    # PackageTable header: u32 version, then the container as a u32-length string.
+    data = package_map.read_bytes()
+    length = struct.unpack_from("<I", data, 4)[0]
+    return data[8:8 + length].decode()
+
+
+def aconfig_storage(image, vendor_image, output, run, root):
+    tool = root / "target/release/super-i18n-apex-extract"
+    apex_tool = root / "target/release/apex-ext2-extract"
+    metadata = output / "metadata/aconfig"
+    (metadata / "maps").mkdir(parents=True, exist_ok=True)
+    (metadata / "boot").mkdir(parents=True, exist_ok=True)
+    published = {}
+    with tempfile.TemporaryDirectory() as scratch:
+        scratch = Path(scratch)
+
+        def publish(container, extract):
+            if container in published:
+                raise ValueError(f"duplicate aconfig container: {container}")
+            published[container] = [template.format(container) for _, template in STORAGE_FILES]
+            for name, template in STORAGE_FILES:
+                extract(name, metadata / template.format(container))
+
+        for container, vendor, selector, directory in STORAGE_PARTITIONS:
+            source = vendor_image if vendor else image
+            publish(container, lambda name, destination: subprocess.run(
+                [str(tool), str(source), str(destination), *selector,
+                 "--path", f"{directory}/{name}"], check=True, capture_output=True))
+        for name in sorted(run(image, "--path", "/system/apex").split()):
+            if not name.endswith((".apex", ".capex")):
+                continue
+            work = scratch / name
+            work.mkdir()
+            archive = work / "payload.apex"
+            packaged = work / name
+            subprocess.run([str(tool), str(image), str(packaged), "--path", f"/system/apex/{name}"],
+                           check=True, capture_output=True)
+            if name.endswith(".capex"):
+                archive.write_bytes(subprocess.run(["unzip", "-p", str(packaged), "original_apex"],
+                                                   check=True, capture_output=True).stdout)
+            else:
+                packaged.replace(archive)
+            package_map = work / "package.map"
+            probe = subprocess.run([str(apex_tool), str(archive), str(package_map),
+                                    "/etc/package.map"], capture_output=True, text=True)
+            if probe.returncode != 0:
+                # APEXes that declare no flags carry no storage files.
+                if ('"package.map" was not found' in probe.stderr
+                        or '"etc" was not found' in probe.stderr):
+                    continue
+                raise SystemExit(f"{name}: {probe.stderr.strip()}")
+            publish(storage_container(package_map), lambda file, destination: subprocess.run(
+                [str(apex_tool), str(archive), str(destination), f"/etc/{file}"],
+                check=True, capture_output=True))
+    return [f"{digest(metadata / path)} /metadata/aconfig/{path}"
+            for container in sorted(published) for path in published[container]]
 
 
 def main():
@@ -136,6 +215,7 @@ def main():
         subprocess.run([str(tool), str(source), str(destination), *selector, "--path", inner],
                        check=True, capture_output=True)
         inventory.append(f"{digest(destination)} {path}")
+    inventory.extend(aconfig_storage(image, vendor_image, output, run, root))
     if args.lock:
         expected = [line for line in args.lock.read_text().splitlines()
                     if line and not line.startswith("#")]
