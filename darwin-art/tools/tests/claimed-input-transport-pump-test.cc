@@ -332,7 +332,7 @@ int main() {
         ++static_cast<Observation*>(context)->packet;
         return InputTransportConsumptionResult::kConsumed;
       },
-      .on_window_consumption = [](void* context, int32_t, int32_t, int32_t, int32_t, bool) {
+      .on_window_consumption = [](void* context, int32_t, int32_t, int32_t, int32_t, bool, uint32_t) {
         auto& state = *static_cast<Observation*>(context);
         assert(state.packet == 1);
         ++state.window;

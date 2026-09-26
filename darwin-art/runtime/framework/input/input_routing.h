@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "../../../compat/darwin_framework_input_hint.h"
 #include "receiver_registry.h"
@@ -346,10 +347,11 @@ InputRoutingEndpointHandle GetInputRoutingEndpoint(
 void TerminateInputRoutingTransport(
     const InputRoutingHandle& state,
     const InputRoutingEndpointHandle& endpoint);
-// Only WMS window publication establishes input eligibility.
+// Only WMS window publication establishes input eligibility and the
+// window's InputWindowFlags.
 bool PublishInputRoutingWmsFrame(const InputRoutingHandle& state, int32_t left,
                                  int32_t top, int32_t right, int32_t bottom,
-                                 bool visible);
+                                 bool visible, uint32_t input_flags = 0);
 // Receiver coordinates never override a WMS publication or enable routing.
 bool UpdateInputRoutingReceiverGeometry(const InputRoutingHandle& state,
                                         int32_t left, int32_t top,
@@ -464,8 +466,11 @@ void ClearInputRoutingPending(const InputRoutingHandle& state);
 // Routes host packets using published Android window geometry and focus.  The
 // selected state is returned so channel_owner can perform the transport wake;
 // routing itself never touches a file descriptor.
+// A DOWN also yields the ACTION_OUTSIDE admissions of the windows watching
+// outside touches above the touched window, when |outside| is supplied.
 DarwinArtInputEnqueueResult RouteFrameworkPointerPacket(
-    const DarwinArtPointerEventV2& packet, InputRoutingAdmission* admission);
+    const DarwinArtPointerEventV2& packet, InputRoutingAdmission* admission,
+    std::vector<InputRoutingAdmission>* outside = nullptr);
 DarwinArtInputEnqueueResult RouteFrameworkKeyPacket(
     const DarwinArtKeyEventV1& packet, InputRoutingAdmission* admission);
 

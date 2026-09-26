@@ -129,8 +129,13 @@ final class WindowInputPublisher {
         return state.terminationResults.removeFirst();
     }
 
+    // Fixture: the window input policy is not modeled.
+    static int inputPolicy(WindowFocusRegistry.Publication record) {
+        return 0;
+    }
+
     static synchronized int nativePublishLease(long token, int left, int top,
-            int right, int bottom, boolean visible) {
+            int right, int bottom, boolean visible, int inputFlags) {
         Lease lease = requireLease(token);
         int result = nextPublishResult(lease.state);
         if (result == 0) {

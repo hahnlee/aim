@@ -99,7 +99,7 @@ bool ValidPacket(const DarwinArtInputPacket& packet) {
     case DarwinArtInputPacketKind::kPointer:
       return packet.pointer.version == 2 &&
              packet.pointer.size >= sizeof(DarwinArtPointerEventV2) &&
-             packet.pointer.action <= DARWIN_ART_POINTER_CANCEL &&
+             packet.pointer.action <= DARWIN_ART_POINTER_OUTSIDE &&
              packet.pointer.pointer_count > 0;
     case DarwinArtInputPacketKind::kKey:
       return packet.key.version == 1 &&
@@ -404,13 +404,14 @@ InputTransportStatus SendInputTransportAck64(InputTransport* transport,
 InputTransportStatus SendInputTransportWindow(InputTransport* transport,
                                                int32_t left, int32_t top,
                                                int32_t right, int32_t bottom,
-                                               bool visible) {
+                                               bool visible, uint32_t input_flags) {
   transport_wire::WindowFrame frame;
   frame.left = left;
   frame.top = top;
   frame.right = right;
   frame.bottom = bottom;
   frame.visible = visible ? 1u : 0u;
+  frame.input_flags = input_flags;
   return transport == nullptr ? InputTransportStatus::kTerminal
                               : transport->SendBytes(&frame, sizeof(frame), -1);
 }
@@ -419,13 +420,14 @@ InputTransportStatus SendInputTransportWindowOnFd(InputTransport* transport,
                                                    int endpoint_fd,
                                                    int32_t left, int32_t top,
                                                    int32_t right, int32_t bottom,
-                                                   bool visible) {
+                                                   bool visible, uint32_t input_flags) {
   transport_wire::WindowFrame frame;
   frame.left = left;
   frame.top = top;
   frame.right = right;
   frame.bottom = bottom;
   frame.visible = visible ? 1u : 0u;
+  frame.input_flags = input_flags;
   return transport == nullptr ? InputTransportStatus::kTerminal
                               : transport->SendBytes(&frame, sizeof(frame), endpoint_fd);
 }

@@ -188,6 +188,8 @@ void RecordAcceptedPointerLocked(InputRoutingStateData* data,
   if (data == nullptr || admission.packet.kind !=
                              darwin_art::DarwinArtInputPacketKind::kPointer)
     return;
+  // ACTION_OUTSIDE is a single event outside any gesture stream.
+  if (admission.packet.pointer.action == DARWIN_ART_POINTER_OUTSIDE) return;
   auto& ledger = data->streams[admission.generation];
   ledger.generation = admission.generation;
   ledger.consumer_id = admission.consumer_id;

@@ -8,6 +8,7 @@
 #include <thread>
 #include <stdexcept>
 #include <unistd.h>
+#include <vector>
 
 namespace darwin_art::input {
 struct InputRoutingState { InputRoutingSelectionSnapshot selection; };
@@ -136,6 +137,39 @@ int main() {
     ReentrantLastOwner(promotion, false);
     ReentrantLastOwner(promotion, true);
   }
+  // InputDispatcher window policy: WMS layer before focus recency, touch
+  // modal windows take outside DOWNs, watchers above the touched window get
+  // ACTION_OUTSIDE in their own frame, not-touchable windows are skipped.
+  upper.reset();
+  {
+    const uint32_t popup_layer = 11000u << kInputWindowLayerShift;
+    auto base = Channel(10, {0, 0, 360, 640});
+    base->selection.input_flags = kInputWindowTouchModal;
+    auto popup = Channel(0, {100, 100, 200, 200});
+    popup->selection.input_flags = popup_layer | kInputWindowWatchOutsideTouch;
+    std::vector<InputRoutingAdmission> outside;
+    assert(RouteFrameworkPointerPacket(Pointer(DARWIN_ART_POINTER_DOWN, 150, 150), &admission,
+                                       &outside) == DarwinArtInputEnqueueResult::kQueued);
+    assert(admission.state == popup && outside.empty());
+    assert(RouteFrameworkPointerPacket(Pointer(DARWIN_ART_POINTER_DOWN, 10, 10), &admission,
+                                       &outside) == DarwinArtInputEnqueueResult::kQueued);
+    assert(admission.state == base && outside.size() == 1 && outside[0].state == popup);
+    assert(outside[0].packet.pointer.action == DARWIN_ART_POINTER_OUTSIDE);
+    assert(outside[0].packet.pointer.x == -90 && outside[0].packet.pointer.y == -90);
+    assert(!outside[0].pointer_down && !outside[0].pointer_end);
+    auto modal = Channel(0, {100, 100, 200, 200});
+    modal->selection.input_flags = popup_layer | kInputWindowTouchModal;
+    assert(RouteFrameworkPointerPacket(Pointer(DARWIN_ART_POINTER_DOWN, 10, 10), &admission,
+                                       &outside) == DarwinArtInputEnqueueResult::kQueued);
+    assert(admission.state == modal && outside.empty());
+    assert(admission.packet.pointer.x == -90 && admission.packet.pointer.y == -90);
+    modal->selection.input_flags |= kInputWindowNotTouchable;
+    assert(RouteFrameworkPointerPacket(Pointer(DARWIN_ART_POINTER_DOWN, 150, 150), &admission,
+                                       &outside) == DarwinArtInputEnqueueResult::kQueued);
+    assert(admission.state == popup);
+    admission = {};
+    outside.clear();
+  }
   alarm(0);
-  std::puts("input-routing-domain: PASS overlap/offset/accepted-capture/stale-epoch/weak-lifetime/reentrant-final-close-unwind");
+  std::puts("input-routing-domain: PASS overlap/offset/accepted-capture/stale-epoch/weak-lifetime/reentrant-final-close-unwind/window-policy");
 }

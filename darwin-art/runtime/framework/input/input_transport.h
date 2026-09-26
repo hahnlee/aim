@@ -107,9 +107,9 @@ class InputTransport {
   friend InputTransportStatus SendInputTransportAck64(InputTransport*, uint64_t,
                                                       bool);
   friend InputTransportStatus SendInputTransportWindow(
-      InputTransport*, int32_t, int32_t, int32_t, int32_t, bool);
+      InputTransport*, int32_t, int32_t, int32_t, int32_t, bool, uint32_t);
   friend InputTransportStatus SendInputTransportWindowOnFd(
-      InputTransport*, int, int32_t, int32_t, int32_t, int32_t, bool);
+      InputTransport*, int, int32_t, int32_t, int32_t, int32_t, bool, uint32_t);
   friend InputTransportStatus SendInputTransportFocus(InputTransport*,
                                                        uint64_t, bool);
   friend InputTransportStatus SendInputTransportFocusOnFd(InputTransport*, int,
@@ -146,12 +146,14 @@ InputTransportStatus SendInputTransportAck64(InputTransport* transport,
 InputTransportStatus SendInputTransportWindow(InputTransport* transport,
                                                int32_t left, int32_t top,
                                                int32_t right, int32_t bottom,
-                                               bool visible);
+                                               bool visible,
+                                               uint32_t input_flags = 0);
 InputTransportStatus SendInputTransportWindowOnFd(InputTransport* transport,
                                                    int endpoint_fd,
                                                    int32_t left, int32_t top,
                                                    int32_t right, int32_t bottom,
-                                                   bool visible);
+                                                   bool visible,
+                                                   uint32_t input_flags = 0);
 InputTransportStatus SendInputTransportFocus(InputTransport* transport,
                                               uint64_t epoch, bool focused);
 InputTransportStatus SendInputTransportFocusOnFd(InputTransport* transport,

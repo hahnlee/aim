@@ -65,11 +65,15 @@ namespace darwin_art {
 DarwinArtInputEnqueueResult EnqueueFrameworkPointerPacket(
     const DarwinArtPointerEventV2& packet) {
   darwin_art::input::InputRoutingAdmission admission;
+  std::vector<darwin_art::input::InputRoutingAdmission> outside;
   const auto result = darwin_art::input::RouteFrameworkPointerPacket(
-      packet, &admission);
+      packet, &admission, &outside);
   if (result != DarwinArtInputEnqueueResult::kQueued ||
       admission.state == nullptr)
     return result;
+  // ACTION_OUTSIDE is best effort for its watcher; only the touched window's
+  // DOWN decides whether the host packet was accepted.
+  for (auto& event : outside) (void)EnqueueRoutedPacket(std::move(event));
   return EnqueueRoutedPacket(std::move(admission));
 }
 

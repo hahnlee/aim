@@ -90,7 +90,8 @@ WindowInputEndpointLeaseAcquireResult WindowInputEndpointLease::Acquire(
 
 darwin_art::input::InputTransportStatus WindowInputEndpointLease::PublishWindow(
     WindowInputEndpointLeaseToken token, std::int32_t left, std::int32_t top,
-    std::int32_t right, std::int32_t bottom, bool visible) {
+    std::int32_t right, std::int32_t bottom, bool visible,
+    std::uint32_t input_flags) {
   auto state = state_;
   std::shared_ptr<darwin_art::input::InputChannelResources> resources;
   {
@@ -103,7 +104,7 @@ darwin_art::input::InputTransportStatus WindowInputEndpointLease::PublishWindow(
   const auto endpoint = resources->Endpoint();
   return endpoint == nullptr
       ? darwin_art::input::InputTransportStatus::kTerminal
-      : endpoint->PublishWindow(left, top, right, bottom, visible);
+      : endpoint->PublishWindow(left, top, right, bottom, visible, input_flags);
 }
 
 darwin_art::input::InputTransportStatus WindowInputEndpointLease::PublishFocus(

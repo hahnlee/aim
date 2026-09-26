@@ -217,7 +217,7 @@ static void TestWmsPublisherRegistration() {
   table.RegisterNatives = [](JNIEnv*, jclass, const JNINativeMethod* methods,
                              jint count) -> jint {
     assert(count == 9 && !std::strcmp(methods[0].name, "nativePublish"));
-    assert(!std::strcmp(methods[0].signature, "(Landroid/view/InputChannel;IIIIZ)I"));
+    assert(!std::strcmp(methods[0].signature, "(Landroid/view/InputChannel;IIIIZI)I"));
     assert(!std::strcmp(methods[1].name, "nativePublishFocus"));
     assert(!std::strcmp(methods[1].signature, "(Landroid/view/InputChannel;JZ)I"));
     assert(!std::strcmp(methods[2].name, "nativeAcquireLease"));
@@ -227,7 +227,7 @@ static void TestWmsPublisherRegistration() {
     assert(!std::strcmp(methods[4].name, "nativeTerminateLeaseAndQuiesce"));
     assert(!std::strcmp(methods[4].signature, "(J)Z"));
     assert(!std::strcmp(methods[5].name, "nativePublishLease"));
-    assert(!std::strcmp(methods[5].signature, "(JIIIIZ)I"));
+    assert(!std::strcmp(methods[5].signature, "(JIIIIZI)I"));
     assert(!std::strcmp(methods[6].name, "nativePublishFocusLease"));
     assert(!std::strcmp(methods[6].signature, "(JJZ)I"));
     assert(!std::strcmp(methods[7].name, "nativeFlushLease"));
@@ -272,12 +272,12 @@ static void TestNativeParcelIdentity() {
   static bool field_failure = true;
   static jlong pair_values[2];
   static jlongArray (*open_pair)(JNIEnv*, jclass, jstring);
-  static jint (*publish)(JNIEnv*, jclass, jobject, jint, jint, jint, jint, jboolean);
+  static jint (*publish)(JNIEnv*, jclass, jobject, jint, jint, jint, jint, jboolean, jint);
   static jint (*publish_focus)(JNIEnv*, jclass, jobject, jlong, jboolean);
   static jlong (*acquire_lease)(JNIEnv*, jclass, jobject);
   static jboolean (*release_lease)(JNIEnv*, jclass, jlong);
   static jboolean (*terminate_lease)(JNIEnv*, jclass, jlong);
-  static jint (*publish_lease)(JNIEnv*, jclass, jlong, jint, jint, jint, jint, jboolean);
+  static jint (*publish_lease)(JNIEnv*, jclass, jlong, jint, jint, jint, jint, jboolean, jint);
   static jint (*publish_focus_lease)(JNIEnv*, jclass, jlong, jlong, jboolean);
   static jint (*flush_lease)(JNIEnv*, jclass, jlong);
   static jint (*query_accepted_lease_tx)(JNIEnv*, jclass, jlong);
@@ -393,7 +393,7 @@ static void TestNativeParcelIdentity() {
   pending = true;
   const int lookups_before = channel_lookups;
   assert(publish(&env, nullptr, reinterpret_cast<jobject>(1), 0, 0, 100, 100,
-                 JNI_TRUE) == 2);
+                 JNI_TRUE, 0) == 2);
   assert(pending && channel_lookups == lookups_before);
   assert(publish_focus(&env, nullptr, reinterpret_cast<jobject>(1), 0,
                        JNI_TRUE) == 2);
@@ -404,7 +404,7 @@ static void TestNativeParcelIdentity() {
   assert(pending && channel_lookups == lookups_before);
   pending = false;
   assert(publish(&env, nullptr, reinterpret_cast<jobject>(1), 0, 0, 100, 100,
-                 JNI_TRUE) == 2);
+                 JNI_TRUE, 0) == 2);
   assert(pending && channel_lookups == lookups_before + 1);
   pending = false;
   auto finalize = reinterpret_cast<void (*)(void*)>(get_finalizer(&env, nullptr));
@@ -475,9 +475,9 @@ static void TestNativeParcelIdentity() {
   auto publication_lease = AcquireServerInputChannelResources(&env, server_object);
   assert(publication_lease && publication_lease == AcquireInputChannelResources(pair_values[0]));
   wire.clear();
-  assert(publish(&env, nullptr, client_object, 0, 0, 720, 1280, JNI_TRUE) == 2);
+  assert(publish(&env, nullptr, client_object, 0, 0, 720, 1280, JNI_TRUE, 0) == 2);
   assert(wire.empty()); // A client wrapper cannot publish WMS control.
-  assert(publish(&env, nullptr, server_object, 0, 0, 720, 1280, JNI_TRUE) == 0);
+  assert(publish(&env, nullptr, server_object, 0, 0, 720, 1280, JNI_TRUE, 0) == 0);
   assert(!pending && wire.size() == 32);
   wire.clear();
   assert(publish_focus(&env, nullptr, client_object, 1001, JNI_TRUE) == 2);
@@ -489,7 +489,7 @@ static void TestNativeParcelIdentity() {
   assert(focus_frame.epoch == 1001 && focus_frame.focused == 1);
   wire.clear();
   blocked = true;
-  assert(publish(&env, nullptr, server_object, 0, 0, 720, 1280, JNI_TRUE) == 0);
+  assert(publish(&env, nullptr, server_object, 0, 0, 720, 1280, JNI_TRUE, 0) == 0);
   assert(wire.empty()); // Accepted means retained, not necessarily written yet.
   allocation_failed = false;
   allocation_failure_after = 0;
@@ -513,20 +513,20 @@ static void TestNativeParcelIdentity() {
   assert(!AcquireServerInputChannelResources(&env, server_object));
   // Actual registered JNI lease retains the original server endpoint even
   // after Java dispose; its identity never re-resolves a current Java handle.
-  assert(publish_lease(&env, nullptr, original_lease, 0, 0, 720, 1280, JNI_TRUE) == 0);
+  assert(publish_lease(&env, nullptr, original_lease, 0, 0, 720, 1280, JNI_TRUE, 0) == 0);
   assert(publish_focus_lease(&env, nullptr, original_lease, 1003, JNI_TRUE) == 0);
   assert(query_accepted_lease_tx(&env, nullptr, original_lease) == 0);
   assert(publish_focus_lease(&env, nullptr, original_lease, 0, JNI_TRUE) == 2);
   assert(terminate_lease && terminate_lease(&env, nullptr, 0) == JNI_FALSE);
   blocked = true;
-  assert(publish_lease(&env, nullptr, original_lease, 1, 2, 721, 1282, JNI_TRUE) == 0);
+  assert(publish_lease(&env, nullptr, original_lease, 1, 2, 721, 1282, JNI_TRUE, 0) == 0);
   assert(query_accepted_lease_tx(&env, nullptr, original_lease) == 1);
   assert(flush_lease(&env, nullptr, original_lease) == 1);
   blocked = false;
   assert(flush_lease(&env, nullptr, original_lease) == 0);
   assert(query_accepted_lease_tx(&env, nullptr, original_lease) == 0);
   blocked = true;
-  assert(publish_lease(&env, nullptr, original_lease, 2, 3, 722, 1283, JNI_TRUE) == 0);
+  assert(publish_lease(&env, nullptr, original_lease, 2, 3, 722, 1283, JNI_TRUE, 0) == 0);
   assert(query_accepted_lease_tx(&env, nullptr, original_lease) == 1);
   const auto pending_fence = retained_endpoint->Transport()->CaptureAcceptedTxFence();
   assert(retained_endpoint->Transport()->QueryTxFence(pending_fence)
@@ -544,7 +544,7 @@ static void TestNativeParcelIdentity() {
   assert(query_accepted_lease_tx(&env, nullptr, original_lease) == 3);
   assert(terminate_lease(&env, nullptr, original_lease) == JNI_FALSE);
   assert(release_lease(&env, nullptr, original_lease) == JNI_FALSE);
-  assert(publish_lease(&env, nullptr, original_lease, 0, 0, 720, 1280, JNI_TRUE) == 2);
+  assert(publish_lease(&env, nullptr, original_lease, 0, 0, 720, 1280, JNI_TRUE, 0) == 2);
   finalize(reinterpret_cast<void*>(pair_values[0]));
   finalize(reinterpret_cast<void*>(pair_values[1]));
   assert(globals == 0 && publication_lease->Endpoint() == retained_endpoint);
@@ -913,7 +913,7 @@ static void TestReceiverTransportPolicy() {
       }, &invocation);
   policy.consumer = &consumer;
   auto callbacks = ReceiverTransportCallbacks(&policy);
-  assert(callbacks.on_window_consumption(callbacks.context, 10, 20, 110, 220, true) ==
+  assert(callbacks.on_window_consumption(callbacks.context, 10, 20, 110, 220, true, 0) ==
          InputTransportConsumptionResult::kConsumed);
   assert(policy_wakes == 1);
   darwin_art::DarwinArtInputPacket packet{};

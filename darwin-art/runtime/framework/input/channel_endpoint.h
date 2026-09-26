@@ -44,8 +44,10 @@ class ChannelEndpoint final {
   bool WakeLocal();
   void DrainLocalWake();
   int BorrowParcelFd(bool server_side) const;
+  // input_flags: InputWindowFlags of the WMS window (input_window_state.h).
   InputTransportStatus PublishWindow(int32_t left, int32_t top, int32_t right,
-                                     int32_t bottom, bool visible);
+                                     int32_t bottom, bool visible,
+                                     uint32_t input_flags = 0);
   InputTransportStatus PublishFocus(uint64_t epoch, bool focused);
 
  private:

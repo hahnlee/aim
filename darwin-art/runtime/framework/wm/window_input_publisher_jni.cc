@@ -72,10 +72,11 @@ jint QueryAcceptedPublicationLeaseTx(JNIEnv*, jclass, jlong token) {
 }
 
 jint PublishLeasedWindow(JNIEnv*, jclass, jlong token, jint left, jint top,
-                         jint right, jint bottom, jboolean visible) {
+                         jint right, jint bottom, jboolean visible, jint input_flags) {
   const auto owner = PublicationLeases();
   return owner == nullptr ? 2 : PublicationStatus(owner->PublishWindow(
-      static_cast<uint64_t>(token), left, top, right, bottom, visible == JNI_TRUE));
+      static_cast<uint64_t>(token), left, top, right, bottom, visible == JNI_TRUE,
+      static_cast<uint32_t>(input_flags)));
 }
 
 jint PublishLeasedFocus(JNIEnv*, jclass, jlong token, jlong epoch,
@@ -87,14 +88,16 @@ jint PublishLeasedFocus(JNIEnv*, jclass, jlong token, jlong epoch,
 }
 
 jint PublishWindow(JNIEnv* env, jclass, jobject input_channel, jint left,
-                   jint top, jint right, jint bottom, jboolean visible) {
+                   jint top, jint right, jint bottom, jboolean visible,
+                   jint input_flags) {
   const auto resources = input::AcquireServerInputChannelResources(env, input_channel);
   if (resources == nullptr || env->ExceptionCheck()) return 2;
   const auto endpoint = resources->Endpoint();
   const auto transport = endpoint == nullptr ? nullptr : endpoint->Transport();
   if (transport == nullptr || transport->ReadFd() < 0) return 2;
   const auto status = endpoint->PublishWindow(left, top, right, bottom,
-                                             visible == JNI_TRUE);
+                                             visible == JNI_TRUE,
+                                             static_cast<uint32_t>(input_flags));
   if (std::getenv("DARWIN_ART_DEBUG_INPUT_LATENCY") != nullptr) {
     std::cerr << "ART Android WMS InputWindow publish name=" << resources->Name()
               << " visible=" << (visible == JNI_TRUE ? 1 : 0) << " frame=["
@@ -134,7 +137,7 @@ bool RegisterWindowInputPublisherNatives(JNIEnv* env) {
   }
   JNINativeMethod methods[]{
       {const_cast<char*>("nativePublish"),
-       const_cast<char*>("(Landroid/view/InputChannel;IIIIZ)I"),
+       const_cast<char*>("(Landroid/view/InputChannel;IIIIZI)I"),
        reinterpret_cast<void*>(&PublishWindow)},
       {const_cast<char*>("nativePublishFocus"),
        const_cast<char*>("(Landroid/view/InputChannel;JZ)I"),
@@ -146,7 +149,7 @@ bool RegisterWindowInputPublisherNatives(JNIEnv* env) {
        reinterpret_cast<void*>(&ReleasePublicationLease)},
       {const_cast<char*>("nativeTerminateLeaseAndQuiesce"), const_cast<char*>("(J)Z"),
        reinterpret_cast<void*>(&TerminatePublicationLeaseAndQuiesce)},
-      {const_cast<char*>("nativePublishLease"), const_cast<char*>("(JIIIIZ)I"),
+      {const_cast<char*>("nativePublishLease"), const_cast<char*>("(JIIIIZI)I"),
        reinterpret_cast<void*>(&PublishLeasedWindow)},
       {const_cast<char*>("nativePublishFocusLease"), const_cast<char*>("(JJZ)I"),
        reinterpret_cast<void*>(&PublishLeasedFocus)},

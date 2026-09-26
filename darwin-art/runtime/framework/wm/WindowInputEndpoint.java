@@ -27,7 +27,8 @@ final class WindowInputEndpoint {
             throw new IllegalArgumentException("foreign input endpoint publication");
         int status = record.kind == WindowFocusRegistry.PublicationKind.GEOMETRY
                 ? WindowInputPublisher.nativePublishLease(lease, record.left, record.top,
-                        record.right, record.bottom, record.visible)
+                        record.right, record.bottom, record.visible,
+                        WindowInputPublisher.inputPolicy(record))
                 : WindowInputPublisher.nativePublishFocusLease(lease, record.epoch, record.focused);
         return WindowInputPublisher.decodeStatus(status);
     }
