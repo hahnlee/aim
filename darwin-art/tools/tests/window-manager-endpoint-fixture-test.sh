@@ -12,6 +12,7 @@ while IFS= read -r stub; do
 done < <(rg --files "$test_dir/stubs" -g '*.java' | sort)
 javac --release 8 -encoding UTF-8 -d "$out_dir" \
   "${stubs[@]}" \
+  "$repo_dir/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$repo_dir/runtime/framework/am/ApplicationProcessRegistry.java" \
   "$repo_dir/runtime/framework/wm/WindowSessionIdentity.java" \
   "$repo_dir/runtime/framework/wm/DesktopRootWindowBindingOwner.java" \
@@ -31,6 +32,7 @@ javac --release 8 -encoding UTF-8 -d "$out_dir" \
   "$repo_dir/runtime/framework/wm/WindowPublicationDriver.java" \
   "$repo_dir/runtime/framework/wm/WindowPublicationController.java" \
   "$repo_dir/runtime/framework/display/DisplayGeometry.java" \
+  "$repo_dir/runtime/framework/display/HostDisplayFacts.java" \
   "$repo_dir/runtime/framework/display/TaskDisplayRegistry.java" \
   "$repo_dir/runtime/framework/wm/WindowSurfaceRegistry.java" \
   "$repo_dir/runtime/framework/wm/WindowSessionEndpoint.java" \

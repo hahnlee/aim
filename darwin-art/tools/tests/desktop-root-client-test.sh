@@ -14,6 +14,7 @@ javac --release 8 -encoding UTF-8 -d "$stage" \
   "$root/tools/tests/wm/desktop-root-client-stubs/android/os/SystemClock.java" \
   "$root/tools/tests/wm/desktop-root-client-stubs/android/util/Log.java" \
   "$root/tools/tests/wm/desktop-root-client-stubs/android/view/InputChannel.java" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/runtime/framework/wm/DesktopRootProtocol.java" \
   "$root/runtime/framework/wm/DesktopRootFocusDecision.java" \
   "$root/runtime/framework/wm/DesktopRootFocusDecisionTransport.java" \

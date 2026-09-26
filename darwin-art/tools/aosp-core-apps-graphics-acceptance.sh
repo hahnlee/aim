@@ -3,6 +3,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 source "$root/tools/lib/aosp-core-apps-graphics-validation.sh"
+source "$root/tools/lib/acceptance-app-cleanup.sh"
+trap 'darwin_art_acceptance_quit_started "$root"' EXIT
 output="${DARWIN_ART_ACCEPTANCE_OUTPUT:-$(mktemp -d "${TMPDIR:-/tmp}/aosp-core-apps-acceptance.XXXXXX")}"
 calculator="$root/_build/aosp-apks/ExactCalculator-api28.apk"
 clock="$root/_build/aosp-apks/DeskClock-api29.apk"
@@ -72,6 +74,7 @@ launch_app() {
     DARWIN_ART_DEBUG_SURFACECONTROL_PIXELS=1 \
   "$root/tools/run-android-apk-app.sh" "$apk" 0 >"$metadata_log" 2>&1
   wait_for_package "$package"
+  darwin_art_acceptance_track "$active_pid"
 }
 
 calculator_metadata="$output/calculator-launch.log"
