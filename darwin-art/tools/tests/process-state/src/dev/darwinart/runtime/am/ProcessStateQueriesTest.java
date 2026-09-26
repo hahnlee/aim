@@ -35,10 +35,6 @@ public final class ProcessStateQueriesTest {
         android.os.Process.freeMemory = cached / 2;
         check(memoryInfo().lowMemory, "free memory below the home threshold was not low");
 
-        Parcel errors = new Parcel();
-        ProcessStateQueries.writeProcessesInErrorState(errors);
-        check(errors.noException && errors.listWritten && errors.typed == null,
-                "error-state processes were not an empty (null) list");
-        System.out.println("process-state-queries: memory levels and error state PASS");
+        System.out.println("process-state-queries: memory levels PASS");
     }
 }

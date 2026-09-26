@@ -55,6 +55,9 @@ public final class ActivityManagerEndpoint extends Binder {
     private final int addUidToObserverCode = transaction("addUidToObserver");
     private final int removeUidFromObserverCode = transaction("removeUidFromObserver");
     private final int handleApplicationWtfCode = transaction("handleApplicationWtf");
+    private final int handleApplicationCrashCode = transaction("handleApplicationCrash");
+    private final int handleApplicationStrictModeViolationCode =
+            transaction("handleApplicationStrictModeViolation");
     private final int setRenderThreadCode = transaction("setRenderThread");
     private final int publishContentProvidersCode = transaction("publishContentProviders");
     // ProcessRecord.mRenderThreadTid, by pid.
@@ -83,6 +86,7 @@ public final class ActivityManagerEndpoint extends Binder {
     private final BoundServiceProcessLauncher processLauncher;
     private final TaskLifecycle tasks;
     private final UidProcessStates uidStates;
+    private final AppErrors appErrors;
 
     public ActivityManagerEndpoint(ApplicationProcessRegistry processes, TaskLifecycle tasks) {
         if (tasks == null) throw new NullPointerException("tasks");
@@ -93,6 +97,7 @@ public final class ActivityManagerEndpoint extends Binder {
                 processes, processLauncher);
         broadcasts = new BroadcastTransactions(processes);
         uidStates = new UidProcessStates(processes);
+        appErrors = new AppErrors(processes);
         attachInterface(null, "android.app.IActivityManager");
     }
 
@@ -277,6 +282,32 @@ public final class ActivityManagerEndpoint extends Binder {
             if (reply != null) reply.writeNoException();
             return true;
         }
+        if (code == handleApplicationCrashCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            data.readStrongBinder(); // Application thread.
+            android.app.ApplicationErrorReport.ParcelableCrashInfo crash = data.readTypedObject(
+                    android.app.ApplicationErrorReport.ParcelableCrashInfo.CREATOR);
+            data.enforceNoDataAvail();
+            int pid = Binder.getCallingPid();
+            appErrors.crashApplication(pid, Binder.getCallingUid(),
+                    processes.requireIdentifiedProcess(pid), crash);
+            if (reply != null) reply.writeNoException();
+            return true;
+        }
+        if (code == handleApplicationStrictModeViolationCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            data.readStrongBinder(); // Application thread.
+            int penalty = data.readInt();
+            android.os.StrictMode.ViolationInfo violation =
+                    data.readTypedObject(android.os.StrictMode.ViolationInfo.CREATOR);
+            data.enforceNoDataAvail();
+            // StrictMode penaltyDropBox: AMS records the violation (DropBox).
+            Log.w("DarwinActivityManager", "StrictMode violation pid="
+                    + Binder.getCallingPid() + " penalty=0x" + Integer.toHexString(penalty)
+                    + (violation == null ? "" : " " + violation.getStackTrace()));
+            if (reply != null) reply.writeNoException();
+            return true;
+        }
         if (code == handleApplicationWtfCode) {
             data.enforceInterface("android.app.IActivityManager");
             data.readStrongBinder(); // Application thread.
@@ -333,7 +364,9 @@ public final class ActivityManagerEndpoint extends Binder {
             if (code == getMemoryInfoCode) {
                 ProcessStateQueries.writeMemoryInfo(reply);
             } else {
-                ProcessStateQueries.writeProcessesInErrorState(reply);
+                reply.writeNoException();
+                reply.writeTypedList(appErrors.errorStates(Binder.getCallingUid()),
+                        Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
             }
             return true;
         }
