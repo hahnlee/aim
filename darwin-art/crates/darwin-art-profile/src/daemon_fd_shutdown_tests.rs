@@ -50,7 +50,13 @@ fn shutdown_rejects_pending_delivery_until_actual_guardian_eof() {
     assert!(!request(&state));
     assert!(!state.shutdown.load(Ordering::SeqCst));
     drop(prepared);
-    assert!(request(&state));
+    // A child another test forks holds a copy of the guardian's write end
+    // until it execs, so EOF can follow the drop by a moment (#81).
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while !request(&state) {
+        assert!(Instant::now() < deadline, "guardian EOF never observed");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(state.shutdown.load(Ordering::SeqCst));
     drop((carrier, peer));
 }

@@ -104,7 +104,16 @@ mod tests {
         child.wait().unwrap();
         assert!(result.is_ok(), "{result:?}");
         assert!(verify_registration(&server, child.id()).is_err());
+        // A socket whose peer is gone is rejected (ENOTCONN). A child another
+        // test forks holds a copy of the dropped peer until it execs (#81).
         let (inherited, _) = UnixStream::pair().unwrap();
-        assert!(verify_registration(&inherited, std::process::id()).is_err());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while verify_registration(&inherited, std::process::id()).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "disconnected socket accepted"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
