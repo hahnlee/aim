@@ -7,6 +7,7 @@ import android.os.IBinder;
 import android.os.Parcelable;
 import android.view.Gravity;
 import android.view.SurfaceControl;
+import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import dev.darwinart.runtime.display.DisplayGeometry;
@@ -15,6 +16,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -127,6 +129,15 @@ final class WindowSurfaceRegistry {
                     + width + "x" + height + " frame=" + frame + " task=" + geometry);
         }
         record.frame = frame;
+        if (visibility != View.VISIBLE) {
+            // WMS relayoutWindow: a window that is not visible has no surface.
+            // ViewRootImpl destroys its own on the invalid result and gets a
+            // new layer from the relayout that makes it visible again.
+            releaseSurface(record);
+            return new RelayoutPublication(
+                    createRelayoutResult(null, frame, geometry, syncSequenceId),
+                    frame, visibility, layout);
+        }
         // WindowLayout.computeSurfaceSize: the client buffer covers the frame
         // plus surface insets (elevation shadows); WMS offsets the layer so the
         // frame, not the shadow margin, lands at the laid-out position.
@@ -183,19 +194,47 @@ final class WindowSurfaceRegistry {
         return effective == null ? null : copyOf(effective);
     }
 
+    /**
+     * Windows shown for one Activity: those attached to its token and,
+     * transitively, their sub-windows (attached to the parent IWindow).
+     */
+    synchronized List<IBinder> activityWindows(IBinder activityToken) {
+        ArrayList<IBinder> result = new ArrayList<>();
+        HashSet<IBinder> owners = new HashSet<>();
+        owners.add(activityToken);
+        boolean added = true;
+        while (added) {
+            added = false;
+            for (Map.Entry<IBinder, WindowRecord> entry : windows.entrySet()) {
+                WindowManager.LayoutParams layout = entry.getValue().attributes;
+                if (layout != null && layout.token != null && owners.contains(layout.token)
+                        && owners.add(entry.getKey())) {
+                    result.add(entry.getKey());
+                    added = true;
+                }
+            }
+        }
+        return result;
+    }
+
     synchronized void remove(int pid, IBinder window) {
         metadata.remove(pid, window);
         WindowRecord record = windows.get(window);
         if (record != null && record.pid != pid) return;
-        SurfaceControl surface = record == null ? null : record.surface;
+        if (record != null) releaseSurface(record);
+        // Do not lose the original layer if transaction/release throws.
+        windows.remove(window);
+    }
+
+    private static void releaseSurface(WindowRecord record) {
+        SurfaceControl surface = record.surface;
         if (surface != null && surface.isValid()) {
             try (SurfaceControl.Transaction transaction = new SurfaceControl.Transaction()) {
                 transaction.reparent(surface, null).apply();
             }
             surface.release();
         }
-        // Do not lose the original layer if transaction/release throws.
-        windows.remove(window);
+        record.surface = null;
     }
 
     synchronized Rect frame(IBinder window) {
@@ -295,12 +334,14 @@ final class WindowSurfaceRegistry {
                     "setConfiguration", Configuration.class, Configuration.class)
                     .invoke(mergedConfiguration, global, geometry.overrideConfiguration());
 
-            SurfaceControl output = (SurfaceControl) resultClass.getField("surfaceControl")
-                    .get(result);
-            Method copyFrom = SurfaceControl.class.getDeclaredMethod(
-                    "copyFrom", SurfaceControl.class, String.class);
-            copyFrom.setAccessible(true);
-            copyFrom.invoke(output, producer, "WindowSurfaceRegistry.relayout");
+            if (producer != null) {
+                SurfaceControl output = (SurfaceControl) resultClass.getField("surfaceControl")
+                        .get(result);
+                Method copyFrom = SurfaceControl.class.getDeclaredMethod(
+                        "copyFrom", SurfaceControl.class, String.class);
+                copyFrom.setAccessible(true);
+                copyFrom.invoke(output, producer, "WindowSurfaceRegistry.relayout");
+            }
             resultClass.getField("syncSeqId").setInt(result, syncSequenceId);
             return (Parcelable) result;
         } catch (ReflectiveOperationException error) {
