@@ -37,6 +37,8 @@ public final class ActivityClientControllerEndpoint extends Binder {
         // ActivityRecord.mOccludesParent from the Activity's window style.
         final boolean occludesParent;
         State state = State.RESUMED;
+        // ActivityManager.TaskDescription the Activity set, or null.
+        android.app.ActivityManager.TaskDescription taskDescription;
         // The Activity the launcher started this task with (the process's
         // initial launch): Back there moves the task to the back.
         boolean launcherRoot;
@@ -90,6 +92,8 @@ public final class ActivityClientControllerEndpoint extends Binder {
     private final int activityRelaunchedCode = transaction("activityRelaunched");
     private final int finishActivityCode = transaction("finishActivity");
     private final int onBackPressedCode = transaction("onBackPressed");
+    private final int getTaskForActivityCode = transaction("getTaskForActivity");
+    private final int setTaskDescriptionCode = transaction("setTaskDescription");
     private final int setRequestedOrientationCode = transaction("setRequestedOrientation");
     private final int getRequestedOrientationCode = transaction("getRequestedOrientation");
 
@@ -292,6 +296,19 @@ public final class ActivityClientControllerEndpoint extends Binder {
      * resumes the top Activity (restart from stopped), as Home and returning
      * to the app do on Android.
      */
+    /** ActivityTaskManager.getTaskForActivity: the Activity's task id, or -1. */
+    public static int taskForActivity(IBinder token, boolean onlyRoot) {
+        IBinder thread;
+        synchronized (activityLock) {
+            ActivityRecord record = activityRecords.get(token);
+            if (record == null) return -1;
+            ArrayDeque<IBinder> stack = activityStacks.get(record.applicationThread);
+            if (onlyRoot && (stack == null || !token.equals(stack.peekFirst()))) return -1;
+            thread = record.applicationThread;
+        }
+        return TaskGeometryController.requireInstance().taskId(thread);
+    }
+
     /** Whether the process has no Activity left in its task. */
     static boolean taskEmpty(IBinder applicationThread) {
         synchronized (activityLock) {
@@ -437,6 +454,8 @@ public final class ActivityClientControllerEndpoint extends Binder {
                 && code != activityRelaunchedCode
                 && code != finishActivityCode
                 && code != onBackPressedCode
+                && code != getTaskForActivityCode
+                && code != setTaskDescriptionCode
                 && code != setRequestedOrientationCode
                 && code != getRequestedOrientationCode) {
             return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
@@ -565,6 +584,42 @@ public final class ActivityClientControllerEndpoint extends Binder {
             if (emptied != null) {
                 TaskGeometryController.requireInstance().requestHostHide(emptied);
             }
+            return true;
+        }
+        if (code == getTaskForActivityCode) {
+            boolean onlyRoot = data.readBoolean();
+            data.enforceNoDataAvail();
+            reply.writeNoException();
+            reply.writeInt(taskForActivity(token, onlyRoot));
+            return true;
+        }
+        if (code == setTaskDescriptionCode) {
+            android.app.ActivityManager.TaskDescription description = data.readTypedObject(
+                    android.app.ActivityManager.TaskDescription.CREATOR);
+            data.enforceNoDataAvail();
+            IBinder thread;
+            String label = null;
+            synchronized (activityLock) {
+                ActivityRecord record = activityRecords.get(token);
+                if (record == null) return true;
+                record.taskDescription = description;
+                thread = record.applicationThread;
+                // Task.updateTaskDescription: the topmost Activity with a label
+                // names the task.
+                ArrayDeque<IBinder> stack = activityStacks.get(thread);
+                if (stack != null) {
+                    java.util.Iterator<IBinder> top = stack.descendingIterator();
+                    while (top.hasNext() && label == null) {
+                        ActivityRecord candidate = activityRecords.get(top.next());
+                        if (candidate != null && candidate.taskDescription != null) {
+                            label = candidate.taskDescription.getLabel();
+                        }
+                    }
+                }
+            }
+            DesktopWindowMetadataRegistry.setTaskLabel(
+                    TaskGeometryController.requireInstance().taskPid(thread), label);
+            if (reply != null) reply.writeNoException();
             return true;
         }
         if (code == onBackPressedCode) {

@@ -48,6 +48,28 @@ public final class ActivityManagerEndpoint extends Binder {
     private final int broadcastIntentWithFeatureCode = transaction("broadcastIntentWithFeature");
     private final int getInfoForIntentSenderCode = transaction("getInfoForIntentSender");
     private final int sendIntentSenderCode = transaction("sendIntentSender");
+    private final int handleApplicationWtfCode = transaction("handleApplicationWtf");
+    private final int setRenderThreadCode = transaction("setRenderThread");
+    private final int publishContentProvidersCode = transaction("publishContentProviders");
+    // ProcessRecord.mRenderThreadTid, by pid.
+    private final java.util.concurrent.ConcurrentHashMap<Integer, Integer> renderThreads =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    // ContentProviderRecords by authority: the holder a process published with
+    // the application thread that owns it.
+    private final java.util.HashMap<String, PublishedProvider> providers =
+            new java.util.HashMap<>();
+
+    private static final class PublishedProvider {
+        final IBinder owner;
+        final int uid;
+        final android.app.ContentProviderHolder holder;
+
+        PublishedProvider(IBinder owner, int uid, android.app.ContentProviderHolder holder) {
+            this.owner = owner;
+            this.uid = uid;
+            this.holder = holder;
+        }
+    }
     private final BroadcastTransactions broadcasts;
     private final ApplicationProcessRegistry processes;
     private final SettingsProviderEndpoint settingsProvider = new SettingsProviderEndpoint();
@@ -94,6 +116,51 @@ public final class ActivityManagerEndpoint extends Binder {
     /** Android system-service-only broadcast entry; not exposed on IActivityManager. */
     public SystemBroadcasts systemBroadcasts() {
         return broadcasts;
+    }
+
+    /** ActivityManagerService.publishContentProviders for {@code caller}'s process. */
+    private void publishProviders(IBinder caller, int uid,
+            java.util.List<android.app.ContentProviderHolder> published) {
+        if (caller == null || published == null) return;
+        synchronized (providers) {
+            for (android.app.ContentProviderHolder holder : published) {
+                if (holder == null || holder.info == null || holder.info.authority == null
+                        || holder.provider == null) continue;
+                if (holder.info.applicationInfo != null
+                        && holder.info.applicationInfo.uid != uid) {
+                    throw new SecurityException("Provider " + holder.info.authority
+                            + " does not belong to the publishing uid " + uid);
+                }
+                for (String authority : holder.info.authority.split(";")) {
+                    providers.put(authority, new PublishedProvider(caller, uid, holder));
+                }
+            }
+        }
+    }
+
+    /**
+     * A provider another process of the caller's own uid published (a
+     * multi-process app). Cross-package access needs AMS's provider
+     * permission checks, which are not enforced here yet (#107).
+     */
+    private android.app.ContentProviderHolder publishedProvider(String authority, int uid) {
+        PublishedProvider provider;
+        synchronized (providers) {
+            provider = authority == null ? null : providers.get(authority);
+            if (provider == null) return null;
+            boolean alive = false;
+            for (ApplicationProcessRegistry.AttachedApplication app : processes.attached()) {
+                if (app.thread == provider.owner) {
+                    alive = true;
+                    break;
+                }
+            }
+            if (!alive) {
+                providers.values().removeIf(entry -> entry.owner == provider.owner);
+                return null;
+            }
+        }
+        return provider.uid == uid ? provider.holder : null;
     }
 
     private static int transaction(String name) {
@@ -166,6 +233,50 @@ public final class ActivityManagerEndpoint extends Binder {
             reply.writeNoException();
             reply.writeInt(sendIntentSender(target, allowlistToken, resultCode, intent,
                     resolvedType, finishedReceiver, requiredPermission, options));
+            return true;
+        }
+        if (code == handleApplicationWtfCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            data.readStrongBinder(); // Application thread.
+            String tag = data.readString();
+            boolean system = data.readBoolean();
+            android.app.ApplicationErrorReport.ParcelableCrashInfo crash = data.readTypedObject(
+                    android.app.ApplicationErrorReport.ParcelableCrashInfo.CREATOR);
+            data.readInt(); // Immediate caller pid.
+            data.enforceNoDataAvail();
+            // ActivityManagerService.handleApplicationWtf: record the report;
+            // a WTF ends the process only when Settings.Global.WTF_IS_FATAL,
+            // which this runtime leaves off.
+            Log.e("DarwinActivityManager", "WTF pid=" + Binder.getCallingPid()
+                    + " system=" + system + " tag=" + tag
+                    + (crash == null ? "" : " " + crash.exceptionClassName + ": "
+                            + crash.exceptionMessage + " at " + crash.throwFileName + ":"
+                            + crash.throwLineNumber));
+            if (reply != null) {
+                reply.writeNoException();
+                reply.writeBoolean(false);
+            }
+            return true;
+        }
+        if (code == setRenderThreadCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            int tid = data.readInt();
+            data.enforceNoDataAvail();
+            // ActivityManagerService.setRenderThread records the tid for the
+            // top-app scheduling boost; there is no such scheduling policy here.
+            if (tid > 0) renderThreads.put(Binder.getCallingPid(), tid);
+            if (reply != null) reply.writeNoException();
+            return true;
+        }
+        if (code == publishContentProvidersCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            IBinder caller = data.readStrongBinder();
+            java.util.ArrayList<android.app.ContentProviderHolder> published =
+                    data.createTypedArrayList(android.app.ContentProviderHolder.CREATOR);
+            data.enforceNoDataAvail();
+            int uid = Binder.getCallingUid();
+            publishProviders(caller, uid, published);
+            if (reply != null) reply.writeNoException();
             return true;
         }
         if (code == getMemoryInfoCode || code == getProcessesInErrorStateCode
@@ -345,7 +456,8 @@ public final class ActivityManagerEndpoint extends Binder {
             data.readBoolean(); // Stable/unstable reference.
             data.enforceNoDataAvail();
             Parcelable holder = "settings".equals(authority) && userId == 0
-                    ? settingsProvider.holder() : null;
+                    ? settingsProvider.holder()
+                    : publishedProvider(authority, Binder.getCallingUid());
             reply.writeNoException();
             reply.writeTypedObject(holder, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
             return true;

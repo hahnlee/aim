@@ -24,6 +24,14 @@ final class WindowSessionEndpoint extends Binder {
     private final int addToDisplayAsUserCode = transaction("addToDisplayAsUser");
     private final int removeCode = transaction("remove");
     private final int relayoutCode = transaction("relayout");
+    private final int relayoutAsyncCode = transaction("relayoutAsync");
+    private final int setOnBackInvokedCallbackInfoCode =
+            transaction("setOnBackInvokedCallbackInfo");
+    // WindowState.mOnBackInvokedCallbackInfo: the callback system back
+    // navigation would invoke for each window of this session.
+    private final java.util.IdentityHashMap<android.os.IBinder,
+            android.window.OnBackInvokedCallbackInfo> backCallbacks =
+            new java.util.IdentityHashMap<>();
 
     WindowSessionEndpoint(WindowSurfaceRegistry surfaces, WindowSessionIdentity identity,
             WindowSessionWindowOwnership windows, WindowPublicationController publications) {
@@ -45,24 +53,39 @@ final class WindowSessionEndpoint extends Binder {
         }
     }
 
+    /**
+     * The session's own caller. A one-way transaction carries no calling
+     * pid, so it is authenticated by uid with the session's registered pid
+     * (the session Binder is the capability, as for AOSP's Session).
+     */
+    private void requireSessionCaller(int flags) {
+        boolean oneway = (flags & android.os.IBinder.FLAG_ONEWAY) != 0;
+        identity.requireCaller(oneway ? identity.pid() : Binder.getCallingPid(),
+                Binder.getCallingUid());
+    }
+
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
-        if (code != removeCode && code != relayoutCode && code != addToDisplayAsUserCode)
+        if (code != removeCode && code != relayoutCode && code != addToDisplayAsUserCode
+                && code != relayoutAsyncCode && code != setOnBackInvokedCallbackInfoCode)
             return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)
                 || super.onTransact(code, data, reply, flags);
-        identity.requireCaller(Binder.getCallingPid(), Binder.getCallingUid());
+        requireSessionCaller(flags);
         if (code == removeCode) {
             data.enforceInterface(DESCRIPTOR);
             android.os.IBinder window = data.readStrongBinder();
             data.enforceNoDataAvail();
             WindowSessionWindowOwnership.Registration registration = windows.beginCleanup(this, window);
             try {
-                identity.requireCaller(Binder.getCallingPid(), Binder.getCallingUid());
+                requireSessionCaller(flags);
                 windows.retire(this, registration);
                 window = registration.window();
                 publications.remove(registration);
                 surfaces.remove(identity.pid(), window);
+                synchronized (backCallbacks) {
+                    backCallbacks.remove(window);
+                }
                 serverInputChannels.remove(registration);
                 windows.release(this, registration);
                 reply.writeNoException();
@@ -71,7 +94,32 @@ final class WindowSessionEndpoint extends Binder {
                 windows.end(this, registration);
             }
         }
-        if (code == relayoutCode) {
+        if (code == setOnBackInvokedCallbackInfoCode) {
+            data.enforceInterface(DESCRIPTOR);
+            android.os.IBinder window = data.readStrongBinder();
+            android.window.OnBackInvokedCallbackInfo info =
+                    data.readTypedObject(android.window.OnBackInvokedCallbackInfo.CREATOR);
+            data.enforceNoDataAvail();
+            WindowSessionWindowOwnership.Registration registration = windows.begin(this, window);
+            try {
+                requireSessionCaller(flags);
+                synchronized (backCallbacks) {
+                    if (info == null) {
+                        backCallbacks.remove(registration.window());
+                    } else {
+                        backCallbacks.put(registration.window(), info);
+                    }
+                }
+            } finally {
+                windows.end(this, registration);
+            }
+            if (reply != null) reply.writeNoException();
+            return true;
+        }
+        if (code == relayoutCode || code == relayoutAsyncCode) {
+            // relayoutAsync is relayout without waiting for its result
+            // (ViewRootImpl's relayout for a visibility-only change).
+            boolean async = code == relayoutAsyncCode;
             data.enforceInterface(DESCRIPTOR);
             android.os.IBinder window = data.readStrongBinder();
             WindowManager.LayoutParams attrs =
@@ -85,7 +133,7 @@ final class WindowSessionEndpoint extends Binder {
             data.enforceNoDataAvail();
             WindowSessionWindowOwnership.Registration registration = windows.begin(this, window);
             try {
-                identity.requireCaller(Binder.getCallingPid(), Binder.getCallingUid());
+                requireSessionCaller(flags);
                 window = registration.window();
                 InputChannel serverChannel = serverInputChannels.get(registration);
                 if (serverChannel == null) throw new IllegalStateException("window has no input channel");
@@ -95,6 +143,7 @@ final class WindowSessionEndpoint extends Binder {
                         requestedWidth, requestedHeight, viewVisibility, lastSyncSequenceId);
                 publications.relayout(registration, publication.frame,
                         publication.viewVisibility, publication.effectiveAttributes);
+                if (async) return true;
                 reply.writeNoException();
                 reply.writeInt(RELAYOUT_RES_FIRST_TIME);
                 reply.writeInt(1);
@@ -121,7 +170,7 @@ final class WindowSessionEndpoint extends Binder {
         boolean adopted = false;
         Throwable failure = null;
         try {
-            identity.requireCaller(Binder.getCallingPid(), Binder.getCallingUid());
+            requireSessionCaller(flags);
             window = registration.window();
             channels = InputChannel.openInputChannelPair(
                     "darwin-art-window-"

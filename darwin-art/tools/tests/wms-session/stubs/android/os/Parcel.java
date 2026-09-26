@@ -36,6 +36,7 @@ public final class Parcel {
     public void writeString(String value) { write(value); }
     public String readString() { return (String) read(); }
     public void writeBoolean(boolean value) { write(Boolean.valueOf(value)); }
+    public void writeFloat(float value) { write(Float.valueOf(value)); }
     public boolean readBoolean() { return ((Boolean) read()).booleanValue(); }
     public void writeFloatArray(float[] value) { write(value); }
     public float[] createFloatArray() { return (float[]) read(); }

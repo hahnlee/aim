@@ -15,6 +15,7 @@ public final class WindowManagerEndpoint extends Binder {
     private final WindowPublicationController publications = new WindowPublicationController();
     private final int openSessionCode = transaction("openSession");
     private final int hasNavigationBarCode = transaction("hasNavigationBar");
+    private final int getCurrentAnimatorScaleCode = transaction("getCurrentAnimatorScale");
 
     public WindowManagerEndpoint(ApplicationProcessRegistry processes,
             DesktopWindowMetadataRegistry metadata, TaskDisplayRegistry displays) {
@@ -51,6 +52,18 @@ public final class WindowManagerEndpoint extends Binder {
         }
     }
 
+    /**
+     * WindowManagerService.getCurrentAnimatorScale: the user's
+     * Settings.Global.ANIMATOR_DURATION_SCALE (1 when unset).
+     */
+    private static float currentAnimatorScale() {
+        android.app.ActivityThread thread = android.app.ActivityThread.currentActivityThread();
+        android.content.Context context = thread == null ? null : thread.getSystemContext();
+        if (context == null) return 1.0f;
+        return android.provider.Settings.Global.getFloat(context.getContentResolver(),
+                android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1.0f);
+    }
+
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
@@ -63,6 +76,13 @@ public final class WindowManagerEndpoint extends Binder {
             WindowSessionEndpoint session = new WindowSessionEndpoint(surfaces, identity, windows, publications);
             reply.writeNoException();
             reply.writeStrongBinder(session);
+            return true;
+        }
+        if (code == getCurrentAnimatorScaleCode) {
+            data.enforceInterface(DESCRIPTOR);
+            data.enforceNoDataAvail();
+            reply.writeNoException();
+            reply.writeFloat(currentAnimatorScale());
             return true;
         }
         if (code != hasNavigationBarCode) return dev.darwinart.runtime.os.UnsupportedTransactions.reject(this, code, reply, flags)

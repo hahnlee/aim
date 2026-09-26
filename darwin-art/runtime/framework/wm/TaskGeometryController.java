@@ -48,7 +48,12 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
 
     private static volatile TaskGeometryController instance;
 
+    // ActivityTaskManager task ids: one task per application process here.
+    private static final java.util.concurrent.atomic.AtomicInteger NEXT_TASK_ID =
+            new java.util.concurrent.atomic.AtomicInteger(1);
+
     private static final class Task {
+        final int id = NEXT_TASK_ID.getAndIncrement();
         final int pid;
         final IBinder thread;
         DisplayGeometry geometry;
@@ -154,6 +159,22 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
                     + " launchOrientation="
                     + (launchActivity == null ? "none" : launchActivity.screenOrientation));
         }
+    }
+
+    /** The task id of the process whose application thread is {@code thread}, or -1. */
+    synchronized int taskId(IBinder thread) {
+        for (Task task : tasks.values()) {
+            if (task.thread == thread) return task.id;
+        }
+        return -1;
+    }
+
+    /** The pid of the task process whose application thread is {@code thread}, or 0. */
+    synchronized int taskPid(IBinder thread) {
+        for (Task task : tasks.values()) {
+            if (task.thread == thread) return task.pid;
+        }
+        return 0;
     }
 
     /** Process retirement from the AMS death owner. Late publications are dropped. */

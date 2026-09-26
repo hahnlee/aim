@@ -19,6 +19,7 @@ public final class NotificationManagerEndpoint extends Binder {
     private final int getNotificationChannelCode = transaction("getNotificationChannel");
     private final int getNotificationChannelsCode = transaction("getNotificationChannels");
     private final int deleteNotificationChannelCode = transaction("deleteNotificationChannel");
+    private final int getZenModeCode = transaction("getZenMode");
     private final NotificationRecords records = new NotificationRecords();
 
     public NotificationManagerEndpoint() {
@@ -116,6 +117,15 @@ public final class NotificationManagerEndpoint extends Binder {
             reply.writeNoException();
             reply.writeTypedObject(new ParceledListSlice<>(records.channels(uid, packageName)),
                     Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
+            return true;
+        }
+        if (code == getZenModeCode) {
+            // ZenModeHelper.getZenMode: Do Not Disturb is never entered here
+            // (no host Focus provider yet), so the mode is ZEN_MODE_OFF.
+            data.enforceInterface(DESCRIPTOR);
+            data.enforceNoDataAvail();
+            reply.writeNoException();
+            reply.writeInt(android.provider.Settings.Global.ZEN_MODE_OFF);
             return true;
         }
         if (code == deleteNotificationChannelCode) {

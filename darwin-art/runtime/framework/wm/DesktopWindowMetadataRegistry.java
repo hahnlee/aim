@@ -29,11 +29,39 @@ public final class DesktopWindowMetadataRegistry {
 
     private static final class ProcessState {
         IBinder receiver;
+        String taskLabel;
         long generation;
         final LinkedHashMap<IBinder, WindowState> windows = new LinkedHashMap<>();
     }
 
     private final HashMap<Integer, ProcessState> processes = new HashMap<>();
+    private static volatile DesktopWindowMetadataRegistry instance;
+
+    public DesktopWindowMetadataRegistry() {
+        instance = this;
+    }
+
+    /**
+     * The label of the task's ActivityManager.TaskDescription (null to clear).
+     * As in Recents, a task label names the task ahead of the window's own
+     * title; this runtime shows it as the root window's title.
+     */
+    static void setTaskLabel(int pid, String label) {
+        DesktopWindowMetadataRegistry current = instance;
+        if (current == null || pid <= 0) return;
+        synchronized (current) {
+            ProcessState process = current.processes.get(pid);
+            if (process == null) {
+                process = new ProcessState();
+                current.processes.put(pid, process);
+            }
+            String normalized = label == null || label.isEmpty() ? null : label;
+            if (java.util.Objects.equals(process.taskLabel, normalized)) return;
+            process.taskLabel = normalized;
+            ++process.generation;
+            publishSelected(process);
+        }
+    }
 
     public synchronized void register(int pid, IBinder receiver) {
         if (pid <= 0 || receiver == null) throw new IllegalArgumentException("invalid receiver");
@@ -81,12 +109,13 @@ public final class DesktopWindowMetadataRegistry {
             }
         }
         if (selected == null) return;
+        String title = process.taskLabel != null ? process.taskLabel : selected.title;
         Parcel data = Parcel.obtain();
         try {
             data.writeInterfaceToken(RECEIVER_DESCRIPTOR);
             data.writeStrongBinder(selected.token);
             data.writeLong(process.generation);
-            data.writeString(selected.title);
+            data.writeString(title);
             if (!process.receiver.transact(
                     TRANSACTION_UPDATE, data, null, IBinder.FLAG_ONEWAY)) {
                 process.receiver = null;
