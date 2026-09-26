@@ -5,6 +5,8 @@
 
 #include <iterator>
 
+#include "../../../compat/window/root_geometry.h"
+
 namespace darwin_art::framework::display {
 namespace {
 
@@ -18,7 +20,8 @@ bool Online(CGDirectDisplayID display) {
   return false;
 }
 
-// {builtIn, xDpi, yDpi}: pixels of the current mode per physical inch.
+// {builtIn, xDpi, yDpi, refreshRate}: pixels of the current mode per physical
+// inch, and the display's nominal refresh rate.
 jfloatArray NativeDescribe(JNIEnv* env, jclass, jint display_id) {
   const auto display = static_cast<CGDirectDisplayID>(display_id);
   if (!Online(display)) return nullptr;
@@ -34,7 +37,8 @@ jfloatArray NativeDescribe(JNIEnv* env, jclass, jint display_id) {
   }
   const jfloat values[] = {CGDisplayIsBuiltin(display) ? 1.0f : 0.0f,
                            static_cast<jfloat>(pixel_width * 25.4 / millimeters.width),
-                           static_cast<jfloat>(pixel_height * 25.4 / millimeters.height)};
+                           static_cast<jfloat>(pixel_height * 25.4 / millimeters.height),
+                           static_cast<jfloat>(darwin_art::window::DisplayRefreshRate(display))};
   jfloatArray result = env->NewFloatArray(std::size(values));
   if (result != nullptr) env->SetFloatArrayRegion(result, 0, std::size(values), values);
   return result;

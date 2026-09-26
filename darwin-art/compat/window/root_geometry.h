@@ -131,6 +131,12 @@ bool ProcessHasVisibleRoot();
 uint32_t ProcessRootRasterScale();
 // The visible root's CGDirectDisplayID, or 0.
 uint32_t ProcessRootDisplayId();
+// Any thread: the nominal refresh rate (Hz) of a display, as its CoreVideo
+// display link reports it (120 for ProMotion); 60 when unknown.
+double DisplayRefreshRate(uint32_t display_id);
+// Any thread: the vsync interval of this process's display: the visible
+// root's display, else the main display.
+int64_t ProcessFrameIntervalNanos();
 // AppKit main thread: whether Android task geometry owns this root's extent.
 bool RootGeometryOwned(DarwinArtSurface* surface);
 

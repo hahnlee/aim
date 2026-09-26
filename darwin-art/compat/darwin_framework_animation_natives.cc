@@ -5,6 +5,7 @@
 #include "darwin_android_time.h"
 #include "darwin_art_bionic_socket_broker.h"
 #include "darwin_framework_system_natives.h"
+#include "window/root_geometry.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -22,13 +23,19 @@
 
 namespace {
 
-constexpr auto kDisplayFrameInterval = std::chrono::nanoseconds(16'666'667);
+// The refresh interval of the display this process's root is on (the
+// built-in ProMotion display paces at 120 Hz), re-read at each schedule so a
+// root moved to another display follows it.
+std::chrono::nanoseconds DisplayFrameInterval() {
+  return std::chrono::nanoseconds(darwin_art::window::ProcessFrameIntervalNanos());
+}
 
 std::chrono::steady_clock::time_point NextDisplayDeadline() {
+  const auto interval = DisplayFrameInterval();
   const auto now = std::chrono::steady_clock::now();
   const auto elapsed = now.time_since_epoch();
-  const auto frame = elapsed / kDisplayFrameInterval + 1;
-  return std::chrono::steady_clock::time_point(frame * kDisplayFrameInterval);
+  const auto frame = elapsed / interval + 1;
+  return std::chrono::steady_clock::time_point(frame * interval);
 }
 
 struct DisplayPulse {
@@ -39,7 +46,7 @@ struct DisplayPulse {
 // DisplayEventReceiver is the clock edge behind Choreographer, ValueAnimator,
 // and framework RippleDrawable.  Android normally gets this edge from
 // SurfaceFlinger.  The Darwin host has no SurfaceFlinger, so provide the same
-// Java callback contract from a 60 Hz monotonic scheduler.  Keeping the
+// Java callback contract from a monotonic scheduler at the display's rate.  Keeping the
 // receiver in a lease map is important: NativeAllocationRegistry may finalize
 // it while a scheduled callback is already waiting on the host thread.
 class DarwinDisplayEventReceiver {
@@ -285,7 +292,7 @@ class DarwinDisplayEventReceiver {
   }
 
   jobject UpdateVsyncData(JNIEnv* env, jlong timestamp, jlong vsync_id) {
-    constexpr jlong kFrameIntervalNanos = 16'666'667;
+    const jlong kFrameIntervalNanos = DisplayFrameInterval().count();
     constexpr jlong kGpuBudgetNanos = 2'000'000;
     if (vsync_data_weak_ == nullptr) return nullptr;
     jobject data = env->CallObjectMethod(vsync_data_weak_, reference_get_);
