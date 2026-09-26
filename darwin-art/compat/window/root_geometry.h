@@ -17,6 +17,8 @@ struct RootGeometryReport {
   uint32_t points_width = 0;
   uint32_t points_height = 0;
   uint32_t backing_scale = 0;
+  // CGDirectDisplayID of the screen the root is on (0 unknown).
+  uint32_t display_id = 0;
 };
 
 // Process-wide latest-wins slot between AppKit (producer) and the Android
@@ -30,11 +32,11 @@ class RootGeometryReports final {
   // AppKit main thread. Returns true when a new report was published. A zero
   // backing scale leaves the last known scale unchanged.
   bool Publish(uint32_t points_width, uint32_t points_height,
-               uint32_t backing_scale = 0);
+               uint32_t backing_scale = 0, uint32_t display_id = 0);
   // AppKit main thread. Records an extent the root now has because Android
   // geometry (or window creation) set it, not because the user resized.
   void NoteKnownExtent(uint32_t points_width, uint32_t points_height,
-                       uint32_t backing_scale = 0);
+                       uint32_t backing_scale = 0, uint32_t display_id = 0);
   // Blocks until a report newer than `after_serial` exists. False once closed.
   bool Await(uint64_t after_serial, RootGeometryReport* report);
   // Root closed or process shutdown; wakes the consumer permanently.
@@ -42,6 +44,8 @@ class RootGeometryReports final {
   uint64_t latest_serial() const;
   // The root's current backing scale: the latest report's, else creation's.
   uint32_t backing_scale() const;
+  // The root's current display: the latest report's, else creation's.
+  uint32_t display_id() const;
 
   RootGeometryReports() = default;
   RootGeometryReports(const RootGeometryReports&) = delete;
@@ -54,6 +58,7 @@ class RootGeometryReports final {
   uint32_t known_width_ = 0;
   uint32_t known_height_ = 0;
   uint32_t known_scale_ = 0;
+  uint32_t known_display_ = 0;
   bool moved_from_known_ = false;
   bool closed_ = false;
 };
@@ -110,6 +115,8 @@ RootGeometryStatus ApplyProcessRootGeometry(
 bool ProcessHasVisibleRoot();
 // The visible root's Android raster scale, or 0 without a visible root.
 uint32_t ProcessRootRasterScale();
+// The visible root's CGDirectDisplayID, or 0.
+uint32_t ProcessRootDisplayId();
 // AppKit main thread: whether Android task geometry owns this root's extent.
 bool RootGeometryOwned(DarwinArtSurface* surface);
 

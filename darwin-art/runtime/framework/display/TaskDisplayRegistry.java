@@ -49,8 +49,29 @@ public final class TaskDisplayRegistry {
 
     private final ConcurrentHashMap<Integer, DisplayGeometry> geometries =
             new ConcurrentHashMap<>();
+    // CGDirectDisplayID of the macOS display each task's root is on.
+    private final ConcurrentHashMap<Integer, Integer> hostDisplays = new ConcurrentHashMap<>();
     private final Object callbackLock = new Object();
     private final HashMap<Integer, ArrayList<Callback>> callbacks = new HashMap<>();
+
+    /** The macOS display the process's root is on, or 0 when unknown. */
+    public int hostDisplay(int pid) {
+        return hostDisplays.getOrDefault(pid, 0);
+    }
+
+    /** Records the root's macOS display; true when it changed. */
+    public boolean storeHostDisplay(int pid, int displayId) {
+        if (pid <= 0 || displayId == 0) return false;
+        Integer previous = hostDisplays.put(pid, displayId);
+        boolean moved = previous == null || previous != displayId;
+        if (moved) {
+            HostDisplayFacts facts = HostDisplayFacts.describe(displayId);
+            Log.i(TAG, "task display pid=" + pid + " host=" + displayId + " "
+                    + (facts == null ? "unknown" : facts.name + (facts.builtIn ? " built-in" : "")
+                            + " dpi=" + facts.xDpi + "x" + facts.yDpi));
+        }
+        return moved;
+    }
 
     /** The logical display 0 geometry observed by one process. */
     public DisplayGeometry geometry(int pid) {
@@ -125,6 +146,7 @@ public final class TaskDisplayRegistry {
     /** Process retirement: forget geometry and callbacks of that exact process. */
     public void removeProcess(int pid) {
         geometries.remove(pid);
+        hostDisplays.remove(pid);
         ArrayList<Callback> removed;
         synchronized (callbackLock) {
             removed = callbacks.remove(pid);

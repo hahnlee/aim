@@ -20,6 +20,23 @@ uint32_t RasterScale(NSWindow* window) {
   const CGFloat scale = window == nil ? 1.0 : window.backingScaleFactor;
   return static_cast<uint32_t>(std::clamp<CGFloat>(std::round(scale), 1.0, 4.0));
 }
+
+// CGDirectDisplayID of the screen showing the window, 0 when off screen.
+uint32_t DisplayId(NSWindow* window) {
+  NSNumber* number = window.screen.deviceDescription[@"NSScreenNumber"];
+  return number == nil ? 0 : number.unsignedIntValue;
+}
+
+void PublishRootFact(DarwinArtMetalView* view, NSWindow* window, const char* what) {
+  const NSRect bounds = view.bounds;
+  if (darwin_art::window::RootGeometryReports::Process().Publish(
+          static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.width))),
+          static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.height))),
+          RasterScale(window), DisplayId(window))) {
+    std::cerr << "DARWIN_ART window " << what << " reported scale=" << RasterScale(window)
+              << " display=" << DisplayId(window) << "\n";
+  }
+}
 }  // namespace
 
 @interface DarwinArtSurfaceWindowDelegate : NSObject <NSWindowDelegate>
@@ -82,7 +99,7 @@ uint32_t RasterScale(NSWindow* window) {
     const bool reported = darwin_art::window::RootGeometryReports::Process().Publish(
         static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.width))),
         static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.height))),
-        RasterScale(surface->window));
+        RasterScale(surface->window), DisplayId(surface->window));
     if (darwin_art::window::RootGeometryOwned(surface)) {
       if (reported) {
         std::cerr << "DARWIN_ART window resize reported points="
@@ -126,21 +143,26 @@ uint32_t RasterScale(NSWindow* window) {
   // The window moved to a display of another backing scale. The layer takes
   // the new scale; Android answers the host fact with a revision that changes
   // density and the raster together, and that revision resizes the backing.
-  const uint32_t scale = RasterScale(surface->window);
-  view.metalLayer.contentsScale = scale;
+  view.metalLayer.contentsScale = RasterScale(surface->window);
   [view updateDrawableSize];
-  const NSRect bounds = view.bounds;
-  if (darwin_art::window::RootGeometryReports::Process().Publish(
-          static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.width))),
-          static_cast<uint32_t>(std::max<CGFloat>(1.0, std::ceil(bounds.size.height))),
-          scale)) {
-    std::cerr << "DARWIN_ART window backing scale reported scale=" << scale << "\n";
+  PublishRootFact(view, surface->window, "backing scale");
+}
+- (void)windowDidChangeScreen:(NSNotification*)notification {
+  (void)notification;
+  DarwinArtMetalView* view = self.view;
+  DarwinArtSurface* surface = self.surface;
+  if (surface == nullptr || view == nil || [view ownerSurface] != surface ||
+      !surface->visible || !darwin_art::window::RootGeometryOwned(surface)) {
+    return;
   }
+  // The display Android reports (DisplayInfo) follows the root's screen.
+  PublishRootFact(view, surface->window, "screen");
 }
 @end
 
 namespace darwin_art::window {
 uint32_t SurfaceRasterScale(NSWindow* window) { return RasterScale(window); }
+uint32_t SurfaceDisplayId(NSWindow* window) { return DisplayId(window); }
 
 id<NSWindowDelegate> CreateSurfaceWindowDelegate(DarwinArtSurface* surface,
                                                SurfaceResize resize) {

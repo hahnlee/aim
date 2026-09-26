@@ -17,6 +17,7 @@
 #include "../connectivity/network_provider_jni.h"
 #include "../power/power_state_jni.h"
 #include "../time/host_time_zone_jni.h"
+#include "../display/host_display_facts_jni.h"
 #include "../pm/installd/installd_jni.h"
 #include "host_command_jni.h"
 #include "../app/process_registration.h"
@@ -166,6 +167,13 @@ int Run(JNIEnv* env, const char* socket_path) {
       env, loader, load, "dev.darwinart.runtime.time.HostTimeZoneService");
   if (host_time_zone == nullptr || env->ExceptionCheck() ||
       !darwin_art::framework::time::RegisterHostTimeZoneProvider(env, host_time_zone)) {
+    return 70;
+  }
+
+  jclass host_display = LoadClass(
+      env, loader, load, "dev.darwinart.runtime.display.HostDisplayFacts");
+  if (host_display == nullptr || env->ExceptionCheck() ||
+      !darwin_art::framework::display::RegisterHostDisplayFacts(env, host_display)) {
     return 70;
   }
 

@@ -37,8 +37,9 @@ public final class DesktopRootGeometryEndpoint extends Binder {
         if (code == TRANSACTION_REGISTER) {
             IBinder receiver = data.readStrongBinder();
             int hostScale = data.readInt();
+            int hostDisplay = data.readInt();
             data.enforceNoDataAvail();
-            tasks.registerHost(pid, receiver, hostScale);
+            tasks.registerHost(pid, receiver, hostScale, hostDisplay);
             if (reply != null) reply.writeNoException();
             return true;
         }
@@ -47,8 +48,9 @@ public final class DesktopRootGeometryEndpoint extends Binder {
             int pointsWidth = data.readInt();
             int pointsHeight = data.readInt();
             int hostScale = data.readInt();
+            int hostDisplay = data.readInt();
             data.enforceNoDataAvail();
-            tasks.hostResized(pid, serial, pointsWidth, pointsHeight, hostScale);
+            tasks.hostResized(pid, serial, pointsWidth, pointsHeight, hostScale, hostDisplay);
             if (reply != null) reply.writeNoException();
             return true;
         }

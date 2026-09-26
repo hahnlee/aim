@@ -54,6 +54,7 @@ runtime/framework/content/ContentServiceEndpoint.java
 runtime/framework/content/SettingsProviderEndpoint.java
 runtime/framework/display/BuiltInDisplayConfiguration.java
 runtime/framework/display/DisplayGeometry.java
+runtime/framework/display/HostDisplayFacts.java
 runtime/framework/display/TaskDisplayRegistry.java
 runtime/framework/display/DefaultDisplayRegistry.java
 runtime/framework/display/DisplayManagerEndpoint.java
