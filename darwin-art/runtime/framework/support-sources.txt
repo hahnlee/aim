@@ -96,6 +96,7 @@ runtime/framework/storage/UserStorage.java
 runtime/framework/storage/StorageManagerLocal.java
 runtime/framework/system/DarwinSystemServer.java
 runtime/framework/system/ServiceDirectory.java
+runtime/framework/recovery/RecoverySystemEndpoint.java
 runtime/framework/system/HostCommandService.java
 runtime/framework/system/LauncherQueries.java
 runtime/framework/system/SystemServerBootstrap.java

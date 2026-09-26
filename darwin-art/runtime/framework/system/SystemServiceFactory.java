@@ -90,6 +90,7 @@ public final class SystemServiceFactory {
                 new DesktopWindowMetadataEndpoint(processes, windowMetadata));
         services.put("darwin.desktop_root", new DesktopRootEndpoint(processes, desktopRoots));
         services.put("user", new UserManagerEndpoint());
+        services.put("recovery", new dev.darwinart.runtime.recovery.RecoverySystemEndpoint());
         services.put("content", new ContentServiceEndpoint());
         services.put("clipboard", new ClipboardServiceEndpoint());
         services.put("notification", new NotificationManagerEndpoint());
