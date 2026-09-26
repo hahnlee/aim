@@ -544,7 +544,7 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                 return Ok(());
             }
             protocol::write_response(&mut stream, message.operation, 0, b"")?;
-            state.host_commands.listen(stream);
+            state.host_commands.listen(pid, stream);
             return Ok(());
         }
         protocol::OP_HOST_COMMAND => {

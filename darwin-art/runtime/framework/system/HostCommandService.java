@@ -36,12 +36,23 @@ public final class HostCommandService {
     private static native String[] nativeNext(long listener);
     private static native boolean nativeReply(long listener, int status, byte[] output);
 
+    /**
+     * Connections to the daemon, each served by its own thread, so a long
+     * command (an install waiting for PackageInstaller) does not hold up the
+     * others; adb runs each shell command as its own process.
+     */
+    private static final int CONNECTIONS = 4;
+
     public static void start(ServiceDirectory services) {
-        long listener = nativeConnect();
-        if (listener == 0) throw new IllegalStateException("host command relay is unavailable");
-        Thread thread = new Thread(() -> serve(listener, services), "HostCommands");
-        thread.setDaemon(true);
-        thread.start();
+        for (int i = 0; i < CONNECTIONS; i++) {
+            long listener = nativeConnect();
+            if (listener == 0) {
+                throw new IllegalStateException("host command relay is unavailable");
+            }
+            Thread thread = new Thread(() -> serve(listener, services), "HostCommands-" + i);
+            thread.setDaemon(true);
+            thread.start();
+        }
     }
 
     private static void serve(long listener, ServiceDirectory services) {
@@ -89,9 +100,10 @@ public final class HostCommandService {
         if (dump) return dump(service, serviceArguments, output);
         // The command's stdio: an empty stdin and one output file that
         // interleaves stdout and stderr, read back when the command finishes.
+        // Each command has its own files: commands run concurrently.
         File directory = outputDirectory();
-        File input = new File(directory, "stdin");
-        File transcript = new File(directory, "output");
+        File input = File.createTempFile("stdin-", "", directory);
+        File transcript = File.createTempFile("output-", "", directory);
         int mode = ParcelFileDescriptor.MODE_READ_WRITE | ParcelFileDescriptor.MODE_CREATE
                 | ParcelFileDescriptor.MODE_TRUNCATE;
         CountDownLatch finished = new CountDownLatch(1);
@@ -111,21 +123,28 @@ public final class HostCommandService {
             if (!finished.await(10, TimeUnit.MINUTES)) {
                 throw new IllegalStateException("shell command did not finish");
             }
+            output.write(Files.readAllBytes(transcript.toPath()));
+        } finally {
+            input.delete();
+            transcript.delete();
         }
-        output.write(Files.readAllBytes(transcript.toPath()));
         return result[0];
     }
 
     /** dumpsys: the service's Binder.dump into the command's output file. */
     private static int dump(IBinder service, String[] arguments, ByteArrayOutputStream output)
             throws IOException, RemoteException {
-        File transcript = new File(outputDirectory(), "dump");
-        try (ParcelFileDescriptor out = ParcelFileDescriptor.open(transcript,
-                ParcelFileDescriptor.MODE_READ_WRITE | ParcelFileDescriptor.MODE_CREATE
-                        | ParcelFileDescriptor.MODE_TRUNCATE)) {
-            service.dump(out.getFileDescriptor(), arguments);
+        File transcript = File.createTempFile("dump-", "", outputDirectory());
+        try {
+            try (ParcelFileDescriptor out = ParcelFileDescriptor.open(transcript,
+                    ParcelFileDescriptor.MODE_READ_WRITE | ParcelFileDescriptor.MODE_CREATE
+                            | ParcelFileDescriptor.MODE_TRUNCATE)) {
+                service.dump(out.getFileDescriptor(), arguments);
+            }
+            output.write(Files.readAllBytes(transcript.toPath()));
+        } finally {
+            transcript.delete();
         }
-        output.write(Files.readAllBytes(transcript.toPath()));
         return 0;
     }
 
