@@ -85,11 +85,40 @@ fn compile_runtime_support(root: &Path) -> Result<CompiledSupport> {
         inventory.len(),
         staging.display()
     );
+    prune_superseded_generations(&build_dir, &staging)?;
     Ok(CompiledSupport {
         directory: staging,
         classes,
         inventory,
     })
+}
+
+/// Removes generations the new `current` supersedes: every verified one, and
+/// unverified ones untouched for ten minutes (abandoned builds). A younger
+/// unverified generation may be a concurrent build in progress and is kept.
+fn prune_superseded_generations(build_dir: &Path, current: &Path) -> Result<()> {
+    const IN_USE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+    let now = std::time::SystemTime::now();
+    for entry in fs::read_dir(build_dir)? {
+        let path = entry?.path();
+        let is_generation = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("generation."));
+        if !is_generation || path == current {
+            continue;
+        }
+        let verified = path.join("verified").is_file();
+        let recent = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_none_or(|age| age < IN_USE);
+        if verified || !recent {
+            fs::remove_dir_all(&path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Signature-only class files for the exact pinned runtime: the system
