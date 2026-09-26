@@ -1,13 +1,15 @@
 //! Host commands for the running system server, the role adb's shell plays
 //! for `cmd package install` and friends (ADR 0009). The system server keeps
-//! one listening connection to the daemon; a local client's command is
-//! relayed over it and the system server's reply returned. Commands run in
+//! a few listening connections to the daemon, each served by its own thread;
+//! a local client's command is relayed over an idle one and the system
+//! server's reply returned, so a long command (an install) does not hold up
+//! the others, as each adb shell command is its own process. Commands run in
 //! the system server with AOSP's own shell-command implementations.
 
 use crate::{ProfileError, protocol};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 /// An install may copy and extract large APKs.
@@ -55,34 +57,80 @@ pub(crate) fn read_reply(stream: &mut impl Read) -> Result<(u32, Vec<u8>), Profi
 
 #[derive(Default)]
 pub(crate) struct HostCommands {
-    listener: Mutex<Option<UnixStream>>,
+    listeners: Mutex<Listeners>,
+    idle: Condvar,
+}
+
+#[derive(Default)]
+struct Listeners {
+    /// The system server incarnation the connections belong to.
+    owner: Option<u32>,
+    /// Bumped when a new incarnation replaces the connections, so a
+    /// connection taken from the old one is not returned to the pool.
+    generation: u64,
+    idle: Vec<UnixStream>,
+    busy: usize,
 }
 
 impl HostCommands {
-    /// The system server's connection; it replaces a previous incarnation's.
-    pub(crate) fn listen(&self, stream: UnixStream) {
-        *self.listener.lock().unwrap() = Some(stream);
+    /// One of the system server's connections. A new system server
+    /// incarnation's first connection replaces a previous incarnation's.
+    pub(crate) fn listen(&self, owner: u32, stream: UnixStream) {
+        let mut listeners = self.listeners.lock().unwrap();
+        if listeners.owner != Some(owner) {
+            listeners.owner = Some(owner);
+            listeners.generation += 1;
+            listeners.idle.clear();
+            listeners.busy = 0;
+        }
+        listeners.idle.push(stream);
+        drop(listeners);
+        self.idle.notify_one();
     }
 
-    /// Relays `arguments` and returns the system server's (status, output).
+    /// Relays `arguments` over an idle connection, waiting for one while all
+    /// are running commands, and returns the system server's (status, output).
     pub(crate) fn run(&self, arguments: &[u8]) -> Result<(u32, Vec<u8>), ProfileError> {
-        let mut listener = self.listener.lock().unwrap();
-        let Some(stream) = listener.as_mut() else {
-            return Ok((
-                STATUS_UNAVAILABLE,
-                b"the system server is not running".to_vec(),
-            ));
+        let mut listeners = self.listeners.lock().unwrap();
+        let (mut stream, generation) = loop {
+            if listeners.idle.is_empty() && listeners.busy == 0 {
+                return Ok((
+                    STATUS_UNAVAILABLE,
+                    b"the system server is not running".to_vec(),
+                ));
+            }
+            if let Some(stream) = listeners.idle.pop() {
+                listeners.busy += 1;
+                break (stream, listeners.generation);
+            }
+            let (next, timeout) = self
+                .idle
+                .wait_timeout(listeners, COMMAND_TIMEOUT)
+                .unwrap();
+            listeners = next;
+            if timeout.timed_out() && listeners.idle.is_empty() {
+                return Ok((
+                    STATUS_UNAVAILABLE,
+                    b"every host command connection stayed busy".to_vec(),
+                ));
+            }
         };
+        drop(listeners);
         let reply = (|| {
             stream.set_read_timeout(Some(COMMAND_TIMEOUT))?;
-            protocol::write_request(stream, protocol::OP_HOST_COMMAND, arguments)?;
-            read_reply(stream)
+            protocol::write_request(&mut stream, protocol::OP_HOST_COMMAND, arguments)?;
+            read_reply(&mut stream)
         })();
-        if reply.is_err() {
-            // A lost or confused system server takes its listening connection
-            // with it.
-            *listener = None;
+        let mut listeners = self.listeners.lock().unwrap();
+        if listeners.generation == generation {
+            listeners.busy -= 1;
+            // A lost or confused system server takes that connection with it.
+            if reply.is_ok() {
+                listeners.idle.push(stream);
+            }
         }
+        drop(listeners);
+        self.idle.notify_one();
         reply
     }
 }
@@ -118,7 +166,7 @@ mod tests {
     fn relays_consecutive_commands() {
         let commands = HostCommands::default();
         let (daemon, mut system) = UnixStream::pair().unwrap();
-        commands.listen(daemon);
+        commands.listen(1, daemon);
         let server = std::thread::spawn(move || {
             for reply in [b"one".as_slice(), b"two".as_slice()] {
                 next_command(&mut system).unwrap();
@@ -134,7 +182,7 @@ mod tests {
     fn relays_output_larger_than_one_frame() {
         let commands = HostCommands::default();
         let (daemon, mut system) = UnixStream::pair().unwrap();
-        commands.listen(daemon);
+        commands.listen(1, daemon);
         let dump = vec![b'x'; 3 * OUTPUT_CHUNK + 17];
         let expected = dump.clone();
         let server = std::thread::spawn(move || {
@@ -147,11 +195,62 @@ mod tests {
     }
 
     #[test]
+    fn a_long_command_does_not_block_another_connection() {
+        let commands = std::sync::Arc::new(HostCommands::default());
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Arc::new(Mutex::new(released));
+        let mut servers = Vec::new();
+        for _ in 0..2 {
+            let (daemon, mut system) = UnixStream::pair().unwrap();
+            commands.listen(1, daemon);
+            let released = released.clone();
+            // Each connection's thread: an install waits to be released.
+            servers.push(std::thread::spawn(move || {
+                if let Ok(command) = next_command(&mut system) {
+                    if command == b"install" {
+                        released.lock().unwrap().recv().unwrap();
+                    }
+                    write_reply(&mut system, 0, &command).unwrap();
+                }
+                system
+            }));
+        }
+        let long = {
+            let commands = commands.clone();
+            std::thread::spawn(move || commands.run(b"install").unwrap())
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        // The install holds one connection; the other answers meanwhile.
+        assert_eq!(commands.run(b"list").unwrap().1, b"list");
+        release.send(()).unwrap();
+        assert_eq!(long.join().unwrap().1, b"install");
+        for server in servers {
+            drop(server.join().unwrap());
+        }
+    }
+
+    #[test]
+    fn a_new_incarnation_replaces_the_connections() {
+        let commands = HostCommands::default();
+        let (old, _old_server) = UnixStream::pair().unwrap();
+        commands.listen(1, old);
+        let (daemon, mut system) = UnixStream::pair().unwrap();
+        commands.listen(2, daemon);
+        let server = std::thread::spawn(move || {
+            next_command(&mut system).unwrap();
+            write_reply(&mut system, 0, b"new").unwrap();
+            system
+        });
+        assert_eq!(commands.run(b"x").unwrap().1, b"new");
+        drop(server.join().unwrap());
+    }
+
+    #[test]
     fn relays_a_command_and_its_reply() {
         let commands = HostCommands::default();
         assert_eq!(commands.run(b"x").unwrap().0, STATUS_UNAVAILABLE);
         let (daemon, mut system) = UnixStream::pair().unwrap();
-        commands.listen(daemon);
+        commands.listen(1, daemon);
         let server = std::thread::spawn(move || {
             let request = next_command(&mut system).unwrap();
             assert_eq!(request, encode(&["install", "/data/local/tmp/a.apk"]));
