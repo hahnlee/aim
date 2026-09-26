@@ -21,6 +21,8 @@ for unit in rpc_identity calling_identity peer_credentials fd_transport platform
   object="$task_stage/binder-$unit.o"
   xcrun clang++ "${kcm_flags[@]}" -I"$project_root/compat" \
     -I"$project_root/tools/bionic-fs-facade/include" \
+    -I"$project_root/tools/bionic-central-fd-broker/include" \
+    -I"$project_root/tools/bionic-socket-broker-adapter/src" \
     -I"$project_root/tools/bionic-ioctl-facade/include" \
     -I"$project_root/tools/bionic-vm-facade/include" \
     -c "$project_root/compat/binder/$unit.cc" -o "$object"

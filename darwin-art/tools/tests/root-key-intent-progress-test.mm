@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #include "runtime/framework/input/root_key_authority.h"
+#include "compat/binder/wire_channel_lifetime.h"
 #include "compat/looper/android_looper_owner.h"
 #include <cassert>
 #include <cstdio>
