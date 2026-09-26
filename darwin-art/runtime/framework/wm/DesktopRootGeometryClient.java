@@ -28,8 +28,13 @@ public final class DesktopRootGeometryClient {
 
     /** True when this process owns a visible desktop root. */
     private static native boolean nativeHasRoot();
-    /** Blocks until a host report newer than {@code afterSerial}: {serial, width, height}. */
+    /**
+     * Blocks until a host report newer than {@code afterSerial}:
+     * {serial, width, height, backing scale}.
+     */
     private static native long[] nativeAwaitReport(long afterSerial);
+    /** The root's Android raster scale (the display backing scale), or 0. */
+    private static native int nativeHostScale();
     /** Applies one task revision to the process root; returns the host status. */
     private static native int nativeApply(long revision, long hostSerial, int androidWidth,
             int androidHeight, int pointsWidth, int pointsHeight);
@@ -74,6 +79,7 @@ public final class DesktopRootGeometryClient {
             try {
                 data.writeInterfaceToken(DesktopRootGeometryEndpoint.DESCRIPTOR);
                 data.writeStrongBinder(receiver);
+                data.writeInt(nativeHostScale());
                 if (!service.transact(DesktopRootGeometryEndpoint.TRANSACTION_REGISTER,
                         data, reply, 0)) {
                     throw new RemoteException("desktop root geometry registration rejected");
@@ -104,6 +110,7 @@ public final class DesktopRootGeometryClient {
                 data.writeLong(serial);
                 data.writeInt((int) report[1]);
                 data.writeInt((int) report[2]);
+                data.writeInt((int) report[3]);
                 // Synchronous: this dedicated thread holds no lock, and the
                 // reply orders reports before the next latest-wins drain.
                 if (!service.transact(DesktopRootGeometryEndpoint.TRANSACTION_REPORT, data,

@@ -43,6 +43,10 @@ jboolean HasRoot(JNIEnv*, jclass) {
   return window::ProcessHasVisibleRoot() ? JNI_TRUE : JNI_FALSE;
 }
 
+jint HostScale(JNIEnv*, jclass) {
+  return static_cast<jint>(window::ProcessRootRasterScale());
+}
+
 // Runs on the dedicated Java reporter thread; blocks outside every Java lock.
 jlongArray AwaitReport(JNIEnv* env, jclass, jlong after_serial) {
   window::RootGeometryReport report;
@@ -50,12 +54,13 @@ jlongArray AwaitReport(JNIEnv* env, jclass, jlong after_serial) {
           static_cast<uint64_t>(after_serial), &report)) {
     return nullptr;
   }
-  jlongArray result = env->NewLongArray(3);
+  jlongArray result = env->NewLongArray(4);
   if (result == nullptr) return nullptr;
-  const jlong values[3] = {static_cast<jlong>(report.serial),
+  const jlong values[4] = {static_cast<jlong>(report.serial),
                            static_cast<jlong>(report.points_width),
-                           static_cast<jlong>(report.points_height)};
-  env->SetLongArrayRegion(result, 0, 3, values);
+                           static_cast<jlong>(report.points_height),
+                           static_cast<jlong>(report.backing_scale)};
+  env->SetLongArrayRegion(result, 0, 4, values);
   return result;
 }
 
@@ -103,8 +108,10 @@ bool RegisterDesktopRootGeometryClient(JNIEnv* env) {
        reinterpret_cast<void*>(&AwaitReport)},
       {const_cast<char*>("nativeApply"), const_cast<char*>("(JJIIII)I"),
        reinterpret_cast<void*>(&Apply)},
+      {const_cast<char*>("nativeHostScale"), const_cast<char*>("()I"),
+       reinterpret_cast<void*>(&HostScale)},
   };
-  const bool registered = env->RegisterNatives(client, methods, 3) == JNI_OK &&
+  const bool registered = env->RegisterNatives(client, methods, 4) == JNI_OK &&
       !env->ExceptionCheck();
   jmethodID registration = registered
       ? env->GetStaticMethodID(client, "register", "()V") : nullptr;

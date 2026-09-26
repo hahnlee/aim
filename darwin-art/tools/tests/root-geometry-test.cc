@@ -95,6 +95,27 @@ void UserResizeAndStaleRevisions() {
   assert(reports.Publish(900, 500));
 }
 
+void BackingScaleIsAHostFact() {
+  RootGeometryReports reports;
+  reports.NoteKnownExtent(640, 360, 2);
+  assert(reports.backing_scale() == 2);
+  assert(!reports.Publish(640, 360, 2));  // Creation extent and scale.
+  assert(!reports.Publish(640, 360));     // Unknown scale keeps the known one.
+  // Moving to a 1x display at the same point extent is a new fact.
+  assert(reports.Publish(640, 360, 1));
+  RootGeometryReport report;
+  assert(reports.Await(0, &report) && report.backing_scale == 1 &&
+         report.points_width == 640);
+  assert(reports.backing_scale() == 1);
+  assert(!reports.Publish(640, 360, 1));  // Duplicate.
+  // A later resize without a scale keeps the display's scale.
+  assert(reports.Publish(700, 400));
+  assert(reports.Await(1, &report) && report.backing_scale == 1);
+  // Back on the 2x display.
+  assert(reports.Publish(700, 400, 2));
+  assert(reports.backing_scale() == 2);
+}
+
 void AllocationFailureRetriesAndCloseIsTerminal() {
   RootGeometryReports reports;
   FakeHost host;
@@ -136,6 +157,7 @@ void AllocationFailureRetriesAndCloseIsTerminal() {
 int main() {
   CreationAndEchoesAreNotFacts();
   UserResizeAndStaleRevisions();
+  BackingScaleIsAHostFact();
   AllocationFailureRetriesAndCloseIsTerminal();
   std::puts("root geometry provider PASS");
   return 0;

@@ -10,6 +10,7 @@ import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.RemoteException;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.WindowManager;
 import dev.darwinart.runtime.am.ActivityManagerEndpoint;
@@ -48,6 +49,9 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
         final int pid;
         final IBinder thread;
         DisplayGeometry geometry;
+        // Android raster scale: Android pixels per host point, and density
+        // 160 * scale. It follows the backing scale of the root's display.
+        int scale = BuiltInDisplayConfiguration.SCALE;
         IBinder hostReceiver;
         long hostSerial;
         long hostAppliedRevision = -1;
@@ -214,8 +218,11 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
         }
     }
 
-    /** Desktop root receiver registration for the calling application process. */
-    void registerHost(int pid, IBinder receiver) {
+    /**
+     * Desktop root receiver registration for the calling application process,
+     * with the root's raster scale (0 when the host does not know it).
+     */
+    void registerHost(int pid, IBinder receiver, int hostScale) {
         if (receiver == null) throw new IllegalArgumentException("host receiver is null");
         ApplicationProcessRegistry.AttachedApplication attached =
                 processes.requireAttachedProcess(pid);
@@ -231,27 +238,45 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
                 if (task == null || task.thread != attached.thread) return;
                 task.hostReceiver = receiver;
                 task.hostClosed = false;
+                if (validScale(hostScale) && hostScale != task.scale) {
+                    // The root opened on a display of another backing scale:
+                    // keep the task's size in points, change its raster.
+                    int pointsWidth = TaskGeometryPolicy.pointsFromPixels(
+                            task.geometry.widthPixels, task.scale);
+                    int pointsHeight = TaskGeometryPolicy.pointsFromPixels(
+                            task.geometry.heightPixels, task.scale);
+                    task.scale = hostScale;
+                    publishLocked(task, TaskGeometryPolicy.pixelsFromPoints(pointsWidth, hostScale),
+                            TaskGeometryPolicy.pixelsFromPoints(pointsHeight, hostScale),
+                            "host scale " + hostScale);
+                    return;
+                }
                 publishHostLocked(task);
             }
         });
     }
 
     /**
-     * A user resize of the desktop root, in host content points. The window
-     * owner chooses the task extent; Android pixels follow the Android raster
-     * scale, not the host backing scale.
+     * A user resize of the desktop root, or a move to a display of another
+     * backing scale, in host content points. The window owner chooses the task
+     * extent; Android pixels and density follow the root's raster scale.
      */
-    void hostResized(int pid, long serial, int pointsWidth, int pointsHeight) {
-        dispatch(() -> applyHostResize(pid, serial, pointsWidth, pointsHeight));
+    void hostResized(int pid, long serial, int pointsWidth, int pointsHeight, int hostScale) {
+        dispatch(() -> applyHostResize(pid, serial, pointsWidth, pointsHeight, hostScale));
     }
 
-    private void applyHostResize(int pid, long serial, int pointsWidth, int pointsHeight) {
+    private static boolean validScale(int scale) {
+        return scale >= 1 && scale <= 4;
+    }
+
+    private void applyHostResize(int pid, long serial, int pointsWidth, int pointsHeight,
+            int hostScale) {
         synchronized (this) {
             Task task = tasks.get(pid);
             if (task == null || task.hostReceiver == null || task.hostClosed) return;
             if (serial <= task.hostSerial) return; // Stale or replayed host report.
             task.hostSerial = serial;
-            int scale = BuiltInDisplayConfiguration.SCALE;
+            int scale = validScale(hostScale) ? hostScale : task.scale;
             int width = TaskGeometryPolicy.pixelsFromPoints(pointsWidth, scale);
             int height = TaskGeometryPolicy.pixelsFromPoints(pointsHeight, scale);
             if (!DisplayGeometry.validDimension(width) || !DisplayGeometry.validDimension(height)) {
@@ -259,12 +284,13 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
                         + pointsWidth + "x" + pointsHeight);
                 return;
             }
-            if (task.geometry.sameExtent(width, height)) {
+            if (scale == task.scale && task.geometry.sameExtent(width, height)) {
                 // Echo of a published extent: settle the host with the same revision.
                 publishHostLocked(task);
                 return;
             }
-            publishLocked(task, width, height, "host resize serial=" + serial);
+            task.scale = scale;
+            publishLocked(task, width, height, "host resize serial=" + serial + " scale=" + scale);
         }
     }
 
@@ -291,7 +317,8 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
     }
 
     private void publishLocked(Task task, int width, int height, String reason) {
-        DisplayGeometry next = task.geometry.withExtent(task.geometry.revision + 1, width, height);
+        DisplayGeometry next = task.geometry.withExtent(task.geometry.revision + 1, width, height,
+                DisplayMetrics.DENSITY_DEFAULT * task.scale);
         task.geometry = next;
         Log.i(TAG, "publish pid=" + task.pid + " " + next + " reason=" + reason);
         // DisplayInfo, relayout and launch configuration read the new revision
@@ -373,7 +400,7 @@ public final class TaskGeometryController implements ActivityManagerEndpoint.Tas
     private void publishHostLocked(Task task) {
         if (task.hostReceiver == null || task.hostClosed) return;
         DisplayGeometry geometry = task.geometry;
-        int scale = BuiltInDisplayConfiguration.SCALE;
+        int scale = task.scale;
         Parcel data = Parcel.obtain();
         try {
             data.writeInterfaceToken(HOST_RECEIVER_DESCRIPTOR);

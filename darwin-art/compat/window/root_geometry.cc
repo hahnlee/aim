@@ -7,14 +7,19 @@ RootGeometryReports& RootGeometryReports::Process() {
   return reports;
 }
 
-bool RootGeometryReports::Publish(uint32_t points_width, uint32_t points_height) {
+bool RootGeometryReports::Publish(uint32_t points_width, uint32_t points_height,
+                                  uint32_t backing_scale) {
   if (points_width == 0 || points_height == 0) return false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (closed_) return false;
+    const uint32_t current_scale = latest_.serial != 0 ? latest_.backing_scale : known_scale_;
+    const uint32_t scale = backing_scale != 0 ? backing_scale : current_scale;
     const bool same_as_latest = latest_.serial != 0 &&
-        latest_.points_width == points_width && latest_.points_height == points_height;
-    const bool known = known_width_ == points_width && known_height_ == points_height;
+        latest_.points_width == points_width && latest_.points_height == points_height &&
+        latest_.backing_scale == scale;
+    const bool known = known_width_ == points_width && known_height_ == points_height &&
+        known_scale_ == scale;
     // AppKit echoes of an extent Android (or window creation) set are not
     // facts; a user returning to that extent after resizing away still is.
     if (same_as_latest || (known && !moved_from_known_)) return false;
@@ -22,16 +27,19 @@ bool RootGeometryReports::Publish(uint32_t points_width, uint32_t points_height)
     ++latest_.serial;
     latest_.points_width = points_width;
     latest_.points_height = points_height;
+    latest_.backing_scale = scale;
   }
   changed_.notify_all();
   return true;
 }
 
 void RootGeometryReports::NoteKnownExtent(uint32_t points_width,
-                                          uint32_t points_height) {
+                                          uint32_t points_height,
+                                          uint32_t backing_scale) {
   std::lock_guard<std::mutex> lock(mutex_);
   known_width_ = points_width;
   known_height_ = points_height;
+  if (backing_scale != 0) known_scale_ = backing_scale;
   moved_from_known_ = false;
 }
 
@@ -50,6 +58,12 @@ void RootGeometryReports::Close() {
     closed_ = true;
   }
   changed_.notify_all();
+}
+
+uint32_t RootGeometryReports::backing_scale() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return latest_.serial != 0 && latest_.backing_scale != 0 ? latest_.backing_scale
+                                                             : known_scale_;
 }
 
 uint64_t RootGeometryReports::latest_serial() const {

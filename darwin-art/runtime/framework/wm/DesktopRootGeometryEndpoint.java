@@ -36,8 +36,9 @@ public final class DesktopRootGeometryEndpoint extends Binder {
         int pid = Binder.getCallingPid();
         if (code == TRANSACTION_REGISTER) {
             IBinder receiver = data.readStrongBinder();
+            int hostScale = data.readInt();
             data.enforceNoDataAvail();
-            tasks.registerHost(pid, receiver);
+            tasks.registerHost(pid, receiver, hostScale);
             if (reply != null) reply.writeNoException();
             return true;
         }
@@ -45,8 +46,9 @@ public final class DesktopRootGeometryEndpoint extends Binder {
             long serial = data.readLong();
             int pointsWidth = data.readInt();
             int pointsHeight = data.readInt();
+            int hostScale = data.readInt();
             data.enforceNoDataAvail();
-            tasks.hostResized(pid, serial, pointsWidth, pointsHeight);
+            tasks.hostResized(pid, serial, pointsWidth, pointsHeight, hostScale);
             if (reply != null) reply.writeNoException();
             return true;
         }
