@@ -340,8 +340,9 @@ public final class ActivityManagerLocal extends ActivityManagerInternal {
     }
 
     @Override
-    public int getTaskIdForActivity(android.os.IBinder arg0, boolean arg1) {
-        throw unsupported("getTaskIdForActivity");
+    public int getTaskIdForActivity(android.os.IBinder token, boolean onlyRoot) {
+        return dev.darwinart.runtime.wm.ActivityClientControllerEndpoint
+                .taskForActivity(token, onlyRoot);
     }
 
     @Override

@@ -30,6 +30,14 @@ public final class StorageManagerEndpoint extends Binder {
     private final int getAllocatableBytesCode = transaction("getAllocatableBytes");
     private final int allocateBytesCode = transaction("allocateBytes");
     private final int getVolumesCode = transaction("getVolumes");
+    private final int needsCheckpointCode = transaction("needsCheckpoint");
+    private final int supportsCheckpointCode = transaction("supportsCheckpoint");
+    private final int registerListenerCode = transaction("registerListener");
+    private final int unregisterListenerCode = transaction("unregisterListener");
+    // StorageManagerService.mCallbacks: notified of volume and storage state
+    // changes (none happen yet: the one emulated volume stays mounted).
+    private final android.os.RemoteCallbackList<android.os.storage.IStorageEventListener>
+            listeners = new android.os.RemoteCallbackList<>();
     /**
      * Users whose credential-encrypted storage is unlocked. This host keeps
      * no per-user CE keys, so there is no secret for vold to check: unlocking
@@ -158,6 +166,31 @@ public final class StorageManagerEndpoint extends Binder {
             data.enforceNoDataAvail();
             reply.writeNoException();
             InternalVolume.writeVolumes(reply);
+            return true;
+        }
+        if (reply != null && (code == needsCheckpointCode || code == supportsCheckpointCode)) {
+            // vold's userdata checkpointing (Virtual A/B updates): this
+            // profile's /data is a sparse image without update checkpoints.
+            data.enforceInterface(DESCRIPTOR);
+            data.enforceNoDataAvail();
+            reply.writeNoException();
+            reply.writeBoolean(false);
+            return true;
+        }
+        if (code == registerListenerCode || code == unregisterListenerCode) {
+            data.enforceInterface(DESCRIPTOR);
+            android.os.storage.IStorageEventListener listener =
+                    android.os.storage.IStorageEventListener.Stub.asInterface(
+                            data.readStrongBinder());
+            data.enforceNoDataAvail();
+            if (listener != null) {
+                if (code == registerListenerCode) {
+                    listeners.register(listener);
+                } else {
+                    listeners.unregister(listener);
+                }
+            }
+            if (reply != null) reply.writeNoException();
             return true;
         }
         if (reply != null && code == isCeStorageUnlockedCode) {
