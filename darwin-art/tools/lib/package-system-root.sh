@@ -138,6 +138,13 @@ darwin_art_package_system_root() (
     }
   done < "$partition_list"
   /usr/bin/tar -rf "$destination" -C "$system_partition" -T "$partition_list" || return
+  # The runtime's build.prop (ADR 0010), the file its property snapshot loads.
+  mkdir -p "$resource_stage/build-prop/system" || return
+  cp "$helper_root/runtime/framework/android-build.properties" \
+    "$resource_stage/build-prop/system/build.prop" || return
+  chmod 0444 "$resource_stage/build-prop/system/build.prop" || return
+  touch -r "$framework" "$resource_stage/build-prop/system/build.prop" || return
+  /usr/bin/tar -rf "$destination" -C "$resource_stage/build-prop" system/build.prop || return
   # The host's own hardware feature declarations, beside the image's vendor
   # Vulkan XMLs in /vendor/etc/permissions.
   /usr/bin/tar -rf "$destination" -C "$helper_root/runtime/framework" \
