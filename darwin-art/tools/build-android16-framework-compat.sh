@@ -97,6 +97,7 @@ for extra_dex in "$out"/classes[2-9]*.dex; do
   next_dex=$((next_dex + 1))
 done
 (cd "$staged" && zip -q -qr "$out/framework-compat.jar" .)
+rm -rf "$staged"
 
 # Connectivity framework policy remains owned by the pinned Android 16
 # framework-connectivity boot jars. The compatibility output must not publish
@@ -136,6 +137,7 @@ security.provider.4=com.android.org.conscrypt.JSSEProvider
 securerandom.source=file:/dev/urandom
 EOF
 (cd "$core_staged" && zip -q -qr "$core_out/core-oj-compat.jar" .)
+rm -rf "$core_staged"
 
 # core-libart is deliberately kept as the pinned DEX input at runtime. Its
 # hidden Java APIs are nevertheless part of the platform boot class path and
