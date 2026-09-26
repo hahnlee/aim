@@ -1514,6 +1514,37 @@ void DarwinLinuxSocketpair(JNIEnv *env, jobject, jint domain, jint type,
   if (trace) std::fprintf(stderr, "ART socket gate: socketpair descriptors=%d,%d\n", descriptors[0], descriptors[1]);
 }
 
+// Linux.pipe2: both ends published through the central broker, like
+// bionic's pipe2, so Os.read/Os.write reach them from any thread.
+jobjectArray DarwinLinuxPipe2(JNIEnv *env, jobject, jint flags) {
+  int32_t descriptors[2] = {-1, -1};
+  if (darwin_art_bionic_socket_broker_pipe2(descriptors, flags) == -1) {
+    ThrowBrokerErrno(env, "pipe2");
+    return nullptr;
+  }
+  jclass descriptor_class = env->FindClass("java/io/FileDescriptor");
+  jobjectArray result =
+      descriptor_class == nullptr
+          ? nullptr
+          : env->NewObjectArray(2, descriptor_class, nullptr);
+  if (descriptor_class != nullptr) env->DeleteLocalRef(descriptor_class);
+  for (int index = 0; result != nullptr && index < 2; ++index) {
+    jobject descriptor = jniCreateFileDescriptor(env, descriptors[index]);
+    if (descriptor == nullptr) {
+      result = nullptr;
+      break;
+    }
+    env->SetObjectArrayElement(result, index, descriptor);
+    env->DeleteLocalRef(descriptor);
+  }
+  if (result == nullptr) {
+    // The Java owner never received them: close both ends here.
+    (void)darwin_art_bionic_socket_broker_close(descriptors[0]);
+    (void)darwin_art_bionic_socket_broker_close(descriptors[1]);
+  }
+  return result;
+}
+
 jobject DarwinLinuxFstat(JNIEnv *env, jobject, jobject java_fd) {
   struct stat status{};
   if (Fstat(jniGetFDFromFileDescriptor(env, java_fd), &status) == -1) {

@@ -134,6 +134,7 @@ my %supported = (
   access => 'DarwinLinuxAccess', open => 'DarwinLinuxOpen', dup => 'DarwinLinuxDup',
   dup2 => 'DarwinLinuxDup2',
   socketpair => 'DarwinLinuxSocketpair',
+  pipe2 => 'DarwinLinuxPipe2',
   fcntlInt => 'DarwinLinuxFcntlInt', fcntlVoid => 'DarwinLinuxFcntlVoid',
   fstat => 'DarwinLinuxFstat',
   ftruncate => 'DarwinLinuxFtruncate',
