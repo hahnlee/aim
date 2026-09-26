@@ -15,6 +15,10 @@
 }
 #define UNUSED_BOUNDARY(result, name, arguments) \
   extern "C" result name arguments { Unexpected(#name); }
+// A fixture that links the real hardware buffer owner
+// (compat/graphics/hardware_buffer_owner.mm) defines this to keep its
+// IOSurface-backed buffers.
+#ifndef DARWIN_ART_FIXTURE_REAL_HARDWARE_BUFFERS
 UNUSED_BOUNDARY(int, AHardwareBuffer_allocate,
                 (const AHardwareBuffer_Desc*, AHardwareBuffer**))
 UNUSED_BOUNDARY(void, AHardwareBuffer_acquire, (AHardwareBuffer*))
@@ -30,6 +34,11 @@ UNUSED_BOUNDARY(AHardwareBuffer*, darwin_art_android_hardware_buffer_from_client
                 (void*))
 UNUSED_BOUNDARY(void, darwin_art_android_hardware_buffer_mark_cpu_rgba,
                 (AHardwareBuffer*))
+#else
+// The owner's handle transport (AHardwareBuffer_{send,recv}HandleToUnixSocket).
+UNUSED_BOUNDARY(intptr_t, darwin_art_bionic_socket_broker_read, (int, void*, size_t))
+UNUSED_BOUNDARY(intptr_t, darwin_art_bionic_socket_broker_write, (int, const void*, size_t))
+#endif
 UNUSED_BOUNDARY(void, ASurfaceControl_acquire, (ASurfaceControl*))
 UNUSED_BOUNDARY(void, ASurfaceControl_release, (ASurfaceControl*))
 UNUSED_BOUNDARY(void*, darwin_art_android_surface_control_create_root, (const char*))
