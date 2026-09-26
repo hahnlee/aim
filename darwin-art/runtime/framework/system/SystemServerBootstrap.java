@@ -120,6 +120,8 @@ public final class SystemServerBootstrap {
 
         // SystemServer.startOtherServices, for the services started above.
         services.startService(AppHibernationService.class);
+        // SystemServer.startOtherServices: ACCOUNT_SERVICE_CLASS.
+        services.startService("com.android.server.accounts.AccountManagerService$Lifecycle");
         DexOptHelper.initializeArtManagerLocal(systemContext, packageManager);
         services.startServiceFromJar("com.android.server.stats.StatsCompanion$Lifecycle",
                 "/apex/com.android.os.statsd/javalib/service-statsd.jar");

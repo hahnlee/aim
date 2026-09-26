@@ -60,6 +60,8 @@ public final class ActivityManagerEndpoint extends Binder {
             transaction("handleApplicationStrictModeViolation");
     private final int setRenderThreadCode = transaction("setRenderThread");
     private final int publishContentProvidersCode = transaction("publishContentProviders");
+    private final int handleIncomingUserCode = transaction("handleIncomingUser");
+    private final IncomingUsers incomingUsers = new IncomingUsers(ApplicationPackages::hasPermission);
     // ProcessRecord.mRenderThreadTid, by pid.
     private final java.util.concurrent.ConcurrentHashMap<Integer, Integer> renderThreads =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -339,6 +341,24 @@ public final class ActivityManagerEndpoint extends Binder {
             // top-app scheduling boost; there is no such scheduling policy here.
             if (tid > 0) renderThreads.put(Binder.getCallingPid(), tid);
             if (reply != null) reply.writeNoException();
+            return true;
+        }
+        if (code == handleIncomingUserCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            data.readInt();  // callingPid
+            int callingUid = data.readInt();
+            int userId = data.readInt();
+            boolean allowAll = data.readBoolean();
+            boolean requireFull = data.readBoolean();
+            String name = data.readString();
+            data.readString();  // callerPackage
+            data.enforceNoDataAvail();
+            if (reply == null) return false;
+            // As in ActivityManagerService, the result only names a user; it
+            // grants nothing, so the supplied uid is evaluated as given.
+            int result = incomingUsers.handle(callingUid, userId, allowAll, requireFull, name);
+            reply.writeNoException();
+            reply.writeInt(result);
             return true;
         }
         if (code == publishContentProvidersCode) {
