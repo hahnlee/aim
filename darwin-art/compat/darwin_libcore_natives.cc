@@ -20,8 +20,10 @@ extern "C" int darwin_art_bionic_open(const char*, int, uint32_t);
 extern "C" int darwin_art_bionic_socket_broker_dup(int);
 extern "C" int darwin_art_bionic_socket_broker_fcntl(int, int, intptr_t);
 extern "C" int darwin_art_bionic_close(int);
-extern "C" intptr_t darwin_art_bionic_read(int, void*, size_t);
-extern "C" intptr_t darwin_art_bionic_write(int, const void*, size_t);
+// bionic's read/write owner (central-fd-broker): broker-owned descriptors
+// such as Os.socketpair's, with filesystem descriptors delegated to the facade.
+extern "C" intptr_t darwin_art_bionic_socket_broker_read(int, void*, size_t);
+extern "C" intptr_t darwin_art_bionic_socket_broker_write(int, const void*, size_t);
 extern "C" intptr_t darwin_art_bionic_pread(int, void*, size_t, int64_t);
 extern "C" intptr_t darwin_art_bionic_pwrite(int, const void*, size_t, int64_t);
 extern "C" int darwin_art_bionic_fstat(int, DarwinArtAndroidStat*);
@@ -1354,8 +1356,8 @@ bool RegisterLibcoreNatives(JNIEnv* env) {
           .dup = &darwin_art_bionic_socket_broker_dup,
           .fcntl = &darwin_art_bionic_socket_broker_fcntl,
           .close = &darwin_art_bionic_socket_broker_close,
-          .read = &darwin_art_bionic_read,
-          .write = &darwin_art_bionic_write,
+          .read = &darwin_art_bionic_socket_broker_read,
+          .write = &darwin_art_bionic_socket_broker_write,
           .pread = &darwin_art_bionic_pread,
           .pwrite = &darwin_art_bionic_pwrite,
           .fstat = &darwin_art_bionic_fstat,

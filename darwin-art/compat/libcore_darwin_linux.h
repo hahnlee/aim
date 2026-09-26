@@ -81,6 +81,7 @@ jobject DarwinLinuxDup2(JNIEnv *env, jobject receiver, jobject java_fd,
 void DarwinLinuxSocketpair(JNIEnv *env, jobject receiver, jint domain,
                            jint type, jint protocol, jobject java_fd1,
                            jobject java_fd2);
+jobjectArray DarwinLinuxPipe2(JNIEnv *env, jobject receiver, jint flags);
 jlong DarwinLinuxSysconf(JNIEnv *env, jobject receiver, jint name);
 jstring DarwinLinuxGetenv(JNIEnv *env, jobject receiver, jstring java_name);
 void DarwinLinuxSetenv(JNIEnv *env, jobject receiver, jstring java_name,
