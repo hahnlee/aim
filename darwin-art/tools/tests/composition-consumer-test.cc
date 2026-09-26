@@ -228,11 +228,27 @@ void FakeGlBindFramebuffer(std::uint32_t target, std::uint32_t framebuffer) {
   (void)framebuffer;
 }
 
-void FakeGlClearColor(float red, float green, float blue, float alpha) {
-  assert(red == 0.0f && green == 0.0f && blue == 0.0f && alpha == 0.0f);
+// The producer's (HWUI/Skia's) clear colour, which Skia caches.
+float g_clear_color[4] = {0.1f, 0.2f, 0.3f, 1.0f};
+
+void FakeGlGetFloat(std::uint32_t value, float* result) {
+  assert(value == 0x0C22 && result != nullptr);
+  for (int i = 0; i < 4; ++i) result[i] = g_clear_color[i];
 }
 
-void FakeGlClear(std::uint32_t mask) { assert(mask == 0x00004000); }
+void FakeGlClearColor(float red, float green, float blue, float alpha) {
+  g_clear_color[0] = red;
+  g_clear_color[1] = green;
+  g_clear_color[2] = blue;
+  g_clear_color[3] = alpha;
+}
+
+void FakeGlClear(std::uint32_t mask) {
+  assert(mask == 0x00004000);
+  // The composition target is cleared to transparent.
+  assert(g_clear_color[0] == 0.0f && g_clear_color[1] == 0.0f &&
+         g_clear_color[2] == 0.0f && g_clear_color[3] == 0.0f);
+}
 
 CompositionProducerFence FakeExportFence(EglDisplay display) {
   assert(display == g_current_display);
@@ -320,6 +336,7 @@ CompositionConsumerBackend FakeBackend() {
   backend.gl_get_integer_v = FakeGlGetInteger;
   backend.gl_bind_framebuffer = FakeGlBindFramebuffer;
   backend.gl_disable = FakeGlDisable;
+  backend.gl_get_float_v = FakeGlGetFloat;
   backend.gl_clear_color = FakeGlClearColor;
   backend.gl_clear = FakeGlClear;
   backend.lookup_iosurface = FakeLookupIosurface;
@@ -391,6 +408,9 @@ int main() {
   g_lookup_fail = false;
   assert(BeginComposition(backend, kBuffer, true, 2));
   assert(g_target_release_calls == 0);
+  // The clear runs in the producer's context and restores its clear colour.
+  assert(g_clear_color[0] == 0.1f && g_clear_color[1] == 0.2f &&
+         g_clear_color[2] == 0.3f && g_clear_color[3] == 1.0f);
   assert(EndComposition(backend) == -1);
   SetSurfaceId("102");
   g_lookup_fail = true;

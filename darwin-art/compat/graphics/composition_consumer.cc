@@ -24,6 +24,7 @@ constexpr EglInt kEglDeviceExt = 0x322C;
 constexpr EglInt kEglMetalDeviceAngle = 0x34A6;
 constexpr EglInt kGlScissorTest = 0x0C11;
 constexpr EglInt kGlDrawFramebufferBinding = 0x8CA6;
+constexpr EglInt kGlColorClearValue = 0x0C22;
 constexpr EglInt kGlColorBufferBit = 0x00004000;
 constexpr EglInt kEglNoNativeFenceFdAndroid = -1;
 
@@ -301,18 +302,27 @@ bool BeginComposition(const CompositionConsumerBackend& backend, void* opaque,
   if (backend.gl_is_enabled == nullptr || backend.gl_enable == nullptr ||
       backend.gl_get_integer_v == nullptr ||
       backend.gl_bind_framebuffer == nullptr || backend.gl_disable == nullptr ||
-      backend.gl_clear_color == nullptr || backend.gl_clear == nullptr) {
+      backend.gl_get_float_v == nullptr || backend.gl_clear_color == nullptr ||
+      backend.gl_clear == nullptr) {
     g_transaction_id = 0;
     RestoreContext(backend);
     return false;
   }
+  // This runs in the producer's (HWUI's) GL context. Skia caches the clear
+  // colour, scissor and framebuffer bindings it last set, so every piece of
+  // state touched here is restored; a leaked clear colour makes Skia's next
+  // fullscreen clear use the wrong colour.
   std::int32_t previous_draw_framebuffer = 0;
+  float previous_clear_color[4] = {};
   const bool scissor_enabled = backend.gl_is_enabled(kGlScissorTest) != 0;
   backend.gl_get_integer_v(kGlDrawFramebufferBinding, &previous_draw_framebuffer);
+  backend.gl_get_float_v(kGlColorClearValue, previous_clear_color);
   backend.gl_bind_framebuffer(0x8CA9, g_target.framebuffer);
   backend.gl_disable(kGlScissorTest);
   backend.gl_clear_color(0.0f, 0.0f, 0.0f, 0.0f);
   backend.gl_clear(kGlColorBufferBit);
+  backend.gl_clear_color(previous_clear_color[0], previous_clear_color[1],
+                         previous_clear_color[2], previous_clear_color[3]);
   backend.gl_bind_framebuffer(0x8CA9,
                               static_cast<std::uint32_t>(previous_draw_framebuffer));
   if (scissor_enabled) backend.gl_enable(kGlScissorTest);

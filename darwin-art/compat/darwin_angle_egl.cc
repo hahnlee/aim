@@ -187,6 +187,7 @@ struct AngleApi {
                               std::uint32_t, std::uint32_t, const void*) =
       nullptr;
   void (*gl_get_integer_v)(std::uint32_t, std::int32_t*) = nullptr;
+  void (*gl_get_float_v)(std::uint32_t, float*) = nullptr;
   void (*gl_get_boolean_v)(std::uint32_t, std::uint8_t*) = nullptr;
   void (*gl_color_mask)(std::uint8_t, std::uint8_t, std::uint8_t,
                         std::uint8_t) = nullptr;
@@ -321,6 +322,7 @@ AngleApi& GetAngleApi() {
     LOAD_GL(gl_tex_image_2d, "glTexImage2D");
     LOAD_GL(gl_tex_sub_image_2d, "glTexSubImage2D");
     LOAD_GL(gl_get_integer_v, "glGetIntegerv");
+    LOAD_GL(gl_get_float_v, "glGetFloatv");
     LOAD_GL(gl_get_boolean_v, "glGetBooleanv");
     LOAD_GL(gl_color_mask, "glColorMask");
     LOAD_GL(gl_tex_storage_1d_ext, "glTexStorage1DEXT");
@@ -2010,6 +2012,7 @@ darwin_art::graphics::CompositionConsumerBackend CompositionBackend() {
   backend.gl_get_integer_v = api.gl_get_integer_v;
   backend.gl_bind_framebuffer = api.gl_bind_framebuffer;
   backend.gl_disable = api.gl_disable;
+  backend.gl_get_float_v = api.gl_get_float_v;
   backend.gl_clear_color = api.gl_clear_color;
   backend.gl_clear = api.gl_clear;
   backend.lookup_iosurface = darwin_art_surface_gpu_lookup_iosurface;
