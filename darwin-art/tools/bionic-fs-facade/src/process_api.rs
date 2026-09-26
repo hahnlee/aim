@@ -233,6 +233,37 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_seed_private_directory(path: *cons
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
+///
+/// `output` is writable for `capacity` bytes when non-null.
+pub unsafe extern "C" fn darwin_art_bionic_fs_fd_private_host_path(
+    fd: c_int,
+    output: *mut c_char,
+    capacity: usize,
+) -> isize {
+    with_active(-1, |facade| {
+        let host_path = match facade.fd_private_host_path(fd) {
+            Ok(path) => path,
+            Err(error) => return facade.fail(error) as isize,
+        };
+        let bytes = host_path.as_os_str().as_bytes();
+        let Some(required) = bytes.len().checked_add(1) else {
+            return facade.fail(ANDROID_ERANGE) as isize;
+        };
+        if output.is_null() || capacity < required {
+            return facade.fail(ANDROID_ERANGE) as isize;
+        }
+        // SAFETY: the caller's writable-buffer contract and capacity check
+        // cover both the byte path and its trailing NUL.
+        unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), output.cast(), bytes.len());
+            *output.add(bytes.len()) = 0;
+        }
+        bytes.len() as isize
+    })
+}
+
+#[unsafe(no_mangle)]
 /// Resolves an Android `/data` path to the process-authorized host backing path.
 ///
 /// This is intentionally narrower than a general guest-to-host escape hatch:

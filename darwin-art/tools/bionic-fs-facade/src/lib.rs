@@ -830,6 +830,31 @@ impl Facade {
         Ok(root.join(std::ffi::OsString::from_vec(relative.to_vec())))
     }
 
+    /// The host path of a descriptor opened on the private data mount, the
+    /// fd counterpart of `resolve_private_host_path`. Other descriptors,
+    /// including overlay nodes, have none.
+    fn fd_private_host_path(&self, fd: c_int) -> Result<PathBuf, c_int> {
+        let descriptors = self.descriptors.lock().map_err(|_| ANDROID_EIO)?;
+        let Some(descriptor) = descriptors.entries.get(&fd) else {
+            return Err(ANDROID_EBADF);
+        };
+        let Descriptor::PrivateFile(file) = descriptor else {
+            return Err(ANDROID_EOPNOTSUPP);
+        };
+        let mut buffer = [0u8; libc::MAXPATHLEN as usize];
+        // SAFETY: F_GETPATH writes at most MAXPATHLEN bytes into the buffer.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) } != 0 {
+            return Err(ANDROID_EIO);
+        }
+        let length = buffer.iter().position(|byte| *byte == 0).ok_or(ANDROID_EIO)?;
+        let path = PathBuf::from(std::ffi::OsString::from_vec(buffer[..length].to_vec()));
+        let root = self.private_root.as_ref().ok_or(ANDROID_EIO)?.path();
+        if !path.starts_with(root) {
+            return Err(ANDROID_EACCES);
+        }
+        Ok(path)
+    }
+
     fn resolve_private_host_path(&self, path: &[u8]) -> Result<PathBuf, c_int> {
         let resolution = self.resolve(path)?;
         if resolution.mount_id != 2 || !resolution.writable {
