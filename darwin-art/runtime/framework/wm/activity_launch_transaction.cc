@@ -1,5 +1,7 @@
 #include "activity_launch_transaction.h"
 
+#include <iterator>
+
 #include "client_transaction.h"
 
 namespace darwin_art::framework::wm {
@@ -293,6 +295,14 @@ bool ScheduleResolvedActivityLaunch(JNIEnv* env, jobject application_binder,
   return result;
 }
 
+// The package's launcher Activity in its running process, as at attach.
+jboolean ScheduleLauncher(JNIEnv* env, jclass, jobject application_binder,
+                          jstring package_name, jint uid) {
+  return ScheduleActivityLaunch(env, application_binder, package_name, uid)
+             ? JNI_TRUE
+             : JNI_FALSE;
+}
+
 bool RegisterActivityLaunchScheduler(JNIEnv* env, jclass endpoint) {
   if (env == nullptr || endpoint == nullptr || env->ExceptionCheck()) return false;
   JNINativeMethod methods[] = {{
@@ -308,8 +318,12 @@ bool RegisterActivityLaunchScheduler(JNIEnv* env, jclass endpoint) {
       const_cast<char*>("(Landroid/os/IBinder;Landroid/os/IBinder;"
                         "Landroid/os/IBinder;)Z"),
       reinterpret_cast<void*>(&ScheduleFinish),
+  }, {
+      const_cast<char*>("nativeScheduleLauncherActivity"),
+      const_cast<char*>("(Landroid/os/IBinder;Ljava/lang/String;I)Z"),
+      reinterpret_cast<void*>(&ScheduleLauncher),
   }};
-  return env->RegisterNatives(endpoint, methods, 2) == JNI_OK;
+  return env->RegisterNatives(endpoint, methods, std::size(methods)) == JNI_OK;
 }
 
 }  // namespace darwin_art::framework::wm

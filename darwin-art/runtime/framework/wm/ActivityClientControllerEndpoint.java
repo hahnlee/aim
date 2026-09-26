@@ -292,6 +292,14 @@ public final class ActivityClientControllerEndpoint extends Binder {
      * resumes the top Activity (restart from stopped), as Home and returning
      * to the app do on Android.
      */
+    /** Whether the process has no Activity left in its task. */
+    static boolean taskEmpty(IBinder applicationThread) {
+        synchronized (activityLock) {
+            ArrayDeque<IBinder> stack = activityStacks.get(applicationThread);
+            return stack == null || stack.isEmpty();
+        }
+    }
+
     static void setTaskHidden(IBinder applicationThread, boolean hidden) {
         ArrayList<IBinder> stopping = new ArrayList<>();
         IBinder top;
@@ -539,14 +547,24 @@ public final class ActivityClientControllerEndpoint extends Binder {
         }
         if (code == activityDestroyedCode) {
             data.enforceNoDataAvail();
+            IBinder emptied = null;
             synchronized (activityLock) {
                 ActivityRecord record = activityRecords.remove(token);
                 if (record != null) {
                     ArrayDeque<IBinder> stack = activityStacks.get(record.applicationThread);
-                    if (stack != null) stack.remove(token);
+                    if (stack != null) {
+                        stack.remove(token);
+                        if (stack.isEmpty()) emptied = record.applicationThread;
+                    }
                 }
             }
             UidProcessStates.changed();
+            // The task's last Activity is gone: on Android the task leaves the
+            // screen while the process may keep its services. Close the root
+            // window; reopening it starts the launcher Activity again.
+            if (emptied != null) {
+                TaskGeometryController.requireInstance().requestHostHide(emptied);
+            }
             return true;
         }
         if (code == onBackPressedCode) {
