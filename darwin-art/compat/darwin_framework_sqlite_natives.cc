@@ -81,34 +81,62 @@ bool StepToCompletion(JNIEnv* env, sqlite3* database, sqlite3_stmt* statement,
   return true;
 }
 
+// Resolves a guest database name to its host backing path, or returns false
+// when the name is not under a private /data mount.
+bool ResolveGuestDatabasePath(const char* guest, std::string* host) {
+  const intptr_t length =
+      darwin_art_bionic_fs_resolve_private_host_path(guest, nullptr, 0);
+  if (length < 0) return false;
+  host->resize(static_cast<std::size_t>(length) + 1);
+  if (darwin_art_bionic_fs_resolve_private_host_path(guest, host->data(),
+                                                     host->size()) != length) {
+    return false;
+  }
+  host->resize(static_cast<std::size_t>(length));
+  return true;
+}
+
+// The connection's VFS: the platform default with guest database names
+// resolved to host paths. SQLite passes every name the app gives it, the
+// nativeOpen path and ATTACH DATABASE's (AccountsDb attaches accounts_ce.db
+// to the DE connection), through xFullPathname before opening it, and derives
+// journal and WAL names from the result, so resolving there keeps those names
+// on the host too. The copy keeps the platform VFS's pAppData, which its
+// xOpen reads.
+sqlite3_vfs* platform_vfs = nullptr;
+
+sqlite3_vfs* GuestPathVfs() {
+  static sqlite3_vfs* vfs = [] {
+    platform_vfs = sqlite3_vfs_find(nullptr);
+    if (platform_vfs == nullptr) return static_cast<sqlite3_vfs*>(nullptr);
+    static sqlite3_vfs guest = *platform_vfs;
+    guest.zName = "darwin-art-guest";
+    guest.xFullPathname = [](sqlite3_vfs*, const char* name, int size,
+                             char* output) -> int {
+      std::string host;
+      if (!ResolveGuestDatabasePath(name, &host)) return SQLITE_CANTOPEN;
+      return platform_vfs->xFullPathname(platform_vfs, host.c_str(), size, output);
+    };
+    if (sqlite3_vfs_register(&guest, 0) != SQLITE_OK) return static_cast<sqlite3_vfs*>(nullptr);
+    return &guest;
+  }();
+  return vfs;
+}
+
 jlong SqliteOpen(JNIEnv* env, jclass, jstring path, jint open_flags, jstring,
                  jboolean, jboolean, jint, jint) {
   const std::string guest_path = Utf8(env, path);
-  std::string native_path = guest_path;
-  if (guest_path != ":memory:" && !guest_path.empty()) {
-    const intptr_t length = darwin_art_bionic_fs_resolve_private_host_path(
-        guest_path.c_str(), nullptr, 0);
-    if (length < 0) {
-      ThrowSqlite(env, nullptr, SQLITE_CANTOPEN,
-                  "resolve private database path");
-      return 0;
-    }
-    native_path.resize(static_cast<std::size_t>(length) + 1);
-    if (darwin_art_bionic_fs_resolve_private_host_path(
-            guest_path.c_str(), native_path.data(), native_path.size()) !=
-        length) {
-      ThrowSqlite(env, nullptr, SQLITE_CANTOPEN,
-                  "resolve private database path");
-      return 0;
-    }
-    native_path.resize(static_cast<std::size_t>(length));
+  sqlite3_vfs* vfs = GuestPathVfs();
+  if (vfs == nullptr) {
+    ThrowSqlite(env, nullptr, SQLITE_CANTOPEN, "register database VFS");
+    return 0;
   }
   int flags = (open_flags & 1) != 0 ? SQLITE_OPEN_READONLY
                                     : SQLITE_OPEN_READWRITE;
   if ((open_flags & 0x10000000) != 0) flags |= SQLITE_OPEN_CREATE;
   flags |= SQLITE_OPEN_FULLMUTEX;
   sqlite3* database = nullptr;
-  const int status = sqlite3_open_v2(native_path.c_str(), &database, flags, nullptr);
+  const int status = sqlite3_open_v2(guest_path.c_str(), &database, flags, vfs->zName);
   if (status != SQLITE_OK) {
     ThrowSqlite(env, database, status, "open database");
     if (database != nullptr) sqlite3_close_v2(database);

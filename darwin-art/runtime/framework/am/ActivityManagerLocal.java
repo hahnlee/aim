@@ -245,7 +245,7 @@ public final class ActivityManagerLocal extends ActivityManagerInternal {
 
     @Override
     public int getCurrentUserId() {
-        throw unsupported("getCurrentUserId");
+        return IncomingUsers.CURRENT_USER;
     }
 
     @Override
