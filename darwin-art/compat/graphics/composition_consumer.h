@@ -36,6 +36,7 @@ struct CompositionConsumerBackend {
   void (*gl_get_integer_v)(std::uint32_t, EglInt*) = nullptr;
   void (*gl_bind_framebuffer)(std::uint32_t, std::uint32_t) = nullptr;
   void (*gl_disable)(std::uint32_t) = nullptr;
+  void (*gl_get_float_v)(std::uint32_t, float*) = nullptr;
   void (*gl_clear_color)(float, float, float, float) = nullptr;
   void (*gl_clear)(std::uint32_t) = nullptr;
 
