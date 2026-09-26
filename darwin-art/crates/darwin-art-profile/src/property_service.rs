@@ -19,6 +19,10 @@ use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
+unsafe extern "C" {
+    fn notify_post(name: *const std::ffi::c_char) -> u32;
+}
+
 /// bionic PROP_VALUE_MAX.
 const VALUE_MAX: usize = 92;
 
@@ -54,7 +58,10 @@ fn legal_name(name: &str) -> bool {
 impl PropertyService {
     /// The service over `persistent_path`, with the persisted values loaded
     /// and published under `publication`.
-    pub(crate) fn open(persistent_path: PathBuf, publication: PathBuf) -> Result<Self, ProfileError> {
+    pub(crate) fn open(
+        persistent_path: PathBuf,
+        publication: PathBuf,
+    ) -> Result<Self, ProfileError> {
         let mut values = BTreeMap::new();
         match fs::read_to_string(&persistent_path) {
             Ok(text) => {
@@ -72,7 +79,11 @@ impl PropertyService {
         // never mistakes a new publication for one it already folded in.
         let generation = fs::read(publication.join("generation"))
             .ok()
-            .and_then(|bytes| bytes.get(..8).map(|word| u64::from_le_bytes(word.try_into().unwrap())))
+            .and_then(|bytes| {
+                bytes
+                    .get(..8)
+                    .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+            })
             .unwrap_or(0);
         let mut service = Self {
             persistent_path,
@@ -144,7 +155,26 @@ impl PropertyService {
             .open(self.publication.join("generation"))?
             .write_all_at(&next.to_le_bytes(), 0)?;
         self.generation = next;
+        self.notify();
         Ok(())
+    }
+
+    /// Wakes processes blocked in `__system_property_wait`; the name matches
+    /// bionic-process-state-facade `property_publication::notification_name`.
+    fn notify(&self) {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(metadata) = fs::metadata(&self.publication) else {
+            return;
+        };
+        let name = format!(
+            "dev.darwinart.properties.{}.{}",
+            metadata.dev(),
+            metadata.ino()
+        );
+        if let Ok(name) = std::ffi::CString::new(name) {
+            // SAFETY: NUL-terminated name.
+            unsafe { notify_post(name.as_ptr()) };
+        }
     }
 
     fn persist(&self) -> std::io::Result<()> {
@@ -201,7 +231,10 @@ mod tests {
             std::env::temp_dir().join(format!("darwin-properties-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let path = root.join("persistent_properties");
-        (path.clone(), PropertyService::open(path, root.join("publication")).unwrap())
+        (
+            path.clone(),
+            PropertyService::open(path, root.join("publication")).unwrap(),
+        )
     }
 
     #[test]
@@ -244,7 +277,8 @@ mod tests {
             "persist.sys.locale=ko-KR\n"
         );
         let reopened =
-            PropertyService::open(path.clone(), path.parent().unwrap().join("publication")).unwrap();
+            PropertyService::open(path.clone(), path.parent().unwrap().join("publication"))
+                .unwrap();
         assert_eq!(
             reopened
                 .values
@@ -260,10 +294,16 @@ mod tests {
         let (path, mut properties) = service("publish");
         let publication = path.parent().unwrap().join("publication");
         let generation = || {
-            u64::from_le_bytes(fs::read(publication.join("generation")).unwrap()[..8].try_into().unwrap())
+            u64::from_le_bytes(
+                fs::read(publication.join("generation")).unwrap()[..8]
+                    .try_into()
+                    .unwrap(),
+            )
         };
         assert_eq!(generation(), 1);
-        properties.set(true, "persist.sys.timezone", "Asia/Seoul").unwrap();
+        properties
+            .set(true, "persist.sys.timezone", "Asia/Seoul")
+            .unwrap();
         properties.set(true, "sys.boot_completed", "1").unwrap();
         assert_eq!(generation(), 3);
         assert_eq!(
