@@ -244,12 +244,16 @@ FrameworkInputEventDispatchResult DispatchFrameworkInputEventResultForReceiver(
     return result;
   }
   result.framework_sequence = sequence;
+  // Recorded before dispatch: the app may finish inside dispatchInputEvent.
+  if (context.key != nullptr)
+    receiver->key_fallbacks.Dispatching(static_cast<uint32_t>(sequence), *context.key);
   if (context.local_packet_lease &&
       !BeginInputRoutingPacketDelivery(*context.local_packet_lease,
                                       context.recipient, routing)) {
     // Authority rejection is terminal, not retryable backpressure. All input
     // locks have been released before finish-ledger cleanup can reenter.
     (void)CancelReceiverFinish(receiver.get(), sequence);
+    receiver->key_fallbacks.Abandoned(static_cast<uint32_t>(sequence));
     result.rejected = true;
     return result;
   }

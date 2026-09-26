@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../../compat/darwin_framework_input_hint.h"
 #include <cstdint>
 #include <memory>
 
@@ -33,6 +34,8 @@ struct OriginalInputReceiverDispatchContext final {
   // Borrowed only during synchronous packet construction/dispatch. Never
   // retained in InputEventOrigin or the asynchronous finish ledger.
   InputRoutingPacketLease* local_packet_lease = nullptr;
+  // The key being dispatched, borrowed like the packet lease; null for motion.
+  const DarwinArtKeyEventV1* key = nullptr;
 };
 
 struct InputWindowGeometry {
