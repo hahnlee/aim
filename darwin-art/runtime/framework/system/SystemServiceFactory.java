@@ -114,6 +114,8 @@ public final class SystemServiceFactory {
                 new dev.darwinart.runtime.usage.UsageStatsManagerLocal());
         NetworkPathProvider networkPath = new NetworkPathProvider();
         ConnectivityServiceState connectivity = new ConnectivityServiceState(networkPath);
+        new dev.darwinart.runtime.connectivity.HostProxyService(
+                connectivity, activity.systemBroadcasts()).start();
         JobSchedulerService jobs = new JobSchedulerService(
                 ApplicationPackages.INSTANCE, processes,
                 activity.systemServiceBindings(), connectivity);

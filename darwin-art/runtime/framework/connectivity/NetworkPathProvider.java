@@ -42,6 +42,13 @@ public final class NetworkPathProvider implements ConnectivityState, AutoCloseab
 
     private static native String[] nativeHostProxy();
 
+    /** Blocks until macOS reports a proxy configuration change; false when unobservable. */
+    static boolean awaitHostProxyChange() {
+        return nativeAwaitHostProxyChange();
+    }
+
+    private static native boolean nativeAwaitHostProxyChange();
+
     private synchronized String[] nativeSnapshot() {
         if (handle == 0) throw new IllegalStateException("network path monitor is closed");
         return nativeSnapshot(handle);

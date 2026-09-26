@@ -2,9 +2,14 @@
 
 #include "network_path_abi.h"
 
+#include <notify.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <cstdio>
 #include <cstdint>
 #include <iterator>
+#include <mutex>
 
 namespace darwin_art::framework::connectivity {
 namespace {
@@ -85,6 +90,27 @@ jobjectArray NativeHostProxy(JNIEnv* env, jclass) {
   return result;
 }
 
+// Blocks until macOS posts a proxy configuration change; false if the
+// notification channel cannot be used, which ends the caller's watch.
+jboolean NativeAwaitHostProxyChange(JNIEnv*, jclass) {
+  static std::once_flag once;
+  static int descriptor = -1;
+  std::call_once(once, [] {
+    int token = 0;
+    if (notify_register_file_descriptor("com.apple.system.config.proxy_change", &descriptor, 0,
+                                        &token) != NOTIFY_STATUS_OK) {
+      descriptor = -1;
+    }
+  });
+  if (descriptor < 0) return JNI_FALSE;
+  int32_t token = 0;
+  ssize_t result;
+  do {
+    result = read(descriptor, &token, sizeof(token));
+  } while (result < 0 && errno == EINTR);
+  return result == sizeof(token) ? JNI_TRUE : JNI_FALSE;
+}
+
 void NativeDestroy(JNIEnv*, jclass, jlong raw_handle) {
   darwin_art_network_path_destroy(reinterpret_cast<void*>(raw_handle));
 }
@@ -102,6 +128,8 @@ bool RegisterNetworkPathProvider(JNIEnv* env, jclass provider_class) {
        reinterpret_cast<void*>(NativeDestroy)},
       {const_cast<char*>("nativeHostProxy"), const_cast<char*>("()[Ljava/lang/String;"),
        reinterpret_cast<void*>(NativeHostProxy)},
+      {const_cast<char*>("nativeAwaitHostProxyChange"), const_cast<char*>("()Z"),
+       reinterpret_cast<void*>(NativeAwaitHostProxyChange)},
   };
   return env->RegisterNatives(provider_class, methods, std::size(methods)) == JNI_OK;
 }
