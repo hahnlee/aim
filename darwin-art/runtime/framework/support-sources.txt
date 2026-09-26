@@ -15,6 +15,7 @@ runtime/framework/am/ActivityManagerLocal.java
 runtime/framework/am/ApplicationProcessRegistry.java
 runtime/framework/am/UidProcessStates.java
 runtime/framework/am/UidObserverController.java
+runtime/framework/am/AppErrors.java
 runtime/framework/am/ConnectionRecord.java
 runtime/framework/am/ServiceConnectionOwner.java
 runtime/framework/am/ServiceConnectionIndex.java

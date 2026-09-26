@@ -6,8 +6,8 @@ import android.os.Parcelable;
 import java.lang.reflect.Field;
 
 /**
- * Read-only AMS process-state queries: memory pressure levels, processes in an
- * error state and freezer transaction reports.
+ * Read-only AMS process-state queries: memory pressure levels and freezer
+ * transaction reports. Processes in an error state belong to {@link AppErrors}.
  */
 final class ProcessStateQueries {
     // ProcessList oom_adj values that getMemoryInfo reports thresholds for.
@@ -41,17 +41,6 @@ final class ProcessStateQueries {
         setHiddenLong(info, "foregroundAppThreshold", memLevel(FOREGROUND_APP_ADJ));
         reply.writeNoException();
         reply.writeTypedObject(info, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
-    }
-
-    /**
-     * AMS.getProcessesInErrorState returns null when no caller-visible process
-     * is crashing or not responding. This system server has no ANR detection,
-     * and an application crash ends in process death, so no live process is
-     * ever held in an error state.
-     */
-    static void writeProcessesInErrorState(Parcel reply) {
-        reply.writeNoException();
-        reply.writeTypedList(null, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
     }
 
     /**
