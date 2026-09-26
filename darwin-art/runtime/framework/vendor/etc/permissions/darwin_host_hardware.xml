@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Hardware this Mac host provides to Android, declared the way a device's
+  vendor partition does (SystemConfig reads /vendor/etc/permissions). Only
+  capabilities with a working host provider belong here:
+  - AppKit mouse and trackpad input reaches apps as SOURCE_MOUSE pointer
+    streams, emulating basic touch: faketouch, not touchscreen.
+  - Android owns portrait and landscape task orientation (ADR 0008).
+  - Audio output plays through CoreAudio.
+  Vulkan comes from the pinned image's vendor XMLs (MoltenVK) and the GLES
+  version from ro.opengles.version (ANGLE Metal).
+-->
+<permissions>
+    <feature name="android.hardware.faketouch" />
+    <feature name="android.hardware.screen.portrait" />
+    <feature name="android.hardware.screen.landscape" />
+    <feature name="android.hardware.audio.output" />
+</permissions>

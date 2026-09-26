@@ -1,6 +1,7 @@
-# System partition packages, platform configuration, aconfig flag protos and
-# product framework overlays from the pinned PS16K
-# image (tools/bootclasspath/extract_system_partition.py), dexpreopt omitted.
+# System partition packages, platform configuration, aconfig flag protos,
+# product framework overlays and the vendor Vulkan feature declarations from
+# the pinned PS16K image (tools/bootclasspath/extract_system_partition.py),
+# dexpreopt omitted.
 e8f4b3b1b00277cf5cf04a1bebf8202eb29e5fb2068dac64968f52eb429ff1a3 /system/app/BasicDreams/BasicDreams.apk
 ab9e40ad60993b92a5890a3529afae5496d6737bf8c7fb2cad8102a549d07567 /system/app/BluetoothMidiService/BluetoothMidiService.apk
 b7e2ea76d6241798d555ff49a914e0f39574537f366b87e43c6775516676abd0 /system/app/BookmarkProvider/BookmarkProvider.apk
@@ -108,6 +109,9 @@ c76939da0864cd71225fc7383a7379a64705ff066a5e39ca167153e113702299 /product/overla
 b92b4842acbbc8c086c1f8d83fe4d2621089f3856a2be6f9e6ecfa9b26d92c50 /product/overlay/framework-res__sdk_gphone16k_arm64__auto_generated_rro_product.apk
 704e1a55af789b08bd6f48c538de61578e3ef917abb7572a5951117e13da657b /system/etc/aconfig_flags.pb
 b6e8c8525ef50f5338a9efa0e7ecca7606726b0cadb9314d55a087c280bde58c /system/system_ext/etc/aconfig_flags.pb
+65e26b6a034aa3cf8d4821e2820c3a0fcc55307a567dfaf2efde4e9988464561 /vendor/etc/permissions/android.hardware.vulkan.compute.xml
+8d78cbae54e60692944a5a8ea4fb41a5d8ac3b0f7ca467028e7b8e6552dc13bc /vendor/etc/permissions/android.hardware.vulkan.level.xml
+e4674544be7703fdcc26afec72cbaa6d63d905e76bd88377f64003dedec75959 /vendor/etc/permissions/android.hardware.vulkan.version.xml
 54f41b1fb1a45174c930cc503673ac633e740b7086ccce3d95b63b7f39015a99 /system/framework/android.hidl.base-V1.0-java.jar
 769ba2928dd78f765ce4b5ded54f8d93652368ac458956010159d3e162e42d10 /system/framework/android.hidl.manager-V1.0-java.jar
 178e952ca5753345f0eb6b32e2727aa1ee7f7b35caa8cb89e08fdf08c45ee597 /system/framework/android.test.base.jar

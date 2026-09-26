@@ -138,6 +138,10 @@ darwin_art_package_system_root() (
     }
   done < "$partition_list"
   /usr/bin/tar -rf "$destination" -C "$system_partition" -T "$partition_list" || return
+  # The host's own hardware feature declarations, beside the image's vendor
+  # Vulkan XMLs in /vendor/etc/permissions.
+  /usr/bin/tar -rf "$destination" -C "$helper_root/runtime/framework" \
+    vendor/etc/permissions/darwin_host_hardware.xml || return
   # As on the device, /system_ext names the system_ext partition, which this
   # root keeps at /system/system_ext (DeviceProtos reads its flag proto there).
   mkdir -p "$resource_stage/root-links" || return

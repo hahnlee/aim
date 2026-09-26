@@ -87,7 +87,8 @@ fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
-fn gpt_super(disk: &Disk) -> Result<(Region, (u16, u16))> {
+/// The GPT partition named `wanted` (`super` on system.img, `vendor` on vendor.img).
+fn gpt_partition(disk: &Disk, wanted: &str) -> Result<(Region, (u16, u16))> {
     let h = disk.read(SECTOR, 512)?;
     if h.get(..8) != Some(GPT_SIGNATURE) {
         return Err(invalid("missing primary GPT").into());
@@ -132,24 +133,24 @@ fn gpt_super(disk: &Disk) -> Result<(Region, (u16, u16))> {
             }
             name.push(char::from_u32(u32::from(unit)).ok_or_else(|| invalid("invalid GPT name"))?);
         }
-        if name == "super" {
+        if name == wanted {
             if found.is_some() {
-                return Err(invalid("duplicate GPT super partition").into());
+                return Err(invalid(format!("duplicate GPT {wanted} partition")).into());
             }
             let first = le64(entry, 32)?;
             let last = le64(entry, 40)?;
             if last < first {
-                return Err(invalid("reversed GPT super partition").into());
+                return Err(invalid(format!("reversed GPT {wanted} partition")).into());
             }
             found = Some(Region {
-                offset: mul(first, SECTOR, "locating super")?,
-                size: mul(last - first + 1, SECTOR, "sizing super")?,
+                offset: mul(first, SECTOR, "locating GPT partition")?,
+                size: mul(last - first + 1, SECTOR, "sizing GPT partition")?,
             });
         }
     }
-    let region = found.ok_or_else(|| invalid("GPT super partition not found"))?;
-    if add(region.offset, region.size, "checking super")? > disk.size {
-        return Err(invalid("super outside image").into());
+    let region = found.ok_or_else(|| invalid(format!("GPT {wanted} partition not found")))?;
+    if add(region.offset, region.size, "checking GPT partition")? > disk.size {
+        return Err(invalid(format!("{wanted} outside image")).into());
     }
     Ok((region, ((revision >> 16) as u16, revision as u16)))
 }
@@ -165,6 +166,9 @@ struct LogicalExtent {
 enum Partition {
     System,
     SystemExt,
+    Product,
+    /// vendor.img: a GPT `vendor` partition holding EROFS directly, no LP.
+    Vendor,
 }
 
 impl Partition {
@@ -172,8 +176,10 @@ impl Partition {
         match value {
             "system" => Ok(Self::System),
             "system_ext" => Ok(Self::SystemExt),
+            "product" => Ok(Self::Product),
+            "vendor" => Ok(Self::Vendor),
             _ => Err(invalid(format!(
-                "unsupported LP partition {value:?}; expected system or system_ext"
+                "unsupported partition {value:?}; expected system, system_ext, product or vendor"
             ))
             .into()),
         }
@@ -183,6 +189,8 @@ impl Partition {
         match self {
             Self::System => "system",
             Self::SystemExt => "system_ext",
+            Self::Product => "product",
+            Self::Vendor => "vendor",
         }
     }
 }
@@ -913,7 +921,7 @@ fn run() -> Result<()> {
     let program = args.next().unwrap_or_default();
     let input = args.next().map(PathBuf::from).ok_or_else(|| {
         invalid(format!(
-            "usage: {} INPUT-system.img OUTPUT [--partition system|system_ext] [APEX_NAME | --path INTERNAL_PATH | --symlink INTERNAL_PATH | --stat INTERNAL_PATH]",
+            "usage: {} INPUT-system.img OUTPUT [--partition system|system_ext|product|vendor] [APEX_NAME | --path INTERNAL_PATH | --symlink INTERNAL_PATH | --stat INTERNAL_PATH]",
             PathBuf::from(program).display()
         ))
     })?;
@@ -925,7 +933,7 @@ fn run() -> Result<()> {
     let (partition, selector) = if first.as_deref() == Some(std::ffi::OsStr::new("--partition")) {
         let value = args
             .next()
-            .ok_or_else(|| invalid("--partition requires system or system_ext"))?;
+            .ok_or_else(|| invalid("--partition requires system, system_ext, product or vendor"))?;
         let value = value
             .into_string()
             .map_err(|_| invalid("--partition value must be valid UTF-8"))?;
@@ -988,8 +996,19 @@ fn run() -> Result<()> {
         return Err(invalid("too many arguments").into());
     }
     let disk = Disk::open(&input)?;
-    let (super_region, gpt) = gpt_super(&disk)?;
-    let (extents, partition_size, lp) = lp_partition(&disk, super_region, partition)?;
+    let (super_region, gpt, extents, partition_size, lp) = if partition == Partition::Vendor {
+        let (region, gpt) = gpt_partition(&disk, "vendor")?;
+        let extent = LogicalExtent {
+            logical: 0,
+            physical: region.offset,
+            length: region.size,
+        };
+        (region, gpt, vec![extent], region.size, (0, 0))
+    } else {
+        let (region, gpt) = gpt_partition(&disk, "super")?;
+        let (extents, size, lp) = lp_partition(&disk, region, partition)?;
+        (region, gpt, extents, size, lp)
+    };
     let view = ExtentView {
         disk: &disk,
         extents,
@@ -1072,7 +1091,8 @@ mod tests {
             Partition::parse("system_ext").unwrap(),
             Partition::SystemExt
         );
-        assert!(Partition::parse("product").is_err());
+        assert_eq!(Partition::parse("product").unwrap(), Partition::Product);
+        assert_eq!(Partition::parse("vendor").unwrap(), Partition::Vendor);
         assert!(Partition::parse("system-ext").is_err());
     }
 

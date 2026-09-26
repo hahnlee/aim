@@ -56,7 +56,7 @@ Component tests are not application acceptance. See [AGENTS.md](../AGENTS.md),
 | Input / WMS | Exact-root ingress, readiness/focus fences, bounded first-key queue and receiver lifetime are adopted. Parent/process-death cleanup remains open. |
 | Orientation / resize | Per-task revisioned geometry: launch orientation, `setRequestedOrientation`, real AppKit edge resize → DisplayManager callback, config/relaunch/`WindowStateResizeItem` transactions, WMS frames/insets and host backing on one revision. Physical: Calculator/DeskClock relaunch, Chromium/Blue Archive config change, five-point click map, popup through resize, two-app isolation, close mid-resize. |
 | Blue Archive | Unchanged full-split APK starts landscape `1280×720` (2×), renders Unity frames, survives a 24-drag live-resize stress (240 revisions, 67 swapchain recreations, no fault) without relaunch, and takes physical clicks on Android dialogs and Unity UI. The Nexon patcher downloads and verifies all 1464 files (~650 MB), preprocessing completes and the login title screen renders; a CoreAudio process tap measures non-silent output there (peak 0.12). GMS is absent (game shows its notice). |
-| Package manager | PMS scans `/data/app` and the pinned image's system partition (79 system packages); permissions, signatures (v3), privileged flags, features and PM queries are PMS answers. `default` was migrated with a pre-migration clone backup; all eight APKs launch from PMS and Blue Archive reaches its title screen on its existing downloads. System features are limited to the image's `/system` XMLs (#46). |
+| Package manager | PMS scans `/data/app` and the pinned image's system partition (79 system packages); permissions, signatures (v3), privileged flags, features and PM queries are PMS answers. `default` was migrated in place; all eight APKs launch from PMS and Blue Archive reaches its title screen on its existing downloads. System features describe the host: faketouch (mouse/trackpad, no touchscreen), both screen orientations, audio output, GLES 3.0 (ANGLE Metal) and Vulkan 1.3 level 1 (MoltenVK, the image's vendor XMLs). |
 | Services | Exact-client connection ledger, process-shared demand and service lifecycle lanes are adopted. Real remote death and reusable shutdown are not proven. |
 | Graphics / SCM | Retained backing, fences and scanout diagnostics pass. ABI2 SCM/Binder callbacks and focused lifetime tests pass; unchanged-APK managed-transfer acceptance remains open. |
 | Source licensing | Original work uses Apache-2.0; upstream notices and OpenJDK GPLv2 + Classpath scope are recorded in the repository's licensing documents. Binary distribution/source matching remains a separate gate. |
@@ -68,8 +68,7 @@ Open failures are GitHub issues; the ones blocking the current goal:
 - Activity behind a new top Activity is never stopped (#16); window close and
   Cmd+Q have no Android lifecycle (#15); popup `ACTION_OUTSIDE` (#17).
 - Broadcasts beyond unordered registered delivery (#3); AppOps foreground
-  state (#44); framework-compat class replacements (#45); device features
-  (#46).
+  state (#44); framework-compat class replacements (#45).
 - SCM managed-transfer adoption (#18); process-death cleanup (#20).
 
 ## Next work

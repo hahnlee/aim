@@ -7,7 +7,10 @@ without expanding the logical partition. From the product partition it copies
 the static overlays that target the framework ("android"): every process
 loads them over framework-res.apk as immutable framework overlays. The
 partitions' aconfig flag protos decide which featureFlag-gated manifest
-elements PackageManagerService parses. Dexpreopt output (`oat/` directories)
+elements PackageManagerService parses. From vendor.img (next to IMAGE) it
+copies the feature declarations that describe what the host provides: the
+Vulkan level/version/compute XMLs match the MoltenVK provider (Vulkan 1.3 with
+every level 1 feature). Dexpreopt output (`oat/` directories)
 is left out: it was compiled against the image's own boot image, which this
 runtime does not use, so ART would reject it.
 
@@ -31,6 +34,9 @@ FLAG_PROTOS = {
                                                  "/etc/aconfig_flags.pb"),
 }
 FILES = ("/system/etc/selinux/plat_mac_permissions.xml",)
+# vendor.img feature XMLs whose capabilities the host graphics provider has.
+VENDOR_FILES = tuple(f"/vendor/etc/permissions/android.hardware.vulkan.{name}.xml"
+                     for name in ("compute", "level", "version"))
 # /product/overlay APKs whose <overlay> targets "android" (all isStatic).
 FRAMEWORK_OVERLAYS = tuple(f"/product/overlay/{name}.apk" for name in (
     "GoogleConfigOverlay",
@@ -57,23 +63,27 @@ def main():
     root = Path(__file__).resolve().parents[2]
     tool = root / "target/release/super-i18n-apex-extract"
     image = args.image.resolve()
+    vendor_image = image.parent / "vendor.img"
     output = args.output.resolve()
 
     def partition(path):
-        # (--partition arguments, path inside that partition)
+        # (image, --partition arguments, path inside that partition)
         if path in FLAG_PROTOS:
-            return FLAG_PROTOS[path]
+            return (image, *FLAG_PROTOS[path])
         if path.startswith("/product/"):
-            return ["--partition", "product"], path[len("/product"):]
-        return [], path
+            return image, ["--partition", "product"], path[len("/product"):]
+        if path.startswith("/vendor/"):
+            return vendor_image, ["--partition", "vendor"], path[len("/vendor"):]
+        return image, [], path
 
-    def run(*extra):
-        return subprocess.run([str(tool), str(image), "-", *extra], check=True,
+    def run(source, *extra):
+        return subprocess.run([str(tool), str(source), "-", *extra], check=True,
                               capture_output=True, text=True).stdout
 
     def file_type(path):
-        selector, inner = partition(path)
-        return int(run(*selector, "--stat", inner).split()[0].split("=")[1], 8) & 0o170000
+        source, selector, inner = partition(path)
+        return int(run(source, *selector, "--stat", inner).split()[0].split("=")[1],
+                   8) & 0o170000
 
     files = []
 
@@ -81,7 +91,7 @@ def main():
         if file_type(path) != 0o040000:
             files.append(path)
             return
-        for name in sorted(run("--path", path).split()):
+        for name in sorted(run(image, "--path", path).split()):
             if name in (".", ".."):
                 continue
             if name == "oat":
@@ -93,6 +103,7 @@ def main():
     files.extend(FILES)
     files.extend(FRAMEWORK_OVERLAYS)
     files.extend(FLAG_PROTOS)
+    files.extend(VENDOR_FILES)
     inventory = []
 
     def library_jars():
@@ -121,8 +132,8 @@ def main():
                            check=True, capture_output=True)
             inventory.append(f"link:{destination.readlink()} {path}")
             continue
-        selector, inner = partition(path)
-        subprocess.run([str(tool), str(image), str(destination), *selector, "--path", inner],
+        source, selector, inner = partition(path)
+        subprocess.run([str(tool), str(source), str(destination), *selector, "--path", inner],
                        check=True, capture_output=True)
         inventory.append(f"{digest(destination)} {path}")
     if args.lock:
