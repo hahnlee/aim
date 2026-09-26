@@ -1,5 +1,6 @@
 //! Construct process bootstrap inputs. Android build identity belongs to the
-//! runtime build, while memory granularity and entropy cross the Darwin boundary.
+//! runtime build, while memory granularity, entropy and the time zone cross
+//! the Darwin boundary.
 //! This does not implement mutable property-service transactions.
 use darwin_art_engine::ProcessSnapshotInputs;
 
@@ -21,6 +22,27 @@ fn build_properties() -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
         properties.push((name.as_bytes().to_vec(), value.as_bytes().to_vec()));
     }
     Ok(properties)
+}
+
+/// The host's IANA time zone, from the `/etc/localtime` link macOS keeps
+/// (`/var/db/timezone/zoneinfo/Asia/Seoul`). Android reads it from
+/// `persist.sys.timezone` (bionic `localtime`, RuntimeInit's libcore
+/// TimezoneGetter). An unreadable or unusual link leaves the property unset,
+/// which Android treats as GMT, rather than guessing.
+fn host_time_zone() -> Option<String> {
+    zone_from_localtime_link(&std::fs::read_link("/etc/localtime").ok()?)
+}
+
+fn zone_from_localtime_link(link: &std::path::Path) -> Option<String> {
+    let link = link.to_str()?;
+    let (_, zone) = link.rsplit_once("/zoneinfo/")?;
+    let valid = !zone.is_empty()
+        && !zone.starts_with('/')
+        && zone.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
+        && zone
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'+'));
+    valid.then(|| zone.to_owned())
 }
 
 pub(super) fn inputs() -> Result<ProcessSnapshotInputs, String> {
@@ -46,7 +68,13 @@ pub(super) fn inputs() -> Result<ProcessSnapshotInputs, String> {
         .into_iter()
         .map(|(name, value)| (name.as_bytes().to_vec(), value.as_bytes().to_vec()))
         .collect(),
-        properties: build_properties()?,
+        properties: {
+            let mut properties = build_properties()?;
+            if let Some(zone) = host_time_zone() {
+                properties.push((b"persist.sys.timezone".to_vec(), zone.into_bytes()));
+            }
+            properties
+        },
         page_size: page_size as u64,
         // FP and ASIMD are guaranteed by this arm64 execution target. Do not
         // advertise optional Android instructions merely because macOS has them.
@@ -106,6 +134,33 @@ mod tests {
         let directory = std::fs::File::open("/").unwrap();
         next.install_process_filesystem(directory.as_fd(), b"/", b"/")
             .unwrap();
+    }
+    #[test]
+    fn time_zone_comes_from_the_localtime_link() {
+        use std::path::Path;
+        assert_eq!(
+            zone_from_localtime_link(Path::new("/var/db/timezone/zoneinfo/Asia/Seoul")),
+            Some("Asia/Seoul".into())
+        );
+        assert_eq!(
+            zone_from_localtime_link(Path::new("/usr/share/zoneinfo/America/Argentina/Salta")),
+            Some("America/Argentina/Salta".into())
+        );
+        assert_eq!(
+            zone_from_localtime_link(Path::new("/usr/share/zoneinfo/Etc/GMT+9")),
+            Some("Etc/GMT+9".into())
+        );
+        assert_eq!(zone_from_localtime_link(Path::new("/etc/localtime.bak")), None);
+        assert_eq!(zone_from_localtime_link(Path::new("/x/zoneinfo/../etc")), None);
+        assert_eq!(zone_from_localtime_link(Path::new("/x/zoneinfo/")), None);
+        let host = host_time_zone();
+        let input = inputs().unwrap();
+        let property = input
+            .properties
+            .iter()
+            .find(|(key, _)| key == b"persist.sys.timezone")
+            .map(|(_, value)| String::from_utf8(value.clone()).unwrap());
+        assert_eq!(property, host);
     }
     #[test]
     fn runtime_identity_is_explicit_and_hardware_values_are_not_fabricated() {
