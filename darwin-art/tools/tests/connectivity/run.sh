@@ -25,7 +25,9 @@ for signature in \
   "$IS_ACTIVE_NETWORK_METERED_SIGNATURE" \
   "$REQUEST_NETWORK_SIGNATURE" \
   "$LISTEN_FOR_NETWORK_SIGNATURE" \
-  "$RELEASE_NETWORK_REQUEST_SIGNATURE"; do
+  "$RELEASE_NETWORK_REQUEST_SIGNATURE" \
+  "$GET_GLOBAL_PROXY_SIGNATURE" \
+  "$GET_PROXY_FOR_NETWORK_SIGNATURE"; do
   grep -Fq "android.net.IConnectivityManager $signature" "$tmp/packages.txt"
 done
 
@@ -59,6 +61,8 @@ test "$(transaction_for isActiveNetworkMetered)" = "$IS_ACTIVE_NETWORK_METERED_T
 test "$(transaction_for requestNetwork)" = "$REQUEST_NETWORK_TRANSACTION"
 test "$(transaction_for listenForNetwork)" = "$LISTEN_FOR_NETWORK_TRANSACTION"
 test "$(transaction_for releaseNetworkRequest)" = "$RELEASE_NETWORK_REQUEST_TRANSACTION"
+test "$(transaction_for getGlobalProxy)" = "$GET_GLOBAL_PROXY_TRANSACTION"
+test "$(transaction_for getProxyForNetwork)" = "$GET_PROXY_FOR_NETWORK_TRANSACTION"
 
 "$apkanalyzer" dex code \
   --class 'android.net.IConnectivityManager$Stub' \
@@ -96,8 +100,9 @@ mkdir -p "$tmp/classes"
   "$root/runtime/framework/connectivity/ConnectivityProjection.java" \
   "$root/runtime/framework/connectivity/ConnectivityPermissionEnforcer.java" \
   "$root/runtime/framework/connectivity/ConnectivityManagerEndpoint.java" \
+  "$root/tools/tests/wm/unsupported-transactions-stub/dev/darwinart/runtime/os/UnsupportedTransactions.java" \
   "$root/tools/tests/connectivity/ConnectivityManagerEndpointTest.java"
 "$java_home/bin/java" -ea -cp "$tmp/classes" \
   dev.darwinart.runtime.connectivity.ConnectivityManagerEndpointTest
-printf 'connectivity-aosp-lock: PASS (%s transactions 1,3,9,14,16,20,42,45,47)\n' \
+printf 'connectivity-aosp-lock: PASS (%s transactions 1,3,9,14,16,20,30,32,42,45,47)\n' \
   "$ICONNECTIVITY_MANAGER_DESCRIPTOR"

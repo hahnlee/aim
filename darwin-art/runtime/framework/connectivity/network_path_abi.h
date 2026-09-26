@@ -33,6 +33,25 @@ struct DarwinArtNetworkLinkFacts {
 
 int darwin_art_network_link_facts_snapshot(DarwinArtNetworkLinkFacts* output);
 
+// The host's effective proxy configuration (SCDynamicStoreCopyProxies), as
+// Android's ProxyInfo sees it: none, one HTTP(S) proxy or a PAC URL.
+constexpr uint32_t kDarwinArtNetworkProxyNone = 0;
+constexpr uint32_t kDarwinArtNetworkProxyDirect = 1;
+constexpr uint32_t kDarwinArtNetworkProxyPac = 2;
+
+struct DarwinArtNetworkProxyFacts {
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint32_t kind;
+  uint32_t port;
+  char host[256];
+  char pac_url[1024];
+  // Comma-separated host patterns that bypass the proxy.
+  char exclusions[2048];
+};
+
+int darwin_art_network_proxy_snapshot(DarwinArtNetworkProxyFacts* output);
+
 void* darwin_art_network_path_create();
 int darwin_art_network_path_snapshot(
     const void* handle, DarwinArtNetworkPathSnapshot* output);

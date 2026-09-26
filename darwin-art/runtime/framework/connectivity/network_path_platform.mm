@@ -114,6 +114,78 @@ bool IsNumericAddress(const char* value) {
 
 }  // namespace
 
+namespace {
+
+bool ProxyEnabled(CFDictionaryRef proxies, CFStringRef key) {
+  CFTypeRef value = CFDictionaryGetValue(proxies, key);
+  int enabled = 0;
+  return value != nullptr && CFGetTypeID(value) == CFNumberGetTypeID() &&
+         CFNumberGetValue(static_cast<CFNumberRef>(value), kCFNumberIntType, &enabled) &&
+         enabled != 0;
+}
+
+int ProxyPort(CFDictionaryRef proxies, CFStringRef key) {
+  CFTypeRef value = CFDictionaryGetValue(proxies, key);
+  int port = 0;
+  if (value == nullptr || CFGetTypeID(value) != CFNumberGetTypeID() ||
+      !CFNumberGetValue(static_cast<CFNumberRef>(value), kCFNumberIntType, &port)) {
+    return 0;
+  }
+  return port > 0 && port <= 65535 ? port : 0;
+}
+
+}  // namespace
+
+extern "C" int darwin_art_network_proxy_snapshot(DarwinArtNetworkProxyFacts* output) {
+  if (output == nullptr) return EINVAL;
+  DarwinArtNetworkProxyFacts facts{};
+  facts.abi_version = 1;
+  facts.struct_size = sizeof(facts);
+  CFDictionaryRef proxies = SCDynamicStoreCopyProxies(nullptr);
+  if (proxies != nullptr) {
+    // A PAC URL decides per URL, so it takes precedence as on macOS.
+    if (ProxyEnabled(proxies, kSCPropNetProxiesProxyAutoConfigEnable)) {
+      CopyString(CFDictionaryGetValue(proxies, kSCPropNetProxiesProxyAutoConfigURLString),
+                 facts.pac_url, sizeof(facts.pac_url));
+      if (facts.pac_url[0] != '\0') facts.kind = kDarwinArtNetworkProxyPac;
+    }
+    if (facts.kind == kDarwinArtNetworkProxyNone) {
+      // Android's ProxyInfo is one proxy for HTTP and HTTPS alike.
+      const bool https = ProxyEnabled(proxies, kSCPropNetProxiesHTTPSEnable);
+      const bool http = ProxyEnabled(proxies, kSCPropNetProxiesHTTPEnable);
+      if (http || https) {
+        CopyString(CFDictionaryGetValue(proxies, http ? kSCPropNetProxiesHTTPProxy
+                                                      : kSCPropNetProxiesHTTPSProxy),
+                   facts.host, sizeof(facts.host));
+        facts.port = static_cast<uint32_t>(
+            ProxyPort(proxies, http ? kSCPropNetProxiesHTTPPort : kSCPropNetProxiesHTTPSPort));
+        if (facts.host[0] != '\0' && facts.port != 0) {
+          facts.kind = kDarwinArtNetworkProxyDirect;
+        }
+      }
+    }
+    CFTypeRef exceptions = CFDictionaryGetValue(proxies, kSCPropNetProxiesExceptionsList);
+    if (facts.kind != kDarwinArtNetworkProxyNone && exceptions != nullptr &&
+        CFGetTypeID(exceptions) == CFArrayGetTypeID()) {
+      CFArrayRef list = static_cast<CFArrayRef>(exceptions);
+      size_t used = 0;
+      for (CFIndex i = 0; i < CFArrayGetCount(list); ++i) {
+        char pattern[256];
+        CopyString(CFArrayGetValueAtIndex(list, i), pattern, sizeof(pattern));
+        const size_t length = std::strlen(pattern);
+        if (length == 0 || used + length + 2 > sizeof(facts.exclusions)) continue;
+        if (used != 0) facts.exclusions[used++] = ',';
+        std::memcpy(facts.exclusions + used, pattern, length);
+        used += length;
+        facts.exclusions[used] = '\0';
+      }
+    }
+    CFRelease(proxies);
+  }
+  *output = facts;
+  return 0;
+}
+
 extern "C" int darwin_art_network_link_facts_snapshot(
     DarwinArtNetworkLinkFacts* output) {
   if (output == nullptr) return EINVAL;

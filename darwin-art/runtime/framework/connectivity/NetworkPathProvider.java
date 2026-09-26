@@ -21,6 +21,27 @@ public final class NetworkPathProvider implements ConnectivityState, AutoCloseab
         }
     }
 
+    /** The macOS proxy configuration of the default network path. */
+    @Override
+    public android.net.ProxyInfo activeNetworkProxy() {
+        String[] proxy = nativeHostProxy();
+        if (proxy == null || proxy.length != 5) return null;
+        switch (proxy[0]) {
+            case "1": {
+                int port = Integer.parseInt(proxy[2]);
+                java.util.List<String> exclusions = proxy[3].isEmpty()
+                        ? java.util.List.of() : Arrays.asList(proxy[3].split(","));
+                return android.net.ProxyInfo.buildDirectProxy(proxy[1], port, exclusions);
+            }
+            case "2":
+                return android.net.ProxyInfo.buildPacProxy(android.net.Uri.parse(proxy[4]));
+            default:
+                return null;
+        }
+    }
+
+    private static native String[] nativeHostProxy();
+
     private synchronized String[] nativeSnapshot() {
         if (handle == 0) throw new IllegalStateException("network path monitor is closed");
         return nativeSnapshot(handle);

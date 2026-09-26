@@ -14,6 +14,14 @@ public interface ConnectivityState {
         return ConnectivitySnapshot.fromMetered(isActiveNetworkMetered());
     }
 
+    /**
+     * The HTTP proxy of the active network (LinkProperties.getHttpProxy), or
+     * null when the network uses none.
+     */
+    default android.net.ProxyInfo activeNetworkProxy() {
+        return null;
+    }
+
     /** Registers for system-owned state publication when the provider is observable. */
     default void addListener(Listener listener) {}
 

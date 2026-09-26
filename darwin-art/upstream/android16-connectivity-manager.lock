@@ -20,3 +20,7 @@ LISTEN_FOR_NETWORK_SIGNATURE='android.net.NetworkRequest listenForNetwork(androi
 LISTEN_FOR_NETWORK_TRANSACTION=45
 RELEASE_NETWORK_REQUEST_SIGNATURE='void releaseNetworkRequest(android.net.NetworkRequest)'
 RELEASE_NETWORK_REQUEST_TRANSACTION=47
+GET_GLOBAL_PROXY_SIGNATURE='android.net.ProxyInfo getGlobalProxy()'
+GET_GLOBAL_PROXY_TRANSACTION=30
+GET_PROXY_FOR_NETWORK_SIGNATURE='android.net.ProxyInfo getProxyForNetwork(android.net.Network)'
+GET_PROXY_FOR_NETWORK_TRANSACTION=32

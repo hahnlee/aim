@@ -29,6 +29,12 @@ public final class ConnectivityManagerEndpointTest {
     private static final class TestState implements ConnectivityState {
         boolean metered;
         int reads;
+        android.net.ProxyInfo proxy;
+
+        @Override
+        public android.net.ProxyInfo activeNetworkProxy() {
+            return proxy;
+        }
 
         TestState(boolean value) {
             metered = value;
@@ -573,6 +579,36 @@ public final class ConnectivityManagerEndpointTest {
         check(state.reads == 0, "unsupported transaction read connectivity state");
     }
 
+    private static void testProxyReplies() throws Exception {
+        TestPermissions context = new TestPermissions();
+        TestState state = new TestState(false);
+        state.proxy = new android.net.ProxyInfo("proxy.example", 3128);
+        ConnectivityManagerEndpoint endpoint = new ConnectivityManagerEndpoint(context, state);
+        Parcel data = request();
+        data.writeTypedObject(new Network(100), 0);
+        Parcel reply = Parcel.obtain();
+        check(endpoint.onTransact(ConnectivityManagerEndpoint.TRANSACTION_GET_PROXY_FOR_NETWORK,
+                data, reply, 0), "getProxyForNetwork returned false");
+        check(reply.hasNoException(), "getProxyForNetwork omitted writeNoException");
+        android.net.ProxyInfo proxy = reply.readTypedObject(android.net.ProxyInfo.CREATOR);
+        check(proxy != null && "proxy.example".equals(proxy.getHost()) && proxy.getPort() == 3128,
+                "network proxy was not the host provider's");
+        Parcel global = Parcel.obtain();
+        check(endpoint.onTransact(ConnectivityManagerEndpoint.TRANSACTION_GET_GLOBAL_PROXY,
+                request(), global, 0), "getGlobalProxy returned false");
+        check(global.hasNoException() && global.readTypedObject(android.net.ProxyInfo.CREATOR) == null,
+                "a global proxy override was reported");
+        state.proxy = null;
+        Parcel none = request();
+        none.writeTypedObject(new Network(100), 0);
+        Parcel noneReply = Parcel.obtain();
+        endpoint.onTransact(ConnectivityManagerEndpoint.TRANSACTION_GET_PROXY_FOR_NETWORK,
+                none, noneReply, 0);
+        check(noneReply.hasNoException()
+                && noneReply.readTypedObject(android.net.ProxyInfo.CREATOR) == null,
+                "a direct network reported a proxy");
+    }
+
     private static void testConstructorRequirements() {
         TestPermissions context = new TestPermissions();
         TestState state = new TestState(true);
@@ -616,6 +652,7 @@ public final class ConnectivityManagerEndpointTest {
         testPermissionDeniedBeforeStateRead();
         testTokenAndNoArguments();
         testInterfaceAndUnsupportedTransactions();
+        testProxyReplies();
         testConstructorRequirements();
         testCallbackLifecycle();
         testDefaultCallbackAllowsNullCapabilities();
