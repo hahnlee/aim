@@ -1,6 +1,6 @@
 //! The original linker64 and linkerconfig of the pinned image, with and
 //! without a translation cache, and page sharing of translated text across
-//! processes. Skipped when the partial runtime image is not installed.
+//! processes. Skipped when the extracted image is absent.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::symlink;
@@ -8,16 +8,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const PARTIAL_ROOT: &str = "/Users/hahnlee/Library/Application Support/DarwinART/runtime-images/0017da01f48cdff3b5e7d130287753330ddf28a06c114dc2c04a450f1772c876/root";
+/// The extracted pinned image (`tools/android-image-extract`).
+const IMAGE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../_build/android16-image-full"
+);
 const LINKER: &str = "/apex/com.android.runtime/bin/linker64";
 const LINKERCONFIG: &str = "/apex/com.android.runtime/bin/linkerconfig";
 
 fn root() -> Option<&'static Path> {
-    let p = Path::new(PARTIAL_ROOT);
+    let p = Path::new(IMAGE);
     if p.join(LINKER.trim_start_matches('/')).exists() {
         Some(p)
     } else {
-        eprintln!("skipped: partial image not installed at {PARTIAL_ROOT}");
+        eprintln!("skipped: extracted image not found at {IMAGE}");
         None
     }
 }
@@ -189,7 +193,7 @@ fn exec_file_regions(pid: i32, under: &Path) -> BTreeMap<String, Mapping> {
     out
 }
 
-/// Copy a guest path from the partial image into `dst`, recreating guest
+/// Copy a guest path from the extracted image into `dst`, recreating guest
 /// symlinks (which are absolute in the image's own namespace).
 fn mirror(src: &Path, dst: &Path, guest: &str) {
     let rel = guest.trim_start_matches('/');
@@ -242,7 +246,6 @@ fn translated_text_pages_are_shared_across_processes() {
         "/system/lib64/libdl.so",
         "/system/lib64/liblog.so",
         "/system/lib64/libc++.so",
-        "/linkerconfig/com.android.runtime/ld.config.txt",
     ] {
         mirror(src, &root, g);
     }

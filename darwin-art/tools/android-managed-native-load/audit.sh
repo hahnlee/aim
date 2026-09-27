@@ -175,7 +175,7 @@ unzip -p "$core_oj" classes.dex > "$tmp/core-oj.dex"
 [[ "$(sha "$tmp/core-oj.dex")" == "$CORE_OJ_DEX_SHA256" ]] ||
   fail 'prebuilt core-oj classes.dex changed'
 
-sdk="${ANDROID_HOME:-/Users/hahnlee/Library/Android/sdk}"
+sdk="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 dexdump="$sdk/build-tools/35.0.0/dexdump"
 d8="$sdk/build-tools/35.0.0/d8"
 android_jar="$sdk/platforms/android-35/android.jar"

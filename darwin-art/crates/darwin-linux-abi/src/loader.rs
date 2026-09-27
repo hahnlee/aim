@@ -6,7 +6,8 @@
 //! A file with a translation-cache entry (or one with nothing to rewrite) is
 //! mapped file-backed: read-only segments shared, writable ones
 //! copy-on-write. Anything else is copied and rewritten before it becomes
-//! executable (see `xrt`).
+//! executable (see `xrt`), and a BoringSSL FIPS module in it gets its
+//! integrity hash recomputed (see `xlate::fips`).
 
 use std::collections::BTreeMap;
 use std::ffi::CStr;
@@ -314,7 +315,23 @@ fn map_copied(
                 .iter()
                 .map(|s| (bias + s.vaddr, s.kind, s.rt))
                 .collect();
-            patch::rewrite_sites(&sites, bias + h.lo, bias + h.hi, true)
+            let stats = patch::rewrite_sites(&sites, bias + h.lo, bias + h.hi, true);
+            if let Some(m) = &a.fips {
+                // Every segment is still mapped read-write.
+                // SAFETY: the module and its hash lie in the loaded segments.
+                unsafe {
+                    let mem = |(lo, hi): (u64, u64)| {
+                        std::slice::from_raw_parts((bias + lo) as *const u8, (hi - lo) as usize)
+                    };
+                    let hash = xlate::fips::digest(mem(m.text), m.rodata.map(mem));
+                    std::ptr::copy_nonoverlapping(
+                        hash.as_ptr(),
+                        (bias + m.hash_vaddr) as *mut u8,
+                        32,
+                    );
+                }
+            }
+            stats
         }
         None => {
             let mut stats = patch::PatchStats::default();

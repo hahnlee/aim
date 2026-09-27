@@ -27,8 +27,8 @@ enum FileState {
     HasTranslation(PathBuf),
     /// An original the cache says needs no rewriting.
     Identity,
-    /// An original with no usable entry; sites once analyzed.
-    Uncached(Option<Arc<Vec<xlate::Site>>>),
+    /// An original with no usable entry; analyzed once.
+    Uncached(Option<Arc<xlate::Analysis>>),
     /// Not an AArch64 ELF (or not parseable as one).
     Other,
 }
@@ -156,9 +156,9 @@ pub fn on_open(fd: i32, host: &CStr, guest: &str, host_flags: i32) {
 pub enum ExecSource {
     /// Map the file itself, shared and read-only, then make it executable.
     Shared,
-    /// Copy into anonymous memory and rewrite these sites (file offsets);
-    /// None: no metadata, scan every word.
-    LoadTime(Option<Arc<Vec<xlate::Site>>>),
+    /// Copy into anonymous memory and rewrite the analysis's sites (file
+    /// offsets); None: no metadata, scan every word.
+    LoadTime(Option<Arc<xlate::Analysis>>),
 }
 
 fn read_fd(fd: i32, size: u64) -> Option<Vec<u8>> {
@@ -182,10 +182,10 @@ fn read_fd(fd: i32, size: u64) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn analyze_fd(fd: i32, size: u64) -> Option<Arc<Vec<xlate::Site>>> {
+fn analyze_fd(fd: i32, size: u64) -> Option<Arc<xlate::Analysis>> {
     let bytes = read_fd(fd, size)?;
     let elf = xlate::elf::parse(&bytes).ok()?;
-    Some(Arc::new(xlate::analyze(&elf).sites))
+    Some(Arc::new(xlate::analyze(&elf)))
 }
 
 pub fn exec_source(fd: i32) -> ExecSource {
@@ -194,7 +194,7 @@ pub fn exec_source(fd: i32) -> ExecSource {
     };
     match state(&st) {
         Some(FileState::Translated { .. } | FileState::Identity) => ExecSource::Shared,
-        Some(FileState::Uncached(Some(sites))) => ExecSource::LoadTime(Some(sites)),
+        Some(FileState::Uncached(Some(a))) => ExecSource::LoadTime(Some(a)),
         Some(FileState::Other) => ExecSource::LoadTime(None),
         s => {
             // Not seen at open (or opened writable): a published cache file
@@ -205,16 +205,16 @@ pub fn exec_source(fd: i32) -> ExecSource {
             {
                 return ExecSource::Shared;
             }
-            let sites = analyze_fd(fd, st.size);
+            let analysis = analyze_fd(fd, st.size);
             set_state(
                 st,
-                match (&s, &sites) {
+                match (&s, &analysis) {
                     (Some(FileState::HasTranslation(p)), _) => FileState::HasTranslation(p.clone()),
-                    (_, Some(sites)) => FileState::Uncached(Some(sites.clone())),
+                    (_, Some(a)) => FileState::Uncached(Some(a.clone())),
                     (_, None) => FileState::Other,
                 },
             );
-            ExecSource::LoadTime(sites)
+            ExecSource::LoadTime(analysis)
         }
     }
 }

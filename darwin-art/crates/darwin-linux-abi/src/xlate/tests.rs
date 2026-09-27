@@ -536,3 +536,97 @@ fn cache_key_is_stable() {
     let s = Synth::new(vec![a64::SVC0, RET]).build();
     assert_eq!(cache_key(&s), key_for_digest(&sha256_hex(&s)));
 }
+
+// ---- BoringSSL FIPS module hash --------------------------------------------
+
+#[test]
+fn fips_digest_is_hmac_sha256_with_the_zero_key() {
+    // Python: hmac.new(bytes(64), msg, hashlib.sha256)
+    assert_eq!(
+        hex(&fips::digest(b"abc", None)),
+        "fd7adb152c05ef80dccf50a1fa4c05d5a3ec6da95575fc312ae7c5d091836351"
+    );
+    // Shared builds prefix text and rodata with their u64 LE lengths.
+    assert_eq!(
+        hex(&fips::digest(b"abc", Some(b"de"))),
+        "8a5e8d08ebbe19610e7ff78b85222c37eb4d8f9de33dc4a95e54e4230552c886"
+    );
+}
+
+/// Where the synthetic module stores its hash: the R segment, after the
+/// headers and outside the hashed ranges.
+const HASH_AT: usize = 0x300;
+
+/// A file whose module is text words [0, 4) and "rodata" words [4, 6), with
+/// a TPIDR_EL0 read inside the module, and either the hash BoringSSL's build
+/// would have stored or garbage.
+fn fips_file(good_hash: bool) -> Vec<u8> {
+    let text = vec![
+        MOV_X8_172,
+        a64::MRS_TPIDR_EL0 | 3,
+        RET,
+        RET,
+        0x1234_5678,
+        0x9abc_def0,
+    ];
+    let mut s = Synth::new(text);
+    s.syms.push(("f", 0, 4, elf::STT_FUNC));
+    s.syms.push(("BORINGSSL_bcm_text_start", 0, 0, 0));
+    s.syms.push(("BORINGSSL_bcm_text_end", 4, 0, 0));
+    s.syms.push(("BORINGSSL_bcm_rodata_start", 4, 0, 0));
+    s.syms.push(("BORINGSSL_bcm_rodata_end", 6, 0, 0));
+    let mut b = s.build();
+    let t = TEXT_VADDR as usize;
+    let h = if good_hash {
+        fips::digest(&b[t..t + 16], Some(&b[t + 16..t + 24]))
+    } else {
+        [0x5a; 32]
+    };
+    b[HASH_AT..HASH_AT + 32].copy_from_slice(&h);
+    b
+}
+
+#[test]
+fn fips_module_hash_is_reinjected_after_rewriting() {
+    let original = fips_file(true);
+    let m = analyze(&elf::parse(&original).unwrap()).fips.unwrap();
+    assert_eq!(m.text, (TEXT_VADDR, TEXT_VADDR + 16));
+    assert_eq!(m.rodata, Some((TEXT_VADDR + 16, TEXT_VADDR + 24)));
+    assert_eq!(
+        (m.hash_offset, m.hash_vaddr),
+        (HASH_AT as u64, HASH_AT as u64)
+    );
+
+    let (o, r) = translated(&original);
+    assert!(r.fips_rehashed);
+    let out = o.to_bytes();
+    let t = TEXT_VADDR as usize;
+    assert_ne!(
+        out[t..t + 16],
+        original[t..t + 16],
+        "the module was rewritten"
+    );
+    let want = fips::digest(&out[t..t + 16], Some(&out[t + 16..t + 24]));
+    assert_eq!(out[HASH_AT..HASH_AT + 32], want);
+    assert_ne!(want, m.original);
+    // The stubs lie outside the hashed ranges.
+    assert!(!m.covers(r.stub_vaddr, r.stub_vaddr + r.stub_size));
+    // Past the ELF header, only the rewritten word and the hash changed.
+    let diff: Vec<usize> = (64..o.patched.len())
+        .filter(|&i| o.patched[i] != original[i])
+        .collect();
+    assert!(
+        diff.iter()
+            .all(|&i| (HASH_AT..HASH_AT + 32).contains(&i) || (t + 4..t + 8).contains(&i)),
+        "{diff:x?}"
+    );
+}
+
+#[test]
+fn a_fips_hash_that_does_not_verify_is_left_alone() {
+    let original = fips_file(false);
+    assert!(analyze(&elf::parse(&original).unwrap()).fips.is_none());
+    let (o, r) = translated(&original);
+    assert!(!r.fips_rehashed);
+    assert_eq!(o.patched[HASH_AT..HASH_AT + 32], [0x5a; 32]);
+}

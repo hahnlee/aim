@@ -109,6 +109,10 @@ programs, and implement only what lies below it.
    - **CTR_EL0:** reads return a fixed value (64-byte lines, IDC/DIC clear).
    - **What the guest sees:** `fstat` reports the translated file's size and
      inode.
+   - **Integrity hashes:** files carrying a BoringSSL FIPS module get their
+     integrity hash re-injected, as BoringSSL's build does (found by its
+     `BORINGSSL_bcm_*` marker symbols; load-time rewriting does the same in
+     memory).
    - **Measured on the full image:** 1,721 ELF files translate in 8.2 s
      (520 MiB cache). With a warm cache, starting `linker64 linkerconfig`
      takes 7.8 ms against 12.2 ms with load-time patching. Text pages are
