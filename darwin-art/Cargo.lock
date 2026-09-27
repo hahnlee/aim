@@ -293,6 +293,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "darwin-android-init"
+version = "0.1.0"
+
+[[package]]
 name = "darwin-art-abi"
 version = "0.1.0"
 

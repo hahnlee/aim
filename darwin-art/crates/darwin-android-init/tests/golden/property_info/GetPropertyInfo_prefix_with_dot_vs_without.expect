@@ -1,0 +1,6 @@
+persist.notradio	1st	1st
+persist.radio	2nd	2nd
+persist.radio.subproperty	2nd	2nd
+persist.radiowords	2nd	2nd
+persist.radio.long.property.prefix.match	2nd	2nd
+persist.radio.long.property.exact.match	3rd	3rd
