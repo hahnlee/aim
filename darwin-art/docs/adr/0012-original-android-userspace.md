@@ -96,8 +96,22 @@ programs, and implement only what lies below it.
    the translator version. The loader maps them file-backed, so pages are
    shared across processes, no code is patched while threads run, and
    code/data identification can use section and symbol information. Only code
-   created at run time (the JIT, or an app's own mappings) is rewritten when
-   it is mapped.
+   without a cache entry is rewritten when it is mapped: code created at run
+   time (an app's own JIT), libraries inside APKs, and 4 KiB-aligned ELF files.
+
+   Translation ABI:
+   - **Stubs:** each translated file gets one extra R+X PT_LOAD appended
+     after its last segment. It holds the moved program header table and all
+     stubs, so the original linker64 reserves and maps them itself.
+   - **Host state:** stubs reach it only through Darwin TSD keys 764–767, use
+     `b` (never `bl`) and never touch x18.
+   - **CTR_EL0:** reads return a fixed value (64-byte lines, IDC/DIC clear).
+   - **What the guest sees:** `fstat` reports the translated file's size and
+     inode.
+   - **Measured on the full image:** 1,721 ELF files translate in 8.2 s
+     (520 MiB cache). With a warm cache, starting `linker64 linkerconfig`
+     takes 7.8 ms against 12.2 ms with load-time patching. Text pages are
+     shared across processes (same vnode and VM object).
 
 Performance is handled as explicit exceptions, never by patching the original
 userspace. A gap is closed in the syscall layer, the binder driver, a HAL or
@@ -155,9 +169,9 @@ of our own.
   0.9 ns against 0.3 ns native.
 - **Syscall redirection:** each `svc #0` becomes a `b` to a per-site stub
   within ±128 MiB. x30 is kept, as Linux does, and x18 is never used. A `brk`
-  plus SIGTRAP path covers sites out of range. The boundary costs about 18 ns
-  per call; a syscall that enters the Darwin kernel costs about 23 ns more
-  than natively. Code mapped executable later is rewritten the same way.
+  plus SIGTRAP path covers sites out of range. With the translation cache,
+  simple calls (getpid, read, write and similar) take a lean path of about
+  3 ns. Calls that run host code keep the full save, at about 21 ns.
 - **First run:** the original `linker64` runs on the syscall layer
   (`crates/darwin-linux-abi`, `linux-run`). It loads the image's libraries
   through the original linker configuration and runs the original

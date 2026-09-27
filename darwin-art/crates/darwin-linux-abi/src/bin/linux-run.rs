@@ -1,23 +1,31 @@
-//! `linux-run [--root DIR] [--trace] PROGRAM [ARGS...]`
+//! `linux-run [--root DIR] [--cache DIR] [--trace] PROGRAM [ARGS...]`
 //!
 //! Runs an original Android arm64 ELF program in this process on the Linux
 //! syscall layer. PROGRAM is a guest path, resolved under `--root`.
+//!
+//! `--cache` is the translation cache directory (default
+//! `~/Library/Caches/DarwinART/translated`, filled by `linux-translate`).
+//! Files without an entry are rewritten at load time.
 
 use std::path::PathBuf;
 
 fn usage() -> ! {
-    eprintln!("usage: linux-run [--root DIR] [--trace] PROGRAM [ARGS...]");
+    eprintln!("usage: linux-run [--root DIR] [--cache DIR] [--trace] PROGRAM [ARGS...]");
     std::process::exit(2);
 }
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut root = PathBuf::from("/");
+    let mut cache = darwin_linux_abi::cache::Cache::default_dir();
     let mut trace = false;
     let program = loop {
         match args.next() {
             Some(a) if a == "--root" => {
                 root = args.next().map(PathBuf::from).unwrap_or_else(|| usage())
+            }
+            Some(a) if a == "--cache" => {
+                cache = Some(args.next().map(PathBuf::from).unwrap_or_else(|| usage()))
             }
             Some(a) if a == "--trace" => trace = true,
             Some(a) if a == "--help" || a == "-h" => usage(),
@@ -33,6 +41,7 @@ fn main() {
         argv,
         envp: darwin_linux_abi::default_android_env(),
         trace,
+        cache,
     });
     eprintln!("linux-run: {err}");
     std::process::exit(127);

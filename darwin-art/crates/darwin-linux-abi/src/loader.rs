@@ -2,13 +2,20 @@
 //! place PT_LOAD segments at a load bias honouring their alignment, load the
 //! PT_INTERP interpreter the same way, and build the initial stack
 //! (argc, argv, envp, auxv).
+//!
+//! A file with a translation-cache entry (or one with nothing to rewrite) is
+//! mapped file-backed: read-only segments shared, writable ones
+//! copy-on-write. Anything else is copied and rewritten before it becomes
+//! executable (see `xrt`).
 
 use std::collections::BTreeMap;
 use std::ffi::CStr;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
+use std::path::Path;
 
 use crate::elf::{self, PF_R, PF_W, PF_X, PT_INTERP, PT_LOAD, PT_PHDR};
-use crate::patch;
+use crate::{patch, xlate, xrt};
 
 pub const PAGE: u64 = 16384;
 
@@ -27,6 +34,9 @@ pub struct Image {
     pub phnum: u64,
     pub end: u64,
     pub interp: Option<String>,
+    /// Where the code came from (translation cache, original, load time).
+    pub source: String,
+    /// Sites rewritten at load time (zero for file-backed images).
     pub stats: patch::PatchStats,
 }
 
@@ -44,10 +54,16 @@ fn prot_of(flags: u32) -> i32 {
     p
 }
 
-/// Map an ELF file from the host path `host`; `name` labels it in diagnostics.
-pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
-    let path = host.to_str().map_err(|e| e.to_string())?;
-    let file = std::fs::File::open(path).map_err(|e| format!("{name}: {e}"))?;
+struct Headers {
+    hdr: elf::Header,
+    phdrs: Vec<elf::Phdr>,
+    loads: Vec<elf::Phdr>,
+    lo: u64,
+    hi: u64,
+    align: u64,
+}
+
+fn read_headers(file: &std::fs::File, name: &str) -> Result<Headers, String> {
     let mut head = vec![0u8; 64];
     file.read_exact_at(&mut head, 0)
         .map_err(|e| format!("{name}: {e}"))?;
@@ -57,7 +73,6 @@ pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
     file.read_exact_at(&mut buf, 0)
         .map_err(|e| format!("{name}: {e}"))?;
     let phdrs = elf::parse_phdrs(&buf, &hdr)?;
-
     let loads: Vec<_> = phdrs
         .iter()
         .filter(|p| p.p_type == PT_LOAD)
@@ -74,16 +89,26 @@ pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
             "{name}: PT_LOAD alignment {align:#x} is not a power of two"
         ));
     }
-    let span = hi - lo;
+    Ok(Headers {
+        hdr,
+        phdrs,
+        loads,
+        lo,
+        hi,
+        align,
+    })
+}
 
-    // Reserve the whole span (plus alignment slack for ET_DYN), like the
-    // kernel's total_mapping_size reservation.
-    let bias = if hdr.e_type == elf::ET_DYN {
+/// Reserve the whole span (plus alignment slack for ET_DYN), like the
+/// kernel's total_mapping_size reservation. Returns the load bias.
+fn reserve(h: &Headers, name: &str) -> Result<u64, String> {
+    let span = h.hi - h.lo;
+    if h.hdr.e_type == elf::ET_DYN {
         // SAFETY: fresh PROT_NONE reservation.
         let r = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
-                (span + align) as usize,
+                (span + h.align) as usize,
                 libc::PROT_NONE,
                 libc::MAP_PRIVATE | libc::MAP_ANON,
                 -1,
@@ -94,23 +119,23 @@ pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
             return Err(format!("{name}: cannot reserve {span:#x} bytes"));
         }
         let r = r as u64;
-        let start = (r + align - 1) & !(align - 1);
+        let start = (r + h.align - 1) & !(h.align - 1);
         // SAFETY: trimming our own reservation.
         unsafe {
             if start > r {
                 libc::munmap(r as *mut _, (start - r) as usize);
             }
-            let tail = r + span + align - (start + span);
+            let tail = r + span + h.align - (start + span);
             if tail > 0 {
                 libc::munmap((start + span) as *mut _, tail as usize);
             }
         }
-        start - lo
+        Ok(start - h.lo)
     } else {
         // SAFETY: ET_EXEC must live at its link address.
         let r = unsafe {
             libc::mmap(
-                lo as *mut _,
+                h.lo as *mut _,
                 span as usize,
                 libc::PROT_NONE,
                 libc::MAP_PRIVATE | libc::MAP_ANON,
@@ -118,17 +143,137 @@ pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
                 0,
             )
         };
-        if r as u64 != lo {
-            return Err(format!("{name}: ET_EXEC range {lo:#x} is not available"));
+        if r as u64 != h.lo {
+            return Err(format!(
+                "{name}: ET_EXEC range {:#x} is not available",
+                h.lo
+            ));
         }
-        0
-    };
+        Ok(0)
+    }
+}
 
+/// Whether every PT_LOAD can be mapped from the file page by page.
+fn file_mappable(h: &Headers) -> bool {
+    h.loads
+        .iter()
+        .all(|p| p.p_align >= PAGE && p.p_vaddr % PAGE == p.p_offset % PAGE)
+        && h.loads
+            .windows(2)
+            .all(|w| page_up(w[0].p_vaddr + w[0].p_memsz) <= page_down(w[1].p_vaddr))
+}
+
+/// Map an ELF file from the host path `host`; `name` labels it in diagnostics.
+pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
+    let path = host.to_str().map_err(|e| e.to_string())?;
+    if let xrt::LoaderSource::File(mapped, what) = xrt::loader_source(Path::new(path)) {
+        let file = std::fs::File::open(&mapped).map_err(|e| format!("{name}: {e}"))?;
+        let h = read_headers(&file, name)?;
+        if file_mappable(&h) {
+            let bias = reserve(&h, name)?;
+            map_file_backed(&file, &h, bias, name)?;
+            let source = format!("{what}: {}", mapped.display());
+            return finish(&file, h, bias, name, source, patch::PatchStats::default());
+        }
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("{name}: {e}"))?;
+    let h = read_headers(&file, name)?;
+    let bias = reserve(&h, name)?;
+    let stats = map_copied(&file, &h, bias, name)?;
+    finish(&file, h, bias, name, "load-time rewrite".into(), stats)
+}
+
+fn map_file_backed(file: &std::fs::File, h: &Headers, bias: u64, name: &str) -> Result<(), String> {
+    let fd = file.as_raw_fd();
+    for p in &h.loads {
+        let start = page_down(bias + p.p_vaddr);
+        let file_end = bias + p.p_vaddr + p.p_filesz;
+        let mem_end = page_up(bias + p.p_vaddr + p.p_memsz);
+        let writable = p.p_flags & PF_W != 0;
+        if p.p_filesz > 0 {
+            let len = page_up(file_end) - start;
+            let (initial, flags) = if writable {
+                (libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE)
+            } else {
+                // Read-only first: Darwin refuses PROT_EXEC on an unsigned
+                // file mapping but allows mprotect to it (experiments/p0/07).
+                (libc::PROT_READ, libc::MAP_SHARED)
+            };
+            // SAFETY: mapping the file inside our reservation.
+            let r = unsafe {
+                libc::mmap(
+                    start as *mut _,
+                    len as usize,
+                    initial,
+                    flags | libc::MAP_FIXED,
+                    fd,
+                    page_down(p.p_offset) as i64,
+                )
+            };
+            if r == libc::MAP_FAILED {
+                return Err(format!(
+                    "{name}: cannot map segment at {start:#x}: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if writable && page_up(file_end) > file_end {
+                // SAFETY: zeroing the start of bss in the private page.
+                unsafe {
+                    std::ptr::write_bytes(
+                        file_end as *mut u8,
+                        0,
+                        (page_up(file_end) - file_end) as usize,
+                    )
+                };
+            }
+        }
+        let anon_start = if p.p_filesz > 0 {
+            page_up(file_end)
+        } else {
+            start
+        };
+        if mem_end > anon_start {
+            // SAFETY: anonymous bss inside our reservation.
+            let r = unsafe {
+                libc::mmap(
+                    anon_start as *mut _,
+                    (mem_end - anon_start) as usize,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_FIXED,
+                    -1,
+                    0,
+                )
+            };
+            if r == libc::MAP_FAILED {
+                return Err(format!("{name}: cannot map bss at {anon_start:#x}"));
+            }
+        }
+        let prot = prot_of(p.p_flags);
+        // SAFETY: final protection of the segment we mapped.
+        if unsafe { libc::mprotect(start as *mut _, (mem_end - start) as usize, prot) } != 0 {
+            return Err(format!(
+                "{name}: mprotect {start:#x} failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Copy the segments into anonymous memory and rewrite the code before it
+/// becomes executable (the no-cache path).
+fn map_copied(
+    file: &std::fs::File,
+    h: &Headers,
+    bias: u64,
+    name: &str,
+) -> Result<patch::PatchStats, String> {
+    let span = h.hi - h.lo;
     // Populate: every page writable while file contents are copied in.
     // SAFETY: remapping inside our reservation.
     let r = unsafe {
         libc::mmap(
-            (bias + lo) as *mut _,
+            (bias + h.lo) as *mut _,
             span as usize,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_FIXED,
@@ -141,7 +286,7 @@ pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
     }
     // Pages between segments stay inaccessible, as with the kernel loader.
     let mut page_prot: BTreeMap<u64, i32> = BTreeMap::new();
-    for p in &loads {
+    for p in &h.loads {
         let dst = bias + p.p_vaddr;
         // SAFETY: dst..dst+memsz lies within the RW mapping above.
         let seg = unsafe { std::slice::from_raw_parts_mut(dst as *mut u8, p.p_filesz as usize) };
@@ -153,16 +298,34 @@ pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
             pg += PAGE;
         }
     }
-    let mut stats = patch::PatchStats::default();
-    for p in loads.iter().filter(|p| p.p_flags & PF_X != 0) {
-        let s = patch::rewrite_region(bias + p.p_vaddr, p.p_filesz);
-        stats.svc += s.svc;
-        stats.mrs_tp += s.mrs_tp;
-        stats.msr_tp += s.msr_tp;
-        stats.brk_fallback += s.brk_fallback;
-    }
-    let mut pg = bias + lo;
-    while pg < bias + hi {
+    // Sites from the translator's code/data identification; a blind scan of
+    // the executable segments only if the file cannot be analyzed.
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut whole = vec![0u8; len as usize];
+    let analysis = file
+        .read_exact_at(&mut whole, 0)
+        .ok()
+        .and_then(|_| xlate::elf::parse(&whole).ok())
+        .map(|e| xlate::analyze(&e));
+    let stats = match analysis {
+        Some(a) => {
+            let sites: Vec<_> = a
+                .sites
+                .iter()
+                .map(|s| (bias + s.vaddr, s.kind, s.rt))
+                .collect();
+            patch::rewrite_sites(&sites, bias + h.lo, bias + h.hi, true)
+        }
+        None => {
+            let mut stats = patch::PatchStats::default();
+            for p in h.loads.iter().filter(|p| p.p_flags & PF_X != 0) {
+                stats.add(&patch::rewrite_region(bias + p.p_vaddr, p.p_filesz));
+            }
+            stats
+        }
+    };
+    let mut pg = bias + h.lo;
+    while pg < bias + h.hi {
         let prot = page_prot.get(&pg).copied().unwrap_or(libc::PROT_NONE);
         // SAFETY: applying final protections inside our mapping.
         if unsafe { libc::mprotect(pg as *mut _, PAGE as usize, prot) } != 0 {
@@ -173,20 +336,30 @@ pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
         }
         pg += PAGE;
     }
-    crate::diag::register_module(bias + lo, bias + hi, name.to_string());
+    Ok(stats)
+}
 
-    let phdr = match phdrs.iter().find(|p| p.p_type == PT_PHDR) {
+fn finish(
+    file: &std::fs::File,
+    h: Headers,
+    bias: u64,
+    name: &str,
+    source: String,
+    stats: patch::PatchStats,
+) -> Result<Image, String> {
+    crate::diag::register_module(bias + h.lo, bias + h.hi, name.to_string());
+    let phdr = match h.phdrs.iter().find(|p| p.p_type == PT_PHDR) {
         Some(p) => bias + p.p_vaddr,
         None => {
             // The phdrs must be inside the first PT_LOAD's file image.
-            let first = loads[0];
-            if hdr.e_phoff < first.p_offset || hdr.e_phoff >= first.p_offset + first.p_filesz {
+            let first = h.loads[0];
+            if h.hdr.e_phoff < first.p_offset || h.hdr.e_phoff >= first.p_offset + first.p_filesz {
                 return Err(format!("{name}: program headers are not loaded"));
             }
-            bias + first.p_vaddr + (hdr.e_phoff - first.p_offset)
+            bias + first.p_vaddr + (h.hdr.e_phoff - first.p_offset)
         }
     };
-    let interp = match phdrs.iter().find(|p| p.p_type == PT_INTERP) {
+    let interp = match h.phdrs.iter().find(|p| p.p_type == PT_INTERP) {
         Some(p) => {
             let mut s = vec![0u8; p.p_filesz as usize];
             file.read_exact_at(&mut s, p.p_offset)
@@ -198,11 +371,12 @@ pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
     };
     Ok(Image {
         bias,
-        entry: bias + hdr.e_entry,
+        entry: bias + h.hdr.e_entry,
         phdr,
-        phnum: hdr.e_phnum as u64,
-        end: bias + hi,
+        phnum: h.hdr.e_phnum as u64,
+        end: bias + h.hi,
         interp,
+        source,
         stats,
     })
 }

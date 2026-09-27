@@ -47,9 +47,9 @@ pub fn getgid() -> i64 {
     unsafe { libc::getgid() as i64 }
 }
 
-/// Linux tid. The main thread's tid equals the pid; `clone` threads are
-/// future work.
-pub fn gettid() -> i64 {
+/// Linux tid of the calling host thread. The main thread's tid equals the
+/// pid; `clone` threads are future work.
+pub fn host_tid() -> i64 {
     // SAFETY: trivial.
     if unsafe { libc::pthread_main_np() } == 1 {
         return getpid();
@@ -60,12 +60,21 @@ pub fn gettid() -> i64 {
     (id & 0x3fff_ffff) as i64
 }
 
+/// gettid: the tid recorded for this guest thread (the lean path answers it
+/// without reaching here unless tracing).
+pub fn gettid() -> i64 {
+    host_tid()
+}
+
 pub fn set_tid_address(a: [u64; 6]) -> i64 {
     CLEAR_CHILD_TID.store(a[0], Ordering::Relaxed);
     gettid()
 }
 
 pub fn exit(a: [u64; 6]) -> i64 {
+    // Now off the guest stack: its deferred munmap (bionic's
+    // _exit_with_stack_teardown) can run.
+    crate::sys::run_deferred_unmaps();
     // Only the main thread exists so far; its exit ends the process.
     exit_group(a)
 }

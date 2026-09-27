@@ -1,14 +1,21 @@
 //! Memory syscalls: mmap, munmap, mprotect, madvise, brk.
 //!
-//! Private file mappings are materialized as anonymous memory filled with
-//! `pread`, so executable pages can be rewritten (see `patch`) and never
-//! depend on Darwin code-signing of file-backed pages. Shared file mappings
-//! go straight to Darwin `mmap`.
+//! - Private file mappings of translated files (and of originals with
+//!   nothing to rewrite) stay file-backed. Executable ones are mapped shared
+//!   and read-only, then made executable, so every process shares the same
+//!   pages (Darwin refuses PROT_EXEC in the mmap itself; experiments/p0/07).
+//! - Private file mappings of other files are materialized as anonymous
+//!   memory filled with `pread`, and rewritten (see `patch`) before they
+//!   become executable.
+//! - Shared file mappings go straight to Darwin `mmap`.
 
+use std::cell::RefCell;
 use std::sync::Mutex;
 
+use crate::context::GuestContext;
 use crate::errno::{self, EEXIST, EINVAL, ENOMEM};
 use crate::patch;
+use crate::xrt::{self, ExecSource};
 
 const PAGE: u64 = 16384;
 
@@ -50,22 +57,64 @@ fn host_mprotect(addr: u64, len: u64, prot: i32) -> i64 {
     errno::check(unsafe { libc::mprotect(addr as *mut _, len as usize, prot) } as i64)
 }
 
-/// Rewrite the code in a freshly populated executable range, then apply the
-/// final protection. The range must currently be readable and writable.
-fn finish_exec(addr: u64, len: u64, prot: u64) -> i64 {
-    let stats = patch::rewrite_region(addr, len);
-    if crate::sys::tracing() && (stats.svc + stats.mrs_tp + stats.msr_tp) > 0 {
+fn trace_stats(what: &str, addr: u64, len: u64, stats: &patch::PatchStats) {
+    if crate::sys::tracing() && stats.total() > 0 {
         eprintln!(
-            "[linux-abi] rewrote {:#x}..{:#x}: {} svc, {} mrs tpidr_el0, {} msr tpidr_el0, {} brk fallbacks",
+            "[linux-abi] {what} {:#x}..{:#x}: {} svc, {} mrs/{} msr tpidr_el0, {} scs, {} ctr_el0, {} brk fallbacks",
             addr,
             addr + len,
             stats.svc,
             stats.mrs_tp,
             stats.msr_tp,
+            stats.scs,
+            stats.ctr,
             stats.brk_fallback
         );
     }
-    host_mprotect(addr, len, host_prot(prot))
+}
+
+/// Fill `[b, b+len)` from `fd` at `off`.
+fn populate(b: u64, len: u64, fd: i32, off: u64) -> Result<(), i64> {
+    let mut done = 0u64;
+    while done < len {
+        // SAFETY: b..b+len is freshly mapped RW.
+        let n = unsafe {
+            libc::pread(
+                fd,
+                (b + done) as *mut _,
+                (len - done) as usize,
+                (off + done) as i64,
+            )
+        };
+        if n < 0 {
+            return Err(-(errno::last() as i64));
+        }
+        if n == 0 {
+            break;
+        }
+        done += n as u64;
+    }
+    Ok(())
+}
+
+/// Rewrite a freshly populated private file mapping (not executable yet)
+/// using the file's sites, or a scan when there is no metadata.
+fn rewrite_file_copy(b: u64, len: u64, off: u64, source: &ExecSource) {
+    let stats = match source {
+        ExecSource::LoadTime(Some(sites)) => {
+            let abs: Vec<_> = sites
+                .iter()
+                .filter(|s| s.offset >= off && s.offset + 4 <= off + len)
+                .map(|s| (b + (s.offset - off), s.kind, s.rt))
+                .collect();
+            patch::rewrite_sites(&abs, b, b + len, true)
+        }
+        // Already translated (or nothing to rewrite): a scan would only hit
+        // words the translator identified as data.
+        ExecSource::Shared => return,
+        ExecSource::LoadTime(None) => patch::rewrite_region(b, len),
+    };
+    trace_stats("rewrote", b, len, &stats);
 }
 
 pub fn mmap(a: [u64; 6]) -> i64 {
@@ -93,7 +142,13 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         hflags |= libc::MAP_NORESERVE;
     }
     let exec = prot & PROT_EXEC != 0;
-    let (base, need_exec_finish) = if kind == MAP_SHARED || kind == MAP_SHARED_VALIDATE {
+    let writable = prot & PROT_WRITE != 0;
+    // (base, what remains to do before returning)
+    enum Finish {
+        Nothing,
+        Protect,
+    }
+    let (base, finish) = if kind == MAP_SHARED || kind == MAP_SHARED_VALIDATE {
         let f = hflags | libc::MAP_SHARED | if anon { libc::MAP_ANON } else { 0 };
         match host_mmap(
             addr,
@@ -103,55 +158,86 @@ pub fn mmap(a: [u64; 6]) -> i64 {
             if anon { -1 } else { fd },
             off as i64,
         ) {
-            Ok(b) => (b, false),
+            Ok(b) => (b, Finish::Nothing),
             Err(e) => return e,
         }
     } else if kind == MAP_PRIVATE {
-        let populate = !anon;
-        let initial = if populate || exec {
-            libc::PROT_READ | libc::PROT_WRITE
+        let source = if !anon && exec && !writable {
+            Some(xrt::exec_source(fd))
         } else {
-            host_prot(prot)
+            None
         };
-        let b = match host_mmap(
-            addr,
-            len,
-            initial,
-            hflags | libc::MAP_PRIVATE | libc::MAP_ANON,
-            -1,
-            0,
-        ) {
-            Ok(b) => b,
-            Err(e) => return e,
-        };
-        if populate {
-            let mut done = 0u64;
-            while done < len {
-                // SAFETY: b..b+len is freshly mapped RW.
-                let n = unsafe {
-                    libc::pread(
-                        fd,
-                        (b + done) as *mut _,
-                        (len - done) as usize,
-                        (off + done) as i64,
-                    )
-                };
-                if n < 0 {
-                    let e = errno::last();
+        if let Some(ExecSource::Shared) = source {
+            // Translated (or nothing to rewrite): the file itself, shared.
+            let b = match host_mmap(
+                addr,
+                len,
+                libc::PROT_READ,
+                hflags | libc::MAP_SHARED,
+                fd,
+                off as i64,
+            ) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            crate::diag::register_fd_module(b, len, fd, off);
+            (b, Finish::Protect)
+        } else if !anon && !exec && xrt::is_shared_source(fd) {
+            // Data and read-only segments of such files: file-backed COW.
+            match host_mmap(
+                addr,
+                len,
+                host_prot(prot),
+                hflags | libc::MAP_PRIVATE,
+                fd,
+                off as i64,
+            ) {
+                Ok(b) => (b, Finish::Nothing),
+                Err(e) => return e,
+            }
+        } else {
+            let fill = !anon;
+            let initial = if fill || exec {
+                libc::PROT_READ | libc::PROT_WRITE
+            } else {
+                host_prot(prot)
+            };
+            let b = match host_mmap(
+                addr,
+                len,
+                initial,
+                hflags | libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            ) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            if fill {
+                if let Err(e) = populate(b, len, fd, off) {
                     // SAFETY: unmapping what we just mapped.
                     unsafe { libc::munmap(b as *mut _, len as usize) };
-                    return -(e as i64);
+                    return e;
                 }
-                if n == 0 {
-                    break;
+                if exec {
+                    crate::diag::register_fd_module(b, len, fd, off);
+                    let source = source.unwrap_or_else(|| xrt::exec_source(fd));
+                    rewrite_file_copy(b, len, off, &source);
                 }
-                done += n as u64;
+            } else if exec {
+                // Fresh anonymous code: nothing written yet, but scan anyway so
+                // the path is the same as mprotect's.
+                trace_stats("rewrote", b, len, &patch::rewrite_region(b, len));
             }
-            if exec {
-                crate::diag::register_fd_module(b, len, fd, off);
-            }
+            (
+                b,
+                if fill || exec {
+                    Finish::Protect
+                } else {
+                    Finish::Nothing
+                },
+            )
         }
-        (b, populate || exec)
     } else {
         return -(EINVAL as i64);
     };
@@ -160,34 +246,99 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         unsafe { libc::munmap(base as *mut _, len as usize) };
         return -(EEXIST as i64);
     }
-    if need_exec_finish {
-        let r = if exec {
-            finish_exec(base, len, prot)
-        } else {
-            host_mprotect(base, len, host_prot(prot))
-        };
-        if r < 0 {
-            return r;
+    match finish {
+        Finish::Nothing => {}
+        Finish::Protect => {
+            let r = host_mprotect(base, len, host_prot(prot));
+            if r < 0 {
+                return r;
+            }
         }
     }
     base as i64
 }
 
-pub fn munmap(a: [u64; 6]) -> i64 {
-    if a[0] & (PAGE - 1) != 0 {
-        return -(EINVAL as i64);
-    }
-    // SAFETY: guest-requested unmap of guest memory.
-    errno::check(unsafe { libc::munmap(a[0] as *mut _, page_up(a[1]) as usize) } as i64)
+thread_local! {
+    /// munmaps of this thread's own stack, run when the thread exits.
+    static DEFERRED_UNMAPS: RefCell<Vec<(u64, u64)>> = const { RefCell::new(Vec::new()) };
 }
 
+/// The syscall stub keeps x16, x17 and x30 in the 32 bytes below the guest
+/// sp until the syscall returns. bionic's `_exit_with_stack_teardown` unmaps
+/// the calling thread's own stack and then calls `exit`, so an munmap that
+/// covers that frame is deferred to thread exit (experiments/p0/02).
+pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
+    let (addr, len) = (a[0], page_up(a[1]));
+    if addr & (PAGE - 1) != 0 {
+        return -(EINVAL as i64);
+    }
+    let frame_lo = ctx.sp.saturating_sub(32);
+    if len > 0 && frame_lo < addr.saturating_add(len) && ctx.sp > addr {
+        DEFERRED_UNMAPS.with(|d| d.borrow_mut().push((addr, len)));
+        return 0;
+    }
+    // SAFETY: guest-requested unmap of guest memory.
+    errno::check(unsafe { libc::munmap(addr as *mut _, len as usize) } as i64)
+}
+
+/// Run the munmaps deferred by [`munmap`]; called on the host stack when the
+/// thread exits.
+pub fn run_deferred_unmaps() -> usize {
+    DEFERRED_UNMAPS.with(|d| {
+        let v = std::mem::take(&mut *d.borrow_mut());
+        for &(addr, len) in &v {
+            // SAFETY: the guest asked for this unmap; its thread is exiting.
+            unsafe { libc::munmap(addr as *mut _, len as usize) };
+        }
+        v.len()
+    })
+}
+
+/// Whether the region at `addr` is backed by a file.
+fn file_backed(addr: u64) -> bool {
+    let mut buf = [0u8; 16];
+    // SAFETY: proc_regionfilename writes at most buf.len() bytes.
+    unsafe {
+        libc::proc_regionfilename(
+            libc::getpid(),
+            addr,
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+        ) > 0
+    }
+}
+
+/// mprotect with PROT_EXEC: code becoming executable is rewritten first.
+///
+/// - Pieces that are already executable are not touched: they were rewritten
+///   when they became executable, and other threads may be running them.
+/// - File-backed pieces are translated files (or need nothing).
+/// - Other pieces are not executable, so nothing runs them: they are made
+///   readable if needed, scanned and rewritten, then protected.
 pub fn mprotect(a: [u64; 6]) -> i64 {
     let (addr, len, prot) = (a[0], page_up(a[1]), a[2] & !(PROT_BTI | PROT_MTE));
     if addr & (PAGE - 1) != 0 {
         return -(EINVAL as i64);
     }
-    if prot & PROT_EXEC != 0 && host_mprotect(addr, len, libc::PROT_READ | libc::PROT_WRITE) == 0 {
-        return finish_exec(addr, len, prot);
+    if prot & PROT_EXEC != 0 {
+        let end = addr + len;
+        let mut cur = addr;
+        while cur < end {
+            let Some((lo, hi, cur_prot, _)) = patch::vm::region(cur) else {
+                break;
+            };
+            if lo >= end {
+                break;
+            }
+            let (lo, hi) = (lo.max(cur), hi.min(end));
+            if cur_prot & libc::PROT_EXEC == 0 && !file_backed(lo) {
+                if cur_prot & libc::PROT_READ == 0 {
+                    host_mprotect(lo, hi - lo, cur_prot | libc::PROT_READ);
+                }
+                trace_stats("rewrote", lo, hi - lo, &patch::rewrite_region(lo, hi - lo));
+            }
+            cur = hi;
+        }
     }
     host_mprotect(addr, len, host_prot(prot))
 }

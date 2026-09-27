@@ -22,7 +22,9 @@ pub fn register_module(start: u64, end: u64, name: String) {
 pub fn register_fd_module(start: u64, len: u64, fd: i32, off: u64) {
     let mut buf = [0u8; libc::PATH_MAX as usize];
     // SAFETY: F_GETPATH writes at most PATH_MAX bytes.
-    let name = if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } == 0 {
+    let name = if let Some(p) = crate::xrt::original_guest_path(fd) {
+        p
+    } else if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } == 0 {
         let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
         let host = std::path::PathBuf::from(String::from_utf8_lossy(&buf[..len]).into_owned());
         crate::vfs::guest_path_of_host(&host).unwrap_or_else(|| host.display().to_string())

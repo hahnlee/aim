@@ -14,6 +14,9 @@ fn self_relative(path: &[u8]) -> Option<&[u8]> {
 
 /// Guest path of an open host fd.
 pub fn fd_guest_path(fd: i32) -> Result<String, Errno> {
+    if let Some(p) = crate::xrt::original_guest_path(fd) {
+        return Ok(p);
+    }
     let mut buf = [0u8; libc::PATH_MAX as usize];
     // SAFETY: F_GETPATH writes at most PATH_MAX bytes.
     if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } < 0 {

@@ -13,5 +13,10 @@ path = "src/lib.rs"
 name = "linux-run"
 path = "src/bin/linux-run.rs"
 
+[[bin]]
+name = "linux-translate"
+path = "src/bin/linux-translate.rs"
+
 [dependencies]
 libc = "0.2"
+sha2 = "0.10"

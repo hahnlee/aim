@@ -2,10 +2,17 @@
 //! programs on Darwin (ADR 0012, phase P0).
 //!
 //! - [`loader`] maps a program (and its PT_INTERP) as Linux `binfmt_elf` does.
-//! - [`patch`] rewrites `svc #0` and `TPIDR_EL0` accesses before code runs.
+//! - [`xlate`] translates an original ELF file ahead of time (a pure
+//!   function); [`cache`] stores translated files keyed by the original's
+//!   sha256 and the translator version; [`xrt`] substitutes them when the
+//!   guest opens an original, so text pages are file-backed and shared.
+//! - [`patch`] rewrites code with no cache entry (run-time generated code,
+//!   untranslated files) before it becomes executable.
 //! - [`context`] and `trampoline.S` carry guest register state across the
 //!   boundary; [`sys`] implements the syscalls with Linux semantics.
 
+pub mod a64;
+pub mod cache;
 pub mod context;
 pub mod diag;
 pub mod elf;
@@ -15,8 +22,10 @@ pub mod loader;
 pub mod patch;
 pub mod sys;
 pub mod vfs;
+pub mod xlate;
+pub mod xrt;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct RunOptions<'a> {
     pub root: &'a Path,
@@ -26,6 +35,9 @@ pub struct RunOptions<'a> {
     pub argv: Vec<String>,
     pub envp: Vec<String>,
     pub trace: bool,
+    /// Translation cache directory; None: every file is rewritten at load
+    /// time.
+    pub cache: Option<PathBuf>,
 }
 
 /// The environment a freshly started Android process sees from init.
@@ -46,6 +58,14 @@ pub fn default_android_env() -> Vec<String> {
     .collect()
 }
 
+fn trace_image(name: &str, i: &loader::Image) {
+    let s = &i.stats;
+    eprintln!(
+        "[linux-abi] {name} loaded at bias {:#x} from {}; load-time rewrites: {} svc, {} mrs/{} msr tpidr_el0, {} scs, {} ctr_el0 ({} brk fallbacks)",
+        i.bias, i.source, s.svc, s.mrs_tp, s.msr_tp, s.scs, s.ctr, s.brk_fallback
+    );
+}
+
 /// Load `program` under `root` and run it on the current thread. Returns
 /// only on a load error; the guest ends the process with exit_group.
 pub fn run(opts: RunOptions) -> String {
@@ -53,6 +73,7 @@ pub fn run(opts: RunOptions) -> String {
         return format!("--root {}: {e}", opts.root.display());
     }
     sys::set_trace(opts.trace);
+    xrt::init(opts.cache.clone());
     context::init_thread();
     diag::install_signal_handlers();
 
@@ -75,23 +96,19 @@ pub fn run(opts: RunOptions) -> String {
                 Err(e) => return format!("interpreter {interp}: cannot resolve (errno {e})"),
             };
             match loader::load_elf(&r.host, &r.guest) {
-                Ok(i) => (i.entry, i.bias),
+                Ok(i) => {
+                    if opts.trace {
+                        trace_image(&r.guest, &i);
+                    }
+                    (i.entry, i.bias)
+                }
                 Err(e) => return e,
             }
         }
         None => (program.entry, 0),
     };
     if opts.trace {
-        eprintln!(
-            "[linux-abi] {} loaded at bias {:#x}, entry {:#x}; rewrote {} svc, {} mrs/{} msr tpidr_el0 ({} brk fallbacks)",
-            resolved.guest,
-            program.bias,
-            entry,
-            program.stats.svc,
-            program.stats.mrs_tp,
-            program.stats.msr_tp,
-            program.stats.brk_fallback
-        );
+        trace_image(&resolved.guest, &program);
     }
     sys::init_brk(program.end);
     let sp = match loader::build_stack(&loader::StackInputs {

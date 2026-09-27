@@ -22,7 +22,7 @@ pub const ENOSYS: Errno = 38;
 pub const ELOOP: Errno = 40;
 
 /// Translate a Darwin errno into its Linux value.
-pub fn from_darwin(e: i32) -> Errno {
+pub const fn from_darwin(e: i32) -> Errno {
     use libc as d;
     match e {
         // 1..=34 coincide, except Darwin 11 (EDEADLK) and 35 (EAGAIN).
@@ -85,6 +85,18 @@ pub fn from_darwin(e: i32) -> Errno {
         _ => EIO,
     }
 }
+
+/// Darwin errno -> Linux errno for errnos below 128, for the lean syscall
+/// path in `trampoline.S` (it maps anything larger to EIO).
+pub static DARWIN_TO_LINUX: [u8; 128] = {
+    let mut t = [0u8; 128];
+    let mut i = 0;
+    while i < 128 {
+        t[i] = from_darwin(i as i32) as u8;
+        i += 1;
+    }
+    t
+};
 
 /// The current thread's Darwin errno, as a Linux value.
 pub fn last() -> Errno {
