@@ -140,19 +140,34 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         })
         .collect();
     let t0 = now_ns();
-    let n = host_poll(&mut host, ms, mask);
-    if n < 0 {
-        return n;
-    }
-    update_timeout(ts, t0);
-    let mut ready = 0;
-    for (g, h) in guest.iter_mut().zip(&host) {
-        g.revents = from_host(h.revents, g.events);
-        if g.revents != 0 {
-            ready += 1;
+    loop {
+        let left = if ms < 0 {
+            -1
+        } else {
+            (ms as i64 - (now_ns() - t0) / 1_000_000).max(0) as i32
+        };
+        let n = host_poll(&mut host, left, mask);
+        if n < 0 {
+            return n;
+        }
+        let mut ready = 0;
+        for (g, h) in guest.iter_mut().zip(&mut host) {
+            if h.revents & libc::POLLIN != 0 && super::inotify::spuriously_ready(h.fd) {
+                h.revents &= !libc::POLLIN;
+            }
+            g.revents = from_host(h.revents, g.events);
+            if g.revents != 0 {
+                ready += 1;
+            }
+        }
+        if ready > 0 || n == 0 || left == 0 {
+            update_timeout(ts, t0);
+            return ready;
+        }
+        for h in &mut host {
+            h.revents = 0;
         }
     }
-    ready
 }
 
 pub fn pselect6(a: [u64; 6]) -> i64 {

@@ -12,6 +12,7 @@ pub mod cred;
 mod dir;
 mod epoll;
 mod event;
+mod evdev;
 mod exec;
 pub(crate) mod fdtab;
 mod fork;

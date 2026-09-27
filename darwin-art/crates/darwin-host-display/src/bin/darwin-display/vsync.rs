@@ -91,15 +91,14 @@ fn ticks_to_ns(ticks: u64) -> i64 {
     (ticks as u128 * numer as u128 / denom as u128) as i64
 }
 
-/// The guest's `CLOCK_MONOTONIC`, in nanoseconds.
-pub fn monotonic_ns() -> i64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: fills the local timespec.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    ts.tv_sec * 1_000_000_000 + ts.tv_nsec
+pub use darwin_host_display::monotonic_ns;
+
+/// A host uptime timestamp (`NSEvent.timestamp`: `mach_absolute_time` in
+/// seconds) in the guest's `CLOCK_MONOTONIC`.
+pub fn uptime_to_monotonic(seconds: f64) -> i64 {
+    // SAFETY: plain clock reads.
+    let (mono, host) = (monotonic_ns(), ticks_to_ns(unsafe { mach_absolute_time() }));
+    (seconds * 1e9) as i64 + (mono - host)
 }
 
 /// One refresh, in guest time.

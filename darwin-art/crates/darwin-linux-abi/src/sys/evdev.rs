@@ -1,0 +1,633 @@
+//! Evdev character devices, `/dev/input/eventN` (`docs/input.md`).
+//!
+//! The guest's `/dev/input` is the device directory of the display server
+//! (`linux-run --display SOCKET`: `SOCKET.input`,
+//! `darwin_host_display::input`). Each device there is a listening Unix
+//! socket; opening it connects, and the connection is the open file. The
+//! fd is that host socket, so poll and epoll see it readable while events
+//! wait, and hung up when the device goes away; listing the directory lists
+//! the devices, and inotify on it reports hotplug.
+//!
+//! What Linux's evdev does per open file happens here:
+//! - `read` returns whole `struct input_event`s (64-bit time), in the
+//!   clock the client chose (`EVIOCSCLOCKID`); `ENODEV` once the device is
+//!   gone or revoked.
+//! - `write` injects events into the device.
+//! - The `EVIOCG*` ioctls answer from the descriptor the server sent at
+//!   open and from the state the client has read so far, which is the
+//!   device state minus what is still queued: Linux gets the same
+//!   consistency by dropping queued events of the type it reports.
+//! - stat shows the node as the character device `13:(64+N)`, `root:input`
+//!   0660, and `/sys/dev/char`, `/sys/class/input` and
+//!   `/sys/devices/virtual/input` describe it, as EventHub reads them.
+
+use std::os::fd::{AsFd, IntoRawFd};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use darwin_host_display::input::codes::*;
+use darwin_host_display::input::{
+    Descriptor, Hello, OP_GRAB, OP_OPEN, Record, State, VERSION, connect_in, record_bytes, test_bit,
+};
+use darwin_host_display::wire;
+
+use super::dir::{self, Entry};
+use super::fdtab::{self, Kind};
+use super::procfs::Node;
+use crate::errno::{self, EAGAIN, EBADF, EFAULT, EINVAL, ENODEV, ENOENT, ENOSYS};
+use crate::vfs::{self, Area, Resolved};
+
+/// `INPUT_MAJOR`, and the first minor of the evdev nodes.
+const INPUT_MAJOR: u32 = 13;
+const EVDEV_MINOR_BASE: u32 = 64;
+/// `AID_INPUT`: `ueventd.rc` gives `/dev/input/*` to root:input 0660.
+const AID_INPUT: u32 = 1004;
+
+/// `sizeof(struct input_event)` on arm64.
+const EVENT: usize = 24;
+
+const O_ACCMODE: u64 = 0o3;
+const O_NONBLOCK: u64 = 0o4000;
+const O_CLOEXEC: u64 = 0o2000000;
+
+// Linux clock ids EVIOCSCLOCKID accepts.
+const CLOCK_REALTIME: i32 = 0;
+const CLOCK_MONOTONIC: i32 = 1;
+const CLOCK_BOOTTIME: i32 = 7;
+
+/// One open file of a device.
+pub struct Evdev {
+    desc: Descriptor,
+    /// The device directory on the host, for control connections.
+    dir: PathBuf,
+    writable: bool,
+    client: Mutex<Client>,
+}
+
+struct Client {
+    state: State,
+    clock: i32,
+    revoked: bool,
+}
+
+fn neg(e: errno::Errno) -> i64 {
+    -(e as i64)
+}
+
+/// The device index of a node name, `eventN`.
+fn index_of(name: &str) -> Option<u32> {
+    name.strip_prefix("event")?.parse().ok()
+}
+
+/// The indices of the devices present, sorted.
+fn present() -> Vec<u32> {
+    let Some(dir) = vfs::input_dir() else {
+        return Vec::new();
+    };
+    let mut v: Vec<u32> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| index_of(e.file_name().to_str()?))
+        .collect();
+    v.sort();
+    v
+}
+
+impl Evdev {
+    pub fn path(&self) -> String {
+        format!("/dev/input/event{}", self.desc.index)
+    }
+
+    /// `read(2)`: whole events, as many as fit.
+    fn read(&self, fd: i32, buf: u64, len: usize) -> i64 {
+        if len != 0 && len < EVENT {
+            return neg(EINVAL);
+        }
+        let want = (len / EVENT).clamp(1, 256);
+        let mut recs = vec![Record::default(); want];
+        loop {
+            let mut c = self.client.lock().unwrap();
+            if c.revoked {
+                return neg(ENODEV);
+            }
+            let bytes = if len == 0 {
+                1
+            } else {
+                want * size_of::<Record>()
+            };
+            let flags = libc::MSG_DONTWAIT | if len == 0 { libc::MSG_PEEK } else { 0 };
+            // SAFETY: receives into our record buffer.
+            let n = unsafe { libc::recv(fd, recs.as_mut_ptr().cast(), bytes, flags) };
+            if n == 0 {
+                return neg(ENODEV);
+            }
+            if n < 0 {
+                let e = errno::last();
+                if e != EAGAIN {
+                    return neg(e);
+                }
+                drop(c);
+                if fdtab::nonblocking(fd) {
+                    return neg(EAGAIN);
+                }
+                let r = fdtab::wait_for(fd, libc::POLLIN);
+                if r < 0 {
+                    return r;
+                }
+                continue;
+            }
+            if len == 0 {
+                return 0;
+            }
+            let mut n = n as usize;
+            // The server writes whole packets: the rest of a cut record is
+            // already on its way.
+            while n % size_of::<Record>() != 0 {
+                let rest = size_of::<Record>() - n % size_of::<Record>();
+                // SAFETY: completes the record inside our buffer.
+                let m = unsafe {
+                    libc::recv(
+                        fd,
+                        recs.as_mut_ptr().cast::<u8>().add(n).cast(),
+                        rest,
+                        libc::MSG_DONTWAIT,
+                    )
+                };
+                match m {
+                    0 => return neg(ENODEV),
+                    m if m > 0 => n += m as usize,
+                    _ if errno::last() == EAGAIN => {
+                        fdtab::wait_for(fd, libc::POLLIN);
+                    }
+                    _ => return neg(errno::last()),
+                }
+            }
+            let count = n / size_of::<Record>();
+            let offset = clock_offset(c.clock);
+            for (i, r) in recs[..count].iter().enumerate() {
+                self.desc.apply(&mut c.state, r);
+                let t = r.time_ns + offset;
+                let ev = [
+                    t.div_euclid(1_000_000_000),
+                    t.rem_euclid(1_000_000_000) / 1000,
+                    (r.kind as i64) | ((r.code as i64) << 16) | ((r.value as i64) << 32),
+                ];
+                // SAFETY: guest buffer of `len` bytes, room for `count`.
+                unsafe { ((buf as *mut [i64; 3]).add(i)).write_unaligned(ev) };
+            }
+            return (count * EVENT) as i64;
+        }
+    }
+
+    /// `write(2)`: whole events, injected into the device.
+    fn write(&self, fd: i32, buf: u64, len: usize) -> i64 {
+        if !self.writable {
+            return neg(EBADF);
+        }
+        if len != 0 && len < EVENT {
+            return neg(EINVAL);
+        }
+        if self.client.lock().unwrap().revoked {
+            return neg(ENODEV);
+        }
+        let recs: Vec<Record> = (0..len / EVENT)
+            .map(|i| {
+                // SAFETY: guest buffer of `len` bytes.
+                let ev = unsafe { ((buf as *const [i64; 3]).add(i)).read_unaligned() };
+                Record {
+                    time_ns: 0,
+                    kind: ev[2] as u16,
+                    code: (ev[2] >> 16) as u16,
+                    value: (ev[2] >> 32) as i32,
+                }
+            })
+            .collect();
+        // SAFETY: the fd is our socket for the duration of the call.
+        let sock = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        match wire::send(sock, record_bytes(&recs), None) {
+            Ok(()) => (recs.len() * EVENT) as i64,
+            Err(_) => neg(ENODEV),
+        }
+    }
+
+    /// `EVIOCGRAB`, on a control connection to the device.
+    fn grab(&self, on: bool) -> i64 {
+        let Ok(s) = connect_in(&self.dir, &format!("event{}", self.desc.index)) else {
+            return neg(ENODEV);
+        };
+        let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+        let hello = Hello {
+            version: VERSION,
+            op: OP_GRAB,
+            client: self.desc.client,
+            arg: on as u64,
+        };
+        let mut r = [0u8; 4];
+        let ok = wire::send(s.as_fd(), wire::bytes(&hello), None).is_ok()
+            && std::io::Read::read_exact(&mut &s, &mut r).is_ok();
+        if ok {
+            i32::from_ne_bytes(r) as i64
+        } else {
+            neg(ENODEV)
+        }
+    }
+}
+
+/// Nanoseconds to add to a `CLOCK_MONOTONIC` time for `clock`
+/// (`CLOCK_BOOTTIME` is the monotonic clock here, as in `clock_gettime`).
+fn clock_offset(clock: i32) -> i64 {
+    if clock != CLOCK_REALTIME {
+        return 0;
+    }
+    let now = |id| {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: fills the local timespec.
+        unsafe { libc::clock_gettime(id, &mut ts) };
+        ts.tv_sec * 1_000_000_000 + ts.tv_nsec
+    };
+    now(libc::CLOCK_REALTIME) - now(libc::CLOCK_MONOTONIC)
+}
+
+fn evdev_of(fd: i32) -> Option<Arc<Evdev>> {
+    match fdtab::get(fd)? {
+        Kind::Evdev(e) => Some(e),
+        _ => None,
+    }
+}
+
+/// `openat` of a device node; None for any other path.
+pub fn open(r: &Resolved, flags: u64) -> Option<i64> {
+    if r.area != Area::Input {
+        return None;
+    }
+    let name = r.guest.rsplit('/').next()?;
+    let index = index_of(name)?;
+    let dir = PathBuf::from(r.host.to_str().ok()?).parent()?.to_owned();
+    let stream = match connect_in(&dir, name) {
+        Ok(s) => s,
+        // A node whose server has gone is a device that no longer exists.
+        Err(e) if e.raw_os_error() == Some(libc::ECONNREFUSED) => return Some(neg(ENODEV)),
+        Err(e) => {
+            return Some(neg(errno::from_darwin(
+                e.raw_os_error().unwrap_or(libc::EIO),
+            )));
+        }
+    };
+    let on: libc::c_int = 1;
+    // SAFETY: setsockopt on our socket with a local int.
+    unsafe {
+        libc::setsockopt(
+            std::os::fd::AsRawFd::as_raw_fd(&stream),
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            (&on as *const libc::c_int).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    let hello = Hello {
+        version: VERSION,
+        op: OP_OPEN,
+        ..Default::default()
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let desc = match wire::send(stream.as_fd(), wire::bytes(&hello), None)
+        .and_then(|()| wire::recv_record::<Descriptor>(stream.as_fd()))
+    {
+        Ok(Some(d)) if d.index == index => d,
+        _ => return Some(neg(ENODEV)),
+    };
+    let _ = stream.set_read_timeout(None);
+    let fd = stream.into_raw_fd();
+    // SAFETY: fcntl on the fd we just made (std opens it close-on-exec).
+    unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+    fdtab::set_flags(fd, flags & O_NONBLOCK != 0, flags & O_CLOEXEC != 0);
+    fdtab::insert(
+        fd,
+        Kind::Evdev(Arc::new(Evdev {
+            desc,
+            dir,
+            writable: flags & O_ACCMODE != 0,
+            client: Mutex::new(Client {
+                state: desc.state,
+                clock: CLOCK_REALTIME,
+                revoked: false,
+            }),
+        })),
+    );
+    Some(fd as i64)
+}
+
+/// read(2) on an evdev fd; None when `fd` is not one.
+pub fn read(fd: i32, buf: u64, len: usize) -> Option<i64> {
+    Some(evdev_of(fd)?.read(fd, buf, len))
+}
+
+/// write(2) on an evdev fd; None when `fd` is not one.
+pub fn write(fd: i32, buf: u64, len: usize) -> Option<i64> {
+    Some(evdev_of(fd)?.write(fd, buf, len))
+}
+
+/// `bits_to_user`: at most `size` bytes of the bitmap up to `max`; returns
+/// the bytes copied.
+fn put_bits(bits: &[u8], max: u16, size: usize, arg: u64) -> i64 {
+    let n = bitmap_bytes(max).min(bits.len()).min(size);
+    // SAFETY: guest buffer of `size` bytes.
+    unsafe { std::ptr::copy_nonoverlapping(bits.as_ptr(), arg as *mut u8, n) };
+    n as i64
+}
+
+fn put<T: Copy>(arg: u64, v: T) -> i64 {
+    if arg == 0 {
+        return neg(EFAULT);
+    }
+    // SAFETY: guest buffer the ioctl names.
+    unsafe { (arg as *mut T).write_unaligned(v) };
+    0
+}
+
+// ioctl encoding (asm-generic).
+const IOC_WRITE: u64 = 1;
+const IOC_READ: u64 = 2;
+
+const EVIOCGVERSION: u64 = 0x8004_4501;
+const EVIOCGID: u64 = 0x8008_4502;
+const EVIOCGREP: u64 = 0x8008_4503;
+const EVIOCSREP: u64 = 0x4008_4503;
+const EVIOCGEFFECTS: u64 = 0x8004_4584;
+const EVIOCRMFF: u64 = 0x4004_4581;
+const EVIOCGRAB: u64 = 0x4004_4590;
+const EVIOCREVOKE: u64 = 0x4004_4591;
+const EVIOCSCLOCKID: u64 = 0x4004_45a0;
+
+/// An evdev ioctl (`'E'`); None when `fd` is not an evdev fd or the
+/// request is not one (the generic ones, `FIONBIO` and the like, apply).
+pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
+    if (cmd >> 8) & 0xff != u64::from(b'E') {
+        return None;
+    }
+    let e = evdev_of(fd)?;
+    let mut c = e.client.lock().unwrap();
+    if c.revoked {
+        return Some(neg(ENODEV));
+    }
+    let d = &e.desc;
+    let (dir, size, nr) = (
+        cmd >> 30,
+        ((cmd >> 16) & 0x3fff) as usize,
+        (cmd & 0xff) as u16,
+    );
+    // Every request but these takes a pointer; a zero-length copy needs
+    // none (getevent sizes a bitmap with EVIOCGBIT(ev, 0) on NULL).
+    if arg == 0 && size != 0 && ![EVIOCGRAB, EVIOCREVOKE, EVIOCRMFF].contains(&cmd) {
+        return Some(neg(EFAULT));
+    }
+    Some(match cmd {
+        EVIOCGVERSION => put(arg, EV_VERSION),
+        EVIOCGID => put(arg, d.id),
+        // No device repeats keys (no EV_REP): Android does.
+        EVIOCGREP | EVIOCSREP => neg(ENOSYS),
+        EVIOCGEFFECTS => put(arg, 0i32),
+        EVIOCRMFF => neg(ENOSYS),
+        EVIOCGRAB => {
+            drop(c);
+            return Some(e.grab(arg != 0));
+        }
+        EVIOCREVOKE if arg != 0 => neg(EINVAL),
+        EVIOCREVOKE => {
+            // The server sees the connection end, which also ends a grab;
+            // poll then reports the fd hung up, as Linux does.
+            c.revoked = true;
+            // SAFETY: shutting down our own socket.
+            unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
+            0
+        }
+        EVIOCSCLOCKID => {
+            // SAFETY: guest int.
+            let id = unsafe { (arg as *const i32).read_unaligned() };
+            if ![CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_BOOTTIME].contains(&id) {
+                return Some(neg(EINVAL));
+            }
+            c.clock = id;
+            0
+        }
+        _ if dir == IOC_WRITE && nr == 0x80 => neg(ENOSYS), // EVIOCSFF
+        _ if dir != IOC_READ => neg(EINVAL),
+        _ => match nr {
+            0x06 => {
+                // EVIOCGNAME: the string and its NUL, cut to `size`.
+                let name = d.name();
+                let n = (name.len() + 1).min(size);
+                let mut v = name.to_vec();
+                v.push(0);
+                // SAFETY: guest buffer of `size` bytes.
+                unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), arg as *mut u8, n) };
+                n as i64
+            }
+            // EVIOCGPHYS, EVIOCGUNIQ: virtual devices have neither.
+            0x07 | 0x08 => neg(ENOENT),
+            0x09 => put_bits(&d.props, INPUT_PROP_MAX, size, arg),
+            0x0a => mt_slots(d, &c.state, size, arg),
+            0x18..=0x1b => {
+                let ev = [EV_KEY, EV_LED, EV_SND, EV_SW][(nr - 0x18) as usize];
+                let bits = c.state.bits(ev).unwrap_or(&[]);
+                put_bits(bits, max_code(ev).unwrap_or(0), size, arg)
+            }
+            0x20..=0x3f => {
+                let ev = nr & EV_MAX;
+                match (d.bits.of(ev), max_code(ev)) {
+                    (Some(bits), Some(max)) => put_bits(bits, max, size, arg),
+                    _ => neg(EINVAL),
+                }
+            }
+            0x40..=0x7f if !test_bit(&d.bits.ev, EV_ABS) => neg(EINVAL),
+            0x40..=0x7f => {
+                let axis = (nr & ABS_MAX) as usize;
+                let info = darwin_host_display::input::AbsInfo {
+                    value: c.state.abs[axis],
+                    ..d.absinfo[axis]
+                };
+                let n = size.min(size_of_val(&info));
+                // SAFETY: guest buffer of `size` bytes.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        (&info as *const darwin_host_display::input::AbsInfo).cast::<u8>(),
+                        arg as *mut u8,
+                        n,
+                    )
+                };
+                0
+            }
+            _ => neg(EINVAL),
+        },
+    })
+}
+
+/// `EVIOCGMTSLOTS`: `{ u32 code; i32 values[] }`, one value per slot.
+fn mt_slots(d: &Descriptor, state: &State, size: usize, arg: u64) -> i64 {
+    // SAFETY: guest u32.
+    let code = unsafe { (arg as *const u32).read_unaligned() };
+    if d.mt_slots == 0 || code > u16::MAX as u32 || !is_mt_axis(code as u16) {
+        return neg(EINVAL);
+    }
+    let room = size.saturating_sub(4) / 4;
+    for slot in 0..(d.mt_slots as usize).min(room) {
+        let v = state.mt_value(slot, code as u16);
+        // SAFETY: guest buffer of `size` bytes, room for `room` values.
+        unsafe { ((arg + 4) as *mut i32).add(slot).write_unaligned(v) };
+    }
+    0
+}
+
+/// The node's stat: the character device `13:(64+N)`, root:input 0660.
+fn as_device(st: &mut libc::stat, index: u32) {
+    st.st_mode = libc::S_IFCHR | 0o660;
+    // Darwin's dev_t encoding (major in the top byte); stat converts it.
+    st.st_rdev = ((INPUT_MAJOR << 24) | (EVDEV_MINOR_BASE + index)) as i32;
+    st.st_uid = 0;
+    st.st_gid = AID_INPUT;
+    st.st_size = 0;
+}
+
+/// stat of a path under `/dev/input`: a device node is shown as one.
+pub fn stat(r: &Resolved, st: &mut libc::stat) {
+    if r.area != Area::Input || st.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        return;
+    }
+    if let Some(index) = r.guest.rsplit('/').next().and_then(index_of) {
+        as_device(st, index);
+    }
+}
+
+/// fstat of an evdev fd; None when `fd` is not one.
+pub fn fstat(fd: i32, st: &mut libc::stat) -> Option<()> {
+    let e = evdev_of(fd)?;
+    as_device(st, e.desc.index);
+    Some(())
+}
+
+/// Whether directory fd `fd` is the device directory (its sockets list as
+/// character devices).
+pub fn is_device_dir(fd: i32) -> bool {
+    let Some(dir) = vfs::input_dir() else {
+        return false;
+    };
+    let (mut a, mut b): (libc::stat, libc::stat) = unsafe { std::mem::zeroed() };
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    // SAFETY: stats into local buffers.
+    let both = unsafe { libc::fstat(fd, &mut a) == 0 && libc::stat(c.as_ptr(), &mut b) == 0 };
+    both && (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+}
+
+/// Directory entries of the device directory: sockets are devices.
+pub fn fix_types(entries: &mut [Entry]) {
+    const DT_SOCK: u8 = 12;
+    const DT_CHR: u8 = 2;
+    for e in entries {
+        if e.ty == DT_SOCK {
+            e.ty = DT_CHR;
+        }
+    }
+}
+
+/// The sysfs view of the devices, under `/sys` (`rest` is the path after
+/// it): `/sys/dev/char/13:M` and `/sys/class/input/*` link to
+/// `/sys/devices/virtual/input/inputN/eventN`. Links are absolute here,
+/// where Linux's are relative; they resolve the same.
+pub fn sys_node(rest: &str) -> Option<Node> {
+    let devs = present();
+    let dirs = |names: Vec<String>, ty| {
+        Node::Dir(names.into_iter().map(|n| Entry::new(1, ty, n)).collect())
+    };
+    let input = |i: u32| format!("/sys/devices/virtual/input/input{i}");
+    let minor = |i: u32| EVDEV_MINOR_BASE + i;
+    Some(match rest {
+        "dev" => dirs(vec!["char".into()], dir::DT_DIR),
+        "dev/char" => dirs(
+            devs.iter()
+                .map(|&i| format!("{INPUT_MAJOR}:{}", minor(i)))
+                .collect(),
+            dir::DT_LNK,
+        ),
+        "class" => dirs(vec!["input".into()], dir::DT_DIR),
+        "class/input" => dirs(
+            devs.iter()
+                .flat_map(|&i| [format!("event{i}"), format!("input{i}")])
+                .collect(),
+            dir::DT_LNK,
+        ),
+        "devices/virtual" => dirs(vec!["input".into()], dir::DT_DIR),
+        "devices/virtual/input" => dirs(
+            devs.iter().map(|&i| format!("input{i}")).collect(),
+            dir::DT_DIR,
+        ),
+        _ => {
+            if let Some(m) = rest.strip_prefix("dev/char/13:") {
+                let i = m.parse::<u32>().ok()?.checked_sub(EVDEV_MINOR_BASE)?;
+                return devs
+                    .contains(&i)
+                    .then(|| Node::Link(format!("{}/event{i}", input(i))));
+            }
+            if let Some(n) = rest.strip_prefix("class/input/") {
+                let (i, dev) = match n.strip_prefix("event") {
+                    Some(i) => (i, true),
+                    None => (n.strip_prefix("input")?, false),
+                };
+                let i = i.parse::<u32>().ok().filter(|i| devs.contains(i))?;
+                return Some(Node::Link(if dev {
+                    format!("{}/event{i}", input(i))
+                } else {
+                    input(i)
+                }));
+            }
+            let n = rest.strip_prefix("devices/virtual/input/input")?;
+            let (i, tail) = n.split_once('/').unwrap_or((n, ""));
+            let i = i.parse::<u32>().ok().filter(|i| devs.contains(i))?;
+            match tail {
+                "" => dirs(vec![format!("event{i}")], dir::DT_DIR),
+                t if t == format!("event{i}") => dirs(vec!["dev".into()], dir::DT_REG),
+                t if t == format!("event{i}/dev") => {
+                    Node::File(format!("{INPUT_MAJOR}:{}\n", minor(i)).into_bytes())
+                }
+                _ => return None,
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ioctl_numbers_are_linux() {
+        // _IOC(dir, 'E', nr, size) as <linux/input.h> computes them.
+        let ioc = |dir: u64, nr: u64, size: u64| (dir << 30) | (size << 16) | (0x45 << 8) | nr;
+        assert_eq!(EVIOCGVERSION, ioc(IOC_READ, 0x01, 4));
+        assert_eq!(EVIOCGID, ioc(IOC_READ, 0x02, 8));
+        assert_eq!(EVIOCGREP, ioc(IOC_READ, 0x03, 8));
+        assert_eq!(EVIOCSREP, ioc(IOC_WRITE, 0x03, 8));
+        assert_eq!(EVIOCRMFF, ioc(IOC_WRITE, 0x81, 4));
+        assert_eq!(EVIOCGEFFECTS, ioc(IOC_READ, 0x84, 4));
+        assert_eq!(EVIOCGRAB, ioc(IOC_WRITE, 0x90, 4));
+        assert_eq!(EVIOCREVOKE, ioc(IOC_WRITE, 0x91, 4));
+        assert_eq!(EVIOCSCLOCKID, ioc(IOC_WRITE, 0xa0, 4));
+    }
+
+    #[test]
+    fn node_names() {
+        assert_eq!(index_of("event12"), Some(12));
+        assert_eq!(index_of("mice"), None);
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        as_device(&mut st, 2);
+        // makedev(13, 66) in Darwin's encoding.
+        assert_eq!(st.st_rdev as u32, (13 << 24) | 66);
+        assert_eq!(st.st_mode & libc::S_IFMT, libc::S_IFCHR);
+    }
+}

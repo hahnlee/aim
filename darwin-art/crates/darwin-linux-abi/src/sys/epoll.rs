@@ -266,34 +266,77 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         return -(EINVAL as i64);
     }
     let mut kevs: Vec<libc::kevent> = Vec::with_capacity(maxevents as usize);
-    let old_mask = super::poll::swap_sigmask(mask);
-    // SAFETY: output array with capacity `maxevents`.
-    let n = unsafe {
-        libc::kevent(
-            epfd,
-            std::ptr::null(),
-            0,
-            kevs.as_mut_ptr(),
-            maxevents,
-            timeout.as_ref().map_or(std::ptr::null(), |t| t as *const _),
-        )
+    let deadline = timeout.map(|t| now_ns() + t.tv_sec * 1_000_000_000 + t.tv_nsec);
+    let (out, rearm) = loop {
+        let left = deadline.map(|d| {
+            let ns = (d - now_ns()).max(0);
+            libc::timespec {
+                tv_sec: ns / 1_000_000_000,
+                tv_nsec: ns % 1_000_000_000,
+            }
+        });
+        let old_mask = super::poll::swap_sigmask(mask);
+        // SAFETY: output array with capacity `maxevents`.
+        let n = unsafe {
+            libc::kevent(
+                epfd,
+                std::ptr::null(),
+                0,
+                kevs.as_mut_ptr(),
+                maxevents,
+                left.as_ref().map_or(std::ptr::null(), |t| t as *const _),
+            )
+        };
+        let err = errno::last();
+        super::poll::restore_sigmask(old_mask);
+        if n < 0 {
+            return -(err as i64);
+        }
+        // SAFETY: the kernel filled n entries.
+        unsafe { kevs.set_len(n as usize) };
+        let found = ready(&ep, &kevs);
+        // An inotify fd that woke the wait with nothing to read: wait on.
+        if !found.0.is_empty() || n == 0 || left.is_some_and(|t| t.tv_sec == 0 && t.tv_nsec == 0) {
+            break found;
+        }
     };
-    let err = errno::last();
-    super::poll::restore_sigmask(old_mask);
-    if n < 0 {
-        return -(err as i64);
+    apply(epfd, &rearm);
+    for (n, (_, b, data)) in out.iter().enumerate() {
+        // SAFETY: guest array of `maxevents` 16-byte struct epoll_event.
+        unsafe {
+            (events as *mut [u64; 2])
+                .add(n)
+                .write_unaligned([*b as u64, *data])
+        };
     }
-    // SAFETY: the kernel filled n entries.
-    unsafe { kevs.set_len(n as usize) };
+    out.len() as i64
+}
+
+fn now_ns() -> i64 {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: local timespec.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
+    t.tv_sec * 1_000_000_000 + t.tv_nsec
+}
+
+/// The ready interests among `kevs` as (fd, events, data), and the
+/// changes that disable the other filter of the one-shot ones.
+fn ready(ep: &Epoll, kevs: &[libc::kevent]) -> (Vec<(i32, u32, u64)>, Vec<libc::kevent>) {
     let mut out: Vec<(i32, u32, u64)> = Vec::with_capacity(kevs.len());
     let mut rearm = Vec::new();
     let mut interest = ep.interest.lock().unwrap();
-    for k in &kevs {
+    for k in kevs {
         let fd = k.ident as i32;
         let Some(i) = interest.get_mut(&fd) else {
             continue;
         };
-        let b = bits(k, i);
+        let mut b = bits(k, i);
+        if b & EPOLLIN != 0 && super::inotify::spuriously_ready(fd) {
+            b &= !(EPOLLIN | EPOLLRDNORM);
+        }
         if b == 0 {
             continue;
         }
@@ -316,17 +359,7 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         }
         out.push((fd, b, i.data));
     }
-    drop(interest);
-    apply(epfd, &rearm);
-    for (n, (_, b, data)) in out.iter().enumerate() {
-        // SAFETY: guest array of `maxevents` 16-byte struct epoll_event.
-        unsafe {
-            (events as *mut [u64; 2])
-                .add(n)
-                .write_unaligned([*b as u64, *data])
-        };
-    }
-    out.len() as i64
+    (out, rearm)
 }
 
 pub fn epoll_pwait(a: [u64; 6]) -> i64 {

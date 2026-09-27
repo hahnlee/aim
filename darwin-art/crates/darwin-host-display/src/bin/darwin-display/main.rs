@@ -7,6 +7,10 @@
 //! module `display` of its `linux-run --display PATH`; the protocol is
 //! `darwin_host_display::wire`.
 //!
+//! The window's input is the guest's evdev devices, listening sockets in
+//! `PATH.input` (`docs/input.md`), removed when the server quits (window
+//! closed, SIGTERM, SIGINT).
+//!
 //! On start it prints one line with the window number (for
 //! `screencapture -l`), the display mode and the refresh period. Every
 //! 5 seconds it prints vsync and present statistics to stderr. SIGUSR1
@@ -14,6 +18,7 @@
 
 #[macro_use]
 mod objc;
+mod input;
 mod metal;
 mod stats;
 mod vsync;
@@ -278,6 +283,14 @@ fn main() {
         capture,
     });
 
+    if let Err(e) = input::start(&socket, &win) {
+        eprintln!(
+            "darwin-display: input devices in {}: {e}",
+            darwin_host_display::input::device_dir(&socket).display()
+        );
+        std::process::exit(1);
+    }
+    input::quit_on_signals();
     let _ = std::fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket).unwrap_or_else(|e| {
         eprintln!("darwin-display: {}: {e}", socket.display());

@@ -6,6 +6,7 @@
 #include <poll.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <sys/epoll.h>
 #include <sys/file.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
@@ -280,6 +281,32 @@ static void inotify_dir(void) {
   rmdir(p("watch"));
 }
 
+// A change the watch does not ask for queues nothing, so poll and epoll do
+// not report the fd readable (a blocking read would wait for an event).
+static void inotify_unwatched_changes(void) {
+  mkdir(p("quiet"), 0755);
+  int in = inotify_init1(IN_CLOEXEC);
+  CHECK(in >= 0);
+  CHECK(inotify_add_watch(in, p("quiet"), IN_CREATE) > 0);
+  CHECK(chmod(p("quiet"), 0700) == 0);
+  struct pollfd pf = {.fd = in, .events = POLLIN};
+  CHECK(poll(&pf, 1, 300) == 0);
+  int ep = epoll_create1(EPOLL_CLOEXEC);
+  struct epoll_event ev = {.events = EPOLLIN, .data.fd = in};
+  CHECK(epoll_ctl(ep, EPOLL_CTL_ADD, in, &ev) == 0);
+  CHECK(chmod(p("quiet"), 0755) == 0);
+  CHECK(epoll_wait(ep, &ev, 1, 300) == 0);
+  int fd = make("quiet/new", "data");
+  close(fd);
+  CHECK(epoll_wait(ep, &ev, 1, 1000) == 1 && ev.events == EPOLLIN);
+  char buf[256];
+  CHECK(read(in, buf, sizeof buf) > 0);
+  close(ep);
+  close(in);
+  unlink(p("quiet/new"));
+  rmdir(p("quiet"));
+}
+
 int main(int argc, char** argv) {
   snprintf(base, sizeof base, "%s/fs-%d", argc > 1 ? argv[1] : "/data/local/tmp", getpid());
   mkdir(base, 0755);
@@ -292,5 +319,6 @@ int main(int argc, char** argv) {
   RUN(copies);
   RUN(memfd_and_seals);
   RUN(inotify_dir);
+  RUN(inotify_unwatched_changes);
   DONE();
 }

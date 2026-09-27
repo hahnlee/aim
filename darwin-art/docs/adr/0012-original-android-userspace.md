@@ -406,7 +406,10 @@ MediaProvider and DnsResolver.
   FUSE is a documented kernel protocol like binder. Bulk I/O may later get a
   passthrough exception.
 - **Input:** input is not a HAL. The syscall layer exposes virtual evdev
-  devices (`/dev/input/event*`) fed by AppKit.
+  devices (`/dev/input/event*`) fed by AppKit: the display server's window
+  is a touchscreen, a keyboard and a scroll wheel (rotary encoder), one
+  Unix socket per open file, configured by `.idc` files in the vendor
+  partition ([input.md](../input.md)).
 
 ### Vendor HALs (ours)
 

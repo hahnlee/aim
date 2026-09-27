@@ -407,6 +407,15 @@ pub fn pending_bytes(fd: i32) -> Option<i64> {
     Some(s.queue.iter().map(|e| e.len() as i64).sum())
 }
 
+/// Whether `fd`, reported readable by the host, is an inotify fd with no
+/// event to read. Its kqueue is readable on any vnode note, and a note may
+/// decode to nothing (a rescan that finds what an earlier one reported);
+/// Linux is readable only while events are queued, and a blocking read
+/// after such a wakeup would never return.
+pub fn spuriously_ready(fd: i32) -> bool {
+    pending_bytes(fd) == Some(0)
+}
+
 /// Fork child: rebuild each inotify kqueue on its fd number.
 pub fn after_fork_child() {
     for (fd, k) in fdtab::fds_where(|k| matches!(k, Kind::Inotify(_))) {

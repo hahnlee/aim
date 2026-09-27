@@ -54,9 +54,9 @@ extern "C" fn yes(_this: Id, _sel: Sel, _app: Id) -> bool {
     true
 }
 
-/// Quit when the window closes.
+/// Quit when the window closes; the input devices go with the window.
 fn app_delegate() -> Id {
-    // SAFETY: registers a new NSObject subclass with one BOOL method, once.
+    // SAFETY: registers a new NSObject subclass with two methods, once.
     let cls = unsafe {
         let cls = objc_allocateClassPair(class(c"NSObject"), c"DarwinDisplayDelegate".as_ptr(), 0);
         class_addMethod(
@@ -64,6 +64,12 @@ fn app_delegate() -> Id {
             sel(c"applicationShouldTerminateAfterLastWindowClosed:"),
             yes as *const c_void,
             c"B@:@".as_ptr(),
+        );
+        class_addMethod(
+            cls,
+            sel(c"applicationWillTerminate:"),
+            crate::input::will_terminate as *const c_void,
+            c"v@:@".as_ptr(),
         );
         objc_registerClassPair(cls);
         cls
@@ -148,9 +154,15 @@ pub fn create(size: Option<(u32, u32)>, title: &str, device: Id) -> Window {
     send!(layer, c"setColorspace:" => (), *const c_void = srgb);
     // SAFETY: created above.
     unsafe { CGColorSpaceRelease(srgb) };
-    let view = send!(window, c"contentView" => Id);
+    let view = crate::input::view(CGRect {
+        size: content.size,
+        ..Default::default()
+    });
+    send!(window, c"setContentView:" => (), Id = view);
     send!(view, c"setLayer:" => (), Id = layer);
     send!(view, c"setWantsLayer:" => (), bool = true);
+    send!(window, c"makeFirstResponder:" => bool, Id = view);
+    send!(window, c"setDelegate:" => (), Id = crate::input::window_delegate());
 
     send!(window, c"makeKeyAndOrderFront:" => (), Id = std::ptr::null_mut());
     send!(app, c"activateIgnoringOtherApps:" => (), bool = true);
