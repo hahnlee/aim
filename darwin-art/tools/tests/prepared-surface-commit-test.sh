@@ -2,7 +2,7 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-ndk_root=${ANDROID_NDK_ROOT:-/Users/hahnlee/Library/Android/sdk/ndk/28.2.13676358}
+ndk_root=${ANDROID_NDK_ROOT:-$HOME/Library/Android/sdk/ndk/28.2.13676358}
 sysroot="$ndk_root/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
 sdk=$(xcrun --sdk macosx --show-sdk-path)
 build_dir=$(mktemp -d "${TMPDIR:-/tmp}/darwin-art-prepared-surface-commit.XXXXXX")

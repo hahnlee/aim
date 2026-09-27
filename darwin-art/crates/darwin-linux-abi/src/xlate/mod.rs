@@ -39,9 +39,17 @@
 //! not covered by an STT_FUNC symbol or a `$x` range is counted as
 //! ambiguous. Files without section headers fall back to whole PF_X
 //! segments, and every site there is ambiguous.
+//!
+//! # Integrity hashes
+//!
+//! A file carrying a BoringSSL FIPS module gets its module hash recomputed
+//! over the rewritten bytes, as BoringSSL's build does after linking
+//! ([`fips`]). The stub segment lies after every original segment, outside
+//! the hashed ranges.
 
 pub mod ehframe;
 pub mod elf;
+pub mod fips;
 
 use sha2::{Digest, Sha256};
 
@@ -50,7 +58,7 @@ use elf::{Elf, PF_R, PF_X, PHDR_SIZE, PT_LOAD, PT_PHDR, Phdr};
 
 /// Bump when the translated output for the same input changes: encodings,
 /// stub layout, the TSD slot numbers in `a64::slot`, or identification.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 pub const PAGE: u64 = 16384;
 
@@ -128,6 +136,8 @@ pub struct Analysis {
     pub is_oat: bool,
     /// Smallest PT_LOAD alignment.
     pub min_load_align: u64,
+    /// A BoringSSL FIPS module whose hash must follow rewritten bytes.
+    pub fips: Option<fips::Module>,
 }
 
 impl Analysis {
@@ -333,6 +343,7 @@ pub fn analyze(elf: &Elf) -> Analysis {
         outside_code,
         is_oat,
         min_load_align,
+        fips: fips::find(elf),
     }
 }
 
@@ -390,6 +401,8 @@ pub struct Report {
     pub outside_code: usize,
     pub method: &'static str,
     pub is_oat: bool,
+    /// The file's BoringSSL FIPS module hash was re-injected.
+    pub fips_rehashed: bool,
     pub stub_vaddr: u64,
     pub stub_size: u64,
     pub ctr_el0: u32,
@@ -537,6 +550,10 @@ pub fn translate(bytes: &[u8], opts: &Options) -> Result<Translation, String> {
     }
     patched[32..40].copy_from_slice(&stub_offset.to_le_bytes());
     patched[56..58].copy_from_slice(&(phnum as u16).to_le_bytes());
+    if let Some(m) = &a.fips {
+        m.reinject(&mut patched);
+        report.fips_rehashed = true;
+    }
 
     report.stub_vaddr = stub_vaddr;
     report.stub_size = seg_len as u64;

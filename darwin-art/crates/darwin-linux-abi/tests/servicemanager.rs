@@ -24,7 +24,11 @@ use darwin_guest_init::paths::Layout;
 use darwin_guest_init::props::mapped_properties;
 use darwin_guest_init::propsvc::{PropertyEvent, PropertySockets};
 
-const IMAGE: &str = "/Users/hahnlee/Work/android-vm-poc/darwin-art/_build/android16-image-full";
+/// The extracted pinned image (`tools/android-image-extract`).
+const IMAGE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../_build/android16-image-full"
+);
 const SERVICEMANAGER_LABEL: &str = "u:r:servicemanager:s0";
 const AID_SYSTEM: u32 = 1000;
 

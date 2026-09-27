@@ -92,6 +92,7 @@ struct Totals {
     outside_code: usize,
     oat_files: usize,
     oat_sites: usize,
+    fips_rehashed: usize,
     methods: BTreeMap<&'static str, usize>,
     unsupported_reasons: BTreeMap<String, usize>,
     errors: Vec<String>,
@@ -181,6 +182,7 @@ fn main() {
                             t.data_excluded += rep.data_excluded;
                             t.outside_code += rep.outside_code;
                             *t.methods.entry(rep.method).or_default() += 1;
+                            t.fips_rehashed += rep.fips_rehashed as usize;
                             if rep.is_oat {
                                 t.oat_files += 1;
                                 t.oat_sites += rep.total_sites();
@@ -266,6 +268,7 @@ fn main() {
         "OAT/ODEX:        {} files, {} sites",
         t.oat_files, t.oat_sites
     );
+    println!("FIPS modules:    {} rehashed", t.fips_rehashed);
     for (why, n) in &t.unsupported_reasons {
         println!("unsupported:     {n} x {why}");
     }

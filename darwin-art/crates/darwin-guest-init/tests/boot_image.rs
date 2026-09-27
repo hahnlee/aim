@@ -9,8 +9,10 @@ use darwin_android_init::rc::read_apex_info_list;
 use darwin_guest_init::fsops::Effect;
 use darwin_guest_init::{Boot, BootOptions, BootReport, RunMode};
 
-const REAL_IMAGE: &str =
-    "/Users/hahnlee/Work/android-vm-poc/darwin-art/_build/android16-image-full";
+const REAL_IMAGE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../_build/android16-image-full"
+);
 
 fn launched_pid(report: &BootReport, service: &str) -> Option<u32> {
     report

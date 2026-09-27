@@ -1,0 +1,12 @@
+# BoringSSL's FIPS integrity hash contract, re-applied by linux-abi's
+# translator (crates/darwin-linux-abi/src/xlate/fips.rs). Reference only:
+# nothing is built from these files.
+BORINGSSL_PROJECT=platform/external/boringssl
+BORINGSSL_REVISION=ecc1358826150d6a1851c517c325b0e6c0e1b8be
+BORINGSSL_TAG=android-16.0.0_r1
+BORINGSSL_INJECT_HASH_GO=src/util/fipstools/inject_hash/inject_hash.go
+BORINGSSL_INJECT_HASH_GO_SHA256=53ea77ae7cac9873081379f2cc1a959341679e58701a129f812e9b5436e81d5b
+BORINGSSL_BCM_CC=src/crypto/fipsmodule/bcm.cc
+BORINGSSL_BCM_CC_SHA256=3d4a2d473ca7508dbbe604b2ae93aa1925d228daccaa7c050db274ea81b78035
+BORINGSSL_FIPS_SHARED_LDS=src/crypto/fipsmodule/fips_shared.lds
+BORINGSSL_FIPS_SHARED_LDS_SHA256=7b7432062d7718be8438b862242373ed1c057bf91244641d8593ee06e5881e81

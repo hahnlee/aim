@@ -14,7 +14,11 @@ use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-const IMAGE: &str = "/Users/hahnlee/Work/android-vm-poc/darwin-art/_build/android16-image-full";
+/// The extracted pinned image (`tools/android-image-extract`).
+const IMAGE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../_build/android16-image-full"
+);
 const PROGRAM: &str = "/data/local/tmp/process";
 
 fn ndk_clang() -> Option<PathBuf> {

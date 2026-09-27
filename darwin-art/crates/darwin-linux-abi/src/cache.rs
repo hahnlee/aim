@@ -137,6 +137,7 @@ fn meta_text(key: &str, sha: &str, size: u64, outcome: &Outcome, r: &Report) -> 
     kv("outside_code", r.outside_code.to_string());
     kv("method", r.method.into());
     kv("oat", (r.is_oat as u8).to_string());
+    kv("fips_rehashed", (r.fips_rehashed as u8).to_string());
     kv("stub_vaddr", format!("{:#x}", r.stub_vaddr));
     kv("stub_size", r.stub_size.to_string());
     s

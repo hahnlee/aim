@@ -274,17 +274,14 @@ fn vendor_apexes_from_packages(image: &ImageRoot) -> Vec<String> {
 /// Parses the real extracted image when available and reports statistics.
 #[test]
 fn real_image_statistics() {
-    let candidates = [
-        "/Users/hahnlee/Work/android-vm-poc/darwin-art/_build/android16-image-full",
-        "/Users/hahnlee/Library/Application Support/DarwinART/runtime-images/0017da01f48cdff3b5e7d130287753330ddf28a06c114dc2c04a450f1772c876/root",
-    ];
-    let Some(root) = candidates
-        .iter()
-        .find(|path| std::path::Path::new(path).is_dir())
-    else {
+    let root = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../_build/android16-image-full"
+    );
+    if !std::path::Path::new(root).is_dir() {
         eprintln!("no extracted image on this machine; skipping");
         return;
-    };
+    }
     let image = ImageRoot::new(root);
     let vendor_version = darwin_android_init::rc::vendor_android_version(&image).unwrap_or(36);
     // The emulator image's bootconfig carries androidboot.hardware=ranchu.

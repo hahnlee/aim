@@ -8,6 +8,8 @@
 //!   memory filled with `pread`, and rewritten (see `patch`) before they
 //!   become executable.
 //! - Shared file mappings go straight to Darwin `mmap`.
+//! - A BoringSSL FIPS module rewritten at load time gets its integrity hash
+//!   recomputed in memory, as the translator does for cached files.
 
 use std::cell::RefCell;
 use std::sync::Mutex;
@@ -15,6 +17,7 @@ use std::sync::Mutex;
 use crate::context::GuestContext;
 use crate::errno::{self, EEXIST, EINVAL, ENOMEM};
 use crate::patch;
+use crate::xlate::fips;
 use crate::xrt::{self, ExecSource};
 
 const PAGE: u64 = 16384;
@@ -99,15 +102,20 @@ fn populate(b: u64, len: u64, fd: i32, off: u64) -> Result<(), i64> {
 
 /// Rewrite a freshly populated private file mapping (not executable yet)
 /// using the file's sites, or a scan when there is no metadata.
-fn rewrite_file_copy(b: u64, len: u64, off: u64, source: &ExecSource) {
+fn rewrite_file_copy(b: u64, len: u64, fd: i32, off: u64, source: &ExecSource) {
     let stats = match source {
-        ExecSource::LoadTime(Some(sites)) => {
-            let abs: Vec<_> = sites
+        ExecSource::LoadTime(Some(a)) => {
+            let abs: Vec<_> = a
+                .sites
                 .iter()
                 .filter(|s| s.offset >= off && s.offset + 4 <= off + len)
                 .map(|s| (b + (s.offset - off), s.kind, s.rt))
                 .collect();
-            patch::rewrite_sites(&abs, b, b + len, true)
+            let stats = patch::rewrite_sites(&abs, b, b + len, true);
+            if let Some(m) = &a.fips {
+                rehash_fips(m, b, len, fd, off);
+            }
+            stats
         }
         // Already translated (or nothing to rewrite): a scan would only hit
         // words the translator identified as data.
@@ -115,6 +123,66 @@ fn rewrite_file_copy(b: u64, len: u64, off: u64, source: &ExecSource) {
         ExecSource::LoadTime(None) => patch::rewrite_region(b, len),
     };
     trace_stats("rewrote", b, len, &stats);
+}
+
+/// After the copy at `b` (file offset `off`) holding the module text was
+/// rewritten, store the module's new hash. The read-only data is never
+/// rewritten, so it comes from the file. The hash is in `.rodata` (or, in
+/// static builds, after the text), which linker64 has mapped by now: it maps
+/// segments in program header order.
+fn rehash_fips(m: &fips::Module, b: u64, len: u64, fd: i32, off: u64) {
+    let text_len = m.text.1 - m.text.0;
+    if m.text_offset < off || m.text_offset + text_len > off + len {
+        return;
+    }
+    let text_addr = b + (m.text_offset - off);
+    let rodata = match m.rodata {
+        Some((lo, hi)) => {
+            let mut v = vec![0u8; (hi - lo) as usize];
+            // SAFETY: reading into our buffer.
+            let n =
+                unsafe { libc::pread(fd, v.as_mut_ptr().cast(), v.len(), m.rodata_offset as i64) };
+            if n != v.len() as isize {
+                return;
+            }
+            Some(v)
+        }
+        None => None,
+    };
+    // SAFETY: the module text lies inside the populated copy.
+    let text = unsafe { std::slice::from_raw_parts(text_addr as *const u8, text_len as usize) };
+    let new = fips::digest(text, rodata.as_deref());
+    let hash_addr = (text_addr - m.text.0).wrapping_add(m.hash_vaddr);
+    if !store_hash(hash_addr, &m.original, &new) {
+        eprintln!("[linux-abi] FIPS module hash at {hash_addr:#x} is not mapped from this file");
+    }
+}
+
+/// Replace `original` with `new` at `addr` in an anonymous copy of the
+/// file. False when no such copy is mapped there.
+fn store_hash(addr: u64, original: &fips::Hash, new: &fips::Hash) -> bool {
+    let Some((lo, hi, prot, _)) = patch::vm::region(addr) else {
+        return false;
+    };
+    if lo > addr || hi < addr + 32 || prot & libc::PROT_READ == 0 || file_backed(addr) {
+        return false;
+    }
+    // SAFETY: readable, inside one region.
+    if unsafe { std::slice::from_raw_parts(addr as *const u8, 32) } != original {
+        return false;
+    }
+    let page = addr & !(PAGE - 1);
+    let span = page_up(addr + 32) - page;
+    let opened = prot & libc::PROT_WRITE == 0;
+    if opened && host_mprotect(page, span, prot | libc::PROT_WRITE) < 0 {
+        return false;
+    }
+    // SAFETY: writable now; the 32 bytes checked above.
+    unsafe { std::ptr::copy_nonoverlapping(new.as_ptr(), addr as *mut u8, 32) };
+    if opened {
+        host_mprotect(page, span, prot);
+    }
+    true
 }
 
 pub fn mmap(a: [u64; 6]) -> i64 {
@@ -228,7 +296,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
                 if exec {
                     crate::diag::register_fd_module(b, len, fd, off);
                     let source = source.unwrap_or_else(|| xrt::exec_source(fd));
-                    rewrite_file_copy(b, len, off, &source);
+                    rewrite_file_copy(b, len, fd, off, &source);
                 }
             } else if exec {
                 // Fresh anonymous code: nothing written yet, but scan anyway so
