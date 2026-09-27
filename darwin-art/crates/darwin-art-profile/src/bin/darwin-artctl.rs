@@ -81,7 +81,7 @@ fn main_result() -> Result<(), Box<dyn Error>> {
         }
         Some("list") => print!("{}", list_packages(&paths)?),
         Some("ps") => print!("{}", list_processes(&paths)?),
-        Some("cmd" | "dumpsys" | "launcher-info" | "archive-info") => {
+        Some("cmd" | "dumpsys" | "launcher-info" | "archive-info" | "native-coverage") => {
             // `cmd SERVICE ARGS...` and `dumpsys SERVICE ARGS...` in the
             // running system server, as adb shell runs them.
             let arguments = env::args().skip(1).collect::<Vec<_>>();
@@ -161,7 +161,7 @@ fn main_result() -> Result<(), Box<dyn Error>> {
                 .into());
         }
         _ => {
-            return Err("usage: darwin-artctl {ensure|socket|status|profiles|create-profile ID|delete-profile ID|profile-size ID|shutdown|register PACKAGE RECORD|resolve PACKAGE|uninstall PACKAGE [--keep-data]|list|ps|hold SECONDS|supervise PACKAGE COMMAND [ARGS...]|daemonize PACKAGE COMMAND [ARGS...]|start-runtime PACKAGE KEY_HEX REQUIRED_MASK COMMAND [ARGS...]|exec PACKAGE COMMAND [ARGS...]}".into());
+            return Err("usage: darwin-artctl {ensure|socket|status|profiles|create-profile ID|delete-profile ID|profile-size ID|shutdown|register PACKAGE RECORD|resolve PACKAGE|uninstall PACKAGE [--keep-data]|list|ps|hold SECONDS|supervise PACKAGE COMMAND [ARGS...]|daemonize PACKAGE COMMAND [ARGS...]|start-runtime PACKAGE KEY_HEX REQUIRED_MASK COMMAND [ARGS...]|exec PACKAGE COMMAND [ARGS...]|cmd SERVICE [ARGS...]|dumpsys SERVICE [ARGS...]|native-coverage}".into());
         }
     }
     Ok(())

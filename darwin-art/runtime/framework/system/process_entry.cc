@@ -66,8 +66,9 @@ bool BuildSystemClassPath(const char* image_root, const char* support_dex,
   return true;
 }
 
-// crates/darwin-art-runtime/src/android_servers.rs
+// crates/darwin-art-runtime/src/{android_servers,native_coverage}.rs
 extern "C" bool darwin_art_register_android_servers(JNIEnv*, jobject, jmethodID);
+extern "C" bool darwin_art_register_native_coverage(JNIEnv*, jclass);
 
 namespace {
 
@@ -196,6 +197,12 @@ int Run(JNIEnv* env, const char* socket_path) {
       env, loader, load, "dev.darwinart.runtime.system.HostCommandService");
   if (host_commands == nullptr || env->ExceptionCheck() ||
       !RegisterHostCommandService(env, host_commands)) {
+    return 70;
+  }
+  jclass native_coverage =
+      LoadClass(env, loader, load, "dev.darwinart.runtime.system.NativeCoverage");
+  if (native_coverage == nullptr || env->ExceptionCheck() ||
+      !darwin_art_register_native_coverage(env, native_coverage)) {
     return 70;
   }
 

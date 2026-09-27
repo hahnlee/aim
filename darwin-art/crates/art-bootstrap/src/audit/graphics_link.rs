@@ -141,6 +141,7 @@ pub(crate) fn audit_runtime_graphics_link_mode(
     let RuntimeCoreObjects {
         boot_native_registration: boot_native_registration_object,
         boot_native_libraries: boot_native_libraries_object,
+        native_registration_audit: native_registration_audit_object,
         art_service: art_service_object,
         art_tools_process: art_tools_process_object,
         vm_bootstrap: vm_bootstrap_object,
@@ -433,6 +434,7 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         .arg(&registration_object)
         .arg(&boot_native_registration_object)
         .arg(&boot_native_libraries_object)
+        .arg(&native_registration_audit_object)
         .arg(&art_service_object)
         .arg(&art_tools_process_object)
         .arg(&process_state_object)

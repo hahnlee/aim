@@ -15,6 +15,7 @@ members = [
     "crates/darwin-art-binder-process",
     "crates/darwin-art-build-contract",
     "crates/darwin-art-native-artifact",
+    "crates/darwin-art-native-inventory",
     "crates/darwin-art-profile",
     "crates/darwin-art-rust-demangle",
     "crates/darwin-art-xtask",

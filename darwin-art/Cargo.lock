@@ -68,6 +68,7 @@ name = "art-bootstrap"
 version = "0.1.0"
 dependencies = [
  "darwin-art-build-contract",
+ "darwin-art-native-inventory",
  "sha2",
 ]
 
@@ -365,6 +366,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "darwin-art-native-inventory"
+version = "0.1.0"
+
+[[package]]
 name = "darwin-art-prefix"
 version = "0.1.0"
 
@@ -385,6 +390,7 @@ dependencies = [
  "bionic-fs-facade",
  "darwin-art-abi",
  "darwin-art-engine-sys",
+ "darwin-art-native-inventory",
  "darwin-art-profile",
  "jni-sys",
  "libc",

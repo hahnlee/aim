@@ -7,4 +7,5 @@ publish = false
 
 [dependencies]
 darwin-art-build-contract = { path = "../darwin-art-build-contract" }
+darwin-art-native-inventory = { path = "../darwin-art-native-inventory" }
 sha2 = "0.10"

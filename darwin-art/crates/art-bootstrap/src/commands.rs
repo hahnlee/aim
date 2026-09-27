@@ -114,6 +114,7 @@ pub(crate) fn run() -> Result<()> {
         "build-button-dex" => build_button_dex_probe(&root),
         "build-runtime-support-classes" => build_runtime_support_classes(&root),
         "build-dex-inspector" => build_dex_inspector(&root).map(|_| ()),
+        "native-inventory" => crate::native_inventory::native_inventory(&root),
         "build-runtime-support-dex" => build_runtime_support_dex(&root),
         "build-runtime-platform" => build_runtime_platform(&root),
         "build-runtime-core" => build_runtime_core(&root),

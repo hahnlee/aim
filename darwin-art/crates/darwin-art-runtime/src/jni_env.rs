@@ -57,6 +57,46 @@ impl Env {
         class
     }
 
+    /// The raw JNIEnv, for C helpers that take it.
+    pub fn raw(self) -> *mut JNIEnv {
+        self.0
+    }
+
+    pub fn exception_clear(self) {
+        call!(self, ExceptionClear)
+    }
+
+    pub fn static_method_id(self, class: jclass, name: &CStr, signature: &CStr) -> jmethodID {
+        call!(
+            self,
+            GetStaticMethodID,
+            class,
+            name.as_ptr(),
+            signature.as_ptr()
+        )
+    }
+
+    pub fn call_static_object(
+        self,
+        class: jclass,
+        method: jmethodID,
+        arguments: &[jvalue],
+    ) -> jobject {
+        call!(
+            self,
+            CallStaticObjectMethodA,
+            class,
+            method,
+            arguments.as_ptr()
+        )
+    }
+
+    /// A Java string from UTF-8 text (interior NULs end it).
+    pub fn new_string_utf(self, text: &str) -> jstring {
+        let text = CString::new(text.split('\0').next().unwrap_or("")).unwrap_or_default();
+        call!(self, NewStringUTF, text.as_ptr())
+    }
+
     pub fn delete_local_ref(self, object: jobject) {
         if !object.is_null() {
             call!(self, DeleteLocalRef, object);

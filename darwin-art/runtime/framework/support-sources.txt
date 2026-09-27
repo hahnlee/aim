@@ -100,6 +100,7 @@ runtime/framework/system/DarwinSystemServer.java
 runtime/framework/system/ServiceDirectory.java
 runtime/framework/recovery/RecoverySystemEndpoint.java
 runtime/framework/system/HostCommandService.java
+runtime/framework/system/NativeCoverage.java
 runtime/framework/system/LauncherQueries.java
 runtime/framework/system/SystemServerBootstrap.java
 runtime/framework/system/SystemServiceFactory.java
