@@ -11,6 +11,7 @@ Called by tools/build-art-android.sh; not meant to be run by hand.
 
 import argparse
 import glob
+import json
 import os
 import re
 import shlex
@@ -65,6 +66,14 @@ DEVICE_CFLAGS = [
     "-fdata-sections",
     "-fno-exceptions",
     "-fstack-protector-strong",
+    "-funwind-tables",
+    "-fno-short-enums",
+    "-fno-strict-aliasing",
+    "-fno-omit-frame-pointer",
+    # Soong zero-initializes automatic variables (and alloca) on every device
+    # build; ART relies on it, e.g. LinkMethodsHelper's BitVector over an
+    # alloca buffer in AssignVTableIndexes.
+    "-ftrivial-auto-var-init=zero",
     "-D__ANDROID_APEX__",
     "-DANDROID",
     "-DNDEBUG",
@@ -502,8 +511,9 @@ class Build:
                         [libart, artbase, libbase, liblog, libcxx_so] + libc)
 
         # dex2oat64: regenerates the boot image with the same reference encoding.
-        # Upstream links BoringSSL's libcrypto_static for the SHA-1 build id; this
-        # prototype links the image's libcrypto.so instead (hahnlee/aim#163).
+        # It links BoringSSL's libcrypto_static (for the SHA-1 build id) as
+        # upstream does: the ART namespace cannot see the platform libcrypto.so.
+        crypto = self.libcrypto_static(includes)
         dex2oat_flags = flags_for("libart-dex2oat")
         dex2oat_objs = self.objects(
             "dex2oat",
@@ -511,12 +521,30 @@ class Build:
             self.operator_srcs("art_dex2oat_operator_srcs", "art/dex2oat") +
             [os.path.join(self.art, "dex2oat", s) for s in ("dex2oat_options.cc", "dex2oat.cc")],
             dex2oat_flags)
-        self.executable("dex2oat64", dex2oat_objs, [elffile],
+        self.executable("dex2oat64", dex2oat_objs, [elffile, crypto],
                         [libart, artbase, dexfile, profile, palette, libbase,
                          art_apex("liblz4.so"), liblog, art_apex("libsigchain.so"), libz,
-                         img("system/lib64/libcrypto.so"), libcxx_so] + libc)
+                         libcxx_so] + libc)
 
         write_if_changed(os.path.join(self.out, "build.ninja"), "\n".join(self.lines) + "\n")
+
+    def libcrypto_static(self, includes):
+        """BoringSSL's libcrypto_static (external/boringssl/Android.bp): the
+        bcm and crypto sources and their Linux assembly (each file is guarded
+        by its architecture), without FIPS self tests."""
+        root = self.aosp_path("boringssl-full/src")
+        with open(os.path.join(root, "gen/sources.json")) as handle:
+            sources = json.load(handle)
+        files = sources["bcm"]["srcs"] + sources["crypto"]["srcs"] + [
+            s for s in sources["bcm"]["asm"] + sources["crypto"]["asm"]
+            if not s.endswith(("-apple.S", "-win.S"))]
+        defines = ("-DBORINGSSL_IMPLEMENTATION -DBORINGSSL_ANDROID_SYSTEM -DOPENSSL_SMALL "
+                   "-fvisibility=hidden")
+        include = f"-I{os.path.join(root, 'include')} -I{includes[0]}"
+        base = f"{include} {' '.join(DEVICE_CFLAGS)} -O2 {defines}"
+        flags = {"cxx": base, "cc": base, "asm": f"{include} {defines}"}
+        return self.static_lib("libcrypto_static",
+                               [os.path.join(root, s) for s in files], flags)
 
     def libcap_names(self):
         """libcap's cap_names.h, made the way external/libcap/Android.bp does.

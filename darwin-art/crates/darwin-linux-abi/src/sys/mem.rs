@@ -22,9 +22,9 @@ use crate::xrt::{self, ExecSource};
 
 use std::os::unix::ffi::OsStrExt;
 
-use super::{copies, vmmap};
+use super::{copies, vmmap, window};
 
-const PAGE: u64 = 16384;
+pub(super) const PAGE: u64 = 16384;
 
 const PROT_READ: u64 = 1;
 const PROT_WRITE: u64 = 2;
@@ -208,10 +208,23 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         return r;
     }
     let len = page_up(len);
-    let fixed = flags & MAP_FIXED != 0;
+    let mut addr = addr;
+    let mut fixed = flags & MAP_FIXED != 0;
     let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
     if (fixed || noreplace) && addr & (PAGE - 1) != 0 {
         return -(EINVAL as i64);
+    }
+    // A hint in the heap reference window takes the reserved pages there
+    // exactly; a hint that cannot be honoured there is dropped, as Linux
+    // places the mapping elsewhere.
+    if !fixed && (window::BASE..window::BASE + window::SIZE).contains(&addr) {
+        if addr & (PAGE - 1) == 0 && window::is_free(addr, len) {
+            fixed = true;
+        } else if noreplace {
+            return -(EEXIST as i64);
+        } else {
+            addr = 0;
+        }
     }
     let kind = flags & MAP_TYPE;
     let anon = flags & MAP_ANONYMOUS != 0;
@@ -380,8 +393,7 @@ pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
         return 0;
     }
     copies::forget(addr, addr + len);
-    // SAFETY: guest-requested unmap of guest memory.
-    errno::check(unsafe { libc::munmap(addr as *mut _, len as usize) } as i64)
+    window::unmap(addr, len)
 }
 
 /// Run the munmaps deferred by [`munmap`]; called on the host stack when the
@@ -422,6 +434,9 @@ pub fn mprotect(a: [u64; 6]) -> i64 {
     let (addr, len, prot) = (a[0], page_up(a[1]), a[2] & !(PROT_BTI | PROT_MTE));
     if addr & (PAGE - 1) != 0 {
         return -(EINVAL as i64);
+    }
+    if window::touches_reserved(addr, addr + len) {
+        return -(ENOMEM as i64);
     }
     if prot & PROT_EXEC != 0 {
         super::memfd::before_exec_protect(addr, addr + len);
@@ -628,6 +643,7 @@ const MREMAP_DONTUNMAP: u64 = 4;
 /// Allocate anonymous memory at exactly `addr` (it must be free), with the
 /// protection of the page below it.
 fn extend_at(addr: u64, len: u64, like: u64, replace: bool) -> Result<(), i64> {
+    let replace = replace || window::is_free(addr, len);
     let mut at = addr;
     let flags = VM_FLAGS_FIXED | if replace { VM_FLAGS_OVERWRITE } else { 0 };
     // SAFETY: allocating in our own task; FIXED without OVERWRITE fails
@@ -655,8 +671,8 @@ fn move_to(old: u64, old_len: u64, new: u64, new_len: u64, keep_old: bool) -> Re
         // MREMAP_DONTUNMAP: the old range stays mapped, empty.
         discard_private(old, old_len);
     } else {
-        // SAFETY: the old pages now live at `new`.
-        unsafe { mach_vm_deallocate(task(), old, old_len) };
+        // The old pages now live at `new`.
+        window::unmap(old, old_len);
     }
     Ok(())
 }
@@ -701,8 +717,7 @@ pub fn mremap(a: [u64; 6]) -> i64 {
     if !keep_old && new_len <= old_len {
         if new_len < old_len {
             copies::forget(old + new_len, old + old_len);
-            // SAFETY: the guest shrinks its own mapping.
-            unsafe { mach_vm_deallocate(task(), old + new_len, old_len - new_len) };
+            window::unmap(old + new_len, old_len - new_len);
         }
         return old as i64;
     }
@@ -769,6 +784,9 @@ pub fn msync(a: [u64; 6]) -> i64 {
         || flags & (MS_ASYNC | MS_SYNC) == (MS_ASYNC | MS_SYNC)
     {
         return -(EINVAL as i64);
+    }
+    if window::touches_reserved(addr, addr + page_up(len)) {
+        return -(ENOMEM as i64);
     }
     let mut h = 0;
     if flags & MS_ASYNC != 0 {

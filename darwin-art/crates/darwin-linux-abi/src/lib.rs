@@ -89,6 +89,7 @@ pub fn run(opts: RunOptions) -> String {
     if let Err(e) = vfs::init(opts.root, opts.path_map) {
         return e;
     }
+    sys::init_heap_window();
     sys::init_fds();
     sys::set_trace(opts.trace);
     xrt::init(opts.cache.clone());

@@ -32,7 +32,7 @@ are ported (0060, 0066, 0095; 0020 loses its Mach arena). Two more pieces of the
 nterp rewrites in `crates/art-bootstrap/src/runtime_art/nterp.rs` and the
 `ImageWriter::IsInBootImage` rewrite in `runtime_art/dex2oat.rs`.
 
-The new series is 8 patches, 4,710 lines as files (+1,543 / -347 changed
+The new series is 8 patches, 4,717 lines as files (+1,544 / -348 changed
 lines, 320 hunks), against 9,771 lines for the 184 Darwin patches. It contains
 no Darwin, Mach or Apple code.
 
@@ -65,10 +65,34 @@ no Darwin, Mach or Apple code.
 ### Syscall-layer contract (#161)
 
 The series reserves nothing itself; the old Darwin patch did that with
-`mach_vm_allocate`. The syscall layer keeps `[0x10000000000, 0x10100000000)`
-free of host allocations, honours guest `mmap` hints and `MAP_FIXED_NOREPLACE`
-inside it, returns `ENOMEM` from `msync` on unmapped pages (ART's linear
-low-4 GiB allocator probes that way) and never maps the first 64 KiB.
+`mach_vm_allocate`. The syscall layer owns the window
+(`crates/darwin-linux-abi/src/sys/window.rs`):
+
+- **Reservation.** Before the program is loaded, `[0x10000000000,
+  0x10100000000)` is reserved: an inaccessible host mapping with the Darwin
+  VM tag 243. The loader, translated files, thread stacks, host allocations
+  and guest mappings without a hint therefore never land in it (Darwin
+  places those bottom-up from 4 GiB, Linux top-down far above the window).
+  The reservation is inherited by fork and made again after exec.
+- **Unmapped to the guest.** Reserved pages look unmapped: they are absent
+  from `/proc/self/maps` and from the VM walk behind `mincore`, `madvise` and
+  `mremap`; `msync` and `mprotect` there fail with `ENOMEM` (ART's linear
+  low-4 GiB allocator probes pages with `msync`).
+- **Placement.** A guest `mmap` whose hint (with or without
+  `MAP_FIXED_NOREPLACE`) lies in the window and whose range is all reserved
+  gets exactly that address. A hint that cannot be honoured there is dropped
+  (the mapping goes elsewhere, as Linux does), except with
+  `MAP_FIXED_NOREPLACE`, which fails with `EEXIST`. `MAP_FIXED` replaces
+  whatever is there, as always. ART checks that the result lies in the
+  window and retries.
+- **Release.** `munmap` of window pages, and the pages a shrinking or moving
+  `mremap` leaves behind, go back to the reservation; `mremap` may grow a
+  window mapping in place over reserved pages.
+- Nothing is ever mapped below 4 GiB (Darwin's `__PAGEZERO`), so the first
+  64 KiB, and the addresses ART's `Context::kBadGprBase` sentinel page
+  guards, always fault. ART's "Could not reserve sentinel fault page at the
+  right address" warning is expected: it reserves the page at its window
+  address instead.
 
 ## The new series (`patches/art-android/`)
 
@@ -79,7 +103,7 @@ of the patches are disjoint.
 | --- | --- | --- | --- |
 | `0001-heap-reference-window.patch` | 121 | +48 -9 | The base constant, conversions, and `MemMap`'s low-4 GiB allocator moved into the window with plain `mmap` |
 | `0002-runtime-heap-reference-encoding.patch` | 647 | +198 -59 | Reference encoding in the runtime: `PtrCompression`, `ObjPtr`, lock-word forwarding, heap/card table/bitmaps, vreg and GC-root visitors |
-| `0003-image-logical-addresses.patch` | 353 | +103 -38 | Image loader, app-image writer, image writer, OAT code and entry-point addresses: logical <-> window |
+| `0003-image-logical-addresses.patch` | 360 | +104 -39 | Image loader, app-image writer, image writer, OAT code and entry-point addresses: logical <-> window |
 | `0004-quick-entrypoint-boundaries.patch` | 591 | +252 -17 | Quick entrypoints (C++ and arm64 assembly) decode arguments from and encode results for managed code |
 | `0005-nterp-heap-base.patch` | 334 | +78 -8 | nterp (arm64ng mterp) decodes before dereferences and C++ calls |
 | `0006-arm64-codegen-heap-base.patch` | 1,425 | +565 -95 | Optimizing arm64 code generator; the shared `ReferenceCodegenARM64` helper |
@@ -135,7 +159,9 @@ syscall layer's job).
   begin/data/end, image roots) return window addresses.
 - `gc/space/image_space.cc`: `RelocationRange` converts logical <-> window;
   relocation diffs become `int64_t` (a logical-to-window diff does not fit
-  32 bits); boot image loading uses 64-bit begin addresses.
+  32 bits), for the primary boot image and for a boot image extension
+  alike (the extension's diff was still truncated to 32 bits until P2 loaded
+  one); boot image loading uses 64-bit begin addresses.
 - `class_linker.cc`: boot-image method test uses the logical address.
 - `runtime_image.cc` (app-image writer): boot-image membership, content
   offsets, descriptor hashing and pointer serialization in logical addresses.
@@ -266,18 +292,31 @@ tools/build-art-android.sh [--aosp DIR] [--image DIR] [--out DIR] [--ndk DIR] [-
   the target), ART aconfig flags (all `is_fixed_read_only`, declaration
   defaults), `com_android_apex`/`com_android_art` XML parsers (xsdc),
   libcap `cap_names.h` (upstream awk + `_makenames`).
+- **Soong's device defaults** that change behaviour are passed too:
+  `-ftrivial-auto-var-init=zero` (ART relies on it: `AssignVTableIndexes`
+  keeps a `BitVector` in an `alloca` buffer it never clears, so without it
+  `java.lang.String` links with a wrong vtable and `InitWithoutImage`
+  aborts with "Class mismatch"), `-fno-strict-aliasing`, `-funwind-tables`,
+  `-fno-short-enums` and `-fno-omit-frame-pointer`.
+- **BoringSSL:** `dex2oat64` links `libcrypto_static` built from the pinned
+  `_aosp/boringssl-full` (`gen/sources.json`: the bcm and crypto sources and
+  their Linux assembly, the flags of `external/boringssl/Android.bp`), as
+  upstream does (#163). The platform `libcrypto.so` is not visible in the ART
+  linker namespace.
 - **Output:** `_build/art-android/` (~0.9 GB with debug info): `lib64/`
   `libartbase.so`, `libdexfile.so`, `libprofile.so`, `libart.so`
   (runtime + JIT compiler, same DT_NEEDED set as the original),
-  `libopenjdkjvm.so`, and `bin/dex2oat64`.
-- **Status:** everything above compiles and links with the series applied
-  (libartbase, libdexfile, libprofile and libart also link from the pristine
-  sources, as a baseline). Nothing has been executed yet (#166). A full build
-  takes a few minutes on this machine (NDK clang runs under Rosetta).
+  `libopenjdkjvm.so`, and `bin/dex2oat64`; `stripped/` holds the same files
+  without debug info, which `image/overlay.toml` puts into the derived image.
+- **Status:** runs on the syscall layer (P2, ADR 0012): the image's
+  `dalvikvm64` runs Java with and without a boot image, interpreted and with
+  the JIT, and `dex2oat64` regenerates the boot image. A full build takes
+  about 3.5 minutes on this machine (NDK clang runs under Rosetta).
 - **Deviations:** `metrics/statsd.cc` is replaced by
-  `tools/art-android/statsd_unavailable.cc` (upstream's own non-Android stubs)
-  until `statslog_art` is generated (#162); `dex2oat64` links the image's
-  `libcrypto.so` instead of BoringSSL static (#163); odrefresh metrics use
+  `tools/art-android/statsd_unavailable.cc` (upstream's own non-Android stubs),
+  so ART reports no metrics to statsd, until `statslog_art` is generated
+  (#162: that needs `stats-log-api-gen` built for the host from
+  `frameworks/proto_logging`, which is not cheap); odrefresh metrics use
   upstream's host variant; `-Werror` is off (NDK clang 19 vs the platform's
   newer clang).
 
@@ -290,29 +329,48 @@ original.
 
 ## Boot image (#165)
 
-The existing Darwin dex2oat (`build-android16-boot-image`) cannot produce the
-new world's boot image. Its image *data* uses the same encoding (logical
-addresses from `ART_BASE_ADDRESS`, references stored as their low 32 bits), but
-its *code* is wrong for the new libart: JNI stubs follow Apple's packed
-stack-argument ABI (0135), 0095 changes the JNI reference-return contract, the
-Thread and entrypoint offsets baked into compiled code come from the Darwin
-runtime build, and the Darwin JIT gates shape what compiles.
+The original boot image cannot run on the rebuilt libart: its code and image
+data hold absolute 32-bit references, and its compiled code bakes in the
+original runtime's Thread and entrypoint offsets. The Darwin dex2oat
+(`build-android16-boot-image`) cannot produce it either: its code follows the
+Darwin runtime (Apple's JNI stack-argument ABI, the Darwin Thread layout, the
+Darwin JIT gates).
 
-The plan:
+Without a boot image, `Runtime::Init` takes `ClassLinker::InitWithoutImage`
+and runs the boot class path jars on nterp and the JIT. That is how P2 first
+ran Java, and how the boot image is made.
 
-1. P2 needs no boot image. Without `-Ximage`, `Runtime::Init` takes
-   `ClassLinker::InitWithoutImage` and runs the image's boot class path jars on
-   nterp and the JIT. That validates 0001-0005 without dex2oat.
-2. `bin/dex2oat64` built here (same series, same `ART_HEAP_REFERENCE_BASE`, same
-   Thread layout as the libart it serves) regenerates `boot.art/.oat/.vdex`
-   for the framework jars when it runs on the syscall layer, with the original
-   `dex2oat-cmdline` from the image's `boot.oat` as the template,
-   `--instruction-set=arm64` and `--base=0x70000000`.
-3. The result becomes a `replace` of `/system/framework/arm64/boot*` in the
-   derived image overlay manifest (ADR 0012 decision 5).
-4. Bootstrap alternative if the syscall layer lags: a Linux host dex2oat
-   (glibc, in a lima VM) from the same series; ART's host build needs no
-   Darwin patches.
+`tools/build-art-boot-image.sh` regenerates it with the rebuilt
+`dex2oat64`, which runs on the syscall layer (`linux-run`) with the original
+linker64, bionic and ART APEX libraries; the ART exception binaries are
+mapped over the image's with `--path-map` file entries, so no derived image is
+needed:
+
+```
+tools/build-art-boot-image.sh [--image DIR] [--art DIR] [--out DIR] [--linux-run PATH]
+```
+
+- **Primary boot image:** the boot class path recorded in the original
+  `boot.oat` (14 jars: the ART module's, the framework's and core-icu4j), as
+  odrefresh compiles it: multi-image, `speed-profile` with both boot image
+  profiles (`/apex/com.android.art/etc/boot-image.prof`,
+  `/system/etc/boot-image.prof`), both `dirty-image-objects` lists,
+  `/system/etc/preloaded-classes`, `--base=0x70000000`, lz4 images.
+- **Mainline extension:** every `boot-<jar>.art` the original ships beyond
+  the primary (here `framework-adservices`), `verify`, compiled against the
+  new primary image, named after the base `boot`.
+- **Reproducible:** `--force-determinism` and `--avoid-storing-invocation`;
+  two runs produce identical files. The whole run (15 dex2oat components,
+  load-time rewriting included) takes about 3 s.
+- **Output:** `_build/art-android/boot-image/framework/arm64/boot*.{art,oat}`
+  and `framework/boot*.vdex`. `image/overlay.toml` replaces the 45
+  corresponding files under `/system/framework`; the original
+  `arm64/boot*.vdex` symlinks stay and resolve to the replaced vdex files.
+- **Loading:** the runtime finds it at its default location
+  (`/system/framework/boot.art` with the profiles, plus
+  `/system/framework/boot-framework-adservices.art`), mapped at
+  `0x10070000000` (the window plus `ART_BASE_ADDRESS`); the loader always
+  relocates from the logical to the window address (`0003`).
 
 ## Classification
 

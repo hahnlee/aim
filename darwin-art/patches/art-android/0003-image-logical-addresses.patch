@@ -169,7 +169,14 @@ diff --git a/runtime/gc/space/image_space.cc b/runtime/gc/space/image_space.cc
      const uint32_t bound_;
      const uint32_t begin_;
      const uint32_t size_;
-@@ -2536,8 +2542,8 @@
+@@ -2530,14 +2536,14 @@
+       DCHECK_EQ(first_header.GetBootImageBegin() + first_header.GetBootImageSize(), image_begin);
+     }
+     int64_t current_diff64 = kExtension
+-        ? static_cast<int64_t>(reinterpret_cast32<uint32_t>(spaces.front()->Begin())) -
++        ? static_cast<int64_t>(reinterpret_cast<uintptr_t>(spaces.front()->Begin())) -
+               static_cast<int64_t>(image_begin)
+         : base_diff64;
      if (base_diff64 == 0 && current_diff64 == 0) {
        return;
      }

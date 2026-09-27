@@ -34,6 +34,7 @@ mod signal;
 mod thread;
 mod vmmap;
 mod wait;
+pub mod window;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -56,6 +57,7 @@ pub use thread::host_tid;
 pub(crate) use thread::{Thread, register_current};
 /// Around a Darwin fork of a guest process.
 pub use thread::{fork_child, fork_parent, fork_prepare};
+pub use window::init as init_heap_window;
 
 /// Read by the trampoline: while set, every syscall takes the full path so
 /// it is traced.
@@ -330,6 +332,9 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         166 => pstate::umask(a),
         168 => pstate::getcpu(a),
         179 => pstate::sysinfo(a),
+        // userfaultfd: answered "unsupported" (ADR 0012); ART then uses
+        // its concurrent-copying collector.
+        282 => -(ENOSYS as i64),
         _ => {
             let args: Vec<String> = a[..names::arg_count(nr)]
                 .iter()
