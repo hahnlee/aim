@@ -13,6 +13,8 @@
 //! | `/apex/apex-info-list.xml` | `<runtime>/apex/apex-info-list.xml` | writable | per boot |
 //! | `/data`, `/metadata`, `/cache` | `<data>/<name>` | writable | persistent |
 //! | `/proc`, `/sys` | `<runtime>/kernfs/{proc,sys}` | kernfs | per boot: values init wrote |
+//! | `/sys/fs/cgroup` | `<runtime>/cgroup` | cgroup2 | per boot: a plain directory tree |
+//! | `/sys/fs/bpf` | `<runtime>/bpf` | bpf | per boot: pinned eBPF objects |
 //! | everything else | `<image>/...` | read-only image | |
 //!
 //! Host device nodes (`/dev/null`, `/dev/zero`, `/dev/random`,
@@ -45,6 +47,13 @@ pub enum MapKind {
     /// `/proc` and `/sys`: the syscall layer synthesizes them; this tree
     /// only holds the values init wrote, for the layer to report.
     Kernfs,
+    /// The cgroup v2 hierarchy: a writable directory whose groups no
+    /// controller acts on. zygote cannot start a process without making
+    /// its group (`createProcessGroup`).
+    Cgroup2,
+    /// bpffs: where the syscall layer's eBPF maps and programs are pinned
+    /// (hard links to their object files).
+    Bpf,
 }
 
 impl MapKind {
@@ -52,6 +61,8 @@ impl MapKind {
         match self {
             MapKind::Writable => "rw",
             MapKind::Kernfs => "kernfs",
+            MapKind::Cgroup2 => "cgroup2",
+            MapKind::Bpf => "bpf",
         }
     }
 }
@@ -111,6 +122,14 @@ impl PathMap {
         &self.image
     }
 
+    /// Add `entry`, replacing one at the same guest path.
+    pub fn add(&mut self, entry: MapEntry) {
+        self.entries.retain(|e| e.guest != entry.guest);
+        let mut entries = std::mem::take(&mut self.entries);
+        entries.push(entry);
+        *self = Self::new(std::mem::take(&mut self.image), entries);
+    }
+
     pub fn entries(&self) -> &[MapEntry] {
         &self.entries
     }
@@ -136,7 +155,7 @@ impl PathMap {
                     entry.host.join(rest)
                 };
                 let area = match entry.kind {
-                    MapKind::Writable => Area::Writable {
+                    MapKind::Writable | MapKind::Cgroup2 | MapKind::Bpf => Area::Writable {
                         prefix: entry.guest.clone(),
                     },
                     MapKind::Kernfs => Area::Kernfs {
@@ -240,13 +259,14 @@ impl PathMap {
             };
             match kind {
                 "root" => image = Some(PathBuf::from(host)),
-                "rw" | "kernfs" => entries.push(MapEntry {
+                "rw" | "kernfs" | "cgroup2" | "bpf" => entries.push(MapEntry {
                     guest: guest.to_string(),
                     host: PathBuf::from(host),
-                    kind: if kind == "rw" {
-                        MapKind::Writable
-                    } else {
-                        MapKind::Kernfs
+                    kind: match kind {
+                        "rw" => MapKind::Writable,
+                        "kernfs" => MapKind::Kernfs,
+                        "cgroup2" => MapKind::Cgroup2,
+                        _ => MapKind::Bpf,
                     },
                 }),
                 other => return Err(format!("line {}: unknown kind '{other}'", number + 1)),
@@ -318,6 +338,14 @@ impl Layout {
     pub fn kernfs_dir(&self) -> PathBuf {
         self.runtime.join("kernfs")
     }
+    /// Host directory the guest sees as the cgroup v2 hierarchy.
+    pub fn cgroup_dir(&self) -> PathBuf {
+        self.runtime.join("cgroup")
+    }
+    /// Host directory the guest sees as bpffs.
+    pub fn bpf_dir(&self) -> PathBuf {
+        self.runtime.join("bpf")
+    }
     pub fn identity_dir(&self) -> PathBuf {
         self.runtime.join("identity")
     }
@@ -365,6 +393,16 @@ impl Layout {
                 kind: MapKind::Kernfs,
             });
         }
+        entries.push(MapEntry {
+            guest: "/sys/fs/cgroup".to_string(),
+            host: self.cgroup_dir(),
+            kind: MapKind::Cgroup2,
+        });
+        entries.push(MapEntry {
+            guest: "/sys/fs/bpf".to_string(),
+            host: self.bpf_dir(),
+            kind: MapKind::Bpf,
+        });
         PathMap::new(self.image.clone(), entries)
     }
 
@@ -398,6 +436,8 @@ impl Layout {
             self.socket_dir(),
             self.kernfs_dir().join("proc"),
             self.kernfs_dir().join("sys"),
+            self.cgroup_dir(),
+            self.bpf_dir(),
             self.identity_dir().join("by-pid"),
             self.logs_dir(),
             self.runtime.join("apex"),

@@ -1,0 +1,15 @@
+[package]
+name = "android_net_netd"
+version = "17.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "netd_aidl_interface V17 (android.net.INetd), Rust backend, generated from the frozen AIDL API"
+
+[lib]
+path = "../../../_build/daemons/aidl/android_net_netd/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+binder.workspace = true
+static_assertions = "1"

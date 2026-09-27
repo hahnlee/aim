@@ -14,8 +14,9 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
+use super::forklock::ForkRwLock;
 use super::{epoll, evdev, event, inotify, knob, memfd, net};
 
 /// Guest fds below this have a byte in [`SLOW`]; the lean path sends larger
@@ -43,7 +44,7 @@ pub enum Kind {
     Evdev(Arc<evdev::Evdev>),
 }
 
-static TABLE: LazyLock<RwLock<HashMap<i32, Kind>>> = LazyLock::new(Default::default);
+static TABLE: LazyLock<ForkRwLock<HashMap<i32, Kind>>> = LazyLock::new(Default::default);
 
 fn set_slow(fd: i32, on: bool) {
     if let Some(b) = SLOW.get(fd as usize) {
@@ -150,7 +151,11 @@ pub fn after_fork_child() {
 }
 
 extern "C" fn atfork_child() {
-    after_fork_child();
+    // The guest's fork holds the table's lock here and runs this itself
+    // (`fork::child_fixups`) once it has released it.
+    if !super::forklock::held() {
+        after_fork_child();
+    }
 }
 
 /// Set up the table for this process: recognize inherited sockets and
@@ -234,10 +239,20 @@ pub fn hide(fd: i32) -> i32 {
     fd
 }
 
+/// Leave `fd` (the layer's, kept across exec) out of the guest's view.
+pub fn keep_hidden(fd: i32) {
+    HIDDEN.lock().unwrap().push(fd);
+}
+
 pub fn unhide(fd: i32) {
     HIDDEN.lock().unwrap().retain(|&h| h != fd);
 }
 
 pub fn is_hidden(fd: i32) -> bool {
     HIDDEN.lock().unwrap().contains(&fd)
+}
+
+/// This module's locks for a fork (`sys::forklock`).
+pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
+    super::forklock::rwlock(&TABLE, held) && super::forklock::mutex(&HIDDEN, held)
 }

@@ -5,15 +5,87 @@
 //! are never followed on the host. Host permission bits get the original
 //! `mode & 0o777`; the complete original mode and uid/gid are kept on files
 //! and directories in darwin-art's `com.darwin-art.android-inode` attribute.
+//!
+//! An inode's original SELinux label (`security.selinux`, bytes exactly as
+//! stored, usually NUL-terminated) is kept on files, directories and symlinks
+//! in the host attribute `dev.darwinart.xattr.security.selinux`, the name the
+//! syscall layer maps the guest's `security.selinux` to. Labels are written
+//! before the host mode is made read-only, and once per hard-linked inode.
 use crate::{Result, invalid};
 use darwin_art_fs_broker::inode_metadata::{AndroidInodeMetadata, write_new};
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{CString, OsStr, c_char, c_int, c_void};
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{self, BufWriter, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+
+/// Host attribute carrying the guest's `security.selinux`.
+pub const LABEL_XATTR: &str = "dev.darwinart.xattr.security.selinux";
+const LABEL_XATTR_C: &[u8] = b"dev.darwinart.xattr.security.selinux\0";
+const XATTR_NOFOLLOW: c_int = 1;
+const XATTR_CREATE: c_int = 2;
+unsafe extern "C" {
+    fn fsetxattr(
+        fd: c_int,
+        name: *const c_char,
+        value: *const c_void,
+        size: usize,
+        position: u32,
+        options: c_int,
+    ) -> c_int;
+    fn setxattr(
+        path: *const c_char,
+        name: *const c_char,
+        value: *const c_void,
+        size: usize,
+        position: u32,
+        options: c_int,
+    ) -> c_int;
+}
+
+/// Label an open file or directory.
+fn label_fd(file: &File, label: &[u8]) -> io::Result<()> {
+    // SAFETY: borrowed descriptor, NUL-terminated name and an exact readable
+    // span; CREATE refuses to overwrite an existing label.
+    let status = unsafe {
+        fsetxattr(
+            file.as_raw_fd(),
+            LABEL_XATTR_C.as_ptr().cast(),
+            label.as_ptr().cast(),
+            label.len(),
+            0,
+            XATTR_CREATE,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Label a symlink itself, never its target.
+fn label_link(path: &Path, label: &[u8]) -> io::Result<()> {
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: NUL-terminated path and name and an exact readable span;
+    // NOFOLLOW addresses the link, CREATE refuses to overwrite.
+    let status = unsafe {
+        setxattr(
+            path.as_ptr(),
+            LABEL_XATTR_C.as_ptr().cast(),
+            label.as_ptr().cast(),
+            label.len(),
+            0,
+            XATTR_NOFOLLOW | XATTR_CREATE,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
 
 pub const S_IFMT: u32 = 0o170000;
 pub const S_IFDIR: u32 = 0o040000;
@@ -43,6 +115,10 @@ pub trait Tree {
     fn children(&self, id: u64) -> Result<Vec<(Vec<u8>, u64)>>;
     fn read_link(&self, id: u64) -> Result<Vec<u8>>;
     fn copy_file(&self, id: u64, out: &mut dyn Write) -> Result<u64>;
+    /// The inode's `security.selinux` value as stored, if it has one.
+    fn label(&self, _id: u64) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
 }
 
 /// Read a whole regular file into memory, bounded.
@@ -104,7 +180,7 @@ impl Report {
 /// `finish`, after every tree (including nested mounts) has been written.
 #[derive(Default)]
 pub struct Materializer {
-    directories: Vec<(PathBuf, Node)>,
+    directories: Vec<(PathBuf, Node, Option<Vec<u8>>)>,
     current: Report,
     total: Report,
 }
@@ -141,14 +217,15 @@ impl Materializer {
                     )));
                 }
                 // The mounted root's metadata replaces the mount point's.
-                self.directories.retain(|(path, _)| path != destination);
+                self.directories.retain(|(path, _, _)| path != destination);
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 DirBuilder::new().mode(0o700).create(destination)?;
             }
             Err(error) => return Err(error.into()),
         }
-        self.directories.push((destination.to_owned(), node));
+        self.directories
+            .push((destination.to_owned(), node, tree.label(root)?));
         self.current.directories += 1;
         let mut links = HashMap::new();
         self.walk(tree, root, destination, &mut links, 0)?;
@@ -177,20 +254,27 @@ impl Materializer {
             let path = directory.join(OsStr::from_bytes(&name));
             let node = tree.node(child)?;
             let created = match node.kind() {
-                S_IFDIR => DirBuilder::new().mode(0o700).create(&path).map(|_| {
-                    self.current.directories += 1;
-                    self.directories.push((path.clone(), node));
-                    true
-                }),
+                S_IFDIR => {
+                    let label = tree.label(child)?;
+                    DirBuilder::new().mode(0o700).create(&path).map(|_| {
+                        self.current.directories += 1;
+                        self.directories.push((path.clone(), node, label));
+                        true
+                    })
+                }
                 S_IFREG => self.file(tree, child, node, &path, links),
                 S_IFLNK => {
                     let target = tree.read_link(child)?;
                     if target.is_empty() || target.contains(&0) {
                         return Err(invalid(format!("invalid symlink {}", path.display())));
                     }
-                    symlink(OsStr::from_bytes(&target), &path).map(|_| {
+                    let label = tree.label(child)?;
+                    symlink(OsStr::from_bytes(&target), &path).and_then(|_| {
+                        if let Some(label) = &label {
+                            label_link(&path, label)?;
+                        }
                         self.current.symlinks += 1;
-                        false
+                        Ok(false)
                     })
                 }
                 _ => {
@@ -225,6 +309,9 @@ impl Materializer {
             self.current.hardlinks += 1;
             return Ok(false);
         }
+        let label = tree
+            .label(id)
+            .map_err(|error| io::Error::other(format!("{}: {error}", path.display())))?;
         let file = OpenOptions::new().write(true).create_new(true).open(path)?;
         let mut out = BufWriter::with_capacity(1 << 20, file);
         let written = tree
@@ -238,6 +325,9 @@ impl Materializer {
         }
         let file = out.into_inner().map_err(|error| error.into_error())?;
         write_new(&file, metadata(&node))?;
+        if let Some(label) = &label {
+            label_fd(&file, label)?;
+        }
         file.set_permissions(Permissions::from_mode(node.mode & 0o777))?;
         if node.nlink > 1 {
             links.insert(id, path.to_owned());
@@ -250,10 +340,13 @@ impl Materializer {
     /// Apply directory metadata deepest-first and return the report.
     pub fn finish(mut self) -> Result<Report> {
         self.directories
-            .sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
-        for (path, node) in &self.directories {
+            .sort_by_key(|(path, _, _)| std::cmp::Reverse(path.components().count()));
+        for (path, node, label) in &self.directories {
             let directory = File::open(path)?;
             write_new(&directory, metadata(node))?;
+            if let Some(label) = label {
+                label_fd(&directory, label)?;
+            }
             directory.set_permissions(Permissions::from_mode(node.mode & 0o777))?;
         }
         Ok(self.total)
@@ -370,6 +463,109 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!((original.mode, original.gid), (S_IFREG | 0o4755, 2000));
         fs::set_permissions(out.join("mnt"), Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&out).unwrap();
+    }
+
+    /// `Memory` whose every node `id` is labelled `u:object_r:t<id>:s0\0`,
+    /// except ids listed as unlabelled.
+    struct Labelled(Memory, Vec<u64>);
+
+    impl Tree for Labelled {
+        fn root(&self) -> u64 {
+            0
+        }
+        fn node(&self, id: u64) -> Result<Node> {
+            self.0.node(id)
+        }
+        fn children(&self, id: u64) -> Result<Vec<(Vec<u8>, u64)>> {
+            self.0.children(id)
+        }
+        fn read_link(&self, id: u64) -> Result<Vec<u8>> {
+            self.0.read_link(id)
+        }
+        fn copy_file(&self, id: u64, out: &mut dyn Write) -> Result<u64> {
+            self.0.copy_file(id, out)
+        }
+        fn label(&self, id: u64) -> Result<Option<Vec<u8>>> {
+            Ok((!self.1.contains(&id)).then(|| format!("u:object_r:t{id}:s0\0").into_bytes()))
+        }
+    }
+
+    /// Reads the host label attribute without following symlinks.
+    pub(crate) fn host_label(path: &Path) -> Option<Vec<u8>> {
+        unsafe extern "C" {
+            fn getxattr(
+                path: *const c_char,
+                name: *const c_char,
+                value: *mut c_void,
+                size: usize,
+                position: u32,
+                options: c_int,
+            ) -> isize;
+        }
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let mut value = vec![0u8; 256];
+        // SAFETY: NUL-terminated strings and a writable span of value.len().
+        let length = unsafe {
+            getxattr(
+                path.as_ptr(),
+                LABEL_XATTR_C.as_ptr().cast(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+                0,
+                XATTR_NOFOLLOW,
+            )
+        };
+        (length >= 0).then(|| {
+            value.truncate(length as usize);
+            value
+        })
+    }
+
+    #[test]
+    fn writes_labels_before_read_only_modes() {
+        let tree = Labelled(
+            Memory(vec![
+                (
+                    node(S_IFDIR | 0o555, 0, 2),
+                    vec![
+                        (b"bin".to_vec(), 1),
+                        (b"sh".to_vec(), 3),
+                        (b"plain".to_vec(), 4),
+                    ],
+                    vec![],
+                ),
+                (
+                    node(S_IFDIR | 0o555, 0, 2),
+                    vec![(b"toybox".to_vec(), 2), (b"ls".to_vec(), 2)],
+                    vec![],
+                ),
+                (node(S_IFREG | 0o444, 3, 2), vec![], b"elf".to_vec()),
+                (node(S_IFLNK | 0o777, 0, 1), vec![], b"/nowhere".to_vec()),
+                (node(S_IFREG | 0o444, 1, 1), vec![], b"x".to_vec()),
+            ]),
+            vec![4],
+        );
+        let out = temp_dir("labels");
+        let mut materializer = Materializer::default();
+        materializer.extract(&tree, &out).unwrap();
+        materializer.finish().unwrap();
+        let label = |p: &str| host_label(&out.join(p));
+        assert_eq!(label(""), Some(b"u:object_r:t0:s0\0".to_vec()));
+        assert_eq!(label("bin"), Some(b"u:object_r:t1:s0\0".to_vec()));
+        assert_eq!(label("bin/ls"), Some(b"u:object_r:t2:s0\0".to_vec()));
+        assert_eq!(label("bin/toybox"), label("bin/ls"));
+        assert_eq!(label("sh"), Some(b"u:object_r:t3:s0\0".to_vec()));
+        assert_eq!(label("plain"), None);
+        // The inode attribute is still written alongside the label.
+        let original =
+            darwin_art_fs_broker::inode_metadata::read(&File::open(out.join("bin/ls")).unwrap())
+                .unwrap()
+                .unwrap();
+        assert_eq!(original.mode, S_IFREG | 0o444);
+        for dir in ["", "bin"] {
+            fs::set_permissions(out.join(dir), Permissions::from_mode(0o700)).unwrap();
+        }
         fs::remove_dir_all(&out).unwrap();
     }
 }

@@ -244,6 +244,7 @@ class Build:
             os.path.join(art, "libnativeloader/include"),
             os.path.join(art, "sigchainlib"),
             os.path.join(art, "odrefresh/include"),
+            os.path.join(art, "dt_fd_forward/export"),
             os.path.join(art, "tools/cpp-define-generator"),
             a("external/vixl/src"),
             a("external/lzma/C"),
@@ -269,6 +270,7 @@ class Build:
             f("frameworks/libs/modules-utils/build/include"),
             f("packages/modules/StatsD/lib/libstatssocket/include"),
             f("packages/modules/StatsD/lib/libstatspull/include"),
+            f("packages/modules/adb/libs/adbconnection/include"),
             f("bionic/libc/platform"),
             f("bionic/libc/async_safe/include"),
             a("boringssl-full/src/include"),  # <openssl/sha.h> for dex2oat's build id
@@ -509,6 +511,17 @@ class Build:
             flags_for("libelffile"))  # art_defaults only: not BUILDING_LIBART
         self.shared_lib("libopenjdkjvm", jvm_objs, [],
                         [libart, artbase, libbase, liblog, libcxx_so] + libc)
+
+        # libadbconnection: the JDWP plugin the zygote's runtime always loads
+        # (-XjdwpProvider:default); it uses libart internals.
+        adb_objs = self.objects(
+            "libadbconnection",
+            [os.path.join(self.art, "adbconnection", s) for s in ("adbconnection.cc", "jdwpargs.cc")],
+            flags_for("libelffile"))
+        self.shared_lib("libadbconnection", adb_objs, [],
+                        [libart, artbase, libbase,
+                         img("apex/com.android.adbd/lib64/libadbconnection_client.so"),
+                         libcxx_so] + libc)
 
         # dex2oat64: regenerates the boot image with the same reference encoding.
         # It links BoringSSL's libcrypto_static (for the SHA-1 build id) as

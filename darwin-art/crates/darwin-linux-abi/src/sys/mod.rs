@@ -6,32 +6,36 @@
 mod ashmem;
 mod attrs;
 mod binder;
+mod bpf;
 mod copies;
 mod copy;
 pub mod cred;
 mod dir;
 mod epoll;
-mod event;
 mod evdev;
+mod event;
 mod exec;
 pub(crate) mod fdtab;
 mod fork;
+pub(crate) mod forklock;
 mod fs;
 mod fsops;
 mod futex;
+mod genfs;
 mod inotify;
 mod knob;
 mod mem;
 mod memfd;
 mod misc;
+mod mount;
 pub mod names;
 mod net;
 mod park;
 mod poll;
 mod process;
 mod procfs;
-mod ptimer;
 mod pstate;
+mod ptimer;
 mod selinuxfs;
 mod sigframe;
 mod signal;
@@ -39,6 +43,7 @@ mod thread;
 mod vmmap;
 mod wait;
 pub mod window;
+mod xattr;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -81,7 +86,7 @@ extern "C" fn linux_abi_dispatch(ctx: *mut GuestContext) {
     // SAFETY: the trampoline passes this thread's live context.
     let ctx = unsafe { &mut *ctx };
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(ctx))).is_err() {
-        eprintln!("[linux-abi] panic in syscall handler; aborting");
+        crate::diag!("[linux-abi] panic in syscall handler; aborting");
         std::process::abort();
     }
 }
@@ -136,7 +141,7 @@ pub fn dispatch(ctx: &mut GuestContext) {
         }
         line.push(')');
         if matches!(nr, 93 | 94) {
-            eprintln!("{line}");
+            crate::diag!("{line}");
         }
     }
     // A syscall a host signal interrupted is restarted when no guest
@@ -149,11 +154,11 @@ pub fn dispatch(ctx: &mut GuestContext) {
     };
     if tracing() {
         if (-4095..0).contains(&r) {
-            eprintln!("{line} = -{} ({})", -r, names::errno_name(-r as i32));
+            crate::diag!("{line} = -{} ({})", -r, names::errno_name(-r as i32));
         } else if !(0..=0xffff).contains(&r) {
-            eprintln!("{line} = {r:#x}");
+            crate::diag!("{line} = {r:#x}");
         } else {
-            eprintln!("{line} = {r}");
+            crate::diag!("{line} = {r}");
         }
     }
     ctx.x[0] = r as u64;
@@ -162,6 +167,10 @@ pub fn dispatch(ctx: &mut GuestContext) {
 fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
     match nr {
         // files
+        5..=7 => xattr::setxattr(nr, a),
+        8..=10 => xattr::getxattr(nr, a),
+        11..=13 => xattr::listxattr(nr, a),
+        14..=16 => xattr::removexattr(nr, a),
         17 => fs::getcwd(a),
         23 => fs::dup(a),
         24 => fs::dup3(a),
@@ -341,6 +350,12 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         166 => pstate::umask(a),
         168 => pstate::getcpu(a),
         179 => pstate::sysinfo(a),
+        // eBPF: maps, and programs that never run
+        280 => bpf::bpf(a),
+        // mount namespaces
+        97 => mount::unshare(a),
+        39 => mount::umount2(a),
+        40 => mount::mount(a),
         // userfaultfd: answered "unsupported" (ADR 0012); ART then uses
         // its concurrent-copying collector.
         282 => -(ENOSYS as i64),
@@ -350,7 +365,7 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
                 .map(|v| format!("{v:#x}"))
                 .collect();
             let pc = ctx.resume_pc() - 4;
-            eprintln!(
+            crate::diag!(
                 "[linux-abi] unimplemented syscall {} ({}) args [{}] at pc {:#x} ({})",
                 nr,
                 names::name(nr).unwrap_or("unknown"),

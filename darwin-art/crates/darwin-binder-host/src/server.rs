@@ -459,6 +459,12 @@ struct Gathered {
 
 impl GuestProcess for Gathered {
     fn copy_from_user(&mut self, address: u64, out: &mut [u8]) -> Result<(), Errno> {
+        // Copying nothing succeeds, as copy_from_user does: a
+        // BINDER_WRITE_READ restarted after a signal has all of its write
+        // buffer consumed already, and nothing of it was gathered.
+        if out.is_empty() {
+            return Ok(());
+        }
         let end = address.checked_add(out.len() as u64).ok_or(errno::EFAULT)?;
         for (base, bytes) in &self.segments {
             if address >= *base && end <= base + bytes.len() as u64 {

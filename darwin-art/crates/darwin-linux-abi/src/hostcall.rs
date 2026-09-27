@@ -73,7 +73,7 @@ extern "C" fn linux_abi_hostcall(module: u64, func: u64, args: u64, len: u64) ->
     match std::panic::catch_unwind(|| call(module, func, args, len)) {
         Ok(r) => r,
         Err(_) => {
-            eprintln!(
+            crate::diag!(
                 "[linux-abi] panic in host module {} function {func}; aborting",
                 module_name(module)
             );

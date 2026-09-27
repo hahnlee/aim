@@ -207,8 +207,11 @@ impl IGnss for Gnss {
         Ok(())
     }
 
+    // The nullable extensions too answer UNSUPPORTED_OPERATION: the
+    // framework's GnssHal wraps whatever a successful call returns and then
+    // calls setCallback on it, so a null would crash system_server.
     fn getExtensionPsds(&self) -> binder::Result<Option<Strong<dyn IGnssPsds>>> {
-        Ok(None)
+        unsupported()
     }
 
     fn getExtensionGnssConfiguration(&self) -> binder::Result<Strong<dyn IGnssConfiguration>> {
@@ -224,17 +227,17 @@ impl IGnss for Gnss {
     }
 
     fn getExtensionGnssBatching(&self) -> binder::Result<Option<Strong<dyn IGnssBatching>>> {
-        Ok(None)
+        unsupported()
     }
 
     fn getExtensionGnssGeofence(&self) -> binder::Result<Option<Strong<dyn IGnssGeofence>>> {
-        Ok(None)
+        unsupported()
     }
 
     fn getExtensionGnssNavigationMessage(
         &self,
     ) -> binder::Result<Option<Strong<dyn IGnssNavigationMessageInterface>>> {
-        Ok(None)
+        unsupported()
     }
 
     fn getExtensionAGnss(&self) -> binder::Result<Strong<dyn IAGnss>> {
@@ -315,7 +318,7 @@ impl IGnss for Gnss {
     fn getExtensionMeasurementCorrections(
         &self,
     ) -> binder::Result<Option<Strong<dyn IMeasurementCorrectionsInterface>>> {
-        Ok(None)
+        unsupported()
     }
 
     fn startSvStatus(&self) -> binder::Result<()> {

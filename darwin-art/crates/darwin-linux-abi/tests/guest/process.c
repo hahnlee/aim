@@ -6,6 +6,7 @@
 //        process argv ARGS...   (prints its argv and AT_EXECFN; used as a
 //                                script interpreter and exec target)
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
@@ -18,12 +19,18 @@
 #include <sys/auxv.h>
 #include <sys/capability.h>
 #include <sys/epoll.h>
+#include <sys/mman.h>
+#include <sys/mount.h>
+#include <sched.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <linux/futex.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -45,6 +52,167 @@ static const char* self_path;
 
 static int pidfd_open(pid_t pid, unsigned flags) { return syscall(SYS_pidfd_open, pid, flags); }
 static int pidfd_send_signal(int fd, int sig) { return syscall(SYS_pidfd_send_signal, fd, sig, NULL, 0); }
+
+// Code that becomes executable in a forked child is rewritten there, and
+// its syscall stubs may go into a trampoline island the parent made before
+// the fork: the child must run what it wrote.
+static void fork_new_code(void) {
+  // getpid(): mov x8, #172; svc #0; ret
+  static const unsigned code[] = {0xd2801588, 0xd4000001, 0xd65f03c0};
+  // Rewriting in the parent first creates the island the child reuses.
+  void* first = mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(first != MAP_FAILED, "mmap");
+  memcpy(first, code, sizeof(code));
+  CHECK(mprotect(first, 16384, PROT_READ | PROT_EXEC) == 0, "mprotect");
+  CHECK(((pid_t(*)(void))first)() == getpid(), "parent code");
+  pid_t pid = fork();
+  CHECK(pid >= 0, "fork");
+  if (pid == 0) {
+    void* p = mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) _exit(2);
+    memcpy(p, code, sizeof(code));
+    if (mprotect(p, 16384, PROT_READ | PROT_EXEC) != 0) _exit(3);
+    _exit(((pid_t(*)(void))p)() == getpid() ? 0 : 4);
+  }
+  int st;
+  CHECK(waitpid(pid, &st, 0) == pid, "waitpid");
+  CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "child status %#x", st);
+  printf("ok fork_new_code\n");
+}
+
+static int mounted(const char* target) {
+  char buf[8192] = {0};
+  int fd = open("/proc/self/mounts", O_RDONLY);
+  if (fd < 0) return -1;
+  read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  return strstr(buf, target) != NULL;
+}
+
+// zygote's storage and app data views: a private mount namespace with bind
+// and tmpfs mounts, inherited by a forked child and undone by umount.
+static void mount_ns(void) {
+  const char* src = "/data/local/tmp/ns-src";
+  const char* dst = "/data/local/tmp/ns-dst";
+  mkdir(src, 0755);
+  mkdir(dst, 0755);
+  int fd = open("/data/local/tmp/ns-src/f", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+  CHECK(fd >= 0, "create");
+  close(fd);
+  CHECK(unshare(CLONE_NEWNS) == 0, "unshare");
+  CHECK(mount("rootfs", "/", NULL, MS_SLAVE | MS_REC, NULL) == 0, "propagation");
+  CHECK(mount(src, dst, NULL, MS_BIND | MS_REC, NULL) == 0, "bind");
+  CHECK(access("/data/local/tmp/ns-dst/f", F_OK) == 0, "bound file");
+  CHECK(mounted(" /data/local/tmp/ns-dst ") == 1, "listed");
+  CHECK(mount("tmpfs", src, "tmpfs", MS_NOSUID, "mode=0751") == 0, "tmpfs");
+  CHECK(access("/data/local/tmp/ns-src/f", F_OK) != 0, "tmpfs hides the directory");
+  pid_t pid = fork();
+  CHECK(pid >= 0, "fork");
+  if (pid == 0) _exit(access("/data/local/tmp/ns-dst/f", F_OK) == 0 ? 0 : 1);
+  int st;
+  CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0, "child view");
+  CHECK(umount2(src, MNT_DETACH) == 0 && umount2(dst, 0) == 0, "umount");
+  CHECK(umount2(dst, 0) == -1 && errno == EINVAL, "not a mount");
+  CHECK(access("/data/local/tmp/ns-dst/f", F_OK) != 0, "unbound");
+  CHECK(mount("none", dst, "sdcardfs", 0, NULL) == -1 && errno == ENODEV, "unknown fs");
+  CHECK(unshare(CLONE_NEWNET) == -1 && errno == EINVAL, "no network namespaces");
+  printf("ok mount_ns\n");
+}
+
+// installd's restorecon: every file has a SELinux label (unlabeled until
+// set), and guest attributes round-trip without the host's showing.
+static void xattrs(void) {
+  const char* p = "/data/local/tmp/xattr-f";
+  int fd = open(p, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+  CHECK(fd >= 0, "create");
+  char buf[128];
+  ssize_t n = lgetxattr(p, "security.selinux", buf, sizeof(buf));
+  CHECK(n > 0 && strcmp(buf, "u:object_r:unlabeled:s0") == 0, "unlabeled");
+  const char* label = "u:object_r:app_data_file:s0";
+  CHECK(lsetxattr(p, "security.selinux", label, strlen(label) + 1, 0) == 0, "set label");
+  n = getxattr(p, "security.selinux", buf, sizeof(buf));
+  CHECK(n == (ssize_t)strlen(label) + 1 && strcmp(buf, label) == 0, "label");
+  CHECK(getxattr(p, "security.selinux", buf, 4) == -1 && errno == ERANGE, "too small");
+  CHECK(fsetxattr(fd, "user.k", "v", 1, XATTR_CREATE) == 0, "fset");
+  CHECK(fsetxattr(fd, "user.k", "w", 1, XATTR_CREATE) == -1 && errno == EEXIST, "create twice");
+  CHECK(fgetxattr(fd, "user.k", buf, sizeof(buf)) == 1 && buf[0] == 'v', "fget");
+  n = listxattr(p, buf, sizeof(buf));
+  CHECK(n == (ssize_t)sizeof("security.selinux\0user.k"), "list");
+  CHECK(removexattr(p, "user.k") == 0, "remove");
+  CHECK(getxattr(p, "user.k", buf, sizeof(buf)) == -1 && errno == ENODATA, "removed");
+  CHECK(getxattr("/data/local/tmp/absent", "security.selinux", buf, sizeof(buf)) == -1 &&
+            errno == ENOENT,
+        "absent file");
+  close(fd);
+  unlink(p);
+  printf("ok xattrs\n");
+}
+
+// libbase's SendFileDescriptors with no fds sends a bare SCM_RIGHTS
+// header; Linux delivers the data without a control message.
+static void empty_rights(void) {
+  int sv[2];
+  CHECK(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) == 0, "socketpair");
+  char cbuf[CMSG_SPACE(sizeof(int))] = {0};
+  char byte = 'x';
+  struct iovec iov = {&byte, 1};
+  struct msghdr m = {0};
+  m.msg_iov = &iov;
+  m.msg_iovlen = 1;
+  m.msg_control = cbuf;
+  m.msg_controllen = CMSG_SPACE(0);
+  struct cmsghdr* c = CMSG_FIRSTHDR(&m);
+  c->cmsg_level = SOL_SOCKET;
+  c->cmsg_type = SCM_RIGHTS;
+  c->cmsg_len = CMSG_LEN(0);
+  CHECK(sendmsg(sv[0], &m, 0) == 1, "send");
+  memset(cbuf, 0, sizeof(cbuf));
+  byte = 0;
+  m.msg_controllen = sizeof(cbuf);
+  CHECK(recvmsg(sv[1], &m, 0) == 1 && byte == 'x', "recv");
+  CHECK(m.msg_controllen == 0 && CMSG_FIRSTHDR(&m) == NULL, "no control message");
+  close(sv[0]);
+  close(sv[1]);
+  printf("ok empty_rights\n");
+}
+
+// bionic's debuggerd handler: a "pseudothread" with its own file table
+// (CLONE_THREAD without CLONE_FILES) closes every fd, opens /dev/null as
+// fd 0; the spawner waits on the tid word and keeps its own fds.
+static volatile pid_t pseudo_tid = -1;
+static int pseudo_fn(void* arg) {
+  (void)arg;
+  for (int i = 0; i < 1024; i++) syscall(__NR_close, i);
+  int fd = open("/dev/null", O_RDWR);
+  _exit(fd == 0 ? 0 : 1);
+}
+static void own_files_thread(void) {
+  int p[2];
+  CHECK(pipe(p) == 0, "pipe");
+  static char stack[64 * 1024];
+  pid_t tid = clone(pseudo_fn, stack + sizeof(stack),
+                    CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_CHILD_SETTID |
+                        CLONE_CHILD_CLEARTID,
+                    NULL, NULL, NULL, (pid_t*)&pseudo_tid);
+  CHECK(tid > 0, "clone");
+  while (pseudo_tid == -1) syscall(__NR_futex, &pseudo_tid, FUTEX_WAIT, -1, NULL, NULL, 0);
+  while (pseudo_tid != 0) syscall(__NR_futex, &pseudo_tid, FUTEX_WAIT, pseudo_tid, NULL, NULL, 0);
+  CHECK(write(p[1], "x", 1) == 1, "the spawner's fds stay open");
+  char c;
+  CHECK(read(p[0], &c, 1) == 1 && c == 'x', "read back");
+  close(p[0]);
+  close(p[1]);
+  printf("ok own_files_thread\n");
+}
+
+// libbpf_android's synchronizeKernelRCU: a PF_KEY socket opens and closes.
+static void pf_key(void) {
+  int fd = socket(15 /* AF_KEY */, SOCK_RAW | SOCK_CLOEXEC, 2 /* PF_KEY_V2 */);
+  CHECK(fd >= 0, "socket");
+  CHECK(close(fd) == 0, "close");
+  CHECK(socket(15, SOCK_DGRAM, 2) == -1 && errno == EAFNOSUPPORT, "only raw v2");
+  printf("ok pf_key\n");
+}
 
 static void fork_wait(void) {
   pid_t parent = getpid();
@@ -355,6 +523,13 @@ static void identity_file(void) {
   int st;
   CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st), "child");
   CHECK(access(path, F_OK) == -1 && errno == ENOENT, "entry removed at exit");
+  // Without CAP_SYS_NICE, RLIMIT_NICE bounds how far the nice value drops
+  // (SystemUI's wmshell thread takes -4 under init's limit of 40).
+  CHECK(setpriority(PRIO_PROCESS, 0, -4) == 0 && getpriority(PRIO_PROCESS, 0) == -4, "nice -4");
+  rl.rlim_cur = rl.rlim_max = 25;
+  CHECK(setrlimit(RLIMIT_NICE, &rl) == 0, "lower RLIMIT_NICE");
+  CHECK(setpriority(PRIO_PROCESS, 0, -10) == -1 && errno == EACCES, "nice -10 beyond the limit");
+  CHECK(setpriority(PRIO_PROCESS, 0, -5) == 0, "nice -5 within it");
   printf("ok identity_file\n");
 }
 
@@ -435,12 +610,15 @@ int main(int argc, char** argv) {
     const char* name;
     void (*fn)(void);
   } checks[] = {
-      {"fork_wait", fork_wait},     {"pipe_echo", pipe_echo},
+      {"fork_wait", fork_wait},     {"fork_new_code", fork_new_code},
+      {"pipe_echo", pipe_echo},     {"mount_ns", mount_ns},
       {"exec_image", exec_image},   {"exec_argv", exec_argv},
       {"exec_script", exec_script}, {"waitid_variants", waitid_variants},
       {"pidfd_poll", pidfd_poll},   {"epoll_fork", epoll_fork},   {"death_by_signal", death_by_signal},
       {"identity", identity},       {"identity_file", identity_file},
       {"seccomp_filter", seccomp_filter},
+      {"xattrs", xattrs},           {"pf_key", pf_key},
+      {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
       {"bench", bench},
   };
   for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {

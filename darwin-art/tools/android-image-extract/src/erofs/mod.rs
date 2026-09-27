@@ -2,6 +2,7 @@
 //! inodes. Layout reference: Linux v6.12 fs/erofs/erofs_fs.h and zmap.c.
 pub mod directory;
 pub mod inode;
+mod xattr;
 mod zmap;
 
 use crate::source::ReadAt;
@@ -13,7 +14,7 @@ use std::io::Write;
 pub const MAGIC: u32 = 0xe0f5_e1e2;
 pub const INCOMPAT_ZERO_PADDING: u32 = 0x1;
 pub const INCOMPAT_COMPR_CFGS: u32 = 0x2;
-/// Extended-attribute name prefixes; xattrs are not read, so this is harmless.
+/// Long extended-attribute name prefixes, read from the superblock table.
 const INCOMPAT_XATTR_PREFIXES: u32 = 0x40;
 const SUPPORTED_INCOMPAT: u32 =
     INCOMPAT_ZERO_PADDING | INCOMPAT_COMPR_CFGS | INCOMPAT_XATTR_PREFIXES;
@@ -33,6 +34,8 @@ pub struct Erofs<'a> {
     meta: u64,
     pub root: u64,
     pub incompat: u32,
+    xattr_blkaddr: u64,
+    prefixes: Vec<xattr::Prefix>,
 }
 
 impl<'a> Erofs<'a> {
@@ -55,6 +58,11 @@ impl<'a> Erofs<'a> {
         if incompat & INCOMPAT_COMPR_CFGS != 0 && le16(&sb, 84)? & !1 != 0 {
             return Err(invalid("EROFS uses a compression algorithm other than LZ4"));
         }
+        let prefixes = if incompat & INCOMPAT_XATTR_PREFIXES != 0 {
+            xattr::prefixes(device, u64::from(le32(&sb, 92)?) * 4, sb[91])?
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             device,
             block_bits,
@@ -62,6 +70,8 @@ impl<'a> Erofs<'a> {
             meta: u64::from(le32(&sb, 40)?),
             root: u64::from(le16(&sb, 14)?),
             incompat,
+            xattr_blkaddr: u64::from(le32(&sb, 44)?),
+            prefixes,
         })
     }
 
@@ -173,6 +183,9 @@ impl Tree for Erofs<'_> {
             return Err(invalid("EROFS inode is not a regular file"));
         }
         self.copy(&inode, out)
+    }
+    fn label(&self, id: u64) -> Result<Option<Vec<u8>>> {
+        Erofs::label(self, &self.inode(id)?)
     }
 }
 

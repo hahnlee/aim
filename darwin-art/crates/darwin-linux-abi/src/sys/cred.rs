@@ -30,6 +30,7 @@ const CAP_SETGID: u32 = 6;
 const CAP_SETUID: u32 = 7;
 const CAP_SETPCAP: u32 = 8;
 const CAP_SYS_NICE: u32 = 23;
+const RLIMIT_NICE: usize = 13;
 const CAP_SYS_RESOURCE: u32 = 24;
 /// Capabilities that follow the fsuid (CAP_FS_MASK).
 const CAP_FS_MASK: u64 =
@@ -233,6 +234,15 @@ impl Identity {
         self.cap_eff & (1 << cap) != 0
     }
 
+    /// `can_nice`: lowering the nice value to `nice` needs CAP_SYS_NICE or
+    /// an RLIMIT_NICE of at least `20 - nice` (init sets 40, which lets
+    /// every service and app go down to -20). An unrecorded limit is the
+    /// one getrlimit reports, unlimited.
+    fn can_nice(&self, nice: i32) -> bool {
+        let limit = self.rlimits[RLIMIT_NICE].map_or(u64::MAX, |l| l.0);
+        self.capable(CAP_SYS_NICE) || (20 - nice) as u64 <= limit
+    }
+
     /// Credentials after execve of a file with no capabilities and no
     /// set-id bits (`cap_bprm_creds_from_file`).
     pub fn exec_transform(&mut self) {
@@ -351,6 +361,16 @@ fn with<R>(f: impl FnOnce(&mut Identity) -> R) -> R {
 /// A copy of this process's identity.
 pub fn current() -> Identity {
     read(|id| id.clone())
+}
+
+/// A new SELinux context for the process (a write to `attr/current`).
+pub fn set_seclabel(label: &str) {
+    with(|id| id.seclabel = label.to_string());
+}
+
+/// Whether the process has capability `cap` in its effective set.
+pub fn capable(cap: u32) -> bool {
+    read(|id| id.capable(cap))
 }
 
 /// In a forked child: publish the inherited identity under the new pid.
@@ -893,7 +913,7 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
     let a = [a[0], who, a[2], a[3], a[4], a[5]];
     if a[0] == PRIO_PROCESS && is_self(a[1] as i32) {
         return with(|id| {
-            if nice < id.priority && !id.capable(CAP_SYS_NICE) {
+            if nice < id.priority && !id.can_nice(nice) {
                 return -(EACCES as i64);
             }
             id.priority = nice;
@@ -909,8 +929,8 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
     {
         let mut table = THREAD_NICE.lock().unwrap();
         let current = table.iter().find(|t| t.0 == tid).map(|t| t.1);
-        let (priority, capable) = read(|id| (id.priority, id.capable(CAP_SYS_NICE)));
-        if nice < current.unwrap_or(priority) && !capable {
+        let (priority, allowed) = read(|id| (id.priority, id.can_nice(nice)));
+        if nice < current.unwrap_or(priority) && !allowed {
             return -(EACCES as i64);
         }
         table.retain(|t| t.0 != tid && super::thread::find(t.0).is_some());
@@ -919,6 +939,11 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
     }
     // SAFETY: plain setpriority.
     crate::errno::check(unsafe { libc::setpriority(a[0] as i32, a[1] as u32, nice) } as i64)
+}
+
+/// This module's locks for a fork (`sys::forklock`).
+pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
+    super::forklock::mutex(&STATE, held) && super::forklock::mutex(&THREAD_NICE, held)
 }
 
 #[cfg(test)]

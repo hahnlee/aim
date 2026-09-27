@@ -144,3 +144,67 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
   (#198), and `/proc/<tid>`, the scheduler calls and `tgkill` for every tid.
 - guest-init's wait for linkerconfig ends at `--timeout` and on SIGINT or
   SIGTERM (#196).
+
+## Java world (P3, 2026-09-28)
+
+The original zygote and system_server on the ART exception, on an M2 Pro.
+`guest-init --run` with the derived image of `image/overlay.toml`: our Rust
+apexd, vold and netd (`daemons/`, `tools/build-daemons.sh`) replace the
+originals, and lmkd is not started (#222).
+
+- **zygote** preloads 18,367 classes in 0.31 s and forks system_server
+  0.07 s after its preload ends, listening on init's `zygote` and
+  `usap_pool_primary` sockets;
+  its seccomp filter is accepted and not enforced.
+- **system_server** runs its bootstrap and core services, then
+  `startOtherServices`: PackageManager scans 245 packages and first-boot
+  dexopt runs through artd and dex2oat64 (137 results), about 8 s from
+  `StartPackageManagerService` to `startOtherServices`. 197 binder services
+  are registered. ActivityManager is ready 15 s after the fork and starts
+  SystemUI, the network stack, phone, Bluetooth, the WebView relro creator
+  and the setup wizard (`top-activity`) through zygote; SystemUI's shell
+  runs.
+- **Memory** (host RSS, shared pages counted in each process): system_server
+  about 220 MB, zygote 33 MB, surfaceflinger 32 MB, artd 39 MB; 52 guest
+  processes take about 730 MB together.
+- **Not reached: `sys.boot_completed`.** On the last runs the host's
+  coreaudiod stopped answering (its log repeats `BeginWriteOperation:
+  still waiting`; a plain host program's `AudioObjectGetPropertyData`
+  hangs too), the audio HAL never registers `IConfig/default`, audioserver
+  waits for it, and system_server blocks in `AudioService.<init>` until its
+  watchdog kills it (#217).
+
+### Fixed on the way
+
+- ART (`0005`): nterp's `new-instance`/`new-array` decode the class after
+  the read-barrier mark entrypoint, and `ExecuteNterpWithClinitImpl` decodes
+  the declaring class. libadbconnection is rebuilt (zygote loads it).
+- Mount namespaces are per-process path-map entries (`unshare`, bind,
+  tmpfs, move, `umount2`, carried over `execve`); init's own binds between
+  writable areas (the data mirrors for app data isolation) become path-map
+  entries for processes started later.
+- `--stdio-null`: services get `/dev/null` on fds 0–2 as init gives them,
+  and the layer logs to a hidden descriptor (zygote refused its
+  non-allowlisted stdout).
+- cgroup v2 and bpffs are areas of the path map; `bpf()` creates maps in
+  shared memory and pins them, and loads programs and BTF without running
+  them (#224), so NetBpfLoad and uprobestats load everything.
+- A forked child re-aliases the stub islands' executable views (SIGILL in
+  system_server's first JNI call).
+- xattrs, with `security.selinux` from the original image (re-extract with
+  the current android-image-extract, #229), from `genfscon` for bpffs and
+  cgroup2, or `unlabeled`; `stat` reports an image file's original owner
+  and mode. installd's restorecon and the tethering module's
+  `verifyClatPerms` need them.
+- `init_user0` runs `vdc cryptfs init_user0`; vold prepares `/data/data`,
+  `/data/user/0` (a symlink, #221) and user 0's storage.
+- Fork safety: fork takes the layer's locks (artd's dex2oat child hung on
+  fs-attrs), linux-run declares `__objc_fork_ok` (zygote children died of
+  SIGKILL when two threads met in an Objective-C `+initialize`), and a
+  thread with its own file table runs as a process (#228; the debuggerd
+  pseudothread closed every fd of system_server).
+- Binder: a zero-length user copy succeeds (a restarted
+  `BINDER_WRITE_READ` failed with EFAULT, and libbinder aborted).
+- An empty `SCM_RIGHTS` passes nothing; PF_KEY sockets open (NetworkStats'
+  `synchronizeKernelRCU`); `setpriority` honors `RLIMIT_NICE`; fwmarkd
+  listens; the GNSS HAL answers UNSUPPORTED for its nullable extensions.

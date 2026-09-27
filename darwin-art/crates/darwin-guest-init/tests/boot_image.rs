@@ -176,6 +176,7 @@ fn real_image_dry_run_boot() {
     );
     let launched = report.services_launched();
     for service in [
+        "apexd",
         "logd",
         "servicemanager",
         "hwservicemanager",
@@ -190,12 +191,12 @@ fn real_image_dry_run_boot() {
             "{service} not launched: {launched:?}"
         );
     }
-    // Roles: no ueventd or apexd process.
+    // Roles: no ueventd process; apexd only serves apexservice.
     assert!(!launched.contains("ueventd"));
-    assert!(!launched.contains("apexd"));
+    assert!(!launched.contains("apexd-bootstrap"));
     assert_eq!(boot.property("apexd.status").as_deref(), Some("ready"));
-    // libvintf reads the vendor APEXes' VINTF fragments only then.
-    assert_eq!(boot.property("apex.all.ready").as_deref(), Some("true"));
+    // apex.all.ready is the replaced apexd's to set once it serves; a dry
+    // run starts no process.
     // A lazy `aidl/apexservice` start does not take the status back.
     boot.executor.start_service("apexd").unwrap();
     assert_eq!(boot.property("apexd.status").as_deref(), Some("ready"));

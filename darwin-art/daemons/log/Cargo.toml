@@ -1,0 +1,10 @@
+[package]
+name = "daemon-log"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "`log` records to logcat through liblog, for the replaced daemons"
+
+[dependencies]
+log.workspace = true

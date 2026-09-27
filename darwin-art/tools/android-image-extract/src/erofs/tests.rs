@@ -216,6 +216,121 @@ fn materializes_tree_with_hardlinks_and_specials() {
     std::fs::remove_dir_all(&out).unwrap();
 }
 
+const SYSTEM_FILE: &[u8] = b"u:object_r:system_file:s0\0";
+const SH_EXEC: &[u8] = b"u:object_r:shell_exec:s0\0";
+const NULL_DEVICE: &[u8] = b"u:object_r:null_device:s0\0";
+const SHARED_BLOCK: usize = 12;
+const PREFIX_BLOCK: usize = 13;
+
+/// An `erofs_xattr_entry`, padded to 4 bytes.
+fn xattr_entry(index: u8, name: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut out = vec![name.len() as u8, index];
+    out.extend_from_slice(&(value.len() as u16).to_le_bytes());
+    out.extend_from_slice(name);
+    out.extend_from_slice(value);
+    out.resize(out.len().div_ceil(4) * 4, 0);
+    out
+}
+
+/// Set nid's inline xattr area: header, shared ids, then `entries`.
+fn xattrs(image: &mut Image, nid: u64, shared: &[u32], entries: &[Vec<u8>]) -> usize {
+    let mut area = vec![0u8; 12];
+    area[4] = shared.len() as u8;
+    for id in shared {
+        area.extend_from_slice(&id.to_le_bytes());
+    }
+    for entry in entries {
+        area.extend_from_slice(entry);
+    }
+    let at = Image::at(nid);
+    image.put(at + 2, &((area.len() - 12) as u16 / 4 + 1).to_le_bytes());
+    image.put(at + 32, &area);
+    area.len()
+}
+
+/// `build()` plus labels: toybox inline, the symlink via a shared xattr,
+/// the device node through a long prefix, `full` and `small` unlabelled.
+fn build_labelled() -> Vec<u8> {
+    let mut image = Image { bytes: build() };
+    let sb = 1024;
+    image.put(
+        sb + 80,
+        &(INCOMPAT_ZERO_PADDING | INCOMPAT_COMPR_CFGS | INCOMPAT_XATTR_PREFIXES).to_le_bytes(),
+    );
+    image.put(sb + 44, &(SHARED_BLOCK as u32).to_le_bytes());
+    image.bytes[sb + 91] = 2;
+    image.put(sb + 92, &((PREFIX_BLOCK * BLOCK / 4) as u32).to_le_bytes());
+    // Long prefixes: 0 = "trusted.sel", 1 = "security.sel".
+    let prefix = PREFIX_BLOCK * BLOCK;
+    image.put(prefix, &4u16.to_le_bytes());
+    image.put(prefix + 2, b"\x04sel");
+    image.put(prefix + 8, &4u16.to_le_bytes());
+    image.put(prefix + 10, b"\x06sel");
+
+    xattrs(
+        &mut image,
+        80,
+        &[],
+        &[
+            xattr_entry(1, b"a", b"b"),
+            xattr_entry(6, b"selinux", SYSTEM_FILE),
+        ],
+    );
+    // Shared id 4 is security.selinux; id 0 a non-matching entry.
+    image.put(SHARED_BLOCK * BLOCK, &xattr_entry(6, b"selinuxx", b"no"));
+    image.put(
+        SHARED_BLOCK * BLOCK + 16,
+        &xattr_entry(6, b"selinux", SH_EXEC),
+    );
+    let used = xattrs(&mut image, 96, &[0, 4], &[]);
+    image.put(Image::at(96) + 32 + used, b"/system/bin/sh");
+    xattrs(
+        &mut image,
+        112,
+        &[],
+        &[
+            xattr_entry(0x80, b"inux", b"trusted"),
+            xattr_entry(0x81, b"inux", NULL_DEVICE),
+        ],
+    );
+    image.bytes
+}
+
+#[test]
+fn reads_inline_shared_and_long_prefix_labels() {
+    let bytes = build_labelled();
+    let fs = Erofs::open(&bytes).unwrap();
+    let label = |nid: u64| Tree::label(&fs, nid).unwrap();
+    assert_eq!(label(80).as_deref(), Some(SYSTEM_FILE));
+    assert_eq!(label(96).as_deref(), Some(SH_EXEC));
+    assert_eq!(label(112).as_deref(), Some(NULL_DEVICE));
+    assert_eq!((label(0), label(64), label(128)), (None, None, None));
+    assert_eq!(fs.read_link(96).unwrap(), b"/system/bin/sh");
+
+    let out = temp_dir("erofs-labels");
+    let mut materializer = Materializer::default();
+    materializer.extract(&fs, &out).unwrap();
+    materializer.finish().unwrap();
+    let host = |p: &str| crate::tree::tests::host_label(&out.join(p));
+    assert_eq!(host("bin/toybox").as_deref(), Some(SYSTEM_FILE));
+    assert_eq!(host("hello").as_deref(), Some(SYSTEM_FILE));
+    assert_eq!(host("link").as_deref(), Some(SH_EXEC));
+    assert_eq!((host("full"), host("bin")), (None, None));
+    std::fs::remove_dir_all(&out).unwrap();
+
+    // A missing long prefix, a truncated entry and an oversized shared
+    // count are errors.
+    let mut bad = bytes.clone();
+    bad[Image::at(112) + 32 + 12 + 1] = 0x82;
+    assert!(Tree::label(&Erofs::open(&bad).unwrap(), 112).is_err());
+    let mut bad = bytes.clone();
+    bad[Image::at(80) + 32 + 12 + 8 + 2] = 0xff;
+    assert!(Tree::label(&Erofs::open(&bad).unwrap(), 80).is_err());
+    let mut bad = bytes;
+    bad[Image::at(96) + 32 + 4] = 9;
+    assert!(Tree::label(&Erofs::open(&bad).unwrap(), 96).is_err());
+}
+
 #[test]
 fn rejects_unsupported_features_and_corruption() {
     let mut bytes = build();

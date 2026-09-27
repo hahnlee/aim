@@ -3,7 +3,7 @@
 //! Generalized from `tools/apex-ext2-extract` to any `ReadAt` source.
 use crate::source::ReadAt;
 use crate::tree::{Node, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, Tree};
-use crate::{Result, invalid, le16, le32, mul};
+use crate::{Result, add, invalid, le16, le32, mul};
 use std::io::Write;
 
 pub const MAGIC: u16 = 0xef53;
@@ -30,6 +30,43 @@ const INLINE_DATA_FL: u32 = 0x1000_0000;
 const ROOT: u64 = 2;
 const MAX_DIRECTORY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RUNS: usize = 4_000_000;
+
+const XATTR_MAGIC: u32 = 0xea02_0000;
+const XATTR_INDEX_SECURITY: u8 = 6;
+
+/// Walk `ext4_xattr_entry`s in `area` from `start` up to the zero terminator
+/// and return the `security.selinux` value; value offsets are relative to
+/// `area`.
+fn find_xattr(area: &[u8], start: usize) -> Result<Option<Vec<u8>>> {
+    let mut at = start;
+    while at + 4 <= area.len() && le32(area, at)? != 0 {
+        if at + 16 > area.len() {
+            return Err(invalid("truncated ext4 xattr entry"));
+        }
+        let name_len = usize::from(area[at]);
+        let index = area[at + 1];
+        let offset = usize::from(le16(area, at + 2)?);
+        let inum = le32(area, at + 4)?;
+        let size = le32(area, at + 8)? as usize;
+        let name = area
+            .get(at + 16..at + 16 + name_len)
+            .ok_or_else(|| invalid("truncated ext4 xattr name"))?;
+        if index == XATTR_INDEX_SECURITY && name == b"selinux" {
+            if inum != 0 {
+                return Err(invalid(
+                    "ext4 security.selinux stored in an EA inode is unsupported",
+                ));
+            }
+            return offset
+                .checked_add(size)
+                .and_then(|end| area.get(offset..end))
+                .map(|value| Some(value.to_vec()))
+                .ok_or_else(|| invalid("ext4 xattr value lies outside its area"));
+        }
+        at += (16 + name_len).div_ceil(4) * 4;
+    }
+    Ok(None)
+}
 
 pub fn is_ext4(device: &dyn ReadAt) -> bool {
     device
@@ -121,6 +158,57 @@ impl<'a> Ext4<'a> {
     }
 
     pub fn inode(&self, number: u64) -> Result<Inode> {
+        let b = self.device.read_vec(self.inode_offset(number)?, 128)?;
+        Ok(Inode {
+            mode: le16(&b, 0)?,
+            uid: u32::from(le16(&b, 2)?) | u32::from(le16(&b, 0x78)?) << 16,
+            gid: u32::from(le16(&b, 0x18)?) | u32::from(le16(&b, 0x7a)?) << 16,
+            size: u64::from(le32(&b, 4)?) | u64::from(le32(&b, 0x6c)?) << 32,
+            nlink: le16(&b, 0x1a)?,
+            flags: le32(&b, 0x20)?,
+            blocks: le32(&b, 0x1c)?,
+            file_acl: u64::from(le32(&b, 0x68)?) | u64::from(le16(&b, 0x76)?) << 32,
+            block: b[0x28..0x28 + 60].try_into().unwrap(),
+        })
+    }
+
+    /// The `security.selinux` value: in-inode xattrs first, then the
+    /// external xattr block.
+    pub fn label(&self, number: u64) -> Result<Option<Vec<u8>>> {
+        let raw = self
+            .device
+            .read_vec(self.inode_offset(number)?, self.inode_size as usize)?;
+        if raw.len() > 128 {
+            let start = 128 + usize::from(le16(&raw, 0x80)?);
+            if start > raw.len() {
+                return Err(invalid(format!(
+                    "ext4 inode {number}: invalid i_extra_isize"
+                )));
+            }
+            if start + 4 <= raw.len() && le32(&raw, start)? == XATTR_MAGIC {
+                // In-inode values are relative to the first entry.
+                if let Some(value) = find_xattr(&raw[start + 4..], 0)? {
+                    return Ok(Some(value));
+                }
+            }
+        }
+        let file_acl = u64::from(le32(&raw, 0x68)?) | u64::from(le16(&raw, 0x76)?) << 32;
+        if file_acl == 0 {
+            return Ok(None);
+        }
+        let block = self.device.read_vec(
+            mul(file_acl, self.block, "locating ext4 xattr block")?,
+            self.block as usize,
+        )?;
+        if le32(&block, 0)? != XATTR_MAGIC || le32(&block, 8)? != 1 {
+            return Err(invalid(format!("ext4 inode {number}: invalid xattr block")));
+        }
+        // Block values are relative to the block start; entries follow the
+        // 32-byte header.
+        find_xattr(&block, 32)
+    }
+
+    fn inode_offset(&self, number: u64) -> Result<u64> {
         if number == 0 || number > self.inodes_count {
             return Err(invalid(format!("ext4 inode {number} out of range")));
         }
@@ -139,19 +227,11 @@ impl<'a> Ext4<'a> {
         if table == 0 {
             return Err(invalid("ext4 group has no inode table"));
         }
-        let at = mul(table, self.block, "locating ext4 inode table")? + index * self.inode_size;
-        let b = self.device.read_vec(at, 128)?;
-        Ok(Inode {
-            mode: le16(&b, 0)?,
-            uid: u32::from(le16(&b, 2)?) | u32::from(le16(&b, 0x78)?) << 16,
-            gid: u32::from(le16(&b, 0x18)?) | u32::from(le16(&b, 0x7a)?) << 16,
-            size: u64::from(le32(&b, 4)?) | u64::from(le32(&b, 0x6c)?) << 32,
-            nlink: le16(&b, 0x1a)?,
-            flags: le32(&b, 0x20)?,
-            blocks: le32(&b, 0x1c)?,
-            file_acl: u64::from(le32(&b, 0x68)?) | u64::from(le16(&b, 0x76)?) << 32,
-            block: b[0x28..0x28 + 60].try_into().unwrap(),
-        })
+        add(
+            mul(table, self.block, "locating ext4 inode table")?,
+            index * self.inode_size,
+            "locating ext4 inode",
+        )
     }
 
     fn extent_node(&self, node: &[u8], depth: Option<u16>, runs: &mut Vec<Run>) -> Result<()> {
@@ -387,6 +467,9 @@ impl Tree for Ext4<'_> {
         }
         self.copy(&inode, out)
     }
+    fn label(&self, id: u64) -> Result<Option<Vec<u8>>> {
+        Ext4::label(self, id)
+    }
 }
 
 #[cfg(test)]
@@ -395,6 +478,49 @@ pub(crate) mod tests {
     use crate::tree::{Materializer, lookup, read_file, tests::temp_dir};
 
     const BLOCK: usize = 1024;
+    const INODE: usize = 256;
+    const SYSTEM_FILE: &[u8] = b"u:object_r:system_file:s0\0";
+    const TOYBOX_EXEC: &[u8] = b"u:object_r:toybox_exec:s0\0";
+
+    /// An `ext4_xattr_entry` with its padded name.
+    fn xattr_entry(index: u8, name: &str, offset: u16, size: u32, inum: u32) -> Vec<u8> {
+        let mut out = vec![name.len() as u8, index];
+        out.extend_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(&inum.to_le_bytes());
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.resize((16 + name.len()).div_ceil(4) * 4, 0);
+        out
+    }
+
+    /// In-inode xattrs for inode `number`: `user.a`, then `security.selinux`.
+    fn inline_label(image: &mut [u8], number: usize, label: &[u8]) {
+        let at = 5 * BLOCK + (number - 1) * INODE;
+        put(image, at + 0x80, &32u16.to_le_bytes()); // i_extra_isize
+        let area = at + 128 + 32;
+        put(image, area, &XATTR_MAGIC.to_le_bytes());
+        let entries = area + 4;
+        let mut table = xattr_entry(1, "a", 56, 1, 0);
+        table.extend(xattr_entry(6, "selinux", 60, label.len() as u32, 0));
+        put(image, entries, &table);
+        put(image, entries + 56, b"z");
+        put(image, entries + 60, label);
+    }
+
+    /// An external xattr block for inode `number` at `block`.
+    fn block_label(image: &mut [u8], number: usize, block: usize, label: &[u8]) {
+        let at = 5 * BLOCK + (number - 1) * INODE;
+        put(image, at + 0x68, &(block as u32).to_le_bytes());
+        let b = block * BLOCK;
+        put(image, b, &XATTR_MAGIC.to_le_bytes());
+        put(image, b + 4, &1u32.to_le_bytes()); // h_refcount
+        put(image, b + 8, &1u32.to_le_bytes()); // h_blocks
+        let mut table = xattr_entry(6, "selinuxx", 400, 1, 0);
+        table.extend(xattr_entry(6, "selinux", 512, label.len() as u32, 0));
+        put(image, b + 32, &table);
+        put(image, b + 512, label);
+    }
 
     fn put(image: &mut [u8], at: usize, data: &[u8]) {
         image[at..at + data.len()].copy_from_slice(data);
@@ -409,8 +535,8 @@ pub(crate) mod tests {
         blocks: u32,
         block: &[u8],
     ) {
-        // Inode table at block 5, 128-byte inodes.
-        let at = 5 * BLOCK + (number - 1) * 128;
+        // Inode table at block 5, 256-byte inodes.
+        let at = 5 * BLOCK + (number - 1) * INODE;
         put(image, at, &mode.to_le_bytes());
         put(image, at + 4, &size.to_le_bytes());
         put(image, at + 0x18, &3003u16.to_le_bytes());
@@ -464,7 +590,7 @@ pub(crate) mod tests {
         put(&mut image, sb + 0x28, &32u32.to_le_bytes()); // inodes per group
         put(&mut image, sb + 0x38, &MAGIC.to_le_bytes());
         put(&mut image, sb + 0x4c, &1u32.to_le_bytes());
-        put(&mut image, sb + 0x58, &128u16.to_le_bytes());
+        put(&mut image, sb + 0x58, &(INODE as u16).to_le_bytes());
         put(
             &mut image,
             sb + 0x60,
@@ -567,6 +693,54 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn reads_in_inode_and_block_labels() {
+        let mut image = build();
+        inline_label(&mut image, 12, SYSTEM_FILE);
+        inline_label(&mut image, 14, TOYBOX_EXEC);
+        block_label(&mut image, 15, 50, SYSTEM_FILE);
+        // In-inode xattrs without the label fall back to the block.
+        inline_label(&mut image, 2, SYSTEM_FILE);
+        put(&mut image, 5 * BLOCK + INODE + 128 + 32 + 4 + 41, b"x"); // "selinux" -> "selinxx"
+        block_label(&mut image, 2, 51, TOYBOX_EXEC);
+        let fs = Ext4::open(&image).unwrap();
+        assert_eq!(fs.label(12).unwrap().as_deref(), Some(SYSTEM_FILE));
+        assert_eq!(fs.label(14).unwrap().as_deref(), Some(TOYBOX_EXEC));
+        assert_eq!(fs.label(15).unwrap().as_deref(), Some(SYSTEM_FILE));
+        assert_eq!(fs.label(2).unwrap().as_deref(), Some(TOYBOX_EXEC));
+        assert_eq!(fs.label(13).unwrap(), None);
+
+        let out = temp_dir("ext4-labels");
+        let mut materializer = Materializer::default();
+        materializer.extract(&fs, &out).unwrap();
+        materializer.finish().unwrap();
+        let host = |p: &str| crate::tree::tests::host_label(&out.join(p));
+        assert_eq!(host("data").as_deref(), Some(SYSTEM_FILE));
+        assert_eq!(host("sh").as_deref(), Some(TOYBOX_EXEC));
+        assert_eq!(host("etc").as_deref(), Some(SYSTEM_FILE));
+        assert_eq!(host("").as_deref(), Some(TOYBOX_EXEC));
+        assert_eq!(host("old"), None);
+        std::fs::remove_dir_all(&out).unwrap();
+
+        // Out-of-area values, EA-inode values and a bad block are errors.
+        let mut bad = image.clone();
+        put(&mut bad, 51 * BLOCK + 32 + 24 + 8, &2000u32.to_le_bytes());
+        assert!(Ext4::open(&bad).unwrap().label(2).is_err());
+        let mut bad = image.clone();
+        put(&mut bad, 51 * BLOCK + 32 + 24 + 4, &9u32.to_le_bytes());
+        assert!(Ext4::open(&bad).unwrap().label(2).is_err());
+        let mut bad = image.clone();
+        put(&mut bad, 50 * BLOCK, &0u32.to_le_bytes());
+        assert!(Ext4::open(&bad).unwrap().label(15).is_err());
+        let mut bad = image;
+        put(
+            &mut bad,
+            5 * BLOCK + 11 * INODE + 0x80,
+            &200u16.to_le_bytes(),
+        );
+        assert!(Ext4::open(&bad).unwrap().label(12).is_err());
+    }
+
+    #[test]
     fn rejects_unsupported_layouts() {
         let mut image = build();
         put(&mut image, 1024 + 0x60, &0x8000u32.to_le_bytes()); // inline data
@@ -575,7 +749,11 @@ pub(crate) mod tests {
         image[1024 + 0x38] = 0;
         assert!(Ext4::open(&image).is_err());
         let mut image = build();
-        put(&mut image, 5 * BLOCK + 11 * 128 + 0x28, &0u16.to_le_bytes()); // extent magic
+        put(
+            &mut image,
+            5 * BLOCK + 11 * INODE + 0x28,
+            &0u16.to_le_bytes(),
+        ); // extent magic
         let fs = Ext4::open(&image).unwrap();
         assert!(read_file(&fs, 12, 1 << 20).is_err());
         assert!(fs.inode(0).is_err() && fs.inode(33).is_err());

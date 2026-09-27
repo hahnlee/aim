@@ -53,7 +53,7 @@ fn reserve(lo: u64, hi: u64, replace: bool) -> bool {
 /// program is loaded.
 pub fn init() {
     if !reserve(BASE, END, false) {
-        eprintln!("[linux-abi] cannot reserve the heap reference window {BASE:#x}..{END:#x}");
+        crate::diag!("[linux-abi] cannot reserve the heap reference window {BASE:#x}..{END:#x}");
     }
 }
 

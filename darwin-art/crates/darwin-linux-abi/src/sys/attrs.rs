@@ -4,8 +4,10 @@
 //! The host cannot chown to Android ids, so init's (and the guests')
 //! `chown`/`chmod` results are recorded as `<guest path>\t<uid|->\t<gid|->\t
 //! <octal mode|->` lines; the latest line wins field by field. `stat`
-//! reports these; paths with no entry (and every path without a path map)
-//! report root:root with the host permission bits.
+//! reports these. Files of the image keep their original owner and mode in
+//! the `com.darwin-art.android-inode` attribute android-image-extract
+//! writes (`original`); other paths with no entry (and every path without a
+//! path map) report root:root with the host permission bits.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -87,15 +89,82 @@ pub fn lookup(guest: &str) -> Attr {
         .unwrap_or_default()
 }
 
-/// Apply the guest view to a host stat of `guest`: Android files are
-/// root's unless recorded otherwise; the host owner is never the guest's.
+/// Where the host file of a stat is, to read its original inode.
+pub enum Host<'a> {
+    /// A path, not following a final symlink.
+    Path(&'a std::ffi::CStr),
+    Fd(i32),
+    /// Not an image file.
+    None,
+}
+
+const INODE: &std::ffi::CStr = c"com.darwin-art.android-inode";
+
+/// The owner and mode an image file had in the original image
+/// (`darwin_art_fs_broker::inode_metadata`).
+fn original(host: Host) -> Option<Attr> {
+    let mut b = [0u8; 20];
+    // SAFETY: host path or fd, local buffer.
+    let n = unsafe {
+        match host {
+            Host::Path(p) => libc::getxattr(
+                p.as_ptr(),
+                INODE.as_ptr(),
+                b.as_mut_ptr().cast(),
+                b.len(),
+                0,
+                libc::XATTR_NOFOLLOW,
+            ),
+            Host::Fd(fd) => {
+                libc::fgetxattr(fd, INODE.as_ptr(), b.as_mut_ptr().cast(), b.len(), 0, 0)
+            }
+            Host::None => return None,
+        }
+    };
+    decode_original(&b[..n.max(0) as usize])
+}
+
+/// "DARI", version 1, then uid, gid and mode as little-endian words.
+fn decode_original(b: &[u8]) -> Option<Attr> {
+    if b.len() != 20 || &b[..8] != b"DARI\x01\0\0\0" {
+        return None;
+    }
+    let word = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    Some(Attr {
+        uid: Some(word(8)),
+        gid: Some(word(12)),
+        mode: Some(word(16) & 0o7777),
+    })
+}
+
+/// Apply the guest view to a host stat of `guest`: recorded attributes
+/// first, then an image file's original ones; otherwise Android files are
+/// root's. The host owner is never the guest's.
 pub fn apply(guest: &str, st: &mut libc::stat) {
-    let a = lookup(guest);
+    apply_host(guest, Host::None, st);
+}
+
+/// `apply`, reading the original inode of an image file at `host`.
+pub fn apply_host(guest: &str, host: Host, st: &mut libc::stat) {
+    let mut a = lookup(guest);
+    if (a.uid.is_none() || a.gid.is_none() || a.mode.is_none())
+        && vfs::runtime_dir().is_some()
+        && let Some(o) = original(host)
+    {
+        a.uid = a.uid.or(o.uid);
+        a.gid = a.gid.or(o.gid);
+        a.mode = a.mode.or(o.mode);
+    }
     st.st_uid = a.uid.unwrap_or(0);
     st.st_gid = a.gid.unwrap_or(0);
     if let Some(m) = a.mode {
         st.st_mode = (st.st_mode & libc::S_IFMT) | (m as u16 & 0o7777);
     }
+}
+
+/// Whether guest ownership and modes are recorded (under a path map).
+pub fn recording() -> bool {
+    file().is_some()
 }
 
 /// Record a guest chown/chmod (only under a path map).
@@ -189,6 +258,11 @@ pub fn permits(st: &libc::stat, want: u32, uid: u32, gid: u32) -> bool {
     bits & want == want
 }
 
+/// This module's locks for a fork (`sys::forklock`).
+pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
+    super::forklock::mutex(&TABLE, held)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +293,24 @@ mod tests {
         assert!(!permits(&st, 4, 7, 7));
         assert!(permits(&st, 6, 0, 0));
         assert!(!permits(&st, 1, 0, 0));
+    }
+
+    #[test]
+    fn original_inodes_decode() {
+        // clatd's directory in the tethering APEX: clat:system 040750.
+        let b = b"DARI\x01\0\0\0\x05\x04\0\0\xe8\x03\0\0\xe8\x41\0\0";
+        assert_eq!(
+            decode_original(b),
+            Some(Attr {
+                uid: Some(1029),
+                gid: Some(1000),
+                mode: Some(0o750),
+            })
+        );
+        assert_eq!(decode_original(&b[..19]), None);
+        assert_eq!(
+            decode_original(b"DARI\x02\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"),
+            None
+        );
     }
 }

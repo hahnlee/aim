@@ -15,9 +15,9 @@
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::paths::{Area, PathMap, Resolved};
+use crate::paths::{Area, MapEntry, MapKind, PathMap, Resolved};
 
 /// What one command did (or, in a dry run, would do).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +89,15 @@ pub fn parse_mode(text: &str) -> Result<u32, String> {
     u32::from_str_radix(text, 8).map_err(|_| format!("invalid mode '{text}'"))
 }
 
+/// The host mode for a guest `mode`. Every guest uid is the same host user,
+/// and the guest mode is what fs-attrs reports, so the owner keeps rw(x) on
+/// the host: `mkdir /data/user 0511 system system` must not stop root
+/// creating `/data/user/0` in it. The layer's `fchmodat` does the same.
+fn host_permissions(mode: u32, host: &Path) -> fs::Permissions {
+    let owner = if host.is_dir() { 0o700 } else { 0o600 };
+    fs::Permissions::from_mode(mode | owner)
+}
+
 pub struct FsOps {
     pub map: PathMap,
     /// Perform changes; a dry run only describes them.
@@ -99,13 +108,19 @@ pub struct FsOps {
     /// Mount points of kernel filesystems that are not mounted here
     /// (cgroup controllers, configfs, functionfs, ...), with the reason.
     unmounted: Vec<(String, String)>,
+    /// The cgroup v2 hierarchy (path, mode, uid, gid), a plain directory.
+    pub cgroup2: Option<(String, u32, u32, u32)>,
+    /// The `--path-map` file processes start with; init's bind mounts
+    /// become entries of it.
+    path_map_file: Option<PathBuf>,
 }
 
 /// Legacy cgroup v1 controllers init.rc still addresses although the
 /// image's `cgroups.json` no longer declares them.
 pub const LEGACY_CGROUP_ROOTS: &[&str] = &["/dev/memcg", "/dev/stune"];
 
-pub const CGROUP_REASON: &str = "cgroups are answered unsupported (ADR 0012 appendix)";
+pub const CGROUP_REASON: &str =
+    "cgroup v1 controllers are answered unsupported (ADR 0012 appendix)";
 
 type FsResult = Result<Effect, String>;
 
@@ -118,7 +133,48 @@ impl FsOps {
             kernfs_values: Vec::new(),
             attrs: Vec::new(),
             unmounted: Vec::new(),
+            cgroup2: None,
+            path_map_file: None,
         }
+    }
+
+    /// Where the path map is written when a bind mount changes it.
+    pub fn set_path_map_file(&mut self, file: PathBuf) {
+        self.path_map_file = Some(file);
+    }
+
+    /// `mount none SRC DST bind [rec]`: init mounts in the one namespace
+    /// every process shares (the data mirrors zygote's app data isolation
+    /// binds from). Between writable areas that is a path-map entry, seen
+    /// by every process started from then on; nothing running then does
+    /// not see it (no mount propagation).
+    fn bind(&mut self, source: &str, target: &str) -> Result<Option<Effect>, String> {
+        let from = self.resolve(source, true)?;
+        let to = self.resolve(target, true)?;
+        if !matches!(from.area, Area::Writable { .. }) || !matches!(to.area, Area::Writable { .. })
+        {
+            return Ok(None);
+        }
+        if self.apply && !from.host.is_dir() {
+            return Err(format!(
+                "mount {source} {target}: {source} is not a directory"
+            ));
+        }
+        self.map.add(MapEntry {
+            guest: to.guest.clone(),
+            host: from.host.clone(),
+            kind: MapKind::Writable,
+        });
+        if self.apply
+            && let Some(file) = &self.path_map_file
+        {
+            fs::write(file, self.map.to_file_text()).map_err(|e| e.to_string())?;
+        }
+        Ok(Some(Effect::Applied(format!(
+            "mount {source} {target} bind: path-map entry {} -> {}",
+            to.guest,
+            from.host.display()
+        ))))
     }
 
     /// A kernel filesystem mount point that stays unmounted (a cgroup
@@ -195,7 +251,8 @@ impl FsOps {
         )))
     }
 
-    /// `do_mkdir`.
+    /// `do_mkdir`. The guest mode goes to fs-attrs; on the host the owner
+    /// keeps access (`host_permissions`).
     pub fn mkdir(
         &mut self,
         path: &str,
@@ -220,7 +277,7 @@ impl FsOps {
                         }
                         Err(e) => return Err(format!("mkdir() failed on {path}: {e}")),
                     }
-                    fs::set_permissions(&resolved.host, fs::Permissions::from_mode(mode))
+                    fs::set_permissions(&resolved.host, host_permissions(mode, &resolved.host))
                         .map_err(|e| format!("fchmodat() failed on {path}: {e}"))?;
                 }
                 self.record_attrs(AttrRecord {
@@ -276,7 +333,7 @@ impl FsOps {
         match &resolved.area {
             Area::Writable { .. } => {
                 if self.apply {
-                    fs::set_permissions(&resolved.host, fs::Permissions::from_mode(mode))
+                    fs::set_permissions(&resolved.host, host_permissions(mode, &resolved.host))
                         .map_err(|e| format!("fchmodat() failed: {e}"))?;
                 }
                 self.record_attrs(AttrRecord {
@@ -499,9 +556,29 @@ impl FsOps {
     ) -> FsResult {
         let resolved = self.resolve(target, true)?;
         if options.iter().any(|o| o == "bind" || o == "rbind") || device.starts_with('/') {
+            if options.iter().any(|o| o == "bind" || o == "rbind")
+                && let Some(effect) = self.bind(device, target)?
+            {
+                return Ok(effect);
+            }
             return Ok(Effect::NoOp(format!(
-                "mount {device} {target} ({}): bind mounts need mount namespaces; one namespace with a fixed path map",
+                "mount {device} {target} ({}): only binds between writable areas become path-map entries",
                 options.join(",")
+            )));
+        }
+        // bpffs and the cgroup v2 hierarchy are areas of the path map.
+        if matches!(fs_type, "bpf" | "cgroup2") && matches!(resolved.area, Area::Writable { .. }) {
+            // A new bpffs root is 01777 (bpf_fill_super), a cgroup2 root 0755.
+            let mode = if fs_type == "bpf" { 0o1777 } else { 0o755 };
+            self.record_attrs(AttrRecord {
+                guest: resolved.guest.clone(),
+                uid: Some(0),
+                gid: Some(0),
+                mode: Some(mode),
+            });
+            return Ok(Effect::Applied(format!(
+                "mount {fs_type} {target}: the path map's {fs_type} area ({})",
+                resolved.host.display()
             )));
         }
         let reason = match fs_type {
@@ -576,6 +653,42 @@ mod tests {
     }
 
     #[test]
+    fn init_bind_mounts_become_path_map_entries() {
+        let layout = temp_layout("bind");
+        let mut ops = FsOps::new(layout.path_map(), layout.fs_attrs_file(), true);
+        ops.set_path_map_file(layout.path_map_file());
+        ops.mkdir("/data/user_de", Some(0o711), None, None).unwrap();
+        ops.mkdir("/data/user_de/0", Some(0o771), None, None)
+            .unwrap();
+        ops.mount("tmpfs", "tmpfs", "/data_mirror", &[]).unwrap();
+        ops.mkdir("/data_mirror/data_de", None, None, None).unwrap();
+        ops.mkdir("/data_mirror/data_de/null", None, None, None)
+            .unwrap();
+        let bind = ["bind".to_string(), "rec".to_string()];
+        assert!(matches!(
+            ops.mount("none", "/data/user_de", "/data_mirror/data_de/null", &bind)
+                .unwrap(),
+            Effect::Applied(_)
+        ));
+        let r = ops
+            .map
+            .resolve("/data_mirror/data_de/null/0", true)
+            .unwrap();
+        assert_eq!(r.host, layout.data.join("data/user_de/0"));
+        // New processes read the entry from the file.
+        let text = fs::read_to_string(layout.path_map_file()).unwrap();
+        let map = PathMap::parse_file_text(&text).unwrap();
+        let r = map.resolve("/data_mirror/data_de/null/0", true).unwrap();
+        assert_eq!(r.host, layout.data.join("data/user_de/0"));
+        // A bind out of the read-only image stays unsupported.
+        assert!(matches!(
+            ops.mount("none", "/system/bin", "/data_mirror/data_de/null", &bind)
+                .unwrap(),
+            Effect::NoOp(_)
+        ));
+    }
+
+    #[test]
     fn commands_act_on_mapped_areas() {
         let layout = temp_layout("areas");
         let mut ops = FsOps::new(layout.path_map(), layout.fs_attrs_file(), true);
@@ -618,10 +731,19 @@ mod tests {
             Effect::Applied(_)
         ));
         assert!(layout.runtime.join("mnt/x").is_dir());
+        // The cgroup v2 hierarchy and bpffs are areas of the path map.
+        for (fs, target) in [("cgroup2", "/sys/fs/cgroup"), ("bpf", "/sys/fs/bpf")] {
+            assert!(matches!(
+                ops.mount(fs, "none", target, &[]).unwrap(),
+                Effect::Applied(_)
+            ));
+        }
         assert!(matches!(
-            ops.mount("cgroup2", "none", "/sys/fs/cgroup", &[]).unwrap(),
-            Effect::NoOp(_)
+            ops.mkdir("/sys/fs/bpf/netd_shared", Some(0o755), None, None)
+                .unwrap(),
+            Effect::Applied(_)
         ));
+        assert!(layout.bpf_dir().join("netd_shared").is_dir());
         ops.mount("configfs", "none", "/config", &[]).unwrap();
         assert!(matches!(
             ops.mkdir("/config/sdcardfs/extensions/1055", None, None, None)

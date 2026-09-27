@@ -47,7 +47,7 @@ diff --git a/runtime/interpreter/mterp/arm64ng/main.S b/runtime/interpreter/mter
     strb    wip, [ip, ip2]
  \label:
     .endif
-@@ -1569,6 +1599,7 @@
+@@ -1569,8 +1599,10 @@
  
  OAT_ENTRY ExecuteNterpWithClinitImpl
      .cfi_startproc
@@ -55,7 +55,10 @@ diff --git a/runtime/interpreter/mterp/arm64ng/main.S b/runtime/interpreter/mter
      // For simplicity, we don't do a read barrier here, but instead rely
      // on art_quick_resolution_trampoline to always have a suspend point before
      // calling back here.
-@@ -1598,6 +1629,7 @@
+     ldr wip, [x0, #ART_METHOD_DECLARING_CLASS_OFFSET]
++    DECODE_NON_NULL_HEAP_REF ip
+     ldr wip2, [ip, #MIRROR_CLASS_STATUS_OFFSET]
+@@ -1598,6 +1630,7 @@
  
  OAT_ENTRY ExecuteNterpImpl
      .cfi_startproc
@@ -105,6 +108,14 @@ diff --git a/runtime/interpreter/mterp/arm64ng/array.S b/runtime/interpreter/mte
      add     x0, xPC, x0, lsl #1         // x0<- PC + ssssssssBBBBbbbb*2 (array data off.)
      bl      art_quick_handle_fill_data
      FETCH_ADVANCE_INST 3                // advance rPC, load rINST
+@@ -167,6 +175,7 @@
+ %  fetch_from_thread_cache("x0", miss_label="2f")
+    TEST_IF_MARKING 3f
+ 1:
++   DECODE_NON_NULL_HEAP_REF x0         // the mark entrypoint returns it compressed
+    lsr     w1, wINST, #12              // w1<- B
+    GET_VREG w1, w1                     // w1<- vB (array length)
+    ldr lr, [xSELF, #THREAD_ALLOC_ARRAY_ENTRYPOINT_OFFSET]
 diff --git a/runtime/interpreter/mterp/arm64ng/control_flow.S b/runtime/interpreter/mterp/arm64ng/control_flow.S
 --- a/runtime/interpreter/mterp/arm64ng/control_flow.S
 +++ b/runtime/interpreter/mterp/arm64ng/control_flow.S
@@ -332,3 +343,11 @@ diff --git a/runtime/interpreter/mterp/arm64ng/object.S b/runtime/interpreter/mt
     add     x1, x0, x1
     .if $wide
     $volatile_store    x26, [x1]
+@@ -491,6 +512,7 @@
+ %  fetch_from_thread_cache("x0", miss_label="2f")
+    TEST_IF_MARKING 3f
+ 4:
++   DECODE_NON_NULL_HEAP_REF x0         // the mark entrypoint returns it compressed
+    ldr     lr, [xSELF, #THREAD_ALLOC_OBJECT_ENTRYPOINT_OFFSET]
+    blr     lr
+    dmb     ishst                       // need fence for making object's class visible

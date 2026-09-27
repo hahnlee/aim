@@ -289,3 +289,29 @@ fn thread_exit_ignores_its_argument() {
     file.ioctl(300, BINDER_THREAD_EXIT, 0, &mut NullFaults)
         .unwrap();
 }
+
+/// A BINDER_WRITE_READ restarted after a signal carries its write buffer
+/// fully consumed: copying the (empty) rest of it succeeds, as on Linux.
+#[test]
+fn a_restarted_write_read_with_its_writes_consumed() {
+    let name = format!(
+        "dev.darwinart.test.binder-host.{}.{}",
+        std::process::id(),
+        NAME.fetch_add(1, Ordering::Relaxed)
+    );
+    let _server = Server::start(&name).unwrap();
+    let client = Client::connect(&name).unwrap();
+    let file = open(&client, 1000, "u:r:system_server:s0");
+    let mut write = Vec::new();
+    cmd(&mut write, BC_ENTER_LOOPER, &[]);
+    let bwr = WriteRead {
+        write_size: write.len() as u64,
+        write_consumed: write.len() as u64,
+        write_buffer: write.as_ptr() as u64,
+        ..Default::default()
+    };
+    let mut arg = bwr.encode();
+    file.ioctl(301, BINDER_WRITE_READ, arg.as_mut_ptr() as u64, &mut Own)
+        .unwrap();
+    assert_eq!(WriteRead::decode(&arg).write_consumed, write.len() as u64);
+}

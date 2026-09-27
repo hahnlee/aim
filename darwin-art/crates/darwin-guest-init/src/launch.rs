@@ -87,6 +87,9 @@ pub struct LinuxRunOptions {
     pub seclabel: bool,
     pub gpu: bool,
     pub display: bool,
+    /// `--stdio-null`: the service's stdio is /dev/null, as init gives it,
+    /// and only the layer's messages reach the log.
+    pub stdio_null: bool,
 }
 
 impl LinuxRunOptions {
@@ -99,6 +102,7 @@ impl LinuxRunOptions {
         seclabel: true,
         gpu: true,
         display: true,
+        stdio_null: true,
     };
 
     /// Which contract options a `linux-run` binary accepts, from its usage
@@ -120,6 +124,7 @@ impl LinuxRunOptions {
             seclabel: usage.contains("--seclabel"),
             gpu: usage.contains("--gpu"),
             display: usage.contains("--display"),
+            stdio_null: usage.contains("--stdio-null"),
         }
     }
 
@@ -139,6 +144,9 @@ impl LinuxRunOptions {
         }
         if !self.seclabel {
             out.push("--seclabel");
+        }
+        if !self.stdio_null {
+            out.push("--stdio-null");
         }
         out
     }
@@ -201,6 +209,9 @@ impl LinuxRun {
                 out.push(flag.to_string());
                 out.push(value.display().to_string());
             }
+        }
+        if self.options.stdio_null {
+            out.push("--stdio-null".to_string());
         }
         if self.trace {
             out.push("--trace".to_string());

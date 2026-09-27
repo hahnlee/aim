@@ -173,7 +173,7 @@ fn write_words(words: &[(u64, u32)]) {
             // SAFETY: removing the temporary alias.
             unsafe { vm::mach_vm_deallocate(vm::task(), rw, PAGE) };
         } else {
-            eprintln!("[linux-abi] cannot write live code at {page:#x}: no RW alias");
+            crate::diag!("[linux-abi] cannot write live code at {page:#x}: no RW alias");
         }
         for &(addr, _) in &words[i..j] {
             // SAFETY: flushing the word we wrote.
@@ -242,6 +242,28 @@ fn new_island(hint: u64) -> Option<Island> {
                 libc::munmap(rw, ISLAND_SIZE as usize);
                 None
             }
+        }
+    }
+}
+
+/// In a forked child: Darwin copies the two views of an island as separate
+/// entries, and the executable one comes out without the stubs. Make it a
+/// view of the child's (intact) writable copy again.
+pub fn fork_child() {
+    let islands = ISLANDS.lock().unwrap_or_else(|e| e.into_inner());
+    for isl in islands.iter() {
+        if vm::alias(
+            isl.rw,
+            ISLAND_SIZE,
+            Some(isl.rx),
+            libc::PROT_READ | libc::PROT_EXEC,
+        )
+        .is_none()
+        {
+            crate::diag!(
+                "[linux-abi] cannot restore the stub island at {:#x}",
+                isl.rx
+            );
         }
     }
 }
@@ -476,4 +498,9 @@ pub unsafe fn handle_brk(uc: *mut libc::ucontext_t) -> bool {
         ss.pc += 4;
         true
     }
+}
+
+/// This module's locks for a fork (`sys::forklock`).
+pub(crate) fn fork_try(held: &mut Vec<crate::sys::forklock::Guard>) -> bool {
+    crate::sys::forklock::mutex(&ISLANDS, held)
 }

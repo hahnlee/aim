@@ -7,10 +7,11 @@
 //!
 //! - `ueventd`: no device nodes are created; `ro.cold_boot_done` is set
 //!   before the boot starts.
-//! - `apexd`, `apexd-bootstrap`, `apexd-snapshotde`: APEXes are
-//!   pre-flattened; `apexd.status` goes to `activated` (with
-//!   `apex.all.ready`) when `apexd` would first start and to `ready` when
-//!   `apexd-snapshotde` would run.
+//! - `apexd-bootstrap`, `apexd-snapshotde`: APEXes are pre-flattened;
+//!   `apexd.status` goes to `ready` when `apexd-snapshotde` would run.
+//!   `apexd` itself does start: the derived image's replacement
+//!   (`daemons/apexd`) serves `apexservice` from the APEX info list and
+//!   reports `activated` and `apex.all.ready`.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, VecDeque};
@@ -41,7 +42,7 @@ pub enum Outgoing {
 }
 
 /// Services whose role darwin-artd plays.
-pub const ROLE_SERVICES: &[&str] = &["ueventd", "apexd", "apexd-bootstrap", "apexd-snapshotde"];
+pub const ROLE_SERVICES: &[&str] = &["ueventd", "apexd-bootstrap", "apexd-snapshotde"];
 
 /// Linux resource limits Darwin has no counterpart for.
 const LINUX_ONLY_RLIMITS: &[(u32, &str)] = &[
@@ -196,27 +197,6 @@ impl GuestExecutor {
             "apexd-bootstrap" => Some(Effect::NoOp(
                 "apexd role: bootstrap APEXes are pre-flattened into the derived image".to_string(),
             )),
-            "apexd" => {
-                // apexd's OnAllPackagesActivated. A later start (a lazy
-                // `aidl/apexservice` request) finds them activated or ready
-                // already and changes nothing, as apexd would not re-activate.
-                let status = self
-                    .props
-                    .borrow()
-                    .property("apexd.status")
-                    .unwrap_or_default();
-                if !status.is_empty() {
-                    return Some(Effect::NoOp(format!(
-                        "apexd role: APEXes are pre-flattened and apexd.status={status}; apexservice is not served"
-                    )));
-                }
-                let _ = self.set_property("apexd.status", "activated");
-                let _ = self.set_property("apex.all.ready", "true");
-                Some(Effect::Applied(
-                    "apexd role: APEXes are pre-flattened; apexd.status=activated, apex.all.ready=true"
-                        .to_string(),
-                ))
-            }
             "apexd-snapshotde" => {
                 // apexd's OnAllPackagesReady (apex.all.ready was set when
                 // the packages were activated).
@@ -1016,7 +996,21 @@ impl GuestExecutor {
             Command::MarkPostData => {
                 Effect::NoOp("mark_post_data: /data is always available".to_string())
             }
-            Command::InitUser0 | Command::Installkey { .. } => Effect::NoOp(
+            // do_init_user0: vold prepares /data/data, /data/user/0 and
+            // user 0's DE storage (keys only when FBE is on).
+            Command::InitUser0 => {
+                let spec = ExecSpec {
+                    seclabel: None,
+                    user: None,
+                    group: None,
+                    supplementary_groups: Vec::new(),
+                    args: ["/system/bin/vdc", "--wait", "cryptfs", "init_user0"]
+                        .map(String::from)
+                        .to_vec(),
+                };
+                return self.exec(&spec, true);
+            }
+            Command::Installkey { .. } => Effect::NoOp(
                 "file-based encryption keys: /data is a host directory without FBE".to_string(),
             ),
             Command::EnterDefaultMountNs => {
@@ -1034,10 +1028,24 @@ impl GuestExecutor {
                 InitAction::WaitForColdbootDone
                 | InitAction::QueuePropertyTriggers
                 | InitAction::EnablePropertyTrigger => Effect::Engine(action.name().to_string()),
-                InitAction::SetupCgroups => Effect::NoOp(
-                    "SetupCgroups: cgroups are answered unsupported (ADR 0012 appendix)"
-                        .to_string(),
-                ),
+                // libprocessgroup's CgroupSetup: v1 controllers stay
+                // unmounted; the v2 hierarchy gets its system/app
+                // isolation directories.
+                InitAction::SetupCgroups => match self.fs.cgroup2.clone() {
+                    Some((root, mode, uid, gid)) => {
+                        for sub in ["apps", "system"] {
+                            let path = format!("{root}/{sub}");
+                            self.fs.mkdir(&path, Some(mode), Some(uid), Some(gid))?;
+                        }
+                        Effect::Applied(format!(
+                            "SetupCgroups: {root}/apps and {root}/system (cgroup v2; no controller acts)"
+                        ))
+                    }
+                    None => Effect::NoOp(
+                        "SetupCgroups: cgroups are answered unsupported (ADR 0012 appendix)"
+                            .to_string(),
+                    ),
+                },
                 InitAction::SetKptrRestrict => {
                     Effect::NoOp("SetKptrRestrict: no kernel pointers are exposed".to_string())
                 }

@@ -445,6 +445,11 @@ pub(super) fn after_fork_child() {
     });
 }
 
+/// This module's locks for a fork (`sys::forklock`).
+pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
+    super::forklock::mutex(&PIDFDS, held)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

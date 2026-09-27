@@ -1,6 +1,8 @@
 //! Soong's `libbinder_ndk_bindgen` for a vendor module: the flags of
 //! `libbinder_ndk_bindgen_flags.txt` and Android.bp, with the vendor
-//! defines, against the NDK sysroot and the pinned binder headers.
+//! defines, against the NDK sysroot and the pinned binder headers. With the
+//! `system` feature it is the platform (system partition) variant, which
+//! the replaced native daemons use (`daemons/`).
 
 use std::env;
 use std::path::PathBuf;
@@ -10,6 +12,11 @@ fn main() {
     let vendor_hals = manifest.join("../../_build/vendor-hals");
     let binder = vendor_hals.join("src/frameworks/native/libs/binder");
     let ndk = PathBuf::from(env::var("ANDROID_NDK_HOME").expect("ANDROID_NDK_HOME"));
+    let variant: &[&str] = if env::var_os("CARGO_FEATURE_SYSTEM").is_some() {
+        &[]
+    } else {
+        &["-D__ANDROID_VENDOR__", "-D__ANDROID_VNDK__"]
+    };
     let sysroot = ndk.join("toolchains/llvm/prebuilt/darwin-x86_64/sysroot");
     let bindings = bindgen::Builder::default()
         .header(
@@ -24,9 +31,8 @@ fn main() {
             "-std=c++17",
             "--target=aarch64-linux-android35",
             "-DANDROID_PLATFORM",
-            "-D__ANDROID_VENDOR__",
-            "-D__ANDROID_VNDK__",
         ])
+        .clang_args(variant)
         .clang_arg(format!("--sysroot={}", sysroot.display()))
         .clang_arg(format!("-I{}", binder.join("ndk/include_ndk").display()))
         .clang_arg(format!(

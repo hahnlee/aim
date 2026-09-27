@@ -522,6 +522,11 @@ source = "_build/art-android/stripped/lib64/libopenjdkjvm.so"
 reason = "the ART exception: the JVM_* interface over the replaced libart's C++ internals"
 
 [[replace]]
+path = "/apex/com.android.art/lib64/libadbconnection.so"
+source = "_build/art-android/stripped/lib64/libadbconnection.so"
+reason = "the ART exception: the JDWP plugin every zygote runtime loads links the replaced libart's C++ internals"
+
+[[replace]]
 path = "/apex/com.android.art/bin/dex2oat64"
 source = "_build/art-android/stripped/bin/dex2oat64"
 reason = "the ART exception: compiles for the replaced libart's reference encoding and Thread layout"
@@ -757,3 +762,27 @@ reason = "the ART exception's boot image (verification data), regenerated for ba
 path = "/system/framework/boot.vdex"
 source = "_build/art-android/boot-image/framework/boot.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
+
+# Replaced native daemons (ADR 0012 appendix): Rust programs that serve the
+# platform's own binder interfaces in place of daemons bound to Linux kernel
+# features, built by tools/build-daemons.sh from daemons/. The original init
+# .rc files still start them.
+
+[[replace]]
+path = "/system/bin/apexd"
+source = "_build/daemons/bin/apexd"
+reason = "APEXes are pre-flattened into the derived image (no loop devices or dm-verity); this apexd only serves apexservice from the APEX info list"
+
+[[replace]]
+path = "/system/bin/vold"
+source = "_build/daemons/bin/vold"
+reason = "vold drives block devices, dm-crypt, fscrypt and mounts; /data is a host directory, so this IVold prepares user storage as directories and links the emulated volume to /data/media"
+
+[[replace]]
+path = "/system/bin/netd"
+source = "_build/daemons/bin/netd"
+reason = "netd drives netlink, iptables, policy routing and eBPF; guest sockets are host sockets, so this INetd keeps the network bookkeeping, answers fwmarkd and hosts the original DnsResolver"
+
+[[remove]]
+path = "/system/etc/init/lmkd.rc"
+reason = "lmkd kills by PSI and memcg pressure, which Darwin does not report; not started until it is backed by macOS memory-pressure events (ActivityManager runs without it)"

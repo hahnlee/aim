@@ -9,6 +9,11 @@ description = "AOSP libbinder_rs, vendor variant, from the pinned sources"
 [lib]
 path = "../../_build/vendor-hals/src/frameworks/native/libs/binder/rust/src/lib.rs"
 
+[features]
+# The platform variant, for system daemons (`daemons/`).
+# AOSP builds libc with extra_traits; system_only.rs compares socket addresses.
+system = ["binder_ndk_sys/system", "libc/extra_traits"]
+
 [dependencies]
 binder_ndk_sys = { path = "../binder-ndk-sys" }
 downcast-rs = "1"

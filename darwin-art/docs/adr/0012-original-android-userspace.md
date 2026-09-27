@@ -336,6 +336,37 @@ is `crates/darwin-linux-abi/tests/art.rs`.
   - ART's statsd metrics are stubbed until `statslog_art` is generated
     (#162).
 
+## P3 SystemServer (2026-09-28)
+
+Details in [boot-status.md](../boot-status.md), "Java world".
+
+- **The original zygote and system_server run.** zygote preloads 18,367
+  classes in 0.31 s and forks system_server; system_server runs its
+  bootstrap, core and other services (197 binder services, 245 packages,
+  first-boot dexopt through artd), and ActivityManager starts SystemUI and
+  other apps through zygote. `sys.boot_completed` is not reached yet: on
+  the last runs a wedged host coreaudiod kept the audio HAL from
+  registering, and system_server's watchdog fired in AudioService (#217).
+- **Replaced daemons are Rust** (`daemons/`, over the image's
+  libbinder_ndk): vold (IVold enough for StorageManagerService: user
+  storage, the emulated volume as symlink views, no FUSE yet, #221), netd
+  (INetd V17 bookkeeping, fwmarkd and DnsResolver, loopback only, #223) and
+  apexd (IApexService from the pre-flattened `/apex`). lmkd is not started
+  (#222).
+- **eBPF scope:** `bpf()` maps live in shared memory and pin into bpffs;
+  programs and BTF load but never run (#224).
+- **Kernel features added to the contract:** per-process mount namespaces
+  as path-map entries, cgroup v2 and bpffs as path-map areas, xattrs with
+  SELinux labels (from the original inodes and `genfscon`), and threads with
+  their own file table (as processes).
+- **Fork on Darwin:** fork takes the layer's locks, and linux-run declares
+  `__objc_fork_ok`: without it the Objective-C runtime kills a child of a
+  multithreaded fork when two of its threads meet in one `+initialize`,
+  which every zygote child is.
+- **Measured:** system_server reaches `startOtherServices` 8 s after its
+  fork and ActivityManager's ready phase at 15 s; system_server's RSS is
+  about 220 MB, and 52 guest processes about 730 MB together.
+
 ## P4 composer (2026-09-28)
 
 Details in [composer.md](../composer.md).
@@ -394,6 +425,12 @@ only at a stable, versioned interface. Everything else stays original.
 | netd | `INetd` | netlink, iptables and eBPF; ours drives macOS networking. The device exposes one Ethernet-like network, not a Wi-Fi HAL |
 | vold | `IVold` | mounts, loop devices, fscrypt and dm-crypt; ours mounts FUSE the way vold does and hands the fd to the original MediaProvider |
 | lmkd | lmkd socket | PSI and memcg; not started at first, later backed by macOS memory-pressure events |
+| apexd | `IApexService` | loop devices and dm-verity; the image is pre-flattened, so ours only reports the active packages (keystore2's module hash, PackageManager) and sets `apexd.status` |
+
+The replacements are Rust (`daemons/`), built against the image's
+libbinder_ndk from the AIDL at the pinned tag (`tools/build-daemons.sh`).
+IVold is an unstable interface: its methods that take a raw
+`FileDescriptor` are refused until the Rust backend can express one.
 
 ### Kept original on the syscall layer
 
@@ -441,7 +478,7 @@ nothing unprivileged for it to drive ([vendor-hals.md](../vendor-hals.md)).
   load-time rewrite, which turns its shadow-call-stack instructions.
 
 Undeclared, so absent: telephony, NFC, vibrator, IR, UWB and Thread, plus
-`update_engine`, `apexd` and `snapuserd` (the image is pre-flattened).
+`update_engine` and `snapuserd` (the image is pre-flattened).
 
 ### Kernel features to emulate
 
@@ -450,11 +487,23 @@ the remaining original daemons use, evdev, and memfd/ashmem.
 
 - **eBPF:** the `bpf()` syscall with maps backed by shared memory. Programs
   attached to kernel hooks are not run; statistics the stack expects are
-  filled in from the syscall layer, which sees every socket operation. The
-  scope is settled in P3.
-- **Answered "unsupported" (Android falls back):** cgroups, namespaces,
-  SELinux (permissive), userfaultfd (ART uses its copying collector) and
-  BINDER_FREEZE.
+  filled in from the syscall layer, which sees every socket operation.
+  Settled in P3: maps and pins work, programs and BTF load, and nothing
+  runs yet (#224).
+- **Mount namespaces** are per-process entries of the path map (bind,
+  tmpfs, move, `umount2`); init's own binds are entries every later process
+  gets. There is no propagation between processes.
+- **cgroup v2 and bpffs** are writable areas of the path map: the
+  hierarchy holds the directories libprocessgroup creates, and no
+  controller acts.
+- **Extended attributes** are host attributes under their own prefix;
+  `security.selinux` is the original inode's label, a `genfscon` label, or
+  `unlabeled`.
+- **A thread with its own file table** (bionic's debuggerd pseudothread)
+  runs as a process.
+- **Answered "unsupported" (Android falls back):** cgroup v1 controllers,
+  the other namespaces, SELinux enforcement (permissive), userfaultfd (ART
+  uses its copying collector) and BINDER_FREEZE.
 
 ### Application JITs
 

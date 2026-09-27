@@ -37,8 +37,12 @@ linux-run --root <image> --path-map <runtime>/path-map \
   guest-init with the same options: the host's ANGLE behind the GLES driver
   (`docs/gles-driver.md`) and the display server behind the composer
   (`docs/composer.md`).
-- stdin is `/dev/null`. stdout and stderr go to
-  `<runtime>/logs/<service>.log`.
+- stdin, stdout and stderr are `/dev/null`, as init gives a service
+  without `stdio_to_kmsg` (zygote refuses to fork while it holds any other
+  file). guest-init opens `<runtime>/logs/<service>.log` as stderr and
+  passes `--stdio-null`: `linux-run` keeps that stderr, hidden from the
+  guest and across its execs (`--diag-fd`), for the layer's own messages,
+  then puts `/dev/null` in fds 0-2.
 - Only the service's descriptors are inherited
   (`POSIX_SPAWN_CLOEXEC_DEFAULT`); see section 5.
 - guest-init stops a service with `kill(-pgid, SIGKILL)` (`SIGTERM` for
@@ -77,9 +81,14 @@ kernfs	/proc	<runtime>/kernfs/proc
 | `/apex/apex-info-list.xml` | `<runtime>/apex/apex-info-list.xml` | `rw` (one file) | per boot |
 | `/data`, `/metadata`, `/cache` | `<data>/<name>` | `rw` | persistent |
 | `/proc`, `/sys` | `<runtime>/kernfs/{proc,sys}` | `kernfs` | per boot |
+| `/sys/fs/cgroup` | `<runtime>/cgroup` | `cgroup2` | per boot |
+| `/sys/fs/bpf` | `<runtime>/bpf` | `bpf` | per boot |
+| init's `mount none SRC DST bind` between `rw` areas | SRC's host path | `rw` | added when init runs it |
 | everything else | `<image>/...` | `root`, read-only | derived image |
 
-`<runtime>` defaults to `<data>/run` and is recreated on every boot.
+`<runtime>` defaults to `<data>/run` and is recreated on every boot. An
+init bind mount rewrites the file, so processes started afterwards see it
+(the data mirrors zygote binds app data from); running processes do not.
 
 Resolution rules:
 
@@ -248,10 +257,18 @@ A dry run of the pinned image records 43 values (dry run, 2026-09-27):
 (5), `/proc/sys/abi/swp`, `/proc/cpu/alignment`, `/sys/module/dm_*`,
 `/sys/block/zram0/*`, `/sys/kernel/debug/*` and `/sys/class/*`.
 
-Kernel filesystems init mounts stay unmounted: cgroup controllers from
-`cgroups.json` plus `/dev/memcg` and `/dev/stune`, configfs, tracefs,
+Kernel filesystems init mounts stay unmounted: the cgroup v1 controllers
+from `cgroups.json` plus `/dev/memcg` and `/dev/stune`, configfs, tracefs,
 pstore, bpf, functionfs and binderfs. Commands on their files are logged as
-no-ops. `/dev/kmsg` is a regular file in the runtime `/dev` until the layer
+no-ops.
+
+The cgroup v2 hierarchy (`Cgroups2` in `cgroups.json`) is the one
+exception: zygote aborts a fork when `createProcessGroup` cannot make
+`<root>/{system,apps}/uid_N/pid_M` and write `cgroup.procs`. It is the
+`cgroup2` path-map entry, a plain per-boot directory: groups can be made,
+joined and removed, but no controller acts on them (no freezing, no memory
+limits). `SetupCgroups` creates `apps` and `system` in it as libprocessgroup's
+`CgroupSetup` does, and `/proc/mounts` lists it as `cgroup2`. `/dev/kmsg` is a regular file in the runtime `/dev` until the layer
 emulates the device.
 
 ## 8. Property areas and the futex

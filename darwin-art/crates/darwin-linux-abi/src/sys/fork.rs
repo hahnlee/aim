@@ -21,6 +21,7 @@ use crate::errno::{self, EINVAL};
 const CSIGNAL: u64 = 0xff;
 const CLONE_VM: u64 = 0x100;
 const CLONE_FS: u64 = 0x200;
+const CLONE_SYSVSEM: u64 = 0x40000;
 const CLONE_FILES: u64 = 0x400;
 const CLONE_SIGHAND: u64 = 0x800;
 const CLONE_PIDFD: u64 = 0x1000;
@@ -58,7 +59,48 @@ const UNSUPPORTED: u64 = CLONE_FS
 /// Whether a `clone` with these flags creates a process (handled here)
 /// rather than a thread.
 pub fn is_fork(flags: u64) -> bool {
-    flags & CLONE_VM == 0 || flags & (CLONE_VFORK | CLONE_THREAD) == CLONE_VFORK
+    flags & CLONE_VM == 0
+        || flags & (CLONE_VFORK | CLONE_THREAD) == CLONE_VFORK
+        || is_own_files_thread(flags)
+}
+
+/// A thread with its own file table (CLONE_THREAD without CLONE_FILES):
+/// bionic's debuggerd handler runs its dispatch "pseudothread" so, and
+/// the pseudothread closes every fd it has. Darwin threads share one
+/// table, so it runs as a forked process instead: its file table is its
+/// own, its writes to memory stay its own (the handler reads none back),
+/// and the parent sees the tid handshake the handler waits on
+/// (CLONE_CHILD_SETTID, then CLONE_CHILD_CLEARTID with a futex wake when
+/// it ends).
+fn is_own_files_thread(flags: u64) -> bool {
+    flags & (CLONE_THREAD | CLONE_VM | CLONE_FILES) == CLONE_THREAD | CLONE_VM
+}
+
+/// The parent's side of an own-files thread's tid handshake: `tid` at
+/// `child_tid` now, and 0 plus a futex wake once the process `pid` ends.
+/// The layer reaps it; the guest never forked it.
+fn own_files_thread_started(pid: i32, r: &Request) {
+    if r.child_tid == 0 {
+        return;
+    }
+    // SAFETY: guest word named by CLONE_CHILD_SETTID/CLEARTID.
+    unsafe {
+        if r.flags & CLONE_CHILD_SETTID != 0 {
+            (r.child_tid as *mut i32).write_volatile(pid);
+        }
+    }
+    if r.flags & CLONE_CHILD_CLEARTID == 0 {
+        return;
+    }
+    let addr = r.child_tid;
+    std::thread::spawn(move || {
+        let mut status = 0;
+        // SAFETY: reaping the process that stands for the thread.
+        while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 && errno::last() == errno::EINTR {}
+        // SAFETY: as above; the guest waits on this word.
+        unsafe { (addr as *mut i32).write_volatile(0) };
+        super::futex::wake_one(addr);
+    });
 }
 
 /// `struct clone_args` flags of a `clone3` call, for [`is_fork`].
@@ -124,7 +166,11 @@ pub fn clone3(ctx: &mut GuestContext, a: [u64; 6]) -> i64 {
     )
 }
 
-fn fork(ctx: &mut GuestContext, r: Request) -> i64 {
+fn fork(ctx: &mut GuestContext, mut r: Request) -> i64 {
+    let own_files_thread = is_own_files_thread(r.flags);
+    if own_files_thread {
+        r.flags &= !(CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_FS | CLONE_SYSVSEM);
+    }
     // The exit signal (CSIGNAL) is always SIGCHLD on Darwin.
     if r.flags & (UNSUPPORTED | CLONE_NEWTIME) != 0 {
         return -(EINVAL as i64);
@@ -144,12 +190,15 @@ fn fork(ctx: &mut GuestContext, r: Request) -> i64 {
     // held by a thread that does not exist there. Darwin's libc takes its
     // own locks (malloc and the like) in its fork handlers.
     // The thread layer's locks are held too (thread table, futex waiters,
-    // signal queues, timers).
+    // signal queues, timers), and before them every other lock of the
+    // layer (`forklock`).
+    let layer = super::forklock::acquire();
     super::thread::fork_prepare();
     let stderr = std::io::stderr().lock();
     // SAFETY: fork; the child continues on this thread only.
     let pid = unsafe { libc::fork() };
     drop(stderr);
+    layer.release(pid == 0);
     if pid == 0 {
         super::thread::fork_child();
     } else {
@@ -171,6 +220,9 @@ fn fork(ctx: &mut GuestContext, r: Request) -> i64 {
         }
         child_fixups(ctx, &r);
         return 0;
+    }
+    if own_files_thread {
+        own_files_thread_started(pid, &r);
     }
     // SAFETY: guest pointers named by the caller's flags.
     unsafe {
@@ -220,6 +272,7 @@ fn child_fixups(ctx: &mut GuestContext, r: &Request) {
     if r.stack != 0 {
         ctx.sp = r.stack;
     }
+    crate::patch::fork_child();
     super::cred::after_fork_child();
     super::wait::after_fork_child();
     super::fdtab::after_fork_child();

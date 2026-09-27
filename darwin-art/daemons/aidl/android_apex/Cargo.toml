@@ -1,0 +1,15 @@
+[package]
+name = "android_apex"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "android.apex (IApexService, unstable), Rust backend, generated at the pinned tag"
+
+[lib]
+path = "../../../_build/daemons/aidl/android_apex/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+binder.workspace = true
+static_assertions = "1"

@@ -345,6 +345,11 @@ pub fn rw(fd: i32, buf: u64, len: usize, pos: Option<i64>, write: bool) -> Optio
     Some(n as i64)
 }
 
+/// This module's locks for a fork (`sys::forklock`).
+pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
+    super::forklock::mutex(&MEMFDS, held)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
