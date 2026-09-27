@@ -95,12 +95,36 @@ done
   echo 'Calculator did not display its keypad' >&2
   exit 1
 }
+# Pixels prove the window drew, not that it takes input: also wait for the
+# app's input receiver for this launch (logged under DEBUG_INPUT_LATENCY).
+calculator_input_ready=false
+for _ in {1..40}; do
+  # grep -c reads to the end: an early-exiting grep -q would SIGPIPE tail
+  # and fail the pipeline under pipefail.
+  if [[ "$(tail -c "+$((calculator_offset + 1))" "$daemon_log" |
+      grep -a -c 'ART Android InputChannel receiver-init' || true)" -gt 0 ]]; then
+    calculator_input_ready=true
+    break
+  fi
+  sleep 0.25
+done
+[[ "$calculator_input_ready" == true ]] || {
+  echo 'Calculator drew its keypad but its input receiver never initialized' >&2
+  exit 1
+}
 swift "$input" click-content "$active_pid" 640 \
   125,475,300 315,575,300 205,475,500
 swift "$observer" "$active_pid" "$output/calculator-formula.png" top \
   >"$output/calculator-formula.txt"
 grep -E '2[[:space:]]*\+[[:space:]]*3' "$output/calculator-formula.txt" >/dev/null || {
-  echo 'Calculator did not visibly display formula 2+3' >&2
+  # Name the layer that lost the taps: the AppKit view logs every pointer
+  # it receives (enqueue=1 means the app's input queue accepted it).
+  received="$(tail -c "+$((calculator_offset + 1))" "$daemon_log" |
+    grep -a -c 'ART AppKit pointer action=0' || true)"
+  queued="$(tail -c "+$((calculator_offset + 1))" "$daemon_log" |
+    grep -a -c 'ART AppKit pointer action=0 .*enqueue=1' || true)"
+  echo "Calculator did not visibly display formula 2+3" \
+    "(taps reaching the window: ${received}/3, queued for the app: ${queued})" >&2
   exit 1
 }
 swift "$input" click-content-no-focus "$active_pid" 640 205,575,500
