@@ -20,6 +20,7 @@ members = [
     "crates/darwin-art-profile",
     "crates/darwin-art-rust-demangle",
     "crates/darwin-art-xtask",
+    "crates/darwin-linux-abi",
     "tools/android-aaudio-provider",
     "tools/android-apk-native-extract",
     "tools/android-arm64-pcs-proof",
