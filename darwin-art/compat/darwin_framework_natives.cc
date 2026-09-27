@@ -143,6 +143,12 @@ jstring CharsetUtilsFromModifiedUtf8Bytes(JNIEnv* env, jclass, jlong source,
 
 }  // namespace
 
+// crates/darwin-art-runtime/src/{debug_natives,file_observer,local_socket,process_natives}.rs
+extern "C" bool darwin_art_register_debug_natives(JNIEnv*);
+extern "C" bool darwin_art_register_file_observer_natives(JNIEnv*);
+extern "C" bool darwin_art_register_local_socket_natives(JNIEnv*);
+extern "C" bool darwin_art_register_process_natives(JNIEnv*);
+
 // Keep the dynamic JNI fallback as well as the explicit table registration.
 // Some framework threads resolve Process natives before the framework table is
 // visible through their boot-class loader.
@@ -328,6 +334,18 @@ bool RegisterFrameworkNatives(JNIEnv* env) {
   };
   if (!Register(env, "android/os/Process", process_methods,
                 static_cast<jint>(std::size(process_methods)))) {
+    return false;
+  }
+  if (!darwin_art_register_process_natives(env) || env->ExceptionCheck()) {
+    return false;
+  }
+  if (!darwin_art_register_debug_natives(env) || env->ExceptionCheck()) {
+    return false;
+  }
+  if (!darwin_art_register_file_observer_natives(env) || env->ExceptionCheck()) {
+    return false;
+  }
+  if (!darwin_art_register_local_socket_natives(env) || env->ExceptionCheck()) {
     return false;
   }
 

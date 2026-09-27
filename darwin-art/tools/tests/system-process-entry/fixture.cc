@@ -18,6 +18,9 @@ extern "C" int darwin_art_install_context_loader(JNIEnv*, jobject loader) {
   return loader == nullptr ? 4 : 0;
 }
 extern "C" bool darwin_art_surfaceflinger_service_start() { return mode != 3; }
+extern "C" bool darwin_art_register_android_servers(JNIEnv*, jobject loader, jmethodID load) {
+  return loader != nullptr && load != nullptr;
+}
 namespace darwin_art::framework::app {
 int FinishFrameworkRegistration(JNIEnv*, bool) { return 0; }
 }
