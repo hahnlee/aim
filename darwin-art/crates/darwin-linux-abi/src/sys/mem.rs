@@ -129,6 +129,12 @@ pub fn mmap(a: [u64; 6]) -> i64 {
     if len == 0 || off & (PAGE - 1) != 0 {
         return -(EINVAL as i64);
     }
+    if flags & MAP_ANONYMOUS == 0
+        && fd >= 0
+        && let Some(r) = super::binder::mmap(addr, len, prot, flags, fd)
+    {
+        return r;
+    }
     let len = page_up(len);
     let fixed = flags & MAP_FIXED != 0;
     let noreplace = flags & MAP_FIXED_NOREPLACE != 0;

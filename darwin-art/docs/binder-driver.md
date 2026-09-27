@@ -7,7 +7,11 @@ Android common kernel's `include/uapi/linux/android/binder.h` (protocol 8)
 and `drivers/android/binder.c`. It is a library with no dependency on the
 syscall layer.
 
-Wiring it into the syscall layer is #167; hosting it in darwin-artd is #168.
+`crates/darwin-binder-host` runs one driver for all guest processes in a
+daemon and connects each guest's syscall layer to it (#168). The syscall
+layer exposes the device nodes (#167). With both, the original
+`servicemanager` of the pinned image serves the original `service` and `cmd`
+clients in other processes.
 
 ## Why a new crate
 
@@ -84,20 +88,47 @@ per-process state:
 
 Splitting that state across host processes would need cross-process
 locking. The owner is the daemon (#168). A guest keeps only its fd → driver
-process mapping, its receive mapping and its reply ports. One lock guards
+process mapping, its receive mapping and its Mach ports. One lock guards
 the core. Thread wakes are delivered after it is released, so a woken reader
 does not block on the lock it was woken under. That brought the in-process
 p50 from 13.5 to 9.2 µs.
 
 ## Driver–process path
 
-Each guest binder ioctl is one `mach_msg(SEND|RCV)` from the calling thread
-to darwin-artd, on the thread's own reply port. A read with no work parks the
-thread's send-once reply right. Whoever queues work for it completes the
-read and replies. A call and its reply therefore cross four Mach hops:
-client → daemon → server, then server → daemon → client.
+`darwin-binder-host` has two halves. The `server` module is the daemon side,
+a library that any host process can embed; `darwin-binderd --service NAME`
+runs it alone. The `client` module is what the syscall layer calls
+(`crates/darwin-linux-abi/src/sys/binder.rs`, enabled by
+`linux-run --binder NAME`). The daemon is found by its bootstrap name.
 
-Measured in `experiments/p1/01-binder-transport` (M2 Pro):
+- **Open.** `openat("/dev/binder")` creates a Unix socket pair. The guest's
+  fd is one end, and the other end goes to the daemon as a fileport. The
+  daemon answers with a **file port** that stands for the open file.
+- **Threads.** The first ioctl of a guest thread asks the file port for a
+  **thread port**. A daemon thread serves it.
+- **Ioctls.** Each guest binder ioctl is one `mach_msg(SEND|RCV)` from the
+  calling thread to its thread port, answered through a send-once right.
+  The daemon thread runs `Driver::ioctl` and may block in it, as the guest
+  thread blocks in the kernel. It sends that answer in the same `mach_msg`
+  that waits for the next request.
+- **Guest memory.** The daemon never reads guest memory. The shim sends the
+  argument structure and gathers what the driver will read from the write
+  stream: each `BC_TRANSACTION`/`BC_REPLY`'s data and offsets, and for
+  `_SG` commands every `BINDER_TYPE_PTR` payload. The daemon's
+  `GuestProcess` serves `copy_from_user` from those segments. It records
+  `copy_to_user` as writes that the shim applies when the ioctl returns.
+- **Readiness.** epoll and poll need no binder support, because the guest
+  fd is a real socket. The daemon writes one byte to its end while a read by
+  the polling thread would find work. Every ioctl answer says whether the
+  shim must drain that byte, which keeps it level-triggered like
+  `binder_poll`. The polling thread is registered from `epoll_ctl` and
+  `ppoll`, the paths from which Linux calls `binder_poll`.
+
+A call and its reply cross four Mach hops: client → daemon → server, then
+server → daemon → client. The daemon adds two thread wakes: the client's
+daemon thread wakes the server's, and the other way back.
+
+Transport alone, measured in `experiments/p1/01-binder-transport` (M2 Pro):
 
 | path | p50 | p99 |
 | --- | --- | --- |
@@ -106,15 +137,26 @@ Measured in `experiments/p1/01-binder-transport` (M2 Pro):
 | relayed Unix sockets | 10.3–10.5 µs | 16 µs |
 | the core in-process (two threads, condvar) | 9.2 µs | 17 µs |
 
-Linux takes about 10–30 µs per transaction. A daemon-hosted driver should
-land near 10 µs. Other options:
+Other options:
 
 - **Shared memory with futex-style wakes.** This would put the core's data
   structures in memory every guest can corrupt.
 - **Unix sockets.** About 4 µs slower at p50.
 
-The core still blocks a reader on a condvar. The parked-read mode that the
-Mach path needs is the first item of #168.
+End to end, between original guest processes (M2 Pro, release build,
+20,000 calls after 2,000 warm-up, timed in the guest with the image's
+`libbinder_ndk`; `crates/darwin-linux-abi/tests/servicemanager.rs`):
+
+| call | p50 | p90 | p99 |
+| --- | --- | --- | --- |
+| `AIBinder_ping` of servicemanager (epoll `Looper`, 3 server ioctls) | 27–30 µs | 32–44 µs | 41–64 µs |
+| a service method, server blocked in `joinThreadPool` | 26–27 µs | 30–46 µs | 40–90 µs |
+
+Linux takes about 10–30 µs per transaction. Each ioctl here is a Mach round
+trip to another thread (about 4 µs per hand-off). The two daemon-internal
+wakes per call are what parked reads remove: a read with no work would not
+block its daemon thread but keep the guest's send-once right, and whoever
+queues work for it would run its read pass and answer it directly.
 
 ## Receive buffers
 
@@ -161,12 +203,17 @@ that dominate, the copies cost nanoseconds and the wakes cost microseconds.
   - the SELinux label, for nodes with `FLAT_BINDER_FLAG_TXN_SECURITY_CTX`,
     such as servicemanager, which reads `getCallingSid`.
 
-  The host uid is never used.
+  The host uid is never used. Through the daemon, the pid comes from the
+  Mach audit token of the open. The uid and label are what the guest's
+  syscall layer reports (`getuid`, `linux-run --seclabel`) until the
+  daemon's process registry supplies them.
 
 ## Lifetimes
 
-- **Process release** (last close or death: a no-senders notification on the
-  process port in the daemon):
+- **Process release** (last close or death): the daemon's end of the
+  readiness socket reads EOF once every guest fd for the file is closed,
+  including at process exit and in forked children. The daemon then
+  releases the process, and its file and thread ports die with it:
   - the process's nodes die;
   - each holder with a death registration gets `BR_DEAD_BINDER`;
   - callers waiting on the process's threads get `BR_DEAD_REPLY`;
@@ -178,7 +225,8 @@ that dominate, the copies cost nanoseconds and the wakes cost microseconds.
   `BC_DEAD_BINDER_DONE`), and registration on an already dead node.
 - **Thread exit.** `BINDER_THREAD_EXIT` sends `BR_DEAD_REPLY` to the caller
   of any transaction the thread was serving.
-- **Signals.** `Driver::interrupt` ends a blocked read with `EINTR`.
+- **Signals.** `Driver::interrupt` ends a blocked read with `EINTR`. Guest
+  signal delivery does not reach it through the daemon yet.
 
 ## Tests
 
@@ -204,3 +252,22 @@ as `IPCThreadState` does.
   - security contexts, poll, non-blocking reads and `EINTR`.
 - **`tests/latency.rs`** measures a small call and reply:
   `cargo test --release --test latency -- --nocapture`.
+
+Across processes:
+
+- **`cargo test -p darwin-binder-host`** (`tests/transport.rs`): the daemon
+  and two binder files in one host process. It covers a transaction with
+  data, an fd and a security context, readiness and its drain, the reply,
+  and release on the last close, seen as `BR_DEAD_BINDER`.
+- **`cargo test -p darwin-linux-abi --release --test servicemanager --
+  --nocapture`** runs the pinned image and is skipped when it is absent. The
+  test plays the minimum of init: property areas and the property service
+  (`darwin-guest-init`), `--path-map`, and the binder host in the test
+  process. It checks that:
+  - the original servicemanager becomes the context manager and sets
+    `servicemanager.ready`;
+  - `service list`, `service check` and `cmd -l` get their answers;
+  - a third process (`tests/fixtures/binder_ping.c`, built with the pinned
+    NDK) adds a service, a client calls it, and the service's death removes
+    it from servicemanager;
+  - the latencies above are printed.

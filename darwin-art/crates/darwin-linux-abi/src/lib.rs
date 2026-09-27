@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 
 pub struct RunOptions<'a> {
     pub root: &'a Path,
+    /// `--path-map`: the guest filesystem view over `root`.
+    pub path_map: Option<&'a Path>,
     /// Guest path of the program.
     pub program: &'a str,
     /// argv, including argv[0].
@@ -39,6 +41,11 @@ pub struct RunOptions<'a> {
     /// Translation cache directory; None: every file is rewritten at load
     /// time.
     pub cache: Option<PathBuf>,
+    /// Bootstrap name of the binder host (`darwin-binderd`); None: the
+    /// binder device nodes do not exist.
+    pub binder: Option<String>,
+    /// The process's SELinux context (what init's `seclabel` gives it).
+    pub seclabel: Option<String>,
 }
 
 /// The environment a freshly started Android process sees from init.
@@ -70,11 +77,19 @@ fn trace_image(name: &str, i: &loader::Image) {
 /// Load `program` under `root` and run it on the current thread. Returns
 /// only on a load error; the guest ends the process with exit_group.
 pub fn run(opts: RunOptions) -> String {
-    if let Err(e) = vfs::init(opts.root) {
+    if let Err(e) = vfs::init(opts.root, opts.path_map) {
         return format!("--root {}: {e}", opts.root.display());
     }
     sys::set_trace(opts.trace);
     xrt::init(opts.cache.clone());
+    if let Some(name) = &opts.binder
+        && let Err(e) = sys::init_binder(name)
+    {
+        return e;
+    }
+    if let Some(label) = opts.seclabel.clone() {
+        sys::set_security_context(label);
+    }
     context::init_thread();
     diag::install_signal_handlers();
 

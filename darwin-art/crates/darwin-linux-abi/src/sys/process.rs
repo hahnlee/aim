@@ -1,7 +1,6 @@
 //! Process identity and lifetime syscalls.
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::errno::{self, EINVAL, EPERM, ESRCH};
 
@@ -24,8 +23,6 @@ pub fn exe_guest_path() -> String {
 pub fn exe_host_path() -> String {
     EXE.get().map(|e| e.host.clone()).unwrap_or_default()
 }
-
-static CLEAR_CHILD_TID: AtomicU64 = AtomicU64::new(0);
 
 pub fn getpid() -> i64 {
     // SAFETY: trivial.
@@ -67,16 +64,8 @@ pub fn gettid() -> i64 {
 }
 
 pub fn set_tid_address(a: [u64; 6]) -> i64 {
-    CLEAR_CHILD_TID.store(a[0], Ordering::Relaxed);
+    super::thread::set_clear_tid(a[0]);
     gettid()
-}
-
-pub fn exit(a: [u64; 6]) -> i64 {
-    // Now off the guest stack: its deferred munmap (bionic's
-    // _exit_with_stack_teardown) can run.
-    crate::sys::run_deferred_unmaps();
-    // Only the main thread exists so far; its exit ends the process.
-    exit_group(a)
 }
 
 pub fn exit_group(a: [u64; 6]) -> i64 {
