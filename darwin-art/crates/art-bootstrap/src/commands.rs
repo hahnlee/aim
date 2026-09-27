@@ -125,6 +125,7 @@ pub(crate) fn run() -> Result<()> {
         "build-jit-compiler" => build_jit_compiler(&root),
         "build-dex2oat" => build_dex2oat(&root).map(|_| ()),
         "build-android16-boot-image" => build_android16_boot_image(&root),
+        "ensure-android16-boot-image" => ensure_android16_boot_image(&root),
         "build-jit-libelffile" => build_jit_libelffile(&root).map(|_| ()),
         "prepare-runtime-common-shadow" => prepare_runtime_shadow(&root).map(|_| ()),
         "build-runtime-native-core" => build_runtime_native_core(&root),

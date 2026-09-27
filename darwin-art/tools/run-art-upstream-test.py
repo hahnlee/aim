@@ -1776,6 +1776,11 @@ def main() -> int:
             *boot_image_class_path,
             root / "_build/dex-probe/unsafe-boot-dex/unsafe-boot.jar",
         ]
+        if args.boot_image is None:
+            # The default image must match the current runtime and boot class
+            # path; ART rejects an image whose dex checksums are stale.
+            command(["cargo", "run", "-q", "-p", "art-bootstrap", "--release", "--",
+                     "ensure-android16-boot-image"], cwd=root, timeout=600)
         boot_image = (args.boot_image.resolve() if args.boot_image is not None
                       else root / "_build/android16-boot-image-darwin/boot.art")
         # Accept the same image-directory spelling used by ART's build and
