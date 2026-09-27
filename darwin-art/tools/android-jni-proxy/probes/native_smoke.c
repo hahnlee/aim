@@ -72,7 +72,10 @@ int main(void) {
   CHECK(env != NULL);
 
   const RawSlot* native = *(const RawSlot* const*)env;
-  CHECK(native[5] == NULL);
+  // Only the four reserved slots are empty.
+  for (uint32_t index = 0; index < DARWIN_ART_JNI_NATIVE_SLOT_COUNT; ++index) {
+    CHECK((native[index] == NULL) == (index < 4));
+  }
   GetVersionFunction get_version =
       (GetVersionFunction)native[DARWIN_ART_JNI_SLOT_GetVersion];
   FindClassFunction find_class =

@@ -52,6 +52,12 @@ typedef struct DarwinArtJniBackend {
   uint64_t (*call_method_v)(void* context, void* object, void* method,
                             void* android_va_list, int32_t return_shorty,
                             int32_t is_static);
+  /* Optional: CallNonvirtual<Type>MethodV of `method` as declared by `clazz`
+   * on `object`, translated like call_method_v. Without it those slots fail
+   * closed (return zero) instead of reaching the guest as NULL. */
+  uint64_t (*call_nonvirtual_method_v)(void* context, void* object, void* clazz,
+                                       void* method, void* android_va_list,
+                                       int32_t return_shorty);
 } DarwinArtJniBackend;
 
 typedef struct DarwinArtJniProxy DarwinArtJniProxy;

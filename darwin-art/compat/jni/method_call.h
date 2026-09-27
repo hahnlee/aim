@@ -25,4 +25,14 @@ uint64_t CallMethodA(JNIEnv* env,
                      int32_t return_shorty,
                      int32_t invocation_kind);
 
+// CallNonvirtual<Type>MethodA: `method` as declared by `clazz`, invoked on
+// `receiver` without virtual dispatch. Same preconditions and return shapes as
+// CallMethodA; null required pointers return zero without invoking ART.
+uint64_t CallNonvirtualMethodA(JNIEnv* env,
+                               jobject receiver,
+                               jclass clazz,
+                               jmethodID method,
+                               const jvalue* args,
+                               int32_t return_shorty);
+
 }  // namespace darwin_art::jni
