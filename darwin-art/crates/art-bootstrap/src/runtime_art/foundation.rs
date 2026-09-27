@@ -158,12 +158,12 @@ pub(crate) fn build_runtime_core(root: &Path) -> Result<()> {
     // monitor tests still pass.
     let patched_mutex = fs::read_to_string(patched_base.join("mutex.cc"))?;
     let patched_mutex_inline = fs::read_to_string(patched_base.join("mutex-inl.h"))?;
+    if !patched_mutex.contains("self->CheckEmptyCheckpointFromMutex();")
+        || !patched_mutex_inline.contains("DarwinCheckpointPark::RunCheckpoint(self);")
+    {
+        return Err("Darwin pthread checkpoint waiter lost CheckEmptyCheckpointFromMutex".into());
+    }
     for source in [&patched_mutex, &patched_mutex_inline] {
-        if !source.contains("CheckEmptyCheckpointFromMutex()") {
-            return Err(
-                "Darwin pthread checkpoint waiter lost CheckEmptyCheckpointFromMutex".into(),
-            );
-        }
         if !source.contains("park.Wait(generation") {
             return Err("Darwin pthread checkpoint waiter lost its parking wait".into());
         }
@@ -174,6 +174,17 @@ pub(crate) fn build_runtime_core(root: &Path) -> Result<()> {
         || patched_mutex.contains("tv_nsec = 100'000")
     {
         return Err("Darwin mutex parking adaptation is missing".into());
+    }
+    // Every other product TU inlines these headers from the runtime-common
+    // shadow; both must carry the same Darwin lock contract.
+    let common_runtime = runtime_bootstrap::prepare_runtime_shadow(root)?;
+    for header in ["base/mutex.h", "base/mutex-inl.h"] {
+        if fs::read(patched_runtime.join(header))? != fs::read(common_runtime.join(header))? {
+            return Err(format!(
+                "runtime-core and runtime-common disagree on {header}; apply the same mutex patches"
+            )
+            .into());
+        }
     }
 
     let includes = [

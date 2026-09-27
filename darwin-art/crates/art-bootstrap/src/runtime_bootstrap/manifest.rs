@@ -4,9 +4,14 @@
 //! compiler orchestration cannot silently change which upstream files are
 //! copied or patched.
 
-pub(super) const RUNTIME_SHADOW_IDENTITY_VERSION: &str = "runtime-shadow-v50";
+pub(super) const RUNTIME_SHADOW_IDENTITY_VERSION: &str = "runtime-shadow-v51";
 
 pub(super) const PATCHED_RUNTIME_SOURCES: &[&str] = &[
+    // The Darwin mutex/monitor lock contract. These TUs inline mutex-inl.h;
+    // they must see the same text as runtime-core, which compiles mutex.cc.
+    "base/mutex.h",
+    "base/mutex-inl.h",
+    "base/mutex.cc",
     "runtime.cc",
     "art_method.h",
     "art_method.cc",
@@ -179,6 +184,12 @@ pub(super) const PATCHED_RUNTIME_PATCHES: &[&str] = &[
     "patches/art/0190-darwin-runtime-start-boot-native-provider.patch",
     "patches/art/0191-darwin-native-client-visibility.patch",
     "patches/art/0193-darwin-shutdown-unregister-readiness.patch",
+    // The Darwin mutex/monitor lock contract, as runtime-core applies it
+    // (runtime_art/foundation.rs); no other patch here touches these files.
+    "patches/art/0004-darwin-uncontended-monitor-lock.patch",
+    "patches/art/0004b-darwin-cross-thread-monitor-lock.patch",
+    "patches/art/0078-darwin-pthread-empty-checkpoints.patch",
+    "patches/art/0198-darwin-mutex-parking.patch",
 ];
 
 #[cfg(test)]
