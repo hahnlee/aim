@@ -1,0 +1,17 @@
+[package]
+license.workspace = true
+name = "darwin-linux-abi"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Linux arm64 syscall layer that runs original Android ELF programs in-process on Darwin (ADR 0012)"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "linux-run"
+path = "src/bin/linux-run.rs"
+
+[dependencies]
+libc = "0.2"

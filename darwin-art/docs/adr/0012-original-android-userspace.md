@@ -101,6 +101,26 @@ of our own.
   - `clone`-created threads and signal delivery with Linux contexts.
   - The cost of a redirected syscall.
 
+## P0 findings (2026-09-27)
+
+- **x18:** Darwin zeroes x18 on every syscall, yield and signal, and on about
+  1% of preemptions. The original libc, libart, libbinder, libutils,
+  libbinder_ndk and linker64 contain no shadow-call-stack instructions, so
+  this only matters for a binary that uses x18. A full-image scan settles it.
+- **TPIDR_EL0 (bionic's thread pointer):** not preserved. Darwin writes a
+  per-CPU value there on context switch. At load time, alongside `svc #0`,
+  `mrs`/`msr tpidr_el0` are rewritten to load and store a per-thread slot:
+  0.9 ns against 0.3 ns native.
+- **Syscall redirection:** each `svc #0` becomes a `b` to a per-site stub
+  within ±128 MiB. x30 is kept, as Linux does, and x18 is never used. A `brk`
+  plus SIGTRAP path covers sites out of range. The boundary costs about 18 ns
+  per call; a syscall that enters the Darwin kernel costs about 23 ns more
+  than natively. Code mapped executable later is rewritten the same way.
+- **First run:** the original `linker64` runs on the syscall layer
+  (`crates/darwin-linux-abi`, `linux-run`). It loads the image's libraries
+  through the original linker configuration and runs the original
+  `linkerconfig` binary through libc initialization and `main`.
+
 ## Phases
 
 | Phase | Target |
