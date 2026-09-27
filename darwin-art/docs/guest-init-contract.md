@@ -297,9 +297,17 @@ emulates the device.
   generated from `/apex/*/apex_manifest.pb`. Each package's partition comes
   from the partition `apex` directories, and it drives vendor-APEX
   subcontexts and linkerconfig.
-  - `start apexd` sets `apexd.status=activated`.
+  - The first `start apexd` sets `apexd.status=activated` and
+    `apex.all.ready=true`. Later starts (a lazy `aidl/apexservice`
+    request) change nothing: `apexservice` is not served.
   - `apexd-snapshotde` sets `ready`.
-  - `apexd-bootstrap` is a no-op.
+  - `apexd-bootstrap` is a no-op. `perform_apex_config --bootstrap` loads
+    the scripts of the APEXes whose manifest sets `vendorBootstrap`, which
+    apexd would activate then; the others' scripts load at
+    `perform_apex_config`.
+- **Image paths.** guest-init reads the image (scripts, `build.prop`,
+  property contexts) with its symlinks resolved relative to the guest root,
+  as `linux-run` does.
 - **linkerconfig.** `perform_apex_config` and `update_linker_config` run the
   original `/apex/com.android.runtime/bin/linkerconfig --target
   /linkerconfig` as root through `linux-run`, and wait for it.
@@ -322,3 +330,5 @@ emulates the device.
   init would do: `critical process 'servicemanager' exited 4 times before
   boot completed`.
 - Tracked in #174.
+
+The current state of the boot is in [boot-status.md](boot-status.md).

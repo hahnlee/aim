@@ -83,6 +83,9 @@ const PR_GET_KEEPCAPS: u64 = 7;
 const PR_SET_KEEPCAPS: u64 = 8;
 const PR_SET_NAME: u64 = 15;
 const PR_GET_NAME: u64 = 16;
+const PR_GET_SECCOMP: u64 = 21;
+const PR_SET_SECCOMP: u64 = 22;
+const SECCOMP_MODE_FILTER: u64 = 2;
 const PR_GET_TIMERSLACK: u64 = 30;
 const PR_SET_TIMERSLACK: u64 = 29;
 const PR_SET_NO_NEW_PRIVS: u64 = 38;
@@ -96,6 +99,7 @@ static KEEPCAPS: AtomicU64 = AtomicU64::new(0);
 static DUMPABLE: AtomicU64 = AtomicU64::new(1);
 /// Linux's default timer slack (50 us).
 static TIMERSLACK: AtomicU64 = AtomicU64::new(50_000);
+static SECCOMP: AtomicU64 = AtomicU64::new(0);
 
 pub fn prctl(a: [u64; 6]) -> i64 {
     if let Some(r) = super::cred::prctl(a) {
@@ -129,6 +133,14 @@ pub fn prctl(a: [u64; 6]) -> i64 {
             0
         }
         PR_GET_TIMERSLACK => TIMERSLACK.load(Relaxed) as i64,
+        // minijail installs a filter in the media services and aborts when
+        // it cannot. Darwin has no seccomp: the filter is accepted and not
+        // enforced.
+        PR_SET_SECCOMP if a[1] == SECCOMP_MODE_FILTER => {
+            SECCOMP.store(SECCOMP_MODE_FILTER, Relaxed);
+            0
+        }
+        PR_GET_SECCOMP => SECCOMP.load(Relaxed) as i64,
         PR_SET_NAME => {
             // SAFETY: guest string (at most 16 bytes used).
             let s = unsafe { crate::sys::guest_cstr(a[1]) };

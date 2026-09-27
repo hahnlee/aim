@@ -251,7 +251,10 @@ impl BinderFile {
         mem: &mut dyn UserMemory,
     ) -> Result<(), Errno> {
         let size = ioc_size(cmd);
-        let reads_arg = cmd >> 30 & 1 != 0;
+        // binder_ioctl never reads the argument of these; libbinder's
+        // thread destructor passes 0 for BINDER_THREAD_EXIT.
+        let ignores_arg = matches!(cmd, BINDER_THREAD_EXIT | BINDER_SET_CONTEXT_MGR);
+        let reads_arg = cmd >> 30 & 1 != 0 && !ignores_arg;
         let writes_arg = cmd >> 31 != 0;
         let mut io = Ioctl {
             cmd,

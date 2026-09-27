@@ -108,6 +108,21 @@ pub fn run(opts: RunOptions) -> String {
         Ok(r) => r,
         Err(e) => return format!("{}: cannot resolve (errno {e})", opts.program),
     };
+    // A script started directly, as init execs otapreopt_slot, runs its
+    // interpreter as binfmt_script would.
+    let mut argv: Vec<std::ffi::CString> = opts
+        .argv
+        .iter()
+        .map(|a| std::ffi::CString::new(a.clone()).unwrap_or_default())
+        .collect();
+    if argv.is_empty() {
+        argv.push(std::ffi::CString::default());
+    }
+    let (resolved, argv) = match sys::interpret_script(resolved, opts.program.as_bytes(), argv) {
+        Ok(r) => r,
+        Err(e) => return format!("{}: cannot execute (errno {})", opts.program, -e),
+    };
+    let argv: Vec<Vec<u8>> = argv.into_iter().map(|a| a.into_bytes()).collect();
     let program = match loader::load_elf(&resolved.host, &resolved.guest) {
         Ok(i) => i,
         Err(e) => return e,
@@ -139,9 +154,9 @@ pub fn run(opts: RunOptions) -> String {
     }
     sys::init_brk(program.end);
     let sp = match loader::build_stack(&loader::StackInputs {
-        argv: &opts.argv,
+        argv: &argv,
         envp: &opts.envp,
-        execfn: opts.execfn.as_deref().unwrap_or(resolved.guest.as_bytes()),
+        execfn: opts.execfn.as_deref().unwrap_or(opts.program.as_bytes()),
         program: &program,
         interp_base,
     }) {

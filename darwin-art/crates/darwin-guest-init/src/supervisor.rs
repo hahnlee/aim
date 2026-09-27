@@ -832,9 +832,13 @@ impl Supervisor {
         (due, next)
     }
 
-    /// Kills every running service (shutdown).
+    /// Kills every running service (shutdown). They are stopped, as init's
+    /// shutdown stops them, so their exits run no `onrestart` and nothing
+    /// restarts.
     pub fn kill_all(&mut self, launcher: &mut dyn Launcher) {
-        for record in self.records.values() {
+        for record in self.records.values_mut() {
+            record.flags |= flags::DISABLED;
+            record.flags &= !flags::RESTARTING;
             if let Some(pid) = record.pid {
                 launcher.kill_group(pid, libc::SIGKILL);
             }

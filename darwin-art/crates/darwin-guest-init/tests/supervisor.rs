@@ -194,6 +194,28 @@ fn start_and_stop_publish_init_svc() {
 }
 
 #[test]
+fn shutdown_kill_runs_no_onrestart() {
+    let mut f = fixture("sv-shutdown");
+    f.start("svc").unwrap();
+    f.events();
+    f.supervisor.kill_all(&mut f.launcher);
+    for (pid, exit) in f.launcher.reap() {
+        f.reap(pid, exit);
+    }
+    let events = f.events();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, SupervisorEvent::OnRestart { .. }))
+    );
+    assert_eq!(f.props["init.svc.svc"], "stopped");
+    let (due, _) = f
+        .supervisor
+        .process_actions(&mut f.launcher, f.now + Duration::from_secs(60));
+    assert!(due.is_empty());
+}
+
+#[test]
 fn crash_restarts_after_restart_period_and_runs_onrestart() {
     let mut f = fixture("sv-crash");
     f.start("svc").unwrap();

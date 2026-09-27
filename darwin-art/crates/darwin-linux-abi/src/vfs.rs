@@ -137,6 +137,19 @@ pub fn runtime_dir() -> Option<&'static Path> {
     VFS.get()?.runtime.as_deref()
 }
 
+/// The path map's directory entries (its "mounts"), shortest guest path
+/// first; single-file entries are left out.
+pub fn mount_points() -> Vec<(String, Area)> {
+    let mut out: Vec<(String, Area)> = vfs()
+        .mounts
+        .iter()
+        .filter(|m| m.host.is_dir())
+        .map(|m| (m.guest.clone(), m.area))
+        .collect();
+    out.reverse();
+    out
+}
+
 pub fn cwd() -> String {
     vfs().cwd.lock().unwrap().clone()
 }

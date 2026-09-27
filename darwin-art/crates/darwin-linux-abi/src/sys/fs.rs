@@ -414,6 +414,13 @@ fn put_stat(st: &libc::stat, out: u64) {
 
 /// Host stat of an fd, with the guest's ownership view.
 fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
+    // A synthesized /proc or /sys directory reports what its path does
+    // (bionic's realpath compares the two).
+    if let Some(guest) = dir::synthesized_path(fd)
+        && let Some(s) = procfs::stat(&guest, true)
+    {
+        return s.map_err(|e| -(e as i64));
+    }
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: stat buffer on our stack.
     if unsafe { libc::fstat(fd, &mut st) } < 0 {

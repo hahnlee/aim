@@ -1,9 +1,11 @@
-//! Dry-run boots: the upstream fixture image always, and the full pinned
-//! Android 16 image when it has been extracted on this machine.
+//! Dry-run boots: the upstream fixture image always, and the derived image
+//! of the full pinned Android 16 image when that has been extracted and the
+//! overlay's sources are built (tools/build-vendor-hals.sh) on this machine.
 
 mod common;
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use darwin_android_init::rc::read_apex_info_list;
 use darwin_guest_init::fsops::Effect;
@@ -13,6 +15,21 @@ const REAL_IMAGE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../_build/android16-image-full"
 );
+
+/// The derived image of `image/overlay.toml`, assembled (APFS clones) once
+/// per overlay identity, or why it cannot be.
+fn derived_image() -> Result<PathBuf, String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let original = Path::new(REAL_IMAGE)
+        .canonicalize()
+        .map_err(|e| format!("{REAL_IMAGE}: {e}"))?;
+    let (_, plan) = darwin_android_image::load(&root.join("image/overlay.toml"), &original, &root)
+        .map_err(|problems| format!("{problems:?}"))?;
+    let identity = darwin_android_image::identity::compute("boot-test-original", &plan);
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("boot-derived-image");
+    darwin_android_image::assemble(&plan, &original, &identity, &out)?;
+    Ok(out)
+}
 
 fn launched_pid(report: &BootReport, service: &str) -> Option<u32> {
     report
@@ -90,7 +107,29 @@ fn fixture_image_dry_run_boot() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// The full boot of the pinned image as a dry run. Prints the statistics.
+#[test]
+fn excluded_services_are_not_started() {
+    let root = common::temp_dir("boot-exclude");
+    let image = common::fixture_image(&root);
+    let mut options = BootOptions::new(image, root.join("data"), RunMode::DryRun);
+    options.exclude = BTreeSet::from(["logd".to_string()]);
+    let mut boot = Boot::prepare(options).unwrap();
+    let report = boot.run().clone();
+    assert!(launched_pid(&report, "logd").is_none());
+    assert!(launched_pid(&report, "servicemanager").is_some());
+    assert!(
+        report
+            .commands
+            .iter()
+            .flat_map(|c| &c.effects)
+            .any(|e| matches!(e, Effect::Skipped(reason) if reason == "'logd' excluded"))
+    );
+    assert_eq!(boot.property("init.svc.logd"), None);
+    common::make_writable(&root);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The full boot of the derived image as a dry run. Prints the statistics.
 #[test]
 fn real_image_dry_run_boot() {
     if !Path::new(REAL_IMAGE)
@@ -100,13 +139,16 @@ fn real_image_dry_run_boot() {
         eprintln!("{REAL_IMAGE} not extracted on this machine; skipping");
         return;
     }
+    let image = match derived_image() {
+        Ok(image) => image,
+        Err(error) => {
+            eprintln!("derived image unavailable ({error}); skipping");
+            return;
+        }
+    };
     let root = common::temp_dir("boot-real");
-    let mut boot = Boot::prepare(BootOptions::new(
-        REAL_IMAGE.into(),
-        root.join("data"),
-        RunMode::DryRun,
-    ))
-    .unwrap();
+    let mut boot =
+        Boot::prepare(BootOptions::new(image, root.join("data"), RunMode::DryRun)).unwrap();
     let report = boot.run().clone();
     eprintln!("{}", report.summary());
     for (reason, count) in report.noop_reasons() {
@@ -139,6 +181,9 @@ fn real_image_dry_run_boot() {
         "hwservicemanager",
         "surfaceflinger",
         "zygote",
+        // class early_hal from a vendorBootstrap APEX: parsed at
+        // `perform_apex_config --bootstrap`, before `class_start early_hal`.
+        "vendor.gatekeeper_nonsecure",
     ] {
         assert!(
             launched.contains(service),
@@ -149,7 +194,17 @@ fn real_image_dry_run_boot() {
     assert!(!launched.contains("ueventd"));
     assert!(!launched.contains("apexd"));
     assert_eq!(boot.property("apexd.status").as_deref(), Some("ready"));
+    // libvintf reads the vendor APEXes' VINTF fragments only then.
     assert_eq!(boot.property("apex.all.ready").as_deref(), Some("true"));
+    // A lazy `aidl/apexservice` start does not take the status back.
+    boot.executor.start_service("apexd").unwrap();
+    assert_eq!(boot.property("apexd.status").as_deref(), Some("ready"));
+    // The device: init.darwin.rc, not the emulator's init.ranchu.rc.
+    assert_eq!(boot.property("ro.hardware").as_deref(), Some("darwin"));
+    assert_eq!(boot.property("ro.hardware.egl").as_deref(), Some("darwin"));
+    assert_eq!(boot.property("ro.sf.lcd_density").as_deref(), Some("320"));
+    assert!(!launched.contains("qemu-props"));
+    assert!(!launched.contains("goldfish-logcat"));
     assert_eq!(
         boot.property("ro.crypto.state").as_deref(),
         Some("unencrypted")

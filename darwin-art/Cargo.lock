@@ -456,6 +456,7 @@ dependencies = [
 name = "darwin-guest-init"
 version = "0.1.0"
 dependencies = [
+ "darwin-android-image",
  "darwin-android-init",
  "darwin-binder-host",
  "libc",

@@ -50,7 +50,7 @@ fn scripts() -> InitScripts {
     parser.parse_data("/system/etc/init/hw/init.rc", SCRIPT.as_bytes());
     InitScripts {
         boot: parser.finish(),
-        apex: Default::default(),
+        ..Default::default()
     }
 }
 

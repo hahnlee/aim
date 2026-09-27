@@ -44,7 +44,7 @@ use crate::errno::ENOSYS;
 pub use binder::init as init_binder;
 pub use copies::note as note_copy;
 pub use dir::synthesized_path as synthesized_dir_path;
-pub use exec::{ExecState, init as init_exec};
+pub use exec::{ExecState, init as init_exec, interpret as interpret_script};
 pub use fdtab::{after_fork_child as fds_after_fork_child, init as init_fds};
 pub use mem::init_brk;
 pub use mem::run_deferred_unmaps;

@@ -30,21 +30,37 @@ pub struct ApexEntry {
     pub version_code: i64,
     pub version_name: String,
     pub partition: String,
+    /// apexd activates it in bootstrap mode, before init's early-init
+    /// `perform_apex_config --bootstrap`.
+    pub vendor_bootstrap: bool,
 }
 
-/// `ApexManifest` fields 1 (`name`), 2 (`version`) and 5 (`versionName`).
-pub fn parse_apex_manifest(bytes: &[u8]) -> Result<(String, i64, String), String> {
+/// The `ApexManifest` fields apexd reports or acts on.
+#[derive(Debug, Default)]
+pub struct Manifest {
+    /// Field 1.
+    pub name: String,
+    /// Field 2.
+    pub version: i64,
+    /// Field 5.
+    pub version_name: String,
+    /// Field 15, `vendorBootstrap`.
+    pub vendor_bootstrap: bool,
+}
+
+pub fn parse_apex_manifest(bytes: &[u8]) -> Result<Manifest, String> {
     let mut reader = ProtoReader { bytes, at: 0 };
-    let (mut name, mut version, mut version_name) = (String::new(), 0i64, String::new());
+    let mut manifest = Manifest::default();
     while let Some((field, wire)) = reader.key()? {
         match (field, wire) {
-            (1, 2) => name = String::from_utf8_lossy(reader.bytes()?).into_owned(),
-            (2, 0) => version = reader.varint()? as i64,
-            (5, 2) => version_name = String::from_utf8_lossy(reader.bytes()?).into_owned(),
+            (1, 2) => manifest.name = String::from_utf8_lossy(reader.bytes()?).into_owned(),
+            (2, 0) => manifest.version = reader.varint()? as i64,
+            (5, 2) => manifest.version_name = String::from_utf8_lossy(reader.bytes()?).into_owned(),
+            (15, 0) => manifest.vendor_bootstrap = reader.varint()? != 0,
             _ => reader.skip(wire)?,
         }
     }
-    Ok((name, version, version_name))
+    Ok(manifest)
 }
 
 /// Whether a package file name belongs to the module: `com.android.art`
@@ -97,10 +113,14 @@ pub fn scan(image: &ImageRoot) -> Vec<ApexEntry> {
         let Ok(bytes) = image.read(&format!("/apex/{dir}/apex_manifest.pb")) else {
             continue;
         };
-        let Ok((name, version_code, version_name)) = parse_apex_manifest(&bytes) else {
+        let Ok(manifest) = parse_apex_manifest(&bytes) else {
             continue;
         };
-        let module_name = if name.is_empty() { dir.clone() } else { name };
+        let module_name = if manifest.name.is_empty() {
+            dir.clone()
+        } else {
+            manifest.name
+        };
         let package = packages
             .iter()
             .filter_map(|(path, partition)| {
@@ -116,9 +136,10 @@ pub fn scan(image: &ImageRoot) -> Vec<ApexEntry> {
         out.push(ApexEntry {
             module_name,
             module_path,
-            version_code,
-            version_name,
+            version_code: manifest.version,
+            version_name: manifest.version_name,
             partition,
+            vendor_bootstrap: manifest.vendor_bootstrap,
         });
     }
     out
@@ -160,6 +181,18 @@ pub fn vendor_apexes(entries: &[ApexEntry]) -> Vec<String> {
         .collect()
 }
 
+/// The APEXes whose scripts `perform_apex_config --bootstrap` loads: the
+/// vendor APEXes apexd activates in bootstrap mode (`vendorBootstrap`, for
+/// example the gatekeeper HAL of class `early_hal`). apexd's own bootstrap
+/// list (runtime, i18n, tzdata) carries no scripts.
+pub fn bootstrap_apexes(entries: &[ApexEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| e.vendor_bootstrap)
+        .map(|e| e.module_name.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,9 +204,14 @@ mod tests {
             0x0a, 0x0f, b'c', b'o', b'm', b'.', b'a', b'n', b'd', b'r', b'o', b'i', b'd', b'.',
             b'a', b'r', b't', 0x10, 0x9f, 0x96, 0xf3, 0xab, 0x01,
         ];
-        let (name, version, _) = parse_apex_manifest(&manifest).unwrap();
-        assert_eq!(name, "com.android.art");
-        assert_eq!(version, 360_499_999);
+        let parsed = parse_apex_manifest(&manifest).unwrap();
+        assert_eq!(parsed.name, "com.android.art");
+        assert_eq!(parsed.version, 360_499_999);
+        assert!(!parsed.vendor_bootstrap);
+        // com.android.hardware.gatekeeper's: version 1, vendorBootstrap.
+        let gatekeeper = [0x0a, 0x02, b'g', b'k', 0x10, 0x01, 0x78, 0x01];
+        let parsed = parse_apex_manifest(&gatekeeper).unwrap();
+        assert!(parsed.vendor_bootstrap && parsed.version == 1);
         assert!(package_matches(
             "com.android.art",
             "com.google.android.art.capex"
@@ -204,6 +242,7 @@ mod tests {
             version_code: 1,
             version_name: String::new(),
             partition: "VENDOR".into(),
+            vendor_bootstrap: false,
         }]);
         let parsed = read_apex_info_list(&xml);
         assert_eq!(parsed[0].module_name, "com.android.hardware.power");

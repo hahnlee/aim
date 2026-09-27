@@ -137,6 +137,7 @@ pub struct ActionManager {
     waiting_for: Option<(String, String)>,
     exec_running: bool,
     services: Vec<Service>,
+    pending_bootstrap_apex: Option<ParsedScripts>,
     pending_apex: Option<ParsedScripts>,
     vendor_api_level: u32,
     shutdown: Option<String>,
@@ -156,6 +157,7 @@ impl ActionManager {
             waiting_for: None,
             exec_running: false,
             services: scripts.boot.services,
+            pending_bootstrap_apex: Some(scripts.bootstrap_apex),
             pending_apex: Some(scripts.apex),
             vendor_api_level,
             shutdown: None,
@@ -509,8 +511,13 @@ impl ActionManager {
             Command::Init(InitAction::EnablePropertyTrigger) => {
                 self.property_triggers_enabled = true;
             }
-            Command::PerformApexConfig { bootstrap: false } => {
-                if let Some(apex) = self.pending_apex.take() {
+            Command::PerformApexConfig { bootstrap } => {
+                let pending = if *bootstrap {
+                    self.pending_bootstrap_apex.take()
+                } else {
+                    self.pending_apex.take()
+                };
+                if let Some(apex) = pending {
                     self.services = apex.services;
                     for action in apex.actions {
                         self.add_action(action, false, None);

@@ -4,6 +4,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Symlinks followed in one lookup, as Linux's `MAXSYMLINKS`.
+const MAX_SYMLINKS: usize = 40;
+
 /// A directory on the host that holds the guest's `/` (an extracted or
 /// derived system image). Every path this crate reads is a guest absolute
 /// path such as `/system/etc/init/hw/init.rc`.
@@ -22,8 +25,47 @@ impl ImageRoot {
     }
 
     /// Host path of a guest path. Relative guest paths are taken from `/`.
+    ///
+    /// Symlinks in the image are followed component by component relative
+    /// to the guest root, as for a process whose root is the image: a GSI's
+    /// `/system_ext -> /system/system_ext` stays inside the image instead of
+    /// naming the Mac's own `/system`.
     pub fn host_path(&self, guest: &str) -> PathBuf {
-        self.root.join(guest.trim_start_matches('/'))
+        let mut pending: Vec<String> = components(guest).rev().collect();
+        let mut done: Vec<String> = Vec::new();
+        let mut links = 0;
+        while let Some(component) = pending.pop() {
+            match component.as_str() {
+                "." => continue,
+                ".." => {
+                    done.pop();
+                    continue;
+                }
+                _ => done.push(component),
+            }
+            let host = self.join(&done);
+            let Ok(target) = fs::read_link(&host) else {
+                continue;
+            };
+            links += 1;
+            if links > MAX_SYMLINKS {
+                // The host call on the link reports the loop.
+                return host;
+            }
+            done.pop();
+            let target = target.to_string_lossy();
+            if target.starts_with('/') {
+                done.clear();
+            }
+            pending.extend(components(&target).rev());
+        }
+        self.join(&done)
+    }
+
+    fn join(&self, components: &[String]) -> PathBuf {
+        let mut path = self.root.clone();
+        path.extend(components);
+        path
     }
 
     pub fn read(&self, guest: &str) -> io::Result<Vec<u8>> {
@@ -63,5 +105,47 @@ impl ImageRoot {
             }
         }
         Ok(dirs)
+    }
+}
+
+fn components(path: &str) -> impl DoubleEndedIterator<Item = String> + '_ {
+    path.split('/')
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn symlinks_resolve_inside_the_image() {
+        let root = std::env::temp_dir().join(format!("image-root-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("system/system_ext/etc/init")).unwrap();
+        fs::create_dir_all(root.join("system/product/etc")).unwrap();
+        fs::write(root.join("system/system_ext/etc/init/a.rc"), "on boot\n").unwrap();
+        fs::write(root.join("system/product/etc/build.prop"), "ro.x=1\n").unwrap();
+        // A GSI's partition links: absolute, and relative through `..`.
+        symlink("/system/system_ext", root.join("system_ext")).unwrap();
+        symlink("../system/product", root.join("product")).unwrap();
+        symlink("/loop", root.join("loop")).unwrap();
+        let image = ImageRoot::new(&root);
+
+        assert_eq!(
+            image.host_path("/system_ext/etc/init/a.rc"),
+            root.join("system/system_ext/etc/init/a.rc")
+        );
+        assert_eq!(image.read("/product/etc/build.prop").unwrap(), b"ro.x=1\n");
+        assert!(image.is_dir("/system_ext/etc/init"));
+        assert_eq!(
+            image.regular_files("/system_ext/etc/init").unwrap(),
+            ["/system_ext/etc/init/a.rc"]
+        );
+        assert_eq!(image.subdirectories("/product").unwrap(), ["etc"]);
+        assert!(!image.exists("/system_ext/missing"));
+        assert!(!image.exists("/loop/x"));
+        fs::remove_dir_all(&root).unwrap();
     }
 }

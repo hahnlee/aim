@@ -56,8 +56,15 @@ fn lookup(fd: i32) -> Option<BinderFile> {
 
 struct Guest;
 
+/// Nothing maps below 4 GiB on macOS arm64 (`__PAGEZERO`), so a pointer
+/// there, null included, is EFAULT as copy_from_user would make it.
+fn check_user(address: u64) -> Result<(), i32> {
+    if address < 1 << 32 { Err(14) } else { Ok(()) }
+}
+
 impl UserMemory for Guest {
     fn read(&mut self, address: u64, len: usize) -> Result<Vec<u8>, i32> {
+        check_user(address)?;
         let mut v = vec![0u8; len];
         // SAFETY: guest memory the guest passed to the ioctl.
         unsafe { std::ptr::copy_nonoverlapping(address as *const u8, v.as_mut_ptr(), len) };
@@ -65,6 +72,7 @@ impl UserMemory for Guest {
     }
 
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), i32> {
+        check_user(address)?;
         // SAFETY: as above.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), address as *mut u8, data.len()) };
         Ok(())

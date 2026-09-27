@@ -254,3 +254,38 @@ fn transaction_with_fd_readiness_reply_and_release() {
         0x99
     );
 }
+
+/// Guest memory where address 0 faults, as it does in a real process.
+struct NullFaults;
+
+impl UserMemory for NullFaults {
+    fn read(&mut self, address: u64, len: usize) -> Result<Vec<u8>, Errno> {
+        if address == 0 {
+            return Err(14); // EFAULT
+        }
+        Own.read(address, len)
+    }
+
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Errno> {
+        if address == 0 {
+            return Err(14);
+        }
+        Own.write(address, data)
+    }
+}
+
+#[test]
+fn thread_exit_ignores_its_argument() {
+    let name = format!(
+        "dev.darwinart.test.binder-host.{}.{}",
+        std::process::id(),
+        NAME.fetch_add(1, Ordering::Relaxed)
+    );
+    let _server = Server::start(&name).unwrap();
+    let client = Client::connect(&name).unwrap();
+    let file = open(&client, 1000, "u:r:keystore:s0");
+    write_read(&file, 300, &[], false).unwrap();
+    // libbinder's IPCThreadState::threadDestructor.
+    file.ioctl(300, BINDER_THREAD_EXIT, 0, &mut NullFaults)
+        .unwrap();
+}

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -51,6 +52,8 @@ pub struct BootOptions {
     pub runtime: Option<PathBuf>,
     pub mode: RunMode,
     pub only: Option<BTreeSet<String>>,
+    /// Services (and `exec` programs) not to start.
+    pub exclude: BTreeSet<String>,
     /// `linux-run`; defaults to the one next to the current executable.
     pub linux_run: Option<PathBuf>,
     /// `linux-run --gpu` and `--display` for every service.
@@ -61,8 +64,8 @@ pub struct BootOptions {
     pub androidboot: Vec<(String, String)>,
     /// Run mode: stop everything after this long.
     pub timeout: Option<Duration>,
-    /// Run mode with `--only`: a `wait_for_prop` or `exec` nobody selected
-    /// can satisfy is simulated after this long.
+    /// Run mode with `--only` or `--exclude`: a `wait_for_prop` or `exec`
+    /// nobody selected can satisfy is simulated after this long.
     pub simulate_after: Duration,
 }
 
@@ -74,16 +77,14 @@ impl BootOptions {
             runtime: None,
             mode,
             only: None,
+            exclude: BTreeSet::new(),
             linux_run: None,
             gpu: None,
             display: None,
             trace: false,
-            androidboot: vec![
-                ("hardware".to_string(), "ranchu".to_string()),
-                // init.ranchu.rc: ro.hardware.egl, the GLES driver the
-                // original libEGL loads (/vendor/lib64/egl/libGLES_darwin.so).
-                ("hardwareegl".to_string(), "darwin".to_string()),
-            ],
+            // The device: init.rc imports init.darwin.rc and vold reads
+            // fstab.darwin (image/overlay.toml).
+            androidboot: vec![("hardware".to_string(), "darwin".to_string())],
             timeout: None,
             simulate_after: Duration::from_secs(2),
         }
@@ -206,6 +207,15 @@ impl BootReport {
     }
 }
 
+/// Set from a signal handler: the running boot stops its services and
+/// returns, as at its timeout.
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Asks the running boot to stop. Async-signal-safe.
+pub fn request_stop() {
+    STOP_REQUESTED.store(true, Ordering::Relaxed);
+}
+
 /// A prepared boot.
 pub struct Boot {
     pub options: BootOptions,
@@ -312,6 +322,7 @@ impl Boot {
             ids: &ids,
             vendor_api_level,
             vendor_apexes: Some(apex::vendor_apexes(&apexes)),
+            bootstrap_apexes: apex::bootstrap_apexes(&apexes),
         }
         .load();
         for diagnostic in scripts
@@ -381,6 +392,7 @@ impl Boot {
         let props = Rc::new(RefCell::new(properties));
         let mut executor =
             GuestExecutor::new(props.clone(), launcher, planner, fs, options.only.clone());
+        executor.exclude = options.exclude.clone();
         executor.sync_services(manager.services());
 
         let (events, sockets) = if options.mode == RunMode::Run {
@@ -588,6 +600,7 @@ impl Boot {
         let deadline = self.options.timeout.map(|t| Instant::now() + t);
         let dry = self.options.mode == RunMode::DryRun;
         let mut blocked_since: Option<Instant> = None;
+        let mut idle_logged = false;
         let mut steps = 0usize;
         loop {
             steps += 1;
@@ -597,6 +610,10 @@ impl Boot {
             }
             if deadline.is_some_and(|d| Instant::now() >= d) {
                 self.report.log.push("timeout reached".to_string());
+                break;
+            }
+            if STOP_REQUESTED.load(Ordering::Relaxed) {
+                self.report.log.push("stop requested".to_string());
                 break;
             }
             self.pump_outbox();
@@ -623,6 +640,14 @@ impl Boot {
                 Step::Idle => {
                     if dry {
                         break;
+                    }
+                    if !idle_logged {
+                        idle_logged = true;
+                        let elapsed = self.executor.planner.boot_epoch.elapsed();
+                        self.report.log.push(format!(
+                            "boot queue first idle after {:.2} s",
+                            elapsed.as_secs_f64()
+                        ));
                     }
                     None
                 }
@@ -652,17 +677,18 @@ impl Boot {
             // grace period.
             if let Some((kind, name, value)) = &wait {
                 let since = *blocked_since.get_or_insert_with(Instant::now);
-                if self.options.only.is_some() && since.elapsed() >= self.options.simulate_after {
+                let selected = self.options.only.is_some() || !self.options.exclude.is_empty();
+                if selected && since.elapsed() >= self.options.simulate_after {
                     blocked_since = None;
                     if *kind == "property" {
                         self.report.log.push(format!(
-                            "--only: nothing selected sets {name}={value}; simulating it"
+                            "nothing selected sets {name}={value}; simulating it"
                         ));
                         self.simulate_property(name, value);
                     } else if let Some(pid) = self.executor.exec_pid {
                         self.report
                             .log
-                            .push(format!("--only: exec pid {pid} still running; not waiting"));
+                            .push(format!("exec pid {pid} still running; not waiting"));
                         self.manager.exec_finished();
                     }
                     continue;

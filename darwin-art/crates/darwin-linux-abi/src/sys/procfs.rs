@@ -70,6 +70,10 @@ fn fd_link(fd: i32) -> Option<String> {
     if let Some(n) = fdtab::anon_name(fd) {
         return Some(n);
     }
+    // A synthesized /proc or /sys directory: its host fd is the root.
+    if let Some(p) = super::dir::synthesized_path(fd) {
+        return Some(p);
+    }
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fstat into a local buffer.
     if unsafe { libc::fstat(fd, &mut st) } < 0 {
@@ -677,6 +681,8 @@ const PID_ENTRIES: &[(&str, u8)] = &[
     ("exe", dir::DT_LNK),
     ("fd", dir::DT_DIR),
     ("maps", dir::DT_REG),
+    ("mountinfo", dir::DT_REG),
+    ("mounts", dir::DT_REG),
     ("oom_score_adj", dir::DT_REG),
     ("root", dir::DT_LNK),
     ("stat", dir::DT_REG),
@@ -684,6 +690,61 @@ const PID_ENTRIES: &[(&str, u8)] = &[
     ("status", dir::DT_REG),
     ("task", dir::DT_DIR),
 ];
+
+/// The persistent areas of the guest-init contract (docs/guest-init-contract.md,
+/// section 2), which Android mounts from block devices; the other `rw` areas
+/// are per boot, as tmpfs.
+const BLOCK_MOUNTS: &[&str] = &["/data", "/metadata", "/cache"];
+
+/// The mount table: the read-only image at `/` and the path map's areas.
+/// Each is `(source, target, fstype, options)`.
+fn mount_table() -> Vec<(String, String, &'static str, &'static str)> {
+    let mut out = vec![("/dev/root".into(), "/".into(), "erofs", "ro,relatime")];
+    for (guest, area) in vfs::mount_points() {
+        let (source, fstype, options) = match (area, guest.as_str()) {
+            (vfs::Area::Kernfs, "/proc") => {
+                ("proc".into(), "proc", "rw,nosuid,nodev,noexec,relatime")
+            }
+            (vfs::Area::Kernfs, "/sys") => {
+                ("sysfs".into(), "sysfs", "rw,nosuid,nodev,noexec,relatime")
+            }
+            (vfs::Area::Writable, g) if BLOCK_MOUNTS.contains(&g) => (
+                format!("/dev/block/by-name{g}"),
+                "ext4",
+                "rw,nosuid,nodev,noatime",
+            ),
+            (vfs::Area::Writable, _) => ("tmpfs".into(), "tmpfs", "rw,nosuid,relatime"),
+            _ => continue,
+        };
+        out.push((source, guest, fstype, options));
+    }
+    out
+}
+
+/// `/proc/<pid>/mounts`, as fstab(5) lines.
+fn mounts() -> String {
+    mount_table()
+        .into_iter()
+        .map(|(source, target, fstype, options)| {
+            format!("{source} {target} {fstype} {options} 0 0\n")
+        })
+        .collect()
+}
+
+/// `/proc/<pid>/mountinfo` (proc(5)): `/` is mount 1 and the parent of the
+/// others.
+fn mountinfo() -> String {
+    mount_table()
+        .into_iter()
+        .enumerate()
+        .map(|(i, (source, target, fstype, options))| {
+            let id = i + 1;
+            let parent = if i == 0 { 0 } else { 1 };
+            let rw = options.split(',').next().unwrap_or("rw");
+            format!("{id} {parent} 0:{id} / {target} {options} - {fstype} {source} {rw}\n")
+        })
+        .collect()
+}
 
 /// Nodes under `/proc/<p>/` (`rest` is the path after it).
 fn pid_node(p: i32, rest: &str, thread: bool) -> Option<Node> {
@@ -707,6 +768,8 @@ fn pid_node(p: i32, rest: &str, thread: bool) -> Option<Node> {
         "status" => Node::File(status(p)?.into_bytes()),
         "statm" => Node::File(statm(p)?.into_bytes()),
         "maps" if me => Node::File(maps().into_bytes()),
+        "mounts" => Node::File(mounts().into_bytes()),
+        "mountinfo" => Node::File(mountinfo().into_bytes()),
         "oom_score_adj" if me => {
             Node::File(format!("{}\n", super::cred::oom_score_adj()).into_bytes())
         }
@@ -760,6 +823,7 @@ pub fn node(guest: &str) -> Option<Node> {
                     ("filesystems", dir::DT_REG),
                     ("loadavg", dir::DT_REG),
                     ("meminfo", dir::DT_REG),
+                    ("mounts", dir::DT_LNK),
                     ("stat", dir::DT_REG),
                     ("sys", dir::DT_DIR),
                     ("uptime", dir::DT_REG),
@@ -773,6 +837,7 @@ pub fn node(guest: &str) -> Option<Node> {
                 Node::Dir(e)
             }
             "self" if tail.is_empty() => Node::Link(me.to_string()),
+            "mounts" if tail.is_empty() => Node::Link("self/mounts".into()),
             "thread-self" if tail.is_empty() => {
                 Node::Link(format!("{me}/task/{}", super::process::gettid()))
             }
@@ -1021,8 +1086,12 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
             } else {
                 format!("/proc/{t}")
             };
-            if let Some(Node::Dir(list)) = node(&canonical(&target)) {
+            let linked = node(&canonical(&target));
+            if let Some(Node::Dir(list)) = linked {
                 dir_fd(&canonical(&target), list, cloexec)
+            } else if let Some(Node::File(data)) = linked.filter(|_| !write) {
+                // /proc/mounts -> self/mounts.
+                content_fd(&data, cloexec)
             } else {
                 let r = match vfs::resolve(vfs::LINUX_AT_FDCWD, target.as_bytes(), true) {
                     Ok(r) => r,

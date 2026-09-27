@@ -8,9 +8,9 @@
 //! - `ueventd`: no device nodes are created; `ro.cold_boot_done` is set
 //!   before the boot starts.
 //! - `apexd`, `apexd-bootstrap`, `apexd-snapshotde`: APEXes are
-//!   pre-flattened; `apexd.status` goes to `activated` when `apexd` would
-//!   start and to `ready` (with `apex.all.ready`) when `apexd-snapshotde`
-//!   would run.
+//!   pre-flattened; `apexd.status` goes to `activated` (with
+//!   `apex.all.ready`) when `apexd` would first start and to `ready` when
+//!   `apexd-snapshotde` would run.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, VecDeque};
@@ -73,6 +73,9 @@ pub struct GuestExecutor {
     pub fs: FsOps,
     /// `--only`: services outside the set are not started.
     pub only: Option<BTreeSet<String>>,
+    /// `--exclude`: services (and `exec` programs) in the set are not
+    /// started.
+    pub exclude: BTreeSet<String>,
     pub outbox: VecDeque<Outgoing>,
     pub launches: Vec<LaunchRecord>,
     /// Effects of the command being executed.
@@ -103,6 +106,7 @@ impl GuestExecutor {
             planner,
             fs,
             only,
+            exclude: BTreeSet::new(),
             outbox: VecDeque::new(),
             launches: Vec::new(),
             current: Vec::new(),
@@ -145,8 +149,16 @@ impl GuestExecutor {
         Ok(())
     }
 
-    fn filtered(&self, name: &str) -> bool {
-        self.only.as_ref().is_some_and(|only| !only.contains(name))
+    /// Why `--only`/`--exclude` keep a service or `exec` program from
+    /// starting.
+    fn filtered(&self, name: &str) -> Option<String> {
+        if self.exclude.contains(name) {
+            Some(format!("'{name}' excluded"))
+        } else if self.only.as_ref().is_some_and(|only| !only.contains(name)) {
+            Some(format!("'{name}' not in --only"))
+        } else {
+            None
+        }
     }
 
     fn now() -> Instant {
@@ -181,18 +193,32 @@ impl GuestExecutor {
                 "apexd role: bootstrap APEXes are pre-flattened into the derived image".to_string(),
             )),
             "apexd" => {
+                // apexd's OnAllPackagesActivated. A later start (a lazy
+                // `aidl/apexservice` request) finds them activated or ready
+                // already and changes nothing, as apexd would not re-activate.
+                let status = self
+                    .props
+                    .borrow()
+                    .property("apexd.status")
+                    .unwrap_or_default();
+                if !status.is_empty() {
+                    return Some(Effect::NoOp(format!(
+                        "apexd role: APEXes are pre-flattened and apexd.status={status}; apexservice is not served"
+                    )));
+                }
                 let _ = self.set_property("apexd.status", "activated");
+                let _ = self.set_property("apex.all.ready", "true");
                 Some(Effect::Applied(
-                    "apexd role: APEXes are pre-flattened; apexd.status=activated".to_string(),
+                    "apexd role: APEXes are pre-flattened; apexd.status=activated, apex.all.ready=true"
+                        .to_string(),
                 ))
             }
             "apexd-snapshotde" => {
-                // apexd's OnAllPackagesReady: libvintf reads the vendor
-                // APEXes' manifest fragments only once apex.all.ready is set.
+                // apexd's OnAllPackagesReady (apex.all.ready was set when
+                // the packages were activated).
                 let _ = self.set_property("apexd.status", "ready");
-                let _ = self.set_property("apex.all.ready", "true");
                 Some(Effect::Applied(
-                    "apexd role: no DE snapshot to take; apexd.status=ready, apex.all.ready=true"
+                    "apexd role: no DE snapshot to take; apexd.status=ready"
                         .to_string(),
                 ))
             }
@@ -210,8 +236,8 @@ impl GuestExecutor {
                 "service '{name}' is not declared (hardware or feature not declared on this device)"
             )));
         }
-        if self.filtered(name) {
-            return Some(Effect::Skipped(format!("'{name}' not in --only")));
+        if let Some(reason) = self.filtered(name) {
+            return Some(Effect::Skipped(reason));
         }
         None
     }
@@ -363,7 +389,7 @@ impl GuestExecutor {
                     .reset(&name, self.launcher.as_mut(), &self.planner)
                     .map(|()| None),
                 _ => {
-                    if self.filtered(&name) || ROLE_SERVICES.contains(&name.as_str()) {
+                    if self.filtered(&name).is_some() || ROLE_SERVICES.contains(&name.as_str()) {
                         continue;
                     }
                     let props = self.props.clone();
@@ -395,13 +421,9 @@ impl GuestExecutor {
     fn exec(&mut self, spec: &ExecSpec, blocking: bool) -> Result<CommandFlow, String> {
         let name = self.supervisor.add_exec_service(spec, &self.planner.ids)?;
         let program = spec.args[0].rsplit('/').next().unwrap_or("").to_string();
-        if self
-            .only
-            .as_ref()
-            .is_some_and(|only| !only.contains(&program))
-        {
+        if let Some(reason) = self.filtered(&program) {
             self.supervisor.discard_temporary(&name);
-            self.effect(Effect::Skipped(format!("'{name}' not in --only")));
+            self.effect(Effect::Skipped(format!("{name}: {reason}")));
             return Ok(CommandFlow::Done);
         }
         let props = self.props.clone();

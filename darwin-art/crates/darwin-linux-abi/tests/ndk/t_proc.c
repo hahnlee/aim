@@ -1,6 +1,7 @@
 // /proc and /sys as bionic, ART and system_server read them.
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -172,6 +173,21 @@ static void proc_dirs(void) {
   }
   closedir(d);
   CHECK(tasks == 1);
+  // bionic's realpath reads the link of an O_PATH fd (Rust's inherited-fd
+  // scan of /proc/self/fd goes through it).
+  char real[PATH_MAX], want[64];
+  snprintf(want, sizeof want, "/proc/%d/fd", getpid());
+  CHECK(realpath("/proc/self/fd", real) != NULL && !strcmp(real, want));
+}
+
+// vold, netd and libprocessgroup read the mount table.
+static void mount_table(void) {
+  CHECK(slurp("/proc/mounts", big, sizeof big) > 0);
+  CHECK(!strncmp(big, "/dev/root / erofs ro,", 21));
+  CHECK(strstr(big, "\nproc /proc proc rw,") && strstr(big, " /data ext4 rw,") &&
+        strstr(big, "\ntmpfs /dev tmpfs rw,"));
+  CHECK(slurp("/proc/self/mountinfo", big, sizeof big) > 0 && !strncmp(big, "1 0 0:1 / / ro,", 15));
+  CHECK(strstr(big, " / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n") != NULL);
 }
 
 int main(int argc, char** argv) {
@@ -183,5 +199,6 @@ int main(int argc, char** argv) {
   RUN(fds_and_links);
   RUN(system_files);
   RUN(proc_dirs);
+  RUN(mount_table);
   DONE();
 }
