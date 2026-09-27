@@ -1,0 +1,41 @@
+# Derived system image overlay (docs/adr/0012-original-android-userspace.md,
+# "Derived system image").
+#
+# The derived image is the extracted original Android image plus exactly the
+# entries below. This file is the complete list of where we deviate from the
+# original; `android-image diff` prints it with sizes and reasons.
+#
+# Policy
+# - Prefer additions. We run the original userspace; our own pieces are added
+#   beside it, never patched into it.
+# - Our device's vendor partition lives under /vendor, as a device vendor's
+#   would: our HALs, the vintf manifest and the GPU libraries. Hardware the
+#   device does not have is not declared, so the original services take their
+#   no-HAL paths.
+# - Replacing or removing an original file is an exception. Each one is listed
+#   explicitly with a `reason` that says why no addition can do the job.
+#
+# Schema 1 (a strict subset of TOML; anything else is rejected)
+#
+#   [[add]]                     a file the original does not have
+#   path = "/vendor/..."        absolute guest path
+#   source = "_build/..."       file relative to darwin-art/ (checked-in, or a
+#                               build output under _build/ or target/)
+#   reason = "..."              optional
+#
+#   [[replace]]                 a file the original has; `reason` required
+#   path, source, reason
+#
+#   [[remove]]                  a file or directory the original has;
+#   path, reason                `reason` required
+#
+# Rules: guest paths are absolute and normalized, and may not pass through a
+# symlink in the original; `add` may not shadow an original path (use
+# `replace`); every source must exist; no path may be declared twice or
+# inside another declared path.
+#
+# The derived identity is sha256 of the original's identity, this manifest in
+# canonical form and the sha256 of every source; comments, formatting and
+# entry order do not affect it.
+
+schema = 1

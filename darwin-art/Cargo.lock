@@ -285,6 +285,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "darwin-android-image"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "sha2",
+]
+
+[[package]]
 name = "darwin-art-abi"
 version = "0.1.0"
 
