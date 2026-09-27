@@ -1,208 +1,276 @@
-//! Load-time rewriting of guest code that must reach the host.
+//! Load-time rewriting, for code that has no translation-cache entry:
+//! anonymous executable memory created at run time (a JIT, or an app's own
+//! mappings) and original files that were never translated.
 //!
-//! Three instruction forms are rewritten before guest code runs:
+//! Sites are rewritten with the same stubs as the ahead-of-time translator
+//! (`a64`), placed in trampoline islands within ±128 MiB of each site. A site
+//! with no island in range becomes `brk #(0xA000 | kind << 5 | rt)`, which
+//! the SIGTRAP handler emulates.
 //!
-//! | Guest instruction      | Why                                         | Replacement                       |
-//! |------------------------|---------------------------------------------|-----------------------------------|
-//! | `svc #0`               | Linux syscall; on Darwin it would trap into XNU with x16 as a Darwin syscall number | `b` to a per-site syscall stub |
-//! | `mrs xN, tpidr_el0`    | XNU overwrites TPIDR_EL0 on context switch  | `b` to a 3-instruction TSD load   |
-//! | `msr tpidr_el0, xN`    | same                                        | `b` to a TSD store stub           |
-//!
-//! Each stub lives in a trampoline island within the ±128 MiB reach of a `b`
-//! from its site, and ends with `b <site + 4>`. A `b` (not `bl`) keeps x30,
-//! which a Linux `svc` preserves and bionic's syscall stubs rely on.
-//!
-//! When no island can be placed in range, the site becomes
-//! `brk #(0xA000 | kind << 5 | reg)` and a SIGTRAP handler emulates it
-//! (slow fallback).
+//! Other threads may be running while this happens, so live code never
+//! loses execute permission:
+//! - islands are dual-mapped: stubs are written through a private RW view
+//!   while the RX view stays executable;
+//! - a site word on a page that is currently executable is written through a
+//!   temporary RW alias of that page (`mach_vm_remap`), as one aligned 32-bit
+//!   store, after its stub is complete;
+//! - a page that is not executable yet is written in place.
 
 use std::sync::Mutex;
 
-use crate::context::{GuestContext, guest_tp_tsd_offset, linux_abi_syscall_entry};
+use crate::a64::{self, Kind};
+use crate::context::GuestContext;
 
-pub const SVC0: u32 = 0xd400_0001;
-const MRS_TPIDR_EL0: u32 = 0xd53b_d040;
-const MSR_TPIDR_EL0: u32 = 0xd51b_d040;
-const MRS_TPIDRRO_EL0: u32 = 0xd53b_d060;
-const BRK_TAG: u32 = 0xA000;
-const BRANCH_RANGE: i64 = 128 << 20;
-const ISLAND_SIZE: usize = 256 << 10;
+const ISLAND_SIZE: u64 = 256 << 10;
 const PAGE: u64 = 16384;
-
-const KIND_SVC: u32 = 0;
-const KIND_MRS: u32 = 1;
-const KIND_MSR: u32 = 2;
 
 unsafe extern "C" {
     fn sys_icache_invalidate(start: *mut libc::c_void, len: usize);
 }
 
-// ---- encoders -------------------------------------------------------------
-
-pub fn encode_b(from: u64, to: u64) -> Option<u32> {
-    let off = to.wrapping_sub(from) as i64;
-    if !(-BRANCH_RANGE..BRANCH_RANGE).contains(&off) || off & 3 != 0 {
-        return None;
+pub mod vm {
+    //! The few Mach VM calls the layer needs.
+    unsafe extern "C" {
+        pub static mach_task_self_: libc::mach_port_t;
+        pub fn mach_vm_remap(
+            target: libc::mach_port_t,
+            address: *mut u64,
+            size: u64,
+            mask: u64,
+            flags: i32,
+            src_task: libc::mach_port_t,
+            src_address: u64,
+            copy: i32,
+            cur: *mut i32,
+            max: *mut i32,
+            inheritance: u32,
+        ) -> i32;
+        pub fn mach_vm_protect(
+            task: libc::mach_port_t,
+            address: u64,
+            size: u64,
+            set_maximum: i32,
+            prot: i32,
+        ) -> i32;
+        pub fn mach_vm_deallocate(task: libc::mach_port_t, address: u64, size: u64) -> i32;
+        pub fn mach_vm_region(
+            task: libc::mach_port_t,
+            address: *mut u64,
+            size: *mut u64,
+            flavor: i32,
+            info: *mut i32,
+            count: *mut u32,
+            object_name: *mut libc::mach_port_t,
+        ) -> i32;
     }
-    Some(0x1400_0000 | ((off >> 2) as u32 & 0x03ff_ffff))
+    pub const VM_FLAGS_FIXED: i32 = 0;
+    pub const VM_FLAGS_ANYWHERE: i32 = 1;
+    pub const VM_FLAGS_OVERWRITE: i32 = 0x4000;
+    pub const VM_INHERIT_COPY: u32 = 1;
+    pub const VM_REGION_BASIC_INFO_64: i32 = 9;
+
+    pub fn task() -> libc::mach_port_t {
+        // SAFETY: reading the task port global.
+        unsafe { mach_task_self_ }
+    }
+
+    /// Protection, max protection and "shared" of the region containing (or
+    /// following) `addr`, with its bounds.
+    pub fn region(addr: u64) -> Option<(u64, u64, i32, bool)> {
+        let mut a = addr;
+        let mut size = 0u64;
+        let mut info = [0i32; 9];
+        let mut count = 9u32;
+        let mut obj = 0;
+        // SAFETY: VM_REGION_BASIC_INFO_64 into a 9-int buffer.
+        let kr = unsafe {
+            mach_vm_region(
+                task(),
+                &mut a,
+                &mut size,
+                VM_REGION_BASIC_INFO_64,
+                info.as_mut_ptr(),
+                &mut count,
+                &mut obj,
+            )
+        };
+        (kr == 0).then_some((a, a + size, info[0], info[3] != 0))
+    }
+
+    /// Map a second, shared view of `[src, src+len)` and give it `prot`.
+    /// With `at`, the view replaces whatever is mapped there.
+    pub fn alias(src: u64, len: u64, at: Option<u64>, prot: i32) -> Option<u64> {
+        let mut addr = at.unwrap_or(0);
+        let flags = match at {
+            Some(_) => VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+            None => VM_FLAGS_ANYWHERE,
+        };
+        let (mut cur, mut max) = (0, 0);
+        // SAFETY: remapping our own memory into a fresh or owned range.
+        let kr = unsafe {
+            mach_vm_remap(
+                task(),
+                &mut addr,
+                len,
+                0,
+                flags,
+                task(),
+                src,
+                0,
+                &mut cur,
+                &mut max,
+                VM_INHERIT_COPY,
+            )
+        };
+        if kr != 0 {
+            return None;
+        }
+        // SAFETY: protecting the view we just created.
+        if unsafe { mach_vm_protect(task(), addr, len, 0, prot) } != 0 {
+            // SAFETY: removing the view we just created.
+            unsafe { mach_vm_deallocate(task(), addr, len) };
+            return None;
+        }
+        Some(addr)
+    }
 }
 
-/// Byte offset of an unconditional `b`.
-pub fn decode_b(insn: u32) -> i64 {
-    (((insn & 0x03ff_ffff) << 6) as i32 >> 4) as i64
+fn page_down(v: u64) -> u64 {
+    v & !(PAGE - 1)
 }
 
-fn stp_pre(rt: u32, rt2: u32, rn: u32, imm: i32) -> u32 {
-    0xa980_0000 | (((imm / 8) as u32 & 0x7f) << 15) | (rt2 << 10) | (rn << 5) | rt
-}
-fn ldp_post(rt: u32, rt2: u32, rn: u32, imm: i32) -> u32 {
-    0xa8c0_0000 | (((imm / 8) as u32 & 0x7f) << 15) | (rt2 << 10) | (rn << 5) | rt
-}
-fn str_uimm(rt: u32, rn: u32, imm: u32) -> u32 {
-    0xf900_0000 | ((imm / 8) << 10) | (rn << 5) | rt
-}
-fn ldr_uimm(rt: u32, rn: u32, imm: u32) -> u32 {
-    0xf940_0000 | ((imm / 8) << 10) | (rn << 5) | rt
-}
-fn ldr_literal(rt: u32, from: u64, to: u64) -> u32 {
-    let off = to.wrapping_sub(from) as i64;
-    assert!(off.abs() < (1 << 20) && off & 3 == 0);
-    0x5800_0000 | ((((off >> 2) as u32) & 0x7_ffff) << 5) | rt
-}
-fn blr(rn: u32) -> u32 {
-    0xd63f_0000 | (rn << 5)
-}
-fn brk(imm: u32) -> u32 {
-    0xd420_0000 | ((imm & 0xffff) << 5)
-}
-
-const SP: u32 = 31;
-
-/// Per-site stub bodies, excluding the final `b <site+4>`.
-fn svc_stub(stub: u64, literal: u64) -> Vec<u32> {
-    vec![
-        stp_pre(16, 17, SP, -32),
-        str_uimm(30, SP, 16),
-        ldr_literal(16, stub + 8, literal),
-        blr(16),
-        ldr_uimm(30, SP, 16),
-        ldp_post(16, 17, SP, 32),
-    ]
-}
-
-fn mrs_stub(rt: u32, tp_off: u32) -> Vec<u32> {
-    vec![MRS_TPIDRRO_EL0 | rt, ldr_uimm(rt, rt, tp_off)]
-}
-
-fn msr_stub(rt: u32, tp_off: u32) -> Vec<u32> {
-    let scratch = if rt == 16 { 17 } else { 16 };
-    vec![
-        stp_pre(16, 17, SP, -16),
-        MRS_TPIDRRO_EL0 | scratch,
-        str_uimm(rt, scratch, tp_off),
-        ldp_post(16, 17, SP, 16),
-    ]
+/// Write aligned 32-bit words into code, never removing execute permission
+/// from a page that has it.
+fn write_words(words: &[(u64, u32)]) {
+    let mut i = 0;
+    while i < words.len() {
+        let page = page_down(words[i].0);
+        let mut j = i;
+        while j < words.len() && page_down(words[j].0) == page {
+            j += 1;
+        }
+        let (_, _, prot, _) = vm::region(page).unwrap_or((0, 0, 0, false));
+        let store = |base: u64| {
+            for &(addr, w) in &words[i..j] {
+                // SAFETY: `base` maps `page` writable; one aligned store per word.
+                unsafe {
+                    ((base + (addr - page)) as *mut u32).write_volatile(w);
+                }
+            }
+        };
+        if prot & libc::PROT_WRITE != 0 {
+            store(page);
+        } else if prot & libc::PROT_EXEC == 0 {
+            // Not executable: nobody can be running it.
+            // SAFETY: temporarily opening a non-executable page of guest code.
+            unsafe {
+                libc::mprotect(page as *mut _, PAGE as usize, prot | libc::PROT_WRITE);
+                store(page);
+                libc::mprotect(page as *mut _, PAGE as usize, prot);
+            }
+        } else if let Some(rw) = vm::alias(page, PAGE, None, libc::PROT_READ | libc::PROT_WRITE) {
+            store(rw);
+            // SAFETY: removing the temporary alias.
+            unsafe { vm::mach_vm_deallocate(vm::task(), rw, PAGE) };
+        } else {
+            eprintln!("[linux-abi] cannot write live code at {page:#x}: no RW alias");
+        }
+        for &(addr, _) in &words[i..j] {
+            // SAFETY: flushing the word we wrote.
+            unsafe { sys_icache_invalidate(addr as *mut _, 4) };
+        }
+        i = j;
+    }
 }
 
 // ---- islands --------------------------------------------------------------
 
 struct Island {
-    base: u64,
+    /// Executable view: where stubs run and branches point.
+    rx: u64,
+    /// Writable view of the same pages.
+    rw: u64,
     used: u64,
 }
 
 static ISLANDS: Mutex<Vec<Island>> = Mutex::new(Vec::new());
 
-fn set_prot(addr: u64, len: u64, prot: i32) {
-    let start = addr & !(PAGE - 1);
-    let end = (addr + len + PAGE - 1) & !(PAGE - 1);
-    // SAFETY: island memory is owned by this module.
-    let r = unsafe { libc::mprotect(start as *mut _, (end - start) as usize, prot) };
-    assert_eq!(r, 0, "island mprotect failed");
-}
-
 fn in_range(a: u64, b: u64) -> bool {
     let d = a.wrapping_sub(b) as i64;
-    d.abs() < BRANCH_RANGE - ISLAND_SIZE as i64
+    d.abs() < a64::BRANCH_RANGE - ISLAND_SIZE as i64
 }
 
-fn new_island(hint: u64) -> Option<u64> {
-    // SAFETY: non-fixed anonymous mapping; hint only steers placement.
-    let p = unsafe {
-        libc::mmap(
-            hint as *mut _,
-            ISLAND_SIZE,
+fn new_island(hint: u64) -> Option<Island> {
+    // SAFETY: fresh anonymous mappings; the hint only steers placement.
+    unsafe {
+        let rw = libc::mmap(
+            std::ptr::null_mut(),
+            ISLAND_SIZE as usize,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_PRIVATE | libc::MAP_ANON,
             -1,
             0,
-        )
-    };
-    if p == libc::MAP_FAILED {
-        return None;
-    }
-    let base = p as u64;
-    // SAFETY: freshly mapped, writable.
-    unsafe { (base as *mut u64).write(linux_abi_syscall_entry as usize as u64) };
-    set_prot(base, ISLAND_SIZE as u64, libc::PROT_READ | libc::PROT_EXEC);
-    Some(base)
-}
-
-/// Reserve `bytes` of stub space reachable from `site`; the region being
-/// patched spans `[lo, hi)` and guides where a new island goes.
-fn alloc_stub(
-    islands: &mut Vec<Island>,
-    site: u64,
-    lo: u64,
-    hi: u64,
-    bytes: u64,
-) -> Option<(u64, u64)> {
-    for isl in islands.iter_mut() {
-        let at = isl.base + isl.used;
-        if isl.used + bytes <= ISLAND_SIZE as u64 && in_range(at, site) {
-            isl.used += bytes;
-            return Some((at, isl.base));
+        );
+        if rw == libc::MAP_FAILED {
+            return None;
+        }
+        let spot = libc::mmap(
+            hint as *mut _,
+            ISLAND_SIZE as usize,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        );
+        if spot == libc::MAP_FAILED {
+            libc::munmap(rw, ISLAND_SIZE as usize);
+            return None;
+        }
+        match vm::alias(
+            rw as u64,
+            ISLAND_SIZE,
+            Some(spot as u64),
+            libc::PROT_READ | libc::PROT_EXEC,
+        ) {
+            Some(rx) => Some(Island {
+                rx,
+                rw: rw as u64,
+                used: 0,
+            }),
+            None => {
+                libc::munmap(spot, ISLAND_SIZE as usize);
+                libc::munmap(rw, ISLAND_SIZE as usize);
+                None
+            }
         }
     }
+}
+
+/// Reserve `bytes` of stub space reachable from `site`; `[lo, hi)` is the
+/// region being patched and guides where a new island goes.
+fn alloc_stub(islands: &mut Vec<Island>, site: u64, lo: u64, hi: u64, bytes: u64) -> Option<usize> {
+    if let Some(i) = islands
+        .iter()
+        .position(|isl| isl.used + bytes <= ISLAND_SIZE && in_range(isl.rx + isl.used, site))
+    {
+        return Some(i);
+    }
     let hi_hint = (hi + PAGE - 1) & !(PAGE - 1);
-    let lo_hint = (lo & !(PAGE - 1)).saturating_sub(4 * ISLAND_SIZE as u64);
+    let lo_hint = page_down(lo).saturating_sub(4 * ISLAND_SIZE);
     for hint in [hi_hint, lo_hint, site] {
-        if let Some(base) = new_island(hint) {
-            if in_range(base, site) {
-                islands.push(Island {
-                    base,
-                    used: 8 + bytes,
-                });
-                return Some((base + 8, base));
+        if let Some(isl) = new_island(hint) {
+            if in_range(isl.rx, site) {
+                islands.push(isl);
+                return Some(islands.len() - 1);
             }
-            // SAFETY: unmapping the island we just created.
-            unsafe { libc::munmap(base as *mut _, ISLAND_SIZE) };
+            // SAFETY: dropping both views of the island we just created.
+            unsafe {
+                libc::munmap(isl.rx as *mut _, ISLAND_SIZE as usize);
+                libc::munmap(isl.rw as *mut _, ISLAND_SIZE as usize);
+            }
         }
     }
     None
-}
-
-fn write_stub(stub: u64, body: &[u32], site: u64) {
-    set_prot(
-        stub,
-        (body.len() as u64 + 1) * 4,
-        libc::PROT_READ | libc::PROT_WRITE,
-    );
-    let back = encode_b(stub + body.len() as u64 * 4, site + 4).expect("stub out of range");
-    // SAFETY: stub space was reserved in a writable island.
-    unsafe {
-        let p = stub as *mut u32;
-        for (i, w) in body.iter().enumerate() {
-            p.add(i).write(*w);
-        }
-        p.add(body.len()).write(back);
-        sys_icache_invalidate(p as *mut _, (body.len() + 1) * 4);
-    }
-    set_prot(
-        stub,
-        (body.len() as u64 + 1) * 4,
-        libc::PROT_READ | libc::PROT_EXEC,
-    );
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -210,11 +278,82 @@ pub struct PatchStats {
     pub svc: usize,
     pub mrs_tp: usize,
     pub msr_tp: usize,
+    pub scs: usize,
+    pub ctr: usize,
     pub brk_fallback: usize,
 }
 
-/// Rewrite every `svc #0` and `TPIDR_EL0` access in `[addr, addr+len)`.
-/// The region must currently be writable; the caller restores its protection.
+impl PatchStats {
+    pub fn add(&mut self, o: &PatchStats) {
+        self.svc += o.svc;
+        self.mrs_tp += o.mrs_tp;
+        self.msr_tp += o.msr_tp;
+        self.scs += o.scs;
+        self.ctr += o.ctr;
+        self.brk_fallback += o.brk_fallback;
+    }
+
+    pub fn total(&self) -> usize {
+        self.svc + self.mrs_tp + self.msr_tp + self.scs + self.ctr
+    }
+
+    fn count(&mut self, kind: Kind) {
+        match kind {
+            Kind::Svc => self.svc += 1,
+            Kind::MrsTp => self.mrs_tp += 1,
+            Kind::MsrTp => self.msr_tp += 1,
+            Kind::ScsPush | Kind::ScsPop => self.scs += 1,
+            Kind::MrsCtr => self.ctr += 1,
+        }
+    }
+}
+
+/// Rewrite the given sites (absolute addresses) of code in `[lo, hi)`.
+pub fn rewrite_sites(
+    sites: &[(u64, Kind, u32)],
+    lo: u64,
+    hi: u64,
+    use_islands: bool,
+) -> PatchStats {
+    let mut stats = PatchStats::default();
+    let ctr = crate::a64::host_ctr_el0();
+    let mut islands = ISLANDS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut site_words = Vec::with_capacity(sites.len());
+    for &(site, kind, rt) in sites {
+        let bytes = a64::stub_len(kind) as u64 * 4;
+        let placed = if use_islands {
+            alloc_stub(&mut islands, site, lo, hi, bytes)
+        } else {
+            None
+        };
+        let word = placed.and_then(|i| {
+            let isl = &mut islands[i];
+            let at = isl.rx + isl.used;
+            let words = a64::stub_for(kind, rt, ctr, at, site)?;
+            for (k, w) in words.iter().enumerate() {
+                // SAFETY: unused stub space in the island's RW view.
+                unsafe { ((isl.rw + isl.used) as *mut u32).add(k).write(*w) };
+            }
+            // SAFETY: the RX view aliases what we just wrote.
+            unsafe { sys_icache_invalidate(at as *mut _, words.len() * 4) };
+            isl.used += bytes;
+            a64::encode_b(site, at)
+        });
+        let word = word.unwrap_or_else(|| {
+            stats.brk_fallback += 1;
+            a64::brk_fallback(kind, rt)
+        });
+        stats.count(kind);
+        site_words.push((site, word));
+    }
+    drop(islands);
+    site_words.sort_unstable_by_key(|&(a, _)| a);
+    write_words(&site_words);
+    stats
+}
+
+/// Find and rewrite every candidate site in `[addr, addr+len)` by scanning
+/// all words: code with no metadata (run-time generated code).
 pub fn rewrite_region(addr: u64, len: u64) -> PatchStats {
     rewrite_region_with(addr, len, true)
 }
@@ -222,62 +361,18 @@ pub fn rewrite_region(addr: u64, len: u64) -> PatchStats {
 /// As [`rewrite_region`], but with `use_islands == false` every site takes the
 /// `brk` fallback (used to measure that path).
 pub fn rewrite_region_with(addr: u64, len: u64, use_islands: bool) -> PatchStats {
-    let mut stats = PatchStats::default();
-    let tp_off = guest_tp_tsd_offset();
-    let mut islands = ISLANDS.lock().unwrap_or_else(|e| e.into_inner());
-    let words = (len / 4) as usize;
-    let base = (addr + 3) & !3;
-    for i in 0..words {
-        let site = base + i as u64 * 4;
-        if site + 4 > addr + len {
-            break;
-        }
+    let start = (addr + 3) & !3;
+    let mut sites = Vec::new();
+    let mut site = start;
+    while site + 4 <= addr + len {
         // SAFETY: the caller guarantees the region is mapped and readable.
         let insn = unsafe { (site as *const u32).read() };
-        let rt = insn & 0x1f;
-        let (kind, body_len) = if insn == SVC0 {
-            (KIND_SVC, 6)
-        } else if insn & !0x1f == MRS_TPIDR_EL0 {
-            (KIND_MRS, 2)
-        } else if insn & !0x1f == MSR_TPIDR_EL0 {
-            (KIND_MSR, 4)
-        } else {
-            continue;
-        };
-        if kind == KIND_MRS && rt == 31 {
-            continue; // mrs xzr: no effect.
+        if let Some((kind, rt)) = a64::classify(insn) {
+            sites.push((site, kind, rt));
         }
-        let stub = if use_islands {
-            alloc_stub(&mut islands, site, addr, addr + len, (body_len + 1) * 4)
-        } else {
-            None
-        };
-        let replacement = match stub {
-            Some((stub, island)) => {
-                let body = match kind {
-                    KIND_SVC => svc_stub(stub, island),
-                    KIND_MRS => mrs_stub(rt, tp_off),
-                    _ => msr_stub(rt, tp_off),
-                };
-                write_stub(stub, &body, site);
-                encode_b(site, stub).expect("island out of range")
-            }
-            None => {
-                stats.brk_fallback += 1;
-                brk(BRK_TAG | (kind << 5) | rt)
-            }
-        };
-        match kind {
-            KIND_SVC => stats.svc += 1,
-            KIND_MRS => stats.mrs_tp += 1,
-            _ => stats.msr_tp += 1,
-        }
-        // SAFETY: region is writable per the caller's contract.
-        unsafe { (site as *mut u32).write(replacement) };
+        site += 4;
     }
-    // SAFETY: flushing the range we just wrote.
-    unsafe { sys_icache_invalidate(addr as *mut _, len as usize) };
-    stats
+    rewrite_sites(&sites, addr, addr + len, use_islands)
 }
 
 // ---- brk fallback ---------------------------------------------------------
@@ -321,32 +416,43 @@ pub unsafe fn handle_brk(uc: *mut libc::ucontext_t) -> bool {
             return false;
         }
         let imm = (insn >> 5) & 0xffff;
-        if imm & 0xff00 != BRK_TAG {
+        if imm & 0xff00 != a64::BRK_TAG {
             return false;
         }
-        let kind = (imm >> 5) & 0x7;
+        let Some(kind) = Kind::from_index((imm >> 5) & 0x7) else {
+            return false;
+        };
         let rt = (imm & 0x1f) as usize;
-        let tp_slot = (crate::context::guest_tp_tsd_offset() / 8) as usize;
         let tsd: u64;
         std::arch::asm!("mrs {}, tpidrro_el0", out(reg) tsd);
+        let slot = |off: u32| (tsd + off as u64) as *mut u64;
         let get = |ss: &ThreadState64, r: usize| match r {
             0..=28 => ss.x[r],
             29 => ss.fp,
             30 => ss.lr,
             _ => 0,
         };
+        let set = |ss: &mut ThreadState64, r: usize, v: u64| match r {
+            0..=28 => ss.x[r] = v,
+            29 => ss.fp = v,
+            30 => ss.lr = v,
+            _ => {}
+        };
         match kind {
-            KIND_MRS => {
-                let v = (tsd as *const u64).add(tp_slot).read();
-                match rt {
-                    0..=28 => ss.x[rt] = v,
-                    29 => ss.fp = v,
-                    30 => ss.lr = v,
-                    _ => {}
-                }
+            Kind::MrsTp => set(ss, rt, slot(a64::slot::TP).read()),
+            Kind::MsrTp => slot(a64::slot::TP).write(get(ss, rt)),
+            Kind::MrsCtr => set(ss, rt, a64::host_ctr_el0() as u64),
+            Kind::ScsPush => {
+                let p = slot(a64::slot::SCS).read();
+                (p as *mut u64).write(ss.lr);
+                slot(a64::slot::SCS).write(p + 8);
             }
-            KIND_MSR => (tsd as *mut u64).add(tp_slot).write(get(ss, rt)),
-            _ => {
+            Kind::ScsPop => {
+                let p = slot(a64::slot::SCS).read() - 8;
+                ss.lr = (p as *const u64).read();
+                slot(a64::slot::SCS).write(p);
+            }
+            Kind::Svc => {
                 let mut ctx: GuestContext = std::mem::zeroed();
                 ctx.x[..29].copy_from_slice(&ss.x);
                 ctx.x[29] = ss.fp;
@@ -364,60 +470,5 @@ pub unsafe fn handle_brk(uc: *mut libc::ucontext_t) -> bool {
         }
         ss.pc += 4;
         true
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    std::arch::global_asm!(
-        ".globl _patch_reference",
-        ".p2align 2",
-        "_patch_reference:",
-        "stp x16, x17, [sp, #-32]!",
-        "str x30, [sp, #16]",
-        "blr x16",
-        "ldr x30, [sp, #16]",
-        "ldp x16, x17, [sp], #32",
-        "mrs x5, tpidrro_el0",
-        "ldr x5, [x5, #1024]",
-        "stp x16, x17, [sp, #-16]!",
-        "str x3, [x16, #1024]",
-        "ldp x16, x17, [sp], #16",
-        "brk #0xa021",
-        "mrs x7, tpidr_el0",
-        "msr tpidr_el0, x9",
-    );
-    unsafe extern "C" {
-        static patch_reference: [u32; 13];
-    }
-
-    #[test]
-    fn encoders_match_assembler() {
-        // SAFETY: symbol defined above.
-        let r = unsafe { &patch_reference };
-        assert_eq!(stp_pre(16, 17, SP, -32), r[0]);
-        assert_eq!(str_uimm(30, SP, 16), r[1]);
-        assert_eq!(blr(16), r[2]);
-        assert_eq!(ldr_uimm(30, SP, 16), r[3]);
-        assert_eq!(ldp_post(16, 17, SP, 32), r[4]);
-        assert_eq!(MRS_TPIDRRO_EL0 | 5, r[5]);
-        assert_eq!(ldr_uimm(5, 5, 1024), r[6]);
-        assert_eq!(stp_pre(16, 17, SP, -16), r[7]);
-        assert_eq!(str_uimm(3, 16, 1024), r[8]);
-        assert_eq!(ldp_post(16, 17, SP, 16), r[9]);
-        assert_eq!(brk(BRK_TAG | (KIND_MRS << 5) | 1), r[10]);
-        assert_eq!(MRS_TPIDR_EL0 | 7, r[11]);
-        assert_eq!(MSR_TPIDR_EL0 | 9, r[12]);
-    }
-
-    #[test]
-    fn branch_roundtrip() {
-        for off in [4i64, -4, 1 << 20, -(1 << 26), (128 << 20) - 4] {
-            let b = encode_b(0x1000_0000, (0x1000_0000i64 + off) as u64).unwrap();
-            assert_eq!(decode_b(b), off);
-        }
-        assert!(encode_b(0, 128 << 20).is_none());
     }
 }

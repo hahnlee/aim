@@ -18,9 +18,12 @@ use crate::context::GuestContext;
 use crate::errno::ENOSYS;
 
 pub use mem::init_brk;
-pub use process::set_exe;
+pub use mem::run_deferred_unmaps;
+pub use process::{host_tid, set_exe};
 
-static TRACE: AtomicBool = AtomicBool::new(false);
+/// Read by the trampoline: while set, every syscall takes the full path so
+/// it is traced.
+pub static TRACE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Relaxed);
@@ -129,7 +132,7 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         80 => fs::fstat(a),
         // memory
         214 => mem::brk(a),
-        215 => mem::munmap(a),
+        215 => mem::munmap(ctx, a),
         222 => mem::mmap(a),
         226 => mem::mprotect(a),
         233 => mem::madvise(a),

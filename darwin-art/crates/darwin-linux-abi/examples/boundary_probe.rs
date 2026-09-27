@@ -1,5 +1,6 @@
 //! P0 measurements for ADR 0012 (not part of the runtime):
-//! - cost of a redirected Linux `getpid` against Darwin's own `getpid`;
+//! - cost of a redirected Linux `getpid` (lean path) against Darwin's own
+//!   `getpid`, and of a trivial syscall on the full (FP/SIMD-saving) path;
 //! - cost of a rewritten `mrs xN, tpidr_el0`;
 //! - whether a raw user write to TPIDR_EL0 survives syscalls and preemption.
 //!
@@ -180,9 +181,15 @@ fn main() {
 
     const GETPID: u64 = 172;
     const GETPPID: u64 = 173;
+    // sched_getscheduler(<not us>): answered by a trivial Rust handler on
+    // the full path.
+    const FULL_TRIVIAL: u64 = 120;
     getpid_island(1000, GETPID);
     let t_island = ns_per(N, || {
         getpid_island(N, GETPID);
+    });
+    let t_full = ns_per(N, || {
+        getpid_island(N, FULL_TRIVIAL);
     });
     let t_island_ppid = ns_per(N, || {
         getpid_island(N, GETPPID);
@@ -207,14 +214,13 @@ fn main() {
         getpid_brk(nb, GETPID);
     });
     println!(
-        "redirected Linux getpid (svc -> island stub -> trampoline -> Rust -> libc getpid): {t_island:.1} ns"
+        "redirected Linux getpid, lean path (svc -> stub -> trampoline, live registers, answered in asm): {t_island:.1} ns"
     );
-    println!("native Darwin getpid (libc, pid cached in userspace): {t_darwin_libc:.1} ns");
-    println!("native Darwin getpid (svc #0x80, enters XNU): {t_darwin_svc:.1} ns");
     println!(
-        "  => boundary round trip alone: {:.1} ns",
-        t_island - t_darwin_libc
+        "redirected trivial syscall, full path (+ FP/SIMD save, host stack, Rust dispatch): {t_full:.1} ns"
     );
+    println!("native Darwin getpid (libc): {t_darwin_libc:.1} ns");
+    println!("native Darwin getpid (svc #0x80, enters XNU): {t_darwin_svc:.1} ns");
     println!(
         "redirected Linux getppid (enters XNU): {t_island_ppid:.1} ns; native Darwin getppid: {t_darwin_ppid:.1} ns"
     );

@@ -90,14 +90,16 @@ pub fn openat(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
+    let hflags = open_flags_to_host(flags);
     // SAFETY: host path from the resolver.
-    errno::check(unsafe {
-        libc::open(
-            r.host.as_ptr(),
-            open_flags_to_host(flags),
-            mode as libc::c_uint,
-        )
-    } as i64)
+    let fd = unsafe { libc::open(r.host.as_ptr(), hflags, mode as libc::c_uint) };
+    if fd < 0 {
+        return -(errno::last() as i64);
+    }
+    // An original ELF with a translation-cache entry is replaced by the
+    // translated file here, before the guest reads its headers.
+    crate::xrt::on_open(fd, &r.host, &r.guest, hflags);
+    fd as i64
 }
 
 pub fn close(a: [u64; 6]) -> i64 {
