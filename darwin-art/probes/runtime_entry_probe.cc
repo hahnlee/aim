@@ -32,7 +32,6 @@
 #include "darwin_binder_wire.h"
 #include "binder/service_endpoint.h"
 #include "darwin_provider_owners.h"
-#include "../runtime/framework/pm/installed_record_source.h"
 #include "runtime_network_probe.h"
 #include "runtime_hwui_probe.h"
 #include "runtime_elf_probe.h"
@@ -132,11 +131,6 @@ bool RegisterHeadlessFixtureNatives(JNIEnv* env) {
          darwin_art_headless_fixture::RegisterResourceNatives(env);
 }
 #endif
-
-jstring NativeResolveDaemonPackage(JNIEnv* env, jclass, jstring package_name) {
-  return darwin_art::framework::pm::QueryInstalledRecord(
-      env, std::getenv("DARWIN_ART_PROFILE_SOCKET"), package_name);
-}
 
 class FixtureGraphicsCleanupOnFailure final {
  public:
@@ -731,8 +725,7 @@ extern "C" DARWIN_ART_EXPORT int32_t darwin_art_run_process(
   if (run_system_server) {
     // System startup must not require any Activity/View/PackageManager fixture.
     const int status = darwin_art::framework::system::RunSystemProcess(
-        env, std::getenv("DARWIN_ART_SYSTEM_SERVER_SOCKET"),
-        &NativeResolveDaemonPackage);
+        env, std::getenv("DARWIN_ART_SYSTEM_SERVER_SOCKET"));
     run_result->hello_answer = 0;
     run_result->native_round_trip = 0;
     run_result->arraycopy_result = 0;

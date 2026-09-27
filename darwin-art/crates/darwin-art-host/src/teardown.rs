@@ -34,7 +34,7 @@ impl<'a> RuntimeShutdownGuard<'a> {
     }
 
     pub(super) fn shutdown(mut self) -> Result<(), HostError> {
-        if self.execution_lifetime == ExecutionLifetime::AndroidProcess {
+        if self.execution_lifetime.owns_process_exit() {
             // APK processes must never enter DestroyJavaVM/ELF teardown,
             // including explicit error cleanup paths. The caller has already
             // recorded the failure; preserve it at the OS process boundary.
@@ -54,7 +54,7 @@ impl<'a> RuntimeShutdownGuard<'a> {
 
 impl Drop for RuntimeShutdownGuard<'_> {
     fn drop(&mut self) {
-        if self.execution_lifetime == ExecutionLifetime::AndroidProcess && self.inner.is_some() {
+        if self.execution_lifetime.owns_process_exit() && self.inner.is_some() {
             // An Android APK process is an OS lifetime boundary.  If an
             // in-process error reaches this guard, unloading live Chromium
             // DSOs/DestroyJavaVM is unsafe and unlike AOSP.  Let the kernel

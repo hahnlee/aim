@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ART JIT/compiler acceptance: runs the JIT fixtures (probes/runtime_entry_probe.cc,
+# linked against the product runtime as the graphics fixture client) through
+# darwin-art-fixture-runner. It needs the built product dylib and the probe
+# DEX outputs (build-dex, build-button-dex), so it is not one of the
+# tools/tests standalone scripts; run it after `cargo xtask build`.
 set -euo pipefail
 jit_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$jit_root"
@@ -32,7 +37,12 @@ export DARWIN_ART_APK_APP_RESOURCE_APK="$DARWIN_ART_FRAMEWORK_RES_APK"
 export DARWIN_ART_RUNTIME_HOST_FILES="$jit_root/_build/android16-core-oj-compat/core-oj-compat.jar:$jit_root/_prebuilt/android-16/bootclasspath/core-libart.jar:$jit_root/_build/android16-framework-compat/framework-compat.jar:$jit_tail:$jit_root/_build/button-dex/dex/classes.dex"
 audit_log="$(mktemp "${TMPDIR:-/tmp}/darwin-art-jit-audit.XXXXXX.log")"
 trap 'rm -f "$audit_log"' EXIT
-if ! target/debug/darwin-art-host --window-seconds 3 \
+# The JIT fixtures are test-client code (probes/runtime_entry_probe.cc),
+# linked against the product runtime as the graphics fixture client.
+cargo run -q -p art-bootstrap --release -- build-runtime-graphics-fixture-client >/dev/null
+if ! target/debug/darwin-art-fixture-runner \
+  --fixture-image "$jit_root/_build/native-fixtures/graphics/libdarwin_art_fixture.dylib" \
+  --window-seconds 3 \
   "$jit_root/_build/runtime-graphics-link-probe/libdarwin_art_runtime_graphics.dylib" \
   "$jit_root/_build/android16-core-oj-compat/core-oj-compat.jar" \
   "$jit_root/_prebuilt/android-16/bootclasspath/core-libart.jar" \

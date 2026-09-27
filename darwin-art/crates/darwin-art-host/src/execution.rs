@@ -26,7 +26,7 @@ fn execute(
     // image on a path which cannot safely relinquish those native borrowers.
     // This is an explicit unsupported mode, not successful teardown evidence.
     #[cfg(target_os = "macos")]
-    if !options.is_android_process() {
+    if !options.owns_process_exit() {
         return Err(HostError::UnsupportedExecutionLifetime(
             options.execution_lifetime,
         ));

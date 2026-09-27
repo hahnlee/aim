@@ -44,6 +44,11 @@ impl RunOptions {
         self.execution_lifetime == ExecutionLifetime::AndroidProcess
     }
 
+    /// Whether the process exits instead of tearing the runtime down in place.
+    pub fn owns_process_exit(&self) -> bool {
+        self.execution_lifetime.owns_process_exit()
+    }
+
     pub(crate) fn validate(&self) -> Result<(), HostError> {
         if !self.visible_seconds.is_finite()
             || self.visible_seconds < 0.0
