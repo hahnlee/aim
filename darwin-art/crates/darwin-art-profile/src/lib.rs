@@ -40,6 +40,7 @@ mod listener_wait;
 mod peer_credentials;
 mod peer_process;
 mod process_command;
+mod launch_intent;
 mod process_identity;
 mod process_incarnation;
 mod process_start_gate;
@@ -49,6 +50,7 @@ mod package_client;
 pub use package_client::{InstalldRequest, installd_at, property_set_at};
 mod process_registry;
 mod protocol;
+pub use launch_intent::{LAUNCH_INTENT_ACTION_ENV, LAUNCH_INTENT_URI_ENV, LaunchIntent};
 pub use process_identity::ProcessIdentity;
 mod registry;
 pub mod runtime_service_cli;
@@ -589,6 +591,24 @@ pub fn resolve_process_identity_at(
     )?;
     let response = protocol::expect_ok(&mut stream, protocol::OP_PROCESS_IDENTITY)?;
     ProcessIdentity::decode(&response, pid)
+}
+
+/// The Intent the registered process's launch asked for, if any. Like
+/// `resolve_process_identity_at`, this only queries a running daemon.
+pub fn resolve_launch_intent_at(
+    socket: &Path,
+    pid: u32,
+) -> Result<Option<LaunchIntent>, ProfileError> {
+    if pid == 0 {
+        return Err(ProfileError::Daemon("process PID must be non-zero".into()));
+    }
+    let mut stream = UnixStream::connect(socket)?;
+    let timeout = Some(std::time::Duration::from_secs(1));
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
+    protocol::write_request(&mut stream, protocol::OP_LAUNCH_INTENT, &pid.to_le_bytes())?;
+    let response = protocol::expect_ok(&mut stream, protocol::OP_LAUNCH_INTENT)?;
+    LaunchIntent::decode(&response)
 }
 
 /// Installed third-party packages, from PackageManagerService's packages.list.

@@ -349,9 +349,27 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
             let identity = crate::ProcessIdentity { pid, uid, package };
             protocol::write_response(&mut stream, message.operation, 0, &identity.encode())?;
         }
+        protocol::OP_LAUNCH_INTENT => {
+            if message.payload.len() != 4 {
+                return Err(ProfileError::Daemon(
+                    "launch Intent request requires a PID".into(),
+                ));
+            }
+            let pid = u32::from_le_bytes(message.payload[..4].try_into().unwrap());
+            let incarnation = ProcessIncarnation::read_live(pid)?;
+            let encoded = state
+                .processes
+                .lock()
+                .unwrap()
+                .launch_intent(pid, incarnation)
+                .map(crate::LaunchIntent::encode)
+                .unwrap_or_default();
+            protocol::write_response(&mut stream, message.operation, 0, &encoded)?;
+        }
         protocol::OP_DAEMONIZE => {
             let (package, arguments, mut environment) = parse_daemonize(&message.payload)?;
             crate::registry::validate_package(&package)?;
+            let launch_intent = crate::LaunchIntent::from_environment(&environment)?;
             let android_uid = if package == "android.system" {
                 1000
             } else {
@@ -395,6 +413,13 @@ fn handle(mut stream: UnixStream, state: &Arc<State>) -> Result<(), ProfileError
                         return Err(error);
                     }
                 };
+            if let Some(intent) = launch_intent {
+                state
+                    .processes
+                    .lock()
+                    .unwrap()
+                    .set_launch_intent(pid, incarnation, intent);
+            }
             let waiter =
                 crate::process_wait::ProcessWaitOwner::from_child(child, incarnation, on_exit);
             if let Some(template) = application_template {

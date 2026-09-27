@@ -45,6 +45,56 @@ pub unsafe extern "C" fn darwin_art_runtime_registered_process_identity(
     }
 }
 
+/// The Intent the registered process's launch requested: 1 with `action` and
+/// `data` (empty when absent) as NUL-terminated strings, 0 when the launch
+/// requested none, -1 when it cannot be resolved or does not fit.
+///
+/// # Safety
+/// `action` and `data` must point to writable buffers of the given capacities.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn darwin_art_runtime_registered_launch_intent(
+    pid: u32,
+    action: *mut u8,
+    action_capacity: usize,
+    data: *mut u8,
+    data_capacity: usize,
+) -> i32 {
+    if action.is_null() || data.is_null() || action_capacity == 0 || data_capacity == 0 {
+        return -1;
+    }
+    let resolved = std::panic::catch_unwind(|| {
+        let socket = std::env::var_os(darwin_art_profile::PROFILE_SOCKET_ENV)?;
+        darwin_art_profile::resolve_launch_intent_at(Path::new(&socket), pid).ok()
+    })
+    .ok()
+    .flatten();
+    let Some(intent) = resolved else {
+        return -1;
+    };
+    let Some(intent) = intent else {
+        return 0;
+    };
+    let copy = |text: &str, output: *mut u8, capacity: usize| -> bool {
+        let bytes = text.as_bytes();
+        if bytes.len() >= capacity {
+            return false;
+        }
+        // SAFETY: the caller's buffer holds `capacity` bytes; one is the NUL.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), output, bytes.len());
+            output.add(bytes.len()).write(0);
+        }
+        true
+    };
+    if copy(&intent.action, action, action_capacity)
+        && copy(intent.data.as_deref().unwrap_or(""), data, data_capacity)
+    {
+        1
+    } else {
+        -1
+    }
+}
+
 fn resolve_uid(pid: u32) -> Option<i32> {
     let socket = std::env::var_os(darwin_art_profile::PROFILE_SOCKET_ENV)?;
     let identity = darwin_art_profile::resolve_process_identity_at(Path::new(&socket), pid).ok()?;

@@ -214,7 +214,8 @@ jboolean ScheduleFinish(JNIEnv* env, jclass, jobject application_binder,
 }  // namespace
 
 bool ScheduleActivityLaunch(JNIEnv* env, jobject application_binder,
-                            jstring package_name, jint uid) {
+                            jstring package_name, jint uid, const char* action,
+                            const char* data) {
   if (env == nullptr || application_binder == nullptr || package_name == nullptr ||
       env->ExceptionCheck() ||
       env->PushLocalFrame(64) < 0) {
@@ -226,6 +227,31 @@ bool ScheduleActivityLaunch(JNIEnv* env, jobject application_binder,
   };
 
   jclass packages = env->FindClass("dev/darwinart/runtime/am/ApplicationPackages");
+  if (action != nullptr && packages != nullptr) {
+    jmethodID requested = env->GetStaticMethodID(
+        packages, "requestedLaunch",
+        "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)[Ljava/lang/Object;");
+    jstring action_string = env->NewStringUTF(action);
+    jstring data_string = data == nullptr ? nullptr : env->NewStringUTF(data);
+    auto launch = requested == nullptr || action_string == nullptr
+                      ? nullptr
+                      : static_cast<jobjectArray>(env->CallStaticObjectMethod(
+                            packages, requested, package_name, uid, action_string,
+                            data_string));
+    if (env->ExceptionCheck()) return finish(false);
+    if (launch != nullptr) {
+      jobject intent = env->GetObjectArrayElement(launch, 0);
+      jobject info = env->GetObjectArrayElement(launch, 1);
+      if (intent == nullptr || info == nullptr || env->ExceptionCheck()) {
+        return finish(false);
+      }
+      return finish(ScheduleResolvedWithinFrame(env, application_binder, nullptr,
+                                                nullptr, intent, info, nullptr,
+                                                nullptr, true));
+    }
+    // No Activity of this package handles the requested Intent: fall back to
+    // the launcher Activity, as a launcher tap would.
+  }
   jmethodID map = packages == nullptr
                       ? nullptr
                       : env->GetStaticMethodID(

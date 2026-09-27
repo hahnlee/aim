@@ -17,6 +17,7 @@ struct ProcessEntry {
     generation: u64,
     leases: BTreeSet<u64>,
     child_owner: Option<u64>,
+    launch_intent: Option<crate::LaunchIntent>,
 }
 
 #[derive(Default)]
@@ -95,6 +96,7 @@ impl ProcessRegistry {
             generation: lease,
             leases: BTreeSet::new(),
             child_owner: None,
+            launch_intent: None,
         });
         entry.leases.insert(lease);
         if child_owner {
@@ -135,6 +137,37 @@ impl ProcessRegistry {
             .get(&pid)
             .filter(|entry| entry.incarnation == incarnation)
             .map(|entry| entry.package.as_str())
+    }
+
+    /// Record the Intent the launch that spawned this process requested.
+    pub(crate) fn set_launch_intent(
+        &mut self,
+        pid: u32,
+        incarnation: ProcessIncarnation,
+        intent: crate::LaunchIntent,
+    ) -> bool {
+        match self
+            .entries
+            .get_mut(&pid)
+            .filter(|entry| entry.incarnation == incarnation)
+        {
+            Some(entry) => {
+                entry.launch_intent = Some(intent);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub(crate) fn launch_intent(
+        &self,
+        pid: u32,
+        incarnation: ProcessIncarnation,
+    ) -> Option<&crate::LaunchIntent> {
+        self.entries
+            .get(&pid)
+            .filter(|entry| entry.incarnation == incarnation)
+            .and_then(|entry| entry.launch_intent.as_ref())
     }
 
     pub(crate) fn android_uid(&self, pid: u32, incarnation: ProcessIncarnation) -> Option<u32> {
