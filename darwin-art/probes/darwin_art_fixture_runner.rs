@@ -18,6 +18,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_symbol: "darwin_art_shutdown_fixture".into(),
     };
     args.drain(1..3);
+    // A fixture run is one-shot: its process, not a reusable embedding
+    // session, owns runtime teardown.
+    args.insert(1, "--fixture-process".into());
     darwin_art_host::run_cli_with_arguments(args, Some(image), Some(&fixture_outcome::observe))
 }
 mod fixture_outcome;

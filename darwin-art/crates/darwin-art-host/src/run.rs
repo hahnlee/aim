@@ -39,7 +39,7 @@ pub(crate) fn run_internal(
 ) -> Result<HostOutcome, HostError> {
     #[cfg(target_os = "macos")]
     {
-        return crate::appkit_actor::run(options.is_android_process(), move |sender| {
+        return crate::appkit_actor::run(options.owns_process_exit(), move |sender| {
             // Android UI ownership remains on this worker; the Darwin actor
             // handles only scheduling and main-thread event dispatch.
             let qos_status = unsafe {
@@ -399,7 +399,7 @@ fn run_owner(
                     outcome.is_ok()
                 );
             }
-            if options.is_android_process() {
+            if options.owns_process_exit() {
                 // An Android app process ends at the OS lifetime boundary.
                 // AOSP does not unload the live app NativeLoader graph or
                 // destroy ART while Chromium workers may still execute it;
@@ -477,7 +477,7 @@ fn run_owner(
             frames_presented: 0,
             last_frame: frame_host.last_frame,
         };
-        if options.is_android_process() {
+        if options.owns_process_exit() {
             // See the visible process path above: app-process exit is an OS
             // boundary, not an in-process ART/NativeLoader teardown.
             let service_cleanup = service_processes

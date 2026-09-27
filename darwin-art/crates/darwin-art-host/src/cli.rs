@@ -128,6 +128,14 @@ pub fn run_with_arguments(
         return run_service_child(control_fd).map_err(Into::into);
     }
 
+    // A one-shot fixture run (for example the ART JIT audit): the process
+    // ends with its runtime and owns final teardown.
+    let fixture_process = values
+        .first()
+        .is_some_and(|value| value == "--fixture-process");
+    if fixture_process {
+        values.drain(..1);
+    }
     let frame_output = if values.first().is_some_and(|value| value == "--frame-ppm") {
         if values.len() < 2 {
             return Err("--frame-ppm requires a path".into());
@@ -153,7 +161,7 @@ pub fn run_with_arguments(
     };
     if values.len() != 6 {
         return Err(format!(
-            "usage: {} [--frame-ppm PATH] [--window-seconds SECONDS] LIBDARWIN_ART CORE_OJ_JAR CORE_LIBART_JAR FRAMEWORK_JAR CORE_ICU4J_JAR APP_DEX",
+            "usage: {} [--fixture-process] [--frame-ppm PATH] [--window-seconds SECONDS] LIBDARWIN_ART CORE_OJ_JAR CORE_LIBART_JAR FRAMEWORK_JAR CORE_ICU4J_JAR APP_DEX",
             PathBuf::from(&program).display()
         )
         .into());
@@ -179,6 +187,8 @@ pub fn run_with_arguments(
             && env::var_os("DARWIN_ART_FORCE_EMBEDDED_SHUTDOWN").is_none()
         {
             ExecutionLifetime::AndroidProcess
+        } else if fixture_process {
+            ExecutionLifetime::FixtureProcess
         } else {
             ExecutionLifetime::ReusableSession
         },

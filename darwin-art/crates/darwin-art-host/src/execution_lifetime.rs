@@ -10,4 +10,17 @@ pub enum ExecutionLifetime {
     ReusableSession,
     /// Model the Android app process boundary; the process owns final teardown.
     AndroidProcess,
+    /// A one-shot fixture run (for example the ART JIT audit): the OS process
+    /// owns final teardown as an Android app process does, but it has no
+    /// application identity, so no profile authority, Binder endpoint or app
+    /// window.
+    FixtureProcess,
+}
+
+impl ExecutionLifetime {
+    /// Whether the OS process boundary, not in-process teardown, ends the
+    /// runtime.
+    pub fn owns_process_exit(self) -> bool {
+        matches!(self, Self::AndroidProcess | Self::FixtureProcess)
+    }
 }
