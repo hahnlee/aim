@@ -1194,6 +1194,594 @@ static int32_t ProxyDetachCurrentThread(void* raw_vm) {
   return proxy->backend.detach_current_thread(proxy->backend.context);
 }
 
+/* ---- Remaining JNIEnv slots ------------------------------------------- */
+
+/* Register-only entries: pointer and integer arguments, identical under
+ * Android AAPCS64 and Darwin ARM64; forwarded to the current ART env. */
+static void* ProxyDefineClass(void* raw_env, const char* name, void* loader,
+                              const int8_t* buffer, int32_t length) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw = HostSlot(host_env, DARWIN_ART_JNI_SLOT_DefineClass);
+  if (raw == NULL) return NULL;
+  return ((void* (*)(void*, const char*, void*, const int8_t*, int32_t))raw)(
+      host_env, name, loader, buffer, length);
+}
+
+static int32_t ProxyEnsureLocalCapacity(void* raw_env, int32_t capacity) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw = HostSlot(host_env, DARWIN_ART_JNI_SLOT_EnsureLocalCapacity);
+  if (raw == NULL) return DARWIN_ART_JNI_ERR;
+  return ((int32_t (*)(void*, int32_t))raw)(host_env, capacity);
+}
+
+static void* ProxyAllocObject(void* raw_env, void* clazz) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw = HostSlot(host_env, DARWIN_ART_JNI_SLOT_AllocObject);
+  if (raw == NULL || clazz == NULL) return NULL;
+  return ((void* (*)(void*, void*))raw)(host_env, clazz);
+}
+
+static int32_t ProxyGetObjectRefType(void* raw_env, void* object) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw = HostSlot(host_env, DARWIN_ART_JNI_SLOT_GetObjectRefType);
+  if (raw == NULL) return 0; /* JNIInvalidRefType */
+  return ((int32_t (*)(void*, void*))raw)(host_env, object);
+}
+
+/* CallNonvirtual<Type>MethodA: jvalue[] is a pointer to 8-byte unions under
+ * both ABIs, so the host ...A entry is called directly. */
+static void* ProxyCallNonvirtualObjectMethodA(void* raw_env, void* object,
+                                              void* clazz, void* method,
+                                              const void* arguments) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw =
+      HostSlot(host_env, DARWIN_ART_JNI_SLOT_CallNonvirtualObjectMethodA);
+  if (raw == NULL || object == NULL || clazz == NULL || method == NULL)
+    return NULL;
+  return ((void* (*)(void*, void*, void*, void*, const void*))raw)(
+      host_env, object, clazz, method, arguments);
+}
+
+static uint8_t ProxyCallNonvirtualBooleanMethodA(void* raw_env, void* object,
+                                                 void* clazz, void* method,
+                                                 const void* arguments) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw =
+      HostSlot(host_env, DARWIN_ART_JNI_SLOT_CallNonvirtualBooleanMethodA);
+  if (raw == NULL || object == NULL || clazz == NULL || method == NULL)
+    return (uint8_t)0;
+  return ((uint8_t (*)(void*, void*, void*, void*, const void*))raw)(
+      host_env, object, clazz, method, arguments);
+}
+
+static int8_t ProxyCallNonvirtualByteMethodA(void* raw_env, void* object,
+                                             void* clazz, void* method,
+                                             const void* arguments) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw =
+      HostSlot(host_env, DARWIN_ART_JNI_SLOT_CallNonvirtualByteMethodA);
+  if (raw == NULL || object == NULL || clazz == NULL || method == NULL)
+    return (int8_t)0;
+  return ((int8_t (*)(void*, void*, void*, void*, const void*))raw)(
+      host_env, object, clazz, method, arguments);
+}
+
+static uint16_t ProxyCallNonvirtualCharMethodA(void* raw_env, void* object,
+                                               void* clazz, void* method,
+                                               const void* arguments) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw =
+      HostSlot(host_env, DARWIN_ART_JNI_SLOT_CallNonvirtualCharMethodA);
+  if (raw == NULL || object == NULL || clazz == NULL || method == NULL)
+    return (uint16_t)0;
+  return ((uint16_t (*)(void*, void*, void*, void*, const void*))raw)(
+      host_env, object, clazz, method, arguments);
+}
+
+static int16_t ProxyCallNonvirtualShortMethodA(void* raw_env, void* object,
+                                               void* clazz, void* method,
+                                               const void* arguments) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw =
+      HostSlot(host_env, DARWIN_ART_JNI_SLOT_CallNonvirtualShortMethodA);
+  if (raw == NULL || object == NULL || clazz == NULL || method == NULL)
+    return (int16_t)0;
+  return ((int16_t (*)(void*, void*, void*, void*, const void*))raw)(
+      host_env, object, clazz, method, arguments);
+}
+
+static int32_t ProxyCallNonvirtualIntMethodA(void* raw_env, void* object,
+                                             void* clazz, void* method,
+                                             const void* arguments) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw =
+      HostSlot(host_env, DARWIN_ART_JNI_SLOT_CallNonvirtualIntMethodA);
+  if (raw == NULL || object == NULL || clazz == NULL || method == NULL)
+    return (int32_t)0;
+  return ((int32_t (*)(void*, void*, void*, void*, const void*))raw)(
+      host_env, object, clazz, method, arguments);
+}
+
+static int64_t ProxyCallNonvirtualLongMethodA(void* raw_env, void* object,
+                                              void* clazz, void* method,
+                                              const void* arguments) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw =
+      HostSlot(host_env, DARWIN_ART_JNI_SLOT_CallNonvirtualLongMethodA);
+  if (raw == NULL || object == NULL || clazz == NULL || method == NULL)
+    return (int64_t)0;
+  return ((int64_t (*)(void*, void*, void*, void*, const void*))raw)(
+      host_env, object, clazz, method, arguments);
+}
+
+static float ProxyCallNonvirtualFloatMethodA(void* raw_env, void* object,
+                                             void* clazz, void* method,
+                                             const void* arguments) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw =
+      HostSlot(host_env, DARWIN_ART_JNI_SLOT_CallNonvirtualFloatMethodA);
+  if (raw == NULL || object == NULL || clazz == NULL || method == NULL)
+    return (float)0;
+  return ((float (*)(void*, void*, void*, void*, const void*))raw)(
+      host_env, object, clazz, method, arguments);
+}
+
+static double ProxyCallNonvirtualDoubleMethodA(void* raw_env, void* object,
+                                               void* clazz, void* method,
+                                               const void* arguments) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw =
+      HostSlot(host_env, DARWIN_ART_JNI_SLOT_CallNonvirtualDoubleMethodA);
+  if (raw == NULL || object == NULL || clazz == NULL || method == NULL)
+    return (double)0;
+  return ((double (*)(void*, void*, void*, void*, const void*))raw)(
+      host_env, object, clazz, method, arguments);
+}
+
+static void ProxyCallNonvirtualVoidMethodA(void* raw_env, void* object,
+                                           void* clazz, void* method,
+                                           const void* arguments) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  void* host_env = HostEnv(proxy);
+  RawJniSlot raw =
+      HostSlot(host_env, DARWIN_ART_JNI_SLOT_CallNonvirtualVoidMethodA);
+  if (raw == NULL || object == NULL || clazz == NULL || method == NULL) return;
+  ((void (*)(void*, void*, void*, void*, const void*))raw)(
+      host_env, object, clazz, method, arguments);
+}
+
+/* CallNonvirtual<Type>MethodV: Android va_list, translated by the backend. */
+static uint64_t ProxyCallNonvirtualBits(void* raw_env, void* object,
+                                        void* clazz, void* method,
+                                        void* android_va_list,
+                                        int32_t return_shorty) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  if (proxy == NULL || proxy->backend.call_nonvirtual_method_v == NULL ||
+      object == NULL || clazz == NULL || method == NULL)
+    return 0;
+  return proxy->backend.call_nonvirtual_method_v(proxy->backend.context, object,
+                                                 clazz, method, android_va_list,
+                                                 return_shorty);
+}
+
+static void* ProxyCallNonvirtualObjectMethodV(void* raw_env, void* object,
+                                              void* clazz, void* method,
+                                              va_list arguments) {
+  return (void*)(uintptr_t)(ProxyCallNonvirtualBits(
+      raw_env, object, clazz, method, (void*)arguments, 'L'));
+}
+
+static uint8_t ProxyCallNonvirtualBooleanMethodV(void* raw_env, void* object,
+                                                 void* clazz, void* method,
+                                                 va_list arguments) {
+  return (uint8_t)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                           (void*)arguments, 'Z'));
+}
+
+static int8_t ProxyCallNonvirtualByteMethodV(void* raw_env, void* object,
+                                             void* clazz, void* method,
+                                             va_list arguments) {
+  return (int8_t)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                          (void*)arguments, 'B'));
+}
+
+static uint16_t ProxyCallNonvirtualCharMethodV(void* raw_env, void* object,
+                                               void* clazz, void* method,
+                                               va_list arguments) {
+  return (uint16_t)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                            (void*)arguments, 'C'));
+}
+
+static int16_t ProxyCallNonvirtualShortMethodV(void* raw_env, void* object,
+                                               void* clazz, void* method,
+                                               va_list arguments) {
+  return (int16_t)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                           (void*)arguments, 'S'));
+}
+
+static int32_t ProxyCallNonvirtualIntMethodV(void* raw_env, void* object,
+                                             void* clazz, void* method,
+                                             va_list arguments) {
+  return (int32_t)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                           (void*)arguments, 'I'));
+}
+
+static int64_t ProxyCallNonvirtualLongMethodV(void* raw_env, void* object,
+                                              void* clazz, void* method,
+                                              va_list arguments) {
+  return (int64_t)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                           (void*)arguments, 'J'));
+}
+
+static float ProxyCallNonvirtualFloatMethodV(void* raw_env, void* object,
+                                             void* clazz, void* method,
+                                             va_list arguments) {
+  const uint32_t bits = (uint32_t)(ProxyCallNonvirtualBits(
+      raw_env, object, clazz, method, (void*)arguments, 'F'));
+  float value = 0;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+static double ProxyCallNonvirtualDoubleMethodV(void* raw_env, void* object,
+                                               void* clazz, void* method,
+                                               va_list arguments) {
+  const uint64_t bits = ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                                (void*)arguments, 'D');
+  double value = 0;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+static void ProxyCallNonvirtualVoidMethodV(void* raw_env, void* object,
+                                           void* clazz, void* method,
+                                           va_list arguments) {
+  (void)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                 (void*)arguments, 'V'));
+}
+
+/* Variadic entries: the assembly thunks capture the Android argument banks;
+ * these build the Android va_list from them. Three named arguments leave
+ * five variadic GP registers (gr_offs -40); four leave four (-32). */
+static AndroidArm64VaList CapturedVaList(uint8_t* gp_registers,
+                                         uint8_t* fp_registers,
+                                         uint8_t* caller_stack,
+                                         int32_t named_gp) {
+  AndroidArm64VaList arguments = {
+      .stack = caller_stack,
+      .gr_top = gp_registers + 64,
+      .vr_top = fp_registers + 128,
+      .gr_offs = -8 * (8 - named_gp),
+      .vr_offs = -128,
+  };
+  return arguments;
+}
+
+static uint64_t ProxyCallCapturedList(void* raw_env, void* receiver,
+                                      void* method,
+                                      AndroidArm64VaList* arguments,
+                                      int32_t return_shorty,
+                                      int32_t is_static) {
+  struct DarwinArtJniProxy* proxy = EnvOwner(raw_env);
+  if (proxy == NULL || proxy->backend.call_method_v == NULL ||
+      receiver == NULL || method == NULL)
+    return 0;
+  return proxy->backend.call_method_v(proxy->backend.context, receiver, method,
+                                      arguments, return_shorty, is_static);
+}
+
+extern uint8_t darwin_art_jni_proxy_call_boolean_method(void* raw_env,
+                                                        void* receiver,
+                                                        void* method, ...);
+uint8_t darwin_art_jni_proxy_call_boolean_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  return (uint8_t)(ProxyCallCapturedList(raw_env, receiver, method, &arguments,
+                                         'Z', 0));
+}
+
+extern uint8_t darwin_art_jni_proxy_call_static_boolean_method(void* raw_env,
+                                                               void* receiver,
+                                                               void* method,
+                                                               ...);
+uint8_t darwin_art_jni_proxy_call_static_boolean_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  return (uint8_t)(ProxyCallCapturedList(raw_env, receiver, method, &arguments,
+                                         'Z', 1));
+}
+
+extern int8_t darwin_art_jni_proxy_call_byte_method(void* raw_env,
+                                                    void* receiver,
+                                                    void* method, ...);
+int8_t darwin_art_jni_proxy_call_byte_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  return (int8_t)(ProxyCallCapturedList(raw_env, receiver, method, &arguments,
+                                        'B', 0));
+}
+
+extern int8_t darwin_art_jni_proxy_call_static_byte_method(void* raw_env,
+                                                           void* receiver,
+                                                           void* method, ...);
+int8_t darwin_art_jni_proxy_call_static_byte_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  return (int8_t)(ProxyCallCapturedList(raw_env, receiver, method, &arguments,
+                                        'B', 1));
+}
+
+extern uint16_t darwin_art_jni_proxy_call_char_method(void* raw_env,
+                                                      void* receiver,
+                                                      void* method, ...);
+uint16_t darwin_art_jni_proxy_call_char_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  return (uint16_t)(ProxyCallCapturedList(raw_env, receiver, method, &arguments,
+                                          'C', 0));
+}
+
+extern uint16_t darwin_art_jni_proxy_call_static_char_method(void* raw_env,
+                                                             void* receiver,
+                                                             void* method, ...);
+uint16_t darwin_art_jni_proxy_call_static_char_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  return (uint16_t)(ProxyCallCapturedList(raw_env, receiver, method, &arguments,
+                                          'C', 1));
+}
+
+extern int16_t darwin_art_jni_proxy_call_short_method(void* raw_env,
+                                                      void* receiver,
+                                                      void* method, ...);
+int16_t darwin_art_jni_proxy_call_short_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  return (int16_t)(ProxyCallCapturedList(raw_env, receiver, method, &arguments,
+                                         'S', 0));
+}
+
+extern int16_t darwin_art_jni_proxy_call_static_short_method(void* raw_env,
+                                                             void* receiver,
+                                                             void* method, ...);
+int16_t darwin_art_jni_proxy_call_static_short_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  return (int16_t)(ProxyCallCapturedList(raw_env, receiver, method, &arguments,
+                                         'S', 1));
+}
+
+extern int64_t darwin_art_jni_proxy_call_long_method(void* raw_env,
+                                                     void* receiver,
+                                                     void* method, ...);
+int64_t darwin_art_jni_proxy_call_long_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  return (int64_t)(ProxyCallCapturedList(raw_env, receiver, method, &arguments,
+                                         'J', 0));
+}
+
+extern int64_t darwin_art_jni_proxy_call_static_long_method(void* raw_env,
+                                                            void* receiver,
+                                                            void* method, ...);
+int64_t darwin_art_jni_proxy_call_static_long_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  return (int64_t)(ProxyCallCapturedList(raw_env, receiver, method, &arguments,
+                                         'J', 1));
+}
+
+extern float darwin_art_jni_proxy_call_float_method(void* raw_env,
+                                                    void* receiver,
+                                                    void* method, ...);
+float darwin_art_jni_proxy_call_float_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  const uint32_t bits = (uint32_t)(ProxyCallCapturedList(
+      raw_env, receiver, method, &arguments, 'F', 0));
+  float value = 0;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+extern float darwin_art_jni_proxy_call_static_float_method(void* raw_env,
+                                                           void* receiver,
+                                                           void* method, ...);
+float darwin_art_jni_proxy_call_static_float_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  const uint32_t bits = (uint32_t)(ProxyCallCapturedList(
+      raw_env, receiver, method, &arguments, 'F', 1));
+  float value = 0;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+extern double darwin_art_jni_proxy_call_double_method(void* raw_env,
+                                                      void* receiver,
+                                                      void* method, ...);
+double darwin_art_jni_proxy_call_double_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  const uint64_t bits =
+      ProxyCallCapturedList(raw_env, receiver, method, &arguments, 'D', 0);
+  double value = 0;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+extern double darwin_art_jni_proxy_call_static_double_method(void* raw_env,
+                                                             void* receiver,
+                                                             void* method, ...);
+double darwin_art_jni_proxy_call_static_double_method_captured(
+    void* raw_env, void* receiver, void* method, uint8_t* gp_registers,
+    uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 3);
+  const uint64_t bits =
+      ProxyCallCapturedList(raw_env, receiver, method, &arguments, 'D', 1);
+  double value = 0;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+extern void* darwin_art_jni_proxy_call_nonvirtual_object_method(
+    void* raw_env, void* object, void* clazz, void* method, ...);
+void* darwin_art_jni_proxy_call_nonvirtual_object_method_captured(
+    void* raw_env, void* object, void* clazz, void* method,
+    uint8_t* gp_registers, uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 4);
+  return (void*)(uintptr_t)(ProxyCallNonvirtualBits(raw_env, object, clazz,
+                                                    method, &arguments, 'L'));
+}
+
+extern uint8_t darwin_art_jni_proxy_call_nonvirtual_boolean_method(
+    void* raw_env, void* object, void* clazz, void* method, ...);
+uint8_t darwin_art_jni_proxy_call_nonvirtual_boolean_method_captured(
+    void* raw_env, void* object, void* clazz, void* method,
+    uint8_t* gp_registers, uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 4);
+  return (uint8_t)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                           &arguments, 'Z'));
+}
+
+extern int8_t darwin_art_jni_proxy_call_nonvirtual_byte_method(
+    void* raw_env, void* object, void* clazz, void* method, ...);
+int8_t darwin_art_jni_proxy_call_nonvirtual_byte_method_captured(
+    void* raw_env, void* object, void* clazz, void* method,
+    uint8_t* gp_registers, uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 4);
+  return (int8_t)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                          &arguments, 'B'));
+}
+
+extern uint16_t darwin_art_jni_proxy_call_nonvirtual_char_method(
+    void* raw_env, void* object, void* clazz, void* method, ...);
+uint16_t darwin_art_jni_proxy_call_nonvirtual_char_method_captured(
+    void* raw_env, void* object, void* clazz, void* method,
+    uint8_t* gp_registers, uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 4);
+  return (uint16_t)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                            &arguments, 'C'));
+}
+
+extern int16_t darwin_art_jni_proxy_call_nonvirtual_short_method(
+    void* raw_env, void* object, void* clazz, void* method, ...);
+int16_t darwin_art_jni_proxy_call_nonvirtual_short_method_captured(
+    void* raw_env, void* object, void* clazz, void* method,
+    uint8_t* gp_registers, uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 4);
+  return (int16_t)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                           &arguments, 'S'));
+}
+
+extern int32_t darwin_art_jni_proxy_call_nonvirtual_int_method(
+    void* raw_env, void* object, void* clazz, void* method, ...);
+int32_t darwin_art_jni_proxy_call_nonvirtual_int_method_captured(
+    void* raw_env, void* object, void* clazz, void* method,
+    uint8_t* gp_registers, uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 4);
+  return (int32_t)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                           &arguments, 'I'));
+}
+
+extern int64_t darwin_art_jni_proxy_call_nonvirtual_long_method(
+    void* raw_env, void* object, void* clazz, void* method, ...);
+int64_t darwin_art_jni_proxy_call_nonvirtual_long_method_captured(
+    void* raw_env, void* object, void* clazz, void* method,
+    uint8_t* gp_registers, uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 4);
+  return (int64_t)(ProxyCallNonvirtualBits(raw_env, object, clazz, method,
+                                           &arguments, 'J'));
+}
+
+extern float darwin_art_jni_proxy_call_nonvirtual_float_method(
+    void* raw_env, void* object, void* clazz, void* method, ...);
+float darwin_art_jni_proxy_call_nonvirtual_float_method_captured(
+    void* raw_env, void* object, void* clazz, void* method,
+    uint8_t* gp_registers, uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 4);
+  const uint32_t bits = (uint32_t)(ProxyCallNonvirtualBits(
+      raw_env, object, clazz, method, &arguments, 'F'));
+  float value = 0;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+extern double darwin_art_jni_proxy_call_nonvirtual_double_method(
+    void* raw_env, void* object, void* clazz, void* method, ...);
+double darwin_art_jni_proxy_call_nonvirtual_double_method_captured(
+    void* raw_env, void* object, void* clazz, void* method,
+    uint8_t* gp_registers, uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 4);
+  const uint64_t bits =
+      ProxyCallNonvirtualBits(raw_env, object, clazz, method, &arguments, 'D');
+  double value = 0;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+extern void darwin_art_jni_proxy_call_nonvirtual_void_method(void* raw_env,
+                                                             void* object,
+                                                             void* clazz,
+                                                             void* method, ...);
+void darwin_art_jni_proxy_call_nonvirtual_void_method_captured(
+    void* raw_env, void* object, void* clazz, void* method,
+    uint8_t* gp_registers, uint8_t* fp_registers, uint8_t* caller_stack) {
+  AndroidArm64VaList arguments =
+      CapturedVaList(gp_registers, fp_registers, caller_stack, 4);
+  (void)(ProxyCallNonvirtualBits(raw_env, object, clazz, method, &arguments,
+                                 'V'));
+}
+
 static const RawJniSlot kNativeTable[DARWIN_ART_JNI_NATIVE_SLOT_COUNT] = {
     [DARWIN_ART_JNI_SLOT_GetVersion] = (RawJniSlot)ProxyGetVersion,
     [DARWIN_ART_JNI_SLOT_FindClass] = (RawJniSlot)ProxyFindClass,
@@ -1409,6 +1997,100 @@ static const RawJniSlot kNativeTable[DARWIN_ART_JNI_NATIVE_SLOT_COUNT] = {
     [DARWIN_ART_JNI_SLOT_DeleteWeakGlobalRef] =
         (RawJniSlot)ProxyDeleteWeakGlobalRef,
     [DARWIN_ART_JNI_SLOT_ExceptionCheck] = (RawJniSlot)ProxyExceptionCheck,
+    /* Remaining slots. */
+    [DARWIN_ART_JNI_SLOT_DefineClass] = (RawJniSlot)ProxyDefineClass,
+    [DARWIN_ART_JNI_SLOT_EnsureLocalCapacity] =
+        (RawJniSlot)ProxyEnsureLocalCapacity,
+    [DARWIN_ART_JNI_SLOT_AllocObject] = (RawJniSlot)ProxyAllocObject,
+    [DARWIN_ART_JNI_SLOT_GetObjectRefType] = (RawJniSlot)ProxyGetObjectRefType,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualObjectMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_nonvirtual_object_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualObjectMethodV] =
+        (RawJniSlot)ProxyCallNonvirtualObjectMethodV,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualObjectMethodA] =
+        (RawJniSlot)ProxyCallNonvirtualObjectMethodA,
+    [DARWIN_ART_JNI_SLOT_CallBooleanMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_boolean_method,
+    [DARWIN_ART_JNI_SLOT_CallStaticBooleanMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_static_boolean_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualBooleanMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_nonvirtual_boolean_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualBooleanMethodV] =
+        (RawJniSlot)ProxyCallNonvirtualBooleanMethodV,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualBooleanMethodA] =
+        (RawJniSlot)ProxyCallNonvirtualBooleanMethodA,
+    [DARWIN_ART_JNI_SLOT_CallByteMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_byte_method,
+    [DARWIN_ART_JNI_SLOT_CallStaticByteMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_static_byte_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualByteMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_nonvirtual_byte_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualByteMethodV] =
+        (RawJniSlot)ProxyCallNonvirtualByteMethodV,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualByteMethodA] =
+        (RawJniSlot)ProxyCallNonvirtualByteMethodA,
+    [DARWIN_ART_JNI_SLOT_CallCharMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_char_method,
+    [DARWIN_ART_JNI_SLOT_CallStaticCharMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_static_char_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualCharMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_nonvirtual_char_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualCharMethodV] =
+        (RawJniSlot)ProxyCallNonvirtualCharMethodV,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualCharMethodA] =
+        (RawJniSlot)ProxyCallNonvirtualCharMethodA,
+    [DARWIN_ART_JNI_SLOT_CallShortMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_short_method,
+    [DARWIN_ART_JNI_SLOT_CallStaticShortMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_static_short_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualShortMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_nonvirtual_short_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualShortMethodV] =
+        (RawJniSlot)ProxyCallNonvirtualShortMethodV,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualShortMethodA] =
+        (RawJniSlot)ProxyCallNonvirtualShortMethodA,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualIntMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_nonvirtual_int_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualIntMethodV] =
+        (RawJniSlot)ProxyCallNonvirtualIntMethodV,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualIntMethodA] =
+        (RawJniSlot)ProxyCallNonvirtualIntMethodA,
+    [DARWIN_ART_JNI_SLOT_CallLongMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_long_method,
+    [DARWIN_ART_JNI_SLOT_CallStaticLongMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_static_long_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualLongMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_nonvirtual_long_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualLongMethodV] =
+        (RawJniSlot)ProxyCallNonvirtualLongMethodV,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualLongMethodA] =
+        (RawJniSlot)ProxyCallNonvirtualLongMethodA,
+    [DARWIN_ART_JNI_SLOT_CallFloatMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_float_method,
+    [DARWIN_ART_JNI_SLOT_CallStaticFloatMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_static_float_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualFloatMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_nonvirtual_float_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualFloatMethodV] =
+        (RawJniSlot)ProxyCallNonvirtualFloatMethodV,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualFloatMethodA] =
+        (RawJniSlot)ProxyCallNonvirtualFloatMethodA,
+    [DARWIN_ART_JNI_SLOT_CallDoubleMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_double_method,
+    [DARWIN_ART_JNI_SLOT_CallStaticDoubleMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_static_double_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualDoubleMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_nonvirtual_double_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualDoubleMethodV] =
+        (RawJniSlot)ProxyCallNonvirtualDoubleMethodV,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualDoubleMethodA] =
+        (RawJniSlot)ProxyCallNonvirtualDoubleMethodA,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualVoidMethod] =
+        (RawJniSlot)darwin_art_jni_proxy_call_nonvirtual_void_method,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualVoidMethodV] =
+        (RawJniSlot)ProxyCallNonvirtualVoidMethodV,
+    [DARWIN_ART_JNI_SLOT_CallNonvirtualVoidMethodA] =
+        (RawJniSlot)ProxyCallNonvirtualVoidMethodA,
 };
 
 static const RawJniSlot kInvokeTable[DARWIN_ART_JNI_INVOKE_SLOT_COUNT] = {

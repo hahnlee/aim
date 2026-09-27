@@ -11,6 +11,7 @@ unsafe extern "C" {
     fn darwin_art_jni_fixture_reset();
     fn darwin_art_jni_fixture_vm() -> *mut c_void;
     fn darwin_art_jni_fixture_passed() -> i32;
+    fn darwin_art_jni_fixture_calls_passed() -> i32;
 }
 
 struct FixtureResolver;
@@ -48,7 +49,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     unsafe { darwin_art_jni_fixture_reset() };
     let bytes = fs::read(fixture)?;
     let mut resolver = FixtureResolver;
-    let mut image = LoadedElf::load_with_resolver(&bytes, &mut resolver)?;
+    let image = LoadedElf::load_with_resolver(&bytes, &mut resolver)?;
     image.run_initializers()?;
     let result = image.call_exported_i32("jni_proxy_fixture_run")?;
     if result != 0x0001_0006 {
@@ -57,6 +58,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: the fake backend state is read only after the synchronous ELF call returns.
     if unsafe { darwin_art_jni_fixture_passed() } != 1 {
         return Err("fake Darwin backend did not observe the complete JNI path".into());
+    }
+    if unsafe { darwin_art_jni_fixture_calls_passed() } != 1 {
+        return Err(
+            "fake Darwin backend did not receive the variadic/va_list/nonvirtual calls".into(),
+        );
     }
     println!(
         "android-jni-proxy: PASS ELF->JNI_OnLoad->JavaVM/GetEnv->proxy JNIEnv->fake Darwin backend"

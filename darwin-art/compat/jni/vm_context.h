@@ -46,6 +46,8 @@ private:
   static int32_t ThrowNew(void *, void *, const char *) noexcept;
   static void *GetMethod(void *, void *, const char *, const char *, int32_t) noexcept;
   static uint64_t CallMethod(void *, void *, void *, void *, int32_t, int32_t) noexcept;
+  static uint64_t CallNonvirtualMethod(void *, void *, void *, void *, void *,
+                                       int32_t) noexcept;
 
   JavaVM *const vm_;
   const std::shared_ptr<NativeRegistration> registration_;

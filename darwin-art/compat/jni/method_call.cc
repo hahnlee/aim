@@ -129,4 +129,48 @@ uint64_t CallMethodA(JNIEnv* env,
   }
 }
 
+uint64_t CallNonvirtualMethodA(JNIEnv* env,
+                               jobject receiver,
+                               jclass clazz,
+                               jmethodID method,
+                               const jvalue* args,
+                               int32_t return_shorty) {
+  if (env == nullptr || receiver == nullptr || clazz == nullptr ||
+      method == nullptr || !IsReturnShorty(return_shorty)) {
+    return 0;
+  }
+  switch (return_shorty) {
+    case 'L':
+      return reinterpret_cast<uint64_t>(
+          env->CallNonvirtualObjectMethodA(receiver, clazz, method, args));
+    case 'Z':
+      return env->CallNonvirtualBooleanMethodA(receiver, clazz, method, args);
+    case 'B':
+      return static_cast<uint64_t>(
+          env->CallNonvirtualByteMethodA(receiver, clazz, method, args));
+    case 'C':
+      return env->CallNonvirtualCharMethodA(receiver, clazz, method, args);
+    case 'S':
+      return static_cast<uint64_t>(
+          env->CallNonvirtualShortMethodA(receiver, clazz, method, args));
+    case 'I':
+      return static_cast<uint64_t>(
+          env->CallNonvirtualIntMethodA(receiver, clazz, method, args));
+    case 'J':
+      return static_cast<uint64_t>(
+          env->CallNonvirtualLongMethodA(receiver, clazz, method, args));
+    case 'F':
+      return FloatBits(
+          env->CallNonvirtualFloatMethodA(receiver, clazz, method, args));
+    case 'D':
+      return DoubleBits(
+          env->CallNonvirtualDoubleMethodA(receiver, clazz, method, args));
+    case 'V':
+      env->CallNonvirtualVoidMethodA(receiver, clazz, method, args);
+      return 0;
+    default:
+      return 0;
+  }
+}
+
 }  // namespace darwin_art::jni

@@ -129,8 +129,38 @@ uint64_t VmContext::CallMethod(void *raw, void *object, void *method,
   }
 }
 
+uint64_t VmContext::CallNonvirtualMethod(void *raw, void *object, void *clazz,
+                                         void *method, void *args,
+                                         int32_t result) noexcept {
+  auto *env = static_cast<JNIEnv *>(CurrentEnvironment(raw));
+  if (!env || !object || !clazz || !method)
+    return 0;
+  auto *self = static_cast<VmContext *>(raw);
+  try {
+    std::string descriptor;
+    {
+      std::lock_guard lock(self->methods_mutex_);
+      auto found = self->descriptors_.find(static_cast<jmethodID>(method));
+      if (found == self->descriptors_.end())
+        return 0;
+      descriptor = found->second;
+    }
+    std::vector<jvalue> values;
+    if (!DecodeAndroidArguments(descriptor, args, &values))
+      return 0;
+    // No locks across a Java call: it may reenter method lookup/registration.
+    return CallNonvirtualMethodA(env, static_cast<jobject>(object),
+                                 static_cast<jclass>(clazz),
+                                 static_cast<jmethodID>(method),
+                                 values.empty() ? nullptr : values.data(), result);
+  } catch (const std::bad_alloc &) {
+    AllocationFailure(env);
+    return 0;
+  }
+}
+
 DarwinArtJniBackend VmContext::Backend() {
   return {this,     CurrentEnvironment, Attach,    Detach,    FindClass,
-          Register, ThrowNew,           GetMethod, CallMethod};
+          Register, ThrowNew,           GetMethod, CallMethod, CallNonvirtualMethod};
 }
 } // namespace darwin_art::jni

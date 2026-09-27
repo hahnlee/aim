@@ -153,6 +153,71 @@ void AssertNoCall(std::uint64_t actual) {
   assert(g_calls == 0);
 }
 
+constexpr uintptr_t kClassValue = 0x0f0e0d0c0b0a0908ull;
+constexpr uintptr_t kNonvirtualObjectValue = 0x2468ace013579bdfull;
+
+void CheckNonvirtualCall(JNIEnv *env, jobject receiver, jclass clazz,
+                         jmethodID method, const jvalue *args) {
+  assert(clazz == reinterpret_cast<jclass>(kClassValue));
+  CheckCall(env, receiver, method, args);
+}
+
+jobject NonvirtualObject(JNIEnv *e, jobject r, jclass c, jmethodID m,
+                   const jvalue *a) {
+  CheckNonvirtualCall(e, r, c, m, a);
+  return reinterpret_cast<jobject>(kNonvirtualObjectValue);
+}
+jboolean NonvirtualBoolean(JNIEnv *e, jobject r, jclass c, jmethodID m,
+                    const jvalue *a) {
+  CheckNonvirtualCall(e, r, c, m, a);
+  return JNI_TRUE;
+}
+jbyte NonvirtualByte(JNIEnv *e, jobject r, jclass c, jmethodID m,
+                 const jvalue *a) {
+  CheckNonvirtualCall(e, r, c, m, a);
+  return static_cast<jbyte>(-9);
+}
+jchar NonvirtualChar(JNIEnv *e, jobject r, jclass c, jmethodID m,
+                 const jvalue *a) {
+  CheckNonvirtualCall(e, r, c, m, a);
+  return static_cast<jchar>(0x4321);
+}
+jshort NonvirtualShort(JNIEnv *e, jobject r, jclass c, jmethodID m,
+                  const jvalue *a) {
+  CheckNonvirtualCall(e, r, c, m, a);
+  return static_cast<jshort>(-4321);
+}
+jint NonvirtualInt(JNIEnv *e, jobject r, jclass c, jmethodID m,
+                const jvalue *a) {
+  CheckNonvirtualCall(e, r, c, m, a);
+  return -7777777;
+}
+jlong NonvirtualLong(JNIEnv *e, jobject r, jclass c, jmethodID m,
+                 const jvalue *a) {
+  CheckNonvirtualCall(e, r, c, m, a);
+  return -0x33445566778899ll;
+}
+jfloat NonvirtualFloat(JNIEnv *e, jobject r, jclass c, jmethodID m,
+                  const jvalue *a) {
+  CheckNonvirtualCall(e, r, c, m, a);
+  std::uint32_t bits = 0x40490fdbu;
+  jfloat value;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+jdouble NonvirtualDouble(JNIEnv *e, jobject r, jclass c, jmethodID m,
+                   const jvalue *a) {
+  CheckNonvirtualCall(e, r, c, m, a);
+  std::uint64_t bits = 0x400921fb54442d18ull;
+  jdouble value;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+void NonvirtualVoid(JNIEnv *e, jobject r, jclass c, jmethodID m,
+                const jvalue *a) {
+  CheckNonvirtualCall(e, r, c, m, a);
+}
+
 } // namespace
 
 int main() {
@@ -178,6 +243,16 @@ int main() {
   functions.CallStaticDoubleMethodA = StaticDouble;
   functions.CallStaticVoidMethodA = StaticVoid;
   functions.NewObjectA = Constructor;
+  functions.CallNonvirtualObjectMethodA = NonvirtualObject;
+  functions.CallNonvirtualBooleanMethodA = NonvirtualBoolean;
+  functions.CallNonvirtualByteMethodA = NonvirtualByte;
+  functions.CallNonvirtualCharMethodA = NonvirtualChar;
+  functions.CallNonvirtualShortMethodA = NonvirtualShort;
+  functions.CallNonvirtualIntMethodA = NonvirtualInt;
+  functions.CallNonvirtualLongMethodA = NonvirtualLong;
+  functions.CallNonvirtualFloatMethodA = NonvirtualFloat;
+  functions.CallNonvirtualDoubleMethodA = NonvirtualDouble;
+  functions.CallNonvirtualVoidMethodA = NonvirtualVoid;
   // ExceptionClear intentionally remains null. The adapter must preserve the
   // callee's pending exception and perform no exception-state policy.
   JNIEnv env{&functions};
@@ -271,7 +346,37 @@ int main() {
   ResetCallState(args);
   AssertNoCall(CallMethodA(&env, receiver, nullptr, args, 'I', 0));
 
+  using darwin_art::jni::CallNonvirtualMethodA;
+  const jclass clazz = reinterpret_cast<jclass>(kClassValue);
+  const struct {
+    int32_t shorty;
+    std::uint64_t expected;
+  } nonvirtual[] = {
+      {'L', kNonvirtualObjectValue},
+      {'Z', JNI_TRUE},
+      {'B', static_cast<std::uint64_t>(static_cast<std::int64_t>(-9))},
+      {'C', 0x4321},
+      {'S', static_cast<std::uint64_t>(static_cast<std::int64_t>(-4321))},
+      {'I', static_cast<std::uint64_t>(static_cast<std::int64_t>(-7777777))},
+      {'J', static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(-0x33445566778899ll))},
+      {'F', 0x40490fdbu},
+      {'D', 0x400921fb54442d18ull},
+      {'V', 0},
+  };
+  for (const auto &call : nonvirtual) {
+    ResetCallState(args);
+    AssertOneCall(
+        CallNonvirtualMethodA(&env, receiver, clazz, method, args, call.shorty),
+        call.expected);
+  }
+  ResetCallState(args);
+  AssertNoCall(CallNonvirtualMethodA(&env, receiver, nullptr, method, args, 'I'));
+  ResetCallState(args);
+  AssertNoCall(CallNonvirtualMethodA(&env, receiver, clazz, method, args, 'X'));
+
   std::puts("android-jni-method-call: PASS A-slots instance-static-constructor "
-            "signed-results fp-bits pending-preserved invalid-null-guards");
+            "nonvirtual signed-results fp-bits pending-preserved "
+            "invalid-null-guards");
   return 0;
 }
