@@ -5,7 +5,7 @@
 use super::{ANDROID_ENOENT, ANDROID_ENOTDIR, ANDROID_EOPNOTSUPP, ANDROID_ERANGE, Facade};
 use darwin_art_fs_broker::guest_path::{GuestRoot, MountOrigin};
 use std::ffi::{c_char, c_int};
-use std::fs::{File, Metadata};
+use std::fs::File;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 
@@ -87,7 +87,8 @@ impl WorkingDirectory {
         Ok((state.directory.try_clone()?, state.origin.clone()))
     }
 
-    pub(super) fn metadata(&self) -> std::io::Result<Metadata> {
+    #[cfg(test)]
+    pub(super) fn metadata(&self) -> std::io::Result<std::fs::Metadata> {
         self.state
             .lock()
             .map_err(|_| std::io::Error::other("cwd state poisoned"))?

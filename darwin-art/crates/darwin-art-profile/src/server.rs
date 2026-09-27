@@ -1009,7 +1009,17 @@ fn validate_bound_service_request(
 }
 
 fn start_runtime(state: &Arc<State>, payload: &[u8]) -> Result<Vec<u8>, ProfileError> {
-    let request = crate::runtime_service_protocol::StartRuntimeRequest::decode(payload)?;
+    let mut request = crate::runtime_service_protocol::StartRuntimeRequest::decode(payload)?;
+    // As for daemonized processes: the daemon, not the client, names the
+    // process's Android identity (system_server is SYSTEM_UID).
+    if request.package == "android.system" {
+        request
+            .environment
+            .retain(|(name, _)| name != "DARWIN_ART_ANDROID_UID");
+        request
+            .environment
+            .push(("DARWIN_ART_ANDROID_UID".into(), "1000".into()));
+    }
     let instance = {
         let _start = state.start_gate.lock().unwrap();
         if let Some(previous) = state.runtime_services.conflicting_instance(&request)? {

@@ -151,6 +151,7 @@ my %supported = (
   remove => 'DarwinLinuxRemove', rename => 'DarwinLinuxRename',
   statvfs => 'DarwinLinuxStatvfs', fstatvfs => 'DarwinLinuxFstatvfs',
   chmod => 'DarwinLinuxChmod', fchmod => 'DarwinLinuxFchmod',
+  fchown => 'DarwinLinuxFchown',
   mkdir => 'DarwinLinuxMkdir', lstat => 'DarwinLinuxLstat',
   unlink => 'DarwinLinuxUnlink', readlink => 'DarwinLinuxReadlink',
   symlink => 'DarwinLinuxSymlink', link => 'DarwinLinuxLink',

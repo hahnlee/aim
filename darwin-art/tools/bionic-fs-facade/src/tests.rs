@@ -786,11 +786,15 @@ mod tests {
 
     #[test]
     fn fchown_does_not_acknowledge_unstored_overlay_ownership() {
-        let facade = Facade::new(File::open("/").unwrap(), b"/", b"/").unwrap();
+        // Without trusted credentials an overlay node has no stored owner;
+        // guest_ownership_tests covers the credentialed contract.
+        let mut facade = Facade::new(File::open("/").unwrap(), b"/", b"/").unwrap();
+        facade.credentials = None;
         let node = Arc::new(Mutex::new(OverlayFile {
             inode: 99,
             mode: ANDROID_S_IFREG | 0o600,
             data: b"unchanged".to_vec(),
+            owner: None,
         }));
         let fd = facade.descriptors.lock().unwrap().insert_with_flags(
             Descriptor::Overlay(OverlayDescriptor {
