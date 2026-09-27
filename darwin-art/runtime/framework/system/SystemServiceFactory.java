@@ -55,15 +55,6 @@ import java.util.HashMap;
 public final class SystemServiceFactory {
     private SystemServiceFactory() {}
 
-    private static IBinder deferredWindowManager;
-
-    /** The window service withheld from the directory until startOtherServices. */
-    public static IBinder takeDeferredWindowManager() {
-        IBinder windowManager = deferredWindowManager;
-        deferredWindowManager = null;
-        return windowManager;
-    }
-
     /**
      * The runtime's system service endpoints. PackageManagerService publishes
      * "package" itself when SystemServerBootstrap starts it.
@@ -81,33 +72,19 @@ public final class SystemServiceFactory {
         taskGeometry.install();
         ActivityManagerEndpoint activity =
                 new ActivityManagerEndpoint(processes, taskGeometry);
-        // The upstream owners publish these themselves (#148, opt-in).
-        final boolean upstreamActivity = UpstreamActivityManager.enabled();
-        if (!upstreamActivity) {
-            services.put("activity", activity);
-            LocalServices.addService(android.app.ActivityManagerInternal.class,
-                    activity.localService());
-        }
+        services.put("activity", activity);
+        LocalServices.addService(android.app.ActivityManagerInternal.class, activity.localService());
         BatteryService battery =
                 new BatteryService(new DarwinBatteryStateProvider(), activity.systemBroadcasts());
         battery.start();
         new dev.darwinart.runtime.time.HostTimeZoneService(activity.systemBroadcasts()).start();
         services.put("batteryproperties", new BatteryPropertiesRegistrarEndpoint(battery));
-        if (!upstreamActivity) {
-            services.put("batterystats", new BatteryStatsEndpoint(battery));
-            services.put("activity_task", new ActivityTaskManagerEndpoint(processes));
-            LocalServices.addService(ActivityTaskManagerInternal.class,
-                    new ActivityTaskManagerLocal());
-        }
+        services.put("batterystats", new BatteryStatsEndpoint(battery));
+        services.put("activity_task", new ActivityTaskManagerEndpoint(processes));
+        LocalServices.addService(ActivityTaskManagerInternal.class, new ActivityTaskManagerLocal());
         services.put("display", new DisplayManagerEndpoint(taskDisplays));
         DesktopRootRegistry desktopRoots = windowManager.createDesktopRootRegistry();
-        if (upstreamActivity) {
-            // SystemServer starts WMS in startOtherServices, after AMS: the
-            // upstream constructors must not find a window service.
-            deferredWindowManager = windowManager;
-        } else {
-            services.put("window", windowManager);
-        }
+        services.put("window", windowManager);
         services.put("darwin.root_geometry", new DesktopRootGeometryEndpoint(taskGeometry));
         services.put("darwin.window_metadata",
                 new DesktopWindowMetadataEndpoint(processes, windowMetadata));

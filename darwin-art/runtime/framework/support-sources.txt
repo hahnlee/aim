@@ -102,7 +102,6 @@ runtime/framework/recovery/RecoverySystemEndpoint.java
 runtime/framework/system/HostCommandService.java
 runtime/framework/system/LauncherQueries.java
 runtime/framework/system/SystemServerBootstrap.java
-runtime/framework/system/UpstreamActivityManager.java
 runtime/framework/system/SystemServiceFactory.java
 runtime/framework/trust/TrustManagerEndpoint.java
 runtime/framework/uimode/UiModeManagerEndpoint.java
