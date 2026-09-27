@@ -283,5 +283,19 @@ int main() {
   sink.reset();
   assert(!released && ledger.Cancel(3000) && released);
   assert(ledger.Cancel(3001));
+  // The oldest event Java has not finished yet, for the dispatch watchdog.
+  {
+    darwin_art::input::FinishLedger watched;
+    uint32_t oldest = 0;
+    uint64_t since = 0;
+    assert(!watched.OldestUnfinished(&oldest, &since));
+    assert(watched.TryRegister(7));
+    assert(watched.TryRegister(8));
+    assert(watched.OldestUnfinished(&oldest, &since) && oldest == 7 && since != 0);
+    assert(watched.Record(7, true));
+    assert(watched.OldestUnfinished(&oldest, &since) && oldest == 8);
+    assert(watched.Record(8, false));
+    assert(!watched.OldestUnfinished(&oldest, &since));
+  }
   std::puts("finish ledger: bounded admission/no eviction/duplicate ACK PASS");
 }

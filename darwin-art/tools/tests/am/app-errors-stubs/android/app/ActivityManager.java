@@ -4,6 +4,7 @@ package android.app;
 public class ActivityManager {
     public static class ProcessErrorStateInfo {
         public static final int CRASHED = 1;
+        public static final int NOT_RESPONDING = 2;
         public int condition;
         public String processName;
         public int pid;
