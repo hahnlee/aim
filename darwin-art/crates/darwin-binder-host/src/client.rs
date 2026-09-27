@@ -19,6 +19,10 @@ use crate::wire::{self, Ioctl, IoctlReply, Reader, Writer};
 pub trait UserMemory {
     fn read(&mut self, address: u64, len: usize) -> Result<Vec<u8>, Errno>;
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Errno>;
+    /// A received file now sits at `fd` (for the caller's fd bookkeeping).
+    fn installed(&mut self, _fd: i32) {}
+    /// The driver closed `fd`.
+    fn closed(&mut self, _fd: i32) {}
 }
 
 /// Linux EIO: the daemon is gone.
@@ -296,10 +300,14 @@ impl BinderFile {
             }
             Ok(reply)
         })??;
+        for fd in &reply.installs {
+            mem.installed(*fd as i32);
+        }
         for (addr, bytes) in &reply.writes {
             mem.write(*addr, bytes)?;
         }
         for fd in &reply.closes {
+            mem.closed(*fd as i32);
             // SAFETY: closing an fd the driver installed and now frees.
             unsafe { libc::close(*fd as i32) };
         }

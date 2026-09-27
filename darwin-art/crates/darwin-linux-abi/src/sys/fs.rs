@@ -1,32 +1,42 @@
-//! File syscalls. Guest fds are host fds; paths go through the guest root
-//! (`vfs`); flags and `struct stat` are translated between Linux and Darwin.
+//! File descriptor syscalls: open, read/write, stat, fcntl, ioctl. Guest
+//! fds are host fds; paths go through the guest root (`vfs`); flags and
+//! `struct stat` are translated between Linux and Darwin. Fds with Linux
+//! state of their own (`fdtab`) dispatch to their owner.
 
 use std::ffi::CString;
 
+use super::fdtab::{self, Kind};
+use super::{attrs, dir, event, inotify, memfd, net};
 use crate::errno::{self, EBADF, EINVAL, ENOENT, ENOTTY, ERANGE};
 use crate::sys::{guest_cstr, procfs};
 use crate::vfs;
 
 // Linux arm64 open flags.
-const O_ACCMODE: u64 = 0o3;
-const O_CREAT: u64 = 0o100;
+pub(super) const O_ACCMODE: u64 = 0o3;
+pub(super) const O_CREAT: u64 = 0o100;
 const O_EXCL: u64 = 0o200;
 const O_NOCTTY: u64 = 0o400;
-const O_TRUNC: u64 = 0o1000;
+pub(super) const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
-const O_NONBLOCK: u64 = 0o4000;
+pub(super) const O_NONBLOCK: u64 = 0o4000;
 const O_DSYNC: u64 = 0o10000;
 const O_DIRECTORY: u64 = 0o40000;
 const O_NOFOLLOW: u64 = 0o100000;
-const O_CLOEXEC: u64 = 0o2000000;
+const O_LARGEFILE: u64 = 0o400000;
+pub(super) const O_CLOEXEC: u64 = 0o2000000;
 const O_SYNC: u64 = 0o4010000;
 const O_PATH: u64 = 0o10000000;
 const O_TMPFILE: u64 = 0o20000000;
 
 // Linux *at() flags.
-const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+pub(super) const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 const AT_EACCESS: u64 = 0x200;
-const AT_EMPTY_PATH: u64 = 0x1000;
+pub(super) const AT_EMPTY_PATH: u64 = 0x1000;
+
+const EISDIR: i64 = 21;
+const ESPIPE: i64 = 29;
+const EROFS: i64 = 30;
+const EPERM: i64 = 1;
 
 fn open_flags_to_host(f: u64) -> i32 {
     let mut h = match f & O_ACCMODE {
@@ -61,13 +71,18 @@ fn open_flags_to_host(f: u64) -> i32 {
 }
 
 fn open_flags_from_host(h: i32) -> u64 {
-    let mut f = (h & libc::O_ACCMODE) as u64;
+    let mut f = (h & libc::O_ACCMODE) as u64 | O_LARGEFILE;
     for (l, d) in [(O_APPEND, libc::O_APPEND), (O_NONBLOCK, libc::O_NONBLOCK)] {
         if h & d != 0 {
             f |= l;
         }
     }
     f
+}
+
+/// Refuse modifying the read-only image.
+pub(super) fn check_writable(r: &vfs::Resolved) -> Result<(), i64> {
+    if r.read_only() { Err(-EROFS) } else { Ok(()) }
 }
 
 pub fn openat(a: [u64; 6]) -> i64 {
@@ -97,10 +112,24 @@ pub fn openat(a: [u64; 6]) -> i64 {
         return fd;
     }
     let hflags = open_flags_to_host(flags);
+    if let Some(fd) = procfs::open(&r.guest, flags, hflags) {
+        return fd;
+    }
+    let creating = flags & O_CREAT != 0 && attrs::absent(&r.host);
+    if flags & (O_CREAT | O_TRUNC) != 0 || flags & O_ACCMODE != 0 {
+        // Opening an existing file in the image for reading only is fine;
+        // anything that could modify it is not.
+        if let Err(e) = check_writable(&r) {
+            return e;
+        }
+    }
     // SAFETY: host path from the resolver.
     let fd = unsafe { libc::open(r.host.as_ptr(), hflags, mode as libc::c_uint) };
     if fd < 0 {
         return -(errno::last() as i64);
+    }
+    if creating {
+        attrs::created(&r.guest);
     }
     // An original ELF with a translation-cache entry is replaced by the
     // translated file here, before the guest reads its headers.
@@ -109,21 +138,118 @@ pub fn openat(a: [u64; 6]) -> i64 {
 }
 
 pub fn close(a: [u64; 6]) -> i64 {
+    let fd = a[0] as i32;
+    if fdtab::is_hidden(fd) {
+        return -(EBADF as i64);
+    }
+    fdtab::on_close(fd);
     // SAFETY: closing a guest fd.
-    errno::check(unsafe { libc::close(a[0] as i32) } as i64)
+    errno::check(unsafe { libc::close(fd) } as i64)
+}
+
+/// The first non-empty buffer of an iovec list.
+fn first(iov: &[libc::iovec]) -> (u64, usize) {
+    iov.iter()
+        .find(|v| v.iov_len > 0)
+        .map_or((0, 0), |v| (v.iov_base as u64, v.iov_len))
+}
+
+/// read/readv on an fd with Linux state. None: a plain host fd.
+fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
+    let k = fdtab::get(fd)?;
+    let (buf, len) = first(iov);
+    match k {
+        Kind::Event(_) | Kind::Timer(_) => event::read(fd, buf, len),
+        Kind::Inotify(_) => inotify::read(fd, buf, len),
+        Kind::Sock(_) => net::read(fd, iov),
+        Kind::Dir(_) => Some(-EISDIR),
+        Kind::Epoll(_) => Some(-(EINVAL as i64)),
+        Kind::Memfd(_) => {
+            let mut total = 0i64;
+            for v in iov {
+                match memfd::rw(fd, v.iov_base as u64, v.iov_len, None, false)? {
+                    n if n < 0 => return Some(if total > 0 { total } else { n }),
+                    n => {
+                        total += n;
+                        if (n as usize) < v.iov_len {
+                            break;
+                        }
+                    }
+                }
+            }
+            Some(total)
+        }
+    }
+}
+
+fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
+    let k = fdtab::get(fd)?;
+    let (buf, len) = first(iov);
+    match k {
+        Kind::Event(_) | Kind::Timer(_) => event::write(fd, buf, len),
+        Kind::Sock(_) => net::write(fd, iov),
+        Kind::Dir(_) => Some(-(EBADF as i64)),
+        Kind::Epoll(_) | Kind::Inotify(_) => Some(-(EINVAL as i64)),
+        Kind::Memfd(_) => {
+            if memfd::write_sealed(fd) {
+                return Some(-EPERM);
+            }
+            let mut total = 0i64;
+            for v in iov {
+                let n = memfd::rw(fd, v.iov_base as u64, v.iov_len, None, true)?;
+                if n < 0 {
+                    return Some(if total > 0 { total } else { n });
+                }
+                total += n;
+            }
+            Some(total)
+        }
+    }
+}
+
+/// pread/pwrite on an fd with Linux state. None: a plain host fd.
+fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i64> {
+    match fdtab::get(fd)? {
+        Kind::Memfd(_) => {
+            if write && memfd::write_sealed(fd) {
+                return Some(-EPERM);
+            }
+            memfd::rw(fd, buf, len, Some(pos), write)
+        }
+        Kind::Dir(_) if !write => Some(-EISDIR),
+        _ => Some(-ESPIPE),
+    }
+}
+
+fn one(buf: u64, len: usize) -> [libc::iovec; 1] {
+    [libc::iovec {
+        iov_base: buf as *mut _,
+        iov_len: len,
+    }]
 }
 
 pub fn read(a: [u64; 6]) -> i64 {
+    let (fd, buf, len) = (a[0] as i32, a[1], a[2] as usize);
+    if let Some(r) = special_read(fd, &one(buf, len)) {
+        return r;
+    }
     // SAFETY: guest buffer.
-    errno::check(unsafe { libc::read(a[0] as i32, a[1] as *mut _, a[2] as usize) } as i64)
+    errno::check(unsafe { libc::read(fd, buf as *mut _, len) } as i64)
 }
 
 pub fn write(a: [u64; 6]) -> i64 {
+    let (fd, buf, len) = (a[0] as i32, a[1], a[2] as usize);
+    if let Some(r) = special_write(fd, &one(buf, len)) {
+        return r;
+    }
     // SAFETY: guest buffer.
-    errno::check(unsafe { libc::write(a[0] as i32, a[1] as *const _, a[2] as usize) } as i64)
+    errno::check(unsafe { libc::write(fd, buf as *const _, len) } as i64)
 }
 
 pub fn pread64(a: [u64; 6]) -> i64 {
+    if let Some(r) = special_pio(a[0] as i32, a[1], a[2] as usize, a[3] as i64, false) {
+        return r;
+    }
     // SAFETY: guest buffer.
     errno::check(
         unsafe { libc::pread(a[0] as i32, a[1] as *mut _, a[2] as usize, a[3] as i64) } as i64,
@@ -131,25 +257,86 @@ pub fn pread64(a: [u64; 6]) -> i64 {
 }
 
 pub fn pwrite64(a: [u64; 6]) -> i64 {
+    if let Some(r) = special_pio(a[0] as i32, a[1], a[2] as usize, a[3] as i64, true) {
+        return r;
+    }
     // SAFETY: guest buffer.
     errno::check(
         unsafe { libc::pwrite(a[0] as i32, a[1] as *const _, a[2] as usize, a[3] as i64) } as i64,
     )
 }
 
-// struct iovec is { void *base; size_t len; } on both kernels.
+fn iovs(ptr: u64, n: u64) -> Result<&'static [libc::iovec], i64> {
+    if n > 1024 {
+        return Err(-(EINVAL as i64));
+    }
+    if n == 0 {
+        return Ok(&[]);
+    }
+    // SAFETY: guest iovec array; struct iovec is { void *base; size_t len; }
+    // on both kernels.
+    Ok(unsafe { std::slice::from_raw_parts(ptr as *const libc::iovec, n as usize) })
+}
+
 pub fn readv(a: [u64; 6]) -> i64 {
+    let v = match iovs(a[1], a[2]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if let Some(r) = special_read(a[0] as i32, v) {
+        return r;
+    }
     // SAFETY: guest iovec array.
-    errno::check(
-        unsafe { libc::readv(a[0] as i32, a[1] as *const libc::iovec, a[2] as i32) } as i64,
-    )
+    errno::check(unsafe { libc::readv(a[0] as i32, v.as_ptr(), v.len() as i32) } as i64)
 }
 
 pub fn writev(a: [u64; 6]) -> i64 {
+    let v = match iovs(a[1], a[2]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if let Some(r) = special_write(a[0] as i32, v) {
+        return r;
+    }
     // SAFETY: guest iovec array.
-    errno::check(
-        unsafe { libc::writev(a[0] as i32, a[1] as *const libc::iovec, a[2] as i32) } as i64,
-    )
+    errno::check(unsafe { libc::writev(a[0] as i32, v.as_ptr(), v.len() as i32) } as i64)
+}
+
+/// preadv/pwritev (69/70) and preadv2/pwritev2 (286/287; flags ignored).
+pub fn preadv(write: bool, a: [u64; 6]) -> i64 {
+    let (fd, pos) = (a[0] as i32, a[3] as i64);
+    let v = match iovs(a[1], a[2]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if pos == -1 {
+        return if write { writev(a) } else { readv(a) };
+    }
+    if fdtab::get(fd).is_some() {
+        let mut total = 0i64;
+        for io in v {
+            let r = match special_pio(fd, io.iov_base as u64, io.iov_len, pos + total, write) {
+                Some(r) => r,
+                None => break,
+            };
+            if r < 0 {
+                return if total > 0 { total } else { r };
+            }
+            total += r;
+            if (r as usize) < io.iov_len {
+                break;
+            }
+        }
+        return total;
+    }
+    // SAFETY: guest iovec array.
+    errno::check(unsafe {
+        if write {
+            libc::pwritev(fd, v.as_ptr(), v.len() as i32, pos)
+        } else {
+            libc::preadv(fd, v.as_ptr(), v.len() as i32, pos)
+        }
+    } as i64)
 }
 
 pub fn lseek(a: [u64; 6]) -> i64 {
@@ -159,6 +346,9 @@ pub fn lseek(a: [u64; 6]) -> i64 {
         4 => libc::SEEK_HOLE,
         w => w as i32,
     };
+    if let Some(r) = dir::lseek(a[0] as i32, a[1] as i64, whence) {
+        return r;
+    }
     // SAFETY: plain lseek.
     errno::check(unsafe { libc::lseek(a[0] as i32, a[1] as i64, whence) })
 }
@@ -202,10 +392,10 @@ fn put_stat(st: &libc::stat, out: u64) {
         st_ino: st.st_ino,
         st_mode: st.st_mode as u32,
         st_nlink: st.st_nlink as u32,
-        // Android files are root's unless init changed them (the contract's
-        // fs-attrs); the host owner is never the guest's.
-        st_uid: 0,
-        st_gid: 0,
+        // The guest's view (attrs::apply): the host owner is never the
+        // guest's.
+        st_uid: st.st_uid,
+        st_gid: st.st_gid,
         st_rdev: linux_dev(st.st_rdev),
         st_size: st.st_size,
         st_blksize: st.st_blksize,
@@ -222,49 +412,146 @@ fn put_stat(st: &libc::stat, out: u64) {
     unsafe { (out as *mut LinuxStat).write_unaligned(l) };
 }
 
-fn fstat_into(fd: i32, out: u64) -> i64 {
-    // SAFETY: stat buffer on our stack.
+/// Host stat of an fd, with the guest's ownership view.
+fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: stat buffer on our stack.
     if unsafe { libc::fstat(fd, &mut st) } < 0 {
-        return -(errno::last() as i64);
+        return Err(-(errno::last() as i64));
     }
-    put_stat(&st, out);
-    0
+    match st.st_mode & libc::S_IFMT {
+        libc::S_IFREG | libc::S_IFDIR | libc::S_IFLNK => {
+            let guest = dir::synthesized_path(fd).or_else(|| procfs::fd_guest_path(fd).ok());
+            attrs::apply(guest.as_deref().unwrap_or(""), &mut st);
+        }
+        _ => {
+            (st.st_uid, st.st_gid) = attrs::ids(attrs::EFFECTIVE);
+        }
+    }
+    Ok(st)
 }
 
 pub fn fstat(a: [u64; 6]) -> i64 {
-    fstat_into(a[0] as i32, a[1])
+    match stat_fd(a[0] as i32) {
+        Ok(st) => {
+            put_stat(&st, a[1]);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// stat of a path relative to a dirfd, with the guest's ownership view.
+pub(super) fn stat_at(dirfd: i32, path: &[u8], flags: u64) -> Result<libc::stat, i64> {
+    if path.is_empty() {
+        return if flags & AT_EMPTY_PATH != 0 {
+            stat_fd(dirfd)
+        } else {
+            Err(-(ENOENT as i64))
+        };
+    }
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // linker64 finds the program through /proc/self/exe, whatever argv[0] is.
+    if procfs::is_self_exe(path) && follow {
+        let p = CString::new(crate::sys::process::exe_host_path()).map_err(|_| -(ENOENT as i64))?;
+        // SAFETY: host path and local stat buffer.
+        if unsafe { libc::stat(p.as_ptr(), &mut st) } < 0 {
+            return Err(-(errno::last() as i64));
+        }
+        attrs::apply(&crate::sys::process::exe_guest_path(), &mut st);
+        return Ok(st);
+    }
+    let r = vfs::resolve(dirfd, path, follow).map_err(|e| -(e as i64))?;
+    if let Some(s) = procfs::stat(&r.guest, follow) {
+        return s.map_err(|e| -(e as i64));
+    }
+    // SAFETY: host path and local stat buffer.
+    if unsafe { libc::lstat(r.host.as_ptr(), &mut st) } < 0 {
+        return Err(-(errno::last() as i64));
+    }
+    attrs::apply(&r.guest, &mut st);
+    Ok(st)
 }
 
 pub fn newfstatat(a: [u64; 6]) -> i64 {
-    let (dirfd, out, flags) = (a[0] as i32, a[2], a[3]);
     // SAFETY: guest path pointer.
     let path = unsafe { guest_cstr(a[1]) };
-    if path.is_empty() {
-        return if flags & AT_EMPTY_PATH != 0 {
-            fstat_into(dirfd, out)
-        } else {
-            -(ENOENT as i64)
-        };
+    match stat_at(a[0] as i32, path, a[3]) {
+        Ok(st) => {
+            put_stat(&st, a[2]);
+            0
+        }
+        Err(e) => e,
     }
-    // linker64 finds the program through /proc/self/exe, whatever argv[0] is.
-    let host = if procfs::is_self_exe(path) && flags & AT_SYMLINK_NOFOLLOW == 0 {
-        match CString::new(crate::sys::process::exe_host_path()) {
-            Ok(p) => p,
-            Err(_) => return -(ENOENT as i64),
-        }
-    } else {
-        match vfs::resolve(dirfd, path, flags & AT_SYMLINK_NOFOLLOW == 0) {
-            Ok(r) => r.host,
-            Err(e) => return -(e as i64),
-        }
+}
+
+/// Linux `struct statx`, 256 bytes.
+#[repr(C)]
+#[derive(Default)]
+struct Statx {
+    mask: u32,
+    blksize: u32,
+    attributes: u64,
+    nlink: u32,
+    uid: u32,
+    gid: u32,
+    mode: u16,
+    pad1: u16,
+    ino: u64,
+    size: u64,
+    blocks: u64,
+    attributes_mask: u64,
+    atime: [i64; 2],
+    btime: [i64; 2],
+    ctime: [i64; 2],
+    mtime: [i64; 2],
+    rdev_major: u32,
+    rdev_minor: u32,
+    dev_major: u32,
+    dev_minor: u32,
+    mnt_id: u64,
+    spare: [u64; 13],
+}
+const _: () = assert!(std::mem::size_of::<Statx>() == 256);
+
+/// STATX_BASIC_STATS | STATX_BTIME.
+const STATX_ALL: u32 = 0x7ff | 0x800;
+
+pub fn statx(a: [u64; 6]) -> i64 {
+    let (dirfd, flags, out) = (a[0] as i32, a[2], a[4]);
+    // SAFETY: guest path pointer.
+    let path = unsafe { guest_cstr(a[1]) };
+    let st = match stat_at(dirfd, path, flags) {
+        Ok(st) => st,
+        Err(e) => return e,
     };
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: host path and local stat buffer.
-    if unsafe { libc::lstat(host.as_ptr(), &mut st) } < 0 {
-        return -(errno::last() as i64);
-    }
-    put_stat(&st, out);
+    let dev = st.st_dev as u32;
+    let rdev = st.st_rdev as u32;
+    // Timestamps are { i64 sec; u32 nsec; i32 pad }.
+    let ts = |s: i64, ns: i64| [s, ns & 0xffff_ffff];
+    let x = Statx {
+        mask: STATX_ALL,
+        blksize: st.st_blksize as u32,
+        nlink: st.st_nlink as u32,
+        uid: st.st_uid,
+        gid: st.st_gid,
+        mode: st.st_mode,
+        ino: st.st_ino,
+        size: st.st_size as u64,
+        blocks: st.st_blocks as u64,
+        atime: ts(st.st_atime, st.st_atime_nsec),
+        btime: ts(st.st_birthtime, st.st_birthtime_nsec),
+        ctime: ts(st.st_ctime, st.st_ctime_nsec),
+        mtime: ts(st.st_mtime, st.st_mtime_nsec),
+        rdev_major: rdev >> 24,
+        rdev_minor: rdev & 0xff_ffff,
+        dev_major: dev >> 24,
+        dev_minor: dev & 0xff_ffff,
+        ..Default::default()
+    };
+    // SAFETY: guest statx buffer.
+    unsafe { (out as *mut Statx).write_unaligned(x) };
     0
 }
 
@@ -354,6 +641,9 @@ pub fn statfs(a: [u64; 6]) -> i64 {
     if unsafe { libc::statfs(r.host.as_ptr(), &mut s) } < 0 {
         return -(errno::last() as i64);
     }
+    if r.read_only() {
+        s.f_flags |= libc::MNT_RDONLY as u32;
+    }
     put_statfs(&s, a[1]);
     0
 }
@@ -365,16 +655,16 @@ pub fn readlinkat(a: [u64; 6]) -> i64 {
     if size == 0 {
         return -(EINVAL as i64);
     }
-    let target: Vec<u8> = if let Some(t) = procfs::readlink(path) {
+    let r = match vfs::resolve(dirfd, path, false) {
+        Ok(r) => r,
+        Err(e) => return -(e as i64),
+    };
+    let target: Vec<u8> = if let Some(t) = procfs::readlink(r.guest.as_bytes()) {
         match t {
             Ok(t) => t,
             Err(e) => return -(e as i64),
         }
     } else {
-        let r = match vfs::resolve(dirfd, path, false) {
-            Ok(r) => r,
-            Err(e) => return -(e as i64),
-        };
         let mut tmp = vec![0u8; libc::PATH_MAX as usize];
         // SAFETY: host path, local buffer.
         let n = unsafe { libc::readlink(r.host.as_ptr(), tmp.as_mut_ptr().cast(), tmp.len()) };
@@ -390,15 +680,32 @@ pub fn readlinkat(a: [u64; 6]) -> i64 {
     n as i64
 }
 
+const R_OK: u64 = 4;
+const W_OK: u64 = 2;
+
 pub fn faccessat(dirfd: u64, path: u64, mode: u64, flags: u64) -> i64 {
     // SAFETY: guest path pointer.
     let p = unsafe { guest_cstr(path) };
-    let r = match vfs::resolve(dirfd as i32, p, flags & AT_SYMLINK_NOFOLLOW == 0) {
+    if mode & !7 != 0 {
+        return -(EINVAL as i64);
+    }
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    let r = match vfs::resolve(dirfd as i32, p, follow) {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
     if super::binder::is_device(&r.guest) {
         return 0;
+    }
+    if let Some(s) = procfs::stat(&r.guest, follow) {
+        return match s {
+            Ok(st) if mode & W_OK != 0 && st.st_mode & 0o222 == 0 => -13,
+            Ok(_) => 0,
+            Err(e) => -(e as i64),
+        };
+    }
+    if mode & W_OK != 0 && r.read_only() {
+        return -EROFS;
     }
     let hflags = if flags & AT_EACCESS != 0 {
         libc::AT_EACCESS
@@ -406,9 +713,27 @@ pub fn faccessat(dirfd: u64, path: u64, mode: u64, flags: u64) -> i64 {
         0
     };
     // SAFETY: host path.
-    errno::check(
-        unsafe { libc::faccessat(libc::AT_FDCWD, r.host.as_ptr(), mode as i32, hflags) } as i64,
-    )
+    let h = unsafe { libc::faccessat(libc::AT_FDCWD, r.host.as_ptr(), mode as i32, hflags) };
+    if h < 0 {
+        return -(errno::last() as i64);
+    }
+    if vfs::runtime_dir().is_some() && mode & (R_OK | W_OK | 1) != 0 {
+        // The guest identity against the recorded owners and modes.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: host path, local buffer.
+        if unsafe { libc::stat(r.host.as_ptr(), &mut st) } == 0 {
+            attrs::apply(&r.guest, &mut st);
+            let (uid, gid) = attrs::ids(if flags & AT_EACCESS != 0 {
+                attrs::EFFECTIVE
+            } else {
+                attrs::REAL
+            });
+            if !attrs::permits(&st, mode as u32, uid, gid) {
+                return -13; // EACCES
+            }
+        }
+    }
+    0
 }
 
 pub fn getcwd(a: [u64; 6]) -> i64 {
@@ -424,16 +749,15 @@ pub fn getcwd(a: [u64; 6]) -> i64 {
     (cwd.len() + 1) as i64
 }
 
-pub fn chdir(a: [u64; 6]) -> i64 {
-    // SAFETY: guest path pointer.
-    let p = unsafe { guest_cstr(a[0]) };
-    let r = match vfs::resolve(vfs::LINUX_AT_FDCWD, p, true) {
-        Ok(r) => r,
-        Err(e) => return -(e as i64),
-    };
+fn set_cwd_checked(r: vfs::Resolved) -> i64 {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if let Some(s) = procfs::stat(&r.guest, true) {
+        match s {
+            Ok(s) => st = s,
+            Err(e) => return -(e as i64),
+        }
     // SAFETY: host path and local buffer.
-    if unsafe { libc::stat(r.host.as_ptr(), &mut st) } < 0 {
+    } else if unsafe { libc::stat(r.host.as_ptr(), &mut st) } < 0 {
         return -(errno::last() as i64);
     }
     if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
@@ -443,51 +767,169 @@ pub fn chdir(a: [u64; 6]) -> i64 {
     0
 }
 
-/// pipe2(fds, flags): O_CLOEXEC and O_NONBLOCK. Packet mode (O_DIRECT)
-/// has no Darwin pipe equivalent.
-pub fn pipe2(a: [u64; 6]) -> i64 {
-    let flags = a[1];
-    if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
-        return -(EINVAL as i64);
+pub fn chdir(a: [u64; 6]) -> i64 {
+    // SAFETY: guest path pointer.
+    let p = unsafe { guest_cstr(a[0]) };
+    match vfs::resolve(vfs::LINUX_AT_FDCWD, p, true) {
+        Ok(r) => set_cwd_checked(r),
+        Err(e) => -(e as i64),
     }
-    let mut fds = [0i32; 2];
-    // SAFETY: a local array, then flags on our new fds.
-    unsafe {
-        if libc::pipe(fds.as_mut_ptr()) < 0 {
-            return -(errno::last() as i64);
-        }
-        for fd in fds {
-            if flags & O_CLOEXEC != 0 {
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            }
-            if flags & O_NONBLOCK != 0 {
-                libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
-            }
-        }
-        // SAFETY: guest int[2].
-        (a[0] as *mut [i32; 2]).write_unaligned(fds);
+}
+
+pub fn fchdir(a: [u64; 6]) -> i64 {
+    match vfs::resolve(a[0] as i32, b".", true) {
+        Ok(r) => set_cwd_checked(r),
+        Err(e) => -(e as i64),
     }
-    0
 }
 
 pub fn dup(a: [u64; 6]) -> i64 {
     // SAFETY: plain dup.
-    errno::check(unsafe { libc::dup(a[0] as i32) } as i64)
+    let r = unsafe { libc::dup(a[0] as i32) };
+    if r < 0 {
+        return -(errno::last() as i64);
+    }
+    fdtab::on_dup(a[0] as i32, r);
+    r as i64
 }
 
 pub fn dup3(a: [u64; 6]) -> i64 {
     let (old, new, flags) = (a[0] as i32, a[1] as i32, a[2]);
-    if old == new {
+    if old == new || flags & !O_CLOEXEC != 0 {
         return -(EINVAL as i64);
+    }
+    if fdtab::is_hidden(old) {
+        return -(EBADF as i64);
+    }
+    if fdtab::is_hidden(new) {
+        event::relocate_hidden(new);
     }
     // SAFETY: plain dup2/fcntl.
     let r = unsafe { libc::dup2(old, new) };
     if r < 0 {
         return -(errno::last() as i64);
     }
+    fdtab::on_dup(old, new);
     if flags & O_CLOEXEC != 0 {
         unsafe { libc::fcntl(new, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
+    r as i64
+}
+
+pub fn pipe2(a: [u64; 6]) -> i64 {
+    const O_DIRECT: u64 = 0o200000;
+    let (out, flags) = (a[0], a[1]);
+    if flags & !(O_CLOEXEC | O_NONBLOCK | O_DIRECT) != 0 {
+        return -(EINVAL as i64);
+    }
+    let mut fds = [0i32; 2];
+    // SAFETY: pipe into a local array.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+        return -(errno::last() as i64);
+    }
+    for fd in fds {
+        fdtab::set_flags(fd, flags & O_NONBLOCK != 0, flags & O_CLOEXEC != 0);
+    }
+    // SAFETY: guest int[2].
+    unsafe { (out as *mut [i32; 2]).write_unaligned(fds) };
+    0
+}
+
+// Linux fcntl commands.
+const F_DUPFD: u64 = 0;
+const F_GETFD: u64 = 1;
+const F_SETFD: u64 = 2;
+const F_GETFL: u64 = 3;
+const F_SETFL: u64 = 4;
+const F_GETLK: u64 = 5;
+const F_SETLK: u64 = 6;
+const F_SETLKW: u64 = 7;
+const F_SETOWN: u64 = 8;
+const F_GETOWN: u64 = 9;
+const F_OFD_GETLK: u64 = 36;
+const F_OFD_SETLK: u64 = 37;
+const F_OFD_SETLKW: u64 = 38;
+const F_DUPFD_CLOEXEC: u64 = 1030;
+const F_SETPIPE_SZ: u64 = 1031;
+const F_GETPIPE_SZ: u64 = 1032;
+const F_ADD_SEALS: u64 = 1033;
+const F_GET_SEALS: u64 = 1034;
+
+// Darwin's open-file-description locks (sys/fcntl.h, private).
+const DARWIN_F_OFD_SETLK: i32 = 90;
+const DARWIN_F_OFD_SETLKW: i32 = 91;
+const DARWIN_F_OFD_GETLK: i32 = 92;
+
+/// Linux arm64 `struct flock` { short type, whence; off_t start, len;
+/// pid_t pid; }.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxFlock {
+    l_type: i16,
+    l_whence: i16,
+    _pad: i32,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+    _pad2: i32,
+}
+
+fn lock(fd: i32, cmd: u64, arg: u64) -> i64 {
+    // SAFETY: guest struct flock.
+    let mut l = unsafe { (arg as *const LinuxFlock).read_unaligned() };
+    let ty = match l.l_type {
+        0 => libc::F_RDLCK,
+        1 => libc::F_WRLCK,
+        2 => libc::F_UNLCK,
+        _ => return -(EINVAL as i64),
+    };
+    let mut h = libc::flock {
+        l_start: l.l_start,
+        l_len: l.l_len,
+        l_pid: 0,
+        l_type: ty,
+        l_whence: l.l_whence,
+    };
+    let hcmd = match cmd {
+        F_GETLK => libc::F_GETLK,
+        F_SETLK => libc::F_SETLK,
+        F_SETLKW => libc::F_SETLKW,
+        F_OFD_GETLK => DARWIN_F_OFD_GETLK,
+        F_OFD_SETLK => DARWIN_F_OFD_SETLK,
+        _ => DARWIN_F_OFD_SETLKW,
+    };
+    // SAFETY: fcntl with a local struct flock.
+    if unsafe { libc::fcntl(fd, hcmd, &mut h) } < 0 {
+        return -(errno::last() as i64);
+    }
+    if matches!(cmd, F_GETLK | F_OFD_GETLK) {
+        l.l_type = match h.l_type as i32 {
+            t if t == libc::F_RDLCK as i32 => 0,
+            t if t == libc::F_WRLCK as i32 => 1,
+            _ => 2,
+        };
+        l.l_start = h.l_start;
+        l.l_len = h.l_len;
+        l.l_whence = h.l_whence;
+        l.l_pid = if cmd == F_OFD_GETLK { -1 } else { h.l_pid };
+        // SAFETY: guest struct flock.
+        unsafe { (arg as *mut LinuxFlock).write_unaligned(l) };
+    }
+    0
+}
+
+fn dup_from(fd: i32, min: i32, cloexec: bool) -> i64 {
+    let cmd = if cloexec {
+        libc::F_DUPFD_CLOEXEC
+    } else {
+        libc::F_DUPFD
+    };
+    // SAFETY: plain fcntl.
+    let r = unsafe { libc::fcntl(fd, cmd, min) };
+    if r < 0 {
+        return -(errno::last() as i64);
+    }
+    fdtab::on_dup(fd, r);
     r as i64
 }
 
@@ -496,11 +938,13 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
     // SAFETY: fcntl with integer arguments.
     unsafe {
         match cmd {
-            0 => errno::check(libc::fcntl(fd, libc::F_DUPFD, arg as i32) as i64),
-            1030 => errno::check(libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, arg as i32) as i64),
-            1 => errno::check(libc::fcntl(fd, libc::F_GETFD) as i64),
-            2 => errno::check(libc::fcntl(fd, libc::F_SETFD, arg as i32 & libc::FD_CLOEXEC) as i64),
-            3 => {
+            F_DUPFD => dup_from(fd, arg as i32, false),
+            F_DUPFD_CLOEXEC => dup_from(fd, arg as i32, true),
+            F_GETFD => errno::check(libc::fcntl(fd, libc::F_GETFD) as i64),
+            F_SETFD => {
+                errno::check(libc::fcntl(fd, libc::F_SETFD, arg as i32 & libc::FD_CLOEXEC) as i64)
+            }
+            F_GETFL => {
                 let r = libc::fcntl(fd, libc::F_GETFL);
                 if r < 0 {
                     -(errno::last() as i64)
@@ -508,11 +952,28 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
                     open_flags_from_host(r) as i64
                 }
             }
-            4 => errno::check(libc::fcntl(
+            F_SETFL => errno::check(libc::fcntl(
                 fd,
                 libc::F_SETFL,
                 open_flags_to_host(arg) & !libc::O_ACCMODE,
             ) as i64),
+            F_GETLK | F_SETLK | F_SETLKW | F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW => {
+                lock(fd, cmd, arg)
+            }
+            F_GETOWN => errno::check(libc::fcntl(fd, libc::F_GETOWN) as i64),
+            F_SETOWN => errno::check(libc::fcntl(fd, libc::F_SETOWN, arg as i32) as i64),
+            // Pipe capacity is fixed on Darwin; report the request as met.
+            F_SETPIPE_SZ | F_GETPIPE_SZ => {
+                if libc::fcntl(fd, libc::F_GETFD) < 0 {
+                    -(EBADF as i64)
+                } else if cmd == F_SETPIPE_SZ {
+                    (arg as i64).max(65536)
+                } else {
+                    65536
+                }
+            }
+            F_ADD_SEALS => memfd::add_seals(fd, arg as u32),
+            F_GET_SEALS => memfd::get_seals(fd),
             _ => {
                 if libc::fcntl(fd, libc::F_GETFD) < 0 {
                     -(EBADF as i64)
@@ -526,30 +987,90 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
 
 const TCGETS: u64 = 0x5401;
 const TIOCGWINSZ: u64 = 0x5413;
+const FIONREAD: u64 = 0x541b;
+const FIONBIO: u64 = 0x5421;
+const FIONCLEX: u64 = 0x5450;
+const FIOCLEX: u64 = 0x5451;
 
 pub fn ioctl(a: [u64; 6]) -> i64 {
     let (fd, req, arg) = (a[0] as i32, a[1], a[2]);
     if let Some(r) = super::binder::ioctl(fd, req, arg) {
         return r;
     }
-    // SAFETY: isatty/ioctl on a guest fd.
-    let tty = unsafe { libc::isatty(fd) } == 1;
-    match req {
-        TCGETS | TIOCGWINSZ if !tty => -(ENOTTY as i64),
-        TIOCGWINSZ => {
-            let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-            if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) } < 0 {
-                return -(errno::last() as i64);
+    // SAFETY: isatty/ioctl on a guest fd with guest argument buffers.
+    unsafe {
+        let tty = libc::isatty(fd) == 1;
+        match req {
+            TCGETS | TIOCGWINSZ if !tty => -(ENOTTY as i64),
+            TIOCGWINSZ => {
+                let mut ws: libc::winsize = std::mem::zeroed();
+                if libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) < 0 {
+                    return -(errno::last() as i64);
+                }
+                // struct winsize has the same layout on both kernels.
+                (arg as *mut libc::winsize).write_unaligned(ws);
+                0
             }
-            // struct winsize has the same layout on both kernels.
-            unsafe { (arg as *mut libc::winsize).write_unaligned(ws) };
-            0
+            TCGETS => {
+                // Report a tty with a zeroed Linux termios (60 bytes).
+                std::ptr::write_bytes(arg as *mut u8, 0, 60);
+                0
+            }
+            FIONREAD => {
+                let n = match inotify::pending_bytes(fd) {
+                    Some(n) => n as i32,
+                    None => {
+                        let mut n = 0i32;
+                        if libc::ioctl(fd, libc::FIONREAD, &mut n) < 0 {
+                            return -(errno::last() as i64);
+                        }
+                        n
+                    }
+                };
+                (arg as *mut i32).write_unaligned(n);
+                0
+            }
+            FIONBIO => {
+                let on = (arg as *const i32).read_unaligned() != 0;
+                let fl = libc::fcntl(fd, libc::F_GETFL);
+                if fl < 0 {
+                    return -(errno::last() as i64);
+                }
+                let fl = if on {
+                    fl | libc::O_NONBLOCK
+                } else {
+                    fl & !libc::O_NONBLOCK
+                };
+                errno::check(libc::fcntl(fd, libc::F_SETFL, fl) as i64)
+            }
+            FIOCLEX | FIONCLEX => errno::check(libc::fcntl(
+                fd,
+                libc::F_SETFD,
+                if req == FIOCLEX { libc::FD_CLOEXEC } else { 0 },
+            ) as i64),
+            _ => -(ENOTTY as i64),
         }
-        TCGETS => {
-            // Report a tty with a zeroed Linux termios (60 bytes); translation is future work.
-            unsafe { std::ptr::write_bytes(arg as *mut u8, 0, 60) };
-            0
-        }
-        _ => -(ENOTTY as i64),
     }
+}
+
+/// close_range(first, last, flags): CLOSE_RANGE_CLOEXEC (4) marks instead
+/// of closing; CLOSE_RANGE_UNSHARE (2) has nothing to unshare.
+pub fn close_range(a: [u64; 6]) -> i64 {
+    let (lo, hi, flags) = (a[0] as u32, a[1] as u32, a[2]);
+    if flags & !6 != 0 || lo > hi {
+        return -(EINVAL as i64);
+    }
+    for fd in fdtab::open_fds() {
+        let u = fd as u32;
+        if u < lo || u > hi || fdtab::is_hidden(fd) {
+            continue;
+        }
+        if flags & 4 != 0 {
+            // SAFETY: plain fcntl on a guest fd.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        } else {
+            close([fd as u64, 0, 0, 0, 0, 0]);
+        }
+    }
+    0
 }

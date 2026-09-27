@@ -87,8 +87,9 @@ fn trace_image(name: &str, i: &loader::Image) {
 /// only on a load error; the guest ends the process with exit_group.
 pub fn run(opts: RunOptions) -> String {
     if let Err(e) = vfs::init(opts.root, opts.path_map) {
-        return format!("--root {}: {e}", opts.root.display());
+        return e;
     }
+    sys::init_fds();
     sys::set_trace(opts.trace);
     xrt::init(opts.cache.clone());
     if let Some(name) = &opts.binder

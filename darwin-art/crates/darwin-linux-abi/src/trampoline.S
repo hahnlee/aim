@@ -86,19 +86,19 @@ Lgettid:
     b       Llean_ret
 Lread:
     mov     x16, #3
-    b       Ldarwin
+    b       Lfd_darwin
 Lwrite:
     mov     x16, #4
-    b       Ldarwin
+    b       Lfd_darwin
 Lpread:
     mov     x16, #153
-    b       Ldarwin
+    b       Lfd_darwin
 Lpwrite:
     mov     x16, #154
-    b       Ldarwin
+    b       Lfd_darwin
 Lclose:
     mov     x16, #6
-    b       Ldarwin
+    b       Lfd_darwin
 Lgetppid:
     mov     x16, #39
     b       Ldarwin
@@ -115,6 +115,18 @@ Lyield:
     mov     x1, x17
     mov     x0, #0
     b       Llean_ret
+
+// An fd call: fds with Linux state beyond the host object (eventfd,
+// SEQPACKET sockets, epoll, ...; see sys/fdtab.rs) and fds past the table
+// take the full path.
+Lfd_darwin:
+    lsr     x17, x0, #16
+    cbnz    x17, Lfull
+    adrp    x17, {slow}@PAGE
+    add     x17, x17, {slow}@PAGEOFF
+    ldrb    w17, [x17, x0]
+    cbnz    w17, Lfull
+    // fall through
 
 // One Darwin BSD syscall on the guest's live x0..x3; carry set means errno.
 Ldarwin:

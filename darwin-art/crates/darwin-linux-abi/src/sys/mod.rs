@@ -3,23 +3,34 @@
 //! The syscall number is in x8, arguments in x0-x5; the result (or -errno,
 //! with Linux errno values) goes back in x0. Each subsystem owns its calls.
 
+mod attrs;
 mod binder;
+mod copies;
+mod copy;
 pub mod cred;
-mod events;
+mod dir;
+mod epoll;
+mod event;
 mod exec;
+pub(crate) mod fdtab;
 mod fork;
 mod fs;
+mod fsops;
 mod futex;
+mod inotify;
 mod mem;
+mod memfd;
 mod misc;
 pub mod names;
+mod net;
+mod poll;
 mod process;
 mod procfs;
 mod pstate;
 mod selinuxfs;
 mod signal;
 mod thread;
-mod unix_socket;
+mod vmmap;
 mod wait;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,10 +39,15 @@ use crate::context::GuestContext;
 use crate::errno::ENOSYS;
 
 pub use binder::init as init_binder;
+pub use copies::note as note_copy;
+pub use dir::synthesized_path as synthesized_dir_path;
 pub use exec::{ExecState, init as init_exec};
+pub use fdtab::{after_fork_child as fds_after_fork_child, init as init_fds};
 pub use mem::init_brk;
 pub use mem::run_deferred_unmaps;
+pub use net::adopt as adopt_fd;
 pub use process::{host_tid, set_exe};
+pub use procfs::{StackInfo, note_stack};
 pub use pstate::kernel_release;
 
 /// Read by the trampoline: while set, every syscall takes the full path so
@@ -131,14 +147,30 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         24 => fs::dup3(a),
         25 => fs::fcntl(a),
         29 => fs::ioctl(a),
+        32 => fsops::flock(a),
+        33 => fsops::mknodat(a),
+        34 => fsops::mkdirat(a),
+        35 => fsops::unlinkat(a),
+        36 => fsops::symlinkat(a),
+        37 => fsops::linkat(a),
+        38 => fsops::renameat(a),
         43 => fs::statfs(a),
         44 => fs::fstatfs(a),
+        45 => fsops::truncate(a),
+        46 => fsops::ftruncate(a),
+        47 => fsops::fallocate(a),
         48 => fs::faccessat(a[0], a[1], a[2], 0),
         439 => fs::faccessat(a[0], a[1], a[2], a[3]),
         49 => fs::chdir(a),
+        50 => fs::fchdir(a),
+        52 => fsops::fchmod(a),
+        53 => fsops::fchmodat(a),
+        54 => fsops::fchownat(a),
+        55 => fsops::fchown(a),
         56 => fs::openat(a),
         57 => fs::close(a),
         59 => fs::pipe2(a),
+        61 => dir::getdents64(a),
         62 => fs::lseek(a),
         63 => fs::read(a),
         64 => fs::write(a),
@@ -146,25 +178,71 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         66 => fs::writev(a),
         67 => fs::pread64(a),
         68 => fs::pwrite64(a),
+        69 | 286 => fs::preadv(false, a),
+        70 | 287 => fs::preadv(true, a),
+        71 => copy::sendfile(a),
+        76 => copy::splice(a),
         78 => fs::readlinkat(a),
         79 => fs::newfstatat(a),
         80 => fs::fstat(a),
-        // readiness
-        19 => events::eventfd2(a),
-        20 => events::epoll_create1(a),
-        21 => events::epoll_ctl(a),
-        22 => events::epoll_pwait(a),
-        73 => events::ppoll(a),
-        85 => events::timerfd_create(a),
-        86 => events::timerfd_settime(a),
-        87 => events::timerfd_gettime(a),
+        81 => fsops::sync(),
+        82 | 83 | 267 => fsops::fsync(a),
+        84 => fsops::sync_file_range(a),
+        88 => fsops::utimensat(a),
+        213 | 223 => 0, // readahead, fadvise64: advice only
+        276 => fsops::renameat2(a),
+        279 => memfd::memfd_create(a),
+        285 => copy::copy_file_range(a),
+        291 => fs::statx(a),
+        436 => fs::close_range(a),
+        // events
+        19 => event::eventfd2(a),
+        20 => epoll::epoll_create1(a),
+        21 => epoll::epoll_ctl(a),
+        22 => epoll::epoll_pwait(a),
+        441 => epoll::epoll_pwait2(a),
+        26 => inotify::inotify_init1(a),
+        27 => inotify::inotify_add_watch(a),
+        28 => inotify::inotify_rm_watch(a),
+        72 => poll::pselect6(a),
+        73 => poll::ppoll(a),
+        85 => event::timerfd_create(a),
+        86 => event::timerfd_settime(a),
+        87 => event::timerfd_gettime(a),
+        // sockets
+        198 => net::socket(a),
+        199 => net::socketpair(a),
+        200 => net::bind(a),
+        201 => net::listen(a),
+        202 => net::accept4([a[0], a[1], a[2], 0, 0, 0]),
+        242 => net::accept4(a),
+        203 => net::connect(a),
+        204 => net::getsockname(a),
+        205 => net::getpeername(a),
+        206 => net::sendto(a),
+        207 => net::recvfrom(a),
+        208 => net::setsockopt(a),
+        209 => net::getsockopt(a),
+        210 => net::shutdown(a),
+        211 => net::sendmsg(a),
+        212 => net::recvmsg(a),
+        243 => net::recvmmsg(a),
+        269 => net::sendmmsg(a),
         // memory
         214 => mem::brk(a),
         215 => mem::munmap(ctx, a),
         216 => mem::mremap(a),
         222 => mem::mmap(a),
         226 => mem::mprotect(a),
+        227 => mem::msync(a),
+        228 | 229 => mem::mlock(nr, a),
+        230 | 231 => 0, // mlockall/munlockall: Darwin pages are not locked per process
+        232 => mem::mincore(a),
         233 => mem::madvise(a),
+        270 => mem::process_vm_rw(false, a),
+        271 => mem::process_vm_rw(true, a),
+        283 => mem::membarrier(a),
+        284 => mem::mlock(228, a),
         // process
         93 => thread::exit(a),
         220 if fork::is_fork(a[0]) => fork::clone(ctx, a),
@@ -182,11 +260,6 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         132 => signal::sigaltstack(a),
         134 => signal::rt_sigaction(a),
         135 => signal::rt_sigprocmask(a),
-        // sockets
-        198 => unix_socket::socket(a),
-        203 => unix_socket::connect(a),
-        206 => unix_socket::sendto(a),
-        207 => unix_socket::recvfrom(a),
         // misc
         101 => misc::nanosleep(a),
         113 => misc::clock_gettime(a),

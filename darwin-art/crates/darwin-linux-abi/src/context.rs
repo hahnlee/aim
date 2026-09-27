@@ -25,6 +25,7 @@ global_asm!(
     trace = sym crate::sys::TRACE,
     errtab = sym crate::errno::DARWIN_TO_LINUX,
     hostcall_hi = const darwin_hostcall::SYSCALL_NR >> 16,
+    slow = sym crate::sys::fdtab::SLOW,
 );
 
 unsafe extern "C" {

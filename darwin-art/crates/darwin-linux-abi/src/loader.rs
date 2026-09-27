@@ -173,6 +173,7 @@ pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
         if file_mappable(&h) {
             let bias = reserve(&h, name)?;
             map_file_backed(&file, &h, bias, name)?;
+            xrt::note_mapped(&mapped, name);
             let source = format!("{what}: {}", mapped.display());
             return finish(&file, h, bias, name, source, patch::PatchStats::default());
         }
@@ -181,6 +182,11 @@ pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
     let h = read_headers(&file, name)?;
     let bias = reserve(&h, name)?;
     let stats = map_copied(&file, &h, bias, name)?;
+    for p in h.loads.iter().filter(|p| p.p_filesz > 0) {
+        let start = page_down(bias + p.p_vaddr);
+        let len = page_up(bias + p.p_vaddr + p.p_filesz) - start;
+        crate::sys::note_copy(start, len, Path::new(path), name, page_down(p.p_offset));
+    }
     finish(&file, h, bias, name, "load-time rewrite".into(), stats)
 }
 
@@ -535,5 +541,16 @@ pub fn build_stack(inp: &StackInputs) -> Result<u64, String> {
         put(k);
         put(v);
     }
+    let span = |ptrs: &[u64], strs: &[Vec<u8>]| match (ptrs.first(), ptrs.last(), strs.last()) {
+        (Some(&lo), Some(&hi), Some(s)) => (lo, hi + s.len() as u64 + 1),
+        _ => (0, 0),
+    };
+    crate::sys::note_stack(crate::sys::StackInfo {
+        lo: base,
+        hi: base + STACK_SIZE,
+        start_stack: start,
+        args: span(&args, inp.argv),
+        env: span(&envs, inp.envp),
+    });
     Ok(start)
 }

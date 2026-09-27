@@ -69,6 +69,17 @@ impl UserMemory for Guest {
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), address as *mut u8, data.len()) };
         Ok(())
     }
+
+    fn installed(&mut self, fd: i32) {
+        // A received SEQPACKET or datagram socket (an InputChannel) keeps
+        // its Linux semantics.
+        super::fdtab::on_close(fd);
+        super::net::adopt(fd);
+    }
+
+    fn closed(&mut self, fd: i32) {
+        super::fdtab::on_close(fd);
+    }
 }
 
 const O_NONBLOCK: u64 = 0o4000;
