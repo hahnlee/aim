@@ -81,6 +81,9 @@ class FinishLedger final {
   // Consume an acknowledged reservation.
   bool Take(uint32_t sequence, bool* handled);
   uint64_t OverflowCount() const;
+  // The earliest reservation Java has not finished yet (no ACK recorded):
+  // its sequence and steady-clock registration time. False when none.
+  bool OldestUnfinished(uint32_t* sequence, uint64_t* registered_ns) const;
 
  private:
   struct Entry {
@@ -92,6 +95,8 @@ class FinishLedger final {
     bool ack_terminal = false;
     bool claimed = false;
     bool handled = false;
+    // Steady-clock time the event was handed to the receiver.
+    uint64_t registered_ns = 0;
     InputEventOrigin origin{};
     std::shared_ptr<const InputRoutingRecipient> recipient;
   };

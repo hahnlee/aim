@@ -2,7 +2,13 @@
 
 #include "input_routing.h"
 #include "input_transport.h"
+#include <algorithm>
+#include <chrono>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace darwin_art::input {
 namespace {
@@ -19,7 +25,108 @@ bool CanReserve(InputEventOrigin origin,
   }
   return false;
 }
+
+// Live receivers and the watchdog state. Receivers unregister under the same
+// mutex the watchdog inspects them under, so an inspected owner is alive.
+struct AnrMonitor {
+  std::mutex mutex;
+  std::vector<const ReceiverFinishOwner*> owners;
+  // (owner, sequence) pairs already reported: one report per stuck event.
+  std::vector<std::pair<const ReceiverFinishOwner*, uint32_t>> reported;
+  InputAnrReporter reporter = nullptr;
+  uint64_t timeout_ns = 0;
+  bool watchdog_started = false;
+};
+
+AnrMonitor& Monitor() {
+  static auto* monitor = new AnrMonitor();
+  return *monitor;
+}
+
+uint64_t SteadyNowNs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
 }  // namespace
+
+ReceiverFinishOwner::ReceiverFinishOwner() {
+  AnrMonitor& monitor = Monitor();
+  std::lock_guard<std::mutex> lock(monitor.mutex);
+  monitor.owners.push_back(this);
+}
+
+ReceiverFinishOwner::~ReceiverFinishOwner() {
+  AnrMonitor& monitor = Monitor();
+  std::lock_guard<std::mutex> lock(monitor.mutex);
+  monitor.owners.erase(
+      std::remove(monitor.owners.begin(), monitor.owners.end(), this),
+      monitor.owners.end());
+  monitor.reported.erase(
+      std::remove_if(monitor.reported.begin(), monitor.reported.end(),
+                     [this](const auto& entry) { return entry.first == this; }),
+      monitor.reported.end());
+}
+
+bool ReceiverFinishOwner::OldestUnfinished(uint32_t* sequence,
+                                           uint64_t* registered_ns) const {
+  return ledger_.OldestUnfinished(sequence, registered_ns);
+}
+
+size_t CheckInputAnrs(uint64_t now_ns) {
+  AnrMonitor& monitor = Monitor();
+  std::vector<std::pair<uint32_t, uint64_t>> reports;
+  InputAnrReporter reporter = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(monitor.mutex);
+    reporter = monitor.reporter;
+    if (reporter == nullptr) return 0;
+    // Forget reports whose event has since finished.
+    monitor.reported.erase(
+        std::remove_if(monitor.reported.begin(), monitor.reported.end(),
+                       [](const auto& entry) {
+                         uint32_t sequence = 0;
+                         uint64_t since = 0;
+                         return !entry.first->OldestUnfinished(&sequence, &since) ||
+                                sequence != entry.second;
+                       }),
+        monitor.reported.end());
+    for (const ReceiverFinishOwner* owner : monitor.owners) {
+      uint32_t sequence = 0;
+      uint64_t since = 0;
+      if (!owner->OldestUnfinished(&sequence, &since) || now_ns < since ||
+          now_ns - since < monitor.timeout_ns) {
+        continue;
+      }
+      const auto key = std::make_pair(owner, sequence);
+      if (std::find(monitor.reported.begin(), monitor.reported.end(), key) !=
+          monitor.reported.end()) {
+        continue;
+      }
+      monitor.reported.push_back(key);
+      reports.emplace_back(sequence, (now_ns - since) / 1'000'000);
+    }
+  }
+  // Report outside the lock: the reporter makes a Binder call.
+  for (const auto& [sequence, waited_ms] : reports) reporter(sequence, waited_ms);
+  return reports.size();
+}
+
+void InstallInputAnrReporter(InputAnrReporter report, uint64_t timeout_ns) {
+  AnrMonitor& monitor = Monitor();
+  std::lock_guard<std::mutex> lock(monitor.mutex);
+  monitor.reporter = report;
+  monitor.timeout_ns = timeout_ns;
+  if (report == nullptr || monitor.watchdog_started) return;
+  monitor.watchdog_started = true;
+  std::thread([] {
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      CheckInputAnrs(SteadyNowNs());
+    }
+  }).detach();
+}
 
 bool ReceiverFinishOwner::Reserve(
     uint32_t sequence, InputEventOrigin origin,

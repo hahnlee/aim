@@ -1,8 +1,17 @@
 #include "finish_ledger.h"
 
+#include <chrono>
 #include <utility>
 
 namespace darwin_art::input {
+namespace {
+uint64_t SteadyNowNs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+}  // namespace
 
 RemoteFinishState FinishLedger::RemoteStateLocked() const {
   RemoteFinishState state;
@@ -71,6 +80,7 @@ bool FinishLedger::TryRegister(
   entry.sequence = sequence;
   entry.origin = origin;
   entry.recipient = std::move(recipient);
+  entry.registered_ns = SteadyNowNs();
   entries_[count_++] = std::move(entry);
   return true;
 }
@@ -117,6 +127,7 @@ bool FinishLedger::TryRegisterNext(
     entry.sequence = chosen;
     entry.origin = origin;
     entry.recipient = std::move(recipient);
+    entry.registered_ns = SteadyNowNs();
     entries_[count_++] = std::move(entry);
     // Publish outputs only after the entry is in the ledger. The caller sees
     // no cursor/sequence reservation if the ledger cannot accept it.
@@ -325,6 +336,22 @@ bool FinishLedger::HasPendingAck() const {
 uint64_t FinishLedger::OverflowCount() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return overflow_count_;
+}
+
+bool FinishLedger::OldestUnfinished(uint32_t* sequence,
+                                    uint64_t* registered_ns) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool found = false;
+  for (size_t i = 0; i < count_; ++i) {
+    const auto& entry = entries_[i];
+    if (entry.ack_recorded) continue;
+    if (!found || entry.registered_ns < *registered_ns) {
+      *sequence = entry.sequence;
+      *registered_ns = entry.registered_ns;
+      found = true;
+    }
+  }
+  return found;
 }
 
 }  // namespace darwin_art::input

@@ -9,11 +9,12 @@ import java.util.HashMap;
 import java.util.List;
 
 /**
- * ActivityManagerService's AppErrors for crashes: a process that reported an
- * uncaught exception (KillApplicationHandler, just before it kills itself)
- * is held in the CRASHED error state until it is gone, and
- * getProcessesInErrorState reports it to its own uid, or to the system.
- * There is no ANR detection or crash dialog yet.
+ * ActivityManagerService's AppErrors: a process that reported an uncaught
+ * exception (KillApplicationHandler, just before it kills itself) is held in
+ * the CRASHED error state until it is gone, and one whose input dispatching
+ * timed out (ProcessErrorStateRecord.appNotResponding) in NOT_RESPONDING until
+ * it is gone or crashes. getProcessesInErrorState reports them to their own
+ * uid, or to the system. There is no crash/ANR dialog yet.
  */
 final class AppErrors {
     private static final String TAG = "DarwinAppErrors";
@@ -47,6 +48,33 @@ final class AppErrors {
                 + (crash == null ? "" : " at " + crash.throwClassName + "."
                         + crash.throwMethodName + "(" + crash.throwFileName + ":"
                         + crash.throwLineNumber + ")"));
+    }
+
+    /**
+     * appNotResponding for {@code pid}: records NOT_RESPONDING, logs the ANR
+     * as ActivityManager does, and asks ART for the process's stack dump
+     * (SIGQUIT, which its Signal Catcher writes to the log).
+     */
+    void notResponding(int pid, int uid, String processName, String annotation) {
+        ActivityManager.ProcessErrorStateInfo info = new ActivityManager.ProcessErrorStateInfo();
+        info.condition = ActivityManager.ProcessErrorStateInfo.NOT_RESPONDING;
+        info.processName = processName;
+        info.pid = pid;
+        info.uid = uid;
+        info.tag = null;
+        info.shortMsg = "ANR";
+        info.longMsg = "ANR in " + processName + "\nReason: " + annotation;
+        synchronized (crashed) {
+            // A crash already reported for the process takes precedence.
+            ActivityManager.ProcessErrorStateInfo existing = crashed.get(pid);
+            if (existing != null
+                    && existing.condition == ActivityManager.ProcessErrorStateInfo.CRASHED) {
+                return;
+            }
+            crashed.put(pid, info);
+        }
+        Log.e(TAG, "ANR in " + processName + " (pid " + pid + ")\nReason: " + annotation);
+        Process.sendSignal(pid, Process.SIGNAL_QUIT);
     }
 
     /**

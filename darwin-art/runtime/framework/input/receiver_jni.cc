@@ -31,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <string>
 #include <utility>
 #include <unistd.h>
 
@@ -47,6 +48,52 @@ std::mutex g_registration_mutex;
 bool g_registration_inflight = false;
 
 using DarwinInputReceiver = InputReceiver;
+
+// InputDispatcher's default dispatching timeout (DEFAULT_DISPATCHING_TIMEOUT).
+constexpr uint64_t kInputDispatchingTimeoutNs = 5'000'000'000ull;
+
+// The watchdog's report: ActivityManagerService learns of an input ANR from
+// InputDispatcher; here the process's own watchdog tells it through
+// IActivityManager.appNotResponding. Runs on the watchdog thread, which stays
+// attached to the VM as a daemon thread.
+void ReportInputAnr(uint32_t sequence, uint64_t waited_ms) {
+  const auto bindings = std::atomic_load_explicit(&g_receiver_bindings,
+                                                  std::memory_order_acquire);
+  if (bindings == nullptr || bindings->vm == nullptr) return;
+  JNIEnv* env = nullptr;
+  JavaVMAttachArgs attach{JNI_VERSION_1_6, "InputDispatcherAnr", nullptr};
+  if (bindings->vm->AttachCurrentThreadAsDaemon(&env, &attach) != JNI_OK ||
+      env == nullptr) {
+    return;
+  }
+  if (env->PushLocalFrame(16) < 0) {
+    env->ExceptionClear();
+    return;
+  }
+  const std::string message =
+      "Input dispatching timed out (Waited " + std::to_string(waited_ms) +
+      "ms for input event " + std::to_string(sequence) + " to be finished)";
+  jclass manager = env->FindClass("android/app/ActivityManager");
+  jmethodID get_service =
+      manager == nullptr ? nullptr
+                         : env->GetStaticMethodID(manager, "getService",
+                                                  "()Landroid/app/IActivityManager;");
+  jobject service = get_service == nullptr
+                        ? nullptr
+                        : env->CallStaticObjectMethod(manager, get_service);
+  jclass service_type =
+      service == nullptr ? nullptr : env->FindClass("android/app/IActivityManager");
+  jmethodID not_responding =
+      service_type == nullptr
+          ? nullptr
+          : env->GetMethodID(service_type, "appNotResponding", "(Ljava/lang/String;)V");
+  jstring text = env->NewStringUTF(message.c_str());
+  if (not_responding != nullptr && text != nullptr && !env->ExceptionCheck()) {
+    env->CallVoidMethod(service, not_responding, text);
+  }
+  if (env->ExceptionCheck()) env->ExceptionClear();
+  env->PopLocalFrame(nullptr);
+}
 
 }  // namespace
 
@@ -584,6 +631,9 @@ bool RegisterInputReceiverNatives(JNIEnv* env, JavaVM* vm,
     } catch (...) {
       registered = false;
     }
+  }
+  if (registered) {
+    InstallInputAnrReporter(&ReportInputAnr, kInputDispatchingTimeoutNs);
   }
   if (!registered) {
     const auto current = std::atomic_load_explicit(

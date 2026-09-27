@@ -56,6 +56,7 @@ public final class ActivityManagerEndpoint extends Binder {
     private final int removeUidFromObserverCode = transaction("removeUidFromObserver");
     private final int handleApplicationWtfCode = transaction("handleApplicationWtf");
     private final int handleApplicationCrashCode = transaction("handleApplicationCrash");
+    private final int appNotRespondingCode = transaction("appNotResponding");
     private final int handleApplicationStrictModeViolationCode =
             transaction("handleApplicationStrictModeViolation");
     private final int setRenderThreadCode = transaction("setRenderThread");
@@ -282,6 +283,28 @@ public final class ActivityManagerEndpoint extends Binder {
             int uid = data.readInt();
             data.enforceNoDataAvail();
             uidStates.observers().updateFilter(token, uid, code == addUidToObserverCode);
+            if (reply != null) reply.writeNoException();
+            return true;
+        }
+        if (code == appNotRespondingCode) {
+            data.enforceInterface("android.app.IActivityManager");
+            String message = data.readString();
+            data.enforceNoDataAvail();
+            // A process reports its own ANR (its input watchdog); the caller's
+            // attached identity names it.
+            int pid = Binder.getCallingPid();
+            int uid = Binder.getCallingUid();
+            String processName = null;
+            for (ApplicationProcessRegistry.AttachedApplication app : processes.attached()) {
+                if (app.pid == pid) {
+                    processName = app.processName != null ? app.processName : app.packageName;
+                    break;
+                }
+            }
+            if (processName != null) {
+                appErrors.notResponding(pid, uid, processName,
+                        message == null ? "unknown" : message);
+            }
             if (reply != null) reply.writeNoException();
             return true;
         }

@@ -57,6 +57,24 @@ public final class AppErrorsTest {
         registry.retireAttached(41, 0, crashedThread);
         check(errors.errorStates(10000) == null && errors.errorStates(1000) == null,
                 "a dead process stayed in the error state");
-        System.out.println("app-errors: crash record, visibility and death PASS");
+        // Input dispatching timeout: NOT_RESPONDING, a stack dump request,
+        // and no downgrade of a reported crash.
+        errors.notResponding(43, 10001, "org.example.other", "Input dispatching timed out");
+        List<ActivityManager.ProcessErrorStateInfo> anr = errors.errorStates(10001);
+        check(anr != null && anr.size() == 1
+                && anr.get(0).condition == ActivityManager.ProcessErrorStateInfo.NOT_RESPONDING
+                && anr.get(0).longMsg.contains("Input dispatching timed out"),
+                "ANR record fields");
+        check(android.os.Process.lastSignalPid == 43
+                && android.os.Process.lastSignal == android.os.Process.SIGNAL_QUIT,
+                "ANR did not request a stack dump");
+        IBinder crashing = attach(registry, 45, 10002, "org.example.both");
+        errors.crashApplication(45, 10002, "org.example.both", crash);
+        errors.notResponding(45, 10002, "org.example.both", "late");
+        check(errors.errorStates(10002).get(0).condition
+                == ActivityManager.ProcessErrorStateInfo.CRASHED,
+                "an ANR replaced a crash");
+        registry.retireAttached(45, 0, crashing);
+        System.out.println("app-errors: crash/ANR record, visibility and death PASS");
     }
 }
