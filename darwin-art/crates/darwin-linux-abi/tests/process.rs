@@ -169,6 +169,61 @@ fn fork_returns_twice_and_wait4_reports_the_exit() {
 }
 
 #[test]
+fn a_forked_child_runs_code_it_makes_executable() {
+    check("fork_new_code");
+}
+
+#[test]
+fn mount_namespaces_bind_and_tmpfs() {
+    check("mount_ns");
+}
+
+#[test]
+fn xattrs_and_selinux_labels() {
+    check("xattrs");
+}
+
+#[test]
+fn a_pf_key_socket_opens_and_closes() {
+    check("pf_key");
+}
+
+#[test]
+fn an_empty_scm_rights_passes_no_control_message() {
+    check("empty_rights");
+}
+
+#[test]
+fn a_thread_with_its_own_file_table_keeps_the_spawners_fds() {
+    check("own_files_thread");
+}
+
+/// `--stdio-null`: the guest's stdio is /dev/null as init gives services,
+/// while the layer's own messages (here the syscall trace) still reach the
+/// original stderr, also after the guest execs.
+#[test]
+fn stdio_null_keeps_the_layer_log() {
+    let Some(root) = root() else { return };
+    let out = linux_run(
+        root,
+        &[
+            "--stdio-null",
+            "--trace",
+            "/system/bin/sh",
+            "-c",
+            "echo visible; echo visible >&2; exec /system/bin/sh -c 'echo again'",
+        ],
+        |_| {},
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(out.stdout.is_empty());
+    assert!(!err.contains("visible"), "{err}");
+    assert!(err.contains("[linux] exit_group"), "{err}");
+    assert!(err.matches("/system/bin/sh loaded").count() >= 2, "{err}");
+}
+
+#[test]
 fn a_pipe_connects_parent_and_child() {
     check("pipe_echo");
 }

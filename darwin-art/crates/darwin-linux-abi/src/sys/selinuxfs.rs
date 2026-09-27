@@ -9,10 +9,14 @@
 //!   numbers the loaded policy), so every class is known;
 //! - `access`, the transaction that computes a decision: every permission
 //!   is allowed;
+//! - `context`, which `security_check_context` writes: every context is
+//!   valid;
 //! - `/proc/<self>/attr/current`: the process's context (the identity's
-//!   seclabel).
+//!   seclabel), which a write changes (`setcon`, zygote's
+//!   `selinux_android_setcontext`); the other attributes (`exec`,
+//!   `fscreate`, `keycreate`, `sockcreate`) keep what was written.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use super::dir::{self, Entry};
 use super::procfs::Node;
@@ -30,33 +34,75 @@ pub fn statfs_magic(guest: &str) -> Option<u64> {
     (guest == MOUNT || guest.strip_prefix(MOUNT)?.starts_with('/')).then_some(SELINUX_MAGIC)
 }
 
-/// Whether `guest` names this process's (or thread's) `attr/current`.
-fn is_attr_current(guest: &str) -> bool {
-    let Some(rest) = guest.strip_prefix("/proc/") else {
-        return false;
-    };
-    let Some(who) = rest.strip_suffix("/attr/current") else {
-        return false;
-    };
+const ATTRS: [&str; 5] = ["current", "exec", "fscreate", "keycreate", "sockcreate"];
+
+/// Written attributes other than `current`.
+static WRITTEN: Mutex<Vec<(&'static str, Vec<u8>)>> = Mutex::new(Vec::new());
+
+/// The attribute `guest` names, if it is this process's (or thread's).
+fn own_attr(guest: &str) -> Option<&'static str> {
+    let rest = guest.strip_prefix("/proc/")?;
+    let (who, name) = rest.split_once("/attr/")?;
+    let name = ATTRS.into_iter().find(|a| *a == name)?;
     let pid = super::process::getpid().to_string();
     let who = match who.split_once("/task/") {
         Some((p, t)) if t.bytes().all(|b| b.is_ascii_digit()) => p,
-        Some(_) => return false,
+        Some(_) => return None,
         None => who,
     };
-    who == "self" || who == "thread-self" || who == pid
+    (who == "self" || who == "thread-self" || who == pid).then_some(name)
+}
+
+fn attr_value(name: &str) -> Vec<u8> {
+    if name == "current" {
+        let mut bytes = super::cred::seclabel().into_bytes();
+        bytes.push(0);
+        return bytes;
+    }
+    let written = WRITTEN.lock().unwrap();
+    written
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
+}
+
+/// A write to an attribute file: a whole context, NUL-terminated or not.
+fn write_attr(name: &'static str, bytes: &[u8]) {
+    let text = bytes
+        .split(|&b| b == 0 || b == b'\n')
+        .next()
+        .unwrap_or_default();
+    if name == "current" {
+        if let Ok(label) = std::str::from_utf8(text)
+            && !label.is_empty()
+        {
+            super::cred::set_seclabel(label);
+        }
+    } else {
+        let mut written = WRITTEN.lock().unwrap();
+        written.retain(|(n, _)| *n != name);
+        written.push((name, text.to_vec()));
+    }
 }
 
 const O_CLOEXEC: u64 = 0o2000000;
+const O_ACCMODE: u64 = 3;
 
 /// `openat` of a file served here rather than as a `/sys` node; None for
 /// other paths.
 pub fn open(guest: &str, flags: u64) -> Option<i64> {
     let cloexec = flags & O_CLOEXEC != 0;
-    if is_attr_current(guest) {
-        let mut bytes = super::cred::seclabel().into_bytes();
-        bytes.push(0);
-        return Some(super::procfs::content_fd(&bytes, cloexec));
+    if let Some(name) = own_attr(guest) {
+        let value = attr_value(name);
+        return Some(if flags & O_ACCMODE != 0 {
+            super::knob::open(&value, cloexec, move |req| {
+                write_attr(name, req);
+                None
+            })
+        } else {
+            super::procfs::content_fd(&value, cloexec)
+        });
     }
     match guest.strip_prefix(MOUNT)? {
         "/status" => {
@@ -69,6 +115,8 @@ pub fn open(guest: &str, flags: u64) -> Option<i64> {
         "/access" => Some(super::knob::open(b"", cloexec, |_| {
             Some(ALLOW_ALL.to_vec())
         })),
+        // With no policy loaded every context is valid.
+        "/context" => Some(super::knob::open(b"", cloexec, |_| None)),
         _ => None,
     }
 }
@@ -183,6 +231,11 @@ pub fn node(rest: &str) -> Option<Node> {
             }
         }
     })
+}
+
+/// This module's locks for a fork (`sys::forklock`).
+pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
+    super::forklock::mutex(&WRITTEN, held)
 }
 
 #[cfg(test)]

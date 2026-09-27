@@ -27,10 +27,31 @@ fn resolve_w(dirfd: u64, path: u64, follow: bool) -> Result<Resolved, i64> {
 pub fn mkdirat(a: [u64; 6]) -> i64 {
     match resolve_w(a[0], a[1], false) {
         Ok(r) => {
+            // The owner keeps access on the host (see host_mode), and
+            // macOS drops S_ISVTX; the guest's mode is recorded when the
+            // host's differs.
+            let want = a[2] as u32 & 0o7777;
+            let mode = host_mode(want, libc::S_IFDIR);
             // SAFETY: host path.
-            let res = errno::check(unsafe { libc::mkdir(r.host.as_ptr(), a[2] as u16) } as i64);
+            let res = errno::check(unsafe { libc::mkdir(r.host.as_ptr(), mode) } as i64);
             if res == 0 {
                 attrs::created(&r.guest);
+                if attrs::recording() {
+                    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                    // SAFETY: host path, local buffer.
+                    unsafe { libc::stat(r.host.as_ptr(), &mut st) };
+                    let made = st.st_mode as u32 & 0o7777;
+                    let guest = (made & 0o077) | (want & 0o700) | (want & libc::S_ISVTX as u32);
+                    if guest != made {
+                        record(
+                            &r.guest,
+                            Attr {
+                                mode: Some(guest),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
             }
             res
         }
@@ -187,14 +208,32 @@ fn record(guest: &str, a: Attr) {
     attrs::record(guest, a);
 }
 
+/// The host mode for a guest chmod. Under a path map the guest's mode is
+/// the recorded one (`attrs`), and the host user keeps owner access: guest
+/// root, which Linux lets past the mode bits, runs as that user.
+fn host_mode(mode: u32, st_mode: u16) -> u16 {
+    if !attrs::recording() {
+        return mode as u16;
+    }
+    let owner = if st_mode & libc::S_IFMT == libc::S_IFDIR {
+        0o700
+    } else {
+        0o600
+    };
+    (mode | owner) as u16
+}
+
 pub fn fchmodat(a: [u64; 6]) -> i64 {
     let mode = a[2] as u32 & 0o7777;
     let r = match resolve_w(a[0], a[1], true) {
         Ok(r) => r,
         Err(e) => return e,
     };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: host path, local buffer.
+    unsafe { libc::stat(r.host.as_ptr(), &mut st) };
     // SAFETY: host path.
-    if unsafe { libc::chmod(r.host.as_ptr(), mode as u16) } < 0 {
+    if unsafe { libc::chmod(r.host.as_ptr(), host_mode(mode, st.st_mode)) } < 0 {
         return -(errno::last() as i64);
     }
     record(
@@ -213,8 +252,10 @@ fn fd_guest(fd: i32) -> Option<String> {
 
 pub fn fchmod(a: [u64; 6]) -> i64 {
     let (fd, mode) = (a[0] as i32, a[1] as u32 & 0o7777);
-    // SAFETY: plain fchmod.
-    if unsafe { libc::fchmod(fd, mode as u16) } < 0 {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fstat into a local buffer, then a plain fchmod.
+    unsafe { libc::fstat(fd, &mut st) };
+    if unsafe { libc::fchmod(fd, host_mode(mode, st.st_mode)) } < 0 {
         return -(errno::last() as i64);
     }
     if let Some(g) = fd_guest(fd) {

@@ -60,6 +60,8 @@ pub struct ExecState {
     /// Signals whose disposition is SIG_IGN (bit n-1 for signal n).
     pub sigign: u64,
     pub personality: u32,
+    /// The process's own mounts (`vfs::own_mounts_text`).
+    pub mounts: String,
 }
 
 const SIG_SETMASK: u64 = 2;
@@ -80,6 +82,7 @@ impl ExecState {
             }
         }
         super::pstate::set_personality(self.personality);
+        vfs::load_own_mounts(&self.mounts);
     }
 
     fn current() -> ExecState {
@@ -99,6 +102,7 @@ impl ExecState {
             sigmask: mask,
             sigign,
             personality: super::pstate::personality_value(),
+            mounts: vfs::own_mounts_text(),
         }
     }
 }
@@ -340,6 +344,11 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
         arg(format!("{:x}", state.sigign)),
         arg("--personality"),
         arg(format!("{:x}", state.personality)),
+    ]);
+    if !state.mounts.is_empty() {
+        host.extend([arg("--mounts"), arg(&state.mounts)]);
+    }
+    host.extend([
         arg("--inherit-env"),
         arg("--exec"),
         arg(execfn),

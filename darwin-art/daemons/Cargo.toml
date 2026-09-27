@@ -1,0 +1,28 @@
+# The replaced native daemons of the derived image (ADR 0012 appendix,
+# "Replaced native daemons"), built for aarch64-linux-android by
+# tools/build-daemons.sh:
+# - aidl/*: the AIDL-generated Rust code of the platform interfaces they
+#   serve (IApexService, IVold, INetd), over the system variant of AOSP's
+#   Rust binder crate (hal/binder with the `system` feature);
+# - log: logcat for the daemons;
+# - apexd, vold, netd: each replaces the original program of that name,
+#   which the original init .rc still starts.
+[workspace]
+members = [
+    "aidl/*",
+    "apexd",
+    "log",
+    "netd",
+    "vold",
+]
+resolver = "2"
+
+[workspace.dependencies]
+binder = { path = "../hal/binder", features = ["system"] }
+daemon-log = { path = "log" }
+log = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "debuginfo"

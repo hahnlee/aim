@@ -74,6 +74,9 @@ fetch() {
 }
 fetch platform/art build art-extra/build
 fetch platform/art odrefresh art-extra/odrefresh
+fetch platform/art adbconnection art-extra/adbconnection
+fetch platform/art dt_fd_forward/export art-extra/dt_fd_forward/export
+fetch platform/packages/modules/adb libs/adbconnection/include packages/modules/adb/libs/adbconnection/include
 fetch platform/bionic libc/platform bionic/libc/platform
 fetch platform/bionic libc/async_safe bionic/libc/async_safe
 fetch platform/external/lz4 lib external/lz4/lib
@@ -107,6 +110,10 @@ if [[ ! -f "$stamp" || "$(cat "$stamp")" != "$identity" ]]; then
   done
   echo "$identity" > "$stamp"
 fi
+# Unpatched ART subtrees the series does not touch (the JDWP plugin).
+for extra in adbconnection dt_fd_forward; do
+  rsync -a --delete --exclude .fetched "$src/art-extra/$extra/" "$stage/$extra/"
+done
 
 python3 "$root/tools/art-android/gen_build.py" \
   --art "$stage" --aosp "$aosp" --image "$image" --ndk "$ndk" --out "$out" \
@@ -118,7 +125,7 @@ ninja -C "$out" "${ninja_args[@]+"${ninja_args[@]}"}"
 strip="$ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-strip"
 mkdir -p "$out/stripped/lib64" "$out/stripped/bin"
 for f in lib64/libartbase.so lib64/libdexfile.so lib64/libprofile.so lib64/libart.so \
-         lib64/libopenjdkjvm.so bin/dex2oat64; do
+         lib64/libopenjdkjvm.so lib64/libadbconnection.so bin/dex2oat64; do
   if [[ ! "$out/stripped/$f" -nt "$out/$f" ]]; then
     "$strip" --strip-debug -o "$out/stripped/$f" "$out/$f"
   fi

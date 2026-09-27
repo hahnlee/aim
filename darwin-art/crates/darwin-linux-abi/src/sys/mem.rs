@@ -66,7 +66,7 @@ fn host_mprotect(addr: u64, len: u64, prot: i32) -> i64 {
 
 fn trace_stats(what: &str, addr: u64, len: u64, stats: &patch::PatchStats) {
     if crate::sys::tracing() && stats.total() > 0 {
-        eprintln!(
+        crate::diag!(
             "[linux-abi] {what} {:#x}..{:#x}: {} svc, {} mrs/{} msr tpidr_el0, {} scs, {} ctr_el0, {} brk fallbacks",
             addr,
             addr + len,
@@ -158,7 +158,7 @@ fn rehash_fips(m: &fips::Module, b: u64, len: u64, fd: i32, off: u64) {
     let new = fips::digest(text, rodata.as_deref());
     let hash_addr = (text_addr - m.text.0).wrapping_add(m.hash_vaddr);
     if !store_hash(hash_addr, &m.original, &new) {
-        eprintln!("[linux-abi] FIPS module hash at {hash_addr:#x} is not mapped from this file");
+        crate::diag!("[linux-abi] FIPS module hash at {hash_addr:#x} is not mapped from this file");
     }
 }
 
@@ -996,4 +996,9 @@ pub fn brk(a: [u64; 6]) -> i64 {
     }
     b.cur = want;
     b.cur as i64
+}
+
+/// This module's locks for a fork (`sys::forklock`).
+pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
+    super::forklock::mutex(&BRK, held)
 }

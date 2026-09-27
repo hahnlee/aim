@@ -77,7 +77,7 @@ pub fn default_android_env() -> Vec<String> {
 
 fn trace_image(name: &str, i: &loader::Image) {
     let s = &i.stats;
-    eprintln!(
+    crate::diag!(
         "[linux-abi] {name} loaded at bias {:#x} from {}; load-time rewrites: {} svc, {} mrs/{} msr tpidr_el0, {} scs, {} ctr_el0 ({} brk fallbacks)",
         i.bias, i.source, s.svc, s.mrs_tp, s.msr_tp, s.scs, s.ctr, s.brk_fallback
     );

@@ -1,7 +1,80 @@
 //! Fault reports that name the guest module containing the faulting pc.
 //! The host signal handlers themselves are `sys::signal`'s.
+//!
+//! The layer's own messages ([`diag!`](crate::diag)) go to the diagnostics
+//! descriptor: stderr, or with `--stdio-null` a hidden copy of it, so that
+//! the guest's stdio can be `/dev/null` as init gives services.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
+
+static LOG_FD: AtomicI32 = AtomicI32::new(2);
+
+/// Send the layer's messages to `fd` from now on.
+pub fn log_to(fd: i32) {
+    LOG_FD.store(fd, Relaxed);
+}
+
+pub fn log_fd() -> i32 {
+    LOG_FD.load(Relaxed)
+}
+
+/// `--diag-fd`: `fd` is the diagnostics descriptor a previous program of
+/// this process kept across exec.
+pub fn keep_log_fd(fd: i32) {
+    crate::sys::fdtab::keep_hidden(fd);
+    log_to(fd);
+}
+
+/// `--stdio-null`: keep stderr as the (hidden, exec-surviving)
+/// diagnostics descriptor and give the guest `/dev/null` as stdin, stdout
+/// and stderr, as init gives its services. Returns the descriptor.
+pub fn stdio_null() -> std::io::Result<i32> {
+    // SAFETY: duplicating and replacing this process's own descriptors.
+    unsafe {
+        // High up, like the layer's other descriptors (`fdtab::hide`).
+        let base = (libc::getdtablesize() * 3 / 4).max(64);
+        let fd = libc::fcntl(2, libc::F_DUPFD, base);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+        if null < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        for std in 0..3 {
+            libc::dup2(null, std);
+        }
+        if null > 2 {
+            libc::close(null);
+        }
+        keep_log_fd(fd);
+        Ok(fd)
+    }
+}
+
+/// One line on the diagnostics descriptor, written with a single `write`.
+pub fn write_line(args: std::fmt::Arguments) {
+    let mut line = args.to_string();
+    line.push('\n');
+    let mut rest = line.as_bytes();
+    while !rest.is_empty() {
+        // SAFETY: writing a local buffer.
+        let n = unsafe { libc::write(log_fd(), rest.as_ptr().cast(), rest.len()) };
+        if n <= 0 {
+            break;
+        }
+        rest = &rest[n as usize..];
+    }
+}
+
+/// `eprintln!` for the layer's own messages (see the module docs).
+#[macro_export]
+macro_rules! diag {
+    ($($arg:tt)*) => {
+        $crate::diag::write_line(format_args!($($arg)*))
+    };
+}
 
 struct Module {
     start: u64,
@@ -97,7 +170,7 @@ pub unsafe fn report(sig: i32, info: *mut libc::siginfo_t, uc: *mut libc::c_void
     unsafe {
         let mc = (*uc).uc_mcontext as *const MContext64;
         let ss = &(*mc).ss;
-        eprintln!(
+        crate::diag!(
             "[linux-abi] fatal signal {} at pc {:#x} ({}), fault addr {:#x}, esr {:#x}",
             sig,
             ss.pc,
@@ -105,7 +178,7 @@ pub unsafe fn report(sig: i32, info: *mut libc::siginfo_t, uc: *mut libc::c_void
             (*info).si_addr as u64,
             (*mc).es.esr
         );
-        eprintln!(
+        crate::diag!(
             "[linux-abi]   lr {:#x} ({}) sp {:#x}",
             ss.lr,
             describe(ss.lr),
@@ -116,9 +189,9 @@ pub unsafe fn report(sig: i32, info: *mut libc::siginfo_t, uc: *mut libc::c_void
             for j in i..(i + 4).min(29) {
                 line.push_str(&format!(" x{j:<2} {:#018x}", ss.x[j]));
             }
-            eprintln!("{line}");
+            crate::diag!("{line}");
         }
-        eprintln!("[linux-abi]   guest tp {:#x}", crate::context::guest_tp());
+        crate::diag!("[linux-abi]   guest tp {:#x}", crate::context::guest_tp());
     }
 }
 
@@ -127,4 +200,9 @@ pub unsafe fn report(sig: i32, info: *mut libc::siginfo_t, uc: *mut libc::c_void
 /// `context::init_thread`.
 pub fn install_signal_handlers() {
     crate::sys::install_host_handlers();
+}
+
+/// This module's locks for a fork (`sys::forklock`).
+pub(crate) fn fork_try(held: &mut Vec<crate::sys::forklock::Guard>) -> bool {
+    crate::sys::forklock::mutex(&MODULES, held)
 }

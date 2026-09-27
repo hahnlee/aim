@@ -129,6 +129,13 @@ pub fn openat(a: [u64; 6]) -> i64 {
             return e;
         }
     }
+    // /dev/kmsg is a regular file in the runtime /dev (guest-init contract,
+    // section 7): every write is a record appended to the log.
+    let hflags = if r.guest == "/dev/kmsg" {
+        hflags | libc::O_APPEND
+    } else {
+        hflags
+    };
     // SAFETY: host path from the resolver.
     let fd = unsafe { libc::open(r.host.as_ptr(), hflags, mode as libc::c_uint) };
     if fd < 0 {
@@ -427,6 +434,15 @@ fn put_stat(st: &libc::stat, out: u64) {
     unsafe { (out as *mut LinuxStat).write_unaligned(l) };
 }
 
+/// An image file's host path, whose original inode `attrs` reads.
+fn image_host(r: &vfs::Resolved) -> attrs::Host<'_> {
+    if r.area == vfs::Area::Image {
+        attrs::Host::Path(&r.host)
+    } else {
+        attrs::Host::None
+    }
+}
+
 /// Host stat of an fd, with the guest's ownership view.
 fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
     // A synthesized /proc or /sys directory reports what its path does
@@ -450,7 +466,7 @@ fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
     match st.st_mode & libc::S_IFMT {
         libc::S_IFREG | libc::S_IFDIR | libc::S_IFLNK => {
             let guest = dir::synthesized_path(fd).or_else(|| procfs::fd_guest_path(fd).ok());
-            attrs::apply(guest.as_deref().unwrap_or(""), &mut st);
+            attrs::apply_host(guest.as_deref().unwrap_or(""), attrs::Host::Fd(fd), &mut st);
         }
         _ => {
             (st.st_uid, st.st_gid) = attrs::ids(attrs::EFFECTIVE);
@@ -498,7 +514,7 @@ pub(super) fn stat_at(dirfd: i32, path: &[u8], flags: u64) -> Result<libc::stat,
     if unsafe { libc::lstat(r.host.as_ptr(), &mut st) } < 0 {
         return Err(-(errno::last() as i64));
     }
-    attrs::apply(&r.guest, &mut st);
+    attrs::apply_host(&r.guest, image_host(&r), &mut st);
     super::evdev::stat(&r, &mut st);
     Ok(st)
 }
@@ -609,7 +625,21 @@ const EXT4_SUPER_MAGIC: u64 = 0xef53;
 const ST_RDONLY: u64 = 1;
 const ST_NOSUID: u64 = 2;
 
+/// The statfs type of a kernel filesystem the path map provides.
+fn kernel_fs_magic(fstype: &str) -> Option<u64> {
+    Some(match fstype {
+        "bpf" => 0xcafe_4a11,
+        "cgroup2" => 0x6367_7270,
+        "tmpfs" => 0x0102_1994,
+        _ => return None,
+    })
+}
+
 fn put_statfs(s: &libc::statfs, out: u64) {
+    put_statfs_as(s, EXT4_SUPER_MAGIC, out);
+}
+
+fn put_statfs_as(s: &libc::statfs, f_type: u64, out: u64) {
     let mut flags = 0;
     if s.f_flags & libc::MNT_RDONLY as u32 != 0 {
         flags |= ST_RDONLY;
@@ -618,7 +648,7 @@ fn put_statfs(s: &libc::statfs, out: u64) {
         flags |= ST_NOSUID;
     }
     let l = LinuxStatfs {
-        f_type: EXT4_SUPER_MAGIC,
+        f_type,
         f_bsize: s.f_bsize as u64,
         f_blocks: s.f_blocks,
         f_bfree: s.f_bfree,
@@ -673,7 +703,8 @@ pub fn statfs(a: [u64; 6]) -> i64 {
     if r.read_only() {
         s.f_flags |= libc::MNT_RDONLY as u32;
     }
-    put_statfs(&s, a[1]);
+    let magic = vfs::fstype(&r.guest).and_then(|t| kernel_fs_magic(&t));
+    put_statfs_as(&s, magic.unwrap_or(EXT4_SUPER_MAGIC), a[1]);
     0
 }
 
@@ -751,7 +782,7 @@ pub fn faccessat(dirfd: u64, path: u64, mode: u64, flags: u64) -> i64 {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: host path, local buffer.
         if unsafe { libc::stat(r.host.as_ptr(), &mut st) } == 0 {
-            attrs::apply(&r.guest, &mut st);
+            attrs::apply_host(&r.guest, image_host(&r), &mut st);
             let (uid, gid) = attrs::ids(if flags & AT_EACCESS != 0 {
                 attrs::EFFECTIVE
             } else {

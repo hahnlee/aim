@@ -746,7 +746,7 @@ pub fn futex(a: [u64; 6]) -> i64 {
         FUTEX_TRYLOCK_PI => lock_pi(uaddr, None, true),
         FUTEX_UNLOCK_PI => unlock_pi(uaddr),
         _ => {
-            eprintln!("[linux-abi] futex op {op_full:#x} not implemented");
+            crate::diag!("[linux-abi] futex op {op_full:#x} not implemented");
             -(ENOSYS as i64)
         }
     }

@@ -1,0 +1,15 @@
+[package]
+name = "android_os_vold"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "android.os.IVold and its callbacks (unstable), Rust backend, generated at the pinned tag"
+
+[lib]
+path = "../../../_build/daemons/aidl/android_os_vold/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+binder.workspace = true
+static_assertions = "1"

@@ -72,7 +72,8 @@ fn package_matches(module: &str, file: &str) -> bool {
 }
 
 /// 0 for an exact name, 1 for a suffixed variant (`-<version>`,
-/// `.nonsecure`), `None` otherwise.
+/// `.nonsecure`, or a format generation such as Google's
+/// `com.google.android.tzdata6`), `None` otherwise.
 fn package_match_quality(module: &str, file: &str) -> Option<u8> {
     let stem = file
         .strip_suffix(".capex")
@@ -86,9 +87,11 @@ fn package_match_quality(module: &str, file: &str) -> Option<u8> {
         if stem == name {
             return Some(0);
         }
-        if stem.starts_with(&format!("{name}-"))
-            || stem.starts_with(&format!("{name}_"))
-            || stem.starts_with(&format!("{name}."))
+        let Some(rest) = stem.strip_prefix(name.as_str()) else {
+            continue;
+        };
+        if rest.starts_with(['-', '_', '.'])
+            || (!rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
         {
             best = Some(1);
         }
@@ -236,6 +239,10 @@ mod tests {
             "com.android.hardware.gatekeeper.nonsecure.apex"
         ));
         assert!(!package_matches("com.android.art", "com.android.artx.apex"));
+        assert_eq!(
+            package_match_quality("com.android.tzdata", "com.google.android.tzdata6.apex"),
+            Some(1)
+        );
         let xml = apex_info_list_xml(&[ApexEntry {
             module_name: "com.android.hardware.power".into(),
             module_path: "/vendor/apex/com.android.hardware.power.apex".into(),

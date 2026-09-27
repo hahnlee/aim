@@ -13,5 +13,9 @@ path = "../../_build/vendor-hals/src/frameworks/native/libs/binder/rust/sys/lib.
 [dependencies]
 libc = "0.2"
 
+[features]
+# The platform variant (no vendor defines), for system daemons.
+system = []
+
 [build-dependencies]
 bindgen = "0.70"

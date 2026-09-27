@@ -1,0 +1,29 @@
+# Pinned inputs of tools/build-daemons.sh (sourced by bash).
+#
+# Trees come from android.googlesource.com at AOSP_TAG, the tag of the pinned
+# image, and are checked against a content hash: sha256 over the
+# `shasum -a 256` lines of every file, sorted by path.
+AOSP_TAG=android-16.0.0_r1
+
+# project|subtree|content sha256
+SOURCE_TREES=(
+  "platform/system/apex|apexd/aidl|9f99c5a24bb555c4585edc81d369b8b72c8d68f740d0a1abdb8ce3fe56bcfd08"
+  "platform/system/vold|binder|b6ced52c5932aa5fb0458cd9782b748546dbcf406ec1edfac5baf8d6122469c8"
+  "platform/frameworks/base|core/java/android/os/incremental|fa374436809682f23668156321ba7b83ac8536ae0490f155bd630ab4f0831341"
+  "platform/frameworks/native|aidl/binder|46b447e4ff898962ff27ac140a868f6e45aa07f1462e00d7d4d527ee3cc06d07"
+  "platform/packages/modules/Connectivity|staticlibs/netd/aidl_api/netd_aidl_interface/17|a2f656f0acc44608d4277248815211c83dc497f927da9a89b67b425e244a7ab5"
+)
+
+# The interfaces the daemons serve, one crate each (tools/lib/daemon_aidl.py):
+#   crate|version|stability|ROOT::GLOB,...|include roots
+# Roots are relative to the fetched trees (the project without `platform/`).
+# IApexService and IVold are unstable, compiled at the tag as the platform's
+# apexd and vold are; INetd is the latest frozen version, which the
+# Connectivity module's netd_aidl_interface_lateststable names.
+n=packages/modules/Connectivity/staticlibs/netd/aidl_api/netd_aidl_interface
+AIDL_CRATES=(
+  "android_apex|0|unstable|system/apex/apexd/aidl::android/apex/*.aidl|"
+  "android_os_vold|0|unstable|system/vold/binder::android/os/*.aidl,frameworks/base/core/java::android/os/incremental/IncrementalFileSystemControlParcel.aidl|frameworks/native/aidl/binder"
+  "android_net_netd|17|stable|$n/17::android/**/*.aidl|"
+)
+unset n

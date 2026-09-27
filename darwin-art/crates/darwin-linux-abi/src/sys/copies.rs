@@ -99,3 +99,8 @@ pub fn moved(old: u64, new: u64, len: u64) {
         );
     }
 }
+
+/// This module's locks for a fork (`sys::forklock`).
+pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
+    super::forklock::mutex(&COPIES, held)
+}

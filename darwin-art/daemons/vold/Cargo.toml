@@ -1,0 +1,18 @@
+[package]
+name = "vold"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "vold (IVold) for a host directory /data: user storage and the emulated volume"
+
+# Installed as /system/bin/vold, in place of the original.
+[package.metadata.daemon]
+program = "vold"
+
+[dependencies]
+android_os_vold = { path = "../aidl/android_os_vold" }
+binder.workspace = true
+daemon-log.workspace = true
+libc = "0.2"
+log.workspace = true

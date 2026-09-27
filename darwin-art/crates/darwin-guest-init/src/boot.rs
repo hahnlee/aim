@@ -261,6 +261,27 @@ pub fn cgroup_mount_points(image: &ImageRoot) -> Vec<String> {
     out
 }
 
+/// The cgroup v2 hierarchy of `cgroups.json` (`Cgroups2`): its path, mode
+/// and owner names. The path map gives it a writable directory
+/// (`paths::MapKind::Cgroup2`).
+pub fn cgroup2_hierarchy(image: &ImageRoot) -> Option<(String, u32, String, String)> {
+    let bytes = image.read("/system/etc/cgroups.json").ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let section = &text[text.find("\"Cgroups2\"")?..];
+    let field = |key: &str| -> Option<String> {
+        let rest = &section[section.find(&format!("\"{key}\""))? + key.len() + 2..];
+        let rest = &rest[rest.find('"')? + 1..];
+        Some(rest[..rest.find('"')?].to_string())
+    };
+    let mode = u32::from_str_radix(&field("Mode").unwrap_or_else(|| "0755".into()), 8).ok()?;
+    Some((
+        field("Path")?,
+        mode,
+        field("UID").unwrap_or_else(|| "root".into()),
+        field("GID").unwrap_or_else(|| "root".into()),
+    ))
+}
+
 fn default_linux_run() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -386,13 +407,25 @@ impl Boot {
             boot_epoch: Instant::now(),
         };
         let mut fs = FsOps::new(map, layout.fs_attrs_file(), options.mode == RunMode::Run);
+        fs.set_path_map_file(layout.path_map_file());
+        let cgroup2 = cgroup2_hierarchy(&image);
         for root in cgroup_mount_points(&image)
             .iter()
             .map(String::as_str)
             .chain(crate::fsops::LEGACY_CGROUP_ROOTS.iter().copied())
+            .filter(|root| cgroup2.as_ref().is_none_or(|(path, ..)| path != root))
         {
             fs.add_unmounted_root(root, crate::fsops::CGROUP_REASON);
         }
+        fs.cgroup2 = cgroup2.and_then(|(path, mode, uid, gid)| {
+            let ids = &planner.ids;
+            Some((
+                path,
+                mode,
+                ids.decode_uid(&uid).ok()?,
+                ids.decode_uid(&gid).ok()?,
+            ))
+        });
         let props = Rc::new(RefCell::new(properties));
         let mut executor =
             GuestExecutor::new(props.clone(), launcher, planner, fs, options.only.clone());

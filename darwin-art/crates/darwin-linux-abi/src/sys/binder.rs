@@ -57,14 +57,20 @@ fn lookup(fd: i32) -> Option<BinderFile> {
 struct Guest;
 
 /// Nothing maps below 4 GiB on macOS arm64 (`__PAGEZERO`), so a pointer
-/// there, null included, is EFAULT as copy_from_user would make it.
-fn check_user(address: u64) -> Result<(), i32> {
-    if address < 1 << 32 { Err(14) } else { Ok(()) }
+/// there, null included, is EFAULT as copy_from_user would make it. A copy
+/// of nothing touches no memory and succeeds whatever the pointer, as on
+/// Linux: an empty Parcel (a ping, a void reply) has a null data pointer.
+fn check_user(address: u64, len: usize) -> Result<(), i32> {
+    if len > 0 && address < 1 << 32 {
+        Err(14)
+    } else {
+        Ok(())
+    }
 }
 
 impl UserMemory for Guest {
     fn read(&mut self, address: u64, len: usize) -> Result<Vec<u8>, i32> {
-        check_user(address)?;
+        check_user(address, len)?;
         let mut v = vec![0u8; len];
         // SAFETY: guest memory the guest passed to the ioctl.
         unsafe { std::ptr::copy_nonoverlapping(address as *const u8, v.as_mut_ptr(), len) };
@@ -72,7 +78,7 @@ impl UserMemory for Guest {
     }
 
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), i32> {
-        check_user(address)?;
+        check_user(address, data.len())?;
         // SAFETY: as above.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), address as *mut u8, data.len()) };
         Ok(())
@@ -204,4 +210,9 @@ pub fn poll(fd: i32) {
     if let Some(file) = lookup(fd) {
         let _ = file.poll(super::process::gettid() as i32);
     }
+}
+
+/// This module's locks for a fork (`sys::forklock`).
+pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
+    super::forklock::mutex(&CLIENT, held) && super::forklock::mutex(&FILES, held)
 }

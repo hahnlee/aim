@@ -1,0 +1,18 @@
+[package]
+name = "netd"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "netd (INetd V17) over the host's networking, hosting the original DnsResolver"
+
+# Installed as /system/bin/netd, in place of the original.
+[package.metadata.daemon]
+program = "netd"
+
+[dependencies]
+android_net_netd = { path = "../aidl/android_net_netd" }
+binder.workspace = true
+daemon-log.workspace = true
+libc = "0.2"
+log.workspace = true

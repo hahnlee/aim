@@ -689,7 +689,7 @@ extern "C" fn linux_abi_deliver(ctx: *mut GuestContext) {
         frame(th, &cpu, &t, uc_mask, 0, 0).to_ctx(ctx);
     };
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).is_err() {
-        eprintln!("[linux-abi] panic in signal delivery; aborting");
+        crate::diag!("[linux-abi] panic in signal delivery; aborting");
         std::process::abort();
     }
 }
@@ -817,6 +817,19 @@ unsafe fn host_signal(hsig: i32, si: &libc::siginfo_t, uc: *mut libc::c_void) ->
 fn guest_fault(ctx: &GuestContext, hsig: i32, code: i32, m: &mut DarwinMcontext) -> Option<i32> {
     let f = sigframe::translate_fault(hsig, code, m);
     let sig = f.info.signo;
+    // macOS maps nothing below 4 GiB, so an access there beyond the null
+    // pages (which implicit null checks use) is a stray pointer, such as a
+    // heap reference that was not decoded: name the code that made it.
+    if (0x10000..1 << 32).contains(&f.fault_address) {
+        crate::diag!(
+            "[linux-abi] signal {sig}: access to {:#x} at pc {:#x} ({}), lr {:#x} ({})",
+            f.fault_address,
+            m.pc,
+            crate::diag::describe(m.pc),
+            m.lr,
+            crate::diag::describe(m.lr)
+        );
+    }
     let th = thread_of(ctx)?;
     let act = action(sig);
     let mask = th.sig.mask();
@@ -1226,7 +1239,7 @@ pub fn rt_sigreturn(ctx: &mut GuestContext) -> i64 {
     let th = current();
     // SAFETY: the frame the guest handler returned from.
     let Some((cpu, mask, saved)) = (unsafe { sigframe::restore(ctx.sp) }) else {
-        eprintln!("[linux-abi] rt_sigreturn: bad frame at {:#x}", ctx.sp);
+        crate::diag!("[linux-abi] rt_sigreturn: bad frame at {:#x}", ctx.sp);
         die(sigframe::SIGSEGV);
     };
     th.sig.mask.store(mask & !UNBLOCKABLE, SeqCst);

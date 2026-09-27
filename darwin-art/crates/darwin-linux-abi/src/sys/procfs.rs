@@ -271,7 +271,11 @@ fn stat_line(p: i32) -> Option<String> {
         ns_to_ticks(ti.pti_total_user),
         ns_to_ticks(ti.pti_total_system),
         b.pbi_nice,
-        ti.pti_threadnum,
+        if p == pid() {
+            tids(p).len() as i32
+        } else {
+            ti.pti_threadnum
+        },
         ti.pti_virtual_size,
         s.start_stack,
         s.args.0,
@@ -329,7 +333,11 @@ fn status(p: i32) -> Option<String> {
         kb(t.ptinfo.pti_resident_size),
         kb(t.ptinfo.pti_resident_size),
         kb(t.ptinfo.pti_virtual_size),
-        t.ptinfo.pti_threadnum,
+        if p == pid() {
+            tids(p).len() as i32
+        } else {
+            t.ptinfo.pti_threadnum
+        },
         (1u64 << n) - 1,
         n - 1,
         t.ptinfo.pti_csw,
@@ -680,10 +688,27 @@ const BLOCK_MOUNTS: &[&str] = &["/data", "/metadata", "/cache"];
 
 /// The mount table: the read-only image at `/` and the path map's areas.
 /// Each is `(source, target, fstype, options)`.
-fn mount_table() -> Vec<(String, String, &'static str, &'static str)> {
-    let mut out = vec![("/dev/root".into(), "/".into(), "erofs", "ro,relatime")];
-    for (guest, area) in vfs::mount_points() {
-        let (source, fstype, options) = match (area, guest.as_str()) {
+fn mount_table() -> Vec<(String, String, String, &'static str)> {
+    let mut out = vec![(
+        "/dev/root".into(),
+        "/".into(),
+        "erofs".into(),
+        "ro,relatime",
+    )];
+    for mp in vfs::mount_points() {
+        let guest = mp.guest;
+        // A kernel filesystem of the path map (cgroup2, bpf) or a mount the
+        // process made.
+        if let (Some(source), Some(fstype)) = (mp.source, mp.fstype) {
+            let options = if mp.area == vfs::Area::Image {
+                "ro,relatime"
+            } else {
+                "rw,nosuid,nodev,noexec,relatime"
+            };
+            out.push((source, guest, fstype, options));
+            continue;
+        }
+        let (source, fstype, options) = match (mp.area, guest.as_str()) {
             (vfs::Area::Kernfs, "/proc") => {
                 ("proc".into(), "proc", "rw,nosuid,nodev,noexec,relatime")
             }
@@ -698,7 +723,7 @@ fn mount_table() -> Vec<(String, String, &'static str, &'static str)> {
             (vfs::Area::Writable, _) => ("tmpfs".into(), "tmpfs", "rw,nosuid,relatime"),
             _ => continue,
         };
-        out.push((source, guest, fstype, options));
+        out.push((source, guest, fstype.to_string(), options));
     }
     out
 }
@@ -956,8 +981,14 @@ fn sys_node(tail: &str) -> Option<Node> {
     })
 }
 
+/// Under /proc or /sys, and not in a writable area mapped there (the cgroup
+/// v2 hierarchy).
 fn is_kernfs(guest: &str) -> bool {
-    guest == "/proc" || guest.starts_with("/proc/") || guest == "/sys" || guest.starts_with("/sys/")
+    (guest == "/proc"
+        || guest.starts_with("/proc/")
+        || guest == "/sys"
+        || guest.starts_with("/sys/"))
+        && vfs::lookup(guest).1 != Area::Writable
 }
 
 /// The host path init recorded a value at, if it exists.

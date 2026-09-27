@@ -36,6 +36,8 @@ use crate::vfs;
 const L_AF_UNIX: u16 = 1;
 const L_AF_INET: u16 = 2;
 const L_AF_INET6: u16 = 10;
+const L_AF_KEY: u16 = 15;
+const PF_KEY_V2: u64 = 2;
 
 const L_SOCK_STREAM: u64 = 1;
 const L_SOCK_DGRAM: u64 = 2;
@@ -622,6 +624,19 @@ pub fn socket(a: [u64; 6]) -> i64 {
             set_int(fd, libc::SOL_SOCKET, libc::SO_NOSIGPIPE, 1);
             fd
         }
+        // PF_KEY: libbpf_android's synchronizeKernelRCU opens and closes
+        // one for the synchronize_rcu() of its release, before it reads a
+        // bpf map it swapped out. Map updates here are visible at once, so
+        // the socket only has to exist; it is an unconnected datagram
+        // socket, and no key management is offered through it.
+        L_AF_KEY if base == L_SOCK_RAW && proto == PF_KEY_V2 => {
+            let fd = match new_host_socket(libc::AF_UNIX, libc::SOCK_DGRAM) {
+                Ok(fd) => fd,
+                Err(e) => return e,
+            };
+            fdtab::insert(fd, Kind::Sock(Sock::new(SockType::Dgram)));
+            fd
+        }
         _ => return -EAFNOSUPPORT,
     };
     fdtab::set_flags(fd, nonblock, cloexec);
@@ -852,7 +867,9 @@ fn control_to_host(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
         if clen < 16 || off + clen > len {
             return Err(-(EINVAL as i64));
         }
-        if level == L_SOL_SOCKET && ty == L_SCM_RIGHTS {
+        // An SCM_RIGHTS without fds passes nothing on Linux (libbase's
+        // SendFileDescriptors sends one for an empty list).
+        if level == L_SOL_SOCKET && ty == L_SCM_RIGHTS && clen >= 20 {
             let n = clen - 16;
             let hlen = 12 + n;
             out.extend_from_slice(&(hlen as u32).to_le_bytes());
@@ -863,7 +880,7 @@ fn control_to_host(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
                 std::slice::from_raw_parts((ptr as *const u8).add(off + 16), n)
             });
             out.resize((out.len() + 3) & !3, 0);
-        } else if !(level == L_SOL_SOCKET && ty == L_SCM_CREDENTIALS) {
+        } else if !(level == L_SOL_SOCKET && matches!(ty, L_SCM_CREDENTIALS | L_SCM_RIGHTS)) {
             return Err(-(EINVAL as i64));
         }
         off += (clen + 7) & !7;
@@ -897,7 +914,11 @@ fn control_to_guest(
                 fdtab::set_flags(fd, false, cloexec);
                 adopt(fd);
             }
-            msgs.push((L_SCM_RIGHTS, data));
+            // Darwin can hand back a bare SCM_RIGHTS header (a sender's
+            // empty one); Linux never delivers one, and libbase aborts on it.
+            if !data.is_empty() {
+                msgs.push((L_SCM_RIGHTS, data));
+            }
         }
         off += (clen + 3) & !3;
     }

@@ -38,6 +38,10 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
   --display SOCKET       display server (darwin-display) for the composer
                          and input (/dev/input)
   --trace                log every syscall
+  --stdio-null           the guest's stdin, stdout and stderr are /dev/null
+                         (as init gives services); the layer's own messages
+                         still go to the original stderr
+  --diag-fd FD           the layer's messages go to FD (kept across exec)
   --identity FILE        the process's credentials (identity file); its
                          by-pid directory is FILE's directory + /by-pid
   --identity-text TEXT   the same, inline
@@ -49,6 +53,7 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
   --sigmask HEX          blocked signals (bit n-1 = Linux signal n)
   --sigign HEX           ignored signals
   --personality HEX      personality(2) value
+  --mounts TEXT          the process's own mounts (bind, tmpfs), one per line
   --exec EXECFN          PROGRAM is followed by the full argv (argv[0]
                          included) and EXECFN is AT_EXECFN, as after execve";
 
@@ -82,6 +87,23 @@ fn host_environment() -> Vec<Vec<u8>> {
     out
 }
 
+/// Tells the Objective-C runtime that this executable forks while it has
+/// threads, and that its children run on without exec: a guest `fork` is a
+/// Darwin `fork` (zygote's children never exec). Without it, a child of a
+/// multithreaded fork treats any two of its threads meeting in one class's
+/// `+initialize` as a fork hazard and kills itself (the SIGKILL of
+/// system_server seconds into its start, with no trace in the guest). The
+/// runtime reads the section from the images it registers
+/// (`DisableInitializeForkSafety` in objc4's `map_images_nolock`), which
+/// are those with an `__objc_imageinfo` (an empty one: no classes).
+#[used]
+#[unsafe(link_section = "__DATA,__objc_fork_ok")]
+static OBJC_FORK_OK: [u32; 2] = [0, 0];
+
+#[used]
+#[unsafe(link_section = "__DATA,__objc_imageinfo,regular,no_dead_strip")]
+static OBJC_IMAGE_INFO: [u32; 2] = [0, 0];
+
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let mut root = PathBuf::from("/");
@@ -98,6 +120,7 @@ fn main() {
     let mut state = ExecState::default();
     let mut execfn = None;
     let mut runtime_args = Vec::new();
+    let mut diag_fd = None;
     let program = loop {
         let Some(a) = args.next() else { usage() };
         let mut value = || args.next().unwrap_or_else(|| usage());
@@ -111,21 +134,36 @@ fn main() {
             "--display" => display = Some(PathBuf::from(value())),
             "--seclabel" => seclabel = Some(value().to_string_lossy().into_owned()),
             "--trace" => trace = true,
+            "--stdio-null" => match darwin_linux_abi::diag::stdio_null() {
+                Ok(fd) => diag_fd = Some(fd),
+                Err(e) => {
+                    darwin_linux_abi::diag!("linux-run: --stdio-null: {e}");
+                    std::process::exit(127);
+                }
+            },
+            "--diag-fd" => {
+                let fd = value()
+                    .to_string_lossy()
+                    .parse()
+                    .unwrap_or_else(|_| usage());
+                darwin_linux_abi::diag::keep_log_fd(fd);
+                diag_fd = Some(fd);
+            }
             "--identity" => {
                 let file = PathBuf::from(value());
                 let text = std::fs::read_to_string(&file).unwrap_or_else(|e| {
-                    eprintln!("linux-run: --identity {}: {e}", file.display());
+                    darwin_linux_abi::diag!("linux-run: --identity {}: {e}", file.display());
                     std::process::exit(127);
                 });
                 identity = Identity::parse(&text).unwrap_or_else(|e| {
-                    eprintln!("linux-run: --identity {}: {e}", file.display());
+                    darwin_linux_abi::diag!("linux-run: --identity {}: {e}", file.display());
                     std::process::exit(127);
                 });
                 by_pid = file.parent().map(|d| d.join("by-pid"));
             }
             "--identity-text" => {
                 identity = Identity::parse(&value().to_string_lossy()).unwrap_or_else(|e| {
-                    eprintln!("linux-run: --identity-text: {e}");
+                    darwin_linux_abi::diag!("linux-run: --identity-text: {e}");
                     std::process::exit(127);
                 })
             }
@@ -135,6 +173,7 @@ fn main() {
             "--sigmask" => state.sigmask = hex(value()),
             "--sigign" => state.sigign = hex(value()),
             "--personality" => state.personality = hex(value()) as u32,
+            "--mounts" => state.mounts = value().to_string_lossy().into_owned(),
             "--exec" => execfn = Some(value().into_vec()),
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -165,6 +204,9 @@ fn main() {
     }
     if trace {
         runtime_args.push(cstring("--trace"));
+    }
+    if let Some(fd) = diag_fd {
+        runtime_args.extend([cstring("--diag-fd"), cstring(fd.to_string())]);
     }
     if let Some(label) = seclabel {
         identity.seclabel = label;
@@ -197,6 +239,6 @@ fn main() {
         state,
         runtime_args,
     });
-    eprintln!("linux-run: {err}");
+    darwin_linux_abi::diag!("linux-run: {err}");
     std::process::exit(127);
 }

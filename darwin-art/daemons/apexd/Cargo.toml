@@ -1,0 +1,17 @@
+[package]
+name = "apexd"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "apexservice (IApexService) over the pre-flattened APEXes of the derived image"
+
+# Installed as /system/bin/apexd, in place of the original.
+[package.metadata.daemon]
+program = "apexd"
+
+[dependencies]
+android_apex = { path = "../aidl/android_apex" }
+binder.workspace = true
+daemon-log.workspace = true
+log.workspace = true

@@ -105,7 +105,7 @@ of the patches are disjoint.
 | `0002-runtime-heap-reference-encoding.patch` | 647 | +198 -59 | Reference encoding in the runtime: `PtrCompression`, `ObjPtr`, lock-word forwarding, heap/card table/bitmaps, vreg and GC-root visitors |
 | `0003-image-logical-addresses.patch` | 360 | +104 -39 | Image loader, app-image writer, image writer, OAT code and entry-point addresses: logical <-> window |
 | `0004-quick-entrypoint-boundaries.patch` | 591 | +252 -17 | Quick entrypoints (C++ and arm64 assembly) decode arguments from and encode results for managed code |
-| `0005-nterp-heap-base.patch` | 334 | +78 -8 | nterp (arm64ng mterp) decodes before dereferences and C++ calls |
+| `0005-nterp-heap-base.patch` | 353 | +81 -8 | nterp (arm64ng mterp) decodes before dereferences and C++ calls |
 | `0006-arm64-codegen-heap-base.patch` | 1,425 | +565 -95 | Optimizing arm64 code generator; the shared `ReferenceCodegenARM64` helper |
 | `0007-arm64-intrinsics-heap-base.patch` | 993 | +205 -109 | arm64 intrinsics |
 | `0008-arm64-jni-and-baseline-heap-base.patch` | 246 | +94 -12 | JNI compiler and the baseline (fast) compiler |
@@ -203,7 +203,11 @@ reference for `art_quick_aput_obj`), `fill-array-data`, `throw`
 virtual/interface dispatch with an explicit null check instead of the SIGSEGV
 path (`invoke.S`), instanceof/checkcast, instance and static field holders
 (`object.S`). The count matches the old build's audited inventory in
-`nterp.rs`.
+`nterp.rs`. Three sites the inventory missed came up in the original
+system_server (P3): `ExecuteNterpWithClinitImpl` decodes the declaring
+class it loads, and `new-instance`/`new-array` decode the class after
+`art_quick_read_barrier_mark_reg00`, which returns it compressed while
+the thread-local cache holds it decoded.
 
 **0006 — optimizing code generator**:
 
@@ -323,7 +327,9 @@ tools/build-art-android.sh [--aosp DIR] [--image DIR] [--out DIR] [--ndk DIR] [-
 The rebuilt set must replace, as a unit, every ART APEX library that links
 libart's C++ internals: libart, libartbase, libdexfile, libprofile,
 libopenjdkjvm (and libopenjdkjvmti, libadbconnection, libperfetto_hprof when
-those plugins are used). Libraries with C APIs (libnativebridge,
+those plugins are used). `tools/build-art-android.sh` builds libadbconnection
+too (zygote loads it); libopenjdkjvmti and libperfetto_hprof are not rebuilt
+yet, so their dlopen fails and ART runs without them. Libraries with C APIs (libnativebridge,
 libnativeloader, libsigchain, libartpalette, libjavacore, libopenjdk) stay
 original.
 

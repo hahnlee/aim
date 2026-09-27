@@ -320,7 +320,7 @@ pub fn clone3(ctx: &GuestContext, a: [u64; 6]) -> i64 {
 
 fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: u64) -> i64 {
     if flags & CLONE_THREAD == 0 {
-        eprintln!(
+        crate::diag!(
             "[linux-abi] clone({flags:#x}) of a process is not implemented; only threads are"
         );
         return -(ENOSYS as i64);
@@ -435,6 +435,54 @@ extern "C" fn thread_start(arg: *mut libc::c_void) -> *mut libc::c_void {
 
 // ---- exit -----------------------------------------------------------------------
 
+unsafe extern "C" {
+    fn mach_thread_self() -> u32;
+    fn mach_port_deallocate(task: u32, name: u32) -> i32;
+    fn thread_info(thread: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+    static mach_task_self_: u32;
+}
+
+/// Host threads of exited guest threads that may still be tearing down:
+/// their Mach ports, until the threads are dead.
+static EXITING: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// This module's locks for a fork (`sys::forklock`) besides the thread
+/// layer's own protocol.
+pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
+    super::forklock::mutex(&EXITING, held)
+}
+
+/// Wait (up to a second) until the host threads of exited guest threads
+/// are gone. A fork must not catch one in its teardown: pthread TSD
+/// destructors run Objective-C code, and a class whose `+initialize` a
+/// fork interrupts kills the child when it first uses it. A guest checks
+/// that it is single-threaded (zygote, through /proc/self/task) before it
+/// forks, and exited threads have left that list already.
+pub fn wait_exited() {
+    const THREAD_BASIC_INFO: i32 = 3;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        let mut ports = EXITING.lock().unwrap_or_else(|e| e.into_inner());
+        ports.retain(|&port| {
+            let mut info = [0i32; 10];
+            let mut count = info.len() as u32;
+            // SAFETY: querying a thread port we hold a send right to.
+            let alive =
+                unsafe { thread_info(port, THREAD_BASIC_INFO, info.as_mut_ptr(), &mut count) } == 0;
+            if !alive {
+                // SAFETY: dropping our right to a dead thread's port.
+                unsafe { mach_port_deallocate(mach_task_self_, port) };
+            }
+            alive
+        });
+        if ports.is_empty() || std::time::Instant::now() > deadline {
+            return;
+        }
+        drop(ports);
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+}
+
 /// exit(code): end the calling thread. The process ends with the last one
 /// (with the main thread's code if it exited earlier, as Linux reports).
 pub fn exit(a: [u64; 6]) -> ! {
@@ -473,6 +521,13 @@ pub fn exit(a: [u64; 6]) -> ! {
     super::signal::reroute_process_pending();
     let ctx = th.ctx;
     let stacks = th.stacks.lock().unwrap().take();
+    // The guest sees the thread gone; the host thread still has its
+    // teardown to run (TSD destructors, which can reach Foundation).
+    // SAFETY: a new send right to this thread, kept until it is dead.
+    EXITING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(unsafe { mach_thread_self() });
     // SAFETY: nothing runs on this thread's context, stacks or record after
     // this; the main thread's record stays (host handlers may reach it).
     unsafe {
@@ -630,6 +685,8 @@ pub fn fork_child() {
     t.insert(new.tid, new.clone());
     super::signal::fork_child(l.signals, old, &new);
     super::ptimer::fork_child(l.ptimers);
+    // The exiting threads were the parent's; their ports are not ours.
+    EXITING.lock().unwrap_or_else(|e| e.into_inner()).clear();
     MAIN_PTHREAD.store(new.pthread.load(SeqCst), SeqCst);
     MAIN_THREAD.store(Arc::as_ptr(&new) as usize, SeqCst);
     LEADER_EXIT.store(-1, SeqCst);
