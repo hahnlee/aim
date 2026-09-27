@@ -1,0 +1,993 @@
+diff --git a/compiler/optimizing/intrinsics_arm64.cc b/compiler/optimizing/intrinsics_arm64.cc
+--- a/compiler/optimizing/intrinsics_arm64.cc
++++ b/compiler/optimizing/intrinsics_arm64.cc
+@@ -15,11 +15,13 @@
+  */
+ 
+ #include "intrinsics_arm64.h"
++#include "utils/arm64/heap_reference_arm64.h"
+ 
+ #include "aarch64/assembler-aarch64.h"
+ #include "aarch64/operands-aarch64.h"
+ #include "arch/arm64/callee_save_frame_arm64.h"
+ #include "arch/arm64/instruction_set_features_arm64.h"
++#include "utils/arm64/heap_reference_arm64.h"
+ #include "art_method.h"
+ #include "base/bit_utils.h"
+ #include "code_generator_arm64.h"
+@@ -769,14 +771,14 @@
+ 
+   if (type == DataType::Type::kReference && codegen->EmitBakerReadBarrier()) {
+     // UnsafeGetObject/UnsafeGetObjectVolatile with Baker's read barrier case.
+-    Register temp = WRegisterFrom(locations->GetTemp(0));
++    Register temp = XRegisterFrom(locations->GetTemp(0));
+     MacroAssembler* masm = codegen->GetVIXLAssembler();
+     // Piggy-back on the field load path using introspection for the Baker read barrier.
+     if (offset_loc.IsConstant()) {
+       uint32_t offset = Int64FromLocation(offset_loc);
+       Location maybe_temp = ReadBarrierNeedsTemp(is_volatile, invoke)
+           ? locations->GetTemp(0) : Location::NoLocation();
+-      DCHECK_EQ(locations->GetTempCount(), ReadBarrierNeedsTemp(is_volatile, invoke));
++      DCHECK_GE(locations->GetTempCount(), ReadBarrierNeedsTemp(is_volatile, invoke));
+       codegen->GenerateFieldLoadWithBakerReadBarrier(invoke,
+                                                      trg_loc,
+                                                      base.W(),
+@@ -785,7 +787,8 @@
+                                                      /* needs_null_check= */ false,
+                                                      is_volatile);
+     } else {
+-      __ Add(temp, base, WRegisterFrom(offset_loc));  // Offset should not exceed 32 bits.
++      ReferenceCodegenARM64<>::DecodeNullable(masm, temp, base);
++      __ Add(temp, temp, XRegisterFrom(offset_loc));
+       codegen->GenerateFieldLoadWithBakerReadBarrier(invoke,
+                                                      trg_loc,
+                                                      base,
+@@ -795,11 +798,14 @@
+     }
+   } else {
+     // Other cases.
++    MacroAssembler* masm = codegen->GetVIXLAssembler();
++    Register address = XRegisterFrom(locations->GetTemp(0));
++    ReferenceCodegenARM64<>::DecodeNullable(masm, address, base);
+     MemOperand mem_op;
+     if (offset_loc.IsConstant()) {
+-      mem_op = MemOperand(base.X(), Int64FromLocation(offset_loc));
++      mem_op = MemOperand(address, Int64FromLocation(offset_loc));
+     } else {
+-      mem_op = MemOperand(base.X(), XRegisterFrom(offset_loc));
++      mem_op = MemOperand(address, XRegisterFrom(offset_loc));
+     }
+     if (is_volatile) {
+       codegen->LoadAcquire(invoke, type, trg, mem_op, /* needs_null_check= */ true);
+@@ -847,12 +853,10 @@
+                                       kIntrinsified);
+   if (can_call && kUseBakerReadBarrier) {
+     locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
+-    if (ReadBarrierNeedsTemp(is_volatile, invoke)) {
+-      // We need a temporary register for the read barrier load in order to use
+-      // CodeGeneratorARM64::GenerateFieldLoadWithBakerReadBarrier().
+-      locations->AddTemp(FixedTempLocation());
+-    }
+   }
++  // Managed references are 32-bit HIR values. Keep a dedicated
++  // register for the nullable native address used by Unsafe memory access.
++  locations->AddTemp(FixedTempLocation());
+   locations->SetInAt(0, Location::NoLocation());        // Unused receiver.
+   locations->SetInAt(1, Location::RequiresRegister());
+   locations->SetInAt(2, Location::RegisterOrConstant(invoke->InputAt(2)));
+@@ -1004,6 +1008,7 @@
+   } else {
+     locations->SetInAt(kValueIndex, Location::RequiresRegister());
+   }
++  locations->AddTemp(FixedTempLocation());
+ }
+ 
+ static void CreateUnsafePutAbsoluteLocations(ArenaAllocator* allocator, HInvoke* invoke) {
+@@ -1114,11 +1119,13 @@
+   Location offset = locations->InAt(kOffsetIndex);      // Long offset.
+   CPURegister value = InputCPURegisterOrZeroRegAt(invoke, kValueIndex);
+   CPURegister source = value;
++  Register address = XRegisterFrom(locations->GetTemp(0));
++  ReferenceCodegenARM64<>::DecodeNullable(masm, address, base);
+   MemOperand mem_op;
+   if (offset.IsConstant()) {
+-    mem_op = MemOperand(base.X(), Int64FromLocation(offset));
++    mem_op = MemOperand(address, Int64FromLocation(offset));
+   } else {
+-    mem_op = MemOperand(base.X(), XRegisterFrom(offset));
++    mem_op = MemOperand(address, XRegisterFrom(offset));
+   }
+ 
+   {
+@@ -1575,7 +1582,8 @@
+     Register store_result = store_result_.IsValid() ? store_result_ : temps.AcquireW();
+ 
+     // Recalculate the `tmp_ptr` from main path clobbered by the read barrier above.
+-    __ Add(tmp_ptr, base_.X(), Operand(offset_));
++    ReferenceCodegenARM64<>::DecodeNullable(masm, tmp_ptr, base_);
++    __ Add(tmp_ptr, tmp_ptr, Operand(offset_));
+ 
+     vixl::aarch64::Label mark_old_value;
+     GenerateCompareAndSet(arm64_codegen,
+@@ -1685,7 +1693,8 @@
+     old_value = temps.AcquireSameSizeAs(new_value);
+   }
+ 
+-  __ Add(tmp_ptr, base.X(), Operand(offset));
++  ReferenceCodegenARM64<>::DecodeNullable(masm, tmp_ptr, base);
++  __ Add(tmp_ptr, tmp_ptr, Operand(offset));
+ 
+   GenerateCompareAndSet(codegen,
+                         type,
+@@ -1940,7 +1949,8 @@
+     codegen->MaybeMarkGCCard(base, /*value=*/arg, new_value_can_be_null);
+   }
+ 
+-  __ Add(tmp_ptr, base.X(), Operand(offset));
++  ReferenceCodegenARM64<>::DecodeNullable(masm, tmp_ptr, base);
++  __ Add(tmp_ptr, tmp_ptr, Operand(offset));
+   GenerateGetAndUpdate(codegen,
+                        get_and_update_op,
+                        type,
+@@ -2042,6 +2052,7 @@
+   if (mirror::kUseStringCompression) {
+     locations->AddTemp(Location::RequiresRegister());
+   }
++  locations->AddRegisterTemps(2);
+   locations->SetOut(Location::RequiresRegister(), Location::kOutputOverlap);
+ }
+ 
+@@ -2088,17 +2099,23 @@
+   __ Subs(out, str, arg);
+   __ B(&end, eq);
+ 
++  const size_t native_temp_index = 3u + (mirror::kUseStringCompression ? 1u : 0u);
++  Register native_str = XRegisterFrom(locations->GetTemp(native_temp_index));
++  Register native_arg = XRegisterFrom(locations->GetTemp(native_temp_index + 1u));
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, native_str, str);
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, native_arg, arg);
++
+   if (mirror::kUseStringCompression) {
+     // Load `count` fields of this and argument strings.
+-    __ Ldr(temp3, HeapOperand(str, count_offset));
+-    __ Ldr(temp2, HeapOperand(arg, count_offset));
++    __ Ldr(temp3, MemOperand(native_str, count_offset));
++    __ Ldr(temp2, MemOperand(native_arg, count_offset));
+     // Clean out compression flag from lengths.
+     __ Lsr(temp0, temp3, 1u);
+     __ Lsr(temp1, temp2, 1u);
+   } else {
+     // Load lengths of this and argument strings.
+-    __ Ldr(temp0, HeapOperand(str, count_offset));
+-    __ Ldr(temp1, HeapOperand(arg, count_offset));
++    __ Ldr(temp0, MemOperand(native_str, count_offset));
++    __ Ldr(temp1, MemOperand(native_arg, count_offset));
+   }
+   // out = length diff.
+   __ Subs(out, temp0, temp1);
+@@ -2138,8 +2155,8 @@
+ 
+   // Loop to compare 4x16-bit characters at a time (ok because of string data alignment).
+   __ Bind(&loop);
+-  __ Ldr(temp4, MemOperand(str.X(), temp1.X()));
+-  __ Ldr(temp2, MemOperand(arg.X(), temp1.X()));
++  __ Ldr(temp4, MemOperand(native_str, temp1.X()));
++  __ Ldr(temp2, MemOperand(native_arg, temp1.X()));
+   __ Cmp(temp4, temp2);
+   __ B(ne, &find_char_diff);
+   __ Add(temp1, temp1, char_size * 4);
+@@ -2199,8 +2216,10 @@
+     // `temp1` will hold the compressed data pointer, `temp2` the uncompressed data pointer.
+     // Note that flags have been set by the `str` compression flag extraction to `temp3`
+     // before branching to the `different_compression` label.
+-    __ Csel(temp1, str, arg, eq);   // Pointer to the compressed string.
+-    __ Csel(temp2, str, arg, ne);   // Pointer to the uncompressed string.
++    __ Csel(temp1.X(), native_str, native_arg, eq);   // Pointer to the compressed string.
++    __ Csel(temp2.X(), native_str, native_arg, ne);   // Pointer to the uncompressed string.
++    temp1 = temp1.X();
++    temp2 = temp2.X();
+ 
+     // We want to free up the temp3, currently holding `str` compression flag, for comparison.
+     // So, we move it to the bottom bit of the iteration count `temp0` which we then need to treat
+@@ -2264,20 +2283,9 @@
+   locations->SetInAt(0, Location::RequiresRegister());
+   locations->SetInAt(1, Location::RequiresRegister());
+ 
+-  // For the generic implementation and for long const strings we need a temporary.
+-  // We do not need it for short const strings, up to 8 bytes, see code generation below.
+-  uint32_t const_string_length = 0u;
+-  const char* const_string = GetConstString(invoke->InputAt(0), &const_string_length);
+-  if (const_string == nullptr) {
+-    const_string = GetConstString(invoke->InputAt(1), &const_string_length);
+-  }
+-  bool is_compressed =
+-      mirror::kUseStringCompression &&
+-      const_string != nullptr &&
+-      mirror::String::DexFileStringAllASCII(const_string, const_string_length);
+-  if (const_string == nullptr || const_string_length > (is_compressed ? 8u : 4u)) {
+-    locations->AddTemp(Location::RequiresRegister());
+-  }
++  // Temp 0 is used by the generic/long-constant loops. A heap reference base additionally
++  // needs two registers for decoded native object addresses.
++  locations->AddRegisterTemps(3);
+ 
+   // TODO: If the String.equals() is used only for an immediately following HIf, we can
+   // mark it as emitted-at-use-site and emit branches directly to the appropriate blocks.
+@@ -2319,6 +2327,11 @@
+   // Reference equality check, return true if same reference.
+   __ Cmp(str, arg);
+   __ B(&return_true, eq);
++
++  Register native_str = XRegisterFrom(locations->GetTemp(1));
++  Register native_arg = XRegisterFrom(locations->GetTemp(2));
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, native_str, str);
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, native_arg, arg);
+ 
+   if (!optimizations.GetArgumentIsString()) {
+     // Instanceof check for the argument by comparing class fields.
+@@ -2330,9 +2343,9 @@
+     // field from String.equals' arguments without read barriers.
+     AssertNonMovableStringClass();
+     // /* HeapReference<Class> */ temp = str->klass_
+-    __ Ldr(temp, MemOperand(str.X(), class_offset));
++    __ Ldr(temp, MemOperand(native_str, class_offset));
+     // /* HeapReference<Class> */ temp1 = arg->klass_
+-    __ Ldr(temp1, MemOperand(arg.X(), class_offset));
++    __ Ldr(temp1, MemOperand(native_arg, class_offset));
+     // Also, because we use the previously loaded class references only in the
+     // following comparison, we don't need to unpoison them.
+     __ Cmp(temp, temp1);
+@@ -2347,6 +2360,7 @@
+     const_string = GetConstString(invoke->InputAt(1), &const_string_length);
+     if (const_string != nullptr) {
+       std::swap(str, arg);  // Make sure the const string is in `str`.
++      std::swap(native_str, native_arg);
+     }
+   }
+   bool is_compressed =
+@@ -2357,7 +2371,7 @@
+   if (const_string != nullptr) {
+     // Load `count` field of the argument string and check if it matches the const string.
+     // Also compares the compression style, if differs return false.
+-    __ Ldr(temp, MemOperand(arg.X(), count_offset));
++    __ Ldr(temp, MemOperand(native_arg, count_offset));
+     // Temporarily release temp1 as we may not be able to embed the flagged count in CMP immediate.
+     scratch_scope.Release(temp1);
+     __ Cmp(temp, Operand(mirror::String::GetFlaggedCount(const_string_length, is_compressed)));
+@@ -2365,8 +2379,8 @@
+     __ B(&return_false, ne);
+   } else {
+     // Load `count` fields of this and argument strings.
+-    __ Ldr(temp, MemOperand(str.X(), count_offset));
+-    __ Ldr(temp1, MemOperand(arg.X(), count_offset));
++    __ Ldr(temp, MemOperand(native_str, count_offset));
++    __ Ldr(temp1, MemOperand(native_arg, count_offset));
+     // Check if `count` fields are equal, return false if they're not.
+     // Also compares the compression style, if differs return false.
+     __ Cmp(temp, temp1);
+@@ -2390,8 +2404,8 @@
+     temp1 = temp1.X();
+     while (remaining_bytes > sizeof(uint64_t)) {
+       Register temp2 = XRegisterFrom(locations->GetTemp(0));
+-      __ Ldp(temp, temp1, MemOperand(str.X(), offset));
+-      __ Ldp(temp2, out, MemOperand(arg.X(), offset));
++      __ Ldp(temp, temp1, MemOperand(native_str, offset));
++      __ Ldp(temp2, out, MemOperand(native_arg, offset));
+       __ Cmp(temp, temp2);
+       __ Ccmp(temp1, out, NoFlag, eq);
+       __ B(&return_false, ne);
+@@ -2399,8 +2413,8 @@
+       remaining_bytes -= 2u * sizeof(uint64_t);
+     }
+     if (remaining_bytes != 0u) {
+-      __ Ldr(temp, MemOperand(str.X(), offset));
+-      __ Ldr(temp1, MemOperand(arg.X(), offset));
++      __ Ldr(temp, MemOperand(native_str, offset));
++      __ Ldr(temp1, MemOperand(native_arg, offset));
+       __ Cmp(temp, temp1);
+       __ B(&return_false, ne);
+     }
+@@ -2425,8 +2439,8 @@
+     Register temp2 = XRegisterFrom(locations->GetTemp(0));
+     // Loop to compare strings 8 bytes at a time starting at the front of the string.
+     __ Bind(&loop);
+-    __ Ldr(out, MemOperand(str.X(), temp1));
+-    __ Ldr(temp2, MemOperand(arg.X(), temp1));
++    __ Ldr(out, MemOperand(native_str, temp1));
++    __ Ldr(temp2, MemOperand(native_arg, temp1));
+     __ Add(temp1, temp1, Operand(sizeof(uint64_t)));
+     __ Cmp(out, temp2);
+     __ B(&return_false, ne);
+@@ -2484,6 +2498,8 @@
+     __ Mov(tmp_reg, 0);
+   }
+ 
++  Register string = WRegisterFrom(locations->InAt(0));
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, string.X(), string);
+   codegen->InvokeRuntime(kQuickIndexOf, invoke, slow_path);
+   CheckEntrypointTypes<kQuickIndexOf, int32_t, void*, uint32_t, uint32_t>();
+ 
+@@ -2548,6 +2564,7 @@
+   codegen_->AddSlowPath(slow_path);
+   __ B(eq, slow_path->GetEntryLabel());
+ 
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, byte_array.X(), byte_array);
+   codegen_->InvokeRuntime(kQuickAllocStringFromBytes, invoke, slow_path);
+   CheckEntrypointTypes<kQuickAllocStringFromBytes, void*, void*, int32_t, int32_t, int32_t>();
+   __ Bind(slow_path->GetExitLabel());
+@@ -2564,12 +2581,16 @@
+ }
+ 
+ void IntrinsicCodeGeneratorARM64::VisitStringNewStringFromChars(HInvoke* invoke) {
++  MacroAssembler* masm = GetVIXLAssembler();
++  LocationSummary* locations = invoke->GetLocations();
+   // No need to emit code checking whether `locations->InAt(2)` is a null
+   // pointer, as callers of the native method
+   //
+   //   java.lang.StringFactory.newStringFromChars(int offset, int charCount, char[] data)
+   //
+   // all include a null check on `data` before calling that method.
++  Register data = WRegisterFrom(locations->InAt(2));
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, data.X(), data);
+   codegen_->InvokeRuntime(kQuickAllocStringFromChars, invoke);
+   CheckEntrypointTypes<kQuickAllocStringFromChars, void*, int32_t, int32_t, void*>();
+ }
+@@ -2593,6 +2614,7 @@
+   codegen_->AddSlowPath(slow_path);
+   __ B(eq, slow_path->GetEntryLabel());
+ 
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, string_to_copy.X(), string_to_copy);
+   codegen_->InvokeRuntime(kQuickAllocStringFromString, invoke, slow_path);
+   CheckEntrypointTypes<kQuickAllocStringFromString, void*, void*>();
+   __ Bind(slow_path->GetExitLabel());
+@@ -2801,7 +2823,7 @@
+   locations->SetInAt(3, Location::RequiresRegister());
+   locations->SetInAt(4, Location::RequiresRegister());
+ 
+-  locations->AddRegisterTemps(3);
++  locations->AddRegisterTemps(5);
+ }
+ 
+ void IntrinsicCodeGeneratorARM64::VisitStringGetCharsNoCheck(HInvoke* invoke) {
+@@ -2820,15 +2842,19 @@
+ 
+   // void getCharsNoCheck(int srcBegin, int srcEnd, char[] dst, int dstBegin);
+   // Since getChars() calls getCharsNoCheck() - we use registers rather than constants.
+-  Register srcObj = XRegisterFrom(locations->InAt(0));
++  Register srcRef = WRegisterFrom(locations->InAt(0));
+   Register srcBegin = XRegisterFrom(locations->InAt(1));
+   Register srcEnd = XRegisterFrom(locations->InAt(2));
+-  Register dstObj = XRegisterFrom(locations->InAt(3));
++  Register dstRef = WRegisterFrom(locations->InAt(3));
+   Register dstBegin = XRegisterFrom(locations->InAt(4));
+ 
+   Register src_ptr = XRegisterFrom(locations->GetTemp(0));
+   Register num_chr = XRegisterFrom(locations->GetTemp(1));
+   Register tmp1 = XRegisterFrom(locations->GetTemp(2));
++  Register srcObj = XRegisterFrom(locations->GetTemp(3));
++  Register dstObj = XRegisterFrom(locations->GetTemp(4));
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, srcObj, srcRef);
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, dstObj, dstRef);
+ 
+   UseScratchRegisterScope temps(masm);
+   Register dst_ptr = temps.AcquireX();
+@@ -2974,6 +3000,7 @@
+   locations->SetInAt(4, LocationForSystemArrayCopyInput(invoke->InputAt(4)));
+ 
+   locations->AddRegisterTemps(3);
++  locations->AddRegisterTemps(2);
+ }
+ 
+ static void CheckSystemArrayCopyPosition(MacroAssembler* masm,
+@@ -3074,11 +3101,13 @@
+ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopyChar(HInvoke* invoke) {
+   MacroAssembler* masm = GetVIXLAssembler();
+   LocationSummary* locations = invoke->GetLocations();
+-  Register src = XRegisterFrom(locations->InAt(0));
++  Register src_ref = WRegisterFrom(locations->InAt(0));
+   Location src_pos = locations->InAt(1);
+-  Register dst = XRegisterFrom(locations->InAt(2));
++  Register dst_ref = WRegisterFrom(locations->InAt(2));
+   Location dst_pos = locations->InAt(3);
+   Location length = locations->InAt(4);
++  Register src = XRegisterFrom(locations->GetTemp(3));
++  Register dst = XRegisterFrom(locations->GetTemp(4));
+ 
+   SlowPathCodeARM64* slow_path =
+       new (codegen_->GetScopedAllocator()) IntrinsicSlowPathARM64(invoke);
+@@ -3086,15 +3115,18 @@
+ 
+   // If source and destination are the same, take the slow path. Overlapping copy regions must be
+   // copied in reverse and we can't know in all cases if it's needed.
+-  __ Cmp(src, dst);
++  __ Cmp(src_ref, dst_ref);
+   __ B(slow_path->GetEntryLabel(), eq);
+ 
+   // Bail out if the source is null.
+-  __ Cbz(src, slow_path->GetEntryLabel());
++  __ Cbz(src_ref, slow_path->GetEntryLabel());
+ 
+   // Bail out if the destination is null.
+-  __ Cbz(dst, slow_path->GetEntryLabel());
++  __ Cbz(dst_ref, slow_path->GetEntryLabel());
+ 
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, src, src_ref);
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, dst, dst_ref);
++
+   if (!length.IsConstant()) {
+     // Merge the following two comparisons into one:
+     //   If the length is negative, bail out (delegate to libcore's native implementation).
+@@ -3272,6 +3304,7 @@
+       // Cases other than Baker read barriers: the third temporary will
+       // be acquired from the VIXL scratch register pool.
+     }
++    locations->AddRegisterTemps(2);
+   }
+ }
+ 
+@@ -3289,15 +3322,18 @@
+   uint32_t primitive_offset = mirror::Class::PrimitiveTypeOffset().Int32Value();
+   uint32_t monitor_offset = mirror::Object::MonitorOffset().Int32Value();
+ 
+-  Register src = XRegisterFrom(locations->InAt(0));
++  Register src_ref = WRegisterFrom(locations->InAt(0));
+   Location src_pos = locations->InAt(1);
+-  Register dest = XRegisterFrom(locations->InAt(2));
++  Register dest_ref = WRegisterFrom(locations->InAt(2));
+   Location dest_pos = locations->InAt(3);
+   Location length = locations->InAt(4);
+   Register temp1 = WRegisterFrom(locations->GetTemp(0));
+   Location temp1_loc = LocationFrom(temp1);
+   Register temp2 = WRegisterFrom(locations->GetTemp(1));
+   Location temp2_loc = LocationFrom(temp2);
++  const size_t native_temp_index = codegen_->EmitBakerReadBarrier() ? 3u : 2u;
++  Register src = XRegisterFrom(locations->GetTemp(native_temp_index));
++  Register dest = XRegisterFrom(locations->GetTemp(native_temp_index + 1u));
+ 
+   SlowPathCodeARM64* intrinsic_slow_path =
+       new (codegen_->GetScopedAllocator()) IntrinsicSlowPathARM64(invoke);
+@@ -3317,12 +3353,12 @@
+           // Checked when building locations.
+           DCHECK_GE(src_pos_constant, dest_pos_constant);
+         } else if (src_pos_constant < dest_pos_constant) {
+-          __ Cmp(src, dest);
++          __ Cmp(src_ref, dest_ref);
+           __ B(intrinsic_slow_path->GetEntryLabel(), eq);
+         }
+       } else {
+         if (!optimizations.GetDestinationIsSource()) {
+-          __ Cmp(src, dest);
++          __ Cmp(src_ref, dest_ref);
+           __ B(&conditions_on_positions_validated, ne);
+         }
+         __ Cmp(WRegisterFrom(dest_pos), src_pos_constant);
+@@ -3330,7 +3366,7 @@
+       }
+     } else {
+       if (!optimizations.GetDestinationIsSource()) {
+-        __ Cmp(src, dest);
++        __ Cmp(src_ref, dest_ref);
+         __ B(&conditions_on_positions_validated, ne);
+       }
+       __ Cmp(RegisterFrom(src_pos, invoke->InputAt(1)->GetType()),
+@@ -3343,14 +3379,17 @@
+ 
+   if (!optimizations.GetSourceIsNotNull()) {
+     // Bail out if the source is null.
+-    __ Cbz(src, intrinsic_slow_path->GetEntryLabel());
++    __ Cbz(src_ref, intrinsic_slow_path->GetEntryLabel());
+   }
+ 
+   if (!optimizations.GetDestinationIsNotNull() && !optimizations.GetDestinationIsSource()) {
+     // Bail out if the destination is null.
+-    __ Cbz(dest, intrinsic_slow_path->GetEntryLabel());
++    __ Cbz(dest_ref, intrinsic_slow_path->GetEntryLabel());
+   }
+ 
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, src, src_ref);
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, dest, dest_ref);
++
+   // We have already checked in the LocationsBuilder for the constant case.
+   if (!length.IsConstant()) {
+     // Merge the following two comparisons into one:
+@@ -3384,13 +3423,15 @@
+     // No read barrier is needed for reading a chain of constant references for comparing
+     // with null, or for reading a constant primitive value, see `ReadBarrierOption`.
+     // /* HeapReference<Class> */ temp = klass->component_type_
+-    __ Ldr(temp, HeapOperand(klass, component_offset));
++    ReferenceCodegenARM64<>::DecodeNonNull(masm, klass.X(), klass);
++    __ Ldr(temp, MemOperand(klass.X(), component_offset));
+     codegen_->GetAssembler()->MaybeUnpoisonHeapReference(temp);
+     // Check that the component type is not null.
+     __ Cbz(temp, intrinsic_slow_path->GetEntryLabel());
+     // Check that the component type is not a primitive.
+     // /* uint16_t */ temp = static_cast<uint16>(klass->primitive_type_);
+-    __ Ldrh(temp, HeapOperand(temp, primitive_offset));
++    ReferenceCodegenARM64<>::DecodeNonNull(masm, temp.X(), temp);
++    __ Ldrh(temp, MemOperand(temp.X(), primitive_offset));
+     static_assert(Primitive::kPrimNot == 0, "Expected 0 for kPrimNot");
+     __ Cbnz(temp, intrinsic_slow_path->GetEntryLabel());
+   };
+@@ -3406,7 +3447,7 @@
+       // /* HeapReference<Class> */ temp1 = dest->klass_
+       codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+                                                       temp1_loc,
+-                                                      dest.W(),
++                                                      dest_ref,
+                                                       class_offset,
+                                                       temp3_loc,
+                                                       /* needs_null_check= */ false,
+@@ -3419,7 +3460,7 @@
+       // /* HeapReference<Class> */ temp2 = src->klass_
+       codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+                                                       temp2_loc,
+-                                                      src.W(),
++                                                      src_ref,
+                                                       class_offset,
+                                                       temp3_loc,
+                                                       /* needs_null_check= */ false,
+@@ -3442,10 +3483,12 @@
+       // No read barrier is needed for reading a chain of constant references
+       // for comparing with null, see `ReadBarrierOption`.
+       // /* HeapReference<Class> */ temp1 = temp1->component_type_
+-      __ Ldr(temp1, HeapOperand(temp1, component_offset));
++      ReferenceCodegenARM64<>::DecodeNonNull(masm, temp1.X(), temp1);
++      __ Ldr(temp1, MemOperand(temp1.X(), component_offset));
+       codegen_->GetAssembler()->MaybeUnpoisonHeapReference(temp1);
+       // /* HeapReference<Class> */ temp1 = temp1->super_class_
+-      __ Ldr(temp1, HeapOperand(temp1, super_offset));
++      ReferenceCodegenARM64<>::DecodeNonNull(masm, temp1.X(), temp1);
++      __ Ldr(temp1, MemOperand(temp1.X(), super_offset));
+       // No need to unpoison the result, we're comparing against null.
+       __ Cbnz(temp1, intrinsic_slow_path->GetEntryLabel());
+       // Bail out if the source is not a non primitive array.
+@@ -3531,7 +3574,7 @@
+         //   }
+ 
+         // /* int32_t */ monitor = src->monitor_
+-        __ Ldr(tmp, HeapOperand(src.W(), monitor_offset));
++        __ Ldr(tmp, MemOperand(src, monitor_offset));
+         // /* LockWord */ lock_word = LockWord(monitor)
+         static_assert(sizeof(LockWord) == sizeof(int32_t),
+                       "art::LockWord and int32_t have different sizes.");
+@@ -3590,7 +3633,7 @@
+     }
+ 
+     // We only need one card marking on the destination array.
+-    codegen_->MarkGCCard(dest.W());
++    codegen_->MarkGCCard(dest_ref);
+ 
+     __ Bind(&skip_copy_and_write_barrier);
+   }
+@@ -3676,6 +3719,7 @@
+   auto allocate_instance = [&]() {
+     DCHECK(out.X().Is(InvokeRuntimeCallingConvention().GetRegisterAt(0)));
+     codegen_->LoadIntrinsicDeclaringClass(out, invoke);
++    ReferenceCodegenARM64<>::DecodeNonNull(masm, out.X(), out.W());
+     codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke);
+     CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+   };
+@@ -3692,9 +3736,10 @@
+       // JIT object table.
+       allocate_instance();
+       __ Mov(temp.W(), value);
+-      codegen_->Store(type, temp.W(), HeapOperand(out.W(), info.value_offset));
++      codegen_->Store(type, temp.W(), HeapOperand(out.X(), info.value_offset));
+       // Class pointer and `value` final field stores require a barrier before publication.
+       codegen_->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
++      ReferenceCodegenARM64<>::Encode(masm, out.X(), out.X());
+     }
+   } else {
+     DCHECK(locations->CanCall());
+@@ -3706,6 +3751,12 @@
+     __ B(&allocate, hs);
+     // If the value is within the bounds, load the object directly from the array.
+     codegen_->LoadBootImageAddress(temp, info.array_data_boot_image_reference);
++    if (ReferenceCodegenARM64<>::kNeedsHeapBase) {
++      // The embedded boot-image reference denotes the array data start, not
++      // a host pointer. Preserve the AOSP cache fast path while restoring its
++      // native64 address before the indexed element load.
++      ReferenceCodegenARM64<>::DecodeNonNull(masm, temp.X(), temp.W());
++    }
+     MemOperand source = HeapOperand(
+         temp, out.X(), LSL, DataType::SizeShift(DataType::Type::kReference));
+     codegen_->Load(DataType::Type::kReference, out, source);
+@@ -3714,9 +3765,10 @@
+     __ Bind(&allocate);
+     // Otherwise allocate and initialize a new object.
+     allocate_instance();
+-    codegen_->Store(type, in.W(), HeapOperand(out.W(), info.value_offset));
++    codegen_->Store(type, in.W(), HeapOperand(out.X(), info.value_offset));
+     // Class pointer and `value` final field stores require a barrier before publication.
+     codegen_->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
++    ReferenceCodegenARM64<>::Encode(masm, out.X(), out.X());
+     __ Bind(&done);
+   }
+ }
+@@ -3760,7 +3812,10 @@
+     DCHECK_ALIGNED(disable_intrinsic_offset.Uint32Value(), 2u);
+     DCHECK_EQ(disable_intrinsic_offset.Uint32Value() + 1u,
+               IntrinsicVisitor::GetReferenceSlowPathEnabledOffset().Uint32Value());
+-    __ Ldrh(temp, HeapOperand(temp, disable_intrinsic_offset.Uint32Value()));
++    ReferenceCodegenARM64<>::DecodeNonNull(
++        GetVIXLAssembler(), temp.X(), temp.W());
++    __ Ldrh(temp,
++            MemOperand(temp.X(), disable_intrinsic_offset.Uint32Value()));
+     __ Cbnz(temp, slow_path->GetEntryLabel());
+   }
+ 
+@@ -3775,9 +3830,13 @@
+                                                     /*needs_null_check=*/ true,
+                                                     /*use_load_acquire=*/ true);
+   } else {
+-    MemOperand field = HeapOperand(WRegisterFrom(obj), referent_offset);
++    UseScratchRegisterScope temps(masm);
++    Register native_obj = temps.AcquireX();
++    __ Cbz(WRegisterFrom(obj), slow_path->GetEntryLabel());
++    ReferenceCodegenARM64<>::DecodeNonNull(masm, native_obj, WRegisterFrom(obj));
++    MemOperand field = HeapOperand(native_obj, referent_offset);
+     codegen_->LoadAcquire(
+-        invoke, DataType::Type::kReference, WRegisterFrom(out), field, /*needs_null_check=*/ true);
++        invoke, DataType::Type::kReference, WRegisterFrom(out), field, /*needs_null_check=*/ false);
+     codegen_->MaybeGenerateReadBarrierSlow(invoke, out, out, obj, referent_offset);
+   }
+   __ Bind(slow_path->GetExitLabel());
+@@ -3796,11 +3855,13 @@
+   Register other = WRegisterFrom(locations->InAt(1));
+   Register out = WRegisterFrom(locations->Out());
+   Register tmp = temps.AcquireW();
++  Register address = out.X();
+ 
+   uint32_t referent_offset = mirror::Reference::ReferentOffset().Uint32Value();
+   uint32_t monitor_offset = mirror::Object::MonitorOffset().Int32Value();
+ 
+-  MemOperand field = HeapOperand(obj, referent_offset);
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, address, obj);
++  MemOperand field = HeapOperand(address, referent_offset);
+   codegen_->LoadAcquire(invoke, DataType::Type::kReference, tmp, field, /*needs_null_check=*/ true);
+   codegen_->GetAssembler()->MaybeUnpoisonHeapReference(tmp);
+ 
+@@ -3825,7 +3886,8 @@
+     // Load the lockword and check if it is a forwarding address.
+     static_assert(LockWord::kStateShift == 30u);
+     static_assert(LockWord::kStateForwardingAddress == 3u);
+-    __ Ldr(tmp, HeapOperand(tmp, monitor_offset));
++    ReferenceCodegenARM64<>::DecodeNonNull(masm, address, tmp);
++    __ Ldr(tmp, HeapOperand(address, monitor_offset));
+     __ Cmp(tmp, Operand(0xc0000000));
+     __ B(&calculate_result, lo);   // ZF clear if taken.
+ 
+@@ -4052,13 +4114,14 @@
+   const uint32_t array_data_offset =
+       mirror::Array::DataOffset(Primitive::kPrimByte).Uint32Value();
+   Register ptr = XRegisterFrom(locations->GetTemp(0));
+-  Register array = XRegisterFrom(locations->InAt(1));
++  Register array = WRegisterFrom(locations->InAt(1));
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, ptr, array);
+   Location offset = locations->InAt(2);
+   if (offset.IsConstant()) {
+     int32_t offset_value = offset.GetConstant()->AsIntConstant()->GetValue();
+-    __ Add(ptr, array, array_data_offset + offset_value);
++    __ Add(ptr, ptr, array_data_offset + offset_value);
+   } else {
+-    __ Add(ptr, array, array_data_offset);
++    __ Add(ptr, ptr, array_data_offset);
+     __ Add(ptr, ptr, XRegisterFrom(offset));
+   }
+ 
+@@ -4571,9 +4634,18 @@
+   // Extra argument for GenerateVarHandleGetAndUpdate().
+   GetAndUpdateOp get_and_update_op_;
+ };
++
++// Metadata checks run before target.offset is computed, so its dedicated temp
++// is available for native addresses without consuming the two VIXL scratch registers.
++static MemOperand VarHandleHeapOperand(HInvoke* invoke, CodeGeneratorARM64* codegen,
++                                       Register reference, int32_t offset) {
++  Register address = XRegisterFrom(invoke->GetLocations()->GetTemp(0u));
++  ReferenceCodegenARM64<>::DecodeNonNull(codegen->GetVIXLAssembler(), address, reference.W());
++  return MemOperand(address, offset);
++}
+ 
+ // Generate subtype check without read barriers.
+-static void GenerateSubTypeObjectCheckNoReadBarrier(CodeGeneratorARM64* codegen,
++static void GenerateSubTypeObjectCheckNoReadBarrier(HInvoke* invoke, CodeGeneratorARM64* codegen,
+                                                     SlowPathCodeARM64* slow_path,
+                                                     Register object,
+                                                     Register type,
+@@ -4591,13 +4663,13 @@
+   UseScratchRegisterScope temps(masm);
+   Register temp = temps.AcquireW();
+ 
+-  __ Ldr(temp, HeapOperand(object, class_offset.Int32Value()));
++  __ Ldr(temp, VarHandleHeapOperand(invoke, codegen, object, class_offset.Int32Value()));
+   codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp);
+   vixl::aarch64::Label loop;
+   __ Bind(&loop);
+   __ Cmp(type, temp);
+   __ B(&success, eq);
+-  __ Ldr(temp, HeapOperand(temp, super_class_offset.Int32Value()));
++  __ Ldr(temp, VarHandleHeapOperand(invoke, codegen, temp, super_class_offset.Int32Value()));
+   codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp);
+   __ Cbz(temp, slow_path->GetEntryLabel());
+   __ B(&loop);
+@@ -4630,10 +4702,10 @@
+   // We do not need a read barrier when loading a reference only for loading constant
+   // primitive field through the reference. Use LDP to load the fields together.
+   DCHECK_EQ(var_type_offset.Int32Value() + 4, access_mode_bit_mask_offset.Int32Value());
+-  __ Ldp(var_type_no_rb, temp2, HeapOperand(varhandle, var_type_offset.Int32Value()));
++  __ Ldp(var_type_no_rb, temp2, VarHandleHeapOperand(invoke, codegen, varhandle, var_type_offset.Int32Value()));
+   codegen->GetAssembler()->MaybeUnpoisonHeapReference(var_type_no_rb);
+   __ Tbz(temp2, static_cast<uint32_t>(access_mode), slow_path->GetEntryLabel());
+-  __ Ldrh(temp2, HeapOperand(var_type_no_rb, primitive_type_offset.Int32Value()));
++  __ Ldrh(temp2, VarHandleHeapOperand(invoke, codegen, var_type_no_rb, primitive_type_offset.Int32Value()));
+   if (primitive_type == Primitive::kPrimNot) {
+     static_assert(Primitive::kPrimNot == 0);
+     __ Cbnz(temp2, slow_path->GetEntryLabel());
+@@ -4656,7 +4728,7 @@
+       DCHECK_EQ(arg->GetType(), DataType::Type::kReference);
+       if (!arg->IsNullConstant()) {
+         Register arg_reg = WRegisterFrom(invoke->GetLocations()->InAt(arg_index));
+-        GenerateSubTypeObjectCheckNoReadBarrier(codegen, slow_path, arg_reg, var_type_no_rb);
++        GenerateSubTypeObjectCheckNoReadBarrier(invoke, codegen, slow_path, arg_reg, var_type_no_rb);
+       }
+     }
+   }
+@@ -4675,7 +4747,7 @@
+ 
+   // Check that the VarHandle references a static field by checking that coordinateType0 == null.
+   // Do not emit read barrier (or unpoison the reference) for comparing to null.
+-  __ Ldr(temp, HeapOperand(varhandle, coordinate_type0_offset.Int32Value()));
++  __ Ldr(temp, VarHandleHeapOperand(invoke, codegen, varhandle, coordinate_type0_offset.Int32Value()));
+   __ Cbnz(temp, slow_path->GetEntryLabel());
+ }
+ 
+@@ -4704,7 +4776,7 @@
+     // coordinateType1 == null. coordinateType0 should not be null, but this is handled by the
+     // type compatibility check with the source object's type, which will fail for null.
+     DCHECK_EQ(coordinate_type0_offset.Int32Value() + 4, coordinate_type1_offset.Int32Value());
+-    __ Ldp(temp, temp2, HeapOperand(varhandle, coordinate_type0_offset.Int32Value()));
++    __ Ldp(temp, temp2, VarHandleHeapOperand(invoke, codegen, varhandle, coordinate_type0_offset.Int32Value()));
+     codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp);
+     // No need for read barrier or unpoisoning of coordinateType1 for comparison with null.
+     __ Cbnz(temp2, slow_path->GetEntryLabel());
+@@ -4713,7 +4785,7 @@
+     // We deliberately avoid the read barrier, letting the slow path handle the false negatives.
+     temps.Release(temp2);  // Needed by GenerateSubTypeObjectCheckNoReadBarrier().
+     GenerateSubTypeObjectCheckNoReadBarrier(
+-        codegen, slow_path, object, temp, /*object_can_be_null=*/ false);
++        invoke, codegen, slow_path, object, temp, /*object_can_be_null=*/ false);
+   }
+ }
+ 
+@@ -4749,7 +4821,7 @@
+   // that coordinateType1 != null. If that's true, coordinateType1 shall be int.class and
+   // coordinateType0 shall not be null but we do not explicitly verify that.
+   DCHECK_EQ(coordinate_type0_offset.Int32Value() + 4, coordinate_type1_offset.Int32Value());
+-  __ Ldp(temp, temp2, HeapOperand(varhandle, coordinate_type0_offset.Int32Value()));
++  __ Ldp(temp, temp2, VarHandleHeapOperand(invoke, codegen, varhandle, coordinate_type0_offset.Int32Value()));
+   codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp);
+   // No need for read barrier or unpoisoning of coordinateType1 for comparison with null.
+   __ Cbz(temp2, slow_path->GetEntryLabel());
+@@ -4764,7 +4836,7 @@
+   // We do this check without read barrier, so there can be false negatives which we
+   // defer to the slow path. There shall be no false negatives for array classes in the
+   // boot image (including Object[] and primitive arrays) because they are non-movable.
+-  __ Ldr(temp2, HeapOperand(object, class_offset.Int32Value()));
++  __ Ldr(temp2, VarHandleHeapOperand(invoke, codegen, object, class_offset.Int32Value()));
+   codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp2);
+   __ Cmp(temp, temp2);
+   __ B(slow_path->GetEntryLabel(), ne);
+@@ -4772,12 +4844,12 @@
+   // Check that the coordinateType0 is an array type. We do not need a read barrier
+   // for loading constant reference fields (or chains of them) for comparison with null,
+   // nor for finally loading a constant primitive field (primitive type) below.
+-  __ Ldr(temp2, HeapOperand(temp, component_type_offset.Int32Value()));
++  __ Ldr(temp2, VarHandleHeapOperand(invoke, codegen, temp, component_type_offset.Int32Value()));
+   codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp2);
+   __ Cbz(temp2, slow_path->GetEntryLabel());
+ 
+   // Check that the array component type matches the primitive type.
+-  __ Ldrh(temp2, HeapOperand(temp2, primitive_type_offset.Int32Value()));
++  __ Ldrh(temp2, VarHandleHeapOperand(invoke, codegen, temp2, primitive_type_offset.Int32Value()));
+   if (primitive_type == Primitive::kPrimNot) {
+     static_assert(Primitive::kPrimNot == 0);
+     __ Cbnz(temp2, slow_path->GetEntryLabel());
+@@ -4797,7 +4869,7 @@
+   }
+ 
+   // Check for array index out of bounds.
+-  __ Ldr(temp, HeapOperand(object, array_length_offset.Int32Value()));
++  __ Ldr(temp, VarHandleHeapOperand(invoke, codegen, object, array_length_offset.Int32Value()));
+   __ Cmp(index, temp);
+   __ B(slow_path->GetEntryLabel(), hs);
+ }
+@@ -4894,7 +4966,7 @@
+       const MemberOffset offset_offset = ArtField::OffsetOffset();
+ 
+       // Load the ArtField*, the offset and, if needed, declaring class.
+-      __ Ldr(field.X(), HeapOperand(varhandle, art_field_offset.Int32Value()));
++      __ Ldr(field.X(), VarHandleHeapOperand(invoke, codegen, varhandle, art_field_offset.Int32Value()));
+       __ Ldr(target.offset, MemOperand(field.X(), offset_offset.Int32Value()));
+       if (expected_coordinates_count == 0u) {
+         codegen->GenerateGcRootFieldLoad(invoke,
+@@ -5025,6 +5097,7 @@
+     // The `target.offset` is a temporary, use it for field address.
+     Register tmp_ptr = target.offset.X();
+     __ Add(tmp_ptr, target.object.X(), target.offset.X());
++    ReferenceCodegenARM64<>::DecodeNonNull(masm, tmp_ptr, tmp_ptr.W());
+     codegen->GenerateFieldLoadWithBakerReadBarrier(invoke,
+                                                    locations->Out(),
+                                                    target.object,
+@@ -5033,10 +5106,17 @@
+                                                    use_load_acquire);
+     DCHECK(!byte_swap);
+   } else {
+-    MemOperand address(target.object.X(), target.offset.X());
+     CPURegister load_reg = out;
+     DataType::Type load_type = type;
+     UseScratchRegisterScope temps(masm);
++    // LoadAcquire() needs both VIXL core scratch registers for an FP result:
++    // one for the materialized address and one for the integer LDAR result
++    // before FMOV. Reuse the now-dead offset temporary for the outer address.
++    bool reuse_offset = !byte_swap && DataType::IsFloatingPointType(type);
++    Register native_address = reuse_offset ? target.offset.X() : temps.AcquireX();
++    __ Add(native_address, target.object.X(), target.offset.X());
++    ReferenceCodegenARM64<>::DecodeNonNull(masm, native_address, native_address.W());
++    MemOperand address(native_address);
+     if (byte_swap) {
+       if (type == DataType::Type::kInt16) {
+         // Avoid unnecessary sign extension before REV16.
+@@ -5053,6 +5133,9 @@
+       codegen->LoadAcquire(invoke, load_type, load_reg, address, /*needs_null_check=*/ false);
+     } else {
+       codegen->Load(load_type, load_reg, address);
++    }
++    if (!reuse_offset) {
++      temps.Release(native_address);
+     }
+     if (type == DataType::Type::kReference) {
+       DCHECK(!byte_swap);
+@@ -5163,7 +5246,11 @@
+       GenerateReverseBytes(masm, value_type, source, temp);
+       source = temp;
+     }
+-    MemOperand address(target.object.X(), target.offset.X());
++    // Preserve both VIXL scratches for StoreRelease()'s FP address/value bridge.
++    Register native_address = target.offset.X();
++    __ Add(native_address, target.object.X(), target.offset.X());
++    ReferenceCodegenARM64<>::DecodeNonNull(masm, native_address, native_address.W());
++    MemOperand address(native_address);
+     if (use_store_release) {
+       codegen->StoreRelease(invoke, value_type, source, address, /*needs_null_check=*/ false);
+     } else {
+@@ -5347,6 +5434,7 @@
+     tmp_ptr = temps.AcquireX();
+   }
+   __ Add(tmp_ptr, target.object.X(), target.offset.X());
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, tmp_ptr, tmp_ptr.W());
+ 
+   // Move floating point values to scratch registers.
+   // Note that float/double CAS uses bitwise comparison, rather than the operator==.
+@@ -5675,6 +5763,7 @@
+     tmp_ptr = temps.AcquireX();
+   }
+   __ Add(tmp_ptr, target.object.X(), target.offset.X());
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, tmp_ptr, tmp_ptr.W());
+ 
+   // The load/store type is never floating point.
+   DataType::Type load_store_type = is_fp
+@@ -5921,14 +6010,14 @@
+     // The main path checked that the coordinateType0 is an array class that matches
+     // the class of the actual coordinate argument but it does not match the value type.
+     // Check if the `varhandle` references a ByteArrayViewVarHandle instance.
+-    __ Ldr(temp, HeapOperand(varhandle, class_offset.Int32Value()));
++    __ Ldr(temp, VarHandleHeapOperand(invoke, codegen, varhandle, class_offset.Int32Value()));
+     codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp);
+     codegen->LoadClassRootForIntrinsic(temp2, ClassRoot::kJavaLangInvokeByteArrayViewVarHandle);
+     __ Cmp(temp, temp2);
+     __ B(GetEntryLabel(), ne);
+ 
+     // Check for array index out of bounds.
+-    __ Ldr(temp, HeapOperand(object, array_length_offset.Int32Value()));
++    __ Ldr(temp, VarHandleHeapOperand(invoke, codegen, object, array_length_offset.Int32Value()));
+     __ Subs(temp, temp, index);
+     __ Ccmp(temp, size, NoFlag, hs);  // If SUBS yields LO (C=false), keep the C flag clear.
+     __ B(GetEntryLabel(), lo);
+@@ -5953,7 +6042,9 @@
+       __ B(GetNativeByteOrderLabel());
+       return;
+     }
+-    __ Ldr(temp, HeapOperand(varhandle, native_byte_order_offset.Int32Value()));
++    // target.offset is already live here; use the now-dead check temporary.
++    ReferenceCodegenARM64<>::DecodeNonNull(masm, temp2.X(), varhandle.W());
++    __ Ldr(temp, MemOperand(temp2.X(), native_byte_order_offset.Int32Value()));
+     __ Cbnz(temp, GetNativeByteOrderLabel());
+   }
+ 
+@@ -6000,7 +6091,7 @@
+   locations->SetInAt(number_of_args, Location::RequiresRegister());
+ 
+   locations->AddTemp(calling_convention.GetMethodLocation());
+-  locations->AddRegisterTemps(4);
++  locations->AddRegisterTemps(5);  // Native address temporary; HIR references stay compressed.
+ 
+   if (!receiver_mh_loc.IsRegister()) {
+     locations->AddTemp(Location::RequiresRegister());
+@@ -6014,7 +6105,7 @@
+   Location receiver_mh_loc = locations->InAt(0);
+   Register method_handle = receiver_mh_loc.IsRegister()
+       ? InputRegisterAt(invoke, 0)
+-      : WRegisterFrom(locations->GetTemp(5));
++      : WRegisterFrom(locations->GetTemp(6));
+ 
+   if (!receiver_mh_loc.IsRegister()) {
+     DCHECK(receiver_mh_loc.IsStackSlot());
+@@ -6029,24 +6120,26 @@
+ 
+   // Call site should match with MethodHandle's type.
+   Register temp = WRegisterFrom(locations->GetTemp(1));
+-  __ Ldr(temp, HeapOperand(method_handle.W(), mirror::MethodHandle::MethodTypeOffset()));
++  Register native_address = XRegisterFrom(locations->GetTemp(5));
++  ReferenceCodegenARM64<>::DecodeNonNull(masm, native_address, method_handle.W());
++  __ Ldr(temp, MemOperand(native_address, mirror::MethodHandle::MethodTypeOffset().Int32Value()));
+   codegen_->GetAssembler()->MaybeUnpoisonHeapReference(temp);
+   __ Cmp(call_site_type, temp);
+   __ B(ne, slow_path->GetEntryLabel());
+ 
+   Register method = XRegisterFrom(locations->GetTemp(0));
+-  __ Ldr(method, HeapOperand(method_handle.W(), mirror::MethodHandle::ArtFieldOrMethodOffset()));
++  __ Ldr(method, MemOperand(native_address, mirror::MethodHandle::ArtFieldOrMethodOffset().Int32Value()));
+ 
+   vixl::aarch64::Label execute_target_method;
+   vixl::aarch64::Label method_dispatch;
+ 
+   Register method_handle_kind = WRegisterFrom(locations->GetTemp(2));
+   __ Ldr(method_handle_kind,
+-         HeapOperand(method_handle.W(), mirror::MethodHandle::HandleKindOffset()));
++         MemOperand(native_address, mirror::MethodHandle::HandleKindOffset().Int32Value()));
+ 
+   __ Cmp(method_handle_kind, Operand(mirror::MethodHandle::Kind::kFirstAccessorKind));
+   __ B(lt, &method_dispatch);
+-  __ Ldr(method, HeapOperand(method_handle.W(), mirror::MethodHandleImpl::TargetOffset()));
++  __ Ldr(method, MemOperand(native_address, mirror::MethodHandleImpl::TargetOffset().Int32Value()));
+   __ B(&execute_target_method);
+ 
+   __ Bind(&method_dispatch);
+@@ -6058,6 +6151,7 @@
+ 
+     // Receiver shouldn't be null for all the following cases.
+     __ Cbz(receiver, slow_path->GetEntryLabel());
++    ReferenceCodegenARM64<>::DecodeNonNull(masm, native_address, receiver.W());
+ 
+     __ Cmp(method_handle_kind, Operand(mirror::MethodHandle::Kind::kInvokeDirect));
+     // No dispatch is needed for invoke-direct.
+@@ -6075,7 +6169,7 @@
+     Register receiver_class = WRegisterFrom(locations->GetTemp(3));
+     // If method is defined in the receiver's class, execute it as it is.
+     __ Ldr(temp, MemOperand(method, ArtMethod::DeclaringClassOffset().Int32Value()));
+-    __ Ldr(receiver_class, HeapOperand(receiver.W(), mirror::Object::ClassOffset().Int32Value()));
++    __ Ldr(receiver_class, MemOperand(native_address, mirror::Object::ClassOffset().Int32Value()));
+     codegen_->GetAssembler()->MaybeUnpoisonHeapReference(receiver_class.W());
+     // `receiver_class` is read w/o read barriers: false negatives go through virtual dispatch.
+     __ Cmp(temp, receiver_class);
+@@ -6087,6 +6181,7 @@
+     // Re-using receiver class register to store vtable.
+     constexpr uint32_t vtable_offset =
+         mirror::Class::EmbeddedVTableOffset(art::PointerSize::k64).Int32Value();
++    ReferenceCodegenARM64<>::DecodeNonNull(masm, receiver_class.X(), receiver_class.W());
+     __ Add(receiver_class.X(), receiver_class.X(), vtable_offset);
+     __ Ldr(method, MemOperand(receiver_class.X(), temp, Extend::UXTW, 3u));
+     __ B(&execute_target_method);
+@@ -6130,9 +6225,10 @@
+ 
+     __ Bind(&do_imt_dispatch);
+     // Re-using `method` to store receiver class and ImTableEntry.
+-    __ Ldr(method.W(), HeapOperand(receiver.W(), mirror::Object::ClassOffset()));
++    __ Ldr(method.W(), MemOperand(native_address, mirror::Object::ClassOffset().Int32Value()));
+     codegen_->GetAssembler()->MaybeUnpoisonHeapReference(method.W());
+ 
++    ReferenceCodegenARM64<>::DecodeNonNull(masm, method, method.W());
+     __ Ldr(method, MemOperand(method, mirror::Class::ImtPtrOffset(PointerSize::k64).Int32Value()));
+     __ Ldr(method, MemOperand(method, temp, Extend::UXTW, 3u));
+ 

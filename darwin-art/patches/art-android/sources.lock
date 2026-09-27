@@ -1,0 +1,4 @@
+# Sources for the android-arm64 ART build (tools/build-art-android.sh).
+# The ART sources themselves are the pinned _aosp/art (sources.lock ART_TAG);
+# these are the extra AOSP projects fetched at the same tag.
+ART_ANDROID_TAG=android-16.0.0_r1

@@ -1,0 +1,246 @@
+diff --git a/compiler/utils/jni_macro_assembler.h b/compiler/utils/jni_macro_assembler.h
+--- a/compiler/utils/jni_macro_assembler.h
++++ b/compiler/utils/jni_macro_assembler.h
+@@ -162,6 +162,20 @@
+ 
+   // Zero extension
+   virtual void ZeroExtend(ManagedRegister mreg, size_t size) = 0;
++
++  // Decode a non-null managed heap reference before passing it to a runtime
++  // entrypoint that expects mirror::Object*. This is a no-op when heap
++  // references are absolute addresses (ART_HEAP_REFERENCE_BASE == 0).
++  virtual void DecodeHeapReference(ManagedRegister reg) {
++    UNUSED(reg);
++  }
++
++  // Normalize the managed ArtMethod argument to ART's native pointer ABI
++  // before publishing a quick frame. A boot image ArtMethod* loaded as a
++  // 32-bit logical image address is placed in the heap reference window.
++  virtual void NormalizeMethodPointer(ManagedRegister reg) {
++    UNUSED(reg);
++  }
+ 
+   // Exploit fast access in managed code to Thread::Current()
+   virtual void GetCurrentThread(ManagedRegister dest) = 0;
+diff --git a/compiler/utils/arm64/jni_macro_assembler_arm64.h b/compiler/utils/arm64/jni_macro_assembler_arm64.h
+--- a/compiler/utils/arm64/jni_macro_assembler_arm64.h
++++ b/compiler/utils/arm64/jni_macro_assembler_arm64.h
+@@ -90,6 +90,9 @@
+   // Zero extension.
+   void ZeroExtend(ManagedRegister mreg, size_t size) override;
+ 
++  void DecodeHeapReference(ManagedRegister reg) override;
++  void NormalizeMethodPointer(ManagedRegister reg) override;
++
+   // Exploit fast access in managed code to Thread::Current().
+   void GetCurrentThread(ManagedRegister dest) override;
+   void GetCurrentThread(FrameOffset dest_offset) override;
+diff --git a/compiler/utils/arm64/jni_macro_assembler_arm64.cc b/compiler/utils/arm64/jni_macro_assembler_arm64.cc
+--- a/compiler/utils/arm64/jni_macro_assembler_arm64.cc
++++ b/compiler/utils/arm64/jni_macro_assembler_arm64.cc
+@@ -16,6 +16,7 @@
+ 
+ #include "jni_macro_assembler_arm64.h"
+ 
++#include "utils/arm64/heap_reference_arm64.h"
+ #include "entrypoints/quick/quick_entrypoints.h"
+ #include "indirect_reference_table.h"
+ #include "jni/jni_env_ext.h"
+@@ -614,6 +615,30 @@
+   } else {
+     ___ Uxth(reg_w(reg.AsWRegister()), reg_w(reg.AsWRegister()));
+   }
++}
++
++void Arm64JNIMacroAssembler::DecodeHeapReference(ManagedRegister m_reg) {
++  Arm64ManagedRegister reg = m_reg.AsArm64();
++  CHECK(reg.IsWRegister());
++  ReferenceCodegenARM64<>::DecodeNonNull(asm_.GetVIXLAssembler(),
++                                         reg_x(reg.AsOverlappingXRegister()),
++                                         reg_w(reg.AsWRegister()));
++}
++
++void Arm64JNIMacroAssembler::NormalizeMethodPointer(ManagedRegister m_reg) {
++#if ART_HEAP_REFERENCE_BASE != 0
++  Arm64ManagedRegister reg = m_reg.AsArm64();
++  CHECK(reg.IsXRegister());
++  UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
++  Register upper = temps.AcquireX();
++  vixl::aarch64::Label native_pointer;
++  ___ Lsr(upper, reg_x(reg.AsXRegister()), 32u);
++  ___ Cbnz(upper, &native_pointer);
++  ___ Orr(reg_x(reg.AsXRegister()), reg_x(reg.AsXRegister()), kArtCompressedReferenceBase);
++  ___ Bind(&native_pointer);
++#else
++  UNUSED(m_reg);
++#endif
+ }
+ 
+ void Arm64JNIMacroAssembler::VerifyObject(ManagedRegister /*src*/, bool /*could_be_null*/) {
+@@ -841,8 +866,13 @@
+   DCHECK(kUseBakerReadBarrier);
+   Register ref = reg_x(m_ref.AsArm64().AsOverlappingXRegister());
+   UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
++  Register native_ref = ref;
++  if (ReferenceCodegenARM64<>::kNeedsHeapBase) {
++    native_ref = temps.AcquireX();
++    ReferenceCodegenARM64<>::DecodeNonNull(asm_.GetVIXLAssembler(), native_ref, ref);
++  }
+   Register scratch = temps.AcquireW();
+-  ___ Ldr(scratch, MEM_OP(ref, mirror::Object::MonitorOffset().SizeValue()));
++  ___ Ldr(scratch, MEM_OP(native_ref, mirror::Object::MonitorOffset().SizeValue()));
+   static_assert(LockWord::kMarkBitStateSize == 1u);
+   switch (cond) {
+     case JNIMacroUnaryCondition::kZero:
+diff --git a/compiler/jni/quick/jni_compiler.cc b/compiler/jni/quick/jni_compiler.cc
+--- a/compiler/jni/quick/jni_compiler.cc
++++ b/compiler/jni/quick/jni_compiler.cc
+@@ -171,8 +171,10 @@
+   const size_t managed_frame_size = main_jni_conv->FrameSize();
+   const size_t main_out_arg_size = main_jni_conv->OutFrameSize();
+   size_t current_frame_size = is_critical_native ? main_out_arg_size : managed_frame_size;
++  ManagedRegister incoming_method_register = mr_conv->MethodRegister();
++  __ NormalizeMethodPointer(incoming_method_register);
+   ManagedRegister method_register =
+-      is_critical_native ? ManagedRegister::NoRegister() : mr_conv->MethodRegister();
++      is_critical_native ? ManagedRegister::NoRegister() : incoming_method_register;
+   ArrayRef<const ManagedRegister> callee_save_regs = main_jni_conv->CalleeSaveRegisters();
+   __ BuildFrame(current_frame_size, method_register, callee_save_regs);
+   DCHECK_EQ(jni_asm->cfi().GetCurrentCFAOffset(), static_cast<int>(current_frame_size));
+@@ -258,6 +260,7 @@
+         __ Load(to_lock, mr_conv->CurrentParamStackOffset(), kObjectReferenceSize);
+       }
+     }
++    __ DecodeHeapReference(to_lock);
+     __ CallFromThread(QUICK_ENTRYPOINT_OFFSET(kPointerSize, pJniLockObject));
+   }
+ 
+@@ -549,6 +552,7 @@
+       // Pass the `this` argument from its spill slot.
+       __ LoadStackReference(to_lock, mr_conv->CurrentParamStackOffset());
+     }
++    __ DecodeHeapReference(to_lock);
+     __ CallFromThread(QUICK_ENTRYPOINT_OFFSET(kPointerSize, pJniUnlockObject));
+   }
+ 
+diff --git a/compiler/optimizing/fast_compiler_arm64.cc b/compiler/optimizing/fast_compiler_arm64.cc
+--- a/compiler/optimizing/fast_compiler_arm64.cc
++++ b/compiler/optimizing/fast_compiler_arm64.cc
+@@ -27,6 +27,7 @@
+ 
+ #include "code_generation_data.h"
+ #include "code_generator_arm64.h"
++#include "utils/arm64/heap_reference_arm64.h"
+ #include "data_type-inl.h"
+ #include "dex/code_item_accessors-inl.h"
+ #include "dex/dex_instruction-inl.h"
+@@ -644,6 +645,19 @@
+   //      ...                       : reserved frame space.
+   //      sp[0]                     : current method.
+   int32_t frame_size = GetFrameSize();
++#if ART_HEAP_REFERENCE_BASE != 0
++  // Fast baseline code receives the same logical 32-bit ArtMethod address as
++  // optimizing code. Normalize it before the frame stores x0 at sp[0].
++  {
++    UseScratchRegisterScope temps(masm);
++    Register upper = temps.AcquireX();
++    vixl::aarch64::Label native_method;
++    __ Lsr(upper, kArtMethodRegister, 32u);
++    __ Cbnz(upper, &native_method);
++    __ Orr(kArtMethodRegister, kArtMethodRegister, kArtCompressedReferenceBase);
++    __ Bind(&native_method);
++  }
++#endif
+   uint32_t core_spills_offset = frame_size - GetCoreSpillSize();
+   CPURegList preserved_core_registers = GetFramePreservedCoreRegisters();
+   DCHECK(!preserved_core_registers.IsEmpty());
+@@ -906,7 +920,11 @@
+       Register receiver = calling_convention.GetRegisterAt(0);
+       Offset class_offset = mirror::Object::ClassOffset();
+       EmissionCheckScope guard(GetVIXLAssembler(), kMaxMacroInstructionSizeInBytes);
+-      __ Ldr(kArtMethodRegister.W(), HeapOperand(receiver.W(), class_offset));
++      UseScratchRegisterScope temps(GetVIXLAssembler());
++      temps.Exclude(receiver);
++      Register native_receiver = temps.AcquireX();
++      ReferenceCodegenARM64<>::DecodeNonNull(GetVIXLAssembler(), native_receiver, receiver.W());
++      __ Ldr(kArtMethodRegister.W(), MemOperand(native_receiver, class_offset.Int32Value()));
+       if (can_be_null) {
+         RecordPcInfo(dex_pc);
+       }
+@@ -983,7 +1001,7 @@
+ 
+   Handle<mirror::String> h_str = handles_->NewHandle(str);
+   Register dst = RegisterFrom(loc, DataType::Type::kReference);
+-  __ Ldr(dst.W(), jit_patches_.DeduplicateJitStringLiteral(GetDexFile(),
++  __ Ldr(dst.X(), jit_patches_.DeduplicateJitStringLiteral(GetDexFile(),
+                                                            string_index,
+                                                            h_str,
+                                                            code_generation_data_.get()));
+@@ -1019,7 +1037,7 @@
+   InvokeRuntimeCallingConvention calling_convention;
+   Register cls_reg = calling_convention.GetRegisterAt(0);
+   Handle<mirror::Class> h_klass = handles_->NewHandle(klass);
+-  __ Ldr(cls_reg.W(), jit_patches_.DeduplicateJitClassLiteral(GetDexFile(),
++  __ Ldr(cls_reg.X(), jit_patches_.DeduplicateJitClassLiteral(GetDexFile(),
+                                                               type_index,
+                                                               h_klass ,
+                                                               code_generation_data_.get()));
+@@ -1057,6 +1075,10 @@
+   Register cls = calling_convention.GetRegisterAt(1);
+   Register obj_cls = calling_convention.GetRegisterAt(2);
+   Register obj = WRegisterFrom(GetExistingRegisterLocation(vreg, DataType::Type::kReference));
++  temps.Exclude(cls);
++  temps.Exclude(obj_cls);
++  temps.Exclude(obj.X());
++  Register native_obj = temps.AcquireX();
+   if (HitUnimplemented()) {
+     return false;
+   }
+@@ -1073,12 +1095,13 @@
+ 
+   vixl::aarch64::Label exit, read_barrier_exit;
+   __ Cbz(obj, &exit);
+-  __ Ldr(cls.W(), jit_patches_.DeduplicateJitClassLiteral(GetDexFile(),
++  ReferenceCodegenARM64<>::DecodeNonNull(GetVIXLAssembler(), native_obj, obj.W());
++  __ Ldr(cls.X(), jit_patches_.DeduplicateJitClassLiteral(GetDexFile(),
+                                                           type_index,
+                                                           h_klass ,
+                                                           code_generation_data_.get()));
+   __ Ldr(cls.W(), MemOperand(cls.X()));
+-  __ Ldr(obj_cls.W(), MemOperand(obj.X()));
++  __ Ldr(obj_cls.W(), MemOperand(native_obj));
+   __ Cmp(cls.W(), obj_cls.W());
+   __ B(eq, &exit);
+ 
+@@ -1907,10 +1930,14 @@
+         }
+       }
+ 
+-      MemOperand mem = HeapOperand(
+-          RegisterFrom(GetExistingRegisterLocation(obj_reg, DataType::Type::kReference),
+-                       DataType::Type::kReference),
+-          field->GetOffset());
++      UseScratchRegisterScope address_temps(GetVIXLAssembler());
++      Register holder = RegisterFrom(
++          GetExistingRegisterLocation(obj_reg, DataType::Type::kReference),
++          DataType::Type::kReference);
++      address_temps.Exclude(holder);
++      Register native_holder = address_temps.AcquireX();
++      ReferenceCodegenARM64<>::DecodeNonNull(GetVIXLAssembler(), native_holder, holder.W());
++      MemOperand mem = MemOperand(native_holder, field->GetOffset().Int32Value());
+       if (HitUnimplemented()) {
+         return false;
+       }
+@@ -2029,7 +2056,11 @@
+       if (HitUnimplemented()) {
+         return false;
+       }
+-      MemOperand mem = HeapOperand(holder, field->GetOffset());
++      UseScratchRegisterScope address_temps(GetVIXLAssembler());
++      address_temps.Exclude(holder);
++      Register native_holder = address_temps.AcquireX();
++      ReferenceCodegenARM64<>::DecodeNonNull(GetVIXLAssembler(), native_holder, holder.W());
++      MemOperand mem = MemOperand(native_holder, field->GetOffset().Int32Value());
+ 
+       // Need one temp if the stored value is a constant.
+       UseScratchRegisterScope temps(GetVIXLAssembler());

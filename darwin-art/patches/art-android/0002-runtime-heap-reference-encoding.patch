@@ -1,0 +1,647 @@
+diff --git a/runtime/mirror/object_reference.h b/runtime/mirror/object_reference.h
+--- a/runtime/mirror/object_reference.h
++++ b/runtime/mirror/object_reference.h
+@@ -97,14 +97,26 @@
+  public:
+   // Compress reference to its bit representation.
+   static uint32_t Compress(MirrorType* mirror_ptr) {
+-    uint32_t as_bits = reinterpret_cast32<uint32_t>(mirror_ptr);
++    uintptr_t address = reinterpret_cast<uintptr_t>(mirror_ptr);
++    uint32_t as_bits;
++    if (address == 0u) {
++      as_bits = 0u;
++    } else {
++      DCHECK_GE(address, kArtCompressedReferenceBase);
++      DCHECK_LT(address, kArtCompressedReferenceLimit);
++      as_bits = static_cast<uint32_t>(address - kArtCompressedReferenceBase);
++      DCHECK_NE(as_bits, 0u);
++    }
+     return kPoisonReferences ? -as_bits : as_bits;
+   }
+ 
+   // Uncompress an encoded reference from its bit representation.
+   static MirrorType* Decompress(uint32_t ref) {
+     uint32_t as_bits = kPoisonReferences ? -ref : ref;
+-    return reinterpret_cast32<MirrorType*>(as_bits);
++    if (as_bits == 0u) {
++      return nullptr;
++    }
++    return reinterpret_cast<MirrorType*>(kArtCompressedReferenceBase + as_bits);
+   }
+ 
+   // Convert an ObjPtr to a compressed reference.
+diff --git a/runtime/obj_ptr.h b/runtime/obj_ptr.h
+--- a/runtime/obj_ptr.h
++++ b/runtime/obj_ptr.h
+@@ -94,6 +94,14 @@
+       return reinterpret_cast<MirrorType*>(
+           static_cast<uintptr_t>(static_cast<uint32_t>(reference_ << kObjectAlignmentShift)));
+     } else {
++#if ART_HEAP_REFERENCE_BASE != 0
++      if (reference_ != 0u) {
++        if (reference_ >= kArtCompressedReferenceBase) {
++          return reinterpret_cast<MirrorType*>(reference_);
++        }
++        return reinterpret_cast<MirrorType*>(kArtCompressedReferenceBase + reference_);
++      }
++#endif
+       return reinterpret_cast<MirrorType*>(reference_);
+     }
+   }
+diff --git a/runtime/obj_ptr-inl.h b/runtime/obj_ptr-inl.h
+--- a/runtime/obj_ptr-inl.h
++++ b/runtime/obj_ptr-inl.h
+@@ -54,6 +54,13 @@
+ inline uintptr_t ObjPtr<MirrorType>::Encode(MirrorType* ptr) {
+   uintptr_t ref = reinterpret_cast<uintptr_t>(ptr);
+   DCHECK_ALIGNED(ref, kObjectAlignment);
++#if ART_HEAP_REFERENCE_BASE != 0
++  if (!kObjPtrPoisoning && ref != 0u) {
++    DCHECK_GE(ref, kArtCompressedReferenceBase);
++    DCHECK_LT(ref, kArtCompressedReferenceLimit);
++    return ref - kArtCompressedReferenceBase;
++  }
++#endif
+   if (kObjPtrPoisoning && ref != 0) {
+     DCHECK_LE(ref, 0xFFFFFFFFU);
+     ref >>= kObjectAlignmentShift;
+diff --git a/runtime/lock_word.h b/runtime/lock_word.h
+--- a/runtime/lock_word.h
++++ b/runtime/lock_word.h
+@@ -23,6 +23,7 @@
+ #include <android-base/logging.h>
+ 
+ #include "base/bit_utils.h"
++#include "base/globals.h"
+ #include "base/macros.h"
+ #include "read_barrier.h"
+ 
+@@ -151,7 +152,19 @@
+ 
+   static LockWord FromForwardingAddress(size_t target) {
+     DCHECK_ALIGNED(target, (1 << kStateSize));
++#if ART_HEAP_REFERENCE_BASE != 0
++    // The heap lies above 4 GiB.  The forwarding payload remains a 32-bit
++    // word, so store the offset in the window rather than
++    // truncating the high address before the object is moved.
++    DCHECK_GE(target, kArtCompressedReferenceBase);
++    DCHECK_LT(target, kArtCompressedReferenceLimit);
++    const uintptr_t offset = target - kArtCompressedReferenceBase;
++    DCHECK_ALIGNED(offset, (1 << kForwardingAddressShift));
++    return LockWord((static_cast<uint32_t>(offset >> kForwardingAddressShift)) |
++                    kStateForwardingAddressShifted);
++#else
+     return LockWord((target >> kForwardingAddressShift) | kStateForwardingAddressShifted);
++#endif
+   }
+ 
+   static LockWord FromHashCode(uint32_t hash_code, uint32_t gc_state) {
+diff --git a/runtime/lock_word-inl.h b/runtime/lock_word-inl.h
+--- a/runtime/lock_word-inl.h
++++ b/runtime/lock_word-inl.h
+@@ -43,7 +43,15 @@
+ 
+ inline size_t LockWord::ForwardingAddress() const {
+   DCHECK_EQ(GetState(), kForwardingAddress);
+-  return value_ << kForwardingAddressShift;
++  // Shift the uint32_t payload first so state bits are discarded before the
++  // base is restored.  Widening value_ before the shift would retain those
++  // bits in the heap reference window.
++  const uintptr_t offset = static_cast<uintptr_t>(value_ << kForwardingAddressShift);
++#if ART_HEAP_REFERENCE_BASE != 0
++  return kArtCompressedReferenceBase + offset;
++#else
++  return offset;
++#endif
+ }
+ 
+ inline LockWord::LockWord() : value_(0) {
+diff --git a/runtime/gc/heap.cc b/runtime/gc/heap.cc
+--- a/runtime/gc/heap.cc
++++ b/runtime/gc/heap.cc
+@@ -206,7 +206,7 @@
+ // 32 MB (0x2000000) is picked to ensure it is aligned to the largest supported PMD
+ // size, which is 32mb with a 16k page size on AArch64.
+ uint8_t* const Heap::kPreferredAllocSpaceBegin = reinterpret_cast<uint8_t*>(([]() constexpr {
+-  constexpr size_t kBegin = 32 * MB;
++  constexpr uintptr_t kBegin = kArtCompressedReferenceBase + 32 * MB;
+   constexpr int kMaxPMDSize = (kMaxPageSize / sizeof(uint64_t)) * kMaxPageSize;
+   static_assert(IsAligned<kMaxPMDSize>(kBegin),
+                 "Moving-space's begin should be aligned to the maximum supported PMD size.");
+@@ -725,11 +725,11 @@
+   // Since we don't know where in the low_4gb the app image will be located, make the card table
+   // cover the whole low_4gb. TODO: Extend the card table in AddSpace.
+   UNUSED(heap_capacity);
+-  // Start at 4 KB, we can be sure there are no spaces mapped this low since the address range is
+-  // reserved by the kernel.
+-  static constexpr size_t kMinHeapAddress = 4 * KB;
++  // Offset zero is the null compressed reference, so the managed window starts one page above
++  // its base.
++  static constexpr uintptr_t kMinHeapAddress = kArtCompressedReferenceBase + 4 * KB;
+   card_table_.reset(accounting::CardTable::Create(reinterpret_cast<uint8_t*>(kMinHeapAddress),
+-                                                  4 * GB - kMinHeapAddress));
++                                                  kArtCompressedReferenceLimit - kMinHeapAddress));
+   CHECK(card_table_.get() != nullptr) << "Failed to create card table";
+   if (foreground_collector_type_ == kCollectorTypeCC && kUseTableLookupReadBarrier) {
+     rb_table_.reset(new accounting::ReadBarrierTable());
+@@ -4530,23 +4530,31 @@
+ }
+ 
+ bool Heap::ObjectIsInBootImageSpace(ObjPtr<mirror::Object> obj) const {
+-  DCHECK_EQ(IsBootImageAddress(obj.Ptr()),
+-            any_of(boot_image_spaces_.begin(),
+-                   boot_image_spaces_.end(),
+-                   [obj](gc::space::ImageSpace* space) REQUIRES_SHARED(Locks::mutator_lock_) {
+-                     return space->HasAddress(obj.Ptr());
+-                   }));
+-  return IsBootImageAddress(obj.Ptr());
++  bool is_boot_image_address =
++      ArtHostAddressToCompressedReferenceAddress(reinterpret_cast<uintptr_t>(obj.Ptr())) -
++          boot_images_start_address_ < boot_images_size_;
++  bool is_in_space = any_of(
++      boot_image_spaces_.begin(),
++      boot_image_spaces_.end(),
++      [obj](gc::space::ImageSpace* space) REQUIRES_SHARED(Locks::mutator_lock_) {
++        return space->HasAddress(obj.Ptr());
++      });
++  DCHECK_EQ(is_boot_image_address, is_in_space);
++  return is_boot_image_address;
+ }
+ 
+ bool Heap::IsInBootImageOatFile(const void* p) const {
+-  DCHECK_EQ(IsBootImageAddress(p),
+-            any_of(boot_image_spaces_.begin(),
+-                   boot_image_spaces_.end(),
+-                   [p](gc::space::ImageSpace* space) REQUIRES_SHARED(Locks::mutator_lock_) {
+-                     return space->GetOatFile()->Contains(p);
+-                   }));
+-  return IsBootImageAddress(p);
++  bool is_boot_image_address =
++      ArtHostAddressToCompressedReferenceAddress(reinterpret_cast<uintptr_t>(p)) -
++          boot_images_start_address_ < boot_images_size_;
++  bool is_in_oat_file = any_of(
++      boot_image_spaces_.begin(),
++      boot_image_spaces_.end(),
++      [p](gc::space::ImageSpace* space) REQUIRES_SHARED(Locks::mutator_lock_) {
++        return space->GetOatFile()->Contains(p);
++      });
++  DCHECK_EQ(is_boot_image_address, is_in_oat_file);
++  return is_boot_image_address;
+ }
+ 
+ void Heap::SetAllocationListener(AllocationListener* l) {
+@@ -4857,7 +4865,11 @@
+   for (space::ContinuousSpace* space : continuous_spaces_) {
+     // An image space is either a boot image space or an app image space.
+     if (space->IsImageSpace() &&
+-        !IsBootImageAddress(space->Begin()) &&
++        !any_of(boot_image_spaces_.begin(),
++                boot_image_spaces_.end(),
++                [space](gc::space::ImageSpace* image) {
++                  return image->Begin() == space->Begin();
++                }) &&
+         (space->AsImageSpace()->GetOatFile()->GetOatDexFiles()[0]->GetDexFileLocation() ==
+               dex_location)) {
+       return true;
+diff --git a/runtime/gc/space/space.cc b/runtime/gc/space/space.cc
+--- a/runtime/gc/space/space.cc
++++ b/runtime/gc/space/space.cc
+@@ -80,10 +80,20 @@
+                                        GcRetentionPolicy gc_retention_policy) :
+     Space(name, gc_retention_policy) {
+   // TODO: Fix this if we ever support objects not in the low 32 bit.
++#if ART_HEAP_REFERENCE_BASE != 0
++  // Heap references are offsets from a high, fixed 4 GiB
++  // window. Large-object mappings use the same low_4gb allocator, so their
++  // accounting bitmap must use that window's base instead of address zero.
++  // The bitmap remains exactly 4 GiB wide and therefore keeps the upstream
++  // size and indexing cost.
++  uint8_t* const heap_begin = reinterpret_cast<uint8_t*>(kArtCompressedReferenceBase);
++#else
++  uint8_t* const heap_begin = nullptr;
++#endif
+   const size_t capacity = static_cast<size_t>(std::numeric_limits<uint32_t>::max());
+-  live_bitmap_ = accounting::LargeObjectBitmap::Create("large live objects", nullptr, capacity);
++  live_bitmap_ = accounting::LargeObjectBitmap::Create("large live objects", heap_begin, capacity);
+   CHECK(live_bitmap_.IsValid());
+-  mark_bitmap_ = accounting::LargeObjectBitmap::Create("large marked objects", nullptr, capacity);
++  mark_bitmap_ = accounting::LargeObjectBitmap::Create("large marked objects", heap_begin, capacity);
+   CHECK(mark_bitmap_.IsValid());
+ }
+ 
+diff --git a/runtime/monitor.cc b/runtime/monitor.cc
+--- a/runtime/monitor.cc
++++ b/runtime/monitor.cc
+@@ -35,6 +35,7 @@
+ #include "lock_word-inl.h"
+ #include "mirror/class-inl.h"
+ #include "mirror/object-inl.h"
++#include "mirror/object_reference.h"
+ #include "monitor-inl.h"
+ #include "object_callbacks.h"
+ #include "scoped_thread_state_change-inl.h"
+@@ -1529,7 +1530,9 @@
+       // not be optimized out.
+       success = stack_visitor->GetVReg(m, dex_reg, kReferenceVReg, &value);
+       if (success) {
+-        mirror::Object* mp = reinterpret_cast<mirror::Object*>(value);
++        // GetVReg returns the compiler's compressed32 reference ABI, not a native pointer.
++        mirror::Object* mp =
++            mirror::CompressedReference<mirror::Object>::FromVRegValue(value).AsMirrorPtr();
+         // TODO(b/299577730) Remove the extra checks here once the underlying bug is fixed.
+         const gc::Verification* v = Runtime::Current()->GetHeap()->GetVerification();
+         if (v->IsValidObject(mp)) {
+diff --git a/runtime/stack.cc b/runtime/stack.cc
+--- a/runtime/stack.cc
++++ b/runtime/stack.cc
+@@ -41,6 +41,7 @@
+ #include "mirror/class-inl.h"
+ #include "mirror/object-inl.h"
+ #include "mirror/object_array-inl.h"
++#include "mirror/object_reference.h"
+ #include "nterp_helpers.h"
+ #include "oat/oat_quick_method_header.h"
+ #include "obj_ptr-inl.h"
+@@ -213,7 +214,7 @@
+       if (!GetVReg(m, reg, kReferenceVReg, &value)) {
+         return nullptr;
+       }
+-      return reinterpret_cast<mirror::Object*>(value);
++      return mirror::CompressedReference<mirror::Object>::FromVRegValue(value).AsMirrorPtr();
+     }
+   }
+ }
+@@ -234,8 +235,8 @@
+     if (updated_vreg_flags[vreg]) {
+       // Value is set by the debugger.
+       if (kind == kReferenceVReg) {
+-        *val = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(
+-            shadow_frame->GetVRegReference(vreg)));
++        *val = mirror::CompressedReference<mirror::Object>::FromMirrorPtr(
++            shadow_frame->GetVRegReference(vreg)).AsVRegValue();
+       } else {
+         *val = shadow_frame->GetVReg(vreg);
+       }
+@@ -281,17 +282,19 @@
+     }
+     if (kind == kReferenceVReg) {
+       // Perform a read barrier in case we are in a different thread and GC is ongoing.
+-      mirror::Object* out = reinterpret_cast<mirror::Object*>(static_cast<uintptr_t>(*val));
+-      uintptr_t ptr_out = reinterpret_cast<uintptr_t>(GcRoot<mirror::Object>(out).Read());
+-      DCHECK_LT(ptr_out, std::numeric_limits<uint32_t>::max());
+-      *val = static_cast<uint32_t>(ptr_out);
++      // The stack-walker API keeps optimized reference vregs in the compressed32 ABI.
++      mirror::Object* out =
++          mirror::CompressedReference<mirror::Object>::FromVRegValue(*val).AsMirrorPtr();
++      mirror::Object* read_barriered = GcRoot<mirror::Object>(out).Read();
++      *val = mirror::CompressedReference<mirror::Object>::FromMirrorPtr(read_barriered)
++          .AsVRegValue();
+     }
+     return result;
+   } else {
+     DCHECK(cur_shadow_frame_ != nullptr);
+     if (kind == kReferenceVReg) {
+-      *val = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(
+-          cur_shadow_frame_->GetVRegReference(vreg)));
++      *val = mirror::CompressedReference<mirror::Object>::FromMirrorPtr(
++          cur_shadow_frame_->GetVRegReference(vreg)).AsVRegValue();
+     } else {
+       *val = cur_shadow_frame_->GetVReg(vreg);
+     }
+diff --git a/runtime/thread.cc b/runtime/thread.cc
+--- a/runtime/thread.cc
++++ b/runtime/thread.cc
+@@ -84,6 +84,7 @@
+ #include "mirror/class_loader.h"
+ #include "mirror/object_array-alloc-inl.h"
+ #include "mirror/object_array-inl.h"
++#include "mirror/object_reference.h"
+ #include "mirror/stack_frame_info.h"
+ #include "mirror/stack_trace_element.h"
+ #include "monitor.h"
+@@ -4355,8 +4356,8 @@
+       uint32_t register_mask = code_info.GetRegisterMaskOf(map);
+       for (uint32_t i = 0; i < BitSizeOf<uint32_t>(); ++i) {
+         if (register_mask & (1 << i)) {
+-          mirror::Object** ref_addr = reinterpret_cast<mirror::Object**>(GetGPRAddress(i));
+-          if (kIsDebugBuild && ref_addr == nullptr) {
++          uintptr_t* gpr_addr = GetGPRAddress(i);
++          if (kIsDebugBuild && gpr_addr == nullptr) {
+             std::string thread_name;
+             GetThread()->GetThreadName(thread_name);
+             LOG(FATAL_WITHOUT_ABORT) << "On thread " << thread_name;
+@@ -4364,8 +4365,18 @@
+             LOG(FATAL) << "Found an unsaved callee-save register " << i << " (null GPRAddress) "
+                        << "set in register_mask=" << register_mask << " at " << DescribeLocation();
+           }
+-          if (*ref_addr != nullptr) {
+-            vreg_info.VisitRegister(ref_addr, i, this);
++          // Optimizing quick code stores references compressed in 32 bits, even though
++          // Context exposes each native register slot as a uintptr_t. Decode before
++          // handing the raw root to GC, then encode the updated root back into the slot.
++          uint32_t compressed_ref = static_cast<uint32_t>(*gpr_addr);
++          if (compressed_ref != 0u) {
++            mirror::Object* ref =
++                mirror::CompressedReference<mirror::Object>::FromVRegValue(compressed_ref)
++                    .AsMirrorPtr();
++            mirror::Object* new_ref = ref;
++            vreg_info.VisitRegister(&new_ref, i, this);
++            *gpr_addr = static_cast<uintptr_t>(
++                mirror::CompressedReference<mirror::Object>::FromMirrorPtr(new_ref).AsVRegValue());
+           }
+         }
+       }
+diff --git a/runtime/quick_exception_handler.cc b/runtime/quick_exception_handler.cc
+--- a/runtime/quick_exception_handler.cc
++++ b/runtime/quick_exception_handler.cc
+@@ -40,6 +40,7 @@
+ #include "jit/jit_code_cache.h"
+ #include "mirror/class-inl.h"
+ #include "mirror/class_loader.h"
++#include "mirror/object_reference.h"
+ #include "mirror/throwable.h"
+ #include "nterp_helpers.h"
+ #include "oat/oat_quick_method_header.h"
+@@ -660,7 +661,10 @@
+         }
+       }
+       if (is_reference) {
+-        new_frame->SetVRegReference(vreg, reinterpret_cast<mirror::Object*>(value));
++        // Dex register locations carry the compiler's compressed32 reference value.
++        mirror::Object* ref =
++            mirror::CompressedReference<mirror::Object>::FromVRegValue(value).AsMirrorPtr();
++        new_frame->SetVRegReference(vreg, ref);
+       } else {
+         new_frame->SetVReg(vreg, value);
+       }
+diff --git a/runtime/interpreter/interpreter_common.cc b/runtime/interpreter/interpreter_common.cc
+--- a/runtime/interpreter/interpreter_common.cc
++++ b/runtime/interpreter/interpreter_common.cc
+@@ -1128,7 +1128,9 @@
+   // If both register locations contains the same value, the register probably holds a reference.
+   // Note: As an optimization, non-moving collectors leave a stale reference value
+   // in the references array even after the original vreg was overwritten to a non-reference.
+-  if (src_value == reinterpret_cast32<uint32_t>(o.Ptr())) {
++  // Compare vreg representations, not a narrowing cast of a native heap address.
++  if (src_value == mirror::CompressedReference<mirror::Object>::FromMirrorPtr(
++                       o.Ptr()).AsVRegValue()) {
+     new_shadow_frame->SetVRegReference(dest_reg, o);
+   } else {
+     new_shadow_frame->SetVReg(dest_reg, src_value);
+diff --git a/runtime/interpreter/unstarted_runtime.cc b/runtime/interpreter/unstarted_runtime.cc
+--- a/runtime/interpreter/unstarted_runtime.cc
++++ b/runtime/interpreter/unstarted_runtime.cc
+@@ -71,6 +71,11 @@
+ using android::base::StringAppendV;
+ using android::base::StringPrintf;
+ 
++template <typename T>
++static T* DecodeUnstartedReferenceArgument(uint32_t value) {
++  return mirror::CompressedReference<T>::FromVRegValue(value).AsMirrorPtr();
++}
++
+ static void AbortTransactionOrFail(Thread* self, const char* fmt, ...)
+     __attribute__((__format__(__printf__, 2, 3)))
+     REQUIRES_SHARED(Locks::mutator_lock_);
+@@ -643,7 +648,8 @@
+   }
+ 
+   uint32_t args[1];
+-  args[0] = reinterpret_cast32<uint32_t>(h_array.Get());
++  args[0] = mirror::CompressedReference<mirror::ByteArray>::FromMirrorPtr(h_array.Get())
++                .AsVRegValue();
+   EnterInterpreterFromInvoke(self, constructor, h_obj.Get(), args, nullptr);
+ 
+   if (self->IsExceptionPending()) {
+@@ -1928,7 +1934,8 @@
+     JValue* result) {
+   int32_t length = args[1];
+   DCHECK_GE(length, 0);
+-  ObjPtr<mirror::Object> element_class = reinterpret_cast32<mirror::Object*>(args[0])->AsClass();
++  ObjPtr<mirror::Object> element_class =
++      DecodeUnstartedReferenceArgument<mirror::Object>(args[0])->AsClass();
+   if (element_class == nullptr) {
+     AbortTransactionOrFail(self, "VMRuntime.newUnpaddedArray with null element_class.");
+     return;
+@@ -2051,7 +2058,7 @@
+                                                    mirror::Object* receiver,
+                                                    uint32_t* args,
+                                                    JValue* result) {
+-  ObjPtr<mirror::Object> rhs = reinterpret_cast32<mirror::Object*>(args[0]);
++  ObjPtr<mirror::Object> rhs = DecodeUnstartedReferenceArgument<mirror::Object>(args[0]);
+   if (rhs == nullptr) {
+     AbortTransactionOrFail(self, "String.compareTo with null object.");
+     return;
+@@ -2068,7 +2075,7 @@
+   Handle<mirror::String> h_receiver(hs.NewHandle(
+       reinterpret_cast<mirror::String*>(receiver)->AsString()));
+   Handle<mirror::ByteArray> h_buffer(hs.NewHandle(
+-      reinterpret_cast<mirror::ByteArray*>(args[0])->AsByteArray()));
++      DecodeUnstartedReferenceArgument<mirror::ByteArray>(args[0])->AsByteArray()));
+   int32_t index = static_cast<int32_t>(args[1]);
+   h_receiver->FillBytesLatin1(h_buffer, index);
+ }
+@@ -2082,7 +2089,7 @@
+   Handle<mirror::String> h_receiver(hs.NewHandle(
+       reinterpret_cast<mirror::String*>(receiver)->AsString()));
+   Handle<mirror::ByteArray> h_buffer(hs.NewHandle(
+-      reinterpret_cast<mirror::ByteArray*>(args[0])->AsByteArray()));
++      DecodeUnstartedReferenceArgument<mirror::ByteArray>(args[0])->AsByteArray()));
+   int32_t index = static_cast<int32_t>(args[1]);
+   h_receiver->FillBytesUTF16(h_buffer, index);
+ }
+@@ -2101,8 +2108,8 @@
+                                                          uint32_t* args,
+                                                          JValue* result) {
+   StackHandleScope<2> hs(self);
+-  auto h_class(hs.NewHandle(reinterpret_cast<mirror::Class*>(args[0])->AsClass()));
+-  auto h_dimensions(hs.NewHandle(reinterpret_cast<mirror::IntArray*>(args[1])->AsIntArray()));
++  auto h_class(hs.NewHandle(DecodeUnstartedReferenceArgument<mirror::Class>(args[0])->AsClass()));
++  auto h_dimensions(hs.NewHandle(DecodeUnstartedReferenceArgument<mirror::IntArray>(args[1])->AsIntArray()));
+   result->SetL(mirror::Array::CreateMultiArray(self, h_class, h_dimensions));
+ }
+ 
+@@ -2116,7 +2123,7 @@
+     ThrowNegativeArraySizeException(length);
+     return;
+   }
+-  ObjPtr<mirror::Class> element_class = reinterpret_cast<mirror::Class*>(args[0])->AsClass();
++  ObjPtr<mirror::Class> element_class = DecodeUnstartedReferenceArgument<mirror::Class>(args[0])->AsClass();
+   Runtime* runtime = Runtime::Current();
+   ClassLinker* class_linker = runtime->GetClassLinker();
+   ObjPtr<mirror::Class> array_class = class_linker->FindArrayClass(self, element_class);
+@@ -2197,7 +2204,7 @@
+     [[maybe_unused]] mirror::Object* receiver,
+     uint32_t* args,
+     JValue* result) {
+-  ObjPtr<mirror::Object> obj = reinterpret_cast32<mirror::Object*>(args[0]);
++  ObjPtr<mirror::Object> obj = DecodeUnstartedReferenceArgument<mirror::Object>(args[0]);
+   if (obj == nullptr) {
+     AbortTransactionOrFail(self, "Cannot access null object, retry at runtime.");
+     return;
+@@ -2242,7 +2249,7 @@
+     [[maybe_unused]] mirror::Object* receiver,
+     uint32_t* args,
+     JValue* result) {
+-  ObjPtr<mirror::Object> obj = reinterpret_cast32<mirror::Object*>(args[0]);
++  ObjPtr<mirror::Object> obj = DecodeUnstartedReferenceArgument<mirror::Object>(args[0]);
+   if (obj == nullptr) {
+     AbortTransactionOrFail(self, "Unsafe.compareAndSwapIntVolatile with null object.");
+     return;
+@@ -2257,13 +2264,14 @@
+                                                          [[maybe_unused]] mirror::Object* receiver,
+                                                          uint32_t* args,
+                                                          [[maybe_unused]] JValue* result) {
+-  ObjPtr<mirror::Object> obj = reinterpret_cast32<mirror::Object*>(args[0]);
++  ObjPtr<mirror::Object> obj = DecodeUnstartedReferenceArgument<mirror::Object>(args[0]);
+   if (obj == nullptr) {
+     AbortTransactionOrFail(self, "Unsafe.putObject with null object.");
+     return;
+   }
+   jlong offset = (static_cast<uint64_t>(args[2]) << 32) | args[1];
+-  ObjPtr<mirror::Object> new_value = reinterpret_cast32<mirror::Object*>(args[3]);
++  ObjPtr<mirror::Object> new_value =
++      DecodeUnstartedReferenceArgument<mirror::Object>(args[3]);
+   Runtime* runtime = Runtime::Current();
+   if (runtime->IsActiveTransaction()) {
+     if (runtime->GetClassLinker()->TransactionWriteConstraint(self, obj) ||
+@@ -2291,7 +2299,8 @@
+     [[maybe_unused]] mirror::Object* receiver,
+     uint32_t* args,
+     JValue* result) {
+-  ObjPtr<mirror::Object> component = reinterpret_cast32<mirror::Object*>(args[0]);
++  ObjPtr<mirror::Object> component =
++      DecodeUnstartedReferenceArgument<mirror::Object>(args[0]);
+   if (component == nullptr) {
+     AbortTransactionOrFail(self, "Unsafe.getArrayBaseOffsetForComponentType with null component.");
+     return;
+@@ -2306,7 +2315,8 @@
+     [[maybe_unused]] mirror::Object* receiver,
+     uint32_t* args,
+     JValue* result) {
+-  ObjPtr<mirror::Object> component = reinterpret_cast32<mirror::Object*>(args[0]);
++  ObjPtr<mirror::Object> component =
++      DecodeUnstartedReferenceArgument<mirror::Object>(args[0]);
+   if (component == nullptr) {
+     AbortTransactionOrFail(self, "Unsafe.getArrayIndexScaleForComponentType with null component.");
+     return;
+diff --git a/runtime/method_handles.cc b/runtime/method_handles.cc
+--- a/runtime/method_handles.cc
++++ b/runtime/method_handles.cc
+@@ -335,7 +335,9 @@
+     // If both register locations contains the same value, the register probably holds a reference.
+     // Note: As an optimization, non-moving collectors leave a stale reference value
+     // in the references array even after the original vreg was overwritten to a non-reference.
+-    if (src_value == reinterpret_cast<uintptr_t>(o.Ptr())) {
++    // Vregs contain compressed references, even when native pointers use a heap base.
++    if (src_value == mirror::CompressedReference<mirror::Object>::FromMirrorPtr(
++                         o.Ptr()).AsVRegValue()) {
+       callee_frame->SetVRegReference(dst_reg, o);
+     } else {
+       callee_frame->SetVReg(dst_reg, src_value);
+diff --git a/runtime/mirror/var_handle.cc b/runtime/mirror/var_handle.cc
+--- a/runtime/mirror/var_handle.cc
++++ b/runtime/mirror/var_handle.cc
+@@ -1971,7 +1971,13 @@
+         WellKnownClasses::java_nio_ByteBuffer_hb->GetOffset());
+     data = heap_byte_array->GetData();
+   } else {
++#if ART_HEAP_REFERENCE_BASE != 0
++    // A direct buffer backed by a managed byte array lives in the heap
++    // reference window above 4 GiB; truncating to 32 bits would lose the base.
++    data = reinterpret_cast<int8_t*>(static_cast<intptr_t>(native_address));
++#else
+     data = reinterpret_cast<int8_t*>(static_cast<uint32_t>(native_address));
++#endif
+   }
+ 
+   bool byte_swap = !GetNativeByteOrder();
+diff --git a/runtime/jit/small_pattern_matcher.cc b/runtime/jit/small_pattern_matcher.cc
+--- a/runtime/jit/small_pattern_matcher.cc
++++ b/runtime/jit/small_pattern_matcher.cc
+@@ -31,11 +31,31 @@
+ static int32_t ReturnOne() { return 1; }
+ static int32_t ReturnFirstArgMethod([[maybe_unused]] ArtMethod* method, int32_t first_arg) {
+   return first_arg;
++}
++
++static mirror::Object* DecodeQuickReference(mirror::Object* reference) {
++#if ART_HEAP_REFERENCE_BASE != 0
++  return mirror::PtrCompression<false, mirror::Object>::Decompress(
++      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(reference)));
++#else
++  return reference;
++#endif
++}
++
++static mirror::Object* EncodeQuickReference(ObjPtr<mirror::Object> object)
++    REQUIRES_SHARED(Locks::mutator_lock_) {
++#if ART_HEAP_REFERENCE_BASE != 0
++  return reinterpret_cast<mirror::Object*>(static_cast<uintptr_t>(
++      mirror::PtrCompression<false, mirror::Object>::Compress(object)));
++#else
++  return object.Ptr();
++#endif
+ }
+ 
+ template <int offset, typename T>
+ static std::conditional_t<(sizeof(T) < sizeof(int32_t)), int32_t, T> ReturnFieldAt(
+     [[maybe_unused]] ArtMethod* method, mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_) {
++  obj = DecodeQuickReference(obj);
+   return obj->GetFieldPrimitive<T, /* kIsVolatile= */ false>(
+       MemberOffset(offset + sizeof(mirror::Object)));
+ }
+@@ -43,7 +63,9 @@
+ template <int offset, typename unused>
+ static mirror::Object* ReturnFieldObjectAt([[maybe_unused]] ArtMethod* method, mirror::Object* obj)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
+-  return obj->GetFieldObject<mirror::Object>(MemberOffset(offset + sizeof(mirror::Object)));
++  obj = DecodeQuickReference(obj);
++  return EncodeQuickReference(
++      obj->GetFieldObject<mirror::Object>(MemberOffset(offset + sizeof(mirror::Object))));
+ }
+ 
+ template <int offset, typename T>
+@@ -60,13 +82,14 @@
+     REQUIRES_SHARED(Locks::mutator_lock_) {
+   ObjPtr<mirror::Class> cls = method->GetDeclaringClass();
+   MemberOffset first_field_offset = cls->GetFirstReferenceStaticFieldOffset(kRuntimePointerSize);
+-  return cls->GetFieldObject<mirror::Object>(
+-      MemberOffset(offset + first_field_offset.Int32Value()));
++  return EncodeQuickReference(cls->GetFieldObject<mirror::Object>(
++      MemberOffset(offset + first_field_offset.Int32Value())));
+ }
+ 
+ template <int offset, typename T>
+ static void SetFieldAt([[maybe_unused]] ArtMethod* method, mirror::Object* obj, T value)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++  obj = DecodeQuickReference(obj);
+   obj->SetFieldPrimitive<T, /* kIsVolatile= */ false>(
+       MemberOffset(offset + sizeof(mirror::Object)), value);
+ }
+@@ -76,6 +99,8 @@
+                              mirror::Object* obj,
+                              mirror::Object* value)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++  obj = DecodeQuickReference(obj);
++  value = DecodeQuickReference(value);
+   obj->SetFieldObject</* kTransactionActive */ false>(
+       MemberOffset(offset + sizeof(mirror::Object)), value);
+ }
+@@ -83,6 +108,7 @@
+ template <int offset, typename T>
+ static void ConstructorSetFieldAt([[maybe_unused]] ArtMethod* method, mirror::Object* obj, T value)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++  obj = DecodeQuickReference(obj);
+   obj->SetFieldPrimitive<T, /* kIsVolatile= */ false>(
+       MemberOffset(offset + sizeof(mirror::Object)), value);
+   QuasiAtomic::ThreadFenceForConstructor();
+@@ -93,6 +119,8 @@
+                                         mirror::Object* obj,
+                                         mirror::Object* value)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++  obj = DecodeQuickReference(obj);
++  value = DecodeQuickReference(value);
+   obj->SetFieldObject</* kTransactionActive */ false>(
+       MemberOffset(offset + sizeof(mirror::Object)), value);
+   QuasiAtomic::ThreadFenceForConstructor();

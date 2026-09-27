@@ -1,0 +1,334 @@
+diff --git a/runtime/interpreter/mterp/arm64ng/main.S b/runtime/interpreter/mterp/arm64ng/main.S
+--- a/runtime/interpreter/mterp/arm64ng/main.S
++++ b/runtime/interpreter/mterp/arm64ng/main.S
+@@ -183,6 +183,34 @@
+  */
+ .macro GET_VREG reg, vreg
+     ldr     \reg, [xFP, \vreg, uxtw #2]
++.endm
++/*
++ * Nterp keeps references in W registers as their 32-bit value (the vreg and
++ * heap encoding). With ART_HEAP_REFERENCE_BASE the X register of a non-null
++ * reference must get the base before it is dereferenced or passed to a C++
++ * entrypoint as mirror::Object*. The W register keeps the 32-bit value.
++ */
++.macro DECODE_NON_NULL_HEAP_REF xreg
++#if ART_HEAP_REFERENCE_BASE != 0
++    orr     \xreg, \xreg, #ART_HEAP_REFERENCE_BASE
++#endif
++.endm
++.macro DECODE_NULLABLE_HEAP_REF xreg, wreg
++    cbz     \wreg, 987f
++    DECODE_NON_NULL_HEAP_REF \xreg
++987:
++.endm
++/* A boot image ArtMethod* can arrive as its 32-bit logical image address. */
++.macro NORMALIZE_ART_METHOD
++#if ART_HEAP_REFERENCE_BASE != 0
++    cbz     x0, 988f
++    mov     ip2, x0
++    lsr     ip2, ip2, #32
++    cbnz    ip2, 988f
++    mov     ip2, #ART_HEAP_REFERENCE_BASE
++    orr     x0, x0, ip2
++988:
++#endif
+ .endm
+ .macro GET_VREG_OBJECT reg, vreg
+     ldr     \reg, [xREFS, \vreg, uxtw #2]
+@@ -1381,7 +1409,9 @@
+    .if \is_object
+    cbz     \value, \label
+    ldr     ip, [xSELF, #THREAD_CARD_TABLE_OFFSET]
+-   lsr     wip2, \holder, #CARD_TABLE_CARD_SHIFT
++   mov     wip2, \holder
++   DECODE_NON_NULL_HEAP_REF ip2
++   lsr     ip2, ip2, #CARD_TABLE_CARD_SHIFT
+    strb    wip, [ip, ip2]
+ \label:
+    .endif
+@@ -1569,6 +1599,7 @@
+ 
+ OAT_ENTRY ExecuteNterpWithClinitImpl
+     .cfi_startproc
++    NORMALIZE_ART_METHOD
+     // For simplicity, we don't do a read barrier here, but instead rely
+     // on art_quick_resolution_trampoline to always have a suspend point before
+     // calling back here.
+@@ -1598,6 +1629,7 @@
+ 
+ OAT_ENTRY ExecuteNterpImpl
+     .cfi_startproc
++    NORMALIZE_ART_METHOD
+     sub x16, sp, #STACK_OVERFLOW_RESERVED_BYTES
+     ldr wzr, [x16]
+     /* Spill callee save regs */
+diff --git a/runtime/interpreter/mterp/arm64ng/array.S b/runtime/interpreter/mterp/arm64ng/array.S
+--- a/runtime/interpreter/mterp/arm64ng/array.S
++++ b/runtime/interpreter/mterp/arm64ng/array.S
+@@ -11,6 +11,7 @@
+     GET_VREG w0, w2                     // w0<- vBB (array object)
+     GET_VREG w1, w3                     // w1<- vCC (requested index)
+     cbz     x0, common_errNullObject    // bail if null array object.
++    DECODE_NON_NULL_HEAP_REF x0
+     ldr     w3, [x0, #MIRROR_ARRAY_LENGTH_OFFSET]    // w3<- arrayObj->length
+     add     x0, x0, w1, uxtw #$shift    // w0<- arrayObj + index*width
+     cmp     w1, w3                      // compare unsigned index, length
+@@ -68,8 +69,13 @@
+     GET_VREG w0, w2                     // w0<- vBB (array object)
+     GET_VREG w1, w3                     // w1<- vCC (requested index)
+     cbz     w0, common_errNullObject    // bail if null
+-    ldr     w3, [x0, #MIRROR_ARRAY_LENGTH_OFFSET]     // w3<- arrayObj->length
++    mov     w10, w0
++    DECODE_NON_NULL_HEAP_REF x10
++    ldr     w3, [x10, #MIRROR_ARRAY_LENGTH_OFFSET]    // w3<- arrayObj->length
+     .if !$is_object
++    mov     x0, x10
++    .endif
++    .if !$is_object
+     add     x0, x0, w1, uxtw #$shift    // w0<- arrayObj + index*width
+     .endif
+     cmp     w1, w3                      // compare unsigned index, length
+@@ -119,6 +125,7 @@
+     ubfx    w2, wINST, #8, #4           // w2<- A
+     GET_VREG w0, w1                     // w0<- vB (object ref)
+     cbz     w0, common_errNullObject    // bail if null
++    DECODE_NON_NULL_HEAP_REF x0
+     FETCH_ADVANCE_INST 1                // advance rPC, load rINST
+     ldr     w3, [x0, #MIRROR_ARRAY_LENGTH_OFFSET]    // w3<- array length
+     GET_INST_OPCODE ip                  // extract opcode from rINST
+@@ -133,6 +140,7 @@
+     lsr     w3, wINST, #8               // w3<- AA
+     orr     x0, x0, x1, lsl #16         // x0<- ssssssssBBBBbbbb
+     GET_VREG w1, w3                     // w1<- vAA (array object)
++    DECODE_NULLABLE_HEAP_REF x1, w1
+     add     x0, xPC, x0, lsl #1         // x0<- PC + ssssssssBBBBbbbb*2 (array data off.)
+     bl      art_quick_handle_fill_data
+     FETCH_ADVANCE_INST 3                // advance rPC, load rINST
+diff --git a/runtime/interpreter/mterp/arm64ng/control_flow.S b/runtime/interpreter/mterp/arm64ng/control_flow.S
+--- a/runtime/interpreter/mterp/arm64ng/control_flow.S
++++ b/runtime/interpreter/mterp/arm64ng/control_flow.S
+@@ -183,6 +183,7 @@
+   EXPORT_PC
+   lsr      w2, wINST, #8               // r2<- AA
+   GET_VREG w0, w2                      // r0<- vAA (exception object)
++  DECODE_NULLABLE_HEAP_REF x0, w0
+   mov x1, xSELF
+   bl art_quick_deliver_exception
+   brk 0
+diff --git a/runtime/interpreter/mterp/arm64ng/other.S b/runtime/interpreter/mterp/arm64ng/other.S
+--- a/runtime/interpreter/mterp/arm64ng/other.S
++++ b/runtime/interpreter/mterp/arm64ng/other.S
+@@ -135,6 +135,7 @@
+     EXPORT_PC
+     lsr      w2, wINST, #8               // w2<- AA
+     GET_VREG w0, w2
++    DECODE_NULLABLE_HEAP_REF x0, w0
+     bl art_quick_lock_object
+     FETCH_ADVANCE_INST 1
+     GET_INST_OPCODE ip                   // extract opcode from rINST
+@@ -152,6 +153,7 @@
+     EXPORT_PC
+     lsr      w2, wINST, #8               // w2<- AA
+     GET_VREG w0, w2
++    DECODE_NULLABLE_HEAP_REF x0, w0
+     bl art_quick_unlock_object
+     FETCH_ADVANCE_INST 1
+     GET_INST_OPCODE ip                   // extract opcode from rINST
+diff --git a/runtime/interpreter/mterp/arm64ng/invoke.S b/runtime/interpreter/mterp/arm64ng/invoke.S
+--- a/runtime/interpreter/mterp/arm64ng/invoke.S
++++ b/runtime/interpreter/mterp/arm64ng/invoke.S
+@@ -81,9 +81,12 @@
+    and w1, w1, #0xf
+    .endif
+    GET_VREG w1, w1
+-   // Note: if w1 is null, this will be handled by our SIGSEGV handler.
+-   ldr w2, [x1, #MIRROR_OBJECT_CLASS_OFFSET]
++   cbz w1, common_errNullObject
++   mov w2, w1
++   DECODE_NON_NULL_HEAP_REF x2
++   ldr w2, [x2, #MIRROR_OBJECT_CLASS_OFFSET]
+    UNPOISON_HEAP_REF w2
++   DECODE_NON_NULL_HEAP_REF x2
+    // Test the first two bits of the fetched ArtMethod:
+    // - If the first bit is set, this is a method on j.l.Object
+    // - If the second bit is set, this is a default method.
+@@ -106,7 +109,7 @@
+    b 1b
+ 3:
+    lsr w26, w26, #16
+-   add w2, w2, #MIRROR_CLASS_VTABLE_OFFSET_64
++   add x2, x2, #MIRROR_CLASS_VTABLE_OFFSET_64
+    ldr x0, [x2, w26, uxtw #3]
+    .if $range
+    b NterpCommonInvokeInstanceRange
+@@ -156,10 +159,13 @@
+    and w1, w1, #0xf
+    .endif
+    GET_VREG w1, w1
+-   // Note: if w1 is null, this will be handled by our SIGSEGV handler.
+-   ldr w0, [x1, #MIRROR_OBJECT_CLASS_OFFSET]
++   cbz w1, common_errNullObject
++   mov w0, w1
++   DECODE_NON_NULL_HEAP_REF x0
++   ldr w0, [x0, #MIRROR_OBJECT_CLASS_OFFSET]
+    UNPOISON_HEAP_REF w0
+-   add w0, w0, #MIRROR_CLASS_VTABLE_OFFSET_64
++   DECODE_NON_NULL_HEAP_REF x0
++   add x0, x0, #MIRROR_CLASS_VTABLE_OFFSET_64
+    ldr x0, [x0, w2, uxtw #3]
+    b $helper
+ 2:
+diff --git a/runtime/interpreter/mterp/arm64ng/object.S b/runtime/interpreter/mterp/arm64ng/object.S
+--- a/runtime/interpreter/mterp/arm64ng/object.S
++++ b/runtime/interpreter/mterp/arm64ng/object.S
+@@ -6,6 +6,7 @@
+    lsr     w2, wINST, #8               // w2<- A
+    GET_VREG w0, w2                     // w0<- vA (object)
+    cbz     w0, .L${opcode}_resume
++   DECODE_NON_NULL_HEAP_REF x0
+    ldr     w2, [x0, #MIRROR_OBJECT_CLASS_OFFSET]
+    UNPOISON_HEAP_REF w2
+    // Fast path: do a comparison without read barrier.
+@@ -36,6 +37,7 @@
+    UNPOISON_HEAP_REF w3
+    cbnz    w3, 5f
+ 1:
++   DECODE_NON_NULL_HEAP_REF x2
+    ldr     w2, [x2, #MIRROR_CLASS_SUPER_CLASS_OFFSET]
+    UNPOISON_HEAP_REF w2
+    cmp     w1, w2
+@@ -44,6 +46,7 @@
+ 2:
+    TEST_IF_MARKING 4f
+ 3:
++   DECODE_NON_NULL_HEAP_REF x1
+    EXPORT_PC
+    bl      art_quick_check_instance_of
+    b       .L${opcode}_resume
+@@ -51,11 +54,14 @@
+    bl      art_quick_read_barrier_mark_reg01
+    b       3b
+ 5:
++   DECODE_NON_NULL_HEAP_REF x2
++   DECODE_NON_NULL_HEAP_REF x3
+    // Class in w1 is an array, w3 is the component type.
+    ldr     w2, [x2, #MIRROR_CLASS_COMPONENT_TYPE_OFFSET]
+    UNPOISON_HEAP_REF w2
+    // Check if object is an array.
+    cbz     w2, 2b
++   DECODE_NON_NULL_HEAP_REF x2
+    ldr     w4, [x3, #MIRROR_CLASS_SUPER_CLASS_OFFSET]
+    UNPOISON_HEAP_REF w4
+    // If the super class of the component type is not null, go slow path.
+@@ -78,6 +84,7 @@
+    lsr     w2, wINST, #12              // w2<- B
+    GET_VREG w0, w2                     // w0<- vB (object)
+    cbz     w0, .L${opcode}_resume
++   DECODE_NON_NULL_HEAP_REF x0
+    ldr     w2, [x0, #MIRROR_OBJECT_CLASS_OFFSET]
+    UNPOISON_HEAP_REF w2
+    // Fast path: do a comparison without read barrier.
+@@ -110,6 +117,7 @@
+    UNPOISON_HEAP_REF w3
+    cbnz    w3, 3f
+ 1:
++   DECODE_NON_NULL_HEAP_REF x2
+    ldr     w2, [x2, #MIRROR_CLASS_SUPER_CLASS_OFFSET]
+    UNPOISON_HEAP_REF w2
+    cmp     w1, w2
+@@ -119,11 +127,14 @@
+    mov     w0, #0
+    b       .L${opcode}_resume
+ 3:
++   DECODE_NON_NULL_HEAP_REF x2
++   DECODE_NON_NULL_HEAP_REF x3
+    // Class in x1 is an array, x3 is the component type of x1, and x2 is the class of the object.
+    ldr     w2, [x2, #MIRROR_CLASS_COMPONENT_TYPE_OFFSET]
+    UNPOISON_HEAP_REF w2
+    // Check if object is an array.
+    cbz     w2, 2b
++   DECODE_NON_NULL_HEAP_REF x2
+    // Check of x1 is Object[]
+    ldr     w4, [x3, #MIRROR_CLASS_SUPER_CLASS_OFFSET]
+    UNPOISON_HEAP_REF w4
+@@ -141,6 +152,7 @@
+ 4:
+    bl      art_quick_read_barrier_mark_reg01
+ 5:
++   DECODE_NON_NULL_HEAP_REF x1
+    EXPORT_PC
+    bl      artInstanceOfFromCode
+    b       .L${opcode}_resume
+@@ -166,6 +178,7 @@
+    GET_VREG w3, w2                     // w3<- object we're operating on
+    ubfx    w2, wINST, #8, #4           // w2<- A
+    cbz     w3, common_errNullObject    // object was null
++   DECODE_NON_NULL_HEAP_REF x3
+    .if $wide
+    $load   x0, [x3, x0]
+    SET_VREG_WIDE x0, w2                // fp[A] <- value
+@@ -205,6 +218,7 @@
+    GET_VREG w3, w2                     // w3<- object we're operating on
+    ubfx    w2, wINST, #8, #4           // w2<- A
+    cbz     w3, common_errNullObject    // object was null
++   DECODE_NON_NULL_HEAP_REF x3
+    add     x3, x3, x0
+    .if $wide
+    $volatile_load x0, [x3]
+@@ -255,6 +269,7 @@
+    lsr     w2, wINST, #12              // w2<- B
+    GET_VREG w2, w2                     // vB (object we're operating on)
+    cbz w2, common_errNullObject
++   DECODE_NON_NULL_HEAP_REF x2
+    .if $wide
+    $store  x26, [x2, x0]
+    .else
+@@ -291,6 +306,7 @@
+    lsr     w2, wINST, #12              // w2<- B
+    GET_VREG w2, w2                     // vB (object we're operating on)
+    cbz     w2, common_errNullObject
++   DECODE_NON_NULL_HEAP_REF x2
+    add     x3, x2, x0
+    .if $wide
+    $volatile_store x26, [x3]
+@@ -331,6 +347,7 @@
+    ldr     w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
+    TEST_IF_MARKING .L${opcode}_read_barrier
+ .L${opcode}_resume_after_read_barrier:
++   DECODE_NON_NULL_HEAP_REF x0
+    .if $wide
+    ldr     x0, [x0, x1]
+    SET_VREG_WIDE x0, w2                // fp[A] <- value
+@@ -350,6 +367,7 @@
+ .L${opcode}_read_barrier:
+    bl      art_quick_read_barrier_mark_reg00
+    .if $is_object
++   DECODE_NON_NULL_HEAP_REF x0
+    $load   w0, [x0, x1]
+    UNPOISON_HEAP_REF w0
+ .L${opcode}_mark_after_load:
+@@ -374,6 +392,7 @@
+    ldr     w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
+    TEST_IF_MARKING .L${opcode}_slow_path_read_barrier
+ .L${opcode}_slow_path_resume_after_read_barrier:
++   DECODE_NON_NULL_HEAP_REF x0
+    add     x0, x0, x1
+    .if $wide
+    ldar    x0, [x0]
+@@ -428,6 +447,7 @@
+    ldr     w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
+    TEST_IF_MARKING .L${opcode}_read_barrier
+ .L${opcode}_resume_after_read_barrier:
++   DECODE_NON_NULL_HEAP_REF x0
+    .if $wide
+    $store  x26, [x0, x1]
+    .else
+@@ -464,6 +484,7 @@
+    ldr     w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
+    TEST_IF_MARKING .L${opcode}_slow_path_read_barrier
+ .L${opcode}_slow_path_resume_after_read_barrier:
++   DECODE_NON_NULL_HEAP_REF x0
+    add     x1, x0, x1
+    .if $wide
+    $volatile_store    x26, [x1]

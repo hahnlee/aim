@@ -1,0 +1,121 @@
+diff --git a/libartbase/base/globals.h b/libartbase/base/globals.h
+--- a/libartbase/base/globals.h
++++ b/libartbase/base/globals.h
+@@ -28,6 +28,35 @@
+ static constexpr size_t MB = KB * KB;
+ static constexpr size_t GB = KB * KB * KB;
+ 
++// Managed heap references are 32 bits wide. Upstream ART stores them as the
++// absolute address of the object, so the heap, the boot image and every other
++// "low 4 GiB" mapping must lie below 4 GiB. A nonzero ART_HEAP_REFERENCE_BASE
++// (a 4 GiB-aligned address set by the build, like ART_BASE_ADDRESS) moves that
++// 4 GiB window up to the base: a reference is then the object's offset from the
++// base, and because the base is 4 GiB-aligned the offset is simply the low 32
++// bits of the address. Zero keeps upstream behaviour.
++#ifndef ART_HEAP_REFERENCE_BASE
++#define ART_HEAP_REFERENCE_BASE 0
++#endif
++static constexpr uintptr_t kArtCompressedReferenceBase = ART_HEAP_REFERENCE_BASE;
++static constexpr uint64_t kArtCompressedReferenceLimit =
++    static_cast<uint64_t>(kArtCompressedReferenceBase) + 4ULL * GB;
++static_assert(kArtCompressedReferenceBase % (4ULL * GB) == 0,
++              "the heap reference window must be 4 GiB aligned");
++
++// Image files and 32-bit metadata keep Android's logical low-4 GiB addresses
++// (for example ART_BASE_ADDRESS). These convert between such a logical address
++// and the address inside the window; other addresses pass through unchanged.
++ALWAYS_INLINE constexpr uintptr_t ArtCompressedReferenceToHostAddress(uintptr_t address) {
++  return address != 0u && address < 4ULL * GB ? kArtCompressedReferenceBase + address : address;
++}
++
++ALWAYS_INLINE constexpr uintptr_t ArtHostAddressToCompressedReferenceAddress(uintptr_t address) {
++  return address >= kArtCompressedReferenceBase && address < kArtCompressedReferenceLimit
++      ? address - kArtCompressedReferenceBase
++      : address;
++}
++
+ // Runtime sizes.
+ static constexpr size_t kBitsPerByte = 8;
+ static constexpr size_t kBitsPerByteLog2 = 3;
+diff --git a/libartbase/base/mem_map.cc b/libartbase/base/mem_map.cc
+--- a/libartbase/base/mem_map.cc
++++ b/libartbase/base/mem_map.cc
+@@ -139,11 +139,11 @@
+ #ifdef __BIONIC__
+   uint64_t random_data;
+   arc4random_buf(&random_data, sizeof(random_data));
+-  return CreateStartPos(random_data, page_size);
++  return kArtCompressedReferenceBase + CreateStartPos(random_data, page_size);
+ #else
+   UNUSED(page_size);
+   // No arc4random on host, see above.
+-  return LOW_MEM_START;
++  return kArtCompressedReferenceBase + LOW_MEM_START;
+ #endif
+ }
+ 
+@@ -193,6 +193,9 @@
+     return true;
+   }
+ 
++  // A low-4 GiB expectation may be a logical address (e.g. ART_BASE_ADDRESS).
++  expected_ptr = reinterpret_cast<uint8_t*>(
++      ArtCompressedReferenceToHostAddress(reinterpret_cast<uintptr_t>(expected_ptr)));
+   uintptr_t actual = reinterpret_cast<uintptr_t>(actual_ptr);
+   uintptr_t expected = reinterpret_cast<uintptr_t>(expected_ptr);
+ 
+@@ -267,7 +270,9 @@
+   if (actual != MAP_FAILED) {
+     // Since we didn't use MAP_FIXED the kernel may have mapped it somewhere not in the low
+     // 4GB. If this is the case, unmap and retry.
+-    if (reinterpret_cast<uintptr_t>(actual) + page_aligned_byte_count >= 4 * GB) {
++    if (reinterpret_cast<uintptr_t>(actual) < kArtCompressedReferenceBase ||
++        reinterpret_cast<uintptr_t>(actual) + page_aligned_byte_count >=
++            kArtCompressedReferenceLimit) {
+       TargetMUnmap(actual, page_aligned_byte_count);
+       actual = MAP_FAILED;
+     }
+@@ -1092,7 +1097,8 @@
+   bool first_run = true;
+ 
+   std::lock_guard<std::mutex> mu(*mem_maps_lock_);
+-  for (uintptr_t ptr = next_mem_pos_; ptr < 4 * GB; ptr += GetPageSize()) {
++  for (uintptr_t ptr = next_mem_pos_; ptr < kArtCompressedReferenceLimit;
++       ptr += GetPageSize()) {
+     // Use gMaps as an optimization to skip over large maps.
+     // Find the first map which is address > ptr.
+     auto it = gMaps->upper_bound(reinterpret_cast<void*>(ptr));
+@@ -1123,11 +1129,11 @@
+       return actual;
+     }
+ 
+-    if (4U * GB - ptr < length) {
++    if (kArtCompressedReferenceLimit - ptr < length) {
+       // Not enough memory until 4GB.
+       if (first_run) {
+         // Try another time from the bottom;
+-        ptr = LOW_MEM_START - GetPageSize();
++        ptr = kArtCompressedReferenceBase + LOW_MEM_START - GetPageSize();
+         first_run = false;
+         continue;
+       } else {
+@@ -1183,12 +1189,16 @@
+                           bool low_4gb) {
+ #ifdef __LP64__
+   // When requesting low_4g memory and having an expectation, the requested range should fit into
+-  // 4GB.
++  // 4GB. A logical low-4 GiB expectation is placed in the heap reference window.
++  if (low_4gb) {
++    addr = reinterpret_cast<void*>(
++        ArtCompressedReferenceToHostAddress(reinterpret_cast<uintptr_t>(addr)));
++  }
+   if (low_4gb && (
+       // Start out of bounds.
+-      (reinterpret_cast<uintptr_t>(addr) >> 32) != 0 ||
++      (addr != nullptr && reinterpret_cast<uintptr_t>(addr) < kArtCompressedReferenceBase) ||
+       // End out of bounds. For simplicity, this will fail for the last page of memory.
+-      ((reinterpret_cast<uintptr_t>(addr) + length) >> 32) != 0)) {
++      reinterpret_cast<uintptr_t>(addr) + length >= kArtCompressedReferenceLimit)) {
+     LOG(ERROR) << "The requested address space (" << addr << ", "
+                << reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(addr) + length)
+                << ") cannot fit in low_4gb";

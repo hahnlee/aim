@@ -62,7 +62,8 @@ programs, and implement only what lies below it.
      `__PAGEZERO`), but ART stores managed references as absolute 32-bit
      addresses. `libart` (with its compiler and dex2oat) is therefore built
      from AOSP source with the base-relative compressed-reference patches, as
-     Android ELF. The boot image is regenerated with it.
+     Android ELF. The boot image is regenerated with it. The patch series, its
+     build and the boot image plan are in `docs/art-exception-patches.md`.
 
 5. **Derived system image.** The original archive plus a checked-in overlay
    manifest (additions, and explicitly listed replacements) with its own
