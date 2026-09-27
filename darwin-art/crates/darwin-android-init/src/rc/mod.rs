@@ -74,7 +74,11 @@ pub struct InitScripts {
     /// `LoadBootScripts`: `/system/etc/init/hw/init.rc`, its imports, and the
     /// partition `etc/init` directories.
     pub boot: ParsedScripts,
-    /// `ParseRcScriptsFromAllApexes`: `/apex/*/etc/*rc`, parsed with the
-    /// APEX parser (`service` and vendor-APEX `on` only).
+    /// `ParseRcScriptsFromAllApexes(bootstrap=true)`: the scripts of the
+    /// APEXes active at early-init's `perform_apex_config --bootstrap`.
+    pub bootstrap_apex: ParsedScripts,
+    /// `ParseRcScriptsFromAllApexes`: `/apex/*/etc/*rc` of the other
+    /// APEXes, parsed with the APEX parser (`service` and vendor-APEX `on`
+    /// only).
     pub apex: ParsedScripts,
 }

@@ -40,6 +40,69 @@
 
 schema = 1
 
+# The device: `darwin` (androidboot.hardware=darwin, from darwin-guest-init),
+# so init.rc imports init.darwin.rc and vold reads fstab.darwin. The
+# emulator's device files and helpers go: they set up QEMU's virtual
+# hardware, which a Mac does not have.
+
+[[add]]
+path = "/vendor/etc/init/hw/init.darwin.rc"
+source = "image/vendor/etc/init/hw/init.darwin.rc"
+reason = "the device's init script: ro.hardware.egl, GLES version, density and mount_all"
+
+[[add]]
+path = "/vendor/etc/fstab.darwin"
+source = "image/vendor/etc/fstab.darwin"
+reason = "the device's fstab for mount_all and vold: /data without file-based encryption"
+
+[[remove]]
+path = "/vendor/etc/init/hw/init.ranchu.rc"
+reason = "the emulator's device script (QEMU props, kernel modules, zram, virtio Wi-Fi); init.darwin.rc replaces it"
+
+[[remove]]
+path = "/vendor/etc/fstab.ranchu"
+reason = "the emulator's virtio block devices; fstab.darwin replaces it"
+
+[[remove]]
+path = "/vendor/bin/qemu-props"
+reason = "sets properties it reads from the emulator over the QEMU pipe"
+
+[[remove]]
+path = "/vendor/bin/dlkm_loader"
+reason = "loads the emulator's kernel modules; there is no Linux kernel"
+
+[[remove]]
+path = "/vendor/lib/modules"
+reason = "the emulator's Linux kernel modules (virtio, goldfish, mac80211)"
+
+[[remove]]
+path = "/vendor/bin/init.ranchu-core.sh"
+reason = "holds a wake lock unless a QEMU boot option allows suspend"
+
+[[remove]]
+path = "/vendor/bin/init.ranchu-net.sh"
+reason = "creates the emulator's virtio Wi-Fi radio and its inter-emulator interface"
+
+[[remove]]
+path = "/vendor/bin/mac80211_create_radios"
+reason = "creates mac80211_hwsim radios for the emulator's virtual Wi-Fi"
+
+[[remove]]
+path = "/vendor/bin/init_ranchu_device_state.sh"
+reason = "writes the emulator's device-state config from a QEMU boot option"
+
+[[remove]]
+path = "/vendor/bin/bt_vhci_forwarder"
+reason = "forwards HCI between QEMU's virtio console and /dev/vhci"
+
+[[remove]]
+path = "/system_ext/bin/init.ranchu.adb.setup.sh"
+reason = "writes adb_keys from the emulator host's key, a QEMU boot option"
+
+[[remove]]
+path = "/system_ext/etc/init/init.system_ext.rc"
+reason = "only reacts to the removed ranchu-adb-setup and qemu-device-state services"
+
 # android.hardware.health: IHealth/default over the Mac's battery. The
 # service is built by tools/build-vendor-hals.sh; its host side is the
 # host-call module `health` (docs/host-call.md).
@@ -164,8 +227,7 @@ reason = "the emulator's mapper reads goldfish handles; ours is mapper.darwin.so
 
 # GLES driver (docs/gles-driver.md): EGL and GLES forwarded to the host's
 # ANGLE over host-call. The original libEGL loads libGLES_<ro.hardware.egl>;
-# init.ranchu.rc sets ro.hardware.egl from androidboot.hardwareegl, which
-# darwin-guest-init passes as `darwin`.
+# init.darwin.rc sets ro.hardware.egl to `darwin`.
 
 [[add]]
 path = "/vendor/lib64/egl/libGLES_darwin.so"
@@ -330,7 +392,7 @@ reason = "declares the removed hostapd"
 
 [[remove]]
 path = "/vendor/etc/vintf/manifest/android.hardware.wifi.supplicant.xml"
-reason = "declares wpa_supplicant (a lazy init.ranchu.rc service) on wlan0; there is no Wi-Fi"
+reason = "declares wpa_supplicant (a lazy service of the removed init.ranchu.rc) on wlan0; there is no Wi-Fi"
 
 [[remove]]
 path = "/vendor/etc/init/health-storage-default.rc"

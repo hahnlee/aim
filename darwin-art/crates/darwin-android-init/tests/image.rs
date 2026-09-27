@@ -147,6 +147,7 @@ fn load_scripts(
         ids: &ids,
         vendor_api_level,
         vendor_apexes,
+        bootstrap_apexes: Vec::new(),
     }
     .load()
 }

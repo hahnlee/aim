@@ -102,6 +102,9 @@ pub struct ScriptLoader<'a> {
     /// `/apex/apex-info-list.xml`, which apexd writes at boot (the daemon
     /// provides it for the derived image).
     pub vendor_apexes: Option<Vec<String>>,
+    /// APEXes apexd activates in bootstrap mode; their scripts load at
+    /// `perform_apex_config --bootstrap`, the others' later.
+    pub bootstrap_apexes: Vec<String>,
 }
 
 impl<'a> ScriptLoader<'a> {
@@ -113,11 +116,25 @@ impl<'a> ScriptLoader<'a> {
         }
     }
 
-    /// Boot scripts, then APEX scripts on top of them.
+    /// Boot scripts, then the bootstrap APEXes' scripts, then the other
+    /// APEXes' scripts on top of them.
     pub fn load(&self) -> InitScripts {
         let boot = self.load_boot_scripts();
-        let apex = self.load_apex_scripts(&boot, None);
-        InitScripts { boot, apex }
+        let others: Vec<String> = self
+            .image
+            .subdirectories("/apex")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|name| !self.bootstrap_apexes.contains(name))
+            .collect();
+        let bootstrap_apex = self.load_apex_scripts(&boot, Some(&others));
+        // init skips the APEXes it parsed in bootstrap mode.
+        let apex = self.load_apex_scripts(&bootstrap_apex, Some(&self.bootstrap_apexes));
+        InitScripts {
+            boot,
+            bootstrap_apex,
+            apex,
+        }
     }
 
     /// `LoadBootScripts`.

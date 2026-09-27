@@ -17,3 +17,6 @@ path = "src/bin/guest-init.rs"
 darwin-android-init = { path = "../darwin-android-init" }
 darwin-binder-host = { path = "../darwin-binder-host" }
 libc = "0.2"
+
+[dev-dependencies]
+darwin-android-image = { path = "../darwin-android-image" }

@@ -7,6 +7,8 @@
 //                                script interpreter and exec target)
 
 #include <errno.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -396,6 +398,17 @@ static void bench(void) {
   printf("bench fork+exec+exit+wait p50 %.0f us p90 %.0f us\n", t[N / 10], t[N / 5 * 9 / 10]);
 }
 
+static void seccomp_filter(void) {
+  // What minijail does for mediaextractor and media.swcodec.
+  struct sock_filter allow = BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+  struct sock_fprog prog = {1, &allow};
+  CHECK(prctl(PR_GET_SECCOMP) == 0, "no filter yet");
+  CHECK(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0, "no_new_privs");
+  CHECK(prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) == 0, "filter");
+  CHECK(prctl(PR_GET_SECCOMP) == SECCOMP_MODE_FILTER, "mode");
+  printf("ok seccomp_filter\n");
+}
+
 int main(int argc, char** argv) {
   self_path = "/data/local/tmp/process";
   // An empty argv arrives as one empty argv[0].
@@ -427,6 +440,7 @@ int main(int argc, char** argv) {
       {"exec_script", exec_script}, {"waitid_variants", waitid_variants},
       {"pidfd_poll", pidfd_poll},   {"epoll_fork", epoll_fork},   {"death_by_signal", death_by_signal},
       {"identity", identity},       {"identity_file", identity_file},
+      {"seccomp_filter", seccomp_filter},
       {"bench", bench},
   };
   for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {

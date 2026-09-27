@@ -247,18 +247,32 @@ fn exec(dirfd: i32, path: u64, argv: u64, envp: u64, flags: u64) -> i64 {
         f.extend_from_slice(&path);
         f
     };
-    let mut target = match resolve(dirfd, &path, flags) {
+    let target = match resolve(dirfd, &path, flags) {
         Ok(r) => r,
         Err(e) => return e,
     };
-    let mut interp_of = filename.clone();
+    match interpret(target, &filename, argv) {
+        Ok((target, argv)) => relaunch(&target.guest, &argv, &envp, &filename),
+        Err(e) => e,
+    }
+}
+
+/// `binfmt_script`: follows `#!` lines from `target` to the ELF program
+/// that runs, rewriting `argv` (never empty) as Linux does. `filename` is
+/// the name the first file was executed by.
+pub fn interpret(
+    mut target: vfs::Resolved,
+    filename: &[u8],
+    mut argv: Vec<CString>,
+) -> Result<(vfs::Resolved, Vec<CString>), i64> {
+    let mut interp_of = filename.to_vec();
     let mut depth = 0;
     loop {
-        match classify(&target.host) {
-            Ok(Kind::Elf) => break,
-            Ok(Kind::Script(interp, arg)) => {
+        match classify(&target.host)? {
+            Kind::Elf => return Ok((target, argv)),
+            Kind::Script(interp, arg) => {
                 if depth == MAX_INTERP_DEPTH {
-                    return -(ELOOP as i64);
+                    return Err(-(ELOOP as i64));
                 }
                 depth += 1;
                 let mut next = vec![to_cstring(&interp)];
@@ -266,16 +280,11 @@ fn exec(dirfd: i32, path: u64, argv: u64, envp: u64, flags: u64) -> i64 {
                 next.push(to_cstring(&interp_of));
                 next.extend(argv.drain(1..));
                 argv = next;
-                target = match vfs::resolve(LINUX_AT_FDCWD, &interp, true) {
-                    Ok(r) => r,
-                    Err(e) => return -(e as i64),
-                };
+                target = vfs::resolve(LINUX_AT_FDCWD, &interp, true).map_err(|e| -(e as i64))?;
                 interp_of = interp;
             }
-            Err(e) => return e,
         }
     }
-    relaunch(&target.guest, &argv, &envp, &filename)
 }
 
 fn to_cstring(b: &[u8]) -> CString {

@@ -23,9 +23,8 @@ in `/vendor/lib64/egl`, for the first set property of `persist.graphics.egl`,
 `ro.hardware.egl` and `ro.board.platform`, and loads it into the `sphal`
 namespace. One library serves EGL, GLES 1 and GLES 2/3.
 
-- `ro.hardware.egl` comes from the device's init script, as on the
-  emulator this image was built for: `init.ranchu.rc` sets it from
-  `androidboot.hardwareegl`, which darwin-guest-init passes as `darwin`.
+- `ro.hardware.egl` comes from the device's init script:
+  `/vendor/etc/init/hw/init.darwin.rc` sets it to `darwin`.
 - The driver needs only LL-NDK libraries: libc, libdl and
   `libnativewindow.so` (for `ANativeWindow_dequeueBuffer` and friends).
 - `linux-run --gpu DIR` names the directory of the host's ANGLE

@@ -209,6 +209,11 @@ fn a_fatal_signal_ends_the_host_process_with_it() {
 }
 
 #[test]
+fn seccomp_filters_are_accepted() {
+    check("seccomp_filter");
+}
+
+#[test]
 fn credentials_follow_linux_rules_across_fork_and_exec() {
     check("identity");
 }
@@ -283,6 +288,24 @@ fn mksh_runs_a_pipeline() {
         |_| {},
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "got x\ndone\n");
+}
+
+/// A `#!` script as linux-run's program runs its interpreter, as init's
+/// execv of a script (otapreopt_slot) does on Linux.
+#[test]
+fn a_script_runs_as_the_program() {
+    let Some(root) = root() else { return };
+    let script = root.join("data/local/tmp/program.sh");
+    std::fs::write(&script, "#!/system/bin/sh -e\necho \"$0|$1\"\n").unwrap();
+    let exec = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+    std::fs::set_permissions(&script, exec).unwrap();
+    let out = linux_run(root, &["/data/local/tmp/program.sh", "arg"], |_| {});
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "/data/local/tmp/program.sh|arg\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// fork+exit+wait and fork+exec+exit+wait latency (printed, not asserted).

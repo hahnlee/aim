@@ -68,7 +68,7 @@ fn derived_image() -> Result<PathBuf, String> {
 }
 
 /// Init's property areas and service. `ro.hardware.egl` is what
-/// init.ranchu.rc sets from `androidboot.hardwareegl` in early-init.
+/// init.darwin.rc sets in early-init.
 fn start_properties(image: &Path, layout: &Layout) -> Receiver<(String, String)> {
     let (changes, changed) = channel();
     let (up, is_up) = channel();
@@ -86,10 +86,7 @@ fn start_properties(image: &Path, layout: &Layout) -> Receiver<(String, String)>
         let mut props = mapped_properties(&props_dir, info).expect("property areas");
         let options = PropertyInitOptions {
             kernel: KernelBootProperties {
-                bootconfig: vec![
-                    ("androidboot.hardware".into(), "ranchu".into()),
-                    ("androidboot.hardwareegl".into(), "darwin".into()),
-                ],
+                bootconfig: vec![("androidboot.hardware".into(), "darwin".into())],
                 ..Default::default()
             },
             vendor_api_level,

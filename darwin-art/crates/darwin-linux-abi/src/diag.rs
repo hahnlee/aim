@@ -40,7 +40,27 @@ pub fn describe(pc: u64) -> String {
         .rev()
         .find(|m| (m.start..m.end).contains(&pc))
         .map(|m| format!("{}+{:#x}", m.name, pc - m.start))
+        .or_else(|| host_symbol(pc))
         .unwrap_or_else(|| "?".into())
+}
+
+/// A host pc (the layer or a system library) as `symbol+offset (image)`.
+fn host_symbol(pc: u64) -> Option<String> {
+    let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+    // SAFETY: dladdr fills `info` with pointers into loaded images.
+    if unsafe { libc::dladdr(pc as *const libc::c_void, &mut info) } == 0 {
+        return None;
+    }
+    let text = |p: *const libc::c_char| {
+        // SAFETY: NUL-terminated strings owned by dyld.
+        (!p.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy())
+    };
+    let image = text(info.dli_fname)?;
+    let image = image.rsplit('/').next().unwrap_or(&image).to_string();
+    Some(match text(info.dli_sname) {
+        Some(symbol) => format!("{symbol}+{:#x} ({image})", pc - info.dli_saddr as u64),
+        None => format!("{image}+{:#x}", pc - info.dli_fbase as u64),
+    })
 }
 
 #[repr(C)]
