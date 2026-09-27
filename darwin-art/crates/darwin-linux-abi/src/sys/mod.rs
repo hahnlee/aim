@@ -3,6 +3,7 @@
 //! The syscall number is in x8, arguments in x0-x5; the result (or -errno,
 //! with Linux errno values) goes back in x0. Each subsystem owns its calls.
 
+mod ashmem;
 mod attrs;
 mod binder;
 mod copies;
@@ -18,6 +19,7 @@ mod fs;
 mod fsops;
 mod futex;
 mod inotify;
+mod knob;
 mod mem;
 mod memfd;
 mod misc;
@@ -27,6 +29,7 @@ mod park;
 mod poll;
 mod process;
 mod procfs;
+mod ptimer;
 mod pstate;
 mod selinuxfs;
 mod sigframe;
@@ -225,6 +228,11 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         85 => event::timerfd_create(a),
         86 => event::timerfd_settime(a),
         87 => event::timerfd_gettime(a),
+        107 => ptimer::timer_create(a),
+        108 => ptimer::timer_gettime(a),
+        109 => ptimer::timer_getoverrun(a),
+        110 => ptimer::timer_settime(a),
+        111 => ptimer::timer_delete(a),
         // sockets
         198 => net::socket(a),
         199 => net::socketpair(a),

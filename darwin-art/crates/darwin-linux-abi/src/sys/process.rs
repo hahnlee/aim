@@ -47,13 +47,32 @@ const SCHED_IDLE: i32 = 5;
 const SCHED_RESET_ON_FORK: i32 = 0x4000_0000;
 
 /// The thread a scheduling call names: 0 is the caller, a pid means the
-/// main thread (Linux applies these per thread).
-fn sched_target(pid: i64) -> Result<std::sync::Arc<Thread>, i64> {
+/// main thread (Linux applies these per thread). None: a thread of another
+/// live process, whose attributes are accepted and not kept (Darwin
+/// schedules the host threads anyway).
+fn sched_target(pid: i64) -> Result<Option<std::sync::Arc<Thread>>, i64> {
+    // The kernel takes a pid_t.
+    let pid = pid as i32;
     if pid < 0 {
         return Err(-(EINVAL as i64));
     }
-    let tid = if pid == 0 { thread::gettid() } else { pid };
-    thread::find(tid as i32).ok_or(-(ESRCH as i64))
+    let tid = if pid == 0 {
+        thread::gettid() as i32
+    } else {
+        pid
+    };
+    if let Some(t) = thread::find(tid) {
+        return Ok(Some(t));
+    }
+    let owner = thread::owner(tid);
+    // SAFETY: probing for the process without signalling it.
+    let alive = owner as i64 != getpid()
+        && (unsafe { libc::kill(owner, 0) } == 0 || errno::last() == libc::EPERM);
+    if alive {
+        Ok(None)
+    } else {
+        Err(-(ESRCH as i64))
+    }
 }
 
 fn priority_range(policy: i32) -> Option<(i32, i32)> {
@@ -72,19 +91,20 @@ pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let s = &th.sched;
+    let s = th.as_ref().map(|t| &t.sched);
+    let get = |v: fn(&thread::Sched) -> i32| s.map_or(0, v);
     match nr {
-        120 => s.policy.load(SeqCst) as i64,
+        120 => get(|s| s.policy.load(SeqCst)) as i64,
         121 => {
             // SAFETY: guest struct sched_param { int sched_priority; }.
-            unsafe { (a[1] as *mut i32).write_unaligned(s.priority.load(SeqCst)) };
+            unsafe { (a[1] as *mut i32).write_unaligned(get(|s| s.priority.load(SeqCst))) };
             0
         }
         _ => {
             let policy = if nr == 119 {
                 a[1] as i32 & !SCHED_RESET_ON_FORK
             } else {
-                s.policy.load(SeqCst)
+                get(|s| s.policy.load(SeqCst))
             };
             let param = if nr == 119 { a[2] } else { a[1] };
             if param == 0 {
@@ -94,8 +114,10 @@ pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
             let prio = unsafe { (param as *const i32).read_unaligned() };
             match priority_range(policy) {
                 Some((lo, hi)) if (lo..=hi).contains(&prio) => {
-                    s.policy.store(policy, SeqCst);
-                    s.priority.store(prio, SeqCst);
+                    if let Some(s) = s {
+                        s.policy.store(policy, SeqCst);
+                        s.priority.store(prio, SeqCst);
+                    }
                     0
                 }
                 _ => -(EINVAL as i64),

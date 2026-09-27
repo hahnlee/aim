@@ -82,6 +82,9 @@ fn fd_link(fd: i32) -> Option<String> {
     if let Some(n) = super::memfd::link_name(st.st_dev as u32 as u64, st.st_ino) {
         return Some(n);
     }
+    if let Some(n) = super::ashmem::link_name(&st) {
+        return Some(n);
+    }
     match st.st_mode & libc::S_IFMT {
         libc::S_IFSOCK => return Some(format!("socket:[{}]", st.st_ino)),
         libc::S_IFIFO => return Some(format!("pipe:[{}]", st.st_ino)),
@@ -633,36 +636,15 @@ fn pids() -> Vec<i32> {
     }
 }
 
+/// The tids of process `p`: the guest threads for this process; other
+/// processes' threads are not listed.
 fn tids(p: i32) -> Vec<i32> {
-    if p != pid() {
-        return vec![p];
-    }
-    unsafe extern "C" {
-        fn task_threads(t: libc::mach_port_t, l: *mut *mut u32, c: *mut u32) -> i32;
-        fn thread_info(t: u32, flavor: i32, info: *mut u64, count: *mut u32) -> i32;
-        fn mach_port_deallocate(t: libc::mach_port_t, n: u32) -> i32;
-    }
-    let mut out = vec![p];
-    let mut list: *mut u32 = std::ptr::null_mut();
-    let mut n = 0u32;
-    // SAFETY: task_threads returns send rights in a vm_allocated array.
-    unsafe {
-        if task_threads(mach_task_self_, &mut list, &mut n) != 0 {
-            return out;
-        }
-        for i in 0..n as usize {
-            let t = *list.add(i);
-            // THREAD_IDENTIFIER_INFO (4): thread_id, handle, dispatch_qaddr.
-            let mut info = [0u64; 3];
-            let mut cnt = 6u32;
-            if i > 0 && thread_info(t, 4, info.as_mut_ptr(), &mut cnt) == 0 {
-                out.push((info[0] & 0x3fff_ffff) as i32);
-            }
-            mach_port_deallocate(mach_task_self_, t);
-        }
-        mach_vm_deallocate(mach_task_self_, list as u64, n as u64 * 4);
-    }
-    out
+    let t = if p == pid() {
+        super::thread::tids()
+    } else {
+        Vec::new()
+    };
+    if t.is_empty() { vec![p] } else { t }
 }
 
 fn entries(names: &[(&str, u8)]) -> Vec<Entry> {
@@ -746,19 +728,32 @@ fn mountinfo() -> String {
         .collect()
 }
 
-/// Nodes under `/proc/<p>/` (`rest` is the path after it).
-fn pid_node(p: i32, rest: &str, thread: bool) -> Option<Node> {
+/// The `comm` of this process's thread `tid`, once it has been named.
+fn thread_comm(tid: i32) -> Option<String> {
+    let n = super::thread::name_of(tid)?;
+    let len = n.iter().position(|&b| b == 0).unwrap_or(16);
+    (len > 0).then(|| String::from_utf8_lossy(&n[..len]).into_owned())
+}
+
+/// Nodes under `/proc/<p>/` (`rest` is the path after it); `thread` is the
+/// tid for `/proc/<p>/task/<tid>/` (and `/proc/<tid>/`).
+fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
     let me = p == pid();
     if !me && task_info(p).is_none() {
         return None;
     }
     Some(match rest {
         "" => {
-            let e = PID_ENTRIES.iter().filter(|(n, _)| !thread || *n != "task");
+            let e = PID_ENTRIES
+                .iter()
+                .filter(|(n, _)| thread.is_none() || *n != "task");
             Node::Dir(e.map(|(n, t)| Entry::new(1, *t, n.as_bytes())).collect())
         }
         "cmdline" => Node::File(cmdline(p)),
-        "comm" => Node::File(format!("{}\n", comm(p)).into_bytes()),
+        "comm" => {
+            let named = me.then(|| thread_comm(thread.unwrap_or(p))).flatten();
+            Node::File(format!("{}\n", named.unwrap_or_else(|| comm(p))).into_bytes())
+        }
         "environ" if me => Node::File(
             STACK
                 .get()
@@ -786,7 +781,7 @@ fn pid_node(p: i32, rest: &str, thread: bool) -> Option<Node> {
                 .map(|fd| Entry::new(fd as u64 + 1, dir::DT_LNK, fd.to_string()))
                 .collect(),
         ),
-        "task" if !thread => Node::Dir(
+        "task" if thread.is_none() => Node::Dir(
             tids(p)
                 .into_iter()
                 .map(|t| Entry::new(t as u64, dir::DT_DIR, t.to_string()))
@@ -797,13 +792,13 @@ fn pid_node(p: i32, rest: &str, thread: bool) -> Option<Node> {
                 let fd: i32 = n.parse().ok()?;
                 return fd_link(fd).map(Node::Link);
             }
-            let t = rest.strip_prefix("task/").filter(|_| !thread)?;
+            let t = rest.strip_prefix("task/").filter(|_| thread.is_none())?;
             let (tid, sub) = t.split_once('/').unwrap_or((t, ""));
             let tid: i32 = tid.parse().ok()?;
             if !tids(p).contains(&tid) {
                 return None;
             }
-            return pid_node(p, sub, true);
+            return pid_node(p, sub, Some(tid));
         }
     })
 }
@@ -841,8 +836,10 @@ pub fn node(guest: &str) -> Option<Node> {
             "thread-self" if tail.is_empty() => {
                 Node::Link(format!("{me}/task/{}", super::process::gettid()))
             }
-            "self" => return pid_node(me, tail, false),
-            "thread-self" => return pid_node(me, tail, true),
+            "self" => return pid_node(me, tail, None),
+            "thread-self" => {
+                return pid_node(me, tail, Some(super::process::gettid() as i32));
+            }
             "cpuinfo" => Node::File(cpuinfo().into_bytes()),
             "meminfo" => Node::File(meminfo().into_bytes()),
             "stat" => Node::File(proc_stat().into_bytes()),
@@ -855,12 +852,46 @@ pub fn node(guest: &str) -> Option<Node> {
                 Node::File(b"nodev\tsysfs\nnodev\tproc\nnodev\ttmpfs\n\text4\n".to_vec())
             }
             "sys" => return sys_node(tail),
-            p => return pid_node(p.parse().ok()?, tail, false),
+            n => {
+                // `/proc/<tid>` of a thread other than a main thread: the
+                // thread's view of its process, as on Linux.
+                let n: i32 = n.parse().ok()?;
+                let p = super::thread::owner(n);
+                if p == n {
+                    return pid_node(p, tail, None);
+                }
+                if p == me && !tids(p).contains(&n) {
+                    return None;
+                }
+                return pid_node(p, tail, Some(n));
+            }
         });
     }
     let rest = guest.strip_prefix("/sys")?.trim_start_matches('/');
+    if let Some(t) = rest.strip_prefix("fs/selinux")
+        && (t.is_empty() || t.starts_with('/'))
+    {
+        return super::selinuxfs::node(t);
+    }
     Some(match rest {
-        "" => Node::Dir(entries(&[("devices", dir::DT_DIR)])),
+        "" => Node::Dir(entries(&[
+            ("devices", dir::DT_DIR),
+            ("fs", dir::DT_DIR),
+            ("kernel", dir::DT_DIR),
+        ])),
+        "fs" => Node::Dir(entries(&[("selinux", dir::DT_DIR)])),
+        "kernel" => Node::Dir(entries(&[("debug", dir::DT_DIR), ("tracing", dir::DT_DIR)])),
+        "kernel/debug" => Node::Dir(entries(&[("tracing", dir::DT_DIR)])),
+        "kernel/tracing" | "kernel/debug/tracing" => Node::Dir(entries(&[
+            ("trace_marker", dir::DT_REG),
+            ("tracing_on", dir::DT_REG),
+        ])),
+        "kernel/tracing/tracing_on" | "kernel/debug/tracing/tracing_on" => {
+            Node::File(b"0\n".to_vec())
+        }
+        "kernel/tracing/trace_marker" | "kernel/debug/tracing/trace_marker" => {
+            Node::File(Vec::new())
+        }
         "devices" => Node::Dir(entries(&[("system", dir::DT_DIR)])),
         "devices/system" => Node::Dir(entries(&[("cpu", dir::DT_DIR)])),
         "devices/system/cpu" => {
@@ -935,7 +966,7 @@ fn recorded(guest: &str) -> Option<(PathBuf, libc::stat)> {
 }
 
 /// A file holding `data`, positioned at 0.
-fn content_fd(data: &[u8], cloexec: bool) -> i64 {
+pub(super) fn content_fd(data: &[u8], cloexec: bool) -> i64 {
     let mut tmpl = std::env::temp_dir()
         .join("linux-abi-proc.XXXXXX")
         .into_os_string()
@@ -1017,6 +1048,19 @@ fn canonical(guest: &str) -> String {
     guest.to_string()
 }
 
+/// The thread of this process whose `comm` a canonical path names.
+fn comm_tid(canon: &str) -> Option<i32> {
+    let rest = canon.strip_prefix("/proc/")?.strip_suffix("/comm")?;
+    let (p, tid) = match rest.split_once("/task/") {
+        Some((p, t)) => (p.parse().ok()?, t.parse().ok()?),
+        None => {
+            let t: i32 = rest.parse().ok()?;
+            (super::thread::owner(t), t)
+        }
+    };
+    (p == pid() && super::thread::find(tid).is_some()).then_some(tid)
+}
+
 const O_ACCMODE: u64 = 3;
 const O_CREAT: u64 = 0o100;
 const O_CLOEXEC: u64 = 0o2000000;
@@ -1038,6 +1082,32 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         ));
     }
     let canon = canonical(guest);
+    if canon.ends_with("/tracing/trace_marker") && node(&canon).is_some() {
+        // Trace events are not collected: writes are discarded.
+        // SAFETY: opening the host's null device.
+        return Some(errno::check(
+            unsafe { libc::open(c"/dev/null".as_ptr(), host_flags) } as i64,
+        ));
+    }
+    if let Some(tid) = comm_tid(&canon) {
+        let name = thread_comm(tid).unwrap_or_else(|| comm(pid()));
+        return Some(super::knob::open(
+            format!("{name}\n").as_bytes(),
+            cloexec,
+            move |b| {
+                // Linux takes up to 15 bytes as they are, newline included.
+                let mut n = [0u8; 16];
+                let len = b
+                    .iter()
+                    .take(15)
+                    .position(|&c| c == 0)
+                    .unwrap_or(b.len().min(15));
+                n[..len].copy_from_slice(&b[..len]);
+                super::thread::set_name_of(tid, n);
+                None
+            },
+        ));
+    }
     // /proc/<pid>/fd/N reopens the file behind fd N.
     if let Some(n) = canon
         .strip_prefix(&format!("/proc/{}/fd/", pid()))

@@ -27,12 +27,12 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed, Ordering::SeqCst};
 
-use super::park;
 use super::sigframe::{
     self, AltStack, Cpu, DarwinMcontext, Entry, KSigaction, MINSIGSTKSZ, SIG_DFL, SIG_IGN,
     SS_AUTODISARM, SS_DISABLE, SS_ONSTACK, Siginfo,
 };
 use super::thread::{self, Thread};
+use super::{park, ptimer};
 use crate::context::{self, GuestContext};
 use crate::errno::{EAGAIN, EINTR, EINVAL, ENOMEM, EPERM, ESRCH};
 
@@ -184,15 +184,23 @@ impl Pending {
 
     fn take(&mut self, sig: i32) -> Option<Siginfo> {
         let i = self.queue.iter().position(|q| q.signo == sig)?;
-        let info = self.queue.remove(i);
+        let mut info = self.queue.remove(i);
         if !self.queue.iter().any(|q| q.signo == sig) {
             self.set &= !bit(sig);
+        }
+        if info.code == ptimer::SI_TIMER {
+            ptimer::dequeued(&mut info);
         }
         Some(info)
     }
 
     fn flush(&mut self, sig: i32) {
-        self.queue.retain(|q| q.signo != sig);
+        self.queue.retain_mut(|q| {
+            if q.signo == sig && q.code == ptimer::SI_TIMER {
+                ptimer::dequeued(q);
+            }
+            q.signo != sig
+        });
         self.set &= !bit(sig);
     }
 }
@@ -337,6 +345,35 @@ fn send_process(info: Siginfo) -> i64 {
             0
         }
     }
+}
+
+/// Queue a POSIX timer's signal for the process, or for this process's
+/// thread `tid`. False when it was not queued (a standard signal already
+/// pending, a full queue, the thread gone): the timer counts an overrun
+/// instead of waiting for it.
+pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
+    let sig = info.signo;
+    let Some(tid) = tid else {
+        let queued = process().push(info) == Ok(true);
+        if queued {
+            route(sig);
+        }
+        return queued;
+    };
+    let Some(th) = thread::find(tid) else {
+        return false;
+    };
+    if lock(&th.sig.pending).push(info) != Ok(true) {
+        return false;
+    }
+    if th.sig.eligible(sig) {
+        thread::with_table(|t| {
+            if t.contains_key(&th.tid) {
+                poke_locked(&th)
+            }
+        });
+    }
+    true
 }
 
 /// Poke a thread that can take process-directed `sig`: the main thread
@@ -1083,6 +1120,12 @@ pub fn tgkill(nr: u64, a: [u64; 6]) -> i64 {
     } else {
         (None, a[0] as i32 as i64, a[1] as i32)
     };
+    // Another process's thread (its tid names the process, see `thread`):
+    // Darwin signals whole processes, so the signal goes to the process.
+    let owner = thread::owner(tid as i32) as i64;
+    if tid > 0 && owner != my_pid() && tgid.is_none_or(|g| g == owner) {
+        return kill([owner as u64, sig as u64, 0, 0, 0, 0]);
+    }
     match target(tgid, tid, sig) {
         Err(e) => e,
         Ok(_) if sig == 0 => 0,

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
-use super::{epoll, event, inotify, memfd, net};
+use super::{epoll, event, inotify, knob, memfd, net};
 
 /// Guest fds below this have a byte in [`SLOW`]; the lean path sends larger
 /// fds to Rust.
@@ -37,6 +37,8 @@ pub enum Kind {
     /// A directory stream: host entries read once, or a synthesized
     /// `/proc`/`/sys` directory.
     Dir(Arc<Mutex<super::dir::DirStream>>),
+    /// A kernel file whose writes act (`knob`).
+    Knob(Arc<knob::Knob>),
 }
 
 static TABLE: LazyLock<RwLock<HashMap<i32, Kind>>> = LazyLock::new(Default::default);
@@ -120,7 +122,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
             Kind::Timer(_) => "anon_inode:[timerfd]",
             Kind::Epoll(_) => "anon_inode:[eventpoll]",
             Kind::Inotify(_) => "anon_inode:inotify",
-            Kind::Sock(_) | Kind::Dir(_) | Kind::Memfd(_) => return None,
+            Kind::Sock(_) | Kind::Dir(_) | Kind::Memfd(_) | Kind::Knob(_) => return None,
         }
         .to_string(),
     )

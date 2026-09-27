@@ -108,6 +108,9 @@ pub fn openat(a: [u64; 6]) -> i64 {
     if let Some(fd) = super::binder::open(&r.guest, flags) {
         return fd;
     }
+    if let Some(fd) = super::ashmem::open(&r.guest, flags) {
+        return fd;
+    }
     if let Some(fd) = super::selinuxfs::open(&r.guest, flags) {
         return fd;
     }
@@ -164,6 +167,7 @@ fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         Kind::Sock(_) => net::read(fd, iov),
         Kind::Dir(_) => Some(-EISDIR),
         Kind::Epoll(_) => Some(-(EINVAL as i64)),
+        Kind::Knob(_) => None,
         Kind::Memfd(_) => {
             let mut total = 0i64;
             for v in iov {
@@ -190,6 +194,7 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         Kind::Sock(_) => net::write(fd, iov),
         Kind::Dir(_) => Some(-(EBADF as i64)),
         Kind::Epoll(_) | Kind::Inotify(_) => Some(-(EINVAL as i64)),
+        Kind::Knob(k) => Some(super::knob::write(fd, &k, iov)),
         Kind::Memfd(_) => {
             if memfd::write_sealed(fd) {
                 return Some(-EPERM);
@@ -217,6 +222,11 @@ fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i
             memfd::rw(fd, buf, len, Some(pos), write)
         }
         Kind::Dir(_) if !write => Some(-EISDIR),
+        Kind::Knob(k) if write => Some(super::knob::write(fd, &k, &one(buf, len))),
+        // SAFETY: guest buffer.
+        Kind::Knob(_) => Some(errno::check(
+            unsafe { libc::pread(fd, buf as *mut _, len, pos) } as i64,
+        )),
         _ => Some(-ESPIPE),
     }
 }
@@ -425,6 +435,9 @@ fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
     // SAFETY: stat buffer on our stack.
     if unsafe { libc::fstat(fd, &mut st) } < 0 {
         return Err(-(errno::last() as i64));
+    }
+    if super::ashmem::as_device(&mut st) {
+        return Ok(st);
     }
     match st.st_mode & libc::S_IFMT {
         libc::S_IFREG | libc::S_IFDIR | libc::S_IFLNK => {
@@ -1002,6 +1015,9 @@ const FIOCLEX: u64 = 0x5451;
 pub fn ioctl(a: [u64; 6]) -> i64 {
     let (fd, req, arg) = (a[0] as i32, a[1], a[2]);
     if let Some(r) = super::binder::ioctl(fd, req, arg) {
+        return r;
+    }
+    if let Some(r) = super::ashmem::ioctl(fd, req, arg) {
         return r;
     }
     // SAFETY: isatty/ioctl on a guest fd with guest argument buffers.

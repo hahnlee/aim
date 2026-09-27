@@ -89,6 +89,9 @@ pub struct GuestExecutor {
     /// The running exec service's pid.
     pub exec_pid: Option<u32>,
     pub helper_timeout: Duration,
+    /// The boot's deadline (`--timeout`): a wait for a helper ends there
+    /// too, as it does when a stop is requested.
+    pub stop_at: Option<Instant>,
 }
 
 impl GuestExecutor {
@@ -116,6 +119,7 @@ impl GuestExecutor {
             deferred_exits: Vec::new(),
             exec_pid: None,
             helper_timeout: Duration::from_secs(60),
+            stop_at: None,
         }
     }
 
@@ -532,9 +536,15 @@ impl GuestExecutor {
                 }
                 self.deferred_exits.push((exited, exit));
             }
-            if Instant::now() > deadline {
+            let stopping =
+                crate::boot::stop_requested() || self.stop_at.is_some_and(|d| Instant::now() >= d);
+            if stopping || Instant::now() > deadline {
                 self.launcher.kill_group(pid, libc::SIGKILL);
-                return Err("linkerconfig did not finish in time".to_string());
+                return Err(if stopping {
+                    "linkerconfig stopped: the boot is ending".to_string()
+                } else {
+                    "linkerconfig did not finish in time".to_string()
+                });
             }
             std::thread::sleep(Duration::from_millis(10));
         }

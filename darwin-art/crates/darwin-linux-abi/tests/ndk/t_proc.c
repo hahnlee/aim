@@ -1,11 +1,17 @@
 // /proc and /sys as bionic, ART and system_server read them.
 #include <dirent.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include <sched.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -190,6 +196,115 @@ static void mount_table(void) {
   CHECK(strstr(big, " / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n") != NULL);
 }
 
+// A second thread for the per-thread files: it names itself, reports its
+// tid and waits until told to finish.
+static pid_t worker_tid;
+static volatile int worker_hits;
+static int worker_go[2];
+
+static void on_usr1(int sig) {
+  (void)sig;
+  if (gettid() == worker_tid) worker_hits++;
+}
+
+static void* worker(void* arg) {
+  (void)arg;
+  worker_tid = gettid();
+  char c;
+  read(worker_go[0], &c, 1);
+  return NULL;
+}
+
+// Thread ids are 2^29 + (pid << 12) + n: /proc, the scheduler calls and
+// tgkill accept them, and a thread's comm follows pthread_setname_np.
+static void threads_and_names(void) {
+  CHECK(pipe(worker_go) == 0);
+  signal(SIGUSR1, on_usr1);
+  pthread_t t;
+  CHECK(pthread_create(&t, NULL, worker, NULL) == 0);
+  while (!__atomic_load_n(&worker_tid, __ATOMIC_SEQ_CST)) usleep(1000);
+  CHECK(worker_tid > (1 << 29));
+  char path[96], name[32];
+  snprintf(path, sizeof path, "/proc/self/task/%d", worker_tid);
+  struct stat st;
+  CHECK(stat(path, &st) == 0 && S_ISDIR(st.st_mode));
+  snprintf(path, sizeof path, "/proc/%d/status", worker_tid);
+  CHECK(slurp(path, big, sizeof big) > 0);
+  int listed = 0;
+  DIR* d = opendir("/proc/self/task");
+  CHECK(d != NULL);
+  struct dirent* e;
+  while ((e = readdir(d)) != NULL) {
+    if (atoi(e->d_name) == worker_tid) listed = 1;
+  }
+  closedir(d);
+  CHECK(listed);
+  // Another thread's name goes through /proc/self/task/<tid>/comm.
+  CHECK(pthread_setname_np(t, "worker-x") == 0);
+  snprintf(path, sizeof path, "/proc/self/task/%d/comm", worker_tid);
+  CHECK(slurp(path, big, sizeof big) > 0 && !strcmp(big, "worker-x\n"));
+  CHECK(pthread_getname_np(t, name, sizeof name) == 0 && !strcmp(name, "worker-x"));
+  // The calling thread's own name (prctl) is the process's comm here.
+  CHECK(prctl(PR_SET_NAME, "main-y") == 0);
+  CHECK(slurp("/proc/self/comm", big, sizeof big) > 0 && !strcmp(big, "main-y\n"));
+  snprintf(path, sizeof path, "/proc/self/task/%d/comm", getpid());
+  CHECK(slurp(path, big, sizeof big) > 0 && !strcmp(big, "main-y\n"));
+  struct sched_param sp = {.sched_priority = 0};
+  CHECK(sched_setscheduler(worker_tid, SCHED_BATCH, &sp) == 0);
+  CHECK(sched_getscheduler(worker_tid) == SCHED_BATCH);
+  CHECK(setpriority(PRIO_PROCESS, worker_tid, 5) == 0);
+  errno = 0;
+  CHECK(getpriority(PRIO_PROCESS, worker_tid) == 5 && errno == 0);
+  CHECK(syscall(SYS_tgkill, getpid(), worker_tid, SIGUSR1) == 0);
+  for (int i = 0; i < 1000 && !worker_hits; i++) usleep(1000);
+  CHECK(worker_hits == 1);
+  CHECK(write(worker_go[1], "x", 1) == 1);
+  CHECK(pthread_join(t, NULL) == 0);
+  CHECK(syscall(SYS_tgkill, getpid(), worker_tid, 0) == -1 && errno == ESRCH);
+  prctl(PR_SET_NAME, "t_proc");
+}
+
+// libselinux's view: every class of the image's policy is known and every
+// check is allowed, and ftrace's marker takes writes.
+static void selinuxfs_and_tracing(void) {
+  char buf[64];
+  CHECK(slurp("/sys/fs/selinux/class/service_manager/index", buf, sizeof buf) > 0 && atoi(buf) > 0);
+  CHECK(slurp("/sys/fs/selinux/class/service_manager/perms/find", buf, sizeof buf) > 0 &&
+        atoi(buf) == 2);
+  int perms = 0;
+  DIR* d = opendir("/sys/fs/selinux/class/file/perms");
+  CHECK(d != NULL);
+  struct dirent* e;
+  while ((e = readdir(d)) != NULL) perms += e->d_name[0] != '.';
+  closedir(d);
+  CHECK(perms > 20);
+  int fd = open("/sys/fs/selinux/access", O_RDWR | O_CLOEXEC);
+  CHECK(fd >= 0);
+  const char* q = "u:r:servicemanager:s0 u:object_r:service_manager:s0 2 2";
+  CHECK(write(fd, q, strlen(q)) == (ssize_t)strlen(q));
+  memset(buf, 0, sizeof buf);
+  CHECK(read(fd, buf, sizeof buf - 1) > 0);
+  unsigned allowed = 0, decided = 0;
+  CHECK(sscanf(buf, "%x %x", &allowed, &decided) == 2 && allowed == ~0u && decided == ~0u);
+  close(fd);
+  void* se = dlopen("libselinux.so", RTLD_NOW);
+  if (se) {
+    int (*check)(const char*, const char*, const char*, const char*, void*) =
+        dlsym(se, "selinux_check_access");
+    CHECK(check && check("u:r:servicemanager:s0", "u:object_r:service_manager:s0",
+                         "service_manager", "find", NULL) == 0);
+  } else {
+    printf("note: libselinux.so not loadable here: %s\n", dlerror());
+  }
+  fd = open("/sys/kernel/tracing/trace_marker", O_WRONLY | O_CLOEXEC);
+  CHECK(fd >= 0 && write(fd, "B|1|x", 5) == 5);
+  close(fd);
+  fd = open("/sys/kernel/debug/tracing/trace_marker", O_WRONLY | O_CLOEXEC);
+  CHECK(fd >= 0 && write(fd, "E|1", 3) == 3);
+  close(fd);
+  CHECK(slurp("/sys/kernel/tracing/tracing_on", buf, sizeof buf) > 0 && !strcmp(buf, "0\n"));
+}
+
 int main(int argc, char** argv) {
   args = argv;
   nargs = argc;
@@ -200,5 +315,7 @@ int main(int argc, char** argv) {
   RUN(system_files);
   RUN(proc_dirs);
   RUN(mount_table);
+  RUN(threads_and_names);
+  RUN(selinuxfs_and_tracing);
   DONE();
 }
