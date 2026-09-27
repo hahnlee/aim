@@ -17,6 +17,7 @@ pub mod context;
 pub mod diag;
 pub mod elf;
 pub mod errno;
+pub mod hostcall;
 pub mod hwcap;
 pub mod loader;
 pub mod patch;

@@ -1,0 +1,19 @@
+# Pinned inputs of tools/build-vendor-hals.sh (sourced by bash).
+#
+# Trees come from android.googlesource.com at AOSP_TAG, the tag of the pinned
+# image. Source trees are checked against a content hash: sha256 over the
+# `shasum -a 256` lines of every file, sorted by path. Frozen AIDL APIs are
+# checked against their own `.hash`, recomputed the way Soong freezes them.
+AOSP_TAG=android-16.0.0_r1
+
+# project|subtree|content sha256
+SOURCE_TREES=(
+  "platform/frameworks/native|libs/binder/rust|b7dbab7e663501608afbf44c1392e79307a6e1138d63bb73de02e2fafeda722c"
+  "platform/frameworks/native|libs/binder/ndk/include_ndk|a699a8ecc88410695a1d6408598b864c70f2d8772f0b7fdfeeda52a985a815ef"
+  "platform/frameworks/native|libs/binder/ndk/include_platform|2e54aeebc4060d2083f79401cffbda6ed6574aadaa6e345d9cefbbe8a34b4bdd"
+)
+
+# Stable AIDL interfaces: package|frozen version|project|aidl_api directory
+AIDL_INTERFACES=(
+  "android.hardware.health|4|platform/hardware/interfaces|health/aidl/aidl_api/android.hardware.health/4"
+)
