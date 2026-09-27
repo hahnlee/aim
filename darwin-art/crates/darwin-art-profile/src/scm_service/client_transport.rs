@@ -130,7 +130,10 @@ pub(crate) fn admit_authenticated(
     mut stream: UnixStream,
     admission: &Request,
 ) -> Result<client::AdmittedResponse, ProfileError> {
-    let Request::Admit { publish_ordinals, .. } = admission else {
+    let Request::Admit {
+        publish_ordinals, ..
+    } = admission
+    else {
         return Err(failed("client admission requires Admit operation"));
     };
     request(&mut stream, admission)?;

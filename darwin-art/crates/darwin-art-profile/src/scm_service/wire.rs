@@ -8,8 +8,8 @@
 #[path = "client_codec.rs"]
 pub(super) mod client;
 
-use crate::ProfileError;
 use super::credentials::Credentials;
+use crate::ProfileError;
 use darwin_art_scm_transfer::{
     TransferKey,
     capabilities::{ClaimedDelivery, DeliveryDisposition, RegisteredPair},
@@ -113,7 +113,7 @@ impl std::fmt::Display for WireError {
             Self::ZeroId => "identifier must be non-zero",
             Self::ZeroAuthority => "authority instance must be non-zero",
             Self::ZeroTicket => "transfer ticket must be non-zero",
-        Self::InvalidCount => "payload count must be in 0..=16",
+            Self::InvalidCount => "payload count must be in 0..=16",
             Self::TooManyItems => "item count exceeds the private wire bound",
             Self::DuplicateOrdinal => "duplicate managed or published ordinal",
             Self::DuplicateId => "duplicate delegation, holder, or published ID",
@@ -459,8 +459,8 @@ pub(crate) fn encode_prepared(
     managed: &[(u64, u128)],
 ) -> Result<Vec<u8>, ProfileError> {
     ensure_key(key).map_err(invalid)?;
-    let payload_count = u16::try_from(payload_count)
-        .map_err(|_| invalid(WireError::InvalidCount))?;
+    let payload_count =
+        u16::try_from(payload_count).map_err(|_| invalid(WireError::InvalidCount))?;
     ensure_managed(payload_count as usize, managed, true).map_err(invalid)?;
     let mut body = body_with_capacity(16 + 8 + 2 + 2 + managed.len() * 24)?;
     push_u128(&mut body, key.authority.instance);
@@ -551,12 +551,19 @@ pub(crate) fn encode_admitted_authenticated(
     let mut body = body_with_capacity(2 + claims.len() * 49 + 12)?;
     push_u16(&mut body, claims.len() as u16);
     for (index, &(ordinal, claim)) in claims.iter().enumerate() {
-        if ordinal >= MAX_ITEMS as u64 || claims[..index].iter().any(|(previous, _)| *previous == ordinal) {
+        if ordinal >= MAX_ITEMS as u64
+            || claims[..index]
+                .iter()
+                .any(|(previous, _)| *previous == ordinal)
+        {
             return Err(invalid(WireError::InvalidPublishedOrdinal));
         }
         let holder = claim.grant.id();
         ensure_id(holder).map_err(invalid)?;
-        if claims[..index].iter().any(|(_, previous)| previous.grant.id() == holder) {
+        if claims[..index]
+            .iter()
+            .any(|(_, previous)| previous.grant.id() == holder)
+        {
             return Err(invalid(WireError::DuplicateId));
         }
         push_u64(&mut body, ordinal);

@@ -200,7 +200,9 @@ unsafe extern "C" fn prepare(
         let payloads = if request.payload_count == 0 {
             &[][..]
         } else {
-            unsafe { std::slice::from_raw_parts(request.payload_fds, request.payload_count as usize) }
+            unsafe {
+                std::slice::from_raw_parts(request.payload_fds, request.payload_count as usize)
+            }
         };
         let managed_raw = if request.managed_count == 0 {
             &[][..]
@@ -490,7 +492,10 @@ mod tests {
             reserved: 0,
         };
         let server = fixture.server();
-        assert_eq!(unsafe { (hooks.prepare.unwrap())(hooks.context, &request, &mut prepared) }, 0);
+        assert_eq!(
+            unsafe { (hooks.prepare.unwrap())(hooks.context, &request, &mut prepared) },
+            0
+        );
         server.join().unwrap().unwrap();
         assert_eq!(prepared.payload_count, 0);
         assert!(prepared.metadata_fd >= 0 && prepared.guardian_fd >= 0);
@@ -621,9 +626,18 @@ mod tests {
         assert_eq!(admission.claim_count, 2);
         assert_eq!(admission.claims[0].ordinal, 0);
         assert_eq!(admission.claims[1].ordinal, 1);
-        assert_eq!(admission.claims[0].grant.carrier, admission.claims[1].grant.carrier);
-        assert_eq!(admission.claims[0].grant.side, admission.claims[1].grant.side);
-        assert_ne!(admission.claims[0].grant.holder, admission.claims[1].grant.holder);
+        assert_eq!(
+            admission.claims[0].grant.carrier,
+            admission.claims[1].grant.carrier
+        );
+        assert_eq!(
+            admission.claims[0].grant.side,
+            admission.claims[1].grant.side
+        );
+        assert_ne!(
+            admission.claims[0].grant.holder,
+            admission.claims[1].grant.holder
+        );
         let server = fixture.server();
         assert_eq!(
             unsafe {

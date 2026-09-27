@@ -205,8 +205,7 @@ impl CapabilityRegistry {
             self.sealed = true;
             return Err(CapabilityError::QuotaExceeded);
         }
-        if self.dead_processes.try_reserve(1).is_err() || self.dead_order.try_reserve(1).is_err()
-        {
+        if self.dead_processes.try_reserve(1).is_err() || self.dead_order.try_reserve(1).is_err() {
             self.sealed = true;
             return Err(CapabilityError::QuotaExceeded);
         }
@@ -216,7 +215,9 @@ impl CapabilityRegistry {
     }
 
     fn references_process(&self, process: ProcessEpoch) -> bool {
-        self.holders.values().any(|holder| holder.process() == process)
+        self.holders
+            .values()
+            .any(|holder| holder.process() == process)
             || self.delegations.values().any(|delegation| {
                 let record = delegation.record;
                 record.source == process

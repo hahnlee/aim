@@ -859,7 +859,10 @@ impl Facade {
         if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) } != 0 {
             return Err(ANDROID_EIO);
         }
-        let length = buffer.iter().position(|byte| *byte == 0).ok_or(ANDROID_EIO)?;
+        let length = buffer
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or(ANDROID_EIO)?;
         let path = PathBuf::from(std::ffi::OsString::from_vec(buffer[..length].to_vec()));
         let root = self.private_root.as_ref().ok_or(ANDROID_EIO)?.path();
         if !path.starts_with(root) {

@@ -1,14 +1,14 @@
 //! Narrow unsafe native Binder capability port. FD aliases belong to the caller;
 //! this port authenticates binding/grants through the genuine daemon protocol.
-use super::{release_id, status, Context};
+use super::{Context, release_id, status};
 use crate::{
+    ProfileError,
     binder_capability_wire::{self as wire, Request},
     protocol,
     scm_service::client_transport,
-    ProfileError,
 };
 use darwin_art_engine_sys::{ScmBinderBindingV2, ScmGrantV2};
-use darwin_art_scm_transfer::capabilities::{decode_attributes, AttributeKind};
+use darwin_art_scm_transfer::capabilities::{AttributeKind, decode_attributes};
 use std::{ffi::c_void, io::Write, os::unix::net::UnixStream, time::Duration};
 
 fn connect(context: &Context, request: &Request) -> Result<UnixStream, ProfileError> {

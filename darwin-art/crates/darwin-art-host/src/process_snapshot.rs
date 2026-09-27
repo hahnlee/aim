@@ -38,7 +38,9 @@ fn zone_from_localtime_link(link: &std::path::Path) -> Option<String> {
     let (_, zone) = link.rsplit_once("/zoneinfo/")?;
     let valid = !zone.is_empty()
         && !zone.starts_with('/')
-        && zone.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
+        && zone
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
         && zone
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'+'));
@@ -51,7 +53,13 @@ fn sysctl_string(name: &str) -> Option<String> {
     let mut length: libc::size_t = 0;
     // SAFETY: size query with a null buffer.
     if unsafe {
-        libc::sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut length, std::ptr::null_mut(), 0)
+        libc::sysctlbyname(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
     } != 0
         || length == 0
     {
@@ -80,12 +88,15 @@ fn sysctl_string(name: &str) -> Option<String> {
 
 /// ADR 0010 host facts: the Mac's model and SoC name.
 fn host_identity() -> Vec<(Vec<u8>, Vec<u8>)> {
-    [("ro.product.model", "hw.model"), ("ro.soc.model", "machdep.cpu.brand_string")]
-        .into_iter()
-        .filter_map(|(property, sysctl)| {
-            sysctl_string(sysctl).map(|value| (property.as_bytes().to_vec(), value.into_bytes()))
-        })
-        .collect()
+    [
+        ("ro.product.model", "hw.model"),
+        ("ro.soc.model", "machdep.cpu.brand_string"),
+    ]
+    .into_iter()
+    .filter_map(|(property, sysctl)| {
+        sysctl_string(sysctl).map(|value| (property.as_bytes().to_vec(), value.into_bytes()))
+    })
+    .collect()
 }
 
 pub(super) fn inputs() -> Result<ProcessSnapshotInputs, String> {
@@ -192,7 +203,9 @@ mod tests {
         assert_eq!(value(b"ro.product.manufacturer").as_deref(), Some("Apple"));
         assert_eq!(
             value(b"ro.build.fingerprint").as_deref(),
-            Some("Apple/aim_darwin_arm64/aim_darwin_arm64:16/BP22.250325.006/13344233:user/dev-keys")
+            Some(
+                "Apple/aim_darwin_arm64/aim_darwin_arm64:16/BP22.250325.006/13344233:user/dev-keys"
+            )
         );
         assert_eq!(value(b"ro.product.model"), sysctl_string("hw.model"));
         assert!(value(b"ro.product.model").is_some_and(|model| model.starts_with("Mac")));
@@ -215,8 +228,14 @@ mod tests {
             zone_from_localtime_link(Path::new("/usr/share/zoneinfo/Etc/GMT+9")),
             Some("Etc/GMT+9".into())
         );
-        assert_eq!(zone_from_localtime_link(Path::new("/etc/localtime.bak")), None);
-        assert_eq!(zone_from_localtime_link(Path::new("/x/zoneinfo/../etc")), None);
+        assert_eq!(
+            zone_from_localtime_link(Path::new("/etc/localtime.bak")),
+            None
+        );
+        assert_eq!(
+            zone_from_localtime_link(Path::new("/x/zoneinfo/../etc")),
+            None
+        );
         assert_eq!(zone_from_localtime_link(Path::new("/x/zoneinfo/")), None);
         let host = host_time_zone();
         let input = inputs().unwrap();

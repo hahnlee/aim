@@ -119,8 +119,11 @@ unsafe extern "C" {
     fn audit_token_to_pidversion(token: AuditToken) -> i32;
 }
 unsafe extern "C" {
-    fn getpeereid(socket: libc::c_int, effective_user: *mut u32, effective_group: *mut u32)
-        -> libc::c_int;
+    fn getpeereid(
+        socket: libc::c_int,
+        effective_user: *mut u32,
+        effective_group: *mut u32,
+    ) -> libc::c_int;
 }
 unsafe extern "C" {
     fn proc_pidinfo(

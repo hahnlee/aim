@@ -8,7 +8,9 @@ use darwin_art_binder_device::descriptor_manifest::{
 };
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 
-pub use darwin_art_engine_sys::{DescriptorTransferBinding, RetainedExportedDescriptor, ExportedDescriptor};
+pub use darwin_art_engine_sys::{
+    DescriptorTransferBinding, ExportedDescriptor, RetainedExportedDescriptor,
+};
 const _: () =
     assert!(MAX_ATTRIBUTES_BYTES == darwin_art_engine_sys::BINDER_DESCRIPTOR_ATTRIBUTES_BYTES);
 

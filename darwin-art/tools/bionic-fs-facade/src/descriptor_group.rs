@@ -32,13 +32,18 @@ fn stage_and_commit(
     for index in 0..count {
         let file = files[index].take().expect("complete owned input group");
         match table.insert_with_flags(Descriptor::File(file), flags[index]) {
-            Ok(fd) => { staged[index] = fd; installed += 1; }
+            Ok(fd) => {
+                staged[index] = fd;
+                installed += 1;
+            }
             Err(()) => break,
         }
     }
     if installed == count {
         error = commit(&staged[..count]);
-        if error == 0 { return Ok(staged); }
+        if error == 0 {
+            return Ok(staged);
+        }
     }
     // Restore allocator state and all descriptor sidecars without allocating.
     // Vec pushes replace slots popped from the same existing allocation.
@@ -47,7 +52,9 @@ fn stage_and_commit(
         table.entries.remove(&fd);
         table.fd_flags.remove(&fd);
         table.fd_origins.remove(&fd);
-        if index < reused { table.free.push(fd); }
+        if index < reused {
+            table.free.push(fd);
+        }
     }
     table.next = next_before;
     Err(if error > 0 { error } else { 5 })
@@ -71,7 +78,11 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_adopt_group(
     let mut files: [Option<File>; MAX_GROUP] = std::array::from_fn(|_| None);
     let mut raw = [-1; MAX_GROUP];
     let mut flags = [false; MAX_GROUP];
-    let mut error = if count != 0 && output.is_null() { 22 } else { 0 };
+    let mut error = if count != 0 && output.is_null() {
+        22
+    } else {
+        0
+    };
     for index in 0..count {
         // SAFETY: trusted caller's complete synchronous input array.
         let entry = unsafe { &*entries.add(index) };
@@ -82,12 +93,20 @@ pub unsafe extern "C" fn darwin_art_bionic_fs_adopt_group(
         raw[index] = entry.host_fd;
         // SAFETY: unique descriptor ownership transfers at this boundary.
         files[index] = Some(unsafe { File::from_raw_fd(entry.host_fd) });
-        if entry.descriptor_flags & !1 != 0 { error = 22; }
+        if entry.descriptor_flags & !1 != 0 {
+            error = 22;
+        }
         flags[index] = entry.descriptor_flags & 1 != 0;
     }
-    if error != 0 { return error; }
-    let Some(active) = acquire_active() else { return 9; };
-    let Ok(mut table) = active.facade.descriptors.lock() else { return 5; };
+    if error != 0 {
+        return error;
+    }
+    let Some(active) = acquire_active() else {
+        return 9;
+    };
+    let Ok(mut table) = active.facade.descriptors.lock() else {
+        return 5;
+    };
     let result = stage_and_commit(&mut table, &mut files, &flags, count, |fds| {
         match commit {
             // SAFETY: callback borrows only this operation's staged numbers.
@@ -114,7 +133,11 @@ mod tests {
 
     fn files(count: usize) -> [Option<File>; MAX_GROUP] {
         std::array::from_fn(|index| {
-            if index < count { Some(File::open("/dev/null").unwrap()) } else { None }
+            if index < count {
+                Some(File::open("/dev/null").unwrap())
+            } else {
+                None
+            }
         })
     }
 
@@ -132,34 +155,49 @@ mod tests {
             return;
         }
         let mut table = DescriptorTable::default();
-        let old = table.insert(Descriptor::File(File::open("/dev/null").unwrap())).unwrap();
+        let old = table
+            .insert(Descriptor::File(File::open("/dev/null").unwrap()))
+            .unwrap();
         drop(table.close_entry(old));
         let free = table.free.clone();
         let next = table.next;
         let mut input = files(3);
         let raw: Vec<_> = input.iter().flatten().map(AsRawFd::as_raw_fd).collect();
-        assert_eq!(stage_and_commit(&mut table, &mut input, &[true; MAX_GROUP], 3,
-            |staged| { assert_eq!(staged.len(), 3); 12 }), Err(12));
+        assert_eq!(
+            stage_and_commit(&mut table, &mut input, &[true; MAX_GROUP], 3, |staged| {
+                assert_eq!(staged.len(), 3);
+                12
+            }),
+            Err(12)
+        );
         assert!(table.entries.is_empty());
         assert!(table.fd_flags.is_empty());
         assert!(table.fd_origins.is_empty());
         assert_eq!(table.free, free);
         assert_eq!(table.next, next);
-        for fd in raw { assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1); }
+        for fd in raw {
+            assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        }
     }
 
     #[test]
     fn committed_group_preserves_guest_flags_and_private_host_cloexec() {
         let mut table = DescriptorTable::default();
         let mut input = files(2);
-        let mut flags = [false; MAX_GROUP]; flags[1] = true;
+        let mut flags = [false; MAX_GROUP];
+        flags[1] = true;
         let result = stage_and_commit(&mut table, &mut input, &flags, 2, |_| 0).unwrap();
         assert_eq!(table.fd_flags[&result[0]], 0);
         assert_eq!(table.fd_flags[&result[1]], 1);
         for fd in &result[..2] {
             assert_eq!(table.fd_origins[fd], None);
-            let Descriptor::File(file) = &table.entries[fd] else { panic!("file owner"); };
-            assert_ne!(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
+            let Descriptor::File(file) = &table.entries[fd] else {
+                panic!("file owner");
+            };
+            assert_ne!(
+                unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+                0
+            );
         }
     }
 }

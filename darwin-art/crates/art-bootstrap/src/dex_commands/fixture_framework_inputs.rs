@@ -84,7 +84,10 @@ pub(crate) fn wm_class_files(class_dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// Every class of the production runtime support output, in deterministic
 /// order.
-pub(crate) fn append_runtime_support_classes(class_dir: &Path, command: &mut Command) -> Result<()> {
+pub(crate) fn append_runtime_support_classes(
+    class_dir: &Path,
+    command: &mut Command,
+) -> Result<()> {
     let metadata = fs::symlink_metadata(class_dir)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(format!(

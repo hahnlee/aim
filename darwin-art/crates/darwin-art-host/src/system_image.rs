@@ -49,9 +49,16 @@ fn validate(root: &Path) -> io::Result<()> {
         // `product` carries the product partition's framework overlays,
         // `vendor` the device's feature declarations and `metadata` the
         // aconfig flag storage aconfigd publishes at boot.
-        if !["apex", "system", "linkerconfig", "product", "vendor", "metadata"]
-            .iter()
-            .any(|name| entry.file_name() == *name)
+        if ![
+            "apex",
+            "system",
+            "linkerconfig",
+            "product",
+            "vendor",
+            "metadata",
+        ]
+        .iter()
+        .any(|name| entry.file_name() == *name)
             || !entry.file_type()?.is_dir()
         {
             return Err(invalid("system image contains an unexpected root entry"));

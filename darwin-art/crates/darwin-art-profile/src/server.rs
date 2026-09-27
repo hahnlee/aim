@@ -90,7 +90,12 @@ pub fn run_daemon(config: DaemonConfig) -> Result<(), ProfileError> {
     // The previous daemon's published values (sys.boot_completed and the
     // like) end with it, as init's area does at reboot. The generation stays
     // so it keeps growing; the property service republishes when it opens.
-    match fs::remove_file(config.paths.profile_root.join("properties/dynamic_properties")) {
+    match fs::remove_file(
+        config
+            .paths
+            .profile_root
+            .join("properties/dynamic_properties"),
+    ) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),

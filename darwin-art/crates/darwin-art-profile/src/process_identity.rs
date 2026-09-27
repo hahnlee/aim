@@ -1,4 +1,4 @@
-use crate::{registry::validate_package, ProfileError};
+use crate::{ProfileError, registry::validate_package};
 
 /// Profile-daemon process registration plus the package-manager UID (user 0).
 /// This is not a substitute for verifying a transport's actual peer PID.

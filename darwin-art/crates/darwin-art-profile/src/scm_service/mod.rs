@@ -1,9 +1,9 @@
 //! Private Unix descriptor-transfer ownership, not Binder or Android policy.
 mod binder_capabilities;
-mod credentials;
 #[cfg(test)]
 mod binder_test_support;
 mod client_transport;
+mod credentials;
 mod native_endpoint;
 pub use native_endpoint::NativeScmEndpointProvider;
 mod metadata;

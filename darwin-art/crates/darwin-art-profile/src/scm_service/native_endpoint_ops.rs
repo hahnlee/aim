@@ -3,12 +3,12 @@
 //! This module owns bounded request validation and client transport only. It
 //! never installs guest descriptors or treats a returned holder as a guest FD.
 
+use super::super::credentials::Credentials;
 use super::super::{client_transport, wire::Request};
 use super::native_endpoint_metadata;
-use super::super::credentials::Credentials;
 use crate::ProfileError;
 use darwin_art_engine_sys::SCM_MAX_PAYLOADS;
-use darwin_art_scm_transfer::{capabilities::DeliveryDisposition, TransferKey};
+use darwin_art_scm_transfer::{TransferKey, capabilities::DeliveryDisposition};
 use std::{
     collections::HashSet,
     os::fd::{BorrowedFd, OwnedFd, RawFd},
@@ -73,7 +73,9 @@ pub(crate) fn prepare(
     let stream = client_transport::connect(socket)?;
     let prepared = client_transport::prepare(stream, carrier_holder, &borrowed, &managed)?;
     if !prepared.offer.authenticated {
-        return Err(invalid("prepared response has no authenticated credentials"));
+        return Err(invalid(
+            "prepared response has no authenticated credentials",
+        ));
     }
     Ok(PreparedNative {
         authority: prepared.offer.key.authority.instance.to_le_bytes(),
@@ -142,10 +144,11 @@ pub(crate) fn admit(
     claims
         .try_reserve_exact(filtered.len())
         .map_err(|_| invalid("admission claim allocation failed"))?;
-    let admitted = match client_transport::admit_authenticated(client_transport::connect(socket)?, &request) {
-        Ok(admitted) => admitted,
-        Err(error) => return abort_admission(socket, key, error),
-    };
+    let admitted =
+        match client_transport::admit_authenticated(client_transport::connect(socket)?, &request) {
+            Ok(admitted) => admitted,
+            Err(error) => return abort_admission(socket, key, error),
+        };
     if admitted.credentials != prepared.credentials {
         return abort_admission(socket, key, invalid("admission credentials changed"));
     }

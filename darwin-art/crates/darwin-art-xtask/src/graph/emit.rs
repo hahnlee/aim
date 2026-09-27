@@ -807,8 +807,7 @@ pub(crate) fn emit_graph_with_support(out: &Path, with_support: bool) -> io::Res
     // The pthread monitor/mutex objects (runtime-core) the final dylib links.
     // Their builder patches upstream mutex/monitor sources; declare those and
     // its patch series so a patch change rebuilds the archive and relinks.
-    let runtime_core_archive =
-        ninja_path(&root.join("_build/runtime-core/libart-core-darwin.a"));
+    let runtime_core_archive = ninja_path(&root.join("_build/runtime-core/libart-core-darwin.a"));
     graph.push_str("rule runtime_core\n");
     graph.push_str("  command = cd ");
     graph.push_str(&shell_quote(&root_for_shell));

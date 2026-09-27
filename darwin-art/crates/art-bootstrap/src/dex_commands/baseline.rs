@@ -1,6 +1,5 @@
 use super::fixture_framework_inputs::{
-    append_am_classes, append_wm_classes, clear_am_class_output,
-    clear_wm_class_output,
+    append_am_classes, append_wm_classes, clear_am_class_output, clear_wm_class_output,
 };
 use super::*;
 use std::fmt::Write as _;
@@ -236,7 +235,8 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         class_dir.join("dev/darwinart/probe/ProbeContext$LocalServiceRecord.class");
     let bound_service_record_class =
         class_dir.join("dev/darwinart/probe/ProbeContext$BoundServiceRecord.class");
-    let remote_service_binder_class = support_classes.join("dev/darwinart/runtime/os/RemoteBinder.class");
+    let remote_service_binder_class =
+        support_classes.join("dev/darwinart/runtime/os/RemoteBinder.class");
     let audio_manager_class = class_dir.join("android/media/ProbeAudioManager.class");
     let compatibility_handler_class =
         class_dir.join("dev/darwinart/probe/ProbeContext$CompatibilityHandler.class");
@@ -339,13 +339,21 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(&remote_service_binder_class)
         .arg(support_classes.join("dev/darwinart/runtime/os/SystemServices.class"))
         .arg(support_classes.join("dev/darwinart/runtime/system/ServiceDirectory.class"))
-        .arg(support_classes.join("dev/darwinart/runtime/display/BuiltInDisplayConfiguration.class"))
+        .arg(
+            support_classes.join("dev/darwinart/runtime/display/BuiltInDisplayConfiguration.class"),
+        )
         .arg(support_classes.join("dev/darwinart/runtime/display/DefaultDisplayRegistry.class"))
         .arg(support_classes.join("dev/darwinart/runtime/display/DisplayManagerEndpoint.class"))
         .arg(support_classes.join("dev/darwinart/runtime/user/UserManagerEndpoint.class"))
         .arg(support_classes.join("dev/darwinart/runtime/content/SettingsProviderEndpoint.class"))
-        .arg(support_classes.join("dev/darwinart/runtime/notification/NotificationManagerEndpoint.class"))
-        .arg(support_classes.join("dev/darwinart/runtime/inputmethod/InputMethodManagerEndpoint.class"))
+        .arg(
+            support_classes
+                .join("dev/darwinart/runtime/notification/NotificationManagerEndpoint.class"),
+        )
+        .arg(
+            support_classes
+                .join("dev/darwinart/runtime/inputmethod/InputMethodManagerEndpoint.class"),
+        )
         .arg(support_classes.join("dev/darwinart/runtime/input/InputManagerEndpoint.class"))
         .arg(support_classes.join("dev/darwinart/runtime/input/InputDeviceRegistry.class"))
         .arg(support_classes.join("dev/darwinart/runtime/input/SystemKeyboardMaps.class"))

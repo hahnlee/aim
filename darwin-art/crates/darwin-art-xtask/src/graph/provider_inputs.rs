@@ -624,11 +624,9 @@ fn validate_quoted_tool_paths(
 }
 
 fn is_audit_dispatch(line: &str, path: &str) -> bool {
-    [
-        "tools/tests/bionic-runtime-provider-closure-acceptance.sh",
-    ]
-    .iter()
-    .any(|dispatch| path == *dispatch && line.contains(&format!("bash \"$root/{dispatch}\"")))
+    ["tools/tests/bionic-runtime-provider-closure-acceptance.sh"]
+        .iter()
+        .any(|dispatch| path == *dispatch && line.contains(&format!("bash \"$root/{dispatch}\"")))
 }
 
 #[cfg(test)]
@@ -660,8 +658,7 @@ mod tests {
     #[test]
     fn audit_dispatches_are_exact_but_fixture_sources_are_rejected() {
         let (exact, dirs) = allowed_tool_paths();
-        let smoke_compile =
-            r#"clang -c \"$root/tools/android16-ftw/traversal_smoke.cc\""#;
+        let smoke_compile = r#"clang -c \"$root/tools/android16-ftw/traversal_smoke.cc\""#;
         assert!(validate_quoted_tool_paths(smoke_compile, &exact, &dirs).is_err());
         let provider_fixture =
             r#"clang -c \"$root/tools/bionic-runtime-provider-closure/fixture.cc\""#;

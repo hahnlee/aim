@@ -210,7 +210,14 @@ fn build(root: &Path, full: bool) -> Result<(), String> {
         root,
         "profile daemon and control",
         cargo(),
-        ["build", "-q", "--release", "-p", "darwin-art-profile", "--bins"],
+        [
+            "build",
+            "-q",
+            "--release",
+            "-p",
+            "darwin-art-profile",
+            "--bins",
+        ],
     )?;
     run_command(
         root,

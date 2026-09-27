@@ -196,8 +196,14 @@ fn tombstone_bound_retires_oldest_unreferenced_death() {
     registry.source_died(source()).unwrap();
     assert_eq!(registry.holder_count(), 0);
     assert_eq!(registry.carrier_count(), 0);
-    assert!(!registry.is_dead(ProcessEpoch { pid: 100, instance: 10 }));
-    assert!(registry.is_dead(ProcessEpoch { pid: 100, instance: 11 }));
+    assert!(!registry.is_dead(ProcessEpoch {
+        pid: 100,
+        instance: 10
+    }));
+    assert!(registry.is_dead(ProcessEpoch {
+        pid: 100,
+        instance: 11
+    }));
     assert!(registry.is_dead(source()));
     assert!(matches!(
         registry.register_pair(source()),

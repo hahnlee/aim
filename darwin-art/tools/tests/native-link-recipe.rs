@@ -118,16 +118,19 @@ fn round_trip_preserves_order_empty_and_non_utf8_fields() {
     }
     assert!(args.iter().any(|arg| arg == &test.output.as_os_str()));
     assert!(args.iter().any(|arg| arg == &test_object.as_os_str()));
-    assert!(args
-        .iter()
-        .any(|arg| { arg.as_bytes() == b"-Wl,-exported_symbol,_darwin_art_test_entry" }));
+    assert!(
+        args.iter()
+            .any(|arg| { arg.as_bytes() == b"-Wl,-exported_symbol,_darwin_art_test_entry" })
+    );
     assert!(args.iter().any(|arg| arg == &export_list.as_os_str()));
-    assert!(args
-        .windows(2)
-        .any(|pair| { pair[0].is_empty() && pair[1].as_bytes().starts_with(b"-D") }));
-    assert!(args
-        .iter()
-        .any(|arg| arg.as_bytes() == [b'-', b'D', b'n', 0x80]));
+    assert!(
+        args.windows(2)
+            .any(|pair| { pair[0].is_empty() && pair[1].as_bytes().starts_with(b"-D") })
+    );
+    assert!(
+        args.iter()
+            .any(|arg| arg.as_bytes() == [b'-', b'D', b'n', 0x80])
+    );
 }
 
 #[test]
@@ -218,24 +221,28 @@ fn rejects_output_aliases_including_cross_product_archive_and_symlink() {
     std::os::unix::fs::symlink(&product.output, &symlink).unwrap();
     let mut test = identity(temp.path(), "test");
     test.output = symlink;
-    assert!(transform_recipe(
-        &recipe,
-        &product,
-        &test,
-        &test_object,
-        OsStr::new("_fixture")
-    )
-    .is_err());
+    assert!(
+        transform_recipe(
+            &recipe,
+            &product,
+            &test,
+            &test_object,
+            OsStr::new("_fixture")
+        )
+        .is_err()
+    );
     let mut test = identity(temp.path(), "test");
     test.map = product.output.clone();
-    assert!(transform_recipe(
-        &recipe,
-        &product,
-        &test,
-        &test_object,
-        OsStr::new("_fixture")
-    )
-    .is_err());
+    assert!(
+        transform_recipe(
+            &recipe,
+            &product,
+            &test,
+            &test_object,
+            OsStr::new("_fixture")
+        )
+        .is_err()
+    );
 }
 
 #[test]

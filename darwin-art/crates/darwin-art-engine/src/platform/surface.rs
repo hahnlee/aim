@@ -398,13 +398,17 @@ mod surface_session_tests {
         _: i32,
         _: *const darwin_art_engine_sys::DescriptorTransferBinding,
         _: *mut darwin_art_engine_sys::ExportedDescriptor,
-    ) -> i32 { -1 }
+    ) -> i32 {
+        -1
+    }
     unsafe extern "C" fn binder_bound_import_test(
         _: i32,
         _: *const darwin_art_engine_sys::DescriptorTransferBinding,
         _: *const u8,
         _: usize,
-    ) -> i32 { -1 }
+    ) -> i32 {
+        -1
+    }
     unsafe extern "C" fn binder_retained_file_test(
         _: i32,
         _: *const darwin_art_engine_sys::DescriptorTransferBinding,
