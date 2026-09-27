@@ -14,6 +14,7 @@ pub const ENOMEM: Errno = 12;
 pub const EACCES: Errno = 13;
 pub const EFAULT: Errno = 14;
 pub const EEXIST: Errno = 17;
+pub const ENODEV: Errno = 19;
 pub const ENOTDIR: Errno = 20;
 pub const EINVAL: Errno = 22;
 pub const ENOTTY: Errno = 25;

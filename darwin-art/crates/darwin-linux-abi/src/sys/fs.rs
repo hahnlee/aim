@@ -90,6 +90,12 @@ pub fn openat(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
+    if let Some(fd) = super::binder::open(&r.guest, flags) {
+        return fd;
+    }
+    if let Some(fd) = super::selinuxfs::open(&r.guest, flags) {
+        return fd;
+    }
     let hflags = open_flags_to_host(flags);
     // SAFETY: host path from the resolver.
     let fd = unsafe { libc::open(r.host.as_ptr(), hflags, mode as libc::c_uint) };
@@ -196,8 +202,10 @@ fn put_stat(st: &libc::stat, out: u64) {
         st_ino: st.st_ino,
         st_mode: st.st_mode as u32,
         st_nlink: st.st_nlink as u32,
-        st_uid: st.st_uid,
-        st_gid: st.st_gid,
+        // Android files are root's unless init changed them (the contract's
+        // fs-attrs); the host owner is never the guest's.
+        st_uid: 0,
+        st_gid: 0,
         st_rdev: linux_dev(st.st_rdev),
         st_size: st.st_size,
         st_blksize: st.st_blksize,
@@ -321,6 +329,18 @@ pub fn statfs(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
+    if let Some(magic) = super::selinuxfs::statfs_magic(&r.guest) {
+        let l = LinuxStatfs {
+            f_type: magic,
+            f_bsize: 4096,
+            f_namelen: 255,
+            f_frsize: 4096,
+            ..Default::default()
+        };
+        // SAFETY: guest statfs buffer.
+        unsafe { (a[1] as *mut LinuxStatfs).write_unaligned(l) };
+        return 0;
+    }
     let mut s: libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: host path, local buffer.
     if unsafe { libc::statfs(r.host.as_ptr(), &mut s) } < 0 {
@@ -369,6 +389,9 @@ pub fn faccessat(dirfd: u64, path: u64, mode: u64, flags: u64) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
+    if super::binder::is_device(&r.guest) {
+        return 0;
+    }
     let hflags = if flags & AT_EACCESS != 0 {
         libc::AT_EACCESS
     } else {
@@ -471,6 +494,9 @@ const TIOCGWINSZ: u64 = 0x5413;
 
 pub fn ioctl(a: [u64; 6]) -> i64 {
     let (fd, req, arg) = (a[0] as i32, a[1], a[2]);
+    if let Some(r) = super::binder::ioctl(fd, req, arg) {
+        return r;
+    }
     // SAFETY: isatty/ioctl on a guest fd.
     let tty = unsafe { libc::isatty(fd) } == 1;
     match req {

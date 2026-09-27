@@ -25,15 +25,42 @@ const HOST_DEVICES: &[&str] = &[
 
 struct Vfs {
     root: PathBuf,
+    /// Writable areas over the root (`--path-map`), longest guest prefix
+    /// first: guest components and the host directory or file.
+    binds: Vec<(Vec<Vec<u8>>, PathBuf)>,
     cwd: Mutex<String>,
 }
 
 static VFS: OnceLock<Vfs> = OnceLock::new();
 
-pub fn init(root: &Path) -> std::io::Result<()> {
+/// `root`, or the `root` line and `rw` entries of a `--path-map` file
+/// (docs/guest-init-contract.md, section 2). `kernfs` entries are not a
+/// view: `/proc` and `/sys` stay synthesized.
+pub fn init(root: &Path, path_map: Option<&Path>) -> std::io::Result<()> {
+    let mut root = root.to_path_buf();
+    let mut binds = Vec::new();
+    if let Some(map) = path_map {
+        for line in std::fs::read_to_string(map)?.lines() {
+            let fields: Vec<&str> = line.split('\t').collect();
+            match fields[..] {
+                ["root", "/", host] => root = PathBuf::from(host),
+                ["rw", guest, host] => binds.push((
+                    guest
+                        .split('/')
+                        .filter(|c| !c.is_empty())
+                        .map(|c| c.as_bytes().to_vec())
+                        .collect::<Vec<_>>(),
+                    PathBuf::from(host),
+                )),
+                _ => {}
+            }
+        }
+    }
+    binds.sort_by_key(|(g, _)| std::cmp::Reverse(g.len()));
     let root = root.canonicalize()?;
     let _ = VFS.set(Vfs {
         root,
+        binds,
         cwd: Mutex::new("/".into()),
     });
     Ok(())
@@ -55,8 +82,22 @@ pub fn set_cwd(guest: String) {
     *vfs().cwd.lock().unwrap() = guest;
 }
 
-/// Guest path of a host path, if it lies inside the root.
+/// Guest path of a host path, if it lies inside the root or a mapped area.
 pub fn guest_path_of_host(host: &Path) -> Option<String> {
+    for (guest, bind) in &vfs().binds {
+        if let Ok(rel) = host.strip_prefix(bind) {
+            let mut g = String::new();
+            for c in guest {
+                g.push('/');
+                g.push_str(&String::from_utf8_lossy(c));
+            }
+            if !rel.as_os_str().is_empty() {
+                g.push('/');
+                g.push_str(&rel.display().to_string());
+            }
+            return Some(if g.is_empty() { "/".into() } else { g });
+        }
+    }
     let rel = host.strip_prefix(root()).ok()?;
     Some(format!("/{}", rel.display()))
 }
@@ -74,8 +115,14 @@ fn guest_path_of_fd(fd: i32) -> Result<String, Errno> {
 }
 
 fn host_of(components: &[Vec<u8>]) -> PathBuf {
-    let mut p = root().to_path_buf();
-    for c in components {
+    let (mut p, rest) = vfs()
+        .binds
+        .iter()
+        .find(|(guest, _)| components.starts_with(guest))
+        .map_or((root().to_path_buf(), components), |(guest, host)| {
+            (host.clone(), &components[guest.len()..])
+        });
+    for c in rest {
         p.push(OsStr::from_bytes(c));
     }
     p

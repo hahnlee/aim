@@ -120,3 +120,15 @@ pub fn futex(a: [u64; 6]) -> i64 {
         }
     }
 }
+
+/// Wake every waiter of a private futex word (CLONE_CHILD_CLEARTID).
+pub fn wake_all(uaddr: u64) {
+    // SAFETY: waking waiters of a guest futex word.
+    unsafe {
+        __ulock_wake(
+            UL_COMPARE_AND_WAIT | ULF_WAKE_ALL | ULF_NO_ERRNO,
+            uaddr as *mut _,
+            0,
+        )
+    };
+}

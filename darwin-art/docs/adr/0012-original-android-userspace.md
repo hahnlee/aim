@@ -222,7 +222,19 @@ Details in [binder-driver.md](../binder-driver.md).
   - the same path over Unix sockets: 10.3 µs p50;
   - the core in-process: 9.2 µs p50.
 - **Freezing.** `BINDER_FREEZE` fails with `EINVAL`.
-- **Wiring:** #167 (syscall layer) and #168 (daemon).
+- **Reached (2026-09-27).**
+  - The original `servicemanager` becomes the context manager under
+    `linux-run`, and the original `service list`, `service check` and
+    `cmd -l` get their answers from separate processes. It also receives the
+    death notice when a registered service dies.
+  - The host is the library `crates/darwin-binder-host`, run by
+    `darwin-binderd` until darwin-artd embeds it.
+  - A guest binder fd is one end of a socket pair: readiness is a byte on
+    it, and release is end-of-file, which also covers process death.
+  - Each guest binder thread has one daemon thread; parked reads are still
+    to do.
+  - Measured: 26–30 µs p50 per small call, timed in the guest with the
+    image's `libbinder_ndk`.
 
 ## Host-call ABI (2026-09-27)
 

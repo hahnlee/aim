@@ -45,6 +45,18 @@ pub fn readlink(path: &[u8]) -> Option<Result<Vec<u8>, Errno>> {
     )
 }
 
+static SECURITY_CONTEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Set the process's SELinux context (`/proc/self/attr/current`).
+pub fn set_security_context(label: String) {
+    let _ = SECURITY_CONTEXT.set(label);
+}
+
+/// The process's SELinux context, or "" when none was given.
+pub fn security_context() -> String {
+    SECURITY_CONTEXT.get().cloned().unwrap_or_default()
+}
+
 /// Whether `path` names `/proc/self/exe`.
 pub fn is_self_exe(path: &[u8]) -> bool {
     self_relative(path) == Some(b"exe")

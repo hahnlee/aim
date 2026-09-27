@@ -3,6 +3,8 @@
 //! The syscall number is in x8, arguments in x0-x5; the result (or -errno,
 //! with Linux errno values) goes back in x0. Each subsystem owns its calls.
 
+mod binder;
+mod events;
 mod fs;
 mod futex;
 mod mem;
@@ -10,16 +12,21 @@ mod misc;
 pub mod names;
 mod process;
 mod procfs;
+mod selinuxfs;
 mod signal;
+mod thread;
+mod unix_socket;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::context::GuestContext;
 use crate::errno::ENOSYS;
 
+pub use binder::init as init_binder;
 pub use mem::init_brk;
 pub use mem::run_deferred_unmaps;
 pub use process::{host_tid, set_exe};
+pub use procfs::set_security_context;
 
 /// Read by the trampoline: while set, every syscall takes the full path so
 /// it is traced.
@@ -135,6 +142,15 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         78 => fs::readlinkat(a),
         79 => fs::newfstatat(a),
         80 => fs::fstat(a),
+        // readiness
+        19 => events::eventfd2(a),
+        20 => events::epoll_create1(a),
+        21 => events::epoll_ctl(a),
+        22 => events::epoll_pwait(a),
+        73 => events::ppoll(a),
+        85 => events::timerfd_create(a),
+        86 => events::timerfd_settime(a),
+        87 => events::timerfd_gettime(a),
         // memory
         214 => mem::brk(a),
         215 => mem::munmap(ctx, a),
@@ -143,7 +159,8 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         226 => mem::mprotect(a),
         233 => mem::madvise(a),
         // process
-        93 => process::exit(a),
+        93 => thread::exit(a),
+        220 => thread::clone(ctx, a),
         94 => process::exit_group(a),
         96 => process::set_tid_address(a),
         98 => futex::futex(a),
@@ -159,6 +176,11 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         132 => signal::sigaltstack(a),
         134 => signal::rt_sigaction(a),
         135 => signal::rt_sigprocmask(a),
+        // sockets
+        198 => unix_socket::socket(a),
+        203 => unix_socket::connect(a),
+        206 => unix_socket::sendto(a),
+        207 => unix_socket::recvfrom(a),
         // misc
         101 => misc::nanosleep(a),
         113 => misc::clock_gettime(a),

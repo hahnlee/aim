@@ -203,6 +203,19 @@ pub fn init_thread() -> *mut GuestContext {
     }
 }
 
+/// Set the guest `TPIDR_EL0` of the current thread (CLONE_SETTLS).
+pub fn set_guest_tp(tp: u64) {
+    // SAFETY: slot claimed in `init_thread`.
+    unsafe { slot_ptr(slot::TP).write(tp) }
+}
+
+/// Resume guest code with the full register state already in the current
+/// thread's context (set up by [`init_thread`]).
+pub fn resume_guest() -> ! {
+    // SAFETY: the slot holds this thread's live context.
+    unsafe { linux_abi_enter_guest(slot_ptr(slot::CTX).read() as *const GuestContext) }
+}
+
 /// Switch the current thread into guest code at `pc` with stack `sp`.
 /// Registers other than sp are zero, as the Linux kernel leaves them at exec.
 pub fn enter_guest(pc: u64, sp: u64) -> ! {
