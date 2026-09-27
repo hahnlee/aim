@@ -1,4 +1,4 @@
-//! Time, randomness, identity and prctl.
+//! Time, randomness and prctl.
 
 use crate::errno::{self, EFAULT, EINVAL};
 
@@ -80,31 +80,6 @@ pub fn getrandom(a: [u64; 6]) -> i64 {
     len as i64
 }
 
-/// Linux `struct utsname`: six 65-byte fields.
-pub fn uname(a: [u64; 6]) -> i64 {
-    let mut host: libc::utsname = unsafe { std::mem::zeroed() };
-    // SAFETY: local buffer.
-    unsafe { libc::uname(&mut host) };
-    // SAFETY: nodename is NUL-terminated.
-    let node = unsafe { std::ffi::CStr::from_ptr(host.nodename.as_ptr()) }.to_bytes();
-    let fields: [&[u8]; 6] = [
-        b"Linux",
-        node,
-        b"6.6.0-darwin",
-        b"#1 SMP PREEMPT",
-        b"aarch64",
-        b"localdomain",
-    ];
-    let mut out = [0u8; 65 * 6];
-    for (i, f) in fields.iter().enumerate() {
-        let n = f.len().min(64);
-        out[i * 65..i * 65 + n].copy_from_slice(&f[..n]);
-    }
-    // SAFETY: guest utsname buffer.
-    unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), a[0] as *mut u8, out.len()) };
-    0
-}
-
 const PR_GET_DUMPABLE: u64 = 3;
 const PR_SET_DUMPABLE: u64 = 4;
 const PR_SET_NAME: u64 = 15;
@@ -118,6 +93,9 @@ thread_local! {
 }
 
 pub fn prctl(a: [u64; 6]) -> i64 {
+    if let Some(r) = super::cred::prctl(a) {
+        return r;
+    }
     match a[0] {
         // Anonymous VMA names are diagnostics only on Linux.
         PR_SET_VMA => 0,

@@ -5,7 +5,7 @@
 //!   magic) with `status` (the page `selinux_status_open` maps), `enforce`
 //!   = 0 and `deny_unknown` = 0. The loaded policy defines no classes, so
 //!   every `selinux_check_access` is an unknown class that is allowed;
-//! - `/proc/<self>/attr/current`: the process's context (`--seclabel`).
+//! - `/proc/<self>/attr/current`: the process's context (the identity's seclabel).
 
 use crate::errno::{self, ENOENT};
 
@@ -64,11 +64,7 @@ const O_CLOEXEC: u64 = 0o2000000;
 pub fn open(guest: &str, flags: u64) -> Option<i64> {
     let cloexec = flags & O_CLOEXEC != 0;
     if is_attr_current(guest) {
-        let label = super::procfs::security_context();
-        if label.is_empty() {
-            return Some(-(ENOENT as i64));
-        }
-        let mut bytes = label.into_bytes();
+        let mut bytes = super::cred::seclabel().into_bytes();
         bytes.push(0);
         return Some(synthetic(&bytes, cloexec));
     }

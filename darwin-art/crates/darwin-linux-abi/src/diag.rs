@@ -98,6 +98,13 @@ extern "C" fn on_signal(sig: i32, info: *mut libc::siginfo_t, uc: *mut libc::c_v
             eprintln!("{line}");
         }
         eprintln!("[linux-abi]   guest tp {:#x}", crate::context::guest_tp());
+        // End the process with this signal, as the guest's death by it would
+        // on Linux: init tells a crash from an exit by the wait status.
+        libc::signal(sig, libc::SIG_DFL);
+        let mut set: libc::sigset_t = 0;
+        libc::sigaddset(&mut set, sig);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        libc::raise(sig);
         libc::_exit(128 + sig);
     }
 }

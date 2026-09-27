@@ -15,7 +15,9 @@ use darwin_binder_host::client::{BinderFile, Client, UserMemory};
 
 use crate::errno::{EINVAL, ENODEV, ENOMEM, EPERM};
 
-static CLIENT: OnceLock<Client> = OnceLock::new();
+/// The daemon's bootstrap name, to reconnect after fork.
+static NAME: OnceLock<String> = OnceLock::new();
+static CLIENT: Mutex<Option<Client>> = Mutex::new(None);
 /// Open binder files by the inode of their socket, so dup'ed fds resolve.
 static FILES: Mutex<Option<HashMap<u64, BinderFile>>> = Mutex::new(None);
 
@@ -23,8 +25,20 @@ static FILES: Mutex<Option<HashMap<u64, BinderFile>>> = Mutex::new(None);
 pub fn init(name: &str) -> Result<(), String> {
     let client =
         Client::connect(name).ok_or_else(|| format!("binder host '{name}' is not running"))?;
-    let _ = CLIENT.set(client);
+    *CLIENT.lock().unwrap() = Some(client);
+    let _ = NAME.set(name.to_string());
     Ok(())
+}
+
+/// In a forked child: a new binder process. Mach rights do not survive
+/// fork, so the child connects to the daemon again; the binder files it
+/// inherited belong to the parent's binder process and are forgotten (as
+/// libbinder refuses to use them after fork).
+pub(super) fn after_fork_child() {
+    let Some(name) = NAME.get() else { return };
+    darwin_binder_host::client::forget_thread_ports();
+    *FILES.lock().unwrap() = None;
+    *CLIENT.lock().unwrap() = Client::connect(name);
 }
 
 fn inode(fd: i32) -> Option<u64> {
@@ -62,22 +76,23 @@ const O_CLOEXEC: u64 = 0o2000000;
 
 /// Whether `guest_path` is a binder device node that exists.
 pub fn is_device(guest_path: &str) -> bool {
-    CLIENT.get().is_some() && Device::from_path(guest_path).is_some()
+    CLIENT.lock().unwrap().is_some() && Device::from_path(guest_path).is_some()
 }
 
 /// `openat` of a binder device node; None for any other path.
 pub fn open(guest_path: &str, flags: u64) -> Option<i64> {
     let device = Device::from_path(guest_path)?;
-    let Some(client) = CLIENT.get() else {
+    let client = CLIENT.lock().unwrap();
+    let Some(client) = client.as_ref() else {
         return Some(-(ENODEV as i64));
     };
-    let euid = super::process::getuid() as u32;
+    let euid = super::cred::getuid(175) as u32;
     let file = client.open(
         device,
         flags & O_NONBLOCK != 0,
         flags & O_CLOEXEC != 0,
         euid,
-        &super::procfs::security_context(),
+        &super::cred::seclabel(),
     );
     Some(match file {
         Ok(f) => {

@@ -34,16 +34,6 @@ pub fn getppid() -> i64 {
     unsafe { libc::getppid() as i64 }
 }
 
-pub fn getuid() -> i64 {
-    // SAFETY: trivial.
-    unsafe { libc::getuid() as i64 }
-}
-
-pub fn getgid() -> i64 {
-    // SAFETY: trivial.
-    unsafe { libc::getgid() as i64 }
-}
-
 /// Linux tid of the calling host thread. The main thread's tid equals the
 /// pid; `clone` threads are future work.
 pub fn host_tid() -> i64 {
@@ -69,6 +59,7 @@ pub fn set_tid_address(a: [u64; 6]) -> i64 {
 }
 
 pub fn exit_group(a: [u64; 6]) -> i64 {
+    super::cred::forget(getpid() as i32);
     // SAFETY: terminating the process without running host atexit handlers,
     // as a Linux exit_group would.
     unsafe { libc::_exit(a[0] as i32) }
