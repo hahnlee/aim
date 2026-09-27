@@ -7,6 +7,7 @@
 //! | [`THREAD`] | file port | tid | status; the thread port |
 //! | [`MMAP`] | file port | guest address, length | status; the memory entry |
 //! | [`POLL`] | file port | tid | status, readiness drain |
+//! | [`INTERRUPT`] | file port | tid | status |
 //! | [`IOCTL`] | thread port | [`Ioctl`] | [`IoctlReply`] |
 
 use darwin_binder_driver::Errno;
@@ -16,6 +17,7 @@ pub const THREAD: i32 = 0x6264_0002;
 pub const MMAP: i32 = 0x6264_0003;
 pub const POLL: i32 = 0x6264_0004;
 pub const IOCTL: i32 = 0x6264_0005;
+pub const INTERRUPT: i32 = 0x6264_0006;
 pub const REPLY: i32 = 0x6264_0100;
 
 /// Linux EPROTO: a malformed message.

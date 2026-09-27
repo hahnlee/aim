@@ -311,6 +311,10 @@ impl Server {
                     }
                 }
             }
+            wire::INTERRUPT => {
+                self.driver.interrupt(file.handle, r.i32()?);
+                Ok((Vec::new(), Vec::new()))
+            }
             wire::POLL => {
                 let tid = r.i32()?;
                 file.readiness.lock().unwrap().poll_tid = Some(tid);

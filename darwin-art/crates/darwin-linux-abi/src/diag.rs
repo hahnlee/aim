@@ -1,5 +1,5 @@
-//! Host signal handling: the SIGTRAP path of the `brk` fallback, and fault
-//! reports that name the guest module containing the faulting pc.
+//! Fault reports that name the guest module containing the faulting pc.
+//! The host signal handlers themselves are `sys::signal`'s.
 
 use std::sync::Mutex;
 
@@ -67,13 +67,14 @@ struct MContext64 {
     ss: ThreadState64,
 }
 
-extern "C" fn on_signal(sig: i32, info: *mut libc::siginfo_t, uc: *mut libc::c_void) {
+/// Report a fault no guest handler takes.
+///
+/// # Safety
+/// Handler arguments from the kernel.
+pub unsafe fn report(sig: i32, info: *mut libc::siginfo_t, uc: *mut libc::c_void) {
     let uc = uc as *mut libc::ucontext_t;
     // SAFETY: SA_SIGINFO handler arguments from the kernel.
     unsafe {
-        if sig == libc::SIGTRAP && crate::patch::handle_brk(uc) {
-            return;
-        }
         let mc = (*uc).uc_mcontext as *const MContext64;
         let ss = &(*mc).ss;
         eprintln!(
@@ -98,48 +99,12 @@ extern "C" fn on_signal(sig: i32, info: *mut libc::siginfo_t, uc: *mut libc::c_v
             eprintln!("{line}");
         }
         eprintln!("[linux-abi]   guest tp {:#x}", crate::context::guest_tp());
-        // End the process with this signal, as the guest's death by it would
-        // on Linux: init tells a crash from an exit by the wait status.
-        libc::signal(sig, libc::SIG_DFL);
-        let mut set: libc::sigset_t = 0;
-        libc::sigaddset(&mut set, sig);
-        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
-        libc::raise(sig);
-        libc::_exit(128 + sig);
     }
 }
 
-const ALTSTACK_SIZE: usize = 1 << 20;
-
-/// Install host handlers for faults and the `brk` fallback on this thread.
+/// Install the host signal handlers (faults, `brk` sites, guest signals).
+/// Each guest thread gets its host alternate stack in
+/// `context::init_thread`.
 pub fn install_signal_handlers() {
-    // SAFETY: installing process-wide handlers and a per-thread altstack.
-    unsafe {
-        let stack = libc::mmap(
-            std::ptr::null_mut(),
-            ALTSTACK_SIZE,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANON,
-            -1,
-            0,
-        );
-        let ss = libc::stack_t {
-            ss_sp: stack,
-            ss_size: ALTSTACK_SIZE,
-            ss_flags: 0,
-        };
-        libc::sigaltstack(&ss, std::ptr::null_mut());
-        for sig in [
-            libc::SIGTRAP,
-            libc::SIGSEGV,
-            libc::SIGBUS,
-            libc::SIGILL,
-            libc::SIGFPE,
-        ] {
-            let mut sa: libc::sigaction = std::mem::zeroed();
-            sa.sa_sigaction = on_signal as usize;
-            sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
-            libc::sigaction(sig, &sa, std::ptr::null_mut());
-        }
-    }
+    crate::sys::install_host_handlers();
 }

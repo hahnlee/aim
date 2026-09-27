@@ -23,11 +23,13 @@ mod memfd;
 mod misc;
 pub mod names;
 mod net;
+mod park;
 mod poll;
 mod process;
 mod procfs;
 mod pstate;
 mod selinuxfs;
+mod sigframe;
 mod signal;
 mod thread;
 mod vmmap;
@@ -46,9 +48,14 @@ pub use fdtab::{after_fork_child as fds_after_fork_child, init as init_fds};
 pub use mem::init_brk;
 pub use mem::run_deferred_unmaps;
 pub use net::adopt as adopt_fd;
-pub use process::{host_tid, set_exe};
+pub use process::set_exe;
 pub use procfs::{StackInfo, note_stack};
 pub use pstate::kernel_release;
+pub(crate) use signal::{install_host_handlers, repoke_self};
+pub use thread::host_tid;
+pub(crate) use thread::{Thread, register_current};
+/// Around a Darwin fork of a guest process.
+pub use thread::{fork_child, fork_parent, fork_prepare};
 
 /// Read by the trampoline: while set, every syscall takes the full path so
 /// it is traced.
@@ -126,7 +133,14 @@ pub fn dispatch(ctx: &mut GuestContext) {
             eprintln!("{line}");
         }
     }
-    let r = handle(ctx, nr, a);
+    // A syscall a host signal interrupted is restarted when no guest
+    // handler is to run for it.
+    let r = loop {
+        let r = handle(ctx, nr, a);
+        if !signal::after_syscall(ctx, nr, &a, r) {
+            break r;
+        }
+    };
     if tracing() {
         if (-4095..0).contains(&r) {
             eprintln!("{line} = -{} ({})", -r, names::errno_name(-r as i32));
@@ -243,36 +257,48 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         271 => mem::process_vm_rw(true, a),
         283 => mem::membarrier(a),
         284 => mem::mlock(228, a),
-        // process
+        // process and threads
         93 => thread::exit(a),
         220 if fork::is_fork(a[0]) => fork::clone(ctx, a),
-        220 => thread::clone(ctx, a),
-        94 => process::exit_group(a),
-        96 => process::set_tid_address(a),
+        94 => thread::exit_group(a),
+        96 => thread::set_tid_address(a),
         98 => futex::futex(a),
-        99 => 0, // set_robust_list: robust futex lists matter once threads exist
+        99 => thread::set_robust_list(a),
+        100 => thread::get_robust_list(a),
+        220 => thread::clone(ctx, a),
+        435 if fork::is_fork(fork::clone3_flags(a)) => fork::clone3(ctx, a),
+        435 => thread::clone3(ctx, a),
         163 | 164 | 261 => cred::prlimit(nr, a),
         172 => process::getpid(),
         173 => process::getppid(),
-        178 => process::gettid(),
-        129..=131 => process::kill(nr, a),
+        178 => thread::gettid(),
         // signals
-        132 => signal::sigaltstack(a),
+        129 => signal::kill(a),
+        130 | 131 => signal::tgkill(nr, a),
+        132 => signal::sigaltstack(ctx, a),
+        133 => signal::rt_sigsuspend(a),
         134 => signal::rt_sigaction(a),
         135 => signal::rt_sigprocmask(a),
+        136 => signal::rt_sigpending(a),
+        137 => signal::rt_sigtimedwait(a),
+        138 => signal::rt_sigqueueinfo(a),
+        139 => signal::rt_sigreturn(ctx),
+        240 => signal::rt_tgsigqueueinfo(a),
         // misc
-        101 => misc::nanosleep(a),
+        101 => park::nanosleep(a),
+        115 => park::clock_nanosleep(a),
         113 => misc::clock_gettime(a),
         114 => misc::clock_getres(a),
         118..=121 => process::sched_policy(nr, a),
+        122 => process::sched_setaffinity(a),
         123 => process::sched_getaffinity(a),
+        125 | 126 => process::sched_priority_range(nr, a),
         124 => misc::sched_yield(),
         167 => misc::prctl(a),
         169 => misc::gettimeofday(a),
         278 => misc::getrandom(a),
         darwin_hostcall::SYSCALL_NR => crate::hostcall::call(a[0], a[1], a[2], a[3]),
         // process lifecycle
-        435 if fork::is_fork(fork::clone3_flags(a)) => fork::clone3(ctx, a),
         221 => exec::execve(a),
         281 => exec::execveat(a),
         95 => wait::waitid(a),

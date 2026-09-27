@@ -225,6 +225,15 @@ impl BinderFile {
         Ok(())
     }
 
+    /// A signal is due for guest thread `tid`: its blocking read (or the
+    /// next one it starts) fails with EINTR. Called from any thread.
+    pub fn interrupt(&self, tid: i32) -> Result<(), Errno> {
+        let mut w = Writer::default();
+        w.i32(tid);
+        with_thread(|t| self.control(t, wire::INTERRUPT, w.0))??;
+        Ok(())
+    }
+
     fn drain(&self, n: u32) {
         let mut sink = [0u8; 8];
         for _ in 0..n.min(sink.len() as u32) {

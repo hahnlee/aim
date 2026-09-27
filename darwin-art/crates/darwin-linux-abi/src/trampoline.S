@@ -10,9 +10,22 @@
 //   288  stub_ret   (return address into the per-site stub)
 //   296  host_sp    (top of this thread's host stack)
 //   304  tid        (Linux tid)
+//   312  in_host    (u32: host code runs for this thread)
 //   320  v0..v31    (32 * 16)
+//   {attn}  attn       (pointer to the thread's signal attention flag)
+//   {orig}  orig_x0    (x0 of a lean-path syscall)
 //
 // x18 is never used: Android's shadow call stack owns it on Linux.
+//
+// Everything is one atom: the other global labels are `.alt_entry`, so the
+// linker neither strips nor reorders them (context::region relies on the
+// order).
+//
+// Signals (see src/sys/signal.rs). Every syscall exit checks the thread's
+// attention flag and, when set, calls into Rust to deliver. A host signal
+// handler that interrupts the trampoline acts by region (context::region):
+// in an exit check it restarts the check; elsewhere it leaves the flag for
+// the check that follows.
 
     .text
 
@@ -129,7 +142,11 @@ Lfd_darwin:
     // fall through
 
 // One Darwin BSD syscall on the guest's live x0..x3; carry set means errno.
+// x0 is kept for a restart after a signal.
 Ldarwin:
+    mrs     x17, tpidrro_el0
+    ldr     x17, [x17, #{ctx}]
+    str     x0, [x17, #{orig}]
     mov     x17, x1
     svc     #0x80
     mov     x1, x17
@@ -142,31 +159,58 @@ Ldarwin:
     neg     x0, x0
     b       Llean_ret
 1:  mov     x0, #-5                     // EIO beyond the table
+// Lean exit check; restartable from its first instruction.
+    .globl _linux_abi_lean_check
+    .alt_entry _linux_abi_lean_check
+_linux_abi_lean_check:
 Llean_ret:
+    mrs     x16, tpidrro_el0
+    ldr     x16, [x16, #{ctx}]
+    ldr     x16, [x16, #{attn}]
+    ldr     w16, [x16]
+    cbnz    w16, Llean_signal
     ldr     x17, [sp, #24]
     msr     nzcv, x17
     ret                                 // into the stub, which restores x16/x17/x30
+    .globl _linux_abi_lean_end
+    .alt_entry _linux_abi_lean_end
+_linux_abi_lean_end:
 
 // Host call (src/hostcall.rs): an AAPCS64 call of linux_abi_hostcall(x0..x3)
 // on the host stack. Caller-saved registers are the guest's to lose, by the
 // host-call contract; x19/x20 are kept below the stub frame and hold the
-// guest sp and the return address into the stub across the call.
+// guest sp and the return address into the stub across the call. It runs
+// host code, so in_host is set around it; the lean exit check follows.
 Lhostcall:
     stp     x19, x20, [sp, #-16]!
     mov     x19, sp
     mov     x20, x30
     mrs     x16, tpidrro_el0
     ldr     x16, [x16, #{ctx}]
+    mov     w17, #1
+    str     w17, [x16, #{in_host}]
     ldr     x16, [x16, #296]
     mov     sp, x16
     bl      _linux_abi_hostcall
+    mrs     x16, tpidrro_el0
+    ldr     x16, [x16, #{ctx}]
+    str     wzr, [x16, #{in_host}]
     mov     sp, x19
     mov     x30, x20
     ldp     x19, x20, [sp], #16
     b       Llean_ret
 
     // ---- full path ----
+    // x17 = the Rust function to call with the saved context: the
+    // dispatcher, or the lean path's signal hand-off (result in x0).
+Llean_signal:
+    adrp    x17, _linux_abi_lean_signal@PAGE
+    add     x17, x17, _linux_abi_lean_signal@PAGEOFF
+    b       Lsave
 Lfull:
+    adrp    x17, _linux_abi_dispatch@PAGE
+    add     x17, x17, _linux_abi_dispatch@PAGEOFF
+Lsave:
     mrs     x16, tpidrro_el0
     ldr     x16, [x16, #{ctx}]
     stp     x0, x1, [x16, #0]
@@ -192,8 +236,12 @@ Lfull:
     str     x30, [x16, #288]
     ldr     x0, [sp, #24]
     str     x0, [x16, #264]
-    // Host stack. x19 holds the context; it is callee-saved in the host ABI.
+    // Host stack. x19 holds the context and x20 the callee; both are
+    // callee-saved in the host ABI.
     mov     x19, x16
+    mov     x20, x17
+    mov     w0, #1
+    str     w0, [x19, #{in_host}]
     ldr     x0, [x16, #296]
     mov     sp, x0
     mov     x29, #0
@@ -219,7 +267,21 @@ Lfull:
     stp     q28, q29, [x0, #448]
     stp     q30, q31, [x0, #480]
     mov     x0, x19
-    bl      _linux_abi_dispatch
+    blr     x20
+// Full exit check, on the host stack with x19 = context. Everything from
+// here to _linux_abi_tail_end is restarted at _linux_abi_recheck by a
+// signal handler that interrupts it.
+    .globl _linux_abi_check
+    .alt_entry _linux_abi_check
+_linux_abi_check:
+    ldr     x0, [x19, #{attn}]
+    ldr     w0, [x0]
+    cbz     w0, Lnopending
+    mov     x0, x19
+    bl      _linux_abi_deliver
+    b       _linux_abi_check
+Lnopending:
+    str     wzr, [x19, #{in_host}]
     add     x0, x19, #320
     ldp     q0, q1, [x0, #0]
     ldp     q2, q3, [x0, #32]
@@ -242,10 +304,13 @@ Lfull:
     ldr     x0, [x19, #280]
     msr     fpsr, x0
 
-Lrestore:
     mov     x16, x19
     ldr     x0, [x16, #264]
     msr     nzcv, x0
+    // stub_ret == 0: enter at ctx->pc directly (a signal handler, or a
+    // clone child that did not come through a stub). x17 carries the pc.
+    ldr     x30, [x16, #288]
+    cbz     x30, Ldirect
     // Rebuild the stub frame below the (possibly updated) guest sp; the stub
     // pops x16, x17 and x30 from it.
     ldr     x0, [x16, #248]
@@ -255,7 +320,6 @@ Lrestore:
     stp     x1, x2, [sp]
     ldr     x1, [x16, #240]
     str     x1, [sp, #16]
-    ldr     x30, [x16, #288]
     ldp     x0, x1, [x16, #0]
     ldp     x2, x3, [x16, #16]
     ldp     x4, x5, [x16, #32]
@@ -271,11 +335,73 @@ Lrestore:
     ldp     x26, x27, [x16, #208]
     ldp     x28, x29, [x16, #224]
     ret
+Ldirect:
+    ldr     x0, [x16, #248]
+    mov     sp, x0
+    ldp     x0, x1, [x16, #0]
+    ldp     x2, x3, [x16, #16]
+    ldp     x4, x5, [x16, #32]
+    ldp     x6, x7, [x16, #48]
+    ldp     x8, x9, [x16, #64]
+    ldp     x10, x11, [x16, #80]
+    ldp     x12, x13, [x16, #96]
+    ldp     x14, x15, [x16, #112]
+    ldp     x18, x19, [x16, #144]
+    ldp     x20, x21, [x16, #160]
+    ldp     x22, x23, [x16, #176]
+    ldp     x24, x25, [x16, #192]
+    ldp     x26, x27, [x16, #208]
+    ldp     x28, x29, [x16, #224]
+    ldr     x30, [x16, #240]
+    ldr     x17, [x16, #256]
+    ldr     x16, [x16, #128]
+    br      x17
+// Re-enter the exit check: a signal handler sets x19 = context and sp =
+// host stack before sending the thread here.
+    .globl _linux_abi_recheck
+    .alt_entry _linux_abi_recheck
+_linux_abi_recheck:
+    mov     w0, #1
+    str     w0, [x19, #{in_host}]
+    b       _linux_abi_check
+    .globl _linux_abi_tail_end
+    .alt_entry _linux_abi_tail_end
+_linux_abi_tail_end:
+
+// void linux_abi_resume(GuestContext *ctx) -- never returns. A clone child
+// starts here: the exit check runs, then the copied registers are resumed.
+    .globl _linux_abi_resume
+    .alt_entry _linux_abi_resume
+    .p2align 2
+_linux_abi_resume:
+    mov     x19, x0
+    ldr     x0, [x19, #296]
+    mov     sp, x0
+    mov     x29, #0
+    b       _linux_abi_recheck
+
+// rt_sigreturn's exact resume: SIGILL here loads the whole context.
+    .globl _linux_abi_resume_trap
+    .alt_entry _linux_abi_resume_trap
+_linux_abi_resume_trap:
+    udf     #0x6c78
+
+// Restorer for guest handlers installed without SA_RESTORER: rt_sigreturn
+// through the same stub frame a redirected svc builds.
+    .globl _linux_abi_restorer
+    .alt_entry _linux_abi_restorer
+_linux_abi_restorer:
+    mov     x8, #139
+    stp     x16, x17, [sp, #-32]!
+    str     x30, [sp, #16]
+    bl      _linux_abi_syscall_entry
+    brk     #0
 
 // void linux_abi_enter_guest(const GuestContext *ctx)  -- never returns.
 // Loads the full register state and branches to ctx->pc. x17 carries the
 // branch target, so the guest starts with x17 == pc (Linux leaves it unspecified).
     .globl _linux_abi_enter_guest
+    .alt_entry _linux_abi_enter_guest
     .p2align 4
 _linux_abi_enter_guest:
     mov     x16, x0
@@ -300,6 +426,7 @@ _linux_abi_enter_guest:
     msr     nzcv, x0
     ldr     x0, [x16, #272]
     msr     fpcr, x0
+    str     wzr, [x16, #{in_host}]
     ldr     x0, [x16, #248]
     mov     sp, x0
     ldp     x0, x1, [x16, #0]
@@ -320,3 +447,6 @@ _linux_abi_enter_guest:
     ldr     x17, [x16, #256]
     ldr     x16, [x16, #128]
     br      x17
+    .globl _linux_abi_text_end
+    .alt_entry _linux_abi_text_end
+_linux_abi_text_end:

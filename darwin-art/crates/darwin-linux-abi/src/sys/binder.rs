@@ -13,7 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use darwin_binder_driver::Device;
 use darwin_binder_host::client::{BinderFile, Client, UserMemory};
 
-use crate::errno::{EINVAL, ENODEV, ENOMEM, EPERM};
+use crate::errno::{EINTR, EINVAL, ENODEV, ENOMEM, EPERM};
 
 /// The daemon's bootstrap name, to reconnect after fork.
 static NAME: OnceLock<String> = OnceLock::new();
@@ -138,9 +138,18 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
     }
     let file = lookup(fd)?;
     let tid = super::process::gettid() as i32;
-    Some(match file.ioctl(tid, cmd as u32, arg, &mut Guest) {
-        Ok(()) => 0,
-        Err(e) => -(e as i64),
+    // A guest signal for this thread interrupts a read parked in the
+    // daemon, as `binder_wait_for_work` returns on a pending signal; the
+    // syscall layer restarts the ioctl when no handler is to run.
+    let interrupt = move || {
+        let _ = file.interrupt(tid);
+    };
+    let r =
+        super::signal::interruptible(&interrupt, || file.ioctl(tid, cmd as u32, arg, &mut Guest));
+    Some(match r {
+        None => -(EINTR as i64),
+        Some(Ok(())) => 0,
+        Some(Err(e)) => -(e as i64),
     })
 }
 
