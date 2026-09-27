@@ -1,0 +1,11 @@
+[package]
+license.workspace = true
+name = "darwin-host-sensors"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-call modules for android.hardware.thermal and android.hardware.sensors: the Mac's thermal state, temperatures, ambient light and lid angle"
+
+[dependencies]
+darwin-hostcall = { path = "../darwin-hostcall" }
+libc = "0.2"

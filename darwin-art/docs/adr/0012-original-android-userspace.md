@@ -412,9 +412,12 @@ MediaProvider and DnsResolver.
 
 allocator/mapper (memfd buffers the host imports into Metal without
 copying) and composer (Metal, AppKit), audio (CoreAudio),
-camera (AVFoundation), sensors, power/health/thermal (IOKit), GNSS
-(CoreLocation), and Codec2 over VideoToolbox (a performance exception; the
-original software codecs also work).
+camera (AVFoundation), sensors (ambient light and lid angle, IOKit HID),
+health (IOKit), thermal (`NSProcessInfo` thermal state, HID temperatures),
+GNSS (CoreLocation fixes, no raw measurements), and Codec2 over
+VideoToolbox (a performance exception; the original software codecs also
+work). Power stays the original vendor APEX's example HAL: macOS offers
+nothing unprivileged for it to drive ([vendor-hals.md](../vendor-hals.md)).
 
 - **KeyMint and Gatekeeper:** the AOSP software implementations first, with
   Keychain or the Secure Enclave later.

@@ -1,0 +1,4 @@
+service vendor.sensors-darwin /vendor/bin/hw/android.hardware.sensors-service.darwin
+    class hal
+    user system
+    group system

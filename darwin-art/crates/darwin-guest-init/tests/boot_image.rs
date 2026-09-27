@@ -149,6 +149,7 @@ fn real_image_dry_run_boot() {
     assert!(!launched.contains("ueventd"));
     assert!(!launched.contains("apexd"));
     assert_eq!(boot.property("apexd.status").as_deref(), Some("ready"));
+    assert_eq!(boot.property("apex.all.ready").as_deref(), Some("true"));
     assert_eq!(
         boot.property("ro.crypto.state").as_deref(),
         Some("unencrypted")

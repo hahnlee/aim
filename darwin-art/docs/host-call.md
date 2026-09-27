@@ -11,7 +11,7 @@ the like.
 | --- | --- |
 | ABI: numbers, argument blocks, guest wrappers, module shape | `crates/darwin-hostcall` (`no_std`) |
 | Dispatch and module registry | `crates/darwin-linux-abi/src/hostcall.rs`, `Lhostcall` in `trampoline.S` |
-| Host modules | `crates/darwin-host-<name>` (first: `darwin-host-health`) |
+| Host modules | `crates/darwin-host-<name>` (first: `darwin-host-health`; `darwin-host-sensors` serves two modules) |
 | HAL services and their build | `hal/`, `tools/build-vendor-hals.sh`, `tools/lib/vendor_hal_aidl.py`, `hal/sources.lock` |
 | Placement in the derived image, and the emulator HALs removed | `image/overlay.toml` |
 
@@ -98,6 +98,9 @@ first.
 | 1 | health | 1 | `FN_BATTERY`: fill `health::Battery` |
 | 2 | gpu | 1 | `FN_INIT`, `FN_IMPORT_BUFFER`, `FN_PRESENT`, and the generated EGL/GLES entry points from `FN_TABLE_BASE` ([gles-driver.md](gles-driver.md)) |
 | 3 | display | 1 | `FN_CONNECT` (returns the event fd), `FN_IMPORT`, `FN_PRESENT`, `FN_RELEASE`, `FN_SET_VSYNC` ([composer.md](composer.md)) |
+| 4 | thermal | 1 | `FN_READ`: fill `thermal::Thermal` ([vendor-hals.md](vendor-hals.md)) |
+| 5 | sensors | 1 | `FN_READ`: fill `sensors::Readings` ([vendor-hals.md](vendor-hals.md)) |
+| 6 | location | 1 | `FN_START`, `FN_STOP`; `FN_READ`: fill `location::Fix` ([vendor-hals.md](vendor-hals.md)) |
 
 ## Vendor HAL build pipeline
 
@@ -143,7 +146,8 @@ The interfaces P4 and P5 need build: power V6 (imports common.fmq V1),
 graphics composer3 V4, allocator V2 and common V6 (with drm.common V1),
 audio.core V3 (with audio.common V4, audio.effect V3, audio.core.sounddose
 V3, media.audio.common.types V4 and media.audio.eraser.types V1), sensors
-V3, bluetooth V1 and health V4, over common V2 and common.fmq V1.
+V3, bluetooth V1, health V4, thermal V3 and gnss V2, over common V2 and
+common.fmq V1.
 
 Tools: the Android NDK (clang, sysroot and libclang for bindgen), SDK
 build-tools 36.0.0 (`aidl`), and `rustup target add aarch64-linux-android`.
@@ -172,8 +176,10 @@ instance is undeclared and the original services take their no-HAL paths:
 - replaced by ours: the graphics allocator, mapper and GLES driver
   ([graphics-buffers.md](graphics-buffers.md),
   [gles-driver.md](gles-driver.md));
+- replaced by ours: thermal (the vendor APEX's example), sensors and GNSS
+  ([vendor-hals.md](vendor-hals.md));
 - replaced by ours later: the composer, audio (with the HIDL audio-effect
-  declaration in `manifest.xml`), sensors, camera, Bluetooth and GNSS;
+  declaration in `manifest.xml`), camera and Bluetooth;
 - hardware the device does not have: radio, Wi-Fi (with hostapd and the
   supplicant), fingerprint, USB, lights, storage health, the goldfish
   Codec2 store, and the vendor APEXes contexthub, rebootescrow, Thread, UWB
@@ -181,9 +187,9 @@ instance is undeclared and the original services take their no-HAL paths:
 
 Software HALs with no hardware behind them stay: ClearKey DRM, KeyMint
 (with secure clock and shared secret), identity credential, and the vendor
-APEXes authsecret, cas, dumpstate, gatekeeper, neuralnetworks, power,
-thermal and widevine. `android-image diff` lists every entry with its
-reason.
+APEXes authsecret, cas, dumpstate, gatekeeper, neuralnetworks, power
+([vendor-hals.md](vendor-hals.md)) and widevine. `android-image diff` lists
+every entry with its reason.
 
 ## First HAL: `android.hardware.health` V4
 

@@ -9,7 +9,8 @@
 //!   before the boot starts.
 //! - `apexd`, `apexd-bootstrap`, `apexd-snapshotde`: APEXes are
 //!   pre-flattened; `apexd.status` goes to `activated` when `apexd` would
-//!   start and to `ready` when `apexd-snapshotde` would run.
+//!   start and to `ready` (with `apex.all.ready`) when `apexd-snapshotde`
+//!   would run.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, VecDeque};
@@ -186,9 +187,13 @@ impl GuestExecutor {
                 ))
             }
             "apexd-snapshotde" => {
+                // apexd's OnAllPackagesReady: libvintf reads the vendor
+                // APEXes' manifest fragments only once apex.all.ready is set.
                 let _ = self.set_property("apexd.status", "ready");
+                let _ = self.set_property("apex.all.ready", "true");
                 Some(Effect::Applied(
-                    "apexd role: no DE snapshot to take; apexd.status=ready".to_string(),
+                    "apexd role: no DE snapshot to take; apexd.status=ready, apex.all.ready=true"
+                        .to_string(),
                 ))
             }
             _ => None,

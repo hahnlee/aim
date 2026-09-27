@@ -1,0 +1,21 @@
+[package]
+name = "thermal"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "android.hardware.thermal IThermal V3 service over the Mac's thermal state and temperatures (host module `thermal`)"
+
+[[bin]]
+name = "thermal-service"
+path = "src/main.rs"
+
+# Installed as /vendor/bin/hw/<binary> (Cargo target names cannot hold dots).
+[package.metadata.vendor-hal]
+binary = "android.hardware.thermal-service.darwin"
+
+[dependencies]
+android_hardware_thermal = { path = "../aidl/android.hardware.thermal" }
+binder = { path = "../binder" }
+darwin-hostcall = { path = "../../crates/darwin-hostcall" }
+log = "0.4"

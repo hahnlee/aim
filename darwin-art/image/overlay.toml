@@ -67,6 +67,61 @@ reason = "the emulator's health HAL reads /sys/class/power_supply, which has no 
 path = "/vendor/etc/vintf/manifest/android.hardware.health-service.example.xml"
 reason = "IHealth/default is declared by our health HAL's fragment"
 
+# android.hardware.thermal, sensors and gnss (docs/vendor-hals.md): the
+# Mac's thermal state and temperatures, its ambient light sensor and lid
+# angle, and CoreLocation. Built by tools/build-vendor-hals.sh; their host
+# sides are the host-call modules `thermal`, `sensors` and `location`. The
+# power HAL stays the original (the vendor APEX's example service).
+
+[[add]]
+path = "/vendor/bin/hw/android.hardware.thermal-service.darwin"
+source = "_build/vendor-hals/bin/android.hardware.thermal-service.darwin"
+reason = "thermal HAL service (Rust, AIDL V3) reporting the Mac's thermal state via host-call"
+
+[[add]]
+path = "/vendor/etc/init/android.hardware.thermal-service.darwin.rc"
+source = "hal/thermal/android.hardware.thermal-service.darwin.rc"
+reason = "starts the thermal HAL"
+
+[[add]]
+path = "/vendor/etc/vintf/manifest/android.hardware.thermal-service.darwin.xml"
+source = "hal/thermal/android.hardware.thermal-service.darwin.xml"
+reason = "declares android.hardware.thermal.IThermal/default V3"
+
+[[remove]]
+path = "/apex/com.android.hardware.thermal"
+reason = "the example thermal HAL reports no temperatures and never throttles; ours serves IThermal/default from the Mac's thermal state"
+
+[[add]]
+path = "/vendor/bin/hw/android.hardware.sensors-service.darwin"
+source = "_build/vendor-hals/bin/android.hardware.sensors-service.darwin"
+reason = "sensors HAL service (Rust, AIDL V3): the Mac's ambient light sensor and lid angle via host-call"
+
+[[add]]
+path = "/vendor/etc/init/android.hardware.sensors-service.darwin.rc"
+source = "hal/sensors/android.hardware.sensors-service.darwin.rc"
+reason = "starts the sensors HAL"
+
+[[add]]
+path = "/vendor/etc/vintf/manifest/android.hardware.sensors-service.darwin.xml"
+source = "hal/sensors/android.hardware.sensors-service.darwin.xml"
+reason = "declares android.hardware.sensors.ISensors/default V3"
+
+[[add]]
+path = "/vendor/bin/hw/android.hardware.gnss-service.darwin"
+source = "_build/vendor-hals/bin/android.hardware.gnss-service.darwin"
+reason = "GNSS HAL service (Rust, AIDL V2) reporting CoreLocation fixes via host-call"
+
+[[add]]
+path = "/vendor/etc/init/android.hardware.gnss-service.darwin.rc"
+source = "hal/gnss/android.hardware.gnss-service.darwin.rc"
+reason = "starts the GNSS HAL"
+
+[[add]]
+path = "/vendor/etc/vintf/manifest/android.hardware.gnss-service.darwin.xml"
+source = "hal/gnss/android.hardware.gnss-service.darwin.xml"
+reason = "declares android.hardware.gnss.IGnss/default V2"
+
 # Graphics buffers (docs/graphics-buffers.md): IAllocator/default V2 and the
 # stable-C mapper `darwin`, memfd-backed buffers the host GPU imports. Built
 # by tools/build-vendor-hals.sh.
@@ -151,14 +206,14 @@ reason = "declares IComposer/default V4"
 # virtio consoles, the emulator's host services) and the examples fake
 # hardware, neither of which a Mac provides. Their `.rc` and vintf fragment
 # go, so the instance is undeclared and the original services take their
-# no-HAL paths; a HAL we replace later (composer, audio, sensors, camera,
-# bluetooth, gnss) is added back with its own fragment. The allocator,
-# mapper and GLES driver are replaced above. The binaries stay:
+# no-HAL paths; a HAL we replace later (composer, audio, camera, bluetooth)
+# is added back with its own fragment. The allocator, mapper, GLES driver,
+# sensors and GNSS are replaced above. The binaries stay:
 # nothing starts them. Kept, being software with no hardware behind it:
 # ClearKey DRM, the software KeyMint (with secure clock and shared secret),
 # identity credential, and the vendor APEXes authsecret, cas, dumpstate,
-# gatekeeper (nonsecure), neuralnetworks (CPU samples), power, thermal and
-# widevine.
+# gatekeeper (nonsecure), neuralnetworks (CPU samples), power and widevine.
+# The thermal APEX is replaced above.
 
 [[replace]]
 path = "/vendor/etc/vintf/manifest.xml"
@@ -211,7 +266,7 @@ reason = "declares the removed Google camera provider"
 
 [[remove]]
 path = "/vendor/etc/init/android.hardware.gnss-service.ranchu.rc"
-reason = "the ranchu GNSS HAL reads NMEA from QEMU's GNSS port; a CoreLocation HAL replaces it"
+reason = "the ranchu GNSS HAL reads NMEA from QEMU's GNSS port; our CoreLocation GNSS HAL replaces it"
 
 [[remove]]
 path = "/vendor/etc/vintf/manifest/android.hardware.gnss-service.ranchu.xml"
@@ -243,7 +298,7 @@ reason = "declares the removed ranchu radio HAL"
 
 [[remove]]
 path = "/vendor/etc/init/android.hardware.sensors-service-multihal.rc"
-reason = "the multihal loads goldfish sensors fed by QEMU; our sensors HAL replaces it (P5)"
+reason = "the multihal loads goldfish sensors fed by QEMU; our sensors HAL replaces it"
 
 [[remove]]
 path = "/vendor/etc/vintf/manifest/android.hardware.sensors-multihal.xml"
