@@ -192,34 +192,43 @@ fn kevent(kq: i32, ev: &libc::kevent64_s) -> i32 {
     unsafe { libc::kevent64(kq, ev, 1, std::ptr::null_mut(), 0, 0, std::ptr::null()) }
 }
 
-fn timer_event(id: u64, flags: u16, fflags: u32, data: i64, tid: i32) -> libc::kevent64_s {
+fn timer_event(id: u64, flags: u16, fflags: u32, data: i64, udata: u64) -> libc::kevent64_s {
     libc::kevent64_s {
         ident: id,
         filter: libc::EVFILT_TIMER,
         flags,
         fflags,
         data,
-        udata: tid as u64,
+        udata,
         ext: [0, 0],
     }
 }
 
-/// Unpark `tid` at `deadline`. None if no timer could be armed.
-fn arm(tid: i32, deadline: u64) -> Option<(i32, u64)> {
-    let id = NEXT_TIMER.fetch_add(1, SeqCst);
+/// `udata` of a POSIX timer's expiry, handed to `ptimer`; any other event
+/// unparks the tid in its `udata`.
+pub const PTIMER_EXPIRY: u64 = 1 << 63;
+
+/// A fresh identifier for [`arm_event`].
+pub fn timer_id() -> u64 {
+    NEXT_TIMER.fetch_add(1, SeqCst)
+}
+
+/// Fire timer `id` once at `deadline`, delivering `udata`. Returns the
+/// kqueue it is armed on, for [`disarm`].
+pub fn arm_event(id: u64, udata: u64, deadline: u64) -> Option<i32> {
     let rel = deadline.saturating_sub(monotonic()).max(1);
     let ev = timer_event(
         id,
         libc::EV_ADD | libc::EV_ONESHOT,
         libc::NOTE_NSECONDS | libc::NOTE_LEEWAY | libc::NOTE_CRITICAL,
         rel.min(i64::MAX as u64) as i64,
-        tid,
+        udata,
     );
     let mut stale = -1;
     for _ in 0..2 {
         let kq = timer_kq(stale)?;
         if kevent(kq, &ev) == 0 {
-            return Some((kq, id));
+            return Some(kq);
         }
         if crate::errno::last() != EBADF {
             return None;
@@ -229,7 +238,13 @@ fn arm(tid: i32, deadline: u64) -> Option<(i32, u64)> {
     None
 }
 
-fn disarm((kq, id): (i32, u64)) {
+/// Unpark `tid` at `deadline`. None if no timer could be armed.
+fn arm(tid: i32, deadline: u64) -> Option<(i32, u64)> {
+    let id = timer_id();
+    arm_event(id, tid as u32 as u64, deadline).map(|kq| (kq, id))
+}
+
+pub fn disarm((kq, id): (i32, u64)) {
     kevent(kq, &timer_event(id, libc::EV_DELETE, 0, 0, 0));
 }
 
@@ -266,7 +281,11 @@ fn timer_loop(kq: i32) {
             return;
         }
         for ev in &evs[..n as usize] {
-            super::thread::unpark(ev.udata as i32);
+            if ev.udata & PTIMER_EXPIRY != 0 {
+                super::ptimer::expired(ev.ident);
+            } else {
+                super::thread::unpark(ev.udata as i32);
+            }
         }
     }
 }

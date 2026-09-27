@@ -185,6 +185,45 @@ pub fn set_name(name: [u8; 16]) {
     }
 }
 
+/// The `comm` of this process's thread `tid`.
+pub fn name_of(tid: i32) -> Option<[u8; 16]> {
+    find(tid).map(|t| *t.name.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Set the `comm` of this process's thread `tid` (a write to its
+/// `/proc/<pid>/task/<tid>/comm`). Darwin names only the calling host
+/// thread, so another thread's host name stays.
+pub fn set_name_of(tid: i32, name: [u8; 16]) -> bool {
+    let Some(t) = find(tid) else {
+        return false;
+    };
+    *t.name.lock().unwrap_or_else(|e| e.into_inner()) = name;
+    if is_current(&t) {
+        let len = name.iter().position(|&b| b == 0).unwrap_or(15);
+        if let Ok(c) = std::ffi::CString::new(&name[..len]) {
+            // SAFETY: naming the calling thread.
+            unsafe { libc::pthread_setname_np(c.as_ptr()) };
+        }
+    }
+    true
+}
+
+/// The process a tid belongs to (a pid is its own main thread's tid).
+pub fn owner(tid: i32) -> i32 {
+    if tid >= TID_BASE {
+        (tid - TID_BASE) >> 12
+    } else {
+        tid
+    }
+}
+
+/// Every tid of this process, in order.
+pub fn tids() -> Vec<i32> {
+    let mut v: Vec<i32> = with_table(|t| t.keys().copied().collect());
+    v.sort_unstable();
+    v
+}
+
 pub fn name() -> [u8; 16] {
     current().map_or([0; 16], |t| {
         *t.name.lock().unwrap_or_else(|e| e.into_inner())
@@ -508,6 +547,7 @@ struct ForkLocks {
     timers: MutexGuard<'static, i32>,
     stacks: MutexGuard<'static, Vec<u64>>,
     signals: super::signal::ForkLocks,
+    ptimers: MutexGuard<'static, Vec<super::ptimer::Timer>>,
     threads: MutexGuard<'static, Option<HashMap<i32, Arc<Thread>>>>,
 }
 
@@ -531,6 +571,7 @@ pub fn fork_prepare() {
     let timers = super::park::fork_lock();
     let stacks = context::fork_lock();
     let signals = super::signal::fork_lock(me);
+    let ptimers = super::ptimer::fork_lock();
     let threads = THREADS.lock().unwrap_or_else(|e| e.into_inner());
     FORK_LOCKS.with(|f| {
         *f.borrow_mut() = Some(ForkLocks {
@@ -538,6 +579,7 @@ pub fn fork_prepare() {
             timers,
             stacks,
             signals,
+            ptimers,
             threads,
         })
     });
@@ -587,6 +629,7 @@ pub fn fork_child() {
     t.clear();
     t.insert(new.tid, new.clone());
     super::signal::fork_child(l.signals, old, &new);
+    super::ptimer::fork_child(l.ptimers);
     MAIN_PTHREAD.store(new.pthread.load(SeqCst), SeqCst);
     MAIN_THREAD.store(Arc::as_ptr(&new) as usize, SeqCst);
     LEADER_EXIT.store(-1, SeqCst);

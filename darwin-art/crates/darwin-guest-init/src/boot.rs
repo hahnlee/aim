@@ -216,6 +216,10 @@ pub fn request_stop() {
     STOP_REQUESTED.store(true, Ordering::Relaxed);
 }
 
+pub fn stop_requested() -> bool {
+    STOP_REQUESTED.load(Ordering::Relaxed)
+}
+
 /// A prepared boot.
 pub struct Boot {
     pub options: BootOptions,
@@ -598,6 +602,7 @@ impl Boot {
     /// fatal error or shutdown, or at the timeout.
     pub fn run(&mut self) -> &BootReport {
         let deadline = self.options.timeout.map(|t| Instant::now() + t);
+        self.executor.stop_at = deadline;
         let dry = self.options.mode == RunMode::DryRun;
         let mut blocked_since: Option<Instant> = None;
         let mut idle_logged = false;
@@ -612,7 +617,7 @@ impl Boot {
                 self.report.log.push("timeout reached".to_string());
                 break;
             }
-            if STOP_REQUESTED.load(Ordering::Relaxed) {
+            if stop_requested() {
                 self.report.log.push("stop requested".to_string());
                 break;
             }

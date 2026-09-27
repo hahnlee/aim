@@ -207,6 +207,12 @@ pub fn mmap(a: [u64; 6]) -> i64 {
     {
         return r;
     }
+    if flags & MAP_ANONYMOUS == 0
+        && fd >= 0
+        && let Some(e) = super::ashmem::before_mmap(fd, len, prot)
+    {
+        return e;
+    }
     let len = page_up(len);
     let mut addr = addr;
     let mut fixed = flags & MAP_FIXED != 0;

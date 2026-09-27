@@ -833,9 +833,29 @@ fn other_thread(who: u64) -> Option<i32> {
     (tid > 0 && !is_self(tid) && super::thread::find(tid).is_some()).then_some(tid)
 }
 
+/// The `who` of a call: for PRIO_PROCESS, 0 is the calling thread, as on
+/// Linux, and a thread of another process (true) is looked up as that
+/// process (Darwin has no per-thread nice value to reach).
+fn prio_who(a: &[u64; 6]) -> (u64, bool) {
+    if a[0] != PRIO_PROCESS {
+        return (a[1], false);
+    }
+    let who = if a[1] == 0 {
+        super::thread::gettid() as i32
+    } else {
+        a[1] as i32
+    };
+    let owner = super::thread::owner(who);
+    if owner != who && !is_self(owner) {
+        return (owner as u64, true);
+    }
+    (who as u32 as u64, false)
+}
+
 /// getpriority (141): the kernel's `20 - nice` for this process's (or one
 /// of its threads') priority; the host's for anything else.
 pub fn getpriority(a: [u64; 6]) -> i64 {
+    let a = [a[0], prio_who(&a).0, a[2], a[3], a[4], a[5]];
     if a[0] == PRIO_PROCESS && is_self(a[1] as i32) {
         return 20 - read(|id| id.priority) as i64;
     }
@@ -864,6 +884,13 @@ pub fn getpriority(a: [u64; 6]) -> i64 {
 /// setpriority (140).
 pub fn setpriority(a: [u64; 6]) -> i64 {
     let nice = (a[2] as i32).clamp(-20, 19);
+    let (who, foreign) = prio_who(&a);
+    if foreign {
+        // Accepted for a live process; not kept.
+        let r = getpriority([PRIO_PROCESS, who, 0, 0, 0, 0]);
+        return if r < 0 { r } else { 0 };
+    }
+    let a = [a[0], who, a[2], a[3], a[4], a[5]];
     if a[0] == PRIO_PROCESS && is_self(a[1] as i32) {
         return with(|id| {
             if nice < id.priority && !id.capable(CAP_SYS_NICE) {

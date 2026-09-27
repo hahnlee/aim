@@ -50,6 +50,8 @@ Everything but the Java world and the services noted below, on an M2 Pro.
 
 - **Result:** 40 services running after 30 s, 48 binder services
   registered with the original servicemanager, and 8,800 lines in logd.
+  With selinuxfs's classes (#203) logd holds about 1,070 lines after
+  44 s instead of 9,360 after 32 s: 8,390 of those were "Unknown class".
 - **Boot time:** init's queue first went idle after 12.0 s, and the last
   early service started at 13.5 s. About 8 s of that are four two-second
   grace periods for waits that only excluded or absent services end:
@@ -67,7 +69,7 @@ keeps exiting and init restarts it every 5 s.
 
 | Service | State | Why |
 | --- | --- | --- |
-| servicemanager, hwservicemanager | running | every access check logs "Unknown class" (#203) |
+| servicemanager, hwservicemanager | running | |
 | logd | running | its kernel-log and audit listeners do not start (no `/proc/kmsg`, `syslog(2)` or `NETLINK_AUDIT`: #207, #201) |
 | vndservicemanager | not declared | the image has no `vndservicemanager` service |
 | prng_seeder | running | |
@@ -133,3 +135,12 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
 - guest-init resolves symlinks in the image relative to the guest root, as
   a GSI's `/system_ext -> /system/system_ext` needs.
 - guest-init's shutdown stops services without running `onrestart`.
+- selinuxfs has the classes and permissions of the image's policy and an
+  `access` that allows everything, so `selinux_check_access` answers
+  quietly (#203).
+- `/dev/ashmem` exists (#195): audioserver's `MemoryHeapBase` no longer
+  fails with "Unable to open ashmem device".
+- POSIX timers, a writable `trace_marker` (#192), per-thread `comm` files
+  (#198), and `/proc/<tid>`, the scheduler calls and `tgkill` for every tid.
+- guest-init's wait for linkerconfig ends at `--timeout` and on SIGINT or
+  SIGTERM (#196).

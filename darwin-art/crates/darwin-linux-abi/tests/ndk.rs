@@ -184,6 +184,16 @@ fn procfs() {
     check("t_proc", &["two", "args"]);
 }
 
+#[test]
+fn posix_timers() {
+    check("t_timer", &[]);
+}
+
+#[test]
+fn ashmem() {
+    check("t_ashmem", &[]);
+}
+
 unsafe extern "C" {
     fn pthread_fchdir_np(fd: libc::c_int) -> libc::c_int;
 }
