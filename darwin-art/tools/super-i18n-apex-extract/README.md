@@ -15,7 +15,8 @@ EROFS layouts, compression algorithms, holes, overlaps, or malformed bounds are
 hard errors. The input is opened read-only and the output uses `create_new`.
 
 Use `INPUT - --path /system/apex` to list an image directory without extracting
-its files. Directory decoding is isolated in `src/directory.rs`. Use
+its files. GPT, LP, LZ4 and the EROFS directory and inode decoders are shared
+with `tools/android-image-extract` (`src/erofs/`). Use
 `INPUT OUTPUT --path /system/etc/classpaths/bootclasspath.pb` to extract the
 original platform classpath metadata; APEX modules carry their own metadata.
 
@@ -37,7 +38,7 @@ the selected inode and a built-in SHA-256 of the extracted APEX.
 Use `INPUT - --stat /system/bin/app_process64` to print the original inode's
 octal mode, numeric Android UID/GID and byte size without extracting file data.
 `--stat` requires stdout (`-`) and never changes host ownership. The decoder in
-`src/inode.rs` preserves compact 16-bit and extended 32-bit IDs according to the
+`tools/android-image-extract/src/erofs/inode.rs` preserves compact 16-bit and extended 32-bit IDs according to the
 [Linux EROFS disk format](https://github.com/torvalds/linux/blob/v6.12/fs/erofs/erofs_fs.h).
 This is image metadata, not the invoking process's credentials. Runtime `stat`
 projection and writable inode ownership must explicitly consume/persist their

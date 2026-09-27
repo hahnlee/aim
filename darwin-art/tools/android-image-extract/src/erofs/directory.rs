@@ -1,18 +1,19 @@
+//! EROFS directory blocks: 12-byte dirents followed by their names.
 use crate::{Result, invalid, le16, le64};
 
 /// Parse flat EROFS directory blocks without copying their file contents.
 pub fn entries(data: &[u8], block_size: usize) -> Result<Vec<(u64, Vec<u8>)>> {
     if block_size < 12 {
-        return Err(invalid("invalid directory block size").into());
+        return Err(invalid("invalid directory block size"));
     }
     let mut result = Vec::new();
     for block in data.chunks(block_size) {
         if block.len() < 12 {
-            return Err(invalid("truncated directory block").into());
+            return Err(invalid("truncated directory block"));
         }
         let names = usize::from(le16(block, 8)?);
         if names == 0 || names % 12 != 0 || names > block.len() {
-            return Err(invalid("invalid directory table length").into());
+            return Err(invalid("invalid directory table length"));
         }
         for index in 0..names / 12 {
             let entry = index * 12;
@@ -23,7 +24,7 @@ pub fn entries(data: &[u8], block_size: usize) -> Result<Vec<(u64, Vec<u8>)>> {
                 usize::from(le16(block, entry + 20)?)
             };
             if start < names || start > end || end > block.len() {
-                return Err(invalid("invalid directory name bounds").into());
+                return Err(invalid("invalid directory name bounds"));
             }
             let bytes = &block[start..end];
             let name_end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
@@ -33,7 +34,7 @@ pub fn entries(data: &[u8], block_size: usize) -> Result<Vec<(u64, Vec<u8>)>> {
                 || name.contains(&b'/')
                 || bytes[name_end..].iter().any(|&b| b != 0)
             {
-                return Err(invalid("invalid directory name").into());
+                return Err(invalid("invalid directory name"));
             }
             result.push((le64(block, entry)?, name.to_vec()));
         }

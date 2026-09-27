@@ -6,4 +6,5 @@ edition = "2024"
 publish = false
 
 [dependencies]
+android-image-extract = { path = "../android-image-extract" }
 darwin-art-fs-broker = { path = "../../crates/darwin-art-fs-broker" }

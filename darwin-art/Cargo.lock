@@ -53,6 +53,16 @@ name = "android-dso-namespace"
 version = "0.1.0"
 
 [[package]]
+name = "android-image-extract"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "darwin-art-fs-broker",
+ "flate2",
+ "sha2",
+]
+
+[[package]]
 name = "android-jni-proxy"
 version = "0.1.0"
 dependencies = [
@@ -516,6 +526,7 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 name = "super-i18n-apex-extract"
 version = "0.1.0"
 dependencies = [
+ "android-image-extract",
  "darwin-art-fs-broker",
 ]
 
