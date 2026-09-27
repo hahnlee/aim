@@ -1,0 +1,11 @@
+default	default
+test.	1st	1st	0
+test.test	2nd	2nd	0
+test.test2.	6th	6th	0
+test.test	5th	5th	1
+test.test1	3rd	3rd	1
+test.test2	7th	7th	1
+test.test3	3rd	3rd	1
+this.is.a.long.string	4th	4th	1
+testoneword	8th	8th	1
+testwordprefix	9th	9th	0

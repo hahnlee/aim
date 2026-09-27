@@ -1,0 +1,7 @@
+default	default
+persist.	1st		0
+persist.dot_prefix.	2nd		0
+persist.non_dot_prefix	3rd		0
+persist.exact_match			1
+persist.dot_prefix2.		4th	0
+persist.non_dot_prefix2		5th	0

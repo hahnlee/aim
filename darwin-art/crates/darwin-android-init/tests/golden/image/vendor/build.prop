@@ -1,0 +1,5 @@
+# Test fixture: later files override earlier ones, ro.* included, before any is set.
+ro.override.me=vendor
+dalvik.vm.heapsize=512m
+ro.debuggable=yes
+debug.too.long.for.a.mutable.property=0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789

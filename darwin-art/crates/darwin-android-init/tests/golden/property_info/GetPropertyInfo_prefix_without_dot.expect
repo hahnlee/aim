@@ -1,0 +1,9 @@
+persist.radio	1st	1st
+persist.radio.subproperty	1st	1st
+persist.radiowords	1st	1st
+persist.radio.long.long.long.sub.property	1st	1st
+persist.radio.something.else.here	2nd	2nd
+persist.radio.something.else.here2	2nd	2nd
+persist.radio.something.else.here.after	2nd	2nd
+persist.radio.something.else.nothere	1st	1st
+persist.radio.something.else	1st	1st
