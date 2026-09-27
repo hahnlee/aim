@@ -1,0 +1,23 @@
+[package]
+name = "android_hardware_audio_core"
+version = "3.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "android.hardware.audio.core V3, Rust backend, generated from the frozen AIDL API"
+# The binder macros expand here, so this crate needs the vendor cfgs too.
+build = "../../binder/build.rs"
+
+[lib]
+path = "../../../_build/vendor-hals/aidl/android.hardware.audio.core-V3/lib.rs"
+
+[dependencies]
+android_hardware_audio_common = { path = "../android.hardware.audio.common" }
+android_hardware_audio_core_sounddose = { path = "../android.hardware.audio.core.sounddose" }
+android_hardware_audio_effect = { path = "../android.hardware.audio.effect" }
+android_hardware_common = { path = "../android.hardware.common" }
+android_hardware_common_fmq = { path = "../android.hardware.common.fmq" }
+android_media_audio_common_types = { path = "../android.media.audio.common.types" }
+async-trait = "0.1"
+binder = { path = "../../binder" }
+static_assertions = "1"

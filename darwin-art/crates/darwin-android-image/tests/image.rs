@@ -384,6 +384,18 @@ fn original_identity_comes_from_file_or_flag() {
     let bare = fixture.temp.0.join("bare");
     fs::create_dir(&bare).unwrap();
     assert_eq!(identity::original_identity(&bare, None).unwrap(), None);
+
+    // android-image-extract records the archive's identity beside the tree.
+    let beside = identity::extraction_identity_path(&bare);
+    assert_eq!(beside, fixture.temp.0.join("bare.identity"));
+    write(&beside, &format!("{}\n", "3".repeat(64)));
+    assert_eq!(
+        identity::original_identity(&bare, None).unwrap(),
+        Some("3".repeat(64))
+    );
+    assert!(identity::original_identity(&bare, Some(ORIGINAL_ID)).is_err());
+    write(&bare.join(".identity"), &format!("{ORIGINAL_ID}\n"));
+    assert!(identity::original_identity(&bare, None).is_err());
 }
 
 #[test]

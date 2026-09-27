@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use android_hardware_health::android::hardware::health::{
+use android_hardware_health::aidl::android::hardware::health::{
     BatteryCapacityLevel::BatteryCapacityLevel, BatteryChargingPolicy::BatteryChargingPolicy,
     BatteryHealth::BatteryHealth, BatteryHealthData::BatteryHealthData,
     BatteryStatus::BatteryStatus, DiskStats::DiskStats, HealthInfo::HealthInfo,

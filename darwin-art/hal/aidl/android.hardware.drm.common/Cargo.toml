@@ -1,15 +1,15 @@
 [package]
-name = "android_hardware_common"
-version = "2.0.0"
+name = "android_hardware_drm_common"
+version = "1.0.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
-description = "android.hardware.common V2, Rust backend, generated from the frozen AIDL API"
+description = "android.hardware.drm.common V1, Rust backend, generated from the frozen AIDL API"
 # The binder macros expand here, so this crate needs the vendor cfgs too.
 build = "../../binder/build.rs"
 
 [lib]
-path = "../../../_build/vendor-hals/aidl/android.hardware.common-V2/lib.rs"
+path = "../../../_build/vendor-hals/aidl/android.hardware.drm.common-V1/lib.rs"
 
 [dependencies]
 async-trait = "0.1"

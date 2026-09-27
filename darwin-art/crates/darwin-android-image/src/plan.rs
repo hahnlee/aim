@@ -10,7 +10,8 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 /// Root files the tool owns in an image tree. `.identity` names the tree's
-/// content identity (the original's extraction writes one too);
+/// content identity (the original's extraction records its identity beside
+/// the tree instead, see `identity::extraction_identity_path`);
 /// `.overlay-receipt` is the derived identity's preimage.
 pub const IDENTITY_FILE: &str = ".identity";
 pub const RECEIPT_FILE: &str = ".overlay-receipt";

@@ -14,3 +14,4 @@ path = "../../../_build/vendor-hals/aidl/android.hardware.health-V4/lib.rs"
 [dependencies]
 async-trait = "0.1"
 binder = { path = "../../binder" }
+static_assertions = "1"

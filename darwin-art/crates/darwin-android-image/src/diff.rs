@@ -14,7 +14,7 @@ pub struct Header<'a> {
 
 pub fn render(header: &Header<'_>, plan: &Plan) -> String {
     let mut out = String::new();
-    let unknown = "unknown (no .identity; pass --original-identity)";
+    let unknown = "unknown (no ORIGDIR.identity; pass --original-identity)";
     writeln!(out, "original  {}", header.original).unwrap();
     writeln!(
         out,

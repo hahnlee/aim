@@ -128,3 +128,168 @@ reason = "part of the emulator's GLES driver"
 [[remove]]
 path = "/vendor/lib64/egl/libGLESv2_emulation.so"
 reason = "part of the emulator's GLES driver"
+# The emulator's vendor HALs. The goldfish/ranchu ones talk to QEMU (pipes,
+# virtio consoles, the emulator's host services) and the examples fake
+# hardware, neither of which a Mac provides. Their `.rc` and vintf fragment
+# go, so the instance is undeclared and the original services take their
+# no-HAL paths; a HAL we replace later (composer, audio, sensors, camera,
+# bluetooth, gnss) is added back with its own fragment. The allocator,
+# mapper and GLES driver are replaced above. The binaries stay:
+# nothing starts them. Kept, being software with no hardware behind it:
+# ClearKey DRM, the software KeyMint (with secure clock and shared secret),
+# identity credential, and the vendor APEXes authsecret, cas, dumpstate,
+# gatekeeper (nonsecure), neuralnetworks (CPU samples), power, thermal and
+# widevine.
+
+[[replace]]
+path = "/vendor/etc/vintf/manifest.xml"
+source = "image/vendor/etc/vintf/manifest.xml"
+reason = "drops the HIDL audio.effect@7.0 IEffectsFactory the removed goldfish audio HAL served; a declared HIDL HAL with no server blocks its clients"
+
+[[remove]]
+path = "/vendor/etc/init/android.hardware.audio.service.rc"
+reason = "goldfish audio (HIDL 7.1 and effects) plays through QEMU's audio device; our CoreAudio audio.core HAL replaces it (P5)"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.audio@7.1-impl.ranchu.xml"
+reason = "declares the removed goldfish audio HAL's IDevicesFactory"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/bluetooth_audio.xml"
+reason = "Bluetooth audio providers live in the removed audio HAL process and need a Bluetooth controller"
+
+[[remove]]
+path = "/vendor/etc/init/android.hardware.biometrics.fingerprint-service.ranchu.rc"
+reason = "the ranchu fingerprint HAL is driven from the emulator console; there is no fingerprint sensor behind it"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.biometrics.fingerprint-service.ranchu.xml"
+reason = "declares the removed ranchu fingerprint HAL"
+
+[[remove]]
+path = "/vendor/etc/init/bluetooth-service-default.rc"
+reason = "the default Bluetooth HAL needs an HCI device (QEMU's virtio console); our CoreBluetooth virtual HCI replaces it"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/bluetooth-service-default.xml"
+reason = "declares the removed default Bluetooth HAL"
+
+[[remove]]
+path = "/vendor/etc/init/android.hardware.camera.provider.ranchu.rc"
+reason = "the ranchu camera provider streams QEMU's virtual cameras; our AVFoundation camera HAL replaces it"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.camera.provider.ranchu.xml"
+reason = "declares the removed ranchu camera provider"
+
+[[remove]]
+path = "/vendor/etc/init/android.hardware.camera.provider@2.7-service-google.rc"
+reason = "Google's emulated camera provider also needs QEMU's camera pipes"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.camera.provider@2.7-service-google.xml"
+reason = "declares the removed Google camera provider"
+
+[[remove]]
+path = "/vendor/etc/init/android.hardware.gnss-service.ranchu.rc"
+reason = "the ranchu GNSS HAL reads NMEA from QEMU's GNSS port; a CoreLocation HAL replaces it"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.gnss-service.ranchu.xml"
+reason = "declares the removed ranchu GNSS HAL"
+
+[[remove]]
+path = "/vendor/etc/init/hwc3.rc"
+reason = "the ranchu composer presents through the emulator's host GPU; our composer replaces it (P4)"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/hwc3.xml"
+reason = "declares the removed ranchu composer"
+
+[[remove]]
+path = "/vendor/etc/init/android.hardware.media.c2@1.0-service-goldfish.rc"
+reason = "goldfish Codec2 decodes on the emulator host; the original software codecs (media.swcodec) serve instead"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.media.c2@1.0-service-goldfish.xml"
+reason = "declares the removed goldfish Codec2 store (HIDL)"
+
+[[remove]]
+path = "/vendor/etc/init/android.hardware.radio.ranchu.rc"
+reason = "the ranchu radio HAL talks to QEMU's modem; telephony is undeclared"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.radio.ranchu.xml"
+reason = "declares the removed ranchu radio HAL"
+
+[[remove]]
+path = "/vendor/etc/init/android.hardware.sensors-service-multihal.rc"
+reason = "the multihal loads goldfish sensors fed by QEMU; our sensors HAL replaces it (P5)"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.sensors-multihal.xml"
+reason = "declares the removed sensors multihal"
+
+[[remove]]
+path = "/vendor/etc/init/android.hardware.usb-service.example.rc"
+reason = "the example USB HAL drives Type-C sysfs ports; the device has no USB port role"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.usb-service.example.xml"
+reason = "declares the removed example USB HAL"
+
+[[remove]]
+path = "/vendor/etc/init/android.hardware.wifi-service.rc"
+reason = "the Wi-Fi HAL drives an nl80211 radio (QEMU's virtio-wifi); the device exposes one Ethernet-like network"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.wifi-service.xml"
+reason = "declares the removed Wi-Fi HAL"
+
+[[remove]]
+path = "/vendor/etc/init/hostapd.android.rc"
+reason = "hostapd needs an nl80211 radio; there is no Wi-Fi"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.wifi.hostapd.xml"
+reason = "declares the removed hostapd"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.wifi.supplicant.xml"
+reason = "declares wpa_supplicant (a lazy init.ranchu.rc service) on wlan0; there is no Wi-Fi"
+
+[[remove]]
+path = "/vendor/etc/init/health-storage-default.rc"
+reason = "the default storage-health HAL runs f2fs/UFS maintenance through sysfs; the data store is an APFS directory"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/health-storage-default.xml"
+reason = "declares the removed storage-health HAL"
+
+[[remove]]
+path = "/vendor/etc/init/lights-default.rc"
+reason = "the example lights HAL fakes LEDs and a backlight the device does not have"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/lights-default.xml"
+reason = "declares the removed example lights HAL"
+
+[[remove]]
+path = "/apex/com.android.hardware.contexthub"
+reason = "the example context hub fakes a sensor hub the device does not have"
+
+[[remove]]
+path = "/apex/com.android.hardware.rebootescrow"
+reason = "the default reboot-escrow HAL keeps its key on a /dev/block/pmem device the device does not have"
+
+[[remove]]
+path = "/apex/com.android.hardware.threadnetwork"
+reason = "simulated Thread radio; Thread is undeclared"
+
+[[remove]]
+path = "/apex/com.android.hardware.uwb"
+reason = "UWB radio; UWB is undeclared"
+
+[[remove]]
+path = "/apex/com.android.hardware.vibrator"
+reason = "the example vibrator fakes a motor; the vibrator is undeclared"

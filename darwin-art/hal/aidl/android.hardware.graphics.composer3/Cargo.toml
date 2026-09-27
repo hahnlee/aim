@@ -1,18 +1,19 @@
 [package]
-name = "android_hardware_graphics_allocator"
-version = "2.0.0"
+name = "android_hardware_graphics_composer3"
+version = "4.0.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
-description = "android.hardware.graphics.allocator V2, Rust backend, generated from the frozen AIDL API"
+description = "android.hardware.graphics.composer3 V4, Rust backend, generated from the frozen AIDL API"
 # The binder macros expand here, so this crate needs the vendor cfgs too.
 build = "../../binder/build.rs"
 
 [lib]
-path = "../../../_build/vendor-hals/aidl/android.hardware.graphics.allocator-V2/lib.rs"
+path = "../../../_build/vendor-hals/aidl/android.hardware.graphics.composer3-V4/lib.rs"
 
 [dependencies]
 android_hardware_common = { path = "../android.hardware.common" }
+android_hardware_drm_common = { path = "../android.hardware.drm.common" }
 android_hardware_graphics_common = { path = "../android.hardware.graphics.common" }
 async-trait = "0.1"
 binder = { path = "../../binder" }

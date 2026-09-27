@@ -8,7 +8,7 @@ mod service;
 
 use std::time::Duration;
 
-use android_hardware_health::android::hardware::health::IHealth::BnHealth;
+use android_hardware_health::aidl::android::hardware::health::IHealth::BnHealth;
 use binder::BinderFeatures;
 use darwin_hostcall::{guest, health, module};
 

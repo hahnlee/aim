@@ -83,6 +83,8 @@ pub struct LinuxRunOptions {
     pub path_map: bool,
     pub identity: bool,
     pub inherit_env: bool,
+    pub binder: bool,
+    pub seclabel: bool,
 }
 
 impl LinuxRunOptions {
@@ -91,6 +93,8 @@ impl LinuxRunOptions {
         path_map: true,
         identity: true,
         inherit_env: true,
+        binder: true,
+        seclabel: true,
     };
 
     /// Which contract options a `linux-run` binary accepts, from its usage
@@ -108,6 +112,8 @@ impl LinuxRunOptions {
             path_map: usage.contains("--path-map"),
             identity: usage.contains("--identity"),
             inherit_env: usage.contains("--inherit-env"),
+            binder: usage.contains("--binder"),
+            seclabel: usage.contains("--seclabel"),
         }
     }
 
@@ -122,6 +128,12 @@ impl LinuxRunOptions {
         if !self.inherit_env {
             out.push("--inherit-env");
         }
+        if !self.binder {
+            out.push("--binder");
+        }
+        if !self.seclabel {
+            out.push("--seclabel");
+        }
         out
     }
 }
@@ -132,6 +144,9 @@ pub struct LinuxRun {
     pub binary: PathBuf,
     pub image: PathBuf,
     pub path_map_file: PathBuf,
+    /// The bootstrap name of the binder host serving the guest's binder
+    /// devices (docs/guest-init-contract.md, section 1).
+    pub binder: Option<String>,
     pub trace: bool,
     pub options: LinuxRunOptions,
 }
@@ -154,6 +169,18 @@ impl LinuxRun {
         }
         if self.options.inherit_env {
             out.push("--inherit-env".to_string());
+        }
+        if self.options.binder
+            && let Some(name) = &self.binder
+        {
+            out.push("--binder".to_string());
+            out.push(name.clone());
+        }
+        // An empty label is one init would compute from the executable's
+        // file context, which needs the policy; the layer then reports none.
+        if self.options.seclabel && !spec.identity.seclabel.is_empty() {
+            out.push("--seclabel".to_string());
+            out.push(spec.identity.seclabel.clone());
         }
         if self.trace {
             out.push("--trace".to_string());

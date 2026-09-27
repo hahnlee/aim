@@ -5,13 +5,11 @@
 #   variant, compiled from the pinned AOSP sources over the image's
 #   libbinder_ndk.so;
 # - aidl/*: the AIDL-generated Rust code of each stable interface;
-# - the services, which reach their host side through darwin-hostcall.
+# - the services and in-process driver libraries, which reach their host
+#   side through darwin-hostcall.
 [workspace]
 members = [
-    "aidl/android.hardware.common",
-    "aidl/android.hardware.graphics.allocator",
-    "aidl/android.hardware.graphics.common",
-    "aidl/android.hardware.health",
+    "aidl/*",
     "binder",
     "binder-ndk-sys",
     "graphics/allocator",
