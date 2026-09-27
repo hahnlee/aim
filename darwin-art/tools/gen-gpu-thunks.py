@@ -91,6 +91,16 @@ GUEST = {
     # Callbacks the host never makes.
     "eglSetBlobCacheFuncsANDROID": "egl", "eglDebugMessageControlKHR": "egl",
     "glDebugMessageCallback": "gl", "glDebugMessageCallbackKHR": "gl",
+    # GL_OES_EGL_image_external over 2D textures (ANGLE's Metal backend
+    # lacks it).
+    "glGetString": "external", "glGetStringi": "external",
+    "glGetIntegerv": "external", "glBindTexture": "external",
+    "glEGLImageTargetTexture2DOES": "external", "glTexParameteri": "external",
+    "glTexParameterf": "external", "glTexParameteriv": "external",
+    "glTexParameterfv": "external", "glGetTexParameteriv": "external",
+    "glGetTexParameterfv": "external", "glShaderSource": "external",
+    "glLinkProgram": "external", "glUniform1i": "external",
+    "glUniform1iv": "external",
 }
 
 

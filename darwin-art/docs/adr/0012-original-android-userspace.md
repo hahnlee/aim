@@ -49,8 +49,11 @@ programs, and implement only what lies below it.
      `libbinder_ndk`) is started from `/vendor/bin/hw` like any vendor HAL. It
      calls a host-side implementation (Rust) over host-call, which uses
      CoreAudio, Metal, AppKit and IOKit.
-   - The composer may become a host-native exception once graphics shows the
-     need; that is decided in the graphics phase.
+   - The composer is not an exception (decided in P4): it is a guest HAL
+     like the others. Its host module talks to a display server process,
+     `darwin-display`, which owns the macOS window, because AppKit needs a
+     main thread and `linux-run` gives that to the guest
+     ([composer.md](../composer.md)).
 4. **Exceptions, kept minimal and explicit.** Where the original cannot run
    as-is, we patch or rebuild it from AOSP source with the smallest
    maintainable change, and list it as a `replace` in the overlay manifest.
@@ -332,6 +335,40 @@ is `crates/darwin-linux-abi/tests/art.rs`.
   - `/sys/kernel/tracing/trace_marker` does not exist (libcutils trace).
   - ART's statsd metrics are stubbed until `statslog_art` is generated
     (#162).
+
+## P4 composer (2026-09-28)
+
+Details in [composer.md](../composer.md).
+
+- **The original SurfaceFlinger composes into a macOS window.** Our
+  composer3 V4 HAL serves one display (id 0), the window.
+  `guest-init --run` starts servicemanager, hwservicemanager, the allocator,
+  the composer and SurfaceFlinger. SurfaceFlinger's RenderEngine (Skia on
+  GLES) runs on ANGLE and reaches its main loop, and it starts the original
+  bootanimation. That animation plays in the window at 60 fps
+  (`screencapture -l`) in the runs where it survives its first second. It
+  is often SIGKILLed early by an unidentified sender (composer.md, "Boot").
+- **The window is in a separate host process.** `darwin-display` owns the
+  NSWindow, a `CAMetalLayer` and a `CVDisplayLink`, on the AppKit main
+  thread. The host module `display` (id 3) in the composer's `linux-run`
+  sends it each client target's memfd once, then 56-byte present records.
+  The server maps the memfd, and a present is one render pass from a
+  no-copy linear texture into the drawable.
+- **Vsync comes from the display, not a timer.** It is taken from the
+  display link's timing model (`inOutputTime` minus whole periods):
+  intervals have an SD of 0.4 µs, against about 1 ms for the callback
+  times. Records go to an fd the HAL reads, since host code never calls the
+  guest.
+- **Client composition only, and no fences.** A present returns no fence,
+  and the HAL reports `PRESENT_FENCE_IS_NOT_RELIABLE`.
+- **External textures are emulated in the GLES driver.** ANGLE's Metal
+  backend lacks `GL_OES_EGL_image_external`, which RenderEngine requires.
+  The driver maps external targets onto 2D textures on hidden texture
+  units.
+- **Measured (M2 Pro, 1080×1920 at 60 Hz).** A present costs 0.6–0.7 ms
+  from request to GPU done, of which 0.13–0.16 ms is GPU time. The
+  RenderEngine shader cache takes 12.7 s cold and 0.43 s with ANGLE's cache
+  warm.
 
 ## Phases
 

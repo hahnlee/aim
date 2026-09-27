@@ -85,6 +85,8 @@ pub struct LinuxRunOptions {
     pub inherit_env: bool,
     pub binder: bool,
     pub seclabel: bool,
+    pub gpu: bool,
+    pub display: bool,
 }
 
 impl LinuxRunOptions {
@@ -95,6 +97,8 @@ impl LinuxRunOptions {
         inherit_env: true,
         binder: true,
         seclabel: true,
+        gpu: true,
+        display: true,
     };
 
     /// Which contract options a `linux-run` binary accepts, from its usage
@@ -114,6 +118,8 @@ impl LinuxRunOptions {
             inherit_env: usage.contains("--inherit-env"),
             binder: usage.contains("--binder"),
             seclabel: usage.contains("--seclabel"),
+            gpu: usage.contains("--gpu"),
+            display: usage.contains("--display"),
         }
     }
 
@@ -147,6 +153,11 @@ pub struct LinuxRun {
     /// The bootstrap name of the binder host serving the guest's binder
     /// devices (docs/guest-init-contract.md, section 1).
     pub binder: Option<String>,
+    /// Host devices every service may use: the host GPU libraries behind
+    /// the GLES driver and the display server behind the composer
+    /// (docs/guest-init-contract.md, section 1).
+    pub gpu: Option<PathBuf>,
+    pub display: Option<PathBuf>,
     pub trace: bool,
     pub options: LinuxRunOptions,
 }
@@ -181,6 +192,15 @@ impl LinuxRun {
         if self.options.seclabel && !spec.identity.seclabel.is_empty() {
             out.push("--seclabel".to_string());
             out.push(spec.identity.seclabel.clone());
+        }
+        for (flag, on, value) in [
+            ("--gpu", self.options.gpu, &self.gpu),
+            ("--display", self.options.display, &self.display),
+        ] {
+            if let (true, Some(value)) = (on, value) {
+                out.push(flag.to_string());
+                out.push(value.display().to_string());
+            }
         }
         if self.trace {
             out.push("--trace".to_string());

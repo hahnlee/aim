@@ -14,6 +14,10 @@
 //!   There is deliberately no copying fallback: a silent multi-GB copy is the
 //!   cost this design exists to avoid.
 //!
+//! - The original is resolved first: `clonefile(2)` does not follow a
+//!   symlink, so cloning a link to the original would give a link, and the
+//!   overlay would be applied to the original through it.
+//!
 //! The tree is built in a hidden sibling of OUTDIR (same volume, so the
 //! final rename is atomic) and published with `renamex_np(RENAME_EXCL)`, so
 //! a concurrent build of the same identity cannot be clobbered and readers
@@ -53,6 +57,8 @@ pub fn assemble(
     if let Some(outcome) = existing(out, identity)? {
         return Ok(outcome);
     }
+    let original =
+        &fs::canonicalize(original).map_err(|error| format!("{}: {error}", original.display()))?;
     let name = out
         .file_name()
         .ok_or_else(|| format!("{}: OUTDIR needs a final path component", out.display()))?;
@@ -60,6 +66,13 @@ pub fn assemble(
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
     };
+    if resolve(&parent.join(name)).starts_with(original) {
+        return Err(format!(
+            "{}: OUTDIR is the original {} or inside it",
+            out.display(),
+            original.display()
+        ));
+    }
     fs::create_dir_all(&parent).map_err(|error| format!("{}: {error}", parent.display()))?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -80,6 +93,28 @@ pub fn assemble(
                 return Ok(outcome);
             }
             Err(error)
+        }
+    }
+}
+
+/// `path` with its longest existing prefix resolved (symlinks, `..`).
+fn resolve(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut prefix = path;
+    loop {
+        if let Ok(real) = fs::canonicalize(prefix) {
+            return rest.iter().rev().fold(real, |p, name| p.join(name));
+        }
+        match (prefix.parent(), prefix.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                prefix = if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                };
+            }
+            _ => return path.to_path_buf(),
         }
     }
 }
@@ -112,6 +147,16 @@ fn existing(out: &Path, identity: &Identity) -> Result<Option<Outcome>, String> 
 
 fn build(plan: &Plan, original: &Path, identity: &Identity, staging: &Path) -> Result<(), String> {
     clone_tree(original, staging)?;
+    // Everything below writes through `staging`; it must be the clone.
+    match fs::symlink_metadata(staging) {
+        Ok(metadata) if metadata.is_dir() => {}
+        _ => {
+            return Err(format!(
+                "{}: the clone is not a directory",
+                staging.display()
+            ));
+        }
+    }
     let context = |path: &Path| {
         let path = path.to_path_buf();
         move |error: io::Error| format!("{}: {error}", path.display())

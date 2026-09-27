@@ -92,6 +92,29 @@ other call is a plain thunk.
   `EGL_ANDROID_recordable`, `EGL_ANDROID_framebuffer_target`,
   `EGL_ANDROID_presentation_time`, `EGL_KHR_swap_buffers_with_damage`.
 
+## External textures
+
+Skia (SurfaceFlinger's RenderEngine, HWUI) samples every buffer it only
+reads through `GL_TEXTURE_EXTERNAL_OES`, which ANGLE's Metal backend does
+not offer. RenderEngine aborts without it. `hal/gles/src/external.rs`
+emulates `GL_OES_EGL_image_external` and `_essl3` over 2D textures, as
+ANGLE's Vulkan backend does:
+
+- A unit's external binding point is kept apart from its 2D one, since
+  callers cache both. It lives in the 2D binding of a hidden unit
+  `u + K`, where `K` is half the host's combined units, and the
+  guest is told it has `K` units. Binding, `glTexParameter*`,
+  `glGetTexParameter*`, `glEGLImageTargetTexture2DOES` and
+  `GL_TEXTURE_BINDING_EXTERNAL_OES` on the external target act on the
+  hidden unit.
+- `glShaderSource` turns `samplerExternalOES` into `sampler2D` and drops
+  the extension's `#extension` lines (keeping line numbers). It records
+  the samplers' names per shader. After `glLinkProgram`, their locations
+  point at the hidden units: `K` at link time, and `glUniform1i`/`1iv`
+  add `K`.
+- The extension names are added to `GL_EXTENSIONS` and to
+  `glGetStringi`.
+
 ## Synchronization
 
 There are no sync-file fences yet. A present waits for the GPU (`glFinish`)

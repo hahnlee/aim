@@ -42,9 +42,12 @@ pub const FN_VERSION: u32 = 0;
 
 /// Linux errno values used by the host-call layer and its modules.
 pub mod errno {
+    pub const EBADF: i32 = 9;
     pub const ENODEV: i32 = 19;
     pub const EINVAL: i32 = 22;
     pub const ENOSYS: i32 = 38;
+    pub const ENOTCONN: i32 = 107;
+    pub const ECONNREFUSED: i32 = 111;
 }
 
 /// Module ids. They are fixed like syscall numbers: never reused, never
@@ -57,6 +60,8 @@ pub mod module {
     pub const HEALTH: u32 = 1;
     /// EGL and OpenGL ES over the host's ANGLE (the GLES driver's host side).
     pub const GPU: u32 = 2;
+    /// The display server's window (the composer HAL's host side).
+    pub const DISPLAY: u32 = 3;
 }
 
 /// Module [`module::HEALTH`]: the host's battery, for
@@ -187,6 +192,114 @@ pub mod gpu {
     const _: () = assert!(core::mem::size_of::<Present>() == 24);
 }
 
+/// Module [`module::DISPLAY`]: the macOS window that shows a display, for
+/// the composer HAL (`docs/composer.md`).
+///
+/// A display is served by the display server (`darwin-display`, named by
+/// `linux-run --display`), which owns the window and its display link. The
+/// composer shows graphics buffers there without copying them: the server
+/// maps each buffer's memory once and presents it with one GPU pass.
+/// Asynchronous events (vsync) arrive as [`Event`] records on a descriptor
+/// the guest reads, since host code never calls guest code.
+pub mod display {
+    pub const VERSION: u32 = 1;
+
+    /// Connect to the display server and describe display
+    /// [`Connect::display`]. Returns a new guest fd that yields [`Event`]
+    /// records, `-ENODEV` without a display server, or `-ECONNREFUSED`
+    /// when it is not running. A second connect replaces the first.
+    pub const FN_CONNECT: u32 = 1;
+    /// Give the server a graphics buffer ([`Import`]). Returns 0, or
+    /// `-EBADF`/`-EINVAL` for a bad fd or layout, `-ENOTCONN` before
+    /// [`FN_CONNECT`].
+    pub const FN_IMPORT: u32 = 2;
+    /// Show an imported buffer ([`Buffer`]). Returns 0 or `-ENOTCONN`.
+    pub const FN_PRESENT: u32 = 3;
+    /// Forget an imported buffer ([`Buffer`]). Returns 0 or `-ENOTCONN`.
+    pub const FN_RELEASE: u32 = 4;
+    /// Start or stop [`event::VSYNC`] records ([`SetVsync`]). Returns 0 or
+    /// `-ENOTCONN`.
+    pub const FN_SET_VSYNC: u32 = 5;
+
+    /// Argument block of [`FN_CONNECT`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Connect {
+        /// In: display index (0 is the main display).
+        pub display: u32,
+        /// Out: the display mode, in pixels.
+        pub width: u32,
+        pub height: u32,
+        /// Out: dots per inch times 1000.
+        pub dpi_x_milli: u32,
+        pub dpi_y_milli: u32,
+        pub _reserved: u32,
+        /// Out: nominal time between vsyncs.
+        pub vsync_period_ns: u64,
+    }
+
+    /// Argument block of [`FN_IMPORT`]. The buffer is `length` bytes of
+    /// `fd` from offset 0 (docs/graphics-buffers.md): rows of
+    /// `stride_bytes`, the top row first.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Import {
+        /// The buffer's guest fd; the server keeps its own reference.
+        pub fd: i32,
+        /// `PixelFormat` of the buffer.
+        pub format: i32,
+        pub width: u32,
+        pub height: u32,
+        pub stride_bytes: u32,
+        pub _reserved: u32,
+        /// A multiple of the page size, covering all the pixels.
+        pub length: u64,
+        /// The caller's name for the buffer in later calls.
+        pub id: u64,
+    }
+
+    /// Argument block of [`FN_PRESENT`] and [`FN_RELEASE`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Buffer {
+        pub id: u64,
+    }
+
+    /// Argument block of [`FN_SET_VSYNC`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct SetVsync {
+        pub enabled: u32,
+    }
+
+    /// [`Event::kind`] values.
+    pub mod event {
+        /// A vsync: [`super::Event::timestamp_ns`] is when it happened and
+        /// [`super::Event::period_ns`] the time to the next one.
+        pub const VSYNC: u32 = 1;
+    }
+
+    /// A record read from the fd [`FN_CONNECT`] returns. Times are the
+    /// guest's `CLOCK_MONOTONIC`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Event {
+        /// One of [`event`].
+        pub kind: u32,
+        pub _reserved: u32,
+        pub timestamp_ns: i64,
+        pub period_ns: i64,
+        /// When the server sent the record.
+        pub sent_ns: i64,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Connect>() == 32);
+    const _: () = assert!(core::mem::size_of::<Import>() == 40);
+    const _: () = assert!(core::mem::size_of::<Buffer>() == 8);
+    const _: () = assert!(core::mem::size_of::<SetVsync>() == 4);
+    const _: () = assert!(core::mem::size_of::<Event>() == 32);
+}
+
 /// A host module, as linked into the syscall layer's registry.
 pub struct HostModule {
     pub id: u32,
@@ -304,6 +417,44 @@ pub mod guest {
     /// Copy the current draw surface into an imported buffer.
     pub fn gpu_present(args: &mut gpu::Present) -> Result<(), Errno> {
         call_with(module::GPU, gpu::FN_PRESENT, args).map(drop)
+    }
+
+    /// Connect to the display server; returns the event fd.
+    pub fn display_connect(args: &mut display::Connect) -> Result<i32, Errno> {
+        call_with(module::DISPLAY, display::FN_CONNECT, args).map(|fd| fd as i32)
+    }
+
+    /// Give the display server a graphics buffer.
+    pub fn display_import(args: &mut display::Import) -> Result<(), Errno> {
+        call_with(module::DISPLAY, display::FN_IMPORT, args).map(drop)
+    }
+
+    /// Show an imported buffer.
+    pub fn display_present(id: u64) -> Result<(), Errno> {
+        call_with(
+            module::DISPLAY,
+            display::FN_PRESENT,
+            &mut display::Buffer { id },
+        )
+        .map(drop)
+    }
+
+    /// Forget an imported buffer.
+    pub fn display_release(id: u64) -> Result<(), Errno> {
+        call_with(
+            module::DISPLAY,
+            display::FN_RELEASE,
+            &mut display::Buffer { id },
+        )
+        .map(drop)
+    }
+
+    /// Start or stop vsync events.
+    pub fn display_set_vsync(enabled: bool) -> Result<(), Errno> {
+        let mut args = display::SetVsync {
+            enabled: enabled as u32,
+        };
+        call_with(module::DISPLAY, display::FN_SET_VSYNC, &mut args).map(drop)
     }
 
     /// Call forwarded entry point `id` with its register image.

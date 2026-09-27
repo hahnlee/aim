@@ -53,6 +53,9 @@ pub struct BootOptions {
     pub only: Option<BTreeSet<String>>,
     /// `linux-run`; defaults to the one next to the current executable.
     pub linux_run: Option<PathBuf>,
+    /// `linux-run --gpu` and `--display` for every service.
+    pub gpu: Option<PathBuf>,
+    pub display: Option<PathBuf>,
     pub trace: bool,
     /// `androidboot.*` bootconfig entries (without the prefix).
     pub androidboot: Vec<(String, String)>,
@@ -72,6 +75,8 @@ impl BootOptions {
             mode,
             only: None,
             linux_run: None,
+            gpu: None,
+            display: None,
             trace: false,
             androidboot: vec![
                 ("hardware".to_string(), "ranchu".to_string()),
@@ -341,6 +346,8 @@ impl Boot {
             image: options.image.clone(),
             path_map_file: layout.path_map_file(),
             binder: Some(binder_name),
+            gpu: options.gpu.clone(),
+            display: options.display.clone(),
             trace: options.trace,
             options: linux_run_options,
         };

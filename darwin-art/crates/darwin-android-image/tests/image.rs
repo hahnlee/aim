@@ -484,6 +484,42 @@ fn assemble_applies_the_overlay_read_only() {
 }
 
 #[test]
+fn assemble_through_a_symlinked_original_leaves_it_untouched() {
+    let fixture = Fixture::new();
+    let plan = fixture.plan(OVERLAY);
+    let identity = identity::compute(ORIGINAL_ID, &plan);
+    // As a worktree links a shared extracted image into its _build.
+    let link = fixture.temp.0.join("link");
+    symlink(&fixture.original, &link).unwrap();
+    let out = fixture.temp.0.join("images/derived");
+
+    assert_eq!(
+        assemble(&plan, &link, &identity, &out).unwrap(),
+        Outcome::Built
+    );
+    assert!(fs::symlink_metadata(&out).unwrap().is_dir());
+    assert!(!out.join("system/app/Stock").exists());
+    assert!(
+        fixture
+            .original
+            .join("system/app/Stock/Stock.apk")
+            .is_file()
+    );
+    assert!(!fixture.original.join("vendor/etc/vintf").exists());
+    assert!(!fixture.original.join(".overlay-receipt").exists());
+    assert_eq!(
+        fs::read_to_string(fixture.original.join("system/etc/hosts")).unwrap(),
+        "127.0.0.1 localhost\n"
+    );
+
+    // OUTDIR may not be the original or lie inside it, by any path.
+    for inside in [link.join("derived"), fixture.original.join("x/derived")] {
+        let error = assemble(&plan, &link, &identity, &inside).unwrap_err();
+        assert!(error.contains("inside"), "{error}");
+    }
+}
+
+#[test]
 fn assemble_reuses_the_same_identity_and_refuses_others() {
     let fixture = Fixture::new();
     let plan = fixture.plan(OVERLAY);

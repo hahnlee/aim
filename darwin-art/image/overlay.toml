@@ -128,6 +128,25 @@ reason = "part of the emulator's GLES driver"
 [[remove]]
 path = "/vendor/lib64/egl/libGLESv2_emulation.so"
 reason = "part of the emulator's GLES driver"
+
+# Composer (docs/composer.md): IComposer/default V4, one display shown in a
+# macOS window by the display server, reached over the host-call module
+# `display`. The ranchu composer's .rc and fragment are removed below.
+
+[[add]]
+path = "/vendor/bin/hw/android.hardware.graphics.composer3-service.darwin"
+source = "_build/vendor-hals/bin/android.hardware.graphics.composer3-service.darwin"
+reason = "composer HAL (Rust, AIDL V4): client composition shown in a macOS window via host-call"
+
+[[add]]
+path = "/vendor/etc/init/android.hardware.graphics.composer3-service.darwin.rc"
+source = "hal/graphics/composer/android.hardware.graphics.composer3-service.darwin.rc"
+reason = "starts the composer HAL"
+
+[[add]]
+path = "/vendor/etc/vintf/manifest/android.hardware.graphics.composer3-service.darwin.xml"
+source = "hal/graphics/composer/android.hardware.graphics.composer3-service.darwin.xml"
+reason = "declares IComposer/default V4"
 # The emulator's vendor HALs. The goldfish/ranchu ones talk to QEMU (pipes,
 # virtio consoles, the emulator's host services) and the examples fake
 # hardware, neither of which a Mac provides. Their `.rc` and vintf fragment
@@ -200,7 +219,7 @@ reason = "declares the removed ranchu GNSS HAL"
 
 [[remove]]
 path = "/vendor/etc/init/hwc3.rc"
-reason = "the ranchu composer presents through the emulator's host GPU; our composer replaces it (P4)"
+reason = "the ranchu composer presents through the emulator's host GPU; ours is the composer3 service above"
 
 [[remove]]
 path = "/vendor/etc/vintf/manifest/hwc3.xml"

@@ -1,5 +1,6 @@
 //! `guest-init --image <derived-root> --data <writable-root> --dry-run|--run
-//! [--only svc1,svc2] [--runtime DIR] [--linux-run PATH] [--trace]
+//! [--only svc1,svc2] [--runtime DIR] [--linux-run PATH] [--gpu DIR]
+//! [--display SOCKET] [--trace]
 //! [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]`
 //!
 //! Development entry point for darwin-artd's init role.
@@ -13,7 +14,8 @@ use darwin_guest_init::{Boot, BootOptions, RunMode};
 fn usage() -> ! {
     eprintln!(
         "usage: guest-init --image DIR --data DIR (--dry-run | --run) [--only a,b] [--runtime DIR]\n\
-         \x20                 [--linux-run PATH] [--trace] [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]"
+         \x20                 [--linux-run PATH] [--gpu DIR] [--display SOCKET] [--trace]\n\
+         \x20                 [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]"
     );
     std::process::exit(2);
 }
@@ -24,6 +26,7 @@ fn main() {
     let mut runtime = None;
     let mut only = None;
     let mut linux_run = None;
+    let (mut gpu, mut display) = (None, None);
     let mut trace = false;
     let mut timeout = None;
     let mut androidboot = Vec::new();
@@ -46,6 +49,8 @@ fn main() {
                 )
             }
             "--linux-run" => linux_run = Some(PathBuf::from(value())),
+            "--gpu" => gpu = Some(PathBuf::from(value())),
+            "--display" => display = Some(PathBuf::from(value())),
             "--trace" => trace = true,
             "--quiet" => quiet = true,
             "--timeout" => {
@@ -68,6 +73,8 @@ fn main() {
     options.runtime = runtime;
     options.only = only;
     options.linux_run = linux_run;
+    options.gpu = gpu;
+    options.display = display;
     options.trace = trace;
     options.timeout = timeout;
     if !androidboot.is_empty() {
