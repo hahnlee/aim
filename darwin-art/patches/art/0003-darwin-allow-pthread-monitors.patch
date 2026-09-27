@@ -5,9 +5,9 @@ diff --git a/runtime/monitor.cc b/runtime/monitor.cc
  #include "verifier/method_verifier.h"
  #include "well_known_classes.h"
  
-+// Linux uses futex-backed runtime locks. Darwin already selects ART's pthread
-+// fallback in base/mutex.h; permit that implementation for the single-threaded
-+// interpreter bootstrap. Empty-checkpoint wakeups remain a later porting gate.
++// Linux uses futex-backed runtime locks. Darwin selects ART's pthread
++// fallback in base/mutex.h, with monitor locks and empty-checkpoint waiters
++// parked on os_sync_wait_on_address words (patch 0198).
 +#if !defined(__APPLE__)
  static_assert(ART_USE_FUTEXES);
 +#endif

@@ -1,0 +1,3 @@
+Threads blocked on a contended Java monitor must sleep, not spin: one thread
+holds a monitor for a few seconds while others block on it (#76). The run
+reports the process CPU time the blocked waiters consumed per second held.

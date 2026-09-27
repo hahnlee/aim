@@ -804,6 +804,53 @@ pub(crate) fn emit_graph_with_support(out: &Path, with_support: bool) -> io::Res
     graph.push_str(&interpreter_archive);
     graph.push('\n');
 
+    // The pthread monitor/mutex objects (runtime-core) the final dylib links.
+    // Their builder patches upstream mutex/monitor sources; declare those and
+    // its patch series so a patch change rebuilds the archive and relinks.
+    let runtime_core_archive =
+        ninja_path(&root.join("_build/runtime-core/libart-core-darwin.a"));
+    graph.push_str("rule runtime_core\n");
+    graph.push_str("  command = cd ");
+    graph.push_str(&shell_quote(&root_for_shell));
+    graph.push_str(" && ");
+    graph.push_str(&bootstrap_cli);
+    graph.push_str(" build-runtime-core\n");
+    graph.push_str("  description = ART runtime core (pthread monitors)\n");
+    graph.push_str("  restat = 1\n\n");
+    graph.push_str("build ");
+    graph.push_str(&runtime_core_archive);
+    graph.push_str(": runtime_core ");
+    graph.push_str(&bootstrap_cli_target);
+    graph.push(' ');
+    for file in [
+        "crates/art-bootstrap/src/runtime_art/foundation.rs",
+        "patches/art/0003-darwin-allow-pthread-monitors.patch",
+        "patches/art/0004-darwin-uncontended-monitor-lock.patch",
+        "patches/art/0004b-darwin-cross-thread-monitor-lock.patch",
+        "patches/art/0026-darwin-base-relative-object-references-only.patch",
+        "patches/art/0159-darwin-objptr-base-relative-boundary.patch",
+        "patches/art/0033-darwin-base-relative-lockword-forwarding.patch",
+        "patches/art/0042b-darwin-compressed32-monitor-boundary.patch",
+        "patches/art/0078-darwin-pthread-empty-checkpoints.patch",
+        "patches/art/0198-darwin-mutex-parking.patch",
+        "_aosp/art/runtime/monitor.cc",
+        "_aosp/art/runtime/base/mutex.h",
+        "_aosp/art/runtime/base/mutex-inl.h",
+        "_aosp/art/runtime/base/mutex.cc",
+        "_aosp/art/runtime/mirror/object_reference.h",
+        "_aosp/art/runtime/obj_ptr.h",
+        "_aosp/art/runtime/obj_ptr-inl.h",
+        "_aosp/art/runtime/lock_word.h",
+        "_aosp/art/runtime/lock_word-inl.h",
+    ] {
+        graph.push_str(&ninja_path(&root.join(file)));
+        graph.push(' ');
+    }
+    graph.push('\n');
+    graph.push_str("build runtime-core: phony ");
+    graph.push_str(&runtime_core_archive);
+    graph.push('\n');
+
     // The JIT compiler consumes the shared staged ABI headers. Depend on the
     // narrow staging producer rather than the complete graphics archive so
     // JIT and runtime compilation can proceed in parallel after publication.
@@ -1744,6 +1791,8 @@ pub(crate) fn emit_graph_with_support(out: &Path, with_support: bool) -> io::Res
     graph.push_str(&archive);
     graph.push(' ');
     graph.push_str(&interpreter_archive);
+    graph.push(' ');
+    graph.push_str(&runtime_core_archive);
     graph.push(' ');
     graph.push_str(&jit_archive);
     graph.push(' ');

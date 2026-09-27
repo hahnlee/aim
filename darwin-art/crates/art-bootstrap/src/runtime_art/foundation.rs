@@ -141,6 +141,7 @@ pub(crate) fn build_runtime_core(root: &Path) -> Result<()> {
         "patches/art/0033-darwin-base-relative-lockword-forwarding.patch",
         "patches/art/0042b-darwin-compressed32-monitor-boundary.patch",
         "patches/art/0078-darwin-pthread-empty-checkpoints.patch",
+        "patches/art/0198-darwin-mutex-parking.patch",
     ] {
         run_command(
             Command::new("patch")
@@ -150,10 +151,11 @@ pub(crate) fn build_runtime_core(root: &Path) -> Result<()> {
         )?;
     }
 
-    // Keep the Darwin empty-checkpoint adaptation fail-closed.  A pthread
-    // waiter must periodically service the ART checkpoint before retrying the
-    // lock; silently dropping the callback would deadlock GC/checkpoint
-    // coordination even though ordinary monitor tests still pass.
+    // Keep the Darwin empty-checkpoint adaptation fail-closed. A pthread
+    // waiter must service the ART checkpoint before retrying the lock and
+    // must be woken by WakeupToRespondToEmptyCheckpoint; silently dropping
+    // either would deadlock GC/checkpoint coordination even though ordinary
+    // monitor tests still pass.
     let patched_mutex = fs::read_to_string(patched_base.join("mutex.cc"))?;
     let patched_mutex_inline = fs::read_to_string(patched_base.join("mutex-inl.h"))?;
     for source in [&patched_mutex, &patched_mutex_inline] {
@@ -162,14 +164,16 @@ pub(crate) fn build_runtime_core(root: &Path) -> Result<()> {
                 "Darwin pthread checkpoint waiter lost CheckEmptyCheckpointFromMutex".into(),
             );
         }
-        if !source.contains("tv_nsec = 100'000") {
-            return Err("Darwin pthread checkpoint waiter lost bounded retry delay".into());
+        if !source.contains("park.Wait(generation") {
+            return Err("Darwin pthread checkpoint waiter lost its parking wait".into());
         }
     }
-    if !patched_mutex.contains("Expected Darwin mutex waiters use an interruptible try-lock loop")
-        || !patched_mutex.contains("Expected Darwin rwlock waiters poll the checkpoint flag")
+    if patched_mutex.matches("DarwinCheckpointPark::Wake(this);").count() < 2
+        || patched_mutex.matches("DarwinCheckpointPark::WakeAll();").count() < 2
+        || !patched_mutex.contains("DarwinMonitorLock(exclusive_owner_")
+        || patched_mutex.contains("tv_nsec = 100'000")
     {
-        return Err("Darwin empty-checkpoint wakeup adaptation is missing".into());
+        return Err("Darwin mutex parking adaptation is missing".into());
     }
 
     let includes = [
@@ -191,29 +195,38 @@ pub(crate) fn build_runtime_core(root: &Path) -> Result<()> {
         patched_base.join("mutex.cc"),
         patched_runtime.join("monitor.cc"),
     ];
+    // The patched shadow is rewritten on every run; the dependency cache
+    // compares contents, so an unchanged tree compiles nothing.
+    let compiler_identity = command_output(
+        Command::new(crate::support::support_build_tool("CLANG", "clang++")).arg("--version"),
+    )?;
+    let mut hash_cache = FileHashCache::default();
+    let mut compiled = 0;
     let mut objects = Vec::new();
     for source in sources {
         let file_name = source
             .file_name()
             .ok_or_else(|| format!("source has no file name: {}", source.display()))?;
         let object = object_dir.join(format!("{}.o", file_name.to_string_lossy()));
-        run_command(
-            runtime_cpp_command(&includes)
-                .args(["-include", "mirror/object_reference.h"])
-                .arg("-c")
-                .arg(&source)
-                .arg("-o")
-                .arg(&object),
-        )?;
-        let kind = command_output(Command::new("file").arg(&object))?;
-        if !kind.contains("Mach-O 64-bit object arm64") {
-            return Err(format!("unexpected runtime core object format: {kind}").into());
+        let mut command = runtime_cpp_command(&includes);
+        command
+            .args(["-include", "mirror/object_reference.h"])
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object);
+        if compile_with_dependency_cache(&mut command, &object, &compiler_identity, &mut hash_cache)? {
+            compiled += 1;
+            let kind = command_output(Command::new("file").arg(&object))?;
+            if !kind.contains("Mach-O 64-bit object arm64") {
+                return Err(format!("unexpected runtime core object format: {kind}").into());
+            }
         }
         objects.push(object);
     }
 
     let archive = build_dir.join("libart-core-darwin.a");
-    create_archive(&archive, &objects)?;
+    create_archive_if_needed(&archive, &objects, compiled)?;
     println!(
         "build-runtime-core: pthread monitor bootstrap objects={} archive={}",
         objects.len(),

@@ -702,6 +702,10 @@ def main() -> int:
         "--boot-image", type=Path,
         help="use an alternate complete ART boot image set (boot.art and siblings)")
     parser.add_argument(
+        "--test-root", type=Path,
+        help="directory holding the test (default: the pinned _aosp/art/test); "
+             "for Darwin tests written in the ART run-test format")
+    parser.add_argument(
         "--gcstress", action="store_true",
         help="apply AOSP run-test's gcstress runtime and heap contract")
     args = parser.parse_args()
@@ -713,7 +717,8 @@ def main() -> int:
         ndk_root
         / "toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include"
     )
-    test = root / "_aosp/art/test" / args.test
+    test = (args.test_root.resolve() if args.test_root is not None
+            else root / "_aosp/art/test") / args.test
     run_script = test / "run.py"
     has_native_source = any(test.rglob("*.cc")) or any(test.rglob("*.c"))
     uses_dexter_slicer = any(
@@ -3655,7 +3660,8 @@ def main() -> int:
                 raise RuntimeError(
                     f"{mode} output mismatch: stdout={len(actual_stdout)}/"
                     f"{len(expected_stdout)} stderr={len(actual_stderr)}/"
-                    f"{len(expected_stderr)} artifacts={temporary}")
+                    f"{len(expected_stderr)} artifacts={temporary}\n"
+                    f"actual stdout (first 400 bytes): {actual_stdout[:400]!r}")
             if (
                 mode == "jit"
                 and not any(marker in host_log.read_bytes() for marker in (

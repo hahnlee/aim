@@ -42,6 +42,8 @@ pub(crate) fn audit_runtime_graphics_link_mode(
     // compile-contract change (for example ART_STATIC_LIBARTBASE) cannot be
     // hidden behind an otherwise fresh-looking archive.
     build_foundation(root)?;
+    // The pthread monitor/mutex objects the dylib links (libart-core-darwin.a).
+    build_runtime_core(root)?;
     let unwindstack_core = build_runtime_unwindstack_core(root)?;
     let unwindstack_dex = build_runtime_unwindstack_dex(root)?;
     let unwindstack_providers =
