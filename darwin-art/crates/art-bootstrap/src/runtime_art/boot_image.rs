@@ -146,6 +146,37 @@ fn publish_boot_image(staging: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The inputs a published image was compiled from: the runtime (dex2oat and
+/// the image format) and every boot class path component, in order. ART
+/// rejects an image whose recorded dex checksums differ from the class path.
+const INPUT_STAMP: &str = "inputs.sha256";
+
+fn boot_image_input_identity(root: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let runtime =
+        root.join("_build/runtime-graphics-link-probe/libdarwin_art_runtime_graphics.dylib");
+    for path in std::iter::once(runtime).chain(boot_class_path(root)) {
+        hasher.update(path.strip_prefix(root).unwrap_or(&path).to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update(Sha256::digest(fs::read(&path)?));
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Rebuild the boot image only when its inputs changed since it was
+/// published (or it has no input stamp).
+pub(crate) fn ensure_android16_boot_image(root: &Path) -> Result<()> {
+    let destination = root.join("_build/android16-boot-image-darwin");
+    let identity = boot_image_input_identity(root)?;
+    let published = fs::read_to_string(destination.join(INPUT_STAMP)).unwrap_or_default();
+    if published.trim() == identity && destination.join("boot.art").is_file() {
+        println!("ensure-android16-boot-image: current {}", destination.display());
+        return Ok(());
+    }
+    build_android16_boot_image(root)
+}
+
 /// Build a complete speed boot image in a sibling directory and publish it as
 /// one generation.  A failed dex2oat run leaves the installed image intact.
 pub(crate) fn build_android16_boot_image(root: &Path) -> Result<()> {
@@ -165,6 +196,9 @@ pub(crate) fn build_android16_boot_image(root: &Path) -> Result<()> {
             return Err(format!("boot class path component is missing: {}", path.display()).into());
         }
     }
+    // Identify the inputs before compiling: the stamp names what this
+    // generation was built from.
+    let identity = boot_image_input_identity(root)?;
     let destination = root.join("_build/android16-boot-image-darwin");
     let parent = destination
         .parent()
@@ -251,6 +285,7 @@ pub(crate) fn build_android16_boot_image(root: &Path) -> Result<()> {
         run_command(&mut command)?;
         verify_component_set(&staging)?;
         create_arm64_component_links(&staging)?;
+        fs::write(staging.join(INPUT_STAMP), identity.clone() + "\n")?;
         publish_boot_image(&staging, &destination)?;
         println!(
             "build-android16-boot-image: filter={BOOT_IMAGE_FILTER} profile={} components=11 published={}",
