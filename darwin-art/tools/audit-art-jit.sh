@@ -35,7 +35,7 @@ export DARWIN_ART_TEST_FONT="$jit_root/_aosp/external/skia/resources/fonts/Robot
 export DARWIN_ART_FRAMEWORK_RES_APK="$jit_root/_prebuilt/android-16/resources/framework-res.apk"
 export DARWIN_ART_APK_APP_RESOURCE_APK="$DARWIN_ART_FRAMEWORK_RES_APK"
 export DARWIN_ART_RUNTIME_HOST_FILES="$jit_root/_build/android16-core-oj-compat/core-oj-compat.jar:$jit_root/_prebuilt/android-16/bootclasspath/core-libart.jar:$jit_root/_build/android16-framework-compat/framework-compat.jar:$jit_tail:$jit_root/_build/button-dex/dex/classes.dex"
-audit_log="$(mktemp "${TMPDIR:-/tmp}/darwin-art-jit-audit.XXXXXX.log")"
+audit_log="$(mktemp "${TMPDIR:-/tmp}/darwin-art-jit-audit.XXXXXX")"
 trap 'rm -f "$audit_log"' EXIT
 # The JIT fixtures are test-client code (probes/runtime_entry_probe.cc),
 # linked against the product runtime as the graphics fixture client.
