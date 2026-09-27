@@ -445,6 +445,14 @@ name = "darwin-binder-driver"
 version = "0.1.0"
 
 [[package]]
+name = "darwin-guest-init"
+version = "0.1.0"
+dependencies = [
+ "darwin-android-init",
+ "libc",
+]
+
+[[package]]
 name = "darwin-linux-abi"
 version = "0.1.0"
 dependencies = [
