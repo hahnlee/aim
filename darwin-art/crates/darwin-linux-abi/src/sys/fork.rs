@@ -131,7 +131,6 @@ fn fork(ctx: &mut GuestContext, r: Request) -> i64 {
     }
     let vfork = r.flags & CLONE_VFORK != 0;
     super::wait::prune_pidfds();
-    super::events::prune_epolls();
     let mut done = [-1i32; 2];
     // SAFETY: plain pipe creation; both ends close on exec.
     if vfork && unsafe { libc::pipe(done.as_mut_ptr()) } < 0 {
@@ -216,6 +215,6 @@ fn child_fixups(ctx: &mut GuestContext, r: &Request) {
     }
     super::cred::after_fork_child();
     super::wait::after_fork_child();
-    super::events::after_fork_child();
+    super::fdtab::after_fork_child();
     super::binder::after_fork_child();
 }

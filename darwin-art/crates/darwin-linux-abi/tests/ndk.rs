@@ -1,0 +1,242 @@
+//! NDK C tests of the file, socket, event, memory and procfs syscalls, run
+//! under `linux-run` with the image's original bionic (`tests/ndk/*.c`).
+//!
+//! Each program is built with the newest installed NDK and run from a
+//! writable `/data/local/tmp` through a path map, like a service under
+//! guest-init. Skipped when the NDK or the extracted image is missing.
+
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn ndk_clang() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let ndks = Path::new(&home).join("Library/Android/sdk/ndk");
+    let mut versions: Vec<PathBuf> = std::fs::read_dir(ndks)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    versions.sort();
+    let clang = versions
+        .last()?
+        .join("toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android35-clang");
+    clang.exists().then_some(clang)
+}
+
+/// The extracted image of the main checkout (`_build` is not in worktrees).
+fn image() -> Option<PathBuf> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .ok()?;
+    let common = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    let img = common
+        .parent()?
+        .join("darwin-art/_build/android16-image-full");
+    img.join("system/build.prop").exists().then_some(img)
+}
+
+struct Guest {
+    runtime: PathBuf,
+    map: PathBuf,
+    cache: PathBuf,
+}
+
+impl Guest {
+    fn new(image: &Path, name: &str) -> Guest {
+        let runtime =
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("n{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&runtime);
+        for d in [
+            "data/local/tmp",
+            "dev/socket",
+            "tmp",
+            "kernfs/proc",
+            "kernfs/sys",
+            "cache",
+        ] {
+            std::fs::create_dir_all(runtime.join(d)).unwrap();
+        }
+        // A value init wrote (docs/guest-init-contract.md section 7).
+        std::fs::create_dir_all(runtime.join("kernfs/proc/sys/kernel")).unwrap();
+        std::fs::write(runtime.join("kernfs/proc/sys/kernel/panic_on_oops"), "1\n").unwrap();
+        let map = runtime.join("path-map");
+        let r = runtime.display();
+        std::fs::write(
+            &map,
+            format!(
+                "# darwin-guest-init path map v1\nroot\t/\t{}\nrw\t/data\t{r}/data\nrw\t/dev\t{r}/dev\nrw\t/tmp\t{r}/tmp\nkernfs\t/proc\t{r}/kernfs/proc\nkernfs\t/sys\t{r}/kernfs/sys\n",
+                image.display()
+            ),
+        )
+        .unwrap();
+        let cache = runtime.join("cache");
+        Guest {
+            runtime,
+            map,
+            cache,
+        }
+    }
+
+    fn build(&self, clang: &Path, name: &str) -> String {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/ndk/{name}.c"));
+        let out = self.runtime.join("data/local/tmp").join(name);
+        let st = Command::new(clang)
+            .args(["-O1", "-D_GNU_SOURCE", "-Wall", "-Werror", "-o"])
+            .arg(&out)
+            .arg(&src)
+            .status()
+            .unwrap();
+        assert!(st.success(), "compiling {name}");
+        format!("/data/local/tmp/{name}")
+    }
+
+    fn run(&self, args: &[&str]) -> (bool, String) {
+        self.run_with(args, Vec::new())
+    }
+
+    /// Run with `fds` inherited at 3, 4, ... as guest-init passes sockets.
+    fn run_with(&self, args: &[&str], fds: Vec<OwnedFd>) -> (bool, String) {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_linux-run"));
+        cmd.arg("--path-map")
+            .arg(&self.map)
+            .arg("--cache")
+            .arg(&self.cache)
+            .args(args);
+        let raw: Vec<i32> = fds.iter().map(|f| f.as_raw_fd()).collect();
+        // SAFETY: only async-signal-safe dup2 between fork and exec.
+        unsafe {
+            cmd.pre_exec(move || {
+                // Out of the way first, so no target clobbers a source.
+                let mut high = Vec::with_capacity(raw.len());
+                for fd in &raw {
+                    let h = libc::fcntl(*fd, libc::F_DUPFD, 64);
+                    if h < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    high.push(h);
+                }
+                for (i, fd) in high.iter().enumerate() {
+                    if libc::dup2(*fd, 3 + i as i32) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    libc::close(*fd);
+                }
+                Ok(())
+            });
+        }
+        let out = cmd.output().unwrap();
+        drop(fds);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), text)
+    }
+}
+
+impl Drop for Guest {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.runtime);
+    }
+}
+
+fn check(name: &str, args: &[&str]) {
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        eprintln!("skipped: NDK or extracted image not found");
+        return;
+    };
+    let g = Guest::new(&image, name);
+    let prog = g.build(&clang, name);
+    let mut argv = vec![prog.as_str()];
+    argv.extend_from_slice(args);
+    let (ok, out) = g.run(&argv);
+    println!("{out}");
+    assert!(ok && out.contains("PASS"), "{name} failed:\n{out}");
+}
+
+#[test]
+fn events() {
+    check("t_event", &[]);
+}
+
+#[test]
+fn files() {
+    check("t_fs", &["/data/local/tmp"]);
+}
+
+#[test]
+fn sockets() {
+    check("t_net", &["/data/local/tmp"]);
+}
+
+#[test]
+fn memory() {
+    check("t_mem", &[]);
+}
+
+#[test]
+fn procfs() {
+    check("t_proc", &["two", "args"]);
+}
+
+unsafe extern "C" {
+    fn pthread_fchdir_np(fd: libc::c_int) -> libc::c_int;
+}
+
+/// An AF_UNIX socket bound at `dir/name` by its short name, as guest-init
+/// binds (the host path may exceed `sun_path`).
+fn bind_in(dir: &Path, name: &str, ty: i32) -> OwnedFd {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a fresh socket, bound with this thread's cwd set to `dir`.
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, ty, 0);
+        assert!(fd >= 0);
+        let dfd = libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+        assert_eq!(pthread_fchdir_np(dfd), 0);
+        let mut a: libc::sockaddr_un = std::mem::zeroed();
+        a.sun_family = libc::AF_UNIX as u8;
+        for (i, b) in name.bytes().enumerate() {
+            a.sun_path[i] = b as libc::c_char;
+        }
+        let r = libc::bind(
+            fd,
+            (&a as *const libc::sockaddr_un).cast(),
+            std::mem::size_of_val(&a) as u32,
+        );
+        pthread_fchdir_np(-1);
+        libc::close(dfd);
+        assert_eq!(r, 0, "bind {name}");
+        OwnedFd::from_raw_fd(fd)
+    }
+}
+
+#[test]
+fn inherited_init_sockets() {
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        eprintln!("skipped: NDK or extracted image not found");
+        return;
+    };
+    let g = Guest::new(&image, "t_inherit");
+    let prog = g.build(&clang, "t_inherit");
+    // What guest-init's CreateSocket does for logd's socket lines.
+    let dir = g.runtime.join("dev/socket");
+    let logdr = bind_in(&dir, "logdr", libc::SOCK_STREAM);
+    // SAFETY: listen on our socket.
+    assert_eq!(unsafe { libc::listen(logdr.as_raw_fd(), 8) }, 0);
+    let logdw = bind_in(&dir, "logdw", libc::SOCK_DGRAM);
+    std::fs::write(
+        g.runtime.join("sockets"),
+        "logd\t/dev/socket/logdr\tseqpacket\tstream\t-\tlisten\nlogd\t/dev/socket/logdw\tdgram\tdgram\tpasscred\t-\n",
+    )
+    .unwrap();
+    let (ok, out) = g.run_with(&[&prog], vec![logdr, logdw]);
+    println!("{out}");
+    assert!(ok && out.contains("PASS"), "t_inherit failed:\n{out}");
+}

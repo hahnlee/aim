@@ -20,6 +20,10 @@ use crate::patch;
 use crate::xlate::fips;
 use crate::xrt::{self, ExecSource};
 
+use std::os::unix::ffi::OsStrExt;
+
+use super::{copies, vmmap};
+
 const PAGE: u64 = 16384;
 
 const PROT_READ: u64 = 1;
@@ -222,7 +226,13 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         Nothing,
         Protect,
     }
+    let mut copied = false;
     let (base, finish) = if kind == MAP_SHARED || kind == MAP_SHARED_VALIDATE {
+        if !anon
+            && let Some(r) = super::memfd::map_shared(fd, addr, len, host_prot(prot), fixed, off)
+        {
+            return r;
+        }
         let f = hflags | libc::MAP_SHARED | if anon { libc::MAP_ANON } else { 0 };
         match host_mmap(
             addr,
@@ -288,6 +298,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
                 Err(e) => return e,
             };
             if fill {
+                copied = true;
                 if let Err(e) = populate(b, len, fd, off) {
                     // SAFETY: unmapping what we just mapped.
                     unsafe { libc::munmap(b as *mut _, len as usize) };
@@ -329,7 +340,24 @@ pub fn mmap(a: [u64; 6]) -> i64 {
             }
         }
     }
+    copies::forget(base, base + len);
+    if copied {
+        note_file_copy(base, len, fd, off);
+    }
     base as i64
+}
+
+/// Record that `[base, base+len)` holds a copy of `fd` from `off`.
+fn note_file_copy(base: u64, len: u64, fd: i32, off: u64) {
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes.
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } < 0 {
+        return;
+    }
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
+    let host = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..n]));
+    let guest = super::procfs::fd_guest_path(fd).unwrap_or_default();
+    copies::note(base, len, &host, &guest, off);
 }
 
 thread_local! {
@@ -351,6 +379,7 @@ pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
         DEFERRED_UNMAPS.with(|d| d.borrow_mut().push((addr, len)));
         return 0;
     }
+    copies::forget(addr, addr + len);
     // SAFETY: guest-requested unmap of guest memory.
     errno::check(unsafe { libc::munmap(addr as *mut _, len as usize) } as i64)
 }
@@ -395,6 +424,7 @@ pub fn mprotect(a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     if prot & PROT_EXEC != 0 {
+        super::memfd::before_exec_protect(addr, addr + len);
         let end = addr + len;
         let mut cur = addr;
         while cur < end {
@@ -405,7 +435,11 @@ pub fn mprotect(a: [u64; 6]) -> i64 {
                 break;
             }
             let (lo, hi) = (lo.max(cur), hi.min(end));
-            if cur_prot & libc::PROT_EXEC == 0 && !file_backed(lo) {
+            // A memfd's views are ART's dual-mapped JIT cache: never scanned.
+            if cur_prot & libc::PROT_EXEC == 0
+                && !file_backed(lo)
+                && super::memfd::anon_name(lo).is_none()
+            {
                 if cur_prot & libc::PROT_READ == 0 {
                     host_mprotect(lo, hi - lo, cur_prot | libc::PROT_READ);
                 }
@@ -421,66 +455,154 @@ const MADV_DONTNEED: u64 = 4;
 const MADV_FREE: u64 = 8;
 const MADV_REMOVE: u64 = 9;
 
+use patch::vm::{
+    VM_FLAGS_ANYWHERE, VM_FLAGS_FIXED, VM_FLAGS_OVERWRITE, VM_INHERIT_COPY, mach_vm_deallocate,
+    mach_vm_protect, mach_vm_remap, task,
+};
+
 unsafe extern "C" {
-    static mach_task_self_: libc::mach_port_t;
-    fn mach_vm_region(
+    fn mach_vm_allocate(task: libc::mach_port_t, address: *mut u64, size: u64, flags: i32) -> i32;
+    fn mach_vm_inherit(task: libc::mach_port_t, address: u64, size: u64, inheritance: u32) -> i32;
+    fn mach_vm_read_overwrite(
         task: libc::mach_port_t,
-        address: *mut u64,
-        size: *mut u64,
-        flavor: i32,
-        info: *mut i32,
-        count: *mut u32,
-        object_name: *mut libc::mach_port_t,
+        address: u64,
+        size: u64,
+        data: u64,
+        out_size: *mut u64,
     ) -> i32;
 }
 
-/// Linux MADV_DONTNEED on private memory must read back zeros; Darwin's
-/// does not guarantee that. Replace each private, non-executable piece of
-/// the range with fresh anonymous memory of the same protection.
-fn zero_private(addr: u64, len: u64) -> i64 {
-    let end = addr + len;
-    let mut cur = addr;
-    while cur < end {
-        let mut raddr = cur;
-        let mut rsize = 0u64;
-        let mut info = [0i32; 9];
-        let mut count = 9u32;
-        let mut obj = 0;
-        // SAFETY: VM_REGION_BASIC_INFO_64 (9) query into a 9-int buffer.
-        let kr = unsafe {
-            mach_vm_region(
-                mach_task_self_,
-                &mut raddr,
-                &mut rsize,
-                9,
-                info.as_mut_ptr(),
-                &mut count,
-                &mut obj,
-            )
-        };
-        if kr != 0 || raddr >= end {
-            break;
+const VM_INHERIT_SHARE: u32 = 0;
+
+/// Map the pages of `[src, src+len)` at `dst` too (replacing what is
+/// there), sharing them; protections and inheritance follow the source.
+pub(super) fn remap_shared(dst: u64, src: u64, len: u64) -> Result<(), i64> {
+    let (mut addr, mut cur, mut max) = (dst, 0, 0);
+    // SAFETY: remapping guest memory within our own task.
+    let kr = unsafe {
+        mach_vm_remap(
+            task(),
+            &mut addr,
+            len,
+            0,
+            VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+            task(),
+            src,
+            0,
+            &mut cur,
+            &mut max,
+            VM_INHERIT_COPY,
+        )
+    };
+    if kr != 0 {
+        return Err(-(ENOMEM as i64));
+    }
+    // mach_vm_remap sets the inheritance given; keep the source's sharing.
+    for r in vmmap::regions(src, src + len) {
+        if r.shared {
+            inherit_shared(dst + (r.start - src), r.end - r.start);
         }
-        let lo = raddr.max(cur);
-        let hi = (raddr + rsize).min(end);
-        let prot = info[0];
-        let shared = info[3] != 0;
-        let replace = !shared && prot & libc::PROT_EXEC == 0 && prot != 0;
-        if replace
-            && let Err(e) = host_mmap(
+    }
+    Ok(())
+}
+
+/// Make fork children share `[addr, addr+len)` instead of copying it.
+pub(super) fn inherit_shared(addr: u64, len: u64) {
+    // SAFETY: changing the inheritance of our own mapping.
+    unsafe { mach_vm_inherit(task(), addr, len, VM_INHERIT_SHARE) };
+}
+
+/// Fresh anonymous memory anywhere.
+pub(super) fn allocate(len: u64) -> Result<u64, i64> {
+    let mut at = 0u64;
+    // SAFETY: allocating in our own task.
+    if unsafe { mach_vm_allocate(task(), &mut at, len, VM_FLAGS_ANYWHERE) } != 0 {
+        return Err(-(ENOMEM as i64));
+    }
+    Ok(at)
+}
+
+/// Linux MADV_DONTNEED on private memory must read back zeros (anonymous)
+/// or the file's contents (file-backed); Darwin's does not guarantee it.
+/// Replace each private, non-executable piece with fresh memory of the
+/// same protection. Shared mappings keep their contents, as on Linux.
+fn discard_private(addr: u64, len: u64) -> i64 {
+    for r in vmmap::regions(addr, addr + len) {
+        let prot = r.prot as i32 & (libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC);
+        if r.shared || prot & libc::PROT_EXEC != 0 || prot == 0 {
+            continue;
+        }
+        let (lo, n) = (r.start, r.end - r.start);
+        let fresh = match &r.file {
+            Some((path, _, _)) => {
+                let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+                    continue;
+                };
+                // SAFETY: reopening the region's own backing file.
+                let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+                if fd < 0 {
+                    continue;
+                }
+                let m = host_mmap(
+                    lo,
+                    n,
+                    prot,
+                    libc::MAP_FIXED | libc::MAP_PRIVATE,
+                    fd,
+                    r.offset as i64,
+                );
+                // SAFETY: our temporary fd.
+                unsafe { libc::close(fd) };
+                m
+            }
+            None => host_mmap(
                 lo,
-                hi - lo,
+                n,
                 prot,
                 libc::MAP_FIXED | libc::MAP_PRIVATE | libc::MAP_ANON,
                 -1,
                 0,
-            )
-        {
+            ),
+        };
+        if let Err(e) = fresh {
             return e;
         }
-        cur = hi;
+        if r.file.is_none() {
+            refill_copy(lo, n, prot);
+        }
     }
     0
+}
+
+/// Reload the file contents of copied pages in fresh `[lo, lo+n)`.
+fn refill_copy(lo: u64, n: u64, prot: i32) {
+    let mut cur = lo;
+    while cur < lo + n {
+        let Some((c, off)) = copies::find(cur) else {
+            cur += PAGE;
+            continue;
+        };
+        let end = c.end.min(lo + n);
+        let Ok(p) = std::ffi::CString::new(c.host.as_os_str().as_bytes()) else {
+            cur = end;
+            continue;
+        };
+        // SAFETY: refilling our fresh private pages from the file they copy.
+        unsafe {
+            let fd = libc::open(p.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+            if fd >= 0 {
+                if prot & libc::PROT_WRITE == 0 {
+                    libc::mprotect(cur as *mut _, (end - cur) as usize, prot | libc::PROT_WRITE);
+                }
+                let _ = populate(cur, end - cur, fd, off);
+                if prot & libc::PROT_WRITE == 0 {
+                    libc::mprotect(cur as *mut _, (end - cur) as usize, prot);
+                }
+                libc::close(fd);
+            }
+        }
+        cur = end;
+    }
 }
 
 pub fn madvise(a: [u64; 6]) -> i64 {
@@ -489,7 +611,7 @@ pub fn madvise(a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     match advice {
-        MADV_DONTNEED | MADV_REMOVE => zero_private(addr, len),
+        MADV_DONTNEED | MADV_REMOVE => discard_private(addr, len),
         MADV_FREE => {
             // SAFETY: advisory only.
             unsafe { libc::madvise(addr as *mut _, len as usize, libc::MADV_FREE) };
@@ -501,103 +623,298 @@ pub fn madvise(a: [u64; 6]) -> i64 {
 
 const MREMAP_MAYMOVE: u64 = 1;
 const MREMAP_FIXED: u64 = 2;
+const MREMAP_DONTUNMAP: u64 = 4;
 
-/// Move the pages of `[from, from+len)` to `to` (replacing what is there),
-/// keeping their memory object and protection, and unmap the source.
-fn move_pages(from: u64, len: u64, to: u64) -> Result<(), i64> {
-    use patch::vm;
-    let (mut at, mut cur, mut max) = (to, 0, 0);
-    // SAFETY: remapping guest memory the guest asked to move.
-    let kr = unsafe {
-        vm::mach_vm_remap(
-            vm::task(),
-            &mut at,
-            len,
-            0,
-            vm::VM_FLAGS_FIXED | vm::VM_FLAGS_OVERWRITE,
-            vm::task(),
-            from,
-            0,
-            &mut cur,
-            &mut max,
-            vm::VM_INHERIT_COPY,
-        )
-    };
-    if kr != 0 {
+/// Allocate anonymous memory at exactly `addr` (it must be free), with the
+/// protection of the page below it.
+fn extend_at(addr: u64, len: u64, like: u64, replace: bool) -> Result<(), i64> {
+    let mut at = addr;
+    let flags = VM_FLAGS_FIXED | if replace { VM_FLAGS_OVERWRITE } else { 0 };
+    // SAFETY: allocating in our own task; FIXED without OVERWRITE fails
+    // rather than replacing anything.
+    if unsafe { mach_vm_allocate(task(), &mut at, len, flags) } != 0 {
         return Err(-(ENOMEM as i64));
     }
-    // SAFETY: the source range now lives at `to`.
-    unsafe { vm::mach_vm_deallocate(vm::task(), from, len) };
+    if let Some(r) = vmmap::region_at(like) {
+        // SAFETY: our fresh allocation.
+        unsafe { mach_vm_protect(task(), addr, len, 0, r.prot as i32) };
+    }
     Ok(())
 }
 
-/// mremap. A grown tail is new anonymous memory with the mapping's
-/// protection; `old_size == 0` (duplicating a shared mapping) is not
-/// supported.
+/// Move `[old, old+old_len)` to `new` (resized to `new_len`), replacing
+/// what is at the destination.
+fn move_to(old: u64, old_len: u64, new: u64, new_len: u64, keep_old: bool) -> Result<(), i64> {
+    let moved = old_len.min(new_len);
+    remap_shared(new, old, moved)?;
+    copies::moved(old, new, moved);
+    if new_len > old_len {
+        extend_at(new + old_len, new_len - old_len, old + old_len - PAGE, true)?;
+    }
+    if keep_old {
+        // MREMAP_DONTUNMAP: the old range stays mapped, empty.
+        discard_private(old, old_len);
+    } else {
+        // SAFETY: the old pages now live at `new`.
+        unsafe { mach_vm_deallocate(task(), old, old_len) };
+    }
+    Ok(())
+}
+
 pub fn mremap(a: [u64; 6]) -> i64 {
     let (old, old_len, new_len, flags, new_addr) = (a[0], page_up(a[1]), page_up(a[2]), a[3], a[4]);
-    let fixed = flags & MREMAP_FIXED != 0;
     if old & (PAGE - 1) != 0
-        || old_len == 0
+        || flags & !(MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP) != 0
+        || (flags & (MREMAP_FIXED | MREMAP_DONTUNMAP) != 0 && flags & MREMAP_MAYMOVE == 0)
         || new_len == 0
-        || flags & !(MREMAP_MAYMOVE | MREMAP_FIXED) != 0
-        || (fixed && (flags & MREMAP_MAYMOVE == 0 || new_addr & (PAGE - 1) != 0))
-        || (fixed && new_addr < old + old_len && old < new_addr + new_len)
     {
         return -(EINVAL as i64);
     }
-    let Some((_, _, prot, _)) = patch::vm::region(old) else {
-        return -(errno::EFAULT as i64);
-    };
-    let anon = libc::MAP_PRIVATE | libc::MAP_ANON;
-    if !fixed && new_len <= old_len {
-        // SAFETY: shrinking the guest's own mapping.
-        unsafe { libc::munmap((old + new_len) as *mut _, (old_len - new_len) as usize) };
-        return old as i64;
+    if flags & MREMAP_DONTUNMAP != 0 && old_len != new_len {
+        return -(EINVAL as i64);
     }
-    let dest = if fixed {
-        new_addr
-    } else {
-        // Grow in place when the pages after the mapping are free.
-        let tail = old + old_len;
-        match host_mmap(tail, new_len - old_len, prot, anon, -1, 0) {
-            Ok(p) if p == tail => return old as i64,
-            Ok(p) => {
-                // SAFETY: undoing the probe mapping made just above.
-                unsafe { libc::munmap(p as *mut _, (new_len - old_len) as usize) };
-            }
-            Err(_) => {}
+    if vmmap::region_at(old).is_none_or(|r| r.start > old) {
+        return -(libc::EFAULT as i64);
+    }
+    let keep_old = flags & MREMAP_DONTUNMAP != 0;
+    if flags & MREMAP_FIXED != 0 {
+        if new_addr & (PAGE - 1) != 0 || (new_addr < old + old_len && old < new_addr + new_len) {
+            return -(EINVAL as i64);
         }
-        if flags & MREMAP_MAYMOVE == 0 {
+        return match move_to(old, old_len, new_addr, new_len, keep_old) {
+            Ok(()) => new_addr as i64,
+            Err(e) => e,
+        };
+    }
+    if old_len == 0 {
+        // Linux: a second mapping of the same (shared) pages.
+        let mut at = 0u64;
+        // SAFETY: reserving an address range in our task.
+        if unsafe { mach_vm_allocate(task(), &mut at, new_len, VM_FLAGS_ANYWHERE) } != 0 {
             return -(ENOMEM as i64);
         }
-        match host_mmap(0, new_len, prot, anon, -1, 0) {
-            Ok(p) => p,
-            Err(e) => return e,
+        return match remap_shared(at, old, new_len) {
+            Ok(()) => at as i64,
+            Err(e) => e,
+        };
+    }
+    if !keep_old && new_len <= old_len {
+        if new_len < old_len {
+            copies::forget(old + new_len, old + old_len);
+            // SAFETY: the guest shrinks its own mapping.
+            unsafe { mach_vm_deallocate(task(), old + new_len, old_len - new_len) };
+        }
+        return old as i64;
+    }
+    if !keep_old
+        && extend_at(
+            old + old_len,
+            new_len - old_len,
+            old + old_len - PAGE,
+            false,
+        )
+        .is_ok()
+    {
+        return old as i64;
+    }
+    if flags & MREMAP_MAYMOVE == 0 {
+        return -(ENOMEM as i64);
+    }
+    let mut at = 0u64;
+    // SAFETY: reserving the destination in our task.
+    if unsafe { mach_vm_allocate(task(), &mut at, new_len, VM_FLAGS_ANYWHERE) } != 0 {
+        return -(ENOMEM as i64);
+    }
+    match move_to(old, old_len, at, new_len, keep_old) {
+        Ok(()) => at as i64,
+        Err(e) => {
+            // SAFETY: releasing our reservation.
+            unsafe { mach_vm_deallocate(task(), at, new_len) };
+            e
+        }
+    }
+}
+
+pub fn mincore(a: [u64; 6]) -> i64 {
+    let (addr, len, vec) = (a[0], page_up(a[1]), a[2]);
+    if addr & (PAGE - 1) != 0 {
+        return -(EINVAL as i64);
+    }
+    if vmmap::regions(addr, addr + len)
+        .map(|r| r.end - r.start)
+        .sum::<u64>()
+        != len
+    {
+        return -(ENOMEM as i64);
+    }
+    // SAFETY: guest vector of len/PAGE bytes.
+    let r = unsafe { libc::mincore(addr as *const _, len as usize, vec as *mut libc::c_char) };
+    if r < 0 {
+        return -(errno::last() as i64);
+    }
+    for i in 0..(len / PAGE) as usize {
+        // SAFETY: inside the guest vector; Linux reports only residency.
+        unsafe { *(vec as *mut u8).add(i) &= 1 };
+    }
+    0
+}
+
+pub fn msync(a: [u64; 6]) -> i64 {
+    const MS_ASYNC: u64 = 1;
+    const MS_INVALIDATE: u64 = 2;
+    const MS_SYNC: u64 = 4;
+    let (addr, len, flags) = (a[0], a[1], a[2]);
+    if addr & (PAGE - 1) != 0
+        || flags & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC) != 0
+        || flags & (MS_ASYNC | MS_SYNC) == (MS_ASYNC | MS_SYNC)
+    {
+        return -(EINVAL as i64);
+    }
+    let mut h = 0;
+    if flags & MS_ASYNC != 0 {
+        h |= libc::MS_ASYNC;
+    }
+    if flags & MS_SYNC != 0 {
+        h |= libc::MS_SYNC;
+    }
+    if flags & MS_INVALIDATE != 0 {
+        h |= libc::MS_INVALIDATE;
+    }
+    // SAFETY: guest range.
+    errno::check(unsafe { libc::msync(addr as *mut _, page_up(len) as usize, h) } as i64)
+}
+
+pub fn mlock(nr: u64, a: [u64; 6]) -> i64 {
+    // SAFETY: guest range.
+    let r = unsafe {
+        if nr == 229 {
+            libc::munlock(a[0] as *const _, a[1] as usize)
+        } else {
+            libc::mlock(a[0] as *const _, a[1] as usize)
         }
     };
-    let keep = old_len.min(new_len);
-    if let Err(e) = move_pages(old, keep, dest) {
-        return e;
+    errno::check(r as i64)
+}
+
+const MEMBARRIER_CMD_QUERY: u64 = 0;
+const MEMBARRIER_CMD_PRIVATE_EXPEDITED: u64 = 1 << 3;
+const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: u64 = 1 << 4;
+const MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 5;
+const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 6;
+
+unsafe extern "C" {
+    fn task_threads(task: libc::mach_port_t, list: *mut *mut u32, count: *mut u32) -> i32;
+    fn thread_get_register_pointer_values(
+        thread: u32,
+        sp: *mut u64,
+        length: *mut usize,
+        values: *mut u64,
+    ) -> i32;
+    fn mach_thread_self() -> u32;
+    fn mach_port_deallocate(task: libc::mach_port_t, name: u32) -> i32;
+}
+
+/// Serialize every other thread of the process: reading a thread's
+/// registers makes the kernel interrupt it, which is a full barrier and a
+/// context synchronization on its core (as .NET does on macOS arm64).
+fn barrier_all_threads() {
+    let mut list: *mut u32 = std::ptr::null_mut();
+    let mut count = 0u32;
+    // SAFETY: task_threads returns a vm_allocated array of send rights.
+    unsafe {
+        if task_threads(task(), &mut list, &mut count) != 0 {
+            return;
+        }
+        let me = mach_thread_self();
+        for i in 0..count as usize {
+            let t = *list.add(i);
+            if t != me {
+                let (mut sp, mut n, mut regs) = (0u64, 128usize, [0u64; 128]);
+                thread_get_register_pointer_values(t, &mut sp, &mut n, regs.as_mut_ptr());
+            }
+            mach_port_deallocate(task(), t);
+        }
+        mach_port_deallocate(task(), me);
+        mach_vm_deallocate(task(), list as u64, count as u64 * 4);
     }
-    if old_len > keep {
-        // SAFETY: the part of the old mapping that does not move.
-        unsafe { libc::munmap((old + keep) as *mut _, (old_len - keep) as usize) };
+}
+
+pub fn membarrier(a: [u64; 6]) -> i64 {
+    let (cmd, flags) = (a[0], a[1]);
+    if flags != 0 {
+        return -(EINVAL as i64);
     }
-    if fixed
-        && new_len > keep
-        && let Err(e) = host_mmap(
-            dest + keep,
-            new_len - keep,
-            prot,
-            anon | libc::MAP_FIXED,
-            -1,
-            0,
-        )
-    {
-        return e;
+    match cmd {
+        MEMBARRIER_CMD_QUERY => {
+            (MEMBARRIER_CMD_PRIVATE_EXPEDITED
+                | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
+                | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
+                | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE) as i64
+        }
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
+        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE => 0,
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE => {
+            barrier_all_threads();
+            0
+        }
+        _ => -(EINVAL as i64),
     }
-    dest as i64
+}
+
+/// process_vm_readv/writev on this process; other processes' memory is out
+/// of reach on Darwin (EPERM).
+pub fn process_vm_rw(write: bool, a: [u64; 6]) -> i64 {
+    let (pid, local, lcnt, remote, rcnt, flags) = (a[0] as i32, a[1], a[2], a[3], a[4], a[5]);
+    if flags != 0 || lcnt > 1024 || rcnt > 1024 {
+        return -(EINVAL as i64);
+    }
+    // SAFETY: trivial.
+    if pid != unsafe { libc::getpid() } {
+        // SAFETY: probing whether the pid exists.
+        return if unsafe { libc::kill(pid, 0) } < 0 {
+            -(libc::ESRCH as i64)
+        } else {
+            -(libc::EPERM as i64)
+        };
+    }
+    // SAFETY: guest iovec arrays of the given counts.
+    let iov = |p: u64, n: u64| unsafe {
+        std::slice::from_raw_parts(p as *const libc::iovec, n as usize)
+            .iter()
+            .map(|v| (v.iov_base as u64, v.iov_len as u64))
+            .filter(|v| v.1 > 0)
+            .collect::<Vec<_>>()
+    };
+    let (l, r) = (iov(local, lcnt), iov(remote, rcnt));
+    let (mut li, mut lo, mut done) = (0usize, 0u64, 0u64);
+    for (rbase, rlen) in r {
+        let mut ro = 0u64;
+        while ro < rlen && li < l.len() {
+            let n = (rlen - ro).min(l[li].1 - lo);
+            let (src, dst) = if write {
+                (l[li].0 + lo, rbase + ro)
+            } else {
+                (rbase + ro, l[li].0 + lo)
+            };
+            let mut got = 0u64;
+            // SAFETY: a fault-safe copy within our own task.
+            if unsafe { mach_vm_read_overwrite(task(), src, n, dst, &mut got) } != 0 {
+                return if done > 0 {
+                    done as i64
+                } else {
+                    -(libc::EFAULT as i64)
+                };
+            }
+            done += n;
+            ro += n;
+            lo += n;
+            if lo == l[li].1 {
+                li += 1;
+                lo = 0;
+            }
+        }
+    }
+    done as i64
 }
 
 struct Brk {

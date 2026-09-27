@@ -2,6 +2,9 @@
 //!
 //! HWCAP_CPUID is never set: Linux emulates EL0 reads of the ID registers,
 //! XNU does not.
+//!
+//! SME and SME2 are never set: bionic's SME helpers would hold state in
+//! x18, which Darwin clobbers (ADR 0012, P0 findings).
 
 use std::ffi::CString;
 
@@ -41,7 +44,7 @@ pub fn host_hwcaps() -> (u64, u64) {
     };
     // AT_HWCAP
     set(feature("hw.optional.floatingpoint"), 0, false); // FP
-    set(feature("hw.optional.AdvSIMD"), 1, false); // ASIMD
+    set(arm("AdvSIMD") || feature("hw.optional.neon"), 1, false); // ASIMD
     set(true, 2, false); // EVTSTRM: generic timer event stream is always on
     set(arm("FEAT_AES"), 3, false);
     set(arm("FEAT_PMULL"), 4, false);
@@ -79,10 +82,8 @@ pub fn host_hwcaps() -> (u64, u64) {
     set(arm("FEAT_ECV"), 19, true);
     set(arm("FEAT_AFP"), 20, true);
     set(arm("FEAT_RPRES"), 21, true);
-    set(arm("FEAT_SME"), 23, true);
     set(arm("FEAT_WFxT"), 31, true);
     set(arm("FEAT_EBF16"), 32, true);
     set(arm("FEAT_CSSC"), 34, true);
-    set(arm("FEAT_SME2"), 37, true);
     (h, h2)
 }

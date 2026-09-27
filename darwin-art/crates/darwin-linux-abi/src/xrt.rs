@@ -240,6 +240,29 @@ pub fn original_guest_path(fd: i32) -> Option<String> {
     }
 }
 
+/// Guest path of the original behind a translated file mapped from `host`
+/// (for `/proc/self/maps`).
+pub fn original_guest_path_of_host(host: &Path) -> Option<String> {
+    match state(&FileStat::of_path(host).ok()?)? {
+        FileState::Translated { guest } => Some(guest),
+        _ => None,
+    }
+}
+
+/// The loader mapped `host` for the guest file `guest`.
+pub fn note_mapped(host: &Path, guest: &str) {
+    if let Ok(st) = FileStat::of_path(host)
+        && rt().cache.as_ref().is_some_and(|c| c.contains(host))
+    {
+        set_state(
+            st,
+            FileState::Translated {
+                guest: guest.to_string(),
+            },
+        );
+    }
+}
+
 /// How the program loader maps an ELF file.
 pub enum LoaderSource {
     /// Map this file (the translated file or an unmodified original)
