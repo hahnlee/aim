@@ -285,6 +285,37 @@ pub fn extract(archive_path: &Path, out: &Path) -> Result<Vec<Line>> {
     Ok(lines)
 }
 
+/// Records the original's identity, the archive's sha256, in
+/// `OUTDIR.identity` beside the extracted tree (the tree itself stays exactly
+/// the archive's content). `android-image` reads it as the original's
+/// identity. Returns the identity and the file.
+pub fn record_identity(archive: &Path, out: &Path) -> Result<(String, PathBuf)> {
+    if !out.is_dir() {
+        return Err(invalid(format!(
+            "{} is not an extracted tree",
+            out.display()
+        )));
+    }
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut File::open(archive)?, &mut hasher)?;
+    let identity: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let mut name = out
+        .file_name()
+        .ok_or_else(|| invalid("OUTDIR has no final component"))?
+        .to_os_string();
+    name.push(".identity");
+    let path = out.with_file_name(name);
+    let mut partial = path.clone().into_os_string();
+    partial.push(".partial");
+    fs::write(&partial, format!("{identity}\n"))?;
+    fs::rename(&partial, &path)?;
+    Ok((identity, path))
+}
+
 struct Candidate {
     path: PathBuf,
     compressed: bool,
@@ -417,4 +448,32 @@ pub fn print(lines: &[Line], out: &mut dyn Write) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_is_recorded_beside_the_tree() {
+        let dir = crate::tree::tests::temp_dir("identity");
+        fs::create_dir(&dir).unwrap();
+        let archive = dir.join("image.zip");
+        fs::write(&archive, b"abc").unwrap();
+        let out = dir.join("tree");
+        assert!(record_identity(&archive, &out).is_err());
+        fs::create_dir(&out).unwrap();
+        let (identity, path) = record_identity(&archive, &out).unwrap();
+        // sha256("abc")
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(identity, abc);
+        assert_eq!(path, dir.join("tree.identity"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), format!("{abc}\n"));
+        assert_eq!(
+            fs::read_dir(&out).unwrap().count(),
+            0,
+            "the tree is untouched"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

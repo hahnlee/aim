@@ -13,11 +13,34 @@ SOURCE_TREES=(
   "platform/frameworks/native|libs/binder/ndk/include_platform|2e54aeebc4060d2083f79401cffbda6ed6574aadaa6e345d9cefbbe8a34b4bdd"
 )
 
-# Stable AIDL interfaces: package|frozen version|project|aidl_api directory|
-# imports (space-separated package:version, each listed earlier)
+# The SDK aidl compiler (build-tools 36.0.0, macOS), relative to the SDK.
+AIDL_COMPILER=build-tools/36.0.0/aidl
+AIDL_COMPILER_SHA256=c422770a410e509659423b290aedd5ea8997c04033df3db2b86d9d6cd1688da3
+
+# Stable AIDL interfaces, one frozen version each:
+#   package|version|project|aidl_api directory|imports
+# Imports are the `versions_with_info` imports of that version in the
+# interface's Android.bp, as package-V<version>; each must be listed here at
+# that version. A service's crate depends on the crates of its interfaces;
+# an interface's crate depends on the crates of its imports.
+hw=platform/hardware/interfaces
+sys=platform/system/hardware/interfaces
 AIDL_INTERFACES=(
-  "android.hardware.health|4|platform/hardware/interfaces|health/aidl/aidl_api/android.hardware.health/4|"
-  "android.hardware.common|2|platform/hardware/interfaces|common/aidl/aidl_api/android.hardware.common/2|"
-  "android.hardware.graphics.common|6|platform/hardware/interfaces|graphics/common/aidl/aidl_api/android.hardware.graphics.common/6|android.hardware.common:2"
-  "android.hardware.graphics.allocator|2|platform/hardware/interfaces|graphics/allocator/aidl/aidl_api/android.hardware.graphics.allocator/2|android.hardware.common:2 android.hardware.graphics.common:6"
+  "android.hardware.common|2|$hw|common/aidl/aidl_api/android.hardware.common/2|"
+  "android.hardware.common.fmq|1|$hw|common/fmq/aidl/aidl_api/android.hardware.common.fmq/1|android.hardware.common-V2"
+  "android.hardware.drm.common|1|$hw|drm/common/aidl/aidl_api/android.hardware.drm.common/1|"
+  "android.hardware.graphics.common|6|$hw|graphics/common/aidl/aidl_api/android.hardware.graphics.common/6|android.hardware.common-V2"
+  "android.hardware.graphics.allocator|2|$hw|graphics/allocator/aidl/aidl_api/android.hardware.graphics.allocator/2|android.hardware.common-V2,android.hardware.graphics.common-V6"
+  "android.hardware.graphics.composer3|4|$hw|graphics/composer/aidl/aidl_api/android.hardware.graphics.composer3/4|android.hardware.graphics.common-V6,android.hardware.common-V2,android.hardware.drm.common-V1"
+  "android.hardware.power|6|$hw|power/aidl/aidl_api/android.hardware.power/6|android.hardware.common.fmq-V1,android.hardware.common-V2"
+  "android.hardware.health|4|$hw|health/aidl/aidl_api/android.hardware.health/4|"
+  "android.hardware.sensors|3|$hw|sensors/aidl/aidl_api/android.hardware.sensors/3|android.hardware.common-V2,android.hardware.common.fmq-V1"
+  "android.hardware.bluetooth|1|$hw|bluetooth/aidl/aidl_api/android.hardware.bluetooth/1|"
+  "android.media.audio.common.types|4|$sys|media/aidl_api/android.media.audio.common.types/4|"
+  "android.media.audio.eraser.types|1|$sys|media/aidl_api/android.media.audio.eraser.types/1|android.media.audio.common.types-V4"
+  "android.hardware.audio.common|4|$hw|audio/aidl/aidl_api/android.hardware.audio.common/4|android.media.audio.common.types-V4"
+  "android.hardware.audio.core.sounddose|3|$hw|audio/aidl/aidl_api/android.hardware.audio.core.sounddose/3|android.media.audio.common.types-V4"
+  "android.hardware.audio.effect|3|$hw|audio/aidl/aidl_api/android.hardware.audio.effect/3|android.media.audio.eraser.types-V1,android.media.audio.common.types-V4,android.hardware.audio.common-V4,android.hardware.common-V2,android.hardware.common.fmq-V1"
+  "android.hardware.audio.core|3|$hw|audio/aidl/aidl_api/android.hardware.audio.core/3|android.media.audio.common.types-V4,android.hardware.audio.effect-V3,android.hardware.audio.core.sounddose-V3,android.hardware.audio.common-V4,android.hardware.common-V2,android.hardware.common.fmq-V1"
 )
+unset hw sys

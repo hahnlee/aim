@@ -1,0 +1,18 @@
+[package]
+name = "android_media_audio_eraser_types"
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "android.media.audio.eraser.types V1, Rust backend, generated from the frozen AIDL API"
+# The binder macros expand here, so this crate needs the vendor cfgs too.
+build = "../../binder/build.rs"
+
+[lib]
+path = "../../../_build/vendor-hals/aidl/android.media.audio.eraser.types-V1/lib.rs"
+
+[dependencies]
+android_media_audio_common_types = { path = "../android.media.audio.common.types" }
+async-trait = "0.1"
+binder = { path = "../../binder" }
+static_assertions = "1"

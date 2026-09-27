@@ -1,0 +1,11 @@
+<!--
+    The pinned image's /vendor/etc/vintf/manifest.xml (from
+    device/generic/goldfish/manifest.xml) without the emulator's HIDL
+    android.hardware.audio.effect@7.0, which the removed goldfish audio HAL
+    served (image/overlay.toml).
+-->
+<manifest version="9.0" type="device" target-level="8">
+    <sepolicy>
+        <version>202504</version>
+    </sepolicy>
+</manifest>

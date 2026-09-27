@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,7 @@ use darwin_android_init::props::service::RESTORECON_PROPERTY;
 use darwin_android_init::props::{SetEffect, Ucred};
 use darwin_android_init::rc::{IdResolver, ScriptLoader, vendor_android_version};
 use darwin_android_init::{ImageRoot, PropertyLookup};
+use darwin_binder_host::server::Server;
 
 use crate::apex;
 use crate::executor::{GuestExecutor, Outgoing, PropsAdapter};
@@ -209,6 +211,8 @@ pub struct Boot {
     linux_run: LinuxRun,
     events: Option<Receiver<PropertyEvent>>,
     _sockets: Option<PropertySockets>,
+    /// Run mode: the binder host behind every service's `--binder`.
+    _binder: Option<Arc<Server>>,
     pub report: BootReport,
 }
 
@@ -323,16 +327,26 @@ impl Boot {
             RunMode::DryRun => LinuxRunOptions::CONTRACT,
             RunMode::Run => LinuxRunOptions::detect(&linux_run_binary),
         };
+        // The binder driver is kernel state, so the init role hosts it
+        // (ADR 0012 item 7): one per boot, named for this process.
+        let binder_name = format!("dev.darwinart.guest-init.{}.binder", std::process::id());
+        let binder = match options.mode {
+            RunMode::Run if linux_run_options.binder => {
+                Some(Server::start(&binder_name).map_err(|e| format!("binder host: {e}"))?)
+            }
+            _ => None,
+        };
         let linux_run = LinuxRun {
             binary: linux_run_binary,
             image: options.image.clone(),
             path_map_file: layout.path_map_file(),
+            binder: Some(binder_name),
             trace: options.trace,
             options: linux_run_options,
         };
         if options.mode == RunMode::Run && !linux_run_options.missing().is_empty() {
             report.log.push(format!(
-                "linux-run lacks {} (docs/guest-init-contract.md): services see the image's own /dev, the host uid and linux-run's default environment",
+                "linux-run lacks {} (docs/guest-init-contract.md): services see the image's own /dev, the host uid, no binder and linux-run's default environment",
                 linux_run_options.missing().join(", ")
             ));
         }
@@ -380,6 +394,7 @@ impl Boot {
             linux_run,
             events,
             _sockets: sockets,
+            _binder: binder,
             report,
         })
     }

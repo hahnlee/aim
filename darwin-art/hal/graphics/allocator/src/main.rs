@@ -10,8 +10,8 @@ use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use android_hardware_common::android::hardware::common::NativeHandle::NativeHandle;
-use android_hardware_graphics_allocator::android::hardware::graphics::allocator::{
+use android_hardware_common::aidl::android::hardware::common::NativeHandle::NativeHandle;
+use android_hardware_graphics_allocator::aidl::android::hardware::graphics::allocator::{
     AllocationError::AllocationError, AllocationResult::AllocationResult,
     BufferDescriptorInfo::BufferDescriptorInfo, IAllocator::BnAllocator, IAllocator::IAllocator,
 };

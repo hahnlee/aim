@@ -85,14 +85,24 @@ impl UserMemory for Guest {
 const O_NONBLOCK: u64 = 0o4000;
 const O_CLOEXEC: u64 = 0o2000000;
 
+/// The device a guest path names: `/dev/binder` and the others, or their
+/// binderfs nodes `/dev/binderfs/<name>`. init mounts binderfs there and
+/// symlinks the former to them; this layer plays that mount.
+fn device(guest_path: &str) -> Option<Device> {
+    match guest_path.strip_prefix("/dev/binderfs/") {
+        Some(name) => Device::from_path(&format!("/dev/{name}")),
+        None => Device::from_path(guest_path),
+    }
+}
+
 /// Whether `guest_path` is a binder device node that exists.
 pub fn is_device(guest_path: &str) -> bool {
-    CLIENT.lock().unwrap().is_some() && Device::from_path(guest_path).is_some()
+    CLIENT.lock().unwrap().is_some() && device(guest_path).is_some()
 }
 
 /// `openat` of a binder device node; None for any other path.
 pub fn open(guest_path: &str, flags: u64) -> Option<i64> {
-    let device = Device::from_path(guest_path)?;
+    let device = device(guest_path)?;
     let client = CLIENT.lock().unwrap();
     let Some(client) = client.as_ref() else {
         return Some(-(ENODEV as i64));

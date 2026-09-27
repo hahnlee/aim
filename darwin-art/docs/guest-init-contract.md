@@ -18,11 +18,20 @@ Each service is one host process, started in a new process group with
 ```
 linux-run --root <image> --path-map <runtime>/path-map \
           --identity <runtime>/identity/<service>.<n> --inherit-env \
-          [--trace] <program> <args...>
+          --binder <name> [--seclabel <label>] [--trace] <program> <args...>
 ```
 
 - `<program>` and `<args>` are the guest argv after init's `${prop}`
   expansion. `argv[0]` is the program path, as init passes it.
+- `--binder` names the binder host: guest-init embeds
+  `darwin-binder-host`'s server (`Server::start`) under the bootstrap name
+  `dev.darwinart.guest-init.<pid>.binder`, one per boot, since the driver is
+  kernel state (ADR 0012 item 7). The layer serves `/dev/binder`,
+  `/dev/hwbinder`, `/dev/vndbinder` and their binderfs nodes
+  `/dev/binderfs/<device>`, which init's `symlink`s point the former at.
+- `--seclabel` is the service's `seclabel`. Without one, init would compute
+  the domain from the executable's file context; guest-init does not yet,
+  and the layer reports `u:r:init:s0`.
 - stdin is `/dev/null`. stdout and stderr go to
   `<runtime>/logs/<service>.log`.
 - Only the service's descriptors are inherited
@@ -39,8 +48,8 @@ linux-run --root <image> --path-map <runtime>/path-map \
 
 `linux-run` must list the new options in its usage text: guest-init runs
 `linux-run --help` and passes only the options it finds there. Without them
-it logs that services will see the image's own `/dev`, the host uid and
-`default_android_env()`.
+it logs that services will see the image's own `/dev`, the host uid, no
+binder and `default_android_env()`.
 
 ## 2. `--path-map FILE`: the guest filesystem view
 

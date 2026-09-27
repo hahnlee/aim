@@ -89,6 +89,7 @@ fn fixture(tag: &str) -> Fixture {
         binary: "/opt/linux-run".into(),
         image,
         path_map_file: layout.path_map_file(),
+        binder: None,
         trace: false,
         options: LinuxRunOptions::CONTRACT,
     };
@@ -435,6 +436,22 @@ fn launch_spec_carries_descriptors_environment_and_identity() {
         ]
     );
     assert!(command.contains(&"--inherit-env".to_string()));
+    assert_eq!(command.last().unwrap(), "/system/bin/testsvc");
+    // No binder host named, and an empty label is init's to compute.
+    assert!(!command.contains(&"--binder".to_string()));
+    assert!(!command.contains(&"--seclabel".to_string()));
+
+    let mut linux_run = f.launcher.linux_run.clone();
+    linux_run.binder = Some("dev.test.binder".into());
+    let mut labelled = spec.clone();
+    labelled.identity.seclabel = "u:r:test:s0".into();
+    let command = linux_run.command_line(&labelled);
+    let value = |flag: &str| {
+        let at = command.iter().position(|a| a == flag)?;
+        Some(command[at + 1].clone())
+    };
+    assert_eq!(value("--binder").as_deref(), Some("dev.test.binder"));
+    assert_eq!(value("--seclabel").as_deref(), Some("u:r:test:s0"));
     assert_eq!(command.last().unwrap(), "/system/bin/testsvc");
 }
 

@@ -12,8 +12,8 @@ the like.
 | ABI: numbers, argument blocks, guest wrappers, module shape | `crates/darwin-hostcall` (`no_std`) |
 | Dispatch and module registry | `crates/darwin-linux-abi/src/hostcall.rs`, `Lhostcall` in `trampoline.S` |
 | Host modules | `crates/darwin-host-<name>` (first: `darwin-host-health`) |
-| HAL services and their build | `hal/`, `tools/build-vendor-hals.sh`, `hal/sources.lock` |
-| Placement in the derived image | `image/overlay.toml` |
+| HAL services and their build | `hal/`, `tools/build-vendor-hals.sh`, `tools/lib/vendor_hal_aidl.py`, `hal/sources.lock` |
+| Placement in the derived image, and the emulator HALs removed | `image/overlay.toml` |
 
 ## The call
 
@@ -112,36 +112,77 @@ verified:
    `libbinder_ndk_bindgen_flags.txt`, and `--cfg android_vendor --cfg
    android_vndk`. The binary links the image's own `libbinder_ndk.so`; libc,
    libdl, libm and liblog come from the NDK sysroot (the same LL-NDK ABI).
-2. **AIDL.** For each stable interface, the frozen API directory
-   (`aidl_api/<package>/<version>`) is fetched. Its `.hash` is recomputed
-   with Soong's freeze recipe (sha1 of the sorted per-file sha1 lines and the
-   previous version). The SDK build-tools `aidl --lang=rust --structured
-   --stability=vintf --version --hash` then generates the code, and the
-   script writes the crate glue Soong's `aidl_rust_glue.py` would. The glue
-   has the package module tree and the crate-level `mangled` namespace the
-   generated code refers to. Nothing generated is checked in.
-3. **Build.** cargo builds with the NDK clang as linker and installs each
-   service under the name in its `[package.metadata.vendor-hal] binary`
-   into `_build/vendor-hals/bin`. `image/overlay.toml` places it in the
-   derived image.
+2. **AIDL** (`tools/lib/vendor_hal_aidl.py`). Each stable interface is
+   pinned at one frozen version with the imports of that version
+   (`versions_with_info` in its `Android.bp`).
+   - Its frozen API directory (`aidl_api/<package>/<version>`) is fetched and
+     checked as Soong's `aidlVerifyHashRule` does: the sha1 of the sorted
+     per-file sha1 lines and the previous version (`latest-version` for V1)
+     must equal the last line of `.hash`.
+   - The pinned SDK compiler (build-tools 36.0.0, checked by sha256) runs
+     `aidl --lang=rust --structured --stability=vintf --version --hash` with
+     `-I` the frozen APIs of the imports, transitively, as Soong's
+     `rust_aidl` does. Its command line, quoted in every generated file, has
+     only relative paths, and files are rewritten only when they change, so
+     the output depends on the pinned inputs alone and cargo rebuilds only
+     what changed.
+   - The crate glue is `aidl_rust_glue.py`'s: the package tree under `aidl`
+     (`android_hardware_health::aidl::android::hardware::health`), and a
+     `mangled` namespace that re-exports the imported crates' `mangled`,
+     through which the generated code names imported types. Crates depend
+     on `binder`, `async-trait` and `static_assertions`, as Soong's do.
+   - Nothing generated is checked in.
+3. **Build.** cargo builds the whole workspace (every interface crate, used
+   or not) with the NDK clang as linker. It installs each service under the
+   name in its `[package.metadata.vendor-hal] binary` into
+   `_build/vendor-hals/bin`. `image/overlay.toml` places it in the derived
+   image.
+
+The interfaces P4 and P5 need build: power V6 (imports common.fmq V1),
+graphics composer3 V4, allocator V2 and common V6 (with drm.common V1),
+audio.core V3 (with audio.common V4, audio.effect V3, audio.core.sounddose
+V3, media.audio.common.types V4 and media.audio.eraser.types V1), sensors
+V3, bluetooth V1 and health V4, over common V2 and common.fmq V1.
 
 Tools: the Android NDK (clang, sysroot and libclang for bindgen), SDK
-build-tools 36 or later (`aidl`), and `rustup target add
-aarch64-linux-android`.
+build-tools 36.0.0 (`aidl`), and `rustup target add aarch64-linux-android`.
 
 To add a HAL:
 
-- add an `AIDL_INTERFACES` line, after the interfaces it imports, listing
-  them as `package:version` (the script puts them on the include path and
-  re-exports their `mangled` items, as Soong's glue does);
-- add a manifest under `hal/aidl/<package>` with `build =
-  "../../binder/build.rs"`, since the binder macros expand there;
+- add an `AIDL_INTERFACES` line for its interface and for each import not
+  yet listed;
+- add a manifest under `hal/aidl/<package>` (a copy of another) with the
+  frozen version and a path dependency on each import's crate; the
+  generator checks that these match the lock;
 - add a service crate with its `.rc` and vintf fragment (a driver library
   loaded in-process, like the mapper or the GLES driver, is a `cdylib` whose
   `[package.metadata.vendor-hal] library` names the installed file in
   `_build/vendor-hals/lib`);
 - add `[[add]]` entries to the overlay, plus `[[remove]]` for an emulator
   HAL of the same instance.
+
+## The vendor partition
+
+The derived image's `/vendor` is the emulator's minus what a Mac cannot
+back, plus our HALs. The overlay removes the `.rc` and vintf fragment of
+each emulator vendor HAL that talks to QEMU or fakes hardware, so the
+instance is undeclared and the original services take their no-HAL paths:
+
+- replaced by ours: the graphics allocator, mapper and GLES driver
+  ([graphics-buffers.md](graphics-buffers.md),
+  [gles-driver.md](gles-driver.md));
+- replaced by ours later: the composer, audio (with the HIDL audio-effect
+  declaration in `manifest.xml`), sensors, camera, Bluetooth and GNSS;
+- hardware the device does not have: radio, Wi-Fi (with hostapd and the
+  supplicant), fingerprint, USB, lights, storage health, the goldfish
+  Codec2 store, and the vendor APEXes contexthub, rebootescrow, Thread, UWB
+  and vibrator.
+
+Software HALs with no hardware behind them stay: ClearKey DRM, KeyMint
+(with secure clock and shared secret), identity credential, and the vendor
+APEXes authsecret, cas, dumpstate, gatekeeper, neuralnetworks, power,
+thermal and widevine. `android-image diff` lists every entry with its
+reason.
 
 ## First HAL: `android.hardware.health` V4
 
@@ -166,17 +207,25 @@ and joins the binder thread pool.
   Its `.rc` and vintf fragment are removed in the overlay, so only ours
   serves the instance.
 
-**Verified** (without the binder wiring, #167/#168):
+**Verified** (2026-09-27):
 
 - `tests/hostcall.rs` covers the lean entry, the traced full path and the
-  `brk` fallback;
-- the HAL, in a derived image assembled with `android-image assemble`, runs
-  under `linux-run`, from load-time rewriting and from the translation
-  cache. The original linker64 and bionic load it with the image's
-  libbinder_ndk. Its host call returns the live battery (`present=true
-  level=80% status=NOT_CHARGING ac=true`). libbinder then stops at
-  `Opening '/dev/binder' failed`.
-
-Rust std checks the standard fds with `ppoll` at start-up, so every Rust
-guest program needs `ppoll` from the syscall layer. The verification run
-used a local stand-in.
+  `brk` fallback.
+- End to end on the derived image (`android-image assemble`, which takes
+  the original's identity from `android16-image-full.identity` beside the
+  extracted tree): `guest-init --run --only
+  servicemanager,vendor.health-darwin` starts the binder host and both
+  services with `linux-run --binder`.
+  - The original servicemanager finds `IHealth/default` in the device VINTF
+    manifest, and the HAL registers it.
+  - The original `service list` shows `android.hardware.health.IHealth/default:
+    [android.hardware.health.IHealth]` beside `manager`, and `service
+    check` finds it.
+  - `service call ... 7` (`getCapacity`) returns 80, the Mac's battery
+    level.
+  - hwservicemanager is not needed.
+- The syscall layer plays binderfs: `/dev/binderfs/<device>`, where init's
+  symlinks point `/dev/binder` and the others, is the binder device.
+- A service without a `seclabel` is in `u:r:init:s0` (contract section 4).
+  guest-init does not yet compute a service's domain from its executable's
+  file context, so the HAL runs as `u:r:init:s0`.

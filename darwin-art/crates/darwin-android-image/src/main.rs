@@ -12,8 +12,9 @@ usage:
   android-image diff     --original ORIGDIR --manifest MANIFEST [options]
 
 options:
-  --original-identity HEX  the original's sha256 identity; defaults to ORIGDIR/.identity
-                           (both, when given, must agree)
+  --original-identity HEX  the original's sha256 identity; defaults to ORIGDIR.identity,
+                           which android-image-extract records beside the tree it
+                           extracts, or ORIGDIR/.identity (those given must agree)
   --source-root DIR        root that manifest sources are relative to; defaults to the
                            directory above the manifest's (image/overlay.toml -> .)
 
@@ -122,8 +123,9 @@ fn run(options: Options) -> Result<(), String> {
         command => {
             let derived = derived.ok_or_else(|| {
                 format!(
-                    "the original's identity is unknown: {} has no .identity; pass --original-identity",
-                    options.original.display()
+                    "the original's identity is unknown: neither {} nor {} exists; pass --original-identity",
+                    identity::extraction_identity_path(&options.original).display(),
+                    options.original.join(".identity").display()
                 )
             })?;
             if command == "identity" {
