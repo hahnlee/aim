@@ -1,5 +1,5 @@
 use super::fixture_framework_inputs::{
-    append_am_classes, append_wm_classes, append_wm_sources, clear_am_class_output,
+    append_am_classes, append_wm_classes, clear_am_class_output,
     clear_wm_class_output,
 };
 use super::*;
@@ -47,19 +47,8 @@ fn generate_large_field_fixture(root: &Path, build_dir: &Path) -> Result<PathBuf
 pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
     build_foundation(root)?;
 
-    let artbase = root.join("_aosp/art/libartbase");
-    let patched_artbase = root.join("_build/foundation/patched-source/libartbase");
-    let libdexfile = root.join("_aosp/art/libdexfile");
-    let libbase_include = root.join("_aosp/system/libbase/include");
-    let libziparchive_include = root.join("_aosp/system/libziparchive/include");
-    let palette_include = root.join("_aosp/art/libartpalette/include");
-    if !libdexfile.join("Android.bp").exists() {
-        return Err("libdexfile sources are missing; run `art-bootstrap sync` first".into());
-    }
-
     let java_home = PathBuf::from("/opt/homebrew/opt/openjdk@17");
     let jni_include = java_home.join("include");
-    let jni_darwin_include = jni_include.join("darwin");
     if !jni_include.join("jni.h").exists() {
         return Err("OpenJDK 17 JNI headers were not found under /opt/homebrew".into());
     }
@@ -111,6 +100,12 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(&compile_signatures_dir)
         .arg(root.join("runtime/framework/compile-stubs/android/os/ServiceManager.java"));
     run_command(&mut signature_javac)?;
+    // The production runtime support owners the fixture exercises, compiled
+    // by their own build against the pinned framework signatures. The
+    // fixture's sources compile against them instead of keeping a copy of
+    // their source list.
+    let support_classes = runtime_support_classes(root)?;
+    let fixture_classpath = env::join_paths([support_classes.clone(), android_mock_jar.clone()])?;
     let javac_bootclasspath = env::join_paths([
         compile_signatures_dir,
         find_android_core_system_modules()?,
@@ -127,7 +122,7 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg("-bootclasspath")
         .arg(&javac_bootclasspath)
         .arg("-classpath")
-        .arg(&android_mock_jar)
+        .arg(&fixture_classpath)
         .arg(&hello_source)
         .arg(root.join("probes/ProbeActivity.java"))
         .arg(root.join("probes/UpstreamTestHarness.java"))
@@ -142,42 +137,6 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(root.join("probes/ProbeCalendarProvider.java"))
         .arg(root.join("probes/ProbeResources.java"))
         .arg(root.join("probes/ProbePackageManager.java"))
-        .arg(root.join("runtime/framework/storage/StorageManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/os/RemoteBinder.java"))
-        .arg(root.join("runtime/framework/os/SystemServices.java"))
-        .arg(root.join("runtime/framework/system/ServiceDirectory.java"))
-        .arg(root.join("runtime/framework/am/ApplicationProcessRegistry.java"))
-        .arg(root.join("runtime/framework/am/SystemServiceBindings.java"))
-        .arg(root.join("runtime/framework/am/ServiceRecord.java"))
-        .arg(root.join("runtime/framework/am/IntentBindRecord.java"))
-        .arg(root.join("runtime/framework/am/ConnectionRecord.java"))
-        .arg(root.join("runtime/framework/am/ServiceConnectionOwner.java"))
-        .arg(root.join("runtime/framework/am/ServiceConnectionIndex.java"))
-        .arg(root.join("runtime/framework/am/ServiceConnectionDeathRegistration.java"))
-        .arg(root.join("runtime/framework/am/ServiceNotificationController.java"))
-        .arg(root.join("runtime/framework/am/ServiceLifecycleOperation.java"))
-        .arg(root.join("runtime/framework/am/ServiceLifecycleController.java"))
-        .arg(root.join("runtime/framework/am/BoundServiceProcessLauncher.java"))
-        .arg(root.join("runtime/framework/am/ProcessLaunchTransport.java"))
-        .arg(root.join("runtime/framework/am/ServiceProcessLaunchController.java"))
-        .arg(root.join("runtime/framework/am/ServiceConnectionResourceController.java"))
-        .arg(root.join("runtime/framework/am/ActiveServices.java"))
-        .arg(root.join("runtime/framework/am/PackageQueries.java"))
-        .arg(root.join("runtime/framework/am/ApplicationPackages.java"))
-        .arg(root.join("runtime/framework/am/ActivityManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/am/ActivityManagerClient.java"))
-        .arg(root.join("runtime/framework/display/BuiltInDisplayConfiguration.java"))
-        .arg(root.join("runtime/framework/display/DefaultDisplayRegistry.java"))
-        .arg(root.join("runtime/framework/display/DisplayManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/user/UserManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/content/SettingsProviderEndpoint.java"))
-        .arg(root.join("runtime/framework/content/ContentServiceEndpoint.java"))
-        .arg(root.join("runtime/framework/content/ClipboardServiceEndpoint.java"))
-        .arg(root.join("runtime/framework/notification/NotificationManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/inputmethod/InputMethodManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/input/InputManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/input/InputDeviceRegistry.java"))
-        .arg(root.join("runtime/framework/input/SystemKeyboardMaps.java"))
         .arg(root.join("probes/ProbeXmlResourceParser.java"))
         .arg(root.join("probes/ProbeCanvas.java"))
         .arg(root.join("probes/ProbeView.java"))
@@ -189,7 +148,6 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(root.join("probes/compile-stubs/android/content/ContentCaptureOptions.java"))
         .arg(root.join("probes/compile-stubs/android/view/autofill/AutofillManager.java"))
         .arg(root.join("probes/compile-stubs/android/view/InputChannel.java"));
-    append_wm_sources(root, &mut javac)?;
     clear_wm_class_output(&class_dir)?;
     clear_am_class_output(&class_dir)?;
     run_command(&mut javac)?;
@@ -278,7 +236,7 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         class_dir.join("dev/darwinart/probe/ProbeContext$LocalServiceRecord.class");
     let bound_service_record_class =
         class_dir.join("dev/darwinart/probe/ProbeContext$BoundServiceRecord.class");
-    let remote_service_binder_class = class_dir.join("dev/darwinart/runtime/os/RemoteBinder.class");
+    let remote_service_binder_class = support_classes.join("dev/darwinart/runtime/os/RemoteBinder.class");
     let audio_manager_class = class_dir.join("android/media/ProbeAudioManager.class");
     let compatibility_handler_class =
         class_dir.join("dev/darwinart/probe/ProbeContext$CompatibilityHandler.class");
@@ -348,6 +306,8 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg("--classpath")
         .arg(&class_dir)
         .arg("--classpath")
+        .arg(&support_classes)
+        .arg("--classpath")
         .arg(&android_mock_jar)
         .arg("--output")
         .arg(&dex_dir)
@@ -377,18 +337,18 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(&local_service_record_class)
         .arg(&bound_service_record_class)
         .arg(&remote_service_binder_class)
-        .arg(class_dir.join("dev/darwinart/runtime/os/SystemServices.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/system/ServiceDirectory.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/display/BuiltInDisplayConfiguration.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/display/DefaultDisplayRegistry.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/display/DisplayManagerEndpoint.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/user/UserManagerEndpoint.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/content/SettingsProviderEndpoint.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/notification/NotificationManagerEndpoint.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/inputmethod/InputMethodManagerEndpoint.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/input/InputManagerEndpoint.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/input/InputDeviceRegistry.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/input/SystemKeyboardMaps.class"))
+        .arg(support_classes.join("dev/darwinart/runtime/os/SystemServices.class"))
+        .arg(support_classes.join("dev/darwinart/runtime/system/ServiceDirectory.class"))
+        .arg(support_classes.join("dev/darwinart/runtime/display/BuiltInDisplayConfiguration.class"))
+        .arg(support_classes.join("dev/darwinart/runtime/display/DefaultDisplayRegistry.class"))
+        .arg(support_classes.join("dev/darwinart/runtime/display/DisplayManagerEndpoint.class"))
+        .arg(support_classes.join("dev/darwinart/runtime/user/UserManagerEndpoint.class"))
+        .arg(support_classes.join("dev/darwinart/runtime/content/SettingsProviderEndpoint.class"))
+        .arg(support_classes.join("dev/darwinart/runtime/notification/NotificationManagerEndpoint.class"))
+        .arg(support_classes.join("dev/darwinart/runtime/inputmethod/InputMethodManagerEndpoint.class"))
+        .arg(support_classes.join("dev/darwinart/runtime/input/InputManagerEndpoint.class"))
+        .arg(support_classes.join("dev/darwinart/runtime/input/InputDeviceRegistry.class"))
+        .arg(support_classes.join("dev/darwinart/runtime/input/SystemKeyboardMaps.class"))
         .arg(&audio_manager_class)
         .arg(&compatibility_handler_class)
         .arg(&default_service_handler_class)
@@ -405,14 +365,6 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(&calendar_provider_class)
         .arg(&resources_class)
         .arg(&package_manager_class)
-        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledPackageInfos.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledPackageParser.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/ServiceResolver.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/InstalledPackageRecord.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/PackageRecords.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/PackageRecords$Source.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/DexLoadReports.class"))
-        .arg(class_dir.join("dev/darwinart/runtime/pm/PackageManagerEndpoint.class"))
         .arg(&mock_package_manager_class)
         .arg(&mock_context_class)
         .arg(&xml_parser_class)
@@ -423,66 +375,14 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
         .arg(&upstream_test_shutdown_hook_class)
         .arg(&upstream_test_main_thread_class)
         .arg(&upstream_test_native_output_class);
-    append_wm_classes(&class_dir, &mut d8)?;
-    append_am_classes(&class_dir, &mut d8)?;
+    append_wm_classes(&support_classes, &mut d8)?;
+    append_am_classes(&support_classes, &mut d8)?;
     run_command(&mut d8)?;
 
-    let libdexfile_external_include = libdexfile.join("external/include");
-    let includes = [
-        patched_artbase.as_path(),
-        artbase.as_path(),
-        libdexfile.as_path(),
-        libdexfile_external_include.as_path(),
-        libbase_include.as_path(),
-        libziparchive_include.as_path(),
-        palette_include.as_path(),
-        Path::new("/opt/homebrew/include"),
-        jni_include.as_path(),
-        jni_darwin_include.as_path(),
-    ];
-    let dex_operator_source = build_dir.join("generated/dexfile_operator_out.cc");
-    generate_operator_source(
-        root,
-        &libdexfile,
-        &[
-            "dex/dex_file.h",
-            "dex/dex_file_layout.h",
-            "dex/dex_instruction.h",
-            "dex/dex_instruction_utils.h",
-            "dex/invoke_type.h",
-        ],
-        &dex_operator_source,
-    )?;
-    let dex_sources = [
-        dex_operator_source,
-        // libunwindstack's AOSP dex adapter consumes the public ADexFile C
-        // ABI. Keep the external implementation in the same provider archive
-        // instead of relying on an accidental host symbol.
-        libdexfile.join("external/dex_file_ext.cc"),
-        libdexfile.join("dex/dex_file.cc"),
-        libdexfile.join("dex/dex_file_loader.cc"),
-        libdexfile.join("dex/standard_dex_file.cc"),
-        libdexfile.join("dex/compact_dex_file.cc"),
-        libdexfile.join("dex/compact_offset_table.cc"),
-        libdexfile.join("dex/dex_file_verifier.cc"),
-        libdexfile.join("dex/dex_file_exception_helpers.cc"),
-        libdexfile.join("dex/dex_file_layout.cc"),
-        libdexfile.join("dex/dex_file_tracking_registrar.cc"),
-        libdexfile.join("dex/dex_instruction.cc"),
-        libdexfile.join("dex/descriptors_names.cc"),
-        libdexfile.join("dex/modifiers.cc"),
-        libdexfile.join("dex/primitive.cc"),
-        libdexfile.join("dex/signature.cc"),
-        libdexfile.join("dex/type_lookup_table.cc"),
-        libdexfile.join("dex/utf.cc"),
-    ];
-    let mut dex_objects = Vec::new();
-    for source in dex_sources {
-        dex_objects.push(compile_cpp(&source, &object_dir, &includes)?);
-    }
-
-    let dex_archive = build_dir.join("libdexfile-darwin.a");
-    create_archive(&dex_archive, &dex_objects)?;
+    // The probe links the production libdexfile provider.
+    let dex_archive = build_libdexfile(root)?;
+    let includes = libdexfile_includes(root, &root.join("_build/foundation"));
+    let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
 
     let probe = build_dir.join("dex-probe");
     run_command(
@@ -534,8 +434,8 @@ pub(crate) fn build_dex_probe(root: &Path) -> Result<()> {
                     class[32]=Ldev/darwinart/probe/ProbeXmlResourceParser;";
     verify_dex_contract(
         &output,
-        193,
-        3548,
+        301,
+        4530,
         &[
             "Ldev/darwinart/probe/ProbeContext;",
             "Ldev/darwinart/probe/ProbeContext$BaseContext;",

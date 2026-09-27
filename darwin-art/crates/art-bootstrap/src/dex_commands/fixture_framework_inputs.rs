@@ -1,36 +1,7 @@
 use crate::Result;
-use darwin_art_build_contract::support_java::{production_sources, SOURCE_MANIFEST};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-const WM_SOURCE_PREFIX: &str = "runtime/framework/wm/";
-
-fn wm_sources_from_manifest(manifest: &str) -> Result<Vec<PathBuf>> {
-    let sources = production_sources(manifest)
-        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
-    let mut wm_sources = sources
-        .into_iter()
-        .filter(|source| source.to_string_lossy().starts_with(WM_SOURCE_PREFIX))
-        .collect::<Vec<_>>();
-    wm_sources.sort();
-    if wm_sources.is_empty() {
-        return Err("production Java manifest has no WMS sources".into());
-    }
-    Ok(wm_sources)
-}
-
-pub(crate) fn append_wm_sources(root: &Path, command: &mut Command) -> Result<()> {
-    let manifest = fs::read_to_string(root.join(SOURCE_MANIFEST))?;
-    for source in wm_sources_from_manifest(&manifest)? {
-        let path = root.join(source);
-        if !path.is_file() {
-            return Err(format!("WMS source is missing: {}", path.display()).into());
-        }
-        command.arg(path);
-    }
-    Ok(())
-}
 
 fn validated_wm_package_dir(class_dir: &Path) -> Result<Option<PathBuf>> {
     validated_package_dir(class_dir, "wm")
@@ -109,6 +80,29 @@ pub(crate) fn wm_class_files(class_dir: &Path) -> Result<Vec<PathBuf>> {
         return Err("WMS compiler output contains no class files".into());
     }
     Ok(classes)
+}
+
+/// Every class of the production runtime support output, in deterministic
+/// order.
+pub(crate) fn append_runtime_support_classes(class_dir: &Path, command: &mut Command) -> Result<()> {
+    let metadata = fs::symlink_metadata(class_dir)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "runtime support class output is not a directory: {}",
+            class_dir.display()
+        )
+        .into());
+    }
+    let mut classes = Vec::new();
+    collect_package_classes(class_dir, class_dir, &mut classes)?;
+    classes.sort();
+    if classes.is_empty() {
+        return Err("runtime support class output contains no class files".into());
+    }
+    for class_file in classes {
+        command.arg(class_dir.join(class_file));
+    }
+    Ok(())
 }
 
 pub(crate) fn append_wm_classes(class_dir: &Path, command: &mut Command) -> Result<()> {
@@ -202,34 +196,6 @@ mod tests {
             "darwin-art-{name}-{}-{nonce}-{serial}",
             std::process::id()
         ))
-    }
-
-    #[test]
-    fn projects_only_authoritative_wm_sources() {
-        let manifest = concat!(
-            "runtime/framework/am/ActivityManagerEndpoint.java\n",
-            "runtime/framework/wm/WindowManagerEndpoint.java\n",
-            "runtime/framework/wm/WindowFocusRegistry.java\n",
-        );
-        assert_eq!(
-            wm_sources_from_manifest(manifest).unwrap(),
-            vec![
-                PathBuf::from("runtime/framework/wm/WindowFocusRegistry.java"),
-                PathBuf::from("runtime/framework/wm/WindowManagerEndpoint.java"),
-            ]
-        );
-    }
-
-    #[test]
-    fn rejects_malformed_or_non_production_catalog_entries() {
-        for manifest in [
-            "runtime/framework/../Probe.java\n",
-            "probes/ProbeContext.java\n",
-            "runtime/framework/compile-stubs/android/net/NetworkCapabilities.java\n",
-            "runtime/framework/am/ActivityManagerEndpoint.java\n",
-        ] {
-            assert!(wm_sources_from_manifest(manifest).is_err(), "{manifest}");
-        }
     }
 
     #[test]

@@ -13,6 +13,7 @@ mod foundation;
 mod interpreter;
 mod jit;
 mod jit_support;
+mod libdexfile;
 mod nterp;
 mod unwindstack;
 
@@ -23,5 +24,6 @@ pub(crate) use foundation::*;
 pub(crate) use interpreter::*;
 pub(crate) use jit::*;
 pub(crate) use jit_support::*;
+pub(crate) use libdexfile::*;
 pub(crate) use nterp::*;
 pub(crate) use unwindstack::*;

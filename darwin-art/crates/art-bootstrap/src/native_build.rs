@@ -110,21 +110,6 @@ pub(crate) fn compile_pending_native(
     Ok((objects, compiled, cached))
 }
 
-pub(crate) fn compile_cpp(source: &Path, object_dir: &Path, includes: &[&Path]) -> Result<PathBuf> {
-    let file_name = source
-        .file_name()
-        .ok_or_else(|| format!("source has no file name: {}", source.display()))?;
-    let object = object_dir.join(format!("{}.o", file_name.to_string_lossy()));
-    run_command(
-        common_cpp_command(includes)
-            .arg("-c")
-            .arg(source)
-            .arg("-o")
-            .arg(&object),
-    )?;
-    Ok(object)
-}
-
 pub(crate) fn record_cache_result(
     compiled: bool,
     compiled_objects: &mut usize,

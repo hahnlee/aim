@@ -22,6 +22,8 @@ pub(crate) fn build_network_dex_probe(root: &Path) -> Result<()> {
         Command::new("javac")
             .args(["--release", "8", "-encoding", "UTF-8", "-d"])
             .arg(&class_dir)
+            .arg("-classpath")
+            .arg(find_android_platform_jar()?)
             .arg(tool.join("probes/NetworkRuntimeFixture.java"))
             .arg(root.join("probes/button/ProbeAnimationHost.java")),
     )?;
@@ -43,7 +45,11 @@ pub(crate) fn build_network_dex_probe(root: &Path) -> Result<()> {
             .arg(class_dir.join("dev/darwinart/probe/ProbeAnimationHost$1.class")),
     )?;
     let output = command_output(Command::new(&dex_probe).arg(&classes_dex))?;
-    if !output.contains("classes=15")
+    // The baseline DEX plus the fixture and its animation host (d8 may add
+    // synthetic lambda classes for the latter).
+    let baseline_output = command_output(Command::new(&dex_probe).arg(&baseline_dex))?;
+    let baseline_classes = dex_class_count(&baseline_output)?;
+    if dex_class_count(&output)? < baseline_classes + 3
         || !output.contains("Ldev/darwinart/probe/NetworkRuntimeFixture;")
         || !output.contains("Ldev/darwinart/probe/ProbeAnimationHost;")
     {
@@ -88,6 +94,9 @@ pub(crate) fn build_network_dex_probe(root: &Path) -> Result<()> {
     if !kind.contains("ELF 64-bit LSB shared object, ARM aarch64") {
         return Err(format!("unexpected network fixture format: {kind}").into());
     }
-    println!("build-network-dex: classes=15 methods=328 ELF=arm64 imports=8 loopback=only");
+    println!(
+        "build-network-dex: classes={} ELF=arm64 imports=8 loopback=only",
+        dex_class_count(&output)?
+    );
     Ok(())
 }

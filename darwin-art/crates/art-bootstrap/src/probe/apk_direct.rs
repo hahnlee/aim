@@ -645,7 +645,7 @@ pub(crate) fn build_runtime_direct_apk_link(root: &Path) -> Result<PathBuf> {
         .arg(root.join("_build/runtime-arm64/libart-arm64-darwin.a"))
         .arg(root.join("_build/runtime-core/libart-core-darwin.a"))
         .arg(root.join("_build/runtime-platform/libart-platform-darwin.a"))
-        .arg(root.join("_build/dex-probe/libdexfile-darwin.a"))
+        .arg(build_libdexfile(root)?)
         .arg(root.join("_build/foundation/libartbase-darwin.a"))
         // The direct APK flavor does not link the graphics closure, so it
         // must carry the same source-pinned fmt v11 owner as the full runtime
