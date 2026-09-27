@@ -485,6 +485,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "darwin-host-location"
+version = "0.1.0"
+dependencies = [
+ "darwin-hostcall",
+]
+
+[[package]]
+name = "darwin-host-sensors"
+version = "0.1.0"
+dependencies = [
+ "darwin-hostcall",
+ "libc",
+]
+
+[[package]]
 name = "darwin-hostcall"
 version = "0.1.0"
 
@@ -500,6 +515,8 @@ dependencies = [
  "darwin-host-display",
  "darwin-host-gpu",
  "darwin-host-health",
+ "darwin-host-location",
+ "darwin-host-sensors",
  "darwin-hostcall",
  "libc",
  "sha2",

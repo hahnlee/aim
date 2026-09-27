@@ -8,7 +8,10 @@
 //!   flavour, which other processes (and the host property service) wake
 //!   with UL_COMPARE_AND_WAIT_SHARED. The flavour follows the mapping, as
 //!   Linux keys a non-private futex by its backing object; `os_sync` keeps
-//!   the shared and private flavours apart.
+//!   the shared and private flavours apart. It has no bitsets: a bitset
+//!   wake wakes waiters of any bitset (spuriously, for the others), so a
+//!   bitset wake of fewer than all waiters may miss its target. Cross-process
+//!   bitset users (libfmq's EventFlag) wake all.
 //!
 //! PI futexes hand ownership to the first waiter on unlock, as Linux does;
 //! there is no priority boosting (Darwin schedules the host threads).
@@ -670,9 +673,10 @@ pub fn futex(a: [u64; 6]) -> i64 {
                 Err(e) => return e,
             };
             if shared() {
-                if bitset != BITSET_ANY {
-                    return -(ENOSYS as i64);
-                }
+                // Darwin's shared wait has no bitset, so any wake of the
+                // word wakes this waiter. That is a spurious wakeup, which
+                // futex callers must tolerate (libfmq's EventFlag rechecks
+                // its bits and waits again).
                 shared_wait(uaddr, val, d)
             } else {
                 let check = || (word(uaddr).load(SeqCst) != val).then_some(-(EAGAIN as i64));

@@ -21,6 +21,8 @@ members = [
     "crates/darwin-host-display",
     "crates/darwin-host-gpu",
     "crates/darwin-host-health",
+    "crates/darwin-host-location",
+    "crates/darwin-host-sensors",
     "crates/darwin-hostcall",
     "crates/darwin-art-build-contract",
     "crates/darwin-art-native-artifact",

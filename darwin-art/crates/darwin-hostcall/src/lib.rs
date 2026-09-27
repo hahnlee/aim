@@ -62,6 +62,12 @@ pub mod module {
     pub const GPU: u32 = 2;
     /// The display server's window (the composer HAL's host side).
     pub const DISPLAY: u32 = 3;
+    /// Thermal state and temperatures (the thermal HAL's host side).
+    pub const THERMAL: u32 = 4;
+    /// Ambient light and lid angle (the sensors HAL's host side).
+    pub const SENSORS: u32 = 5;
+    /// CoreLocation fixes (the GNSS HAL's host side).
+    pub const LOCATION: u32 = 6;
 }
 
 /// Module [`module::HEALTH`]: the host's battery, for
@@ -300,6 +306,119 @@ pub mod display {
     const _: () = assert!(core::mem::size_of::<Event>() == 32);
 }
 
+/// Module [`module::THERMAL`]: the host's thermal state and temperatures,
+/// for `android.hardware.thermal`.
+pub mod thermal {
+    pub const VERSION: u32 = 1;
+
+    /// Fill a [`Thermal`]. Returns 0.
+    pub const FN_READ: u32 = 1;
+
+    /// `NSProcessInfoThermalState` values.
+    pub mod state {
+        pub const NOMINAL: u32 = 0;
+        pub const FAIR: u32 = 1;
+        pub const SERIOUS: u32 = 2;
+        pub const CRITICAL: u32 = 3;
+    }
+
+    /// Argument block of [`FN_READ`] (output only). A temperature the host
+    /// cannot read is NaN.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Thermal {
+        /// One of [`state`].
+        pub state: u32,
+        /// The hottest CPU die sensor, in degrees Celsius.
+        pub cpu_celsius: f32,
+        /// The battery (mean of its gauge sensors), in degrees Celsius.
+        pub battery_celsius: f32,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Thermal>() == 12);
+}
+
+/// Module [`module::SENSORS`]: the host's ambient light sensor and lid
+/// angle, for `android.hardware.sensors`.
+pub mod sensors {
+    pub const VERSION: u32 = 1;
+
+    /// Fill a [`Readings`]. Returns 0.
+    pub const FN_READ: u32 = 1;
+
+    /// Bits of [`Readings::present`].
+    pub mod present {
+        pub const LIGHT: u32 = 1 << 0;
+        pub const HINGE: u32 = 1 << 1;
+    }
+
+    /// Argument block of [`FN_READ`] (output only). A reading is valid when
+    /// its bit is set in `present`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Readings {
+        /// Bits of [`present`]: the sensors this host has.
+        pub present: u32,
+        pub light_lux: f32,
+        /// Lid opening, 0 (closed) to 360 degrees.
+        pub hinge_degrees: f32,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Readings>() == 12);
+}
+
+/// Module [`module::LOCATION`]: CoreLocation fixes, for
+/// `android.hardware.gnss`.
+pub mod location {
+    pub const VERSION: u32 = 1;
+
+    /// Start location updates (no argument block). Returns 0.
+    pub const FN_START: u32 = 1;
+    /// Stop location updates (no argument block). Returns 0.
+    pub const FN_STOP: u32 = 2;
+    /// Fill a [`Fix`] with the latest location. Returns 0.
+    pub const FN_READ: u32 = 3;
+
+    /// Whether the host lets us read the location.
+    pub mod authorization {
+        /// The user has not answered the prompt yet.
+        pub const NOT_DETERMINED: u32 = 0;
+        pub const RESTRICTED: u32 = 1;
+        pub const DENIED: u32 = 2;
+        pub const AUTHORIZED: u32 = 3;
+        /// Location Services are off system-wide.
+        pub const SERVICES_OFF: u32 = 4;
+    }
+
+    /// Argument block of [`FN_READ`] (output only). Units follow
+    /// CoreLocation: degrees, meters, meters per second; an accuracy below
+    /// 0 marks its value as invalid.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Fix {
+        /// One of [`authorization`].
+        pub authorization: u32,
+        /// 1 when the fields below hold a location.
+        pub valid: u32,
+        pub latitude: f64,
+        pub longitude: f64,
+        pub altitude: f64,
+        pub horizontal_accuracy: f64,
+        pub vertical_accuracy: f64,
+        pub speed: f64,
+        pub speed_accuracy: f64,
+        /// Course over ground, degrees clockwise from true north.
+        pub course: f64,
+        pub course_accuracy: f64,
+        /// Time since the fix, in nanoseconds.
+        pub age_ns: u64,
+        /// Time of the fix, in milliseconds since the Unix epoch.
+        pub unix_ms: i64,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Fix>() == 96);
+}
+
 /// A host module, as linked into the syscall layer's registry.
 pub struct HostModule {
     pub id: u32,
@@ -455,6 +574,38 @@ pub mod guest {
             enabled: enabled as u32,
         };
         call_with(module::DISPLAY, display::FN_SET_VSYNC, &mut args).map(drop)
+    }
+
+    /// The host's thermal state and temperatures.
+    pub fn thermal() -> Result<thermal::Thermal, Errno> {
+        let mut t = thermal::Thermal::default();
+        call_with(module::THERMAL, thermal::FN_READ, &mut t)?;
+        Ok(t)
+    }
+
+    /// The host's ambient light and lid angle.
+    pub fn sensors() -> Result<sensors::Readings, Errno> {
+        let mut r = sensors::Readings::default();
+        call_with(module::SENSORS, sensors::FN_READ, &mut r)?;
+        Ok(r)
+    }
+
+    /// Start (`true`) or stop host location updates.
+    pub fn location_updates(on: bool) -> Result<(), Errno> {
+        let func = if on {
+            location::FN_START
+        } else {
+            location::FN_STOP
+        };
+        // SAFETY: FN_START and FN_STOP take no argument block.
+        check(unsafe { call(module::LOCATION, func, core::ptr::null_mut(), 0) }).map(drop)
+    }
+
+    /// The latest host location.
+    pub fn location() -> Result<location::Fix, Errno> {
+        let mut f = location::Fix::default();
+        call_with(module::LOCATION, location::FN_READ, &mut f)?;
+        Ok(f)
     }
 
     /// Call forwarded entry point `id` with its register image.

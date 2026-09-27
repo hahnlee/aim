@@ -1,0 +1,4 @@
+service vendor.thermal-darwin /vendor/bin/hw/android.hardware.thermal-service.darwin
+    class hal
+    user system
+    group system

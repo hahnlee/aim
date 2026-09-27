@@ -23,6 +23,8 @@ darwin-binder-host = { path = "../darwin-binder-host" }
 darwin-host-display = { path = "../darwin-host-display" }
 darwin-host-gpu = { path = "../darwin-host-gpu" }
 darwin-host-health = { path = "../darwin-host-health" }
+darwin-host-location = { path = "../darwin-host-location" }
+darwin-host-sensors = { path = "../darwin-host-sensors" }
 darwin-hostcall = { path = "../darwin-hostcall" }
 libc = "0.2"
 sha2 = "0.10"
