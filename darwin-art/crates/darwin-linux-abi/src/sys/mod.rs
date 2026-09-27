@@ -133,6 +133,7 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         // memory
         214 => mem::brk(a),
         215 => mem::munmap(ctx, a),
+        216 => mem::mremap(a),
         222 => mem::mmap(a),
         226 => mem::mprotect(a),
         233 => mem::madvise(a),
