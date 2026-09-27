@@ -166,8 +166,16 @@ pub fn extract(archive_path: &Path, out: &Path) -> Result<Vec<Line>> {
     if fs::symlink_metadata(out).is_ok() {
         return Err(invalid(format!("{} already exists", out.display())));
     }
+    // A bare OUTDIR name has the empty path as its parent: the current directory.
     let parent = out
         .parent()
+        .map(|p| {
+            if p.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                p
+            }
+        })
         .filter(|p| p.is_dir())
         .ok_or_else(|| invalid("OUTDIR's parent directory must exist"))?;
     let name = out
