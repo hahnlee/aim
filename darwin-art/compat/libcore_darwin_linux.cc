@@ -37,6 +37,8 @@ extern "C" int darwin_art_bionic_fs_chmod_core(const char *, uint32_t)
     __attribute__((weak_import));
 extern "C" int darwin_art_bionic_fs_fchmod_core(int, uint32_t)
     __attribute__((weak_import));
+extern "C" int darwin_art_bionic_fs_fchown_core(int, uint32_t, uint32_t)
+    __attribute__((weak_import));
 extern "C" int darwin_art_bionic_fs_mkdir_core(const char *, uint32_t)
     __attribute__((weak_import));
 extern "C" ssize_t darwin_art_bionic_fs_getxattr_core(const char *, const char *,
@@ -526,6 +528,25 @@ void DarwinLinuxFchmod(JNIEnv *env, jobject, jobject java_fd, jint mode) {
     }
   } else if (fchmod(fd, static_cast<mode_t>(mode)) == -1) {
     ThrowErrno(env, "fchmod", errno);
+  }
+}
+
+// The facade stores Android ownership for private /data nodes (ADR 0009); a
+// host descriptor outside it keeps the host's answer.
+void DarwinLinuxFchown(JNIEnv *env, jobject, jobject java_fd, jint uid,
+                       jint gid) {
+  const int fd = jniGetFDFromFileDescriptor(env, java_fd);
+  if (darwin_art_bionic_fs_fchown_core != nullptr) {
+    if (darwin_art_bionic_fs_fchown_core(fd, static_cast<uint32_t>(uid),
+                                         static_cast<uint32_t>(gid)) == -1) {
+      const int android_error = darwin_art_bionic_errno_load == nullptr
+                                    ? EIO
+                                    : darwin_art_bionic_errno_load();
+      jniThrowErrnoException(env, "fchown", android_error);
+    }
+  } else if (fchown(fd, static_cast<uid_t>(uid), static_cast<gid_t>(gid)) ==
+             -1) {
+    ThrowErrno(env, "fchown", errno);
   }
 }
 

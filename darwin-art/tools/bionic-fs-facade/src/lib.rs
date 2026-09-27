@@ -27,6 +27,9 @@ mod descriptor_table;
 mod directory;
 mod extended_attributes;
 mod filesystem_namespace;
+mod guest_ownership;
+#[cfg(test)]
+mod guest_ownership_tests;
 mod immutable_open;
 #[cfg(test)]
 mod immutable_open_tests;
@@ -34,6 +37,7 @@ mod metadata;
 mod mkdir_at;
 mod native_image;
 mod open_at;
+mod ownership_policy;
 mod private_data;
 #[cfg(test)]
 mod private_data_tests;
@@ -322,12 +326,16 @@ struct OverlayFile {
     inode: u64,
     mode: u32,
     data: Vec<u8>,
+    /// Android owner of a `/data` overlay node; none for synthetic files and
+    /// for a process without trusted credentials, which report root.
+    owner: Option<guest_ownership::GuestOwner>,
 }
 
 #[derive(Clone, Copy)]
 struct OverlayDirectory {
     inode: u64,
     mode: u32,
+    owner: Option<guest_ownership::GuestOwner>,
 }
 
 enum OverlayEntry {
@@ -348,6 +356,7 @@ impl Default for OverlayState {
             OverlayEntry::Directory(OverlayDirectory {
                 inode: 1,
                 mode: ANDROID_S_IFDIR | 0o700,
+                owner: None,
             }),
         );
         Self {
@@ -413,6 +422,9 @@ pub struct Facade {
     directories: Mutex<DirectoryTable>,
     entropy: Arc<dyn EntropyBackend>,
     capability_failure: AtomicBool,
+    /// The launcher's Android identity, captured before guest code runs.
+    /// Without it, `/data` nodes keep their host owner and chown is refused.
+    credentials: Option<guest_ownership::ProcessCredentials>,
 }
 
 impl Facade {
@@ -546,6 +558,7 @@ impl Facade {
             directories: Mutex::new(DirectoryTable::default()),
             entropy,
             capability_failure: AtomicBool::new(false),
+            credentials: guest_ownership::ProcessCredentials::from_environment(),
         })
     }
 
@@ -1150,6 +1163,7 @@ impl Facade {
             inode: Self::synthetic_inode(path),
             mode: ANDROID_S_IFREG | 0o444,
             data,
+            owner: None,
         }));
         let mut descriptors = match self.descriptors.lock() {
             Ok(descriptors) => descriptors,
@@ -1294,6 +1308,7 @@ impl Facade {
             inode: 0x7072_6f63,
             mode: ANDROID_S_IFREG | 0o444,
             data: contents.into_bytes(),
+            owner: None,
         }));
         let descriptor = Descriptor::Overlay(OverlayDescriptor {
             node,
@@ -1546,6 +1561,7 @@ impl Facade {
                     inode,
                     mode: ANDROID_S_IFREG | (mode & 0o7777),
                     data: Vec::new(),
+                    owner: self.overlay_creator(),
                 }));
                 overlay.entries.insert(
                     resolution.relative_path.clone(),
@@ -2179,7 +2195,8 @@ impl Facade {
                         Ok(metadata) => metadata,
                         Err(error) => return self.fail_io(&error),
                     };
-                    metadata_to_android(&metadata)
+                    let origin = descriptors.fd_origins.get(&fd).and_then(Option::as_ref);
+                    self.android_stat_from(origin, file, &metadata)
                 }
                 Descriptor::Random(kind) => random_device_stat(*kind),
                 Descriptor::Overlay(descriptor) => {
@@ -2441,17 +2458,39 @@ impl Facade {
         result
     }
 
-    fn fchown(&self, fd: c_int, _owner: u32, _group: u32) -> c_int {
+    fn fchown(&self, fd: c_int, owner: u32, group: u32) -> c_int {
         let descriptors = match self.descriptors.lock() {
             Ok(descriptors) => descriptors,
             Err(_) => return self.fail_capability(),
         };
         match descriptors.entries.get(&fd) {
-            // Overlay nodes do not yet store guest ownership or authorize
-            // transitions against process credentials. Never acknowledge a
-            // change whose requested uid/gid would simply be discarded.
-            Some(Descriptor::Overlay(_)) => self.fail(ANDROID_EOPNOTSUPP),
-            Some(_) => self.fail(ANDROID_EROFS),
+            Some(Descriptor::Overlay(descriptor)) => {
+                let mut file = match descriptor.node.lock() {
+                    Ok(file) => file,
+                    Err(_) => return self.fail_capability(),
+                };
+                // Synthetic files, and every overlay node of a process
+                // without trusted credentials, have no stored owner. Never
+                // acknowledge a change that would simply be discarded.
+                let Some(current) = file.owner else {
+                    return self.fail(ANDROID_EOPNOTSUPP);
+                };
+                match self.authorize_chown(current, file.mode, owner, group) {
+                    Ok(authorized) => {
+                        file.owner = Some(guest_ownership::GuestOwner {
+                            uid: authorized.uid,
+                            gid: authorized.gid,
+                        });
+                        file.mode = authorized.mode;
+                        0
+                    }
+                    Err(error) => self.fail(error),
+                }
+            }
+            Some(Descriptor::File(file) | Descriptor::PrivateFile(file)) => {
+                self.chown_host_node(file, owner, group)
+            }
+            Some(Descriptor::Random(_)) => self.fail(ANDROID_EROFS),
             None => self.fail(ANDROID_EBADF),
         }
     }
@@ -2543,6 +2582,7 @@ impl Facade {
             OverlayEntry::Directory(OverlayDirectory {
                 inode,
                 mode: ANDROID_S_IFDIR | (mode & 0o7777),
+                owner: self.overlay_creator(),
             }),
         );
         if std::env::var_os("DARWIN_ART_FS_TRACE").is_some() {
@@ -2594,6 +2634,7 @@ impl Facade {
                 OverlayEntry::Directory(OverlayDirectory {
                     inode,
                     mode: ANDROID_S_IFDIR | 0o700,
+                    owner: self.overlay_creator(),
                 }),
             );
         }
@@ -3002,8 +3043,8 @@ fn overlay_file_stat(file: &OverlayFile) -> AndroidStat {
         st_ino: file.inode,
         st_mode: file.mode,
         st_nlink: 1,
-        st_uid: 0,
-        st_gid: 0,
+        st_uid: file.owner.map_or(0, |owner| owner.uid),
+        st_gid: file.owner.map_or(0, |owner| owner.gid),
         st_rdev: 0,
         pad1: 0,
         st_size: size,
@@ -3024,8 +3065,8 @@ fn overlay_directory_stat(directory: OverlayDirectory) -> AndroidStat {
         st_ino: directory.inode,
         st_mode: directory.mode,
         st_nlink: 1,
-        st_uid: 0,
-        st_gid: 0,
+        st_uid: directory.owner.map_or(0, |owner| owner.uid),
+        st_gid: directory.owner.map_or(0, |owner| owner.gid),
         st_rdev: 0,
         pad1: 0,
         st_size: 0,

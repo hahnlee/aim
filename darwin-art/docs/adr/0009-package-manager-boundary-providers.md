@@ -75,6 +75,22 @@ Darwin code exists only at these boundaries:
   Android filesystem namespace (FdFile, `OS::FileExists`/`DirectoryExists`), as
   libziparchive and androidfw do. The private data mount stores Linux `user.*`
   extended attributes, which `UserDataPreparer` needs for its serial checks.
+- **File ownership.** The host owns every `/data` backing file as the Darwin
+  user, so the Android uid/gid of a private-mount node is stored in the
+  host-private extended attribute `dev.darwinart.owner` (uid then gid, each a
+  little-endian u32), which the guest's `user.*` view never shows, as with
+  `dev.darwinart.fsverity`. `stat`, `lstat`, `fstatat` and `fstat` report it,
+  and a node without it belongs to the calling process's uid and gid.
+  `fchown` is authorized by the facade's Linux chown policy against the
+  credentials the launcher passed in `DARWIN_ART_ANDROID_UID` (read once, at
+  facade creation): uid 0 and system_server hold `CAP_CHOWN` and `CAP_FSETID`,
+  and an app (gid equal to its uid, no supplementary groups) may only restate
+  its uid or pick its own group. The result is stored, and the set-ID bits
+  the policy clears are cleared on the host mode. The read-only image,
+  `/data/app` and shared storage keep their existing metadata; without
+  launcher credentials the host owner is reported and chown stays
+  unsupported. New nodes are not stamped with their creator, so an unowned
+  node reads as belonging to whichever process stats it.
 - **System partition.** PMS scans the pinned image's `/system/app`,
   `/system/priv-app` and APK-in-APEX packages (including Health Connect, whose
   APK defines permissions AppOps maps), plus the permission and sysconfig XML

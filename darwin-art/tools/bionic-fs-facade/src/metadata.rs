@@ -22,9 +22,15 @@ impl Facade {
                 return self.fail(ANDROID_ENOENT);
             }
             return if directory_fd == AT_FDCWD {
-                match self.namespace.cwd.metadata() {
+                let (directory, origin) = match self.namespace.cwd.lease() {
+                    Ok(lease) => lease,
+                    Err(error) => return self.fail_io(&error),
+                };
+                match directory.metadata() {
                     Ok(metadata) => {
-                        unsafe { status.write(metadata_to_android(&metadata)) };
+                        let translated =
+                            self.android_stat_from(origin.as_ref(), &directory, &metadata);
+                        unsafe { status.write(translated) };
                         0
                     }
                     Err(error) => self.fail_io(&error),
@@ -81,7 +87,7 @@ impl Facade {
             Ok(metadata) => metadata,
             Err(error) => return self.fail_io(&error),
         };
-        unsafe { status.write(metadata_to_android(&metadata)) };
+        unsafe { status.write(self.android_stat(&file, &metadata)) };
         0
     }
 
@@ -89,8 +95,12 @@ impl Facade {
     /// pathname. When the full guest-root resolver is available, this also
     /// gives absolute and relative links Android's virtual `/data` semantics;
     /// the descriptor-only fallback deliberately rejects links rather than
-    /// allowing a host-path escape.
-    fn stat_private_relative(&self, relative: &[u8], no_follow: bool) -> Result<Metadata, c_int> {
+    /// allowing a host-path escape. Private nodes report their Android owner.
+    fn stat_private_relative(
+        &self,
+        relative: &[u8],
+        no_follow: bool,
+    ) -> Result<AndroidStat, c_int> {
         let root = self
             .private_root
             .as_deref()
@@ -103,7 +113,7 @@ impl Facade {
         authority: &super::writable_mount::WritableMount,
         relative: &[u8],
         no_follow: bool,
-    ) -> Result<Metadata, c_int> {
+    ) -> Result<AndroidStat, c_int> {
         if let Some(root) = &self.namespace.guest_root {
             let mount = root
                 .open(authority.guest_prefix())
@@ -116,10 +126,8 @@ impl Facade {
                 root.open_relative(&mount, relative, no_follow)
                     .map_err(|error| self.fail_io(&error))?
             };
-            return Ok(file
-                .metadata()
-                .map_err(|error| self.fail_io(&error))?
-                .clone());
+            let metadata = file.metadata().map_err(|error| self.fail_io(&error))?;
+            return Ok(self.android_stat(&file, &metadata));
         }
 
         let file = if relative.is_empty() {
@@ -140,7 +148,7 @@ impl Facade {
         if !no_follow && metadata.file_type().is_symlink() {
             return Err(self.fail(ANDROID_EOPNOTSUPP));
         }
-        Ok(metadata)
+        Ok(self.android_stat(&file, &metadata))
     }
 
     pub(super) unsafe fn stat(
@@ -162,6 +170,7 @@ impl Facade {
                 inode: Self::synthetic_inode(path),
                 mode: ANDROID_S_IFREG | 0o444,
                 data,
+                owner: None,
             };
             // SAFETY: the Android ABI requires one writable 128-byte stat
             // object, checked for null above.
@@ -197,11 +206,11 @@ impl Facade {
                 Some(relative) => relative,
                 None => return self.fail(ANDROID_EACCES),
             };
-            let metadata = match self.stat_private_relative(&relative, no_follow) {
-                Ok(metadata) => metadata,
+            let translated = match self.stat_private_relative(&relative, no_follow) {
+                Ok(translated) => translated,
                 Err(error) => return error,
             };
-            unsafe { status.write(metadata_to_android(&metadata)) };
+            unsafe { status.write(translated) };
             return 0;
         }
         // Preserve ENOENT for a missing final component below the writable
@@ -217,11 +226,11 @@ impl Facade {
                 Ok(relative) => relative,
                 Err(error) => return self.fail(error),
             };
-            let metadata = match self.stat_writable_relative(root, &relative, no_follow) {
-                Ok(metadata) => metadata,
+            let translated = match self.stat_writable_relative(root, &relative, no_follow) {
+                Ok(translated) => translated,
                 Err(error) => return error,
             };
-            unsafe { status.write(metadata_to_android(&metadata)) };
+            unsafe { status.write(translated) };
             return 0;
         }
         if resolution.mount_id == 2 {
@@ -268,7 +277,14 @@ impl Facade {
                 Ok(opened) => opened,
                 Err(error) => return self.fail_io(&error),
             };
-            unsafe { status.write(metadata_to_android(opened.node.metadata())) };
+            // A link can lead here into the private mount; its nodes report
+            // their Android owner as a direct /data stat does.
+            let translated = self.android_stat_from(
+                Some(opened.origin()),
+                opened.node.file(),
+                opened.node.metadata(),
+            );
+            unsafe { status.write(translated) };
             return 0;
         }
         let mut relative_path = resolution.relative_path;
