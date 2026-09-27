@@ -9,3 +9,6 @@ tools/__pycache__/
 __pycache__/
 *.pyc
 hs_err_pid*.log
+
+# rustc output when compiling from stdin
+rust_out
