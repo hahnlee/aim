@@ -587,7 +587,7 @@ pub(crate) fn audit_runtime_graphics_link_mode(
         // just as the Android APEX dependency does.
         .arg(format!(
             "-Wl,-force_load,{}",
-            root.join("_build/dex-probe/libdexfile-darwin.a").display()
+            build_libdexfile(root)?.display()
         ))
         .arg(
             build_paths

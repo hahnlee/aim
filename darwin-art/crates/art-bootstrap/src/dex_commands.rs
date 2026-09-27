@@ -20,7 +20,9 @@ pub(crate) use button::build_button_dex_probe;
 pub(crate) use dex_inspector::build_dex_inspector;
 pub(crate) use elf_jni::build_elf_jni_dex_probe;
 pub(crate) use network::build_network_dex_probe;
-pub(crate) use runtime_support::{build_runtime_support_classes, build_runtime_support_dex};
+pub(crate) use runtime_support::{
+    build_runtime_support_classes, build_runtime_support_dex, runtime_support_classes,
+};
 
 pub(crate) fn find_d8() -> Result<PathBuf> {
     let sdk_root = android_sdk_root()?;
@@ -87,6 +89,15 @@ pub(crate) fn verify_dex_contract(
         }
     }
     Ok(())
+}
+
+/// The `classes=` count of a verified DEX probe header.
+pub(crate) fn dex_class_count(output: &str) -> Result<usize> {
+    output
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("classes="))
+        .and_then(|count| count.parse().ok())
+        .ok_or_else(|| format!("DEX probe output has no class count: {output:?}").into())
 }
 
 // The probe's diagnostic enumerates class_defs, not referenced type strings.

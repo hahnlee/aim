@@ -1,4 +1,4 @@
-use super::fixture_framework_inputs::append_wm_classes;
+use super::fixture_framework_inputs::append_runtime_support_classes;
 use super::*;
 
 pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
@@ -38,8 +38,15 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
     fs::create_dir_all(&class_dir)?;
     fs::create_dir_all(&dex_dir)?;
 
-    let javac_classpath =
-        env::join_paths([&android_platform_jar, &android_mock_jar, &baseline_classes])?;
+    // The production runtime support owners, compiled by their own build;
+    // the fixture packages all of them instead of keeping a source list.
+    let support_classes = runtime_support_classes(root)?;
+    let javac_classpath = env::join_paths([
+        &android_platform_jar,
+        &android_mock_jar,
+        &baseline_classes,
+        &support_classes,
+    ])?;
     let mut javac = Command::new("javac");
     javac
         .args(["--release", "8", "-encoding", "UTF-8", "-d"])
@@ -50,44 +57,6 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
         .arg(root.join("probes/button/ProbeAnimationHost.java"))
         .arg(root.join("probes/button/ProbeActivity.java"))
         .arg(root.join("probes/button/ProbeView.java"))
-        .arg(root.join("runtime/framework/system/DarwinSystemServer.java"))
-        .arg(root.join("runtime/framework/system/SystemServiceFactory.java"))
-        .arg(root.join("runtime/framework/usage/UsageStatsManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/restrictions/RestrictionsManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/job/JobSchedulerEndpoint.java"))
-        .arg(root.join("runtime/framework/job/JobSchedulerService.java"))
-        .arg(root.join("runtime/framework/job/JobRecord.java"))
-        .arg(root.join("runtime/framework/job/JobServiceContext.java"))
-        .arg(root.join("runtime/framework/audio/AudioServiceEndpoint.java"))
-        .arg(root.join("runtime/framework/camera/CameraServiceEndpoint.java"))
-        .arg(root.join("runtime/framework/alarm/AlarmManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/shortcut/ShortcutManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/storage/StorageManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/admin/DevicePolicyManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/power/PowerStateProvider.java"))
-        .arg(root.join("runtime/framework/power/DarwinPowerStateProvider.java"))
-        .arg(root.join("runtime/framework/power/PowerManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/power/ThermalServiceEndpoint.java"))
-        .arg(root.join("runtime/framework/trust/TrustManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/connectivity/ConnectivityState.java"))
-        .arg(root.join("runtime/framework/connectivity/ConnectivityCallbackRegistry.java"))
-        .arg(root.join("runtime/framework/connectivity/ConnectivitySnapshot.java"))
-        .arg(root.join("runtime/framework/connectivity/ConnectivityProjection.java"))
-        .arg(root.join("runtime/framework/connectivity/ConnectivityPermissionEnforcer.java"))
-        .arg(
-            root.join(
-                "runtime/framework/connectivity/InstalledConnectivityPermissionEnforcer.java",
-            ),
-        )
-        .arg(root.join("runtime/framework/connectivity/ConnectivityManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/connectivity/NetworkPathProvider.java"))
-        .arg(root.join("runtime/framework/connectivity/NetworkProbeTransport.java"))
-        .arg(root.join("runtime/framework/connectivity/HttpNetworkProbeTransport.java"))
-        .arg(root.join("runtime/framework/connectivity/NetworkValidationMonitor.java"))
-        .arg(root.join("runtime/framework/connectivity/ConnectivityServiceState.java"))
-        .arg(root.join("runtime/framework/compile-stubs/android/net/NetworkCapabilities.java"))
-        .arg(root.join("runtime/framework/uimode/UiModeManagerEndpoint.java"))
-        .arg(root.join("runtime/framework/locale/LocaleManagerEndpoint.java"))
         .arg(root.join("probes/apk_support/java/javax/microedition/khronos/egl/EGL.java"))
         .arg(root.join("probes/apk_support/java/javax/microedition/khronos/egl/EGL10.java"))
         .arg(root.join("probes/apk_support/java/javax/microedition/khronos/egl/EGLConfig.java"))
@@ -105,9 +74,13 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
         .arg("--classpath")
         .arg(&baseline_classes)
         .arg("--classpath")
+        .arg(&support_classes)
+        .arg("--classpath")
         .arg(&android_mock_jar)
         .arg("--output")
         .arg(&dex_dir)
+        // PackageDexUsage's store, as the runtime support DEX packages it.
+        .arg(root.join("_build/package-dex-usage-runtime/package-dex-usage.jar"))
         .arg(baseline("android/test/mock/MockPackageManager.class"))
         .arg(baseline("android/test/mock/MockContext.class"))
         .arg(baseline("android/content/pm/ProbeShortcutManager.class"))
@@ -173,7 +146,6 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
         .arg(baseline(
             "dev/darwinart/probe/ProbeContext$BoundServiceRecord.class",
         ))
-        .arg(baseline("dev/darwinart/runtime/os/RemoteBinder.class"))
         .arg(baseline(
             "dev/darwinart/probe/ProbeContext$CompatibilityHandler.class",
         ))
@@ -191,227 +163,6 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
             "dev/darwinart/probe/ProbeSharedPreferences$EditorImpl.class",
         ))
         .arg(baseline("dev/darwinart/probe/ProbePackageManager.class"))
-        .arg(baseline("dev/darwinart/runtime/os/SystemServices.class"))
-        .arg(baseline(
-            "dev/darwinart/runtime/system/ServiceDirectory.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/system/SystemServiceFactory.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/camera/CameraServiceEndpoint.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/am/ApplicationProcessRegistry.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/am/ApplicationProcessRegistry$1.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/am/ApplicationProcessRegistry$InitialWork.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/am/ApplicationProcessRegistry$ProcessRecord.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/am/ApplicationProcessRegistry$AttachedApplication.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/am/ActivityManagerEndpoint.class",
-        ))
-        .arg(baseline("dev/darwinart/runtime/am/ActiveServices.class"))
-        .arg(baseline(
-            "dev/darwinart/runtime/am/SystemServiceBindings.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/am/ActiveServices$ProcessLauncher.class",
-        ))
-        .arg(baseline("dev/darwinart/runtime/am/ServiceRecord.class"))
-        .arg(baseline("dev/darwinart/runtime/am/IntentBindRecord.class"))
-        .arg(baseline("dev/darwinart/runtime/am/ConnectionRecord.class"))
-        .arg(baseline(
-            "dev/darwinart/runtime/am/ActivityManagerClient.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/display/BuiltInDisplayConfiguration.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/display/DefaultDisplayRegistry.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/display/DisplayManagerEndpoint.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/user/UserManagerEndpoint.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/content/SettingsProviderEndpoint.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/content/ContentServiceEndpoint.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/content/ContentServiceEndpoint$ObserverRecord.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/content/ClipboardServiceEndpoint.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/content/ClipboardServiceEndpoint$ClipRecord.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/content/ClipboardServiceEndpoint$ListenerRecord.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/notification/NotificationManagerEndpoint.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/inputmethod/InputMethodManagerEndpoint.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/input/InputManagerEndpoint.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/input/InputDeviceRegistry.class",
-        ))
-        .arg(baseline(
-            "dev/darwinart/runtime/input/SystemKeyboardMaps.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/audio/AudioServiceEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/alarm/AlarmManagerEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/shortcut/ShortcutManagerEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/storage/StorageManagerEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/admin/DevicePolicyManagerEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/power/PowerStateProvider.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/power/DarwinPowerStateProvider.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/power/PowerManagerEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/power/ThermalServiceEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/restrictions/RestrictionsManagerEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/trust/TrustManagerEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityState.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityState$Listener.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityCallbackRegistry.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityCallbackRegistry$1.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityCallbackRegistry$2.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityCallbackRegistry$Registration.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivitySnapshot.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityProjection.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityPermissionEnforcer.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/InstalledConnectivityPermissionEnforcer.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityManagerEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/NetworkPathProvider.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/NetworkProbeTransport.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/NetworkProbeTransport$Result.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/HttpNetworkProbeTransport.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/NetworkValidationMonitor.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/NetworkValidationMonitor$Callback.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/NetworkValidationMonitor$1.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/NetworkValidationMonitor$2.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/NetworkValidationMonitor$2$1.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityServiceState.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityServiceState$1.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityServiceState$2.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/connectivity/ConnectivityServiceState$3.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/uimode/UiModeManagerEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/locale/LocaleManagerEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/usage/UsageStatsManagerEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/job/JobSchedulerEndpoint.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/job/JobSchedulerService.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/job/JobSchedulerService$Key.class",
-        ))
-        .arg(button("dev/darwinart/runtime/job/JobRecord.class"))
-        .arg(button("dev/darwinart/runtime/job/JobRecord$State.class"))
-        .arg(button("dev/darwinart/runtime/job/JobServiceContext.class"))
-        .arg(button(
-            "dev/darwinart/runtime/job/JobServiceContext$Listener.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/job/JobServiceContext$Callback.class",
-        ))
-        .arg(button(
-            "dev/darwinart/runtime/job/JobServiceContext$ServiceConnection.class",
-        ))
         .arg(baseline("dev/darwinart/probe/ProbeResources.class"))
         .arg(baseline("dev/darwinart/probe/ProbeXmlResourceParser.class"))
         .arg(button("dev/darwinart/probe/FontBootstrap.class"))
@@ -419,10 +170,6 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
         .arg(button("dev/darwinart/probe/ProbeAnimationHost$1.class"))
         .arg(button("dev/darwinart/probe/ProbeActivity.class"))
         .arg(button("dev/darwinart/probe/ProbeView.class"))
-        .arg(button("dev/darwinart/system/DarwinSystemServer.class"))
-        .arg(button(
-            "dev/darwinart/system/DarwinSystemServer$PackageRegistryBinder.class",
-        ))
         .arg(button("javax/microedition/khronos/egl/EGL.class"))
         .arg(button("javax/microedition/khronos/egl/EGL10.class"))
         .arg(button("javax/microedition/khronos/egl/EGLConfig.class"))
@@ -430,7 +177,7 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
         .arg(button("javax/microedition/khronos/egl/EGLDisplay.class"))
         .arg(button("javax/microedition/khronos/egl/EGLSurface.class"))
         .arg(button("javax/microedition/khronos/egl/DarwinEGL10.class"));
-    append_wm_classes(&baseline_classes, &mut d8)?;
+    append_runtime_support_classes(&support_classes, &mut d8)?;
     run_command(&mut d8)?;
 
     let classes_dex = dex_dir.join("classes.dex");
@@ -438,8 +185,8 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
     let output = command_output(Command::new(&dex_probe).arg(&classes_dex))?;
     verify_dex_contract(
         &output,
-        270,
-        4042,
+        427,
+        5547,
         &[
             "Ldev/darwinart/probe/ProbeActivity;",
             "Ldev/darwinart/probe/ProbeContext$BaseContext;",
@@ -499,7 +246,6 @@ pub(crate) fn build_button_dex_probe(root: &Path) -> Result<()> {
             "Ldev/darwinart/runtime/connectivity/ConnectivitySnapshot;",
             "Ldev/darwinart/runtime/connectivity/ConnectivityProjection;",
             "Ldev/darwinart/runtime/connectivity/ConnectivityPermissionEnforcer;",
-            "Ldev/darwinart/runtime/connectivity/InstalledConnectivityPermissionEnforcer;",
             "Ldev/darwinart/runtime/connectivity/ConnectivityManagerEndpoint;",
             "Ldev/darwinart/runtime/connectivity/NetworkPathProvider;",
             "Ldev/darwinart/runtime/connectivity/ConnectivityServiceState;",

@@ -486,7 +486,7 @@ pub(crate) fn audit_runtime_link(root: &Path) -> Result<()> {
         .arg(root.join("_build/runtime-arm64/libart-arm64-darwin.a"))
         .arg(root.join("_build/runtime-core/libart-core-darwin.a"))
         .arg(root.join("_build/runtime-platform/libart-platform-darwin.a"))
-        .arg(root.join("_build/dex-probe/libdexfile-darwin.a"))
+        .arg(build_libdexfile(root)?)
         .arg(root.join("_build/foundation/libartbase-darwin.a"))
         // The runtime probe uses the source-pinned Android-base/fmt v11
         // objects.  The smaller foundation archive intentionally omits those

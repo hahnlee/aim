@@ -7,6 +7,12 @@ pub(crate) fn build_runtime_support_classes(root: &Path) -> Result<()> {
     compile_runtime_support(root).map(|_| ())
 }
 
+/// The production runtime support classes (a fresh generation), for fixtures
+/// that exercise those owners instead of compiling their own copies.
+pub(crate) fn runtime_support_classes(root: &Path) -> Result<PathBuf> {
+    compile_runtime_support(root).map(|support| support.classes)
+}
+
 struct CompiledSupport {
     directory: PathBuf,
     classes: PathBuf,
