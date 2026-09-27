@@ -55,6 +55,8 @@ pub mod module {
     pub const CORE: u32 = 0;
     /// Battery and power supply (the health HAL's host side).
     pub const HEALTH: u32 = 1;
+    /// EGL and OpenGL ES over the host's ANGLE (the GLES driver's host side).
+    pub const GPU: u32 = 2;
 }
 
 /// Module [`module::HEALTH`]: the host's battery, for
@@ -111,6 +113,78 @@ pub mod health {
     }
 
     const _: () = assert!(core::mem::size_of::<Battery>() == 64);
+}
+
+/// Module [`module::GPU`]: EGL and OpenGL ES over the host's ANGLE on
+/// Metal, for the guest GLES driver (`docs/gles-driver.md`).
+pub mod gpu {
+    pub const VERSION: u32 = 1;
+
+    /// Load ANGLE and resolve the forwarded entry points ([`Init`]).
+    /// Returns 0, `-ENODEV` when the host has no GPU libraries, or
+    /// `-EINVAL` when the guest's table is not the host's.
+    pub const FN_INIT: u32 = 1;
+    /// Wrap guest memory as a linear Metal texture and import it into ANGLE
+    /// as an `EGLImage` ([`ImportBuffer`]). Returns 0 or `-EINVAL`.
+    pub const FN_IMPORT_BUFFER: u32 = 2;
+    /// Copy the current context's draw surface into an `EGLImage`, top row
+    /// first, and wait for the GPU ([`Present`]). Returns 0 or `-EINVAL`.
+    pub const FN_PRESENT: u32 = 3;
+    /// Forwarded entry point `i` of the generated table
+    /// (`tools/gen-gpu-thunks.py`) is function `FN_TABLE_BASE + i`. Its
+    /// argument block is the callee's register image, 8 bytes per value:
+    /// the x registers, then the d registers, then the stack words in the
+    /// Apple arm64 layout. The call returns the callee's x0 unchanged (0 for
+    /// an entry point the host could not resolve).
+    pub const FN_TABLE_BASE: u32 = 0x1000;
+
+    /// Argument block of [`FN_INIT`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Init {
+        /// `TABLE_HASH` of the generated table.
+        pub table_hash: u64,
+        pub table_len: u64,
+        /// Guest bitmap of `table_len` bits, one u64 per 64 entries: the
+        /// host sets bit `i` when it resolved entry `i`.
+        pub resolved: u64,
+        pub resolved_words: u64,
+    }
+
+    /// Argument block of [`FN_IMPORT_BUFFER`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct ImportBuffer {
+        /// The host `EGLDisplay`.
+        pub display: u64,
+        /// Page-aligned guest mapping of the whole buffer, pixels at 0.
+        pub address: u64,
+        /// Length of the mapping, a multiple of the page size.
+        pub length: u64,
+        pub width: u32,
+        pub height: u32,
+        pub stride_bytes: u32,
+        /// `PixelFormat` of the buffer.
+        pub format: i32,
+        /// Out: the `EGLImage`.
+        pub image: u64,
+    }
+
+    /// Argument block of [`FN_PRESENT`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Present {
+        /// Destination `EGLImage` (from [`FN_IMPORT_BUFFER`]).
+        pub image: u64,
+        pub src_width: u32,
+        pub src_height: u32,
+        pub dst_width: u32,
+        pub dst_height: u32,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Init>() == 32);
+    const _: () = assert!(core::mem::size_of::<ImportBuffer>() == 48);
+    const _: () = assert!(core::mem::size_of::<Present>() == 24);
 }
 
 /// A host module, as linked into the syscall layer's registry.
@@ -216,4 +290,61 @@ pub mod guest {
         call_with(module::HEALTH, health::FN_BATTERY, &mut b)?;
         Ok(b)
     }
+
+    /// Load the host GPU libraries and resolve the forwarded entry points.
+    pub fn gpu_init(args: &mut gpu::Init) -> Result<(), Errno> {
+        call_with(module::GPU, gpu::FN_INIT, args).map(drop)
+    }
+
+    /// Import a mapped graphics buffer into ANGLE as an `EGLImage`.
+    pub fn gpu_import_buffer(args: &mut gpu::ImportBuffer) -> Result<(), Errno> {
+        call_with(module::GPU, gpu::FN_IMPORT_BUFFER, args).map(drop)
+    }
+
+    /// Copy the current draw surface into an imported buffer.
+    pub fn gpu_present(args: &mut gpu::Present) -> Result<(), Errno> {
+        call_with(module::GPU, gpu::FN_PRESENT, args).map(drop)
+    }
+
+    /// Call forwarded entry point `id` with its register image.
+    ///
+    /// # Safety
+    /// `regs` must hold `words` values laid out as that entry point's
+    /// register image, and any pointers in it must be valid for the callee.
+    #[inline(always)]
+    pub unsafe fn gpu_forward(id: u32, regs: *mut u64, words: usize) -> i64 {
+        // SAFETY: caller contract.
+        unsafe { call_fn(module::GPU, gpu::FN_TABLE_BASE + id, regs.cast(), words * 8) }
+    }
+
+    /// [`call`] as an out-of-line C function. A caller then saves only the
+    /// registers AAPCS64 makes it save, whereas inline assembly must also
+    /// treat v8-v15 as clobbered (it cannot name their upper halves alone),
+    /// which costs a small caller eight extra register saves.
+    ///
+    /// # Safety
+    /// As for [`call`].
+    #[inline(always)]
+    pub unsafe fn call_fn(module: u32, func: u32, args: *mut u8, len: usize) -> i64 {
+        unsafe extern "C" {
+            fn darwin_hostcall(module: u32, func: u32, args: *mut u8, len: usize) -> i64;
+        }
+        // SAFETY: caller contract; the function is the host-call syscall.
+        unsafe { darwin_hostcall(module, func, args, len) }
+    }
+
+    core::arch::global_asm!(
+        ".pushsection .text.darwin_hostcall,\"ax\",@progbits",
+        ".globl darwin_hostcall",
+        ".hidden darwin_hostcall",
+        ".type darwin_hostcall,@function",
+        ".p2align 2",
+        "darwin_hostcall:",
+        "movz x8, #0x4843, lsl #16",
+        "svc #0",
+        "ret",
+        ".size darwin_hostcall, . - darwin_hostcall",
+        ".popsection",
+    );
+    const _: () = assert!(SYSCALL_NR == 0x4843 << 16);
 }

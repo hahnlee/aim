@@ -96,6 +96,7 @@ first.
 | --- | --- | --- | --- |
 | 0 | core | `ABI_VERSION` = 1 | (version only) |
 | 1 | health | 1 | `FN_BATTERY`: fill `health::Battery` |
+| 2 | gpu | 1 | `FN_INIT`, `FN_IMPORT_BUFFER`, `FN_PRESENT`, and the generated EGL/GLES entry points from `FN_TABLE_BASE` ([gles-driver.md](gles-driver.md)) |
 
 ## Vendor HAL build pipeline
 
@@ -130,12 +131,15 @@ aarch64-linux-android`.
 
 To add a HAL:
 
-- add an `AIDL_INTERFACES` line (interfaces that import other packages also
-  need `-I` paths and `pub use` of their crates in the glue, which the script
-  does not do yet);
+- add an `AIDL_INTERFACES` line, after the interfaces it imports, listing
+  them as `package:version` (the script puts them on the include path and
+  re-exports their `mangled` items, as Soong's glue does);
 - add a manifest under `hal/aidl/<package>` with `build =
   "../../binder/build.rs"`, since the binder macros expand there;
-- add a service crate with its `.rc` and vintf fragment;
+- add a service crate with its `.rc` and vintf fragment (a driver library
+  loaded in-process, like the mapper or the GLES driver, is a `cdylib` whose
+  `[package.metadata.vendor-hal] library` names the installed file in
+  `_build/vendor-hals/lib`);
 - add `[[add]]` entries to the overlay, plus `[[remove]]` for an emulator
   HAL of the same instance.
 

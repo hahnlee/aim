@@ -1,0 +1,20 @@
+[package]
+name = "gles"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "The derived image's GLES driver: EGL and OpenGL ES forwarded to the host's ANGLE over host-call (docs/gles-driver.md)"
+
+[lib]
+crate-type = ["cdylib"]
+
+# Installed as /vendor/lib64/egl/<library>; the original libEGL loads it for
+# ro.hardware.egl=darwin.
+[package.metadata.vendor-hal]
+library = "libGLES_darwin.so"
+
+[dependencies]
+darwin-gralloc = { path = "../graphics/gralloc" }
+darwin-hostcall = { path = "../../crates/darwin-hostcall" }
+libc = "0.2"

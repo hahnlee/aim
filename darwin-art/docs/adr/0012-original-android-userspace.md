@@ -48,16 +48,13 @@ programs, and implement only what lies below it.
      `aarch64-linux-android`, the original Rust AIDL backend over the original
      `libbinder_ndk`) is started from `/vendor/bin/hw` like any vendor HAL. It
      calls a host-side implementation (Rust) over host-call, which uses
-     CoreAudio, IOSurface/Metal, AppKit and IOKit.
+     CoreAudio, Metal, AppKit and IOKit.
    - The composer may become a host-native exception once graphics shows the
      need; that is decided in the graphics phase.
 4. **Exceptions, kept minimal and explicit.** Where the original cannot run
    as-is, we patch or rebuild it from AOSP source with the smallest
    maintainable change, and list it as a `replace` in the overlay manifest.
    Reflection-style bypasses are never an option.
-   - **Graphics driver libraries:** `libEGL`, `libGLESv2` and `libvulkan` are
-     our implementations over ANGLE and MoltenVK. These are stable Khronos C
-     APIs, the device's GPU driver seam.
    - **ART:** macOS arm64 cannot map anything below 4 GiB (a fixed
      `__PAGEZERO`), but ART stores managed references as absolute 32-bit
      addresses. `libart` (with its compiler and dex2oat) is therefore built
@@ -70,6 +67,12 @@ programs, and implement only what lies below it.
    identity.
    - Our HALs, the vintf manifest and the GPU libraries live in `/vendor`,
      as a device vendor's would.
+   - **GPU driver:** an addition, not a replacement. The original `libEGL`
+     and `libvulkan` loaders stay; they load the device's driver, which is
+     ours: `/vendor/lib64/egl/libGLES_darwin.so` (and later
+     `vulkan.darwin.so`), guest ELF thunks generated from the Khronos
+     registry that forward EGL/GLES to ANGLE (and Vulkan to MoltenVK) on the
+     host over host-call (`docs/gles-driver.md`).
    - Hardware the device does not have is simply not declared, so the
      original services take their no-HAL paths.
    - A command lists what the derived image adds to or replaces in the
@@ -305,7 +308,8 @@ MediaProvider and DnsResolver.
 
 ### Vendor HALs (ours)
 
-allocator/mapper and composer (IOSurface, Metal, AppKit), audio (CoreAudio),
+allocator/mapper (memfd buffers the host imports into Metal without
+copying) and composer (Metal, AppKit), audio (CoreAudio),
 camera (AVFoundation), sensors, power/health/thermal (IOKit), GNSS
 (CoreLocation), and Codec2 over VideoToolbox (a performance exception; the
 original software codecs also work).

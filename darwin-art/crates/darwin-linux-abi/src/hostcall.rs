@@ -25,7 +25,7 @@ unsafe fn core_call(_func: u32, _args: u64, _len: u64) -> i64 {
 }
 
 /// Every host module, at the index of its id.
-static MODULES: &[&HostModule] = &[&CORE, &darwin_host_health::MODULE];
+static MODULES: &[&HostModule] = &[&CORE, &darwin_host_health::MODULE, &darwin_host_gpu::MODULE];
 
 const _: () = {
     // The syscall entry matches the number with one `movz ..., lsl #16`.

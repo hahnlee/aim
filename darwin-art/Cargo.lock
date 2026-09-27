@@ -461,6 +461,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "darwin-host-gpu"
+version = "0.1.0"
+dependencies = [
+ "darwin-hostcall",
+ "libc",
+]
+
+[[package]]
 name = "darwin-host-health"
 version = "0.1.0"
 dependencies = [
@@ -475,10 +483,12 @@ version = "0.1.0"
 name = "darwin-linux-abi"
 version = "0.1.0"
 dependencies = [
+ "darwin-android-image",
  "darwin-android-init",
  "darwin-binder-driver",
  "darwin-binder-host",
  "darwin-guest-init",
+ "darwin-host-gpu",
  "darwin-host-health",
  "darwin-hostcall",
  "libc",

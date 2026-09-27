@@ -10,7 +10,9 @@
 //! `--path-map` is the guest filesystem view (its `root` and `rw` entries;
 //! docs/guest-init-contract.md, section 2). `--binder` names the binder host
 //! (`darwin-binderd --service NAME`) that backs `/dev/binder`,
-//! `/dev/hwbinder` and `/dev/vndbinder`.
+//! `/dev/hwbinder` and `/dev/vndbinder`. `--gpu` is the directory of the
+//! host GPU libraries (ANGLE's `libEGL.dylib` and `libGLESv2.dylib`) behind
+//! the guest GLES driver (docs/gles-driver.md).
 //!
 //! The options after `--identity` describe the process as darwin-guest-init
 //! starts it (`docs/guest-init-contract.md`), or as a guest `execve`
@@ -29,6 +31,7 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
   --cache DIR            translation cache directory
   --no-cache             rewrite every file at load time
   --binder NAME          binder host serving the binder device nodes
+  --gpu DIR              host GPU libraries (ANGLE) for the GLES driver
   --trace                log every syscall
   --identity FILE        the process's credentials (identity file); its
                          by-pid directory is FILE's directory + /by-pid
@@ -80,6 +83,7 @@ fn main() {
     let mut cache = darwin_linux_abi::cache::Cache::default_dir();
     let mut trace = false;
     let mut binder = None;
+    let mut gpu: Option<PathBuf> = None;
     let mut path_map: Option<PathBuf> = None;
     let mut seclabel = None;
     let mut identity = Identity::default();
@@ -97,6 +101,7 @@ fn main() {
             "--no-cache" => cache = None,
             "--path-map" => path_map = Some(PathBuf::from(value())),
             "--binder" => binder = Some(value().to_string_lossy().into_owned()),
+            "--gpu" => gpu = Some(PathBuf::from(value())),
             "--seclabel" => seclabel = Some(value().to_string_lossy().into_owned()),
             "--trace" => trace = true,
             "--identity" => {
@@ -141,6 +146,10 @@ fn main() {
     }
     if let Some(b) = &binder {
         runtime_args.extend([cstring("--binder"), cstring(b.as_bytes())]);
+    }
+    if let Some(g) = &gpu {
+        darwin_host_gpu::set_library_dir(g);
+        runtime_args.extend([cstring("--gpu"), cstring(g.as_os_str().as_bytes())]);
     }
     if trace {
         runtime_args.push(cstring("--trace"));

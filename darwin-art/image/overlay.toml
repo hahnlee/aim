@@ -66,3 +66,65 @@ reason = "the emulator's health HAL reads /sys/class/power_supply, which has no 
 [[remove]]
 path = "/vendor/etc/vintf/manifest/android.hardware.health-service.example.xml"
 reason = "IHealth/default is declared by our health HAL's fragment"
+
+# Graphics buffers (docs/graphics-buffers.md): IAllocator/default V2 and the
+# stable-C mapper `darwin`, memfd-backed buffers the host GPU imports. Built
+# by tools/build-vendor-hals.sh.
+
+[[add]]
+path = "/vendor/bin/hw/android.hardware.graphics.allocator-service.darwin"
+source = "_build/vendor-hals/bin/android.hardware.graphics.allocator-service.darwin"
+reason = "graphics allocator HAL (Rust, AIDL V2): memfd-backed buffers"
+
+[[add]]
+path = "/vendor/etc/init/android.hardware.graphics.allocator-service.darwin.rc"
+source = "hal/graphics/allocator/android.hardware.graphics.allocator-service.darwin.rc"
+reason = "starts the graphics allocator HAL"
+
+[[add]]
+path = "/vendor/etc/vintf/manifest/android.hardware.graphics.allocator-service.darwin.xml"
+source = "hal/graphics/allocator/android.hardware.graphics.allocator-service.darwin.xml"
+reason = "declares IAllocator/default V2 and the native mapper 5.0 instance darwin"
+
+[[add]]
+path = "/vendor/lib64/hw/mapper.darwin.so"
+source = "_build/vendor-hals/lib/mapper.darwin.so"
+reason = "stable-C IMapper v5 (Rust) that libui loads for the allocator's suffix"
+
+[[remove]]
+path = "/vendor/bin/hw/android.hardware.graphics.allocator-service.ranchu"
+reason = "the emulator's allocator allocates through the goldfish pipe to the emulator host; ours serves IAllocator/default"
+
+[[remove]]
+path = "/vendor/etc/init/android.hardware.graphics.allocator-service.ranchu.rc"
+reason = "service vendor.graphics.allocator is our allocator's"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.graphics.gralloc.ranchu.xml"
+reason = "IAllocator/default and the mapper instance are declared by our allocator's fragment"
+
+[[remove]]
+path = "/vendor/lib64/hw/mapper.ranchu.so"
+reason = "the emulator's mapper reads goldfish handles; ours is mapper.darwin.so"
+
+# GLES driver (docs/gles-driver.md): EGL and GLES forwarded to the host's
+# ANGLE over host-call. The original libEGL loads libGLES_<ro.hardware.egl>;
+# init.ranchu.rc sets ro.hardware.egl from androidboot.hardwareegl, which
+# darwin-guest-init passes as `darwin`.
+
+[[add]]
+path = "/vendor/lib64/egl/libGLES_darwin.so"
+source = "_build/vendor-hals/lib/libGLES_darwin.so"
+reason = "the device's GLES driver: thunks to ANGLE (Metal) on the host"
+
+[[remove]]
+path = "/vendor/lib64/egl/libEGL_emulation.so"
+reason = "the emulator's GLES driver streams to the emulator host; ours is libGLES_darwin.so"
+
+[[remove]]
+path = "/vendor/lib64/egl/libGLESv1_CM_emulation.so"
+reason = "part of the emulator's GLES driver"
+
+[[remove]]
+path = "/vendor/lib64/egl/libGLESv2_emulation.so"
+reason = "part of the emulator's GLES driver"
