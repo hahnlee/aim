@@ -11,6 +11,8 @@
 //!   `/proc` are synthesized and not followed here.
 //! - The inverse map (host path -> guest path) uses the same table.
 //! - With a path map, the image root is read-only to the guest.
+//! - `/dev/input` is the display server's device directory
+//!   ([`set_input_dir`], `sys::evdev`).
 
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
@@ -42,6 +44,8 @@ pub enum Area {
     Kernfs,
     /// A host device node passed through.
     HostDevice,
+    /// `/dev/input`: the display server's input devices.
+    Input,
 }
 
 struct Mount {
@@ -61,6 +65,17 @@ struct Vfs {
 }
 
 static VFS: OnceLock<Vfs> = OnceLock::new();
+static INPUT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Show host directory `dir` as the guest's `/dev/input`. Before [`init`].
+pub fn set_input_dir(dir: &Path) {
+    let _ = INPUT.set(dir.to_owned());
+}
+
+/// The host directory behind `/dev/input`, if any.
+pub fn input_dir() -> Option<&'static Path> {
+    INPUT.get().map(PathBuf::as_path)
+}
 
 /// Parse a path map file: `kind<TAB>guest<TAB>host` lines, kinds `root`,
 /// `rw` and `kernfs`; `#` starts a comment line.
@@ -101,7 +116,7 @@ fn parse_map(text: &str) -> Result<(Option<PathBuf>, Vec<Mount>), String> {
 /// Initialize from `--root` and, when given, a `--path-map` file (whose
 /// `root` line overrides `root`).
 pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
-    let (map_root, mounts, runtime) = match map {
+    let (map_root, mut mounts, runtime) = match map {
         Some(map) => {
             let text =
                 std::fs::read_to_string(map).map_err(|e| format!("{}: {e}", map.display()))?;
@@ -110,6 +125,14 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
         }
         None => (None, Vec::new(), None),
     };
+    if let Some(dir) = input_dir() {
+        mounts.push(Mount {
+            guest: "/dev/input".into(),
+            host: dir.to_owned(),
+            area: Area::Input,
+        });
+        mounts.sort_by(|a, b| b.guest.len().cmp(&a.guest.len()));
+    }
     let root = map_root.as_deref().unwrap_or(root);
     let root = root
         .canonicalize()

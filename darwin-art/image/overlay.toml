@@ -305,6 +305,25 @@ path = "/vendor/etc/vintf/manifest/android.hardware.audio.service-aidl.darwin.xm
 source = "hal/audio/android.hardware.audio.service-aidl.darwin.xml"
 reason = "declares audio.core IModule/default and IConfig/default V3 and audio.effect IFactory/default V3"
 
+# Input (docs/input.md) is not a HAL: the display server's window is evdev
+# devices under /dev/input. Their input device configuration tells EventHub
+# and InputReader what they are; keys use the image's Generic.kl/.kcm.
+
+[[add]]
+path = "/vendor/usr/idc/darwin-touchscreen.idc"
+source = "image/vendor/usr/idc/darwin-touchscreen.idc"
+reason = "the window as the internal display's direct touchscreen"
+
+[[add]]
+path = "/vendor/usr/idc/darwin-keyboard.idc"
+source = "image/vendor/usr/idc/darwin-keyboard.idc"
+reason = "the Mac's keyboard as the built-in keyboard"
+
+[[add]]
+path = "/vendor/usr/idc/darwin-wheel.idc"
+source = "image/vendor/usr/idc/darwin-wheel.idc"
+reason = "wheel and trackpad scrolling as a rotary encoder"
+
 # The emulator's vendor HALs. The goldfish/ranchu ones talk to QEMU (pipes,
 # virtio consoles, the emulator's host services) and the examples fake
 # hardware, neither of which a Mac provides. Their `.rc` and vintf fragment

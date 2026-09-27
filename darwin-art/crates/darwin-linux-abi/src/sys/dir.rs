@@ -137,7 +137,12 @@ pub fn getdents64(a: [u64; 6]) -> i64 {
     let mut d = d.lock().unwrap();
     if d.entries.is_none() {
         match read_host_entries(fd) {
-            Ok(e) => d.entries = Some(e),
+            Ok(mut e) => {
+                if super::evdev::is_device_dir(fd) {
+                    super::evdev::fix_types(&mut e);
+                }
+                d.entries = Some(e)
+            }
             Err(e) => return e,
         }
     }

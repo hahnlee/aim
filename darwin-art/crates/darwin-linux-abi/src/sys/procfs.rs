@@ -875,6 +875,8 @@ pub fn node(guest: &str) -> Option<Node> {
     }
     Some(match rest {
         "" => Node::Dir(entries(&[
+            ("class", dir::DT_DIR),
+            ("dev", dir::DT_DIR),
             ("devices", dir::DT_DIR),
             ("fs", dir::DT_DIR),
             ("kernel", dir::DT_DIR),
@@ -892,7 +894,10 @@ pub fn node(guest: &str) -> Option<Node> {
         "kernel/tracing/trace_marker" | "kernel/debug/tracing/trace_marker" => {
             Node::File(Vec::new())
         }
-        "devices" => Node::Dir(entries(&[("system", dir::DT_DIR)])),
+        "devices" => Node::Dir(entries(&[
+            ("system", dir::DT_DIR),
+            ("virtual", dir::DT_DIR),
+        ])),
         "devices/system" => Node::Dir(entries(&[("cpu", dir::DT_DIR)])),
         "devices/system/cpu" => {
             let mut e = entries(&[
@@ -909,7 +914,9 @@ pub fn node(guest: &str) -> Option<Node> {
         | "devices/system/cpu/online" => Node::File(cpu_range().into_bytes()),
         "devices/system/cpu/kernel_max" => Node::File(format!("{}\n", ncpu() - 1).into_bytes()),
         _ => {
-            let c = rest.strip_prefix("devices/system/cpu/cpu")?;
+            let Some(c) = rest.strip_prefix("devices/system/cpu/cpu") else {
+                return super::evdev::sys_node(rest);
+            };
             let (n, tail) = c.split_once('/').unwrap_or((c, ""));
             if n.parse::<usize>().ok()? >= ncpu() {
                 return None;

@@ -111,6 +111,9 @@ pub fn openat(a: [u64; 6]) -> i64 {
     if let Some(fd) = super::ashmem::open(&r.guest, flags) {
         return fd;
     }
+    if let Some(fd) = super::evdev::open(&r, flags) {
+        return fd;
+    }
     if let Some(fd) = super::selinuxfs::open(&r.guest, flags) {
         return fd;
     }
@@ -164,6 +167,7 @@ fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
     match k {
         Kind::Event(_) | Kind::Timer(_) => event::read(fd, buf, len),
         Kind::Inotify(_) => inotify::read(fd, buf, len),
+        Kind::Evdev(_) => super::evdev::read(fd, buf, len),
         Kind::Sock(_) => net::read(fd, iov),
         Kind::Dir(_) => Some(-EISDIR),
         Kind::Epoll(_) => Some(-(EINVAL as i64)),
@@ -192,6 +196,7 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
     match k {
         Kind::Event(_) | Kind::Timer(_) => event::write(fd, buf, len),
         Kind::Sock(_) => net::write(fd, iov),
+        Kind::Evdev(_) => super::evdev::write(fd, buf, len),
         Kind::Dir(_) => Some(-(EBADF as i64)),
         Kind::Epoll(_) | Kind::Inotify(_) => Some(-(EINVAL as i64)),
         Kind::Knob(k) => Some(super::knob::write(fd, &k, iov)),
@@ -439,6 +444,9 @@ fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
     if super::ashmem::as_device(&mut st) {
         return Ok(st);
     }
+    if super::evdev::fstat(fd, &mut st).is_some() {
+        return Ok(st);
+    }
     match st.st_mode & libc::S_IFMT {
         libc::S_IFREG | libc::S_IFDIR | libc::S_IFLNK => {
             let guest = dir::synthesized_path(fd).or_else(|| procfs::fd_guest_path(fd).ok());
@@ -491,6 +499,7 @@ pub(super) fn stat_at(dirfd: i32, path: &[u8], flags: u64) -> Result<libc::stat,
         return Err(-(errno::last() as i64));
     }
     attrs::apply(&r.guest, &mut st);
+    super::evdev::stat(&r, &mut st);
     Ok(st)
 }
 
@@ -1018,6 +1027,9 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
         return r;
     }
     if let Some(r) = super::ashmem::ioctl(fd, req, arg) {
+        return r;
+    }
+    if let Some(r) = super::evdev::ioctl(fd, req, arg) {
         return r;
     }
     // SAFETY: isatty/ioctl on a guest fd with guest argument buffers.

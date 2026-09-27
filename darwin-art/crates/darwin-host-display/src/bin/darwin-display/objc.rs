@@ -95,6 +95,13 @@ pub struct CGSize {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
+pub struct CGPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct CGRect {
     pub x: f64,
     pub y: f64,

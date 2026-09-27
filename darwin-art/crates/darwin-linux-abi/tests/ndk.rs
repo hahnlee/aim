@@ -81,10 +81,20 @@ impl Guest {
         }
     }
 
+    /// Build `tests/ndk/NAME.c`, or `NAME.cpp` with a static libc++.
     fn build(&self, clang: &Path, name: &str) -> String {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/ndk/{name}.c"));
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ndk");
+        let mut src = dir.join(format!("{name}.c"));
+        let mut cc = Command::new(clang);
+        if !src.exists() {
+            src = dir.join(format!("{name}.cpp"));
+            let mut cxx = clang.as_os_str().to_owned();
+            cxx.push("++");
+            cc = Command::new(cxx);
+            cc.arg("-static-libstdc++");
+        }
         let out = self.runtime.join("data/local/tmp").join(name);
-        let st = Command::new(clang)
+        let st = cc
             .args(["-O1", "-D_GNU_SOURCE", "-Wall", "-Werror", "-o"])
             .arg(&out)
             .arg(&src)
@@ -92,6 +102,16 @@ impl Guest {
             .unwrap();
         assert!(st.success(), "compiling {name}");
         format!("/data/local/tmp/{name}")
+    }
+
+    /// Show host file `host` at guest path `guest`.
+    fn map(&self, guest: &str, host: &Path) {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.map)
+            .unwrap();
+        writeln!(f, "rw\t{guest}\t{}", host.display()).unwrap();
     }
 
     fn run(&self, args: &[&str]) -> (bool, String) {
@@ -192,6 +212,62 @@ fn posix_timers() {
 #[test]
 fn ashmem() {
     check("t_ashmem", &[]);
+}
+
+/// The evdev devices of a display server (`linux-run --display`), with
+/// KEY_A held on its keyboard.
+#[test]
+fn evdev() {
+    use darwin_host_display::input::{KEYBOARD, device_dir, devices, server::Devices};
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        eprintln!("skipped: NDK or extracted image not found");
+        return;
+    };
+    let g = Guest::new(&image, "t_evdev");
+    let prog = g.build(&clang, "t_evdev");
+    let socket = g.runtime.join("display.sock");
+    let devs = Devices::create(&device_dir(&socket), devices(1080, 1920, 254.0, 254.0)).unwrap();
+    devs.emit(KEYBOARD, darwin_host_display::monotonic_ns(), &[(1, 30, 1)]);
+    let (ok, out) = g.run(&["--display", socket.to_str().unwrap(), &prog]);
+    println!("{out}");
+    assert!(ok && out.contains("PASS"), "t_evdev failed:\n{out}");
+}
+
+/// The original EventHub (libinputreader.so) opens and classifies the
+/// devices with the derived image's `.idc` files and reads their events.
+#[test]
+fn eventhub() {
+    use darwin_host_display::input::{device_dir, devices, server::Devices};
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        eprintln!("skipped: NDK or extracted image not found");
+        return;
+    };
+    let g = Guest::new(&image, "t_eventhub");
+    let prog = g.build(&clang, "t_eventhub");
+    let idc = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../image/vendor/usr/idc");
+    for name in ["darwin-touchscreen", "darwin-keyboard", "darwin-wheel"] {
+        g.map(
+            &format!("/vendor/usr/idc/{name}.idc"),
+            &idc.join(format!("{name}.idc")),
+        );
+    }
+    let socket = g.runtime.join("display.sock");
+    let _devs = Devices::create(&device_dir(&socket), devices(1080, 1920, 254.0, 254.0)).unwrap();
+    let (ok, out) = g.run(&["--display", socket.to_str().unwrap(), &prog]);
+    println!("{out}");
+    assert!(ok && out.contains("PASS"), "t_eventhub failed:\n{out}");
+    for want in [
+        "darwin-touchscreen\n      Classes: TOUCH | TOUCH_MT\n      Path: /dev/input/event0",
+        // keyboard.builtIn, from its .idc; the image's key layout.
+        "darwin-keyboard (aka device 0 - built-in keyboard)\n      Classes: KEYBOARD | ALPHAKEY",
+        "KeyLayoutFile: /system/usr/keylayout/Generic.kl",
+        "darwin-wheel\n      Classes: ROTARY_ENCODER",
+        // The sysfs root EventHub finds through /sys/dev/char.
+        "SysfsDevicePath: /sys/devices/virtual\n",
+        "key: device 0 code 48 value 1",
+    ] {
+        assert!(out.contains(want), "missing {want:?}");
+    }
 }
 
 unsafe extern "C" {

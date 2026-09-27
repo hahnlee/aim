@@ -12,3 +12,6 @@ tools/__pycache__/
 
 # Generated compiler dependency file
 /darwin-art/darwin_android_platform.d
+
+# Agent worktrees and their build/scratch dirs
+/_wt/

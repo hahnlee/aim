@@ -14,7 +14,8 @@
 //! host GPU libraries (ANGLE's `libEGL.dylib` and `libGLESv2.dylib`) behind
 //! the guest GLES driver (docs/gles-driver.md). `--display` is the socket
 //! of the display server (`darwin-display`) behind the composer HAL
-//! (docs/composer.md).
+//! (docs/composer.md); its input devices are the guest's `/dev/input`
+//! (docs/input.md).
 //!
 //! The options after `--identity` describe the process as darwin-guest-init
 //! starts it (`docs/guest-init-contract.md`), or as a guest `execve`
@@ -35,6 +36,7 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
   --binder NAME          binder host serving the binder device nodes
   --gpu DIR              host GPU libraries (ANGLE) for the GLES driver
   --display SOCKET       display server (darwin-display) for the composer
+                         and input (/dev/input)
   --trace                log every syscall
   --identity FILE        the process's credentials (identity file); its
                          by-pid directory is FILE's directory + /by-pid
@@ -158,6 +160,7 @@ fn main() {
     }
     if let Some(d) = &display {
         darwin_host_display::set_server(d);
+        darwin_linux_abi::vfs::set_input_dir(&darwin_host_display::input::device_dir(d));
         runtime_args.extend([cstring("--display"), cstring(d.as_os_str().as_bytes())]);
     }
     if trace {

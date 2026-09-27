@@ -36,8 +36,8 @@ the composer's `linux-run`:
   stay, as a panel stays when the HWC process dies.
 - **One AppKit owner.** Input (P5) arrives as AppKit events on this window
   and becomes the syscall layer's evdev devices, read by inputflinger in
-  another process. The window's owner feeds them; it is darwin-artd's role
-  once that daemon exists, as the binder host is.
+  another process ([input.md](input.md)). The window's owner feeds them;
+  it is darwin-artd's role once that daemon exists, as the binder host is.
 - **The cost is small.** A buffer crosses once, as its fd (`SCM_RIGHTS`);
   a present is one 56-byte record. Nothing is copied on the way.
 
