@@ -104,9 +104,26 @@ of our own.
 ## P0 findings (2026-09-27)
 
 - **x18:** Darwin zeroes x18 on every syscall, yield and signal, and on about
-  1% of preemptions. The original libc, libart, libbinder, libutils,
-  libbinder_ndk and linker64 contain no shadow-call-stack instructions, so
-  this only matters for a binary that uses x18. A full-image scan settles it.
+  1% of preemptions. A scan of the full image (2,133 arm64 ELF files, with
+  `tools/android-image-extract scan-x18`) finds no shadow-call-stack code on
+  our path:
+  - linker64 and bionic;
+  - libart, libc++, libandroid_runtime, libbinder, libhwui, libgui and
+    libandroid_servers;
+  - servicemanager, surfaceflinger and app_process64;
+  - the boot OAT and services.odex.
+
+  The few x18 instructions there (bionic's SCS bookkeeping and
+  register-context save/restore) never rely on its value persisting.
+
+  Three binaries are built with SCS: the Bluetooth JNI, the NFC JNI and
+  ot-daemon. They stay off because that hardware is not declared. If ever
+  needed, their SCS push/pop can be turned into no-ops at load time, since
+  those functions also keep the return address in their stack frame.
+
+  A few Google app libraries use x18 as an ordinary register, which is an
+  app-compatibility risk the current runtime already has. The guest must not
+  advertise SME, so libc's SME helper never holds a value in x18.
 - **TPIDR_EL0 (bionic's thread pointer):** not preserved. Darwin writes a
   per-CPU value there on context switch. At load time, alongside `svc #0`,
   `mrs`/`msr tpidr_el0` are rewritten to load and store a per-thread slot:

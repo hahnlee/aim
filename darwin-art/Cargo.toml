@@ -30,6 +30,7 @@ members = [
     "tools/android-bionic-pthread-provider-runner",
     "tools/android-dl-iterate-phdr-runner",
     "tools/android-dso-namespace",
+    "tools/android-image-extract",
     "tools/android-jni-proxy",
     "tools/apex-ext2-extract",
     "tools/bionic-abort-facade",

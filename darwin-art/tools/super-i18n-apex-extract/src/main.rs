@@ -1,54 +1,23 @@
-use std::env;
-mod directory;
-mod inode;
+use android_image_extract::erofs::{directory, inode};
+use android_image_extract::source::{ReadAt, Slice};
+use android_image_extract::{add, align, gpt, le16, le32, lp, lz4, mul};
 use inode::Inode;
+use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-const SECTOR: u64 = 512;
-const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
-const LP_GEOMETRY_MAGIC: u32 = 0x616c_4467;
-const LP_HEADER_MAGIC: u32 = 0x414c_5030;
 const EROFS_MAGIC: u32 = 0xe0f5_e1e2;
 const DEFAULT_APEX_NAME: &str = "com.android.i18n.apex";
-const MAX_TABLE_BYTES: usize = 1024 * 1024;
 const MAX_TARGET_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PCLUSTER_BYTES: usize = 1024 * 1024;
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+type Result<T> = android_image_extract::Result<T>;
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
-fn le16(b: &[u8], o: usize) -> Result<u16> {
-    let v = b.get(o..o + 2).ok_or_else(|| invalid("truncated u16"))?;
-    Ok(u16::from_le_bytes([v[0], v[1]]))
-}
-fn le32(b: &[u8], o: usize) -> Result<u32> {
-    let v = b.get(o..o + 4).ok_or_else(|| invalid("truncated u32"))?;
-    Ok(u32::from_le_bytes(v.try_into().unwrap()))
-}
-fn le64(b: &[u8], o: usize) -> Result<u64> {
-    let v = b.get(o..o + 8).ok_or_else(|| invalid("truncated u64"))?;
-    Ok(u64::from_le_bytes(v.try_into().unwrap()))
-}
-fn add(a: u64, b: u64, what: &str) -> Result<u64> {
-    a.checked_add(b)
-        .ok_or_else(|| invalid(format!("overflow {what}")).into())
-}
-fn mul(a: u64, b: u64, what: &str) -> Result<u64> {
-    a.checked_mul(b)
-        .ok_or_else(|| invalid(format!("overflow {what}")).into())
-}
-fn align(value: u64, alignment: u64) -> Result<u64> {
-    if !alignment.is_power_of_two() {
-        return Err(invalid("invalid alignment").into());
-    }
-    add(value, alignment - 1, "aligning").map(|v| v & !(alignment - 1))
-}
-
 struct Disk {
     file: File,
     size: u64,
@@ -70,89 +39,34 @@ impl Disk {
     }
 }
 
+impl ReadAt for Disk {
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.file.read_exact_at(buf, offset)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Region {
     offset: u64,
     size: u64,
 }
 
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
-        }
-    }
-    !crc
-}
-
 /// The GPT partition named `wanted` (`super` on system.img, `vendor` on vendor.img).
 fn gpt_partition(disk: &Disk, wanted: &str) -> Result<(Region, (u16, u16))> {
-    let h = disk.read(SECTOR, 512)?;
-    if h.get(..8) != Some(GPT_SIGNATURE) {
-        return Err(invalid("missing primary GPT").into());
-    }
-    let revision = le32(&h, 8)?;
-    let header_size = usize::try_from(le32(&h, 12)?)?;
-    if !(92..=512).contains(&header_size) || le64(&h, 24)? != 1 {
-        return Err(invalid("invalid GPT header size or LBA").into());
-    }
-    let expected = le32(&h, 16)?;
-    let mut checked = h[..header_size].to_vec();
-    checked[16..20].fill(0);
-    if crc32(&checked) != expected {
-        return Err(invalid("GPT header CRC mismatch").into());
-    }
-    let table_lba = le64(&h, 72)?;
-    let count = usize::try_from(le32(&h, 80)?)?;
-    let entry_size = usize::try_from(le32(&h, 84)?)?;
-    if count == 0 || count > 4096 || !(128..=4096).contains(&entry_size) {
-        return Err(invalid("invalid GPT entry geometry").into());
-    }
-    let table_len = count
-        .checked_mul(entry_size)
-        .ok_or_else(|| invalid("GPT table overflow"))?;
-    if table_len > MAX_TABLE_BYTES {
-        return Err(invalid("GPT table too large").into());
-    }
-    let table = disk.read(mul(table_lba, SECTOR, "locating GPT table")?, table_len)?;
-    if crc32(&table) != le32(&h, 88)? {
-        return Err(invalid("GPT table CRC mismatch").into());
-    }
-    let mut found = None;
-    for entry in table.chunks_exact(entry_size) {
-        if entry[..16].iter().all(|b| *b == 0) {
-            continue;
-        }
-        let mut name = String::new();
-        for pair in entry[56..128].chunks_exact(2) {
-            let unit = u16::from_le_bytes([pair[0], pair[1]]);
-            if unit == 0 {
-                break;
-            }
-            name.push(char::from_u32(u32::from(unit)).ok_or_else(|| invalid("invalid GPT name"))?);
-        }
-        if name == wanted {
-            if found.is_some() {
-                return Err(invalid(format!("duplicate GPT {wanted} partition")).into());
-            }
-            let first = le64(entry, 32)?;
-            let last = le64(entry, 40)?;
-            if last < first {
-                return Err(invalid(format!("reversed GPT {wanted} partition")).into());
-            }
-            found = Some(Region {
-                offset: mul(first, SECTOR, "locating GPT partition")?,
-                size: mul(last - first + 1, SECTOR, "sizing GPT partition")?,
-            });
-        }
-    }
-    let region = found.ok_or_else(|| invalid(format!("GPT {wanted} partition not found")))?;
-    if add(region.offset, region.size, "checking GPT partition")? > disk.size {
-        return Err(invalid(format!("{wanted} outside image")).into());
-    }
-    Ok((region, ((revision >> 16) as u16, revision as u16)))
+    let table = gpt::read(disk)?;
+    let partition = table
+        .get(wanted)
+        .ok_or_else(|| invalid(format!("GPT {wanted} partition not found")))?;
+    Ok((
+        Region {
+            offset: partition.offset,
+            size: partition.size,
+        },
+        table.version,
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -195,144 +109,37 @@ impl Partition {
     }
 }
 
-fn descriptor(
-    header: &[u8],
-    offset: usize,
-    expected: u32,
-    tables: usize,
-) -> Result<(usize, usize)> {
-    let start = usize::try_from(le32(header, offset)?)?;
-    let count = usize::try_from(le32(header, offset + 4)?)?;
-    let size = le32(header, offset + 8)?;
-    if size != expected || count > 1_000_000 {
-        return Err(invalid("invalid LP table descriptor").into());
-    }
-    let bytes = count
-        .checked_mul(expected as usize)
-        .ok_or_else(|| invalid("LP descriptor overflow"))?;
-    if start.checked_add(bytes).is_none_or(|end| end > tables) {
-        return Err(invalid("LP descriptor outside tables").into());
-    }
-    Ok((start, count))
-}
-
 fn lp_partition(
     disk: &Disk,
     super_region: Region,
     wanted_partition: Partition,
 ) -> Result<(Vec<LogicalExtent>, u64, (u16, u16))> {
-    let geometry = disk.read(add(super_region.offset, 4096, "locating LP geometry")?, 52)?;
-    if le32(&geometry, 0)? != LP_GEOMETRY_MAGIC || le32(&geometry, 4)? != 52 {
-        return Err(invalid("invalid LP geometry").into());
+    let region = Slice::new(disk, super_region.offset, super_region.size)?;
+    let metadata = lp::read(&region)?;
+    let name = wanted_partition.name();
+    let partition = metadata
+        .partitions
+        .iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| invalid(format!("LP {name} partition missing")))?;
+    if partition.extents.is_empty() {
+        return Err(invalid(format!("{name} LP extents invalid")).into());
     }
-    let mut geometry_checked = geometry.clone();
-    geometry_checked[8..40].fill(0);
-    if sha256(&geometry_checked) != geometry[8..40] {
-        return Err(invalid("LP geometry SHA-256 mismatch").into());
-    }
-    let max_size = usize::try_from(le32(&geometry, 40)?)?;
-    let slots = le32(&geometry, 44)?;
-    if max_size == 0
-        || max_size > MAX_TABLE_BYTES
-        || max_size % 4096 != 0
-        || !(1..=4).contains(&slots)
-        || le32(&geometry, 48)? != 4096
-    {
-        return Err(invalid("unsupported LP geometry values").into());
-    }
-    let metadata_offset = add(super_region.offset, 3 * 4096, "locating LP metadata")?;
-    let prefix = disk.read(metadata_offset, 128)?;
-    if le32(&prefix, 0)? != LP_HEADER_MAGIC {
-        return Err(invalid("invalid LP metadata magic").into());
-    }
-    let major = le16(&prefix, 4)?;
-    let minor = le16(&prefix, 6)?;
-    let header_size = usize::try_from(le32(&prefix, 8)?)?;
-    if major != 10 || header_size != 128 {
-        return Err(invalid("unsupported LP metadata version").into());
-    }
-    let header = disk.read(metadata_offset, header_size)?;
-    let mut checked = header.clone();
-    checked[12..44].fill(0);
-    if sha256(&checked) != header[12..44] {
-        return Err(invalid("LP header SHA-256 mismatch").into());
-    }
-    let table_size = usize::try_from(le32(&header, 44)?)?;
-    if table_size > max_size - header_size {
-        return Err(invalid("LP tables exceed metadata slot").into());
-    }
-    let tables = disk.read(
-        add(metadata_offset, header_size as u64, "locating LP tables")?,
-        table_size,
-    )?;
-    if sha256(&tables) != header[48..80] {
-        return Err(invalid("LP table SHA-256 mismatch").into());
-    }
-    let (po, pn) = descriptor(&header, 80, 52, table_size)?;
-    let (eo, en) = descriptor(&header, 92, 24, table_size)?;
-    let (_bo, bn) = descriptor(&header, 116, 64, table_size)?;
-    if bn == 0 {
-        return Err(invalid("LP has no block device").into());
-    }
-    let mut partition = None;
-    for i in 0..pn {
-        let e = &tables[po + i * 52..po + (i + 1) * 52];
-        let end = e[..36].iter().position(|b| *b == 0).unwrap_or(36);
-        if &e[..end] == wanted_partition.name().as_bytes() {
-            if partition.is_some() {
-                return Err(invalid(format!(
-                    "duplicate LP {} partition",
-                    wanted_partition.name()
-                ))
-                .into());
-            }
-            partition = Some((
-                usize::try_from(le32(e, 40)?)?,
-                usize::try_from(le32(e, 44)?)?,
-            ));
-        }
-    }
-    let (first, count) = partition
-        .ok_or_else(|| invalid(format!("LP {} partition missing", wanted_partition.name())))?;
-    if count == 0 || first.checked_add(count).is_none_or(|v| v > en) {
-        return Err(invalid(format!("{} LP extents invalid", wanted_partition.name())).into());
-    }
-    let mut extents = Vec::with_capacity(count);
-    let mut logical = 0u64;
-    for i in first..first + count {
-        let e = &tables[eo + i * 24..eo + (i + 1) * 24];
-        let sectors = le64(e, 0)?;
-        let kind = le32(e, 8)?;
-        let target = le64(e, 12)?;
-        let source = usize::try_from(le32(e, 20)?)?;
-        if sectors == 0 || kind != 0 || source >= bn {
-            return Err(
-                invalid(format!("unsupported LP {} extent", wanted_partition.name())).into(),
-            );
-        }
-        let length = mul(sectors, SECTOR, "sizing LP extent")?;
-        let physical = add(
-            super_region.offset,
-            mul(target, SECTOR, "locating LP extent")?,
-            "locating LP extent",
-        )?;
-        if add(physical, length, "checking LP extent")?
-            > add(super_region.offset, super_region.size, "checking super")?
-        {
-            return Err(invalid("LP extent outside super").into());
-        }
-        extents.push(LogicalExtent {
-            logical,
-            physical,
-            length,
-        });
-        logical = add(
-            logical,
-            length,
-            &format!("sizing {}", wanted_partition.name()),
-        )?;
-    }
-    Ok((extents, logical, (major, minor)))
+    let extents = partition
+        .extents
+        .iter()
+        .map(|e| {
+            let physical = e
+                .physical
+                .ok_or_else(|| invalid(format!("unsupported LP {name} extent")))?;
+            Ok(LogicalExtent {
+                logical: e.logical,
+                physical: add(super_region.offset, physical, "locating LP extent")?,
+                length: e.length,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((extents, partition.size, metadata.version))
 }
 
 struct ExtentView<'a> {
@@ -578,81 +385,6 @@ fn compact_index(
     Ok(Index { kind, low, pblk })
 }
 
-fn lz4_decode(input: &[u8], expected: usize) -> Result<Vec<u8>> {
-    let mut output = Vec::with_capacity(expected);
-    let mut cursor = 0usize;
-    while cursor < input.len() {
-        let token = input[cursor];
-        cursor += 1;
-        let mut literals = usize::from(token >> 4);
-        if literals == 15 {
-            loop {
-                let value = *input
-                    .get(cursor)
-                    .ok_or_else(|| invalid("truncated LZ4 literal length"))?;
-                cursor += 1;
-                literals = literals
-                    .checked_add(usize::from(value))
-                    .ok_or_else(|| invalid("LZ4 length overflow"))?;
-                if value != 255 {
-                    break;
-                }
-            }
-        }
-        let literal_end = cursor
-            .checked_add(literals)
-            .ok_or_else(|| invalid("LZ4 literal overflow"))?;
-        if literal_end > input.len()
-            || output
-                .len()
-                .checked_add(literals)
-                .is_none_or(|v| v > expected)
-        {
-            return Err(invalid("invalid LZ4 literals").into());
-        }
-        output.extend_from_slice(&input[cursor..literal_end]);
-        cursor = literal_end;
-        if cursor == input.len() {
-            break;
-        }
-        let offset = usize::from(le16(input, cursor)?);
-        cursor += 2;
-        if offset == 0 || offset > output.len() {
-            return Err(invalid("invalid LZ4 match offset").into());
-        }
-        let mut matched = usize::from(token & 15) + 4;
-        if token & 15 == 15 {
-            loop {
-                let value = *input
-                    .get(cursor)
-                    .ok_or_else(|| invalid("truncated LZ4 match length"))?;
-                cursor += 1;
-                matched = matched
-                    .checked_add(usize::from(value))
-                    .ok_or_else(|| invalid("LZ4 length overflow"))?;
-                if value != 255 {
-                    break;
-                }
-            }
-        }
-        if output
-            .len()
-            .checked_add(matched)
-            .is_none_or(|v| v > expected)
-        {
-            return Err(invalid("LZ4 output exceeds extent").into());
-        }
-        for _ in 0..matched {
-            let value = output[output.len() - offset];
-            output.push(value);
-        }
-    }
-    if output.len() != expected {
-        return Err(invalid("LZ4 output length mismatch").into());
-    }
-    Ok(output)
-}
-
 fn extract(
     fs: &mut Erofs<'_>,
     inode: &Inode,
@@ -776,7 +508,7 @@ fn extract(
                 .iter()
                 .position(|b| *b != 0)
                 .ok_or_else(|| invalid("zero EROFS pcluster"))?;
-            (lz4_decode(&bytes[margin..], expected)?, count)
+            (lz4::decode_block(&bytes[margin..], expected)?, count)
         };
         physical_blocks = physical_blocks
             .checked_add(extent_blocks as u64)
@@ -1104,18 +836,7 @@ mod tests {
         )
     }
     #[test]
-    fn lz4_literal() {
-        assert_eq!(lz4_decode(b"\x30abc", 3).unwrap(), b"abc")
-    }
-    #[test]
     fn readers_reject_bounds() {
-        assert!(le64(&[0; 7], 0).is_err());
         assert!(packed_bits(&[0], 8, 14).unwrap() == 0)
-    }
-    #[test]
-    fn malformed_lz4_is_rejected() {
-        assert!(lz4_decode(b"\x10", 1).is_err());
-        assert!(lz4_decode(b"\x00\x00\x00", 4).is_err());
-        assert!(lz4_decode(b"\x40abcd", 3).is_err());
     }
 }
