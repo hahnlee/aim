@@ -1,4 +1,4 @@
-//! Memory syscalls: mmap, munmap, mprotect, madvise, brk.
+//! Memory syscalls: mmap, munmap, mremap, mprotect, madvise, brk.
 //!
 //! - Private file mappings of translated files (and of originals with
 //!   nothing to rewrite) stay file-backed. Executable ones are mapped shared
@@ -423,6 +423,107 @@ pub fn madvise(a: [u64; 6]) -> i64 {
         }
         _ => 0,
     }
+}
+
+const MREMAP_MAYMOVE: u64 = 1;
+const MREMAP_FIXED: u64 = 2;
+
+/// Move the pages of `[from, from+len)` to `to` (replacing what is there),
+/// keeping their memory object and protection, and unmap the source.
+fn move_pages(from: u64, len: u64, to: u64) -> Result<(), i64> {
+    use patch::vm;
+    let (mut at, mut cur, mut max) = (to, 0, 0);
+    // SAFETY: remapping guest memory the guest asked to move.
+    let kr = unsafe {
+        vm::mach_vm_remap(
+            vm::task(),
+            &mut at,
+            len,
+            0,
+            vm::VM_FLAGS_FIXED | vm::VM_FLAGS_OVERWRITE,
+            vm::task(),
+            from,
+            0,
+            &mut cur,
+            &mut max,
+            vm::VM_INHERIT_COPY,
+        )
+    };
+    if kr != 0 {
+        return Err(-(ENOMEM as i64));
+    }
+    // SAFETY: the source range now lives at `to`.
+    unsafe { vm::mach_vm_deallocate(vm::task(), from, len) };
+    Ok(())
+}
+
+/// mremap. A grown tail is new anonymous memory with the mapping's
+/// protection; `old_size == 0` (duplicating a shared mapping) is not
+/// supported.
+pub fn mremap(a: [u64; 6]) -> i64 {
+    let (old, old_len, new_len, flags, new_addr) = (a[0], page_up(a[1]), page_up(a[2]), a[3], a[4]);
+    let fixed = flags & MREMAP_FIXED != 0;
+    if old & (PAGE - 1) != 0
+        || old_len == 0
+        || new_len == 0
+        || flags & !(MREMAP_MAYMOVE | MREMAP_FIXED) != 0
+        || (fixed && (flags & MREMAP_MAYMOVE == 0 || new_addr & (PAGE - 1) != 0))
+        || (fixed && new_addr < old + old_len && old < new_addr + new_len)
+    {
+        return -(EINVAL as i64);
+    }
+    let Some((_, _, prot, _)) = patch::vm::region(old) else {
+        return -(errno::EFAULT as i64);
+    };
+    let anon = libc::MAP_PRIVATE | libc::MAP_ANON;
+    if !fixed && new_len <= old_len {
+        // SAFETY: shrinking the guest's own mapping.
+        unsafe { libc::munmap((old + new_len) as *mut _, (old_len - new_len) as usize) };
+        return old as i64;
+    }
+    let dest = if fixed {
+        new_addr
+    } else {
+        // Grow in place when the pages after the mapping are free.
+        let tail = old + old_len;
+        match host_mmap(tail, new_len - old_len, prot, anon, -1, 0) {
+            Ok(p) if p == tail => return old as i64,
+            Ok(p) => {
+                // SAFETY: undoing the probe mapping made just above.
+                unsafe { libc::munmap(p as *mut _, (new_len - old_len) as usize) };
+            }
+            Err(_) => {}
+        }
+        if flags & MREMAP_MAYMOVE == 0 {
+            return -(ENOMEM as i64);
+        }
+        match host_mmap(0, new_len, prot, anon, -1, 0) {
+            Ok(p) => p,
+            Err(e) => return e,
+        }
+    };
+    let keep = old_len.min(new_len);
+    if let Err(e) = move_pages(old, keep, dest) {
+        return e;
+    }
+    if old_len > keep {
+        // SAFETY: the part of the old mapping that does not move.
+        unsafe { libc::munmap((old + keep) as *mut _, (old_len - keep) as usize) };
+    }
+    if fixed
+        && new_len > keep
+        && let Err(e) = host_mmap(
+            dest + keep,
+            new_len - keep,
+            prot,
+            anon | libc::MAP_FIXED,
+            -1,
+            0,
+        )
+    {
+        return e;
+    }
+    dest as i64
 }
 
 struct Brk {
