@@ -9,20 +9,27 @@
 use darwin_art_abi::StatusCode;
 
 #[cfg(target_os = "macos")]
+mod android_servers;
 mod bound_service_launch_capability;
 #[cfg(target_os = "macos")]
 mod bound_service_process_ffi;
+mod debug_natives;
+mod file_observer;
+mod guest_procfs;
 mod host_command_ffi;
 mod installd_ffi;
+mod jni_env;
 mod lifecycle;
 mod linker_load_flags;
 pub mod linker_namespace;
 #[cfg(unix)]
 mod linker_namespace_ffi;
+mod local_socket;
 mod native_owner;
 #[cfg(target_os = "macos")]
 mod network_path;
 mod owners;
+mod process_natives;
 mod process_registry;
 mod property_ffi;
 mod provider;

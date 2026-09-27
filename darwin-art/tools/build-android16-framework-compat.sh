@@ -48,7 +48,6 @@ javac --release 8 -encoding UTF-8 -d "$classes" -classpath "$android_jar" \
   "$root/tools/android-framework-compat/src/android/util/StatsEvent.java" \
   "$root/tools/android-framework-compat/src/android/util/StatsLog.java" \
   "$root/compat/java/android/media/MediaCommunicationManager.java" \
-  "$root/tools/android-framework-compat/src/android/telephony/TelephonyManager.java" \
   "$root/tools/android-framework-compat/src/dev/darwinart/security/DarwinSecurityProvider.java" \
   "$root/tools/android-framework-compat/src/dev/darwinart/security/DarwinHttpsDiagnostic.java" \
   "$root/tools/android-framework-compat/src/dev/darwinart/security/DarwinAndroidCAStore.java" \
@@ -71,7 +70,6 @@ fi
   "$classes/android/util/StatsLog.class" \
   "$classes/android/media/MediaCommunicationManager.class" \
   "$classes/android/media/MediaCommunicationManager\$SessionCallback.class" \
-  "$classes/android/telephony/TelephonyManager.class" \
   "$classes/dev/darwinart/security/DarwinSecurityProvider.class" \
   "$classes/dev/darwinart/security/DarwinHttpsDiagnostic.class" \
   "$classes/dev/darwinart/security/DarwinAndroidCAStore.class" \

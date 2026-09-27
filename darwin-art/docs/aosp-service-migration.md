@@ -115,3 +115,33 @@ paused but not stopped/hidden, `ACTION_OUTSIDE` for popups is not delivered,
 and density does not yet follow a screen's backing scale.
 See the [pinned Android 16 `IWindow.aidl`](https://android.googlesource.com/platform/frameworks/base/+/99b01a65cc4c104933788b3143285ab6bae65827/core/java/android/view/IWindow.aidl)
 and [`LoadedApk.registerAppInfoToArt`](https://android.googlesource.com/platform/frameworks/base/+/99b01a65cc4c104933788b3143285ab6bae65827/core/java/android/app/LoadedApk.java).
+
+## Upstream ActivityManager bring-up (#148)
+
+`DARWIN_ART_UPSTREAM_ACTIVITY_MANAGER=1` (use a disposable profile) starts the
+original `UriGrantsManagerService`, `ActivityTaskManagerService` and
+`ActivityManagerService` in `SystemServer.startBootstrapServices` order instead
+of the `activity`/`activity_task` endpoints (`UpstreamActivityManager`). The
+runtime's `window` service is withheld until the `startOtherServices` point,
+as WMS does not exist while the upstream constructors run. Construction is
+fatal on failure; later steps log `step ok`/`step failed` in order.
+
+The services.jar natives live in Rust (`crates/darwin-art-runtime`): the
+system process entry registers `android_servers.rs` through the system server
+class loader, as SystemServer loads `libandroid_servers`, and the framework
+natives hub registers `local_socket.rs`, `debug_natives.rs`,
+`process_natives.rs` and `file_observer.rs`. Each native answers as the
+Android implementation does without the kernel feature it wraps (no PSI,
+freezer, zram, memevents, cgroups, inotify or pidfd), and procfs-backed values
+come from the device view's guest /proc. `telephony.registry` is the original
+`TelephonyRegistry`, which also runs on devices without telephony, and the
+framework uses the original `TelephonyManager`.
+
+Verified on 2026-09-27: ATMS and AMS construct, `start()` and
+`setSystemProcess` complete. Next blocker: `installSystemProviders` runs the
+original SettingsProvider in the system process, but its data directory
+(`/data/user_de/0/com.android.providers.settings`) lives in that package's own
+private-data tree, not the system process's `/data`. Packages that share the
+system uid need their data in the system process view. After that come
+DropBoxManagerService, the zygote (`ZygoteProcess` over a local socket) and
+WMS/Input/Display.

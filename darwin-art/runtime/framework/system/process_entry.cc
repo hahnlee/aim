@@ -66,6 +66,9 @@ bool BuildSystemClassPath(const char* image_root, const char* support_dex,
   return true;
 }
 
+// crates/darwin-art-runtime/src/android_servers.rs
+extern "C" bool darwin_art_register_android_servers(JNIEnv*, jobject, jmethodID);
+
 namespace {
 
 jclass LoadClass(JNIEnv* env, jobject loader, jmethodID load, const char* name) {
@@ -139,6 +142,11 @@ int Run(JNIEnv* env, const char* socket_path) {
     if (env->ExceptionCheck()) return 70;
   }
   env->DeleteLocalRef(runtime_init);
+  // SystemServer.run: System.loadLibrary("android_servers") before any
+  // service starts.
+  if (!darwin_art_register_android_servers(env, loader, load) || env->ExceptionCheck()) {
+    return 70;
+  }
 
   jclass network_path = LoadClass(
       env, loader, load, "dev.darwinart.runtime.connectivity.NetworkPathProvider");
