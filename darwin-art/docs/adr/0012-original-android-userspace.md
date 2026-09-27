@@ -196,3 +196,84 @@ of our own.
 | P4 | allocator/mapper and composer HALs plus ANGLE/MoltenVK: SurfaceFlinger in a macOS window, one app draws |
 | P5 | Input, audio, power/health, sensors and camera HALs |
 | P6 | Parity with the current runtime; switch and delete the old stack |
+
+## Appendix: what we implement, and where
+
+Only components bound to Linux kernel features or hardware are replaced, and
+only at a stable, versioned interface. Everything else stays original.
+
+### Replaced native daemons (exceptions at stable AIDL)
+
+| Daemon | Boundary | Why |
+| --- | --- | --- |
+| netd | `INetd` | netlink, iptables and eBPF; ours drives macOS networking. The device exposes one Ethernet-like network, not a Wi-Fi HAL |
+| vold | `IVold` | mounts, loop devices, fscrypt and dm-crypt; ours mounts FUSE the way vold does and hands the fd to the original MediaProvider |
+| lmkd | lmkd socket | PSI and memcg; not started at first, later backed by macOS memory-pressure events |
+
+### Kept original on the syscall layer
+
+servicemanager, logd, installd, zygote/app_process (`fork` maps to Darwin
+`fork`), SurfaceFlinger, inputflinger, audioserver, cameraserver,
+MediaProvider and DnsResolver.
+
+- **Scoped storage:** the original MediaProvider FUSE daemon serves
+  `/storage/emulated`. `/dev/fuse` is implemented in the syscall layer, since
+  FUSE is a documented kernel protocol like binder. Bulk I/O may later get a
+  passthrough exception.
+- **Input:** input is not a HAL. The syscall layer exposes virtual evdev
+  devices (`/dev/input/event*`) fed by AppKit.
+
+### Vendor HALs (ours)
+
+allocator/mapper and composer (IOSurface, Metal, AppKit), audio (CoreAudio),
+camera (AVFoundation), sensors, power/health/thermal (IOKit), GNSS
+(CoreLocation), and Codec2 over VideoToolbox (a performance exception; the
+original software codecs also work).
+
+- **KeyMint and Gatekeeper:** the AOSP software implementations first, with
+  Keychain or the Secure Enclave later.
+- **DRM:** the AOSP ClearKey HAL.
+- **Bluetooth is required.** Its HAL is a virtual HCI controller over
+  CoreBluetooth (LE first). A USB dongle path can add Classic audio. The
+  SCS-built Bluetooth JNI runs through the translation cache, which keeps its
+  shadow call stack.
+
+Undeclared, so absent: telephony, NFC, vibrator, IR, UWB and Thread, plus
+`update_engine`, `apexd` and `snapuserd` (the image is pre-flattened).
+
+### Kernel features to emulate
+
+binder, FUSE, `/proc` and `/sys` per the device contract, the netlink subset
+the remaining original daemons use, evdev, and memfd/ashmem.
+
+- **eBPF:** the `bpf()` syscall with maps backed by shared memory. Programs
+  attached to kernel hooks are not run; statistics the stack expects are
+  filled in from the syscall layer, which sees every socket operation. The
+  scope is settled in P3.
+- **Answered "unsupported" (Android falls back):** cgroups, namespaces,
+  SELinux (permissive), userfaultfd (ART uses its copying collector) and
+  BINDER_FREEZE.
+
+### Application JITs
+
+- Code that becomes executable (`mprotect`/`mmap` with PROT_EXEC) is scanned
+  and rewritten like translated files: `svc #0`, `tpidr_el0` and
+  `ctr_el0`.
+- RWX requests map to a `MAP_JIT` region whose per-thread write/execute state
+  is switched on fault. That works, but a JIT that alternates constantly
+  pays about 5 µs per switch.
+- A JIT that allocates x18 as a general register is an app-compatibility
+  risk handled case by case.
+
+ART's own JIT uses dual mapping and emits no instruction that needs
+rewriting: it keeps the thread in x19 and makes no raw syscalls.
+
+### References
+
+- **Model:** FreeBSD's Linuxulator (`sys/compat/linux`, BSD-2-Clause) is the
+  reference implementation for syscall translation: futex, epoll over
+  kqueue, eventfd/timerfd, linprocfs/linsysfs and netlink. Code may be
+  ported with attribution.
+- **Validation:** the Linux Test Project (LTP) arm64 syscall tests,
+  run under `linux-run`, measure the layer's fidelity.
+
