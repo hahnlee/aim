@@ -1,0 +1,18 @@
+[package]
+license.workspace = true
+name = "darwin-guest-init"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "darwin-artd's init role: boots the original Android userspace of a derived image on the Linux syscall layer (ADR 0012 item 6)"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "guest-init"
+path = "src/bin/guest-init.rs"
+
+[dependencies]
+darwin-android-init = { path = "../darwin-android-init" }
+libc = "0.2"
