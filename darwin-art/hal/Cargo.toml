@@ -14,6 +14,7 @@ members = [
     "audio/check",
     "binder",
     "binder-ndk-sys",
+    "bluetooth",
     "fmq",
     "graphics/allocator",
     "graphics/composer",
@@ -24,6 +25,7 @@ members = [
     "health",
     "sensors",
     "thermal",
+    "tests/bluetooth-hci-client",
 ]
 resolver = "2"
 

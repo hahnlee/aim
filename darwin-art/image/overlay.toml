@@ -185,6 +185,25 @@ path = "/vendor/etc/vintf/manifest/android.hardware.gnss-service.darwin.xml"
 source = "hal/gnss/android.hardware.gnss-service.darwin.xml"
 reason = "declares android.hardware.gnss.IGnss/default V2"
 
+# android.hardware.bluetooth: IBluetoothHci/default, a virtual LE controller
+# over CoreBluetooth (host-call module `bluetooth`, docs/bluetooth.md). It
+# replaces the default HAL removed below.
+
+[[add]]
+path = "/vendor/bin/hw/android.hardware.bluetooth-service.darwin"
+source = "_build/vendor-hals/bin/android.hardware.bluetooth-service.darwin"
+reason = "Bluetooth HAL service (Rust, AIDL V1) passing HCI to the CoreBluetooth virtual controller via host-call"
+
+[[add]]
+path = "/vendor/etc/init/android.hardware.bluetooth-service.darwin.rc"
+source = "hal/bluetooth/android.hardware.bluetooth-service.darwin.rc"
+reason = "starts the Bluetooth HAL"
+
+[[add]]
+path = "/vendor/etc/vintf/manifest/android.hardware.bluetooth-service.darwin.xml"
+source = "hal/bluetooth/android.hardware.bluetooth-service.darwin.xml"
+reason = "declares android.hardware.bluetooth.IBluetoothHci/default V1"
+
 # Graphics buffers (docs/graphics-buffers.md): IAllocator/default V2 and the
 # stable-C mapper `darwin`, memfd-backed buffers the host GPU imports. Built
 # by tools/build-vendor-hals.sh.

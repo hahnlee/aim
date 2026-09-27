@@ -19,6 +19,7 @@ members = [
     "crates/darwin-binder-driver",
     "crates/darwin-binder-host",
     "crates/darwin-host-audio",
+    "crates/darwin-host-bluetooth",
     "crates/darwin-host-display",
     "crates/darwin-host-gpu",
     "crates/darwin-host-health",

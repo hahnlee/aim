@@ -424,10 +424,18 @@ nothing unprivileged for it to drive ([vendor-hals.md](../vendor-hals.md)).
 - **KeyMint and Gatekeeper:** the AOSP software implementations first, with
   Keychain or the Secure Enclave later.
 - **DRM:** the AOSP ClearKey HAL.
-- **Bluetooth is required.** Its HAL is a virtual HCI controller over
-  CoreBluetooth (LE first). A USB dongle path can add Classic audio. The
-  SCS-built Bluetooth JNI runs through the translation cache, which keeps its
-  shadow call stack.
+- **Bluetooth is required.** Its HAL (`IBluetoothHci` V1) is a virtual
+  LE-only HCI controller over CoreBluetooth, in the host-call module
+  `bluetooth` ([bluetooth.md](../bluetooth.md)). The controller reports
+  BR/EDR as unsupported, scans with `CBCentralManager` into (extended)
+  advertising reports, and connects a device only after discovering its
+  GATT tree. An ATT server per link then answers the stack's ATT requests
+  from that tree, or turns them into `CBPeripheral` reads, writes and
+  subscriptions. The Generic Access and Generic Attribute services, which
+  CoreBluetooth hides, are rebuilt. Advertising maps the local name and
+  service UUIDs onto `CBPeripheralManager`; macOS owns pairing. A USB dongle
+  path can add Classic audio. The SCS-built Bluetooth JNI loads through the
+  load-time rewrite, which turns its shadow-call-stack instructions.
 
 Undeclared, so absent: telephony, NFC, vibrator, IR, UWB and Thread, plus
 `update_engine`, `apexd` and `snapuserd` (the image is pre-flattened).

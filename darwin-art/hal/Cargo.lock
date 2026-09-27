@@ -295,6 +295,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
+name = "bluetooth"
+version = "0.1.0"
+dependencies = [
+ "android_hardware_bluetooth",
+ "binder",
+ "darwin-hostcall",
+ "libc",
+]
+
+[[package]]
+name = "bluetooth-hci-client"
+version = "0.1.0"
+dependencies = [
+ "android_hardware_bluetooth",
+ "binder",
+]
+
+[[package]]
 name = "cexpr"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

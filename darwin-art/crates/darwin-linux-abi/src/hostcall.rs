@@ -34,6 +34,7 @@ static MODULES: &[&HostModule] = &[
     &darwin_host_sensors::SENSORS,
     &darwin_host_location::MODULE,
     &darwin_host_audio::MODULE,
+    &darwin_host_bluetooth::MODULE,
 ];
 
 const _: () = {
@@ -96,5 +97,9 @@ mod tests {
         assert_eq!(call(0, 1, 0, 0), enosys);
         assert_eq!(call(MODULES.len() as u64, 0, 0, 0), enosys);
         assert_eq!(call(1 << 32, 0, 0, 0), enosys);
+        assert_eq!(
+            call(module::BLUETOOTH as u64, 0, 0, 0),
+            darwin_hostcall::bluetooth::VERSION as i64
+        );
     }
 }

@@ -1,0 +1,15 @@
+[package]
+name = "bluetooth-hci-client"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Test client of the Bluetooth HAL: HCI through IBluetoothHci (crates/darwin-linux-abi/tests/bluetooth.rs); not in the image"
+
+# Installed into _build/vendor-hals/bin for the test.
+[package.metadata.vendor-hal]
+binary = "bluetooth-hci-client"
+
+[dependencies]
+android_hardware_bluetooth = { path = "../../aidl/android.hardware.bluetooth" }
+binder = { path = "../../binder" }
