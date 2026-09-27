@@ -1,0 +1,4 @@
+service vendor.health-darwin /vendor/bin/hw/android.hardware.health-service.darwin
+    class hal
+    user system
+    group system

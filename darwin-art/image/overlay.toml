@@ -39,3 +39,30 @@
 # entry order do not affect it.
 
 schema = 1
+
+# android.hardware.health: IHealth/default over the Mac's battery. The
+# service is built by tools/build-vendor-hals.sh; its host side is the
+# host-call module `health` (docs/host-call.md).
+
+[[add]]
+path = "/vendor/bin/hw/android.hardware.health-service.darwin"
+source = "_build/vendor-hals/bin/android.hardware.health-service.darwin"
+reason = "health HAL service (Rust, AIDL V4) reading the Mac's battery via host-call"
+
+[[add]]
+path = "/vendor/etc/init/android.hardware.health-service.darwin.rc"
+source = "hal/health/android.hardware.health-service.darwin.rc"
+reason = "starts the health HAL"
+
+[[add]]
+path = "/vendor/etc/vintf/manifest/android.hardware.health-service.darwin.xml"
+source = "hal/health/android.hardware.health-service.darwin.xml"
+reason = "declares android.hardware.health.IHealth/default V4"
+
+[[remove]]
+path = "/vendor/etc/init/android.hardware.health-service.example.rc"
+reason = "the emulator's health HAL reads /sys/class/power_supply, which has no Mac counterpart; ours serves IHealth/default"
+
+[[remove]]
+path = "/vendor/etc/vintf/manifest/android.hardware.health-service.example.xml"
+reason = "IHealth/default is declared by our health HAL's fragment"

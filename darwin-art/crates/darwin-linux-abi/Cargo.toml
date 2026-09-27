@@ -18,5 +18,7 @@ name = "linux-translate"
 path = "src/bin/linux-translate.rs"
 
 [dependencies]
+darwin-host-health = { path = "../darwin-host-health" }
+darwin-hostcall = { path = "../darwin-hostcall" }
 libc = "0.2"
 sha2 = "0.10"

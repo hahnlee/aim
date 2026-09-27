@@ -1,0 +1,17 @@
+[package]
+name = "binder_ndk_sys"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "AOSP libbinder_ndk_sys (vendor variant): bindgen bindings to the image's libbinder_ndk.so"
+links = "binder_ndk"
+
+[lib]
+path = "../../_build/vendor-hals/src/frameworks/native/libs/binder/rust/sys/lib.rs"
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+bindgen = "0.70"

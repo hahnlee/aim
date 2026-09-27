@@ -1,0 +1,21 @@
+[package]
+name = "health"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "android.hardware.health IHealth V4 service over the Mac's battery (host module `health`)"
+
+[[bin]]
+name = "health-service"
+path = "src/main.rs"
+
+# Installed as /vendor/bin/hw/<binary> (Cargo target names cannot hold dots).
+[package.metadata.vendor-hal]
+binary = "android.hardware.health-service.darwin"
+
+[dependencies]
+android_hardware_health = { path = "../aidl/android.hardware.health" }
+binder = { path = "../binder" }
+darwin-hostcall = { path = "../../crates/darwin-hostcall" }
+log = "0.4"

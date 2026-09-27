@@ -143,10 +143,9 @@ fn compute(fixture: &Fixture, text: &str) -> Identity {
 }
 
 #[test]
-fn seed_manifest_parses_with_no_entries() {
+fn checked_in_manifest_parses() {
     let text = include_str!("../../../image/overlay.toml");
-    let manifest = parse(text).expect("the checked-in manifest parses");
-    assert!(manifest.entries.is_empty());
+    parse(text).expect("the checked-in manifest parses");
 }
 
 #[test]

@@ -31,7 +31,7 @@
 // On entry: [sp] = guest x16, [sp+8] = guest x17, [sp+16] = guest x30,
 // guest sp = sp + 32. The thread's GuestContext is in a fixed TSD slot.
 //
-// Two paths:
+// Two paths (host calls take a third, Lhostcall below):
 // - lean: the syscalls below are answered right here, on live registers,
 //   with at most one Darwin syscall. Only x16/x17 (already saved by the
 //   stub) are scratch, NZCV is kept in the free slot at [sp+24], and no host
@@ -75,6 +75,9 @@ _linux_abi_syscall_entry:
     b.eq    Lgetgid
     cmp     x8, #177
     b.eq    Lgetegid
+    movz    x16, #{hostcall_hi}, lsl #16
+    cmp     x8, x16
+    b.eq    Lhostcall
     b       Lfull
 
 Lgetpid:
@@ -143,6 +146,24 @@ Llean_ret:
     ldr     x17, [sp, #24]
     msr     nzcv, x17
     ret                                 // into the stub, which restores x16/x17/x30
+
+// Host call (src/hostcall.rs): an AAPCS64 call of linux_abi_hostcall(x0..x3)
+// on the host stack. Caller-saved registers are the guest's to lose, by the
+// host-call contract; x19/x20 are kept below the stub frame and hold the
+// guest sp and the return address into the stub across the call.
+Lhostcall:
+    stp     x19, x20, [sp, #-16]!
+    mov     x19, sp
+    mov     x20, x30
+    mrs     x16, tpidrro_el0
+    ldr     x16, [x16, #{ctx}]
+    ldr     x16, [x16, #296]
+    mov     sp, x16
+    bl      _linux_abi_hostcall
+    mov     sp, x19
+    mov     x30, x20
+    ldp     x19, x20, [sp], #16
+    b       Llean_ret
 
     // ---- full path ----
 Lfull:

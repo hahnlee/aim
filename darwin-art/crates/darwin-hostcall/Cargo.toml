@@ -1,0 +1,9 @@
+[package]
+license = "Apache-2.0"
+name = "darwin-hostcall"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-call ABI (ADR 0012, boundary 2): module ids, argument layouts, guest wrappers and the host module shape"
+
+[dependencies]

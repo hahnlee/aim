@@ -17,6 +17,8 @@ members = [
     "crates/darwin-art-binder-device",
     "crates/darwin-art-binder-process",
     "crates/darwin-binder-driver",
+    "crates/darwin-host-health",
+    "crates/darwin-hostcall",
     "crates/darwin-art-build-contract",
     "crates/darwin-art-native-artifact",
     "crates/darwin-art-native-inventory",

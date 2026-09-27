@@ -453,9 +453,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "darwin-host-health"
+version = "0.1.0"
+dependencies = [
+ "darwin-hostcall",
+]
+
+[[package]]
+name = "darwin-hostcall"
+version = "0.1.0"
+
+[[package]]
 name = "darwin-linux-abi"
 version = "0.1.0"
 dependencies = [
+ "darwin-host-health",
+ "darwin-hostcall",
  "libc",
  "sha2",
 ]

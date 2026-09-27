@@ -70,7 +70,12 @@ pub fn dispatch(ctx: &mut GuestContext) {
     let a = [ctx.x[0], ctx.x[1], ctx.x[2], ctx.x[3], ctx.x[4], ctx.x[5]];
     let mut line = String::new();
     if tracing() {
-        line = format!("[linux] {}(", names::name(nr).unwrap_or("?"));
+        let name = match names::name(nr) {
+            Some(n) => n,
+            None if nr == darwin_hostcall::SYSCALL_NR => "hostcall",
+            None => "?",
+        };
+        line = format!("[linux] {name}(");
         for (i, v) in a.iter().take(names::arg_count(nr)).enumerate() {
             if i > 0 {
                 line.push_str(", ");
@@ -165,6 +170,7 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         167 => misc::prctl(a),
         169 => misc::gettimeofday(a),
         278 => misc::getrandom(a),
+        darwin_hostcall::SYSCALL_NR => crate::hostcall::call(a[0], a[1], a[2], a[3]),
         _ => {
             let args: Vec<String> = a[..names::arg_count(nr)]
                 .iter()

@@ -1,6 +1,7 @@
 //! P0 measurements for ADR 0012 (not part of the runtime):
 //! - cost of a redirected Linux `getpid` (lean path) against Darwin's own
 //!   `getpid`, and of a trivial syscall on the full (FP/SIMD-saving) path;
+//! - cost of a host call (ADR 0012 boundary 2) that returns a module version;
 //! - cost of a rewritten `mrs xN, tpidr_el0`;
 //! - whether a raw user write to TPIDR_EL0 survives syscalls and preemption.
 //!
@@ -23,6 +24,19 @@ std::arch::global_asm!(
     "b.ne 1b",
     "ret",
     "_probe_getpid_loop_end:",
+    ".globl _probe_hostcall_loop, _probe_hostcall_loop_end",
+    "_probe_hostcall_loop:", // x0 = iterations; host call (core module version)
+    "stp x19, x30, [sp, #-16]!",
+    "mov x19, x0",
+    "1: mov x0, #0",
+    "mov x1, #0",
+    "movz x8, #0x4843, lsl #16",
+    "svc #0",
+    "subs x19, x19, #1",
+    "b.ne 1b",
+    "ldp x19, x30, [sp], #16",
+    "ret",
+    "_probe_hostcall_loop_end:",
     ".globl _probe_mrs_loop, _probe_mrs_loop_end",
     "_probe_mrs_loop:", // x0 = iterations; returns the last value read
     "mov x9, x0",
@@ -41,6 +55,8 @@ std::arch::global_asm!(
 unsafe extern "C" {
     static probe_getpid_loop: u8;
     static probe_getpid_loop_end: u8;
+    static probe_hostcall_loop: u8;
+    static probe_hostcall_loop_end: u8;
     static probe_mrs_loop: u8;
     static probe_mrs_loop_end: u8;
     static probe_msr: u8;
@@ -229,6 +245,14 @@ fn main() {
         t_island_ppid - t_darwin_ppid
     );
     println!("redirected Linux getpid via brk + SIGTRAP fallback: {t_brk:.1} ns");
+    // SAFETY: symbols from the global_asm block above.
+    let hostcall = unsafe { load(&probe_hostcall_loop, &probe_hostcall_loop_end, Some(true)) };
+    let t_hostcall = ns_per(N, || {
+        hostcall(N, 0);
+    });
+    println!(
+        "host call (svc -> stub -> trampoline, host stack, Rust module lookup): {t_hostcall:.1} ns"
+    );
 
     msr_island(0xfeed_f00d, 0);
     let n = 200_000_000;

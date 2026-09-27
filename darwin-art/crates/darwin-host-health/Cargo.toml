@@ -1,0 +1,10 @@
+[package]
+license.workspace = true
+name = "darwin-host-health"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-call module for android.hardware.health: the Mac's battery through IOKit"
+
+[dependencies]
+darwin-hostcall = { path = "../darwin-hostcall" }
