@@ -275,6 +275,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "composer"
+version = "0.1.0"
+dependencies = [
+ "android_hardware_common",
+ "android_hardware_drm_common",
+ "android_hardware_graphics_common",
+ "android_hardware_graphics_composer3",
+ "binder",
+ "darwin-gralloc",
+ "darwin-hostcall",
+ "libc",
+ "log",
+]
+
+[[package]]
 name = "darwin-gralloc"
 version = "0.1.0"
 

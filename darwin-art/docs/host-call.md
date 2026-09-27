@@ -97,6 +97,7 @@ first.
 | 0 | core | `ABI_VERSION` = 1 | (version only) |
 | 1 | health | 1 | `FN_BATTERY`: fill `health::Battery` |
 | 2 | gpu | 1 | `FN_INIT`, `FN_IMPORT_BUFFER`, `FN_PRESENT`, and the generated EGL/GLES entry points from `FN_TABLE_BASE` ([gles-driver.md](gles-driver.md)) |
+| 3 | display | 1 | `FN_CONNECT` (returns the event fd), `FN_IMPORT`, `FN_PRESENT`, `FN_RELEASE`, `FN_SET_VSYNC` ([composer.md](composer.md)) |
 
 ## Vendor HAL build pipeline
 

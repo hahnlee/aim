@@ -202,9 +202,10 @@ mapping to its host module:
   copy either way. Window surfaces render to an ANGLE pbuffer and blit into
   the dequeued buffer's texture on `eglSwapBuffers` (flipped, so row 0 is the
   top row, as Android expects of window buffers). See `docs/gles-driver.md`.
-- **Composer (next)**: the same import gives the composer a Metal texture of
-  each layer's buffer in its own process. The memory is shared, so no
-  cross-process GPU object is needed.
+- **Composer** (`docs/composer.md`): the client target's fd goes to the
+  display server once, which maps it and makes the same linear texture
+  over the mapping. The memory is shared, so no cross-process GPU object is
+  needed.
 
 Synchronization: until sync fences exist in the syscall layer, a GPU writer
 finishes its GPU work before it returns a buffer (release fence -1), and

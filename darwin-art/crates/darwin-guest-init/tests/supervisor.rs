@@ -90,6 +90,8 @@ fn fixture(tag: &str) -> Fixture {
         image,
         path_map_file: layout.path_map_file(),
         binder: None,
+        gpu: None,
+        display: None,
         trace: false,
         options: LinuxRunOptions::CONTRACT,
     };

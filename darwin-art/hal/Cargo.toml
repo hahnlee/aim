@@ -13,6 +13,7 @@ members = [
     "binder",
     "binder-ndk-sys",
     "graphics/allocator",
+    "graphics/composer",
     "graphics/gralloc",
     "graphics/mapper",
     "gles",

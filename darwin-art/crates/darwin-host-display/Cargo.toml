@@ -1,0 +1,15 @@
+[package]
+license.workspace = true
+name = "darwin-host-display"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-call module for the composer HAL, and darwin-display, the display server that owns the macOS window"
+
+[[bin]]
+name = "darwin-display"
+path = "src/bin/darwin-display/main.rs"
+
+[dependencies]
+darwin-hostcall = { path = "../darwin-hostcall" }
+libc = "0.2"

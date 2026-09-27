@@ -5149,10 +5149,6 @@ pub unsafe extern "C" fn glBindSampler(unit: GLuint, sampler: GLuint) {
     unsafe { host::glBindSampler(unit, sampler) }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn glBindTexture(target: GLenum, texture: GLuint) {
-    unsafe { host::glBindTexture(target, texture) }
-}
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn glBindTransformFeedback(target: GLenum, id: GLuint) {
     unsafe { host::glBindTransformFeedback(target, id) }
 }
@@ -5805,10 +5801,6 @@ pub unsafe extern "C" fn glEGLImageTargetTexStorageEXT(target: GLenum, image: GL
     unsafe { host::glEGLImageTargetTexStorageEXT(target, image, attrib_list) }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn glEGLImageTargetTexture2DOES(target: GLenum, image: GLeglImageOES) {
-    unsafe { host::glEGLImageTargetTexture2DOES(target, image) }
-}
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn glEnable(cap: GLenum) {
     unsafe { host::glEnable(cap) }
 }
@@ -6297,10 +6289,6 @@ pub unsafe extern "C" fn glGetIntegeri_vRobustANGLE(target: GLenum, index: GLuin
     unsafe { host::glGetIntegeri_vRobustANGLE(target, index, paramCount, length, data) }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn glGetIntegerv(pname: GLenum, data: *mut GLint) {
-    unsafe { host::glGetIntegerv(pname, data) }
-}
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn glGetIntegervRobustANGLE(pname: GLenum, paramCount: GLsizei, length: *mut GLsizei, data: *mut GLint) {
     unsafe { host::glGetIntegervRobustANGLE(pname, paramCount, length, data) }
 }
@@ -6589,14 +6577,6 @@ pub unsafe extern "C" fn glGetShaderivRobustANGLE(shader: GLuint, pname: GLenum,
     unsafe { host::glGetShaderivRobustANGLE(shader, pname, paramCount, length, params) }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn glGetString(name: GLenum) -> *const GLubyte {
-    unsafe { host::glGetString(name) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn glGetStringi(name: GLenum, index: GLuint) -> *const GLubyte {
-    unsafe { host::glGetStringi(name, index) }
-}
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn glGetSynciv(sync: GLsync, pname: GLenum, count: GLsizei, length: *mut GLsizei, values: *mut GLint) {
     unsafe { host::glGetSynciv(sync, pname, count, length, values) }
 }
@@ -6677,16 +6657,8 @@ pub unsafe extern "C" fn glGetTexParameterIuivOES(target: GLenum, pname: GLenum,
     unsafe { host::glGetTexParameterIuivOES(target, pname, params) }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn glGetTexParameterfv(target: GLenum, pname: GLenum, params: *mut GLfloat) {
-    unsafe { host::glGetTexParameterfv(target, pname, params) }
-}
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn glGetTexParameterfvRobustANGLE(target: GLenum, pname: GLenum, paramCount: GLsizei, length: *mut GLsizei, params: *mut GLfloat) {
     unsafe { host::glGetTexParameterfvRobustANGLE(target, pname, paramCount, length, params) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn glGetTexParameteriv(target: GLenum, pname: GLenum, params: *mut GLint) {
-    unsafe { host::glGetTexParameteriv(target, pname, params) }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn glGetTexParameterivRobustANGLE(target: GLenum, pname: GLenum, paramCount: GLsizei, length: *mut GLsizei, params: *mut GLint) {
@@ -6991,10 +6963,6 @@ pub unsafe extern "C" fn glLineWidth(width: GLfloat) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn glLineWidthx(width: GLfixed) {
     unsafe { host::glLineWidthx(width) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn glLinkProgram(program: GLuint) {
-    unsafe { host::glLinkProgram(program) }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn glLoadIdentity() {
@@ -7753,10 +7721,6 @@ pub unsafe extern "C" fn glShaderBinary(count: GLsizei, shaders: *const GLuint, 
     unsafe { host::glShaderBinary(count, shaders, binaryFormat, binary, length) }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn glShaderSource(shader: GLuint, count: GLsizei, string: *const *mut GLchar, length: *const GLint) {
-    unsafe { host::glShaderSource(shader, count, string, length) }
-}
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn glShadingRateCombinerOpsEXT(combinerOp0: GLenum, combinerOp1: GLenum) {
     unsafe { host::glShadingRateCombinerOpsEXT(combinerOp0, combinerOp1) }
 }
@@ -7925,24 +7889,8 @@ pub unsafe extern "C" fn glTexParameterIuivOES(target: GLenum, pname: GLenum, pa
     unsafe { host::glTexParameterIuivOES(target, pname, params) }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn glTexParameterf(target: GLenum, pname: GLenum, param: GLfloat) {
-    unsafe { host::glTexParameterf(target, pname, param) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn glTexParameterfv(target: GLenum, pname: GLenum, params: *const GLfloat) {
-    unsafe { host::glTexParameterfv(target, pname, params) }
-}
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn glTexParameterfvRobustANGLE(target: GLenum, pname: GLenum, paramCount: GLsizei, params: *const GLfloat) {
     unsafe { host::glTexParameterfvRobustANGLE(target, pname, paramCount, params) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn glTexParameteri(target: GLenum, pname: GLenum, param: GLint) {
-    unsafe { host::glTexParameteri(target, pname, param) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn glTexParameteriv(target: GLenum, pname: GLenum, params: *const GLint) {
-    unsafe { host::glTexParameteriv(target, pname, params) }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn glTexParameterivRobustANGLE(target: GLenum, pname: GLenum, paramCount: GLsizei, params: *const GLint) {
@@ -8071,14 +8019,6 @@ pub unsafe extern "C" fn glUniform1f(location: GLint, v0: GLfloat) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn glUniform1fv(location: GLint, count: GLsizei, value: *const GLfloat) {
     unsafe { host::glUniform1fv(location, count, value) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn glUniform1i(location: GLint, v0: GLint) {
-    unsafe { host::glUniform1i(location, v0) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn glUniform1iv(location: GLint, count: GLsizei, value: *const GLint) {
-    unsafe { host::glUniform1iv(location, count, value) }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn glUniform1ui(location: GLint, v0: GLuint) {
@@ -8481,7 +8421,7 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "glBindRenderbuffer", addr: glBindRenderbuffer as *const c_void, id: 135 },
     Proc { name: "glBindRenderbufferOES", addr: glBindRenderbufferOES as *const c_void, id: 136 },
     Proc { name: "glBindSampler", addr: glBindSampler as *const c_void, id: 137 },
-    Proc { name: "glBindTexture", addr: glBindTexture as *const c_void, id: 138 },
+    Proc { name: "glBindTexture", addr: crate::external::glBindTexture as *const c_void, id: -1 },
     Proc { name: "glBindTransformFeedback", addr: glBindTransformFeedback as *const c_void, id: 139 },
     Proc { name: "glBindUniformLocationCHROMIUM", addr: glBindUniformLocationCHROMIUM as *const c_void, id: 140 },
     Proc { name: "glBindVertexArray", addr: glBindVertexArray as *const c_void, id: 141 },
@@ -8647,7 +8587,7 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "glDrawTexxvOES", addr: glDrawTexxvOES as *const c_void, id: 299 },
     Proc { name: "glEGLImageTargetRenderbufferStorageOES", addr: glEGLImageTargetRenderbufferStorageOES as *const c_void, id: 300 },
     Proc { name: "glEGLImageTargetTexStorageEXT", addr: glEGLImageTargetTexStorageEXT as *const c_void, id: 301 },
-    Proc { name: "glEGLImageTargetTexture2DOES", addr: glEGLImageTargetTexture2DOES as *const c_void, id: 302 },
+    Proc { name: "glEGLImageTargetTexture2DOES", addr: crate::external::glEGLImageTargetTexture2DOES as *const c_void, id: -1 },
     Proc { name: "glEnable", addr: glEnable as *const c_void, id: 303 },
     Proc { name: "glEnableClientState", addr: glEnableClientState as *const c_void, id: 304 },
     Proc { name: "glEnableVertexAttribArray", addr: glEnableVertexAttribArray as *const c_void, id: 305 },
@@ -8770,7 +8710,7 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "glGetInteger64vRobustANGLE", addr: glGetInteger64vRobustANGLE as *const c_void, id: 422 },
     Proc { name: "glGetIntegeri_v", addr: glGetIntegeri_v as *const c_void, id: 423 },
     Proc { name: "glGetIntegeri_vRobustANGLE", addr: glGetIntegeri_vRobustANGLE as *const c_void, id: 424 },
-    Proc { name: "glGetIntegerv", addr: glGetIntegerv as *const c_void, id: 425 },
+    Proc { name: "glGetIntegerv", addr: crate::external::glGetIntegerv as *const c_void, id: -1 },
     Proc { name: "glGetIntegervRobustANGLE", addr: glGetIntegervRobustANGLE as *const c_void, id: 426 },
     Proc { name: "glGetInternalformativ", addr: glGetInternalformativ as *const c_void, id: 427 },
     Proc { name: "glGetInternalformativRobustANGLE", addr: glGetInternalformativRobustANGLE as *const c_void, id: 428 },
@@ -8843,8 +8783,8 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "glGetShaderSource", addr: glGetShaderSource as *const c_void, id: 495 },
     Proc { name: "glGetShaderiv", addr: glGetShaderiv as *const c_void, id: 496 },
     Proc { name: "glGetShaderivRobustANGLE", addr: glGetShaderivRobustANGLE as *const c_void, id: 497 },
-    Proc { name: "glGetString", addr: glGetString as *const c_void, id: 498 },
-    Proc { name: "glGetStringi", addr: glGetStringi as *const c_void, id: 499 },
+    Proc { name: "glGetString", addr: crate::external::glGetString as *const c_void, id: -1 },
+    Proc { name: "glGetStringi", addr: crate::external::glGetStringi as *const c_void, id: -1 },
     Proc { name: "glGetSynciv", addr: glGetSynciv as *const c_void, id: 500 },
     Proc { name: "glGetTexEnvfv", addr: glGetTexEnvfv as *const c_void, id: 501 },
     Proc { name: "glGetTexEnviv", addr: glGetTexEnviv as *const c_void, id: 502 },
@@ -8865,9 +8805,9 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "glGetTexParameterIuiv", addr: glGetTexParameterIuiv as *const c_void, id: 517 },
     Proc { name: "glGetTexParameterIuivEXT", addr: glGetTexParameterIuivEXT as *const c_void, id: 518 },
     Proc { name: "glGetTexParameterIuivOES", addr: glGetTexParameterIuivOES as *const c_void, id: 519 },
-    Proc { name: "glGetTexParameterfv", addr: glGetTexParameterfv as *const c_void, id: 520 },
+    Proc { name: "glGetTexParameterfv", addr: crate::external::glGetTexParameterfv as *const c_void, id: -1 },
     Proc { name: "glGetTexParameterfvRobustANGLE", addr: glGetTexParameterfvRobustANGLE as *const c_void, id: 521 },
-    Proc { name: "glGetTexParameteriv", addr: glGetTexParameteriv as *const c_void, id: 522 },
+    Proc { name: "glGetTexParameteriv", addr: crate::external::glGetTexParameteriv as *const c_void, id: -1 },
     Proc { name: "glGetTexParameterivRobustANGLE", addr: glGetTexParameterivRobustANGLE as *const c_void, id: 523 },
     Proc { name: "glGetTexParameterxv", addr: glGetTexParameterxv as *const c_void, id: 524 },
     Proc { name: "glGetTransformFeedbackVarying", addr: glGetTransformFeedbackVarying as *const c_void, id: 525 },
@@ -8944,7 +8884,7 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "glLightxv", addr: glLightxv as *const c_void, id: 596 },
     Proc { name: "glLineWidth", addr: glLineWidth as *const c_void, id: 597 },
     Proc { name: "glLineWidthx", addr: glLineWidthx as *const c_void, id: 598 },
-    Proc { name: "glLinkProgram", addr: glLinkProgram as *const c_void, id: 599 },
+    Proc { name: "glLinkProgram", addr: crate::external::glLinkProgram as *const c_void, id: -1 },
     Proc { name: "glLoadIdentity", addr: glLoadIdentity as *const c_void, id: 600 },
     Proc { name: "glLoadMatrixf", addr: glLoadMatrixf as *const c_void, id: 601 },
     Proc { name: "glLoadMatrixx", addr: glLoadMatrixx as *const c_void, id: 602 },
@@ -9134,7 +9074,7 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "glSetFenceNV", addr: glSetFenceNV as *const c_void, id: 786 },
     Proc { name: "glShadeModel", addr: glShadeModel as *const c_void, id: 787 },
     Proc { name: "glShaderBinary", addr: glShaderBinary as *const c_void, id: 788 },
-    Proc { name: "glShaderSource", addr: glShaderSource as *const c_void, id: 789 },
+    Proc { name: "glShaderSource", addr: crate::external::glShaderSource as *const c_void, id: -1 },
     Proc { name: "glShadingRateCombinerOpsEXT", addr: glShadingRateCombinerOpsEXT as *const c_void, id: 790 },
     Proc { name: "glShadingRateEXT", addr: glShadingRateEXT as *const c_void, id: 791 },
     Proc { name: "glShadingRateQCOM", addr: glShadingRateQCOM as *const c_void, id: 792 },
@@ -9177,11 +9117,11 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "glTexParameterIuiv", addr: glTexParameterIuiv as *const c_void, id: 829 },
     Proc { name: "glTexParameterIuivEXT", addr: glTexParameterIuivEXT as *const c_void, id: 830 },
     Proc { name: "glTexParameterIuivOES", addr: glTexParameterIuivOES as *const c_void, id: 831 },
-    Proc { name: "glTexParameterf", addr: glTexParameterf as *const c_void, id: 832 },
-    Proc { name: "glTexParameterfv", addr: glTexParameterfv as *const c_void, id: 833 },
+    Proc { name: "glTexParameterf", addr: crate::external::glTexParameterf as *const c_void, id: -1 },
+    Proc { name: "glTexParameterfv", addr: crate::external::glTexParameterfv as *const c_void, id: -1 },
     Proc { name: "glTexParameterfvRobustANGLE", addr: glTexParameterfvRobustANGLE as *const c_void, id: 834 },
-    Proc { name: "glTexParameteri", addr: glTexParameteri as *const c_void, id: 835 },
-    Proc { name: "glTexParameteriv", addr: glTexParameteriv as *const c_void, id: 836 },
+    Proc { name: "glTexParameteri", addr: crate::external::glTexParameteri as *const c_void, id: -1 },
+    Proc { name: "glTexParameteriv", addr: crate::external::glTexParameteriv as *const c_void, id: -1 },
     Proc { name: "glTexParameterivRobustANGLE", addr: glTexParameterivRobustANGLE as *const c_void, id: 837 },
     Proc { name: "glTexParameterx", addr: glTexParameterx as *const c_void, id: 838 },
     Proc { name: "glTexParameterxv", addr: glTexParameterxv as *const c_void, id: 839 },
@@ -9214,8 +9154,8 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "glTranslatex", addr: glTranslatex as *const c_void, id: 866 },
     Proc { name: "glUniform1f", addr: glUniform1f as *const c_void, id: 867 },
     Proc { name: "glUniform1fv", addr: glUniform1fv as *const c_void, id: 868 },
-    Proc { name: "glUniform1i", addr: glUniform1i as *const c_void, id: 869 },
-    Proc { name: "glUniform1iv", addr: glUniform1iv as *const c_void, id: 870 },
+    Proc { name: "glUniform1i", addr: crate::external::glUniform1i as *const c_void, id: -1 },
+    Proc { name: "glUniform1iv", addr: crate::external::glUniform1iv as *const c_void, id: -1 },
     Proc { name: "glUniform1ui", addr: glUniform1ui as *const c_void, id: 871 },
     Proc { name: "glUniform1uiv", addr: glUniform1uiv as *const c_void, id: 872 },
     Proc { name: "glUniform2f", addr: glUniform2f as *const c_void, id: 873 },

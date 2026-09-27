@@ -18,7 +18,8 @@ Each service is one host process, started in a new process group with
 ```
 linux-run --root <image> --path-map <runtime>/path-map \
           --identity <runtime>/identity/<service>.<n> --inherit-env \
-          --binder <name> [--seclabel <label>] [--trace] <program> <args...>
+          --binder <name> [--seclabel <label>] [--gpu <dir>] \
+          [--display <socket>] [--trace] <program> <args...>
 ```
 
 - `<program>` and `<args>` are the guest argv after init's `${prop}`
@@ -32,6 +33,10 @@ linux-run --root <image> --path-map <runtime>/path-map \
 - `--seclabel` is the service's `seclabel`. Without one, init would compute
   the domain from the executable's file context; guest-init does not yet,
   and the layer reports `u:r:init:s0`.
+- `--gpu` and `--display` are host devices every service may use, given to
+  guest-init with the same options: the host's ANGLE behind the GLES driver
+  (`docs/gles-driver.md`) and the display server behind the composer
+  (`docs/composer.md`).
 - stdin is `/dev/null`. stdout and stderr go to
   `<runtime>/logs/<service>.log`.
 - Only the service's descriptors are inherited

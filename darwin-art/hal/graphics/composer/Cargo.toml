@@ -1,0 +1,26 @@
+[package]
+name = "composer"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "android.hardware.graphics.composer3 IComposer V4 service: one display in a macOS window (host module `display`, docs/composer.md)"
+
+[[bin]]
+name = "composer-service"
+path = "src/main.rs"
+
+# Installed as /vendor/bin/hw/<binary> (Cargo target names cannot hold dots).
+[package.metadata.vendor-hal]
+binary = "android.hardware.graphics.composer3-service.darwin"
+
+[dependencies]
+android_hardware_common = { path = "../../aidl/android.hardware.common" }
+android_hardware_drm_common = { path = "../../aidl/android.hardware.drm.common" }
+android_hardware_graphics_common = { path = "../../aidl/android.hardware.graphics.common" }
+android_hardware_graphics_composer3 = { path = "../../aidl/android.hardware.graphics.composer3" }
+binder = { path = "../../binder" }
+darwin-gralloc = { path = "../gralloc" }
+darwin-hostcall = { path = "../../../crates/darwin-hostcall" }
+libc = "0.2"
+log = "0.4"
