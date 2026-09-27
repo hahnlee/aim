@@ -53,6 +53,26 @@ public final class ApplicationPackages implements PackageQueries {
         return resolved == null || resolved.isEmpty() ? null : resolved.get(0).activityInfo;
     }
 
+    /**
+     * The Intent and Activity for a launch that requested `action` (and data
+     * `data`) in `packageName`, as `am start -a ACTION -d DATA PACKAGE`
+     * resolves it: default-category activities of that package only. Returns
+     * {Intent, ActivityInfo}, or null when the package handles no such Intent.
+     */
+    public static Object[] requestedLaunch(String packageName, int uid, String action,
+            String data) {
+        Intent intent = new Intent(action).setPackage(packageName);
+        if (data != null && !data.isEmpty()) intent.setData(android.net.Uri.parse(data));
+        List<ResolveInfo> resolved = packageManager().queryIntentActivities(intent, null,
+                STOCK_PM_FLAGS | PackageManager.MATCH_DEFAULT_ONLY, Process.SYSTEM_UID,
+                UserHandle.getUserId(uid));
+        if (resolved == null || resolved.isEmpty()) return null;
+        ActivityInfo info = resolved.get(0).activityInfo;
+        intent.setClassName(info.packageName, info.name)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        return new Object[] {intent, info};
+    }
+
     /** ActivityTaskSupervisor.resolveActivity for an explicit component. */
     public static ActivityInfo activity(ComponentName component, int userId) {
         return packageManager().getActivityInfo(

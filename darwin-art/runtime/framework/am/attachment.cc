@@ -128,8 +128,19 @@ jstring Attach(JNIEnv* env, jclass, jobject application, jlong,
   }
   return static_cast<jstring>(env->PopLocalFrame(attached_package));
 }
-void Launch(JNIEnv* env, jclass, jobject application, jstring package, jint uid) {
-  if (!darwin_art::framework::wm::ScheduleActivityLaunch(env, application, package, uid)) {
+void Launch(JNIEnv* env, jclass, jobject application, jstring package, jint uid,
+            jint pid) {
+  // The Intent this process's launch requested (am start -a/-d), if any.
+  char action[257];
+  char data[4097];
+  const int32_t requested =
+      pid > 0 ? darwin_art_runtime_registered_launch_intent(
+                    static_cast<uint32_t>(pid), action, sizeof(action), data,
+                    sizeof(data))
+              : 0;
+  if (!darwin_art::framework::wm::ScheduleActivityLaunch(
+          env, application, package, uid, requested == 1 ? action : nullptr,
+          requested == 1 && data[0] != '\0' ? data : nullptr)) {
     Error(env, "System activity launch transaction could not be dispatched");
   }
 }
@@ -144,7 +155,7 @@ bool RegisterActivityManager(JNIEnv* env, jclass endpoint) {
        const_cast<char*>("(Landroid/os/IBinder;JLjava/lang/String;I)Ljava/lang/String;"),
        reinterpret_cast<void*>(&Attach)},
       {const_cast<char*>("nativeLaunch"),
-       const_cast<char*>("(Landroid/os/IBinder;Ljava/lang/String;I)V"),
+       const_cast<char*>("(Landroid/os/IBinder;Ljava/lang/String;II)V"),
        reinterpret_cast<void*>(&Launch)}};
   if (env->RegisterNatives(endpoint, methods, 3) != JNI_OK) return false;
   if (!RegisterProcessLauncher(env)) return false;

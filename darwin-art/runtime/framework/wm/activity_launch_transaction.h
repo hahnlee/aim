@@ -6,8 +6,13 @@ namespace darwin_art::framework::wm {
 
 // Constructs the original AOSP launch/resume ClientTransaction. Android owns
 // activity construction, ContextImpl, lifecycle callbacks and ViewRoot setup.
+// The launch's requested Intent (`action`, optional `data`), resolved within
+// the package; launches the launcher Activity when `action` is null or the
+// package has no Activity for it.
 bool ScheduleActivityLaunch(JNIEnv* env, jobject application_binder,
-                            jstring package_name, jint uid);
+                            jstring package_name, jint uid,
+                            const char* action = nullptr,
+                            const char* data = nullptr);
 
 // Schedules a manifest-resolved Intent through the same original AOSP client
 // transaction path used for the initial launcher Activity.

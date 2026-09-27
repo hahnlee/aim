@@ -190,7 +190,8 @@ public final class ActivityManagerEndpoint extends Binder {
     private static native String nativeResolveAttachedPackage(int expectedUid);
     private static native String nativeAttach(IBinder application, long startSequence,
             String reservedProcessName, int expectedUid);
-    private static native void nativeLaunch(IBinder application, String packageName, int uid);
+    private static native void nativeLaunch(IBinder application, String packageName, int uid,
+            int pid);
 
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
@@ -618,7 +619,7 @@ public final class ActivityManagerEndpoint extends Binder {
                 IBinder app = attached.thread;
                 String packageName = attached.packageName;
                 if (attached.initialWork == ApplicationProcessRegistry.InitialWork.ACTIVITY) {
-                    nativeLaunch(app, packageName, attached.uid);
+                    nativeLaunch(app, packageName, attached.uid, attached.pid);
                 }
                 activeServices.onProcessAttached(attached);
             } catch (RuntimeException | Error error) {
