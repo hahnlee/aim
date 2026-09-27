@@ -84,10 +84,14 @@ public final class HostCommandService {
         if (arguments.length == 2 && "archive-info".equals(arguments[0])) {
             return LauncherQueries.archiveInfo(arguments[1], output);
         }
+        if (arguments.length == 1 && "native-coverage".equals(arguments[0])) {
+            output.write(NativeCoverage.report().getBytes());
+            return 0;
+        }
         boolean dump = arguments.length >= 2 && "dumpsys".equals(arguments[0]);
         if (arguments.length < 2 || !(dump || "cmd".equals(arguments[0]))) {
             output.write(("usage: cmd|dumpsys SERVICE [ARGS...] | launcher-info PACKAGE"
-                    + " | archive-info APK\n").getBytes());
+                    + " | archive-info APK | native-coverage\n").getBytes());
             return EXIT_USAGE;
         }
         IBinder service = services.localService(arguments[1]);

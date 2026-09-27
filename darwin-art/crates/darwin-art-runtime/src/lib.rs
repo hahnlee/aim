@@ -25,6 +25,7 @@ pub mod linker_namespace;
 #[cfg(unix)]
 mod linker_namespace_ffi;
 mod local_socket;
+mod native_coverage;
 mod native_owner;
 #[cfg(target_os = "macos")]
 mod network_path;

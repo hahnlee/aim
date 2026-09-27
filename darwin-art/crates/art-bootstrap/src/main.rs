@@ -11,6 +11,7 @@ mod help;
 mod native_build;
 mod native_cache;
 mod native_graph;
+mod native_inventory;
 mod native_link_recipe;
 mod support;
 

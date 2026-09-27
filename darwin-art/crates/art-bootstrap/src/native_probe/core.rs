@@ -61,6 +61,8 @@ pub(crate) fn core_probe_includes(
 pub(crate) struct RuntimeCoreObjects {
     pub(crate) boot_native_registration: PathBuf,
     pub(crate) boot_native_libraries: PathBuf,
+    /// ART's JNI binding record for the native coverage report.
+    pub(crate) native_registration_audit: PathBuf,
     /// libartservice: service-art.jar's ArtJni natives (ADR 0009).
     pub(crate) art_service: PathBuf,
     /// libarttools EnsureNoProcessInDir for Darwin processes.
@@ -109,6 +111,15 @@ pub(crate) fn compile_runtime_core_objects(
             compiler_identity,
             "compat/art/boot_native_libraries.cc",
             "darwin_art_boot_native_libraries.cc.o",
+        )?,
+        native_registration_audit: compile_probe(
+            root,
+            build_dir,
+            include_refs,
+            probe_cache,
+            compiler_identity,
+            "compat/art/native_registration_audit.cc",
+            "darwin_art_native_registration_audit.cc.o",
         )?,
         art_service: compile_probe(
             root,

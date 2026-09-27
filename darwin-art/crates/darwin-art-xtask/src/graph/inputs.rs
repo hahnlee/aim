@@ -55,6 +55,8 @@ pub(crate) fn graph_inputs(root: &Path) -> Vec<PathBuf> {
         PathBuf::from("runtime/art/boot_native_registration.cc"),
         PathBuf::from("compat/art/boot_native_libraries.cc"),
         PathBuf::from("compat/art/boot_native_libraries.h"),
+        PathBuf::from("compat/art/native_registration_audit.cc"),
+        PathBuf::from("compat/art/native_registration_audit.h"),
         PathBuf::from("probes/runtime_registration_fixture.cc"),
         PathBuf::from("probes/runtime_registration_fixture.h"),
         PathBuf::from("probes/runtime_network_loader.cc"),
@@ -562,6 +564,7 @@ pub(crate) fn is_global_digest_excluded(path: &Path) -> bool {
             | "runtime/art/native_registration.h"
             | "runtime/art/boot_native_registration.cc"
             | "compat/art/boot_native_libraries.cc"
+            | "compat/art/native_registration_audit.cc"
             | "probes/runtime_registration_fixture.cc"
             | "probes/runtime_registration_fixture.h"
             | "probes/runtime_app_bootstrap.cc"
