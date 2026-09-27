@@ -185,6 +185,30 @@ of our own.
 - **16 KiB pages:** match a Linux 16K kernel. Large reservations are cheap.
   Nothing maps below 4 GiB, hence the ART exception above.
 
+## P1 binder driver (2026-09-27)
+
+Details in [binder-driver.md](../binder-driver.md).
+
+- **A rewrite, not the old crates.** The old binder crates drop remote
+  reference counts. They never deliver scatter-gather payloads or fd arrays,
+  and they do not route nested calls. `crates/darwin-binder-driver`
+  implements the kernel driver from the UAPI and `binder.c`. It is a library
+  shaped like the file operations.
+- **All binder state in darwin-artd.** Per-process state (threads, work
+  queues, the receive allocator) is written by other processes'
+  transactions, so it stays with the global state in the daemon rather than
+  in the guests.
+- **Transport: Mach messages.** One `mach_msg(SEND|RCV)` per ioctl on the
+  thread's reply port. Parked reads are completed by the waker. Fds travel
+  as fileports. Receive buffers are memory entries that the daemon writes
+  once.
+- **Measured (M2 Pro, `experiments/p1/01-binder-transport`):**
+  - client → daemon → server → daemon → client over Mach: 6.5 µs p50;
+  - the same path over Unix sockets: 10.3 µs p50;
+  - the core in-process: 9.2 µs p50.
+- **Freezing.** `BINDER_FREEZE` fails with `EINVAL`.
+- **Wiring:** #167 (syscall layer) and #168 (daemon).
+
 ## Phases
 
 | Phase | Target |
