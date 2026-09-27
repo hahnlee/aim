@@ -112,3 +112,14 @@ python3 "$root/tools/art-android/gen_build.py" \
   --art "$stage" --aosp "$aosp" --image "$image" --ndk "$ndk" --out "$out" \
   --xsdc "$xsdc" --apex-xsd "$aosp/android16-linkerconfig-apex/ApexInfoList.xsd" --java "$java"
 ninja -C "$out" "${ninja_args[@]+"${ninja_args[@]}"}"
+
+# The derived image (image/overlay.toml) takes copies without debug info;
+# lib64/ and bin/ keep it for symbolization.
+strip="$ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-strip"
+mkdir -p "$out/stripped/lib64" "$out/stripped/bin"
+for f in lib64/libartbase.so lib64/libdexfile.so lib64/libprofile.so lib64/libart.so \
+         lib64/libopenjdkjvm.so bin/dex2oat64; do
+  if [[ ! "$out/stripped/$f" -nt "$out/$f" ]]; then
+    "$strip" --strip-debug -o "$out/stripped/$f" "$out/$f"
+  fi
+done

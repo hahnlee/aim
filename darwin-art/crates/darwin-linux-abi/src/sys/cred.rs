@@ -822,11 +822,33 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
 
 const PRIO_PROCESS: u64 = 0;
 
-/// getpriority (141): the kernel's `20 - nice` for this process's
-/// priority; the host's for anything else.
+/// Nice values set on this process's other threads. Linux keeps one per
+/// thread (PRIO_PROCESS with a tid); Darwin has no per-thread nice value,
+/// so the guest sees what it set.
+static THREAD_NICE: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
+
+/// A thread of this process other than the main thread.
+fn other_thread(who: u64) -> Option<i32> {
+    let tid = who as i32;
+    (tid > 0 && !is_self(tid) && super::thread::find(tid).is_some()).then_some(tid)
+}
+
+/// getpriority (141): the kernel's `20 - nice` for this process's (or one
+/// of its threads') priority; the host's for anything else.
 pub fn getpriority(a: [u64; 6]) -> i64 {
     if a[0] == PRIO_PROCESS && is_self(a[1] as i32) {
         return 20 - read(|id| id.priority) as i64;
+    }
+    if a[0] == PRIO_PROCESS
+        && let Some(tid) = other_thread(a[1])
+    {
+        let nice = THREAD_NICE
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.0 == tid)
+            .map(|t| t.1);
+        return 20 - nice.unwrap_or_else(|| read(|id| id.priority)) as i64;
     }
     // SAFETY: errno is cleared first because -1 is a valid priority.
     unsafe {
@@ -854,6 +876,19 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
             unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
             0
         });
+    }
+    if a[0] == PRIO_PROCESS
+        && let Some(tid) = other_thread(a[1])
+    {
+        let mut table = THREAD_NICE.lock().unwrap();
+        let current = table.iter().find(|t| t.0 == tid).map(|t| t.1);
+        let (priority, capable) = read(|id| (id.priority, id.capable(CAP_SYS_NICE)));
+        if nice < current.unwrap_or(priority) && !capable {
+            return -(EACCES as i64);
+        }
+        table.retain(|t| t.0 != tid && super::thread::find(t.0).is_some());
+        table.push((tid, nice));
+        return 0;
     }
     // SAFETY: plain setpriority.
     crate::errno::check(unsafe { libc::setpriority(a[0] as i32, a[1] as u32, nice) } as i64)

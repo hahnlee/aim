@@ -53,8 +53,14 @@ pub struct Region {
     pub file: Option<(PathBuf, u64, u64)>,
 }
 
-/// The region containing `addr`, or the next one above it.
-pub fn region_at(addr: u64) -> Option<Region> {
+/// A raw VM map entry: bounds and Darwin VM tag.
+pub struct Entry {
+    pub start: u64,
+    pub end: u64,
+    pub tag: u32,
+}
+
+fn entry_info(addr: u64) -> Option<ProcRegionWithPathInfo> {
     let mut r: ProcRegionWithPathInfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<ProcRegionWithPathInfo>() as i32;
     // SAFETY: proc_pidinfo writes at most `size` bytes into r.
@@ -67,9 +73,32 @@ pub fn region_at(addr: u64) -> Option<Region> {
             size,
         )
     };
-    if n < size {
-        return None;
-    }
+    (n >= size).then_some(r)
+}
+
+/// The VM map entry containing `addr`, or the next one above it, including
+/// the heap reference window's reservation.
+pub fn entry_at(addr: u64) -> Option<Entry> {
+    let r = entry_info(addr)?;
+    Some(Entry {
+        start: r.info.address,
+        end: r.info.address + r.info.size,
+        tag: r.info.user_tag,
+    })
+}
+
+/// The region containing `addr`, or the next one above it. Reserved pages
+/// of the heap reference window are not mapped as far as the guest can
+/// tell, so they are skipped.
+pub fn region_at(addr: u64) -> Option<Region> {
+    let mut at = addr;
+    let r = loop {
+        let r = entry_info(at)?;
+        if r.info.user_tag != super::window::TAG {
+            break r;
+        }
+        at = r.info.address + r.info.size;
+    };
     // SAFETY: vip_path is 32x32 c_chars, NUL-terminated by the kernel.
     let raw: &[u8; 1024] = unsafe { &*(r.vip.vip_path.as_ptr() as *const [u8; 1024]) };
     let len = raw.iter().position(|&c| c == 0).unwrap_or(0);
