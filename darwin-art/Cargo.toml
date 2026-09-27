@@ -15,6 +15,7 @@ members = [
     "crates/darwin-art-scm-transfer",
     "crates/darwin-art-binder-device",
     "crates/darwin-art-binder-process",
+    "crates/darwin-binder-driver",
     "crates/darwin-art-build-contract",
     "crates/darwin-art-native-artifact",
     "crates/darwin-art-native-inventory",

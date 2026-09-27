@@ -1,0 +1,9 @@
+[package]
+license.workspace = true
+name = "darwin-binder-driver"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Linux binder driver (include/uapi/linux/android/binder.h) as a host library for original Android ELF libbinder"
+
+[dependencies]
