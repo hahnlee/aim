@@ -1,7 +1,7 @@
 //! Isolated genuine ART/BinderProxy list acceptance. Never add this image or
 //! its entry point to either production runtime's source or export closure.
 use super::*;
-use crate::native_link_recipe::{transform_recipe, LinkIdentity};
+use crate::native_link_recipe::{LinkIdentity, transform_recipe};
 
 pub(crate) fn build_binder_recipient_test(root: &Path) -> Result<()> {
     let product = root.join("_build/runtime-link-probe");

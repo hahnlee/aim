@@ -69,7 +69,11 @@ fn server_pair_and_prepare_responses_decode_without_minting_client_grants() {
             key: key(),
             payload_count: 16,
             managed: vec![(3, 10), (9, 11)],
-            credentials: crate::scm_service::credentials::Credentials { pid: 1, uid: 0, gid: 0 },
+            credentials: crate::scm_service::credentials::Credentials {
+                pid: 1,
+                uid: 0,
+                gid: 0
+            },
             authenticated: false,
         }
     );

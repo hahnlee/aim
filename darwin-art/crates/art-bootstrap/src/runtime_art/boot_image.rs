@@ -157,7 +157,12 @@ fn boot_image_input_identity(root: &Path) -> Result<String> {
     let runtime =
         root.join("_build/runtime-graphics-link-probe/libdarwin_art_runtime_graphics.dylib");
     for path in std::iter::once(runtime).chain(boot_class_path(root)) {
-        hasher.update(path.strip_prefix(root).unwrap_or(&path).to_string_lossy().as_bytes());
+        hasher.update(
+            path.strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .as_bytes(),
+        );
         hasher.update([0]);
         hasher.update(Sha256::digest(fs::read(&path)?));
     }
@@ -171,7 +176,10 @@ pub(crate) fn ensure_android16_boot_image(root: &Path) -> Result<()> {
     let identity = boot_image_input_identity(root)?;
     let published = fs::read_to_string(destination.join(INPUT_STAMP)).unwrap_or_default();
     if published.trim() == identity && destination.join("boot.art").is_file() {
-        println!("ensure-android16-boot-image: current {}", destination.display());
+        println!(
+            "ensure-android16-boot-image: current {}",
+            destination.display()
+        );
         return Ok(());
     }
     build_android16_boot_image(root)

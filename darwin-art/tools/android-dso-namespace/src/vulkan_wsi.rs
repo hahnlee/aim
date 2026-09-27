@@ -870,7 +870,10 @@ unsafe extern "C" fn destroy_swapchain(
 ) {
     let handle = from_handle(swapchain);
     if std::env::var_os("DARWIN_ART_DEBUG_GRAPHICS_DSO").is_some() {
-        eprintln!("ART Android Vulkan WSI: pid={} destroy-swapchain handle={handle:#x}", std::process::id());
+        eprintln!(
+            "ART Android Vulkan WSI: pid={} destroy-swapchain handle={handle:#x}",
+            std::process::id()
+        );
     }
     let removed = swapchains()
         .lock()

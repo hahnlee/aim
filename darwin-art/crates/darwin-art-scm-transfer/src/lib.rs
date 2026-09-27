@@ -739,8 +739,14 @@ mod tests {
                 .unwrap();
         }
         assert!(owner.dead_senders.contains(&sender()));
-        assert!(!owner.dead_senders.contains(&ProcessEpoch { pid: 30, instance: 10 }));
-        assert!(owner.dead_senders.contains(&ProcessEpoch { pid: 30, instance: 11 }));
+        assert!(!owner.dead_senders.contains(&ProcessEpoch {
+            pid: 30,
+            instance: 10
+        }));
+        assert!(owner.dead_senders.contains(&ProcessEpoch {
+            pid: 30,
+            instance: 11
+        }));
         let next = owner.mint_key().unwrap();
         let (next_payload, _next_peer) = socket_pair();
         assert!(matches!(

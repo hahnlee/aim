@@ -36,11 +36,11 @@ mod scm_service;
 mod settings_migration;
 pub use scm_service::NativeScmEndpointProvider;
 mod daemonized_child_wait;
+mod launch_intent;
 mod listener_wait;
 mod peer_credentials;
 mod peer_process;
 mod process_command;
-mod launch_intent;
 mod process_identity;
 mod process_incarnation;
 mod process_start_gate;
@@ -464,7 +464,9 @@ fn replace_stale_daemon(paths: &ProfilePaths) -> Result<bool, ProfileError> {
     let idle = daemon_status(paths)
         .map(|status| status.split_whitespace().any(|field| field == "leases=0"))
         .unwrap_or(false)
-        && list_processes(paths).map(|list| list.trim().is_empty()).unwrap_or(false);
+        && list_processes(paths)
+            .map(|list| list.trim().is_empty())
+            .unwrap_or(false);
     if !idle {
         eprintln!(
             "darwin-artctl: warning: the running darwin-artd is older than {}; it serves \

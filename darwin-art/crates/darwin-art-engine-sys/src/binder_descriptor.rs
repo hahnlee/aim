@@ -32,17 +32,18 @@ pub struct ExportedDescriptor {
 
 impl Default for ExportedDescriptor {
     fn default() -> Self {
-        Self { host_fd: -1, attributes_length: 0,
-               attributes: [0; BINDER_DESCRIPTOR_ATTRIBUTES_BYTES] }
+        Self {
+            host_fd: -1,
+            attributes_length: 0,
+            attributes: [0; BINDER_DESCRIPTOR_ATTRIBUTES_BYTES],
+        }
     }
 }
 
-pub type BinderBoundExportFn = unsafe extern "C" fn(
-    i32, *const DescriptorTransferBinding, *mut ExportedDescriptor,
-) -> i32;
-pub type BinderBoundImportFn = unsafe extern "C" fn(
-    i32, *const DescriptorTransferBinding, *const u8, usize,
-) -> i32;
+pub type BinderBoundExportFn =
+    unsafe extern "C" fn(i32, *const DescriptorTransferBinding, *mut ExportedDescriptor) -> i32;
+pub type BinderBoundImportFn =
+    unsafe extern "C" fn(i32, *const DescriptorTransferBinding, *const u8, usize) -> i32;
 
 #[repr(C)]
 pub struct RetainedExportedDescriptor {

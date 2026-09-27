@@ -168,8 +168,14 @@ pub(crate) fn build_runtime_core(root: &Path) -> Result<()> {
             return Err("Darwin pthread checkpoint waiter lost its parking wait".into());
         }
     }
-    if patched_mutex.matches("DarwinCheckpointPark::Wake(this);").count() < 2
-        || patched_mutex.matches("DarwinCheckpointPark::WakeAll();").count() < 2
+    if patched_mutex
+        .matches("DarwinCheckpointPark::Wake(this);")
+        .count()
+        < 2
+        || patched_mutex
+            .matches("DarwinCheckpointPark::WakeAll();")
+            .count()
+            < 2
         || !patched_mutex.contains("DarwinMonitorLock(exclusive_owner_")
         || patched_mutex.contains("tv_nsec = 100'000")
     {
@@ -226,7 +232,12 @@ pub(crate) fn build_runtime_core(root: &Path) -> Result<()> {
             .arg(&source)
             .arg("-o")
             .arg(&object);
-        if compile_with_dependency_cache(&mut command, &object, &compiler_identity, &mut hash_cache)? {
+        if compile_with_dependency_cache(
+            &mut command,
+            &object,
+            &compiler_identity,
+            &mut hash_cache,
+        )? {
             compiled += 1;
             let kind = command_output(Command::new("file").arg(&object))?;
             if !kind.contains("Mach-O 64-bit object arm64") {

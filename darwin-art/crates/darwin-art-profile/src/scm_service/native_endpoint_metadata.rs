@@ -4,8 +4,8 @@
 //! This owner reads it with pread so a caller's file offset is unchanged and
 //! never accepts an unbounded or non-regular carrier.
 
-use crate::ProfileError;
 use super::super::credentials::Credentials;
+use crate::ProfileError;
 use darwin_art_scm_transfer::{AuthorityEpoch, TransferKey};
 use std::{collections::HashSet, io, os::fd::RawFd};
 
@@ -82,11 +82,7 @@ pub(super) fn decode_prepared(bytes: &[u8]) -> Result<PreparedMetadata, ProfileE
     let ticket = reader.u64()?;
     let payload_count = reader.u16()? as usize;
     let managed_count = reader.u16()? as usize;
-    if authority == 0
-        || ticket == 0
-        || payload_count > 16
-        || managed_count > payload_count
-    {
+    if authority == 0 || ticket == 0 || payload_count > 16 || managed_count > payload_count {
         return Err(invalid("prepared metadata key or count is invalid"));
     }
     let mut ordinals = HashSet::new();

@@ -228,8 +228,10 @@ pub(super) fn adapter_jobs(
         }
         if matches!(
             adapter_source,
-            "filesystem/archive_filesystem.cc" | "filesystem/guest_config.cc"
-                | "filesystem/guest_file.cc" | "process/procfs_jni.cc"
+            "filesystem/archive_filesystem.cc"
+                | "filesystem/guest_config.cc"
+                | "filesystem/guest_file.cc"
+                | "process/procfs_jni.cc"
         ) {
             for include in [
                 "tools/bionic-fs-facade/include",

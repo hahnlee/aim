@@ -97,7 +97,11 @@ impl LaunchIntent {
         let data = &bytes[separator + 1..];
         let intent = Self {
             action,
-            data: if data.is_empty() { None } else { Some(text(data)?) },
+            data: if data.is_empty() {
+                None
+            } else {
+                Some(text(data)?)
+            },
         };
         intent.validate()?;
         Ok(Some(intent))
@@ -129,8 +133,14 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(intent.action, "android.intent.action.VIEW");
-        assert_eq!(intent.data.as_deref(), Some("https://127.0.0.1:8443/index.html"));
-        assert_eq!(LaunchIntent::decode(&intent.encode()).unwrap(), Some(intent));
+        assert_eq!(
+            intent.data.as_deref(),
+            Some("https://127.0.0.1:8443/index.html")
+        );
+        assert_eq!(
+            LaunchIntent::decode(&intent.encode()).unwrap(),
+            Some(intent)
+        );
         let bare = LaunchIntent::from_environment(&environment(&[(
             LAUNCH_INTENT_ACTION_ENV,
             "android.intent.action.MAIN",

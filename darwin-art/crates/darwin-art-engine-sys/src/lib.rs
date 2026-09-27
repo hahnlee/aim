@@ -11,12 +11,13 @@ use core::ffi::{c_char, c_void};
 
 mod binder_descriptor;
 mod scm_endpoint;
-pub use scm_endpoint::*;
 pub use binder_descriptor::{
-    BINDER_DESCRIPTOR_ATTRIBUTES_BYTES, BinderExportLeaseReleaseFn, BinderRetainedExportFn,
-    DescriptorTransferBinding, RetainedExportedDescriptor, ExportedDescriptor, BinderBoundExportFn, BinderBoundImportFn,
+    BINDER_DESCRIPTOR_ATTRIBUTES_BYTES, BinderBoundExportFn, BinderBoundImportFn,
+    BinderExportLeaseReleaseFn, BinderRetainedExportFn, DescriptorTransferBinding,
+    ExportedDescriptor, RetainedExportedDescriptor,
 };
 use darwin_art_abi::{AbiHeader, StatusCode};
+pub use scm_endpoint::*;
 
 /// Existing native ABI status: teardown has not committed; retain all owners.
 pub const PROCESS_SHUTDOWN_NOT_READY: i32 = 67;

@@ -83,10 +83,7 @@ pub(super) fn serve(
                 let payloads = if payload_count == 0 {
                     Vec::new()
                 } else {
-                    fd_passing::receive_many_until(
-                        stream,
-                        Instant::now() + Duration::from_secs(5),
-                    )?
+                    fd_passing::receive_many_until(stream, Instant::now() + Duration::from_secs(5))?
                 };
                 if payloads.len() != payload_count {
                     return Err(failed("full native payload group mismatch"));
@@ -94,7 +91,13 @@ pub(super) fn serve(
                 let prepared = owner
                     .lock()
                     .map_err(|_| failed("owner poisoned"))?
-                    .prepare_authenticated(peer, credentials, carrier_holder, &payloads, &managed)?;
+                    .prepare_authenticated(
+                        peer,
+                        credentials,
+                        carrier_holder,
+                        &payloads,
+                        &managed,
+                    )?;
                 reply(stream, &mut responded, &prepared.response)?;
                 fd_passing::send_many(
                     stream,
@@ -113,15 +116,22 @@ pub(super) fn serve(
                 managed,
                 publish_ordinals,
             } => {
-                let (credentials, claims) = owner.lock().map_err(|_| failed("owner poisoned"))?.admit_authoritative(
-                    peer,
-                    carrier_holder,
-                    key,
-                    payload_count,
-                    &managed,
-                    &publish_ordinals,
+                let (credentials, claims) = owner
+                    .lock()
+                    .map_err(|_| failed("owner poisoned"))?
+                    .admit_authoritative(
+                        peer,
+                        carrier_holder,
+                        key,
+                        payload_count,
+                        &managed,
+                        &publish_ordinals,
+                    )?;
+                reply(
+                    stream,
+                    &mut responded,
+                    &wire::encode_admitted_authenticated(&claims, credentials)?,
                 )?;
-                reply(stream, &mut responded, &wire::encode_admitted_authenticated(&claims, credentials)?)?;
             }
             Request::Settle { key, disposition } => {
                 owner.lock().map_err(|_| failed("owner poisoned"))?.settle(

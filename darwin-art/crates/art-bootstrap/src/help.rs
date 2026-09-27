@@ -91,7 +91,9 @@ pub(crate) fn print_help() {
     println!(
         "  build-runtime-fixture-client         link headless tests against the product runtime"
     );
-    println!("  build-binder-recipient-test          build isolated genuine ART/BinderProxy JNI-list fixture");
+    println!(
+        "  build-binder-recipient-test          build isolated genuine ART/BinderProxy JNI-list fixture"
+    );
     println!(
         "  build-runtime-graphics-fixture-client link graphics tests against the product runtime"
     );

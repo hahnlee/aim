@@ -2,8 +2,8 @@
 //! Decoded IDs are untrusted wire values, NOT capability grants. Native callers
 //! still need same-authority admission and complete FD ownership before publish.
 
-use super::*;
 use super::super::credentials::Credentials;
+use super::*;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct PairOffer {
@@ -151,17 +151,27 @@ pub(crate) fn decode_prepared(bytes: &[u8]) -> Result<PreparedOffer, ProfileErro
         ensure_count(payload_count)?;
         let count = reader.u16()? as usize;
         let managed = read_items(&mut reader, count, payload_count, true)?;
-        let (credentials, authenticated) = if reader.bytes.len().saturating_sub(reader.position) == 12 {
-            let credentials = Credentials {
-                pid: i32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
-                uid: u32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
-                gid: u32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
+        let (credentials, authenticated) =
+            if reader.bytes.len().saturating_sub(reader.position) == 12 {
+                let credentials = Credentials {
+                    pid: i32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
+                    uid: u32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
+                    gid: u32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
+                };
+                if !credentials.valid() {
+                    return Err(WireError::InvalidCount);
+                }
+                (credentials, true)
+            } else {
+                (
+                    Credentials {
+                        pid: 1,
+                        uid: 0,
+                        gid: 0,
+                    },
+                    false,
+                )
             };
-            if !credentials.valid() { return Err(WireError::InvalidCount); }
-            (credentials, true)
-        } else {
-            (Credentials { pid: 1, uid: 0, gid: 0 }, false)
-        };
         reader.finish()?;
         Ok(PreparedOffer {
             key,
@@ -199,17 +209,28 @@ pub(crate) fn decode_admitted(
             let carrier = reader.u64()?;
             ensure_id(carrier as u128)?;
             let side = reader.u8()? as u32;
-            if side > 1 { return Err(WireError::InconsistentPair); }
+            if side > 1 {
+                return Err(WireError::InconsistentPair);
+            }
             if received != ordinal || ordinal >= MAX_ITEMS as u64 {
                 return Err(WireError::InvalidPublishedOrdinal);
             }
             if expected[..index].contains(&ordinal) {
                 return Err(WireError::DuplicateOrdinal);
             }
-            if claims.iter().any(|previous: &AdmittedGrant| previous.holder == holder) {
+            if claims
+                .iter()
+                .any(|previous: &AdmittedGrant| previous.holder == holder)
+            {
                 return Err(WireError::DuplicateId);
             }
-            claims.push(AdmittedGrant { ordinal, authority, carrier, holder, side });
+            claims.push(AdmittedGrant {
+                ordinal,
+                authority,
+                carrier,
+                holder,
+                side,
+            });
         }
         if reader.bytes.len().saturating_sub(reader.position) == 12 {
             let credentials = Credentials {
@@ -217,7 +238,9 @@ pub(crate) fn decode_admitted(
                 uid: u32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
                 gid: u32::from_le_bytes(reader.take(4)?.try_into().unwrap()),
             };
-            if !credentials.valid() { return Err(WireError::InvalidCount); }
+            if !credentials.valid() {
+                return Err(WireError::InvalidCount);
+            }
         }
         reader.finish()?;
         Ok(claims)
@@ -235,7 +258,9 @@ pub(crate) fn decode_admitted_authenticated(
     }
     let claims_end = body.len() - 12;
     let mut legacy = Vec::new();
-    legacy.try_reserve_exact(expected.len()).map_err(|_| invalid(WireError::Allocation))?;
+    legacy
+        .try_reserve_exact(expected.len())
+        .map_err(|_| invalid(WireError::Allocation))?;
     let mut reader = Reader::new(&body[..claims_end]);
     let count = reader.u16().map_err(invalid)? as usize;
     if count != expected.len() || count > MAX_ITEMS {
@@ -256,10 +281,19 @@ pub(crate) fn decode_admitted_authenticated(
         if expected[..index].contains(&ordinal) {
             return Err(invalid(WireError::DuplicateOrdinal));
         }
-        if legacy.iter().any(|previous: &AdmittedGrant| previous.holder == holder) {
+        if legacy
+            .iter()
+            .any(|previous: &AdmittedGrant| previous.holder == holder)
+        {
             return Err(invalid(WireError::DuplicateId));
         }
-        legacy.push(AdmittedGrant { ordinal, authority, carrier, holder, side });
+        legacy.push(AdmittedGrant {
+            ordinal,
+            authority,
+            carrier,
+            holder,
+            side,
+        });
     }
     reader.finish().map_err(invalid)?;
     let credentials = Credentials {
@@ -267,8 +301,13 @@ pub(crate) fn decode_admitted_authenticated(
         uid: u32::from_le_bytes(body[claims_end + 4..claims_end + 8].try_into().unwrap()),
         gid: u32::from_le_bytes(body[claims_end + 8..].try_into().unwrap()),
     };
-    if !credentials.valid() { return Err(invalid(WireError::InvalidCount)); }
-    Ok(AdmittedResponse { credentials, claims: legacy })
+    if !credentials.valid() {
+        return Err(invalid(WireError::InvalidCount));
+    }
+    Ok(AdmittedResponse {
+        credentials,
+        claims: legacy,
+    })
 }
 
 #[cfg(test)]

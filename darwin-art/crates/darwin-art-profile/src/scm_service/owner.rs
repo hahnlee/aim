@@ -1,7 +1,7 @@
 //! Authenticated transfer ledger composition, separate from native transport.
 //! The containing service holds ONE mutex across validation/reservation/commit.
-use crate::ProfileError;
 use super::credentials::Credentials;
+use crate::ProfileError;
 use darwin_art_scm_transfer::{
     AuthorityEpoch, MAX_GLOBAL_LEASES, MAX_PAYLOADS, MAX_PROCESS_LEASES, PreparedTransfer,
     ProcessEpoch, Retirement, ScmTransferLeaseOwner, TransferKey, TrustedReceiveContext,
@@ -65,7 +65,11 @@ impl Owner {
     ) -> Result<Prepared, ProfileError> {
         self.prepare_authenticated(
             peer,
-            Credentials { pid: peer.pid as i32, uid: 0, gid: 0 },
+            Credentials {
+                pid: peer.pid as i32,
+                uid: 0,
+                gid: 0,
+            },
             carrier,
             payloads,
             managed,
@@ -80,10 +84,7 @@ impl Owner {
         payloads: &[OwnedFd],
         managed: &[(u64, u128)],
     ) -> Result<Prepared, ProfileError> {
-        if !credentials.valid()
-            || payloads.len() > MAX_PAYLOADS
-            || managed.len() > payloads.len()
-        {
+        if !credentials.valid() || payloads.len() > MAX_PAYLOADS || managed.len() > payloads.len() {
             return Err(failed("invalid full native payload count"));
         }
         let carrier = self
@@ -164,9 +165,9 @@ impl Owner {
                 send,
                 count: payloads.len(),
                 managed: manifest,
-            receiver: None,
-            settled: None,
-            credentials,
+                receiver: None,
+                settled: None,
+                credentials,
             },
         );
         Ok(Prepared {
