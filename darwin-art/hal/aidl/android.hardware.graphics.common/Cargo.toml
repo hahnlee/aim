@@ -1,0 +1,17 @@
+[package]
+name = "android_hardware_graphics_common"
+version = "6.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "android.hardware.graphics.common V6, Rust backend, generated from the frozen AIDL API"
+# The binder macros expand here, so this crate needs the vendor cfgs too.
+build = "../../binder/build.rs"
+
+[lib]
+path = "../../../_build/vendor-hals/aidl/android.hardware.graphics.common-V6/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+binder = { path = "../../binder" }
+android_hardware_common = { path = "../android.hardware.common" }

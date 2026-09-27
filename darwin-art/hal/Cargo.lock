@@ -12,6 +12,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator"
+version = "0.1.0"
+dependencies = [
+ "android_hardware_common",
+ "android_hardware_graphics_allocator",
+ "android_hardware_graphics_common",
+ "binder",
+ "darwin-gralloc",
+ "libc",
+]
+
+[[package]]
+name = "android_hardware_common"
+version = "2.0.0"
+dependencies = [
+ "async-trait",
+ "binder",
+]
+
+[[package]]
+name = "android_hardware_graphics_allocator"
+version = "2.0.0"
+dependencies = [
+ "android_hardware_common",
+ "android_hardware_graphics_common",
+ "async-trait",
+ "binder",
+]
+
+[[package]]
+name = "android_hardware_graphics_common"
+version = "6.0.0"
+dependencies = [
+ "android_hardware_common",
+ "async-trait",
+ "binder",
+]
+
+[[package]]
 name = "android_hardware_health"
 version = "4.0.0"
 dependencies = [
@@ -102,6 +141,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "darwin-gralloc"
+version = "0.1.0"
+
+[[package]]
 name = "darwin-hostcall"
 version = "0.1.0"
 
@@ -116,6 +159,15 @@ name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
+
+[[package]]
+name = "gles"
+version = "0.1.0"
+dependencies = [
+ "darwin-gralloc",
+ "darwin-hostcall",
+ "libc",
+]
 
 [[package]]
 name = "glob"
@@ -163,6 +215,14 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
+name = "mapper"
+version = "0.1.0"
+dependencies = [
+ "darwin-gralloc",
+ "libc",
+]
 
 [[package]]
 name = "memchr"

@@ -8,9 +8,16 @@
 # - the services, which reach their host side through darwin-hostcall.
 [workspace]
 members = [
+    "aidl/android.hardware.common",
+    "aidl/android.hardware.graphics.allocator",
+    "aidl/android.hardware.graphics.common",
     "aidl/android.hardware.health",
     "binder",
     "binder-ndk-sys",
+    "graphics/allocator",
+    "graphics/gralloc",
+    "graphics/mapper",
+    "gles",
     "health",
 ]
 resolver = "2"

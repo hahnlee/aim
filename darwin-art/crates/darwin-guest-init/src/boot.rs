@@ -71,7 +71,12 @@ impl BootOptions {
             only: None,
             linux_run: None,
             trace: false,
-            androidboot: vec![("hardware".to_string(), "ranchu".to_string())],
+            androidboot: vec![
+                ("hardware".to_string(), "ranchu".to_string()),
+                // init.ranchu.rc: ro.hardware.egl, the GLES driver the
+                // original libEGL loads (/vendor/lib64/egl/libGLES_darwin.so).
+                ("hardwareegl".to_string(), "darwin".to_string()),
+            ],
             timeout: None,
             simulate_after: Duration::from_secs(2),
         }

@@ -1,0 +1,165 @@
+//! `eglSwapBuffers` on a window surface: the guest renders into an ANGLE
+//! pbuffer (the surface's default framebuffer); at swap its color buffer is
+//! blitted into the buffer being queued. The destination framebuffer has
+//! `GL_MESA_framebuffer_flip_y`, so the buffer's row 0 is the top row, as
+//! Android expects of window buffers.
+
+use std::ffi::CStr;
+use std::sync::OnceLock;
+
+use darwin_hostcall::gpu::Present;
+
+use crate::{EINVAL, resolved};
+
+const GL_TEXTURE_2D: u32 = 0x0de1;
+const GL_TEXTURE_BINDING_2D: u32 = 0x8069;
+const GL_SCISSOR_TEST: u32 = 0x0c11;
+const GL_READ_FRAMEBUFFER: u32 = 0x8ca8;
+const GL_DRAW_FRAMEBUFFER: u32 = 0x8ca9;
+const GL_DRAW_FRAMEBUFFER_BINDING: u32 = 0x8ca6;
+const GL_READ_FRAMEBUFFER_BINDING: u32 = 0x8caa;
+const GL_COLOR_ATTACHMENT0: u32 = 0x8ce0;
+const GL_FRAMEBUFFER_FLIP_Y_MESA: u32 = 0x8bbb;
+const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
+const GL_NEAREST: u32 = 0x2600;
+const GL_LINEAR: u32 = 0x2601;
+const EGL_CONTEXT_CLIENT_VERSION: i32 = 0x3098;
+
+type Blit = unsafe extern "C" fn(i32, i32, i32, i32, i32, i32, i32, i32, u32, u32);
+
+/// The ANGLE entry points a present uses.
+struct Gl {
+    get_current_display: unsafe extern "C" fn() -> usize,
+    get_current_context: unsafe extern "C" fn() -> usize,
+    query_context: unsafe extern "C" fn(usize, usize, i32, *mut i32) -> u32,
+    get_integerv: unsafe extern "C" fn(u32, *mut i32),
+    is_enabled: unsafe extern "C" fn(u32) -> u8,
+    enable: unsafe extern "C" fn(u32),
+    disable: unsafe extern "C" fn(u32),
+    gen_textures: unsafe extern "C" fn(i32, *mut u32),
+    delete_textures: unsafe extern "C" fn(i32, *const u32),
+    bind_texture: unsafe extern "C" fn(u32, u32),
+    image_target_texture: unsafe extern "C" fn(u32, usize),
+    gen_framebuffers: unsafe extern "C" fn(i32, *mut u32),
+    delete_framebuffers: unsafe extern "C" fn(i32, *const u32),
+    bind_framebuffer: unsafe extern "C" fn(u32, u32),
+    framebuffer_texture: unsafe extern "C" fn(u32, u32, u32, u32, i32),
+    framebuffer_parameter: unsafe extern "C" fn(u32, u32, i32),
+    blit: Blit,
+    blit_angle: Blit,
+    finish: unsafe extern "C" fn(),
+}
+
+/// ANGLE's entry point `name` as the function pointer type `F`.
+///
+/// # Safety
+/// `F` must be the C signature of that entry point.
+unsafe fn entry<F>(name: &CStr) -> Option<F> {
+    let address = resolved(name);
+    // SAFETY: a non-null function address, as the caller's type.
+    (address != 0).then(|| unsafe { std::mem::transmute_copy(&address) })
+}
+
+fn gl() -> Option<&'static Gl> {
+    static GL: OnceLock<Option<Gl>> = OnceLock::new();
+    GL.get_or_init(|| {
+        // SAFETY: each field's type is the C signature of that entry point.
+        unsafe {
+            Some(Gl {
+                get_current_display: entry(c"eglGetCurrentDisplay")?,
+                get_current_context: entry(c"eglGetCurrentContext")?,
+                query_context: entry(c"eglQueryContext")?,
+                get_integerv: entry(c"glGetIntegerv")?,
+                is_enabled: entry(c"glIsEnabled")?,
+                enable: entry(c"glEnable")?,
+                disable: entry(c"glDisable")?,
+                gen_textures: entry(c"glGenTextures")?,
+                delete_textures: entry(c"glDeleteTextures")?,
+                bind_texture: entry(c"glBindTexture")?,
+                image_target_texture: entry(c"glEGLImageTargetTexture2DOES")?,
+                gen_framebuffers: entry(c"glGenFramebuffers")?,
+                delete_framebuffers: entry(c"glDeleteFramebuffers")?,
+                bind_framebuffer: entry(c"glBindFramebuffer")?,
+                framebuffer_texture: entry(c"glFramebufferTexture2D")?,
+                framebuffer_parameter: entry(c"glFramebufferParameteriMESA")?,
+                blit: entry(c"glBlitFramebuffer")?,
+                blit_angle: entry(c"glBlitFramebufferANGLE")?,
+                finish: entry(c"glFinish")?,
+            })
+        }
+    })
+    .as_ref()
+}
+
+pub fn present(p: &Present) -> i64 {
+    let Some(g) = gl() else {
+        return EINVAL;
+    };
+    if p.image == 0 || p.src_width == 0 || p.src_height == 0 {
+        return EINVAL;
+    }
+    // SAFETY: ANGLE's GL on this thread's current context; every binding
+    // changed here is restored.
+    unsafe {
+        let context = (g.get_current_context)();
+        if context == 0 {
+            return EINVAL;
+        }
+        let mut version = 0;
+        (g.query_context)(
+            (g.get_current_display)(),
+            context,
+            EGL_CONTEXT_CLIENT_VERSION,
+            &mut version,
+        );
+        let (mut draw, mut read, mut texture) = (0, 0, 0);
+        (g.get_integerv)(GL_DRAW_FRAMEBUFFER_BINDING, &mut draw);
+        (g.get_integerv)(GL_READ_FRAMEBUFFER_BINDING, &mut read);
+        (g.get_integerv)(GL_TEXTURE_BINDING_2D, &mut texture);
+        let scissor = (g.is_enabled)(GL_SCISSOR_TEST) != 0;
+
+        let (mut target, mut fbo) = (0, 0);
+        (g.gen_textures)(1, &mut target);
+        (g.bind_texture)(GL_TEXTURE_2D, target);
+        (g.image_target_texture)(GL_TEXTURE_2D, p.image as usize);
+        (g.gen_framebuffers)(1, &mut fbo);
+        (g.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, fbo);
+        (g.framebuffer_texture)(
+            GL_DRAW_FRAMEBUFFER,
+            GL_COLOR_ATTACHMENT0,
+            GL_TEXTURE_2D,
+            target,
+            0,
+        );
+        (g.framebuffer_parameter)(GL_DRAW_FRAMEBUFFER, GL_FRAMEBUFFER_FLIP_Y_MESA, 1);
+        (g.bind_framebuffer)(GL_READ_FRAMEBUFFER, 0);
+        if scissor {
+            (g.disable)(GL_SCISSOR_TEST);
+        }
+        let (sw, sh) = (p.src_width as i32, p.src_height as i32);
+        let (dw, dh) = (p.dst_width as i32, p.dst_height as i32);
+        if version >= 3 {
+            let filter = if (sw, sh) == (dw, dh) {
+                GL_NEAREST
+            } else {
+                GL_LINEAR
+            };
+            (g.blit)(0, 0, sw, sh, 0, 0, dw, dh, GL_COLOR_BUFFER_BIT, filter);
+        } else {
+            // ANGLE_framebuffer_blit copies without scaling.
+            let (w, h) = (sw.min(dw), sh.min(dh));
+            (g.blit_angle)(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
+        if scissor {
+            (g.enable)(GL_SCISSOR_TEST);
+        }
+        (g.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, draw as u32);
+        (g.bind_framebuffer)(GL_READ_FRAMEBUFFER, read as u32);
+        (g.bind_texture)(GL_TEXTURE_2D, texture as u32);
+        (g.delete_framebuffers)(1, &fbo);
+        (g.delete_textures)(1, &target);
+        // No sync fences yet: the buffer is complete when it is queued.
+        (g.finish)();
+    }
+    0
+}
