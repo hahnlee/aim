@@ -281,12 +281,17 @@ fn lean_syscalls_follow_linux_semantics() {
         libc::close(a as i32);
         libc::close(b);
     }
-    // SAFETY: trivial identity queries.
-    unsafe {
-        assert_eq!(sys(174, [0; 4]), libc::getuid() as i64);
-        assert_eq!(sys(177, [0; 4]), libc::getegid() as i64);
-        assert_eq!(sys(173, [0; 4]), libc::getppid() as i64);
-    }
+    // The ids are the guest's identity, not the host's.
+    use darwin_linux_abi::sys::cred;
+    cred::init(
+        cred::Identity::parse("uid\t1000\ngid\t1001\negid\t1002\n").unwrap(),
+        None,
+    );
+    assert_eq!(sys(174, [0; 4]), 1000, "getuid");
+    assert_eq!(sys(176, [0; 4]), 1001, "getgid");
+    assert_eq!(sys(177, [0; 4]), 1002, "getegid");
+    // SAFETY: trivial.
+    assert_eq!(sys(173, [0; 4]), unsafe { libc::getppid() } as i64);
     assert_eq!(sys(124, [0; 4]), 0, "sched_yield");
     assert_eq!(
         sys(178, [0; 4]),

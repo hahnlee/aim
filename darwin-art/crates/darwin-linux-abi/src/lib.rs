@@ -26,6 +26,7 @@ pub mod vfs;
 pub mod xlate;
 pub mod xrt;
 
+use std::ffi::CString;
 use std::path::{Path, PathBuf};
 
 pub struct RunOptions<'a> {
@@ -35,8 +36,10 @@ pub struct RunOptions<'a> {
     /// Guest path of the program.
     pub program: &'a str,
     /// argv, including argv[0].
-    pub argv: Vec<String>,
-    pub envp: Vec<String>,
+    pub argv: Vec<Vec<u8>>,
+    pub envp: Vec<Vec<u8>>,
+    /// AT_EXECFN: the filename the guest passed to execve; None: `program`.
+    pub execfn: Option<Vec<u8>>,
     pub trace: bool,
     /// Translation cache directory; None: every file is rewritten at load
     /// time.
@@ -44,8 +47,14 @@ pub struct RunOptions<'a> {
     /// Bootstrap name of the binder host (`darwin-binderd`); None: the
     /// binder device nodes do not exist.
     pub binder: Option<String>,
-    /// The process's SELinux context (what init's `seclabel` gives it).
-    pub seclabel: Option<String>,
+    pub identity: sys::cred::Identity,
+    /// The process table directory (`by-pid`) the process belongs to.
+    pub by_pid: Option<PathBuf>,
+    /// State carried over the guest's last exec.
+    pub state: sys::ExecState,
+    /// The options describing this runtime (root, cache, tracing, ...),
+    /// repeated when the guest execs another program.
+    pub runtime_args: Vec<CString>,
 }
 
 /// The environment a freshly started Android process sees from init.
@@ -87,11 +96,11 @@ pub fn run(opts: RunOptions) -> String {
     {
         return e;
     }
-    if let Some(label) = opts.seclabel.clone() {
-        sys::set_security_context(label);
-    }
+    sys::cred::init(opts.identity, opts.by_pid);
+    sys::init_exec(opts.runtime_args);
     context::init_thread();
     diag::install_signal_handlers();
+    opts.state.apply();
 
     let resolved = match vfs::resolve(vfs::LINUX_AT_FDCWD, opts.program.as_bytes(), true) {
         Ok(r) => r,
@@ -130,7 +139,7 @@ pub fn run(opts: RunOptions) -> String {
     let sp = match loader::build_stack(&loader::StackInputs {
         argv: &opts.argv,
         envp: &opts.envp,
-        execfn: &resolved.guest,
+        execfn: opts.execfn.as_deref().unwrap_or(resolved.guest.as_bytes()),
         program: &program,
         interp_base,
     }) {

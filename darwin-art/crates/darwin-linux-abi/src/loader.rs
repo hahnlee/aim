@@ -405,9 +405,9 @@ const AT_EXECFN: u64 = 31;
 const STACK_SIZE: u64 = 8 << 20;
 
 pub struct StackInputs<'a> {
-    pub argv: &'a [String],
-    pub envp: &'a [String],
-    pub execfn: &'a str,
+    pub argv: &'a [Vec<u8>],
+    pub envp: &'a [Vec<u8>],
+    pub execfn: &'a [u8],
     pub program: &'a Image,
     pub interp_base: u64,
 }
@@ -440,8 +440,8 @@ pub fn build_stack(inp: &StackInputs) -> Result<u64, String> {
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), top as *mut u8, bytes.len()) };
         top
     };
-    let cstr = |s: &str| {
-        let mut v = s.as_bytes().to_vec();
+    let cstr = |s: &[u8]| {
+        let mut v = s.to_vec();
         v.push(0);
         v
     };
@@ -471,15 +471,13 @@ pub fn build_stack(inp: &StackInputs) -> Result<u64, String> {
     let random = push_bytes(&rnd);
 
     let (hwcap, hwcap2) = crate::hwcap::host_hwcaps();
-    // SAFETY: trivial identity queries.
-    let (uid, euid, gid, egid) = unsafe {
-        (
-            libc::getuid() as u64,
-            libc::geteuid() as u64,
-            libc::getgid() as u64,
-            libc::getegid() as u64,
-        )
-    };
+    let id = crate::sys::cred::current();
+    let (uid, euid, gid, egid) = (
+        id.uid[0] as u64,
+        id.uid[1] as u64,
+        id.gid[0] as u64,
+        id.gid[1] as u64,
+    );
     let p = inp.program;
     let auxv: Vec<(u64, u64)> = vec![
         (AT_HWCAP, hwcap),

@@ -8,6 +8,12 @@
 //!   as one 8-byte read (a counter's sum is not accumulated);
 //! - a timerfd is such a FIFO fed by a timer thread, which writes an
 //!   expiration count of 1 while the FIFO is empty.
+//!
+//! Darwin does not pass kqueues to a forked child, so each epoll fd's
+//! registrations are recorded and replayed there ([`after_fork_child`]). A
+//! disabled `EVFILT_USER` filter tags each epoll kqueue, so a record is only
+//! trusted while its fd still is that kqueue. (The child's epoll instance is
+//! its own copy, where Linux would share one.)
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,17 +51,112 @@ fn set_fd_flags(fd: i32, flags: u64) {
     }
 }
 
+/// A registration: ident, filter, kqueue flags, epoll data.
+type Registration = (usize, i16, u16, u64);
+
+struct Epoll {
+    cloexec: bool,
+    registrations: Vec<Registration>,
+}
+
+static EPOLLS: Mutex<Option<HashMap<i32, Epoll>>> = Mutex::new(None);
+/// `EVFILT_USER` ident of the tag filter: this prefix | the epoll fd.
+const EPOLL_TAG: usize = 0x6570_6f6c_0000_0000;
+
+/// A kqueue tagged as the epoll fd `fd`.
+fn new_epoll(fd: Option<i32>) -> i32 {
+    // SAFETY: plain kqueue.
+    let kq = unsafe { libc::kqueue() };
+    if kq >= 0 {
+        let mut t = kev(
+            fd.unwrap_or(kq),
+            libc::EVFILT_USER,
+            libc::EV_ADD | libc::EV_DISABLE,
+            0,
+        );
+        t.ident |= EPOLL_TAG;
+        apply(kq, &t);
+    }
+    kq
+}
+
+fn is_epoll(kq: i32) -> bool {
+    let mut probe = kev(kq, libc::EVFILT_USER, libc::EV_DISABLE, 0);
+    probe.ident |= EPOLL_TAG;
+    apply(kq, &probe) == 0
+}
+
 pub fn epoll_create1(a: [u64; 6]) -> i64 {
     if a[0] & !O_CLOEXEC != 0 {
         return -(EINVAL as i64);
     }
-    // SAFETY: plain kqueue.
-    let kq = unsafe { libc::kqueue() };
+    let kq = new_epoll(None);
     if kq < 0 {
         return -(errno::last() as i64);
     }
     set_fd_flags(kq, a[0]);
+    EPOLLS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(
+            kq,
+            Epoll {
+                cloexec: a[0] & O_CLOEXEC != 0,
+                registrations: Vec::new(),
+            },
+        );
     kq as i64
+}
+
+/// Record the outcome of an epoll_ctl on `kq`.
+fn record(kq: i32, fd: i32, adds: &[(i16, u16, u64)]) {
+    let mut t = EPOLLS.lock().unwrap();
+    if let Some(e) = t.as_mut().and_then(|t| t.get_mut(&kq)) {
+        e.registrations.retain(|r| r.0 != fd as usize);
+        e.registrations
+            .extend(adds.iter().map(|&(f, fl, d)| (fd as usize, f, fl, d)));
+    }
+}
+
+/// Before fork: forget epoll fds the guest closed or replaced.
+pub(super) fn prune_epolls() {
+    if let Some(t) = EPOLLS.lock().unwrap().as_mut() {
+        t.retain(|&kq, _| is_epoll(kq));
+    }
+}
+
+/// In a forked child: recreate each epoll fd at its number with its
+/// registrations.
+pub(super) fn after_fork_child() {
+    let mut g = EPOLLS.lock().unwrap();
+    let Some(t) = g.as_mut() else { return };
+    t.retain(|&fd, e| {
+        // SAFETY: probing and filling the fd number the kqueue had.
+        unsafe {
+            if libc::fcntl(fd, libc::F_GETFD) >= 0 {
+                return false;
+            }
+            let kq = new_epoll(Some(fd));
+            if kq < 0 {
+                return false;
+            }
+            for &(ident, filter, flags, data) in &e.registrations {
+                apply(kq, &kev(ident as i32, filter, flags, data));
+            }
+            if kq != fd {
+                let ok = libc::dup2(kq, fd) == fd;
+                libc::close(kq);
+                if !ok {
+                    return false;
+                }
+            }
+            if e.cloexec {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            true
+        }
+    });
 }
 
 fn kev(fd: i32, filter: i16, flags: u16, data: u64) -> libc::kevent {
@@ -103,8 +204,10 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
             if events & EPOLLIN != 0 {
                 super::binder::poll(fd);
             }
+            let mut adds = Vec::new();
             for (bit, filter) in [(EPOLLIN, libc::EVFILT_READ), (EPOLLOUT, libc::EVFILT_WRITE)] {
                 let e = if events & bit != 0 {
+                    adds.push((filter, flags, data));
                     apply(kq, &kev(fd, filter, flags, data))
                 } else {
                     let e = apply(kq, &kev(fd, filter, libc::EV_DELETE, 0));
@@ -114,11 +217,13 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
                     return -(errno::from_darwin(e) as i64);
                 }
             }
+            record(kq, fd, &adds);
             0
         }
         EPOLL_CTL_DEL => {
             let r = apply(kq, &kev(fd, libc::EVFILT_READ, libc::EV_DELETE, 0));
             let w = apply(kq, &kev(fd, libc::EVFILT_WRITE, libc::EV_DELETE, 0));
+            record(kq, fd, &[]);
             match (r, w) {
                 (0, _) | (_, 0) => 0,
                 (libc::EBADF, _) => -(EBADF as i64),

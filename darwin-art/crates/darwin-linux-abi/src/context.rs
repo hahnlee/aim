@@ -21,6 +21,7 @@ global_asm!(
     include_str!("trampoline.S"),
     ctx = const slot::CTX,
     pid = sym LINUX_ABI_PID,
+    ids = sym crate::sys::cred::IDS,
     trace = sym crate::sys::TRACE,
     errtab = sym crate::errno::DARWIN_TO_LINUX,
     hostcall_hi = const darwin_hostcall::SYSCALL_NR >> 16,
@@ -32,7 +33,7 @@ unsafe extern "C" {
 }
 
 /// The process id, answered by the lean syscall path without a Darwin call.
-/// Set once in [`init_thread`]; a future fork must refresh it.
+/// Set once in [`init_thread`]; a forked child refreshes it.
 pub static mut LINUX_ABI_PID: u64 = 0;
 
 /// Full guest register state saved at a syscall boundary. Layout is shared

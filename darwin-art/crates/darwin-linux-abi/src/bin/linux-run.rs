@@ -1,4 +1,4 @@
-//! `linux-run [--root DIR] [--path-map FILE] [--cache DIR] [--binder NAME] [--seclabel LABEL] [--trace] PROGRAM [ARGS...]`
+//! `linux-run [OPTIONS] PROGRAM [ARGS...]`
 //!
 //! Runs an original Android arm64 ELF program in this process on the Linux
 //! syscall layer. PROGRAM is a guest path, resolved under `--root`.
@@ -8,60 +8,173 @@
 //! Files without an entry are rewritten at load time.
 //!
 //! `--path-map` is the guest filesystem view (its `root` and `rw` entries;
-//! docs/guest-init-contract.md, section 2).
+//! docs/guest-init-contract.md, section 2). `--binder` names the binder host
+//! (`darwin-binderd --service NAME`) that backs `/dev/binder`,
+//! `/dev/hwbinder` and `/dev/vndbinder`.
 //!
-//! `--binder` names the binder host (`darwin-binderd --service NAME`) that
-//! backs `/dev/binder`, `/dev/hwbinder` and `/dev/vndbinder`. `--seclabel`
-//! is the process's SELinux context.
+//! The options after `--identity` describe the process as darwin-guest-init
+//! starts it (`docs/guest-init-contract.md`), or as a guest `execve`
+//! re-executes `linux-run` with the state Linux keeps across exec.
 
+use std::ffi::{CStr, CString, OsString};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 
+use darwin_linux_abi::sys::{ExecState, cred::Identity};
+
+const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
+
+  --root DIR             guest root directory (default /)
+  --path-map FILE        guest filesystem view over the root
+  --cache DIR            translation cache directory
+  --no-cache             rewrite every file at load time
+  --binder NAME          binder host serving the binder device nodes
+  --trace                log every syscall
+  --identity FILE        the process's credentials (identity file); its
+                         by-pid directory is FILE's directory + /by-pid
+  --identity-text TEXT   the same, inline
+  --seclabel LABEL       the process's SELinux context (overrides the
+                         identity's seclabel)
+  --by-pid DIR           the by-pid process table directory
+  --inherit-env          the guest environment is linux-run's own
+  --cwd DIR              guest working directory
+  --sigmask HEX          blocked signals (bit n-1 = Linux signal n)
+  --sigign HEX           ignored signals
+  --personality HEX      personality(2) value
+  --exec EXECFN          PROGRAM is followed by the full argv (argv[0]
+                         included) and EXECFN is AT_EXECFN, as after execve";
+
 fn usage() -> ! {
-    eprintln!(
-        "usage: linux-run [--root DIR] [--path-map FILE] [--cache DIR] [--binder NAME] [--seclabel LABEL] [--trace] PROGRAM [ARGS...]"
-    );
+    eprintln!("{USAGE}");
     std::process::exit(2);
 }
 
+fn hex(v: OsString) -> u64 {
+    u64::from_str_radix(&v.to_string_lossy(), 16).unwrap_or_else(|_| usage())
+}
+
+fn cstring(s: impl Into<Vec<u8>>) -> CString {
+    CString::new(s).unwrap_or_else(|_| usage())
+}
+
+/// linux-run's own environment, verbatim and in order.
+fn host_environment() -> Vec<Vec<u8>> {
+    unsafe extern "C" {
+        fn _NSGetEnviron() -> *const *const *const libc::c_char;
+    }
+    let mut out = Vec::new();
+    // SAFETY: the process environment, a NULL-terminated array of C strings.
+    unsafe {
+        let mut p = *_NSGetEnviron();
+        while !(*p).is_null() {
+            out.push(CStr::from_ptr(*p).to_bytes().to_vec());
+            p = p.add(1);
+        }
+    }
+    out
+}
+
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args_os().skip(1);
     let mut root = PathBuf::from("/");
     let mut cache = darwin_linux_abi::cache::Cache::default_dir();
     let mut trace = false;
     let mut binder = None;
-    let mut path_map = None;
+    let mut path_map: Option<PathBuf> = None;
     let mut seclabel = None;
+    let mut identity = Identity::default();
+    let mut by_pid = None;
+    let mut inherit_env = false;
+    let mut state = ExecState::default();
+    let mut execfn = None;
+    let mut runtime_args = Vec::new();
     let program = loop {
-        match args.next() {
-            Some(a) if a == "--root" => {
-                root = args.next().map(PathBuf::from).unwrap_or_else(|| usage())
+        let Some(a) = args.next() else { usage() };
+        let mut value = || args.next().unwrap_or_else(|| usage());
+        match a.to_str().unwrap_or("") {
+            "--root" => root = PathBuf::from(value()),
+            "--cache" => cache = Some(PathBuf::from(value())),
+            "--no-cache" => cache = None,
+            "--path-map" => path_map = Some(PathBuf::from(value())),
+            "--binder" => binder = Some(value().to_string_lossy().into_owned()),
+            "--seclabel" => seclabel = Some(value().to_string_lossy().into_owned()),
+            "--trace" => trace = true,
+            "--identity" => {
+                let file = PathBuf::from(value());
+                let text = std::fs::read_to_string(&file).unwrap_or_else(|e| {
+                    eprintln!("linux-run: --identity {}: {e}", file.display());
+                    std::process::exit(127);
+                });
+                identity = Identity::parse(&text).unwrap_or_else(|e| {
+                    eprintln!("linux-run: --identity {}: {e}", file.display());
+                    std::process::exit(127);
+                });
+                by_pid = file.parent().map(|d| d.join("by-pid"));
             }
-            Some(a) if a == "--cache" => {
-                cache = Some(args.next().map(PathBuf::from).unwrap_or_else(|| usage()))
+            "--identity-text" => {
+                identity = Identity::parse(&value().to_string_lossy()).unwrap_or_else(|e| {
+                    eprintln!("linux-run: --identity-text: {e}");
+                    std::process::exit(127);
+                })
             }
-            Some(a) if a == "--path-map" => {
-                path_map = Some(args.next().map(PathBuf::from).unwrap_or_else(|| usage()))
+            "--by-pid" => by_pid = Some(PathBuf::from(value())),
+            "--inherit-env" => inherit_env = true,
+            "--cwd" => state.cwd = Some(value().to_string_lossy().into_owned()),
+            "--sigmask" => state.sigmask = hex(value()),
+            "--sigign" => state.sigign = hex(value()),
+            "--personality" => state.personality = hex(value()) as u32,
+            "--exec" => execfn = Some(value().into_vec()),
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                std::process::exit(0);
             }
-            Some(a) if a == "--binder" => binder = Some(args.next().unwrap_or_else(|| usage())),
-            Some(a) if a == "--seclabel" => seclabel = Some(args.next().unwrap_or_else(|| usage())),
-            Some(a) if a == "--trace" => trace = true,
-            Some(a) if a == "--help" || a == "-h" => usage(),
-            Some(a) => break a,
-            None => usage(),
+            _ => break a,
         }
     };
-    let mut argv = vec![program.clone()];
-    argv.extend(args);
+    runtime_args.extend([cstring("--root"), cstring(root.as_os_str().as_bytes())]);
+    match &cache {
+        Some(c) => runtime_args.extend([cstring("--cache"), cstring(c.as_os_str().as_bytes())]),
+        None => runtime_args.push(cstring("--no-cache")),
+    }
+    if let Some(p) = &path_map {
+        runtime_args.extend([cstring("--path-map"), cstring(p.as_os_str().as_bytes())]);
+    }
+    if let Some(b) = &binder {
+        runtime_args.extend([cstring("--binder"), cstring(b.as_bytes())]);
+    }
+    if trace {
+        runtime_args.push(cstring("--trace"));
+    }
+    if let Some(label) = seclabel {
+        identity.seclabel = label;
+    }
+    let program = program.to_string_lossy().into_owned();
+    let mut argv: Vec<Vec<u8>> = args.map(OsString::into_vec).collect();
+    if execfn.is_none() {
+        argv.insert(0, program.clone().into_bytes());
+    }
+    let envp = if inherit_env {
+        host_environment()
+    } else {
+        darwin_linux_abi::default_android_env()
+            .into_iter()
+            .map(String::into_bytes)
+            .collect()
+    };
     let err = darwin_linux_abi::run(darwin_linux_abi::RunOptions {
         root: &root,
         path_map: path_map.as_deref(),
         program: &program,
         argv,
-        envp: darwin_linux_abi::default_android_env(),
+        envp,
+        execfn,
         trace,
         cache,
         binder,
-        seclabel,
+        identity,
+        by_pid,
+        state,
+        runtime_args,
     });
     eprintln!("linux-run: {err}");
     std::process::exit(127);

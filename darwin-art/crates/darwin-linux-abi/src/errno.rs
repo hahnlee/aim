@@ -8,6 +8,7 @@ pub const ENOENT: Errno = 2;
 pub const ESRCH: Errno = 3;
 pub const EINTR: Errno = 4;
 pub const EIO: Errno = 5;
+pub const ENOEXEC: Errno = 8;
 pub const EBADF: Errno = 9;
 pub const EAGAIN: Errno = 11;
 pub const ENOMEM: Errno = 12;

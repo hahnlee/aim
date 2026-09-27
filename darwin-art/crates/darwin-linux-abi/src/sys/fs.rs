@@ -247,13 +247,21 @@ pub fn newfstatat(a: [u64; 6]) -> i64 {
             -(ENOENT as i64)
         };
     }
-    let r = match vfs::resolve(dirfd, path, flags & AT_SYMLINK_NOFOLLOW == 0) {
-        Ok(r) => r,
-        Err(e) => return -(e as i64),
+    // linker64 finds the program through /proc/self/exe, whatever argv[0] is.
+    let host = if procfs::is_self_exe(path) && flags & AT_SYMLINK_NOFOLLOW == 0 {
+        match CString::new(crate::sys::process::exe_host_path()) {
+            Ok(p) => p,
+            Err(_) => return -(ENOENT as i64),
+        }
+    } else {
+        match vfs::resolve(dirfd, path, flags & AT_SYMLINK_NOFOLLOW == 0) {
+            Ok(r) => r.host,
+            Err(e) => return -(e as i64),
+        }
     };
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: host path and local stat buffer.
-    if unsafe { libc::lstat(r.host.as_ptr(), &mut st) } < 0 {
+    if unsafe { libc::lstat(host.as_ptr(), &mut st) } < 0 {
         return -(errno::last() as i64);
     }
     put_stat(&st, out);
@@ -432,6 +440,33 @@ pub fn chdir(a: [u64; 6]) -> i64 {
         return -20; // ENOTDIR
     }
     vfs::set_cwd(r.guest);
+    0
+}
+
+/// pipe2(fds, flags): O_CLOEXEC and O_NONBLOCK. Packet mode (O_DIRECT)
+/// has no Darwin pipe equivalent.
+pub fn pipe2(a: [u64; 6]) -> i64 {
+    let flags = a[1];
+    if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
+        return -(EINVAL as i64);
+    }
+    let mut fds = [0i32; 2];
+    // SAFETY: a local array, then flags on our new fds.
+    unsafe {
+        if libc::pipe(fds.as_mut_ptr()) < 0 {
+            return -(errno::last() as i64);
+        }
+        for fd in fds {
+            if flags & O_CLOEXEC != 0 {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            if flags & O_NONBLOCK != 0 {
+                libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
+            }
+        }
+        // SAFETY: guest int[2].
+        (a[0] as *mut [i32; 2]).write_unaligned(fds);
+    }
     0
 }
 

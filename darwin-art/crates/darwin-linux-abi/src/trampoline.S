@@ -67,14 +67,9 @@ _linux_abi_syscall_entry:
     b.eq    Lyield
     cmp     x8, #173
     b.eq    Lgetppid
-    cmp     x8, #174
-    b.eq    Lgetuid
-    cmp     x8, #175
-    b.eq    Lgeteuid
-    cmp     x8, #176
-    b.eq    Lgetgid
-    cmp     x8, #177
-    b.eq    Lgetegid
+    sub     x16, x8, #174               // getuid, geteuid, getgid, getegid
+    cmp     x16, #3
+    b.ls    Lids
     movz    x16, #{hostcall_hi}, lsl #16
     cmp     x8, x16
     b.eq    Lhostcall
@@ -107,18 +102,11 @@ Lclose:
 Lgetppid:
     mov     x16, #39
     b       Ldarwin
-Lgetuid:
-    mov     x16, #24
-    b       Ldarwin
-Lgeteuid:
-    mov     x16, #25
-    b       Ldarwin
-Lgetgid:
-    mov     x16, #47
-    b       Ldarwin
-Lgetegid:
-    mov     x16, #43
-    b       Ldarwin
+Lids:                                   // the guest's ids (sys/cred.rs)
+    adrp    x17, {ids}@PAGE
+    add     x17, x17, {ids}@PAGEOFF
+    ldr     x0, [x17, x16, lsl #3]
+    b       Llean_ret
 Lyield:
     mov     x17, x1
     mov     x16, #-59                   // swtch_pri mach trap

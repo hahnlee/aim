@@ -4,7 +4,10 @@
 //! with Linux errno values) goes back in x0. Each subsystem owns its calls.
 
 mod binder;
+pub mod cred;
 mod events;
+mod exec;
+mod fork;
 mod fs;
 mod futex;
 mod mem;
@@ -12,10 +15,12 @@ mod misc;
 pub mod names;
 mod process;
 mod procfs;
+mod pstate;
 mod selinuxfs;
 mod signal;
 mod thread;
 mod unix_socket;
+mod wait;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -23,10 +28,11 @@ use crate::context::GuestContext;
 use crate::errno::ENOSYS;
 
 pub use binder::init as init_binder;
+pub use exec::{ExecState, init as init_exec};
 pub use mem::init_brk;
 pub use mem::run_deferred_unmaps;
 pub use process::{host_tid, set_exe};
-pub use procfs::set_security_context;
+pub use pstate::kernel_release;
 
 /// Read by the trampoline: while set, every syscall takes the full path so
 /// it is traced.
@@ -132,6 +138,7 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         49 => fs::chdir(a),
         56 => fs::openat(a),
         57 => fs::close(a),
+        59 => fs::pipe2(a),
         62 => fs::lseek(a),
         63 => fs::read(a),
         64 => fs::write(a),
@@ -160,16 +167,15 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         233 => mem::madvise(a),
         // process
         93 => thread::exit(a),
+        220 if fork::is_fork(a[0]) => fork::clone(ctx, a),
         220 => thread::clone(ctx, a),
         94 => process::exit_group(a),
         96 => process::set_tid_address(a),
         98 => futex::futex(a),
         99 => 0, // set_robust_list: robust futex lists matter once threads exist
-        163 | 261 => process::prlimit(nr, a),
+        163 | 164 | 261 => cred::prlimit(nr, a),
         172 => process::getpid(),
         173 => process::getppid(),
-        174 | 175 => process::getuid(),
-        176 | 177 => process::getgid(),
         178 => process::gettid(),
         129..=131 => process::kill(nr, a),
         // signals
@@ -188,11 +194,43 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         118..=121 => process::sched_policy(nr, a),
         123 => process::sched_getaffinity(a),
         124 => misc::sched_yield(),
-        160 => misc::uname(a),
         167 => misc::prctl(a),
         169 => misc::gettimeofday(a),
         278 => misc::getrandom(a),
         darwin_hostcall::SYSCALL_NR => crate::hostcall::call(a[0], a[1], a[2], a[3]),
+        // process lifecycle
+        435 if fork::is_fork(fork::clone3_flags(a)) => fork::clone3(ctx, a),
+        221 => exec::execve(a),
+        281 => exec::execveat(a),
+        95 => wait::waitid(a),
+        260 => wait::wait4(a),
+        424 => wait::pidfd_send_signal(a),
+        434 => wait::pidfd_open(a),
+        // identity
+        174..=177 => cred::getuid(nr),
+        143 | 145 => cred::setreid(nr, a),
+        144 | 146 => cred::setid(nr, a),
+        147 | 149 => cred::setresid(nr, a),
+        148 | 150 => cred::getresid(nr, a),
+        151 | 152 => cred::setfsid(nr, a),
+        158 => cred::getgroups(a),
+        159 => cred::setgroups(a),
+        90 => cred::capget(a),
+        91 => cred::capset(a),
+        140 => cred::setpriority(a),
+        141 => cred::getpriority(a),
+        // process state
+        92 => pstate::personality(a),
+        153 => pstate::times(a),
+        154 => pstate::setpgid(a),
+        155 => pstate::getpgid(a),
+        156 => pstate::getsid(a),
+        157 => pstate::setsid(),
+        160 => pstate::uname(a),
+        165 => pstate::getrusage(a),
+        166 => pstate::umask(a),
+        168 => pstate::getcpu(a),
+        179 => pstate::sysinfo(a),
         _ => {
             let args: Vec<String> = a[..names::arg_count(nr)]
                 .iter()
