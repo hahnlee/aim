@@ -209,6 +209,38 @@ unsafe extern "system" fn anr_dump(
     std::ptr::null_mut()
 }
 
+/// com_android_server_power_PowerManagerService.cpp without a power HAL or
+/// suspend control: no HAL to initialize or boost, wake locks and autosuspend
+/// have no /sys/power to write, and a mode change or forced suspend fails.
+unsafe extern "system" fn power_init(_env: *mut JNIEnv, _object: jobject) {}
+
+unsafe extern "system" fn power_suspend_blocker(_env: *mut JNIEnv, _class: jclass, _name: jstring) {
+}
+
+unsafe extern "system" fn power_auto_suspend(_env: *mut JNIEnv, _class: jclass, _enable: jboolean) {
+}
+
+unsafe extern "system" fn power_boost(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    _boost: jint,
+    _duration: jint,
+) {
+}
+
+unsafe extern "system" fn power_mode(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    _mode: jint,
+    _enabled: jboolean,
+) -> jboolean {
+    0
+}
+
+unsafe extern "system" fn power_force_suspend(_env: *mut JNIEnv, _class: jclass) -> jboolean {
+    0
+}
+
 fn natives(
     env: Env,
     loader: jobject,
@@ -308,6 +340,36 @@ fn register(env: Env, loader: jobject, load: jmethodID) -> bool {
             native(c"getMemoryFreedCompaction", c"()J", zero_kb as *mut c_void),
             native(c"compactSystem", c"()V", compaction_noop as *mut c_void),
             native(c"compactProcess", c"(II)V", compact_process as *mut c_void),
+        ],
+    ) && natives(
+        env,
+        loader,
+        load,
+        "com.android.server.power.PowerManagerService",
+        &[
+            native(c"nativeInit", c"()V", power_init as *mut c_void),
+            native(
+                c"nativeAcquireSuspendBlocker",
+                c"(Ljava/lang/String;)V",
+                power_suspend_blocker as *mut c_void,
+            ),
+            native(
+                c"nativeReleaseSuspendBlocker",
+                c"(Ljava/lang/String;)V",
+                power_suspend_blocker as *mut c_void,
+            ),
+            native(
+                c"nativeSetAutoSuspend",
+                c"(Z)V",
+                power_auto_suspend as *mut c_void,
+            ),
+            native(c"nativeSetPowerBoost", c"(II)V", power_boost as *mut c_void),
+            native(c"nativeSetPowerMode", c"(IZ)Z", power_mode as *mut c_void),
+            native(
+                c"nativeForceSuspend",
+                c"()Z",
+                power_force_suspend as *mut c_void,
+            ),
         ],
     ) && natives(
         env,

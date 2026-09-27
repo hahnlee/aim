@@ -61,6 +61,7 @@ pub unsafe extern "C" fn darwin_art_runtime_installd_create_app_data(
     package: *const c_char,
     user: u32,
     flags: u32,
+    app_id: u32,
     ce_inode: *mut u64,
     de_inode: *mut u64,
     errno: *mut u32,
@@ -72,6 +73,7 @@ pub unsafe extern "C" fn darwin_art_runtime_installd_create_app_data(
         package: package.to_owned(),
         user,
         flags,
+        app_id,
     });
     run(socket, request, errno, |payload| {
         if payload.len() != 16 {

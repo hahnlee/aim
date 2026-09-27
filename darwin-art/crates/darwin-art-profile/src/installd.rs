@@ -21,10 +21,18 @@ pub(crate) const FLAG_STORAGE_CE: u32 = 0x2;
 pub(crate) const FLAG_CLEAR_CACHE_ONLY: u32 = 0x10;
 pub(crate) const FLAG_CLEAR_CODE_CACHE_ONLY: u32 = 0x20;
 
-const COMMAND_CREATE_APP_DATA: u8 = 1;
+// Command 1 was createAppData without the app ID; a stale peer that still
+// sends it is rejected rather than misread.
+const COMMAND_CREATE_APP_DATA: u8 = 5;
 const COMMAND_DESTROY_APP_DATA: u8 = 2;
 const COMMAND_CLEAR_APP_DATA: u8 = 3;
 const COMMAND_RM_PACKAGE_DIR: u8 = 4;
+
+/// Process.SYSTEM_UID. Packages that share it run in, and keep their data
+/// with, the system process (android:sharedUserId="android.uid.system").
+pub const SYSTEM_APP_ID: u32 = 1000;
+/// The profile tree whose `private-data` is the system process's `/data`.
+const SYSTEM_DATA_OWNER: &str = "android.system";
 
 /// One installd request, decoded from the daemon wire payload.
 #[derive(Debug, PartialEq, Eq)]
@@ -33,6 +41,8 @@ pub enum Request {
         package: String,
         user: u32,
         flags: u32,
+        /// CreateAppDataArgs.appId: selects whose `/data` holds the package.
+        app_id: u32,
     },
     DestroyAppData {
         package: String,
@@ -56,8 +66,15 @@ impl Request {
                 package,
                 user,
                 flags,
+                app_id,
+            } => {
+                out.push(COMMAND_CREATE_APP_DATA);
+                out.extend_from_slice(&user.to_le_bytes());
+                out.extend_from_slice(&flags.to_le_bytes());
+                out.extend_from_slice(&app_id.to_le_bytes());
+                out.extend_from_slice(package.as_bytes());
             }
-            | Request::DestroyAppData {
+            Request::DestroyAppData {
                 package,
                 user,
                 flags,
@@ -68,7 +85,6 @@ impl Request {
                 flags,
             } => {
                 out.push(match self {
-                    Request::CreateAppData { .. } => COMMAND_CREATE_APP_DATA,
                     Request::DestroyAppData { .. } => COMMAND_DESTROY_APP_DATA,
                     _ => COMMAND_CLEAR_APP_DATA,
                 });
@@ -93,7 +109,18 @@ impl Request {
                 .map_err(|_| invalid())
         };
         match command {
-            COMMAND_CREATE_APP_DATA | COMMAND_DESTROY_APP_DATA | COMMAND_CLEAR_APP_DATA => {
+            COMMAND_CREATE_APP_DATA => {
+                if rest.len() < 12 {
+                    return Err(invalid());
+                }
+                Ok(Request::CreateAppData {
+                    user: u32::from_le_bytes(rest[..4].try_into().unwrap()),
+                    flags: u32::from_le_bytes(rest[4..8].try_into().unwrap()),
+                    app_id: u32::from_le_bytes(rest[8..12].try_into().unwrap()),
+                    package: text(&rest[12..])?,
+                })
+            }
+            COMMAND_DESTROY_APP_DATA | COMMAND_CLEAR_APP_DATA => {
                 if rest.len() < 8 {
                     return Err(invalid());
                 }
@@ -101,11 +128,6 @@ impl Request {
                 let flags = u32::from_le_bytes(rest[4..8].try_into().unwrap());
                 let package = text(&rest[8..])?;
                 Ok(match command {
-                    COMMAND_CREATE_APP_DATA => Request::CreateAppData {
-                        package,
-                        user,
-                        flags,
-                    },
                     COMMAND_DESTROY_APP_DATA => Request::DestroyAppData {
                         package,
                         user,
@@ -156,8 +178,9 @@ impl<'a> Installd<'a> {
                 package,
                 user,
                 flags,
+                app_id,
             } => self
-                .create_app_data(package, *user, *flags)
+                .create_app_data(package, *user, *flags, *app_id)
                 .map(|inodes| inodes.encode()),
             Request::DestroyAppData {
                 package,
@@ -179,23 +202,52 @@ impl<'a> Installd<'a> {
         }
     }
 
-    /// The application's own `/data` tree.
-    fn private_data(&self, package: &str) -> PathBuf {
+    /// The `/data` tree of a profile process: an application's own, or the
+    /// system process's (`android.system`).
+    fn private_data(&self, owner: &str) -> PathBuf {
         self.paths
             .mount
             .join("data/apps")
-            .join(package)
+            .join(owner)
             .join("private-data")
     }
 
-    fn ce_dir(&self, package: &str, user: u32) -> PathBuf {
-        self.private_data(package)
+    /// Whose `/data` holds a package's directories. Android isolates data by
+    /// uid; a package that shares the system uid is visible to the system
+    /// process, like every other system-uid package.
+    fn owner(package: &str, app_id: u32) -> &str {
+        if app_id == SYSTEM_APP_ID {
+            SYSTEM_DATA_OWNER
+        } else {
+            package
+        }
+    }
+
+    /// The owner of a package's existing directories, for requests that carry
+    /// no app ID (destroy/clear): the system tree when it holds them.
+    fn existing_owner<'p>(&self, package: &'p str, user: u32) -> &'p str {
+        let system = self.private_data(SYSTEM_DATA_OWNER);
+        let held = |storage: &str| {
+            system
+                .join(format!("{storage}/{user}"))
+                .join(package)
+                .exists()
+        };
+        if held("user") || held("user_de") {
+            SYSTEM_DATA_OWNER
+        } else {
+            package
+        }
+    }
+
+    fn ce_dir(&self, owner: &str, package: &str, user: u32) -> PathBuf {
+        self.private_data(owner)
             .join(format!("user/{user}"))
             .join(package)
     }
 
-    fn de_dir(&self, package: &str, user: u32) -> PathBuf {
-        self.private_data(package)
+    fn de_dir(&self, owner: &str, package: &str, user: u32) -> PathBuf {
+        self.private_data(owner)
             .join(format!("user_de/{user}"))
             .join(package)
     }
@@ -216,12 +268,22 @@ impl<'a> Installd<'a> {
         package: &str,
         user: u32,
         flags: u32,
+        app_id: u32,
     ) -> Result<AppDataInodes, ProfileError> {
         Self::validate(package, user)?;
+        let owner = Self::owner(package, app_id);
         let mut inodes = AppDataInodes::default();
         for (flag, directory, inode) in [
-            (FLAG_STORAGE_CE, self.ce_dir(package, user), &mut inodes.ce),
-            (FLAG_STORAGE_DE, self.de_dir(package, user), &mut inodes.de),
+            (
+                FLAG_STORAGE_CE,
+                self.ce_dir(owner, package, user),
+                &mut inodes.ce,
+            ),
+            (
+                FLAG_STORAGE_DE,
+                self.de_dir(owner, package, user),
+                &mut inodes.de,
+            ),
         ] {
             if flags & flag == 0 {
                 continue;
@@ -242,9 +304,10 @@ impl<'a> Installd<'a> {
         flags: u32,
     ) -> Result<(), ProfileError> {
         Self::validate(package, user)?;
+        let owner = self.existing_owner(package, user);
         for (flag, directory) in [
-            (FLAG_STORAGE_CE, self.ce_dir(package, user)),
-            (FLAG_STORAGE_DE, self.de_dir(package, user)),
+            (FLAG_STORAGE_CE, self.ce_dir(owner, package, user)),
+            (FLAG_STORAGE_DE, self.de_dir(owner, package, user)),
         ] {
             if flags & flag != 0 {
                 remove_tree(&directory)?;
@@ -262,9 +325,10 @@ impl<'a> Installd<'a> {
         flags: u32,
     ) -> Result<(), ProfileError> {
         Self::validate(package, user)?;
+        let owner = self.existing_owner(package, user);
         for (flag, directory) in [
-            (FLAG_STORAGE_CE, self.ce_dir(package, user)),
-            (FLAG_STORAGE_DE, self.de_dir(package, user)),
+            (FLAG_STORAGE_CE, self.ce_dir(owner, package, user)),
+            (FLAG_STORAGE_DE, self.de_dir(owner, package, user)),
         ] {
             if flags & flag == 0 || !directory.exists() {
                 continue;
@@ -386,6 +450,7 @@ mod tests {
                 package: "org.example".into(),
                 user: 0,
                 flags: 3,
+                app_id: 10_123,
             },
             Request::DestroyAppData {
                 package: "org.example".into(),
@@ -406,6 +471,11 @@ mod tests {
         assert!(Request::decode(&[]).is_err());
         assert!(Request::decode(&[9]).is_err());
         assert!(Request::decode(&[1, 0, 0]).is_err());
+        // The pre-app-ID createAppData command is refused, not misread.
+        let mut stale = vec![1];
+        stale.extend_from_slice(&[0; 8]);
+        stale.extend_from_slice(b"org.example");
+        assert!(Request::decode(&stale).is_err());
     }
 
     #[test]
@@ -419,7 +489,7 @@ mod tests {
             .mount
             .join("data/apps/org.example/private-data/user_de/0/org.example");
         let inodes = installd
-            .create_app_data("org.example", 0, FLAG_STORAGE_CE | FLAG_STORAGE_DE)
+            .create_app_data("org.example", 0, FLAG_STORAGE_CE | FLAG_STORAGE_DE, 10_123)
             .unwrap();
         assert!(ce.join("cache").is_dir() && ce.join("code_cache").is_dir());
         assert!(de.join("cache").is_dir());
@@ -428,7 +498,7 @@ mod tests {
         fs::write(ce.join("files.db"), b"kept").unwrap();
         fs::write(ce.join("cache/tmp"), b"cache").unwrap();
         installd
-            .create_app_data("org.example", 0, FLAG_STORAGE_CE)
+            .create_app_data("org.example", 0, FLAG_STORAGE_CE, 10_123)
             .unwrap();
         assert_eq!(fs::read(ce.join("files.db")).unwrap(), b"kept");
 
@@ -447,14 +517,51 @@ mod tests {
         assert!(!de.exists() && ce.exists());
         assert!(
             installd
-                .create_app_data("org.example", 10, FLAG_STORAGE_CE)
+                .create_app_data("org.example", 10, FLAG_STORAGE_CE, 10_123)
                 .is_err()
         );
         assert!(
             installd
-                .create_app_data("../x", 0, FLAG_STORAGE_CE)
+                .create_app_data("../x", 0, FLAG_STORAGE_CE, 10_123)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn system_uid_packages_keep_data_with_the_system_process() {
+        let paths = fixture("system-uid");
+        let installd = Installd::new(&paths);
+        let system = paths.mount.join("data/apps/android.system/private-data");
+        let de = system.join("user_de/0/com.android.providers.settings");
+        installd
+            .create_app_data(
+                "com.android.providers.settings",
+                0,
+                FLAG_STORAGE_CE | FLAG_STORAGE_DE,
+                SYSTEM_APP_ID,
+            )
+            .unwrap();
+        assert!(de.join("cache").is_dir());
+        assert!(
+            system
+                .join("user/0/com.android.providers.settings")
+                .is_dir()
+        );
+        assert!(
+            !paths
+                .mount
+                .join("data/apps/com.android.providers.settings")
+                .exists()
+        );
+        fs::write(de.join("settings.db"), b"db").unwrap();
+        installd
+            .clear_app_data("com.android.providers.settings", 0, FLAG_STORAGE_DE)
+            .unwrap();
+        assert!(!de.join("settings.db").exists() && de.join("cache").is_dir());
+        installd
+            .destroy_app_data("com.android.providers.settings", 0, FLAG_STORAGE_DE)
+            .unwrap();
+        assert!(!de.exists());
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 extern "C" int darwin_art_runtime_installd_create_app_data(
     const char* socket, const char* package, uint32_t user, uint32_t flags,
-    uint64_t* ce_inode, uint64_t* de_inode, uint32_t* errno_out);
+    uint32_t app_id, uint64_t* ce_inode, uint64_t* de_inode, uint32_t* errno_out);
 extern "C" int darwin_art_runtime_installd_app_data(
     const char* socket, const char* package, uint32_t user, uint32_t flags,
     int32_t clear, uint32_t* errno_out);
@@ -40,10 +40,11 @@ void StoreErrno(JNIEnv* env, jintArray errno_out, uint32_t value) {
   env->SetIntArrayRegion(errno_out, 0, 1, &code);
 }
 
-jint CreateAppData(JNIEnv* env, jclass, jstring package, jint user, jint flags,
+jint CreateAppData(JNIEnv* env, jclass, jstring package, jint user, jint flags, jint app_id,
                    jlongArray inodes, jintArray errno_out) {
   Utf name(env, package);
-  if (Socket() == nullptr || name.get() == nullptr || user < 0 || inodes == nullptr ||
+  if (Socket() == nullptr || name.get() == nullptr || user < 0 || app_id < 0 ||
+      inodes == nullptr ||
       env->GetArrayLength(inodes) != 2 || errno_out == nullptr ||
       env->GetArrayLength(errno_out) != 1) {
     return kInvalid;
@@ -52,7 +53,7 @@ jint CreateAppData(JNIEnv* env, jclass, jstring package, jint user, jint flags,
   uint32_t code = 0;
   const int status = darwin_art_runtime_installd_create_app_data(
       Socket(), name.get(), static_cast<uint32_t>(user), static_cast<uint32_t>(flags),
-      &ce, &de, &code);
+      static_cast<uint32_t>(app_id), &ce, &de, &code);
   const jlong values[2] = {static_cast<jlong>(ce), static_cast<jlong>(de)};
   env->SetLongArrayRegion(inodes, 0, 2, values);
   StoreErrno(env, errno_out, code);
@@ -91,7 +92,7 @@ bool RegisterDarwinInstalld(JNIEnv* env, jclass installd) {
   if (env == nullptr || installd == nullptr || env->ExceptionCheck()) return false;
   const JNINativeMethod methods[] = {
       {const_cast<char*>("nativeCreateAppData"),
-       const_cast<char*>("(Ljava/lang/String;II[J[I)I"),
+       const_cast<char*>("(Ljava/lang/String;III[J[I)I"),
        reinterpret_cast<void*>(CreateAppData)},
       {const_cast<char*>("nativeAppData"), const_cast<char*>("(Ljava/lang/String;IIZ[I)I"),
        reinterpret_cast<void*>(AppData)},

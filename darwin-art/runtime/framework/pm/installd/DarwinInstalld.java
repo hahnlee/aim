@@ -30,7 +30,7 @@ public final class DarwinInstalld extends IInstalld.Stub {
     private static final int TRANSPORT_FAILED = 1;
 
     private static native int nativeCreateAppData(String packageName, int userId, int flags,
-            long[] inodes, int[] errno);
+            int appId, long[] inodes, int[] errno);
     private static native int nativeAppData(String packageName, int userId, int flags,
             boolean clear, int[] errno);
     private static native int nativeRmPackageDir(String codePath, int[] errno);
@@ -61,7 +61,8 @@ public final class DarwinInstalld extends IInstalld.Stub {
             requireInternal(args.uuid);
             long[] inodes = new long[2];
             int[] errno = new int[1];
-            check(nativeCreateAppData(args.packageName, args.userId, args.flags, inodes, errno),
+            check(nativeCreateAppData(args.packageName, args.userId, args.flags, args.appId,
+                    inodes, errno),
                     errno, "createAppData " + args.packageName);
             result.ceDataInode = inodes[0];
             result.deDataInode = inodes[1];

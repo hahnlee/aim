@@ -4,7 +4,6 @@ import android.app.ActivityThread;
 import android.app.IApplicationThread;
 import android.content.Context;
 import android.os.ArtModuleServiceManager;
-import android.os.IBinder;
 import android.os.Process;
 import android.os.ServiceManager;
 import android.os.SystemClock;
@@ -21,7 +20,6 @@ import com.android.server.TelephonyRegistry;
 import com.android.server.utils.TimingsTraceAndSlog;
 import com.android.server.apphibernation.AppHibernationService;
 import com.android.server.appop.AppOpMigrationHelper;
-import com.android.server.am.ActivityManagerService;
 import com.android.server.appop.AppOpsService;
 import com.android.server.art.ArtModuleServiceInitializer;
 import com.android.server.art.DexUseManagerLocal;
@@ -85,26 +83,17 @@ public final class SystemServerBootstrap {
                 new PermissionMigrationHelperImpl());
         LocalServices.addService(AppOpMigrationHelper.class, new AppOpMigrationHelperImpl());
         services.startService(AccessCheckingService.class);
-        // SystemServer: ActivityTaskManagerService and ActivityManagerService
-        // follow AccessCheckingService (#148, opt-in).
-        ActivityManagerService upstreamActivity = UpstreamActivityManager.enabled()
-                ? UpstreamActivityManager.start(services, installer)
-                : null;
         // ActivityManagerService's constructor and start(): the AppOps owner.
-        // The upstream owner creates and publishes its own.
-        AppOpsService appOps = null;
-        if (upstreamActivity == null) {
-            File systemDir = SystemServiceManager.ensureSystemDir();
-            ServiceThread appOpsThread =
-                    new ServiceThread("AppOps", Process.THREAD_PRIORITY_FOREGROUND, false);
-            appOpsThread.start();
-            appOps = new AppOpsService(new File(systemDir, "appops_accesses.xml"),
-                    new File(systemDir, "appops.xml"), appOpsThread.getThreadHandler(),
-                    systemContext);
-            appOps.publish();
-            ((ActivityManagerEndpoint) ServiceManager.getService(Context.ACTIVITY_SERVICE))
-                    .setAppOpsService(appOps);
-        }
+        File systemDir = SystemServiceManager.ensureSystemDir();
+        ServiceThread appOpsThread =
+                new ServiceThread("AppOps", Process.THREAD_PRIORITY_FOREGROUND, false);
+        appOpsThread.start();
+        AppOpsService appOps = new AppOpsService(new File(systemDir, "appops_accesses.xml"),
+                new File(systemDir, "appops.xml"), appOpsThread.getThreadHandler(),
+                systemContext);
+        appOps.publish();
+        ((ActivityManagerEndpoint) ServiceManager.getService(Context.ACTIVITY_SERVICE))
+                .setAppOpsService(appOps);
         TimingsTraceAndSlog t = new TimingsTraceAndSlog();
         services.startBootPhase(t, SystemService.PHASE_WAIT_FOR_DEFAULT_DISPLAY);
 
@@ -121,14 +110,10 @@ public final class SystemServerBootstrap {
         // Resources of packages' themes (Activity window styles).
         AttributeCache.init(systemContext);
         // ActivityManagerService.setSystemProcess
-        if (upstreamActivity != null) {
-            UpstreamActivityManager.step("setSystemProcess", upstreamActivity::setSystemProcess);
-        } else {
-            IApplicationThread systemThread =
-                    ActivityThread.currentActivityThread().getApplicationThread();
-            ((ActivityManagerEndpoint) ServiceManager.getService(Context.ACTIVITY_SERVICE))
-                    .setSystemProcess(systemThread.asBinder());
-        }
+        IApplicationThread systemThread =
+                ActivityThread.currentActivityThread().getApplicationThread();
+        ((ActivityManagerEndpoint) ServiceManager.getService(Context.ACTIVITY_SERVICE))
+                .setSystemProcess(systemThread.asBinder());
         services.startService(new SensorPrivacyService(systemContext));
         android.util.Slog.i(TAG, "Bootstrap services started");
         // SystemServer.startCoreServices
@@ -138,16 +123,6 @@ public final class SystemServerBootstrap {
         TelephonyRegistry telephonyRegistry = new TelephonyRegistry(
                 systemContext, new TelephonyRegistry.ConfigurationProvider());
         ServiceManager.addService("telephony.registry", telephonyRegistry);
-        if (upstreamActivity != null) {
-            // SystemServer.startOtherServices: InstallSystemProviders.
-            UpstreamActivityManager.step("installSystemProviders",
-                    () -> upstreamActivity.getContentProviderHelper().installSystemProviders());
-        }
-        IBinder deferredWindowManager = SystemServiceFactory.takeDeferredWindowManager();
-        if (deferredWindowManager != null) {
-            // SystemServer.startOtherServices: WindowManagerService.main.
-            ServiceManager.addService(Context.WINDOW_SERVICE, deferredWindowManager);
-        }
 
         // SystemServer.startOtherServices, for the services started above.
         services.startService(AppHibernationService.class);
@@ -161,13 +136,8 @@ public final class SystemServerBootstrap {
         packageManager.systemReady();
         services.startBootPhase(t, SystemService.PHASE_DEVICE_SPECIFIC_SERVICES_READY);
         // ActivityManagerService.systemReady
-        if (upstreamActivity != null) {
-            UpstreamActivityManager.step("systemReady",
-                    () -> upstreamActivity.systemReady(null, t));
-        } else {
-            services.preSystemReady();
-            appOps.systemReady();
-        }
+        services.preSystemReady();
+        appOps.systemReady();
         SystemUserLifecycle.onSystemUserStarting(services);
         services.startBootPhase(t, SystemService.PHASE_ACTIVITY_MANAGER_READY);
         // The systemReady callback: MakeTelephonyRegistryReady.
