@@ -51,9 +51,19 @@ programs, and implement only what lies below it.
      CoreAudio, IOSurface/Metal, AppKit and IOKit.
    - The composer may become a host-native exception once graphics shows the
      need; that is decided in the graphics phase.
-4. **Exception: graphics driver libraries.** `libEGL`, `libGLESv2` and
-   `libvulkan` are replaced by our implementations over ANGLE and MoltenVK.
-   These are stable Khronos C APIs, the device's GPU driver seam.
+4. **Exceptions, kept minimal and explicit.** Where the original cannot run
+   as-is, we patch or rebuild it from AOSP source with the smallest
+   maintainable change, and list it as a `replace` in the overlay manifest.
+   Reflection-style bypasses are never an option.
+   - **Graphics driver libraries:** `libEGL`, `libGLESv2` and `libvulkan` are
+     our implementations over ANGLE and MoltenVK. These are stable Khronos C
+     APIs, the device's GPU driver seam.
+   - **ART:** macOS arm64 cannot map anything below 4 GiB (a fixed
+     `__PAGEZERO`), but ART stores managed references as absolute 32-bit
+     addresses. `libart` (with its compiler and dex2oat) is therefore built
+     from AOSP source with the base-relative compressed-reference patches, as
+     Android ELF. The boot image is regenerated with it.
+
 5. **Derived system image.** The original archive plus a checked-in overlay
    manifest (additions, and explicitly listed replacements) with its own
    identity.
@@ -73,6 +83,21 @@ programs, and implement only what lies below it.
    The original init may replace it later.
 7. **Cross-process kernel state.** darwin-artd holds it, as wineserver does:
    the binder driver core, the process table and uids.
+
+8. **Ahead-of-time translation cache (after Rosetta 2).** Darwin owns x18
+   and TPIDR_EL0 and does not honour Linux `svc #0`. The few instructions that
+   depend on them are rewritten once per original file, never in the image:
+   - `svc #0` becomes a branch into the syscall layer;
+   - `mrs`/`msr tpidr_el0` access a per-thread slot;
+   - shadow-call-stack push/pop keep their protection through a per-thread
+     shadow-stack pointer held in memory, not in x18.
+
+   Translated copies live in a cache keyed by the original file's sha256 and
+   the translator version. The loader maps them file-backed, so pages are
+   shared across processes, no code is patched while threads run, and
+   code/data identification can use section and symbol information. Only code
+   created at run time (the JIT, or an app's own mappings) is rewritten when
+   it is mapped.
 
 Performance is handled as explicit exceptions, never by patching the original
 userspace. A gap is closed in the syscall layer, the binder driver, a HAL or
@@ -137,6 +162,28 @@ of our own.
   (`crates/darwin-linux-abi`, `linux-run`). It loads the image's libraries
   through the original linker configuration and runs the original
   `linkerconfig` binary through libc initialization and `main`.
+
+### Platform probes (`experiments/p0/`)
+
+- **clone:** feasible. A Darwin pthread with a small host stack resumes the
+  guest frame; SETTLS, PARENT_SETTID and CHILD_CLEARTID work. The time until
+  the child runs is 12 µs at p50, against 13 µs for `pthread_create`. The
+  layer must defer bionic's stack-teardown `munmap`.
+- **futex:** feasible with an in-process waiter table for private futexes,
+  covering bitsets, requeue and exact counts, with kqueue timeouts that have
+  no leeway. `os_sync` SHARED is for MAP_SHARED memory. The flavour follows
+  the mapping, not FUTEX_PRIVATE_FLAG. PI futexes are open.
+- **Signals:** feasible. Linux frames are built for guest handlers, and
+  faults are classified through the VM map to give exact SIGSEGV/SIGBUS codes
+  and addresses. `rt_sigreturn` goes through a trap. A fault round trip costs
+  5.3 µs. A signal queue for `sigwait` is open.
+- **JIT dual mapping:** feasible. A named memory entry is mapped RW and RX
+  under the hardened runtime with `allow-unsigned-executable-memory`. `mrs
+  ctr_el0` traps and must be emulated; the guest must not see HWCAP_CPUID.
+- **Syscall cost:** a lean integer-only path costs about 3–4 ns. The full
+  save is only for clone, signals and sigreturn.
+- **16 KiB pages:** match a Linux 16K kernel. Large reservations are cheap.
+  Nothing maps below 4 GiB, hence the ART exception above.
 
 ## Phases
 
