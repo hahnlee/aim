@@ -1,182 +1,607 @@
-//! Guest threads: `clone` with CLONE_THREAD and the `exit` of a non-main
-//! thread, as experiments/p0/02-clone-threads settled.
+//! Guest threads: `clone` for threads, thread exit, tids, and the per-thread
+//! records other threads reach (signals, futex wakes, timers, scheduling).
 //!
-//! Each guest thread is a detached Darwin pthread. It gets its own
-//! [`GuestContext`] (host stack, shadow call stack), copies the caller's
-//! registers with x0 = 0 and sp = the child stack, and resumes after the
-//! `svc`. Processes (`fork`) and namespaces are not handled here.
+//! Each guest thread is a Darwin pthread (experiments/p0/02). Its host stack
+//! is the pthread's own; the child resumes the parent's copied registers on
+//! the guest stack through the trampoline's exit path, so it starts exactly
+//! as Linux starts a clone child and takes pending signals first.
+//!
+//! Tids: the main thread's is the pid. Others are `TID_BASE + (pid << 12) +
+//! n` (n in 1..4096): unique across processes and never a Darwin pid (those
+//! stay below 100000), and below 2^30 as `FUTEX_TID_MASK` requires. When
+//! darwin-artd owns the pid space (ADR 0012, section 7) it assigns them.
 
-use std::cell::Cell;
-use std::sync::{Arc, Condvar, Mutex};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::context::{self, GuestContext};
-use crate::errno::{EAGAIN, EINVAL, ENOSYS};
+use super::park::Parker;
+use super::signal::ThreadSignals;
+use crate::context::{self, GuestContext, HostStacks};
+use crate::errno::{EAGAIN, EINVAL, ENOSYS, ESRCH};
 
-const CLONE_VM: u64 = 0x100;
+const TID_BASE: i32 = 1 << 29;
+const TIDS_PER_PROCESS: u32 = 4095;
+/// Host stack of a clone thread (the syscall layer runs on it).
+const HOST_STACK: usize = 512 << 10;
+
+pub const CLONE_VM: u64 = 0x100;
+const CLONE_FS: u64 = 0x200;
+const CLONE_FILES: u64 = 0x400;
 const CLONE_SIGHAND: u64 = 0x800;
-const CLONE_SETTLS: u64 = 0x80000;
-const CLONE_PARENT_SETTID: u64 = 0x100000;
-const CLONE_CHILD_CLEARTID: u64 = 0x200000;
-const CLONE_CHILD_SETTID: u64 = 0x1000000;
-const CLONE_THREAD: u64 = 0x10000;
+const CLONE_PIDFD: u64 = 0x1000;
+const CLONE_PTRACE: u64 = 0x2000;
+const CLONE_VFORK: u64 = 0x4000;
+const CLONE_PARENT: u64 = 0x8000;
+pub const CLONE_THREAD: u64 = 0x1_0000;
+const CLONE_SYSVSEM: u64 = 0x4_0000;
+const CLONE_SETTLS: u64 = 0x8_0000;
+const CLONE_PARENT_SETTID: u64 = 0x10_0000;
+const CLONE_CHILD_CLEARTID: u64 = 0x20_0000;
+const CLONE_DETACHED: u64 = 0x40_0000;
+const CLONE_UNTRACED: u64 = 0x80_0000;
+const CLONE_CHILD_SETTID: u64 = 0x100_0000;
+const CLONE_IO: u64 = 0x8000_0000;
+/// What a thread clone may carry besides the exit-signal byte.
+const THREAD_FLAGS: u64 = CLONE_VM
+    | CLONE_FS
+    | CLONE_FILES
+    | CLONE_SIGHAND
+    | CLONE_THREAD
+    | CLONE_SYSVSEM
+    | CLONE_SETTLS
+    | CLONE_PARENT_SETTID
+    | CLONE_CHILD_CLEARTID
+    | CLONE_DETACHED
+    | CLONE_UNTRACED
+    | CLONE_CHILD_SETTID
+    | CLONE_IO
+    | CLONE_PTRACE
+    | CLONE_PARENT;
 
-/// Host stack for the pthread itself; guest syscalls run on the context's
-/// own host stack.
-const PTHREAD_STACK: usize = 256 << 10;
-
-thread_local! {
-    /// CLONE_CHILD_CLEARTID / set_tid_address of this thread.
-    static CLEAR_TID: Cell<u64> = const { Cell::new(0) };
+/// Scheduling attributes Linux keeps per thread.
+pub struct Sched {
+    pub nice: AtomicI32,
+    pub policy: AtomicI32,
+    pub priority: AtomicI32,
 }
 
-pub fn set_clear_tid(addr: u64) {
-    CLEAR_TID.with(|c| c.set(addr));
+pub struct Thread {
+    pub tid: i32,
+    /// The host pthread_t; 0 until the thread runs.
+    pthread: AtomicUsize,
+    ctx: *mut GuestContext,
+    pub sig: ThreadSignals,
+    pub park: Parker,
+    clear_child_tid: AtomicU64,
+    robust_list: AtomicU64,
+    /// `comm`, as PR_SET_NAME sets it.
+    pub name: Mutex<[u8; 16]>,
+    pub sched: Sched,
+    stacks: Mutex<Option<HostStacks>>,
 }
 
-struct Start {
-    regs: Box<GuestContext>,
-    tls: Option<u64>,
-    clear_tid: u64,
-    set_tid: u64,
-    gate: Arc<(Mutex<Gate>, Condvar)>,
-}
+// SAFETY: `ctx` is only dereferenced by the owning thread (and read-only
+// through its atomics by others); everything else is synchronized.
+unsafe impl Send for Thread {}
+// SAFETY: as above.
+unsafe impl Sync for Thread {}
 
-/// The start handshake: the child publishes its Linux tid, and runs guest
-/// code only after the parent stored it (CLONE_PARENT_SETTID is visible
-/// before the child runs, as on Linux).
-enum Gate {
-    Created,
-    Started(i64),
-    Go,
-}
-
-extern "C" fn child_main(arg: *mut libc::c_void) -> *mut libc::c_void {
-    // SAFETY: `arg` is the Box<Start> leaked by `clone`.
-    let start = unsafe { Box::from_raw(arg as *mut Start) };
-    let ctx = context::init_thread();
-    let tid = super::host_tid();
-    {
-        // Publish the tid, then wait until the parent has stored *ptid.
-        let (lock, cv) = &*start.gate;
-        let mut g = lock.lock().unwrap();
-        *g = Gate::Started(tid);
-        cv.notify_all();
-        while !matches!(*g, Gate::Go) {
-            g = cv.wait(g).unwrap();
+impl Thread {
+    fn new(tid: i32, ctx: *mut GuestContext, mask: u64) -> Self {
+        Thread {
+            tid,
+            pthread: AtomicUsize::new(0),
+            ctx,
+            sig: ThreadSignals::new(mask),
+            park: Parker::default(),
+            clear_child_tid: AtomicU64::new(0),
+            robust_list: AtomicU64::new(0),
+            name: Mutex::new([0; 16]),
+            sched: Sched {
+                nice: AtomicI32::new(0),
+                policy: AtomicI32::new(0),
+                priority: AtomicI32::new(0),
+            },
+            stacks: Mutex::new(None),
         }
     }
-    // SAFETY: `ctx` is this thread's fresh context; the parent's registers
-    // were copied into `regs` while the parent was stopped in the syscall.
+
+    /// Raise a host signal on this thread. The caller holds the table lock,
+    /// so the host thread cannot finish exiting meanwhile.
+    pub fn raise_host_locked(&self, sig: i32) {
+        let p = self.pthread.load(SeqCst);
+        if p != 0 {
+            // SAFETY: the pthread is alive while it is in the table.
+            unsafe { libc::pthread_kill(p as libc::pthread_t, sig) };
+        }
+    }
+}
+
+static THREADS: Mutex<Option<HashMap<i32, Arc<Thread>>>> = Mutex::new(None);
+static NEXT_TID: AtomicU32 = AtomicU32::new(0);
+/// The main thread's exit code once it has called `exit` (the process
+/// exits with it when the last thread does), else -1.
+static LEADER_EXIT: AtomicI32 = AtomicI32::new(-1);
+/// For host signals that land on a non-guest thread: the main thread's
+/// pthread and record, reachable without locks.
+static MAIN_PTHREAD: AtomicUsize = AtomicUsize::new(0);
+static MAIN_THREAD: AtomicUsize = AtomicUsize::new(0);
+
+pub fn with_table<R>(f: impl FnOnce(&HashMap<i32, Arc<Thread>>) -> R) -> R {
+    let mut t = THREADS.lock().unwrap_or_else(|e| e.into_inner());
+    f(t.get_or_insert_with(HashMap::new))
+}
+
+fn with_table_mut<R>(f: impl FnOnce(&mut HashMap<i32, Arc<Thread>>) -> R) -> R {
+    let mut t = THREADS.lock().unwrap_or_else(|e| e.into_inner());
+    f(t.get_or_insert_with(HashMap::new))
+}
+
+pub fn find(tid: i32) -> Option<Arc<Thread>> {
+    with_table(|t| t.get(&tid).cloned())
+}
+
+pub fn unpark(tid: i32) {
+    if let Some(th) = find(tid) {
+        th.park.unpark();
+    }
+}
+
+fn pid() -> i32 {
+    // SAFETY: trivial.
+    unsafe { libc::getpid() }
+}
+
+pub fn main_tid() -> i32 {
+    pid()
+}
+
+/// The calling thread's record, if it runs guest code.
+pub fn current() -> Option<&'static Thread> {
+    let ctx = context::current_ctx();
+    // SAFETY: a live context points at its thread, which outlives it.
+    unsafe { ctx.as_ref().and_then(|c| c.thread.as_ref()) }
+}
+
+pub fn is_current(th: &Thread) -> bool {
+    current().is_some_and(|c| std::ptr::eq(c, th))
+}
+
+/// Linux tid of the calling thread (the pid before it runs guest code).
+pub fn host_tid() -> i64 {
+    current().map_or(pid(), |t| t.tid) as i64
+}
+
+pub fn gettid() -> i64 {
+    host_tid()
+}
+
+/// Set the calling thread's `comm` (PR_SET_NAME).
+pub fn set_name(name: [u8; 16]) {
+    if let Some(t) = current() {
+        *t.name.lock().unwrap_or_else(|e| e.into_inner()) = name;
+    }
+}
+
+pub fn name() -> [u8; 16] {
+    current().map_or([0; 16], |t| {
+        *t.name.lock().unwrap_or_else(|e| e.into_inner())
+    })
+}
+
+/// Poke the main thread from a host signal handler on a thread that runs
+/// no guest code (no locks: the handler may have interrupted their owner).
+pub fn poke_main_from_handler(sig: i32) {
+    let main = MAIN_THREAD.load(SeqCst) as *const Thread;
+    // SAFETY: the main thread's record is never freed (see `exit`).
+    if let Some(th) = unsafe { main.as_ref() } {
+        th.sig.attn.store(1, SeqCst);
+        th.park.unpark();
+    }
+    let p = MAIN_PTHREAD.load(SeqCst);
+    if p != 0 {
+        // SAFETY: Darwin keeps the main thread's pthread_t valid.
+        unsafe { libc::pthread_kill(p as libc::pthread_t, sig) };
+    }
+}
+
+fn alloc_tid(t: &HashMap<i32, Arc<Thread>>) -> Option<i32> {
+    let base = TID_BASE + (pid() << 12);
+    (0..TIDS_PER_PROCESS)
+        .map(|_| base + (NEXT_TID.fetch_add(1, SeqCst) % TIDS_PER_PROCESS) as i32 + 1)
+        .find(|tid| !t.contains_key(tid))
+}
+
+/// Make the calling host thread a guest thread with context `ctx` (which
+/// has no thread yet): the first becomes the main thread (tid = pid).
+pub fn register_current(ctx: *mut GuestContext, stacks: HostStacks) {
+    let th = with_table_mut(|t| {
+        let tid = if t.contains_key(&pid()) {
+            alloc_tid(t).expect("no free tid")
+        } else {
+            pid()
+        };
+        let th = Arc::new(Thread::new(tid, ctx, 0));
+        t.insert(tid, th.clone());
+        th
+    });
+    *th.stacks.lock().unwrap() = Some(stacks);
+    // SAFETY: pthread_self is always valid.
+    th.pthread
+        .store(unsafe { libc::pthread_self() } as usize, SeqCst);
+    if th.tid == pid() {
+        MAIN_PTHREAD.store(th.pthread.load(SeqCst), SeqCst);
+        MAIN_THREAD.store(Arc::as_ptr(&th) as usize, SeqCst);
+    }
+    // SAFETY: `ctx` is the caller's fresh context.
     unsafe {
-        let c = &mut *ctx;
-        c.x = start.regs.x;
-        c.v = start.regs.v;
-        c.sp = start.regs.sp;
-        c.pc = start.regs.pc;
-        c.nzcv = start.regs.nzcv;
-        c.fpcr = start.regs.fpcr;
-        c.fpsr = start.regs.fpsr;
-        c.stub_ret = 0;
-        if let Some(tp) = start.tls {
-            context::set_guest_tp(tp);
-        }
-        if start.set_tid != 0 {
-            (start.set_tid as *mut u32).write_volatile(tid as u32);
-        }
+        (*ctx).tid = th.tid as u64;
+        (*ctx).attn = &th.sig.attn;
+        (*ctx).thread = Arc::into_raw(th);
     }
-    set_clear_tid(start.clear_tid);
-    drop(start);
-    context::resume_guest()
 }
 
+// ---- clone ----------------------------------------------------------------------
+
+struct Boot {
+    thread: Arc<Thread>,
+    tp: u64,
+}
+
+/// clone(flags, newsp, parent_tid, tls, child_tid) for threads.
 pub fn clone(ctx: &GuestContext, a: [u64; 6]) -> i64 {
-    let (flags, stack, ptid, tls, ctid) = (a[0], a[1], a[2], a[3], a[4]);
-    let thread = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD;
-    if flags & thread != thread {
-        eprintln!("[linux-abi] clone flags {flags:#x}: only threads are implemented");
-        return -(ENOSYS as i64);
-    }
-    if stack == 0 {
+    spawn(ctx, a[0], a[1], a[2], a[3], a[4])
+}
+
+/// clone3(args, size) for threads.
+pub fn clone3(ctx: &GuestContext, a: [u64; 6]) -> i64 {
+    if a[1] < 64 {
         return -(EINVAL as i64);
     }
-    // SAFETY: an all-zero context is valid; the copy is filled below.
-    let mut regs: Box<GuestContext> = Box::new(unsafe { std::mem::zeroed() });
-    regs.x = ctx.x;
-    regs.x[0] = 0;
-    regs.v = ctx.v;
-    regs.sp = stack;
-    regs.pc = ctx.resume_pc();
-    regs.nzcv = ctx.nzcv;
-    regs.fpcr = ctx.fpcr;
-    regs.fpsr = ctx.fpsr;
-    let gate = Arc::new((Mutex::new(Gate::Created), Condvar::new()));
-    let start = Box::new(Start {
-        regs,
-        tls: (flags & CLONE_SETTLS != 0).then_some(tls),
-        clear_tid: if flags & CLONE_CHILD_CLEARTID != 0 {
-            ctid
-        } else {
-            0
-        },
-        set_tid: if flags & CLONE_CHILD_SETTID != 0 {
-            ctid
-        } else {
-            0
-        },
-        gate: gate.clone(),
-    });
-    // SAFETY: pthread attributes on our stack, started detached.
-    let r = unsafe {
-        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
-        libc::pthread_attr_init(&mut attr);
-        libc::pthread_attr_setstacksize(&mut attr, PTHREAD_STACK);
-        libc::pthread_attr_setdetachstate(&mut attr, libc::PTHREAD_CREATE_DETACHED);
-        let mut t: libc::pthread_t = std::mem::zeroed();
-        let raw = Box::into_raw(start);
-        let r = libc::pthread_create(&mut t, &attr, child_main, raw.cast());
-        libc::pthread_attr_destroy(&mut attr);
-        if r != 0 {
-            drop(Box::from_raw(raw));
-        }
-        r
-    };
-    if r != 0 {
-        return -(EAGAIN as i64);
+    // SAFETY: guest struct clone_args (at least the version-0 64 bytes).
+    let c = unsafe { (a[0] as *const [u64; 8]).read_unaligned() };
+    let [
+        flags,
+        pidfd,
+        child_tid,
+        parent_tid,
+        exit_signal,
+        stack,
+        stack_size,
+        tls,
+    ] = c;
+    if flags & CLONE_THREAD != 0 && (pidfd != 0 || exit_signal != 0) {
+        return -(EINVAL as i64);
     }
-    let (lock, cv) = &*gate;
-    let mut g = lock.lock().unwrap();
-    let tid = loop {
-        if let Gate::Started(tid) = *g {
-            break tid;
-        }
-        g = cv.wait(g).unwrap();
-    };
-    if flags & CLONE_PARENT_SETTID != 0 {
-        // SAFETY: guest pointer to the new thread's tid field.
-        unsafe { (ptid as *mut u32).write_volatile(tid as u32) };
-    }
-    *g = Gate::Go;
-    cv.notify_all();
-    tid
+    let sp = if stack == 0 { 0 } else { stack + stack_size };
+    spawn(ctx, flags | exit_signal, sp, parent_tid, tls, child_tid)
 }
 
-/// `exit` of the calling thread: CLONE_CHILD_CLEARTID, then the Darwin
-/// thread ends. The main thread's exit ends the process.
-pub fn exit(a: [u64; 6]) -> i64 {
+fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: u64) -> i64 {
+    if flags & CLONE_THREAD == 0 {
+        eprintln!(
+            "[linux-abi] clone({flags:#x}) of a process is not implemented; only threads are"
+        );
+        return -(ENOSYS as i64);
+    }
+    // Linux: THREAD needs SIGHAND, which needs VM.
+    if flags & CLONE_SIGHAND == 0 || flags & CLONE_VM == 0 || flags & !(THREAD_FLAGS | 0xff) != 0 {
+        return -(EINVAL as i64);
+    }
+    if flags & (CLONE_VFORK | CLONE_PIDFD) != 0 {
+        return -(EINVAL as i64);
+    }
+    let Some(parent) = current() else {
+        return -(EINVAL as i64);
+    };
+    let child_ctx = Box::into_raw(context::copy_regs(ctx));
+    // SAFETY: fresh context owned here until the child starts.
+    let c = unsafe { &mut *child_ctx };
+    c.x[0] = 0;
+    if newsp != 0 {
+        c.sp = newsp;
+    }
+    let th = with_table_mut(|t| {
+        let tid = alloc_tid(t)?;
+        let th = Arc::new(Thread::new(tid, child_ctx, parent.sig.mask()));
+        *th.name.lock().unwrap() = *parent.name.lock().unwrap();
+        for (d, s) in [
+            (&th.sched.nice, &parent.sched.nice),
+            (&th.sched.policy, &parent.sched.policy),
+            (&th.sched.priority, &parent.sched.priority),
+        ] {
+            d.store(s.load(SeqCst), SeqCst);
+        }
+        if flags & CLONE_CHILD_CLEARTID != 0 {
+            th.clear_child_tid.store(ctid, SeqCst);
+        }
+        t.insert(tid, th.clone());
+        Some(th)
+    });
+    let Some(th) = th else {
+        // SAFETY: never handed out.
+        drop(unsafe { Box::from_raw(child_ctx) });
+        return -(EAGAIN as i64);
+    };
+    let tid = th.tid;
+    c.tid = tid as u64;
+    c.attn = &th.sig.attn;
+    c.thread = Arc::into_raw(th.clone());
+    // Linux writes both before the child can run.
+    // SAFETY: guest tid words.
+    unsafe {
+        if flags & CLONE_PARENT_SETTID != 0 {
+            (ptid as *mut i32).write_volatile(tid);
+        }
+        if flags & CLONE_CHILD_SETTID != 0 {
+            (ctid as *mut i32).write_volatile(tid);
+        }
+    }
+    let tp = if flags & CLONE_SETTLS != 0 {
+        tls
+    } else {
+        context::guest_tp()
+    };
+    let boot = Box::into_raw(Box::new(Boot {
+        thread: th.clone(),
+        tp,
+    }));
+    // The child may run, exit and be freed before pthread_create returns:
+    // nothing of it is touched afterwards (experiments/p0/02).
+    let ok = {
+        // SAFETY: standard pthread creation with a detached attribute.
+        unsafe {
+            let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+            libc::pthread_attr_init(&mut attr);
+            libc::pthread_attr_setstacksize(&mut attr, HOST_STACK);
+            libc::pthread_attr_setdetachstate(&mut attr, libc::PTHREAD_CREATE_DETACHED);
+            let mut pt: libc::pthread_t = std::mem::zeroed();
+            let r = libc::pthread_create(&mut pt, &attr, thread_start, boot as *mut _);
+            libc::pthread_attr_destroy(&mut attr);
+            r == 0
+        }
+    };
+    if !ok {
+        with_table_mut(|t| t.remove(&tid));
+        // SAFETY: the child never started; reclaim what it would own.
+        unsafe {
+            drop(Box::from_raw(boot));
+            drop(Arc::from_raw(c.thread));
+            drop(Box::from_raw(child_ctx));
+        }
+        return -(EAGAIN as i64);
+    }
+    tid as i64
+}
+
+extern "C" fn thread_start(arg: *mut libc::c_void) -> *mut libc::c_void {
+    // SAFETY: `arg` is the Boot handed over by `spawn`.
+    let boot = unsafe { Box::from_raw(arg as *mut Boot) };
+    let th = &boot.thread;
+    let ctx = th.ctx;
+    let anchor = 0u8;
+    let host_sp = (&anchor as *const u8 as u64 - 256) & !15;
+    // SAFETY: the child's own context, now bound to this host thread.
+    unsafe {
+        (*ctx).host_sp = host_sp;
+        *th.stacks.lock().unwrap() = Some(context::bind(ctx, boot.tp));
+        th.pthread.store(libc::pthread_self() as usize, SeqCst);
+    }
+    drop(boot);
+    // SAFETY: the context holds the child's registers.
+    unsafe { context::resume(ctx) }
+}
+
+// ---- exit -----------------------------------------------------------------------
+
+/// exit(code): end the calling thread. The process ends with the last one
+/// (with the main thread's code if it exited earlier, as Linux reports).
+pub fn exit(a: [u64; 6]) -> ! {
+    let code = a[0] as i32 & 0xff;
+    let Some(th) = current() else { exit_group(a) };
+    // No host signal handler may run on this thread from here on.
+    // SAFETY: blocking signals for the calling thread.
+    unsafe {
+        let mut all: libc::sigset_t = 0;
+        libc::sigfillset(&mut all);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &all, std::ptr::null_mut());
+    }
     // Now off the guest stack: its deferred munmap (bionic's
-    // _exit_with_stack_teardown) can run. bionic cleared the tid address of
-    // such a thread first.
+    // _exit_with_stack_teardown) can run.
     super::run_deferred_unmaps();
-    // SAFETY: trivial.
-    if unsafe { libc::pthread_main_np() } == 1 {
-        return super::process::exit_group(a);
+    super::futex::exit_robust_list(th.robust_list.load(SeqCst), th.tid);
+    let ctid = th.clear_child_tid.load(SeqCst);
+    if ctid != 0 {
+        // SAFETY: the guest tid word registered with CLONE_CHILD_CLEARTID or
+        // set_tid_address.
+        unsafe { (ctid as *mut u32).write_volatile(0) };
+        super::futex::wake_one(ctid);
     }
-    let clear = CLEAR_TID.with(|c| c.get());
-    if clear != 0 {
-        // SAFETY: the guest registered this word for exactly this store.
-        unsafe { (clear as *mut u32).write_volatile(0) };
-        super::futex::wake_all(clear);
+    let main = th.tid == pid();
+    let left = with_table_mut(|t| {
+        t.remove(&th.tid);
+        t.len()
+    });
+    if main {
+        LEADER_EXIT.store(code, SeqCst);
     }
-    // SAFETY: ending this Darwin thread; the guest never runs on it again.
-    unsafe { libc::pthread_exit(std::ptr::null_mut()) }
+    if left == 0 {
+        let leader = LEADER_EXIT.load(SeqCst);
+        end_process(if leader >= 0 { leader } else { code });
+    }
+    super::signal::reroute_process_pending();
+    let ctx = th.ctx;
+    let stacks = th.stacks.lock().unwrap().take();
+    // SAFETY: nothing runs on this thread's context, stacks or record after
+    // this; the main thread's record stays (host handlers may reach it).
+    unsafe {
+        context::unbind(stacks);
+        if !main {
+            drop(Arc::from_raw((*ctx).thread));
+            drop(Box::from_raw(ctx));
+        }
+        libc::pthread_exit(std::ptr::null_mut())
+    }
+}
+
+pub fn exit_group(a: [u64; 6]) -> ! {
+    end_process(a[0] as i32 & 0xff)
+}
+
+fn end_process(code: i32) -> ! {
+    super::cred::forget(pid());
+    // SAFETY: ending the process without host atexit handlers, as Linux's
+    // exit_group.
+    unsafe { libc::_exit(code) }
+}
+
+pub fn set_tid_address(a: [u64; 6]) -> i64 {
+    match current() {
+        Some(th) => {
+            th.clear_child_tid.store(a[0], SeqCst);
+            th.tid as i64
+        }
+        None => gettid(),
+    }
+}
+
+/// set_robust_list(head, len): the list is walked when the thread exits.
+pub fn set_robust_list(a: [u64; 6]) -> i64 {
+    if a[1] != 24 {
+        return -(EINVAL as i64);
+    }
+    if let Some(th) = current() {
+        th.robust_list.store(a[0], SeqCst);
+    }
+    0
+}
+
+/// get_robust_list(tid, head_ptr, len_ptr).
+pub fn get_robust_list(a: [u64; 6]) -> i64 {
+    let th = if a[0] == 0 {
+        current().and_then(|c| find(c.tid))
+    } else {
+        find(a[0] as i32)
+    };
+    let Some(th) = th else {
+        return -(ESRCH as i64);
+    };
+    // SAFETY: guest out-pointers.
+    unsafe {
+        (a[1] as *mut u64).write_unaligned(th.robust_list.load(SeqCst));
+        (a[2] as *mut u64).write_unaligned(24);
+    }
+    0
+}
+
+// ---- fork -------------------------------------------------------------------------
+
+/// The layer's shared state held across a Darwin fork, so that the child
+/// copies none of it mid-update. Taken in the lock order used elsewhere.
+struct ForkLocks {
+    /// The host signal mask before the fork: host signals stay blocked
+    /// until the child has rebuilt its thread and signal state, so none is
+    /// recorded against the parent's records and then dropped.
+    mask: libc::sigset_t,
+    timers: MutexGuard<'static, i32>,
+    stacks: MutexGuard<'static, Vec<u64>>,
+    signals: super::signal::ForkLocks,
+    threads: MutexGuard<'static, Option<HashMap<i32, Arc<Thread>>>>,
+}
+
+thread_local! {
+    static FORK_LOCKS: RefCell<Option<ForkLocks>> = const { RefCell::new(None) };
+}
+
+/// Call right before forking a guest process (the forking thread must be a
+/// guest thread); then [`fork_parent`] in the parent and [`fork_child`] in
+/// the child.
+pub fn fork_prepare() {
+    let me = current().expect("fork from a thread without a guest context");
+    let mut mask: libc::sigset_t = 0;
+    // SAFETY: blocking every host signal on the calling thread.
+    unsafe {
+        let mut all: libc::sigset_t = 0;
+        libc::sigfillset(&mut all);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &all, &mut mask);
+    }
+    super::futex::fork_lock();
+    let timers = super::park::fork_lock();
+    let stacks = context::fork_lock();
+    let signals = super::signal::fork_lock(me);
+    let threads = THREADS.lock().unwrap_or_else(|e| e.into_inner());
+    FORK_LOCKS.with(|f| {
+        *f.borrow_mut() = Some(ForkLocks {
+            mask,
+            timers,
+            stacks,
+            signals,
+            threads,
+        })
+    });
+}
+
+fn fork_locks() -> ForkLocks {
+    FORK_LOCKS
+        .with(|f| f.borrow_mut().take())
+        .expect("fork_prepare was not called")
+}
+
+pub fn fork_parent() {
+    let l = fork_locks();
+    let mask = l.mask;
+    drop(l);
+    super::futex::fork_unlock(false);
+    unmask(mask);
+}
+
+fn unmask(mask: libc::sigset_t) {
+    // SAFETY: restoring the calling thread's host signal mask.
+    unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) };
+}
+
+/// In the child, where only the calling thread exists: it becomes the main
+/// thread (tid = the new pid) with the signal mask, alternate stack, name
+/// and scheduling attributes it had; every other thread, futex waiter,
+/// pending signal and the timer thread are gone.
+pub fn fork_child() {
+    let mut l = fork_locks();
+    let old = current().expect("fork_child on a thread without a guest context");
+    let ctx = old.ctx;
+    let new = Arc::new(Thread::new(pid(), ctx, old.sig.mask()));
+    *new.name.lock().unwrap() = *old.name.lock().unwrap();
+    for (d, s) in [
+        (&new.sched.nice, &old.sched.nice),
+        (&new.sched.policy, &old.sched.policy),
+        (&new.sched.priority, &old.sched.priority),
+    ] {
+        d.store(s.load(SeqCst), SeqCst);
+    }
+    *new.stacks.lock().unwrap() = old.stacks.lock().unwrap().take();
+    // SAFETY: pthread_self is always valid.
+    new.pthread
+        .store(unsafe { libc::pthread_self() } as usize, SeqCst);
+    let t = l.threads.get_or_insert_with(HashMap::new);
+    t.clear();
+    t.insert(new.tid, new.clone());
+    super::signal::fork_child(l.signals, old, &new);
+    MAIN_PTHREAD.store(new.pthread.load(SeqCst), SeqCst);
+    MAIN_THREAD.store(Arc::as_ptr(&new) as usize, SeqCst);
+    LEADER_EXIT.store(-1, SeqCst);
+    NEXT_TID.store(0, SeqCst);
+    // SAFETY: the calling thread's own context; the old record is leaked
+    // (the parent's copy of it lives on in the parent).
+    unsafe {
+        (*ctx).tid = new.tid as u64;
+        (*ctx).attn = &new.sig.attn;
+        (*ctx).thread = Arc::into_raw(new);
+    }
+    drop(l.threads);
+    context::fork_child();
+    drop(l.stacks);
+    super::park::fork_child(l.timers);
+    super::futex::fork_unlock(true);
+    unmask(l.mask);
 }

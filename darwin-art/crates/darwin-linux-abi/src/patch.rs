@@ -459,13 +459,18 @@ pub unsafe fn handle_brk(uc: *mut libc::ucontext_t) -> bool {
                 ctx.x[30] = ss.lr;
                 ctx.sp = ss.sp;
                 ctx.pc = ss.pc + 4;
+                ctx.nzcv = ss.cpsr as u64;
                 ctx.v = (*mc).ns.v;
                 crate::sys::dispatch(&mut ctx);
+                crate::sys::repoke_self();
                 ss.x.copy_from_slice(&ctx.x[..29]);
                 ss.fp = ctx.x[29];
                 ss.lr = ctx.x[30];
                 ss.sp = ctx.sp;
                 ss.pc = ctx.pc - 4;
+                // rt_sigreturn restores these too.
+                ss.cpsr = (ss.cpsr & !0xf000_0000) | (ctx.nzcv as u32 & 0xf000_0000);
+                (*mc).ns.v = ctx.v;
             }
         }
         ss.pc += 4;

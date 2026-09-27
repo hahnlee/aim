@@ -36,7 +36,7 @@ const P_PIDFD: u64 = 3;
 /// Linux signal number of a Darwin one.
 pub fn signal_from_host(host: i32) -> i32 {
     (1..32)
-        .find(|&l| super::process::signal_to_host(l) == host)
+        .find(|&l| super::signal::to_host(l) == host)
         .unwrap_or(host)
 }
 
@@ -382,12 +382,12 @@ pub fn pidfd_open(a: [u64; 6]) -> i64 {
 /// process, as the host signal for another one.
 fn send_signal(pid: i32, sig: i32) -> i64 {
     if pid as i64 == super::process::getpid() {
-        return super::process::kill(129, [pid as u64, sig as u64, 0, 0, 0, 0]);
+        return super::signal::kill([pid as u64, sig as u64, 0, 0, 0, 0]);
     }
     let host = if sig == 0 {
         0
     } else {
-        match super::process::signal_to_host(sig) {
+        match super::signal::to_host(sig) {
             0 => return -(EINVAL as i64),
             h => h,
         }

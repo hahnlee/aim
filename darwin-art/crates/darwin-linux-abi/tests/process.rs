@@ -271,7 +271,6 @@ fn identity_files_inherited_env_and_fds_reach_the_guest() {
 /// The image's mksh forks, pipes and execs itself; its parent waits for
 /// SIGCHLD in `sigsuspend`.
 #[test]
-#[ignore = "mksh waits for SIGCHLD in rt_sigsuspend, which needs guest signal delivery"]
 fn mksh_runs_a_pipeline() {
     let Some(root) = root() else { return };
     let out = linux_run(

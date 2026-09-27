@@ -2,7 +2,10 @@
 
 use std::sync::OnceLock;
 
-use crate::errno::{self, EINVAL, EPERM, ESRCH};
+use std::sync::atomic::Ordering::SeqCst;
+
+use super::thread::{self, Thread};
+use crate::errno::{self, EINVAL, ESRCH};
 
 struct Exe {
     guest: String,
@@ -34,122 +37,86 @@ pub fn getppid() -> i64 {
     unsafe { libc::getppid() as i64 }
 }
 
-/// Linux tid of the calling host thread. The main thread's tid equals the
-/// pid; `clone` threads are future work.
-pub fn host_tid() -> i64 {
-    // SAFETY: trivial.
-    if unsafe { libc::pthread_main_np() } == 1 {
-        return getpid();
-    }
-    let mut id = 0u64;
-    // SAFETY: querying the current thread.
-    unsafe { libc::pthread_threadid_np(0 as libc::pthread_t, &mut id) };
-    (id & 0x3fff_ffff) as i64
-}
+pub use super::thread::gettid;
 
-/// gettid: the tid recorded for this guest thread (the lean path answers it
-/// without reaching here unless tracing).
-pub fn gettid() -> i64 {
-    host_tid()
-}
+const SCHED_OTHER: i32 = 0;
+const SCHED_FIFO: i32 = 1;
+const SCHED_RR: i32 = 2;
+const SCHED_BATCH: i32 = 3;
+const SCHED_IDLE: i32 = 5;
+const SCHED_RESET_ON_FORK: i32 = 0x4000_0000;
 
-pub fn set_tid_address(a: [u64; 6]) -> i64 {
-    super::thread::set_clear_tid(a[0]);
-    gettid()
-}
-
-pub fn exit_group(a: [u64; 6]) -> i64 {
-    super::cred::forget(getpid() as i32);
-    // SAFETY: terminating the process without running host atexit handlers,
-    // as a Linux exit_group would.
-    unsafe { libc::_exit(a[0] as i32) }
-}
-
-/// Linux -> Darwin signal numbers (0 when Darwin has no equivalent).
-pub fn signal_to_host(sig: i32) -> i32 {
-    match sig {
-        1 => libc::SIGHUP,
-        2 => libc::SIGINT,
-        3 => libc::SIGQUIT,
-        4 => libc::SIGILL,
-        5 => libc::SIGTRAP,
-        6 => libc::SIGABRT,
-        7 => libc::SIGBUS,
-        8 => libc::SIGFPE,
-        9 => libc::SIGKILL,
-        10 => libc::SIGUSR1,
-        11 => libc::SIGSEGV,
-        12 => libc::SIGUSR2,
-        13 => libc::SIGPIPE,
-        14 => libc::SIGALRM,
-        15 => libc::SIGTERM,
-        17 => libc::SIGCHLD,
-        18 => libc::SIGCONT,
-        19 => libc::SIGSTOP,
-        20 => libc::SIGTSTP,
-        21 => libc::SIGTTIN,
-        22 => libc::SIGTTOU,
-        23 => libc::SIGURG,
-        24 => libc::SIGXCPU,
-        25 => libc::SIGXFSZ,
-        26 => libc::SIGVTALRM,
-        27 => libc::SIGPROF,
-        28 => libc::SIGWINCH,
-        29 => libc::SIGIO,
-        31 => libc::SIGSYS,
-        _ => 0,
-    }
-}
-
-/// kill/tkill/tgkill aimed at this process. Guest signal handlers are not
-/// delivered yet, so a fatal signal takes its default action on the host.
-pub fn kill(nr: u64, a: [u64; 6]) -> i64 {
-    let (target, sig) = match nr {
-        131 => (a[1] as i64, a[2] as i32),
-        _ => (a[0] as i64, a[1] as i32),
-    };
-    let me = getpid();
-    let self_target = target == me || target == gettid() || (nr == 129 && target == 0);
-    if !self_target {
-        return -(if target <= 0 { EPERM } else { ESRCH } as i64);
-    }
-    if sig == 0 {
-        return 0;
-    }
-    let host = signal_to_host(sig);
-    if host == 0 {
-        return -(EINVAL as i64);
-    }
-    eprintln!("[linux-abi] guest sent itself signal {sig}; taking the default action");
-    // SAFETY: reset to default and raise, as Linux would with no handler.
-    unsafe {
-        libc::signal(host, libc::SIG_DFL);
-        errno::check(libc::raise(host) as i64)
-    }
-}
-
-const SCHED_OTHER: u64 = 0;
-
-/// sched_setparam (118), sched_setscheduler (119), sched_getscheduler (120),
-/// sched_getparam (121) for this process. Guest threads run under Darwin's
-/// scheduler, which Linux reports as SCHED_OTHER with priority 0.
-pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
-    let pid = a[0] as i64;
+/// The thread a scheduling call names: 0 is the caller, a pid means the
+/// main thread (Linux applies these per thread).
+fn sched_target(pid: i64) -> Result<std::sync::Arc<Thread>, i64> {
     if pid < 0 {
-        return -(EINVAL as i64);
+        return Err(-(EINVAL as i64));
     }
-    if pid != 0 && pid != getpid() && pid != gettid() {
-        return -(ESRCH as i64);
+    let tid = if pid == 0 { thread::gettid() } else { pid };
+    thread::find(tid as i32).ok_or(-(ESRCH as i64))
+}
+
+fn priority_range(policy: i32) -> Option<(i32, i32)> {
+    match policy {
+        SCHED_OTHER | SCHED_BATCH | SCHED_IDLE => Some((0, 0)),
+        SCHED_FIFO | SCHED_RR => Some((1, 99)),
+        _ => None,
     }
+}
+
+/// sched_setparam (118), sched_setscheduler (119), sched_getscheduler
+/// (120), sched_getparam (121). The policy and priority are recorded per
+/// thread; Darwin schedules the host threads as it sees fit.
+pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
+    let th = match sched_target(a[0] as i64) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let s = &th.sched;
     match nr {
-        120 => SCHED_OTHER as i64,
+        120 => s.policy.load(SeqCst) as i64,
         121 => {
             // SAFETY: guest struct sched_param { int sched_priority; }.
-            unsafe { (a[1] as *mut i32).write_unaligned(0) };
+            unsafe { (a[1] as *mut i32).write_unaligned(s.priority.load(SeqCst)) };
             0
         }
-        119 if a[1] & !0x4000_0000 != SCHED_OTHER => -(EPERM as i64),
-        _ => 0,
+        _ => {
+            let policy = if nr == 119 {
+                a[1] as i32 & !SCHED_RESET_ON_FORK
+            } else {
+                s.policy.load(SeqCst)
+            };
+            let param = if nr == 119 { a[2] } else { a[1] };
+            if param == 0 {
+                return -(EINVAL as i64);
+            }
+            // SAFETY: guest struct sched_param.
+            let prio = unsafe { (param as *const i32).read_unaligned() };
+            match priority_range(policy) {
+                Some((lo, hi)) if (lo..=hi).contains(&prio) => {
+                    s.policy.store(policy, SeqCst);
+                    s.priority.store(prio, SeqCst);
+                    0
+                }
+                _ => -(EINVAL as i64),
+            }
+        }
+    }
+}
+
+/// sched_get_priority_max (125) and sched_get_priority_min (126).
+pub fn sched_priority_range(nr: u64, a: [u64; 6]) -> i64 {
+    match priority_range(a[0] as i32) {
+        Some((lo, hi)) => (if nr == 125 { hi } else { lo }) as i64,
+        None => -(EINVAL as i64),
+    }
+}
+
+/// sched_setaffinity: accepted; Darwin places the host threads.
+pub fn sched_setaffinity(a: [u64; 6]) -> i64 {
+    match sched_target(a[0] as i64) {
+        Ok(_) => 0,
+        Err(e) => e,
     }
 }
 
@@ -157,8 +124,8 @@ pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
 /// as the kernel does (a multiple of 8 covering the CPUs).
 pub fn sched_getaffinity(a: [u64; 6]) -> i64 {
     let (pid, len, mask) = (a[0] as i64, a[1] as usize, a[2]);
-    if pid != 0 && pid != getpid() && pid != gettid() {
-        return -(ESRCH as i64);
+    if let Err(e) = sched_target(pid) {
+        return e;
     }
     let ncpu = std::thread::available_parallelism().map_or(1, |n| n.get());
     let bytes = ncpu.div_ceil(64) * 8;

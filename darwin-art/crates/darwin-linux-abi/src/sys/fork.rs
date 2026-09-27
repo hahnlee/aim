@@ -143,10 +143,18 @@ fn fork(ctx: &mut GuestContext, r: Request) -> i64 {
     // Hold stderr's lock across the fork so the child never inherits it
     // held by a thread that does not exist there. Darwin's libc takes its
     // own locks (malloc and the like) in its fork handlers.
+    // The thread layer's locks are held too (thread table, futex waiters,
+    // signal queues, timers).
+    super::thread::fork_prepare();
     let stderr = std::io::stderr().lock();
     // SAFETY: fork; the child continues on this thread only.
     let pid = unsafe { libc::fork() };
     drop(stderr);
+    if pid == 0 {
+        super::thread::fork_child();
+    } else {
+        super::thread::fork_parent();
+    }
     if pid < 0 {
         let e = errno::last();
         for fd in done.into_iter().filter(|&fd| fd >= 0) {
@@ -188,21 +196,20 @@ fn fork(ctx: &mut GuestContext, r: Request) -> i64 {
     pid as i64
 }
 
-/// The forked child's layer state: its pid, the one surviving thread (whose
-/// Linux tid is the pid) and the host objects Darwin does not inherit.
+/// The forked child's layer state beyond the thread layer's (which
+/// `thread::fork_child` reset: pid, the one surviving thread with tid = pid,
+/// futex waiters, pending signals): the host objects Darwin does not
+/// inherit.
 fn child_fixups(ctx: &mut GuestContext, r: &Request) {
     // SAFETY: trivial.
     let pid = unsafe { libc::getpid() };
-    // SAFETY: only this thread runs in the child.
-    unsafe { context::LINUX_ABI_PID = pid as u64 };
-    ctx.tid = pid as u64;
     // A new process has no clear_child_tid unless it asked for one.
     let clear = if r.flags & CLONE_CHILD_CLEARTID != 0 {
         r.child_tid
     } else {
         0
     };
-    super::process::set_tid_address([clear, 0, 0, 0, 0, 0]);
+    super::thread::set_tid_address([clear, 0, 0, 0, 0, 0]);
     if r.flags & CLONE_CHILD_SETTID != 0 && r.child_tid != 0 {
         // SAFETY: guest pointer in the child's copy of memory.
         unsafe { (r.child_tid as *mut i32).write_unaligned(pid) };
