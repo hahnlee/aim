@@ -1,0 +1,21 @@
+[package]
+name = "bluetooth"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "android.hardware.bluetooth IBluetoothHci V1 service: a virtual LE controller over CoreBluetooth (host module `bluetooth`)"
+
+[[bin]]
+name = "bluetooth-service"
+path = "src/main.rs"
+
+# Installed as /vendor/bin/hw/<binary> (Cargo target names cannot hold dots).
+[package.metadata.vendor-hal]
+binary = "android.hardware.bluetooth-service.darwin"
+
+[dependencies]
+android_hardware_bluetooth = { path = "../aidl/android.hardware.bluetooth" }
+binder = { path = "../binder" }
+darwin-hostcall = { path = "../../crates/darwin-hostcall" }
+libc = "0.2"

@@ -43,9 +43,12 @@ pub const FN_VERSION: u32 = 0;
 /// Linux errno values used by the host-call layer and its modules.
 pub mod errno {
     pub const EBADF: i32 = 9;
+    pub const EAGAIN: i32 = 11;
+    pub const EBUSY: i32 = 16;
     pub const ENODEV: i32 = 19;
     pub const EINVAL: i32 = 22;
     pub const ENOSYS: i32 = 38;
+    pub const EMSGSIZE: i32 = 90;
     pub const ENOTCONN: i32 = 107;
     pub const ECONNREFUSED: i32 = 111;
 }
@@ -70,6 +73,9 @@ pub mod module {
     pub const LOCATION: u32 = 6;
     /// Audio streams over CoreAudio (the audio HAL's host side).
     pub const AUDIO: u32 = 7;
+    /// A virtual HCI controller over CoreBluetooth (the Bluetooth HAL's
+    /// host side).
+    pub const BLUETOOTH: u32 = 8;
 }
 
 /// Module [`module::HEALTH`]: the host's battery, for
@@ -575,6 +581,64 @@ pub mod audio {
     const _: () = assert!(core::mem::size_of::<Ring>() <= RING_DATA_OFFSET);
 }
 
+/// Module [`module::BLUETOOTH`]: a virtual HCI controller over
+/// CoreBluetooth, for `android.hardware.bluetooth` (`docs/bluetooth.md`).
+///
+/// Packets are H4 payloads without the type byte, as `IBluetoothHci`
+/// carries them. Controller-to-host packets queue in the host; the fd
+/// [`FN_OPEN`] returns becomes readable when the queue is not empty, and
+/// the guest drains it with [`FN_RECV`]. Host code never calls the guest.
+pub mod bluetooth {
+    pub const VERSION: u32 = 1;
+
+    /// Open the controller (powered off until HCI_Reset). Takes no argument
+    /// block. Returns the wake fd (a pipe's read end, close-on-exec,
+    /// non-blocking): each byte in it means "the queue has packets". Returns
+    /// `-EBUSY` when the controller is already open.
+    pub const FN_OPEN: u32 = 1;
+    /// Hand a host-to-controller packet to the controller ([`Packet`], the
+    /// data read). Returns 0, `-EINVAL` for an unknown kind or malformed
+    /// packet, or `-ENODEV` when the controller is not open.
+    pub const FN_SEND: u32 = 2;
+    /// Take the next controller-to-host packet ([`Packet`], the data
+    /// written, `len` set to its length). Returns 0, `-EAGAIN` when the
+    /// queue is empty, `-EMSGSIZE` when `capacity` is too small (the packet
+    /// stays queued), or `-ENODEV`.
+    pub const FN_RECV: u32 = 3;
+    /// Close the controller: drop every link and scan, and the queue. Takes
+    /// no argument block. Returns 0.
+    pub const FN_CLOSE: u32 = 4;
+
+    /// Packet kinds, the H4 type numbers.
+    pub mod kind {
+        pub const COMMAND: u32 = 1;
+        pub const ACL: u32 = 2;
+        pub const SCO: u32 = 3;
+        pub const EVENT: u32 = 4;
+        pub const ISO: u32 = 5;
+    }
+
+    /// The largest packet either way: an ACL packet of 4 header bytes and
+    /// the controller's 1021-byte buffers, or an event of 2 + 255.
+    pub const MAX_PACKET: usize = 1028;
+
+    /// Argument block of [`FN_SEND`] and [`FN_RECV`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Packet {
+        /// One of [`kind`]; set by the host in [`FN_RECV`].
+        pub kind: u32,
+        /// Bytes in `data`; set by the host in [`FN_RECV`].
+        pub len: u32,
+        /// Guest buffer.
+        pub data: u64,
+        /// Size of the buffer at `data` ([`FN_RECV`] only).
+        pub capacity: u64,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Packet>() == 24);
+}
+
 /// A host module, as linked into the syscall layer's registry.
 pub struct HostModule {
     pub id: u32,
@@ -677,6 +741,57 @@ pub mod guest {
         let mut b = health::Battery::default();
         call_with(module::HEALTH, health::FN_BATTERY, &mut b)?;
         Ok(b)
+    }
+
+    /// Open the Bluetooth controller; returns its wake fd.
+    pub fn bluetooth_open() -> Result<i32, Errno> {
+        // SAFETY: FN_OPEN takes no argument block.
+        check(unsafe {
+            call(
+                module::BLUETOOTH,
+                bluetooth::FN_OPEN,
+                core::ptr::null_mut(),
+                0,
+            )
+        })
+        .map(|fd| fd as i32)
+    }
+
+    /// Send a host-to-controller packet of `kind`.
+    pub fn bluetooth_send(kind: u32, data: &[u8]) -> Result<(), Errno> {
+        let mut p = bluetooth::Packet {
+            kind,
+            len: data.len() as u32,
+            data: data.as_ptr() as u64,
+            capacity: data.len() as u64,
+        };
+        call_with(module::BLUETOOTH, bluetooth::FN_SEND, &mut p).map(drop)
+    }
+
+    /// Take the next controller-to-host packet into `buf`: its kind and
+    /// length, or `Err(Errno(EAGAIN))` when none is queued.
+    pub fn bluetooth_recv(buf: &mut [u8]) -> Result<(u32, usize), Errno> {
+        let mut p = bluetooth::Packet {
+            data: buf.as_mut_ptr() as u64,
+            capacity: buf.len() as u64,
+            ..Default::default()
+        };
+        call_with(module::BLUETOOTH, bluetooth::FN_RECV, &mut p)?;
+        Ok((p.kind, p.len as usize))
+    }
+
+    /// Close the Bluetooth controller.
+    pub fn bluetooth_close() -> Result<(), Errno> {
+        // SAFETY: FN_CLOSE takes no argument block.
+        check(unsafe {
+            call(
+                module::BLUETOOTH,
+                bluetooth::FN_CLOSE,
+                core::ptr::null_mut(),
+                0,
+            )
+        })
+        .map(drop)
     }
 
     /// Load the host GPU libraries and resolve the forwarded entry points.

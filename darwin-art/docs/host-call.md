@@ -102,6 +102,7 @@ first.
 | 5 | sensors | 1 | `FN_READ`: fill `sensors::Readings` ([vendor-hals.md](vendor-hals.md)) |
 | 6 | location | 1 | `FN_START`, `FN_STOP`; `FN_READ`: fill `location::Fix` ([vendor-hals.md](vendor-hals.md)) |
 | 7 | audio | 1 | `FN_DEVICES`; `FN_OPEN` on a ring memfd, `FN_START`, `FN_STOP`, `FN_CLOSE` ([audio.md](audio.md)) |
+| 8 | bluetooth | 1 | `FN_OPEN` (returns the wake fd), `FN_SEND`, `FN_RECV`, `FN_CLOSE`: HCI packets to and from the virtual controller ([bluetooth.md](bluetooth.md)) |
 
 ## Vendor HAL build pipeline
 
@@ -183,7 +184,8 @@ instance is undeclared and the original services take their no-HAL paths:
   ([vendor-hals.md](vendor-hals.md));
 - replaced by ours: audio, whose HIDL audio-effect declaration in
   `manifest.xml` also goes ([audio.md](audio.md));
-- replaced by ours later: the composer, camera and Bluetooth;
+- replaced by ours: Bluetooth ([bluetooth.md](bluetooth.md));
+- replaced by ours later: the composer and camera;
 - hardware the device does not have: radio, Wi-Fi (with hostapd and the
   supplicant), fingerprint, USB, lights, storage health, the goldfish
   Codec2 store, and the vendor APEXes contexthub, rebootescrow, Thread, UWB

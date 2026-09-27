@@ -21,6 +21,7 @@ path = "src/bin/linux-translate.rs"
 darwin-binder-driver = { path = "../darwin-binder-driver" }
 darwin-binder-host = { path = "../darwin-binder-host" }
 darwin-host-audio = { path = "../darwin-host-audio" }
+darwin-host-bluetooth = { path = "../darwin-host-bluetooth" }
 darwin-host-display = { path = "../darwin-host-display" }
 darwin-host-gpu = { path = "../darwin-host-gpu" }
 darwin-host-health = { path = "../darwin-host-health" }
