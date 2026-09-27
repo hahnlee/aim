@@ -689,7 +689,9 @@ pub fn futex(a: [u64; 6]) -> i64 {
                 return -(EINVAL as i64);
             }
             if shared() {
-                shared_wake(uaddr, val)
+                // Waiters' bitsets are unknown here: a bitset wake wakes
+                // them all, so the one whose bits match is among them.
+                shared_wake(uaddr, if bitset == BITSET_ANY { val } else { u32::MAX })
             } else {
                 table_wake(uaddr, val, bitset)
             }
@@ -768,6 +770,43 @@ mod tests {
         assert_eq!(w, 6 | 8);
         // Sign-extended cmparg: -1 < 0.
         assert!(wake_op_cmp(u32::MAX, 2 << 24));
+    }
+
+    #[test]
+    fn a_shared_bitset_wake_reaches_the_matching_waiter() {
+        // libfmq's EventFlag: FUTEX_WAIT_BITSET / FUTEX_WAKE_BITSET on a
+        // word in MAP_SHARED memory, with waiters on different bits. A wake
+        // of one waiter on bit 2 must reach the waiter on bit 2.
+        // SAFETY: a fresh anonymous shared mapping, unmapped after the joins.
+        let word_addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                16384,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        } as u64;
+        let mut deadline = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: a local timespec.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut deadline) };
+        deadline.tv_sec += 2;
+        let deadline = &*Box::leak(Box::new(deadline)) as *const libc::timespec as u64;
+        let wait = move |bits: u64| {
+            std::thread::spawn(move || futex([word_addr, FUTEX_WAIT_BITSET, 0, deadline, 0, bits]))
+        };
+        let (on_1, on_2) = (wait(1), wait(2));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        futex([word_addr, FUTEX_WAKE_BITSET, 1, 0, 0, 2]);
+        assert_eq!(on_2.join().unwrap(), 0, "the waiter on bit 2 timed out");
+        // The other waiter wakes spuriously, which futex users tolerate.
+        assert_eq!(on_1.join().unwrap(), 0);
+        // SAFETY: our mapping.
+        unsafe { libc::munmap(word_addr as *mut _, 16384) };
     }
 
     #[test]

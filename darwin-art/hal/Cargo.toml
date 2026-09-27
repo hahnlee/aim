@@ -10,8 +10,11 @@
 [workspace]
 members = [
     "aidl/*",
+    "audio",
+    "audio/check",
     "binder",
     "binder-ndk-sys",
+    "fmq",
     "graphics/allocator",
     "graphics/composer",
     "graphics/gralloc",

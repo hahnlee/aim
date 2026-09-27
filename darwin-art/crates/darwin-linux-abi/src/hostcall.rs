@@ -33,6 +33,7 @@ static MODULES: &[&HostModule] = &[
     &darwin_host_sensors::THERMAL,
     &darwin_host_sensors::SENSORS,
     &darwin_host_location::MODULE,
+    &darwin_host_audio::MODULE,
 ];
 
 const _: () = {
