@@ -463,6 +463,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "darwin-host-audio"
+version = "0.1.0"
+dependencies = [
+ "darwin-hostcall",
+ "libc",
+]
+
+[[package]]
 name = "darwin-host-display"
 version = "0.1.0"
 dependencies = [
@@ -513,6 +521,7 @@ dependencies = [
  "darwin-binder-driver",
  "darwin-binder-host",
  "darwin-guest-init",
+ "darwin-host-audio",
  "darwin-host-display",
  "darwin-host-gpu",
  "darwin-host-health",

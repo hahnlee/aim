@@ -123,17 +123,21 @@ target_dir="${CARGO_TARGET_DIR:-$root/_build/vendor-hals/target}"
 cargo build --manifest-path "$root/hal/Cargo.toml" --locked --release \
   --target aarch64-linux-android --target-dir "$target_dir" --workspace
 # Each service package names its installed binary, and each driver package
-# its installed library, in [package.metadata.vendor-hal].
-mkdir -p "$out/lib"
+# its installed library, in [package.metadata.vendor-hal]; a HAL's test
+# client (run from /data/local/tmp by the crate tests, never placed in the
+# image) is a `test` binary, installed into _build/vendor-hals/test.
+mkdir -p "$out/lib" "$out/test"
 (cd "$root/hal" && cargo metadata --no-deps --format-version 1) | python3 -c '
 import json, sys
 for p in json.load(sys.stdin)["packages"]:
     meta = (p["metadata"] or {}).get("vendor-hal", {})
-    for key, kind, built in (("binary", "bin", "{}"), ("library", "cdylib", "lib{}.so")):
+    for key, kind, built, dir in (("binary", "bin", "{}", "bin"),
+                                  ("library", "cdylib", "lib{}.so", "lib"),
+                                  ("test", "bin", "{}", "test")):
         if key in meta:
             [t] = [t["name"] for t in p["targets"] if kind in t["kind"]]
             print(built.format(t.replace("-", "_") if kind == "cdylib" else t),
-                  "bin" if kind == "bin" else "lib", meta[key])' | while read -r built dir name; do
+                  dir, meta[key])' | while read -r built dir name; do
   install -m 0755 "$target_dir/aarch64-linux-android/release/$built" "$out/$dir/$name"
   echo "built $out/$dir/$name"
 done

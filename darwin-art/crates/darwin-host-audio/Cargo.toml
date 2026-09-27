@@ -1,0 +1,11 @@
+[package]
+license.workspace = true
+name = "darwin-host-audio"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-call module for android.hardware.audio.core: PCM streams on CoreAudio (AUHAL) over a shared lock-free ring"
+
+[dependencies]
+darwin-hostcall = { path = "../darwin-hostcall" }
+libc = "0.2"

@@ -101,6 +101,7 @@ first.
 | 4 | thermal | 1 | `FN_READ`: fill `thermal::Thermal` ([vendor-hals.md](vendor-hals.md)) |
 | 5 | sensors | 1 | `FN_READ`: fill `sensors::Readings` ([vendor-hals.md](vendor-hals.md)) |
 | 6 | location | 1 | `FN_START`, `FN_STOP`; `FN_READ`: fill `location::Fix` ([vendor-hals.md](vendor-hals.md)) |
+| 7 | audio | 1 | `FN_DEVICES`; `FN_OPEN` on a ring memfd, `FN_START`, `FN_STOP`, `FN_CLOSE` ([audio.md](audio.md)) |
 
 ## Vendor HAL build pipeline
 
@@ -140,7 +141,9 @@ verified:
    or not) with the NDK clang as linker. It installs each service under the
    name in its `[package.metadata.vendor-hal] binary` into
    `_build/vendor-hals/bin`. `image/overlay.toml` places it in the derived
-   image.
+   image. A HAL's test client (`test` in the same table) goes to
+   `_build/vendor-hals/test`, which crate tests copy into the guest's
+   `/data/local/tmp`; it is never placed in the image.
 
 The interfaces P4 and P5 need build: power V6 (imports common.fmq V1),
 graphics composer3 V4, allocator V2 and common V6 (with drm.common V1),
@@ -178,8 +181,9 @@ instance is undeclared and the original services take their no-HAL paths:
   [gles-driver.md](gles-driver.md));
 - replaced by ours: thermal (the vendor APEX's example), sensors and GNSS
   ([vendor-hals.md](vendor-hals.md));
-- replaced by ours later: the composer, audio (with the HIDL audio-effect
-  declaration in `manifest.xml`), camera and Bluetooth;
+- replaced by ours: audio, whose HIDL audio-effect declaration in
+  `manifest.xml` also goes ([audio.md](audio.md));
+- replaced by ours later: the composer, camera and Bluetooth;
 - hardware the device does not have: radio, Wi-Fi (with hostapd and the
   supplicant), fingerprint, USB, lights, storage health, the goldfish
   Codec2 store, and the vendor APEXes contexthub, rebootescrow, Thread, UWB

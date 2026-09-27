@@ -68,6 +68,8 @@ pub mod module {
     pub const SENSORS: u32 = 5;
     /// CoreLocation fixes (the GNSS HAL's host side).
     pub const LOCATION: u32 = 6;
+    /// Audio streams over CoreAudio (the audio HAL's host side).
+    pub const AUDIO: u32 = 7;
 }
 
 /// Module [`module::HEALTH`]: the host's battery, for
@@ -419,6 +421,160 @@ pub mod location {
     const _: () = assert!(core::mem::size_of::<Fix>() == 96);
 }
 
+/// Module [`module::AUDIO`]: PCM streams on the Mac's default output and
+/// input devices, for `android.hardware.audio.core` (`docs/audio.md`).
+///
+/// A stream moves frames through a [`Ring`] in a memfd that the guest
+/// creates and maps; the host maps the same file. The ring is single
+/// producer, single consumer and lock-free: for output the guest produces
+/// and the device callback consumes, for input the reverse. The device
+/// callback never waits for the guest: a short ring plays silence (and
+/// counts the frames in [`Ring::xruns`]), a full one drops captured frames.
+pub mod audio {
+    use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64};
+
+    pub const VERSION: u32 = 1;
+
+    /// Describe the default devices ([`Devices`]). Returns 0.
+    pub const FN_DEVICES: u32 = 1;
+    /// Open a stream on a ring ([`Open`]). Returns 0, `-ENODEV` when there
+    /// is no such device, or `-EINVAL` for a bad format or ring.
+    pub const FN_OPEN: u32 = 2;
+    /// Start the device callback ([`Stream`]). Returns 0 or `-EINVAL`.
+    pub const FN_START: u32 = 3;
+    /// Stop the device callback; the ring is left as it is ([`Stream`]).
+    pub const FN_STOP: u32 = 4;
+    /// Stop and release a stream and its mapping ([`Stream`]).
+    pub const FN_CLOSE: u32 = 5;
+
+    pub const DIRECTION_OUTPUT: u32 = 0;
+    pub const DIRECTION_INPUT: u32 = 1;
+
+    /// Interleaved signed 16-bit PCM.
+    pub const FORMAT_PCM_16: u32 = 1;
+    /// Interleaved 32-bit float PCM.
+    pub const FORMAT_FLOAT: u32 = 2;
+
+    /// A default device as macOS reports it.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug)]
+    pub struct Device {
+        /// 0 when the Mac has no such default device; the rest is then 0.
+        pub present: u32,
+        pub sample_rate: u32,
+        pub channels: u32,
+        /// The device's I/O buffer size.
+        pub buffer_frames: u32,
+        /// Device and stream latency plus the safety offset.
+        pub latency_frames: u32,
+        pub reserved: u32,
+        /// UTF-8, NUL-padded.
+        pub name: [u8; 64],
+    }
+
+    impl Default for Device {
+        fn default() -> Self {
+            Self {
+                present: 0,
+                sample_rate: 0,
+                channels: 0,
+                buffer_frames: 0,
+                latency_frames: 0,
+                reserved: 0,
+                name: [0; 64],
+            }
+        }
+    }
+
+    /// Argument block of [`FN_DEVICES`] (output only).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Devices {
+        pub output: Device,
+        pub input: Device,
+    }
+
+    /// Argument block of [`FN_OPEN`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Open {
+        /// [`DIRECTION_OUTPUT`] or [`DIRECTION_INPUT`].
+        pub direction: u32,
+        /// [`FORMAT_PCM_16`] or [`FORMAT_FLOAT`].
+        pub format: u32,
+        pub sample_rate: u32,
+        pub channels: u32,
+        /// The ring's memfd; the host maps it and does not keep the fd.
+        pub fd: i32,
+        pub reserved: u32,
+        /// Length of the file: [`RING_DATA_OFFSET`] plus the ring's frames.
+        pub length: u64,
+        /// Out: the stream handle.
+        pub stream: u64,
+    }
+
+    /// Argument block of [`FN_START`], [`FN_STOP`] and [`FN_CLOSE`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Stream {
+        pub stream: u64,
+    }
+
+    /// Frames start this far into the ring's file.
+    pub const RING_DATA_OFFSET: usize = 256;
+
+    /// Header at offset 0 of the ring's file. Positions are frame counts
+    /// since the ring was opened; frame `n` is at data offset
+    /// `(n % capacity_frames) * frame_bytes`. The guest fills the first two
+    /// fields before [`FN_OPEN`]; everything else is atomic.
+    #[repr(C)]
+    #[derive(Debug, Default)]
+    pub struct Ring {
+        pub capacity_frames: u32,
+        pub frame_bytes: u32,
+        /// Frames produced (by the guest for output, the host for input).
+        pub write: AtomicU64,
+        /// Frames consumed.
+        pub read: AtomicU64,
+        /// Output: frames the device played as silence because the ring ran
+        /// short. Input: captured frames dropped because it was full.
+        pub xruns: AtomicU64,
+        /// Device callbacks run, and host time spent in them.
+        pub callbacks: AtomicU64,
+        pub callback_ns: AtomicU64,
+        /// Seqlock over `stamp_frames` and `stamp_ns`: odd while the host
+        /// writes them.
+        pub stamp_seq: AtomicU32,
+        /// Device and stream latency the stamps include.
+        pub device_latency_frames: AtomicU32,
+        /// Ring position `stamp_frames` reaches the speaker (output) or was
+        /// captured at the microphone (input) at CLOCK_MONOTONIC
+        /// `stamp_ns`.
+        pub stamp_frames: AtomicU64,
+        pub stamp_ns: AtomicI64,
+        /// Largest |sample| the device callback moved (f32 bits, full scale
+        /// 1.0), until the guest resets it.
+        pub peak_bits: AtomicU32,
+        pub reserved: u32,
+        /// Latency probe, output only. The guest stores the CLOCK_MONOTONIC
+        /// time of a write in `mark_ns`, then its first frame plus one in
+        /// `mark` (only while `mark` is 0). The callback that consumes that
+        /// frame adds its delay to the sums and clears `mark`.
+        pub mark: AtomicU64,
+        pub mark_ns: AtomicI64,
+        pub latency_count: AtomicU64,
+        pub latency_sum_ns: AtomicU64,
+        pub latency_max_ns: AtomicU64,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Device>() == 88);
+    const _: () = assert!(core::mem::size_of::<Devices>() == 176);
+    const _: () = assert!(core::mem::size_of::<Open>() == 40);
+    const _: () = assert!(core::mem::size_of::<Stream>() == 8);
+    const _: () = assert!(core::mem::size_of::<Ring>() == 120);
+    const _: () = assert!(core::mem::size_of::<Ring>() <= RING_DATA_OFFSET);
+}
+
 /// A host module, as linked into the syscall layer's registry.
 pub struct HostModule {
     pub id: u32,
@@ -606,6 +762,25 @@ pub mod guest {
         let mut f = location::Fix::default();
         call_with(module::LOCATION, location::FN_READ, &mut f)?;
         Ok(f)
+    }
+
+    /// The host's default audio devices.
+    pub fn audio_devices() -> Result<audio::Devices, Errno> {
+        let mut d = audio::Devices::default();
+        call_with(module::AUDIO, audio::FN_DEVICES, &mut d)?;
+        Ok(d)
+    }
+
+    /// Open an audio stream on a ring; returns its handle.
+    pub fn audio_open(args: &mut audio::Open) -> Result<u64, Errno> {
+        call_with(module::AUDIO, audio::FN_OPEN, args)?;
+        Ok(args.stream)
+    }
+
+    /// [`audio::FN_START`], [`audio::FN_STOP`] or [`audio::FN_CLOSE`] on a
+    /// stream.
+    pub fn audio_stream(func: u32, stream: u64) -> Result<(), Errno> {
+        call_with(module::AUDIO, func, &mut audio::Stream { stream }).map(drop)
     }
 
     /// Call forwarded entry point `id` with its register image.

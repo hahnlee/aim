@@ -1,0 +1,27 @@
+[package]
+name = "audio"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "android.hardware.audio.core V3 service (IModule/default, IConfig/default) and an empty audio.effect IFactory, over CoreAudio (host module `audio`)"
+
+[[bin]]
+name = "audio-service"
+path = "src/main.rs"
+
+# Installed as /vendor/bin/hw/<binary> (Cargo target names cannot hold dots).
+[package.metadata.vendor-hal]
+binary = "android.hardware.audio.service-aidl.darwin"
+
+[dependencies]
+android_hardware_audio_common = { path = "../aidl/android.hardware.audio.common" }
+android_hardware_audio_core = { path = "../aidl/android.hardware.audio.core" }
+android_hardware_audio_core_sounddose = { path = "../aidl/android.hardware.audio.core.sounddose" }
+android_hardware_audio_effect = { path = "../aidl/android.hardware.audio.effect" }
+android_media_audio_common_types = { path = "../aidl/android.media.audio.common.types" }
+binder = { path = "../binder" }
+darwin-fmq = { path = "../fmq" }
+darwin-hostcall = { path = "../../crates/darwin-hostcall" }
+libc = "0.2"
+log = "0.4"

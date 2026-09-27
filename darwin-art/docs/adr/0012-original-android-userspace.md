@@ -411,7 +411,9 @@ MediaProvider and DnsResolver.
 ### Vendor HALs (ours)
 
 allocator/mapper (memfd buffers the host imports into Metal without
-copying) and composer (Metal, AppKit), audio (CoreAudio),
+copying) and composer (Metal, AppKit), audio (audio.core V3 on CoreAudio
+through a lock-free ring the render callback never waits on; the original
+audioserver loads it, [audio.md](../audio.md)),
 camera (AVFoundation), sensors (ambient light and lid angle, IOKit HID),
 health (IOKit), thermal (`NSProcessInfo` thermal state, HID temperatures),
 GNSS (CoreLocation fixes, no raw measurements), and Codec2 over

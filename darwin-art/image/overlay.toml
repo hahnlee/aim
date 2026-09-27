@@ -264,6 +264,28 @@ reason = "starts the composer HAL"
 path = "/vendor/etc/vintf/manifest/android.hardware.graphics.composer3-service.darwin.xml"
 source = "hal/graphics/composer/android.hardware.graphics.composer3-service.darwin.xml"
 reason = "declares IComposer/default V4"
+
+# Audio (docs/audio.md): audio.core V3 IModule/default and IConfig/default
+# over the Mac's default devices, and an empty audio.effect V3
+# IFactory/default, in one process; streams play and capture through the
+# host-call module `audio` (CoreAudio). The goldfish audio HAL's .rc and
+# fragments are removed below.
+
+[[add]]
+path = "/vendor/bin/hw/android.hardware.audio.service-aidl.darwin"
+source = "_build/vendor-hals/bin/android.hardware.audio.service-aidl.darwin"
+reason = "audio HAL (Rust, AIDL audio.core V3 and audio.effect V3): streams on CoreAudio via host-call"
+
+[[add]]
+path = "/vendor/etc/init/android.hardware.audio.service-aidl.darwin.rc"
+source = "hal/audio/android.hardware.audio.service-aidl.darwin.rc"
+reason = "starts the audio HAL as vendor.audio-hal-aidl, the name audioserver's .rc restarts"
+
+[[add]]
+path = "/vendor/etc/vintf/manifest/android.hardware.audio.service-aidl.darwin.xml"
+source = "hal/audio/android.hardware.audio.service-aidl.darwin.xml"
+reason = "declares audio.core IModule/default and IConfig/default V3 and audio.effect IFactory/default V3"
+
 # The emulator's vendor HALs. The goldfish/ranchu ones talk to QEMU (pipes,
 # virtio consoles, the emulator's host services) and the examples fake
 # hardware, neither of which a Mac provides. Their `.rc` and vintf fragment

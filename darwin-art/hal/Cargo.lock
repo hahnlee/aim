@@ -222,6 +222,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio"
+version = "0.1.0"
+dependencies = [
+ "android_hardware_audio_common",
+ "android_hardware_audio_core",
+ "android_hardware_audio_core_sounddose",
+ "android_hardware_audio_effect",
+ "android_media_audio_common_types",
+ "binder",
+ "darwin-fmq",
+ "darwin-hostcall",
+ "libc",
+ "log",
+]
+
+[[package]]
+name = "audio-check"
+version = "0.1.0"
+dependencies = [
+ "android_hardware_audio_common",
+ "android_hardware_audio_core",
+ "android_media_audio_common_types",
+ "binder",
+ "darwin-fmq",
+ "libc",
+]
+
+[[package]]
 name = "binder"
 version = "0.1.0"
 dependencies = [
@@ -303,6 +331,17 @@ dependencies = [
  "binder",
  "darwin-gralloc",
  "darwin-hostcall",
+ "libc",
+ "log",
+]
+
+[[package]]
+name = "darwin-fmq"
+version = "0.1.0"
+dependencies = [
+ "android_hardware_common",
+ "android_hardware_common_fmq",
+ "binder",
  "libc",
  "log",
 ]
