@@ -1,0 +1,9 @@
+# Applied in order with patch -p1 to the pinned ART sources (tools/build-art-android.sh).
+0001-heap-reference-window.patch
+0002-runtime-heap-reference-encoding.patch
+0003-image-logical-addresses.patch
+0004-quick-entrypoint-boundaries.patch
+0005-nterp-heap-base.patch
+0006-arm64-codegen-heap-base.patch
+0007-arm64-intrinsics-heap-base.patch
+0008-arm64-jni-and-baseline-heap-base.patch

@@ -1,0 +1,591 @@
+diff --git a/runtime/entrypoints/quick/quick_trampoline_entrypoints.cc b/runtime/entrypoints/quick/quick_trampoline_entrypoints.cc
+--- a/runtime/entrypoints/quick/quick_trampoline_entrypoints.cc
++++ b/runtime/entrypoints/quick/quick_trampoline_entrypoints.cc
+@@ -51,6 +51,7 @@
+ #include "mirror/method_handle_impl.h"
+ #include "mirror/object-inl.h"
+ #include "mirror/object_array-inl.h"
++#include "mirror/object_reference.h"
+ #include "mirror/var_handle.h"
+ #include "oat/oat.h"
+ #include "oat/oat_file.h"
+@@ -756,6 +757,16 @@
+       ? result | UINT64_C(0xffffffff00000000)
+       : result;
+ }
++
++#if ART_HEAP_REFERENCE_BASE != 0
++static int64_t CompressReferenceResultIfNeeded(int64_t result, char result_shorty) {
++  if (result_shorty == 'L' || result_shorty == '[') {
++    return static_cast<int64_t>(mirror::PtrCompression<false, mirror::Object>::Compress(
++        reinterpret_cast<mirror::Object*>(result)));
++  }
++  return result;
++}
++#endif
+ 
+ NO_STACK_PROTECTOR
+ extern "C" uint64_t artQuickToInterpreterBridge(ArtMethod* method, Thread* self, ArtMethod** sp)
+@@ -836,7 +847,12 @@
+   }
+ 
+   // No need to restore the args since the method has already been run by the interpreter.
+-  return NanBoxResultIfNeeded(result.GetJ(), shorty[0]);
++  const int64_t quick_result = NanBoxResultIfNeeded(result.GetJ(), shorty[0]);
++#if ART_HEAP_REFERENCE_BASE != 0
++  return CompressReferenceResultIfNeeded(quick_result, shorty[0]);
++#else
++  return quick_result;
++#endif
+ }
+ 
+ // Visits arguments on the stack placing them into the args vector, Object* arguments are converted
+@@ -899,6 +915,10 @@
+ extern "C" uint64_t artQuickProxyInvokeHandler(
+     ArtMethod* proxy_method, mirror::Object* receiver, Thread* self, ArtMethod** sp)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++#if ART_HEAP_REFERENCE_BASE != 0
++  receiver = mirror::PtrCompression<false, mirror::Object>::Decompress(
++      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(receiver)));
++#endif
+   DCHECK(proxy_method->IsProxyMethod()) << proxy_method->PrettyMethod();
+   DCHECK(receiver->GetClass()->IsProxyClass()) << proxy_method->PrettyMethod();
+   // Ensure we don't get thread suspension until the object arguments are safely in jobjects.
+@@ -970,7 +990,17 @@
+                            result);
+   }
+ 
+-  return NanBoxResultIfNeeded(result.GetJ(), shorty[0]);
++#if ART_HEAP_REFERENCE_BASE != 0
++  if (soa.Self()->IsExceptionPending()) {
++    return 0;
++  }
++#endif
++  const int64_t quick_result = NanBoxResultIfNeeded(result.GetJ(), shorty[0]);
++#if ART_HEAP_REFERENCE_BASE != 0
++  return CompressReferenceResultIfNeeded(quick_result, shorty[0]);
++#else
++  return quick_result;
++#endif
+ }
+ 
+ // Visitor returning a reference argument at a given position in a Quick stack frame.
+@@ -2171,7 +2201,18 @@
+   uint32_t* sp32 = reinterpret_cast<uint32_t*>(sp);
+   ArtMethod* called = *sp;
+   uint32_t cookie = *(sp32 - 1);
+-  return GenericJniMethodEnd(self, cookie, result, result_f, called);
++  uint64_t quick_result = GenericJniMethodEnd(self, cookie, result, result_f, called);
++#if ART_HEAP_REFERENCE_BASE != 0
++  // GenericJniMethodEnd restores the runnable state and releases JNI state
++  // before this shorty read. Its reference result is native at this boundary;
++  // convert it only after cleanup so the managed quick caller receives offset32.
++  const char return_shorty = called->GetShortyView()[0];
++  if (return_shorty == 'L') {
++    quick_result = mirror::PtrCompression<false, mirror::Object>::Compress(
++        reinterpret_cast<mirror::Object*>(quick_result));
++  }
++#endif
++  return quick_result;
+ }
+ 
+ // We use TwoWordReturn to optimize scalar returns. We use the hi value for code, and the lo value
+@@ -2254,12 +2295,20 @@
+ extern "C" TwoWordReturn artInvokeInterfaceTrampolineWithAccessCheck(
+     uint32_t method_idx, mirror::Object* this_object, Thread* self, ArtMethod** sp)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++#if ART_HEAP_REFERENCE_BASE != 0
++  this_object = mirror::PtrCompression<false, mirror::Object>::Decompress(
++      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this_object)));
++#endif
+   return artInvokeCommon<kInterface>(method_idx, this_object, self, sp);
+ }
+ 
+ extern "C" TwoWordReturn artInvokeDirectTrampolineWithAccessCheck(
+     uint32_t method_idx, mirror::Object* this_object, Thread* self, ArtMethod** sp)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++#if ART_HEAP_REFERENCE_BASE != 0
++  this_object = mirror::PtrCompression<false, mirror::Object>::Decompress(
++      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this_object)));
++#endif
+   return artInvokeCommon<kDirect>(method_idx, this_object, self, sp);
+ }
+ 
+@@ -2274,12 +2323,20 @@
+ extern "C" TwoWordReturn artInvokeSuperTrampolineWithAccessCheck(
+     uint32_t method_idx, mirror::Object* this_object, Thread* self, ArtMethod** sp)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++#if ART_HEAP_REFERENCE_BASE != 0
++  this_object = mirror::PtrCompression<false, mirror::Object>::Decompress(
++      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this_object)));
++#endif
+   return artInvokeCommon<kSuper>(method_idx, this_object, self, sp);
+ }
+ 
+ extern "C" TwoWordReturn artInvokeVirtualTrampolineWithAccessCheck(
+     uint32_t method_idx, mirror::Object* this_object, Thread* self, ArtMethod** sp)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++#if ART_HEAP_REFERENCE_BASE != 0
++  this_object = mirror::PtrCompression<false, mirror::Object>::Decompress(
++      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this_object)));
++#endif
+   return artInvokeCommon<kVirtual>(method_idx, this_object, self, sp);
+ }
+ 
+@@ -2290,6 +2347,12 @@
+                                                       Thread* self,
+                                                       ArtMethod** sp)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++#if ART_HEAP_REFERENCE_BASE != 0
++  // Quick managed arguments contain compressed references, not native pointers.
++  raw_this_object = mirror::PtrCompression<false, mirror::Object>::Decompress(
++      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(raw_this_object)));
++#endif
++
+   ScopedQuickEntrypointChecks sqec(self);
+ 
+   Runtime* runtime = Runtime::Current();
+@@ -2407,6 +2470,10 @@
+ // Returns uint64_t representing raw bits from JValue.
+ extern "C" uint64_t artInvokePolymorphic(mirror::Object* raw_receiver, Thread* self, ArtMethod** sp)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++#if ART_HEAP_REFERENCE_BASE != 0
++  raw_receiver = mirror::PtrCompression<false, mirror::Object>::Decompress(
++      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(raw_receiver)));
++#endif
+   ScopedQuickEntrypointChecks sqec(self);
+   DCHECK(raw_receiver != nullptr);
+   DCHECK_EQ(*sp, Runtime::Current()->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsAndArgs));
+@@ -2525,13 +2592,21 @@
+   Runtime::Current()->GetInstrumentation()->PushDeoptContextIfNeeded(
+       self, DeoptimizationMethodType::kDefault, is_ref, result);
+ 
++#if ART_HEAP_REFERENCE_BASE != 0
++  return CompressReferenceResultIfNeeded(NanBoxResultIfNeeded(result.GetJ(), shorty[0]), shorty[0]);
++#else
+   return NanBoxResultIfNeeded(result.GetJ(), shorty[0]);
++#endif
+ }
+ 
+ extern "C" uint64_t artInvokePolymorphicWithHiddenReceiver(mirror::Object* raw_receiver,
+                                                            Thread* self,
+                                                            ArtMethod** sp)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++#if ART_HEAP_REFERENCE_BASE != 0
++  raw_receiver = mirror::PtrCompression<false, mirror::Object>::Decompress(
++      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(raw_receiver)));
++#endif
+   ScopedQuickEntrypointChecks sqec(self);
+   DCHECK(raw_receiver != nullptr);
+   DCHECK(raw_receiver->InstanceOf(WellKnownClasses::java_lang_invoke_MethodHandle.Get()));
+@@ -2625,7 +2700,11 @@
+   Runtime::Current()->GetInstrumentation()->PushDeoptContextIfNeeded(
+       self, DeoptimizationMethodType::kDefault, is_ref, result);
+ 
++#if ART_HEAP_REFERENCE_BASE != 0
++  return CompressReferenceResultIfNeeded(NanBoxResultIfNeeded(result.GetJ(), shorty[0]), shorty[0]);
++#else
+   return NanBoxResultIfNeeded(result.GetJ(), shorty[0]);
++#endif
+ }
+ 
+ // Returns uint64_t representing raw bits from JValue.
+@@ -2768,7 +2847,11 @@
+ 
+     if (is_ref) {
+       // Restore the return value if it's a reference since it might have moved.
++#if ART_HEAP_REFERENCE_BASE != 0
++      *gpr_result = mirror::PtrCompression<false, mirror::Object>::Compress(res.Get());
++#else
+       *reinterpret_cast<mirror::Object**>(gpr_result) = res.Get();
++#endif
+       return_value.SetL(res.Get());
+     }
+   }
+diff --git a/runtime/entrypoints/quick/quick_alloc_entrypoints.cc b/runtime/entrypoints/quick/quick_alloc_entrypoints.cc
+--- a/runtime/entrypoints/quick/quick_alloc_entrypoints.cc
++++ b/runtime/entrypoints/quick/quick_alloc_entrypoints.cc
+@@ -30,6 +30,24 @@
+ namespace art HIDDEN {
+ 
+ static constexpr bool kUseTlabFastPath = true;
++
++// Quick allocation entrypoints have an AOSP raw-pointer ABI: their Class*
++// argument is a native pointer even when the caller carries a compressed
++// heap reference.  Keep the boundary defensive because oat
++// code and generic quick stubs can enter this ABI without the optimizing
++// compiler's explicit decode sequence.  Already-decoded pointers are left
++// untouched; zero remains null.  This is a host ABI normalization, not a
++// test-specific or interpreter fallback.
++static ALWAYS_INLINE mirror::Class* DecodeAllocationClassArgument(mirror::Class* klass) {
++#if ART_HEAP_REFERENCE_BASE != 0
++  const uintptr_t address = reinterpret_cast<uintptr_t>(klass);
++  if (address != 0u && address < kArtCompressedReferenceBase) {
++    return reinterpret_cast<mirror::Class*>(kArtCompressedReferenceBase +
++                                           static_cast<uint32_t>(address));
++  }
++#endif
++  return klass;
++}
+ 
+ template <bool kInitialized,
+           bool kWithChecks,
+@@ -38,6 +56,7 @@
+ static ALWAYS_INLINE inline mirror::Object* artAllocObjectFromCode(
+     mirror::Class* klass,
+     Thread* self) REQUIRES_SHARED(Locks::mutator_lock_) {
++  klass = DecodeAllocationClassArgument(klass);
+   ScopedQuickEntrypointChecks sqec(self);
+   DCHECK(klass != nullptr);
+   if (kUseTlabFastPath &&
+@@ -96,6 +115,7 @@
+ extern "C" mirror::Array* artAllocArrayFromCodeResolved##suffix##suffix2( \
+     mirror::Class* klass, int32_t component_count, Thread* self) \
+     REQUIRES_SHARED(Locks::mutator_lock_) { \
++  klass = DecodeAllocationClassArgument(klass); \
+   ScopedQuickEntrypointChecks sqec(self); \
+   return AllocArrayFromCodeResolved<instrumented_bool>( \
+       klass, component_count, self, allocator_type).Ptr(); \
+diff --git a/runtime/arch/arm64/quick_entrypoints_arm64.S b/runtime/arch/arm64/quick_entrypoints_arm64.S
+--- a/runtime/arch/arm64/quick_entrypoints_arm64.S
++++ b/runtime/arch/arm64/quick_entrypoints_arm64.S
+@@ -32,6 +32,22 @@
+     .cfi_adjust_cfa_offset -(\frame_adjustment)
+ .endm
+ 
++.macro NORMALIZE_ART_METHOD_IN_X0
++#if ART_HEAP_REFERENCE_BASE != 0
++    // Managed quick calls carry ArtMethod* as a low-32-bit logical address.
++    // Runtime metadata is native-addressed in the window; lift only that form
++    // before a frame stores x0 or a C++ bridge dereferences it. xIP0 is an
++    // intra-procedural scratch register and no flags are modified.
++    cbz    x0, 1f
++    mov    xIP0, x0
++    lsr    xIP0, xIP0, #32
++    cbnz   xIP0, 1f
++    mov    xIP0, #ART_HEAP_REFERENCE_BASE
++    orr    x0, x0, xIP0
++1:
++#endif
++.endm
++
+ .macro POP_SAVE_REFS_ONLY_FRAME
+     DECREASE_FRAME 96
+ .endm
+@@ -491,6 +507,15 @@
+     cmp w10, #'F'
+     beq 3f
+ 
++    // Managed references are compressed; native JValue stores Object*.
++    cmp w10, #'L'
++    bne 4f
++    mov w0, w0
++    cbz w0, 4f
++#if ART_HEAP_REFERENCE_BASE != 0
++    orr x0, x0, #ART_HEAP_REFERENCE_BASE
++#endif
++4:
+     // Just store x0. Doesn't matter if it is 64 or 32 bits.
+     str x0, [x4]
+ 
+@@ -751,6 +776,16 @@
+     RESTORE_TWO_REGS xFP, xLR, 96
+     RESTORE_TWO_REGS_DECREASE_FRAME x3, x4, SAVE_SIZE
+ 
++    // OSR returns the same managed reference representation as normal code.
++    ldrb w10, [x4]
++    cmp w10, #'L'
++    bne .Losr_store_result
++    mov w0, w0
++    cbz w0, .Losr_store_result
++#if ART_HEAP_REFERENCE_BASE != 0
++    orr x0, x0, #ART_HEAP_REFERENCE_BASE
++#endif
++.Losr_store_result:
+     // The compiler put the result in x0. Doesn't matter if it is 64 or 32 bits.
+     str x0, [x3]
+     ret
+@@ -976,16 +1011,22 @@
+ #ifdef USE_READ_BARRIER
+ #ifdef USE_BAKER_READ_BARRIER
+ .macro BAKER_RB_CHECK_GRAY_BIT_AND_LOAD wDest, xObj, offset, gray_slow_path_label
+-    ldr wIP0, [\xObj, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
++    mov x16, #ART_HEAP_REFERENCE_BASE
++    and x6, \xObj, #0xffffffff
++    add x6, x16, x6
++    ldr wIP0, [x6, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
+     tbnz wIP0, #LOCK_WORD_READ_BARRIER_STATE_SHIFT, \gray_slow_path_label
+     // False dependency to avoid needing load/load fence.
+-    add \xObj, \xObj, xIP0, lsr #32
+-    ldr \wDest, [\xObj, #\offset]                      // Heap reference = 32b; zero-extends to xN.
++    add x6, x6, xIP0, lsr #32
++    ldr \wDest, [x6, #\offset]                         // Heap reference = 32b; zero-extends to xN.
+     UNPOISON_HEAP_REF \wDest
+ .endm
+ 
+ .macro BAKER_RB_LOAD_AND_MARK wDest, xObj, offset, mark_function
+-    ldr \wDest, [\xObj, #\offset]                      // Heap reference = 32b; zero-extends to xN.
++    mov x16, #ART_HEAP_REFERENCE_BASE
++    and x6, \xObj, #0xffffffff
++    add x6, x16, x6
++    ldr \wDest, [x6, #\offset]                         // Heap reference = 32b; zero-extends to xN.
+     UNPOISON_HEAP_REF \wDest
+     // Save LR in a register preserved by `art_quick_read_barrier_mark_regNN`
+     // and unused by the `art_quick_aput_obj`.
+@@ -1034,26 +1075,35 @@
+ #ifdef USE_READ_BARRIER
+     cbnz wMR, .Laput_obj_gc_marking
+ #endif  // USE_READ_BARRIER
+-    ldr w3, [x0, #MIRROR_OBJECT_CLASS_OFFSET]          // Heap reference = 32b; zero-extends to x3.
++    mov x16, #ART_HEAP_REFERENCE_BASE
++    add x5, x16, w0, uxtw
++    ldr w3, [x5, #MIRROR_OBJECT_CLASS_OFFSET]          // Heap reference = 32b; zero-extends to x3.
+     UNPOISON_HEAP_REF w3
+-    ldr w3, [x3, #MIRROR_CLASS_COMPONENT_TYPE_OFFSET]  // Heap reference = 32b; zero-extends to x3.
++    add x6, x16, w3, uxtw
++    ldr w3, [x6, #MIRROR_CLASS_COMPONENT_TYPE_OFFSET]  // Heap reference = 32b; zero-extends to x3.
+     UNPOISON_HEAP_REF w3
+-    ldr w4, [x2, #MIRROR_OBJECT_CLASS_OFFSET]          // Heap reference = 32b; zero-extends to x4.
++    add x7, x16, w2, uxtw
++    ldr w4, [x7, #MIRROR_OBJECT_CLASS_OFFSET]          // Heap reference = 32b; zero-extends to x4.
+     UNPOISON_HEAP_REF w4
+ #endif  // !defined(USE_READ_BARRIER) || defined(USE_BAKER_READ_BARRIER)
+     cmp w3, w4  // value's type == array's component type - trivial assignability
+     bne .Laput_obj_check_assignability
+ .Laput_obj_store:
+-    add x3, x0, #MIRROR_OBJECT_ARRAY_DATA_OFFSET
++    mov x16, #ART_HEAP_REFERENCE_BASE
++    add x3, x16, w0, uxtw
++    add x3, x3, #MIRROR_OBJECT_ARRAY_DATA_OFFSET
+     POISON_HEAP_REF w2
+     str w2, [x3, x1, lsl #2]                           // Heap reference = 32b.
+     ldr x3, [xSELF, #THREAD_CARD_TABLE_OFFSET]
++    add x0, x16, w0, uxtw
+     lsr x0, x0, #CARD_TABLE_CARD_SHIFT
+     strb w3, [x3, x0]
+     ret
+ 
+ .Laput_obj_null:
+-    add x3, x0, #MIRROR_OBJECT_ARRAY_DATA_OFFSET
++    mov x16, #ART_HEAP_REFERENCE_BASE
++    add x3, x16, w0, uxtw
++    add x3, x3, #MIRROR_OBJECT_ARRAY_DATA_OFFSET
+     str w2, [x3, x1, lsl #2]                           // Heap reference = 32b.
+     ret
+ 
+@@ -1063,8 +1113,9 @@
+     SAVE_TWO_REGS x2, xLR, 16
+ 
+     // Call runtime code
+-    mov x0, x3              // Heap reference, 32b, "uncompress" = do nothing, already zero-extended
+-    mov x1, x4              // Heap reference, 32b, "uncompress" = do nothing, already zero-extended
++    mov x16, #ART_HEAP_REFERENCE_BASE
++    add x0, x16, w3, uxtw   // Pass native component Class*.
++    add x1, x16, w4, uxtw   // Pass native value Class*.
+     CALL_SYMBOL artIsAssignableFromCode
+ 
+     // Check for exception
+@@ -1075,10 +1126,13 @@
+     RESTORE_TWO_REGS x2, xLR, 16
+     RESTORE_TWO_REGS_DECREASE_FRAME x0, x1, 32
+ 
+-    add x3, x0, #MIRROR_OBJECT_ARRAY_DATA_OFFSET
++    mov x16, #ART_HEAP_REFERENCE_BASE
++    add x3, x16, w0, uxtw
++    add x3, x3, #MIRROR_OBJECT_ARRAY_DATA_OFFSET
+     POISON_HEAP_REF w2
+     str w2, [x3, x1, lsl #2]                           // Heap reference = 32b.
+     ldr x3, [xSELF, #THREAD_CARD_TABLE_OFFSET]
++    add x0, x16, w0, uxtw
+     lsr x0, x0, #CARD_TABLE_CARD_SHIFT
+     strb w3, [x3, x0]
+     ret
+@@ -1092,7 +1146,9 @@
+     CFI_REMEMBER_STATE
+ #endif  // defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
+     SETUP_SAVE_ALL_CALLEE_SAVES_FRAME
+-    mov x1, x2                                         // Pass value.
++    mov x16, #ART_HEAP_REFERENCE_BASE
++    add x0, x16, w0, uxtw                              // Pass native array.
++    add x1, x16, w2, uxtw                              // Pass native value.
+     mov x2, xSELF                                      // Pass Thread::Current.
+     CALL_SYMBOL artThrowArrayStoreException            // (Object*, Object*, Thread*).
+     CALL_SYMBOL art_quick_do_long_jump                 // (Context*)
+@@ -1316,6 +1372,10 @@
+ #endif
+     POISON_HEAP_REF w0
+     str    w0, [x3, #MIRROR_OBJECT_CLASS_OFFSET]
++    // A native64 free-list link occupies both header words. AOSP low-4GiB
++    // pointers leave the upper word zero implicitly; make that invariant
++    // explicit before the object is published.
++    str    wzr, [x3, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
+                                                               // Push the new object onto the thread
+                                                               // local allocation stack and
+                                                               // increment the thread local
+@@ -1503,6 +1563,10 @@
+     // Array classes are never finalizable or uninitialized, no need to check.
+     ldr    \wTemp0, [\xClass, #MIRROR_CLASS_COMPONENT_TYPE_OFFSET] // Load component type
+     UNPOISON_HEAP_REF \wTemp0
++    // The input Class* is native, but its component field is compressed32.
++    // xTemp1 is caller-owned scratch and receives the size below.
++    mov    \xTemp1, #ART_HEAP_REFERENCE_BASE
++    add    \xTemp0, \xTemp1, \wTemp0, uxtw
+     ldr    \wTemp0, [\xTemp0, #MIRROR_CLASS_OBJECT_PRIMITIVE_TYPE_OFFSET]
+     lsr    \xTemp0, \xTemp0, #PRIMITIVE_TYPE_SIZE_SHIFT_SHIFT // Component size shift is in high 16
+                                                               // bits.
+@@ -1640,6 +1704,7 @@
+      */
+      .extern artQuickProxyInvokeHandler
+ ENTRY art_quick_proxy_invoke_handler
++    NORMALIZE_ART_METHOD_IN_X0
+     SETUP_SAVE_REFS_AND_ARGS_FRAME_WITH_METHOD_IN_X0
+     mov     x2, xSELF                            // pass Thread::Current
+     mov     x3, sp                               // pass SP
+@@ -1690,6 +1755,7 @@
+ END art_quick_imt_conflict_trampoline
+ 
+ ENTRY art_quick_resolution_trampoline
++    NORMALIZE_ART_METHOD_IN_X0
+     SETUP_SAVE_REFS_AND_ARGS_FRAME
+     mov x2, xSELF
+     mov x3, sp
+@@ -1764,6 +1830,7 @@
+      */
+     .extern artQuickGenericJniTrampoline
+ ENTRY art_quick_generic_jni_trampoline
++    NORMALIZE_ART_METHOD_IN_X0
+     SETUP_SAVE_REFS_AND_ARGS_FRAME_WITH_METHOD_IN_X0
+ 
+     // Save SP, so we can have static CFI info.
+@@ -1889,6 +1956,7 @@
+  * x1..x7, d0..d7 = arguments to that method.
+  */
+ ENTRY art_quick_to_interpreter_bridge
++    NORMALIZE_ART_METHOD_IN_X0
+     SETUP_SAVE_REFS_AND_ARGS_FRAME         // Set up frame and save arguments.
+ 
+     //  x0 will contain mirror::ArtMethod* method.
+@@ -2074,7 +2142,13 @@
+     // Reference is null, no work to do at all.
+     cbz \wreg, .Lret_rb_\name
+     // Use wIP0 as temp and check the mark bit of the reference. wIP0 is not used by the compiler.
++#if ART_HEAP_REFERENCE_BASE != 0
++    mov   xIP0, #ART_HEAP_REFERENCE_BASE
++    add   xIP0, xIP0, \wreg, uxtw
++    ldr   wIP0, [xIP0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
++#else
+     ldr   wIP0, [\xreg, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
++#endif
+     tbz   wIP0, #LOCK_WORD_MARK_BIT_SHIFT, .Lnot_marked_rb_\name
+ .Lret_rb_\name:
+     ret
+@@ -2083,6 +2157,10 @@
+     tst   wIP0, wIP0, lsl #1
+     bmi   .Lret_forwarding_address\name
+ .Lslow_rb_\name:
++#if ART_HEAP_REFERENCE_BASE != 0
++    mov   xIP0, #ART_HEAP_REFERENCE_BASE
++    add   xIP0, xIP0, \wreg, uxtw
++#endif
+     /*
+      * Allocate 44 stack slots * 8 = 352 bytes:
+      * - 19 slots for core registers X0-15, X17, X19, LR
+@@ -2116,13 +2194,27 @@
+     stp   d28, d29, [sp, #320]
+     stp   d30, d31, [sp, #336]
+ 
++#if ART_HEAP_REFERENCE_BASE != 0
++    mov   x0, xIP0                    // Pass a native Object* to C++.
++#else
+     .ifnc \wreg, w0
+       mov   w0, \wreg                   // Pass arg1 - obj from `wreg`
+     .endif
++#endif
+     CALL_SYMBOL artReadBarrierMark      // artReadBarrierMark(obj)
++#if ART_HEAP_REFERENCE_BASE != 0
++    mov   xIP0, #ART_HEAP_REFERENCE_BASE
++    sub   xIP0, x0, xIP0              // Return a compressed managed reference.
+     .ifnc \wreg, w0
++      mov   \wreg, wIP0
++    .else
++      mov   w0, wIP0
++    .endif
++#else
++    .ifnc \wreg, w0
+       mov   \wreg, w0                   // Return result into `wreg`
+     .endif
++#endif
+ 
+     // Restore core regs, except `xreg`, as `wreg` is used to return the
+     // result of this function (simply remove it from the stack instead).
+@@ -2294,7 +2386,8 @@
+ 
+     mov   x0, xIP0
+     CALL_SYMBOL artReadBarrierMark // artReadBarrierMark(obj)
+-    mov   xIP0, x0
++    mov   xIP1, #ART_HEAP_REFERENCE_BASE
++    sub   xIP0, x0, xIP1          // Return a compressed managed reference.
+ 
+     // Restore core regs, except x0 and x1 as the return register switch case
+     // address calculation is smoother with an extra register.
+@@ -2384,6 +2477,11 @@
+      *     GC root entrypoint code.
+      */
+ ENTRY_ALIGNED art_quick_read_barrier_mark_introspection, 512
++#if ART_HEAP_REFERENCE_BASE != 0
++    // Keep the fixed +0x100/+0x300 switch layout: the path that converts
++    // the reference lives after those fixed-size tables.
++    b .Lheap_base_mark_introspection
++#else
+     // At this point, IP0 contains the reference, IP1 can be freely used.
+     // For heap poisoning, the reference is poisoned, so unpoison it first.
+     UNPOISON_HEAP_REF wIP0
+@@ -2412,6 +2510,7 @@
+     // in the top 2 bits of the lock word.
+     lsl   wIP0, wIP1, #LOCK_WORD_STATE_FORWARDING_ADDRESS_SHIFT
+     b .Lmark_introspection_return
++#endif
+ 
+     // We're very close to the alloted 256B for the entrypoint code before the
+     // array switch cases. Should we go a little bit over the limit, we can
+@@ -2426,7 +2525,40 @@
+     .hidden art_quick_read_barrier_mark_introspection_gc_roots
+     .global art_quick_read_barrier_mark_introspection_gc_roots
+ art_quick_read_barrier_mark_introspection_gc_roots:
++#if ART_HEAP_REFERENCE_BASE != 0
++    // The GC-root thunk carries a 32-bit reference in IP0. Unlike the main
++    // entry, this fixed-offset entry jumps directly to the slow path.
++    mov   xIP1, #ART_HEAP_REFERENCE_BASE
++    add   xIP0, xIP1, wIP0, uxtw
++#endif
+     READ_BARRIER_MARK_INTROSPECTION_SLOW_PATH BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_OFFSET
++#if ART_HEAP_REFERENCE_BASE != 0
++.Lheap_base_mark_introspection:
++    // IP0 enters as the 32-bit reference loaded by the field/array thunk.
++    // The lock word is read through the native address; the value returned
++    // to the switch stays a 32-bit reference.
++    UNPOISON_HEAP_REF wIP0
++    cbz   wIP0, .Lheap_base_mark_introspection_return
++    mov   xIP1, #ART_HEAP_REFERENCE_BASE
++    add   xIP0, xIP1, wIP0, uxtw
++    ldr   wIP1, [xIP0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
++    tbz   wIP1, #LOCK_WORD_MARK_BIT_SHIFT, .Lheap_base_mark_introspection_unmarked
++    mov   xIP1, #ART_HEAP_REFERENCE_BASE
++    sub   xIP0, xIP0, xIP1
++.Lheap_base_mark_introspection_return:
++    ldr   wIP1, [lr, #BAKER_MARK_INTROSPECTION_FIELD_LDR_OFFSET]
++    bfi   xIP0, xIP1, #(32 + 3), #5
++    adr   xIP1, .Lmark_introspection_return_switch
++    bfxil xIP1, xIP0, #32, #8
++    br    xIP1
++.Lheap_base_mark_introspection_unmarked:
++    tst   wIP1, wIP1, lsl #1
++    bmi   .Lheap_base_mark_introspection_forwarding_address
++    READ_BARRIER_MARK_INTROSPECTION_SLOW_PATH BAKER_MARK_INTROSPECTION_FIELD_LDR_OFFSET
++.Lheap_base_mark_introspection_forwarding_address:
++    lsl   wIP0, wIP1, #LOCK_WORD_STATE_FORWARDING_ADDRESS_SHIFT
++    b     .Lheap_base_mark_introspection_return
++#endif
+ END art_quick_read_barrier_mark_introspection
+ 
+ .extern artInvokePolymorphic

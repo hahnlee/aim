@@ -1,0 +1,353 @@
+diff --git a/runtime/oat/image.h b/runtime/oat/image.h
+--- a/runtime/oat/image.h
++++ b/runtime/oat/image.h
+@@ -159,7 +159,8 @@
+   }
+ 
+   uint8_t* GetImageBegin() const {
+-    return reinterpret_cast<uint8_t*>(image_begin_);
++    return reinterpret_cast<uint8_t*>(
++        ArtCompressedReferenceToHostAddress(image_begin_));
+   }
+ 
+   size_t GetImageSize() const {
+@@ -185,19 +186,23 @@
+   // The location that the oat file was expected to be when the image was created. The actual
+   // oat file may be at a different location for application images.
+   uint8_t* GetOatFileBegin() const {
+-    return reinterpret_cast<uint8_t*>(oat_file_begin_);
++    return reinterpret_cast<uint8_t*>(
++        ArtCompressedReferenceToHostAddress(oat_file_begin_));
+   }
+ 
+   uint8_t* GetOatDataBegin() const {
+-    return reinterpret_cast<uint8_t*>(oat_data_begin_);
++    return reinterpret_cast<uint8_t*>(
++        ArtCompressedReferenceToHostAddress(oat_data_begin_));
+   }
+ 
+   uint8_t* GetOatDataEnd() const {
+-    return reinterpret_cast<uint8_t*>(oat_data_end_);
++    return reinterpret_cast<uint8_t*>(
++        ArtCompressedReferenceToHostAddress(oat_data_end_));
+   }
+ 
+   uint8_t* GetOatFileEnd() const {
+-    return reinterpret_cast<uint8_t*>(oat_file_end_);
++    return reinterpret_cast<uint8_t*>(
++        ArtCompressedReferenceToHostAddress(oat_file_end_));
+   }
+ 
+   EXPORT PointerSize GetPointerSize() const;
+diff --git a/runtime/oat/image-inl.h b/runtime/oat/image-inl.h
+--- a/runtime/oat/image-inl.h
++++ b/runtime/oat/image-inl.h
+@@ -41,7 +41,8 @@
+   // rather than image_roots_ because it won't move (asserted below)
+   // and it's a const member.
+   mirror::ObjectArray<mirror::Object>* image_roots =
+-      reinterpret_cast<mirror::ObjectArray<mirror::Object>*>(image_roots_);
++      reinterpret_cast<mirror::ObjectArray<mirror::Object>*>(
++          ArtCompressedReferenceToHostAddress(image_roots_));
+   mirror::ObjectArray<mirror::Object>* result =
+       ReadBarrier::BarrierForRoot<mirror::ObjectArray<mirror::Object>, kReadBarrierOption>(
+           &image_roots);
+diff --git a/runtime/gc/space/image_space.cc b/runtime/gc/space/image_space.cc
+--- a/runtime/gc/space/image_space.cc
++++ b/runtime/gc/space/image_space.cc
+@@ -208,11 +208,12 @@
+  public:
+   RelocationRange(const RelocationRange&) = default;
+   RelocationRange(uintptr_t source, uintptr_t dest, uintptr_t length)
+-      : source_(source),
+-        dest_(dest),
++      : source_(ArtHostAddressToCompressedReferenceAddress(source)),
++        dest_(ArtCompressedReferenceToHostAddress(dest)),
+         length_(length) {}
+ 
+   bool InSource(uintptr_t address) const {
++    address = ArtHostAddressToCompressedReferenceAddress(address);
+     return address - source_ < length_;
+   }
+ 
+@@ -226,6 +227,7 @@
+ 
+   // Translate a source address to the destination space.
+   uintptr_t ToDest(uintptr_t address) const {
++    address = ArtHostAddressToCompressedReferenceAddress(address);
+     DCHECK(InSource(address));
+     return address + Delta();
+   }
+@@ -2400,13 +2402,13 @@
+  private:
+   class SimpleRelocateVisitor {
+    public:
+-    SimpleRelocateVisitor(uint32_t diff, uint32_t begin, uint32_t size)
++    SimpleRelocateVisitor(int64_t diff, uint32_t begin, uint32_t size)
+         : diff_(diff), begin_(begin), size_(size) {}
+ 
+     // Adapter taking the same arguments as SplitRangeRelocateVisitor
+     // to simplify constructing the various visitors in DoRelocateSpaces().
+-    SimpleRelocateVisitor(uint32_t base_diff,
+-                          uint32_t current_diff,
++    SimpleRelocateVisitor(int64_t base_diff,
++                          int64_t current_diff,
+                           uint32_t bound,
+                           uint32_t begin,
+                           uint32_t size)
+@@ -2419,33 +2421,35 @@
+     template <typename T>
+     ALWAYS_INLINE T* operator()(T* src) const {
+       DCHECK(InSource(src));
+-      uint32_t raw_src = reinterpret_cast32<uint32_t>(src);
+-      return reinterpret_cast32<T*>(raw_src + diff_);
++      uintptr_t raw_src = ArtHostAddressToCompressedReferenceAddress(
++          reinterpret_cast<uintptr_t>(src));
++      return reinterpret_cast<T*>(static_cast<int64_t>(raw_src) + diff_);
+     }
+ 
+     template <typename T>
+     ALWAYS_INLINE bool InSource(T* ptr) const {
+-      uint32_t raw_ptr = reinterpret_cast32<uint32_t>(ptr);
++      uintptr_t raw_ptr = ArtHostAddressToCompressedReferenceAddress(
++          reinterpret_cast<uintptr_t>(ptr));
+       return raw_ptr - begin_ < size_;
+     }
+ 
+     template <typename T>
+     ALWAYS_INLINE bool InDest(T* ptr) const {
+-      uint32_t raw_ptr = reinterpret_cast32<uint32_t>(ptr);
+-      uint32_t src_ptr = raw_ptr - diff_;
+-      return src_ptr - begin_ < size_;
++      int64_t raw_ptr = static_cast<int64_t>(reinterpret_cast<uintptr_t>(ptr));
++      int64_t src_ptr = raw_ptr - diff_;
++      return src_ptr >= begin_ && static_cast<uint64_t>(src_ptr - begin_) < size_;
+     }
+ 
+    private:
+-    const uint32_t diff_;
++    const int64_t diff_;
+     const uint32_t begin_;
+     const uint32_t size_;
+   };
+ 
+   class SplitRangeRelocateVisitor {
+    public:
+-    SplitRangeRelocateVisitor(uint32_t base_diff,
+-                              uint32_t current_diff,
++    SplitRangeRelocateVisitor(int64_t base_diff,
++                              int64_t current_diff,
+                               uint32_t bound,
+                               uint32_t begin,
+                               uint32_t size)
+@@ -2462,20 +2466,22 @@
+     template <typename T>
+     ALWAYS_INLINE T* operator()(T* src) const {
+       DCHECK(InSource(src));
+-      uint32_t raw_src = reinterpret_cast32<uint32_t>(src);
+-      uint32_t diff = (raw_src < bound_) ? base_diff_ : current_diff_;
+-      return reinterpret_cast32<T*>(raw_src + diff);
++      uintptr_t raw_src = ArtHostAddressToCompressedReferenceAddress(
++          reinterpret_cast<uintptr_t>(src));
++      int64_t diff = (raw_src < bound_) ? base_diff_ : current_diff_;
++      return reinterpret_cast<T*>(static_cast<int64_t>(raw_src) + diff);
+     }
+ 
+     template <typename T>
+     ALWAYS_INLINE bool InSource(T* ptr) const {
+-      uint32_t raw_ptr = reinterpret_cast32<uint32_t>(ptr);
++      uintptr_t raw_ptr = ArtHostAddressToCompressedReferenceAddress(
++          reinterpret_cast<uintptr_t>(ptr));
+       return raw_ptr - begin_ < size_;
+     }
+ 
+    private:
+-    const uint32_t base_diff_;
+-    const uint32_t current_diff_;
++    const int64_t base_diff_;
++    const int64_t current_diff_;
+     const uint32_t bound_;
+     const uint32_t begin_;
+     const uint32_t size_;
+@@ -2536,8 +2542,8 @@
+     if (base_diff64 == 0 && current_diff64 == 0) {
+       return;
+     }
+-    uint32_t base_diff = static_cast<uint32_t>(base_diff64);
+-    uint32_t current_diff = static_cast<uint32_t>(current_diff64);
++    int64_t base_diff = base_diff64;
++    int64_t current_diff = current_diff64;
+ 
+     // For boot image the main visitor is a SimpleRelocateVisitor. For the boot image extension we
+     // mostly use a SplitRelocationVisitor but some work can still use the SimpleRelocationVisitor.
+@@ -2739,7 +2745,7 @@
+     ImageSpace* first_space = spaces.front().get();
+     const ImageHeader& first_space_header = first_space->GetImageHeader();
+     int64_t base_diff64 =
+-        static_cast<int64_t>(reinterpret_cast32<uint32_t>(first_space->Begin())) -
++        static_cast<int64_t>(reinterpret_cast<uintptr_t>(first_space->Begin())) -
+         static_cast<int64_t>(reinterpret_cast32<uint32_t>(first_space_header.GetImageBegin()));
+     if (!relocate_) {
+       DCHECK_EQ(base_diff64, 0);
+diff --git a/runtime/class_linker.cc b/runtime/class_linker.cc
+--- a/runtime/class_linker.cc
++++ b/runtime/class_linker.cc
+@@ -11311,7 +11311,10 @@
+   CHECK(method->IsCopied());
+   gc::Heap* heap = Runtime::Current()->GetHeap();
+   // Check if the copied method is in the boot class path.
+-  if (heap->IsBootImageAddress(method) || GetAllocatorForClassLoader(nullptr)->Contains(method)) {
++  uintptr_t logical_method =
++      ArtHostAddressToCompressedReferenceAddress(reinterpret_cast<uintptr_t>(method));
++  if (logical_method - heap->GetBootImagesStartAddress() < heap->GetBootImagesSize() ||
++      GetAllocatorForClassLoader(nullptr)->Contains(method)) {
+     DCHECK(GetHoldingClassOfCopiedMethod(method)->GetClassLoader() == nullptr);
+     return nullptr;
+   }
+diff --git a/runtime/runtime_image.cc b/runtime/runtime_image.cc
+--- a/runtime/runtime_image.cc
++++ b/runtime/runtime_image.cc
+@@ -230,7 +230,11 @@
+ 
+  private:
+   bool IsInBootImage(const void* obj) const {
+-    return reinterpret_cast<uintptr_t>(obj) - boot_image_begin_ < boot_image_size_;
++    uintptr_t address = reinterpret_cast<uintptr_t>(obj);
++#if ART_HEAP_REFERENCE_BASE != 0
++    address = ArtHostAddressToCompressedReferenceAddress(address);
++#endif
++    return address - boot_image_begin_ < boot_image_size_;
+   }
+ 
+   // Returns the image contents for `cls`. If `cls` is in the boot image, the
+@@ -336,9 +340,16 @@
+   // in the boot image. For the copy, this is really its content, it should not
+   // be returned as an `ObjPtr` (as it's not a GC object), nor stored anywhere.
+   template<typename T> T* FromImageOffsetToRuntimeContent(uint32_t offset) {
+-    if (offset == 0u || IsInBootImage(reinterpret_cast<const void*>(offset))) {
+-      return reinterpret_cast<T*>(offset);
++    if (offset == 0u) {
++      return nullptr;
+     }
++    if (IsInBootImage(reinterpret_cast<const void*>(offset))) {
++      uintptr_t address = offset;
++#if ART_HEAP_REFERENCE_BASE != 0
++      address = ArtCompressedReferenceToHostAddress(address);
++#endif
++      return reinterpret_cast<T*>(address);
++    }
+     uint32_t vector_data_offset = FromImageOffsetToVectorOffset(offset);
+     return reinterpret_cast<T*>(objects_.data() + vector_data_offset);
+   }
+@@ -398,7 +409,11 @@
+     uint32_t operator()(const ClassTable::TableSlot& slot) const NO_THREAD_SAFETY_ANALYSIS {
+       uint32_t ptr = slot.NonHashData();
+       if (helper_->IsInBootImage(reinterpret_cast32<const void*>(ptr))) {
+-        return reinterpret_cast32<mirror::Class*>(ptr)->DescriptorHash();
++        uintptr_t address = ptr;
++#if ART_HEAP_REFERENCE_BASE != 0
++        address = ArtCompressedReferenceToHostAddress(address);
++#endif
++        return reinterpret_cast<mirror::Class*>(address)->DescriptorHash();
+       }
+       return helper_->class_hashes_.Get(helper_->FromImageOffsetToVectorOffset(ptr));
+     }
+@@ -1745,7 +1760,11 @@
+   }
+ 
+   static uint64_t PointerToUint64(void* ptr) {
+-    return reinterpret_cast64<uint64_t>(ptr);
++    uintptr_t address = reinterpret_cast<uintptr_t>(ptr);
++#if ART_HEAP_REFERENCE_BASE != 0
++    address = ArtHostAddressToCompressedReferenceAddress(address);
++#endif
++    return static_cast<uint64_t>(address);
+   }
+ 
+   void WriteImageMethods() {
+diff --git a/runtime/oat/oat_file-inl.h b/runtime/oat/oat_file-inl.h
+--- a/runtime/oat/oat_file-inl.h
++++ b/runtime/oat/oat_file-inl.h
+@@ -95,7 +95,15 @@
+   if (code_offset_ == 0) {
+     return nullptr;
+   }
+-  return reinterpret_cast<const void *>(begin_ + code_offset_);
++  uintptr_t code_address = reinterpret_cast<uintptr_t>(begin_) + code_offset_;
++#if ART_HEAP_REFERENCE_BASE != 0
++  // OAT stores method code addresses in Android's logical 32-bit address
++  // window.  OatFile::Begin() can therefore still be logical when an image
++  // was mapped at its logical address; lift only low values
++  // below the window base and leave native host mappings unchanged.
++  code_address = ArtCompressedReferenceToHostAddress(code_address);
++#endif
++  return reinterpret_cast<const void *>(code_address);
+ }
+ 
+ inline const OatFile::BssMappingInfo* OatFile::FindBcpMappingInfo(const DexFile* dex_file) const {
+diff --git a/runtime/art_method.h b/runtime/art_method.h
+--- a/runtime/art_method.h
++++ b/runtime/art_method.h
+@@ -789,8 +789,13 @@
+   }
+   ALWAYS_INLINE
+   const void* GetEntryPointFromQuickCompiledCodePtrSize(PointerSize pointer_size) const {
+-    return GetNativePointer<const void*>(
++    const void* entry_point = GetNativePointer<const void*>(
+         EntryPointFromQuickCompiledCodeOffset(pointer_size), pointer_size);
++#if ART_HEAP_REFERENCE_BASE != 0
++    entry_point = reinterpret_cast<const void*>(ArtCompressedReferenceToHostAddress(
++        reinterpret_cast<uintptr_t>(entry_point)));
++#endif
++    return entry_point;
+   }
+ 
+   void SetEntryPointFromQuickCompiledCode(const void* entry_point_from_quick_compiled_code)
+diff --git a/runtime/instrumentation.cc b/runtime/instrumentation.cc
+--- a/runtime/instrumentation.cc
++++ b/runtime/instrumentation.cc
+@@ -278,7 +278,17 @@
+       CHECK_EQ(new_code, GetQuickToInterpreterBridge());
+     }
+   }
++#if ART_HEAP_REFERENCE_BASE != 0
++  // AOT/JIT producers may still hand this boundary an Android logical
++  // 32-bit code address. Normalize before equality checks and atomic publish.
++  new_code = reinterpret_cast<const void*>(ArtCompressedReferenceToHostAddress(
++      reinterpret_cast<uintptr_t>(new_code)));
++#endif
+   const void* current_entry_point = method->GetEntryPointFromQuickCompiledCode();
++#if ART_HEAP_REFERENCE_BASE != 0
++  current_entry_point = reinterpret_cast<const void*>(ArtCompressedReferenceToHostAddress(
++      reinterpret_cast<uintptr_t>(current_entry_point)));
++#endif
+   if (current_entry_point == new_code) {
+     // If the method is from a boot image, don't dirty it if the entrypoint
+     // doesn't change.
+@@ -1660,6 +1670,11 @@
+     return_value.SetJ(0);
+   } else if (return_shorty == 'F' || return_shorty == 'D') {
+     return_value.SetJ(*fpr_result);
++#if ART_HEAP_REFERENCE_BASE != 0
++  } else if (*is_ref) {
++    return_value.SetL(mirror::PtrCompression<false, mirror::Object>::Decompress(
++        static_cast<uint32_t>(*gpr_result)));
++#endif
+   } else {
+     return_value.SetJ(*gpr_result);
+   }
+diff --git a/dex2oat/linker/image_writer.h b/dex2oat/linker/image_writer.h
+--- a/dex2oat/linker/image_writer.h
++++ b/dex2oat/linker/image_writer.h
+@@ -572,7 +572,10 @@
+   // Return true if `obj` is inside of a boot image space that we're compiling against.
+   // (Always false when compiling the boot image.)
+   ALWAYS_INLINE bool IsInBootImage(const void* obj) const {
+-    return reinterpret_cast<uintptr_t>(obj) - boot_image_begin_ < boot_image_size_;
++    // boot_image_begin_ is the logical image address; objects live in the
++    // heap reference window.
++    return ArtHostAddressToCompressedReferenceAddress(reinterpret_cast<uintptr_t>(obj)) -
++        boot_image_begin_ < boot_image_size_;
+   }
+ 
+   template <typename MirrorType>
