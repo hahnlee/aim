@@ -12,7 +12,7 @@ the like.
 | ABI: numbers, argument blocks, guest wrappers, module shape | `crates/aim-hostcall` (`no_std`) |
 | Dispatch and module registry | `crates/aim-linux-abi/src/hostcall.rs`, `Lhostcall` in `trampoline.S` |
 | Host modules | `crates/aim-host-<name>` (first: `aim-host-health`; `aim-host-sensors` serves two modules) |
-| HAL services and their build | `hal/`, `tools/build-vendor-hals.sh`, `tools/lib/vendor_hal_aidl.py`, `hal/sources.lock` |
+| HAL services and their build | `hal/`, `cargo aim` ([build.md](build.md)), `tools/lib/vendor_hal_aidl.py`, `hal/sources.lock` |
 | Placement in the derived image, and the emulator HALs removed | `image/overlay.toml` |
 
 ## The call
@@ -107,9 +107,9 @@ first.
 
 ## Vendor HAL build pipeline
 
-`tools/build-vendor-hals.sh` builds the `hal/` cargo workspace for
-`aarch64-linux-android`. All its inputs are pinned in `hal/sources.lock` and
-verified:
+`cargo aim` ([build.md](build.md)) builds the `hal/` crates for
+`aarch64-linux-android`. All their inputs are pinned in `hal/sources.lock`
+and verified:
 
 1. **AOSP Rust binder.** `libbinder_rs` and the `libbinder_ndk` headers are
    fetched at the image's tag (`android-16.0.0_r1`) and checked against a
@@ -119,7 +119,7 @@ verified:
    `libbinder_ndk_bindgen_flags.txt`, and `--cfg android_vendor --cfg
    android_vndk`. The binary links the image's own `libbinder_ndk.so`; libc,
    libdl, libm and liblog come from the NDK sysroot (the same LL-NDK ABI).
-2. **AIDL** (`tools/lib/vendor_hal_aidl.py`). Each stable interface is
+2. **AIDL** (the `aidl-gen` node, `tools/lib/vendor_hal_aidl.py`). Each stable interface is
    pinned at one frozen version with the imports of that version
    (`versions_with_info` in its `Android.bp`).
    - Its frozen API directory (`aidl_api/<package>/<version>`) is fetched and
@@ -139,13 +139,13 @@ verified:
      through which the generated code names imported types. Crates depend
      on `binder`, `async-trait` and `static_assertions`, as Soong's do.
    - Nothing generated is checked in.
-3. **Build.** cargo builds the whole workspace (every interface crate, used
-   or not) with the NDK clang as linker. It installs each service under the
-   name in its `[package.metadata.vendor-hal] binary` into
-   `_build/vendor-hals/bin`. `image/overlay.toml` places it in the derived
-   image. A HAL's test client (`test` in the same table) goes to
-   `_build/vendor-hals/test`, which crate tests copy into the guest's
-   `/data/local/tmp`; it is never placed in the image.
+3. **Build.** Each package with a `[package.metadata.vendor-hal]` table is
+   a `hal/<package>` node, built with the NDK clang as linker and installed
+   under the name in its `binary` into `target/aim/hal/bin`.
+   `image/overlay.toml` places it in the derived image. A HAL's test client
+   (`test` in the same table) goes to `target/aim/hal/test`, which crate
+   tests copy into the guest's `/data/local/tmp`; it is never placed in the
+   image.
 
 The interfaces P4 and P5 need build: power V6 (imports common.fmq V1),
 graphics composer3 V4, allocator V2 and common V6 (with drm.common V1),
@@ -168,7 +168,8 @@ To add a HAL:
 - add a service crate with its `.rc` and vintf fragment (a driver library
   loaded in-process, like the mapper or the GLES driver, is a `cdylib` whose
   `[package.metadata.vendor-hal] library` names the installed file in
-  `_build/vendor-hals/lib`);
+  `target/aim/hal/lib`), and list it in the workspace's `members`; the build
+  graph picks it up from `cargo metadata`;
 - add `[[add]]` entries to the overlay, plus `[[remove]]` for an emulator
   HAL of the same instance.
 

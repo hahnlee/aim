@@ -12,7 +12,7 @@ program = "vold"
 
 [dependencies]
 android_os_vold = { path = "../aidl/android_os_vold" }
-binder.workspace = true
+binder = { workspace = true, features = ["system"] }
 daemon-log.workspace = true
-libc = "0.2"
+libc.workspace = true
 log.workspace = true

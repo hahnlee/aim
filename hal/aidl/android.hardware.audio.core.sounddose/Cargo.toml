@@ -9,10 +9,10 @@ description = "android.hardware.audio.core.sounddose V3, Rust backend, generated
 build = "../../binder/build.rs"
 
 [lib]
-path = "../../../_build/vendor-hals/aidl/android.hardware.audio.core.sounddose-V3/lib.rs"
+path = "../../../target/aim/gen/hal-aidl/android.hardware.audio.core.sounddose-V3/lib.rs"
 
 [dependencies]
 android_media_audio_common_types = { path = "../android.media.audio.common.types" }
-async-trait = "0.1"
-binder = { path = "../../binder" }
-static_assertions = "1"
+async-trait.workspace = true
+binder.workspace = true
+static_assertions.workspace = true

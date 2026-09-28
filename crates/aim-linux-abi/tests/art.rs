@@ -5,11 +5,9 @@
 //! image of `image/overlay.toml` puts in place of the originals), first
 //! without a boot image, then with it.
 //!
-//! Skipped unless the extracted image, every source of the overlay (the ART
-//! exception build, tools/build-art-android.sh and
-//! tools/build-art-boot-image.sh, and the vendor HALs), a JDK and the SDK's
-//! d8 are present. Run it with a private CARGO_TARGET_DIR: it executes
-//! linux-run.
+//! Skipped unless the derived image (`cargo aim build`, which builds the
+//! ART exception and its boot image), a JDK and the SDK's d8 are present.
+//! Run it with a private CARGO_TARGET_DIR: it executes linux-run.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -18,10 +16,6 @@ use std::time::{Duration, Instant};
 use aim_android_init::ImageRoot;
 use aim_guest_init::paths::Layout;
 
-const IMAGE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/android16-image-full"
-);
 /// What the fixture prints (checked against a host computation of `work`).
 const EXPECTED: &str = "hello from ART: 1000 49168000 caught";
 /// Without a boot image: the ART module's boot class path plus core-icu4j,
@@ -49,19 +43,13 @@ const TRANSLATED: [&str; 6] = [
     "system/framework",
 ];
 
-fn source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
 /// javac and the newest SDK build-tools' d8.
 fn java_tools() -> Option<(PathBuf, PathBuf, PathBuf)> {
     let jdk = ["/opt/homebrew/opt/openjdk@17", "/opt/homebrew/opt/openjdk"]
         .iter()
         .map(PathBuf::from)
         .find(|j| j.join("bin/javac").exists())?;
-    let sdk = std::env::var_os("ANDROID_SDK_ROOT")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join("Library/Android/sdk")))?;
+    let sdk = aim_paths::sdk()?;
     let mut tools: Vec<PathBuf> = std::fs::read_dir(sdk.join("build-tools"))
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path().join("d8")))
@@ -71,18 +59,9 @@ fn java_tools() -> Option<(PathBuf, PathBuf, PathBuf)> {
     Some((jdk.join("bin/javac"), tools.pop()?, jdk))
 }
 
-/// The derived image of `image/overlay.toml`, assembled (APFS clones) once
-/// per identity, so a rebuilt ART gets a fresh tree.
-fn derived_image() -> Result<PathBuf, String> {
-    let root = source_root();
-    let original = Path::new(IMAGE).canonicalize().map_err(|e| e.to_string())?;
-    let (_, plan) = aim_android_image::load(&root.join("image/overlay.toml"), &original, &root)
-        .map_err(|problems| format!("{problems:?}"))?;
-    let identity = aim_android_image::identity::compute("art-test-original", &plan);
-    let out = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("art-derived-image-{}", &identity.hex[..16]));
-    aim_android_image::assemble(&plan, &original, &identity, &out)?;
-    Ok(out)
+/// The derived image of `image/overlay.toml` (`cargo aim build derived-image`).
+fn derived_image() -> Option<PathBuf> {
+    aim_paths::input(aim_paths::derived_image(), "derived-image")
 }
 
 /// Compile the fixture to `<out>/classes.dex`.
@@ -111,7 +90,8 @@ fn build_dex(out: &Path) -> PathBuf {
 /// The boot class path recorded in the original boot image's oat header;
 /// the regenerated boot image covers the same jars.
 fn image_boot_class_path() -> String {
-    let oat = std::fs::read(Path::new(IMAGE).join("system/framework/arm64/boot.oat")).unwrap();
+    let oat =
+        std::fs::read(aim_paths::original_image().join("system/framework/arm64/boot.oat")).unwrap();
     let key = b"bootclasspath\0";
     let at = oat.windows(key.len()).position(|w| w == key).unwrap() + key.len();
     let len = oat[at..].iter().position(|&b| b == 0).unwrap();
@@ -192,27 +172,11 @@ impl Guest {
 
 #[test]
 fn hello_world_runs_on_the_art_exception() {
-    if !Path::new(IMAGE)
-        .join("apex/com.android.art/bin/dalvikvm64")
-        .exists()
-    {
-        eprintln!("skipped: extracted image not found at {IMAGE}");
-        return;
-    }
     if java_tools().is_none() {
-        eprintln!("skipped: no JDK or SDK build-tools d8");
+        aim_paths::skip("no JDK or SDK build-tools d8");
         return;
     }
-    let image = match derived_image() {
-        Ok(image) => image,
-        Err(e) => {
-            eprintln!(
-                "skipped: no derived image (run tools/build-art-android.sh, \
-                 tools/build-art-boot-image.sh and tools/build-vendor-hals.sh): {e}"
-            );
-            return;
-        }
-    };
+    let Some(image) = derived_image() else { return };
 
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("art-{}", std::process::id()));
     remove_tree(&dir);

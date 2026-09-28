@@ -114,8 +114,8 @@ in the background.
 
 ## Boot
 
-With the vendor HALs built (`tools/build-vendor-hals.sh`) and the derived
-image assembled (`android-image assemble`):
+With the derived image built (`cargo aim build`, which puts it at
+`target/aim/derived-image`):
 
 ```sh
 aim-display --socket /tmp/display.sock &

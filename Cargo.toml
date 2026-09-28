@@ -1,3 +1,11 @@
+# One workspace for the host (macOS) crates and the guest crates built for
+# aarch64-linux-android (hal/, daemons/). `cargo aim` (crates/aim-build,
+# docs/build.md) builds both; plain `cargo build`/`cargo test` build the
+# host crates (default-members).
+#
+# The guest crates' AIDL and AOSP sources are not in Git: the aidl-gen node
+# of `cargo aim` fetches the pinned AOSP trees into _build/aosp and
+# generates the AIDL crates into target/aim/gen before cargo runs.
 [workspace]
 members = [
     "crates/aim-android-image",
@@ -5,6 +13,7 @@ members = [
     "crates/aim-guest-init",
     "crates/aim-binder-driver",
     "crates/aim-binder-host",
+    "crates/aim-build",
     "crates/aim-host-audio",
     "crates/aim-host-bluetooth",
     "crates/aim-host-camera",
@@ -15,9 +24,76 @@ members = [
     "crates/aim-host-sensors",
     "crates/aim-hostcall",
     "crates/aim-linux-abi",
+    "crates/aim-paths",
+    "tools/android-image-extract",
+    # Guest (aarch64-linux-android).
+    "hal/aidl/*",
+    "hal/audio",
+    "hal/audio/check",
+    "hal/binder",
+    "hal/binder-ndk-sys",
+    "hal/bluetooth",
+    "hal/camera",
+    "hal/fmq",
+    "hal/graphics/allocator",
+    "hal/graphics/composer",
+    "hal/graphics/gralloc",
+    "hal/graphics/mapper",
+    "hal/gles",
+    "hal/gnss",
+    "hal/health",
+    "hal/sensors",
+    "hal/thermal",
+    "hal/tests/bluetooth-hci-client",
+    "hal/tests/camera-client",
+    "daemons/aidl/*",
+    "daemons/apexd",
+    "daemons/lmkd",
+    "daemons/log",
+    "daemons/netd",
+    "daemons/vold",
+]
+default-members = [
+    "crates/aim-android-image",
+    "crates/aim-android-init",
+    "crates/aim-guest-init",
+    "crates/aim-binder-driver",
+    "crates/aim-binder-host",
+    "crates/aim-build",
+    "crates/aim-host-audio",
+    "crates/aim-host-bluetooth",
+    "crates/aim-host-camera",
+    "crates/aim-host-display",
+    "crates/aim-host-gpu",
+    "crates/aim-host-health",
+    "crates/aim-host-location",
+    "crates/aim-host-sensors",
+    "crates/aim-hostcall",
+    "crates/aim-linux-abi",
+    "crates/aim-paths",
     "tools/android-image-extract",
 ]
 resolver = "2"
 
 [workspace.package]
 license = "Apache-2.0"
+
+[workspace.dependencies]
+aim-hostcall = { path = "crates/aim-hostcall" }
+aim-paths = { path = "crates/aim-paths" }
+async-trait = "0.1"
+# AOSP libbinder_rs, vendor variant; the daemons add the `system` feature.
+binder = { path = "hal/binder" }
+daemon-log = { path = "daemons/log" }
+libc = "0.2"
+log = "0.4"
+sha2 = "0.10"
+static_assertions = "1"
+
+# The guest crates are built with this profile (`cargo aim`), as Soong
+# builds them: LTO, one codegen unit, no debug info.
+[profile.android]
+inherits = "release"
+lto = true
+codegen-units = 1
+strip = "debuginfo"

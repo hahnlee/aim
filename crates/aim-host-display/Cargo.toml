@@ -11,5 +11,5 @@ name = "aim-display"
 path = "src/bin/aim-display/main.rs"
 
 [dependencies]
-aim-hostcall = { path = "../aim-hostcall" }
-libc = "0.2"
+aim-hostcall.workspace = true
+libc.workspace = true

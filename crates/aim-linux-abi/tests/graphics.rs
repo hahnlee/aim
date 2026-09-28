@@ -6,8 +6,8 @@
 //! into a pbuffer, into the buffer and into a window surface (an
 //! ImageReader's queue).
 //!
-//! Skipped unless the extracted image, the pinned NDK, the ANGLE build and
-//! the vendor HAL outputs (tools/build-vendor-hals.sh) are all present.
+//! Skipped unless the pinned NDK, the ANGLE build and the derived image
+//! (`cargo aim build`) are all present.
 //! Run it with a private CARGO_TARGET_DIR: it executes linux-run.
 
 use std::io::Read;
@@ -28,43 +28,18 @@ use aim_guest_init::paths::Layout;
 use aim_guest_init::props::mapped_properties;
 use aim_guest_init::propsvc::{PropertyEvent, PropertySockets};
 
-const IMAGE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/android16-image-full"
-);
-const ANGLE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/angle-source/out/AimRelease"
-);
 const SERVICEMANAGER_LABEL: &str = "u:r:servicemanager:s0";
 const ALLOCATOR: &str = "android.hardware.graphics.allocator.IAllocator/default";
 const AID_SYSTEM: u32 = 1000;
 
-fn source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
+/// The pinned NDK's clang for the guest (arm64 Android), if installed.
 fn ndk_clang() -> Option<PathBuf> {
-    let sdk = std::env::var_os("ANDROID_SDK_ROOT")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join("Library/Android/sdk")))?;
-    let clang = sdk.join(
-        "ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android35-clang",
-    );
-    clang.exists().then_some(clang)
+    aim_paths::ndk_clang(35)
 }
 
-/// The derived image of `image/overlay.toml`, assembled (APFS clones) once
-/// per overlay identity.
-fn derived_image() -> Result<PathBuf, String> {
-    let root = source_root();
-    let original = Path::new(IMAGE).canonicalize().map_err(|e| e.to_string())?;
-    let (_, plan) = aim_android_image::load(&root.join("image/overlay.toml"), &original, &root)
-        .map_err(|problems| format!("{problems:?}"))?;
-    let identity = aim_android_image::identity::compute("graphics-test-original", &plan);
-    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("graphics-derived-image");
-    aim_android_image::assemble(&plan, &original, &identity, &out)?;
-    Ok(out)
+/// The derived image of `image/overlay.toml` (`cargo aim build derived-image`).
+fn derived_image() -> Option<PathBuf> {
+    aim_paths::input(aim_paths::derived_image(), "derived-image")
 }
 
 /// Init's property areas and service. `ro.hardware.egl` is what
@@ -146,7 +121,7 @@ impl Guest<'_> {
             .arg("--seclabel")
             .arg(seclabel)
             .arg("--gpu")
-            .arg(ANGLE)
+            .arg(aim_paths::angle())
             .args(argv)
             .stdin(Stdio::null());
         c
@@ -188,25 +163,14 @@ fn log_of(path: &Path) -> String {
 
 #[test]
 fn allocates_and_renders_through_the_original_libui_and_libegl() {
-    if !Path::new(IMAGE).join("system/bin/servicemanager").exists() {
-        eprintln!("skipped: extracted image not found at {IMAGE}");
-        return;
-    }
     let Some(clang) = ndk_clang() else {
-        eprintln!("skipped: the pinned NDK (r28c) is not installed");
+        aim_paths::skip("the pinned NDK is not installed");
         return;
     };
-    if !Path::new(ANGLE).join("libGLESv2.dylib").exists() {
-        eprintln!("skipped: no ANGLE build at {ANGLE}");
+    if aim_paths::input(aim_paths::angle().join("libGLESv2.dylib"), "angle").is_none() {
         return;
     }
-    let image = match derived_image() {
-        Ok(image) => image,
-        Err(e) => {
-            eprintln!("skipped: no derived image (run tools/build-vendor-hals.sh): {e}");
-            return;
-        }
-    };
+    let Some(image) = derived_image() else { return };
 
     let dir =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("graphics-{}", std::process::id()));

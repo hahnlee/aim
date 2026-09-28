@@ -12,5 +12,5 @@ program = "lmkd"
 
 [dependencies]
 daemon-log.workspace = true
-libc = "0.2"
+libc.workspace = true
 log.workspace = true

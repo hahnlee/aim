@@ -12,6 +12,6 @@ program = "apexd"
 
 [dependencies]
 android_apex = { path = "../aidl/android_apex" }
-binder.workspace = true
+binder = { workspace = true, features = ["system"] }
 daemon-log.workspace = true
 log.workspace = true

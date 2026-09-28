@@ -10,7 +10,7 @@ description = "Test client for the audio HAL: plays and records through IModule/
 name = "audio-hal-check"
 path = "src/main.rs"
 
-# A test client: installed into _build/vendor-hals/test, not the image.
+# A test client: installed into target/aim/hal/test, not the image.
 [package.metadata.vendor-hal]
 test = "audio-hal-check"
 
@@ -18,6 +18,6 @@ test = "audio-hal-check"
 android_hardware_audio_common = { path = "../../aidl/android.hardware.audio.common" }
 android_hardware_audio_core = { path = "../../aidl/android.hardware.audio.core" }
 android_media_audio_common_types = { path = "../../aidl/android.media.audio.common.types" }
-binder = { path = "../../binder" }
+binder.workspace = true
 aim-fmq = { path = "../../fmq" }
-libc = "0.2"
+libc.workspace = true

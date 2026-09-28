@@ -275,15 +275,10 @@ fn vendor_apexes_from_packages(image: &ImageRoot) -> Vec<String> {
 /// Parses the real extracted image when available and reports statistics.
 #[test]
 fn real_image_statistics() {
-    let root = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../_build/android16-image-full"
-    );
-    if !std::path::Path::new(root).is_dir() {
-        eprintln!("no extracted image on this machine; skipping");
+    let Some(root) = aim_paths::input(aim_paths::original_image(), "image") else {
         return;
-    }
-    let image = ImageRoot::new(root);
+    };
+    let image = ImageRoot::new(&root);
     let vendor_version = aim_android_init::rc::vendor_android_version(&image).unwrap_or(36);
     // The emulator image's bootconfig carries androidboot.hardware=ranchu.
     let options = PropertyInitOptions {
@@ -341,7 +336,7 @@ fn real_image_statistics() {
     );
     let count =
         |d: &[aim_android_init::Diagnostic], s| d.iter().filter(|x| x.severity == s).count();
-    eprintln!("image: {root}");
+    eprintln!("image: {}", root.display());
     eprintln!("vendor android version: {vendor_version}; vendor apexes: {vendor_apexes:?}");
     eprintln!(
         "properties: {summary}; property-load diagnostics: {}",

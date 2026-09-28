@@ -12,6 +12,20 @@ Record the upstream project, exact revision, applicable license, and local
 changes when importing or adapting code. Include required notices in the same
 change. Do not remove headers to fit a file under the repository default.
 
+## Building and testing
+
+```sh
+cargo aim build                 # the build graph (docs/build.md)
+cargo aim test                  # unit tests
+cargo aim test --integration    # everything, then every test with a timeout
+```
+
+`cargo aim status` says which nodes are stale and why. Do not add build
+scripts: a new build step is a node in `crates/aim-build`, and a new HAL or
+daemon crate needs no build edit at all (docs/build.md, "Where the graph
+comes from"). Tests locate their inputs with `aim_paths`; under `cargo aim
+test` a test that skips for a missing input fails.
+
 ## Tracking work
 
 Open work is tracked in [GitHub issues](https://github.com/hahnlee/aim/issues),

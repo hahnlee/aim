@@ -7,4 +7,4 @@ publish = false
 description = "Host-call module for android.hardware.health: the Mac's battery through IOKit"
 
 [dependencies]
-aim-hostcall = { path = "../aim-hostcall" }
+aim-hostcall.workspace = true

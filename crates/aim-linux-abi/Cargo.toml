@@ -28,11 +28,11 @@ aim-host-gpu = { path = "../aim-host-gpu" }
 aim-host-health = { path = "../aim-host-health" }
 aim-host-location = { path = "../aim-host-location" }
 aim-host-sensors = { path = "../aim-host-sensors" }
-aim-hostcall = { path = "../aim-hostcall" }
-libc = "0.2"
-sha2 = "0.10"
+aim-hostcall.workspace = true
+libc.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
-aim-android-image = { path = "../aim-android-image" }
 aim-android-init = { path = "../aim-android-init" }
 aim-guest-init = { path = "../aim-guest-init" }
+aim-paths.workspace = true

@@ -1,0 +1,21 @@
+[package]
+license.workspace = true
+name = "aim-build"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "`cargo aim`: the repository's build graph with content-hash caching (docs/build.md)"
+
+[[bin]]
+name = "cargo-aim"
+path = "src/main.rs"
+
+[dependencies]
+aim-android-image = { path = "../aim-android-image" }
+aim-paths.workspace = true
+libc.workspace = true
+# Runs the ninja files of the ART exception and ANGLE (docs/build.md, "n2").
+n2 = { git = "https://github.com/evmar/n2", rev = "b1fead52ccda0c497d816696f23f4099c3e8ec1f", default-features = false }
+serde_json = "1"
+sha1 = "0.10"
+sha2.workspace = true

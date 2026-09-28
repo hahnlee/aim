@@ -11,17 +11,11 @@
 //! MTLCompilerService".)
 
 use std::ffi::CStr;
-use std::path::Path;
 
 use aim_host_gpu::{
     MODULE, fork_state, function, restore_fork_state, set_library_dir, table_identity,
 };
 use aim_hostcall::gpu::{FN_INIT, Init};
-
-const ANGLE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/angle-source/out/AimRelease"
-);
 
 /// Call a forwarded entry point with its register image.
 fn x(name: &CStr, args: &[u64]) -> u64 {
@@ -163,7 +157,7 @@ fn child(state: &str, dpy: u64, initialized: bool) -> i32 {
         .step_by(2)
         .map(|i| u8::from_str_radix(&state[i..i + 2], 16).unwrap())
         .collect();
-    set_library_dir(Path::new(ANGLE));
+    set_library_dir(&aim_paths::angle());
     restore_fork_state(&state);
     match draw(dpy, initialized) {
         Ok(()) => 0,
@@ -189,11 +183,10 @@ fn main() {
     if args.len() == 5 && args[1] == "child" {
         std::process::exit(child(&args[2], args[3].parse().unwrap(), args[4] == "true"));
     }
-    if !Path::new(ANGLE).join("libGLESv2.dylib").exists() {
-        eprintln!("skipped: no ANGLE build at {ANGLE}");
+    if aim_paths::input(aim_paths::angle().join("libGLESv2.dylib"), "angle").is_none() {
         return;
     }
-    set_library_dir(Path::new(ANGLE));
+    set_library_dir(&aim_paths::angle());
     let (hash, len) = table_identity();
     let mut bits = vec![0u64; (len as usize).div_ceil(64)];
     let mut init = Init {

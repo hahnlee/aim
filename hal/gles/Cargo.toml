@@ -14,7 +14,10 @@ crate-type = ["cdylib"]
 [package.metadata.vendor-hal]
 library = "libGLES_aim.so"
 
+[build-dependencies]
+aim-paths.workspace = true
+
 [dependencies]
 aim-gralloc = { path = "../graphics/gralloc" }
-aim-hostcall = { path = "../../crates/aim-hostcall" }
-libc = "0.2"
+aim-hostcall.workspace = true
+libc.workspace = true

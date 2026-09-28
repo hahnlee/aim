@@ -24,22 +24,12 @@ use aim_guest_init::paths::Layout;
 use aim_guest_init::props::mapped_properties;
 use aim_guest_init::propsvc::{PropertyEvent, PropertySockets};
 
-/// The extracted pinned image (`tools/android-image-extract`).
-const IMAGE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/android16-image-full"
-);
 const SERVICEMANAGER_LABEL: &str = "u:r:servicemanager:s0";
 const AID_SYSTEM: u32 = 1000;
 
-fn image() -> Option<&'static Path> {
-    let p = Path::new(IMAGE);
-    if p.join("system/bin/servicemanager").exists() {
-        Some(p)
-    } else {
-        eprintln!("skipped: extracted image not found at {IMAGE}");
-        None
-    }
+/// The extracted pinned image (the `image` node of `cargo aim`).
+fn image() -> Option<PathBuf> {
+    aim_paths::original_image_with("system/bin/servicemanager")
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -178,18 +168,12 @@ impl Drop for Kill {
 
 /// The pinned NDK's clang for the guest (arm64 Android), if installed.
 fn ndk_clang() -> Option<PathBuf> {
-    let sdk = std::env::var_os("ANDROID_SDK_ROOT")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join("Library/Android/sdk")))?;
-    let clang = sdk.join(
-        "ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android35-clang",
-    );
-    clang.exists().then_some(clang)
+    aim_paths::ndk_clang(35)
 }
 
 #[test]
 fn original_servicemanager_serves_original_clients() {
-    let Some(image) = image() else { return };
+    let Some(ref image) = image() else { return };
     let dir = scratch("servicemanager");
     let layout = Layout::new(image.into(), dir.join("data"), Some(dir.join("run")));
     layout.prepare().unwrap();
@@ -251,7 +235,7 @@ fn original_servicemanager_serves_original_clients() {
     // A service in a third process: addService, getService and direct
     // calls, its death, and the round-trip latency of small calls.
     let Some(clang) = ndk_clang() else {
-        eprintln!("service and latency checks skipped: the pinned NDK (r28c) is not installed");
+        aim_paths::skip("the pinned NDK is not installed (service and latency checks)");
         drop(sm);
         let _ = std::fs::remove_dir_all(&dir);
         return;

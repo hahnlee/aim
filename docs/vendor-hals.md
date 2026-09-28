@@ -3,7 +3,7 @@
 These HALs report what a Mac can tell Android about its power, heat,
 surroundings and position. Each of ours is a Rust AIDL service under `hal/`
 that reaches its host side through host-call ([host-call.md](host-call.md)),
-built by `tools/build-vendor-hals.sh` and placed by `image/overlay.toml`,
+built by `cargo aim` ([build.md](build.md)) and placed by `image/overlay.toml`,
 like the health HAL. Everything a HAL reports comes from a public or
 privilege-free macOS source. What the Mac cannot report is absent, never
 faked.

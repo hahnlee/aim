@@ -15,4 +15,4 @@ path = "src/bin/aim-binderd.rs"
 
 [dependencies]
 aim-binder-driver = { path = "../aim-binder-driver" }
-libc = "0.2"
+libc.workspace = true

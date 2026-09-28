@@ -7,3 +7,6 @@ publish = false
 description = "Android 16 init inputs (.rc scripts, bionic property areas, setprop protocol) as a typed model for aimd"
 
 [dependencies]
+
+[dev-dependencies]
+aim-paths.workspace = true

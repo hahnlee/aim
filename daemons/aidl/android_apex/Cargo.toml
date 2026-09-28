@@ -7,9 +7,9 @@ publish = false
 description = "android.apex (IApexService, unstable), Rust backend, generated at the pinned tag"
 
 [lib]
-path = "../../../_build/daemons/aidl/android_apex/lib.rs"
+path = "../../../target/aim/gen/daemon-aidl/android_apex/lib.rs"
 
 [dependencies]
-async-trait = "0.1"
-binder.workspace = true
-static_assertions = "1"
+async-trait.workspace = true
+binder = { workspace = true, features = ["system"] }
+static_assertions.workspace = true

@@ -18,7 +18,7 @@ binary = "android.hardware.sensors-service.aim"
 android_hardware_common = { path = "../aidl/android.hardware.common" }
 android_hardware_common_fmq = { path = "../aidl/android.hardware.common.fmq" }
 android_hardware_sensors = { path = "../aidl/android.hardware.sensors" }
-binder = { path = "../binder" }
-aim-hostcall = { path = "../../crates/aim-hostcall" }
-libc = "0.2"
-log = "0.4"
+binder.workspace = true
+aim-hostcall.workspace = true
+libc.workspace = true
+log.workspace = true

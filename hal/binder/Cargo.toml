@@ -7,7 +7,7 @@ publish = false
 description = "AOSP libbinder_rs, vendor variant, from the pinned sources"
 
 [lib]
-path = "../../_build/vendor-hals/src/frameworks/native/libs/binder/rust/src/lib.rs"
+path = "../../_build/aosp/frameworks/native/libs/binder/rust/src/lib.rs"
 
 [features]
 # The platform variant, for system daemons (`daemons/`).
@@ -17,8 +17,8 @@ system = ["binder_ndk_sys/system", "libc/extra_traits"]
 [dependencies]
 binder_ndk_sys = { path = "../binder-ndk-sys" }
 downcast-rs = "1"
-libc = "0.2"
-log = "0.4"
+libc.workspace = true
+log.workspace = true
 zerocopy = { version = "0.8", features = ["alloc"] }
 
 # Upstream code, built as Soong builds it (lints are checked upstream).

@@ -1,0 +1,8 @@
+[alias]
+# The build graph (crates/aim-build, docs/build.md).
+aim = "run --release --quiet --package aim-build --bin cargo-aim --"
+
+[target.aarch64-linux-android]
+# The pinned NDK's clang for API 35, through a wrapper `cargo aim` writes
+# (the NDK's location is machine-specific; aim_paths::ndk_wrappers).
+linker = "target/aim/ndk/aarch64-linux-android35-clang"

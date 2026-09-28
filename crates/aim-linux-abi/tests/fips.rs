@@ -9,21 +9,11 @@ use std::process::Command;
 use aim_linux_abi::cache::{Cache, remove_tree};
 use aim_linux_abi::xlate;
 
-/// The extracted pinned image (`tools/android-image-extract`).
-const IMAGE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/android16-image-full"
-);
 const INPUT: &str = "/system/etc/hosts";
 
-fn image() -> Option<&'static Path> {
-    let p = Path::new(IMAGE);
-    if p.join("system/lib64/libcrypto.so").exists() {
-        Some(p)
-    } else {
-        eprintln!("skipped: extracted image not found at {IMAGE}");
-        None
-    }
+/// The extracted pinned image (the `image` node of `cargo aim`).
+fn image() -> Option<PathBuf> {
+    aim_paths::original_image_with("system/lib64/libcrypto.so")
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -55,7 +45,7 @@ fn check_sha256sum(image: &Path, cache: &Path) {
 
 #[test]
 fn libcrypto_passes_its_fips_integrity_test() {
-    let Some(image) = image() else { return };
+    let Some(ref image) = image() else { return };
 
     // No cache: libcrypto is rewritten, and its hash recomputed, at load time.
     let empty = scratch("fips-empty-cache");

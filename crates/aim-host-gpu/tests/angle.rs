@@ -3,16 +3,10 @@
 //! the ANGLE build is absent.
 
 use std::ffi::CStr;
-use std::path::Path;
 use std::time::Instant;
 
 use aim_host_gpu::{MODULE, function, set_library_dir, table_identity};
 use aim_hostcall::gpu::{FN_IMPORT_BUFFER, FN_INIT, FN_PRESENT, ImportBuffer, Init, Present};
-
-const ANGLE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/angle-source/out/AimRelease"
-);
 
 /// Call a forwarded entry point with integer-class arguments.
 fn x(name: &CStr, args: &[u64]) -> u64 {
@@ -28,11 +22,10 @@ fn block<T>(func: u32, a: &mut T) -> i64 {
 
 #[test]
 fn renders_into_a_shared_memory_buffer() {
-    if !Path::new(ANGLE).join("libGLESv2.dylib").exists() {
-        eprintln!("skipped: no ANGLE build at {ANGLE}");
+    if aim_paths::input(aim_paths::angle().join("libGLESv2.dylib"), "angle").is_none() {
         return;
     }
-    set_library_dir(Path::new(ANGLE));
+    set_library_dir(&aim_paths::angle());
     let (hash, len) = table_identity();
     let mut bits = vec![0u64; (len as usize).div_ceil(64)];
     let mut init = Init {

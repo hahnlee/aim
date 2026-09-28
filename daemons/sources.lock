@@ -1,4 +1,5 @@
-# Pinned inputs of tools/build-daemons.sh (sourced by bash).
+# Pinned inputs of the replaced daemons (daemons/): the aidl-gen node of
+# `cargo aim` (docs/build.md) reads them. Shell-style assignments.
 #
 # Trees come from android.googlesource.com at AOSP_TAG, the tag of the pinned
 # image, and are checked against a content hash: sha256 over the
