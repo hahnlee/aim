@@ -145,6 +145,10 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
   fails with "Unable to open ashmem device".
 - POSIX timers, a writable `trace_marker` (#192), per-thread `comm` files
   (#198), and `/proc/<tid>`, the scheduler calls and `tgkill` for every tid.
+- The process table is the guest's pid namespace for every call that
+  names a process, not only `/proc` (#341): `kill` (also `-1` and process
+  groups), pidfds, the scheduler and priority calls and the rest reach
+  guest processes only, and a Mac process is ESRCH.
 - guest-init's wait for linkerconfig ends at `--timeout` and on SIGINT or
   SIGTERM (#196).
 
@@ -468,6 +472,8 @@ by DHCP. First boot, `cargo aim boot`, on a Mac on Wi-Fi:
   failed (DhcpClient).
 - The emulator's vendor overlay made `eth0` a restricted network; it goes
   from the derived image.
+- DhcpClient's UDP socket took the Mac's port 68, so a second guest (or
+  the NDK network tests) failed to bind it; the port is `eth0`'s (#334).
 
 ## Memory pressure (2026-09-29, #277)
 

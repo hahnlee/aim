@@ -194,7 +194,11 @@ rlimit	13	40	40
   - A pid with no entry is reported as root.
   - It is also the guest's pid namespace: `/proc` lists the processes in
     it (and the reader), and `/proc/<pid>` of any other host process does
-    not exist.
+    not exist. Every call that names a process resolves it there (another
+    host process is ESRCH); `kill(-1)` and process groups reach its
+    processes only. An entry counts only for a process started before the
+    entry was written, so a pid the Mac reuses is never a member. A
+    forking process writes its child's entry before `fork` returns.
 
 ## 5. Inherited descriptors
 

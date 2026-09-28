@@ -318,6 +318,54 @@ fn identity_files_inherited_env_and_fds_reach_the_guest() {
     );
 }
 
+/// A guest with a process table (`--identity`) lives in a pid namespace:
+/// given the pid of a host process, every pid-taking call fails with
+/// ESRCH, and the host process survives `kill`, `kill(-pgrp)` and
+/// `kill(-1)`.
+#[test]
+fn a_guest_cannot_reach_host_processes() {
+    let Some(root) = root() else { return };
+    // Its own table, so no other test's processes are in it.
+    let dir = root.join("data/local/tmp/pidns");
+    std::fs::create_dir_all(dir.join("by-pid")).unwrap();
+    let id = dir.join("guest");
+    std::fs::write(
+        &id,
+        "# aim-guest-init identity v1\nservice\tguest\nuid\t10050\ngid\t10050\n",
+    )
+    .unwrap();
+    let mut host = Command::new("/bin/sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let host_pid = host.id().to_string();
+    let out = linux_run(
+        root,
+        &[
+            "--identity",
+            id.to_str().unwrap(),
+            PROGRAM,
+            "pid_namespace",
+            &host_pid,
+        ],
+        |_| {},
+    );
+    let alive = host.try_wait().unwrap().is_none();
+    let _ = host.kill();
+    let _ = host.wait();
+    let (so, se) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        out.status.success() && so.contains("ok pid_namespace\n"),
+        "{:?}\nstdout:\n{so}\nstderr:\n{se}",
+        out.status
+    );
+    assert!(alive, "the host process survived");
+}
+
 /// The image's mksh forks, pipes and execs itself; its parent waits for
 /// SIGCHLD in `sigsuspend`.
 #[test]

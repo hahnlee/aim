@@ -39,7 +39,8 @@ fn ip4(b: &[u8], at: usize) -> Option<Ipv4Addr> {
 
 /// The DHCP server's port.
 pub const SERVER_PORT: u16 = 67;
-const CLIENT_PORT: u16 = 68;
+/// The DHCP client's port.
+pub const CLIENT_PORT: u16 = 68;
 
 /// The frame the router sends back for `frame`, if any.
 pub fn answer(frame: &[u8], lease: &Lease) -> Option<Vec<u8>> {

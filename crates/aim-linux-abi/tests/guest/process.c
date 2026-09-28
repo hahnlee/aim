@@ -32,6 +32,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
@@ -668,6 +669,80 @@ static void identity_file(void) {
   printf("ok identity_file\n");
 }
 
+// A pid namespace (run with --identity, so the process table is the
+// namespace): host process `host`, which leads its own process group, does
+// not exist for the guest, and signals to groups or to every process reach
+// the table's processes only.
+static void pid_namespace(pid_t host) {
+  char path[64];
+#define GONE(call) CHECK((call) == -1 && errno == ESRCH, "%s", #call)
+  GONE(kill(host, 0));
+  GONE(kill(host, SIGKILL));
+  GONE(kill(-host, SIGKILL));
+  GONE(syscall(SYS_tkill, host, SIGKILL));
+  GONE(syscall(SYS_tgkill, host, host, SIGKILL));
+  siginfo_t si = {.si_signo = SIGKILL, .si_code = SI_QUEUE};
+  GONE(syscall(SYS_rt_sigqueueinfo, host, SIGKILL, &si));
+  GONE(pidfd_open(host, 0));
+  struct sched_param sp = {0};
+  cpu_set_t set;
+  GONE(sched_getscheduler(host));
+  GONE(sched_setscheduler(host, SCHED_OTHER, &sp));
+  GONE(sched_getparam(host, &sp));
+  GONE(sched_setparam(host, &sp));
+  GONE(sched_getaffinity(host, sizeof(set), &set));
+  GONE(sched_setaffinity(host, sizeof(set), &set));
+  errno = 0;
+  GONE(getpriority(PRIO_PROCESS, host));
+  GONE(setpriority(PRIO_PROCESS, host, 19));
+  GONE(getpriority(PRIO_PGRP, host));
+  GONE(setpriority(PRIO_PGRP, host, 19));
+  struct rlimit rl;
+  GONE(prlimit(host, RLIMIT_NOFILE, NULL, &rl));
+  GONE(getpgid(host));
+  GONE(getsid(host));
+  GONE(setpgid(host, host));
+  char buf[8];
+  struct iovec local = {buf, sizeof(buf)}, remote = {buf, sizeof(buf)};
+  GONE(process_vm_readv(host, &local, 1, &remote, 1, 0));
+  struct __user_cap_header_struct h = {_LINUX_CAPABILITY_VERSION_3, host};
+  struct __user_cap_data_struct d[2];
+  GONE(capget(&h, d));
+  snprintf(path, sizeof(path), "/proc/%d/stat", host);
+  CHECK(access(path, F_OK) == -1 && errno == ENOENT, "%s", path);
+  // The host process that started this one leads its group and session.
+  CHECK(getpgid(0) == 0 && getsid(0) == 0, "outside group %d session %d", getpgid(0), getsid(0));
+  // Alone in the namespace, kill(-1) has no target (Linux skips the caller)
+  // and PRIO_USER names this process only.
+  GONE(kill(-1, 0));
+  CHECK(setpriority(PRIO_USER, 0, 5) == 0 && getpriority(PRIO_USER, 0) == 5, "PRIO_USER");
+  CHECK(getpriority(PRIO_USER, getuid() + 1) == -1 && errno == ESRCH, "another uid");
+  CHECK(kill(0, 0) == 0, "own group");
+
+  int ready[2];
+  CHECK(pipe(ready) == 0, "pipe");
+  pid_t child = fork();
+  if (child == 0) {
+    setpgid(0, 0);
+    write(ready[1], "r", 1);
+    for (;;) pause();
+  }
+  // Right after fork, before the child ran: in the namespace.
+  CHECK(kill(child, 0) == 0 && getpgid(child) >= 0, "child");
+  char c;
+  CHECK(read(ready[0], &c, 1) == 1, "child ready");
+  CHECK(getpgid(child) == child && getsid(child) == 0, "child group %d", getpgid(child));
+  int fd = pidfd_open(child, 0);
+  CHECK(fd >= 0 && pidfd_send_signal(fd, 0) == 0, "pidfd");
+  CHECK(kill(-child, 0) == 0 && kill(-1, 0) == 0, "child group and kill(-1)");
+  CHECK(kill(-1, SIGKILL) == 0, "kill(-1) reaches the child");
+  int st;
+  CHECK(waitpid(child, &st, 0) == child && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL, "child killed");
+  close(fd);
+#undef GONE
+  printf("ok pid_namespace\n");
+}
+
 static double now_us(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -784,6 +859,10 @@ int main(int argc, char** argv) {
     return 0;
   }
   const char* which = argc > 1 ? argv[1] : "all";
+  if (strcmp(which, "pid_namespace") == 0 && argc == 3) {
+    pid_namespace(atoi(argv[2]));
+    return 0;
+  }
   if (strcmp(which, "bench_mappings") == 0 && argc == 4) {
     bench_mappings(atoi(argv[2]), atoi(argv[3]));
     return 0;

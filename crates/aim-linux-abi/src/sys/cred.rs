@@ -340,24 +340,6 @@ pub fn by_pid_dir() -> Option<&'static PathBuf> {
     BY_PID.get()
 }
 
-/// The pids in this process's process table: the guest's processes, as a
-/// pid namespace holds them. None without a table.
-pub fn table_pids() -> Option<Vec<i32>> {
-    let dir = std::fs::read_dir(BY_PID.get()?).ok()?;
-    Some(
-        dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
-            .collect(),
-    )
-}
-
-/// Whether `pid` is in this process's process table (always, without a
-/// table).
-pub fn in_table(pid: i32) -> bool {
-    BY_PID
-        .get()
-        .is_none_or(|d| std::fs::symlink_metadata(d.join(pid.to_string())).is_ok())
-}
-
 fn read<R>(f: impl FnOnce(&Identity) -> R) -> R {
     f(STATE.lock().unwrap().get_or_insert_with(Identity::default))
 }
@@ -420,6 +402,13 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     after_fork_child();
 }
 
+/// In the parent of a fork: the child's entry, before `fork` returns, so
+/// the pid is in the process table as soon as anyone can know it. The
+/// child writes it again when it starts.
+pub(super) fn note_child(pid: i32) {
+    write_entry(pid, &current());
+}
+
 /// In a forked child: publish the inherited identity under the new pid.
 pub(super) fn after_fork_child() {
     let id = current();
@@ -443,18 +432,23 @@ pub struct PeerCred {
     pub gid: u32,
 }
 
+/// The identity of host process `pid`: this process's, or its entry in the
+/// process table.
+fn identity_of(pid: i32) -> Option<Identity> {
+    // SAFETY: trivial.
+    if pid == unsafe { libc::getpid() } {
+        return Some(current());
+    }
+    BY_PID
+        .get()
+        .and_then(|d| std::fs::read_to_string(d.join(pid.to_string())).ok())
+        .and_then(|t| Identity::parse(&t).ok())
+}
+
 /// The effective ids of host process `pid` from the process table. A pid
 /// with no entry is reported as root.
 pub fn peer(pid: i32) -> PeerCred {
-    // SAFETY: trivial.
-    let id = if pid == unsafe { libc::getpid() } {
-        Some(current())
-    } else {
-        BY_PID
-            .get()
-            .and_then(|d| std::fs::read_to_string(d.join(pid.to_string())).ok())
-            .and_then(|t| Identity::parse(&t).ok())
-    };
+    let id = identity_of(pid);
     let (uid, gid) = id.map_or((0, 0), |id| (id.uid[1], id.gid[1]));
     PeerCred { pid, uid, gid }
 }
@@ -702,15 +696,10 @@ pub fn capget(a: [u64; 6]) -> i64 {
     let (eff, perm, inh) = if is_self(pid) {
         read(|id| (id.cap_eff, id.cap_perm, id.cap_inh))
     } else {
-        // SAFETY: probing a pid.
-        if unsafe { libc::kill(pid, 0) } < 0 && crate::errno::last() == ESRCH {
-            return -(ESRCH as i64);
+        if let Err(e) = super::pidns::check(pid) {
+            return e;
         }
-        let entry = BY_PID
-            .get()
-            .and_then(|d| std::fs::read_to_string(d.join(pid.to_string())).ok())
-            .and_then(|t| Identity::parse(&t).ok())
-            .unwrap_or_default();
+        let entry = identity_of(pid).unwrap_or_default();
         (entry.cap_eff, entry.cap_perm, entry.cap_inh)
     };
     for i in 0..n {
@@ -897,6 +886,8 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
 }
 
 const PRIO_PROCESS: u64 = 0;
+const PRIO_PGRP: u64 = 1;
+const PRIO_USER: u64 = 2;
 
 /// Nice values set on this process's other threads. Linux keeps one per
 /// thread (PRIO_PROCESS with a tid); Darwin has no per-thread nice value,
@@ -928,9 +919,59 @@ fn prio_who(a: &[u64; 6]) -> (u64, bool) {
     (who as u32 as u64, false)
 }
 
+/// The processes a PRIO_PGRP or PRIO_USER call names, in the guest's pid
+/// namespace (`pidns`); None leaves a process group to the host, when
+/// there is no namespace. Guest uids are known only for this process and
+/// the process table.
+fn prio_targets(which: u64, who: u64) -> Option<Vec<i32>> {
+    if which == PRIO_PGRP {
+        // SAFETY: trivial.
+        let pgrp = if who == 0 {
+            unsafe { libc::getpgrp() }
+        } else {
+            who as i32
+        };
+        return super::pidns::group(pgrp);
+    }
+    // SAFETY: trivial.
+    let me = unsafe { libc::getpid() };
+    let uid = if who == 0 {
+        read(|id| id.uid[0])
+    } else {
+        who as u32
+    };
+    let members = super::pidns::members().unwrap_or_else(|| vec![me]);
+    Some(
+        members
+            .into_iter()
+            .filter(|&p| identity_of(p).is_some_and(|id| id.uid[0] == uid))
+            .collect(),
+    )
+}
+
+/// The nice value of process `p`: this process's own, the host's for
+/// another.
+fn process_nice(p: i32) -> Result<i32, i64> {
+    let r = getpriority([PRIO_PROCESS, p as u64, 0, 0, 0, 0]);
+    if r < 0 { Err(r) } else { Ok(20 - r as i32) }
+}
+
 /// getpriority (141): the kernel's `20 - nice` for this process's (or one
-/// of its threads') priority; the host's for anything else.
+/// of its threads') priority; the host's for another process, and the
+/// highest of a group's or user's processes.
 pub fn getpriority(a: [u64; 6]) -> i64 {
+    if a[0] > PRIO_USER {
+        return -(EINVAL as i64);
+    }
+    if a[0] != PRIO_PROCESS
+        && let Some(targets) = prio_targets(a[0], a[1])
+    {
+        return targets
+            .into_iter()
+            .filter_map(|p| process_nice(p).ok())
+            .min()
+            .map_or(-(ESRCH as i64), |nice| 20 - nice as i64);
+    }
     let a = [a[0], prio_who(&a).0, a[2], a[3], a[4], a[5]];
     if a[0] == PRIO_PROCESS && is_self(a[1] as i32) {
         return 20 - read(|id| id.priority) as i64;
@@ -945,6 +986,11 @@ pub fn getpriority(a: [u64; 6]) -> i64 {
             .find(|t| t.0 == tid)
             .map(|t| t.1);
         return 20 - nice.unwrap_or_else(|| read(|id| id.priority)) as i64;
+    }
+    if a[0] == PRIO_PROCESS
+        && let Err(e) = super::pidns::check(a[1] as i32)
+    {
+        return e;
     }
     // SAFETY: errno is cleared first because -1 is a valid priority.
     unsafe {
@@ -983,6 +1029,24 @@ fn nice_changed(tid: i32, nice: i32) {
 /// QoS (`process::host_qos`).
 pub fn setpriority(a: [u64; 6]) -> i64 {
     let nice = (a[2] as i32).clamp(-20, 19);
+    if a[0] > PRIO_USER {
+        return -(EINVAL as i64);
+    }
+    if a[0] != PRIO_PROCESS
+        && let Some(targets) = prio_targets(a[0], a[1])
+    {
+        // Each process in turn; the first success clears ESRCH and any
+        // failure sticks, as in the kernel's `set_one_prio`.
+        let mut err = -(ESRCH as i64);
+        for p in targets {
+            match setpriority([PRIO_PROCESS, p as u64, nice as u64, 0, 0, 0]) {
+                0 if err == -(ESRCH as i64) => err = 0,
+                0 => {}
+                e => err = e,
+            }
+        }
+        return err;
+    }
     let (who, foreign) = prio_who(&a);
     if foreign {
         // Accepted for a live process; not kept.
@@ -1018,6 +1082,11 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
         drop(table);
         nice_changed(tid, nice);
         return 0;
+    }
+    if a[0] == PRIO_PROCESS
+        && let Err(e) = super::pidns::check(a[1] as i32)
+    {
+        return e;
     }
     // SAFETY: plain setpriority.
     crate::errno::check(unsafe { libc::setpriority(a[0] as i32, a[1] as u32, nice) } as i64)

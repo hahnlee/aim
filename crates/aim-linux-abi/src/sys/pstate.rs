@@ -12,22 +12,47 @@ pub fn setsid() -> i64 {
     errno::check(unsafe { libc::setsid() } as i64)
 }
 
+/// A pid argument where 0 means the caller: a process in the guest's pid
+/// namespace (`pidns`).
+fn member(pid: u64) -> Result<i32, i64> {
+    match pid as i32 {
+        0 => Ok(0),
+        p => super::pidns::check(p),
+    }
+}
+
 pub fn setpgid(a: [u64; 6]) -> i64 {
     if (a[1] as i32) < 0 {
         return -(EINVAL as i64);
     }
+    let pid = match member(a[0]) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
     // SAFETY: trivial.
-    errno::check(unsafe { libc::setpgid(a[0] as i32, a[1] as i32) } as i64)
+    errno::check(unsafe { libc::setpgid(pid, a[1] as i32) } as i64)
+}
+
+/// getpgid (155) and getsid (156): a group or session led from outside
+/// the namespace is 0, as pid_vnr gives.
+fn ns_id(pid: u64, get: unsafe extern "C" fn(libc::pid_t) -> libc::pid_t) -> i64 {
+    let pid = match member(pid) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    // SAFETY: trivial.
+    match errno::check(unsafe { get(pid) } as i64) {
+        id if id > 0 => super::pidns::id_in_ns(id as i32) as i64,
+        r => r,
+    }
 }
 
 pub fn getpgid(a: [u64; 6]) -> i64 {
-    // SAFETY: trivial.
-    errno::check(unsafe { libc::getpgid(a[0] as i32) } as i64)
+    ns_id(a[0], libc::getpgid)
 }
 
 pub fn getsid(a: [u64; 6]) -> i64 {
-    // SAFETY: trivial.
-    errno::check(unsafe { libc::getsid(a[0] as i32) } as i64)
+    ns_id(a[0], libc::getsid)
 }
 
 pub fn umask(a: [u64; 6]) -> i64 {

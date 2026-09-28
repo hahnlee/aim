@@ -1121,8 +1121,48 @@ pub fn kill(a: [u64; 6]) -> i64 {
         }
         return -(EINVAL as i64);
     }
-    // SAFETY: plain kill of a process or group.
-    crate::errno::check(unsafe { libc::kill(pid as i32, h) } as i64)
+    let targets = match pid {
+        -1 => super::pidns::members().map(|m| (m, true)),
+        ..=0 => {
+            // SAFETY: trivial.
+            let pgrp = if pid == 0 {
+                unsafe { libc::getpgrp() }
+            } else {
+                -pid as i32
+            };
+            super::pidns::group(pgrp).map(|m| (m, false))
+        }
+        _ => {
+            if let Err(e) = super::pidns::check(pid as i32) {
+                return e;
+            }
+            None
+        }
+    };
+    let Some((targets, all)) = targets else {
+        // SAFETY: plain kill of a process or group.
+        return crate::errno::check(unsafe { libc::kill(pid as i32, h) } as i64);
+    };
+    // Each member in turn, with the kernel's result: a group succeeds if
+    // one member was signalled (`__kill_pgrp_info`); `kill(-1)` skips the
+    // caller, ignores EPERM and fails only for want of a target.
+    let me = my_pid() as i32;
+    let targets: Vec<i32> = targets.into_iter().filter(|&p| !all || p != me).collect();
+    let mut sent = false;
+    let mut err = if all && !targets.is_empty() {
+        0
+    } else {
+        -(ESRCH as i64)
+    };
+    for p in targets {
+        // SAFETY: plain kill of a member.
+        match crate::errno::check(unsafe { libc::kill(p, h) } as i64) {
+            0 => sent = !all,
+            e if all && e == -(EPERM as i64) => {}
+            e => err = e,
+        }
+    }
+    if sent { 0 } else { err }
 }
 
 fn target(tgid: Option<i64>, tid: i64, sig: i32) -> Result<std::sync::Arc<Thread>, i64> {

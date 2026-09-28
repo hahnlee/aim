@@ -76,10 +76,7 @@ fn sched_target(pid: i64) -> Result<Option<std::sync::Arc<Thread>>, i64> {
         return Ok(Some(t));
     }
     let owner = thread::owner(tid);
-    // SAFETY: probing for the process without signalling it.
-    let alive = owner as i64 != getpid()
-        && (unsafe { libc::kill(owner, 0) } == 0 || errno::last() == libc::EPERM);
-    if alive {
+    if owner as i64 != getpid() && super::pidns::contains(owner) {
         Ok(None)
     } else {
         Err(-(ESRCH as i64))

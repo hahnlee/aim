@@ -729,12 +729,11 @@ fn cpu_range() -> String {
     format!("0-{}\n", ncpu() - 1)
 }
 
-/// The processes `/proc` lists: the guest's (its process table and this
-/// process), not the Mac's; every host process without a table.
+/// The processes `/proc` lists: the guest's pid namespace (`pidns`), not
+/// the Mac's; every host process without one.
 fn pids() -> Vec<i32> {
-    let mut v = match super::cred::table_pids() {
+    let mut v = match super::pidns::members() {
         Some(mut v) => {
-            v.push(pid());
             v.retain(|&p| task_info(p).is_some());
             v
         }
@@ -873,7 +872,7 @@ fn thread_comm(tid: i32) -> Option<String> {
 /// tid for `/proc/<p>/task/<tid>/` (and `/proc/<tid>/`).
 fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
     let me = p == pid();
-    if !me && (!super::cred::in_table(p) || task_info(p).is_none()) {
+    if !me && (!super::pidns::contains(p) || task_info(p).is_none()) {
         return None;
     }
     Some(match rest {
