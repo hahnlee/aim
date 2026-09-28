@@ -192,6 +192,9 @@ rlimit	13	40	40
     `by-pid/<pid>`).
   - guest-init itself does the same for `property_service` peers.
   - A pid with no entry is reported as root.
+  - It is also the guest's pid namespace: `/proc` lists the processes in
+    it (and the reader), and `/proc/<pid>` of any other host process does
+    not exist.
 
 ## 5. Inherited descriptors
 

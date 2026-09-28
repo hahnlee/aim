@@ -729,17 +729,28 @@ fn cpu_range() -> String {
     format!("0-{}\n", ncpu() - 1)
 }
 
+/// The processes `/proc` lists: the guest's (its process table and this
+/// process), not the Mac's; every host process without a table.
 fn pids() -> Vec<i32> {
-    // SAFETY: sizing call then a buffer of that size.
-    unsafe {
-        let n = libc::proc_listallpids(std::ptr::null_mut(), 0);
-        let mut v = vec![0i32; n.max(0) as usize + 64];
-        let n = libc::proc_listallpids(v.as_mut_ptr().cast(), (v.len() * 4) as i32);
-        v.truncate(n.max(0) as usize);
-        v.retain(|&p| p > 0);
-        v.sort_unstable();
-        v
-    }
+    let mut v = match super::cred::table_pids() {
+        Some(mut v) => {
+            v.push(pid());
+            v.retain(|&p| task_info(p).is_some());
+            v
+        }
+        // SAFETY: sizing call then a buffer of that size.
+        None => unsafe {
+            let n = libc::proc_listallpids(std::ptr::null_mut(), 0);
+            let mut v = vec![0i32; n.max(0) as usize + 64];
+            let n = libc::proc_listallpids(v.as_mut_ptr().cast(), (v.len() * 4) as i32);
+            v.truncate(n.max(0) as usize);
+            v
+        },
+    };
+    v.retain(|&p| p > 0);
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 /// The tids of process `p`: the guest threads for this process; other
@@ -862,7 +873,7 @@ fn thread_comm(tid: i32) -> Option<String> {
 /// tid for `/proc/<p>/task/<tid>/` (and `/proc/<tid>/`).
 fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
     let me = p == pid();
-    if !me && task_info(p).is_none() {
+    if !me && (!super::cred::in_table(p) || task_info(p).is_none()) {
         return None;
     }
     Some(match rest {
