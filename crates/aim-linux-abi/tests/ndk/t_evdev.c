@@ -39,9 +39,9 @@ static void identity(void) {
   CHECK(ioctl(fd, EVIOCGID, &id) == 0 && id.bustype == BUS_VIRTUAL);
   char name[80];
   // The name and its NUL, or as much as fits.
-  CHECK(ioctl(fd, EVIOCGNAME(sizeof(name)), name) == 19);
+  CHECK(ioctl(fd, EVIOCGNAME(sizeof(name)), name) == 16);
   CHECK(strcmp(name, "aim-touchscreen") == 0);
-  CHECK(ioctl(fd, EVIOCGNAME(4), name) == 4 && memcmp(name, "darw", 4) == 0);
+  CHECK(ioctl(fd, EVIOCGNAME(4), name) == 4 && memcmp(name, "aim-", 4) == 0);
   CHECK(ioctl(fd, EVIOCGPHYS(sizeof(name)), name) == -1 && errno == ENOENT);
   CHECK(ioctl(fd, EVIOCGUNIQ(sizeof(name)), name) == -1 && errno == ENOENT);
   // Not an evdev request: the generic answer.
