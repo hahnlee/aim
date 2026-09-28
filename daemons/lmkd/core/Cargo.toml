@@ -1,0 +1,14 @@
+[package]
+name = "lmkd-core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "lmkd's protocol, process bookkeeping and kill policy, independent of the pressure source"
+
+# Built for the guest as part of `lmkd`, and for the host to run its tests
+# (a default member of the workspace).
+
+[dependencies]
+libc.workspace = true
+log.workspace = true

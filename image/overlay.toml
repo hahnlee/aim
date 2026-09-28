@@ -830,4 +830,4 @@ reason = "netd drives netlink, iptables, policy routing and eBPF; guest sockets 
 [[replace]]
 path = "/system/bin/lmkd"
 source = "target/aim/daemons/bin/lmkd"
-reason = "lmkd kills by PSI and memcg pressure, which Darwin does not report; this lmkd answers the control socket ActivityManager waits on, and kills nothing (#222)"
+reason = "lmkd kills by PSI and memcg pressure, which Darwin does not report; this lmkd keeps the control protocol and kill order and kills on the Mac's memory pressure, from the host-call module memory (#222, #277)"

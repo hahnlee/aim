@@ -79,6 +79,8 @@ pub mod module {
     /// The Mac's cameras over AVFoundation (the camera provider HAL's host
     /// side).
     pub const CAMERA: u32 = 9;
+    /// The Mac's memory pressure and free memory (lmkd's host side).
+    pub const MEMORY: u32 = 10;
 }
 
 /// Module [`module::HEALTH`]: the host's battery, for
@@ -835,6 +837,47 @@ pub mod camera {
     const _: () = assert!(core::mem::size_of::<Session>() == 8);
 }
 
+/// Module [`module::MEMORY`]: the Mac's memory pressure, for lmkd.
+///
+/// The guest reports the Mac's whole RAM, so the kills that make room
+/// follow the Mac's own pressure level (`DISPATCH_SOURCE_TYPE_MEMORYPRESSURE`)
+/// rather than Linux PSI or memcg events.
+pub mod memory {
+    pub const VERSION: u32 = 1;
+
+    /// Fill a [`Memory`]. Returns 0.
+    pub const FN_READ: u32 = 1;
+    /// Watch the pressure level. Takes no argument block. Returns a pipe's
+    /// read end (close-on-exec, non-blocking): a byte arrives in it each
+    /// time the Mac's level changes. Each call makes a new pipe.
+    pub const FN_WATCH: u32 = 2;
+
+    /// The Mac's pressure levels (`kern.memorystatus_vm_pressure_level`).
+    pub mod level {
+        pub const NORMAL: u32 = 1;
+        pub const WARN: u32 = 2;
+        pub const CRITICAL: u32 = 4;
+    }
+
+    /// Argument block of [`FN_READ`] (output only). Sizes are in bytes.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Memory {
+        /// One of [`level`].
+        pub level: u32,
+        pub reserved: u32,
+        /// Physical memory.
+        pub total: u64,
+        /// Free memory (free and speculative pages).
+        pub free: u64,
+        /// File-backed memory the kernel can drop (file-backed and
+        /// purgeable pages): the Linux page cache's counterpart.
+        pub file: u64,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Memory>() == 32);
+}
+
 /// A host module, as linked into the syscall layer's registry.
 pub struct HostModule {
     pub id: u32,
@@ -1120,6 +1163,20 @@ pub mod guest {
             &mut camera::Session { session },
         )
         .map(drop)
+    }
+
+    /// The Mac's memory pressure and free memory.
+    pub fn memory_read() -> Result<memory::Memory, Errno> {
+        let mut m = memory::Memory::default();
+        call_with(module::MEMORY, memory::FN_READ, &mut m)?;
+        Ok(m)
+    }
+
+    /// A pipe that gets a byte each time the Mac's pressure level changes.
+    pub fn memory_watch() -> Result<i32, Errno> {
+        // SAFETY: FN_WATCH takes no argument block.
+        check(unsafe { call(module::MEMORY, memory::FN_WATCH, core::ptr::null_mut(), 0) })
+            .map(|fd| fd as i32)
     }
 
     /// Call forwarded entry point `id` with its register image.

@@ -493,8 +493,8 @@ fn meminfo() -> String {
     unsafe { host_statistics64(mach_host_self(), 4, v.as_mut_ptr(), &mut count) };
     let pages = |i: usize| v[i] as u32 as u64 * page / 1024;
     let (free, active, inactive, wired) = (pages(0), pages(1), pages(2), pages(3));
-    // external_page_count (file-backed) is field 29 of vm_statistics64.
-    let cached = pages(29);
+    // external_page_count (file-backed) is word 34 of vm_statistics64.
+    let cached = pages(34);
     let avail = free + inactive;
     let kb = total / 1024;
     format!(

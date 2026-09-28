@@ -27,6 +27,7 @@ aim-host-display = { path = "../aim-host-display" }
 aim-host-gpu = { path = "../aim-host-gpu" }
 aim-host-health = { path = "../aim-host-health" }
 aim-host-location = { path = "../aim-host-location" }
+aim-host-memory = { path = "../aim-host-memory" }
 aim-host-sensors = { path = "../aim-host-sensors" }
 aim-hostcall.workspace = true
 libc.workspace = true

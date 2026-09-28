@@ -36,6 +36,7 @@ static MODULES: &[&HostModule] = &[
     &aim_host_audio::MODULE,
     &aim_host_bluetooth::MODULE,
     &aim_host_camera::MODULE,
+    &aim_host_memory::MODULE,
 ];
 
 const _: () = {
@@ -105,6 +106,10 @@ mod tests {
         assert_eq!(
             call(module::CAMERA as u64, 0, 0, 0),
             aim_hostcall::camera::VERSION as i64
+        );
+        assert_eq!(
+            call(module::MEMORY as u64, 0, 0, 0),
+            aim_hostcall::memory::VERSION as i64
         );
     }
 }

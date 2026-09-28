@@ -4,13 +4,15 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
-description = "lmkd's control socket (the lmkd protocol) with the process bookkeeping and no kills"
+description = "lmkd: the original's protocol and kill order, killing on the Mac's memory pressure"
 
 # Installed as /system/bin/lmkd, in place of the original.
 [package.metadata.daemon]
 program = "lmkd"
 
 [dependencies]
+aim-hostcall.workspace = true
 daemon-log.workspace = true
 libc.workspace = true
+lmkd-core = { path = "core" }
 log.workspace = true

@@ -209,6 +209,107 @@ fn memfd() {
     check("t_memfd", &[]);
 }
 
+/// The derived image's lmkd answers ActivityManager's protocol, with the
+/// host-call module `memory` as its pressure source.
+#[test]
+fn lmkd() {
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let Some(lmkd) = aim_paths::input(aim_paths::daemon_bin("lmkd"), "daemon/lmkd") else {
+        return;
+    };
+    let g = Guest::new(&image, "t_lmkd");
+    let prog = g.build(&clang, "t_lmkd");
+    std::fs::copy(&lmkd, g.runtime.join("data/local/tmp/lmkd")).unwrap();
+    let (ok, out) = g.run(&[&prog, "/data/local/tmp/lmkd"]);
+    println!("{out}");
+    assert!(ok && out.contains("PASS"), "t_lmkd failed:\n{out}");
+}
+
+/// The host priority of the thread of `pid` named `name`.
+fn thread_priority(pid: u32, name: &str) -> Option<i32> {
+    const PROC_PIDLISTTHREADS: i32 = 6;
+    let mut ids = [0u64; 256];
+    // SAFETY: proc_pidinfo into local buffers of the sizes given.
+    unsafe {
+        let n = libc::proc_pidinfo(
+            pid as i32,
+            PROC_PIDLISTTHREADS,
+            0,
+            ids.as_mut_ptr().cast(),
+            size_of_val(&ids) as i32,
+        );
+        for &id in &ids[..n.max(0) as usize / 8] {
+            let mut ti: libc::proc_threadinfo = std::mem::zeroed();
+            let size = size_of::<libc::proc_threadinfo>() as i32;
+            if libc::proc_pidinfo(
+                pid as i32,
+                libc::PROC_PIDTHREADINFO,
+                id,
+                (&raw mut ti).cast(),
+                size,
+            ) == size
+                && std::ffi::CStr::from_ptr(ti.pth_name.as_ptr()).to_bytes() == name.as_bytes()
+            {
+                return Some(ti.pth_priority);
+            }
+        }
+    }
+    None
+}
+
+/// Background scheduling (a nice value of 10 or more, SCHED_IDLE) lowers
+/// the host thread's QoS, and the default brings it back.
+#[test]
+fn background_qos() {
+    use std::io::{BufRead, Write};
+    use std::process::Stdio;
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_qos");
+    let prog = g.build(&clang, "t_qos");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_linux-run"))
+        .arg("--path-map")
+        .arg(&g.map)
+        .arg("--cache")
+        .arg(&g.cache)
+        .arg(&prog)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    // Darwin's base priorities of the default, utility and background QoS.
+    for (step, want) in [
+        ("default", 31),
+        ("utility", 20),
+        ("background", 4),
+        ("default", 31),
+        ("background", 4),
+    ] {
+        let mut line = String::new();
+        out.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), step);
+        assert_eq!(
+            thread_priority(child.id(), "qos-worker"),
+            Some(want),
+            "{step}"
+        );
+        writeln!(stdin).unwrap();
+    }
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut out, &mut rest).unwrap();
+    assert!(
+        child.wait().unwrap().success() && rest.contains("PASS"),
+        "{rest}"
+    );
+}
+
 /// The evdev devices of a display server (`linux-run --display`), with
 /// KEY_A held on its keyboard.
 #[test]

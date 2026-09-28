@@ -939,7 +939,30 @@ pub fn getpriority(a: [u64; 6]) -> i64 {
     }
 }
 
-/// setpriority (140).
+/// The nice value of `tid`, a thread of this process.
+pub fn thread_nice(tid: i32) -> i32 {
+    if is_self(tid) {
+        return read(|id| id.priority);
+    }
+    let nice = THREAD_NICE
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|t| t.0 == tid)
+        .map(|t| t.1);
+    nice.unwrap_or_else(|| read(|id| id.priority))
+}
+
+/// The calling thread's host QoS after its nice value changed to `nice`.
+fn nice_changed(tid: i32, nice: i32) {
+    if tid == super::thread::gettid() as i32 {
+        let policy = super::thread::current().map_or(0, |t| t.sched.policy.load(Ordering::SeqCst));
+        super::process::apply_host_qos(nice, policy);
+    }
+}
+
+/// setpriority (140). The calling thread's nice value also sets its host
+/// QoS (`process::host_qos`).
 pub fn setpriority(a: [u64; 6]) -> i64 {
     let nice = (a[2] as i32).clamp(-20, 19);
     let (who, foreign) = prio_who(&a);
@@ -959,6 +982,7 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
             // best effort.
             // SAFETY: plain setpriority.
             unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
+            nice_changed(a[1] as i32, nice);
             0
         });
     }
@@ -973,6 +997,8 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
         }
         table.retain(|t| t.0 != tid && super::thread::find(t.0).is_some());
         table.push((tid, nice));
+        drop(table);
+        nice_changed(tid, nice);
         return 0;
     }
     // SAFETY: plain setpriority.
