@@ -33,7 +33,7 @@ pub const VK_ERROR_INVALID_EXTERNAL_HANDLE: VkResult = -1000072003;
 
 pub mod stype {
     pub const SUBMIT_INFO: i32 = 4;
-    pub const FENCE_CREATE_INFO: i32 = 8;
+    pub const SEMAPHORE_CREATE_INFO: i32 = 9;
     pub const DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT: i32 = 1000011000;
     pub const NATIVE_BUFFER_ANDROID: i32 = 1000010000;
     pub const SWAPCHAIN_IMAGE_CREATE_INFO_ANDROID: i32 = 1000010001;
@@ -52,6 +52,9 @@ pub mod stype {
     pub const EXTERNAL_FORMAT_ANDROID: i32 = 1000129005;
     pub const ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_2_ANDROID: i32 = 1000129006;
     pub const IMPORT_MEMORY_HOST_POINTER_INFO_EXT: i32 = 1000178000;
+    pub const SEMAPHORE_TYPE_CREATE_INFO: i32 = 1000207002;
+    pub const TIMELINE_SEMAPHORE_SUBMIT_INFO: i32 = 1000207003;
+    pub const SEMAPHORE_SIGNAL_INFO: i32 = 1000207005;
     pub const LAYER_SETTINGS_CREATE_INFO_EXT: i32 = 1000496000;
 }
 
@@ -392,11 +395,40 @@ pub struct VkSubmitInfo {
 }
 
 #[repr(C)]
-pub struct VkFenceCreateInfo {
+pub struct VkTimelineSemaphoreSubmitInfo {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub waitSemaphoreValueCount: u32,
+    pub pWaitSemaphoreValues: *const u64,
+    pub signalSemaphoreValueCount: u32,
+    pub pSignalSemaphoreValues: *const u64,
+}
+
+#[repr(C)]
+pub struct VkSemaphoreCreateInfo {
     pub sType: i32,
     pub pNext: *const c_void,
     pub flags: u32,
 }
+
+#[repr(C)]
+pub struct VkSemaphoreTypeCreateInfo {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub semaphoreType: i32,
+    pub initialValue: u64,
+}
+
+#[repr(C)]
+pub struct VkSemaphoreSignalInfo {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub semaphore: u64,
+    pub value: u64,
+}
+
+/// `VK_SEMAPHORE_TYPE_TIMELINE`.
+pub const SEMAPHORE_TYPE_TIMELINE: i32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

@@ -20,6 +20,10 @@
 //! The socket carries a marker (its `SO_LINGER` time, as the syscall layer
 //! marks its sockets), so a sync_file arriving from another process is
 //! recognized ([`is_sync_file`]).
+//!
+//! [`metal`] connects fences to Metal's shared events, in both directions.
+
+pub mod metal;
 
 use std::collections::HashMap;
 use std::io;
@@ -316,25 +320,56 @@ pub fn merge(a: BorrowedFd, b: BorrowedFd) -> io::Result<OwnedFd> {
     for fd in [a, b] {
         inputs.push(Private::new(fd.try_clone_to_owned()?));
     }
-    waiter()?.add(inputs, &states, writer)?;
+    waiter()?.add(
+        inputs,
+        &states,
+        Box::new(move |state| {
+            if let State::Signaled {
+                timestamp_ns,
+                status,
+            } = state
+            {
+                writer.signal_at(timestamp_ns, status);
+            }
+        }),
+    )?;
     Ok(file)
 }
 
+/// Call `then` with the fence's state once it has signaled: now, or on
+/// the waiter's thread.
+pub fn on_signal(fd: BorrowedFd, then: impl FnOnce(State) + Send + 'static) -> io::Result<()> {
+    let s = state(fd);
+    if s != State::Active {
+        then(s);
+        return Ok(());
+    }
+    let input = Private::new(fd.try_clone_to_owned()?);
+    waiter()?.add(vec![input], &[s], Box::new(then))
+}
+
+/// What waits for fences: a merge, or an [`on_signal`] callback.
 struct Merge {
     inputs: Vec<Private>,
     /// Inputs not signaled yet.
     left: usize,
-    writer: Writer,
+    then: Box<dyn FnOnce(State) + Send>,
 }
 
-/// One thread per process that waits for the inputs of merged fences.
+/// One thread per process that waits for the inputs of merged fences and
+/// of [`on_signal`] callbacks.
 struct Waiter {
     kq: RawFd,
     merges: Mutex<(u64, HashMap<u64, Merge>)>,
 }
 
 impl Waiter {
-    fn add(&self, inputs: Vec<Private>, states: &[State], writer: Writer) -> io::Result<()> {
+    fn add(
+        &self,
+        inputs: Vec<Private>,
+        states: &[State],
+        then: Box<dyn FnOnce(State) + Send>,
+    ) -> io::Result<()> {
         let mut merges = self.merges.lock().unwrap();
         merges.0 += 1;
         let id = merges.0;
@@ -355,7 +390,7 @@ impl Waiter {
             Merge {
                 inputs,
                 left: changes.len(),
-                writer,
+                then,
             },
         );
         // SAFETY: registering local changes on our kqueue.
@@ -408,13 +443,7 @@ impl Waiter {
                         .iter()
                         .map(|p| state(unsafe { BorrowedFd::borrow_raw(p.0) }))
                         .collect();
-                    if let State::Signaled {
-                        timestamp_ns,
-                        status,
-                    } = combine(&states)
-                    {
-                        m.writer.signal_at(timestamp_ns, status);
-                    }
+                    (m.then)(combine(&states));
                 }
             }
         }
@@ -445,7 +474,7 @@ fn waiter() -> io::Result<Arc<Waiter>> {
     });
     let run = waiter.clone();
     std::thread::Builder::new()
-        .name("sync-file-merge".into())
+        .name("sync-file-wait".into())
         .spawn(move || run.run())?;
     *w = Some((pid, waiter.clone()));
     Ok(waiter)
@@ -588,5 +617,23 @@ mod tests {
                 status: 1
             }
         );
+    }
+
+    #[test]
+    fn on_signal_runs_once_the_fence_signals() {
+        let (file, writer) = pair().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let now = tx.clone();
+        on_signal(file.as_fd(), move |s| tx.send(s).unwrap()).unwrap();
+        assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
+        writer.signal_at(50, 1);
+        let signaled = State::Signaled {
+            timestamp_ns: 50,
+            status: 1,
+        };
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(signaled));
+        // An already signaled fence runs it at once.
+        on_signal(file.as_fd(), move |s| now.send(s).unwrap()).unwrap();
+        assert_eq!(rx.try_recv(), Ok(signaled));
     }
 }

@@ -1,17 +1,17 @@
 //! `VK_KHR_external_semaphore_fd` with sync-file fds, which HWUI requires
 //! to hand its rendering to SurfaceFlinger and back. MoltenVK has no sync
-//! files, and the syscall layer none the host can signal yet, so the
-//! payload crosses on the CPU:
+//! files; the driver connects them to its own timeline semaphores
+//! ([`driver::fence_after`], [`driver::signal_after`]):
 //!
-//! - export waits until the semaphore's pending signal has run and returns
-//!   -1, the sync fd of an already signaled payload; the wait consumes the
-//!   payload, as the copy transference of a sync fd does;
-//! - import waits for the fd to signal, closes it, and signals the
-//!   semaphore.
+//! - export submits a batch that waits for the semaphore and returns a
+//!   sync_file that signals after it; the wait consumes the payload, as the
+//!   copy transference of a sync fd does;
+//! - import submits a batch that signals the semaphore once the fd has
+//!   signaled.
 
 use std::ffi::c_void;
 
-use crate::driver::{submit, wait_fd};
+use crate::driver;
 use crate::thunks::host;
 use crate::types::*;
 
@@ -67,12 +67,14 @@ pub unsafe extern "C" fn vkGetSemaphoreFdKHR(
     if kind != SEMAPHORE_HANDLE_TYPE_SYNC_FD {
         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
     }
-    let r = submit(device, None, &[semaphore], &[], 0, true);
-    if r == VK_SUCCESS {
-        // SAFETY: the application's out pointer.
-        unsafe { *fd = -1 };
+    match driver::fence_after(device, None, &[(semaphore, 0)]) {
+        Ok(f) => {
+            // SAFETY: the application's out pointer.
+            unsafe { *fd = f };
+            VK_SUCCESS
+        }
+        Err(r) => r,
     }
-    r
 }
 
 pub unsafe extern "C" fn vkImportSemaphoreFdKHR(
@@ -84,6 +86,5 @@ pub unsafe extern "C" fn vkImportSemaphoreFdKHR(
     if kind != SEMAPHORE_HANDLE_TYPE_SYNC_FD {
         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
     }
-    wait_fd(fd);
-    submit(device, None, &[], &[semaphore], 0, false)
+    driver::signal_after(device, fd, &[(semaphore, 0)], 0)
 }

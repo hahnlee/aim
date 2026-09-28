@@ -1,5 +1,7 @@
-//! Graphics buffers as the storage of `VkImage`s (`docs/graphics-buffers.md`,
-//! `docs/vulkan-driver.md`).
+//! Metal objects behind MoltenVK's: graphics buffers as the storage of
+//! `VkImage`s (`docs/graphics-buffers.md`, `docs/vulkan-driver.md`), and
+//! the shared events of timeline semaphores, which sync_files signal and
+//! are signaled by ([`aim_sync_file::metal`]).
 //!
 //! The guest maps the buffer's memfd; the mapping starts on a page, so
 //! Metal wraps it without copying (`newBufferWithBytesNoCopy`). A linear
@@ -9,26 +11,25 @@
 //! keeps the buffer, until the image is destroyed.
 
 use std::ffi::{CStr, c_char, c_void};
+use std::os::fd::{BorrowedFd, OwnedFd};
 
-use aim_hostcall::vulkan::Attach;
+use aim_hostcall::vulkan::{Attach, Timeline};
 
-use crate::{EINVAL, Private};
+use crate::{EBADF, EINVAL, Private};
 
 type Id = *mut c_void;
 type Sel = *const c_void;
 
-#[link(name = "objc")]
-unsafe extern "C" {
-    fn objc_getClass(name: *const c_char) -> Id;
-    fn sel_registerName(name: *const c_char) -> Sel;
-    fn objc_msgSend();
-    fn objc_release(obj: Id);
-    fn objc_autoreleasePoolPush() -> *mut c_void;
-    fn objc_autoreleasePoolPop(pool: *mut c_void);
+aim_hostcall::dylib! {
+    static METAL = c"/System/Library/Frameworks/Metal.framework/Metal" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        static objc_msgSend: c_void;
+        fn objc_release(obj: Id);
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
 }
-
-#[link(name = "Metal", kind = "framework")]
-unsafe extern "C" {}
 
 pub fn pool_push() -> *mut c_void {
     // SAFETY: no preconditions.
@@ -50,7 +51,7 @@ macro_rules! send {
     ($obj:expr, $sel:expr => $ret:ty $(, $t:ty = $a:expr)*) => {{
         // SAFETY: the selector's method has exactly this signature.
         let f: unsafe extern "C" fn(Id, Sel $(, $t)*) -> $ret =
-            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+            unsafe { std::mem::transmute(objc_msgSend()) };
         unsafe { f($obj, sel($sel) $(, $a)*) }
     }};
 }
@@ -130,4 +131,77 @@ pub fn attach(p: &Private, a: &mut Attach) -> i64 {
     };
     pool_pop(pool);
     r
+}
+
+/// `VkExportMetalObjectsInfoEXT` with a `VkExportMetalSharedEventInfoEXT`.
+#[repr(C)]
+struct ExportObjects {
+    s_type: i32,
+    next: *mut ExportSharedEvent,
+}
+
+#[repr(C)]
+struct ExportSharedEvent {
+    s_type: i32,
+    next: *const c_void,
+    semaphore: u64,
+    event: u64,
+    shared_event: Id,
+}
+
+const EXPORT_METAL_OBJECTS_INFO_EXT: i32 = 1000311001;
+const EXPORT_METAL_SHARED_EVENT_INFO_EXT: i32 = 1000311010;
+
+/// The `MTLSharedEvent` of a timeline semaphore (MoltenVK's reference).
+fn shared_event(p: &Private, a: &Timeline) -> Option<Id> {
+    // SAFETY: MoltenVK's exported function with its C signature.
+    let export = unsafe {
+        std::mem::transmute::<usize, unsafe extern "C" fn(u64, *mut ExportObjects)>(
+            p.export_objects,
+        )
+    };
+    let mut event = ExportSharedEvent {
+        s_type: EXPORT_METAL_SHARED_EVENT_INFO_EXT,
+        next: std::ptr::null(),
+        semaphore: a.semaphore,
+        event: 0,
+        shared_event: std::ptr::null_mut(),
+    };
+    let mut info = ExportObjects {
+        s_type: EXPORT_METAL_OBJECTS_INFO_EXT,
+        next: &mut event,
+    };
+    if a.device == 0 || a.semaphore == 0 {
+        return None;
+    }
+    // SAFETY: the guest's VkDevice and VkSemaphore, MoltenVK handles.
+    unsafe { export(a.device, &mut info) };
+    (!event.shared_event.is_null()).then_some(event.shared_event)
+}
+
+/// A sync_file for the semaphore's value.
+pub fn fence(p: &Private, a: &Timeline) -> Result<OwnedFd, i64> {
+    let event = shared_event(p, a).ok_or(EINVAL)?;
+    let pool = pool_push();
+    // SAFETY: an MTLSharedEvent.
+    let file = unsafe { aim_sync_file::metal::fence(event, a.value) };
+    pool_pop(pool);
+    file.map_err(|_| EINVAL)
+}
+
+/// Set the semaphore to its value once the guest's sync_file has signaled.
+pub fn signal(p: &Private, a: &Timeline) -> i64 {
+    // SAFETY: F_GETFD only checks that the guest's fd is open.
+    if unsafe { libc::fcntl(a.fd, libc::F_GETFD) } < 0 {
+        return EBADF;
+    }
+    let Some(event) = shared_event(p, a) else {
+        return EINVAL;
+    };
+    // SAFETY: the guest's open fd, borrowed for the call; an MTLSharedEvent.
+    match unsafe { aim_sync_file::metal::signal_when(BorrowedFd::borrow_raw(a.fd), event, a.value) }
+    {
+        Ok(()) => 0,
+        Err(_) => EBADF,
+    }
 }

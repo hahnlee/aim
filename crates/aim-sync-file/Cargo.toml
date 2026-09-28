@@ -7,4 +7,5 @@ publish = false
 description = "Linux sync_file fences as host descriptors, shared by the syscall layer and the GPU and display modules"
 
 [dependencies]
+aim-hostcall.workspace = true
 libc.workspace = true

@@ -214,8 +214,9 @@ Buffers move between processes with Linux `sync_file` fences, as on a
 device. A sync_file is an `AF_UNIX` datagram socket pair made by
 `crates/aim-sync-file`:
 
-- **Signal.** The producer keeps the other end, the writer: the GPU module
-  until Metal signals the fence's `MTLSharedEvent`, the display server
+- **Signal.** The producer keeps the other end, the writer: the GPU or
+  Vulkan module until Metal signals the fence's `MTLSharedEvent`
+  (`aim_sync_file::metal`), the display server
   until the frame is shown, the merge waiter until every input has
   signaled. It signals by sending one record (the signal time in
   `CLOCK_MONOTONIC` and the status) and closing its end. A writer closed
@@ -232,7 +233,8 @@ device. A sync_file is an `AF_UNIX` datagram socket pair made by
 - **The syscall layer** (`sys/sync_file.rs`) adds the rest of its Linux
   behaviour: `SYNC_IOC_MERGE` (signaled at the later time, with the first
   error; a merge of pending fences is signaled by one host thread per
-  process over a kqueue), `SYNC_IOC_FILE_INFO` (one fence per file, named
+  process over a kqueue, which also sets the `MTLSharedEvent` of a Vulkan
+  timeline semaphore once a fence imported into it has signaled), `SYNC_IOC_FILE_INFO` (one fence per file, named
   `aim`), `SYNC_IOC_SET_DEADLINE` (accepted), `EINVAL` for `read` and
   `write`, and `anon_inode:sync_file` in `/proc/self/fd`.
 

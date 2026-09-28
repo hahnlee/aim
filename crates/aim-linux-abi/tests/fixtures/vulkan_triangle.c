@@ -20,11 +20,13 @@
 #include <media/NdkImageReader.h>
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <vulkan/vulkan.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define W 64
 #define H 64
@@ -479,9 +481,11 @@ static void ahb_triangle(void) {
     printf("ok AHardwareBuffer image clear + triangle, read back on the CPU\n");
 }
 
-// Sync-fd semaphores, as HWUI hands frames to SurfaceFlinger and back:
-// export the payload of a signaled semaphore, import it into another and
-// wait for that one.
+// Sync-fd semaphores, as HWUI hands frames to SurfaceFlinger and back: the
+// payload of a semaphore whose signal is pending (on the second queue,
+// behind a timeline semaphore the CPU signals) exported as a sync_file,
+// which signals only after it, and imported into another semaphore that a
+// submission waits for.
 static void sync_fd(void) {
     VkExportSemaphoreCreateInfo export_info = {
         .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
@@ -492,36 +496,71 @@ static void sync_fd(void) {
         (PFN_vkGetSemaphoreFdKHR)vkGetDeviceProcAddr(device, "vkGetSemaphoreFdKHR");
     PFN_vkImportSemaphoreFdKHR import_fd =
         (PFN_vkImportSemaphoreFdKHR)vkGetDeviceProcAddr(device, "vkImportSemaphoreFdKHR");
-    CHECK(get_fd && import_fd, "no sync-fd entry points");
-    VkSemaphore signaled, imported;
+    PFN_vkSignalSemaphore signal_semaphore =
+        (PFN_vkSignalSemaphore)vkGetDeviceProcAddr(device, "vkSignalSemaphore");
+    CHECK(get_fd && import_fd && signal_semaphore, "no sync-fd or timeline entry points");
+    VkSemaphore signaled, imported, gate;
     VK(vkCreateSemaphore(device, &si, NULL, &signaled));
     VK(vkCreateSemaphore(device, &si, NULL, &imported));
-    VkSubmitInfo signal = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                           .signalSemaphoreCount = 1,
-                           .pSignalSemaphores = &signaled};
-    VK(vkQueueSubmit(queue, 1, &signal, VK_NULL_HANDLE));
+    VkSemaphoreTypeCreateInfo timeline = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+                                          .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE};
+    VkSemaphoreCreateInfo ti = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+                                .pNext = &timeline};
+    VK(vkCreateSemaphore(device, &ti, NULL, &gate));
+    uint64_t one = 1;
+    VkTimelineSemaphoreSubmitInfo values = {
+        .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+        .waitSemaphoreValueCount = 1,
+        .pWaitSemaphoreValues = &one};
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkSubmitInfo gated = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                          .pNext = &values,
+                          .waitSemaphoreCount = 1,
+                          .pWaitSemaphores = &gate,
+                          .pWaitDstStageMask = &stage,
+                          .signalSemaphoreCount = 1,
+                          .pSignalSemaphores = &signaled};
+    VK(vkQueueSubmit(queue2, 1, &gated, VK_NULL_HANDLE));
     VkSemaphoreGetFdInfoKHR gi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
                                   .semaphore = signaled,
                                   .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT};
     int fd = -2;
     VK(get_fd(device, &gi, &fd));
-    CHECK(fd >= -1, "sync fd %d", fd);
+    CHECK(fd >= 0, "sync fd %d", fd);
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    CHECK(poll(&p, 1, 50) == 0, "the sync_file signaled before its semaphore");
+    int watch = dup(fd);
     VkImportSemaphoreFdInfoKHR ii = {.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
                                      .semaphore = imported,
                                      .flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT,
                                      .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
                                      .fd = fd};
     VK(import_fd(device, &ii));
-    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence done;
+    VK(vkCreateFence(device, &fci, NULL, &done));
     VkSubmitInfo wait = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                          .waitSemaphoreCount = 1,
                          .pWaitSemaphores = &imported,
                          .pWaitDstStageMask = &stage};
-    VK(vkQueueSubmit(queue, 1, &wait, VK_NULL_HANDLE));
-    VK(vkQueueWaitIdle(queue));
+    VK(vkQueueSubmit(queue, 1, &wait, done));
+    CHECK((r = vkWaitForFences(device, 1, &done, VK_TRUE, 50000000)) == VK_TIMEOUT,
+          "the imported semaphore signaled before the sync_file: %d", r);
+    double t0 = now_ns();
+    VkSemaphoreSignalInfo open = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO,
+                                  .semaphore = gate,
+                                  .value = 1};
+    VK(signal_semaphore(device, &open));
+    VK(vkWaitForFences(device, 1, &done, VK_TRUE, 5000000000ull));
+    printf("timing sync_file round trip %.0f us\n", (now_ns() - t0) / 1e3);
+    p.fd = watch;
+    CHECK(poll(&p, 1, 0) == 1, "the exported sync_file never signaled");
+    close(watch);
+    vkDestroyFence(device, done, NULL);
+    vkDestroySemaphore(device, gate, NULL);
     vkDestroySemaphore(device, signaled, NULL);
     vkDestroySemaphore(device, imported, NULL);
-    printf("ok sync-fd semaphore export and import (fd %d)\n", fd);
+    printf("ok sync-fd semaphore export and import of a pending payload\n");
 }
 
 // A swapchain on an ImageReader's window (the original loader's
@@ -665,7 +704,11 @@ int main(int argc, char** argv) {
                                  .queueFamilyIndex = family,
                                  .queueCount = 2,
                                  .pQueuePriorities = priorities};
+    VkPhysicalDeviceTimelineSemaphoreFeatures timelines = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+        .timelineSemaphore = VK_TRUE};
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                             .pNext = &timelines,
                              .queueCreateInfoCount = 1,
                              .pQueueCreateInfos = &q,
                              .enabledExtensionCount = 4,

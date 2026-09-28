@@ -163,6 +163,7 @@ version = "0.1.0"
 dependencies = [
  "aim-hostcall",
  "aim-paths",
+ "aim-sync-file",
  "libc",
 ]
 
@@ -211,6 +212,7 @@ dependencies = [
 name = "aim-sync-file"
 version = "0.1.0"
 dependencies = [
+ "aim-hostcall",
  "libc",
 ]
 

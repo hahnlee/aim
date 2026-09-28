@@ -8,6 +8,7 @@ description = "Host-call module for the guest Vulkan driver: Vulkan forwarded to
 
 [dependencies]
 aim-hostcall.workspace = true
+aim-sync-file.workspace = true
 libc.workspace = true
 
 [dev-dependencies]

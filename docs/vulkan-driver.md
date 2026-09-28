@@ -170,23 +170,40 @@ memfd.
 
 ### Synchronization
 
-The syscall layer has no sync files the host can signal yet, so fences cross
-on the CPU (#315):
+Fences cross as sync_files ([graphics-buffers.md](graphics-buffers.md),
+"Fences"; `crates/aim-sync-file`) on the GPU, through timeline semaphores
+of the driver's own, which MoltenVK makes of `MTLSharedEvent`s:
 
-- `vkAcquireImageANDROID` waits for the dequeued buffer's fence, then
-  signals the application's semaphore or fence with an empty submission on
-  the device's first queue;
-- `vkQueueSignalReleaseImageANDROID` submits a batch that waits for the
-  loader's semaphores and waits on the CPU until it (and everything
-  submitted before it) has run, then returns fence -1, so the buffer is
-  queued finished;
-- a sync-fd semaphore export waits the same way and returns -1 (an already
-  signaled payload; the wait consumes the payload, as the copy transference
-  of a sync fd does); an import waits for the fd and signals the semaphore.
+- **To a sync_file** (`driver::fence_after`): a submission that waits for
+  the application's semaphores and signals a timeline value; host call
+  `FN_FENCE` returns a sync_file that the process's
+  `MTLSharedEventListener` signals when the event reaches the value
+  (`aim_sync_file::metal::fence`, which the GLES driver's native fences
+  use too).
+- **From a sync_file** (`driver::signal_after`): host call `FN_SIGNAL` sets
+  the timeline's event to a value once the fd has signaled (the sync-file
+  waiter thread, `aim_sync_file::on_signal`), and a submission on the
+  device's first queue waits for that value and signals the application's
+  semaphore or fence.
 
-The driver's own submissions take a per-queue lock that the application's
-`vkQueueSubmit*`, `vkQueueWaitIdle` and `vkQueueBindSparse` also take, since
-an acquire is not synchronized with the application's use of the queue.
+A timeline is taken for one value at a time, and again once it has reached
+it (`vkGetSemaphoreCounterValue`), so out-of-order signals never pass a
+value early. MoltenVK makes them whatever features the application
+enabled. On top of these:
+
+- `vkAcquireImageANDROID` signals the application's semaphore or fence
+  after the dequeued buffer's fence;
+- `vkQueueSignalReleaseImageANDROID` returns a fence for the loader's
+  semaphores, submitted on the presenting queue after its work;
+- a sync-fd semaphore export returns a fence for the semaphore (the wait
+  consumes the payload, as the copy transference of a sync fd does); an
+  import makes the semaphore signal after the fd (-1 is signaled).
+
+A wait for a sync_file holds up the device's first queue until the fd
+signals, as the wait of the semaphore it feeds would. The driver's own
+submissions take a per-queue lock that the application's `vkQueueSubmit*`,
+`vkQueueWaitIdle` and `vkQueueBindSparse` also take, since they are not
+synchronized with the application's use of the queue.
 
 ## Conformance gaps
 
@@ -221,8 +238,10 @@ declares Vulkan hardware level 0.
     too), in 1.5–10 ms for the submit and wait; the memory exported again is
     the same AHardwareBuffer; the same on the second queue, after a
     semaphore the first signals;
-  - a sync-fd semaphore exported (fd -1) and imported into another that a
-    submission then waits for.
+  - a sync-fd semaphore whose signal is pending (behind a timeline
+    semaphore the CPU signals later) exported as a sync_file that signals
+    only after it, and imported into another that a submission waits for,
+    which waits too; 88 µs from the CPU signal to the last fence.
 - A full boot (`guest-init` as `cargo aim boot` runs it, first boot):
   `sys.boot_completed` after 49 s; `ro.hardware.vulkan=aim`;
   `pm list features` lists `android.hardware.vulkan.compute`, `.level`

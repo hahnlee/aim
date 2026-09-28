@@ -344,14 +344,22 @@ fn host_queues(m: Merged, requested: &[VkDeviceQueueCreateInfo]) -> Vec<VkDevice
     out
 }
 
+/// A timeline semaphore of the driver's own and the last value it was
+/// given to reach.
+struct Timeline {
+    semaphore: u64,
+    value: u64,
+}
+
 /// What the driver keeps per device.
 struct Device {
     physical: usize,
     merged: Option<Merged>,
     /// The first queue the application got, which the driver's own
-    /// submissions use, and a fence for waiting on them.
+    /// submissions use.
     queue: Option<usize>,
-    fence: u64,
+    /// The timelines that connect submissions and sync_files.
+    timelines: Vec<Timeline>,
 }
 
 struct State {
@@ -457,7 +465,7 @@ pub unsafe extern "C" fn vkCreateDevice(
                 physical: physical_device as usize,
                 merged,
                 queue: None,
-                fence: 0,
+                timelines: Vec::new(),
             },
         );
     }
@@ -470,12 +478,10 @@ pub unsafe extern "C" fn vkDestroyDevice(device: VkDispatch, _allocator: *const 
         s.queues.retain(|_, (d, _)| *d != device as usize);
         s.devices.remove(&(device as usize))
     };
-    // SAFETY: the application's device.
+    // SAFETY: the application's device and the driver's semaphores.
     unsafe {
-        if let Some(d) = gone
-            && d.fence != 0
-        {
-            host::vkDestroyFence(device, d.fence, std::ptr::null());
+        for t in gone.iter().flat_map(|d| &d.timelines) {
+            host::vkDestroySemaphore(device, t.semaphore, std::ptr::null());
         }
         host::vkDestroyDevice(device, std::ptr::null());
     }
@@ -598,112 +604,178 @@ pub unsafe extern "C" fn vkQueueWaitIdle(queue: VkDispatch) -> VkResult {
     locked(queue, || unsafe { host::vkQueueWaitIdle(queue) })
 }
 
+/// A semaphore operation of the driver's own submissions: a binary
+/// semaphore (value 0) or a value of a timeline semaphore.
+pub type Op = (u64, u64);
+
 /// Submit, on `queue` (or the device's first queue), a batch that waits
-/// for `waits` and signals `signals` and `fence`; with `wait`, wait on the
-/// CPU until it has run (and everything submitted before it).
+/// for `waits` and signals `signals` and `fence`.
 pub fn submit(
     device: VkDispatch,
     queue: Option<VkDispatch>,
-    waits: &[u64],
-    signals: &[u64],
+    waits: &[Op],
+    signals: &[Op],
     fence: u64,
-    wait: bool,
 ) -> VkResult {
-    let queue = match queue {
-        Some(q) => q,
-        None => match state()
-            .devices
-            .get(&(device as usize))
-            .and_then(|d| d.queue)
-        {
-            Some(q) => q as VkDispatch,
-            // The application has no queue yet; nothing it submitted can
-            // be pending.
-            None => return VK_ERROR_INITIALIZATION_FAILED,
-        },
+    let Some(queue) = queue.or_else(|| first_queue(device)) else {
+        // The application has no queue yet; nothing it submitted can be
+        // pending.
+        return VK_ERROR_INITIALIZATION_FAILED;
     };
-    let Some((device, lock)) = queue_lock(queue) else {
+    let Some((_, lock)) = queue_lock(queue) else {
         return VK_ERROR_INITIALIZATION_FAILED;
     };
     let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let (wait_semaphores, wait_values): (Vec<u64>, Vec<u64>) = waits.iter().copied().unzip();
+    let (signal_semaphores, signal_values): (Vec<u64>, Vec<u64>) = signals.iter().copied().unzip();
     let stages = vec![PIPELINE_STAGE_ALL_COMMANDS; waits.len()];
+    let values = VkTimelineSemaphoreSubmitInfo {
+        sType: stype::TIMELINE_SEMAPHORE_SUBMIT_INFO,
+        pNext: std::ptr::null(),
+        waitSemaphoreValueCount: waits.len() as u32,
+        pWaitSemaphoreValues: wait_values.as_ptr(),
+        signalSemaphoreValueCount: signals.len() as u32,
+        pSignalSemaphoreValues: signal_values.as_ptr(),
+    };
     let batch = VkSubmitInfo {
         sType: stype::SUBMIT_INFO,
-        pNext: std::ptr::null(),
+        pNext: (&raw const values).cast(),
         waitSemaphoreCount: waits.len() as u32,
-        pWaitSemaphores: waits.as_ptr(),
+        pWaitSemaphores: wait_semaphores.as_ptr(),
         pWaitDstStageMask: stages.as_ptr(),
         commandBufferCount: 0,
         pCommandBuffers: std::ptr::null(),
         signalSemaphoreCount: signals.len() as u32,
-        pSignalSemaphores: signals.as_ptr(),
-    };
-    let own = if wait {
-        match own_fence(device) {
-            Ok(f) => f,
-            Err(r) => return r,
-        }
-    } else {
-        fence
+        pSignalSemaphores: signal_semaphores.as_ptr(),
     };
     // SAFETY: a valid batch on the application's queue.
-    let r = unsafe { host::vkQueueSubmit(queue, 1, (&raw const batch).cast(), own) };
-    if r != VK_SUCCESS || !wait {
-        return r;
-    }
-    // SAFETY: the device's own fence.
-    unsafe {
-        let r = host::vkWaitForFences(device, 1, (&raw const own).cast(), 1, u64::MAX);
-        host::vkResetFences(device, 1, (&raw const own).cast());
-        r
-    }
+    unsafe { host::vkQueueSubmit(queue, 1, (&raw const batch).cast(), fence) }
 }
 
-/// The device's fence for the driver's own waits (under a queue lock).
-fn own_fence(device: VkDispatch) -> Result<u64, VkResult> {
-    if let Some(d) = state().devices.get(&(device as usize))
-        && d.fence != 0
-    {
-        return Ok(d.fence);
+fn first_queue(device: VkDispatch) -> Option<VkDispatch> {
+    state()
+        .devices
+        .get(&(device as usize))
+        .and_then(|d| d.queue)
+        .map(|q| q as VkDispatch)
+}
+
+/// A timeline of `device` that no pending operation uses, and the next
+/// value it is to reach. MoltenVK makes a timeline semaphore of an
+/// `MTLSharedEvent` whatever features the application enabled.
+fn timeline(device: VkDispatch) -> Result<Op, VkResult> {
+    let mut s = state();
+    let d = s
+        .devices
+        .get_mut(&(device as usize))
+        .ok_or(VK_ERROR_INITIALIZATION_FAILED)?;
+    for t in &mut d.timelines {
+        let mut now = 0u64;
+        // SAFETY: the driver's semaphore.
+        unsafe { host::vkGetSemaphoreCounterValue(device, t.semaphore, (&raw mut now).cast()) };
+        if now >= t.value {
+            t.value += 1;
+            return Ok((t.semaphore, t.value));
+        }
     }
-    let info = VkFenceCreateInfo {
-        sType: stype::FENCE_CREATE_INFO,
+    let kind = VkSemaphoreTypeCreateInfo {
+        sType: stype::SEMAPHORE_TYPE_CREATE_INFO,
         pNext: std::ptr::null(),
+        semaphoreType: SEMAPHORE_TYPE_TIMELINE,
+        initialValue: 0,
+    };
+    let info = VkSemaphoreCreateInfo {
+        sType: stype::SEMAPHORE_CREATE_INFO,
+        pNext: (&raw const kind).cast(),
         flags: 0,
     };
-    let mut fence = 0u64;
+    let mut semaphore = 0u64;
     // SAFETY: a valid create info.
     let r = unsafe {
-        host::vkCreateFence(
+        host::vkCreateSemaphore(
             device,
             (&raw const info).cast(),
             std::ptr::null(),
-            (&raw mut fence).cast(),
+            (&raw mut semaphore).cast(),
         )
     };
     if r != VK_SUCCESS {
         return Err(r);
     }
-    match state().devices.get_mut(&(device as usize)) {
-        Some(d) => d.fence = fence,
-        None => return Err(VK_ERROR_INITIALIZATION_FAILED),
-    }
-    Ok(fence)
+    d.timelines.push(Timeline {
+        semaphore,
+        value: 1,
+    });
+    Ok((semaphore, 1))
 }
 
-/// Wait for a sync-file fd (consumed; -1 is signaled) on the CPU.
-pub fn wait_fd(fd: i32) {
-    if fd < 0 {
-        return;
-    }
-    let mut p = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
+/// A sync_file fd that signals once `waits` have signaled and, on `queue`
+/// (or the device's first queue), what was submitted before.
+pub fn fence_after(
+    device: VkDispatch,
+    queue: Option<VkDispatch>,
+    waits: &[Op],
+) -> Result<i32, VkResult> {
+    let device = match queue {
+        Some(q) => queue_lock(q).ok_or(VK_ERROR_INITIALIZATION_FAILED)?.0,
+        None => device,
     };
-    // SAFETY: a pollfd on the stack; the fd is ours to close.
-    unsafe {
-        while libc::poll(&mut p, 1, -1) < 0 && *libc::__errno() == libc::EINTR {}
-        libc::close(fd);
+    let op = timeline(device)?;
+    let r = submit(device, queue, waits, &[op], 0);
+    let mut args = aim_hostcall::vulkan::Timeline {
+        device: device as u64,
+        semaphore: op.0,
+        value: op.1,
+        ..Default::default()
+    };
+    if r != VK_SUCCESS {
+        // Nothing will reach the value: reach it here, so the timeline is
+        // free again.
+        signal_now(device, op);
+        return Err(r);
     }
+    aim_hostcall::guest::vulkan_fence(&mut args).map_err(|_| VK_ERROR_OUT_OF_HOST_MEMORY)
+}
+
+/// Submit, on the device's first queue, a batch that signals `signals` and
+/// `fence` once the sync_file `fd` has signaled. Takes `fd`; -1 is a
+/// signaled sync_file.
+pub fn signal_after(device: VkDispatch, fd: i32, signals: &[Op], fence: u64) -> VkResult {
+    if fd < 0 {
+        return submit(device, None, &[], signals, fence);
+    }
+    if signals.is_empty() && fence == 0 {
+        // SAFETY: the fd is ours now.
+        unsafe { libc::close(fd) };
+        return VK_SUCCESS;
+    }
+    let r = timeline(device).and_then(|op| {
+        let mut args = aim_hostcall::vulkan::Timeline {
+            device: device as u64,
+            semaphore: op.0,
+            value: op.1,
+            fd,
+            ..Default::default()
+        };
+        if aim_hostcall::guest::vulkan_signal(&mut args).is_err() {
+            signal_now(device, op);
+            return Err(VK_ERROR_INVALID_EXTERNAL_HANDLE);
+        }
+        Ok(submit(device, None, &[op], signals, fence))
+    });
+    // SAFETY: the fd is ours now; the host holds its own reference.
+    unsafe { libc::close(fd) };
+    r.unwrap_or_else(|e| e)
+}
+
+/// Reach a timeline value on the CPU.
+fn signal_now(device: VkDispatch, (semaphore, value): Op) {
+    let info = VkSemaphoreSignalInfo {
+        sType: stype::SEMAPHORE_SIGNAL_INFO,
+        pNext: std::ptr::null(),
+        semaphore,
+        value,
+    };
+    // SAFETY: the driver's semaphore.
+    unsafe { host::vkSignalSemaphore(device, (&raw const info).cast()) };
 }
