@@ -148,7 +148,15 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
 - The process table is the guest's pid namespace for every call that
   names a process, not only `/proc` (#341): `kill` (also `-1` and process
   groups), pidfds, the scheduler and priority calls and the rest reach
-  guest processes only, and a Mac process is ESRCH.
+  guest processes only, and a Mac process is ESRCH. `getppid` and
+  `/proc/<pid>/stat` give 0 for a parent outside, such as guest-init
+  (#364), and `sysinfo` counts the namespace's processes (#366). A `linux-run` started without a table (tests, a debugging
+  shell) is alone in a private namespace with its descendants (#361);
+  `--by-pid` joins a boot's. Signals, renicing and rescheduling another
+  guest process follow the kernel's uid and capability rules (#362): an
+  app gets EPERM for a system uid process, system_server's CAP_KILL and
+  CAP_SYS_NICE reach apps. `prlimit` reads another guest process's limits
+  under the same kind of rule (#363); setting them is EPERM.
 - guest-init's wait for linkerconfig ends at `--timeout` and on SIGINT or
   SIGTERM (#196).
 
@@ -568,6 +576,11 @@ cargo aim boot --data target/aim/boot/data
 linux-run --root target/aim/derived/root --path-map target/aim/boot/data/run/path-map \
     --binder dev.aim.guest-init.<pid>.binder /system/bin/sh -c \
     'echo a > /data/local/tmp/Foo; echo b > /data/local/tmp/foo; ls /data/local/tmp'
+# a shell that should see and signal the boot's processes (ps, kill) joins
+# its pid namespace; without --by-pid it is alone in a private one:
+linux-run --root target/aim/derived/root --path-map target/aim/boot/data/run/path-map \
+    --binder dev.aim.guest-init.<pid>.binder \
+    --by-pid target/aim/boot/data/run/identity/by-pid /system/bin/ps -A
 cargo aim storage                     # the images and what they occupy
 ```
 

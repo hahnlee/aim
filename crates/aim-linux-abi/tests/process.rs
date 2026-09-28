@@ -263,6 +263,15 @@ fn credentials_follow_linux_rules_across_fork_and_exec() {
     check("identity");
 }
 
+/// kill, pidfd_send_signal, setpriority, the scheduler calls and prlimit
+/// on another process follow the kernel's uid and capability rules: an app cannot
+/// reach system uid processes, a system uid with CAP_KILL and CAP_SYS_NICE
+/// reaches apps.
+#[test]
+fn signals_and_priorities_need_permission() {
+    check("permissions");
+}
+
 #[test]
 fn identity_files_inherited_env_and_fds_reach_the_guest() {
     let Some(root) = root() else { return };
@@ -334,23 +343,57 @@ fn a_guest_cannot_reach_host_processes() {
         "# aim-guest-init identity v1\nservice\tguest\nuid\t10050\ngid\t10050\n",
     )
     .unwrap();
+    host_process_unreachable(root, &["--identity", id.to_str().unwrap()]);
+}
+
+/// A guest started without a table (a test, a debugging shell) is alone in
+/// a private namespace, as unable to reach host processes; its descendants
+/// die with it and its table goes.
+#[test]
+fn a_standalone_guest_has_a_private_namespace() {
+    let Some(root) = root() else { return };
+    host_process_unreachable(root, &[]);
+
+    let out = linux_run(root, &[PROGRAM, "ns_init_exit"], |_| {});
+    let so = String::from_utf8_lossy(&out.stdout);
+    let pids: Vec<i32> = so
+        .strip_prefix("pids ")
+        .map(|l| {
+            l.split_whitespace()
+                .filter_map(|p| p.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let [init, child] = pids[..] else {
+        panic!("{so}\n{}", String::from_utf8_lossy(&out.stderr))
+    };
+    assert!(out.status.success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // SAFETY: probing a pid with signal 0.
+    while unsafe { libc::kill(child, 0) } == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: as above.
+    assert_ne!(
+        unsafe { libc::kill(child, 0) },
+        0,
+        "the child died with init"
+    );
+    let table = std::env::temp_dir().join(format!("aim-pidns-{init}"));
+    assert!(!table.exists(), "{} removed", table.display());
+}
+
+/// `pid_namespace` of `tests/guest/process.c` with a host process's pid.
+fn host_process_unreachable(root: &Path, args: &[&str]) {
     let mut host = Command::new("/bin/sleep")
         .arg("60")
         .process_group(0)
         .spawn()
         .unwrap();
     let host_pid = host.id().to_string();
-    let out = linux_run(
-        root,
-        &[
-            "--identity",
-            id.to_str().unwrap(),
-            PROGRAM,
-            "pid_namespace",
-            &host_pid,
-        ],
-        |_| {},
-    );
+    let mut argv = args.to_vec();
+    argv.extend([PROGRAM, "pid_namespace", &host_pid]);
+    let out = linux_run(root, &argv, |_| {});
     let alive = host.try_wait().unwrap().is_none();
     let _ = host.kill();
     let _ = host.wait();

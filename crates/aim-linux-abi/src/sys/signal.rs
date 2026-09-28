@@ -39,6 +39,7 @@ use crate::errno::{EAGAIN, EINTR, EINVAL, ENOMEM, EPERM, ESRCH};
 const NSIG: i32 = 64;
 const SIGKILL: i32 = 9;
 const SIGSTOP: i32 = 19;
+const SIGCONT: i32 = 18;
 const UNBLOCKABLE: u64 = bit(SIGKILL) | bit(SIGSTOP);
 /// Delivered before other pending signals, as Linux's `dequeue_synchronous_signal`.
 const SYNCHRONOUS: u64 = bit(4) | bit(5) | bit(7) | bit(8) | bit(11) | bit(31);
@@ -128,6 +129,7 @@ fn ignored(sig: i32, act: &KSigaction) -> bool {
 /// Darwin equivalent (so its parent sees the signal), or exits 128+sig.
 pub fn die(sig: i32) -> ! {
     super::fork::spawn::wait_handovers();
+    super::pidns::leave();
     let h = to_host(sig);
     // SAFETY: restoring the default action and raising it on this thread.
     unsafe {
@@ -1091,13 +1093,26 @@ pub fn rt_sigtimedwait(a: [u64; 6]) -> i64 {
 }
 
 fn sender(sig: i32, code: i32) -> Siginfo {
-    // SAFETY: trivial identity queries.
-    let (pid, uid) = unsafe { (libc::getpid(), libc::getuid()) };
-    Siginfo::from_sender(sig, code, pid, uid)
+    // SAFETY: trivial.
+    let pid = unsafe { libc::getpid() };
+    Siginfo::from_sender(sig, code, pid, super::cred::getuid(174) as u32)
 }
 
 fn my_pid() -> i64 {
     super::process::getpid()
+}
+
+/// Send host signal `h` (0: none) for Linux `sig` to another process `p`
+/// of the namespace, with `check_kill_permission`'s rule: the credentials
+/// of `cred::may_signal`, or SIGCONT within the caller's session.
+pub(super) fn signal_process(p: i32, sig: i32, h: i32) -> i64 {
+    // SAFETY: trivial.
+    let same_session = || unsafe { libc::getsid(p) == libc::getsid(0) };
+    if !(super::cred::may_signal(p) || sig == SIGCONT && same_session()) {
+        return -(EPERM as i64);
+    }
+    // SAFETY: plain kill of a process of the namespace.
+    crate::errno::check(unsafe { libc::kill(p, h) } as i64)
 }
 
 /// kill(pid, sig). Other processes are signalled through Darwin, which has
@@ -1136,7 +1151,7 @@ pub fn kill(a: [u64; 6]) -> i64 {
             if let Err(e) = super::pidns::check(pid as i32) {
                 return e;
             }
-            None
+            return signal_process(pid as i32, sig, h);
         }
     };
     let Some((targets, all)) = targets else {
@@ -1155,8 +1170,7 @@ pub fn kill(a: [u64; 6]) -> i64 {
         -(ESRCH as i64)
     };
     for p in targets {
-        // SAFETY: plain kill of a member.
-        match crate::errno::check(unsafe { libc::kill(p, h) } as i64) {
+        match signal_process(p, sig, h) {
             0 => sent = !all,
             e if all && e == -(EPERM as i64) => {}
             e => err = e,

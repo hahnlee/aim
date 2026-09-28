@@ -492,6 +492,7 @@ pub fn exit_group(a: [u64; 6]) -> ! {
 fn end_process(code: i32) -> ! {
     super::fork::spawn::wait_handovers();
     super::cred::forget(pid());
+    super::pidns::leave();
     // SAFETY: ending the process without host atexit handlers, as Linux's
     // exit_group.
     unsafe { libc::_exit(code) }

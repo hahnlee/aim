@@ -593,8 +593,19 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   and every fork write): `/proc` and every call that names a process
   (`kill` and its group and `-1` forms, `tgkill`, pidfds, `sched_*`,
   `*priority`, `getpgid`/`setpgid`/`getsid`, `capget`, `process_vm_*`)
-  see its processes only, and a Mac process is ESRCH (`sys/pidns.rs`).
-  Guest pids are host pids.
+  see its processes only, and a Mac process is ESRCH (`sys/pidns.rs`);
+  a parent outside (guest-init) is 0 for `getppid`. Guest pids are host
+  pids. A `linux-run` started without a table (tests,
+  a debugging shell) gets a private one: a namespace of itself and its
+  descendants, which die with it as with a namespace's init. A shell joins
+  a boot's namespace with `--by-pid <runtime>/identity/by-pid`. Between
+  guest processes the kernel's permission rules hold, on the credentials
+  of the table: `kill` and pidfd signals need a matching real or saved
+  uid or CAP_KILL (SIGCONT also within the session), renicing and
+  rescheduling a matching uid or CAP_SYS_NICE, reading another's limits
+  (`prlimit`) matching ids or CAP_SYS_RESOURCE. Another process's limits
+  and memory cannot be changed or read (EPERM): Darwin reaches them only
+  from inside the process.
 - **cgroup v2 and bpffs** are writable areas of the path map: the
   hierarchy holds the directories libprocessgroup creates, and no
   controller acts.

@@ -26,6 +26,7 @@ use crate::errno::{EACCES, EFAULT, EINVAL, EPERM, ESRCH};
 /// Highest capability of the kernel we present (CAP_CHECKPOINT_RESTORE).
 pub const CAP_LAST_CAP: u32 = 40;
 const CAP_FULL: u64 = (1 << (CAP_LAST_CAP + 1)) - 1;
+const CAP_KILL: u32 = 5;
 const CAP_SETGID: u32 = 6;
 const CAP_SETUID: u32 = 7;
 const CAP_SETPCAP: u32 = 8;
@@ -120,11 +121,12 @@ fn limit_text(v: u64) -> String {
 
 impl Identity {
     /// Parse the identity file format (`# aim-guest-init identity v1`).
-    /// Besides the contract's keys, `euid`, `egid` and `securebits` carry
-    /// state a process can reach on its own; unknown keys are ignored.
+    /// Besides the contract's keys, `euid`, `egid`, `suid`, `sgid` and
+    /// `securebits` carry state a process can reach on its own; unknown
+    /// keys are ignored.
     pub fn parse(text: &str) -> Result<Identity, String> {
         let mut id = Identity::default();
-        let (mut euid, mut egid) = (None, None);
+        let (mut euid, mut egid, mut suid, mut sgid) = (None, None, None, None);
         let mut caps_given = false;
         for line in text.lines() {
             if line.is_empty() || line.starts_with('#') {
@@ -137,6 +139,8 @@ impl Identity {
                 "gid" => id.gid = [num(value)? as u32; 4],
                 "euid" => euid = Some(num(value)? as u32),
                 "egid" => egid = Some(num(value)? as u32),
+                "suid" => suid = Some(num(value)? as u32),
+                "sgid" => sgid = Some(num(value)? as u32),
                 "groups" => {
                     id.groups = value
                         .split(' ')
@@ -182,6 +186,12 @@ impl Identity {
         if let Some(e) = egid {
             id.gid[1..].fill(e);
         }
+        if let Some(s) = suid {
+            id.uid[2] = s;
+        }
+        if let Some(s) = sgid {
+            id.gid[2] = s;
+        }
         if !caps_given && id.uid[1] != 0 {
             // init leaves a non-root service without a `capabilities` line
             // with no capability.
@@ -190,8 +200,8 @@ impl Identity {
         Ok(id)
     }
 
-    /// The identity file text. Saved and filesystem ids are not kept:
-    /// after exec they equal the effective ones.
+    /// The identity file text. Filesystem ids are not kept: they follow
+    /// the effective ones, as saved ids do after exec.
     pub fn to_text(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::from("# aim-guest-init identity v1\n");
@@ -203,6 +213,12 @@ impl Identity {
         }
         if self.gid[1] != self.gid[0] {
             let _ = writeln!(out, "egid\t{}", self.gid[1]);
+        }
+        if self.uid[2] != self.uid[1] {
+            let _ = writeln!(out, "suid\t{}", self.uid[2]);
+        }
+        if self.gid[2] != self.gid[1] {
+            let _ = writeln!(out, "sgid\t{}", self.gid[2]);
         }
         let groups: Vec<String> = self.groups.iter().map(u32::to_string).collect();
         let _ = writeln!(out, "groups\t{}", groups.join(" "));
@@ -327,13 +343,15 @@ fn write_entry(pid: i32, id: &Identity) {
 }
 
 /// Set this process's identity at start-up. `by_pid` is the process table
-/// directory, when the process belongs to one.
+/// directory, when the process belongs to one; its entry is written there.
 pub fn init(id: Identity, by_pid: Option<PathBuf>) {
     publish(&id);
-    *STATE.lock().unwrap() = Some(id);
     if let Some(d) = by_pid {
         let _ = BY_PID.set(d);
+        // SAFETY: trivial.
+        write_entry(unsafe { libc::getpid() }, &id);
     }
+    *STATE.lock().unwrap() = Some(id);
 }
 
 pub fn by_pid_dir() -> Option<&'static PathBuf> {
@@ -399,7 +417,6 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             .push((unsafe { libc::getpid() }, nice));
     }
     init(id, by_pid);
-    after_fork_child();
 }
 
 /// In the parent of a fork: the child's entry, before `fork` returns, so
@@ -407,13 +424,6 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
 /// child writes it again when it starts.
 pub(super) fn note_child(pid: i32) {
     write_entry(pid, &current());
-}
-
-/// In a forked child: publish the inherited identity under the new pid.
-pub(super) fn after_fork_child() {
-    let id = current();
-    // SAFETY: trivial.
-    write_entry(unsafe { libc::getpid() }, &id);
 }
 
 /// The process `pid` is gone (exited or reaped): drop its entry.
@@ -451,6 +461,43 @@ pub fn peer(pid: i32) -> PeerCred {
     let id = identity_of(pid);
     let (uid, gid) = id.map_or((0, 0), |id| (id.uid[1], id.gid[1]));
     PeerCred { pid, uid, gid }
+}
+
+/// The credentials of process `pid` of the namespace, for a permission
+/// check: a pid with no entry is root.
+fn target(pid: i32) -> Identity {
+    identity_of(pid).unwrap_or_default()
+}
+
+/// `kill_ok_by_cred` (kernel/signal.c): the caller's real or effective uid
+/// is the target's real or saved uid, or it has CAP_KILL.
+pub fn may_signal(pid: i32) -> bool {
+    let t = target(pid);
+    read(|id| {
+        id.capable(CAP_KILL)
+            || [id.uid[0], id.uid[1]]
+                .iter()
+                .any(|u| *u == t.uid[0] || *u == t.uid[2])
+    })
+}
+
+/// `set_one_prio_perm` and the scheduler's `check_same_owner`
+/// (kernel/sys.c, kernel/sched/syscalls.c): the caller's effective uid is
+/// the target's real or effective uid, or it has CAP_SYS_NICE.
+pub fn may_renice(pid: i32) -> bool {
+    let t = target(pid);
+    read(|id| id.capable(CAP_SYS_NICE) || id.uid[1] == t.uid[0] || id.uid[1] == t.uid[1])
+}
+
+/// `check_prlimit_permission` (kernel/sys.c): the caller's real uid and
+/// gid are each of the target's real, effective and saved ids, or it has
+/// CAP_SYS_RESOURCE.
+fn may_prlimit(t: &Identity) -> bool {
+    read(|id| {
+        id.capable(CAP_SYS_RESOURCE)
+            || (t.uid[..3].iter().all(|&u| u == id.uid[0])
+                && t.gid[..3].iter().all(|&g| g == id.gid[0]))
+    })
 }
 
 /// The credential lines of `/proc/self/status`.
@@ -826,9 +873,9 @@ pub fn prctl(a: [u64; 6]) -> Option<i64> {
     Some(r)
 }
 
-/// getrlimit (163), setrlimit (164) and prlimit64 (261) on this process:
-/// limits set by init or the guest are reported as set; the others are the
-/// host's (`process::prlimit`).
+/// getrlimit (163), setrlimit (164) and prlimit64 (261): limits set by
+/// init or the guest are reported as set; the others are the host's
+/// (`process::prlimit`), which every guest process inherits.
 pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
     let (pid, res, new, old) = match nr {
         163 => (0, a[0], 0, a[1]),
@@ -844,8 +891,11 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
     {
         return -(EFAULT as i64);
     }
-    if !is_self(pid) || res as usize >= RLIM_NLIMITS {
-        return super::process::prlimit(261, [pid as u64, res, new, old, 0, 0]);
+    if !is_self(pid) {
+        return prlimit_other(pid, res, new, old);
+    }
+    if res as usize >= RLIM_NLIMITS {
+        return super::process::prlimit(261, [0, res, new, old, 0, 0]);
     }
     let res_i = res as usize;
     let current = match read(|id| id.rlimits[res_i]) {
@@ -881,6 +931,42 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
     if old != 0 {
         // SAFETY: guest struct rlimit64.
         unsafe { (old as *mut [u64; 2]).write_unaligned([current.0, current.1]) };
+    }
+    0
+}
+
+/// prlimit64 on another process of the namespace, with
+/// `check_prlimit_permission`: its limits as its table entry records them.
+/// Darwin changes a process's limits only from inside it, so a new limit
+/// for another process is refused (EPERM).
+fn prlimit_other(pid: i32, res: u64, new: u64, old: u64) -> i64 {
+    if let Err(e) = super::pidns::check(pid) {
+        return e;
+    }
+    let t = target(pid);
+    if !may_prlimit(&t) {
+        return -(EPERM as i64);
+    }
+    if res as usize >= RLIM_NLIMITS {
+        return -(EINVAL as i64);
+    }
+    if new != 0 {
+        return -(EPERM as i64);
+    }
+    if old != 0 {
+        let limit = match t.rlimits[res as usize] {
+            Some(l) => [l.0, l.1],
+            None => {
+                let mut l = [0u64; 2];
+                let r = super::process::prlimit(261, [0, res, 0, l.as_mut_ptr() as u64, 0, 0]);
+                if r < 0 {
+                    return r;
+                }
+                l
+            }
+        };
+        // SAFETY: guest struct rlimit64.
+        unsafe { (old as *mut [u64; 2]).write_unaligned(limit) };
     }
     0
 }
@@ -1025,6 +1111,20 @@ fn nice_changed(tid: i32, nice: i32) {
     }
 }
 
+/// `set_one_prio`'s checks for another process `p`: the owner rule, then
+/// a lower nice value needs CAP_SYS_NICE or `p`'s RLIMIT_NICE.
+fn may_set_prio(p: i32, nice: i32) -> Result<(), i64> {
+    super::pidns::check(p)?;
+    if !may_renice(p) {
+        return Err(-(EPERM as i64));
+    }
+    let limit = target(p).rlimits[RLIMIT_NICE].map_or(u64::MAX, |l| l.0);
+    if nice < process_nice(p)? && !capable(CAP_SYS_NICE) && (20 - nice) as u64 > limit {
+        return Err(-(EACCES as i64));
+    }
+    Ok(())
+}
+
 /// setpriority (140). The calling thread's nice value also sets its host
 /// QoS (`process::host_qos`).
 pub fn setpriority(a: [u64; 6]) -> i64 {
@@ -1048,6 +1148,11 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
         return err;
     }
     let (who, foreign) = prio_who(&a);
+    if (foreign || (a[0] == PRIO_PROCESS && !is_self(who as i32) && other_thread(who).is_none()))
+        && let Err(e) = may_set_prio(who as i32, nice)
+    {
+        return e;
+    }
     if foreign {
         // Accepted for a live process; not kept.
         let r = getpriority([PRIO_PROCESS, who, 0, 0, 0, 0]);
@@ -1117,6 +1222,10 @@ mod tests {
         let mut split = id.clone();
         split.uid = [1000, 0, 0, 0];
         split.securebits = SECBIT_KEEP_CAPS;
+        assert_eq!(Identity::parse(&split.to_text()).unwrap(), split);
+        // A saved id other than the effective one, as kill(2) checks it.
+        split.uid = [10060, 10060, 10050, 10060];
+        split.gid = [10060, 0, 10050, 0];
         assert_eq!(Identity::parse(&split.to_text()).unwrap(), split);
     }
 

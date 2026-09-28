@@ -269,12 +269,16 @@ fn free_memory() -> u64 {
 }
 
 /// sysinfo (179): Linux arm64 `struct sysinfo` (112 bytes, mem_unit 1).
+/// `procs` counts the processes of the guest's pid namespace.
 pub fn sysinfo(a: [u64; 6]) -> i64 {
     let mut load = [0f64; 3];
     // SAFETY: local buffer.
     unsafe { libc::getloadavg(load.as_mut_ptr(), 3) };
-    // SAFETY: counting pids.
-    let procs = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) }.max(0);
+    let procs = match super::pidns::members() {
+        Some(m) => m.len() as i32,
+        // SAFETY: counting pids.
+        None => unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) }.max(0),
+    };
     let mut w = [0u64; 14];
     w[0] = uptime().tv_sec as u64;
     for i in 0..3 {

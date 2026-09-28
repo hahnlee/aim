@@ -49,7 +49,8 @@ pub struct RunOptions<'a> {
     /// binder device nodes do not exist.
     pub binder: Option<String>,
     pub identity: sys::cred::Identity,
-    /// The process table directory (`by-pid`) the process belongs to.
+    /// The process table directory (`by-pid`) the process belongs to;
+    /// None: a new, private one (`sys/pidns.rs`).
     pub by_pid: Option<PathBuf>,
     /// State carried over the guest's last exec.
     pub state: sys::ExecState,
@@ -126,7 +127,11 @@ pub fn run(opts: RunOptions) -> String {
     {
         return e;
     }
-    sys::cred::init(opts.identity, opts.by_pid);
+    let by_pid = match opts.by_pid.map_or_else(sys::new_pid_namespace, Ok) {
+        Ok(d) => d,
+        Err(e) => return format!("pid namespace: {e}"),
+    };
+    sys::cred::init(opts.identity, Some(by_pid));
     sys::init_exec(opts.runtime_args);
     context::init_thread();
     diag::install_signal_handlers();
