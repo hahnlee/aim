@@ -19,7 +19,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use aim_host_display::input::translate::{Gesture, Phase};
+use aim_host_display::input::translate::Phase;
 use aim_host_display::wire::{self, Host as Rec, HostInput, Request, host, input};
 use aim_hostcall::display::{Connect, Window as Record, mode, window};
 
@@ -73,7 +73,8 @@ pub fn restack() {
     });
 }
 
-fn input(i: HostInput) {
+/// An input event of this host's windows, for the server's devices.
+pub fn input(i: HostInput) {
     send(&Rec {
         op: host::INPUT,
         input: i,
@@ -94,83 +95,6 @@ pub fn touch(task: i32, phase: Phase, x: f64, y: f64, area: [i32; 4], t: i64) {
         x,
         y,
         area,
-        time_ns: t,
-        ..Default::default()
-    });
-}
-
-pub fn key(mac: u16, down: bool, t: i64) {
-    input(HostInput {
-        kind: input::KEY,
-        code: mac as u32,
-        down: down as u32,
-        time_ns: t,
-        ..Default::default()
-    });
-}
-
-/// Cmd+[ as the server's `back_shortcut` takes it; whether it was.
-pub fn back_shortcut(mac: u16, down: bool, command: bool, t: i64) -> bool {
-    input(HostInput {
-        kind: input::BACK_SHORTCUT,
-        code: mac as u32,
-        down: down as u32,
-        flags: command as u64,
-        time_ns: t,
-        ..Default::default()
-    });
-    // As `Input::back_shortcut` decides.
-    mac == 0x21 && command
-}
-
-pub fn flags_changed(mac: u16, flags: u64, t: i64) {
-    input(HostInput {
-        kind: input::FLAGS,
-        code: mac as u32,
-        flags,
-        time_ns: t,
-        ..Default::default()
-    });
-}
-
-pub fn scroll(dy: f64, precise: bool, t: i64) {
-    input(HostInput {
-        kind: input::SCROLL,
-        y: dy,
-        down: precise as u32,
-        time_ns: t,
-        ..Default::default()
-    });
-}
-
-pub fn swipe(g: Gesture, dx: f64, dy: f64, t: i64) {
-    let code = match g {
-        Gesture::Began => 0,
-        Gesture::Changed => 1,
-        Gesture::Ended => 2,
-    };
-    input(HostInput {
-        kind: input::SWIPE,
-        code,
-        x: dx,
-        y: dy,
-        time_ns: t,
-        ..Default::default()
-    });
-}
-
-pub fn back(down: bool, t: i64) {
-    input(HostInput {
-        kind: input::BACK,
-        down: down as u32,
-        time_ns: t,
-        ..Default::default()
-    });
-}
-
-pub fn release_all(t: i64) {
-    input(HostInput {
-        kind: input::RELEASE_ALL,
         time_ns: t,
         ..Default::default()
     });

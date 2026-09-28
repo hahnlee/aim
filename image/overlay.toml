@@ -362,9 +362,9 @@ source = "image/vendor/usr/idc/aim-keyboard.idc"
 reason = "the Mac's keyboard as the built-in keyboard"
 
 [[add]]
-path = "/vendor/usr/idc/aim-wheel.idc"
-source = "image/vendor/usr/idc/aim-wheel.idc"
-reason = "wheel and trackpad scrolling as a rotary encoder"
+path = "/vendor/usr/idc/aim-mouse.idc"
+source = "image/vendor/usr/idc/aim-mouse.idc"
+reason = "the Mac's pointer as an absolute mouse: hover, buttons, scrolling"
 
 # The emulator's vendor HALs. The goldfish/ranchu ones talk to QEMU (pipes,
 # virtio consoles, the emulator's host services) and the examples fake

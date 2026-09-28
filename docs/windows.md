@@ -137,19 +137,33 @@ server's mode:
 ## Back
 
 The window chrome has no Back button (user's decision, #294). Back is the
-keyboard's `KEY_BACK` (`Generic.kl`: BACK):
+keyboard's `KEY_BACK` (`Generic.kl`: BACK), or the mouse's back button:
 
 - **Cmd+[**, the macOS Back shortcut. AppKit sends no key up while Command
   is held, so the key down presses and releases Back.
-- **The mouse's back button** (button 4).
+- **The mouse's back button** (button 4): the mouse's `BTN_SIDE`, which
+  Android turns into Back ([input.md](input.md)).
 - **A two-finger swipe to the right** of 80 points, mostly sideways, when
-  the Mac's "Swipe between pages" is on: once per gesture.
+  the Mac's "Swipe between pages" is on: once per gesture. A gesture whose
+  first 8 points go mostly right is the swipe and does not scroll the
+  content horizontally (nor does its momentum); any other gesture scrolls.
 - **Esc** goes out as Esc (`KEY_ESC`), for the apps and games that use it.
   Android 16 does **not** turn an unhandled Esc into Back: its
   `PhoneWindowManager`/`KeyGestureController` intercept an unhandled Esc to
   close system dialogs before the `Generic.kcm` fallback (ESCAPE → BACK)
-  applies. Android's own Meta+Esc and Meta+Left are Back, so Cmd+Esc and
-  Cmd+Left are too.
+  applies. Command is Android's Ctrl ([input.md](input.md)), so Cmd+Esc and
+  Cmd+Left are not Android's Meta+Esc and Meta+Left (Back): Cmd+Left is
+  Home, as in a Mac text field.
+
+## Shortcuts
+
+Command is the shortcut key and Android's Ctrl ([input.md](input.md)),
+except for the window's own:
+
+- **Cmd+W** closes the window, which removes its task.
+- **Cmd+Q** quits the app: in a shim, the shim quits, closing its app's
+  tasks; in the server's own windows, every window of the key window's
+  package closes.
 
 The first window of a run shows a hint at its bottom ("Swipe with two
 fingers or press ⌘[ to go back") until it is dismissed once; the dismissal

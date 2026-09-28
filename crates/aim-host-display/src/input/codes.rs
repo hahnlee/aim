@@ -13,18 +13,41 @@ pub const EV_REP: u16 = 0x14;
 pub const EV_FF: u16 = 0x15;
 pub const EV_MAX: u16 = 0x1f;
 
+pub const EV_CNT: usize = EV_MAX as usize + 1;
+
 pub const SYN_REPORT: u16 = 0;
 pub const SYN_DROPPED: u16 = 3;
 
+pub const KEY_RESERVED: u16 = 0;
+pub const KEY_ESC: u16 = 1;
+pub const KEY_BACKSPACE: u16 = 14;
+pub const KEY_LEFTCTRL: u16 = 29;
+pub const KEY_HOME: u16 = 102;
+pub const KEY_UP: u16 = 103;
+pub const KEY_LEFT: u16 = 105;
+pub const KEY_RIGHT: u16 = 106;
+pub const KEY_END: u16 = 107;
+pub const KEY_DOWN: u16 = 108;
+pub const KEY_LEFTMETA: u16 = 125;
+pub const KEY_RIGHTMETA: u16 = 126;
 pub const KEY_BACK: u16 = 158;
 pub const KEY_MAX: u16 = 0x2ff;
+pub const BTN_RIGHT: u16 = 0x111;
+pub const BTN_MIDDLE: u16 = 0x112;
+pub const BTN_SIDE: u16 = 0x113;
+pub const BTN_EXTRA: u16 = 0x114;
+pub const BTN_TOOL_MOUSE: u16 = 0x146;
 pub const BTN_TOUCH: u16 = 0x14a;
 pub const KEY_FN: u16 = 0x1d0;
 
+pub const REL_HWHEEL: u16 = 0x06;
 pub const REL_WHEEL: u16 = 0x08;
 pub const REL_WHEEL_HI_RES: u16 = 0x0b;
+pub const REL_HWHEEL_HI_RES: u16 = 0x0c;
 pub const REL_MAX: u16 = 0x0f;
 
+pub const ABS_X: u16 = 0x00;
+pub const ABS_Y: u16 = 0x01;
 pub const ABS_MAX: u16 = 0x3f;
 pub const ABS_CNT: usize = ABS_MAX as usize + 1;
 pub const ABS_MT_SLOT: u16 = 0x2f;
@@ -44,6 +67,7 @@ pub const LED_MAX: u16 = 0x0f;
 pub const SND_MAX: u16 = 0x07;
 pub const FF_MAX: u16 = 0x7f;
 
+pub const INPUT_PROP_POINTER: u16 = 0x00;
 pub const INPUT_PROP_DIRECT: u16 = 0x01;
 pub const INPUT_PROP_MAX: u16 = 0x1f;
 

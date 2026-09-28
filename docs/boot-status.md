@@ -348,7 +348,7 @@ a shell, and other target directories' binaries, were not affected; by
   To confirm: a boot, then `am start` of Contacts (acore) or the launcher
   with no `CANTOPEN` / "Ignoring missing CE app data dir" in logcat, and
   `ls -ln /data/user/0/<pkg>` from `run-as` (or the app) showing its uid;
-- #235 evdev fds across exec; #236 the ART codegen behind the null-page
+- #236 the ART codegen behind the null-page
   faults; #237 audio retries after the null sink; #232 the security agent.
 
 
@@ -604,7 +604,7 @@ tasks. On an M2 Pro with other agents' boots loading the host (load average
 | Raising a window | `mCurrentFocus` becomes its task |
 | Resize (Accessibility, 412×756 to 640×820 points) | the task's bounds 1280×1592 pixels; Chrome lays out for the width |
 | Move | the task moves with the window |
-| Cmd+[, mouse button 4, two-finger swipe right | `KEY_BACK`; SubSettings back to Settings each time |
+| Cmd+[, mouse button 4, two-finger swipe right | Back (`KEY_BACK`; button 4 is now the mouse's `BTN_SIDE`); SubSettings back to Settings each time |
 | Esc | `KEY_ESC` reaches the app; no Back (Android 16 closes system dialogs instead) |
 | A task restored from recents at boot | no window |
 
@@ -623,3 +623,23 @@ Settings.app and Chrome.app started each app in its own process with its
 name and icon in the Dock; a click in the Calculator shim's window, behind
 Chrome's, focused its task and typed 7, and keys typed 5 5. `pm uninstall`
 of Calculator removed its shim, and `pm install` wrote it again.
+
+## Pointer, scrolling and shortcuts (2026-09-29, #214, #288)
+
+A window-mode boot of the derived image with the mouse device
+([input.md](input.md)); the input went through the server's path for a
+window host's records (`hosts::apply`, the calls `aim-display`'s AppKit
+handlers make), not through posted AppKit events.
+
+| Check | Result |
+| --- | --- |
+| `dumpsys input` | `aim-mouse`: classes `TOUCH`, Touch Input Mapper in `POINTER` mode, sources `MOUSE`, X 0–3839 and Y 0–2351, `VSCROLL` and `HSCROLL`; `disable_touch_input_mapper_pointer_usage` unset (the pointer-usage path) |
+| Hover over Settings | the row under the pointer highlights |
+| 15 trackpad deltas of 40 pixels up | Settings scrolls; `getevent -lt`: `REL_WHEEL_HI_RES` −37/−38 each, a whole `REL_WHEEL` −1 every third |
+| A diagonal gesture up and left (20 and 40 pixels per event) | both axes: `REL_WHEEL_HI_RES` −18/−19 and `REL_HWHEEL_HI_RES` +37/+38 per event, its first 8 points' horizontal part sent once decided |
+| Right click in the Settings search field | the text field's context menu (undo, select all, autofill) |
+| Typing, Cmd+A, Cmd+C, Right, Cmd+V | `KEY_LEFTCTRL` around `KEY_A`, `KEY_C`, `KEY_V`; the field reads "ifiifi" |
+| Pinch out with rotation (12 steps of +5 % and 3°) | Pointer location shows two pointers spreading along arcs |
+| A two-finger swipe right, then momentum | `KEY_BACK` down/up only, no `REL_HWHEEL`; SearchActivity back to Settings |
+| The pointer sprite | `CURSOR` in SurfaceFlinger's HWC layers; absent from the presented frame (the display server's capture), present in `screencap` |
+

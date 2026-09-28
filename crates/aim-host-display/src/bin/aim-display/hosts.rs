@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use aim_host_display::input::translate::{Gesture, Phase};
+use aim_host_display::input::translate::{Button, Gesture, Phase, Scroll, Twist};
 use aim_host_display::wire::{self, Host as Rec, HostInput, host, input};
 use aim_hostcall::display::{Window as Record, window};
 
@@ -243,13 +243,20 @@ fn request(r: Record) {
     }
 }
 
-/// A host's input event, into the server's devices.
-fn apply(i: HostInput) {
+/// An input event, into the server's devices: a window host's, or one of
+/// the server's own windows'. Touches wait for their task
+/// (`windows::touch`), on the main thread.
+pub fn apply(i: HostInput) {
     let Some(input) = crate::input::input() else {
         return;
     };
     let t = i.time_ns;
     let down = i.down != 0;
+    let gesture = |g: u32| match g {
+        0 => Gesture::Began,
+        1 => Gesture::Changed,
+        _ => Gesture::Ended,
+    };
     match i.kind {
         input::TOUCH => {
             let phase = match i.code {
@@ -259,22 +266,37 @@ fn apply(i: HostInput) {
             };
             on_main(move || crate::windows::touch(i.task, phase, i.x, i.y, i.area, t));
         }
-        input::KEY => input.key(i.code as u16, down, false, t),
-        input::BACK_SHORTCUT => {
-            input.back_shortcut(i.code as u16, down, i.flags != 0, t);
-        }
+        input::KEY => input.key(i.code as u16, down, i.down == 2, i.flags, t),
+        input::HOVER => input.hover(i.x, i.y, t),
         input::FLAGS => input.flags_changed(i.code as u16, i.flags, t),
-        input::SCROLL => input.scroll(i.y, down, t),
-        input::SWIPE => {
-            let g = match i.code {
-                0 => Gesture::Began,
-                1 => Gesture::Changed,
-                _ => Gesture::Ended,
-            };
-            input.swipe(g, i.x, i.y, t);
+        input::SCROLL => input.scroll(
+            Scroll {
+                x: i.x,
+                y: i.y,
+                dx: i.dx,
+                dy: i.dy,
+                precise: i.code & 1 != 0,
+                momentum: i.code & 2 != 0,
+                swipe: (i.down > 0).then(|| (gesture(i.down - 1), i.sx, i.sy)),
+            },
+            t,
+        ),
+        input::LEAVE => input.leave(t),
+        input::BUTTON => {
+            let buttons = [Button::Right, Button::Middle, Button::Back, Button::Forward];
+            if let Some(&b) = buttons.get(i.code as usize) {
+                input.button(b, down, i.x, i.y, t);
+            }
         }
-        input::BACK => input.back(down, t),
         input::RELEASE_ALL => input.release_all(t),
+        input::TWIST => {
+            let twist = if i.code == 0 {
+                Twist::Magnify(i.dx)
+            } else {
+                Twist::Rotate(i.dx)
+            };
+            input.twist(twist, gesture(i.down), i.x, i.y, i.area, t);
+        }
         _ => {}
     }
 }
