@@ -446,7 +446,7 @@ and frame times (#239).
 | P2 | The ART exception (rebuilt libart, regenerated boot image) runs Java | reached |
 | P3 | The original SystemServer boots (`sys.boot_completed`) with no HALs declared | reached 2026-09-28 (with the HALs declared; 25 s first boot, 50 s with the spawned fork, #239) |
 | P4 | allocator/mapper and composer HALs plus ANGLE/MoltenVK: SurfaceFlinger in a macOS window, one app draws | reached 2026-09-28: Settings draws in the window and takes injected taps |
-| P5 | Input, audio, power/health, sensors and camera HALs | input, audio, health, thermal, sensors, Bluetooth and GNSS verified at app level 2026-09-28; camera open |
+| P5 | Input, audio, power/health, sensors and camera HALs | input, audio, health, thermal, sensors, Bluetooth and GNSS verified at app level 2026-09-28; camera verified through cameraserver with an NDK Camera2 client 2026-09-28 (test pattern: camera access not yet granted, lid closed; the Camera2 app's preview stays black) |
 | P6 | Parity with the current runtime; switch and delete the old stack | |
 
 ## Appendix: what we implement, and where
@@ -490,7 +490,10 @@ allocator/mapper (memfd buffers the host imports into Metal without
 copying) and composer (Metal, AppKit), audio (audio.core V3 on CoreAudio
 through a lock-free ring the render callback never waits on; the original
 audioserver loads it, [audio.md](../audio.md)),
-camera (AVFoundation), sensors (ambient light and lid angle, IOKit HID),
+camera (provider V1: one LIMITED device per Mac camera, frames from
+AVFoundation converted into the stream buffers by the host module, a test
+pattern while macOS withholds access, [camera.md](../camera.md)), sensors
+(ambient light and lid angle, IOKit HID),
 health (IOKit), thermal (`NSProcessInfo` thermal state, HID temperatures),
 GNSS (CoreLocation fixes, no raw measurements), and Codec2 over
 VideoToolbox (a performance exception; the original software codecs also

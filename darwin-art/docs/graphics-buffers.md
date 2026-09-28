@@ -104,7 +104,7 @@ plane is a pure function of (format, width, height, stride) in
 | `RGBA_FP16` (0x16) | 4 × half float | `RGBA16Float` |
 | `RGBA_1010102` (0x2b) | 32 bits, R in the low 10 | `RGB10A2Unorm` |
 | `R_8` (0x38) | 1 byte | `R8Unorm` |
-| `BLOB` (0x21) | width bytes, height 1 | none (data buffer) |
+| `BLOB` (0x21) | width bytes (any width), height 1 | none (data buffer) |
 | `YCBCR_420_888` (0x23) | NV12: Y plane, then interleaved Cb Cr at half resolution | none yet |
 | `YCRCB_420_SP` (0x11) | NV21: Y plane, then interleaved Cr Cb | none yet |
 | `YV12` (0x32315659) | Y, then Cr, then Cb; chroma stride `align(stride / 2, 16)` | none yet |

@@ -204,6 +204,24 @@ path = "/vendor/etc/vintf/manifest/android.hardware.bluetooth-service.darwin.xml
 source = "hal/bluetooth/android.hardware.bluetooth-service.darwin.xml"
 reason = "declares android.hardware.bluetooth.IBluetoothHci/default V1"
 
+# The camera provider (docs/camera.md): one LIMITED device per Mac camera
+# over AVFoundation, a test pattern without camera access. Replaces the
+# emulator's QEMU cameras, removed below.
+[[add]]
+path = "/vendor/bin/hw/android.hardware.camera.provider-service.darwin"
+source = "_build/vendor-hals/bin/android.hardware.camera.provider-service.darwin"
+reason = "camera provider HAL service (Rust, AIDL V1) streaming the Mac's cameras through the AVFoundation host module via host-call"
+
+[[add]]
+path = "/vendor/etc/init/android.hardware.camera.provider-service.darwin.rc"
+source = "hal/camera/android.hardware.camera.provider-service.darwin.rc"
+reason = "starts the camera provider HAL"
+
+[[add]]
+path = "/vendor/etc/vintf/manifest/android.hardware.camera.provider-service.darwin.xml"
+source = "hal/camera/android.hardware.camera.provider-service.darwin.xml"
+reason = "declares android.hardware.camera.provider.ICameraProvider/internal/0 V1"
+
 # Graphics buffers (docs/graphics-buffers.md): IAllocator/default V2 and the
 # stable-C mapper `darwin`, memfd-backed buffers the host GPU imports. Built
 # by tools/build-vendor-hals.sh.
@@ -328,8 +346,8 @@ reason = "wheel and trackpad scrolling as a rotary encoder"
 # virtio consoles, the emulator's host services) and the examples fake
 # hardware, neither of which a Mac provides. Their `.rc` and vintf fragment
 # go, so the instance is undeclared and the original services take their
-# no-HAL paths; a HAL we replace later (composer, audio, camera, bluetooth)
-# is added back with its own fragment. The allocator, mapper, GLES driver,
+# no-HAL paths; a HAL we replace (composer, audio, camera, bluetooth) is
+# added back with its own fragment. The allocator, mapper, GLES driver,
 # sensors and GNSS are replaced above. The binaries stay:
 # nothing starts them. Kept, being software with no hardware behind it:
 # ClearKey DRM, the software KeyMint (with secure clock and shared secret),
@@ -385,6 +403,22 @@ reason = "Google's emulated camera provider also needs QEMU's camera pipes"
 [[remove]]
 path = "/vendor/etc/vintf/manifest/android.hardware.camera.provider@2.7-service-google.xml"
 reason = "declares the removed Google camera provider"
+
+[[remove]]
+path = "/vendor/etc/permissions/android.hardware.camera.full.prebuilt.xml"
+reason = "claims a FULL camera with manual sensor and post-processing control; a Mac camera is LIMITED (docs/camera.md)"
+
+[[remove]]
+path = "/vendor/etc/permissions/android.hardware.camera.raw.prebuilt.xml"
+reason = "claims RAW capture, which AVFoundation does not give a Mac camera"
+
+[[remove]]
+path = "/vendor/etc/permissions/android.hardware.camera.flash-autofocus.prebuilt.xml"
+reason = "claims a flash and autofocus control, which a Mac camera does not have"
+
+[[remove]]
+path = "/vendor/etc/permissions/android.hardware.camera.concurrent.prebuilt.xml"
+reason = "claims concurrent cameras; the camera provider offers no concurrent combinations"
 
 [[remove]]
 path = "/vendor/etc/init/android.hardware.gnss-service.ranchu.rc"

@@ -20,6 +20,7 @@ members = [
     "crates/darwin-binder-host",
     "crates/darwin-host-audio",
     "crates/darwin-host-bluetooth",
+    "crates/darwin-host-camera",
     "crates/darwin-host-display",
     "crates/darwin-host-gpu",
     "crates/darwin-host-health",

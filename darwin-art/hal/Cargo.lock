@@ -82,6 +82,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "android_hardware_camera_common"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "binder",
+ "static_assertions",
+]
+
+[[package]]
+name = "android_hardware_camera_device"
+version = "1.0.0"
+dependencies = [
+ "android_hardware_camera_common",
+ "android_hardware_camera_metadata",
+ "android_hardware_common",
+ "android_hardware_common_fmq",
+ "android_hardware_graphics_common",
+ "async-trait",
+ "binder",
+ "static_assertions",
+]
+
+[[package]]
+name = "android_hardware_camera_metadata"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "binder",
+ "static_assertions",
+]
+
+[[package]]
+name = "android_hardware_camera_provider"
+version = "1.0.0"
+dependencies = [
+ "android_hardware_camera_common",
+ "android_hardware_camera_device",
+ "async-trait",
+ "binder",
+ "static_assertions",
+]
+
+[[package]]
 name = "android_hardware_common"
 version = "2.0.0"
 dependencies = [
@@ -310,6 +353,32 @@ version = "0.1.0"
 dependencies = [
  "android_hardware_bluetooth",
  "binder",
+]
+
+[[package]]
+name = "camera"
+version = "0.1.0"
+dependencies = [
+ "android_hardware_camera_common",
+ "android_hardware_camera_device",
+ "android_hardware_camera_metadata",
+ "android_hardware_camera_provider",
+ "android_hardware_common",
+ "android_hardware_common_fmq",
+ "android_hardware_graphics_common",
+ "binder",
+ "darwin-gralloc",
+ "darwin-hostcall",
+ "libc",
+ "log",
+]
+
+[[package]]
+name = "camera-client"
+version = "0.1.0"
+dependencies = [
+ "binder",
+ "libc",
 ]
 
 [[package]]

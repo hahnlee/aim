@@ -35,6 +35,7 @@ static MODULES: &[&HostModule] = &[
     &darwin_host_location::MODULE,
     &darwin_host_audio::MODULE,
     &darwin_host_bluetooth::MODULE,
+    &darwin_host_camera::MODULE,
 ];
 
 const _: () = {
@@ -100,6 +101,10 @@ mod tests {
         assert_eq!(
             call(module::BLUETOOTH as u64, 0, 0, 0),
             darwin_hostcall::bluetooth::VERSION as i64
+        );
+        assert_eq!(
+            call(module::CAMERA as u64, 0, 0, 0),
+            darwin_hostcall::camera::VERSION as i64
         );
     }
 }
