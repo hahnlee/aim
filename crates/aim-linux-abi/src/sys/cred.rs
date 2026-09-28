@@ -828,6 +828,15 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
         164 => (0, a[0], a[1], 0),
         _ => (a[0] as i32, a[1], a[2], a[3]),
     };
+    // The kernel copies in and out with EFAULT: Chromium's
+    // `AssertMemoryIsReadOnly` passes read-only memory as `old` and expects
+    // it (base/memory/protected_memory_posix.cc).
+    const RLIMIT_SIZE: u64 = 16;
+    if (new != 0 && !super::vmmap::accessible(new, RLIMIT_SIZE, libc::VM_PROT_READ as u32))
+        || (old != 0 && !super::vmmap::accessible(old, RLIMIT_SIZE, libc::VM_PROT_WRITE as u32))
+    {
+        return -(EFAULT as i64);
+    }
     if !is_self(pid) || res as usize >= RLIM_NLIMITS {
         return super::process::prlimit(261, [pid as u64, res, new, old, 0, 0]);
     }
@@ -1038,5 +1047,58 @@ mod tests {
         };
         root.exec_transform();
         assert_eq!((root.cap_eff, root.cap_perm), (0xff, 0xff));
+    }
+
+    #[test]
+    fn prlimit_answers_efault_for_memory_it_cannot_copy() {
+        const RLIMIT_NPROC: u64 = 6;
+        let page = 16384;
+        // SAFETY: two fresh anonymous pages, unmapped below.
+        let p = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                2 * page,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(p, libc::MAP_FAILED);
+        let at = p as u64;
+        assert_eq!(prlimit(163, [RLIMIT_NPROC, at, 0, 0, 0, 0]), 0);
+        // SAFETY: our page.
+        let [soft, hard] = unsafe { (p as *const [u64; 2]).read() };
+        assert!(soft <= hard);
+        // A write that would straddle into an inaccessible page, and a
+        // read-only page (Chromium's AssertMemoryIsReadOnly).
+        // SAFETY: our second page.
+        assert_eq!(
+            unsafe { libc::mprotect(p.byte_add(page), page, libc::PROT_NONE) },
+            0
+        );
+        let end = at + page as u64 - 8;
+        assert_eq!(
+            prlimit(163, [RLIMIT_NPROC, end, 0, 0, 0, 0]),
+            -(EFAULT as i64)
+        );
+        // SAFETY: our page.
+        assert_eq!(unsafe { libc::mprotect(p, page, libc::PROT_READ) }, 0);
+        assert_eq!(
+            prlimit(163, [RLIMIT_NPROC, at, 0, 0, 0, 0]),
+            -(EFAULT as i64)
+        );
+        assert_eq!(
+            prlimit(261, [0, RLIMIT_NPROC, 0, at, 0, 0]),
+            -(EFAULT as i64)
+        );
+        // Reading the new limit from it is fine; an unmapped one is not.
+        assert_eq!(prlimit(164, [RLIMIT_NPROC, at, 0, 0, 0, 0]), 0);
+        // SAFETY: our page.
+        assert_eq!(unsafe { libc::munmap(p, 2 * page) }, 0);
+        assert_eq!(
+            prlimit(164, [RLIMIT_NPROC, at, 0, 0, 0, 0]),
+            -(EFAULT as i64)
+        );
     }
 }

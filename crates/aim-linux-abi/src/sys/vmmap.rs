@@ -102,6 +102,23 @@ pub fn info_at(addr: u64) -> Option<Info> {
     })
 }
 
+/// Whether all of `[addr, addr + len)` is mapped with every bit of `prot`
+/// (Darwin VM_PROT), as `copy_to_user` and `copy_from_user` would find it.
+/// A call that would otherwise fault in the layer answers EFAULT instead.
+pub fn accessible(addr: u64, len: u64, prot: u32) -> bool {
+    let Some(end) = addr.checked_add(len) else {
+        return false;
+    };
+    let mut at = addr;
+    while at < end {
+        match info_at(at) {
+            Some(r) if r.start <= at && r.prot & prot == prot => at = r.end,
+            _ => return false,
+        }
+    }
+    true
+}
+
 fn entry_info(addr: u64) -> Option<ProcRegionWithPathInfo> {
     let mut r: ProcRegionWithPathInfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<ProcRegionWithPathInfo>() as i32;

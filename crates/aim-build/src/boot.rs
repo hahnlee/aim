@@ -1,11 +1,14 @@
 //! `cargo aim boot`: the boot of docs/boot-status.md on what `cargo aim
 //! build` built: aim-display owns the window, guest-init boots the derived
 //! image with ANGLE for the GPU. The data directory defaults to
-//! `target/aim/boot/data` (never the user's runtime profile).
+//! `target/aim/boot/data` (never the user's runtime profile). SIGUSR1 to
+//! aim-display writes the last presented buffer to
+//! `target/aim/boot/capture.bmp`.
 
 use crate::graph::Ctx;
+use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
@@ -17,9 +20,7 @@ pub fn run(ctx: &Ctx, data: Option<&str>, extra: &[String]) -> Result<ExitCode, 
     let _ = fs::remove_file(&socket);
 
     let mut display = Command::new(ctx.workspace.host_bin("aim-display"))
-        .arg("--socket")
-        .arg(&socket)
-        .args(["--size", "1080x1920"])
+        .args(display_args(&dir))
         .spawn()
         .map_err(|e| format!("aim-display: {e}"))?;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -53,4 +54,34 @@ pub fn run(ctx: &Ctx, data: Option<&str>, extra: &[String]) -> Result<ExitCode, 
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// aim-display's arguments: its socket and capture file in `dir`.
+fn display_args(dir: &Path) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec!["--socket".into(), dir.join("display").into()];
+    args.extend(["--size", "1080x1920", "--capture"].map(OsString::from));
+    args.push(dir.join("capture.bmp").into());
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_captures_next_to_its_socket() {
+        let args = display_args(Path::new("/b"));
+        let args: Vec<_> = args.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            [
+                "--socket",
+                "/b/display",
+                "--size",
+                "1080x1920",
+                "--capture",
+                "/b/capture.bmp"
+            ]
+        );
+    }
 }
