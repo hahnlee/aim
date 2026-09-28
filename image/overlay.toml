@@ -49,7 +49,7 @@ schema = 1
 [[add]]
 path = "/vendor/etc/init/hw/init.aim.rc"
 source = "image/vendor/etc/init/hw/init.aim.rc"
-reason = "the device's init script: ro.hardware.egl, GLES version, density and mount_all"
+reason = "the device's init script: ro.hardware.egl and .vulkan, GLES version, density and mount_all"
 
 [[add]]
 path = "/vendor/etc/fstab.aim"
@@ -283,6 +283,20 @@ reason = "part of the emulator's GLES driver"
 [[remove]]
 path = "/vendor/lib64/egl/libGLESv2_emulation.so"
 reason = "part of the emulator's GLES driver"
+
+# Vulkan driver (docs/vulkan-driver.md): Vulkan forwarded to the host's
+# MoltenVK over host-call. The original libvulkan loads
+# vulkan.<ro.hardware.vulkan>.so from /vendor/lib64/hw; init.aim.rc sets
+# ro.hardware.vulkan to `aim`.
+
+[[add]]
+path = "/vendor/lib64/hw/vulkan.aim.so"
+source = "target/aim/hal/lib/vulkan.aim.so"
+reason = "the device's Vulkan driver: thunks to MoltenVK (Metal) on the host"
+
+[[remove]]
+path = "/vendor/lib64/hw/vulkan.ranchu.so"
+reason = "the emulator's Vulkan driver streams to the emulator host (gfxstream); ours is vulkan.aim.so"
 
 # Composer (docs/composer.md): IComposer/default V4, one display shown in a
 # macOS window by the display server, reached over the host-call module

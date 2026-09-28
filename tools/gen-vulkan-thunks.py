@@ -43,7 +43,7 @@ WITHHELD_INSTANCE = [
     # Callbacks into guest code, which host code never makes.
     "VK_EXT_debug_report", "VK_EXT_debug_utils",
     # MoltenVK's own configuration, which is ours to set.
-    "VK_EXT_layer_settings",
+    "VK_EXT_layer_settings", "VK_MVK_moltenvk",
 ]
 WITHHELD_DEVICE = [
     # Window-system integration (see above).

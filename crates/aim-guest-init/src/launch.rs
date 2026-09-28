@@ -86,6 +86,7 @@ pub struct LinuxRunOptions {
     pub binder: bool,
     pub seclabel: bool,
     pub gpu: bool,
+    pub vulkan: bool,
     pub display: bool,
     /// `--stdio-null`: the service's stdio is /dev/null, as init gives it,
     /// and only the layer's messages reach the log.
@@ -101,6 +102,7 @@ impl LinuxRunOptions {
         binder: true,
         seclabel: true,
         gpu: true,
+        vulkan: true,
         display: true,
         stdio_null: true,
     };
@@ -123,6 +125,7 @@ impl LinuxRunOptions {
             binder: usage.contains("--binder"),
             seclabel: usage.contains("--seclabel"),
             gpu: usage.contains("--gpu"),
+            vulkan: usage.contains("--vulkan"),
             display: usage.contains("--display"),
             stdio_null: usage.contains("--stdio-null"),
         }
@@ -162,9 +165,10 @@ pub struct LinuxRun {
     /// devices (docs/guest-init-contract.md, section 1).
     pub binder: Option<String>,
     /// Host devices every service may use: the host GPU libraries behind
-    /// the GLES driver and the display server behind the composer
-    /// (docs/guest-init-contract.md, section 1).
+    /// the GLES and Vulkan drivers and the display server behind the
+    /// composer (docs/guest-init-contract.md, section 1).
     pub gpu: Option<PathBuf>,
+    pub vulkan: Option<PathBuf>,
     pub display: Option<PathBuf>,
     pub trace: bool,
     pub options: LinuxRunOptions,
@@ -203,6 +207,7 @@ impl LinuxRun {
         }
         for (flag, on, value) in [
             ("--gpu", self.options.gpu, &self.gpu),
+            ("--vulkan", self.options.vulkan, &self.vulkan),
             ("--display", self.options.display, &self.display),
         ] {
             if let (true, Some(value)) = (on, value) {

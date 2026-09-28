@@ -18,7 +18,7 @@ pub const TABLE_HASH: u64 = 0xdb57ad3850b4bf59;
 pub const TABLE_LEN: usize = 272;
 
 /// Extensions of the host the driver does not offer.
-pub const WITHHELD_INSTANCE: &[&str] = &["VK_KHR_surface", "VK_KHR_get_surface_capabilities2", "VK_EXT_surface_maintenance1", "VK_KHR_surface_maintenance1", "VK_EXT_swapchain_colorspace", "VK_EXT_metal_surface", "VK_MVK_macos_surface", "VK_MVK_ios_surface", "VK_EXT_headless_surface", "VK_KHR_portability_enumeration", "VK_EXT_debug_report", "VK_EXT_debug_utils", "VK_EXT_layer_settings"];
+pub const WITHHELD_INSTANCE: &[&str] = &["VK_KHR_surface", "VK_KHR_get_surface_capabilities2", "VK_EXT_surface_maintenance1", "VK_KHR_surface_maintenance1", "VK_EXT_swapchain_colorspace", "VK_EXT_metal_surface", "VK_MVK_macos_surface", "VK_MVK_ios_surface", "VK_EXT_headless_surface", "VK_KHR_portability_enumeration", "VK_EXT_debug_report", "VK_EXT_debug_utils", "VK_EXT_layer_settings", "VK_MVK_moltenvk"];
 pub const WITHHELD_DEVICE: &[&str] = &["VK_KHR_swapchain", "VK_KHR_swapchain_mutable_format", "VK_EXT_swapchain_maintenance1", "VK_KHR_swapchain_maintenance1", "VK_KHR_present_id", "VK_KHR_present_id2", "VK_KHR_present_wait", "VK_KHR_present_wait2", "VK_KHR_incremental_present", "VK_GOOGLE_display_timing", "VK_EXT_hdr_metadata", "VK_EXT_metal_objects", "VK_EXT_external_memory_metal"];
 
 pub mod host {

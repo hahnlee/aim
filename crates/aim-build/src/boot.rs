@@ -63,6 +63,8 @@ pub fn guest_init(ctx: &Ctx, data: &Path, display: &Path) -> Command {
         .arg("--run")
         .arg("--gpu")
         .arg(aim_paths::angle())
+        .arg("--vulkan")
+        .arg(aim_paths::moltenvk())
         .arg("--display")
         .arg(display);
     command
