@@ -109,7 +109,7 @@ fn fd_link(fd: i32) -> Option<String> {
     if unsafe { libc::fstat(fd, &mut st) } < 0 {
         return None;
     }
-    if let Some(n) = super::memfd::link_name(st.st_dev as u32 as u64, st.st_ino) {
+    if let Some(n) = super::memfd::fd_link(fd, &st) {
         return Some(n);
     }
     if let Some(n) = super::ashmem::link_name(&st) {
@@ -403,7 +403,7 @@ fn maps() -> String {
             offset = r.offset;
             dev = *d;
             ino = *i;
-            name = super::memfd::link_name(*d, *i)
+            name = super::memfd::link_name(path, *d, *i)
                 .or_else(|| crate::xrt::original_guest_path_of_host(path))
                 .or_else(|| vfs::guest_path_of_host(path))
                 .unwrap_or_else(|| path.display().to_string());
@@ -1243,6 +1243,9 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
     {
         if fdtab::is_hidden(n) {
             return Some(-(ENOENT as i64));
+        }
+        if let Some(r) = super::memfd::reopen(n, host_flags) {
+            return Some(r);
         }
         let mut path = [0u8; libc::PATH_MAX as usize];
         // SAFETY: F_GETPATH into a local buffer; then open or dup.

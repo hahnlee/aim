@@ -510,6 +510,9 @@ pub(super) fn stat_at(dirfd: i32, path: &[u8], flags: u64) -> Result<libc::stat,
     if let Some(s) = procfs::stat(&r.guest, follow) {
         return s.map_err(|e| -(e as i64));
     }
+    if let Some(s) = super::ashmem::stat(&r.guest) {
+        return Ok(s);
+    }
     // SAFETY: host path and local stat buffer.
     if unsafe { libc::lstat(r.host.as_ptr(), &mut st) } < 0 {
         return Err(-(errno::last() as i64));
@@ -754,7 +757,7 @@ pub fn faccessat(dirfd: u64, path: u64, mode: u64, flags: u64) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
-    if super::binder::is_device(&r.guest) {
+    if super::binder::is_device(&r.guest) || super::ashmem::stat(&r.guest).is_some() {
         return 0;
     }
     if let Some(s) = procfs::stat(&r.guest, follow) {

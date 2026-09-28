@@ -194,6 +194,11 @@ fn ashmem() {
     check("t_ashmem", &[]);
 }
 
+#[test]
+fn memfd() {
+    check("t_memfd", &[]);
+}
+
 /// The evdev devices of a display server (`linux-run --display`), with
 /// KEY_A held on its keyboard.
 #[test]

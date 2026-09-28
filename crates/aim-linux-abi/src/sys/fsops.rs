@@ -373,6 +373,9 @@ pub fn fallocate(a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     if mode == FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE {
+        if memfd::write_sealed(fd) {
+            return -EPERM;
+        }
         let ph = libc::fpunchhole_t {
             fp_flags: 0,
             reserved: 0,

@@ -74,10 +74,10 @@ impl UserMemory for Guest {
     }
 
     fn installed(&mut self, fd: i32) {
-        // A received SEQPACKET or datagram socket (an InputChannel) keeps
-        // its Linux semantics.
+        // A received SEQPACKET or datagram socket (an InputChannel) or
+        // memfd keeps its Linux semantics.
         super::fdtab::on_close(fd);
-        super::net::adopt(fd);
+        super::fdtab::adopt(fd);
     }
 
     fn closed(&mut self, fd: i32) {

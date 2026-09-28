@@ -9,8 +9,9 @@
 //! `trampoline.S` sends read, write, pread, pwrite and close on them to Rust.
 //!
 //! Sockets carry a marker (the `SO_LINGER` time, meaningless while lingering
-//! is off) so a SEQPACKET or datagram socket that arrives by `SCM_RIGHTS`,
-//! across exec or from the binder driver is recognized by [`adopt`].
+//! is off), and memfds marker flags, so a SEQPACKET or datagram socket or a
+//! memfd that arrives by `SCM_RIGHTS`, across exec or from the binder driver
+//! is recognized by [`adopt`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -83,10 +84,17 @@ pub fn on_dup(old: i32, new: i32) {
     }
 }
 
-/// Give the sockets inherited across exec their Linux state.
+/// Recognize an fd that arrived from elsewhere (exec, `SCM_RIGHTS`,
+/// binder): a socket or a memfd gets its Linux state.
+pub fn adopt(fd: i32) {
+    net::adopt(fd);
+    memfd::adopt(fd);
+}
+
+/// Give the fds inherited across exec their Linux state.
 fn adopt_inherited() {
     for fd in open_fds() {
-        net::adopt(fd);
+        adopt(fd);
     }
 }
 
@@ -150,7 +158,7 @@ pub fn after_fork_child() {
     event::after_fork_child();
 }
 
-/// Set up the table for this process: recognize inherited sockets.
+/// Set up the table for this process: recognize inherited fds.
 pub fn init() {
     adopt_inherited();
 }
