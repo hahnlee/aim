@@ -197,13 +197,16 @@ simulated through the test hook (the Mac's own network untouched):
 - Network available: `Active default network: 100`, Ethernet,
   `IS_VALIDATED`, 172.30.1.49/24; `ping -c 3 www.google.com` 3/3.
 - `down`: EthernetTracker `interfaceLinkStateChanged, iface: eth0, up:
-  false`; `Active default network: none` within 4 s; ping cannot resolve.
+  false`; `Active default network: none` within 4 s; ping fails (no statistics).
 - Back: network 101, `IS_VALIDATED` within 4 s; ping 3/3.
 - Another network (10.77.1.23/24 via 10.77.1.1, DNS 1.1.1.1, 60 s lease):
   link down and up, a new DHCP lease, network 102 `IS_VALIDATED` with
   10.77.1.23/24 within 4 s; ping 3/3; DhcpClient `Renewed lease ... DHCP
   server /10.77.1.1 ... lease 60 seconds` through the virtual router.
 - The Mac's network again: network 103 `IS_VALIDATED`, 172.30.1.49/24.
+- Booted with the hook at `down`: no default network 20 s after
+  `sys.boot_completed`; emptying the hook gave network 100
+  `IS_VALIDATED` within 6 s, and ping 3/3.
 
 ## Stage 2: presenting it as Wi-Fi (#265)
 
