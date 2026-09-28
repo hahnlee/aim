@@ -137,48 +137,88 @@ are the medians of each run's p90 and p99.
 
 ## Idle CPU after boot (#328)
 
-One `cargo aim boot` of a fresh data directory at `a807c311`, 2026-09-29,
-on the shared M2 Pro (load average 7–48 during it). The host CPU of each
-guest process over 10–15 s windows (`ps` time deltas), named by the guest:
+`cargo aim boot`s of fresh data directories, 2026-09-29, on the shared
+M2 Pro (host load average 3–150 from other agents' builds and boots, so
+the numbers locate, they do not compare). The host CPU of each guest
+process over 10–20 s windows (`ps` time deltas), named by the guest:
 services by their identity file, app processes by `dumpsys activity
 processes` (another process's `/proc/<pid>/cmdline` is empty for fork
 children, #238).
 
-Two minutes after boot completion the guest used 9.6–10.8 cores: Play
-Store (`com.android.vending`, installing and dexopting) 3.1, system_server
-0.9, the launcher 0.9, servicemanager 0.7, GMS and GMS persistent 0.7,
-SurfaceFlinger 0.4, statsd 0.4, logd 0.35, the composer HAL 0.25, then
-60 processes under 0.3 each.
+At `a807c311`, two minutes after boot completion, the guest used 9.6–10.8
+cores: Play Store (installing and dexopting) 3.1, system_server 0.9, the
+launcher 0.9, servicemanager 0.7, GMS and GMS persistent 0.7, then 60
+processes under 0.4 each. Five minutes after boot it was still 7–8 cores,
+with system_server 1.6, netd 1.0 and NetworkStack 0.9 on top. What of
+that was the layer's or the device's, and what became of it:
 
-What in that is ours to fix:
+| Loop | Cost | Now |
+| --- | --- | --- |
+| eth0 went down and up about three times a second: DhcpClient's `connect` to the server reached the host, where the Mac's own DHCP client holds that address pair (EADDRINUSE), so every lease failed | system_server, netd, NetworkStack and every app's network callbacks (24 CONNECTED broadcasts in 9 s) | the connect goes to the virtual router; one lease per boot |
+| UwbService and FingerprintService waited for their removed HALs in system_server's binder threads, three times a second | binder threads, ctl.interface_start requests | the device no longer declares UWB or a fingerprint sensor |
+| traced_probes aborted about once a minute on its memory watchdog | a restart and a cleanup exec each time | `/proc` counts rss in 16 KiB pages; its watchdog had read four times its resident size |
+| GMS persistent dies every 2 s ("UsbManagerCompat is unavailable": no `usb` service) | a new process start each time, plus GMS service restarts, runtime-permission rewrites and package events | open: UsbService needs `android.hardware.usb.host`, uevent netlink sockets and a sysfs without init-made `/sys/class/android_usb` |
 
-- **Crash-restart loops.** In the first four minutes GMS persistent died
-  52 times ("UsbManagerCompat is unavailable": the device had no `usb`
-  service), each death a new process start plus restarts of GMS services,
-  runtime-permission rewrites and 1,700 BackgroundInstallControlService
-  package events; traced_probes aborted about once a minute on its memory
-  watchdog, which read four times its resident size from `/proc`; the
-  Bluetooth app aborted in `bt_stack_manage` about every 40 s; UwbService
-  and FingerprintService waited for removed HALs in system_server's binder
-  threads, three times a second. The device now declares USB host and no
-  longer declares UWB or a fingerprint sensor, and `/proc` counts rss in
-  16 KiB pages (neither yet checked in a boot).
-- **Kernel time.** Nearly all of the long-running services' CPU was
-  system time with millions of page faults: servicemanager 2:06 of CPU
-  (1.96 s user) and 9.3 million faults, SurfaceFlinger 2:47 (3.3 s user),
-  mediaswcodec 1:39 (1.3 s user) and 6.2 million faults, system_server
-  "0.3% user + 6.1% kernel" in its own ANR report. Sampled, servicemanager's
-  main thread was in guest code, not in the layer. It stopped by four
-  minutes after boot, when the host had 78 % of its memory free again;
-  whether it is the host's memory pressure (reactivation faults) or the
-  layer is open. A binder ping costs servicemanager no faults.
-- **Everything else** is the first-boot work of GMS, Play Store and the
-  launcher, which Android does on a phone too.
+With the first three fixed, a boot calmed to 0.1–0.4 cores within two
+minutes of boot completion between GMS persistent's restarts, and read
+1.8–10 cores in 20 s windows that caught them.
 
-The run ended at 04:45:52 KST, when the host security agent (#232) began
-killing every process that a release binary of this worktree spawned
-(zygote restarts, fork children, `sh -c`); its later zygote and netd
-restart loop is a consequence, not a guest problem.
+Most of the services' CPU at boot is system time, with millions of page
+faults: servicemanager 2:06 of CPU of which 1.96 s user and 9.3 million
+faults, SurfaceFlinger 2:47 with 3.3 s user, system_server "0.3% user +
+6.1% kernel" in its own ANR report. It happens while the host is short of
+memory (vm_stat: 60–300 MB free, 100,000–700,000 page reactivations per
+20 s) and stops when memory is free again; a binder ping costs
+servicemanager no faults. It is the host's paging, not a loop.
+
+## Where the time goes: in-guest fork+exec
+
+`fork_bench spawn` (fork, exec of `/system/bin/true`, exit, wait) in a
+booted guest: 211 ms p50 at host load 60–100, 55 ms at 40; `fork_bench
+fork`: 30 ms, then 8 ms (fork() itself 0.6 ms p50, the rest the child's
+start and exit). Exec of a trivial dynamic program costs 48–250 ms, of a
+static one 47 ms (a failed exec: ET_EXEC at 0x200000 cannot be placed).
+A timestamped `--trace` of the dynamic one at load 30 (23.7 ms of guest
+time, 743 syscalls):
+
+- **12 `mmap`s of property areas, about 1 ms each (12 ms, half of it).**
+  bionic and the linker map `/dev/__properties__` files read-only and
+  shared. On the host, mapping a file costs 9–25 µs, but 1.1–1.6 ms once
+  another process maps it writable and has written it, in any
+  monitored path (the repository, the data image); in the temporary
+  directory it stays 9 µs. guest-init's property service maps every area
+  writable. This is the host security agent's per-mapping check (#232,
+  #295), and it applies to every process that starts a program; the data
+  image put `/dev` inside the repository tree (`DATA/run/dev`).
+- **61 `openat`s, 3.7 ms** (60–170 µs each on the repository's files; the
+  same open costs a plain C program 96 µs, 25 µs in the temporary
+  directory). Each ELF with a translation costs two more host opens (its
+  `meta` and its `elf`).
+- The other 103 `mmap`s, 88 `mprotect`s and the rest: about 5 ms.
+
+## Where the time goes: Settings scroll
+
+`dumpsys gfxinfo com.android.settings framestats` over ten `input swipe`s
+(120 frames), SurfaceFlinger's `--frametimeline` and `--timestats`:
+
+- The app did about 1 ms of work per frame (input, animation, traversal,
+  draw, issue). The rest was waiting: the RenderThread about 30 ms p50 in
+  `dequeueBuffer`, the UI thread about 30 ms for the RenderThread (sync),
+  so frames completed 90 ms after their vsync and 92–96 % were janky.
+- Every SurfaceFlinger frame was "deadline missed (while in GPU comp)":
+  it started 17 ms late and took 33 ms, and presents came 33 ms apart.
+  A frame is on screen, and its present fence signals, about two vsyncs
+  after SurfaceFlinger presents it (the window's compositor). With two
+  client targets RenderEngine waited for the one it drew two frames ago,
+  and GL backpressure skipped a vsync while a present fence was pending.
+  With three client targets and no GL backpressure (docs/composer.md,
+  "Frames in flight"): presents 16.7 ms apart, 4–7 % janky frames and
+  p50 18–19 ms at host load ~25, 30–63 % at load 45.
+- gfxinfo's "gpu percentile: 4950ms" (#324) is its GPU histogram's last
+  bucket, which holds every frame whose GPU completion came more than
+  25 ms after its swap started; framestats' `GpuCompleted` values are in
+  the monotonic clock of the rest, 1–65 ms after `SwapBuffers`, the long
+  ones those whose `dequeueBuffer` waited. There is no clock error.
 
 ## Where the time goes: Chrome cold start
 
