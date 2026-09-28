@@ -164,6 +164,15 @@ ANGLE's Vulkan backend does:
   `glGetTexParameter*`, `glEGLImageTargetTexture2DOES` and
   `GL_TEXTURE_BINDING_EXTERNAL_OES` on the external target act on the
   hidden unit.
+- A texture's first bind to the external target gives it an external
+  texture's initial state (`GL_LINEAR` minification, `GL_CLAMP_TO_EDGE`),
+  not a 2D texture's mipmap filter, which leaves a one-level texture
+  incomplete: sampling one reads opaque black.
+- `glBindSampler(u, s)` also binds `s` to unit `u + K`, since a sampler
+  applies to every target of its unit. Skia sets filtering only through
+  sampler objects, so a hardware bitmap (a buffer without
+  `GPU_RENDER_TARGET`, which Skia samples as external) was sampled with
+  its texture's own state: launcher icons drew as black squares (#252).
 - `glShaderSource` turns `samplerExternalOES` into `sampler2D` and drops
   the extension's `#extension` lines (keeping line numbers). It records
   the samplers' names per shader. After `glLinkProgram`, their locations

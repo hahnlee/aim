@@ -11,7 +11,9 @@
 //! binding of the hidden unit `u + K`, where `K` is half the host's units;
 //! the guest is told it has `K` units. Shaders get `sampler2D` for
 //! `samplerExternalOES`, and a program's external samplers are pointed at
-//! their hidden units (`glUniform1i` adds `K`).
+//! their hidden units (`glUniform1i` adds `K`). A sampler object bound to
+//! `u` is bound to `u + K` too, and a new external texture gets an external
+//! texture's initial filtering and wrapping.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char};
@@ -33,6 +35,19 @@ const GL_MAX_TEXTURE_IMAGE_UNITS: GLenum = 0x8872;
 const GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS: GLenum = 0x8b4c;
 const GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS: GLenum = 0x8b4d;
 const GL_LINK_STATUS: GLenum = 0x8b82;
+const GL_TEXTURE_MIN_FILTER: GLenum = 0x2801;
+const GL_TEXTURE_WRAP_S: GLenum = 0x2802;
+const GL_TEXTURE_WRAP_T: GLenum = 0x2803;
+const GL_LINEAR: GLint = 0x2601;
+const GL_CLAMP_TO_EDGE: GLint = 0x812f;
+
+/// The initial state of an external texture that differs from a 2D one's
+/// (`OES_EGL_image_external`, "Changes to Section 3.7.14").
+const EXTERNAL_DEFAULTS: [(GLenum, GLint); 3] = [
+    (GL_TEXTURE_MIN_FILTER, GL_LINEAR),
+    (GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE),
+    (GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE),
+];
 
 const OURS: [&CStr; 2] = [
     c"GL_OES_EGL_image_external",
@@ -155,10 +170,36 @@ pub unsafe extern "C" fn glGetIntegerv(pname: GLenum, data: *mut GLint) {
 pub unsafe extern "C" fn glBindTexture(target: GLenum, texture: GLuint) {
     // SAFETY: forwarded.
     unsafe {
-        if target == GL_TEXTURE_EXTERNAL_OES {
-            on_hidden_unit(|| host::glBindTexture(GL_TEXTURE_2D, texture))
-        } else {
-            host::glBindTexture(target, texture)
+        if target != GL_TEXTURE_EXTERNAL_OES {
+            return host::glBindTexture(target, texture);
+        }
+        on_hidden_unit(|| {
+            // A name not yet bound is not yet a texture: this bind creates it.
+            let new = texture != 0 && host::glIsTexture(texture) == 0;
+            host::glBindTexture(GL_TEXTURE_2D, texture);
+            if new {
+                // An external texture starts with linear filtering and
+                // clamped wrapping; a 2D one would start with a mipmap
+                // filter, which leaves a one-level texture incomplete.
+                for (pname, param) in EXTERNAL_DEFAULTS {
+                    host::glTexParameteri(GL_TEXTURE_2D, pname, param);
+                }
+            }
+        })
+    }
+}
+
+/// # Safety
+/// GL's contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn glBindSampler(unit: GLuint, sampler: GLuint) {
+    // A sampler object applies to every target of its unit, so it also
+    // applies to the unit's external binding on the hidden unit.
+    // SAFETY: forwarded; the guest's units are below `K`.
+    unsafe {
+        host::glBindSampler(unit, sampler);
+        if (unit as GLint) < hidden_base() {
+            host::glBindSampler(unit + hidden_base() as GLuint, sampler);
         }
     }
 }
