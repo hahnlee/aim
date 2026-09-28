@@ -1,0 +1,9 @@
+# The task bridge (docs/windows.md): in window mode, the default display's
+# freeform tasks become the display server's macOS windows. It sets the
+# display's windowing mode for the display server's mode, and in device
+# mode exits.
+service aim-windows /system_ext/bin/aim-windows
+    class late_start
+    user system
+    group system
+    oneshot

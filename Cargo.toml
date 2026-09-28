@@ -10,6 +10,7 @@
 members = [
     "crates/aim-android-image",
     "crates/aim-android-init",
+    "crates/aim-apps",
     "crates/aim-guest-init",
     "crates/aim-binder-driver",
     "crates/aim-binder-host",
@@ -58,10 +59,13 @@ members = [
     "daemons/log",
     "daemons/netd",
     "daemons/vold",
+    "daemons/windows",
+    "daemons/windows/core",
 ]
 default-members = [
     "crates/aim-android-image",
     "crates/aim-android-init",
+    "crates/aim-apps",
     "crates/aim-guest-init",
     "crates/aim-binder-driver",
     "crates/aim-binder-host",
@@ -82,9 +86,10 @@ default-members = [
     "crates/aim-storage",
     "crates/aim-sync-file",
     "tools/android-image-extract",
-    # lmkd's policy, a guest library, is built for the host too to run its
-    # tests.
+    # lmkd's policy and the task bridge's parcel reading, guest libraries,
+    # are built for the host too to run their tests.
     "daemons/lmkd/core",
+    "daemons/windows/core",
 ]
 resolver = "2"
 

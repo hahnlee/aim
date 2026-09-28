@@ -492,6 +492,21 @@ libbinder_ndk from the AIDL at the pinned tag (the `daemon/*` nodes of
 IVold is an unstable interface: its methods that take a raw
 `FileDescriptor` are refused until the Rust backend can express one.
 
+### Added system daemon: the task bridge (window mode)
+
+`aim-windows` (`daemons/windows`, `/system_ext/bin/aim-windows`) is an
+addition, not a replacement: in window mode it reports the default
+display's freeform tasks to the display server, so each is a macOS window,
+and carries out what the windows ask (move and resize, focus, close,
+launch). It is a client of the platform's own binder interfaces
+(`IActivityTaskManager`, `IWindowManager`) and implements the platform's
+`ITaskStackListener`; these Java AIDL interfaces have no NDK backend, so
+the few transactions are hand-written with the pinned AIDL's codes and
+parcel layouts. Freeform windowing is enabled the way a device vendor
+enables it, with the `android.software.freeform_window_management`
+feature. No framework code is patched, and no APK is added
+([windows.md](../windows.md)).
+
 ### Kept original on the syscall layer
 
 servicemanager, logd, installd, zygote/app_process (`fork` spawns a fresh
@@ -503,8 +518,8 @@ inputflinger, audioserver, cameraserver, MediaProvider and DnsResolver.
   FUSE is a documented kernel protocol like binder. Bulk I/O may later get a
   passthrough exception.
 - **Input:** input is not a HAL. The syscall layer exposes virtual evdev
-  devices (`/dev/input/event*`) fed by AppKit: the display server's window
-  is a touchscreen, a keyboard and a scroll wheel (rotary encoder), one
+  devices (`/dev/input/event*`) fed by AppKit: the display server's windows
+  are a touchscreen, a keyboard and a scroll wheel (rotary encoder), one
   Unix socket per open file, configured by `.idc` files in the vendor
   partition ([input.md](../input.md)).
 

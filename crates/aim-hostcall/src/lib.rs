@@ -246,7 +246,7 @@ pub mod gpu {
 /// Asynchronous events (vsync) arrive as [`Event`] records on a descriptor
 /// the guest reads, since host code never calls guest code.
 pub mod display {
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 3;
 
     /// Connect to the display server and describe display
     /// [`Connect::display`]. Returns a new guest fd that yields [`Event`]
@@ -265,6 +265,10 @@ pub mod display {
     /// Start or stop [`event::VSYNC`] records ([`SetVsync`]). Returns 0 or
     /// `-ENOTCONN`.
     pub const FN_SET_VSYNC: u32 = 5;
+    /// Connect to the display server as the guest's task bridge
+    /// ([`Windows`]). Returns a new guest fd that carries [`Window`]
+    /// records both ways, or the errors of [`FN_CONNECT`].
+    pub const FN_WINDOWS: u32 = 6;
 
     /// Argument block of [`FN_CONNECT`].
     #[repr(C)]
@@ -351,7 +355,114 @@ pub mod display {
         pub sent_ns: i64,
     }
 
+    /// [`Windows::mode`] values: how the display server shows the display.
+    pub mod mode {
+        /// One window showing the whole display.
+        pub const DEVICE: u32 = 1;
+        /// One window per task: the display is congruent with the Mac's
+        /// main screen, and each task's window shows its part of it.
+        pub const WINDOWS: u32 = 2;
+    }
+
+    /// Argument block of [`FN_WINDOWS`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Windows {
+        /// Out: one of [`mode`].
+        pub mode: u32,
+        pub _reserved: u32,
+    }
+
+    /// [`Window::op`] values. The guest reports tasks; the server asks for
+    /// changes. Bounds are the task's, in display pixels.
+    pub mod window {
+        /// Guest: a task that gets a window, new or changed:
+        /// [`super::Window::bounds`], and [`super::Window::caption`] at
+        /// their top.
+        pub const TASK: u32 = 1;
+        /// Guest: the task's title (its `TaskDescription` label), in
+        /// [`super::Window::text`].
+        pub const TITLE: u32 = 2;
+        /// Guest: the task's package, in [`super::Window::text`].
+        pub const PACKAGE: u32 = 3;
+        /// Guest: the task is now the top (focused) one.
+        pub const FRONT: u32 = 4;
+        /// Guest: the task is gone.
+        pub const REMOVED: u32 = 5;
+        /// Guest: the task went behind the others (Back on its root
+        /// activity moves it to the back).
+        pub const MOVED_TO_BACK: u32 = 6;
+        /// Server: move or resize the task to [`super::Window::bounds`].
+        pub const SET_BOUNDS: u32 = 16;
+        /// Server: make the task the top (focused) one.
+        pub const FOCUS: u32 = 17;
+        /// Server: remove the task, as closing its window does.
+        pub const CLOSE: u32 = 18;
+        /// Server: start the launcher activity `package/class` in
+        /// [`super::Window::text`], in a new task (or bring its task to the
+        /// front).
+        pub const LAUNCH: u32 = 19;
+    }
+
+    /// A record on the connection [`FN_WINDOWS`] returns.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Window {
+        /// One of [`window`].
+        pub op: u32,
+        pub task: i32,
+        /// Left, top, right, bottom.
+        pub bounds: [i32; 4],
+        /// The height of the task's caption, inside the top of `bounds`.
+        pub caption: i32,
+        pub _reserved: u32,
+        /// UTF-8, NUL-padded (cut at a character boundary).
+        pub text: [u8; 224],
+    }
+
+    impl Default for Window {
+        fn default() -> Self {
+            Window {
+                op: 0,
+                task: 0,
+                bounds: [0; 4],
+                caption: 0,
+                _reserved: 0,
+                text: [0; 224],
+            }
+        }
+    }
+
+    impl Window {
+        /// A record of `op` for `task` carrying `text`.
+        pub fn with_text(op: u32, task: i32, text: &str) -> Window {
+            let mut w = Window {
+                op,
+                task,
+                ..Default::default()
+            };
+            let mut n = text.len().min(w.text.len());
+            while !text.is_char_boundary(n) {
+                n -= 1;
+            }
+            w.text[..n].copy_from_slice(&text.as_bytes()[..n]);
+            w
+        }
+
+        /// [`Window::text`] up to its padding.
+        pub fn text(&self) -> &str {
+            let n = self
+                .text
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(self.text.len());
+            core::str::from_utf8(&self.text[..n]).unwrap_or("")
+        }
+    }
+
     const _: () = assert!(core::mem::size_of::<Connect>() == 32);
+    const _: () = assert!(core::mem::size_of::<Windows>() == 8);
+    const _: () = assert!(core::mem::size_of::<Window>() == 256);
     const _: () = assert!(core::mem::size_of::<Import>() == 40);
     const _: () = assert!(core::mem::size_of::<Buffer>() == 8);
     const _: () = assert!(core::mem::size_of::<Present>() == 16);
@@ -1207,6 +1318,12 @@ pub mod guest {
             enabled: enabled as u32,
         };
         call_with(module::DISPLAY, display::FN_SET_VSYNC, &mut args).map(drop)
+    }
+
+    /// Connect to the display server as the task bridge; returns the
+    /// record fd.
+    pub fn display_windows(args: &mut display::Windows) -> Result<i32, Errno> {
+        call_with(module::DISPLAY, display::FN_WINDOWS, args).map(|fd| fd as i32)
     }
 
     /// The host's thermal state and temperatures.

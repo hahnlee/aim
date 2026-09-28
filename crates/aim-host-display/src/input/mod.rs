@@ -337,12 +337,14 @@ pub fn touchscreen(width: u32, height: u32, dpi_x: f64, dpi_y: f64) -> Descripto
     d
 }
 
-/// The Mac's keyboard: every key [`keymap`] maps.
+/// The Mac's keyboard: every key [`keymap`] maps, and Back, which the
+/// Mac's back gestures press (`translate::Input::back`).
 pub fn keyboard() -> Descriptor {
     let mut d = Descriptor::new(KEYBOARD, "aim-keyboard");
     for code in keymap::linux_keys() {
         d.declare(EV_KEY, code);
     }
+    d.declare(EV_KEY, KEY_BACK);
     d
 }
 

@@ -11,6 +11,7 @@ unsafe extern "C" {
     fn sel_registerName(name: *const c_char) -> Sel;
     pub fn objc_msgSend();
     fn objc_release(obj: Id);
+    fn objc_retain(obj: Id) -> Id;
     fn objc_autoreleasePoolPush() -> *mut c_void;
     fn objc_autoreleasePoolPop(pool: *mut c_void);
     pub fn objc_allocateClassPair(superclass: Id, name: *const c_char, extra: usize) -> Id;
@@ -86,6 +87,12 @@ impl GlobalBlock {
     }
 }
 
+/// Another reference to `obj`, which [`release`] gives up.
+pub fn retain(obj: Id) -> Id {
+    // SAFETY: retaining a live object (or nil, which is a no-op).
+    unsafe { objc_retain(obj) }
+}
+
 pub fn release(obj: Id) {
     if !obj.is_null() {
         // SAFETY: the caller owns one reference to `obj`.
@@ -149,4 +156,51 @@ pub struct CGRect {
     pub x: f64,
     pub y: f64,
     pub size: CGSize,
+}
+
+unsafe extern "C" {
+    static _dispatch_main_q: c_void;
+    fn dispatch_async_f(q: *const c_void, ctx: *mut c_void, work: extern "C" fn(*mut c_void));
+    fn dispatch_after_f(
+        when: u64,
+        q: *const c_void,
+        ctx: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
+    fn dispatch_time(when: u64, delta: i64) -> u64;
+}
+
+type Work = Box<dyn FnOnce() + Send>;
+
+extern "C" fn run_work(ctx: *mut c_void) {
+    // SAFETY: `ctx` is the box `on_main` or `on_main_after` leaked.
+    let work = unsafe { Box::from_raw(ctx.cast::<Work>()) };
+    work();
+}
+
+/// Run `f` on the main thread (AppKit's), after what is queued there.
+pub fn on_main(f: impl FnOnce() + Send + 'static) {
+    let work: Box<Work> = Box::new(Box::new(f));
+    // SAFETY: the main queue runs `run_work` once with the leaked box.
+    unsafe {
+        dispatch_async_f(
+            &raw const _dispatch_main_q,
+            Box::into_raw(work).cast(),
+            run_work,
+        )
+    };
+}
+
+/// Run `f` on the main thread in `ms` milliseconds.
+pub fn on_main_after(ms: u64, f: impl FnOnce() + Send + 'static) {
+    let work: Box<Work> = Box::new(Box::new(f));
+    // SAFETY: as `on_main`; DISPATCH_TIME_NOW is 0.
+    unsafe {
+        dispatch_after_f(
+            dispatch_time(0, (ms * 1_000_000) as i64),
+            &raw const _dispatch_main_q,
+            Box::into_raw(work).cast(),
+            run_work,
+        )
+    };
 }

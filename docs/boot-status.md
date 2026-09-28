@@ -562,3 +562,38 @@ After a stop, `target/aim/boot/data` is empty (detached); a second
 `cargo aim boot` attaches the same image, and installed apps start with
 their data. Look for a data image left attached by a crash with
 `hdiutil info`; guest-init detaches it at the next start.
+
+## Window mode (2026-09-29, #294)
+
+`cargo aim boot --windows` ([windows.md](windows.md)): the display is the
+Mac's main screen (3840×2160 at 2×, plus the bar margin: 3840×2352), the
+default display runs freeform windowing, and the task bridge reports its
+tasks. On an M2 Pro with other agents' boots loading the host (load average
+37 to 125):
+
+| Check | Result |
+| --- | --- |
+| Settings, Calculator (installed with `pm install`) and Chrome from `am start` | three native windows titled with their package (no `TaskDescription` label), each showing its task, no Android caption |
+| A click in a window | one touch at the display pixel under it (point × 2); Settings opened the page clicked |
+| Raising a window | `mCurrentFocus` becomes its task |
+| Resize (Accessibility, 412×756 to 640×820 points) | the task's bounds 1280×1592 pixels; Chrome lays out for the width |
+| Move | the task moves with the window |
+| Cmd+[, mouse button 4, two-finger swipe right | `KEY_BACK`; SubSettings back to Settings each time |
+| Esc | `KEY_ESC` reaches the app; no Back (Android 16 closes system dialogs instead) |
+| A task restored from recents at boot | no window |
+
+Under that load SystemUI hit ANRs, and freeform positions Android chose
+itself (Chrome's launch, Settings shifted away from Chrome when a page
+opened) did not reach the task surfaces, so those windows showed other
+parts of the display; the bridge now commits such bounds by moving the
+task a pixel and back with `resizeTask` (a resize to the same bounds is a
+no-op and did not help).
+
+**App shims** (same boots): `aim-apps shims --watch` wrote 19 shims into
+`target/aim/boot/apps`, the packages `cmd package query-activities -a MAIN
+-c LAUNCHER` lists (Gboard's launcher activity, disabled at run time, and
+GMS's, disabled by a resource, left out). Opening Calculator.app,
+Settings.app and Chrome.app started each app in its own process with its
+name and icon in the Dock; a click in the Calculator shim's window, behind
+Chrome's, focused its task and typed 7, and keys typed 5 5. `pm uninstall`
+of Calculator removed its shim, and `pm install` wrote it again.

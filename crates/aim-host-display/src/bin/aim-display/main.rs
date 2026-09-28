@@ -1,15 +1,20 @@
-//! `aim-display --socket PATH [--size WxH] [--title TEXT] [--capture FILE]`
+//! `aim-display --socket PATH [--mode device|windows] [--size WxH] [--title TEXT] [--capture FILE]`
 //!
-//! The display server (`docs/composer.md`): one macOS window showing the
+//! The display server (`docs/composer.md`): macOS windows showing the
 //! guest's display. It owns what must live on the host's main thread
-//! (AppKit) and outlive a composer restart: the window, its Metal layer and
-//! the display link. The composer HAL reaches it through the host-call
-//! module `display` of its `linux-run --display PATH`; the protocol is
-//! `aim_host_display::wire`.
+//! (AppKit) and outlive a composer restart: the windows, their Metal
+//! layers and the display link. The composer HAL reaches it through the
+//! host-call module `display` of its `linux-run --display PATH`; the
+//! protocol is `aim_host_display::wire`.
 //!
-//! The window's input is the guest's evdev devices, listening sockets in
-//! `PATH.input` (`docs/input.md`), removed when the server quits (window
-//! closed, SIGTERM, SIGINT).
+//! - **Device mode** (the default): one window showing the whole display.
+//! - **Window mode** (`--mode windows`, `docs/windows.md`): one window per
+//!   Android task, which the guest's task bridge reports; the display is
+//!   the Mac's main screen.
+//!
+//! The windows' input is the guest's evdev devices, listening sockets in
+//! `PATH.input` (`docs/input.md`), removed when the server quits (device
+//! window closed, SIGTERM, SIGINT).
 //!
 //! On start it prints one line with the window number (for
 //! `screencapture -l`), the display mode and the refresh period. Every
@@ -18,11 +23,14 @@
 
 #[macro_use]
 mod objc;
+mod hosts;
 mod input;
 mod metal;
+mod shim;
 mod stats;
 mod vsync;
 mod window;
+mod windows;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -33,16 +41,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_host_display::wire::{self, Request};
-use aim_hostcall::display::{Connect, Event, event};
+use aim_hostcall::display::{Connect, Event, Windows, event, mode};
 use aim_sync_file::Writer;
 
-use metal::{Renderer, Texture};
+use metal::{Fence, Renderer, Target, Texture};
 use stats::Stats;
 
 /// How long a present waits for its buffer's acquire fence.
 const ACQUIRE_TIMEOUT_MS: i32 = 3000;
 
-const USAGE: &str = "usage: aim-display --socket PATH [--size WxH] [--title TEXT] [--capture FILE]";
+const USAGE: &str = "usage: aim-display --socket PATH [--mode device|windows] [--size WxH] [--title TEXT] [--capture FILE]";
 
 struct Client {
     /// Events go out on the connection the guest reads.
@@ -53,11 +61,33 @@ struct Client {
 struct Display {
     renderer: Renderer,
     info: Connect,
+    /// One of `aim_hostcall::display::mode`.
+    mode: u32,
     clients: Mutex<Vec<Arc<Client>>>,
     /// Serializes presents from all clients.
     last: Mutex<Option<Arc<Texture>>>,
+    /// The layers presents go to: the device window's, or the task
+    /// windows' that are visible.
+    targets: Mutex<Vec<Target>>,
     stats: Stats,
     capture: Option<PathBuf>,
+}
+
+static DISPLAY: OnceLock<Display> = OnceLock::new();
+
+impl Display {
+    fn new(renderer: Renderer, info: Connect, mode: u32, capture: Option<PathBuf>) -> Display {
+        Display {
+            renderer,
+            info,
+            mode,
+            clients: Mutex::new(Vec::new()),
+            last: Mutex::new(None),
+            targets: Mutex::new(Vec::new()),
+            stats: Stats::new(),
+            capture,
+        }
+    }
 }
 
 static CAPTURE_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -107,8 +137,8 @@ impl Display {
         }
     }
 
-    /// Show `t` once its content is ready (`acquire`); `fence` signals when
-    /// it is on screen.
+    /// Show `t` once its content is ready (`acquire`), in this process's
+    /// windows and the window hosts'; `fence` signals when it is on screen.
     fn present(&self, t: &Arc<Texture>, acquire: Option<OwnedFd>, fence: Option<Writer>) {
         if let Some(a) = acquire
             && !aim_sync_file::wait(a.as_fd(), ACQUIRE_TIMEOUT_MS)
@@ -117,11 +147,31 @@ impl Display {
                 "aim-display: acquire fence of a present not signaled in {ACQUIRE_TIMEOUT_MS} ms"
             );
         }
+        let fence = fence.map(Fence::new);
         let mut last = self.last.lock().unwrap();
-        if let Some(frame) = self.renderer.present(Some(t), fence) {
+        let targets = self.targets.lock().unwrap().clone();
+        let hosts = hosts::present(t, fence.as_ref());
+        if let Some(frame) = self.renderer.present(Some(t), &targets, fence.as_ref()) {
             self.stats.present(frame);
         }
+        hosts.wait();
         *last = Some(t.clone());
+        if let Some(f) = fence {
+            f.done();
+        }
+    }
+
+    /// Show the last frame again in the layers of `targets` (a window that
+    /// appeared or changed), without a fence.
+    fn refresh(&self, targets: &[Target]) {
+        let last = self.last.lock().unwrap();
+        if let Some(t) = last.as_ref() {
+            self.renderer.present(Some(t), targets, None);
+        }
+    }
+
+    fn set_targets(&self, targets: Vec<Target>) {
+        *self.targets.lock().unwrap() = targets;
     }
 
     /// Serve one client until it disconnects.
@@ -177,8 +227,24 @@ impl Display {
                 }
                 wire::OP_RELEASE => {
                     textures.remove(&r.id);
+                    hosts::release(r.id);
                 }
                 wire::OP_SET_VSYNC => client.vsync.store(r.flag != 0, Ordering::Relaxed),
+                wire::OP_WINDOWS if r.id == wire::VERSION => {
+                    let answer = Windows {
+                        mode: self.mode,
+                        ..Default::default()
+                    };
+                    if wire::send(sock.as_fd(), wire::bytes(&answer), None).is_ok()
+                        && self.mode == mode::WINDOWS
+                    {
+                        windows::serve_bridge(sock);
+                    }
+                    return;
+                }
+                wire::OP_HOST if r.id == wire::VERSION && self.mode == mode::WINDOWS => {
+                    return hosts::serve(sock);
+                }
                 _ => break,
             }
         }
@@ -225,9 +291,16 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
 }
 
 fn main() {
+    // An app's shim bundle runs this binary as that app's window host.
+    if let Some(package) = shim::info("AIMPackage") {
+        let activity = shim::info("AIMActivity").unwrap_or_default();
+        let socket = shim::info("AIMDisplaySocket").unwrap_or_default();
+        shim::run(package, activity, std::path::Path::new(&socket));
+    }
     let mut args = std::env::args().skip(1);
     let (mut socket, mut size, mut capture) = (None, None, None);
     let mut title = "Android".to_string();
+    let mut display_mode = mode::DEVICE;
     while let Some(a) = args.next() {
         let mut value = || {
             args.next().unwrap_or_else(|| {
@@ -244,6 +317,16 @@ fn main() {
                 }))
             }
             "--title" => title = value(),
+            "--mode" => {
+                display_mode = match value().as_str() {
+                    "device" => mode::DEVICE,
+                    "windows" => mode::WINDOWS,
+                    _ => {
+                        eprintln!("{USAGE}");
+                        std::process::exit(2)
+                    }
+                }
+            }
             "--capture" => capture = Some(PathBuf::from(value())),
             _ => {
                 eprintln!("{USAGE}");
@@ -255,6 +338,12 @@ fn main() {
         eprintln!("{USAGE}");
         std::process::exit(2)
     };
+    if display_mode == mode::WINDOWS && size.is_some() {
+        eprintln!(
+            "aim-display: window mode's display is the main screen; --size is for device mode"
+        );
+        std::process::exit(2)
+    }
     // SAFETY: plain signal dispositions; the handler only stores an atomic.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
@@ -267,15 +356,24 @@ fn main() {
         eprintln!("aim-display: no Metal device");
         std::process::exit(1);
     }
-    let win = window::create(size, &title, device);
-    let renderer = Renderer::new(device, win.layer).unwrap_or_else(|e| {
+    window::app(display_mode);
+    let win = if display_mode == mode::WINDOWS {
+        windows::start(device)
+    } else {
+        window::create(size, &title, device)
+    };
+    let renderer = Renderer::new(device).unwrap_or_else(|e| {
         eprintln!("aim-display: shader: {e}");
         std::process::exit(1)
     });
+    let targets: Vec<Target> = win
+        .layer
+        .map(|l| Target::new(l, None))
+        .into_iter()
+        .collect();
     // The display is black until the first frame.
-    renderer.present(None, None);
+    renderer.present(None, &targets, None);
 
-    static DISPLAY: OnceLock<Display> = OnceLock::new();
     let period = vsync::start(Box::new(|tick| {
         if let Some(d) = DISPLAY.get() {
             d.on_vsync(tick)
@@ -285,22 +383,17 @@ fn main() {
         eprintln!("aim-display: {e}");
         std::process::exit(1)
     });
-    let display = DISPLAY.get_or_init(|| Display {
-        renderer,
-        info: Connect {
-            display: 0,
-            width: win.width,
-            height: win.height,
-            dpi_x_milli: (win.dpi_x * 1000.0) as u32,
-            dpi_y_milli: (win.dpi_y * 1000.0) as u32,
-            _reserved: 0,
-            vsync_period_ns: period as u64,
-        },
-        clients: Mutex::new(Vec::new()),
-        last: Mutex::new(None),
-        stats: Stats::new(),
-        capture,
-    });
+    let info = Connect {
+        display: 0,
+        width: win.width,
+        height: win.height,
+        dpi_x_milli: (win.dpi_x * 1000.0) as u32,
+        dpi_y_milli: (win.dpi_y * 1000.0) as u32,
+        _reserved: 0,
+        vsync_period_ns: period as u64,
+    };
+    let display = DISPLAY.get_or_init(|| Display::new(renderer, info, display_mode, capture));
+    display.set_targets(targets);
 
     if let Err(e) = input::start(&socket, &win) {
         eprintln!(
@@ -316,8 +409,9 @@ fn main() {
         std::process::exit(1)
     });
     println!(
-        "aim-display: window {} {}x{} pixels, {:.0}x{:.0} dpi, vsync {} ns, socket {}",
-        win.number,
+        "aim-display: {} {}x{} pixels, {:.0}x{:.0} dpi, vsync {} ns, socket {}",
+        win.number
+            .map_or("window mode".to_string(), |n| format!("window {n}")),
         win.width,
         win.height,
         win.dpi_x,

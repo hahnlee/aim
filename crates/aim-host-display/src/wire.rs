@@ -7,16 +7,27 @@
 //! which the guest reads directly. Requests are fixed-size [`Request`]
 //! records; an [`OP_IMPORT`] carries the buffer's fd as `SCM_RIGHTS`, an
 //! [`OP_PRESENT`] its fences.
+//!
+//! The guest's task bridge (`docs/windows.md`) opens its own connection
+//! with [`OP_WINDOWS`]; the server answers with a filled
+//! [`display::Windows`](aim_hostcall::display::Windows), and from then on
+//! both ends write [`display::Window`](aim_hostcall::display::Window)
+//! records.
+//!
+//! A window host (an app's shim, `docs/windows.md`) opens a connection with
+//! [`OP_HOST`]; from then on both ends write [`Host`] records: the server
+//! sends it the buffers, presents and task records of its package, and it
+//! answers presents and sends its windows' requests and input.
 //! Both ends are built from this crate, so the layout is checked only by
 //! [`VERSION`].
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
-use aim_hostcall::display::Import;
+use aim_hostcall::display::{Import, Window};
 
 /// Sent in the hello; the server closes a connection of another version.
-pub const VERSION: u64 = 2;
+pub const VERSION: u64 = 3;
 
 /// `id` = [`VERSION`], `flag` = display index.
 pub const OP_HELLO: u32 = 1;
@@ -28,6 +39,82 @@ pub const OP_PRESENT: u32 = 3;
 pub const OP_RELEASE: u32 = 4;
 /// `flag` = 1 to send vsync events, 0 to stop.
 pub const OP_SET_VSYNC: u32 = 5;
+/// `id` = [`VERSION`]: the task bridge's hello.
+pub const OP_WINDOWS: u32 = 6;
+/// `id` = [`VERSION`]: a window host's hello; [`Host`] records follow.
+pub const OP_HOST: u32 = 7;
+
+/// [`Host::op`] values.
+pub mod host {
+    /// Host: its package, in `window.text`; `id` = [`super::VERSION`].
+    pub const HELLO: u32 = 1;
+    /// Server: a buffer (`import`), its fd attached; `id` names it.
+    pub const IMPORT: u32 = 2;
+    /// Server: forget buffer `id`.
+    pub const RELEASE: u32 = 3;
+    /// Server: show buffer `id` in the host's windows; `flag` = sequence.
+    pub const PRESENT: u32 = 4;
+    /// Host: present `flag` has read its buffer; `id` = the time
+    /// (`CLOCK_MONOTONIC` ns).
+    pub const SAMPLED: u32 = 5;
+    /// Either way: a task record (`window`), to the host as the bridge
+    /// sends it, from the host as a request for the bridge.
+    pub const WINDOW: u32 = 6;
+    /// Host: an input event (`input`).
+    pub const INPUT: u32 = 7;
+    /// Host: task `flag`'s window has number `id`.
+    pub const NUMBER: u32 = 8;
+    /// Host: it minimized a window; stack the tasks as the screen does.
+    pub const RESTACK: u32 = 9;
+}
+
+/// [`HostInput::kind`] values: `translate::Input`'s methods.
+pub mod input {
+    /// `touch`: `task`, `code` = phase (0 down, 1 drag, 2 up), `x`, `y`,
+    /// `area`.
+    pub const TOUCH: u32 = 1;
+    /// `key`: `code` = macOS virtual key, `down`.
+    pub const KEY: u32 = 2;
+    /// `back_shortcut`: `code`, `down`, `flags` = 1 with Command.
+    pub const BACK_SHORTCUT: u32 = 3;
+    /// `flags_changed`: `code`, `flags` = `modifierFlags`.
+    pub const FLAGS: u32 = 4;
+    /// `scroll`: `y` = delta, `down` = precise.
+    pub const SCROLL: u32 = 5;
+    /// `swipe`: `code` = gesture (0 began, 1 changed, 2 ended), `x`, `y`.
+    pub const SWIPE: u32 = 6;
+    /// `back`: `down`.
+    pub const BACK: u32 = 7;
+    /// `release_all`.
+    pub const RELEASE_ALL: u32 = 8;
+}
+
+/// An input event a window host forwards.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HostInput {
+    pub kind: u32,
+    pub task: i32,
+    pub code: u32,
+    pub down: u32,
+    pub x: f64,
+    pub y: f64,
+    pub area: [i32; 4],
+    pub flags: u64,
+    pub time_ns: i64,
+}
+
+/// A record between the display server and a window host.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Host {
+    pub op: u32,
+    pub flag: u32,
+    pub id: u64,
+    pub import: Import,
+    pub window: Window,
+    pub input: HostInput,
+}
 
 /// [`OP_PRESENT`] carries an acquire fence.
 pub const PRESENT_ACQUIRE: u32 = 1;
