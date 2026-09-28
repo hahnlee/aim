@@ -11,18 +11,43 @@
 //! device, at that device's rate. The first capture asks macOS for
 //! microphone access.
 
+mod client;
 mod coreaudio;
+pub mod io;
+mod null;
 mod stream;
+mod wire;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
 
 use darwin_hostcall::audio::{
-    Devices, FN_CLOSE, FN_DEVICES, FN_OPEN, FN_START, FN_STOP, Open, Stream as StreamArgs, VERSION,
+    DIRECTION_INPUT, Device, Devices, FN_CLOSE, FN_DEVICES, FN_OPEN, FN_START, FN_STOP, Open,
+    Stream as StreamArgs, VERSION,
 };
 use darwin_hostcall::{HostModule, args_mut, errno, module};
 
 pub use stream::clock;
+
+static LOG_FD: AtomicI32 = AtomicI32::new(2);
+
+/// Where the module's messages go (the syscall layer's diagnostics
+/// descriptor), and the CoreAudio process's stderr.
+pub fn set_log_fd(fd: i32) {
+    LOG_FD.store(fd, Relaxed);
+}
+
+fn log_fd() -> i32 {
+    LOG_FD.load(Relaxed)
+}
+
+/// One line on the log descriptor, in a single write.
+fn log(args: std::fmt::Arguments) {
+    let line = format!("audio: {args}\n");
+    // SAFETY: writing our buffer to a descriptor we were given.
+    unsafe { libc::write(log_fd(), line.as_ptr().cast(), line.len()) };
+}
 
 pub static MODULE: HostModule = HostModule {
     id: module::AUDIO,
@@ -31,9 +56,54 @@ pub static MODULE: HostModule = HostModule {
     call,
 };
 
+/// Where a stream's frames go.
+enum Backend {
+    /// A unit in the CoreAudio process, by its handle there.
+    Device(u64),
+    /// The null sink, while running.
+    Null(Option<null::NullSink>),
+}
+
+struct Entry {
+    /// This process's own mapping of the ring, for the null sink.
+    shared: Arc<stream::Shared>,
+    rate: u32,
+    input: bool,
+    running: bool,
+    backend: Backend,
+}
+
+impl Entry {
+    fn set_null_running(&mut self, running: bool) {
+        self.running = running;
+        if let Backend::Null(sink) = &mut self.backend {
+            *sink =
+                running.then(|| null::NullSink::start(self.shared.clone(), self.rate, self.input));
+        }
+    }
+}
+
 struct Streams {
     next: u64,
-    open: HashMap<u64, stream::Stream>,
+    open: HashMap<u64, Entry>,
+}
+
+impl Streams {
+    /// The CoreAudio process is gone: move every stream to the null sink,
+    /// telling its callbacks (should they still run) to leave the ring.
+    fn detach_all(&mut self) {
+        for e in self.open.values_mut() {
+            if let Backend::Device(_) = e.backend {
+                e.shared
+                    .ring()
+                    .detached
+                    .store(1, std::sync::atomic::Ordering::Release);
+                e.backend = Backend::Null(None);
+                let running = e.running;
+                e.set_null_running(running);
+            }
+        }
+    }
 }
 
 static STREAMS: Mutex<Option<Streams>> = Mutex::new(None);
@@ -50,13 +120,26 @@ fn neg(e: i32) -> i64 {
     -(e as i64)
 }
 
+fn request(op: u32, stream: u64, open: Option<&Open>) -> Result<wire::Reply, client::Error> {
+    let req = wire::Request {
+        op,
+        stream,
+        open: open.copied().unwrap_or_default(),
+        ..Default::default()
+    };
+    client::request(&req, open.map(|o| o.fd))
+}
+
 unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
     match func {
         FN_DEVICES => {
             // SAFETY: the registry passes the guest's argument block.
             match unsafe { args_mut::<Devices>(args, len) } {
                 Ok(out) => {
-                    *out = devices();
+                    *out = match request(FN_DEVICES, 0, None) {
+                        Ok(reply) => reply.devices,
+                        Err(_) => null_devices(),
+                    };
                     0
                 }
                 Err(e) => e,
@@ -68,16 +151,34 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
                 Ok(open) => open,
                 Err(e) => return e,
             };
-            match stream::Stream::open(open) {
-                Ok(s) => with_streams(|streams| {
-                    let id = streams.next;
-                    streams.next += 1;
-                    streams.open.insert(id, s);
-                    open.stream = id;
-                    0
-                }),
-                Err(e) => neg(e),
-            }
+            let shared: Arc<stream::Shared> = match stream::Shared::new(open, 0) {
+                Ok(s) => s.into(),
+                Err(e) => return neg(e),
+            };
+            let backend = match request(FN_OPEN, 0, Some(open)) {
+                Ok(reply) => Backend::Device(reply.stream),
+                Err(client::Error::Errno(e)) => return neg(e),
+                Err(client::Error::Gone) => Backend::Null(None),
+            };
+            with_streams(|streams| {
+                if let Backend::Null(_) = backend {
+                    streams.detach_all();
+                }
+                let id = streams.next;
+                streams.next += 1;
+                streams.open.insert(
+                    id,
+                    Entry {
+                        shared,
+                        rate: open.sample_rate,
+                        input: open.direction == DIRECTION_INPUT,
+                        running: false,
+                        backend,
+                    },
+                );
+                open.stream = id;
+                0
+            })
         }
         FN_START | FN_STOP | FN_CLOSE => {
             // SAFETY: as above.
@@ -86,26 +187,57 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
                 Err(e) => return e,
             };
             with_streams(|streams| {
-                let ok = match func {
-                    FN_START => streams.open.get(&id).map(|s| s.start()),
-                    FN_STOP => streams.open.get(&id).map(|s| s.stop()),
-                    _ => streams.open.remove(&id).map(|_| true),
+                let Some(entry) = streams.open.get_mut(&id) else {
+                    return neg(errno::EINVAL);
                 };
-                match ok {
-                    Some(true) => 0,
-                    _ => neg(errno::EINVAL),
+                let running = func == FN_START;
+                if let Backend::Device(handle) = entry.backend {
+                    match request(func, handle, None) {
+                        Ok(_) => entry.running = running,
+                        Err(client::Error::Errno(e)) => return neg(e),
+                        Err(client::Error::Gone) => streams.detach_all(),
+                    }
                 }
+                let entry = streams.open.get_mut(&id).unwrap();
+                if let Backend::Null(_) = entry.backend {
+                    entry.set_null_running(running);
+                }
+                if func == FN_CLOSE {
+                    // The null sink stops before the mapping goes.
+                    streams.open.remove(&id);
+                }
+                0
             })
         }
         _ => neg(errno::ENOSYS),
     }
 }
 
-/// The default devices.
+/// The default devices, as macOS reports them. Called in the CoreAudio
+/// process.
 pub fn devices() -> Devices {
     Devices {
         output: coreaudio::describe(false),
         input: coreaudio::describe(true),
+    }
+}
+
+/// What the module reports without CoreAudio: a stereo 48 kHz output (the
+/// null sink) and no input.
+fn null_devices() -> Devices {
+    let mut name = [0u8; 64];
+    name[..11].copy_from_slice(b"Null output");
+    Devices {
+        output: Device {
+            present: 1,
+            sample_rate: 48_000,
+            channels: 2,
+            buffer_frames: 480,
+            latency_frames: 0,
+            reserved: 0,
+            name,
+        },
+        input: Device::default(),
     }
 }
 

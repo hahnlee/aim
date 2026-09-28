@@ -43,6 +43,36 @@ pub fn note_stack(s: StackInfo) {
     let _ = STACK.set(s);
 }
 
+/// Fork: the main thread's stack areas (the child's memory has them at
+/// the same addresses).
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    w.opt(STACK.get(), |w, s| {
+        for v in [
+            s.lo,
+            s.hi,
+            s.start_stack,
+            s.args.0,
+            s.args.1,
+            s.env.0,
+            s.env.1,
+        ] {
+            w.u64(v);
+        }
+    });
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    if let Some(v) = r.opt(|r| [(); 7].map(|_| r.u64())) {
+        note_stack(StackInfo {
+            lo: v[0],
+            hi: v[1],
+            start_stack: v[2],
+            args: (v[3], v[4]),
+            env: (v[5], v[6]),
+        });
+    }
+}
+
 fn pid() -> i32 {
     super::process::getpid() as i32
 }
@@ -599,6 +629,64 @@ fn uptime() -> String {
     format!("{up:.2} {:.2}\n", up * ncpu() as f64 * 0.9)
 }
 
+/// `/proc/config.gz`: the configuration of the kernel the layer plays, as
+/// libvintf's `RuntimeInfo` reads it (system_server's `Debug.isVmapStack`
+/// aborts when it cannot). Options the layer does not provide are absent.
+const KERNEL_CONFIG: &str = "\
+# Linux/arm64 6.6.0 Kernel Configuration (darwin-linux-abi)
+CONFIG_ARM64=y
+CONFIG_64BIT=y
+CONFIG_MMU=y
+CONFIG_SMP=y
+CONFIG_ARM64_4K_PAGES=y
+CONFIG_ANDROID_BINDER_IPC=y
+CONFIG_ASHMEM=y
+CONFIG_MEMFD_CREATE=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_CGROUPS=y
+CONFIG_INOTIFY_USER=y
+CONFIG_EPOLL=y
+CONFIG_EVENTFD=y
+CONFIG_SIGNALFD=y
+CONFIG_TIMERFD=y
+CONFIG_FUTEX=y
+CONFIG_POSIX_TIMERS=y
+CONFIG_INPUT_EVDEV=y
+CONFIG_UNIX=y
+CONFIG_INET=y
+CONFIG_IPV6=y
+CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
+CONFIG_SECURITY_SELINUX=y
+CONFIG_VMAP_STACK=y
+";
+
+/// `data` as a gzip file of stored (uncompressed) deflate blocks.
+fn gzip_stored(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3];
+    let mut chunks = data.chunks(0xffff).peekable();
+    if chunks.peek().is_none() {
+        out.extend([1, 0, 0, 0xff, 0xff]);
+    }
+    while let Some(c) = chunks.next() {
+        let len = c.len() as u16;
+        out.push(chunks.peek().is_none() as u8);
+        out.extend(len.to_le_bytes());
+        out.extend((!len).to_le_bytes());
+        out.extend(c);
+    }
+    let mut crc = !0u32;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & (crc & 1).wrapping_neg());
+        }
+    }
+    out.extend((!crc).to_le_bytes());
+    out.extend((data.len() as u32).to_le_bytes());
+    out
+}
+
 fn loadavg() -> String {
     let mut l = [0f64; 3];
     // SAFETY: three doubles.
@@ -839,6 +927,7 @@ pub fn node(guest: &str) -> Option<Node> {
                 let mut e = entries(&[
                     ("self", dir::DT_LNK),
                     ("thread-self", dir::DT_LNK),
+                    ("config.gz", dir::DT_REG),
                     ("cpuinfo", dir::DT_REG),
                     ("filesystems", dir::DT_REG),
                     ("loadavg", dir::DT_REG),
@@ -865,6 +954,7 @@ pub fn node(guest: &str) -> Option<Node> {
             "thread-self" => {
                 return pid_node(me, tail, Some(super::process::gettid() as i32));
             }
+            "config.gz" => Node::File(gzip_stored(KERNEL_CONFIG.as_bytes())),
             "cpuinfo" => Node::File(cpuinfo().into_bytes()),
             "meminfo" => Node::File(meminfo().into_bytes()),
             "stat" => Node::File(proc_stat().into_bytes()),
@@ -1340,4 +1430,29 @@ fn attr_current() -> Vec<u8> {
 /// Whether `path` names `/proc/self/exe`.
 pub fn is_self_exe(path: &[u8]) -> bool {
     path == b"/proc/self/exe" || path == format!("/proc/{}/exe", pid()).as_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    /// The host's gzip reads `/proc/config.gz` back verbatim.
+    #[test]
+    fn config_gz_is_gzip() {
+        let big: String = super::KERNEL_CONFIG.repeat(200);
+        for data in ["", super::KERNEL_CONFIG, big.as_str()] {
+            let mut child = Command::new("gzip")
+                .arg("-dc")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let gz = super::gzip_stored(data.as_bytes());
+            child.stdin.take().unwrap().write_all(&gz).unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success());
+            assert_eq!(out.stdout, data.as_bytes());
+        }
+    }
 }

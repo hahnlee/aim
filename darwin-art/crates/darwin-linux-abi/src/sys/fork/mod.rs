@@ -1,21 +1,21 @@
 //! fork and vfork: `clone` without CLONE_VM, and CLONE_VFORK.
 //!
-//! A guest process is a Darwin process, so a fork is a Darwin `fork()` made
-//! from inside the syscall handler. The child is a copy of the calling
-//! thread with the whole address space: guest memory, the translation
-//! cache mappings (file-backed and shared, so still shared), this thread's
-//! `GuestContext`, host stack and TSD slots. It returns from the same
-//! syscall on the same guest context with 0 in x0. Only the layer's own
-//! state that names threads or host objects needs fixing up in the child
-//! ([`child_fixups`]): the pid and tid, the by-pid identity entry, and the
-//! kqueue-backed fds (pidfds, epoll) and binder connection, which are host
-//! objects Darwin does not inherit.
+//! A guest process is a Darwin process, and a guest fork makes a new one
+//! by spawning a fresh `linux-run` that takes over a copy-on-write snapshot
+//! of the guest memory and the layer's state ([`spawn`], [`state`];
+//! `docs/fork.md`). A Darwin `fork()` is never used: its child cannot reach
+//! XPC services, which Metal's shader compiler is. The child resumes the
+//! forking thread's registers with 0 in x0, as its main thread
+//! ([`child_started`] applies the clone flags there).
 //!
 //! `vfork` (CLONE_VM | CLONE_VFORK) is a fork whose parent waits until the
 //! child execs or exits, which is all POSIX lets a vfork child do. The
 //! wait is a close-on-exec pipe the child holds.
 
-use crate::context::{self, GuestContext};
+pub(crate) mod spawn;
+pub(crate) mod state;
+
+use crate::context::GuestContext;
 use crate::errno::{self, EINVAL};
 
 const CSIGNAL: u64 = 0xff;
@@ -175,8 +175,10 @@ fn fork(ctx: &mut GuestContext, mut r: Request) -> i64 {
     if r.flags & (UNSUPPORTED | CLONE_NEWTIME) != 0 {
         return -(EINVAL as i64);
     }
+    let Some(runtime) = super::exec::launch_args() else {
+        return -(libc::ENOEXEC as i64);
+    };
     let vfork = r.flags & CLONE_VFORK != 0;
-    super::wait::prune_pidfds();
     let mut done = [-1i32; 2];
     // SAFETY: plain pipe creation; both ends close on exec.
     if vfork && unsafe { libc::pipe(done.as_mut_ptr()) } < 0 {
@@ -186,41 +188,31 @@ fn fork(ctx: &mut GuestContext, mut r: Request) -> i64 {
         // SAFETY: our pipe.
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
-    // Hold stderr's lock across the fork so the child never inherits it
-    // held by a thread that does not exist there. Darwin's libc takes its
-    // own locks (malloc and the like) in its fork handlers.
-    // The thread layer's locks are held too (thread table, futex waiters,
-    // signal queues, timers), and before them every other lock of the
-    // layer (`forklock`).
-    let layer = super::forklock::acquire();
-    super::thread::fork_prepare();
-    let stderr = std::io::stderr().lock();
-    // SAFETY: fork; the child continues on this thread only.
-    let pid = unsafe { libc::fork() };
-    drop(stderr);
-    layer.release(pid == 0);
-    if pid == 0 {
-        super::thread::fork_child();
-    } else {
-        super::thread::fork_parent();
-    }
-    if pid < 0 {
-        let e = errno::last();
-        for fd in done.into_iter().filter(|&fd| fd >= 0) {
-            // SAFETY: our pipe.
-            unsafe { libc::close(fd) };
+    let setup = spawn::ChildSetup {
+        stack: r.stack,
+        tls: (r.flags & CLONE_SETTLS != 0).then_some(r.tls),
+        set_tid: if r.flags & CLONE_CHILD_SETTID != 0 {
+            r.child_tid
+        } else {
+            0
+        },
+        clear_tid: if r.flags & CLONE_CHILD_CLEARTID != 0 {
+            r.child_tid
+        } else {
+            0
+        },
+        vfork: vfork.then_some((done[0], done[1])),
+    };
+    let pid = match spawn::fork(ctx, &setup, runtime) {
+        Ok(pid) => pid,
+        Err(e) => {
+            for fd in done.into_iter().filter(|&fd| fd >= 0) {
+                // SAFETY: our pipe.
+                unsafe { libc::close(fd) };
+            }
+            return e;
         }
-        return -(e as i64);
-    }
-    if pid == 0 {
-        if vfork {
-            // SAFETY: our pipe's read end; the write end closes on exec
-            // or exit, which releases the parent.
-            unsafe { libc::close(done[0]) };
-        }
-        child_fixups(ctx, &r);
-        return 0;
-    }
+    };
     if own_files_thread {
         own_files_thread_started(pid, &r);
     }
@@ -248,33 +240,19 @@ fn fork(ctx: &mut GuestContext, mut r: Request) -> i64 {
     pid as i64
 }
 
-/// The forked child's layer state beyond the thread layer's (which
-/// `thread::fork_child` reset: pid, the one surviving thread with tid = pid,
-/// futex waiters, pending signals): the host objects Darwin does not
-/// inherit.
-fn child_fixups(ctx: &mut GuestContext, r: &Request) {
+/// In the child, on its main thread before it resumes: what the clone
+/// flags ask of a new process. It returns 0.
+fn child_started(ctx: &mut GuestContext, stack: u64, set_tid: u64, clear_tid: u64) {
     // SAFETY: trivial.
     let pid = unsafe { libc::getpid() };
     // A new process has no clear_child_tid unless it asked for one.
-    let clear = if r.flags & CLONE_CHILD_CLEARTID != 0 {
-        r.child_tid
-    } else {
-        0
-    };
-    super::thread::set_tid_address([clear, 0, 0, 0, 0, 0]);
-    if r.flags & CLONE_CHILD_SETTID != 0 && r.child_tid != 0 {
+    super::thread::set_tid_address([clear_tid, 0, 0, 0, 0, 0]);
+    if set_tid != 0 {
         // SAFETY: guest pointer in the child's copy of memory.
-        unsafe { (r.child_tid as *mut i32).write_unaligned(pid) };
+        unsafe { (set_tid as *mut i32).write_unaligned(pid) };
     }
-    if r.flags & CLONE_SETTLS != 0 {
-        context::set_guest_tp(r.tls);
+    if stack != 0 {
+        ctx.sp = stack;
     }
-    if r.stack != 0 {
-        ctx.sp = r.stack;
-    }
-    crate::patch::fork_child();
-    super::cred::after_fork_child();
-    super::wait::after_fork_child();
-    super::fdtab::after_fork_child();
-    super::binder::after_fork_child();
+    ctx.x[0] = 0;
 }

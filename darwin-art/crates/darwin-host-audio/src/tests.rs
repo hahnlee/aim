@@ -1,8 +1,9 @@
-//! The module against the Mac's real default devices. Output plays a
-//! square wave of one LSB (-90 dBFS, inaudible) for a fraction of a
-//! second, checked through the callback's counters and peak; the
-//! microphone test is ignored by default because it asks macOS for
-//! microphone access.
+//! The module against the Mac's real default devices, its CoreAudio
+//! process served by a thread of the test process. Output plays a square
+//! wave of one LSB (-90 dBFS, inaudible) for a fraction of a second,
+//! checked through the callback's counters and peak; the microphone test is
+//! ignored by default because it asks macOS for microphone access. When
+//! CoreAudio does not answer, the same tests run on the null sink.
 
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::time::{Duration, Instant};
@@ -84,8 +85,17 @@ impl Drop for TestRing {
 }
 
 fn host_call<T>(func: u32, args: &mut T) -> i64 {
+    client::serve_in_thread();
     // SAFETY: a live argument block of its exact size.
     unsafe { call(func, args as *mut T as u64, std::mem::size_of::<T>() as u64) }
+}
+
+fn module_devices() -> Devices {
+    let mut d = Devices::default();
+    assert_eq!(host_call(FN_DEVICES, &mut d), 0);
+    let name = String::from_utf8_lossy(&d.output.name);
+    eprintln!("output device: {}", name.trim_end_matches('\0'));
+    d
 }
 
 fn open(ring: &TestRing, direction: u32, format: u32, rate: u32, channels: u32) -> i64 {
@@ -110,6 +120,7 @@ fn rejects_bad_calls() {
     assert_eq!(host_call(FN_START, &mut s), -(EINVAL as i64));
     assert_eq!(host_call(FN_CLOSE, &mut s), -(EINVAL as i64));
     assert_eq!(host_call(99, &mut s), -(ENOSYS as i64));
+    client::serve_in_thread();
     // SAFETY: a wrong length is refused before the block is touched.
     assert_eq!(
         unsafe { call(FN_START, &mut s as *mut _ as u64, 4) },
@@ -127,7 +138,7 @@ fn rejects_bad_calls() {
 
 #[test]
 fn describes_the_default_output() {
-    let d = devices();
+    let d = module_devices();
     if d.output.present == 0 {
         eprintln!("skipped: no default output device");
         return;
@@ -148,7 +159,7 @@ fn describes_the_default_output() {
 
 #[test]
 fn plays_a_ring_through_the_default_output() {
-    if devices().output.present == 0 {
+    if module_devices().output.present == 0 {
         eprintln!("skipped: no default output device");
         return;
     }
@@ -214,7 +225,7 @@ fn plays_a_ring_through_the_default_output() {
 #[test]
 #[ignore = "opens the microphone, which asks macOS for access on first use"]
 fn captures_from_the_default_input() {
-    let d = devices();
+    let d = module_devices();
     if d.input.present == 0 {
         eprintln!("skipped: no default input device");
         return;

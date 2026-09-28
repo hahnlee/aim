@@ -3,7 +3,10 @@
 //!
 //! The host cannot chown to Android ids, so init's (and the guests')
 //! `chown`/`chmod` results are recorded as `<guest path>\t<uid|->\t<gid|->\t
-//! <octal mode|->` lines; the latest line wins field by field. `stat`
+//! <octal mode|->` lines; the latest line wins field by field. The guest
+//! path is the file's path in the path map's areas (`vfs::attr_key`), so a
+//! bind mount shows its source's owner, and a stub in a process's own tmpfs
+//! does not change what the same guest path shows elsewhere. `stat`
 //! reports these. Files of the image keep their original owner and mode in
 //! the `com.darwin-art.android-inode` attribute android-image-extract
 //! writes (`original`); other paths with no entry (and every path without a
@@ -66,6 +69,11 @@ pub fn lookup(guest: &str) -> Attr {
     let Ok(md) = std::fs::metadata(&path) else {
         return Attr::default();
     };
+    let key = vfs::attr_key(if guest.len() > 1 {
+        guest.trim_end_matches('/')
+    } else {
+        guest
+    });
     use std::os::unix::fs::MetadataExt;
     let stamp = (
         md.size() as i64,
@@ -79,13 +87,8 @@ pub fn lookup(guest: &str) -> Attr {
             map: parse(&text),
         });
     }
-    let key = if guest.len() > 1 {
-        guest.trim_end_matches('/')
-    } else {
-        guest
-    };
     t.as_ref()
-        .and_then(|t| t.map.get(key).copied())
+        .and_then(|t| t.map.get(&key).copied())
         .unwrap_or_default()
 }
 
@@ -174,7 +177,8 @@ pub fn record(guest: &str, a: Attr) {
     };
     let field = |v: Option<u32>| v.map_or("-".to_string(), |v| v.to_string());
     let line = format!(
-        "{guest}\t{}\t{}\t{}\n",
+        "{}\t{}\t{}\t{}\n",
+        vfs::attr_key(guest),
         field(a.uid),
         field(a.gid),
         a.mode.map_or("-".to_string(), |m| format!("{m:o}"))
@@ -256,11 +260,6 @@ pub fn permits(st: &libc::stat, want: u32, uid: u32, gid: u32) -> bool {
         m & 7
     };
     bits & want == want
-}
-
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
-    super::forklock::mutex(&TABLE, held)
 }
 
 #[cfg(test)]

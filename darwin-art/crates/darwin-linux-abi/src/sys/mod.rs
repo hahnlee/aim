@@ -3,6 +3,7 @@
 //! The syscall number is in x8, arguments in x0-x5; the result (or -errno,
 //! with Linux errno values) goes back in x0. Each subsystem owns its calls.
 
+mod arena;
 mod ashmem;
 mod attrs;
 mod binder;
@@ -17,7 +18,6 @@ mod event;
 mod exec;
 pub(crate) mod fdtab;
 mod fork;
-pub(crate) mod forklock;
 mod fs;
 mod fsops;
 mod futex;
@@ -50,11 +50,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::context::GuestContext;
 use crate::errno::ENOSYS;
 
+pub use arena::map_anon as map_guest_anon;
 pub use binder::init as init_binder;
 pub use copies::note as note_copy;
 pub use dir::synthesized_path as synthesized_dir_path;
 pub use exec::{ExecState, init as init_exec, interpret as interpret_script};
-pub use fdtab::{after_fork_child as fds_after_fork_child, init as init_fds};
+pub use fdtab::init as init_fds;
+pub use fork::spawn::{child_main as become_fork_child, reserve_fds as reserve_fork_fds};
+pub(crate) use fork::state as fork_state;
 pub use mem::init_brk;
 pub use mem::run_deferred_unmaps;
 pub use net::adopt as adopt_fd;
@@ -64,8 +67,6 @@ pub use pstate::kernel_release;
 pub(crate) use signal::{install_host_handlers, repoke_self};
 pub use thread::host_tid;
 pub(crate) use thread::{Thread, register_current};
-/// Around a Darwin fork of a guest process.
-pub use thread::{fork_child, fork_parent, fork_prepare};
 pub use window::init as init_heap_window;
 
 /// Read by the trampoline: while set, every syscall takes the full path so

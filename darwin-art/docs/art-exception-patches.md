@@ -73,7 +73,8 @@ The series reserves nothing itself; the old Darwin patch did that with
   VM tag 243. The loader, translated files, thread stacks, host allocations
   and guest mappings without a hint therefore never land in it (Darwin
   places those bottom-up from 4 GiB, Linux top-down far above the window).
-  The reservation is inherited by fork and made again after exec.
+  A fork child and an exec'ed program make it again; a fork child then
+  maps the parent's window pages into it (`docs/fork.md`).
 - **Unmapped to the guest.** Reserved pages look unmapped: they are absent
   from `/proc/self/maps` and from the VM walk behind `mincore`, `madvise` and
   `mremap`; `msync` and `mprotect` there fail with `ENOMEM` (ART's linear
@@ -88,6 +89,14 @@ The series reserves nothing itself; the old Darwin patch did that with
 - **Release.** `munmap` of window pages, and the pages a shrinking or moving
   `mremap` leaves behind, go back to the reservation; `mremap` may grow a
   window mapping in place over reserved pages.
+- **Null page.** A fault on the window's first page is delivered as a
+  `SEGV_MAPERR` at its offset in that page (`si_addr` and the frame's
+  `fault_address`), as a fault on Linux's zero page is: `base | 0` is a null
+  reference that some compiled code decodes as non-null before an implicit
+  null check (`NotificationChannel.setVibrationPattern`, an inlined
+  `long[].length` of a null array, killed every restarted system_server).
+  ART's handler then throws the NullPointerException the code expects.
+  The layer names each such access (pc, lr) among its messages.
 - Nothing is ever mapped below 4 GiB (Darwin's `__PAGEZERO`), so the first
   64 KiB, and the addresses ART's `Context::kBadGprBase` sentinel page
   guards, always fault. ART's "Could not reserve sentinel fault page at the

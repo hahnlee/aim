@@ -5,6 +5,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
+const PROC_PIDREGIONINFO: i32 = 7;
 const PROC_PIDREGIONPATHINFO: i32 = 8;
 const VM_INHERIT_SHARE: u32 = 0;
 
@@ -58,6 +59,47 @@ pub struct Entry {
     pub start: u64,
     pub end: u64,
     pub tag: u32,
+}
+
+/// A VM map entry as a fork snapshot needs it.
+pub struct Info {
+    pub start: u64,
+    pub end: u64,
+    /// Darwin VM_PROT bits, current and maximum.
+    pub prot: u32,
+    pub max_prot: u32,
+    /// Inherited as shared by fork children (MAP_SHARED and the like).
+    pub shared: bool,
+    /// No memory behind it yet (`SM_EMPTY`): never touched.
+    pub empty: bool,
+    pub tag: u32,
+}
+
+const SM_EMPTY: u32 = 3;
+
+/// The entry containing `addr`, or the next one above it (no path lookup).
+pub fn info_at(addr: u64) -> Option<Info> {
+    let mut r: ProcRegionInfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<ProcRegionInfo>() as i32;
+    // SAFETY: proc_pidinfo writes at most `size` bytes into r.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            PROC_PIDREGIONINFO,
+            addr,
+            (&mut r as *mut ProcRegionInfo).cast(),
+            size,
+        )
+    };
+    (n >= size).then(|| Info {
+        start: r.address,
+        end: r.address + r.size,
+        prot: r.protection,
+        max_prot: r.max_protection,
+        shared: r.inheritance == VM_INHERIT_SHARE,
+        empty: r.share_mode == SM_EMPTY && r.pages_resident == 0 && r.pages_swapped_out == 0,
+        tag: r.user_tag,
+    })
 }
 
 fn entry_info(addr: u64) -> Option<ProcRegionWithPathInfo> {

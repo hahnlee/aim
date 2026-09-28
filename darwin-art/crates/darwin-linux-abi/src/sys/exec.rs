@@ -51,6 +51,16 @@ pub fn init(runtime_args: Vec<CString>) {
     }
 }
 
+/// The `linux-run` executable, as this process was started.
+pub fn launch_exe() -> Option<&'static CString> {
+    LAUNCH.get().map(|l| &l.exe)
+}
+
+/// The `linux-run` options describing this runtime.
+pub fn launch_args() -> Option<&'static [CString]> {
+    LAUNCH.get().map(|l| l.args.as_slice())
+}
+
 /// Process state carried over exec on `linux-run`'s command line.
 #[derive(Default)]
 pub struct ExecState {
@@ -355,6 +365,7 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
         arg(program),
     ]);
     host.extend(argv.iter().cloned());
+    super::fork::spawn::wait_handovers();
     let mut hargv: Vec<*const libc::c_char> = host.iter().map(|s| s.as_ptr()).collect();
     hargv.push(std::ptr::null());
     let mut henv: Vec<*const libc::c_char> = envp.iter().map(|s| s.as_ptr()).collect();

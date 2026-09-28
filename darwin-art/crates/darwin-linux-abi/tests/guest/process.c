@@ -19,6 +19,9 @@
 #include <sys/auxv.h>
 #include <sys/capability.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <sys/inotify.h>
+#include <sys/timerfd.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sched.h>
@@ -429,6 +432,117 @@ static void epoll_fork(void) {
   printf("ok epoll_fork\n");
 }
 
+// After fork, private memory is each process's own copy and shared memory
+// is one: writes to a private page after the fork stay in the process that
+// made them, in both directions, while a MAP_SHARED page and a memfd
+// mapping carry them across. Descriptors (with their close-on-exec flags),
+// an eventfd watched by epoll, an inotify watch and an armed timerfd come
+// along.
+static void fork_memory(void) {
+  enum { PAGE = 16384 };
+  char* priv = mmap(NULL, 4 * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  char* shared = mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  int mfd = memfd_create("fork_memory", MFD_CLOEXEC);
+  CHECK(mfd >= 0 && ftruncate(mfd, PAGE) == 0, "memfd");
+  char* viamfd = mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+  // A page protected to nothing keeps its contents.
+  char* hidden = mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(priv != MAP_FAILED && shared != MAP_FAILED && viamfd != MAP_FAILED && hidden != MAP_FAILED,
+        "mmap");
+  strcpy(priv, "before");
+  strcpy(priv + 3 * PAGE, "far");
+  strcpy(shared, "before");
+  strcpy(viamfd, "before");
+  strcpy(hidden, "hidden");
+  CHECK(mprotect(hidden, PAGE, PROT_NONE) == 0, "mprotect");
+  static int in_data = 1;
+  int cloexec_fd = open("/data/local/tmp/process", O_RDONLY | O_CLOEXEC);
+  int plain_fd = open("/data/local/tmp/process", O_RDONLY);
+  int efd = eventfd(0, EFD_CLOEXEC);
+  int ep = epoll_create1(EPOLL_CLOEXEC);
+  struct epoll_event ev = {.events = EPOLLIN, .data.u64 = 0xfeed};
+  CHECK(cloexec_fd >= 0 && plain_fd >= 0 && efd >= 0 && ep >= 0, "fds");
+  CHECK(epoll_ctl(ep, EPOLL_CTL_ADD, efd, &ev) == 0, "epoll_ctl");
+  mkdir("/data/local/tmp/watched", 0700);
+  unlink("/data/local/tmp/watched/new");
+  int in = inotify_init1(IN_CLOEXEC);
+  CHECK(in >= 0 && inotify_add_watch(in, "/data/local/tmp/watched", IN_CREATE) >= 0, "inotify");
+  int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+  struct itimerspec its = {.it_value = {.tv_nsec = 50 * 1000 * 1000}};
+  CHECK(tfd >= 0 && timerfd_settime(tfd, 0, &its, NULL) == 0, "timerfd");
+  int go[2], back[2];
+  CHECK(pipe(go) == 0 && pipe(back) == 0, "pipes");
+  pid_t pid = fork();
+  CHECK(pid >= 0, "fork");
+  if (pid == 0) {
+    char c;
+    int bad = 0;
+    bad |= strcmp(priv, "before") || strcmp(priv + 3 * PAGE, "far") || in_data != 1;
+    bad |= (mprotect(hidden, PAGE, PROT_READ) != 0 || strcmp(hidden, "hidden")) << 1;
+    bad |= !((fcntl(cloexec_fd, F_GETFD) & FD_CLOEXEC) && fcntl(plain_fd, F_GETFD) == 0) << 2;
+    // The parent writes, then lets us look.
+    if (read(go[0], &c, 1) != 1) _exit(99);
+    bad |= (strcmp(priv, "before") || in_data != 1) << 3;
+    bad |= (strcmp(shared, "parent") || strcmp(viamfd, "parent")) << 4;
+    strcpy(priv, "child");
+    in_data = 3;
+    strcpy(shared, "child");
+    strcpy(viamfd, "child");
+    uint64_t one = 1;
+    bad |= (write(efd, &one, 8) != 8) << 6;
+    struct epoll_event got;
+    bad |= (epoll_wait(ep, &got, 1, 5000) != 1 || got.data.u64 != 0xfeed) << 6;
+    close(open("/data/local/tmp/watched/new", O_CREAT | O_WRONLY, 0600));
+    char buf[256];
+    struct pollfd pin = {.fd = in, .events = POLLIN};
+    bad |= (poll(&pin, 1, 5000) != 1 || read(in, buf, sizeof(buf)) <= 0 ||
+            ((struct inotify_event*)buf)->mask != IN_CREATE) << 5;
+    uint64_t ticks = 0;
+    bad |= (read(tfd, &ticks, 8) != 8 || ticks != 1) << 7;
+    if (write(back[1], "y", 1) != 1) _exit(98);
+    _exit(bad);
+  }
+  strcpy(priv, "parent");
+  in_data = 2;
+  strcpy(shared, "parent");
+  strcpy(viamfd, "parent");
+  CHECK(write(go[1], "x", 1) == 1, "go");
+  char c;
+  CHECK(read(back[0], &c, 1) == 1, "back");
+  int st;
+  CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st), "child %#x", st);
+  CHECK(WEXITSTATUS(st) == 0, "child checks failed: mask %#x", WEXITSTATUS(st));
+  CHECK(strcmp(priv, "parent") == 0 && in_data == 2, "the child's private writes stay its own");
+  CHECK(strcmp(shared, "child") == 0 && strcmp(viamfd, "child") == 0, "shared writes arrive");
+  uint64_t v = 0;
+  CHECK(read(efd, &v, 8) == 8 && v == 1, "the child's eventfd write reaches the parent");
+  printf("ok fork_memory\n");
+}
+
+// A parent that exits right after fork (daemon()'s double fork): the
+// grandchild still starts and runs.
+static void fork_then_exit(void) {
+  int p[2];
+  CHECK(pipe(p) == 0, "pipe");
+  pid_t pid = fork();
+  CHECK(pid >= 0, "fork");
+  if (pid == 0) {
+    close(p[0]);
+    if (fork() == 0) {
+      usleep(100 * 1000);
+      _exit(write(p[1], "g", 1) == 1 ? 0 : 1);
+    }
+    _exit(0);
+  }
+  close(p[1]);
+  int st;
+  CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0, "child %#x", st);
+  char c = 0;
+  CHECK(read(p[0], &c, 1) == 1 && c == 'g', "the grandchild ran");
+  close(p[0]);
+  printf("ok fork_then_exit\n");
+}
+
 static void death_by_signal(void) {
   pid_t pid = fork();
   if (pid == 0) {
@@ -573,6 +687,49 @@ static void bench(void) {
   printf("bench fork+exec+exit+wait p50 %.0f us p90 %.0f us\n", t[N / 10], t[N / 5 * 9 / 10]);
 }
 
+// fork+exit+wait with a large address space: N mappings of alternating
+// protection (so none merge), each with a dirty page, and M MiB touched in
+// one more (argv: bench_mappings N M).
+static void bench_mappings(int n, int mib) {
+  enum { PAGE = 16384 };
+  double s = now_us();
+  for (int i = 0; i < n; i++) {
+    char* p = mmap(NULL, 2 * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(p != MAP_FAILED, "mmap %d", i);
+    p[0] = (char)i;
+    if (i % 2) CHECK(mprotect(p + PAGE, PAGE, PROT_READ) == 0, "mprotect");
+  }
+  size_t big = (size_t)mib << 20;
+  char* b = mmap(NULL, big, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(b != MAP_FAILED, "big");
+  for (size_t off = 0; off < big; off += PAGE) b[off] = 1;
+  printf("bench setup %d mappings + %d MiB in %.0f ms\n", n, mib, (now_us() - s) / 1000);
+  enum { R = 10 };
+  double t[R];
+  for (int i = 0; i < R; i++) {
+    double s = now_us();
+    pid_t pid = fork();
+    if (pid == 0) _exit(b[big - PAGE] == 1 ? 0 : 1);
+    int st;
+    CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0, "child %#x", st);
+    t[i] = now_us() - s;
+  }
+  qsort(t, R, sizeof(double), cmp);
+  printf("bench %d mappings + %d MiB: fork+exit+wait p50 %.0f us p90 %.0f us\n", n, mib, t[R / 2],
+         t[R * 9 / 10]);
+  // How long the parent's fork call itself takes.
+  for (int i = 0; i < R; i++) {
+    double s = now_us();
+    pid_t pid = fork();
+    if (pid == 0) _exit(0);
+    t[i] = now_us() - s;
+    waitpid(pid, NULL, 0);
+  }
+  qsort(t, R, sizeof(double), cmp);
+  printf("bench %d mappings + %d MiB: fork in the parent p50 %.0f us p90 %.0f us\n", n, mib,
+         t[R / 2], t[R * 9 / 10]);
+}
+
 static void seccomp_filter(void) {
   // What minijail does for mediaextractor and media.swcodec.
   struct sock_filter allow = BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
@@ -606,6 +763,10 @@ int main(int argc, char** argv) {
     return 0;
   }
   const char* which = argc > 1 ? argv[1] : "all";
+  if (strcmp(which, "bench_mappings") == 0 && argc == 4) {
+    bench_mappings(atoi(argv[2]), atoi(argv[3]));
+    return 0;
+  }
   struct {
     const char* name;
     void (*fn)(void);
@@ -615,6 +776,7 @@ int main(int argc, char** argv) {
       {"exec_image", exec_image},   {"exec_argv", exec_argv},
       {"exec_script", exec_script}, {"waitid_variants", waitid_variants},
       {"pidfd_poll", pidfd_poll},   {"epoll_fork", epoll_fork},   {"death_by_signal", death_by_signal},
+      {"fork_memory", fork_memory}, {"fork_then_exit", fork_then_exit},
       {"identity", identity},       {"identity_file", identity_file},
       {"seccomp_filter", seccomp_filter},
       {"xattrs", xattrs},           {"pf_key", pf_key},

@@ -311,5 +311,16 @@ fn allocates_and_renders_through_the_original_libui_and_libegl() {
         String::from_utf8_lossy(&out.stderr),
         log_of(&allocator_log)
     );
+    // Zygote's pattern: the display got (or initialized) before a fork
+    // without exec, and a shader no cache has seen compiled in the child.
+    let out = guest.run(&["/data/local/tmp/gles_triangle", "fork"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    eprintln!("{stdout}");
+    assert!(
+        out.status.success() && stdout.contains("ok fork child of an initialized display draws"),
+        "{:?}\n{stdout}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -3,6 +3,9 @@
 // through the original libEGL loader and the vendor driver.
 //
 //   gles_triangle          allocate, render, check pixels, print timings
+//   gles_triangle fork     zygote's pattern: get the display, fork, and
+//                          compile and draw in the child (twice: a display
+//                          only got, and one initialized, before the fork)
 //
 // Prints one "ok ..." line per check and "timing ..." lines; exits non-zero
 // on the first failure.
@@ -18,7 +21,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 #define W 64
 #define H 64
@@ -82,6 +87,73 @@ static void frame(GLuint prog, float r, float g, float b) {
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
+// In a fork child: a context on `dpy` (initialized here unless `inited`),
+// a program whose fragment shader no cache has seen (a constant unique to
+// this run), and a triangle read back. Exits with the result.
+static void child_draws(EGLDisplay dpy, int inited) {
+    EGLint major = 0, minor = 0;
+    if (!inited) CHECK(eglInitialize(dpy, &major, &minor), "child eglInitialize %x", eglGetError());
+    const EGLint config_attribs[] = {EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
+                                     EGL_ALPHA_SIZE, 8, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+                                     EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_NONE};
+    EGLConfig config;
+    EGLint n = 0;
+    CHECK(eglChooseConfig(dpy, config_attribs, &config, 1, &n) && n == 1, "child eglChooseConfig %x",
+          eglGetError());
+    const EGLint context_attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    EGLContext ctx = eglCreateContext(dpy, config, EGL_NO_CONTEXT, context_attribs);
+    CHECK(ctx != EGL_NO_CONTEXT, "child eglCreateContext %x", eglGetError());
+    const EGLint pbuffer_attribs[] = {EGL_WIDTH, W, EGL_HEIGHT, H, EGL_NONE};
+    EGLSurface pbuffer = eglCreatePbufferSurface(dpy, config, pbuffer_attribs);
+    CHECK(eglMakeCurrent(dpy, pbuffer, pbuffer, ctx), "child eglMakeCurrent %x", eglGetError());
+    char fs[256];
+    snprintf(fs, sizeof(fs),
+             "#version 300 es\nprecision highp float;\nout vec4 color;\nuniform float u%lld;\n"
+             "void main() { color = vec4(0.0, 1.0, 0.0, 1.0) + vec4(u%lld * %d.0); }\n",
+             (long long)now_ns(), (long long)now_ns(), getpid());
+    GLuint p = glCreateProgram();
+    glAttachShader(p, shader(GL_VERTEX_SHADER, kVertex));
+    glAttachShader(p, shader(GL_FRAGMENT_SHADER, fs));
+    glBindAttribLocation(p, 0, "pos");
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[1024] = "";
+        glGetProgramInfoLog(p, sizeof(log), NULL, log);
+        CHECK(0, "child program link: %s", log);
+    }
+    frame(p, 1.0f, 0.0f, 0.0f);
+    uint8_t pixels[W * H * 4];
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    uint32_t centre = pixels[(H / 2 * W + W / 2) * 4 + 1];
+    CHECK(centre == 0xff, "child centre green %02x", centre);
+    exit(0);
+}
+
+static int fork_and_draw(EGLDisplay dpy, int inited) {
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork");
+    if (pid == 0) child_draws(dpy, inited);
+    int st = 0;
+    CHECK(waitpid(pid, &st, 0) == pid, "waitpid");
+    return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+// Zygote preloads the driver (eglGetDisplay) and forks every app without
+// exec; the app then compiles its shaders.
+static int zygote(void) {
+    EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    CHECK(dpy != EGL_NO_DISPLAY, "eglGetDisplay");
+    CHECK(fork_and_draw(dpy, 0), "the child of a preloading parent draws");
+    printf("ok fork child compiles and draws\n");
+    EGLint major = 0, minor = 0;
+    CHECK(eglInitialize(dpy, &major, &minor), "eglInitialize %x", eglGetError());
+    CHECK(fork_and_draw(dpy, 1), "the child of an initialized parent draws");
+    printf("ok fork child of an initialized display draws\n");
+    return 0;
+}
+
 // RGBA bytes at (x, y) of a readback with the given row pitch.
 static uint32_t at(const uint8_t* p, int pitch, int x, int y) {
     const uint8_t* q = p + y * pitch + x * 4;
@@ -94,8 +166,9 @@ static void check_frame(const uint8_t* p, int pitch, uint32_t clear, const char*
     CHECK(corner == clear, "%s: corner %08x want %08x", what, corner, clear);
 }
 
-int main(void) {
+int main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc > 1 && strcmp(argv[1], "fork") == 0) return zygote();
     // 1. A buffer through AHardwareBuffer (libui's Gralloc5: IAllocator
     // over binder, then mapper.darwin.so in this process).
     AHardwareBuffer_Desc desc = {

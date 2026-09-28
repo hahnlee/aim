@@ -343,11 +343,6 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
     })
 }
 
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
-    super::forklock::mutex(&LOCK, held)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

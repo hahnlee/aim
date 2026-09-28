@@ -246,24 +246,44 @@ fn new_island(hint: u64) -> Option<Island> {
     }
 }
 
-/// In a forked child: Darwin copies the two views of an island as separate
-/// entries, and the executable one comes out without the stubs. Make it a
-/// view of the child's (intact) writable copy again.
-pub fn fork_child() {
+/// Fork: the islands. The child gets a copy of each executable view with
+/// the guest's memory; its writable view is host memory, which it makes
+/// anew from that copy.
+pub(crate) fn fork_save(w: &mut crate::sys::fork_state::Writer) {
     let islands = ISLANDS.lock().unwrap_or_else(|e| e.into_inner());
-    for isl in islands.iter() {
-        if vm::alias(
-            isl.rw,
-            ISLAND_SIZE,
-            Some(isl.rx),
-            libc::PROT_READ | libc::PROT_EXEC,
-        )
-        .is_none()
-        {
-            crate::diag!(
-                "[linux-abi] cannot restore the stub island at {:#x}",
-                isl.rx
+    w.seq(islands.iter(), |w, isl| {
+        w.u64(isl.rx);
+        w.u64(isl.used);
+    });
+}
+
+pub(crate) fn fork_restore(r: &mut crate::sys::fork_state::Reader) {
+    let saved = r.seq(|r| (r.u64(), r.u64()));
+    let mut islands = ISLANDS.lock().unwrap_or_else(|e| e.into_inner());
+    for (rx, used) in saved {
+        // SAFETY: a fresh host mapping, filled from the island's copy.
+        let rw = unsafe {
+            let rw = libc::mmap(
+                std::ptr::null_mut(),
+                ISLAND_SIZE as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
             );
+            if rw == libc::MAP_FAILED {
+                None
+            } else {
+                std::ptr::copy_nonoverlapping(rx as *const u8, rw as *mut u8, ISLAND_SIZE as usize);
+                Some(rw as u64)
+            }
+        };
+        let aliased = rw.and_then(|rw| {
+            vm::alias(rw, ISLAND_SIZE, Some(rx), libc::PROT_READ | libc::PROT_EXEC).map(|_| rw)
+        });
+        match aliased {
+            Some(rw) => islands.push(Island { rx, rw, used }),
+            None => crate::diag!("[linux-abi] cannot restore the stub island at {rx:#x}"),
         }
     }
 }
@@ -498,9 +518,4 @@ pub unsafe fn handle_brk(uc: *mut libc::ucontext_t) -> bool {
         ss.pc += 4;
         true
     }
-}
-
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<crate::sys::forklock::Guard>) -> bool {
-    crate::sys::forklock::mutex(&ISLANDS, held)
 }

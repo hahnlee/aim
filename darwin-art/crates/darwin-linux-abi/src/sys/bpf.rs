@@ -719,11 +719,6 @@ pub fn bpf(a: [u64; 6]) -> i64 {
     }
 }
 
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
-    super::forklock::mutex(&MAPPED, held)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

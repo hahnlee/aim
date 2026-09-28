@@ -10,7 +10,8 @@ use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use darwin_hostcall::audio::{
     DIRECTION_INPUT, DIRECTION_OUTPUT, FORMAT_FLOAT, FORMAT_PCM_16, Open, RING_DATA_OFFSET, Ring,
@@ -19,8 +20,9 @@ use darwin_hostcall::errno::{EINVAL, ENODEV};
 
 use crate::coreaudio::{self as ca, AudioBufferList, AudioTimeStamp, AudioUnit, OSStatus};
 
-/// State the callback reads; boxed so its address is stable.
-struct Shared {
+/// State the callback reads; boxed so its address is stable. The null
+/// sink (`crate::null`) drives the same callbacks from a timer.
+pub(crate) struct Shared {
     base: *mut u8,
     length: usize,
     capacity: u64,
@@ -39,7 +41,48 @@ unsafe impl Send for Shared {}
 unsafe impl Sync for Shared {}
 
 impl Shared {
-    fn ring(&self) -> &Ring {
+    /// Map the guest's ring for a stream of `args`' format and check it.
+    pub(crate) fn new(args: &Open, latency_ns: i64) -> Result<Box<Self>, i32> {
+        let sample_bytes = match args.format {
+            FORMAT_PCM_16 => 2,
+            FORMAT_FLOAT => 4,
+            _ => return Err(EINVAL),
+        };
+        if !matches!(args.direction, DIRECTION_OUTPUT | DIRECTION_INPUT)
+            || !(1..=8).contains(&args.channels)
+            || !(8000..=192_000).contains(&args.sample_rate)
+        {
+            return Err(EINVAL);
+        }
+        let frame_bytes = args.channels as usize * sample_bytes;
+        let (base, length) = map(args.fd, args.length)?;
+        let mut shared = Box::new(Shared {
+            base,
+            length,
+            capacity: 0,
+            frame_bytes,
+            float: args.format == FORMAT_FLOAT,
+            latency_ns,
+            unit: AtomicPtr::new(std::ptr::null_mut()),
+            scratch: UnsafeCell::new(Vec::new()),
+        });
+        let ring = shared.ring();
+        let capacity = ring.capacity_frames as u64;
+        if ring.frame_bytes as usize != frame_bytes
+            || capacity == 0
+            || RING_DATA_OFFSET as u64 + capacity * frame_bytes as u64 > length as u64
+        {
+            return Err(EINVAL);
+        }
+        shared.capacity = capacity;
+        Ok(shared)
+    }
+
+    pub(crate) fn frame_bytes(&self) -> usize {
+        self.frame_bytes
+    }
+
+    pub(crate) fn ring(&self) -> &Ring {
         // SAFETY: the mapping starts with a Ring and lives as long as self.
         unsafe { &*(self.base as *const Ring) }
     }
@@ -108,7 +151,7 @@ impl Shared {
         ring.stamp_seq.store(seq.wrapping_add(2), Release);
     }
 
-    fn account(&self, started: i64) {
+    pub(crate) fn account(&self, started: i64) {
         let ring = self.ring();
         ring.callbacks.fetch_add(1, Relaxed);
         ring.callback_ns
@@ -117,7 +160,7 @@ impl Shared {
 }
 
 /// Output: fill the device's buffer from the ring.
-unsafe extern "C" fn render(
+pub(crate) unsafe extern "C" fn render(
     refcon: *mut c_void,
     _flags: *mut u32,
     time: *const AudioTimeStamp,
@@ -136,6 +179,11 @@ unsafe extern "C" fn render(
     };
     let ring = s.ring();
     let want = (buffer.byte_size as usize / s.frame_bytes).min(frames as usize) as u64;
+    if ring.detached.load(Acquire) != 0 {
+        // SAFETY: the device buffer holds `want` frames.
+        unsafe { std::ptr::write_bytes(buffer.data as *mut u8, 0, want as usize * s.frame_bytes) };
+        return 0;
+    }
     let read = ring.read.load(Relaxed);
     let have = (ring.write.load(Acquire).wrapping_sub(read)).min(s.capacity);
     let n = have.min(want);
@@ -184,6 +232,9 @@ unsafe extern "C" fn capture(
     let started = clock::now_ns();
     // SAFETY: our refcon; the scratch buffer is this thread's alone.
     let s = unsafe { &*(refcon as *const Shared) };
+    if s.ring().detached.load(Acquire) != 0 {
+        return 0;
+    }
     // SAFETY: the scratch buffer is this callback thread's alone.
     let scratch = unsafe { &mut *s.scratch.get() };
     let bytes = frames as usize * s.frame_bytes;
@@ -215,7 +266,7 @@ unsafe extern "C" fn capture(
 impl Shared {
     /// Append captured frames, captured at CLOCK_MONOTONIC `captured_ns`,
     /// dropping what does not fit (counted as xruns).
-    fn push_captured(&self, bytes: &[u8], captured_ns: i64) {
+    pub(crate) fn push_captured(&self, bytes: &[u8], captured_ns: i64) {
         let ring = self.ring();
         let frames = (bytes.len() / self.frame_bytes) as u64;
         self.note_peak(bytes);
@@ -235,12 +286,20 @@ impl Shared {
     }
 }
 
+impl Drop for Shared {
+    fn drop(&mut self) {
+        unmap(self.base, self.length);
+    }
+}
+
 /// The unit's lifecycle, under the stream's lock.
 #[derive(Default)]
 struct State {
     /// Set once the unit is configured and initialized.
     unit: Option<Unit>,
     running: bool,
+    /// An input unit is being set up on its own thread.
+    setting_up: bool,
     closed: bool,
 }
 
@@ -262,39 +321,37 @@ impl Drop for Unit {
 }
 
 struct Inner {
+    // Dropped in this order: the unit (and its callback) before the ring.
     state: Mutex<State>,
     shared: Box<Shared>,
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        // The unit (and its callback) goes before the mapping.
-        self.state.get_mut().unwrap_or_else(|e| e.into_inner()).unit = None;
-        unmap(self.shared.base, self.shared.length);
-    }
+    args: Open,
+    device_channels: u32,
 }
 
 pub struct Stream(Arc<Inner>);
 
+/// Input units being set up, which [`wait_for_setups`] waits for.
+static SETUPS: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+/// Wait up to `timeout` for input units still being set up to finish, so
+/// that none is left half made when the process exits.
+pub fn wait_for_setups(timeout: Duration) -> bool {
+    let (count, done) = &SETUPS;
+    let guard = count.lock().unwrap_or_else(|e| e.into_inner());
+    let (guard, _) = done
+        .wait_timeout_while(guard, timeout, |n| *n > 0)
+        .unwrap_or_else(|e| e.into_inner());
+    *guard == 0
+}
+
 impl Stream {
-    /// Map the ring and set up (but do not start) the unit. An input unit
-    /// is set up on a thread of its own: its first use asks macOS for
-    /// microphone access and waits for the user's answer, and the guest
-    /// must not wait with it. Until then the ring stays empty.
+    /// Map the ring and set up (but do not start) an output unit. An input
+    /// unit is set up on the first start, on a thread of its own: its first
+    /// use asks macOS for microphone access and waits for the user's
+    /// answer, and the guest must not wait with it. Until then the ring
+    /// stays empty.
     pub fn open(args: &Open) -> Result<Self, i32> {
-        let sample_bytes = match args.format {
-            FORMAT_PCM_16 => 2,
-            FORMAT_FLOAT => 4,
-            _ => return Err(EINVAL),
-        };
-        let input = match args.direction {
-            DIRECTION_OUTPUT => false,
-            DIRECTION_INPUT => true,
-            _ => return Err(EINVAL),
-        };
-        if !(1..=8).contains(&args.channels) || !(8000..=192_000).contains(&args.sample_rate) {
-            return Err(EINVAL);
-        }
+        let input = args.direction == DIRECTION_INPUT;
         let device = ca::describe(input);
         if device.present == 0 {
             return Err(ENODEV);
@@ -303,43 +360,21 @@ impl Stream {
         if input && device.sample_rate != args.sample_rate {
             return Err(EINVAL);
         }
-        let frame_bytes = args.channels as usize * sample_bytes;
-        let (base, length) = map(args.fd, args.length)?;
-        let mut shared = Box::new(Shared {
-            base,
-            length,
-            capacity: 0,
-            frame_bytes,
-            float: args.format == FORMAT_FLOAT,
-            latency_ns: device.latency_frames as i64 * 1_000_000_000 / device.sample_rate as i64,
-            unit: AtomicPtr::new(std::ptr::null_mut()),
-            scratch: UnsafeCell::new(Vec::new()),
-        });
-        let ring = shared.ring();
-        let capacity = ring.capacity_frames as u64;
-        if ring.frame_bytes as usize != frame_bytes
-            || capacity == 0
-            || RING_DATA_OFFSET as u64 + capacity * frame_bytes as u64 > length as u64
-        {
-            unmap(base, length);
-            return Err(EINVAL);
-        }
-        ring.device_latency_frames
+        let latency_ns = device.latency_frames as i64 * 1_000_000_000 / device.sample_rate as i64;
+        let shared = Shared::new(args, latency_ns)?;
+        shared
+            .ring()
+            .device_latency_frames
             .store(device.latency_frames, Relaxed);
-        shared.capacity = capacity;
         let inner = Arc::new(Inner {
             state: Mutex::new(State::default()),
             shared,
+            args: *args,
+            device_channels: device.channels,
         });
-        let args = *args;
-        if input {
-            let pending = inner.clone();
-            std::thread::Builder::new()
-                .name("audio-input-setup".into())
-                .spawn(move || pending.set_up(&args, device.channels))
-                .map_err(|_| ENODEV)?;
-        } else if !inner.set_up(&args, device.channels) {
-            return Err(ENODEV);
+        if !input {
+            let unit = new_unit(&inner.shared, args, device.channels).ok_or(ENODEV)?;
+            inner.lock().unit = Some(unit);
         }
         Ok(Self(inner))
     }
@@ -348,7 +383,22 @@ impl Stream {
     pub fn start(&self) -> bool {
         let mut state = self.0.lock();
         state.running = true;
-        state.unit.as_ref().is_none_or(start)
+        if let Some(unit) = &state.unit {
+            return start(unit);
+        }
+        if !state.setting_up {
+            state.setting_up = true;
+            *SETUPS.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            let pending = self.0.clone();
+            let spawned = std::thread::Builder::new()
+                .name("audio-input-setup".into())
+                .spawn(move || pending.set_up());
+            if spawned.is_err() {
+                self.0.set_up_done(&mut state);
+                return false;
+            }
+        }
+        true
     }
 
     /// Stop the callback; returns once it no longer runs.
@@ -383,18 +433,26 @@ impl Inner {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Configure and initialize the unit, then start it if the guest
-    /// already asked to. Returns whether the unit is usable.
-    fn set_up(&self, args: &Open, device_channels: u32) -> bool {
-        let Some(unit) = new_unit(&self.shared, args, device_channels) else {
-            return false;
-        };
+    /// Configure and initialize the input unit, then start it if the
+    /// guest still wants it running.
+    fn set_up(&self) {
+        let unit = new_unit(&self.shared, &self.args, self.device_channels);
         let mut state = self.lock();
-        if state.closed || (state.running && !start(&unit)) {
-            return false;
+        if let Some(unit) = unit
+            && !state.closed
+            && (!state.running || start(&unit))
+        {
+            state.unit = Some(unit);
         }
-        state.unit = Some(unit);
-        true
+        self.set_up_done(&mut state);
+    }
+
+    fn set_up_done(&self, state: &mut State) {
+        state.setting_up = false;
+        let (count, done) = &SETUPS;
+        let mut n = count.lock().unwrap_or_else(|e| e.into_inner());
+        *n -= 1;
+        done.notify_all();
     }
 }
 
@@ -574,7 +632,7 @@ mod tests {
 
     fn shared() -> Shared {
         let length = RING_DATA_OFFSET + CAPACITY as usize * FRAME;
-        // SAFETY: a fresh anonymous shared mapping, unmapped by `release`.
+        // SAFETY: a fresh anonymous shared mapping, unmapped on drop.
         let base = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -596,10 +654,6 @@ mod tests {
             unit: AtomicPtr::new(std::ptr::null_mut()),
             scratch: UnsafeCell::new(Vec::new()),
         }
-    }
-
-    fn release(s: Shared) {
-        unmap(s.base, s.length);
     }
 
     unsafe extern "C" {
@@ -689,7 +743,5 @@ mod tests {
         input.push_captured(&vec![0u8; 200 * FRAME], clock::now_ns());
         assert_eq!(ring.write.load(Relaxed), CAPACITY);
         assert_eq!(ring.xruns.load(Relaxed), 300 - CAPACITY);
-        release(out);
-        release(input);
     }
 }

@@ -62,20 +62,6 @@ fn with_thread<R>(f: impl FnOnce(&mut ThreadState) -> R) -> Result<R, Errno> {
     })
 }
 
-/// In a forked child: Mach port rights do not survive fork, so the calling
-/// thread's reply and thread ports are gone. Forget them (and close the
-/// placeholder fds); the next call makes new ones.
-pub fn forget_thread_ports() {
-    THREAD.with(|t| {
-        if let Some(t) = t.borrow_mut().take() {
-            for fd in t.reserved {
-                // SAFETY: our own placeholder fds.
-                unsafe { libc::close(fd) };
-            }
-        }
-    });
-}
-
 fn call(t: &mut ThreadState, dest: Port, msg: &Msg) -> Result<mach::Received, Errno> {
     match mach::call(&mut t.buf, dest, t.reply, msg) {
         Ok(r) if r.id == wire::REPLY => Ok(r),

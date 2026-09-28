@@ -147,8 +147,9 @@ impl FsOps {
     /// every process shares (the data mirrors zygote's app data isolation
     /// binds from). Between writable areas that is a path-map entry, seen
     /// by every process started from then on; nothing running then does
-    /// not see it (no mount propagation).
-    fn bind(&mut self, source: &str, target: &str) -> Result<Option<Effect>, String> {
+    /// not see it (no mount propagation). With `rec`, the entries below
+    /// SRC come along (the mirror of /data/user gets its /data/user/0).
+    fn bind(&mut self, source: &str, target: &str, rec: bool) -> Result<Option<Effect>, String> {
         let from = self.resolve(source, true)?;
         let to = self.resolve(target, true)?;
         if !matches!(from.area, Area::Writable { .. }) || !matches!(to.area, Area::Writable { .. })
@@ -160,11 +161,30 @@ impl FsOps {
                 "mount {source} {target}: {source} is not a directory"
             ));
         }
+        let below: Vec<MapEntry> = if rec {
+            let prefix = format!("{}/", from.guest);
+            self.map
+                .entries()
+                .iter()
+                .filter_map(|e| {
+                    let rest = e.guest.strip_prefix(&prefix)?;
+                    Some(MapEntry {
+                        guest: format!("{}/{rest}", to.guest),
+                        ..e.clone()
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.map.add(MapEntry {
             guest: to.guest.clone(),
             host: from.host.clone(),
             kind: MapKind::Writable,
         });
+        for entry in below {
+            self.map.add(entry);
+        }
         if self.apply
             && let Some(file) = &self.path_map_file
         {
@@ -556,8 +576,9 @@ impl FsOps {
     ) -> FsResult {
         let resolved = self.resolve(target, true)?;
         if options.iter().any(|o| o == "bind" || o == "rbind") || device.starts_with('/') {
+            let rec = options.iter().any(|o| o == "rec" || o == "rbind");
             if options.iter().any(|o| o == "bind" || o == "rbind")
-                && let Some(effect) = self.bind(device, target)?
+                && let Some(effect) = self.bind(device, target, rec)?
             {
                 return Ok(effect);
             }
@@ -680,6 +701,20 @@ mod tests {
         let map = PathMap::parse_file_text(&text).unwrap();
         let r = map.resolve("/data_mirror/data_de/null/0", true).unwrap();
         assert_eq!(r.host, layout.data.join("data/user_de/0"));
+        // The mirror of /data/user holds user 0's CE storage, /data/data,
+        // as vold's bind propagates to it on Android.
+        ops.mkdir("/data/user", Some(0o511), None, None).unwrap();
+        ops.mkdir("/data_mirror/data_ce", None, None, None).unwrap();
+        ops.mkdir("/data_mirror/data_ce/null", None, None, None)
+            .unwrap();
+        ops.mount("none", "/data/user", "/data_mirror/data_ce/null", &bind)
+            .unwrap();
+        let r = ops
+            .map
+            .resolve("/data_mirror/data_ce/null/0/com.example", true)
+            .unwrap();
+        assert_eq!(r.host, layout.data.join("data/data/com.example"));
+        assert!(layout.data.join("data/user/0").is_dir());
         // A bind out of the read-only image stays unsupported.
         assert!(matches!(
             ops.mount("none", "/system/bin", "/data_mirror/data_de/null", &bind)

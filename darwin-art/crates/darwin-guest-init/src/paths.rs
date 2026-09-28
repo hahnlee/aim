@@ -12,6 +12,7 @@
 //! | `/mnt`, `/tmp`, `/storage`, `/config`, `/data_mirror`, `/linkerconfig` | `<runtime>/<name>` | writable | per boot |
 //! | `/apex/apex-info-list.xml` | `<runtime>/apex/apex-info-list.xml` | writable | per boot |
 //! | `/data`, `/metadata`, `/cache` | `<data>/<name>` | writable | persistent |
+//! | `/data/user/0` | `<data>/data/data` | writable | persistent (vold's bind of `/data/data`) |
 //! | `/proc`, `/sys` | `<runtime>/kernfs/{proc,sys}` | kernfs | per boot: values init wrote |
 //! | `/sys/fs/cgroup` | `<runtime>/cgroup` | cgroup2 | per boot: a plain directory tree |
 //! | `/sys/fs/bpf` | `<runtime>/bpf` | bpf | per boot: pinned eBPF objects |
@@ -386,6 +387,15 @@ impl Layout {
                 kind: MapKind::Writable,
             });
         }
+        // vold binds /data/data onto /data/user/0 (prepare_special_dirs), a
+        // mount /data's shared propagation shows every process, and init's
+        // data mirror of /data/user; the syscall layer's mounts are per
+        // process, so it is an entry here.
+        entries.push(MapEntry {
+            guest: "/data/user/0".to_string(),
+            host: self.data.join("data/data"),
+            kind: MapKind::Writable,
+        });
         for name in ["proc", "sys"] {
             entries.push(MapEntry {
                 guest: format!("/{name}"),
@@ -431,6 +441,13 @@ impl Layout {
         for name in DATA_DIRS {
             fs::create_dir_all(self.data.join(name))?;
         }
+        // The mount point of /data/user/0, a symlink to /data/data in
+        // earlier layouts (#221).
+        let user0 = self.data.join("data/user/0");
+        if fs::symlink_metadata(&user0).is_ok_and(|m| m.file_type().is_symlink()) {
+            fs::remove_file(&user0)?;
+        }
+        fs::create_dir_all(&user0)?;
         for dir in [
             self.properties_dir(),
             self.socket_dir(),

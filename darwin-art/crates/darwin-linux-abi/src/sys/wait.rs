@@ -418,17 +418,40 @@ pub(super) fn prune_pidfds() {
     PIDFDS.lock().unwrap().retain(|p| has_tag(p.fd, p.pid));
 }
 
-/// In a forked child: Darwin did not inherit the kqueues, so each pidfd is
-/// recreated at its number, as Linux children inherit their parent's
-/// pidfds.
+/// Fork: the pidfds (their kqueues are made again in the child).
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    prune_pidfds();
+    let t = PIDFDS.lock().unwrap();
+    w.seq(t.iter(), |w, p| {
+        w.i32(p.fd);
+        w.i32(p.pid);
+        w.bool(p.nonblock);
+    });
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let v = r.seq(|r| PidFd {
+        fd: r.i32(),
+        pid: r.i32(),
+        nonblock: r.bool(),
+    });
+    *PIDFDS.lock().unwrap() = v;
+}
+
+/// The fds of this process's pidfds.
+pub(super) fn pidfd_fds() -> Vec<i32> {
+    prune_pidfds();
+    PIDFDS.lock().unwrap().iter().map(|p| p.fd).collect()
+}
+
+/// In a forked child: kqueues are not inherited, so each pidfd is
+/// recreated at its number (held by a placeholder until now), as Linux
+/// children inherit their parent's pidfds.
 pub(super) fn after_fork_child() {
     let mut t = PIDFDS.lock().unwrap();
     t.retain(|p| {
-        // SAFETY: probing and filling the fd number the kqueue had.
+        // SAFETY: filling the fd number the kqueue had.
         unsafe {
-            if libc::fcntl(p.fd, libc::F_GETFD) >= 0 {
-                return false;
-            }
             let Ok(kq) = new_pidfd_kqueue(p.pid) else {
                 return false;
             };
@@ -443,11 +466,6 @@ pub(super) fn after_fork_child() {
             ok
         }
     });
-}
-
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
-    super::forklock::mutex(&PIDFDS, held)
 }
 
 #[cfg(test)]

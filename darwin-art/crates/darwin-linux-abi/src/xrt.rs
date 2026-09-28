@@ -284,3 +284,51 @@ pub fn loader_source(host: &Path) -> LoaderSource {
         _ => LoaderSource::LoadTime,
     }
 }
+
+/// Fork: what is known about each file, but analyses (redone on demand).
+pub(crate) fn fork_save(w: &mut crate::sys::fork_state::Writer) {
+    let files = rt().files.lock().unwrap();
+    let known: Vec<_> = files
+        .iter()
+        .filter(|(_, s)| !matches!(s, FileState::Uncached(_)))
+        .collect();
+    w.seq(known.into_iter(), |w, (st, s)| {
+        w.u64(st.dev);
+        w.u64(st.ino);
+        w.u64(st.size);
+        w.i64(st.mtime_s);
+        w.i64(st.mtime_ns);
+        match s {
+            FileState::Translated { guest } => {
+                w.u32(0);
+                w.str(guest);
+            }
+            FileState::HasTranslation(p) => {
+                w.u32(1);
+                w.path(p);
+            }
+            FileState::Identity => w.u32(2),
+            _ => w.u32(3),
+        }
+    });
+}
+
+pub(crate) fn fork_restore(r: &mut crate::sys::fork_state::Reader) {
+    let known = r.seq(|r| {
+        let st = FileStat {
+            dev: r.u64(),
+            ino: r.u64(),
+            size: r.u64(),
+            mtime_s: r.i64(),
+            mtime_ns: r.i64(),
+        };
+        let s = match r.u32() {
+            0 => FileState::Translated { guest: r.str() },
+            1 => FileState::HasTranslation(r.path()),
+            2 => FileState::Identity,
+            _ => FileState::Other,
+        };
+        (st, s)
+    });
+    rt().files.lock().unwrap().extend(known);
+}

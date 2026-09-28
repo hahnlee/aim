@@ -4,6 +4,10 @@
 //! - selinuxfs at `/sys/fs/selinux` (libselinux finds it by its statfs
 //!   magic) with `status` (the page `selinux_status_open` maps), `enforce`
 //!   = 0 and `deny_unknown` = 0;
+//! - `policyvers`: the newest policy format Linux loads, which libvintf
+//!   checks against the framework matrix's `kernel-sepolicy-version`
+//!   (without it libselinux answers 15, and ActivityManager warns of an
+//!   inconsistent build);
 //! - `class/<name>/index` and `class/<name>/perms/<perm>` for the classes
 //!   of the image's policy (`plat_sepolicy.cil`, numbered as the kernel
 //!   numbers the loaded policy), so every class is known;
@@ -26,6 +30,8 @@ const MOUNT: &str = "/sys/fs/selinux";
 const PAGE: usize = 16384;
 /// Where the classes and permissions come from.
 const POLICY: &str = "/system/etc/selinux/plat_sepolicy.cil";
+/// `POLICYDB_VERSION_MAX` of Linux 6.12 (`POLICYDB_VERSION_COMP_FTRANS`).
+const POLICY_VERSION: &[u8] = b"33";
 /// `access`'s reply: allowed, decided, auditallow, auditdeny, seqno, flags.
 const ALLOW_ALL: &[u8] = b"ffffffff ffffffff 0 ffffffff 0 0";
 
@@ -200,6 +206,7 @@ pub fn node(rest: &str) -> Option<Node> {
                 ("class", dir::DT_DIR),
                 ("deny_unknown", dir::DT_REG),
                 ("enforce", dir::DT_REG),
+                ("policyvers", dir::DT_REG),
                 ("status", dir::DT_REG),
             ]
             .iter()
@@ -207,6 +214,7 @@ pub fn node(rest: &str) -> Option<Node> {
             .collect(),
         ),
         "enforce" | "deny_unknown" => Node::File(b"0".to_vec()),
+        "policyvers" => Node::File(POLICY_VERSION.to_vec()),
         "status" | "access" => Node::File(Vec::new()),
         "class" => Node::Dir(names(
             classes().iter().map(|c| c.name.as_str()),
@@ -233,14 +241,44 @@ pub fn node(rest: &str) -> Option<Node> {
     })
 }
 
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
-    super::forklock::mutex(&WRITTEN, held)
+/// Fork: the written attributes (a task's `exec`, `fscreate`, ...
+/// contexts are inherited).
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    let v = WRITTEN.lock().unwrap();
+    w.seq(v.iter(), |w, (name, value)| {
+        w.str(name);
+        w.bytes(value);
+    });
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let v = r.seq(|r| (r.str(), r.bytes()));
+    let mut written = WRITTEN.lock().unwrap();
+    for (name, value) in v {
+        if let Some(n) = ATTRS.into_iter().find(|a| *a == name) {
+            written.push((n, value));
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// libvintf's runtime check needs `kernel-sepolicy-version` 30 or
+    /// newer from the Android 16 framework matrix.
+    #[test]
+    fn policyvers_is_a_current_kernels() {
+        let Some(Node::File(v)) = node("policyvers") else {
+            panic!("no policyvers");
+        };
+        let v: u32 = std::str::from_utf8(&v).unwrap().parse().unwrap();
+        assert!(v >= 30, "{v}");
+        let Some(Node::Dir(root)) = node("") else {
+            panic!("no root");
+        };
+        assert!(root.iter().any(|e| e.name == b"policyvers"));
+    }
 
     #[test]
     fn classes_are_numbered_as_the_kernel_loads_them() {

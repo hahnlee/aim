@@ -33,7 +33,7 @@ pub fn stdio_null() -> std::io::Result<i32> {
     // SAFETY: duplicating and replacing this process's own descriptors.
     unsafe {
         // High up, like the layer's other descriptors (`fdtab::hide`).
-        let base = (libc::getdtablesize() * 3 / 4).max(64);
+        let base = crate::sys::fdtab::hidden_base();
         let fd = libc::fcntl(2, libc::F_DUPFD, base);
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
@@ -202,7 +202,21 @@ pub fn install_signal_handlers() {
     crate::sys::install_host_handlers();
 }
 
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<crate::sys::forklock::Guard>) -> bool {
-    crate::sys::forklock::mutex(&MODULES, held)
+/// Fork: the named executable mappings, for diagnostics.
+pub(crate) fn fork_save(w: &mut crate::sys::fork_state::Writer) {
+    let m = MODULES.lock().unwrap_or_else(|e| e.into_inner());
+    w.seq(m.iter(), |w, m| {
+        w.u64(m.start);
+        w.u64(m.end);
+        w.str(&m.name);
+    });
+}
+
+pub(crate) fn fork_restore(r: &mut crate::sys::fork_state::Reader) {
+    let v = r.seq(|r| Module {
+        start: r.u64(),
+        end: r.u64(),
+        name: r.str(),
+    });
+    *MODULES.lock().unwrap_or_else(|e| e.into_inner()) = v;
 }

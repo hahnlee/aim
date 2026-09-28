@@ -68,7 +68,8 @@ other call is a plain thunk.
 
 - **Display.** `eglGetDisplay(EGL_DEFAULT_DISPLAY)` and
   `eglGetPlatformDisplay(EGL_PLATFORM_ANDROID_KHR)` are ANGLE's Metal
-  display. ANGLE's Metal backend offers OpenGL ES 3.0.
+  display, created on first use (see "Displays and fork"). ANGLE's Metal
+  backend offers OpenGL ES 3.0.
 - **Configs.** `EGL_RECORDABLE_ANDROID` and `EGL_FRAMEBUFFER_TARGET_ANDROID`
   are true for every config and dropped from `eglChooseConfig` lists;
   `EGL_NATIVE_VISUAL_ID` is the `PixelFormat` of the config's color buffer
@@ -90,6 +91,43 @@ other call is a plain thunk.
 - **Extensions added**: `EGL_ANDROID_image_native_buffer`,
   `EGL_ANDROID_recordable`, `EGL_ANDROID_framebuffer_target`,
   `EGL_ANDROID_presentation_time`, `EGL_KHR_swap_buffers_with_damage`.
+
+## Displays and fork
+
+Zygote preloads the driver: `ZygoteInit.preload` →
+`nativePreloadGraphicsDriver` → HWUI's `zygote_preload_graphics`, which
+calls `eglGetDisplay(EGL_DEFAULT_DISPLAY)` when HWUI renders with GL. It
+then forks every app without exec. ANGLE's `eglGetPlatformDisplay` already
+creates the Metal device (`angle::IsMetalRendererAvailable` calls
+`MTLCreateSystemDefaultDevice`, which connects to the window server through
+SkyLight), and no host object of a parent is any use to a child. A child of
+Darwin `fork()` could not even compile shaders ("Unable to reach
+MTLCompilerService"), so app windows stayed black (#233) while
+SurfaceFlinger, started by exec, drew. A guest fork is therefore a freshly
+spawned process that takes over the parent's memory and state
+(`docs/fork.md`), and the host module (`crates/darwin-host-gpu`) keeps
+Metal out of zygote:
+
+- `eglGetDisplay`, `eglGetPlatformDisplay` and `eglGetPlatformDisplayEXT`
+  record the request and return a handle, a small number
+  (`src/display.rs`); nothing reaches ANGLE or Metal.
+- The first call that passes the handle (`eglInitialize`) makes the request
+  of ANGLE in the calling process; every EGL call's display argument (always
+  the first) and `FN_IMPORT_BUFFER`'s display are translated, and
+  `eglGetCurrentDisplay` returns the handle. A failed request is retried at
+  the next use; the call gets `EGL_NO_DISPLAY` and fails with
+  `EGL_BAD_DISPLAY`.
+- A fork child takes over the handles (`fork_state`), but none of ANGLE's
+  displays: each is made again on its first use there, and initialized if
+  the guest had initialized it in the parent, since the guest's EGL will
+  not ask again. The child also loads ANGLE on the first forwarded call if
+  the parent had loaded it (`FN_INIT`, which libEGL's loader triggers
+  through `eglGetProcAddress`, runs only in zygote).
+
+`tests/fork.rs` runs zygote's pattern on the host (load ANGLE, get the
+display, fork the way the layer does, then compile a shader unique to the
+run and draw in the child), and `tests/graphics.rs` runs it in the guest
+(`gles_triangle fork`).
 
 ## External textures
 
@@ -120,6 +158,12 @@ There are no sync-file fences yet. A present waits for the GPU (`glFinish`)
 before the buffer is queued with fence -1, and `EGL_ANDROID_native_fence_sync`
 is not offered, so consumers (SurfaceFlinger's RenderEngine, HWUI) wait on the
 CPU. Both are the first costs to remove.
+
+`eglClientWaitSync(KHR)` on a thread without a current context polls the
+sync's `EGL_SYNC_STATUS` every 100 µs up to the timeout. EGL allows such a
+wait, but ANGLE's Metal backend fails it with `EGL_BAD_CONTEXT`, and HWUI's
+`HardwareBitmapUploader` waits that way for the fence of its upload thread
+("Failed to wait for the fence 0x3006" in the launcher).
 
 ## Measured (M2 Pro, `tests/graphics.rs`, release)
 

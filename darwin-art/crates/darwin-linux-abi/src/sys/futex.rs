@@ -609,35 +609,6 @@ pub fn exit_robust_list(head: u64, tid: i32) {
     }
 }
 
-// ---- fork -------------------------------------------------------------------------
-
-/// Hold every bucket lock across a fork (see `thread::fork_prepare`).
-pub fn fork_lock() {
-    for b in &BUCKETS {
-        // SAFETY: static locks, always taken in this order when all are.
-        unsafe { libc::os_unfair_lock_lock(b.lock.get()) };
-    }
-}
-
-/// Release what [`fork_lock`] took. In the child the locks are reset
-/// instead (an `os_unfair_lock` records its owner's thread port, which the
-/// child's thread no longer has), and the waiters, other threads' stack
-/// frames the child does not have, are dropped.
-pub fn fork_unlock(child: bool) {
-    for b in &BUCKETS {
-        // SAFETY: this thread holds every bucket lock (`fork_lock`); in the
-        // child it is the only thread.
-        unsafe {
-            if child {
-                *b.head.get() = std::ptr::null_mut();
-                *b.lock.get() = libc::OS_UNFAIR_LOCK_INIT;
-            } else {
-                libc::os_unfair_lock_unlock(b.lock.get());
-            }
-        }
-    }
-}
-
 // ---- the syscall -------------------------------------------------------------------
 
 fn deadline(ts: u64, relative: bool, realtime: bool) -> Result<Option<u64>, i64> {

@@ -4,7 +4,7 @@
 //! making the directories with their modes and owners.
 
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 pub const AID_ROOT: u32 = 0;
@@ -29,13 +29,30 @@ pub fn prepare_dir(path: &Path, mode: u32, uid: u32, gid: u32) -> io::Result<()>
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
-/// A symlink `link` -> `target`, replacing a different one.
+/// A symlink `link` -> `target`, replacing a different one, or the empty
+/// directories init.rc makes where vold would mount (`mkdir
+/// /mnt/pass_through/0/emulated/0`).
 pub fn link(target: &str, link: &Path) -> io::Result<()> {
     if std::fs::read_link(link).is_ok_and(|t| t == Path::new(target)) {
         return Ok(());
     }
-    let _ = std::fs::remove_file(link);
+    match std::fs::symlink_metadata(link) {
+        Ok(m) if m.is_dir() => remove_empty_dirs(link)?,
+        Ok(_) => std::fs::remove_file(link)?,
+        Err(_) => {}
+    }
     std::os::unix::fs::symlink(target, link)
+}
+
+/// Remove a tree that holds nothing but directories; fail on anything else.
+fn remove_empty_dirs(dir: &Path) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if std::fs::symlink_metadata(&path)?.is_dir() {
+            remove_empty_dirs(&path)?;
+        }
+    }
+    std::fs::remove_dir(dir)
 }
 
 /// Where a volume's per-user data lives: internal storage (`/data`) or an
@@ -120,7 +137,7 @@ pub fn prepare_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Re
             AID_SYSTEM,
             AID_MISC,
         ));
-        // User 0's internal CE app data is /data/data (init links /data/user/0).
+        // User 0's internal CE app data is /data/data (bound on /data/user/0).
         let user_ce = if internal && user == 0 {
             PathBuf::from("/data/data")
         } else {
@@ -138,19 +155,22 @@ pub fn prepare_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Re
 }
 
 /// `fscrypt_init_user0` without keys: `prepare_special_dirs` and user 0's
-/// DE storage. The original bind-mounts /data/data onto /data/user/0 and
-/// relies on /data's shared propagation to show it to every process; mounts
-/// on the syscall layer are per process, so /data/user/0 is the symlink to
-/// /data/data it was before Android 11 (and still is in zygote's isolated
-/// app data views).
+/// DE storage. The original bind-mounts /data/data onto /data/user/0, a
+/// mount /data's shared propagation shows every process and init's data
+/// mirror (zygote finds apps' CE storage there). Mounts on the syscall
+/// layer are per process, so that bind is an entry of guest-init's path
+/// map, and vold checks that it is there.
 pub fn init_user0() -> io::Result<Vec<PathBuf>> {
     prepare_dir(Path::new("/data/data"), 0o771, AID_SYSTEM, AID_SYSTEM)?;
-    std::fs::create_dir_all("/data/user")?;
-    let user0 = Path::new("/data/user/0");
-    if user0.is_dir() && !user0.is_symlink() {
-        std::fs::remove_dir(user0)?;
+    let (data, user0) = (
+        std::fs::metadata("/data/data")?,
+        std::fs::metadata("/data/user/0")?,
+    );
+    if (data.dev(), data.ino()) != (user0.dev(), user0.ino()) {
+        return Err(io::Error::other(
+            "/data/user/0 is not /data/data: the path map has no bind for it",
+        ));
     }
-    link("/data/data", user0)?;
     prepare_dir(Path::new("/data/media"), 0o770, AID_MEDIA_RW, AID_MEDIA_RW)?;
     prepare_dir(
         Path::new("/data/media/obb"),
@@ -216,6 +236,13 @@ mod tests {
         link("/a", &dir.join("l")).unwrap();
         link("/b", &dir.join("l")).unwrap();
         assert_eq!(std::fs::read_link(dir.join("l")).unwrap(), Path::new("/b"));
+        // init.rc's empty directories give way; a file in them does not.
+        std::fs::create_dir_all(dir.join("m/0")).unwrap();
+        link("/c", &dir.join("m")).unwrap();
+        assert_eq!(std::fs::read_link(dir.join("m")).unwrap(), Path::new("/c"));
+        std::fs::create_dir_all(dir.join("n/0")).unwrap();
+        std::fs::write(dir.join("n/0/f"), b"").unwrap();
+        assert!(link("/c", &dir.join("n")).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

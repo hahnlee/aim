@@ -181,6 +181,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lmkd"
+version = "0.1.0"
+dependencies = [
+ "daemon-log",
+ "libc",
+ "log",
+]
+
+[[package]]
 name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"

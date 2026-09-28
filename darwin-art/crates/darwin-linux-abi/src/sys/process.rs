@@ -19,6 +19,17 @@ pub fn set_exe(guest: String, host: String) {
     let _ = EXE.set(Exe { guest, host });
 }
 
+/// Fork: the program, for `/proc/self/exe`.
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    w.str(&exe_guest_path());
+    w.str(&exe_host_path());
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let (guest, host) = (r.str(), r.str());
+    set_exe(guest, host);
+}
+
 pub fn exe_guest_path() -> String {
     EXE.get().map(|e| e.guest.clone()).unwrap_or_default()
 }

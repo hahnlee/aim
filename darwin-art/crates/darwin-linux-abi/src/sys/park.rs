@@ -174,19 +174,6 @@ fn timer_kq(stale: i32) -> Option<i32> {
     Some(*kq)
 }
 
-/// Held across a fork (see `thread::fork_prepare`).
-pub fn fork_lock() -> std::sync::MutexGuard<'static, i32> {
-    TIMER_KQ.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// In the child: kqueues are not inherited and the timer thread is gone.
-pub fn fork_child(mut kq: std::sync::MutexGuard<'static, i32>) {
-    if *kq >= 0 {
-        super::fdtab::unhide(*kq);
-    }
-    *kq = -1;
-}
-
 fn kevent(kq: i32, ev: &libc::kevent64_s) -> i32 {
     // SAFETY: one change, no events out.
     unsafe { libc::kevent64(kq, ev, 1, std::ptr::null_mut(), 0, 0, std::ptr::null()) }

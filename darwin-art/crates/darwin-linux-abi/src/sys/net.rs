@@ -99,6 +99,32 @@ impl Sock {
     }
 }
 
+/// Fork: a socket's Linux state.
+pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
+    w.u32(match s.ty {
+        SockType::Stream => 0,
+        SockType::Dgram => 1,
+        SockType::SeqPacket => 2,
+    });
+    w.bool(s.passcred.load(std::sync::atomic::Ordering::Relaxed));
+    w.opt(s.local.lock().unwrap().as_deref(), |w, a| w.bytes(a));
+    w.opt(s.peer.lock().unwrap().as_deref(), |w, a| w.bytes(a));
+}
+
+pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
+    let ty = match r.u32() {
+        0 => SockType::Stream,
+        1 => SockType::Dgram,
+        _ => SockType::SeqPacket,
+    };
+    let s = Sock::new(ty);
+    s.passcred
+        .store(r.bool(), std::sync::atomic::Ordering::Relaxed);
+    *s.local.lock().unwrap() = r.opt(|r| r.bytes());
+    *s.peer.lock().unwrap() = r.opt(|r| r.bytes());
+    s
+}
+
 fn sock(fd: i32) -> Option<Arc<Sock>> {
     match fdtab::get(fd) {
         Some(Kind::Sock(s)) => Some(s),

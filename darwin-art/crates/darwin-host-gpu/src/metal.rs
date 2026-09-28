@@ -123,8 +123,9 @@ pub fn import_buffer(a: &mut ImportBuffer) -> i64 {
         return EINVAL;
     }
     let pool = pool_push();
+    let display = crate::display::host(a.display as usize);
     let image = (|| {
-        let device = device(a.display as usize)?;
+        let device = device(display)?;
         let buffer = send!(device, c"newBufferWithBytesNoCopy:length:options:deallocator:" => Id,
             *mut c_void = a.address as *mut c_void, usize = a.length as usize,
             usize = MTL_STORAGE_MODE_SHARED, Id = std::ptr::null_mut());
@@ -154,7 +155,7 @@ pub fn import_buffer(a: &mut ImportBuffer) -> i64 {
             let f: unsafe extern "C" fn(usize, usize, u32, Id, *const i32) -> usize =
                 std::mem::transmute(create_image);
             let image = f(
-                a.display as usize,
+                display,
                 EGL_NO_CONTEXT,
                 EGL_METAL_TEXTURE_ANGLE,
                 texture,

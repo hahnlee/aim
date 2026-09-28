@@ -3,7 +3,7 @@
 //! over the configuration of [`crate::config::primary`].
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use android_hardware_audio_core::aidl::android::hardware::audio::core::{
     AudioPatch::AudioPatch,
@@ -87,9 +87,17 @@ struct State {
     mic_mute: bool,
 }
 
-pub struct Module {
+/// The module once the host's devices are known.
+struct Ready {
     state: Mutex<State>,
     devices: Devices,
+}
+
+/// Registered at once; the first call that needs the ports asks the host
+/// for its devices (which answers within a few seconds, with a null output
+/// when CoreAudio does not).
+pub struct Module {
+    ready: Arc<OnceLock<Ready>>,
 }
 
 fn illegal_argument<T>(why: std::fmt::Arguments) -> binder::Result<T> {
@@ -144,8 +152,9 @@ impl State {
     }
 }
 
-impl Module {
-    pub fn new(devices: Devices) -> Self {
+impl Ready {
+    fn new() -> Self {
+        let devices = crate::host_devices();
         let c = config::primary(&devices);
         Self {
             state: Mutex::new(State {
@@ -164,18 +173,39 @@ impl Module {
             devices,
         }
     }
+}
+
+impl Module {
+    /// The devices are asked for on a thread of its own at once, so that
+    /// they are usually known by the first call.
+    pub fn new() -> Self {
+        let ready = Arc::new(OnceLock::new());
+        let early = ready.clone();
+        std::thread::spawn(move || {
+            early.get_or_init(Ready::new);
+        });
+        Self { ready }
+    }
+
+    fn ready(&self) -> &Ready {
+        self.ready.get_or_init(Ready::new)
+    }
+
+    fn devices(&self) -> &Devices {
+        &self.ready().devices
+    }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.ready().state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The nominal latency of a stream: one device buffer, which is the
     /// period the host ring is drained or filled at.
     fn nominal_latency_ms(&self, input: bool) -> i32 {
         let d = if input {
-            &self.devices.input
+            self.devices().input
         } else {
-            &self.devices.output
+            self.devices().output
         };
         (d.buffer_frames as u64 * 1000).div_ceil(d.sample_rate.max(1) as u64) as i32
     }
@@ -243,9 +273,9 @@ impl Module {
             ));
         }
         let device_buffer = if input {
-            self.devices.input.buffer_frames
+            self.devices().input.buffer_frames
         } else {
-            self.devices.output.buffer_frames
+            self.devices().output.buffer_frames
         };
         // Output: one stream buffer plus one device buffer, so a write
         // lands while the callback drains the previous one (measured: no

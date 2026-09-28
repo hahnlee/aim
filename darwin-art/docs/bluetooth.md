@@ -50,7 +50,10 @@ HAL reader thread: poll(fd) -> FN_RECV* -> hciEventReceived /        its own
 
 It reports HCI and LMP 5.3, manufacturer `0xffff`, and the LMP features
 *LE supported* and *BR/EDR not supported*. The stack therefore runs LE
-only; CoreBluetooth has no BR/EDR.
+only; CoreBluetooth has no BR/EDR. They also claim *Secure Simple
+Pairing*: the Android stack asserts it at start-up (`btm_sec_dev_reset`,
+"only controllers with SSP is supported") and aborts without it, LE only
+or not.
 
 - **Address.** Derived from the Mac's hardware UUID (`gethostuuid`), marked
   locally administered. It is stable per Mac and never a real device's

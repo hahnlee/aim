@@ -174,7 +174,7 @@ pub mod gpu {
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Default)]
     pub struct ImportBuffer {
-        /// The host `EGLDisplay`.
+        /// The `EGLDisplay`, as the guest's EGL calls pass it.
         pub display: u64,
         /// Page-aligned guest mapping of the whole buffer, pixels at 0.
         pub address: u64,
@@ -561,7 +561,10 @@ pub mod audio {
         /// Largest |sample| the device callback moved (f32 bits, full scale
         /// 1.0), until the guest resets it.
         pub peak_bits: AtomicU32,
-        pub reserved: u32,
+        /// Set by the host when the stream moved off its device to the
+        /// null sink (the device process stopped answering): from then on
+        /// the device callback leaves the ring alone.
+        pub detached: AtomicU32,
         /// Latency probe, output only. The guest stores the CLOCK_MONOTONIC
         /// time of a write in `mark_ns`, then its first frame plus one in
         /// `mark` (only while `mark` is 0). The callback that consumes that

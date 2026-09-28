@@ -259,6 +259,16 @@ fn epoll_fds_survive_fork() {
 }
 
 #[test]
+fn fork_copies_private_memory_and_shares_shared_memory() {
+    check("fork_memory");
+}
+
+#[test]
+fn a_parent_that_exits_right_after_fork_leaves_a_running_child() {
+    check("fork_then_exit");
+}
+
+#[test]
 fn a_fatal_signal_ends_the_host_process_with_it() {
     check("death_by_signal");
 }
@@ -370,4 +380,18 @@ fn process_latency() {
     let out = linux_run(root, &[PROGRAM, "bench"], |_| {});
     eprintln!("{}", String::from_utf8_lossy(&out.stdout));
     assert!(out.status.success());
+}
+
+/// fork+exit+wait of a process with zygote's shape: thousands of mappings
+/// and hundreds of MiB of touched memory (printed, not asserted).
+#[test]
+fn fork_latency_with_a_large_address_space() {
+    let Some(root) = root() else { return };
+    let out = linux_run(root, &[PROGRAM, "bench_mappings", "4000", "300"], |_| {});
+    eprintln!("{}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

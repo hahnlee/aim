@@ -101,6 +101,20 @@ static DUMPABLE: AtomicU64 = AtomicU64::new(1);
 static TIMERSLACK: AtomicU64 = AtomicU64::new(50_000);
 static SECCOMP: AtomicU64 = AtomicU64::new(0);
 
+/// Fork: what a child inherits (not the parent-death signal, which
+/// Linux clears).
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    for v in [&KEEPCAPS, &DUMPABLE, &TIMERSLACK, &SECCOMP] {
+        w.u64(v.load(Relaxed));
+    }
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    for v in [&KEEPCAPS, &DUMPABLE, &TIMERSLACK, &SECCOMP] {
+        v.store(r.u64(), Relaxed);
+    }
+}
+
 pub fn prctl(a: [u64; 6]) -> i64 {
     if let Some(r) = super::cred::prctl(a) {
         return r;

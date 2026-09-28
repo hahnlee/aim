@@ -14,9 +14,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
-use super::forklock::ForkRwLock;
 use super::{epoll, evdev, event, inotify, knob, memfd, net};
 
 /// Guest fds below this have a byte in [`SLOW`]; the lean path sends larger
@@ -44,7 +43,7 @@ pub enum Kind {
     Evdev(Arc<evdev::Evdev>),
 }
 
-static TABLE: LazyLock<ForkRwLock<HashMap<i32, Kind>>> = LazyLock::new(Default::default);
+static TABLE: LazyLock<RwLock<HashMap<i32, Kind>>> = LazyLock::new(Default::default);
 
 fn set_slow(fd: i32, on: bool) {
     if let Some(b) = SLOW.get(fd as usize) {
@@ -132,41 +131,28 @@ pub fn anon_name(fd: i32) -> Option<String> {
     )
 }
 
-/// The pid whose fork-child fixups ran last.
-static FIXED_FOR: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+/// The fds of epolls and inotifies: kqueues, which a fork child makes
+/// again on the same numbers.
+pub fn kqueue_fds() -> Vec<i32> {
+    fds_where(|k| matches!(k, Kind::Epoll(_) | Kind::Inotify(_)))
+        .into_iter()
+        .map(|(fd, _)| fd)
+        .collect()
+}
 
-/// In a fork child, before guest code runs: Darwin gives the child no
-/// kqueues and no threads, so epoll and inotify fds are rebuilt on their
-/// numbers and the timerfd thread restarted. Idempotent per process, so the
-/// fork path may call it besides the `pthread_atfork` handler.
+/// In a fork child, once the table is restored and before guest code
+/// runs: kqueues are not inherited and the child has no threads, so epoll
+/// and inotify fds are rebuilt on their numbers (held by placeholders until
+/// now) and the timerfd thread restarted.
 pub fn after_fork_child() {
-    // SAFETY: trivial.
-    let pid = unsafe { libc::getpid() };
-    if FIXED_FOR.swap(pid, Ordering::Relaxed) == pid {
-        return;
-    }
     epoll::after_fork_child();
     inotify::after_fork_child();
     event::after_fork_child();
 }
 
-extern "C" fn atfork_child() {
-    // The guest's fork holds the table's lock here and runs this itself
-    // (`fork::child_fixups`) once it has released it.
-    if !super::forklock::held() {
-        after_fork_child();
-    }
-}
-
-/// Set up the table for this process: recognize inherited sockets and
-/// rebuild kqueue-backed fds in fork children (Darwin does not inherit
-/// kqueues).
+/// Set up the table for this process: recognize inherited sockets.
 pub fn init() {
-    // SAFETY: trivial.
-    FIXED_FOR.store(unsafe { libc::getpid() }, Ordering::Relaxed);
     adopt_inherited();
-    // SAFETY: registering a plain C callback.
-    unsafe { libc::pthread_atfork(None, None, Some(atfork_child)) };
 }
 
 /// Every fd in the table whose kind matches `f`.
@@ -220,13 +206,7 @@ static HIDDEN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 /// Move a descriptor the layer keeps for itself (an eventfd's peer end)
 /// high up, out of the guest's way, and leave it out of `/proc/self/fd`.
 pub fn hide(fd: i32) -> i32 {
-    let mut lim = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: plain getrlimit into a local.
-    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) };
-    let base = (lim.rlim_cur.min(1 << 20) * 3 / 4).max(64) as i32;
+    let base = hidden_base();
     // SAFETY: duplicating our own fd, then closing the original.
     let high = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, base) };
     let fd = if high >= 0 {
@@ -237,6 +217,19 @@ pub fn hide(fd: i32) -> i32 {
     };
     HIDDEN.lock().unwrap().push(fd);
     fd
+}
+
+/// Where the layer's own fds go: high up, but below `OPEN_MAX` (10240),
+/// the highest fd `posix_spawn` can pass to a fork child
+/// (`posix_spawn_file_actions_addinherit_np` refuses the rest with EBADF),
+/// and within the descriptor table: F_DUPFD fails above it, as it does at
+/// 3/4 of a soft RLIMIT_NOFILE beyond kern.maxfilesperproc.
+pub fn hidden_base() -> i32 {
+    // <sys/syslimits.h>.
+    const OPEN_MAX: i32 = 10240;
+    // SAFETY: plain getdtablesize.
+    let table = unsafe { libc::getdtablesize() };
+    (table.min(OPEN_MAX) * 3 / 4).max(64)
 }
 
 /// Leave `fd` (the layer's, kept across exec) out of the guest's view.
@@ -252,7 +245,184 @@ pub fn is_hidden(fd: i32) -> bool {
     HIDDEN.lock().unwrap().contains(&fd)
 }
 
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
-    super::forklock::rwlock(&TABLE, held) && super::forklock::mutex(&HIDDEN, held)
+/// Fork: every fd's kind, with fds that share an object (dup'ed ones)
+/// sharing it again in the child, and the layer's hidden fds. The fds
+/// themselves are inherited. Knob and evdev fds stay plain fds: a knob's
+/// action is code, and an input device is opened again.
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    let table = TABLE.read().unwrap();
+    let mut objects: Vec<*const ()> = Vec::new();
+    let mut entries: Vec<(i32, &Kind, usize, bool)> = Vec::new();
+    for (fd, k) in table.iter() {
+        let p = match k {
+            Kind::Event(a) => Arc::as_ptr(a) as *const (),
+            Kind::Timer(a) => Arc::as_ptr(a) as *const (),
+            Kind::Sock(a) => Arc::as_ptr(a) as *const (),
+            Kind::Epoll(a) => Arc::as_ptr(a) as *const (),
+            Kind::Inotify(a) => Arc::as_ptr(a) as *const (),
+            Kind::Dir(a) => Arc::as_ptr(a) as *const (),
+            Kind::Memfd(_) => std::ptr::null(),
+            Kind::Knob(_) | Kind::Evdev(_) => continue,
+        };
+        let (i, new) = match objects.iter().position(|&o| !p.is_null() && o == p) {
+            Some(i) => (i, false),
+            None => {
+                objects.push(p);
+                (objects.len() - 1, true)
+            }
+        };
+        entries.push((*fd, k, i, new));
+    }
+    // Objects first seen at a lower index come first in the child too.
+    entries.sort_by_key(|e| (e.2, !e.3));
+    w.seq(entries.into_iter(), |w, (fd, k, i, new)| {
+        w.i32(fd);
+        w.u64(i as u64);
+        w.bool(new);
+        if !new {
+            return;
+        }
+        match k {
+            Kind::Event(e) => {
+                w.u32(0);
+                event::save_event(e, w);
+            }
+            Kind::Timer(t) => {
+                w.u32(1);
+                event::save_timer(t, w);
+            }
+            Kind::Sock(s) => {
+                w.u32(2);
+                net::save_sock(s, w);
+            }
+            Kind::Epoll(e) => {
+                w.u32(3);
+                epoll::save(e, w);
+            }
+            Kind::Inotify(i) => {
+                w.u32(4);
+                inotify::save(i, w);
+            }
+            Kind::Dir(d) => {
+                w.u32(5);
+                super::dir::save(&d.lock().unwrap(), w);
+            }
+            Kind::Memfd(k) => {
+                w.u32(6);
+                w.u64(k.0);
+                w.u64(k.1);
+            }
+            Kind::Knob(_) | Kind::Evdev(_) => unreachable!(),
+        }
+    });
+    w.seq(HIDDEN.lock().unwrap().iter(), |w, fd| w.i32(*fd));
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let mut objects: Vec<Kind> = Vec::new();
+    let entries = r.seq(|r| {
+        let fd = r.i32();
+        let i = r.u64() as usize;
+        if !r.bool() {
+            return (fd, objects.get(i).cloned());
+        }
+        let k = match r.u32() {
+            0 => Kind::Event(event::load_event(r)),
+            1 => Kind::Timer(event::load_timer(r)),
+            2 => Kind::Sock(net::load_sock(r)),
+            3 => Kind::Epoll(epoll::load(r)),
+            4 => Kind::Inotify(inotify::load(r)),
+            5 => Kind::Dir(Arc::new(Mutex::new(super::dir::load(r)))),
+            _ => Kind::Memfd((r.u64(), r.u64())),
+        };
+        objects.push(k.clone());
+        (fd, Some(k))
+    });
+    for (fd, k) in entries {
+        if let Some(k) = k {
+            insert(fd, k);
+        }
+    }
+    keep_inherited_hidden(r.seq(|r| r.i32()));
+}
+
+/// Fork child: hide the parent's hidden fds that came along, beside this
+/// process's own. One that did not (a kqueue, such as the timer kqueue)
+/// is a free number the guest may get.
+fn keep_inherited_hidden(parent: Vec<i32>) {
+    let mut hidden = HIDDEN.lock().unwrap();
+    for fd in parent {
+        // SAFETY: plain fcntl on a possibly closed fd.
+        if !hidden.contains(&fd) && unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0 {
+            hidden.push(fd);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" {
+        fn posix_spawn_file_actions_addinherit_np(
+            actions: *mut libc::posix_spawn_file_actions_t,
+            fd: libc::c_int,
+        ) -> libc::c_int;
+    }
+
+    /// A hidden fd goes high even when the soft RLIMIT_NOFILE is above
+    /// what the descriptor table can hold, and stays where `posix_spawn`
+    /// can pass it to a fork child.
+    #[test]
+    fn a_hidden_fd_goes_high_and_stays_inheritable() {
+        // SAFETY: raising this test process's soft limit to its hard one.
+        unsafe {
+            let mut lim: libc::rlimit = std::mem::zeroed();
+            libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim);
+            lim.rlim_cur = lim.rlim_max;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+        }
+        // SAFETY: a new kqueue of our own.
+        let kq = unsafe { libc::kqueue() };
+        let fd = hide(kq);
+        assert!(fd >= hidden_base() && fd < 10240, "{fd}");
+        // SAFETY: a file action list of our own, destroyed here.
+        let r = unsafe {
+            let mut actions: libc::posix_spawn_file_actions_t = std::ptr::null_mut();
+            libc::posix_spawn_file_actions_init(&mut actions);
+            let r = posix_spawn_file_actions_addinherit_np(&mut actions, fd);
+            libc::posix_spawn_file_actions_destroy(&mut actions);
+            r
+        };
+        assert_eq!(r, 0, "fd {fd} cannot be passed to a fork child");
+        unhide(fd);
+        // SAFETY: our fd.
+        unsafe { libc::close(fd) };
+    }
+
+    /// A fork child hides the parent's hidden fds it inherited, not the
+    /// numbers of those it did not, and keeps its own.
+    #[test]
+    fn a_fork_child_hides_only_inherited_fds() {
+        // SAFETY: new pipes of our own; `gone` is closed, as a parent's
+        // kqueue is in the child.
+        let (own, inherited, gone) = unsafe {
+            let mut p = [0; 2];
+            let mut q = [0; 2];
+            libc::pipe(p.as_mut_ptr());
+            libc::pipe(q.as_mut_ptr());
+            libc::close(q[1]);
+            (p[0], p[1], q[0])
+        };
+        keep_hidden(own);
+        // SAFETY: our fd.
+        unsafe { libc::close(gone) };
+        keep_inherited_hidden(vec![inherited, gone]);
+        assert!(is_hidden(own) && is_hidden(inherited) && !is_hidden(gone));
+        for fd in [own, inherited] {
+            unhide(fd);
+            // SAFETY: our fds.
+            unsafe { libc::close(fd) };
+        }
+    }
 }
