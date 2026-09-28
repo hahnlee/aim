@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The device's Vulkan driver (docs/vulkan-driver.md) is MoltenVK, which
+     lacks geometry shaders among the features of hardware level 1: the
+     device supports Vulkan hardware level 0. -->
+<permissions>
+    <feature name="android.hardware.vulkan.level" version="0" />
+</permissions>

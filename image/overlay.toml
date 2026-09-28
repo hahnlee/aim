@@ -298,6 +298,15 @@ reason = "the device's Vulkan driver: thunks to MoltenVK (Metal) on the host"
 path = "/vendor/lib64/hw/vulkan.ranchu.so"
 reason = "the emulator's Vulkan driver streams to the emulator host (gfxstream); ours is vulkan.aim.so"
 
+[[replace]]
+path = "/vendor/etc/permissions/android.hardware.vulkan.level.xml"
+source = "image/vendor/etc/permissions/android.hardware.vulkan.level.xml"
+reason = "the emulator's driver declares hardware level 1; MoltenVK lacks geometry shaders, so ours is level 0"
+
+[[remove]]
+path = "/vendor/etc/permissions/android.software.vulkan.deqp.level.xml"
+reason = "declares that the emulator's driver passes this release's dEQP; ours has not been run against it"
+
 # Composer (docs/composer.md): IComposer/default V4, one display shown in a
 # macOS window by the display server, reached over the host-call module
 # `display`. The ranchu composer's .rc and fragment are removed below.
