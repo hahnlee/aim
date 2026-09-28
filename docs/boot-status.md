@@ -224,7 +224,9 @@ guest-init --image DERIVED --data DATA --run --exclude bootanim \
     --gpu _build/angle-source/out/AimRelease --display DISPLAY
 ```
 
-`cargo aim boot` runs these two with these flags.
+`cargo aim boot` runs these two with these flags, and gives aim-display
+`--capture target/aim/boot/capture.bmp`: SIGUSR1 to it writes the last
+presented buffer there.
 
 | Since guest-init started | s |
 | --- | --- |
