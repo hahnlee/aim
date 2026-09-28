@@ -399,8 +399,7 @@ fn send_signal(pid: i32, sig: i32) -> i64 {
             h => h,
         }
     };
-    // SAFETY: plain kill.
-    errno::check(unsafe { libc::kill(pid, host) } as i64)
+    super::signal::signal_process(pid, sig, host)
 }
 
 pub fn pidfd_send_signal(a: [u64; 6]) -> i64 {

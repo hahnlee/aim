@@ -597,7 +597,11 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   Guest pids are host pids. A `linux-run` started without a table (tests,
   a debugging shell) gets a private one: a namespace of itself and its
   descendants, which die with it as with a namespace's init. A shell joins
-  a boot's namespace with `--by-pid <runtime>/identity/by-pid`.
+  a boot's namespace with `--by-pid <runtime>/identity/by-pid`. Between
+  guest processes the kernel's permission rules hold, on the credentials
+  of the table: `kill` and pidfd signals need a matching real or saved
+  uid or CAP_KILL (SIGCONT also within the session), renicing and
+  rescheduling a matching uid or CAP_SYS_NICE.
 - **cgroup v2 and bpffs** are writable areas of the path map: the
   hierarchy holds the directories libprocessgroup creates, and no
   controller acts.

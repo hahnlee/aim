@@ -743,6 +743,124 @@ static void pid_namespace(pid_t host) {
   printf("ok pid_namespace\n");
 }
 
+// A child that takes real, effective and saved uid `r`, `e`, `s` (and the
+// same gids), starts a session if asked, reports on `ready` and waits.
+static pid_t idle_as(uid_t r, uid_t e, uid_t s, int session, const int ready[2]) {
+  pid_t pid = fork();
+  CHECK(pid >= 0, "fork");
+  if (pid == 0) {
+    if (session) setsid();
+    if (setresgid(r, e, s) != 0 || setresuid(r, e, s) != 0) _exit(9);
+    write(ready[1], "r", 1);
+    for (;;) pause();
+  }
+  char c;
+  CHECK(read(ready[0], &c, 1) == 1, "child %d ready", pid);
+  return pid;
+}
+
+// A child that becomes uid `uid` keeping capabilities `caps` (bits of the
+// first word), runs `fn` and exits with its failures.
+static void run_as(uid_t uid, uint32_t caps, void (*fn)(void)) {
+  pid_t pid = fork();
+  CHECK(pid >= 0, "fork");
+  if (pid == 0) {
+    struct __user_cap_header_struct h = {_LINUX_CAPABILITY_VERSION_3, 0};
+    struct __user_cap_data_struct d[2] = {{caps, caps, 0}, {0, 0, 0}};
+    CHECK(prctl(PR_SET_KEEPCAPS, 1) == 0, "keepcaps");
+    CHECK(setresgid(uid, uid, uid) == 0 && setresuid(uid, uid, uid) == 0, "uid %d", uid);
+    CHECK(capset(&h, d) == 0, "capset %#x", caps);
+    fn();
+    _exit(0);
+  }
+  int st;
+  CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0, "uid %d: %#x", uid,
+        st);
+}
+
+// Processes of the permission checks: system uid 1000; an app (10060)
+// whose saved uid is 10050; an app 10051 in a session of its own.
+static pid_t perm_system, perm_saved, perm_other;
+
+#define DENIED(call) CHECK((call) == -1 && errno == EPERM, "%s", #call)
+
+// An app (uid 10050, no capabilities) against the others.
+static void app_permissions(void) {
+  struct sched_param sp = {0};
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  CPU_SET(0, &set);
+  DENIED(kill(perm_system, 0));
+  DENIED(kill(perm_system, SIGKILL));
+  DENIED(kill(getppid(), SIGTERM));
+  DENIED(syscall(SYS_tgkill, perm_system, perm_system, SIGKILL));
+  int fd = pidfd_open(perm_system, 0);
+  CHECK(fd >= 0, "pidfd_open needs no permission");
+  DENIED(pidfd_send_signal(fd, SIGKILL));
+  close(fd);
+  DENIED(setpriority(PRIO_PROCESS, perm_system, 19));
+  DENIED(sched_setscheduler(perm_system, SCHED_OTHER, &sp));
+  DENIED(sched_setparam(perm_system, &sp));
+  DENIED(sched_setaffinity(perm_system, sizeof(set), &set));
+  CHECK(getpriority(PRIO_PROCESS, perm_system) >= -20 && sched_getscheduler(perm_system) >= 0,
+        "reading is allowed");
+  // SIGCONT within the session, not outside it.
+  CHECK(kill(perm_system, SIGCONT) == 0, "SIGCONT in the session");
+  DENIED(kill(perm_other, SIGCONT));
+  // The target's saved uid is ours.
+  CHECK(kill(perm_saved, 0) == 0, "saved uid");
+  // kill(-1) ignores the processes it may not signal.
+  CHECK(kill(-1, SIGKILL) == 0, "kill(-1)");
+  CHECK(kill(perm_system, 0) == -1 && errno == EPERM, "system survives");
+  // Its own processes: signal and renice, but not below their RLIMIT_NICE.
+  int ready[2];
+  CHECK(pipe(ready) == 0, "pipe");
+  pid_t own = fork();
+  if (own == 0) {
+    struct rlimit rl = {20, 20};
+    setrlimit(RLIMIT_NICE, &rl);
+    write(ready[1], "r", 1);
+    for (;;) pause();
+  }
+  char c;
+  CHECK(read(ready[0], &c, 1) == 1, "own ready");
+  CHECK(setpriority(PRIO_PROCESS, own, 5) == 0, "renice own");
+  CHECK(setpriority(PRIO_PROCESS, own, -1) == -1 && errno == EACCES, "below RLIMIT_NICE");
+  CHECK(sched_setscheduler(own, SCHED_BATCH, &sp) == 0, "own scheduling");
+  CHECK(kill(own, SIGKILL) == 0 && waitpid(own, NULL, 0) == own, "kill own");
+}
+
+// uid 1000 with CAP_KILL and CAP_SYS_NICE, as zygote leaves system_server.
+static void system_permissions(void) {
+  struct sched_param sp = {0};
+  CHECK(kill(perm_system, 0) == 0, "same uid");
+  CHECK(setpriority(PRIO_PROCESS, perm_other, 10) == 0, "CAP_SYS_NICE renices an app");
+  CHECK(sched_setscheduler(perm_other, SCHED_BATCH, &sp) == 0, "and schedules it");
+  CHECK(kill(perm_other, 0) == 0 && kill(getppid(), 0) == 0, "CAP_KILL");
+  struct __user_cap_header_struct h = {_LINUX_CAPABILITY_VERSION_3, 0};
+  struct __user_cap_data_struct d[2] = {{1 << CAP_SYS_NICE, 1 << CAP_SYS_NICE, 0}, {0, 0, 0}};
+  CHECK(capset(&h, d) == 0, "drop CAP_KILL");
+  DENIED(kill(perm_other, 0));
+  CHECK(kill(perm_system, SIGKILL) == 0, "same uid");
+}
+
+static void permissions(void) {
+  int ready[2];
+  CHECK(pipe(ready) == 0, "pipe");
+  perm_system = idle_as(1000, 1000, 1000, 0, ready);
+  perm_saved = idle_as(10060, 10060, 10050, 0, ready);
+  perm_other = idle_as(10051, 10051, 10051, 1, ready);
+  run_as(10050, 0, app_permissions);
+  run_as(1000, 1 << CAP_KILL | 1 << CAP_SYS_NICE, system_permissions);
+  int st;
+  CHECK(waitpid(perm_system, &st, 0) == perm_system && WIFSIGNALED(st), "system killed");
+  CHECK(kill(perm_saved, SIGKILL) == 0 && kill(perm_other, SIGKILL) == 0, "root kills");
+  CHECK(waitpid(perm_saved, NULL, 0) == perm_saved && waitpid(perm_other, NULL, 0) == perm_other,
+        "reaped");
+  printf("ok permissions\n");
+}
+#undef DENIED
+
 // Without a process table, linux-run is the init of a private pid
 // namespace: this prints its pid and a child's and exits, and the child
 // dies with it (tests/process.rs).
@@ -895,6 +1013,7 @@ int main(int argc, char** argv) {
       {"seccomp_filter", seccomp_filter},
       {"xattrs", xattrs},           {"pf_key", pf_key},
       {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
+      {"permissions", permissions},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},
   };
   for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {

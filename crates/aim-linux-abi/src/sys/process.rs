@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::Ordering::SeqCst;
 
 use super::thread::{self, Thread};
-use crate::errno::{self, EINVAL, ESRCH};
+use crate::errno::{self, EINVAL, EPERM, ESRCH};
 
 struct Exe {
     guest: String,
@@ -115,6 +115,16 @@ pub fn apply_host_qos(nice: i32, policy: i32) {
     unsafe { libc::pthread_set_qos_class_self_np(host_qos(nice, policy), 0) };
 }
 
+/// A change to another process's scheduling (a thread of it, `pid`) needs
+/// the same owner or CAP_SYS_NICE (`check_same_owner`).
+fn may_change(pid: i64) -> Result<(), i64> {
+    if super::cred::may_renice(thread::owner(pid as i32)) {
+        Ok(())
+    } else {
+        Err(-(EPERM as i64))
+    }
+}
+
 /// sched_setparam (118), sched_setscheduler (119), sched_getscheduler
 /// (120), sched_getparam (121). The policy and priority are recorded per
 /// thread; the calling thread's policy also sets its host QoS
@@ -147,6 +157,11 @@ pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
             let prio = unsafe { (param as *const i32).read_unaligned() };
             match priority_range(policy) {
                 Some((lo, hi)) if (lo..=hi).contains(&prio) => {
+                    if th.is_none()
+                        && let Err(e) = may_change(a[0] as i64)
+                    {
+                        return e;
+                    }
                     if let Some(th) = &th {
                         th.sched.policy.store(policy, SeqCst);
                         th.sched.priority.store(prio, SeqCst);
@@ -173,7 +188,8 @@ pub fn sched_priority_range(nr: u64, a: [u64; 6]) -> i64 {
 /// sched_setaffinity: accepted; Darwin places the host threads.
 pub fn sched_setaffinity(a: [u64; 6]) -> i64 {
     match sched_target(a[0] as i64) {
-        Ok(_) => 0,
+        Ok(Some(_)) => 0,
+        Ok(None) => may_change(a[0] as i64).map_or_else(|e| e, |_| 0),
         Err(e) => e,
     }
 }

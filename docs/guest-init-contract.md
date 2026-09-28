@@ -193,6 +193,9 @@ rlimit	13	40	40
     `by-pid/<pid>`).
   - guest-init itself does the same for `property_service` peers.
   - A pid with no entry is reported as root.
+  - An entry written by the layer also carries saved ids (`suid`, `sgid`)
+    that differ from the effective ones; the permission checks between
+    processes (`kill`, `setpriority`, the scheduler calls) read them.
   - It is also the guest's pid namespace: `/proc` lists the processes in
     it (and the reader), and `/proc/<pid>` of any other host process does
     not exist. Every call that names a process resolves it there (another

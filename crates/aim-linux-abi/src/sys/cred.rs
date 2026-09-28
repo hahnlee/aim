@@ -26,6 +26,7 @@ use crate::errno::{EACCES, EFAULT, EINVAL, EPERM, ESRCH};
 /// Highest capability of the kernel we present (CAP_CHECKPOINT_RESTORE).
 pub const CAP_LAST_CAP: u32 = 40;
 const CAP_FULL: u64 = (1 << (CAP_LAST_CAP + 1)) - 1;
+const CAP_KILL: u32 = 5;
 const CAP_SETGID: u32 = 6;
 const CAP_SETUID: u32 = 7;
 const CAP_SETPCAP: u32 = 8;
@@ -120,11 +121,12 @@ fn limit_text(v: u64) -> String {
 
 impl Identity {
     /// Parse the identity file format (`# aim-guest-init identity v1`).
-    /// Besides the contract's keys, `euid`, `egid` and `securebits` carry
-    /// state a process can reach on its own; unknown keys are ignored.
+    /// Besides the contract's keys, `euid`, `egid`, `suid`, `sgid` and
+    /// `securebits` carry state a process can reach on its own; unknown
+    /// keys are ignored.
     pub fn parse(text: &str) -> Result<Identity, String> {
         let mut id = Identity::default();
-        let (mut euid, mut egid) = (None, None);
+        let (mut euid, mut egid, mut suid, mut sgid) = (None, None, None, None);
         let mut caps_given = false;
         for line in text.lines() {
             if line.is_empty() || line.starts_with('#') {
@@ -137,6 +139,8 @@ impl Identity {
                 "gid" => id.gid = [num(value)? as u32; 4],
                 "euid" => euid = Some(num(value)? as u32),
                 "egid" => egid = Some(num(value)? as u32),
+                "suid" => suid = Some(num(value)? as u32),
+                "sgid" => sgid = Some(num(value)? as u32),
                 "groups" => {
                     id.groups = value
                         .split(' ')
@@ -182,6 +186,12 @@ impl Identity {
         if let Some(e) = egid {
             id.gid[1..].fill(e);
         }
+        if let Some(s) = suid {
+            id.uid[2] = s;
+        }
+        if let Some(s) = sgid {
+            id.gid[2] = s;
+        }
         if !caps_given && id.uid[1] != 0 {
             // init leaves a non-root service without a `capabilities` line
             // with no capability.
@@ -190,8 +200,8 @@ impl Identity {
         Ok(id)
     }
 
-    /// The identity file text. Saved and filesystem ids are not kept:
-    /// after exec they equal the effective ones.
+    /// The identity file text. Filesystem ids are not kept: they follow
+    /// the effective ones, as saved ids do after exec.
     pub fn to_text(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::from("# aim-guest-init identity v1\n");
@@ -203,6 +213,12 @@ impl Identity {
         }
         if self.gid[1] != self.gid[0] {
             let _ = writeln!(out, "egid\t{}", self.gid[1]);
+        }
+        if self.uid[2] != self.uid[1] {
+            let _ = writeln!(out, "suid\t{}", self.uid[2]);
+        }
+        if self.gid[2] != self.gid[1] {
+            let _ = writeln!(out, "sgid\t{}", self.gid[2]);
         }
         let groups: Vec<String> = self.groups.iter().map(u32::to_string).collect();
         let _ = writeln!(out, "groups\t{}", groups.join(" "));
@@ -445,6 +461,32 @@ pub fn peer(pid: i32) -> PeerCred {
     let id = identity_of(pid);
     let (uid, gid) = id.map_or((0, 0), |id| (id.uid[1], id.gid[1]));
     PeerCred { pid, uid, gid }
+}
+
+/// The credentials of process `pid` of the namespace, for a permission
+/// check: a pid with no entry is root.
+fn target(pid: i32) -> Identity {
+    identity_of(pid).unwrap_or_default()
+}
+
+/// `kill_ok_by_cred` (kernel/signal.c): the caller's real or effective uid
+/// is the target's real or saved uid, or it has CAP_KILL.
+pub fn may_signal(pid: i32) -> bool {
+    let t = target(pid);
+    read(|id| {
+        id.capable(CAP_KILL)
+            || [id.uid[0], id.uid[1]]
+                .iter()
+                .any(|u| *u == t.uid[0] || *u == t.uid[2])
+    })
+}
+
+/// `set_one_prio_perm` and the scheduler's `check_same_owner`
+/// (kernel/sys.c, kernel/sched/syscalls.c): the caller's effective uid is
+/// the target's real or effective uid, or it has CAP_SYS_NICE.
+pub fn may_renice(pid: i32) -> bool {
+    let t = target(pid);
+    read(|id| id.capable(CAP_SYS_NICE) || id.uid[1] == t.uid[0] || id.uid[1] == t.uid[1])
 }
 
 /// The credential lines of `/proc/self/status`.
@@ -1019,6 +1061,20 @@ fn nice_changed(tid: i32, nice: i32) {
     }
 }
 
+/// `set_one_prio`'s checks for another process `p`: the owner rule, then
+/// a lower nice value needs CAP_SYS_NICE or `p`'s RLIMIT_NICE.
+fn may_set_prio(p: i32, nice: i32) -> Result<(), i64> {
+    super::pidns::check(p)?;
+    if !may_renice(p) {
+        return Err(-(EPERM as i64));
+    }
+    let limit = target(p).rlimits[RLIMIT_NICE].map_or(u64::MAX, |l| l.0);
+    if nice < process_nice(p)? && !capable(CAP_SYS_NICE) && (20 - nice) as u64 > limit {
+        return Err(-(EACCES as i64));
+    }
+    Ok(())
+}
+
 /// setpriority (140). The calling thread's nice value also sets its host
 /// QoS (`process::host_qos`).
 pub fn setpriority(a: [u64; 6]) -> i64 {
@@ -1042,6 +1098,11 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
         return err;
     }
     let (who, foreign) = prio_who(&a);
+    if (foreign || (a[0] == PRIO_PROCESS && !is_self(who as i32) && other_thread(who).is_none()))
+        && let Err(e) = may_set_prio(who as i32, nice)
+    {
+        return e;
+    }
     if foreign {
         // Accepted for a live process; not kept.
         let r = getpriority([PRIO_PROCESS, who, 0, 0, 0, 0]);
@@ -1111,6 +1172,10 @@ mod tests {
         let mut split = id.clone();
         split.uid = [1000, 0, 0, 0];
         split.securebits = SECBIT_KEEP_CAPS;
+        assert_eq!(Identity::parse(&split.to_text()).unwrap(), split);
+        // A saved id other than the effective one, as kill(2) checks it.
+        split.uid = [10060, 10060, 10050, 10060];
+        split.gid = [10060, 0, 10050, 0];
         assert_eq!(Identity::parse(&split.to_text()).unwrap(), split);
     }
 

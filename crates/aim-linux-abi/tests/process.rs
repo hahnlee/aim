@@ -263,6 +263,15 @@ fn credentials_follow_linux_rules_across_fork_and_exec() {
     check("identity");
 }
 
+/// kill, pidfd_send_signal, setpriority and the scheduler calls on another
+/// process follow the kernel's uid and capability rules: an app cannot
+/// reach system uid processes, a system uid with CAP_KILL and CAP_SYS_NICE
+/// reaches apps.
+#[test]
+fn signals_and_priorities_need_permission() {
+    check("permissions");
+}
+
 #[test]
 fn identity_files_inherited_env_and_fds_reach_the_guest() {
     let Some(root) = root() else { return };
