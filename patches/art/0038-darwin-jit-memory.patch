@@ -1,0 +1,218 @@
+diff --git a/runtime/jit/jit_memory_region.h b/runtime/jit/jit_memory_region.h
+--- a/runtime/jit/jit_memory_region.h
++++ b/runtime/jit/jit_memory_region.h
+@@ -137,6 +137,14 @@
+     return exec_pages_.IsValid();
+   }
+ 
++  bool IsDarwinMapJit() const {
++#if defined(__APPLE__)
++    return exec_pages_.IsValid() && !non_exec_pages_.IsValid() && !writable_data_pages_.IsValid();
++#else
++    return false;
++#endif
++  }
++
+   bool IsInDataSpace(const void* ptr) const {
+     return data_pages_.HasAddress(ptr);
+   }
+diff --git a/runtime/jit/jit_scoped_code_cache_write.h b/runtime/jit/jit_scoped_code_cache_write.h
+--- a/runtime/jit/jit_scoped_code_cache_write.h
++++ b/runtime/jit/jit_scoped_code_cache_write.h
+@@ -19,6 +19,10 @@
+ 
+ #include <sys/mman.h>
+ 
++#if defined(__APPLE__)
++#include "darwin_jit_memory.h"
++#endif
++
+ #include "base/systrace.h"
+ #include "base/utils.h"  // For CheckedCall
+ 
+@@ -37,7 +41,15 @@
+  public:
+   explicit ScopedCodeCacheWrite(const JitMemoryRegion& region)
+       : ScopedTrace("ScopedCodeCacheWrite"),
+-        region_(region) {
++        region_(region),
++        darwin_write_scope_(false) {
++#if defined(__APPLE__)
++    if (region.IsDarwinMapJit()) {
++      AimJitWriteBegin();
++      darwin_write_scope_ = true;
++      return;
++    }
++#endif
+     if (kIsDebugBuild || !region.HasDualCodeMapping()) {
+       ScopedTrace trace("mprotect all");
+       const MemMap* const updatable_pages = region.GetUpdatableCodeMapping();
+@@ -49,6 +61,12 @@
+   }
+ 
+   ~ScopedCodeCacheWrite() {
++#if defined(__APPLE__)
++    if (darwin_write_scope_) {
++      AimJitWriteEnd();
++      return;
++    }
++#endif
+     if (kIsDebugBuild || !region_.HasDualCodeMapping()) {
+       ScopedTrace trace("mprotect code");
+       const MemMap* const updatable_pages = region_.GetUpdatableCodeMapping();
+@@ -61,6 +79,7 @@
+ 
+  private:
+   const JitMemoryRegion& region_;
++  bool darwin_write_scope_;
+ 
+   DISALLOW_COPY_AND_ASSIGN(ScopedCodeCacheWrite);
+ };
+diff --git a/runtime/jit/jit_memory_region.cc b/runtime/jit/jit_memory_region.cc
+--- a/runtime/jit/jit_memory_region.cc
++++ b/runtime/jit/jit_memory_region.cc
+@@ -17,6 +17,11 @@
+ #include "jit_memory_region.h"
+ 
+ #include <fcntl.h>
+ #include <unistd.h>
+ 
++#if defined(__APPLE__)
++#include <pthread.h>
++#include <sys/mman.h>
++#endif
++
+ #include <android-base/unique_fd.h>
+@@ -32,6 +33,10 @@
+ #include "oat/oat_quick_method_header.h"
+ #include "palette/palette.h"
+ 
++#if defined(__APPLE__)
++#include "darwin_jit_memory.h"
++#endif
++
+ using android::base::unique_fd;
+ 
+ namespace art HIDDEN {
+@@ -72,6 +77,70 @@
+   MemMap non_exec_pages;
+   MemMap writable_data_pages;
+ 
++  // Map name specific for android_os_Debug.cpp accounting.
++  std::string data_cache_name = is_zygote ? "zygote-data-code-cache" : "data-code-cache";
++  std::string exec_cache_name = is_zygote ? "zygote-jit-code-cache" : "jit-code-cache";
++  std::string error_str;
++  bool darwin_map_jit_ = false;
++
++#if defined(__APPLE__)
++  if (!pthread_jit_write_protect_supported_np()) {
++    *error_msg = "Darwin JIT requires per-thread write protection";
++    return false;
++  }
++  if (pthread_jit_write_protect_supported_np()) {
++    darwin_map_jit_ = true;
++    // Darwin's MAP_JIT mapping is inherited across fork while its W^X state
++    // is controlled per thread by pthread_jit_write_protect_np. This is the
++    // platform equivalent of ART's sealed zygote code view: pre-fork code
++    // remains executable in the child, and PostForkChildAction creates a
++    // separate private MAP_JIT region for subsequent compilations.
++    if (is_zygote) {
++      current_capacity_ = max_capacity;
++    }
++    // XNU rejects MAP_JIT|MAP_FIXED (EINVAL), so allocate executable memory
++    // first without a reservation. A non-JIT metadata mapping is then hinted
++    // below it; the complete pair is checked against ART's uint32 offset
++    // contract before either view is published.
++    std::string name = exec_cache_name + "-rwx";
++    exec_pages = MemMap::MapFileAtAddress(nullptr,
++                                          exec_capacity,
++                                 kProtRWX,
++                                 MAP_PRIVATE | MAP_ANON | MAP_JIT,
++                                 -1,
++                                 /* start= */ 0,
++                                 /* low_4gb= */ false,
++                                          name.c_str(),
++                                          /* reuse= */ false,
++                                          nullptr,
++                                          &error_str);
++    if (!exec_pages.IsValid()) {
++      *error_msg = "Failed to create Darwin MAP_JIT code cache: " + error_str;
++      return false;
++    }
++    data_pages = MemMap::MapAnonymous(data_cache_name.c_str(), nullptr,
++                                      data_capacity, kProtRW, false, false,
++                                      nullptr, &error_str);
++    if (!data_pages.IsValid()) {
++      exec_pages.Reset();
++      *error_msg = "Failed to map Darwin JIT data cache: " + error_str;
++      return false;
++    }
++    const uintptr_t data_begin = reinterpret_cast<uintptr_t>(data_pages.Begin());
++    const uintptr_t exec_begin = reinterpret_cast<uintptr_t>(exec_pages.Begin());
++    const uintptr_t exec_end = reinterpret_cast<uintptr_t>(exec_pages.End());
++    if (data_begin > exec_begin || exec_end - data_begin > UINT32_MAX) {
++      data_pages.Reset();
++      exec_pages.Reset();
++      *error_msg = "Darwin JIT data/code mappings exceed uint32 offset range";
++      return false;
++    }
++
++    // MAP_JIT returns independent native mappings on macOS, unlike Android's
++    // low-4GiB dual view. ART's code/data references are pointer based; only
++    // the local stack-map offset is a 32-bit field and is checked at formation.
++  } else
++#endif
+   if (is_zygote) {
+     android_errorWriteLog(0x534e4554, "200284993");  // Report to SafetyNet.
+     // Because we are not going to GC code generated by the zygote, just use all available.
+@@ -101,13 +164,8 @@
+    }
+  }
+ 
+-  // Map name specific for android_os_Debug.cpp accounting.
+-  std::string data_cache_name = is_zygote ? "zygote-data-code-cache" : "data-code-cache";
+-  std::string exec_cache_name = is_zygote ? "zygote-jit-code-cache" : "jit-code-cache";
+-
+-  std::string error_str;
+   int base_flags;
+-  if (mem_fd.get() >= 0) {
++  if (!darwin_map_jit_ && mem_fd.get() >= 0) {
+     // Dual view of JIT code cache case. Create an initial mapping of data pages large enough
+     // for data and non-writable view of JIT code pages. We use the memory file descriptor to
+     // enable dual mapping - we'll create a second mapping using the descriptor below. The
+@@ -201,7 +259,7 @@
+         /* low_4gb= */ true,
+         data_cache_name.c_str(),
+         &error_str);
+-  } else {
++  } else if (!darwin_map_jit_) {
+     // Single view of JIT code cache case. Create an initial mapping of data pages large enough
+     // for data and JIT code pages. The mappings will look like:
+     //
+@@ -232,7 +290,7 @@
+     return false;
+   }
+ 
+-  if (exec_capacity > 0) {
++  if (!darwin_map_jit_ && exec_capacity > 0) {
+     uint8_t* const divider = data_pages.Begin() + data_capacity;
+     // Set initial permission for executable view to catch any SELinux permission problems early
+     // (for processes that cannot map WX pages). Otherwise, this region does not need to be
+@@ -380,7 +438,16 @@
+   // Write the header.
+   OatQuickMethodHeader* method_header =
+       OatQuickMethodHeader::FromCodePointer(w_memory + header_size);
+-  new (method_header) OatQuickMethodHeader((stack_map != nullptr) ? result - stack_map : 0u);
++  uint32_t code_info_offset = 0u;
++  if (stack_map != nullptr) {
++    const uintptr_t result_address = reinterpret_cast<uintptr_t>(result);
++    const uintptr_t stack_map_address = reinterpret_cast<uintptr_t>(stack_map);
++    CHECK_LE(stack_map_address, result_address);
++    const uintptr_t offset = result_address - stack_map_address;
++    CHECK_LE(offset, std::numeric_limits<uint32_t>::max());
++    code_info_offset = static_cast<uint32_t>(offset);
++  }
++  new (method_header) OatQuickMethodHeader(code_info_offset);
+ 
+   // Both instruction and data caches need flushing to the point of unification where both share
+   // a common view of memory. Flushing the data cache ensures the dirty cachelines from the

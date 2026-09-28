@@ -1,0 +1,9 @@
+[package]
+name = "aim-gralloc"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Graphics buffer layout, handle and metadata shared by the allocator, the mapper and the GLES driver (docs/graphics-buffers.md)"
+
+[dependencies]

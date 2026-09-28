@@ -1,0 +1,23 @@
+[package]
+license.workspace = true
+name = "aim-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "aim-fixture-runner"
+path = "../../probes/aim_fixture_runner.rs"
+
+[dependencies]
+aim-abi = { path = "../aim-abi" }
+aim-engine-sys = { path = "../aim-engine-sys" }
+aim-engine = { path = "../aim-engine" }
+aim-runtime = { path = "../aim-runtime" }
+aim-profile = { path = "../aim-profile" }
+aim-binder-process = { path = "../aim-binder-process" }
+libc = "0.2"
+sha2 = "0.10"
+
+[dev-dependencies]
+aim-binder-device = { path = "../aim-binder-device" }

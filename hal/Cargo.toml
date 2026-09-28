@@ -1,0 +1,37 @@
+# Vendor HAL services of the derived image (ADR 0012 decision 3,
+# docs/host-call.md), built for aarch64-linux-android by
+# tools/build-vendor-hals.sh, which first prepares _build/vendor-hals:
+# - binder-ndk-sys, binder: AOSP's Rust binder crate (libbinder_rs), vendor
+#   variant, compiled from the pinned AOSP sources over the image's
+#   libbinder_ndk.so;
+# - aidl/*: the AIDL-generated Rust code of each stable interface;
+# - the services and in-process driver libraries, which reach their host
+#   side through aim-hostcall.
+[workspace]
+members = [
+    "aidl/*",
+    "audio",
+    "audio/check",
+    "binder",
+    "binder-ndk-sys",
+    "bluetooth",
+    "camera",
+    "fmq",
+    "graphics/allocator",
+    "graphics/composer",
+    "graphics/gralloc",
+    "graphics/mapper",
+    "gles",
+    "gnss",
+    "health",
+    "sensors",
+    "thermal",
+    "tests/bluetooth-hci-client",
+    "tests/camera-client",
+]
+resolver = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "debuginfo"

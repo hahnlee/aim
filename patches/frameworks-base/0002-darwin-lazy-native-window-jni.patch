@@ -1,0 +1,69 @@
+diff --git a/jni/android_graphics_HardwareRenderer.cpp b/jni/android_graphics_HardwareRenderer.cpp
+--- a/jni/android_graphics_HardwareRenderer.cpp
++++ b/jni/android_graphics_HardwareRenderer.cpp
+@@ -116,6 +116,17 @@
+ typedef ANativeWindow* (*ANW_fromSurface)(JNIEnv* env, jobject surface);
+ ANW_fromSurface fromSurface;
+
++#if defined(AIM_LAZY_NATIVE_WINDOW_JNI)
++// The Darwin compatibility runtime and HWUI are one explicitly audited
++// image. Resolve the Surface bridge at link time instead of pretending that
++// a separate Android libandroid_runtime.dylib exists on macOS.
++extern "C" void* aim_android_ANativeWindow_fromSurface(void* env, void* surface);
++static ANW_fromSurface requireFromSurface() {
++    return reinterpret_cast<ANW_fromSurface>(
++            &aim_android_ANativeWindow_fromSurface);
++}
++#endif
++
+ class FrameCommitWrapper : public LightRefBase<FrameCommitWrapper> {
+ public:
+     explicit FrameCommitWrapper(JNIEnv* env, jobject jobject) {
+@@ -202,7 +213,11 @@
+     RenderProxy* proxy = reinterpret_cast<RenderProxy*>(proxyPtr);
+     ANativeWindow* window = nullptr;
+     if (jsurface) {
++#if defined(AIM_LAZY_NATIVE_WINDOW_JNI)
++        window = requireFromSurface()(env, jsurface);
++#else
+         window = fromSurface(env, jsurface);
++#endif
+     }
+     bool enableTimeout = true;
+     if (discardBuffer) {
+@@ -711,12 +726,19 @@
+                                                           jobject jsurface, jint left, jint top,
+                                                           jint right, jint bottom,
+                                                           jobject jCopyRequest) {
++#if defined(AIM_LAZY_NATIVE_WINDOW_JNI)
++    ANW_fromSurface localFromSurface = requireFromSurface();
++#endif
+     JavaVM* vm = nullptr;
+     LOG_ALWAYS_FATAL_IF(env->GetJavaVM(&vm) != JNI_OK, "Unable to get Java VM");
+     auto copyRequest = std::make_shared<CopyRequestAdapter>(
+             vm, env->NewGlobalRef(jCopyRequest),
+             ::android::uirenderer::Rect(left, top, right, bottom));
++#if defined(AIM_LAZY_NATIVE_WINDOW_JNI)
++    ANativeWindow* window = localFromSurface(env, jsurface);
++#else
+     ANativeWindow* window = fromSurface(env, jsurface);
++#endif
+     RenderProxy::copySurfaceInto(window, std::move(copyRequest));
+     ANativeWindow_release(window);
+ }
+@@ -1130,6 +1152,7 @@
+     gCopyRequest.getDestinationBitmap =
+             GetMethodIDOrDie(env, copyRequest, "getDestinationBitmap", "(II)J");
+
++#if !defined(AIM_LAZY_NATIVE_WINDOW_JNI)
+ #ifdef __ANDROID__
+     void* handle_ = SharedLib::openSharedLib("libandroid");
+ #else
+@@ -1138,6 +1161,7 @@
+     fromSurface = (ANW_fromSurface)SharedLib::getSymbol(handle_, "ANativeWindow_fromSurface");
+     LOG_ALWAYS_FATAL_IF(fromSurface == nullptr,
+                         "Failed to find required symbol ANativeWindow_fromSurface!");
++#endif
+
+     return RegisterMethodsOrDie(env, kClassPathName, gMethods, NELEM(gMethods));
+ }

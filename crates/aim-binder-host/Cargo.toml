@@ -1,0 +1,18 @@
+[package]
+license.workspace = true
+name = "aim-binder-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Hosts the binder driver core for guest processes in one daemon, over Mach messages (ADR 0012 decision 7)"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "aim-binderd"
+path = "src/bin/aim-binderd.rs"
+
+[dependencies]
+aim-binder-driver = { path = "../aim-binder-driver" }
+libc = "0.2"

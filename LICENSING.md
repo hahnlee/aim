@@ -14,10 +14,10 @@ upstream file is modified, translated, embedded in a script, or renamed.
 | Material | Applicable terms |
 | --- | --- |
 | OpenJDK-derived files and patches listed in [licensing/OPENJDK.md](licensing/OPENJDK.md) | GPL-2.0-only WITH Classpath-exception-2.0; preserve the exception for covered modifications |
-| Other files in `darwin-art/patches/` | The terms of each patched upstream file; our changes to those files are provided under those terms |
-| `darwin-art/upstream/freebsd-linuxulator/source/` | Original per-file FreeBSD licenses and the included `COPYRIGHT` |
-| `darwin-art/upstream/freebsd-linuxulator/manifests/` | Generated reference data; preserve its FreeBSD provenance and the source notices |
-| `darwin-art/tools/bionic-process-state-facade/upstream/get_device_api_level_inlines.h` | BSD-2-Clause, as stated in its retained header |
+| Other files in `patches/` | The terms of each patched upstream file; our changes to those files are provided under those terms |
+| `upstream/freebsd-linuxulator/source/` | Original per-file FreeBSD licenses and the included `COPYRIGHT` |
+| `upstream/freebsd-linuxulator/manifests/` | Generated reference data; preserve its FreeBSD provenance and the source notices |
+| `tools/bionic-process-state-facade/upstream/get_device_api_level_inlines.h` | BSD-2-Clause, as stated in its retained header |
 | Downloaded sources, tools, images, libraries, fonts, and generated derivatives | Their upstream terms; their presence in a build directory does not make them Apache-2.0 |
 | License and notice documents | Reproduced under their original terms, not relicensed by the root license |
 

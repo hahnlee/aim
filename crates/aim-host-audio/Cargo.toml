@@ -1,0 +1,11 @@
+[package]
+license.workspace = true
+name = "aim-host-audio"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-call module for android.hardware.audio.core: PCM streams on CoreAudio (AUHAL) over a shared lock-free ring"
+
+[dependencies]
+aim-hostcall = { path = "../aim-hostcall" }
+libc = "0.2"

@@ -1,0 +1,15 @@
+[package]
+license.workspace = true
+name = "aim-host-gpu"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-call module for the guest GLES driver: EGL and OpenGL ES forwarded to ANGLE on Metal"
+
+[dependencies]
+aim-hostcall = { path = "../aim-hostcall" }
+libc = "0.2"
+
+[[test]]
+name = "fork"
+harness = false

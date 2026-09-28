@@ -1,7 +1,0 @@
-{
-  global:
-    JNI_OnLoad;
-    Java_dev_darwinart_probe_GuestLibdlFixture_nativePlugin;
-  local:
-    *;
-};

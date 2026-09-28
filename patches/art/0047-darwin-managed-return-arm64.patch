@@ -1,0 +1,36 @@
+diff --git a/runtime/arch/arm64/quick_entrypoints_arm64.S b/runtime/arch/arm64/quick_entrypoints_arm64.S
+--- a/runtime/arch/arm64/quick_entrypoints_arm64.S
++++ b/runtime/arch/arm64/quick_entrypoints_arm64.S
+@@ -488,6 +488,15 @@
+     cmp w10, #'F'
+     beq 3f
+ 
++    // Managed references are compressed; native JValue stores Object*.
++    cmp w10, #'L'
++    bne 4f
++    mov w0, w0
++    cbz w0, 4f
++#if AIM_REFERENCE_BASE != 0
++    orr x0, x0, #AIM_REFERENCE_BASE
++#endif
++4:
+     // Just store x0. Doesn't matter if it is 64 or 32 bits.
+     str x0, [x4]
+ 
+@@ -751,6 +760,16 @@
+     RESTORE_TWO_REGS_DECREASE_FRAME x3, x4, SAVE_SIZE
+ 
++    // OSR returns the same managed reference representation as normal code.
++    ldrb w10, [x4]
++    cmp w10, #'L'
++    bne .Losr_store_result
++    mov w0, w0
++    cbz w0, .Losr_store_result
++#if AIM_REFERENCE_BASE != 0
++    orr x0, x0, #AIM_REFERENCE_BASE
++#endif
++.Losr_store_result:
+     // The compiler put the result in x0. Doesn't matter if it is 64 or 32 bits.
+     str x0, [x3]
+     ret
+ 

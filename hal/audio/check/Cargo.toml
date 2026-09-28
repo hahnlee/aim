@@ -1,0 +1,23 @@
+[package]
+name = "audio-check"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Test client for the audio HAL: plays and records through IModule/default the way audioserver's libaudiohal does (crates/aim-linux-abi/tests/audio.rs)"
+
+[[bin]]
+name = "audio-hal-check"
+path = "src/main.rs"
+
+# A test client: installed into _build/vendor-hals/test, not the image.
+[package.metadata.vendor-hal]
+test = "audio-hal-check"
+
+[dependencies]
+android_hardware_audio_common = { path = "../../aidl/android.hardware.audio.common" }
+android_hardware_audio_core = { path = "../../aidl/android.hardware.audio.core" }
+android_media_audio_common_types = { path = "../../aidl/android.media.audio.common.types" }
+binder = { path = "../../binder" }
+aim-fmq = { path = "../../fmq" }
+libc = "0.2"

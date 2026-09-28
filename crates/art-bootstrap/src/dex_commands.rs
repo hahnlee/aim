@@ -1,0 +1,159 @@
+use super::*;
+
+#[path = "dex_commands/baseline.rs"]
+mod baseline;
+#[path = "dex_commands/button.rs"]
+mod button;
+#[path = "dex_commands/dex_inspector.rs"]
+mod dex_inspector;
+#[path = "dex_commands/elf_jni.rs"]
+mod elf_jni;
+#[path = "dex_commands/fixture_framework_inputs.rs"]
+mod fixture_framework_inputs;
+#[path = "dex_commands/network.rs"]
+mod network;
+#[path = "dex_commands/runtime_support.rs"]
+mod runtime_support;
+
+pub(crate) use baseline::build_dex_probe;
+pub(crate) use button::build_button_dex_probe;
+pub(crate) use dex_inspector::build_dex_inspector;
+pub(crate) use elf_jni::build_elf_jni_dex_probe;
+pub(crate) use network::build_network_dex_probe;
+pub(crate) use runtime_support::{
+    build_runtime_support_classes, build_runtime_support_dex, runtime_support_classes,
+};
+
+pub(crate) fn find_d8() -> Result<PathBuf> {
+    let sdk_root = android_sdk_root()?;
+    let build_tools = sdk_root.join("build-tools");
+    let mut candidates = fs::read_dir(&build_tools)?
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path().join("d8"))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates
+        .pop()
+        .ok_or_else(|| format!("d8 was not found under {}", build_tools.display()).into())
+}
+
+pub(crate) fn android_sdk_root() -> Result<PathBuf> {
+    env::var_os("ANDROID_SDK_ROOT")
+        .or_else(|| env::var_os("ANDROID_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join("Library/Android/sdk"))
+        })
+        .ok_or_else(|| "could not determine the Android SDK directory".into())
+}
+
+pub(crate) fn find_android_platform_jar() -> Result<PathBuf> {
+    let jar = android_sdk_root()?.join("platforms/android-36/android.jar");
+    if !jar.is_file() {
+        return Err(format!("Android API 36 platform JAR is missing: {}", jar.display()).into());
+    }
+    Ok(jar)
+}
+
+pub(crate) fn find_android_core_system_modules() -> Result<PathBuf> {
+    let jar = android_sdk_root()?.join("platforms/android-36/core-for-system-modules.jar");
+    if !jar.is_file() {
+        return Err(format!("Android core system modules are missing: {}", jar.display()).into());
+    }
+    Ok(jar)
+}
+
+// D8 is free to renumber synthetic lambda classes when an unrelated method is
+// added. Treating its full diagnostic string as a golden file made every Java
+// compatibility edit rebuild foundation twice merely to discover the next
+// index. The stable contract is the verified DEX version/count plus named
+// runtime classes that must remain packaged.
+pub(crate) fn verify_dex_contract(
+    output: &str,
+    classes: usize,
+    methods: usize,
+    required_descriptors: &[&str],
+) -> Result<()> {
+    let header = format!("AOSP DEX: verified=yes version=38 classes={classes} methods={methods} ");
+    if !output.trim().starts_with(&header) {
+        return Err(format!("unexpected DEX contract header: {output:?}").into());
+    }
+    for descriptor in required_descriptors {
+        if !output.contains(descriptor) {
+            return Err(
+                format!("DEX contract is missing required class {descriptor}: {output:?}").into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The `classes=` count of a verified DEX probe header.
+pub(crate) fn dex_class_count(output: &str) -> Result<usize> {
+    output
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("classes="))
+        .and_then(|count| count.parse().ok())
+        .ok_or_else(|| format!("DEX probe output has no class count: {output:?}").into())
+}
+
+// The probe's diagnostic enumerates class_defs, not referenced type strings.
+// These classes must retain their original framework/services bootclasspath owner.
+pub(crate) fn verify_service_definitions_external(output: &str) -> Result<()> {
+    for name in [
+        "Landroid/os/ServiceManager;",
+        "Lcom/android/server/pm/AbstractStatsBase;",
+        "Lcom/android/server/pm/AbstractStatsBase$1;",
+        "Lcom/android/server/pm/dex/PackageDexUsage;",
+        "Lcom/android/server/pm/dex/PackageDexUsage$DexUseInfo;",
+        "Lcom/android/server/pm/dex/PackageDexUsage$PackageUseInfo;",
+    ] {
+        if output.split_whitespace().any(|entry| {
+            let Some((index, descriptor)) = entry.split_once("]=") else {
+                return false;
+            };
+            index.strip_prefix("class[").is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit())
+            }) && descriptor == name
+        }) {
+            return Err(format!("support DEX shadows original bootclasspath class {name}").into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod service_ownership_tests {
+    #[test]
+    fn compile_signature_may_be_referenced_but_not_defined() {
+        assert!(
+            super::verify_service_definitions_external(
+                "type=Landroid/os/ServiceManager; class[2]=Ldev/aim/runtime/wm/DesktopRootClient;"
+            )
+            .is_ok()
+        );
+        assert!(
+            super::verify_service_definitions_external("class[2]=Landroid/os/ServiceManager;")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_copied_original_but_allows_adapter() {
+        assert!(
+            super::verify_service_definitions_external(
+                "class[2]=Lcom/android/server/pm/dex/PackageDexUsage;"
+            )
+            .is_err()
+        );
+        assert!(
+            super::verify_service_definitions_external(
+                "class[2]=Lcom/android/server/pm/dex/DexUsageStore;"
+            )
+            .is_ok()
+        );
+    }
+}

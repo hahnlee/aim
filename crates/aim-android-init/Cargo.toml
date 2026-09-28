@@ -1,0 +1,9 @@
+[package]
+license.workspace = true
+name = "aim-android-init"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Android 16 init inputs (.rc scripts, bionic property areas, setprop protocol) as a typed model for aimd"
+
+[dependencies]

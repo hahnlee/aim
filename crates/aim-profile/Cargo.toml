@@ -1,0 +1,24 @@
+[package]
+license.workspace = true
+name = "aim-profile"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+aim-engine-sys = { path = "../aim-engine-sys" }
+aim-binder-device = { path = "../aim-binder-device" }
+aim-scm-transfer = { path = "../aim-scm-transfer" }
+libc = "0.2"
+
+[lib]
+name = "aim_profile"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aimd"
+path = "src/bin/aimd.rs"
+
+[[bin]]
+name = "aimctl"
+path = "src/bin/aimctl.rs"

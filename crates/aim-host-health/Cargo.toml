@@ -1,0 +1,10 @@
+[package]
+license.workspace = true
+name = "aim-host-health"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-call module for android.hardware.health: the Mac's battery through IOKit"
+
+[dependencies]
+aim-hostcall = { path = "../aim-hostcall" }

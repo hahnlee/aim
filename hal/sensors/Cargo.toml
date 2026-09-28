@@ -1,0 +1,24 @@
+[package]
+name = "sensors"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "android.hardware.sensors ISensors V3 service over the Mac's ambient light sensor and lid angle (host module `sensors`)"
+
+[[bin]]
+name = "sensors-service"
+path = "src/main.rs"
+
+# Installed as /vendor/bin/hw/<binary> (Cargo target names cannot hold dots).
+[package.metadata.vendor-hal]
+binary = "android.hardware.sensors-service.aim"
+
+[dependencies]
+android_hardware_common = { path = "../aidl/android.hardware.common" }
+android_hardware_common_fmq = { path = "../aidl/android.hardware.common.fmq" }
+android_hardware_sensors = { path = "../aidl/android.hardware.sensors" }
+binder = { path = "../binder" }
+aim-hostcall = { path = "../../crates/aim-hostcall" }
+libc = "0.2"
+log = "0.4"

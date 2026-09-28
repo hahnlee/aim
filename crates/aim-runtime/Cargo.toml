@@ -1,0 +1,20 @@
+[package]
+license.workspace = true
+name = "aim-runtime"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+libc = "0.2"
+aim-abi = { path = "../aim-abi" }
+aim-engine-sys = { path = "../aim-engine-sys" }
+aim-profile = { path = "../aim-profile" }
+aim-native-inventory = { path = "../aim-native-inventory" }
+jni-sys = "=0.3.0"
+
+[dev-dependencies]
+bionic-fs-facade = { path = "../../tools/bionic-fs-facade" }

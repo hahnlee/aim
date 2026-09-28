@@ -1,4 +1,0 @@
-service vendor.bluetooth-darwin /vendor/bin/hw/android.hardware.bluetooth-service.darwin
-    class hal
-    user bluetooth
-    group bluetooth

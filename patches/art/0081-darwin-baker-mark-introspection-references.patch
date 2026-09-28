@@ -1,0 +1,64 @@
+diff --git a/runtime/arch/arm64/quick_entrypoints_arm64.S b/runtime/arch/arm64/quick_entrypoints_arm64.S
+--- a/runtime/arch/arm64/quick_entrypoints_arm64.S
++++ b/runtime/arch/arm64/quick_entrypoints_arm64.S
+@@ -2335,7 +2335,8 @@
+     stp   d30, d31, [sp, #320]
+
+     mov   x0, xIP0
+     CALL_SYMBOL artReadBarrierMark // artReadBarrierMark(obj)
+-    mov   xIP0, x0
++    mov   xIP1, #AIM_REFERENCE_BASE
++    sub   xIP0, x0, xIP1          // Return a compressed managed reference.
+
+     // Restore core regs, except x0 and x1 as the return register switch case
+@@ -2428,6 +2429,11 @@
+      *     GC root entrypoint code.
+      */
+ ENTRY_ALIGNED art_quick_read_barrier_mark_introspection, 512
++#if defined(__APPLE__)
++    // Preserve AOSP's fixed +0x100/+0x300 switch ABI. The full Darwin
++    // conversion path lives after those fixed-size tables.
++    b .Ldarwin_mark_introspection
++#else
+     // At this point, IP0 contains the reference, IP1 can be freely used.
+     // For heap poisoning, the reference is poisoned, so unpoison it first.
+     UNPOISON_HEAP_REF wIP0
+@@ -2455,6 +2460,7 @@
+     // in the top 2 bits of the lock word.
+     lsl   wIP0, wIP1, #LOCK_WORD_STATE_FORWARDING_ADDRESS_SHIFT
+     b .Lmark_introspection_return
++#endif
+
+     // We're very close to the alloted 256B for the entrypoint code before the
+     // array switch cases. Should we go a little bit over the limit, we can
+@@ -2478,4 +2485,30 @@
+ art_quick_read_barrier_mark_introspection_gc_roots:
+ #endif
+     READ_BARRIER_MARK_INTROSPECTION_SLOW_PATH BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_OFFSET
++#if defined(__APPLE__)
++.Ldarwin_mark_introspection:
++    // IP0 enters as a compressed32 managed reference loaded by the field/
++    // array thunk. Native dereferences use Object*; returns stay compressed.
++    UNPOISON_HEAP_REF wIP0
++    cbz   wIP0, .Ldarwin_mark_introspection_return
++    mov   xIP1, #AIM_REFERENCE_BASE
++    add   xIP0, xIP1, wIP0, uxtw
++    ldr   wIP1, [xIP0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
++    tbz   wIP1, #LOCK_WORD_MARK_BIT_SHIFT, .Ldarwin_mark_introspection_unmarked
++    mov   xIP1, #AIM_REFERENCE_BASE
++    sub   xIP0, xIP0, xIP1
++.Ldarwin_mark_introspection_return:
++    ldr   wIP1, [lr, #BAKER_MARK_INTROSPECTION_FIELD_LDR_OFFSET]
++    bfi   xIP0, xIP1, #(32 + 3), #5
++    adr   xIP1, .Lmark_introspection_return_switch
++    bfxil xIP1, xIP0, #32, #8
++    br    xIP1
++.Ldarwin_mark_introspection_unmarked:
++    tst   wIP1, wIP1, lsl #1
++    bmi   .Ldarwin_mark_introspection_forwarding_address
++    READ_BARRIER_MARK_INTROSPECTION_SLOW_PATH BAKER_MARK_INTROSPECTION_FIELD_LDR_OFFSET
++.Ldarwin_mark_introspection_forwarding_address:
++    lsl   wIP0, wIP1, #LOCK_WORD_STATE_FORWARDING_ADDRESS_SHIFT
++    b     .Ldarwin_mark_introspection_return
++#endif
+ END art_quick_read_barrier_mark_introspection

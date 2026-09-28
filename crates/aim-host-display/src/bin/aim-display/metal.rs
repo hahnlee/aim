@@ -1,0 +1,242 @@
+//! Buffers as Metal textures, and presenting one into the window's layer.
+//!
+//! A graphics buffer is a memfd whose pixels start at offset 0
+//! (docs/graphics-buffers.md). The server maps it once; the mapping starts
+//! on a page, so Metal wraps it without copying
+//! (`newBufferWithBytesNoCopy`) and a linear texture over that buffer is
+//! the buffer's memory. A present is one render pass that samples the
+//! texture into the layer's drawable: the drawable is Core Animation's, so
+//! this is the one copy a frame costs. It also converts the format (the
+//! layer is BGRA) and scales when the sizes differ.
+
+use std::ffi::c_void;
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::time::Instant;
+
+use aim_hostcall::display::Import;
+
+use crate::objc::{Id, Pool, class, nsstring, release, text};
+
+#[link(name = "Metal", kind = "framework")]
+unsafe extern "C" {
+    fn MTLCreateSystemDefaultDevice() -> Id;
+}
+
+const MTL_PIXEL_FORMAT_BGRA8_UNORM: usize = 80;
+const MTL_STORAGE_MODE_SHARED: usize = 0;
+const MTL_TEXTURE_USAGE_SHADER_READ: usize = 1;
+const MTL_LOAD_ACTION_CLEAR: usize = 2;
+const MTL_LOAD_ACTION_DONT_CARE: usize = 0;
+const MTL_STORE_ACTION_STORE: usize = 1;
+const MTL_PRIMITIVE_TYPE_TRIANGLE: usize = 3;
+
+const SHADER: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+struct V { float4 position [[position]]; float2 uv; };
+// One triangle over the whole target; uv (0,0) is the top-left texel, as
+// row 0 is the top row of an Android buffer.
+vertex V vertex_main(uint id [[vertex_id]]) {
+    float2 uv = float2((id << 1) & 2, id & 2);
+    return V { float4(uv * float2(2, -2) + float2(-1, 1), 0, 1), uv };
+}
+fragment half4 fragment_main(V in [[stage_in]], texture2d<half> t [[texture(0)]]) {
+    constexpr sampler s(filter::linear);
+    return half4(t.sample(s, in.uv).rgb, 1.0h);
+}
+"#;
+
+/// `PixelFormat` → `MTLPixelFormat`, bytes per pixel.
+fn metal_format(format: i32) -> Option<(usize, u32)> {
+    Some(match format {
+        0x1 | 0x2 => (70, 4), // RGBA_8888, RGBX_8888: RGBA8Unorm (alpha is ignored)
+        0x4 => (40, 2),       // RGB_565: B5G6R5Unorm
+        0x5 => (80, 4),       // BGRA_8888: BGRA8Unorm
+        0x16 => (115, 8),     // RGBA_FP16: RGBA16Float
+        0x2b => (90, 4),      // RGBA_1010102: RGB10A2Unorm
+        _ => return None,
+    })
+}
+
+/// An imported buffer: its mapping, and the Metal objects over it.
+pub struct Texture {
+    pub import: Import,
+    map: *mut c_void,
+    buffer: Id,
+    texture: Id,
+    _fd: OwnedFd,
+}
+
+// SAFETY: Metal objects are thread-safe; the mapping is plain memory.
+unsafe impl Send for Texture {}
+unsafe impl Sync for Texture {}
+
+impl Texture {
+    /// The pixels, `import.length` bytes.
+    pub fn pixels(&self) -> &[u8] {
+        // SAFETY: mapped for the texture's lifetime.
+        unsafe { std::slice::from_raw_parts(self.map.cast(), self.import.length as usize) }
+    }
+}
+
+impl Drop for Texture {
+    fn drop(&mut self) {
+        release(self.texture);
+        release(self.buffer);
+        // SAFETY: our mapping; Metal no longer references it.
+        unsafe { libc::munmap(self.map, self.import.length as usize) };
+    }
+}
+
+pub struct Renderer {
+    device: Id,
+    queue: Id,
+    pipeline: Id,
+    layer: Id,
+}
+
+// SAFETY: Metal devices, queues and pipelines are thread-safe, and
+// `CAMetalLayer` hands out drawables on any thread.
+unsafe impl Send for Renderer {}
+unsafe impl Sync for Renderer {}
+
+/// What one present cost.
+pub struct Frame {
+    /// From the request to the GPU finishing the pass.
+    pub cpu_ns: u64,
+    /// GPU execution of the pass.
+    pub gpu_ns: u64,
+}
+
+pub fn device() -> Id {
+    // SAFETY: no preconditions.
+    unsafe { MTLCreateSystemDefaultDevice() }
+}
+
+impl Renderer {
+    pub fn new(device: Id, layer: Id) -> Result<Renderer, String> {
+        let _pool = Pool::new();
+        let mut error: Id = std::ptr::null_mut();
+        let library = send!(device, c"newLibraryWithSource:options:error:" => Id,
+            Id = nsstring(SHADER), Id = std::ptr::null_mut(), *mut Id = &mut error);
+        if library.is_null() {
+            return Err(text(send!(error, c"localizedDescription" => Id)));
+        }
+        let desc = send!(class(c"MTLRenderPipelineDescriptor"), c"new" => Id);
+        let vertex = send!(library, c"newFunctionWithName:" => Id, Id = nsstring("vertex_main"));
+        let fragment =
+            send!(library, c"newFunctionWithName:" => Id, Id = nsstring("fragment_main"));
+        send!(desc, c"setVertexFunction:" => (), Id = vertex);
+        send!(desc, c"setFragmentFunction:" => (), Id = fragment);
+        let attachments = send!(desc, c"colorAttachments" => Id);
+        let color = send!(attachments, c"objectAtIndexedSubscript:" => Id, usize = 0);
+        send!(color, c"setPixelFormat:" => (), usize = MTL_PIXEL_FORMAT_BGRA8_UNORM);
+        let pipeline = send!(device, c"newRenderPipelineStateWithDescriptor:error:" => Id,
+            Id = desc, *mut Id = &mut error);
+        for o in [vertex, fragment, desc, library] {
+            release(o);
+        }
+        if pipeline.is_null() {
+            return Err(text(send!(error, c"localizedDescription" => Id)));
+        }
+        Ok(Renderer {
+            device,
+            queue: send!(device, c"newCommandQueue" => Id),
+            pipeline,
+            layer,
+        })
+    }
+
+    /// Map a buffer and wrap it as a texture.
+    pub fn import(&self, fd: OwnedFd, i: &Import) -> Result<Texture, String> {
+        let (format, bpp) =
+            metal_format(i.format).ok_or_else(|| format!("format {:#x}", i.format))?;
+        let length = i.length as usize;
+        if (i.stride_bytes as u64) < i.width as u64 * bpp as u64
+            || i.stride_bytes as u64 * i.height as u64 > i.length
+        {
+            return Err(format!("layout {i:?}"));
+        }
+        // SAFETY: a shared read-only mapping of the buffer's memfd.
+        let map = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd.as_raw_fd(),
+                0,
+            )
+        };
+        if map == libc::MAP_FAILED {
+            return Err(format!("mmap: {}", std::io::Error::last_os_error()));
+        }
+        let _pool = Pool::new();
+        let buffer = send!(self.device, c"newBufferWithBytesNoCopy:length:options:deallocator:" => Id,
+            *mut c_void = map, usize = length, usize = MTL_STORAGE_MODE_SHARED,
+            *const c_void = std::ptr::null());
+        let texture = if buffer.is_null() {
+            std::ptr::null_mut()
+        } else {
+            let desc = send!(class(c"MTLTextureDescriptor"),
+                c"texture2DDescriptorWithPixelFormat:width:height:mipmapped:" => Id,
+                usize = format, usize = i.width as usize, usize = i.height as usize, bool = false);
+            send!(desc, c"setStorageMode:" => (), usize = MTL_STORAGE_MODE_SHARED);
+            send!(desc, c"setUsage:" => (), usize = MTL_TEXTURE_USAGE_SHADER_READ);
+            send!(buffer, c"newTextureWithDescriptor:offset:bytesPerRow:" => Id,
+                Id = desc, usize = 0, usize = i.stride_bytes as usize)
+        };
+        let t = Texture {
+            import: *i,
+            map,
+            buffer,
+            texture,
+            _fd: fd,
+        };
+        if t.texture.is_null() {
+            return Err(format!("Metal refused the buffer {i:?}"));
+        }
+        Ok(t)
+    }
+
+    /// Draw `t` (or black) into the next drawable, show it at the next
+    /// vsync and wait until the GPU has read `t`, so its buffer may be
+    /// reused once this returns.
+    pub fn present(&self, t: Option<&Texture>) -> Option<Frame> {
+        let start = Instant::now();
+        let _pool = Pool::new();
+        let drawable = send!(self.layer, c"nextDrawable" => Id);
+        if drawable.is_null() {
+            return None;
+        }
+        let commands = send!(self.queue, c"commandBuffer" => Id);
+        let pass = send!(class(c"MTLRenderPassDescriptor"), c"renderPassDescriptor" => Id);
+        let attachments = send!(pass, c"colorAttachments" => Id);
+        let color = send!(attachments, c"objectAtIndexedSubscript:" => Id, usize = 0);
+        let target = send!(drawable, c"texture" => Id);
+        send!(color, c"setTexture:" => (), Id = target);
+        let load = if t.is_some() {
+            MTL_LOAD_ACTION_DONT_CARE
+        } else {
+            MTL_LOAD_ACTION_CLEAR
+        };
+        send!(color, c"setLoadAction:" => (), usize = load);
+        send!(color, c"setStoreAction:" => (), usize = MTL_STORE_ACTION_STORE);
+        let encoder = send!(commands, c"renderCommandEncoderWithDescriptor:" => Id, Id = pass);
+        if let Some(t) = t {
+            send!(encoder, c"setRenderPipelineState:" => (), Id = self.pipeline);
+            send!(encoder, c"setFragmentTexture:atIndex:" => (), Id = t.texture, usize = 0);
+            send!(encoder, c"drawPrimitives:vertexStart:vertexCount:" => (),
+                usize = MTL_PRIMITIVE_TYPE_TRIANGLE, usize = 0, usize = 3);
+        }
+        send!(encoder, c"endEncoding" => ());
+        send!(commands, c"presentDrawable:" => (), Id = drawable);
+        send!(commands, c"commit" => ());
+        send!(commands, c"waitUntilCompleted" => ());
+        let gpu = send!(commands, c"GPUEndTime" => f64) - send!(commands, c"GPUStartTime" => f64);
+        Some(Frame {
+            cpu_ns: start.elapsed().as_nanos() as u64,
+            gpu_ns: (gpu.max(0.0) * 1e9) as u64,
+        })
+    }
+}

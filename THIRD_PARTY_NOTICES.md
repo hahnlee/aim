@@ -9,7 +9,7 @@ travel with any redistributed covered sources or binaries.
 
 - **Android Open Source Project (AOSP).** Framework, ART, Bionic, system-library
   and related ports use source revisions recorded in
-  [`darwin-art/sources.lock`](darwin-art/sources.lock), `darwin-art/upstream/`,
+  [`sources.lock`](sources.lock), `upstream/`,
   and provider `sources.lock` files. Patches retain the target file's terms;
   AOSP is not uniformly Apache-2.0. Our patches are AIM modifications,
   not unmodified upstream releases. [Upstream](https://android.googlesource.com/).
@@ -21,13 +21,13 @@ travel with any redistributed covered sources or binaries.
   [copied upstream notices](licensing/third-party/).
 - **FreeBSD Linuxulator reference slice.** The pinned 24-file slice retains its
   original per-file BSD notices and
-  [`COPYRIGHT`](darwin-art/upstream/freebsd-linuxulator/source/COPYRIGHT).
+  [`COPYRIGHT`](upstream/freebsd-linuxulator/source/COPYRIGHT).
   It is used for semantic/ABI reference; the reference kernel implementation
   is not linked into the runtime. Generated manifests retain FreeBSD provenance.
-  See [the adoption document](darwin-art/docs/freebsd-linuxulator-adoption.md).
+  See [the adoption document](docs/freebsd-linuxulator-adoption.md).
 - **Bionic device API header.** Copyright (C) 2018 The Android Open Source
   Project. The vendored
-  [`get_device_api_level_inlines.h`](darwin-art/tools/bionic-process-state-facade/upstream/get_device_api_level_inlines.h)
+  [`get_device_api_level_inlines.h`](tools/bionic-process-state-facade/upstream/get_device_api_level_inlines.h)
   retains its full BSD-2-Clause notice. Its revision and hash are in that
   provider's `sources.lock`.
 - **Skia.** Darwin patches adapt Skia's BSD-licensed implementation. The copied
@@ -53,17 +53,17 @@ and its transitive dependencies before distributing binaries.
 | AOSP ART, Framework, HWUI, Minikin, system libraries, Perfetto | Predominantly Apache-2.0, with file-specific exceptions including the OpenJDK components above |
 | Bionic and imported BSD libc routines | Preserve each file's BSD/other notice; kernel UAPI headers retain any applicable syscall exception |
 | Skia, ANGLE, Dawn and their dependencies | Preserve the BSD/other terms of the actual source and linked third-party code |
-| MoltenVK | Apache-2.0; its pinned version and license hash are in `darwin-art/sources.lock`; also preserve notices for bundled dependencies |
+| MoltenVK | Apache-2.0; its pinned version and license hash are in `sources.lock`; also preserve notices for bundled dependencies |
 | ICU / ICU4J, HarfBuzz, FreeType and font files | Preserve code and data licenses separately; use the FreeType License (FTL) option where available and satisfy its credit requirement |
 | BoringSSL / Conscrypt, libc++ / libunwind, compression and image codecs | Preserve the exact version's composite licenses, exceptions, and third-party notices |
 | Rust crates | See the versioned [Rust dependency notices](licensing/rust-dependencies.txt); this inventory includes resolved build/test dependencies |
 
 Refresh Rust notices after changing the lockfile with
-`python3 darwin-art/tools/update-rust-license-notices.py`; use `--check` to
+`python3 tools/update-rust-license-notices.py`; use `--check` to
 verify them without writing. Both commands use Cargo's locked, offline metadata
 and require the dependencies to have been fetched into the local Cargo cache.
 The staged AOSP DebugStore crate has a separate template manifest/lock under
-`darwin-art/tools/debugstore/`; its generated build graph is not part of this
+`tools/debugstore/`; its generated build graph is not part of this
 workspace inventory and must be included when auditing a binary release.
 
 This software uses the FreeType project (https://freetype.org/). Font files
