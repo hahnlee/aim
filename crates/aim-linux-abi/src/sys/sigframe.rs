@@ -443,7 +443,7 @@ pub struct Fault {
 }
 
 /// Translate a Darwin fault signal into the Linux signal, si_code and
-/// address (experiments/p0/04).
+/// address (ADR 0012, "Platform probes").
 ///
 /// Darwin raises SIGBUS for a PROT_NONE page, a write to a read-only page
 /// and a read past the end of a mapped file alike, with the same ESR, so

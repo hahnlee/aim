@@ -1,10 +1,11 @@
 //! Guest threads: `clone` for threads, thread exit, tids, and the per-thread
 //! records other threads reach (signals, futex wakes, timers, scheduling).
 //!
-//! Each guest thread is a Darwin pthread (experiments/p0/02). Its host stack
-//! is the pthread's own; the child resumes the parent's copied registers on
-//! the guest stack through the trampoline's exit path, so it starts exactly
-//! as Linux starts a clone child and takes pending signals first.
+//! Each guest thread is a Darwin pthread (ADR 0012, "Platform probes"). Its
+//! host stack is the pthread's own; the child resumes the parent's copied
+//! registers on the guest stack through the trampoline's exit path, so it
+//! starts exactly as Linux starts a clone child and takes pending signals
+//! first.
 //!
 //! Tids: the main thread's is the pid. Others are `TID_BASE + (pid << 12) +
 //! n` (n in 1..4096): unique across processes and never a Darwin pid (those
@@ -387,7 +388,7 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
         tp,
     }));
     // The child may run, exit and be freed before pthread_create returns:
-    // nothing of it is touched afterwards (experiments/p0/02).
+    // nothing of it is touched afterwards (ADR 0012, "Platform probes").
     let ok = {
         // SAFETY: standard pthread creation with a detached attribute.
         unsafe {

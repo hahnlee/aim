@@ -1,3 +1,0 @@
-symbol	kind	class	owner
-abort	FUNC	D	bionic-abort-signal-state
-android_set_abort_message	FUNC	D	android-crash-runtime

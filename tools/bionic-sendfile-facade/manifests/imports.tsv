@@ -1,2 +1,0 @@
-symbol	kind	class	owner
-sendfile	FUNC	B	off_t-kernel-errno

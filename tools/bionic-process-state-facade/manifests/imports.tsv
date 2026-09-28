@@ -1,5 +1,0 @@
-symbol	android_signature	classification	policy
-__system_property_get	int(const-char*,char*)	D	immutable-property-snapshot
-__system_property_read	int(const-prop-info*,char*,char*)	D	immutable-property-snapshot
-getauxval	unsigned-long(unsigned-long)	D	explicit-auxv-allowlist
-getenv	char*(const-char*)	C	immutable-environment-snapshot

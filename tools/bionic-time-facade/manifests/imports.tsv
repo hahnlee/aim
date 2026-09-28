@@ -1,5 +1,0 @@
-symbol	android_signature	pcs	capability
-clock_gettime	int(clockid_t,struct-timespec*)	direct-register-only	explicit-clock-map
-gettimeofday	int(struct-timeval*,struct-timezone*)	direct-register-only	android-64-bit-usec-copy
-nanosleep	int(const-struct-timespec*,struct-timespec*)	direct-register-only	translated-EINTR-remaining
-sysconf	long(int)	direct-register-only	explicit-selector-map

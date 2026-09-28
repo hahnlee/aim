@@ -1,4 +1,0 @@
-symbol	kind	class	status	reason
-wcstod	FUNC	B	supported	Android-wchar32-to-AOSP-gdtoa-binary64
-wcstof	FUNC	B	supported	Android-wchar32-to-AOSP-gdtoa-binary32
-wcstold	FUNC	B	rejected	Android-binary128-versus-Darwin-binary64-ABI

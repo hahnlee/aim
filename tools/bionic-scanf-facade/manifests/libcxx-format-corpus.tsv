@@ -1,4 +1,0 @@
-source	line	callee	format	purpose
-locale	1023	__libcpp_sscanf_l	%p	pointer-num_get
-locale	2642	sscanf	%Lf	long-double-num_get
-bsd_locale_fallbacks.h	119	vsscanf	caller-format	locale-wrapper

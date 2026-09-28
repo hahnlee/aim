@@ -1,4 +1,0 @@
-{
-  global: format_fixture_run;
-  local: *;
-};

@@ -1,4 +1,0 @@
-path	size	sha256
-libc/bionic/atexit.cpp	9208	f03ce36e31a679f4b5bf38eec188502514bcf48b0343ae3aa64a50e2d66733cf
-libc/bionic/atexit.h	1614	2dc5d1cdf5ddf52ebb6983684ec597afed0a108b9af61c2855b60a6c893f7da1
-libc/arch-common/bionic/crtbegin_so.c	2936	7339e128550f8f90a254fef776c8a23b96a13190e93981cb20a588a2e6342bf3

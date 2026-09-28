@@ -1,8 +1,0 @@
-symbol	kind	class	policy
-strtol	FUNC	B	AOSP integer parser
-strtoll	FUNC	B	AOSP integer parser
-strtoimax	FUNC	B	AOSP signed intmax integer parser
-strtoll_l	FUNC	B	locale handle ignored by AOSP wrapper
-strtoul	FUNC	B	AOSP unsigned integer parser
-strtoull	FUNC	B	AOSP unsigned integer parser
-strtoull_l	FUNC	B	locale handle ignored by AOSP wrapper

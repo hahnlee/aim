@@ -1,8 +1,0 @@
-LIBCXX_IOCTL_FIXTURE {
-  global:
-    IoctlFixtureEntropy;
-    IoctlFixtureUnknown;
-    IoctlFixtureNull;
-  local:
-    *;
-};

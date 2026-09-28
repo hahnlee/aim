@@ -1,4 +1,4 @@
-//! futex (experiments/p0/03).
+//! futex (ADR 0012, "Platform probes").
 //!
 //! - Private futexes (FUTEX_PRIVATE_FLAG, or a non-private op on private
 //!   memory) use an in-process waiter table: exact wake counts, bitsets,

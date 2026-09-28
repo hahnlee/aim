@@ -1,6 +1,0 @@
-path	size	sha256
-libc/upstream-openbsd/lib/libc/stdio/fgetwc.c	2359	bb13c7f51887ecefb8b91b4c0f6e397c8268c675827a83f1f6aaacc90c7dbab9
-libc/upstream-openbsd/lib/libc/stdio/fputwc.c	2380	373dd874edacdc68dcb1417d1ec32e1b749a1c8367169c07c09ab1908ddfb1d7
-libc/upstream-openbsd/lib/libc/stdio/ungetwc.c	2279	9506552730bfbbc9da9e0e491174746ae721f662c91a49a8fa6fe2d0638a1238
-libc/stdio/local.h	11992	6bc4bec14474d8b79c3c19b4caa4eac2598547f3785ce8ac767c8d4a54ae3403
-libc/stdio/stdio.cpp	33494	5d4b80441905ffd02392f9b27036e96e3d7cec31212d9876d528c9d7a66a24ee

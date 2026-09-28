@@ -191,7 +191,7 @@ of our own.
   through the original linker configuration and runs the original
   `linkerconfig` binary through libc initialization and `main`.
 
-### Platform probes (`experiments/p0/`)
+### Platform probes (`experiments/p0/`, removed; see git history)
 
 - **clone:** feasible. A Darwin pthread with a small host stack resumes the
   guest frame; SETTLS, PARENT_SETTID and CHILD_CLEARTID work. The time until
@@ -230,7 +230,7 @@ Details in [binder-driver.md](../binder-driver.md).
   thread's reply port. Parked reads are completed by the waker. Fds travel
   as fileports. Receive buffers are memory entries that the daemon writes
   once.
-- **Measured (M2 Pro, `experiments/p1/01-binder-transport`):**
+- **Measured (M2 Pro, `experiments/p1/01-binder-transport`, removed; see git history):**
   - client → daemon → server → daemon → client over Mach: 6.5 µs p50;
   - the same path over Unix sockets: 10.3 µs p50;
   - the core in-process: 9.2 µs p50.
@@ -447,7 +447,7 @@ and frame times (#239).
 | P3 | The original SystemServer boots (`sys.boot_completed`) with no HALs declared | reached 2026-09-28 (with the HALs declared; 25 s first boot, 50 s with the spawned fork, #239) |
 | P4 | allocator/mapper and composer HALs plus ANGLE/MoltenVK: SurfaceFlinger in a macOS window, one app draws | reached 2026-09-28: Settings draws in the window and takes injected taps |
 | P5 | Input, audio, power/health, sensors and camera HALs | input, audio, health, thermal, sensors, Bluetooth and GNSS verified at app level 2026-09-28; camera verified through cameraserver with an NDK Camera2 client 2026-09-28 (test pattern: camera access not yet granted, lid closed; the Camera2 app's preview stays black) |
-| P6 | Parity with the current runtime; switch and delete the old stack | |
+| P6 | Parity with the current runtime; switch and delete the old stack | old stack deleted 2026-09-28 (git history keeps it); app parity (Calculator, Chromium, games) open |
 
 ## Appendix: what we implement, and where
 

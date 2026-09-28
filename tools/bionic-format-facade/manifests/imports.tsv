@@ -1,8 +1,0 @@
-symbol	status	reason
-fprintf	rejected	Bionic-FILE-and-variadic-PCS
-snprintf	supported	AAPCS64-capture-fixed-buffer
-sscanf	rejected	pointer-write-scan-grammar
-vasprintf	supported	AAPCS64-va-list-Bionic-allocator
-vfprintf	rejected	Bionic-FILE-and-va-list
-vsnprintf	supported	AAPCS64-va-list-fixed-buffer
-vsscanf	rejected	pointer-write-scan-grammar

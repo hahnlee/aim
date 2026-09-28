@@ -1,5 +1,0 @@
-name	android_value	accepted_by
-AT_FDCWD	-100	fchmodat,unlinkat,utimensat
-AT_SYMLINK_NOFOLLOW	0x100	fchmodat,utimensat
-AT_REMOVEDIR	0x200	unlinkat
-AT_EMPTY_PATH	0x1000	rejected-EINVAL

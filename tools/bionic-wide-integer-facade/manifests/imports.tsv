@@ -1,5 +1,0 @@
-symbol	kind	class	owner
-wcstol	FUNC	B	AOSP-wchar32-integer
-wcstoll	FUNC	B	AOSP-wchar32-integer
-wcstoul	FUNC	B	AOSP-wchar32-integer
-wcstoull	FUNC	B	AOSP-wchar32-integer

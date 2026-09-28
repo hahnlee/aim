@@ -1,5 +1,0 @@
-symbol	kind	class	status	reason
-strtod	FUNC	B	supported	AOSP-gdtoa-binary64
-strtof	FUNC	B	supported	AOSP-gdtoa-binary32
-strtold	FUNC	B	rejected	Android-binary128-vs-Darwin-binary64-ABI
-strtold_l	FUNC	B	rejected	Android-binary128-vs-Darwin-binary64-ABI

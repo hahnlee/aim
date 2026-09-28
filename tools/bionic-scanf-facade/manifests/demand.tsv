@@ -1,4 +1,0 @@
-symbol	type	class	status	reason
-fscanf	FUNC	B	supported	Android-AAPCS64-varargs+provider-FILE-cursor
-sscanf	FUNC	B	supported	Android-AAPCS64-varargs
-vsscanf	FUNC	B	supported	Android-32-byte-va_list

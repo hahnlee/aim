@@ -1,7 +1,0 @@
-{
-  global:
-    binary128_fixture_basic;
-    binary128_fixture_thread;
-  local:
-    *;
-};

@@ -1,6 +1,0 @@
-source	revision	test
-platform/bionic/tests/stdio_test.cpp	android16-release	snprintf_smoke
-platform/bionic/tests/stdio_test.cpp	android16-release	snprintf_measure
-platform/bionic/tests/stdio_test.cpp	android16-release	snprintf_integer_limits
-platform/bionic/tests/stdio_test.cpp	android16-release	snprintf_e
-platform/bionic/tests/stdio_test.cpp	android16-release	snprintf_negative_zero_5084292

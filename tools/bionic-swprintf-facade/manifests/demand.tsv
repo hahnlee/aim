@@ -1,2 +1,0 @@
-symbol	kind	class	status	boundary
-swprintf	FUNC	B	supported	libcxx-to_wstring-%f+%Lf

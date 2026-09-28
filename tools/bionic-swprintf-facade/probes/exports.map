@@ -1,6 +1,0 @@
-{
-  global:
-    swprintf_fixture;
-  local:
-    *;
-};

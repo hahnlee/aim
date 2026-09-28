@@ -1,5 +1,0 @@
-path	size	sha256
-libc/Android.bp	88904	78a169fa5535205a29f5b0e8ea33496cc53394a61af7de7d2a51cf4e4bc699de
-libc/stdio/printf_common.h	29713	2c3a44ccfc3534eec532ce2adede0b2565c3f15cdab66b08d272a3faaedfd964
-libc/stdio/stdio.cpp	33494	5d4b80441905ffd02392f9b27036e96e3d7cec31212d9876d528c9d7a66a24ee
-libc/stdio/vfprintf.cpp	22523	676fabb641ede53cb0e39873fd72d828c08c9c3224876dd9b48a164bda93d959

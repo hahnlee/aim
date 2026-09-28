@@ -22,7 +22,7 @@
 //!   as process-directed guest signals.
 //! - `rt_sigreturn` loads the frame into the context and resumes through a
 //!   `udf` trap whose SIGILL handler sets every register: on arm64 there is
-//!   no other exact way back to an arbitrary pc (experiments/p0/04).
+//!   no other exact way back to an arbitrary pc (ADR 0012, "Platform probes").
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed, Ordering::SeqCst};

@@ -1,8 +1,0 @@
-diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/code_generator_arm64.cc
---- a/compiler/optimizing/code_generator_arm64.cc
-+++ b/compiler/optimizing/code_generator_arm64.cc
-@@ -17,3 +17,4 @@
- #include "code_generator_arm64.h"
-+#include "art_reference_codegen_arm64.h"
- 
- #include "aarch64/assembler-aarch64.h"

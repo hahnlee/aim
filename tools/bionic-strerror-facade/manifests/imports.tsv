@@ -1,2 +1,0 @@
-symbol	android_signature	pcs	capability
-strerror_r	int(int,char*,size_t)	direct-register-only	XSI-caller-buffer

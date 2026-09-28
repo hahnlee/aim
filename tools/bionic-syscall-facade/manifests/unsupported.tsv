@@ -1,7 +1,0 @@
-scope	result	reason
-unknown-syscall-number	ENOSYS	no raw Darwin syscall forwarding
-futex-other-operation-or-selective-bitset	EINVAL	WAIT/WAKE and match-any WAIT_BITSET/WAKE_BITSET are implemented
-futex-wait-invalid-timeout	EINVAL	negative or non-normalized relative timespec
-futex-wake-negative-count	EINVAL	Linux requires a non-negative wake count
-futex-more-than-257-live-addresses	EAGAIN	fixed provider side-table capacity policy
-rt_sigprocmask-other-form	EINVAL	only libunwind invalid-how readability probe

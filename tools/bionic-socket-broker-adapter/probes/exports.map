@@ -1,7 +1,0 @@
-{
-  global:
-    NetworkFixtureHttp;
-    PipeFixtureRoundTrip;
-  local:
-    *;
-};

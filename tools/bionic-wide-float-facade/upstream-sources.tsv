@@ -1,3 +1,0 @@
-path	size	sha256
-libc/Android.bp	88904	78a169fa5535205a29f5b0e8ea33496cc53394a61af7de7d2a51cf4e4bc699de
-libc/bionic/wcstod.cpp	3966	3107540366b91598f13dbbcf6614f44d7539e640ca30769c9216e1eaeb4e8cbe

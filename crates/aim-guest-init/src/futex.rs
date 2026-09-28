@@ -5,7 +5,7 @@
 //! mapping of `/dev/__properties__/<area>`. The syscall layer turns that
 //! wait into Darwin's `__ulock_wait2(UL_COMPARE_AND_WAIT_SHARED, ...)`
 //! because the flavour follows the mapping type
-//! (`experiments/p0/03-futex/README.md`: SHARED and non-shared waiters live
+//! (ADR 0012, "Platform probes": SHARED and non-shared waiters live
 //! in separate namespaces, and a SHARED key is the backing object and
 //! offset, not the address). The writer here therefore wakes with the same
 //! SHARED flavour through its own mapping of the same file.

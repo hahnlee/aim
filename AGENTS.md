@@ -1,95 +1,49 @@
-# Runtime architecture requirements
+# Working on AIM
 
-Read the Current goal and latest checkpoint in docs/architecture-migration.md
-before work. Update verified status before ending a work turn; replace
-superseded facts instead of appending a turn-by-turn log.
+Read [ADR 0012](docs/adr/0012-original-android-userspace.md) before work, and
+[docs/boot-status.md](docs/boot-status.md) for how far the image boots. Keep
+boot-status.md current with every boot-relevant change: replace superseded
+facts instead of appending a log.
+
+## Principles
+
+- Run the original Android userspace unmodified. Implement only what lies
+  below it: Linux syscall semantics, the binder driver, host-call and the
+  HALs. A gap is closed there, never by patching or bypassing the guest.
+- Exceptions (a rebuild from AOSP source, a replaced daemon) must be minimal,
+  maintainable and explicit: a `replace` in `image/overlay.toml` with its
+  reason, and a note in ADR 0012. Reflection, name interception and by-name
+  special cases in the runtime are never acceptable.
+- Validate against Linux semantics (man pages, LTP-style tests), not against
+  what one guest program happens to need. Port from FreeBSD's Linuxulator
+  where useful and attribute it.
+- Rust first. Use C, C++ or assembly only where unavoidable.
+- No VM or hypervisor: everything runs as Darwin processes.
+- No environment-variable feature flags. Configuration comes from the image,
+  CLI arguments or code. Breaking migrations happen on a branch.
+- Replace missing behavior at its owner, the way a Linux kernel or a device
+  vendor would provide it. Do not add success-returning stubs, swallowed
+  errors or app-specific branches.
+- Keep code minimal and match the surrounding style and comment density. No
+  dead code, and no TODO without an issue.
+- Treat Android pixels/density and macOS points/backing scale as separate
+  coordinate systems; a 2x scanout must not be an upscale of a 1x raster.
+
+## Safety
+
+- Never modify APKs, the original image or its extracted tree. Tools that
+  take the original (`android-image assemble --original`) get its real path,
+  never a symlink.
+- Never touch a user's real data directory; use a disposable one.
+- Never circumvent Play Integrity or DRM, and never spoof real device
+  identities.
+- Kill only processes you started, by pid, and leave none behind.
+- Never commit an absolute user path (`/Users/...`); tests locate `_build`
+  relative to `CARGO_MANIFEST_DIR`, scripts relative to the repository root.
+
+## Work tracking
 
 - Track open work, bugs and follow-ups as GitHub issues (CONTRIBUTING.md,
-  "Tracking work"), never as TODO lists or gate checklists in repository
-  documents. File an issue for each gap you find, even outside the current
-  task, and reference issue numbers from documents and commits.
-- Keep non-ADR work documents focused on current scope, decisions and
-  acceptance evidence. Keep architecture-migration.md within 150 lines
-  and its Latest progress within five compact items. Fold completed work into
-  status; omit old PIDs, repetitive test logs and rejected experiments unless
-  needed to reproduce an open failure. Git history holds past diagnostics;
-  preserve uncommitted findings when condensing. ADRs retain decision history.
-
-- Production APK execution is an Android compatibility runtime, not a probe.
-  Do not add production behavior to test fixtures or Probe classes. Existing
-  production dependencies there are migration debt, not patterns to copy.
-- Preserve AOSP ownership: ActivityThread/LoadedApk/ContextImpl own application
-  state; framework transactions own activity/service lifecycle;
-  ViewRoot/Choreographer/HWUI own traversal and rendering; SurfaceControl,
-  BufferQueue and fences own buffer submission and composition contracts.
-- Use AOSP implementations where available. Do not replace missing framework
-  behavior with app-specific branches, reflection-based field fabrication,
-  swallowed exceptions, success-returning stubs, or manual lifecycle callbacks.
-  Diagnose the missing platform contract and implement it at its owner.
-- Split production code by Android subsystem and ownership. Do not grow generic
-  Bridge/Manager/Utils files spanning activity, window, display, input, storage,
-  and service responsibilities. Separate platform transport from policy.
-  Renaming or moving a bypass does not count as replacing it.
-- Darwin-specific code belongs at genuine macOS boundaries such as AppKit
-  events, process/IPC transport, filesystem and Metal presentation. Its presence
-  alone is not a defect; duplicating Android framework policy there is.
-- Keep test fixtures outside production source ownership. New build inputs
-  must explicitly identify runtime modules versus test-only sources.
-- Do not modify APKs, reset profiles or add CPU fallback to make acceptance pass.
-  Report physical interaction failures even when process-level tests pass.
-- User authorizes task-scoped app/runtime/management-daemon termination and
-  restart without repeated confirmation. Resolve exact owned targets first,
-  prefer graceful shutdown, preserve APKs/profiles and unrelated applications.
-- Before adding production code, identify its Android subsystem owner and the
-  narrow Darwin boundary (if any). Split unrelated responsibilities out of an
-  oversized file before extending it; do not append another subsystem to it.
-- A split must establish explicit interfaces, state/lifetime ownership and
-  independently testable contracts, not merely textual includes in a monolith.
-  Keep policy in its Android owner and native resource ownership behind narrow
-  platform APIs. Prefer Rust for new host resource/transport ownership where
-  compatible with the AOSP ABI; preserve upstream framework implementations.
-- Do not introduce temporary production overlays, fake service responses or
-  probe-only launch behavior as intermediate acceptance. An unfinished contract
-  remains unfinished until the real production path and app interaction pass.
-- Before reporting a migration complete, identify the production caller, the
-  new subsystem owner and the old bypass removed. Component-only integration
-  must be labeled as such; additional files or passing unit tests alone do not
-  establish production integration.
-- Treat Android pixels/density and macOS points/backing scale as separate
-  coordinate systems. Every display, resize, input and capture change must
-  preserve the Retina mapping explicitly; a 2x scanout must not be an upscale
-  of a 1x Android raster.
-- Preserve Android resource and locale semantics. Never expose a numeric
-  resource identifier or package-name fallback when PackageManager/Resources
-  should resolve localized text, and test at least one non-default locale when
-  changing label or text lookup.
-- Prefer Wine-style host integration: keep the Android API/ABI and policy at
-  the guest-facing boundary, then implement the narrow provider with the real
-  macOS service where practical (including Bluetooth, biometrics, camera,
-  media, certificates and host fonts). Keep compatibility-only contamination
-  out of those provider boundaries.
-- Font ownership is split deliberately: APK-bundled fonts and Android generic
-  family/metric contracts remain Android-owned, while installed host fonts may
-  be exposed through a Darwin font provider and participate in fallback. Do
-  not silently substitute a host face when Android layout depends on another
-  face's metrics.
-- Use Wine's guest-contract/host-provider split as the default precedent for
-  ambiguous OS integration. Record an ADR under docs/adr/ before implementing
-  a materially different ownership decision, including rationale, compatibility
-  cost and the path back to host integration.
-- Treat Android as a moving upstream target. Prefer version-pinned AOSP owners,
-  generated ABI descriptions and narrow per-release adapters over copying
-  policy into a permanent Darwin abstraction.
-- Continuously audit file size and authority. `DarwinServiceBridge` was retired;
-  do not reintroduce it or add production responsibilities to another broad
-  service, bridge, manager or utility. A file that acquires policy plus
-  transport plus resource lifetime must be split before it is extended.
-- Oversized-owner cleanup is a goal-exit gate, not an instruction to replace the
-  active compatibility objective with a refactoring-only objective. Before the
-  current goal is declared complete, audit the production paths it changed and
-  extract any remaining mixed responsibilities from similar monoliths behind
-  explicit subsystem interfaces and tests.
-- Keep each goal acceptance-scoped. Compatibility work for the APKs named in
-  the current goal does not imply full platform support; implement the common
-  Android contract exposed by their real failures, and record unrelated system
-  integrations as follow-up work rather than expanding the active goal.
+  "Tracking work"), never as TODO lists or checklists in documents. File an
+  issue for each gap you find, even outside the current task.
+- Integration tests that skip because an input is missing count as not run.

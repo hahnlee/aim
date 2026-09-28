@@ -1,6 +1,0 @@
-NETWORK_STACK_ACCEPTANCE {
-  global:
-    NetworkFixtureHttp;
-  local:
-    *;
-};

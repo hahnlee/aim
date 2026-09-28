@@ -1,3 +1,0 @@
-name	linuxulator_value	bionic_value	reason
-O_SYNC	4096	1052672	FreeBSD Linuxulator treats the common 0x1000 bit as O_SYNC; Linux arm64/Bionic exposes O_SYNC as __O_SYNC|O_DSYNC.
-SIGRTMIN	32	42	Linux kernel ABI starts realtime signals at 32; Bionic reserves 10 signals and exposes 42 to applications.

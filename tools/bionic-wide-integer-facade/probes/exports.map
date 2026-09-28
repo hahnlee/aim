@@ -1,6 +1,0 @@
-{
-  global:
-    bionic_wide_integer_fixture_basic;
-    bionic_wide_integer_fixture_thread;
-  local: *;
-};

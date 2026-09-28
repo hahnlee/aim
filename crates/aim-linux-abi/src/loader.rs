@@ -190,7 +190,8 @@ fn map_file_backed(file: &std::fs::File, h: &Headers, bias: u64, name: &str) -> 
                 (libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE)
             } else {
                 // Read-only first: Darwin refuses PROT_EXEC on an unsigned
-                // file mapping but allows mprotect to it (experiments/p0/07).
+                // file mapping but allows mprotect to it (ADR 0012,
+                // "Platform probes").
                 (libc::PROT_READ, libc::MAP_SHARED)
             };
             // SAFETY: mapping the file inside our reservation.

@@ -3,7 +3,8 @@
 //! - Private file mappings of translated files (and of originals with
 //!   nothing to rewrite) stay file-backed. Executable ones are mapped shared
 //!   and read-only, then made executable, so every process shares the same
-//!   pages (Darwin refuses PROT_EXEC in the mmap itself; experiments/p0/07).
+//!   pages (Darwin refuses PROT_EXEC in the mmap itself; ADR 0012,
+//!   "Platform probes").
 //! - Private file mappings of other files are materialized as anonymous
 //!   memory filled with `pread`, and rewritten (see `patch`) before they
 //!   become executable.
@@ -398,7 +399,7 @@ thread_local! {
 /// The syscall stub keeps x16, x17 and x30 in the 32 bytes below the guest
 /// sp until the syscall returns. bionic's `_exit_with_stack_teardown` unmaps
 /// the calling thread's own stack and then calls `exit`, so an munmap that
-/// covers that frame is deferred to thread exit (experiments/p0/02).
+/// covers that frame is deferred to thread exit (ADR 0012, "Platform probes").
 pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
     let (addr, len) = (a[0], page_up(a[1]));
     if addr & (PAGE - 1) != 0 {

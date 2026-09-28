@@ -1,9 +1,0 @@
-surface	status	note
-A,a,B,b,h	implemented	exact AOSP C locale names
-C,c,D,d,e,F,H,I,j,k,l,M,m,n,P,p,R,r,S,T,t,U,u,V,G,g,v,W,w,X,x,y,Y,+,%	implemented	exact AOSP strftime.c
-E,O	implemented	C-locale modifier aliases from exact source
-_,minus,0,caret,hash	implemented	Android padding and ASCII case modifiers
-Z,z	implemented	tm_zone/tm_gmtoff with explicit fixed-offset owner fallback
-s	implemented-fixed-offset	civil-to-epoch; ambiguous DST inference fails EOPNOTSUPP
-unknown	implemented	exact upstream pass-through of conversion character
-IANA-transition-rules	unsupported	no bundled tzdata or transition-rule engine

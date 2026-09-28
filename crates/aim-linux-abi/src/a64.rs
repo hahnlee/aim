@@ -19,7 +19,7 @@ pub const MRS_TPIDR_EL0: u32 = 0xd53b_d040;
 pub const MSR_TPIDR_EL0: u32 = 0xd51b_d040;
 /// `mrs xN, tpidrro_el0`: Darwin's TSD base, readable at EL0.
 pub const MRS_TPIDRRO_EL0: u32 = 0xd53b_d060;
-/// `mrs xN, ctr_el0`: traps on Darwin (experiments/p0/05).
+/// `mrs xN, ctr_el0`: traps on Darwin (ADR 0012, "Platform probes").
 pub const MRS_CTR_EL0: u32 = 0xd53b_0020;
 /// `str x30, [x18], #8`: shadow-call-stack push.
 pub const SCS_PUSH: u32 = 0xf800_865e;

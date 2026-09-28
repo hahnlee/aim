@@ -14,6 +14,5 @@ path = "src/main.rs"
 
 [dependencies]
 crc32fast = "1.5"
-aim-fs-broker = { path = "../../crates/aim-fs-broker" }
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 sha2 = "0.10"

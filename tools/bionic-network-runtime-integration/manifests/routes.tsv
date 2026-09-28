@@ -1,9 +1,0 @@
-symbol	soname	version	owner	operation
-__errno	libc.so	LIBC	errno	thread-local errno cell
-close	libc.so	LIBC	central-fd-broker	generic descriptor close
-connect	libc.so	LIBC	socket-owner	owner-checked opaque dispatch
-freeaddrinfo	libc.so	LIBC	dns-owner	retire result graph
-getaddrinfo	libc.so	LIBC	dns-owner	bounded numeric or localhost lookup
-recv	libc.so	LIBC	socket-owner	owner-checked opaque dispatch
-send	libc.so	LIBC	socket-owner	owner-checked opaque dispatch
-socket	libc.so	LIBC	socket-owner	create object then broker publish
