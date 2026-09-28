@@ -894,6 +894,9 @@ pub fn bind(a: [u64; 6]) -> i64 {
         // Linux autobind: nothing to do for a Darwin AF_UNIX socket.
         return 0;
     }
+    if let Some(r) = bind_on_link(fd, &name) {
+        return r;
+    }
     let bind_once = || {
         with_target(&t, |sa, len| {
             errno::check(unsafe { libc::bind(fd, sa, len) } as i64)
@@ -1005,6 +1008,32 @@ fn connect_to_router(fd: i32, name: &[u8]) -> Option<i64> {
     Some(0)
 }
 
+/// A datagram socket bound to a device other than the loopback that binds
+/// the DHCP client port (DhcpClient) is bound on the device's virtual link
+/// only, as the local name it reports: its DHCP messages go to the virtual
+/// router (`dhcp_to_router`), which answers on the packet sockets, and
+/// nothing from the Mac's network reaches it. A host bind would take the
+/// Mac's UDP port 68 from the Mac and from other guests. None: an ordinary
+/// bind.
+fn bind_on_link(fd: i32, name: &[u8]) -> Option<i64> {
+    let s = any_sock(fd)?;
+    let Family::Inet(o) = &s.family else {
+        return None;
+    };
+    let client = name.len() >= 8
+        && u16::from_le_bytes([name[0], name[1]]) == L_AF_INET
+        && u16::from_be_bytes([name[2], name[3]]) == super::dhcp::CLIENT_PORT;
+    if !client || !on_link(fd, o) {
+        return None;
+    }
+    let mut local = s.local.lock().unwrap();
+    if local.is_some() || host_inet_name(fd, false).is_some_and(|(port, _)| port != 0) {
+        return Some(-(EINVAL as i64));
+    }
+    *local = Some(name[..name.len().min(16)].to_vec());
+    Some(0)
+}
+
 /// Whether `fd` is a datagram socket bound to a device other than the
 /// loopback, whose DHCP messages go to the virtual router.
 fn on_link(fd: i32, o: &InetOpts) -> bool {
@@ -1097,6 +1126,10 @@ fn name_of(fd: i32, peer: bool, out: u64, outlen: u64) -> i64 {
             Family::Packet(p) => Some(p.local_name()),
             Family::Inet(o) if peer && o.router.load(Ordering::Relaxed) => {
                 s.peer.lock().unwrap().clone()
+            }
+            // Bound on a virtual link (`bind_on_link`).
+            Family::Inet(_) if !peer && s.local.lock().unwrap().is_some() => {
+                s.local.lock().unwrap().clone()
             }
             Family::Inet(o) if peer && o.port_zero.load(Ordering::Relaxed) => {
                 let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -1560,7 +1593,10 @@ fn dhcp_to_router(fd: i32, s: &Sock, iov: &[libc::iovec], name: Option<(u64, u32
     if port != super::dhcp::SERVER_PORT || !on_link(fd, o) {
         return None;
     }
-    let src = host_inet_name(fd, false).map_or([0; 4], |(_, a)| a);
+    let src = match s.local.lock().unwrap().as_deref() {
+        Some(local) => [local[4], local[5], local[6], local[7]],
+        None => host_inet_name(fd, false).map_or([0; 4], |(_, a)| a),
+    };
     let msg: Vec<u8> = iov
         .iter()
         .flat_map(|v| {

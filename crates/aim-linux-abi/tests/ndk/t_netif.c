@@ -246,6 +246,17 @@ static void socket_options(void) {
   CHECK(sendto(s, "x", 1, 0, (struct sockaddr*)&mapped, sizeof mapped) == -1 && errno == EAFNOSUPPORT);
   struct sockaddr_in any = {.sin_family = AF_INET, .sin_port = htons(68)};
   CHECK(bind(s, (struct sockaddr*)&any, sizeof any) == 0);
+  CHECK(bind(s, (struct sockaddr*)&any, sizeof any) == -1 && errno == EINVAL);
+  struct sockaddr_in bound = {0};
+  l = sizeof bound;
+  CHECK(getsockname(s, (struct sockaddr*)&bound, &l) == 0 && bound.sin_family == AF_INET &&
+        bound.sin_port == htons(68) && bound.sin_addr.s_addr == INADDR_ANY);
+  close(s);
+  // The port is eth0's, not the Mac's, which the test holds: a socket
+  // without SO_REUSEADDR takes it all the same.
+  s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  CHECK(setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, "eth0", 5) == 0);
+  CHECK(bind(s, (struct sockaddr*)&any, sizeof any) == 0);
   close(s);
   int proto = -1;
   l = sizeof proto;

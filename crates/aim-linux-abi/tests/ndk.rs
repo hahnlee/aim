@@ -174,8 +174,17 @@ fn sockets() {
     check("t_net", &["/data/local/tmp"]);
 }
 
+/// Hold the Mac's UDP port 68 (the DHCP client port) for the test run, as
+/// the Mac or another guest may: a guest's DHCP socket on `eth0` must not
+/// need it. Someone else holding it already is as good.
+fn hold_dhcp_client_port() {
+    static HELD: std::sync::OnceLock<Option<std::net::UdpSocket>> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| std::net::UdpSocket::bind(("0.0.0.0", 68)).ok());
+}
+
 #[test]
 fn network_devices() {
+    hold_dhcp_client_port();
     check("t_netif", &[]);
 }
 
@@ -187,6 +196,7 @@ fn network_link_changes() {
         aim_paths::skip("the pinned NDK or the extracted image is missing");
         return;
     };
+    hold_dhcp_client_port();
     let g = Guest::new(&image, "t_netwatch");
     let hook = g.runtime.join("net/simulate");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();

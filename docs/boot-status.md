@@ -472,6 +472,8 @@ by DHCP. First boot, `cargo aim boot`, on a Mac on Wi-Fi:
   failed (DhcpClient).
 - The emulator's vendor overlay made `eth0` a restricted network; it goes
   from the derived image.
+- DhcpClient's UDP socket took the Mac's port 68, so a second guest (or
+  the NDK network tests) failed to bind it; the port is `eth0`'s (#334).
 
 ## Memory pressure (2026-09-29, #277)
 

@@ -99,6 +99,11 @@ Mac: new DNS servers only        the next renewal (a DHCPACK with them)
   255.255.255.255 (REBINDING). Such a datagram to port 67 becomes the
   frame `eth0` would carry and goes to the virtual router, whose answer
   reaches DhcpClient's packet socket; it never reaches the Mac's network.
+  The socket's port 68 is `eth0`'s, not the Mac's: a datagram socket
+  bound to a device other than `lo` that binds the DHCP client port is
+  bound on the virtual link only (no host port, so the Mac, other guests
+  and the NDK tests keep theirs), and nothing from the Mac's network
+  arrives on it. Such binds do not conflict with each other.
   Without a network it fails with ENETUNREACH. A renewal for an address
   the Mac no longer has is NAKed, and DhcpClient starts over.
 - **Test hook.** `<runtime>/net/simulate` (`<data>/run/net/simulate` for
