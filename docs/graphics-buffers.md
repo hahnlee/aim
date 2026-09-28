@@ -201,12 +201,40 @@ mapping to its host module:
   it into ANGLE as an `EGLImage`. The buffer's memory is the texture: no
   copy either way. Window surfaces render to an ANGLE pbuffer and blit into
   the dequeued buffer's texture on `eglSwapBuffers` (flipped, so row 0 is the
-  top row, as Android expects of window buffers). See `docs/gles-driver.md`.
+  top row, as Android expects of window buffers), and queue it with the
+  blit's fence. See `docs/gles-driver.md`.
 - **Composer** (`docs/composer.md`): the client target's fd goes to the
   display server once, which maps it and makes the same linear texture
   over the mapping. The memory is shared, so no cross-process GPU object is
   needed.
 
-Synchronization: until sync fences exist in the syscall layer, a GPU writer
-finishes its GPU work before it returns a buffer (release fence -1), and
-readers need no acquire wait.
+## Fences
+
+Buffers move between processes with Linux `sync_file` fences, as on a
+device. A sync_file is an `AF_UNIX` datagram socket pair made by
+`crates/aim-sync-file`:
+
+- **Signal.** The producer keeps the other end, the writer: the GPU module
+  until Metal signals the fence's `MTLSharedEvent`, the display server
+  until the frame is shown, the merge waiter until every input has
+  signaled. It signals by sending one record (the signal time in
+  `CLOCK_MONOTONIC` and the status) and closing its end. A writer closed
+  without a record leaves the socket readable with `ECONNRESET`: the fence
+  has signaled with an error (`-EPIPE`), as Linux reports a fence its
+  driver failed.
+- **Wait.** A datagram socket reports `POLLIN`, and no `POLLHUP`, once the
+  record is queued, so `poll`, `epoll` and `select` wait for the fence
+  unchanged. The record is only ever peeked.
+- **Share.** The fd is a real host descriptor, so binder, `SCM_RIGHTS` and
+  fork carry it like any fd. Its `SO_LINGER` time marks it (`0x5346`), so
+  a sync_file arriving from another process is recognized. A fork child
+  closes the writers it inherited (they are the parent's to signal).
+- **The syscall layer** (`sys/sync_file.rs`) adds the rest of its Linux
+  behaviour: `SYNC_IOC_MERGE` (signaled at the later time, with the first
+  error; a merge of pending fences is signaled by one host thread per
+  process over a kqueue), `SYNC_IOC_FILE_INFO` (one fence per file, named
+  `aim`), `SYNC_IOC_SET_DEADLINE` (accepted), `EINVAL` for `read` and
+  `write`, and `anon_inode:sync_file` in `/proc/self/fd`.
+
+A merged file reports one fence rather than its inputs; Android reads only
+the overall status and the latest signal time from it.

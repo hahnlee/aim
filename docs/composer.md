@@ -56,13 +56,20 @@ the composer's `linux-run`:
   buffer is named by its gralloc buffer id, which is unique across
   processes. The HAL releases it when its last client-target slot is
   reused.
-- **Present.** One render pass samples the texture into the layer's next
-  drawable. That is the one copy per frame, and a necessary one: drawables
-  belong to Core Animation, and `CAMetalLayer` has no RGBA8 format, so the
-  pass also swizzles. It scales when the window is resized (the display
-  mode stays fixed, `resizeAspect`). The server waits for the pass to finish
-  before it reads the next request, so a buffer is free again once the next
-  present has been processed.
+- **Present.** A present carries two fences as `SCM_RIGHTS`: the client
+  target's acquire fence, and the writer of a new present fence whose
+  sync_file the HAL returns to SurfaceFlinger. The server waits for the
+  acquire fence (up to 3 s), so the HAL's present does not block
+  SurfaceFlinger. One render pass samples the texture into the layer's
+  next drawable. That is the one copy per frame, and a necessary one:
+  drawables belong to Core Animation, and `CAMetalLayer` has no RGBA8
+  format, so the pass also swizzles. It scales when the window is resized
+  (the display mode stays fixed, `resizeAspect`). The server waits for the
+  pass to finish before it reads the next request, so a buffer is free
+  again once the next present has been processed. The drawable's presented
+  handler signals the present fence with `presentedTime` (converted to
+  `CLOCK_MONOTONIC`), or the handler's time when Core Animation dropped the
+  frame.
 - **Display mode.** The window's content in backing pixels: by default the
   main screen's visible frame, `--size WxH` otherwise. Its density is the
   screen's (backing pixels per inch from `CGDisplayScreenSize`), its
@@ -99,13 +106,19 @@ in the background.
   RenderEngine (Skia on GLES, ANGLE on Metal) into the client target, and a
   present shows it. Device composition of layers (a Metal pass per layer)
   can come later without changing the protocol.
-- **Fences.** The syscall layer has no sync_file yet. A present waits on
-  the client target's acquire fence if one is given (our GLES driver
-  finishes before it queues, so there is none). It returns no present
-  fence or release fences. `getCapabilities` reports
+- **Fences.** The client target's acquire fence (RenderEngine's fence for
+  its composition) goes to the display server with the present, and the
+  present fence comes back (see "Buffers and presents"); SurfaceFlinger
+  releases the previous client target on it. Client composition needs no
+  release fences of its own: SurfaceFlinger releases the layers' buffers
+  on RenderEngine's fence. `getCapabilities` still reports
   `PRESENT_FENCE_IS_NOT_RELIABLE`, and the emulator's vendor properties
-  already set `debug.sf.vsync_reactor_ignore_present_fences`, so vsync
-  prediction relies on the HAL's vsyncs.
+  set `debug.sf.vsync_reactor_ignore_present_fences`, so vsync prediction
+  relies on the HAL's vsyncs.
+- **Client composition stays.** In a Settings scroll SurfaceFlinger's
+  RenderEngine thread spent under 1 % of its samples in GL once
+  composition no longer waited for the GPU; device composition of layers
+  in the display server would save little and is not done.
 - **Unsupported** (`EX_UNSUPPORTED`, and SurfaceFlinger takes its fallback):
   virtual displays, readback, identification data (SurfaceFlinger uses the
   port), content sampling, per-frame metadata, HDR conversion, overlay

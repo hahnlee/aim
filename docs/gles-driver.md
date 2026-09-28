@@ -99,7 +99,10 @@ other call is a plain thunk.
   `eglSwapBuffers` the driver dequeues a buffer, imports it (once per
   buffer), and the host (`FN_PRESENT`) blits the pbuffer into it through a
   framebuffer with `GL_MESA_framebuffer_flip_y`, so the buffer's row 0 is the
-  top of the image as Android expects. The buffer is then queued. A new
+  top of the image as Android expects. Each context keeps that framebuffer
+  per buffer until the buffer's image or the context is destroyed. The
+  buffer is then queued with a fence for the blit (see "Synchronization");
+  nothing waits for the GPU. A new
   window size takes effect at the next swap (a new pbuffer, rebound if
   current). `eglSwapBuffersWithDamage` presents the whole surface;
   `eglPresentationTimeANDROID` and `eglSwapInterval` go to the window.
@@ -110,7 +113,16 @@ other call is a plain thunk.
   a `GL_RGB` internal format, so alpha reads as 1.
 - **Extensions added**: `EGL_ANDROID_image_native_buffer`,
   `EGL_ANDROID_recordable`, `EGL_ANDROID_framebuffer_target`,
-  `EGL_ANDROID_presentation_time`, `EGL_KHR_swap_buffers_with_damage`.
+  `EGL_ANDROID_presentation_time`, `EGL_KHR_swap_buffers_with_damage`,
+  `EGL_ANDROID_native_fence_sync`.
+- **Zero-copy window surfaces** (rendering into the dequeued buffer
+  instead of the pbuffer) are not done: it would mean emulating
+  framebuffer 0 of every context (bindings, queries, `glDrawBuffers`,
+  invalidation, depth and stencil), and HWUI, lacking
+  `EGL_EXT_buffer_age`, asks for `EGL_BUFFER_PRESERVED`, which a
+  per-buffer target cannot give without the same copy. With fences, the
+  blit costs about 0.2 % of the RenderThread's time in a Settings scroll
+  (M2 Pro).
 
 ## Displays and fork
 
@@ -143,6 +155,15 @@ Metal out of zygote:
   not ask again. The child also loads ANGLE on the first forwarded call if
   the parent had loaded it (`FN_INIT`, which libEGL's loader triggers
   through `eglGetProcAddress`, runs only in zygote).
+- In such a child, a request for a display starts making ANGLE's display
+  on a host thread. HWUI asks for it when the app binds (its driver
+  preload, `RenderThread::preload`) and draws its first frame hundreds of
+  milliseconds later, so the Metal device (~40 ms, most of it
+  `MTLCreateSystemDefaultDevice` reaching the window server) is no longer
+  made on the RenderThread. Zygote itself is not a fork child and still
+  makes nothing. Loading ANGLE (~15–75 ms) happens on the same preload
+  thread already. Making every fork child load ANGLE up front would cost
+  about 19 MB per process that never draws.
 
 `tests/fork.rs` runs zygote's pattern on the host (load ANGLE, get the
 display, fork the way the layer does, then compile a shader unique to the
@@ -183,10 +204,24 @@ ANGLE's Vulkan backend does:
 
 ## Synchronization
 
-There are no sync-file fences yet. A present waits for the GPU (`glFinish`)
-before the buffer is queued with fence -1, and `EGL_ANDROID_native_fence_sync`
-is not offered, so consumers (SurfaceFlinger's RenderEngine, HWUI) wait on the
-CPU. Both are the first costs to remove.
+`hal/gles/src/sync.rs`, the host's `src/fence.rs`, and the syscall layer's
+sync_file ([graphics-buffers.md](graphics-buffers.md), "Fences").
+
+- **Native fences.** `FN_FENCE` makes a new `MTLSharedEvent`, has ANGLE
+  signal it after the current context's commands (an
+  `EGL_ANGLE_metal_shared_event_sync` sync) and flushes them. One
+  `MTLSharedEventListener` per process signals the fence's sync_file when
+  the event reaches its value, with the time the callback ran. A present
+  queues its buffer with such a fence for the blit.
+- **`EGL_ANDROID_native_fence_sync`.** A native fence sync made without an
+  fd is a host fence for the commands issued so far; one made with
+  `EGL_SYNC_NATIVE_FENCE_FD_ANDROID` takes the fd over.
+  `eglDupNativeFenceFDANDROID` duplicates the fd, status queries and
+  `eglClientWaitSync` poll it, and `eglWaitSync` (a server wait) waits on
+  the CPU, which orders later commands after the fence as a GPU wait
+  would. SurfaceFlinger's RenderEngine now returns a fence for its
+  composition (Skia's submit no longer syncs the CPU), and HWUI waits for
+  dequeued buffers' release fences through it.
 
 `eglClientWaitSync(KHR)` on a thread without a current context polls the
 sync's `EGL_SYNC_STATUS` every 100 µs up to the timeout. EGL allows such a
@@ -206,7 +241,15 @@ wait, but ANGLE's Metal backend fails it with `EGL_BAD_CONTEXT`, and HWUI's
 | 64×64 clear + triangle + `glFinish` | 317 µs/frame |
 | window surface: triangle + `eglSwapBuffers` + consumer acquire | 326 µs/frame |
 | first `eglSwapBuffers` of a buffer (import) | 1.4 ms |
+| 64×64 clear + triangle + native fence + poll of its fd | 167 µs/frame (`glFinish`: 239 µs, same run) |
+| window surface with fences: triangle + `eglSwapBuffers` + consumer acquire | 196 µs/frame |
 
 The per-call cost is about 12 ns above ANGLE's own: the host-call entry
-(4.6 ns), the module dispatch and the register copy. Frame times are
-dominated by Metal's submit-and-wait, which the missing fences force.
+(4.6 ns), the module dispatch and the register copy. Before fences, frame
+times were dominated by Metal's submit-and-wait: in a Settings scroll the
+RenderThread spent 6–8 % of its time in `glFinish` at each present, and
+SurfaceFlinger's RenderEngine thread as much in Skia's synchronous
+submit. With fences neither waits (0.2 % and 0 % in the same scroll). The
+largest GPU cost left in a new app process is compiling its shaders:
+ANGLE's link of each program waits for `MTLCompilerService`, about 15 %
+of the RenderThread in the first scroll of a freshly started Settings.
