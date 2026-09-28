@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The device is a USB host: the Mac's USB ports. SystemServer starts
+     UsbService (the `usb` service behind UsbManager) only with this
+     feature or USB accessory mode, which needs a USB gadget the Mac does
+     not have. UsbHostManager watches /dev/bus/usb, where no device appears
+     until USB devices are passed through. -->
+<permissions>
+    <feature name="android.hardware.usb.host" />
+</permissions>
