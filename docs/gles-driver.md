@@ -155,13 +155,15 @@ Metal out of zygote:
   not ask again. The child also loads ANGLE on the first forwarded call if
   the parent had loaded it (`FN_INIT`, which libEGL's loader triggers
   through `eglGetProcAddress`, runs only in zygote).
-- In such a child, a request for a display starts making ANGLE's display
-  on a host thread. HWUI asks for it when the app binds (its driver
-  preload, `RenderThread::preload`) and draws its first frame hundreds of
-  milliseconds later, so the Metal device (~40 ms, most of it
-  `MTLCreateSystemDefaultDevice` reaching the window server) is no longer
-  made on the RenderThread. Zygote itself is not a fork child and still
-  makes nothing. Loading ANGLE (~15–75 ms) happens on the same preload
+- In such a child, a request for a display that reaches the driver starts
+  making ANGLE's display on a host thread, so that the Metal device (~40
+  ms, most of it `MTLCreateSystemDefaultDevice` reaching the window server)
+  is ready before the first `eglInitialize`. HWUI's driver preload
+  (`RenderThread::preload`) asks for the display when the app binds, long
+  before its first frame; whether libEGL passes that request on to the
+  driver in a child, rather than answering it from zygote's cached display,
+  is not verified yet. Zygote itself is not a fork child and still makes
+  nothing. Loading ANGLE (~15–75 ms) happens on the same preload
   thread already. Making every fork child load ANGLE up front would cost
   about 19 MB per process that never draws.
 

@@ -17,9 +17,8 @@
 //!
 //! In a fork child of a process that had loaded ANGLE (an app forked from
 //! zygote), asking for a display starts making it on a host thread
-//! ([`prefetch`]): HWUI asks for it when the app binds, to preload the
-//! driver, and draws its first frame much later. The ~40 ms of Metal device
-//! creation then leaves the RenderThread's path to the first frame.
+//! ([`prefetch`]), so the ~40 ms of Metal device creation need not wait for
+//! the first `eglInitialize` on the RenderThread.
 
 use std::sync::Mutex;
 
