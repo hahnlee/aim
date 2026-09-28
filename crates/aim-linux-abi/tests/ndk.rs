@@ -175,6 +175,11 @@ fn sockets() {
 }
 
 #[test]
+fn network_devices() {
+    check("t_netif", &[]);
+}
+
+#[test]
 fn memory() {
     check("t_mem", &[]);
 }

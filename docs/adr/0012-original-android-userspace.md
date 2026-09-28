@@ -458,7 +458,7 @@ only at a stable, versioned interface. Everything else stays original.
 
 | Daemon | Boundary | Why |
 | --- | --- | --- |
-| netd | `INetd` | netlink, iptables and eBPF; ours drives macOS networking. The device exposes one Ethernet-like network, not a Wi-Fi HAL |
+| netd | `INetd` | iptables, policy routing and eBPF; ours sets interfaces through the layer's ioctls and rtnetlink and keeps networks and routes as bookkeeping (host sockets carry the traffic). The device has one Ethernet network, `eth0`, standing for the Mac's network; Wi-Fi is stage 2 (docs/network.md, #265) |
 | vold | `IVold` | mounts, loop devices, fscrypt and dm-crypt; ours mounts FUSE the way vold does and hands the fd to the original MediaProvider |
 | lmkd | lmkd socket | PSI and memcg; ours answers the socket protocol and kills nothing (ActivityManager waits on the socket under its lock, so an absent lmkd stalls it); kills follow macOS memory-pressure events later (#222) |
 | apexd | `IApexService` | loop devices and dm-verity; the image is pre-flattened, so ours only reports the active packages (keystore2's module hash, PackageManager) and sets `apexd.status` |
@@ -524,6 +524,13 @@ Undeclared, so absent: telephony, NFC, vibrator, IR, UWB and Thread, plus
 
 binder, FUSE, `/proc` and `/sys` per the device contract, the netlink subset
 the remaining original daemons use, evdev, and memfd/ashmem.
+
+- **Network devices** (docs/network.md): `lo` and `eth0` with the
+  interface ioctls, NETLINK_ROUTE (link and address dumps, changes and
+  groups) and AF_PACKET. `eth0`'s far end is a virtual router whose DHCP
+  lease is the Mac's own address, gateway and DNS servers, so the original
+  EthernetService and IpClient provision it; guest sockets stay host
+  sockets.
 
 - **eBPF:** the `bpf()` syscall with maps backed by shared memory. Programs
   attached to kernel hooks are not run; statistics the stack expects are

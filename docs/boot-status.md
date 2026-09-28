@@ -404,7 +404,42 @@ The host's security agent did not flag or block any of the four boots
 - #238 app processes' names in `/proc/<pid>/cmdline` for other processes;
 - #240 wide-gamut EGL configs; #241 phone and GMS startup ANRs; #242
   battery temperature; #230 traced and traced_probes aborts.
-- #260 Chrome's renderers die reserving V8's code range; #257 ESRCH in
-  Chrome's network thread is DnsResolver's answer with no nameservers
-  (#223); #258 remaining memfd seal gaps; #261 app data lost on a second
-  boot of the same data directory.
+- #260 Chrome's renderers die reserving V8's code range; #258 remaining
+  memfd seal gaps; #261 app data lost on a second boot of the same data
+  directory.
+
+## Network (2026-09-28)
+
+Details in [network.md](network.md). The original EthernetService,
+NetworkStack and DnsResolver bring up `eth0`, which stands for the Mac's
+network: the layer's netlink and ioctls carry the configuration, and
+`eth0`'s virtual router leases the Mac's address, gateway and DNS servers
+by DHCP. First boot, `cargo aim boot`, on a Mac on Wi-Fi:
+
+- `dumpsys connectivity`: `Active default network: 100`, Ethernet,
+  `IS_VALIDATED`, LinkProperties 172.30.1.46/24 with the Mac's gateway and
+  DNS servers. NetworkMonitor's HTTP and HTTPS `generate_204` probes
+  answer 204. The DHCP exchange takes 72 ms; the network is validated
+  1.7 s after the lease, 9.4 s after EthernetService starts and 6 s
+  before `sys.boot_completed`.
+- Shell: `ping -c 3 www.google.com` answers; an NDK program resolves
+  `example.com` through DnsResolver and reads `HTTP/1.1 200 OK`.
+- Chrome's browser process opens HTTPS connections to the page it is
+  given; its renderer dies before drawing it (#260). Its "No such process
+  (3)" warnings (#257), DnsResolver's ESRCH for a network with no
+  nameservers, are gone.
+
+### Fixed on the way
+
+- Java's `bind`/`connect` of AF_INET sockets failed with EINVAL: libcore
+  tries a v4-mapped IPv6 address first and falls back on EAFNOSUPPORT,
+  which Darwin does not return.
+- UDP `connect` to port 0 (the "have IPv4/IPv6" probes of bionic and
+  DnsResolver) failed, so every AI_ADDRCONFIG lookup found nothing.
+- `SO_PROTOCOL` read 0, so libcore did not exempt UDP `connect` from
+  StrictMode, and NetworkStack died of NetworkOnMainThreadException in
+  DnsResolver's address sorting.
+- `SO_MARK` failed, and with it every DnsResolver query; `SO_RCVBUF` 0
+  failed (DhcpClient).
+- The emulator's vendor overlay made `eth0` a restricted network; it goes
+  from the derived image.

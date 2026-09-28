@@ -311,8 +311,7 @@ static void options(void) {
   gl = sizeof err;
   CHECK(getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &gl) == 0 && err == 0);
   close(s);
-  CHECK(socket(AF_NETLINK, SOCK_RAW, 0) == -1 && errno == EAFNOSUPPORT);
-  CHECK(socket(AF_PACKET, SOCK_RAW, 0) == -1 && errno == EAFNOSUPPORT);
+  CHECK(socket(AF_BLUETOOTH, SOCK_RAW, 0) == -1 && errno == EAFNOSUPPORT);
   int one = 1;
   CHECK(setsockopt(0, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) == -1);
 }
