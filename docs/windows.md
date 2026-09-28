@@ -118,8 +118,9 @@ server's mode:
 - **Move and resize.** Moving the window moves the task at once; a live
   resize resizes it when the resize ends (each resize is a configuration
   change for the app). The window then takes the bounds the task got (a
-  minimum size). While they differ, the layer shows the task one pixel per
-  pixel from the top left, unstretched.
+  minimum size), once the user has not moved it for half a second; bounds
+  Android gives the task itself it takes at once. While they differ, the
+  layer shows the task one pixel per pixel from the top left, unstretched.
 - **Focus and stacking.** The key window's task is the focused one
   (`FOCUS`), and a task Android brings to the front makes its window key
   while the app is active. A press in a window whose task is not in front

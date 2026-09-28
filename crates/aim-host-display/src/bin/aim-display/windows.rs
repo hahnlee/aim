@@ -36,6 +36,7 @@ use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use aim_host_display::input::translate::Phase;
 use aim_host_display::windows::{Frame, Screen, bounds, content, view_to_display};
@@ -50,6 +51,9 @@ use crate::window::{NS_BACKING_STORE_BUFFERED, NS_WINDOW_STYLE};
 
 /// The longest a press waits for its task to come to the front.
 const HOLD_MS: u64 = 250;
+/// How long after the user moved or resized a window Android's bounds for
+/// it are taken as answers to that, not as moves of Android's own.
+const SETTLE_MS: u64 = 500;
 /// `NSWindowCollectionBehaviorFullScreenNone`: the green button zooms.
 const FULL_SCREEN_NONE: usize = 1 << 9;
 /// `NSWindowToolbarStyleUnified`.
@@ -79,8 +83,8 @@ struct TaskWindow {
     caption: i32,
     visible: bool,
     closed: bool,
-    /// Bounds asked for and not answered yet.
-    outstanding: u32,
+    /// When the user last moved or resized the window.
+    moved: Option<Instant>,
 }
 
 impl TaskWindow {
@@ -438,30 +442,46 @@ fn task(task: i32, b: [i32; 4], caption: i32) {
     if !known {
         return create(task, b, caption);
     }
-    // Apply Android's bounds to the window only when they are not the
-    // answer to a move or resize still going on.
-    let apply = with(|s| {
-        let t = s.tasks.get_mut(&task)?;
-        t.outstanding = t.outstanding.saturating_sub(1);
-        t.bounds = b;
-        t.caption = caption;
-        let c = t.content();
-        send!(t.layer, c"setDrawableSize:" => (), CGSize = CGSize {
-            width: (c[2] - c[0]).max(1) as f64,
-            height: (c[3] - c[1]).max(1) as f64,
-        });
-        let live = send!(t.window, c"inLiveResize" => bool);
-        let differs = window_content(&s.screen, t.window) != c;
-        let apply = t.outstanding == 0 && !live && differs && !t.closed;
-        s.applying |= apply;
-        Some((t.window, s.screen, c, apply))
-    })
-    .flatten();
-    if let Some((w, screen, c, true)) = apply {
-        place(&screen, w, c);
-        with(|s| s.applying = false);
-    }
+    with(|s| {
+        if let Some(t) = s.tasks.get_mut(&task) {
+            t.bounds = b;
+            t.caption = caption;
+            let c = t.content();
+            send!(t.layer, c"setDrawableSize:" => (), CGSize = CGSize {
+                width: (c[2] - c[0]).max(1) as f64,
+                height: (c[3] - c[1]).max(1) as f64,
+            });
+        }
+    });
+    follow(task);
     update_targets(Some(task));
+}
+
+/// Put the window where its task is, unless the user is moving or
+/// resizing it: then Android's bounds answer the user's, and the window
+/// follows only once the user has stopped (a minimum size Android kept).
+fn follow(task: i32) {
+    let Some(Some((w, screen, c, recent))) = with(|s| {
+        let t = s.tasks.get(&task)?;
+        let c = t.content();
+        let live = send!(t.window, c"inLiveResize" => bool);
+        if t.closed || live || window_content(&s.screen, t.window) == c {
+            return None;
+        }
+        let recent = t
+            .moved
+            .is_some_and(|m| m.elapsed() < Duration::from_millis(SETTLE_MS));
+        s.applying |= !recent;
+        Some((t.window, s.screen, c, recent))
+    }) else {
+        return;
+    };
+    if recent {
+        on_main_after(SETTLE_MS, move || follow(task));
+        return;
+    }
+    place(&screen, w, c);
+    with(|s| s.applying = false);
 }
 
 /// A new task window over the task's content.
@@ -525,7 +545,7 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
         caption,
         visible: true,
         closed: false,
-        outstanding: 0,
+        moved: None,
     };
     send!(w, c"setTitle:" => (), Id = nsstring(&title));
     with(|s| {
@@ -549,11 +569,6 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
 }
 
 fn set_bounds(task: i32, b: [i32; 4]) {
-    with(|s| {
-        if let Some(t) = s.tasks.get_mut(&task) {
-            t.outstanding += 1;
-        }
-    });
     request(window::SET_BOUNDS, task, b);
 }
 
@@ -731,7 +746,8 @@ fn moved(note: Id) {
         return;
     };
     let Some(Some(b)) = with(|s| {
-        let t = s.tasks.get(&task)?;
+        let t = s.tasks.get_mut(&task)?;
+        t.moved = Some(Instant::now());
         let b = bounds(window_content(&s.screen, w), t.caption);
         (b != t.bounds).then_some(b)
     }) else {
