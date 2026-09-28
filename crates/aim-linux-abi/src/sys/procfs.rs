@@ -6,7 +6,8 @@
 //! - Directories are directory streams with fixed entries (see `dir`).
 //! - Values init wrote under `<runtime>/kernfs/...`
 //!   (`docs/guest-init-contract.md` section 7) take precedence over the
-//!   synthesized ones and may be rewritten by the guest.
+//!   synthesized ones and may be rewritten by the guest, but for sysfs's
+//!   device trees, which hold only the modeled devices (`device_tree`).
 //! - `/proc/<pid>` for another process is read from Darwin's process info;
 //!   memory maps and fds are only available for this process.
 
@@ -1104,7 +1105,7 @@ fn is_kernfs(guest: &str) -> bool {
 /// The host path init recorded a value at, if it exists.
 fn recorded(guest: &str) -> Option<(PathBuf, libc::stat)> {
     let (host, area) = vfs::lookup(guest);
-    if area != Area::Kernfs {
+    if area != Area::Kernfs || device_tree(guest) {
         return None;
     }
     let c = CString::new(host.as_os_str().as_encoded_bytes()).ok()?;
@@ -1252,9 +1253,14 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
                     .unwrap_or(b.len().min(15));
                 n[..len].copy_from_slice(&b[..len]);
                 super::thread::set_name_of(tid, n);
-                None
+                Ok(None)
             },
         ));
+    }
+    if write && let Some(dev) = super::uevent::attribute(&canon) {
+        return Some(super::knob::open(&dev.attribute(), cloexec, move |b| {
+            super::uevent::synthesize(&dev, b).map(|()| None)
+        }));
     }
     // /proc/<pid>/fd/N reopens the file behind fd N.
     if let Some(n) = canon
@@ -1293,6 +1299,10 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
     }
     Some(match node(&canon) {
         Some(Node::File(data)) => {
+            if write && device_tree(&canon) {
+                // A device attribute with no store method.
+                return Some(-(EACCES as i64));
+            }
             if write {
                 // Kernel knobs the layer does not emulate: record the value
                 // under kernfs like init's writes, or refuse.
@@ -1329,8 +1339,31 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
                 errno::check(unsafe { libc::open(r.host.as_ptr(), host_flags, 0) } as i64)
             }
         }
+        // sysfs creates no files: a missing device attribute stays missing.
+        None if device_tree(&canon) => {
+            let parent = canon.rsplit_once('/').map_or("", |(p, _)| p);
+            if flags & O_CREAT != 0 && matches!(node(parent), Some(Node::Dir(_))) {
+                -(EACCES as i64)
+            } else {
+                -(ENOENT as i64)
+            }
+        }
         None if flags & O_CREAT != 0 || write => record_write(guest, host_flags),
         None => -(ENOENT as i64),
+    })
+}
+
+/// Whether `guest` is in sysfs's device trees, which hold only the devices
+/// the layer models and their attributes. Values init wrote there are not
+/// served: on Linux such a write fails for a device that does not exist
+/// (`/sys/class/android_usb` on a device without a USB gadget), and the
+/// modeled attributes answer for themselves.
+fn device_tree(guest: &str) -> bool {
+    ["block", "bus", "class", "dev", "devices"].iter().any(|t| {
+        guest
+            .strip_prefix("/sys/")
+            .and_then(|r| r.strip_prefix(t))
+            .is_some_and(|r| r.is_empty() || r.starts_with('/'))
     })
 }
 

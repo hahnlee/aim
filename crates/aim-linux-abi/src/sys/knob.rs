@@ -1,17 +1,18 @@
 //! Kernel files whose writes act rather than store: selinuxfs's `access`
-//! transaction, a thread's `comm`.
+//! transaction, a thread's `comm`, a device's `uevent`.
 //!
 //! The fd is an unlinked file holding what a read returns, so reads, seeks
 //! and fstat stay native. A write goes to the file's handler instead; a
 //! reply replaces the contents and is read from the start, as a Linux
-//! transaction file answers the write that precedes the read.
+//! transaction file answers the write that precedes the read. A refused
+//! write fails with the handler's errno.
 
 use std::sync::Arc;
 
 use super::fdtab::{self, Kind};
-use crate::errno;
+use crate::errno::{self, Errno};
 
-type OnWrite = dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync;
+type OnWrite = dyn Fn(&[u8]) -> Result<Option<Vec<u8>>, Errno> + Send + Sync;
 
 pub struct Knob(Box<OnWrite>);
 
@@ -19,7 +20,7 @@ pub struct Knob(Box<OnWrite>);
 pub fn open(
     contents: &[u8],
     cloexec: bool,
-    on_write: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
+    on_write: impl Fn(&[u8]) -> Result<Option<Vec<u8>>, Errno> + Send + Sync + 'static,
 ) -> i64 {
     let fd = super::procfs::content_fd(contents, cloexec);
     if fd >= 0 {
@@ -37,7 +38,11 @@ pub fn write(fd: i32, k: &Knob, iov: &[libc::iovec]) -> i64 {
             std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len)
         });
     }
-    if let Some(reply) = (k.0)(&req) {
+    let reply = match (k.0)(&req) {
+        Ok(reply) => reply,
+        Err(e) => return -(e as i64),
+    };
+    if let Some(reply) = reply {
         // SAFETY: rewriting our own unlinked file.
         unsafe {
             libc::ftruncate(fd, 0);

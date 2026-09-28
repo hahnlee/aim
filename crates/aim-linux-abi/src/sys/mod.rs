@@ -47,6 +47,7 @@ mod sigframe;
 mod signal;
 mod sync_file;
 mod thread;
+mod uevent;
 mod uplink;
 mod vmmap;
 mod wait;

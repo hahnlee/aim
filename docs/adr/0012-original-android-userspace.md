@@ -558,10 +558,21 @@ nothing unprivileged for it to drive ([vendor-hals.md](../vendor-hals.md)).
 Undeclared, so absent: telephony, NFC, vibrator, IR, UWB and Thread, plus
 `update_engine` and `snapuserd` (the image is pre-flattened).
 
+USB: the device is a USB host (`android.hardware.usb.host`, the Mac's
+ports), so UsbService runs; no USB device is passed through yet, so none
+appears in `/dev/bus/usb`. It has no USB gadget, hence no accessory or
+peripheral mode and no `/sys/class/android_usb`.
+
 ### Kernel features to emulate
 
 binder, FUSE, `/proc` and `/sys` per the device contract, the netlink subset
 the remaining original daemons use, evdev, and memfd/ashmem.
+
+- **uevents:** NETLINK_KOBJECT_UEVENT sockets receive the kernel's
+  uevents (`ACTION@DEVPATH`, the variables, `SEQNUM`) with the kernel's
+  credentials; a modeled device's sysfs `uevent` attribute lists its
+  variables and synthesizes an announcement when written. sysfs's device
+  trees hold only the modeled devices.
 
 - **Network devices** (docs/network.md): `lo` and `eth0` with the
   interface ioctls, NETLINK_ROUTE (link and address dumps, changes and

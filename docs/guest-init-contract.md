@@ -301,6 +301,12 @@ init's `write`, `copy`, `copy_per_line`, `hostname` and `domainname` to
 path>`. Nothing on the host changes. The layer's `/proc` and `/sys`
 emulation must return the recorded value for a path it serves. It may accept
 later guest writes the same way. Values it does not emulate stay unused.
+sysfs's device trees (`/sys/{block,bus,class,dev,devices}`) are the
+exception: they hold only the devices the layer models, so a value init
+wrote there is never served. On Linux the write fails for a device that
+does not exist, such as init.usb.rc's `/sys/class/android_usb` on a device
+without a USB gadget, whose presence would send UsbService down the gadget
+path.
 
 A dry run of the pinned image records 43 values (dry run, 2026-09-27):
 `/proc/sys/kernel/*` (17, for example `panic_on_oops`, `kptr_restrict`,

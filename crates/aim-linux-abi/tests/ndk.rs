@@ -475,6 +475,27 @@ fn eventhub() {
     }
 }
 
+/// uevent sockets, the evdev nodes' `uevent` attributes, and sysfs device
+/// trees that ignore a value init wrote for a device that does not exist.
+#[test]
+fn uevents() {
+    use aim_host_display::input::{device_dir, devices, server::Devices};
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_uevent");
+    let usb = g.runtime.join("kernfs/sys/class/android_usb/android0");
+    std::fs::create_dir_all(&usb).unwrap();
+    std::fs::write(usb.join("enable"), "0").unwrap();
+    let prog = g.build(&clang, "t_uevent");
+    let socket = g.runtime.join("display.sock");
+    let _devs = Devices::create(&device_dir(&socket), devices(1080, 1920, 254.0, 254.0)).unwrap();
+    let (ok, out) = g.run(&["--display", socket.to_str().unwrap(), &prog]);
+    println!("{out}");
+    assert!(ok && out.contains("PASS"), "t_uevent failed:\n{out}");
+}
+
 unsafe extern "C" {
     fn pthread_fchdir_np(fd: libc::c_int) -> libc::c_int;
 }

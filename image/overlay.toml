@@ -455,6 +455,11 @@ path = "/system_ext/etc/init/aim-windows.rc"
 source = "image/system_ext/etc/init/aim-windows.rc"
 reason = "starts the task bridge"
 
+[[add]]
+path = "/vendor/etc/permissions/android.hardware.usb.host.xml"
+source = "image/vendor/etc/permissions/android.hardware.usb.host.xml"
+reason = "the Mac's USB host ports: UsbService, the `usb` service behind UsbManager, runs only with this feature (GMS persistent exits without UsbManager); the device has no USB gadget, so no accessory mode"
+
 [[remove]]
 path = "/vendor/etc/permissions/android.hardware.uwb.xml"
 reason = "declares UWB, whose HAL (com.android.hardware.uwb) is removed: UwbService waited for it forever in system_server's binder threads"

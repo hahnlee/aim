@@ -1,16 +1,21 @@
-//! AF_NETLINK, NETLINK_ROUTE: the rtnetlink subset Android's network stack
+//! AF_NETLINK: NETLINK_ROUTE, the rtnetlink subset Android's network stack
 //! uses on the kernel's devices (`netif`): link and address dumps
 //! (bionic's getifaddrs), address and link changes (netd, NetworkStack),
 //! and the link and address groups (EthernetTracker's and IpClient's
-//! NetlinkMonitors). Other netlink families are EPROTONOSUPPORT.
+//! NetlinkMonitors); and NETLINK_KOBJECT_UEVENT, whose one group carries
+//! the kernel's uevents (`uevent`) and the ones a privileged process hands
+//! the kernel to announce. Other netlink families are EPROTONOSUPPORT.
 //!
 //! A netlink socket is a host AF_UNIX datagram socket bound to
-//! `<runtime>/netlink/<portid>-<groups>`, so poll, epoll and plain reads
-//! work on it. A request is handled in the calling process, and the
-//! replies and every change's announcement are datagrams sent to the
-//! listening sockets' names, one netlink message each (a dump is several
-//! reads, as a large dump is on Linux). A name whose socket is gone is
-//! removed when a send finds it refused.
+//! `<runtime>/netlink/<protocol>:<portid>-<groups>`, so poll, epoll and
+//! plain reads work on it. A request is handled in the calling process, and
+//! the replies and every announcement are datagrams sent to the listening
+//! sockets' names, one netlink message each (a dump is several reads, as a
+//! large dump is on Linux). Each datagram starts with what Linux keeps
+//! beside the message: the group it was sent to, the sender's port id and
+//! its credentials, which a receive turns into the source address and
+//! SCM_CREDENTIALS. A name whose socket is gone is removed when a send
+//! finds it refused.
 //!
 //! - Dumps: RTM_GETLINK, RTM_GETADDR; RTM_GETROUTE, RTM_GETNEIGH and
 //!   RTM_GETRULE dump nothing (no routing table or neighbours: the host
@@ -28,6 +33,7 @@ use super::netif::{self, Addr, Event, Link};
 use crate::errno::{self, EINVAL, ENODEV, EPERM, Errno};
 
 pub const NETLINK_ROUTE: u64 = 0;
+pub const NETLINK_KOBJECT_UEVENT: u64 = 15;
 pub const L_AF_NETLINK: u16 = 16;
 pub const SOL_NETLINK: u64 = 270;
 
@@ -82,11 +88,15 @@ const EOPNOTSUPP: Errno = 95;
 const ECONNREFUSED: Errno = 111;
 const EADDRINUSE: Errno = 98;
 const CAP_NET_ADMIN: u32 = 12;
+const CAP_SYS_ADMIN: u32 = 21;
+/// The largest uevent the kernel sends.
+const UEVENT_BUFFER_SIZE: usize = 2048;
 
 /// A netlink socket's state.
 pub struct Socket {
     /// SOCK_RAW or SOCK_DGRAM (the same for netlink).
     pub ty: u64,
+    pub proto: u64,
     portid: AtomicU32,
     groups: AtomicU32,
     cap_ack: AtomicU32,
@@ -109,16 +119,28 @@ fn dir() -> PathBuf {
     netif::kernel_dir("netlink")
 }
 
-fn name_of(portid: u32, groups: u32) -> String {
-    format!("{}-{groups:x}", portid as i32)
+fn name_of(proto: u64, portid: u32, groups: u32) -> String {
+    format!("{proto}:{}-{groups:x}", portid as i32)
 }
 
-static NEXT: AtomicU32 = AtomicU32::new(0);
+/// The protocol, port id and groups of a socket's name.
+fn parse_name(name: &str) -> Option<(u64, u32, u32)> {
+    let (proto, rest) = name.split_once(':')?;
+    let (p, g) = rest.rsplit_once('-')?;
+    Some((
+        proto.parse().ok()?,
+        p.parse::<i32>().ok()? as u32,
+        u32::from_str_radix(g, 16).ok()?,
+    ))
+}
+
+/// Autobind counters, per protocol: port ids are per protocol on Linux.
+static NEXT: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
 
 /// Bind host socket `fd` to the name of `portid` (and `groups`), replacing
 /// a stale name of the same port.
-fn bind_name(fd: i32, portid: u32, groups: u32) -> Result<PathBuf, Errno> {
-    let p = dir().join(name_of(portid, groups));
+fn bind_name(fd: i32, proto: u64, portid: u32, groups: u32) -> Result<PathBuf, Errno> {
+    let p = dir().join(name_of(proto, portid, groups));
     let t = super::net::host_target_of_path(&p);
     for _ in 0..2 {
         let r = super::net::with_target(&t, |sa, len| {
@@ -136,6 +158,20 @@ fn bind_name(fd: i32, portid: u32, groups: u32) -> Result<PathBuf, Errno> {
     Err(EADDRINUSE)
 }
 
+/// Whether a live socket of `proto` holds port id `portid`, with any groups.
+fn taken(proto: u64, portid: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir()) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .and_then(parse_name)
+            .is_some_and(|(p, id, _)| (p, id) == (proto, portid))
+            && alive(&e.path())
+    })
+}
+
 /// Whether a socket is bound at `p`: connecting a datagram probe to a
 /// name with no socket is refused.
 fn alive(p: &std::path::Path) -> bool {
@@ -150,11 +186,12 @@ fn alive(p: &std::path::Path) -> bool {
     r != -(ECONNREFUSED as i64) && r != -2
 }
 
-/// A new port id: the process id for its first socket, then negative
-/// numbers unique to the process, as Linux autobinds.
-fn new_portid() -> u32 {
+/// A new port id: the process id for its first socket of the protocol,
+/// then negative numbers unique to the process, as Linux autobinds.
+fn new_portid(proto: u64) -> u32 {
     let pid = super::process::getpid() as u32;
-    match NEXT.fetch_add(1, Ordering::Relaxed) {
+    let next = &NEXT[(proto == NETLINK_KOBJECT_UEVENT) as usize];
+    match next.fetch_add(1, Ordering::Relaxed) {
         0 => pid,
         n => (-((pid as i32 & 0xf_ffff) << 11 | (n as i32 & 0x7ff)) - 4096) as u32,
     }
@@ -162,7 +199,7 @@ fn new_portid() -> u32 {
 
 /// `socket(AF_NETLINK, ty, proto)`: a bound host datagram socket.
 pub fn socket(ty: u64, proto: u64) -> Result<(i32, Socket), i64> {
-    if proto != NETLINK_ROUTE {
+    if proto != NETLINK_ROUTE && proto != NETLINK_KOBJECT_UEVENT {
         return Err(-93); // EPROTONOSUPPORT
     }
     // SAFETY: a plain datagram socket.
@@ -171,12 +208,13 @@ pub fn socket(ty: u64, proto: u64) -> Result<(i32, Socket), i64> {
         return Err(-(errno::last() as i64));
     }
     super::net::size_buffers(fd);
-    let portid = new_portid();
-    match bind_name(fd, portid, 0) {
+    let portid = new_portid(proto);
+    match bind_name(fd, proto, portid, 0) {
         Ok(path) => Ok((
             fd,
             Socket {
                 ty,
+                proto,
                 portid: AtomicU32::new(portid),
                 groups: AtomicU32::new(0),
                 cap_ack: AtomicU32::new(0),
@@ -196,9 +234,9 @@ impl Socket {
     /// Give the socket a new port id and group set, renaming its name.
     fn rename(&self, portid: u32, groups: u32) -> Result<(), Errno> {
         let mut path = self.path.lock().unwrap();
-        let new = dir().join(name_of(portid, groups));
+        let new = dir().join(name_of(self.proto, portid, groups));
         if new != *path {
-            if portid != self.portid.load(Ordering::Relaxed) && alive(&new) {
+            if portid != self.portid.load(Ordering::Relaxed) && taken(self.proto, portid) {
                 return Err(EADDRINUSE);
             }
             std::fs::rename(&*path, &new).map_err(|e| e.raw_os_error().unwrap_or(EINVAL))?;
@@ -206,7 +244,7 @@ impl Socket {
         }
         self.portid.store(portid, Ordering::Relaxed);
         self.groups.store(groups, Ordering::Relaxed);
-        listening(groups);
+        listening(self.proto, groups);
         Ok(())
     }
 
@@ -221,6 +259,7 @@ impl Socket {
     /// Fork: the socket's state.
     pub fn save(&self, w: &mut super::fork_state::Writer) {
         w.u64(self.ty);
+        w.u64(self.proto);
         w.u32(self.portid.load(Ordering::Relaxed));
         w.u32(self.groups.load(Ordering::Relaxed));
         w.u32(self.cap_ack.load(Ordering::Relaxed));
@@ -228,11 +267,12 @@ impl Socket {
     }
 
     pub fn load(r: &mut super::fork_state::Reader) -> Socket {
-        let ty = r.u64();
+        let (ty, proto) = (r.u64(), r.u64());
         let (portid, groups, cap_ack) = (r.u32(), r.u32(), r.u32());
         let path = PathBuf::from(String::from_utf8_lossy(&r.bytes()).into_owned());
         Socket {
             ty,
+            proto,
             portid: AtomicU32::new(portid),
             groups: AtomicU32::new(groups),
             cap_ack: AtomicU32::new(cap_ack),
@@ -244,8 +284,8 @@ impl Socket {
 
 /// A process listening to link changes watches the Mac's network, whose
 /// changes are link changes.
-fn listening(groups: u32) {
-    if groups & GRP_LINK != 0 {
+fn listening(proto: u64, groups: u32) {
+    if proto == NETLINK_ROUTE && groups & GRP_LINK != 0 {
         super::uplink::watch(netif::refresh);
     }
 }
@@ -253,16 +293,13 @@ fn listening(groups: u32) {
 /// The state of the socket bound to `name` in the netlink directory (a
 /// netlink socket that arrived by exec or `SCM_RIGHTS`).
 pub fn adopt(name: &std::ffi::OsStr) -> Option<Socket> {
-    let (p, g) = name.to_str()?.rsplit_once('-')?;
-    let (portid, groups) = (
-        p.parse::<i32>().ok()? as u32,
-        u32::from_str_radix(g, 16).ok()?,
-    );
+    let (proto, portid, groups) = parse_name(name.to_str()?)?;
     let path = dir().join(name);
     std::fs::symlink_metadata(&path).ok()?;
-    listening(groups);
+    listening(proto, groups);
     Some(Socket {
         ty: 3,
+        proto,
         portid: AtomicU32::new(portid),
         groups: AtomicU32::new(groups),
         cap_ack: AtomicU32::new(0),
@@ -360,20 +397,72 @@ fn sender() -> i32 {
             libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
             libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
         }
+        super::net::size_buffers(fd);
         super::fdtab::hide(fd)
     })
 }
 
-/// Send one datagram to the socket named `p`. Returns the Linux errno of a
+/// What precedes each message on a socket's queue: the group it was sent
+/// to (as a bind mask; 0 for a unicast), the sender's port id (0: the
+/// kernel) and the sender's pid, uid and gid.
+pub const META: usize = 20;
+
+/// The kernel as a sender.
+const KERNEL: (u32, [u32; 3]) = (0, [0; 3]);
+
+/// The source address (`struct sockaddr_nl`) and credentials (`struct
+/// ucred`) of a received message's metadata.
+pub fn parse_meta(m: &[u8; META]) -> (Vec<u8>, [u32; 3]) {
+    let w = |i: usize| u32::from_le_bytes(m[i..i + 4].try_into().unwrap());
+    (sockaddr_nl(w(4), w(0)), [w(8), w(12), w(16)])
+}
+
+/// Send one message to the socket named `p`. Returns the Linux errno of a
 /// failure. A full queue drops the message, as Linux drops a broadcast to
 /// a full receiver.
-fn deliver(p: &std::path::Path, msg: &[u8]) -> Option<Errno> {
+fn deliver(p: &std::path::Path, group: u32, from: (u32, [u32; 3]), msg: &[u8]) -> Option<Errno> {
+    let mut d = Vec::with_capacity(META + msg.len());
+    for v in [group, from.0, from.1[0], from.1[1], from.1[2]] {
+        d.extend_from_slice(&v.to_le_bytes());
+    }
+    d.extend_from_slice(msg);
     let fd = sender();
     let r = super::net::with_target(&super::net::host_target_of_path(p), |sa, len| {
         // SAFETY: sending our buffer to a named socket.
-        errno::check(unsafe { libc::sendto(fd, msg.as_ptr().cast(), msg.len(), 0, sa, len) } as i64)
+        errno::check(unsafe { libc::sendto(fd, d.as_ptr().cast(), d.len(), 0, sa, len) } as i64)
     });
     (r < 0).then_some(-r as Errno)
+}
+
+/// Send each `(group, message)` to the sockets of `proto` bound to its
+/// group, except the socket named `except` (a sender does not hear its own
+/// broadcast).
+fn broadcast(
+    proto: u64,
+    msgs: &[(u32, Vec<u8>)],
+    from: (u32, [u32; 3]),
+    except: Option<&std::path::Path>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir()) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let Some((p, _, groups)) = e.file_name().to_str().and_then(parse_name) else {
+            continue;
+        };
+        if p != proto || except == Some(e.path().as_path()) {
+            continue;
+        }
+        for (g, m) in msgs {
+            if groups & g == 0 {
+                continue;
+            }
+            if matches!(deliver(&e.path(), *g, from, m), Some(ECONNREFUSED | 2)) {
+                let _ = std::fs::remove_file(e.path());
+                break;
+            }
+        }
+    }
 }
 
 /// Announce device changes to the sockets listening to their groups.
@@ -400,28 +489,13 @@ pub fn announce(events: &[Event]) {
             }
         })
         .collect();
-    let Ok(entries) = std::fs::read_dir(dir()) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let name = e.file_name();
-        let Some(groups) = name
-            .to_str()
-            .and_then(|n| n.rsplit_once('-'))
-            .and_then(|(_, g)| u32::from_str_radix(g, 16).ok())
-        else {
-            continue;
-        };
-        for (g, m) in &msgs {
-            if groups & g == 0 {
-                continue;
-            }
-            if matches!(deliver(&e.path(), m), Some(ECONNREFUSED | 2)) {
-                let _ = std::fs::remove_file(e.path());
-                break;
-            }
-        }
-    }
+    broadcast(NETLINK_ROUTE, &msgs, KERNEL, None);
+}
+
+/// Broadcast a kernel uevent (`uevent::emit`) to the uevent sockets bound
+/// to its group, the only one the kernel sends to.
+pub fn uevent(msg: &[u8]) {
+    broadcast(NETLINK_KOBJECT_UEVENT, &[(1, msg.to_vec())], KERNEL, None);
 }
 
 // ---- messages ---------------------------------------------------------------
@@ -670,10 +744,50 @@ fn request(
     }
 }
 
-/// A message the socket sent to the kernel: handle each request in it and
-/// queue the replies on the socket. Returns the bytes consumed.
-pub fn send(s: &Socket, data: &[u8]) -> i64 {
+/// A uevent a process sent to the kernel (`uevent_net_rcv`): with
+/// CAP_SYS_ADMIN, the kernel announces it as its own, with the next
+/// sequence number appended and the sender's credentials.
+fn inject(body: &[u8], cred: [u32; 3]) -> Errno {
+    if !super::cred::capable(CAP_SYS_ADMIN) {
+        return EPERM;
+    }
+    let seqnum = format!("SEQNUM={}", super::uevent::next_seqnum());
+    if body.len() + seqnum.len() > UEVENT_BUFFER_SIZE {
+        return EINVAL;
+    }
+    let msg = [body, seqnum.as_bytes()].concat();
+    broadcast(NETLINK_KOBJECT_UEVENT, &[(1, msg)], (0, cred), None);
+    0
+}
+
+/// A message the socket sent to `dst` (port id and groups; the kernel when
+/// None). A group named in it gets the message, as does the kernel, which
+/// handles each request in it and queues the replies on the socket.
+/// Sockets of other processes are not reachable by port id. Returns the
+/// bytes consumed.
+pub fn send(s: &Socket, data: &[u8], dst: Option<(u32, u32)>) -> i64 {
     let portid = s.portid.load(Ordering::Relaxed);
+    let (dst_portid, groups) = dst.unwrap_or((0, 0));
+    // Linux sends to the lowest group named.
+    let group = groups & groups.wrapping_neg();
+    // Neither family lets an unprivileged process name a destination.
+    if (dst_portid != 0 || group != 0) && admin().is_err() {
+        return -(EPERM as i64);
+    }
+    let path = s.path.lock().unwrap().clone();
+    let c = super::cred::peer(super::process::getpid() as i32);
+    let cred = [c.pid as u32, c.uid, c.gid];
+    if group != 0 {
+        broadcast(
+            s.proto,
+            &[(group, data.to_vec())],
+            (portid, cred),
+            Some(&path),
+        );
+    }
+    if dst_portid != 0 {
+        return -(ECONNREFUSED as i64);
+    }
     let cap_ack = s.cap_ack.load(Ordering::Relaxed) != 0;
     let mut replies = Vec::new();
     let mut at = 0;
@@ -688,7 +802,11 @@ pub fn send(s: &Socket, data: &[u8]) -> i64 {
         let seq = u32::from_le_bytes(m[8..12].try_into().unwrap());
         // Control messages and non-requests are not answered.
         if flags & NLM_F_REQUEST != 0 && ty >= 16 {
-            let err = request(ty, flags, seq, portid, &m[16..], &mut replies);
+            let err = if s.proto == NETLINK_ROUTE {
+                request(ty, flags, seq, portid, &m[16..], &mut replies)
+            } else {
+                inject(&m[16..], cred)
+            };
             if err != 0 || flags & NLM_F_ACK != 0 {
                 // struct nlmsgerr: the error and the request's header,
                 // with its payload for an error unless NETLINK_CAP_ACK.
@@ -699,9 +817,8 @@ pub fn send(s: &Socket, data: &[u8]) -> i64 {
         }
         at += align(len);
     }
-    let path = s.path.lock().unwrap().clone();
     for r in &replies {
-        deliver(&path, r);
+        deliver(&path, 0, KERNEL, r);
     }
     data.len() as i64
 }
@@ -755,7 +872,7 @@ mod tests {
 
     #[test]
     fn port_ids_are_unique_and_later_ones_negative() {
-        let (a, b) = (new_portid(), new_portid());
+        let (a, b) = (new_portid(NETLINK_ROUTE), new_portid(NETLINK_ROUTE));
         assert_ne!(a, b);
         assert!((b as i32) < -4096);
     }

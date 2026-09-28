@@ -157,11 +157,16 @@ that was the layer's or the device's, and what became of it:
 | eth0 went down and up about three times a second: DhcpClient's `connect` to the server reached the host, where the Mac's own DHCP client holds that address pair (EADDRINUSE), so every lease failed | system_server, netd, NetworkStack and every app's network callbacks (24 CONNECTED broadcasts in 9 s) | the connect goes to the virtual router; one lease per boot |
 | UwbService and FingerprintService waited for their removed HALs in system_server's binder threads, three times a second | binder threads, ctl.interface_start requests | the device no longer declares UWB or a fingerprint sensor |
 | traced_probes aborted about once a minute on its memory watchdog | a restart and a cleanup exec each time | `/proc` counts rss in 16 KiB pages; its watchdog had read four times its resident size |
-| GMS persistent dies every 2 s ("UsbManagerCompat is unavailable": no `usb` service) | a new process start each time, plus GMS service restarts, runtime-permission rewrites and package events | open: UsbService needs `android.hardware.usb.host`, uevent netlink sockets and a sysfs without init-made `/sys/class/android_usb` |
+| GMS persistent dies every 2 s ("UsbManagerCompat is unavailable": no `usb` service) | a new process start each time, plus GMS service restarts, runtime-permission rewrites and package events | the device declares `android.hardware.usb.host`, so UsbService runs (#336); sysfs no longer shows init's `/sys/class/android_usb`, and uevent sockets work |
 
-With the first three fixed, a boot calmed to 0.1–0.4 cores within two
-minutes of boot completion between GMS persistent's restarts, and read
-1.8–10 cores in 20 s windows that caught them.
+Six minutes after boot completion, over 2 minutes sampled every second
+(processes that came and went included), `55cb4474` used 0.05 cores (load
+2–13) against 1.73 on main (load 12–25): main's loop still started GMS
+persistent 6 times in that window, and each round restarted GMS, the Play
+Store and other apps (0.83 cores in processes that started in the window).
+Two minutes after boot completion both still run first-boot work
+(dex2oat, app starts): 1.2 and 5.0 cores against 3.2 on main, of which
+GMS persistent's own processes took 0.76 on main.
 
 Most of the services' CPU at boot is system time, with millions of page
 faults: servicemanager 2:06 of CPU of which 1.96 s user and 9.3 million
