@@ -110,6 +110,27 @@ objects, which guest code cannot hold). `vkCreateDevice` removes the
 driver's own extensions from the list it passes on and enables
 `VK_EXT_external_memory_host`.
 
+### Queue families
+
+MoltenVK has one queue per family (a `VkQueue` is an `MTLCommandQueue`;
+Metal has no queue families) and offers several alike general-purpose
+families instead: four on an M2 Pro. HWUI's `VulkanManager`, like other
+Vulkan applications, asks for two queues of its graphics family. When all
+of a physical device's families are alike, the driver presents them as one
+family with all their queues: queue `i` of family 0 is the host's family
+`i` (`vkGetPhysicalDeviceQueueFamilyProperties{,2}`, `vkCreateDevice`,
+`vkGetDeviceQueue{,2}`).
+
+Family 0 is the host's first family, so every other family index means the
+same to MoltenVK and passes through: command pools, barriers (an ownership
+transfer is between two families; `VK_QUEUE_FAMILY_EXTERNAL` and
+`VK_QUEUE_FAMILY_FOREIGN_EXT` pass as they are) and sharing lists
+(concurrent sharing names two families or more, so there is none). A
+command buffer from a pool of family 0 may run on any of its queues:
+MoltenVK records command buffers apart from any queue and encodes them into
+the queue they are submitted to (it would use the pool's family only to
+prefill Metal command buffers, which is off).
+
 ### Swapchain images (`VK_ANDROID_native_buffer`)
 
 The loader's `vkCreateSwapchainKHR` dequeues the window's buffers and
@@ -192,11 +213,14 @@ declares Vulkan hardware level 0.
     extensions and `VK_EXT_debug_report` among them) and 123 device
     extensions, `VK_KHR_swapchain`, the AHardwareBuffer, foreign queue
     family and sync-fd ones included;
+  - one queue family with four queues, and a device with two of them, as
+    HWUI makes it;
   - an instance and a device with those extensions; a red triangle on blue
     into a 64×64 image whose memory is an AHardwareBuffer, read back through
     the buffer's CPU mapping (corner, centre and apex pixels, so orientation
-    too), in 1.8–10 ms for the submit and wait; the memory exported again is
-    the same AHardwareBuffer;
+    too), in 1.5–10 ms for the submit and wait; the memory exported again is
+    the same AHardwareBuffer; the same on the second queue, after a
+    semaphore the first signals;
   - a sync-fd semaphore exported (fd -1) and imported into another that a
     submission then waits for.
 - A full boot (`guest-init` as `cargo aim boot` runs it, first boot):

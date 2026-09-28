@@ -115,6 +115,8 @@ static VkInstance instance;
 static VkPhysicalDevice gpu;
 static VkDevice device;
 static VkQueue queue;
+// The second queue of the graphics family, as HWUI asks for two.
+static VkQueue queue2;
 static VkCommandPool pool;
 static VkRenderPass pass;
 static VkPipelineLayout layout;
@@ -441,6 +443,33 @@ static void ahb_triangle(void) {
     VK(vkGetMemoryAndroidHardwareBufferANDROID(device, &gi, &again));
     CHECK(again == ahb, "exported buffer %p, imported %p", (void*)again, (void*)ahb);
     AHardwareBuffer_release(again);
+    // Again on the family's second queue, after a semaphore the first
+    // signals, with a command buffer from the family's pool.
+    VkCommandBuffer cmd2 = record(fb, 0.0f, 1.0f, 0.0f);
+    VkSemaphoreCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    VkSemaphore first;
+    VK(vkCreateSemaphore(device, &sci, NULL, &first));
+    VkSubmitInfo signal = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                           .signalSemaphoreCount = 1,
+                           .pSignalSemaphores = &first};
+    VK(vkQueueSubmit(queue, 1, &signal, VK_NULL_HANDLE));
+    VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence done;
+    VK(vkCreateFence(device, &fci, NULL, &done));
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo second = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                           .waitSemaphoreCount = 1,
+                           .pWaitSemaphores = &first,
+                           .pWaitDstStageMask = &stage,
+                           .commandBufferCount = 1,
+                           .pCommandBuffers = &cmd2};
+    VK(vkQueueSubmit(queue2, 1, &second, done));
+    VK(vkWaitForFences(device, 1, &done, VK_TRUE, UINT64_MAX));
+    check_frame(ahb, 0x00ff00ff, "second queue");
+    vkDestroyFence(device, done, NULL);
+    vkDestroySemaphore(device, first, NULL);
+    vkFreeCommandBuffers(device, pool, 1, &cmd2);
+    printf("ok the graphics family's second queue, after a semaphore from the first\n");
     vkFreeCommandBuffers(device, pool, 1, &cmd);
     vkDestroyFramebuffer(device, fb, NULL);
     vkDestroyImageView(device, v, NULL);
@@ -618,21 +647,36 @@ int main(int argc, char** argv) {
                           VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME};
     for (int i = 0; i < 4; i++) CHECK(has(e, n, exts[i]), "no %s", exts[i]);
     free(e);
-    float priority = 1.0f;
+    // As HWUI's VulkanManager: two queues of the first graphics family.
+    uint32_t families = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(gpu, &families, NULL);
+    VkQueueFamilyProperties* fp = calloc(families, sizeof(*fp));
+    vkGetPhysicalDeviceQueueFamilyProperties(gpu, &families, fp);
+    uint32_t family = 0;
+    while (family < families && !(fp[family].queueFlags & VK_QUEUE_GRAPHICS_BIT)) family++;
+    CHECK(family < families && fp[family].queueCount >= 2,
+          "graphics family %u of %u has %u queues", family, families,
+          family < families ? fp[family].queueCount : 0);
+    printf("ok %u queue family, graphics family %u with %u queues\n", families, family,
+           fp[family].queueCount);
+    free(fp);
+    float priorities[2] = {1.0f, 1.0f};
     VkDeviceQueueCreateInfo q = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                                 .queueFamilyIndex = 0,
-                                 .queueCount = 1,
-                                 .pQueuePriorities = &priority};
+                                 .queueFamilyIndex = family,
+                                 .queueCount = 2,
+                                 .pQueuePriorities = priorities};
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                              .queueCreateInfoCount = 1,
                              .pQueueCreateInfos = &q,
                              .enabledExtensionCount = 4,
                              .ppEnabledExtensionNames = exts};
     VK(vkCreateDevice(gpu, &di, NULL, &device));
-    vkGetDeviceQueue(device, 0, 0, &queue);
+    vkGetDeviceQueue(device, family, 0, &queue);
+    vkGetDeviceQueue(device, family, 1, &queue2);
+    CHECK(queue && queue2 && queue != queue2, "queues %p %p", (void*)queue, (void*)queue2);
     VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                   .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-                                  .queueFamilyIndex = 0};
+                                  .queueFamilyIndex = family};
     VK(vkCreateCommandPool(device, &pi, NULL, &pool));
     printf("ok device with VK_KHR_swapchain, AHardwareBuffers and sync fds\n");
 

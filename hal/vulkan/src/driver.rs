@@ -1,6 +1,7 @@
 //! The Android driver interface (`hwvulkan`, `vulkan/libvulkan/driver.cpp`
 //! of the original loader): proc addresses, the extension lists, instance
-//! and device creation, and the queues the driver submits its own work to.
+//! and device creation, queue families, and the queues the driver submits
+//! its own work to.
 //!
 //! MoltenVK's dispatchable handles start with a loader word holding
 //! `ICD_LOADER_MAGIC`, which is `HWVULKAN_DISPATCH_MAGIC` (0x01CDC0DE): the
@@ -228,9 +229,125 @@ pub unsafe extern "C" fn vkCreateInstance(
     unsafe { host::vkCreateInstance((&raw const info).cast(), std::ptr::null(), instance.cast()) }
 }
 
+/// Queue families. MoltenVK has one queue per family (a `VkQueue` is an
+/// `MTLCommandQueue`, and Metal has no queue families) and offers several
+/// alike general-purpose families instead, while HWUI, like other Vulkan
+/// applications, asks for several queues of its graphics family. When all
+/// of a physical device's families are alike, the driver presents them as
+/// one family of all their queues: its queue `i` is queue `i % per` of the
+/// host's family `i / per`.
+///
+/// That family is index 0, as the host's first family is, so every other
+/// place a family index appears means the same to MoltenVK: command pools,
+/// barriers (an ownership transfer is between two families, and there is
+/// one; `VK_QUEUE_FAMILY_EXTERNAL` and `_FOREIGN_EXT` pass as they are) and
+/// sharing lists (concurrent sharing names two families or more, so there
+/// is none). A command buffer from a pool of family 0 may be submitted to
+/// any of its queues: MoltenVK records command buffers apart from queues
+/// and encodes them into the queue they are submitted to.
+#[derive(Clone, Copy)]
+struct Merged {
+    families: u32,
+    per: u32,
+}
+
+impl Merged {
+    fn queues(self) -> u32 {
+        self.families * self.per
+    }
+
+    /// The host's family and index of queue `index` of the one family.
+    fn queue(self, index: u32) -> (u32, u32) {
+        (index / self.per, index % self.per)
+    }
+}
+
+fn merged(physical: VkDispatch) -> Option<Merged> {
+    let host = read_all(|n, p: *mut VkQueueFamilyProperties| {
+        // SAFETY: the host fills up to `*n` properties.
+        unsafe { host::vkGetPhysicalDeviceQueueFamilyProperties(physical, n.cast(), p.cast()) };
+        VK_SUCCESS
+    })
+    .ok()?;
+    let first = *host.first()?;
+    (host.len() > 1 && host.iter().all(|f| *f == first)).then_some(Merged {
+        families: host.len() as u32,
+        per: first.queueCount,
+    })
+}
+
+pub unsafe extern "C" fn vkGetPhysicalDeviceQueueFamilyProperties(
+    physical: VkDispatch,
+    count: *mut u32,
+    out: *mut VkQueueFamilyProperties,
+) {
+    // SAFETY (all): the application's count and output array.
+    let Some(m) = merged(physical) else {
+        return unsafe {
+            host::vkGetPhysicalDeviceQueueFamilyProperties(physical, count.cast(), out.cast())
+        };
+    };
+    unsafe {
+        if out.is_null() || *count == 0 {
+            *count = out.is_null() as u32;
+            return;
+        }
+        *count = 1;
+        host::vkGetPhysicalDeviceQueueFamilyProperties(physical, count.cast(), out.cast());
+        (*out).queueCount = m.queues();
+    }
+}
+
+pub unsafe extern "C" fn vkGetPhysicalDeviceQueueFamilyProperties2(
+    physical: VkDispatch,
+    count: *mut u32,
+    out: *mut VkQueueFamilyProperties2,
+) {
+    // SAFETY (all): as above; the host fills the first family's chain,
+    // which is every family's.
+    let Some(m) = merged(physical) else {
+        return unsafe {
+            host::vkGetPhysicalDeviceQueueFamilyProperties2(physical, count.cast(), out.cast())
+        };
+    };
+    unsafe {
+        if out.is_null() || *count == 0 {
+            *count = out.is_null() as u32;
+            return;
+        }
+        *count = 1;
+        host::vkGetPhysicalDeviceQueueFamilyProperties2(physical, count.cast(), out.cast());
+        (*out).queueFamilyProperties.queueCount = m.queues();
+    }
+}
+
+/// The host's queue create infos for the application's `requested`.
+fn host_queues(m: Merged, requested: &[VkDeviceQueueCreateInfo]) -> Vec<VkDeviceQueueCreateInfo> {
+    let mut out = Vec::new();
+    for q in requested {
+        if q.queueFamilyIndex != 0 {
+            // Not a family of the device; the host refuses it.
+            out.push(*q);
+            continue;
+        }
+        for family in 0..q.queueCount.div_ceil(m.per) {
+            let first = family * m.per;
+            out.push(VkDeviceQueueCreateInfo {
+                queueFamilyIndex: family,
+                queueCount: m.per.min(q.queueCount - first),
+                // SAFETY: within the application's queueCount priorities.
+                pQueuePriorities: unsafe { q.pQueuePriorities.add(first as usize) },
+                ..*q
+            });
+        }
+    }
+    out
+}
+
 /// What the driver keeps per device.
 struct Device {
     physical: usize,
+    merged: Option<Merged>,
     /// The first queue the application got, which the driver's own
     /// submissions use, and a fence for waiting on them.
     queue: Option<usize>,
@@ -309,6 +426,19 @@ pub unsafe extern "C" fn vkCreateDevice(
     }
     info.enabledExtensionCount = names.len() as u32;
     info.ppEnabledExtensionNames = names.as_ptr();
+    let merged = merged(physical_device);
+    let queues;
+    if let Some(m) = merged {
+        // SAFETY: the application's queue create infos.
+        queues = host_queues(m, unsafe {
+            std::slice::from_raw_parts(
+                info.pQueueCreateInfos.cast(),
+                info.queueCreateInfoCount as usize,
+            )
+        });
+        info.queueCreateInfoCount = queues.len() as u32;
+        info.pQueueCreateInfos = queues.as_ptr().cast();
+    }
     // SAFETY: a valid create info.
     let r = unsafe {
         host::vkCreateDevice(
@@ -325,6 +455,7 @@ pub unsafe extern "C" fn vkCreateDevice(
             d,
             Device {
                 physical: physical_device as usize,
+                merged,
                 queue: None,
                 fence: 0,
             },
@@ -365,12 +496,26 @@ fn got_queue(device: VkDispatch, queue: VkDispatch) {
     }
 }
 
+/// The host's family and index of the application's queue `index` of
+/// `family`.
+fn host_queue(device: VkDispatch, family: u32, index: u32) -> (u32, u32) {
+    match state()
+        .devices
+        .get(&(device as usize))
+        .and_then(|d| d.merged)
+    {
+        Some(m) if family == 0 => m.queue(index),
+        _ => (family, index),
+    }
+}
+
 pub unsafe extern "C" fn vkGetDeviceQueue(
     device: VkDispatch,
     family: u32,
     index: u32,
     queue: *mut VkDispatch,
 ) {
+    let (family, index) = host_queue(device, family, index);
     // SAFETY: the application's arguments.
     unsafe {
         host::vkGetDeviceQueue(device, family, index, queue.cast());
@@ -384,8 +529,12 @@ pub unsafe extern "C" fn vkGetDeviceQueue2(
     queue: *mut VkDispatch,
 ) {
     // SAFETY: the application's arguments.
+    let mut info = unsafe { *info };
+    (info.queueFamilyIndex, info.queueIndex) =
+        host_queue(device, info.queueFamilyIndex, info.queueIndex);
+    // SAFETY: as above.
     unsafe {
-        host::vkGetDeviceQueue2(device, info.cast(), queue.cast());
+        host::vkGetDeviceQueue2(device, (&raw const info).cast(), queue.cast());
         got_queue(device, *queue);
     }
 }

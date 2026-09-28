@@ -2,7 +2,8 @@
 //! creates an instance and a device through the original libvulkan loader
 //! (our driver vulkan.aim.so, MoltenVK on the host), draws a triangle into
 //! an image whose memory is an AHardwareBuffer (our allocator HAL over
-//! binder, our mapper in-process), reads it back, and passes sync-fd
+//! binder, our mapper in-process), reads it back, draws again on a second
+//! queue of the graphics family (as HWUI asks for two), and passes sync-fd
 //! semaphores. The swapchain half of the program needs SurfaceFlinger (the
 //! loader asks it for the refresh period), so it runs in a booted guest
 //! (docs/vulkan-driver.md, "Verified").

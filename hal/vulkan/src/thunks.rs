@@ -2098,12 +2098,6 @@ unsafe extern "C" fn vkGetPhysicalDeviceProperties(physicalDevice: VkDispatch, p
 unsafe extern "C" fn vkGetPhysicalDeviceProperties2(physicalDevice: VkDispatch, pProperties: *mut c_void) {
     unsafe { host::vkGetPhysicalDeviceProperties2(physicalDevice, pProperties) }
 }
-unsafe extern "C" fn vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice: VkDispatch, pQueueFamilyPropertyCount: *mut c_void, pQueueFamilyProperties: *mut c_void) {
-    unsafe { host::vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties) }
-}
-unsafe extern "C" fn vkGetPhysicalDeviceQueueFamilyProperties2(physicalDevice: VkDispatch, pQueueFamilyPropertyCount: *mut c_void, pQueueFamilyProperties: *mut c_void) {
-    unsafe { host::vkGetPhysicalDeviceQueueFamilyProperties2(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties) }
-}
 unsafe extern "C" fn vkGetPhysicalDeviceSparseImageFormatProperties(physicalDevice: VkDispatch, format: i32, r#type: i32, samples: i32, usage: u32, tiling: i32, pPropertyCount: *mut c_void, pProperties: *mut c_void) {
     unsafe { host::vkGetPhysicalDeviceSparseImageFormatProperties(physicalDevice, format, r#type, samples, usage, tiling, pPropertyCount, pProperties) }
 }
@@ -2525,9 +2519,9 @@ pub static PROCS: [Proc; 383] = [
     Proc { name: "vkGetPhysicalDeviceProperties", addr: vkGetPhysicalDeviceProperties as *const c_void, id: 234 },
     Proc { name: "vkGetPhysicalDeviceProperties2", addr: vkGetPhysicalDeviceProperties2 as *const c_void, id: 235 },
     Proc { name: "vkGetPhysicalDeviceProperties2KHR", addr: vkGetPhysicalDeviceProperties2 as *const c_void, id: 235 },
-    Proc { name: "vkGetPhysicalDeviceQueueFamilyProperties", addr: vkGetPhysicalDeviceQueueFamilyProperties as *const c_void, id: 236 },
-    Proc { name: "vkGetPhysicalDeviceQueueFamilyProperties2", addr: vkGetPhysicalDeviceQueueFamilyProperties2 as *const c_void, id: 237 },
-    Proc { name: "vkGetPhysicalDeviceQueueFamilyProperties2KHR", addr: vkGetPhysicalDeviceQueueFamilyProperties2 as *const c_void, id: 237 },
+    Proc { name: "vkGetPhysicalDeviceQueueFamilyProperties", addr: crate::driver::vkGetPhysicalDeviceQueueFamilyProperties as *const c_void, id: -1 },
+    Proc { name: "vkGetPhysicalDeviceQueueFamilyProperties2", addr: crate::driver::vkGetPhysicalDeviceQueueFamilyProperties2 as *const c_void, id: -1 },
+    Proc { name: "vkGetPhysicalDeviceQueueFamilyProperties2KHR", addr: crate::driver::vkGetPhysicalDeviceQueueFamilyProperties2 as *const c_void, id: -1 },
     Proc { name: "vkGetPhysicalDeviceSparseImageFormatProperties", addr: vkGetPhysicalDeviceSparseImageFormatProperties as *const c_void, id: 238 },
     Proc { name: "vkGetPhysicalDeviceSparseImageFormatProperties2", addr: vkGetPhysicalDeviceSparseImageFormatProperties2 as *const c_void, id: 239 },
     Proc { name: "vkGetPhysicalDeviceSparseImageFormatProperties2KHR", addr: vkGetPhysicalDeviceSparseImageFormatProperties2 as *const c_void, id: 239 },

@@ -132,6 +132,33 @@ pub struct VkDeviceCreateInfo {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct VkDeviceQueueCreateInfo {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub flags: u32,
+    pub queueFamilyIndex: u32,
+    pub queueCount: u32,
+    pub pQueuePriorities: *const f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct VkQueueFamilyProperties {
+    pub queueFlags: u32,
+    pub queueCount: u32,
+    pub timestampValidBits: u32,
+    pub minImageTransferGranularity: VkExtent3D,
+}
+
+#[repr(C)]
+pub struct VkQueueFamilyProperties2 {
+    pub sType: i32,
+    pub pNext: *mut c_void,
+    pub queueFamilyProperties: VkQueueFamilyProperties,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct VkExtent3D {
     pub width: u32,
     pub height: u32,
@@ -372,6 +399,7 @@ pub struct VkFenceCreateInfo {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct VkDeviceQueueInfo2 {
     pub sType: i32,
     pub pNext: *const c_void,
