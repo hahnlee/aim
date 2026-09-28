@@ -96,6 +96,10 @@ pub struct Ioctl {
     pub fds: Vec<u32>,
     /// Placeholder fds the daemon may hand out for received files.
     pub reserved: Vec<u32>,
+    /// The caller can prepare more placeholders when a transaction needs
+    /// them ([`IoctlReply::want_fds`]); otherwise the transaction's files
+    /// fail to install, with `EMFILE`.
+    pub grow: bool,
 }
 
 impl Ioctl {
@@ -114,6 +118,7 @@ impl Ioctl {
         for fd in &self.reserved {
             w.u32(*fd);
         }
+        w.u32(self.grow as u32);
         w.0
     }
 
@@ -133,6 +138,7 @@ impl Ioctl {
         for _ in 0..r.u32()? {
             io.reserved.push(r.u32()?);
         }
+        io.grow = r.u32()? != 0;
         Ok(io)
     }
 }
@@ -152,6 +158,9 @@ pub struct IoctlReply {
     pub closes: Vec<u32>,
     /// Readiness bytes to drain from the binder fd.
     pub drain: u32,
+    /// A transaction carries more files than `reserved` had room for: the
+    /// read stopped before it, and the caller reads again with this many.
+    pub want_fds: u32,
 }
 
 impl IoctlReply {
@@ -170,7 +179,7 @@ impl IoctlReply {
         for fd in &self.closes {
             w.u32(*fd);
         }
-        w.u32(self.drain);
+        w.u32(self.drain).u32(self.want_fds);
         w.0
     }
 
@@ -191,6 +200,7 @@ impl IoctlReply {
             rep.closes.push(r.u32()?);
         }
         rep.drain = r.u32()?;
+        rep.want_fds = r.u32()?;
         Ok(rep)
     }
 }
@@ -207,6 +217,7 @@ mod tests {
             segments: vec![(0x1000, vec![2; 12]), (0x2000, vec![])],
             fds: vec![3, 4],
             reserved: vec![9],
+            grow: true,
         };
         assert_eq!(Ioctl::decode(&io.encode()).unwrap(), io);
         let rep = IoctlReply {
@@ -216,6 +227,7 @@ mod tests {
             installs: vec![9],
             closes: vec![7],
             drain: 1,
+            want_fds: 12,
         };
         assert_eq!(IoctlReply::decode(&rep.encode()).unwrap(), rep);
         assert_eq!(Ioctl::decode(&[1, 2]), Err(EPROTO));

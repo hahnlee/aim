@@ -57,6 +57,13 @@ pub trait GuestProcess {
     fn get_file(&mut self, fd: u32) -> Result<File, Errno>;
     /// Install a received file as a new close-on-exec fd.
     fn install_file(&mut self, file: File) -> Result<u32, Errno>;
+    /// Whether `count` files can be installed in this ioctl. A caller that
+    /// prepares its fds before the ioctl (the daemon's clients) answers no
+    /// when it prepared fewer: the transaction stays queued, the read
+    /// returns, and the caller reads again with `count` fds ready.
+    fn can_install(&mut self, _count: usize) -> bool {
+        true
+    }
     /// Close an fd the driver installed (fd arrays of a freed buffer).
     fn close_fd(&mut self, fd: u32);
 }

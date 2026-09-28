@@ -315,3 +315,89 @@ fn a_restarted_write_read_with_its_writes_consumed() {
         .unwrap();
     assert_eq!(WriteRead::decode(&arg).write_consumed, write.len() as u64);
 }
+
+/// A one-way call carrying more fds than a thread keeps placeholders for
+/// (Chrome's `IChildProcessService.setupConnection` passes its child a
+/// dozen or more): the reader gets every file, none is dropped (#256).
+#[test]
+fn a_transaction_with_many_fds_reaches_the_reader() {
+    const FDS: usize = 20;
+    let name = format!(
+        "dev.aim.test.binder-host.{}.{}",
+        std::process::id(),
+        NAME.fetch_add(1, Ordering::Relaxed)
+    );
+    let _server = Server::start(&name).unwrap();
+    let client = Client::connect(&name).unwrap();
+    let (mgr_tid, caller_tid) = (400, 401);
+    let mgr = open(&client, 1000, "u:r:servicemanager:s0");
+    let mut fbo = FlatBinderObject {
+        kind: BINDER_TYPE_BINDER,
+        flags: FLAT_BINDER_FLAG_ACCEPTS_FDS,
+        binder: 0x1234,
+        cookie: 0x5678,
+    }
+    .encode();
+    mgr.ioctl(
+        mgr_tid,
+        BINDER_SET_CONTEXT_MGR_EXT,
+        fbo.as_mut_ptr() as u64,
+        &mut Own,
+    )
+    .unwrap();
+    let mut enter = Vec::new();
+    cmd(&mut enter, BC_ENTER_LOOPER, &[]);
+    write_read(&mgr, mgr_tid, &enter, false).unwrap();
+
+    // Each fd is the read end of a pipe holding its own index.
+    let caller = open(&client, 10_001, "u:r:untrusted_app:s0");
+    let mut data = vec![0u8; FDS * 24];
+    let mut offsets = Vec::new();
+    for i in 0..FDS {
+        let mut pipe = [0i32; 2];
+        // SAFETY: a pipe with one byte in it.
+        unsafe {
+            assert_eq!(libc::pipe(pipe.as_mut_ptr()), 0);
+            assert_eq!(libc::write(pipe[1], [i as u8].as_ptr().cast(), 1), 1);
+            libc::close(pipe[1]);
+        }
+        let at = i * 24;
+        data[at..at + 4].copy_from_slice(&BINDER_TYPE_FD.to_le_bytes());
+        data[at + 8..at + 12].copy_from_slice(&(pipe[0] as u32).to_le_bytes());
+        offsets.extend_from_slice(&(at as u64).to_le_bytes());
+    }
+    let tr = TransactionData {
+        code: 3,
+        flags: TF_ONE_WAY | TF_ACCEPT_FDS,
+        data_size: data.len() as u64,
+        offsets_size: offsets.len() as u64,
+        buffer: data.as_ptr() as u64,
+        offsets: offsets.as_ptr() as u64,
+        ..Default::default()
+    };
+    let mut write = Vec::new();
+    cmd(&mut write, BC_TRANSACTION, &tr.encode());
+    let read = write_read(&caller, caller_tid, &write, true).unwrap();
+    assert!(
+        returns(&read)
+            .iter()
+            .any(|(c, _)| *c == BR_TRANSACTION_COMPLETE)
+    );
+
+    let read = write_read(&mgr, mgr_tid, &[], true).unwrap();
+    let tr = returns(&read)
+        .into_iter()
+        .find_map(|(c, tr)| (c == BR_TRANSACTION).then(|| tr.unwrap()))
+        .expect("BR_TRANSACTION");
+    assert_eq!((tr.code, tr.data_size), (3, (FDS * 24) as u64));
+    for i in 0..FDS {
+        // SAFETY: the transaction lies in the manager's receive buffer; its
+        // fd objects now hold the manager's fds.
+        unsafe {
+            let fd = ((tr.buffer + (i * 24 + 8) as u64) as *const u32).read() as i32;
+            let mut got = [0u8; 1];
+            assert_eq!(libc::read(fd, got.as_mut_ptr().cast(), 1), 1, "fd {i}");
+            assert_eq!(got[0], i as u8);
+        }
+    }
+}

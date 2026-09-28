@@ -196,7 +196,10 @@ that dominate, the copies cost nanoseconds and the wakes cost microseconds.
   Through the daemon it is a fileport (`fileport_makeport` /
   `fileport_makefd`) carried in the same Mach message: SCM_RIGHTS through the
   daemon without a second channel. The receiving shim installs it at a
-  pre-reserved fd number.
+  pre-reserved fd number. Each thread keeps 8 of them; a transaction with
+  more files stays queued, the read returns `want_fds`, and the shim reads
+  again with that many (`GuestProcess::can_install`). Linux has no such
+  limit, and Chrome passes its child processes a dozen or more (#256).
 - **Credentials.** They come from `Credentials`, which the process registry
   supplies at open:
   - the guest-visible pid;

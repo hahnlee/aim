@@ -427,6 +427,7 @@ impl Worker {
                 .map(|(fd, p)| (*fd, Arc::new(FilePort(*p)) as File))
                 .collect(),
             reserved: io.reserved,
+            grow: io.grow,
             reply: IoctlReply::default(),
             installed: Vec::new(),
         };
@@ -453,6 +454,7 @@ struct Gathered {
     segments: Vec<(u64, Vec<u8>)>,
     files: HashMap<u32, File>,
     reserved: Vec<u32>,
+    grow: bool,
     reply: IoctlReply,
     installed: Vec<File>,
 }
@@ -494,6 +496,15 @@ impl GuestProcess for Gathered {
         self.reply.installs.push(fd);
         self.installed.push(file);
         Ok(fd)
+    }
+
+    fn can_install(&mut self, count: usize) -> bool {
+        // The installed files ride back as the reply's ports.
+        if count <= self.reserved.len() || !self.grow || count > mach::MAX_PORTS {
+            return true;
+        }
+        self.reply.want_fds = count as u32;
+        false
     }
 
     fn close_fd(&mut self, fd: u32) {

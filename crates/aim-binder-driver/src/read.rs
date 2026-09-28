@@ -66,8 +66,23 @@ impl State {
             if capacity - (start + out.len()) < TRANSACTION_DATA_SECCTX_SIZE + 4 {
                 return Pass::Done;
             }
+            let next = if from_thread {
+                thread.todo.front()
+            } else {
+                p.todo.front()
+            };
+            // A transaction whose files the reader has no room for stays
+            // at the front of its queue until the reader has.
+            if let Some(Work::Transaction(id)) = next
+                && let Some(t) = self.txns.get(id)
+                && !t.fd_fixups.is_empty()
+                && !guest.can_install(t.fd_fixups.len())
+            {
+                return Pass::Done;
+            }
+            let p = self.procs.get_mut(&proc).unwrap();
             let work = if from_thread {
-                thread.todo.pop_front().unwrap()
+                p.threads.get_mut(&tid).unwrap().todo.pop_front().unwrap()
             } else {
                 p.todo.pop_front().unwrap()
             };
