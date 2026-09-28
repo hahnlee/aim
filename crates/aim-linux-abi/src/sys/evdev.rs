@@ -591,13 +591,36 @@ pub fn sys_node(rest: &str) -> Option<Node> {
             let i = i.parse::<u32>().ok().filter(|i| devs.contains(i))?;
             match tail {
                 "" => dirs(vec![format!("event{i}")], dir::DT_DIR),
-                t if t == format!("event{i}") => dirs(vec!["dev".into()], dir::DT_REG),
+                t if t == format!("event{i}") => {
+                    dirs(vec!["dev".into(), "uevent".into()], dir::DT_REG)
+                }
                 t if t == format!("event{i}/dev") => {
                     Node::File(format!("{INPUT_MAJOR}:{}\n", minor(i)).into_bytes())
+                }
+                t if t == format!("event{i}/uevent") => {
+                    let devpath = format!("/{}", rest.strip_suffix("/uevent")?);
+                    Node::File(uevent_device(&devpath)?.attribute())
                 }
                 _ => return None,
             }
         }
+    })
+}
+
+/// The uevent description of a present evdev node from its sysfs path
+/// below `/sys` (`/devices/virtual/input/inputN/eventN`).
+pub fn uevent_device(devpath: &str) -> Option<super::uevent::Device> {
+    let n = devpath.strip_prefix("/devices/virtual/input/input")?;
+    let (i, event) = n.split_once('/')?;
+    let i = i.parse::<u32>().ok().filter(|i| present().contains(i))?;
+    (event == format!("event{i}")).then(|| super::uevent::Device {
+        devpath: devpath.to_string(),
+        subsystem: "input",
+        env: vec![
+            format!("MAJOR={INPUT_MAJOR}"),
+            format!("MINOR={}", EVDEV_MINOR_BASE + i),
+            format!("DEVNAME=input/event{i}"),
+        ],
     })
 }
 

@@ -104,7 +104,7 @@ pub fn open(guest: &str, flags: u64) -> Option<i64> {
         return Some(if flags & O_ACCMODE != 0 {
             super::knob::open(&value, cloexec, move |req| {
                 write_attr(name, req);
-                None
+                Ok(None)
             })
         } else {
             super::procfs::content_fd(&value, cloexec)
@@ -119,10 +119,10 @@ pub fn open(guest: &str, flags: u64) -> Option<i64> {
             Some(super::procfs::content_fd(&page, cloexec))
         }
         "/access" => Some(super::knob::open(b"", cloexec, |_| {
-            Some(ALLOW_ALL.to_vec())
+            Ok(Some(ALLOW_ALL.to_vec()))
         })),
         // With no policy loaded every context is valid.
-        "/context" => Some(super::knob::open(b"", cloexec, |_| None)),
+        "/context" => Some(super::knob::open(b"", cloexec, |_| Ok(None))),
         _ => None,
     }
 }

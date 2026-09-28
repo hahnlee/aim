@@ -1,5 +1,5 @@
 //! Sockets: AF_UNIX with Linux semantics on Darwin, AF_INET/AF_INET6
-//! passed through with address and option translation, NETLINK_ROUTE
+//! passed through with address and option translation, AF_NETLINK
 //! (`netlink`) and AF_PACKET (`packet`) on the kernel's devices (`netif`).
 //!
 //! - **SEQPACKET** (Darwin has none for AF_UNIX) is a stream socket carrying
@@ -1545,14 +1545,12 @@ fn send_other(fd: i32, iov: &[libc::iovec], name: Option<(u64, u32)>) -> Option<
     };
     Some(match &s.family {
         Family::Netlink(n) => {
-            if let Some((p, l)) = name {
-                match super::netlink::parse_sockaddr(p, l) {
-                    Ok((0, _)) => {}
-                    Ok(_) => return Some(-111), // ECONNREFUSED
-                    Err(e) => return Some(e),
-                }
-            }
-            super::netlink::send(n, &gather())
+            let dst = match name.map(|(p, l)| super::netlink::parse_sockaddr(p, l)) {
+                Some(Ok(d)) => Some(d),
+                Some(Err(e)) => return Some(e),
+                None => None,
+            };
+            super::netlink::send(n, &gather(), dst)
         }
         Family::Packet(p) => {
             let ifindex = match name.map(|(a, l)| super::packet::parse_sockaddr(a, l)) {
@@ -1632,13 +1630,25 @@ fn recv_other(fd: i32, iov: &[libc::iovec], flags: u64) -> Option<Result<Receive
     let hflags = host_recv_flags(flags);
     Some(match &s.family {
         Family::Netlink(_) => {
-            let mut v = iov.to_vec();
-            recvmsg_host(fd, &mut v, &mut [], false, hflags).map(|(n, f, ..)| Received {
-                n: n as i64,
-                flags: f,
-                ctrl: Vec::new(),
-                cred: None,
-                name: Some(super::netlink::sockaddr_nl(0, 0)),
+            let mut meta = [0u8; super::netlink::META];
+            let mut v = vec![libc::iovec {
+                iov_base: meta.as_mut_ptr().cast(),
+                iov_len: meta.len(),
+            }];
+            v.extend_from_slice(iov);
+            recvmsg_host(fd, &mut v, &mut [], false, hflags).map(|(n, f, ..)| {
+                let (name, [pid, uid, gid]) = super::netlink::parse_meta(&meta);
+                Received {
+                    n: n.saturating_sub(meta.len()) as i64,
+                    flags: f,
+                    ctrl: Vec::new(),
+                    cred: s.passcred.load(Ordering::Relaxed).then_some(Cred {
+                        pid: pid as i32,
+                        uid,
+                        gid,
+                    }),
+                    name: Some(name),
+                }
             })
         }
         Family::Packet(p) => {
@@ -2255,7 +2265,7 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
             let Some(v) = int() else {
                 return -(EINVAL as i64);
             };
-            match sock(fd) {
+            match any_sock(fd) {
                 Some(s) => s.passcred.store(v != 0, Ordering::Relaxed),
                 None => {
                     if let Err(e) = is_socket(fd) {
@@ -2440,7 +2450,7 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
             (1, L_SO_DOMAIN, Family::Packet(_)) => return int(super::packet::L_AF_PACKET as i32),
             (1, L_SO_TYPE, Family::Netlink(n)) => return int(n.ty as i32),
             (1, L_SO_TYPE, Family::Packet(_)) => return int(L_SOCK_RAW as i32),
-            (1, L_SO_PROTOCOL, Family::Netlink(_)) => return int(0),
+            (1, L_SO_PROTOCOL, Family::Netlink(n)) => return int(n.proto as i32),
             (1, L_SO_PROTOCOL, Family::Packet(p)) => return int(p.protocol() as i32),
             _ => {}
         }
@@ -2490,7 +2500,7 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
         }
         (1, L_SO_PROTOCOL) => put_opt(&host_protocol(fd).to_le_bytes(), val, len),
         (1, L_SO_PASSCRED) => {
-            let v = s.is_some_and(|s| s.passcred.load(Ordering::Relaxed)) as i32;
+            let v = any_sock(fd).is_some_and(|s| s.passcred.load(Ordering::Relaxed)) as i32;
             put_opt(&v.to_le_bytes(), val, len)
         }
         (1, L_SO_PEERCRED) => {

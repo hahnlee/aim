@@ -110,7 +110,7 @@ keeps exiting and init restarts it every 5 s.
 | lmkd | restarting (exit 0) | no PSI or memcg (P3 replaced it; see "Memory pressure") |
 | netd | restarting (SIGABRT) | `libnetd_updatable_init`: no cgroup v2 directory; then eBPF and netlink (#202, #201; P3 replaces it) |
 | audioserver | restarting (SIGSEGV) | null dereference after "Found no HAL version": needs the audio HAL (P5) |
-| vold | excluded: exit 1, then init reboots (`reboot_on_failure`) | no `NETLINK_KOBJECT_UEVENT` socket (#201; P3 replaces it) |
+| vold | excluded | the original drives block devices, dm-crypt and fscrypt (P3 replaced it: `daemons/vold`) |
 | bpfloader (netbpfload) | excluded: exit 1, then init reboots (`reboot_on_failure`) | no bpffs at `/sys/fs/bpf` (#202) |
 | surfaceflinger | excluded: SIGABRT | guest-init passes no `--gpu` (#204), so RenderEngine gets `EGL_BAD_DISPLAY`; with it, RenderEngine runs on ANGLE and SurfaceFlinger aborts with "failed to get hwcomposer service" (the composer is P4) |
 | zygote | excluded | ART (P2) |
