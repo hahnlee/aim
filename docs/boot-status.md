@@ -102,7 +102,7 @@ keeps exiting and init restarts it every 5 s.
 | exec `chattr +F /data/media` | exit 1 | `FS_IOC_GETFLAGS` is ENOTTY |
 | exec `otapreopt_slot` | exit 1 | not an A/B device ("Slot property empty") |
 | exec `kcmdlinectrl update-props` | exit 1 | no `/misc` partition |
-| lmkd | restarting (exit 0) | no PSI or memcg (P3 replaces it) |
+| lmkd | restarting (exit 0) | no PSI or memcg (P3 replaced it; see "Memory pressure") |
 | netd | restarting (SIGABRT) | `libnetd_updatable_init`: no cgroup v2 directory; then eBPF and netlink (#202, #201; P3 replaces it) |
 | audioserver | restarting (SIGSEGV) | null dereference after "Found no HAL version": needs the audio HAL (P5) |
 | vold | excluded: exit 1, then init reboots (`reboot_on_failure`) | no `NETLINK_KOBJECT_UEVENT` socket (#201; P3 replaces it) |
@@ -148,7 +148,8 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
 The original zygote and system_server on the ART exception, on an M2 Pro.
 `guest-init --run` with the derived image of `image/overlay.toml`: our Rust
 apexd, vold, netd and lmkd (`daemons/`, the `daemon/*` nodes) replace
-the originals (lmkd since the second part below; it kills nothing, #222).
+the originals (lmkd since the second part below; it kills on the Mac's
+memory pressure since #277, see "Memory pressure").
 
 - **zygote** preloads 18,367 classes in 0.31 s and forks system_server
   0.07 s after its preload ends, listening on init's `zygote` and
@@ -273,8 +274,8 @@ presented buffer there.
 - **lmkd:** ActivityManager waits for the lmkd socket under its lock on
   every process event. Without lmkd, app starts took 10–25 s, ANRs piled
   up and the watchdog killed system_server a few minutes after boot. Our
-  lmkd answers the protocol and kills nothing; the first boot went from
-  75–95 s to 25 s.
+  lmkd answers the protocol (and, since #277, kills on the Mac's memory
+  pressure); the first boot went from 75–95 s to 25 s.
 - **`/proc/config.gz`:** system_server's `Debug.isVmapStack` CHECKs that
   libvintf can read the kernel configuration; the first ANR aborted it.
 - **Null page of the heap window:** a fault there is a null-check fault
@@ -448,3 +449,46 @@ by DHCP. First boot, `cargo aim boot`, on a Mac on Wi-Fi:
   failed (DhcpClient).
 - The emulator's vendor overlay made `eth0` a restricted network; it goes
   from the derived image.
+
+## Memory pressure (2026-09-29, #277)
+
+lmkd (`daemons/lmkd`) keeps the original's protocol and kill order and
+kills on the Mac's memory pressure, which the host-call module `memory`
+reports (ADR 0012's lmkd row, [host-call.md](host-call.md)). A thread's
+Linux scheduling sets its host QoS: a nice value of 10 or more or
+SCHED_BATCH runs at utility, 19 or SCHED_IDLE at background.
+
+Measured on a loaded host (load average 90, other agents' boots running),
+`cargo aim boot` with a reused data directory, seven apps opened with
+`am start -W` and then HOME:
+
+- the Mac's level went to warn (`memory_pressure -l warn`) for 30 s; lmkd
+  logged one kill a second, 48 in all, every one at oom_score_adj 900 to
+  999, none below. `dumpsys activity lmk` counted the same 48, and
+  `dumpsys activity exit-info` gave the killed deskclock `reason=3
+  (LOW_MEMORY)`. When the level fell back, lmkd logged `memory pressure
+  Warn -> Normal` and stopped.
+- A dispatch memory-pressure source is not used: the kernel notifies only
+  a few, large processes, and neither lmkd nor a plain host process got
+  an event while the level read warn for a minute. The module polls the
+  level every 250 ms instead.
+
+What is not covered: ActivityManager's process groups
+(`setProcessGroup`) change nothing on the host. Without cgroup
+controllers libprocessgroup's background profile keeps only its timer
+slack action, which has no process form, so the call fails in the guest
+(#297). Kills name no process (`Kill '' (pid)`): another process's
+`/proc/<pid>/cmdline` and `comm` read empty for zygote's children
+(#298).
+
+**Morning check** (one boot slot, after the throttle is lifted):
+
+1. `cargo aim boot`, wait for `sys.boot_completed`, open several apps with
+   `am start -W`, then `am start -a android.intent.action.MAIN -c
+   android.intent.category.HOME`.
+2. `dumpsys activity oom`: several `cch` processes (oom_score_adj >= 900).
+3. `memory_pressure -l warn -s 5` on the Mac (real pressure; `-S` needs
+   root).
+4. `logcat -d -s lowmemorykiller`: `Kill ... oom_score_adj` lines only at
+   900 and above (the highest registered first), one a second, then `memory pressure Warn
+   -> Normal`; `dumpsys activity lmk` counts them.
