@@ -212,9 +212,10 @@ fn read_fd(fd: i32, off: u64, size: u64) -> Option<Vec<u8>> {
 
 /// The sites of the ELF at `[start, start+size)` of `fd`, as offsets in
 /// the file: from the cache, or found and then recorded there. None when
-/// the bytes are no ELF the translator can read.
+/// the bytes are no ELF the translator can read. Sites are kept in the
+/// user's cache; an image's is read-only.
 fn sites_of(fd: i32, st: &FileStat, start: u64, size: u64) -> Option<Arc<Sites>> {
-    let cache = rt().cache.as_ref();
+    let cache = rt().caches.iter().find(|c| !c.is_image());
     let member = cache
         .and_then(|_| fd_path(fd))
         .map(|p| cache::member_path(&p, start));

@@ -290,6 +290,11 @@ impl Cache {
         &self.dir
     }
 
+    /// Whether this is an image's own (read-only) cache.
+    pub fn is_image(&self) -> bool {
+        self.image_root.is_some()
+    }
+
     /// `~/Library/Caches/aim/translated`, with the home directory
     /// taken from the user database (not the environment). Moves the
     /// pre-rename `~/Library/Caches/DarwinART` there first if only it exists.
