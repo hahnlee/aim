@@ -115,6 +115,20 @@ in the background.
   `PRESENT_FENCE_IS_NOT_RELIABLE`, and the emulator's vendor properties
   set `debug.sf.vsync_reactor_ignore_present_fences`, so vsync prediction
   relies on the HAL's vsyncs.
+- **Frames in flight.** A frame is on screen, and its present fence
+  signals, about two vsyncs after SurfaceFlinger presents it (Core
+  Animation shows a drawable at the compositor's next refresh). With two
+  client targets, RenderEngine waited for the one it drew into two frames
+  ago to be released on a present fence, and with GL backpressure
+  SurfaceFlinger skipped a vsync while the previous present fence was
+  pending: it presented every other vsync, and apps waited about 30 ms in
+  `dequeueBuffer` for each frame. `init.aim.rc` sets
+  `ro.surface_flinger.max_frame_buffer_acquired_buffers` to 3 and
+  `debug.sf.enable_gl_backpressure` to 0. A Settings scroll went from
+  92–96 % janky frames (p50 57–61 ms, presents 33 ms apart) to 4–7 %
+  (p50 18–19 ms, presents 16.7 ms apart) on the same boot (host load
+  average 3–60 before, about 25 after, 2026-09-29); with only one of the
+  two it stayed at every other vsync.
 - **Client composition stays.** In a Settings scroll SurfaceFlinger's
   RenderEngine thread spent under 1 % of its samples in GL once
   composition no longer waited for the GPU; device composition of layers

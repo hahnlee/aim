@@ -340,6 +340,24 @@ pub fn by_pid_dir() -> Option<&'static PathBuf> {
     BY_PID.get()
 }
 
+/// The pids in this process's process table: the guest's processes, as a
+/// pid namespace holds them. None without a table.
+pub fn table_pids() -> Option<Vec<i32>> {
+    let dir = std::fs::read_dir(BY_PID.get()?).ok()?;
+    Some(
+        dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+            .collect(),
+    )
+}
+
+/// Whether `pid` is in this process's process table (always, without a
+/// table).
+pub fn in_table(pid: i32) -> bool {
+    BY_PID
+        .get()
+        .is_none_or(|d| std::fs::symlink_metadata(d.join(pid.to_string())).is_ok())
+}
+
 fn read<R>(f: impl FnOnce(&Identity) -> R) -> R {
     f(STATE.lock().unwrap().get_or_insert_with(Identity::default))
 }

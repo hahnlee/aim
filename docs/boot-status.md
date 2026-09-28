@@ -300,6 +300,14 @@ when GMS churns files after boot) and from then on denies its write opens
 here therefore excludes bootanim, uses a freshly built `linux-run`, and
 runs its `am`/`dumpsys` commands with another build; the Java world lasts
 about a minute after `sys.boot_completed`.
+On 2026-09-29 it flagged a boot at 04:45:52, four minutes after boot
+completion: every process that a release binary of that target
+directory spawned (fork children, `sh -c`, zygote and service restarts)
+was then SIGKILLed at start, with no kernel or crash report, and netd's
+read-write opens of its BPF maps failed with EPERM (so netd aborted, and
+its `onrestart` restarted zygote every 5 s). The same binaries run from
+a shell, and other target directories' binaries, were not affected; by
+05:27 the kills had stopped.
 
 ### Open
 
@@ -417,9 +425,14 @@ The host's security agent did not flag or block any of the four boots
 - #239 boot time and frame times after the spawned fork;
 - #238 app processes' names in `/proc/<pid>/cmdline` for other processes;
 - #240 wide-gamut EGL configs; #241 phone and GMS startup ANRs; #242
-  battery temperature; #230 traced and traced_probes aborts.
+  battery temperature; #230 traced aborts (traced_probes' were its memory
+  watchdog reading four times its rss from `/proc`, now counted in the
+  guest's 16 KiB pages).
 - #258 remaining memfd seal gaps; #261 app data lost on a second boot of
   the same data directory.
+- GMS persistent dies every few seconds since eth0 is an Ethernet
+  network: Nearby's USB medium needs the `usb` service, which the device
+  does not run (docs/perf-baseline.md, "Idle CPU after boot").
 
 ## Network (2026-09-28)
 

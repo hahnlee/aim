@@ -7,6 +7,7 @@
 //                                script interpreter and exec target)
 
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
@@ -617,6 +618,7 @@ static void identity_file(void) {
   CHECK(pipe(go) == 0 && pipe(ready) == 0, "pipes");
   pid_t pid = fork();
   if (pid == 0) {
+    close(go[1]);  // so that a failed check in the parent ends the wait
     CHECK(setresuid(10057, 10057, 10057) == 0, "setresuid");
     write(ready[1], "r", 1);
     char c;
@@ -633,6 +635,25 @@ static void identity_file(void) {
   read(fd, text, sizeof(text) - 1);
   close(fd);
   CHECK(strstr(text, "\nuid\t10057\n") && strstr(text, "\ngroups\t3003 1065\n"), "entry '%s'", text);
+  // /proc holds the process table's processes (a pid namespace), not the
+  // host's: the child and this process, not the test that started it.
+  int listed_self = 0, listed_child = 0, listed_other = 0;
+  DIR* proc = opendir("/proc");
+  CHECK(proc != NULL, "opendir /proc");
+  for (struct dirent* e; (e = readdir(proc));) {
+    int p = atoi(e->d_name);
+    if (p == getpid()) listed_self = 1;
+    else if (p == pid) listed_child = 1;
+    else if (p > 0) listed_other = 1;
+  }
+  closedir(proc);
+  CHECK(listed_self && listed_child && !listed_other, "/proc lists %d %d %d", listed_self,
+        listed_child, listed_other);
+  snprintf(path, sizeof(path), "/proc/%d/stat", getppid());
+  CHECK(access(path, F_OK) == -1 && errno == ENOENT, "the host parent is not in /proc");
+  snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+  CHECK(access(path, F_OK) == 0, "the child is in /proc");
+  snprintf(path, sizeof(path), "/data/local/tmp/id/by-pid/%d", pid);
   write(go[1], "g", 1);
   int st;
   CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st), "child");

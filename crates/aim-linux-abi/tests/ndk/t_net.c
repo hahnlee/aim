@@ -350,6 +350,17 @@ static void inet_loopback(void) {
   socklen_t fl = sizeof from;
   CHECK(recvfrom(u, buf, sizeof buf, 0, (struct sockaddr*)&from, &fl) == 2 && from.sin6_family == AF_INET6);
   close(u);
+  // Datagram sockets that all set SO_REUSEADDR share a port (socket(7)).
+  int d1 = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0), d2 = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  CHECK(setsockopt(d1, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) == 0);
+  CHECK(setsockopt(d2, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) == 0);
+  struct sockaddr_in any = {.sin_family = AF_INET};
+  CHECK(bind(d1, (struct sockaddr*)&any, sizeof any) == 0);
+  al = sizeof any;
+  CHECK(getsockname(d1, (struct sockaddr*)&any, &al) == 0 && any.sin_port != 0);
+  CHECK(bind(d2, (struct sockaddr*)&any, sizeof any) == 0);
+  close(d1);
+  close(d2);
 }
 
 int main(int argc, char** argv) {
