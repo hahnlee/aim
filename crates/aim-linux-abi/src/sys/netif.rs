@@ -11,6 +11,12 @@
 //!   default route, and its virtual link's DHCP server leases the Mac's
 //!   address (`dhcp`). Its hardware address is a fixed locally
 //!   administered one.
+//! - The Mac's network is part of the state: each process that reads or
+//!   changes the devices compares it with the Mac's current one first, and
+//!   the one that finds a change announces it (carrier lost or back, or
+//!   lost and back for a different network, so that DHCP runs again).
+//!   Processes listening to link changes look every few seconds and on
+//!   each routing change (`uplink::watch`).
 //! - There is no routing table: routes live in netd's per-network
 //!   bookkeeping, and the host routes every socket.
 //! - The state is a text file in the runtime directory
@@ -23,7 +29,8 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use super::{netlink, uplink};
+use super::netlink;
+use super::uplink::{self, Uplink};
 use crate::errno::{EFAULT, EINVAL, ENODEV, EPERM, Errno};
 use crate::vfs;
 
@@ -86,6 +93,9 @@ pub struct Link {
     pub mtu: u32,
     pub mac: [u8; 6],
     pub addrs: Vec<Addr>,
+    /// Whether the link has carrier: always for the loopback, while the
+    /// Mac has a network for `eth0`.
+    pub carrier: bool,
 }
 
 impl Link {
@@ -101,16 +111,10 @@ impl Link {
         }
     }
 
-    /// Whether the link has carrier: always for the loopback, while the
-    /// Mac has a network for `eth0`.
-    pub fn carrier(&self) -> bool {
-        self.loopback() || uplink::uplink().is_some()
-    }
-
     /// The flags as the kernel reports them, with IFF_RUNNING and
     /// IFF_LOWER_UP while the link is up and has carrier.
     pub fn live_flags(&self) -> u32 {
-        if self.flags & IFF_UP != 0 && self.carrier() {
+        if self.flags & IFF_UP != 0 && self.carrier {
             self.flags | IFF_RUNNING | IFF_LOWER_UP
         } else {
             self.flags
@@ -150,6 +154,7 @@ fn boot_links() -> Vec<Link> {
                     prefix: 128,
                 },
             ],
+            carrier: true,
         },
         Link {
             index: ETH0,
@@ -158,6 +163,7 @@ fn boot_links() -> Vec<Link> {
             mtu: 1500,
             mac: ETH0_MAC,
             addrs: Vec::new(),
+            carrier: false,
         },
     ]
 }
@@ -169,8 +175,14 @@ fn mac_text(m: &[u8; 6]) -> String {
         .join(":")
 }
 
-fn serialize(links: &[Link]) -> String {
+fn serialize(links: &[Link], up: &Option<Uplink>) -> String {
     let mut s = String::new();
+    if let Some(u) = up {
+        s += &format!(
+            "uplink {} {}/{} {} {}\n",
+            u.index, u.addr, u.prefix, u.gateway, u.mtu
+        );
+    }
     for l in links {
         s += &format!(
             "link {} {} {:x} {} {}\n",
@@ -187,11 +199,23 @@ fn serialize(links: &[Link]) -> String {
     s
 }
 
-fn parse(text: &str) -> Option<Vec<Link>> {
+/// The devices and the Mac's network they last saw.
+fn parse(text: &str) -> Option<(Vec<Link>, Option<Uplink>)> {
     let mut links: Vec<Link> = Vec::new();
+    let mut up = None;
     for line in text.lines() {
         let w: Vec<&str> = line.split(' ').collect();
         match w.as_slice() {
+            ["uplink", index, addr, gateway, mtu] => {
+                let (a, p) = addr.split_once('/')?;
+                up = Some(Uplink {
+                    index: index.parse().ok()?,
+                    addr: a.parse().ok()?,
+                    prefix: p.parse().ok()?,
+                    gateway: gateway.parse().ok()?,
+                    mtu: mtu.parse().ok()?,
+                });
+            }
             ["link", index, name, flags, mtu, mac] => {
                 let mut m = [0u8; 6];
                 for (i, b) in mac.split(':').enumerate() {
@@ -204,6 +228,7 @@ fn parse(text: &str) -> Option<Vec<Link>> {
                     mtu: mtu.parse().ok()?,
                     mac: m,
                     addrs: Vec::new(),
+                    carrier: false,
                 });
             }
             ["addr", index, addr] => {
@@ -221,7 +246,36 @@ fn parse(text: &str) -> Option<Vec<Link>> {
             _ => return None,
         }
     }
-    Some(links)
+    for l in &mut links {
+        l.carrier = l.loopback() || up.is_some();
+    }
+    Some((links, up))
+}
+
+/// Bring the devices from the Mac's network `was` to `now`: carrier
+/// follows it, and a different network takes the carrier away and back,
+/// as moving a cable to another network would. Returns whether it
+/// changed.
+fn follow_uplink(
+    links: &mut [Link],
+    was: &Option<Uplink>,
+    now: &Option<Uplink>,
+    ev: &mut Vec<Event>,
+) -> bool {
+    if was == now {
+        return false;
+    }
+    for l in links.iter_mut().filter(|l| !l.loopback()) {
+        if l.flags & IFF_UP != 0 && was.is_some() && now.is_some() {
+            l.carrier = false;
+            ev.push(Event::Link(l.clone()));
+        }
+        l.carrier = now.is_some();
+        if l.flags & IFF_UP != 0 {
+            ev.push(Event::Link(l.clone()));
+        }
+    }
+    true
 }
 
 /// A directory of kernel state shared by the processes of one boot: in the
@@ -244,8 +298,8 @@ pub fn kernel_dir(name: &str) -> PathBuf {
     d
 }
 
-/// Run `f` on the device state under its lock; write back what changed and
-/// announce `f`'s events.
+/// Run `f` on the device state under its lock, after following the Mac's
+/// network; write back what changed and announce the events.
 fn transact<R>(f: impl FnOnce(&mut Vec<Link>, &mut Vec<Event>) -> R) -> R {
     let path = kernel_dir("net").join("links");
     let file = std::fs::OpenOptions::new()
@@ -256,18 +310,33 @@ fn transact<R>(f: impl FnOnce(&mut Vec<Link>, &mut Vec<Event>) -> R) -> R {
         .open(&path);
     let Ok(mut file) = file else {
         // No shared state to be had: this process's own view.
-        return f(&mut boot_links(), &mut Vec::new());
+        let mut links = boot_links();
+        follow_uplink(&mut links, &None, &uplink::current(), &mut Vec::new());
+        return f(&mut links, &mut Vec::new());
     };
     // SAFETY: locking our open file; released when it closes.
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     let mut text = String::new();
     let _ = file.read_to_string(&mut text);
-    let mut links = parse(&text)
-        .filter(|l| !l.is_empty())
-        .unwrap_or_else(boot_links);
+    let (mut links, was) = parse(&text)
+        .filter(|(l, _)| !l.is_empty())
+        .unwrap_or_else(|| (boot_links(), None));
     let mut events = Vec::new();
+    let now = uplink::current();
+    if follow_uplink(&mut links, &was, &now, &mut events) {
+        match &now {
+            Some(u) => crate::diag!(
+                "[linux-abi] net: the Mac's network is {}/{} via {} (host interface {})",
+                u.addr,
+                u.prefix,
+                u.gateway,
+                u.index
+            ),
+            None => crate::diag!("[linux-abi] net: the Mac has no network; eth0 has no carrier"),
+        }
+    }
     let r = f(&mut links, &mut events);
-    let new = serialize(&links);
+    let new = serialize(&links, &now);
     if new != text {
         let _ = file.set_len(0);
         let _ = file.rewind();
@@ -279,6 +348,11 @@ fn transact<R>(f: impl FnOnce(&mut Vec<Link>, &mut Vec<Event>) -> R) -> R {
 
 pub fn links() -> Vec<Link> {
     transact(|l, _| l.clone())
+}
+
+/// Follow the Mac's network (`uplink::watch`).
+pub fn refresh() {
+    transact(|_, _| ());
 }
 
 pub fn by_index(index: u32) -> Option<Link> {
@@ -409,7 +483,7 @@ pub fn host_index_of(name: &str) -> Result<u32, Errno> {
     Ok(if l.loopback() {
         uplink::host_index("lo0")
     } else {
-        uplink::uplink().map_or(0, |u| u.index)
+        uplink::current().map_or(0, |u| u.index)
     })
 }
 
@@ -614,7 +688,56 @@ mod tests {
             ip: "192.168.1.20".parse().unwrap(),
             prefix: 24,
         });
-        assert_eq!(parse(&serialize(&l)).unwrap(), l);
+        assert_eq!(parse(&serialize(&l, &None)).unwrap(), (l.clone(), None));
+        let up = Some(Uplink {
+            index: 4,
+            addr: "192.168.1.20".parse().unwrap(),
+            prefix: 24,
+            gateway: "192.168.1.1".parse().unwrap(),
+            mtu: 1500,
+        });
+        l[1].carrier = true;
+        assert_eq!(parse(&serialize(&l, &up)).unwrap(), (l, up));
+    }
+
+    #[test]
+    fn carrier_follows_the_macs_network() {
+        let up = |a: &str| {
+            Some(Uplink {
+                index: 4,
+                addr: a.parse().unwrap(),
+                prefix: 24,
+                gateway: "192.168.1.1".parse().unwrap(),
+                mtu: 1500,
+            })
+        };
+        let flags = |ev: &[Event]| -> Vec<u32> {
+            ev.iter()
+                .map(|e| match e {
+                    Event::Link(l) => l.live_flags() & (IFF_RUNNING | IFF_LOWER_UP),
+                    _ => panic!("{e:?}"),
+                })
+                .collect()
+        };
+        let on = IFF_RUNNING | IFF_LOWER_UP;
+        let mut l = boot_links();
+        let mut ev = Vec::new();
+        // Down: carrier changes silently.
+        assert!(follow_uplink(&mut l, &None, &up("192.168.1.20"), &mut ev));
+        assert!(ev.is_empty() && l[1].carrier && l[0].carrier);
+        l[1].flags |= IFF_UP;
+        // Up: lost, back, and lost and back for another network.
+        let was = up("192.168.1.20");
+        assert!(!follow_uplink(&mut l, &was, &was.clone(), &mut ev));
+        assert!(follow_uplink(&mut l, &was, &None, &mut ev));
+        assert_eq!(flags(&ev), [0]);
+        ev.clear();
+        assert!(follow_uplink(&mut l, &None, &was, &mut ev));
+        assert_eq!(flags(&ev), [on]);
+        ev.clear();
+        assert!(follow_uplink(&mut l, &was, &up("10.0.0.5"), &mut ev));
+        assert_eq!(flags(&ev), [0, on]);
+        assert!(l[1].carrier);
     }
 
     #[test]

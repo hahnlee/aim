@@ -1,8 +1,11 @@
 //! The far end of `eth0`'s virtual link (docs/network.md): a router that
 //! answers DHCP and ARP for the guest, as a virtual machine's NAT network
 //! does. Its lease is the Mac's own network (`uplink`): the Mac's address,
-//! prefix, gateway, MTU and DNS servers, with an infinite lease time,
-//! because guest sockets are host sockets and use exactly those.
+//! prefix, gateway, MTU and DNS servers, because guest sockets are host
+//! sockets and use exactly those. The lease time is finite
+//! (`uplink::LEASE_SECS`), so DhcpClient renews and picks up what changed;
+//! its renewals, UDP datagrams to the server's port, come here too
+//! ([`client_frame`]) rather than to the real network.
 //!
 //! Only the guest's DHCP client and ARP requests for the gateway get an
 //! answer; every other frame the guest transmits goes nowhere, since no
@@ -10,7 +13,7 @@
 
 use std::net::Ipv4Addr;
 
-use super::uplink::Uplink;
+use super::uplink::{Lease, Uplink};
 
 /// The virtual router's hardware address: locally administered, "aim".
 pub const ROUTER_MAC: [u8; 6] = [0x02, 0x61, 0x69, 0x6d, 0x00, 0x01];
@@ -34,13 +37,35 @@ fn ip4(b: &[u8], at: usize) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::from(v))
 }
 
+/// The DHCP server's port.
+pub const SERVER_PORT: u16 = 67;
+const CLIENT_PORT: u16 = 68;
+
 /// The frame the router sends back for `frame`, if any.
-pub fn answer(frame: &[u8], up: &Uplink, dns: &[Ipv4Addr]) -> Option<Vec<u8>> {
+pub fn answer(frame: &[u8], lease: &Lease) -> Option<Vec<u8>> {
     match be16(frame, 12)? {
-        ETH_P_ARP => arp(frame, up),
-        ETH_P_IP => dhcp(frame, up, dns),
+        ETH_P_ARP => arp(frame, &lease.up),
+        ETH_P_IP => dhcp(frame, lease),
         _ => None,
     }
+}
+
+/// The frame `eth0` would carry for a DHCP message a UDP socket sent from
+/// `src` to the server at `dst` (a renewal to the lease's server, or a
+/// rebinding broadcast).
+pub fn client_frame(src: Ipv4Addr, dst: Ipv4Addr, msg: &[u8]) -> Vec<u8> {
+    let dst_mac = if dst == Ipv4Addr::BROADCAST {
+        [0xff; 6]
+    } else {
+        ROUTER_MAC
+    };
+    frame(
+        dst_mac,
+        super::netif::ETH0_MAC,
+        (src, CLIENT_PORT),
+        (dst, SERVER_PORT),
+        msg,
+    )
 }
 
 /// An ARP request for the gateway gets the router's address.
@@ -63,9 +88,10 @@ fn arp(f: &[u8], up: &Uplink) -> Option<Vec<u8>> {
 
 /// A DHCP client message: DISCOVER gets an OFFER, REQUEST an ACK for the
 /// Mac's address or a NAK; the rest is ignored.
-fn dhcp(f: &[u8], up: &Uplink, dns: &[Ipv4Addr]) -> Option<Vec<u8>> {
+fn dhcp(f: &[u8], lease: &Lease) -> Option<Vec<u8>> {
+    let up = &lease.up;
     let ihl = ((*f.get(14)? & 0xf) as usize) * 4;
-    if f[14] >> 4 != 4 || *f.get(23)? != 17 || be16(f, 14 + ihl + 2)? != 67 {
+    if f[14] >> 4 != 4 || *f.get(23)? != 17 || be16(f, 14 + ihl + 2)? != SERVER_PORT {
         return None;
     }
     let b = f.get(14 + ihl + 8..)?;
@@ -100,7 +126,7 @@ fn dhcp(f: &[u8], up: &Uplink, dns: &[Ipv4Addr]) -> Option<Vec<u8>> {
         }
         _ => return None,
     };
-    Some(reply_frame(b, reply, up, dns))
+    Some(reply_frame(b, reply, lease))
 }
 
 fn checksum(data: &[u8], mut sum: u32) -> u16 {
@@ -113,10 +139,11 @@ fn checksum(data: &[u8], mut sum: u32) -> u16 {
     !(sum as u16)
 }
 
-fn reply_frame(req: &[u8], kind: u8, up: &Uplink, dns: &[Ipv4Addr]) -> Vec<u8> {
+fn reply_frame(req: &[u8], kind: u8, lease: &Lease) -> Vec<u8> {
+    let (up, dns) = (&lease.up, &lease.dns);
     let nak = kind == NAK;
     let broadcast = nak || u16::from_be_bytes([req[10], req[11]]) & 0x8000 != 0;
-    let chaddr = &req[28..34];
+    let chaddr: [u8; 6] = req[28..34].try_into().unwrap();
     // BOOTP: op, htype, hlen, hops, xid, secs, flags, ciaddr, yiaddr,
     // siaddr, giaddr, chaddr, sname, file.
     let mut b = vec![2u8, 1, 6, 0];
@@ -138,7 +165,7 @@ fn reply_frame(req: &[u8], kind: u8, up: &Uplink, dns: &[Ipv4Addr]) -> Vec<u8> {
     opt(54, &up.gateway.octets());
     if !nak {
         let mask = u32::MAX.checked_shl(32 - up.prefix as u32).unwrap_or(0);
-        opt(51, &u32::MAX.to_be_bytes());
+        opt(51, &lease.secs.to_be_bytes());
         opt(1, &mask.to_be_bytes());
         opt(3, &up.gateway.octets());
         if !dns.is_empty() {
@@ -156,16 +183,34 @@ fn reply_frame(req: &[u8], kind: u8, up: &Uplink, dns: &[Ipv4Addr]) -> Vec<u8> {
     } else {
         up.addr
     };
-    let udp_len = (8 + b.len()) as u16;
+    let dst_mac = if broadcast { [0xff; 6] } else { chaddr };
+    frame(
+        dst_mac,
+        ROUTER_MAC,
+        (up.gateway, SERVER_PORT),
+        (dst, CLIENT_PORT),
+        &b,
+    )
+}
+
+/// An Ethernet frame of an IPv4 UDP datagram carrying `payload`.
+fn frame(
+    dst_mac: [u8; 6],
+    src_mac: [u8; 6],
+    src: (Ipv4Addr, u16),
+    dst: (Ipv4Addr, u16),
+    payload: &[u8],
+) -> Vec<u8> {
+    let udp_len = (8 + payload.len()) as u16;
     let mut udp = Vec::with_capacity(udp_len as usize);
-    udp.extend_from_slice(&67u16.to_be_bytes());
-    udp.extend_from_slice(&68u16.to_be_bytes());
+    udp.extend_from_slice(&src.1.to_be_bytes());
+    udp.extend_from_slice(&dst.1.to_be_bytes());
     udp.extend_from_slice(&udp_len.to_be_bytes());
     udp.extend_from_slice(&[0, 0]);
-    udp.extend_from_slice(&b);
+    udp.extend_from_slice(payload);
     let mut pseudo = Vec::with_capacity(12);
-    pseudo.extend_from_slice(&up.gateway.octets());
-    pseudo.extend_from_slice(&dst.octets());
+    pseudo.extend_from_slice(&src.0.octets());
+    pseudo.extend_from_slice(&dst.0.octets());
     pseudo.extend_from_slice(&[0, 17]);
     pseudo.extend_from_slice(&udp_len.to_be_bytes());
     let pre = checksum(&pseudo, 0);
@@ -178,14 +223,14 @@ fn reply_frame(req: &[u8], kind: u8, up: &Uplink, dns: &[Ipv4Addr]) -> Vec<u8> {
     let mut ip = vec![0x45u8, 0];
     ip.extend_from_slice(&(20 + udp_len).to_be_bytes());
     ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
-    ip.extend_from_slice(&up.gateway.octets());
-    ip.extend_from_slice(&dst.octets());
+    ip.extend_from_slice(&src.0.octets());
+    ip.extend_from_slice(&dst.0.octets());
     let c = checksum(&ip, 0);
     ip[10..12].copy_from_slice(&c.to_be_bytes());
 
     let mut f = Vec::with_capacity(14 + ip.len() + udp.len());
-    f.extend_from_slice(if broadcast { &[0xff; 6] } else { chaddr });
-    f.extend_from_slice(&ROUTER_MAC);
+    f.extend_from_slice(&dst_mac);
+    f.extend_from_slice(&src_mac);
     f.extend_from_slice(&ETH_P_IP.to_be_bytes());
     f.extend_from_slice(&ip);
     f.extend_from_slice(&udp);
@@ -203,6 +248,14 @@ mod tests {
             prefix: 24,
             gateway: Ipv4Addr::new(192, 168, 1, 1),
             mtu: 1500,
+        }
+    }
+
+    fn lease(dns: &[Ipv4Addr]) -> Lease {
+        Lease {
+            up: up(),
+            dns: dns.to_vec(),
+            secs: 3600,
         }
     }
 
@@ -249,14 +302,14 @@ mod tests {
     #[test]
     fn discover_gets_an_offer_of_the_macs_network() {
         let dns = [Ipv4Addr::new(9, 9, 9, 9)];
-        let r = answer(&client(DISCOVER, None), &up(), &dns).unwrap();
+        let r = answer(&client(DISCOVER, None), &lease(&dns)).unwrap();
         assert_eq!(&r[..6], &MAC);
         assert_eq!(option(&r, 53).unwrap(), [OFFER]);
         assert_eq!(&r[14 + 20 + 8 + 16..14 + 20 + 8 + 20], &[192, 168, 1, 20]);
         assert_eq!(option(&r, 1).unwrap(), [255, 255, 255, 0]);
         assert_eq!(option(&r, 3).unwrap(), [192, 168, 1, 1]);
         assert_eq!(option(&r, 6).unwrap(), [9, 9, 9, 9]);
-        assert_eq!(option(&r, 51).unwrap(), [255; 4]);
+        assert_eq!(option(&r, 51).unwrap(), 3600u32.to_be_bytes());
         // Valid IPv4 and UDP checksums.
         assert_eq!(checksum(&r[14..34], 0), 0);
         let mut pseudo = r[26..34].to_vec();
@@ -267,12 +320,31 @@ mod tests {
 
     #[test]
     fn request_is_acked_or_naked() {
-        let ok = answer(&client(REQUEST, Some(up().addr)), &up(), &[]).unwrap();
+        let ok = answer(&client(REQUEST, Some(up().addr)), &lease(&[])).unwrap();
         assert_eq!(option(&ok, 53).unwrap(), [ACK]);
         let old = Some(Ipv4Addr::new(10, 0, 0, 7));
-        let nak = answer(&client(REQUEST, old), &up(), &[]).unwrap();
+        let nak = answer(&client(REQUEST, old), &lease(&[])).unwrap();
         assert_eq!(option(&nak, 53).unwrap(), [NAK]);
         assert_eq!(&nak[..6], &[0xff; 6]);
+    }
+
+    #[test]
+    fn a_renewal_over_udp_is_answered() {
+        // RENEWING: ciaddr is the leased address, no server identifier or
+        // requested address, unicast to the server.
+        let mut b = client(REQUEST, None)[14 + 20 + 8..].to_vec();
+        b[12..16].copy_from_slice(&up().addr.octets());
+        let f = client_frame(up().addr, up().gateway, &b);
+        assert_eq!(&f[..6], &ROUTER_MAC);
+        assert_eq!(checksum(&f[14..34], 0), 0);
+        let ack = answer(&f, &lease(&[])).unwrap();
+        assert_eq!(option(&ack, 53).unwrap(), [ACK]);
+        assert_eq!(&ack[..6], &MAC);
+        // The Mac moved to another network: the old address is NAKed.
+        let mut moved = lease(&[]);
+        moved.up.addr = Ipv4Addr::new(10, 0, 0, 7);
+        let nak = answer(&f, &moved).unwrap();
+        assert_eq!(option(&nak, 53).unwrap(), [NAK]);
     }
 
     #[test]
@@ -282,10 +354,10 @@ mod tests {
         f.extend_from_slice(&[8, 6, 0, 1, 8, 0, 6, 4, 0, 1]);
         f.extend_from_slice(&MAC);
         f.extend_from_slice(&[192, 168, 1, 20, 0, 0, 0, 0, 0, 0, 192, 168, 1, 1]);
-        let r = answer(&f, &up(), &[]).unwrap();
+        let r = answer(&f, &lease(&[])).unwrap();
         assert_eq!(&r[6..12], &ROUTER_MAC);
         assert_eq!(&r[20..22], &[0, 2]);
         f[41] = 9;
-        assert!(answer(&f, &up(), &[]).is_none());
+        assert!(answer(&f, &lease(&[])).is_none());
     }
 }

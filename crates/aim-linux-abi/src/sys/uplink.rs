@@ -4,9 +4,15 @@
 //! sockets, so these values are what the guest's traffic really uses; the
 //! virtual link's DHCP server hands them out (`dhcp`) and `eth0` has
 //! carrier while they exist. Read when asked, never cached: the Mac
-//! changes networks.
+//! changes networks, and [`watch`] makes sure the guest hears of it.
+//!
+//! A boot's test hook, `<runtime>/net/simulate`, changes what the guest
+//! sees without touching the Mac's network: a line `down` takes the
+//! network away; `addr A/P`, `gateway G`, `dns S...` and `lease SECONDS`
+//! replace those values of a present one.
 
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The host's primary IPv4 network.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,6 +166,150 @@ pub fn uplink() -> Option<Uplink> {
     })
 }
 
+/// The lease time the virtual router gives: DhcpClient renews after half
+/// of it, which is how DNS changes reach the guest.
+pub const LEASE_SECS: u32 = 3600;
+
+/// What `eth0` stands for: the Mac's network, its DNS servers and the
+/// lease time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lease {
+    pub up: Uplink,
+    pub dns: Vec<Ipv4Addr>,
+    pub secs: u32,
+}
+
+fn hook() -> String {
+    std::fs::read_to_string(super::netif::kernel_dir("net").join("simulate")).unwrap_or_default()
+}
+
+/// The Mac's network as the guest sees it (the test hook applied), or
+/// None when there is none.
+pub fn current() -> Option<Uplink> {
+    simulate(&hook(), uplink()?, Vec::new()).map(|l| l.up)
+}
+
+/// What the virtual router leases now, or None without a network.
+pub fn lease() -> Option<Lease> {
+    simulate(&hook(), uplink()?, dns_servers())
+}
+
+/// `up` and `dns` with the test hook's `text` applied.
+fn simulate(text: &str, up: Uplink, dns: Vec<Ipv4Addr>) -> Option<Lease> {
+    let mut l = Lease {
+        up,
+        dns,
+        secs: LEASE_SECS,
+    };
+    for line in text.lines() {
+        let mut w = line.split_whitespace();
+        match (w.next(), w.next()) {
+            (Some("down"), _) => return None,
+            (Some("addr"), Some(a)) => {
+                let (ip, p) = a.split_once('/').unwrap_or((a, "24"));
+                if let (Ok(ip), Ok(p @ 0..=32)) = (ip.parse(), p.parse()) {
+                    (l.up.addr, l.up.prefix) = (ip, p);
+                }
+            }
+            (Some("gateway"), Some(g)) => l.up.gateway = g.parse().unwrap_or(l.up.gateway),
+            (Some("dns"), Some(d)) => {
+                l.dns = std::iter::once(d)
+                    .chain(w)
+                    .filter_map(|d| d.parse().ok())
+                    .collect()
+            }
+            (Some("lease"), Some(s)) => l.secs = s.parse().unwrap_or(l.secs),
+            _ => {}
+        }
+    }
+    Some(l)
+}
+
+/// How long the watcher waits for a routing message before it looks
+/// anyway: DNS servers and the test hook change without one.
+const WATCH_PERIOD_MS: u64 = 2000;
+
+/// Watch the Mac's network from a thread of this process, calling
+/// `changed` on each routing change and every [`WATCH_PERIOD_MS`]. Every
+/// process listening to link changes runs one; the shared device state
+/// makes sure each change is announced once (`netif`).
+pub fn watch(changed: fn()) {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("linux-abi-uplink".into())
+        .spawn(move || watch_loop(changed));
+    if spawned.is_err() {
+        STARTED.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Whether a routing message may change the default route or the
+/// addresses: route changes other than cloned, host and link-layer
+/// entries, address and interface changes.
+fn relevant(msg: &[u8]) -> bool {
+    if msg.len() < std::mem::size_of::<libc::rt_msghdr>() {
+        return false;
+    }
+    // SAFETY: a whole header, checked above.
+    let h = unsafe { (msg.as_ptr() as *const libc::rt_msghdr).read_unaligned() };
+    let skip = libc::RTF_WASCLONED | libc::RTF_HOST | libc::RTF_LLINFO;
+    match h.rtm_type as i32 {
+        libc::RTM_ADD | libc::RTM_DELETE | libc::RTM_CHANGE => h.rtm_flags & skip == 0,
+        libc::RTM_NEWADDR | libc::RTM_DELADDR | libc::RTM_IFINFO => true,
+        _ => false,
+    }
+}
+
+fn watch_loop(changed: fn()) {
+    // SAFETY: this host thread takes no signals, so the kernel never picks
+    // it for a process-directed one.
+    unsafe {
+        let mut all: libc::sigset_t = 0;
+        libc::sigfillset(&mut all);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &all, std::ptr::null_mut());
+    }
+    // SAFETY: a routing socket of our own, kept for the process.
+    let s = unsafe { libc::socket(libc::PF_ROUTE, libc::SOCK_RAW, 0) };
+    let s = if s >= 0 { super::fdtab::hide(s) } else { s };
+    let mut buf = vec![0u8; 2048];
+    let period = std::time::Duration::from_millis(WATCH_PERIOD_MS);
+    let mut due = std::time::Instant::now();
+    loop {
+        let now = std::time::Instant::now();
+        if now >= due {
+            changed();
+            due = now + period;
+        }
+        let mut p = libc::pollfd {
+            fd: s,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let wait = due.saturating_duration_since(now).as_millis() as i32;
+        // SAFETY: one pollfd on our stack (none: a plain sleep).
+        if unsafe { libc::poll(&mut p, (s >= 0) as u32, wait) } <= 0 {
+            continue;
+        }
+        // A change comes as a burst of messages: let it finish, then
+        // look once.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        loop {
+            // SAFETY: reading into our buffer without blocking.
+            let n =
+                unsafe { libc::recv(s, buf.as_mut_ptr().cast(), buf.len(), libc::MSG_DONTWAIT) };
+            if n <= 0 {
+                break;
+            }
+            if relevant(&buf[..n as usize]) {
+                due = std::time::Instant::now();
+            }
+        }
+    }
+}
+
 /// The host's IPv4 DNS servers (`/etc/resolv.conf`, which macOS writes
 /// from its primary resolver configuration).
 pub fn dns_servers() -> Vec<Ipv4Addr> {
@@ -197,6 +347,34 @@ mod tests {
             parse_nameservers(t),
             [Ipv4Addr::new(192, 168, 0, 1), Ipv4Addr::new(8, 8, 8, 8)]
         );
+    }
+
+    #[test]
+    fn the_test_hook_changes_the_lease() {
+        let up = Uplink {
+            index: 4,
+            addr: Ipv4Addr::new(192, 168, 1, 20),
+            prefix: 24,
+            gateway: Ipv4Addr::new(192, 168, 1, 1),
+            mtu: 1500,
+        };
+        let dns = vec![Ipv4Addr::new(192, 168, 1, 1)];
+        let plain = simulate("", up.clone(), dns.clone()).unwrap();
+        assert_eq!((&plain.up, &plain.dns, plain.secs), (&up, &dns, LEASE_SECS));
+        assert!(simulate("lease 60\ndown\n", up.clone(), dns.clone()).is_none());
+        let l = simulate(
+            "addr 10.1.2.3/16\ngateway 10.1.0.1\ndns 9.9.9.9 1.1.1.1\nlease 120\nbogus\n",
+            up.clone(),
+            dns,
+        )
+        .unwrap();
+        assert_eq!((l.up.addr, l.up.prefix), (Ipv4Addr::new(10, 1, 2, 3), 16));
+        assert_eq!(l.up.gateway, Ipv4Addr::new(10, 1, 0, 1));
+        assert_eq!(
+            l.dns,
+            [Ipv4Addr::new(9, 9, 9, 9), Ipv4Addr::new(1, 1, 1, 1)]
+        );
+        assert_eq!((l.secs, l.up.index), (120, 4));
     }
 
     #[test]

@@ -12,7 +12,7 @@ writes.
 | Piece | Where |
 | --- | --- |
 | Devices `lo` and `eth0`: flags, MTU, addresses, shared by a boot's processes | `crates/aim-linux-abi/src/sys/netif.rs` |
-| The Mac's network: default route, address, gateway, MTU, DNS servers | `sys/uplink.rs` |
+| The Mac's network: default route, address, gateway, MTU, DNS servers; watching it | `sys/uplink.rs` |
 | NETLINK_ROUTE: dumps, changes, group announcements | `sys/netlink.rs` |
 | AF_PACKET SOCK_RAW and classic BPF filters | `sys/packet.rs` |
 | `eth0`'s virtual router: DHCP and ARP | `sys/dhcp.rs` |
@@ -20,7 +20,7 @@ writes.
 | SO_MARK, SO_BINDTODEVICE, ping sockets, UDP connect to port 0 | `sys/net.rs` (`Family::Inet`) |
 | INetd interface calls over ioctls and rtnetlink | `daemons/netd/src/interfaces.rs` |
 | `android.hardware.ethernet` | `image/vendor/etc/permissions/android.hardware.ethernet.xml` |
-| NDK test | `crates/aim-linux-abi/tests/ndk/t_netif.c` |
+| NDK tests | `crates/aim-linux-abi/tests/ndk/t_netif.c`, `t_netwatch.c` |
 
 ## Bring-up
 
@@ -33,7 +33,7 @@ EthernetTracker                                                    (INetd)
   IpClient.start ----------------> DhcpClient
                                    AF_PACKET: DISCOVER --> virtual router
                                    <-- OFFER (the Mac's address, gateway, DNS)
-                                   REQUEST --> <-- ACK (infinite lease)
+                                   REQUEST --> <-- ACK (1 h lease)
                                    interfaceSetCfg(addr) ---------> SIOCSIFADDR,
                                                                     SIOCSIFNETMASK
                                    <- RTM_NEWADDR (RTNLGRP_IPV4_IFADDR) <- kernel
@@ -47,13 +47,13 @@ NetworkMonitor: DNS through DnsResolver, HTTP and HTTPS generate_204 probes
 
 - **Carrier.** `eth0` is up when userspace sets IFF_UP, and has carrier
   (IFF_RUNNING, IFF_LOWER_UP, IF_OPER_UP) while the Mac has an IPv4 default
-  route. A change of the Mac's network is not announced yet (#266).
+  route. Changes are announced (see "Following the Mac's network").
 - **The lease** is the Mac's primary network as a routing socket and
   `getifaddrs` report it: the address and prefix of the default route's
   interface, its gateway (also the DHCP server identifier) and MTU, and the
-  IPv4 nameservers of `/etc/resolv.conf`. The lease time is infinite, so
-  DhcpClient never renews (a renewal would go to the real gateway through
-  a host socket). A request for another address is NAKed.
+  IPv4 nameservers of `/etc/resolv.conf`. The lease time is one hour, so
+  DhcpClient renews after 30 minutes and picks up new DNS servers. A
+  request for another address is NAKed.
 - **Hardware addresses** are fixed and locally administered: `eth0`
   `02:61:69:6d:00:02`, the router `02:61:69:6d:00:01`.
 - **The emulator's overlay goes.** Its vendor overlay made `eth0` a
@@ -61,6 +61,57 @@ NetworkMonitor: DNS through DnsResolver, HTTP and HTTPS generate_204 probes
   because the emulator's `eth0` is its modem link. Ours is an ordinary
   Ethernet network with the default capabilities (INTERNET, NOT_RESTRICTED,
   NOT_METERED, TRUSTED, ...).
+
+## Following the Mac's network (#266)
+
+The Mac joins and leaves networks, sleeps, and moves from Wi-Fi to a
+cable. The guest sees this as a device with a cable would:
+
+```text
+Mac: default route gone          eth0: carrier lost -> RTM_NEWLINK without
+                                   IFF_RUNNING/IFF_LOWER_UP
+  EthernetTracker (NetlinkMonitor): link down -> IpClient stopped,
+  NetworkAgent unregistered -> ConnectivityService: network lost
+Mac: default route back          eth0: carrier back -> RTM_NEWLINK with
+                                   IFF_RUNNING/IFF_LOWER_UP
+  EthernetTracker: link up -> new IpClient -> DHCP (the new lease) ->
+  new NetworkAgent -> NetworkMonitor validates -> default network
+Mac: another network (address,   eth0: carrier lost and back at once,
+  gateway, MTU or interface)       so the steps above run with a new lease
+Mac: new DNS servers only        the next renewal (a DHCPACK with them)
+```
+
+- **Watching.** Every process that binds a NETLINK_ROUTE socket to
+  RTNLGRP_LINK (system_server's EthernetTracker, NetworkStack) runs a
+  thread with a routing socket (`PF_ROUTE`): a change of routes other than
+  cloned, host and link-layer entries, or of addresses or interfaces, has
+  it look at the Mac's network; it also looks every 2 s, for DNS servers
+  and the test hook, which change without a routing message. A routing
+  socket needs no entitlement and no run loop, unlike SCDynamicStore or
+  `nw_path_monitor`.
+- **Once per change.** The network last seen is part of the shared device
+  state (`uplink` line of `<runtime>/net/links`). Every process that reads
+  or changes the devices compares it with the Mac's current one under the
+  state's lock, and the one that finds a change announces it; the other
+  watchers then find nothing new.
+- **Renewals stay in the guest.** DhcpClient renews by UDP from a socket
+  bound to `eth0` and port 68, to the lease's server (RENEWING) or to
+  255.255.255.255 (REBINDING). Such a datagram to port 67 becomes the
+  frame `eth0` would carry and goes to the virtual router, whose answer
+  reaches DhcpClient's packet socket; it never reaches the Mac's network.
+  Without a network it fails with ENETUNREACH. A renewal for an address
+  the Mac no longer has is NAKed, and DhcpClient starts over.
+- **Test hook.** `<runtime>/net/simulate` (`<data>/run/net/simulate` for
+  `cargo aim boot`) changes what the guest sees without touching the Mac:
+  `down` takes the network away; `addr A/P`, `gateway G`, `dns S...` and
+  `lease SECONDS` replace those values of the Mac's network. An empty or
+  missing file is the Mac's network as it is. Guest sockets still use the
+  Mac's real network, so a simulated address is only what Android is told.
+
+```sh
+echo down > target/aim/boot/data/run/net/simulate   # outage
+: > target/aim/boot/data/run/net/simulate           # back
+```
 
 ## The kernel side
 
@@ -138,6 +189,25 @@ network (172.30.1.0/24):
   (#260). Chrome's "No such process (3)" warnings (#257) are gone: they
   were DnsResolver's ESRCH for a network with no nameservers.
 
+### Verified: following the Mac's network (2026-09-29)
+
+`cargo aim boot` on the same Mac, with the outage and the other network
+simulated through the test hook (the Mac's own network untouched):
+
+- Network available: `Active default network: 100`, Ethernet,
+  `IS_VALIDATED`, 172.30.1.49/24; `ping -c 3 www.google.com` 3/3.
+- `down`: EthernetTracker `interfaceLinkStateChanged, iface: eth0, up:
+  false`; `Active default network: none` within 4 s; ping fails (no statistics).
+- Back: network 101, `IS_VALIDATED` within 4 s; ping 3/3.
+- Another network (10.77.1.23/24 via 10.77.1.1, DNS 1.1.1.1, 60 s lease):
+  link down and up, a new DHCP lease, network 102 `IS_VALIDATED` with
+  10.77.1.23/24 within 4 s; ping 3/3; DhcpClient `Renewed lease ... DHCP
+  server /10.77.1.1 ... lease 60 seconds` through the virtual router.
+- The Mac's network again: network 103 `IS_VALIDATED`, 172.30.1.49/24.
+- Booted with the hook at `down`: no default network 20 s after
+  `sys.boot_completed`; emptying the hook gave network 100
+  `IS_VALIDATED` within 6 s, and ping 3/3.
+
 ## Stage 2: presenting it as Wi-Fi (#265)
 
 Most apps and Settings expect Wi-Fi, and a Mac is usually on Wi-Fi. The
@@ -172,7 +242,7 @@ sockets. What it takes, below the original stack:
 - **`wlan0` in netif.** The device named after the Mac's default-route
   interface type: `wlan0` (ARPHRD_ETHER) when it is Wi-Fi. `eth0` stays for
   a wired Mac. Carrier follows the supplicant's association, and both
-  follow the host's route changes (#266).
+  follow the host's route changes as `eth0` does.
 - **Location permission.** macOS gives SSIDs, BSSIDs and scan results
   only to processes with Location Services authorization, so the host side
   must hold it (the process running the `wifi` module, or aim-display
@@ -186,8 +256,6 @@ sockets. What it takes, below the original stack:
 
 ## Open
 
-- #266 the Mac's network changes (Wi-Fi to wired, sleep) are not announced:
-  no RTM_NEWLINK or new lease;
 - #267 no IPv6 on `eth0` (no router advertisements or SLAAC); IPv6 sockets
   still reach the Internet through the host;
 - #260 Chrome's renderer: "V8 process OOM (Failed to reserve virtual

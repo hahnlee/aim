@@ -206,6 +206,7 @@ impl Socket {
         }
         self.portid.store(portid, Ordering::Relaxed);
         self.groups.store(groups, Ordering::Relaxed);
+        listening(groups);
         Ok(())
     }
 
@@ -241,6 +242,14 @@ impl Socket {
     }
 }
 
+/// A process listening to link changes watches the Mac's network, whose
+/// changes are link changes.
+fn listening(groups: u32) {
+    if groups & GRP_LINK != 0 {
+        super::uplink::watch(netif::refresh);
+    }
+}
+
 /// The state of the socket bound to `name` in the netlink directory (a
 /// netlink socket that arrived by exec or `SCM_RIGHTS`).
 pub fn adopt(name: &std::ffi::OsStr) -> Option<Socket> {
@@ -251,6 +260,7 @@ pub fn adopt(name: &std::ffi::OsStr) -> Option<Socket> {
     );
     let path = dir().join(name);
     std::fs::symlink_metadata(&path).ok()?;
+    listening(groups);
     Some(Socket {
         ty: 3,
         portid: AtomicU32::new(portid),
@@ -724,6 +734,7 @@ mod tests {
             mtu: 1500,
             mac: netif::ETH0_MAC,
             addrs: Vec::new(),
+            carrier: true,
         };
         let a = Addr {
             ip: "192.168.1.20".parse().unwrap(),

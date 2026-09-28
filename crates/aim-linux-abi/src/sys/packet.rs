@@ -25,6 +25,7 @@ const ETH_P_ALL: u16 = 0x0003;
 const CAP_NET_RAW: u32 = 13;
 const ENXIO: Errno = 6;
 const ENETDOWN: Errno = 100;
+const ENETUNREACH: Errno = 101;
 
 /// PACKET_HOST, PACKET_BROADCAST, PACKET_MULTICAST, PACKET_OTHERHOST,
 /// PACKET_OUTGOING.
@@ -216,10 +217,18 @@ fn pkttype(frame: &[u8]) -> u8 {
     }
 }
 
+/// How a frame reaches the packet sockets.
+enum Way<'a> {
+    /// From the link, to the sockets bound to its protocol.
+    In,
+    /// Sent by this host, to the ETH_P_ALL taps except the sending socket.
+    Out(Option<&'a Socket>),
+}
+
 /// Queue `frame` on the sockets that receive it: bound to `ifindex` (or
 /// to every link) and to its protocol, or ETH_P_ALL taps for an outgoing
-/// frame (except its sender), each through its filter.
-fn deliver(frame: &[u8], ifindex: u32, outgoing: Option<&Socket>) {
+/// frame, each through its filter.
+fn deliver(frame: &[u8], ifindex: u32, way: Way) {
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]) as u32;
     let all: Vec<Arc<Socket>> = SOCKETS
         .lock()
@@ -230,9 +239,11 @@ fn deliver(frame: &[u8], ifindex: u32, outgoing: Option<&Socket>) {
     for s in all {
         let proto = s.proto.load(Ordering::Relaxed);
         let bound = s.ifindex.load(Ordering::Relaxed);
-        let wants = match outgoing {
-            Some(from) => proto == ETH_P_ALL as u32 && !std::ptr::eq(from, &*s),
-            None => proto == ETH_P_ALL as u32 || proto == ethertype,
+        let wants = match way {
+            Way::Out(from) => {
+                proto == ETH_P_ALL as u32 && !from.is_some_and(|f| std::ptr::eq(f, &*s))
+            }
+            Way::In => proto == ETH_P_ALL as u32 || proto == ethertype,
         };
         if !wants || (bound != 0 && bound != ifindex) {
             continue;
@@ -267,14 +278,38 @@ pub fn send(s: &Socket, frame: &[u8], ifindex: u32) -> i64 {
     if link.live_flags() & netif::IFF_RUNNING == 0 {
         return -(ENETDOWN as i64);
     }
-    deliver(frame, ifindex, Some(s));
-    if link.index == netif::ETH0
-        && let Some(up) = uplink::uplink()
-        && let Some(reply) = dhcp::answer(frame, &up, &uplink::dns_servers())
-    {
-        deliver(&reply, ifindex, None);
+    deliver(frame, ifindex, Way::Out(Some(s)));
+    if link.index == netif::ETH0 {
+        to_router(frame);
     }
     frame.len() as i64
+}
+
+/// Hand `frame`, sent on `eth0`, to the virtual router, and its answer to
+/// the packet sockets.
+fn to_router(frame: &[u8]) {
+    if let Some(lease) = uplink::lease()
+        && let Some(reply) = dhcp::answer(frame, &lease)
+    {
+        deliver(&reply, netif::ETH0, Way::In);
+    }
+}
+
+/// A DHCP message a UDP socket bound to `eth0` sent to the server port
+/// (`net`): it goes to the virtual router as the frame `eth0` would
+/// carry, never to the real network. Returns the bytes sent or a Linux
+/// errno.
+pub fn udp_to_router(src: std::net::Ipv4Addr, dst: std::net::Ipv4Addr, msg: &[u8]) -> i64 {
+    let Some(link) = netif::by_index(netif::ETH0) else {
+        return -(ENXIO as i64);
+    };
+    if link.live_flags() & netif::IFF_RUNNING == 0 {
+        return -(ENETUNREACH as i64);
+    }
+    let frame = dhcp::client_frame(src, dst, msg);
+    deliver(&frame, netif::ETH0, Way::Out(None));
+    to_router(&frame);
+    msg.len() as i64
 }
 
 /// Receive one frame into `buf`: (bytes copied or, with `trunc`, the
