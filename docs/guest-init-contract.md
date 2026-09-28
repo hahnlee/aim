@@ -185,7 +185,8 @@ rlimit	13	40	40
 - **Children.** A forked child inherits the in-process state
   (`docs/fork.md`). The layer writes the child's identity to
   `<dir of FILE>/by-pid/<host pid>`, where guest-init already links each
-  service's pid. It removes the file when the process exits. The by-pid
+  service's pid; each process also writes its own entry when it starts
+  and after `execve`. It removes the file when the process exits. The by-pid
   directory is the process table for peer credentials:
   - `SO_PEERCRED` and `SCM_CREDENTIALS` on AF_UNIX sockets must report the
     peer's guest pid, uid and gid from there (`LOCAL_PEERPID` →
@@ -199,6 +200,9 @@ rlimit	13	40	40
     processes only. An entry counts only for a process started before the
     entry was written, so a pid the Mac reuses is never a member. A
     forking process writes its child's entry before `fork` returns.
+  - A `linux-run` started with neither `--identity` nor `--by-pid` makes a
+    private table and is the init of that namespace: its descendants die
+    with it and the table goes.
 
 ## 5. Inherited descriptors
 

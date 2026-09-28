@@ -327,13 +327,15 @@ fn write_entry(pid: i32, id: &Identity) {
 }
 
 /// Set this process's identity at start-up. `by_pid` is the process table
-/// directory, when the process belongs to one.
+/// directory, when the process belongs to one; its entry is written there.
 pub fn init(id: Identity, by_pid: Option<PathBuf>) {
     publish(&id);
-    *STATE.lock().unwrap() = Some(id);
     if let Some(d) = by_pid {
         let _ = BY_PID.set(d);
+        // SAFETY: trivial.
+        write_entry(unsafe { libc::getpid() }, &id);
     }
+    *STATE.lock().unwrap() = Some(id);
 }
 
 pub fn by_pid_dir() -> Option<&'static PathBuf> {
@@ -399,7 +401,6 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             .push((unsafe { libc::getpid() }, nice));
     }
     init(id, by_pid);
-    after_fork_child();
 }
 
 /// In the parent of a fork: the child's entry, before `fork` returns, so
@@ -407,13 +408,6 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
 /// child writes it again when it starts.
 pub(super) fn note_child(pid: i32) {
     write_entry(pid, &current());
-}
-
-/// In a forked child: publish the inherited identity under the new pid.
-pub(super) fn after_fork_child() {
-    let id = current();
-    // SAFETY: trivial.
-    write_entry(unsafe { libc::getpid() }, &id);
 }
 
 /// The process `pid` is gone (exited or reaped): drop its entry.

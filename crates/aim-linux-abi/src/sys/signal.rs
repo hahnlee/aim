@@ -128,6 +128,7 @@ fn ignored(sig: i32, act: &KSigaction) -> bool {
 /// Darwin equivalent (so its parent sees the signal), or exits 128+sig.
 pub fn die(sig: i32) -> ! {
     super::fork::spawn::wait_handovers();
+    super::pidns::leave();
     let h = to_host(sig);
     // SAFETY: restoring the default action and raising it on this thread.
     unsafe {

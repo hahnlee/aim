@@ -743,6 +743,20 @@ static void pid_namespace(pid_t host) {
   printf("ok pid_namespace\n");
 }
 
+// Without a process table, linux-run is the init of a private pid
+// namespace: this prints its pid and a child's and exits, and the child
+// dies with it (tests/process.rs).
+static void ns_init_exit(void) {
+  pid_t child = fork();
+  CHECK(child >= 0, "fork");
+  if (child == 0) {
+    close(1);
+    close(2);
+    for (;;) pause();
+  }
+  printf("pids %d %d\n", getpid(), child);
+}
+
 static double now_us(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -881,11 +895,12 @@ int main(int argc, char** argv) {
       {"seccomp_filter", seccomp_filter},
       {"xattrs", xattrs},           {"pf_key", pf_key},
       {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
-      {"bench", bench},
+      {"bench", bench},             {"ns_init_exit", ns_init_exit},
   };
   for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
     if (strcmp(which, checks[i].name) == 0 ||
-        (strcmp(which, "all") == 0 && checks[i].fn != bench && checks[i].fn != identity_file)) {
+        (strcmp(which, "all") == 0 && checks[i].fn != bench && checks[i].fn != identity_file &&
+         checks[i].fn != ns_init_exit)) {
       fflush(stdout);
       checks[i].fn();
       fflush(stdout);
