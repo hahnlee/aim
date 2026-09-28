@@ -193,3 +193,31 @@ The `/proc/self/maps` reads (`procfs::maps`, `vmmap::region_at`) are another
 2–4 % (~50 ms). Beyond Chrome, the largest single lever on the measured
 numbers is the busy post-boot guest (`idle.cpu_cores` 3–11): the same cold
 start is 2–5× slower in the bench than on a calmed-down guest.
+
+## Start-up and fork measurements (#190, #239)
+
+Microbenchmarks, not `cargo aim bench`: release builds, M2 Pro,
+2026-09-29, on a host other agents also loaded; A is main at `b6967392`,
+B the change, run back to back. Treat them as indicative.
+
+- **ART start-up from the translation cache (#190):** the 2x gap
+  (0.73 s cached against 0.34 s load-time) was not the cache. The host's
+  endpoint security agent authorizes a process's first `mmap` of each file
+  outside `~/Library` and the temporary directory, about 0.7 ms each;
+  `tests/art.rs` kept its cache in the target directory, so `dalvikvm64`
+  paid it for ~310 cached libraries while load-time rewriting maps no
+  files. With the cache in the temporary directory (the default cache is
+  in `~/Library/Caches`), the cache is as fast as load-time rewriting:
+  0.39–0.46 s against 0.33–0.49 s over the test's four configurations
+  (it was 0.64–0.81 s). Image files mapped from the repository's derived
+  image still pay it (#295).
+- **`linux-run` start** (spawn, `--help`, exit; p50 of 200): 7.2 → 4.7 ms
+  once the host frameworks are opened on first use (`/usr/bin/true`:
+  4.1 ms). docs/fork.md has the fork numbers: fork+exit+wait about
+  1.5 ms and fork+exec about 4.5 ms faster.
+
+An interleaved `cargo aim bench` A/B was started, but the host's load
+average was 95–295 on 12 cores during it, and the runs spread 2–4x
+between runs of the same build (`process.fork_p50_us` 13 ms in one run,
+56 ms in the next), so none of it is reported here; a bench of main after
+the merge replaces it.
