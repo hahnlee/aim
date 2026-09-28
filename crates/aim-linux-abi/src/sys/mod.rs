@@ -36,6 +36,7 @@ mod netif;
 mod netlink;
 mod packet;
 mod park;
+mod pidns;
 mod poll;
 mod process;
 mod procfs;

@@ -933,11 +933,9 @@ pub fn process_vm_rw(write: bool, a: [u64; 6]) -> i64 {
     }
     // SAFETY: trivial.
     if pid != unsafe { libc::getpid() } {
-        // SAFETY: probing whether the pid exists.
-        return if unsafe { libc::kill(pid, 0) } < 0 {
-            -(libc::ESRCH as i64)
-        } else {
-            -(libc::EPERM as i64)
+        return match super::pidns::check(pid) {
+            Ok(_) => -(libc::EPERM as i64),
+            Err(e) => e,
         };
     }
     // SAFETY: guest iovec arrays of the given counts.

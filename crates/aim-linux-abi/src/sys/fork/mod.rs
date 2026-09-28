@@ -213,6 +213,7 @@ fn fork(ctx: &mut GuestContext, mut r: Request) -> i64 {
             return e;
         }
     };
+    super::cred::note_child(pid);
     if own_files_thread {
         own_files_thread_started(pid, &r);
     }

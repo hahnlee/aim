@@ -375,14 +375,21 @@ pub fn pidfd_open(a: [u64; 6]) -> i64 {
     if flags & !PIDFD_NONBLOCK != 0 || pid <= 0 {
         return -(EINVAL as i64);
     }
+    if let Err(e) = super::pidns::check(pid) {
+        return e;
+    }
     open_pidfd(pid, flags & PIDFD_NONBLOCK != 0)
 }
 
 /// Send Linux signal `sig` to `pid`: through the signal layer for this
-/// process, as the host signal for another one.
+/// process, as the host signal for another one. A pid the Mac reused
+/// after the process exited is no longer in the namespace.
 fn send_signal(pid: i32, sig: i32) -> i64 {
     if pid as i64 == super::process::getpid() {
         return super::signal::kill([pid as u64, sig as u64, 0, 0, 0, 0]);
+    }
+    if let Err(e) = super::pidns::check(pid) {
+        return e;
     }
     let host = if sig == 0 {
         0

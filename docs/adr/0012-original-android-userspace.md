@@ -578,6 +578,12 @@ the remaining original daemons use, evdev, and memfd/ashmem.
 - **Mount namespaces** are per-process entries of the path map (bind,
   tmpfs, move, `umount2`); init's own binds are entries every later process
   gets. There is no propagation between processes.
+- **The pid namespace** is the process table (`by-pid`, which guest-init
+  and every fork write): `/proc` and every call that names a process
+  (`kill` and its group and `-1` forms, `tgkill`, pidfds, `sched_*`,
+  `*priority`, `getpgid`/`setpgid`/`getsid`, `capget`, `process_vm_*`)
+  see its processes only, and a Mac process is ESRCH (`sys/pidns.rs`).
+  Guest pids are host pids.
 - **cgroup v2 and bpffs** are writable areas of the path map: the
   hierarchy holds the directories libprocessgroup creates, and no
   controller acts.

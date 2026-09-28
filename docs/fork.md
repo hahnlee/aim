@@ -71,7 +71,8 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
    the guest's kqueue fd numbers (epoll, inotify, pidfd), and the child
    holds them with `/dev/null` from its first moment so nothing else takes
    them. The child gets a send right to a port of the parent's through its
-   registered ports.
+   registered ports. The parent writes the child's by-pid entry before
+   `fork` returns, so the child is in the pid namespace at once.
 5. **Handover.** A host thread of the parent serves the port. The child
    sends its reply port and receives the memory entries and the blob in one
    message. If the child dies first, a no-senders notification ends the

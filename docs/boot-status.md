@@ -145,6 +145,10 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
   fails with "Unable to open ashmem device".
 - POSIX timers, a writable `trace_marker` (#192), per-thread `comm` files
   (#198), and `/proc/<tid>`, the scheduler calls and `tgkill` for every tid.
+- The process table is the guest's pid namespace for every call that
+  names a process, not only `/proc` (#341): `kill` (also `-1` and process
+  groups), pidfds, the scheduler and priority calls and the rest reach
+  guest processes only, and a Mac process is ESRCH.
 - guest-init's wait for linkerconfig ends at `--timeout` and on SIGINT or
   SIGTERM (#196).
 
