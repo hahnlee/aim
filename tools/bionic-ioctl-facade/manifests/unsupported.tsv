@@ -1,7 +1,0 @@
-surface	failure	android-errno
-unknown-request	fail-closed	ENOTTY(25)
-unknown-fd	fail-closed	EBADF(9)
-known-non-entropy-fd	fail-closed	ENOTTY(25)
-missing-fd-provider	fail-closed	ENOSYS(38)
-general-linux-ioctl	out-of-scope	ENOTTY(25)
-darwin-ioctl-forwarding	forbidden	n/a

@@ -4,10 +4,9 @@
 
 Independent original contributions are submitted under Apache-2.0. Contributions
 to upstream-derived files and patches must preserve the upstream license,
-copyrights, notices, and applicable exceptions. In particular, retain the
-Classpath exception for modifications to covered OpenJDK code; do not relabel
-that code as Apache-2.0. See [LICENSING.md](LICENSING.md) and the
-[OpenJDK modification inventory](licensing/OPENJDK.md).
+copyrights, notices, and applicable exceptions. In particular, OpenJDK code
+keeps GPLv2 with the Classpath exception; do not relabel it as Apache-2.0.
+See [LICENSING.md](LICENSING.md) and [licensing/OPENJDK.md](licensing/OPENJDK.md).
 
 Record the upstream project, exact revision, applicable license, and local
 changes when importing or adapting code. Include required notices in the same
@@ -24,9 +23,8 @@ porting gates, follow-ups and investigations.
   codes, reproduction), the expected AOSP behavior, the owning subsystem and
   acceptance criteria.
 - Do not add TODO lists, gate checklists or backlog sections to Markdown files.
-  `docs/architecture-migration.md` stays a short index of the
-  current goal, verified state and acceptance commands, and refers to issues
-  by number for open failures.
+  `docs/boot-status.md` records the verified state and refers to issues by
+  number for open failures.
 - ADRs under `docs/adr/` record decisions. Link the issue that
   prompted the decision.
 - Reference the issue in commits that resolve it (`Fixes #123` in the body),
@@ -46,10 +44,10 @@ Common types are `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`,
 Examples:
 
 ```text
-feat(art): execute app dex through PathClassLoader
-fix(darwin): preserve compressed references above PAGEZERO
-perf(gpu): avoid framebuffer copies during presentation
-docs(architecture): document the host graphics boundary
+feat(linux-abi): implement timerfd over kqueue
+fix(binder): release a dead node's references on BC_DEAD_BINDER_DONE
+perf(gpu): avoid a copy when presenting a composed frame
+docs(adr): record the composer as a guest HAL
 ```
 
 Generated outputs, downloaded AOSP trees, local Android system inputs, and

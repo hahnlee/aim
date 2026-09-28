@@ -1,9 +1,0 @@
-capability	reason	failure
-unqualified-hostname	DNS search-domain expansion is outside this capability	EAI_NONAME
-mdns-hostname	Host LAN/mDNS discovery is outside this capability	EAI_NONAME
-named-service	/etc/services and system service policy are outside this slice	EAI_SERVICE
-reverse-name	PTR/mDNS lookup is outside numeric reverse conversion	EAI_NONAME
-AI_V4MAPPED-AI_ALL	mixed-family synthesis is not part of the minimum numeric slice	EAI_BADFLAGS
-NI_NOFQDN-NI_NAMEREQD	non-numeric reverse policy is closed	EAI_BADFLAGS
-unknown-free-pointer	foreign allocation ownership is never dereferenced	ignored
-reset-concurrent-reader	reset is a quiescent lifecycle boundary	caller-contract

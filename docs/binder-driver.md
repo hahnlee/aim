@@ -128,7 +128,8 @@ A call and its reply cross four Mach hops: client → daemon → server, then
 server → daemon → client. The daemon adds two thread wakes: the client's
 daemon thread wakes the server's, and the other way back.
 
-Transport alone, measured in `experiments/p1/01-binder-transport` (M2 Pro):
+Transport alone, measured in `experiments/p1/01-binder-transport` (removed;
+see git history) on an M2 Pro:
 
 | path | p50 | p99 |
 | --- | --- | --- |

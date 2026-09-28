@@ -1,7 +1,0 @@
-field	offset	size
-d_ino	0	8
-d_off	8	8
-d_reclen	16	2
-d_type	18	1
-d_name	19	256
-sizeof	0	280

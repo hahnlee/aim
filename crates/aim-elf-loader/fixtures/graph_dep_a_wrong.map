@@ -1,4 +1,0 @@
-GRAPH_2 {
-  global: dep_a_value;
-  local: *;
-};

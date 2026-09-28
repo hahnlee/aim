@@ -1,6 +1,6 @@
 //! Read-only ext2/3/4 reader for APEX payloads: extent trees and legacy
 //! indirect block maps, fast and slow symlinks, linear (and htree) directories.
-//! Generalized from `tools/apex-ext2-extract` to any `ReadAt` source.
+//! Reads from any `ReadAt` source.
 use crate::source::ReadAt;
 use crate::tree::{Node, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, Tree};
 use crate::{Result, add, invalid, le16, le32, mul};

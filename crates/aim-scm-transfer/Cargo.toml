@@ -1,9 +1,0 @@
-[package]
-license.workspace = true
-name = "aim-scm-transfer"
-version = "0.1.0"
-edition = "2024"
-publish = false
-
-[dependencies]
-libc = "0.2"

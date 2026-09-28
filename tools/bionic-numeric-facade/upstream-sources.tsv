@@ -1,3 +1,0 @@
-path	size	sha256
-libc/bionic/stdlib_l.cpp	2176	7399803737fc7c004f4af3a12be5d77a3c52846b3a8519a172fa275cfea857a6
-libc/bionic/strtol.cpp	5865	f8e2f0418fae507a5985e737c5f6321e099d2f38939cea9b12172677c2c10b9d

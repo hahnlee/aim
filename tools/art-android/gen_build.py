@@ -120,7 +120,6 @@ class Build:
         self.gen = os.path.join(self.out, "gen")
         self.art = os.path.abspath(args.art)
         self.src_root = os.path.dirname(self.art)  # contains art/ and fetched trees
-        self.aosp = os.path.abspath(args.aosp)
         self.image = os.path.abspath(args.image)
         self.ndk = os.path.abspath(args.ndk)
         self.toolchain = os.path.join(self.ndk, "toolchains/llvm/prebuilt/darwin-x86_64")
@@ -128,9 +127,6 @@ class Build:
         self.modules = bp_query.load(self.src_root, BP_FILES)
 
     # -- helpers ------------------------------------------------------------
-
-    def aosp_path(self, *parts):
-        return os.path.join(self.aosp, *parts)
 
     def fetched(self, *parts):
         return os.path.join(self.src_root, *parts)
@@ -220,7 +216,6 @@ class Build:
 
     def include_dirs(self):
         art = self.art
-        a = self.aosp_path
         f = self.fetched
         return [
             os.path.join(self.gen, "include"),
@@ -246,23 +241,22 @@ class Build:
             os.path.join(art, "odrefresh/include"),
             os.path.join(art, "dt_fd_forward/export"),
             os.path.join(art, "tools/cpp-define-generator"),
-            a("external/vixl/src"),
-            a("external/lzma/C"),
-            a("external/zlib"),
-            a("external/fmtlib/include"),
-            a("external/tinyxml2"),
-            a("external/dlmalloc"),
-            a("system/libbase/include"),
-            a("system/logging/liblog/include"),
-            a("system/libziparchive/include"),
-            a("system/libziparchive/incfs_support/include"),
-            a("system/core/libcutils/include"),
-            a("system/unwinding/libunwindstack/include"),
-            a("libnativehelper/include"),
-            a("libnativehelper/include_jni"),
-            a("libnativehelper/header_only_include"),
-            a("libnativehelper/platform_header_only_include"),
-            a("external/googletest/googletest/include"),  # gtest_prod.h (FRIEND_TEST)
+            f("external/vixl/src"),
+            f("external/lzma/C"),
+            f("external/zlib"),
+            f("external/fmtlib/include"),
+            f("external/tinyxml2"),
+            f("external/dlmalloc"),
+            f("system/libbase/include"),
+            f("system/logging/liblog/include"),
+            f("system/libziparchive/include"),
+            f("system/libziparchive/incfs_support/include"),
+            f("system/core/libcutils/include"),
+            f("system/unwinding/libunwindstack/include"),
+            f("libnativehelper/include_jni"),
+            f("libnativehelper/header_only_include"),
+            f("libnativehelper/include_platform_header_only"),
+            f("external/googletest/googletest/include"),  # gtest_prod.h (FRIEND_TEST)
             f("external/lz4/lib"),
             f("external/cpu_features/include"),
             f("external/libcap/libcap/include"),
@@ -273,7 +267,7 @@ class Build:
             f("packages/modules/adb/libs/adbconnection/include"),
             f("bionic/libc/platform"),
             f("bionic/libc/async_safe/include"),
-            a("boringssl-full/src/include"),  # <openssl/sha.h> for dex2oat's build id
+            f("external/boringssl/src/include"),  # <openssl/sha.h> for dex2oat's build id
         ]
 
     def libcxx_config(self):
@@ -408,13 +402,13 @@ class Build:
         # Static third-party pieces that ART links whole.
         ziparchive = self.static_lib(
             "libziparchive",
-            [self.aosp_path("system/libziparchive", s) for s in
+            [self.fetched("system/libziparchive", s) for s in
              ("zip_archive.cc", "zip_archive_stream_entry.cc", "zip_cd_entry_map.cc",
               "zip_error.cpp", "zip_writer.cc")],
             {**external_flags,
              "cxx": external_flags["cxx"] + " -DZLIB_CONST -D_FILE_OFFSET_BITS=64"
                                             " -DINCFS_SUPPORT_DISABLED=1"})
-        tinyxml = self.static_lib("libtinyxml2", [self.aosp_path("external/tinyxml2/tinyxml2.cpp")],
+        tinyxml = self.static_lib("libtinyxml2", [self.fetched("external/tinyxml2/tinyxml2.cpp")],
                                   external_flags)
         libcap = self.static_lib(
             "libcap",
@@ -437,9 +431,9 @@ class Build:
         vixl = self.static_lib(
             "libvixl",
             # external/vixl/Android.bp: vixl-common + vixl-arm + vixl-arm64.
-            sorted(glob.glob(self.aosp_path("external/vixl/src/*.cc")) +
-                   glob.glob(self.aosp_path("external/vixl/src/aarch32/*.cc")) +
-                   glob.glob(self.aosp_path("external/vixl/src/aarch64/*.cc"))),
+            sorted(glob.glob(self.fetched("external/vixl/src/*.cc")) +
+                   glob.glob(self.fetched("external/vixl/src/aarch32/*.cc")) +
+                   glob.glob(self.fetched("external/vixl/src/aarch64/*.cc"))),
             {**external_flags,
              "cxx": external_flags["cxx"] +
                     " -DVIXL_GENERATE_SIMULATOR_INSTRUCTIONS_VALUE=0 -DVIXL_CODE_BUFFER_MALLOC"
@@ -507,7 +501,7 @@ class Build:
         # internals, so it must be rebuilt with the patched runtime.
         jvm_objs = self.objects(
             "libopenjdkjvm",
-            [self.aosp_path("art-openjdkjvm/art/openjdkjvm/OpenjdkJvm.cc")],
+            [os.path.join(self.art, "openjdkjvm/OpenjdkJvm.cc")],
             flags_for("libelffile"))  # art_defaults only: not BUILDING_LIBART
         self.shared_lib("libopenjdkjvm", jvm_objs, [],
                         [libart, artbase, libbase, liblog, libcxx_so] + libc)
@@ -545,7 +539,7 @@ class Build:
         """BoringSSL's libcrypto_static (external/boringssl/Android.bp): the
         bcm and crypto sources and their Linux assembly (each file is guarded
         by its architecture), without FIPS self tests."""
-        root = self.aosp_path("boringssl-full/src")
+        root = self.fetched("external/boringssl/src")
         with open(os.path.join(root, "gen/sources.json")) as handle:
             sources = json.load(handle)
         files = sources["bcm"]["srcs"] + sources["crypto"]["srcs"] + [
@@ -598,7 +592,6 @@ class Build:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--art", required=True, help="patched ART tree (<src>/art)")
-    parser.add_argument("--aosp", required=True, help="pinned AOSP sources (_aosp)")
     parser.add_argument("--image", required=True, help="extracted original image")
     parser.add_argument("--ndk", required=True)
     parser.add_argument("--out", required=True)

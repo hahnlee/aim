@@ -1,9 +1,0 @@
-{
-  global:
-    bionic_locale_fixture_basic;
-    bionic_locale_fixture_multibyte;
-    bionic_locale_fixture_collation;
-    bionic_locale_fixture_wctype;
-    bionic_locale_fixture_thread;
-  local: *;
-};

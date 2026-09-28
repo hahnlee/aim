@@ -1,6 +1,0 @@
-symbol	soname	version
-android_dlopen_ext	libdl.so	LIBC
-dlclose	libdl.so	LIBC
-dlerror	libdl.so	LIBC
-dlopen	libdl.so	LIBC
-dlsym	libdl.so	LIBC

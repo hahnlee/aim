@@ -1,4 +1,0 @@
-symbol	type	class	implementation
-fscanf	FUNC	B	AAPCS64-capture+provider-FILE-reader
-sscanf	FUNC	B	AAPCS64-capture+string-reader
-vsscanf	FUNC	B	Android-va_list32+string-reader

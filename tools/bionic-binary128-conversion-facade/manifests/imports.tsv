@@ -1,4 +1,0 @@
-symbol	type	class	implementation
-strtold	FUNC	B	AAPCS64-q0+AOSP-gdtoa-strtorQ
-strtold_l	FUNC	B	AAPCS64-q0+locale-ignored
-wcstold	FUNC	B	AAPCS64-q0+ICU76-wchar32

@@ -1,2 +1,0 @@
-request	name	direction	size	fd-kind	policy
-0x80045200	RNDGETENTCNT	read	4	random-device	fixed-32-for-libcxx-result-width

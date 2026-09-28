@@ -1,5 +1,0 @@
-path	size	sha256
-libc/Android.bp	88904	78a169fa5535205a29f5b0e8ea33496cc53394a61af7de7d2a51cf4e4bc699de
-libc/bionic/strtold.cpp	1764	1d9136287ec5f137411e1acf45712be1c1394dc728516c85d60b49d8ffafec1a
-libc/bionic/stdlib_l.cpp	2176	7399803737fc7c004f4af3a12be5d77a3c52846b3a8519a172fa275cfea857a6
-libc/upstream-openbsd/lib/libc/gdtoa/strtorQ.c	2948	a68df9bff3bfcd7f5e72ae1d0cd12331e4691ad5e22b52ad7f01a6904661fab6

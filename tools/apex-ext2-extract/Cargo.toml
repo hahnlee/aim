@@ -1,6 +1,0 @@
-[package]
-license.workspace = true
-name = "apex-ext2-extract"
-version = "0.1.0"
-edition = "2021"
-publish = false

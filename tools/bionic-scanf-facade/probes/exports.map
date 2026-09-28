@@ -1,4 +1,0 @@
-{
-  global: scanf_fixture;
-  local: *;
-};

@@ -4,13 +4,13 @@
 //! MAP_SHARED mappings, fork, dup and descriptor passing all work natively
 //! and across processes.
 //!
-//! Darwin refuses executable views of file-backed shared memory
-//! (experiments/p0/05). ART's JIT maps one memfd twice, RW and RX. When a
+//! Darwin refuses executable views of file-backed shared memory (ADR 0012,
+//! "Platform probes"). ART's JIT maps one memfd twice, RW and RX. When a
 //! memfd is first mapped (or mprotect'ed) executable in a process, its
 //! contents move to anonymous memory inherited as shared by fork children;
-//! every existing view is remapped onto it, and later mappings alias it
-//! with `mach_vm_remap`, which gives the dual views. From then on that
-//! process's reads and writes through the fd use the same memory.
+//! every existing view is remapped onto it, and later mappings alias it with
+//! `mach_vm_remap`, which gives the dual views. From then on that process's
+//! reads and writes through the fd use the same memory.
 //!
 //! Seals: SHRINK/GROW refuse ftruncate and fallocate; WRITE/FUTURE_WRITE
 //! refuse write and writable shared mappings. A write seal does not revoke

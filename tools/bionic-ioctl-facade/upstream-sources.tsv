@@ -1,3 +1,0 @@
-project	revision	path	size	sha256
-toolchain/llvm-project	97a699bf4812a18fb657c2779f5296a4ab2694d2	libcxx/src/random.cpp	4992	c288b5d9d4cdf253bd867a5572c7aca9a1c93398680b915518f4ae111d82bfed
-platform/bionic	361ba86734fb2821a6adcfdf775db8abd04e0de0	libc/bionic/ioctl.cpp	1648	a5f79b305fbfa598d9b4a79dcbd67f107dc397fba7dccd5401d68273e4bf70a0

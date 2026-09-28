@@ -1,12 +1,12 @@
 //! Blocking for guest threads: a per-thread parker that futex wakes, signals
 //! and deadlines unpark, plus the sleeps built on it.
 //!
-//! Darwin's timed waits (`__ulock_wait2`, Mach semaphores, psynch) fire up
-//! to 10% late: 2 ms on a 20 ms wait, 8 ms for semaphores. Only a kqueue
-//! EVFILT_TIMER with zero leeway is precise (+30 µs; experiments/p0/03). A
-//! deadline is therefore armed on one process-wide kqueue whose host thread
-//! unparks the waiter when it fires, and the wait itself stays untimed on
-//! `os_sync_wait_on_address`.
+//! Darwin's timed waits (`__ulock_wait2`, Mach semaphores, psynch) fire up to
+//! 10% late: 2 ms on a 20 ms wait, 8 ms for semaphores. Only a kqueue
+//! EVFILT_TIMER with zero leeway is precise (+30 µs; ADR 0012, "Platform
+//! probes"). A deadline is therefore armed on one process-wide kqueue whose
+//! host thread unparks the waiter when it fires, and the wait itself stays
+//! untimed on `os_sync_wait_on_address`.
 //!
 //! Guest clocks: CLOCK_MONOTONIC is the host CLOCK_MONOTONIC, as in
 //! `misc::clock_gettime`. Deadlines are host CLOCK_MONOTONIC nanoseconds.

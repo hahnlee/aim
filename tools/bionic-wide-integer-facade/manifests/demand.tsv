@@ -1,8 +1,0 @@
-symbol	kind	class	status	reason
-wcstod	FUNC	B	rejected	separate-AOSP-gdtoa-wide-float-owner
-wcstof	FUNC	B	rejected	separate-AOSP-gdtoa-wide-float-owner
-wcstol	FUNC	B	supported	AOSP-wchar32-integer
-wcstold	FUNC	B	rejected	Android-binary128-long-double-ABI
-wcstoll	FUNC	B	supported	AOSP-wchar32-integer
-wcstoul	FUNC	B	supported	AOSP-wchar32-integer
-wcstoull	FUNC	B	supported	AOSP-wchar32-integer

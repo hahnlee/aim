@@ -1,5 +1,0 @@
-SKIA_REVISION=bcb0f77c44783b1800ba37641ba7ecab04f05e07
-BACKEND=ganesh-metal
-TARGET=CAMetalLayer.drawable.texture
-CPU_READBACK=0
-FULL_FRAME_BLITS=0

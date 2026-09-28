@@ -5,9 +5,11 @@ ART: macOS arm64 cannot map anything below 4 GiB, while ART stores managed
 references as absolute 32-bit addresses. This document records
 
 - which of the aim patches (`patches/art/`, `patches/art-openjdkjvm/`,
-  `patches/openjdkjvmti/`) the new world still needs;
-- the new series, `patches/art-android/`, applied to the pinned ART sources
-  (`sources.lock`: `android-16.0.0_r1`, ART `ed6c006b`);
+  `patches/openjdkjvmti/`, all removed with the old stack; see git history)
+  the new world still needs;
+- the new series, `patches/art-android/`, applied to the ART sources of the
+  image's tag (`patches/art-android/sources.lock`: `android-16.0.0_r1`, ART
+  `ed6c006b`);
 - how that ART is built as android-arm64 ELF against the original image
   libraries (`tools/build-art-android.sh`);
 - how the boot image is regenerated for it.
@@ -28,9 +30,10 @@ patches).
 189 patches: 184 in `patches/art/`, 1 in `patches/art-openjdkjvm/`, 4 in
 `patches/openjdkjvmti/`. Four (a) patches are split: only their reference hunks
 are ported (0060, 0066, 0095; 0020 loses its Mach arena). Two more pieces of the
-(a) design live outside `patches/` in the old build and are ported too: the
+(a) design lived outside `patches/` in the old build and are ported too: the
 nterp rewrites in `crates/art-bootstrap/src/runtime_art/nterp.rs` and the
-`ImageWriter::IsInBootImage` rewrite in `runtime_art/dex2oat.rs`.
+`ImageWriter::IsInBootImage` rewrite in `runtime_art/dex2oat.rs` (removed;
+see git history).
 
 The new series is 8 patches, 4,717 lines as files (+1,544 / -348 changed
 lines, 320 hunks), against 9,771 lines for the 184 Darwin patches. It contains
@@ -105,8 +108,8 @@ The series reserves nothing itself; the old Darwin patch did that with
 
 ## The new series (`patches/art-android/`)
 
-Applied in `series` order with `patch -p1` to a copy of `_aosp/art`. The files
-of the patches are disjoint.
+Applied in `series` order with `patch -p1` to a copy of the fetched ART
+subtrees. The files of the patches are disjoint.
 
 | Patch | Lines | Changes | Purpose |
 | --- | --- | --- | --- |
@@ -291,10 +294,14 @@ tools/build-art-android.sh [--aosp DIR] [--image DIR] [--out DIR] [--ndk DIR] [-
   `libunwindstack` (ART APEX), `liblog`, `libz`, `heapprofd_client_api`
   (system), `libstatspull`, `libstatssocket` (statsd APEX). Every library links
   with `-z defs`, so all symbols resolve against the originals.
-- **Sources:** the pinned `_aosp/art` plus projects fetched at
-  `android-16.0.0_r1` (`patches/art-android/sources.lock`): `art/build`,
-  `art/odrefresh`, bionic platform headers, lz4, cpu_features, libcap, perfetto
-  heapprofd header, modules-utils, statsd headers. No Soong and no full AOSP
+- **Sources:** AOSP subtrees fetched at `android-16.0.0_r1`
+  (`patches/art-android/sources.lock`) into `_build/art-android/src`: the ART
+  subtrees the build reads (runtime, compiler, dex2oat, the libraries,
+  openjdkjvm, adbconnection, ...), libcore's `jvm.h`, libnativehelper,
+  libbase/liblog/libcutils/libunwindstack headers, libziparchive, vixl, lzma,
+  zlib, tinyxml2, dlmalloc, fmtlib, BoringSSL, bionic platform headers, lz4,
+  cpu_features, libcap, perfetto heapprofd header, modules-utils, statsd
+  headers, and apexd's `ApexInfoList.xsd`. No Soong and no full AOSP
   checkout: `tools/art-android/bp_query.py` evaluates ART's `Android.bp` for an
   arm64 device (defaults chains, `arch/target/codegen` groups; arm64 codegen
   implies arm as in `art/build/codegen.go`) and `tools/art-android/gen_build.py`
@@ -311,8 +318,8 @@ tools/build-art-android.sh [--aosp DIR] [--image DIR] [--out DIR] [--ndk DIR] [-
   `java.lang.String` links with a wrong vtable and `InitWithoutImage`
   aborts with "Class mismatch"), `-fno-strict-aliasing`, `-funwind-tables`,
   `-fno-short-enums` and `-fno-omit-frame-pointer`.
-- **BoringSSL:** `dex2oat64` links `libcrypto_static` built from the pinned
-  `_aosp/boringssl-full` (`gen/sources.json`: the bcm and crypto sources and
+- **BoringSSL:** `dex2oat64` links `libcrypto_static` built from the fetched
+  `external/boringssl/src` (`gen/sources.json`: the bcm and crypto sources and
   their Linux assembly, the flags of `external/boringssl/Android.bp`), as
   upstream does (#163). The platform `libcrypto.so` is not visible in the ART
   linker namespace.

@@ -1,5 +1,0 @@
-# FreeBSD main as observed 2026-08-16. All fetches use this immutable commit.
-FREEBSD_REVISION=087d722624c7293c2cbc5ab2bc1e20b6a68aae96
-FREEBSD_RAW_BASE=https://raw.githubusercontent.com/freebsd/freebsd-src
-SOURCE_FILE_COUNT=24
-SOURCE_BYTE_COUNT=377278

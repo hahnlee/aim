@@ -1,4 +1,0 @@
-symbol	kind	class	reason
-fputwc	FUNC	B	FILE-layout-wide-state
-getwc	FUNC	B	FILE-layout-wide-state
-ungetwc	FUNC	B	FILE-layout-wide-state

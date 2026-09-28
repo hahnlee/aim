@@ -1,7 +1,0 @@
-diff --git a/compiler/optimizing/optimizing_compiler.cc b/compiler/optimizing/optimizing_compiler.cc
---- a/compiler/optimizing/optimizing_compiler.cc
-+++ b/compiler/optimizing/optimizing_compiler.cc
-@@ -992,3 +992,0 @@
--    }
--  }
--#endif

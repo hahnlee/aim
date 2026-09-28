@@ -1,4 +1,0 @@
-symbol	kind	version	owner
-fputwc	FUNC	LIBC	wide-stdio-stream-state
-getwc	FUNC	LIBC	wide-stdio-stream-state
-ungetwc	FUNC	LIBC	wide-stdio-stream-state

@@ -1,5 +1,0 @@
-symbol	elf_type	owner	failure_channel
-free	FUNC	Darwin allocator	void
-malloc	FUNC	Darwin allocator	result seam until Bionic TLS errno
-posix_memalign	FUNC	Darwin allocator	direct Android return code
-realloc	FUNC	Darwin allocator	result seam until Bionic TLS errno

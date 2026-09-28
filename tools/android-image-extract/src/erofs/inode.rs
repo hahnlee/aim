@@ -31,7 +31,7 @@ impl Inode {
     }
 
     pub fn persist(&self, output: &std::fs::File) -> std::io::Result<()> {
-        use aim_fs_broker::inode_metadata::{AndroidInodeMetadata, write_new};
+        use crate::inode_metadata::{AndroidInodeMetadata, write_new};
         write_new(
             output,
             AndroidInodeMetadata {

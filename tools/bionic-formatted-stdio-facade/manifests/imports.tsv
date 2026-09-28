@@ -1,3 +1,0 @@
-symbol	type	class	owner
-fprintf	FUNC	B	formatted-stdio
-vfprintf	FUNC	B	formatted-stdio

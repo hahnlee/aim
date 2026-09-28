@@ -1,6 +1,0 @@
-{
-  global:
-    guest_libdl_record;
-  local:
-    *;
-};

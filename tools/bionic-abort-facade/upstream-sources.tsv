@@ -1,3 +1,0 @@
-path	size	sha256
-libc/bionic/abort.cpp	2379	ff5efc55b7e5b409c747b23b3a8c07cb515f21054a36e3bcef98df49b055011b
-libc/bionic/android_set_abort_message.cpp	3863	b894114a963a5da1fbcafc3b433349032e34926ddcaf86798a7606bb3000dfb2

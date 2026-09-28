@@ -1,4 +1,0 @@
-FD_BROKER_FIXTURE {
-  global: central_fd_dup_epoll_fixture;
-  local: *;
-};

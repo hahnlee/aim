@@ -1,2 +1,0 @@
-address	owner	arguments
-0x1213bc	libcxx-filesystem-copy_file_impl	out_fd,in_fd,nullptr,remaining_size

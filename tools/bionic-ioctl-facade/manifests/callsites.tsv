@@ -1,2 +1,0 @@
-address	caller	request	form
-0xdc74c	std::__ndk1::random_device::entropy() const	0x80045200	ioctl(fd,RNDGETENTCNT,int*)

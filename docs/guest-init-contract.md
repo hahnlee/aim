@@ -301,8 +301,8 @@ emulates the device.
   serial word, and have a timeout when one is given.
   - The layer must wait with `__ulock_wait2(UL_COMPARE_AND_WAIT_SHARED, ...)`.
   - The flavour must follow the **mapping** (`MAP_SHARED` file or shm), not
-    `FUTEX_PRIVATE_FLAG`. `experiments/p0/03-futex`: SHARED and non-shared
-    waiters are separate namespaces.
+    `FUTEX_PRIVATE_FLAG`. `experiments/p0/03-futex` (removed; see git
+    history): SHARED and non-shared waiters are separate namespaces.
   - `sys/futex.rs` picks the flavour from the flag today. That works for
     bionic's property waits, which use the shared op, but breaks for private
     ops on shared memory.

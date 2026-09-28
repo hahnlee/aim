@@ -1,3 +1,0 @@
-path	kind	accepted-flags	read-backend	android-mode	android-rdev
-/dev/random	random-device	O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_LARGEFILE	SecRandomCopyBytes	S_IFCHR|0666	makedev(1,8)
-/dev/urandom	random-device	O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_LARGEFILE	SecRandomCopyBytes	S_IFCHR|0666	makedev(1,9)

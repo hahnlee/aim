@@ -1,6 +1,0 @@
-path	size	sha256
-libc/Android.bp	88904	78a169fa5535205a29f5b0e8ea33496cc53394a61af7de7d2a51cf4e4bc699de
-libc/stdio/stdio.cpp	33494	5d4b80441905ffd02392f9b27036e96e3d7cec31212d9876d528c9d7a66a24ee
-libc/stdio/vfscanf.cpp	23961	c2f00338d8e8fab39a4c7ec5ec838fa9d006d0880927a7db4e40c77d4457fe14
-libc/stdio/scanf_common.h	4790	f959de5eae171f69026acf97ff976904518a7041803780659df72c196b05f0c3
-libc/upstream-openbsd/lib/libc/stdio/vsscanf.c	2228	9bce517cc45037a382523ec98d90edc88383903cc1a9021ec5db5992d34facc2

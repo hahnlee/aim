@@ -1,4 +1,0 @@
-symbol	type	class	status	reason
-strtold	FUNC	B	supported	Android-binary128-q0
-strtold_l	FUNC	B	supported	Android-binary128-q0-locale-ignored
-wcstold	FUNC	B	supported	Android-wchar32-to-binary128-q0

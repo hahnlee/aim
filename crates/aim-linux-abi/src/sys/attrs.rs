@@ -104,7 +104,7 @@ pub enum Host<'a> {
 const INODE: &std::ffi::CStr = c"dev.aim.android-inode";
 
 /// The owner and mode an image file had in the original image
-/// (`aim_fs_broker::inode_metadata`).
+/// (`tools/android-image-extract/src/inode_metadata.rs`).
 fn original(host: Host) -> Option<Attr> {
     let mut b = [0u8; 20];
     // SAFETY: host path or fd, local buffer.

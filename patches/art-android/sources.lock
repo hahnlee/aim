@@ -1,4 +1,6 @@
 # Sources for the android-arm64 ART build (tools/build-art-android.sh).
-# The ART sources themselves are the pinned _aosp/art (sources.lock ART_TAG);
-# these are the extra AOSP projects fetched at the same tag.
+# Every AOSP input is fetched at this tag, the image's own.
 ART_ANDROID_TAG=android-16.0.0_r1
+# Gitiles answers 503 for external/lzma at the tag's name, so that one
+# project is fetched by the same tag's object id.
+LZMA_REVISION=c30edc9a7147f4f4829ed9848e2479f3061d46bb

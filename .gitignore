@@ -8,13 +8,8 @@
 /_prebuilt
 .ninja_log
 .ninja_deps
-tools/__pycache__/
 __pycache__/
 *.pyc
-hs_err_pid*.log
-
-# Generated compiler dependency file
-/darwin_android_platform.d
 
 # Agent worktrees and their build/scratch dirs
 /_wt/

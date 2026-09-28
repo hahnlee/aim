@@ -12,6 +12,7 @@ pub mod erofs;
 pub mod ext4;
 pub mod gpt;
 pub mod image;
+pub mod inode_metadata;
 pub mod lp;
 pub mod lz4;
 pub mod source;

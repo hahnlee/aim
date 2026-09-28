@@ -1,8 +1,0 @@
-{
-  global:
-    phdr_fixture_run;
-    phdr_fixture_early_stop;
-    phdr_fixture_after_unload;
-  local:
-    *;
-};

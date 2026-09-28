@@ -1,7 +1,0 @@
-capability	boundary
-external-DNS	forbidden; DNS provider admits localhost and numeric nodes only
-Internet	forbidden; server binds loopback and tests reject non-loopback peers
-HTTP-scope	HTTP/1.0 request/response framing only, no TLS or redirects
-short-I/O	client deliberately caps every send/recv call at three bytes
-socket-close	standalone socket token owner, not the shared runtime FD broker
-teardown	DNS reset only after all clients stop; server listener/workers joined first

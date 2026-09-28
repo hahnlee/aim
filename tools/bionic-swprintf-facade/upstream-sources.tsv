@@ -1,4 +1,0 @@
-path	size	sha256
-libc/upstream-openbsd/lib/libc/gdtoa/gdtoa.c	18497	b81ab58b2743dea24dee7962f25c5a02077f24630942e69041c81bac6173fa2c
-libc/stdio/stdio.cpp	33494	5d4b80441905ffd02392f9b27036e96e3d7cec31212d9876d528c9d7a66a24ee
-libc/upstream-openbsd/lib/libc/stdio/vswprintf.c	2865	8c915901b11adb7ad7d5e9c02dae09061a370b2a81bff41478e4d39c4c014b69

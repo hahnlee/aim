@@ -11,8 +11,8 @@
 //! in the host attribute `dev.aim.xattr.security.selinux`, the name the
 //! syscall layer maps the guest's `security.selinux` to. Labels are written
 //! before the host mode is made read-only, and once per hard-linked inode.
+use crate::inode_metadata::{AndroidInodeMetadata, write_new};
 use crate::{Result, invalid};
-use aim_fs_broker::inode_metadata::{AndroidInodeMetadata, write_new};
 use std::collections::HashMap;
 use std::ffi::{CString, OsStr, c_char, c_int, c_void};
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
@@ -456,10 +456,9 @@ pub(crate) mod tests {
             (mode("bin"), mode("bin/toybox"), mode("mnt")),
             (0o751, 0o755, 0o555)
         );
-        let original =
-            aim_fs_broker::inode_metadata::read(&File::open(out.join("bin/toybox")).unwrap())
-                .unwrap()
-                .unwrap();
+        let original = crate::inode_metadata::read(&File::open(out.join("bin/toybox")).unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!((original.mode, original.gid), (S_IFREG | 0o4755, 2000));
         fs::set_permissions(out.join("mnt"), Permissions::from_mode(0o700)).unwrap();
         fs::remove_dir_all(&out).unwrap();
@@ -557,10 +556,9 @@ pub(crate) mod tests {
         assert_eq!(label("sh"), Some(b"u:object_r:t3:s0\0".to_vec()));
         assert_eq!(label("plain"), None);
         // The inode attribute is still written alongside the label.
-        let original =
-            aim_fs_broker::inode_metadata::read(&File::open(out.join("bin/ls")).unwrap())
-                .unwrap()
-                .unwrap();
+        let original = crate::inode_metadata::read(&File::open(out.join("bin/ls")).unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(original.mode, S_IFREG | 0o444);
         for dir in ["", "bin"] {
             fs::set_permissions(out.join(dir), Permissions::from_mode(0o700)).unwrap();

@@ -1,4 +1,0 @@
-{
-  global: AimApkDirectGrandchildValue;
-  local: *;
-};

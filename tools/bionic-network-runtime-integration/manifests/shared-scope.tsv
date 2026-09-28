@@ -1,8 +1,0 @@
-area	files	minimum-change
-fd-broker	tools/bionic-central-fd-broker/include+src+probe	owner-checked typed socket dispatch and sanitizer race coverage landed in ABI v3
-socket-provider	tools/bionic-socket-broker-adapter/include+src+probe	central publish dispatch marker-safe close and DNS lifecycle wrapper
-provider-namespace	tools/bionic-provider-namespace/generator+enum+builtins	socket and DNS owners with close assigned to central broker
-provider-closure	tools/build-bionic-runtime-provider-closure.sh	broker socket DNS adapters linked without dyld fallback
-runtime-owner	compat/darwin_runtime_adapters.cc	process network owner acquired after filesystem and released before it
-runtime-fixture	probes/runtime_entry_probe.cc+art-bootstrap	bounded loopback server JavaVMExt JNI invocation and teardown verification
-runtime-docs	docs/art-elf-native-loader-integration.md	exact routing lifecycle and bounded network policy

@@ -9,10 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "aim-abi"
-version = "0.1.0"
-
-[[package]]
 name = "aim-android-image"
 version = "0.1.0"
 dependencies = [
@@ -23,13 +19,6 @@ dependencies = [
 [[package]]
 name = "aim-android-init"
 version = "0.1.0"
-
-[[package]]
-name = "aim-binder-device"
-version = "0.1.0"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "aim-binder-driver"
@@ -44,47 +33,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aim-binder-process"
-version = "0.1.0"
-dependencies = [
- "aim-binder-device",
- "aim-engine-sys",
- "aim-profile",
- "libc",
-]
-
-[[package]]
-name = "aim-build-contract"
-version = "0.1.0"
-
-[[package]]
-name = "aim-elf-loader"
-version = "0.1.0"
-dependencies = [
- "aim-fs-broker",
- "sha2",
-]
-
-[[package]]
-name = "aim-engine"
-version = "0.1.0"
-dependencies = [
- "aim-engine-sys",
- "aim-runtime",
-]
-
-[[package]]
-name = "aim-engine-sys"
-version = "0.1.0"
-dependencies = [
- "aim-abi",
-]
-
-[[package]]
-name = "aim-fs-broker"
-version = "0.1.0"
-
-[[package]]
 name = "aim-guest-init"
 version = "0.1.0"
 dependencies = [
@@ -92,21 +40,6 @@ dependencies = [
  "aim-android-init",
  "aim-binder-host",
  "libc",
-]
-
-[[package]]
-name = "aim-host"
-version = "0.1.0"
-dependencies = [
- "aim-abi",
- "aim-binder-device",
- "aim-binder-process",
- "aim-engine",
- "aim-engine-sys",
- "aim-profile",
- "aim-runtime",
- "libc",
- "sha2",
 ]
 
 [[package]]
@@ -198,313 +131,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "aim-looper-transport"
-version = "0.1.0"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "aim-native-artifact"
-version = "0.1.0"
-dependencies = [
- "sha2",
-]
-
-[[package]]
-name = "aim-native-inventory"
-version = "0.1.0"
-
-[[package]]
-name = "aim-prefix"
-version = "0.1.0"
-
-[[package]]
-name = "aim-profile"
-version = "0.1.0"
-dependencies = [
- "aim-binder-device",
- "aim-engine-sys",
- "aim-scm-transfer",
- "libc",
-]
-
-[[package]]
-name = "aim-runtime"
-version = "0.1.0"
-dependencies = [
- "aim-abi",
- "aim-engine-sys",
- "aim-native-inventory",
- "aim-profile",
- "bionic-fs-facade",
- "jni-sys",
- "libc",
-]
-
-[[package]]
-name = "aim-rust-demangle"
-version = "0.1.0"
-dependencies = [
- "rustc-demangle",
-]
-
-[[package]]
-name = "aim-scm-transfer"
-version = "0.1.0"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "aim-xtask"
-version = "0.1.0"
-dependencies = [
- "aim-build-contract",
- "sha2",
-]
-
-[[package]]
-name = "android-aaudio-provider"
-version = "0.1.0"
-
-[[package]]
-name = "android-apk-native-extract"
-version = "0.1.0"
-dependencies = [
- "flate2",
-]
-
-[[package]]
-name = "android-arm64-pcs-proof"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "android-arm64-so-inspect"
-version = "0.1.0"
-
-[[package]]
-name = "android-binder-ndk-provider"
-version = "0.1.0"
-
-[[package]]
-name = "android-bionic-pthread-provider-runner"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "android-dl-iterate-phdr-runner"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "android-dso-namespace"
-version = "0.1.0"
-
-[[package]]
 name = "android-image-extract"
 version = "0.1.0"
 dependencies = [
- "aim-fs-broker",
  "crc32fast",
  "flate2",
  "sha2",
-]
-
-[[package]]
-name = "android-jni-proxy"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "apex-ext2-extract"
-version = "0.1.0"
-
-[[package]]
-name = "art-bootstrap"
-version = "0.1.0"
-dependencies = [
- "aim-build-contract",
- "aim-native-inventory",
- "sha2",
-]
-
-[[package]]
-name = "bionic-abort-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-binary128-conversion-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-dso-lifecycle-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-errno-tls"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-fdsan-owner"
-version = "0.1.0"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "bionic-float-conversion-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-formatted-stdio-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
- "bionic-stdio-facade",
-]
-
-[[package]]
-name = "bionic-fs-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
- "aim-fs-broker",
- "aim-prefix",
- "libc",
-]
-
-[[package]]
-name = "bionic-locale-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-numeric-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-process-state-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-runtime-provider-closure"
-version = "0.1.0"
-dependencies = [
- "android-aaudio-provider",
- "android-binder-ndk-provider",
- "android-dso-namespace",
- "bionic-dso-lifecycle-facade",
- "bionic-fdsan-owner",
- "bionic-fs-facade",
- "bionic-process-state-facade",
- "bionic-stdio-facade",
- "bionic-vm-facade",
-]
-
-[[package]]
-name = "bionic-scanf-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
- "bionic-stdio-facade",
-]
-
-[[package]]
-name = "bionic-stdio-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-stdio-wide-integration"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
- "bionic-fs-facade",
- "bionic-stdio-facade",
-]
-
-[[package]]
-name = "bionic-strerror-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-swprintf-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-time-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-vm-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-wide-float-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-wide-integer-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
-]
-
-[[package]]
-name = "bionic-wide-stdio-facade"
-version = "0.1.0"
-dependencies = [
- "aim-elf-loader",
 ]
 
 [[package]]
@@ -581,12 +213,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jni-sys"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8eaf4bc02d17cbdd7ff4c7438cafcdf7fb9a4613313ad11b4f8fefe7d3fa0130"
-
-[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -601,12 +227,6 @@ dependencies = [
  "adler2",
  "simd-adler32",
 ]
-
-[[package]]
-name = "rustc-demangle"
-version = "0.1.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
 
 [[package]]
 name = "sha2"
@@ -624,14 +244,6 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
-
-[[package]]
-name = "super-i18n-apex-extract"
-version = "0.1.0"
-dependencies = [
- "aim-fs-broker",
- "android-image-extract",
-]
 
 [[package]]
 name = "typenum"

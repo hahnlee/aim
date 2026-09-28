@@ -1,9 +1,0 @@
-property	requirement
-namespace-owner	bind callbacks per live ClassLoader namespace rather than process OnceLock
-open-sibling	discover load and initialize one exact sibling graph inside existing namespace
-handle-cache	generation-safe namespace-owned refcounted handle token
-lookup-lease	pin graph from lookup admission through returned-address use boundary
-close-drain	last close rejects admission drains leases runs fini then unmaps
-recursive-init	publish pending entry before constructors and permit same-thread recursion
-failed-init	rollback private graph and retain deterministic thread-local error only
-teardown	ClassLoader collection closes dynamic children before parent provider namespace
