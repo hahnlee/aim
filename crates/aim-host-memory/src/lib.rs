@@ -4,13 +4,20 @@
 //! The level is the kernel's own (`kern.memorystatus_vm_pressure_level`,
 //! what `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` reports), read at each
 //! [`FN_READ`], with the free and file-backed memory of
-//! `host_statistics64`. A dispatch memory-pressure source only wakes the
-//! watchers: each level change writes a byte into every [`FN_WATCH`] pipe,
-//! which lmkd polls. Host code never calls into the guest.
+//! `host_statistics64`. A host thread watches the level and writes a byte
+//! into every [`FN_WATCH`] pipe when it changes; lmkd polls the pipe. Host
+//! code never calls into the guest.
+//!
+//! The thread polls the level ([`POLL`]) rather than use a dispatch
+//! memory-pressure source: the kernel notifies only a few processes of a
+//! change, the largest first, so a small daemon's source never fires
+//! (measured under `memory_pressure -l warn`: the level read 2 for a
+//! minute, and neither lmkd nor a plain host process got an event).
 
-use std::ffi::{CStr, c_void};
+use std::ffi::CStr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Mutex, Once};
+use std::time::Duration;
 
 use aim_hostcall::memory::{FN_READ, FN_WATCH, Memory, VERSION, level};
 use aim_hostcall::{HostModule, args_mut, errno, module};
@@ -37,6 +44,9 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
     }
 }
 
+/// How often the watcher thread reads the level.
+pub const POLL: Duration = Duration::from_millis(250);
+
 fn sysctl<T: Default>(name: &CStr) -> Option<T> {
     let mut value = T::default();
     let mut size = size_of::<T>();
@@ -53,13 +63,18 @@ fn sysctl<T: Default>(name: &CStr) -> Option<T> {
     (r == 0 && size == size_of::<T>()).then_some(value)
 }
 
-/// The Mac's pressure level and memory now.
-pub fn read() -> Memory {
-    let level = match sysctl::<i32>(c"kern.memorystatus_vm_pressure_level") {
+/// One of [`level`].
+fn pressure_level() -> u32 {
+    match sysctl::<i32>(c"kern.memorystatus_vm_pressure_level") {
         Some(2) => level::WARN,
         Some(4) => level::CRITICAL,
         _ => level::NORMAL,
-    };
+    }
+}
+
+/// The Mac's pressure level and memory now.
+pub fn read() -> Memory {
+    let level = pressure_level();
     // SAFETY: an all-zero vm_statistics64 is valid.
     let mut vm: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
     let mut count = libc::HOST_VM_INFO64_COUNT;
@@ -119,8 +134,12 @@ fn watch() -> i64 {
     // SAFETY: as above.
     unsafe { libc::fcntl(write_end.as_raw_fd(), F_SETNOSIGPIPE, 1) };
     WATCHERS.lock().unwrap().push(write_end);
-    static SOURCE: Once = Once::new();
-    SOURCE.call_once(start_source);
+    static WATCHER: Once = Once::new();
+    WATCHER.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("aim-memory-pressure".into())
+            .spawn(watch_level);
+    });
     // The guest owns the read end from here on.
     std::os::fd::IntoRawFd::into_raw_fd(read_end) as i64
 }
@@ -135,48 +154,23 @@ pub fn notify() {
     });
 }
 
-const DISPATCH_MEMORYPRESSURE_NORMAL: usize = 0x01;
-const DISPATCH_MEMORYPRESSURE_WARN: usize = 0x02;
-const DISPATCH_MEMORYPRESSURE_CRITICAL: usize = 0x04;
-const QOS_CLASS_UTILITY: isize = 0x11;
-
-unsafe extern "C" {
-    static _dispatch_source_type_memorypressure: c_void;
-    fn dispatch_get_global_queue(identifier: isize, flags: usize) -> *const c_void;
-    fn dispatch_source_create(
-        ty: *const c_void,
-        handle: usize,
-        mask: usize,
-        q: *const c_void,
-    ) -> *mut c_void;
-    fn dispatch_source_set_event_handler_f(
-        source: *mut c_void,
-        handler: extern "C" fn(*mut c_void),
-    );
-    fn dispatch_resume(object: *mut c_void);
-}
-
-extern "C" fn pressure_changed(_: *mut c_void) {
-    notify();
-}
-
-fn start_source() {
-    // SAFETY: the source lives for the process; its handler only writes to
-    // our pipes.
+/// The watcher thread: wake the watchers on each change of the level.
+fn watch_level() {
+    // SAFETY: plain call on this thread, which takes no guest signals.
     unsafe {
-        let source = dispatch_source_create(
-            &raw const _dispatch_source_type_memorypressure,
-            0,
-            DISPATCH_MEMORYPRESSURE_NORMAL
-                | DISPATCH_MEMORYPRESSURE_WARN
-                | DISPATCH_MEMORYPRESSURE_CRITICAL,
-            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0),
-        );
-        if source.is_null() {
-            return;
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+        let mut all: libc::sigset_t = 0;
+        libc::sigfillset(&mut all);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &all, std::ptr::null_mut());
+    }
+    let mut last = pressure_level();
+    loop {
+        std::thread::sleep(POLL);
+        let now = pressure_level();
+        if now != last {
+            last = now;
+            notify();
         }
-        dispatch_source_set_event_handler_f(source, pressure_changed);
-        dispatch_resume(source);
     }
 }
 
@@ -225,7 +219,7 @@ mod tests {
             unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) }
         };
         assert_eq!(pending(&a), -1, "nothing before a change");
-        // What the dispatch source's handler does on a change.
+        // What the watcher thread does on a change.
         notify();
         assert_eq!(pending(&a), 1);
         assert_eq!(pending(&b), 1);
