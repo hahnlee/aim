@@ -1,0 +1,29 @@
+[package]
+name = "camera"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "android.hardware.camera.provider ICameraProvider V1 service over AVFoundation (host module `camera`)"
+
+[[bin]]
+name = "camera-provider-service"
+path = "src/main.rs"
+
+# Installed as /vendor/bin/hw/<binary> (Cargo target names cannot hold dots).
+[package.metadata.vendor-hal]
+binary = "android.hardware.camera.provider-service.darwin"
+
+[dependencies]
+android_hardware_camera_common = { path = "../aidl/android.hardware.camera.common" }
+android_hardware_camera_device = { path = "../aidl/android.hardware.camera.device" }
+android_hardware_camera_metadata = { path = "../aidl/android.hardware.camera.metadata" }
+android_hardware_camera_provider = { path = "../aidl/android.hardware.camera.provider" }
+android_hardware_common = { path = "../aidl/android.hardware.common" }
+android_hardware_common_fmq = { path = "../aidl/android.hardware.common.fmq" }
+android_hardware_graphics_common = { path = "../aidl/android.hardware.graphics.common" }
+binder = { path = "../binder" }
+darwin-gralloc = { path = "../graphics/gralloc" }
+darwin-hostcall = { path = "../../crates/darwin-hostcall" }
+libc = "0.2"
+log = "0.4"

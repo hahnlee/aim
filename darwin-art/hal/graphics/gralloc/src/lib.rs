@@ -103,11 +103,18 @@ impl Descriptor {
     /// The layout of this descriptor, or why it cannot be allocated.
     pub fn layout(&self) -> Result<Layout, Unsupported> {
         let d = self;
+        let format = resolve_format(d.format, d.usage);
+        // A BLOB's width is its size in bytes (camera JPEGs, codec data).
+        let max_width = if format == format::BLOB {
+            i32::MAX
+        } else {
+            MAX_DIMENSION
+        };
         if d.width <= 0
             || d.height <= 0
             || d.layer_count <= 0
             || d.reserved_size < 0
-            || d.width > MAX_DIMENSION
+            || d.width > max_width
             || d.height > MAX_DIMENSION
         {
             return Err(Unsupported::BadDescriptor);
@@ -116,7 +123,6 @@ impl Descriptor {
         if d.usage & unsupported != 0 {
             return Err(Unsupported::Unsupported);
         }
-        let format = resolve_format(d.format, d.usage);
         if format == format::BLOB && d.height != 1 {
             return Err(Unsupported::BadDescriptor);
         }
@@ -191,6 +197,12 @@ mod tests {
         );
         assert_eq!(
             desc(format::BLOB, 4096, 2, 0x33).layout(),
+            Err(Unsupported::BadDescriptor)
+        );
+        // A 3 MB JPEG buffer.
+        assert!(desc(format::BLOB, 3 << 20, 1, 0x33).layout().is_ok());
+        assert_eq!(
+            desc(format::RGBA_8888, MAX_DIMENSION + 1, 1, 0x33).layout(),
             Err(Unsupported::BadDescriptor)
         );
         let mut layers = desc(format::RGBA_8888, 64, 64, gpu);

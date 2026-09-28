@@ -15,6 +15,7 @@ members = [
     "binder",
     "binder-ndk-sys",
     "bluetooth",
+    "camera",
     "fmq",
     "graphics/allocator",
     "graphics/composer",
@@ -26,6 +27,7 @@ members = [
     "sensors",
     "thermal",
     "tests/bluetooth-hci-client",
+    "tests/camera-client",
 ]
 resolver = "2"
 

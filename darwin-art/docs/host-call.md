@@ -103,6 +103,7 @@ first.
 | 6 | location | 1 | `FN_START`, `FN_STOP`; `FN_READ`: fill `location::Fix` ([vendor-hals.md](vendor-hals.md)) |
 | 7 | audio | 1 | `FN_DEVICES`; `FN_OPEN` on a ring memfd, `FN_START`, `FN_STOP`, `FN_CLOSE` ([audio.md](audio.md)) |
 | 8 | bluetooth | 1 | `FN_OPEN` (returns the wake fd), `FN_SEND`, `FN_RECV`, `FN_CLOSE`: HCI packets to and from the virtual controller ([bluetooth.md](bluetooth.md)) |
+| 9 | camera | 1 | `FN_DEVICES`, `FN_OPEN` (a capture session), `FN_FRAME` (the next frame into the guest's buffers), `FN_CLOSE` ([camera.md](camera.md)) |
 
 ## Vendor HAL build pipeline
 
@@ -150,8 +151,9 @@ The interfaces P4 and P5 need build: power V6 (imports common.fmq V1),
 graphics composer3 V4, allocator V2 and common V6 (with drm.common V1),
 audio.core V3 (with audio.common V4, audio.effect V3, audio.core.sounddose
 V3, media.audio.common.types V4 and media.audio.eraser.types V1), sensors
-V3, bluetooth V1, health V4, thermal V3 and gnss V2, over common V2 and
-common.fmq V1.
+V3, bluetooth V1, health V4, thermal V3, gnss V2 and camera.provider V1
+(with camera.device, camera.common and camera.metadata V1), over common V2
+and common.fmq V1.
 
 Tools: the Android NDK (clang, sysroot and libclang for bindgen), SDK
 build-tools 36.0.0 (`aidl`), and `rustup target add aarch64-linux-android`.
@@ -185,7 +187,8 @@ instance is undeclared and the original services take their no-HAL paths:
 - replaced by ours: audio, whose HIDL audio-effect declaration in
   `manifest.xml` also goes ([audio.md](audio.md));
 - replaced by ours: Bluetooth ([bluetooth.md](bluetooth.md));
-- replaced by ours later: the composer and camera;
+- replaced by ours: the camera providers ([camera.md](camera.md));
+- replaced by ours later: the composer;
 - hardware the device does not have: radio, Wi-Fi (with hostapd and the
   supplicant), fingerprint, USB, lights, storage health, the goldfish
   Codec2 store, and the vendor APEXes contexthub, rebootescrow, Thread, UWB

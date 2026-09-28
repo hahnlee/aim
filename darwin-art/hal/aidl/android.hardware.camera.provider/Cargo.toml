@@ -1,0 +1,19 @@
+[package]
+name = "android_hardware_camera_provider"
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "android.hardware.camera.provider V1, Rust backend, generated from the frozen AIDL API"
+# The binder macros expand here, so this crate needs the vendor cfgs too.
+build = "../../binder/build.rs"
+
+[lib]
+path = "../../../_build/vendor-hals/aidl/android.hardware.camera.provider-V1/lib.rs"
+
+[dependencies]
+android_hardware_camera_common = { path = "../android.hardware.camera.common" }
+android_hardware_camera_device = { path = "../android.hardware.camera.device" }
+async-trait = "0.1"
+binder = { path = "../../binder" }
+static_assertions = "1"

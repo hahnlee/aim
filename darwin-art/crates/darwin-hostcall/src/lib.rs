@@ -76,6 +76,9 @@ pub mod module {
     /// A virtual HCI controller over CoreBluetooth (the Bluetooth HAL's
     /// host side).
     pub const BLUETOOTH: u32 = 8;
+    /// The Mac's cameras over AVFoundation (the camera provider HAL's host
+    /// side).
+    pub const CAMERA: u32 = 9;
 }
 
 /// Module [`module::HEALTH`]: the host's battery, for
@@ -642,6 +645,196 @@ pub mod bluetooth {
     const _: () = assert!(core::mem::size_of::<Packet>() == 24);
 }
 
+/// Module [`module::CAMERA`]: the Mac's cameras over AVFoundation, for
+/// `android.hardware.camera.provider` (`docs/camera.md`).
+///
+/// A session captures BGRA frames from one camera (or a test pattern, when
+/// macOS has not granted camera access) on a host thread and keeps the
+/// latest one. [`FN_FRAME`] waits for a frame newer than the guest last saw
+/// and converts it into the guest's buffers: scaled with a centered crop to
+/// each output's size, and packed as RGBA, NV12/NV21 or JPEG.
+pub mod camera {
+    pub const VERSION: u32 = 1;
+
+    /// Describe the cameras and the camera permission ([`Devices`]).
+    /// Returns 0. Asks nothing of the user.
+    pub const FN_DEVICES: u32 = 1;
+    /// Start capturing from a camera ([`Open`]). Returns 0, `-ENODEV` for
+    /// no such camera, or `-EBUSY` when it already has a session. Without
+    /// camera access the session streams a test pattern; the first open
+    /// asks macOS for access (the TCC prompt).
+    pub const FN_OPEN: u32 = 2;
+    /// Wait for a frame newer than [`Frame::after`] and write it into each
+    /// output ([`Frame`]). Returns 0, `-EAGAIN` when no frame came before
+    /// the timeout, or `-EINVAL` for a bad output.
+    pub const FN_FRAME: u32 = 3;
+    /// Stop a session ([`Session`]). Returns 0 or `-EINVAL`.
+    pub const FN_CLOSE: u32 = 4;
+
+    pub const MAX_DEVICES: usize = 4;
+    pub const MAX_SIZES: usize = 24;
+    pub const MAX_OUTPUTS: usize = 4;
+
+    /// Where a camera faces.
+    pub mod facing {
+        /// The Mac's built-in camera, which faces the user.
+        pub const FRONT: u32 = 0;
+        pub const BACK: u32 = 1;
+        /// An external or Continuity camera.
+        pub const EXTERNAL: u32 = 2;
+    }
+
+    /// Camera access, as `AVAuthorizationStatus`.
+    pub mod access {
+        pub const NOT_DETERMINED: u32 = 0;
+        pub const RESTRICTED: u32 = 1;
+        pub const DENIED: u32 = 2;
+        pub const AUTHORIZED: u32 = 3;
+    }
+
+    /// What a session streams.
+    pub mod source {
+        pub const CAMERA: u32 = 1;
+        pub const TEST_PATTERN: u32 = 2;
+    }
+
+    /// Output formats: `android.hardware.graphics.common.PixelFormat`
+    /// values.
+    pub mod format {
+        pub const RGBA_8888: i32 = 0x1;
+        pub const RGBX_8888: i32 = 0x2;
+        /// NV21: Y plane, then interleaved Cr Cb.
+        pub const YCRCB_420_SP: i32 = 0x11;
+        /// JPEG bytes from offset 0.
+        pub const BLOB: i32 = 0x21;
+        /// NV12: Y plane, then interleaved Cb Cr.
+        pub const YCBCR_420_888: i32 = 0x23;
+    }
+
+    /// A capture size of a camera's formats.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Size {
+        pub width: u32,
+        pub height: u32,
+        /// The highest frame rate of the size, frames per second.
+        pub max_fps: u32,
+        pub reserved: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug)]
+    pub struct Device {
+        /// AVFoundation's `uniqueID`, UTF-8, NUL-padded.
+        pub id: [u8; 64],
+        /// `localizedName`, UTF-8, NUL-padded.
+        pub name: [u8; 64],
+        /// One of [`facing`].
+        pub facing: u32,
+        pub size_count: u32,
+        /// Landscape sizes, largest first.
+        pub sizes: [Size; MAX_SIZES],
+    }
+
+    impl Default for Device {
+        fn default() -> Self {
+            Self {
+                id: [0; 64],
+                name: [0; 64],
+                facing: 0,
+                size_count: 0,
+                sizes: [Size::default(); MAX_SIZES],
+            }
+        }
+    }
+
+    /// Argument block of [`FN_DEVICES`] (output only). Devices are in a
+    /// stable order: built-in cameras first, then by `uniqueID`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Devices {
+        pub count: u32,
+        /// One of [`access`].
+        pub access: u32,
+        pub devices: [Device; MAX_DEVICES],
+    }
+
+    /// Argument block of [`FN_OPEN`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Open {
+        /// Index into [`Devices::devices`].
+        pub device: u32,
+        /// The largest output size; the camera captures at least this.
+        pub width: u32,
+        pub height: u32,
+        pub fps: u32,
+        /// Out: one of [`source`].
+        pub source: u32,
+        pub reserved: u32,
+        /// Out: the session handle.
+        pub session: u64,
+    }
+
+    /// One destination of [`FN_FRAME`]: a mapped guest buffer.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Output {
+        /// One of [`format`].
+        pub format: i32,
+        pub width: u32,
+        pub height: u32,
+        /// Row pitch of the first plane, bytes.
+        pub stride: u32,
+        /// NV12/NV21: offset and row pitch of the chroma plane.
+        pub chroma_offset: u64,
+        pub chroma_stride: u32,
+        /// JPEG quality, 1..=100.
+        pub jpeg_quality: u32,
+        /// JPEG: clockwise rotation (0, 90, 180, 270) recorded as the EXIF
+        /// orientation.
+        pub jpeg_orientation: u32,
+        pub reserved: u32,
+        pub address: u64,
+        pub length: u64,
+        /// Out: bytes written (the JPEG's size; the data size otherwise).
+        pub written: u64,
+    }
+
+    /// Argument block of [`FN_FRAME`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Frame {
+        pub session: u64,
+        /// Wait for a frame whose sequence number is above this.
+        pub after: u64,
+        pub timeout_ms: u32,
+        pub output_count: u32,
+        /// Guest array of `output_count` [`Output`]s.
+        pub outputs: u64,
+        /// Out: the frame's sequence number.
+        pub seq: u64,
+        /// Out: the start of the frame's exposure, on the guest's
+        /// CLOCK_BOOTTIME (the host's CLOCK_MONOTONIC), nanoseconds.
+        pub timestamp_ns: i64,
+    }
+
+    /// Argument block of [`FN_CLOSE`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Session {
+        pub session: u64,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Size>() == 16);
+    const _: () = assert!(core::mem::size_of::<Device>() == 520);
+    const _: () = assert!(core::mem::size_of::<Devices>() == 2088);
+    const _: () = assert!(core::mem::size_of::<Open>() == 32);
+    const _: () = assert!(core::mem::size_of::<Output>() == 64);
+    const _: () = assert!(core::mem::size_of::<Frame>() == 48);
+    const _: () = assert!(core::mem::size_of::<Session>() == 8);
+}
+
 /// A host module, as linked into the syscall layer's registry.
 pub struct HostModule {
     pub id: u32,
@@ -899,6 +1092,34 @@ pub mod guest {
     /// stream.
     pub fn audio_stream(func: u32, stream: u64) -> Result<(), Errno> {
         call_with(module::AUDIO, func, &mut audio::Stream { stream }).map(drop)
+    }
+
+    /// The host's cameras and the camera permission.
+    pub fn camera_devices() -> Result<camera::Devices, Errno> {
+        let mut d = camera::Devices::default();
+        call_with(module::CAMERA, camera::FN_DEVICES, &mut d)?;
+        Ok(d)
+    }
+
+    /// Start a camera session.
+    pub fn camera_open(args: &mut camera::Open) -> Result<u64, Errno> {
+        call_with(module::CAMERA, camera::FN_OPEN, args)?;
+        Ok(args.session)
+    }
+
+    /// Wait for the next frame and write it into `args.outputs`.
+    pub fn camera_frame(args: &mut camera::Frame) -> Result<(), Errno> {
+        call_with(module::CAMERA, camera::FN_FRAME, args).map(drop)
+    }
+
+    /// Stop a camera session.
+    pub fn camera_close(session: u64) -> Result<(), Errno> {
+        call_with(
+            module::CAMERA,
+            camera::FN_CLOSE,
+            &mut camera::Session { session },
+        )
+        .map(drop)
     }
 
     /// Call forwarded entry point `id` with its register image.

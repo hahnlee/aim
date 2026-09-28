@@ -1,0 +1,15 @@
+[package]
+name = "camera-client"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Test client of the camera HAL through the original cameraserver: an NDK Camera2 (ACameraManager) capture into AImageReaders (docs/camera.md); not in the image"
+
+# Installed into _build/vendor-hals/test; run from /data/local/tmp.
+[package.metadata.vendor-hal]
+test = "camera-client"
+
+[dependencies]
+binder = { path = "../../binder" }
+libc = "0.2"

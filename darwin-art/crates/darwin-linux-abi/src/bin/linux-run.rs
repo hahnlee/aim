@@ -197,6 +197,7 @@ fn main() {
         runtime_args.extend([cstring("--gpu"), cstring(g.as_os_str().as_bytes())]);
     }
     darwin_host_audio::set_log_fd(darwin_linux_abi::diag::log_fd());
+    darwin_host_camera::set_log_fd(darwin_linux_abi::diag::log_fd());
     if let Some(d) = &display {
         darwin_host_display::set_server(d);
         darwin_linux_abi::vfs::set_input_dir(&darwin_host_display::input::device_dir(d));

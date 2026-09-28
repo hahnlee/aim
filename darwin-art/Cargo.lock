@@ -479,6 +479,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "darwin-host-camera"
+version = "0.1.0"
+dependencies = [
+ "darwin-hostcall",
+ "libc",
+]
+
+[[package]]
 name = "darwin-host-display"
 version = "0.1.0"
 dependencies = [
@@ -531,6 +539,7 @@ dependencies = [
  "darwin-guest-init",
  "darwin-host-audio",
  "darwin-host-bluetooth",
+ "darwin-host-camera",
  "darwin-host-display",
  "darwin-host-gpu",
  "darwin-host-health",
