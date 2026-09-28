@@ -229,6 +229,10 @@ static void renewal(void) {
   struct sockaddr_in server = {.sin_family = AF_INET, .sin_port = htons(67)};
   server.sin_addr.s_addr = inet_addr("10.11.12.1");
   CHECK(connect(u, (struct sockaddr*)&server, sizeof server) == 0);
+  struct sockaddr_in peer;
+  socklen_t pl = sizeof peer;
+  CHECK(getpeername(u, (struct sockaddr*)&peer, &pl) == 0 && peer.sin_port == htons(67) &&
+        peer.sin_addr.s_addr == server.sin_addr.s_addr);
   unsigned char m[244];
   int n = bootp(m, 3, inet_addr("10.11.12.13"));
   CHECK(write(u, m, n) == n);

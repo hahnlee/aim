@@ -89,13 +89,15 @@ pub enum Family {
 }
 
 /// SO_MARK and SO_BINDTODEVICE of an AF_INET/AF_INET6 socket, whether it
-/// is connected to port 0 (`datagram_to_port_zero`), and whether it is an
-/// IPv4 ping socket (`recv_ping`).
+/// is connected to port 0 (`datagram_to_port_zero`) or to the virtual DHCP
+/// server (`connect_to_router`), and whether it is an IPv4 ping socket
+/// (`recv_ping`).
 #[derive(Default)]
 pub struct InetOpts {
     mark: std::sync::atomic::AtomicU32,
     device: Mutex<String>,
     port_zero: AtomicBool,
+    router: AtomicBool,
     icmp4: AtomicBool,
 }
 
@@ -146,6 +148,7 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
             w.u32(o.mark.load(Ordering::Relaxed));
             w.bytes(o.device.lock().unwrap().as_bytes());
             w.bool(o.port_zero.load(Ordering::Relaxed));
+            w.bool(o.router.load(Ordering::Relaxed));
             w.bool(o.icmp4.load(Ordering::Relaxed));
         }
         Family::Netlink(n) => {
@@ -174,6 +177,7 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
             o.mark.store(r.u32(), Ordering::Relaxed);
             *o.device.lock().unwrap() = String::from_utf8_lossy(&r.bytes()).into_owned();
             o.port_zero.store(r.bool(), Ordering::Relaxed);
+            o.router.store(r.bool(), Ordering::Relaxed);
             o.icmp4.store(r.bool(), Ordering::Relaxed);
             Family::Inet(o)
         }
@@ -944,6 +948,9 @@ pub fn connect(a: [u64; 6]) -> i64 {
     if family_mismatch(fd, &name) {
         return -EAFNOSUPPORT;
     }
+    if let Some(r) = connect_to_router(fd, &name) {
+        return r;
+    }
     let zero_port = datagram_to_port_zero(fd, &mut t);
     let mut r = with_target(&t, |sa, len| {
         errno::check(unsafe { libc::connect(fd, sa, len) } as i64)
@@ -973,6 +980,39 @@ pub fn connect(a: [u64; 6]) -> i64 {
         }
     }
     r
+}
+
+/// A datagram socket bound to a device other than the loopback that
+/// connects to the DHCP server port (DhcpClient, once bound to its lease)
+/// is connected to `eth0`'s virtual router, where its datagrams go
+/// (`dhcp_to_router`), not to the Mac's network. The host socket stays
+/// unconnected: the Mac's own DHCP client holds that address pair, so a
+/// host connect fails with EADDRINUSE. None: an ordinary connect.
+fn connect_to_router(fd: i32, name: &[u8]) -> Option<i64> {
+    let s = any_sock(fd)?;
+    let Family::Inet(o) = &s.family else {
+        return None;
+    };
+    let server = name.len() >= 8
+        && u16::from_le_bytes([name[0], name[1]]) == L_AF_INET
+        && u16::from_be_bytes([name[2], name[3]]) == super::dhcp::SERVER_PORT;
+    let routed = server && on_link(fd, o);
+    o.router.store(routed, Ordering::Relaxed);
+    if !routed {
+        return None;
+    }
+    *s.peer.lock().unwrap() = Some(name.to_vec());
+    Some(0)
+}
+
+/// Whether `fd` is a datagram socket bound to a device other than the
+/// loopback, whose DHCP messages go to the virtual router.
+fn on_link(fd: i32, o: &InetOpts) -> bool {
+    let device = o.device.lock().unwrap().clone();
+    !device.is_empty()
+        && !o.icmp4.load(Ordering::Relaxed)
+        && get_int(fd, libc::SOL_SOCKET, libc::SO_TYPE) == Some(libc::SOCK_DGRAM)
+        && super::netif::by_name(&device).is_some_and(|l| !l.loopback())
 }
 
 /// The discard port, which stands in for port 0 on the host.
@@ -1055,6 +1095,9 @@ fn name_of(fd: i32, peer: bool, out: u64, outlen: u64) -> i64 {
             Family::Netlink(n) => Some(n.local_name()),
             Family::Packet(_) if peer => return -107, // ENOTCONN
             Family::Packet(p) => Some(p.local_name()),
+            Family::Inet(o) if peer && o.router.load(Ordering::Relaxed) => {
+                s.peer.lock().unwrap().clone()
+            }
             Family::Inet(o) if peer && o.port_zero.load(Ordering::Relaxed) => {
                 let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
                 let mut len = std::mem::size_of::<libc::sockaddr_storage>() as u32;
@@ -1486,7 +1529,7 @@ fn send_other(fd: i32, iov: &[libc::iovec], name: Option<(u64, u32)>) -> Option<
             };
             super::packet::send(p, &gather(), ifindex)
         }
-        Family::Inet(o) => return dhcp_to_router(fd, o, iov, name),
+        Family::Inet(_) => return dhcp_to_router(fd, &s, iov, name),
         Family::Unix => return None,
     })
 }
@@ -1496,31 +1539,25 @@ fn send_other(fd: i32, iov: &[libc::iovec], name: Option<(u64, u32)>) -> Option<
 /// server) and rebinding broadcasts. They go to `eth0`'s virtual router
 /// (`packet::udp_to_router`), as they would on a real link, instead of to
 /// the Mac's network. None: another datagram, sent as usual.
-fn dhcp_to_router(
-    fd: i32,
-    o: &InetOpts,
-    iov: &[libc::iovec],
-    name: Option<(u64, u32)>,
-) -> Option<i64> {
-    let device = o.device.lock().unwrap().clone();
-    if device.is_empty() || o.icmp4.load(Ordering::Relaxed) {
+fn dhcp_to_router(fd: i32, s: &Sock, iov: &[libc::iovec], name: Option<(u64, u32)>) -> Option<i64> {
+    let Family::Inet(o) = &s.family else {
+        return None;
+    };
+    if o.device.lock().unwrap().is_empty() {
         return None;
     }
+    let inet = |b: &[u8]| {
+        (b.len() >= 8 && u16::from_le_bytes([b[0], b[1]]) == L_AF_INET)
+            .then(|| (u16::from_be_bytes([b[2], b[3]]), [b[4], b[5], b[6], b[7]]))
+    };
     let dst = match name {
-        Some((p, l)) if l >= 8 => {
-            // SAFETY: a guest sockaddr of at least 8 bytes.
-            let b = unsafe { std::slice::from_raw_parts(p as *const u8, 8) };
-            (u16::from_le_bytes([b[0], b[1]]) == L_AF_INET)
-                .then(|| (u16::from_be_bytes([b[2], b[3]]), [b[4], b[5], b[6], b[7]]))
-        }
-        Some(_) => None,
+        // SAFETY: a guest sockaddr of `l` bytes.
+        Some((p, l)) => inet(unsafe { std::slice::from_raw_parts(p as *const u8, l as usize) }),
+        None if o.router.load(Ordering::Relaxed) => inet(s.peer.lock().unwrap().as_deref()?),
         None => host_inet_name(fd, true),
     };
     let (port, dst) = dst?;
-    if port != super::dhcp::SERVER_PORT
-        || get_int(fd, libc::SOL_SOCKET, libc::SO_TYPE) != Some(libc::SOCK_DGRAM)
-        || super::netif::by_name(&device).is_none_or(|l| l.loopback())
-    {
+    if port != super::dhcp::SERVER_PORT || !on_link(fd, o) {
         return None;
     }
     let src = host_inet_name(fd, false).map_or([0; 4], |(_, a)| a);
@@ -2052,8 +2089,9 @@ pub fn read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
 /// write/writev on a socket with Linux state (a plain host write for
 /// AF_INET options, but for DHCP to the virtual router).
 pub fn write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
-    if let Family::Inet(o) = &any_sock(fd)?.family {
-        return dhcp_to_router(fd, o, iov, None);
+    let s = any_sock(fd)?;
+    if let Family::Inet(_) = &s.family {
+        return dhcp_to_router(fd, &s, iov, None);
     }
     Some(send(fd, iov, None, None, 0))
 }
@@ -2153,6 +2191,20 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
             // Linux raises a small (or zero) size to its minimum (2304
             // bytes, SOCK_MIN_RCVBUF); Darwin refuses zero.
             v = v.max(2304);
+        }
+        if l == libc::SOL_SOCKET
+            && o == libc::SO_REUSEADDR
+            && get_int(fd, libc::SOL_SOCKET, libc::SO_TYPE) == Some(libc::SOCK_DGRAM)
+        {
+            // Datagram sockets that all set SO_REUSEADDR share a port on
+            // Linux (socket(7)); on Darwin that takes SO_REUSEPORT too.
+            // SAFETY: an int option.
+            let r = unsafe {
+                libc::setsockopt(fd, l, libc::SO_REUSEPORT, (&v as *const i32).cast(), 4)
+            };
+            if r < 0 {
+                return -(errno::last() as i64);
+            }
         }
         // SAFETY: an int option.
         return errno::check(
