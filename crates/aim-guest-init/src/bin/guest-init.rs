@@ -113,6 +113,8 @@ fn main() {
         }
     };
     let report = boot.run().clone();
+    // Detaches the data image; `exit` below would skip it.
+    drop(boot);
     if !quiet {
         for diagnostic in &report.diagnostics {
             println!("diag: {diagnostic}");
