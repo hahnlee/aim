@@ -4705,14 +4705,6 @@ pub unsafe extern "C" fn eglBindTexImage(dpy: EGLDisplay, surface: EGLSurface, b
     unsafe { host::eglBindTexImage(dpy, surface, buffer) }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglClientWaitSync(dpy: EGLDisplay, sync: EGLSync, flags: EGLint, timeout: EGLTime) -> EGLint {
-    unsafe { host::eglClientWaitSync(dpy, sync, flags, timeout) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglClientWaitSyncKHR(dpy: EGLDisplay, sync: EGLSyncKHR, flags: EGLint, timeout: EGLTimeKHR) -> EGLint {
-    unsafe { host::eglClientWaitSyncKHR(dpy, sync, flags, timeout) }
-}
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eglCopyBuffers(dpy: EGLDisplay, surface: EGLSurface, target: EGLNativePixmapType) -> EGLBoolean {
     unsafe { host::eglCopyBuffers(dpy, surface, target) }
 }
@@ -8283,8 +8275,8 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "eglBindAPI", addr: eglBindAPI as *const c_void, id: 1 },
     Proc { name: "eglBindTexImage", addr: eglBindTexImage as *const c_void, id: 2 },
     Proc { name: "eglChooseConfig", addr: crate::egl::eglChooseConfig as *const c_void, id: -1 },
-    Proc { name: "eglClientWaitSync", addr: eglClientWaitSync as *const c_void, id: 4 },
-    Proc { name: "eglClientWaitSyncKHR", addr: eglClientWaitSyncKHR as *const c_void, id: 5 },
+    Proc { name: "eglClientWaitSync", addr: crate::egl::eglClientWaitSync as *const c_void, id: -1 },
+    Proc { name: "eglClientWaitSyncKHR", addr: crate::egl::eglClientWaitSyncKHR as *const c_void, id: -1 },
     Proc { name: "eglCopyBuffers", addr: eglCopyBuffers as *const c_void, id: 6 },
     Proc { name: "eglCopyMetalSharedEventANGLE", addr: eglCopyMetalSharedEventANGLE as *const c_void, id: 7 },
     Proc { name: "eglCreateContext", addr: eglCreateContext as *const c_void, id: 8 },

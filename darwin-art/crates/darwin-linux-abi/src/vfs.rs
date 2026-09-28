@@ -15,15 +15,17 @@
 //!   ([`set_input_dir`], `sys::evdev`).
 //! - The process's own mounts (`mount(2)` with `MS_BIND` or `tmpfs`,
 //!   `sys/mount.rs`) are entries over the same table. They belong to this
-//!   process and its children, as after `unshare(CLONE_NEWNS)`.
+//!   process and its children, as after `unshare(CLONE_NEWNS)`. A mount
+//!   hides the older ones at and below its mount point, as mounting over a
+//!   directory does (zygote's tmpfs over `/data/user` hides the path map's
+//!   `/data/user/0`).
 
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use crate::errno::{self, Errno};
-use crate::sys::forklock::ForkRwLock;
 
 pub const LINUX_AT_FDCWD: i32 = -100;
 const MAX_SYMLINKS: usize = 40;
@@ -63,6 +65,8 @@ struct Mount {
     fstype: Option<String>,
     /// A mount this process made (not a path map entry).
     own: bool,
+    /// Mount order: 0 for the path map, then increasing.
+    seq: u64,
 }
 
 struct Vfs {
@@ -70,7 +74,7 @@ struct Vfs {
     /// Whether a path map is in use (the image is then read-only).
     mapped: bool,
     /// Longest guest prefix first; among equal prefixes the latest mount.
-    mounts: ForkRwLock<Vec<Mount>>,
+    mounts: RwLock<Vec<Mount>>,
     /// Directory holding the path map (the guest-init runtime directory).
     runtime: Option<PathBuf>,
     cwd: Mutex<String>,
@@ -127,6 +131,7 @@ fn parse_map(text: &str) -> Result<(Option<PathBuf>, Vec<Mount>), String> {
                 .map(|t| if t == "bpf" { "bpf" } else { "none" }.to_string()),
             fstype,
             own: false,
+            seq: 0,
         });
     }
     mounts.sort_by(|a, b| b.guest.len().cmp(&a.guest.len()));
@@ -153,6 +158,7 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
             source: None,
             fstype: None,
             own: false,
+            seq: 0,
         });
         mounts.sort_by(|a, b| b.guest.len().cmp(&a.guest.len()));
     }
@@ -163,7 +169,7 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
     let _ = VFS.set(Vfs {
         root,
         mapped: !mounts.is_empty(),
-        mounts: ForkRwLock::new(mounts),
+        mounts: RwLock::new(mounts),
         runtime,
         cwd: Mutex::new("/".into()),
     });
@@ -223,6 +229,31 @@ pub fn set_cwd(guest: String) {
     *vfs().cwd.lock().unwrap() = guest;
 }
 
+/// The rest of `path` below the mount point `at`, if it is there.
+fn below<'a>(at: &str, path: &'a str) -> Option<&'a str> {
+    if path == at {
+        Some("")
+    } else {
+        path.strip_prefix(at).and_then(|r| r.strip_prefix('/'))
+    }
+}
+
+/// Whether a later mount at or above the mount point of `m` hides it.
+fn hidden(mounts: &[Mount], m: &Mount) -> bool {
+    mounts
+        .iter()
+        .any(|n| n.seq > m.seq && below(&n.guest, &m.guest).is_some())
+}
+
+/// The mount that holds the normalized guest path, and the path below it:
+/// the deepest one not hidden. `mounts` is ordered longest mount point
+/// first, the latest first among equal ones.
+fn holder<'a, 'p>(mounts: &'a [Mount], guest: &'p str) -> Option<(&'a Mount, &'p str)> {
+    mounts
+        .iter()
+        .find_map(|m| Some((m, below(&m.guest, guest)?)).filter(|(m, _)| !hidden(mounts, m)))
+}
+
 /// Host path and area of a normalized absolute guest path, without
 /// following symlinks.
 pub fn lookup(guest: &str) -> (PathBuf, Area) {
@@ -230,24 +261,46 @@ pub fn lookup(guest: &str) -> (PathBuf, Area) {
         return (PathBuf::from(guest), Area::HostDevice);
     }
     let v = vfs();
-    for m in v.mounts.read().unwrap().iter() {
-        let rest = if guest == m.guest {
-            Some("")
+    if let Some((m, rest)) = holder(&v.mounts.read().unwrap(), guest) {
+        let host = if rest.is_empty() {
+            m.host.clone()
         } else {
-            guest
-                .strip_prefix(m.guest.as_str())
-                .and_then(|r| r.strip_prefix('/'))
+            m.host.join(rest)
         };
-        if let Some(rest) = rest {
-            let host = if rest.is_empty() {
-                m.host.clone()
-            } else {
-                m.host.join(rest)
-            };
-            return (host, m.area);
-        }
+        return (host, m.area);
     }
     (v.root.join(guest.trim_start_matches('/')), Area::Image)
+}
+
+/// The path fs-attrs knows a normalized guest path by, so that a file has
+/// one owner and mode through whichever mount it is reached (a bind shows
+/// its source's): its path through the path map entry with the shortest
+/// host prefix (the area itself rather than a bind into it), or through
+/// the image root; in a tmpfs of this process, the host path (private to
+/// the process and its children).
+pub fn attr_key(guest: &str) -> String {
+    if !guest.starts_with('/') {
+        return guest.to_string();
+    }
+    let (host, _) = lookup(guest);
+    let v = vfs();
+    let mounts = v.mounts.read().unwrap();
+    let area = mounts
+        .iter()
+        .filter(|m| !m.own)
+        .filter_map(|m| Some((m, host.strip_prefix(&m.host).ok()?)))
+        .min_by_key(|(m, _)| (m.host.as_os_str().len(), m.guest.len()));
+    if let Some((m, rest)) = area {
+        return if rest.as_os_str().is_empty() {
+            m.guest.clone()
+        } else {
+            format!("{}/{}", m.guest, rest.display())
+        };
+    }
+    match host.strip_prefix(&v.root) {
+        Ok(rel) => format!("/{}", rel.display()),
+        Err(_) => host.display().to_string(),
+    }
 }
 
 /// Mount `host` (with `area`) at the normalized guest path `guest`, over
@@ -259,6 +312,7 @@ pub fn add_mount(guest: &str, host: PathBuf, area: Area, source: &str, fstype: &
         guest.trim_end_matches('/')
     };
     let mut mounts = vfs().mounts.write().unwrap();
+    let seq = mounts.iter().map(|m| m.seq).max().unwrap_or(0) + 1;
     let at = mounts
         .iter()
         .position(|m| m.guest.len() <= guest.len())
@@ -272,6 +326,7 @@ pub fn add_mount(guest: &str, host: PathBuf, area: Area, source: &str, fstype: &
             source: Some(source.to_string()),
             fstype: Some(fstype.to_string()),
             own: true,
+            seq,
         },
     );
 }
@@ -279,15 +334,7 @@ pub fn add_mount(guest: &str, host: PathBuf, area: Area, source: &str, fstype: &
 /// The filesystem type of the mount that holds the normalized guest path.
 pub fn fstype(guest: &str) -> Option<String> {
     let mounts = vfs().mounts.read().unwrap();
-    mounts
-        .iter()
-        .find(|m| {
-            guest == m.guest
-                || guest
-                    .strip_prefix(m.guest.as_str())
-                    .is_some_and(|r| r.starts_with('/'))
-        })
-        .and_then(|m| m.fstype.clone())
+    holder(&mounts, guest).and_then(|(m, _)| m.fstype.clone())
 }
 
 /// The kernel filesystem `guest` is on, and the path below its root, for
@@ -387,21 +434,33 @@ pub fn guest_path_of_host(host: &Path) -> Option<String> {
     if HOST_DEVICES.contains(&s) {
         return Some(s.to_string());
     }
-    let mut best: Option<(usize, String)> = None;
-    for m in v.mounts.read().unwrap().iter() {
-        if let Ok(rest) = host.strip_prefix(&m.host) {
-            let len = m.host.as_os_str().len();
-            if best.as_ref().is_none_or(|b| len > b.0) {
-                let g = if rest.as_os_str().is_empty() {
-                    m.guest.clone()
-                } else {
-                    format!("{}/{}", m.guest, rest.display())
-                };
-                best = Some((len, g));
-            }
+    // The mount deepest into the host tree (a bind over its source's area);
+    // between mounts of the same host directory, the shorter mount point
+    // (`/data/user/0`, not its `/data_mirror` copy). Hidden mounts are not
+    // reachable.
+    let mounts = v.mounts.read().unwrap();
+    let mut best: Option<(usize, usize, String)> = None;
+    for m in mounts.iter() {
+        let Ok(rest) = host.strip_prefix(&m.host) else {
+            continue;
+        };
+        if hidden(&mounts, m) {
+            continue;
+        }
+        let len = m.host.as_os_str().len();
+        if best
+            .as_ref()
+            .is_none_or(|b| len > b.0 || (len == b.0 && m.guest.len() < b.1))
+        {
+            let g = if rest.as_os_str().is_empty() {
+                m.guest.clone()
+            } else {
+                format!("{}/{}", m.guest, rest.display())
+            };
+            best = Some((len, m.guest.len(), g));
         }
     }
-    if let Some((_, g)) = best {
+    if let Some((_, _, g)) = best {
         return Some(g);
     }
     let rel = host.strip_prefix(&v.root).ok()?;
@@ -517,9 +576,40 @@ pub fn resolve(dirfd: i32, path: &[u8], follow_last: bool) -> Result<Resolved, E
     })
 }
 
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<crate::sys::forklock::Guard>) -> bool {
-    crate::sys::forklock::rwlock(&vfs().mounts, held)
+/// The process-wide view the unit tests share (it is initialized once):
+/// `/data` and the data mirrors as guest-init maps them. The guard keeps
+/// tests that mount from running at the same time.
+#[cfg(test)]
+pub(crate) fn test_view() -> (std::sync::MutexGuard<'static, ()>, &'static Path) {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    static LOCK: Mutex<()> = Mutex::new(());
+    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("vfs-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (root, data) = (dir.join("root"), dir.join("data"));
+        for d in [&root, &data, &dir.join("run/data_mirror")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let map = dir.join("run/path-map");
+        let d = data.display();
+        std::fs::write(
+            &map,
+            format!(
+                "rw\t/data\t{d}\n\
+                 rw\t/data/user/0\t{d}/data\n\
+                 rw\t/data_mirror\t{}\n\
+                 rw\t/data_mirror/data_ce/null\t{d}/user\n\
+                 rw\t/data_mirror/data_ce/null/0\t{d}/data\n\
+                 rw\t/data_mirror/data_de/null\t{d}/user_de\n",
+                dir.join("run/data_mirror").display()
+            ),
+        )
+        .unwrap();
+        init(&root, Some(&map)).unwrap();
+        dir
+    });
+    (guard, dir)
 }
 
 #[cfg(test)]
@@ -544,25 +634,19 @@ mod tests {
         );
     }
 
-    /// The only test that initializes the process-wide view.
     #[test]
     fn own_mounts_shadow_the_map_until_unmounted() {
-        let dir = std::env::temp_dir().join(format!("vfs-mounts-{}", std::process::id()));
-        let (root, data, tmp) = (dir.join("root"), dir.join("data"), dir.join("tmp"));
-        for d in [&root, &data, &tmp] {
-            std::fs::create_dir_all(d).unwrap();
-        }
-        let map = dir.join("path-map");
-        std::fs::write(&map, format!("rw\t/data\t{}\n", data.display())).unwrap();
-        init(&root, Some(&map)).unwrap();
+        let (_view, dir) = test_view();
+        let (data, tmp) = (dir.join("data"), dir.join("tmp"));
+        std::fs::create_dir_all(&tmp).unwrap();
 
         add_mount("/data/app", tmp.clone(), Area::Writable, "tmpfs", "tmpfs");
         assert_eq!(lookup("/data/app/x").0, tmp.join("x"));
         assert_eq!(lookup("/data/other").0, data.join("other"));
-        let last = mount_points().pop().unwrap();
-        assert_eq!(
-            (last.guest.as_str(), last.fstype.as_deref()),
-            ("/data/app", Some("tmpfs"))
+        assert!(
+            mount_points()
+                .iter()
+                .any(|m| m.guest == "/data/app" && m.fstype.as_deref() == Some("tmpfs"))
         );
         let text = own_mounts_text();
         assert!(move_mount("/data/app", "/data/moved"));
@@ -574,6 +658,38 @@ mod tests {
         load_own_mounts(&text);
         assert_eq!(lookup("/data/app").0, tmp);
         assert!(remove_mount("/data/app"));
-        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_mount_hides_the_older_ones_below_it() {
+        let (_view, dir) = test_view();
+        let (data, tmp) = (dir.join("data"), dir.join("hide"));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // The path map's /data/user/0 is /data/data, and so is its mirror.
+        assert_eq!(lookup("/data/user/0/p").0, data.join("data/p"));
+        assert_eq!(attr_key("/data/user/0/p"), "/data/data/p");
+        assert_eq!(attr_key("/data_mirror/data_ce/null/0/p"), "/data/data/p");
+        assert_eq!(attr_key("/data_mirror/data_ce/null"), "/data/user");
+        assert_eq!(
+            guest_path_of_host(&data.join("data/p")).as_deref(),
+            Some("/data/user/0/p")
+        );
+
+        add_mount("/data/user", tmp.clone(), Area::Writable, "tmpfs", "tmpfs");
+        assert_eq!(lookup("/data/user/0").0, tmp.join("0"));
+        assert_eq!(fstype("/data/user/0").as_deref(), Some("tmpfs"));
+        assert_eq!(attr_key("/data/user/0"), format!("{}/0", tmp.display()));
+        // A mount made later below the tmpfs is seen again.
+        add_mount(
+            "/data/user/0",
+            data.join("data"),
+            Area::Writable,
+            "/data/data",
+            "bind",
+        );
+        assert_eq!(lookup("/data/user/0/p").0, data.join("data/p"));
+        assert!(remove_mount("/data/user/0"));
+        assert!(remove_mount("/data/user"));
+        assert_eq!(lookup("/data/user/0/p").0, data.join("data/p"));
     }
 }

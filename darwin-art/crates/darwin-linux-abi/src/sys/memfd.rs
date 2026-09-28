@@ -345,9 +345,35 @@ pub fn rw(fd: i32, buf: u64, len: usize, pos: Option<i64>, write: bool) -> Optio
     Some(n as i64)
 }
 
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
-    super::forklock::mutex(&MEMFDS, held)
+/// Fork: the memfds this process knows, with their executable-mode
+/// memory (shared with the child, as the file is).
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    let m = MEMFDS.lock().unwrap();
+    let all: Vec<_> = m.iter().flatten().collect();
+    w.seq(all.into_iter(), |w, (k, f)| {
+        w.u64(k.0);
+        w.u64(k.1);
+        w.str(&f.name);
+        w.u32(f.seals);
+        w.opt(f.anon, |w, (b, s)| {
+            w.u64(b);
+            w.u64(s);
+        });
+    });
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let v = r.seq(|r| {
+        (
+            (r.u64(), r.u64()),
+            Memfd {
+                name: r.str(),
+                seals: r.u32(),
+                anon: r.opt(|r| (r.u64(), r.u64())),
+            },
+        )
+    });
+    with(|m| m.extend(v));
 }
 
 #[cfg(test)]

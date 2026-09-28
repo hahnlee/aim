@@ -170,3 +170,137 @@ pub fn umount2(a: [u64; 6]) -> i64 {
         -(EINVAL as i64)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CString;
+
+    use super::*;
+    use crate::sys::{attrs, fsops};
+
+    fn p(s: &CString) -> u64 {
+        s.as_ptr() as u64
+    }
+
+    fn at(path: &str) -> CString {
+        CString::new(path).unwrap()
+    }
+
+    fn owner(path: &str) -> Option<u32> {
+        attrs::lookup(
+            &vfs::resolve(LINUX_AT_FDCWD, path.as_bytes(), true)
+                .unwrap()
+                .guest,
+        )
+        .uid
+    }
+
+    fn host(path: &str) -> PathBuf {
+        let r = vfs::resolve(LINUX_AT_FDCWD, path.as_bytes(), true).unwrap();
+        PathBuf::from(OsStr::from_bytes(r.host.as_bytes()))
+    }
+
+    fn mkdir(path: &str, mode: u64, uid: u64) {
+        let c = at(path);
+        let fd = LINUX_AT_FDCWD as u64;
+        assert_eq!(
+            fsops::mkdirat([fd, p(&c), mode, 0, 0, 0]),
+            0,
+            "mkdir {path}"
+        );
+        assert_eq!(
+            fsops::fchownat([fd, p(&c), uid, uid, 0, 0]),
+            0,
+            "chown {path}"
+        );
+    }
+
+    fn bind(source: &str, target: &str) {
+        let (s, t) = (at(source), at(target));
+        assert_eq!(
+            mount([p(&s), p(&t), 0, MS_BIND | 0x4000, 0, 0]),
+            0,
+            "bind {target}"
+        );
+    }
+
+    /// Zygote's `isolateAppData` for one app of user 0, as the original
+    /// runs it in the app's child (Zygote.cpp, Android 16), after installd
+    /// made the app's data directories.
+    #[test]
+    fn zygote_isolates_app_data() {
+        let (_view, _) = vfs::test_view();
+        const APP: u64 = 10123;
+        // installd: create_app_data through /data/data (a directory).
+        // init.rc and vold made these.
+        for dir in ["/data/data", "/data/user", "/data/user_de/0"] {
+            std::fs::create_dir_all(host(dir)).unwrap();
+        }
+        mkdir("/data/data/com.example", 0o700, APP);
+        mkdir("/data/user_de/0/com.example", 0o700, APP);
+        mkdir("/data/data/com.other", 0o700, APP + 1);
+        // The same directory, whichever mount reaches it.
+        assert_eq!(owner("/data/user/0/com.example"), Some(APP as u32));
+        assert_eq!(
+            owner("/data_mirror/data_ce/null/0/com.example"),
+            Some(APP as u32)
+        );
+
+        assert_eq!(unshare([CLONE_NEWNS, 0, 0, 0, 0, 0]), 0);
+        let (tmpfs, opts) = (at("tmpfs"), at("uid=0,gid=0,mode=0751"));
+        for dir in ["/data/data", "/data/user", "/data/user_de"] {
+            let t = at(dir);
+            let flags = 0x2 | 0x4 | 0x8; // MS_NOSUID | MS_NODEV | MS_NOEXEC
+            assert_eq!(mount([p(&tmpfs), p(&t), p(&tmpfs), flags, p(&opts), 0]), 0);
+        }
+        // The tmpfs over /data/user hides the path map's /data/user/0.
+        let (target, link) = (at("/data/data"), at("/data/user/0"));
+        let fd = LINUX_AT_FDCWD as u64;
+        assert_eq!(fsops::symlinkat([p(&target), fd, p(&link), 0, 0, 0]), 0);
+        mkdir("/data/user_de/0", 0o711, 0);
+        // DE, then CE (getAppDataDirName finds the directory by name).
+        mkdir("/data/user_de/0/com.example", 0o700, 0);
+        bind(
+            "/data_mirror/data_de/null/0/com.example",
+            "/data/user_de/0/com.example",
+        );
+        assert!(host("/data_mirror/data_ce/null/0/com.example").is_dir());
+        mkdir("/data/data/com.example", 0o700, 0);
+        bind(
+            "/data_mirror/data_ce/null/0/com.example",
+            "/data/data/com.example",
+        );
+
+        // The app: its data directory is ApplicationInfo.dataDir, and its
+        // databases are SQLite files created there.
+        let data = host("/data_mirror/data_ce/null/0/com.example");
+        assert_eq!(host("/data/user/0/com.example"), data);
+        assert_eq!(owner("/data/user/0/com.example"), Some(APP as u32));
+        assert_eq!(owner("/data/user_de/0/com.example"), Some(APP as u32));
+        mkdir("/data/user/0/com.example/databases", 0o771, APP);
+        let db = at("/data/user/0/com.example/databases/contacts2.db");
+        let flags = 0o2 | 0o100 | 0o2000000; // O_RDWR | O_CREAT | O_CLOEXEC
+        let fd = super::super::fs::openat([fd, p(&db), flags, 0o660, 0, 0]);
+        assert!(fd >= 0, "open: {fd}");
+        // SAFETY: the fd just opened.
+        unsafe { libc::close(fd as i32) };
+        assert!(data.join("databases/contacts2.db").is_file());
+        // Other apps' directories are hidden.
+        assert!(!host("/data/user/0/com.other").exists());
+        assert!(!host("/data/data/com.other").exists());
+
+        for dir in [
+            "/data/data/com.example",
+            "/data/user_de/0/com.example",
+            "/data/user_de",
+            "/data/user",
+            "/data/data",
+        ] {
+            let t = at(dir);
+            assert_eq!(umount2([p(&t), MNT_DETACH, 0, 0, 0, 0]), 0, "umount {dir}");
+        }
+        // The stubs zygote gave root's owner did not change the app's.
+        assert_eq!(owner("/data/data/com.example"), Some(APP as u32));
+        assert_eq!(owner("/data/user/0/com.example"), Some(APP as u32));
+    }
+}

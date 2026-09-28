@@ -100,7 +100,33 @@ pub fn moved(old: u64, new: u64, len: u64) {
     }
 }
 
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
-    super::forklock::mutex(&COPIES, held)
+/// Fork: the record goes with the memory it describes.
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    let m = COPIES.lock().unwrap();
+    w.seq(m.iter(), |w, (s, c)| {
+        w.u64(*s);
+        w.u64(c.end);
+        w.str(&c.guest);
+        w.path(&c.host);
+        w.u64(c.offset);
+        w.u64(c.dev);
+        w.u64(c.ino);
+    });
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let v = r.seq(|r| {
+        (
+            r.u64(),
+            Copy {
+                end: r.u64(),
+                guest: r.str(),
+                host: r.path(),
+                offset: r.u64(),
+                dev: r.u64(),
+                ino: r.u64(),
+            },
+        )
+    });
+    COPIES.lock().unwrap().extend(v);
 }

@@ -464,6 +464,11 @@ pub fn translate_fault(hsig: i32, host_code: i32, m: &DarwinMcontext) -> Fault {
             };
             if data_abort && esr & 0x3f == 0x21 {
                 (SIGBUS, BUS_ADRALN, addr)
+            } else if (super::window::BASE..super::window::BASE + 0x1000).contains(&addr) {
+                // The first page of ART's heap window is the null page of
+                // heap references (offset 0 is null): report the access
+                // as the null-page fault an implicit null check expects.
+                (SIGSEGV, SEGV_MAPERR, addr - super::window::BASE)
             } else {
                 let need = if insn_abort {
                     libc::PROT_EXEC

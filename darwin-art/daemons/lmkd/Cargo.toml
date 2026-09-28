@@ -1,0 +1,16 @@
+[package]
+name = "lmkd"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "lmkd's control socket (the lmkd protocol) with the process bookkeeping and no kills"
+
+# Installed as /system/bin/lmkd, in place of the original.
+[package.metadata.daemon]
+program = "lmkd"
+
+[dependencies]
+daemon-log.workspace = true
+libc = "0.2"
+log.workspace = true

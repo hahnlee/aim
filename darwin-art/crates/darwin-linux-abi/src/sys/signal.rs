@@ -32,7 +32,7 @@ use super::sigframe::{
     SS_AUTODISARM, SS_DISABLE, SS_ONSTACK, Siginfo,
 };
 use super::thread::{self, Thread};
-use super::{park, ptimer};
+use super::{park, ptimer, window};
 use crate::context::{self, GuestContext};
 use crate::errno::{EAGAIN, EINTR, EINVAL, ENOMEM, EPERM, ESRCH};
 
@@ -127,6 +127,7 @@ fn ignored(sig: i32, act: &KSigaction) -> bool {
 /// The guest's default action for a fatal signal: the process dies of the
 /// Darwin equivalent (so its parent sees the signal), or exits 128+sig.
 pub fn die(sig: i32) -> ! {
+    super::fork::spawn::wait_handovers();
     let h = to_host(sig);
     // SAFETY: restoring the default action and raising it on this thread.
     unsafe {
@@ -820,10 +821,15 @@ fn guest_fault(ctx: &GuestContext, hsig: i32, code: i32, m: &mut DarwinMcontext)
     // macOS maps nothing below 4 GiB, so an access there beyond the null
     // pages (which implicit null checks use) is a stray pointer, such as a
     // heap reference that was not decoded: name the code that made it.
-    if (0x10000..1 << 32).contains(&f.fault_address) {
+    // So is an access to the first page of ART's heap window
+    // (`window::BASE`), which the guest sees as its null page: a null heap
+    // reference decoded as if it were not.
+    let window_null =
+        sig == sigframe::SIGSEGV && (window::BASE..window::BASE + 0x1000).contains(&m.far);
+    if (0x10000..1 << 32).contains(&f.fault_address) || window_null {
         crate::diag!(
             "[linux-abi] signal {sig}: access to {:#x} at pc {:#x} ({}), lr {:#x} ({})",
-            f.fault_address,
+            if window_null { m.far } else { f.fault_address },
             m.pc,
             crate::diag::describe(m.pc),
             m.lr,
@@ -1278,28 +1284,44 @@ pub fn repoke_self() {
 
 // ---- fork -------------------------------------------------------------------------
 
-/// The signal state a fork must not copy mid-update (see `thread::fork_prepare`).
-pub struct ForkLocks {
-    _actions: std::sync::MutexGuard<'static, [KSigaction; NSIG as usize]>,
-    pending: std::sync::MutexGuard<'static, Pending>,
-    process: std::sync::MutexGuard<'static, Pending>,
+/// Fork: the dispositions, and the forking thread's mask and alternate
+/// stack. Pending signals are not inherited.
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    let actions = *ACTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    w.seq(actions.iter(), |w, a| {
+        for v in [a.handler, a.flags, a.restorer, a.mask] {
+            w.u64(v);
+        }
+    });
+    let th = current();
+    w.u64(th.sig.mask());
+    let alt = *lock(&th.sig.alt);
+    w.u64(alt.sp);
+    w.u64(alt.size);
+    w.i32(alt.flags);
 }
 
-pub fn fork_lock(me: &'static Thread) -> ForkLocks {
-    ForkLocks {
-        _actions: ACTIONS.lock().unwrap_or_else(|e| e.into_inner()),
-        pending: lock(&me.sig.pending),
-        process: process(),
+/// Restore on the child's main thread, which the context of the fork
+/// runs on.
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let actions = r.seq(|r| KSigaction {
+        handler: r.u64(),
+        flags: r.u64(),
+        restorer: r.u64(),
+        mask: r.u64(),
+    });
+    for (i, act) in actions.iter().enumerate() {
+        let sig = i as u64 + 1;
+        if valid(sig) && sig != SIGKILL as u64 && sig != SIGSTOP as u64 {
+            rt_sigaction([sig, act as *const KSigaction as u64, 0, 8, 0, 0]);
+        }
     }
-}
-
-/// In the child: pending signals are not inherited (Linux clears both the
-/// thread's and the process's); the mask, dispositions and alternate stack
-/// are. `new` replaces `old` as the calling thread's record.
-pub fn fork_child(mut l: ForkLocks, old: &Thread, new: &Thread) {
-    *l.pending = Pending::new();
-    *l.process = Pending::new();
-    EXTERNAL.store(0, SeqCst);
-    *lock(&new.sig.alt) = *lock(&old.sig.alt);
-    drop(l);
+    let mask = r.u64();
+    rt_sigprocmask([2, &mask as *const u64 as u64, 0, 8, 0, 0]);
+    let alt = AltStack {
+        sp: r.u64(),
+        size: r.u64(),
+        flags: r.i32(),
+    };
+    *lock(&current().sig.alt) = alt;
 }

@@ -359,13 +359,34 @@ Details in [boot-status.md](../boot-status.md), "Java world".
   as path-map entries, cgroup v2 and bpffs as path-map areas, xattrs with
   SELinux labels (from the original inodes and `genfscon`), and threads with
   their own file table (as processes).
-- **Fork on Darwin:** fork takes the layer's locks, and linux-run declares
-  `__objc_fork_ok`: without it the Objective-C runtime kills a child of a
-  multithreaded fork when two of its threads meet in one `+initialize`,
-  which every zygote child is.
+- **Fork on Darwin:** a guest fork is not a Darwin `fork()`, whose child
+  cannot reach XPC services (Metal's shader compiler among them; #233). The
+  parent spawns a fresh `linux-run` and hands it a copy-on-write snapshot
+  of the guest memory as Mach memory entries, plus the layer's state
+  (`docs/fork.md`). This replaced a Darwin fork with the layer's locks held
+  across it and `__objc_fork_ok`. Guest memory therefore lives in a fixed
+  range above the host's allocations.
 - **Measured:** system_server reaches `startOtherServices` 8 s after its
   fork and ActivityManager's ready phase at 15 s; system_server's RSS is
   about 220 MB, and 52 guest processes about 730 MB together.
+- **`sys.boot_completed` (second part).** A first boot reaches it 25.3 s
+  after guest-init starts (zygote 5.8 s, ActivityManager ready 23.3 s),
+  with 277 binder services and 74 guest processes (about 2.8 GB RSS,
+  shared pages counted per process; system_server 369 MB). Settings
+  resumes after `am start -W` (warm, 243 ms). What it took:
+  - the audio HAL registers before touching CoreAudio, which runs in a
+    child process with timeouts and a null sink (#217, audio.md);
+  - an lmkd: ActivityManager waits for lmkd's socket under its lock on
+    every process event, so without one the boot stalled into ANRs and the
+    watchdog. Ours (`daemons/lmkd`) answers the protocol and kills nothing
+    (#222);
+  - `/proc/config.gz` for libvintf's kernel configuration;
+  - a fault on the heap window's first page is a null-check fault (#236);
+  - vold's storage views exist from `initUser0`.
+- **Open after P3:** app windows render black because zygote children
+  cannot reach Metal's shader compiler service (#233); app data isolation
+  leaves apps without their CE directory (#234); the host's security agent
+  kills the boot's `linux-run` (#232).
 
 ## P4 composer (2026-09-28)
 
@@ -401,17 +422,32 @@ Details in [composer.md](../composer.md).
   RenderEngine shader cache takes 12.7 s cold and 0.43 s with ANGLE's cache
   warm.
 
+## P3–P5 acceptance (2026-09-28)
+
+Details in [boot-status.md](../boot-status.md), "P3–P5 acceptance". On the
+spawned fork, a first boot reaches `sys.boot_completed` in 50 s; Settings
+resumes after `am start -W` and draws in the macOS window (#233 fixed by
+the spawned fork); acore, the launcher and GMS no longer crash-loop (#234);
+a tap injected through darwin-display's touchscreen opens a Settings
+sub-page; an AAudio stream at -90 dBFS reaches CoreAudio through
+AudioFlinger and our HAL; sensorservice, thermalservice, battery,
+bluetooth_manager (ON) and location (gps) show our HALs. It took
+selinuxfs `policyvers` for libvintf, Linux-sized datagram buffers for
+logd, SSP in the Bluetooth controller's features, context-free
+`eglClientWaitSync` and a fix to the fork child's hidden fds. Open: boot
+and frame times (#239).
+
 ## Phases
 
-| Phase | Target |
-| --- | --- |
-| P0 | Load-time `svc` redirection; the original `linker64` runs an original `/system/bin` program; x18, TLS, clone, signals and syscall cost measured |
-| P1 | The original servicemanager with the binder driver; transaction latency measured |
-| P2 | The ART exception (rebuilt libart, regenerated boot image) runs Java |
-| P3 | The original SystemServer boots (`sys.boot_completed`) with no HALs declared |
-| P4 | allocator/mapper and composer HALs plus ANGLE/MoltenVK: SurfaceFlinger in a macOS window, one app draws |
-| P5 | Input, audio, power/health, sensors and camera HALs |
-| P6 | Parity with the current runtime; switch and delete the old stack |
+| Phase | Target | Status |
+| --- | --- | --- |
+| P0 | Load-time `svc` redirection; the original `linker64` runs an original `/system/bin` program; x18, TLS, clone, signals and syscall cost measured | reached |
+| P1 | The original servicemanager with the binder driver; transaction latency measured | reached |
+| P2 | The ART exception (rebuilt libart, regenerated boot image) runs Java | reached |
+| P3 | The original SystemServer boots (`sys.boot_completed`) with no HALs declared | reached 2026-09-28 (with the HALs declared; 25 s first boot, 50 s with the spawned fork, #239) |
+| P4 | allocator/mapper and composer HALs plus ANGLE/MoltenVK: SurfaceFlinger in a macOS window, one app draws | reached 2026-09-28: Settings draws in the window and takes injected taps |
+| P5 | Input, audio, power/health, sensors and camera HALs | input, audio, health, thermal, sensors, Bluetooth and GNSS verified at app level 2026-09-28; camera open |
+| P6 | Parity with the current runtime; switch and delete the old stack | |
 
 ## Appendix: what we implement, and where
 
@@ -424,7 +460,7 @@ only at a stable, versioned interface. Everything else stays original.
 | --- | --- | --- |
 | netd | `INetd` | netlink, iptables and eBPF; ours drives macOS networking. The device exposes one Ethernet-like network, not a Wi-Fi HAL |
 | vold | `IVold` | mounts, loop devices, fscrypt and dm-crypt; ours mounts FUSE the way vold does and hands the fd to the original MediaProvider |
-| lmkd | lmkd socket | PSI and memcg; not started at first, later backed by macOS memory-pressure events |
+| lmkd | lmkd socket | PSI and memcg; ours answers the socket protocol and kills nothing (ActivityManager waits on the socket under its lock, so an absent lmkd stalls it); kills follow macOS memory-pressure events later (#222) |
 | apexd | `IApexService` | loop devices and dm-verity; the image is pre-flattened, so ours only reports the active packages (keystore2's module hash, PackageManager) and sets `apexd.status` |
 
 The replacements are Rust (`daemons/`), built against the image's
@@ -434,9 +470,9 @@ IVold is an unstable interface: its methods that take a raw
 
 ### Kept original on the syscall layer
 
-servicemanager, logd, installd, zygote/app_process (`fork` maps to Darwin
-`fork`), SurfaceFlinger, inputflinger, audioserver, cameraserver,
-MediaProvider and DnsResolver.
+servicemanager, logd, installd, zygote/app_process (`fork` spawns a fresh
+`linux-run` that takes over the parent, `docs/fork.md`), SurfaceFlinger,
+inputflinger, audioserver, cameraserver, MediaProvider and DnsResolver.
 
 - **Scoped storage:** the original MediaProvider FUSE daemon serves
   `/storage/emulated`. `/dev/fuse` is implemented in the syscall layer, since

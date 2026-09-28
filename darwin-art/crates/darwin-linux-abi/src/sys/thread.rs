@@ -11,10 +11,9 @@
 //! stay below 100000), and below 2^30 as `FUTEX_TID_MASK` requires. When
 //! darwin-artd owns the pid space (ADR 0012, section 7) it assigns them.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use super::park::Parker;
 use super::signal::ThreadSignals;
@@ -435,54 +434,6 @@ extern "C" fn thread_start(arg: *mut libc::c_void) -> *mut libc::c_void {
 
 // ---- exit -----------------------------------------------------------------------
 
-unsafe extern "C" {
-    fn mach_thread_self() -> u32;
-    fn mach_port_deallocate(task: u32, name: u32) -> i32;
-    fn thread_info(thread: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
-    static mach_task_self_: u32;
-}
-
-/// Host threads of exited guest threads that may still be tearing down:
-/// their Mach ports, until the threads are dead.
-static EXITING: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-
-/// This module's locks for a fork (`sys::forklock`) besides the thread
-/// layer's own protocol.
-pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
-    super::forklock::mutex(&EXITING, held)
-}
-
-/// Wait (up to a second) until the host threads of exited guest threads
-/// are gone. A fork must not catch one in its teardown: pthread TSD
-/// destructors run Objective-C code, and a class whose `+initialize` a
-/// fork interrupts kills the child when it first uses it. A guest checks
-/// that it is single-threaded (zygote, through /proc/self/task) before it
-/// forks, and exited threads have left that list already.
-pub fn wait_exited() {
-    const THREAD_BASIC_INFO: i32 = 3;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    loop {
-        let mut ports = EXITING.lock().unwrap_or_else(|e| e.into_inner());
-        ports.retain(|&port| {
-            let mut info = [0i32; 10];
-            let mut count = info.len() as u32;
-            // SAFETY: querying a thread port we hold a send right to.
-            let alive =
-                unsafe { thread_info(port, THREAD_BASIC_INFO, info.as_mut_ptr(), &mut count) } == 0;
-            if !alive {
-                // SAFETY: dropping our right to a dead thread's port.
-                unsafe { mach_port_deallocate(mach_task_self_, port) };
-            }
-            alive
-        });
-        if ports.is_empty() || std::time::Instant::now() > deadline {
-            return;
-        }
-        drop(ports);
-        std::thread::sleep(std::time::Duration::from_micros(200));
-    }
-}
-
 /// exit(code): end the calling thread. The process ends with the last one
 /// (with the main thread's code if it exited earlier, as Linux reports).
 pub fn exit(a: [u64; 6]) -> ! {
@@ -521,13 +472,6 @@ pub fn exit(a: [u64; 6]) -> ! {
     super::signal::reroute_process_pending();
     let ctx = th.ctx;
     let stacks = th.stacks.lock().unwrap().take();
-    // The guest sees the thread gone; the host thread still has its
-    // teardown to run (TSD destructors, which can reach Foundation).
-    // SAFETY: a new send right to this thread, kept until it is dead.
-    EXITING
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(unsafe { mach_thread_self() });
     // SAFETY: nothing runs on this thread's context, stacks or record after
     // this; the main thread's record stays (host handlers may reach it).
     unsafe {
@@ -545,6 +489,7 @@ pub fn exit_group(a: [u64; 6]) -> ! {
 }
 
 fn end_process(code: i32) -> ! {
+    super::fork::spawn::wait_handovers();
     super::cred::forget(pid());
     // SAFETY: ending the process without host atexit handlers, as Linux's
     // exit_group.
@@ -592,116 +537,24 @@ pub fn get_robust_list(a: [u64; 6]) -> i64 {
 
 // ---- fork -------------------------------------------------------------------------
 
-/// The layer's shared state held across a Darwin fork, so that the child
-/// copies none of it mid-update. Taken in the lock order used elsewhere.
-struct ForkLocks {
-    /// The host signal mask before the fork: host signals stay blocked
-    /// until the child has rebuilt its thread and signal state, so none is
-    /// recorded against the parent's records and then dropped.
-    mask: libc::sigset_t,
-    timers: MutexGuard<'static, i32>,
-    stacks: MutexGuard<'static, Vec<u64>>,
-    signals: super::signal::ForkLocks,
-    ptimers: MutexGuard<'static, Vec<super::ptimer::Timer>>,
-    threads: MutexGuard<'static, Option<HashMap<i32, Arc<Thread>>>>,
-}
-
-thread_local! {
-    static FORK_LOCKS: RefCell<Option<ForkLocks>> = const { RefCell::new(None) };
-}
-
-/// Call right before forking a guest process (the forking thread must be a
-/// guest thread); then [`fork_parent`] in the parent and [`fork_child`] in
-/// the child.
-pub fn fork_prepare() {
-    let me = current().expect("fork from a thread without a guest context");
-    let mut mask: libc::sigset_t = 0;
-    // SAFETY: blocking every host signal on the calling thread.
-    unsafe {
-        let mut all: libc::sigset_t = 0;
-        libc::sigfillset(&mut all);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &all, &mut mask);
+/// Fork: the forking thread's name and scheduling attributes, which the
+/// child's main thread takes.
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    let th = current().expect("fork from a thread without a guest context");
+    w.bytes(&*th.name.lock().unwrap_or_else(|e| e.into_inner()));
+    for v in [&th.sched.nice, &th.sched.policy, &th.sched.priority] {
+        w.i32(v.load(SeqCst));
     }
-    super::futex::fork_lock();
-    let timers = super::park::fork_lock();
-    let stacks = context::fork_lock();
-    let signals = super::signal::fork_lock(me);
-    let ptimers = super::ptimer::fork_lock();
-    let threads = THREADS.lock().unwrap_or_else(|e| e.into_inner());
-    FORK_LOCKS.with(|f| {
-        *f.borrow_mut() = Some(ForkLocks {
-            mask,
-            timers,
-            stacks,
-            signals,
-            ptimers,
-            threads,
-        })
-    });
 }
 
-fn fork_locks() -> ForkLocks {
-    FORK_LOCKS
-        .with(|f| f.borrow_mut().take())
-        .expect("fork_prepare was not called")
-}
-
-pub fn fork_parent() {
-    let l = fork_locks();
-    let mask = l.mask;
-    drop(l);
-    super::futex::fork_unlock(false);
-    unmask(mask);
-}
-
-fn unmask(mask: libc::sigset_t) {
-    // SAFETY: restoring the calling thread's host signal mask.
-    unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) };
-}
-
-/// In the child, where only the calling thread exists: it becomes the main
-/// thread (tid = the new pid) with the signal mask, alternate stack, name
-/// and scheduling attributes it had; every other thread, futex waiter,
-/// pending signal and the timer thread are gone.
-pub fn fork_child() {
-    let mut l = fork_locks();
-    let old = current().expect("fork_child on a thread without a guest context");
-    let ctx = old.ctx;
-    let new = Arc::new(Thread::new(pid(), ctx, old.sig.mask()));
-    *new.name.lock().unwrap() = *old.name.lock().unwrap();
-    for (d, s) in [
-        (&new.sched.nice, &old.sched.nice),
-        (&new.sched.policy, &old.sched.policy),
-        (&new.sched.priority, &old.sched.priority),
-    ] {
-        d.store(s.load(SeqCst), SeqCst);
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let th = current().expect("fork child without a guest context");
+    let mut name = [0u8; 16];
+    let saved = r.bytes();
+    let n = saved.len().min(16);
+    name[..n].copy_from_slice(&saved[..n]);
+    set_name_of(th.tid, name);
+    for v in [&th.sched.nice, &th.sched.policy, &th.sched.priority] {
+        v.store(r.i32(), SeqCst);
     }
-    *new.stacks.lock().unwrap() = old.stacks.lock().unwrap().take();
-    // SAFETY: pthread_self is always valid.
-    new.pthread
-        .store(unsafe { libc::pthread_self() } as usize, SeqCst);
-    let t = l.threads.get_or_insert_with(HashMap::new);
-    t.clear();
-    t.insert(new.tid, new.clone());
-    super::signal::fork_child(l.signals, old, &new);
-    super::ptimer::fork_child(l.ptimers);
-    // The exiting threads were the parent's; their ports are not ours.
-    EXITING.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    MAIN_PTHREAD.store(new.pthread.load(SeqCst), SeqCst);
-    MAIN_THREAD.store(Arc::as_ptr(&new) as usize, SeqCst);
-    LEADER_EXIT.store(-1, SeqCst);
-    NEXT_TID.store(0, SeqCst);
-    // SAFETY: the calling thread's own context; the old record is leaked
-    // (the parent's copy of it lives on in the parent).
-    unsafe {
-        (*ctx).tid = new.tid as u64;
-        (*ctx).attn = &new.sig.attn;
-        (*ctx).thread = Arc::into_raw(new);
-    }
-    drop(l.threads);
-    context::fork_child();
-    drop(l.stacks);
-    super::park::fork_child(l.timers);
-    super::futex::fork_unlock(true);
-    unmask(l.mask);
 }

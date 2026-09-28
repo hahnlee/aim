@@ -300,6 +300,9 @@ impl IVold::IVold for Vold {
     }
     fn initUser0(&self) -> binder::Result<()> {
         let dirs = storage::init_user0().map_err(|e| io_error("initUser0", e))?;
+        // Apps that start before StorageManager mounts the volume (at boot
+        // completion) get their /storage view from these links too.
+        storage::link_emulated(0).map_err(|e| io_error("initUser0", e))?;
         log::info!("initialized user 0: {} directories", dirs.len());
         Ok(())
     }

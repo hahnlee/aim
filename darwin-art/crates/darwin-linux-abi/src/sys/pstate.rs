@@ -287,6 +287,14 @@ pub fn getcpu(a: [u64; 6]) -> i64 {
 
 static PERSONALITY: AtomicU32 = AtomicU32::new(0);
 
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    w.u32(personality_value());
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    set_personality(r.u32());
+}
+
 pub fn personality_value() -> u32 {
     PERSONALITY.load(Ordering::Relaxed)
 }

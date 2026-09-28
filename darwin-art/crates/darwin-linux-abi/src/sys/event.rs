@@ -272,6 +272,49 @@ fn poke() {
     TIMERS.wake.notify_all();
 }
 
+/// Fork: an eventfd is its hidden peer (inherited) and its mode.
+pub(super) fn save_event(e: &EventFd, w: &mut super::fork_state::Writer) {
+    w.i32(e.peer.load(Ordering::Relaxed));
+    w.bool(e.semaphore);
+}
+
+pub(super) fn load_event(r: &mut super::fork_state::Reader) -> Arc<EventFd> {
+    let peer = r.i32();
+    Arc::new(EventFd {
+        peer: AtomicI32::new(peer),
+        semaphore: r.bool(),
+        lock: Mutex::new(()),
+    })
+}
+
+/// Fork: a timerfd is its hidden peer and its settings (Linux children
+/// share the timer with the parent; here each process has a copy).
+pub(super) fn save_timer(t: &TimerFd, w: &mut super::fork_state::Writer) {
+    w.i32(t.peer.load(Ordering::Relaxed));
+    w.bool(t.realtime);
+    let s = t.state.lock().unwrap();
+    w.u64(s.next);
+    w.u64(s.interval);
+    w.bool(s.token);
+}
+
+pub(super) fn load_timer(r: &mut super::fork_state::Reader) -> Arc<TimerFd> {
+    let peer = r.i32();
+    let realtime = r.bool();
+    let state = TimerState {
+        next: r.u64(),
+        interval: r.u64(),
+        token: r.bool(),
+    };
+    let t = Arc::new(TimerFd {
+        peer: AtomicI32::new(peer),
+        realtime,
+        state: Mutex::new(state),
+    });
+    TIMERS.list.lock().unwrap().1.push(Arc::downgrade(&t));
+    t
+}
+
 /// Fork child: the timer thread did not survive.
 pub fn after_fork_child() {
     let mut g = TIMERS.list.lock().unwrap_or_else(|e| e.into_inner());

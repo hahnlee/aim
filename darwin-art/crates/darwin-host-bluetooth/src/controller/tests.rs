@@ -129,8 +129,8 @@ fn start_up_dialogue_of_the_android_stack() {
     assert_eq!(le, vec![0, 0, 0x10, 0, 0, 0, 0, 0, 0]);
     assert_eq!(complete(&mut c, cmd::LE_READ_SUPPORTED_STATES, &[])[0], 0);
     let f = complete(&mut c, cmd::READ_LOCAL_EXTENDED_FEATURES, &[0]);
-    // Page 0 of 0: LE supported, BR/EDR not supported.
-    assert_eq!(f, vec![0, 0, 0, 0, 0, 0, 0, 0x60, 0, 0, 0]);
+    // Page 0 of 0: LE supported, BR/EDR not supported, SSP.
+    assert_eq!(f, vec![0, 0, 0, 0, 0, 0, 0, 0x60, 0, 0x08, 0]);
     assert_eq!(
         complete(&mut c, cmd::LE_SET_EVENT_MASK, &[0xff; 8]),
         vec![0]

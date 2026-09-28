@@ -138,8 +138,11 @@ pub const VERSION: u8 = 0x0c;
 pub const MANUFACTURER: u16 = 0xffff;
 
 /// LMP features page 0: LE supported (bit 38), BR/EDR not supported
-/// (bit 37). The stack then runs LE only.
-pub const LMP_FEATURES: u64 = 1 << 38 | 1 << 37;
+/// (bit 37). The stack then runs LE only. Secure Simple Pairing (bit 51)
+/// too: the Android stack aborts at start-up without it
+/// (`btm_sec_dev_reset`: "only controllers with SSP is supported"), LE only
+/// or not.
+pub const LMP_FEATURES: u64 = 1 << 51 | 1 << 38 | 1 << 37;
 
 /// LE features: only Extended Advertising (bit 12), which carries a
 /// device's whole advertisement (CoreBluetooth merges the advertising PDU
@@ -226,5 +229,7 @@ mod tests {
         );
         assert_eq!(le_meta(0x02, &[1]), vec![0x3e, 2, 0x02, 1]);
         assert_eq!(LMP_FEATURES.to_le_bytes()[4], 0x60);
+        // The GD controller's SupportsSimplePairing: page 0, byte 6, bit 3.
+        assert_eq!(LMP_FEATURES.to_le_bytes()[6], 0x08);
     }
 }

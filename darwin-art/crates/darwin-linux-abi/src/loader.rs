@@ -105,21 +105,8 @@ fn read_headers(file: &std::fs::File, name: &str) -> Result<Headers, String> {
 fn reserve(h: &Headers, name: &str) -> Result<u64, String> {
     let span = h.hi - h.lo;
     if h.hdr.e_type == elf::ET_DYN {
-        // SAFETY: fresh PROT_NONE reservation.
-        let r = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                (span + h.align) as usize,
-                libc::PROT_NONE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        if r == libc::MAP_FAILED {
-            return Err(format!("{name}: cannot reserve {span:#x} bytes"));
-        }
-        let r = r as u64;
+        let r = crate::sys::map_guest_anon(span + h.align, libc::PROT_NONE)
+            .map_err(|_| format!("{name}: cannot reserve {span:#x} bytes"))?;
         let start = (r + h.align - 1) & !(h.align - 1);
         // SAFETY: trimming our own reservation.
         unsafe {
@@ -437,21 +424,8 @@ pub struct StackInputs<'a> {
 
 /// Build the Linux initial process stack and return the initial sp.
 pub fn build_stack(inp: &StackInputs) -> Result<u64, String> {
-    // SAFETY: fresh anonymous stack mapping.
-    let base = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            STACK_SIZE as usize,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANON,
-            -1,
-            0,
-        )
-    };
-    if base == libc::MAP_FAILED {
-        return Err("cannot allocate the guest stack".into());
-    }
-    let base = base as u64;
+    let base = crate::sys::map_guest_anon(STACK_SIZE, libc::PROT_READ | libc::PROT_WRITE)
+        .map_err(|_| "cannot allocate the guest stack".to_string())?;
     // Guard page at the bottom.
     // SAFETY: our own mapping.
     unsafe { libc::mprotect(base as *mut _, PAGE as usize, libc::PROT_NONE) };

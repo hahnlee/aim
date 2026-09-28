@@ -22,7 +22,7 @@ use crate::xrt::{self, ExecSource};
 
 use std::os::unix::ffi::OsStrExt;
 
-use super::{copies, vmmap, window};
+use super::{arena, copies, vmmap, window};
 
 pub(super) const PAGE: u64 = 16384;
 
@@ -232,6 +232,12 @@ pub fn mmap(a: [u64; 6]) -> i64 {
             addr = 0;
         }
     }
+    // Anywhere means anywhere in the guest range; MAP_FIXED_NOREPLACE
+    // wants exactly its address.
+    let placed = !fixed && !noreplace;
+    if placed {
+        addr = arena::hint(addr, len);
+    }
     let kind = flags & MAP_TYPE;
     let anon = flags & MAP_ANONYMOUS != 0;
     let mut hflags = if fixed { libc::MAP_FIXED } else { 0 };
@@ -349,6 +355,11 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         // SAFETY: unmapping the mapping we just created at the wrong place.
         unsafe { libc::munmap(base as *mut _, len as usize) };
         return -(EEXIST as i64);
+    }
+    if placed && !arena::contains(base, len) {
+        // SAFETY: unmapping the mapping Darwin placed outside the range.
+        unsafe { libc::munmap(base as *mut _, len as usize) };
+        return -(ENOMEM as i64);
     }
     match finish {
         Finish::Nothing => {}
@@ -477,8 +488,8 @@ const MADV_FREE: u64 = 8;
 const MADV_REMOVE: u64 = 9;
 
 use patch::vm::{
-    VM_FLAGS_ANYWHERE, VM_FLAGS_FIXED, VM_FLAGS_OVERWRITE, VM_INHERIT_COPY, mach_vm_deallocate,
-    mach_vm_protect, mach_vm_remap, task,
+    VM_FLAGS_FIXED, VM_FLAGS_OVERWRITE, VM_INHERIT_COPY, mach_vm_deallocate, mach_vm_protect,
+    mach_vm_remap, task,
 };
 
 unsafe extern "C" {
@@ -533,14 +544,9 @@ pub(super) fn inherit_shared(addr: u64, len: u64) {
     unsafe { mach_vm_inherit(task(), addr, len, VM_INHERIT_SHARE) };
 }
 
-/// Fresh anonymous memory anywhere.
+/// Fresh anonymous memory anywhere in the guest range.
 pub(super) fn allocate(len: u64) -> Result<u64, i64> {
-    let mut at = 0u64;
-    // SAFETY: allocating in our own task.
-    if unsafe { mach_vm_allocate(task(), &mut at, len, VM_FLAGS_ANYWHERE) } != 0 {
-        return Err(-(ENOMEM as i64));
-    }
-    Ok(at)
+    arena::map_anon(len, libc::PROT_READ | libc::PROT_WRITE)
 }
 
 /// Linux MADV_DONTNEED on private memory must read back zeros (anonymous)
@@ -710,11 +716,10 @@ pub fn mremap(a: [u64; 6]) -> i64 {
     }
     if old_len == 0 {
         // Linux: a second mapping of the same (shared) pages.
-        let mut at = 0u64;
-        // SAFETY: reserving an address range in our task.
-        if unsafe { mach_vm_allocate(task(), &mut at, new_len, VM_FLAGS_ANYWHERE) } != 0 {
-            return -(ENOMEM as i64);
-        }
+        let at = match allocate(new_len) {
+            Ok(a) => a,
+            Err(e) => return e,
+        };
         return match remap_shared(at, old, new_len) {
             Ok(()) => at as i64,
             Err(e) => e,
@@ -741,11 +746,10 @@ pub fn mremap(a: [u64; 6]) -> i64 {
     if flags & MREMAP_MAYMOVE == 0 {
         return -(ENOMEM as i64);
     }
-    let mut at = 0u64;
-    // SAFETY: reserving the destination in our task.
-    if unsafe { mach_vm_allocate(task(), &mut at, new_len, VM_FLAGS_ANYWHERE) } != 0 {
-        return -(ENOMEM as i64);
-    }
+    let at = match allocate(new_len) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
     match move_to(old, old_len, at, new_len, keep_old) {
         Ok(()) => at as i64,
         Err(e) => {
@@ -998,7 +1002,20 @@ pub fn brk(a: [u64; 6]) -> i64 {
     b.cur as i64
 }
 
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
-    super::forklock::mutex(&BRK, held)
+/// Fork: the program break (its pages come with the guest's memory).
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    let b = BRK.lock().unwrap();
+    for v in [b.base, b.cur, b.mapped, b.limit] {
+        w.u64(v);
+    }
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let v = [(); 4].map(|_| r.u64());
+    *BRK.lock().unwrap() = Brk {
+        base: v[0],
+        cur: v[1],
+        mapped: v[2],
+        limit: v[3],
+    };
 }

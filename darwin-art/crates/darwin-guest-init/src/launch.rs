@@ -419,6 +419,9 @@ pub fn create_socket(spec: &SocketSpec) -> Result<(OwnedFd, i32), String> {
         ),
         Err(e) => return Err(format!("bind {}: {e}", spec.host_path.display())),
     };
+    if created_type == libc::SOCK_DGRAM {
+        set_linux_buffers(fd.as_raw_fd());
+    }
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&spec.host_path, fs::Permissions::from_mode(spec.perm))
         .map_err(|e| format!("chmod {}: {e}", spec.host_path.display()))?;
@@ -427,6 +430,25 @@ pub fn create_socket(spec: &SocketSpec) -> Result<(OwnedFd, i32), String> {
         return Err(format!("listen: {}", io::Error::last_os_error()));
     }
     Ok((fd, created_type))
+}
+
+/// Linux's default socket buffers (net.core.[rw]mem_default). Darwin gives
+/// an AF_UNIX datagram socket 4 KiB to receive into, so logd's `logdw`
+/// overflowed and liblog dropped thousands of messages in a boot.
+fn set_linux_buffers(fd: i32) {
+    const BUFFER: libc::c_int = 212_992;
+    for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+        // SAFETY: setting an int option on our socket.
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                opt,
+                (&BUFFER as *const libc::c_int).cast(),
+                size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+    }
 }
 
 fn open_file(spec: &FileSpec) -> Result<OwnedFd, String> {
@@ -666,5 +688,40 @@ mod tests {
             descriptor_env_name("ANDROID_FILE_", "/dev/kmsg"),
             "ANDROID_FILE__dev_kmsg"
         );
+    }
+
+    /// A datagram socket (logd's `logdw`) holds what Linux's does, not
+    /// Darwin's 4 KiB.
+    #[test]
+    fn a_dgram_socket_gets_linux_buffers() {
+        let dir = std::env::temp_dir().join(format!("gi-sock-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let spec = SocketSpec {
+            name: "logdw".into(),
+            socket_type: SocketType::Dgram,
+            passcred: true,
+            listen: false,
+            perm: 0o222,
+            uid: 0,
+            gid: 0,
+            host_path: dir.join("logdw"),
+            env_name: "ANDROID_SOCKET_logdw".into(),
+            fd: 3,
+        };
+        let (fd, _) = create_socket(&spec).unwrap();
+        let mut v: libc::c_int = 0;
+        let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: reading an int option of our socket into a local.
+        unsafe {
+            libc::getsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&mut v as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        };
+        assert!(v >= 212_992, "{v}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

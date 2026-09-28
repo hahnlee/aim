@@ -47,7 +47,7 @@ unsafe extern "C" {
 }
 
 /// The process id, answered by the lean syscall path without a Darwin call.
-/// Set once in [`init_thread`]; a forked child refreshes it.
+/// Set once in [`init_thread`].
 pub static mut LINUX_ABI_PID: u64 = 0;
 
 /// Full guest register state saved at a syscall boundary. The fields up to
@@ -196,6 +196,13 @@ pub fn guest_scs() -> u64 {
     unsafe { slot_ptr(slot::SCS).read() }
 }
 
+/// Set the guest shadow-call-stack pointer of the current thread (a fork
+/// child taking over its parent's shadow stack).
+pub fn set_guest_scs(v: u64) {
+    // SAFETY: slot claimed in `init_thread`.
+    unsafe { slot_ptr(slot::SCS).write(v) }
+}
+
 const HOST_STACK_SIZE: usize = 1 << 20;
 /// Shadow call stack: guard page, 32 KiB, guard page (bionic uses 16 KiB).
 const SCS_GUARD: usize = 16 << 10;
@@ -229,17 +236,6 @@ pub struct HostStacks {
 /// Stacks of exited threads, reused by new ones (thread pools churn).
 static SPARE_STACKS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 const MAX_SPARE_STACKS: usize = 64;
-
-/// Held across a fork (see `sys::thread::fork_prepare`).
-pub fn fork_lock() -> std::sync::MutexGuard<'static, Vec<u64>> {
-    SPARE_STACKS.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// In the child: the lean getpid answers the new pid.
-pub fn fork_child() {
-    // SAFETY: only the forking thread exists in the child.
-    unsafe { LINUX_ABI_PID = libc::getpid() as u64 };
-}
 
 impl HostStacks {
     fn map() -> Self {

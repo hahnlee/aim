@@ -80,15 +80,22 @@ kernfs	/proc	<runtime>/kernfs/proc
 | `/mnt`, `/tmp`, `/storage`, `/config`, `/data_mirror`, `/linkerconfig` | `<runtime>/<name>` | `rw` | per boot |
 | `/apex/apex-info-list.xml` | `<runtime>/apex/apex-info-list.xml` | `rw` (one file) | per boot |
 | `/data`, `/metadata`, `/cache` | `<data>/<name>` | `rw` | persistent |
+| `/data/user/0` | `<data>/data/data` | `rw` | persistent (vold's bind of `/data/data`) |
 | `/proc`, `/sys` | `<runtime>/kernfs/{proc,sys}` | `kernfs` | per boot |
 | `/sys/fs/cgroup` | `<runtime>/cgroup` | `cgroup2` | per boot |
 | `/sys/fs/bpf` | `<runtime>/bpf` | `bpf` | per boot |
-| init's `mount none SRC DST bind` between `rw` areas | SRC's host path | `rw` | added when init runs it |
+| init's `mount none SRC DST bind` between `rw` areas | SRC's host path | `rw` | added when init runs it; with `rec`, the entries below SRC are copied below DST |
 | everything else | `<image>/...` | `root`, read-only | derived image |
 
 `<runtime>` defaults to `<data>/run` and is recreated on every boot. An
 init bind mount rewrites the file, so processes started afterwards see it
 (the data mirrors zygote binds app data from); running processes do not.
+vold's bind of `/data/data` onto `/data/user/0` (`prepare_special_dirs`)
+reaches every process and `/data_mirror/data_ce/null/0` through `/data`'s
+shared propagation on Android, so it is an entry from the start; init's
+`bind rec` of `/data/user` copies it to the mirror. A symlink there would
+be followed in each process's own view, and zygote's tmpfs over
+`/data/data` in an app would hide the app's CE storage (#234).
 
 Resolution rules:
 
@@ -102,6 +109,8 @@ Resolution rules:
    in the image and `/dev/stdin -> /proc/self/fd/0` in the runtime `/dev`.
    Each intermediate result goes through the map again.
    `PathMap::resolve` in `src/paths.rs` is the reference implementation.
+   A process's own mount (`mount(2)` in the layer) hides the older entries
+   at and below its mount point, as mounting over a directory does.
 4. `kernfs` entries are not a view of `/proc` or `/sys`. The layer keeps
    synthesizing those (`/proc/self/*` first). See section 7 for what the
    tree contains.
@@ -172,11 +181,11 @@ rlimit	13	40	40
 - `setuid`, `setgid`, `setresuid`, `setgroups`, `capset`,
   `prctl(PR_CAPBSET_DROP)` and `PR_SET_KEEPCAPS` update the in-process
   state with Linux permission rules. They do not change the file.
-- **Children.** A forked child inherits the in-process state. The layer
-  writes the child's identity to `<dir of FILE>/by-pid/<host pid>`, where
-  guest-init already links each service's pid. It removes the file when the
-  process exits. The by-pid directory is the process table for peer
-  credentials:
+- **Children.** A forked child inherits the in-process state
+  (`docs/fork.md`). The layer writes the child's identity to
+  `<dir of FILE>/by-pid/<host pid>`, where guest-init already links each
+  service's pid. It removes the file when the process exits. The by-pid
+  directory is the process table for peer credentials:
   - `SO_PEERCRED` and `SCM_CREDENTIALS` on AF_UNIX sockets must report the
     peer's guest pid, uid and gid from there (`LOCAL_PEERPID` →
     `by-pid/<pid>`).
@@ -233,6 +242,10 @@ per change:
 ```
 
 For each path the most recent line wins, field by field (`-` = unchanged).
+The layer keys a file by its path through the entry with the shortest host
+prefix (the area, not a bind into it: `/data/data/<pkg>` whether reached
+through `/data/user/0` or `/data_mirror`); a file in a process's own tmpfs
+by its host path.
 `stat`, `fstat` and `newfstatat` must report these values. Paths with no
 entry report uid 0 and gid 0 with the host permission bits. Two known
 requirements:

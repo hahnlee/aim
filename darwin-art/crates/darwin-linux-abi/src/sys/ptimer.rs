@@ -148,16 +148,6 @@ pub fn dequeued(info: &mut Siginfo) {
     }
 }
 
-/// Held across a fork (see `thread::fork_prepare`), after the signal locks.
-pub fn fork_lock() -> MutexGuard<'static, Vec<Timer>> {
-    timers()
-}
-
-/// Fork child: timers are not inherited (and the timer kqueue is gone).
-pub fn fork_child(mut t: MutexGuard<'static, Vec<Timer>>) {
-    t.clear();
-}
-
 fn clock_realtime(clock: u64) -> Result<bool, i64> {
     match clock {
         0 | 8 => Ok(true),      // REALTIME(_ALARM)

@@ -30,17 +30,6 @@ pub fn init(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// In a forked child: a new binder process. Mach rights do not survive
-/// fork, so the child connects to the daemon again; the binder files it
-/// inherited belong to the parent's binder process and are forgotten (as
-/// libbinder refuses to use them after fork).
-pub(super) fn after_fork_child() {
-    let Some(name) = NAME.get() else { return };
-    darwin_binder_host::client::forget_thread_ports();
-    *FILES.lock().unwrap() = None;
-    *CLIENT.lock().unwrap() = Client::connect(name);
-}
-
 fn inode(fd: i32) -> Option<u64> {
     // SAFETY: fstat into a local buffer.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -181,19 +170,36 @@ pub fn mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: i32) -> Option<i64> 
     if len == 0 {
         return Some(-(EINVAL as i64));
     }
-    let hflags = libc::MAP_PRIVATE
-        | libc::MAP_ANON
-        | if flags & MAP_FIXED != 0 {
-            libc::MAP_FIXED
-        } else {
-            0
+    let hflags = libc::MAP_PRIVATE | libc::MAP_ANON;
+    let base = if flags & MAP_FIXED != 0 {
+        // SAFETY: reserving the range the receive buffer will replace.
+        let b = unsafe {
+            libc::mmap(
+                addr as *mut _,
+                len as usize,
+                libc::PROT_NONE,
+                hflags | libc::MAP_FIXED,
+                -1,
+                0,
+            )
         };
-    // SAFETY: reserving the range the receive buffer will replace.
-    let base = unsafe { libc::mmap(addr as *mut _, len as usize, libc::PROT_NONE, hflags, -1, 0) };
-    if base == libc::MAP_FAILED {
-        return Some(-(ENOMEM as i64));
-    }
-    let base = base as u64;
+        if b == libc::MAP_FAILED {
+            return Some(-(ENOMEM as i64));
+        }
+        b as u64
+    } else {
+        match super::arena::map(
+            super::arena::hint(addr, len),
+            len,
+            libc::PROT_NONE,
+            hflags,
+            -1,
+            0,
+        ) {
+            Ok(b) => b,
+            Err(_) => return Some(-(ENOMEM as i64)),
+        }
+    };
     Some(match file.mmap(base, len) {
         Ok(()) => base as i64,
         Err(e) => {
@@ -210,9 +216,4 @@ pub fn poll(fd: i32) {
     if let Some(file) = lookup(fd) {
         let _ = file.poll(super::process::gettid() as i32);
     }
-}
-
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
-    super::forklock::mutex(&CLIENT, held) && super::forklock::mutex(&FILES, held)
 }

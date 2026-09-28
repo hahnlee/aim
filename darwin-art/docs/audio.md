@@ -9,7 +9,8 @@ interim path (option A) stays until the switch in P6.
 | --- | --- |
 | HAL service: `IModule/default`, `IConfig/default` (audio.core V3) and `IFactory/default` (audio.effect V3) in one process | `hal/audio`, `/vendor/bin/hw/android.hardware.audio.service-aidl.darwin` |
 | FMQs laid out as libfmq's (both sides) | `hal/fmq` (`darwin-fmq`) |
-| Host module `audio` (id 7): AUHAL units and the shared ring | `crates/darwin-host-audio`, contract in `darwin_hostcall::audio` |
+| Host module `audio` (id 7): the shared ring, the null sink, the CoreAudio process's client | `crates/darwin-host-audio`, contract in `darwin_hostcall::audio` |
+| CoreAudio process (`linux-run --audio-io`): device queries and AUHAL units | `crates/darwin-host-audio/src/io.rs` |
 | `.rc` (service `vendor.audio-hal-aidl`) and vintf fragment | `hal/audio/*.rc`, `hal/audio/*.xml`, placed by `image/overlay.toml` |
 | HAL test client (not in the image) | `hal/audio/check` (`audio-hal-check`) |
 | Tests | `crates/darwin-host-audio` (unit, device), `crates/darwin-linux-abi/tests/audio.rs` (boot) |
@@ -32,9 +33,18 @@ the emulator's audio HAL (its `.rc`, its `IDevicesFactory` fragment,
 `bluetooth_audio.xml` and the HIDL `IEffectsFactory` in `manifest.xml`);
 nothing else of it remains to remove.
 
+## Start-up
+
+The service registers `IConfig`, `IModule` and `IFactory` at once, before
+anything touches CoreAudio: audioserver waits for them, and system_server's
+`AudioService` waits for audioserver, so a HAL stuck on CoreAudio stops the
+whole boot (#217). The module asks the host for the devices on a thread of
+its own right after start; the first binder call that needs the ports
+waits for that answer, which comes within 3 seconds.
+
 ## The primary module
 
-Built from the Mac's default devices at start-up (`FN_DEVICES`), in the
+Built from the Mac's default devices (`FN_DEVICES`), in the
 shape of AOSP's reference primary configuration. A device the Mac lacks is
 left out, and audioserver takes its no-device path.
 
@@ -68,7 +78,7 @@ Sound dose, telephony and Bluetooth are absent (null interfaces).
 ## A stream
 
 ```text
-audioserver                  HAL process (linux-run)                    CoreAudio I/O thread
+audioserver                  HAL process (linux-run)                    CoreAudio process's I/O thread
 libaudiohal ── data FMQ ──>  worker: burst → ring write (blocks if full)
             ── command FMQ ─>        ring: memfd, lock-free SPSC   ──>  render callback
             <─ reply FMQ ───         reply: position, latency            (never waits)
@@ -86,7 +96,7 @@ libaudiohal ── data FMQ ──>  worker: burst → ring write (blocks if ful
   do: `start`, `burst`, `drain`, `pause`, `flush`, `standby`, and the
   internal exit command that `close` sends.
 - **Host ring.** Each stream has a ring in a memfd that the host module
-  maps too (`darwin_hostcall::audio::Ring`): single producer, single
+  and the CoreAudio process map too (`darwin_hostcall::audio::Ring`): single producer, single
   consumer, positions in frames, with a header the host fills in (callback
   counts and time, xruns, a peak meter, a seqlocked position stamp and a
   latency probe). The render callback copies what the ring holds and plays
@@ -101,20 +111,96 @@ libaudiohal ── data FMQ ──>  worker: burst → ring write (blocks if ful
   device's rate and stops where the data ended. `latencyMs` is the device
   latency plus what the ring holds. `xrunFrames` counts silence played
   while the stream was active, not while idle.
-- **Input.** The input unit is set up on a thread of its own: its first
-  use asks macOS for microphone access and waits for the user's answer
-  (TCC), which the HAL must not wait for. Until the first capture callback
+- **Input.** The input unit is set up on the stream's first `start`, on a
+  thread of its own: its first use asks macOS for microphone access and
+  waits for the user's answer (TCC), which the HAL must not wait for.
+  Until the first capture callback
   the stream delivers silence at the capture rate, as from a muted
   microphone, so AudioFlinger's record thread keeps its pace.
 - **Stats.** On `standby` and `close` the worker logs what the callback
   saw: frames, callbacks and their host time, xruns, peak (dBFS) and the
   write-to-callback delay.
 
+## The CoreAudio process and teardown
+
+Every CoreAudio call of the HAL runs in a separate host process,
+`linux-run --audio-io`, which the module starts on its first request:
+
+```text
+HAL (linux-run)                                   linux-run --audio-io
+ module `audio` ── socket: requests, ring memfds ──▶ device queries, AUHAL units
+                ── lifeline: a pipe's write end ──▶ (EOF when the HAL is gone)
+ ring memfd ◀──────────── mapped by both ─────────▶ render and capture callbacks
+```
+
+- **Why.** On 2026-09-28 the host's coreaudiod stopped answering every
+  client (a plain host program's `AudioObjectGetPropertyData` hangs too). Its
+  log repeats `Monitor::BeginWriteOperation: still waiting ... RIP: 1 RP: 0
+  WIP: 0 WP: 1`: a property change (a write operation) waits for a read
+  operation in progress that never ends, and the change is dispatched to a
+  client whose notification worker never started (`HALS_Client.8317
+  (worker not started)`). In the minutes before, the HAL process was
+  restarted every 5 to 13 seconds (netd aborted, which restarts zygote,
+  which restarts audioserver, which restarts the HAL; and the host's
+  security agent killed processes, #232), each time querying the devices and
+  opening streams, and each start asked TCC for microphone access. The
+  hang began 8 seconds after one of those TCC requests. The most likely
+  cause is a HAL process that was SIGKILLed while CoreAudio was setting up
+  its client (or an input unit waiting for TCC): coreaudiod kept the half
+  made client, and waits for it forever. A SIGKILL cannot be caught, so no
+  stop or close path in the HAL process can prevent that; only a process
+  that is not killed abruptly can.
+- **Lifetime.** The CoreAudio process is the HAL process's child, in a
+  process group of its own (so a SIGKILL of the service's group does not
+  reach it), and ignores SIGINT and SIGHUP. When the HAL process goes,
+  however it goes, the kernel closes its ends of the socket and the
+  lifeline. The CoreAudio process then stops, uninitializes and disposes
+  every unit (in that order), waits for input units still being set up,
+  and exits. If CoreAudio itself does not return, it exits 10 seconds after
+  the lifeline closed.
+- **Input setup is deferred to the first start.** Opening an input stream
+  only maps its ring; the unit (and with it the TCC request) is made on the
+  stream's first `start`, on a thread of its own. audioserver opens the
+  input at boot without starting it, so a boot makes no TCC request.
+- **The module still maps each ring**, for the null sink below.
+
+## Without CoreAudio
+
+Every request to the CoreAudio process has a timeout: 3 seconds for the
+device query and opens (the first request also starts the process, and it
+is the first contact with coreaudiod), 2 seconds for start, stop and close.
+A request that is not answered in time gives the process up for the rest
+of the HAL process's life (no retry yet, #237): the module closes the
+socket and the lifeline (the process tears down whenever CoreAudio lets
+it), and
+
+- the devices are a stereo 48 kHz output named "Null output" with a
+  480-frame buffer, and no input, so audioserver's policy has its speaker
+  and takes its no-microphone path;
+- every stream, open or opened later, plays into the **null sink**: a
+  thread that runs the render callback's own ring logic at the stream's
+  rate (10 ms periods against CLOCK_MONOTONIC), so output is consumed,
+  the position stamps advance as a device's would, xruns are counted, and
+  AudioFlinger's threads keep their pace. An input stream on the null sink
+  captures silence at its rate.
+- A stream that was on the CoreAudio process gets `Ring::detached` set
+  first: from then on its callbacks (should they still run) leave the ring
+  alone, so the ring keeps one consumer.
+
+Returning errors instead was rejected: audioserver treats a failed open of
+the primary output as a missing module and retries it, and system_server's
+`AudioService` then waits on audioserver. The null sink keeps the boot and
+every app's audio path on their normal course.
+
 ## Verified (2026-09-28, MacBook Pro, M2 Pro)
 
-`crates/darwin-linux-abi/tests/audio.rs` (20 s) boots `guest-init --only
-servicemanager,hwservicemanager,system_suspend,vendor.audio-hal-aidl,audioserver`.
-Every test signal is at -90 dBFS: inaudible, checked through the render
+`crates/darwin-linux-abi/tests/audio.rs` (24 s) boots `guest-init --only
+logd,servicemanager,hwservicemanager,system_suspend,vendor.audio-hal-aidl,audioserver`.
+Services get /dev/null as stdio, so the test reads the HAL's messages from
+logd (`logcat -s`); the host module's own lines are in the service's log
+file, and the test fails if they show the null sink. The boot is stopped
+when the test ends, passed or failed. Re-run with CoreAudio in its own
+process (P3b): same results as below. Every test signal is at -90 dBFS: inaudible, checked through the render
 callback's counters and peak meter, not by ear.
 
 - **audioserver**, original: loads `libaudiohal@aidl` for both factories
@@ -164,12 +250,13 @@ must run, since audioserver configures the HIDL thread pool and waits for
 
 | Function | Argument block | Result |
 | --- | --- | --- |
-| `FN_DEVICES` | `Devices` (out): default output and input: rate, channels, buffer, latency, name | 0 |
+| `FN_DEVICES` | `Devices` (out): default output and input: rate, channels, buffer, latency, name; the null devices when CoreAudio does not answer | 0 |
 | `FN_OPEN` | `Open`: direction, format (PCM 16 or float), rate, channels, the ring memfd and its length; out: handle | 0, `-ENODEV`, `-EINVAL` |
 | `FN_START`, `FN_STOP`, `FN_CLOSE` | `Stream`: handle | 0 or `-EINVAL` |
 
-The host maps the ring from the guest's fd (the syscall layer's
-descriptors are the process's own) and keeps no guest pointer. Output uses
+The module maps the ring from the guest's fd (the syscall layer's
+descriptors are the process's own) and passes the fd on to the CoreAudio
+process, which maps it too; neither keeps a guest pointer. Output uses
 the DefaultOutput unit; input the HAL output unit with input enabled on the
 default input device. Stamps convert CoreAudio's host time (mach absolute
 time) to the guest's CLOCK_MONOTONIC, which is the host's.

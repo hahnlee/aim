@@ -8,11 +8,18 @@
 //! nothing is copied. The table of entry points is generated from the
 //! Khronos registry by `tools/gen-gpu-thunks.py`.
 //!
+//! The guest's `EGLDisplay`s are handles of [`display`]: ANGLE's display,
+//! and with it the process's Metal device, is created on first use in the
+//! process that uses it. A guest fork child is a fresh process that takes
+//! the handles over ([`fork_state`]) and loads ANGLE again when the guest
+//! first calls it.
+//!
 //! Three functions are not plain forwards: [`FN_INIT`] loads ANGLE,
 //! [`FN_IMPORT_BUFFER`] turns a mapped graphics buffer into an `EGLImage`
 //! over a linear Metal texture ([`metal`]), and [`FN_PRESENT`] copies a
 //! window surface's pbuffer into the buffer being queued ([`present`]).
 
+mod display;
 mod metal;
 mod present;
 #[rustfmt::skip]
@@ -22,7 +29,7 @@ use std::ffi::{CStr, CString, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use darwin_hostcall::gpu::{
     FN_IMPORT_BUFFER, FN_INIT, FN_PRESENT, FN_TABLE_BASE, ImportBuffer, Init, Present, VERSION,
@@ -126,7 +133,10 @@ unsafe fn forward(i: usize, args: u64, len: u64) -> i64 {
     if len != ((nx + nd + ns) * 8) as u64 {
         return EINVAL;
     }
-    let f = RESOLVED[i].load(Ordering::Relaxed);
+    let mut f = RESOLVED[i].load(Ordering::Relaxed);
+    if f == 0 && RELOAD.load(Ordering::Relaxed) && load().is_ok() {
+        f = RESOLVED[i].load(Ordering::Relaxed);
+    }
     if f == 0 {
         return 0;
     }
@@ -146,10 +156,23 @@ unsafe fn forward(i: usize, args: u64, len: u64) -> i64 {
             regs.as_ptr()
         };
         if e.lib == Lib::Egl {
+            if let Some(handle) = display::get(e.name, &regs) {
+                return handle as i64;
+            }
             // EGL creates Metal objects; guest threads have no
             // autorelease pool of their own.
             let pool = metal::pool_push();
-            let r = darwin_gpu_forward(f, regs.as_ptr(), stack, ns as u64);
+            // A display is always the first argument.
+            let handle = regs[0] as usize;
+            if nx > 0 {
+                regs[0] = display::host(handle) as u64;
+            }
+            let mut r = darwin_gpu_forward(f, regs.as_ptr(), stack, ns as u64);
+            if e.name == c"eglGetCurrentDisplay" {
+                r = display::guest(r as usize) as u64;
+            } else if e.name == c"eglInitialize" && r as u32 == 1 {
+                display::initialized(handle);
+            }
             metal::pool_pop(pool);
             r as i64
         } else {
@@ -195,6 +218,28 @@ fn dlopen(dir: &Path, name: &str) -> *mut c_void {
         eprintln!("[gpu] cannot load {}: {err}", dir.join(name).display());
     }
     h
+}
+
+/// Set in a fork child whose parent had loaded ANGLE: the guest's driver
+/// is initialized, so the first forwarded call loads it here.
+static RELOAD: AtomicBool = AtomicBool::new(false);
+
+/// The state a guest fork child takes over: whether ANGLE is loaded, and
+/// the display handles.
+pub fn fork_state() -> Vec<u8> {
+    let loaded = RESOLVED.iter().any(|f| f.load(Ordering::Relaxed) != 0);
+    let mut v = vec![loaded as u8];
+    v.extend(display::fork_state());
+    v
+}
+
+/// Take over a parent's [`fork_state`].
+pub fn restore_fork_state(b: &[u8]) {
+    let Some((&loaded, displays)) = b.split_first() else {
+        return;
+    };
+    RELOAD.store(loaded != 0, Ordering::Relaxed);
+    display::restore_fork_state(displays);
 }
 
 /// Load ANGLE once per process and resolve every entry point.

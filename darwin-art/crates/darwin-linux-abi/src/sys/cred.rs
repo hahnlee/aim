@@ -373,6 +373,35 @@ pub fn capable(cap: u32) -> bool {
     read(|id| id.capable(cap))
 }
 
+/// Fork: the identity, the process table and the forking thread's nice
+/// value (the child's main thread has it).
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    w.str(&current().to_text());
+    w.opt(BY_PID.get(), |w, d| w.path(d));
+    let tid = super::thread::gettid() as i32;
+    let nice = THREAD_NICE
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|t| t.0 == tid)
+        .map(|t| t.1);
+    w.opt(nice, |w, n| w.i32(n));
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let id = Identity::parse(&r.str()).unwrap_or_default();
+    let by_pid = r.opt(|r| r.path());
+    if let Some(nice) = r.opt(|r| r.i32()) {
+        // SAFETY: trivial.
+        THREAD_NICE
+            .lock()
+            .unwrap()
+            .push((unsafe { libc::getpid() }, nice));
+    }
+    init(id, by_pid);
+    after_fork_child();
+}
+
 /// In a forked child: publish the inherited identity under the new pid.
 pub(super) fn after_fork_child() {
     let id = current();
@@ -939,11 +968,6 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
     }
     // SAFETY: plain setpriority.
     crate::errno::check(unsafe { libc::setpriority(a[0] as i32, a[1] as u32, nice) } as i64)
-}
-
-/// This module's locks for a fork (`sys::forklock`).
-pub(crate) fn fork_try(held: &mut Vec<super::forklock::Guard>) -> bool {
-    super::forklock::mutex(&STATE, held) && super::forklock::mutex(&THREAD_NICE, held)
 }
 
 #[cfg(test)]

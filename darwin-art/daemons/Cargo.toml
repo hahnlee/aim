@@ -5,12 +5,13 @@
 #   serve (IApexService, IVold, INetd), over the system variant of AOSP's
 #   Rust binder crate (hal/binder with the `system` feature);
 # - log: logcat for the daemons;
-# - apexd, vold, netd: each replaces the original program of that name,
-#   which the original init .rc still starts.
+# - apexd, vold, netd, lmkd: each replaces the original program of that
+#   name, which the original init .rc still starts.
 [workspace]
 members = [
     "aidl/*",
     "apexd",
+    "lmkd",
     "log",
     "netd",
     "vold",

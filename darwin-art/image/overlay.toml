@@ -783,6 +783,7 @@ path = "/system/bin/netd"
 source = "_build/daemons/bin/netd"
 reason = "netd drives netlink, iptables, policy routing and eBPF; guest sockets are host sockets, so this INetd keeps the network bookkeeping, answers fwmarkd and hosts the original DnsResolver"
 
-[[remove]]
-path = "/system/etc/init/lmkd.rc"
-reason = "lmkd kills by PSI and memcg pressure, which Darwin does not report; not started until it is backed by macOS memory-pressure events (ActivityManager runs without it)"
+[[replace]]
+path = "/system/bin/lmkd"
+source = "_build/daemons/bin/lmkd"
+reason = "lmkd kills by PSI and memcg pressure, which Darwin does not report; this lmkd answers the control socket ActivityManager waits on, and kills nothing (#222)"

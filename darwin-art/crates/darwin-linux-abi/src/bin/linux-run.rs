@@ -55,7 +55,14 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
   --personality HEX      personality(2) value
   --mounts TEXT          the process's own mounts (bind, tmpfs), one per line
   --exec EXECFN          PROGRAM is followed by the full argv (argv[0]
-                         included) and EXECFN is AT_EXECFN, as after execve";
+                         included) and EXECFN is AT_EXECFN, as after execve
+
+  linux-run --audio-io   (internal) the audio host module's CoreAudio
+                         process, started by the module itself
+  linux-run [RUNTIME OPTIONS] --fork-child FDS
+                         (internal) the child of a guest fork, spawned by
+                         the parent, which hands it its memory and state;
+                         FDS are the parent's kqueue fd numbers";
 
 fn usage() -> ! {
     eprintln!("{USAGE}");
@@ -87,23 +94,6 @@ fn host_environment() -> Vec<Vec<u8>> {
     out
 }
 
-/// Tells the Objective-C runtime that this executable forks while it has
-/// threads, and that its children run on without exec: a guest `fork` is a
-/// Darwin `fork` (zygote's children never exec). Without it, a child of a
-/// multithreaded fork treats any two of its threads meeting in one class's
-/// `+initialize` as a fork hazard and kills itself (the SIGKILL of
-/// system_server seconds into its start, with no trace in the guest). The
-/// runtime reads the section from the images it registers
-/// (`DisableInitializeForkSafety` in objc4's `map_images_nolock`), which
-/// are those with an `__objc_imageinfo` (an empty one: no classes).
-#[used]
-#[unsafe(link_section = "__DATA,__objc_fork_ok")]
-static OBJC_FORK_OK: [u32; 2] = [0, 0];
-
-#[used]
-#[unsafe(link_section = "__DATA,__objc_imageinfo,regular,no_dead_strip")]
-static OBJC_IMAGE_INFO: [u32; 2] = [0, 0];
-
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let mut root = PathBuf::from("/");
@@ -123,8 +113,17 @@ fn main() {
     let mut diag_fd = None;
     let program = loop {
         let Some(a) = args.next() else { usage() };
+        if a == "--fork-child" {
+            // The child of a guest fork (`sys::fork`), after the runtime
+            // options; the value lists the fds to hold for it.
+            let kqueues = args.next().unwrap_or_else(|| usage());
+            darwin_linux_abi::sys::reserve_fork_fds(&kqueues.to_string_lossy());
+            break None;
+        }
         let mut value = || args.next().unwrap_or_else(|| usage());
         match a.to_str().unwrap_or("") {
+            // The audio host module's CoreAudio process (docs/audio.md).
+            "--audio-io" => darwin_host_audio::io::main(),
             "--root" => root = PathBuf::from(value()),
             "--cache" => cache = Some(PathBuf::from(value())),
             "--no-cache" => cache = None,
@@ -179,7 +178,7 @@ fn main() {
                 println!("{USAGE}");
                 std::process::exit(0);
             }
-            _ => break a,
+            _ => break Some(a),
         }
     };
     runtime_args.extend([cstring("--root"), cstring(root.as_os_str().as_bytes())]);
@@ -197,6 +196,7 @@ fn main() {
         darwin_host_gpu::set_library_dir(g);
         runtime_args.extend([cstring("--gpu"), cstring(g.as_os_str().as_bytes())]);
     }
+    darwin_host_audio::set_log_fd(darwin_linux_abi::diag::log_fd());
     if let Some(d) = &display {
         darwin_host_display::set_server(d);
         darwin_linux_abi::vfs::set_input_dir(&darwin_host_display::input::device_dir(d));
@@ -211,6 +211,25 @@ fn main() {
     if let Some(label) = seclabel {
         identity.seclabel = label;
     }
+    let Some(program) = program else {
+        let err = darwin_linux_abi::run_fork_child(darwin_linux_abi::RunOptions {
+            root: &root,
+            path_map: path_map.as_deref(),
+            program: "",
+            argv: Vec::new(),
+            envp: Vec::new(),
+            execfn: None,
+            trace,
+            cache,
+            binder,
+            identity,
+            by_pid,
+            state,
+            runtime_args,
+        });
+        darwin_linux_abi::diag!("linux-run: {err}");
+        std::process::exit(127);
+    };
     let program = program.to_string_lossy().into_owned();
     let mut argv: Vec<Vec<u8>> = args.map(OsString::into_vec).collect();
     if execfn.is_none() {

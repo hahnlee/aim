@@ -11,6 +11,10 @@
 //!   once audioserver registers `media.audio_flinger` (it first waits for
 //!   system_server's `activity` service).
 //!
+//! The HAL's own messages are in logd (services' stdio is /dev/null, as
+//! init gives it); the syscall layer's and the host module's are in the
+//! service's log file.
+//!
 //! Every signal is at -90 dBFS: inaudible, but seen by the HAL's peak
 //! meter. Skipped unless the extracted image, the pinned NDK and the vendor
 //! HAL outputs (tools/build-vendor-hals.sh) are present.
@@ -27,7 +31,9 @@ const IMAGE: &str = concat!(
     "/../../_build/android16-image-full"
 );
 const HAL_LOG: &str = "vendor.audio-hal-aidl.log";
+const HAL_TAG: &str = "android.hardware.audio.service-aidl.darwin";
 const SERVICES: &[&str] = &[
+    "logd",
     "servicemanager",
     "hwservicemanager",
     "system_suspend",
@@ -67,18 +73,6 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
-/// Wait until `path` contains `needle`.
-fn wait_for(path: &Path, needle: &str, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if read(path).contains(needle) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    false
-}
-
 struct Guest {
     path_map: PathBuf,
     binder: String,
@@ -110,6 +104,49 @@ impl Guest {
             std::thread::sleep(Duration::from_millis(20));
         }
         child.wait_with_output().unwrap()
+    }
+}
+
+impl Guest {
+    /// What `tag` logged, from logd.
+    fn log(&self, tag: &str) -> String {
+        let out = self.run(
+            &["/system/bin/logcat", "-d", "-v", "raw", "-s", tag],
+            Duration::from_secs(30),
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Wait until `tag` has logged `needle`.
+    fn wait_for_log(&self, tag: &str, needle: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.log(tag).contains(needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        false
+    }
+}
+
+/// Stops the boot (and every service it started) when the test ends,
+/// passed or failed.
+struct Running(Option<std::thread::JoinHandle<String>>);
+
+impl Running {
+    fn stop(&mut self) -> String {
+        darwin_guest_init::boot::request_stop();
+        self.0
+            .take()
+            .map(|t| t.join().unwrap_or_else(|_| "boot panicked".into()))
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -154,7 +191,7 @@ fn audioserver_and_the_hal_play_through_coreaudio() {
     // guest-init hosts the binder driver in this process; its services run
     // until the boot's timeout.
     let (ready, is_ready) = channel();
-    let boot = {
+    let mut boot = Running(Some({
         let data = data.clone();
         std::thread::spawn(move || {
             let mut options = BootOptions::new(image, data, RunMode::Run);
@@ -165,7 +202,7 @@ fn audioserver_and_the_hal_play_through_coreaudio() {
             ready.send(boot.layout.path_map_file()).unwrap();
             boot.run().summary()
         })
-    };
+    }));
     let guest = Guest {
         path_map: is_ready.recv().unwrap(),
         binder: format!("dev.darwinart.guest-init.{}.binder", std::process::id()),
@@ -176,15 +213,18 @@ fn audioserver_and_the_hal_play_through_coreaudio() {
     // configuration comes from the HAL's ports and routes, and the primary
     // output is opened on a patch to the speaker.
     assert!(
-        wait_for(
-            &hal_log,
+        guest.wait_for_log(
+            HAL_TAG,
             "opened Params { input: false",
             Duration::from_secs(60)
         ),
-        "audioserver did not open the primary output:\nHAL:\n{}\naudioserver:\n{}",
+        "audioserver did not open the primary output:\nHAL:\n{}\n{}\naudioserver:\n{}",
+        guest.log(HAL_TAG),
         read(&hal_log),
         read(&logs.join("audioserver.log"))
     );
+    // The host module reached CoreAudio, not the null sink.
+    assert!(!read(&hal_log).contains("null sink"), "{}", read(&hal_log));
 
     // The HAL's own client, as libaudiohal drives it.
     let tmp = data.join("data/local/tmp");
@@ -198,9 +238,10 @@ fn audioserver_and_the_hal_play_through_coreaudio() {
     eprintln!("{stdout}");
     assert!(
         out.status.success() && stdout.contains("ok done"),
-        "{:?}\n{stdout}\n{}\nHAL:\n{}",
+        "{:?}\n{stdout}\n{}\nHAL:\n{}\n{}",
         out.status,
         String::from_utf8_lossy(&out.stderr),
+        guest.log(HAL_TAG),
         read(&hal_log)
     );
     let written = field(&stdout, "output written", "written").unwrap();
@@ -215,7 +256,7 @@ fn audioserver_and_the_hal_play_through_coreaudio() {
     assert!((5.0..200.0).contains(&latency), "latency {latency} ms");
     assert!(field(&stdout, "input read", "read").unwrap() >= 48000.0);
     // What CoreAudio's render callback saw.
-    let hal = read(&hal_log);
+    let hal = guest.log(HAL_TAG);
     let standby = hal
         .lines()
         .find(|l| l.contains("output stream in standby: 96096 frames"))
@@ -274,6 +315,6 @@ fn audioserver_and_the_hal_play_through_coreaudio() {
         &["/system/bin/setprop", "sys.powerctl", "shutdown"],
         Duration::from_secs(30),
     );
-    eprintln!("{}", boot.join().unwrap());
+    eprintln!("{}", boot.stop());
     let _ = std::fs::remove_dir_all(&dir);
 }

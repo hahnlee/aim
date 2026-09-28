@@ -388,16 +388,59 @@ pub fn epoll_pwait2(a: [u64; 6]) -> i64 {
     wait(a[0] as i32, a[1], a[2] as i32, timeout, a[4])
 }
 
-/// Fork child: Darwin dropped every kqueue. Recreate each epoll on its fd
+/// Fork: an epoll is its interest list (its kqueue is made again in the
+/// child, by [`after_fork_child`]).
+pub(super) fn save(ep: &Epoll, w: &mut super::fork_state::Writer) {
+    w.bool(ep.cloexec);
+    let interest = ep.interest.lock().unwrap();
+    w.seq(interest.iter(), |w, (fd, i)| {
+        w.i32(*fd);
+        w.u32(i.events);
+        w.u64(i.data);
+        w.bool(i.disabled);
+    });
+}
+
+pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Epoll> {
+    let cloexec = r.bool();
+    let interest = r.seq(|r| {
+        (
+            r.i32(),
+            Interest {
+                events: r.u32(),
+                data: r.u64(),
+                disabled: r.bool(),
+            },
+        )
+    });
+    Arc::new(Epoll {
+        cloexec,
+        interest: Mutex::new(interest.into_iter().collect()),
+    })
+}
+
+/// Fork child: kqueues are not inherited. Make each epoll again on its fd
 /// numbers, then re-register the interests (after all kqueues exist, since
 /// an epoll may watch another).
 pub fn after_fork_child() {
+    rebuild(
+        fdtab::fds_where(|k| matches!(k, Kind::Epoll(_)))
+            .into_iter()
+            .filter_map(|(fd, k)| match k {
+                Kind::Epoll(ep) => Some((fd, ep)),
+                _ => None,
+            })
+            .collect(),
+    );
+}
+
+fn rebuild(epolls: Vec<(i32, Arc<Epoll>)>) {
     // One kqueue per epoll, duplicated onto every fd that refers to it.
     let mut made: Vec<(i32, Arc<Epoll>)> = Vec::new();
-    for (fd, k) in fdtab::fds_where(|k| matches!(k, Kind::Epoll(_))) {
-        let Kind::Epoll(ep) = k else { continue };
+    for (fd, ep) in epolls {
         let src = made.iter().find(|(_, e)| Arc::ptr_eq(e, &ep)).map(|m| m.0);
-        // SAFETY: fd numbers the parent used for epolls; Darwin freed them.
+        // SAFETY: fd numbers the parent used for epolls, held by
+        // placeholders (`fork::spawn::reserve_fds`).
         unsafe {
             let kq = match src {
                 Some(s) => s,
@@ -427,11 +470,12 @@ pub fn after_fork_child() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sys::fork_state::{Reader, Writer};
 
-    /// A fork child gets the epoll back on the same fd number, with its
-    /// interest list, and sees the shared eventfd counter.
+    /// A fork child makes the epoll again on its fd number from the
+    /// parent's state, with its interest list.
     #[test]
-    fn epoll_and_eventfd_survive_fork() {
+    fn an_epoll_is_rebuilt_from_its_saved_state() {
         fdtab::init();
         let ep = epoll_create1([0; 6]) as i32;
         let efd = super::super::event::eventfd2([0, 0o4000, 0, 0, 0, 0]) as i32;
@@ -446,25 +490,31 @@ mod tests {
             0,
         ];
         assert_eq!(epoll_ctl(add), 0);
-        // SAFETY: the child only makes syscalls and exits.
-        let pid = unsafe { libc::fork() };
-        if pid == 0 {
-            let one = 1u64;
-            super::super::event::write(efd, &one as *const u64 as u64, 8);
-            let mut out = [0u64; 2];
-            let n = epoll_pwait([ep as u64, out.as_mut_ptr() as u64, 1, 1000, 0, 0]);
-            // SAFETY: leaving the forked test process.
-            unsafe { libc::_exit(if n == 1 && out[1] == 0x55 { 0 } else { 1 }) };
+        let Some(Kind::Epoll(e)) = fdtab::get(ep) else {
+            panic!("no epoll")
+        };
+        let mut w = Writer::default();
+        save(&e, &mut w);
+        let saved = w.into_bytes();
+        // As in the child: the number is held by a placeholder.
+        // SAFETY: replacing our own kqueue fd with /dev/null.
+        unsafe {
+            let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY);
+            libc::dup2(null, ep);
+            libc::close(null);
         }
-        let mut st = 0;
-        // SAFETY: waiting for our child.
-        assert_eq!(unsafe { libc::waitpid(pid, &mut st, 0) }, pid);
-        assert!(
-            libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0,
-            "status {st:#x}"
-        );
-        let mut v = 0u64;
-        let r = super::super::event::read(efd, &mut v as *mut u64 as u64, 8);
-        assert_eq!((r, v), (Some(8), 1), "the child's write reached the parent");
+        let loaded = load(&mut Reader::new(&saved));
+        fdtab::insert(ep, Kind::Epoll(loaded.clone()));
+        rebuild(vec![(ep, loaded)]);
+        let one = 1u64;
+        super::super::event::write(efd, &one as *const u64 as u64, 8);
+        let mut out = [0u64; 2];
+        let n = epoll_pwait([ep as u64, out.as_mut_ptr() as u64, 1, 1000, 0, 0]);
+        assert_eq!((n, out[1]), (1, 0x55));
+        for fd in [ep, efd] {
+            fdtab::on_close(fd);
+            // SAFETY: our test fds.
+            unsafe { libc::close(fd) };
+        }
     }
 }

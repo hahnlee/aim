@@ -66,6 +66,22 @@ fn describe(kind: &str, d: &audio::Device) {
     );
 }
 
+/// The host's default devices. The host module answers within a few
+/// seconds, with a null output when CoreAudio does not (`docs/audio.md`).
+pub fn host_devices() -> audio::Devices {
+    match guest::audio_devices() {
+        Ok(d) => {
+            describe("output", &d.output);
+            describe("input", &d.input);
+            d
+        }
+        Err(e) => {
+            log::error!("cannot query the host's audio devices: errno {}", e.0);
+            audio::Devices::default()
+        }
+    }
+}
+
 fn main() {
     logger::init(TAG);
     match guest::version(hostcall_module::AUDIO) {
@@ -75,16 +91,9 @@ fn main() {
             std::process::exit(1);
         }
     }
-    let devices = match guest::audio_devices() {
-        Ok(d) => d,
-        Err(e) => {
-            log::error!("cannot query the host's audio devices: errno {}", e.0);
-            std::process::exit(1);
-        }
-    };
-    describe("output", &devices.output);
-    describe("input", &devices.input);
 
+    // Register at once: audioserver (and through it system_server) waits
+    // for these names. The module asks for the devices on its own thread.
     binder::ProcessState::set_thread_pool_max_thread_count(4);
     binder::ProcessState::start_thread_pool();
     register(
@@ -93,7 +102,7 @@ fn main() {
     );
     register(
         "android.hardware.audio.core.IModule/default",
-        BnModule::new_binder(module::Module::new(devices), BinderFeatures::default()).as_binder(),
+        BnModule::new_binder(module::Module::new(), BinderFeatures::default()).as_binder(),
     );
     register(
         "android.hardware.audio.effect.IFactory/default",

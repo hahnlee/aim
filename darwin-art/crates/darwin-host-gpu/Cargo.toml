@@ -9,3 +9,7 @@ description = "Host-call module for the guest GLES driver: EGL and OpenGL ES for
 [dependencies]
 darwin-hostcall = { path = "../darwin-hostcall" }
 libc = "0.2"
+
+[[test]]
+name = "fork"
+harness = false

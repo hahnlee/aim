@@ -79,8 +79,35 @@ fn trace_image(name: &str, i: &loader::Image) {
     let s = &i.stats;
     crate::diag!(
         "[linux-abi] {name} loaded at bias {:#x} from {}; load-time rewrites: {} svc, {} mrs/{} msr tpidr_el0, {} scs, {} ctr_el0 ({} brk fallbacks)",
-        i.bias, i.source, s.svc, s.mrs_tp, s.msr_tp, s.scs, s.ctr, s.brk_fallback
+        i.bias,
+        i.source,
+        s.svc,
+        s.mrs_tp,
+        s.msr_tp,
+        s.scs,
+        s.ctr,
+        s.brk_fallback
     );
+}
+
+/// `linux-run --fork-child`: become the child of a guest fork in the
+/// process that spawned this one (`sys::fork`). Only the runtime options
+/// of `opts` are used; the process state comes from the parent. Returns
+/// only on failure.
+pub fn run_fork_child(opts: RunOptions) -> String {
+    if let Err(e) = vfs::init(opts.root, opts.path_map) {
+        return e;
+    }
+    sys::init_heap_window();
+    sys::set_trace(opts.trace);
+    xrt::init(opts.cache.clone());
+    if let Some(name) = &opts.binder
+        && let Err(e) = sys::init_binder(name)
+    {
+        return e;
+    }
+    sys::init_exec(opts.runtime_args);
+    sys::become_fork_child()
 }
 
 /// Load `program` under `root` and run it on the current thread. Returns

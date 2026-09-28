@@ -416,6 +416,62 @@ pub fn spuriously_ready(fd: i32) -> bool {
     pending_bytes(fd) == Some(0)
 }
 
+/// Fork: an inotify is its watches (each on an inherited vnode fd) and its
+/// queued events.
+pub(super) fn save(ino: &Inotify, w: &mut super::fork_state::Writer) {
+    use std::os::unix::ffi::OsStrExt;
+    w.bool(ino.cloexec);
+    let s = ino.state.lock().unwrap();
+    w.seq(s.watches.iter(), |w, (wd, x)| {
+        w.i32(*wd);
+        w.i32(x.fd);
+        w.u64(x.dev_ino.0);
+        w.u64(x.dev_ino.1);
+        w.u32(x.mask);
+        w.bytes(std::ffi::OsStr::from_bytes(x.host.as_bytes()).as_bytes());
+        w.opt(x.dir.as_ref(), |w, d| {
+            w.seq(d.iter(), |w, (name, e)| {
+                w.bytes(name);
+                w.u64(e.0);
+                w.i64(e.1);
+                w.i64(e.2);
+                w.bool(e.3);
+            })
+        });
+    });
+    w.i32(s.next_wd);
+    w.seq(s.queue.iter(), |w, e| w.bytes(e));
+}
+
+pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Inotify> {
+    let cloexec = r.bool();
+    let watches = r.seq(|r| {
+        let wd = r.i32();
+        let fd = r.i32();
+        let watch = Watch {
+            fd,
+            dev_ino: (r.u64(), r.u64()),
+            mask: r.u32(),
+            host: CString::new(r.bytes()).unwrap_or_default(),
+            dir: r.opt(|r| {
+                r.seq(|r| (r.bytes(), (r.u64(), r.i64(), r.i64(), r.bool())))
+                    .into_iter()
+                    .collect()
+            }),
+        };
+        (wd, watch)
+    });
+    let state = State {
+        watches: watches.into_iter().collect(),
+        next_wd: r.i32(),
+        queue: r.seq(|r| r.bytes()).into(),
+    };
+    Arc::new(Inotify {
+        cloexec,
+        state: Mutex::new(state),
+    })
+}
+
 /// Fork child: rebuild each inotify kqueue on its fd number.
 pub fn after_fork_child() {
     for (fd, k) in fdtab::fds_where(|k| matches!(k, Kind::Inotify(_))) {

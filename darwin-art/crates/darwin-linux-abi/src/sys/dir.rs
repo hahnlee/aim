@@ -40,6 +40,27 @@ pub struct DirStream {
     pub guest: Option<String>,
 }
 
+/// Fork: a stream's entries and position.
+pub(super) fn save(d: &DirStream, w: &mut super::fork_state::Writer) {
+    w.opt(d.entries.as_ref(), |w, v| {
+        w.seq(v.iter(), |w, e| {
+            w.u64(e.ino);
+            w.u32(e.ty as u32);
+            w.bytes(&e.name);
+        })
+    });
+    w.u64(d.pos as u64);
+    w.opt(d.guest.as_deref(), |w, g| w.str(g));
+}
+
+pub(super) fn load(r: &mut super::fork_state::Reader) -> DirStream {
+    DirStream {
+        entries: r.opt(|r| r.seq(|r| Entry::new(r.u64(), r.u32() as u8, r.bytes()))),
+        pos: r.u64() as usize,
+        guest: r.opt(|r| r.str()),
+    }
+}
+
 impl DirStream {
     pub fn synthesized(guest: String, entries: Vec<Entry>) -> DirStream {
         DirStream {
