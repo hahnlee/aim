@@ -50,6 +50,7 @@ version = "0.1.0"
 dependencies = [
  "aim-android-image",
  "aim-paths",
+ "aim-storage",
  "libc",
  "n2",
  "serde_json",
@@ -79,6 +80,7 @@ dependencies = [
  "aim-android-init",
  "aim-binder-host",
  "aim-paths",
+ "aim-storage",
  "libc",
 ]
 
@@ -176,6 +178,7 @@ dependencies = [
  "aim-host-sensors",
  "aim-hostcall",
  "aim-paths",
+ "aim-storage",
  "libc",
  "sha2",
 ]
@@ -183,6 +186,13 @@ dependencies = [
 [[package]]
 name = "aim-paths"
 version = "0.1.0"
+
+[[package]]
+name = "aim-storage"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "allocator"

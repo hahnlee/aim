@@ -1,5 +1,5 @@
 //! `cargo aim bench`: boots a fresh data directory the way `cargo aim boot`
-//! does (aim-display, guest-init `--exclude bootanim`) and measures boot,
+//! does (aim-display, guest-init, no boot animation) and measures boot,
 //! process creation, binder, app starts, Chrome and memory
 //! (docs/perf-baseline.md has the method). Each run is one boot; the
 //! table of medians goes to stdout and the runs to
@@ -89,7 +89,7 @@ pub fn run(ctx: &Ctx, options: &Options) -> Result<ExitCode, String> {
     meta.insert(
         "method".into(),
         json!({
-            "boot": "guest-init --run --exclude bootanim --gpu ANGLE --display aim-display (1080x1920), fresh data directory per run",
+            "boot": "guest-init --run --gpu ANGLE --display aim-display (1080x1920), debug.sf.nobootanimation, fresh data image per run",
             "repeat": REPEAT,
             "settle_s": SETTLE.as_secs_f64(),
         }),
@@ -514,11 +514,7 @@ fn one_run(
     run: &mut Run,
 ) -> Result<(), String> {
     let data = dir.join(format!("data-{n}"));
-    if data.exists() {
-        aim_android_image::assemble::force_remove(&data)
-            .map_err(|e| format!("{}: {e}", data.display()))?;
-    }
-    fs::create_dir_all(&data).map_err(|e| format!("{}: {e}", data.display()))?;
+    aim_storage::data::remove(&data)?;
     let log =
         fs::File::create(dir.join(format!("guest-init-{n}.log"))).map_err(|e| e.to_string())?;
     let display = boot::start_display(ctx, dir)?;
@@ -553,7 +549,7 @@ fn one_run(
     let result = measure(&guest, &mut session, &capture, fixtures, epoch0, t0, run);
     drop(session);
     if !keep {
-        let _ = aim_android_image::assemble::force_remove(&data);
+        let _ = aim_storage::data::remove(&data);
     }
     result
 }

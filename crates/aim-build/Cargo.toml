@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 aim-android-image = { path = "../aim-android-image" }
 aim-paths.workspace = true
+aim-storage.workspace = true
 libc.workspace = true
 # Runs the ninja files of the ART exception and ANGLE (docs/build.md, "n2").
 n2 = { git = "https://github.com/evmar/n2", rev = "b1fead52ccda0c497d816696f23f4099c3e8ec1f", default-features = false }

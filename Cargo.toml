@@ -26,6 +26,7 @@ members = [
     "crates/aim-hostcall",
     "crates/aim-linux-abi",
     "crates/aim-paths",
+    "crates/aim-storage",
     "tools/android-image-extract",
     # Guest (aarch64-linux-android).
     "hal/aidl/*",
@@ -74,6 +75,7 @@ default-members = [
     "crates/aim-hostcall",
     "crates/aim-linux-abi",
     "crates/aim-paths",
+    "crates/aim-storage",
     "tools/android-image-extract",
     # lmkd's policy, a guest library, is built for the host too to run its
     # tests.
@@ -87,6 +89,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 aim-hostcall = { path = "crates/aim-hostcall" }
 aim-paths = { path = "crates/aim-paths" }
+aim-storage = { path = "crates/aim-storage" }
 async-trait = "0.1"
 # AOSP libbinder_rs, vendor variant; the daemons add the `system` feature.
 binder = { path = "hal/binder" }

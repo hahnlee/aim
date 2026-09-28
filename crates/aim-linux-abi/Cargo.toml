@@ -37,3 +37,4 @@ sha2.workspace = true
 aim-android-init = { path = "../aim-android-init" }
 aim-guest-init = { path = "../aim-guest-init" }
 aim-paths.workspace = true
+aim-storage.workspace = true
