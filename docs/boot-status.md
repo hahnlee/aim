@@ -8,7 +8,7 @@ from.
 ## How to reproduce
 
 ```
-cargo aim build        # <derived> is target/aim/derived-image
+cargo aim build        # <derived> is target/aim/derived/root
 guest-init --image <derived> --data <data> --run \
     --exclude zygote,surfaceflinger,vold,bpfloader --timeout 45
 ```
@@ -17,6 +17,11 @@ guest-init --image <derived> --data <data> --run \
   `wait_for_prop` or `exec` that only an excluded service would end is
   satisfied after two seconds, as with `--only`.
 - guest-init stops every service on its timeout, on SIGINT and on SIGTERM.
+- `<data>` is a case-sensitive disk image, `<data>.asif`, that guest-init
+  attaches at `<data>` for the boot and detaches when it stops
+  (docs/storage.md); `cargo aim storage` shows what it occupies.
+- The device has no boot animation (`debug.sf.nobootanimation`);
+  `--exclude bootanim` still works but is no longer needed.
 - The device is `aim` (`androidboot.hardware=aim`):
   `/vendor/etc/init/hw/init.aim.rc` and `/vendor/etc/fstab.aim` from
   `image/overlay.toml`. The emulator's `init.ranchu.rc` and helpers are

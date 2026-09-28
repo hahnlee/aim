@@ -157,16 +157,32 @@ fn build(plan: &Plan, original: &Path, identity: &Identity, staging: &Path) -> R
             ));
         }
     }
+    set_mode(staging, BUILD_DIR_MODE).map_err(|error| format!("{}: {error}", staging.display()))?;
+    apply(plan, identity, staging)?;
+    seal(staging)
+}
+
+/// Applies the overlay of `plan` to the tree at `root`, a writable copy of
+/// the original (a clone, or the original in a disk image whose writes go
+/// to a shadow file), and writes its receipt and identity last.
+pub fn apply(plan: &Plan, identity: &Identity, root: &Path) -> Result<(), String> {
     let context = |path: &Path| {
         let path = path.to_path_buf();
         move |error: io::Error| format!("{}: {error}", path.display())
     };
-    set_mode(staging, BUILD_DIR_MODE).map_err(context(staging))?;
-
+    for name in [IDENTITY_FILE, RECEIPT_FILE] {
+        let path = root.join(name);
+        match fs::remove_file(&path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                return Err(format!("{}: {error}", path.display()));
+            }
+            _ => {}
+        }
+    }
     for step in &plan.steps {
-        let target = staging.join(step.relative());
+        let target = root.join(step.relative());
         let parent = target.parent().expect("guest paths have a parent");
-        make_ancestors_writable(staging, parent)?;
+        make_ancestors_writable(root, parent)?;
         match step.kind {
             Kind::Remove => {
                 if fs::symlink_metadata(&target)
@@ -198,20 +214,10 @@ fn build(plan: &Plan, original: &Path, identity: &Identity, staging: &Path) -> R
             }
         }
     }
-
-    for name in [IDENTITY_FILE, RECEIPT_FILE] {
-        let path = staging.join(name);
-        match fs::remove_file(&path) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                return Err(format!("{}: {error}", path.display()));
-            }
-            _ => {}
-        }
-    }
-    fs::write(staging.join(RECEIPT_FILE), &identity.receipt).map_err(context(staging))?;
-    fs::write(staging.join(IDENTITY_FILE), format!("{}\n", identity.hex))
-        .map_err(context(staging))?;
-    seal(staging)
+    make_ancestors_writable(root, root)?;
+    set_mode(root, BUILD_DIR_MODE).map_err(context(root))?;
+    fs::write(root.join(RECEIPT_FILE), &identity.receipt).map_err(context(root))?;
+    fs::write(root.join(IDENTITY_FILE), format!("{}\n", identity.hex)).map_err(context(root))
 }
 
 /// Clones `original` to the absent path `staging`.

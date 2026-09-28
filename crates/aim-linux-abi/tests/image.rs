@@ -71,15 +71,16 @@ fn check_linker_and_linkerconfig(cache: &Path, root: &Path) {
 }
 
 #[test]
-fn linker64_runs_with_load_time_rewriting_and_from_the_cache() {
+fn linker64_runs_from_the_image_and_the_user_cache() {
     let Some(ref root) = root() else { return };
-    // Empty cache: every file is rewritten at load time.
+    // Empty user cache: the system image's own cache serves its files
+    // (tests/image_cache.rs covers load-time rewriting without one).
     let empty = scratch("empty-cache");
     check_linker_and_linkerconfig(&empty, root);
     let (_, trace) = run_ok(&empty, root, &["--trace", LINKER]);
-    assert!(trace.contains("from load-time rewrite"), "{trace}");
+    assert!(trace.contains("from translation cache"), "{trace}");
 
-    // Warm cache: nothing is rewritten in memory.
+    // Warm user cache: nothing is rewritten in memory.
     let cache = scratch("cache");
     let report = translate(&cache, root);
     assert!(report.contains("brk fallbacks:   0"), "{report}");

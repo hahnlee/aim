@@ -130,3 +130,25 @@ fn image_cache_serves_the_image_with_an_empty_user_cache() {
     aim_linux_abi::cache::remove_tree(&moved).unwrap();
     aim_linux_abi::cache::remove_tree(&user).unwrap();
 }
+
+/// The same on the real images: the system image and the derived image
+/// over it carry their own caches, so an empty user cache is enough.
+#[test]
+fn the_built_images_need_no_runtime_translation() {
+    for (root, node) in [
+        (aim_paths::original_image(), "image"),
+        (aim_paths::derived_image(), "derived-image"),
+    ] {
+        let Some(root) = aim_paths::input(root, node) else {
+            return;
+        };
+        let user = scratch(&format!("empty-user-cache-{node}"));
+        let (count, trace) = load_time_rewrites(&root, &user);
+        assert_eq!(count, 0, "{}:\n{trace}", root.display());
+        assert!(
+            std::fs::read_dir(&user).unwrap().next().is_none(),
+            "the user cache stays empty"
+        );
+        aim_linux_abi::cache::remove_tree(&user).unwrap();
+    }
+}

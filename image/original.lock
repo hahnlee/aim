@@ -1,7 +1,8 @@
 # The original image of ADR 0012: the pinned Android 16 arm64 system image
 # archive (docs/gsi-base.md). The `image` node of `cargo aim` extracts it
-# with android-image-extract into _build/android16-image-full, whose
-# identity (the archive's sha256, in android16-image-full.identity) must be
-# SHA256. The archive itself is not in Git.
+# with android-image-extract into the case-sensitive system image
+# _build/android16-image.dmg (docs/storage.md), whose identity (the
+# archive's sha256, in root.identity in the image) must be SHA256. Neither
+# the archive nor the image is in Git.
 ARCHIVE=_prebuilt/android-16/system-image/arm64-v8a-playstore-ps16k-36_r07.zip
 SHA256=182f51ad2b04bbb9cd9464d3e0396a81201db6d9659e1fde5951b6efc1e0a00e

@@ -14,6 +14,7 @@ cargo aim test --integration     # builds every node, then all tests
 cargo aim boot                   # aim-display + guest-init, docs/boot-status.md
 cargo aim bench [--runs N]       # boot and measure, docs/perf-baseline.md
 cargo aim clean [NODE...]        # forget nodes and remove their outputs
+cargo aim storage [DATA...]      # what the disk images occupy, docs/storage.md
 ```
 
 `cargo aim build hal/health` builds one node and what it needs; a prefix
@@ -36,11 +37,12 @@ selects a group (`cargo aim build hal`). `-v` shows the tools' output,
 
 | Path | What |
 | --- | --- |
-| `_build/android16-image-full` | The extracted original image (`image` node), read-only |
+| `_build/android16-image.dmg` | The system image (`image` node): the original and its translation cache as a compressed read-only case-sensitive disk image, mounted at `_build/android16-image` (docs/storage.md) |
 | `_build/aosp/` | AOSP trees fetched at the image's tag, each checked against its lock's hash |
 | `_build/downloads/` | Their archives, so a refetch needs no network |
 | `_build/xsdc`, `_build/angle-source`, `_build/depot_tools` | Pinned checkouts |
-| `target/aim/<node>/` | Every build output (`hal/bin`, `art/stripped`, `boot-image`, `derived-image`, ...) |
+| `target/aim/<node>/` | Every build output (`hal/bin`, `art/stripped`, `boot-image`, ...) |
+| `target/aim/derived.shadow` | The derived image: the system image's changes by the overlay and its translations, mounted read-only at `target/aim/derived` |
 | `target/aim/gen/` | Generated sources: the AIDL crates `hal/aidl/*` and `daemons/aidl/*` point at |
 | `target/aim-cache/` | Node stamps and logs |
 
@@ -56,15 +58,15 @@ non-cargo stages are declared in code:
 | Node | Upstream | Inputs (declared) | Outputs |
 | --- | --- | --- | --- |
 | `host/<bin>` | | manifests, build scripts, `Cargo.lock`, cargo config; found: dep-info | cargo's `target/release/<bin>` |
-| `image` | `host/android-image-extract` (order only) | `image/original.lock` | `_build/android16-image-full` |
+| `image` | `host/android-image-extract`, `host/linux-translate` (order only) | `image/original.lock` | `_build/android16-image.dmg`, attached |
 | `aidl-gen` | | `hal/sources.lock`, `daemons/sources.lock`, `tools/lib/*.py`, AIDL crate manifests | `target/aim/gen/{hal,daemon}-aidl` |
 | `hal/<package>`, `daemon/<package>` | `image`; `aidl-gen` when a dependency's sources are generated or fetched | as `host/*` | `target/aim/{hal,daemons}/...` |
 | `xsdc` | | `upstream/android16-xsdc.lock` | `target/aim/xsdc` |
 | `art` | `xsdc`, `image` | `patches/art-android/*`, `tools/art-android/*`; found: n2's deps log | `target/aim/art/stripped` |
 | `boot-image` | `art`, `image`, `host/linux-run` (order only) | | `target/aim/boot-image/framework` |
 | `angle` | | `upstream/angle.lock`, `upstream/angle-args.gn` | `_build/angle-source/out/AimRelease` |
-| `derived-image` | `image` and the producer of every built overlay source | `image/overlay.toml` and its checked-in sources | `target/aim/derived-image` |
-| `translation-cache` | `derived-image`, `host/linux-translate` | | linux-run's default cache |
+| `derived-image` | `image` and the producer of every built overlay source | `image/overlay.toml` and its checked-in sources | `target/aim/derived.shadow`, attached at `target/aim/derived` |
+| `translation-cache` | `derived-image`, `host/linux-translate` | | the derived image's `translated/` |
 
 The default `cargo aim build` builds every node except the HALs' test
 clients (`[package.metadata.vendor-hal] test = ...`), which `cargo aim test
@@ -197,15 +199,16 @@ present):
 
 ```sh
 mkdir -p _build
-ln -s "$MAIN/_build/android16-image-full" _build/
-ln -s "$MAIN/_build/android16-image-full.identity" _build/
+ln -s "$MAIN/_build/android16-image.dmg" _build/
 ln -s "$MAIN/_build/angle-source" "$MAIN/_build/depot_tools" _build/
 ```
 
 `_build/aosp` and `_build/downloads` may be linked too, or fetched again.
 `cargo aim` and `aim_paths::input` resolve links before they hand a path to
-a tool: the derived image is always cloned from the real original, and the
-Python helpers compute relative paths between real directories.
+a tool: the Python helpers compute relative paths between real
+directories. The system image is mounted beside the real image file, so
+every checkout that links it uses the one attachment; each checkout has
+its own derived image (a shadow file over it).
 
 `target` may be a link to a directory elsewhere (such as a per-worktree
 target directory), but then set `CARGO_TARGET_DIR` to its real path: tests
