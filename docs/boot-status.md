@@ -388,8 +388,15 @@ The host's security agent did not flag or block any of the four boots
   failed. The node stats as the device, on the region files' `st_dev`.
   memfds now keep their name and seals with the file, so an fd received
   over binder or `SCM_RIGHTS`, or reopened through `/proc/self/fd`, is
-  the same memfd. Chrome shows its first-run page; about 35 s later the
-  browser aborts waiting for its GPU process (#256).
+  the same memfd. Chrome shows its first-run page.
+- **Chrome aborted "Timed out waiting for GPU channel"** (#256) about 35 s
+  after first run: `IChildProcessService.setupConnection` carries more than
+  eight fds. Through the binder daemon a reader had only eight
+  pre-reserved fd numbers, so the oneway call was dropped with `EMFILE`,
+  and neither the GPU process nor the renderers ever started. Now the read
+  stops before such a transaction and the shim reads again with enough
+  (docs/binder-driver.md). Chrome shows its new tab page, and its GPU
+  process keeps running.
 
 ### Open
 
@@ -397,5 +404,7 @@ The host's security agent did not flag or block any of the four boots
 - #238 app processes' names in `/proc/<pid>/cmdline` for other processes;
 - #240 wide-gamut EGL configs; #241 phone and GMS startup ANRs; #242
   battery temperature; #230 traced and traced_probes aborts.
-- #256 Chrome's GPU child never gets `setupConnection`; #257 ESRCH from a
-  socket call in Chrome's network thread; #258 remaining memfd seal gaps.
+- #260 Chrome's renderers die reserving V8's code range; #257 ESRCH in
+  Chrome's network thread is DnsResolver's answer with no nameservers
+  (#223); #258 remaining memfd seal gaps; #261 app data lost on a second
+  boot of the same data directory.

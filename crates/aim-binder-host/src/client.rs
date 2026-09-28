@@ -236,6 +236,18 @@ impl BinderFile {
         arg: u64,
         mem: &mut dyn UserMemory,
     ) -> Result<(), Errno> {
+        self.ioctl_reserving(tid, cmd, arg, mem, RESERVED_FDS)
+    }
+
+    /// [`Self::ioctl`] with at least `reserve` placeholders for a read.
+    fn ioctl_reserving(
+        &self,
+        tid: i32,
+        cmd: u32,
+        arg: u64,
+        mem: &mut dyn UserMemory,
+        reserve: usize,
+    ) -> Result<(), Errno> {
         let size = ioc_size(cmd);
         // binder_ioctl never reads the argument of these; libbinder's
         // thread destructor passes 0 for BINDER_THREAD_EXIT.
@@ -272,7 +284,8 @@ impl BinderFile {
         }
         let reply = with_thread(|t| -> Result<IoctlReply, Errno> {
             if reads {
-                refill_reserved(&mut t.reserved);
+                refill_reserved(&mut t.reserved, reserve);
+                io.grow = t.reserved.len() >= reserve;
             }
             io.reserved = t.reserved.iter().map(|fd| *fd as u32).collect();
             let port = self.thread_port(t, tid)?;
@@ -313,6 +326,11 @@ impl BinderFile {
         if writes_arg && size > 0 && (reply.status == 0 || cmd == BINDER_WRITE_READ) {
             mem.write(arg, &reply.arg)?;
         }
+        if reply.status == 0 && reply.want_fds > 0 {
+            // The read stopped before a transaction with more files than we
+            // had placeholders for; the updated arg continues it.
+            return self.ioctl_reserving(tid, cmd, arg, mem, reply.want_fds as usize);
+        }
         match reply.status {
             0 => Ok(()),
             e => Err(e),
@@ -320,8 +338,8 @@ impl BinderFile {
     }
 }
 
-fn refill_reserved(pool: &mut Vec<i32>) {
-    while pool.len() < RESERVED_FDS {
+fn refill_reserved(pool: &mut Vec<i32>, count: usize) {
+    while pool.len() < count {
         // SAFETY: opening /dev/null and duplicating it upward.
         let fd = unsafe {
             let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
