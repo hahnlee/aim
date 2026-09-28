@@ -263,8 +263,8 @@ fn credentials_follow_linux_rules_across_fork_and_exec() {
     check("identity");
 }
 
-/// kill, pidfd_send_signal, setpriority and the scheduler calls on another
-/// process follow the kernel's uid and capability rules: an app cannot
+/// kill, pidfd_send_signal, setpriority, the scheduler calls and prlimit
+/// on another process follow the kernel's uid and capability rules: an app cannot
 /// reach system uid processes, a system uid with CAP_KILL and CAP_SYS_NICE
 /// reaches apps.
 #[test]

@@ -807,8 +807,12 @@ static void app_permissions(void) {
   // SIGCONT within the session, not outside it.
   CHECK(kill(perm_system, SIGCONT) == 0, "SIGCONT in the session");
   DENIED(kill(perm_other, SIGCONT));
-  // The target's saved uid is ours.
+  // The target's saved uid is ours: enough to signal it, but prlimit
+  // needs every uid and gid to match.
   CHECK(kill(perm_saved, 0) == 0, "saved uid");
+  struct rlimit rl;
+  DENIED(prlimit(perm_saved, RLIMIT_NOFILE, NULL, &rl));
+  DENIED(prlimit(perm_system, RLIMIT_NOFILE, NULL, &rl));
   // kill(-1) ignores the processes it may not signal.
   CHECK(kill(-1, SIGKILL) == 0, "kill(-1)");
   CHECK(kill(perm_system, 0) == -1 && errno == EPERM, "system survives");
@@ -824,6 +828,10 @@ static void app_permissions(void) {
   }
   char c;
   CHECK(read(ready[0], &c, 1) == 1, "own ready");
+  CHECK(prlimit(own, RLIMIT_NICE, NULL, &rl) == 0 && rl.rlim_cur == 20 && rl.rlim_max == 20,
+        "own process's limit %lu", (unsigned long)rl.rlim_cur);
+  CHECK(prlimit(own, RLIMIT_NOFILE, NULL, &rl) == 0 && rl.rlim_cur > 0, "an inherited limit");
+  CHECK(syscall(SYS_prlimit64, own, 99, NULL, &rl) == -1 && errno == EINVAL, "bad resource");
   CHECK(setpriority(PRIO_PROCESS, own, 5) == 0, "renice own");
   CHECK(setpriority(PRIO_PROCESS, own, -1) == -1 && errno == EACCES, "below RLIMIT_NICE");
   CHECK(sched_setscheduler(own, SCHED_BATCH, &sp) == 0, "own scheduling");
@@ -841,6 +849,8 @@ static void system_permissions(void) {
   struct __user_cap_data_struct d[2] = {{1 << CAP_SYS_NICE, 1 << CAP_SYS_NICE, 0}, {0, 0, 0}};
   CHECK(capset(&h, d) == 0, "drop CAP_KILL");
   DENIED(kill(perm_other, 0));
+  struct rlimit rl;
+  DENIED(prlimit(perm_other, RLIMIT_NOFILE, NULL, &rl));
   CHECK(kill(perm_system, SIGKILL) == 0, "same uid");
 }
 
@@ -852,6 +862,8 @@ static void permissions(void) {
   perm_other = idle_as(10051, 10051, 10051, 1, ready);
   run_as(10050, 0, app_permissions);
   run_as(1000, 1 << CAP_KILL | 1 << CAP_SYS_NICE, system_permissions);
+  struct rlimit rl;
+  CHECK(prlimit(perm_other, RLIMIT_NOFILE, NULL, &rl) == 0, "CAP_SYS_RESOURCE reads any limit");
   int st;
   CHECK(waitpid(perm_system, &st, 0) == perm_system && WIFSIGNALED(st), "system killed");
   CHECK(kill(perm_saved, SIGKILL) == 0 && kill(perm_other, SIGKILL) == 0, "root kills");

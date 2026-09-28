@@ -489,6 +489,17 @@ pub fn may_renice(pid: i32) -> bool {
     read(|id| id.capable(CAP_SYS_NICE) || id.uid[1] == t.uid[0] || id.uid[1] == t.uid[1])
 }
 
+/// `check_prlimit_permission` (kernel/sys.c): the caller's real uid and
+/// gid are each of the target's real, effective and saved ids, or it has
+/// CAP_SYS_RESOURCE.
+fn may_prlimit(t: &Identity) -> bool {
+    read(|id| {
+        id.capable(CAP_SYS_RESOURCE)
+            || (t.uid[..3].iter().all(|&u| u == id.uid[0])
+                && t.gid[..3].iter().all(|&g| g == id.gid[0]))
+    })
+}
+
 /// The credential lines of `/proc/self/status`.
 pub fn proc_status() -> String {
     let id = current();
@@ -862,9 +873,9 @@ pub fn prctl(a: [u64; 6]) -> Option<i64> {
     Some(r)
 }
 
-/// getrlimit (163), setrlimit (164) and prlimit64 (261) on this process:
-/// limits set by init or the guest are reported as set; the others are the
-/// host's (`process::prlimit`).
+/// getrlimit (163), setrlimit (164) and prlimit64 (261): limits set by
+/// init or the guest are reported as set; the others are the host's
+/// (`process::prlimit`), which every guest process inherits.
 pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
     let (pid, res, new, old) = match nr {
         163 => (0, a[0], 0, a[1]),
@@ -880,8 +891,11 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
     {
         return -(EFAULT as i64);
     }
-    if !is_self(pid) || res as usize >= RLIM_NLIMITS {
-        return super::process::prlimit(261, [pid as u64, res, new, old, 0, 0]);
+    if !is_self(pid) {
+        return prlimit_other(pid, res, new, old);
+    }
+    if res as usize >= RLIM_NLIMITS {
+        return super::process::prlimit(261, [0, res, new, old, 0, 0]);
     }
     let res_i = res as usize;
     let current = match read(|id| id.rlimits[res_i]) {
@@ -917,6 +931,42 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
     if old != 0 {
         // SAFETY: guest struct rlimit64.
         unsafe { (old as *mut [u64; 2]).write_unaligned([current.0, current.1]) };
+    }
+    0
+}
+
+/// prlimit64 on another process of the namespace, with
+/// `check_prlimit_permission`: its limits as its table entry records them.
+/// Darwin changes a process's limits only from inside it, so a new limit
+/// for another process is refused (EPERM).
+fn prlimit_other(pid: i32, res: u64, new: u64, old: u64) -> i64 {
+    if let Err(e) = super::pidns::check(pid) {
+        return e;
+    }
+    let t = target(pid);
+    if !may_prlimit(&t) {
+        return -(EPERM as i64);
+    }
+    if res as usize >= RLIM_NLIMITS {
+        return -(EINVAL as i64);
+    }
+    if new != 0 {
+        return -(EPERM as i64);
+    }
+    if old != 0 {
+        let limit = match t.rlimits[res as usize] {
+            Some(l) => [l.0, l.1],
+            None => {
+                let mut l = [0u64; 2];
+                let r = super::process::prlimit(261, [0, res, 0, l.as_mut_ptr() as u64, 0, 0]);
+                if r < 0 {
+                    return r;
+                }
+                l
+            }
+        };
+        // SAFETY: guest struct rlimit64.
+        unsafe { (old as *mut [u64; 2]).write_unaligned(limit) };
     }
     0
 }

@@ -154,6 +154,8 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
   Signals, renicing and rescheduling another guest process follow the
   kernel's uid and capability rules (#362): an app gets EPERM for a
   system uid process, system_server's CAP_KILL and CAP_SYS_NICE reach apps.
+  `prlimit` reads another guest process's limits under the same kind of
+  rule (#363); setting them is EPERM.
 - guest-init's wait for linkerconfig ends at `--timeout` and on SIGINT or
   SIGTERM (#196).
 

@@ -249,16 +249,14 @@ fn lim_to_host(v: u64) -> u64 {
     }
 }
 
-/// getrlimit (163) and prlimit64 (261) for the calling process.
+/// The host's getrlimit (163) and prlimit64 (261) for the calling process
+/// (`cred::prlimit` resolves the pid).
 pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
-    let (pid, res, new, old) = if nr == 163 {
-        (0, a[0], 0, a[1])
+    let (res, new, old) = if nr == 163 {
+        (a[0], 0, a[1])
     } else {
-        (a[0], a[1], a[2], a[3])
+        (a[1], a[2], a[3])
     };
-    if pid != 0 && pid as i64 != getpid() {
-        return -(ESRCH as i64);
-    }
     let Some(hres) = rlimit_to_host(res) else {
         if old != 0 {
             // SAFETY: guest rlimit64 buffer.

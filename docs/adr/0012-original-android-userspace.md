@@ -601,7 +601,10 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   guest processes the kernel's permission rules hold, on the credentials
   of the table: `kill` and pidfd signals need a matching real or saved
   uid or CAP_KILL (SIGCONT also within the session), renicing and
-  rescheduling a matching uid or CAP_SYS_NICE.
+  rescheduling a matching uid or CAP_SYS_NICE, reading another's limits
+  (`prlimit`) matching ids or CAP_SYS_RESOURCE. Another process's limits
+  and memory cannot be changed or read (EPERM): Darwin reaches them only
+  from inside the process.
 - **cgroup v2 and bpffs** are writable areas of the path map: the
   hierarchy holds the directories libprocessgroup creates, and no
   controller acts.
