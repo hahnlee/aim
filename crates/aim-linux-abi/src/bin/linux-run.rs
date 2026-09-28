@@ -12,7 +12,9 @@
 //! (`aim-binderd --service NAME`) that backs `/dev/binder`,
 //! `/dev/hwbinder` and `/dev/vndbinder`. `--gpu` is the directory of the
 //! host GPU libraries (ANGLE's `libEGL.dylib` and `libGLESv2.dylib`) behind
-//! the guest GLES driver (docs/gles-driver.md). `--display` is the socket
+//! the guest GLES driver (docs/gles-driver.md), `--vulkan` the directory of
+//! MoltenVK's `libMoltenVK.dylib` behind the guest Vulkan driver
+//! (docs/vulkan-driver.md). `--display` is the socket
 //! of the display server (`aim-display`) behind the composer HAL
 //! (docs/composer.md); its input devices are the guest's `/dev/input`
 //! (docs/input.md).
@@ -35,6 +37,7 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
   --no-cache             rewrite every file at load time
   --binder NAME          binder host serving the binder device nodes
   --gpu DIR              host GPU libraries (ANGLE) for the GLES driver
+  --vulkan DIR           host Vulkan library (MoltenVK) for the Vulkan driver
   --display SOCKET       display server (aim-display) for the composer
                          and input (/dev/input)
   --trace                log every syscall
@@ -102,6 +105,7 @@ fn main() {
     let mut trace = false;
     let mut binder = None;
     let mut gpu: Option<PathBuf> = None;
+    let mut vulkan: Option<PathBuf> = None;
     let mut display: Option<PathBuf> = None;
     let mut path_map: Option<PathBuf> = None;
     let mut seclabel = None;
@@ -131,6 +135,7 @@ fn main() {
             "--path-map" => path_map = Some(PathBuf::from(value())),
             "--binder" => binder = Some(value().to_string_lossy().into_owned()),
             "--gpu" => gpu = Some(PathBuf::from(value())),
+            "--vulkan" => vulkan = Some(PathBuf::from(value())),
             "--display" => display = Some(PathBuf::from(value())),
             "--seclabel" => seclabel = Some(value().to_string_lossy().into_owned()),
             "--trace" => trace = true,
@@ -197,6 +202,10 @@ fn main() {
     if let Some(g) = &gpu {
         aim_host_gpu::set_library_dir(g);
         runtime_args.extend([cstring("--gpu"), cstring(g.as_os_str().as_bytes())]);
+    }
+    if let Some(v) = &vulkan {
+        aim_host_vulkan::set_library_dir(v);
+        runtime_args.extend([cstring("--vulkan"), cstring(v.as_os_str().as_bytes())]);
     }
     aim_host_audio::set_log_fd(aim_linux_abi::diag::log_fd());
     aim_host_camera::set_log_fd(aim_linux_abi::diag::log_fd());

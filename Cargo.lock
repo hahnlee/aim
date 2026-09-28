@@ -156,6 +156,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aim-host-vulkan"
+version = "0.1.0"
+dependencies = [
+ "aim-hostcall",
+ "aim-paths",
+ "libc",
+]
+
+[[package]]
 name = "aim-hostcall"
 version = "0.1.0"
 
@@ -176,6 +185,7 @@ dependencies = [
  "aim-host-location",
  "aim-host-memory",
  "aim-host-sensors",
+ "aim-host-vulkan",
  "aim-hostcall",
  "aim-paths",
  "aim-storage",
@@ -1123,6 +1133,16 @@ dependencies = [
  "daemon-log",
  "libc",
  "log",
+]
+
+[[package]]
+name = "vulkan"
+version = "0.1.0"
+dependencies = [
+ "aim-gralloc",
+ "aim-hostcall",
+ "aim-paths",
+ "libc",
 ]
 
 [[package]]

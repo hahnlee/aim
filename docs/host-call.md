@@ -105,6 +105,7 @@ first.
 | 8 | bluetooth | 1 | `FN_OPEN` (returns the wake fd), `FN_SEND`, `FN_RECV`, `FN_CLOSE`: HCI packets to and from the virtual controller ([bluetooth.md](bluetooth.md)) |
 | 9 | camera | 1 | `FN_DEVICES`, `FN_OPEN` (a capture session), `FN_FRAME` (the next frame into the guest's buffers), `FN_CLOSE` ([camera.md](camera.md)) |
 | 10 | memory | 1 | `FN_READ`: fill `memory::Memory` (the Mac's pressure level, free and file-backed memory); `FN_WATCH` (returns a pipe that gets a byte on each level change). lmkd's pressure source (`daemons/lmkd`) |
+| 11 | vulkan | 1 | `FN_INIT`, `FN_ATTACH` (a mapped graphics buffer as an image's storage), and the generated Vulkan entry points from `FN_TABLE_BASE` ([vulkan-driver.md](vulkan-driver.md)) |
 
 ## Vendor HAL build pipeline
 
