@@ -173,15 +173,24 @@ fn host_argv(pid: i32) -> Vec<Vec<u8>> {
         .take(argc)
         .map(<[u8]>::to_vec)
         .collect();
-    if argv.first().is_some_and(|a| a.ends_with(b"linux-run")) {
-        let mut i = 1;
-        while i < argv.len() && argv[i].starts_with(b"--") {
-            let takes_value = !matches!(&argv[i][..], b"--trace" | b"--inherit-env");
-            i += if takes_value { 2 } else { 1 };
-        }
-        return argv[i.min(argv.len())..].to_vec();
+    guest_argv(argv)
+}
+
+/// A `linux-run` command line's guest program and arguments, after its
+/// own options (`src/bin/linux-run.rs`); any other argv as it is.
+fn guest_argv(argv: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    if !argv.first().is_some_and(|a| a.ends_with(b"linux-run")) {
+        return argv;
     }
-    argv
+    let mut i = 1;
+    while i < argv.len() && argv[i].starts_with(b"--") {
+        let takes_value = !matches!(
+            &argv[i][..],
+            b"--trace" | b"--inherit-env" | b"--stdio-null" | b"--no-cache"
+        );
+        i += if takes_value { 2 } else { 1 };
+    }
+    argv[i.min(argv.len())..].to_vec()
 }
 
 fn read_guest(lo: u64, hi: u64) -> Vec<u8> {
@@ -1440,6 +1449,26 @@ pub fn is_self_exe(path: &[u8]) -> bool {
 mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn guest_argv_skips_linux_run_options() {
+        let argv = |s: &str| {
+            s.split(' ')
+                .map(|a| a.as_bytes().to_vec())
+                .collect::<Vec<_>>()
+        };
+        let run = "/t/linux-run --root /r --path-map /m --inherit-env --binder b --stdio-null \
+                   --no-cache --trace /system/bin/servicemanager -v";
+        assert_eq!(
+            super::guest_argv(argv(run)),
+            argv("/system/bin/servicemanager -v")
+        );
+        assert!(super::guest_argv(argv("/t/linux-run --root /r --fork-child 7")).is_empty());
+        assert_eq!(
+            super::guest_argv(argv("/bin/sh -c x")),
+            argv("/bin/sh -c x")
+        );
+    }
 
     /// The host's gzip reads `/proc/config.gz` back verbatim.
     #[test]
