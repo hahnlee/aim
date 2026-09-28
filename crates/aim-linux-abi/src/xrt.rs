@@ -1,5 +1,8 @@
 //! Runtime use of the translation cache.
 //!
+//! - Two caches are consulted, in order: the image's own, beside its tree
+//!   (`<root>/../translated`, docs/storage.md), for files of the image, and
+//!   the user's (`--cache`, by default `~/Library/Caches/aim/translated`).
 //! - When the guest opens an original AArch64 ELF read-only and the cache
 //!   has a translated entry for it, the fd is replaced by one on the
 //!   translated file ([`on_open`]). The guest linker then reads the
@@ -46,7 +49,8 @@ pub struct Sites {
 }
 
 struct Runtime {
-    cache: Option<Cache>,
+    /// The image's cache (files under the root), then the user's.
+    caches: Vec<Cache>,
     ctr_el0: u32,
     files: Mutex<HashMap<FileStat, FileState>>,
     /// Files holding stored members (APKs): their members, and the sites of
@@ -61,11 +65,16 @@ struct Archive {
 
 static RT: OnceLock<Runtime> = OnceLock::new();
 
-/// Use `cache` (a translation cache directory) for this process. Without a
-/// call, or with None, every file takes the load-time path.
-pub fn init(cache: Option<PathBuf>) {
+/// Use the translation cache of the image at `root`, if it has one, and
+/// `cache` (a translation cache directory) for this process. Without a
+/// call, or with neither, every file takes the load-time path.
+pub fn init(root: Option<&Path>, cache: Option<PathBuf>) {
     let _ = RT.set(Runtime {
-        cache: cache.map(Cache::new),
+        caches: root
+            .and_then(Cache::image_of)
+            .into_iter()
+            .chain(cache.map(Cache::new))
+            .collect(),
         ctr_el0: crate::a64::host_ctr_el0(),
         files: Mutex::new(HashMap::new()),
         archives: Mutex::new(HashMap::new()),
@@ -74,7 +83,7 @@ pub fn init(cache: Option<PathBuf>) {
 
 fn rt() -> &'static Runtime {
     RT.get_or_init(|| Runtime {
-        cache: None,
+        caches: Vec::new(),
         ctr_el0: crate::a64::host_ctr_el0(),
         files: Mutex::new(HashMap::new()),
         archives: Mutex::new(HashMap::new()),
@@ -89,7 +98,7 @@ fn set_state(st: FileStat, s: FileState) {
     rt().files.lock().unwrap().insert(st, s);
 }
 
-fn fd_path(fd: i32) -> Option<PathBuf> {
+pub(crate) fn fd_path(fd: i32) -> Option<PathBuf> {
     let mut buf = [0u8; libc::PATH_MAX as usize];
     // SAFETY: F_GETPATH writes at most PATH_MAX bytes.
     if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } < 0 {
@@ -109,10 +118,7 @@ fn is_elf_fd(fd: i32) -> bool {
 /// Decide what an original at `host` (with stat `st`) maps as.
 fn decide(host: &Path, st: &FileStat) -> FileState {
     let r = rt();
-    let Some(cache) = &r.cache else {
-        return FileState::Uncached(None);
-    };
-    match cache.lookup(host, st) {
+    match r.caches.iter().find_map(|c| c.lookup(host, st)) {
         Some(e) if e.ctr_el0 == r.ctr_el0 => match e.kind {
             EntryKind::Translated(p) => FileState::HasTranslation(p),
             EntryKind::Identity => FileState::Identity,
@@ -307,8 +313,8 @@ pub fn exec_source(fd: i32, off: u64) -> ExecSource {
             // Not seen at open (or opened writable): a published cache file
             // maps shared; anything else has its sites found once.
             if s.is_none()
-                && let (Some(cache), Some(p)) = (&rt().cache, fd_path(fd))
-                && cache.contains(&p)
+                && let Some(p) = fd_path(fd)
+                && in_cache(&p)
             {
                 return ExecSource::Shared;
             }
@@ -329,6 +335,11 @@ pub fn exec_source(fd: i32, off: u64) -> ExecSource {
             }
         }
     }
+}
+
+/// Whether `p` is a published file of one of the caches.
+fn in_cache(p: &Path) -> bool {
+    rt().caches.iter().any(|c| c.contains(p))
 }
 
 /// Whether non-executable private mappings of `fd` can stay file-backed
@@ -364,7 +375,7 @@ pub fn original_guest_path_of_host(host: &Path) -> Option<String> {
 /// The loader mapped `host` for the guest file `guest`.
 pub fn note_mapped(host: &Path, guest: &str) {
     if let Ok(st) = FileStat::of_path(host)
-        && rt().cache.as_ref().is_some_and(|c| c.contains(host))
+        && in_cache(host)
     {
         set_state(
             st,

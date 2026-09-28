@@ -127,6 +127,16 @@ fn rewrite_file_copy(b: u64, len: u64, fd: i32, off: u64, source: &ExecSource) {
         ExecSource::Shared => return,
         ExecSource::LoadTime(None) => patch::rewrite_region(b, len),
     };
+    // Every file that takes this path is named, sites or not: no cache
+    // had it (the image cache test counts these).
+    if crate::sys::tracing() {
+        let path = xrt::fd_path(fd).unwrap_or_default();
+        crate::diag!(
+            "[linux-abi] load-time rewrite of {} at offset {off:#x}: {} sites",
+            path.display(),
+            stats.total()
+        );
+    }
     trace_stats("rewrote", b, len, &stats);
 }
 

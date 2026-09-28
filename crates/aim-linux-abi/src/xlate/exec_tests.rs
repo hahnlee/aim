@@ -51,7 +51,7 @@ fn runtime_cache() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let d = scratch("rt-cache");
-        xrt::init(Some(d.clone()));
+        xrt::init(None, Some(d.clone()));
         d
     })
 }

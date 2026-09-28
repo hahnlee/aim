@@ -1,10 +1,14 @@
 //! `linux-translate [--cache DIR] [--jobs N] [--verbose] ROOT...`
+//! `linux-translate --image VOLUME [--jobs N] [--verbose]`
 //!
 //! Pre-populates the translation cache for every AArch64 ELF file under each
 //! ROOT (an extracted Android image tree, read-only), then reports what was
 //! found, how long it took and how large the cache is.
 //!
-//! `--cache` defaults to `~/Library/Caches/aim/translated`.
+//! `--cache` defaults to `~/Library/Caches/aim/translated`. `--image`
+//! translates a system image volume's tree, `VOLUME/root`, into the image's
+//! own cache, `VOLUME/translated`, indexed by path relative to the tree
+//! (docs/storage.md); linux-run looks there first.
 //! Symlinks are not followed: every file is indexed under its real path,
 //! which is the host path the runtime resolves guest paths to.
 
@@ -20,7 +24,9 @@ use aim_linux_abi::cache::Cache;
 use aim_linux_abi::xlate;
 
 fn usage() -> ! {
-    eprintln!("usage: linux-translate [--cache DIR] [--jobs N] [--verbose] ROOT...");
+    eprintln!(
+        "usage: linux-translate [--cache DIR] [--jobs N] [--verbose] ROOT...\n       linux-translate --image VOLUME [--jobs N] [--verbose]"
+    );
     std::process::exit(2);
 }
 
@@ -102,6 +108,7 @@ struct Totals {
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut cache_dir = None;
+    let mut image = None;
     let mut jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
     let mut verbose = false;
     let mut roots = Vec::new();
@@ -116,19 +123,34 @@ fn main() {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(|| usage())
             }
+            "--image" => image = Some(args.next().map(PathBuf::from).unwrap_or_else(|| usage())),
             "--verbose" => verbose = true,
             "--help" | "-h" => usage(),
             _ => roots.push(PathBuf::from(a)),
         }
     }
-    if roots.is_empty() {
-        usage();
-    }
-    let Some(cache_dir) = cache_dir.or_else(Cache::default_dir) else {
-        eprintln!("linux-translate: no cache directory (use --cache)");
-        std::process::exit(2);
+    let cache = match image {
+        Some(volume) if roots.is_empty() && cache_dir.is_none() => {
+            let root = volume.join("root").canonicalize().unwrap_or_else(|e| {
+                eprintln!("linux-translate: {}/root: {e}", volume.display());
+                std::process::exit(1);
+            });
+            roots.push(root.clone());
+            Cache::image(&root)
+        }
+        Some(_) => usage(),
+        None => {
+            if roots.is_empty() {
+                usage();
+            }
+            let Some(dir) = cache_dir.or_else(Cache::default_dir) else {
+                eprintln!("linux-translate: no cache directory (use --cache)");
+                std::process::exit(2);
+            };
+            Cache::new(dir)
+        }
     };
-    let cache = Cache::new(&cache_dir);
+    let cache_dir = cache.dir().to_path_buf();
     let opts = xlate::Options::default();
     let start = Instant::now();
 
