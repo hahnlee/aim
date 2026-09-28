@@ -39,7 +39,7 @@ selects a group (`cargo aim build hal`). `-v` shows the tools' output,
 | --- | --- |
 | `_build/android16-image.dmg` | The system image (`image` node): the original and its translation cache as a compressed read-only case-sensitive disk image, mounted at `_build/android16-image` (docs/storage.md) |
 | `_build/aosp/` | AOSP trees fetched at the image's tag, each checked against its lock's hash |
-| `_build/downloads/` | Their archives, so a refetch needs no network |
+| `_build/downloads/` | Their archives (and the MoltenVK release), so a refetch needs no network |
 | `_build/xsdc`, `_build/angle-source`, `_build/depot_tools` | Pinned checkouts |
 | `target/aim/<node>/` | Every build output (`hal/bin`, `art/stripped`, `boot-image`, ...) |
 | `target/aim/derived.shadow` | The derived image: the system image's changes by the overlay and its translations, mounted read-only at `target/aim/derived` |
@@ -65,6 +65,7 @@ non-cargo stages are declared in code:
 | `art` | `xsdc`, `image` | `patches/art-android/*`, `tools/art-android/*`; found: n2's deps log | `target/aim/art/stripped` |
 | `boot-image` | `art`, `image`, `host/linux-run` (order only) | | `target/aim/boot-image/framework` |
 | `angle` | | `upstream/angle.lock`, `upstream/angle-args.gn` | `_build/angle-source/out/AimRelease` |
+| `moltenvk` | | `upstream/moltenvk.lock` | `target/aim/moltenvk` (`libMoltenVK.dylib`, `LICENSE`, `vk.xml`) |
 | `derived-image` | `image` and the producer of every built overlay source | `image/overlay.toml` and its checked-in sources | `target/aim/derived.shadow`, attached at `target/aim/derived` |
 | `translation-cache` | `derived-image`, `host/linux-translate` | | the derived image's `translated/` |
 

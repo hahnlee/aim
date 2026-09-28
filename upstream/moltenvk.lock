@@ -1,0 +1,24 @@
+# MoltenVK, the host side of the Vulkan driver (docs/vulkan-driver.md). The
+# `moltenvk` node of `cargo aim` downloads the official release archive,
+# checks it against MOLTENVK_SHA256 and installs its macOS dylib and
+# license in target/aim/moltenvk. It also fetches the Khronos registry
+# (vk.xml) of the Vulkan-Headers revision this MoltenVK release is built
+# with, which tools/gen-vulkan-thunks.py reads.
+MOLTENVK_VERSION=v1.4.2
+MOLTENVK_URL=https://github.com/KhronosGroup/MoltenVK/releases/download/${MOLTENVK_VERSION}/MoltenVK-macos.tar
+MOLTENVK_SHA256=f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e
+# The release tag's commit.
+MOLTENVK_REVISION=db66022459ffb663aa2b50f6b018bc2e124f5edf
+
+# What the release links in (MoltenVK's ExternalRevisions at that tag).
+# Recorded for the license notices (THIRD_PARTY_NOTICES.md); nothing is
+# fetched from them but vk.xml.
+SPIRV_CROSS_REVISION=6c09849fe88c48eaed08413aa022aaa136a3a057
+SPIRV_TOOLS_REVISION=0d6fd73ca73830ccab5fa1f00ed5ed40124e2c55
+SPIRV_HEADERS_REVISION=29981f65241605e08b0ede4cfeb999fe3b723c6a
+CEREAL_REVISION=a56bad8bbb770ee266e930c95d37fff2a5be7fea
+VULKAN_HEADERS_REVISION=e3b1eec08173d6b825cd3ac88c885a63b621504a
+
+# registry/vk.xml of VULKAN_HEADERS_REVISION (Vulkan 1.4.357).
+VK_XML_URL=https://raw.githubusercontent.com/KhronosGroup/Vulkan-Headers/${VULKAN_HEADERS_REVISION}/registry/vk.xml
+VK_XML_SHA256=264d0d7350e37d70c82407fb430d085040fc01a9a961d43dec8c2d6ed1dfd183
