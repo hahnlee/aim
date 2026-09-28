@@ -34,7 +34,7 @@ fn image() -> Option<PathBuf> {
 
 fn scratch(name: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
+    let _ = aim_linux_abi::cache::remove_tree(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
 }
@@ -237,7 +237,7 @@ fn original_servicemanager_serves_original_clients() {
     let Some(clang) = ndk_clang() else {
         aim_paths::skip("the pinned NDK is not installed (service and latency checks)");
         drop(sm);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = aim_linux_abi::cache::remove_tree(&dir);
         return;
     };
     let bench = layout.data.join("data/local/tmp/binder_ping");
@@ -287,7 +287,7 @@ fn original_servicemanager_serves_original_clients() {
             .contains(&gone)
     });
     drop(sm);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = aim_linux_abi::cache::remove_tree(&dir);
 }
 
 fn wait_for(mut done: impl FnMut() -> bool) {

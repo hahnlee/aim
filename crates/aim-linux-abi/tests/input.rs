@@ -34,7 +34,7 @@ struct Server {
 impl Server {
     fn new(name: &str) -> Server {
         let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = aim_linux_abi::cache::remove_tree(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("d.sock");
         let devs = Devices::create(&device_dir(&socket), devices(1080, 1920, 254.0, 254.0))
@@ -66,7 +66,7 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.input.close();
-        let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = aim_linux_abi::cache::remove_tree(&self.dir);
     }
 }
 

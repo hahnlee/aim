@@ -25,6 +25,7 @@ pub mod sys;
 pub mod vfs;
 pub mod xlate;
 pub mod xrt;
+pub mod zip;
 
 use std::ffi::CString;
 use std::path::{Path, PathBuf};

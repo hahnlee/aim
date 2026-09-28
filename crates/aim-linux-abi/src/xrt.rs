@@ -8,7 +8,10 @@
 //!   to rewrite) are file-backed and shared ([`exec_source`]).
 //! - Anything else takes the load-time path: an anonymous copy rewritten
 //!   before it becomes executable, with sites found by the translator's
-//!   code/data identification when the file is an ELF.
+//!   code/data identification when the code is an ELF's: a file, or a
+//!   library stored in an APK. Those sites are kept in the cache
+//!   ([`Cache::publish_sites`]), so only the first process to map an ELF's
+//!   code analyzes it.
 
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -16,8 +19,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::cache::{Cache, EntryKind, FileStat};
-use crate::xlate;
+use crate::cache::{self, Cache, EntryKind, FileStat};
+use crate::xlate::{self, fips};
+use crate::zip;
 
 #[derive(Clone, Debug)]
 enum FileState {
@@ -27,16 +31,32 @@ enum FileState {
     HasTranslation(PathBuf),
     /// An original the cache says needs no rewriting.
     Identity,
-    /// An original with no usable entry; analyzed once.
-    Uncached(Option<Arc<xlate::Analysis>>),
+    /// An original with no usable entry; its sites found once.
+    Uncached(Option<Arc<Sites>>),
     /// Not an AArch64 ELF (or not parseable as one).
     Other,
+}
+
+/// Where the load-time path rewrites an ELF's code, by file offset.
+#[derive(Debug)]
+pub struct Sites {
+    pub sites: Vec<cache::Site>,
+    /// A BoringSSL FIPS module whose hash must follow rewritten bytes.
+    pub fips: Option<fips::Module>,
 }
 
 struct Runtime {
     cache: Option<Cache>,
     ctr_el0: u32,
     files: Mutex<HashMap<FileStat, FileState>>,
+    /// Files holding stored members (APKs): their members, and the sites of
+    /// the ELFs found in them by offset.
+    archives: Mutex<HashMap<FileStat, Archive>>,
+}
+
+struct Archive {
+    members: Arc<Vec<zip::Member>>,
+    elfs: HashMap<u64, Option<Arc<Sites>>>,
 }
 
 static RT: OnceLock<Runtime> = OnceLock::new();
@@ -48,6 +68,7 @@ pub fn init(cache: Option<PathBuf>) {
         cache: cache.map(Cache::new),
         ctr_el0: crate::a64::host_ctr_el0(),
         files: Mutex::new(HashMap::new()),
+        archives: Mutex::new(HashMap::new()),
     });
 }
 
@@ -56,6 +77,7 @@ fn rt() -> &'static Runtime {
         cache: None,
         ctr_el0: crate::a64::host_ctr_el0(),
         files: Mutex::new(HashMap::new()),
+        archives: Mutex::new(HashMap::new()),
     })
 }
 
@@ -156,12 +178,12 @@ pub fn on_open(fd: i32, host: &CStr, guest: &str, host_flags: i32) {
 pub enum ExecSource {
     /// Map the file itself, shared and read-only, then make it executable.
     Shared,
-    /// Copy into anonymous memory and rewrite the analysis's sites (file
-    /// offsets); None: no metadata, scan every word.
-    LoadTime(Option<Arc<xlate::Analysis>>),
+    /// Copy into anonymous memory and rewrite these sites (file offsets);
+    /// None: no metadata, scan every word.
+    LoadTime(Option<Arc<Sites>>),
 }
 
-fn read_fd(fd: i32, size: u64) -> Option<Vec<u8>> {
+fn read_fd(fd: i32, off: u64, size: u64) -> Option<Vec<u8>> {
     let mut buf = vec![0u8; size as usize];
     let mut done = 0usize;
     while done < buf.len() {
@@ -171,7 +193,7 @@ fn read_fd(fd: i32, size: u64) -> Option<Vec<u8>> {
                 fd,
                 buf[done..].as_mut_ptr().cast(),
                 buf.len() - done,
-                done as i64,
+                (off + done as u64) as i64,
             )
         };
         if n <= 0 {
@@ -182,39 +204,129 @@ fn read_fd(fd: i32, size: u64) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn analyze_fd(fd: i32, size: u64) -> Option<Arc<xlate::Analysis>> {
-    let bytes = read_fd(fd, size)?;
+/// The sites of the ELF at `[start, start+size)` of `fd`, as offsets in
+/// the file: from the cache, or found and then recorded there. None when
+/// the bytes are no ELF the translator can read.
+fn sites_of(fd: i32, st: &FileStat, start: u64, size: u64) -> Option<Arc<Sites>> {
+    let cache = rt().cache.as_ref();
+    let member = cache
+        .and_then(|_| fd_path(fd))
+        .map(|p| cache::member_path(&p, start));
+    if let (Some(c), Some(m)) = (cache, &member)
+        && let Some(mut sites) = c.lookup_sites(m, st)
+    {
+        sites.iter_mut().for_each(|s| s.0 += start);
+        return Some(Arc::new(Sites { sites, fips: None }));
+    }
+    let bytes = read_fd(fd, start, size)?;
+    // The same content at another path (an app installed again) has its
+    // sites recorded already.
+    let sha = cache.map(|_| xlate::sha256_hex(&bytes));
+    if let (Some(c), Some(m), Some(sha)) = (cache, &member, &sha)
+        && let Some(mut sites) = c.sites(sha)
+    {
+        let _ = c.record_index(m, st, sha);
+        sites.iter_mut().for_each(|s| s.0 += start);
+        return Some(Arc::new(Sites { sites, fips: None }));
+    }
     let elf = xlate::elf::parse(&bytes).ok()?;
-    Some(Arc::new(xlate::analyze(&elf)))
+    let a = xlate::analyze(&elf);
+    let sites: Vec<cache::Site> = a
+        .sites
+        .iter()
+        .map(|s| (start + s.offset, s.kind, s.rt))
+        .collect();
+    let fips = a.fips.map(|mut m| {
+        m.text_offset += start;
+        m.rodata_offset += start;
+        m.hash_offset += start;
+        m
+    });
+    // A FIPS module's hash must be recomputed from the file each time, so
+    // its sites are not recorded.
+    if let (Some(c), Some(m), Some(sha), None) = (cache, &member, &sha, &fips) {
+        let local: Vec<_> = sites.iter().map(|&(o, k, r)| (o - start, k, r)).collect();
+        if let Err(e) = c.publish_sites(m, st, sha, &local) {
+            crate::diag!(
+                "[linux-abi] cannot record the sites of {}: {e}",
+                m.display()
+            );
+        }
+    }
+    Some(Arc::new(Sites { sites, fips }))
 }
 
-pub fn exec_source(fd: i32) -> ExecSource {
+/// The sites of the ELF stored in the archive `fd` (an APK) that holds
+/// file offset `off`, if there is one.
+fn archive_sites(fd: i32, st: &FileStat, off: u64) -> Option<Arc<Sites>> {
+    let read = |at: u64, len: usize| read_fd(fd, at, len as u64);
+    let members = {
+        let archives = rt().archives.lock().unwrap();
+        archives.get(st).map(|a| a.members.clone())
+    };
+    let members = match members {
+        Some(m) => m,
+        None => {
+            let m = Arc::new(zip::members(st.size, read).unwrap_or_default());
+            rt().archives.lock().unwrap().insert(
+                *st,
+                Archive {
+                    members: m.clone(),
+                    elfs: HashMap::new(),
+                },
+            );
+            m
+        }
+    };
+    let (start, size) = zip::stored_at(&members, off, read)?;
+    if let Some(s) = rt().archives.lock().unwrap().get(st)?.elfs.get(&start) {
+        return s.clone();
+    }
+    let head = read_fd(fd, start, 20)?;
+    let sites = if xlate::elf::is_aarch64_elf(&head) {
+        sites_of(fd, st, start, size)
+    } else {
+        None
+    };
+    if let Some(a) = rt().archives.lock().unwrap().get_mut(st) {
+        a.elfs.insert(start, sites.clone());
+    }
+    sites
+}
+
+/// How an executable private mapping of `fd` at file offset `off` is made.
+pub fn exec_source(fd: i32, off: u64) -> ExecSource {
     let Ok((st, _)) = FileStat::of_fd(fd) else {
         return ExecSource::LoadTime(None);
     };
     match state(&st) {
         Some(FileState::Translated { .. } | FileState::Identity) => ExecSource::Shared,
         Some(FileState::Uncached(Some(a))) => ExecSource::LoadTime(Some(a)),
-        Some(FileState::Other) => ExecSource::LoadTime(None),
+        Some(FileState::Other) => ExecSource::LoadTime(archive_sites(fd, &st, off)),
         s => {
             // Not seen at open (or opened writable): a published cache file
-            // maps shared; anything else is analyzed once.
+            // maps shared; anything else has its sites found once.
             if s.is_none()
                 && let (Some(cache), Some(p)) = (&rt().cache, fd_path(fd))
                 && cache.contains(&p)
             {
                 return ExecSource::Shared;
             }
-            let analysis = analyze_fd(fd, st.size);
+            let sites = sites_of(fd, &st, 0, st.size);
             set_state(
                 st,
-                match (&s, &analysis) {
+                match (&s, &sites) {
                     (Some(FileState::HasTranslation(p)), _) => FileState::HasTranslation(p.clone()),
                     (_, Some(a)) => FileState::Uncached(Some(a.clone())),
                     (_, None) => FileState::Other,
                 },
             );
-            ExecSource::LoadTime(analysis)
+            match (s, sites) {
+                (_, Some(a)) => ExecSource::LoadTime(Some(a)),
+                // Not an ELF: maybe an archive.
+                (None, None) => ExecSource::LoadTime(archive_sites(fd, &st, off)),
+                (_, None) => ExecSource::LoadTime(None),
+            }
         }
     }
 }

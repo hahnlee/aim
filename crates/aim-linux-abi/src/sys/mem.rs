@@ -113,8 +113,8 @@ fn rewrite_file_copy(b: u64, len: u64, fd: i32, off: u64, source: &ExecSource) {
             let abs: Vec<_> = a
                 .sites
                 .iter()
-                .filter(|s| s.offset >= off && s.offset + 4 <= off + len)
-                .map(|s| (b + (s.offset - off), s.kind, s.rt))
+                .filter(|&&(o, _, _)| o >= off && o + 4 <= off + len)
+                .map(|&(o, kind, rt)| (b + (o - off), kind, rt))
                 .collect();
             let stats = patch::rewrite_sites(&abs, b, b + len, true);
             if let Some(m) = &a.fips {
@@ -276,7 +276,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         }
     } else if kind == MAP_PRIVATE {
         let source = if !anon && exec && !writable {
-            Some(xrt::exec_source(fd))
+            Some(xrt::exec_source(fd, off))
         } else {
             None
         };
@@ -337,7 +337,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
                 }
                 if exec {
                     crate::diag::register_fd_module(b, len, fd, off);
-                    let source = source.unwrap_or_else(|| xrt::exec_source(fd));
+                    let source = source.unwrap_or_else(|| xrt::exec_source(fd, off));
                     rewrite_file_copy(b, len, fd, off, &source);
                 }
             } else if exec && !fresh_jit {
