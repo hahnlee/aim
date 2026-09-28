@@ -512,6 +512,17 @@ slack action, which has no process form, so the call fails in the guest
    900 and above (the highest registered first), one a second, then `memory pressure Warn
    -> Normal`; `dumpsys activity lmk` counts them.
 
+## The Mac's settings (2026-09-29, #283, #282, #281)
+
+Details in [mac-settings.md](mac-settings.md). The device takes the Mac's
+time zone, first language with its region, and light/dark appearance:
+aim-guest-init sets `vendor.aim.mac.*` before init's first action and
+when the Mac changes them, and `init.aim.rc` applies them with
+`persist.sys.timezone` and `persist.sys.locale` in `post-fs-data`,
+`cmd alarm set-timezone` and `cmd uimode night`. A first boot on a Mac
+on Asia/Seoul, `ko-KR` and Light shows KST (the Mac's clock), `ko-rKR`
+and `notnight`; Settings draws in Korean.
+
 ## Storage images (2026-09-29)
 
 The boot on the case-sensitive images of [storage.md](storage.md): the

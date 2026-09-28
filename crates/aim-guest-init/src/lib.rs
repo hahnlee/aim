@@ -15,6 +15,8 @@
 //!   files.
 //! - [`apex`]: `/apex/apex-info-list.xml` for the pre-flattened APEX tree.
 //! - [`executor`], [`boot`]: the `CommandExecutor` and init's main loop.
+//! - [`mac`]: the Mac's time zone, language and appearance as
+//!   `vendor.aim.mac.*` properties.
 //!
 //! What the syscall layer must provide for this to work is specified in
 //! `docs/guest-init-contract.md`.
@@ -27,6 +29,7 @@ pub mod futex;
 pub mod guest_inode;
 pub mod identity;
 pub mod launch;
+pub mod mac;
 pub mod paths;
 pub mod props;
 pub mod propsvc;

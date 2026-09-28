@@ -39,3 +39,25 @@ on fs
 
 on late-fs
     mount_all /vendor/etc/fstab.aim --late
+
+# The Mac's time zone, language and appearance (docs/mac-settings.md):
+# aim-guest-init sets vendor.aim.mac.* before the first action, and the
+# time zone and appearance again when the Mac changes them.
+
+# After init.rc's post-fs-data has loaded the persistent properties, and
+# before zygote-start: the Mac's zone and language replace the persisted
+# ones for this boot.
+on post-fs-data
+    setprop persist.sys.timezone ${vendor.aim.mac.time_zone}
+    setprop persist.sys.locale ${vendor.aim.mac.locale}
+
+# A zone change while Android runs goes through AlarmManager.setTimeZone,
+# which broadcasts it and which the time zone detector reads back.
+on property:sys.boot_completed=1 && property:vendor.aim.mac.time_zone=*
+    exec_background - system system -- /system/bin/cmd alarm set-timezone ${vendor.aim.mac.time_zone}
+
+# The appearance goes through UiModeManager (ui_night_mode), at the end
+# of the boot and on each change of the Mac's. Not earlier: a change
+# before the system is ready never reaches the global configuration.
+on property:sys.boot_completed=1 && property:vendor.aim.mac.night_mode=*
+    exec_background - system system -- /system/bin/cmd uimode night ${vendor.aim.mac.night_mode}

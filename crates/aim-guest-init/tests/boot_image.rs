@@ -207,3 +207,24 @@ fn real_image_dry_run_boot() {
     common::make_writable(&root);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The zones a Mac names (`/etc/localtime`) are in the guest's tzdata,
+/// which `mac::properties` checks before the device takes one.
+#[test]
+fn derived_image_tzdata_has_the_macs_zones() {
+    let Some(image) = derived_image() else {
+        return;
+    };
+    let tzdata = std::fs::read(image.join(aim_guest_init::mac::TZDATA.trim_start_matches('/')))
+        .expect("tzdata");
+    for zone in [
+        "Asia/Seoul",
+        "America/Los_Angeles",
+        "Europe/Kyiv",
+        "UTC",
+        "Etc/GMT-14",
+    ] {
+        assert!(aim_guest_init::mac::tzdata_has(&tzdata, zone), "{zone}");
+    }
+    assert!(!aim_guest_init::mac::tzdata_has(&tzdata, "Mars/Olympus"));
+}

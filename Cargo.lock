@@ -79,6 +79,7 @@ version = "0.1.0"
 dependencies = [
  "aim-android-init",
  "aim-binder-host",
+ "aim-hostcall",
  "aim-paths",
  "aim-storage",
  "libc",

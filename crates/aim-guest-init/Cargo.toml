@@ -16,6 +16,7 @@ path = "src/bin/guest-init.rs"
 [dependencies]
 aim-android-init = { path = "../aim-android-init" }
 aim-binder-host = { path = "../aim-binder-host" }
+aim-hostcall.workspace = true
 aim-storage.workspace = true
 libc.workspace = true
 
