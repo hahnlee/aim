@@ -5,14 +5,14 @@
 //! Opens a small window: run it in a logged-in session.
 
 use std::io::Read;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use aim_host_display::{MODULE, set_server};
 use aim_hostcall::display::{
-    Buffer, Connect, Event, FN_CONNECT, FN_IMPORT, FN_PRESENT, FN_SET_VSYNC, Import, SetVsync,
+    Connect, Event, FN_CONNECT, FN_IMPORT, FN_PRESENT, FN_SET_VSYNC, Import, Present, SetVsync,
     event,
 };
 
@@ -114,7 +114,36 @@ fn presents_a_buffer_and_delivers_vsync() {
         ..Default::default()
     };
     assert_eq!(call(FN_IMPORT, &mut import), 0);
-    assert_eq!(call(FN_PRESENT, &mut Buffer { id: 7 }), 0);
+    // The server shows the buffer once its acquire fence signals, and the
+    // present fence signals once it is on screen.
+    let (acquire, content) = aim_sync_file::pair().unwrap();
+    let mut present = Present {
+        id: 7,
+        acquire: acquire.as_raw_fd(),
+        present: -1,
+    };
+    assert_eq!(call(FN_PRESENT, &mut present), 0);
+    // SAFETY: the module returned a new fd for us.
+    let shown = unsafe { OwnedFd::from_raw_fd(present.present) };
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !aim_sync_file::wait(shown.as_fd(), 0),
+        "shown before its content"
+    );
+    let ready = aim_sync_file::monotonic_ns();
+    content.signal(1);
+    assert!(aim_sync_file::wait(shown.as_fd(), 5000), "present fence");
+    let aim_sync_file::State::Signaled {
+        timestamp_ns,
+        status: 1,
+    } = aim_sync_file::state(shown.as_fd())
+    else {
+        panic!("{:?}", aim_sync_file::state(shown.as_fd()));
+    };
+    assert!(
+        timestamp_ns > ready,
+        "shown at {timestamp_ns}, ready at {ready}"
+    );
 
     // Vsync: a steady stream at the display's period.
     assert_eq!(call(FN_SET_VSYNC, &mut SetVsync { enabled: 1 }), 0);

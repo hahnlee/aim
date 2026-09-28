@@ -3,4 +3,16 @@
 # _build/angle-source (git, then depot_tools' `gclient sync`), and builds
 # libEGL and libGLESv2 in its out/AimRelease with the gn args of
 # upstream/angle-args.gn (Metal only).
+#
+# ANGLE's DEPS at this revision pin what the build links or loads with it
+# (their licenses: THIRD_PARTY_NOTICES.md, licensing/upstream-sources.json):
+# abseil-cpp 3a994d3a4560406a1101ae4fb3a496e7c6604ca9, perfetto
+# be28dac0fa653fa627e0b1f0e58549d730bfb28d, zlib
+# 0165316260f597826ab93d4580faebd56e4f002d, astc-encoder
+# 2319d9c4d4af53a7fc7c52985e264ce6e8a02a9b, libc++
+# 97b436da4c33663581d394f4ee0a5977fc38c2f4, libc++abi
+# fc1897a2c12aa27e703c3ed48b62eba8abf4ce19, and the Khronos registries that
+# tools/gen-gpu-thunks.py reads: OpenGL-Registry
+# 9cb90ca4902d588bef3c830fbb1da484893bd5fb, EGL-Registry
+# 7dea2ed79187cd13f76183c4b9100159b9e3e071.
 ANGLE_REVISION=37c976ffba9d2940add977cad9945b23de14c150

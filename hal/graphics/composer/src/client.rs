@@ -44,6 +44,7 @@ use android_hardware_graphics_composer3::aidl::android::hardware::graphics::comp
     OverlayProperties::OverlayProperties,
     PerFrameMetadataKey::PerFrameMetadataKey,
     PowerMode::PowerMode,
+    PresentFence::PresentFence,
     PresentOrValidate::PresentOrValidate,
     PresentOrValidate::Result::Result as PresentResult,
     ReadbackBufferAttributes::ReadbackBufferAttributes,
@@ -230,8 +231,14 @@ impl Client {
         if cmd.acceptDisplayChanges {
             d.accept_changes();
         }
-        if cmd.presentDisplay {
-            d.present(host);
+        if cmd.presentDisplay
+            && let Some(fence) = d.present(host)
+        {
+            out.push(CommandResultPayload::PresentFence(PresentFence {
+                display: DISPLAY,
+                fence: Some(ParcelFileDescriptor::new(fence)),
+                layerPresentFences: None,
+            }));
         }
     }
 }

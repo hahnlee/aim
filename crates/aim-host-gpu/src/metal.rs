@@ -12,15 +12,15 @@ use aim_hostcall::gpu::ImportBuffer;
 
 use crate::{EINVAL, resolved};
 
-type Id = *mut c_void;
-type Sel = *const c_void;
+pub type Id = *mut c_void;
+pub type Sel = *const c_void;
 
 aim_hostcall::dylib! {
     static METAL = c"/System/Library/Frameworks/Metal.framework/Metal" {
-        fn objc_getClass(name: *const c_char) -> Id;
+        pub fn objc_getClass(name: *const c_char) -> Id;
         fn sel_registerName(name: *const c_char) -> Sel;
-        static objc_msgSend: c_void;
-        fn objc_release(obj: Id);
+        pub static objc_msgSend: c_void;
+        pub fn objc_release(obj: Id);
         fn objc_autoreleasePoolPush() -> *mut c_void;
         fn objc_autoreleasePoolPop(pool: *mut c_void);
     }
@@ -36,7 +36,7 @@ pub fn pool_pop(pool: *mut c_void) {
     unsafe { objc_autoreleasePoolPop(pool) }
 }
 
-fn sel(name: &CStr) -> Sel {
+pub fn sel(name: &CStr) -> Sel {
     // SAFETY: a NUL-terminated selector name.
     unsafe { sel_registerName(name.as_ptr()) }
 }
@@ -45,11 +45,12 @@ fn sel(name: &CStr) -> Sel {
 macro_rules! send {
     ($obj:expr, $sel:expr => $ret:ty $(, $t:ty = $a:expr)*) => {{
         // SAFETY: the selector's method has exactly this signature.
-        let f: unsafe extern "C" fn(Id, Sel $(, $t)*) -> $ret =
-            unsafe { std::mem::transmute(objc_msgSend()) };
-        unsafe { f($obj, sel($sel) $(, $a)*) }
+        let f: unsafe extern "C" fn($crate::metal::Id, $crate::metal::Sel $(, $t)*) -> $ret =
+            unsafe { std::mem::transmute($crate::metal::objc_msgSend()) };
+        unsafe { f($obj, $crate::metal::sel($sel) $(, $a)*) }
     }};
 }
+pub(crate) use send;
 
 // Metal and EGL constants.
 const MTL_STORAGE_MODE_SHARED: usize = 0;
@@ -78,7 +79,7 @@ fn metal_format(format: i32) -> Option<(usize, u32, Option<i32>)> {
 }
 
 /// The `MTLDevice` behind an ANGLE display.
-fn device(display: usize) -> Option<Id> {
+pub fn device(display: usize) -> Option<Id> {
     let query_display = resolved(c"eglQueryDisplayAttribEXT");
     let query_device = resolved(c"eglQueryDeviceAttribEXT");
     if query_display == 0 || query_device == 0 {

@@ -6,8 +6,10 @@
 //! which `linux-run` gives to the guest. The module connects to the server
 //! named by `linux-run --display` and forwards the composer's requests
 //! ([`wire`]). A buffer travels once, as its memfd over `SCM_RIGHTS`; the
-//! server maps the same memory, so nothing is copied. The guest gets the
-//! connection itself to read vsync events from.
+//! server maps the same memory, so nothing is copied. A present carries its
+//! fences the same way: the acquire fence the server waits for, and the
+//! writer of the present fence it signals once the frame is on screen. The
+//! guest gets the connection itself to read vsync events from.
 
 pub mod input;
 pub mod wire;
@@ -19,8 +21,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use aim_hostcall::display::{
-    Buffer, Connect, FN_CONNECT, FN_IMPORT, FN_PRESENT, FN_RELEASE, FN_SET_VSYNC, Import, SetVsync,
-    VERSION,
+    Buffer, Connect, FN_CONNECT, FN_IMPORT, FN_PRESENT, FN_RELEASE, FN_SET_VSYNC, Import, Present,
+    SetVsync, VERSION,
 };
 use aim_hostcall::{HostModule, args_mut, errno, module};
 use wire::Request;
@@ -52,19 +54,15 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
     let r = match func {
         FN_CONNECT => unsafe { args_mut::<Connect>(args, len) }.map(connect),
         FN_IMPORT => unsafe { args_mut::<Import>(args, len) }.map(|i| import(i)),
-        FN_PRESENT | FN_RELEASE => unsafe { args_mut::<Buffer>(args, len) }.map(|b| {
-            let op = if func == FN_PRESENT {
-                wire::OP_PRESENT
-            } else {
-                wire::OP_RELEASE
-            };
+        FN_PRESENT => unsafe { args_mut::<Present>(args, len) }.map(present),
+        FN_RELEASE => unsafe { args_mut::<Buffer>(args, len) }.map(|b| {
             request(
                 &Request {
-                    op,
+                    op: wire::OP_RELEASE,
                     id: b.id,
                     ..Default::default()
                 },
-                None,
+                &[],
             )
         }),
         FN_SET_VSYNC => unsafe { args_mut::<SetVsync>(args, len) }.map(|v| {
@@ -74,7 +72,7 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
                     flag: (v.enabled != 0) as u32,
                     ..Default::default()
                 },
-                None,
+                &[],
             )
         }),
         _ => Err(neg(errno::ENOSYS)),
@@ -145,16 +143,49 @@ fn import(i: &Import) -> i64 {
             import: *i,
             ..Default::default()
         },
-        Some(i.fd),
+        &[i.fd],
     )
 }
 
-fn request(r: &Request, fd: Option<i32>) -> i64 {
+/// Send the present with the present fence's writer (and the acquire
+/// fence); the guest gets the present fence.
+fn present(p: &mut Present) -> i64 {
+    // SAFETY: F_GETFD only checks that the guest's fd is open.
+    if p.acquire >= 0 && unsafe { libc::fcntl(p.acquire, libc::F_GETFD) } < 0 {
+        return neg(errno::EBADF);
+    }
+    let Ok((fence, writer)) = aim_sync_file::pair() else {
+        return neg(errno::ENOMEM);
+    };
+    let mut fds = vec![writer.as_raw_fd()];
+    let mut flag = 0;
+    if p.acquire >= 0 {
+        fds.push(p.acquire);
+        flag |= wire::PRESENT_ACQUIRE;
+    }
+    let r = request(
+        &Request {
+            op: wire::OP_PRESENT,
+            flag,
+            id: p.id,
+            ..Default::default()
+        },
+        &fds,
+    );
+    // The server has its own copy of the writer now.
+    drop(writer);
+    if r == 0 {
+        p.present = aim_sync_file::give_to_guest(fence);
+    }
+    r
+}
+
+fn request(r: &Request, fds: &[i32]) -> i64 {
     let guard = CONNECTION.lock().unwrap();
     let Some(conn) = guard.as_ref() else {
         return neg(errno::ENOTCONN);
     };
-    match wire::send(conn.as_fd(), wire::bytes(r), fd) {
+    match wire::send_fds(conn.as_fd(), wire::bytes(r), fds) {
         Ok(()) => 0,
         Err(_) => neg(errno::ENOTCONN),
     }

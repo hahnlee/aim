@@ -113,6 +113,7 @@ name = "aim-host-display"
 version = "0.1.0"
 dependencies = [
  "aim-hostcall",
+ "aim-sync-file",
  "libc",
 ]
 
@@ -122,6 +123,7 @@ version = "0.1.0"
 dependencies = [
  "aim-hostcall",
  "aim-paths",
+ "aim-sync-file",
  "libc",
 ]
 
@@ -189,6 +191,7 @@ dependencies = [
  "aim-hostcall",
  "aim-paths",
  "aim-storage",
+ "aim-sync-file",
  "libc",
  "sha2",
 ]
@@ -199,6 +202,13 @@ version = "0.1.0"
 
 [[package]]
 name = "aim-storage"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "aim-sync-file"
 version = "0.1.0"
 dependencies = [
  "libc",

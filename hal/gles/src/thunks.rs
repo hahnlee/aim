@@ -4753,32 +4753,12 @@ pub unsafe extern "C" fn eglCreateStreamProducerD3DTextureANGLE(dpy: EGLDisplay,
     unsafe { host::eglCreateStreamProducerD3DTextureANGLE(dpy, stream, attrib_list) }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglCreateSync(dpy: EGLDisplay, r#type: EGLenum, attrib_list: *const EGLAttrib) -> EGLSync {
-    unsafe { host::eglCreateSync(dpy, r#type, attrib_list) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglCreateSyncKHR(dpy: EGLDisplay, r#type: EGLenum, attrib_list: *const EGLint) -> EGLSyncKHR {
-    unsafe { host::eglCreateSyncKHR(dpy, r#type, attrib_list) }
-}
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn eglDestroyContext(dpy: EGLDisplay, ctx: EGLContext) -> EGLBoolean {
     unsafe { host::eglDestroyContext(dpy, ctx) }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eglDestroyStreamKHR(dpy: EGLDisplay, stream: EGLStreamKHR) -> EGLBoolean {
     unsafe { host::eglDestroyStreamKHR(dpy, stream) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglDestroySync(dpy: EGLDisplay, sync: EGLSync) -> EGLBoolean {
-    unsafe { host::eglDestroySync(dpy, sync) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglDestroySyncKHR(dpy: EGLDisplay, sync: EGLSyncKHR) -> EGLBoolean {
-    unsafe { host::eglDestroySyncKHR(dpy, sync) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglDupNativeFenceFDANDROID(dpy: EGLDisplay, sync: EGLSyncKHR) -> EGLint {
-    unsafe { host::eglDupNativeFenceFDANDROID(dpy, sync) }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eglExportVkImageANGLE(dpy: EGLDisplay, image: EGLImage, vk_image: *mut c_void, vk_image_create_info: *mut c_void) -> EGLBoolean {
@@ -4827,14 +4807,6 @@ pub unsafe extern "C" fn eglGetNativeClientBufferANDROID(buffer: *const c_void) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eglGetNextFrameIdANDROID(dpy: EGLDisplay, surface: EGLSurface, frameId: *mut EGLuint64KHR) -> EGLBoolean {
     unsafe { host::eglGetNextFrameIdANDROID(dpy, surface, frameId) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglGetSyncAttrib(dpy: EGLDisplay, sync: EGLSync, attribute: EGLint, value: *mut EGLAttrib) -> EGLBoolean {
-    unsafe { host::eglGetSyncAttrib(dpy, sync, attribute, value) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglGetSyncAttribKHR(dpy: EGLDisplay, sync: EGLSyncKHR, attribute: EGLint, value: *mut EGLint) -> EGLBoolean {
-    unsafe { host::eglGetSyncAttribKHR(dpy, sync, attribute, value) }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eglGetSyncValuesCHROMIUM(dpy: EGLDisplay, surface: EGLSurface, ust: *mut EGLuint64KHR, msc: *mut EGLuint64KHR, sbc: *mut EGLuint64KHR) -> EGLBoolean {
@@ -5023,14 +4995,6 @@ pub unsafe extern "C" fn eglWaitGL() -> EGLBoolean {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eglWaitNative(engine: EGLint) -> EGLBoolean {
     unsafe { host::eglWaitNative(engine) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglWaitSync(dpy: EGLDisplay, sync: EGLSync, flags: EGLint) -> EGLBoolean {
-    unsafe { host::eglWaitSync(dpy, sync, flags) }
-}
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglWaitSyncKHR(dpy: EGLDisplay, sync: EGLSyncKHR, flags: EGLint) -> EGLint {
-    unsafe { host::eglWaitSyncKHR(dpy, sync, flags) }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eglWaitUntilWorkScheduledANGLE(dpy: EGLDisplay) {
@@ -8271,8 +8235,8 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "eglBindAPI", addr: eglBindAPI as *const c_void, id: 1 },
     Proc { name: "eglBindTexImage", addr: eglBindTexImage as *const c_void, id: 2 },
     Proc { name: "eglChooseConfig", addr: crate::egl::eglChooseConfig as *const c_void, id: -1 },
-    Proc { name: "eglClientWaitSync", addr: crate::egl::eglClientWaitSync as *const c_void, id: -1 },
-    Proc { name: "eglClientWaitSyncKHR", addr: crate::egl::eglClientWaitSyncKHR as *const c_void, id: -1 },
+    Proc { name: "eglClientWaitSync", addr: crate::sync::eglClientWaitSync as *const c_void, id: -1 },
+    Proc { name: "eglClientWaitSyncKHR", addr: crate::sync::eglClientWaitSyncKHR as *const c_void, id: -1 },
     Proc { name: "eglCopyBuffers", addr: eglCopyBuffers as *const c_void, id: 6 },
     Proc { name: "eglCopyMetalSharedEventANGLE", addr: eglCopyMetalSharedEventANGLE as *const c_void, id: 7 },
     Proc { name: "eglCreateContext", addr: eglCreateContext as *const c_void, id: 8 },
@@ -8289,8 +8253,8 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "eglCreatePlatformWindowSurfaceEXT", addr: crate::egl::eglCreatePlatformWindowSurfaceEXT as *const c_void, id: -1 },
     Proc { name: "eglCreateStreamKHR", addr: eglCreateStreamKHR as *const c_void, id: 20 },
     Proc { name: "eglCreateStreamProducerD3DTextureANGLE", addr: eglCreateStreamProducerD3DTextureANGLE as *const c_void, id: 21 },
-    Proc { name: "eglCreateSync", addr: eglCreateSync as *const c_void, id: 22 },
-    Proc { name: "eglCreateSyncKHR", addr: eglCreateSyncKHR as *const c_void, id: 23 },
+    Proc { name: "eglCreateSync", addr: crate::sync::eglCreateSync as *const c_void, id: -1 },
+    Proc { name: "eglCreateSyncKHR", addr: crate::sync::eglCreateSyncKHR as *const c_void, id: -1 },
     Proc { name: "eglCreateWindowSurface", addr: crate::egl::eglCreateWindowSurface as *const c_void, id: -1 },
     Proc { name: "eglDebugMessageControlKHR", addr: crate::egl::eglDebugMessageControlKHR as *const c_void, id: -1 },
     Proc { name: "eglDestroyContext", addr: eglDestroyContext as *const c_void, id: 25 },
@@ -8298,9 +8262,9 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "eglDestroyImageKHR", addr: crate::egl::eglDestroyImageKHR as *const c_void, id: -1 },
     Proc { name: "eglDestroyStreamKHR", addr: eglDestroyStreamKHR as *const c_void, id: 28 },
     Proc { name: "eglDestroySurface", addr: crate::egl::eglDestroySurface as *const c_void, id: -1 },
-    Proc { name: "eglDestroySync", addr: eglDestroySync as *const c_void, id: 30 },
-    Proc { name: "eglDestroySyncKHR", addr: eglDestroySyncKHR as *const c_void, id: 31 },
-    Proc { name: "eglDupNativeFenceFDANDROID", addr: eglDupNativeFenceFDANDROID as *const c_void, id: 32 },
+    Proc { name: "eglDestroySync", addr: crate::sync::eglDestroySync as *const c_void, id: -1 },
+    Proc { name: "eglDestroySyncKHR", addr: crate::sync::eglDestroySyncKHR as *const c_void, id: -1 },
+    Proc { name: "eglDupNativeFenceFDANDROID", addr: crate::sync::eglDupNativeFenceFDANDROID as *const c_void, id: -1 },
     Proc { name: "eglExportVkImageANGLE", addr: eglExportVkImageANGLE as *const c_void, id: 33 },
     Proc { name: "eglForceGPUSwitchANGLE", addr: eglForceGPUSwitchANGLE as *const c_void, id: 34 },
     Proc { name: "eglGetCompositorTimingANDROID", addr: eglGetCompositorTimingANDROID as *const c_void, id: 35 },
@@ -8320,8 +8284,8 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "eglGetPlatformDisplay", addr: crate::egl::eglGetPlatformDisplay as *const c_void, id: -1 },
     Proc { name: "eglGetPlatformDisplayEXT", addr: crate::egl::eglGetPlatformDisplayEXT as *const c_void, id: -1 },
     Proc { name: "eglGetProcAddress", addr: crate::egl::eglGetProcAddress as *const c_void, id: -1 },
-    Proc { name: "eglGetSyncAttrib", addr: eglGetSyncAttrib as *const c_void, id: 51 },
-    Proc { name: "eglGetSyncAttribKHR", addr: eglGetSyncAttribKHR as *const c_void, id: 52 },
+    Proc { name: "eglGetSyncAttrib", addr: crate::sync::eglGetSyncAttrib as *const c_void, id: -1 },
+    Proc { name: "eglGetSyncAttribKHR", addr: crate::sync::eglGetSyncAttribKHR as *const c_void, id: -1 },
     Proc { name: "eglGetSyncValuesCHROMIUM", addr: eglGetSyncValuesCHROMIUM as *const c_void, id: 53 },
     Proc { name: "eglHandleGPUSwitchANGLE", addr: eglHandleGPUSwitchANGLE as *const c_void, id: 54 },
     Proc { name: "eglInitialize", addr: eglInitialize as *const c_void, id: 55 },
@@ -8380,8 +8344,8 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "eglWaitClient", addr: eglWaitClient as *const c_void, id: 106 },
     Proc { name: "eglWaitGL", addr: eglWaitGL as *const c_void, id: 107 },
     Proc { name: "eglWaitNative", addr: eglWaitNative as *const c_void, id: 108 },
-    Proc { name: "eglWaitSync", addr: eglWaitSync as *const c_void, id: 109 },
-    Proc { name: "eglWaitSyncKHR", addr: eglWaitSyncKHR as *const c_void, id: 110 },
+    Proc { name: "eglWaitSync", addr: crate::sync::eglWaitSync as *const c_void, id: -1 },
+    Proc { name: "eglWaitSyncKHR", addr: crate::sync::eglWaitSyncKHR as *const c_void, id: -1 },
     Proc { name: "eglWaitUntilWorkScheduledANGLE", addr: eglWaitUntilWorkScheduledANGLE as *const c_void, id: 111 },
     Proc { name: "glAcquireTexturesANGLE", addr: glAcquireTexturesANGLE as *const c_void, id: 112 },
     Proc { name: "glActiveShaderProgram", addr: glActiveShaderProgram as *const c_void, id: 113 },

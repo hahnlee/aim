@@ -326,6 +326,10 @@ pub fn adopt(fd: i32) {
     if let Some((guest, ..)) = &listed {
         local = Some(unix_addr(guest));
     }
+    if l.l_linger == aim_sync_file::MARK {
+        super::sync_file::adopt(fd);
+        return;
+    }
     let passcred = listed.as_ref().is_some_and(|l| l.2);
     let ty = match (l.l_linger, &listed) {
         (MARK_SEQPACKET, _) => SockType::SeqPacket,

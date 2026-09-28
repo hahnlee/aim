@@ -5,17 +5,16 @@
 //!   Metal display on the host.
 //! - Window surfaces: an `ANativeWindow` gets a host pbuffer as its default
 //!   framebuffer. `eglSwapBuffers` dequeues a buffer, has the host blit the
-//!   pbuffer into it (top row first) and queues it.
+//!   pbuffer into it (top row first) and queues it with the blit's fence.
 //! - `EGL_NATIVE_BUFFER_ANDROID` images: the buffer's memory, imported by the
 //!   host as a Metal texture ([`crate::buffers`]).
 //! - Android config attributes (`EGL_NATIVE_VISUAL_ID`,
 //!   `EGL_RECORDABLE_ANDROID`, `EGL_FRAMEBUFFER_TARGET_ANDROID`).
 //! - Callbacks (blob cache, debug) are accepted and never called: host code
 //!   does not call guest code.
-//! - Client waits on a sync without a current context, which ANGLE's Metal
-//!   backend refuses.
 //!
-//! Every other EGL call goes straight to the host (`crate::thunks`).
+//! Syncs are [`crate::sync`]; every other EGL call goes straight to the
+//! host (`crate::thunks`).
 
 use core::ffi::{CStr, c_char, c_int, c_void};
 use std::cell::Cell;
@@ -104,7 +103,7 @@ thread_local! {
     static CURRENT: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }
 
-fn fail<T>(error: EGLint, ret: T) -> T {
+pub(crate) fn fail<T>(error: EGLint, ret: T) -> T {
     ERROR.set(error);
     ret
 }
@@ -196,6 +195,7 @@ const OURS: &[&str] = &[
     "EGL_ANDROID_framebuffer_target",
     "EGL_ANDROID_presentation_time",
     "EGL_KHR_swap_buffers_with_damage",
+    "EGL_ANDROID_native_fence_sync",
 ];
 /// Host extensions that need callbacks into the guest.
 const WITHHELD: &[&str] = &["EGL_ANDROID_blob_cache", "EGL_KHR_debug"];
@@ -576,10 +576,13 @@ fn swap(surface: EGLSurface, w: &mut Window) -> EGLBoolean {
         src_height: w.height as u32,
         dst_width: b.width as u32,
         dst_height: b.height as u32,
+        fence: -1,
+        _reserved: 0,
     };
     let presented = aim_hostcall::guest::gpu_present(&mut present).is_ok();
-    // SAFETY: the dequeued buffer; the GPU is done with it (no fence).
-    let queued = unsafe { ANativeWindow_queueBuffer(w.window, buffer, -1) } == 0;
+    // SAFETY: the dequeued buffer and the fence of the copy into it, which
+    // the queue takes over.
+    let queued = unsafe { ANativeWindow_queueBuffer(w.window, buffer, present.fence) } == 0;
     if !presented || !queued {
         return fail(EGL_BAD_SURFACE, EGL_FALSE);
     }
@@ -821,84 +824,6 @@ pub unsafe extern "C" fn eglDestroyImage(dpy: EGLDisplay, image: EGLImage) -> EG
         destroyed(image);
     }
     ok
-}
-
-// Syncs.
-
-const EGL_SYNC_STATUS: EGLint = 0x30f1;
-const EGL_SIGNALED: EGLint = 0x30f2;
-const EGL_TIMEOUT_EXPIRED: EGLint = 0x30f5;
-const EGL_CONDITION_SATISFIED: EGLint = 0x30f6;
-/// How often a client wait without a context looks at the sync.
-const POLL: std::time::Duration = std::time::Duration::from_micros(100);
-
-/// `eglClientWaitSync(KHR)`. EGL needs no current context for it, but
-/// ANGLE's Metal backend fails it with `EGL_BAD_CONTEXT` without one (HWUI
-/// waits for its upload thread's fence from another thread). Without a
-/// context the wait polls the sync's status, which ANGLE answers from the
-/// display; the flush flag has nothing to flush then.
-unsafe fn client_wait(
-    dpy: EGLDisplay,
-    sync: EGLSync,
-    timeout: u64,
-    with_context: impl FnOnce() -> EGLint,
-) -> EGLint {
-    // SAFETY: a plain query of this thread's context.
-    if !unsafe { host::eglGetCurrentContext() }.is_null() {
-        return with_context();
-    }
-    let start = std::time::Instant::now();
-    loop {
-        let mut status: EGLint = 0;
-        // SAFETY: forwarded, into a local.
-        if unsafe { host::eglGetSyncAttribKHR(dpy, sync, EGL_SYNC_STATUS, &mut status) } != EGL_TRUE
-        {
-            return EGL_FALSE as EGLint;
-        }
-        if status == EGL_SIGNALED {
-            return EGL_CONDITION_SATISFIED;
-        }
-        // EGL_FOREVER is u64::MAX nanoseconds, longer than any wait here.
-        let left = timeout.saturating_sub(start.elapsed().as_nanos() as u64);
-        if left == 0 {
-            return EGL_TIMEOUT_EXPIRED;
-        }
-        std::thread::sleep(POLL.min(std::time::Duration::from_nanos(left)));
-    }
-}
-
-/// # Safety
-/// EGL's contract.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglClientWaitSync(
-    dpy: EGLDisplay,
-    sync: EGLSync,
-    flags: EGLint,
-    timeout: EGLTime,
-) -> EGLint {
-    // SAFETY: forwarded.
-    unsafe {
-        client_wait(dpy, sync, timeout, || {
-            host::eglClientWaitSync(dpy, sync, flags, timeout)
-        })
-    }
-}
-
-/// # Safety
-/// EGL's contract.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn eglClientWaitSyncKHR(
-    dpy: EGLDisplay,
-    sync: EGLSyncKHR,
-    flags: EGLint,
-    timeout: EGLTimeKHR,
-) -> EGLint {
-    // SAFETY: forwarded.
-    unsafe {
-        client_wait(dpy, sync, timeout, || {
-            host::eglClientWaitSyncKHR(dpy, sync, flags, timeout)
-        })
-    }
 }
 
 // Errors, procedures and callbacks.

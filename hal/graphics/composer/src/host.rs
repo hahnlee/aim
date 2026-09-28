@@ -4,7 +4,7 @@ use std::io::Read;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use aim_gralloc::Handle;
-use aim_hostcall::display::{Connect, Event, Import, event};
+use aim_hostcall::display::{Connect, Event, Import, Present, event};
 use aim_hostcall::guest::{self, Errno};
 
 /// The connected display: its mode, and the fd its events arrive on.
@@ -39,8 +39,16 @@ impl Host {
         guest::display_import(&mut args)
     }
 
-    pub fn present(&self, id: u64) -> Result<(), Errno> {
-        guest::display_present(id)
+    /// Show buffer `id` once `acquire` signals; returns the present fence.
+    pub fn present(&self, id: u64, acquire: Option<BorrowedFd>) -> Result<OwnedFd, Errno> {
+        let mut args = Present {
+            id,
+            acquire: acquire.map_or(-1, |f| f.as_raw_fd()),
+            present: -1,
+        };
+        guest::display_present(&mut args)?;
+        // SAFETY: the host call returned a new fd that we now own.
+        Ok(unsafe { OwnedFd::from_raw_fd(args.present) })
     }
 
     pub fn release(&self, id: u64) -> Result<(), Errno> {

@@ -88,9 +88,15 @@ GUEST = {
     "eglCreateImage": "egl", "eglDestroyImageKHR": "egl",
     "eglDestroyImage": "egl", "eglGetError": "egl",
     "eglPresentationTimeANDROID": "egl", "eglGetProcAddress": "egl",
-    # Client waits without a current context (ANGLE's Metal backend
-    # refuses them).
-    "eglClientWaitSync": "egl", "eglClientWaitSyncKHR": "egl",
+    # Native fence syncs (EGL_ANDROID_native_fence_sync) over sync_file
+    # fds, and client waits without a current context (ANGLE's Metal
+    # backend refuses them).
+    "eglCreateSync": "sync", "eglCreateSyncKHR": "sync",
+    "eglDestroySync": "sync", "eglDestroySyncKHR": "sync",
+    "eglGetSyncAttrib": "sync", "eglGetSyncAttribKHR": "sync",
+    "eglWaitSync": "sync", "eglWaitSyncKHR": "sync",
+    "eglDupNativeFenceFDANDROID": "sync",
+    "eglClientWaitSync": "sync", "eglClientWaitSyncKHR": "sync",
     # Callbacks the host never makes.
     "eglSetBlobCacheFuncsANDROID": "egl", "eglDebugMessageControlKHR": "egl",
     "glDebugMessageCallback": "gl", "glDebugMessageCallbackKHR": "gl",

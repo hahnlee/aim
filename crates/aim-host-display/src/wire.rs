@@ -5,7 +5,8 @@
 //! [`display::Connect`](aim_hostcall::display::Connect) and from then on
 //! writes only [`display::Event`](aim_hostcall::display::Event) records,
 //! which the guest reads directly. Requests are fixed-size [`Request`]
-//! records; an [`OP_IMPORT`] carries the buffer's fd as `SCM_RIGHTS`.
+//! records; an [`OP_IMPORT`] carries the buffer's fd as `SCM_RIGHTS`, an
+//! [`OP_PRESENT`] its fences.
 //! Both ends are built from this crate, so the layout is checked only by
 //! [`VERSION`].
 
@@ -15,16 +16,21 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use aim_hostcall::display::Import;
 
 /// Sent in the hello; the server closes a connection of another version.
-pub const VERSION: u64 = 1;
+pub const VERSION: u64 = 2;
 
 /// `id` = [`VERSION`], `flag` = display index.
 pub const OP_HELLO: u32 = 1;
 /// `import` describes the buffer; its fd rides along.
 pub const OP_IMPORT: u32 = 2;
+/// `id` is the buffer. The fds are the present fence's writer, then the
+/// acquire fence when `flag` has [`PRESENT_ACQUIRE`].
 pub const OP_PRESENT: u32 = 3;
 pub const OP_RELEASE: u32 = 4;
 /// `flag` = 1 to send vsync events, 0 to stop.
 pub const OP_SET_VSYNC: u32 = 5;
+
+/// [`OP_PRESENT`] carries an acquire fence.
+pub const PRESENT_ACQUIRE: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -45,6 +51,11 @@ pub fn bytes<T: Copy>(v: &T) -> &[u8] {
 
 /// Write all of `data`, with `fd` attached to its first byte.
 pub fn send(sock: BorrowedFd, data: &[u8], fd: Option<RawFd>) -> io::Result<()> {
+    send_fds(sock, data, fd.as_slice())
+}
+
+/// Write all of `data`, with `fds` attached to its first byte.
+pub fn send_fds(sock: BorrowedFd, data: &[u8], fds: &[RawFd]) -> io::Result<()> {
     let mut iov = libc::iovec {
         iov_base: data.as_ptr() as *mut _,
         iov_len: data.len(),
@@ -55,14 +66,21 @@ pub fn send(sock: BorrowedFd, data: &[u8], fd: Option<RawFd>) -> io::Result<()> 
         let mut msg: libc::msghdr = std::mem::zeroed();
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
-        if let Some(fd) = fd {
+        if !fds.is_empty() {
+            let len = size_of_val(fds) as u32;
+            assert!(libc::CMSG_SPACE(len) as usize <= size_of_val(&control));
             msg.msg_control = control.as_mut_ptr().cast();
-            msg.msg_controllen = libc::CMSG_SPACE(size_of::<RawFd>() as u32) as _;
+            msg.msg_controllen = libc::CMSG_SPACE(len) as _;
             let c = libc::CMSG_FIRSTHDR(&msg);
             (*c).cmsg_level = libc::SOL_SOCKET;
             (*c).cmsg_type = libc::SCM_RIGHTS;
-            (*c).cmsg_len = libc::CMSG_LEN(size_of::<RawFd>() as u32) as _;
-            libc::CMSG_DATA(c).cast::<RawFd>().write_unaligned(fd);
+            (*c).cmsg_len = libc::CMSG_LEN(len) as _;
+            for (i, fd) in fds.iter().enumerate() {
+                libc::CMSG_DATA(c)
+                    .cast::<RawFd>()
+                    .add(i)
+                    .write_unaligned(*fd);
+            }
         }
         loop {
             let n = libc::sendmsg(sock.as_raw_fd(), &msg, 0);
@@ -84,9 +102,9 @@ pub fn send(sock: BorrowedFd, data: &[u8], fd: Option<RawFd>) -> io::Result<()> 
     }
 }
 
-/// Read exactly `buf.len()` bytes and any fd sent with them. `Ok(false)` at
-/// end of stream.
-pub fn recv(sock: BorrowedFd, buf: &mut [u8], fd: &mut Option<OwnedFd>) -> io::Result<bool> {
+/// Read exactly `buf.len()` bytes and any fds sent with them, in order.
+/// `Ok(false)` at end of stream.
+pub fn recv(sock: BorrowedFd, buf: &mut [u8], fds: &mut Vec<OwnedFd>) -> io::Result<bool> {
     let mut done = 0;
     while done < buf.len() {
         let mut iov = libc::iovec {
@@ -113,7 +131,7 @@ pub fn recv(sock: BorrowedFd, buf: &mut [u8], fd: &mut Option<OwnedFd>) -> io::R
                         ((*c).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / size_of::<RawFd>();
                     for i in 0..count {
                         let raw = libc::CMSG_DATA(c).cast::<RawFd>().add(i).read_unaligned();
-                        *fd = Some(OwnedFd::from_raw_fd(raw));
+                        fds.push(OwnedFd::from_raw_fd(raw));
                     }
                 }
                 c = libc::CMSG_NXTHDR(&msg, c);
@@ -140,8 +158,7 @@ pub fn recv_record<T: Copy + Default>(sock: BorrowedFd) -> io::Result<Option<T>>
     let mut v = T::default();
     // SAFETY: `T` is plain old data; every byte pattern is a value.
     let buf = unsafe { std::slice::from_raw_parts_mut((&mut v as *mut T).cast(), size_of::<T>()) };
-    let mut fd = None;
-    Ok(recv(sock, buf, &mut fd)?.then_some(v))
+    Ok(recv(sock, buf, &mut Vec::new())?.then_some(v))
 }
 
 #[cfg(test)]
@@ -175,24 +192,36 @@ mod tests {
             ..Default::default()
         };
         send(a.as_fd(), bytes(&import), Some(file.as_raw_fd())).unwrap();
-        send(a.as_fd(), bytes(&present), None).unwrap();
+        let (fence, writer) = aim_sync_file::pair().unwrap();
+        send_fds(
+            a.as_fd(),
+            bytes(&present),
+            &[writer.as_raw_fd(), file.as_raw_fd()],
+        )
+        .unwrap();
+        drop(writer);
 
         let mut got = Request::default();
-        let mut fd = None;
+        let mut fds = Vec::new();
         // SAFETY: `Request` is plain old data.
         let buf = unsafe {
             std::slice::from_raw_parts_mut((&mut got as *mut Request).cast(), size_of::<Request>())
         };
-        assert!(recv(b.as_fd(), buf, &mut fd).unwrap());
+        assert!(recv(b.as_fd(), buf, &mut fds).unwrap());
         assert_eq!((got.op, got.id), (OP_IMPORT, 9));
-        let mut received = std::fs::File::from(fd.take().expect("the fd"));
+        let mut received = std::fs::File::from(fds.pop().expect("the fd"));
         received.rewind().unwrap();
         let mut text = String::new();
         received.read_to_string(&mut text).unwrap();
         assert_eq!(text, "pixels");
 
-        let next = recv_record::<Request>(b.as_fd()).unwrap().unwrap();
-        assert_eq!((next.op, next.id), (OP_PRESENT, 9));
+        assert!(recv(b.as_fd(), buf, &mut fds).unwrap());
+        assert_eq!((got.op, got.id, fds.len()), (OP_PRESENT, 9, 2));
+        assert!(aim_sync_file::is_sync_file(fence.as_fd()));
+        assert!(!aim_sync_file::wait(fence.as_fd(), 0));
+        // The server's copy of the writer: dropping it fails the fence.
+        fds.clear();
+        assert!(aim_sync_file::wait(fence.as_fd(), 0));
         drop(a);
         assert!(recv_record::<Request>(b.as_fd()).unwrap().is_none());
     }

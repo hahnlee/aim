@@ -126,6 +126,78 @@
       "revision_lock": "upstream/moltenvk.lock",
       "source_url": "https://github.com/KhronosGroup/Vulkan-Headers/blob/e3b1eec08173d6b825cd3ac88c885a63b621504a/LICENSES/MIT.txt",
       "sha256": "1ca3502222d967f3be5751c55f6b7ee735b5383909c3b501495f54b216dbf227"
+    },
+    {
+      "file": "licensing/third-party/angle-LICENSE",
+      "project": "angle/angle",
+      "revision": "37c976ffba9d2940add977cad9945b23de14c150",
+      "upstream_path": "LICENSE",
+      "revision_lock": "upstream/angle.lock",
+      "source_url": "https://chromium.googlesource.com/angle/angle/+/37c976ffba9d2940add977cad9945b23de14c150/LICENSE",
+      "sha256": "bf4da21bd20bcfb5b60b7ecc67fa864a79be049e21d6178076887f178dd6c71a"
+    },
+    {
+      "file": "licensing/third-party/angle-xxhash-LICENSE",
+      "project": "angle/angle",
+      "revision": "37c976ffba9d2940add977cad9945b23de14c150",
+      "upstream_path": "src/common/third_party/xxhash/LICENSE",
+      "revision_lock": "upstream/angle.lock",
+      "source_url": "https://chromium.googlesource.com/angle/angle/+/37c976ffba9d2940add977cad9945b23de14c150/src/common/third_party/xxhash/LICENSE",
+      "sha256": "6ffedbc0f7878612d2b23589f1ff2ab15633e1df7963a5d9fc750ec5500c7e7a"
+    },
+    {
+      "file": "licensing/third-party/abseil-cpp-LICENSE",
+      "project": "chromium/src/third_party/abseil-cpp",
+      "revision": "3a994d3a4560406a1101ae4fb3a496e7c6604ca9",
+      "upstream_path": "LICENSE",
+      "revision_lock": "upstream/angle.lock",
+      "source_url": "https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp/+/3a994d3a4560406a1101ae4fb3a496e7c6604ca9/LICENSE",
+      "sha256": "c79a7fea0e3cac04cd43f20e7b648e5a0ff8fa5344e644b0ee09ca1162b62747"
+    },
+    {
+      "file": "licensing/third-party/perfetto-LICENSE",
+      "project": "external/github.com/google/perfetto",
+      "revision": "be28dac0fa653fa627e0b1f0e58549d730bfb28d",
+      "upstream_path": "LICENSE",
+      "revision_lock": "upstream/angle.lock",
+      "source_url": "https://chromium.googlesource.com/external/github.com/google/perfetto/+/be28dac0fa653fa627e0b1f0e58549d730bfb28d/LICENSE",
+      "sha256": "9a682a56cffc9524dfa9b0b1c0dca9cb81a19e96d5bd0793aaf02c08a95ee7ca"
+    },
+    {
+      "file": "licensing/third-party/chromium-zlib-LICENSE",
+      "project": "chromium/src/third_party/zlib",
+      "revision": "0165316260f597826ab93d4580faebd56e4f002d",
+      "upstream_path": "LICENSE",
+      "revision_lock": "upstream/angle.lock",
+      "source_url": "https://chromium.googlesource.com/chromium/src/third_party/zlib/+/0165316260f597826ab93d4580faebd56e4f002d/LICENSE",
+      "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+    },
+    {
+      "file": "licensing/third-party/astc-encoder-LICENSE",
+      "project": "external/github.com/ARM-software/astc-encoder",
+      "revision": "2319d9c4d4af53a7fc7c52985e264ce6e8a02a9b",
+      "upstream_path": "LICENSE.txt",
+      "revision_lock": "upstream/angle.lock",
+      "source_url": "https://chromium.googlesource.com/external/github.com/ARM-software/astc-encoder/+/2319d9c4d4af53a7fc7c52985e264ce6e8a02a9b/LICENSE.txt",
+      "sha256": "494accc32e50eb523a0e384d0ae6d4b702db867a89d6971216760e92b240ee12"
+    },
+    {
+      "file": "licensing/third-party/libcxx-LICENSE",
+      "project": "external/github.com/llvm/llvm-project/libcxx",
+      "revision": "97b436da4c33663581d394f4ee0a5977fc38c2f4",
+      "upstream_path": "LICENSE.TXT",
+      "revision_lock": "upstream/angle.lock",
+      "source_url": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx/+/97b436da4c33663581d394f4ee0a5977fc38c2f4/LICENSE.TXT",
+      "sha256": "539dd7aed86e8a4f12cbdd0e6c50c189c7d74847e4fecc64ce2c6ee3a01da38b"
+    },
+    {
+      "file": "licensing/third-party/libcxxabi-LICENSE",
+      "project": "external/github.com/llvm/llvm-project/libcxxabi",
+      "revision": "fc1897a2c12aa27e703c3ed48b62eba8abf4ce19",
+      "upstream_path": "LICENSE.TXT",
+      "revision_lock": "upstream/angle.lock",
+      "source_url": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxxabi/+/fc1897a2c12aa27e703c3ed48b62eba8abf4ce19/LICENSE.TXT",
+      "sha256": "e2b35be49f7284a45b7baca8fc7b3ab7440e7902392b2528a457816b5bb2a15c"
     }
   ]
 }

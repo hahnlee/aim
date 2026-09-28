@@ -2,7 +2,8 @@
 // original libnativewindow/libui (allocator and mapper HALs), and GLES
 // through the original libEGL loader and the vendor driver.
 //
-//   gles_triangle          allocate, render, check pixels, print timings
+//   gles_triangle          allocate, render, check pixels, native fences
+//                          (sync_file), print timings
 //   gles_triangle fork     zygote's pattern: get the display, fork, and
 //                          compile and draw in the child (twice: a display
 //                          only got, and one initialized, before the fork)
@@ -16,11 +17,15 @@
 #include <GLES3/gl3.h>
 #include <GLES2/gl2ext.h>
 #include <android/hardware_buffer.h>
+#include <errno.h>
+#include <linux/sync_file.h>
 #include <media/NdkImageReader.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -152,6 +157,106 @@ static int zygote(void) {
     CHECK(fork_and_draw(dpy, 1), "the child of an initialized parent draws");
     printf("ok fork child of an initialized display draws\n");
     return 0;
+}
+
+// Whether a sync_file signals within `ms`.
+static int fence_signals(int fd, int ms) {
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    return poll(&p, 1, ms) == 1 && p.revents == POLLIN;
+}
+
+// A sync_file's status and signal time (SYNC_IOC_FILE_INFO with one fence).
+static int fence_info(int fd, uint64_t* timestamp) {
+    struct sync_fence_info fence;
+    struct sync_file_info info = {.num_fences = 1, .sync_fence_info = (uint64_t)(uintptr_t)&fence};
+    CHECK(ioctl(fd, SYNC_IOC_FILE_INFO, &info) == 0, "SYNC_IOC_FILE_INFO %d", errno);
+    CHECK(info.num_fences == 1 && fence.status == info.status, "sync_file_info");
+    *timestamp = fence.timestamp_ns;
+    return info.status;
+}
+
+// EGL_ANDROID_native_fence_sync over sync_file: a fence for GL commands,
+// waited for, inspected, merged, imported back into EGL, and seen by a
+// fork child.
+static void native_fences(EGLDisplay dpy, GLuint prog) {
+    CHECK(strstr(eglQueryString(dpy, EGL_EXTENSIONS), "EGL_ANDROID_native_fence_sync"),
+          "EGL_ANDROID_native_fence_sync");
+    PFNEGLDUPNATIVEFENCEFDANDROIDPROC eglDupNativeFenceFDANDROID =
+        (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)eglGetProcAddress("eglDupNativeFenceFDANDROID");
+    CHECK(eglDupNativeFenceFDANDROID != NULL, "eglDupNativeFenceFDANDROID");
+    double t0 = now_ns();
+    frame(prog, 0.0f, 0.0f, 1.0f);
+    EGLSyncKHR sync = eglCreateSyncKHR(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+    CHECK(sync != EGL_NO_SYNC_KHR, "native fence sync %x", eglGetError());
+    EGLint value = 0;
+    CHECK(eglGetSyncAttribKHR(dpy, sync, EGL_SYNC_TYPE_KHR, &value) &&
+              value == EGL_SYNC_NATIVE_FENCE_ANDROID, "sync type %x", value);
+    int fd = eglDupNativeFenceFDANDROID(dpy, sync);
+    CHECK(fd >= 0, "eglDupNativeFenceFDANDROID %x", eglGetError());
+    CHECK(fence_signals(fd, 5000), "the fence signals");
+    uint64_t ts = 0;
+    CHECK(fence_info(fd, &ts) == 1 && ts >= (uint64_t)t0 && ts <= (uint64_t)now_ns(),
+          "signaled status and time");
+    CHECK(eglClientWaitSyncKHR(dpy, sync, 0, EGL_FOREVER_KHR) == EGL_CONDITION_SATISFIED,
+          "client wait");
+    CHECK(eglGetSyncAttribKHR(dpy, sync, EGL_SYNC_STATUS_KHR, &value) && value == EGL_SIGNALED_KHR,
+          "sync status");
+    char byte;
+    CHECK(read(fd, &byte, 1) < 0 && errno == EINVAL, "read of a sync_file");
+    eglDestroySyncKHR(dpy, sync);
+
+    // Merge: a fence that has signaled with one that has not yet.
+    frame(prog, 1.0f, 0.0f, 0.0f);
+    EGLSyncKHR later = eglCreateSyncKHR(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+    int later_fd = eglDupNativeFenceFDANDROID(dpy, later);
+    struct sync_merge_data merge = {.name = "merged", .fd2 = later_fd};
+    CHECK(ioctl(fd, SYNC_IOC_MERGE, &merge) == 0 && merge.fence >= 0, "SYNC_IOC_MERGE %d", errno);
+    CHECK(fence_signals(merge.fence, 5000), "the merged fence signals");
+    uint64_t later_ts = 0, merged_ts = 0;
+    fence_info(later_fd, &later_ts);
+    CHECK(fence_info(merge.fence, &merged_ts) == 1 && merged_ts >= later_ts && merged_ts >= ts,
+          "merged time %llu", (unsigned long long)merged_ts);
+    eglDestroySyncKHR(dpy, later);
+
+    // A fence fd back into EGL (as SurfaceFlinger waits for a buffer):
+    // EGL takes the fd over.
+    const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, dup(merge.fence), EGL_NONE};
+    EGLSyncKHR imported = eglCreateSyncKHR(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+    CHECK(imported != EGL_NO_SYNC_KHR, "imported fence %x", eglGetError());
+    CHECK(eglWaitSyncKHR(dpy, imported, 0) == EGL_TRUE, "server wait %x", eglGetError());
+    eglDestroySyncKHR(dpy, imported);
+
+    // A fork child sees the parent's fence, including one signaled after
+    // the fork.
+    frame(prog, 0.0f, 1.0f, 0.0f);
+    EGLSyncKHR pending = eglCreateSyncKHR(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+    int pending_fd = eglDupNativeFenceFDANDROID(dpy, pending);
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork");
+    if (pid == 0) _exit(fence_signals(pending_fd, 5000) && fence_signals(merge.fence, 0) ? 0 : 1);
+    int st = 0;
+    CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+          "fork child waits for the fence");
+    eglDestroySyncKHR(dpy, pending);
+    close(pending_fd);
+    close(merge.fence);
+    close(later_fd);
+    close(fd);
+    CHECK(glGetError() == GL_NO_ERROR, "GL error");
+    printf("ok native fences: sync_file wait, info, merge, import, fork\n");
+
+    const int frames = 500;
+    t0 = now_ns();
+    for (int i = 0; i < frames; i++) {
+        frame(prog, 0.0f, 0.0f, 1.0f);
+        EGLSyncKHR s = eglCreateSyncKHR(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+        int f = eglDupNativeFenceFDANDROID(dpy, s);
+        CHECK(fence_signals(f, 5000), "frame fence");
+        close(f);
+        eglDestroySyncKHR(dpy, s);
+    }
+    printf("timing triangle frame (clear + draw + native fence + poll) %.1f us\n",
+           (now_ns() - t0) / frames / 1e3);
 }
 
 // RGBA bytes at (x, y) of a readback with the given row pitch.
@@ -357,6 +462,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < frames; i++) frame(prog, 0.0f, 0.0f, 1.0f);
     glFinish();
     printf("timing triangle frame, pipelined %.1f us\n", (now_ns() - t0) / frames / 1e3);
+    native_fences(dpy, prog);
 
     // 6. A window surface: an ImageReader's ANativeWindow (a BufferQueue
     // in this process). The frame reaches the queued buffer top row first.
