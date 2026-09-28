@@ -1,43 +1,32 @@
-//! `lmkd` of the derived image: the lmkd control socket, answered as the
-//! original answers it, with no kills.
+//! `lmkd` of the derived image: the original's control protocol and kill
+//! order ([`lmkd_core`]), with the Mac's memory pressure as its trigger.
 //!
 //! ActivityManager tells lmkd about every process it starts, reprioritizes
 //! and removes, and waits for the socket while it holds its own lock: with
 //! no lmkd, each of those waits for a connection that never comes, the lock
 //! is held for seconds, and the watchdog ends system_server. The original
-//! lmkd kills by PSI and memcg pressure, which Darwin does not report
-//! (#222); until kills follow macOS memory pressure, this one keeps the
-//! protocol and kills nothing.
+//! lmkd kills on PSI and memcg pressure, which Darwin does not report
+//! (#222). The guest reports the Mac's whole RAM, so this one kills when
+//! the Mac is under pressure: the host-call module `memory` wakes it on
+//! each change of the Mac's level and reports the level and free memory.
 //!
-//! The protocol is `lmkd.h`'s: packets of big-endian 32-bit words, the
-//! command first. Only `LMK_GETKILLCNT`, `LMK_UPDATE_PROPS` and
-//! `LMK_BOOT_COMPLETED` are answered; the rest are one-way. `lmkd --reinit`
-//! and `lmkd --boot_completed` (lmkd.rc's `exec_background`) send the
-//! matching command to the running lmkd and exit with its result.
+//! `lmkd --reinit` and `lmkd --boot_completed` (lmkd.rc's
+//! `exec_background`) send the matching command to the running lmkd and
+//! exit with its result.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::time::Duration;
 
-const LMK_TARGET: i32 = 0;
-const LMK_PROCPRIO: i32 = 1;
-const LMK_PROCREMOVE: i32 = 2;
-const LMK_PROCPURGE: i32 = 3;
-const LMK_GETKILLCNT: i32 = 4;
-const LMK_SUBSCRIBE: i32 = 5;
-const LMK_UPDATE_PROPS: i32 = 7;
-const LMK_START_MONITORING: i32 = 9;
-const LMK_BOOT_COMPLETED: i32 = 10;
-const LMK_PROCS_PRIO: i32 = 11;
+use aim_hostcall::guest;
+use aim_hostcall::memory::level;
+use lmkd_core::policy::{Level, Memory};
+use lmkd_core::proto::{LMK_BOOT_COMPLETED, LMK_UPDATE_PROPS};
+use lmkd_core::server::{Pressure, Server};
 
-/// `boot_completed_notification_result`.
-const BOOT_COMPLETED_SUCCESS: i32 = 0;
-const BOOT_COMPLETED_ALREADY_HANDLED: i32 = 2;
-
-/// `LMKD_CTRL_PACKET_SIZE`: the largest packet (LMK_TARGET with 6 pairs,
-/// LMK_PROCS_PRIO with 3 words for each of up to 32 processes).
-const PACKET: usize = 4 * (32 * 3 + 2);
-
-static BOOT_COMPLETED: AtomicBool = AtomicBool::new(false);
+/// How often lmkd re-reads the Mac's memory while it is under pressure,
+/// and so the most it kills: one process each time. macOS takes a moment
+/// to lower its level after memory is freed.
+const INTERVAL: Duration = Duration::from_secs(1);
 
 fn main() {
     daemon_log::init("lowmemorykiller");
@@ -64,7 +53,41 @@ fn main() {
     }
 }
 
-/// The listening socket init made from lmkd.rc (`socket lmkd seqpacket`).
+/// The Mac's memory pressure, through the host-call module `memory`.
+struct Host {
+    watch: OwnedFd,
+    page: u64,
+}
+
+impl Pressure for Host {
+    fn fd(&self) -> RawFd {
+        self.watch.as_raw_fd()
+    }
+
+    fn read(&mut self) -> Memory {
+        let mut buf = [0u8; 64];
+        // SAFETY: draining our non-blocking pipe into a local buffer.
+        while unsafe { libc::read(self.watch.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) } > 0
+        {
+        }
+        let m = guest::memory_read().unwrap_or_else(|e| {
+            log::error!("reading the host's memory: {e:?}");
+            Default::default()
+        });
+        Memory {
+            level: match m.level {
+                level::WARN => Level::Warn,
+                level::CRITICAL => Level::Critical,
+                _ => Level::Normal,
+            },
+            free: m.free / self.page,
+            file: m.file / self.page,
+        }
+    }
+}
+
+/// Serve the listening socket init made from lmkd.rc (`socket lmkd
+/// seqpacket`).
 fn serve() {
     let Some(fd) = std::env::var("ANDROID_SOCKET_lmkd")
         .ok()
@@ -79,67 +102,21 @@ fn serve() {
         log::error!("listen: {}", std::io::Error::last_os_error());
         std::process::exit(1);
     }
-    log::info!("serving the lmkd socket; processes are not killed (no memory pressure source)");
-    loop {
-        // SAFETY: accept on the listening socket init passed us.
-        let conn = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
-        if conn < 0 {
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            log::error!("accept: {}", std::io::Error::last_os_error());
+    let watch = match guest::memory_watch() {
+        // SAFETY: the host made the pipe for us.
+        Ok(fd) => unsafe { OwnedFd::from_raw_fd(fd) },
+        Err(e) => {
+            log::error!("no memory pressure from the host (host-call module memory: {e:?})");
             std::process::exit(1);
         }
-        // SAFETY: a fresh connection, owned from here on.
-        let conn = unsafe { OwnedFd::from_raw_fd(conn) };
-        std::thread::spawn(move || client(conn));
-    }
-}
-
-/// Answer one client until it hangs up.
-fn client(conn: OwnedFd) {
-    let mut buf = [0u8; PACKET];
-    loop {
-        // SAFETY: a receive into our buffer.
-        let n = unsafe { libc::recv(conn.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
-        if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-            continue;
-        }
-        if n < 4 {
-            return;
-        }
-        let words: Vec<i32> = buf[..n as usize]
-            .chunks_exact(4)
-            .map(|w| i32::from_be_bytes(w.try_into().unwrap()))
-            .collect();
-        if let Some(reply) = handle(&words) {
-            let bytes: Vec<u8> = reply.iter().flat_map(|w| w.to_be_bytes()).collect();
-            // SAFETY: a send from our buffer.
-            unsafe { libc::send(conn.as_raw_fd(), bytes.as_ptr().cast(), bytes.len(), 0) };
-        }
-    }
-}
-
-/// The reply to a packet, for the commands that have one.
-fn handle(words: &[i32]) -> Option<[i32; 2]> {
-    match words[0] {
-        LMK_GETKILLCNT => Some([LMK_GETKILLCNT, 0]),
-        LMK_UPDATE_PROPS => Some([LMK_UPDATE_PROPS, 0]),
-        LMK_BOOT_COMPLETED => {
-            let r = if BOOT_COMPLETED.swap(true, SeqCst) {
-                BOOT_COMPLETED_ALREADY_HANDLED
-            } else {
-                BOOT_COMPLETED_SUCCESS
-            };
-            Some([LMK_BOOT_COMPLETED, r])
-        }
-        LMK_TARGET | LMK_PROCPRIO | LMK_PROCREMOVE | LMK_PROCPURGE | LMK_SUBSCRIBE
-        | LMK_START_MONITORING | LMK_PROCS_PRIO => None,
-        other => {
-            log::warn!("unknown command {other}");
-            None
-        }
-    }
+    };
+    // SAFETY: plain sysconf.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+    // SAFETY: the socket init passed us, ours from here on.
+    let listener = unsafe { OwnedFd::from_raw_fd(fd) };
+    let e = Server::new(listener, Host { watch, page }, INTERVAL).run();
+    log::error!("poll: {e}");
+    std::process::exit(1);
 }
 
 /// Send `cmd` to the running lmkd and return the result it answers.
@@ -175,22 +152,5 @@ fn request(cmd: i32) -> std::io::Result<i32> {
             return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
         Ok(i32::from_be_bytes(reply[4..].try_into().unwrap()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn answers_what_lmkd_answers() {
-        assert_eq!(
-            handle(&[LMK_GETKILLCNT, 0, 1000]),
-            Some([LMK_GETKILLCNT, 0])
-        );
-        assert_eq!(handle(&[LMK_UPDATE_PROPS]), Some([LMK_UPDATE_PROPS, 0]));
-        assert_eq!(handle(&[LMK_PROCPRIO, 1234, 10001, 900, 0]), None);
-        assert_eq!(handle(&[LMK_BOOT_COMPLETED]), Some([LMK_BOOT_COMPLETED, 0]));
-        assert_eq!(handle(&[LMK_BOOT_COMPLETED]), Some([LMK_BOOT_COMPLETED, 2]));
     }
 }

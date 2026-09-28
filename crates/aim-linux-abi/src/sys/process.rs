@@ -94,9 +94,34 @@ fn priority_range(policy: i32) -> Option<(i32, i32)> {
     }
 }
 
+/// The Darwin QoS class for a thread's Linux scheduling. Android runs
+/// background work at a nice value of ANDROID_PRIORITY_BACKGROUND (10) or
+/// more, or in SCHED_BATCH or SCHED_IDLE; Darwin runs that at utility QoS,
+/// the lowest nice value and SCHED_IDLE at background QoS (`PRIO_DARWIN_BG`:
+/// efficiency cores, throttled I/O), and everything else at the default.
+pub fn host_qos(nice: i32, policy: i32) -> libc::qos_class_t {
+    use libc::qos_class_t::*;
+    match policy {
+        SCHED_IDLE => QOS_CLASS_BACKGROUND,
+        SCHED_BATCH => QOS_CLASS_UTILITY,
+        _ if nice >= 19 => QOS_CLASS_BACKGROUND,
+        _ if nice >= 10 => QOS_CLASS_UTILITY,
+        _ => QOS_CLASS_DEFAULT,
+    }
+}
+
+/// Give the calling thread the QoS of its Linux scheduling. Darwin sets a
+/// thread's QoS only from the thread itself, so a thread that changes
+/// another's scheduling changes only what the guest reads back.
+pub fn apply_host_qos(nice: i32, policy: i32) {
+    // SAFETY: plain call on the calling thread.
+    unsafe { libc::pthread_set_qos_class_self_np(host_qos(nice, policy), 0) };
+}
+
 /// sched_setparam (118), sched_setscheduler (119), sched_getscheduler
 /// (120), sched_getparam (121). The policy and priority are recorded per
-/// thread; Darwin schedules the host threads as it sees fit.
+/// thread; the calling thread's policy also sets its host QoS
+/// ([`host_qos`]). Darwin schedules the host threads as it sees fit.
 pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
     let th = match sched_target(a[0] as i64) {
         Ok(t) => t,
@@ -125,9 +150,12 @@ pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
             let prio = unsafe { (param as *const i32).read_unaligned() };
             match priority_range(policy) {
                 Some((lo, hi)) if (lo..=hi).contains(&prio) => {
-                    if let Some(s) = s {
-                        s.policy.store(policy, SeqCst);
-                        s.priority.store(prio, SeqCst);
+                    if let Some(th) = &th {
+                        th.sched.policy.store(policy, SeqCst);
+                        th.sched.priority.store(prio, SeqCst);
+                        if th.tid == thread::gettid() as i32 {
+                            apply_host_qos(super::cred::thread_nice(th.tid), policy);
+                        }
                     }
                     0
                 }

@@ -14,6 +14,12 @@ travel with any redistributed covered sources or binaries.
   not unmodified upstream releases. The vendor HALs and replaced daemons
   (`hal/`, `daemons/`) pin the AOSP sources they build against in their
   `sources.lock` files. [Upstream](https://android.googlesource.com/).
+- **AOSP lmkd.** `daemons/lmkd/core` ports lmkd's control protocol
+  (`include/lmkd.h`, the `LMK_STAT_KILL_OCCURRED` layout of `statslog.cpp`)
+  and its kill order and counters (`lmkd.cpp`) from
+  `platform/system/memory/lmkd` at `android-16.0.0_r1` (Apache-2.0;
+  Copyright The Android Open Source Project and Google, Inc); the ported
+  files name their origin and copyright. [Upstream](https://android.googlesource.com/platform/system/memory/lmkd/).
 - **Khronos and ANGLE registries.** `hal/gles/src/thunks.rs` and
   `crates/aim-host-gpu/src/table.rs` are generated from the Khronos XML
   registry (`gl.xml`, `egl.xml`; Apache-2.0) and ANGLE's extension registry

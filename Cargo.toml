@@ -21,6 +21,7 @@ members = [
     "crates/aim-host-gpu",
     "crates/aim-host-health",
     "crates/aim-host-location",
+    "crates/aim-host-memory",
     "crates/aim-host-sensors",
     "crates/aim-hostcall",
     "crates/aim-linux-abi",
@@ -49,6 +50,7 @@ members = [
     "daemons/aidl/*",
     "daemons/apexd",
     "daemons/lmkd",
+    "daemons/lmkd/core",
     "daemons/log",
     "daemons/netd",
     "daemons/vold",
@@ -67,11 +69,15 @@ default-members = [
     "crates/aim-host-gpu",
     "crates/aim-host-health",
     "crates/aim-host-location",
+    "crates/aim-host-memory",
     "crates/aim-host-sensors",
     "crates/aim-hostcall",
     "crates/aim-linux-abi",
     "crates/aim-paths",
     "tools/android-image-extract",
+    # lmkd's policy, a guest library, is built for the host too to run its
+    # tests.
+    "daemons/lmkd/core",
 ]
 resolver = "2"
 

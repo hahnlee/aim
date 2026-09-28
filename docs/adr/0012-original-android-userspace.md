@@ -378,8 +378,8 @@ Details in [boot-status.md](../boot-status.md), "Java world".
     child process with timeouts and a null sink (#217, audio.md);
   - an lmkd: ActivityManager waits for lmkd's socket under its lock on
     every process event, so without one the boot stalled into ANRs and the
-    watchdog. Ours (`daemons/lmkd`) answers the protocol and kills nothing
-    (#222);
+    watchdog. Ours (`daemons/lmkd`) answers the protocol; it kills on the
+    Mac's memory pressure since #277;
   - `/proc/config.gz` for libvintf's kernel configuration;
   - a fault on the heap window's first page is a null-check fault (#236);
   - vold's storage views exist from `initUser0`.
@@ -460,7 +460,7 @@ only at a stable, versioned interface. Everything else stays original.
 | --- | --- | --- |
 | netd | `INetd` | iptables, policy routing and eBPF; ours sets interfaces through the layer's ioctls and rtnetlink and keeps networks and routes as bookkeeping (host sockets carry the traffic). The device has one Ethernet network, `eth0`, standing for the Mac's network; Wi-Fi is stage 2 (docs/network.md, #265) |
 | vold | `IVold` | mounts, loop devices, fscrypt and dm-crypt; ours mounts FUSE the way vold does and hands the fd to the original MediaProvider |
-| lmkd | lmkd socket | PSI and memcg; ours answers the socket protocol and kills nothing (ActivityManager waits on the socket under its lock, so an absent lmkd stalls it); kills follow macOS memory-pressure events later (#222) |
+| lmkd | lmkd socket | PSI and memcg, which Darwin does not report. The guest reports the Mac's whole RAM, so ours kills on the Mac's memory pressure instead: the host-call module `memory` wakes it on each change of the Mac's level and reports free memory (docs/host-call.md). It keeps the original's protocol (ActivityManager waits on the socket under its lock, so an absent lmkd stalls it) and kill order: warn kills cached processes (oom_score_adj >= 900), critical down to perceptible (>= 200), ActivityManager's minfree levels deeper when free memory runs out; the highest oom_score_adj first, one kill per second while the pressure lasts, reported with `LMK_PROCKILL` and `LMK_STAT_KILL_OCCURRED` (#277) |
 | apexd | `IApexService` | loop devices and dm-verity; the image is pre-flattened, so ours only reports the active packages (keystore2's module hash, PackageManager) and sets `apexd.status` |
 
 The replacements are Rust (`daemons/`), built against the image's

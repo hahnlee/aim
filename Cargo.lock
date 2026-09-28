@@ -138,6 +138,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aim-host-memory"
+version = "0.1.0"
+dependencies = [
+ "aim-hostcall",
+ "libc",
+]
+
+[[package]]
 name = "aim-host-sensors"
 version = "0.1.0"
 dependencies = [
@@ -164,6 +172,7 @@ dependencies = [
  "aim-host-gpu",
  "aim-host-health",
  "aim-host-location",
+ "aim-host-memory",
  "aim-host-sensors",
  "aim-hostcall",
  "aim-paths",
@@ -803,7 +812,17 @@ dependencies = [
 name = "lmkd"
 version = "0.1.0"
 dependencies = [
+ "aim-hostcall",
  "daemon-log",
+ "libc",
+ "lmkd-core",
+ "log",
+]
+
+[[package]]
+name = "lmkd-core"
+version = "0.1.0"
+dependencies = [
  "libc",
  "log",
 ]
