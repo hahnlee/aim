@@ -1,0 +1,11 @@
+# aim Android 16 HWUI GPU handoff identity.
+# The upstream source remains immutable; the GPU behavior is an opt-in patch
+# applied to a disposable registrar tree by build-android16-android-graphics-jni.sh.
+FRAMEWORKS_BASE_PROJECT=platform/frameworks/base
+FRAMEWORKS_BASE_TAG=android-16.0.0_r1
+FRAMEWORKS_BASE_REVISION=99b01a65cc4c104933788b3143285ab6bae65827
+FRAMEWORKS_BASE_SUBTREE=libs/hwui
+LAYOUTLIB_LOADER_SHA256=e0030bc560c5c0fd66ed5e71872103039617036bef9db970817e9d72aaaff7d3
+GPU_LAYOUTLIB_PATCH_SHA256=1668986e932fb35d480047bf5a0b2ed09888f349f5faf7effd2e7d132686149a
+GPU_FEATURE_DEFINE=AIM_HWUI_GPU
+GPU_FEATURE_ENVIRONMENT=AIM_HWUI_GPU

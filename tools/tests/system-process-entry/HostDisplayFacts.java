@@ -1,0 +1,3 @@
+package dev.aim.runtime.display;
+// Test-only registration signature, never a runtime build input.
+public final class HostDisplayFacts {}

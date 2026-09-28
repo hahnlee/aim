@@ -2,7 +2,7 @@
 
 The root Apache-2.0 license does not apply to the OpenJDK-derived work below.
 Covered original code and our modifications are distributed under
-**GPL-2.0-only WITH Classpath-exception-2.0**. Darwin ART explicitly retains
+**GPL-2.0-only WITH Classpath-exception-2.0**. aim explicitly retains
 and extends the upstream Classpath exception to its modifications of files
 already covered by that exception. This does not add an exception to unrelated
 GPL code whose copyright holders have not granted one.
@@ -25,14 +25,14 @@ The active source inputs are:
 
 | Owner | Revision | Lock |
 | --- | --- | --- |
-| AOSP `platform/libcore` | `080fac8bb8670bc7fbc895050caf4b13c4d6cd12` | `darwin-art/sources.lock` and the libcore/native-owner locks under `darwin-art/upstream/` |
-| AOSP `platform/art`, `openjdkjvm` | `ed6c006bd06ae060bd9698fd2cb25c4865512ec3` | `darwin-art/upstream/android16-openjdkjvm-darwin.lock` |
-| AOSP `platform/art`, `openjdkjvmti` | `9fac16b7c1e3599509612e9f9567283a00b16ac1` | `darwin-art/upstream/android16-openjdkjvmti.lock` |
+| AOSP `platform/libcore` | `080fac8bb8670bc7fbc895050caf4b13c4d6cd12` | `sources.lock` and the libcore/native-owner locks under `upstream/` |
+| AOSP `platform/art`, `openjdkjvm` | `ed6c006bd06ae060bd9698fd2cb25c4865512ec3` | `upstream/android16-openjdkjvm-darwin.lock` |
+| AOSP `platform/art`, `openjdkjvmti` | `9fac16b7c1e3599509612e9f9567283a00b16ac1` | `upstream/android16-openjdkjvmti.lock` |
 
 ## Repository modifications covered by these terms
 
-Paths in this table are relative to `darwin-art/`. These are modifications by
-Darwin ART contributors, documented on 2026-09-24. Git history records the
+Paths in this table are relative to the repository root. These are modifications by
+aim contributors, documented on 2026-09-24. Git history records the
 individual change dates; the patch bytes remain unchanged so their existing
 source/build checksums remain valid.
 

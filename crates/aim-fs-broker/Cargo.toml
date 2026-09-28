@@ -1,0 +1,8 @@
+[package]
+license.workspace = true
+name = "aim-fs-broker"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]

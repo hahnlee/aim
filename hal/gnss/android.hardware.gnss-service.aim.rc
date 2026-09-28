@@ -1,0 +1,4 @@
+service vendor.gnss-aim /vendor/bin/hw/android.hardware.gnss-service.aim
+    class hal
+    user gps
+    group system gps

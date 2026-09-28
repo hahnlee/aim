@@ -1,7 +1,0 @@
-MANAGED_NATIVE_LOAD {
-  global:
-    JNI_OnLoad;
-    Java_dev_darwinart_managedload_ManagedNativeLoad_nativeProbe;
-  local:
-    *;
-};

@@ -1,9 +1,0 @@
-[package]
-license.workspace = true
-name = "darwin-art-build-contract"
-version = "0.1.0"
-edition = "2024"
-publish = false
-
-[lib]
-path = "src/lib.rs"

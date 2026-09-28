@@ -1,0 +1,16 @@
+[package]
+license.workspace = true
+name = "bionic-stdio-wide-integration"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "bionic-stdio-wide-integration"
+path = "../bionic-stdio-facade/src/main.rs"
+
+[dependencies]
+bionic-fs-facade = { path = "../bionic-fs-facade" }
+bionic-stdio-facade = { path = "../bionic-stdio-facade" }
+aim-elf-loader = { path = "../../crates/aim-elf-loader" }

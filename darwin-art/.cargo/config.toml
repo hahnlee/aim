@@ -1,2 +1,0 @@
-[alias]
-xtask = "run -q -p darwin-art-xtask -- dev"

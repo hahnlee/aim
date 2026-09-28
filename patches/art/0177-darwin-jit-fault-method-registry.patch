@@ -1,0 +1,23 @@
+diff --git a/runtime/jit/jit_code_cache.cc b/runtime/jit/jit_code_cache.cc
+--- a/runtime/jit/jit_code_cache.cc
++++ b/runtime/jit/jit_code_cache.cc
+@@ -16,4 +16,7 @@
+ 
+ #include "jit_code_cache.h"
+ 
++#if defined(__APPLE__)
++#include "darwin_jit_memory.h"
++#endif
+ #include <sstream>
+@@ -723,5 +727,11 @@ bool JitCodeCache::Commit(Thread* self,
+     if (!region->CommitData(reserved_data, roots, stack_map)) {
+       return false;
+     }
+ 
++#if defined(__APPLE__)
++    AimRegisterJitMethod(reinterpret_cast<uintptr_t>(method_header->GetCode()),
++                               method_header->GetCodeSize(),
++                               reinterpret_cast<uintptr_t>(method));
++#endif
++
+     switch (compilation_kind) {

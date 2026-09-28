@@ -1,0 +1,7 @@
+MANAGED_NATIVE_LOAD {
+  global:
+    JNI_OnLoad;
+    Java_dev_aim_managedload_ManagedNativeLoad_nativeProbe;
+  local:
+    *;
+};

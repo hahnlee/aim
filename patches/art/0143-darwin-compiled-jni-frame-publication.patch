@@ -1,0 +1,33 @@
+diff --git a/runtime/entrypoints/quick/quick_jni_entrypoints.cc b/runtime/entrypoints/quick/quick_jni_entrypoints.cc
+--- a/runtime/entrypoints/quick/quick_jni_entrypoints.cc
++++ b/runtime/entrypoints/quick/quick_jni_entrypoints.cc
+@@ -15,5 +15,9 @@
+ 
+ #include <android-base/logging.h>
++#if defined(__APPLE__)
++#include "darwin_unwindstack_native.h"
++#endif
++#include "arch/instruction_set.h"
+ 
+ #include "art_method-inl.h"
+ #include "base/casts.h"
+@@ -70,6 +74,19 @@ extern "C" void artJniMethodStart(Thread* self)
+     CHECK(!native_method->IsCriticalNative()) << native_method->PrettyMethod();
+   }
+ 
++#if defined(__APPLE__)
++  const ManagedStack* managed_stack = self->GetManagedStack();
++  if (!managed_stack->GetTopQuickFrameGenericJniTag()) {
++    constexpr uint64_t kFramePayload = sizeof(ArtMethod*) + (12u + 8u) * sizeof(uint64_t);
++    constexpr uint64_t kFrameSize = (kFramePayload + 15u) & ~uint64_t{15u};
++    constexpr uint32_t kCoreSpillMask = 0x7ff80000u;  // X19-X30.
++    static_assert(kRuntimeISA == InstructionSet::kArm64);
++    static_assert(kFrameSize == 176u);
++    aim_unwindstack_push_compiled_quick_frame(
++        managed_stack->GetTopQuickFrameKnownNotTagged(), kFrameSize, kCoreSpillMask);
++  }
++#endif
++
+   // Transition out of runnable.
+   self->TransitionFromRunnableToSuspended(ThreadState::kNative);
+ }

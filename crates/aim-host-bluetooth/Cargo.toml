@@ -1,0 +1,11 @@
+[package]
+license.workspace = true
+name = "aim-host-bluetooth"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-call module for android.hardware.bluetooth: a virtual LE HCI controller over CoreBluetooth"
+
+[dependencies]
+aim-hostcall = { path = "../aim-hostcall" }
+libc = "0.2"

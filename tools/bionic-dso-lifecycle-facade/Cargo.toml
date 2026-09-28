@@ -1,0 +1,18 @@
+[package]
+license.workspace = true
+name = "bionic-dso-lifecycle-facade"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[features]
+standalone-test-stubs = []
+
+[[bin]]
+name = "bionic-dso-lifecycle-facade"
+path = "src/main.rs"
+required-features = ["standalone-test-stubs"]
+
+[dependencies]
+aim-elf-loader = { path = "../../crates/aim-elf-loader" }

@@ -1,0 +1,107 @@
+diff --git a/libartbase/base/utils.cc b/libartbase/base/utils.cc
+index 7f4407c..f5a18f2 100644
+--- a/libartbase/base/utils.cc
++++ b/libartbase/base/utils.cc
+@@ -31,7 +31,9 @@
+ 
+ #include <fstream>
+ #include <memory>
++#include <mutex>
+ #include <string>
++#include <vector>
+ 
+ #include "android-base/file.h"
+ #include "android-base/stringprintf.h"
+@@ -62,5 +64,41 @@
+ namespace art {
+ 
++#if defined(__APPLE__)
++namespace {
++
++struct DarwinLogicalThreadName {
++  pthread_t thread;
++  std::string name;
++};
++
++std::mutex gDarwinLogicalThreadNamesLock;
++std::vector<DarwinLogicalThreadName> gDarwinLogicalThreadNames;
++
++void RecordDarwinLogicalThreadName(pthread_t thread, const char* name) {
++  std::lock_guard<std::mutex> lock(gDarwinLogicalThreadNamesLock);
++  for (DarwinLogicalThreadName& record : gDarwinLogicalThreadNames) {
++    if (pthread_equal(record.thread, thread)) {
++      record.name = name;
++      return;
++    }
++  }
++  gDarwinLogicalThreadNames.push_back({thread, name});
++}
++
++bool ReadDarwinLogicalThreadName(pthread_t thread, std::string* name) {
++  std::lock_guard<std::mutex> lock(gDarwinLogicalThreadNamesLock);
++  for (const DarwinLogicalThreadName& record : gDarwinLogicalThreadNames) {
++    if (pthread_equal(record.thread, thread)) {
++      *name = record.name;
++      return true;
++    }
++  }
++  return false;
++}
++
++}  // namespace
++#endif
++
+ using android::base::ReadFileToString;  // NOLINT - ReadFileToString is actually used
+ using android::base::StringPrintf;
+ using android::base::WriteStringToFile;
+@@ -316,10 +349,15 @@ void SetThreadName(pthread_t thr, const char* thread_name) {
+     PLOG(WARNING) << "Unable to set the name of current thread to '" << buf << "'";
+   }
+ #else  // __APPLE__
++  // Match Linux/Android's TASK_COMM_LEN contract even though Darwin accepts
++  // longer names. Java Thread.setName() must update the native name using the
++  // same 15-byte truncation that Android applications observe.
++  char buf[16];
++  strncpy(buf, s, sizeof(buf)-1);
++  buf[sizeof(buf)-1] = '\0';
++  RecordDarwinLogicalThreadName(thr, buf);
+   if (pthread_equal(thr, pthread_self())) {
+-    pthread_setname_np(thread_name);
+-  } else {
+-    PLOG(WARNING) << "Unable to set the name of another thread to '" << thread_name << "'";
++    pthread_setname_np(buf);
+   }
+ #endif
+ }
+@@ -468,3 +498,31 @@ std::vector<std::string> GetCpuModelNames() {
+ }
+ 
+ }  // namespace art
++
++#if defined(__APPLE__)
++extern "C" int aim_pthread_getname_np(pthread_t thread,
++                                               char* name,
++                                               size_t size) {
++  if (name == nullptr || size == 0u) {
++    return EINVAL;
++  }
++  std::string logical_name;
++  if (!art::ReadDarwinLogicalThreadName(thread, &logical_name)) {
++    return pthread_getname_np(thread, name, size);
++  }
++  if (logical_name.size() + 1u > size) {
++    return ERANGE;
++  }
++  memcpy(name, logical_name.c_str(), logical_name.size() + 1u);
++  return 0;
++}
++
++extern "C" int aim_pthread_setname_np(pthread_t thread,
++                                               const char* name) {
++  if (name == nullptr) {
++    return EINVAL;
++  }
++  art::RecordDarwinLogicalThreadName(thread, name);
++  return pthread_equal(thread, pthread_self()) ? pthread_setname_np(name) : 0;
++}
++#endif

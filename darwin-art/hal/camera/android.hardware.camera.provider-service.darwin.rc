@@ -1,6 +1,0 @@
-service vendor.camera-provider-darwin /vendor/bin/hw/android.hardware.camera.provider-service.darwin
-    class hal
-    user cameraserver
-    group audio camera input drmrpc
-    ioprio rt 4
-    task_profiles CameraServiceCapacity CameraServicePerformance

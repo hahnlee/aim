@@ -1,0 +1,56 @@
+diff --git a/runtime/entrypoints/quick/quick_trampoline_entrypoints.cc b/runtime/entrypoints/quick/quick_trampoline_entrypoints.cc
+--- a/runtime/entrypoints/quick/quick_trampoline_entrypoints.cc
++++ b/runtime/entrypoints/quick/quick_trampoline_entrypoints.cc
+@@ -15,5 +15,9 @@
+ 
+ #include "android-base/logging.h"
++#if defined(__APPLE__)
++#include "darwin_unwindstack_native.h"
++#endif
++
+ #include "arch/context.h"
+ #include "arch/instruction_set.h"
+ #include "art_method-inl.h"
+@@ -2144,6 +2148,9 @@ extern "C" const void* artQuickGenericJniTrampoline(Thread* self,
+                         << std::hex << reinterpret_cast<uintptr_t>(nativeCode);
+ 
+   // Return native code.
++#if defined(__APPLE__)
++  aim_unwindstack_push_quick_frame(managed_sp);
++#endif
+   return nativeCode;
+ }
+ 
+@@ -2171,6 +2178,9 @@ extern "C" uint64_t artQuickGenericJniEndTrampoline(Thread* self,
+   ArtMethod* called = *sp;
+   uint32_t cookie = *(sp32 - 1);
+   uint64_t quick_result = GenericJniMethodEnd(self, cookie, result, result_f, called);
++#if defined(__APPLE__)
++  aim_unwindstack_pop_quick_frame_if(sp, 0u);
++#endif
+ #if defined(__APPLE__)
+   // GenericJniMethodEnd restores the runnable state and releases JNI state
+   // before this shorty read. Its reference result is native at this boundary;
+diff --git a/runtime/runtime.cc b/runtime/runtime.cc
+--- a/runtime/runtime.cc
++++ b/runtime/runtime.cc
+@@ -15,5 +15,9 @@
+ 
+ #include "runtime.h"
++#if defined(__APPLE__)
++#include "darwin_unwindstack_native.h"
++#endif
++
+ 
+ #include <optional>
+ #include <utility>
+@@ -958,6 +962,9 @@ bool Runtime::Create(RuntimeArgumentMap&& runtime_options) {
+     instance_ = nullptr;
+     return false;
+   }
++#if defined(__APPLE__)
++  aim_unwindstack_set_art_main_thread();
++#endif
+   return true;
+ }
+ 

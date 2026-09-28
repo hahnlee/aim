@@ -1,7 +1,0 @@
-DARWIN_ART_1 {
-  global:
-    provider_data;
-    provider_value;
-  local:
-    *;
-};

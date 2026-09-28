@@ -1,0 +1,18 @@
+[package]
+license.workspace = true
+name = "aim-binder-process"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+aim-engine-sys = { path = "../aim-engine-sys" }
+aim-binder-device = { path = "../aim-binder-device" }
+aim-profile = { path = "../aim-profile" }
+
+[lib]
+name = "aim_binder_process"
+path = "src/lib.rs"
+
+[dev-dependencies]
+libc = "0.2"

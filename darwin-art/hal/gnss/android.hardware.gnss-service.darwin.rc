@@ -1,4 +1,0 @@
-service vendor.gnss-darwin /vendor/bin/hw/android.hardware.gnss-service.darwin
-    class hal
-    user gps
-    group system gps

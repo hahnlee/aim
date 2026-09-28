@@ -1,0 +1,10 @@
+[package]
+license.workspace = true
+name = "aim-host-location"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-call module for android.hardware.gnss: the Mac's location through CoreLocation"
+
+[dependencies]
+aim-hostcall = { path = "../aim-hostcall" }

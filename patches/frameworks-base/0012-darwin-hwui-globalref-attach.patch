@@ -1,0 +1,13 @@
+diff --git a/jni/GraphicsJNI.h b/jni/GraphicsJNI.h
+--- a/jni/GraphicsJNI.h
++++ b/jni/GraphicsJNI.h
+@@ -2,0 +3,3 @@
++#if defined(__APPLE__)
++#include "darwin_hwui_jni_attachment.h"
++#endif
+@@ -362,0 +366,3 @@
++#if defined(__APPLE__)
++            return aim::hwui::requireEnv(mVm);
++#else
+@@ -363,0 +370 @@
++#endif

@@ -1,0 +1,10 @@
+diff --git a/jni/android_graphics_HardwareRenderer.cpp b/jni/android_graphics_HardwareRenderer.cpp
+--- a/jni/android_graphics_HardwareRenderer.cpp
++++ b/jni/android_graphics_HardwareRenderer.cpp
+@@ -111,1 +111,5 @@
+-        LOG_ALWAYS_FATAL("Failed to get JNIEnv for JavaVM: %p", vm);
++#if defined(__APPLE__)
++        return aim::hwui::requireEnv(vm);
++#else
++        LOG_ALWAYS_FATAL("Failed to get JNIEnv for JavaVM: %p", vm);
++#endif

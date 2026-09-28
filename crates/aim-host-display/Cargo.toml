@@ -1,0 +1,15 @@
+[package]
+license.workspace = true
+name = "aim-host-display"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-call module for the composer HAL, and aim-display, the display server that owns the macOS window"
+
+[[bin]]
+name = "aim-display"
+path = "src/bin/aim-display/main.rs"
+
+[dependencies]
+aim-hostcall = { path = "../aim-hostcall" }
+libc = "0.2"

@@ -1,0 +1,6 @@
+service vendor.camera-provider-aim /vendor/bin/hw/android.hardware.camera.provider-service.aim
+    class hal
+    user cameraserver
+    group audio camera input drmrpc
+    ioprio rt 4
+    task_profiles CameraServiceCapacity CameraServicePerformance

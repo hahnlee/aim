@@ -1,5 +1,0 @@
-# The darwin device's fstab, read by init's mount_all and by vold. /data is
-# a directory on the Mac without file-based encryption; the partitions are
-# directories of the derived image, not block devices.
-#<src>               <mnt_point>  <type>  <mnt_flags and options>  <fs_mgr_flags>
-/dev/block/userdata  /data        ext4    noatime,nosuid,nodev     wait,latemount

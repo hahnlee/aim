@@ -1,0 +1,7 @@
+{
+  global:
+    JNI_OnLoad;
+    Java_dev_aim_probe_GuestLibdlFixture_nativePlugin;
+  local:
+    *;
+};

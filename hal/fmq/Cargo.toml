@@ -1,0 +1,14 @@
+[package]
+name = "aim-fmq"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "AIDL fast message queues laid out as libfmq's, both the creating and the mapping side"
+
+[dependencies]
+android_hardware_common = { path = "../aidl/android.hardware.common" }
+android_hardware_common_fmq = { path = "../aidl/android.hardware.common.fmq" }
+binder = { path = "../binder" }
+libc = "0.2"
+log = "0.4"

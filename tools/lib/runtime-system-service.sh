@@ -1,0 +1,84 @@
+#!/bin/bash
+# Host process provisioning only. Android service policy remains in framework
+# owners. The metadata below is existing bootstrap migration debt, not a new
+# substitute for AOSP SystemServer. Source with system-private-data.sh and
+# system-service-environment.sh.
+aim_start_runtime_system_service() (
+  set -euo pipefail
+  local host="$1" profile_mount="$2" system_server_root="$3" archive="$4"
+  local store="$5" framework_res="$6" support_dex="$7"
+  shift 7
+  [[ "$#" == 5 ]] || { echo "invalid system runtime command" >&2; return 64; }
+  local system_server_private="$profile_mount/data/apps/android.system/private-data"
+  local system_server_command=("$host" --window-seconds 0 "$@" "$support_dex")
+  # SYSTEMSERVERCLASSPATH as derive_classpath exported it for this image.
+  local server_classpath
+  server_classpath="$(sed -n 's/^export SYSTEMSERVERCLASSPATH //p' \
+    "$system_server_root/system/etc/classpath")"
+  [[ -n "$server_classpath" ]] || { echo "image exports no SYSTEMSERVERCLASSPATH" >&2; return 69; }
+  server_classpath="$(tr ':' '\n' <<<"$server_classpath" | \
+    sed "s#^#$system_server_root#" | paste -sd: -)"
+  prepare_system_private_data "$system_server_private" || return
+  aim_system_service_environment \
+  AIM_SYSTEM_SERVER_MODE=1 \
+  AIM_RUNTIME_TARGET_SDK_VERSION=36 \
+  AIM_RUNTIME_JAVA_DEBUGGABLE=0 \
+  AIM_DAEMONIZED_LOG="${profile_mount%/mnt}/aimd.log" \
+  AIM_ANDROID_SHARED_STORAGE_ROOT="$profile_mount/storage" \
+  AIM_ANDROID_PACKAGE_ROOT="$profile_mount/packages" \
+  AIM_ANDROID_PACKAGE_ROOT_WRITABLE=1 \
+  AIM_FRAMEWORK_RES_APK="$framework_res" \
+  AIM_APK_APP_PACKAGE=android \
+  AIM_APK_APP_APPLICATION=android.app.Application \
+  AIM_APK_APP_LAUNCH_COMPONENT=none \
+  AIM_APK_APP_SCREEN_ORIENTATION=-1 \
+  AIM_APK_APP_ACTIVITIES=none \
+  AIM_APK_APP_ACTIVITY_ALIASES=none \
+  AIM_APK_APP_SERVICES=none \
+  AIM_APK_APP_RECEIVERS=none \
+  AIM_APK_APP_PROVIDERS=none \
+  AIM_APK_APP_SERVICE_METADATA=none \
+  AIM_APK_APP_METADATA=none \
+  AIM_APK_APP_VERSION_CODE=1 \
+  AIM_APK_APP_VERSION_NAME=1 \
+  AIM_APK_APP_THEME=0 \
+  AIM_APK_APP_TARGET_SDK=36 \
+  AIM_APK_APP_LABEL=Android \
+  AIM_APK_APP_LABEL_RES=0 \
+  AIM_APK_APP_ICON_RES=0 \
+  AIM_APK_APP_RESOURCE_APK="$framework_res" \
+  AIM_APK_APP_SUPPORT_DEX="$support_dex" \
+  AIM_ANDROID_PRIVATE_DATA_ROOT="$system_server_private" \
+  AIM_APK_APP_DATA_DIR="${system_server_private%/private-data}" \
+  AIM_APK_APP_DATA_GUEST_DIR=/data/user/0/android \
+  AIM_APK_APP_EXTERNAL_DIR=/storage/emulated/0 \
+  AIM_ANDROID_FILESYSTEM_ROOT="$system_server_root" \
+  AIM_ANDROID_SYSTEM_ROOT="$system_server_root/system" \
+  AIM_ANDROID_SYSTEM_NATIVE_DIR="$system_server_root/system/lib64" \
+  AIM_RUNTIME_HOST_FILES="$AIM_BOOT_CLASSPATH:$support_dex:$server_classpath" \
+  AIM_DEBUG_SURFACECONTROL_CAPTURE_PATH="${AIM_DEBUG_SURFACECONTROL_CAPTURE_PATH:-}" \
+  AIM_DEBUG_SURFACECONTROL_CAPTURE_PIXELS="${AIM_DEBUG_SURFACECONTROL_CAPTURE_PIXELS:-}" \
+  AIM_DEBUG_SURFACECONTROL_PIXELS="${AIM_DEBUG_SURFACECONTROL_PIXELS:-}" \
+  AIM_DEBUG_SURFACE_TRANSACTIONS="${AIM_DEBUG_SURFACE_TRANSACTIONS:-}" \
+  AIM_DEBUG_GRAPHICS_DSO="${AIM_DEBUG_GRAPHICS_DSO:-}" \
+  AIM_VM_FAILURE_TRACE="${AIM_VM_FAILURE_TRACE:-}" \
+  "$host" --start-system-service "$archive" "$store" "${system_server_command[@]}"
+)
+
+# Consume only the typed CLI reply, never evaluate it as shell code. Publish
+# addresses atomically after validating the complete response; no PID probing
+# or socket-existence test can substitute for daemon readiness.
+aim_apply_runtime_endpoints() {
+  local line pid="" binder="" compositor=""
+  while IFS= read -r line; do
+    case "$line" in
+      pid=*) [[ -z "$pid" && -n "${line#pid=}" ]] || return 65; pid="${line#pid=}" ;;
+      binder=*) [[ -z "$binder" && -n "${line#binder=}" ]] || return 65; binder="${line#binder=}" ;;
+      compositor=*) [[ -z "$compositor" && -n "${line#compositor=}" ]] || return 65; compositor="${line#compositor=}" ;;
+      *) return 65 ;;
+    esac
+  done <<< "$1"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$binder" == /* && "$compositor" == /* ]] || return 65
+  export AIM_SYSTEM_SERVER_SOCKET="$binder"
+  export AIM_SURFACEFLINGER_SOCKET="$compositor"
+}

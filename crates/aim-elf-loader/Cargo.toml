@@ -1,0 +1,22 @@
+[package]
+license.workspace = true
+name = "aim-elf-loader"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib", "staticlib"]
+
+[[bin]]
+name = "elf-loader-gate"
+path = "src/bin/gate.rs"
+
+[[bin]]
+name = "elf-namespace-gate"
+path = "src/bin/namespace_gate.rs"
+
+[dependencies]
+aim-fs-broker = { path = "../aim-fs-broker" }
+sha2 = "0.10"
