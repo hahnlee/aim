@@ -17,8 +17,8 @@ user (the EGL/GLES driver, later the composer and Vulkan) imports it; see
 
 ## Design: memfd memory, imported by the host GPU
 
-Every buffer is one `memfd` (in the syscall layer, an unlinked temporary
-file that every process maps `MAP_SHARED`; its size is set once with
+Every buffer is one `memfd` (in the syscall layer, a host temporary file
+that every process maps `MAP_SHARED`; its size is set once with
 `ftruncate`). The pixel planes start at offset 0, so every mapping of the buffer starts on a
 page boundary. That is the one property the host needs: on Apple silicon the
 GPU uses the same memory as the CPU, and Metal wraps page-aligned memory

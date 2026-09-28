@@ -13,7 +13,7 @@
 //!
 //! Unpinned pages are never purged: PIN reports ASHMEM_NOT_PURGED.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use crate::errno::{self, EINVAL, EPERM};
 
@@ -89,11 +89,28 @@ fn stat_of(fd: i32) -> Option<libc::stat> {
     (unsafe { libc::fstat(fd, &mut st) } == 0 && marked(&st)).then_some(st)
 }
 
+/// The filesystem the device node is on: that of the region files, so the
+/// node and every region fd agree, as on Linux, where both are the node
+/// (Chromium's ashmem check compares their `st_dev`).
+fn node_dev() -> i32 {
+    static DEV: OnceLock<i32> = OnceLock::new();
+    *DEV.get_or_init(|| {
+        let dir = std::env::temp_dir().into_os_string().into_encoded_bytes();
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if let Ok(d) = std::ffi::CString::new(dir) {
+            // SAFETY: stat into a local buffer.
+            unsafe { libc::stat(d.as_ptr(), &mut st) };
+        }
+        st.st_dev
+    })
+}
+
 /// fstat of an ashmem fd shows the device, as on Linux. False: not one.
 pub fn as_device(st: &mut libc::stat) -> bool {
     if !marked(st) {
         return false;
     }
+    st.st_dev = node_dev();
     st.st_mode = libc::S_IFCHR | 0o666;
     st.st_rdev = RDEV;
     st.st_nlink = 1;
@@ -102,6 +119,19 @@ pub fn as_device(st: &mut libc::stat) -> bool {
     st.st_uid = 0;
     st.st_gid = 0;
     true
+}
+
+/// stat of the device node, which has no host file. None for other
+/// paths.
+pub fn stat(guest: &str) -> Option<libc::stat> {
+    if !is_device(guest) {
+        return None;
+    }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    st.st_mode = libc::S_IFREG;
+    st.st_flags = MARK;
+    as_device(&mut st);
+    Some(st)
 }
 
 /// Link text for `/proc/self/fd/N`.
@@ -383,6 +413,12 @@ mod tests {
         assert_eq!(unsafe { libc::fstat(fd, &mut st) }, 0);
         assert!(as_device(&mut st));
         assert_eq!(st.st_mode, libc::S_IFCHR | 0o666);
+        let node = stat("/dev/ashmem").unwrap();
+        assert_eq!(
+            (node.st_mode, node.st_rdev, node.st_dev),
+            (st.st_mode, st.st_rdev, st.st_dev)
+        );
+        assert!(stat("/dev/ashmemx").is_none());
         let name = *b"sensor queue\0";
         let mut buf = [0u8; NAME_LEN];
         assert_eq!(ioctl(fd, GET_NAME, buf.as_mut_ptr() as u64), Some(0));

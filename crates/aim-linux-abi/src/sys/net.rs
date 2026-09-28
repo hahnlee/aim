@@ -938,7 +938,7 @@ fn control_to_guest(
                 .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
             {
                 fdtab::set_flags(fd, false, cloexec);
-                adopt(fd);
+                fdtab::adopt(fd);
             }
             // Darwin can hand back a bare SCM_RIGHTS header (a sender's
             // empty one); Linux never delivers one, and libbase aborts on it.

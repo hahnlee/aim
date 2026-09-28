@@ -383,6 +383,13 @@ The host's security agent did not flag or block any of the four boots
 - **"Failed to wait for the fence 0x3006"** in the launcher: ANGLE's Metal
   backend refuses `eglClientWaitSync` without a current context, which
   HWUI's bitmap uploader does; the driver polls the sync's status then.
+- **Chrome exited at first run** (#251): its shared memory check
+  (`SharedMemoryRegionGetProtectionFlags`) found no `/dev/ashmem` node and
+  failed. The node stats as the device, on the region files' `st_dev`.
+  memfds now keep their name and seals with the file, so an fd received
+  over binder or `SCM_RIGHTS`, or reopened through `/proc/self/fd`, is
+  the same memfd. Chrome shows its first-run page; about 35 s later the
+  browser aborts waiting for its GPU process (#256).
 
 ### Open
 
@@ -390,3 +397,5 @@ The host's security agent did not flag or block any of the four boots
 - #238 app processes' names in `/proc/<pid>/cmdline` for other processes;
 - #240 wide-gamut EGL configs; #241 phone and GMS startup ANRs; #242
   battery temperature; #230 traced and traced_probes aborts.
+- #256 Chrome's GPU child never gets `setupConnection`; #257 ESRCH from a
+  socket call in Chrome's network thread; #258 remaining memfd seal gaps.

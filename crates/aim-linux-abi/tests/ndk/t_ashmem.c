@@ -23,6 +23,10 @@ static void region_ioctls(void) {
   int again = open("/dev/ashmem", O_RDWR | O_CLOEXEC);
   CHECK(fstat(again, &dev) == 0 && dev.st_rdev == st.st_rdev);
   close(again);
+  // The node itself: Chromium compares a region's st_dev with it.
+  CHECK(stat("/dev/ashmem", &dev) == 0 && S_ISCHR(dev.st_mode) && dev.st_rdev == st.st_rdev &&
+        dev.st_dev == st.st_dev);
+  CHECK(access("/dev/ashmem", R_OK | W_OK) == 0);
   char name[ASHMEM_NAME_LEN] = "audio client";
   CHECK(ioctl(fd, ASHMEM_SET_NAME, name) == 0);
   CHECK(ioctl(fd, ASHMEM_SET_SIZE, 2 * PAGE) == 0);
