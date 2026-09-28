@@ -160,8 +160,6 @@ pub struct Report {
     pub bytes: u64,
     /// Device nodes, FIFOs and sockets, which are not created on the host.
     pub special: Vec<(PathBuf, u32)>,
-    /// Entries whose name collides on the (case-insensitive) host filesystem.
-    pub collisions: Vec<PathBuf>,
 }
 
 impl Report {
@@ -172,7 +170,6 @@ impl Report {
         self.symlinks += other.symlinks;
         self.bytes += other.bytes;
         self.special.extend(other.special);
-        self.collisions.extend(other.collisions);
     }
 }
 
@@ -286,7 +283,14 @@ impl Materializer {
                 Ok(true) => self.walk(tree, child, &path, links, depth + 1)?,
                 Ok(false) => {}
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    self.current.collisions.push(path);
+                    // Android's filesystems are case-sensitive: on a host
+                    // filesystem that is not, a name differing only in case
+                    // collides, and the image would lose a file.
+                    return Err(invalid(format!(
+                        "{} collides with an existing name; extract onto a \
+                         case-sensitive filesystem (docs/storage.md)",
+                        path.display()
+                    )));
                 }
                 Err(error) => {
                     return Err(invalid(format!("create {}: {error}", path.display())));
@@ -563,6 +567,27 @@ pub(crate) mod tests {
         for dir in ["", "bin"] {
             fs::set_permissions(out.join(dir), Permissions::from_mode(0o700)).unwrap();
         }
+        fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn a_name_that_collides_on_the_host_fails_the_extraction() {
+        // Two entries of one name stand for `Ringtone.ogg` and `ringtone.ogg`
+        // on a case-insensitive host.
+        let tree = Memory(vec![
+            (
+                node(S_IFDIR | 0o755, 0, 2),
+                vec![(b"a.ogg".to_vec(), 1), (b"a.ogg".to_vec(), 1)],
+                vec![],
+            ),
+            (node(S_IFREG | 0o644, 1, 1), vec![], b"x".to_vec()),
+        ]);
+        let out = temp_dir("collision");
+        let error = Materializer::default()
+            .extract(&tree, &out)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("case-sensitive"), "{error}");
         fs::remove_dir_all(&out).unwrap();
     }
 }
