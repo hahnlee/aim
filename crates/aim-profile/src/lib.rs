@@ -31,6 +31,7 @@ mod property_service;
 pub use host_commands::{HostCommandListener, run_host_command_at};
 mod filesystem;
 mod host_fd_delivery;
+mod legacy_dir;
 mod package_layout;
 mod scm_service;
 mod settings_migration;
@@ -169,7 +170,10 @@ pub fn default_profiles_root() -> Result<PathBuf, ProfileError> {
         return Ok(PathBuf::from(root));
     }
     let home = env::var_os("HOME").ok_or(ProfileError::MissingHome)?;
-    Ok(PathBuf::from(home).join("Library/Application Support/aim/profiles"))
+    let support = PathBuf::from(home).join("Library/Application Support");
+    // Best effort: on failure the old tree stays where it was.
+    let _ = legacy_dir::migrate(&support.join("DarwinART"), &support.join("aim"));
+    Ok(support.join("aim/profiles"))
 }
 
 pub fn list_profile_ids(profiles_root: &Path) -> Result<Vec<String>, ProfileError> {

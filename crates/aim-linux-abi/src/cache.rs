@@ -29,6 +29,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::xlate::{self, Outcome, Output, Report};
 
+/// Moves a directory from its pre-rename (darwin-art) location to the new
+/// one with a single exclusive `rename`: only when `new` does not exist yet,
+/// never copying, replacing or deleting anything. Returns whether it moved.
+pub fn migrate_legacy_dir(old: &Path, new: &Path) -> io::Result<bool> {
+    let from = CString::new(old.as_os_str().as_bytes())?;
+    let to = CString::new(new.as_os_str().as_bytes())?;
+    // SAFETY: both paths are NUL-terminated and outlive the call.
+    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ENOENT | libc::EEXIST) => Ok(false),
+        _ => Err(error),
+    }
+}
+
 /// Identity of an original file as the index records it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FileStat {
@@ -180,7 +197,8 @@ impl Cache {
     }
 
     /// `~/Library/Caches/aim/translated`, with the home directory
-    /// taken from the user database (not the environment).
+    /// taken from the user database (not the environment). Moves the
+    /// pre-rename `~/Library/Caches/DarwinART` there first if only it exists.
     pub fn default_dir() -> Option<PathBuf> {
         // SAFETY: getpwuid returns a pointer into static storage or null.
         unsafe {
@@ -189,10 +207,11 @@ impl Cache {
                 return None;
             }
             let home = std::ffi::CStr::from_ptr((*pw).pw_dir);
-            Some(
-                Path::new(std::ffi::OsStr::from_bytes(home.to_bytes()))
-                    .join("Library/Caches/aim/translated"),
-            )
+            let caches =
+                Path::new(std::ffi::OsStr::from_bytes(home.to_bytes())).join("Library/Caches");
+            // Best effort: on failure the old tree stays where it was.
+            let _ = migrate_legacy_dir(&caches.join("DarwinART"), &caches.join("aim"));
+            Some(caches.join("aim/translated"))
         }
     }
 
@@ -363,5 +382,38 @@ impl Cache {
             kind: t.outcome.name(),
             report: Some(t.report),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migrate_legacy_dir;
+    use std::fs;
+
+    #[test]
+    fn legacy_dir_moves_once_and_never_replaces() {
+        let root = std::env::temp_dir().join(format!("aim-migrate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (old, new) = (root.join("DarwinART"), root.join("aim"));
+        fs::create_dir_all(old.join("translated")).unwrap();
+        fs::write(old.join("translated/entry"), b"kept").unwrap();
+
+        assert!(migrate_legacy_dir(&old, &new).unwrap());
+        assert!(!old.exists());
+        assert_eq!(fs::read(new.join("translated/entry")).unwrap(), b"kept");
+        // Nothing left to move.
+        assert!(!migrate_legacy_dir(&old, &new).unwrap());
+
+        // Both present: neither is touched, even an empty new directory.
+        fs::create_dir(&old).unwrap();
+        fs::write(old.join("stale"), b"old").unwrap();
+        assert!(!migrate_legacy_dir(&old, &new).unwrap());
+        assert_eq!(fs::read(old.join("stale")).unwrap(), b"old");
+        assert_eq!(fs::read(new.join("translated/entry")).unwrap(), b"kept");
+        let empty = root.join("empty");
+        fs::create_dir(&empty).unwrap();
+        assert!(!migrate_legacy_dir(&old, &empty).unwrap());
+        assert!(old.join("stale").exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -97,7 +97,8 @@ fn host_environment() -> Vec<Vec<u8>> {
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let mut root = PathBuf::from("/");
-    let mut cache = aim_linux_abi::cache::Cache::default_dir();
+    // Unset: the default, looked up (and migrated) only when used.
+    let mut cache = None;
     let mut trace = false;
     let mut binder = None;
     let mut gpu: Option<PathBuf> = None;
@@ -125,8 +126,8 @@ fn main() {
             // The audio host module's CoreAudio process (docs/audio.md).
             "--audio-io" => aim_host_audio::io::main(),
             "--root" => root = PathBuf::from(value()),
-            "--cache" => cache = Some(PathBuf::from(value())),
-            "--no-cache" => cache = None,
+            "--cache" => cache = Some(Some(PathBuf::from(value()))),
+            "--no-cache" => cache = Some(None),
             "--path-map" => path_map = Some(PathBuf::from(value())),
             "--binder" => binder = Some(value().to_string_lossy().into_owned()),
             "--gpu" => gpu = Some(PathBuf::from(value())),
@@ -181,6 +182,7 @@ fn main() {
             _ => break Some(a),
         }
     };
+    let cache = cache.unwrap_or_else(aim_linux_abi::cache::Cache::default_dir);
     runtime_args.extend([cstring("--root"), cstring(root.as_os_str().as_bytes())]);
     match &cache {
         Some(c) => runtime_args.extend([cstring("--cache"), cstring(c.as_os_str().as_bytes())]),

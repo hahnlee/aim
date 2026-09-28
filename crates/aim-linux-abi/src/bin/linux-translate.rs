@@ -101,7 +101,7 @@ struct Totals {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let mut cache_dir = Cache::default_dir();
+    let mut cache_dir = None;
     let mut jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
     let mut verbose = false;
     let mut roots = Vec::new();
@@ -124,7 +124,7 @@ fn main() {
     if roots.is_empty() {
         usage();
     }
-    let Some(cache_dir) = cache_dir else {
+    let Some(cache_dir) = cache_dir.or_else(Cache::default_dir) else {
         eprintln!("linux-translate: no cache directory (use --cache)");
         std::process::exit(2);
     };
