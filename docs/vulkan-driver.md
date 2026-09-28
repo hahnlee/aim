@@ -287,14 +287,19 @@ declares Vulkan hardware level 0.
   and `.version=4206592` (1.3); `dumpsys gpu` reports `vulkanVersion =
   4206592`.
 
-Not verified yet:
+- A full boot (2026-09-29, heavily loaded host), then `setprop
+  debug.hwui.renderer skiavk` (HWUI reads it when an app process starts;
+  for a test only, the default stays GLES):
+  - Settings, Chrome and Clock start and draw with `Pipeline=Skia
+    (Vulkan)` (`dumpsys gfxinfo`); Settings scrolls; Chrome passes its
+    first-run screens and shows example.com; logcat has no Vulkan, Skia
+    or RenderThread errors;
+  - `vulkan_triangle swapchain` in the booted guest: a swapchain of 7
+    images on an ImageReader's window, 100 frames at 370 µs each
+    (acquire, submit, present and the reader's acquire), with GPU
+    fences both ways (#317).
 
-- The swapchain mode of the program needs SurfaceFlinger (the loader asks
-  it for the display's refresh period, `native_window_get_refresh_cycle_duration`),
-  so it runs only in a booted guest (#317); that run was cut short by the
-  host's security agent (#232).
-- HWUI on Vulkan (`debug.hwui.renderer=skiavk`, for a test only) reaches
-  `VulkanManager::initialize` and aborts: HWUI asks for two queues of the
-  graphics family, and MoltenVK has one queue per family by design (it
-  offers more families instead). Settings shows its splash screen only
-  (#314).
+Not verified yet: a video or camera surface under `skiavk` (the YUV
+path is checked by the program only), and frame times worth comparing
+with GLES (the host was loaded; a measured decision on the default is a
+later step).
