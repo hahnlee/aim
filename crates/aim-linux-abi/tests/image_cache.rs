@@ -109,6 +109,8 @@ fn image_cache_serves_the_image_with_an_empty_user_cache() {
     assert!(out.status.success(), "linux-translate --image:\n{report}");
     assert!(vol.join("translated/paths").is_dir(), "{report}");
 
+    // The first run recorded its load-time sites in the user cache.
+    let user = scratch("empty-user-cache-2");
     let (count, trace) = load_time_rewrites(&root, &user);
     assert_eq!(
         count, 0,
