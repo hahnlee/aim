@@ -528,15 +528,15 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
         outstanding: 0,
     };
     send!(w, c"setTitle:" => (), Id = nsstring(&title));
-    // The screen may not take the window where the task is (above the
-    // menu bar): the task follows the window.
-    let placed = window_content(&screen, w);
     with(|s| {
         s.tasks.insert(task, t);
     });
     let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
     send!(w, c"makeKeyAndOrderFront:" => (), Id = std::ptr::null_mut());
     send!(app, c"activateIgnoringOtherApps:" => (), bool = true);
+    // The screen may not take the window where the task is (above the menu
+    // bar, over the Dock): showing it moves it, and the task follows.
+    let placed = window_content(&screen, w);
     with(|s| s.applying = false);
     // For `screencapture -l`, and for the server's stacking.
     let number = send!(w, c"windowNumber" => isize);

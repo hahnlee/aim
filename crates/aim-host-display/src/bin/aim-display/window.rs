@@ -87,11 +87,12 @@ pub struct Window {
     pub number: Option<isize>,
 }
 
-/// In device mode the server quits when its window closes, and an app's
-/// window host when the app's last window closes; the window-mode server's
-/// windows come and go with tasks.
+/// In device mode the server quits when its window closes. In window mode
+/// windows come and go with tasks (an app may pass through a task that
+/// closes before its next one opens), and an app's window host stays until
+/// it is quit, as a Mac app does.
 extern "C" fn quit_after_last_window(_this: Id, _sel: Sel, _app: Id) -> bool {
-    MODE.load(Ordering::Relaxed) == mode::DEVICE || crate::shim::is_host()
+    MODE.load(Ordering::Relaxed) == mode::DEVICE
 }
 
 /// Clicking a window host in the Dock (re)starts its app.

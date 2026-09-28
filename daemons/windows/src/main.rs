@@ -50,6 +50,9 @@ struct Task {
 
 struct Bridge {
     atm: BpActivityTaskManager,
+    /// Held while bounds are read and committed, so a refresh never sees
+    /// a commit half done.
+    serial: Mutex<()>,
     host: Mutex<File>,
     tasks: Mutex<HashMap<i32, Task>>,
     /// The display's size in pixels.
@@ -85,9 +88,11 @@ impl Bridge {
     /// away from another task when an activity starts in it) do not always
     /// reach the task's surface: the legacy freeform transitions can leave
     /// the surface where it was, and the window would show another part of
-    /// the display. Those bounds are committed with `resizeTask`, whose
-    /// change transition places the surface.
+    /// the display. Those bounds are committed: moved a pixel and back
+    /// with `resizeTask`, whose change transitions place the surface (a
+    /// resize to the bounds the task has changes nothing).
     fn refresh(&self, task: i32, force: bool) {
+        let _serial = self.serial.lock().unwrap();
         let bounds = match self.atm.task_bounds(task) {
             Ok(b) => b.filter(|&b| self.windowed(b)),
             Err(e) => {
@@ -130,10 +135,15 @@ impl Bridge {
         for w in &out {
             self.send(w);
         }
-        if let Some(b) = commit
-            && let Err(e) = self.atm.resize_task(task, b)
-        {
-            log::warn!("task {task}: commit bounds: {e}");
+        if let Some(b) = commit {
+            let [l, t, r, bottom] = b;
+            let r = self
+                .atm
+                .resize_task(task, [l + 1, t, r + 1, bottom])
+                .and_then(|()| self.atm.resize_task(task, b));
+            if let Err(e) = r {
+                log::warn!("task {task}: commit bounds: {e}");
+            }
         }
     }
 
@@ -324,6 +334,7 @@ fn main() {
     };
     let bridge = Arc::new(Bridge {
         atm,
+        serial: Mutex::new(()),
         host: Mutex::new(writer),
         tasks: Mutex::new(HashMap::new()),
         size,

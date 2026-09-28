@@ -9,7 +9,8 @@
 //! - `shims` keeps `DIR` holding one shim per launcher app of the guest
 //!   whose system image root is `ROOT` and whose `/data` is `DATA`; with
 //!   `--watch` it follows installs and uninstalls (`DATA/system/
-//!   packages.list` changing) until it is stopped.
+//!   packages.list` changing), and a rebuilt `AIM_DISPLAY`, until it is
+//!   stopped.
 //! - `install` does the same into `~/Applications/aim Apps`.
 //! - `icon` draws one APK's launcher icon as a macOS icon.
 
@@ -126,11 +127,8 @@ fn icon_command(a: &Args) -> Result<(), String> {
     std::fs::write(out, bytes).map_err(|e| format!("{}: {e}", out.display()))
 }
 
-/// When the guest's package list last changed.
-fn packages_changed(data: Option<&Path>) -> Option<SystemTime> {
-    std::fs::metadata(data?.join("system/packages.list"))
-        .and_then(|m| m.modified())
-        .ok()
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 fn shims(a: &Args, dir: PathBuf) -> Result<(), String> {
@@ -141,8 +139,12 @@ fn shims(a: &Args, dir: PathBuf) -> Result<(), String> {
     let data = a.data.as_deref();
     let mut seen = None;
     loop {
-        let now = packages_changed(data);
-        if seen.is_none() || now != seen.flatten() {
+        // The guest's package list, and the window host binary.
+        let now = (
+            data.and_then(|d| modified(&d.join("system/packages.list"))),
+            modified(host),
+        );
+        if seen != Some(now) {
             let apps = aim_apps::installed::scan(root, data, &framework);
             let done = aim_apps::shim::sync(&dir, &apps, &framework, socket, host)
                 .map_err(|e| format!("{}: {e}", dir.display()))?;

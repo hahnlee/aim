@@ -11,7 +11,7 @@
 //!
 //! Launching the shim, or clicking it in the Dock, starts the app (its
 //! launcher activity: Android brings a running task to the front). Quitting
-//! it closes the app's tasks, and closing its last window quits it.
+//! it closes the app's tasks.
 
 use std::collections::HashMap;
 use std::os::fd::AsFd;

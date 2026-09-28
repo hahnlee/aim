@@ -585,8 +585,9 @@ tasks. On an M2 Pro with other agents' boots loading the host (load average
 Under that load SystemUI hit ANRs, and freeform positions Android chose
 itself (Chrome's launch, Settings shifted away from Chrome when a page
 opened) did not reach the task surfaces, so those windows showed other
-parts of the display; the bridge now commits such bounds with
-`resizeTask`.
+parts of the display; the bridge now commits such bounds by moving the
+task a pixel and back with `resizeTask` (a resize to the same bounds is a
+no-op and did not help).
 
 **App shims** (same boots): `aim-apps shims --watch` wrote 19 shims into
 `target/aim/boot/apps`, the packages `cmd package query-activities -a MAIN
@@ -595,5 +596,4 @@ GMS's, disabled by a resource, left out). Opening Calculator.app,
 Settings.app and Chrome.app started each app in its own process with its
 name and icon in the Dock; a click in the Calculator shim's window, behind
 Chrome's, focused its task and typed 7, and keys typed 5 5. `pm uninstall`
-of Calculator removed its shim (its open shim quit with its last window),
-and `pm install` wrote it again.
+of Calculator removed its shim, and `pm install` wrote it again.

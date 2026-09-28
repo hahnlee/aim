@@ -111,8 +111,10 @@ server's mode:
   itself (its launch position; a shift away from another task when an
   activity starts in it) do not always reach the task's surface: the
   legacy freeform transitions can leave it where it was, and the window
-  would show another part of the display. The bridge commits them with
-  `resizeTask`, whose change transition places the surface.
+  would show another part of the display. The bridge commits them by
+  moving the task a pixel and back with `resizeTask`, whose change
+  transitions place the surface (a resize to the bounds the task already
+  has changes nothing).
 - **Move and resize.** Moving the window moves the task at once; a live
   resize resizes it when the resize ends (each resize is a configuration
   change for the app). The window then takes the bounds the task got (a
@@ -180,8 +182,9 @@ Settings.app/Contents/
 - **Launch.** Opening a shim (Finder, Dock, Launchpad, Spotlight, `open`)
   starts the app's launcher activity in a new task (`LAUNCH`); Android
   brings a running task to the front instead. Clicking the Dock icon again
-  does the same. Quitting a shim closes its app's tasks; closing its last
-  window quits it.
+  does the same. Quitting a shim closes its app's tasks. Closing its last
+  window does not quit it, as with a Mac app (an app may pass through a
+  task that closes before its next one opens).
 - **Stacking.** With windows in several processes, the server restacks the
   tasks by the screen's order of all their windows (`CGWindowListCreate`)
   when one is minimized.
