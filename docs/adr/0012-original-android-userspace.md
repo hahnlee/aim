@@ -566,6 +566,12 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   the writable state when a signal handler returns, so the switch back to
   executable runs outside the handler, through the resume trap. A JIT that
   alternates constantly pays for two signals per switch.
+- Code in RWX memory that stores into RWX memory (self-modifying code such
+  as Widevine's self-decrypting code) could never finish such a store: the
+  thread cannot fetch it while writable, and faults again once executable.
+  The handler performs the store itself (the plain A64 stores: single and
+  pair, general and SIMD&FP registers, every addressing mode, and
+  store-release) and moves the thread past it, one signal per store.
 - A JIT that allocates x18 as a general register is an app-compatibility
   risk handled case by case.
 

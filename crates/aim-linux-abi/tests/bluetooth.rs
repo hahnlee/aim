@@ -171,7 +171,7 @@ fn hci_through_the_hal_and_the_stack_library() {
 
     let dir =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("bluetooth-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = aim_linux_abi::cache::remove_tree(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let layout = Layout::new(image.clone(), dir.join("data"), Some(dir.join("run")));
     layout.prepare().unwrap();
@@ -342,5 +342,5 @@ fn hci_through_the_hal_and_the_stack_library() {
             );
         }
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = aim_linux_abi::cache::remove_tree(&dir);
 }

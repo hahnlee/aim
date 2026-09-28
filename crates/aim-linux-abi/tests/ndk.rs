@@ -29,7 +29,7 @@ impl Guest {
     fn new(image: &Path, name: &str) -> Guest {
         let runtime =
             Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("n{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&runtime);
+        let _ = aim_linux_abi::cache::remove_tree(&runtime);
         for d in [
             "data/local/tmp",
             "dev/socket",
@@ -141,7 +141,7 @@ impl Guest {
 
 impl Drop for Guest {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.runtime);
+        let _ = aim_linux_abi::cache::remove_tree(&self.runtime);
     }
 }
 
@@ -308,6 +308,86 @@ fn background_qos() {
         child.wait().unwrap().success() && rest.contains("PASS"),
         "{rest}"
     );
+}
+
+/// A zip whose members are stored, each one's data aligned to `align`
+/// with padding in its local header's extra field (as zipalign does).
+fn stored_zip(members: &[(&str, &[u8])], align: usize) -> Vec<u8> {
+    let (mut out, mut dir) = (Vec::new(), Vec::new());
+    for &(name, data) in members {
+        let header = out.len() as u32;
+        let pad = (align - (out.len() + 30 + name.len()) % align) % align;
+        let sizes = [(data.len() as u32).to_le_bytes(); 2].concat();
+        out.extend_from_slice(b"PK\x03\x04\x0a\0\0\0\0\0\0\0\0\0\0\0\0\0");
+        out.extend_from_slice(&sizes);
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(pad as u16).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.resize(out.len() + pad, 0);
+        out.extend_from_slice(data);
+        dir.extend_from_slice(b"PK\x01\x02\x0a\0\x0a\0\0\0\0\0\0\0\0\0\0\0\0\0");
+        dir.extend_from_slice(&sizes);
+        dir.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        dir.extend_from_slice(&[0; 12]);
+        dir.extend_from_slice(&header.to_le_bytes());
+        dir.extend_from_slice(name.as_bytes());
+    }
+    let dir_at = out.len() as u32;
+    out.extend_from_slice(&dir);
+    out.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+    out.extend_from_slice(&[(members.len() as u16).to_le_bytes(); 2].concat());
+    out.extend_from_slice(&(dir.len() as u32).to_le_bytes());
+    out.extend_from_slice(&dir_at.to_le_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+/// A native library loaded straight from an APK (stored, page-aligned):
+/// its code is rewritten at load time, and the sites found in the first
+/// process are kept in the translation cache for the next ones.
+#[test]
+fn apk_library() {
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_apklib");
+    let prog = g.build(&clang, "t_apklib");
+    let so = g.runtime.join("libapk.so");
+    let st = Command::new(&clang)
+        .args(["-O1", "-shared", "-fPIC", "-Wall", "-Werror", "-o"])
+        .arg(&so)
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ndk/apk_lib.c"))
+        .status()
+        .unwrap();
+    assert!(st.success(), "compiling apk_lib.c");
+    let apk = stored_zip(
+        &[
+            ("classes.dex", b"dex\n035\0"),
+            ("lib/arm64-v8a/libapk.so", &std::fs::read(&so).unwrap()),
+        ],
+        16384,
+    );
+    let at = apk.windows(4).position(|w| w == b"\x7fELF").unwrap() as u64;
+    let host = g.runtime.join("data/local/tmp/app.apk");
+    std::fs::write(&host, &apk).unwrap();
+    for run in 0..2 {
+        let (ok, out) = g.run(&[&prog, "/data/local/tmp/app.apk!/lib/arm64-v8a/libapk.so"]);
+        println!("{out}");
+        assert!(
+            ok && out.contains("PASS"),
+            "t_apklib (run {run}) failed:\n{out}"
+        );
+        // The first run recorded the library's sites: the svc and the
+        // thread pointer read.
+        let cache = aim_linux_abi::cache::Cache::new(&g.cache);
+        let stat = aim_linux_abi::cache::FileStat::of_path(&host).unwrap();
+        let member = aim_linux_abi::cache::member_path(&std::fs::canonicalize(&host).unwrap(), at);
+        let sites = cache
+            .lookup_sites(&member, &stat)
+            .expect("the library's sites");
+        assert!(sites.len() >= 2, "{sites:?}");
+    }
 }
 
 /// The evdev devices of a display server (`linux-run --display`), with

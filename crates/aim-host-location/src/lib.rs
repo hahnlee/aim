@@ -54,22 +54,21 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
 type Id = *mut c_void;
 type Sel = *const c_void;
 
-#[link(name = "objc")]
-unsafe extern "C" {
-    fn objc_getClass(name: *const c_char) -> Id;
-    fn sel_registerName(name: *const c_char) -> Sel;
-    fn objc_msgSend();
-    fn objc_autoreleasePoolPush() -> *mut c_void;
-    fn objc_autoreleasePoolPop(pool: *mut c_void);
+aim_hostcall::dylib! {
+    static CORE_LOCATION = c"/System/Library/Frameworks/CoreLocation.framework/CoreLocation" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        static objc_msgSend: c_void;
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
 }
 
-#[link(name = "CoreLocation", kind = "framework")]
-unsafe extern "C" {}
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    static kCFRunLoopDefaultMode: *const c_void;
-    fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source: bool) -> i32;
+aim_hostcall::dylib! {
+    static CORE_FOUNDATION = c"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" {
+        static kCFRunLoopDefaultMode: *const c_void;
+        fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source: bool) -> i32;
+    }
 }
 
 /// `objc_msgSend` typed as `fn(receiver, selector) -> R`.
@@ -80,8 +79,7 @@ unsafe extern "C" {
 unsafe fn send<R>(receiver: Id, selector: &std::ffi::CStr) -> R {
     // SAFETY: caller contract; objc_msgSend has the callee's signature.
     unsafe {
-        let f: unsafe extern "C" fn(Id, Sel) -> R =
-            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let f: unsafe extern "C" fn(Id, Sel) -> R = std::mem::transmute(objc_msgSend());
         f(receiver, sel_registerName(selector.as_ptr()))
     }
 }
@@ -164,7 +162,7 @@ fn run() {
         unsafe { send::<()>(manager, c"startUpdatingLocation") };
         while *s.wanted.lock().unwrap() {
             // SAFETY: this thread's run loop, in the default mode.
-            unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, TICK, false) };
+            unsafe { CFRunLoopRunInMode(*kCFRunLoopDefaultMode(), TICK, false) };
             let fix = latest(manager);
             *s.fix.lock().unwrap() = fix;
         }

@@ -7,8 +7,12 @@
 //! ```text
 //! <dir>/<sha256>-v<VERSION>/meta   what the translator found (key=value lines)
 //! <dir>/<sha256>-v<VERSION>/elf    the translated file (only when translated)
+//! <dir>/<sha256>-v<VERSION>-sites/sites  load-time sites ([`sites_key`])
 //! <dir>/index/<sha256 of host path> -> "<dev>:<ino>:<size>:<mtime> <sha256>"
 //! ```
+//!
+//! An ELF stored inside another file (an APK's native library) is indexed
+//! as `<host path>!<offset>` ([`member_path`]).
 //!
 //! - An entry is staged in `<dir>/.tmp-*`, made read-only, and published with
 //!   one `rename`, so readers see a complete entry or none. It is never
@@ -165,6 +169,57 @@ pub fn parse_meta(text: &str) -> Vec<(&str, &str)> {
     text.lines().filter_map(|l| l.split_once('=')).collect()
 }
 
+/// A site the load-time path rewrites: file offset, kind, register.
+pub type Site = (u64, crate::a64::Kind, u32);
+
+/// Entries of load-time sites (`<sha256>-v<VERSION>-sites/sites`) are for
+/// code that is mapped from a file the runtime cannot substitute (an ELF
+/// stored inside an APK) or that has no translated entry: the runtime
+/// rewrites a copy at these sites instead of scanning or analyzing it again
+/// in every process.
+fn sites_key(sha256: &str) -> String {
+    format!("{sha256}-v{}-sites", xlate::VERSION)
+}
+
+/// The index path of the ELF at `offset` inside the file at `host_path`
+/// (the file itself at 0).
+pub fn member_path(host_path: &Path, offset: u64) -> PathBuf {
+    if offset == 0 {
+        return host_path.to_path_buf();
+    }
+    let mut p = host_path.as_os_str().to_owned();
+    p.push(format!("!{offset}"));
+    PathBuf::from(p)
+}
+
+/// 16 bytes per site: offset, kind and register (little-endian).
+fn encode_sites(sites: &[Site]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(sites.len() * 16);
+    for &(offset, kind, rt) in sites {
+        out.extend_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(&(kind as u32).to_le_bytes());
+        out.extend_from_slice(&rt.to_le_bytes());
+    }
+    out
+}
+
+fn decode_sites(b: &[u8]) -> Option<Vec<Site>> {
+    if b.len() % 16 != 0 {
+        return None;
+    }
+    b.chunks_exact(16)
+        .map(|c| {
+            let word = |i: usize| u32::from_le_bytes(c[i..i + 4].try_into().unwrap());
+            let kind = crate::a64::Kind::from_index(word(8))?;
+            Some((
+                u64::from_le_bytes(c[..8].try_into().unwrap()),
+                kind,
+                word(12),
+            ))
+        })
+        .collect()
+}
+
 fn set_mode(p: &Path, mode: u32) -> io::Result<()> {
     fs::set_permissions(p, fs::Permissions::from_mode(mode))
 }
@@ -269,6 +324,29 @@ impl Cache {
 
     /// Publish an entry atomically. Returns false if it already existed.
     pub fn publish(&self, key: &str, meta: &str, output: Option<&Output>) -> io::Result<bool> {
+        self.publish_with(key, meta, |stage| {
+            if let Some(o) = output {
+                let path = stage.join("elf");
+                let f = fs::File::create(&path)?;
+                f.write_all_at(&o.patched, 0)?;
+                // The gap up to the stub segment stays a hole.
+                f.set_len(o.stub_offset)?;
+                f.write_all_at(&o.stub_segment, o.stub_offset)?;
+                f.sync_all()?;
+                set_mode(&path, 0o444)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Stage an entry with `meta` and what `fill` writes into the staging
+    /// directory, then publish it with one `rename`.
+    fn publish_with(
+        &self,
+        key: &str,
+        meta: &str,
+        fill: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<bool> {
         let final_dir = self.entry_dir(key);
         if final_dir.join("meta").exists() {
             return Ok(false);
@@ -281,16 +359,7 @@ impl Cache {
         ));
         fs::create_dir(&stage)?;
         let result = (|| -> io::Result<()> {
-            if let Some(o) = output {
-                let path = stage.join("elf");
-                let f = fs::File::create(&path)?;
-                f.write_all_at(&o.patched, 0)?;
-                // The gap up to the stub segment stays a hole.
-                f.set_len(o.stub_offset)?;
-                f.write_all_at(&o.stub_segment, o.stub_offset)?;
-                f.sync_all()?;
-                set_mode(&path, 0o444)?;
-            }
+            fill(&stage)?;
             let path = stage.join("meta");
             let mut f = fs::File::create(&path)?;
             f.write_all(meta.as_bytes())?;
@@ -314,6 +383,43 @@ impl Cache {
                 Err(e)
             }
         }
+    }
+
+    /// The load-time sites recorded for the ELF at `member` (a host path,
+    /// see [`member_path`]) if the file has not changed since.
+    pub fn lookup_sites(&self, member: &Path, st: &FileStat) -> Option<Vec<Site>> {
+        self.sites(&self.lookup_digest(member, st)?)
+    }
+
+    /// The load-time sites recorded for content with digest `sha256`.
+    pub fn sites(&self, sha256: &str) -> Option<Vec<Site>> {
+        let dir = self.entry_dir(&sites_key(sha256));
+        decode_sites(&fs::read(dir.join("sites")).ok()?)
+    }
+
+    /// Record `sites`, found in the ELF at `member` whose content has
+    /// digest `sha256`, for [`Cache::lookup_sites`].
+    pub fn publish_sites(
+        &self,
+        member: &Path,
+        st: &FileStat,
+        sha256: &str,
+        sites: &[Site],
+    ) -> io::Result<()> {
+        let key = sites_key(sha256);
+        let meta = format!(
+            "version={}\nkey={key}\nsha256={sha256}\noutcome=sites\nsites={}\n",
+            xlate::VERSION,
+            sites.len()
+        );
+        self.publish_with(&key, &meta, |stage| {
+            let path = stage.join("sites");
+            let mut f = fs::File::create(&path)?;
+            f.write_all(&encode_sites(sites))?;
+            f.sync_all()?;
+            set_mode(&path, 0o444)
+        })?;
+        self.record_index(member, st, sha256)
     }
 
     /// Point the index entry of `host_path` at `sha256`.

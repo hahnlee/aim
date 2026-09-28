@@ -9,22 +9,20 @@ pub type Sel = *const c_void;
 pub type Class = *mut c_void;
 pub const NIL: Id = std::ptr::null_mut();
 
-#[link(name = "objc")]
-unsafe extern "C" {
-    pub fn objc_getClass(name: *const c_char) -> Class;
-    fn sel_registerName(name: *const c_char) -> Sel;
-    pub fn objc_msgSend();
-    pub fn objc_release(obj: Id);
-    fn objc_autoreleasePoolPush() -> *mut c_void;
-    fn objc_autoreleasePoolPop(pool: *mut c_void);
-    pub fn objc_allocateClassPair(superclass: Class, name: *const c_char, extra: usize) -> Class;
-    pub fn objc_registerClassPair(cls: Class);
-    pub fn class_addMethod(cls: Class, name: Sel, imp: *const c_void, types: *const c_char)
-    -> bool;
+aim_hostcall::dylib! {
+    static FOUNDATION = c"/System/Library/Frameworks/Foundation.framework/Foundation" {
+        pub fn objc_getClass(name: *const c_char) -> Class;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        pub static objc_msgSend: c_void;
+        pub fn objc_release(obj: Id);
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+        pub fn objc_allocateClassPair(superclass: Class, name: *const c_char, extra: usize) -> Class;
+        pub fn objc_registerClassPair(cls: Class);
+        pub fn class_addMethod(cls: Class, name: Sel, imp: *const c_void, types: *const c_char)
+        -> bool;
+    }
 }
-
-#[link(name = "Foundation", kind = "framework")]
-unsafe extern "C" {}
 
 pub type Queue = *mut c_void;
 
@@ -49,7 +47,7 @@ macro_rules! send {
     ($obj:expr, $sel:expr => $ret:ty $(, $t:ty = $a:expr)*) => {{
         // SAFETY: the selector's method has exactly this signature.
         let f: unsafe extern "C" fn($crate::objc::Id, $crate::objc::Sel $(, $t)*) -> $ret =
-            unsafe { std::mem::transmute($crate::objc::objc_msgSend as unsafe extern "C" fn()) };
+            unsafe { std::mem::transmute($crate::objc::objc_msgSend()) };
         unsafe { f($obj as $crate::objc::Id, $crate::objc::sel($sel) $(, $a)*) }
     }};
 }

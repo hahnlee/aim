@@ -17,6 +17,7 @@
 
 use crate::graph::{Action, Ctx, Dep, Node};
 use crate::log::Log;
+use aim_android_image::assemble::force_remove;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -106,7 +107,9 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     // place of the ART APEX's, and a writable /data and /tmp.
     let out = aim_paths::boot_image();
     let work = out.with_extension("work");
-    let _ = fs::remove_dir_all(&work);
+    // dex2oat's linux-run records load-time sites in the work cache, whose
+    // entries are read-only.
+    let _ = force_remove(&work);
     let _ = fs::remove_dir_all(&out);
     for dir in ["data/out/arm64", "data/ext/arm64", "tmp"] {
         fs::create_dir_all(work.join(dir)).map_err(|e| e.to_string())?;
@@ -238,7 +241,7 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
         fs::copy(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
         files += 1;
     }
-    fs::remove_dir_all(&work).map_err(|e| e.to_string())?;
+    force_remove(&work).map_err(|e| e.to_string())?;
     log.line(&format!(
         "boot image: {} ({files} files for {} BCP jars + {} extension(s))",
         out.display(),

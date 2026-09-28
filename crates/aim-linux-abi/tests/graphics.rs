@@ -174,7 +174,7 @@ fn allocates_and_renders_through_the_original_libui_and_libegl() {
 
     let dir =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("graphics-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = aim_linux_abi::cache::remove_tree(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let layout = Layout::new(image.clone(), dir.join("data"), Some(dir.join("run")));
     layout.prepare().unwrap();
@@ -285,5 +285,5 @@ fn allocates_and_renders_through_the_original_libui_and_libegl() {
         out.status,
         String::from_utf8_lossy(&out.stderr),
     );
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = aim_linux_abi::cache::remove_tree(&dir);
 }

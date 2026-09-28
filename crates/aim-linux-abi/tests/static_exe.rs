@@ -48,5 +48,5 @@ fn static_executable_sets_up_tls_and_page_size() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(so, "page 16384 tls 42 7\n");
-    std::fs::remove_dir_all(&root).unwrap();
+    aim_linux_abi::cache::remove_tree(&root).unwrap();
 }

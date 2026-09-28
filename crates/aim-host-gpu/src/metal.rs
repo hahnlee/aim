@@ -15,18 +15,16 @@ use crate::{EINVAL, resolved};
 type Id = *mut c_void;
 type Sel = *const c_void;
 
-#[link(name = "objc")]
-unsafe extern "C" {
-    fn objc_getClass(name: *const c_char) -> Id;
-    fn sel_registerName(name: *const c_char) -> Sel;
-    fn objc_msgSend();
-    fn objc_release(obj: Id);
-    fn objc_autoreleasePoolPush() -> *mut c_void;
-    fn objc_autoreleasePoolPop(pool: *mut c_void);
+aim_hostcall::dylib! {
+    static METAL = c"/System/Library/Frameworks/Metal.framework/Metal" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        static objc_msgSend: c_void;
+        fn objc_release(obj: Id);
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
 }
-
-#[link(name = "Metal", kind = "framework")]
-unsafe extern "C" {}
 
 pub fn pool_push() -> *mut c_void {
     // SAFETY: no preconditions.
@@ -48,7 +46,7 @@ macro_rules! send {
     ($obj:expr, $sel:expr => $ret:ty $(, $t:ty = $a:expr)*) => {{
         // SAFETY: the selector's method has exactly this signature.
         let f: unsafe extern "C" fn(Id, Sel $(, $t)*) -> $ret =
-            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+            unsafe { std::mem::transmute(objc_msgSend()) };
         unsafe { f($obj, sel($sel) $(, $a)*) }
     }};
 }

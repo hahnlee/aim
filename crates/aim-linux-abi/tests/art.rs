@@ -193,10 +193,14 @@ fn hello_world_runs_on_the_art_exception() {
     let tmp = layout.data.join("data/local/tmp");
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::copy(build_dex(&dir.join("dex")), tmp.join("hello.dex")).unwrap();
-    let guest = Guest {
-        layout,
-        cache: dir.join("cache"),
-    };
+    // The cache sits where linux-run's default one does, outside the
+    // repository: on a Mac whose endpoint security agent authorizes each
+    // process's first mapping of a file there (about 0.7 ms, skipped for
+    // ~/Library and the temporary directory), a cache under the target
+    // directory measured that agent instead of the cache (#190).
+    let cache = std::env::temp_dir().join(format!("aim-art-cache-{}", std::process::id()));
+    remove_tree(&cache);
+    let guest = Guest { layout, cache };
     let (out, _) = guest.run(
         &[
             "/apex/com.android.runtime/bin/linkerconfig",
@@ -269,5 +273,6 @@ fn hello_world_runs_on_the_art_exception() {
             load_time[i], cached[i]
         );
     }
+    remove_tree(&guest.cache);
     remove_tree(&dir);
 }

@@ -118,19 +118,29 @@ its own file table (debuggerd's pseudothread) is a fork too.
 
 ## Cost
 
-All measurements are on an M2 Pro with a debug build, from
-`tests/process.rs` (`process_latency`,
-`fork_latency_with_a_large_address_space`):
+Measured on an M2 Pro (release build, 2026-09-29) with `tests/process.rs`
+(`process_latency`, `fork_latency_with_a_large_address_space`, p50 of
+three runs each) and `linux-run --help` spawned 200 times:
 
-| | Darwin `fork()` | spawned fork |
-|---|---|---|
-| fork+exit+wait, small process | 1.0 ms | 8.5 ms |
-| fork+exec+exit+wait | 73 ms | 82 ms |
-| fork+exit+wait, 4,000 mappings + 300 MiB touched | not measured | 25 ms |
-| `fork` in that parent | not measured | 7.4 ms |
+| | Darwin `fork()` (debug) | spawned fork, frameworks linked | spawned fork, frameworks opened on use |
+|---|---|---|---|
+| `linux-run` start (spawn, exit, wait) | | 7.2 ms | 4.7 ms |
+| fork+exit+wait, small process | 1.0 ms | 7.4–8.0 ms | 5.9–6.2 ms |
+| fork+exec+exit+wait | 73 ms | 21.3–22.2 ms | 17.0–17.3 ms |
+| fork+exit+wait, 4,000 mappings + 300 MiB touched | not measured | 23–27 ms | 21–23 ms |
+| `fork` in that parent | not measured | 7.9–8.7 ms | 7.3–7.4 ms |
 
 Most of a small fork is process start. Spawning `/usr/bin/true` costs about
-3 ms on this machine. A debug `linux-run` costs 7 ms, most of it dyld
-loading the frameworks linux-run links. In the parent, each mapping costs
-about 1.7 µs to snapshot. In the child, each mapping costs about 1.2 µs to
-map.
+4 ms on this machine. `linux-run` used to link Foundation, Metal,
+CoreAudio, AudioToolbox, CoreLocation, IOKit and CoreFoundation for its host
+modules, and dyld loaded and initialized all of them in every guest
+process and fork child. The modules now declare what they call with
+`aim_hostcall::dylib!`, which opens the framework with `dlopen` on first
+use, so `linux-run` links only libSystem (and libiconv, which Rust's
+standard library links): `otool -L` lists two libraries instead of ten.
+
+In the child, `linux-run`'s own start-up after `main` (path map, heap
+window, binder connection, receiving and mapping the parent's memory,
+restoring the state) takes about 1 ms of the ~6 ms before it resumes the
+guest; the rest is exec and dyld. In a debug build, each mapping cost
+about 1.7 µs to snapshot in the parent and 1.2 µs to map in the child.
