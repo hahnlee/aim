@@ -417,7 +417,9 @@ The host's security agent did not flag or block any of the four boots
 - #239 boot time and frame times after the spawned fork;
 - #238 app processes' names in `/proc/<pid>/cmdline` for other processes;
 - #240 wide-gamut EGL configs; #241 phone and GMS startup ANRs; #242
-  battery temperature; #230 traced and traced_probes aborts.
+  battery temperature; #230 traced aborts (traced_probes' were its memory
+  watchdog reading four times its rss from `/proc`, now counted in the
+  guest's 16 KiB pages).
 - #258 remaining memfd seal gaps; #261 app data lost on a second boot of
   the same data directory.
 

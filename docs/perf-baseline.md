@@ -59,7 +59,8 @@ The guest is far from idle after a first boot: GMS, the launcher and
 dexopt keep it at 3–11 host cores for minutes (`idle.cpu_cores`), and it
 never dropped below 1.5 cores within 180 s in these runs, so `boot.settled_s`
 is the 180 s cap. Everything after boot is therefore measured on a busy
-guest; compare A/B runs made the same way in the same session.
+guest; compare A/B runs made the same way in the same session. "Idle CPU
+after boot" below has what runs.
 
 ## Baseline (preliminary)
 
@@ -133,6 +134,51 @@ are the medians of each run's p90 and p99.
   (`boot.completed_s`) against 46–52 s here; the time between
   `pms_ready` and `ams_ready` grew from 5.7 to 17 s. Whether the cache path
   or the post-boot load explains that needs an A/B run.
+
+## Idle CPU after boot (#328)
+
+One `cargo aim boot` of a fresh data directory at `a807c311`, 2026-09-29,
+on the shared M2 Pro (load average 7–48 during it). The host CPU of each
+guest process over 10–15 s windows (`ps` time deltas), named by the guest:
+services by their identity file, app processes by `dumpsys activity
+processes` (another process's `/proc/<pid>/cmdline` is empty for fork
+children, #238).
+
+Two minutes after boot completion the guest used 9.6–10.8 cores: Play
+Store (`com.android.vending`, installing and dexopting) 3.1, system_server
+0.9, the launcher 0.9, servicemanager 0.7, GMS and GMS persistent 0.7,
+SurfaceFlinger 0.4, statsd 0.4, logd 0.35, the composer HAL 0.25, then
+60 processes under 0.3 each.
+
+What in that is ours to fix:
+
+- **Crash-restart loops.** In the first four minutes GMS persistent died
+  52 times ("UsbManagerCompat is unavailable": the device had no `usb`
+  service), each death a new process start plus restarts of GMS services,
+  runtime-permission rewrites and 1,700 BackgroundInstallControlService
+  package events; traced_probes aborted about once a minute on its memory
+  watchdog, which read four times its resident size from `/proc`; the
+  Bluetooth app aborted in `bt_stack_manage` about every 40 s; UwbService
+  and FingerprintService waited for removed HALs in system_server's binder
+  threads, three times a second. The device now declares USB host and no
+  longer declares UWB or a fingerprint sensor, and `/proc` counts rss in
+  16 KiB pages (neither yet checked in a boot).
+- **Kernel time.** Nearly all of the long-running services' CPU was
+  system time with millions of page faults: servicemanager 2:06 of CPU
+  (1.96 s user) and 9.3 million faults, SurfaceFlinger 2:47 (3.3 s user),
+  mediaswcodec 1:39 (1.3 s user) and 6.2 million faults, system_server
+  "0.3% user + 6.1% kernel" in its own ANR report. Sampled, servicemanager's
+  main thread was in guest code, not in the layer. It stopped by four
+  minutes after boot, when the host had 78 % of its memory free again;
+  whether it is the host's memory pressure (reactivation faults) or the
+  layer is open. A binder ping costs servicemanager no faults.
+- **Everything else** is the first-boot work of GMS, Play Store and the
+  launcher, which Android does on a phone too.
+
+The run ended at 04:45:52 KST, when the host security agent (#232) began
+killing every process that a release binary of this worktree spawned
+(zygote restarts, fork children, `sh -c`); its later zygote and netd
+restart loop is a consequence, not a guest problem.
 
 ## Where the time goes: Chrome cold start
 
