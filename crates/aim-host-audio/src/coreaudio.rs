@@ -121,67 +121,70 @@ const BUFFER_FRAME_SIZE: u32 = fourcc(b"fsiz");
 const STREAMS: u32 = fourcc(b"stm#");
 const OBJECT_NAME: u32 = fourcc(b"lnam");
 
-#[link(name = "CoreAudio", kind = "framework")]
-unsafe extern "C" {
-    fn AudioObjectGetPropertyDataSize(
-        object: AudioObjectID,
-        address: *const AudioObjectPropertyAddress,
-        qualifier_size: u32,
-        qualifier: *const c_void,
-        size: *mut u32,
-    ) -> OSStatus;
-    fn AudioObjectGetPropertyData(
-        object: AudioObjectID,
-        address: *const AudioObjectPropertyAddress,
-        qualifier_size: u32,
-        qualifier: *const c_void,
-        size: *mut u32,
-        data: *mut c_void,
-    ) -> OSStatus;
+aim_hostcall::dylib! {
+    static CORE_AUDIO = c"/System/Library/Frameworks/CoreAudio.framework/CoreAudio" {
+        fn AudioObjectGetPropertyDataSize(
+            object: AudioObjectID,
+            address: *const AudioObjectPropertyAddress,
+            qualifier_size: u32,
+            qualifier: *const c_void,
+            size: *mut u32,
+        ) -> OSStatus;
+        fn AudioObjectGetPropertyData(
+            object: AudioObjectID,
+            address: *const AudioObjectPropertyAddress,
+            qualifier_size: u32,
+            qualifier: *const c_void,
+            size: *mut u32,
+            data: *mut c_void,
+        ) -> OSStatus;
+    }
 }
 
-#[link(name = "AudioToolbox", kind = "framework")]
-unsafe extern "C" {
-    fn AudioComponentFindNext(
-        after: AudioComponent,
-        desc: *const AudioComponentDescription,
-    ) -> AudioComponent;
-    fn AudioComponentInstanceNew(component: AudioComponent, unit: *mut AudioUnit) -> OSStatus;
-    pub fn AudioComponentInstanceDispose(unit: AudioUnit) -> OSStatus;
-    pub fn AudioUnitSetProperty(
-        unit: AudioUnit,
-        id: u32,
-        scope: u32,
-        element: u32,
-        data: *const c_void,
-        size: u32,
-    ) -> OSStatus;
-    pub fn AudioUnitGetProperty(
-        unit: AudioUnit,
-        id: u32,
-        scope: u32,
-        element: u32,
-        data: *mut c_void,
-        size: *mut u32,
-    ) -> OSStatus;
-    pub fn AudioUnitInitialize(unit: AudioUnit) -> OSStatus;
-    pub fn AudioUnitUninitialize(unit: AudioUnit) -> OSStatus;
-    pub fn AudioOutputUnitStart(unit: AudioUnit) -> OSStatus;
-    pub fn AudioOutputUnitStop(unit: AudioUnit) -> OSStatus;
-    pub fn AudioUnitRender(
-        unit: AudioUnit,
-        action_flags: *mut u32,
-        time_stamp: *const AudioTimeStamp,
-        bus: u32,
-        frames: u32,
-        data: *mut AudioBufferList,
-    ) -> OSStatus;
+aim_hostcall::dylib! {
+    static AUDIO_TOOLBOX = c"/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox" {
+        fn AudioComponentFindNext(
+            after: AudioComponent,
+            desc: *const AudioComponentDescription,
+        ) -> AudioComponent;
+        fn AudioComponentInstanceNew(component: AudioComponent, unit: *mut AudioUnit) -> OSStatus;
+        pub fn AudioComponentInstanceDispose(unit: AudioUnit) -> OSStatus;
+        pub fn AudioUnitSetProperty(
+            unit: AudioUnit,
+            id: u32,
+            scope: u32,
+            element: u32,
+            data: *const c_void,
+            size: u32,
+        ) -> OSStatus;
+        pub fn AudioUnitGetProperty(
+            unit: AudioUnit,
+            id: u32,
+            scope: u32,
+            element: u32,
+            data: *mut c_void,
+            size: *mut u32,
+        ) -> OSStatus;
+        pub fn AudioUnitInitialize(unit: AudioUnit) -> OSStatus;
+        pub fn AudioUnitUninitialize(unit: AudioUnit) -> OSStatus;
+        pub fn AudioOutputUnitStart(unit: AudioUnit) -> OSStatus;
+        pub fn AudioOutputUnitStop(unit: AudioUnit) -> OSStatus;
+        pub fn AudioUnitRender(
+            unit: AudioUnit,
+            action_flags: *mut u32,
+            time_stamp: *const AudioTimeStamp,
+            bus: u32,
+            frames: u32,
+            data: *mut AudioBufferList,
+        ) -> OSStatus;
+    }
 }
 
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFStringGetCString(s: CFStringRef, buf: *mut c_char, size: isize, encoding: u32) -> bool;
-    fn CFRelease(cf: *const c_void);
+aim_hostcall::dylib! {
+    static CORE_FOUNDATION = c"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" {
+        fn CFStringGetCString(s: CFStringRef, buf: *mut c_char, size: isize, encoding: u32) -> bool;
+        fn CFRelease(cf: *const c_void);
+    }
 }
 
 const UTF8: u32 = 0x0800_0100;

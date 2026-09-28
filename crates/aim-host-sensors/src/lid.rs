@@ -15,26 +15,28 @@ const USAGE_ORIENTATION: i32 = 0x8a;
 const REPORT_TYPE_FEATURE: u32 = 2;
 const REPORT_ANGLE: isize = 1;
 
-#[link(name = "IOKit", kind = "framework")]
-unsafe extern "C" {
-    fn IOHIDManagerCreate(alloc: CFTypeRef, options: u32) -> CFTypeRef;
-    fn IOHIDManagerSetDeviceMatching(manager: CFTypeRef, matching: CFTypeRef);
-    fn IOHIDManagerCopyDevices(manager: CFTypeRef) -> CFTypeRef;
-    fn IOHIDDeviceOpen(device: CFTypeRef, options: u32) -> i32;
-    fn IOHIDDeviceGetReport(
-        device: CFTypeRef,
-        report_type: u32,
-        report_id: isize,
-        report: *mut u8,
-        len: *mut isize,
-    ) -> i32;
+aim_hostcall::dylib! {
+    static IO_KIT = c"/System/Library/Frameworks/IOKit.framework/IOKit" {
+        fn IOHIDManagerCreate(alloc: CFTypeRef, options: u32) -> CFTypeRef;
+        fn IOHIDManagerSetDeviceMatching(manager: CFTypeRef, matching: CFTypeRef);
+        fn IOHIDManagerCopyDevices(manager: CFTypeRef) -> CFTypeRef;
+        fn IOHIDDeviceOpen(device: CFTypeRef, options: u32) -> i32;
+        fn IOHIDDeviceGetReport(
+            device: CFTypeRef,
+            report_type: u32,
+            report_id: isize,
+            report: *mut u8,
+            len: *mut isize,
+        ) -> i32;
+    }
 }
 
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFSetGetCount(set: CFTypeRef) -> isize;
-    fn CFSetGetValues(set: CFTypeRef, values: *mut CFTypeRef);
-    fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
+aim_hostcall::dylib! {
+    static CORE_FOUNDATION = c"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" {
+        fn CFSetGetCount(set: CFTypeRef) -> isize;
+        fn CFSetGetValues(set: CFTypeRef, values: *mut CFTypeRef);
+        fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
+    }
 }
 
 /// The opened sensor device (and its manager, which owns the connection).

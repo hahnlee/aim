@@ -25,9 +25,13 @@
 //!
 //! This crate is `no_std` and holds only the contract: numbers, argument
 //! layouts, the guest-side call ([`guest`], aarch64 Linux/Android only) and
-//! the shape of a host module ([`HostModule`]).
+//! the shape of a host module ([`HostModule`]), plus how host modules reach
+//! system libraries ([`dylib`], macOS only).
 
 #![no_std]
+
+#[cfg(target_os = "macos")]
+pub mod dylib;
 
 /// Version of the calling convention itself (register use, [`FN_VERSION`],
 /// error convention). Bumped only for incompatible changes.

@@ -4,25 +4,26 @@ use std::ffi::{CStr, c_char, c_void};
 
 pub type CFTypeRef = *const c_void;
 
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    static kCFTypeDictionaryKeyCallBacks: c_void;
-    static kCFTypeDictionaryValueCallBacks: c_void;
-    fn CFRelease(cf: CFTypeRef);
-    fn CFGetTypeID(cf: CFTypeRef) -> usize;
-    fn CFStringGetTypeID() -> usize;
-    fn CFStringCreateWithCString(alloc: CFTypeRef, s: *const c_char, encoding: u32) -> CFTypeRef;
-    fn CFStringGetCString(s: CFTypeRef, buf: *mut c_char, len: isize, encoding: u32) -> bool;
-    fn CFNumberCreate(alloc: CFTypeRef, the_type: isize, value: *const c_void) -> CFTypeRef;
-    fn CFDictionaryCreateMutable(
-        alloc: CFTypeRef,
-        capacity: isize,
-        keys: *const c_void,
-        values: *const c_void,
-    ) -> CFTypeRef;
-    fn CFDictionarySetValue(dict: CFTypeRef, key: CFTypeRef, value: CFTypeRef);
-    pub fn CFArrayGetCount(array: CFTypeRef) -> isize;
-    pub fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
+aim_hostcall::dylib! {
+    static CORE_FOUNDATION = c"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" {
+        static kCFTypeDictionaryKeyCallBacks: c_void;
+        static kCFTypeDictionaryValueCallBacks: c_void;
+        fn CFRelease(cf: CFTypeRef);
+        fn CFGetTypeID(cf: CFTypeRef) -> usize;
+        fn CFStringGetTypeID() -> usize;
+        fn CFStringCreateWithCString(alloc: CFTypeRef, s: *const c_char, encoding: u32) -> CFTypeRef;
+        fn CFStringGetCString(s: CFTypeRef, buf: *mut c_char, len: isize, encoding: u32) -> bool;
+        fn CFNumberCreate(alloc: CFTypeRef, the_type: isize, value: *const c_void) -> CFTypeRef;
+        fn CFDictionaryCreateMutable(
+            alloc: CFTypeRef,
+            capacity: isize,
+            keys: *const c_void,
+            values: *const c_void,
+        ) -> CFTypeRef;
+        fn CFDictionarySetValue(dict: CFTypeRef, key: CFTypeRef, value: CFTypeRef);
+        pub fn CFArrayGetCount(array: CFTypeRef) -> isize;
+        pub fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
+    }
 }
 
 const UTF8: u32 = 0x0800_0100;
@@ -53,8 +54,8 @@ impl Owned {
             let dict = Self(CFDictionaryCreateMutable(
                 std::ptr::null(),
                 0,
-                (&raw const kCFTypeDictionaryKeyCallBacks).cast(),
-                (&raw const kCFTypeDictionaryValueCallBacks).cast(),
+                kCFTypeDictionaryKeyCallBacks().cast(),
+                kCFTypeDictionaryValueCallBacks().cast(),
             ));
             for &(key, value) in pairs {
                 let number = Self(CFNumberCreate(

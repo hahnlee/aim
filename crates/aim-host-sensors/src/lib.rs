@@ -67,15 +67,13 @@ unsafe fn call_sensors(func: u32, args: u64, len: u64) -> i64 {
     }
 }
 
-#[link(name = "objc")]
-unsafe extern "C" {
-    fn objc_getClass(name: *const c_char) -> *mut c_void;
-    fn sel_registerName(name: *const c_char) -> *const c_void;
-    fn objc_msgSend();
+aim_hostcall::dylib! {
+    static FOUNDATION = c"/System/Library/Frameworks/Foundation.framework/Foundation" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *const c_void;
+        static objc_msgSend: c_void;
+    }
 }
-
-#[link(name = "Foundation", kind = "framework")]
-unsafe extern "C" {}
 
 /// `[[NSProcessInfo processInfo] thermalState]`.
 fn thermal_state() -> u32 {
@@ -83,7 +81,7 @@ fn thermal_state() -> u32 {
     // SAFETY: both messages take no argument; `processInfo` returns the
     // shared (never released) instance and `thermalState` an NSInteger.
     unsafe {
-        let send: Send = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let send: Send = std::mem::transmute(objc_msgSend());
         let info = send(
             objc_getClass(c"NSProcessInfo".as_ptr()),
             sel_registerName(c"processInfo".as_ptr()),

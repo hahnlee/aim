@@ -36,36 +36,38 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
 
 type CFTypeRef = *const c_void;
 
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFRelease(cf: CFTypeRef);
-    fn CFGetTypeID(cf: CFTypeRef) -> usize;
-    fn CFNumberGetTypeID() -> usize;
-    fn CFBooleanGetTypeID() -> usize;
-    fn CFStringGetTypeID() -> usize;
-    fn CFNumberGetValue(number: CFTypeRef, the_type: isize, value: *mut c_void) -> bool;
-    fn CFBooleanGetValue(boolean: CFTypeRef) -> bool;
-    fn CFStringCreateWithCString(alloc: CFTypeRef, s: *const c_char, encoding: u32) -> CFTypeRef;
-    fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> bool;
-    fn CFArrayGetCount(array: CFTypeRef) -> isize;
-    fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
-    fn CFDictionaryGetValue(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+aim_hostcall::dylib! {
+    static CORE_FOUNDATION = c"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" {
+        fn CFRelease(cf: CFTypeRef);
+        fn CFGetTypeID(cf: CFTypeRef) -> usize;
+        fn CFNumberGetTypeID() -> usize;
+        fn CFBooleanGetTypeID() -> usize;
+        fn CFStringGetTypeID() -> usize;
+        fn CFNumberGetValue(number: CFTypeRef, the_type: isize, value: *mut c_void) -> bool;
+        fn CFBooleanGetValue(boolean: CFTypeRef) -> bool;
+        fn CFStringCreateWithCString(alloc: CFTypeRef, s: *const c_char, encoding: u32) -> CFTypeRef;
+        fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> bool;
+        fn CFArrayGetCount(array: CFTypeRef) -> isize;
+        fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
+        fn CFDictionaryGetValue(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    }
 }
 
-#[link(name = "IOKit", kind = "framework")]
-unsafe extern "C" {
-    fn IOPSCopyPowerSourcesInfo() -> CFTypeRef;
-    fn IOPSCopyPowerSourcesList(blob: CFTypeRef) -> CFTypeRef;
-    fn IOPSGetPowerSourceDescription(blob: CFTypeRef, ps: CFTypeRef) -> CFTypeRef;
-    fn IOServiceMatching(name: *const c_char) -> CFTypeRef;
-    fn IOServiceGetMatchingService(main_port: u32, matching: CFTypeRef) -> u32;
-    fn IORegistryEntryCreateCFProperty(
-        entry: u32,
-        key: CFTypeRef,
-        alloc: CFTypeRef,
-        options: u32,
-    ) -> CFTypeRef;
-    fn IOObjectRelease(object: u32) -> i32;
+aim_hostcall::dylib! {
+    static IO_KIT = c"/System/Library/Frameworks/IOKit.framework/IOKit" {
+        fn IOPSCopyPowerSourcesInfo() -> CFTypeRef;
+        fn IOPSCopyPowerSourcesList(blob: CFTypeRef) -> CFTypeRef;
+        fn IOPSGetPowerSourceDescription(blob: CFTypeRef, ps: CFTypeRef) -> CFTypeRef;
+        fn IOServiceMatching(name: *const c_char) -> CFTypeRef;
+        fn IOServiceGetMatchingService(main_port: u32, matching: CFTypeRef) -> u32;
+        fn IORegistryEntryCreateCFProperty(
+            entry: u32,
+            key: CFTypeRef,
+            alloc: CFTypeRef,
+            options: u32,
+        ) -> CFTypeRef;
+        fn IOObjectRelease(object: u32) -> i32;
+    }
 }
 
 const UTF8: u32 = 0x0800_0100;
