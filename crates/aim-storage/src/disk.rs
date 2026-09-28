@@ -116,8 +116,10 @@ pub struct Attach<'a> {
     pub mount: Option<&'a Path>,
 }
 
-/// Attaches `image`; returns its device.
+/// Attaches `image` by its real path, which is what `hdiutil info` then
+/// lists ([`attachments_of`]); returns its device.
 pub fn attach(image: &Path, how: Attach) -> Result<String, String> {
+    let image = &std::fs::canonicalize(image).map_err(|e| format!("{}: {e}", image.display()))?;
     let mut command = Command::new("diskutil");
     command.args(["image", "attach"]);
     if how.read_only {
