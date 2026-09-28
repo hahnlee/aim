@@ -229,6 +229,8 @@ pub struct Boot {
     props: Rc<RefCell<Properties>>,
     linux_run: LinuxRun,
     events: Option<Receiver<PropertyEvent>>,
+    /// Run mode: changes of the Mac's settings (`mac::watch`).
+    mac: Option<Receiver<(String, String)>>,
     _sockets: Option<PropertySockets>,
     /// Run mode: the binder host behind every service's `--binder`.
     _binder: Option<Arc<Server>>,
@@ -340,6 +342,16 @@ impl Boot {
         };
         diagnostics.extend(property_init(&mut properties, &image, &init_options));
         diagnostics.extend(start_property_service(&mut properties));
+        // The Mac's settings the device follows, before init's first
+        // action reads them (docs/mac-settings.md).
+        let tzdata = image.read(crate::mac::TZDATA).unwrap_or_default();
+        let mac = match options.mode {
+            RunMode::Run => crate::mac::properties(&tzdata),
+            RunMode::DryRun => Vec::new(),
+        };
+        for (name, value) in &mac {
+            properties.init_set(name, value);
+        }
         // ueventd's role: there is no coldboot to wait for.
         properties.init_set(COLD_BOOT_DONE_PROP, "true");
         report.diagnostics = diagnostics.iter().map(|d| d.to_string()).collect();
@@ -441,6 +453,11 @@ impl Boot {
         executor.exclude = options.exclude.clone();
         executor.sync_services(manager.services());
 
+        let mac = (options.mode == RunMode::Run).then(|| {
+            let (sender, receiver) = mpsc::channel();
+            crate::mac::watch(sender, tzdata, mac);
+            receiver
+        });
         let (events, sockets) = if options.mode == RunMode::Run {
             let (sender, receiver) = mpsc::channel();
             let sockets = PropertySockets::start(&layout.socket_dir(), sender)
@@ -458,6 +475,7 @@ impl Boot {
             props,
             linux_run,
             events,
+            mac,
             _sockets: sockets,
             _binder: binder,
             _data: data_image,
@@ -615,6 +633,15 @@ impl Boot {
         self.pump_outbox();
     }
 
+    /// Sets a property for the host, as init sets one, and runs its
+    /// triggers.
+    fn set_host_property(&mut self, name: &str, value: &str) {
+        if let Err(error) = self.executor.set_property(name, value) {
+            self.report.log.push(format!("{name}={value}: {error}"));
+        }
+        self.pump_outbox();
+    }
+
     fn record_command(&mut self, executed: ExecutedCommand) {
         let effects = self.executor.take_effects();
         let event = executed
@@ -663,6 +690,9 @@ impl Boot {
             if stop_requested() {
                 self.report.log.push("stop requested".to_string());
                 break;
+            }
+            while let Some((name, value)) = self.mac.as_ref().and_then(|m| m.try_recv().ok()) {
+                self.set_host_property(&name, &value);
             }
             self.pump_outbox();
             let next_process_action = self.executor.poll_processes();
