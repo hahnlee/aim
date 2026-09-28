@@ -1,5 +1,5 @@
 """Generates the Rust crates of the AIDL interfaces the replaced native
-daemons serve (tools/build-daemons.sh, step 2), the way Soong's rust_aidl
+daemons serve (the aidl-gen node of `cargo aim`), the way Soong's rust_aidl
 does, with the crate glue of vendor_hal_aidl.py.
 
 The interfaces are the platform's own, not VINTF: IApexService and IVold
@@ -40,7 +40,7 @@ from vendor_hal_aidl import glue, sync  # noqa: E402
 
 
 def fail(message):
-    sys.exit(f"build-daemons: {message}")
+    sys.exit(f"daemon_aidl: {message}")
 
 
 def frozen_hash(api, version):
@@ -107,7 +107,7 @@ def generate(aidl, src, out, manifests, entry):
     )
     with open(f"{new}/lib.rs", "w") as f:
         f.write(glue(crate, version, sorted(staged), []).replace(
-            "tools/build-vendor-hals.sh", "tools/build-daemons.sh"))
+            "vendor_hal_aidl.py", "daemon_aidl.py"))
     sync(new, f"{out}/{crate}")
     shutil.rmtree(new)
     shutil.rmtree(stage)

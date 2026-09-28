@@ -19,8 +19,8 @@ android_hardware_common = { path = "../../aidl/android.hardware.common" }
 android_hardware_drm_common = { path = "../../aidl/android.hardware.drm.common" }
 android_hardware_graphics_common = { path = "../../aidl/android.hardware.graphics.common" }
 android_hardware_graphics_composer3 = { path = "../../aidl/android.hardware.graphics.composer3" }
-binder = { path = "../../binder" }
+binder.workspace = true
 aim-gralloc = { path = "../gralloc" }
-aim-hostcall = { path = "../../../crates/aim-hostcall" }
-libc = "0.2"
-log = "0.4"
+aim-hostcall.workspace = true
+libc.workspace = true
+log.workspace = true

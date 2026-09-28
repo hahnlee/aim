@@ -1,0 +1,6 @@
+# ANGLE, the host side of the GLES driver (docs/gles-driver.md). The `angle`
+# node of `cargo aim` checks out ANGLE at this revision into
+# _build/angle-source (git, then depot_tools' `gclient sync`), and builds
+# libEGL and libGLESv2 in its out/AimRelease with the gn args of
+# upstream/angle-args.gn (Metal only).
+ANGLE_REVISION=37c976ffba9d2940add977cad9945b23de14c150

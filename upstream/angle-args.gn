@@ -1,0 +1,10 @@
+is_debug = false
+is_component_build = true
+angle_enable_metal = true
+angle_enable_gl = false
+angle_enable_vulkan = false
+angle_enable_wgpu = false
+angle_enable_null = false
+angle_enable_d3d11 = false
+angle_build_all = false
+target_cpu = "arm64"

@@ -6,7 +6,7 @@ clang and linked against the ORIGINAL platform libraries of the pinned image.
 Source lists come from ART's own Android.bp files (see bp_query.py); only the
 configuration that Soong would compute from art/build/art.go is written here.
 
-Called by tools/build-art-android.sh; not meant to be run by hand.
+Run by the art node of `cargo aim` (docs/build.md); not meant to be run by hand.
 """
 
 import argparse

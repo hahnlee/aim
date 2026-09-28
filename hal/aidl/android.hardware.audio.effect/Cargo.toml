@@ -9,7 +9,7 @@ description = "android.hardware.audio.effect V3, Rust backend, generated from th
 build = "../../binder/build.rs"
 
 [lib]
-path = "../../../_build/vendor-hals/aidl/android.hardware.audio.effect-V3/lib.rs"
+path = "../../../target/aim/gen/hal-aidl/android.hardware.audio.effect-V3/lib.rs"
 
 [dependencies]
 android_hardware_audio_common = { path = "../android.hardware.audio.common" }
@@ -17,6 +17,6 @@ android_hardware_common = { path = "../android.hardware.common" }
 android_hardware_common_fmq = { path = "../android.hardware.common.fmq" }
 android_media_audio_common_types = { path = "../android.media.audio.common.types" }
 android_media_audio_eraser_types = { path = "../android.media.audio.eraser.types" }
-async-trait = "0.1"
-binder = { path = "../../binder" }
-static_assertions = "1"
+async-trait.workspace = true
+binder.workspace = true
+static_assertions.workspace = true

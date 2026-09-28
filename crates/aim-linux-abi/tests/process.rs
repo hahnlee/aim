@@ -14,34 +14,17 @@ use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-/// The extracted pinned image (`tools/android-image-extract`).
-const IMAGE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/android16-image-full"
-);
 const PROGRAM: &str = "/data/local/tmp/process";
 
 fn ndk_clang() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let ndks = Path::new(&home).join("Library/Android/sdk/ndk");
-    let mut versions: Vec<PathBuf> = std::fs::read_dir(ndks)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    versions.sort();
-    versions
-        .into_iter()
-        .rev()
-        .map(|v| v.join("toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android35-clang"))
-        .find(|c| c.exists())
+    aim_paths::ndk_clang(35)
 }
 
 /// Copy a guest path of the image into `dst`, keeping symlinks (absolute in
 /// the image's namespace) and following them.
 fn mirror(dst: &Path, guest: &str) {
     let rel = guest.trim_start_matches('/');
-    let (from, to) = (Path::new(IMAGE).join(rel), dst.join(rel));
+    let (from, to) = (aim_paths::original_image().join(rel), dst.join(rel));
     if to.symlink_metadata().is_ok() {
         return;
     }
@@ -71,13 +54,10 @@ fn root() -> Option<&'static Path> {
     static ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
     ROOT.get_or_init(|| {
         let Some(clang) = ndk_clang() else {
-            eprintln!("skipped: no NDK");
+            aim_paths::skip("the pinned NDK is not installed");
             return None;
         };
-        if !Path::new(IMAGE).join("system/bin/sh").exists() {
-            eprintln!("skipped: image not installed at {IMAGE}");
-            return None;
-        }
+        aim_paths::input(aim_paths::original_image().join("system/bin/sh"), "image")?;
         // One copy, replaced by each run.
         let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("process-root");
         let _ = aim_linux_abi::cache::remove_tree(&root);

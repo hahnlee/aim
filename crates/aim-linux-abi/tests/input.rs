@@ -17,19 +17,9 @@ use aim_host_display::input::translate::{Input, Phase};
 use aim_host_display::input::{KEYBOARD, TOUCHSCREEN, WHEEL, device_dir, devices};
 use aim_host_display::monotonic_ns;
 
-const IMAGE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/android16-image-full"
-);
-
-fn image() -> Option<&'static Path> {
-    let p = Path::new(IMAGE);
-    if p.join("system/bin/toolbox").exists() {
-        Some(p)
-    } else {
-        eprintln!("skipped: extracted image not found at {IMAGE}");
-        None
-    }
+/// The extracted pinned image (the `image` node of `cargo aim`).
+fn image() -> Option<PathBuf> {
+    aim_paths::original_image_with("system/bin/toolbox")
 }
 
 /// A display server's input side, in a short directory: device sockets
@@ -119,7 +109,7 @@ fn wait(child: &mut Child, limit: Duration) -> (bool, String) {
 
 #[test]
 fn getevent_lists_devices_and_reads_window_input() {
-    let Some(image) = image() else { return };
+    let Some(ref image) = image() else { return };
     let s = Server::new("evdev");
     let t = monotonic_ns;
 
@@ -244,7 +234,7 @@ fn getevent_lists_devices_and_reads_window_input() {
 /// opened; their events carry `CLOCK_MONOTONIC` times (`EVIOCSCLOCKID`).
 #[test]
 fn getevent_sees_hotplugged_devices() {
-    let Some(image) = image() else { return };
+    let Some(ref image) = image() else { return };
     let s = Server::new("evhot");
     // The devices go; only their directory stays.
     s.input.close();

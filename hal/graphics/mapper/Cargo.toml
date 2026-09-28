@@ -16,4 +16,4 @@ library = "mapper.aim.so"
 
 [dependencies]
 aim-gralloc = { path = "../gralloc" }
-libc = "0.2"
+libc.workspace = true

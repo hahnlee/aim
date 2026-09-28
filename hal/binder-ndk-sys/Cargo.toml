@@ -8,14 +8,15 @@ description = "AOSP libbinder_ndk_sys (vendor variant): bindgen bindings to the 
 links = "binder_ndk"
 
 [lib]
-path = "../../_build/vendor-hals/src/frameworks/native/libs/binder/rust/sys/lib.rs"
+path = "../../_build/aosp/frameworks/native/libs/binder/rust/sys/lib.rs"
 
 [dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [features]
 # The platform variant (no vendor defines), for system daemons.
 system = []
 
 [build-dependencies]
+aim-paths.workspace = true
 bindgen = "0.70"

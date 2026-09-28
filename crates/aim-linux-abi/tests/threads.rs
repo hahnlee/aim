@@ -8,14 +8,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-const IMAGE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/android16-image-full"
-);
-/// Under $HOME; the pinned NDK the repository's scripts use.
-const NDK_CLANG: &str =
-    "Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang";
-
 /// A guest root with linker64, bionic and the test program, built once
 /// per test process (rebuilt from scratch each run).
 struct Root(PathBuf);
@@ -26,15 +18,12 @@ fn root() -> Option<&'static Root> {
 }
 
 fn build_root() -> Option<Root> {
-    let clang = Path::new(&std::env::var_os("HOME")?).join(NDK_CLANG);
-    let image = Path::new(IMAGE);
-    if !clang.exists() || !image.join("system/lib64/ld-android.so").exists() {
-        eprintln!(
-            "skipped: needs the NDK ({}) and the full image ({IMAGE})",
-            clang.display()
-        );
+    let Some(clang) = aim_paths::ndk_toolchain().map(|t| t.join("bin/clang")) else {
+        aim_paths::skip("the pinned NDK is not installed");
         return None;
-    }
+    };
+    let image = &aim_paths::original_image();
+    aim_paths::input(image.join("system/lib64/ld-android.so"), "image")?;
     let r = Root(Path::new(env!("CARGO_TARGET_TMPDIR")).join("threads-root"));
     let _ = std::fs::remove_dir_all(&r.0);
     let copy = |guest: &str| {

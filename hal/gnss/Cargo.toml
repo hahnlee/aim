@@ -16,7 +16,7 @@ binary = "android.hardware.gnss-service.aim"
 
 [dependencies]
 android_hardware_gnss = { path = "../aidl/android.hardware.gnss" }
-binder = { path = "../binder" }
-aim-hostcall = { path = "../../crates/aim-hostcall" }
-libc = "0.2"
-log = "0.4"
+binder.workspace = true
+aim-hostcall.workspace = true
+libc.workspace = true
+log.workspace = true

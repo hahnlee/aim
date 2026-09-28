@@ -20,8 +20,8 @@ android_hardware_audio_core = { path = "../aidl/android.hardware.audio.core" }
 android_hardware_audio_core_sounddose = { path = "../aidl/android.hardware.audio.core.sounddose" }
 android_hardware_audio_effect = { path = "../aidl/android.hardware.audio.effect" }
 android_media_audio_common_types = { path = "../aidl/android.media.audio.common.types" }
-binder = { path = "../binder" }
+binder.workspace = true
 aim-fmq = { path = "../fmq" }
-aim-hostcall = { path = "../../crates/aim-hostcall" }
-libc = "0.2"
-log = "0.4"
+aim-hostcall.workspace = true
+libc.workspace = true
+log.workspace = true

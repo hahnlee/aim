@@ -9,9 +9,9 @@ description = "android.hardware.camera.metadata V1, Rust backend, generated from
 build = "../../binder/build.rs"
 
 [lib]
-path = "../../../_build/vendor-hals/aidl/android.hardware.camera.metadata-V1/lib.rs"
+path = "../../../target/aim/gen/hal-aidl/android.hardware.camera.metadata-V1/lib.rs"
 
 [dependencies]
-async-trait = "0.1"
-binder = { path = "../../binder" }
-static_assertions = "1"
+async-trait.workspace = true
+binder.workspace = true
+static_assertions.workspace = true

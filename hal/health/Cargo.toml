@@ -16,6 +16,6 @@ binary = "android.hardware.health-service.aim"
 
 [dependencies]
 android_hardware_health = { path = "../aidl/android.hardware.health" }
-binder = { path = "../binder" }
-aim-hostcall = { path = "../../crates/aim-hostcall" }
-log = "0.4"
+binder.workspace = true
+aim-hostcall.workspace = true
+log.workspace = true

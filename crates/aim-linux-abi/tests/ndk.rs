@@ -1,7 +1,7 @@
 //! NDK C tests of the file, socket, event, memory and procfs syscalls, run
 //! under `linux-run` with the image's original bionic (`tests/ndk/*.c`).
 //!
-//! Each program is built with the newest installed NDK and run from a
+//! Each program is built with the pinned NDK and run from a
 //! writable `/data/local/tmp` through a path map, like a service under
 //! guest-init. Skipped when the NDK or the extracted image is missing.
 
@@ -11,30 +11,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn ndk_clang() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let ndks = Path::new(&home).join("Library/Android/sdk/ndk");
-    let mut versions: Vec<PathBuf> = std::fs::read_dir(ndks)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    versions.sort();
-    let clang = versions
-        .last()?
-        .join("toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android35-clang");
-    clang.exists().then_some(clang)
+    aim_paths::ndk_clang(35)
 }
 
-/// The extracted image of the main checkout (`_build` is not in worktrees).
+/// The extracted pinned image (the `image` node of `cargo aim`).
 fn image() -> Option<PathBuf> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .ok()?;
-    let common = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    let img = common.parent()?.join("_build/android16-image-full");
-    img.join("system/build.prop").exists().then_some(img)
+    aim_paths::original_image_with("system/build.prop")
 }
 
 struct Guest {
@@ -165,7 +147,7 @@ impl Drop for Guest {
 
 fn check(name: &str, args: &[&str]) {
     let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
-        eprintln!("skipped: NDK or extracted image not found");
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
         return;
     };
     let g = Guest::new(&image, name);
@@ -218,7 +200,7 @@ fn ashmem() {
 fn evdev() {
     use aim_host_display::input::{KEYBOARD, device_dir, devices, server::Devices};
     let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
-        eprintln!("skipped: NDK or extracted image not found");
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
         return;
     };
     let g = Guest::new(&image, "t_evdev");
@@ -237,7 +219,7 @@ fn evdev() {
 fn eventhub() {
     use aim_host_display::input::{device_dir, devices, server::Devices};
     let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
-        eprintln!("skipped: NDK or extracted image not found");
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
         return;
     };
     let g = Guest::new(&image, "t_eventhub");
@@ -304,7 +286,7 @@ fn bind_in(dir: &Path, name: &str, ty: i32) -> OwnedFd {
 #[test]
 fn inherited_init_sockets() {
     let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
-        eprintln!("skipped: NDK or extracted image not found");
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
         return;
     };
     let g = Guest::new(&image, "t_inherit");

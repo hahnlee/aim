@@ -2,22 +2,23 @@
 //! `libbinder_ndk_bindgen_flags.txt` and Android.bp, with the vendor
 //! defines, against the NDK sysroot and the pinned binder headers. With the
 //! `system` feature it is the platform (system partition) variant, which
-//! the replaced native daemons use (`daemons/`).
+//! the replaced native daemons use (`daemons/`). The sources and the link
+//! directory are where `cargo aim` puts them (crates/aim-paths).
 
 use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let vendor_hals = manifest.join("../../_build/vendor-hals");
-    let binder = vendor_hals.join("src/frameworks/native/libs/binder");
-    let ndk = PathBuf::from(env::var("ANDROID_NDK_HOME").expect("ANDROID_NDK_HOME"));
+    let binder = aim_paths::aosp().join("frameworks/native/libs/binder");
+    let toolchain = aim_paths::ndk_toolchain().expect("the pinned NDK (aim_paths::NDK_VERSION)");
+    // bindgen loads the NDK's own libclang.
+    env::set_var("LIBCLANG_PATH", toolchain.join("lib"));
     let variant: &[&str] = if env::var_os("CARGO_FEATURE_SYSTEM").is_some() {
         &[]
     } else {
         &["-D__ANDROID_VENDOR__", "-D__ANDROID_VNDK__"]
     };
-    let sysroot = ndk.join("toolchains/llvm/prebuilt/darwin-x86_64/sysroot");
+    let sysroot = toolchain.join("sysroot");
     let bindings = bindgen::Builder::default()
         .header(
             binder
@@ -74,8 +75,7 @@ fn main() {
     bindings.write_to_file(out.join("bindings.rs")).unwrap();
     println!(
         "cargo::rustc-link-search=native={}",
-        vendor_hals.join("link").display()
+        aim_paths::android_link_dir().display()
     );
     println!("cargo::rustc-link-lib=dylib=binder_ndk");
-    println!("cargo::rerun-if-env-changed=ANDROID_NDK_HOME");
 }

@@ -11,7 +11,7 @@ references as absolute 32-bit addresses. This document records
   image's tag (`patches/art-android/sources.lock`: `android-16.0.0_r1`, ART
   `ed6c006b`);
 - how that ART is built as android-arm64 ELF against the original image
-  libraries (`tools/build-art-android.sh`);
+  libraries (the `art` node of `cargo aim`, [build.md](build.md));
 - how the boot image is regenerated for it.
 
 Tracking: #153 (migration), #161 (syscall-layer window contract), #165 (boot
@@ -276,10 +276,10 @@ loosening of 0066 and the `VLOG(jit) "Darwin ..."` diagnostics.
 The six (c) patches are left out of the minimal series; they are ordinary ART
 fixes that can be carried separately or upstreamed.
 
-## Building (`tools/build-art-android.sh`)
+## Building (the `art` node)
 
 ```
-tools/build-art-android.sh [--aosp DIR] [--image DIR] [--out DIR] [--ndk DIR] [-- ninja args]
+cargo aim build art
 ```
 
 - **Toolchain:** Android NDK clang (`~/Library/Android/sdk/ndk/28.2.13676358`,
@@ -295,18 +295,21 @@ tools/build-art-android.sh [--aosp DIR] [--image DIR] [--out DIR] [--ndk DIR] [-
   (system), `libstatspull`, `libstatssocket` (statsd APEX). Every library links
   with `-z defs`, so all symbols resolve against the originals.
 - **Sources:** AOSP subtrees fetched at `android-16.0.0_r1`
-  (`patches/art-android/sources.lock`) into `_build/art-android/src`: the ART
-  subtrees the build reads (runtime, compiler, dex2oat, the libraries,
+  and checked against the content hashes of `patches/art-android/sources.lock`,
+  into `_build/aosp`: the ART subtrees the build reads (runtime, compiler, dex2oat, the libraries,
   openjdkjvm, adbconnection, ...), libcore's `jvm.h`, libnativehelper,
   libbase/liblog/libcutils/libunwindstack headers, libziparchive, vixl, lzma,
   zlib, tinyxml2, dlmalloc, fmtlib, BoringSSL, bionic platform headers, lz4,
   cpu_features, libcap, perfetto heapprofd header, modules-utils, statsd
-  headers, and apexd's `ApexInfoList.xsd`. No Soong and no full AOSP
+  headers, and apexd's `ApexInfoList.xsd`. The series is applied to a
+  staged copy of the ART subtrees (`target/aim/art/src/art`), rewriting only
+  the files whose content changes. No Soong and no full AOSP
   checkout: `tools/art-android/bp_query.py` evaluates ART's `Android.bp` for an
   arm64 device (defaults chains, `arch/target/codegen` groups; arm64 codegen
   implies arm as in `art/build/codegen.go`) and `tools/art-android/gen_build.py`
   writes a ninja file with Soong's `art.go` global/device flags (CC with Baker
-  read barriers forced, because the syscall layer has no userfaultfd).
+  read barriers forced, because the syscall layer has no userfaultfd), which
+  n2 runs ([build.md](build.md), "n2").
 - **Generated sources:** `operator_out` (upstream `generate_operator_out.py`),
   nterp (`gen_mterp.py`), `asm_defines.h` (cpp-define-generator, compiled for
   the target), ART aconfig flags (all `is_fixed_read_only`, declaration
@@ -323,7 +326,7 @@ tools/build-art-android.sh [--aosp DIR] [--image DIR] [--out DIR] [--ndk DIR] [-
   their Linux assembly, the flags of `external/boringssl/Android.bp`), as
   upstream does (#163). The platform `libcrypto.so` is not visible in the ART
   linker namespace.
-- **Output:** `_build/art-android/` (~0.9 GB with debug info): `lib64/`
+- **Output:** `target/aim/art/` (~0.9 GB with debug info): `lib64/`
   `libartbase.so`, `libdexfile.so`, `libprofile.so`, `libart.so`
   (runtime + JIT compiler, same DT_NEEDED set as the original),
   `libopenjdkjvm.so`, and `bin/dex2oat64`; `stripped/` holds the same files
@@ -343,7 +346,7 @@ tools/build-art-android.sh [--aosp DIR] [--image DIR] [--out DIR] [--ndk DIR] [-
 The rebuilt set must replace, as a unit, every ART APEX library that links
 libart's C++ internals: libart, libartbase, libdexfile, libprofile,
 libopenjdkjvm (and libopenjdkjvmti, libadbconnection, libperfetto_hprof when
-those plugins are used). `tools/build-art-android.sh` builds libadbconnection
+those plugins are used). The `art` node builds libadbconnection
 too (zygote loads it); libopenjdkjvmti and libperfetto_hprof are not rebuilt
 yet, so their dlopen fails and ART runs without them. Libraries with C APIs (libnativebridge,
 libnativeloader, libsigchain, libartpalette, libjavacore, libopenjdk) stay
@@ -362,14 +365,14 @@ Without a boot image, `Runtime::Init` takes `ClassLinker::InitWithoutImage`
 and runs the boot class path jars on nterp and the JIT. That is how P2 first
 ran Java, and how the boot image is made.
 
-`tools/build-art-boot-image.sh` regenerates it with the rebuilt
+The `boot-image` node of `cargo aim` regenerates it with the rebuilt
 `dex2oat64`, which runs on the syscall layer (`linux-run`) with the original
 linker64, bionic and ART APEX libraries; the ART exception binaries are
 mapped over the image's with `--path-map` file entries, so no derived image is
 needed:
 
 ```
-tools/build-art-boot-image.sh [--image DIR] [--art DIR] [--out DIR] [--linux-run PATH]
+cargo aim build boot-image
 ```
 
 - **Primary boot image:** the boot class path recorded in the original
@@ -384,7 +387,7 @@ tools/build-art-boot-image.sh [--image DIR] [--art DIR] [--out DIR] [--linux-run
 - **Reproducible:** `--force-determinism` and `--avoid-storing-invocation`;
   two runs produce identical files. The whole run (15 dex2oat components,
   load-time rewriting included) takes about 3 s.
-- **Output:** `_build/art-android/boot-image/framework/arm64/boot*.{art,oat}`
+- **Output:** `target/aim/boot-image/framework/arm64/boot*.{art,oat}`
   and `framework/boot*.vdex`. `image/overlay.toml` replaces the 45
   corresponding files under `/system/framework`; the original
   `arm64/boot*.vdex` symlinks stay and resolve to the replaced vdex files.

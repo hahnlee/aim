@@ -16,6 +16,6 @@ binary = "android.hardware.bluetooth-service.aim"
 
 [dependencies]
 android_hardware_bluetooth = { path = "../aidl/android.hardware.bluetooth" }
-binder = { path = "../binder" }
-aim-hostcall = { path = "../../crates/aim-hostcall" }
-libc = "0.2"
+binder.workspace = true
+aim-hostcall.workspace = true
+libc.workspace = true

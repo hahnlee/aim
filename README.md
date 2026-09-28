@@ -14,33 +14,27 @@ recorded in [docs/boot-status.md](docs/boot-status.md).
 ## Requirements
 
 - macOS on Apple Silicon, Rust (with `rustup target add aarch64-linux-android`)
-- the Android SDK with an NDK and `build-tools/36.0.0` (for `aidl`)
-- Homebrew `openjdk@17` and `ninja`
-- an ANGLE build (Metal backend) in `_build/angle-source`, see
-  [docs/gles-driver.md](docs/gles-driver.md)
-- the pinned original image archive (see [docs/gsi-base.md](docs/gsi-base.md))
+- the Android SDK with NDK `28.2.13676358` and `build-tools/36.0.0` (for `aidl`)
+- Homebrew `openjdk@17`, `python3`
+- the pinned original image archive in `_prebuilt` (`image/original.lock`,
+  [docs/gsi-base.md](docs/gsi-base.md))
+- for ANGLE (Metal), its checkout in `_build/angle-source` and `ninja`, see
+  [docs/build.md](docs/build.md) and [docs/gles-driver.md](docs/gles-driver.md)
 
 ## Build and boot
 
 ```sh
-cargo build --release
-target/release/android-image-extract ARCHIVE.zip _build/android16-image-full
-
-tools/build-vendor-hals.sh        # our vendor HALs (hal/)
-tools/build-daemons.sh            # replaced netd/vold/lmkd/apexd (daemons/)
-tools/build-art-android.sh        # the ART exception (patches/art-android/)
-tools/build-art-boot-image.sh     # its boot image
-
-target/release/android-image assemble --original _build/android16-image-full \
-    --manifest image/overlay.toml --out DERIVED
-target/release/linux-translate DERIVED
-
-target/release/aim-display --socket DISPLAY --size 1080x1920 &
-target/release/guest-init --image DERIVED --data DATA --run \
-    --gpu _build/angle-source/out/AimRelease --display DISPLAY
+cargo aim build     # everything a boot needs; reruns only what changed
+cargo aim status    # what is stale, and why
+cargo aim test      # unit tests; --integration builds everything and runs all
+cargo aim boot      # aim-display + guest-init on the derived image
 ```
 
-`tools/guest-logcat.sh DATA/run` reads the running guest's logd.
+`cargo aim` is the build graph of [docs/build.md](docs/build.md): the host
+tools, our vendor HALs and daemons, the ART exception and its boot image, the
+extracted original and the derived image, each rebuilt when its inputs
+change. `tools/guest-logcat.sh DATA/run` reads the running guest's logd
+(`cargo aim boot` puts DATA in `target/aim/boot/data`).
 
 ## Layout
 
@@ -54,7 +48,8 @@ target/release/guest-init --image DERIVED --data DATA --run \
 | `hal/`, `daemons/` | Guest-side vendor HALs and replaced daemons (Rust, `aarch64-linux-android`) |
 | `image/` | The overlay manifest and our `/vendor` files |
 | `patches/art-android/` | The ART exception series |
-| `tools/` | Build scripts, `android-image-extract`, the GPU thunk generator |
+| `crates/aim-build`, `crates/aim-paths` | `cargo aim` and its output layout |
+| `tools/` | `android-image-extract`, the build's Python helpers, the GPU thunk generator |
 | `docs/` | Design documents; `docs/adr/` holds the decisions |
 
 ## Contributing

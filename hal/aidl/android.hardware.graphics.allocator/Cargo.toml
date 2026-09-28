@@ -9,11 +9,11 @@ description = "android.hardware.graphics.allocator V2, Rust backend, generated f
 build = "../../binder/build.rs"
 
 [lib]
-path = "../../../_build/vendor-hals/aidl/android.hardware.graphics.allocator-V2/lib.rs"
+path = "../../../target/aim/gen/hal-aidl/android.hardware.graphics.allocator-V2/lib.rs"
 
 [dependencies]
 android_hardware_common = { path = "../android.hardware.common" }
 android_hardware_graphics_common = { path = "../android.hardware.graphics.common" }
-async-trait = "0.1"
-binder = { path = "../../binder" }
-static_assertions = "1"
+async-trait.workspace = true
+binder.workspace = true
+static_assertions.workspace = true

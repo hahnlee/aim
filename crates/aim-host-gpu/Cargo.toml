@@ -7,8 +7,11 @@ publish = false
 description = "Host-call module for the guest GLES driver: EGL and OpenGL ES forwarded to ANGLE on Metal"
 
 [dependencies]
-aim-hostcall = { path = "../aim-hostcall" }
-libc = "0.2"
+aim-hostcall.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+aim-paths.workspace = true
 
 [[test]]
 name = "fork"

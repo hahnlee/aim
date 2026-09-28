@@ -6,10 +6,10 @@ license = "Apache-2.0"
 publish = false
 description = "Test client of the Bluetooth HAL: HCI through IBluetoothHci (crates/aim-linux-abi/tests/bluetooth.rs); not in the image"
 
-# Installed into _build/vendor-hals/bin for the test.
+# A test client: installed into target/aim/hal/test, not the image.
 [package.metadata.vendor-hal]
-binary = "bluetooth-hci-client"
+test = "bluetooth-hci-client"
 
 [dependencies]
 android_hardware_bluetooth = { path = "../../aidl/android.hardware.bluetooth" }
-binder = { path = "../../binder" }
+binder.workspace = true

@@ -6,7 +6,7 @@ code is distributed under **GPL-2.0-only WITH Classpath-exception-2.0**.
 ## What the repository holds
 
 No OpenJDK-derived file and no patch to one. The ART exception build
-(`tools/build-art-android.sh`, ADR 0012 decision 4) compiles, unmodified:
+(the `art` node of `cargo aim`, ADR 0012 decision 4) compiles, unmodified:
 
 - `art/openjdkjvm/OpenjdkJvm.cc` into `libopenjdkjvm.so`, because that
   library uses libart internals and must match the patched runtime;
@@ -14,7 +14,7 @@ No OpenJDK-derived file and no patch to one. The ART exception build
   `OpenjdkJvm.cc` includes.
 
 Both are fetched at `android-16.0.0_r1` (`patches/art-android/sources.lock`)
-into the ignored `_build/art-android/src`. The series in
+into the ignored `_build/aosp`. The series in
 `patches/art-android/` does not touch them.
 
 ## License texts and upstream source

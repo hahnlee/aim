@@ -146,7 +146,7 @@ system, file for file:
 
 ### ART
 
-`tools/build-art-android.sh` builds `patches/art-android/` on
+The `art` node of `cargo aim` builds `patches/art-android/` on
 `android-16.0.0_r1` ART (`ed6c006b`) and links against the pinned image's
 libraries. For the GSI:
 

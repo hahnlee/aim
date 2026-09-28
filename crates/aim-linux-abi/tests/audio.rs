@@ -16,8 +16,8 @@
 //! service's log file.
 //!
 //! Every signal is at -90 dBFS: inaudible, but seen by the HAL's peak
-//! meter. Skipped unless the extracted image, the pinned NDK and the vendor
-//! HAL outputs (tools/build-vendor-hals.sh) are present.
+//! meter. Skipped unless the pinned NDK, the derived image and the HAL's test
+//! client (`cargo aim build`) are present.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -26,10 +26,6 @@ use std::time::{Duration, Instant};
 
 use aim_guest_init::{Boot, BootOptions, RunMode};
 
-const IMAGE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/android16-image-full"
-);
 const HAL_LOG: &str = "vendor.audio-hal-aidl.log";
 const HAL_TAG: &str = "android.hardware.audio.service-aidl.aim";
 const SERVICES: &[&str] = &[
@@ -41,32 +37,14 @@ const SERVICES: &[&str] = &[
     "audioserver",
 ];
 
-fn source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
+/// The pinned NDK's clang for the guest (arm64 Android), if installed.
 fn ndk_clang() -> Option<PathBuf> {
-    let sdk = std::env::var_os("ANDROID_SDK_ROOT")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join("Library/Android/sdk")))?;
-    let clang = sdk.join(
-        "ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android35-clang",
-    );
-    clang.exists().then_some(clang)
+    aim_paths::ndk_clang(35)
 }
 
-/// The derived image of `image/overlay.toml`, assembled once per identity
-/// (images are never rebuilt in place).
-fn derived_image() -> Result<PathBuf, String> {
-    let root = source_root();
-    let original = Path::new(IMAGE).canonicalize().map_err(|e| e.to_string())?;
-    let (_, plan) = aim_android_image::load(&root.join("image/overlay.toml"), &original, &root)
-        .map_err(|problems| format!("{problems:?}"))?;
-    let identity = aim_android_image::identity::compute("audio-test-original", &plan);
-    let out = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("audio-derived-image-{}", &identity.hex[..16]));
-    aim_android_image::assemble(&plan, &original, &identity, &out)?;
-    Ok(out)
+/// The derived image of `image/overlay.toml` (`cargo aim build derived-image`).
+fn derived_image() -> Option<PathBuf> {
+    aim_paths::input(aim_paths::derived_image(), "derived-image")
 }
 
 fn read(path: &Path) -> String {
@@ -160,29 +138,15 @@ fn field(text: &str, line: &str, key: &str) -> Option<f64> {
 
 #[test]
 fn audioserver_and_the_hal_play_through_coreaudio() {
-    if !Path::new(IMAGE).join("system/bin/audioserver").exists() {
-        eprintln!("skipped: extracted image not found at {IMAGE}");
-        return;
-    }
     let Some(clang) = ndk_clang() else {
-        eprintln!("skipped: the pinned NDK (r28c) is not installed");
+        aim_paths::skip("the pinned NDK is not installed");
         return;
     };
-    let check = source_root().join("_build/vendor-hals/test/audio-hal-check");
-    if !check.exists() {
-        eprintln!(
-            "skipped: no {} (run tools/build-vendor-hals.sh)",
-            check.display()
-        );
+    let Some(check) = aim_paths::input(aim_paths::hal_test("audio-hal-check"), "hal/audio-check")
+    else {
         return;
-    }
-    let image = match derived_image() {
-        Ok(image) => image,
-        Err(e) => {
-            eprintln!("skipped: no derived image: {e}");
-            return;
-        }
     };
+    let Some(image) = derived_image() else { return };
 
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("audio-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

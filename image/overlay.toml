@@ -19,8 +19,9 @@
 #
 #   [[add]]                     a file the original does not have
 #   path = "/vendor/..."        absolute guest path
-#   source = "_build/..."       file relative to the repo root (checked-in, or a
-#                               build output under _build/ or target/)
+#   source = "target/aim/..."   file relative to the repo root: checked in, or
+#                               a `cargo aim` output (docs/build.md), whose
+#                               node the derived image then depends on
 #   reason = "..."              optional
 #
 #   [[replace]]                 a file the original has; `reason` required
@@ -104,12 +105,12 @@ path = "/system_ext/etc/init/init.system_ext.rc"
 reason = "only reacts to the removed ranchu-adb-setup and qemu-device-state services"
 
 # android.hardware.health: IHealth/default over the Mac's battery. The
-# service is built by tools/build-vendor-hals.sh; its host side is the
+# service is built by the hal/* nodes of `cargo aim`; its host side is the
 # host-call module `health` (docs/host-call.md).
 
 [[add]]
 path = "/vendor/bin/hw/android.hardware.health-service.aim"
-source = "_build/vendor-hals/bin/android.hardware.health-service.aim"
+source = "target/aim/hal/bin/android.hardware.health-service.aim"
 reason = "health HAL service (Rust, AIDL V4) reading the Mac's battery via host-call"
 
 [[add]]
@@ -132,13 +133,13 @@ reason = "IHealth/default is declared by our health HAL's fragment"
 
 # android.hardware.thermal, sensors and gnss (docs/vendor-hals.md): the
 # Mac's thermal state and temperatures, its ambient light sensor and lid
-# angle, and CoreLocation. Built by tools/build-vendor-hals.sh; their host
+# angle, and CoreLocation. Built by the hal/* nodes of `cargo aim`; their host
 # sides are the host-call modules `thermal`, `sensors` and `location`. The
 # power HAL stays the original (the vendor APEX's example service).
 
 [[add]]
 path = "/vendor/bin/hw/android.hardware.thermal-service.aim"
-source = "_build/vendor-hals/bin/android.hardware.thermal-service.aim"
+source = "target/aim/hal/bin/android.hardware.thermal-service.aim"
 reason = "thermal HAL service (Rust, AIDL V3) reporting the Mac's thermal state via host-call"
 
 [[add]]
@@ -157,7 +158,7 @@ reason = "the example thermal HAL reports no temperatures and never throttles; o
 
 [[add]]
 path = "/vendor/bin/hw/android.hardware.sensors-service.aim"
-source = "_build/vendor-hals/bin/android.hardware.sensors-service.aim"
+source = "target/aim/hal/bin/android.hardware.sensors-service.aim"
 reason = "sensors HAL service (Rust, AIDL V3): the Mac's ambient light sensor and lid angle via host-call"
 
 [[add]]
@@ -172,7 +173,7 @@ reason = "declares android.hardware.sensors.ISensors/default V3"
 
 [[add]]
 path = "/vendor/bin/hw/android.hardware.gnss-service.aim"
-source = "_build/vendor-hals/bin/android.hardware.gnss-service.aim"
+source = "target/aim/hal/bin/android.hardware.gnss-service.aim"
 reason = "GNSS HAL service (Rust, AIDL V2) reporting CoreLocation fixes via host-call"
 
 [[add]]
@@ -191,7 +192,7 @@ reason = "declares android.hardware.gnss.IGnss/default V2"
 
 [[add]]
 path = "/vendor/bin/hw/android.hardware.bluetooth-service.aim"
-source = "_build/vendor-hals/bin/android.hardware.bluetooth-service.aim"
+source = "target/aim/hal/bin/android.hardware.bluetooth-service.aim"
 reason = "Bluetooth HAL service (Rust, AIDL V1) passing HCI to the CoreBluetooth virtual controller via host-call"
 
 [[add]]
@@ -209,7 +210,7 @@ reason = "declares android.hardware.bluetooth.IBluetoothHci/default V1"
 # emulator's QEMU cameras, removed below.
 [[add]]
 path = "/vendor/bin/hw/android.hardware.camera.provider-service.aim"
-source = "_build/vendor-hals/bin/android.hardware.camera.provider-service.aim"
+source = "target/aim/hal/bin/android.hardware.camera.provider-service.aim"
 reason = "camera provider HAL service (Rust, AIDL V1) streaming the Mac's cameras through the AVFoundation host module via host-call"
 
 [[add]]
@@ -224,11 +225,11 @@ reason = "declares android.hardware.camera.provider.ICameraProvider/internal/0 V
 
 # Graphics buffers (docs/graphics-buffers.md): IAllocator/default V2 and the
 # stable-C mapper `aim`, memfd-backed buffers the host GPU imports. Built
-# by tools/build-vendor-hals.sh.
+# by the hal/* nodes of `cargo aim`.
 
 [[add]]
 path = "/vendor/bin/hw/android.hardware.graphics.allocator-service.aim"
-source = "_build/vendor-hals/bin/android.hardware.graphics.allocator-service.aim"
+source = "target/aim/hal/bin/android.hardware.graphics.allocator-service.aim"
 reason = "graphics allocator HAL (Rust, AIDL V2): memfd-backed buffers"
 
 [[add]]
@@ -243,7 +244,7 @@ reason = "declares IAllocator/default V2 and the native mapper 5.0 instance aim"
 
 [[add]]
 path = "/vendor/lib64/hw/mapper.aim.so"
-source = "_build/vendor-hals/lib/mapper.aim.so"
+source = "target/aim/hal/lib/mapper.aim.so"
 reason = "stable-C IMapper v5 (Rust) that libui loads for the allocator's suffix"
 
 [[remove]]
@@ -268,7 +269,7 @@ reason = "the emulator's mapper reads goldfish handles; ours is mapper.aim.so"
 
 [[add]]
 path = "/vendor/lib64/egl/libGLES_aim.so"
-source = "_build/vendor-hals/lib/libGLES_aim.so"
+source = "target/aim/hal/lib/libGLES_aim.so"
 reason = "the device's GLES driver: thunks to ANGLE (Metal) on the host"
 
 [[remove]]
@@ -289,7 +290,7 @@ reason = "part of the emulator's GLES driver"
 
 [[add]]
 path = "/vendor/bin/hw/android.hardware.graphics.composer3-service.aim"
-source = "_build/vendor-hals/bin/android.hardware.graphics.composer3-service.aim"
+source = "target/aim/hal/bin/android.hardware.graphics.composer3-service.aim"
 reason = "composer HAL (Rust, AIDL V4): client composition shown in a macOS window via host-call"
 
 [[add]]
@@ -310,7 +311,7 @@ reason = "declares IComposer/default V4"
 
 [[add]]
 path = "/vendor/bin/hw/android.hardware.audio.service-aidl.aim"
-source = "_build/vendor-hals/bin/android.hardware.audio.service-aidl.aim"
+source = "target/aim/hal/bin/android.hardware.audio.service-aidl.aim"
 reason = "audio HAL (Rust, AIDL audio.core V3 and audio.effect V3): streams on CoreAudio via host-call"
 
 [[add]]
@@ -527,45 +528,45 @@ reason = "the example vibrator fakes a motor; the vibrator is undeclared"
 # The ART exception (ADR 0012 decision 4, docs/art-exception-patches.md):
 # macOS maps nothing below 4 GiB, so ART is rebuilt from the pinned sources
 # with base-relative 32-bit heap references (patches/art-android/), by
-# tools/build-art-android.sh. Every library that links libart's C++
+# the art node of `cargo aim`. Every library that links libart's C++
 # internals is replaced as a unit; the ones with C APIs stay original.
 
 [[replace]]
 path = "/apex/com.android.art/lib64/libart.so"
-source = "_build/art-android/stripped/lib64/libart.so"
+source = "target/aim/art/stripped/lib64/libart.so"
 reason = "the ART exception: heap references are offsets in a window above 4 GiB, since macOS maps nothing below"
 
 [[replace]]
 path = "/apex/com.android.art/lib64/libartbase.so"
-source = "_build/art-android/stripped/lib64/libartbase.so"
+source = "target/aim/art/stripped/lib64/libartbase.so"
 reason = "the ART exception: MemMap's low-4 GiB allocator places mappings in the heap reference window"
 
 [[replace]]
 path = "/apex/com.android.art/lib64/libdexfile.so"
-source = "_build/art-android/stripped/lib64/libdexfile.so"
+source = "target/aim/art/stripped/lib64/libdexfile.so"
 reason = "the ART exception: links the C++ internals of the replaced libartbase"
 
 [[replace]]
 path = "/apex/com.android.art/lib64/libprofile.so"
-source = "_build/art-android/stripped/lib64/libprofile.so"
+source = "target/aim/art/stripped/lib64/libprofile.so"
 reason = "the ART exception: links the C++ internals of the replaced libartbase and libdexfile"
 
 [[replace]]
 path = "/apex/com.android.art/lib64/libopenjdkjvm.so"
-source = "_build/art-android/stripped/lib64/libopenjdkjvm.so"
+source = "target/aim/art/stripped/lib64/libopenjdkjvm.so"
 reason = "the ART exception: the JVM_* interface over the replaced libart's C++ internals"
 
 [[replace]]
 path = "/apex/com.android.art/lib64/libadbconnection.so"
-source = "_build/art-android/stripped/lib64/libadbconnection.so"
+source = "target/aim/art/stripped/lib64/libadbconnection.so"
 reason = "the ART exception: the JDWP plugin every zygote runtime loads links the replaced libart's C++ internals"
 
 [[replace]]
 path = "/apex/com.android.art/bin/dex2oat64"
-source = "_build/art-android/stripped/bin/dex2oat64"
+source = "target/aim/art/stripped/bin/dex2oat64"
 reason = "the ART exception: compiles for the replaced libart's reference encoding and Thread layout"
 
-# The boot image, regenerated by tools/build-art-boot-image.sh with the
+# The boot image, regenerated by the boot-image node of `cargo aim` with the
 # rebuilt dex2oat64 on the syscall layer. The original's code and image data
 # hold absolute 32-bit references and the original runtime's Thread layout,
 # so none of its files works with the ART exception. Same boot class path,
@@ -574,250 +575,250 @@ reason = "the ART exception: compiles for the replaced libart's reference encodi
 
 [[replace]]
 path = "/system/framework/arm64/boot-apache-xml.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-apache-xml.art"
+source = "target/aim/boot-image/framework/arm64/boot-apache-xml.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-bouncycastle.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-bouncycastle.art"
+source = "target/aim/boot-image/framework/arm64/boot-bouncycastle.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-core-icu4j.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-core-icu4j.art"
+source = "target/aim/boot-image/framework/arm64/boot-core-icu4j.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-core-libart.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-core-libart.art"
+source = "target/aim/boot-image/framework/arm64/boot-core-libart.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-ext.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-ext.art"
+source = "target/aim/boot-image/framework/arm64/boot-ext.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-framework-adservices.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-framework-adservices.art"
+source = "target/aim/boot-image/framework/arm64/boot-framework-adservices.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-framework-graphics.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-framework-graphics.art"
+source = "target/aim/boot-image/framework/arm64/boot-framework-graphics.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-framework-location.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-framework-location.art"
+source = "target/aim/boot-image/framework/arm64/boot-framework-location.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-framework-ondeviceintelligence-platform.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-framework-ondeviceintelligence-platform.art"
+source = "target/aim/boot-image/framework/arm64/boot-framework-ondeviceintelligence-platform.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-framework.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-framework.art"
+source = "target/aim/boot-image/framework/arm64/boot-framework.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-ims-common.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-ims-common.art"
+source = "target/aim/boot-image/framework/arm64/boot-ims-common.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-okhttp.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-okhttp.art"
+source = "target/aim/boot-image/framework/arm64/boot-okhttp.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-telephony-common.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-telephony-common.art"
+source = "target/aim/boot-image/framework/arm64/boot-telephony-common.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-voip-common.art"
-source = "_build/art-android/boot-image/framework/arm64/boot-voip-common.art"
+source = "target/aim/boot-image/framework/arm64/boot-voip-common.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot.art"
-source = "_build/art-android/boot-image/framework/arm64/boot.art"
+source = "target/aim/boot-image/framework/arm64/boot.art"
 reason = "the ART exception's boot image (image), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-apache-xml.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-apache-xml.oat"
+source = "target/aim/boot-image/framework/arm64/boot-apache-xml.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-bouncycastle.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-bouncycastle.oat"
+source = "target/aim/boot-image/framework/arm64/boot-bouncycastle.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-core-icu4j.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-core-icu4j.oat"
+source = "target/aim/boot-image/framework/arm64/boot-core-icu4j.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-core-libart.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-core-libart.oat"
+source = "target/aim/boot-image/framework/arm64/boot-core-libart.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-ext.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-ext.oat"
+source = "target/aim/boot-image/framework/arm64/boot-ext.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-framework-adservices.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-framework-adservices.oat"
+source = "target/aim/boot-image/framework/arm64/boot-framework-adservices.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-framework-graphics.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-framework-graphics.oat"
+source = "target/aim/boot-image/framework/arm64/boot-framework-graphics.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-framework-location.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-framework-location.oat"
+source = "target/aim/boot-image/framework/arm64/boot-framework-location.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-framework-ondeviceintelligence-platform.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-framework-ondeviceintelligence-platform.oat"
+source = "target/aim/boot-image/framework/arm64/boot-framework-ondeviceintelligence-platform.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-framework.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-framework.oat"
+source = "target/aim/boot-image/framework/arm64/boot-framework.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-ims-common.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-ims-common.oat"
+source = "target/aim/boot-image/framework/arm64/boot-ims-common.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-okhttp.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-okhttp.oat"
+source = "target/aim/boot-image/framework/arm64/boot-okhttp.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-telephony-common.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-telephony-common.oat"
+source = "target/aim/boot-image/framework/arm64/boot-telephony-common.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot-voip-common.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot-voip-common.oat"
+source = "target/aim/boot-image/framework/arm64/boot-voip-common.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/arm64/boot.oat"
-source = "_build/art-android/boot-image/framework/arm64/boot.oat"
+source = "target/aim/boot-image/framework/arm64/boot.oat"
 reason = "the ART exception's boot image (code), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-apache-xml.vdex"
-source = "_build/art-android/boot-image/framework/boot-apache-xml.vdex"
+source = "target/aim/boot-image/framework/boot-apache-xml.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-bouncycastle.vdex"
-source = "_build/art-android/boot-image/framework/boot-bouncycastle.vdex"
+source = "target/aim/boot-image/framework/boot-bouncycastle.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-core-icu4j.vdex"
-source = "_build/art-android/boot-image/framework/boot-core-icu4j.vdex"
+source = "target/aim/boot-image/framework/boot-core-icu4j.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-core-libart.vdex"
-source = "_build/art-android/boot-image/framework/boot-core-libart.vdex"
+source = "target/aim/boot-image/framework/boot-core-libart.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-ext.vdex"
-source = "_build/art-android/boot-image/framework/boot-ext.vdex"
+source = "target/aim/boot-image/framework/boot-ext.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-framework-adservices.vdex"
-source = "_build/art-android/boot-image/framework/boot-framework-adservices.vdex"
+source = "target/aim/boot-image/framework/boot-framework-adservices.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-framework-graphics.vdex"
-source = "_build/art-android/boot-image/framework/boot-framework-graphics.vdex"
+source = "target/aim/boot-image/framework/boot-framework-graphics.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-framework-location.vdex"
-source = "_build/art-android/boot-image/framework/boot-framework-location.vdex"
+source = "target/aim/boot-image/framework/boot-framework-location.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-framework-ondeviceintelligence-platform.vdex"
-source = "_build/art-android/boot-image/framework/boot-framework-ondeviceintelligence-platform.vdex"
+source = "target/aim/boot-image/framework/boot-framework-ondeviceintelligence-platform.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-framework.vdex"
-source = "_build/art-android/boot-image/framework/boot-framework.vdex"
+source = "target/aim/boot-image/framework/boot-framework.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-ims-common.vdex"
-source = "_build/art-android/boot-image/framework/boot-ims-common.vdex"
+source = "target/aim/boot-image/framework/boot-ims-common.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-okhttp.vdex"
-source = "_build/art-android/boot-image/framework/boot-okhttp.vdex"
+source = "target/aim/boot-image/framework/boot-okhttp.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-telephony-common.vdex"
-source = "_build/art-android/boot-image/framework/boot-telephony-common.vdex"
+source = "target/aim/boot-image/framework/boot-telephony-common.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot-voip-common.vdex"
-source = "_build/art-android/boot-image/framework/boot-voip-common.vdex"
+source = "target/aim/boot-image/framework/boot-voip-common.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 [[replace]]
 path = "/system/framework/boot.vdex"
-source = "_build/art-android/boot-image/framework/boot.vdex"
+source = "target/aim/boot-image/framework/boot.vdex"
 reason = "the ART exception's boot image (verification data), regenerated for base-relative references"
 
 # Replaced native daemons (ADR 0012 appendix): Rust programs that serve the
 # platform's own binder interfaces in place of daemons bound to Linux kernel
-# features, built by tools/build-daemons.sh from daemons/. The original init
-# .rc files still start them.
+# features, built by the daemon/* nodes of `cargo aim` from daemons/. The
+# original init .rc files still start them.
 
 [[replace]]
 path = "/system/bin/apexd"
-source = "_build/daemons/bin/apexd"
+source = "target/aim/daemons/bin/apexd"
 reason = "APEXes are pre-flattened into the derived image (no loop devices or dm-verity); this apexd only serves apexservice from the APEX info list"
 
 [[replace]]
 path = "/system/bin/vold"
-source = "_build/daemons/bin/vold"
+source = "target/aim/daemons/bin/vold"
 reason = "vold drives block devices, dm-crypt, fscrypt and mounts; /data is a host directory, so this IVold prepares user storage as directories and links the emulated volume to /data/media"
 
 [[replace]]
 path = "/system/bin/netd"
-source = "_build/daemons/bin/netd"
+source = "target/aim/daemons/bin/netd"
 reason = "netd drives netlink, iptables, policy routing and eBPF; guest sockets are host sockets, so this INetd keeps the network bookkeeping, answers fwmarkd and hosts the original DnsResolver"
 
 [[replace]]
 path = "/system/bin/lmkd"
-source = "_build/daemons/bin/lmkd"
+source = "target/aim/daemons/bin/lmkd"
 reason = "lmkd kills by PSI and memcg pressure, which Darwin does not report; this lmkd answers the control socket ActivityManager waits on, and kills nothing (#222)"

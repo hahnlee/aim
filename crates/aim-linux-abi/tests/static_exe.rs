@@ -13,19 +13,13 @@ use std::process::Command;
 
 /// The pinned NDK's clang for the guest (arm64 Android), if installed.
 fn ndk_clang() -> Option<PathBuf> {
-    let sdk = std::env::var_os("ANDROID_SDK_ROOT")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join("Library/Android/sdk")))?;
-    let clang = sdk.join(
-        "ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android35-clang",
-    );
-    clang.exists().then_some(clang)
+    aim_paths::ndk_clang(35)
 }
 
 #[test]
 fn static_executable_sets_up_tls_and_page_size() {
     let Some(clang) = ndk_clang() else {
-        eprintln!("skipped: the pinned NDK (r28c) is not installed");
+        aim_paths::skip("the pinned NDK is not installed");
         return;
     };
     let root =

@@ -1,4 +1,5 @@
-# Applied in order with patch -p1 to the pinned ART sources (tools/build-art-android.sh).
+# Applied in order with patch -p1 to the pinned ART sources (the art node of
+# `cargo aim`, docs/build.md).
 0001-heap-reference-window.patch
 0002-runtime-heap-reference-encoding.patch
 0003-image-logical-addresses.patch

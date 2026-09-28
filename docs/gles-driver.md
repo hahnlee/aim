@@ -31,10 +31,13 @@ namespace. One library serves EGL, GLES 1 and GLES 2/3.
   (`libEGL.dylib`, `libGLESv2.dylib`; the pinned build is
   `_build/angle-source/out/AimRelease`, Metal backend only). Without
   it, `eglGetDisplay` fails and GL calls do nothing.
-- The ANGLE pin is `37c976ffba9d2940add977cad9945b23de14c150`, a checkout
-  of `chromium.googlesource.com/angle/angle` (with `gclient sync`) in
+- The ANGLE pin is `37c976ffba9d2940add977cad9945b23de14c150`
+  (`upstream/angle.lock`), a checkout of
+  `chromium.googlesource.com/angle/angle` (with `gclient sync`) in
   `_build/angle-source`, built with `gn gen out/AimRelease` and these
-  `args.gn`, then `ninja -C out/AimRelease libEGL libGLESv2`:
+  `args.gn` (`upstream/angle-args.gn`), then `ninja -C out/AimRelease
+  libEGL libGLESv2`. The `angle` node of `cargo aim` does all of this
+  ([build.md](build.md), "ANGLE"):
 
   ```
   is_debug = false

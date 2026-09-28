@@ -1,6 +1,62 @@
-# Sources for the android-arm64 ART build (tools/build-art-android.sh).
-# Every AOSP input is fetched at this tag, the image's own.
-ART_ANDROID_TAG=android-16.0.0_r1
+# Sources of the ART exception build (the `art` node of `cargo aim`,
+# docs/build.md). Every AOSP input is fetched at AOSP_TAG, the image's own,
+# into _build/aosp and checked like hal/sources.lock: a tree against the
+# sha256 over the `shasum -a 256` lines of its files, sorted by path; a file
+# against its sha256. The `platform/art` entries are staged with the series.
+AOSP_TAG=android-16.0.0_r1
+
+# project|subtree|content sha256[|revision]
 # Gitiles answers 503 for external/lzma at the tag's name, so that one
 # project is fetched by the same tag's object id.
-LZMA_REVISION=c30edc9a7147f4f4829ed9848e2479f3061d46bb
+SOURCE_TREES=(
+  "platform/art|adbconnection|1c4d1aae9680f88c70cccb6a2ef2e901984d86aed5cbee2eef3093d813d9e81f"
+  "platform/art|build|b03c2cb4bb0d3de6e76f5aae97992b5580b6945d403471889e435a7b8352ebf6"
+  "platform/art|cmdline|be580130f25e08a0893168ea6d52291d3378a4e45feb0c192792767f8bb734da"
+  "platform/art|compiler|1186dbf538c57d6d7abef732d662443ad2cb5a2ba66dfd3ab0ff54b22ec9f54a"
+  "platform/art|dex2oat|309840932dd373efd222ebf2cee5fff3ea756da4736787729e50a271a1ccfced"
+  "platform/art|disassembler|49fdacc56ec3ff5343a2fc7a5e8137379be45807da668c6c02fcb45b2448ad8c"
+  "platform/art|dt_fd_forward/export|9b0a288544b9427d4844bdaf1d8c6c88595559a8a49f7c3b4383d8ad1501c870"
+  "platform/art|libartbase|710ab725729e61de82801dd15b177d98d01c4a2fd4fea97bf9cdc30245634850"
+  "platform/art|libartpalette|0f7651241d84b1b8afb8dece42c3ff184c334e3894b45f8bec94274015f3ce37"
+  "platform/art|libdexfile|fa656f0edf31660227bcc21286a7a15906980dae87d1cf34369701eeda753f73"
+  "platform/art|libelffile|9aff6fc6776862d6fb08e298b32cead13ce6de06c909100bfb18d0421eb10fa5"
+  "platform/art|libnativebridge|d67606b1ebde29f08d88fa0472db1698d88804577d90e83795066adab206fde1"
+  "platform/art|libnativeloader|9e1dbb46be0a58874c85ebd55f853f54ced3a5d7febcf60d2cb826f2a333aeb2"
+  "platform/art|libprofile|dedb159c178be2df3f4edcc29fb7b3ee4d3ffc262106c32753f6c31fb2ed6fa2"
+  "platform/art|odrefresh|f3df6988bc671d602809307f57d37b535e7c39c4144e1d08012d6125cf774008"
+  "platform/art|openjdkjvm|9a406a48190957dc9f178fead70a1f3da8c57b7c6034b48b19d97c5292420dde"
+  "platform/art|runtime|16aadf73f21d56c37cdaf73821c70c7d8688cdcf9ed5ec26e805af4e90ba0084"
+  "platform/art|sigchainlib|6cc6ba72651be1a51c44e46303b3bedd47e4506e71395ecb776d9c9f67a0fb3e"
+  "platform/art|tools/cpp-define-generator|1b16436259167776fac99fce5a936f630cadeef48842fd0773e12cef142cae2d"
+  "platform/bionic|libc/async_safe|1d03d5aebedb472ed0f833e5402490e5d4c18b7c25c69f3d2ecb23bbacf3f31c"
+  "platform/bionic|libc/platform|8d4ff21ebedca90f2003dc2858dafdc8a3b95f83919ef68d884922a85c015532"
+  "platform/external/boringssl|src|25ca7c98600d6ac48be50725fbe8d9b320ccaf4245b6763a674aecb5dae5b3a1"
+  "platform/external/cpu_features||6f7921b876df8635b0954474886ab33a9ae990a2c22391433ed03c9ad4467dc0"
+  "platform/external/dlmalloc||08661c68c61d6453911cf275339d73ff46b18b2344929da38c1edb1df9f636ef"
+  "platform/external/fmtlib|include|6ba1918f6de6168f499ec318974e33bda9c4f47fd2d34cf20f4f3ddf68b02222"
+  "platform/external/googletest|googletest/include|2c4b8968286a58e82a73fcb055b9261e9a55bd7020e4d42a31eddcaffb1d5833"
+  "platform/external/libcap||21492cd26b8dedfef622799621d0c9accfef5834461ec9dee58ad076bcebb079"
+  "platform/external/lz4|lib|7e3589004f893754a34956a28f5c3e1d30c3ea271b3cfb41e1055136487280fe"
+  "platform/external/lzma|C|3bed9c69f7de6da65f9a066495c86bf4320161aca459cfe7b80d66b856d2e3f4|c30edc9a7147f4f4829ed9848e2479f3061d46bb"
+  "platform/external/perfetto|src/profiling/memory/include|546f6c35fffa59b3dedd3e705c7e3e643336d159754b50676f650ffd5d5f5326"
+  "platform/external/tinyxml2||055c41a099b697c8d43eb298820a5fb57a5c32893f6d187af61067fd2fd964cd"
+  "platform/external/vixl|src|de15a5c1b0c1b3d3c18c12093782a925fc0551b978df95101794779dc32d85d8"
+  "platform/external/zlib||d86a0fc009b2356fc06453de13a7d8be46d072a279b553f8087ce934c7ee68fc"
+  "platform/frameworks/libs/modules-utils|build|6a7ca1e6edcbe235751e4079d965ad5c22cca231e41f64ab90e1b56806be3770"
+  "platform/libcore|ojluni/src/main/native|6b7af09ee5809837a45191ba71b3cab60d62e650dc53e29d1601cc7a6a60b4aa"
+  "platform/libnativehelper||40e422871ba691af349ed875146b59de836cdf3804ab3b5aec302c58264231f3"
+  "platform/packages/modules/StatsD|lib/libstatspull/include|1e6bbce5b52c697c8ba2c5c262633f5e6f0943bff5502bcccbd82d11bad8613d"
+  "platform/packages/modules/StatsD|lib/libstatssocket/include|898bceef38937ea05b12db75b11c922b01776b6bd70a5ca08a8c1a3fc669e0ea"
+  "platform/packages/modules/adb|libs/adbconnection/include|bc3237eb60d8ca7870709af60ccbd34eaef6d9ae9ae132291fe22709a4a51e15"
+  "platform/system/core|libcutils/include|07e76c1347917d630744a1577fca78ea70183d46009a1940e0844a6479749f68"
+  "platform/system/libbase|include|93a93dbd3bb6db2d4057d72767289bf4c53da0d0f20d83f6425e242f7c7f0fd0"
+  "platform/system/libziparchive||7532828292fb5b13562c5c2dd788369c89cdb1fa3004847acbda3bd595108c90"
+  "platform/system/logging|liblog/include|f531d8ab5cc6a4b00ade83ed16c0dca08f4520f7bf829523d88cd8cd988200f6"
+  "platform/system/unwinding|libunwindstack/include|9e594d95a135c570e568885bdbf846af897a27fc1226b33dd630eed7ba31a247"
+)
+
+# project|path|sha256: single files.
+SOURCE_FILES=(
+  "platform/art|tools/generate_operator_out.py|ea13bd12b99a6dee5d50d1a7c8151f7ab0332a8a1e58c25647df9aeb0fd7c871"
+  "platform/system/apex|apexd/ApexInfoList.xsd|d02e30bc40b826186800d12ba2345171c97573417751c87bc87e2b868a8883fc"
+)

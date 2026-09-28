@@ -38,8 +38,9 @@ facts instead of appending a log.
 - Never circumvent Play Integrity or DRM, and never spoof real device
   identities.
 - Kill only processes you started, by pid, and leave none behind.
-- Never commit an absolute user path (`/Users/...`); tests locate `_build`
-  relative to `CARGO_MANIFEST_DIR`, scripts relative to the repository root.
+- Never commit an absolute user path (`/Users/...`); tests locate their
+  inputs with `aim_paths` (docs/build.md), scripts relative to the
+  repository root.
 
 ## Work tracking
 

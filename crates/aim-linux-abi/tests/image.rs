@@ -8,22 +8,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// The extracted pinned image (`tools/android-image-extract`).
-const IMAGE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/android16-image-full"
-);
 const LINKER: &str = "/apex/com.android.runtime/bin/linker64";
 const LINKERCONFIG: &str = "/apex/com.android.runtime/bin/linkerconfig";
 
-fn root() -> Option<&'static Path> {
-    let p = Path::new(IMAGE);
-    if p.join(LINKER.trim_start_matches('/')).exists() {
-        Some(p)
-    } else {
-        eprintln!("skipped: extracted image not found at {IMAGE}");
-        None
-    }
+/// The extracted pinned image (the `image` node of `cargo aim`).
+fn root() -> Option<PathBuf> {
+    aim_paths::original_image_with(LINKER.trim_start_matches('/'))
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -82,7 +72,7 @@ fn check_linker_and_linkerconfig(cache: &Path, root: &Path) {
 
 #[test]
 fn linker64_runs_with_load_time_rewriting_and_from_the_cache() {
-    let Some(root) = root() else { return };
+    let Some(ref root) = root() else { return };
     // Empty cache: every file is rewritten at load time.
     let empty = scratch("empty-cache");
     check_linker_and_linkerconfig(&empty, root);
@@ -234,7 +224,7 @@ impl Drop for Kill {
 /// both is the same file, vnode and VM object, mapped shared.
 #[test]
 fn translated_text_pages_are_shared_across_processes() {
-    let Some(src) = root() else { return };
+    let Some(ref src) = root() else { return };
     let root = scratch("share-root");
     for g in [
         LINKER,

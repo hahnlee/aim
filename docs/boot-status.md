@@ -8,9 +8,7 @@ from.
 ## How to reproduce
 
 ```
-tools/build-vendor-hals.sh
-android-image assemble --original <extracted image> --manifest image/overlay.toml --out <derived>
-linux-translate <derived>
+cargo aim build        # <derived> is target/aim/derived-image
 guest-init --image <derived> --data <data> --run \
     --exclude zygote,surfaceflinger,vold,bpfloader --timeout 45
 ```
@@ -149,7 +147,7 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
 
 The original zygote and system_server on the ART exception, on an M2 Pro.
 `guest-init --run` with the derived image of `image/overlay.toml`: our Rust
-apexd, vold, netd and lmkd (`daemons/`, `tools/build-daemons.sh`) replace
+apexd, vold, netd and lmkd (`daemons/`, the `daemon/*` nodes) replace
 the originals (lmkd since the second part below; it kills nothing, #222).
 
 - **zygote** preloads 18,367 classes in 0.31 s and forks system_server
@@ -225,6 +223,8 @@ aim-display --socket DISPLAY --size 1080x1920 &
 guest-init --image DERIVED --data DATA --run --exclude bootanim \
     --gpu _build/angle-source/out/AimRelease --display DISPLAY
 ```
+
+`cargo aim boot` runs these two with these flags.
 
 | Since guest-init started | s |
 | --- | --- |

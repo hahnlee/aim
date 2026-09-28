@@ -1,0 +1,9 @@
+[package]
+license.workspace = true
+name = "aim-paths"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The layout of `cargo aim`'s inputs and outputs (docs/build.md), for the build, build scripts and tests"
+
+[dependencies]

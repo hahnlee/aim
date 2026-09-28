@@ -12,7 +12,7 @@ program = "netd"
 
 [dependencies]
 android_net_netd = { path = "../aidl/android_net_netd" }
-binder.workspace = true
+binder = { workspace = true, features = ["system"] }
 daemon-log.workspace = true
-libc = "0.2"
+libc.workspace = true
 log.workspace = true

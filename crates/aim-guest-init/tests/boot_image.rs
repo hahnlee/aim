@@ -1,6 +1,5 @@
 //! Dry-run boots: the upstream fixture image always, and the derived image
-//! of the full pinned Android 16 image when that has been extracted and the
-//! overlay's sources are built (tools/build-vendor-hals.sh) on this machine.
+//! of the full pinned Android 16 image when `cargo aim build` has built it.
 
 mod common;
 
@@ -11,24 +10,9 @@ use aim_android_init::rc::read_apex_info_list;
 use aim_guest_init::fsops::Effect;
 use aim_guest_init::{Boot, BootOptions, BootReport, RunMode};
 
-const REAL_IMAGE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../_build/android16-image-full"
-);
-
-/// The derived image of `image/overlay.toml`, assembled (APFS clones) once
-/// per overlay identity, or why it cannot be.
-fn derived_image() -> Result<PathBuf, String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let original = Path::new(REAL_IMAGE)
-        .canonicalize()
-        .map_err(|e| format!("{REAL_IMAGE}: {e}"))?;
-    let (_, plan) = aim_android_image::load(&root.join("image/overlay.toml"), &original, &root)
-        .map_err(|problems| format!("{problems:?}"))?;
-    let identity = aim_android_image::identity::compute("boot-test-original", &plan);
-    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("boot-derived-image");
-    aim_android_image::assemble(&plan, &original, &identity, &out)?;
-    Ok(out)
+/// The derived image of `image/overlay.toml` (`cargo aim build derived-image`).
+fn derived_image() -> Option<PathBuf> {
+    aim_paths::input(aim_paths::derived_image(), "derived-image")
 }
 
 fn launched_pid(report: &BootReport, service: &str) -> Option<u32> {
@@ -132,20 +116,7 @@ fn excluded_services_are_not_started() {
 /// The full boot of the derived image as a dry run. Prints the statistics.
 #[test]
 fn real_image_dry_run_boot() {
-    if !Path::new(REAL_IMAGE)
-        .join("system/etc/init/hw/init.rc")
-        .exists()
-    {
-        eprintln!("{REAL_IMAGE} not extracted on this machine; skipping");
-        return;
-    }
-    let image = match derived_image() {
-        Ok(image) => image,
-        Err(error) => {
-            eprintln!("derived image unavailable ({error}); skipping");
-            return;
-        }
-    };
+    let Some(image) = derived_image() else { return };
     let root = common::temp_dir("boot-real");
     let mut boot =
         Boot::prepare(BootOptions::new(image, root.join("data"), RunMode::DryRun)).unwrap();
