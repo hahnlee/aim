@@ -1,13 +1,13 @@
 //! `netd` of the derived image (ADR 0012 appendix, "Replaced native
-//! daemons"): INetd (netd_aidl_interface V17) without netlink, iptables,
-//! policy routing or eBPF, which the original drives.
+//! daemons"; docs/network.md): INetd (netd_aidl_interface V17) without
+//! iptables, policy routing or eBPF, which the original drives.
 //!
 //! - Guest sockets are host sockets: the host's networking carries them,
 //!   so the network, route, firewall, bandwidth and traffic-accounting
 //!   calls are bookkeeping that succeeds (`networks`).
-//! - The only interface is the loopback. A network backed by the Mac's
-//!   connection (which ConnectivityService would see through a transport)
-//!   is not provided yet.
+//! - Interfaces are the kernel's (`lo`, and `eth0` for the Mac's network):
+//!   their addresses, flags and MTU are set and read through the socket
+//!   ioctls and rtnetlink, as the original does (`interfaces`).
 //! - Tethering offload, clatd, IPsec and XFRM need kernel features the host
 //!   does not expose to the guest and fail with UNSUPPORTED_OPERATION.
 //! - netd hosts the original DnsResolver (`resolv`), which serves
@@ -15,6 +15,7 @@
 //!   (`fwmark`), which libnetd_client in every process talks to.
 
 mod fwmark;
+mod interfaces;
 mod networks;
 mod resolv;
 
@@ -39,7 +40,6 @@ use binder::{
 };
 
 const SERVICE: &str = "netd";
-const LOOPBACK: &str = "lo";
 
 #[derive(Default)]
 struct Netd {
@@ -51,6 +51,16 @@ fn unsupported<T>(what: &str) -> binder::Result<T> {
         ExceptionCode::UNSUPPORTED_OPERATION,
         Some(format!("{what}: no such kernel feature on this device")),
     ))
+}
+
+/// A failed kernel call, as the original's ServiceSpecificException.
+fn kernel<T>(r: Result<T, interfaces::Errno>) -> binder::Result<T> {
+    r.map_err(|e| {
+        Status::new_service_specific_error_str(
+            e,
+            Some(std::io::Error::from_raw_os_error(e).to_string()),
+        )
+    })
 }
 
 fn no_interface<T>(name: &str) -> binder::Result<T> {
@@ -150,11 +160,11 @@ impl INetd::INetd for Netd {
     fn tetherGetStats(&self) -> binder::Result<Vec<TetherStatsParcel>> {
         Ok(Vec::new())
     }
-    fn interfaceAddAddress(&self, ifname: &str, _: &str, _: i32) -> binder::Result<()> {
-        no_interface(ifname)
+    fn interfaceAddAddress(&self, ifname: &str, addr: &str, prefix: i32) -> binder::Result<()> {
+        kernel(interfaces::address(ifname, addr, prefix, true))
     }
-    fn interfaceDelAddress(&self, ifname: &str, _: &str, _: i32) -> binder::Result<()> {
-        no_interface(ifname)
+    fn interfaceDelAddress(&self, ifname: &str, addr: &str, prefix: i32) -> binder::Result<()> {
+        kernel(interfaces::address(ifname, addr, prefix, false))
     }
     fn getProcSysNet(
         &self,
@@ -533,46 +543,25 @@ impl INetd::INetd for Netd {
         Ok(())
     }
     fn interfaceGetList(&self) -> binder::Result<Vec<String>> {
-        Ok(vec![LOOPBACK.to_string()])
+        Ok(interfaces::list())
     }
     fn interfaceGetCfg(&self, ifname: &str) -> binder::Result<InterfaceConfigurationParcel> {
-        if ifname != LOOPBACK {
-            return no_interface(ifname);
-        }
-        Ok(InterfaceConfigurationParcel {
-            ifName: LOOPBACK.into(),
-            hwAddr: "00:00:00:00:00:00".into(),
-            ipv4Addr: "127.0.0.1".into(),
-            prefixLength: 8,
-            flags: [
-                INetd::IF_STATE_UP,
-                INetd::IF_FLAG_LOOPBACK,
-                INetd::IF_FLAG_RUNNING,
-            ]
-            .map(String::from)
-            .into(),
-        })
+        kernel(interfaces::get_cfg(ifname))
     }
     fn interfaceSetCfg(&self, cfg: &InterfaceConfigurationParcel) -> binder::Result<()> {
-        if cfg.ifName != LOOPBACK {
-            return no_interface(&cfg.ifName);
-        }
-        Ok(())
+        kernel(interfaces::set_cfg(cfg))
     }
     fn interfaceSetIPv6PrivacyExtensions(&self, _: &str, _: bool) -> binder::Result<()> {
         Ok(())
     }
-    fn interfaceClearAddrs(&self, _: &str) -> binder::Result<()> {
-        Ok(())
+    fn interfaceClearAddrs(&self, ifname: &str) -> binder::Result<()> {
+        kernel(interfaces::clear(ifname))
     }
     fn interfaceSetEnableIPv6(&self, _: &str, _: bool) -> binder::Result<()> {
         Ok(())
     }
-    fn interfaceSetMtu(&self, ifname: &str, _: i32) -> binder::Result<()> {
-        if ifname != LOOPBACK {
-            return no_interface(ifname);
-        }
-        Ok(())
+    fn interfaceSetMtu(&self, ifname: &str, mtu: i32) -> binder::Result<()> {
+        kernel(interfaces::set_mtu(ifname, mtu))
     }
     fn tetherAddForward(&self, _: &str, _: &str) -> binder::Result<()> {
         unsupported("tetherAddForward")

@@ -1066,6 +1066,9 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
     if let Some(r) = super::evdev::ioctl(fd, req, arg) {
         return r;
     }
+    if let Some(r) = super::netif::ioctl(fd, req, arg) {
+        return r;
+    }
     // SAFETY: isatty/ioctl on a guest fd with guest argument buffers.
     unsafe {
         let tty = libc::isatty(fd) == 1;

@@ -1,6 +1,6 @@
 //! Sockets: AF_UNIX with Linux semantics on Darwin, AF_INET/AF_INET6
-//! passed through with address and option translation. AF_NETLINK and
-//! AF_PACKET are EAFNOSUPPORT.
+//! passed through with address and option translation, NETLINK_ROUTE
+//! (`netlink`) and AF_PACKET (`packet`) on the kernel's devices (`netif`).
 //!
 //! - **SEQPACKET** (Darwin has none for AF_UNIX) is a stream socket carrying
 //!   frames: a 16-byte header (length, sender pid, uid, gid) and the
@@ -22,6 +22,11 @@
 //! - **Recognition across processes:** SEQPACKET and datagram sockets carry
 //!   a marker (the SO_LINGER time, unused while lingering is off); sockets
 //!   guest-init created are listed in `<runtime>/sockets`.
+//! - **Options Darwin has no place for:** an AF_INET/AF_INET6 socket given
+//!   SO_MARK or SO_BINDTODEVICE gets an entry holding them
+//!   (`Family::Inet`); SO_BINDTODEVICE also binds the host socket to the
+//!   host interface behind the device (`IP_BOUND_IF`). A datagram socket
+//!   connected to port 0 is connected to the discard port on the host.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -75,9 +80,29 @@ pub enum SockType {
     SeqPacket,
 }
 
-/// An AF_UNIX socket's Linux state.
+/// What kind of socket a [`Sock`] is.
+pub enum Family {
+    Unix,
+    Inet(InetOpts),
+    Netlink(super::netlink::Socket),
+    Packet(Arc<super::packet::Socket>),
+}
+
+/// SO_MARK and SO_BINDTODEVICE of an AF_INET/AF_INET6 socket, whether it
+/// is connected to port 0 (`datagram_to_port_zero`), and whether it is an
+/// IPv4 ping socket (`recv_ping`).
+#[derive(Default)]
+pub struct InetOpts {
+    mark: std::sync::atomic::AtomicU32,
+    device: Mutex<String>,
+    port_zero: AtomicBool,
+    icmp4: AtomicBool,
+}
+
+/// A socket's Linux state: an AF_UNIX socket's, or another family's.
 pub struct Sock {
     pub ty: SockType,
+    pub family: Family,
     /// SO_PASSCRED: attach SCM_CREDENTIALS to received messages.
     passcred: AtomicBool,
     /// Serializes framed receives, so one message is read whole.
@@ -89,8 +114,13 @@ pub struct Sock {
 
 impl Sock {
     fn new(ty: SockType) -> Arc<Sock> {
+        Sock::of(ty, Family::Unix)
+    }
+
+    fn of(ty: SockType, family: Family) -> Arc<Sock> {
         Arc::new(Sock {
             ty,
+            family,
             passcred: AtomicBool::new(false),
             recv: Mutex::new(()),
             local: Mutex::new(None),
@@ -109,6 +139,24 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
     w.bool(s.passcred.load(std::sync::atomic::Ordering::Relaxed));
     w.opt(s.local.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     w.opt(s.peer.lock().unwrap().as_deref(), |w, a| w.bytes(a));
+    match &s.family {
+        Family::Unix => w.u32(0),
+        Family::Inet(o) => {
+            w.u32(1);
+            w.u32(o.mark.load(Ordering::Relaxed));
+            w.bytes(o.device.lock().unwrap().as_bytes());
+            w.bool(o.port_zero.load(Ordering::Relaxed));
+            w.bool(o.icmp4.load(Ordering::Relaxed));
+        }
+        Family::Netlink(n) => {
+            w.u32(2);
+            n.save(w);
+        }
+        Family::Packet(p) => {
+            w.u32(3);
+            p.save(w);
+        }
+    }
 }
 
 pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
@@ -117,17 +165,41 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
         1 => SockType::Dgram,
         _ => SockType::SeqPacket,
     };
-    let s = Sock::new(ty);
-    s.passcred
-        .store(r.bool(), std::sync::atomic::Ordering::Relaxed);
-    *s.local.lock().unwrap() = r.opt(|r| r.bytes());
-    *s.peer.lock().unwrap() = r.opt(|r| r.bytes());
+    let passcred = r.bool();
+    let local = r.opt(|r| r.bytes());
+    let peer = r.opt(|r| r.bytes());
+    let family = match r.u32() {
+        1 => {
+            let o = InetOpts::default();
+            o.mark.store(r.u32(), Ordering::Relaxed);
+            *o.device.lock().unwrap() = String::from_utf8_lossy(&r.bytes()).into_owned();
+            o.port_zero.store(r.bool(), Ordering::Relaxed);
+            o.icmp4.store(r.bool(), Ordering::Relaxed);
+            Family::Inet(o)
+        }
+        2 => Family::Netlink(super::netlink::Socket::load(r)),
+        3 => Family::Packet(super::packet::Socket::load(r)),
+        _ => Family::Unix,
+    };
+    let s = Sock::of(ty, family);
+    s.passcred.store(passcred, Ordering::Relaxed);
+    *s.local.lock().unwrap() = local;
+    *s.peer.lock().unwrap() = peer;
     s
 }
 
-fn sock(fd: i32) -> Option<Arc<Sock>> {
+/// The socket's Linux state, of any family.
+fn any_sock(fd: i32) -> Option<Arc<Sock>> {
     match fdtab::get(fd) {
         Some(Kind::Sock(s)) => Some(s),
+        _ => None,
+    }
+}
+
+/// An AF_UNIX socket's Linux state.
+fn sock(fd: i32) -> Option<Arc<Sock>> {
+    match fdtab::get(fd) {
+        Some(Kind::Sock(s)) if matches!(s.family, Family::Unix) => Some(s),
         _ => None,
     }
 }
@@ -224,6 +296,13 @@ pub fn adopt(fd: i32) {
     {
         return;
     }
+    if let Some(n) = netlink_of_host(&sa) {
+        fdtab::insert(
+            fd,
+            Kind::Sock(Sock::of(SockType::Dgram, Family::Netlink(n))),
+        );
+        return;
+    }
     let mut l = libc::linger {
         l_onoff: 0,
         l_linger: 0,
@@ -259,6 +338,21 @@ pub fn adopt(fd: i32) {
     s.passcred.store(passcred, Ordering::Relaxed);
     *s.local.lock().unwrap() = local;
     fdtab::insert(fd, Kind::Sock(s));
+}
+
+/// A netlink socket's state from its host name: a name in the netlink
+/// directory (or its last component, when it was bound relative to it).
+fn netlink_of_host(sa: &libc::sockaddr_storage) -> Option<super::netlink::Socket> {
+    // SAFETY: an AF_UNIX address.
+    let sun = unsafe { &*(sa as *const libc::sockaddr_storage as *const libc::sockaddr_un) };
+    let path: Vec<u8> = sun
+        .sun_path
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    let path = Path::new(std::ffi::OsStr::from_bytes(&path));
+    super::netlink::adopt(path.file_name()?)
 }
 
 // ---- credentials ---------------------------------------------------------
@@ -323,7 +417,7 @@ unsafe extern "C" {
 }
 
 /// Where an address points on the host.
-enum Target {
+pub(super) enum Target {
     /// A ready Darwin sockaddr.
     Host(Vec<u8>),
     /// An AF_UNIX name relative to a directory.
@@ -341,7 +435,7 @@ fn sun(name: &[u8]) -> Vec<u8> {
 }
 
 /// Run `f` with the host sockaddr of `t`.
-fn with_target(t: &Target, f: impl FnOnce(*const libc::sockaddr, u32) -> i64) -> i64 {
+pub(super) fn with_target(t: &Target, f: impl FnOnce(*const libc::sockaddr, u32) -> i64) -> i64 {
     match t {
         Target::Host(sa) => f(sa.as_ptr().cast(), sa.len() as u32),
         Target::Unnamed => -(EINVAL as i64),
@@ -433,7 +527,7 @@ fn unescape(name: &[u8]) -> Vec<u8> {
     out
 }
 
-fn host_target_of_path(host: &Path) -> Target {
+pub(super) fn host_target_of_path(host: &Path) -> Target {
     let bytes = host.as_os_str().as_bytes();
     if bytes.len() < 104 {
         return Target::Host(sun(bytes));
@@ -445,6 +539,27 @@ fn host_target_of_path(host: &Path) -> Target {
             .map(|n| n.as_bytes().to_vec())
             .unwrap_or_default(),
     }
+}
+
+/// Whether `addr` is an AF_INET6 address for an AF_INET socket, which
+/// Linux refuses with EAFNOSUPPORT (Darwin: EINVAL). libcore relies on it:
+/// it tries a v4-mapped IPv6 address first and falls back to AF_INET on
+/// that errno.
+fn family_mismatch(fd: i32, addr: &[u8]) -> bool {
+    if addr.len() < 2 || u16::from_le_bytes([addr[0], addr[1]]) != L_AF_INET6 {
+        return false;
+    }
+    let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as u32;
+    // SAFETY: getsockname into local storage.
+    unsafe {
+        libc::getsockname(
+            fd,
+            (&mut sa as *mut libc::sockaddr_storage).cast(),
+            &mut len,
+        )
+    };
+    sa.ss_family as i32 == libc::AF_INET
 }
 
 /// Translate a guest sockaddr. `bind`: the last path component is not
@@ -591,10 +706,15 @@ fn new_host_socket(domain: i32, ty: i32) -> Result<i32, i64> {
 /// defaults (2 KiB datagrams, 8 KiB streams) are too small for logd.
 const BUFFER: i32 = 212_992;
 
+/// Give a host datagram socket Linux's default buffers.
+pub(super) fn size_buffers(fd: i32) {
+    set_int(fd, libc::SOL_SOCKET, libc::SO_SNDBUF, BUFFER);
+    set_int(fd, libc::SOL_SOCKET, libc::SO_RCVBUF, BUFFER);
+}
+
 fn setup_unix(fd: i32, ty: SockType) {
     if ty != SockType::Stream {
-        set_int(fd, libc::SOL_SOCKET, libc::SO_SNDBUF, BUFFER);
-        set_int(fd, libc::SOL_SOCKET, libc::SO_RCVBUF, BUFFER);
+        size_buffers(fd);
         mark(fd, ty);
     }
 }
@@ -648,6 +768,11 @@ pub fn socket(a: [u64; 6]) -> i64 {
                 return -(errno::last() as i64);
             }
             set_int(fd, libc::SOL_SOCKET, libc::SO_NOSIGPIPE, 1);
+            if d == libc::AF_INET && base == L_SOCK_DGRAM && proto == IPPROTO_ICMP {
+                let o = InetOpts::default();
+                o.icmp4.store(true, Ordering::Relaxed);
+                fdtab::insert(fd, Kind::Sock(Sock::of(SockType::Dgram, Family::Inet(o))));
+            }
             fd
         }
         // PF_KEY: libbpf_android's synchronizeKernelRCU opens and closes
@@ -661,6 +786,28 @@ pub fn socket(a: [u64; 6]) -> i64 {
                 Err(e) => return e,
             };
             fdtab::insert(fd, Kind::Sock(Sock::new(SockType::Dgram)));
+            fd
+        }
+        super::netlink::L_AF_NETLINK => {
+            if base != L_SOCK_RAW && base != L_SOCK_DGRAM {
+                return -94; // ESOCKTNOSUPPORT
+            }
+            let (fd, n) = match super::netlink::socket(base, proto) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            fdtab::insert(
+                fd,
+                Kind::Sock(Sock::of(SockType::Dgram, Family::Netlink(n))),
+            );
+            fd
+        }
+        super::packet::L_AF_PACKET => {
+            let (fd, p) = match super::packet::socket(base, proto) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            fdtab::insert(fd, Kind::Sock(Sock::of(SockType::Dgram, Family::Packet(p))));
             fd
         }
         _ => return -EAFNOSUPPORT,
@@ -711,10 +858,30 @@ pub fn bind(a: [u64; 6]) -> i64 {
     if let Err(e) = is_socket(fd) {
         return e;
     }
+    if let Some(s) = any_sock(fd) {
+        match &s.family {
+            Family::Netlink(n) => {
+                return match super::netlink::parse_sockaddr(a[1], a[2] as u32) {
+                    Ok((portid, groups)) => super::netlink::bind(n, portid, groups),
+                    Err(e) => e,
+                };
+            }
+            Family::Packet(p) => {
+                return match super::packet::parse_sockaddr(a[1], a[2] as u32) {
+                    Ok((proto, ifindex)) => super::packet::bind(p, proto, ifindex),
+                    Err(e) => e,
+                };
+            }
+            Family::Unix | Family::Inet(_) => {}
+        }
+    }
     let (t, name) = match target_of(a[1], a[2] as u32, true) {
         Ok(t) => t,
         Err(e) => return e,
     };
+    if family_mismatch(fd, &name) {
+        return -EAFNOSUPPORT;
+    }
     if matches!(t, Target::Unnamed) {
         // Linux autobind: nothing to do for a Darwin AF_UNIX socket.
         return 0;
@@ -754,10 +921,26 @@ pub fn bind(a: [u64; 6]) -> i64 {
 
 pub fn connect(a: [u64; 6]) -> i64 {
     let fd = a[0] as i32;
-    let (t, name) = match target_of(a[1], a[2] as u32, false) {
+    if let Some(s) = any_sock(fd) {
+        match &s.family {
+            Family::Netlink(_) => {
+                return match super::netlink::parse_sockaddr(a[1], a[2] as u32) {
+                    Ok((portid, _)) => super::netlink::connect(portid),
+                    Err(e) => e,
+                };
+            }
+            Family::Packet(_) => return -EOPNOTSUPP,
+            Family::Unix | Family::Inet(_) => {}
+        }
+    }
+    let (mut t, name) = match target_of(a[1], a[2] as u32, false) {
         Ok(t) => t,
         Err(e) => return e,
     };
+    if family_mismatch(fd, &name) {
+        return -EAFNOSUPPORT;
+    }
+    let zero_port = datagram_to_port_zero(fd, &mut t);
     let mut r = with_target(&t, |sa, len| {
         errno::check(unsafe { libc::connect(fd, sa, len) } as i64)
     });
@@ -770,7 +953,45 @@ pub fn connect(a: [u64; 6]) -> i64 {
     {
         *s.peer.lock().unwrap() = Some(name);
     }
+    if r == 0 {
+        match (any_sock(fd), zero_port) {
+            (Some(s), _) => {
+                if let Family::Inet(o) = &s.family {
+                    o.port_zero.store(zero_port, Ordering::Relaxed);
+                }
+            }
+            (None, true) => {
+                let o = InetOpts::default();
+                o.port_zero.store(true, Ordering::Relaxed);
+                fdtab::insert(fd, Kind::Sock(Sock::of(SockType::Dgram, Family::Inet(o))));
+            }
+            (None, false) => {}
+        }
+    }
     r
+}
+
+/// The discard port, which stands in for port 0 on the host.
+const DISCARD: u16 = 9;
+
+/// Linux connects a datagram socket to port 0 (bionic's and
+/// DnsResolver's "have IPv4/IPv6" probes do, then read the source address
+/// the route chose); Darwin refuses it. The host socket is connected to
+/// the discard port instead, and getpeername reports port 0. Returns
+/// whether `t` was changed.
+fn datagram_to_port_zero(fd: i32, t: &mut Target) -> bool {
+    let Target::Host(sa) = t else {
+        return false;
+    };
+    let inet = sa[1] as i32 == libc::AF_INET || sa[1] as i32 == libc::AF_INET6;
+    if !inet
+        || sa[2..4] != [0, 0]
+        || get_int(fd, libc::SOL_SOCKET, libc::SO_TYPE) != Some(libc::SOCK_DGRAM)
+    {
+        return false;
+    }
+    sa[2..4].copy_from_slice(&DISCARD.to_be_bytes());
+    true
 }
 
 pub fn listen(a: [u64; 6]) -> i64 {
@@ -824,6 +1045,38 @@ pub fn accept4(a: [u64; 6]) -> i64 {
 }
 
 fn name_of(fd: i32, peer: bool, out: u64, outlen: u64) -> i64 {
+    if let Some(s) = any_sock(fd) {
+        let name = match &s.family {
+            Family::Netlink(_) if peer => Some(super::netlink::sockaddr_nl(0, 0)),
+            Family::Netlink(n) => Some(n.local_name()),
+            Family::Packet(_) if peer => return -107, // ENOTCONN
+            Family::Packet(p) => Some(p.local_name()),
+            Family::Inet(o) if peer && o.port_zero.load(Ordering::Relaxed) => {
+                let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+                let mut len = std::mem::size_of::<libc::sockaddr_storage>() as u32;
+                // SAFETY: getpeername into local storage.
+                let r = unsafe {
+                    libc::getpeername(
+                        fd,
+                        (&mut sa as *mut libc::sockaddr_storage).cast(),
+                        &mut len,
+                    )
+                };
+                if r < 0 {
+                    return -(errno::last() as i64);
+                }
+                linux_addr_of_host(&sa, len).map(|mut a| {
+                    a[2..4].fill(0);
+                    a
+                })
+            }
+            Family::Unix | Family::Inet(_) => None,
+        };
+        if let Some(n) = name {
+            put_addr(&n, out, outlen);
+            return 0;
+        }
+    }
     if let Some(s) = sock(fd) {
         let known = if peer { &s.peer } else { &s.local };
         if let Some(n) = known.lock().unwrap().clone() {
@@ -1120,9 +1373,13 @@ fn send(
     ctrl: Option<(u64, usize)>,
     flags: u64,
 ) -> i64 {
+    if let Some(r) = send_other(fd, iov, name) {
+        return r;
+    }
     let s = sock(fd);
     let (target, abstract_target) = match name {
         Some((p, l)) if p != 0 => match target_of(p, l, false) {
+            Ok((_, n)) if family_mismatch(fd, &n) => return -EAFNOSUPPORT,
             Ok((t, n)) => (Some(t), is_abstract(&n)),
             Err(e) => return e,
         },
@@ -1190,6 +1447,122 @@ fn send(
         Some(SockType::Dgram) => (r as usize).saturating_sub(FRAME) as i64,
         _ => r,
     }
+}
+
+/// A send on a netlink or packet socket, which the layer handles. None:
+/// another family.
+fn send_other(fd: i32, iov: &[libc::iovec], name: Option<(u64, u32)>) -> Option<i64> {
+    let s = any_sock(fd)?;
+    let name = name.filter(|n| n.0 != 0);
+    let gather = || -> Vec<u8> {
+        iov.iter()
+            .flat_map(|v| {
+                // SAFETY: the guest's iovec buffers.
+                unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) }
+            })
+            .copied()
+            .collect()
+    };
+    Some(match &s.family {
+        Family::Netlink(n) => {
+            if let Some((p, l)) = name {
+                match super::netlink::parse_sockaddr(p, l) {
+                    Ok((0, _)) => {}
+                    Ok(_) => return Some(-111), // ECONNREFUSED
+                    Err(e) => return Some(e),
+                }
+            }
+            super::netlink::send(n, &gather())
+        }
+        Family::Packet(p) => {
+            let ifindex = match name.map(|(a, l)| super::packet::parse_sockaddr(a, l)) {
+                Some(Ok((_, i))) => i,
+                Some(Err(e)) => return Some(e),
+                None => 0,
+            };
+            super::packet::send(p, &gather(), ifindex)
+        }
+        Family::Unix | Family::Inet(_) => return None,
+    })
+}
+
+/// A receive on a netlink or packet socket. None: another family.
+fn recv_other(fd: i32, iov: &[libc::iovec], flags: u64) -> Option<Result<Received, i64>> {
+    let s = any_sock(fd)?;
+    let hflags = host_recv_flags(flags);
+    Some(match &s.family {
+        Family::Netlink(_) => {
+            let mut v = iov.to_vec();
+            recvmsg_host(fd, &mut v, &mut [], false, hflags).map(|(n, f, ..)| Received {
+                n: n as i64,
+                flags: f,
+                ctrl: Vec::new(),
+                cred: None,
+                name: Some(super::netlink::sockaddr_nl(0, 0)),
+            })
+        }
+        Family::Packet(p) => {
+            let mut buf = vec![0u8; iov_len(iov)];
+            super::packet::recv(p, fd, &mut buf, hflags, flags & L_MSG_TRUNC != 0).map(
+                |(n, truncated, name)| {
+                    let filled = n.min(buf.len());
+                    let mut at = 0;
+                    for v in iov {
+                        let k = v.iov_len.min(filled - at);
+                        // SAFETY: the guest's iovec buffers.
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                buf[at..].as_ptr(),
+                                v.iov_base as *mut u8,
+                                k,
+                            )
+                        };
+                        at += k;
+                    }
+                    Received {
+                        n: n as i64,
+                        flags: if truncated { libc::MSG_TRUNC } else { 0 },
+                        ctrl: Vec::new(),
+                        cred: None,
+                        name: Some(name),
+                    }
+                },
+            )
+        }
+        Family::Inet(o) if o.icmp4.load(Ordering::Relaxed) => recv_ping(fd, iov, hflags, flags),
+        Family::Unix | Family::Inet(_) => return None,
+    })
+}
+
+/// A receive on an IPv4 ping socket (SOCK_DGRAM, IPPROTO_ICMP): Darwin
+/// delivers the IP header too, Linux only the ICMP message.
+fn recv_ping(fd: i32, iov: &[libc::iovec], hflags: i32, flags: u64) -> Result<Received, i64> {
+    let mut pkt = vec![0u8; 65536];
+    let mut v = [libc::iovec {
+        iov_base: pkt.as_mut_ptr().cast(),
+        iov_len: pkt.len(),
+    }];
+    let (n, _, _, name) = recvmsg_host(fd, &mut v, &mut [], true, hflags)?;
+    let ihl = pkt.first().map_or(0, |b| ((b & 0xf) as usize) * 4).min(n);
+    let msg = &pkt[ihl..n];
+    let mut at = 0;
+    for v in iov {
+        let k = v.iov_len.min(msg.len() - at);
+        // SAFETY: the guest's iovec buffers.
+        unsafe { std::ptr::copy_nonoverlapping(msg[at..].as_ptr(), v.iov_base as *mut u8, k) };
+        at += k;
+    }
+    Ok(Received {
+        n: if flags & L_MSG_TRUNC != 0 {
+            msg.len()
+        } else {
+            at
+        } as i64,
+        flags: if at < msg.len() { libc::MSG_TRUNC } else { 0 },
+        ctrl: Vec::new(),
+        cred: None,
+        name,
+    })
 }
 
 /// What one host recvmsg returned: bytes, msg_flags, control length and
@@ -1267,6 +1640,9 @@ fn recv(
     ctrl_cap: usize,
     flags: u64,
 ) -> Result<Received, i64> {
+    if let Some(r) = recv_other(fd, iov, flags) {
+        return r;
+    }
     let s = sock(fd);
     let mut hctrl = vec![0u8; if ctrl_cap > 0 { ctrl_cap + 64 } else { 0 }];
     let hflags = host_recv_flags(flags);
@@ -1592,18 +1968,25 @@ pub fn recvmmsg(a: [u64; 6]) -> i64 {
     n as i64
 }
 
-/// read/readv on an AF_UNIX socket with Linux state.
+/// read/readv on a socket with Linux state (a plain host read for
+/// AF_INET options).
 pub fn read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
-    sock(fd)?;
+    if let Family::Inet(o) = &any_sock(fd)?.family
+        && !o.icmp4.load(Ordering::Relaxed)
+    {
+        return None;
+    }
     Some(match recv(fd, iov, false, 0, 0) {
         Ok(r) => r.n,
         Err(e) => e,
     })
 }
 
-/// write/writev on an AF_UNIX socket with Linux state.
+/// write/writev on a socket with Linux state.
 pub fn write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
-    sock(fd)?;
+    if matches!(any_sock(fd)?.family, Family::Inet(_)) {
+        return None;
+    }
     Some(send(fd, iov, None, None, 0))
 }
 
@@ -1620,6 +2003,10 @@ const L_SO_RCVBUF: u64 = 8;
 const L_SO_KEEPALIVE: u64 = 9;
 const L_SO_OOBINLINE: u64 = 10;
 const L_SO_PRIORITY: u64 = 12;
+const L_SO_BINDTODEVICE: u64 = 25;
+const L_SO_ATTACH_FILTER: u64 = 26;
+const L_SO_DETACH_FILTER: u64 = 27;
+const L_SO_MARK: u64 = 36;
 const L_SO_LINGER: u64 = 13;
 const L_SO_REUSEPORT: u64 = 15;
 const L_SO_PASSCRED: u64 = 16;
@@ -1637,6 +2024,7 @@ const L_SO_RCVTIMEO_NEW: u64 = 66;
 const L_SO_SNDTIMEO_NEW: u64 = 67;
 
 const IPPROTO_IP: u64 = 0;
+const IPPROTO_ICMP: u64 = 1;
 const IPPROTO_TCP: u64 = 6;
 const IPPROTO_IPV6: u64 = 41;
 
@@ -1690,13 +2078,21 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
         }
     };
     if let Some((l, o)) = int_option(level, opt) {
-        let Some(v) = int() else {
+        let Some(mut v) = int() else {
             return -(EINVAL as i64);
         };
+        if l == libc::SOL_SOCKET && (o == libc::SO_RCVBUF || o == libc::SO_SNDBUF) {
+            // Linux raises a small (or zero) size to its minimum (2304
+            // bytes, SOCK_MIN_RCVBUF); Darwin refuses zero.
+            v = v.max(2304);
+        }
         // SAFETY: an int option.
         return errno::check(
             unsafe { libc::setsockopt(fd, l, o, (&v as *const i32).cast(), 4) } as i64,
         );
+    }
+    if let Some(r) = setsockopt_other(fd, level, opt, val, len) {
+        return r;
     }
     match (level, opt) {
         (1, L_SO_PASSCRED) => {
@@ -1759,10 +2155,142 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
     }
 }
 
+/// The AF_INET options, netlink options and packet filters. None: not
+/// one of them.
+fn setsockopt_other(fd: i32, level: u64, opt: u64, val: u64, len: u32) -> Option<i64> {
+    let s = any_sock(fd);
+    let int = || {
+        // SAFETY: a guest int option value.
+        (len >= 4).then(|| unsafe { (val as *const u32).read_unaligned() })
+    };
+    Some(match (level, opt, s.as_deref().map(|s| &s.family)) {
+        (super::netlink::SOL_NETLINK, _, Some(Family::Netlink(n))) => match int() {
+            Some(v) => super::netlink::setsockopt(n, opt, v),
+            None => -(EINVAL as i64),
+        },
+        (1, L_SO_ATTACH_FILTER, Some(Family::Packet(p))) => {
+            super::packet::attach_filter(p, val, len)
+        }
+        (1, L_SO_DETACH_FILTER, Some(Family::Packet(p))) => super::packet::detach_filter(p),
+        (1, L_SO_MARK | L_SO_BINDTODEVICE, None | Some(Family::Inet(_))) => {
+            if let Err(e) = is_socket(fd) {
+                return Some(e);
+            }
+            let s = match s {
+                Some(s) => s,
+                None => {
+                    let s = Sock::of(SockType::Stream, Family::Inet(InetOpts::default()));
+                    fdtab::insert(fd, Kind::Sock(s.clone()));
+                    s
+                }
+            };
+            let Family::Inet(o) = &s.family else {
+                unreachable!()
+            };
+            inet_option(fd, o, opt, val, len)
+        }
+        _ => return None,
+    })
+}
+
+/// SO_MARK (CAP_NET_ADMIN) and SO_BINDTODEVICE on an AF_INET/AF_INET6
+/// socket.
+fn inet_option(fd: i32, o: &InetOpts, opt: u64, val: u64, len: u32) -> i64 {
+    if opt == L_SO_MARK {
+        if len < 4 {
+            return -(EINVAL as i64);
+        }
+        if !super::cred::capable(12) {
+            return -1; // EPERM
+        }
+        // SAFETY: a guest int option value.
+        o.mark.store(
+            unsafe { (val as *const u32).read_unaligned() },
+            Ordering::Relaxed,
+        );
+        return 0;
+    }
+    // SAFETY: the guest's device name of `len` bytes.
+    let name = unsafe { std::slice::from_raw_parts(val as *const u8, (len as usize).min(16)) };
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    let name = String::from_utf8_lossy(&name[..end]).into_owned();
+    let index = match super::netif::host_index_of(&name) {
+        Ok(i) => i,
+        Err(e) => return -(e as i64),
+    };
+    // IP_BOUND_IF or IPV6_BOUND_IF, by the socket's family.
+    let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut sl = std::mem::size_of::<libc::sockaddr_storage>() as u32;
+    // SAFETY: getsockname into local storage.
+    unsafe { libc::getsockname(fd, (&mut sa as *mut libc::sockaddr_storage).cast(), &mut sl) };
+    let v6 = sa.ss_family as i32 == libc::AF_INET6;
+    let (l, o2) = if v6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_BOUND_IF)
+    } else {
+        (libc::IPPROTO_IP, libc::IP_BOUND_IF)
+    };
+    let i = index as i32;
+    // SAFETY: an int option on the host socket.
+    let r = unsafe { libc::setsockopt(fd, l, o2, (&i as *const i32).cast(), 4) };
+    if r < 0 {
+        return -(errno::last() as i64);
+    }
+    *o.device.lock().unwrap() = name;
+    0
+}
+
+/// The protocol of a host socket (`soi_protocol` of its
+/// PROC_PIDFDSOCKETINFO): IPPROTO_UDP for a UDP socket, 0 for AF_UNIX.
+/// libcore exempts UDP connects from StrictMode's network check by it.
+fn host_protocol(fd: i32) -> i32 {
+    const PROC_PIDFDSOCKETINFO: i32 = 3;
+    /// sizeof(struct socket_fdinfo) and offsetof(.psi.soi_protocol).
+    const SIZE: usize = 792;
+    const PROTOCOL: usize = 180;
+    let mut info = [0u8; SIZE];
+    // SAFETY: proc_pidfdinfo into a buffer of the struct's size.
+    let n = unsafe {
+        libc::proc_pidfdinfo(
+            libc::getpid(),
+            fd,
+            PROC_PIDFDSOCKETINFO,
+            info.as_mut_ptr().cast(),
+            SIZE as i32,
+        )
+    };
+    if n as usize != SIZE {
+        return 0;
+    }
+    i32::from_ne_bytes(info[PROTOCOL..PROTOCOL + 4].try_into().unwrap())
+}
+
 pub fn getsockopt(a: [u64; 6]) -> i64 {
     let (fd, level, opt, val, len) = (a[0] as i32, a[1], a[2], a[3], a[4]);
     if let Err(e) = is_socket(fd) {
         return e;
+    }
+    if let Some(s) = any_sock(fd) {
+        let int = |v: i32| put_opt(&v.to_le_bytes(), val, len);
+        match (level, opt, &s.family) {
+            (1, L_SO_MARK, Family::Inet(o)) => return int(o.mark.load(Ordering::Relaxed) as i32),
+            (1, L_SO_BINDTODEVICE, Family::Inet(o)) => {
+                let mut n = o.device.lock().unwrap().as_bytes().to_vec();
+                n.push(0);
+                return put_opt(&n, val, len);
+            }
+            (1, L_SO_DOMAIN, Family::Netlink(_)) => {
+                return int(super::netlink::L_AF_NETLINK as i32);
+            }
+            (1, L_SO_DOMAIN, Family::Packet(_)) => return int(super::packet::L_AF_PACKET as i32),
+            (1, L_SO_TYPE, Family::Netlink(n)) => return int(n.ty as i32),
+            (1, L_SO_TYPE, Family::Packet(_)) => return int(L_SOCK_RAW as i32),
+            (1, L_SO_PROTOCOL, Family::Netlink(_)) => return int(0),
+            (1, L_SO_PROTOCOL, Family::Packet(p)) => return int(p.protocol() as i32),
+            _ => {}
+        }
+    }
+    if level == 1 && opt == L_SO_MARK {
+        return put_opt(&0i32.to_le_bytes(), val, len);
     }
     if let Some((l, o)) = int_option(level, opt) {
         let Some(v) = get_int(fd, l, o) else {
@@ -1804,7 +2332,7 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
             };
             put_opt(&(d as i32).to_le_bytes(), val, len)
         }
-        (1, L_SO_PROTOCOL) => put_opt(&0i32.to_le_bytes(), val, len),
+        (1, L_SO_PROTOCOL) => put_opt(&host_protocol(fd).to_le_bytes(), val, len),
         (1, L_SO_PASSCRED) => {
             let v = s.is_some_and(|s| s.passcred.load(Ordering::Relaxed)) as i32;
             put_opt(&v.to_le_bytes(), val, len)

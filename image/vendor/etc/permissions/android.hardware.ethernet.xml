@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The device has Ethernet: eth0, which stands for the Mac's network
+     (docs/network.md). ConnectivityService starts EthernetService only
+     with this feature. -->
+<permissions>
+    <feature name="android.hardware.ethernet" />
+</permissions>
