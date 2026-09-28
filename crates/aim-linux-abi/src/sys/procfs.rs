@@ -289,7 +289,7 @@ fn stat_line(p: i32) -> Option<String> {
     } else {
         StackInfo::default()
     };
-    let rss_pages = ti.pti_resident_size / 4096;
+    let rss_pages = ti.pti_resident_size / super::mem::PAGE;
     Some(format!(
         "{p} ({}) {state} {} {} {} 0 -1 4194560 {} 0 {} 0 {} {} 0 0 20 {} {} 0 {start} {} {rss_pages} 18446744073709551615 0 0 {} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 {} {} {} {} 0\n",
         comm(p),
@@ -374,9 +374,10 @@ fn status(p: i32) -> Option<String> {
     ))
 }
 
+/// In pages of the guest's page size (`AT_PAGESZ`), as `rss` in `stat`.
 fn statm(p: i32) -> Option<String> {
     let t = task_info(p)?;
-    let pg = |b: u64| b / 4096;
+    let pg = |b: u64| b / super::mem::PAGE;
     Some(format!(
         "{} {} 0 0 0 {} 0\n",
         pg(t.ptinfo.pti_virtual_size),

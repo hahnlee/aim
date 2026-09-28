@@ -62,11 +62,20 @@ static void status_stat_cmdline(void) {
   CHECK(strstr(big, want) && strstr(big, "\nThreads:\t") && strstr(big, "\nVmRSS:\t"));
   snprintf(want, sizeof want, "\nUid:\t%d\t", getuid());
   CHECK(strstr(big, want) != NULL);
+  long rss_kb = strtol(strstr(big, "\nVmRSS:\t") + 8, NULL, 10);
   CHECK(slurp("/proc/self/stat", big, sizeof big) > 0);
   int pid = 0, ppid = 0;
   char state;
   CHECK(sscanf(big, "%d (%*[^)]) %c %d", &pid, &state, &ppid) == 3);
   CHECK(pid == getpid() && ppid == getppid());
+  // rss (field 24) and statm count pages of the page size (proc(5)).
+  char* f = strrchr(big, ')');
+  for (int i = 2; i < 24; i++) f = strchr(f + 1, ' ');
+  long page_kb = sysconf(_SC_PAGESIZE) / 1024, stat_kb = strtol(f + 1, NULL, 10) * page_kb;
+  CHECK(slurp("/proc/self/statm", big, sizeof big) > 0);
+  long size, resident;
+  CHECK(sscanf(big, "%ld %ld", &size, &resident) == 2);
+  CHECK(labs(stat_kb - rss_kb) < rss_kb / 4 && labs(resident * page_kb - rss_kb) < rss_kb / 4);
   ssize_t n = slurp("/proc/self/cmdline", big, sizeof big);
   CHECK(n > 0);
   char* q = big;
