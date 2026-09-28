@@ -6,6 +6,7 @@
 //! incremental work. The cargo nodes come from `cargo metadata`, the
 //! derived image's upstream from `image/overlay.toml`.
 
+mod bench;
 mod boot;
 mod cargo;
 mod fetch;
@@ -39,6 +40,13 @@ commands:
   boot [--data DIR] [-- GUEST-INIT-ARGS...]
                          build, then run aim-display and guest-init with the
                          standard flags of docs/boot-status.md
+  bench [--runs N] [--keep]
+                         build, then boot fresh data directories N times
+                         (default 1) and measure boot, process creation,
+                         binder, app starts, Chrome and memory; writes
+                         target/aim/bench/<timestamp>.json (docs/perf-baseline.md)
+  bench --compare A.json B.json
+                         the change of every median from A to B
   status [NODE...]       which nodes are stale, and why
   clean [NODE...]        forget NODEs (default: all) and remove their outputs
 
@@ -87,6 +95,9 @@ struct Args {
     timeout: Duration,
     data: Option<String>,
     rest: Vec<String>,
+    runs: usize,
+    keep: bool,
+    compare: Vec<String>,
 }
 
 fn parse(args: Vec<String>) -> Result<Args, String> {
@@ -101,6 +112,9 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         timeout: Duration::from_secs(900),
         data: None,
         rest: Vec::new(),
+        runs: 1,
+        keep: false,
+        compare: Vec::new(),
     };
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().ok_or(format!("{flag} needs a value"));
@@ -117,6 +131,17 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
                 parsed.timeout = Duration::from_secs(secs);
             }
             "--data" if parsed.command == "boot" => parsed.data = Some(value(&arg)?),
+            "--runs" if parsed.command == "bench" => {
+                parsed.runs = value(&arg)?
+                    .parse()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .ok_or("--runs needs a positive number")?
+            }
+            "--keep" if parsed.command == "bench" => parsed.keep = true,
+            "--compare" if parsed.command == "bench" => {
+                parsed.compare = vec![value(&arg)?, value(&arg)?];
+            }
             "--" if parsed.command == "boot" => {
                 parsed.rest = args.by_ref().collect();
             }
@@ -221,6 +246,19 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
                 graph::build(&graph, &graph.boot_set(), &ctx, &options)?;
             }
             boot::run(&ctx, args.data.as_deref(), &args.rest)
+        }
+        "bench" if !args.compare.is_empty() => bench::compare(&args.compare[0], &args.compare[1]),
+        "bench" => {
+            let (graph, ctx) = load(args.verbose)?;
+            {
+                let _lock = lock()?;
+                graph::build(&graph, &graph.boot_set(), &ctx, &options)?;
+            }
+            let options = bench::Options {
+                runs: args.runs,
+                keep: args.keep,
+            };
+            bench::run(&ctx, &options)
         }
         "help" | "-h" | "--help" => {
             println!("{USAGE}");

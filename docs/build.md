@@ -12,6 +12,7 @@ cargo aim status                 # which nodes are stale, and why
 cargo aim test                   # unit tests
 cargo aim test --integration     # builds every node, then all tests
 cargo aim boot                   # aim-display + guest-init, docs/boot-status.md
+cargo aim bench [--runs N]       # boot and measure, docs/perf-baseline.md
 cargo aim clean [NODE...]        # forget nodes and remove their outputs
 ```
 
