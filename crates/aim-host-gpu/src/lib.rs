@@ -161,6 +161,9 @@ unsafe fn forward(i: usize, args: u64, len: u64) -> i64 {
         };
         if e.lib == Lib::Egl {
             if let Some(handle) = display::get(e.name, &regs) {
+                if RELOAD.load(Ordering::Relaxed) {
+                    display::prefetch(handle as usize);
+                }
                 return handle as i64;
             }
             // EGL creates Metal objects; guest threads have no
@@ -176,6 +179,12 @@ unsafe fn forward(i: usize, args: u64, len: u64) -> i64 {
                 r = display::guest(r as usize) as u64;
             } else if e.name == c"eglInitialize" && r as u32 == 1 {
                 display::initialized(handle);
+            } else if r as u32 == 1
+                && (e.name == c"eglDestroyImageKHR" || e.name == c"eglDestroyImage")
+            {
+                present::image_destroyed(regs[1] as usize);
+            } else if e.name == c"eglDestroyContext" && r as u32 == 1 {
+                present::context_destroyed(regs[1] as usize);
             }
             metal::pool_pop(pool);
             r as i64

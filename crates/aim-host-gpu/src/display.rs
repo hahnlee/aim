@@ -14,6 +14,12 @@
 //! gets the handles ([`fork_state`]) but none of ANGLE's displays: each is
 //! made again on its first use there, and initialized if it was in the
 //! parent, since the guest's EGL will not ask again.
+//!
+//! In a fork child of a process that had loaded ANGLE (an app forked from
+//! zygote), asking for a display starts making it on a host thread
+//! ([`prefetch`]): HWUI asks for it when the app binds, to preload the
+//! driver, and draws its first frame much later. The ~40 ms of Metal device
+//! creation then leaves the RenderThread's path to the first frame.
 
 use std::sync::Mutex;
 
@@ -42,6 +48,8 @@ struct Slot {
     request: Request,
     /// ANGLE's display once made in this process; 0 before.
     display: usize,
+    /// A host thread was started to make it.
+    prefetched: bool,
     /// The guest initialized it (here or in a parent before fork).
     initialized: bool,
 }
@@ -62,6 +70,7 @@ impl Displays {
                 self.slots.push(Slot {
                     request,
                     display: 0,
+                    prefetched: false,
                     initialized: false,
                 });
                 self.slots.len() - 1
@@ -159,6 +168,7 @@ impl Displays {
             slots.push(Slot {
                 request,
                 display: 0,
+                prefetched: false,
                 initialized,
             });
         }
@@ -268,6 +278,25 @@ pub unsafe fn get(name: &std::ffi::CStr, regs: &[u64; 16]) -> Option<u64> {
         _ => return None,
     };
     Some(displays().get(request) as u64)
+}
+
+/// Start making the display behind `handle` on a host thread, once.
+pub fn prefetch(handle: usize) {
+    {
+        let mut d = displays();
+        let Some(slot) = d.slot(handle) else { return };
+        if slot.prefetched || slot.display != 0 {
+            return;
+        }
+        slot.prefetched = true;
+    }
+    let _ = std::thread::Builder::new()
+        .name("gpu-display".into())
+        .spawn(move || {
+            let pool = crate::metal::pool_push();
+            host(handle);
+            crate::metal::pool_pop(pool);
+        });
 }
 
 /// ANGLE's display for a display argument of the guest's: its display when

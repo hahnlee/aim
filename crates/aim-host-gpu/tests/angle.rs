@@ -166,6 +166,15 @@ fn renders_into_a_shared_memory_buffer() {
     // Row 0 of the buffer is the top of the image.
     assert_eq!(px(0), 0xff00_ff00, "top row green");
     assert_eq!(px(h - 1), 0xffff_0000, "bottom row blue");
+    // Again into the same buffer, through the framebuffer the first present
+    // made.
+    color(1.0, 0.0, 0.0);
+    x(c"glClear", &[0x4000]);
+    assert_eq!(block(FN_PRESENT, &mut present), 0);
+    // SAFETY: the present's new fence, ours to close.
+    let fence = unsafe { OwnedFd::from_raw_fd(present.fence) };
+    assert!(aim_sync_file::wait(fence.as_fd(), 5000));
+    assert_eq!((px(0), px(h - 1)), (0xff00_00ff, 0xff00_00ff), "red");
     assert_eq!(x(c"glGetError", &[]), 0);
 
     // A fence for later commands: each signals once its commands are done.
