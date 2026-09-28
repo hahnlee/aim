@@ -131,6 +131,12 @@ pub fn angle() -> PathBuf {
     angle_source().join("out/AimRelease")
 }
 
+/// The MoltenVK release (`moltenvk` node): `libMoltenVK.dylib`, its
+/// `LICENSE`, and the Khronos registry `vk.xml` it is built with.
+pub fn moltenvk() -> PathBuf {
+    out().join("moltenvk")
+}
+
 /// Where the derived image is mounted: the system image with the overlay
 /// of `image/overlay.toml` in a shadow file (`derived-image` node), and the
 /// overlay's translations (`translation-cache` node).

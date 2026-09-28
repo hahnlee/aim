@@ -54,8 +54,9 @@ pub struct BootOptions {
     pub exclude: BTreeSet<String>,
     /// `linux-run`; defaults to the one next to the current executable.
     pub linux_run: Option<PathBuf>,
-    /// `linux-run --gpu` and `--display` for every service.
+    /// `linux-run --gpu`, `--vulkan` and `--display` for every service.
     pub gpu: Option<PathBuf>,
+    pub vulkan: Option<PathBuf>,
     pub display: Option<PathBuf>,
     pub trace: bool,
     /// `androidboot.*` bootconfig entries (without the prefix).
@@ -78,6 +79,7 @@ impl BootOptions {
             exclude: BTreeSet::new(),
             linux_run: None,
             gpu: None,
+            vulkan: None,
             display: None,
             trace: false,
             // The device: init.rc imports init.aim.rc and vold reads
@@ -389,6 +391,7 @@ impl Boot {
             path_map_file: layout.path_map_file(),
             binder: Some(binder_name),
             gpu: options.gpu.clone(),
+            vulkan: options.vulkan.clone(),
             display: options.display.clone(),
             trace: options.trace,
             options: linux_run_options,

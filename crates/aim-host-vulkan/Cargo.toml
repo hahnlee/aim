@@ -1,0 +1,14 @@
+[package]
+license.workspace = true
+name = "aim-host-vulkan"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Host-call module for the guest Vulkan driver: Vulkan forwarded to MoltenVK on Metal"
+
+[dependencies]
+aim-hostcall.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+aim-paths.workspace = true

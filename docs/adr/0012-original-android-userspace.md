@@ -81,12 +81,19 @@ programs, and implement only what lies below it.
      The system image is a local build artefact, never distributed.
    - Our HALs, the vintf manifest and the GPU libraries live in `/vendor`,
      as a device vendor's would.
-   - **GPU driver:** an addition, not a replacement. The original `libEGL`
-     and `libvulkan` loaders stay; they load the device's driver, which is
-     ours: `/vendor/lib64/egl/libGLES_aim.so` (and later
-     `vulkan.aim.so`), guest ELF thunks generated from the Khronos
-     registry that forward EGL/GLES to ANGLE (and Vulkan to MoltenVK) on the
-     host over host-call (`docs/gles-driver.md`).
+   - **GPU drivers:** additions, not replacements. The original `libEGL`
+     and `libvulkan` loaders stay; they load the device's drivers, which
+     are ours: `/vendor/lib64/egl/libGLES_aim.so` and
+     `/vendor/lib64/hw/vulkan.aim.so`, guest ELF thunks generated from the
+     Khronos registry that forward EGL/GLES to ANGLE and Vulkan to the
+     pinned MoltenVK release on the host over host-call
+     (`docs/gles-driver.md`, `docs/vulkan-driver.md`).
+   - The Vulkan driver hands MoltenVK's dispatchable handles to the loader
+     unwrapped: they already begin with the loader word and magic the
+     loader expects. What Android adds to Vulkan is the driver's own:
+     `VK_ANDROID_native_buffer` under the loader's swapchain,
+     AHardwareBuffer memory and sync-fd semaphores, with graphics buffers
+     imported into Metal without a copy.
    - The emulator's vendor HALs talk to QEMU or fake hardware. The overlay
      removes their `.rc` and vintf fragments where we replace them or where
      the Mac lacks the hardware. Hardware the device does not have is then

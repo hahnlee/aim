@@ -1,0 +1,23 @@
+[package]
+name = "vulkan"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "The derived image's Vulkan driver: Vulkan forwarded to the host's MoltenVK over host-call (docs/vulkan-driver.md)"
+
+[lib]
+crate-type = ["cdylib"]
+
+# Installed as /vendor/lib64/hw/<library>; the original libvulkan loads it
+# for ro.hardware.vulkan=aim.
+[package.metadata.vendor-hal]
+library = "vulkan.aim.so"
+
+[build-dependencies]
+aim-paths.workspace = true
+
+[dependencies]
+aim-gralloc = { path = "../graphics/gralloc" }
+aim-hostcall.workspace = true
+libc.workspace = true

@@ -63,6 +63,69 @@
       "revision_lock": "patches/art-android/sources.lock",
       "source_url": "https://android.googlesource.com/platform/external/boringssl/+/ecc1358826150d6a1851c517c325b0e6c0e1b8be/NOTICE",
       "sha256": "756a61a8300d105ae68e7f2993e27d41a765c946f3400422e2403b01e7ded527"
+    },
+    {
+      "file": "licensing/third-party/moltenvk-LICENSE",
+      "project": "KhronosGroup/MoltenVK",
+      "revision": "db66022459ffb663aa2b50f6b018bc2e124f5edf",
+      "upstream_path": "LICENSE",
+      "revision_lock": "upstream/moltenvk.lock",
+      "source_url": "https://github.com/KhronosGroup/MoltenVK/blob/db66022459ffb663aa2b50f6b018bc2e124f5edf/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "file": "licensing/third-party/moltenvk-LICENSE",
+      "project": "KhronosGroup/SPIRV-Cross",
+      "revision": "6c09849fe88c48eaed08413aa022aaa136a3a057",
+      "upstream_path": "LICENSE",
+      "revision_lock": "upstream/moltenvk.lock",
+      "source_url": "https://github.com/KhronosGroup/SPIRV-Cross/blob/6c09849fe88c48eaed08413aa022aaa136a3a057/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "file": "licensing/third-party/moltenvk-LICENSE",
+      "project": "KhronosGroup/SPIRV-Tools",
+      "revision": "0d6fd73ca73830ccab5fa1f00ed5ed40124e2c55",
+      "upstream_path": "LICENSE",
+      "revision_lock": "upstream/moltenvk.lock",
+      "source_url": "https://github.com/KhronosGroup/SPIRV-Tools/blob/0d6fd73ca73830ccab5fa1f00ed5ed40124e2c55/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "file": "licensing/third-party/spirv-headers-LICENSE",
+      "project": "KhronosGroup/SPIRV-Headers",
+      "revision": "29981f65241605e08b0ede4cfeb999fe3b723c6a",
+      "upstream_path": "LICENSE",
+      "revision_lock": "upstream/moltenvk.lock",
+      "source_url": "https://github.com/KhronosGroup/SPIRV-Headers/blob/29981f65241605e08b0ede4cfeb999fe3b723c6a/LICENSE",
+      "sha256": "ea43b1de38a6f90c488800d66dec1ed671e68cda530266bc96951fb5b6307613"
+    },
+    {
+      "file": "licensing/third-party/cereal-LICENSE",
+      "project": "USCiLab/cereal",
+      "revision": "a56bad8bbb770ee266e930c95d37fff2a5be7fea",
+      "upstream_path": "LICENSE",
+      "revision_lock": "upstream/moltenvk.lock",
+      "source_url": "https://github.com/USCiLab/cereal/blob/a56bad8bbb770ee266e930c95d37fff2a5be7fea/LICENSE",
+      "sha256": "58604a126af6a671ea390ee3d5b3e42228aa59b2858fb7af1d5b20b31739ccbb"
+    },
+    {
+      "file": "licensing/third-party/vulkan-headers-LICENSE.md",
+      "project": "KhronosGroup/Vulkan-Headers",
+      "revision": "e3b1eec08173d6b825cd3ac88c885a63b621504a",
+      "upstream_path": "LICENSE.md",
+      "revision_lock": "upstream/moltenvk.lock",
+      "source_url": "https://github.com/KhronosGroup/Vulkan-Headers/blob/e3b1eec08173d6b825cd3ac88c885a63b621504a/LICENSE.md",
+      "sha256": "95ad366d23fadf701d355bc45fb8b82ae2d700239471d35d41286ac3b08ff903"
+    },
+    {
+      "file": "licensing/third-party/vulkan-headers-MIT.txt",
+      "project": "KhronosGroup/Vulkan-Headers",
+      "revision": "e3b1eec08173d6b825cd3ac88c885a63b621504a",
+      "upstream_path": "LICENSES/MIT.txt",
+      "revision_lock": "upstream/moltenvk.lock",
+      "source_url": "https://github.com/KhronosGroup/Vulkan-Headers/blob/e3b1eec08173d6b825cd3ac88c885a63b621504a/LICENSES/MIT.txt",
+      "sha256": "1ca3502222d967f3be5751c55f6b7ee735b5383909c3b501495f54b216dbf227"
     }
   ]
 }

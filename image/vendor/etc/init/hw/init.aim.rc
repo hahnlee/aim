@@ -10,7 +10,11 @@ on early-init
     setprop ro.hardware.egl aim
     # ANGLE's Metal backend implements OpenGL ES 3.0 (0x30000).
     setprop ro.opengles.version 196608
-    # There is no Vulkan driver yet, so RenderEngine renders with GLES.
+    # The Vulkan driver the original libvulkan loads:
+    # /vendor/lib64/hw/vulkan.aim.so (docs/vulkan-driver.md).
+    setprop ro.hardware.vulkan aim
+    # RenderEngine renders with GLES: the Vulkan driver's presents wait on
+    # the CPU until there are sync files (docs/vulkan-driver.md).
     setprop debug.renderengine.backend skiaglthreaded
     # A Retina display at 2x.
     setprop ro.sf.lcd_density 320

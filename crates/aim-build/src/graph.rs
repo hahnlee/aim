@@ -51,6 +51,7 @@ pub enum Action {
     Art,
     BootImage,
     Angle,
+    MoltenVk,
     DerivedImage,
     TranslationCache,
 }

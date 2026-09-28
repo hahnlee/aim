@@ -91,6 +91,7 @@ fn fixture(tag: &str) -> Fixture {
         path_map_file: layout.path_map_file(),
         binder: None,
         gpu: None,
+        vulkan: None,
         display: None,
         trace: false,
         options: LinuxRunOptions::CONTRACT,

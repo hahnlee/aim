@@ -19,7 +19,7 @@ Each service is one host process, started in a new process group with
 linux-run --root <image> --path-map <runtime>/path-map \
           --identity <runtime>/identity/<service>.<n> --inherit-env \
           --binder <name> [--seclabel <label>] [--gpu <dir>] \
-          [--display <socket>] [--trace] <program> <args...>
+          [--vulkan <dir>] [--display <socket>] [--trace] <program> <args...>
 ```
 
 - `<program>` and `<args>` are the guest argv after init's `${prop}`
@@ -33,10 +33,11 @@ linux-run --root <image> --path-map <runtime>/path-map \
 - `--seclabel` is the service's `seclabel`. Without one, init would compute
   the domain from the executable's file context; guest-init does not yet,
   and the layer reports `u:r:init:s0`.
-- `--gpu` and `--display` are host devices every service may use, given to
-  guest-init with the same options: the host's ANGLE behind the GLES driver
-  (`docs/gles-driver.md`) and the display server behind the composer
-  (`docs/composer.md`).
+- `--gpu`, `--vulkan` and `--display` are host devices every service may
+  use, given to guest-init with the same options: the host's ANGLE behind
+  the GLES driver (`docs/gles-driver.md`), MoltenVK behind the Vulkan
+  driver (`docs/vulkan-driver.md`) and the display server behind the
+  composer (`docs/composer.md`).
 - stdin, stdout and stderr are `/dev/null`, as init gives a service
   without `stdio_to_kmsg` (zygote refuses to fork while it holds any other
   file). guest-init opens `<runtime>/logs/<service>.log` as stderr and

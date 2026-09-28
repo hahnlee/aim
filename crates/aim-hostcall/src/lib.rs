@@ -85,6 +85,8 @@ pub mod module {
     pub const CAMERA: u32 = 9;
     /// The Mac's memory pressure and free memory (lmkd's host side).
     pub const MEMORY: u32 = 10;
+    /// Vulkan over the host's MoltenVK (the Vulkan driver's host side).
+    pub const VULKAN: u32 = 11;
 }
 
 /// Module [`module::HEALTH`]: the host's battery, for
@@ -917,6 +919,66 @@ pub unsafe fn args_mut<'a, T>(args: u64, len: u64) -> Result<&'a mut T, i64> {
     Ok(unsafe { &mut *(args as *mut T) })
 }
 
+/// Module [`module::VULKAN`]: Vulkan over the host's MoltenVK, for the
+/// guest Vulkan driver (`docs/vulkan-driver.md`).
+pub mod vulkan {
+    pub const VERSION: u32 = 1;
+
+    /// Load MoltenVK and resolve the forwarded entry points ([`Init`]).
+    /// Returns 0, `-ENODEV` when the host has no MoltenVK, or `-EINVAL`
+    /// when the guest's table is not the host's.
+    pub const FN_INIT: u32 = 1;
+    /// Make guest memory the storage of a `VkImage`: a linear Metal texture
+    /// over the mapping replaces the image's own ([`Attach`]). Returns 0,
+    /// `-EINVAL` for a bad layout or format, or `-ENODEV` before
+    /// [`FN_INIT`].
+    pub const FN_ATTACH: u32 = 2;
+    /// Forwarded entry point `i` of the generated table
+    /// (`tools/gen-vulkan-thunks.py`) is function `FN_TABLE_BASE + i`, with
+    /// the register image of `gpu::FN_TABLE_BASE`: the x registers, then
+    /// the d registers, then the stack words in the Apple arm64 layout,
+    /// 8 bytes per value. The call returns the callee's x0 unchanged.
+    pub const FN_TABLE_BASE: u32 = 0x1000;
+
+    /// Argument block of [`FN_INIT`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Init {
+        /// `TABLE_HASH` of the generated table.
+        pub table_hash: u64,
+        pub table_len: u64,
+        /// Guest bitmap of `table_len` bits, one u64 per 64 entries: the
+        /// host sets bit `i` when it resolved entry `i`.
+        pub resolved: u64,
+        pub resolved_words: u64,
+    }
+
+    /// Argument block of [`FN_ATTACH`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Attach {
+        /// The `VkPhysicalDevice` of the image's device.
+        pub physical_device: u64,
+        /// The `VkImage`: 2D, one level and layer, not yet used.
+        pub image: u64,
+        /// Page-aligned guest mapping of the whole buffer, pixels at 0.
+        pub address: u64,
+        /// Length of the mapping, a multiple of the page size.
+        pub length: u64,
+        pub width: u32,
+        pub height: u32,
+        pub stride_bytes: u32,
+        /// The image's `VkFormat`.
+        pub format: i32,
+        /// Out: MoltenVK's `VkResult`.
+        pub result: i32,
+        pub _reserved: u32,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Init>() == 32);
+    const _: () = assert!(core::mem::size_of::<Attach>() == 56);
+}
+
 /// Guest side: the call instruction and typed wrappers.
 #[cfg(all(
     target_arch = "aarch64",
@@ -1192,6 +1254,33 @@ pub mod guest {
     pub unsafe fn gpu_forward(id: u32, regs: *mut u64, words: usize) -> i64 {
         // SAFETY: caller contract.
         unsafe { call_fn(module::GPU, gpu::FN_TABLE_BASE + id, regs.cast(), words * 8) }
+    }
+
+    /// Load MoltenVK and resolve the forwarded Vulkan entry points.
+    pub fn vulkan_init(args: &mut vulkan::Init) -> Result<(), Errno> {
+        call_with(module::VULKAN, vulkan::FN_INIT, args).map(drop)
+    }
+
+    /// Make a mapped graphics buffer the storage of a `VkImage`.
+    pub fn vulkan_attach(args: &mut vulkan::Attach) -> Result<(), Errno> {
+        call_with(module::VULKAN, vulkan::FN_ATTACH, args).map(drop)
+    }
+
+    /// Call forwarded Vulkan entry point `id` with its register image.
+    ///
+    /// # Safety
+    /// As for [`gpu_forward`].
+    #[inline(always)]
+    pub unsafe fn vulkan_forward(id: u32, regs: *mut u64, words: usize) -> i64 {
+        // SAFETY: caller contract.
+        unsafe {
+            call_fn(
+                module::VULKAN,
+                vulkan::FN_TABLE_BASE + id,
+                regs.cast(),
+                words * 8,
+            )
+        }
     }
 
     /// [`call`] as an out-of-line C function. A caller then saves only the
