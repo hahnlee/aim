@@ -423,6 +423,16 @@ The host's security agent did not flag or block any of the four boots
   (ADR 0012, "Application JITs"). Chrome draws `https://example.com`, a
   `data:` page's script runs (`fib(30)` in 9–17 ms, optimized code), and
   the renderers stay up.
+- **GMS persistent crash loop** (#336): Nearby's USB medium throws
+  "UsbManagerCompat is unavailable" without the `usb` service, about once
+  a second two minutes after boot (104 in a 2-minute window, 49 process
+  starts). The device declares `android.hardware.usb.host` (the Mac's
+  ports), so UsbService runs; none in three boots since. Declaring it
+  alone killed system_server 48 times in 9.5 minutes ("Unable to open
+  socket for UEventObserver"): init.usb.rc's writes had made
+  `/sys/class/android_usb` appear, which sends UsbService down the USB
+  gadget path. sysfs's device trees now hold only the modeled devices,
+  and NETLINK_KOBJECT_UEVENT sockets work.
 
 ### Open
 
@@ -434,9 +444,6 @@ The host's security agent did not flag or block any of the four boots
   guest's 16 KiB pages).
 - #258 remaining memfd seal gaps; #261 app data lost on a second boot of
   the same data directory.
-- GMS persistent dies every few seconds since eth0 is an Ethernet
-  network: Nearby's USB medium needs the `usb` service, which the device
-  does not run (docs/perf-baseline.md, "Idle CPU after boot").
 
 ## Network (2026-09-28)
 
