@@ -558,8 +558,14 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   and rewritten like translated files: `svc #0`, `tpidr_el0` and
   `ctr_el0`.
 - RWX requests map to a `MAP_JIT` region whose per-thread write/execute state
-  is switched on fault. That works, but a JIT that alternates constantly
-  pays about 5 µs per switch.
+  is switched on fault (`sys/jit.rs`). Darwin cannot place `MAP_JIT` at a
+  fixed address and refuses to change the protection of RWX pages, so pages
+  made RWX (V8 reserves its code range PROT_NONE, then `mprotect`s it RWX)
+  are unmapped and mapped again as `MAP_JIT` at the same address, and RWX
+  pages given another protection are replaced by a copy. Darwin restores
+  the writable state when a signal handler returns, so the switch back to
+  executable runs outside the handler, through the resume trap. A JIT that
+  alternates constantly pays for two signals per switch.
 - A JIT that allocates x18 as a general register is an app-compatibility
   risk handled case by case.
 

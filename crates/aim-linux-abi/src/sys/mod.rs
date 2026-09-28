@@ -24,6 +24,7 @@ mod fsops;
 mod futex;
 mod genfs;
 mod inotify;
+mod jit;
 mod knob;
 mod mem;
 mod memfd;
