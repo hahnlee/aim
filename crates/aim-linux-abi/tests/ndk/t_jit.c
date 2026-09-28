@@ -110,6 +110,48 @@ static void rwx_mmap(void) {
   CHECK(munmap(p, 4 * PG) == 0);
 }
 
+// Code in RWX memory that writes the same mapping, as self-decrypting code
+// (Widevine's) does: each kind of store, then a loop of 8,192 stores.
+static void self_modifying(void) {
+  uint32_t* c = mmap(NULL, 3 * PG, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(c != MAP_FAILED);
+  static const uint32_t stores[] = {
+      0x4e010c20,  // dup v0.16b, w1
+      0xf9000001,  // str x1, [x0]
+      0xa9010401,  // stp x1, x1, [x0, #16]
+      0x3900a001,  // strb w1, [x0, #40]
+      0x7800d001,  // sturh w1, [x0, #13]
+      0x3d800c00,  // str q0, [x0, #48]
+      0xad020000,  // stp q0, q0, [x0, #64]
+      0xd2800202,  // mov x2, #16
+      0xf8226801,  // str x1, [x0, x2]
+      0x91040003,  // add x3, x0, #256
+      0xf8008c61,  // str x1, [x3, #8]!
+      0xb81fc461,  // str w1, [x3], #-4
+      0x889ffc61,  // stlr w1, [x3]
+      0xd65f03c0,  // ret
+  };
+  static const uint32_t loop[] = {
+      0xb8004401,  // str w1, [x0], #4
+      0xf1000442,  // subs x2, x2, #1
+      0x54ffffc1,  // b.ne .-8
+      0xd65f03c0,  // ret
+  };
+  for (unsigned i = 0; i < sizeof(stores) / 4; i++) c[i] = stores[i];
+  for (unsigned i = 0; i < sizeof(loop) / 4; i++) c[64 + i] = loop[i];
+  __builtin___clear_cache((char*)c, (char*)(c + 128));
+  unsigned char* d = (unsigned char*)c + PG;
+  uint64_t v = 0x0102030405060708ull;
+  ((void (*)(void*, uint64_t))c)(d, v);
+  CHECK(*(uint64_t*)d == v && *(uint64_t*)(d + 16) == v && *(uint64_t*)(d + 24) == v);
+  CHECK(d[40] == 8 && d[13] == 8 && d[14] == 7);
+  for (int i = 48; i < 96; i++) CHECK(d[i] == 8);
+  CHECK(*(uint64_t*)(d + 264) == v && *(uint32_t*)(d + 260) == (uint32_t)v);
+  ((void (*)(void*, uint32_t, uint64_t))(c + 64))(d, 0xabcd, 2 * PG / 4);
+  for (unsigned i = 0; i < 2 * PG / 4; i++) CHECK(((uint32_t*)d)[i] == 0xabcd);
+  munmap(c, 3 * PG);
+}
+
 static char* shared_code;
 static volatile int stop;
 
@@ -156,6 +198,7 @@ static void fork_child(void) {
 int main(void) {
   RUN(v8_code_range);
   RUN(rwx_mmap);
+  RUN(self_modifying);
   RUN(threads);
   RUN(fork_child);
   DONE();
