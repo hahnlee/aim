@@ -73,13 +73,24 @@ pub fn clean(node: &Node) -> Result<(), String> {
         Action::BootImage => vec![aim_paths::boot_image()],
         // The build tree of a checkout other checkouts may share.
         Action::Angle => Vec::new(),
-        Action::DerivedImage => vec![aim_paths::derived_image()],
+        Action::DerivedImage => {
+            detach_derived()?;
+            vec![aim_paths::derived_image_shadow()]
+        }
     };
     for path in paths {
         aim_android_image::assemble::force_remove(&path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(())
+}
+
+/// Detaches the derived image (its shadow stays).
+pub fn detach_derived() -> Result<(), String> {
+    aim_storage::system::detach(
+        &aim_paths::system_image(),
+        Some(&aim_paths::derived_image_shadow()),
+    )
 }
 
 /// `dir`, created if needed, with every link resolved: the Python helpers

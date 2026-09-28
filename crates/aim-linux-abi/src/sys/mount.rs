@@ -187,12 +187,8 @@ mod tests {
     }
 
     fn owner(path: &str) -> Option<u32> {
-        attrs::lookup(
-            &vfs::resolve(LINUX_AT_FDCWD, path.as_bytes(), true)
-                .unwrap()
-                .guest,
-        )
-        .uid
+        let r = vfs::resolve(LINUX_AT_FDCWD, path.as_bytes(), true).unwrap();
+        attrs::lookup(attrs::Host::Path(&r.host), || r.guest.clone()).uid
     }
 
     fn host(path: &str) -> PathBuf {

@@ -61,7 +61,6 @@ pub fn guest_init(ctx: &Ctx, data: &Path, display: &Path) -> Command {
         .arg("--data")
         .arg(data)
         .arg("--run")
-        .args(["--exclude", "bootanim"])
         .arg("--gpu")
         .arg(aim_paths::angle())
         .arg("--display")

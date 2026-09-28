@@ -1,5 +1,8 @@
 //! `derived-image`: the original plus `image/overlay.toml`
-//! (crates/aim-android-image), at `target/aim/derived-image`.
+//! (crates/aim-android-image). The overlay is applied to the system image
+//! attached with a shadow file (`target/aim/derived.shadow`), which takes
+//! every write, so the derived image costs only what the overlay changes;
+//! it is then mounted read-only at `target/aim/derived` (docs/storage.md).
 //!
 //! Its upstream is read from the overlay: a source under `target/` or
 //! `_build/` must be an output of some node, which the derived image then
@@ -10,9 +13,9 @@ use super::repo;
 use crate::graph::{Action, Dep, Node};
 use crate::log::Log;
 use aim_android_image::{assemble, identity};
+use aim_storage::system;
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
 
 const OVERLAY: &str = "image/overlay.toml";
 
@@ -52,15 +55,13 @@ pub fn node(others: &[Node]) -> Result<Node, String> {
         inputs,
         outputs: vec![aim_paths::derived_image().join(".identity")],
         tools: Vec::new(),
-        recipe: 1,
+        recipe: 2,
         action: Action::DerivedImage,
         boot: true,
     })
 }
 
 pub fn run(log: &mut Log) -> Result<(), String> {
-    // The real original: a derived image is cloned from it, never through a
-    // link (which would apply the overlay to the original).
     let original = fs::canonicalize(aim_paths::original_image()).map_err(|e| e.to_string())?;
     let (_, plan) = aim_android_image::load(&repo(OVERLAY), &original, aim_paths::root()).map_err(
         |problems| {
@@ -71,16 +72,30 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     let original_identity = identity::original_identity(&original, None)?
         .ok_or_else(|| format!("{}: no identity", original.display()))?;
     let derived = identity::compute(&original_identity, &plan);
-    let out: PathBuf = aim_paths::derived_image();
-    if identity::read_tree_identity(&out)
-        .ok()
-        .flatten()
-        .is_some_and(|found| found != derived.hex)
-    {
-        log.line(&format!("replacing {}", out.display()));
-        assemble::force_remove(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let (image, shadow) = (aim_paths::system_image(), aim_paths::derived_image_shadow());
+    let mount = aim_paths::derived_image_mount();
+    if shadow.exists() {
+        // A shadow of another system image does not attach, or shows
+        // another identity.
+        let found = system::attach(&image, Some(&shadow), &mount, false)
+            .ok()
+            .and_then(|()| identity::read_tree_identity(&aim_paths::derived_image()).ok())
+            .flatten();
+        if found.as_deref() == Some(derived.hex.as_str()) {
+            log.line(&format!("reused {} ({})", mount.display(), derived.hex));
+            return Ok(());
+        }
+        log.line(&format!("replacing {}", mount.display()));
+        system::detach(&image, Some(&shadow))?;
+        fs::remove_file(&shadow).map_err(|e| format!("{}: {e}", shadow.display()))?;
     }
-    let outcome = assemble(&plan, &original, &derived, &out)?;
-    log.line(&format!("{outcome:?} {} ({})", out.display(), derived.hex));
+    // Written through the shadow; its identity last, so an interrupted
+    // build is replaced on the next run.
+    system::attach(&image, Some(&shadow), &mount, true)?;
+    let applied = assemble::apply(&plan, &derived, &system::root(&mount));
+    system::detach(&image, Some(&shadow))?;
+    applied?;
+    system::attach(&image, Some(&shadow), &mount, false)?;
+    log.line(&format!("built {} ({})", mount.display(), derived.hex));
     Ok(())
 }

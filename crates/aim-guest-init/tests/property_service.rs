@@ -258,10 +258,13 @@ fn ctl_messages_start_and_stop_services_with_passed_socket_fds() {
     let logdw = std::fs::metadata(boot.layout.socket_dir().join("logdw")).unwrap();
     assert!(logdw.file_type().is_socket());
     assert_eq!(logdw.permissions().mode() & 0o777, 0o222);
-    let attrs = std::fs::read_to_string(boot.layout.fs_attrs_file()).unwrap();
-    assert!(
-        attrs.contains("/dev/socket/logd\t1036\t1036\t666\n"),
-        "{attrs}"
+    assert_eq!(
+        aim_guest_init::guest_inode::read(&boot.layout.socket_dir().join("logd")).unwrap(),
+        Some(aim_guest_init::guest_inode::GuestInode {
+            uid: Some(1036),
+            gid: Some(1036),
+            mode: Some(0o666)
+        })
     );
     let table = std::fs::read_to_string(boot.layout.sockets_file()).unwrap();
     assert!(

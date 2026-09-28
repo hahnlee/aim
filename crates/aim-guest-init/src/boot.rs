@@ -230,7 +230,11 @@ pub struct Boot {
     _sockets: Option<PropertySockets>,
     /// Run mode: the binder host behind every service's `--binder`.
     _binder: Option<Arc<Server>>,
+    /// Run mode: the data directory's case-sensitive image, attached at
+    /// it for the boot (docs/storage.md). Declared last, so it is
+    /// detached after the rest is dropped.
     pub report: BootReport,
+    _data: Option<aim_storage::data::DataImage>,
 }
 
 /// The controller mount points `SetupCgroups` would create from
@@ -299,11 +303,15 @@ impl Boot {
                 options.image.display()
             ));
         }
-        let layout = Layout::new(
-            options.image.clone(),
-            options.data.clone(),
-            options.runtime.clone(),
-        );
+        // Before the layout: its persistent directories are in the image.
+        let data_image = match options.mode {
+            RunMode::Run => Some(aim_storage::data::DataImage::attach(&options.data)?),
+            RunMode::DryRun => None,
+        };
+        let data = data_image
+            .as_ref()
+            .map_or_else(|| options.data.clone(), |d| d.dir().to_path_buf());
+        let layout = Layout::new(options.image.clone(), data, options.runtime.clone());
         layout.prepare().map_err(|e| e.to_string())?;
         let map = layout.path_map();
         std::fs::write(layout.path_map_file(), map.to_file_text()).map_err(|e| e.to_string())?;
@@ -449,6 +457,7 @@ impl Boot {
             events,
             _sockets: sockets,
             _binder: binder,
+            _data: data_image,
             report,
         })
     }

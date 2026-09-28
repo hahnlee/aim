@@ -8,7 +8,7 @@ from.
 ## How to reproduce
 
 ```
-cargo aim build        # <derived> is target/aim/derived-image
+cargo aim build        # <derived> is target/aim/derived/root
 guest-init --image <derived> --data <data> --run \
     --exclude zygote,surfaceflinger,vold,bpfloader --timeout 45
 ```
@@ -17,6 +17,11 @@ guest-init --image <derived> --data <data> --run \
   `wait_for_prop` or `exec` that only an excluded service would end is
   satisfied after two seconds, as with `--only`.
 - guest-init stops every service on its timeout, on SIGINT and on SIGTERM.
+- `<data>` is a case-sensitive disk image, `<data>.asif`, that guest-init
+  attaches at `<data>` for the boot and detaches when it stops
+  (docs/storage.md); `cargo aim storage` shows what it occupies.
+- The device has no boot animation (`debug.sf.nobootanimation`);
+  `--exclude bootanim` still works but is no longer needed.
 - The device is `aim` (`androidboot.hardware=aim`):
   `/vendor/etc/init/hw/init.aim.rc` and `/vendor/etc/fstab.aim` from
   `image/overlay.toml`. The emulator's `init.ranchu.rc` and helpers are
@@ -492,3 +497,43 @@ slack action, which has no process form, so the call fails in the guest
 4. `logcat -d -s lowmemorykiller`: `Kill ... oom_score_adj` lines only at
    900 and above (the highest registered first), one a second, then `memory pressure Warn
    -> Normal`; `dumpsys activity lmk` counts them.
+
+## Storage images (2026-09-29)
+
+The boot on the case-sensitive images of [storage.md](storage.md): the
+system image (compressed, with its translation cache), the derived image
+as its shadow, and the data directory as a data image. No boot
+animation (`debug.sf.nobootanimation`), no `--exclude`. M2 Pro, with other
+agents' builds and boots loading the host (load average 65–150), so the
+times are not comparable with the sections above.
+
+| Check | Result |
+| --- | --- |
+| First boot (empty data image) | `sys.boot_completed` after 48.8 s |
+| Names that differ only in case in `/data` | `Foo` and `foo` coexist |
+| `pm install -r -g` Chrome | Success; `/data/data/org.chromium.chrome` is 10212:10212 0700 |
+| `am start -W -S` Settings (`.homepage.SettingsHomepageActivity`) | `Status: ok`, COLD, 2232 ms |
+| `am start -W -S` Chrome | `Status: ok`, COLD, 2688 ms (first-run activity) |
+| 1 GiB written to `/data/local/tmp`, deleted, stop | the image file went from 2.86 GB to 1.63 GB (1.44 GB used in its volume) |
+| Second boot of the same data image | `sys.boot_completed` after 33–42 s; Chrome's data directory still 10212:10212 0700; Settings (6.7 s) and Chrome (5.5 s) start; no "Failed to prepare", `CANTOPEN` or "Ignoring missing CE app data dir" (#261) |
+
+One second-boot run's Settings launch 1 s after `sys.boot_completed`
+timed out (`am start -W`, 14 s); 20 s later it started, as did every
+launch of the other runs.
+
+### How to check it
+
+```
+cargo aim build                       # attaches _build/android16-image and target/aim/derived
+cargo aim boot --data target/aim/boot/data
+# in another shell, with the boot's binder (guest-init's pid):
+linux-run --root target/aim/derived/root --path-map target/aim/boot/data/run/path-map \
+    --binder dev.aim.guest-init.<pid>.binder /system/bin/sh -c \
+    'echo a > /data/local/tmp/Foo; echo b > /data/local/tmp/foo; ls /data/local/tmp'
+cargo aim storage                     # the images and what they occupy
+```
+
+After a stop, `target/aim/boot/data` is empty (detached); a second
+`cargo aim boot` attaches the same image, and installed apps start with
+their data. Look for a data image left attached by a crash with
+`hdiutil info`; guest-init detaches it at the next start.

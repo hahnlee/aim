@@ -3,7 +3,10 @@
 //! [--gpu DIR] [--display SOCKET] [--trace]
 //! [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]`
 //!
-//! Development entry point for aimd's init role.
+//! Development entry point for aimd's init role. With `--run`, the data
+//! directory's persistent content lives in a case-sensitive disk image
+//! beside it (`<data>.asif`), created on first use, attached hidden at
+//! `<data>` for the boot and detached when it stops (docs/storage.md).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -110,6 +113,8 @@ fn main() {
         }
     };
     let report = boot.run().clone();
+    // Detaches the data image; `exit` below would skip it.
+    drop(boot);
     if !quiet {
         for diagnostic in &report.diagnostics {
             println!("diag: {diagnostic}");

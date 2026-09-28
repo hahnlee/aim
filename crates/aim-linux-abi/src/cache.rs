@@ -14,6 +14,15 @@
 //! An ELF stored inside another file (an APK's native library) is indexed
 //! as `<host path>!<offset>` ([`member_path`]).
 //!
+//! A system image carries its own cache beside its tree (docs/storage.md):
+//! `<volume>/root` is the guest root and `<volume>/translated` a cache
+//! whose index is keyed by the path relative to `root`, without the device,
+//! since the volume's mount point and device change with every attach:
+//!
+//! ```text
+//! <volume>/translated/paths/<sha256 of relative path> -> "<ino>:<size>:<mtime> <sha256>"
+//! ```
+//!
 //! - An entry is staged in `<dir>/.tmp-*`, made read-only, and published with
 //!   one `rename`, so readers see a complete entry or none. It is never
 //!   modified afterwards. A version bump changes every key, which
@@ -96,6 +105,14 @@ impl FileStat {
             self.dev, self.ino, self.size, self.mtime_s, self.mtime_ns
         )
     }
+
+    /// The tag of a file inside an image, whose device is not stable.
+    fn image_tag(&self) -> String {
+        format!(
+            "{}:{}:{}.{:09}",
+            self.ino, self.size, self.mtime_s, self.mtime_ns
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +132,8 @@ pub struct Entry {
 #[derive(Clone, Debug)]
 pub struct Cache {
     dir: PathBuf,
+    /// An image's cache: the tree its index is relative to.
+    image_root: Option<PathBuf>,
 }
 
 /// What [`Cache::translate_file`] did.
@@ -244,11 +263,36 @@ pub fn remove_tree(p: &Path) -> io::Result<()> {
 impl Cache {
     /// A cache rooted at `dir` (created on first publish).
     pub fn new(dir: impl Into<PathBuf>) -> Cache {
-        Cache { dir: dir.into() }
+        Cache {
+            dir: dir.into(),
+            image_root: None,
+        }
+    }
+
+    /// The cache of the image whose guest root is `root`:
+    /// `<root>/../translated`, indexed relative to `root`. `root` must be
+    /// spelled as the host paths looked up in it are (the runtime's
+    /// canonical root).
+    pub fn image(root: &Path) -> Cache {
+        Cache {
+            dir: root.parent().unwrap_or(root).join("translated"),
+            image_root: Some(root.to_path_buf()),
+        }
+    }
+
+    /// [`Cache::image`] if the image has a translation cache.
+    pub fn image_of(root: &Path) -> Option<Cache> {
+        let cache = Cache::image(root);
+        cache.dir.is_dir().then_some(cache)
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Whether this is an image's own (read-only) cache.
+    pub fn is_image(&self) -> bool {
+        self.image_root.is_some()
     }
 
     /// `~/Library/Caches/aim/translated`, with the home directory
@@ -274,10 +318,26 @@ impl Cache {
         self.dir.join(key)
     }
 
-    fn index_path(&self, host_path: &Path) -> PathBuf {
-        self.dir
-            .join("index")
-            .join(xlate::sha256_hex(host_path.as_os_str().as_bytes()))
+    /// The index link of `host_path` and the tag it must carry; None for a
+    /// path outside an image cache's tree.
+    fn index_link(&self, host_path: &Path, st: &FileStat) -> Option<(PathBuf, String)> {
+        match &self.image_root {
+            None => Some((
+                self.dir
+                    .join("index")
+                    .join(xlate::sha256_hex(host_path.as_os_str().as_bytes())),
+                st.tag(),
+            )),
+            Some(root) => {
+                let relative = host_path.strip_prefix(root).ok()?;
+                Some((
+                    self.dir
+                        .join("paths")
+                        .join(xlate::sha256_hex(relative.as_os_str().as_bytes())),
+                    st.image_tag(),
+                ))
+            }
+        }
     }
 
     /// Whether `p` is a file inside this cache's published entries.
@@ -288,10 +348,11 @@ impl Cache {
     /// The sha256 recorded for the file at `host_path`, if the index has it
     /// and the file has not changed since.
     pub fn lookup_digest(&self, host_path: &Path, st: &FileStat) -> Option<String> {
-        let target = fs::read_link(self.index_path(host_path)).ok()?;
+        let (link, want) = self.index_link(host_path, st)?;
+        let target = fs::read_link(link).ok()?;
         let target = target.to_str()?;
         let (tag, sha) = target.split_once(' ')?;
-        (tag == st.tag() && sha.len() == 64).then(|| sha.to_string())
+        (tag == want && sha.len() == 64).then(|| sha.to_string())
     }
 
     /// Read a published entry.
@@ -424,8 +485,13 @@ impl Cache {
 
     /// Point the index entry of `host_path` at `sha256`.
     pub fn record_index(&self, host_path: &Path, st: &FileStat, sha256: &str) -> io::Result<()> {
-        let link = self.index_path(host_path);
-        let want = format!("{} {sha256}", st.tag());
+        let (link, tag) = self.index_link(host_path, st).ok_or_else(|| {
+            io::Error::other(format!(
+                "{}: outside the image this cache belongs to",
+                host_path.display()
+            ))
+        })?;
+        let want = format!("{tag} {sha256}");
         if fs::read_link(&link).ok().as_deref() == Some(Path::new(&want)) {
             return Ok(());
         }
@@ -493,8 +559,60 @@ impl Cache {
 
 #[cfg(test)]
 mod tests {
-    use super::migrate_legacy_dir;
+    use super::{Cache, FileStat, migrate_legacy_dir};
     use std::fs;
+
+    #[test]
+    fn image_index_is_relative_to_the_root() {
+        let vol = std::env::temp_dir().join(format!("aim-image-cache-{}", std::process::id()));
+        let _ = super::remove_tree(&vol);
+        let root = vol.join("root");
+        fs::create_dir_all(root.join("system/lib64")).unwrap();
+        let lib = root.join("system/lib64/libx.so");
+        fs::write(&lib, b"original").unwrap();
+        let outside = vol.join("elsewhere.so");
+        fs::write(&outside, b"original").unwrap();
+        let sha = "ab".repeat(32);
+
+        assert!(Cache::image_of(&root).is_none(), "no translated/ yet");
+        let cache = Cache::image(&root);
+        let st = FileStat::of_path(&lib).unwrap();
+        cache.record_index(&lib, &st, &sha).unwrap();
+        assert!(Cache::image_of(&root).is_some());
+        assert_eq!(cache.lookup_digest(&lib, &st), Some(sha.clone()));
+        // Another attach: another device and mount point, same relative
+        // path, inode, size and mtime.
+        let moved = vol.join("moved");
+        fs::rename(vol.join("root"), &moved).unwrap();
+        let (moved_lib, other) = (moved.join("system/lib64/libx.so"), Cache::image(&moved));
+        let st2 = FileStat {
+            dev: st.dev + 1,
+            ..FileStat::of_path(&moved_lib).unwrap()
+        };
+        assert_eq!(other.lookup_digest(&moved_lib, &st2), Some(sha.clone()));
+        // A changed file is a miss.
+        for stale in [
+            FileStat {
+                ino: st.ino + 1,
+                ..st2
+            },
+            FileStat {
+                size: st.size + 1,
+                ..st2
+            },
+            FileStat {
+                mtime_ns: (st.mtime_ns + 1) % 1_000_000_000,
+                ..st2
+            },
+        ] {
+            assert_eq!(other.lookup_digest(&moved_lib, &stale), None);
+        }
+        // A path outside the tree is not the image cache's.
+        let st3 = FileStat::of_path(&outside).unwrap();
+        assert_eq!(other.lookup_digest(&outside, &st3), None);
+        assert!(other.record_index(&outside, &st3, &sha).is_err());
+        super::remove_tree(&vol).unwrap();
+    }
 
     #[test]
     fn legacy_dir_moves_once_and_never_replaces() {

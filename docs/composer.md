@@ -114,8 +114,8 @@ in the background.
 
 ## Boot
 
-With the derived image built (`cargo aim build`, which puts it at
-`target/aim/derived-image`):
+With the derived image built (`cargo aim build`, which mounts it at
+`target/aim/derived`, root `target/aim/derived/root`):
 
 ```sh
 aim-display --socket /tmp/display.sock &

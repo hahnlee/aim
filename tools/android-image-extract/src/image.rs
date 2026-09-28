@@ -435,7 +435,7 @@ pub fn print(lines: &[Line], out: &mut dyn Write) -> std::io::Result<()> {
         let r = &line.report;
         writeln!(
             out,
-            "{:<48} dirs={} files={} hardlinks={} symlinks={} bytes={} special={} collisions={}  {}",
+            "{:<48} dirs={} files={} hardlinks={} symlinks={} bytes={} special={}  {}",
             line.unit,
             r.directories,
             r.files,
@@ -443,16 +443,12 @@ pub fn print(lines: &[Line], out: &mut dyn Write) -> std::io::Result<()> {
             r.symlinks,
             r.bytes,
             r.special.len(),
-            r.collisions.len(),
             line.detail
         )?;
     }
     if let Some(total) = lines.last() {
         for (path, mode) in &total.report.special {
             writeln!(out, "special (not created): {:o} {}", mode, path.display())?;
-        }
-        for path in &total.report.collisions {
-            writeln!(out, "host name collision (not created): {}", path.display())?;
         }
     }
     Ok(())

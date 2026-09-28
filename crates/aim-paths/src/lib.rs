@@ -3,9 +3,9 @@
 //! tests all find their inputs here, so there is one layout:
 //!
 //! - `_build/`: large fetched inputs, each verified against a pin: the
-//!   extracted original image, the AOSP trees (`_build/aosp`), the ANGLE
-//!   checkout and its build. A worktree may link them from another
-//!   checkout.
+//!   system image (the original as a compressed disk image), the AOSP
+//!   trees (`_build/aosp`), the ANGLE checkout and its build. A worktree
+//!   may link them from another checkout.
 //! - `target/aim/`: every build output, per node; `target/aim-cache/`: the
 //!   node stamps.
 //!
@@ -42,11 +42,26 @@ pub fn downloads() -> PathBuf {
     fetched().join("downloads")
 }
 
-/// The extracted original image (read-only; `image` node). In a worktree it
-/// may be a link: resolve it before handing it to a tool that writes beside
-/// or into its argument.
+/// The system image (`image` node): the pinned original as a compressed
+/// read-only case-sensitive disk image with its translation cache
+/// (docs/storage.md). In a worktree it may be a link to the main
+/// checkout's.
+pub fn system_image() -> PathBuf {
+    fetched().join("android16-image.dmg")
+}
+
+/// Where the system image is mounted: beside the real image file, so every
+/// checkout that links it finds the one attachment.
+pub fn system_image_mount() -> PathBuf {
+    let image = system_image();
+    let real = std::fs::canonicalize(&image).unwrap_or(image);
+    real.with_extension("")
+}
+
+/// The original image's root (read-only; `image` node), in the mounted
+/// system image.
 pub fn original_image() -> PathBuf {
-    fetched().join("android16-image-full")
+    system_image_mount().join("root")
 }
 
 /// The ANGLE checkout (`angle` node).
@@ -116,9 +131,22 @@ pub fn angle() -> PathBuf {
     angle_source().join("out/AimRelease")
 }
 
-/// The derived image of `image/overlay.toml` (`derived-image` node).
+/// Where the derived image is mounted: the system image with the overlay
+/// of `image/overlay.toml` in a shadow file (`derived-image` node), and the
+/// overlay's translations (`translation-cache` node).
+pub fn derived_image_mount() -> PathBuf {
+    out().join("derived")
+}
+
+/// The shadow file that holds the derived image's changes to the system
+/// image.
+pub fn derived_image_shadow() -> PathBuf {
+    out().join("derived.shadow")
+}
+
+/// The derived image's root, the guest's `/`.
 pub fn derived_image() -> PathBuf {
-    out().join("derived-image")
+    derived_image_mount().join("root")
 }
 
 /// Markers of tests that skipped for a missing input (see [`skip`]).
@@ -164,7 +192,7 @@ pub fn input(path: PathBuf, node: &str) -> Option<PathBuf> {
     None
 }
 
-/// The extracted original image, resolved, if it holds `file`; otherwise
+/// The original image, resolved, if it holds `file`; otherwise
 /// the test skips.
 pub fn original_image_with(file: &str) -> Option<PathBuf> {
     input(original_image().join(file), "image")?;

@@ -422,6 +422,15 @@ pub fn create_socket(spec: &SocketSpec) -> Result<(OwnedFd, i32), String> {
     if created_type == libc::SOCK_DGRAM {
         set_linux_buffers(fd.as_raw_fd());
     }
+    // The guest owner and mode, on the inode; before the host mode, which
+    // may deny the owner the write access an attribute change needs.
+    let owner = crate::guest_inode::GuestInode {
+        uid: Some(spec.uid),
+        gid: Some(spec.gid),
+        mode: Some(spec.perm),
+    };
+    crate::guest_inode::record(&spec.host_path, owner)
+        .map_err(|e| format!("{}: {e}", spec.host_path.display()))?;
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&spec.host_path, fs::Permissions::from_mode(spec.perm))
         .map_err(|e| format!("chmod {}: {e}", spec.host_path.display()))?;
@@ -509,13 +518,6 @@ impl Launcher for HostLauncher {
                     },
                     if socket.passcred { "passcred" } else { "-" },
                     if socket.listen { "listen" } else { "-" },
-                ),
-            );
-            append(
-                &self.layout.fs_attrs_file(),
-                &format!(
-                    "/dev/socket/{}\t{}\t{}\t{:o}\n",
-                    socket.name, socket.uid, socket.gid, socket.perm
                 ),
             );
             passed.push((fd, socket.fd));

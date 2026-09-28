@@ -14,6 +14,10 @@ on early-init
     setprop debug.renderengine.backend skiaglthreaded
     # A Retina display at 2x.
     setprop ro.sf.lcd_density 320
+    # No boot animation: bootanimation starts, sees this and exits
+    # without reading bootanimation.zip (whose reads the Mac's security
+    # agent flagged, #232); the window stays black until the first frame.
+    setprop debug.sf.nobootanimation 1
 
 # Partitions are directories of the derived image and /data is a host
 # directory: aim-guest-init's mount_all mounts nothing and raises the

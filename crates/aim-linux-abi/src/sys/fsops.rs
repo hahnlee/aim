@@ -1,9 +1,9 @@
 //! Namespace and metadata changes: mkdir, unlink, link, rename, chmod,
 //! chown, truncate, fallocate, sync, utimens, flock. The image under a path
 //! map is read-only (EROFS); ownership the host cannot represent is
-//! recorded in fs-attrs (`attrs`).
+//! recorded on the host inode (`attrs`).
 
-use super::attrs::{self, Attr};
+use super::attrs::{self, Attr, Host};
 use super::fs::{AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, check_writable};
 use super::memfd;
 use crate::errno::{self, EINVAL, ENOENT};
@@ -35,7 +35,8 @@ pub fn mkdirat(a: [u64; 6]) -> i64 {
             // SAFETY: host path.
             let res = errno::check(unsafe { libc::mkdir(r.host.as_ptr(), mode) } as i64);
             if res == 0 {
-                attrs::created(&r.guest);
+                let host = Host::Path(&r.host);
+                attrs::created(host, || r.guest.clone());
                 if attrs::recording() {
                     let mut st: libc::stat = unsafe { std::mem::zeroed() };
                     // SAFETY: host path, local buffer.
@@ -43,8 +44,9 @@ pub fn mkdirat(a: [u64; 6]) -> i64 {
                     let made = st.st_mode as u32 & 0o7777;
                     let guest = (made & 0o077) | (want & 0o700) | (want & libc::S_ISVTX as u32);
                     if guest != made {
-                        record(
-                            &r.guest,
+                        attrs::record(
+                            host,
+                            || r.guest.clone(),
                             Attr {
                                 mode: Some(guest),
                                 ..Default::default()
@@ -67,7 +69,7 @@ pub fn mknodat(a: [u64; 6]) -> i64 {
     };
     let res = mknod_host(&r, mode);
     if res == 0 {
-        attrs::created(&r.guest);
+        attrs::created(Host::Path(&r.host), || r.guest.clone());
     }
     res
 }
@@ -126,7 +128,7 @@ pub fn symlinkat(a: [u64; 6]) -> i64 {
             // SAFETY: host path.
             let res = errno::check(unsafe { libc::symlink(t.as_ptr(), r.host.as_ptr()) } as i64);
             if res == 0 {
-                attrs::created(&r.guest);
+                attrs::created(Host::Path(&r.host), || r.guest.clone());
             }
             res
         }
@@ -190,22 +192,12 @@ pub fn renameat2(a: [u64; 6]) -> i64 {
             -(e as i64)
         };
     }
-    if flags & RENAME_EXCHANGE != 0 {
-        let (a, b) = (attrs::lookup(&old.guest), attrs::lookup(&new.guest));
-        attrs::record(&old.guest, b);
-        attrs::record(&new.guest, a);
-    } else {
-        attrs::renamed(&old.guest, &new.guest);
-    }
+    // Owners and modes are attributes of the inodes: they moved along.
     0
 }
 
 pub fn renameat(a: [u64; 6]) -> i64 {
     renameat2([a[0], a[1], a[2], a[3], 0, 0])
-}
-
-fn record(guest: &str, a: Attr) {
-    attrs::record(guest, a);
 }
 
 /// The host mode for a guest chmod. Under a path map the guest's mode is
@@ -236,8 +228,9 @@ pub fn fchmodat(a: [u64; 6]) -> i64 {
     if unsafe { libc::chmod(r.host.as_ptr(), host_mode(mode, st.st_mode)) } < 0 {
         return -(errno::last() as i64);
     }
-    record(
-        &r.guest,
+    attrs::record(
+        Host::Path(&r.host),
+        || r.guest,
         Attr {
             mode: Some(mode),
             ..Default::default()
@@ -258,15 +251,14 @@ pub fn fchmod(a: [u64; 6]) -> i64 {
     if unsafe { libc::fchmod(fd, host_mode(mode, st.st_mode)) } < 0 {
         return -(errno::last() as i64);
     }
-    if let Some(g) = fd_guest(fd) {
-        record(
-            &g,
-            Attr {
-                mode: Some(mode),
-                ..Default::default()
-            },
-        );
-    }
+    attrs::record(
+        Host::Fd(fd),
+        || fd_guest(fd).unwrap_or_default(),
+        Attr {
+            mode: Some(mode),
+            ..Default::default()
+        },
+    );
     0
 }
 
@@ -295,7 +287,7 @@ fn chown_host(path: &std::ffi::CStr, guest: &str, uid: u64, gid: u64, follow: bo
         if r < 0 {
             return -(errno::last() as i64);
         }
-        record(guest, owner(uid, gid));
+        attrs::record(Host::Path(path), || guest.to_string(), owner(uid, gid));
         return 0;
     }
     // SAFETY: host path.
@@ -335,9 +327,11 @@ pub fn fchown(a: [u64; 6]) -> i64 {
         if unsafe { libc::fstat(fd, &mut st) } < 0 {
             return -(errno::last() as i64);
         }
-        if let Some(g) = fd_guest(fd) {
-            record(&g, owner(a[1], a[2]));
-        }
+        attrs::record(
+            Host::Fd(fd),
+            || fd_guest(fd).unwrap_or_default(),
+            owner(a[1], a[2]),
+        );
         return 0;
     }
     // SAFETY: plain fchown.
@@ -484,4 +478,200 @@ pub fn utimensat(a: [u64; 6]) -> i64 {
         return -(ENOENT as i64);
     }
     errno::check(res as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    use super::*;
+    use crate::sys::fs::{openat, stat_at};
+    use crate::vfs::LINUX_AT_FDCWD;
+
+    const AT: u64 = LINUX_AT_FDCWD as u64;
+
+    fn c(path: &str) -> CString {
+        CString::new(path).unwrap()
+    }
+
+    /// (uid, gid, mode) the guest's stat shows.
+    fn owner(path: &str) -> (u32, u32, u32) {
+        let st = stat_at(LINUX_AT_FDCWD, path.as_bytes(), AT_SYMLINK_NOFOLLOW).unwrap();
+        (st.st_uid, st.st_gid, st.st_mode as u32 & 0o7777)
+    }
+
+    fn chown(path: &str, uid: u32, gid: u32) {
+        let p = c(path);
+        let flags = AT_SYMLINK_NOFOLLOW;
+        let r = fchownat([AT, p.as_ptr() as u64, uid as u64, gid as u64, flags, 0]);
+        assert_eq!(r, 0, "chown {path}");
+    }
+
+    fn chmod(path: &str, mode: u32) {
+        let p = c(path);
+        assert_eq!(fchmodat([AT, p.as_ptr() as u64, mode as u64, 0, 0, 0]), 0);
+    }
+
+    fn create(path: &str) {
+        let p = c(path);
+        let flags = 0o1 | 0o100 | 0o200 | 0o2000000; // O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC
+        let fd = openat([AT, p.as_ptr() as u64, flags, 0o600, 0, 0]);
+        assert!(fd >= 0, "create {path}: {fd}");
+        // SAFETY: the fd just opened.
+        unsafe { libc::close(fd as i32) };
+    }
+
+    #[test]
+    fn owners_live_on_the_inode() {
+        let (_view, dir) = vfs::test_view();
+        let base = format!("/data/attrs-{}", std::process::id());
+        let p = c(&base);
+        assert_eq!(mkdirat([AT, p.as_ptr() as u64, 0o771, 0, 0, 0]), 0);
+        chown(&base, 1000, 1000);
+        chmod(&base, 0o771);
+        assert_eq!(owner(&base), (1000, 1000, 0o771));
+
+        // Created files belong to the creator (root here) until chowned.
+        let (a, b) = (format!("{base}/a"), format!("{base}/b"));
+        create(&a);
+        assert_eq!(owner(&a).0, 0);
+        chown(&a, 10123, 10123);
+        chmod(&a, 0o640);
+        assert_eq!(owner(&a), (10123, 10123, 0o640));
+        create(&b);
+        chown(&b, 2000, 2001);
+
+        // A rename, an exchange and a hard link keep each inode's owner.
+        let moved = c(&format!("{base}/moved"));
+        let pa = c(&a);
+        assert_eq!(
+            renameat2([AT, pa.as_ptr() as u64, AT, moved.as_ptr() as u64, 0, 0]),
+            0
+        );
+        assert_eq!(owner(&format!("{base}/moved")), (10123, 10123, 0o640));
+        let pb = c(&b);
+        let swap = [AT, pb.as_ptr() as u64, AT, moved.as_ptr() as u64, 2, 0];
+        assert_eq!(renameat2(swap), 0);
+        assert_eq!(owner(&b), (10123, 10123, 0o640));
+        assert_eq!(owner(&format!("{base}/moved")).0, 2000);
+        let link = c(&format!("{base}/link"));
+        assert_eq!(
+            linkat([AT, pb.as_ptr() as u64, AT, link.as_ptr() as u64, 0, 0]),
+            0
+        );
+        assert_eq!(owner(&format!("{base}/link")), (10123, 10123, 0o640));
+
+        // A file created read-only gets its owner too.
+        let ro = c(&format!("{base}/ro"));
+        let fd = crate::sys::fs::openat([AT, ro.as_ptr() as u64, 0o100 | 0o200, 0o444, 0, 0]);
+        assert!(fd >= 0);
+        // SAFETY: the fd just opened.
+        unsafe { libc::close(fd as i32) };
+        chown(&format!("{base}/ro"), 1013, 1013);
+        assert_eq!(owner(&format!("{base}/ro")), (1013, 1013, 0o444));
+
+        // A FIFO and a symlink carry their own owner.
+        let fifo = c(&format!("{base}/fifo"));
+        assert_eq!(
+            mknodat([
+                AT,
+                fifo.as_ptr() as u64,
+                libc::S_IFIFO as u64 | 0o600,
+                0,
+                0,
+                0
+            ]),
+            0
+        );
+        chown(&format!("{base}/fifo"), 1036, 1036);
+        assert_eq!(owner(&format!("{base}/fifo")).0, 1036);
+        let sym = c(&format!("{base}/sym"));
+        let target = c("b");
+        assert_eq!(
+            symlinkat([target.as_ptr() as u64, AT, sym.as_ptr() as u64, 0, 0, 0]),
+            0
+        );
+        chown(&format!("{base}/sym"), 1001, 1001);
+        assert_eq!(owner(&format!("{base}/sym")).0, 1001);
+        assert_eq!(owner(&b).0, 10123);
+
+        // A second boot starts with a fresh runtime directory: the owners
+        // are still there (#261).
+        let _ = std::fs::remove_file(dir.join("run/fs-attrs"));
+        assert_eq!(owner(&b), (10123, 10123, 0o640));
+        assert_eq!(owner(&base), (1000, 1000, 0o771));
+    }
+
+    #[test]
+    fn image_paths_use_the_table() {
+        let (_view, dir) = vfs::test_view();
+        let name = format!("image-{}", std::process::id());
+        let host = dir.join("root").join(&name);
+        std::fs::create_dir_all(&host).unwrap();
+        let guest = format!("/{name}");
+        // The guest cannot change the read-only image.
+        let p = c(&guest);
+        assert_eq!(fchownat([AT, p.as_ptr() as u64, 1000, 1000, 0, 0]), -30);
+        // init's chown of an image directory goes to the table.
+        let h = CString::new(host.as_os_str().as_bytes()).unwrap();
+        let a = Attr {
+            uid: Some(1000),
+            gid: Some(1001),
+            mode: Some(0o751),
+        };
+        attrs::record(attrs::Host::Image(&h), || guest.clone(), a);
+        let table = std::fs::read_to_string(dir.join("run/fs-attrs")).unwrap();
+        assert!(
+            table.contains(&format!("{guest}\t1000\t1001\t751\n")),
+            "{table}"
+        );
+        assert_eq!(owner(&guest), (1000, 1001, 0o751));
+    }
+
+    /// The cost of a guest stat (#273): `cargo test -p aim-linux-abi --lib
+    /// --release stat_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn stat_cost() {
+        let (_view, dir) = vfs::test_view();
+        let base = format!("/data/bench-{}", std::process::id());
+        let p = c(&base);
+        assert_eq!(mkdirat([AT, p.as_ptr() as u64, 0o771, 0, 0, 0]), 0);
+        let files: Vec<String> = (0..1000).map(|i| format!("{base}/f{i}")).collect();
+        for f in &files {
+            create(f);
+            chown(f, 10123, 10123);
+        }
+        let image = dir.join("root/bench");
+        std::fs::create_dir_all(&image).unwrap();
+        let time = |what: &str, paths: &[String]| {
+            let rounds = 20;
+            let start = std::time::Instant::now();
+            for _ in 0..rounds {
+                for f in paths {
+                    std::hint::black_box(owner(f));
+                }
+            }
+            let ns = start.elapsed().as_nanos() / (rounds * paths.len()) as u128;
+            eprintln!("{what}: {ns} ns/stat");
+        };
+        time("writable file (guest attribute)", &files);
+        time(
+            "image file (table, original attribute)",
+            &["/bench".to_string()],
+        );
+        // What every stat paid before, after any process appended to the
+        // table: rereading and parsing it whole (a boot's 51,800 lines).
+        let table: String = (0..51_800)
+            .map(|i| format!("/data/data/com.example.app{i}/cache\t10123\t10123\t771\n"))
+            .collect();
+        let start = std::time::Instant::now();
+        std::hint::black_box(attrs::tests_parse(&table));
+        eprintln!(
+            "table reparse ({} bytes): {} us",
+            table.len(),
+            start.elapsed().as_micros()
+        );
+    }
 }

@@ -69,6 +69,16 @@ programs, and implement only what lies below it.
    manifest (additions, and explicitly listed replacements and removals)
    with its own identity. The original's identity is the archive's sha256,
    recorded beside the tree when it is extracted.
+   - **Case-sensitive disk images** ([storage.md](../storage.md)).
+     Android's filesystems are case-sensitive and the Mac's is not: an
+     extraction onto the host lost 7 files of the pinned image that differ
+     from others only in case. The original is extracted into a
+     case-sensitive APFS volume, which becomes a compressed read-only disk
+     image (lzfse, 2.1 GB for the 3.8 GB tree and its translations); the
+     derived image is that image with the overlay in a shadow file. The
+     guest's writable data is a sparse case-sensitive image per data
+     directory. All are attached hidden by the user, without admin rights.
+     The system image is a local build artefact, never distributed.
    - Our HALs, the vintf manifest and the GPU libraries live in `/vendor`,
      as a device vendor's would.
    - **GPU driver:** an addition, not a replacement. The original `libEGL`
@@ -103,7 +113,10 @@ programs, and implement only what lies below it.
      shadow-stack pointer held in memory, not in x18.
 
    Translated copies live in a cache keyed by the original file's sha256 and
-   the translator version. The loader maps them file-backed, so pages are
+   the translator version. The system image carries the cache of its own
+   files, indexed by path within the image (decision 5); linux-run looks
+   there first, then in the user's cache, and rewrites at load time only
+   what neither has. The loader maps them file-backed, so pages are
    shared across processes, no code is patched while threads run, and
    code/data identification can use section and symbol information. Only code
    without a cache entry is rewritten when it is mapped: code created at run

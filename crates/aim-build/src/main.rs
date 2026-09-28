@@ -17,6 +17,7 @@ mod log;
 mod n2db;
 mod nodes;
 mod stamp;
+mod storage;
 mod test;
 mod tools;
 
@@ -48,6 +49,8 @@ commands:
   bench --compare A.json B.json
                          the change of every median from A to B
   status [NODE...]       which nodes are stale, and why
+  storage [DATA...]      what the system, derived and data images occupy on the
+                         host, and what a data image could give back (docs/storage.md)
   clean [NODE...]        forget NODEs (default: all) and remove their outputs
 
 options:
@@ -148,7 +151,11 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
             flag if flag.starts_with('-') => {
                 return Err(format!("unknown option {flag}\n\n{USAGE}"));
             }
-            name if matches!(parsed.command.as_str(), "build" | "status" | "clean") => {
+            name if matches!(
+                parsed.command.as_str(),
+                "build" | "status" | "clean" | "storage"
+            ) =>
+            {
                 parsed.names.push(name.into())
             }
             other => return Err(format!("unexpected argument {other}\n\n{USAGE}")),
@@ -221,6 +228,7 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
             let (graph, _) = load(args.verbose)?;
             let _lock = lock()?;
             if args.names.is_empty() {
+                nodes::detach_derived()?;
                 for dir in [aim_paths::out(), aim_paths::cache()] {
                     aim_android_image::assemble::force_remove(&dir)
                         .map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -259,6 +267,10 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
                 keep: args.keep,
             };
             bench::run(&ctx, &options)
+        }
+        "storage" => {
+            storage::run(&args.names)?;
+            Ok(ExitCode::SUCCESS)
         }
         "help" | "-h" | "--help" => {
             println!("{USAGE}");

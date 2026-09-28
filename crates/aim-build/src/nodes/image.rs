@@ -1,14 +1,20 @@
-//! `image`: the original image, extracted from the pinned archive of
-//! `image/original.lock` and verified by its identity. An existing tree is
-//! never rewritten: it may be shared with other checkouts.
+//! `image`: the system image (docs/storage.md). The pinned archive of
+//! `image/original.lock`, verified by its sha256, is extracted into a fresh
+//! case-sensitive volume (`root/`, with `root.identity` beside it), its ELF
+//! files are translated into the volume's `translated/`, and the volume
+//! becomes the compressed read-only `_build/android16-image.dmg`, mounted
+//! hidden at `_build/android16-image`. An existing image is never
+//! rewritten, since other checkouts may share it; this node then only
+//! checks its identity and attaches it.
 
 use super::repo;
 use crate::graph::{Action, Ctx, Dep, Node};
 use crate::hash;
 use crate::lockfile::Lock;
 use crate::log::Log;
+use aim_storage::system;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 const LOCK: &str = "image/original.lock";
@@ -16,33 +22,35 @@ const LOCK: &str = "image/original.lock";
 pub fn node() -> Node {
     Node {
         name: "image".into(),
-        deps: vec![Dep::order_only("host/android-image-extract")],
+        deps: vec![
+            Dep::order_only("host/android-image-extract"),
+            Dep::order_only("host/linux-translate"),
+        ],
         inputs: vec![repo(LOCK)],
-        outputs: vec![aim_paths::original_image()],
+        // Missing while the image is detached (after a restart), which
+        // runs the node, and so attaches it, before anything reads it.
+        outputs: vec![identity_file(&aim_paths::system_image_mount())],
         tools: Vec::new(),
-        recipe: 1,
+        recipe: 2,
         action: Action::Image,
         boot: true,
     }
 }
 
-/// The identity android-image-extract recorded beside the (resolved) tree.
-fn identity_file(tree: &Path) -> Result<PathBuf, String> {
-    let real = fs::canonicalize(tree).map_err(|e| format!("{}: {e}", tree.display()))?;
-    let mut name = real.file_name().unwrap().to_os_string();
-    name.push(".identity");
-    Ok(real.with_file_name(name))
+/// The identity android-image-extract recorded beside the tree.
+fn identity_file(mount: &Path) -> std::path::PathBuf {
+    mount.join("root.identity")
 }
 
-fn check(tree: &Path, want: &str) -> Result<(), String> {
-    let file = identity_file(tree)?;
+fn check(mount: &Path, want: &str) -> Result<(), String> {
+    let file = identity_file(mount);
     let got = fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
     if got.trim() == want {
         Ok(())
     } else {
         Err(format!(
-            "{} holds the original {}, but {LOCK} pins {want}; move it away to extract the pin",
-            tree.display(),
+            "{} holds the original {}, but {LOCK} pins {want}; move it away to build the pin",
+            aim_paths::system_image().display(),
             got.trim()
         ))
     }
@@ -51,24 +59,35 @@ fn check(tree: &Path, want: &str) -> Result<(), String> {
 pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     let lock = Lock::read(&repo(LOCK))?;
     let want = lock.get("SHA256")?;
-    let tree = aim_paths::original_image();
-    if tree.exists() {
-        check(&tree, want)?;
-        log.line(&format!("{} is the original {want}", tree.display()));
-        return Ok(());
+    let image = aim_paths::system_image();
+    if !image.exists() {
+        let archive = repo(lock.get("ARCHIVE")?);
+        let got = hash::sha256_file(&archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+        if got != want {
+            return Err(format!(
+                "{}: sha256 {got}, {LOCK} pins {want}",
+                archive.display()
+            ));
+        }
+        system::build(&image, "aim-system", |mount| {
+            // A name that differs from another only in case fails the
+            // extraction; on this volume there is none to lose.
+            log.run(
+                Command::new(ctx.workspace.host_bin("android-image-extract"))
+                    .arg(&archive)
+                    .arg(system::root(mount)),
+            )?;
+            log.run(
+                Command::new(ctx.workspace.host_bin("linux-translate"))
+                    .arg("--image")
+                    .arg(mount),
+            )
+        })?;
+        log.line(&format!("built {}", image.display()));
     }
-    let archive = repo(lock.get("ARCHIVE")?);
-    let got = hash::sha256_file(&archive).map_err(|e| format!("{}: {e}", archive.display()))?;
-    if got != want {
-        return Err(format!(
-            "{}: sha256 {got}, {LOCK} pins {want}",
-            archive.display()
-        ));
-    }
-    log.run(
-        Command::new(ctx.workspace.host_bin("android-image-extract"))
-            .arg(&archive)
-            .arg(&tree),
-    )?;
-    check(&tree, want)
+    let mount = aim_paths::system_image_mount();
+    system::attach(&image, None, &mount, false)?;
+    check(&mount, want)?;
+    log.line(&format!("{} is the original {want}", mount.display()));
+    Ok(())
 }

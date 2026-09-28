@@ -10,8 +10,9 @@
 //! - [`supervisor`], [`launch`], [`identity`]: services as host processes
 //!   running `linux-run`, with their sockets, environment, credentials and
 //!   restart policies.
-//! - [`fsops`], [`paths`]: filesystem builtins against the writable areas
-//!   of the guest view.
+//! - [`fsops`], [`paths`], [`guest_inode`]: filesystem builtins against
+//!   the writable areas of the guest view, and the guest owners of their
+//!   files.
 //! - [`apex`]: `/apex/apex-info-list.xml` for the pre-flattened APEX tree.
 //! - [`executor`], [`boot`]: the `CommandExecutor` and init's main loop.
 //!
@@ -23,6 +24,7 @@ pub mod boot;
 pub mod executor;
 pub mod fsops;
 pub mod futex;
+pub mod guest_inode;
 pub mod identity;
 pub mod launch;
 pub mod paths;
