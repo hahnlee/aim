@@ -200,6 +200,11 @@ fn ashmem() {
 }
 
 #[test]
+fn jit() {
+    check("t_jit", &[]);
+}
+
+#[test]
 fn memfd() {
     check("t_memfd", &[]);
 }

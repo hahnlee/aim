@@ -397,6 +397,13 @@ The host's security agent did not flag or block any of the four boots
   stops before such a transaction and the shim reads again with enough
   (docs/binder-driver.md). Chrome shows its new tab page, and its GPU
   process keeps running.
+- **Chrome's renderers died "V8 process OOM (Failed to reserve virtual
+  memory for CodeRange)"** (#260) on every web page: V8 reserves its code
+  range PROT_NONE and makes it RWX with `mprotect`, which Darwin refuses
+  (EACCES) for anything but `MAP_JIT` memory. RWX memory is now `MAP_JIT`
+  (ADR 0012, "Application JITs"). Chrome draws `https://example.com`, a
+  `data:` page's script runs (`fib(30)` in 9–17 ms, optimized code), and
+  the renderers stay up.
 
 ### Open
 
@@ -404,9 +411,8 @@ The host's security agent did not flag or block any of the four boots
 - #238 app processes' names in `/proc/<pid>/cmdline` for other processes;
 - #240 wide-gamut EGL configs; #241 phone and GMS startup ANRs; #242
   battery temperature; #230 traced and traced_probes aborts.
-- #260 Chrome's renderers die reserving V8's code range; #258 remaining
-  memfd seal gaps; #261 app data lost on a second boot of the same data
-  directory.
+- #258 remaining memfd seal gaps; #261 app data lost on a second boot of
+  the same data directory.
 
 ## Network (2026-09-28)
 
@@ -424,10 +430,9 @@ by DHCP. First boot, `cargo aim boot`, on a Mac on Wi-Fi:
   before `sys.boot_completed`.
 - Shell: `ping -c 3 www.google.com` answers; an NDK program resolves
   `example.com` through DnsResolver and reads `HTTP/1.1 200 OK`.
-- Chrome's browser process opens HTTPS connections to the page it is
-  given; its renderer dies before drawing it (#260). Its "No such process
-  (3)" warnings (#257), DnsResolver's ESRCH for a network with no
-  nameservers, are gone.
+- Chrome loads and draws `https://example.com` (#260 fixed the renderer).
+  Its "No such process (3)" warnings (#257), DnsResolver's ESRCH for a
+  network with no nameservers, are gone.
 
 ### Fixed on the way
 

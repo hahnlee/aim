@@ -14,7 +14,10 @@
 //!
 //! Darwin's `mmap` takes a non-fixed address as the start of a first-fit
 //! search, so a guest mapping without a usable hint is placed with `LO` as
-//! its hint.
+//! its hint. Placing takes [`placing`], so a range unmapped to be mapped
+//! again at the same address (`jit`) is not taken meanwhile.
+
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::errno::{self, ENOMEM};
 
@@ -38,6 +41,18 @@ pub fn hint(addr: u64, len: u64) -> u64 {
     }
 }
 
+static PLACING: RwLock<()> = RwLock::new(());
+
+/// Held while a mapping is placed by a hint.
+pub fn placing() -> RwLockReadGuard<'static, ()> {
+    PLACING.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Held while a range is unmapped and mapped again at its address.
+pub fn placing_exclusive() -> RwLockWriteGuard<'static, ()> {
+    PLACING.write().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Map anonymous private memory of `len` bytes in the guest range.
 pub fn map_anon(len: u64, prot: i32) -> Result<u64, i64> {
     map(LO, len, prot, libc::MAP_PRIVATE | libc::MAP_ANON, -1, 0)
@@ -46,6 +61,7 @@ pub fn map_anon(len: u64, prot: i32) -> Result<u64, i64> {
 /// `mmap` placed in the guest range, searching from `hint`. `flags` must
 /// not contain MAP_FIXED.
 pub fn map(hint: u64, len: u64, prot: i32, flags: i32, fd: i32, off: i64) -> Result<u64, i64> {
+    let _placing = placing();
     // SAFETY: a fresh mapping; the hint only steers placement.
     let p = unsafe { libc::mmap(hint as *mut _, len as usize, prot, flags, fd, off) };
     if p == libc::MAP_FAILED {

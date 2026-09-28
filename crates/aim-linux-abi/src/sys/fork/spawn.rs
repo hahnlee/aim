@@ -62,6 +62,7 @@ const VM_PROT_READ: i32 = 1;
 const VM_PROT_EXECUTE: i32 = 4;
 const VM_PROT_ALL: i32 = 7;
 const VM_FLAGS_FIXED: i32 = 0;
+const VM_FLAGS_ANYWHERE: i32 = 1;
 const VM_FLAGS_OVERWRITE: i32 = 0x4000;
 const VM_INHERIT_SHARE: u32 = 0;
 const VM_INHERIT_COPY: u32 = 1;
@@ -355,6 +356,18 @@ fn map_regions(r: &mut Reader, entries: &[Port]) -> Result<(), String> {
         // Only the heap window is mapped (reserved) here already.
         let in_window = (window::BASE..window::BASE + window::SIZE).contains(&g.start);
         let flags = VM_FLAGS_FIXED | if in_window { VM_FLAGS_OVERWRITE } else { 0 };
+        if g.prot == VM_PROT_ALL {
+            let src = if g.backing == Backing::Fresh {
+                None
+            } else {
+                let Some(&e) = entries.next() else {
+                    return Err("fork: fewer memory entries than regions".into());
+                };
+                Some(e)
+            };
+            map_jit(g.start, g.len, src)?;
+            continue;
+        }
         let mut addr = g.start;
         // SAFETY (all arms): mapping the parent's memory into our own guest
         // range, which nothing else of ours uses.
@@ -400,6 +413,41 @@ fn map_regions(r: &mut Reader, entries: &[Port]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// JIT memory (RWX, `jit`): a fresh `MAP_JIT` mapping at the parent's
+/// address, filled from the parent's copy `src`.
+fn map_jit(start: u64, len: u64, src: Option<Port>) -> Result<(), String> {
+    let mut tmp = 0;
+    if let Some(e) = src {
+        // SAFETY: mapping the parent's copy anywhere, to read it.
+        let kr = unsafe {
+            mach_vm_map(
+                task(),
+                &mut tmp,
+                len,
+                0,
+                VM_FLAGS_ANYWHERE,
+                e,
+                0,
+                0,
+                VM_PROT_READ,
+                VM_PROT_READ,
+                VM_INHERIT_COPY,
+            )
+        };
+        if kr != 0 {
+            return Err(format!(
+                "fork: cannot read JIT memory at {start:#x} (kr {kr:#x})"
+            ));
+        }
+    }
+    let r = crate::sys::jit::map_at(start, len, (tmp != 0).then_some(tmp as *const u8));
+    if tmp != 0 {
+        // SAFETY: the view mapped above.
+        unsafe { mach_vm_deallocate(task(), tmp, len) };
+    }
+    r.map_err(|e| format!("fork: cannot map JIT memory at {start:#x} ({e})"))
 }
 
 // ---- descriptors --------------------------------------------------------------------

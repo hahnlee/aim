@@ -771,6 +771,9 @@ unsafe fn host_signal(hsig: i32, si: &libc::siginfo_t, uc: *mut libc::c_void) ->
     ) && si.si_code > 0
         && si.si_code < 0x10000;
     if fault {
+        if matches!(hsig, libc::SIGSEGV | libc::SIGBUS) && super::jit::fault(ctx, m) {
+            return None;
+        }
         let host_fault = Some(from_host(hsig));
         if ctx.is_null() {
             return host_fault;

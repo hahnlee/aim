@@ -239,6 +239,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
     if placed {
         addr = arena::hint(addr, len);
     }
+    let placing = placed.then(arena::placing);
     let kind = flags & MAP_TYPE;
     let anon = flags & MAP_ANONYMOUS != 0;
     let mut hflags = if fixed { libc::MAP_FIXED } else { 0 };
@@ -247,6 +248,8 @@ pub fn mmap(a: [u64; 6]) -> i64 {
     }
     let exec = prot & PROT_EXEC != 0;
     let writable = prot & PROT_WRITE != 0;
+    // Fresh RWX memory: `jit` makes it so below.
+    let fresh_jit = anon && exec && writable;
     // (base, what remains to do before returning)
     enum Finish {
         Nothing,
@@ -307,7 +310,9 @@ pub fn mmap(a: [u64; 6]) -> i64 {
             }
         } else {
             let fill = !anon;
-            let initial = if fill || exec {
+            let initial = if fresh_jit {
+                libc::PROT_NONE
+            } else if fill || exec {
                 libc::PROT_READ | libc::PROT_WRITE
             } else {
                 host_prot(prot)
@@ -335,7 +340,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
                     let source = source.unwrap_or_else(|| xrt::exec_source(fd));
                     rewrite_file_copy(b, len, fd, off, &source);
                 }
-            } else if exec {
+            } else if exec && !fresh_jit {
                 // Fresh anonymous code: nothing written yet, but scan anyway so
                 // the path is the same as mprotect's.
                 trace_stats("rewrote", b, len, &patch::rewrite_region(b, len));
@@ -362,11 +367,20 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         unsafe { libc::munmap(base as *mut _, len as usize) };
         return -(ENOMEM as i64);
     }
+    drop(placing);
     match finish {
         Finish::Nothing => {}
         Finish::Protect => {
-            let r = host_mprotect(base, len, host_prot(prot));
+            let r = if writable && exec {
+                super::jit::protect_rwx(base, len)
+            } else {
+                host_mprotect(base, len, host_prot(prot))
+            };
             if r < 0 {
+                if fresh_jit {
+                    // SAFETY: unmapping the mapping we just created.
+                    unsafe { libc::munmap(base as *mut _, len as usize) };
+                }
                 return r;
             }
         }
@@ -456,6 +470,7 @@ pub fn mprotect(a: [u64; 6]) -> i64 {
     if window::touches_reserved(addr, addr + len) {
         return -(ENOMEM as i64);
     }
+    let rwx = prot & (PROT_WRITE | PROT_EXEC) == PROT_WRITE | PROT_EXEC;
     if prot & PROT_EXEC != 0 {
         super::memfd::before_exec_protect(addr, addr + len);
         let end = addr + len;
@@ -470,6 +485,7 @@ pub fn mprotect(a: [u64; 6]) -> i64 {
             let (lo, hi) = (lo.max(cur), hi.min(end));
             // A memfd's views are ART's dual-mapped JIT cache: never scanned.
             if cur_prot & libc::PROT_EXEC == 0
+                && !(rwx && vmmap::info_at(lo).is_some_and(|i| i.empty))
                 && !file_backed(lo)
                 && super::memfd::anon_name(lo).is_none()
             {
@@ -481,7 +497,15 @@ pub fn mprotect(a: [u64; 6]) -> i64 {
             cur = hi;
         }
     }
-    host_mprotect(addr, len, host_prot(prot))
+    if rwx {
+        return super::jit::protect_rwx(addr, len);
+    }
+    let r = host_mprotect(addr, len, host_prot(prot));
+    if r == -(errno::EACCES as i64) {
+        // JIT pages keep their protection.
+        return super::jit::protect_around(addr, len, host_prot(prot));
+    }
+    r
 }
 
 const MADV_DONTNEED: u64 = 4;
