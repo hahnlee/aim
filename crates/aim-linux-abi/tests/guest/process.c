@@ -32,6 +32,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -725,6 +726,8 @@ static void pid_namespace(pid_t host) {
   CHECK(setpriority(PRIO_USER, 0, 5) == 0 && getpriority(PRIO_USER, 0) == 5, "PRIO_USER");
   CHECK(getpriority(PRIO_USER, getuid() + 1) == -1 && errno == ESRCH, "another uid");
   CHECK(kill(0, 0) == 0, "own group");
+  struct sysinfo sys;
+  CHECK(sysinfo(&sys) == 0 && sys.procs == 1, "procs %d alone", sys.procs);
 
   int ready[2];
   CHECK(pipe(ready) == 0, "pipe");
@@ -739,6 +742,7 @@ static void pid_namespace(pid_t host) {
   char c;
   CHECK(read(ready[0], &c, 1) == 1, "child ready");
   CHECK(getpgid(child) == child && getsid(child) == 0, "child group %d", getpgid(child));
+  CHECK(sysinfo(&sys) == 0 && sys.procs == 2, "procs %d with the child", sys.procs);
   int fd = pidfd_open(child, 0);
   CHECK(fd >= 0 && pidfd_send_signal(fd, 0) == 0, "pidfd");
   CHECK(kill(-child, 0) == 0 && kill(-1, 0) == 0, "child group and kill(-1)");

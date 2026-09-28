@@ -150,7 +150,7 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
   groups), pidfds, the scheduler and priority calls and the rest reach
   guest processes only, and a Mac process is ESRCH. `getppid` and
   `/proc/<pid>/stat` give 0 for a parent outside, such as guest-init
-  (#364). A `linux-run` started without a table (tests, a debugging
+  (#364), and `sysinfo` counts the namespace's processes (#366). A `linux-run` started without a table (tests, a debugging
   shell) is alone in a private namespace with its descendants (#361);
   `--by-pid` joins a boot's. Signals, renicing and rescheduling another
   guest process follow the kernel's uid and capability rules (#362): an
