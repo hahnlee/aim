@@ -22,6 +22,12 @@
 //!
 //! The window chrome is the Mac's, with no button of Android's: the first
 //! window says once how to go back ([`back_hint`]), until dismissed.
+//!
+//! The same windows run in the display server and in a window host, an
+//! app's shim (`shim.rs`): the server shows the tasks of packages no host
+//! has, and hands a host's package's tasks to it ([`crate::hosts`]). A host
+//! sends its requests and input through the server, which alone knows
+//! which task is in front.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -71,8 +77,6 @@ struct TaskWindow {
     /// The task's bounds and caption, in display pixels.
     bounds: [i32; 4],
     caption: i32,
-    package: String,
-    title: String,
     visible: bool,
     closed: bool,
     /// Bounds asked for and not answered yet.
@@ -92,12 +96,37 @@ struct Held {
     touches: Vec<(Phase, f64, f64, [i32; 4], i64)>,
 }
 
+/// What the bridge said of a task.
+#[derive(Clone, Default)]
+struct Info {
+    package: String,
+    title: String,
+    /// Its bounds and caption, once it has a window.
+    bounds: Option<([i32; 4], i32)>,
+    /// A window host shows it.
+    hosted: bool,
+    /// Its window asked to close it.
+    closing: bool,
+}
+
+impl Info {
+    /// The window title: the task's label, else its app's name (a window
+    /// host's), else its package.
+    fn title(&self) -> String {
+        if !self.title.is_empty() {
+            self.title.clone()
+        } else {
+            crate::shim::app_name().unwrap_or_else(|| self.package.clone())
+        }
+    }
+}
+
 struct State {
     screen: Screen,
     device: Id,
+    /// The windows this process shows.
     tasks: HashMap<i32, TaskWindow>,
-    /// Package and title reported before a task's first bounds.
-    early: HashMap<i32, (String, String)>,
+    infos: HashMap<i32, Info>,
     front: Option<i32>,
     held: Option<Held>,
     generation: u64,
@@ -111,7 +140,7 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
-/// The task bridge's connection, for requests.
+/// The task bridge's connection, for requests (the server's).
 static BRIDGE: Mutex<Option<UnixStream>> = Mutex::new(None);
 
 /// Run `f` on the state (main thread, window mode). AppKit calls that may
@@ -120,7 +149,12 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
     STATE.with(|s| s.borrow_mut().as_mut().map(f))
 }
 
-fn send(r: Record) {
+/// Send `r` to the task bridge: this process's, or the server's for a
+/// window host.
+pub fn send(r: Record) {
+    if crate::shim::is_host() {
+        return crate::shim::send_window(r);
+    }
     let mut bridge = BRIDGE.lock().unwrap();
     let Some(sock) = bridge.as_mut() else { return };
     // SAFETY: `Record` is plain old data.
@@ -156,7 +190,7 @@ pub fn start(device: Id) -> crate::window::Window {
             screen,
             device,
             tasks: HashMap::new(),
-            early: HashMap::new(),
+            infos: HashMap::new(),
             front: None,
             held: None,
             generation: 0,
@@ -194,39 +228,76 @@ pub fn serve_bridge(sock: OwnedFd) {
         if sock.read_exact(buf).is_err() {
             break;
         }
-        on_main(move || on_record(&r));
+        on_main(move || on_bridge_record(&r));
     }
     *BRIDGE.lock().unwrap() = None;
     on_main(|| {
-        let tasks: Vec<i32> = with(|s| s.tasks.keys().copied().collect()).unwrap_or_default();
+        let tasks: Vec<i32> = with(|s| s.infos.keys().copied().collect()).unwrap_or_default();
         for task in tasks {
-            remove(task);
+            on_bridge_record(&Record {
+                op: window::REMOVED,
+                task,
+                ..Default::default()
+            });
         }
     });
 }
 
-fn on_record(r: &Record) {
+/// Keep what `r` says of its task.
+fn note(s: &mut State, r: &Record) -> Info {
+    let info = s.infos.entry(r.task).or_default();
+    match r.op {
+        window::PACKAGE => info.package = r.text().to_string(),
+        window::TITLE => info.title = r.text().to_string(),
+        window::TASK => info.bounds = Some((r.bounds, r.caption)),
+        _ => {}
+    }
+    info.clone()
+}
+
+/// A record of the task bridge (in the server): a window host's when one
+/// shows the task's package, else shown here.
+fn on_bridge_record(r: &Record) {
+    let host = with(|s| {
+        let info = note(s, r);
+        if r.op == window::FRONT {
+            s.front = Some(r.task);
+        }
+        let host = crate::hosts::of(&info.package);
+        if let Some(i) = s.infos.get_mut(&r.task) {
+            i.hosted = host.is_some();
+        }
+        host
+    })
+    .flatten();
+    match host {
+        Some(h) => {
+            h.send_window(r);
+            if r.op == window::REMOVED {
+                with(|s| s.infos.remove(&r.task));
+            }
+            if r.op == window::FRONT {
+                release_held(None);
+            }
+        }
+        None => apply(r),
+    }
+}
+
+/// A record the server passed on (in a window host).
+pub fn on_host_record(r: &Record) {
+    with(|s| note(s, r));
+    apply(r);
+}
+
+/// Show what `r` says in this process's windows.
+fn apply(r: &Record) {
     match r.op {
         window::TASK => task(r.task, r.bounds, r.caption),
         window::PACKAGE | window::TITLE => {
-            let text = r.text().to_string();
-            let is_title = r.op == window::TITLE;
             let shown = with(|s| {
-                if let Some(t) = s.tasks.get_mut(&r.task) {
-                    if is_title {
-                        t.title = text;
-                    } else {
-                        t.package = text;
-                    }
-                    return Some((t.window, title_of(t)));
-                }
-                let e = s.early.entry(r.task).or_default();
-                if is_title {
-                    e.1 = text;
-                } else {
-                    e.0 = text;
-                }
-                None
+                let w = s.tasks.get(&r.task)?.window;
+                Some((w, s.infos.get(&r.task)?.title()))
             })
             .flatten();
             if let Some((w, title)) = shown {
@@ -240,17 +311,89 @@ fn on_record(r: &Record) {
                 send!(w, c"miniaturize:" => (), Id = std::ptr::null_mut());
             }
         }
-        op => eprintln!("aim-display: task bridge sent {op}"),
+        op => eprintln!("aim-display: task record {op}"),
     }
 }
 
-/// The window title: the task's label, else its package.
-fn title_of(t: &TaskWindow) -> String {
-    if !t.title.is_empty() {
-        t.title.clone()
-    } else {
-        t.package.clone()
+/// A window host for `package` connected (in the server): the windows of
+/// its tasks move there.
+pub fn adopt(package: &str, host: &crate::hosts::Host) {
+    let tasks: Vec<(i32, Info)> = with(|s| {
+        s.infos
+            .iter_mut()
+            .filter(|(_, i)| i.package == package && !i.hosted)
+            .map(|(&task, i)| {
+                i.hosted = true;
+                (task, i.clone())
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+    let front = with(|s| s.front).flatten();
+    for (task, info) in tasks {
+        close_window(task);
+        let text = |op, text: &str| Record::with_text(op, task, text);
+        host.send_window(&text(window::PACKAGE, &info.package));
+        host.send_window(&text(window::TITLE, &info.title));
+        if let Some((bounds, caption)) = info.bounds {
+            host.send_window(&Record {
+                op: window::TASK,
+                task,
+                bounds,
+                caption,
+                ..Default::default()
+            });
+        }
+        if front == Some(task) {
+            host.send_window(&Record {
+                op: window::FRONT,
+                task,
+                ..Default::default()
+            });
+        }
     }
+}
+
+/// The window host for `package` left (in the server): the windows of its
+/// tasks come back here.
+pub fn disown(package: &str) {
+    let tasks: Vec<(i32, Info)> = with(|s| {
+        s.infos
+            .iter_mut()
+            .filter(|(_, i)| i.package == package && i.hosted && !i.closing)
+            .map(|(&task, i)| {
+                i.hosted = false;
+                (task, i.clone())
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+    for (task, info) in tasks {
+        if let Some((b, caption)) = info.bounds {
+            create(task, b, caption);
+        }
+    }
+}
+
+/// A window host asked to close `task` (in the server): its window does
+/// not come back here when the host goes.
+pub fn closing(task: i32) {
+    with(|s| {
+        if let Some(i) = s.infos.get_mut(&task) {
+            i.closing = true;
+        }
+    });
+}
+
+/// The task windows of this process, as (task, window number), for a
+/// window host to report.
+pub fn window_numbers() -> Vec<(i32, isize)> {
+    let windows: Vec<(i32, Id)> =
+        with(|s| s.tasks.iter().map(|(&t, w)| (t, w.window)).collect()).unwrap_or_default();
+    windows
+        .into_iter()
+        .map(|(t, w)| (t, send!(w, c"windowNumber" => isize)))
+        .collect()
 }
 
 fn cg(f: Frame) -> CGRect {
@@ -323,13 +466,10 @@ fn task(task: i32, b: [i32; 4], caption: i32) {
 
 /// A new task window over the task's content.
 fn create(task: i32, b: [i32; 4], caption: i32) {
-    let Some((screen, device, (package, title))) = with(|s| {
+    let Some((screen, device, title)) = with(|s| {
         s.applying = true;
-        (
-            s.screen,
-            s.device,
-            s.early.remove(&task).unwrap_or_default(),
-        )
+        let title = s.infos.get(&task).map(Info::title).unwrap_or_default();
+        (s.screen, s.device, title)
     }) else {
         return;
     };
@@ -383,13 +523,11 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
         view,
         bounds: b,
         caption,
-        package,
-        title,
         visible: true,
         closed: false,
         outstanding: 0,
     };
-    send!(w, c"setTitle:" => (), Id = nsstring(&title_of(&t)));
+    send!(w, c"setTitle:" => (), Id = nsstring(&title));
     // The screen may not take the window where the task is (above the
     // menu bar): the task follows the window.
     let placed = window_content(&screen, w);
@@ -400,11 +538,10 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
     send!(w, c"makeKeyAndOrderFront:" => (), Id = std::ptr::null_mut());
     send!(app, c"activateIgnoringOtherApps:" => (), bool = true);
     with(|s| s.applying = false);
-    // For `screencapture -l`.
-    eprintln!(
-        "aim-display: task {task} window {}",
-        send!(w, c"windowNumber" => isize)
-    );
+    // For `screencapture -l`, and for the server's stacking.
+    let number = send!(w, c"windowNumber" => isize);
+    eprintln!("aim-display: task {task} window {number}");
+    crate::shim::window_number(task, number);
     if placed != c {
         set_bounds(task, bounds(placed, caption));
     }
@@ -444,11 +581,18 @@ fn front(task: i32) {
 
 /// The task is gone: its window closes.
 fn remove(task: i32) {
-    let Some(Some(t)) = with(|s| {
-        s.early.remove(&task);
+    with(|s| {
+        s.infos.remove(&task);
         if s.front == Some(task) {
             s.front = None;
         }
+    });
+    close_window(task);
+}
+
+/// Close the task's window here.
+fn close_window(task: i32) {
+    let Some(Some(t)) = with(|s| {
         let t = s.tasks.remove(&task);
         s.applying = true;
         t
@@ -498,15 +642,30 @@ fn update_targets(changed: Option<i32>) {
 /// Window mode's handling of a pointer event in `view`; false when `view`
 /// is not a task window's.
 pub fn pointer(view: Id, phase: Phase, x: f64, y: f64, view_height: f64, t: i64) -> bool {
-    // None: not a task window's view; Some(None): held.
-    let touch = with(|s| {
+    let Some(Some((task, px, py, area))) = with(|s| {
         let (&task, tw) = s.tasks.iter().find(|(_, tw)| tw.view == view)?;
         let c = tw.content();
         let (px, py) = view_to_display(x, y, view_height, [c[0], c[1]], s.screen.scale);
-        let touch = (phase, px, py, c, t);
+        Some((task, px, py, c))
+    }) else {
+        return false;
+    };
+    if crate::shim::is_host() {
+        crate::shim::touch(task, phase, px, py, area, t);
+    } else {
+        touch(task, phase, px, py, area, t);
+    }
+    true
+}
+
+/// A touch at display pixel (`x`, `y`) of `task`'s window `area` (in the
+/// server): held until the task is in front.
+pub fn touch(task: i32, phase: Phase, x: f64, y: f64, area: [i32; 4], t: i64) {
+    let now = with(|s| {
+        let touch = (phase, x, y, area, t);
         if let Some(h) = &mut s.held {
             h.touches.push(touch);
-            return Some(None);
+            return None;
         }
         if phase == Phase::Down && s.front != Some(task) {
             s.generation += 1;
@@ -518,20 +677,16 @@ pub fn pointer(view: Id, phase: Phase, x: f64, y: f64, view_height: f64, t: i64)
             });
             request(window::FOCUS, task, [0; 4]);
             on_main_after(HOLD_MS, move || release_held(Some(generation)));
-            return Some(None);
+            return None;
         }
-        Some(Some(touch))
+        Some(touch)
     })
     .flatten();
-    let Some(touch) = touch else {
-        return false;
-    };
-    if let Some((phase, px, py, area, t)) = touch
+    if let Some((phase, x, y, area, t)) = now
         && let Some(input) = crate::input::input()
     {
-        input.touch(phase, px, py, area, t);
+        input.touch(phase, x, y, area, t);
     }
-    true
 }
 
 /// Send the held touches: when their task came to the front (`None`), or
@@ -602,9 +757,15 @@ extern "C" fn did_end_live_resize(_: Id, _: Sel, note: Id) {
 }
 
 extern "C" fn did_become_key(_: Id, _: Sel, note: Id) {
-    if let Some((task, _)) = task_of(note)
-        && with(|s| s.front != Some(task)) == Some(true)
-    {
+    if let Some((task, _)) = task_of(note) {
+        focus(task);
+    }
+}
+
+/// Make `task` the focused one, unless it is (in the server, which alone
+/// knows which task is in front; a window host asks it).
+pub fn focus(task: i32) {
+    if crate::shim::is_host() || with(|s| s.front != Some(task)) == Some(true) {
         request(window::FOCUS, task, [0; 4]);
     }
 }
@@ -627,28 +788,31 @@ extern "C" fn should_close(_: Id, _: Sel, w: Id) -> bool {
     true
 }
 
-/// A minimized window's task goes behind the visible ones: focus those
-/// from the back to the front, as the screen stacks them.
+/// A minimized window's task goes behind the visible ones.
 extern "C" fn did_miniaturize(_: Id, _: Sel, _note: Id) {
-    let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
-    let ordered = send!(app, c"orderedWindows" => Id);
-    let n = send!(ordered, c"count" => usize);
-    let windows: Vec<Id> = (0..n)
-        .map(|i| send!(ordered, c"objectAtIndex:" => Id, usize = i))
-        .filter(|&w| send!(w, c"isVisible" => bool) && !send!(w, c"isMiniaturized" => bool))
+    if crate::shim::is_host() {
+        crate::shim::restack();
+    } else {
+        restack();
+    }
+}
+
+/// Stack the tasks as the screen stacks their windows (in the server):
+/// focus the visible ones from the back to the front. The windows of all
+/// processes count, by their window numbers.
+pub fn restack() {
+    let order = crate::window::on_screen_windows();
+    let local = window_numbers();
+    let tasks: Vec<i32> = order
+        .iter()
+        .filter_map(|&n| {
+            local
+                .iter()
+                .find(|&&(_, w)| w == n as isize)
+                .map(|&(t, _)| t)
+                .or_else(|| crate::hosts::task_of_window(n as isize))
+        })
         .collect();
-    let tasks: Vec<i32> = with(|s| {
-        windows
-            .iter()
-            .filter_map(|&w| {
-                s.tasks
-                    .iter()
-                    .find(|(_, t)| t.window == w)
-                    .map(|(&task, _)| task)
-            })
-            .collect()
-    })
-    .unwrap_or_default();
     for &task in tasks.iter().rev() {
         request(window::FOCUS, task, [0; 4]);
     }

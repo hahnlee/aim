@@ -79,6 +79,11 @@ unsafe impl Send for Texture {}
 unsafe impl Sync for Texture {}
 
 impl Texture {
+    /// The buffer's memfd, to hand to a window host.
+    pub fn fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self._fd)
+    }
+
     /// The pixels, `import.length` bytes.
     pub fn pixels(&self) -> &[u8] {
         // SAFETY: mapped for the texture's lifetime.
@@ -146,38 +151,56 @@ pub struct Frame {
     pub gpu_ns: u64,
 }
 
-/// A present's fence, signaled once all its drawables are shown: the
-/// drawables not shown yet, the latest time one was shown, and the fence.
-struct Pending(Mutex<(usize, i64, Option<Writer>)>);
+/// A present's fence: signaled once everything that shows the frame has
+/// shown it (each drawable, and each window host), at the latest of their
+/// times. The present itself holds one count until [`Fence::done`].
+#[derive(Clone)]
+pub struct Fence(Arc<Mutex<(usize, i64, Option<Writer>)>>);
 
-impl Pending {
-    fn shown(&self, ns: i64) {
+impl Fence {
+    pub fn new(writer: Writer) -> Fence {
+        Fence(Arc::new(Mutex::new((1, 0, Some(writer)))))
+    }
+
+    /// One more to wait for.
+    pub fn expect(&self) {
+        self.0.lock().unwrap().0 += 1;
+    }
+
+    /// One shown at `ns`.
+    pub fn shown(&self, ns: i64) {
         let mut p = self.0.lock().unwrap();
-        p.0 -= 1;
         p.1 = p.1.max(ns);
+        p.0 -= 1;
         if p.0 == 0
             && let Some(w) = p.2.take()
         {
-            w.signal_at(p.1, 1);
+            let at = if p.1 > 0 { p.1 } else { vsync::monotonic_ns() };
+            w.signal_at(at, 1);
         }
+    }
+
+    /// The present has handed out all it waits for.
+    pub fn done(&self) {
+        self.shown(0);
     }
 }
 
 /// Present fences of drawables not shown yet, by drawable.
-static PRESENTED: Mutex<Vec<(usize, Arc<Pending>)>> = Mutex::new(Vec::new());
+static PRESENTED: Mutex<Vec<(usize, Fence)>> = Mutex::new(Vec::new());
 
 /// A drawable's presented handler: count it shown for its present's fence,
 /// at the time it was shown (now, when it was dropped instead).
 extern "C" fn presented(_block: *const GlobalBlock, drawable: Id) {
-    let pending = {
+    let fence = {
         let mut p = PRESENTED.lock().unwrap();
         p.iter()
             .position(|(d, _)| *d == drawable as usize)
             .map(|i| p.swap_remove(i).1)
     };
-    if let Some(p) = pending {
+    if let Some(f) = fence {
         let shown = send!(drawable, c"presentedTime" => f64);
-        p.shown(if shown > 0.0 {
+        f.shown(if shown > 0.0 {
             vsync::uptime_to_monotonic(shown)
         } else {
             vsync::monotonic_ns()
@@ -282,13 +305,13 @@ impl Renderer {
 
     /// Draw `t` (or black) into the next drawable of each target, show
     /// them at the next vsync and wait until the GPU has read `t`, so its
-    /// buffer may be reused once this returns. `fence` signals once every
-    /// target shows the frame (at once when there is none).
+    /// buffer may be reused once this returns. `fence` waits for each
+    /// drawable to be shown.
     pub fn present(
         &self,
         t: Option<&Texture>,
         targets: &[Target],
-        fence: Option<Writer>,
+        fence: Option<&Fence>,
     ) -> Option<Frame> {
         let start = Instant::now();
         let _pool = Pool::new();
@@ -302,17 +325,13 @@ impl Renderer {
             self.encode(commands, drawable, t, target.crop);
             drawables.push(drawable);
         }
-        match fence {
-            Some(writer) if !drawables.is_empty() => {
-                let pending = Arc::new(Pending(Mutex::new((drawables.len(), 0, Some(writer)))));
-                let mut p = PRESENTED.lock().unwrap();
-                for &d in &drawables {
-                    p.push((d as usize, pending.clone()));
-                    send!(d, c"addPresentedHandler:" => (), *const GlobalBlock = presented_block());
-                }
+        if let Some(f) = fence {
+            let mut p = PRESENTED.lock().unwrap();
+            for &d in &drawables {
+                f.expect();
+                p.push((d as usize, f.clone()));
+                send!(d, c"addPresentedHandler:" => (), *const GlobalBlock = presented_block());
             }
-            Some(writer) => writer.signal_at(vsync::monotonic_ns(), 1),
-            None => {}
         }
         for &d in &drawables {
             send!(commands, c"presentDrawable:" => (), Id = d);

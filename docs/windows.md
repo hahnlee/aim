@@ -60,6 +60,8 @@ task's window lies exactly over the task. The rest follows from that:
 | `RunningTaskInfo` parcel reading | `daemons/windows/core` |
 | Host-call `FN_WINDOWS`, records | `aim_hostcall::display::{Windows, Window, window}` |
 | Freeform support | `/vendor/etc/permissions/android.software.freeform_window_management.xml` |
+| Window hosts (the server's side; a shim's side) | `bin/aim-display/hosts.rs`, `bin/aim-display/shim.rs` |
+| APK labels and icons, macOS icons, shim bundles | `crates/aim-apps` (`aim-apps`) |
 
 ## The task bridge
 
@@ -149,6 +151,60 @@ keyboard's `KEY_BACK` (`Generic.kl`: BACK):
 The first window of a run shows a hint at its bottom ("Swipe with two
 fingers or press ⌘[ to go back") until it is dismissed once; the dismissal
 is kept in the `dev.aim` defaults (`BackHintDismissed`).
+
+## App shims
+
+Each launcher app of the guest is also a small macOS app, a **shim**, with
+the app's name and icon, so it has its own Dock icon, Cmd+Tab entry,
+Launchpad and Spotlight presence (#248):
+
+```text
+Settings.app/Contents/
+  Info.plist            CFBundleName "Settings", AIMPackage com.android.settings,
+                        AIMDisplaySocket <server socket>
+  MacOS/aim-app         the aim-display binary (an APFS clone)
+  Resources/AppIcon.icns
+```
+
+- **Hosting.** Run from a bundle that names a package, aim-display is that
+  app's **window host** (`bin/aim-display/shim.rs`). It connects to the
+  display server (`OP_HOST`), which hands it the package's task records and
+  the frames (each buffer's memfd once, then every present). It draws its
+  windows' parts of each frame as the server does and answers when its GPU
+  pass has read the buffer; the server's present waits for that (250 ms at
+  most) and its present fence counts it. Its requests go to the task
+  bridge and its input to the server's devices, through the server
+  (`bin/aim-display/hosts.rs`). Tasks of packages without a host stay in
+  the server's own windows; a host that connects takes its package's
+  windows over, and one that quits or crashes gives them back.
+- **Launch.** Opening a shim (Finder, Dock, Launchpad, Spotlight, `open`)
+  starts the app's launcher activity in a new task (`LAUNCH`); Android
+  brings a running task to the front instead. Clicking the Dock icon again
+  does the same. Quitting a shim closes its app's tasks; closing its last
+  window quits it.
+- **Stacking.** With windows in several processes, the server restacks the
+  tasks by the screen's order of all their windows (`CGWindowListCreate`)
+  when one is minimized.
+- **Icons** (`crates/aim-apps`, macOS icon grid of 1024): the body is an
+  824 square with continuous corners (radius 185.4), 100 in from each edge,
+  over a soft shadow. An adaptive icon's background and foreground are
+  drawn on the 108 dp canvas with its 72 dp viewport filling the body, so
+  the foreground's safe zone is never cut; a legacy icon sits at three
+  quarters of the body on a white plate. The drawables are Android's own
+  resources, read from the APK: PNG and WebP bitmaps, vector drawables
+  (paths, groups, clip paths, strokes, gradients, tints), `inset`,
+  `layer-list`, `shape`, `selector`, colors and theme attributes. The
+  `.icns` has every size from 16 to 1024 (1x and 2x), drawn at its own
+  resolution.
+- **Install and uninstall.** `aim-apps shims --watch` keeps a directory
+  holding one shim per launcher app (an app with an enabled MAIN/LAUNCHER
+  activity), from the image's app directories and `/data/app` (installed
+  apps, updates of system apps and decompressed ones), rewriting a shim
+  whose app or icon drawing changed and removing the shims of uninstalled
+  apps; it follows `/data/system/packages.list`. Written bundles are
+  registered with Launch Services. `cargo aim boot --windows` runs it into
+  `target/aim/boot/apps`; `aim-apps install` writes into
+  `~/Applications/aim Apps` instead (not run by the build or the tests).
 
 ## Not covered yet
 

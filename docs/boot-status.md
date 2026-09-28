@@ -587,3 +587,13 @@ itself (Chrome's launch, Settings shifted away from Chrome when a page
 opened) did not reach the task surfaces, so those windows showed other
 parts of the display; the bridge now commits such bounds with
 `resizeTask`.
+
+**App shims** (same boots): `aim-apps shims --watch` wrote 19 shims into
+`target/aim/boot/apps`, the packages `cmd package query-activities -a MAIN
+-c LAUNCHER` lists (Gboard's launcher activity, disabled at run time, and
+GMS's, disabled by a resource, left out). Opening Calculator.app,
+Settings.app and Chrome.app started each app in its own process with its
+name and icon in the Dock; a click in the Calculator shim's window, behind
+Chrome's, focused its task and typed 7, and keys typed 5 5. `pm uninstall`
+of Calculator removed its shim (its open shim quit with its last window),
+and `pm install` wrote it again.

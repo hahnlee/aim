@@ -1,0 +1,11 @@
+[package]
+license.workspace = true
+name = "aim-apps"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The guest's launcher apps as macOS apps: APK labels and icons, macOS icons and shim bundles"
+
+[dependencies]
+android-image-extract = { path = "../../tools/android-image-extract" }
+libc.workspace = true

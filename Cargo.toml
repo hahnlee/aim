@@ -10,6 +10,7 @@
 members = [
     "crates/aim-android-image",
     "crates/aim-android-init",
+    "crates/aim-apps",
     "crates/aim-guest-init",
     "crates/aim-binder-driver",
     "crates/aim-binder-host",
@@ -64,6 +65,7 @@ members = [
 default-members = [
     "crates/aim-android-image",
     "crates/aim-android-init",
+    "crates/aim-apps",
     "crates/aim-guest-init",
     "crates/aim-binder-driver",
     "crates/aim-binder-host",

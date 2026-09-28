@@ -398,8 +398,9 @@ pub mod display {
         pub const FOCUS: u32 = 17;
         /// Server: remove the task, as closing its window does.
         pub const CLOSE: u32 = 18;
-        /// Server: start the package in [`super::Window::text`] (its
-        /// launcher activity), in a new task.
+        /// Server: start the launcher activity `package/class` in
+        /// [`super::Window::text`], in a new task (or bring its task to the
+        /// front).
         pub const LAUNCH: u32 = 19;
     }
 
@@ -416,7 +417,7 @@ pub mod display {
         pub caption: i32,
         pub _reserved: u32,
         /// UTF-8, NUL-padded (cut at a character boundary).
-        pub text: [u8; 96],
+        pub text: [u8; 224],
     }
 
     impl Default for Window {
@@ -427,7 +428,7 @@ pub mod display {
                 bounds: [0; 4],
                 caption: 0,
                 _reserved: 0,
-                text: [0; 96],
+                text: [0; 224],
             }
         }
     }
@@ -461,7 +462,7 @@ pub mod display {
 
     const _: () = assert!(core::mem::size_of::<Connect>() == 32);
     const _: () = assert!(core::mem::size_of::<Windows>() == 8);
-    const _: () = assert!(core::mem::size_of::<Window>() == 128);
+    const _: () = assert!(core::mem::size_of::<Window>() == 256);
     const _: () = assert!(core::mem::size_of::<Import>() == 40);
     const _: () = assert!(core::mem::size_of::<Buffer>() == 8);
     const _: () = assert!(core::mem::size_of::<Present>() == 16);

@@ -23,8 +23,10 @@
 
 #[macro_use]
 mod objc;
+mod hosts;
 mod input;
 mod metal;
+mod shim;
 mod stats;
 mod vsync;
 mod window;
@@ -42,7 +44,7 @@ use aim_host_display::wire::{self, Request};
 use aim_hostcall::display::{Connect, Event, Windows, event, mode};
 use aim_sync_file::Writer;
 
-use metal::{Renderer, Target, Texture};
+use metal::{Fence, Renderer, Target, Texture};
 use stats::Stats;
 
 /// How long a present waits for its buffer's acquire fence.
@@ -72,6 +74,21 @@ struct Display {
 }
 
 static DISPLAY: OnceLock<Display> = OnceLock::new();
+
+impl Display {
+    fn new(renderer: Renderer, info: Connect, mode: u32, capture: Option<PathBuf>) -> Display {
+        Display {
+            renderer,
+            info,
+            mode,
+            clients: Mutex::new(Vec::new()),
+            last: Mutex::new(None),
+            targets: Mutex::new(Vec::new()),
+            stats: Stats::new(),
+            capture,
+        }
+    }
+}
 
 static CAPTURE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -120,8 +137,8 @@ impl Display {
         }
     }
 
-    /// Show `t` once its content is ready (`acquire`); `fence` signals when
-    /// it is on screen.
+    /// Show `t` once its content is ready (`acquire`), in this process's
+    /// windows and the window hosts'; `fence` signals when it is on screen.
     fn present(&self, t: &Arc<Texture>, acquire: Option<OwnedFd>, fence: Option<Writer>) {
         if let Some(a) = acquire
             && !aim_sync_file::wait(a.as_fd(), ACQUIRE_TIMEOUT_MS)
@@ -130,12 +147,18 @@ impl Display {
                 "aim-display: acquire fence of a present not signaled in {ACQUIRE_TIMEOUT_MS} ms"
             );
         }
+        let fence = fence.map(Fence::new);
         let mut last = self.last.lock().unwrap();
         let targets = self.targets.lock().unwrap().clone();
-        if let Some(frame) = self.renderer.present(Some(t), &targets, fence) {
+        let hosts = hosts::present(t, fence.as_ref());
+        if let Some(frame) = self.renderer.present(Some(t), &targets, fence.as_ref()) {
             self.stats.present(frame);
         }
+        hosts.wait();
         *last = Some(t.clone());
+        if let Some(f) = fence {
+            f.done();
+        }
     }
 
     /// Show the last frame again in the layers of `targets` (a window that
@@ -204,6 +227,7 @@ impl Display {
                 }
                 wire::OP_RELEASE => {
                     textures.remove(&r.id);
+                    hosts::release(r.id);
                 }
                 wire::OP_SET_VSYNC => client.vsync.store(r.flag != 0, Ordering::Relaxed),
                 wire::OP_WINDOWS if r.id == wire::VERSION => {
@@ -217,6 +241,9 @@ impl Display {
                         windows::serve_bridge(sock);
                     }
                     return;
+                }
+                wire::OP_HOST if r.id == wire::VERSION && self.mode == mode::WINDOWS => {
+                    return hosts::serve(sock);
                 }
                 _ => break,
             }
@@ -264,6 +291,12 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
 }
 
 fn main() {
+    // An app's shim bundle runs this binary as that app's window host.
+    if let Some(package) = shim::info("AIMPackage") {
+        let activity = shim::info("AIMActivity").unwrap_or_default();
+        let socket = shim::info("AIMDisplaySocket").unwrap_or_default();
+        shim::run(package, activity, std::path::Path::new(&socket));
+    }
     let mut args = std::env::args().skip(1);
     let (mut socket, mut size, mut capture) = (None, None, None);
     let mut title = "Android".to_string();
@@ -350,24 +383,17 @@ fn main() {
         eprintln!("aim-display: {e}");
         std::process::exit(1)
     });
-    let display = DISPLAY.get_or_init(|| Display {
-        renderer,
-        info: Connect {
-            display: 0,
-            width: win.width,
-            height: win.height,
-            dpi_x_milli: (win.dpi_x * 1000.0) as u32,
-            dpi_y_milli: (win.dpi_y * 1000.0) as u32,
-            _reserved: 0,
-            vsync_period_ns: period as u64,
-        },
-        mode: display_mode,
-        clients: Mutex::new(Vec::new()),
-        last: Mutex::new(None),
-        targets: Mutex::new(targets),
-        stats: Stats::new(),
-        capture,
-    });
+    let info = Connect {
+        display: 0,
+        width: win.width,
+        height: win.height,
+        dpi_x_milli: (win.dpi_x * 1000.0) as u32,
+        dpi_y_milli: (win.dpi_y * 1000.0) as u32,
+        _reserved: 0,
+        vsync_period_ns: period as u64,
+    };
+    let display = DISPLAY.get_or_init(|| Display::new(renderer, info, display_mode, capture));
+    display.set_targets(targets);
 
     if let Err(e) = input::start(&socket, &win) {
         eprintln!(

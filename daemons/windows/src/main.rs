@@ -254,11 +254,17 @@ impl Bridge {
             }
             window::FOCUS => self.atm.set_focused_task(task),
             window::CLOSE => self.atm.remove_task(task).map(drop),
-            window::LAUNCH => self.atm.start_package(w.text()).map(|r| {
-                if r < 0 {
-                    log::warn!("start {}: {r}", w.text());
+            window::LAUNCH => match w.text().split_once('/') {
+                Some((package, class)) => self.atm.start_activity(package, class).map(|r| {
+                    if r < 0 {
+                        log::warn!("start {}: {r}", w.text());
+                    }
+                }),
+                None => {
+                    log::warn!("start {}: not package/class", w.text());
+                    Ok(())
                 }
-            }),
+            },
             op => {
                 log::warn!("unknown request {op}");
                 Ok(())

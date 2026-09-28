@@ -33,6 +33,34 @@ unsafe extern "C" {
     fn CGColorSpaceCreateWithName(name: *const c_void) -> *const c_void;
     fn CGColorSpaceRelease(space: *const c_void);
     static kCGColorSpaceSRGB: *const c_void;
+    fn CGWindowListCreate(option: u32, relative_to: u32) -> *const c_void;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFArrayGetCount(a: *const c_void) -> isize;
+    fn CFArrayGetValueAtIndex(a: *const c_void, i: isize) -> *const c_void;
+    fn CFRelease(r: *const c_void);
+}
+
+/// `kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements`.
+const ON_SCREEN: u32 = (1 << 0) | (1 << 4);
+
+/// The numbers of the windows on screen, of every process, front to back.
+pub fn on_screen_windows() -> Vec<u32> {
+    // SAFETY: an array of CGWindowIDs (stored as the values themselves),
+    // released here.
+    unsafe {
+        let list = CGWindowListCreate(ON_SCREEN, 0);
+        if list.is_null() {
+            return Vec::new();
+        }
+        let ids = (0..CFArrayGetCount(list))
+            .map(|i| CFArrayGetValueAtIndex(list, i) as usize as u32)
+            .collect();
+        CFRelease(list);
+        ids
+    }
 }
 
 pub const NS_WINDOW_STYLE: usize = 1 | 2 | 4 | 8; // titled, closable, miniaturizable, resizable
@@ -59,15 +87,22 @@ pub struct Window {
     pub number: Option<isize>,
 }
 
-/// In device mode the server quits when its window closes; in window mode
+/// In device mode the server quits when its window closes, and an app's
+/// window host when the app's last window closes; the window-mode server's
 /// windows come and go with tasks.
 extern "C" fn quit_after_last_window(_this: Id, _sel: Sel, _app: Id) -> bool {
-    MODE.load(Ordering::Relaxed) == mode::DEVICE
+    MODE.load(Ordering::Relaxed) == mode::DEVICE || crate::shim::is_host()
+}
+
+/// Clicking a window host in the Dock (re)starts its app.
+extern "C" fn reopen(_this: Id, _sel: Sel, _app: Id, _visible: bool) -> bool {
+    crate::shim::launch();
+    true
 }
 
 /// Quit when the window closes; the input devices go with the window.
 fn app_delegate() -> Id {
-    // SAFETY: registers a new NSObject subclass with two methods, once.
+    // SAFETY: registers a new NSObject subclass with its methods, once.
     let cls = unsafe {
         let cls = objc_allocateClassPair(class(c"NSObject"), c"DarwinDisplayDelegate".as_ptr(), 0);
         class_addMethod(
@@ -75,6 +110,12 @@ fn app_delegate() -> Id {
             sel(c"applicationShouldTerminateAfterLastWindowClosed:"),
             quit_after_last_window as *const c_void,
             c"B@:@".as_ptr(),
+        );
+        class_addMethod(
+            cls,
+            sel(c"applicationShouldHandleReopen:hasVisibleWindows:"),
+            reopen as *const c_void,
+            c"B@:@B".as_ptr(),
         );
         class_addMethod(
             cls,

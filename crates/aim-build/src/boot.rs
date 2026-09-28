@@ -4,7 +4,9 @@
 //! `target/aim/boot/data` (never the user's runtime profile). SIGUSR1 to
 //! aim-display writes the last presented buffer to
 //! `target/aim/boot/capture.bmp`. `--windows` runs aim-display in window
-//! mode (docs/windows.md) instead of one phone-sized device window.
+//! mode (docs/windows.md) instead of one phone-sized device window, and
+//! keeps a shim for each launcher app in `target/aim/boot/apps` (never the
+//! user's Applications folder).
 
 use crate::graph::Ctx;
 use std::ffi::OsString;
@@ -23,13 +25,27 @@ pub fn run(
     let data = data.map_or(dir.join("data"), PathBuf::from);
     fs::create_dir_all(&data).map_err(|e| format!("{}: {e}", data.display()))?;
     let mut display = start_display(ctx, &dir, windows)?;
+    let mut apps = if windows {
+        Some(
+            Command::new(ctx.workspace.host_bin("aim-apps"))
+                .args(shims_args(ctx, &dir, &data))
+                .spawn()
+                .map_err(|e| format!("aim-apps: {e}"))?,
+        )
+    } else {
+        None
+    };
     let status = guest_init(ctx, &data, &dir.join("display"))
         .args(extra)
         .status()
         .map_err(|e| format!("guest-init: {e}"))?;
-    // SAFETY: signals the child we started.
+    // SAFETY: signals the children we started.
     unsafe { libc::kill(display.id() as i32, libc::SIGTERM) };
     let _ = display.wait();
+    if let Some(apps) = &mut apps {
+        let _ = apps.kill();
+        let _ = apps.wait();
+    }
     Ok(if status.success() {
         ExitCode::SUCCESS
     } else {
@@ -74,6 +90,25 @@ pub fn guest_init(ctx: &Ctx, data: &Path, display: &Path) -> Command {
         .arg("--display")
         .arg(display);
     command
+}
+
+/// aim-apps's arguments: shims in `dir/apps` for the guest booted from the
+/// derived image with `data`, following installs.
+fn shims_args(ctx: &Ctx, dir: &Path, data: &Path) -> Vec<OsString> {
+    vec![
+        "shims".into(),
+        "--image".into(),
+        aim_paths::derived_image().into(),
+        "--data".into(),
+        data.join("data").into(),
+        "--display".into(),
+        dir.join("display").into(),
+        "--host".into(),
+        ctx.workspace.host_bin("aim-display").into(),
+        "--into".into(),
+        dir.join("apps").into(),
+        "--watch".into(),
+    ]
 }
 
 /// aim-display's arguments: its socket and capture file in `dir`, and a

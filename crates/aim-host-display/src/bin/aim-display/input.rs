@@ -43,12 +43,14 @@ pub fn time(event: Id) -> i64 {
 }
 
 pub fn pointer(view: Id, event: Id, phase: Phase) {
-    let Some(input) = INPUT.get() else { return };
     let at = send!(event, c"locationInWindow" => CGPoint);
     let p =
         send!(view, c"convertPoint:fromView:" => CGPoint, CGPoint = at, Id = std::ptr::null_mut());
     let b = send!(view, c"bounds" => CGRect);
-    if !crate::windows::pointer(view, phase, p.x, p.y, b.size.height, time(event)) {
+    if crate::windows::pointer(view, phase, p.x, p.y, b.size.height, time(event)) {
+        return;
+    }
+    if let Some(input) = INPUT.get() {
         input.pointer(phase, p.x, p.y, b.size.width, b.size.height, time(event));
     }
 }
@@ -76,11 +78,13 @@ const COMMAND: u64 = 1 << 20;
 const BACK_BUTTON: isize = 3;
 
 extern "C" fn scroll_wheel(_: Id, _: Sel, event: Id) {
-    let Some(input) = INPUT.get() else { return };
     let dx = send!(event, c"scrollingDeltaX" => f64);
     let dy = send!(event, c"scrollingDeltaY" => f64);
     let precise = send!(event, c"hasPreciseScrollingDeltas" => bool);
-    input.scroll(dy, precise, time(event));
+    match INPUT.get() {
+        Some(input) => input.scroll(dy, precise, time(event)),
+        None => crate::shim::scroll(dy, precise, time(event)),
+    }
     // Two fingers on a trackpad: the fingers' own direction, whatever the
     // scrolling direction setting.
     let swipes = send!(class(c"NSEvent"), c"isSwipeTrackingFromScrollEventsEnabled" => bool);
@@ -98,14 +102,19 @@ extern "C" fn scroll_wheel(_: Id, _: Sel, event: Id) {
         PHASE_ENDED | PHASE_CANCELLED => Gesture::Ended,
         _ => return,
     };
-    input.swipe(gesture, sign * dx, sign * dy, time(event));
+    match INPUT.get() {
+        Some(input) => input.swipe(gesture, sign * dx, sign * dy, time(event)),
+        None => crate::shim::swipe(gesture, sign * dx, sign * dy, time(event)),
+    }
 }
 
 extern "C" fn other_mouse(_: Id, _: Sel, event: Id, down: bool) {
-    if let Some(input) = INPUT.get()
-        && send!(event, c"buttonNumber" => isize) == BACK_BUTTON
-    {
-        input.back(down, time(event));
+    if send!(event, c"buttonNumber" => isize) != BACK_BUTTON {
+        return;
+    }
+    match INPUT.get() {
+        Some(input) => input.back(down, time(event)),
+        None => crate::shim::back(down, time(event)),
     }
 }
 
@@ -118,15 +127,24 @@ extern "C" fn other_mouse_up(this: Id, s: Sel, event: Id) {
 }
 
 fn key(event: Id, down: bool) {
-    let Some(input) = INPUT.get() else { return };
     // Android repeats keys itself.
     if down && send!(event, c"isARepeat" => bool) {
         return;
     }
     let code = send!(event, c"keyCode" => u16);
     let command = send!(event, c"modifierFlags" => u64) & COMMAND != 0;
-    if !input.back_shortcut(code, down, command, time(event)) {
-        input.key(code, down, false, time(event));
+    let t = time(event);
+    match INPUT.get() {
+        Some(input) => {
+            if !input.back_shortcut(code, down, command, t) {
+                input.key(code, down, false, t);
+            }
+        }
+        None => {
+            if !crate::shim::back_shortcut(code, down, command, t) {
+                crate::shim::key(code, down, t);
+            }
+        }
     }
 }
 
@@ -139,23 +157,30 @@ extern "C" fn key_up(_: Id, _: Sel, event: Id) {
 }
 
 extern "C" fn flags_changed(_: Id, _: Sel, event: Id) {
-    if let Some(input) = INPUT.get() {
-        let code = send!(event, c"keyCode" => u16);
-        let flags = send!(event, c"modifierFlags" => u64);
-        input.flags_changed(code, flags, time(event));
+    let code = send!(event, c"keyCode" => u16);
+    let flags = send!(event, c"modifierFlags" => u64);
+    match INPUT.get() {
+        Some(input) => input.flags_changed(code, flags, time(event)),
+        None => crate::shim::flags_changed(code, flags, time(event)),
     }
 }
 
 pub extern "C" fn resign_key(_: Id, _: Sel, _note: Id) {
-    if let Some(input) = INPUT.get() {
-        input.release_all(crate::vsync::monotonic_ns());
+    let t = crate::vsync::monotonic_ns();
+    match INPUT.get() {
+        Some(input) => input.release_all(t),
+        None => crate::shim::release_all(t),
     }
 }
 
-/// The devices disappear with the window (hotplug for the guest).
+/// The devices disappear with the window (hotplug for the guest); a
+/// window host's app closes its tasks.
 pub extern "C" fn will_terminate(_: Id, _: Sel, _note: Id) {
     if let Some(input) = INPUT.get() {
         input.close();
+    }
+    if crate::shim::is_host() {
+        crate::shim::close_all();
     }
 }
 

@@ -123,9 +123,9 @@ fn write_string8(p: &mut BorrowedParcel<'_>, s: Option<&str>) -> Wire<()> {
     write::string8(s).iter().try_for_each(|w| p.write(w))
 }
 
-/// An `Intent` that starts `package`'s launcher activity, as
+/// An `Intent` that starts launcher activity `class` of `package`, as
 /// `Intent.writeToParcel` writes it after its typed-object marker.
-fn write_launch_intent(p: &mut BorrowedParcel<'_>, package: &str) -> Wire<()> {
+fn write_launch_intent(p: &mut BorrowedParcel<'_>, package: &str, class: &str) -> Wire<()> {
     write_string8(p, Some("android.intent.action.MAIN"))?;
     p.write(&0i32)?; // no Uri
     write_string8(p, None)?; // type
@@ -133,7 +133,8 @@ fn write_launch_intent(p: &mut BorrowedParcel<'_>, package: &str) -> Wire<()> {
     p.write(&LAUNCH_FLAGS)?;
     p.write(&0i32)?; // extended flags
     write_string8(p, Some(package))?;
-    p.write(&None::<String>)?; // no component
+    p.write(package)?; // the component: package and class
+    p.write(class)?;
     p.write(&0i32)?; // no source bounds
     p.write(&1i32)?;
     write_string8(p, Some("android.intent.category.LAUNCHER"))?;
@@ -183,15 +184,15 @@ impl BpActivityTaskManager {
         Ok(call(&self.binder, atm::REMOVE_TASK, |p| p.write(&task))?.read()?)
     }
 
-    /// Start `package`'s launcher activity as a launcher would; the
-    /// `ActivityManager.START_*` result.
-    pub fn start_package(&self, package: &str) -> Result<i32> {
+    /// Start launcher activity `class` of `package` as a launcher would;
+    /// the `ActivityManager.START_*` result.
+    pub fn start_activity(&self, package: &str, class: &str) -> Result<i32> {
         let reply = call(&self.binder, atm::START_ACTIVITY_AS_USER, |p| {
             p.write(&None::<SpIBinder>)?; // caller
             p.write(&"android")?; // callingPackage
             p.write(&None::<String>)?; // callingFeatureId
             p.write(&1i32)?;
-            write_launch_intent(p, package)?;
+            write_launch_intent(p, package, class)?;
             p.write(&None::<String>)?; // resolvedType
             p.write(&None::<SpIBinder>)?; // resultTo
             p.write(&None::<String>)?; // resultWho
