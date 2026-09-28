@@ -1482,8 +1482,71 @@ fn send_other(fd: i32, iov: &[libc::iovec], name: Option<(u64, u32)>) -> Option<
             };
             super::packet::send(p, &gather(), ifindex)
         }
-        Family::Unix | Family::Inet(_) => return None,
+        Family::Inet(o) => return dhcp_to_router(fd, o, iov, name),
+        Family::Unix => return None,
     })
+}
+
+/// A DHCP client's datagram to the server port from a socket bound to a
+/// device other than the loopback: DhcpClient's renewals (to the lease's
+/// server) and rebinding broadcasts. They go to `eth0`'s virtual router
+/// (`packet::udp_to_router`), as they would on a real link, instead of to
+/// the Mac's network. None: another datagram, sent as usual.
+fn dhcp_to_router(
+    fd: i32,
+    o: &InetOpts,
+    iov: &[libc::iovec],
+    name: Option<(u64, u32)>,
+) -> Option<i64> {
+    let device = o.device.lock().unwrap().clone();
+    if device.is_empty() || o.icmp4.load(Ordering::Relaxed) {
+        return None;
+    }
+    let dst = match name {
+        Some((p, l)) if l >= 8 => {
+            // SAFETY: a guest sockaddr of at least 8 bytes.
+            let b = unsafe { std::slice::from_raw_parts(p as *const u8, 8) };
+            (u16::from_le_bytes([b[0], b[1]]) == L_AF_INET)
+                .then(|| (u16::from_be_bytes([b[2], b[3]]), [b[4], b[5], b[6], b[7]]))
+        }
+        Some(_) => None,
+        None => host_inet_name(fd, true),
+    };
+    let (port, dst) = dst?;
+    if port != super::dhcp::SERVER_PORT
+        || get_int(fd, libc::SOL_SOCKET, libc::SO_TYPE) != Some(libc::SOCK_DGRAM)
+        || super::netif::by_name(&device).is_none_or(|l| l.loopback())
+    {
+        return None;
+    }
+    let src = host_inet_name(fd, false).map_or([0; 4], |(_, a)| a);
+    let msg: Vec<u8> = iov
+        .iter()
+        .flat_map(|v| {
+            // SAFETY: the guest's iovec buffers.
+            unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) }
+        })
+        .copied()
+        .collect();
+    Some(super::packet::udp_to_router(src.into(), dst.into(), &msg))
+}
+
+/// The port and address of a host AF_INET socket's peer or local name.
+fn host_inet_name(fd: i32, peer: bool) -> Option<(u16, [u8; 4])> {
+    // SAFETY: an all-zero sockaddr_in is valid.
+    let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_in>() as u32;
+    let p = (&mut sa as *mut libc::sockaddr_in).cast();
+    // SAFETY: the name into local storage of its size.
+    let r = unsafe {
+        if peer {
+            libc::getpeername(fd, p, &mut len)
+        } else {
+            libc::getsockname(fd, p, &mut len)
+        }
+    };
+    (r == 0 && sa.sin_family as i32 == libc::AF_INET)
+        .then(|| (u16::from_be(sa.sin_port), sa.sin_addr.s_addr.to_ne_bytes()))
 }
 
 /// A receive on a netlink or packet socket. None: another family.
@@ -1982,10 +2045,11 @@ pub fn read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
     })
 }
 
-/// write/writev on a socket with Linux state.
+/// write/writev on a socket with Linux state (a plain host write for
+/// AF_INET options, but for DHCP to the virtual router).
 pub fn write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
-    if matches!(any_sock(fd)?.family, Family::Inet(_)) {
-        return None;
+    if let Family::Inet(o) = &any_sock(fd)?.family {
+        return dhcp_to_router(fd, o, iov, None);
     }
     Some(send(fd, iov, None, None, 0))
 }
