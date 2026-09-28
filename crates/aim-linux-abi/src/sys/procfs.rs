@@ -303,7 +303,7 @@ fn stat_line(p: i32) -> Option<String> {
     Some(format!(
         "{p} ({}) {state} {} {} {} 0 -1 4194560 {} 0 {} 0 {} {} 0 0 20 {} {} 0 {start} {} {rss_pages} 18446744073709551615 0 0 {} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 {} {} {} {} 0\n",
         comm(p),
-        b.pbi_ppid,
+        super::pidns::vnr(b.pbi_ppid as i32),
         b.pbi_pgid,
         b.pbi_pgid,
         ti.pti_faults,
@@ -365,7 +365,7 @@ fn status(p: i32) -> Option<String> {
          SigCgt:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\n\
          Cpus_allowed:\t{:x}\nCpus_allowed_list:\t0-{}\nvoluntary_ctxt_switches:\t{}\nnonvoluntary_ctxt_switches:\t0\n",
         comm(p),
-        t.pbsd.pbi_ppid,
+        super::pidns::vnr(t.pbsd.pbi_ppid as i32),
         cred_lines(p),
         kb(t.ptinfo.pti_virtual_size),
         kb(t.ptinfo.pti_virtual_size),

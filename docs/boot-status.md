@@ -148,14 +148,15 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
 - The process table is the guest's pid namespace for every call that
   names a process, not only `/proc` (#341): `kill` (also `-1` and process
   groups), pidfds, the scheduler and priority calls and the rest reach
-  guest processes only, and a Mac process is ESRCH. A `linux-run` started
-  without a table (tests, a debugging shell) is alone in a private
-  namespace with its descendants (#361); `--by-pid` joins a boot's.
-  Signals, renicing and rescheduling another guest process follow the
-  kernel's uid and capability rules (#362): an app gets EPERM for a
-  system uid process, system_server's CAP_KILL and CAP_SYS_NICE reach apps.
-  `prlimit` reads another guest process's limits under the same kind of
-  rule (#363); setting them is EPERM.
+  guest processes only, and a Mac process is ESRCH. `getppid` and
+  `/proc/<pid>/stat` give 0 for a parent outside, such as guest-init
+  (#364). A `linux-run` started without a table (tests, a debugging
+  shell) is alone in a private namespace with its descendants (#361);
+  `--by-pid` joins a boot's. Signals, renicing and rescheduling another
+  guest process follow the kernel's uid and capability rules (#362): an
+  app gets EPERM for a system uid process, system_server's CAP_KILL and
+  CAP_SYS_NICE reach apps. `prlimit` reads another guest process's limits
+  under the same kind of rule (#363); setting them is EPERM.
 - guest-init's wait for linkerconfig ends at `--timeout` and on SIGINT or
   SIGTERM (#196).
 

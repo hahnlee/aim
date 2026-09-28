@@ -650,8 +650,13 @@ static void identity_file(void) {
   closedir(proc);
   CHECK(listed_self && listed_child && !listed_other, "/proc lists %d %d %d", listed_self,
         listed_child, listed_other);
-  snprintf(path, sizeof(path), "/proc/%d/stat", getppid());
-  CHECK(access(path, F_OK) == -1 && errno == ENOENT, "the host parent is not in /proc");
+  // The host process that started this one is outside: its pid is 0, in
+  // /proc/self/stat too.
+  CHECK(getppid() == 0, "parent %d", getppid());
+  int ppid = -1;
+  FILE* stat = fopen("/proc/self/stat", "r");
+  CHECK(stat && fscanf(stat, "%*d (%*[^)]) %*c %d", &ppid) == 1 && ppid == 0, "stat ppid %d", ppid);
+  fclose(stat);
   snprintf(path, sizeof(path), "/proc/%d/stat", pid);
   CHECK(access(path, F_OK) == 0, "the child is in /proc");
   snprintf(path, sizeof(path), "/data/local/tmp/id/by-pid/%d", pid);
@@ -710,7 +715,9 @@ static void pid_namespace(pid_t host) {
   GONE(capget(&h, d));
   snprintf(path, sizeof(path), "/proc/%d/stat", host);
   CHECK(access(path, F_OK) == -1 && errno == ENOENT, "%s", path);
-  // The host process that started this one leads its group and session.
+  // The host process that started this one is its parent and leads its
+  // group and session.
+  CHECK(getppid() == 0, "outside parent %d", getppid());
   CHECK(getpgid(0) == 0 && getsid(0) == 0, "outside group %d session %d", getpgid(0), getsid(0));
   // Alone in the namespace, kill(-1) has no target (Linux skips the caller)
   // and PRIO_USER names this process only.

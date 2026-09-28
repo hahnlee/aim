@@ -43,9 +43,12 @@ pub fn getpid() -> i64 {
     unsafe { libc::getpid() as i64 }
 }
 
+/// getppid: 0 for a parent outside the pid namespace (guest-init, the
+/// shell that started a standalone linux-run), as Linux reports a parent
+/// in an ancestor namespace.
 pub fn getppid() -> i64 {
     // SAFETY: trivial.
-    unsafe { libc::getppid() as i64 }
+    super::pidns::vnr(unsafe { libc::getppid() }) as i64
 }
 
 pub use super::thread::gettid;

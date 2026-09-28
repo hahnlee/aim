@@ -132,6 +132,11 @@ pub fn contains(pid: i32) -> bool {
         })
 }
 
+/// A host pid as the namespace numbers it: itself for a member, else 0.
+pub fn vnr(pid: i32) -> i32 {
+    if contains(pid) { pid } else { 0 }
+}
+
 /// `pid` if it is in the namespace, else ESRCH.
 pub fn check(pid: i32) -> Result<i32, i64> {
     if contains(pid) {

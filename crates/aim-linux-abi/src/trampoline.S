@@ -78,8 +78,6 @@ _linux_abi_syscall_entry:
     b.eq    Lclose
     cmp     x8, #124
     b.eq    Lyield
-    cmp     x8, #173
-    b.eq    Lgetppid
     sub     x16, x8, #174               // getuid, geteuid, getgid, getegid
     cmp     x16, #3
     b.ls    Lids
@@ -112,9 +110,6 @@ Lpwrite:
 Lclose:
     mov     x16, #6
     b       Lfd_darwin
-Lgetppid:
-    mov     x16, #39
-    b       Ldarwin
 Lids:                                   // the guest's ids (sys/cred.rs)
     adrp    x17, {ids}@PAGE
     add     x17, x17, {ids}@PAGEOFF
