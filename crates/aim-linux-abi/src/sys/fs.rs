@@ -142,7 +142,7 @@ pub fn openat(a: [u64; 6]) -> i64 {
         return -(errno::last() as i64);
     }
     if creating {
-        attrs::created(&r.guest);
+        attrs::created(attrs::Host::Fd(fd), || r.guest.clone());
     }
     // An original ELF with a translation-cache entry is replaced by the
     // translated file here, before the guest reads its headers.
@@ -434,12 +434,12 @@ fn put_stat(st: &libc::stat, out: u64) {
     unsafe { (out as *mut LinuxStat).write_unaligned(l) };
 }
 
-/// An image file's host path, whose original inode `attrs` reads.
-fn image_host(r: &vfs::Resolved) -> attrs::Host<'_> {
-    if r.area == vfs::Area::Image {
-        attrs::Host::Path(&r.host)
+/// The host inode of a resolved path, whose attributes `attrs` reads.
+fn attrs_host(r: &vfs::Resolved) -> attrs::Host<'_> {
+    if r.read_only() {
+        attrs::Host::Image(&r.host)
     } else {
-        attrs::Host::None
+        attrs::Host::Path(&r.host)
     }
 }
 
@@ -465,8 +465,12 @@ fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
     }
     match st.st_mode & libc::S_IFMT {
         libc::S_IFREG | libc::S_IFDIR | libc::S_IFLNK => {
-            let guest = dir::synthesized_path(fd).or_else(|| procfs::fd_guest_path(fd).ok());
-            attrs::apply_host(guest.as_deref().unwrap_or(""), attrs::Host::Fd(fd), &mut st);
+            let guest = || {
+                dir::synthesized_path(fd)
+                    .or_else(|| procfs::fd_guest_path(fd).ok())
+                    .unwrap_or_default()
+            };
+            attrs::apply(attrs::Host::Fd(fd), guest, &mut st);
         }
         _ => {
             (st.st_uid, st.st_gid) = attrs::ids(attrs::EFFECTIVE);
@@ -503,7 +507,11 @@ pub(super) fn stat_at(dirfd: i32, path: &[u8], flags: u64) -> Result<libc::stat,
         if unsafe { libc::stat(p.as_ptr(), &mut st) } < 0 {
             return Err(-(errno::last() as i64));
         }
-        attrs::apply(&crate::sys::process::exe_guest_path(), &mut st);
+        attrs::apply(
+            attrs::Host::Path(&p),
+            crate::sys::process::exe_guest_path,
+            &mut st,
+        );
         return Ok(st);
     }
     let r = vfs::resolve(dirfd, path, follow).map_err(|e| -(e as i64))?;
@@ -517,7 +525,7 @@ pub(super) fn stat_at(dirfd: i32, path: &[u8], flags: u64) -> Result<libc::stat,
     if unsafe { libc::lstat(r.host.as_ptr(), &mut st) } < 0 {
         return Err(-(errno::last() as i64));
     }
-    attrs::apply_host(&r.guest, image_host(&r), &mut st);
+    attrs::apply(attrs_host(&r), || r.guest.clone(), &mut st);
     super::evdev::stat(&r, &mut st);
     Ok(st)
 }
@@ -785,7 +793,7 @@ pub fn faccessat(dirfd: u64, path: u64, mode: u64, flags: u64) -> i64 {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: host path, local buffer.
         if unsafe { libc::stat(r.host.as_ptr(), &mut st) } == 0 {
-            attrs::apply_host(&r.guest, image_host(&r), &mut st);
+            attrs::apply(attrs_host(&r), || r.guest.clone(), &mut st);
             let (uid, gid) = attrs::ids(if flags & AT_EACCESS != 0 {
                 attrs::EFFECTIVE
             } else {

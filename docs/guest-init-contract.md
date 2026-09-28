@@ -231,23 +231,53 @@ thread's working directory with `pthread_fchdir_np(dirfd)` for the duration
 of the call (`src/unixsock.rs`). The layer should do the same. It must return
 the guest path, not the host path, from `getsockname`/`getpeername`.
 
-## 6. Ownership and modes: `<runtime>/fs-attrs`
+## 6. Ownership and modes: on the inode, and `<runtime>/fs-attrs`
 
-The host cannot `chown` to Android ids. guest-init records init's `chown`,
-`chmod`, `mkdir` modes and owners and socket owners, one tab-separated line
-per change:
+The host cannot `chown` to Android ids. The guest owner and mode of a file
+with a writable host inode (the path map's `rw`, `cgroup2` and `bpf` areas,
+a process's own tmpfs, and host files under kernfs) live on that inode, in
+the host attribute `dev.aim.guest-inode`. guest-init writes it for init's
+`chown`, `chmod`, `mkdir` modes and owners and for socket owners; the layer
+for the guest's `chown`, `chmod`, `mkdir` modes and for the files a guest
+creates (owned by its fs uid and gid, as on Linux). 20 bytes:
+
+| Offset | Bytes | |
+| --- | --- | --- |
+| 0 | 5 | `DAGI`, version 1 |
+| 5 | 1 | fields present: uid 1, gid 2, mode 4 |
+| 6 | 2 | zero |
+| 8 | 4 × 3 | uid, gid, mode (permission bits), little-endian |
+
+A change merges its fields into those the inode has. Setting it needs
+write access to the file, which a read-only host mode (a guest's
+`open(O_CREAT, 0444)`, a socket of mode 0222) denies the owner: the writer
+adds owner write for the change and restores the mode. The attribute moves
+with a rename, is shared by hard links and lives as long as the file: an
+owner installd gave `/data/data/<pkg>` survives the next boot (#261). A bind
+shows its source's owner, and a stub in a process's own tmpfs is another
+inode.
+
+Paths with no writable host inode (the read-only image, whose directories
+init `mkdir`s and `chmod`s, and `/proc` or `/sys` entries with no host file)
+are recorded in the per-boot table `<runtime>/fs-attrs`, one tab-separated
+line per change:
 
 ```
 <guest path>	<uid|->	<gid|->	<octal mode|->
 ```
 
 For each path the most recent line wins, field by field (`-` = unchanged).
-The layer keys a file by its path through the entry with the shortest host
-prefix (the area, not a bind into it: `/data/data/<pkg>` whether reached
-through `/data/user/0` or `/data_mirror`); a file in a process's own tmpfs
-by its host path.
-`stat`, `fstat` and `newfstatat` must report these values. Paths with no
-entry report uid 0 and gid 0 with the host permission bits. Two known
+The layer keys a path by its path through the entry with the shortest host
+prefix (the area, not a bind into it); a file in a process's own tmpfs by
+its host path. The table is small and written almost only by init at boot.
+
+`stat`, `fstat` and `newfstatat` report the inode's attribute (its absent
+fields: uid 0, gid 0, the host permission bits); without one, the table's
+fields, then an image file's original owner and mode
+(`dev.aim.android-inode`), then uid 0 and gid 0 with the host permission
+bits. Reading an attribute costs about 15 µs on the development Mac, so
+each process keeps what it read by (dev, ino) while the inode's ctime,
+which every attribute change updates, stays the same. Two known
 requirements:
 
 - bionic refuses property areas that are not `root:root` or that are group-

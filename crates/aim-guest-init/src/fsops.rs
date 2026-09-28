@@ -8,9 +8,10 @@
 //! - The read-only image: nothing is written; init's error is returned
 //!   where the path is missing (`EROFS` / `ENOENT`), a no-op where it
 //!   already has the requested shape.
-//! - Ownership and modes are also recorded in the fs-attrs table, since the
-//!   host cannot `chown` to Android ids; the syscall layer reports them from
-//!   `stat`.
+//! - Ownership and modes: the host cannot `chown` to Android ids, so they
+//!   are recorded for the syscall layer's `stat` on the host inode of a
+//!   writable area ([`crate::guest_inode`]), and for the read-only image and
+//!   paths with no host inode in the fs-attrs table.
 
 use std::fs;
 use std::io::Write as _;
@@ -62,7 +63,8 @@ impl Effect {
     }
 }
 
-/// One fs-attrs entry: `<guest path>\t<uid|->\t<gid|->\t<octal mode|->`.
+/// A recorded owner and mode; in the fs-attrs table, the line
+/// `<guest path>\t<uid|->\t<gid|->\t<octal mode|->`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttrRecord {
     pub guest: String,
@@ -90,7 +92,7 @@ pub fn parse_mode(text: &str) -> Result<u32, String> {
 }
 
 /// The host mode for a guest `mode`. Every guest uid is the same host user,
-/// and the guest mode is what fs-attrs reports, so the owner keeps rw(x) on
+/// and the guest mode is the recorded one, so the owner keeps rw(x) on
 /// the host: `mkdir /data/user 0511 system system` must not stop root
 /// creating `/data/user/0` in it. The layer's `fchmodat` does the same.
 fn host_permissions(mode: u32, host: &Path) -> fs::Permissions {
@@ -238,14 +240,37 @@ impl FsOps {
         self.map.resolve(guest, follow_last)
     }
 
-    pub fn record_attrs(&mut self, record: AttrRecord) {
-        if self.apply
-            && let Ok(mut file) = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.attrs_file)
-        {
-            let _ = file.write_all(record.line().as_bytes());
+    /// Records an owner and mode: on the host inode of a writable area (or
+    /// an existing kernfs value), else in the fs-attrs table.
+    fn record_attrs(
+        &mut self,
+        resolved: &Resolved,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        mode: Option<u32>,
+    ) {
+        let record = AttrRecord {
+            guest: resolved.guest.clone(),
+            uid,
+            gid,
+            mode,
+        };
+        if self.apply {
+            let on_inode = matches!(resolved.area, Area::Writable { .. } | Area::Kernfs { .. })
+                && fs::symlink_metadata(&resolved.host).is_ok()
+                && crate::guest_inode::record(
+                    &resolved.host,
+                    crate::guest_inode::GuestInode { uid, gid, mode },
+                )
+                .is_ok();
+            if !on_inode
+                && let Ok(mut file) = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.attrs_file)
+            {
+                let _ = file.write_all(record.line().as_bytes());
+            }
         }
         self.attrs.push(record);
     }
@@ -271,7 +296,7 @@ impl FsOps {
         )))
     }
 
-    /// `do_mkdir`. The guest mode goes to fs-attrs; on the host the owner
+    /// `do_mkdir`. The guest mode is recorded; on the host the owner
     /// keeps access (`host_permissions`).
     pub fn mkdir(
         &mut self,
@@ -300,12 +325,12 @@ impl FsOps {
                     fs::set_permissions(&resolved.host, host_permissions(mode, &resolved.host))
                         .map_err(|e| format!("fchmodat() failed on {path}: {e}"))?;
                 }
-                self.record_attrs(AttrRecord {
-                    guest: resolved.guest.clone(),
-                    uid: Some(uid.unwrap_or(0)),
-                    gid: Some(gid.unwrap_or(0)),
-                    mode: Some(mode),
-                });
+                self.record_attrs(
+                    &resolved,
+                    Some(uid.unwrap_or(0)),
+                    Some(gid.unwrap_or(0)),
+                    Some(mode),
+                );
                 Ok(Effect::Applied(format!(
                     "mkdir {} {:o} -> {}",
                     resolved.guest,
@@ -325,14 +350,14 @@ impl FsOps {
             Area::HostDevice => Err(format!("mkdir() failed on {path}: File exists")),
             Area::ReadOnlyImage => {
                 if resolved.host.is_dir() {
-                    self.record_attrs(AttrRecord {
-                        guest: resolved.guest.clone(),
-                        uid: Some(uid.unwrap_or(0)),
-                        gid: Some(gid.unwrap_or(0)),
-                        mode: Some(mode),
-                    });
+                    self.record_attrs(
+                        &resolved,
+                        Some(uid.unwrap_or(0)),
+                        Some(gid.unwrap_or(0)),
+                        Some(mode),
+                    );
                     Ok(Effect::NoOp(format!(
-                        "mkdir {}: exists in the read-only image (owner/mode recorded in fs-attrs)",
+                        "mkdir {}: exists in the read-only image (owner/mode recorded)",
                         resolved.guest
                     )))
                 } else {
@@ -356,26 +381,16 @@ impl FsOps {
                     fs::set_permissions(&resolved.host, host_permissions(mode, &resolved.host))
                         .map_err(|e| format!("fchmodat() failed: {e}"))?;
                 }
-                self.record_attrs(AttrRecord {
-                    guest: resolved.guest.clone(),
-                    uid: None,
-                    gid: None,
-                    mode: Some(mode),
-                });
+                self.record_attrs(&resolved, None, None, Some(mode));
                 Ok(Effect::Applied(format!(
                     "chmod {mode:o} {}",
                     resolved.guest
                 )))
             }
             Area::Kernfs { .. } | Area::ReadOnlyImage | Area::HostDevice => {
-                self.record_attrs(AttrRecord {
-                    guest: resolved.guest.clone(),
-                    uid: None,
-                    gid: None,
-                    mode: Some(mode),
-                });
+                self.record_attrs(&resolved, None, None, Some(mode));
                 Ok(Effect::Recorded(format!(
-                    "chmod {mode:o} {} (not writable here; mode recorded in fs-attrs)",
+                    "chmod {mode:o} {} (not writable here; mode recorded)",
                     resolved.guest
                 )))
             }
@@ -397,14 +412,9 @@ impl FsOps {
                 "lchown() failed on {path}: No such file or directory"
             ));
         }
-        self.record_attrs(AttrRecord {
-            guest: resolved.guest.clone(),
-            uid: Some(uid),
-            gid,
-            mode: None,
-        });
+        self.record_attrs(&resolved, Some(uid), gid, None);
         Ok(Effect::Recorded(format!(
-            "chown {uid}:{} {} (fs-attrs)",
+            "chown {uid}:{} {} (recorded)",
             gid.map_or("-".to_string(), |g| g.to_string()),
             resolved.guest
         )))
@@ -591,12 +601,7 @@ impl FsOps {
         if matches!(fs_type, "bpf" | "cgroup2") && matches!(resolved.area, Area::Writable { .. }) {
             // A new bpffs root is 01777 (bpf_fill_super), a cgroup2 root 0755.
             let mode = if fs_type == "bpf" { 0o1777 } else { 0o755 };
-            self.record_attrs(AttrRecord {
-                guest: resolved.guest.clone(),
-                uid: Some(0),
-                gid: Some(0),
-                mode: Some(mode),
-            });
+            self.record_attrs(&resolved, Some(0), Some(0), Some(mode));
             return Ok(Effect::Applied(format!(
                 "mount {fs_type} {target}: the path map's {fs_type} area ({})",
                 resolved.host.display()
@@ -758,9 +763,28 @@ mod tests {
             "1"
         );
         ops.chown(1036, Some(1036), "/data/misc/x").unwrap();
-        let attrs = fs::read_to_string(layout.fs_attrs_file()).unwrap();
-        assert!(attrs.contains("/data/misc\t1000\t1000\t1771\n"), "{attrs}");
-        assert!(attrs.contains("/data/misc/x\t1036\t1036\t-\n"), "{attrs}");
+        // Owners of writable files are on their inodes, those of image
+        // paths in the table.
+        use crate::guest_inode::{GuestInode, read};
+        assert_eq!(
+            read(&layout.data.join("data/misc")).unwrap(),
+            Some(GuestInode {
+                uid: Some(1000),
+                gid: Some(1000),
+                mode: Some(0o1771)
+            })
+        );
+        assert_eq!(
+            read(&layout.data.join("data/misc/x")).unwrap(),
+            Some(GuestInode {
+                uid: Some(1036),
+                gid: Some(1036),
+                mode: None
+            })
+        );
+        let table = fs::read_to_string(layout.fs_attrs_file()).unwrap();
+        assert!(!table.contains("/data/"), "{table}");
+        assert!(table.contains("\t0\t0\t755\n"), "{table}");
         assert!(matches!(
             ops.mount("tmpfs", "tmpfs", "/mnt/x", &[]).unwrap(),
             Effect::Applied(_)
