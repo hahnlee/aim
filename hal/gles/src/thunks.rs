@@ -5137,10 +5137,6 @@ pub unsafe extern "C" fn glBindRenderbufferOES(target: GLenum, renderbuffer: GLu
     unsafe { host::glBindRenderbufferOES(target, renderbuffer) }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn glBindSampler(unit: GLuint, sampler: GLuint) {
-    unsafe { host::glBindSampler(unit, sampler) }
-}
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn glBindTransformFeedback(target: GLenum, id: GLuint) {
     unsafe { host::glBindTransformFeedback(target, id) }
 }
@@ -8412,7 +8408,7 @@ pub static PROCS: [Proc; 941] = [
     Proc { name: "glBindProgramPipelineEXT", addr: glBindProgramPipelineEXT as *const c_void, id: 134 },
     Proc { name: "glBindRenderbuffer", addr: glBindRenderbuffer as *const c_void, id: 135 },
     Proc { name: "glBindRenderbufferOES", addr: glBindRenderbufferOES as *const c_void, id: 136 },
-    Proc { name: "glBindSampler", addr: glBindSampler as *const c_void, id: 137 },
+    Proc { name: "glBindSampler", addr: crate::external::glBindSampler as *const c_void, id: -1 },
     Proc { name: "glBindTexture", addr: crate::external::glBindTexture as *const c_void, id: -1 },
     Proc { name: "glBindTransformFeedback", addr: glBindTransformFeedback as *const c_void, id: 139 },
     Proc { name: "glBindUniformLocationCHROMIUM", addr: glBindUniformLocationCHROMIUM as *const c_void, id: 140 },

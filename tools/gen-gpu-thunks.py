@@ -103,7 +103,7 @@ GUEST = {
     "glTexParameterfv": "external", "glGetTexParameteriv": "external",
     "glGetTexParameterfv": "external", "glShaderSource": "external",
     "glLinkProgram": "external", "glUniform1i": "external",
-    "glUniform1iv": "external",
+    "glUniform1iv": "external", "glBindSampler": "external",
 }
 
 

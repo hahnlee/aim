@@ -166,6 +166,82 @@ static void check_frame(const uint8_t* p, int pitch, uint32_t clear, const char*
     CHECK(corner == clear, "%s: corner %08x want %08x", what, corner, clear);
 }
 
+static const char* kQuadVertex =
+    "#version 300 es\n"
+    "uniform vec4 rect;\n"
+    "in vec2 pos;\n"
+    "out vec2 uv;\n"
+    "void main() {\n"
+    "    uv = rect.xy + (pos * 0.5 + 0.5) * rect.zw;\n"
+    "    gl_Position = vec4(pos, 0.0, 1.0);\n"
+    "}\n";
+static const char* kExternalFragment =
+    "#version 300 es\n"
+    "#extension GL_OES_EGL_image_external_essl3 : require\n"
+    "precision mediump float;\n"
+    "uniform samplerExternalOES tex;\n"
+    "in vec2 uv;\n"
+    "out vec4 color;\n"
+    "void main() { color = texture(tex, uv); }\n";
+
+// `image` (a frame of `frame`) sampled through GL_TEXTURE_EXTERNAL_OES into
+// the pbuffer, the way Skia samples a hardware bitmap.
+static void sample_external(EGLImageKHR image, PFNGLEGLIMAGETARGETTEXTURE2DOESPROC target) {
+    static const float kQuad[] = {-1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f};
+    GLuint p = glCreateProgram();
+    glAttachShader(p, shader(GL_VERTEX_SHADER, kQuadVertex));
+    glAttachShader(p, shader(GL_FRAGMENT_SHADER, kExternalFragment));
+    glBindAttribLocation(p, 0, "pos");
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    CHECK(ok, "external program link");
+    glUseProgram(p);
+    glUniform1i(glGetUniformLocation(p, "tex"), 0);
+    GLint rect = glGetUniformLocation(p, "rect");
+    glActiveTexture(GL_TEXTURE0);
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex);
+    target(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)image);
+    glViewport(0, 0, W, H);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, kQuad);
+    uint8_t pixels[W * H * 4];
+
+    // A fresh texture with no parameters set: an external texture starts
+    // with linear filtering, so it is complete (not an opaque black).
+    glUniform4f(rect, 0.0f, 0.0f, 1.0f, 1.0f);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    check_frame(pixels, W * 4, 0x0000ffff, "external texture, initial state");
+
+    // A sampler object on the unit replaces the texture's own filtering, as
+    // Skia relies on: rows 14..18 of the frame (blue below the triangle's
+    // bottom edge at row 16, green above) magnified to the whole height
+    // stay pure colors with the sampler's NEAREST, not the texture's LINEAR.
+    GLuint sampler;
+    glGenSamplers(1, &sampler);
+    glSamplerParameteri(sampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glSamplerParameteri(sampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindSampler(0, sampler);
+    glUniform4f(rect, 0.5f, 14.0f / H, 0.0f, 4.0f / H);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    for (int y = 0; y < H; y++) {
+        uint32_t c = at(pixels, W * 4, W / 2, y);
+        CHECK(c == 0x0000ffff || c == 0x00ff00ff, "external texture, sampler: row %d %08x", y, c);
+    }
+    CHECK(at(pixels, W * 4, W / 2, 0) != at(pixels, W * 4, W / 2, H - 1),
+          "external texture, sampler: no edge");
+    glBindSampler(0, 0);
+    glDeleteSamplers(1, &sampler);
+    CHECK(glGetError() == GL_NO_ERROR, "GL error");
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(p);
+    printf("ok AHardwareBuffer sampled as an external texture (initial state, sampler)\n");
+}
+
 int main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc > 1 && strcmp(argv[1], "fork") == 0) return zygote();
@@ -258,6 +334,8 @@ int main(int argc, char** argv) {
     check_frame(cpu, got.stride * 4, 0x0000ffff, "AHardwareBuffer memory");
     AHardwareBuffer_unlock(ahb, NULL);
     printf("ok AHardwareBuffer EGLImage clear + triangle (GPU and CPU views)\n");
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    sample_external(image, target_texture);
 
     // 5. Timings: one GL call, and whole triangle frames.
     const int calls = 1000000;
