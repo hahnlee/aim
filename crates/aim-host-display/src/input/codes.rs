@@ -16,6 +16,7 @@ pub const EV_MAX: u16 = 0x1f;
 pub const SYN_REPORT: u16 = 0;
 pub const SYN_DROPPED: u16 = 3;
 
+pub const KEY_BACK: u16 = 158;
 pub const KEY_MAX: u16 = 0x2ff;
 pub const BTN_TOUCH: u16 = 0x14a;
 pub const KEY_FN: u16 = 0x1d0;

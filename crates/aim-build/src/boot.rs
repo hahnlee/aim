@@ -3,7 +3,8 @@
 //! image with ANGLE for the GPU. The data directory defaults to
 //! `target/aim/boot/data` (never the user's runtime profile). SIGUSR1 to
 //! aim-display writes the last presented buffer to
-//! `target/aim/boot/capture.bmp`.
+//! `target/aim/boot/capture.bmp`. `--windows` runs aim-display in window
+//! mode (docs/windows.md) instead of one phone-sized device window.
 
 use crate::graph::Ctx;
 use std::ffi::OsString;
@@ -12,11 +13,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
 use std::time::{Duration, Instant};
 
-pub fn run(ctx: &Ctx, data: Option<&str>, extra: &[String]) -> Result<ExitCode, String> {
+pub fn run(
+    ctx: &Ctx,
+    data: Option<&str>,
+    windows: bool,
+    extra: &[String],
+) -> Result<ExitCode, String> {
     let dir = aim_paths::out().join("boot");
     let data = data.map_or(dir.join("data"), PathBuf::from);
     fs::create_dir_all(&data).map_err(|e| format!("{}: {e}", data.display()))?;
-    let mut display = start_display(ctx, &dir)?;
+    let mut display = start_display(ctx, &dir, windows)?;
     let status = guest_init(ctx, &data, &dir.join("display"))
         .args(extra)
         .status()
@@ -31,14 +37,14 @@ pub fn run(ctx: &Ctx, data: Option<&str>, extra: &[String]) -> Result<ExitCode, 
     })
 }
 
-/// Starts aim-display with its socket and capture file in `dir` and waits
-/// for its socket.
-pub fn start_display(ctx: &Ctx, dir: &Path) -> Result<Child, String> {
+/// Starts aim-display with its socket and capture file in `dir` (in window
+/// mode when `windows`) and waits for its socket.
+pub fn start_display(ctx: &Ctx, dir: &Path, windows: bool) -> Result<Child, String> {
     let socket = dir.join("display");
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let _ = fs::remove_file(&socket);
     let mut display = Command::new(ctx.workspace.host_bin("aim-display"))
-        .args(display_args(dir))
+        .args(display_args(dir, windows))
         .spawn()
         .map_err(|e| format!("aim-display: {e}"))?;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -70,10 +76,16 @@ pub fn guest_init(ctx: &Ctx, data: &Path, display: &Path) -> Command {
     command
 }
 
-/// aim-display's arguments: its socket and capture file in `dir`.
-fn display_args(dir: &Path) -> Vec<OsString> {
+/// aim-display's arguments: its socket and capture file in `dir`, and a
+/// phone-sized device window or window mode.
+fn display_args(dir: &Path, windows: bool) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec!["--socket".into(), dir.join("display").into()];
-    args.extend(["--size", "1080x1920", "--capture"].map(OsString::from));
+    if windows {
+        args.extend(["--mode", "windows"].map(OsString::from));
+    } else {
+        args.extend(["--size", "1080x1920"].map(OsString::from));
+    }
+    args.push("--capture".into());
     args.push(dir.join("capture.bmp").into());
     args
 }
@@ -84,7 +96,7 @@ mod tests {
 
     #[test]
     fn display_captures_next_to_its_socket() {
-        let args = display_args(Path::new("/b"));
+        let args = display_args(Path::new("/b"), false);
         let args: Vec<_> = args.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
             args,
@@ -93,6 +105,19 @@ mod tests {
                 "/b/display",
                 "--size",
                 "1080x1920",
+                "--capture",
+                "/b/capture.bmp"
+            ]
+        );
+        let args = display_args(Path::new("/b"), true);
+        let args: Vec<_> = args.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            [
+                "--socket",
+                "/b/display",
+                "--mode",
+                "windows",
                 "--capture",
                 "/b/capture.bmp"
             ]

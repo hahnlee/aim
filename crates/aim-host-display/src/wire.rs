@@ -7,6 +7,12 @@
 //! which the guest reads directly. Requests are fixed-size [`Request`]
 //! records; an [`OP_IMPORT`] carries the buffer's fd as `SCM_RIGHTS`, an
 //! [`OP_PRESENT`] its fences.
+//!
+//! The guest's task bridge (`docs/windows.md`) opens its own connection
+//! with [`OP_WINDOWS`]; the server answers with a filled
+//! [`display::Windows`](aim_hostcall::display::Windows), and from then on
+//! both ends write [`display::Window`](aim_hostcall::display::Window)
+//! records.
 //! Both ends are built from this crate, so the layout is checked only by
 //! [`VERSION`].
 
@@ -16,7 +22,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use aim_hostcall::display::Import;
 
 /// Sent in the hello; the server closes a connection of another version.
-pub const VERSION: u64 = 2;
+pub const VERSION: u64 = 3;
 
 /// `id` = [`VERSION`], `flag` = display index.
 pub const OP_HELLO: u32 = 1;
@@ -28,6 +34,8 @@ pub const OP_PRESENT: u32 = 3;
 pub const OP_RELEASE: u32 = 4;
 /// `flag` = 1 to send vsync events, 0 to stop.
 pub const OP_SET_VSYNC: u32 = 5;
+/// `id` = [`VERSION`]: the task bridge's hello.
+pub const OP_WINDOWS: u32 = 6;
 
 /// [`OP_PRESENT`] carries an acquire fence.
 pub const PRESENT_ACQUIRE: u32 = 1;

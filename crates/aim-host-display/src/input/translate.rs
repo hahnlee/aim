@@ -14,6 +14,13 @@
 //! - **Scrolling.** Wheel and trackpad scrolling are the rotary encoder's
 //!   `REL_WHEEL_HI_RES` (120 per line) and `REL_WHEEL` (whole lines), in
 //!   the direction the Mac's own content would move.
+//! - **Back.** The Mac's ways back are the keyboard's `KEY_BACK`
+//!   (`Generic.kl`: BACK): Cmd+[, the mouse's back button and a two-finger
+//!   swipe to the right. Esc stays Esc (`KEY_ESC`), for the apps and games
+//!   that use it; Android 16 turns an Esc no app handles into closing
+//!   system dialogs, not Back (its `Generic.kcm` fallback to BACK is
+//!   intercepted first), and its own Meta+Esc and Meta+Left (Cmd+Esc,
+//!   Cmd+Left) are Back.
 
 use std::sync::Mutex;
 
@@ -24,6 +31,10 @@ use super::{KEYBOARD, TOUCHSCREEN, WHEEL};
 
 /// Trackpad scrolling comes in points; a line is this many.
 pub const POINTS_PER_LINE: f64 = 10.0;
+/// A horizontal two-finger swipe this far (points) is Back.
+pub const SWIPE_BACK_POINTS: f64 = 80.0;
+/// The macOS virtual key of `[`.
+const MAC_LEFT_BRACKET: u16 = 0x21;
 
 /// The display pixel under view point `(x, y)` (origin at the bottom left)
 /// of a `view_w` x `view_h` point view showing a `width` x `height` pixel
@@ -82,6 +93,14 @@ pub enum Phase {
     Up,
 }
 
+/// A trackpad gesture's phase (`NSEvent.phase`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gesture {
+    Began,
+    Changed,
+    Ended,
+}
+
 #[derive(Default)]
 struct Pointer {
     touching: bool,
@@ -91,6 +110,8 @@ struct Pointer {
     /// a whole line.
     hi_res_rest: f64,
     line_rest: i32,
+    /// The fingers' travel in this gesture, and whether it was Back yet.
+    swipe: (f64, f64, bool),
 }
 
 /// The input side of the display server: its devices and the translation
@@ -114,18 +135,25 @@ impl Input {
     }
 
     /// The primary button at view point `(x, y)` of a `view_w` x `view_h`
-    /// view, at `t` (guest `CLOCK_MONOTONIC` ns).
+    /// view showing the whole display, at `t` (guest `CLOCK_MONOTONIC` ns).
     pub fn pointer(&self, phase: Phase, x: f64, y: f64, view_w: f64, view_h: f64, t: i64) {
-        let mut s = self.state.lock().unwrap();
         let (w, h) = (self.width, self.height);
+        if let Some((px, py)) = to_display_unclamped(x, y, view_w, view_h, w, h) {
+            self.touch(phase, px, py, [0, 0, w as i32, h as i32], t);
+        }
+    }
+
+    /// The primary button at display pixel `(x, y)`, which `area` (left,
+    /// top, right, bottom) bounds: a press outside it is ignored, a drag
+    /// leaving it is clamped to its edge.
+    pub fn touch(&self, phase: Phase, x: f64, y: f64, area: [i32; 4], t: i64) {
+        let mut s = self.state.lock().unwrap();
+        let [l, top, r, b] = area.map(|v| v as f64);
         match phase {
             Phase::Down => {
-                if s.touching {
+                if s.touching || !(l..r).contains(&x) || !(top..b).contains(&y) {
                     return;
                 }
-                let Some((px, py)) = to_display(x, y, view_w, view_h, w, h) else {
-                    return;
-                };
                 s.touching = true;
                 let id = s.next_tracking_id;
                 s.next_tracking_id = (id + 1) & 0xffff;
@@ -134,23 +162,21 @@ impl Input {
                     t,
                     &[
                         (EV_ABS, ABS_MT_TRACKING_ID, id),
-                        (EV_ABS, ABS_MT_POSITION_X, px),
-                        (EV_ABS, ABS_MT_POSITION_Y, py),
+                        (EV_ABS, ABS_MT_POSITION_X, x as i32),
+                        (EV_ABS, ABS_MT_POSITION_Y, y as i32),
                         (EV_KEY, BTN_TOUCH, 1),
                     ],
                 );
             }
-            Phase::Drag if s.touching => {
-                if let Some((px, py)) = to_display_clamped(x, y, view_w, view_h, w, h) {
-                    self.devices.emit(
-                        TOUCHSCREEN,
-                        t,
-                        &[
-                            (EV_ABS, ABS_MT_POSITION_X, px),
-                            (EV_ABS, ABS_MT_POSITION_Y, py),
-                        ],
-                    );
-                }
+            Phase::Drag if s.touching && l < r && top < b => {
+                self.devices.emit(
+                    TOUCHSCREEN,
+                    t,
+                    &[
+                        (EV_ABS, ABS_MT_POSITION_X, x.clamp(l, r - 1.0) as i32),
+                        (EV_ABS, ABS_MT_POSITION_Y, y.clamp(top, b - 1.0) as i32),
+                    ],
+                );
             }
             Phase::Up if s.touching => {
                 s.touching = false;
@@ -184,6 +210,48 @@ impl Input {
         }
         if let Some(code) = keymap::linux_key(mac) {
             self.set_key(&mut self.state.lock().unwrap(), code, down, t);
+        }
+    }
+
+    /// Back, the key: pressed (`down`) or released.
+    pub fn back(&self, down: bool, t: i64) {
+        self.set_key(&mut self.state.lock().unwrap(), KEY_BACK, down, t);
+    }
+
+    /// macOS's Back shortcut, Cmd+[: `keyDown:` (`down`, with `command`
+    /// held) or `keyUp:` of virtual key `mac`. Returns whether the key was
+    /// the shortcut's. AppKit sends no `keyUp:` while Command is held, so
+    /// the down presses and releases Back, and the up is dropped.
+    pub fn back_shortcut(&self, mac: u16, down: bool, command: bool, t: i64) -> bool {
+        if mac != MAC_LEFT_BRACKET || !command {
+            return false;
+        }
+        if down {
+            let mut s = self.state.lock().unwrap();
+            self.set_key(&mut s, KEY_BACK, true, t);
+            self.set_key(&mut s, KEY_BACK, false, t);
+        }
+        true
+    }
+
+    /// A two-finger trackpad gesture: the fingers moved `dx`, `dy` points
+    /// (right and down positive). Moving right by [`SWIPE_BACK_POINTS`],
+    /// mostly sideways, presses and releases Back, once per gesture.
+    pub fn swipe(&self, phase: Gesture, dx: f64, dy: f64, t: i64) {
+        let mut s = self.state.lock().unwrap();
+        match phase {
+            Gesture::Began => s.swipe = (dx, dy, false),
+            Gesture::Changed => {
+                s.swipe.0 += dx;
+                s.swipe.1 += dy;
+                let (x, y, done) = s.swipe;
+                if !done && x >= SWIPE_BACK_POINTS && x > 2.0 * y.abs() {
+                    s.swipe.2 = true;
+                    self.set_key(&mut s, KEY_BACK, true, t);
+                    self.set_key(&mut s, KEY_BACK, false, t);
+                }
+            }
+            Gesture::Ended => s.swipe = (0.0, 0.0, false),
         }
     }
 
@@ -252,7 +320,84 @@ impl Input {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Descriptor, Hello, OP_OPEN, Record, VERSION, connect_in, devices};
     use super::*;
+    use crate::wire;
+    use std::io::Read;
+    use std::os::fd::AsFd;
+
+    /// The keyboard's packets as (code, value) pairs, `n` records.
+    fn keys(k: &mut std::os::unix::net::UnixStream, n: usize) -> Vec<(u16, i32)> {
+        let mut v = vec![Record::default(); n];
+        // SAFETY: `Record` is plain old data.
+        let b = unsafe {
+            std::slice::from_raw_parts_mut(v.as_mut_ptr().cast::<u8>(), n * size_of::<Record>())
+        };
+        k.read_exact(b).unwrap();
+        v.iter()
+            .filter(|r| r.kind == EV_KEY)
+            .map(|r| (r.code, r.value))
+            .collect()
+    }
+
+    #[test]
+    fn back_from_the_shortcut_the_button_and_a_swipe() {
+        let dir = std::env::temp_dir().join(format!("back-{}", std::process::id()));
+        let input = Input::new(
+            Devices::create(&dir, devices(100, 200, 160.0, 160.0)).unwrap(),
+            100,
+            200,
+        );
+        let mut k = connect_in(&dir, "event1").unwrap();
+        let hello = Hello {
+            version: VERSION,
+            op: OP_OPEN,
+            ..Default::default()
+        };
+        wire::send(k.as_fd(), wire::bytes(&hello), None).unwrap();
+        wire::recv_record::<Descriptor>(k.as_fd()).unwrap().unwrap();
+
+        // Cmd+[ is Back, pressed and released at its down; [ alone is [.
+        assert!(input.back_shortcut(0x21, true, true, 1));
+        assert!(input.back_shortcut(0x21, false, true, 2));
+        assert!(!input.back_shortcut(0x21, true, false, 3));
+        input.key(0x21, true, false, 3);
+        assert!(!input.back_shortcut(0x21, false, false, 4));
+        input.key(0x21, false, false, 4);
+        assert!(!input.back_shortcut(0x00, true, true, 5));
+        // The mouse's back button.
+        input.back(true, 6);
+        input.back(false, 7);
+        assert_eq!(
+            keys(&mut k, 12),
+            [
+                (KEY_BACK, 1),
+                (KEY_BACK, 0),
+                (26, 1),
+                (26, 0),
+                (KEY_BACK, 1),
+                (KEY_BACK, 0)
+            ]
+        );
+
+        // A swipe to the right is Back once; a mostly vertical one, or one
+        // to the left, is not.
+        input.swipe(Gesture::Began, 10.0, 0.0, 8);
+        for _ in 0..10 {
+            input.swipe(Gesture::Changed, 20.0, 2.0, 9);
+        }
+        input.swipe(Gesture::Ended, 0.0, 0.0, 10);
+        input.swipe(Gesture::Began, 0.0, 0.0, 11);
+        input.swipe(Gesture::Changed, 90.0, 60.0, 12);
+        input.swipe(Gesture::Changed, -200.0, 0.0, 12);
+        input.swipe(Gesture::Ended, 0.0, 0.0, 13);
+        input.back(true, 14);
+        assert_eq!(
+            keys(&mut k, 6),
+            [(KEY_BACK, 1), (KEY_BACK, 0), (KEY_BACK, 1)]
+        );
+        input.close();
+    }
 
     #[test]
     fn view_points_map_to_display_pixels() {

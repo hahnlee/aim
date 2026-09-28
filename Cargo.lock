@@ -218,6 +218,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "aim-windows"
+version = "0.1.0"
+dependencies = [
+ "aim-hostcall",
+ "aim-windows-core",
+ "binder",
+ "daemon-log",
+ "log",
+]
+
+[[package]]
+name = "aim-windows-core"
+version = "0.1.0"
+
+[[package]]
 name = "allocator"
 version = "0.1.0"
 dependencies = [

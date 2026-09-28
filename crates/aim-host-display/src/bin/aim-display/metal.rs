@@ -1,4 +1,4 @@
-//! Buffers as Metal textures, and presenting one into the window's layer.
+//! Buffers as Metal textures, and presenting one into the windows' layers.
 //!
 //! A graphics buffer is a memfd whose pixels start at offset 0
 //! (docs/graphics-buffers.md). The server maps it once; the mapping starts
@@ -7,18 +7,20 @@
 //! the buffer's memory. A present is one render pass that samples the
 //! texture into the layer's drawable: the drawable is Core Animation's, so
 //! this is the one copy a frame costs. It also converts the format (the
-//! layer is BGRA) and scales when the sizes differ. The present fence
-//! signals when Core Animation has shown the drawable, with that time.
+//! layer is BGRA) and scales when the sizes differ. A layer may show part
+//! of the buffer (a task's window in window mode, docs/windows.md). The
+//! present fence signals when Core Animation has shown every drawable of
+//! the present, with the latest time.
 
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use aim_hostcall::display::Import;
 use aim_sync_file::Writer;
 
-use crate::objc::{GlobalBlock, Id, Pool, class, nsstring, release, text};
+use crate::objc::{GlobalBlock, Id, Pool, class, nsstring, release, retain, text};
 use crate::vsync;
 
 #[link(name = "Metal", kind = "framework")]
@@ -39,10 +41,11 @@ const SHADER: &str = r#"
 using namespace metal;
 struct V { float4 position [[position]]; float2 uv; };
 // One triangle over the whole target; uv (0,0) is the top-left texel, as
-// row 0 is the top row of an Android buffer.
-vertex V vertex_main(uint id [[vertex_id]]) {
-    float2 uv = float2((id << 1) & 2, id & 2);
-    return V { float4(uv * float2(2, -2) + float2(-1, 1), 0, 1), uv };
+// row 0 is the top row of an Android buffer. `crop` is the part of the
+// texture shown: left, top, right, bottom, in texture coordinates.
+vertex V vertex_main(uint id [[vertex_id]], constant float4& crop [[buffer(0)]]) {
+    float2 t = float2((id << 1) & 2, id & 2);
+    return V { float4(t * float2(2, -2) + float2(-1, 1), 0, 1), mix(crop.xy, crop.zw, t) };
 }
 fragment half4 fragment_main(V in [[stage_in]], texture2d<half> t [[texture(0)]]) {
     constexpr sampler s(filter::linear);
@@ -96,13 +99,44 @@ pub struct Renderer {
     device: Id,
     queue: Id,
     pipeline: Id,
-    layer: Id,
 }
 
-// SAFETY: Metal devices, queues and pipelines are thread-safe, and
-// `CAMetalLayer` hands out drawables on any thread.
+// SAFETY: Metal devices, queues and pipelines are thread-safe.
 unsafe impl Send for Renderer {}
 unsafe impl Sync for Renderer {}
+
+/// A layer to present into, and what it shows.
+pub struct Target {
+    /// A `CAMetalLayer`, retained.
+    pub layer: Id,
+    /// The part of the buffer it shows, in pixels: left, top, right,
+    /// bottom. None: all of it.
+    pub crop: Option<[i32; 4]>,
+}
+
+// SAFETY: `CAMetalLayer` hands out drawables on any thread.
+unsafe impl Send for Target {}
+
+impl Target {
+    pub fn new(layer: Id, crop: Option<[i32; 4]>) -> Target {
+        Target {
+            layer: retain(layer),
+            crop,
+        }
+    }
+}
+
+impl Clone for Target {
+    fn clone(&self) -> Target {
+        Target::new(self.layer, self.crop)
+    }
+}
+
+impl Drop for Target {
+    fn drop(&mut self) {
+        release(self.layer);
+    }
+}
 
 /// What one present cost.
 pub struct Frame {
@@ -112,26 +146,42 @@ pub struct Frame {
     pub gpu_ns: u64,
 }
 
-/// Present fences of drawables not shown yet, by drawable.
-static PRESENTED: Mutex<Vec<(usize, Writer)>> = Mutex::new(Vec::new());
+/// A present's fence, signaled once all its drawables are shown: the
+/// drawables not shown yet, the latest time one was shown, and the fence.
+struct Pending(Mutex<(usize, i64, Option<Writer>)>);
 
-/// A drawable's presented handler: signal its present fence with the time
-/// it was shown (now, when it was dropped instead).
+impl Pending {
+    fn shown(&self, ns: i64) {
+        let mut p = self.0.lock().unwrap();
+        p.0 -= 1;
+        p.1 = p.1.max(ns);
+        if p.0 == 0
+            && let Some(w) = p.2.take()
+        {
+            w.signal_at(p.1, 1);
+        }
+    }
+}
+
+/// Present fences of drawables not shown yet, by drawable.
+static PRESENTED: Mutex<Vec<(usize, Arc<Pending>)>> = Mutex::new(Vec::new());
+
+/// A drawable's presented handler: count it shown for its present's fence,
+/// at the time it was shown (now, when it was dropped instead).
 extern "C" fn presented(_block: *const GlobalBlock, drawable: Id) {
-    let writer = {
+    let pending = {
         let mut p = PRESENTED.lock().unwrap();
         p.iter()
             .position(|(d, _)| *d == drawable as usize)
             .map(|i| p.swap_remove(i).1)
     };
-    if let Some(w) = writer {
+    if let Some(p) = pending {
         let shown = send!(drawable, c"presentedTime" => f64);
-        let ns = if shown > 0.0 {
+        p.shown(if shown > 0.0 {
             vsync::uptime_to_monotonic(shown)
         } else {
             vsync::monotonic_ns()
-        };
-        w.signal_at(ns, 1);
+        });
     }
 }
 
@@ -146,7 +196,7 @@ pub fn device() -> Id {
 }
 
 impl Renderer {
-    pub fn new(device: Id, layer: Id) -> Result<Renderer, String> {
+    pub fn new(device: Id) -> Result<Renderer, String> {
         let _pool = Pool::new();
         let mut error: Id = std::ptr::null_mut();
         let library = send!(device, c"newLibraryWithSource:options:error:" => Id,
@@ -175,7 +225,6 @@ impl Renderer {
             device,
             queue: send!(device, c"newCommandQueue" => Id),
             pipeline,
-            layer,
         })
     }
 
@@ -231,17 +280,58 @@ impl Renderer {
         Ok(t)
     }
 
-    /// Draw `t` (or black) into the next drawable, show it at the next
-    /// vsync and wait until the GPU has read `t`, so its buffer may be
-    /// reused once this returns. `fence` signals once the frame is shown.
-    pub fn present(&self, t: Option<&Texture>, fence: Option<Writer>) -> Option<Frame> {
+    /// Draw `t` (or black) into the next drawable of each target, show
+    /// them at the next vsync and wait until the GPU has read `t`, so its
+    /// buffer may be reused once this returns. `fence` signals once every
+    /// target shows the frame (at once when there is none).
+    pub fn present(
+        &self,
+        t: Option<&Texture>,
+        targets: &[Target],
+        fence: Option<Writer>,
+    ) -> Option<Frame> {
         let start = Instant::now();
         let _pool = Pool::new();
-        let drawable = send!(self.layer, c"nextDrawable" => Id);
-        if drawable.is_null() {
+        let commands = send!(self.queue, c"commandBuffer" => Id);
+        let mut drawables = Vec::new();
+        for target in targets {
+            let drawable = send!(target.layer, c"nextDrawable" => Id);
+            if drawable.is_null() {
+                continue;
+            }
+            self.encode(commands, drawable, t, target.crop);
+            drawables.push(drawable);
+        }
+        match fence {
+            Some(writer) if !drawables.is_empty() => {
+                let pending = Arc::new(Pending(Mutex::new((drawables.len(), 0, Some(writer)))));
+                let mut p = PRESENTED.lock().unwrap();
+                for &d in &drawables {
+                    p.push((d as usize, pending.clone()));
+                    send!(d, c"addPresentedHandler:" => (), *const GlobalBlock = presented_block());
+                }
+            }
+            Some(writer) => writer.signal_at(vsync::monotonic_ns(), 1),
+            None => {}
+        }
+        for &d in &drawables {
+            send!(commands, c"presentDrawable:" => (), Id = d);
+        }
+        send!(commands, c"commit" => ());
+        send!(commands, c"waitUntilCompleted" => ());
+        if drawables.is_empty() {
             return None;
         }
-        let commands = send!(self.queue, c"commandBuffer" => Id);
+        let gpu = send!(commands, c"GPUEndTime" => f64) - send!(commands, c"GPUStartTime" => f64);
+        Some(Frame {
+            cpu_ns: start.elapsed().as_nanos() as u64,
+            gpu_ns: (gpu.max(0.0) * 1e9) as u64,
+        })
+    }
+
+    /// One render pass: `t`'s `crop` (all of it when None), or black, over
+    /// `drawable`.
+    fn encode(&self, commands: Id, drawable: Id, t: Option<&Texture>, crop: Option<[i32; 4]>) {
         let pass = send!(class(c"MTLRenderPassDescriptor"), c"renderPassDescriptor" => Id);
         let attachments = send!(pass, c"colorAttachments" => Id);
         let color = send!(attachments, c"objectAtIndexedSubscript:" => Id, usize = 0);
@@ -256,23 +346,18 @@ impl Renderer {
         send!(color, c"setStoreAction:" => (), usize = MTL_STORE_ACTION_STORE);
         let encoder = send!(commands, c"renderCommandEncoderWithDescriptor:" => Id, Id = pass);
         if let Some(t) = t {
+            let (w, h) = (t.import.width as f32, t.import.height as f32);
+            let uv = match crop {
+                Some([l, top, r, b]) => [l as f32 / w, top as f32 / h, r as f32 / w, b as f32 / h],
+                None => [0.0, 0.0, 1.0, 1.0],
+            };
             send!(encoder, c"setRenderPipelineState:" => (), Id = self.pipeline);
+            send!(encoder, c"setVertexBytes:length:atIndex:" => (),
+                *const c_void = uv.as_ptr().cast(), usize = size_of_val(&uv), usize = 0);
             send!(encoder, c"setFragmentTexture:atIndex:" => (), Id = t.texture, usize = 0);
             send!(encoder, c"drawPrimitives:vertexStart:vertexCount:" => (),
                 usize = MTL_PRIMITIVE_TYPE_TRIANGLE, usize = 0, usize = 3);
         }
         send!(encoder, c"endEncoding" => ());
-        if let Some(w) = fence {
-            PRESENTED.lock().unwrap().push((drawable as usize, w));
-            send!(drawable, c"addPresentedHandler:" => (), *const GlobalBlock = presented_block());
-        }
-        send!(commands, c"presentDrawable:" => (), Id = drawable);
-        send!(commands, c"commit" => ());
-        send!(commands, c"waitUntilCompleted" => ());
-        let gpu = send!(commands, c"GPUEndTime" => f64) - send!(commands, c"GPUStartTime" => f64);
-        Some(Frame {
-            cpu_ns: start.elapsed().as_nanos() as u64,
-            gpu_ns: (gpu.max(0.0) * 1e9) as u64,
-        })
     }
 }

@@ -58,6 +58,8 @@ members = [
     "daemons/log",
     "daemons/netd",
     "daemons/vold",
+    "daemons/windows",
+    "daemons/windows/core",
 ]
 default-members = [
     "crates/aim-android-image",
@@ -82,9 +84,10 @@ default-members = [
     "crates/aim-storage",
     "crates/aim-sync-file",
     "tools/android-image-extract",
-    # lmkd's policy, a guest library, is built for the host too to run its
-    # tests.
+    # lmkd's policy and the task bridge's parcel reading, guest libraries,
+    # are built for the host too to run their tests.
     "daemons/lmkd/core",
+    "daemons/windows/core",
 ]
 resolver = "2"
 

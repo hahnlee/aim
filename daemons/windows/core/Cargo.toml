@@ -1,0 +1,10 @@
+[package]
+name = "aim-windows-core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "The task bridge's parcel reading: what ActivityTaskManager's task callbacks carry"
+
+# Built for the guest as part of `aim-windows`, and for the host to run its
+# tests (a default member of the workspace).

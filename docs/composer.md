@@ -71,7 +71,9 @@ the composer's `linux-run`:
   `CLOCK_MONOTONIC`), or the handler's time when Core Animation dropped the
   frame.
 - **Display mode.** The window's content in backing pixels: by default the
-  main screen's visible frame, `--size WxH` otherwise. Its density is the
+  main screen's visible frame, `--size WxH` otherwise. In window mode
+  (`--mode windows`) it is the main screen and a bar margin, and each task
+  window presents its task's part of every frame ([windows.md](windows.md)). Its density is the
   screen's (backing pixels per inch from `CGDisplayScreenSize`), its
   refresh period the display link's nominal one. Android pixels are backing
   pixels, never points.

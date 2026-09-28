@@ -1,0 +1,24 @@
+[package]
+name = "aim-windows"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "The task bridge: ActivityTaskManager's tasks as the display server's macOS windows"
+
+# Installed as /system_ext/bin/aim-windows (docs/windows.md).
+[package.metadata.daemon]
+program = "aim-windows"
+
+[dependencies]
+aim-hostcall.workspace = true
+aim-windows-core = { path = "core" }
+binder = { workspace = true, features = ["system"] }
+daemon-log.workspace = true
+log.workspace = true
+
+# declare_binder_interface! tests the cfgs Soong sets for NDK and VNDK
+# builds; a system daemon has neither.
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(android_ndk)", "cfg(android_vndk)"]

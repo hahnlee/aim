@@ -10,8 +10,12 @@
 //! fences the same way: the acquire fence the server waits for, and the
 //! writer of the present fence it signals once the frame is on screen. The
 //! guest gets the connection itself to read vsync events from.
+//!
+//! The guest's task bridge (`docs/windows.md`) gets a connection of its own
+//! ([`FN_WINDOWS`]) and exchanges window records on it directly.
 
 pub mod input;
+pub mod windows;
 pub mod wire;
 
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
@@ -21,8 +25,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use aim_hostcall::display::{
-    Buffer, Connect, FN_CONNECT, FN_IMPORT, FN_PRESENT, FN_RELEASE, FN_SET_VSYNC, Import, Present,
-    SetVsync, VERSION,
+    Buffer, Connect, FN_CONNECT, FN_IMPORT, FN_PRESENT, FN_RELEASE, FN_SET_VSYNC, FN_WINDOWS,
+    Import, Present, SetVsync, VERSION, Windows,
 };
 use aim_hostcall::{HostModule, args_mut, errno, module};
 use wire::Request;
@@ -75,18 +79,16 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
                 &[],
             )
         }),
+        FN_WINDOWS => unsafe { args_mut::<Windows>(args, len) }.map(windows),
         _ => Err(neg(errno::ENOSYS)),
     };
     r.unwrap_or_else(|e| e)
 }
 
-fn connect(out: &mut Connect) -> i64 {
-    let Some(path) = SERVER.get() else {
-        return neg(errno::ENODEV);
-    };
-    let Ok(stream) = UnixStream::connect(path) else {
-        return neg(errno::ECONNREFUSED);
-    };
+/// Connect to the server, send `hello` and read its answer.
+fn open<T: Copy + Default>(hello: &Request) -> Result<(UnixStream, T), i64> {
+    let path = SERVER.get().ok_or(neg(errno::ENODEV))?;
+    let stream = UnixStream::connect(path).map_err(|_| neg(errno::ECONNREFUSED))?;
     // A write after the server has gone must fail, not raise SIGPIPE.
     let on: libc::c_int = 1;
     // SAFETY: setsockopt on our socket with a local int.
@@ -99,33 +101,62 @@ fn connect(out: &mut Connect) -> i64 {
             size_of::<libc::c_int>() as libc::socklen_t,
         )
     };
+    // The server answers at once; a hung one must not hang the guest.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    match wire::send(stream.as_fd(), wire::bytes(hello), None)
+        .and_then(|()| wire::recv_record::<T>(stream.as_fd()))
+    {
+        Ok(Some(answer)) => {
+            let _ = stream.set_read_timeout(None);
+            Ok((stream, answer))
+        }
+        _ => Err(neg(errno::ECONNREFUSED)),
+    }
+}
+
+/// A guest fd for our end of `stream`; we keep the original.
+fn give_to_guest(stream: &UnixStream) -> Result<i64, i64> {
+    // SAFETY: fcntl on a fd we own; the guest owns the duplicate.
+    let guest = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if guest < 0 {
+        return Err(neg(errno::ENODEV));
+    }
+    Ok(guest as i64)
+}
+
+fn connect(out: &mut Connect) -> i64 {
     let hello = Request {
         op: wire::OP_HELLO,
         flag: out.display,
         id: wire::VERSION,
         ..Default::default()
     };
-    // The server answers at once; a hung one must not hang the guest.
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let info = match wire::send(stream.as_fd(), wire::bytes(&hello), None)
-        .and_then(|()| wire::recv_record::<Connect>(stream.as_fd()))
-    {
-        Ok(Some(info)) => info,
-        _ => return neg(errno::ECONNREFUSED),
+    let r = open::<Connect>(&hello).and_then(|(stream, info)| {
+        let guest = give_to_guest(&stream)?;
+        *out = Connect {
+            display: out.display,
+            ..info
+        };
+        *CONNECTION.lock().unwrap() = Some(stream.into());
+        Ok(guest)
+    });
+    r.unwrap_or_else(|e| e)
+}
+
+/// The task bridge's connection: the guest reads and writes it directly,
+/// so the module keeps nothing of it.
+fn windows(out: &mut Windows) -> i64 {
+    let hello = Request {
+        op: wire::OP_WINDOWS,
+        id: wire::VERSION,
+        ..Default::default()
     };
-    let _ = stream.set_read_timeout(None);
-    let mine = OwnedFd::from(stream);
-    // SAFETY: fcntl on a fd we own; the guest owns the duplicate.
-    let guest = unsafe { libc::fcntl(mine.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-    if guest < 0 {
-        return neg(errno::ENODEV);
-    }
-    *out = Connect {
-        display: out.display,
-        ..info
-    };
-    *CONNECTION.lock().unwrap() = Some(mine);
-    guest as i64
+    let r = open::<Windows>(&hello).and_then(|(stream, info)| {
+        let guest = give_to_guest(&stream)?;
+        *out = info;
+        Ok(guest)
+    });
+    r.unwrap_or_else(|e| e)
 }
 
 fn import(i: &Import) -> i64 {

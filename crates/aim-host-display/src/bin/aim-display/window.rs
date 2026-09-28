@@ -1,11 +1,15 @@
-//! The window: an `NSWindow` whose content view hosts a `CAMetalLayer`, on
-//! the main thread.
+//! The application, and device mode's window: an `NSWindow` whose content
+//! view hosts a `CAMetalLayer`, on the main thread.
 //!
-//! The display mode is the window's content in backing pixels. By default
-//! the window fills the main screen's visible frame, so the display has the
-//! screen's scale and density; `--size` asks for a smaller one.
+//! In device mode the display mode is the window's content in backing
+//! pixels. By default the window fills the main screen's visible frame, so
+//! the display has the screen's scale and density; `--size` asks for a
+//! smaller one. Window mode's windows are in `windows.rs`.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use aim_hostcall::display::mode;
 
 use crate::objc::{CGRect, CGSize, Id, Sel, class, class_addMethod, nsstring, sel};
 use crate::objc::{objc_allocateClassPair, objc_registerClassPair};
@@ -31,27 +35,34 @@ unsafe extern "C" {
     static kCGColorSpaceSRGB: *const c_void;
 }
 
-const NS_WINDOW_STYLE: usize = 1 | 2 | 4 | 8; // titled, closable, miniaturizable, resizable
-const NS_BACKING_STORE_BUFFERED: usize = 2;
+pub const NS_WINDOW_STYLE: usize = 1 | 2 | 4 | 8; // titled, closable, miniaturizable, resizable
+pub const NS_BACKING_STORE_BUFFERED: usize = 2;
 const NS_APPLICATION_ACTIVATION_POLICY_REGULAR: isize = 0;
 const MTL_PIXEL_FORMAT_BGRA8_UNORM: usize = 80;
+
+/// The display server's mode, one of `aim_hostcall::display::mode`.
+static MODE: AtomicU32 = AtomicU32::new(mode::DEVICE);
 // NSActivityOptions
 const NS_ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP: u64 = 0x00ff_ffff & !(1 << 20);
 const NS_ACTIVITY_LATENCY_CRITICAL: u64 = 0xff_0000_0000;
 
+/// The display the server shows, and device mode's window.
 pub struct Window {
-    pub layer: Id,
+    /// The device window's layer.
+    pub layer: Option<Id>,
     /// The display mode, in pixels.
     pub width: u32,
     pub height: u32,
     pub dpi_x: f64,
     pub dpi_y: f64,
-    /// `screencapture -l` takes this.
-    pub number: isize,
+    /// The device window's number; `screencapture -l` takes it.
+    pub number: Option<isize>,
 }
 
-extern "C" fn yes(_this: Id, _sel: Sel, _app: Id) -> bool {
-    true
+/// In device mode the server quits when its window closes; in window mode
+/// windows come and go with tasks.
+extern "C" fn quit_after_last_window(_this: Id, _sel: Sel, _app: Id) -> bool {
+    MODE.load(Ordering::Relaxed) == mode::DEVICE
 }
 
 /// Quit when the window closes; the input devices go with the window.
@@ -62,7 +73,7 @@ fn app_delegate() -> Id {
         class_addMethod(
             cls,
             sel(c"applicationShouldTerminateAfterLastWindowClosed:"),
-            yes as *const c_void,
+            quit_after_last_window as *const c_void,
             c"B@:@".as_ptr(),
         );
         class_addMethod(
@@ -78,7 +89,7 @@ fn app_delegate() -> Id {
 }
 
 /// The main display's density, in dots per inch of backing pixels.
-fn main_display_dpi() -> (f64, f64) {
+pub fn main_display_dpi() -> (f64, f64) {
     // SAFETY: CoreGraphics queries on the main display; the mode is released.
     unsafe {
         let id = CGMainDisplayID();
@@ -96,12 +107,13 @@ fn main_display_dpi() -> (f64, f64) {
     }
 }
 
-/// Create the application and its window. Main thread only.
-pub fn create(size: Option<(u32, u32)>, title: &str, device: Id) -> Window {
+/// Create the application for `display_mode`. Main thread only.
+pub fn app(display_mode: u32) {
+    MODE.store(display_mode, Ordering::Relaxed);
     let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
     send!(app, c"setActivationPolicy:" => bool, isize = NS_APPLICATION_ACTIVATION_POLICY_REGULAR);
     send!(app, c"setDelegate:" => (), Id = app_delegate());
-    // The display link must keep its rate while the window is in the
+    // The display link must keep its rate while the windows are in the
     // background: no App Nap, and latency-critical scheduling.
     let info = send!(class(c"NSProcessInfo"), c"processInfo" => Id);
     let activity = send!(info, c"beginActivityWithOptions:reason:" => Id,
@@ -109,7 +121,34 @@ pub fn create(size: Option<(u32, u32)>, title: &str, device: Id) -> Window {
         Id = nsstring("presenting the Android display"));
     // Held for the life of the process.
     send!(activity, c"retain" => Id);
+}
 
+/// A new `CAMetalLayer` on `device` with drawables of `width` x `height`
+/// pixels, shown at `scale` pixels per point and placed by `gravity`.
+pub fn metal_layer(device: Id, width: u32, height: u32, scale: f64, gravity: &str) -> Id {
+    let layer = send!(class(c"CAMetalLayer"), c"new" => Id);
+    send!(layer, c"setDevice:" => (), Id = device);
+    send!(layer, c"setPixelFormat:" => (), usize = MTL_PIXEL_FORMAT_BGRA8_UNORM);
+    send!(layer, c"setFramebufferOnly:" => (), bool = true);
+    send!(layer, c"setOpaque:" => (), bool = true);
+    send!(layer, c"setDrawableSize:" => (), CGSize = CGSize {
+        width: width as f64,
+        height: height as f64,
+    });
+    send!(layer, c"setContentsScale:" => (), f64 = scale);
+    send!(layer, c"setContentsGravity:" => (), Id = nsstring(gravity));
+    // SAFETY: a named CoreGraphics color space, released once the layer
+    // has retained it.
+    let srgb = unsafe { CGColorSpaceCreateWithName(kCGColorSpaceSRGB) };
+    send!(layer, c"setColorspace:" => (), *const c_void = srgb);
+    // SAFETY: created above.
+    unsafe { CGColorSpaceRelease(srgb) };
+    layer
+}
+
+/// Create device mode's window. Main thread only.
+pub fn create(size: Option<(u32, u32)>, title: &str, device: Id) -> Window {
+    let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
     let screen = send!(class(c"NSScreen"), c"mainScreen" => Id);
     let scale = send!(screen, c"backingScaleFactor" => f64);
     let visible = send!(screen, c"visibleFrame" => CGRect);
@@ -135,25 +174,9 @@ pub fn create(size: Option<(u32, u32)>, title: &str, device: Id) -> Window {
         send!(window, c"center" => ());
     }
 
-    let layer = send!(class(c"CAMetalLayer"), c"new" => Id);
-    send!(layer, c"setDevice:" => (), Id = device);
-    send!(layer, c"setPixelFormat:" => (), usize = MTL_PIXEL_FORMAT_BGRA8_UNORM);
-    send!(layer, c"setFramebufferOnly:" => (), bool = true);
-    send!(layer, c"setOpaque:" => (), bool = true);
-    send!(layer, c"setDrawableSize:" => (), CGSize = CGSize {
-        width: width as f64,
-        height: height as f64,
-    });
-    send!(layer, c"setContentsScale:" => (), f64 = scale);
     // The display keeps its mode when the window is resized; the layer
     // scales it to fit.
-    send!(layer, c"setContentsGravity:" => (), Id = nsstring("resizeAspect"));
-    // SAFETY: a named CoreGraphics color space, released once the layer
-    // has retained it.
-    let srgb = unsafe { CGColorSpaceCreateWithName(kCGColorSpaceSRGB) };
-    send!(layer, c"setColorspace:" => (), *const c_void = srgb);
-    // SAFETY: created above.
-    unsafe { CGColorSpaceRelease(srgb) };
+    let layer = metal_layer(device, width, height, scale, "resizeAspect");
     let view = crate::input::view(CGRect {
         size: content.size,
         ..Default::default()
@@ -168,12 +191,12 @@ pub fn create(size: Option<(u32, u32)>, title: &str, device: Id) -> Window {
     send!(app, c"activateIgnoringOtherApps:" => (), bool = true);
     let (dpi_x, dpi_y) = main_display_dpi();
     Window {
-        layer,
+        layer: Some(layer),
         width,
         height,
         dpi_x,
         dpi_y,
-        number: send!(window, c"windowNumber" => isize),
+        number: Some(send!(window, c"windowNumber" => isize)),
     }
 }
 

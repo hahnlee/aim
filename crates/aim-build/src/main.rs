@@ -38,9 +38,10 @@ commands:
        [--timeout SECS]  with a timeout (default 900); --integration adds the
                          tests/ targets and builds every node first. A test
                          that skips for a missing input fails.
-  boot [--data DIR] [-- GUEST-INIT-ARGS...]
+  boot [--data DIR] [--windows] [-- GUEST-INIT-ARGS...]
                          build, then run aim-display and guest-init with the
-                         standard flags of docs/boot-status.md
+                         standard flags of docs/boot-status.md; --windows
+                         shows each app in its own window (docs/windows.md)
   bench [--runs N] [--keep]
                          build, then boot fresh data directories N times
                          (default 1) and measure boot, process creation,
@@ -98,6 +99,7 @@ struct Args {
     timeout: Duration,
     data: Option<String>,
     rest: Vec<String>,
+    windows: bool,
     runs: usize,
     keep: bool,
     compare: Vec<String>,
@@ -115,6 +117,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         timeout: Duration::from_secs(900),
         data: None,
         rest: Vec::new(),
+        windows: false,
         runs: 1,
         keep: false,
         compare: Vec::new(),
@@ -134,6 +137,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
                 parsed.timeout = Duration::from_secs(secs);
             }
             "--data" if parsed.command == "boot" => parsed.data = Some(value(&arg)?),
+            "--windows" if parsed.command == "boot" => parsed.windows = true,
             "--runs" if parsed.command == "bench" => {
                 parsed.runs = value(&arg)?
                     .parse()
@@ -253,7 +257,7 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
                 let _lock = lock()?;
                 graph::build(&graph, &graph.boot_set(), &ctx, &options)?;
             }
-            boot::run(&ctx, args.data.as_deref(), &args.rest)
+            boot::run(&ctx, args.data.as_deref(), args.windows, &args.rest)
         }
         "bench" if !args.compare.is_empty() => bench::compare(&args.compare[0], &args.compare[1]),
         "bench" => {

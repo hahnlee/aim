@@ -97,7 +97,7 @@ first.
 | 0 | core | `ABI_VERSION` = 1 | (version only) |
 | 1 | health | 1 | `FN_BATTERY`: fill `health::Battery` |
 | 2 | gpu | 1 | `FN_INIT`, `FN_IMPORT_BUFFER`, `FN_PRESENT`, and the generated EGL/GLES entry points from `FN_TABLE_BASE` ([gles-driver.md](gles-driver.md)) |
-| 3 | display | 1 | `FN_CONNECT` (returns the event fd), `FN_IMPORT`, `FN_PRESENT`, `FN_RELEASE`, `FN_SET_VSYNC` ([composer.md](composer.md)) |
+| 3 | display | 3 | `FN_CONNECT` (returns the event fd), `FN_IMPORT`, `FN_PRESENT`, `FN_RELEASE`, `FN_SET_VSYNC` ([composer.md](composer.md)); `FN_WINDOWS` (returns the task bridge's record fd, [windows.md](windows.md)) |
 | 4 | thermal | 1 | `FN_READ`: fill `thermal::Thermal` ([vendor-hals.md](vendor-hals.md)) |
 | 5 | sensors | 1 | `FN_READ`: fill `sensors::Readings` ([vendor-hals.md](vendor-hals.md)) |
 | 6 | location | 1 | `FN_START`, `FN_STOP`; `FN_READ`: fill `location::Fix` ([vendor-hals.md](vendor-hals.md)) |

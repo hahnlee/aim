@@ -24,7 +24,7 @@ NSView events ──▶ translate::Input ──▶ server::Devices ──unix so
 | Node | Name | What | Classes EventHub gives it |
 | --- | --- | --- | --- |
 | `event0` | `aim-touchscreen` | primary button: one finger, multitouch protocol B (10 slots), `INPUT_PROP_DIRECT`, axes in display pixels, resolution from the display's dpi | `TOUCH \| TOUCH_MT` |
-| `event1` | `aim-keyboard` | physical keys (`KEY_*`), `Generic.kl`/`Generic.kcm` | `KEYBOARD \| ALPHAKEY`, built-in keyboard |
+| `event1` | `aim-keyboard` | physical keys (`KEY_*`) and `KEY_BACK`, `Generic.kl`/`Generic.kcm` | `KEYBOARD \| ALPHAKEY`, built-in keyboard |
 | `event2` | `aim-wheel` | wheel and trackpad scrolling: `REL_WHEEL`, `REL_WHEEL_HI_RES` | `ROTARY_ENCODER` |
 
 All are `BUS_VIRTUAL`, vendor and product 0 (no real device identity), so
@@ -57,12 +57,18 @@ and character map are the image's `Generic.kl` and `Generic.kcm`.
   toggle. The keyboard has no `EV_REP`: Android repeats keys itself, so
   AppKit's repeats are dropped (EventHub's `EVIOCSREP` gets `ENOSYS`, as with
   any keyboard without kernel repeat).
+- **Back.** The Mac's ways back press the keyboard's `KEY_BACK`: Cmd+[,
+  the mouse's back button and a two-finger swipe to the right (when
+  "swipe between pages" is on). Esc stays Esc; Android 16 does not turn an
+  unhandled Esc into Back ([windows.md](windows.md), "Back").
 - When the window stops being key, the finger lifts and every key is
   released, so nothing stays down in the guest.
 
 ### Coordinates
 
-The display mode is the window's content in backing pixels, and the layer
+In window mode each window maps its points one to one onto its task's part
+of the display ([windows.md](windows.md)). In device mode the display mode
+is the window's content in backing pixels, and the layer
 shows it aspect-fitted (`resizeAspect`) when the window is resized. A view
 point (points, origin bottom left) maps to a display pixel by the fit's
 scale and offset, with y flipped (`translate::to_display`). A press on the

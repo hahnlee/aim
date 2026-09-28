@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The device supports freeform windows (docs/windows.md): in window mode
+     each freeform task on the default display is a macOS window, and the
+     task bridge sets the display's windowing mode to freeform. -->
+<permissions>
+    <feature name="android.software.freeform_window_management" />
+</permissions>

@@ -517,7 +517,7 @@ fn one_run(
     aim_storage::data::remove(&data)?;
     let log =
         fs::File::create(dir.join(format!("guest-init-{n}.log"))).map_err(|e| e.to_string())?;
-    let display = boot::start_display(ctx, dir)?;
+    let display = boot::start_display(ctx, dir, false)?;
     let epoch0 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
