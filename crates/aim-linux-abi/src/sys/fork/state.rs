@@ -14,7 +14,8 @@
 use std::path::PathBuf;
 
 use crate::sys::{
-    copies, cred, fdtab, mem, memfd, misc, process, procfs, pstate, selinuxfs, signal, thread, wait,
+    copies, cred, fdtab, mem, memfd, misc, process, procfs, pstate, selinuxfs, signal, sync_file,
+    thread, wait,
 };
 
 #[derive(Default)]
@@ -180,6 +181,7 @@ pub fn save(w: &mut Writer) {
     selinuxfs::fork_save(w);
     wait::fork_save(w);
     fdtab::fork_save(w);
+    sync_file::fork_save(w);
     signal::fork_save(w);
     thread::fork_save(w);
     w.bytes(&aim_host_gpu::fork_state());
@@ -202,6 +204,7 @@ pub fn restore(r: &mut Reader) -> bool {
     selinuxfs::fork_restore(r);
     wait::fork_restore(r);
     fdtab::fork_restore(r);
+    sync_file::fork_restore(r);
     signal::fork_restore(r);
     thread::fork_restore(r);
     aim_host_gpu::restore_fork_state(&r.bytes());

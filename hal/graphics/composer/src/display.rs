@@ -3,12 +3,13 @@
 //!
 //! Composition is all client (GPU) composition: validation turns every
 //! layer into `CLIENT`, SurfaceFlinger renders them with RenderEngine into
-//! the client target, and a present shows that buffer. There are no sync
-//! fences yet, so a present fence is never returned and SurfaceFlinger
-//! treats the frame as shown when present returns (`docs/composer.md`).
+//! the client target, and a present shows that buffer. The display server
+//! waits for the client target's acquire fence, so a present does not; it
+//! returns the present fence, which signals once the frame is on screen
+//! (`docs/composer.md`).
 
 use std::collections::HashMap;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 
 use aim_gralloc::Handle;
 use android_hardware_common::aidl::android::hardware::common::NativeHandle::NativeHandle;
@@ -19,9 +20,6 @@ use android_hardware_graphics_composer3::aidl::android::hardware::graphics::comp
 };
 
 use crate::host::Host;
-
-/// How long a present waits for the client target's acquire fence.
-const FENCE_TIMEOUT_MS: i32 = 3000;
 
 pub struct Display {
     /// Requested composition per layer.
@@ -156,22 +154,14 @@ impl Display {
         }
     }
 
-    /// Show the client target, once its rendering is done.
-    pub fn present(&mut self, host: &Host) {
-        if let Some(fence) = self.target_fence.take() {
-            let mut p = libc::pollfd {
-                fd: fence.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // SAFETY: poll on one fd we hold.
-            unsafe { libc::poll(&mut p, 1, FENCE_TIMEOUT_MS) };
-        }
-        if let Some(id) = self.target
-            && let Err(e) = host.present(id)
-        {
-            log::error!("present {id:#x}: {e:?}");
-        }
+    /// Show the client target once its rendering is done; the present
+    /// fence.
+    pub fn present(&mut self, host: &Host) -> Option<OwnedFd> {
+        let fence = self.target_fence.take();
+        let id = self.target?;
+        host.present(id, fence.as_ref().map(|f| f.as_fd()))
+            .inspect_err(|e| log::error!("present {id:#x}: {e:?}"))
+            .ok()
     }
 
     /// Forget everything, as for a new client.

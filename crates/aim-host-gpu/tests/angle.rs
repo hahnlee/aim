@@ -6,7 +6,12 @@ use std::ffi::CStr;
 use std::time::Instant;
 
 use aim_host_gpu::{MODULE, function, set_library_dir, table_identity};
-use aim_hostcall::gpu::{FN_IMPORT_BUFFER, FN_INIT, FN_PRESENT, ImportBuffer, Init, Present};
+use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+
+use aim_hostcall::gpu::{
+    FN_FENCE, FN_IMPORT_BUFFER, FN_INIT, FN_PRESENT, Fence, ImportBuffer, Init, Present,
+};
+use aim_sync_file::State;
 
 /// Call a forwarded entry point with integer-class arguments.
 fn x(name: &CStr, args: &[u64]) -> u64 {
@@ -138,14 +143,57 @@ fn renders_into_a_shared_memory_buffer() {
         src_height: h as u32,
         dst_width: w as u32,
         dst_height: h as u32,
+        ..Default::default()
     };
+    let before = aim_sync_file::monotonic_ns();
     assert_eq!(block(FN_PRESENT, &mut present), 0);
+    // SAFETY: the present's new fence, ours to close.
+    let fence = unsafe { OwnedFd::from_raw_fd(present.fence) };
+    assert!(
+        aim_sync_file::wait(fence.as_fd(), 5000),
+        "the copy's fence signals"
+    );
+    let State::Signaled {
+        timestamp_ns,
+        status: 1,
+    } = aim_sync_file::state(fence.as_fd())
+    else {
+        panic!("fence {:?}", aim_sync_file::state(fence.as_fd()));
+    };
+    assert!(timestamp_ns >= before && timestamp_ns <= aim_sync_file::monotonic_ns());
     // SAFETY: the mapping above.
     let px = |row: u64| unsafe { *(mem as *const u32).add((row * stride / 4) as usize) };
     // Row 0 of the buffer is the top of the image.
     assert_eq!(px(0), 0xff00_ff00, "top row green");
     assert_eq!(px(h - 1), 0xffff_0000, "bottom row blue");
     assert_eq!(x(c"glGetError", &[]), 0);
+
+    // A fence for later commands: each signals once its commands are done.
+    let mut fences = Vec::new();
+    for _ in 0..3 {
+        color(1.0, 0.0, 0.0);
+        x(c"glClear", &[0x4000]);
+        let fd = block(FN_FENCE, &mut Fence { display: dpy });
+        assert!(fd >= 0, "fence: {fd}");
+        // SAFETY: a new fd, ours to close.
+        fences.push(unsafe { OwnedFd::from_raw_fd(fd as i32) });
+    }
+    for f in &fences {
+        assert!(aim_sync_file::wait(f.as_fd(), 5000));
+    }
+    let start = Instant::now();
+    let n = 200;
+    for _ in 0..n {
+        x(c"glClear", &[0x4000]);
+        let fd = block(FN_FENCE, &mut Fence { display: dpy });
+        // SAFETY: a new fd, ours to close.
+        let f = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        assert!(aim_sync_file::wait(f.as_fd(), 5000));
+    }
+    eprintln!(
+        "clear + fence + wait for it: {:.1} us",
+        start.elapsed().as_secs_f64() * 1e6 / n as f64
+    );
 
     let n = 1_000_000;
     let start = Instant::now();

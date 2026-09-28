@@ -48,6 +48,7 @@ pub const FN_VERSION: u32 = 0;
 pub mod errno {
     pub const EBADF: i32 = 9;
     pub const EAGAIN: i32 = 11;
+    pub const ENOMEM: i32 = 12;
     pub const EBUSY: i32 = 16;
     pub const ENODEV: i32 = 19;
     pub const EINVAL: i32 = 22;
@@ -148,7 +149,7 @@ pub mod health {
 /// Module [`module::GPU`]: EGL and OpenGL ES over the host's ANGLE on
 /// Metal, for the guest GLES driver (`docs/gles-driver.md`).
 pub mod gpu {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     /// Load ANGLE and resolve the forwarded entry points ([`Init`]).
     /// Returns 0, `-ENODEV` when the host has no GPU libraries, or
@@ -158,8 +159,14 @@ pub mod gpu {
     /// as an `EGLImage` ([`ImportBuffer`]). Returns 0 or `-EINVAL`.
     pub const FN_IMPORT_BUFFER: u32 = 2;
     /// Copy the current context's draw surface into an `EGLImage`, top row
-    /// first, and wait for the GPU ([`Present`]). Returns 0 or `-EINVAL`.
+    /// first ([`Present`]), with a fence for the copy. Returns 0 or
+    /// `-EINVAL`.
     pub const FN_PRESENT: u32 = 3;
+    /// A native fence (`EGL_ANDROID_native_fence_sync`) for the commands
+    /// the current context has issued so far, which are flushed ([`Fence`]).
+    /// Returns the new sync_file's guest fd, or `-EINVAL` without a current
+    /// context.
+    pub const FN_FENCE: u32 = 4;
     /// Forwarded entry point `i` of the generated table
     /// (`tools/gen-gpu-thunks.py`) is function `FN_TABLE_BASE + i`. Its
     /// argument block is the callee's register image, 8 bytes per value:
@@ -210,11 +217,23 @@ pub mod gpu {
         pub src_height: u32,
         pub dst_width: u32,
         pub dst_height: u32,
+        /// Out: a sync_file fd that signals when the copy is done.
+        pub fence: i32,
+        pub _reserved: u32,
+    }
+
+    /// Argument block of [`FN_FENCE`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Fence {
+        /// The `EGLDisplay`, as the guest's EGL calls pass it.
+        pub display: u64,
     }
 
     const _: () = assert!(core::mem::size_of::<Init>() == 32);
     const _: () = assert!(core::mem::size_of::<ImportBuffer>() == 48);
-    const _: () = assert!(core::mem::size_of::<Present>() == 24);
+    const _: () = assert!(core::mem::size_of::<Present>() == 32);
+    const _: () = assert!(core::mem::size_of::<Fence>() == 8);
 }
 
 /// Module [`module::DISPLAY`]: the macOS window that shows a display, for
@@ -227,7 +246,7 @@ pub mod gpu {
 /// Asynchronous events (vsync) arrive as [`Event`] records on a descriptor
 /// the guest reads, since host code never calls guest code.
 pub mod display {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     /// Connect to the display server and describe display
     /// [`Connect::display`]. Returns a new guest fd that yields [`Event`]
@@ -238,7 +257,8 @@ pub mod display {
     /// `-EBADF`/`-EINVAL` for a bad fd or layout, `-ENOTCONN` before
     /// [`FN_CONNECT`].
     pub const FN_IMPORT: u32 = 2;
-    /// Show an imported buffer ([`Buffer`]). Returns 0 or `-ENOTCONN`.
+    /// Show an imported buffer once its acquire fence has signaled
+    /// ([`Present`]). Returns 0, `-EBADF` for a bad fence or `-ENOTCONN`.
     pub const FN_PRESENT: u32 = 3;
     /// Forget an imported buffer ([`Buffer`]). Returns 0 or `-ENOTCONN`.
     pub const FN_RELEASE: u32 = 4;
@@ -283,11 +303,24 @@ pub mod display {
         pub id: u64,
     }
 
-    /// Argument block of [`FN_PRESENT`] and [`FN_RELEASE`].
+    /// Argument block of [`FN_RELEASE`].
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct Buffer {
         pub id: u64,
+    }
+
+    /// Argument block of [`FN_PRESENT`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Present {
+        pub id: u64,
+        /// A sync_file fd that signals when the buffer's content is ready,
+        /// or -1. The caller keeps it.
+        pub acquire: i32,
+        /// Out: a sync_file fd that signals when the buffer is on screen
+        /// (the present fence), or -1.
+        pub present: i32,
     }
 
     /// Argument block of [`FN_SET_VSYNC`].
@@ -321,6 +354,7 @@ pub mod display {
     const _: () = assert!(core::mem::size_of::<Connect>() == 32);
     const _: () = assert!(core::mem::size_of::<Import>() == 40);
     const _: () = assert!(core::mem::size_of::<Buffer>() == 8);
+    const _: () = assert!(core::mem::size_of::<Present>() == 16);
     const _: () = assert!(core::mem::size_of::<SetVsync>() == 4);
     const _: () = assert!(core::mem::size_of::<Event>() == 32);
 }
@@ -1114,6 +1148,11 @@ pub mod guest {
         call_with(module::GPU, gpu::FN_PRESENT, args).map(drop)
     }
 
+    /// A native fence for the current context's commands; returns its fd.
+    pub fn gpu_fence(args: &mut gpu::Fence) -> Result<i32, Errno> {
+        call_with(module::GPU, gpu::FN_FENCE, args).map(|fd| fd as i32)
+    }
+
     /// Connect to the display server; returns the event fd.
     pub fn display_connect(args: &mut display::Connect) -> Result<i32, Errno> {
         call_with(module::DISPLAY, display::FN_CONNECT, args).map(|fd| fd as i32)
@@ -1125,13 +1164,8 @@ pub mod guest {
     }
 
     /// Show an imported buffer.
-    pub fn display_present(id: u64) -> Result<(), Errno> {
-        call_with(
-            module::DISPLAY,
-            display::FN_PRESENT,
-            &mut display::Buffer { id },
-        )
-        .map(drop)
+    pub fn display_present(args: &mut display::Present) -> Result<(), Errno> {
+        call_with(module::DISPLAY, display::FN_PRESENT, args).map(drop)
     }
 
     /// Forget an imported buffer.

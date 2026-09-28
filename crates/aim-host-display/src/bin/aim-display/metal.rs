@@ -7,15 +7,19 @@
 //! the buffer's memory. A present is one render pass that samples the
 //! texture into the layer's drawable: the drawable is Core Animation's, so
 //! this is the one copy a frame costs. It also converts the format (the
-//! layer is BGRA) and scales when the sizes differ.
+//! layer is BGRA) and scales when the sizes differ. The present fence
+//! signals when Core Animation has shown the drawable, with that time.
 
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use aim_hostcall::display::Import;
+use aim_sync_file::Writer;
 
-use crate::objc::{Id, Pool, class, nsstring, release, text};
+use crate::objc::{GlobalBlock, Id, Pool, class, nsstring, release, text};
+use crate::vsync;
 
 #[link(name = "Metal", kind = "framework")]
 unsafe extern "C" {
@@ -106,6 +110,34 @@ pub struct Frame {
     pub cpu_ns: u64,
     /// GPU execution of the pass.
     pub gpu_ns: u64,
+}
+
+/// Present fences of drawables not shown yet, by drawable.
+static PRESENTED: Mutex<Vec<(usize, Writer)>> = Mutex::new(Vec::new());
+
+/// A drawable's presented handler: signal its present fence with the time
+/// it was shown (now, when it was dropped instead).
+extern "C" fn presented(_block: *const GlobalBlock, drawable: Id) {
+    let writer = {
+        let mut p = PRESENTED.lock().unwrap();
+        p.iter()
+            .position(|(d, _)| *d == drawable as usize)
+            .map(|i| p.swap_remove(i).1)
+    };
+    if let Some(w) = writer {
+        let shown = send!(drawable, c"presentedTime" => f64);
+        let ns = if shown > 0.0 {
+            vsync::uptime_to_monotonic(shown)
+        } else {
+            vsync::monotonic_ns()
+        };
+        w.signal_at(ns, 1);
+    }
+}
+
+fn presented_block() -> &'static GlobalBlock {
+    static BLOCK: OnceLock<GlobalBlock> = OnceLock::new();
+    BLOCK.get_or_init(|| GlobalBlock::new(presented as *const c_void))
 }
 
 pub fn device() -> Id {
@@ -201,8 +233,8 @@ impl Renderer {
 
     /// Draw `t` (or black) into the next drawable, show it at the next
     /// vsync and wait until the GPU has read `t`, so its buffer may be
-    /// reused once this returns.
-    pub fn present(&self, t: Option<&Texture>) -> Option<Frame> {
+    /// reused once this returns. `fence` signals once the frame is shown.
+    pub fn present(&self, t: Option<&Texture>, fence: Option<Writer>) -> Option<Frame> {
         let start = Instant::now();
         let _pool = Pool::new();
         let drawable = send!(self.layer, c"nextDrawable" => Id);
@@ -230,6 +262,10 @@ impl Renderer {
                 usize = MTL_PRIMITIVE_TYPE_TRIANGLE, usize = 0, usize = 3);
         }
         send!(encoder, c"endEncoding" => ());
+        if let Some(w) = fence {
+            PRESENTED.lock().unwrap().push((drawable as usize, w));
+            send!(drawable, c"addPresentedHandler:" => (), *const GlobalBlock = presented_block());
+        }
         send!(commands, c"presentDrawable:" => (), Id = drawable);
         send!(commands, c"commit" => ());
         send!(commands, c"waitUntilCompleted" => ());

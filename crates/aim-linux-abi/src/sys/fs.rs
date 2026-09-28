@@ -177,7 +177,7 @@ fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         Kind::Evdev(_) => super::evdev::read(fd, buf, len),
         Kind::Sock(_) => net::read(fd, iov),
         Kind::Dir(_) => Some(-EISDIR),
-        Kind::Epoll(_) => Some(-(EINVAL as i64)),
+        Kind::Epoll(_) | Kind::SyncFile => Some(-(EINVAL as i64)),
         Kind::Knob(_) => None,
         Kind::Memfd(_) => {
             let mut total = 0i64;
@@ -205,7 +205,7 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         Kind::Sock(_) => net::write(fd, iov),
         Kind::Evdev(_) => super::evdev::write(fd, buf, len),
         Kind::Dir(_) => Some(-(EBADF as i64)),
-        Kind::Epoll(_) | Kind::Inotify(_) => Some(-(EINVAL as i64)),
+        Kind::Epoll(_) | Kind::Inotify(_) | Kind::SyncFile => Some(-(EINVAL as i64)),
         Kind::Knob(k) => Some(super::knob::write(fd, &k, iov)),
         Kind::Memfd(_) => {
             if memfd::write_sealed(fd) {
@@ -1075,6 +1075,9 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
         return r;
     }
     if let Some(r) = super::netif::ioctl(fd, req, arg) {
+        return r;
+    }
+    if let Some(r) = super::sync_file::ioctl(fd, req, arg) {
         return r;
     }
     // SAFETY: isatty/ioctl on a guest fd with guest argument buffers.

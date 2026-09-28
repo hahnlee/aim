@@ -44,6 +44,7 @@ mod ptimer;
 mod selinuxfs;
 mod sigframe;
 mod signal;
+mod sync_file;
 mod thread;
 mod uplink;
 mod vmmap;

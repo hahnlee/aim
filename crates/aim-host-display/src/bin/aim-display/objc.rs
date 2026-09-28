@@ -43,6 +43,49 @@ macro_rules! send {
     }};
 }
 
+unsafe extern "C" {
+    static _NSConcreteGlobalBlock: [*const c_void; 32];
+}
+
+/// A block literal without captures (`_NSConcreteGlobalBlock`). Copying
+/// it returns it unchanged.
+#[repr(C)]
+pub struct GlobalBlock {
+    isa: *const c_void,
+    flags: i32,
+    reserved: i32,
+    invoke: *const c_void,
+    descriptor: &'static BlockDescriptor,
+}
+
+#[repr(C)]
+struct BlockDescriptor {
+    reserved: usize,
+    size: usize,
+}
+
+// SAFETY: immutable after construction.
+unsafe impl Send for GlobalBlock {}
+unsafe impl Sync for GlobalBlock {}
+
+impl GlobalBlock {
+    /// A block whose invoke function is `invoke` (its first argument is the
+    /// block itself).
+    pub fn new(invoke: *const c_void) -> GlobalBlock {
+        static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
+            reserved: 0,
+            size: size_of::<GlobalBlock>(),
+        };
+        GlobalBlock {
+            isa: (&raw const _NSConcreteGlobalBlock).cast(),
+            flags: 1 << 28, // BLOCK_IS_GLOBAL
+            reserved: 0,
+            invoke,
+            descriptor: &DESCRIPTOR,
+        }
+    }
+}
+
 pub fn release(obj: Id) {
     if !obj.is_null() {
         // SAFETY: the caller owns one reference to `obj`.

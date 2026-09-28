@@ -2,14 +2,15 @@
 //! pbuffer (the surface's default framebuffer); at swap its color buffer is
 //! blitted into the buffer being queued. The destination framebuffer has
 //! `GL_MESA_framebuffer_flip_y`, so the buffer's row 0 is the top row, as
-//! Android expects of window buffers.
+//! Android expects of window buffers. The buffer is queued with a fence
+//! for the blit ([`crate::fence`]); nothing waits for the GPU here.
 
 use std::ffi::CStr;
 use std::sync::OnceLock;
 
 use aim_hostcall::gpu::Present;
 
-use crate::{EINVAL, resolved};
+use crate::{EINVAL, fence, resolved};
 
 const GL_TEXTURE_2D: u32 = 0x0de1;
 const GL_TEXTURE_BINDING_2D: u32 = 0x8069;
@@ -47,14 +48,13 @@ struct Gl {
     framebuffer_parameter: unsafe extern "C" fn(u32, u32, i32),
     blit: Blit,
     blit_angle: Blit,
-    finish: unsafe extern "C" fn(),
 }
 
 /// ANGLE's entry point `name` as the function pointer type `F`.
 ///
 /// # Safety
 /// `F` must be the C signature of that entry point.
-unsafe fn entry<F>(name: &CStr) -> Option<F> {
+pub(crate) unsafe fn entry<F>(name: &CStr) -> Option<F> {
     let address = resolved(name);
     // SAFETY: a non-null function address, as the caller's type.
     (address != 0).then(|| unsafe { std::mem::transmute_copy(&address) })
@@ -84,14 +84,13 @@ fn gl() -> Option<&'static Gl> {
                 framebuffer_parameter: entry(c"glFramebufferParameteriMESA")?,
                 blit: entry(c"glBlitFramebuffer")?,
                 blit_angle: entry(c"glBlitFramebufferANGLE")?,
-                finish: entry(c"glFinish")?,
             })
         }
     })
     .as_ref()
 }
 
-pub fn present(p: &Present) -> i64 {
+pub fn present(p: &mut Present) -> i64 {
     let Some(g) = gl() else {
         return EINVAL;
     };
@@ -105,13 +104,9 @@ pub fn present(p: &Present) -> i64 {
         if context == 0 {
             return EINVAL;
         }
+        let display = (g.get_current_display)();
         let mut version = 0;
-        (g.query_context)(
-            (g.get_current_display)(),
-            context,
-            EGL_CONTEXT_CLIENT_VERSION,
-            &mut version,
-        );
+        (g.query_context)(display, context, EGL_CONTEXT_CLIENT_VERSION, &mut version);
         let (mut draw, mut read, mut texture) = (0, 0, 0);
         (g.get_integerv)(GL_DRAW_FRAMEBUFFER_BINDING, &mut draw);
         (g.get_integerv)(GL_READ_FRAMEBUFFER_BINDING, &mut read);
@@ -158,8 +153,10 @@ pub fn present(p: &Present) -> i64 {
         (g.bind_texture)(GL_TEXTURE_2D, texture as u32);
         (g.delete_framebuffers)(1, &fbo);
         (g.delete_textures)(1, &target);
-        // No sync fences yet: the buffer is complete when it is queued.
-        (g.finish)();
+        match fence::fence(display) {
+            Ok(f) => p.fence = aim_sync_file::give_to_guest(f),
+            Err(e) => return e,
+        }
     }
     0
 }

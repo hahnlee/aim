@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
-use super::{epoll, evdev, event, inotify, knob, memfd, net};
+use super::{epoll, evdev, event, inotify, knob, memfd, net, sync_file};
 
 /// Guest fds below this have a byte in [`SLOW`]; the lean path sends larger
 /// fds to Rust.
@@ -42,6 +42,8 @@ pub enum Kind {
     Knob(Arc<knob::Knob>),
     /// An open evdev device (`/dev/input/eventN`).
     Evdev(Arc<evdev::Evdev>),
+    /// A fence (`sync_file`); its state is the host socket's.
+    SyncFile,
 }
 
 static TABLE: LazyLock<RwLock<HashMap<i32, Kind>>> = LazyLock::new(Default::default);
@@ -132,6 +134,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
             Kind::Timer(_) => "anon_inode:[timerfd]",
             Kind::Epoll(_) => "anon_inode:[eventpoll]",
             Kind::Inotify(_) => "anon_inode:inotify",
+            Kind::SyncFile => "anon_inode:sync_file",
             Kind::Evdev(e) => return Some(e.path()),
             Kind::Sock(_) | Kind::Dir(_) | Kind::Memfd(_) | Kind::Knob(_) => return None,
         }
@@ -160,6 +163,7 @@ pub fn after_fork_child() {
 
 /// Set up the table for this process: recognize inherited fds.
 pub fn init() {
+    sync_file::init();
     adopt_inherited();
 }
 
@@ -269,7 +273,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Epoll(a) => Arc::as_ptr(a) as *const (),
             Kind::Inotify(a) => Arc::as_ptr(a) as *const (),
             Kind::Dir(a) => Arc::as_ptr(a) as *const (),
-            Kind::Memfd(_) => std::ptr::null(),
+            Kind::Memfd(_) | Kind::SyncFile => std::ptr::null(),
             Kind::Knob(_) | Kind::Evdev(_) => continue,
         };
         let (i, new) = match objects.iter().position(|&o| !p.is_null() && o == p) {
@@ -320,6 +324,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
                 w.u64(k.0);
                 w.u64(k.1);
             }
+            Kind::SyncFile => w.u32(7),
             Kind::Knob(_) | Kind::Evdev(_) => unreachable!(),
         }
     });
@@ -341,6 +346,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             3 => Kind::Epoll(epoll::load(r)),
             4 => Kind::Inotify(inotify::load(r)),
             5 => Kind::Dir(Arc::new(Mutex::new(super::dir::load(r)))),
+            7 => Kind::SyncFile,
             _ => Kind::Memfd((r.u64(), r.u64())),
         };
         objects.push(k.clone());

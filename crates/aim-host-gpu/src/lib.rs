@@ -14,12 +14,15 @@
 //! the handles over ([`fork_state`]) and loads ANGLE again when the guest
 //! first calls it.
 //!
-//! Three functions are not plain forwards: [`FN_INIT`] loads ANGLE,
+//! Four functions are not plain forwards: [`FN_INIT`] loads ANGLE,
 //! [`FN_IMPORT_BUFFER`] turns a mapped graphics buffer into an `EGLImage`
-//! over a linear Metal texture ([`metal`]), and [`FN_PRESENT`] copies a
-//! window surface's pbuffer into the buffer being queued ([`present`]).
+//! over a linear Metal texture ([`metal`]), [`FN_PRESENT`] copies a window
+//! surface's pbuffer into the buffer being queued ([`present`]), and
+//! [`FN_FENCE`] makes a native fence (a sync_file) for the current
+//! context's commands ([`fence`]).
 
 mod display;
+mod fence;
 mod metal;
 mod present;
 #[rustfmt::skip]
@@ -32,7 +35,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use aim_hostcall::gpu::{
-    FN_IMPORT_BUFFER, FN_INIT, FN_PRESENT, FN_TABLE_BASE, ImportBuffer, Init, Present, VERSION,
+    FN_FENCE, FN_IMPORT_BUFFER, FN_INIT, FN_PRESENT, FN_TABLE_BASE, Fence, ImportBuffer, Init,
+    Present, VERSION,
 };
 use aim_hostcall::{HostModule, args_mut, errno, module};
 
@@ -306,6 +310,15 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
         },
         FN_PRESENT => match unsafe { args_mut::<Present>(args, len) } {
             Ok(a) => present::present(a),
+            Err(e) => e,
+        },
+        FN_FENCE => match unsafe { args_mut::<Fence>(args, len) } {
+            Ok(a) => {
+                let pool = metal::pool_push();
+                let r = fence::fence(display::host(a.display as usize));
+                metal::pool_pop(pool);
+                r.map_or_else(|e| e, |f| aim_sync_file::give_to_guest(f) as i64)
+            }
             Err(e) => e,
         },
         _ => ENOSYS,

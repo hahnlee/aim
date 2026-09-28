@@ -34,9 +34,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_host_display::wire::{self, Request};
 use aim_hostcall::display::{Connect, Event, event};
+use aim_sync_file::Writer;
 
 use metal::{Renderer, Texture};
 use stats::Stats;
+
+/// How long a present waits for its buffer's acquire fence.
+const ACQUIRE_TIMEOUT_MS: i32 = 3000;
 
 const USAGE: &str = "usage: aim-display --socket PATH [--size WxH] [--title TEXT] [--capture FILE]";
 
@@ -103,9 +107,18 @@ impl Display {
         }
     }
 
-    fn present(&self, t: &Arc<Texture>) {
+    /// Show `t` once its content is ready (`acquire`); `fence` signals when
+    /// it is on screen.
+    fn present(&self, t: &Arc<Texture>, acquire: Option<OwnedFd>, fence: Option<Writer>) {
+        if let Some(a) = acquire
+            && !aim_sync_file::wait(a.as_fd(), ACQUIRE_TIMEOUT_MS)
+        {
+            eprintln!(
+                "aim-display: acquire fence of a present not signaled in {ACQUIRE_TIMEOUT_MS} ms"
+            );
+        }
         let mut last = self.last.lock().unwrap();
-        if let Some(frame) = self.renderer.present(Some(t)) {
+        if let Some(frame) = self.renderer.present(Some(t), fence) {
             self.stats.present(frame);
         }
         *last = Some(t.clone());
@@ -123,7 +136,7 @@ impl Display {
         let mut textures: HashMap<u64, Arc<Texture>> = HashMap::new();
         loop {
             let mut r = Request::default();
-            let mut fd = None;
+            let mut fds = Vec::new();
             // SAFETY: `Request` is plain old data.
             let buf = unsafe {
                 std::slice::from_raw_parts_mut(
@@ -131,7 +144,7 @@ impl Display {
                     size_of::<Request>(),
                 )
             };
-            match wire::recv(sock.as_fd(), buf, &mut fd) {
+            match wire::recv(sock.as_fd(), buf, &mut fds) {
                 Ok(true) => {}
                 _ => break,
             }
@@ -143,7 +156,7 @@ impl Display {
                     self.clients.lock().unwrap().push(client.clone());
                 }
                 wire::OP_IMPORT => {
-                    let Some(fd) = fd else { break };
+                    let Some(fd) = fds.pop() else { break };
                     match self.renderer.import(fd, &r.import) {
                         Ok(t) => {
                             textures.insert(r.id, Arc::new(t));
@@ -151,10 +164,17 @@ impl Display {
                         Err(e) => eprintln!("aim-display: import {:#x}: {e}", r.id),
                     }
                 }
-                wire::OP_PRESENT => match textures.get(&r.id) {
-                    Some(t) => self.present(t),
-                    None => eprintln!("aim-display: present of unknown buffer {:#x}", r.id),
-                },
+                wire::OP_PRESENT => {
+                    let mut fds = fds.into_iter();
+                    let fence = fds.next().map(Writer::from);
+                    let acquire = (r.flag & wire::PRESENT_ACQUIRE != 0)
+                        .then(|| fds.next())
+                        .flatten();
+                    match textures.get(&r.id) {
+                        Some(t) => self.present(t, acquire, fence),
+                        None => eprintln!("aim-display: present of unknown buffer {:#x}", r.id),
+                    }
+                }
                 wire::OP_RELEASE => {
                     textures.remove(&r.id);
                 }
@@ -253,7 +273,7 @@ fn main() {
         std::process::exit(1)
     });
     // The display is black until the first frame.
-    renderer.present(None);
+    renderer.present(None, None);
 
     static DISPLAY: OnceLock<Display> = OnceLock::new();
     let period = vsync::start(Box::new(|tick| {
