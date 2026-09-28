@@ -3,9 +3,15 @@
 
 use crate::{align, format};
 
-/// Rows of every plane are aligned to this many bytes (Metal needs 16 for
-/// linear textures; 64 is a cache line).
+/// Rows of single-plane formats are aligned to this many bytes (Metal needs
+/// 16 for linear textures; 64 is a cache line).
 pub const ROW_ALIGN: u64 = 64;
+/// Rows of YUV planes: 16 bytes, as Android defines YV12 (`y_stride =
+/// ALIGN(width, 16)`, `c_stride = ALIGN(y_stride / 2, 16)`) and as Metal
+/// lays out the planes of a linear multi-planar texture, so a buffer is
+/// the storage MoltenVK expects of a linear YCbCr image
+/// (docs/vulkan-driver.md, "YUV").
+pub const YUV_ROW_ALIGN: u64 = 16;
 
 /// `android.hardware.graphics.common.PlaneLayoutComponentType` values.
 pub mod component {
@@ -67,24 +73,30 @@ fn packed(format: i32) -> Option<(u64, &'static [Component])> {
     })
 }
 
-/// Formats the host GPU imports as a texture (docs/graphics-buffers.md).
-pub fn gpu_capable(format: i32) -> bool {
-    matches!(
-        format,
+/// Whether the host GPU imports a buffer of `format` for the GPU usage
+/// `gpu` (docs/graphics-buffers.md): every usage of the formats with a
+/// Metal format, and sampling of the YUV formats, which the Vulkan driver
+/// samples as multi-planar images.
+pub fn gpu_capable(format: i32, gpu: u64) -> bool {
+    match format {
         format::RGBA_8888
-            | format::RGBX_8888
-            | format::BGRA_8888
-            | format::RGB_565
-            | format::RGBA_FP16
-            | format::RGBA_1010102
-            | format::R_8
-    )
+        | format::RGBX_8888
+        | format::BGRA_8888
+        | format::RGB_565
+        | format::RGBA_FP16
+        | format::RGBA_1010102
+        | format::R_8 => true,
+        format::YCBCR_420_888 | format::YCRCB_420_SP | format::YV12 | format::YCBCR_P010 => {
+            gpu & !crate::usage::GPU_TEXTURE == 0
+        }
+        _ => false,
+    }
 }
 
-/// The smallest pixel stride >= `width` whose rows are `ROW_ALIGN`-aligned.
-fn pixel_stride(width: u64, bpp: u64) -> u64 {
+/// The smallest pixel stride >= `width` whose rows are `row_align`-aligned.
+fn pixel_stride(width: u64, bpp: u64, row_align: u64) -> u64 {
     let mut stride = width;
-    while (stride * bpp) % ROW_ALIGN != 0 {
+    while (stride * bpp) % row_align != 0 {
         stride += 1;
     }
     stride
@@ -119,13 +131,13 @@ impl Layout {
         let (w, h) = (width as u64, height as u64);
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
         let (stride, planes) = if let Some((bpp, components)) = packed(format) {
-            let stride = pixel_stride(w, bpp);
+            let stride = pixel_stride(w, bpp, ROW_ALIGN);
             let p = plane(components, 0, bpp * 8, stride * bpp, w, h, 1);
             (stride, vec![p])
         } else {
             match format {
                 format::YCBCR_420_888 | format::YCRCB_420_SP => {
-                    let stride = align(w, ROW_ALIGN);
+                    let stride = align(w, YUV_ROW_ALIGN);
                     let chroma: &[Component] = if format == format::YCBCR_420_888 {
                         &[(CB, 0, 8), (CR, 8, 8)]
                     } else {
@@ -136,8 +148,8 @@ impl Layout {
                     (stride, vec![y, c])
                 }
                 format::YV12 => {
-                    let stride = align(w, ROW_ALIGN);
-                    let c_stride = align(stride / 2, 16);
+                    let stride = align(w, YUV_ROW_ALIGN);
+                    let c_stride = align(stride / 2, YUV_ROW_ALIGN);
                     let y = plane(&[(Y, 0, 8)], 0, 8, stride, w, h, 1);
                     let cr = plane(&[(CR, 0, 8)], y.total_size, 8, c_stride, cw, ch, 2);
                     let cb = plane(
@@ -152,7 +164,7 @@ impl Layout {
                     (stride, vec![y, cr, cb])
                 }
                 format::YCBCR_P010 => {
-                    let stride = pixel_stride(w, 2);
+                    let stride = pixel_stride(w, 2, YUV_ROW_ALIGN);
                     let y = plane(&[(Y, 6, 10)], 0, 16, stride * 2, w, h, 1);
                     let c = plane(
                         &[(CB, 6, 10), (CR, 22, 10)],
@@ -223,9 +235,10 @@ mod tests {
     #[test]
     fn yuv_planes() {
         let l = Layout::new(format::YCBCR_420_888, 100, 50, 1).unwrap();
-        assert_eq!(l.stride, 128);
+        assert_eq!(l.stride, 112);
         assert_eq!(l.planes.len(), 2);
-        assert_eq!(l.planes[1].offset, 128 * 50);
+        assert_eq!(l.planes[1].offset, 112 * 50);
+        assert_eq!(l.planes[1].stride_bytes, 112);
         assert_eq!(l.planes[1].height_samples, 25);
         assert_eq!(l.planes[1].width_samples, 50);
         let l = Layout::new(format::YV12, 64, 64, 1).unwrap();
@@ -233,6 +246,12 @@ mod tests {
         assert_eq!(l.planes[1].offset, 64 * 64);
         assert_eq!(l.planes[2].offset, 64 * 64 + 32 * 32);
         assert_eq!(l.planes[1].components[0].0, component::CR);
+        // Android's YV12: y_stride = ALIGN(720, 16), c_stride = ALIGN(360, 16).
+        let l = Layout::new(format::YV12, 720, 480, 1).unwrap();
+        assert_eq!((l.stride, l.planes[1].stride_bytes), (720, 368));
+        assert_eq!(l.planes[2].offset, 720 * 480 + 368 * 240);
+        let l = Layout::new(format::YCBCR_P010, 100, 50, 1).unwrap();
+        assert_eq!(l.planes[0].stride_bytes, 208);
     }
 
     #[test]

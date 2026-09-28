@@ -50,6 +50,7 @@ pub mod stype {
     pub const ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID: i32 = 1000129002;
     pub const IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID: i32 = 1000129003;
     pub const EXTERNAL_FORMAT_ANDROID: i32 = 1000129005;
+    pub const SAMPLER_YCBCR_CONVERSION_CREATE_INFO: i32 = 1000156000;
     pub const ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_2_ANDROID: i32 = 1000129006;
     pub const IMPORT_MEMORY_HOST_POINTER_INFO_EXT: i32 = 1000178000;
     pub const SEMAPHORE_TYPE_CREATE_INFO: i32 = 1000207002;
@@ -203,6 +204,63 @@ pub struct VkNativeBufferANDROID {
     pub ahb: *mut c_void,
 }
 
+/// `VkExternalFormatANDROID`.
+#[repr(C)]
+pub struct VkExternalFormatANDROID {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub externalFormat: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkImageViewCreateInfo {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub flags: u32,
+    pub image: u64,
+    pub viewType: i32,
+    pub format: i32,
+    pub components: [i32; 4],
+    pub subresourceRange: [u32; 5],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkSamplerYcbcrConversionCreateInfo {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub format: i32,
+    pub ycbcrModel: i32,
+    pub ycbcrRange: i32,
+    pub components: [i32; 4],
+    pub xChromaOffset: i32,
+    pub yChromaOffset: i32,
+    pub chromaFilter: i32,
+    pub forceExplicitReconstruction: u32,
+}
+
+#[repr(C)]
+pub struct VkImageSubresource {
+    pub aspectMask: u32,
+    pub mipLevel: u32,
+    pub arrayLayer: u32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct VkSubresourceLayout {
+    pub offset: u64,
+    pub size: u64,
+    pub rowPitch: u64,
+    pub arrayPitch: u64,
+    pub depthPitch: u64,
+}
+
+/// `VK_IMAGE_ASPECT_PLANE_0_BIT`; plane n is this << n.
+pub const ASPECT_PLANE_0: u32 = 0x10;
+pub const IMAGE_TILING_LINEAR: i32 = 1;
+
 #[repr(C)]
 pub struct VkExternalMemoryCreateInfo {
     pub sType: i32,
@@ -274,6 +332,7 @@ pub struct VkMemoryGetAndroidHardwareBufferInfoANDROID {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct VkPhysicalDeviceImageFormatInfo2 {
     pub sType: i32,
     pub pNext: *const c_void,

@@ -133,7 +133,8 @@ impl Descriptor {
             d.layer_count as u32,
         )
         .ok_or(Unsupported::Unsupported)?;
-        if d.usage & usage::GPU_IMAGE != 0 && (!layout::gpu_capable(format) || d.layer_count > 1) {
+        let gpu = d.usage & usage::GPU_IMAGE;
+        if gpu != 0 && (!layout::gpu_capable(format, gpu) || d.layer_count > 1) {
             return Err(Unsupported::Unsupported);
         }
         Ok(layout)
@@ -189,6 +190,16 @@ mod tests {
         assert!(desc(format::RGB_888, 64, 64, 0x33).layout().is_ok());
         assert_eq!(
             desc(format::RGB_888, 64, 64, gpu).layout(),
+            Err(Unsupported::Unsupported)
+        );
+        // YUV is sampled (by the Vulkan driver), not rendered to.
+        assert!(
+            desc(format::YV12, 64, 64, usage::GPU_TEXTURE)
+                .layout()
+                .is_ok()
+        );
+        assert_eq!(
+            desc(format::YCBCR_420_888, 64, 64, gpu).layout(),
             Err(Unsupported::Unsupported)
         );
         assert_eq!(

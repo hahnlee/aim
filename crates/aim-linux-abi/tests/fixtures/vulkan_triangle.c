@@ -4,7 +4,8 @@
 //
 //   vulkan_triangle        instance and device, a triangle into an
 //                          AHardwareBuffer-backed image read back on the CPU,
-//                          and sync-fd semaphores
+//                          YUV AHardwareBuffers sampled through external
+//                          formats, and sync-fd semaphores
 //   vulkan_triangle swapchain
 //                          a swapchain on an ImageReader's window; the
 //                          loader asks SurfaceFlinger for the refresh
@@ -112,10 +113,84 @@ static const uint32_t kFrag[] = {
     0x00000009, 0x0000000c, 0x000100fd, 0x00010038,
 };
 
+// glslc -O --target-env=vulkan1.1 of a triangle covering the target:
+//   #version 450
+//   void main() {
+//       vec2 p[3] = vec2[](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+//       gl_Position = vec4(p[gl_VertexIndex], 0.0, 1.0);
+//   }
+static const uint32_t kFullVert[] = {
+    0x07230203, 0x00010300, 0x000d000a, 0x00000028, 0x00000000, 0x00020011,
+    0x00000001, 0x0006000b, 0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e,
+    0x00000000, 0x0003000e, 0x00000000, 0x00000001, 0x0007000f, 0x00000000,
+    0x00000004, 0x6e69616d, 0x00000000, 0x00000018, 0x0000001c, 0x00050048,
+    0x00000016, 0x00000000, 0x0000000b, 0x00000000, 0x00050048, 0x00000016,
+    0x00000001, 0x0000000b, 0x00000001, 0x00050048, 0x00000016, 0x00000002,
+    0x0000000b, 0x00000003, 0x00050048, 0x00000016, 0x00000003, 0x0000000b,
+    0x00000004, 0x00030047, 0x00000016, 0x00000002, 0x00040047, 0x0000001c,
+    0x0000000b, 0x0000002a, 0x00020013, 0x00000002, 0x00030021, 0x00000003,
+    0x00000002, 0x00030016, 0x00000006, 0x00000020, 0x00040017, 0x00000007,
+    0x00000006, 0x00000002, 0x00040015, 0x00000008, 0x00000020, 0x00000000,
+    0x0004002b, 0x00000008, 0x00000009, 0x00000003, 0x0004001c, 0x0000000a,
+    0x00000007, 0x00000009, 0x00040020, 0x0000000b, 0x00000007, 0x0000000a,
+    0x0004002b, 0x00000006, 0x0000000d, 0xbf800000, 0x0005002c, 0x00000007,
+    0x0000000e, 0x0000000d, 0x0000000d, 0x0004002b, 0x00000006, 0x0000000f,
+    0x40400000, 0x0005002c, 0x00000007, 0x00000010, 0x0000000f, 0x0000000d,
+    0x0005002c, 0x00000007, 0x00000011, 0x0000000d, 0x0000000f, 0x0006002c,
+    0x0000000a, 0x00000012, 0x0000000e, 0x00000010, 0x00000011, 0x00040017,
+    0x00000013, 0x00000006, 0x00000004, 0x0004002b, 0x00000008, 0x00000014,
+    0x00000001, 0x0004001c, 0x00000015, 0x00000006, 0x00000014, 0x0006001e,
+    0x00000016, 0x00000013, 0x00000006, 0x00000015, 0x00000015, 0x00040020,
+    0x00000017, 0x00000003, 0x00000016, 0x0004003b, 0x00000017, 0x00000018,
+    0x00000003, 0x00040015, 0x00000019, 0x00000020, 0x00000001, 0x0004002b,
+    0x00000019, 0x0000001a, 0x00000000, 0x00040020, 0x0000001b, 0x00000001,
+    0x00000019, 0x0004003b, 0x0000001b, 0x0000001c, 0x00000001, 0x00040020,
+    0x0000001e, 0x00000007, 0x00000007, 0x0004002b, 0x00000006, 0x00000021,
+    0x00000000, 0x0004002b, 0x00000006, 0x00000022, 0x3f800000, 0x00040020,
+    0x00000026, 0x00000003, 0x00000013, 0x00050036, 0x00000002, 0x00000004,
+    0x00000000, 0x00000003, 0x000200f8, 0x00000005, 0x0004003b, 0x0000000b,
+    0x0000000c, 0x00000007, 0x0003003e, 0x0000000c, 0x00000012, 0x0004003d,
+    0x00000019, 0x0000001d, 0x0000001c, 0x00050041, 0x0000001e, 0x0000001f,
+    0x0000000c, 0x0000001d, 0x0004003d, 0x00000007, 0x00000020, 0x0000001f,
+    0x00050051, 0x00000006, 0x00000023, 0x00000020, 0x00000000, 0x00050051,
+    0x00000006, 0x00000024, 0x00000020, 0x00000001, 0x00070050, 0x00000013,
+    0x00000025, 0x00000023, 0x00000024, 0x00000021, 0x00000022, 0x00050041,
+    0x00000026, 0x00000027, 0x00000018, 0x0000001a, 0x0003003e, 0x00000027,
+    0x00000025, 0x000100fd, 0x00010038,
+};
+
+// and of:
+//   #version 450
+//   layout(binding = 0) uniform sampler2D image;
+//   layout(location = 0) out vec4 color;
+//   void main() { color = texture(image, vec2(0.5)); }
+static const uint32_t kSampleFrag[] = {
+    0x07230203, 0x00010300, 0x000d000a, 0x00000013, 0x00000000, 0x00020011,
+    0x00000001, 0x0006000b, 0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e,
+    0x00000000, 0x0003000e, 0x00000000, 0x00000001, 0x0006000f, 0x00000004,
+    0x00000004, 0x6e69616d, 0x00000000, 0x00000009, 0x00030010, 0x00000004,
+    0x00000007, 0x00040047, 0x00000009, 0x0000001e, 0x00000000, 0x00040047,
+    0x0000000d, 0x00000022, 0x00000000, 0x00040047, 0x0000000d, 0x00000021,
+    0x00000000, 0x00020013, 0x00000002, 0x00030021, 0x00000003, 0x00000002,
+    0x00030016, 0x00000006, 0x00000020, 0x00040017, 0x00000007, 0x00000006,
+    0x00000004, 0x00040020, 0x00000008, 0x00000003, 0x00000007, 0x0004003b,
+    0x00000008, 0x00000009, 0x00000003, 0x00090019, 0x0000000a, 0x00000006,
+    0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000001, 0x00000000,
+    0x0003001b, 0x0000000b, 0x0000000a, 0x00040020, 0x0000000c, 0x00000000,
+    0x0000000b, 0x0004003b, 0x0000000c, 0x0000000d, 0x00000000, 0x00040017,
+    0x0000000f, 0x00000006, 0x00000002, 0x0004002b, 0x00000006, 0x00000010,
+    0x3f000000, 0x0005002c, 0x0000000f, 0x00000011, 0x00000010, 0x00000010,
+    0x00050036, 0x00000002, 0x00000004, 0x00000000, 0x00000003, 0x000200f8,
+    0x00000005, 0x0004003d, 0x0000000b, 0x0000000e, 0x0000000d, 0x00050057,
+    0x00000007, 0x00000012, 0x0000000e, 0x00000011, 0x0003003e, 0x00000009,
+    0x00000012, 0x000100fd, 0x00010038,
+};
+
 static VkResult r;
 static VkInstance instance;
 static VkPhysicalDevice gpu;
 static VkDevice device;
+static uint32_t family;
 static VkQueue queue;
 // The second queue of the graphics family, as HWUI asks for two.
 static VkQueue queue2;
@@ -221,28 +296,10 @@ static VkShaderModule shader(const uint32_t* code, size_t size) {
     return m;
 }
 
-// A render pass that clears one R8G8B8A8 attachment and leaves it in
-// `final_layout`, and a pipeline drawing the red triangle.
-static void create_pipeline(VkImageLayout final_layout) {
-    VkAttachmentDescription a = {.format = VK_FORMAT_R8G8B8A8_UNORM,
-                                 .samples = VK_SAMPLE_COUNT_1_BIT,
-                                 .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-                                 .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                                 .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                                 .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-                                 .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                                 .finalLayout = final_layout};
-    VkAttachmentReference ref = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkSubpassDescription sub = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                .colorAttachmentCount = 1,
-                                .pColorAttachments = &ref};
-    VkRenderPassCreateInfo rp = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-                                 .attachmentCount = 1,
-                                 .pAttachments = &a,
-                                 .subpassCount = 1,
-                                 .pSubpasses = &sub};
-    VK(vkCreateRenderPass(device, &rp, NULL, &pass));
-    VkShaderModule vs = shader(kVert, sizeof(kVert)), fs = shader(kFrag, sizeof(kFrag));
+// A pipeline of the two shaders for `pass`, with `pipeline_layout`.
+static VkPipeline graphics_pipeline(const uint32_t* vert, size_t vert_size, const uint32_t* frag,
+                                    size_t frag_size, VkPipelineLayout pipeline_layout) {
+    VkShaderModule vs = shader(vert, vert_size), fs = shader(frag, frag_size);
     VkPipelineShaderStageCreateInfo stages[2] = {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
          .stage = VK_SHADER_STAGE_VERTEX_BIT,
@@ -278,8 +335,6 @@ static void create_pipeline(VkImageLayout final_layout) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .attachmentCount = 1,
         .pAttachments = &cba};
-    VkPipelineLayoutCreateInfo pl = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    VK(vkCreatePipelineLayout(device, &pl, NULL, &layout));
     VkGraphicsPipelineCreateInfo gp = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
                                        .stageCount = 2,
                                        .pStages = stages,
@@ -289,11 +344,39 @@ static void create_pipeline(VkImageLayout final_layout) {
                                        .pRasterizationState = &rs,
                                        .pMultisampleState = &ms,
                                        .pColorBlendState = &cb,
-                                       .layout = layout,
+                                       .layout = pipeline_layout,
                                        .renderPass = pass};
-    VK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, NULL, &pipeline));
+    VkPipeline p;
+    VK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, NULL, &p));
     vkDestroyShaderModule(device, vs, NULL);
     vkDestroyShaderModule(device, fs, NULL);
+    return p;
+}
+
+// A render pass that clears one R8G8B8A8 attachment and leaves it in
+// `final_layout`, and a pipeline drawing the red triangle.
+static void create_pipeline(VkImageLayout final_layout) {
+    VkAttachmentDescription a = {.format = VK_FORMAT_R8G8B8A8_UNORM,
+                                 .samples = VK_SAMPLE_COUNT_1_BIT,
+                                 .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                 .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                                 .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                 .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                 .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                                 .finalLayout = final_layout};
+    VkAttachmentReference ref = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sub = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                .colorAttachmentCount = 1,
+                                .pColorAttachments = &ref};
+    VkRenderPassCreateInfo rp = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+                                 .attachmentCount = 1,
+                                 .pAttachments = &a,
+                                 .subpassCount = 1,
+                                 .pSubpasses = &sub};
+    VK(vkCreateRenderPass(device, &rp, NULL, &pass));
+    VkPipelineLayoutCreateInfo pl = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    VK(vkCreatePipelineLayout(device, &pl, NULL, &layout));
+    pipeline = graphics_pipeline(kVert, sizeof(kVert), kFrag, sizeof(kFrag), layout);
 }
 
 static VkImageView view_of(VkImage image) {
@@ -381,39 +464,37 @@ static void submit_and_wait(VkCommandBuffer cmd) {
     vkDestroyFence(device, fence, NULL);
 }
 
-// A triangle into an image whose memory is an AHardwareBuffer, read back
-// through the buffer's CPU mapping.
-static void ahb_triangle(void) {
-    AHardwareBuffer_Desc desc = {.width = W,
-                                 .height = H,
-                                 .layers = 1,
-                                 .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
-                                 .usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
-                                          AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
-                                          AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN};
-    AHardwareBuffer* ahb = NULL;
-    CHECK(AHardwareBuffer_allocate(&desc, &ahb) == 0, "AHardwareBuffer_allocate");
-    VkAndroidHardwareBufferFormatPropertiesANDROID fmt = {
+// An image whose memory is `ahb`: of `format`, or of the buffer's external
+// format when `format` is VK_FORMAT_UNDEFINED. `fmt` gets the buffer's
+// format properties.
+static VkImage import_image(AHardwareBuffer* ahb, VkFormat format, VkImageUsageFlags usage,
+                            VkDeviceMemory* memory,
+                            VkAndroidHardwareBufferFormatPropertiesANDROID* fmt) {
+    *fmt = (VkAndroidHardwareBufferFormatPropertiesANDROID){
         .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID};
     VkAndroidHardwareBufferPropertiesANDROID props = {
-        .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID, .pNext = &fmt};
+        .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID, .pNext = fmt};
     VK(vkGetAndroidHardwareBufferPropertiesANDROID(device, ahb, &props));
-    CHECK(fmt.format == VK_FORMAT_R8G8B8A8_UNORM && props.memoryTypeBits,
-          "AHardwareBuffer properties: format %d, types %x", fmt.format, props.memoryTypeBits);
+    CHECK(props.memoryTypeBits && fmt->externalFormat, "AHardwareBuffer properties: types %x",
+          props.memoryTypeBits);
+    AHardwareBuffer_Desc d;
+    AHardwareBuffer_describe(ahb, &d);
+    VkExternalFormatANDROID external = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID,
+                                        .externalFormat = fmt->externalFormat};
     VkExternalMemoryImageCreateInfo ext = {
         .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+        .pNext = format == VK_FORMAT_UNDEFINED ? &external : NULL,
         .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID};
     VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
                             .pNext = &ext,
                             .imageType = VK_IMAGE_TYPE_2D,
-                            .format = VK_FORMAT_R8G8B8A8_UNORM,
-                            .extent = {W, H, 1},
+                            .format = format,
+                            .extent = {d.width, d.height, 1},
                             .mipLevels = 1,
                             .arrayLayers = 1,
                             .samples = VK_SAMPLE_COUNT_1_BIT,
                             .tiling = VK_IMAGE_TILING_OPTIMAL,
-                            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                                     VK_IMAGE_USAGE_SAMPLED_BIT,
+                            .usage = usage,
                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
     VkImage image;
     VK(vkCreateImage(device, &ii, NULL, &image));
@@ -427,9 +508,29 @@ static void ahb_triangle(void) {
                                .pNext = &import,
                                .allocationSize = props.allocationSize,
                                .memoryTypeIndex = __builtin_ctz(props.memoryTypeBits)};
+    VK(vkAllocateMemory(device, &mi, NULL, memory));
+    VK(vkBindImageMemory(device, image, *memory, 0));
+    return image;
+}
+
+// A triangle into an image whose memory is an AHardwareBuffer, read back
+// through the buffer's CPU mapping.
+static void ahb_triangle(void) {
+    AHardwareBuffer_Desc desc = {.width = W,
+                                 .height = H,
+                                 .layers = 1,
+                                 .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+                                 .usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
+                                          AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
+                                          AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN};
+    AHardwareBuffer* ahb = NULL;
+    CHECK(AHardwareBuffer_allocate(&desc, &ahb) == 0, "AHardwareBuffer_allocate");
+    VkAndroidHardwareBufferFormatPropertiesANDROID fmt;
     VkDeviceMemory memory;
-    VK(vkAllocateMemory(device, &mi, NULL, &memory));
-    VK(vkBindImageMemory(device, image, memory, 0));
+    VkImage image = import_image(ahb, VK_FORMAT_R8G8B8A8_UNORM,
+                                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                 &memory, &fmt);
+    CHECK(fmt.format == VK_FORMAT_R8G8B8A8_UNORM, "AHardwareBuffer format %d", fmt.format);
     VkImageView v = view_of(image);
     VkFramebuffer fb = framebuffer(v);
     VkCommandBuffer cmd = record(fb, 0.0f, 0.0f, 1.0f);
@@ -479,6 +580,192 @@ static void ahb_triangle(void) {
     vkFreeMemory(device, memory, NULL);
     AHardwareBuffer_release(ahb);
     printf("ok AHardwareBuffer image clear + triangle, read back on the CPU\n");
+}
+
+// A YUV AHardwareBuffer of the allocator's `format`, filled with one colour
+// on the CPU, sampled through its external format and a Y'CbCr conversion
+// with the suggested parameters, as HWUI draws video frames: the colour in
+// RGB fills the target. The Cb and Cr values tell a swap apart (red, not
+// blue).
+static void yuv(uint32_t format, const char* what) {
+    AHardwareBuffer_Desc desc = {.width = 40,
+                                 .height = 30,
+                                 .layers = 1,
+                                 .format = format,
+                                 .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
+                                          AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN};
+    AHardwareBuffer* ahb = NULL;
+    CHECK(AHardwareBuffer_allocate(&desc, &ahb) == 0, "%s: allocate", what);
+    AHardwareBuffer_Planes planes;
+    CHECK(AHardwareBuffer_lockPlanes(ahb, AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, NULL,
+                                     &planes) == 0 && planes.planeCount == 3,
+          "%s: lockPlanes", what);
+    // BT.601 narrow range: (Y, Cb, Cr) = (81, 90, 240) is red.
+    const uint8_t value[3] = {81, 90, 240};
+    for (int p = 0; p < 3; p++) {
+        uint32_t sub = p ? 2 : 1;
+        for (uint32_t y = 0; y < desc.height / sub; y++)
+            for (uint32_t x = 0; x < desc.width / sub; x++)
+                ((uint8_t*)planes.planes[p].data)[y * planes.planes[p].rowStride +
+                                                  x * planes.planes[p].pixelStride] = value[p];
+    }
+    AHardwareBuffer_unlock(ahb, NULL);
+
+    AHardwareBuffer* target_ahb = NULL;
+    AHardwareBuffer_Desc td = {.width = W,
+                               .height = H,
+                               .layers = 1,
+                               .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+                               .usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
+                                        AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN};
+    CHECK(AHardwareBuffer_allocate(&td, &target_ahb) == 0, "%s: target", what);
+    VkAndroidHardwareBufferFormatPropertiesANDROID fmt, target_fmt;
+    VkDeviceMemory memory, target_memory;
+    VkImage target = import_image(target_ahb, VK_FORMAT_R8G8B8A8_UNORM,
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &target_memory,
+                                  &target_fmt);
+    VkImage image = import_image(ahb, VK_FORMAT_UNDEFINED, VK_IMAGE_USAGE_SAMPLED_BIT, &memory,
+                                 &fmt);
+
+    VkExternalFormatANDROID external = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID,
+                                        .externalFormat = fmt.externalFormat};
+    VkSamplerYcbcrConversionCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO,
+        .pNext = &external,
+        .format = VK_FORMAT_UNDEFINED,
+        .ycbcrModel = fmt.suggestedYcbcrModel,
+        .ycbcrRange = fmt.suggestedYcbcrRange,
+        .components = fmt.samplerYcbcrConversionComponents,
+        .xChromaOffset = fmt.suggestedXChromaOffset,
+        .yChromaOffset = fmt.suggestedYChromaOffset,
+        .chromaFilter = VK_FILTER_NEAREST};
+    VkSamplerYcbcrConversion conversion;
+    VK(vkCreateSamplerYcbcrConversion(device, &ci, NULL, &conversion));
+    VkSamplerYcbcrConversionInfo with = {.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
+                                         .conversion = conversion};
+    VkSamplerCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                               .pNext = &with,
+                               .magFilter = VK_FILTER_NEAREST,
+                               .minFilter = VK_FILTER_NEAREST,
+                               .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                               .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                               .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
+    VkSampler sampler;
+    VK(vkCreateSampler(device, &sci, NULL, &sampler));
+    VkSamplerYcbcrConversionInfo view_with = with;
+    VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                .pNext = &view_with,
+                                .image = image,
+                                .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                .format = VK_FORMAT_UNDEFINED,
+                                .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    VkImageView view;
+    VK(vkCreateImageView(device, &vi, NULL, &view));
+
+    VkDescriptorSetLayoutBinding b = {.binding = 0,
+                                      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                      .descriptorCount = 1,
+                                      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                                      .pImmutableSamplers = &sampler};
+    VkDescriptorSetLayoutCreateInfo dli = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings = &b};
+    VkDescriptorSetLayout set_layout;
+    VK(vkCreateDescriptorSetLayout(device, &dli, NULL, &set_layout));
+    VkPipelineLayoutCreateInfo pli = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                      .setLayoutCount = 1,
+                                      .pSetLayouts = &set_layout};
+    VkPipelineLayout sample_layout;
+    VK(vkCreatePipelineLayout(device, &pli, NULL, &sample_layout));
+    VkPipeline sample = graphics_pipeline(kFullVert, sizeof(kFullVert), kSampleFrag,
+                                          sizeof(kSampleFrag), sample_layout);
+    VkDescriptorPoolSize size = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3};
+    VkDescriptorPoolCreateInfo dpi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                      .maxSets = 1,
+                                      .poolSizeCount = 1,
+                                      .pPoolSizes = &size};
+    VkDescriptorPool descriptors;
+    VK(vkCreateDescriptorPool(device, &dpi, NULL, &descriptors));
+    VkDescriptorSetAllocateInfo dai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                       .descriptorPool = descriptors,
+                                       .descriptorSetCount = 1,
+                                       .pSetLayouts = &set_layout};
+    VkDescriptorSet set;
+    VK(vkAllocateDescriptorSets(device, &dai, &set));
+    VkDescriptorImageInfo di = {.imageView = view,
+                                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                              .dstSet = set,
+                              .descriptorCount = 1,
+                              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                              .pImageInfo = &di};
+    vkUpdateDescriptorSets(device, 1, &w, 0, NULL);
+
+    VkImageView target_view = view_of(target);
+    VkFramebuffer fb = framebuffer(target_view);
+    VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                      .commandPool = pool,
+                                      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                      .commandBufferCount = 1};
+    VkCommandBuffer cmd;
+    VK(vkAllocateCommandBuffers(device, &ai, &cmd));
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VK(vkBeginCommandBuffer(cmd, &bi));
+    // The buffer comes from the CPU: acquired from the foreign family.
+    VkImageMemoryBarrier acquire = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                                    .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                                    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                                    .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+                                    .dstQueueFamilyIndex = family,
+                                    .image = image,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &acquire);
+    VkClearValue clear = {.color = {{0.0f, 0.0f, 0.0f, 1.0f}}};
+    VkRenderPassBeginInfo rb = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                                .renderPass = pass,
+                                .framebuffer = fb,
+                                .renderArea = {{0, 0}, {W, H}},
+                                .clearValueCount = 1,
+                                .pClearValues = &clear};
+    vkCmdBeginRenderPass(cmd, &rb, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sample);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sample_layout, 0, 1, &set, 0,
+                            NULL);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+    VK(vkEndCommandBuffer(cmd));
+    submit_and_wait(cmd);
+
+    uint8_t* cpu = NULL;
+    CHECK(AHardwareBuffer_lock(target_ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL,
+                               (void**)&cpu) == 0, "%s: lock target", what);
+    AHardwareBuffer_Desc got;
+    AHardwareBuffer_describe(target_ahb, &got);
+    uint32_t centre = at(cpu, got.stride * 4, W / 2, H / 2);
+    AHardwareBuffer_unlock(target_ahb, NULL);
+    uint8_t r8 = centre >> 24, g8 = centre >> 16, b8 = centre >> 8;
+    CHECK(r8 >= 235 && g8 <= 20 && b8 <= 20, "%s: sampled %08x, want red", what, centre);
+
+    vkFreeCommandBuffers(device, pool, 1, &cmd);
+    vkDestroyFramebuffer(device, fb, NULL);
+    vkDestroyImageView(device, target_view, NULL);
+    vkDestroyDescriptorPool(device, descriptors, NULL);
+    vkDestroyPipeline(device, sample, NULL);
+    vkDestroyPipelineLayout(device, sample_layout, NULL);
+    vkDestroyDescriptorSetLayout(device, set_layout, NULL);
+    vkDestroyImageView(device, view, NULL);
+    vkDestroySampler(device, sampler, NULL);
+    vkDestroySamplerYcbcrConversion(device, conversion, NULL);
+    vkDestroyImage(device, image, NULL);
+    vkFreeMemory(device, memory, NULL);
+    vkDestroyImage(device, target, NULL);
+    vkFreeMemory(device, target_memory, NULL);
+    AHardwareBuffer_release(ahb);
+    AHardwareBuffer_release(target_ahb);
+    printf("ok %s AHardwareBuffer sampled through its external format: %08x\n", what, centre);
 }
 
 // Sync-fd semaphores, as HWUI hands frames to SurfaceFlinger and back: the
@@ -691,7 +978,6 @@ int main(int argc, char** argv) {
     vkGetPhysicalDeviceQueueFamilyProperties(gpu, &families, NULL);
     VkQueueFamilyProperties* fp = calloc(families, sizeof(*fp));
     vkGetPhysicalDeviceQueueFamilyProperties(gpu, &families, fp);
-    uint32_t family = 0;
     while (family < families && !(fp[family].queueFlags & VK_QUEUE_GRAPHICS_BIT)) family++;
     CHECK(family < families && fp[family].queueCount >= 2,
           "graphics family %u of %u has %u queues", family, families,
@@ -704,8 +990,12 @@ int main(int argc, char** argv) {
                                  .queueFamilyIndex = family,
                                  .queueCount = 2,
                                  .pQueuePriorities = priorities};
+    VkPhysicalDeviceSamplerYcbcrConversionFeatures ycbcr = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES,
+        .samplerYcbcrConversion = VK_TRUE};
     VkPhysicalDeviceTimelineSemaphoreFeatures timelines = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+        .pNext = &ycbcr,
         .timelineSemaphore = VK_TRUE};
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                              .pNext = &timelines,
@@ -729,6 +1019,8 @@ int main(int argc, char** argv) {
     } else {
         create_pipeline(VK_IMAGE_LAYOUT_GENERAL);
         ahb_triangle();
+        yuv(AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_420, "YCbCr_420_888");
+        yuv(0x32315659, "YV12");
         sync_fd();
     }
     vkDestroyPipeline(device, pipeline, NULL);

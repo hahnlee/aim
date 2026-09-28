@@ -84,6 +84,8 @@ GUEST = {
     "vkAllocateMemory": "ahb", "vkFreeMemory": "ahb", "vkCreateBuffer": "ahb",
     "vkGetPhysicalDeviceImageFormatProperties2": "ahb",
     "vkGetPhysicalDeviceExternalBufferProperties": "ahb",
+    # Their external formats.
+    "vkCreateImageView": "ahb", "vkCreateSamplerYcbcrConversion": "ahb",
     # VK_KHR_external_semaphore_fd with sync fds.
     "vkCreateSemaphore": "sync_fd", "vkGetSemaphoreFdKHR": "sync_fd",
     "vkImportSemaphoreFdKHR": "sync_fd",

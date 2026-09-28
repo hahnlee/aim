@@ -163,10 +163,46 @@ memfd.
 - **Export** allocates an AHardwareBuffer that fits the dedicated image (or
   a `BLOB` of the allocation's size) and imports it.
 - `vkGetAndroidHardwareBufferPropertiesANDROID` reports the data size, the
-  memory types above and the Vulkan format: RGBA_8888 and RGBX_8888 (alpha
-  swizzled to one) as `R8G8B8A8_UNORM`, RGB_565, BGRA_8888, RGBA_FP16,
-  RGBA_1010102 and R_8. Buffers without a Metal format (YUV, RGB_888) are
-  refused as invalid handles: there are no external formats (#316).
+  memory types above, the Vulkan format and, as the external format, the
+  buffer's AHardwareBuffer format: RGBA_8888 and RGBX_8888 (alpha swizzled
+  to one) as `R8G8B8A8_UNORM`, RGB_565, BGRA_8888, RGBA_FP16, RGBA_1010102,
+  R_8 and the YUV formats below. RGB_888 has no Vulkan format and is
+  refused as an invalid handle. An external format
+  (`VkExternalFormatANDROID`) in `vkCreateImage` or
+  `vkCreateSamplerYcbcrConversion`, and a view without a format of such an
+  image, get the Vulkan format.
+
+#### YUV
+
+| AHardwareBuffer format | Vulkan format | Suggested components |
+| --- | --- | --- |
+| `Y8Cb8Cr8_420` (NV12) | `G8_B8R8_2PLANE_420_UNORM` | identity |
+| `YCrCb_420_SP` (NV21) | `G8_B8R8_2PLANE_420_UNORM` | Cb and Cr swapped |
+| `YV12` | `G8_B8_R8_3PLANE_420_UNORM` | Cb and Cr swapped |
+| `YCbCr_P010` | `G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16` | identity |
+
+The suggested conversion is BT.601, narrow range, with chroma at the
+midpoint (the allocator's `SITED_INTERSTITIAL`), as HWUI and Skia take it
+for video frames.
+
+MoltenVK makes a multi-planar image of one Metal texture per plane, and a
+texture can be set only for plane 0 after creation (`vkSetMTLTextureMVK`),
+or for every plane only when the image is created
+(`VkImportMetalTextureInfoEXT`), before the application gives it memory.
+Memory imported from an `MTLTexture` (`VK_EXT_external_memory_metal`)
+would do for a disjoint plane, but MoltenVK 1.4.2 treats an import of that
+handle type as an export and refuses it for multi-planar formats. So the
+driver creates a YUV image linear on the host and imports its buffer's
+mapping as host memory, without the dedicated allocation (which would keep
+MoltenVK from making a buffer of it); MoltenVK then makes each plane's
+texture over that `MTLBuffer` at its own layout of a linear image: rows
+aligned to Metal's linear texture alignment (16 bytes here), planes one
+after the other. The allocator lays YUV buffers out the same way (its
+16-byte YUV rows are also Android's definition of YV12), and an import
+compares the two layouts plane by plane (`vkGetImageSubresourceLayout`)
+and refuses a buffer that differs. The memory types of a YUV buffer are
+the host-visible ones; the format features are MoltenVK's linear ones
+(sampling, linear filtering, midpoint and cosited chroma).
 
 ### Synchronization
 
@@ -238,6 +274,9 @@ declares Vulkan hardware level 0.
     too), in 1.5–10 ms for the submit and wait; the memory exported again is
     the same AHardwareBuffer; the same on the second queue, after a
     semaphore the first signals;
+  - 40x30 YCbCr_420_888 and YV12 buffers filled on the CPU with BT.601
+    red, sampled through their external formats and a Y'CbCr conversion
+    with the suggested parameters: (254, 0, 0);
   - a sync-fd semaphore whose signal is pending (behind a timeline
     semaphore the CPU signals later) exported as a sync_file that signals
     only after it, and imported into another that a submission waits for,
