@@ -185,7 +185,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             (o.stride, o.chroma_offset, o.chroma_stride),
-            (128, 128 * 50, 128)
+            (112, 112 * 50, 112)
         );
         let o = output(&handle(format::RGBX_8888, 100, 50), 0x1000, 100, 50, 90, 0).unwrap();
         assert_eq!((o.format, o.stride), (format::RGBX_8888, 448));

@@ -212,8 +212,9 @@ sync_file ([graphics-buffers.md](graphics-buffers.md), "Fences").
 - **Native fences.** `FN_FENCE` makes a new `MTLSharedEvent`, has ANGLE
   signal it after the current context's commands (an
   `EGL_ANGLE_metal_shared_event_sync` sync) and flushes them. One
-  `MTLSharedEventListener` per process signals the fence's sync_file when
-  the event reaches its value, with the time the callback ran. A present
+  `MTLSharedEventListener` per process (`aim_sync_file::metal`, shared
+  with the Vulkan driver) signals the fence's sync_file when the event
+  reaches its value, with the time the callback ran. A present
   queues its buffer with such a fence for the blit.
 - **`EGL_ANDROID_native_fence_sync`.** A native fence sync made without an
   fd is a host fence for the commands issued so far; one made with

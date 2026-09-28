@@ -4,19 +4,20 @@
 //! `VkNativeBufferANDROID`; the driver makes the buffer's memory the image's
 //! storage (`buffers::attach`), so rendering writes the buffer directly.
 //!
-//! Synchronization is on the CPU until the syscall layer has sync files the
-//! host can signal: an acquire waits for the buffer's fence before it
-//! signals the application's semaphore or fence, and a release waits for
-//! the queue before the buffer is queued with fence -1.
+//! Synchronization is by sync_files on the GPU ([`driver::fence_after`],
+//! [`driver::signal_after`]): an acquire signals the application's
+//! semaphore or fence once the buffer's fence has signaled, and a release
+//! queues the buffer with a fence that signals once the application's
+//! semaphores have.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use crate::buffers;
-use crate::driver::{self, submit, wait_fd};
+use crate::driver::{self, Op};
 use crate::thunks::host;
 use crate::types::*;
+use crate::{ahb, buffers};
 
 /// gralloc1 usage (`GRALLOC1_PRODUCER_USAGE_GPU_RENDER_TARGET`,
 /// `GRALLOC1_CONSUMER_USAGE_GPU_TEXTURE`).
@@ -68,12 +69,12 @@ pub unsafe extern "C" fn vkAcquireImageANDROID(
     semaphore: u64,
     fence: u64,
 ) -> VkResult {
-    wait_fd(fence_fd);
-    if semaphore == 0 && fence == 0 {
-        return VK_SUCCESS;
-    }
-    let signals: &[u64] = if semaphore != 0 { &[semaphore] } else { &[] };
-    submit(device, None, &[], signals, fence, false)
+    let signals: &[Op] = if semaphore != 0 {
+        &[(semaphore, 0)]
+    } else {
+        &[]
+    };
+    driver::signal_after(device, fence_fd, signals, fence)
 }
 
 pub unsafe extern "C" fn vkQueueSignalReleaseImageANDROID(
@@ -83,18 +84,23 @@ pub unsafe extern "C" fn vkQueueSignalReleaseImageANDROID(
     _image: u64,
     fence_fd: *mut i32,
 ) -> VkResult {
-    let waits = if wait_count == 0 {
-        &[][..]
-    } else {
+    let waits: Vec<Op> = (0..wait_count as usize)
         // SAFETY: the loader's semaphores.
-        unsafe { std::slice::from_raw_parts(waits, wait_count as usize) }
-    };
-    let r = submit(std::ptr::null_mut(), Some(queue), waits, &[], 0, true);
-    if !fence_fd.is_null() {
-        // SAFETY: the loader's out pointer.
-        unsafe { *fence_fd = -1 };
+        .map(|i| (unsafe { *waits.add(i) }, 0))
+        .collect();
+    match driver::fence_after(std::ptr::null_mut(), Some(queue), &waits) {
+        Ok(fd) => {
+            // SAFETY: the loader's out pointer, or the fd nobody takes.
+            unsafe {
+                match fence_fd.is_null() {
+                    false => *fence_fd = fd,
+                    true => drop(libc::close(fd)),
+                }
+            };
+            VK_SUCCESS
+        }
+        Err(r) => r,
     }
-    r
 }
 
 pub unsafe extern "C" fn vkCreateImage(
@@ -107,6 +113,17 @@ pub unsafe extern "C" fn vkCreateImage(
     let mut info = unsafe { *info };
     // SAFETY: as above; the chain is the caller's for this call.
     let native = unsafe { find::<VkNativeBufferANDROID>(info.pNext, stype::NATIVE_BUFFER_ANDROID) };
+    // SAFETY: as above.
+    let external = unsafe {
+        find::<VkExternalFormatANDROID>(info.pNext, stype::EXTERNAL_FORMAT_ANDROID)
+            .map(|e| (*e).externalFormat)
+    };
+    if let Some(e) = external.filter(|&e| e != 0) {
+        match ahb::external_format(e) {
+            Some(f) => info.format = f,
+            None => return VK_ERROR_FORMAT_NOT_SUPPORTED,
+        }
+    }
     let mut for_ahb = false;
     // Android structures MoltenVK does not know: the native buffer is
     // attached below, AHardwareBuffer memory when it is allocated.
@@ -123,6 +140,10 @@ pub unsafe extern "C" fn vkCreateImage(
             _ => false,
         })
     };
+    // An AHardwareBuffer's YUV image is linear on the host (see `ahb`).
+    if for_ahb && ahb::is_yuv(info.format) {
+        info.tiling = IMAGE_TILING_LINEAR;
+    }
     // SAFETY: a valid create info.
     let r = unsafe {
         host::vkCreateImage(

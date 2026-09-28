@@ -33,7 +33,7 @@ pub const VK_ERROR_INVALID_EXTERNAL_HANDLE: VkResult = -1000072003;
 
 pub mod stype {
     pub const SUBMIT_INFO: i32 = 4;
-    pub const FENCE_CREATE_INFO: i32 = 8;
+    pub const SEMAPHORE_CREATE_INFO: i32 = 9;
     pub const DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT: i32 = 1000011000;
     pub const NATIVE_BUFFER_ANDROID: i32 = 1000010000;
     pub const SWAPCHAIN_IMAGE_CREATE_INFO_ANDROID: i32 = 1000010001;
@@ -50,8 +50,12 @@ pub mod stype {
     pub const ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID: i32 = 1000129002;
     pub const IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID: i32 = 1000129003;
     pub const EXTERNAL_FORMAT_ANDROID: i32 = 1000129005;
+    pub const SAMPLER_YCBCR_CONVERSION_CREATE_INFO: i32 = 1000156000;
     pub const ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_2_ANDROID: i32 = 1000129006;
     pub const IMPORT_MEMORY_HOST_POINTER_INFO_EXT: i32 = 1000178000;
+    pub const SEMAPHORE_TYPE_CREATE_INFO: i32 = 1000207002;
+    pub const TIMELINE_SEMAPHORE_SUBMIT_INFO: i32 = 1000207003;
+    pub const SEMAPHORE_SIGNAL_INFO: i32 = 1000207005;
     pub const LAYER_SETTINGS_CREATE_INFO_EXT: i32 = 1000496000;
 }
 
@@ -132,6 +136,33 @@ pub struct VkDeviceCreateInfo {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct VkDeviceQueueCreateInfo {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub flags: u32,
+    pub queueFamilyIndex: u32,
+    pub queueCount: u32,
+    pub pQueuePriorities: *const f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct VkQueueFamilyProperties {
+    pub queueFlags: u32,
+    pub queueCount: u32,
+    pub timestampValidBits: u32,
+    pub minImageTransferGranularity: VkExtent3D,
+}
+
+#[repr(C)]
+pub struct VkQueueFamilyProperties2 {
+    pub sType: i32,
+    pub pNext: *mut c_void,
+    pub queueFamilyProperties: VkQueueFamilyProperties,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct VkExtent3D {
     pub width: u32,
     pub height: u32,
@@ -172,6 +203,63 @@ pub struct VkNativeBufferANDROID {
     pub usage3: u64,
     pub ahb: *mut c_void,
 }
+
+/// `VkExternalFormatANDROID`.
+#[repr(C)]
+pub struct VkExternalFormatANDROID {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub externalFormat: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkImageViewCreateInfo {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub flags: u32,
+    pub image: u64,
+    pub viewType: i32,
+    pub format: i32,
+    pub components: [i32; 4],
+    pub subresourceRange: [u32; 5],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkSamplerYcbcrConversionCreateInfo {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub format: i32,
+    pub ycbcrModel: i32,
+    pub ycbcrRange: i32,
+    pub components: [i32; 4],
+    pub xChromaOffset: i32,
+    pub yChromaOffset: i32,
+    pub chromaFilter: i32,
+    pub forceExplicitReconstruction: u32,
+}
+
+#[repr(C)]
+pub struct VkImageSubresource {
+    pub aspectMask: u32,
+    pub mipLevel: u32,
+    pub arrayLayer: u32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct VkSubresourceLayout {
+    pub offset: u64,
+    pub size: u64,
+    pub rowPitch: u64,
+    pub arrayPitch: u64,
+    pub depthPitch: u64,
+}
+
+/// `VK_IMAGE_ASPECT_PLANE_0_BIT`; plane n is this << n.
+pub const ASPECT_PLANE_0: u32 = 0x10;
+pub const IMAGE_TILING_LINEAR: i32 = 1;
 
 #[repr(C)]
 pub struct VkExternalMemoryCreateInfo {
@@ -244,6 +332,7 @@ pub struct VkMemoryGetAndroidHardwareBufferInfoANDROID {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct VkPhysicalDeviceImageFormatInfo2 {
     pub sType: i32,
     pub pNext: *const c_void,
@@ -365,13 +454,43 @@ pub struct VkSubmitInfo {
 }
 
 #[repr(C)]
-pub struct VkFenceCreateInfo {
+pub struct VkTimelineSemaphoreSubmitInfo {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub waitSemaphoreValueCount: u32,
+    pub pWaitSemaphoreValues: *const u64,
+    pub signalSemaphoreValueCount: u32,
+    pub pSignalSemaphoreValues: *const u64,
+}
+
+#[repr(C)]
+pub struct VkSemaphoreCreateInfo {
     pub sType: i32,
     pub pNext: *const c_void,
     pub flags: u32,
 }
 
 #[repr(C)]
+pub struct VkSemaphoreTypeCreateInfo {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub semaphoreType: i32,
+    pub initialValue: u64,
+}
+
+#[repr(C)]
+pub struct VkSemaphoreSignalInfo {
+    pub sType: i32,
+    pub pNext: *const c_void,
+    pub semaphore: u64,
+    pub value: u64,
+}
+
+/// `VK_SEMAPHORE_TYPE_TIMELINE`.
+pub const SEMAPHORE_TYPE_TIMELINE: i32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct VkDeviceQueueInfo2 {
     pub sType: i32,
     pub pNext: *const c_void,

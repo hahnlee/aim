@@ -110,6 +110,27 @@ objects, which guest code cannot hold). `vkCreateDevice` removes the
 driver's own extensions from the list it passes on and enables
 `VK_EXT_external_memory_host`.
 
+### Queue families
+
+MoltenVK has one queue per family (a `VkQueue` is an `MTLCommandQueue`;
+Metal has no queue families) and offers several alike general-purpose
+families instead: four on an M2 Pro. HWUI's `VulkanManager`, like other
+Vulkan applications, asks for two queues of its graphics family. When all
+of a physical device's families are alike, the driver presents them as one
+family with all their queues: queue `i` of family 0 is the host's family
+`i` (`vkGetPhysicalDeviceQueueFamilyProperties{,2}`, `vkCreateDevice`,
+`vkGetDeviceQueue{,2}`).
+
+Family 0 is the host's first family, so every other family index means the
+same to MoltenVK and passes through: command pools, barriers (an ownership
+transfer is between two families; `VK_QUEUE_FAMILY_EXTERNAL` and
+`VK_QUEUE_FAMILY_FOREIGN_EXT` pass as they are) and sharing lists
+(concurrent sharing names two families or more, so there is none). A
+command buffer from a pool of family 0 may run on any of its queues:
+MoltenVK records command buffers apart from any queue and encodes them into
+the queue they are submitted to (it would use the pool's family only to
+prefill Metal command buffers, which is off).
+
 ### Swapchain images (`VK_ANDROID_native_buffer`)
 
 The loader's `vkCreateSwapchainKHR` dequeues the window's buffers and
@@ -142,30 +163,83 @@ memfd.
 - **Export** allocates an AHardwareBuffer that fits the dedicated image (or
   a `BLOB` of the allocation's size) and imports it.
 - `vkGetAndroidHardwareBufferPropertiesANDROID` reports the data size, the
-  memory types above and the Vulkan format: RGBA_8888 and RGBX_8888 (alpha
-  swizzled to one) as `R8G8B8A8_UNORM`, RGB_565, BGRA_8888, RGBA_FP16,
-  RGBA_1010102 and R_8. Buffers without a Metal format (YUV, RGB_888) are
-  refused as invalid handles: there are no external formats (#316).
+  memory types above, the Vulkan format and, as the external format, the
+  buffer's AHardwareBuffer format: RGBA_8888 and RGBX_8888 (alpha swizzled
+  to one) as `R8G8B8A8_UNORM`, RGB_565, BGRA_8888, RGBA_FP16, RGBA_1010102,
+  R_8 and the YUV formats below. RGB_888 has no Vulkan format and is
+  refused as an invalid handle. An external format
+  (`VkExternalFormatANDROID`) in `vkCreateImage` or
+  `vkCreateSamplerYcbcrConversion`, and a view without a format of such an
+  image, get the Vulkan format.
+
+#### YUV
+
+| AHardwareBuffer format | Vulkan format | Suggested components |
+| --- | --- | --- |
+| `Y8Cb8Cr8_420` (NV12) | `G8_B8R8_2PLANE_420_UNORM` | identity |
+| `YCrCb_420_SP` (NV21) | `G8_B8R8_2PLANE_420_UNORM` | Cb and Cr swapped |
+| `YV12` | `G8_B8_R8_3PLANE_420_UNORM` | Cb and Cr swapped |
+| `YCbCr_P010` | `G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16` | identity |
+
+The suggested conversion is BT.601, narrow range, with chroma at the
+midpoint (the allocator's `SITED_INTERSTITIAL`), as HWUI and Skia take it
+for video frames.
+
+MoltenVK makes a multi-planar image of one Metal texture per plane, and a
+texture can be set only for plane 0 after creation (`vkSetMTLTextureMVK`),
+or for every plane only when the image is created
+(`VkImportMetalTextureInfoEXT`), before the application gives it memory.
+Memory imported from an `MTLTexture` (`VK_EXT_external_memory_metal`)
+would do for a disjoint plane, but MoltenVK 1.4.2 treats an import of that
+handle type as an export and refuses it for multi-planar formats. So the
+driver creates a YUV image linear on the host and imports its buffer's
+mapping as host memory, without the dedicated allocation (which would keep
+MoltenVK from making a buffer of it); MoltenVK then makes each plane's
+texture over that `MTLBuffer` at its own layout of a linear image: rows
+aligned to Metal's linear texture alignment (16 bytes here), planes one
+after the other. The allocator lays YUV buffers out the same way (its
+16-byte YUV rows are also Android's definition of YV12), and an import
+compares the two layouts plane by plane (`vkGetImageSubresourceLayout`)
+and refuses a buffer that differs. The memory types of a YUV buffer are
+the host-visible ones; the format features are MoltenVK's linear ones
+(sampling, linear filtering, midpoint and cosited chroma).
 
 ### Synchronization
 
-The syscall layer has no sync files the host can signal yet, so fences cross
-on the CPU (#315):
+Fences cross as sync_files ([graphics-buffers.md](graphics-buffers.md),
+"Fences"; `crates/aim-sync-file`) on the GPU, through timeline semaphores
+of the driver's own, which MoltenVK makes of `MTLSharedEvent`s:
 
-- `vkAcquireImageANDROID` waits for the dequeued buffer's fence, then
-  signals the application's semaphore or fence with an empty submission on
-  the device's first queue;
-- `vkQueueSignalReleaseImageANDROID` submits a batch that waits for the
-  loader's semaphores and waits on the CPU until it (and everything
-  submitted before it) has run, then returns fence -1, so the buffer is
-  queued finished;
-- a sync-fd semaphore export waits the same way and returns -1 (an already
-  signaled payload; the wait consumes the payload, as the copy transference
-  of a sync fd does); an import waits for the fd and signals the semaphore.
+- **To a sync_file** (`driver::fence_after`): a submission that waits for
+  the application's semaphores and signals a timeline value; host call
+  `FN_FENCE` returns a sync_file that the process's
+  `MTLSharedEventListener` signals when the event reaches the value
+  (`aim_sync_file::metal::fence`, which the GLES driver's native fences
+  use too).
+- **From a sync_file** (`driver::signal_after`): host call `FN_SIGNAL` sets
+  the timeline's event to a value once the fd has signaled (the sync-file
+  waiter thread, `aim_sync_file::on_signal`), and a submission on the
+  device's first queue waits for that value and signals the application's
+  semaphore or fence.
 
-The driver's own submissions take a per-queue lock that the application's
-`vkQueueSubmit*`, `vkQueueWaitIdle` and `vkQueueBindSparse` also take, since
-an acquire is not synchronized with the application's use of the queue.
+A timeline is taken for one value at a time, and again once it has reached
+it (`vkGetSemaphoreCounterValue`), so out-of-order signals never pass a
+value early. MoltenVK makes them whatever features the application
+enabled. On top of these:
+
+- `vkAcquireImageANDROID` signals the application's semaphore or fence
+  after the dequeued buffer's fence;
+- `vkQueueSignalReleaseImageANDROID` returns a fence for the loader's
+  semaphores, submitted on the presenting queue after its work;
+- a sync-fd semaphore export returns a fence for the semaphore (the wait
+  consumes the payload, as the copy transference of a sync fd does); an
+  import makes the semaphore signal after the fd (-1 is signaled).
+
+A wait for a sync_file holds up the device's first queue until the fd
+signals, as the wait of the semaphore it feeds would. The driver's own
+submissions take a per-queue lock that the application's `vkQueueSubmit*`,
+`vkQueueWaitIdle` and `vkQueueBindSparse` also take, since they are not
+synchronized with the application's use of the queue.
 
 ## Conformance gaps
 
@@ -192,27 +266,40 @@ declares Vulkan hardware level 0.
     extensions and `VK_EXT_debug_report` among them) and 123 device
     extensions, `VK_KHR_swapchain`, the AHardwareBuffer, foreign queue
     family and sync-fd ones included;
+  - one queue family with four queues, and a device with two of them, as
+    HWUI makes it;
   - an instance and a device with those extensions; a red triangle on blue
     into a 64×64 image whose memory is an AHardwareBuffer, read back through
     the buffer's CPU mapping (corner, centre and apex pixels, so orientation
-    too), in 1.8–10 ms for the submit and wait; the memory exported again is
-    the same AHardwareBuffer;
-  - a sync-fd semaphore exported (fd -1) and imported into another that a
-    submission then waits for.
+    too), in 1.5–10 ms for the submit and wait; the memory exported again is
+    the same AHardwareBuffer; the same on the second queue, after a
+    semaphore the first signals;
+  - 40x30 YCbCr_420_888 and YV12 buffers filled on the CPU with BT.601
+    red, sampled through their external formats and a Y'CbCr conversion
+    with the suggested parameters: (254, 0, 0);
+  - a sync-fd semaphore whose signal is pending (behind a timeline
+    semaphore the CPU signals later) exported as a sync_file that signals
+    only after it, and imported into another that a submission waits for,
+    which waits too; 88 µs from the CPU signal to the last fence.
 - A full boot (`guest-init` as `cargo aim boot` runs it, first boot):
   `sys.boot_completed` after 49 s; `ro.hardware.vulkan=aim`;
   `pm list features` lists `android.hardware.vulkan.compute`, `.level`
   and `.version=4206592` (1.3); `dumpsys gpu` reports `vulkanVersion =
   4206592`.
 
-Not verified yet:
+- A full boot (2026-09-29, heavily loaded host), then `setprop
+  debug.hwui.renderer skiavk` (HWUI reads it when an app process starts;
+  for a test only, the default stays GLES):
+  - Settings, Chrome and Clock start and draw with `Pipeline=Skia
+    (Vulkan)` (`dumpsys gfxinfo`); Settings scrolls; Chrome passes its
+    first-run screens and shows example.com; logcat has no Vulkan, Skia
+    or RenderThread errors;
+  - `vulkan_triangle swapchain` in the booted guest: a swapchain of 7
+    images on an ImageReader's window, 100 frames at 370 µs each
+    (acquire, submit, present and the reader's acquire), with GPU
+    fences both ways (#317).
 
-- The swapchain mode of the program needs SurfaceFlinger (the loader asks
-  it for the display's refresh period, `native_window_get_refresh_cycle_duration`),
-  so it runs only in a booted guest (#317); that run was cut short by the
-  host's security agent (#232).
-- HWUI on Vulkan (`debug.hwui.renderer=skiavk`, for a test only) reaches
-  `VulkanManager::initialize` and aborts: HWUI asks for two queues of the
-  graphics family, and MoltenVK has one queue per family by design (it
-  offers more families instead). Settings shows its splash screen only
-  (#314).
+Not verified yet: a video or camera surface under `skiavk` (the YUV
+path is checked by the program only), and frame times worth comparing
+with GLES (the host was loaded; a measured decision on the default is a
+later step).

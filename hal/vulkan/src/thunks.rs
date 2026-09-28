@@ -1849,9 +1849,6 @@ unsafe extern "C" fn vkCreateFramebuffer(device: VkDispatch, pCreateInfo: *const
 unsafe extern "C" fn vkCreateGraphicsPipelines(device: VkDispatch, pipelineCache: u64, createInfoCount: u32, pCreateInfos: *const c_void, pAllocator: *const c_void, pPipelines: *mut c_void) -> i32 {
     unsafe { host::vkCreateGraphicsPipelines(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines) }
 }
-unsafe extern "C" fn vkCreateImageView(device: VkDispatch, pCreateInfo: *const c_void, pAllocator: *const c_void, pView: *mut c_void) -> i32 {
-    unsafe { host::vkCreateImageView(device, pCreateInfo, pAllocator, pView) }
-}
 unsafe extern "C" fn vkCreatePipelineCache(device: VkDispatch, pCreateInfo: *const c_void, pAllocator: *const c_void, pPipelineCache: *mut c_void) -> i32 {
     unsafe { host::vkCreatePipelineCache(device, pCreateInfo, pAllocator, pPipelineCache) }
 }
@@ -1872,9 +1869,6 @@ unsafe extern "C" fn vkCreateRenderPass2(device: VkDispatch, pCreateInfo: *const
 }
 unsafe extern "C" fn vkCreateSampler(device: VkDispatch, pCreateInfo: *const c_void, pAllocator: *const c_void, pSampler: *mut c_void) -> i32 {
     unsafe { host::vkCreateSampler(device, pCreateInfo, pAllocator, pSampler) }
-}
-unsafe extern "C" fn vkCreateSamplerYcbcrConversion(device: VkDispatch, pCreateInfo: *const c_void, pAllocator: *const c_void, pYcbcrConversion: *mut c_void) -> i32 {
-    unsafe { host::vkCreateSamplerYcbcrConversion(device, pCreateInfo, pAllocator, pYcbcrConversion) }
 }
 unsafe extern "C" fn vkCreateShaderModule(device: VkDispatch, pCreateInfo: *const c_void, pAllocator: *const c_void, pShaderModule: *mut c_void) -> i32 {
     unsafe { host::vkCreateShaderModule(device, pCreateInfo, pAllocator, pShaderModule) }
@@ -2097,12 +2091,6 @@ unsafe extern "C" fn vkGetPhysicalDeviceProperties(physicalDevice: VkDispatch, p
 }
 unsafe extern "C" fn vkGetPhysicalDeviceProperties2(physicalDevice: VkDispatch, pProperties: *mut c_void) {
     unsafe { host::vkGetPhysicalDeviceProperties2(physicalDevice, pProperties) }
-}
-unsafe extern "C" fn vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice: VkDispatch, pQueueFamilyPropertyCount: *mut c_void, pQueueFamilyProperties: *mut c_void) {
-    unsafe { host::vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties) }
-}
-unsafe extern "C" fn vkGetPhysicalDeviceQueueFamilyProperties2(physicalDevice: VkDispatch, pQueueFamilyPropertyCount: *mut c_void, pQueueFamilyProperties: *mut c_void) {
-    unsafe { host::vkGetPhysicalDeviceQueueFamilyProperties2(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties) }
 }
 unsafe extern "C" fn vkGetPhysicalDeviceSparseImageFormatProperties(physicalDevice: VkDispatch, format: i32, r#type: i32, samples: i32, usage: u32, tiling: i32, pPropertyCount: *mut c_void, pProperties: *mut c_void) {
     unsafe { host::vkGetPhysicalDeviceSparseImageFormatProperties(physicalDevice, format, r#type, samples, usage, tiling, pPropertyCount, pProperties) }
@@ -2394,7 +2382,7 @@ pub static PROCS: [Proc; 383] = [
     Proc { name: "vkCreateFramebuffer", addr: vkCreateFramebuffer as *const c_void, id: 138 },
     Proc { name: "vkCreateGraphicsPipelines", addr: vkCreateGraphicsPipelines as *const c_void, id: 139 },
     Proc { name: "vkCreateImage", addr: crate::native_buffer::vkCreateImage as *const c_void, id: -1 },
-    Proc { name: "vkCreateImageView", addr: vkCreateImageView as *const c_void, id: 141 },
+    Proc { name: "vkCreateImageView", addr: crate::ahb::vkCreateImageView as *const c_void, id: -1 },
     Proc { name: "vkCreateInstance", addr: crate::driver::vkCreateInstance as *const c_void, id: -1 },
     Proc { name: "vkCreatePipelineCache", addr: vkCreatePipelineCache as *const c_void, id: 143 },
     Proc { name: "vkCreatePipelineLayout", addr: vkCreatePipelineLayout as *const c_void, id: 144 },
@@ -2405,8 +2393,8 @@ pub static PROCS: [Proc; 383] = [
     Proc { name: "vkCreateRenderPass2", addr: vkCreateRenderPass2 as *const c_void, id: 148 },
     Proc { name: "vkCreateRenderPass2KHR", addr: vkCreateRenderPass2 as *const c_void, id: 148 },
     Proc { name: "vkCreateSampler", addr: vkCreateSampler as *const c_void, id: 149 },
-    Proc { name: "vkCreateSamplerYcbcrConversion", addr: vkCreateSamplerYcbcrConversion as *const c_void, id: 150 },
-    Proc { name: "vkCreateSamplerYcbcrConversionKHR", addr: vkCreateSamplerYcbcrConversion as *const c_void, id: 150 },
+    Proc { name: "vkCreateSamplerYcbcrConversion", addr: crate::ahb::vkCreateSamplerYcbcrConversion as *const c_void, id: -1 },
+    Proc { name: "vkCreateSamplerYcbcrConversionKHR", addr: crate::ahb::vkCreateSamplerYcbcrConversion as *const c_void, id: -1 },
     Proc { name: "vkCreateSemaphore", addr: crate::sync_fd::vkCreateSemaphore as *const c_void, id: -1 },
     Proc { name: "vkCreateShaderModule", addr: vkCreateShaderModule as *const c_void, id: 152 },
     Proc { name: "vkDebugMarkerSetObjectNameEXT", addr: vkDebugMarkerSetObjectNameEXT as *const c_void, id: 153 },
@@ -2525,9 +2513,9 @@ pub static PROCS: [Proc; 383] = [
     Proc { name: "vkGetPhysicalDeviceProperties", addr: vkGetPhysicalDeviceProperties as *const c_void, id: 234 },
     Proc { name: "vkGetPhysicalDeviceProperties2", addr: vkGetPhysicalDeviceProperties2 as *const c_void, id: 235 },
     Proc { name: "vkGetPhysicalDeviceProperties2KHR", addr: vkGetPhysicalDeviceProperties2 as *const c_void, id: 235 },
-    Proc { name: "vkGetPhysicalDeviceQueueFamilyProperties", addr: vkGetPhysicalDeviceQueueFamilyProperties as *const c_void, id: 236 },
-    Proc { name: "vkGetPhysicalDeviceQueueFamilyProperties2", addr: vkGetPhysicalDeviceQueueFamilyProperties2 as *const c_void, id: 237 },
-    Proc { name: "vkGetPhysicalDeviceQueueFamilyProperties2KHR", addr: vkGetPhysicalDeviceQueueFamilyProperties2 as *const c_void, id: 237 },
+    Proc { name: "vkGetPhysicalDeviceQueueFamilyProperties", addr: crate::driver::vkGetPhysicalDeviceQueueFamilyProperties as *const c_void, id: -1 },
+    Proc { name: "vkGetPhysicalDeviceQueueFamilyProperties2", addr: crate::driver::vkGetPhysicalDeviceQueueFamilyProperties2 as *const c_void, id: -1 },
+    Proc { name: "vkGetPhysicalDeviceQueueFamilyProperties2KHR", addr: crate::driver::vkGetPhysicalDeviceQueueFamilyProperties2 as *const c_void, id: -1 },
     Proc { name: "vkGetPhysicalDeviceSparseImageFormatProperties", addr: vkGetPhysicalDeviceSparseImageFormatProperties as *const c_void, id: 238 },
     Proc { name: "vkGetPhysicalDeviceSparseImageFormatProperties2", addr: vkGetPhysicalDeviceSparseImageFormatProperties2 as *const c_void, id: 239 },
     Proc { name: "vkGetPhysicalDeviceSparseImageFormatProperties2KHR", addr: vkGetPhysicalDeviceSparseImageFormatProperties2 as *const c_void, id: 239 },

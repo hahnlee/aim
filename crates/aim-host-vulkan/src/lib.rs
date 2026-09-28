@@ -10,8 +10,10 @@
 //! the original loader expects. The table of entry points is generated from
 //! the Khronos registry by `tools/gen-vulkan-thunks.py`.
 //!
-//! One function is not a plain forward: [`FN_ATTACH`] makes a mapped
-//! graphics buffer the storage of an image ([`metal`]).
+//! Three functions are not plain forwards: [`FN_ATTACH`] makes a mapped
+//! graphics buffer the storage of an image, and [`FN_FENCE`] and
+//! [`FN_SIGNAL`] connect sync_files to timeline semaphores through their
+//! Metal shared events ([`metal`]).
 
 mod metal;
 #[rustfmt::skip]
@@ -23,7 +25,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use aim_hostcall::vulkan::{Attach, FN_ATTACH, FN_INIT, FN_TABLE_BASE, Init, VERSION};
+use aim_hostcall::vulkan::{
+    Attach, FN_ATTACH, FN_FENCE, FN_INIT, FN_SIGNAL, FN_TABLE_BASE, Init, Timeline, VERSION,
+};
 use aim_hostcall::{HostModule, args_mut, errno, module};
 
 pub static MODULE: HostModule = HostModule {
@@ -54,6 +58,7 @@ pub fn set_library_dir(dir: &Path) {
     let _ = LIBRARY_DIR.set(dir.to_owned());
 }
 
+const EBADF: i64 = -(errno::EBADF as i64);
 const EINVAL: i64 = -(errno::EINVAL as i64);
 const ENODEV: i64 = -(errno::ENODEV as i64);
 const ENOSYS: i64 = -(errno::ENOSYS as i64);
@@ -175,6 +180,7 @@ struct Private {
     set_mtl_texture: usize,
     pixel_format: usize,
     bytes_per_block: usize,
+    export_objects: usize,
 }
 
 static PRIVATE: OnceLock<Private> = OnceLock::new();
@@ -217,11 +223,13 @@ fn load() -> Result<(), i64> {
             set_mtl_texture: sym(c"vkSetMTLTextureMVK"),
             pixel_format: sym(c"mvkMTLPixelFormatFromVkFormat"),
             bytes_per_block: sym(c"mvkMTLPixelFormatBytesPerBlock"),
+            export_objects: sym(c"vkExportMetalObjectsEXT"),
         };
         if private.get_mtl_device == 0
             || private.set_mtl_texture == 0
             || private.pixel_format == 0
             || private.bytes_per_block == 0
+            || private.export_objects == 0
         {
             eprintln!(
                 "[vulkan] {} lacks MoltenVK's Metal entry points",
@@ -284,6 +292,18 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
             Ok(a) => attach(a),
             Err(e) => e,
         },
+        FN_FENCE => match (unsafe { args_mut::<Timeline>(args, len) }, PRIVATE.get()) {
+            (Ok(a), Some(p)) => {
+                metal::fence(p, a).map_or_else(|e| e, |f| aim_sync_file::give_to_guest(f) as i64)
+            }
+            (Err(e), _) => e,
+            (_, None) => ENODEV,
+        },
+        FN_SIGNAL => match (unsafe { args_mut::<Timeline>(args, len) }, PRIVATE.get()) {
+            (Ok(a), Some(p)) => metal::signal(p, a),
+            (Err(e), _) => e,
+            (_, None) => ENODEV,
+        },
         _ => ENOSYS,
     }
 }
@@ -339,5 +359,15 @@ mod tests {
         assert_eq!(init(&bad), EINVAL);
         let mut attach_args = Attach::default();
         assert_eq!(attach(&mut attach_args), ENODEV);
+        let mut timeline = Timeline::default();
+        // SAFETY: a valid argument block, refused before MoltenVK loads.
+        let r = unsafe {
+            call(
+                FN_FENCE,
+                (&raw mut timeline) as u64,
+                size_of::<Timeline>() as u64,
+            )
+        };
+        assert_eq!(r, ENODEV);
     }
 }

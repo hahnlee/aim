@@ -956,7 +956,7 @@ pub unsafe fn args_mut<'a, T>(args: u64, len: u64) -> Result<&'a mut T, i64> {
 /// Module [`module::VULKAN`]: Vulkan over the host's MoltenVK, for the
 /// guest Vulkan driver (`docs/vulkan-driver.md`).
 pub mod vulkan {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     /// Load MoltenVK and resolve the forwarded entry points ([`Init`]).
     /// Returns 0, `-ENODEV` when the host has no MoltenVK, or `-EINVAL`
@@ -967,6 +967,15 @@ pub mod vulkan {
     /// `-EINVAL` for a bad layout or format, or `-ENODEV` before
     /// [`FN_INIT`].
     pub const FN_ATTACH: u32 = 2;
+    /// A sync_file that signals when a timeline semaphore reaches a value
+    /// ([`Timeline`]). Returns the new sync_file's guest fd, or `-EINVAL`
+    /// for a semaphore without a Metal event.
+    pub const FN_FENCE: u32 = 3;
+    /// Set a timeline semaphore to a value once a sync_file has signaled
+    /// ([`Timeline`]; the guest keeps its fd). Returns 0, `-EBADF` when
+    /// the fd is not a sync_file, or `-EINVAL` for a semaphore without a
+    /// Metal event.
+    pub const FN_SIGNAL: u32 = 4;
     /// Forwarded entry point `i` of the generated table
     /// (`tools/gen-vulkan-thunks.py`) is function `FN_TABLE_BASE + i`, with
     /// the register image of `gpu::FN_TABLE_BASE`: the x registers, then
@@ -1009,8 +1018,22 @@ pub mod vulkan {
         pub _reserved: u32,
     }
 
+    /// Argument block of [`FN_FENCE`] and [`FN_SIGNAL`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Timeline {
+        /// The `VkDevice` and its timeline `VkSemaphore`.
+        pub device: u64,
+        pub semaphore: u64,
+        pub value: u64,
+        /// [`FN_SIGNAL`]'s sync_file.
+        pub fd: i32,
+        pub _reserved: u32,
+    }
+
     const _: () = assert!(core::mem::size_of::<Init>() == 32);
     const _: () = assert!(core::mem::size_of::<Attach>() == 56);
+    const _: () = assert!(core::mem::size_of::<Timeline>() == 32);
 }
 
 /// Guest side: the call instruction and typed wrappers.
@@ -1298,6 +1321,16 @@ pub mod guest {
     /// Make a mapped graphics buffer the storage of a `VkImage`.
     pub fn vulkan_attach(args: &mut vulkan::Attach) -> Result<(), Errno> {
         call_with(module::VULKAN, vulkan::FN_ATTACH, args).map(drop)
+    }
+
+    /// A sync_file for a timeline semaphore's value; returns its fd.
+    pub fn vulkan_fence(args: &mut vulkan::Timeline) -> Result<i32, Errno> {
+        call_with(module::VULKAN, vulkan::FN_FENCE, args).map(|fd| fd as i32)
+    }
+
+    /// Set a timeline semaphore's value once a sync_file has signaled.
+    pub fn vulkan_signal(args: &mut vulkan::Timeline) -> Result<(), Errno> {
+        call_with(module::VULKAN, vulkan::FN_SIGNAL, args).map(drop)
     }
 
     /// Call forwarded Vulkan entry point `id` with its register image.

@@ -4,18 +4,14 @@
 //!
 //! Each fence is a new `MTLSharedEvent` that ANGLE signals after those
 //! commands (an `EGL_ANGLE_metal_shared_event_sync` sync), in the command
-//! buffer that the flush commits. One `MTLSharedEventListener` per process
-//! calls back when an event reaches its value, and the callback signals the
-//! fence's writer ([`aim_sync_file`]) with the time it ran.
+//! buffer that the flush commits; [`aim_sync_file::metal`] signals the
+//! sync_file when the event reaches its value.
 
-use std::ffi::c_void;
 use std::os::fd::OwnedFd;
-use std::sync::{Mutex, OnceLock};
-
-use aim_sync_file::Writer;
+use std::sync::OnceLock;
 
 use crate::EINVAL;
-use crate::metal::{Id, device, objc_getClass, objc_release, send};
+use crate::metal::{Id, device, objc_release, send};
 use crate::present::entry;
 
 const EGL_SYNC_METAL_SHARED_EVENT_ANGLE: u32 = 0x34d8;
@@ -48,85 +44,10 @@ fn egl() -> Option<&'static Egl> {
     .as_ref()
 }
 
-/// A block literal without captures (`_NSConcreteGlobalBlock`).
-#[repr(C)]
-struct Block {
-    isa: *const c_void,
-    flags: i32,
-    reserved: i32,
-    invoke: unsafe extern "C" fn(*const Block, Id, u64),
-    descriptor: &'static BlockDescriptor,
-}
-
-#[repr(C)]
-struct BlockDescriptor {
-    reserved: usize,
-    size: usize,
-}
-
-// SAFETY: immutable after construction.
-unsafe impl Send for Block {}
-unsafe impl Sync for Block {}
-
-#[link(name = "System")]
-unsafe extern "C" {
-    static _NSConcreteGlobalBlock: [*const c_void; 32];
-}
-
-const BLOCK_IS_GLOBAL: i32 = 1 << 28;
-
-/// Writers of the fences in flight, by their event.
-static PENDING: Mutex<Vec<(usize, Writer)>> = Mutex::new(Vec::new());
-
-/// The listener's callback: `event` reached its value.
-unsafe extern "C" fn reached(_block: *const Block, event: Id, _value: u64) {
-    let writer = {
-        let mut pending = PENDING.lock().unwrap();
-        pending
-            .iter()
-            .position(|(e, _)| *e == event as usize)
-            .map(|i| pending.swap_remove(i).1)
-    };
-    if let Some(w) = writer {
-        w.signal(1);
-        // SAFETY: the reference `fence` made the event with.
-        unsafe { objc_release(event) };
-    }
-}
-
-/// The process's listener and its block.
-fn listener() -> Option<(Id, &'static Block)> {
-    static LISTENER: OnceLock<Option<(usize, Block)>> = OnceLock::new();
-    LISTENER
-        .get_or_init(|| {
-            static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
-                reserved: 0,
-                size: size_of::<Block>(),
-            };
-            // SAFETY: a class name.
-            let class = unsafe { objc_getClass(c"MTLSharedEventListener".as_ptr()) };
-            if class.is_null() {
-                return None;
-            }
-            let listener = send!(class, c"alloc" => Id);
-            let listener = send!(listener, c"init" => Id);
-            let block = Block {
-                isa: (&raw const _NSConcreteGlobalBlock).cast(),
-                flags: BLOCK_IS_GLOBAL,
-                reserved: 0,
-                invoke: reached,
-                descriptor: &DESCRIPTOR,
-            };
-            (!listener.is_null()).then_some((listener as usize, block))
-        })
-        .as_ref()
-        .map(|(l, b)| (*l as Id, b))
-}
-
 /// A fence for the commands the current context has issued on ANGLE's
 /// `display`; the commands are flushed.
 pub fn fence(display: usize) -> Result<OwnedFd, i64> {
-    let (Some(egl), Some((listener, block))) = (egl(), listener()) else {
+    let Some(egl) = egl() else {
         return Err(EINVAL);
     };
     // SAFETY: a plain query of this thread's context.
@@ -134,7 +55,6 @@ pub fn fence(display: usize) -> Result<OwnedFd, i64> {
         return Err(EINVAL);
     }
     let device = device(display).ok_or(EINVAL)?;
-    let (file, writer) = aim_sync_file::pair().map_err(|_| EINVAL)?;
     let event = send!(device, c"newSharedEvent" => Id);
     if event.is_null() {
         return Err(EINVAL);
@@ -157,14 +77,15 @@ pub fn fence(display: usize) -> Result<OwnedFd, i64> {
         unsafe { objc_release(event) };
         return Err(EINVAL);
     }
-    PENDING.lock().unwrap().push((event as usize, writer));
-    send!(event, c"notifyListener:atValue:block:" => (),
-        Id = listener, u64 = 1, *const Block = block);
+    // SAFETY: a new MTLSharedEvent.
+    let file = unsafe { aim_sync_file::metal::fence(event, 1) };
     // SAFETY: ANGLE's glFlush and eglDestroySync on the sync made above;
-    // the queued signal keeps its own reference to the event.
+    // the queued signal and the fence keep their own references to the
+    // event.
     unsafe {
+        objc_release(event);
         (egl.flush)();
         (egl.destroy_sync)(display, sync);
     }
-    Ok(file)
+    file.map_err(|_| EINVAL)
 }

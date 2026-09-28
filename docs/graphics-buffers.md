@@ -105,17 +105,18 @@ plane is a pure function of (format, width, height, stride) in
 | `RGBA_1010102` (0x2b) | 32 bits, R in the low 10 | `RGB10A2Unorm` |
 | `R_8` (0x38) | 1 byte | `R8Unorm` |
 | `BLOB` (0x21) | width bytes (any width), height 1 | none (data buffer) |
-| `YCBCR_420_888` (0x23) | NV12: Y plane, then interleaved Cb Cr at half resolution | none yet |
-| `YCRCB_420_SP` (0x11) | NV21: Y plane, then interleaved Cr Cb | none yet |
-| `YV12` (0x32315659) | Y, then Cr, then Cb; chroma stride `align(stride / 2, 16)` | none yet |
-| `YCBCR_P010` (0x36) | 16-bit Y plane, then 16-bit Cb Cr pairs; 10 bits in the high bits | none yet |
+| `YCBCR_420_888` (0x23) | NV12: Y plane, then interleaved Cb Cr at half resolution | Vulkan only: `G8_B8R8_2PLANE_420_UNORM` |
+| `YCRCB_420_SP` (0x11) | NV21: Y plane, then interleaved Cr Cb | Vulkan only: as NV12, Cb and Cr swizzled |
+| `YV12` (0x32315659) | Y, then Cr, then Cb; chroma stride `align(stride / 2, 16)` | Vulkan only: `G8_B8_R8_3PLANE_420_UNORM`, Cb and Cr swizzled |
+| `YCBCR_P010` (0x36) | 16-bit Y plane, then 16-bit Cb Cr pairs; 10 bits in the high bits | Vulkan only: `G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16` |
 
 - `IMPLEMENTATION_DEFINED` resolves to `YCBCR_420_888` when the usage has a
   video-encoder, camera or video-decoder bit, and to `RGBX_8888` otherwise.
 - Strides: the row of a single-plane format is aligned to 64 bytes (the
-  pixel stride is rounded so that this holds). YUV luma rows are aligned to
-  64 bytes, and chroma planes follow at the offsets listed in their plane
-  layouts.
+  pixel stride is rounded so that this holds). YUV rows are aligned to 16
+  bytes, as Android defines YV12 and as Metal lays out a linear
+  multi-planar texture ([vulkan-driver.md](vulkan-driver.md), "YUV"), and
+  each plane follows the one before it.
 - Depth and stencil formats, `RAW*`, `Y8`/`Y16` and the 4:2:2 formats are
   answered `isSupported = false`.
 
@@ -127,7 +128,9 @@ All `BufferUsage` bits are accepted except:
 - `GPU_MIPMAP_COMPLETE` and `GPU_CUBE_MAP`: a texture over a linear buffer
   has one level and one face;
 - GPU usage (`GPU_TEXTURE`, `GPU_RENDER_TARGET`, `COMPOSER_*`) with a layer
-  count above 1, or on a format with no Metal format above.
+  count above 1, or on a format with no Metal format above; the YUV
+  formats take `GPU_TEXTURE` alone (the Vulkan driver samples them; the
+  GLES driver cannot yet, #316).
 
 CPU usage never changes the layout: every buffer is always CPU mappable,
 because software rendering, HWUI's fallback and screenshots lock buffers
@@ -214,8 +217,9 @@ Buffers move between processes with Linux `sync_file` fences, as on a
 device. A sync_file is an `AF_UNIX` datagram socket pair made by
 `crates/aim-sync-file`:
 
-- **Signal.** The producer keeps the other end, the writer: the GPU module
-  until Metal signals the fence's `MTLSharedEvent`, the display server
+- **Signal.** The producer keeps the other end, the writer: the GPU or
+  Vulkan module until Metal signals the fence's `MTLSharedEvent`
+  (`aim_sync_file::metal`), the display server
   until the frame is shown, the merge waiter until every input has
   signaled. It signals by sending one record (the signal time in
   `CLOCK_MONOTONIC` and the status) and closing its end. A writer closed
@@ -232,7 +236,8 @@ device. A sync_file is an `AF_UNIX` datagram socket pair made by
 - **The syscall layer** (`sys/sync_file.rs`) adds the rest of its Linux
   behaviour: `SYNC_IOC_MERGE` (signaled at the later time, with the first
   error; a merge of pending fences is signaled by one host thread per
-  process over a kqueue), `SYNC_IOC_FILE_INFO` (one fence per file, named
+  process over a kqueue, which also sets the `MTLSharedEvent` of a Vulkan
+  timeline semaphore once a fence imported into it has signaled), `SYNC_IOC_FILE_INFO` (one fence per file, named
   `aim`), `SYNC_IOC_SET_DEADLINE` (accepted), `EINVAL` for `read` and
   `write`, and `anon_inode:sync_file` in `/proc/self/fd`.
 

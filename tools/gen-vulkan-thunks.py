@@ -61,13 +61,16 @@ WITHHELD_DEVICE = [
 # Names are canonical; aliases get the same entry point.
 GUEST = {
     # The Android driver interface: proc addresses, extension lists,
-    # instance and device creation, queues the driver also submits to.
+    # instance and device creation, queue families and the queues the
+    # driver also submits to.
     "vkGetInstanceProcAddr": "driver", "vkGetDeviceProcAddr": "driver",
     "vkEnumerateInstanceExtensionProperties": "driver",
     "vkEnumerateDeviceExtensionProperties": "driver",
     "vkCreateInstance": "driver", "vkCreateDevice": "driver",
     "vkDestroyDevice": "driver", "vkGetDeviceQueue": "driver",
     "vkGetDeviceQueue2": "driver", "vkQueueSubmit": "driver",
+    "vkGetPhysicalDeviceQueueFamilyProperties": "driver",
+    "vkGetPhysicalDeviceQueueFamilyProperties2": "driver",
     "vkQueueSubmit2": "driver",
     "vkQueueWaitIdle": "driver", "vkQueueBindSparse": "driver",
     # VK_ANDROID_native_buffer: swapchain images over gralloc buffers.
@@ -81,6 +84,8 @@ GUEST = {
     "vkAllocateMemory": "ahb", "vkFreeMemory": "ahb", "vkCreateBuffer": "ahb",
     "vkGetPhysicalDeviceImageFormatProperties2": "ahb",
     "vkGetPhysicalDeviceExternalBufferProperties": "ahb",
+    # Their external formats.
+    "vkCreateImageView": "ahb", "vkCreateSamplerYcbcrConversion": "ahb",
     # VK_KHR_external_semaphore_fd with sync fds.
     "vkCreateSemaphore": "sync_fd", "vkGetSemaphoreFdKHR": "sync_fd",
     "vkImportSemaphoreFdKHR": "sync_fd",

@@ -92,8 +92,11 @@ programs, and implement only what lies below it.
      unwrapped: they already begin with the loader word and magic the
      loader expects. What Android adds to Vulkan is the driver's own:
      `VK_ANDROID_native_buffer` under the loader's swapchain,
-     AHardwareBuffer memory and sync-fd semaphores, with graphics buffers
-     imported into Metal without a copy.
+     AHardwareBuffer memory (YUV buffers through external formats) and
+     sync-fd semaphores on the GPU, with graphics buffers imported into
+     Metal without a copy. MoltenVK's alike queue families (one queue
+     each) are presented as one family with all their queues, as HWUI
+     asks for two queues of one family.
    - The emulator's vendor HALs talk to QEMU or fake hardware. The overlay
      removes their `.rc` and vintf fragments where we replace them or where
      the Mac lacks the hardware. Hardware the device does not have is then
