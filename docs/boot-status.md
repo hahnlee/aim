@@ -28,6 +28,15 @@ guest-init --image <derived> --data <data> --run \
   removed; `android-image diff` lists them with reasons. The vendor
   `build.prop` still describes the emulator (#206).
 
+## Boot timeline (2026-09-29)
+
+A first boot at load 5 on the M2 Pro (docs/perf-baseline.md, "Where the
+time goes: exec, process start and the early boot"): guest-init prepares
+for 1.4 s, launches zygote at 2.9 s; `boot_progress_start` 3.5 s,
+`boot_progress_system_run` 6.2 s, `boot_progress_pms_ready` 11.9 s,
+`boot_progress_enable_screen` 34.8 s. Before the exec work of that day
+zygote was launched at 5.3-5.5 s and started at 6.3-6.5 s.
+
 ## Debugging
 
 The original logd runs, and every service logs to it. Read it with the
