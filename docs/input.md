@@ -272,22 +272,21 @@ through the server's own path from a window host's records
 
 ## IME (#23)
 
-Keys go out as physical keys, and Android's own IME composes text from
-them. That is enough for Latin layouts and for Android's Korean, Japanese
-and Chinese IMEs, which compose from key codes. Using the Mac's input
-method (its candidate window, dictionaries and input-source switching,
-`NSTextInputClient`) is a different path and would plug in like this:
+Keys go out as physical keys, and Android's own input method composes
+text from them. That is enough for Latin layouts and for the Korean,
+Japanese and Chinese input methods that compose from key codes: the
+image's Gboard, with Korean as its language, turns G K S R M F into 한글
+(its language switches with Ctrl+Space). The Mac's input method (its
+candidate window, dictionaries, dictation, emoji picker and input-source
+switching) is not used. The options, none built yet (an input method is
+a service in an app: adding one is a new system component, the user's
+decision):
 
-- The content view adopts `NSTextInputClient` and sends `keyDown:` through
-  `interpretKeyEvents:`. Keys the input method does not consume still go
-  out as evdev keys.
-- Marked text and committed text are text, not keys: they cannot travel as
-  evdev events. They would go to the guest's focused editor through the
-  input method framework: an Android IME service of ours (an APK in the
-  derived image) receiving `setMarkedText`/`insertText` from the display
-  server, and applying them with `InputConnection.setComposingText` and
-  `commitText`. The window's side answers `firstRectForCharacterRange:`
-  from the cursor rectangle that IME reports
-  (`onUpdateCursorAnchorInfo`), mapped back from pixels to points.
-- The evdev path here stays as it is; the IME is an addition beside it, not
-  a replacement.
+| Option | How | For | Against |
+| --- | --- | --- | --- |
+| **A. The Mac's input method through a bridging IME** (recommended) | The content view adopts `NSTextInputClient` and sends `keyDown:` through `interpretKeyEvents:`; keys the input method does not consume still go out as evdev keys. Marked and committed text go to a minimal Android IME (an `InputMethodService` in an APK in the derived image, the default IME) over the display server's connection, which applies them with `InputConnection.setComposingText` and `commitText`, and reports `onUpdateCursorAnchorInfo` so `firstRectForCharacterRange:` puts the candidate window at the caret (pixels mapped back to points). Non-editor focus keeps the raw key path, so games still get keys. | Every Mac input source, its candidates and dictionaries, dictation and the emoji picker; switching as on the Mac; ChromeOS (ARC) and Windows Subsystem for Android bridge the same way | A new APK (Java, the one framework class an IME must extend) replacing Gboard as the IME; the IME's protocol to the host; `EditorInfo` and selection kept in sync both ways |
+| B. Android's IME, following the Mac's input source | Keys as now; a system tool (as `aim-keyboard`) switches Gboard's subtype when the Mac's input source changes (`com.apple.inputmethod.Korean` → Korean) | No new component; Gboard's composition works today | Gboard's candidates and dictionaries, not the Mac's; subtype switching needs the IME's own subtype ids; the Mac keeps intercepting its switching keys (Caps Lock, Ctrl+Space), whose Caps Lock still reaches Android |
+| C. Committed text as key events | `injectInputEvent` of `ACTION_MULTIPLE` key events with characters | Nothing in the guest | No composing text, no candidates; apps handle it unevenly; deprecated |
+
+A needs an ADR on input method ownership (a host input method provider
+and an APK in the derived image).
