@@ -16,10 +16,15 @@
 //! [[remove]]                                # a file or directory
 //! path = "/system/app/Foo"
 //! reason = "..."                            # required
+//!
+//! [[include]]                               # entries a build writes
+//! source = "target/aim/oat/overlay.toml"    # a manifest without includes
+//! reason = "..."                            # required
 //! ```
 //!
 //! Accepted syntax: blank lines, `#` comments, the top-level `schema`
-//! integer, `[[add]]`/`[[replace]]`/`[[remove]]` tables, and `key = "string"`
+//! integer, `[[add]]`/`[[replace]]`/`[[remove]]`/`[[include]]` tables, and
+//! `key = "string"`
 //! (basic or literal, single-line) inside them. Anything else is an error, so
 //! the file never means something the tool silently ignores.
 
@@ -75,9 +80,19 @@ pub struct Entry {
     pub line: usize,
 }
 
+/// Another manifest whose entries count as this one's (`include`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Include {
+    /// The manifest, relative to the source root.
+    pub source: String,
+    pub reason: String,
+    pub line: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub entries: Vec<Entry>,
+    pub includes: Vec<Include>,
 }
 
 #[derive(Debug)]
@@ -87,7 +102,8 @@ enum Value {
 }
 
 struct Table {
-    kind: Kind,
+    /// `None` for `[[include]]`.
+    kind: Option<Kind>,
     line: usize,
     keys: BTreeMap<String, (Value, usize)>,
 }
@@ -117,14 +133,19 @@ pub fn parse(text: &str) -> Result<Manifest, Vec<Problem>> {
             let name = rest[..end].trim();
             match Kind::from_table(name) {
                 Some(kind) => tables.push(Table {
-                    kind,
+                    kind: Some(kind),
+                    line,
+                    keys: BTreeMap::new(),
+                }),
+                None if name == "include" => tables.push(Table {
+                    kind: None,
                     line,
                     keys: BTreeMap::new(),
                 }),
                 None => problems.push(syntax(
                     line,
                     format!(
-                        "unknown table [[{name}]]; expected [[add]], [[replace]] or [[remove]]"
+                        "unknown table [[{name}]]; expected [[add]], [[replace]], [[remove]] or [[include]]"
                     ),
                 )),
             }
@@ -133,7 +154,7 @@ pub fn parse(text: &str) -> Result<Manifest, Vec<Problem>> {
         if trimmed.starts_with('[') {
             problems.push(syntax(
                 line,
-                "only [[add]], [[replace]] and [[remove]] tables are allowed",
+                "only [[add]], [[replace]], [[remove]] and [[include]] tables are allowed",
             ));
             continue;
         }
@@ -202,49 +223,86 @@ pub fn parse(text: &str) -> Result<Manifest, Vec<Problem>> {
         )),
     }
 
-    let mut entries = Vec::new();
+    let (mut entries, mut includes) = (Vec::new(), Vec::new());
     for table in tables {
-        if let Some(entry) = entry_from_table(table, &mut problems) {
+        if table.kind.is_none() {
+            if let Some(include) = include_from_table(table, &mut problems) {
+                includes.push(include);
+            }
+        } else if let Some(entry) = entry_from_table(table, &mut problems) {
             entries.push(entry);
         }
     }
 
     if problems.is_empty() {
-        Ok(Manifest { entries })
+        Ok(Manifest { entries, includes })
     } else {
         Err(problems)
     }
 }
 
-fn entry_from_table(mut table: Table, problems: &mut Vec<Problem>) -> Option<Entry> {
-    let kind = table.kind;
-    let line = table.line;
-    let before = problems.len();
-    let mut take = |name: &str, problems: &mut Vec<Problem>| -> Option<String> {
-        match table.keys.remove(name) {
-            None => None,
-            Some((Value::Str(text), _)) => Some(text),
-            Some((Value::Int(_), key_line)) => {
-                problems.push(Problem::at(
-                    ProblemKind::Syntax,
-                    key_line,
-                    format!("`{name}` must be a string"),
-                ));
-                None
-            }
+/// Takes the string key `name` out of `table`.
+fn take(table: &mut Table, name: &str, problems: &mut Vec<Problem>) -> Option<String> {
+    match table.keys.remove(name) {
+        None => None,
+        Some((Value::Str(text), _)) => Some(text),
+        Some((Value::Int(_), key_line)) => {
+            problems.push(Problem::at(
+                ProblemKind::Syntax,
+                key_line,
+                format!("`{name}` must be a string"),
+            ));
+            None
         }
-    };
-    let path = take("path", problems);
-    let source = take("source", problems);
-    let reason = take("reason", problems);
+    }
+}
 
+/// Reports the keys left in `table` after its known ones were taken.
+fn unknown_keys(table: &Table, name: &str, problems: &mut Vec<Problem>) {
     for (key, (_, key_line)) in &table.keys {
         problems.push(Problem::at(
             ProblemKind::UnexpectedField,
             *key_line,
-            format!("unknown key `{key}` in [[{kind}]]"),
+            format!("unknown key `{key}` in [[{name}]]"),
         ));
     }
+}
+
+fn include_from_table(mut table: Table, problems: &mut Vec<Problem>) -> Option<Include> {
+    let line = table.line;
+    let source = take(&mut table, "source", problems);
+    let reason = take(&mut table, "reason", problems);
+    unknown_keys(&table, "include", problems);
+    if source.is_none() {
+        problems.push(Problem::at(
+            ProblemKind::MissingField,
+            line,
+            "[[include]] needs `source`",
+        ));
+    }
+    match &reason {
+        Some(text) if !text.trim().is_empty() => {}
+        _ => problems.push(Problem::at(
+            ProblemKind::MissingReason,
+            line,
+            "[[include]] needs a `reason`",
+        )),
+    }
+    Some(Include {
+        source: source?,
+        reason: reason.filter(|r| !r.trim().is_empty())?.trim().to_string(),
+        line,
+    })
+}
+
+fn entry_from_table(mut table: Table, problems: &mut Vec<Problem>) -> Option<Entry> {
+    let kind = table.kind.expect("an entry table");
+    let line = table.line;
+    let before = problems.len();
+    let path = take(&mut table, "path", problems);
+    let source = take(&mut table, "source", problems);
+    let reason = take(&mut table, "reason", problems);
+    unknown_keys(&table, kind.as_str(), problems);
     if path.is_none() {
         problems.push(Problem::at(
             ProblemKind::MissingField,
@@ -374,4 +432,47 @@ fn parse_basic_string(body: &str) -> Result<(String, &str), String> {
         }
     }
     Err("unterminated string".into())
+}
+
+/// Appends the entries of every included manifest (read from under
+/// `source_root`) to `manifest`, each at its `[[include]]`'s line. An
+/// included manifest has no includes of its own.
+pub fn expand(manifest: &mut Manifest, source_root: &std::path::Path) -> Result<(), Vec<Problem>> {
+    let mut problems = Vec::new();
+    for include in &manifest.includes {
+        let at = |message: String| Problem::at(ProblemKind::Syntax, include.line, message);
+        let text = match std::fs::read_to_string(source_root.join(&include.source)) {
+            Ok(text) => text,
+            Err(error) => {
+                problems.push(Problem::at(
+                    ProblemKind::SourceMissing,
+                    include.line,
+                    format!("include `{}`: {error}", include.source),
+                ));
+                continue;
+            }
+        };
+        match parse(&text) {
+            Ok(included) if !included.includes.is_empty() => problems.push(at(format!(
+                "include `{}` has [[include]] tables of its own",
+                include.source
+            ))),
+            Ok(included) => manifest
+                .entries
+                .extend(included.entries.into_iter().map(|entry| Entry {
+                    line: include.line,
+                    ..entry
+                })),
+            Err(inner) => problems.extend(
+                inner
+                    .into_iter()
+                    .map(|p| at(format!("include `{}`: {p}", include.source))),
+            ),
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
 }

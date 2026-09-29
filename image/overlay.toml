@@ -30,6 +30,9 @@
 #   [[remove]]                  a file or directory the original has;
 #   path, reason                `reason` required
 #
+#   [[include]]                 a manifest a `cargo aim` node writes, whose
+#   source, reason              entries (no includes) count as this file's
+#
 # Rules: guest paths are absolute and normalized, and may not pass through a
 # symlink in the original; `add` may not shadow an original path (use
 # `replace`); every source must exist; no path may be declared twice or
@@ -449,26 +452,13 @@ reason = "freeform windows: window mode shows each freeform task as a macOS wind
 # has no switch to leave a service out, so its services.jar is the
 # original with the start of each native service's original turned into
 # no-ops (the system-server node); guest-init reads the list to register
-# the native ones.
+# the native ones. The `oat` node compiles it with the image's other oat
+# files that carry code (see the include below).
 
 [[replace]]
 path = "/system/framework/services.jar"
 source = "target/aim/system-server/services.jar"
 reason = "SystemServer does not start the services image/native-services lists (their startService calls are nops; nothing else changes), which native implementations replace (ADR 0013)"
-
-[[replace]]
-path = "/system/framework/oat/arm64/services.odex"
-source = "target/aim/system-server/oat/arm64/services.odex"
-reason = "the edited services.jar's oat file (verify, against the ART exception's boot image): the original names the original jar's entries by CRC"
-
-[[replace]]
-path = "/system/framework/oat/arm64/services.vdex"
-source = "target/aim/system-server/oat/arm64/services.vdex"
-reason = "the edited services.jar's verification data: the original's would not match it, and system_server would verify services.jar at run time"
-
-[[remove]]
-path = "/system/framework/oat/arm64/services.art"
-reason = "the original services.odex's app image, which belongs to the original jar and runtime"
 
 [[add]]
 path = "/system/etc/aim/native-services"
@@ -920,3 +910,13 @@ reason = "netd drives netlink, iptables, policy routing and eBPF; guest sockets 
 path = "/system/bin/lmkd"
 source = "target/aim/daemons/bin/lmkd"
 reason = "lmkd kills by PSI and memcg pressure, which Darwin does not report; this lmkd keeps the control protocol and kill order and kills on the Mac's memory pressure, from the host-call module memory (#222, #277)"
+
+# The image's oat files with compiled code (speed and speed-profile: the
+# system_server class path, org.apache.http.legacy and a few apps), compiled
+# again by the `oat` node of `cargo aim` for the ART exception's runtime and
+# regenerated boot image, as each original's header records (filter, class
+# loader context, profile, app image). ART rejects the originals' code.
+
+[[include]]
+source = "target/aim/oat/overlay.toml"
+reason = "oat files compiled for the ART exception's runtime and boot image, whose checksums the originals' code names"

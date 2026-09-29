@@ -64,6 +64,16 @@ programs, and implement only what lies below it.
      from AOSP source with the base-relative compressed-reference patches, as
      Android ELF. The boot image is regenerated with it. The patch series, its
      build and the boot image plan are in `docs/art-exception-patches.md`.
+     An oat file with code is valid only for the boot image and runtime it
+     was compiled against, so ART rejects the code of the image's other
+     compiled oat files too (29 of 168: the system_server class path,
+     `org.apache.http.legacy` and six `speed` apps); the `oat` node
+     compiles those again as each original's header records, into an
+     overlay manifest `image/overlay.toml` includes. The `verify` ones stay:
+     their vdex is used as it is. The runtime still differs from the
+     original's in one respect: without userfaultfd it uses the copying
+     collector with read barriers instead of CMC, so ART also opens no
+     original odex (#442).
    - **SystemServer (ADR 0013):** `services.jar` without the start of each
      service a native implementation replaces (`image/native-services`):
      that one call's instructions become `nop`s in place, checked

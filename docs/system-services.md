@@ -47,8 +47,9 @@ every step: replace superseded facts instead of appending a log.
    `const-class` and `invoke-virtual`) turned into `nop`s, in place; the
    dex checksums and the jar's CRC are recomputed and nothing else changes
    (`aim_android_image::system_server`, the `system-server` node, ADR 0013
-   "Steps"). The node then compiles the jar's `services.odex` and `.vdex`
-   again with the rebuilt dex2oat64 (`verify`, against the regenerated boot
+   "Steps"). The `oat` node compiles the jar's `services.{odex,vdex,art}`
+   again with the rebuilt dex2oat64 (`speed-profile` as the original, its
+   profile converted to the edited jar, against the regenerated boot
    image): the image's name the jar's entries by CRC, and without matching
    ones system_server verifies all of services.jar at run time (ANRs, and
    a cold Settings start after boot timed out). guest-init reads the same

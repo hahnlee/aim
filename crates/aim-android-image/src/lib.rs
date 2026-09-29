@@ -37,7 +37,8 @@ pub fn load(
             format!("{}: {error}", path.display()),
         )]
     })?;
-    let manifest = manifest::parse(&text)?;
+    let mut manifest = manifest::parse(&text)?;
+    manifest::expand(&mut manifest, source_root)?;
     let plan = validate(&manifest, original, source_root)?;
     Ok((manifest, plan))
 }

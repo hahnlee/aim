@@ -382,10 +382,15 @@ cargo aim build boot-image
   `/system/etc/boot-image.prof`), both `dirty-image-objects` lists,
   `/system/etc/preloaded-classes`, `--base=0x70000000`, lz4 images.
 - **Mainline extension:** every `boot-<jar>.art` the original ships beyond
-  the primary (here `framework-adservices`), `verify`, compiled against the
-  new primary image, named after the base `boot`.
+  the primary (here `framework-adservices`), with the jars its original oat
+  file holds (here all 31 mainline BCP jars, one image), `verify` without a
+  profile as the original, compiled against the new primary image, named
+  after the base `boot`. An oat file compiled against the boot image names
+  its components' checksums (`i;14/...:i;31/...`), so an extension with
+  fewer jars than the original's would leave no app or system_server oat
+  file valid.
 - **Reproducible:** `--force-determinism` and `--avoid-storing-invocation`;
-  two runs produce identical files. The whole run (15 dex2oat components,
+  two runs produce identical files. The whole run (primary and extension,
   load-time rewriting included) takes about 3 s.
 - **Output:** `target/aim/boot-image/framework/arm64/boot*.{art,oat}`
   and `framework/boot*.vdex`. `image/overlay.toml` replaces the 45
@@ -396,6 +401,23 @@ cargo aim build boot-image
   `/system/framework/boot-framework-adservices.art`), mapped at
   `0x10070000000` (the window plus `ART_BASE_ADDRESS`); the loader always
   relocates from the logical to the window address (`0003`).
+
+## Other oat files
+
+The image's other oat files were compiled for the original boot image and
+runtime. ART checks an oat file's read-barrier state first (the originals are
+CMC's, `concurrent-copying = false`; this runtime has no userfaultfd, #442)
+and then, for a filter with code, its boot image checksums; either mismatch
+rejects the file, and artd reports `kOatCannotOpen ... Read barrier state
+mismatch`. For a `verify` odex (139 of 168) that costs nothing: its vdex is
+accepted and there was no code. The 29 with code (`speed`, `speed-profile`)
+are compiled again by the `oat` node, as each original's header records
+(compiler filter, class loader context without its checksums, boot class
+path, `<jar>.prof`, app image), against the regenerated boot image. services.jar
+is the `system-server` node's edited jar; profman turns its profile into text
+and back against the edited jar. The node writes `target/aim/oat/overlay.toml`,
+which `image/overlay.toml` includes; the image's dexoptanalyzer then answers
+"no dexopt needed" for them (the originals: "dex2oat for filter").
 
 ## Classification
 

@@ -135,10 +135,12 @@ The migration's state and conformance results are in
   symbolic edit (the class, the call and its unused result are checked,
   so a changed SystemServer fails the build instead of being patched
   wrongly), recorded as a `replace` in `image/overlay.toml`. The jar's
-  oat files name its entries by CRC, so they are compiled again for the
-  edited jar (`verify`, as the original's are used under the ART
-  exception, #440); without them system_server verified services.jar at
-  run time and a cold Settings start after boot timed out. It is the
+  oat files name its entries by CRC; the `oat` node compiles them for the
+  edited jar, as it compiles the image's other oat files with code (ADR
+  0012, decision 4), with the original's `speed-profile` and its profile
+  converted to the edited jar's checksums. Without them system_server
+  verified services.jar at run time and a cold Settings start after boot
+  timed out. It is the
   ADR 0012 exception for SystemServer that decision 5.3 anticipated.
 - **The pilot.** `clipboard` on `NSPasteboard` passes 35 of CTS's 36
   clipboard tests (the original: 36); the missing one needs DeviceConfig

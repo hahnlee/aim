@@ -7,7 +7,9 @@
 //! recorded in the original boot.oat (multi-image, speed-profile with the
 //! image's boot profiles, dirty-image-objects and preloaded-classes, at
 //! ART_BASE_ADDRESS), plus every mainline boot image extension the image
-//! ships (verify), compiled against it. The output is what
+//! ships (verify, over the jars its original records), compiled against it.
+//! An oat file compiled against the boot image is only valid when the
+//! images cover its whole boot class path. The output is what
 //! image/overlay.toml replaces:
 //!   framework/arm64/boot*.{art,oat}  ->  /system/framework/arm64/
 //!   framework/boot*.vdex             ->  /system/framework/
@@ -33,17 +35,17 @@ pub fn node() -> Node {
         inputs: Vec::new(),
         outputs: vec![aim_paths::boot_image().join("framework")],
         tools: Vec::new(),
-        recipe: 1,
+        recipe: 2,
         action: Action::BootImage,
         boot: true,
     }
 }
 
-/// A key of the original boot.oat's header (`key\0value\0` pairs).
+/// A key of an oat file's header (`key\0value\0` pairs; `classpath` is
+/// not the end of `bootclasspath`).
 pub(super) fn oat_key(oat: &Path, key: &str) -> Result<String, String> {
     let data = fs::read(oat).map_err(|e| format!("{}: {e}", oat.display()))?;
-    let mut needle = key.as_bytes().to_vec();
-    needle.push(0);
+    let needle = format!("\0{key}\0").into_bytes();
     let at = data
         .windows(needle.len())
         .position(|w| w == needle)
@@ -54,6 +56,62 @@ pub(super) fn oat_key(oat: &Path, key: &str) -> Result<String, String> {
         .position(|&b| b == 0)
         .ok_or("unterminated value")?;
     Ok(String::from_utf8_lossy(&data[at..at + end]).into_owned())
+}
+
+/// The dex locations an oat file holds, in order, without multidex entries:
+/// each `OatDexFile` starts with its location's length and the location.
+pub(super) fn oat_dex_locations(oat: &Path) -> Result<Vec<String>, String> {
+    let data = fs::read(oat).map_err(|e| format!("{}: {e}", oat.display()))?;
+    let mut found = Vec::new();
+    for at in 4..data.len() {
+        if data[at] != b'/' {
+            continue;
+        }
+        let len = u32::from_le_bytes(data[at - 4..at].try_into().unwrap()) as usize;
+        let Some(location) = data.get(at..at + len.min(4096)) else {
+            continue;
+        };
+        let printable = location.iter().all(|b| b.is_ascii_graphic());
+        if printable && (location.ends_with(b".jar") || location.ends_with(b".apk")) {
+            let location = String::from_utf8_lossy(location).into_owned();
+            if !found.contains(&location) {
+                found.push(location);
+            }
+        }
+    }
+    if found.is_empty() {
+        return Err(format!("{}: no dex locations", oat.display()));
+    }
+    Ok(found)
+}
+
+/// The mainline boot image extensions the image ships: the stems of its
+/// `boot-<stem>.art` files beyond the primary image's.
+fn extension_stems(image: &Path) -> Result<Vec<String>, String> {
+    let framework = image.join("system/framework");
+    let bcp = oat_key(&framework.join("arm64/boot.oat"), "bootclasspath")?;
+    let primary: Vec<&str> = bcp.split(':').map(stem).collect();
+    let mut stems: Vec<String> = fs::read_dir(framework.join("arm64"))
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let stem = name.strip_prefix("boot-")?.strip_suffix(".art")?;
+            (!primary.contains(&stem)).then(|| stem.to_string())
+        })
+        .collect();
+    stems.sort();
+    Ok(stems)
+}
+
+/// The boot image the runtime loads by default (ART's
+/// `GetDefaultBootImageLocation`): the primary image and its extensions.
+pub(super) fn boot_image_location(image: &Path) -> Result<String, String> {
+    let mut location = String::from("/system/framework/boot.art");
+    for stem in extension_stems(image)? {
+        location.push_str(&format!(":/system/framework/boot-{stem}.art"));
+    }
+    Ok(location)
 }
 
 fn stem(path: &str) -> &str {
@@ -68,37 +126,15 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     let bcp = oat_key(&framework.join("arm64/boot.oat"), "bootclasspath")?;
     let jars: Vec<&str> = bcp.split(':').collect();
 
-    // Mainline extensions: boot-<stem>.art files beyond the primary image.
-    let primary: Vec<&str> = jars.iter().map(|j| stem(j)).collect();
-    let mut arts: Vec<PathBuf> = fs::read_dir(framework.join("arm64"))
-        .map_err(|e| e.to_string())?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().unwrap().to_string_lossy();
-            name.starts_with("boot-") && name.ends_with(".art")
-        })
-        .collect();
-    arts.sort();
-    let mut extensions = Vec::new();
-    for art_file in arts {
-        let name = art_file.file_stem().unwrap().to_string_lossy();
-        let stem = &name["boot-".len()..];
-        if primary.contains(&stem) {
-            continue;
-        }
-        let mut candidates: Vec<PathBuf> = fs::read_dir(image.join("apex"))
-            .map_err(|e| e.to_string())?
-            .flatten()
-            .map(|apex| apex.path().join("javalib").join(format!("{stem}.jar")))
-            .collect();
-        candidates.sort();
-        candidates.push(image.join(format!("system/framework/{stem}.jar")));
-        let jar = candidates
-            .into_iter()
-            .find(|c| c.is_file())
-            .ok_or_else(|| format!("no jar for boot image extension {stem}"))?;
-        extensions.push(format!("/{}", jar.strip_prefix(&image).unwrap().display()));
+    // An extension is named after its first jar and holds the jars its
+    // original oat file holds (the image's one extension: every mainline
+    // BCP jar), compiled over the class path that oat file records.
+    let stems = extension_stems(&image)?;
+    let mut extensions: Vec<(String, Vec<String>)> = Vec::new();
+    for stem in &stems {
+        let oat = framework.join(format!("arm64/boot-{stem}.oat"));
+        let base = oat_key(&oat, "bootclasspath")?;
+        extensions.push((base, oat_dex_locations(&oat)?));
     }
 
     // The guest view: the original image with the ART exception binaries in
@@ -139,25 +175,28 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     );
     dex2oat(log, &primary_args)?;
 
-    // An extension's image is named after the base, "boot", plus its jar's
-    // stem.
-    for jar in &extensions {
-        dex2oat(
-            log,
-            &[
-                format!("--dex-file={jar}"),
-                format!("--dex-location={jar}"),
-                "--compiler-filter=verify".into(),
-                "--runtime-arg".into(),
-                format!("-Xbootclasspath:{bcp}:{jar}"),
-                "--runtime-arg".into(),
-                format!("-Xbootclasspath-locations:{bcp}:{jar}"),
-                "--boot-image=/data/out/boot.art".into(),
-                "--oat-file=/data/ext/arm64/boot.oat".into(),
-                "--oat-location=/system/framework/arm64/boot.oat".into(),
-                "--image=/data/ext/arm64/boot.art".into(),
-            ],
-        )?;
+    // An extension's image is named after the base, "boot", plus its first
+    // jar's stem. Without a profile it holds every class of its jars, as
+    // the original does.
+    for (base, jars) in &extensions {
+        let all = format!("{base}:{}", jars.join(":"));
+        let mut args: Vec<String> = jars
+            .iter()
+            .flat_map(|jar| [format!("--dex-file={jar}"), format!("--dex-location={jar}")])
+            .collect();
+        args.extend([
+            "--single-image".into(),
+            "--compiler-filter=verify".into(),
+            "--runtime-arg".into(),
+            format!("-Xbootclasspath:{all}"),
+            "--runtime-arg".into(),
+            format!("-Xbootclasspath-locations:{all}"),
+            "--boot-image=/data/out/boot.art".into(),
+            "--oat-file=/data/ext/arm64/boot.oat".into(),
+            "--oat-location=/system/framework/arm64/boot.oat".into(),
+            "--image=/data/ext/arm64/boot.art".into(),
+        ]);
+        dex2oat(log, &args)?;
         for entry in fs::read_dir(work.join("data/ext/arm64")).map_err(|e| e.to_string())? {
             let from = entry.map_err(|e| e.to_string())?.path();
             fs::rename(
@@ -252,27 +291,35 @@ impl Dex2oat {
         })
     }
 
-    /// Runs dex2oat64 with the common arguments and `args`. Without a
-    /// generated linker configuration linker64 uses its default namespace,
-    /// which LD_LIBRARY_PATH points at the APEXes libart links.
+    /// The image's (or the exception's) ART tool `binary` on the syscall
+    /// layer. Without a generated linker configuration linker64 uses its
+    /// default namespace, which LD_LIBRARY_PATH points at the APEXes libart
+    /// links.
+    fn command(&self, binary: &str) -> Command {
+        let mut command = Command::new(&self.linux_run);
+        command
+            .env_clear()
+            .env(
+                "LD_LIBRARY_PATH",
+                "/apex/com.android.art/lib64:/apex/com.android.i18n/lib64:/apex/com.android.os.statsd/lib64",
+            )
+            .env("ANDROID_ROOT", "/system")
+            .env("ANDROID_DATA", "/data")
+            .env("ANDROID_ART_ROOT", "/apex/com.android.art")
+            .env("ANDROID_I18N_ROOT", "/apex/com.android.i18n")
+            .arg("--inherit-env")
+            .arg("--path-map")
+            .arg(self.work.join("path-map"))
+            .arg("--cache")
+            .arg(self.work.join("cache"))
+            .arg(binary);
+        command
+    }
+
+    /// Runs dex2oat64 with the common arguments and `args`.
     pub fn run(&self, log: &mut Log, args: &[String]) -> Result<(), String> {
         log.run(
-            Command::new(&self.linux_run)
-                .env_clear()
-                .env(
-                    "LD_LIBRARY_PATH",
-                    "/apex/com.android.art/lib64:/apex/com.android.i18n/lib64:/apex/com.android.os.statsd/lib64",
-                )
-                .env("ANDROID_ROOT", "/system")
-                .env("ANDROID_DATA", "/data")
-                .env("ANDROID_ART_ROOT", "/apex/com.android.art")
-                .env("ANDROID_I18N_ROOT", "/apex/com.android.i18n")
-                .arg("--inherit-env")
-                .arg("--path-map")
-                .arg(self.work.join("path-map"))
-                .arg("--cache")
-                .arg(self.work.join("cache"))
-                .arg("/apex/com.android.art/bin/dex2oat64")
+            self.command("/apex/com.android.art/bin/dex2oat64")
                 .args([
                     "--runtime-arg",
                     "-Xms64m",
@@ -289,5 +336,10 @@ impl Dex2oat {
                 ])
                 .args(args),
         )
+    }
+
+    /// Runs the image's profman with `args`; returns its standard output.
+    pub fn profman(&self, log: &mut Log, args: &[String]) -> Result<String, String> {
+        log.output(self.command("/apex/com.android.art/bin/profman").args(args))
     }
 }
