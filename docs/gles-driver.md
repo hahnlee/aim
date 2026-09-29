@@ -160,17 +160,19 @@ Metal out of zygote:
   ms, most of it `MTLCreateSystemDefaultDevice` reaching the window server)
   is ready before the first `eglInitialize`. HWUI's driver preload
   (`RenderThread::preload`) asks for the display when the app binds, long
-  before its first frame; whether libEGL passes that request on to the
-  driver in a child, rather than answering it from zygote's cached display,
-  is not verified yet. Zygote itself is not a fork child and still makes
-  nothing. Loading ANGLE (~15–75 ms) happens on the same preload
+  before its first frame, and libEGL passes the request of a child on to
+  the driver rather than answering it from zygote's cached display. An
+  `eglInitialize` (or any call that passes the handle) meanwhile waits for
+  the thread's display under the displays' lock. Zygote itself is not a
+  fork child and still makes nothing. Loading ANGLE (~15–75 ms) happens on the same preload
   thread already. Making every fork child load ANGLE up front would cost
   about 19 MB per process that never draws.
 
 `tests/fork.rs` runs zygote's pattern on the host (load ANGLE, get the
 display, fork the way the layer does, then compile a shader unique to the
 run and draw in the child), and `tests/graphics.rs` runs it in the guest
-(`gles_triangle fork`).
+(`gles_triangle fork`), where the child of the preloading parent asks for
+the display again before initializing it, as an app does.
 
 ## External textures
 

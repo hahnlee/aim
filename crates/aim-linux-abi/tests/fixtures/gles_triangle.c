@@ -64,7 +64,11 @@ static GLuint shader(GLenum type, const char* src) {
     glCompileShader(s);
     GLint ok = 0;
     glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    CHECK(ok, "shader compile");
+    if (!ok) {
+        char log[1024] = "";
+        glGetShaderInfoLog(s, sizeof(log), NULL, log);
+        CHECK(0, "shader compile: %s", log);
+    }
     return s;
 }
 
@@ -92,12 +96,17 @@ static void frame(GLuint prog, float r, float g, float b) {
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
-// In a fork child: a context on `dpy` (initialized here unless `inited`),
-// a program whose fragment shader no cache has seen (a constant unique to
-// this run), and a triangle read back. Exits with the result.
+// In a fork child: a context on `dpy` (asked for again and initialized
+// here unless `inited`, as an app's RenderThread does, which makes the host
+// start ANGLE's display on a thread of its own), a program whose fragment
+// shader no cache has seen (a uniform named by the time and pid), and a
+// triangle read back. Exits with the result.
 static void child_draws(EGLDisplay dpy, int inited) {
     EGLint major = 0, minor = 0;
-    if (!inited) CHECK(eglInitialize(dpy, &major, &minor), "child eglInitialize %x", eglGetError());
+    if (!inited) {
+        CHECK(eglGetDisplay(EGL_DEFAULT_DISPLAY) == dpy, "child eglGetDisplay");
+        CHECK(eglInitialize(dpy, &major, &minor), "child eglInitialize %x", eglGetError());
+    }
     const EGLint config_attribs[] = {EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
                                      EGL_ALPHA_SIZE, 8, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
                                      EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_NONE};
@@ -111,11 +120,12 @@ static void child_draws(EGLDisplay dpy, int inited) {
     const EGLint pbuffer_attribs[] = {EGL_WIDTH, W, EGL_HEIGHT, H, EGL_NONE};
     EGLSurface pbuffer = eglCreatePbufferSurface(dpy, config, pbuffer_attribs);
     CHECK(eglMakeCurrent(dpy, pbuffer, pbuffer, ctx), "child eglMakeCurrent %x", eglGetError());
+    long long nonce = (long long)now_ns();
     char fs[256];
     snprintf(fs, sizeof(fs),
              "#version 300 es\nprecision highp float;\nout vec4 color;\nuniform float u%lld;\n"
              "void main() { color = vec4(0.0, 1.0, 0.0, 1.0) + vec4(u%lld * %d.0); }\n",
-             (long long)now_ns(), (long long)now_ns(), getpid());
+             nonce, nonce, getpid());
     GLuint p = glCreateProgram();
     glAttachShader(p, shader(GL_VERTEX_SHADER, kVertex));
     glAttachShader(p, shader(GL_FRAGMENT_SHADER, fs));
