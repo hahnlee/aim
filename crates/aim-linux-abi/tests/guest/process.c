@@ -888,6 +888,12 @@ static void permissions(void) {
 }
 #undef DENIED
 
+static double now_us(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
+}
+
 static char* slurp(const char* path) {
   static char buf[4096];
   int fd = open(path, O_RDONLY);
@@ -965,6 +971,12 @@ static void peers(void) {
   CHECK(listed_child && !listed_tid, "/proc lists the child %d, not its thread %d", listed_child,
         listed_tid);
   CHECK(named == child, "the child by its rewritten argv: %d", named);
+  // The child answers at once, not after a reader's timeout (50 ms).
+  snprintf(path, sizeof(path), "/proc/%d/cmdline", child);
+  double t0 = now_us();
+  for (int i = 0; i < 20; i++) CHECK((text = slurp(path)) && !strcmp(text, "renamed-child"), "cmdline");
+  double per_read = (now_us() - t0) / 20;
+  CHECK(per_read < 20000, "%.0f us per cmdline read", per_read);
   int tasks = 0;
   snprintf(path, sizeof(path), "/proc/%d/task", child);
   DIR* task = opendir(path);
@@ -1029,11 +1041,6 @@ static void ns_init_exit(void) {
   printf("pids %d %d\n", getpid(), child);
 }
 
-static double now_us(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
-}
 
 static int cmp(const void* a, const void* b) {
   double x = *(const double*)a, y = *(const double*)b;

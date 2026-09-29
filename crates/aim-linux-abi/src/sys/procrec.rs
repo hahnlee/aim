@@ -11,34 +11,34 @@
 //!   and the scheduling calls on another process read them there);
 //! - `cmdline` is the argument area of the guest's memory, which a program
 //!   rewrites in place (zygote names its children so): a reader asks for
-//!   it, and the process copies it into the record from its handler of
-//!   the request signal. A process that does not answer in time is read
-//!   as it last answered (or as it started);
+//!   it, and the process copies it into the record. A process that does
+//!   not answer in time is read as it last answered (or as it started);
 //! - a scheduling change for one of its threads is written into the
-//!   thread's slot, with the same signal: the process hands it to the
-//!   thread, which applies it to its host thread (`process`).
+//!   thread's slot, with a request: the process hands it to the thread,
+//!   which applies it to its host thread (`process`).
 //!
-//! The request signal is Darwin's SIGINFO, which Linux lacks and Darwin
-//! ignores by default, so a process that does not serve requests yet (or
-//! any more) is unharmed.
+//! Requests ring a word of the record that a host thread of the process
+//! waits on (Darwin's shared `__ulock`, as for shared futexes), so they
+//! interrupt none of the guest's threads: a signal would, on whatever
+//! thread Darwin picks, and system_server reads every process's `/proc`
+//! entries all the time.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU8, AtomicU32, Ordering::*};
 use std::time::{Duration, Instant};
 
-/// The host signal of a request.
-pub const REQUEST: i32 = libc::SIGINFO;
 /// One slot per possible tid of a process (`thread`).
 const SLOTS: usize = 4096;
 /// The part of the argument area a record holds.
 const ARGS_MAX: usize = (64 << 10) - 64;
 /// How long a reader waits for an answer.
 const PATIENCE: Duration = Duration::from_millis(50);
+/// Longest wait of the serving thread: a wake it missed is noticed then.
+const SLICE_NS: u64 = 1_000_000_000;
 
 #[repr(C)]
 struct Header {
-    /// Requests for the argument area: the last one asked and the last one
-    /// answered.
+    /// Requests: the last one made and the last one answered.
     asked: AtomicU32,
     answered: AtomicU32,
     /// Set with a slot's `changed`.
@@ -155,6 +155,70 @@ pub fn init(dir: &Path, nice: i32) {
         return;
     }
     OWN.store(rec, Release);
+    let _ = std::thread::Builder::new()
+        .name("aim-procrec".into())
+        .stack_size(128 << 10)
+        .spawn(move || serve(r));
+}
+
+const UL_COMPARE_AND_WAIT_SHARED: u32 = 3;
+const ULF_WAKE_ALL: u32 = 0x100;
+const ULF_NO_ERRNO: u32 = 0x0100_0000;
+
+unsafe extern "C" {
+    fn __ulock_wait2(op: u32, addr: *mut libc::c_void, value: u64, timeout_ns: u64, v2: u64)
+    -> i32;
+    fn __ulock_wake(op: u32, addr: *mut libc::c_void, wake_value: u64) -> i32;
+}
+
+/// Wait up to `ns` while `word` holds `value`, as other processes' waits.
+fn wait(word: &AtomicU32, value: u32, ns: u64) {
+    // SAFETY: a word of a shared mapping that outlives the call.
+    unsafe {
+        __ulock_wait2(
+            UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO,
+            word.as_ptr().cast(),
+            value as u64,
+            ns,
+            0,
+        )
+    };
+}
+
+fn wake(word: &AtomicU32) {
+    // SAFETY: as above.
+    unsafe {
+        __ulock_wake(
+            UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL | ULF_NO_ERRNO,
+            word.as_ptr().cast(),
+            0,
+        )
+    };
+}
+
+/// The serving thread: answers each request with the argument area as it
+/// is now, and hands scheduling changes to their threads. It takes none
+/// of the process's signals.
+fn serve(r: &'static Record) {
+    // SAFETY: blocking signals for this thread.
+    unsafe {
+        let mut all: libc::sigset_t = 0;
+        libc::sigfillset(&mut all);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &all, std::ptr::null_mut());
+    }
+    let h = &r.header;
+    loop {
+        let asked = h.asked.load(Acquire);
+        if h.answered.load(Relaxed) != asked {
+            copy_args(r);
+            for (tid, sched) in take_changes(r) {
+                super::process::adopt(tid, sched);
+            }
+            h.answered.store(asked, Release);
+            wake(&h.answered);
+        }
+        wait(&h.asked, asked, SLICE_NS);
+    }
 }
 
 /// Process `pid` is gone: drop its record.
@@ -213,7 +277,7 @@ pub fn note_args() {
     }
 }
 
-/// Copy the argument area into the record. Async-signal-safe.
+/// Copy the argument area into the record.
 fn copy_args(r: &Record) {
     let (lo, hi) = super::procfs::args_area();
     let len = (hi.saturating_sub(lo) as usize).min(ARGS_MAX);
@@ -236,27 +300,10 @@ unsafe extern "C" {
     fn mach_vm_read_overwrite(t: libc::mach_port_t, a: u64, s: u64, d: u64, o: *mut u64) -> i32;
 }
 
-/// The request signal arrived (a host signal handler, on any thread):
-/// answer a request for the argument area. True when a thread's
-/// scheduling changed, for a thread of the process to take over
-/// ([`take_changes`]).
-pub fn serve() -> bool {
-    let Some(r) = own() else { return false };
-    let h = &r.header;
-    let asked = h.asked.load(Acquire);
-    if h.answered.load(Relaxed) != asked {
-        copy_args(r);
-        h.answered.store(asked, Release);
-    }
-    h.changed.load(Relaxed) != 0
-}
-
 /// The threads whose scheduling another process changed, with the new
 /// scheduling.
-pub fn take_changes() -> Vec<(i32, Sched)> {
-    let Some(r) = own() else { return Vec::new() };
-    let h = &r.header;
-    if h.changed.load(Relaxed) == 0 || h.changed.swap(0, AcqRel) == 0 {
+fn take_changes(r: &Record) -> Vec<(i32, Sched)> {
+    if r.header.changed.swap(0, AcqRel) == 0 {
         return Vec::new();
     }
     super::thread::tids()
@@ -337,9 +384,12 @@ impl Peer {
         Some(Sched::unpack(self.slot(tid)?.sched.load(Acquire)))
     }
 
-    fn ask(&self) {
-        // SAFETY: a signal Darwin ignores unless the process serves it.
-        unsafe { libc::kill(self.pid, REQUEST) };
+    /// Make a request; returns its number.
+    fn ask(&self) -> u32 {
+        let h = &self.rec().header;
+        let n = h.asked.fetch_add(1, AcqRel).wrapping_add(1);
+        wake(&h.asked);
+        n
     }
 
     /// Change thread `tid`'s scheduling with `f`, for the process to apply.
@@ -360,14 +410,15 @@ impl Peer {
     /// The process's argument area, as it answers now or answered last.
     pub fn args(&self) -> Vec<u8> {
         let h = &self.rec().header;
-        let asked = h.asked.fetch_add(1, AcqRel).wrapping_add(1);
-        self.ask();
+        let asked = self.ask();
         let deadline = Instant::now() + PATIENCE;
-        while (h.answered.load(Acquire).wrapping_sub(asked) as i32) < 0 {
-            if Instant::now() > deadline {
+        loop {
+            let answered = h.answered.load(Acquire);
+            let left = deadline.saturating_duration_since(Instant::now());
+            if (answered.wrapping_sub(asked) as i32) >= 0 || left.is_zero() {
                 break;
             }
-            std::thread::sleep(Duration::from_micros(50));
+            wait(&h.answered, answered, left.as_nanos() as u64);
         }
         let len = (h.args_len.load(Acquire) as usize).min(ARGS_MAX);
         self.rec().args[..len]

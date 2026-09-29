@@ -209,9 +209,11 @@ rlimit	13	40	40
     (`sys/procrec.rs`), which it maps shared: its threads with their
     `comm` and scheduling, and a copy of its argument area. Other
     processes read `/proc/<pid>/task`, `comm` and `cmdline` there, and
-    change a thread's scheduling by writing its slot; Darwin's SIGINFO
-    asks the process to refresh the argument area and to hand a change
-    to the thread, which applies it to its host thread.
+    change a thread's scheduling by writing its slot. A request rings a
+    word of the record (a shared `__ulock`) that a host thread of the
+    process waits on; it refreshes the argument area and hands a change
+    to the thread, which applies it to its host thread. No guest thread
+    is interrupted.
   - A `linux-run` started with neither `--identity` nor `--by-pid` makes a
     private table and is the init of that namespace: its descendants die
     with it and the table goes.
