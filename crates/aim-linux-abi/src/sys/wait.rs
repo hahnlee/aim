@@ -135,16 +135,16 @@ pub fn wait4(a: [u64; 6]) -> i64 {
 }
 
 /// The Linux `siginfo_t` fields `waitid` writes.
-fn put_wait_siginfo(out: u64, info: Option<&libc::siginfo_t>) {
+/// `uid` is the child's real uid in the guest's model (the host one is not
+/// it).
+fn put_wait_siginfo(out: u64, info: Option<(&libc::siginfo_t, u32)>) {
     let (signo, code, pid, uid, status) = match info {
-        Some(i) if i.si_pid != 0 => {
+        Some((i, uid)) if i.si_pid != 0 => {
             let status = if i.si_code == libc::CLD_EXITED {
                 i.si_status
             } else {
                 signal_from_host(i.si_status)
             };
-            // The child's uid in the guest's model: the host one is not it.
-            let uid = super::cred::current().uid[0];
             (LINUX_SIGCHLD, i.si_code, i.si_pid, uid, status)
         }
         _ => (0, 0, 0, 0, 0),
@@ -231,11 +231,12 @@ pub fn waitid(a: [u64; 6]) -> i64 {
         info.si_code,
         libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
     );
+    let uid = super::signal::sender_uid(info.si_pid);
     if info.si_pid != 0 && ended && options & WNOWAIT == 0 {
         super::cred::forget(info.si_pid);
     }
     if infop != 0 {
-        put_wait_siginfo(infop, Some(&info));
+        put_wait_siginfo(infop, Some((&info, uid)));
     }
     0
 }

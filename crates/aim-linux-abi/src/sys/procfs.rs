@@ -315,24 +315,10 @@ fn stat_line(p: i32) -> Option<String> {
     ))
 }
 
-/// The credential lines of `/proc/<p>/status`: the identity's for this
-/// process; uid and gid from the process table for others.
+/// The credential lines of `/proc/<p>/status`, from the process's
+/// identity (another's from the process table).
 fn cred_lines(p: i32) -> String {
-    if p == pid() {
-        return super::cred::proc_status();
-    }
-    let c = super::cred::peer(p);
-    let (u, g) = (c.uid, c.gid);
-    let caps = if u == 0 {
-        "000001ffffffffff"
-    } else {
-        "0000000000000000"
-    };
-    format!(
-        "Uid:\t{u}\t{u}\t{u}\t{u}\nGid:\t{g}\t{g}\t{g}\t{g}\nGroups:\t\n\
-         CapInh:\t0000000000000000\nCapPrm:\t{caps}\nCapEff:\t{caps}\nCapBnd:\t{caps}\n\
-         CapAmb:\t0000000000000000\n"
-    )
+    super::cred::proc_status(p)
 }
 
 fn status(p: i32) -> Option<String> {
@@ -1098,10 +1084,26 @@ fn recorded(guest: &str) -> Option<(PathBuf, libc::stat)> {
     if area != Area::Kernfs || device_tree(guest) {
         return None;
     }
+    // A value written for a process or thread lasts as long as it does.
+    if let Some(n) = proc_entry(&canonical(guest))
+        && node(&format!("/proc/{n}")).is_none()
+    {
+        return None;
+    }
     let c = CString::new(host.as_os_str().as_encoded_bytes()).ok()?;
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: host path, local buffer.
     (unsafe { libc::stat(c.as_ptr(), &mut st) } == 0).then_some((host, st))
+}
+
+/// The pid or tid of the `/proc/<n>` directory a canonical path is in.
+fn proc_entry(canon: &str) -> Option<i32> {
+    canon
+        .strip_prefix("/proc/")?
+        .split('/')
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// A file holding `data`, positioned at 0.
@@ -1141,7 +1143,9 @@ fn dir_fd(guest: &str, list: Vec<Entry>, cloexec: bool) -> i64 {
     {
         for e in rd.flatten() {
             let name = e.file_name().as_encoded_bytes().to_vec();
-            if !list.iter().any(|x| x.name == name) {
+            // Only the namespace's processes are directories of /proc.
+            let process = guest == "/proc" && name.iter().all(u8::is_ascii_digit);
+            if !process && !list.iter().any(|x| x.name == name) {
                 let t = if e.file_type().is_ok_and(|t| t.is_dir()) {
                     dir::DT_DIR
                 } else {
@@ -1380,17 +1384,22 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
     if !is_kernfs(guest) {
         return None;
     }
-    if let Some((_, st)) = recorded(guest) {
+    let canon = canonical(guest);
+    // A process's files belong to its effective ids, the rest to root.
+    let owner = match proc_entry(&canon).map(super::thread::owner) {
+        Some(p) if p == pid() => super::attrs::ids(super::attrs::EFFECTIVE),
+        Some(p) => {
+            let c = super::cred::peer(p);
+            (c.uid, c.gid)
+        }
+        None => (0, 0),
+    };
+    if let Some((_, mut st)) = recorded(guest) {
+        (st.st_uid, st.st_gid) = owner;
         return Some(Ok(st));
     }
-    let canon = canonical(guest);
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     let me = pid();
-    let owner = if canon.starts_with(&format!("/proc/{me}")) {
-        super::attrs::ids(super::attrs::EFFECTIVE)
-    } else {
-        (0, 0)
-    };
     st.st_uid = owner.0;
     st.st_gid = owner.1;
     st.st_blksize = 1024;

@@ -272,6 +272,13 @@ fn signals_and_priorities_need_permission() {
     check("permissions");
 }
 
+/// Another process's /proc owner and credentials, and the sender of its
+/// SIGCHLD, as Linux reports them.
+#[test]
+fn other_processes_ids_in_proc_and_siginfo() {
+    check("peer_ids");
+}
+
 #[test]
 fn identity_files_inherited_env_and_fds_reach_the_guest() {
     let Some(root) = root() else { return };
