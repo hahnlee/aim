@@ -52,6 +52,7 @@ pub enum Action {
     BootImage,
     Angle,
     MoltenVk,
+    SystemServer,
     DerivedImage,
     TranslationCache,
 }

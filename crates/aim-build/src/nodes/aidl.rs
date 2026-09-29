@@ -8,10 +8,13 @@
 //! 3. `tools/lib/vendor_hal_aidl.py` and `tools/lib/daemon_aidl.py` compile
 //!    them with the pinned SDK `aidl --lang=rust` into the crates that
 //!    `hal/aidl/*` and `daemons/aidl/*` point at (`target/aim/gen`).
+//! 4. The framework AIDL of the native system services is generated into
+//!    the crate `crates/aim-services/aidl` points at, and checked against
+//!    the image ([`super::service_aidl`]).
 
-use super::{files, real, repo};
+use super::{files, real, repo, service_aidl};
 use crate::fetch::Source;
-use crate::graph::{Action, Node};
+use crate::graph::{Action, Dep, Node};
 use crate::lockfile::Lock;
 use crate::log::Log;
 use crate::tools::{self, Tool};
@@ -26,6 +29,9 @@ pub fn node() -> Node {
         repo("daemons/sources.lock"),
         repo("tools/lib/vendor_hal_aidl.py"),
         repo("tools/lib/daemon_aidl.py"),
+        repo(service_aidl::LOCK),
+        // The generated codes are checked against the image's stubs.
+        repo("image/original.lock"),
     ];
     // The generators check each crate's manifest against its imports.
     for dir in ["hal/aidl", "daemons/aidl"] {
@@ -33,11 +39,11 @@ pub fn node() -> Node {
     }
     Node {
         name: "aidl-gen".into(),
-        deps: Vec::new(),
+        deps: vec![Dep::order_only("image")],
         inputs,
-        outputs: vec![hal_out(), daemon_out()],
+        outputs: vec![hal_out(), daemon_out(), service_aidl::out()],
         tools: vec![Tool::Aidl, Tool::Python],
-        recipe: 1,
+        recipe: 2,
         action: Action::AidlGen,
         boot: true,
     }
@@ -133,5 +139,6 @@ pub fn run(log: &mut Log) -> Result<(), String> {
             .arg(real(&daemon_out())?)
             .arg(repo("daemons/aidl"))
             .args(daemons.array("AIDL_CRATES")),
-    )
+    )?;
+    service_aidl::run(log)
 }

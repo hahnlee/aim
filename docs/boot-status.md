@@ -28,6 +28,19 @@ guest-init --image <derived> --data <data> --run \
   removed; `android-image diff` lists them with reasons. The vendor
   `build.prop` still describes the emulator (#206).
 
+## Native system services (2026-09-29, ADR 0013)
+
+`image/native-services` lists the system services implemented natively
+(docs/system-services.md): today `clipboard`. The derived image's
+`services.jar` does not start `ClipboardService` (its
+`SystemServerTiming: StartClipboardService` trace line stays), and
+guest-init registers the native clipboard with servicemanager when
+`servicemanager.ready` is set; `service check clipboard` finds it.
+Boots with it reach `sys.boot_completed` as before (four boots of a
+reused data image, 20-25 s); SystemUI and Gboard, which listen to the
+clipboard, run without errors, and CTS's clipboard tests pass but one
+(#428). An empty list gives the original clipboard back.
+
 ## Boot timeline (2026-09-29)
 
 A first boot at load 5 on the M2 Pro (docs/perf-baseline.md, "Where the

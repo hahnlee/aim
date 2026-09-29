@@ -232,6 +232,33 @@ that dominate, the copies cost nanoseconds and the wakes cost microseconds.
 - **Signals.** `Driver::interrupt` ends a blocked read with `EINTR`. Guest
   signal delivery does not reach it through the daemon yet.
 
+## A binder process on the host
+
+`aim_binder_host::local::LocalProcess` is a binder process of the driver
+inside the host process that runs it (guest-init): the native system
+services of ADR 0013 (docs/system-services.md). It plays libbinder's
+`ProcessState` and `IPCThreadState` over `Driver::ioctl` directly, with no
+Mach hop: host threads are its binder threads (a looper, then more on
+`BR_SPAWN_LOOPER`), addresses are host addresses and its receive buffer is
+heap memory. It serves `Service` objects as nodes (answering
+`INTERFACE_TRANSACTION` and `PING` itself), calls other nodes and serves
+calls routed back to the waiting thread meanwhile, takes strong references
+to handles it keeps (`BC_INCREFS`/`BC_ACQUIRE` before the buffer that
+carried them is freed) and gets death notices. Parcels are libbinder's
+kernel format (`aim_binder_host::parcel`): strings with length and NUL,
+binders followed by their stability, the interface token and Java's
+exception replies. Its nodes do not accept file descriptors (#433).
+
+## Tracing
+
+`Driver::start_trace` records every transaction (`TraceRecord`): sender pid
+and euid, target pid, the interface token at the start of the data (AIDL's
+descriptor or HIDL's interface name), code, one-way or not, and for a
+synchronous call the time from the driver taking `BC_TRANSACTION` to it
+taking the target's `BC_REPLY`. guest-init `--binder-trace FILE` appends
+them to a file once a second; `tools/binder-trace-report.py` names the
+services and methods (docs/system-services.md, "Inventory").
+
 ## Tests
 
 `cargo test -p aim-binder-driver` runs an in-process harness

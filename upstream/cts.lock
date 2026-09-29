@@ -1,0 +1,12 @@
+# The official CTS release the native system services are tested against
+# (ADR 0013, "Conformance bar"; docs/system-services.md): the Android 16
+# arm64 CTS, r1, for the pinned image (BE2A.250530.026.F3, security patch
+# 2025-07-05). Built from AOSP (Apache-2.0) with its test libraries; a local
+# test input, never shipped or committed. tools/cts-module.py fetches the
+# pinned entries into _build/cts with range requests.
+URL=https://dl.google.com/dl/android/cts/android-cts-16_r1-linux_x86-arm.zip
+SIZE=18629012254
+
+# entry|sha256 of the inflated file
+"android-cts/testcases/CtsContentTestCases/CtsContentUriTestApp.apk|c077711943a5e0db9b4c7d110ea5c5e92bb17f29472c20c1d9f57ae0bc83ebc5"
+"android-cts/testcases/CtsContentTestCases/arm64/CtsContentTestCases.apk|5303d9039d26445f19b8ac5b93dc6c2a942c938f96ddabab537372838b94e2e3"

@@ -9,7 +9,9 @@
 //!   (`aim-binderd` runs it alone; aimd is meant to host it);
 //! - [`client`]: what the syscall layer calls for `open`, `ioctl`, `mmap`
 //!   and poll registration on a binder fd;
-//! - [`wire`] and [`mach`]: the messages and the Mach primitives under them.
+//! - [`wire`] and [`mach`]: the messages and the Mach primitives under them;
+//! - [`local`] and [`parcel`]: a binder process on the host itself, for
+//!   native system services (ADR 0013).
 //!
 //! Each guest ioctl is one `mach_msg(SEND|RCV)` from the calling thread to
 //! its own daemon thread, which runs the driver's ioctl and may block in it.
@@ -18,6 +20,8 @@
 //! guest. Fds travel as fileports. See `docs/binder-driver.md`.
 
 pub mod client;
+pub mod local;
 pub mod mach;
+pub mod parcel;
 pub mod server;
 pub mod wire;

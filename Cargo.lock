@@ -21,7 +21,11 @@ dependencies = [
 name = "aim-android-image"
 version = "0.1.0"
 dependencies = [
+ "adler2",
+ "aim-paths",
+ "crc32fast",
  "libc",
+ "sha1",
  "sha2",
 ]
 
@@ -85,10 +89,12 @@ version = "0.1.0"
 name = "aim-guest-init"
 version = "0.1.0"
 dependencies = [
+ "aim-android-image",
  "aim-android-init",
  "aim-binder-host",
  "aim-hostcall",
  "aim-paths",
+ "aim-services",
  "aim-storage",
  "libc",
 ]
@@ -219,6 +225,23 @@ dependencies = [
 [[package]]
 name = "aim-paths"
 version = "0.1.0"
+
+[[package]]
+name = "aim-service-aidl"
+version = "0.1.0"
+dependencies = [
+ "aim-binder-host",
+]
+
+[[package]]
+name = "aim-services"
+version = "0.1.0"
+dependencies = [
+ "aim-binder-driver",
+ "aim-binder-host",
+ "aim-hostcall",
+ "aim-service-aidl",
+]
 
 [[package]]
 name = "aim-storage"

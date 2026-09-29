@@ -1,0 +1,13 @@
+[package]
+license.workspace = true
+name = "aim-services"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Android's system services as native macOS implementations, served on the host's binder (ADR 0013)"
+
+[dependencies]
+aim-binder-driver = { path = "../aim-binder-driver" }
+aim-binder-host = { path = "../aim-binder-host" }
+aim-hostcall.workspace = true
+aim-service-aidl = { path = "aidl" }

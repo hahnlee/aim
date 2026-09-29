@@ -1,7 +1,7 @@
 //! `guest-init --image <derived-root> --data <writable-root> --dry-run|--run
 //! [--only svc1,svc2] [--exclude svc1,svc2] [--runtime DIR] [--linux-run PATH]
 //! [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]
-//! [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]`
+//! [--binder-trace FILE] [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]`
 //!
 //! Development entry point for aimd's init role. With `--run`, the data
 //! directory's persistent content lives in a case-sensitive disk image
@@ -18,7 +18,7 @@ fn usage() -> ! {
     eprintln!(
         "usage: guest-init --image DIR --data DIR (--dry-run | --run) [--only a,b] [--exclude a,b] [--runtime DIR]\n\
          \x20                 [--linux-run PATH] [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]\n\
-         \x20                 [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]"
+         \x20                 [--binder-trace FILE] [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]"
     );
     std::process::exit(2);
 }
@@ -46,6 +46,7 @@ fn main() {
     let mut linux_run = None;
     let (mut gpu, mut vulkan, mut display) = (None, None, None);
     let mut trace = false;
+    let mut binder_trace = None;
     let mut timeout = None;
     let mut androidboot = Vec::new();
     let mut quiet = false;
@@ -77,6 +78,7 @@ fn main() {
             "--vulkan" => vulkan = Some(PathBuf::from(value())),
             "--display" => display = Some(PathBuf::from(value())),
             "--trace" => trace = true,
+            "--binder-trace" => binder_trace = Some(PathBuf::from(value())),
             "--quiet" => quiet = true,
             "--timeout" => {
                 timeout = Some(Duration::from_secs_f64(
@@ -103,6 +105,7 @@ fn main() {
     options.vulkan = vulkan;
     options.display = display;
     options.trace = trace;
+    options.binder_trace = binder_trace;
     options.timeout = timeout;
     if !androidboot.is_empty() {
         options.androidboot = androidboot;

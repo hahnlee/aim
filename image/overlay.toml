@@ -445,6 +445,22 @@ path = "/vendor/etc/permissions/android.software.freeform_window_management.xml"
 source = "image/vendor/etc/permissions/android.software.freeform_window_management.xml"
 reason = "freeform windows: window mode shows each freeform task as a macOS window"
 
+# ADR 0013: system services implemented natively on the Mac. SystemServer
+# has no switch to leave a service out, so its services.jar is the
+# original with the start of each native service's original turned into
+# no-ops (the system-server node); guest-init reads the list to register
+# the native ones.
+
+[[replace]]
+path = "/system/framework/services.jar"
+source = "target/aim/system-server/services.jar"
+reason = "SystemServer does not start the services image/native-services lists (their startService calls are nops; nothing else changes), which native implementations replace (ADR 0013)"
+
+[[add]]
+path = "/system/etc/aim/native-services"
+source = "image/native-services"
+reason = "the system services implemented natively, which guest-init registers with servicemanager"
+
 [[add]]
 path = "/system_ext/bin/aim-windows"
 source = "target/aim/daemons/bin/aim-windows"

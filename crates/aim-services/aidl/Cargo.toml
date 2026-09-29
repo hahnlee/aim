@@ -1,0 +1,13 @@
+[package]
+license.workspace = true
+name = "aim-service-aidl"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The framework AIDL of the native system services (ADR 0013), generated at the pinned tag and checked against the image"
+
+[lib]
+path = "../../../target/aim/gen/service-aidl/lib.rs"
+
+[dependencies]
+aim-binder-host = { path = "../../aim-binder-host" }

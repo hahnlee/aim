@@ -10,6 +10,7 @@ use crate::log::Log;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -87,7 +88,7 @@ impl Source {
                 format!("{}/{}", self.revision, self.path)
             };
             let url = format!("{GITILES}/{}/+archive/{suffix}.tar.gz", self.project);
-            let downloaded = download(&url, &archive, log, |partial, log| {
+            let downloaded = gitiles(&url, &archive, log, |partial, log| {
                 log.run(Command::new("tar").arg("-tzf").arg(partial))
                     .is_ok()
             });
@@ -112,6 +113,12 @@ impl Source {
 
     /// Extracts the tree from a shallow, sparse git checkout.
     fn git_extract(&self, dest: &Path, log: &mut Log) -> Result<(), String> {
+        self.git_checkout(dest, &format!("/{}/", self.path), log)
+    }
+
+    /// Checks `pattern` (a sparse-checkout pattern for `self.path`) out of
+    /// a shallow, blob-less clone and moves `self.path` to `dest`.
+    fn git_checkout(&self, dest: &Path, pattern: &str, log: &mut Log) -> Result<(), String> {
         let work = dest.with_extension("git-work");
         let _ = fs::remove_dir_all(&work);
         fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -133,15 +140,7 @@ impl Source {
             ],
         )?;
         if !self.path.is_empty() {
-            git(
-                log,
-                &[
-                    "sparse-checkout",
-                    "set",
-                    "--no-cone",
-                    &format!("/{}/", self.path),
-                ],
-            )?;
+            git(log, &["sparse-checkout", "set", "--no-cone", pattern])?;
         }
         git(
             log,
@@ -171,7 +170,11 @@ impl Source {
                 self.project, self.revision, self.path
             );
             let encoded = dest.with_extension("base64");
-            download(&url, &encoded, log, |_, _| true)?;
+            if let Err(error) = gitiles(&url, &encoded, log, |_, _| true) {
+                log.line(&format!("{error}; fetching with git instead"));
+                self.git_checkout(&dest, &format!("/{}", self.path), log)?;
+                return self.check_file(&dest);
+            }
             let partial = dest.with_extension("partial");
             log.run(
                 Command::new("base64")
@@ -184,15 +187,42 @@ impl Source {
             fs::remove_file(&encoded).map_err(|e| e.to_string())?;
             fs::rename(&partial, &dest).map_err(|e| e.to_string())?;
         }
-        let got = hash::sha256_file(&dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+        self.check_file(&dest)
+    }
+
+    fn check_file(&self, dest: &Path) -> Result<PathBuf, String> {
+        let got = hash::sha256_file(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
         if got != self.sha256 {
             return Err(format!(
                 "sha256 mismatch: {}/{}: {got} (lock: {})",
                 self.project, self.path, self.sha256
             ));
         }
-        Ok(dest)
+        Ok(dest.to_path_buf())
     }
+}
+
+/// Set once gitiles has refused a download in this run: the rest go
+/// straight to git, rather than through every retry again.
+static GITILES_REFUSED: AtomicBool = AtomicBool::new(false);
+
+/// [`download`] from gitiles, unless it already refused one.
+fn gitiles(
+    url: &str,
+    dest: &Path,
+    log: &mut Log,
+    valid: impl Fn(&Path, &mut Log) -> bool,
+) -> Result<(), String> {
+    if GITILES_REFUSED.load(Ordering::Relaxed) {
+        return Err(format!(
+            "not fetching {url}: gitiles refused an earlier download"
+        ));
+    }
+    let result = download(url, dest, log, valid);
+    if result.is_err() {
+        GITILES_REFUSED.store(true, Ordering::Relaxed);
+    }
+    result
 }
 
 /// Downloads `url` to `dest`, retrying with a growing pause (gitiles

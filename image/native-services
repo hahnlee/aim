@@ -1,0 +1,7 @@
+# System services implemented natively on the Mac (ADR 0013,
+# docs/system-services.md): SystemServer does not start the original
+# class (the derived image's services.jar, `cargo aim build system-server`),
+# and guest-init registers the native service under the binder name.
+#
+# name       SystemServer class
+clipboard    com.android.server.clipboard.ClipboardService

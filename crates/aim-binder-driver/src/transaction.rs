@@ -7,7 +7,11 @@ use crate::host::{Errno, GuestProcess, errno};
 use crate::state::{
     BufferRecord, ErrorSlot, FdFixup, NodeId, ProcId, State, Tid, Txn, TxnId, Work,
 };
+use crate::trace::TraceRecord;
 use crate::uapi::*;
+
+/// How much of a traced transaction's data is read for its interface token.
+const TOKEN_BYTES: usize = 512;
 
 /// Why a transaction failed: the BR code for the sender and the errno kept
 /// in the extended error.
@@ -279,6 +283,10 @@ impl State {
             return Err(failure);
         }
 
+        if self.trace.is_some() && !reply {
+            self.trace_sent(proc, target_proc, id, tr, guest);
+        }
+
         let complete = if allocation.oneway_spam_suspect {
             Work::OnewaySpamSuspect
         } else {
@@ -296,6 +304,9 @@ impl State {
             self.pop_transaction(target_proc, target_tid, in_reply_to);
             self.enqueue_thread_work(target_proc, target_tid, Work::Transaction(id));
             self.procs.get_mut(&target_proc).unwrap().outstanding_txns += 1;
+            if let Some(trace) = &mut self.trace {
+                trace.replied(in_reply_to);
+            }
             self.free_transaction(in_reply_to);
         } else if !oneway {
             // Deferred: the sender returns to user space with the reply, not
@@ -320,6 +331,35 @@ impl State {
             }
         }
         Ok(())
+    }
+
+    /// Record a sent transaction with the interface token its data starts
+    /// with.
+    fn trace_sent(
+        &mut self,
+        proc: ProcId,
+        target_proc: ProcId,
+        id: TxnId,
+        tr: &TransactionData,
+        guest: &mut dyn GuestProcess,
+    ) {
+        let mut head = vec![0u8; (tr.data_size as usize).min(TOKEN_BYTES)];
+        if guest.copy_from_user(tr.buffer, &mut head).is_err() {
+            head.clear();
+        }
+        let from = &self.procs[&proc];
+        let record = TraceRecord {
+            at: Default::default(),
+            device: self.contexts[from.context].name.clone(),
+            from_pid: from.creds.pid,
+            from_euid: from.creds.euid,
+            to_pid: self.procs[&target_proc].creds.pid,
+            descriptor: crate::trace::descriptor(&head),
+            code: tr.code,
+            oneway: tr.flags & TF_ONE_WAY != 0,
+            latency: None,
+        };
+        self.trace.as_mut().unwrap().sent(id, record);
     }
 
     fn release_target_node(&mut self, node: Option<NodeId>) {
@@ -700,6 +740,9 @@ impl State {
         let Some(t) = self.txns.remove(&id) else {
             return;
         };
+        if let Some(trace) = &mut self.trace {
+            trace.dropped(id);
+        }
         if let Some(to) = t.to_proc {
             if let Some(p) = self.procs.get_mut(&to) {
                 p.outstanding_txns = p.outstanding_txns.saturating_sub(1);
