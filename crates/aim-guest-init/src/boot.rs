@@ -316,13 +316,16 @@ fn start_native_services(
 
 /// Trace every binder transaction into `file`, one tab-separated line
 /// each: microseconds since the trace started, device, sender pid and
-/// euid, target pid, interface token, code, `oneway` or `sync`, and a
-/// synchronous call's latency in nanoseconds (`-` without a reply).
+/// euid, target pid, interface token, code, `oneway` or `sync`; for a
+/// synchronous call the nanoseconds until the reply, until a target
+/// thread took it and until the sender took the reply (`-` for none); and
+/// the target's waiting and looper threads when it was sent.
 fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), String> {
     use std::io::Write;
     let mut out = std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?;
     let driver = server.driver().clone();
     driver.start_trace();
+    let nanos = |d: Option<Duration>| d.map_or("-".to_string(), |d| d.as_nanos().to_string());
     std::thread::Builder::new()
         .name("binder-trace".into())
         .spawn(move || {
@@ -331,7 +334,7 @@ fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), Stri
                 let mut text = String::new();
                 for r in driver.take_trace() {
                     text.push_str(&format!(
-                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                         r.at.as_micros(),
                         r.device,
                         r.from_pid,
@@ -340,8 +343,11 @@ fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), Stri
                         r.descriptor,
                         r.code,
                         if r.oneway { "oneway" } else { "sync" },
-                        r.latency
-                            .map_or("-".to_string(), |l| l.as_nanos().to_string()),
+                        nanos(r.latency),
+                        nanos(r.delivered),
+                        nanos(r.returned),
+                        r.waiting,
+                        r.loopers,
                     ));
                 }
                 if out.write_all(text.as_bytes()).is_err() {

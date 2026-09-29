@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Summarizes a binder trace (`guest-init --binder-trace FILE`,
 docs/system-services.md): per process, which services, interfaces and
-methods it called, how often, and the driver's p50/p99 latency.
+methods it called, how often, and the driver's p50/p99 latency; then,
+per service, where the synchronous calls' time went: the wake of a
+target thread (or the wait for a free one), the target's work, and the
+sender's wake with the reply.
 
 Method names come from the image itself: every AIDL Java stub
 (`<Interface>$Stub`) in the image's jars declares a `TRANSACTION_<method>`
@@ -122,14 +125,19 @@ def main():
 
     calls = collections.defaultdict(list)  # (pid, descriptor, code) -> latencies
     oneway = collections.Counter()
+    splits = collections.defaultdict(list)  # descriptor -> [(deliver, work, back, idle)]
     for line in open(args.trace, errors="replace"):
         f = line.rstrip("\n").split("\t")
-        if len(f) != 9 or (wanted and f[2] not in wanted):
+        if len(f) != 13 or (wanted and f[2] not in wanted):
             continue
         key = (f[2], f[5], int(f[6]))
         if f[7] == "oneway":
             oneway[key] += 1
         calls[key].append(int(f[8]) if f[8] != "-" else None)
+        if "-" not in f[8:11]:
+            replied, delivered, returned = int(f[8]), int(f[9]), int(f[10])
+            splits[f[5]].append((delivered, replied - delivered, returned - replied,
+                                 int(f[11]) > 0))
 
     def method(descriptor, code):
         if code in SPECIAL:
@@ -166,6 +174,28 @@ def main():
                 print(f"| {service} | {descriptor or '-'} | {method(descriptor, code)}{kind} "
                       f"| {len(lat)} | {p50} | {p99} |")
         print()
+
+    print("## Where the synchronous calls' time went (us)")
+    print()
+    print("| service | interface | calls | total p50 | p99 | wake/wait p50 | p99 "
+          "| no idle thread | work p50 | p99 | return p50 | p99 |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    rows = [(d, v) for d, v in splits.items()]
+    everything = [x for _, v in rows for x in v]
+    rows.append(("(all)", everything))
+    for descriptor, v in sorted(rows, key=lambda r: -len(r[1])):
+        if not v:
+            continue
+        us = lambda xs, p: f"{percentile(xs, p) / 1000:.0f}"
+        total = [a + b + c for a, b, c, _ in v]
+        deliver = [a for a, _, _, _ in v]
+        work = [b for _, b, _, _ in v]
+        back = [c for _, _, c, _ in v]
+        busy = sum(1 for *_, idle in v if not idle)
+        service = ", ".join(names.get(descriptor, [])) or "-"
+        print(f"| {service} | {descriptor or '-'} | {len(v)} | {us(total, 50)} | {us(total, 99)} "
+              f"| {us(deliver, 50)} | {us(deliver, 99)} | {100 * busy // len(v)} % "
+              f"| {us(work, 50)} | {us(work, 99)} | {us(back, 50)} | {us(back, 99)} |")
 
 
 if __name__ == "__main__":

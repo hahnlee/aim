@@ -1,11 +1,15 @@
 //! Transaction tracing: which process calls which interface and method,
-//! and how long a synchronous call takes in the driver
+//! and where a synchronous call's time goes in the driver
 //! (`guest-init --binder-trace`, docs/system-services.md).
 //!
-//! A call is timed from the driver taking the sender's `BC_TRANSACTION` to
-//! it taking the target's `BC_REPLY`: the target's wake, its work and its
-//! way back into the driver. The sender's own hops into and out of the
-//! driver are not part of it.
+//! A synchronous call is timed at four points: the driver taking the
+//! sender's `BC_TRANSACTION`, a target thread's read taking it
+//! (`BR_TRANSACTION`), the driver taking the target's `BC_REPLY`, and the
+//! sender's read taking the `BR_REPLY`. The first span is the wake of a
+//! waiting target thread, or the wait for one when none was free; the
+//! second is the target's work with its hops out of and back into the
+//! driver; the third is the sender's wake. The sender's own hops into and
+//! out of the driver are not part of it.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -13,7 +17,7 @@ use std::time::{Duration, Instant};
 use crate::state::TxnId;
 
 /// One transaction, as the driver saw it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TraceRecord {
     /// When the call was sent, since tracing started.
     pub at: Duration,
@@ -27,15 +31,27 @@ pub struct TraceRecord {
     pub descriptor: String,
     pub code: u32,
     pub oneway: bool,
-    /// Until the reply; `None` for one-way calls and calls that got no
-    /// reply (dead target, failed reply).
+    /// The target's threads waiting for process work when it was sent.
+    pub waiting: u32,
+    /// The target's looper threads (registered or entered) then.
+    pub loopers: u32,
+    /// Until a target thread's read took it; `None` for one-way calls and
+    /// calls never delivered.
+    pub delivered: Option<Duration>,
+    /// Until the target's reply; `None` for one-way calls and calls that
+    /// got no reply (dead target, failed reply).
     pub latency: Option<Duration>,
+    /// Until the sender's read took the reply.
+    pub returned: Option<Duration>,
 }
 
 #[derive(Default)]
 pub(crate) struct Trace {
     start: Option<Instant>,
+    /// Sent and not yet replied to, by transaction.
     pending: HashMap<TxnId, (Instant, TraceRecord)>,
+    /// Replied to and not yet read by the sender, by reply.
+    returning: HashMap<TxnId, (Instant, TraceRecord)>,
     done: Vec<TraceRecord>,
 }
 
@@ -58,17 +74,32 @@ impl Trace {
         }
     }
 
-    /// Transaction `id` was replied to.
-    pub fn replied(&mut self, id: TxnId) {
+    /// A target thread's read took transaction `id`.
+    pub fn delivered(&mut self, id: TxnId) {
+        if let Some((sent, record)) = self.pending.get_mut(&id) {
+            record.delivered = Some(sent.elapsed());
+        }
+    }
+
+    /// Transaction `id` was replied to with `reply`.
+    pub fn replied(&mut self, id: TxnId, reply: TxnId) {
         if let Some((sent, mut record)) = self.pending.remove(&id) {
             record.latency = Some(sent.elapsed());
+            self.returning.insert(reply, (sent, record));
+        }
+    }
+
+    /// The sender's read took `reply`.
+    pub fn returned(&mut self, reply: TxnId) {
+        if let Some((sent, mut record)) = self.returning.remove(&reply) {
+            record.returned = Some(sent.elapsed());
             self.done.push(record);
         }
     }
 
-    /// Transaction `id` is gone without a reply.
+    /// Transaction or reply `id` is gone.
     pub fn dropped(&mut self, id: TxnId) {
-        if let Some((_, record)) = self.pending.remove(&id) {
+        if let Some((_, record)) = self.pending.remove(&id).or(self.returning.remove(&id)) {
             self.done.push(record);
         }
     }
@@ -122,6 +153,34 @@ mod tests {
             data.extend_from_slice(&u.to_le_bytes());
         }
         data
+    }
+
+    #[test]
+    fn splits_a_call() {
+        let mut trace = Trace::new();
+        let record = TraceRecord {
+            code: 1,
+            ..TraceRecord::default()
+        };
+        trace.sent(1, record.clone());
+        trace.delivered(1);
+        trace.replied(1, 2);
+        assert!(trace.take().is_empty());
+        trace.returned(2);
+        let [r] = &trace.take()[..] else { panic!() };
+        let (d, l, b) = (r.delivered.unwrap(), r.latency.unwrap(), r.returned.unwrap());
+        assert!(d <= l && l <= b);
+
+        trace.sent(3, record.clone());
+        trace.dropped(3);
+        let [r] = &trace.take()[..] else { panic!() };
+        assert_eq!((r.delivered, r.latency), (None, None));
+
+        trace.sent(4, record);
+        trace.replied(4, 5);
+        trace.dropped(5);
+        let [r] = &trace.take()[..] else { panic!() };
+        assert!(r.latency.is_some() && r.returned.is_none());
     }
 
     #[test]

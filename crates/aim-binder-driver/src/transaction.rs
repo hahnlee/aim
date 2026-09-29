@@ -5,7 +5,8 @@
 use crate::alloc::align8;
 use crate::host::{Errno, GuestProcess, errno};
 use crate::state::{
-    BufferRecord, ErrorSlot, FdFixup, NodeId, ProcId, State, Tid, Txn, TxnId, Work,
+    BufferRecord, ErrorSlot, FdFixup, LOOPER_ENTERED, LOOPER_REGISTERED, NodeId, ProcId, State,
+    Tid, Txn, TxnId, Work,
 };
 use crate::trace::TraceRecord;
 use crate::uapi::*;
@@ -305,7 +306,7 @@ impl State {
             self.enqueue_thread_work(target_proc, target_tid, Work::Transaction(id));
             self.procs.get_mut(&target_proc).unwrap().outstanding_txns += 1;
             if let Some(trace) = &mut self.trace {
-                trace.replied(in_reply_to);
+                trace.replied(in_reply_to, id);
             }
             self.free_transaction(in_reply_to);
         } else if !oneway {
@@ -348,16 +349,22 @@ impl State {
             head.clear();
         }
         let from = &self.procs[&proc];
+        let to = &self.procs[&target_proc];
         let record = TraceRecord {
-            at: Default::default(),
             device: self.contexts[from.context].name.clone(),
             from_pid: from.creds.pid,
             from_euid: from.creds.euid,
-            to_pid: self.procs[&target_proc].creds.pid,
+            to_pid: to.creds.pid,
             descriptor: crate::trace::descriptor(&head),
             code: tr.code,
             oneway: tr.flags & TF_ONE_WAY != 0,
-            latency: None,
+            waiting: to.waiting_threads.len() as u32,
+            loopers: to
+                .threads
+                .values()
+                .filter(|t| t.looper & (LOOPER_REGISTERED | LOOPER_ENTERED) != 0)
+                .count() as u32,
+            ..TraceRecord::default()
         };
         self.trace.as_mut().unwrap().sent(id, record);
     }
