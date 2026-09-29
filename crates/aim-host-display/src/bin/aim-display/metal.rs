@@ -189,16 +189,36 @@ impl Fence {
 /// Present fences of drawables not shown yet, by drawable.
 static PRESENTED: Mutex<Vec<(usize, Fence)>> = Mutex::new(Vec::new());
 
+/// Count each of `drawables` for `fence` until it is shown, and `watch`
+/// it. Core Animation runs presented handlers under a lock of its own
+/// that adding one waits for, so `watch` runs without [`PRESENTED`] held:
+/// holding it deadlocked the server with the handler of an earlier
+/// present, and the present fence never signaled.
+fn expect_shown(fence: &Fence, drawables: &[Id], watch: impl Fn(Id)) {
+    {
+        let mut p = PRESENTED.lock().unwrap();
+        for &d in drawables {
+            fence.expect();
+            p.push((d as usize, fence.clone()));
+        }
+    }
+    for &d in drawables {
+        watch(d);
+    }
+}
+
+/// The fence waiting for `drawable` to be shown.
+fn take_shown(drawable: Id) -> Option<Fence> {
+    let mut p = PRESENTED.lock().unwrap();
+    p.iter()
+        .position(|(d, _)| *d == drawable as usize)
+        .map(|i| p.swap_remove(i).1)
+}
+
 /// A drawable's presented handler: count it shown for its present's fence,
 /// at the time it was shown (now, when it was dropped instead).
 extern "C" fn presented(_block: *const GlobalBlock, drawable: Id) {
-    let fence = {
-        let mut p = PRESENTED.lock().unwrap();
-        p.iter()
-            .position(|(d, _)| *d == drawable as usize)
-            .map(|i| p.swap_remove(i).1)
-    };
-    if let Some(f) = fence {
+    if let Some(f) = take_shown(drawable) {
         let shown = send!(drawable, c"presentedTime" => f64);
         f.shown(if shown > 0.0 {
             vsync::uptime_to_monotonic(shown)
@@ -326,12 +346,9 @@ impl Renderer {
             drawables.push(drawable);
         }
         if let Some(f) = fence {
-            let mut p = PRESENTED.lock().unwrap();
-            for &d in &drawables {
-                f.expect();
-                p.push((d as usize, f.clone()));
+            expect_shown(f, &drawables, |d| {
                 send!(d, c"addPresentedHandler:" => (), *const GlobalBlock = presented_block());
-            }
+            });
         }
         for &d in &drawables {
             send!(commands, c"presentDrawable:" => (), Id = d);
@@ -378,5 +395,29 @@ impl Renderer {
                 usize = MTL_PRIMITIVE_TYPE_TRIANGLE, usize = 0, usize = 3);
         }
         send!(encoder, c"endEncoding" => ());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsFd;
+
+    #[test]
+    fn a_presented_handler_may_run_while_one_is_added() {
+        let (file, writer) = aim_sync_file::pair().unwrap();
+        let fence = Fence::new(writer);
+        let drawables = [0x10 as Id, 0x20 as Id];
+        // As Core Animation: the handler runs on another thread while the
+        // present waits for it to add the next.
+        expect_shown(&fence, &drawables, |d| {
+            let d = d as usize;
+            std::thread::spawn(move || take_shown(d as Id).unwrap().shown(5))
+                .join()
+                .unwrap();
+        });
+        assert!(!aim_sync_file::wait(file.as_fd(), 0));
+        fence.done();
+        assert!(aim_sync_file::wait(file.as_fd(), 1000));
     }
 }
