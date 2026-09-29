@@ -482,9 +482,6 @@ fn drain_external() {
 /// first, so a sender racing with the scan sets it again.
 fn take(th: &Thread) -> Option<Taken> {
     th.sig.attn.store(0, SeqCst);
-    for (tid, sched) in super::procrec::take_changes() {
-        super::process::adopt(tid, sched);
-    }
     if th.qos_stale.swap(false, SeqCst) {
         super::process::apply_own_qos(th);
     }
@@ -783,12 +780,6 @@ unsafe fn host_signal(hsig: i32, si: &libc::siginfo_t, uc: *mut libc::c_void) ->
     // SAFETY: caller contract.
     let m = unsafe { sigframe::mcontext(uc) };
     let ctx = context::current_ctx();
-    if hsig == super::procrec::REQUEST {
-        if super::procrec::serve() {
-            thread::poke_main_from_handler(CARRIER);
-        }
-        return None;
-    }
     if hsig == CARRIER {
         if !ctx.is_null() {
             // SAFETY: this thread's context and interrupted state.
@@ -921,7 +912,6 @@ pub fn install_host_handlers() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         forward(CARRIER, 0);
-        forward(super::procrec::REQUEST, 0);
         for sig in 1..32 {
             let h = to_host(sig);
             if h != 0
