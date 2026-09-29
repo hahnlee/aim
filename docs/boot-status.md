@@ -72,7 +72,11 @@ load 2-3), before and after:
 | Cold start (`am start -W -S`): Settings, Calculator, Chrome | 0.97-1.01, 1.45-1.46, 1.06-1.14 s | 0.23, 0.31, 0.29-0.34 s |
 
 One of the two boots with the fix hit SurfaceFlinger's hung task
-snapshot (#436).
+snapshot (#436): the display server deadlocked adding a drawable's
+presented handler while Core Animation ran an earlier one, so a present
+fence never signaled and RenderEngine waited on it for ever. Fixed
+(docs/composer.md, "Buffers and presents"); 20 force-stops of a visible
+Settings in one boot then passed.
 
 ## Boot timeline (2026-09-29)
 

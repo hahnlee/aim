@@ -69,7 +69,8 @@ the composer's `linux-run`:
   again once the next present has been processed. The drawable's presented
   handler signals the present fence with `presentedTime` (converted to
   `CLOCK_MONOTONIC`), or the handler's time when Core Animation dropped the
-  frame.
+  frame. Core Animation runs these handlers under a lock that adding one
+  waits for, so the server adds them holding none of its own (#436).
 - **Display mode.** The window's content in backing pixels: by default the
   main screen's visible frame, `--size WxH` otherwise. In window mode
   (`--mode windows`) it is the main screen and a bar margin, and each task
