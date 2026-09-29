@@ -1,6 +1,6 @@
 # ADR 0012: Original Android userspace on a Linux syscall layer
 
-Status: accepted (target architecture; migration tracked in #153)
+Status: accepted (target architecture; migration tracked in #153). ADR 0013 moves the system services to native implementations; this ADR still governs the app process and every original not yet replaced.
 
 ## Context
 
