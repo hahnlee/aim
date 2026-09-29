@@ -362,9 +362,9 @@ source = "image/vendor/usr/idc/aim-keyboard.idc"
 reason = "the Mac's keyboard as the built-in keyboard"
 
 [[add]]
-path = "/vendor/usr/idc/aim-wheel.idc"
-source = "image/vendor/usr/idc/aim-wheel.idc"
-reason = "wheel and trackpad scrolling as a rotary encoder"
+path = "/vendor/usr/idc/aim-mouse.idc"
+source = "image/vendor/usr/idc/aim-mouse.idc"
+reason = "the Mac's pointer as an absolute mouse: hover, buttons, scrolling"
 
 # The emulator's vendor HALs. The goldfish/ranchu ones talk to QEMU (pipes,
 # virtio consoles, the emulator's host services) and the examples fake
@@ -449,6 +449,11 @@ reason = "freeform windows: window mode shows each freeform task as a macOS wind
 path = "/system_ext/bin/aim-windows"
 source = "target/aim/daemons/bin/aim-windows"
 reason = "the task bridge (Rust): ActivityTaskManager's tasks as the display server's windows, through the task listener and task calls"
+
+[[add]]
+path = "/system_ext/bin/aim-keyboard"
+source = "target/aim/daemons/bin/aim-keyboard"
+reason = "the built-in keyboard's layout as the Mac's (Rust): InputManager's layout override, run by init.aim.rc"
 
 [[add]]
 path = "/system_ext/etc/init/aim-windows.rc"

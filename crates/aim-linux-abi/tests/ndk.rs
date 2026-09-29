@@ -450,7 +450,7 @@ fn eventhub() {
     let g = Guest::new(&image, "t_eventhub");
     let prog = g.build(&clang, "t_eventhub");
     let idc = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../image/vendor/usr/idc");
-    for name in ["aim-touchscreen", "aim-keyboard", "aim-wheel"] {
+    for name in ["aim-touchscreen", "aim-keyboard", "aim-mouse"] {
         g.map(
             &format!("/vendor/usr/idc/{name}.idc"),
             &idc.join(format!("{name}.idc")),
@@ -466,7 +466,9 @@ fn eventhub() {
         // keyboard.builtIn, from its .idc; the image's key layout.
         "aim-keyboard (aka device 0 - built-in keyboard)\n      Classes: KEYBOARD | ALPHAKEY",
         "KeyLayoutFile: /system/usr/keylayout/Generic.kl",
-        "aim-wheel\n      Classes: ROTARY_ENCODER",
+        // A pointer device (touch.deviceType = pointer): its events are a
+        // mouse's.
+        "aim-mouse\n      Classes: TOUCH\n      Path: /dev/input/event2",
         // The sysfs root EventHub finds through /sys/dev/char.
         "SysfsDevicePath: /sys/devices/virtual\n",
         "key: device 0 code 48 value 1",

@@ -1,5 +1,5 @@
-//! The Mac's time zone, language and appearance, which the device follows
-//! (docs/mac-settings.md). guest-init reads them before init's first
+//! The Mac's time zone, language, appearance and keyboard layout, which
+//! the device follows (docs/mac-settings.md). guest-init reads them before init's first
 //! action and publishes them as `vendor.aim.mac.*` properties, and
 //! republishes the time zone and appearance when the Mac changes them.
 //! `init.aim.rc` applies the values through Android's own services, as a
@@ -14,6 +14,35 @@ pub const TIME_ZONE_PROP: &str = "vendor.aim.mac.time_zone";
 pub const LOCALE_PROP: &str = "vendor.aim.mac.locale";
 /// `yes` in Dark appearance, else `no` (`cmd uimode night`).
 pub const NIGHT_MODE_PROP: &str = "vendor.aim.mac.night_mode";
+/// The built-in keyboard's layout: an InputDevices layout's resource name
+/// (`aim-keyboard layout`).
+pub const KEYBOARD_LAYOUT_PROP: &str = "vendor.aim.mac.keyboard_layout";
+
+/// The Mac keyboard layouts (`com.apple.keylayout.*`) whose characters an
+/// InputDevices layout has, key for key on the unmodified and Shift levels.
+const KEYBOARD_LAYOUTS: &[(&str, &str)] = &[
+    ("Colemak", "keyboard_layout_english_us_colemak"),
+    ("DVORAK-QWERTYCMD", "keyboard_layout_english_us_dvorak"),
+    ("Dvorak", "keyboard_layout_english_us_dvorak"),
+    ("British-PC", "keyboard_layout_english_uk"),
+    ("French-PC", "keyboard_layout_french"),
+    ("German", "keyboard_layout_german"),
+    ("Russian", "keyboard_layout_russian_mac"),
+    ("RussianWin", "keyboard_layout_russian"),
+    ("USInternational-PC", "keyboard_layout_english_us_intl"),
+];
+
+/// The InputDevices layout for the Mac's keyboard layout `id`
+/// (`AppleCurrentKeyboardLayoutInputSourceID`). US English for the others:
+/// `ABC` and `US` are, and so is the Latin level of the input methods'
+/// layouts (`2SetHangul`), whose own characters are an input method's.
+pub fn keyboard_layout(id: &str) -> &'static str {
+    let name = id.strip_prefix("com.apple.keylayout.").unwrap_or_default();
+    KEYBOARD_LAYOUTS
+        .iter()
+        .find(|(mac, _)| *mac == name)
+        .map_or("keyboard_layout_english_us", |(_, android)| android)
+}
 
 /// The guest's tzdata: bionic and libcore resolve zone names in it.
 pub const TZDATA: &str = "/apex/com.android.tzdata/etc/tz/tzdata";
@@ -162,6 +191,15 @@ pub fn properties(tzdata: &[u8]) -> Vec<(&'static str, String)> {
         }
         let style = preference("AppleInterfaceStyle").and_then(|v| v.string());
         out.push((NIGHT_MODE_PROP, night_mode(style.as_deref()).to_string()));
+        let toolbox = cfstring(c"com.apple.HIToolbox");
+        CFPreferencesAppSynchronize(toolbox);
+        let layout = app_preference("AppleCurrentKeyboardLayoutInputSourceID", toolbox)
+            .and_then(|v| v.string());
+        CFRelease(toolbox);
+        out.push((
+            KEYBOARD_LAYOUT_PROP,
+            keyboard_layout(layout.as_deref().unwrap_or_default()).to_string(),
+        ));
     }
     out
 }
@@ -257,11 +295,18 @@ impl Cf {
 
 /// The global-domain value of `key`, as `defaults read -g` shows it.
 unsafe fn preference(key: &str) -> Option<Cf> {
+    // SAFETY: the any-application domain.
+    unsafe { app_preference(key, *kCFPreferencesAnyApplication()) }
+}
+
+/// Application `app`'s value of `key`, as `defaults read APP KEY` shows
+/// it.
+unsafe fn app_preference(key: &str, app: CFTypeRef) -> Option<Cf> {
     let key = std::ffi::CString::new(key).ok()?;
     // SAFETY: CF calls on a string this function creates and releases.
     unsafe {
         let key = cfstring(&key);
-        let value = CFPreferencesCopyAppValue(key, *kCFPreferencesAnyApplication());
+        let value = CFPreferencesCopyAppValue(key, app);
         CFRelease(key);
         (!value.is_null()).then(|| Cf(value))
     }
@@ -390,11 +435,35 @@ mod tests {
     }
 
     #[test]
+    fn mac_keyboard_layouts_as_android_layouts() {
+        let l = keyboard_layout;
+        assert_eq!(
+            l("com.apple.keylayout.Dvorak"),
+            "keyboard_layout_english_us_dvorak"
+        );
+        assert_eq!(
+            l("com.apple.keylayout.RussianWin"),
+            "keyboard_layout_russian"
+        );
+        assert_eq!(l("com.apple.keylayout.ABC"), "keyboard_layout_english_us");
+        assert_eq!(
+            l("com.apple.keylayout.2SetHangul"),
+            "keyboard_layout_english_us"
+        );
+        assert_eq!(l(""), "keyboard_layout_english_us");
+    }
+
+    #[test]
     fn reads_the_macs_settings() {
         // No tzdata: the zone is left out. The appearance is always named.
         let props = properties(&[]);
         assert!(!props.iter().any(|(n, _)| *n == TIME_ZONE_PROP));
         let night = props.iter().find(|(n, _)| *n == NIGHT_MODE_PROP).unwrap();
         assert!(night.1 == "yes" || night.1 == "no");
+        let layout = props
+            .iter()
+            .find(|(n, _)| *n == KEYBOARD_LAYOUT_PROP)
+            .unwrap();
+        assert!(layout.1.starts_with("keyboard_layout_"), "{}", layout.1);
     }
 }

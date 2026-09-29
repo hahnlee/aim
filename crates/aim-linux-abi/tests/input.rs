@@ -13,8 +13,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use aim_host_display::input::server::Devices;
-use aim_host_display::input::translate::{Input, Phase};
-use aim_host_display::input::{KEYBOARD, TOUCHSCREEN, WHEEL, device_dir, devices};
+use aim_host_display::input::translate::{Button, Input, Phase, Scroll};
+use aim_host_display::input::{KEYBOARD, MOUSE, TOUCHSCREEN, device_dir, devices};
 use aim_host_display::monotonic_ns;
 
 /// The extracted pinned image (the `image` node of `cargo aim`).
@@ -45,7 +45,7 @@ impl Server {
             dir,
             socket,
             cache,
-            input: Input::new(devs, 1080, 1920),
+            input: Input::new(devs, 1080, 1920, 254.0),
         }
     }
 
@@ -115,7 +115,7 @@ fn getevent_lists_devices_and_reads_window_input() {
 
     // Hold A and touch the middle of the window (a 540x960 point view of
     // the 1080x1920 display): -lp shows the key and the touch as state.
-    s.input.key(0x00, true, false, t());
+    s.input.key(0x00, true, false, 0, t());
     s.input
         .pointer(Phase::Down, 270.0, 480.0, 540.0, 960.0, t());
     let out = s.getevent(image, &["-l", "-p", "-i"]).output().unwrap();
@@ -139,8 +139,10 @@ fn getevent_lists_devices_and_reads_window_input() {
         "input props:\nINPUT_PROP_DIRECT",
         ": /dev/input/event1\nbus: 0006\nvendor 0000\nproduct 0000\nversion 0001\nname: \"aim-keyboard\"",
         "KEY_A*",
-        ": /dev/input/event2\nbus: 0006\nvendor 0000\nproduct 0000\nversion 0001\nname: \"aim-wheel\"",
-        "REL (0002): REL_WHEEL REL_WHEEL_HI_RES",
+        ": /dev/input/event2\nbus: 0006\nvendor 0000\nproduct 0000\nversion 0001\nname: \"aim-mouse\"",
+        "REL (0002): REL_HWHEEL REL_WHEEL REL_WHEEL_HI_RES REL_HWHEEL_HI_RES",
+        "ABS (0003): ABS_X : value 0, min 0, max 1079, fuzz 0, flat 0, resolution 10",
+        "input props:\nINPUT_PROP_POINTER",
     ] {
         assert!(lp.contains(want), "missing {want:?} in:\n{lp}");
     }
@@ -148,13 +150,13 @@ fn getevent_lists_devices_and_reads_window_input() {
 
     // Events, as the window reports them.
     let mut child = s
-        .getevent(image, &["-l", "-c", "23"])
+        .getevent(image, &["-l", "-c", "34"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let start = Instant::now();
-    while [TOUCHSCREEN, KEYBOARD, WHEEL]
+    while [TOUCHSCREEN, KEYBOARD, MOUSE]
         .iter()
         .any(|&i| s.input.devices().clients(i) == 0)
     {
@@ -171,12 +173,31 @@ fn getevent_lists_devices_and_reads_window_input() {
     // Out of the window: clamped to the edge.
     s.input.pointer(Phase::Drag, 600.0, -5.0, 540.0, 960.0, t());
     s.input.pointer(Phase::Up, 600.0, -5.0, 540.0, 960.0, t());
-    s.input.key(0x00, true, false, t());
-    s.input.key(0x00, true, true, t()); // AppKit's repeat: Android repeats
-    s.input.key(0x00, false, false, t());
+    s.input.key(0x00, true, false, 0, t());
+    s.input.key(0x00, true, true, 0, t()); // AppKit's repeat: Android repeats
+    s.input.key(0x00, false, false, 0, t());
     // Right Shift, as flagsChanged reports it.
     s.input.flags_changed(0x3c, (1 << 17) | 0x4, t());
-    s.input.scroll(1.0, false, t());
+    // The mouse: hover in the middle, a right click, a wheel line and a
+    // trackpad's 128 pixels to the left (content moving left: scrolling
+    // right).
+    s.input.hover(540.0, 960.0, t());
+    s.input.button(Button::Right, true, 540.0, 960.0, t());
+    s.input.button(Button::Right, false, 540.0, 960.0, t());
+    let at = Scroll {
+        x: 540.0,
+        y: 960.0,
+        ..Default::default()
+    };
+    s.input.scroll(Scroll { dy: 1.0, ..at }, t());
+    s.input.scroll(
+        Scroll {
+            dx: -128.0,
+            precise: true,
+            ..at
+        },
+        t(),
+    );
     let (ok, text) = wait(&mut child, Duration::from_secs(60));
     println!("{text}");
     assert!(ok, "{text}");
@@ -223,11 +244,40 @@ fn getevent_lists_devices_and_reads_window_input() {
     assert_eq!(
         of("event2"),
         [
+            "EV_KEY BTN_TOOL_MOUSE DOWN",
+            "EV_ABS ABS_X 0000021c",
+            "EV_ABS ABS_Y 000003c0",
+            "EV_SYN SYN_REPORT 00000000",
+            "EV_KEY BTN_RIGHT DOWN",
+            "EV_SYN SYN_REPORT 00000000",
+            "EV_KEY BTN_RIGHT UP",
+            "EV_SYN SYN_REPORT 00000000",
             "EV_REL REL_WHEEL 00000001",
             "EV_REL REL_WHEEL_HI_RES 00000078",
             "EV_SYN SYN_REPORT 00000000",
+            "EV_REL REL_HWHEEL 00000001",
+            "EV_REL REL_HWHEEL_HI_RES 00000078",
+            "EV_SYN SYN_REPORT 00000000",
         ]
     );
+}
+
+/// The nodes of a display server that died without removing them (its
+/// device directory is not locked) are removed when a client finds them.
+#[test]
+fn stale_nodes_are_removed() {
+    let Some(ref image) = image() else { return };
+    let s = Server::new("evstale");
+    let dir = device_dir(&s.socket);
+    s.input.close();
+    // What a SIGKILLed server leaves: a bound socket nobody listens on.
+    let stale = std::os::unix::net::UnixListener::bind(dir.join("event0")).unwrap();
+    drop(stale);
+    let out = s.getevent(image, &["-l", "-p"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    println!("{text}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!text.contains("event0"), "{text}");
+    assert!(!dir.join("event0").exists());
 }
 
 /// Devices that appear while getevent watches `/dev/input` (inotify) are

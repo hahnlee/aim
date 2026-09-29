@@ -108,6 +108,11 @@ in the background.
   RenderEngine (Skia on GLES, ANGLE on Metal) into the client target, and a
   present shows it. Device composition of layers (a Metal pass per layer)
   can come later without changing the protocol.
+- **The cursor** is the one layer left as it asked: a `CURSOR` layer (the
+  mouse pointer's sprite, [input.md](input.md)) stays `CURSOR`, the
+  display's hardware cursor, which is the Mac's own cursor over the
+  window. It is not drawn; `setCursorPosition` and its buffer are
+  accepted and unused.
 - **Fences.** The client target's acquire fence (RenderEngine's fence for
   its composition) goes to the display server with the present, and the
   present fence comes back (see "Buffers and presents"); SurfaceFlinger

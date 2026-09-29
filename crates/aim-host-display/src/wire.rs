@@ -27,7 +27,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use aim_hostcall::display::{Import, Window};
 
 /// Sent in the hello; the server closes a connection of another version.
-pub const VERSION: u64 = 3;
+pub const VERSION: u64 = 4;
 
 /// `id` = [`VERSION`], `flag` = display index.
 pub const OP_HELLO: u32 = 1;
@@ -68,25 +68,33 @@ pub mod host {
     pub const RESTACK: u32 = 9;
 }
 
-/// [`HostInput::kind`] values: `translate::Input`'s methods.
+/// [`HostInput::kind`] values: `translate::Input`'s methods. Positions
+/// (`x`, `y`) are display pixels; a gesture phase is 0 began, 1 changed,
+/// 2 ended.
 pub mod input {
     /// `touch`: `task`, `code` = phase (0 down, 1 drag, 2 up), `x`, `y`,
     /// `area`.
     pub const TOUCH: u32 = 1;
-    /// `key`: `code` = macOS virtual key, `down`.
+    /// `key`: `code` = macOS virtual key, `down` = 0 up, 1 down, 2 a
+    /// repeat, `flags` = `modifierFlags`.
     pub const KEY: u32 = 2;
-    /// `back_shortcut`: `code`, `down`, `flags` = 1 with Command.
-    pub const BACK_SHORTCUT: u32 = 3;
+    /// `hover`: `x`, `y`.
+    pub const HOVER: u32 = 3;
     /// `flags_changed`: `code`, `flags` = `modifierFlags`.
     pub const FLAGS: u32 = 4;
-    /// `scroll`: `y` = delta, `down` = precise.
+    /// `scroll`: `x`, `y`, `dx`, `dy`, `code` = 1 precise | 2 momentum,
+    /// `down` = the swipe's phase + 1 (0: none), `sx`, `sy` its motion.
     pub const SCROLL: u32 = 5;
-    /// `swipe`: `code` = gesture (0 began, 1 changed, 2 ended), `x`, `y`.
-    pub const SWIPE: u32 = 6;
-    /// `back`: `down`.
-    pub const BACK: u32 = 7;
+    /// `leave`.
+    pub const LEAVE: u32 = 6;
+    /// `button`: `code` = 0 right, 1 middle, 2 back, 3 forward, `down`,
+    /// `x`, `y`.
+    pub const BUTTON: u32 = 7;
     /// `release_all`.
     pub const RELEASE_ALL: u32 = 8;
+    /// `twist`: `code` = 0 magnify, 1 rotate, `down` = phase, `dx` = the
+    /// amount, `x`, `y`, `area`.
+    pub const TWIST: u32 = 9;
 }
 
 /// An input event a window host forwards.
@@ -102,6 +110,10 @@ pub struct HostInput {
     pub area: [i32; 4],
     pub flags: u64,
     pub time_ns: i64,
+    pub dx: f64,
+    pub dy: f64,
+    pub sx: f64,
+    pub sy: f64,
 }
 
 /// A record between the display server and a window host.

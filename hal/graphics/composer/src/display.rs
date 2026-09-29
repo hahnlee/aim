@@ -1,12 +1,16 @@
 //! The one display's state: its layers, what composition each asked for,
 //! and the client target buffers the host has.
 //!
-//! Composition is all client (GPU) composition: validation turns every
-//! layer into `CLIENT`, SurfaceFlinger renders them with RenderEngine into
-//! the client target, and a present shows that buffer. The display server
+//! Composition is client (GPU) composition: validation turns every layer
+//! into `CLIENT`, SurfaceFlinger renders them with RenderEngine into the
+//! client target, and a present shows that buffer. The display server
 //! waits for the client target's acquire fence, so a present does not; it
 //! returns the present fence, which signals once the frame is on screen
 //! (`docs/composer.md`).
+//!
+//! The one exception is the cursor: the display's hardware cursor is the
+//! Mac's own, which already shows where the pointer is, so a `CURSOR`
+//! layer (the pointer's sprite) stays one and is not drawn.
 
 use std::collections::HashMap;
 use std::os::fd::{AsFd, OwnedFd};
@@ -129,13 +133,13 @@ impl Display {
         Ok(())
     }
 
-    /// Every layer is composed by the client; the changes SurfaceFlinger
-    /// must accept.
+    /// Every layer but the cursor is composed by the client; the changes
+    /// SurfaceFlinger must accept.
     pub fn validate(&mut self) -> Vec<ChangedCompositionLayer> {
         self.changes = self
             .layers
             .iter()
-            .filter(|&(_, &c)| c != Composition::CLIENT)
+            .filter(|&(_, &c)| c != Composition::CLIENT && c != Composition::CURSOR)
             .map(|(&layer, _)| layer)
             .collect();
         self.changes.sort();

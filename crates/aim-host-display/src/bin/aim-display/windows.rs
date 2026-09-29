@@ -654,15 +654,33 @@ fn update_targets(changed: Option<i32>) {
     }
 }
 
-/// Window mode's handling of a pointer event in `view`; false when `view`
-/// is not a task window's.
-pub fn pointer(view: Id, phase: Phase, x: f64, y: f64, view_height: f64, t: i64) -> bool {
-    let Some(Some((task, px, py, area))) = with(|s| {
+/// Where view point (`x`, `y`) of `view` (`view_height` points tall) is,
+/// when `view` is a task window's: the task, the display pixel, the task's
+/// content and the display pixels per point.
+pub fn locate(
+    view: Id,
+    x: f64,
+    y: f64,
+    view_height: f64,
+) -> Option<(i32, f64, f64, [i32; 4], f64)> {
+    with(|s| {
         let (&task, tw) = s.tasks.iter().find(|(_, tw)| tw.view == view)?;
         let c = tw.content();
         let (px, py) = view_to_display(x, y, view_height, [c[0], c[1]], s.screen.scale);
-        Some((task, px, py, c))
-    }) else {
+        Some((task, px, py, c, s.screen.scale))
+    })
+    .flatten()
+}
+
+/// Whether `view` is a task window's.
+pub fn is_task_view(view: Id) -> bool {
+    with(|s| s.tasks.values().any(|tw| tw.view == view)) == Some(true)
+}
+
+/// Window mode's handling of a pointer event in `view`; false when `view`
+/// is not a task window's.
+pub fn pointer(view: Id, phase: Phase, x: f64, y: f64, view_height: f64, t: i64) -> bool {
+    let Some((task, px, py, area, _)) = locate(view, x, y, view_height) else {
         return false;
     };
     if crate::shim::is_host() {
@@ -671,6 +689,27 @@ pub fn pointer(view: Id, phase: Phase, x: f64, y: f64, view_height: f64, t: i64)
         touch(task, phase, px, py, area, t);
     }
     true
+}
+
+/// Cmd+Q in the server's task window `w`: its app quits, as a window
+/// host's does: every window of its package closes.
+pub fn quit_app(w: Id) {
+    let windows = with(|s| {
+        let (task, _) = s.tasks.iter().find(|(_, t)| t.window == w)?;
+        let package = s.infos.get(task)?.package.clone();
+        Some(
+            s.tasks
+                .iter()
+                .filter(|(t, _)| s.infos.get(t).is_some_and(|i| i.package == package))
+                .map(|(_, tw)| tw.window)
+                .collect::<Vec<_>>(),
+        )
+    })
+    .flatten()
+    .unwrap_or_default();
+    for w in windows {
+        send!(w, c"performClose:" => (), Id = std::ptr::null_mut());
+    }
 }
 
 /// A touch at display pixel (`x`, `y`) of `task`'s window `area` (in the

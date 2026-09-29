@@ -15,8 +15,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::codes::{EV_SYN, SYN_DROPPED, SYN_REPORT};
-use super::{Descriptor, Hello, OP_GRAB, OP_OPEN, Record, State, VERSION, record_bytes};
+use super::codes::{
+    ABS_CNT, ABS_MT_SLOT, EV_ABS, EV_CNT, EV_KEY, EV_SYN, KEY_MAX, KEY_RESERVED, SYN_DROPPED,
+    SYN_REPORT,
+};
+use super::{
+    AbsInfo, Descriptor, FLUSH, Hello, KeyEntry, MASK_SET, Mask, OP_DESCRIBE, OP_FLUSH, OP_GRAB,
+    OP_KEYCODE, OP_MASK, OP_OPEN, OP_SET_ABS, Record, Spec, State, VERSION, is_masked, mask_codes,
+    record_bytes, set_bit, test_bit,
+};
 use crate::wire;
 
 const EBUSY: i32 = 16;
@@ -28,19 +35,25 @@ struct Client {
     sock: OwnedFd,
     /// A packet was lost: send `SYN_DROPPED` first.
     dropped: AtomicBool,
+    /// Event masks by type (`EVIOCSMASK`); None passes every code.
+    masks: Mutex<Vec<Option<Mask>>>,
 }
 
 struct Inner {
+    /// Mutable: `EVIOCSABS` changes axes, `EVIOCSKEYCODE` the keys.
+    desc: Descriptor,
     state: State,
     /// Events since the last `SYN_REPORT`.
     pending: Vec<Record>,
     clients: Vec<Arc<Client>>,
     grab: Option<u64>,
     next_client: u64,
+    /// Scan code and key, in the keymap's order; empty: no keymap.
+    keymap: Vec<(u32, u16)>,
 }
 
 struct Device {
-    desc: Descriptor,
+    index: u32,
     inner: Mutex<Inner>,
 }
 
@@ -48,19 +61,94 @@ struct Device {
 pub struct Devices {
     dir: PathBuf,
     devices: Vec<Arc<Device>>,
+    /// The device directory, locked while the devices exist: a node in an
+    /// unlocked directory is stale (its server died without removing it).
+    lock: Mutex<Option<std::fs::File>>,
 }
 
-impl Device {
+impl Inner {
     /// Feed one event through the input core's rules; a `SYN_REPORT`
     /// sends the packet.
-    fn event(&self, inner: &mut Inner, r: Record, time_ns: i64) {
+    fn event(&mut self, r: Record, time_ns: i64) {
         if r.kind == EV_SYN && r.code == SYN_REPORT {
-            flush(inner, time_ns);
-        } else if r.kind != EV_SYN && self.desc.apply(&mut inner.state, &r) {
-            inner.pending.push(r);
+            flush(self, time_ns);
+        } else if r.kind != EV_SYN && self.desc.apply(&mut self.state, &r) {
+            self.pending.push(r);
         }
     }
 
+    fn client(&self, id: u64) -> Option<&Arc<Client>> {
+        self.clients.iter().find(|c| c.id == id)
+    }
+
+    /// `EVIOCSABS`: the axis's range and value, for every open file.
+    fn set_abs(&mut self, axis: u64, info: AbsInfo) -> i32 {
+        if !test_bit(&self.desc.bits.ev, EV_ABS) || axis as usize >= ABS_CNT {
+            return -EINVAL;
+        }
+        // The number of slots is fixed.
+        if axis as u16 == ABS_MT_SLOT {
+            return -EINVAL;
+        }
+        self.desc.absinfo[axis as usize] = info;
+        self.state.abs[axis as usize] = info.value;
+        0
+    }
+
+    /// The keymap position `e` names (`hidinput_locate_usage`).
+    fn locate(&self, e: &KeyEntry) -> Option<usize> {
+        if e.by_index != 0 {
+            return ((e.index as usize) < self.keymap.len()).then_some(e.index as usize);
+        }
+        self.keymap.iter().position(|&(sc, _)| sc == e.scancode)
+    }
+
+    /// `EVIOCGKEYCODE`/`EVIOCSKEYCODE` (`input_get_keycode`,
+    /// `input_set_keycode` with hid-input's keymap).
+    fn keycode(&mut self, e: &mut KeyEntry, set: bool, time_ns: i64) -> i32 {
+        if set && e.keycode > KEY_MAX as u32 {
+            return -EINVAL;
+        }
+        let Some(i) = self.locate(e) else {
+            return -EINVAL;
+        };
+        if !set {
+            (e.index, e.scancode, e.keycode) =
+                (i as u32, self.keymap[i].0, self.keymap[i].1 as u32);
+            return 0;
+        }
+        let old = std::mem::replace(&mut self.keymap[i].1, e.keycode as u16);
+        let keys = &mut self.desc.bits.key;
+        set_bit(keys, old, false);
+        set_bit(keys, e.keycode as u16, true);
+        if self.keymap.iter().any(|&(_, k)| k == old) {
+            set_bit(keys, old, true);
+        }
+        set_bit(keys, KEY_RESERVED, false);
+        // A key held down that the device no longer has goes up.
+        if !test_bit(&self.desc.bits.key, old) && test_bit(&self.state.key, old) {
+            set_bit(&mut self.state.key, old, false);
+            self.pending.push(Record {
+                time_ns,
+                kind: EV_KEY,
+                code: old,
+                value: 0,
+            });
+            flush(self, time_ns);
+        }
+        0
+    }
+
+    /// The key at scan code `scancode`.
+    fn key_of(&self, scancode: u32) -> Option<u16> {
+        self.keymap
+            .iter()
+            .find(|&&(sc, _)| sc == scancode)
+            .map(|&(_, k)| k)
+    }
+}
+
+impl Device {
     /// Serve one connection.
     fn serve(self: Arc<Self>, conn: UnixStream) {
         let _ = conn.set_read_timeout(Some(Duration::from_secs(5)));
@@ -70,11 +158,58 @@ impl Device {
         if hello.version != VERSION {
             return;
         }
+        let answer = |r: i32| (&conn).write_all(&r.to_ne_bytes());
         match hello.op {
             OP_OPEN => self.open(conn),
             OP_GRAB => {
-                let r = self.grab(hello.client, hello.arg != 0);
-                let _ = (&conn).write_all(&r.to_ne_bytes());
+                let _ = answer(self.grab(hello.client, hello.arg != 0));
+            }
+            OP_DESCRIBE => {
+                let inner = self.inner.lock().unwrap();
+                let desc = Descriptor {
+                    client: 0,
+                    state: inner.state,
+                    ..inner.desc
+                };
+                drop(inner);
+                let _ = wire::send(conn.as_fd(), wire::bytes(&desc), None);
+            }
+            OP_SET_ABS => {
+                if let Ok(Some(info)) = wire::recv_record::<AbsInfo>(conn.as_fd()) {
+                    let _ = answer(self.inner.lock().unwrap().set_abs(hello.arg, info));
+                }
+            }
+            OP_MASK => {
+                let kind = hello.arg as u32;
+                let set = if hello.arg & MASK_SET != 0 {
+                    match wire::recv_record::<Mask>(conn.as_fd()) {
+                        Ok(Some(m)) => Some(m),
+                        _ => return,
+                    }
+                } else {
+                    None
+                };
+                let (r, mask) = self.mask(hello.client, kind, set);
+                if answer(r).is_ok() {
+                    let _ = wire::send(conn.as_fd(), wire::bytes(&mask), None);
+                }
+            }
+            OP_KEYCODE => {
+                let Ok(Some(mut e)) = wire::recv_record::<KeyEntry>(conn.as_fd()) else {
+                    return;
+                };
+                let now = crate::monotonic_ns();
+                let r = self
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .keycode(&mut e, hello.arg != 0, now);
+                if answer(r).is_ok() {
+                    let _ = wire::send(conn.as_fd(), wire::bytes(&e), None);
+                }
+            }
+            OP_FLUSH => {
+                let _ = answer(self.flush_client(hello.client));
             }
             _ => {}
         }
@@ -95,7 +230,7 @@ impl Device {
             let desc = Descriptor {
                 client: id,
                 state: inner.state,
-                ..self.desc
+                ..inner.desc
             };
             if wire::send(conn.as_fd(), wire::bytes(&desc), None).is_err() {
                 return;
@@ -104,6 +239,7 @@ impl Device {
                 id,
                 sock: sock.into(),
                 dropped: AtomicBool::new(false),
+                masks: Mutex::new(vec![None; EV_CNT]),
             });
             inner.clients.push(client.clone());
             client
@@ -126,7 +262,7 @@ impl Device {
                 let now = crate::monotonic_ns();
                 let mut inner = self.inner.lock().unwrap();
                 for r in &buf[..whole] {
-                    self.event(&mut inner, *r, now);
+                    inner.event(*r, now);
                 }
                 drop(inner);
                 let used = whole * size_of::<Record>();
@@ -144,7 +280,7 @@ impl Device {
     /// `EVIOCGRAB` for client `id`, with the kernel's answers.
     fn grab(&self, id: u64, on: bool) -> i32 {
         let mut inner = self.inner.lock().unwrap();
-        if !inner.clients.iter().any(|c| c.id == id) {
+        if inner.client(id).is_none() {
             return -ENODEV;
         }
         match (on, inner.grab) {
@@ -158,6 +294,48 @@ impl Device {
                 0
             }
             (false, _) => -EINVAL,
+        }
+    }
+
+    /// `EVIOCGMASK` (`set` None) or `EVIOCSMASK` of type `kind` for client
+    /// `id`; the mask as it is after (`evdev_get_mask`: all set when none
+    /// was given). A type without codes to mask is accepted and ignored.
+    fn mask(&self, id: u64, kind: u32, set: Option<Mask>) -> (i32, Mask) {
+        let inner = self.inner.lock().unwrap();
+        let Some(c) = inner.client(id) else {
+            return (-ENODEV, Mask::default());
+        };
+        let mut masks = c.masks.lock().unwrap();
+        if mask_codes(kind) == 0 {
+            return (0, Mask([0xff; 96]));
+        }
+        if let Some(m) = set {
+            masks[kind as usize] = Some(m);
+        }
+        (0, masks[kind as usize].unwrap_or(Mask([0xff; 96])))
+    }
+
+    /// Drop what client `id` has queued: a [`FLUSH`] record ends it, and
+    /// `SYN_DROPPED` follows (`evdev_set_clk_type`).
+    fn flush_client(&self, id: u64) -> i32 {
+        let inner = self.inner.lock().unwrap();
+        let Some(c) = inner.client(id) else {
+            return -ENODEV;
+        };
+        let time_ns = crate::monotonic_ns();
+        let rec = |kind, code| Record {
+            time_ns,
+            kind,
+            code,
+            value: 0,
+        };
+        match wire::send(
+            c.sock.as_fd(),
+            record_bytes(&[rec(FLUSH, 0), rec(EV_SYN, SYN_DROPPED)]),
+            None,
+        ) {
+            Ok(()) => 0,
+            Err(_) => -ENODEV,
         }
     }
 }
@@ -194,10 +372,23 @@ fn flush(inner: &mut Inner, time_ns: i64) {
         } else {
             1
         };
-        send_packet(c, record_bytes(&packet[from..]));
+        let masks = c.masks.lock().unwrap();
+        if masks.iter().all(Option::is_none) {
+            send_packet(c, record_bytes(&packet[from..]));
+            continue;
+        }
+        // Masked events are not queued; a packet left empty is not sent
+        // (evdev drops an empty SYN_REPORT).
+        let passed: Vec<Record> = packet[from..]
+            .iter()
+            .filter(|r| !is_masked(&masks, r.kind, r.code))
+            .copied()
+            .collect();
+        if passed.iter().any(|r| r.kind != EV_SYN) {
+            send_packet(c, record_bytes(&passed));
+        }
     }
 }
-
 fn send_packet(c: &Client, data: &[u8]) {
     let fd = c.sock.as_raw_fd();
     // SAFETY: sends from our buffer on the client's socket.
@@ -218,38 +409,80 @@ fn send_packet(c: &Client, data: &[u8]) {
     }
 }
 
+/// Lock the device directory `dir`.
+fn lock_dir(dir: &Path, how: libc::c_int) -> io::Result<std::fs::File> {
+    let d = std::fs::File::open(dir)?;
+    // SAFETY: flock on the directory we just opened.
+    if unsafe { libc::flock(d.as_raw_fd(), how) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(d)
+}
+
+/// Remove the device nodes in `dir`.
+fn remove_nodes(dir: &Path) -> io::Result<()> {
+    for e in std::fs::read_dir(dir)?.flatten() {
+        if e.file_name().to_string_lossy().starts_with("event") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    Ok(())
+}
+
+/// Remove the nodes of a server that died without removing them: `dir`'s
+/// nodes if no server holds it. Returns whether they were stale.
+pub fn remove_stale(dir: &Path) -> bool {
+    match lock_dir(dir, libc::LOCK_EX | libc::LOCK_NB) {
+        Ok(_lock) => {
+            let _ = remove_nodes(dir);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 impl Devices {
     /// Create the devices in `dir` (created if needed; stale device sockets
     /// of an earlier server are removed). Each socket is bound and
     /// listening before it appears in `dir`, so a client that sees it can
-    /// open it.
-    pub fn create(dir: &Path, descriptors: Vec<Descriptor>) -> io::Result<Devices> {
+    /// open it. The directory stays locked while the devices exist.
+    pub fn create(dir: &Path, specs: Vec<Spec>) -> io::Result<Devices> {
         std::fs::create_dir_all(dir)?;
-        for e in std::fs::read_dir(dir)?.flatten() {
-            if e.file_name().to_string_lossy().starts_with("event") {
-                let _ = std::fs::remove_file(e.path());
+        // A client removing stale nodes holds the lock for a moment; a
+        // live server holds it for good.
+        let mut tries = 0;
+        let lock = loop {
+            match lock_dir(dir, libc::LOCK_EX | libc::LOCK_NB) {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock && tries < 40 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                r => break r?,
             }
-        }
+        };
+        remove_nodes(dir)?;
         let mut staging = dir.as_os_str().to_owned();
         staging.push(".new");
         let staging = PathBuf::from(staging);
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging)?;
         let mut devices = Vec::new();
-        for desc in descriptors {
+        for Spec { desc, keymap } in specs {
             let name = format!("event{}", desc.index);
             let listener = super::listen_in(&staging, &name)?;
             // Access is the guest's business (the syscall layer shows the
             // node as root:input 0660).
             std::fs::set_permissions(staging.join(&name), std::fs::Permissions::from_mode(0o666))?;
             let device = Arc::new(Device {
-                desc,
+                index: desc.index,
                 inner: Mutex::new(Inner {
+                    desc,
                     state: desc.state,
                     pending: Vec::new(),
                     clients: Vec::new(),
                     grab: None,
                     next_client: 1,
+                    keymap,
                 }),
             });
             let d = device.clone();
@@ -266,13 +499,41 @@ impl Devices {
         Ok(Devices {
             dir: dir.to_owned(),
             devices,
+            lock: Mutex::new(Some(lock)),
         })
+    }
+
+    fn device(&self, index: u32) -> Option<&Arc<Device>> {
+        self.devices.iter().find(|d| d.index == index)
+    }
+
+    /// Remap scan code `scancode` of device `index` to `key`, as
+    /// `EVIOCSKEYCODE` does; false if the device has no such scan code.
+    pub fn remap(&self, index: u32, scancode: u32, key: u16) -> bool {
+        let Some(d) = self.device(index) else {
+            return false;
+        };
+        let mut e = KeyEntry {
+            scancode,
+            keycode: key as u32,
+            ..Default::default()
+        };
+        d.inner
+            .lock()
+            .unwrap()
+            .keycode(&mut e, true, crate::monotonic_ns())
+            == 0
+    }
+
+    /// The key device `index` sends for scan code `scancode` (its keymap).
+    pub fn key_of(&self, index: u32, scancode: u32) -> Option<u16> {
+        self.device(index)?.inner.lock().unwrap().key_of(scancode)
     }
 
     /// Report `events` (type, code, value) of device `index` as one packet
     /// at `time_ns` (the guest's `CLOCK_MONOTONIC`).
     pub fn emit(&self, index: u32, time_ns: i64, events: &[(u16, u16, i32)]) {
-        let Some(d) = self.devices.iter().find(|d| d.desc.index == index) else {
+        let Some(d) = self.device(index) else {
             return;
         };
         let mut inner = d.inner.lock().unwrap();
@@ -283,29 +544,28 @@ impl Devices {
                 code,
                 value,
             };
-            d.event(&mut inner, r, time_ns);
+            inner.event(r, time_ns);
         }
         flush(&mut inner, time_ns);
     }
 
     /// How many clients have device `index` open.
     pub fn clients(&self, index: u32) -> usize {
-        self.devices
-            .iter()
-            .find(|d| d.desc.index == index)
+        self.device(index)
             .map_or(0, |d| d.inner.lock().unwrap().clients.len())
     }
 
-    /// The devices go away: their nodes disappear (hotplug) and their
-    /// clients see the end of their connection.
+    /// The devices go away: their nodes disappear (hotplug), their clients
+    /// see the end of their connection, and the directory is free.
     pub fn close(&self) {
         for d in &self.devices {
-            let _ = std::fs::remove_file(self.dir.join(format!("event{}", d.desc.index)));
+            let _ = std::fs::remove_file(self.dir.join(format!("event{}", d.index)));
             for c in &d.inner.lock().unwrap().clients {
                 // SAFETY: shutting down a client socket we own.
                 unsafe { libc::shutdown(c.sock.as_raw_fd(), libc::SHUT_RDWR) };
             }
         }
+        self.lock.lock().unwrap().take();
     }
 }
 
@@ -343,18 +603,200 @@ mod tests {
         v
     }
 
-    fn grab(dir: &Path, client: u64, on: bool) -> i32 {
-        let mut s = connect_in(dir, "event0").unwrap();
+    /// Control request `op` to device `index`, with `payload`; the answer.
+    fn control(
+        dir: &Path,
+        index: u32,
+        op: u32,
+        client: u64,
+        arg: u64,
+        payload: &[u8],
+    ) -> (i32, UnixStream) {
+        let mut s = connect_in(dir, &format!("event{index}")).unwrap();
         let hello = Hello {
             version: VERSION,
-            op: OP_GRAB,
+            op,
             client,
-            arg: on as u64,
+            arg,
         };
         wire::send(s.as_fd(), wire::bytes(&hello), None).unwrap();
+        if !payload.is_empty() {
+            wire::send(s.as_fd(), payload, None).unwrap();
+        }
         let mut r = [0u8; 4];
         s.read_exact(&mut r).unwrap();
-        i32::from_ne_bytes(r)
+        (i32::from_ne_bytes(r), s)
+    }
+
+    fn grab(dir: &Path, client: u64, on: bool) -> i32 {
+        control(dir, TOUCHSCREEN, OP_GRAB, client, on as u64, &[]).0
+    }
+
+    fn keycode(dir: &Path, e: KeyEntry, set: bool) -> (i32, KeyEntry) {
+        let (r, s) = control(dir, KEYBOARD, OP_KEYCODE, 0, set as u64, wire::bytes(&e));
+        let got = if r == 0 {
+            wire::recv_record::<KeyEntry>(s.as_fd()).unwrap().unwrap()
+        } else {
+            e
+        };
+        (r, got)
+    }
+
+    fn describe(dir: &Path, index: u32) -> Descriptor {
+        let s = connect_in(dir, &format!("event{index}")).unwrap();
+        let hello = Hello {
+            version: VERSION,
+            op: OP_DESCRIBE,
+            ..Default::default()
+        };
+        wire::send(s.as_fd(), wire::bytes(&hello), None).unwrap();
+        wire::recv_record::<Descriptor>(s.as_fd()).unwrap().unwrap()
+    }
+
+    #[test]
+    fn masks_axes_keymap_and_flush() {
+        let dir = std::env::temp_dir().join(format!("evdev-ctl-{}", std::process::id()));
+        let devs = Devices::create(&dir, devices(100, 200, 160.0, 160.0)).unwrap();
+        let (mut k, dk) = open(&dir, KEYBOARD);
+
+        // A mask passing KEY_A alone: KEY_B's packet is not sent at all.
+        let mut m = Mask::default();
+        set_bit(&mut m.0, 30, true);
+        let (r, s) = control(
+            &dir,
+            KEYBOARD,
+            OP_MASK,
+            dk.client,
+            MASK_SET | EV_KEY as u64,
+            wire::bytes(&m),
+        );
+        assert_eq!(r, 0);
+        assert_eq!(wire::recv_record::<Mask>(s.as_fd()).unwrap().unwrap(), m);
+        let (r, s) = control(&dir, KEYBOARD, OP_MASK, dk.client, EV_REL as u64, &[]);
+        assert_eq!(r, 0);
+        assert_eq!(
+            wire::recv_record::<Mask>(s.as_fd()).unwrap().unwrap(),
+            Mask([0xff; 96])
+        );
+        devs.emit(KEYBOARD, 1, &[(EV_KEY, 48, 1)]);
+        devs.emit(KEYBOARD, 2, &[(EV_KEY, 48, 0), (EV_KEY, 30, 1)]);
+        let got = read_records(&mut k, 2);
+        assert_eq!(
+            (got[0].code, got[0].value, got[1].code),
+            (30, 1, SYN_REPORT)
+        );
+        // The device's state has KEY_B's changes all the same.
+        devs.emit(KEYBOARD, 3, &[(EV_KEY, 48, 1)]);
+        assert!(test_bit(&describe(&dir, KEYBOARD).state.key, 48));
+
+        // The keymap: A's usage is KEY_A; remapped to KEY_Z it is Z, and
+        // KEY_A (held) goes up, as the device no longer has it.
+        let a = KeyEntry {
+            scancode: 0x0007_0004,
+            ..Default::default()
+        };
+        assert_eq!(keycode(&dir, a, false), (0, KeyEntry { keycode: 30, ..a }));
+        let by_index = KeyEntry {
+            by_index: 1,
+            index: 0,
+            ..Default::default()
+        };
+        assert_eq!(keycode(&dir, by_index, false).1.scancode, 0x0007_0004);
+        assert_eq!(
+            keycode(&dir, KeyEntry { scancode: 1, ..a }, false).0,
+            -EINVAL
+        );
+        assert_eq!(
+            keycode(
+                &dir,
+                KeyEntry {
+                    keycode: 0x300,
+                    ..a
+                },
+                true
+            )
+            .0,
+            -EINVAL
+        );
+        assert_eq!(keycode(&dir, KeyEntry { keycode: 44, ..a }, true).0, 0);
+        let got = read_records(&mut k, 2);
+        assert_eq!((got[0].code, got[0].value), (30, 0));
+        assert_eq!(devs.key_of(KEYBOARD, 0x0007_0004), Some(44));
+        let d = describe(&dir, KEYBOARD);
+        assert!(!test_bit(&d.bits.key, 30) && test_bit(&d.bits.key, 44));
+        assert_eq!(keycode(&dir, a, false).1.keycode, 44);
+        // The ISO keys, as the display server remaps them for an ISO
+        // keyboard.
+        for (usage, key) in keymap::ISO {
+            assert!(devs.remap(KEYBOARD, usage, key));
+        }
+        assert_eq!(devs.key_of(KEYBOARD, 0x0007_0064), Some(41));
+        assert_eq!(devs.key_of(KEYBOARD, 0x0007_0035), Some(86));
+        assert!(!devs.remap(KEYBOARD, 0x1234, 30));
+        // Devices without a keymap have none.
+        let (r, _) = control(&dir, TOUCHSCREEN, OP_KEYCODE, 0, 0, wire::bytes(&a));
+        assert_eq!(r, -EINVAL);
+
+        // An axis for every open file; the slot count cannot change.
+        let info = AbsInfo {
+            value: 7,
+            minimum: 0,
+            maximum: 49,
+            resolution: 3,
+            ..Default::default()
+        };
+        let (r, _) = control(&dir, MOUSE, OP_SET_ABS, 0, ABS_X as u64, wire::bytes(&info));
+        assert_eq!(r, 0);
+        let d = describe(&dir, MOUSE);
+        assert_eq!(
+            (
+                d.absinfo[ABS_X as usize].maximum,
+                d.state.abs[ABS_X as usize]
+            ),
+            (49, 7)
+        );
+        let (r, _) = control(
+            &dir,
+            TOUCHSCREEN,
+            OP_SET_ABS,
+            0,
+            ABS_MT_SLOT as u64,
+            wire::bytes(&info),
+        );
+        assert_eq!(r, -EINVAL);
+        let (r, _) = control(
+            &dir,
+            KEYBOARD,
+            OP_SET_ABS,
+            0,
+            ABS_X as u64,
+            wire::bytes(&info),
+        );
+        assert_eq!(r, -EINVAL);
+
+        // A flush: its record, then SYN_DROPPED.
+        let (r, _) = control(&dir, KEYBOARD, OP_FLUSH, dk.client, 0, &[]);
+        assert_eq!(r, 0);
+        let got = read_records(&mut k, 2);
+        assert_eq!(
+            (got[0].kind, got[1].kind, got[1].code),
+            (FLUSH, EV_SYN, SYN_DROPPED)
+        );
+
+        // A live server's nodes are not stale.
+        assert!(!remove_stale(&dir));
+        drop(devs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_nodes_go() {
+        let dir = std::env::temp_dir().join(format!("evdev-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("event0"), b"").unwrap();
+        assert!(remove_stale(&dir));
+        assert!(!dir.join("event0").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

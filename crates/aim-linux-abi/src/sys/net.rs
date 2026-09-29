@@ -334,6 +334,10 @@ pub fn adopt(fd: i32) {
         super::sync_file::adopt(fd);
         return;
     }
+    if l.l_linger == super::evdev::MARK {
+        super::evdev::adopt(fd);
+        return;
+    }
     let passcred = listed.as_ref().is_some_and(|l| l.2);
     let ty = match (l.l_linger, &listed) {
         (MARK_SEQPACKET, _) => SockType::SeqPacket,
