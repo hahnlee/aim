@@ -469,6 +469,12 @@ pub fn exit(a: [u64; 6]) -> ! {
     // _exit_with_stack_teardown) can run.
     super::run_deferred_unmaps();
     super::futex::exit_robust_list(th.robust_list.load(SeqCst), th.tid);
+    let main = th.tid == pid();
+    // Out of the table before a joiner wakes: its tid is gone for tgkill.
+    let left = with_table_mut(|t| {
+        t.remove(&th.tid);
+        t.len()
+    });
     let ctid = th.clear_child_tid.load(SeqCst);
     if ctid != 0 {
         // SAFETY: the guest tid word registered with CLONE_CHILD_CLEARTID or
@@ -476,11 +482,6 @@ pub fn exit(a: [u64; 6]) -> ! {
         unsafe { (ctid as *mut u32).write_volatile(0) };
         super::futex::wake_one(ctid);
     }
-    let main = th.tid == pid();
-    let left = with_table_mut(|t| {
-        t.remove(&th.tid);
-        t.len()
-    });
     if main {
         LEADER_EXIT.store(code, SeqCst);
     }
