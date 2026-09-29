@@ -617,7 +617,14 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   rescheduling a matching uid or CAP_SYS_NICE, reading another's limits
   (`prlimit`) matching ids or CAP_SYS_RESOURCE. Another process's limits
   and memory cannot be changed or read (EPERM): Darwin reaches them only
-  from inside the process.
+  from inside the process. What Linux reads or changes of another task
+  directly goes through the process's record (`sys/procrec.rs`): its
+  threads, their `comm` and scheduling, and its argument area, which it
+  copies on request. A scheduling change from another process is applied
+  by the target thread itself, as Darwin sets a thread's QoS only from
+  that thread; guest processes have the role of an application that may
+  draw UI, so the user-interactive QoS of display and real-time threads
+  takes effect.
 - **cgroup v2 and bpffs** are writable areas of the path map: the
   hierarchy holds the directories libprocessgroup creates, and no
   controller acts.
