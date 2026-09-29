@@ -1,6 +1,6 @@
 # ADR 0013: Android's system services as native macOS implementations
 
-Status: proposed (direction decided 2026-09-29; migration tracked in #153)
+Status: accepted 2026-09-29 (migration tracked in #153)
 
 ## Context
 
