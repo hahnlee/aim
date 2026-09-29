@@ -1,19 +1,28 @@
 # Working on AIM
 
-Read [ADR 0012](docs/adr/0012-original-android-userspace.md) before work, and
+Read [ADR 0012](docs/adr/0012-original-android-userspace.md) and
+[ADR 0013](docs/adr/0013-native-system-services.md) before work, and
 [docs/boot-status.md](docs/boot-status.md) for how far the image boots. Keep
 boot-status.md current with every boot-relevant change: replace superseded
 facts instead of appending a log.
 
 ## Principles
 
-- Run the original Android userspace unmodified. Implement only what lies
-  below it: Linux syscall semantics, the binder driver, host-call and the
-  HALs. A gap is closed there, never by patching or bypassing the guest.
-- Exceptions (a rebuild from AOSP source, a replaced daemon) must be minimal,
-  maintainable and explicit: a `replace` in `image/overlay.toml` with its
-  reason, and a note in ADR 0012. Reflection, name interception and by-name
-  special cases in the runtime are never acceptable.
+- An app's own process (ART, the boot classpath, bionic, its native
+  libraries) runs original and unmodified. Implement what lies below it:
+  Linux syscall semantics, the binder driver, host-call and the HALs. A gap
+  there is closed there, never by patching or bypassing the guest.
+- System services move, one at a time, from the original SystemServer to
+  native implementations backed by macOS (ADR 0013): a replacement
+  implements the service's AIDL at the pinned version with generated
+  transaction codes, registers under the original name, and replaces the
+  original only once it passes that service's CTS module and the app
+  checks. Until then the original runs.
+- Other exceptions (a rebuild from AOSP source, a replaced daemon, a
+  SystemServer change) must be minimal, maintainable and explicit: a
+  `replace` in `image/overlay.toml` with its reason, and a note in the ADR.
+  Reflection, name interception and by-name special cases in the runtime
+  are never acceptable.
 - Validate against Linux semantics (man pages, LTP-style tests), not against
   what one guest program happens to need. Port from FreeBSD's Linuxulator
   where useful and attribute it.
