@@ -136,6 +136,11 @@ pub fn openat(a: [u64; 6]) -> i64 {
     } else {
         hflags
     };
+    // An original ELF with a translation-cache entry is opened as the
+    // translated file, before the guest reads its headers.
+    if let Some(fd) = crate::xrt::open_translated(&r.host, &r.guest, hflags) {
+        return fd as i64;
+    }
     // SAFETY: host path from the resolver.
     let fd = unsafe { libc::open(r.host.as_ptr(), hflags, mode as libc::c_uint) };
     if fd < 0 {
@@ -144,8 +149,7 @@ pub fn openat(a: [u64; 6]) -> i64 {
     if creating {
         attrs::created(attrs::Host::Fd(fd), || r.guest.clone());
     }
-    // An original ELF with a translation-cache entry is replaced by the
-    // translated file here, before the guest reads its headers.
+    // Or it is replaced by the translated file here.
     crate::xrt::on_open(fd, &r.host, &r.guest, hflags);
     fd as i64
 }
