@@ -100,6 +100,17 @@ fn adopt_inherited() {
     }
 }
 
+/// execve in place: the kept fds this process holds as plain fds (a fork
+/// child's evdev fds, say) get their Linux state, as in a new process.
+pub fn adopt_plain() {
+    for fd in open_fds()
+        .into_iter()
+        .filter(|&fd| get(fd).is_none() && !is_hidden(fd))
+    {
+        adopt(fd);
+    }
+}
+
 /// The open fds of this process.
 pub fn open_fds() -> Vec<i32> {
     // SAFETY: sizing call, then a buffer of that size.

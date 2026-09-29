@@ -53,6 +53,14 @@ static DUMPABLE: AtomicU64 = AtomicU64::new(1);
 static TIMERSLACK: AtomicU64 = AtomicU64::new(50_000);
 static SECCOMP: AtomicU64 = AtomicU64::new(0);
 
+/// execve in place: the keep-capabilities flag clears and the process is
+/// dumpable again (Linux's `setup_new_exec` for a program that gains no
+/// privileges).
+pub(super) fn exec_reset() {
+    KEEPCAPS.store(0, Relaxed);
+    DUMPABLE.store(1, Relaxed);
+}
+
 /// Fork: what a child inherits (not the parent-death signal, which
 /// Linux clears).
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {

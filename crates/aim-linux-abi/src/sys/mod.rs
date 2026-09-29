@@ -332,8 +332,8 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         278 => misc::getrandom(a),
         aim_hostcall::SYSCALL_NR => crate::hostcall::call(a[0], a[1], a[2], a[3]),
         // process lifecycle
-        221 => exec::execve(a),
-        281 => exec::execveat(a),
+        221 => exec::execve(ctx, a),
+        281 => exec::execveat(ctx, a),
         95 => wait::waitid(a),
         260 => wait::wait4(a),
         424 => wait::pidfd_send_signal(a),

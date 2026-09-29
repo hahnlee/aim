@@ -198,6 +198,10 @@ rlimit	13	40	40
   - An entry written by the layer also carries saved ids (`suid`, `sgid`)
     that differ from the effective ones; the permission checks between
     processes (`kill`, `setpriority`, the scheduler calls) read them.
+  - After an `execve` in place (`sys/exec.rs`) the entry also carries the
+    new program's argv (`cmdline`, the NUL-terminated arguments in hex):
+    `/proc/<pid>/cmdline` and `comm` of another process read it, since
+    the host's argv still names the program the process started with.
   - It is also the guest's pid namespace: `/proc` lists the processes in
     it (and the reader), and `/proc/<pid>` of any other host process does
     not exist. Every call that names a process resolves it there (another

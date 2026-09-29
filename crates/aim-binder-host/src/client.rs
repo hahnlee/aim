@@ -62,6 +62,20 @@ fn with_thread<R>(f: impl FnOnce(&mut ThreadState) -> R) -> Result<R, Errno> {
     })
 }
 
+/// The calling thread after its process replaced its program in place
+/// (execve): its placeholder fds went with the old image (close-on-exec),
+/// and its thread ports serve files the process may no longer have.
+pub fn forget_thread() {
+    THREAD.with(|t| {
+        if let Some(t) = t.borrow_mut().as_mut() {
+            t.reserved.clear();
+            for (_, port) in t.threads.drain() {
+                mach::release_send(port);
+            }
+        }
+    });
+}
+
 fn call(t: &mut ThreadState, dest: Port, msg: &Msg) -> Result<mach::Received, Errno> {
     match mach::call(&mut t.buf, dest, t.reply, msg) {
         Ok(r) if r.id == wire::REPLY => Ok(r),

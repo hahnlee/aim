@@ -1,6 +1,6 @@
 //! Process identity and lifetime syscalls.
 
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 use std::sync::atomic::Ordering::SeqCst;
 
@@ -12,11 +12,18 @@ struct Exe {
     host: String,
 }
 
-static EXE: OnceLock<Exe> = OnceLock::new();
+static EXE: RwLock<Option<Exe>> = RwLock::new(None);
 
 /// Record the program being run, for `/proc/self/exe`.
 pub fn set_exe(guest: String, host: String) {
-    let _ = EXE.set(Exe { guest, host });
+    *EXE.write().unwrap_or_else(|e| e.into_inner()) = Some(Exe { guest, host });
+}
+
+fn exe<R>(f: impl FnOnce(&Exe) -> R) -> Option<R> {
+    EXE.read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(f)
 }
 
 /// Fork: the program, for `/proc/self/exe`.
@@ -31,11 +38,11 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
 }
 
 pub fn exe_guest_path() -> String {
-    EXE.get().map(|e| e.guest.clone()).unwrap_or_default()
+    exe(|e| e.guest.clone()).unwrap_or_default()
 }
 
 pub fn exe_host_path() -> String {
-    EXE.get().map(|e| e.host.clone()).unwrap_or_default()
+    exe(|e| e.host.clone()).unwrap_or_default()
 }
 
 pub fn getpid() -> i64 {

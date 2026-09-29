@@ -3,9 +3,27 @@
 //! The target is classified as Linux does (`binfmt_script`, then
 //! `binfmt_elf`): a `#!` script is rewritten into its interpreter's
 //! argument vector, an arm64 ELF is run, anything else (a Mach-O among
-//! them) is ENOEXEC. Running a program replaces the process image, so the
-//! layer re-executes `linux-run` itself with the program, the guest's argv
-//! and envp, and the state Linux keeps across exec:
+//! them) is ENOEXEC. Running a program replaces the process image.
+//!
+//! A process whose only guest thread execs, and which holds no host
+//! module state (GPU, audio, ...), replaces its image in place, as Linux's
+//! `begin_new_exec` does: CLOEXEC fds are closed, the guest range is
+//! unmapped with what the layer records about it, caught signals go back
+//! to their defaults and the alternate stack goes, the thread loses its
+//! clear_child_tid, robust list, `comm` and thread pointer, credentials
+//! take the exec transform, and the new program and its interpreter are
+//! loaded; the syscall returns into the interpreter's entry. What fails
+//! before that (the program or interpreter cannot be read) is returned to
+//! the caller; a load failure after it kills the process with SIGSEGV, as
+//! on Linux. Everything else stays: fds, the signal mask and pending
+//! signals, the working directory and mounts, the pid and credentials, and
+//! the layer's caches (path map, translation cache, attributes). The
+//! command line other processes read moves to the process's `by-pid`
+//! entry, since the host's argv keeps naming the program the process
+//! started with.
+//!
+//! Otherwise the layer re-executes `linux-run` itself with the program, the
+//! guest's argv and envp, and the state Linux keeps across exec:
 //!
 //! - open fds without O_CLOEXEC: guest fds are host fds, and Darwin's exec
 //!   keeps exactly those;
@@ -21,6 +39,7 @@ use std::ffi::{CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::OnceLock;
 
+use crate::context::{self, GuestContext};
 use crate::errno::{self, EACCES, EFAULT, EINVAL, ELOOP, ENOENT, ENOEXEC};
 use crate::sys::guest_cstr;
 use crate::vfs::{self, LINUX_AT_FDCWD};
@@ -32,6 +51,7 @@ const BINPRM_BUF_SIZE: usize = 256;
 /// Linux allows this many interpreter levels (`binfmt_script` nesting).
 const MAX_INTERP_DEPTH: usize = 4;
 const EM_AARCH64: u16 = 183;
+const SIGSEGV: i32 = 11;
 
 struct Launch {
     exe: CString,
@@ -220,15 +240,15 @@ fn classify(host: &CStr) -> Result<Kind, i64> {
     }
 }
 
-pub fn execve(a: [u64; 6]) -> i64 {
-    exec(LINUX_AT_FDCWD, a[0], a[1], a[2], 0)
+pub fn execve(ctx: &mut GuestContext, a: [u64; 6]) -> i64 {
+    exec(ctx, LINUX_AT_FDCWD, a[0], a[1], a[2], 0)
 }
 
-pub fn execveat(a: [u64; 6]) -> i64 {
-    exec(a[0] as i32, a[1], a[2], a[3], a[4])
+pub fn execveat(ctx: &mut GuestContext, a: [u64; 6]) -> i64 {
+    exec(ctx, a[0] as i32, a[1], a[2], a[3], a[4])
 }
 
-fn exec(dirfd: i32, path: u64, argv: u64, envp: u64, flags: u64) -> i64 {
+fn exec(ctx: &mut GuestContext, dirfd: i32, path: u64, argv: u64, envp: u64, flags: u64) -> i64 {
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return -(EINVAL as i64);
     }
@@ -266,8 +286,73 @@ fn exec(dirfd: i32, path: u64, argv: u64, envp: u64, flags: u64) -> i64 {
         Err(e) => return e,
     };
     match interpret(target, &filename, argv) {
-        Ok((target, argv)) => relaunch(&target.guest, &argv, &envp, &filename),
+        Ok((target, argv)) => in_place(ctx, &target, &argv, &envp, &filename)
+            .unwrap_or_else(|| relaunch(&target.guest, &argv, &envp, &filename)),
         Err(e) => e,
+    }
+}
+
+/// Replace the image in place (see the module docs); None when the process
+/// cannot, and execs anew.
+fn in_place(
+    ctx: &mut GuestContext,
+    target: &vfs::Resolved,
+    argv: &[CString],
+    envp: &[CString],
+    execfn: &[u8],
+) -> Option<i64> {
+    if !context::is_live(ctx)
+        || !super::thread::alone()
+        || crate::hostcall::used()
+        || super::memfd::has_exec_copies()
+        || super::ptimer::any()
+    {
+        return None;
+    }
+    // What Linux checks before the point of no return: the interpreter.
+    let interp = crate::loader::interpreter(&target.host).ok()?;
+    if let Some(i) = interp {
+        let r = match vfs::resolve(LINUX_AT_FDCWD, i.as_bytes(), true) {
+            Ok(r) => r,
+            Err(e) => return Some(-(e as i64)),
+        };
+        if let Err(e) = classify(&r.host) {
+            return Some(e);
+        }
+    }
+    let argv: Vec<Vec<u8>> = argv.iter().map(|a| a.as_bytes().to_vec()).collect();
+    let envp: Vec<Vec<u8>> = envp.iter().map(|e| e.as_bytes().to_vec()).collect();
+    super::fork::spawn::wait_handovers();
+    super::fs::close_on_exec();
+    super::fdtab::adopt_plain();
+    super::binder::exec_reset();
+    super::mem::exec_reset();
+    crate::diag::exec_reset();
+    crate::patch::exec_reset();
+    super::signal::exec_reset();
+    super::thread::exec_reset();
+    super::misc::exec_reset();
+    super::cred::exec(
+        argv.iter()
+            .flat_map(|a| a.iter().copied().chain([0]))
+            .collect(),
+    );
+    match crate::load_program(target, &argv, &envp, execfn) {
+        Ok((entry, sp)) => {
+            ctx.x = [0; 31];
+            ctx.v = [0; 32];
+            ctx.sp = sp;
+            ctx.pc = entry;
+            ctx.stub_ret = 0;
+            ctx.nzcv = 0;
+            ctx.fpcr = 0;
+            ctx.fpsr = 0;
+            Some(0)
+        }
+        Err(e) => {
+            crate::diag!("[linux-abi] execve {}: {e}", target.guest);
+            super::signal::die(SIGSEGV)
+        }
     }
 }
 

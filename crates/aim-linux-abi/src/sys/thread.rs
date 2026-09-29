@@ -561,6 +561,26 @@ pub fn get_robust_list(a: [u64; 6]) -> i64 {
     0
 }
 
+/// Whether the calling thread is the process's only guest thread, its
+/// main thread.
+pub fn alone() -> bool {
+    with_table(|t| t.len() == 1) && current().is_some_and(|th| th.tid == pid())
+}
+
+/// execve in place, on the process's only thread: no clear_child_tid or
+/// robust list, the `comm` of a new process, no thread pointer and an
+/// empty shadow call stack.
+pub(super) fn exec_reset() {
+    let th = current().expect("exec from a thread without a guest context");
+    th.clear_child_tid.store(0, SeqCst);
+    th.robust_list.store(0, SeqCst);
+    *th.name.lock().unwrap_or_else(|e| e.into_inner()) = [0; 16];
+    context::set_guest_tp(0);
+    if let Some(st) = th.stacks.lock().unwrap().as_ref() {
+        context::set_guest_scs(st.scs());
+    }
+}
+
 // ---- fork -------------------------------------------------------------------------
 
 /// Fork: the forking thread's name and scheduling attributes, which the

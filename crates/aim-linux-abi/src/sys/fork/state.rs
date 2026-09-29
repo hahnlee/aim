@@ -207,7 +207,11 @@ pub fn restore(r: &mut Reader) -> bool {
     sync_file::fork_restore(r);
     signal::fork_restore(r);
     thread::fork_restore(r);
-    aim_host_gpu::restore_fork_state(&r.bytes());
+    let gpu = r.bytes();
+    if gpu != aim_host_gpu::fork_state() {
+        crate::hostcall::mark_used();
+    }
+    aim_host_gpu::restore_fork_state(&gpu);
     if !r.intact() {
         return false;
     }

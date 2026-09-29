@@ -32,6 +32,11 @@ pub fn shared_files() -> Vec<aim_binder_host::wire::SharedFile> {
         .unwrap_or_default()
 }
 
+/// execve in place: the calling thread's client state is the old image's.
+pub fn exec_reset() {
+    aim_binder_host::client::forget_thread();
+}
+
 /// Connect to the daemon serving bootstrap name `name`.
 pub fn init(name: &str) -> Result<(), String> {
     let client =

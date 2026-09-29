@@ -412,6 +412,16 @@ pub fn mmap(a: [u64; 6]) -> i64 {
     base as i64
 }
 
+/// execve in place: the old image's memory goes, the whole guest range,
+/// with what is recorded about it; the heap window is reserved again.
+pub fn exec_reset() {
+    // SAFETY: nothing of the old image is used from here on.
+    unsafe { mach_vm_deallocate(task(), arena::LO, arena::HI - arena::LO) };
+    window::init();
+    copies::forget(arena::LO, arena::HI);
+    DEFERRED_UNMAPS.with(|d| d.borrow_mut().clear());
+}
+
 /// Record that `[base, base+len)` holds a copy of `fd` from `off`.
 fn note_file_copy(base: u64, len: u64, fd: i32, off: u64) {
     let mut buf = [0u8; libc::PATH_MAX as usize];

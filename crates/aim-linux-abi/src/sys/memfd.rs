@@ -612,6 +612,12 @@ pub fn rw(fd: i32, buf: u64, len: usize, pos: Option<i64>, write: bool) -> Optio
     Some(n as i64)
 }
 
+/// Whether a memfd's contents moved to this process's memory (mapped
+/// executable), which an exec in place would lose.
+pub fn has_exec_copies() -> bool {
+    with(|m| m.values().any(|f| f.anon.is_some()))
+}
+
 /// Fork: the memfds this process knows, with their executable-mode
 /// memory (shared with the child, as the file is).
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {

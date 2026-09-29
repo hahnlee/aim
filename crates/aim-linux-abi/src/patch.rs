@@ -259,6 +259,18 @@ fn new_island(hint: u64) -> Option<Island> {
     }
 }
 
+/// execve in place: the islands went with the old image's memory; their
+/// writable views are host memory, released here.
+pub(crate) fn exec_reset() {
+    for isl in ISLANDS.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+        // SAFETY: the island's own mappings, which nothing uses any more.
+        unsafe {
+            libc::munmap(isl.rw as *mut _, ISLAND_SIZE as usize);
+            libc::munmap(isl.rx as *mut _, ISLAND_SIZE as usize);
+        }
+    }
+}
+
 /// Fork: the islands. The child gets a copy of each executable view with
 /// the guest's memory; its writable view is host memory, which it makes
 /// anew from that copy.
