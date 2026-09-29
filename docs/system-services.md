@@ -69,14 +69,18 @@ every step: replace superseded facts instead of appending a log.
 **Method.** guest-init `--binder-trace FILE` makes the binder driver
 record every transaction: sender pid and euid, target pid, the interface
 token at the start of the data, code, one-way or not, and for a
-synchronous call the time from the driver taking `BC_TRANSACTION` to it
-taking the target's `BC_REPLY` (the target's wake, its work and its way
-back into the driver; not the caller's own hops). On a booted device, each
+synchronous call three spans: until a target thread's read takes it (the
+wake of a free thread, or the wait for one), until the driver takes the
+target's `BC_REPLY` (its work), and until the sender's read takes the
+reply; plus the target's free threads, the sending thread and the
+serving thread. On a booted device, each
 app was cold-started with `am force-stop; am start -W -S`, left 6 s, and
 its pid taken from ActivityManager's `Start proc` line.
 `tools/binder-trace-report.py` names services (from `service list`) and
 methods (from the `TRANSACTION_*` constants of every stub in the image's
-jars). `cargo aim boot -- --binder-trace FILE` records one.
+jars), splits each service's time into wake, work, the serving thread's
+own nested calls and return, and lists the slowest calls. `cargo aim
+boot -- --binder-trace FILE` records one.
 
 **Cold starts on the original stack** (2026-09-29, first boot of a reused
 data image, M2 Pro, load average about 20):
@@ -117,7 +121,8 @@ What stands out:
 - Settings reads package and app-op state heavily (83 `package`, 27
   `appops` calls); every app reads the settings provider.
 - servicemanager is slow: `isDeclared` 95-117 ms, `updatableViaApex`
-  110 ms, `checkService2` 4 ms at p50 (#435).
+  110 ms, `checkService2` 4 ms at p50 (#435; why: "Where a cold start's
+  binder time goes").
 - Calculator reads the clipboard at start (`addPrimaryClipChangedListener`,
   `getPrimaryClip`), Chrome registers a listener.
 
@@ -137,6 +142,54 @@ ADR 0013's target: p50 < 20 us, p99 < 200 us per call.
 
 A binder hop itself costs 6.5 us (docs/binder-driver.md); what the
 table shows is the servers' work, under load, and system_server's Java.
+
+### Where a cold start's binder time goes
+
+Measured 2026-09-30 on a settled boot (the second boot of a data
+directory, 5 min after `sys.boot_completed`, each app started once
+before, host load about 3.6, guest at nice 0; M2 Pro, 16 GB). TotalTime
+of `am start -W -S`: Chrome 756 ms, Settings 754 ms, Calculator 1,134 ms.
+
+| Span of a synchronous call (all 796 of the three starts) | p50 | p99 |
+| --- | --- | --- |
+| Wake of a free server thread | 8 us | 332 us |
+| The server's work | 583 us | 24.5 ms |
+| Of that, the serving thread's own binder calls | 0 | 6.1 ms |
+| Return to the sender | 7 us | 132 us |
+
+- **The transport is not the cost.** No call waited for a busy server
+  (every server had a free thread); wake and return are 7-9 us. What is
+  slow is the servers' work, and it is rarely nested binder calls: of the
+  20 slowest calls (12-53 ms) only the settings provider's `call` spends
+  most of its time in calls of its own. Trivial Java methods take
+  milliseconds: `IUserManager.getUserPropertiesCopy` 12.7 ms,
+  `getProfileParent` 12.5 ms, `INotificationManager.getNotificationChannels`
+  47 ms, `IActivityManager.setProcessStateSummary` up to 24 ms.
+- **The servers run in the kernel.** During one start system_server
+  uses 0.07 s user and 0.3-0.4 s total CPU (35-58 K page faults) and
+  SurfaceFlinger 0.1 s user and 1-2 s total (130-245 K faults); seven
+  minutes after boot all guest processes together have 60 s user and
+  1,565 s total CPU. `sample` of a busy server shows its time on libc's
+  malloc/free path (scudo's mutex, the outline atomics, the TLS stubs),
+  and those instructions take page faults: a `free(malloc(64))` loop
+  takes no fault in a quiet guest but 0.4-1.5 per iteration while an app
+  starts, because hot text pages of libraries every guest process maps
+  (libc, libc++, libbase, ...) keep losing their mappings (#444).
+- **servicemanager** (#435) answers `isDeclared`, `getService2` and
+  `updatableViaApex` for the graphics allocator in 20-53 ms each during a
+  start: 163 ms of Calculator's 318 ms of synchronous binder time. Its
+  work is libvintf walking the manifests (malloc/free of many small
+  strings), 80-150 us back to back, 1.3-4 ms after 300 ms of idle (50-200
+  faults per call), and 0.3-1 s right after boot, when com.android.phone
+  restarts after each startup ANR (#241) and asks for the radio HALs every
+  0.4 s. Not VINTF re-reads (the cache holds), file access or the driver.
+  Its "no idle thread" was the trace counting only threads waiting in a
+  read; an epoll looper's idle poll-mode thread now counts as free.
+- system_server: 99.9 % of its threads' samples wait in the kernel
+  (kevent, ulock, mach_msg); what it runs is the same malloc/free path.
+  In three of four runs a CLOSE transition's task snapshot hung in
+  SurfaceFlinger (RenderEngine waiting on a fence) and the watchdog
+  killed system_server (#436).
 
 ## Internal dependencies of leaf candidates
 
