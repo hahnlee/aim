@@ -41,6 +41,7 @@ mod pidns;
 mod poll;
 mod process;
 mod procfs;
+mod procrec;
 mod pstate;
 mod ptimer;
 mod selinuxfs;

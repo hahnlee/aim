@@ -272,6 +272,14 @@ fn signals_and_priorities_need_permission() {
     check("permissions");
 }
 
+/// Another process's /proc entries (its threads, rewritten argv, names,
+/// owner and credentials) and its threads' scheduling set from outside, as
+/// Linux reports them.
+#[test]
+fn other_processes_through_proc_and_scheduling() {
+    check("peers");
+}
+
 #[test]
 fn identity_files_inherited_env_and_fds_reach_the_guest() {
     let Some(root) = root() else { return };

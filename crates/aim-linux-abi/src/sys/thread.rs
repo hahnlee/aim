@@ -13,7 +13,9 @@
 //! aimd owns the pid space (ADR 0012, section 7) it assigns them.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst,
+};
 use std::sync::{Arc, Mutex};
 
 use super::park::Parker;
@@ -83,6 +85,9 @@ pub struct Thread {
     /// `comm`, as PR_SET_NAME sets it.
     pub name: Mutex<[u8; 16]>,
     pub sched: Sched,
+    /// Another thread changed this one's scheduling: its host QoS is to
+    /// follow (`process::apply_own_qos`).
+    pub qos_stale: AtomicBool,
     stacks: Mutex<Option<HostStacks>>,
 }
 
@@ -108,7 +113,17 @@ impl Thread {
                 policy: AtomicI32::new(0),
                 priority: AtomicI32::new(0),
             },
+            qos_stale: AtomicBool::new(false),
             stacks: Mutex::new(None),
+        }
+    }
+
+    /// Its scheduling, with its nice value.
+    pub fn sched_now(&self) -> super::procrec::Sched {
+        super::procrec::Sched {
+            policy: self.sched.policy.load(SeqCst),
+            priority: self.sched.priority.load(SeqCst),
+            nice: super::cred::thread_nice(self.tid),
         }
     }
 
@@ -200,6 +215,7 @@ pub fn gettid() -> i64 {
 pub fn set_name(name: [u8; 16]) {
     if let Some(t) = current() {
         *t.name.lock().unwrap_or_else(|e| e.into_inner()) = name;
+        super::procrec::set_name(t.tid, &name);
     }
 }
 
@@ -216,6 +232,7 @@ pub fn set_name_of(tid: i32, name: [u8; 16]) -> bool {
         return false;
     };
     *t.name.lock().unwrap_or_else(|e| e.into_inner()) = name;
+    super::procrec::set_name(tid, &name);
     if is_current(&t) {
         let len = name.iter().position(|&b| b == 0).unwrap_or(15);
         if let Ok(c) = std::ffi::CString::new(&name[..len]) {
@@ -233,6 +250,15 @@ pub fn owner(tid: i32) -> i32 {
     } else {
         tid
     }
+}
+
+/// The slot of `tid` among the tids process `pid` can have: 0 for its
+/// main thread, n for `TID_BASE + (pid << 12) + n`.
+pub fn slot_of(pid: i32, tid: i32) -> Option<usize> {
+    if tid == pid {
+        return Some(0);
+    }
+    (tid >= TID_BASE && owner(tid) == pid).then(|| ((tid - TID_BASE) & 0xfff) as usize)
 }
 
 /// Every tid of this process, in order.
@@ -383,6 +409,8 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
         return -(EAGAIN as i64);
     };
     let tid = th.tid;
+    super::cred::inherit_nice(parent.tid, tid);
+    super::procrec::add_thread(tid, &th.name.lock().unwrap(), th.sched_now());
     c.tid = tid as u64;
     c.attn = &th.sig.attn;
     c.thread = Arc::into_raw(th.clone());
@@ -477,6 +505,10 @@ pub fn exit(a: [u64; 6]) -> ! {
         super::futex::wake_one(ctid);
     }
     let main = th.tid == pid();
+    if !main {
+        // A main thread that exits stays listed until the process ends.
+        super::procrec::remove_thread(th.tid);
+    }
     let left = with_table_mut(|t| {
         t.remove(&th.tid);
         t.len()
@@ -577,4 +609,6 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     for v in [&th.sched.nice, &th.sched.policy, &th.sched.priority] {
         v.store(r.i32(), SeqCst);
     }
+    let sched = th.sched_now();
+    super::procrec::set_sched(th.tid, |_| sched);
 }

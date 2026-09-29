@@ -14,8 +14,14 @@ struct Exe {
 
 static EXE: OnceLock<Exe> = OnceLock::new();
 
-/// Record the program being run, for `/proc/self/exe`.
+/// Record the program being run, for `/proc/self/exe`. exec names the
+/// process after it (`comm`, up to 15 bytes).
 pub fn set_exe(guest: String, host: String) {
+    let base = guest.rsplit('/').next().unwrap_or("").as_bytes();
+    let mut name = [0u8; 16];
+    let len = base.len().min(15);
+    name[..len].copy_from_slice(&base[..len]);
+    thread::set_name_of(thread::main_tid(), name);
     let _ = EXE.set(Exe { guest, host });
 }
 
@@ -61,10 +67,14 @@ const SCHED_IDLE: i32 = 5;
 const SCHED_RESET_ON_FORK: i32 = 0x4000_0000;
 
 /// The thread a scheduling call names: 0 is the caller, a pid means the
-/// main thread (Linux applies these per thread). None: a thread of another
-/// live process, whose attributes are accepted and not kept (Darwin
-/// schedules the host threads anyway).
-fn sched_target(pid: i64) -> Result<Option<std::sync::Arc<Thread>>, i64> {
+/// main thread (Linux applies these per thread).
+enum Target {
+    Own(std::sync::Arc<Thread>),
+    /// A thread of another process of the namespace, with its record.
+    Peer(i32, super::procrec::Peer),
+}
+
+fn sched_target(pid: i64) -> Result<Target, i64> {
     // The kernel takes a pid_t.
     let pid = pid as i32;
     if pid < 0 {
@@ -76,14 +86,17 @@ fn sched_target(pid: i64) -> Result<Option<std::sync::Arc<Thread>>, i64> {
         pid
     };
     if let Some(t) = thread::find(tid) {
-        return Ok(Some(t));
+        return Ok(Target::Own(t));
     }
     let owner = thread::owner(tid);
-    if owner as i64 != getpid() && super::pidns::contains(owner) {
-        Ok(None)
-    } else {
-        Err(-(ESRCH as i64))
+    if owner as i64 == getpid() {
+        return Err(-(ESRCH as i64));
     }
+    super::pidns::check(owner)?;
+    super::procrec::Peer::open(owner)
+        .filter(|p| p.has(tid))
+        .map(|p| Target::Peer(tid, p))
+        .ok_or(-(ESRCH as i64))
 }
 
 fn priority_range(policy: i32) -> Option<(i32, i32)> {
@@ -110,12 +123,38 @@ pub fn host_qos(nice: i32, policy: i32) -> libc::qos_class_t {
     }
 }
 
-/// Give the calling thread the QoS of its Linux scheduling. Darwin sets a
-/// thread's QoS only from the thread itself, so a thread that changes
-/// another's scheduling changes only what the guest reads back.
-pub fn apply_host_qos(nice: i32, policy: i32) {
+/// Give the calling thread `th` the QoS of its Linux scheduling.
+pub fn apply_own_qos(th: &Thread) {
+    let qos = host_qos(
+        super::cred::thread_nice(th.tid),
+        th.sched.policy.load(SeqCst),
+    );
     // SAFETY: plain call on the calling thread.
-    unsafe { libc::pthread_set_qos_class_self_np(host_qos(nice, policy), 0) };
+    unsafe { libc::pthread_set_qos_class_self_np(qos, 0) };
+}
+
+/// Thread `tid` of this process has new scheduling. Darwin sets a thread's
+/// QoS only from the thread itself: the calling thread applies its own at
+/// once, another thread is poked to apply it ([`apply_own_qos`]) when it
+/// next checks for signals.
+pub fn sched_changed(tid: i32) {
+    let Some(th) = thread::find(tid) else { return };
+    if thread::is_current(&th) {
+        apply_own_qos(&th);
+    } else {
+        th.qos_stale.store(true, SeqCst);
+        super::signal::poke(&th);
+    }
+}
+
+/// Another process changed the scheduling of thread `tid` in this
+/// process's record (`procrec`): take it over.
+pub fn adopt(tid: i32, s: super::procrec::Sched) {
+    let Some(th) = thread::find(tid) else { return };
+    th.sched.policy.store(s.policy, SeqCst);
+    th.sched.priority.store(s.priority, SeqCst);
+    super::cred::adopt_nice(tid, s.nice);
+    sched_changed(tid);
 }
 
 /// A change to another process's scheduling (a thread of it, `pid`) needs
@@ -129,53 +168,60 @@ fn may_change(pid: i64) -> Result<(), i64> {
 }
 
 /// sched_setparam (118), sched_setscheduler (119), sched_getscheduler
-/// (120), sched_getparam (121). The policy and priority are recorded per
-/// thread; the calling thread's policy also sets its host QoS
-/// ([`host_qos`]). Darwin schedules the host threads as it sees fit.
+/// (120), sched_getparam (121). The policy and priority are kept per
+/// thread and set its host QoS ([`host_qos`]); another process's thread
+/// takes them through its record.
 pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
-    let th = match sched_target(a[0] as i64) {
+    let target = match sched_target(a[0] as i64) {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let s = th.as_ref().map(|t| &t.sched);
-    let get = |v: fn(&thread::Sched) -> i32| s.map_or(0, v);
+    let now = match &target {
+        Target::Own(th) => th.sched_now(),
+        Target::Peer(tid, p) => p.sched(*tid).unwrap_or_default(),
+    };
     match nr {
-        120 => get(|s| s.policy.load(SeqCst)) as i64,
+        120 => now.policy as i64,
         121 => {
             // SAFETY: guest struct sched_param { int sched_priority; }.
-            unsafe { (a[1] as *mut i32).write_unaligned(get(|s| s.priority.load(SeqCst))) };
+            unsafe { (a[1] as *mut i32).write_unaligned(now.priority) };
             0
         }
         _ => {
             let policy = if nr == 119 {
                 a[1] as i32 & !SCHED_RESET_ON_FORK
             } else {
-                get(|s| s.policy.load(SeqCst))
+                now.policy
             };
             let param = if nr == 119 { a[2] } else { a[1] };
             if param == 0 {
                 return -(EINVAL as i64);
             }
             // SAFETY: guest struct sched_param.
-            let prio = unsafe { (param as *const i32).read_unaligned() };
-            match priority_range(policy) {
-                Some((lo, hi)) if (lo..=hi).contains(&prio) => {
-                    if th.is_none()
-                        && let Err(e) = may_change(a[0] as i64)
-                    {
+            let priority = unsafe { (param as *const i32).read_unaligned() };
+            if !priority_range(policy).is_some_and(|(lo, hi)| (lo..=hi).contains(&priority)) {
+                return -(EINVAL as i64);
+            }
+            let set = move |s| super::procrec::Sched {
+                policy,
+                priority,
+                ..s
+            };
+            match target {
+                Target::Own(th) => {
+                    th.sched.policy.store(policy, SeqCst);
+                    th.sched.priority.store(priority, SeqCst);
+                    super::procrec::set_sched(th.tid, set);
+                    sched_changed(th.tid);
+                }
+                Target::Peer(tid, p) => {
+                    if let Err(e) = may_change(a[0] as i64) {
                         return e;
                     }
-                    if let Some(th) = &th {
-                        th.sched.policy.store(policy, SeqCst);
-                        th.sched.priority.store(prio, SeqCst);
-                        if th.tid == thread::gettid() as i32 {
-                            apply_host_qos(super::cred::thread_nice(th.tid), policy);
-                        }
-                    }
-                    0
+                    p.set_sched(tid, set);
                 }
-                _ => -(EINVAL as i64),
             }
+            0
         }
     }
 }
@@ -191,8 +237,8 @@ pub fn sched_priority_range(nr: u64, a: [u64; 6]) -> i64 {
 /// sched_setaffinity: accepted; Darwin places the host threads.
 pub fn sched_setaffinity(a: [u64; 6]) -> i64 {
     match sched_target(a[0] as i64) {
-        Ok(Some(_)) => 0,
-        Ok(None) => may_change(a[0] as i64).map_or_else(|e| e, |_| 0),
+        Ok(Target::Own(_)) => 0,
+        Ok(Target::Peer(..)) => may_change(a[0] as i64).map_or_else(|e| e, |_| 0),
         Err(e) => e,
     }
 }

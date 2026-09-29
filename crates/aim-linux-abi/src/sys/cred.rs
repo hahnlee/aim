@@ -350,6 +350,9 @@ pub fn init(id: Identity, by_pid: Option<PathBuf>) {
         let _ = BY_PID.set(d);
         // SAFETY: trivial.
         write_entry(unsafe { libc::getpid() }, &id);
+        if let Some(d) = BY_PID.get() {
+            super::procrec::init(d, id.priority);
+        }
     }
     *STATE.lock().unwrap() = Some(id);
 }
@@ -430,6 +433,7 @@ pub(super) fn note_child(pid: i32) {
 pub(super) fn forget(pid: i32) {
     if let Some(dir) = BY_PID.get() {
         let _ = std::fs::remove_file(dir.join(pid.to_string()));
+        super::procrec::forget(dir, pid);
     }
 }
 
@@ -500,9 +504,10 @@ fn may_prlimit(t: &Identity) -> bool {
     })
 }
 
-/// The credential lines of `/proc/self/status`.
-pub fn proc_status() -> String {
-    let id = current();
+/// The credential lines of `/proc/<pid>/status`: this process's
+/// identity, another's from the process table (root without an entry).
+pub fn proc_status(pid: i32) -> String {
+    let id = identity_of(pid).unwrap_or_default();
     let ids = |v: [u32; 4]| format!("{}\t{}\t{}\t{}", v[0], v[1], v[2], v[3]);
     let groups: String = id.groups.iter().map(|g| format!("{g} ")).collect();
     format!(
@@ -975,9 +980,8 @@ const PRIO_PROCESS: u64 = 0;
 const PRIO_PGRP: u64 = 1;
 const PRIO_USER: u64 = 2;
 
-/// Nice values set on this process's other threads. Linux keeps one per
-/// thread (PRIO_PROCESS with a tid); Darwin has no per-thread nice value,
-/// so the guest sees what it set.
+/// Nice values of this process's threads other than the main thread
+/// (whose value is the identity's `priority`); Linux keeps one per thread.
 static THREAD_NICE: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
 
 /// A thread of this process other than the main thread.
@@ -986,23 +990,28 @@ fn other_thread(who: u64) -> Option<i32> {
     (tid > 0 && !is_self(tid) && super::thread::find(tid).is_some()).then_some(tid)
 }
 
-/// The `who` of a call: for PRIO_PROCESS, 0 is the calling thread, as on
-/// Linux, and a thread of another process (true) is looked up as that
-/// process (Darwin has no per-thread nice value to reach).
-fn prio_who(a: &[u64; 6]) -> (u64, bool) {
-    if a[0] != PRIO_PROCESS {
-        return (a[1], false);
-    }
-    let who = if a[1] == 0 {
+/// The thread a PRIO_PROCESS call names: 0 is the calling thread, as on
+/// Linux.
+fn prio_tid(who: u64) -> i32 {
+    if who == 0 {
         super::thread::gettid() as i32
     } else {
-        a[1] as i32
-    };
-    let owner = super::thread::owner(who);
-    if owner != who && !is_self(owner) {
-        return (owner as u64, true);
+        who as i32
     }
-    (who as u32 as u64, false)
+}
+
+/// Thread `tid` of another process of the namespace: that process and
+/// its record (`procrec`).
+fn peer_thread(tid: i32) -> Result<(i32, super::procrec::Peer), i64> {
+    let owner = super::thread::owner(tid);
+    if is_self(owner) {
+        return Err(-(ESRCH as i64));
+    }
+    super::pidns::check(owner)?;
+    super::procrec::Peer::open(owner)
+        .filter(|p| p.has(tid))
+        .map(|p| (owner, p))
+        .ok_or(-(ESRCH as i64))
 }
 
 /// The processes a PRIO_PGRP or PRIO_USER call names, in the guest's pid
@@ -1035,57 +1044,43 @@ fn prio_targets(which: u64, who: u64) -> Option<Vec<i32>> {
     )
 }
 
-/// The nice value of process `p`: this process's own, the host's for
-/// another.
-fn process_nice(p: i32) -> Result<i32, i64> {
-    let r = getpriority([PRIO_PROCESS, p as u64, 0, 0, 0, 0]);
-    if r < 0 { Err(r) } else { Ok(20 - r as i32) }
+/// The nice value of thread `tid`: this process's own, another's from its
+/// record.
+fn nice_of(tid: i32) -> Result<i32, i64> {
+    if is_self(tid) || other_thread(tid as u64).is_some() {
+        return Ok(thread_nice(tid));
+    }
+    let (_, peer) = peer_thread(tid)?;
+    peer.sched(tid).map(|s| s.nice).ok_or(-(ESRCH as i64))
 }
 
-/// getpriority (141): the kernel's `20 - nice` for this process's (or one
-/// of its threads') priority; the host's for another process, and the
-/// highest of a group's or user's processes.
+/// getpriority (141): the kernel's `20 - nice` of a thread (PRIO_PROCESS),
+/// or the highest of a group's or user's processes.
 pub fn getpriority(a: [u64; 6]) -> i64 {
     if a[0] > PRIO_USER {
         return -(EINVAL as i64);
     }
-    if a[0] != PRIO_PROCESS
-        && let Some(targets) = prio_targets(a[0], a[1])
-    {
-        return targets
-            .into_iter()
-            .filter_map(|p| process_nice(p).ok())
-            .min()
-            .map_or(-(ESRCH as i64), |nice| 20 - nice as i64);
-    }
-    let a = [a[0], prio_who(&a).0, a[2], a[3], a[4], a[5]];
-    if a[0] == PRIO_PROCESS && is_self(a[1] as i32) {
-        return 20 - read(|id| id.priority) as i64;
-    }
-    if a[0] == PRIO_PROCESS
-        && let Some(tid) = other_thread(a[1])
-    {
-        let nice = THREAD_NICE
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|t| t.0 == tid)
-            .map(|t| t.1);
-        return 20 - nice.unwrap_or_else(|| read(|id| id.priority)) as i64;
-    }
-    if a[0] == PRIO_PROCESS
-        && let Err(e) = super::pidns::check(a[1] as i32)
-    {
-        return e;
-    }
-    // SAFETY: errno is cleared first because -1 is a valid priority.
-    unsafe {
-        *libc::__error() = 0;
-        let p = libc::getpriority(a[0] as i32, a[1] as u32);
-        if p == -1 && *libc::__error() != 0 {
-            return -(crate::errno::last() as i64);
+    if a[0] != PRIO_PROCESS {
+        if let Some(targets) = prio_targets(a[0], a[1]) {
+            return targets
+                .into_iter()
+                .filter_map(|p| nice_of(p).ok())
+                .min()
+                .map_or(-(ESRCH as i64), |nice| 20 - nice as i64);
         }
-        20 - p as i64
+        // SAFETY: errno is cleared first because -1 is a valid priority.
+        unsafe {
+            *libc::__error() = 0;
+            let p = libc::getpriority(a[0] as i32, a[1] as u32);
+            if p == -1 && *libc::__error() != 0 {
+                return -(crate::errno::last() as i64);
+            }
+            return 20 - p as i64;
+        }
+    }
+    match nice_of(prio_tid(a[1])) {
+        Ok(nice) => 20 - nice as i64,
+        Err(e) => e,
     }
 }
 
@@ -1103,38 +1098,72 @@ pub fn thread_nice(tid: i32) -> i32 {
     nice.unwrap_or_else(|| read(|id| id.priority))
 }
 
-/// The calling thread's host QoS after its nice value changed to `nice`.
-fn nice_changed(tid: i32, nice: i32) {
-    if tid == super::thread::gettid() as i32 {
-        let policy = super::thread::current().map_or(0, |t| t.sched.policy.load(Ordering::SeqCst));
-        super::process::apply_host_qos(nice, policy);
+/// A new thread `tid` starts with the nice value of `parent`, the thread
+/// that made it.
+pub fn inherit_nice(parent: i32, tid: i32) {
+    let nice = thread_nice(parent);
+    let mut table = THREAD_NICE.lock().unwrap();
+    table.retain(|t| super::thread::find(t.0).is_some());
+    table.push((tid, nice));
+}
+
+/// Keep `nice` as thread `tid`'s value. The main thread's also sets the
+/// host process's (raising it always works; lowering it is best effort).
+fn keep_nice(tid: i32, nice: i32) {
+    if is_self(tid) {
+        with(|id| id.priority = nice);
+        // SAFETY: plain setpriority.
+        unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
+    } else {
+        let mut table = THREAD_NICE.lock().unwrap();
+        table.retain(|t| t.0 != tid && super::thread::find(t.0).is_some());
+        table.push((tid, nice));
     }
 }
 
+/// Another process set thread `tid`'s nice value (`procrec`).
+pub fn adopt_nice(tid: i32, nice: i32) {
+    if thread_nice(tid) != nice {
+        keep_nice(tid, nice);
+    }
+}
+
+/// Thread `tid`'s nice value changed here: its record and host QoS follow.
+fn nice_changed(tid: i32, nice: i32) {
+    super::procrec::set_sched(tid, |s| super::procrec::Sched { nice, ..s });
+    super::process::sched_changed(tid);
+}
+
 /// `set_one_prio`'s checks for another process `p`: the owner rule, then
-/// a lower nice value needs CAP_SYS_NICE or `p`'s RLIMIT_NICE.
-fn may_set_prio(p: i32, nice: i32) -> Result<(), i64> {
-    super::pidns::check(p)?;
+/// a nice value below the thread's `current` one needs CAP_SYS_NICE or
+/// `p`'s RLIMIT_NICE.
+fn may_set_prio(p: i32, nice: i32, current: i32) -> Result<(), i64> {
     if !may_renice(p) {
         return Err(-(EPERM as i64));
     }
     let limit = target(p).rlimits[RLIMIT_NICE].map_or(u64::MAX, |l| l.0);
-    if nice < process_nice(p)? && !capable(CAP_SYS_NICE) && (20 - nice) as u64 > limit {
+    if nice < current && !capable(CAP_SYS_NICE) && (20 - nice) as u64 > limit {
         return Err(-(EACCES as i64));
     }
     Ok(())
 }
 
-/// setpriority (140). The calling thread's nice value also sets its host
-/// QoS (`process::host_qos`).
+/// setpriority (140): a thread's nice value (PRIO_PROCESS), which also
+/// sets its host QoS (`process::host_qos`), or each of a group's or
+/// user's processes'. Another process's thread takes it through its
+/// record.
 pub fn setpriority(a: [u64; 6]) -> i64 {
     let nice = (a[2] as i32).clamp(-20, 19);
     if a[0] > PRIO_USER {
         return -(EINVAL as i64);
     }
-    if a[0] != PRIO_PROCESS
-        && let Some(targets) = prio_targets(a[0], a[1])
-    {
+    if a[0] != PRIO_PROCESS {
+        let Some(targets) = prio_targets(a[0], a[1]) else {
+            // SAFETY: plain setpriority.
+            return crate::errno::check(
+                unsafe { libc::setpriority(a[0] as i32, a[1] as u32, nice) } as i64,
+            );
+        };
         // Each process in turn; the first success clears ESRCH and any
         // failure sticks, as in the kernel's `set_one_prio`.
         let mut err = -(ESRCH as i64);
@@ -1147,54 +1176,26 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
         }
         return err;
     }
-    let (who, foreign) = prio_who(&a);
-    if (foreign || (a[0] == PRIO_PROCESS && !is_self(who as i32) && other_thread(who).is_none()))
-        && let Err(e) = may_set_prio(who as i32, nice)
-    {
-        return e;
-    }
-    if foreign {
-        // Accepted for a live process; not kept.
-        let r = getpriority([PRIO_PROCESS, who, 0, 0, 0, 0]);
-        return if r < 0 { r } else { 0 };
-    }
-    let a = [a[0], who, a[2], a[3], a[4], a[5]];
-    if a[0] == PRIO_PROCESS && is_self(a[1] as i32) {
-        return with(|id| {
-            if nice < id.priority && !id.can_nice(nice) {
-                return -(EACCES as i64);
-            }
-            id.priority = nice;
-            // Raising the host nice value always works; lowering it is
-            // best effort.
-            // SAFETY: plain setpriority.
-            unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
-            nice_changed(a[1] as i32, nice);
-            0
-        });
-    }
-    if a[0] == PRIO_PROCESS
-        && let Some(tid) = other_thread(a[1])
-    {
-        let mut table = THREAD_NICE.lock().unwrap();
-        let current = table.iter().find(|t| t.0 == tid).map(|t| t.1);
-        let (priority, allowed) = read(|id| (id.priority, id.can_nice(nice)));
-        if nice < current.unwrap_or(priority) && !allowed {
+    let tid = prio_tid(a[1]);
+    if is_self(tid) || other_thread(tid as u64).is_some() {
+        let current = thread_nice(tid);
+        if nice < current && !read(|id| id.can_nice(nice)) {
             return -(EACCES as i64);
         }
-        table.retain(|t| t.0 != tid && super::thread::find(t.0).is_some());
-        table.push((tid, nice));
-        drop(table);
+        keep_nice(tid, nice);
         nice_changed(tid, nice);
         return 0;
     }
-    if a[0] == PRIO_PROCESS
-        && let Err(e) = super::pidns::check(a[1] as i32)
-    {
+    let (owner, peer) = match peer_thread(tid) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let current = peer.sched(tid).map_or(0, |s| s.nice);
+    if let Err(e) = may_set_prio(owner, nice, current) {
         return e;
     }
-    // SAFETY: plain setpriority.
-    crate::errno::check(unsafe { libc::setpriority(a[0] as i32, a[1] as u32, nice) } as i64)
+    peer.set_sched(tid, |s| super::procrec::Sched { nice, ..s });
+    0
 }
 
 #[cfg(test)]

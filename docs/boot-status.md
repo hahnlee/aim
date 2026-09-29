@@ -145,6 +145,15 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
   fails with "Unable to open ashmem device".
 - POSIX timers, a writable `trace_marker` (#192), per-thread `comm` files
   (#198), and `/proc/<tid>`, the scheduler calls and `tgkill` for every tid.
+- Another process's `/proc` entries come from its record
+  (`sys/procrec.rs`, next to its by-pid entry): its threads under
+  `/proc/<pid>/task` (so ActivityManager's `isThreadInProcess` accepts a
+  top app's RenderThread, #379), their `comm`, and `cmdline` as the
+  process's memory holds it, so zygote's children show the names
+  `setArgV0` and `PR_SET_NAME` give them and `pidof`/`ps` find them
+  (#238). `/proc` lists thread-group leaders only (#378); `/proc/<pid>`
+  belongs to the process's effective ids and `status` shows its
+  credentials and capabilities (#377).
 - The process table is the guest's pid namespace for every call that
   names a process, not only `/proc` (#341): `kill` (also `-1` and process
   groups), pidfds, the scheduler and priority calls and the rest reach
