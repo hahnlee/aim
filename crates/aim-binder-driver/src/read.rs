@@ -282,6 +282,13 @@ impl State {
             .map(|(fd, _)| fd)
             .collect();
 
+        if let Some(trace) = &mut self.trace {
+            if cmd == BR_REPLY {
+                trace.returned(id);
+            } else {
+                trace.delivered(id, tid);
+            }
+        }
         if cmd != BR_REPLY && !oneway {
             let stack = self.thread(proc, tid).unwrap().transaction_stack;
             let t = self.txns.get_mut(&id).unwrap();
