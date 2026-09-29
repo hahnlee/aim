@@ -6,7 +6,7 @@
 use super::attrs::{self, Attr, Host};
 use super::fs::{AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, check_writable};
 use super::memfd;
-use crate::errno::{self, EINVAL, ENOENT};
+use crate::errno::{self, EINVAL, ENOENT, ENOSPC};
 use crate::sys::{guest_cstr, procfs};
 use crate::vfs::{self, Resolved};
 
@@ -398,8 +398,13 @@ pub fn fallocate(a: [u64; 6]) -> i64 {
         fst_length: (end - st.st_size).max(0),
         fst_bytesalloc: 0,
     };
-    // SAFETY: F_PREALLOCATE with a local fstore; advisory on APFS.
     if fs.fst_length > 0 {
+        match super::space::charge(fd, fs.fst_length as u64) {
+            Ok(n) if n == fs.fst_length as u64 => {}
+            Ok(_) => return -(ENOSPC as i64),
+            Err(e) => return e,
+        }
+        // SAFETY: F_PREALLOCATE with a local fstore; advisory on APFS.
         unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut fs) };
     }
     if mode & FALLOC_FL_KEEP_SIZE == 0 && end > st.st_size {

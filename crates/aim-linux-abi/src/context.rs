@@ -27,6 +27,7 @@ global_asm!(
     errtab = sym crate::errno::DARWIN_TO_LINUX,
     hostcall_hi = const aim_hostcall::SYSCALL_NR >> 16,
     slow = sym crate::sys::fdtab::SLOW,
+    budget = sym crate::sys::space::BUDGET,
     in_host = const std::mem::offset_of!(GuestContext, in_host),
     attn = const std::mem::offset_of!(GuestContext, attn),
     orig = const std::mem::offset_of!(GuestContext, orig_x0),

@@ -2,15 +2,20 @@
 //! directory, `<data>.asif` beside it, mounted hidden at `<data>` while a
 //! boot runs (docs/storage.md).
 //!
-//! - **Created on demand** as a sparse image (ASIF) of up to [`SIZE`]: it
-//!   occupies only what the guest wrote.
+//! - **Created on demand** as a sparse image (ASIF) that occupies only what
+//!   the guest wrote. Its size, what the guest sees as `/data`'s, is only a
+//!   [`ceiling`]: the size of the host volume holding it, to which an
+//!   image found smaller is grown at attach. The Mac's free space is the
+//!   real limit; the guest's syscall layer keeps it from taking the last of
+//!   it (`aim-linux-abi`'s `sys/space.rs`).
 //! - **Space returns:** APFS TRIMs freed blocks, and an ASIF image punches
 //!   them out of its file. A sparse bundle keeps them (neither TRIM nor
 //!   `hdiutil compact` frees its bands on macOS 26 and later), which is why
-//!   this is not one. APFS only TRIMs once about 2 GiB have been freed, so
-//!   at stop, when the file holds more than [`RECLAIM_THRESHOLD`] beyond
-//!   what the volume uses, 2 GiB are allocated and freed again: the unmount
-//!   then TRIMs everything free ("compaction").
+//!   this is not one. APFS only TRIMs once a 32nd of its container has
+//!   been freed, so at stop, when the file holds more than
+//!   [`RECLAIM_THRESHOLD`] beyond what the volume uses, a 24th of it is
+//!   allocated (not written) and freed again, and a full sync commits
+//!   that: the unmount then TRIMs everything free ("compaction").
 //! - **One user:** the attaching process holds an exclusive lock on
 //!   `<data>.lock` (the disk image helper locks the image file itself). An
 //!   attachment found at the next start belongs to a process
@@ -24,17 +29,24 @@ use std::time::Duration;
 
 use crate::disk::{self, Attach};
 
-/// The largest the guest's data can grow (the size `df /data` reports).
-pub const SIZE: &str = "64g";
 const VOLUME: &str = "aim-data";
 /// Space the image's file may hold beyond the volume's use before a stop
 /// compacts it.
 pub const RECLAIM_THRESHOLD: u64 = 512 << 20;
-/// What APFS frees before it TRIMs (measured on macOS 27: 1.75 GiB freed
-/// stay in the file, 2 GiB are returned).
-const TRIM_BATCH: i64 = 2 << 30;
+/// The part of its container APFS frees before it TRIMs is a 32nd
+/// (measured on macOS 27: of a 64 GB container, 1.75 GiB freed stay in the
+/// file and 2 GiB are returned; of 16 GB, 300 MB stay and 700 MB return);
+/// compaction frees a 24th.
+const TRIM_BATCH_DIVISOR: u64 = 24;
 /// How long a busy volume is waited for at detach.
 const PATIENCE: Duration = Duration::from_secs(20);
+
+/// The size the data image `image` may reach: that of the host volume
+/// holding it.
+pub fn ceiling(image: &Path) -> Result<u64, String> {
+    let host = image.parent().unwrap_or(Path::new("."));
+    disk::capacity(host).ok_or_else(|| format!("{}: no volume size", host.display()))
+}
 
 /// The image of the data directory `dir`.
 pub fn image_of(dir: &Path) -> PathBuf {
@@ -79,6 +91,7 @@ impl DataImage {
     pub fn attach(dir: &Path) -> Result<Self, String> {
         let dir = real(dir)?;
         let image = image_of(&dir);
+        let ceiling = ceiling(&image)?;
         if !image.exists() {
             if fs::read_dir(&dir).is_ok_and(|mut d| d.next().is_some())
                 && !disk::is_mount_point(&dir)
@@ -89,7 +102,7 @@ impl DataImage {
                     dir.display()
                 ));
             }
-            disk::create_case_sensitive(&image, SIZE, VOLUME)?;
+            disk::create_case_sensitive(&image, &ceiling.to_string(), VOLUME)?;
         }
         let lock_path = lock_of(&dir);
         let lock = File::create(&lock_path).map_err(|e| format!("{}: {e}", lock_path.display()))?;
@@ -110,7 +123,7 @@ impl DataImage {
             mount: Some(&dir),
             ..Default::default()
         };
-        let device = match disk::attach(&image, how) {
+        let mut device = match disk::attach(&image, how) {
             Ok(device) => device,
             Err(first) => {
                 // A volume a crash left inconsistent: repair it, then retry.
@@ -118,6 +131,13 @@ impl DataImage {
                 disk::attach(&image, how)?
             }
         };
+        // Smaller than the host volume (made with an older ceiling, or
+        // moved to a larger disk): grown while detached.
+        if disk::capacity(&dir).is_some_and(|size| size < ceiling) {
+            disk::detach(&device, PATIENCE)?;
+            disk::resize(&image, ceiling)?;
+            device = disk::attach(&image, how)?;
+        }
         Ok(Self {
             dir,
             image,
@@ -150,7 +170,8 @@ impl DataImage {
             used: Some(used),
         }) = usage(&self.dir)
             && allocated > used + RECLAIM_THRESHOLD
-            && let Err(e) = release_to_trim(&self.dir)
+            && let Some(size) = disk::capacity(&self.dir)
+            && let Err(e) = release_to_trim(&self.dir, size / TRIM_BATCH_DIVISOR)
         {
             eprintln!("aim-storage: compacting {}: {e}", self.image.display());
         }
@@ -166,9 +187,12 @@ impl Drop for DataImage {
     }
 }
 
-/// Allocates [`TRIM_BATCH`] in the volume at `mount` (without writing it)
-/// and frees it, so that APFS TRIMs all free space when it unmounts.
-fn release_to_trim(mount: &Path) -> Result<(), String> {
+/// Allocates `batch` bytes in the volume at `mount` (without writing
+/// them), frees them and commits that, so that APFS TRIMs all free space
+/// when it unmounts. The file is unlinked while open: a preallocation
+/// released at close counts as nothing freed. Without the full sync the
+/// TRIM waits for the next mount.
+fn release_to_trim(mount: &Path, batch: u64) -> Result<(), String> {
     let path = mount.join(".aim-trim");
     let file = File::options()
         .read(true)
@@ -176,22 +200,27 @@ fn release_to_trim(mount: &Path) -> Result<(), String> {
         .create_new(true)
         .open(&path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
+    // As much as the volume has, if it has less.
     let mut store = libc::fstore_t {
-        fst_flags: libc::F_ALLOCATEALL,
+        fst_flags: 0,
         fst_posmode: libc::F_PEOFPOSMODE,
         fst_offset: 0,
-        fst_length: TRIM_BATCH,
+        fst_length: batch as i64,
         fst_bytesalloc: 0,
     };
     // SAFETY: an open descriptor and a local fstore_t.
     let status = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PREALLOCATE, &mut store) };
     let error = std::io::Error::last_os_error();
-    let _ = file.set_len(store.fst_bytesalloc as u64);
-    let _ = file.sync_all();
+    let removed = fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()));
     drop(file);
-    fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    removed?;
     if status != 0 {
         return Err(format!("F_PREALLOCATE: {error}"));
+    }
+    let root = File::open(mount).map_err(|e| format!("{}: {e}", mount.display()))?;
+    // SAFETY: an open descriptor.
+    if unsafe { libc::fcntl(root.as_raw_fd(), libc::F_FULLFSYNC) } != 0 {
+        return Err(format!("F_FULLFSYNC: {}", std::io::Error::last_os_error()));
     }
     Ok(())
 }
@@ -206,7 +235,10 @@ fn repair(image: &Path) -> Result<(), String> {
         .map(|a| a.devices)
         .unwrap_or_default();
     let mut result = Ok(());
-    for volume in devices.iter().filter(|d| d.contains('s')) {
+    for volume in devices
+        .iter()
+        .filter(|d| d.trim_start_matches("/dev/disk").contains('s'))
+    {
         let status = std::process::Command::new("fsck_apfs")
             .args(["-y", volume])
             .status()
