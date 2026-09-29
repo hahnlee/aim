@@ -8,12 +8,14 @@
 //! host thread unparks the waiter when it fires, and the wait itself stays
 //! untimed on `os_sync_wait_on_address`.
 //!
-//! Guest clocks: CLOCK_MONOTONIC is the host CLOCK_MONOTONIC, as in
-//! `misc::clock_gettime`. Deadlines are host CLOCK_MONOTONIC nanoseconds.
+//! Deadlines are guest CLOCK_MONOTONIC nanoseconds (`clock`), the clock
+//! kqueue timers and `__ulock_wait2` count: both stop while the host
+//! sleeps.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::SeqCst};
 
+use super::clock::{self, Base};
 use crate::errno::{EBADF, EINTR, EINVAL};
 
 unsafe extern "C" {
@@ -33,18 +35,8 @@ unsafe extern "C" {
 /// private 4-byte word.
 const UL_WAIT: u32 = 1 | 0x0100_0000;
 
-pub fn now(clock: libc::clockid_t) -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: local timespec.
-    unsafe { libc::clock_gettime(clock, &mut ts) };
-    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
-}
-
 pub fn monotonic() -> u64 {
-    now(libc::CLOCK_MONOTONIC)
+    Base::Monotonic.now()
 }
 
 /// A guest `struct timespec` in nanoseconds, or -EINVAL.
@@ -68,16 +60,6 @@ pub fn write_timespec(p: u64, ns: u64) {
 /// A deadline `ns` from now.
 pub fn after(ns: u64) -> u64 {
     monotonic().saturating_add(ns)
-}
-
-/// An absolute guest time on CLOCK_REALTIME or CLOCK_MONOTONIC as a
-/// deadline. A REALTIME deadline is converted once, on entry.
-pub fn absolute(ns: u64, realtime: bool) -> u64 {
-    if realtime {
-        after(ns.saturating_sub(now(libc::CLOCK_REALTIME)))
-    } else {
-        ns
-    }
 }
 
 /// One per guest thread. States: 0 idle, 1 unparked (a token), 2 parked.
@@ -319,22 +301,16 @@ pub fn nanosleep(a: [u64; 6]) -> i64 {
 /// clock_nanosleep(clock, flags, req, rem): returns the error number itself.
 pub fn clock_nanosleep(a: [u64; 6]) -> i64 {
     let (clock, flags, req, rem) = (a[0], a[1], a[2], a[3]);
-    let realtime = match clock {
-        0 | 5 | 8 => true,          // REALTIME, REALTIME_COARSE, REALTIME_ALARM
-        1 | 4 | 6 | 7 | 9 => false, // MONOTONIC(_RAW/_COARSE), BOOTTIME(_ALARM)
-        2 | 3 => return -95,        // CPU-time clocks: EOPNOTSUPP
-        _ => return -(EINVAL as i64),
+    let base = match clock::timer_base(clock) {
+        Ok(b) => b,
+        Err(e) => return e,
     };
     let ns = match read_timespec(req) {
         Ok(n) => n,
         Err(e) => return e,
     };
     let abs = flags & TIMER_ABSTIME != 0;
-    let deadline = if abs {
-        absolute(ns, realtime)
-    } else {
-        after(ns)
-    };
+    let deadline = if abs { base.deadline(ns) } else { after(ns) };
     match sleep_until(deadline) {
         Ok(()) => 0,
         Err(left) => {

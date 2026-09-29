@@ -130,14 +130,9 @@ fn ticks(tv: libc::timeval) -> i64 {
     tv.tv_sec * USER_HZ + tv.tv_usec as i64 * USER_HZ / 1_000_000
 }
 
-fn uptime() -> libc::timespec {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: local timespec. CLOCK_MONOTONIC counts from boot on Darwin.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    ts
+/// Nanoseconds since boot (CLOCK_BOOTTIME).
+fn uptime() -> u64 {
+    super::clock::Base::Boottime.now()
 }
 
 /// times (153): struct tms in clock ticks; returns ticks since boot.
@@ -159,8 +154,7 @@ pub fn times(a: [u64; 6]) -> i64 {
         // SAFETY: guest struct tms of four clock_t.
         unsafe { (a[0] as *mut [i64; 4]).write_unaligned(t) };
     }
-    let up = uptime();
-    up.tv_sec * USER_HZ + up.tv_nsec / (1_000_000_000 / USER_HZ)
+    (uptime() / (1_000_000_000 / USER_HZ as u64)) as i64
 }
 
 /// The kernel release the image expects: the newest kernel of its newest
@@ -280,7 +274,7 @@ pub fn sysinfo(a: [u64; 6]) -> i64 {
         None => unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) }.max(0),
     };
     let mut w = [0u64; 14];
-    w[0] = uptime().tv_sec as u64;
+    w[0] = uptime() / 1_000_000_000;
     for i in 0..3 {
         w[1 + i] = (load[i] * 65536.0) as u64;
     }

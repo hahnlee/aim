@@ -159,12 +159,12 @@ window size and on any screen.
 
 ### Time
 
-Events carry the guest's `CLOCK_MONOTONIC` (the host's): an `NSEvent`
-timestamp (`mach_absolute_time` in seconds) is shifted by the offset between
-the two clocks. A packet's events share one time, as the input core stamps
-them. The syscall layer converts to the clock each open file chose
-(`EVIOCSCLOCKID`: `CLOCK_REALTIME` by default, `CLOCK_MONOTONIC`,
-`CLOCK_BOOTTIME`, which is monotonic here as in `clock_gettime`).
+Events carry the guest's `CLOCK_MONOTONIC`, which is `mach_absolute_time`
+(`aim_hostcall::clock`): an `NSEvent` timestamp (`mach_absolute_time` in
+seconds) needs no conversion. A packet's events share one time, as the input
+core stamps them. The syscall layer converts to the clock each open file
+chose (`EVIOCSCLOCKID`: `CLOCK_REALTIME` by default, `CLOCK_MONOTONIC`,
+`CLOCK_BOOTTIME`).
 
 ## Delivery: a socket per open file
 

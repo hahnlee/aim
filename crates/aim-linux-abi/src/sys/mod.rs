@@ -8,6 +8,7 @@ mod ashmem;
 mod attrs;
 mod binder;
 mod bpf;
+mod clock;
 mod copies;
 mod copy;
 pub mod cred;
@@ -318,15 +319,15 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         // misc
         101 => park::nanosleep(a),
         115 => park::clock_nanosleep(a),
-        113 => misc::clock_gettime(a),
-        114 => misc::clock_getres(a),
+        113 => clock::clock_gettime(a),
+        114 => clock::clock_getres(a),
         118..=121 => process::sched_policy(nr, a),
         122 => process::sched_setaffinity(a),
         123 => process::sched_getaffinity(a),
         125 | 126 => process::sched_priority_range(nr, a),
         124 => misc::sched_yield(),
         167 => misc::prctl(a),
-        169 => misc::gettimeofday(a),
+        169 => clock::gettimeofday(a),
         278 => misc::getrandom(a),
         aim_hostcall::SYSCALL_NR => crate::hostcall::call(a[0], a[1], a[2], a[3]),
         // process lifecycle

@@ -383,48 +383,18 @@ fn frame(a: &mut Frame) -> i64 {
     0
 }
 
-/// Host time on the guest's clocks: the syscall layer serves the guest's
-/// CLOCK_MONOTONIC and CLOCK_BOOTTIME from the host's CLOCK_MONOTONIC.
+/// Host time on the guest's CLOCK_BOOTTIME, the camera's timestamp source.
 mod clock {
-    use std::sync::OnceLock;
-
-    #[repr(C)]
-    struct MachTimebaseInfo {
-        numer: u32,
-        denom: u32,
-    }
-
-    unsafe extern "C" {
-        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
-        fn mach_absolute_time() -> u64;
-    }
+    use aim_hostcall::clock::{boottime_ns, monotonic_ns, ticks_to_ns};
 
     pub fn now_ns() -> i64 {
-        let mut ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: a local timespec.
-        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-        ts.tv_sec * 1_000_000_000 + ts.tv_nsec
+        boottime_ns()
     }
 
-    fn timebase() -> (i64, i64) {
-        static TIMEBASE: OnceLock<(i64, i64)> = OnceLock::new();
-        *TIMEBASE.get_or_init(|| {
-            let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
-            // SAFETY: a local out-parameter.
-            unsafe { mach_timebase_info(&mut info) };
-            (info.numer as i64, info.denom.max(1) as i64)
-        })
-    }
-
-    /// CLOCK_MONOTONIC nanoseconds of a mach absolute time.
+    /// CLOCK_BOOTTIME nanoseconds of a mach absolute time (which stops
+    /// while the host sleeps, as CLOCK_MONOTONIC does).
     pub fn host_to_ns(host_time: u64) -> i64 {
-        let (numer, denom) = timebase();
-        // SAFETY: reads the clock.
-        let now = unsafe { mach_absolute_time() };
-        now_ns() + (host_time as i64 - now as i64) * numer / denom
+        ticks_to_ns(host_time) + boottime_ns() - monotonic_ns()
     }
 }
 

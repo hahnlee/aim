@@ -224,6 +224,11 @@ fn posix_timers() {
 }
 
 #[test]
+fn clocks() {
+    check("t_clock", &[]);
+}
+
+#[test]
 fn ashmem() {
     check("t_ashmem", &[]);
 }

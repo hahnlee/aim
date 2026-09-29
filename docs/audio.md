@@ -259,4 +259,4 @@ descriptors are the process's own) and passes the fd on to the CoreAudio
 process, which maps it too; neither keeps a guest pointer. Output uses
 the DefaultOutput unit; input the HAL output unit with input enabled on the
 default input device. Stamps convert CoreAudio's host time (mach absolute
-time) to the guest's CLOCK_MONOTONIC, which is the host's.
+time) to the guest's CLOCK_MONOTONIC, which counts the same ticks.

@@ -1,56 +1,8 @@
-//! Time, randomness and prctl.
+//! sched_yield, randomness and prctl.
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use crate::errno::{self, EFAULT, EINVAL};
-
-fn clock_to_host(id: u64) -> Option<libc::clockid_t> {
-    Some(match id {
-        0 | 5 => libc::CLOCK_REALTIME,       // REALTIME, REALTIME_COARSE
-        1 | 6 | 7 => libc::CLOCK_MONOTONIC,  // MONOTONIC, MONOTONIC_COARSE, BOOTTIME
-        4 => libc::CLOCK_MONOTONIC_RAW,      // MONOTONIC_RAW
-        2 => libc::CLOCK_PROCESS_CPUTIME_ID, // PROCESS_CPUTIME_ID
-        3 => libc::CLOCK_THREAD_CPUTIME_ID,  // THREAD_CPUTIME_ID
-        8 | 9 => libc::CLOCK_REALTIME,       // REALTIME_ALARM, BOOTTIME_ALARM
-        _ => return None,
-    })
-}
-
-// struct timespec is { i64 tv_sec; i64 tv_nsec; } on both kernels.
-pub fn clock_gettime(a: [u64; 6]) -> i64 {
-    let Some(id) = clock_to_host(a[0]) else {
-        return -(EINVAL as i64);
-    };
-    // SAFETY: guest timespec.
-    errno::check(unsafe { libc::clock_gettime(id, a[1] as *mut libc::timespec) } as i64)
-}
-
-pub fn clock_getres(a: [u64; 6]) -> i64 {
-    let Some(id) = clock_to_host(a[0]) else {
-        return -(EINVAL as i64);
-    };
-    if a[1] == 0 {
-        return 0;
-    }
-    // SAFETY: guest timespec.
-    errno::check(unsafe { libc::clock_getres(id, a[1] as *mut libc::timespec) } as i64)
-}
-
-pub fn gettimeofday(a: [u64; 6]) -> i64 {
-    if a[0] == 0 {
-        return 0;
-    }
-    let mut tv = libc::timeval {
-        tv_sec: 0,
-        tv_usec: 0,
-    };
-    // SAFETY: local timeval; guest struct timeval is { i64; i64 }.
-    unsafe {
-        libc::gettimeofday(&mut tv, std::ptr::null_mut());
-        (a[0] as *mut [i64; 2]).write_unaligned([tv.tv_sec, tv.tv_usec as i64]);
-    }
-    0
-}
+use crate::errno::{EFAULT, EINVAL};
 
 pub fn sched_yield() -> i64 {
     // SAFETY: trivial.

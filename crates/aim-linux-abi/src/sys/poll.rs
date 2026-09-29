@@ -82,13 +82,7 @@ fn timeout_ms(ts: u64) -> Result<i32, i64> {
 }
 
 fn now_ns() -> i64 {
-    let mut t = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: local timespec.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
-    t.tv_sec * 1_000_000_000 + t.tv_nsec
+    super::clock::Base::Monotonic.now() as i64
 }
 
 /// Write back the time left of a guest timespec after waiting since `t0`.

@@ -143,6 +143,26 @@ pub fn find(tid: i32) -> Option<Arc<Thread>> {
     with_table(|t| t.get(&tid).cloned())
 }
 
+/// The tid of this process whose low 29 bits are `bits` (all a CPU clock
+/// id keeps): the main thread's, or a clone's above TID_BASE.
+pub fn tid_of_clock_bits(bits: i32) -> i32 {
+    if bits == pid() { bits } else { TID_BASE | bits }
+}
+
+/// User and system CPU time of thread `tid` of this process, in
+/// nanoseconds.
+pub fn cpu_times(tid: i32) -> Option<(u64, u64)> {
+    with_table(|t| {
+        let p = t.get(&tid)?.pthread.load(SeqCst);
+        if p == 0 {
+            return None;
+        }
+        // SAFETY: the pthread is alive while it is in the table (whose lock
+        // is held).
+        super::clock::thread_times(unsafe { libc::pthread_mach_thread_np(p as libc::pthread_t) })
+    })
+}
+
 pub fn unpark(tid: i32) {
     if let Some(th) = find(tid) {
         th.park.unpark();
