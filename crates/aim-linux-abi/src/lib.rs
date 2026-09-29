@@ -101,6 +101,7 @@ pub fn run_fork_child(opts: RunOptions) -> String {
         return e;
     }
     sys::init_heap_window();
+    sys::init_host_role();
     sys::set_trace(opts.trace);
     xrt::init(Some(vfs::root()), opts.cache.clone());
     if let Some(name) = &opts.binder
@@ -119,6 +120,7 @@ pub fn run(opts: RunOptions) -> String {
         return e;
     }
     sys::init_heap_window();
+    sys::init_host_role();
     sys::init_fds();
     sys::set_trace(opts.trace);
     xrt::init(Some(vfs::root()), opts.cache.clone());

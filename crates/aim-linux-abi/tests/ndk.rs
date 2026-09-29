@@ -295,7 +295,8 @@ fn thread_priority(pid: u32, name: &str) -> Option<i32> {
 }
 
 /// Background scheduling (a nice value of 10 or more, SCHED_IDLE) lowers
-/// the host thread's QoS, and the default brings it back.
+/// the host thread's QoS, and the default brings it back; a real-time
+/// policy or a display priority set by another process raises it.
 #[test]
 fn background_qos() {
     use std::io::{BufRead, Write};
@@ -334,6 +335,31 @@ fn background_qos() {
             Some(want),
             "{step}"
         );
+        writeln!(stdin).unwrap();
+    }
+    // A thread of another process follows the scheduling set from here
+    // once it has been handed over: user-interactive QoS (as the process
+    // of an application) for SCHED_FIFO and a nice value of -10.
+    let mut peer = 0;
+    for (step, want) in [
+        ("remote-fifo", 46),
+        ("remote-default", 31),
+        ("remote-boost", 46),
+    ] {
+        let mut line = String::new();
+        out.read_line(&mut line).unwrap();
+        let mut words = line.split_whitespace();
+        assert_eq!(words.next(), Some(step), "{line}");
+        if let Some(p) = words.next() {
+            peer = p.parse().unwrap();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut got = thread_priority(peer, "qos-peer");
+        while got != Some(want) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            got = thread_priority(peer, "qos-peer");
+        }
+        assert_eq!(got, Some(want), "{step}");
         writeln!(stdin).unwrap();
     }
     let mut rest = String::new();

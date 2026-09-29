@@ -111,16 +111,47 @@ fn priority_range(policy: i32) -> Option<(i32, i32)> {
 /// background work at a nice value of ANDROID_PRIORITY_BACKGROUND (10) or
 /// more, or in SCHED_BATCH or SCHED_IDLE; Darwin runs that at utility QoS,
 /// the lowest nice value and SCHED_IDLE at background QoS (`PRIO_DARWIN_BG`:
-/// efficiency cores, throttled I/O), and everything else at the default.
+/// efficiency cores, throttled I/O). What draws frames, a real-time policy
+/// (SurfaceFlinger, audio, a top app's RenderThread under
+/// `sys.use_fifo_ui`) or ANDROID_PRIORITY_DISPLAY (-4) and above (the
+/// top app's UI and RenderThread, TOP_APP_PRIORITY_BOOST), runs at
+/// user-interactive QoS; other raised priorities at user-initiated; the
+/// rest at the default.
 pub fn host_qos(nice: i32, policy: i32) -> libc::qos_class_t {
     use libc::qos_class_t::*;
     match policy {
+        SCHED_FIFO | SCHED_RR => QOS_CLASS_USER_INTERACTIVE,
         SCHED_IDLE => QOS_CLASS_BACKGROUND,
         SCHED_BATCH => QOS_CLASS_UTILITY,
         _ if nice >= 19 => QOS_CLASS_BACKGROUND,
         _ if nice >= 10 => QOS_CLASS_UTILITY,
+        _ if nice <= -4 => QOS_CLASS_USER_INTERACTIVE,
+        _ if nice < 0 => QOS_CLASS_USER_INITIATED,
         _ => QOS_CLASS_DEFAULT,
     }
+}
+
+unsafe extern "C" {
+    static mach_task_self_: libc::mach_port_t;
+    fn task_policy_set(task: libc::mach_port_t, flavor: u32, info: *const i32, count: u32) -> i32;
+}
+
+/// Give the process Darwin's role of an application that may draw UI
+/// (TASK_DEFAULT_APPLICATION). A process without a role has the
+/// user-interactive and user-initiated QoS of [`host_qos`] squashed to the
+/// default.
+pub fn init_host_role() {
+    const TASK_CATEGORY_POLICY: u32 = 1;
+    const TASK_DEFAULT_APPLICATION: i32 = 7;
+    // SAFETY: task_category_policy { role } for this task.
+    unsafe {
+        task_policy_set(
+            mach_task_self_,
+            TASK_CATEGORY_POLICY,
+            &TASK_DEFAULT_APPLICATION,
+            1,
+        )
+    };
 }
 
 /// Give the calling thread `th` the QoS of its Linux scheduling.

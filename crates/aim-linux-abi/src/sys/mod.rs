@@ -73,7 +73,7 @@ pub(crate) use fork::state as fork_state;
 pub use mem::init_brk;
 pub use mem::run_deferred_unmaps;
 pub use pidns::new_table as new_pid_namespace;
-pub use process::set_exe;
+pub use process::{init_host_role, set_exe};
 pub use procfs::{StackInfo, note_stack};
 pub use pstate::kernel_release;
 pub(crate) use signal::{install_host_handlers, repoke_self};

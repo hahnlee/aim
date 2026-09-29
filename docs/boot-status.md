@@ -154,6 +154,16 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
   (#238). `/proc` lists thread-group leaders only (#378); `/proc/<pid>`
   belongs to the process's effective ids and `status` shows its
   credentials and capabilities (#377).
+- Scheduling set on another process's thread (`setpriority`,
+  `sched_setscheduler`: ActivityManager's TOP_APP_PRIORITY_BOOST or
+  SCHED_FIFO for a RenderThread) is kept and applied by that thread to its
+  host thread (#379, #380). Real-time policies and nice values of -4 and
+  below run at user-interactive QoS; guest processes take the role of an
+  application that may draw UI (TASK_DEFAULT_APPLICATION), without which
+  Darwin squashes that QoS to the default. Checked by `tests/process.rs`
+  (`other_processes_through_proc_and_scheduling`) and `tests/ndk.rs`
+  (`background_qos`, host priority 46); not yet in a boot (#232 blocked
+  the branch's `linux-run`).
 - The process table is the guest's pid namespace for every call that
   names a process, not only `/proc` (#341): `kill` (also `-1` and process
   groups), pidfds, the scheduler and priority calls and the rest reach
