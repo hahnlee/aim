@@ -20,6 +20,9 @@ fn names_that_differ_only_in_case_coexist() {
     let dir = dir("case");
     let image = DataImage::attach(&dir).unwrap();
     assert!(disk::is_mount_point(&dir));
+    // Made at its ceiling, so the next attach need not grow it.
+    let ceiling = data::ceiling(&data::image_of(&dir)).unwrap();
+    assert_eq!(disk::capacity(&dir), Some(ceiling));
     fs::write(dir.join("Foo"), "upper").unwrap();
     fs::write(dir.join("foo"), "lower").unwrap();
     assert_eq!(fs::read_to_string(dir.join("Foo")).unwrap(), "upper");
@@ -108,4 +111,33 @@ fn old_plain_data_directories_are_refused() {
     let error = DataImage::attach(&dir).unwrap_err();
     assert!(error.contains("before data images"), "{error}");
     fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn an_image_grows_to_its_host_volume_and_keeps_its_data() {
+    let dir = dir("grow");
+    let image = data::image_of(&dir);
+    disk::create_case_sensitive(&image, "1g", "aim-data").unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let device = disk::attach(
+        &image,
+        disk::Attach {
+            mount: Some(&dir),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(disk::capacity(&dir).unwrap() <= 1 << 30);
+    fs::write(dir.join("kept"), "x").unwrap();
+    disk::detach(&device, std::time::Duration::from_secs(20)).unwrap();
+
+    let attached = DataImage::attach(&dir).unwrap();
+    let ceiling = data::ceiling(&image).unwrap();
+    assert_eq!(disk::capacity(&dir), Some(ceiling));
+    assert_eq!(fs::read_to_string(dir.join("kept")).unwrap(), "x");
+    let before = data::usage(&dir).unwrap().allocated;
+    drop(attached);
+    // Nothing is preallocated: the file holds what the volume uses.
+    assert!(before < 64 << 20, "the grown image holds {before} bytes");
+    data::remove(&dir).unwrap();
 }

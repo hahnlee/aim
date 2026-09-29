@@ -3,10 +3,11 @@
 //! `struct stat` are translated between Linux and Darwin. Fds with Linux
 //! state of their own (`fdtab`) dispatch to their owner.
 
+use std::borrow::Cow;
 use std::ffi::CString;
 
 use super::fdtab::{self, Kind};
-use super::{attrs, dir, event, inotify, memfd, net};
+use super::{attrs, dir, event, inotify, memfd, net, space};
 use crate::errno::{self, EBADF, EINVAL, ENOENT, ENOTTY, ERANGE};
 use crate::sys::{guest_cstr, procfs};
 use crate::vfs;
@@ -270,6 +271,10 @@ pub fn write(a: [u64; 6]) -> i64 {
     if let Some(r) = special_write(fd, &one(buf, len)) {
         return r;
     }
+    let len = match space::charge(fd, len as u64) {
+        Ok(n) => n as usize,
+        Err(e) => return e,
+    };
     // SAFETY: guest buffer.
     errno::check(unsafe { libc::write(fd, buf as *const _, len) } as i64)
 }
@@ -288,10 +293,12 @@ pub fn pwrite64(a: [u64; 6]) -> i64 {
     if let Some(r) = special_pio(a[0] as i32, a[1], a[2] as usize, a[3] as i64, true) {
         return r;
     }
+    let len = match space::charge(a[0] as i32, a[2]) {
+        Ok(n) => n as usize,
+        Err(e) => return e,
+    };
     // SAFETY: guest buffer.
-    errno::check(
-        unsafe { libc::pwrite(a[0] as i32, a[1] as *const _, a[2] as usize, a[3] as i64) } as i64,
-    )
+    errno::check(unsafe { libc::pwrite(a[0] as i32, a[1] as *const _, len, a[3] as i64) } as i64)
 }
 
 fn iovs(ptr: u64, n: u64) -> Result<&'static [libc::iovec], i64> {
@@ -326,8 +333,34 @@ pub fn writev(a: [u64; 6]) -> i64 {
     if let Some(r) = special_write(a[0] as i32, v) {
         return r;
     }
+    let v = match charge_iov(a[0] as i32, v) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     // SAFETY: guest iovec array.
     errno::check(unsafe { libc::writev(a[0] as i32, v.as_ptr(), v.len() as i32) } as i64)
+}
+
+/// `v` cut to what [`space::charge`] lets a write to `fd` put on its volume.
+fn charge_iov(fd: i32, v: &[libc::iovec]) -> Result<Cow<'_, [libc::iovec]>, i64> {
+    let total = v.iter().map(|io| io.iov_len as u64).sum();
+    let mut left = space::charge(fd, total)?;
+    if left == total {
+        return Ok(Cow::Borrowed(v));
+    }
+    let mut out = Vec::new();
+    for io in v {
+        if left == 0 {
+            break;
+        }
+        let n = (io.iov_len as u64).min(left);
+        out.push(libc::iovec {
+            iov_base: io.iov_base,
+            iov_len: n as usize,
+        });
+        left -= n;
+    }
+    Ok(Cow::Owned(out))
 }
 
 /// preadv/pwritev (69/70) and preadv2/pwritev2 (286/287; flags ignored).
@@ -357,6 +390,14 @@ pub fn preadv(write: bool, a: [u64; 6]) -> i64 {
         }
         return total;
     }
+    let v = if write {
+        match charge_iov(fd, v) {
+            Ok(v) => v,
+            Err(e) => return e,
+        }
+    } else {
+        Cow::Borrowed(v)
+    };
     // SAFETY: guest iovec array.
     errno::check(unsafe {
         if write {
@@ -689,6 +730,7 @@ pub fn fstatfs(a: [u64; 6]) -> i64 {
     if unsafe { libc::fstatfs(a[0] as i32, &mut s) } < 0 {
         return -(errno::last() as i64);
     }
+    space::adjust(&mut s);
     put_statfs(&s, a[1]);
     0
 }
@@ -720,6 +762,7 @@ pub fn statfs(a: [u64; 6]) -> i64 {
     if r.read_only() {
         s.f_flags |= libc::MNT_RDONLY as u32;
     }
+    space::adjust(&mut s);
     let magic = vfs::fstype(&r.guest).and_then(|t| kernel_fs_magic(&t));
     put_statfs_as(&s, magic.unwrap_or(EXT4_SUPER_MAGIC), a[1]);
     0

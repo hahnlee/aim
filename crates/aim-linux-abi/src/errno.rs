@@ -21,6 +21,7 @@ pub const ENODEV: Errno = 19;
 pub const ENOTDIR: Errno = 20;
 pub const EINVAL: Errno = 22;
 pub const ENOTTY: Errno = 25;
+pub const ENOSPC: Errno = 28;
 pub const ERANGE: Errno = 34;
 pub const ENOSYS: Errno = 38;
 pub const ELOOP: Errno = 40;

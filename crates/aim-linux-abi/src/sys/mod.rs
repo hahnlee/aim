@@ -47,6 +47,7 @@ mod selinuxfs;
 mod sharedfile;
 mod sigframe;
 mod signal;
+pub(crate) mod space;
 mod sync_file;
 mod thread;
 mod uevent;

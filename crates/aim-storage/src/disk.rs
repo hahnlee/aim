@@ -170,7 +170,7 @@ pub fn detach(device: &str, patience: Duration) -> Result<(), String> {
 }
 
 /// Creates a blank sparse image (ASIF) of up to `size` (diskutil's size
-/// syntax, such as `64g`) with one case-sensitive APFS volume.
+/// syntax, such as `32g`, or bytes) with one case-sensitive APFS volume.
 pub fn create_case_sensitive(image: &Path, size: &str, volume: &str) -> Result<(), String> {
     run(Command::new("diskutil")
         .args([
@@ -183,6 +183,16 @@ pub fn create_case_sensitive(image: &Path, size: &str, volume: &str) -> Result<(
     let formatted = run(Command::new("newfs_apfs").args(["-e", "-v", volume, &raw]));
     let detached = detach(&device, Duration::from_secs(10));
     formatted.and(detached).map(|_| ())
+}
+
+/// Grows or shrinks the detached image `image` to `bytes`, with the
+/// filesystem on it; its data is kept.
+pub fn resize(image: &Path, bytes: u64) -> Result<(), String> {
+    run(Command::new("diskutil")
+        .args(["image", "resize", "--size"])
+        .arg(bytes.to_string())
+        .arg(image))
+    .map(|_| ())
 }
 
 /// The format of the image file `image` (`UDRO`, `ULFO`, ...), as
@@ -206,14 +216,16 @@ pub fn convert(source: &Path, destination: &Path, format: &str) -> Result<(), St
     .map(|_| ())
 }
 
-/// The mount point of the filesystem holding `path`, and its device.
-pub fn mount_of(path: &Path) -> Option<(PathBuf, String)> {
+fn statfs(path: &Path) -> Option<libc::statfs> {
     let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
     let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: NUL-terminated path, local buffer.
-    if unsafe { libc::statfs(c.as_ptr(), &mut fs) } != 0 {
-        return None;
-    }
+    (unsafe { libc::statfs(c.as_ptr(), &mut fs) } == 0).then_some(fs)
+}
+
+/// The mount point of the filesystem holding `path`, and its device.
+pub fn mount_of(path: &Path) -> Option<(PathBuf, String)> {
+    let fs = statfs(path)?;
     // SAFETY: statfs NUL-terminates both names.
     let (on, from) = unsafe {
         (
@@ -250,15 +262,43 @@ pub fn allocated(path: &Path) -> std::io::Result<u64> {
     Ok(total)
 }
 
-/// Bytes in use in the filesystem mounted at `mount`.
+/// Bytes the files of the volume mounted at `mount` use. Not statfs's
+/// blocks less free ones: APFS on a sparse image counts the host volume's
+/// free space as its own, so that difference includes the host's use.
 pub fn used(mount: &Path) -> Option<u64> {
     let c = std::ffi::CString::new(mount.as_os_str().as_encoded_bytes()).ok()?;
-    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: NUL-terminated path, local buffer.
-    if unsafe { libc::statfs(c.as_ptr(), &mut fs) } != 0 {
-        return None;
+    let mut list = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_SPACEUSED,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    #[repr(C, packed(4))]
+    struct Reply {
+        length: u32,
+        used: libc::off_t,
     }
-    Some((fs.f_blocks - fs.f_bfree) * fs.f_bsize as u64)
+    let mut reply = Reply { length: 0, used: 0 };
+    // SAFETY: NUL-terminated path, local attribute list and reply buffer.
+    let status = unsafe {
+        libc::getattrlist(
+            c.as_ptr(),
+            (&raw mut list).cast(),
+            (&raw mut reply).cast(),
+            std::mem::size_of::<Reply>(),
+            0,
+        )
+    };
+    (status == 0).then_some(reply.used as u64)
+}
+
+/// The size of the filesystem holding `path` (for APFS, its container's).
+pub fn capacity(path: &Path) -> Option<u64> {
+    let fs = statfs(path)?;
+    Some(fs.f_blocks * fs.f_bsize as u64)
 }
 
 #[cfg(test)]
