@@ -65,7 +65,10 @@ fn start_properties(image: &Path, layout: &Layout) -> Receiver<(String, String)>
         let (events, requests) = channel();
         let _sockets = PropertySockets::start(&socket_dir, events).expect("property sockets");
         up.send(()).unwrap();
-        for PropertyEvent::Set(request) in requests {
+        for event in requests {
+            let PropertyEvent::Set(request) = event else {
+                continue;
+            };
             // Only servicemanager sets properties here.
             let cred = Ucred {
                 pid: request.peer_pid,

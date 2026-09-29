@@ -46,10 +46,12 @@ impl SetRequest {
     }
 }
 
-/// Events the socket threads send to the boot loop.
+/// Events the socket threads and the child watcher send to the boot loop.
 #[derive(Debug)]
 pub enum PropertyEvent {
     Set(SetRequest),
+    /// SIGCHLD: a child may have exited; the loop reaps it.
+    ChildExited,
 }
 
 /// The listening sockets and their threads.
