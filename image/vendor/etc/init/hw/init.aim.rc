@@ -61,3 +61,9 @@ on property:sys.boot_completed=1 && property:vendor.aim.mac.time_zone=*
 # before the system is ready never reaches the global configuration.
 on property:sys.boot_completed=1 && property:vendor.aim.mac.night_mode=*
     exec_background - system system -- /system/bin/cmd uimode night ${vendor.aim.mac.night_mode}
+
+# The keyboard layout goes to InputManager as the built-in keyboard's
+# layout override (docs/input.md, "Layouts"), once the system is ready
+# and on each change of the Mac's.
+on property:sys.boot_completed=1 && property:vendor.aim.mac.keyboard_layout=*
+    exec_background - system system -- /system_ext/bin/aim-keyboard layout ${vendor.aim.mac.keyboard_layout}

@@ -1,6 +1,6 @@
-# The Mac's time zone, language and appearance
+# The Mac's time zone, language, appearance and keyboard layout
 
-The device follows three of the Mac's settings (#283, #282, #281). The
+The device follows four of the Mac's settings (#283, #282, #281, #288). The
 host reads them and the guest applies them through Android's own services,
 the way a device's vendor init would; no part of Android is patched, and
 the Mac's settings are only read.
@@ -10,6 +10,7 @@ the Mac's settings are only read.
 | Time zone | the IANA name `/etc/localtime` links to, if the image's tzdata (`/apex/com.android.tzdata/etc/tz/tzdata`) has it | `vendor.aim.mac.time_zone` | at boot: `setprop persist.sys.timezone` in `post-fs-data`; while running: `cmd alarm set-timezone` (`AlarmManager.setTimeZone`) |
 | Language and region | the first of `AppleLanguages` Android can name, with `AppleLocale`'s region when it has none (`ko` + `ko_KR` → `ko-KR`, `zh-Hans` + `zh_CN` → `zh-Hans-CN`) | `vendor.aim.mac.locale` | at boot: `setprop persist.sys.locale` in `post-fs-data` |
 | Appearance | `AppleInterfaceStyle` (`Dark`, or absent for Light; "Auto" updates it) | `vendor.aim.mac.night_mode` (`yes`/`no`) | `cmd uimode night` (`UiModeManager.setNightMode`, `ui_night_mode`), at `sys.boot_completed` and on each change |
+| Keyboard layout | `AppleCurrentKeyboardLayoutInputSourceID` of `com.apple.HIToolbox` (`com.apple.keylayout.Dvorak`), as the InputDevices layout with its characters, else US English ([input.md](input.md), "Layouts") | `vendor.aim.mac.keyboard_layout` (`keyboard_layout_english_us_dvorak`) | `aim-keyboard layout` (InputManager's layout override for the built-in keyboard), at `sys.boot_completed` and on each change |
 
 - **Host.** `aim-guest-init` (`src/mac.rs`) sets the properties after
   `PropertyInit` and before init's first action, then reads the Mac's

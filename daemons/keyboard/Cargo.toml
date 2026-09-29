@@ -1,0 +1,23 @@
+[package]
+name = "aim-keyboard"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "The built-in keyboard's layout as the Mac's, through InputManager"
+
+# Installed as /system_ext/bin/aim-keyboard (docs/input.md, "Layouts").
+[package.metadata.daemon]
+program = "aim-keyboard"
+
+[dependencies]
+binder = { workspace = true, features = ["system"] }
+daemon-log.workspace = true
+log.workspace = true
+sha1 = "0.10"
+
+# declare_binder_interface! tests the cfgs Soong sets for NDK and VNDK
+# builds; a system daemon has neither.
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(android_ndk)", "cfg(android_vndk)"]

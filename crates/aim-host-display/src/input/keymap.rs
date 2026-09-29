@@ -11,6 +11,12 @@
 //! it: the keyboard's keymap goes from it to the `KEY_*` it sends
 //! (`EVIOCGKEYCODE`), starting from this table.
 
+/// On an ISO keyboard, the two keys whose places differ from a PC's: the
+/// key left of 1 (`kVK_ISO_Section`, usage 0x64) is PC's `KEY_GRAVE`, and
+/// the key right of left Shift (`kVK_ANSI_Grave` there, usage 0x35) is
+/// `KEY_102ND`. Linux's hid-apple swaps the same two (`iso_layout`).
+pub const ISO: [(u32, u16); 2] = [(0x0007_0064, 41), (0x0007_0035, 86)];
+
 /// The consumer page's AC Back, Back's usage.
 pub const AC_BACK: u32 = 0x000c_0224;
 

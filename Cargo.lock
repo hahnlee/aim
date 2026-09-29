@@ -181,6 +181,16 @@ name = "aim-hostcall"
 version = "0.1.0"
 
 [[package]]
+name = "aim-keyboard"
+version = "0.1.0"
+dependencies = [
+ "binder",
+ "daemon-log",
+ "log",
+ "sha1",
+]
+
+[[package]]
 name = "aim-linux-abi"
 version = "0.1.0"
 dependencies = [

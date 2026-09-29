@@ -54,6 +54,7 @@ members = [
     "hal/tests/camera-client",
     "daemons/aidl/*",
     "daemons/apexd",
+    "daemons/keyboard",
     "daemons/lmkd",
     "daemons/lmkd/core",
     "daemons/log",

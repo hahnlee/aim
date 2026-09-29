@@ -109,6 +109,42 @@ character map are the image's `Generic.kl` and `Generic.kcm`.
 - When the window stops being key, the fingers lift and every key and
   button is released, so nothing stays down in the guest.
 
+### Layouts
+
+Keys are physical; the characters are Android's: the keyboard's key
+character map (`Generic.kcm`) with the overlay of the layout Android's
+`KeyboardLayoutManager` picks for it, which also remaps key codes (under
+Dvorak the key at Q is `KEYCODE_APOSTROPHE`, and Ctrl+the key at I is
+Ctrl+C, as Cmd+C is on the Mac).
+
+- **The Mac's layout picks it.** guest-init reads the Mac's current
+  keyboard layout (`AppleCurrentKeyboardLayoutInputSourceID` of
+  `com.apple.HIToolbox`) and sets `vendor.aim.mac.keyboard_layout` to the
+  InputDevices layout with the same characters on the unmodified and Shift
+  levels (`mac::KEYBOARD_LAYOUTS`: Dvorak, Colemak, US International - PC,
+  British - PC, French - PC, German, Russian, Russian - PC), else US
+  English ([mac-settings.md](mac-settings.md)). At `sys.boot_completed`
+  and on each change, init runs `aim-keyboard layout NAME`
+  (`daemons/keyboard`, `/system_ext/bin`), which sets InputManager's layout
+  override for the built-in keyboard
+  (`IInputManager.setKeyboardLayoutOverrideForInputDevice`, by the
+  descriptor EventHub gives a built-in device of its name), as a device's
+  vendor component would. A layout chosen in Android's Settings for an
+  input method wins over it.
+- **Input methods' layouts.** Korean 2-Set (`2SetHangul`) is US English at
+  the key level. Its Hangul come from Android's input method composing
+  from the keys (the image's Gboard does, with Korean as its language:
+  G K S R M F give 한글), not from the Mac's input method (#23).
+- **ISO keyboards.** An Apple ISO keyboard's key left of 1
+  (`kVK_ISO_Section`) and key right of left Shift (`kVK_ANSI_Grave` there)
+  are in each other's place relative to a PC's. When the Mac's keyboard is
+  ISO (`KBGetLayoutType`, at start), the display server remaps the two in
+  the keyboard's keymap (`KEY_GRAVE`, `KEY_102ND`), as Linux's hid-apple
+  does.
+- **JIS keyboards** send their own keys (`KEY_YEN`, `KEY_RO`, Eisu, Kana),
+  but InputDevices has no JIS character map, so the punctuation follows US
+  English.
+
 ### Coordinates
 
 In window mode each window maps its points one to one onto its task's part

@@ -507,6 +507,24 @@ impl Devices {
         self.devices.iter().find(|d| d.index == index)
     }
 
+    /// Remap scan code `scancode` of device `index` to `key`, as
+    /// `EVIOCSKEYCODE` does; false if the device has no such scan code.
+    pub fn remap(&self, index: u32, scancode: u32, key: u16) -> bool {
+        let Some(d) = self.device(index) else {
+            return false;
+        };
+        let mut e = KeyEntry {
+            scancode,
+            keycode: key as u32,
+            ..Default::default()
+        };
+        d.inner
+            .lock()
+            .unwrap()
+            .keycode(&mut e, true, crate::monotonic_ns())
+            == 0
+    }
+
     /// The key device `index` sends for scan code `scancode` (its keymap).
     pub fn key_of(&self, index: u32, scancode: u32) -> Option<u16> {
         self.device(index)?.inner.lock().unwrap().key_of(scancode)
@@ -707,6 +725,14 @@ mod tests {
         let d = describe(&dir, KEYBOARD);
         assert!(!test_bit(&d.bits.key, 30) && test_bit(&d.bits.key, 44));
         assert_eq!(keycode(&dir, a, false).1.keycode, 44);
+        // The ISO keys, as the display server remaps them for an ISO
+        // keyboard.
+        for (usage, key) in keymap::ISO {
+            assert!(devs.remap(KEYBOARD, usage, key));
+        }
+        assert_eq!(devs.key_of(KEYBOARD, 0x0007_0064), Some(41));
+        assert_eq!(devs.key_of(KEYBOARD, 0x0007_0035), Some(86));
+        assert!(!devs.remap(KEYBOARD, 0x1234, 30));
         // Devices without a keymap have none.
         let (r, _) = control(&dir, TOUCHSCREEN, OP_KEYCODE, 0, 0, wire::bytes(&a));
         assert_eq!(r, -EINVAL);

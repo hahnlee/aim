@@ -507,6 +507,16 @@ enables it, with the `android.software.freeform_window_management`
 feature. No framework code is patched, and no APK is added
 ([windows.md](../windows.md)).
 
+### Added system tool: the keyboard's layout
+
+`aim-keyboard` (`daemons/keyboard`, `/system_ext/bin/aim-keyboard`) is an
+addition too: init runs it with the Mac's keyboard layout, and it sets
+that InputDevices layout as the built-in keyboard's layout override,
+through one hand-written `IInputManager` transaction (the pinned AIDL's
+code), as a device vendor's settings component would. Android's
+`KeyboardLayoutManager` still picks and applies the layout; nothing in the
+framework is patched ([input.md](../input.md), "Layouts").
+
 ### Kept original on the syscall layer
 
 servicemanager, logd, installd, zygote/app_process (`fork` spawns a fresh
@@ -519,9 +529,11 @@ inputflinger, audioserver, cameraserver, MediaProvider and DnsResolver.
   passthrough exception.
 - **Input:** input is not a HAL. The syscall layer exposes virtual evdev
   devices (`/dev/input/event*`) fed by AppKit: the display server's windows
-  are a touchscreen, a keyboard and a scroll wheel (rotary encoder), one
-  Unix socket per open file, configured by `.idc` files in the vendor
-  partition ([input.md](../input.md)).
+  are a touchscreen, a keyboard and an absolute mouse (hover, buttons,
+  scrolling where the pointer is), one Unix socket per open file,
+  configured by `.idc` files in the vendor partition; the mouse's pointer
+  sprite is the composer's hardware cursor, the Mac's own
+  ([input.md](../input.md)).
 
 ### Vendor HALs (ours)
 

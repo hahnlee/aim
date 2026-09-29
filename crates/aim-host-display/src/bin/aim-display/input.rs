@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 
 use aim_host_display::input::server::Devices;
 use aim_host_display::input::translate::{COMMAND, Input, Phase};
-use aim_host_display::input::{device_dir, devices};
+use aim_host_display::input::{KEYBOARD, device_dir, devices, keymap};
 use aim_host_display::wire::{HostInput, input as kind};
 
 use crate::objc::{CGPoint, CGRect, Id, Sel, class, class_addMethod, sel};
@@ -30,10 +30,26 @@ use crate::window::Window;
 
 static INPUT: OnceLock<Input> = OnceLock::new();
 
-/// Create the devices of the server at `socket` for `win`'s display.
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn LMGetKbdType() -> u8;
+    fn KBGetLayoutType(keyboard_type: i16) -> u32;
+}
+
+/// `kKeyboardISO`.
+const KEYBOARD_ISO: u32 = u32::from_be_bytes(*b"ISO ");
+
+/// Create the devices of the server at `socket` for `win`'s display. The
+/// Mac's keyboard (the one last typed on) decides the keymap's ISO keys.
 pub fn start(socket: &Path, win: &Window) -> std::io::Result<()> {
     let dir = device_dir(socket);
     let devs = Devices::create(&dir, devices(win.width, win.height, win.dpi_x, win.dpi_y))?;
+    // SAFETY: plain HIToolbox queries, on the main thread.
+    if unsafe { KBGetLayoutType(LMGetKbdType() as i16) } == KEYBOARD_ISO {
+        for (usage, key) in keymap::ISO {
+            devs.remap(KEYBOARD, usage, key);
+        }
+    }
     let _ = INPUT.set(Input::new(devs, win.width, win.height, win.dpi_y));
     Ok(())
 }
