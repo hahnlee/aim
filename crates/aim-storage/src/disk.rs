@@ -185,6 +185,17 @@ pub fn create_case_sensitive(image: &Path, size: &str, volume: &str) -> Result<(
     formatted.and(detached).map(|_| ())
 }
 
+/// The format of the image file `image` (`UDRO`, `ULFO`, ...), as
+/// `diskutil image info` names it.
+pub fn format_of(image: &Path) -> Result<String, String> {
+    let output = run(Command::new("diskutil").args(["image", "info"]).arg(image))?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Image Format: "))
+        .map(|f| f.trim().to_string())
+        .ok_or_else(|| format!("{}: diskutil image info names no format", image.display()))
+}
+
 /// Writes `source` (an image) as a new image `destination` in `format`
 /// (`ULFO`, `UDZO`, `ULMO`, `ASIF`...).
 pub fn convert(source: &Path, destination: &Path, format: &str) -> Result<(), String> {

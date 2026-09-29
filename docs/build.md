@@ -37,7 +37,7 @@ selects a group (`cargo aim build hal`). `-v` shows the tools' output,
 
 | Path | What |
 | --- | --- |
-| `_build/android16-image.dmg` | The system image (`image` node): the original and its translation cache as a compressed read-only case-sensitive disk image, mounted at `_build/android16-image` (docs/storage.md) |
+| `_build/android16-image.dmg` | The system image (`image` node): the original and its translation cache as an uncompressed read-only case-sensitive disk image, mounted at `_build/android16-image` (docs/storage.md) |
 | `_build/aosp/` | AOSP trees fetched at the image's tag, each checked against its lock's hash |
 | `_build/downloads/` | Their archives (and the MoltenVK release), so a refetch needs no network |
 | `_build/xsdc`, `_build/angle-source`, `_build/depot_tools` | Pinned checkouts |

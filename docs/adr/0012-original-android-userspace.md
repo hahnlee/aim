@@ -73,8 +73,8 @@ programs, and implement only what lies below it.
      Android's filesystems are case-sensitive and the Mac's is not: an
      extraction onto the host lost 7 files of the pinned image that differ
      from others only in case. The original is extracted into a
-     case-sensitive APFS volume, which becomes a compressed read-only disk
-     image (lzfse, 2.1 GB for the 3.8 GB tree and its translations); the
+     case-sensitive APFS volume, which becomes an uncompressed read-only
+     disk image (4.7 GB for the 3.8 GB tree and its translations); the
      derived image is that image with the overlay in a shadow file. The
      guest's writable data is a sparse case-sensitive image per data
      directory. All are attached hidden by the user, without admin rights.
