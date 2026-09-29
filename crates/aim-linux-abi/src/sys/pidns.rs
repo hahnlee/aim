@@ -74,11 +74,27 @@ pub fn leave() {
     else {
         return;
     };
-    for p in members().unwrap_or_default() {
-        if p != me() {
-            // SAFETY: a process of this namespace.
-            unsafe { libc::kill(p, libc::SIGKILL) };
+    let others: Vec<i32> = members()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&p| p != me())
+        .collect();
+    for &p in &others {
+        // SAFETY: a process of this namespace.
+        unsafe { libc::kill(p, libc::SIGKILL) };
+    }
+    // As the kernel's `zap_pid_ns_processes`, wait until they are gone (a
+    // process being started may still be writing its entries), for at
+    // most a second.
+    const SZOMB: u32 = 5;
+    for _ in 0..100 {
+        if others
+            .iter()
+            .all(|&p| bsd_info(p).is_none_or(|i| i.pbi_status == SZOMB))
+        {
+            break;
         }
+        std::thread::sleep(Duration::from_millis(10));
     }
     let _ = std::fs::remove_dir_all(dir);
 }

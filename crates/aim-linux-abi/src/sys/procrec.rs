@@ -27,8 +27,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU8, AtomicU32, Ordering::*};
 use std::time::{Duration, Instant};
 
-/// One slot per possible tid of a process (`thread`).
-const SLOTS: usize = 4096;
 /// The part of the argument area a record holds.
 const ARGS_MAX: usize = (64 << 10) - 64;
 /// How long a reader waits for an answer.
@@ -63,7 +61,7 @@ struct Slot {
 struct Record {
     header: Header,
     args: [AtomicU8; ARGS_MAX],
-    slots: [Slot; SLOTS],
+    slots: [Slot; super::thread::SLOTS],
 }
 
 const SIZE: usize = std::mem::size_of::<Record>();

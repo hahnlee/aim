@@ -252,13 +252,17 @@ pub fn owner(tid: i32) -> i32 {
     }
 }
 
+/// One slot for each tid a process can have.
+pub const SLOTS: usize = TIDS_PER_PROCESS as usize + 1;
+
 /// The slot of `tid` among the tids process `pid` can have: 0 for its
-/// main thread, n for `TID_BASE + (pid << 12) + n`.
+/// main thread, n for `TID_BASE + (pid << TID_SHIFT) + n`.
 pub fn slot_of(pid: i32, tid: i32) -> Option<usize> {
     if tid == pid {
         return Some(0);
     }
-    (tid >= TID_BASE && owner(tid) == pid).then(|| ((tid - TID_BASE) & 0xfff) as usize)
+    (tid >= TID_BASE && owner(tid) == pid)
+        .then(|| ((tid - TID_BASE) as u32 & TIDS_PER_PROCESS) as usize)
 }
 
 /// Every tid of this process, in order.
