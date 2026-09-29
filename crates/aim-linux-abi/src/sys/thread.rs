@@ -21,8 +21,12 @@ use super::signal::ThreadSignals;
 use crate::context::{self, GuestContext, HostStacks};
 use crate::errno::{EAGAIN, EINVAL, ENOSYS, ESRCH};
 
-const TID_BASE: i32 = 1 << 29;
-const TIDS_PER_PROCESS: u32 = 4095;
+/// A clone's tid is TID_BASE + (pid << TID_SHIFT) + n, above every host
+/// pid (at most 99999) and, like a Linux tid, below 2^28, the most a CPU
+/// clock id (`~tid << 3`) can encode.
+const TID_BASE: i32 = 1 << 17;
+const TID_SHIFT: u32 = 11;
+const TIDS_PER_PROCESS: u32 = (1 << TID_SHIFT) - 1;
 /// Host stack of a clone thread (the syscall layer runs on it).
 const HOST_STACK: usize = 512 << 10;
 
@@ -143,19 +147,13 @@ pub fn find(tid: i32) -> Option<Arc<Thread>> {
     with_table(|t| t.get(&tid).cloned())
 }
 
-/// The tid of this process whose low 29 bits are `bits` (all a CPU clock
-/// id keeps): the main thread's, or a clone's above TID_BASE.
-pub fn tid_of_clock_bits(bits: i32) -> i32 {
-    if bits == pid() { bits } else { TID_BASE | bits }
-}
-
 /// User and system CPU time of thread `tid` of this process, in
-/// nanoseconds.
+/// nanoseconds; none yet for a thread whose host thread has not started.
 pub fn cpu_times(tid: i32) -> Option<(u64, u64)> {
     with_table(|t| {
         let p = t.get(&tid)?.pthread.load(SeqCst);
         if p == 0 {
-            return None;
+            return Some((0, 0));
         }
         // SAFETY: the pthread is alive while it is in the table (whose lock
         // is held).
@@ -231,7 +229,7 @@ pub fn set_name_of(tid: i32, name: [u8; 16]) -> bool {
 /// The process a tid belongs to (a pid is its own main thread's tid).
 pub fn owner(tid: i32) -> i32 {
     if tid >= TID_BASE {
-        (tid - TID_BASE) >> 12
+        (tid - TID_BASE) >> TID_SHIFT
     } else {
         tid
     }
@@ -267,7 +265,7 @@ pub fn poke_main_from_handler(sig: i32) {
 }
 
 fn alloc_tid(t: &HashMap<i32, Arc<Thread>>) -> Option<i32> {
-    let base = TID_BASE + (pid() << 12);
+    let base = TID_BASE + (pid() << TID_SHIFT);
     (0..TIDS_PER_PROCESS)
         .map(|_| base + (NEXT_TID.fetch_add(1, SeqCst) % TIDS_PER_PROCESS) as i32 + 1)
         .find(|tid| !t.contains_key(tid))

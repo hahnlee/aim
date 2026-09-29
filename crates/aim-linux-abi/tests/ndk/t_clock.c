@@ -132,12 +132,18 @@ static void cpu_clocks(void) {
   pthread_t th;
   stop = 0;
   CHECK(pthread_create(&th, NULL, spinner, NULL) == 0);
+  // Tids fit what a CPU clock id encodes, whatever the pid.
+  CHECK(pthread_gettid_np(th) < (1 << 28));
   clockid_t other;
-  CHECK(pthread_getcpuclockid(th, &other) == 0);
-  usleep(50000);
-  int64_t o = ns_of(other);
+  CHECK(pthread_getcpuclockid(th, &other) == 0 && other < 0);
+  // Its clock is valid before it first runs; on a busy host that takes a
+  // while, so wait for it to count 10 ms (at most 5 s).
   struct timespec r;
   int res = syscall(SYS_clock_getres, other, &r) == 0 ? r.tv_nsec : -errno;
+  int64_t o = 0, deadline = ns_of(CLOCK_MONOTONIC) + 5000000000LL;
+  while ((o = ns_of(other)) >= 0 && o < 10000000 && ns_of(CLOCK_MONOTONIC) < deadline) {
+    usleep(10000);
+  }
   stop = 1;
   pthread_join(th, NULL);
   CHECK(o >= 10000000 && res == 1);

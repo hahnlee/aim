@@ -134,17 +134,13 @@ pub fn realtime_ns() -> i64 {
 }
 
 /// An encoded CPU clock: (pid or tid, 0 for the caller; per thread;
-/// CPUCLOCK_WHICH). `~id << 3` keeps 29 bits of the id, which a pid has
-/// and a tid is recovered from (`thread::tid_of_clock_bits`).
+/// CPUCLOCK_WHICH).
 fn cpu_clock(id: u64) -> Option<(i32, bool, i64)> {
     let id = id as i32 as i64;
     match id as u64 {
         PROCESS_CPUTIME_ID => Some((0, false, CPUCLOCK_SCHED)),
         THREAD_CPUTIME_ID => Some((0, true, CPUCLOCK_SCHED)),
-        _ if id < 0 => {
-            let bits = (!(id >> 3) & ((1 << 29) - 1)) as i32;
-            Some((bits, id & CPUCLOCK_PERTHREAD != 0, id & 3))
-        }
+        _ if id < 0 => Some(((!(id >> 3)) as i32, id & CPUCLOCK_PERTHREAD != 0, id & 3)),
         _ => None,
     }
 }
@@ -198,13 +194,24 @@ const TASK_ABSOLUTETIME_INFO: u32 = 1;
 
 /// This process's user and system time: its live threads' (current, and
 /// like Linux's counting what a thread ran before exec) and its exited
-/// threads'.
+/// threads'. Mach reports live threads in microseconds; the caller's own
+/// share, read before the total, is replaced by its exact time, read
+/// after it, so the total is never behind the caller's thread clock.
 fn own_process_times() -> Option<(u64, u64)> {
     let mut abs = TaskAbsolutetimeInfo::default();
-    // SAFETY: an all-zero task_thread_times_info is valid.
-    let mut live: libc::task_thread_times_info = unsafe { std::mem::zeroed() };
-    // SAFETY: task_info into locals of the flavours' sizes.
+    // SAFETY: all-zero Mach info structs are valid.
+    let (mut live, mut me): (libc::task_thread_times_info, libc::thread_basic_info) =
+        unsafe { std::mem::zeroed() };
+    // SAFETY: Mach info calls into locals of the flavours' sizes.
     let ok = unsafe {
+        let mut n = libc::THREAD_BASIC_INFO_COUNT;
+        let port = libc::pthread_mach_thread_np(libc::pthread_self());
+        let r = libc::thread_info(
+            port,
+            libc::THREAD_BASIC_INFO as u32,
+            (&raw mut me).cast(),
+            &mut n,
+        );
         let task = mach_task_self_;
         let mut n = (size_of::<TaskAbsolutetimeInfo>() / 4) as u32;
         let a = libc::task_info(task, TASK_ABSOLUTETIME_INFO, (&raw mut abs).cast(), &mut n);
@@ -215,14 +222,22 @@ fn own_process_times() -> Option<(u64, u64)> {
             (&raw mut live).cast(),
             &mut n,
         );
-        a == 0 && b == 0
+        r == 0 && a == 0 && b == 0
     };
+    // SAFETY: reads the clock.
+    let exact = unsafe { clock_gettime_nsec_np(libc::CLOCK_THREAD_CPUTIME_ID) };
     let ns =
         |t: libc::time_value_t| t.seconds as u64 * 1_000_000_000 + t.microseconds as u64 * 1000;
+    let others_user = ns(live.user_time).saturating_sub(ns(me.user_time));
+    let others_system = ns(live.system_time).saturating_sub(ns(me.system_time));
     ok.then(|| {
         (
-            ticks_to_ns(abs.total_user - abs.threads_user) as u64 + ns(live.user_time),
-            ticks_to_ns(abs.total_system - abs.threads_system) as u64 + ns(live.system_time),
+            ticks_to_ns(abs.total_user - abs.threads_user) as u64
+                + others_user
+                + exact.saturating_sub(ns(me.system_time)),
+            ticks_to_ns(abs.total_system - abs.threads_system) as u64
+                + others_system
+                + ns(me.system_time),
         )
     })
 }
@@ -232,7 +247,6 @@ fn own_process_times() -> Option<(u64, u64)> {
 /// caller's tid (Linux's `pid_for_clock`).
 fn cpu_ns((id, thread, which): (i32, bool, i64), gettime: bool) -> Result<u64, i64> {
     let tid = super::thread::gettid() as i32;
-    let own = |bits| bits == 0 || super::thread::tid_of_clock_bits(bits) == tid;
     let (user, system) = match (thread, id) {
         _ if which > CPUCLOCK_SCHED => None,
         (true, 0) => {
@@ -244,10 +258,10 @@ fn cpu_ns((id, thread, which): (i32, bool, i64), gettime: bool) -> Result<u64, i
             // SAFETY: the calling thread's own port.
             thread_times(unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) })
         }
-        (true, _) if own(id) => return cpu_ns((0, true, which), gettime),
-        (true, _) => super::thread::cpu_times(super::thread::tid_of_clock_bits(id)),
+        (true, _) if id == tid => return cpu_ns((0, true, which), gettime),
+        (true, _) => super::thread::cpu_times(id),
         (false, _) if id == 0 || id == std::process::id() as i32 => own_process_times(),
-        (false, _) if gettime && own(id) => own_process_times(),
+        (false, _) if gettime && id == tid => own_process_times(),
         (false, _) if super::pidns::contains(id) => process_times(id),
         (false, _) => None,
     }
