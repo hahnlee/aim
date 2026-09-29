@@ -248,6 +248,21 @@ static void threads_and_names(void) {
   }
   closedir(d);
   CHECK(listed);
+  // A value written for a thread (task profiles' timer slack) is kept, and
+  // the thread stays out of /proc's list of processes.
+  snprintf(path, sizeof path, "/proc/%d/timerslack_ns", worker_tid);
+  int slack = open(path, O_WRONLY | O_CLOEXEC);
+  CHECK(slack >= 0 && write(slack, "50000", 5) == 5);
+  close(slack);
+  CHECK(stat(path, &st) == 0);
+  listed = 0;
+  d = opendir("/proc");
+  CHECK(d != NULL);
+  while ((e = readdir(d)) != NULL) {
+    if (atoi(e->d_name) == worker_tid) listed = 1;
+  }
+  closedir(d);
+  CHECK(!listed);
   // Another thread's name goes through /proc/self/task/<tid>/comm.
   CHECK(pthread_setname_np(t, "worker-x") == 0);
   snprintf(path, sizeof path, "/proc/self/task/%d/comm", worker_tid);
@@ -270,6 +285,9 @@ static void threads_and_names(void) {
   CHECK(write(worker_go[1], "x", 1) == 1);
   CHECK(pthread_join(t, NULL) == 0);
   CHECK(syscall(SYS_tgkill, getpid(), worker_tid, 0) == -1 && errno == ESRCH);
+  // The value goes with the thread.
+  snprintf(path, sizeof path, "/proc/%d/timerslack_ns", worker_tid);
+  CHECK(stat(path, &st) == -1 && errno == ENOENT);
   prctl(PR_SET_NAME, "t_proc");
 }
 

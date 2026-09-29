@@ -884,6 +884,65 @@ static void permissions(void) {
 }
 #undef DENIED
 
+static char* slurp(const char* path) {
+  static char buf[4096];
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) return NULL;
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  buf[n < 0 ? 0 : n] = 0;
+  return buf;
+}
+
+static volatile pid_t chld_pid;
+static volatile uid_t chld_uid;
+
+static void on_chld(int sig, siginfo_t* si, void* uc) {
+  (void)sig;
+  (void)uc;
+  chld_pid = si->si_pid;
+  chld_uid = si->si_uid;
+}
+
+// Another process's credentials as the kernel reports them: /proc/<pid>
+// belongs to its effective ids, its status has its ids and capabilities,
+// and SIGCHLD and waitid carry its pid and uid (a uid 10057 child).
+static void peer_ids(void) {
+  struct sigaction sa = {.sa_sigaction = on_chld, .sa_flags = SA_SIGINFO | SA_RESTART};
+  sigaction(SIGCHLD, &sa, NULL);
+  int ready[2], go[2];
+  CHECK(pipe(ready) == 0 && pipe(go) == 0, "pipes");
+  pid_t child = fork();
+  if (child == 0) {
+    close(go[1]);
+    if (setresgid(10057, 10057, 10057) != 0 || setresuid(10057, 10057, 10057) != 0) _exit(9);
+    write(ready[1], "r", 1);
+    char c;
+    read(go[0], &c, 1);
+    _exit(0);
+  }
+  close(go[0]);
+  char c, path[64], *text;
+  CHECK(read(ready[0], &c, 1) == 1, "child ready");
+  struct stat st;
+  snprintf(path, sizeof(path), "/proc/%d", child);
+  CHECK(stat(path, &st) == 0 && st.st_uid == 10057 && st.st_gid == 10057, "owner %d", st.st_uid);
+  snprintf(path, sizeof(path), "/proc/%d/status", child);
+  CHECK((text = slurp(path)) && strstr(text, "\nUid:\t10057\t10057\t10057\t10057\n") &&
+            strstr(text, "\nCapEff:\t0000000000000000\n"),
+        "status '%s'", text);
+  CHECK((text = slurp("/proc/self/status")) && strstr(text, "\nCapEff:\t000001ffffffffff\n"),
+        "own status '%s'", text);
+  write(go[1], "x", 1);
+  siginfo_t si = {0};
+  CHECK(waitid(P_PID, child, &si, WEXITED) == 0 && si.si_pid == child && si.si_uid == 10057,
+        "waitid pid %d uid %d", si.si_pid, si.si_uid);
+  for (int i = 0; i < 1000 && !chld_pid; i++) usleep(1000);
+  CHECK(chld_pid == child && chld_uid == 10057, "SIGCHLD pid %d uid %d", chld_pid, chld_uid);
+  signal(SIGCHLD, SIG_DFL);
+  printf("ok peer_ids\n");
+}
+
 // Without a process table, linux-run is the init of a private pid
 // namespace: this prints its pid and a child's and exits, and the child
 // dies with it (tests/process.rs).
@@ -1036,7 +1095,7 @@ int main(int argc, char** argv) {
       {"seccomp_filter", seccomp_filter},
       {"xattrs", xattrs},           {"pf_key", pf_key},
       {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
-      {"permissions", permissions},
+      {"permissions", permissions}, {"peer_ids", peer_ids},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},
   };
   for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {

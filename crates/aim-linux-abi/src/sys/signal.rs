@@ -408,7 +408,7 @@ pub fn reroute_process_pending() {
 // ---- signals from outside the process -----------------------------------------
 
 struct External {
-    /// pid | uid << 32
+    /// The sender's host pid.
     from: AtomicU64,
     /// si_code | status << 32
     code: AtomicU64,
@@ -422,6 +422,13 @@ static EXTERNAL_INFO: [External; 32] = [const {
     }
 }; 32];
 
+/// The guest's `si_uid` of a signal host process `pid` sent: its real uid
+/// in the process table (a child's is there until it is reaped), else
+/// root's, as for a process outside the namespace.
+pub(super) fn sender_uid(pid: i32) -> u32 {
+    super::cred::real_uid_of(pid).unwrap_or(0)
+}
+
 /// Record a host signal from outside; async-signal-safe (no locks).
 fn record_external(sig: i32, si: &libc::siginfo_t) {
     let code = match si.si_code {
@@ -431,8 +438,7 @@ fn record_external(sig: i32, si: &libc::siginfo_t) {
         _ => sigframe::SI_USER,
     };
     let e = &EXTERNAL_INFO[sig as usize - 1];
-    e.from
-        .store(si.si_pid as u32 as u64 | (si.si_uid as u64) << 32, Relaxed);
+    e.from.store(si.si_pid as u32 as u64, Relaxed);
     e.code.store(
         code as u32 as u64 | (si.si_status as u32 as u64) << 32,
         Relaxed,
@@ -446,11 +452,12 @@ fn drain_external() {
         if bits & bit(sig) != 0 {
             let e = &EXTERNAL_INFO[sig as usize - 1];
             let (from, code) = (e.from.load(Relaxed), e.code.load(Relaxed));
+            let pid = from as u32 as i32;
             let mut info = Siginfo::from_sender(
                 sig,
                 code as u32 as i32,
-                from as u32 as i32,
-                (from >> 32) as u32,
+                super::pidns::vnr(pid),
+                sender_uid(pid),
             );
             info.fields[1] = code >> 32; // _sigchld.status
             send_process(info);

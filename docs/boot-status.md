@@ -145,6 +145,13 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
   fails with "Unable to open ashmem device".
 - POSIX timers, a writable `trace_marker` (#192), per-thread `comm` files
   (#198), and `/proc/<tid>`, the scheduler calls and `tgkill` for every tid.
+- `/proc` lists thread-group leaders only, and a value written under
+  `/proc/<pid or tid>` goes with its process or thread (#378).
+  `/proc/<pid>` belongs to the process's effective ids and its `status`
+  has its credentials and capabilities from the process table (#377).
+  Signals from another guest process carry its namespace pid and guest
+  real uid; a child stays in the table as a zombie until a parent in the
+  namespace reaps it, so SIGCHLD and `waitid` report its uid (#383).
 - The process table is the guest's pid namespace for every call that
   names a process, not only `/proc` (#341): `kill` (also `-1` and process
   groups), pidfds, the scheduler and priority calls and the rest reach
