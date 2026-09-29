@@ -55,6 +55,11 @@ fn timers() -> MutexGuard<'static, Vec<Timer>> {
     TIMERS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Whether the process has a timer.
+pub fn any() -> bool {
+    !timers().is_empty()
+}
+
 /// Arm the kqueue for `id`'s deadline `next` (outside the table lock: the
 /// timer kqueue's lock is taken before this one across a fork).
 fn arm(id: i32, ident: u64, next: u64) {

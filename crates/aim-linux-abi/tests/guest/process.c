@@ -348,6 +348,76 @@ static void exec_script(void) {
   printf("ok exec_script\n");
 }
 
+static void on_usr1(int sig) { (void)sig; }
+
+// What execve resets and what it keeps (execve(2)): caught handlers go to
+// SIG_DFL, ignored ones stay ignored; the mask and pending signals stay;
+// close-on-exec fds close, others stay; the name is the new program's;
+// other processes read the new command line.
+static int exec_state_child(char** argv) {
+  int plain = atoi(argv[1]), cloexec = atoi(argv[2]);
+  int bad = 0;
+  struct sigaction sa;
+  sigaction(SIGUSR1, NULL, &sa);
+  bad |= (sa.sa_handler != SIG_DFL || sa.sa_flags != 0) << 0;
+  sigaction(SIGUSR2, NULL, &sa);
+  bad |= (sa.sa_handler != SIG_IGN) << 1;
+  sigset_t set;
+  sigprocmask(SIG_BLOCK, NULL, &set);
+  bad |= !sigismember(&set, SIGTERM) << 2;
+  sigpending(&set);
+  bad |= !sigismember(&set, SIGTERM) << 3;
+  bad |= !(fcntl(cloexec, F_GETFD) == -1 && errno == EBADF) << 4;
+  bad |= (fcntl(plain, F_GETFD) != 0) << 5;
+  char comm[32] = {0};
+  int fd = open("/proc/self/comm", O_RDONLY);
+  read(fd, comm, sizeof(comm) - 1);
+  close(fd);
+  bad |= (strcmp(comm, "process\n") != 0) << 6;
+  char b = bad ? 'x' : 'k';
+  write(plain, &b, 1);
+  for (;;) sleep(1);
+}
+
+static void exec_state(void) {
+  int p[2];
+  CHECK(pipe(p) == 0, "pipe");
+  pid_t pid = fork();
+  CHECK(pid >= 0, "fork");
+  if (pid == 0) {
+    close(p[0]);
+    signal(SIGUSR1, on_usr1);
+    signal(SIGUSR2, SIG_IGN);
+    sigset_t term;
+    sigemptyset(&term);
+    sigaddset(&term, SIGTERM);
+    sigprocmask(SIG_BLOCK, &term, NULL);
+    kill(getpid(), SIGTERM);
+    prctl(PR_SET_NAME, "renamed");
+    int cloexec = open(self_path, O_RDONLY | O_CLOEXEC);
+    char a1[16], a2[16];
+    snprintf(a1, sizeof(a1), "%d", p[1]);
+    snprintf(a2, sizeof(a2), "%d", cloexec);
+    execve(self_path, (char*[]){"execstate", a1, a2, NULL}, NULL);
+    _exit(127);
+  }
+  close(p[1]);
+  char b = 0;
+  CHECK(read(p[0], &b, 1) == 1 && b == 'k', "the exec'd child's checks: '%c'", b);
+  char path[64], cmd[256] = {0}, want[64];
+  snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+  int fd = open(path, O_RDONLY);
+  int n = read(fd, cmd, sizeof(cmd));
+  close(fd);
+  int wn = snprintf(want, sizeof(want), "execstate%c%d%c", 0, p[1], 0);
+  CHECK(n > wn && memcmp(cmd, want, wn) == 0, "cmdline '%.*s'", n, cmd);
+  kill(pid, SIGKILL);
+  int st;
+  CHECK(waitpid(pid, &st, 0) == pid && WIFSIGNALED(st), "status %#x", st);
+  close(p[0]);
+  printf("ok exec_state\n");
+}
+
 static void waitid_variants(void) {
   pid_t pid = fork();
   if (pid == 0) {
@@ -1056,6 +1126,7 @@ int main(int argc, char** argv) {
   // An empty argv arrives as one empty argv[0].
   if (argc == 1 && argv[0][0] == 0) return 3;
   if (strcmp(argv[0], "exit") == 0) return 0;
+  if (strcmp(argv[0], "execstate") == 0 && argc == 3) return exec_state_child(argv);
   if (strcmp(argv[0], "ids") == 0) {
     struct __user_cap_header_struct h = {_LINUX_CAPABILITY_VERSION_3, 0};
     struct __user_cap_data_struct d[2];
@@ -1088,7 +1159,8 @@ int main(int argc, char** argv) {
       {"fork_wait", fork_wait},     {"fork_new_code", fork_new_code},
       {"pipe_echo", pipe_echo},     {"mount_ns", mount_ns},
       {"exec_image", exec_image},   {"exec_argv", exec_argv},
-      {"exec_script", exec_script}, {"waitid_variants", waitid_variants},
+      {"exec_script", exec_script}, {"exec_state", exec_state},
+      {"waitid_variants", waitid_variants},
       {"pidfd_poll", pidfd_poll},   {"epoll_fork", epoll_fork},   {"death_by_signal", death_by_signal},
       {"fork_memory", fork_memory}, {"fork_then_exit", fork_then_exit},
       {"identity", identity},       {"identity_file", identity_file},

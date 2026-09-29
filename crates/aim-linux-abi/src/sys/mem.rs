@@ -266,7 +266,17 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         Protect,
     }
     let mut copied = false;
-    let (base, finish) = if kind == MAP_SHARED || kind == MAP_SHARED_VALIDATE {
+    let shared = kind == MAP_SHARED || kind == MAP_SHARED_VALIDATE;
+    let (base, finish) = if shared
+        && !anon
+        && !noreplace
+        && let Some(r) = super::sharedfile::map(fd, addr, len, prot as i32, fixed, off)
+    {
+        match r {
+            Ok(b) => (b, Finish::Nothing),
+            Err(e) => return e,
+        }
+    } else if shared {
         if !anon
             && let Some(r) = super::memfd::map_shared(fd, addr, len, host_prot(prot), fixed, off)
         {
@@ -400,6 +410,16 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         note_file_copy(base, len, fd, off);
     }
     base as i64
+}
+
+/// execve in place: the old image's memory goes, the whole guest range,
+/// with what is recorded about it; the heap window is reserved again.
+pub fn exec_reset() {
+    // SAFETY: nothing of the old image is used from here on.
+    unsafe { mach_vm_deallocate(task(), arena::LO, arena::HI - arena::LO) };
+    window::init();
+    copies::forget(arena::LO, arena::HI);
+    DEFERRED_UNMAPS.with(|d| d.borrow_mut().clear());
 }
 
 /// Record that `[base, base+len)` holds a copy of `fd` from `off`.

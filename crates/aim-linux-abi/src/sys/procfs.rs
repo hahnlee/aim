@@ -13,7 +13,7 @@
 
 use std::ffi::CString;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use super::dir::{self, DirStream, Entry};
 use super::fdtab::{self, Kind};
@@ -38,16 +38,21 @@ pub struct StackInfo {
     pub env: (u64, u64),
 }
 
-static STACK: OnceLock<StackInfo> = OnceLock::new();
+/// The current program's; replaced when the process execs in place.
+static STACK: RwLock<Option<StackInfo>> = RwLock::new(None);
 
 pub fn note_stack(s: StackInfo) {
-    let _ = STACK.set(s);
+    *STACK.write().unwrap_or_else(|e| e.into_inner()) = Some(s);
+}
+
+fn stack() -> Option<StackInfo> {
+    *STACK.read().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Fork: the main thread's stack areas (the child's memory has them at
 /// the same addresses).
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
-    w.opt(STACK.get(), |w, s| {
+    w.opt(stack(), |w, s| {
         for v in [
             s.lo,
             s.hi,
@@ -218,9 +223,12 @@ unsafe extern "C" {
 
 fn cmdline(p: i32) -> Vec<u8> {
     if p == pid()
-        && let Some(s) = STACK.get()
+        && let Some(s) = stack()
     {
         return read_guest(s.args.0, s.args.1);
+    }
+    if let Some(c) = super::cred::entry_cmdline(p) {
+        return c;
     }
     let mut out = Vec::new();
     for a in host_argv(p) {
@@ -233,6 +241,9 @@ fn cmdline(p: i32) -> Vec<u8> {
 fn comm(p: i32) -> String {
     let argv0 = if p == pid() {
         super::process::exe_guest_path()
+    } else if let Some(c) = super::cred::entry_cmdline(p) {
+        let argv0 = c.split(|&b| b == 0).next().unwrap_or_default();
+        String::from_utf8_lossy(argv0).into_owned()
     } else {
         host_argv(p)
             .first()
@@ -285,7 +296,7 @@ fn stat_line(p: i32) -> Option<String> {
         + b.pbi_start_tvusec as u64 * TICKS / 1_000_000;
     let ns_to_ticks = |ns: u64| ns / (1_000_000_000 / TICKS);
     let s = if p == pid() {
-        STACK.get().copied().unwrap_or_default()
+        stack().unwrap_or_default()
     } else {
         StackInfo::default()
     };
@@ -374,7 +385,7 @@ fn statm(p: i32) -> Option<String> {
 
 /// Linux-format `/proc/self/maps` from the VM map.
 fn maps() -> String {
-    let stack = STACK.get().copied().unwrap_or_default();
+    let stack = stack().unwrap_or_default();
     let mut out = String::new();
     for r in vmmap::regions(0, u64::MAX) {
         let prot = r.prot;
@@ -864,11 +875,7 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
             let named = me.then(|| thread_comm(thread.unwrap_or(p))).flatten();
             Node::File(format!("{}\n", named.unwrap_or_else(|| comm(p))).into_bytes())
         }
-        "environ" if me => Node::File(
-            STACK
-                .get()
-                .map_or(Vec::new(), |s| read_guest(s.env.0, s.env.1)),
-        ),
+        "environ" if me => Node::File(stack().map_or(Vec::new(), |s| read_guest(s.env.0, s.env.1))),
         "stat" => Node::File(stat_line(p)?.into_bytes()),
         "status" => Node::File(status(p)?.into_bytes()),
         "statm" => Node::File(statm(p)?.into_bytes()),

@@ -156,45 +156,49 @@ pub fn run(opts: RunOptions) -> String {
         Err(e) => return format!("{}: cannot execute (errno {})", opts.program, -e),
     };
     let argv: Vec<Vec<u8>> = argv.into_iter().map(|a| a.into_bytes()).collect();
-    let program = match loader::load_elf(&resolved.host, &resolved.guest) {
-        Ok(i) => i,
-        Err(e) => return e,
-    };
-    sys::set_exe(
-        resolved.guest.clone(),
-        resolved.host.to_string_lossy().into_owned(),
-    );
-    let (entry, interp_base) = match &program.interp {
-        Some(interp) => {
-            let r = match vfs::resolve(vfs::LINUX_AT_FDCWD, interp.as_bytes(), true) {
-                Ok(r) => r,
-                Err(e) => return format!("interpreter {interp}: cannot resolve (errno {e})"),
-            };
-            match loader::load_elf(&r.host, &r.guest) {
-                Ok(i) => {
-                    if opts.trace {
-                        trace_image(&r.guest, &i);
-                    }
-                    (i.entry, i.bias)
-                }
-                Err(e) => return e,
-            }
-        }
-        None => (program.entry, 0),
-    };
-    if opts.trace {
-        trace_image(&resolved.guest, &program);
+    let execfn = opts.execfn.as_deref().unwrap_or(opts.program.as_bytes());
+    match load_program(&resolved, &argv, &opts.envp, execfn) {
+        Ok((entry, sp)) => context::enter_guest(entry, sp),
+        Err(e) => e,
     }
-    sys::init_brk(program.end);
-    let sp = match loader::build_stack(&loader::StackInputs {
-        argv: &argv,
-        envp: &opts.envp,
-        execfn: opts.execfn.as_deref().unwrap_or(opts.program.as_bytes()),
-        program: &program,
-        interp_base,
-    }) {
-        Ok(sp) => sp,
-        Err(e) => return e,
+}
+
+/// Load `program` (an ELF file; `#!` scripts are interpreted already) and
+/// its interpreter, and build the initial stack as Linux's `binfmt_elf`
+/// does. Returns the entry point and the initial stack pointer.
+pub fn load_program(
+    program: &vfs::Resolved,
+    argv: &[Vec<u8>],
+    envp: &[Vec<u8>],
+    execfn: &[u8],
+) -> Result<(u64, u64), String> {
+    let image = loader::load_elf(&program.host, &program.guest)?;
+    sys::set_exe(
+        program.guest.clone(),
+        program.host.to_string_lossy().into_owned(),
+    );
+    let (entry, interp_base) = match &image.interp {
+        Some(interp) => {
+            let r = vfs::resolve(vfs::LINUX_AT_FDCWD, interp.as_bytes(), true)
+                .map_err(|e| format!("interpreter {interp}: cannot resolve (errno {e})"))?;
+            let i = loader::load_elf(&r.host, &r.guest)?;
+            if sys::tracing() {
+                trace_image(&r.guest, &i);
+            }
+            (i.entry, i.bias)
+        }
+        None => (image.entry, 0),
     };
-    context::enter_guest(entry, sp)
+    if sys::tracing() {
+        trace_image(&program.guest, &image);
+    }
+    sys::init_brk(image.end);
+    let sp = loader::build_stack(&loader::StackInputs {
+        argv,
+        envp,
+        execfn,
+        program: &image,
+        interp_base,
+    })?;
+    Ok((entry, sp))
 }

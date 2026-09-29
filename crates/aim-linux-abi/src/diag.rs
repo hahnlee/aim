@@ -202,6 +202,11 @@ pub fn install_signal_handlers() {
     crate::sys::install_host_handlers();
 }
 
+/// execve in place: the old image's mappings are gone.
+pub(crate) fn exec_reset() {
+    MODULES.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 /// Fork: the named executable mappings, for diagnostics.
 pub(crate) fn fork_save(w: &mut crate::sys::fork_state::Writer) {
     let m = MODULES.lock().unwrap_or_else(|e| e.into_inner());

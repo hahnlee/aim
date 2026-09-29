@@ -53,6 +53,19 @@ pub mod vm {
             prot: i32,
         ) -> i32;
         pub fn mach_vm_deallocate(task: libc::mach_port_t, address: u64, size: u64) -> i32;
+        pub fn mach_vm_map(
+            task: libc::mach_port_t,
+            address: *mut u64,
+            size: u64,
+            mask: u64,
+            flags: i32,
+            object: libc::mach_port_t,
+            offset: u64,
+            copy: i32,
+            cur: i32,
+            max: i32,
+            inheritance: u32,
+        ) -> i32;
         pub fn mach_vm_region(
             task: libc::mach_port_t,
             address: *mut u64,
@@ -242,6 +255,18 @@ fn new_island(hint: u64) -> Option<Island> {
                 libc::munmap(rw, ISLAND_SIZE as usize);
                 None
             }
+        }
+    }
+}
+
+/// execve in place: the islands went with the old image's memory; their
+/// writable views are host memory, released here.
+pub(crate) fn exec_reset() {
+    for isl in ISLANDS.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+        // SAFETY: the island's own mappings, which nothing uses any more.
+        unsafe {
+            libc::munmap(isl.rw as *mut _, ISLAND_SIZE as usize);
+            libc::munmap(isl.rx as *mut _, ISLAND_SIZE as usize);
         }
     }
 }

@@ -332,14 +332,50 @@ fn publish(id: &Identity) {
     }
 }
 
+/// The command line of the program this process exec'd in place (argv,
+/// each argument NUL-terminated), which other processes read from the
+/// `by-pid` entry: the host's argv still names the program the process
+/// was started with.
+static CMDLINE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
 /// Write `id` as the `by-pid` entry of `pid`, replacing (never modifying)
 /// what is there.
 fn write_entry(pid: i32, id: &Identity) {
     let Some(dir) = BY_PID.get() else { return };
+    let mut text = id.to_text();
+    if let Some(c) = CMDLINE.lock().unwrap().as_ref() {
+        text.push_str("cmdline\t");
+        for b in c {
+            text.push_str(&format!("{b:02x}"));
+        }
+        text.push('\n');
+    }
     let tmp = dir.join(format!(".{pid}.tmp"));
-    if std::fs::write(&tmp, id.to_text()).is_ok() {
+    if std::fs::write(&tmp, text).is_ok() {
         let _ = std::fs::rename(&tmp, dir.join(pid.to_string()));
     }
+}
+
+/// execve in place: the new program's credentials
+/// ([`Identity::exec_transform`]) and its command line `cmdline`.
+pub fn exec(cmdline: Vec<u8>) {
+    *CMDLINE.lock().unwrap() = Some(cmdline);
+    let mut g = STATE.lock().unwrap();
+    let id = g.get_or_insert_with(Identity::default);
+    id.exec_transform();
+    publish(id);
+    // SAFETY: trivial.
+    write_entry(unsafe { libc::getpid() }, id);
+}
+
+/// The command line process `pid` of this namespace exec'd in place, from
+/// its `by-pid` entry.
+pub fn entry_cmdline(pid: i32) -> Option<Vec<u8>> {
+    let text = std::fs::read_to_string(BY_PID.get()?.join(pid.to_string())).ok()?;
+    let hex = text.lines().find_map(|l| l.strip_prefix("cmdline\t"))?;
+    (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok())
+        .collect()
 }
 
 /// Set this process's identity at start-up. `by_pid` is the process table

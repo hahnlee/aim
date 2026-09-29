@@ -255,7 +255,7 @@ impl HostStacks {
         HostStacks { base }
     }
 
-    fn scs(&self) -> u64 {
+    pub(crate) fn scs(&self) -> u64 {
         self.base + SCS_GUARD as u64
     }
 

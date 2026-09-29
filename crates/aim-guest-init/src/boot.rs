@@ -30,9 +30,50 @@ use crate::launch::{
     DryRunLauncher, Exit, HostLauncher, Launcher, LinuxRun, LinuxRunOptions, describe_launch,
 };
 use crate::paths::Layout;
-use crate::props::{Properties, heap_properties, mapped_properties};
+use crate::props::{Properties, heap_properties, mapped_properties, share_areas};
 use crate::propsvc::{PropertyEvent, PropertySockets, SetRequest};
 use crate::supervisor::{DEFAULT_PATH, Planner};
+
+/// Wakes the boot loop on every SIGCHLD, as init's signalfd does, so a
+/// child's exit (an `exec` ending) is handled at once rather than at the
+/// loop's next timeout. The thread ends with the loop's receiver.
+fn watch_children(events: mpsc::Sender<PropertyEvent>) -> std::io::Result<()> {
+    // SAFETY: a new kqueue and its signal filter; EVFILT_SIGNAL records the
+    // signal beside its disposition.
+    let kq = unsafe { libc::kqueue() };
+    if kq < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let change = libc::kevent {
+        ident: libc::SIGCHLD as usize,
+        filter: libc::EVFILT_SIGNAL,
+        flags: libc::EV_ADD | libc::EV_CLEAR,
+        fflags: 0,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    // SAFETY: registering one event on our kqueue.
+    if unsafe { libc::kevent(kq, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
+        let e = std::io::Error::last_os_error();
+        // SAFETY: our kqueue.
+        unsafe { libc::close(kq) };
+        return Err(e);
+    }
+    std::thread::spawn(move || {
+        loop {
+            // SAFETY: waiting on our kqueue into a local event.
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            let n =
+                unsafe { libc::kevent(kq, std::ptr::null(), 0, &mut event, 1, std::ptr::null()) };
+            if n > 0 && events.send(PropertyEvent::ChildExited).is_err() {
+                break;
+            }
+        }
+        // SAFETY: our kqueue.
+        unsafe { libc::close(kq) };
+    });
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunMode {
@@ -397,6 +438,9 @@ impl Boot {
             }
             _ => None,
         };
+        if let Some(server) = &binder {
+            share_areas(&properties, server);
+        }
         let linux_run = LinuxRun {
             binary: linux_run_binary,
             image: options.image.clone(),
@@ -460,6 +504,7 @@ impl Boot {
         });
         let (events, sockets) = if options.mode == RunMode::Run {
             let (sender, receiver) = mpsc::channel();
+            watch_children(sender.clone()).map_err(|e| format!("SIGCHLD watcher: {e}"))?;
             let sockets = PropertySockets::start(&layout.socket_dir(), sender)
                 .map_err(|e| format!("property service sockets: {e}"))?;
             (Some(receiver), Some(sockets))
@@ -779,7 +824,9 @@ impl Boot {
             if let Some(receiver) = &self.events {
                 match receiver.recv_timeout(timeout) {
                     Ok(PropertyEvent::Set(request)) => self.handle_set_request(request),
-                    Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {}
+                    Ok(PropertyEvent::ChildExited)
+                    | Err(RecvTimeoutError::Timeout)
+                    | Err(RecvTimeoutError::Disconnected) => {}
                 }
             } else {
                 std::thread::sleep(timeout);
@@ -819,7 +866,7 @@ impl Boot {
                 self.handle_set_request(request);
                 true
             }
-            Err(_) => false,
+            Ok(PropertyEvent::ChildExited) | Err(_) => false,
         }
     }
 

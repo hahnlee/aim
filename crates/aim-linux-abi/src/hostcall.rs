@@ -11,6 +11,8 @@
 //! Modules are Rust crates linked into the syscall layer; [`MODULES`] is the
 //! registry, indexed by module id.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use aim_hostcall::{ABI_VERSION, FN_VERSION, HostModule, errno, module};
 
 static CORE: HostModule = HostModule {
@@ -50,6 +52,19 @@ const _: () = {
     }
 };
 
+/// Whether this process has called a host module other than the core one
+/// (or holds host state a fork parent passed on): host objects an exec in
+/// place could not tear down, so it execs anew.
+static USED: AtomicBool = AtomicBool::new(false);
+
+pub fn used() -> bool {
+    USED.load(Ordering::Relaxed)
+}
+
+pub fn mark_used() {
+    USED.store(true, Ordering::Relaxed);
+}
+
 /// Run a host call. Returns a value >= 0 or a negative Linux errno.
 pub fn call(module: u64, func: u64, args: u64, len: u64) -> i64 {
     let (Ok(module), Ok(func)) = (u32::try_from(module), u32::try_from(func)) else {
@@ -60,6 +75,9 @@ pub fn call(module: u64, func: u64, args: u64, len: u64) -> i64 {
     };
     if func == FN_VERSION {
         return m.version as i64;
+    }
+    if m.id != module::CORE {
+        mark_used();
     }
     // SAFETY: the module validates the argument block (HostModule::call).
     unsafe { (m.call)(func, args, len) }

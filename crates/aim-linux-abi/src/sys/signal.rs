@@ -1346,6 +1346,27 @@ pub fn repoke_self() {
     }
 }
 
+/// execve in place (`flush_signal_handlers`): caught signals go back to
+/// their default action, ignored ones stay ignored, every action loses its
+/// flags, mask and restorer, and the alternate stack is gone. The mask and
+/// pending signals stay.
+pub(super) fn exec_reset() {
+    for sig in (1..=NSIG).filter(|&s| s != SIGKILL && s != SIGSTOP) {
+        let act = KSigaction {
+            handler: if action(sig).handler == SIG_IGN {
+                SIG_IGN
+            } else {
+                SIG_DFL
+            },
+            flags: 0,
+            restorer: 0,
+            mask: 0,
+        };
+        rt_sigaction([sig as u64, &act as *const KSigaction as u64, 0, 8, 0, 0]);
+    }
+    *lock(&current().sig.alt) = AltStack::DISABLED;
+}
+
 // ---- fork -------------------------------------------------------------------------
 
 /// Fork: the dispositions, and the forking thread's mask and alternate

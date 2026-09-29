@@ -1,4 +1,4 @@
-//! Read-only images: the system image (the pinned original as a compressed
+//! Read-only images: the system image (the pinned original as a read-only
 //! case-sensitive APFS image with its translation cache) and the derived
 //! image over it (the overlay, written into a shadow file). The volume
 //! layout is `root/` (the guest's root), `root.identity` and `translated/`
@@ -13,11 +13,10 @@ use std::time::Duration;
 
 use crate::disk::{self, Attach, Attached};
 
-/// The compression: lzfse. It builds the 4.6 GB volume in about 4 s and
-/// reads at about 550 MiB/s cold on one thread; zlib (UDZO) is as large
-/// and slower, lzma (ULMO) 20 % smaller but reads at 55 MiB/s even when
-/// cached (docs/storage.md, "Measurements").
-pub const FORMAT: &str = "ULFO";
+/// Uncompressed and read-only: a first read of a block is a plain read,
+/// where a compressed image (lzfse, `ULFO`, half the size) decompresses
+/// it (docs/storage.md, "Measurements").
+pub const FORMAT: &str = "UDRO";
 /// The ceiling of the writable volume an image is built in.
 const BUILD_SIZE: &str = "32g";
 /// A freshly written volume is scanned by the Mac's security agent, which
@@ -83,9 +82,21 @@ pub fn detach(image: &Path, shadow: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-/// Builds the compressed image `out`: `fill` writes the content into the
-/// mounted root of a fresh writable case-sensitive volume, which is then
-/// compressed. `out` appears complete or not at all.
+/// Detaches every attachment of `image`, whatever its shadow: before the
+/// image file is replaced.
+pub fn detach_all(image: &Path) -> Result<(), String> {
+    if !image.exists() {
+        return Ok(());
+    }
+    for a in disk::attachments_of(image)? {
+        disk::detach(&a.device, PATIENCE)?;
+    }
+    Ok(())
+}
+
+/// Builds the read-only image `out` in [`FORMAT`]: `fill` writes the
+/// content into the mounted root of a fresh writable case-sensitive
+/// volume, which is then converted. `out` appears complete or not at all.
 pub fn build(
     out: &Path,
     volume: &str,
@@ -96,8 +107,8 @@ pub fn build(
         name.push(suffix);
         out.with_file_name(name)
     };
-    let (staging, mount, compressed) = (with(".tmp.asif"), with(".tmp"), with(".tmp.dmg"));
-    for stale in [&staging, &compressed] {
+    let (staging, mount, converted) = (with(".tmp.asif"), with(".tmp"), with(".tmp.dmg"));
+    for stale in [&staging, &converted] {
         if stale.exists() {
             detach(stale, None)?;
             fs::remove_file(stale).map_err(|e| format!("{}: {e}", stale.display()))?;
@@ -110,11 +121,11 @@ pub fn build(
         // Unmounted with its content flushed, even when `fill` failed.
         detach(&staging, None)?;
         filled?;
-        disk::convert(&staging, &compressed, FORMAT)?;
-        fs::rename(&compressed, out).map_err(|e| format!("{}: {e}", out.display()))
+        disk::convert(&staging, &converted, FORMAT)?;
+        fs::rename(&converted, out).map_err(|e| format!("{}: {e}", out.display()))
     })();
     let _ = fs::remove_file(&staging);
-    let _ = fs::remove_file(&compressed);
+    let _ = fs::remove_file(&converted);
     let _ = fs::remove_dir(&mount);
     result
 }

@@ -350,6 +350,25 @@ fn map_copied(
     Ok(stats)
 }
 
+fn read_interp(file: &std::fs::File, h: &Headers, name: &str) -> Result<Option<String>, String> {
+    let Some(p) = h.phdrs.iter().find(|p| p.p_type == PT_INTERP) else {
+        return Ok(None);
+    };
+    let mut s = vec![0u8; p.p_filesz as usize];
+    file.read_exact_at(&mut s, p.p_offset)
+        .map_err(|e| format!("{name}: {e}"))?;
+    let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
+    Ok(Some(String::from_utf8_lossy(&s[..end]).into_owned()))
+}
+
+/// The interpreter (PT_INTERP) the ELF file at `host` names, read as
+/// [`load_elf`] reads it: what `execve` checks before the old image goes.
+pub fn interpreter(host: &CStr) -> Result<Option<String>, String> {
+    let path = host.to_str().map_err(|e| e.to_string())?;
+    let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    read_interp(&file, &read_headers(&file, path)?, path)
+}
+
 fn finish(
     file: &std::fs::File,
     h: Headers,
@@ -370,16 +389,7 @@ fn finish(
             bias + first.p_vaddr + (h.hdr.e_phoff - first.p_offset)
         }
     };
-    let interp = match h.phdrs.iter().find(|p| p.p_type == PT_INTERP) {
-        Some(p) => {
-            let mut s = vec![0u8; p.p_filesz as usize];
-            file.read_exact_at(&mut s, p.p_offset)
-                .map_err(|e| format!("{name}: {e}"))?;
-            let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
-            Some(String::from_utf8_lossy(&s[..end]).into_owned())
-        }
-        None => None,
-    };
+    let interp = read_interp(file, &h, name)?;
     Ok(Image {
         bias,
         entry: bias + h.hdr.e_entry,

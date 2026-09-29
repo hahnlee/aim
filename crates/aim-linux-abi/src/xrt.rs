@@ -115,17 +115,71 @@ fn is_elf_fd(fd: i32) -> bool {
     n == head.len() as isize && xlate::elf::is_aarch64_elf(&head)
 }
 
-/// Decide what an original at `host` (with stat `st`) maps as.
-fn decide(host: &Path, st: &FileStat) -> FileState {
+/// Decide what an original at `host` (with stat `st`) maps as, from the
+/// caches' indexes alone: None when no cache knows the file.
+fn decide(host: &Path, st: &FileStat) -> Option<FileState> {
     let r = rt();
-    match r.caches.iter().find_map(|c| c.lookup(host, st)) {
-        Some(e) if e.ctr_el0 == r.ctr_el0 => match e.kind {
-            EntryKind::Translated(p) => FileState::HasTranslation(p),
-            EntryKind::Identity => FileState::Identity,
-            EntryKind::Unsupported(_) => FileState::Uncached(None),
-        },
-        _ => FileState::Uncached(None),
+    let e = r.caches.iter().find_map(|c| c.lookup(host, st))?;
+    Some(match e.kind {
+        _ if e.ctr_el0 != r.ctr_el0 => FileState::Uncached(None),
+        EntryKind::Translated(p) => FileState::HasTranslation(p),
+        EntryKind::Identity => FileState::Identity,
+        EntryKind::Unsupported(_) => FileState::Uncached(None),
+    })
+}
+
+/// Open the published translated file `path` of the original at guest path
+/// `guest`, with `cloexec` (0 or O_CLOEXEC).
+fn open_published(path: &Path, guest: &str, cloexec: i32) -> Option<i32> {
+    let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: opening a published cache file.
+    let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY | cloexec) };
+    if fd < 0 {
+        return None;
     }
+    if let Ok((tst, _)) = FileStat::of_fd(fd) {
+        set_state(
+            tst,
+            FileState::Translated {
+                guest: guest.to_string(),
+            },
+        );
+    }
+    Some(fd)
+}
+
+/// Before the guest opens `host` with Darwin flags `host_flags`: an
+/// original the caches have a translation of, known from its stat and the
+/// index, is opened as the translated file right away. That is one host
+/// open, and the original's contents (in a compressed image, a
+/// decompression) are never read. None: the caller opens `host` and calls
+/// [`on_open`].
+pub fn open_translated(host: &CStr, guest: &str, host_flags: i32) -> Option<i32> {
+    let other = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CREAT | libc::O_TRUNC;
+    if host_flags & libc::O_ACCMODE != libc::O_RDONLY || host_flags & other != 0 {
+        return None;
+    }
+    // SAFETY: stat into a local buffer.
+    let mut raw: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat(host.as_ptr(), &mut raw) } != 0
+        || raw.st_mode & libc::S_IFMT != libc::S_IFREG
+        || raw.st_size < 64
+    {
+        return None;
+    }
+    let st = FileStat::from_libc(&raw);
+    let s = match state(&st) {
+        Some(s) => s,
+        None => {
+            let s = decide(Path::new(std::ffi::OsStr::from_bytes(host.to_bytes())), &st)?;
+            set_state(st, s.clone());
+            s
+        }
+    };
+    let FileState::HasTranslation(path) = s else {
+        return None;
+    };
+    open_published(&path, guest, host_flags & libc::O_CLOEXEC)
 }
 
 /// Called after the guest opened `host` as `fd` with Darwin flags
@@ -143,10 +197,10 @@ pub fn on_open(fd: i32, host: &CStr, guest: &str, host_flags: i32) {
     let s = match state(&st) {
         Some(s) => s,
         None => {
-            let s = if is_elf_fd(fd) {
-                decide(Path::new(std::ffi::OsStr::from_bytes(host.to_bytes())), &st)
-            } else {
-                FileState::Other
+            let s = match decide(Path::new(std::ffi::OsStr::from_bytes(host.to_bytes())), &st) {
+                Some(s) => s,
+                None if is_elf_fd(fd) => FileState::Uncached(None),
+                None => FileState::Other,
             };
             set_state(st, s.clone());
             s
@@ -155,24 +209,12 @@ pub fn on_open(fd: i32, host: &CStr, guest: &str, host_flags: i32) {
     let FileState::HasTranslation(path) = s else {
         return;
     };
-    let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return;
+    let Some(nfd) = open_published(&path, guest, libc::O_CLOEXEC) else {
+        return; // Keep the original; the load-time path covers it.
     };
-    // SAFETY: opening the published translated file and moving it onto the
-    // guest's fd number, keeping FD_CLOEXEC as requested.
+    // SAFETY: moving the translated file onto the guest's fd number,
+    // keeping FD_CLOEXEC as requested.
     unsafe {
-        let nfd = libc::open(cpath.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-        if nfd < 0 {
-            return; // Keep the original; the load-time path covers it.
-        }
-        if let Ok((tst, _)) = FileStat::of_fd(nfd) {
-            set_state(
-                tst,
-                FileState::Translated {
-                    guest: guest.to_string(),
-                },
-            );
-        }
         if libc::dup2(nfd, fd) >= 0 && host_flags & libc::O_CLOEXEC != 0 {
             libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
         }
@@ -401,8 +443,8 @@ pub fn loader_source(host: &Path) -> LoaderSource {
         return LoaderSource::LoadTime;
     };
     match decide(host, &st) {
-        FileState::HasTranslation(p) => LoaderSource::File(p, "translation cache"),
-        FileState::Identity => {
+        Some(FileState::HasTranslation(p)) => LoaderSource::File(p, "translation cache"),
+        Some(FileState::Identity) => {
             LoaderSource::File(host.to_path_buf(), "original (nothing to rewrite)")
         }
         _ => LoaderSource::LoadTime,

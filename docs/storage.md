@@ -9,7 +9,7 @@ rights and which stay hidden from the Finder (`nobrowse`):
 | Image | What | Format | Where |
 | --- | --- | --- | --- |
 | Data image | the guest's writable data of one data directory | sparse (ASIF), read/write | `<data>.asif`, mounted at `<data>` |
-| System image | the pinned original and its translation cache | compressed (ULFO, lzfse), read-only | `_build/android16-image.dmg`, mounted at `_build/android16-image` |
+| System image | the pinned original and its translation cache | uncompressed (UDRO), read-only | `_build/android16-image.dmg`, mounted at `_build/android16-image` |
 | Derived image | the system image plus `image/overlay.toml` and the overlay's translations | a shadow file over the system image | `target/aim/derived.shadow`, mounted read-only at `target/aim/derived` |
 
 ## Data image
@@ -77,10 +77,12 @@ The `image` node of `cargo aim` (docs/build.md) builds it once per pin:
    (entries keyed by the original's sha256 and the translator version),
    with its index keyed by the path relative to `root/` instead of the
    host path, since the mount point and device change on every attach.
-4. The volume is converted to a compressed read-only image
-   (`diskutil image create from --format ULFO`) and published with a
+4. The volume is converted to an uncompressed read-only image
+   (`diskutil image create from --format UDRO`) and published with a
    rename, then attached read-only and hidden at
-   `_build/android16-image`.
+   `_build/android16-image`. An image in another format (the compressed
+   ULFO it used to be) is built again, and the derived images over it are
+   replaced.
 
 Volume layout:
 
@@ -140,7 +142,8 @@ macOS 27, with other builds loading the machine:
 | The extracted tree `_build/android16-image-full` (case-insensitive, 7 files lost) | 3.8 GB |
 | Its translation cache | 520 MB |
 | The volume (tree and cache) | 4.6 GB used |
-| ULFO (lzfse), chosen | 2.12 GB |
+| UDRO (uncompressed), chosen | 4.75 GB |
+| ULFO (lzfse), used until 2026-09-29 | 2.12 GB |
 | UDZO (zlib) | 2.12 GB |
 | ULMO (lzma) | 1.69 GB |
 
@@ -154,9 +157,24 @@ thread right after attaching (cold: every block decompressed), then again
 | UDZO | 10.7 s, 368 MiB/s | 0.44 s | 10 s |
 | ULMO | 71.8 s, 55 MiB/s | 69.7 s, 56 MiB/s | 83 s |
 
-lzma is 20 % smaller, but its reads are never cached; lzfse builds and
-reads fastest. The whole `image` node (extraction, translation,
-compression) takes about 140 s.
+lzma is 20 % smaller, but its reads are never cached. Space is not the
+constraint, so the image is uncompressed: the same read right after
+attaching, on 2026-09-29 (load 1-3; the image file itself was in the host's
+file cache both times, so this is the decompression alone): ULFO 3.86 s
+(1,015 MiB/s), UDRO 0.81 s (4,862 MiB/s); warm 0.41 and 0.43 s. First
+boots of fresh data images (docs/perf-baseline.md), seconds since
+guest-init's start, the first boot after building the image and a second
+one:
+
+| | zygote launched | `boot_progress_start` | `system_run` | `pms_ready` |
+| --- | --- | --- | --- | --- |
+| ULFO, first | 3.49-3.89 | 4.31 | 7.51 | 13.7 |
+| UDRO, first | 3.24 | 3.94 | 6.16 | 12.1 |
+| ULFO, second | 2.88 | 3.54 | 6.22 | 11.9 |
+| UDRO, second | 2.90 | 3.58 | 5.39 | 10.7 |
+
+The whole `image` node (extraction, translation, conversion) takes about
+85 s.
 
 ## Security agent
 

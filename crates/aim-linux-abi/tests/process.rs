@@ -224,6 +224,11 @@ fn execve_runs_scripts_through_their_interpreter() {
 }
 
 #[test]
+fn execve_resets_handlers_and_keeps_the_mask_pending_signals_and_fds() {
+    check("exec_state");
+}
+
+#[test]
 fn waitid_reports_stops_continues_and_kills() {
     check("waitid_variants");
 }

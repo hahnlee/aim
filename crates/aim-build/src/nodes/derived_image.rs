@@ -74,6 +74,16 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     let derived = identity::compute(&original_identity, &plan);
     let (image, shadow) = (aim_paths::system_image(), aim_paths::derived_image_shadow());
     let mount = aim_paths::derived_image_mount();
+    let modified = |p: &std::path::Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    if shadow.exists() && modified(&shadow) < modified(&image) {
+        // Written over a system image that has been built again since.
+        log.line(&format!(
+            "replacing {} (a new system image)",
+            mount.display()
+        ));
+        system::detach(&image, Some(&shadow))?;
+        fs::remove_file(&shadow).map_err(|e| format!("{}: {e}", shadow.display()))?;
+    }
     if shadow.exists() {
         // A shadow of another system image does not attach, or shows
         // another identity.

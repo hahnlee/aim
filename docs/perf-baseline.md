@@ -176,30 +176,95 @@ memory (vm_stat: 60–300 MB free, 100,000–700,000 page reactivations per
 20 s) and stops when memory is free again; a binder ping costs
 servicemanager no faults. It is the host's paging, not a loop.
 
-## Where the time goes: in-guest fork+exec
+## Where the time goes: exec, process start and the early boot
 
-`fork_bench spawn` (fork, exec of `/system/bin/true`, exit, wait) in a
-booted guest: 211 ms p50 at host load 60–100, 55 ms at 40; `fork_bench
-fork`: 30 ms, then 8 ms (fork() itself 0.6 ms p50, the rest the child's
-start and exit). Exec of a trivial dynamic program costs 48–250 ms, of a
-static one 47 ms (a failed exec: ET_EXEC at 0x200000 cannot be placed).
-A timestamped `--trace` of the dynamic one at load 30 (23.7 ms of guest
-time, 743 syscalls):
+Measured 2026-09-29 on the M2 Pro with timestamps (not committed) at
+guest-init's launches, `linux-run`'s `main`, the guest's first
+instruction, `execve` and `exit_group`, and syscall traces with times
+(`--trace`). Boots of fresh data images with `cargo aim boot`: "full"
+(load average 5 at the start), and "quiet" with `--exclude zygote` (load
+5), where the microbenchmarks ran: `fork_bench`, an exec benchmark (a
+fork child stamps the time into shared memory and execs
+`/system/bin/true`; to the parent seeing it exit) and
+`__system_property_set` in a loop. A is main at `dbde2b0a`, B the
+changes below; each boot was the first after rebuilding (a cold host
+cache: the security agent's per-file decisions, the image's page cache),
+B3 a second boot of B.
 
-- **12 `mmap`s of property areas, about 1 ms each (12 ms, half of it).**
-  bionic and the linker map `/dev/__properties__` files read-only and
-  shared. On the host, mapping a file costs 9–25 µs, but 1.1–1.6 ms once
-  another process maps it writable and has written it, in any
-  monitored path (the repository, the data image); in the temporary
-  directory it stays 9 µs. guest-init's property service maps every area
-  writable. This is the host security agent's per-mapping check (#232,
-  #295), and it applies to every process that starts a program; the data
-  image put `/dev` inside the repository tree (`DATA/run/dev`).
-- **61 `openat`s, 3.7 ms** (60–170 µs each on the repository's files; the
-  same open costs a plain C program 96 µs, 25 µs in the temporary
-  directory). Each ELF with a translation costs two more host opens (its
-  `meta` and its `elf`).
-- The other 103 `mmap`s, 88 `mprotect`s and the rest: about 5 ms.
+| | A1 | A2 | B1 | B2 | B3 (warm) |
+| --- | --- | --- | --- | --- | --- |
+| first service launched (guest-init's preparation) | 1.82 | 1.61 | 1.80 | 1.53 | 1.41 |
+| zygote launched | 5.54 | 5.33 | 3.89 | 3.49 | 2.88 |
+| `boot_progress_start` | 6.50 | 6.28 | – | 4.31 | 3.54 |
+| `boot_progress_system_run` | 9.50 | 9.20 | – | 7.51 | 6.22 |
+| `boot_progress_pms_ready` | 15.9 | 15.3 | – | 13.7 | 11.9 |
+| `boot_progress_enable_screen` | 37.8 | 39.1 | – | 36.8 | 34.8 |
+| exec of `true` to its exit, p50 (ms) | 28.4 | 28.0 | 11.5 | 11.0 | 10.4 |
+| fork+exec+exit+wait, p50 (ms) | 33.6 | 34.0 | 15.7 | 15.3 | 15.3 |
+| fork+exit+wait, p50 (ms) | 9.1 | 9.3 | 9.5 | 9.2 | 9.4 |
+| `__system_property_set`, p50 (ms) | 7.54 | 7.52 | 0.063 | 0.061 | 0.044 |
+
+Boot times are seconds since guest-init's start (B1's events log was not
+read before its boot ended). A quiet guest's fork+exec of `true`, stage
+by stage (p50, ms), before and after:
+
+| | A | B |
+| --- | --- | --- |
+| fork in the parent | 0.7 | 0.6 |
+| the child `linux-run`'s spawn, dyld, to `main` | 3.8 | 3.1 |
+| receiving and mapping the parent's memory | 0.9 | 0.7 |
+| execve: Darwin's execve of `linux-run`, dyld, the layer's start | 4.3 + 1.3 | – |
+| execve in place: close-on-exec, unmap, reset, load | – | 1.1 |
+| `true` from its first instruction to `exit_group` | 21.8 | 9.0 |
+
+What changed, largest first:
+
+- **Property-area mappings** (#337). A host file mapping of a property
+  area cost 0.8-3 ms per call in a `linux-run` process, every time, while
+  guest-init held the file mapped writable: the host's security agent
+  (a fresh copy of the same file maps in 14 µs once checked). bionic maps
+  12-14 areas in every program it starts, half of `true`'s run. guest-init
+  now shares a memory entry of each area through the binder host, and the
+  layer maps that (3-7 µs), `sys/sharedfile.rs`.
+- **guest-init's child exits**: the boot loop saw an exit only at its next
+  100 ms timeout, 35-175 ms of idle time after every one-shot `exec`
+  service (about 1 s before zygote); it now wakes on SIGCHLD.
+- **setprop**: the property service's accept threads slept 5 ms between
+  polls (7.5 ms per `setprop` with the timer slack); they now wait in
+  `poll`.
+- **execve in place** (`sys/exec.rs`): the Darwin re-exec of `linux-run`
+  (dyld, the layer's start, and every per-process cache lost) is replaced
+  by an in-place image replacement where the process allows it; a boot
+  execs 62 programs in place and 3 anew (multi-threaded parents).
+- **Translated ELFs with one host open** (#339): no read of the original
+  (a decompression in the compressed image, 2-4 ms per library on a cold
+  cache) and one host open instead of two (170 -> 84 µs per library).
+
+What remains is mostly the host security agent, whose per-call costs a
+`linux-run` process pays on the repository's paths (the data image and
+the derived image included), measured in a quiet guest:
+
+- **every host `open`: 70-90 µs** (`stat` 8 µs), also `O_PATH` and
+  `O_EVTONLY`. `true` still makes 60 opens (the linker's search paths,
+  `ld.config.txt`, the property areas, 12 libraries): about 5 ms of its
+  9 ms. A static program or a phone does this in about 1-2 ms;
+- **the first mapping of a file in a process: about 0.9 ms** (p50), the
+  next ones 11 µs. zygote's start (traced) maps 278 files, 274 ms; it
+  takes 0.85 s from its first instruction to `boot_progress_start`.
+  `true`'s 12 libraries, mapped by every process, stay cheap;
+- **writes: an `O_CREAT|O_TRUNC` open about 1 ms, `unlink` 1 ms, `rename`
+  3.6 ms, `BPF_OBJ_GET` (an `O_RDWR` open) 2.3-4.8 ms**:
+  `mainline_aconfigd_init` (165 ms) and `bpfloader` (316 ms, with 95,000
+  4-KiB `read`s of its programs) are the longest one-shot services
+  before zygote.
+
+The early boot on B (B3): guest-init prepares for 1.4 s, then about 25
+services run in series until zygote is launched at 2.9 s: 8-15 ms from launch to a service's first instruction (the spawn
+and dyld about 4 ms, the program's first mapping about 1 ms, the by-pid
+entry's write about 2 ms), 0.3 s of `bpfloader`, 0.35 s of the aconfigd
+services, and 0.15 s where guest-init itself runs the atrace `chmod`s
+and other builtins of `late-init`. zygote then needs 0.85 s to
+`boot_progress_start`.
 
 ## Where the time goes: Settings scroll
 

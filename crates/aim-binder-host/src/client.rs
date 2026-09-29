@@ -13,7 +13,7 @@ use aim_binder_driver::uapi::*;
 use aim_binder_driver::{Device, Errno, MAX_MAPPING, errno};
 
 use crate::mach::{self, Buffer, Msg, Port};
-use crate::wire::{self, Ioctl, IoctlReply, Reader, Writer};
+use crate::wire::{self, Ioctl, IoctlReply, Reader, SharedFile, Writer};
 
 /// Guest memory, as the calling process sees it.
 pub trait UserMemory {
@@ -62,6 +62,20 @@ fn with_thread<R>(f: impl FnOnce(&mut ThreadState) -> R) -> Result<R, Errno> {
     })
 }
 
+/// The calling thread after its process replaced its program in place
+/// (execve): its placeholder fds went with the old image (close-on-exec),
+/// and its thread ports serve files the process may no longer have.
+pub fn forget_thread() {
+    THREAD.with(|t| {
+        if let Some(t) = t.borrow_mut().as_mut() {
+            t.reserved.clear();
+            for (_, port) in t.threads.drain() {
+                mach::release_send(port);
+            }
+        }
+    });
+}
+
 fn call(t: &mut ThreadState, dest: Port, msg: &Msg) -> Result<mach::Received, Errno> {
     match mach::call(&mut t.buf, dest, t.reply, msg) {
         Ok(r) if r.id == wire::REPLY => Ok(r),
@@ -87,6 +101,36 @@ pub struct Client {
 impl Client {
     pub fn connect(name: &str) -> Option<Self> {
         mach::look_up(name).ok().map(|service| Self { service })
+    }
+
+    /// The files whose pages the daemon's process shares; each entry is a
+    /// send right the caller now holds.
+    pub fn shared_files(&self) -> Result<Vec<SharedFile>, Errno> {
+        let mut out = Vec::new();
+        loop {
+            let mut w = Writer::default();
+            w.u32(out.len() as u32);
+            let msg = Msg {
+                id: wire::FILES,
+                ports: Vec::new(),
+                data: w.0,
+            };
+            let r = with_thread(|t| call(t, self.service, &msg))??;
+            let mut rd = status(&r)?;
+            let total = rd.u32()? as usize;
+            for &entry in &r.ports {
+                let (dev, ino, size) = (rd.u64()?, rd.u64()?, rd.u64()?);
+                out.push(SharedFile {
+                    dev,
+                    ino,
+                    size,
+                    entry,
+                });
+            }
+            if r.ports.is_empty() || out.len() >= total {
+                return Ok(out);
+            }
+        }
     }
 
     /// `open("/dev/binder")`. Returns the file and the guest fd.

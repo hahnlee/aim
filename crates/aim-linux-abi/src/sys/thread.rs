@@ -469,6 +469,12 @@ pub fn exit(a: [u64; 6]) -> ! {
     // _exit_with_stack_teardown) can run.
     super::run_deferred_unmaps();
     super::futex::exit_robust_list(th.robust_list.load(SeqCst), th.tid);
+    let main = th.tid == pid();
+    // Out of the table before a joiner wakes: its tid is gone for tgkill.
+    let left = with_table_mut(|t| {
+        t.remove(&th.tid);
+        t.len()
+    });
     let ctid = th.clear_child_tid.load(SeqCst);
     if ctid != 0 {
         // SAFETY: the guest tid word registered with CLONE_CHILD_CLEARTID or
@@ -476,11 +482,6 @@ pub fn exit(a: [u64; 6]) -> ! {
         unsafe { (ctid as *mut u32).write_volatile(0) };
         super::futex::wake_one(ctid);
     }
-    let main = th.tid == pid();
-    let left = with_table_mut(|t| {
-        t.remove(&th.tid);
-        t.len()
-    });
     if main {
         LEADER_EXIT.store(code, SeqCst);
     }
@@ -559,6 +560,26 @@ pub fn get_robust_list(a: [u64; 6]) -> i64 {
         (a[2] as *mut u64).write_unaligned(24);
     }
     0
+}
+
+/// Whether the calling thread is the process's only guest thread, its
+/// main thread.
+pub fn alone() -> bool {
+    with_table(|t| t.len() == 1) && current().is_some_and(|th| th.tid == pid())
+}
+
+/// execve in place, on the process's only thread: no clear_child_tid or
+/// robust list, the `comm` of a new process, no thread pointer and an
+/// empty shadow call stack.
+pub(super) fn exec_reset() {
+    let th = current().expect("exec from a thread without a guest context");
+    th.clear_child_tid.store(0, SeqCst);
+    th.robust_list.store(0, SeqCst);
+    *th.name.lock().unwrap_or_else(|e| e.into_inner()) = [0; 16];
+    context::set_guest_tp(0);
+    if let Some(st) = th.stacks.lock().unwrap().as_ref() {
+        context::set_guest_scs(st.scs());
+    }
 }
 
 // ---- fork -------------------------------------------------------------------------

@@ -13,6 +13,9 @@ use std::sync::atomic::AtomicU32;
 use aim_android_init::props::area::{AreaMemory, HeapMemory};
 use aim_android_init::props::areas::{PROPERTIES_SERIAL, PROPERTY_INFO};
 use aim_android_init::props::{FutexWaker, PA_SIZE, PropertyAreas, PropertyService, WakeTarget};
+use aim_binder_host::mach;
+use aim_binder_host::server::Server;
+use aim_binder_host::wire::SharedFile;
 
 use crate::futex::{SharedFutex, UlockShared};
 
@@ -20,6 +23,9 @@ use crate::futex::{SharedFutex, UlockShared};
 pub struct MmapMemory {
     base: *mut u8,
     len: usize,
+    /// The file's device and inode.
+    dev: u64,
+    ino: u64,
 }
 
 impl MmapMemory {
@@ -38,7 +44,8 @@ impl MmapMemory {
                 return Err(io::Error::last_os_error());
             }
             let result = (|| {
-                if libc::ftruncate(fd, len as libc::off_t) != 0 {
+                let mut st: libc::stat = std::mem::zeroed();
+                if libc::ftruncate(fd, len as libc::off_t) != 0 || libc::fstat(fd, &mut st) != 0 {
                     return Err(io::Error::last_os_error());
                 }
                 let base = libc::mmap(
@@ -55,6 +62,8 @@ impl MmapMemory {
                 Ok(Self {
                     base: base.cast(),
                     len,
+                    dev: st.st_dev as u32 as u64,
+                    ino: st.st_ino,
                 })
             })();
             libc::close(fd);
@@ -167,6 +176,28 @@ pub fn mapped_properties(dir: &Path, property_info: Vec<u8>) -> Result<Propertie
     let mut service = PropertyService::with_areas(areas);
     service.set_waker(Box::new(SharedAreaWaker::new(bases, UlockShared)));
     Ok(service)
+}
+
+/// Share the mapped areas' pages with the guests through the binder host
+/// (the kernel-state server), as tmpfs pages are shared: a guest's
+/// `MAP_SHARED` mapping of an area maps them without a host file mapping,
+/// which costs 1-3 ms in a guest process while this process holds the file
+/// mapped writable (the host's endpoint security agent, #337).
+pub fn share_areas(properties: &Properties, server: &Server) {
+    let areas = properties.areas();
+    let all = areas.contexts().iter().filter_map(|c| areas.area(c));
+    for area in all.chain([areas.serial_area()]) {
+        if let AreaBacking::Mapped(m) = area.memory()
+            && let Ok(entry) = mach::share_read_only(m.base as u64, m.len as u64)
+        {
+            server.share_file(SharedFile {
+                dev: m.dev,
+                ino: m.ino,
+                size: m.len as u64,
+                entry,
+            });
+        }
+    }
 }
 
 fn set_mode(path: &Path, mode: u32) {

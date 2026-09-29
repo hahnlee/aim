@@ -21,6 +21,22 @@ static CLIENT: Mutex<Option<Client>> = Mutex::new(None);
 /// Open binder files by the inode of their socket, so dup'ed fds resolve.
 static FILES: Mutex<Option<HashMap<u64, BinderFile>>> = Mutex::new(None);
 
+/// The files whose pages the daemon's process shares (`sharedfile`); none
+/// without a daemon.
+pub fn shared_files() -> Vec<aim_binder_host::wire::SharedFile> {
+    CLIENT
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|c| c.shared_files().ok())
+        .unwrap_or_default()
+}
+
+/// execve in place: the calling thread's client state is the old image's.
+pub fn exec_reset() {
+    aim_binder_host::client::forget_thread();
+}
+
 /// Connect to the daemon serving bootstrap name `name`.
 pub fn init(name: &str) -> Result<(), String> {
     let client =

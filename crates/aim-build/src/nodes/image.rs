@@ -2,10 +2,11 @@
 //! `image/original.lock`, verified by its sha256, is extracted into a fresh
 //! case-sensitive volume (`root/`, with `root.identity` beside it), its ELF
 //! files are translated into the volume's `translated/`, and the volume
-//! becomes the compressed read-only `_build/android16-image.dmg`, mounted
-//! hidden at `_build/android16-image`. An existing image is never
-//! rewritten, since other checkouts may share it; this node then only
-//! checks its identity and attaches it.
+//! becomes the read-only `_build/android16-image.dmg` (in
+//! [`system::FORMAT`]), mounted hidden at `_build/android16-image`. An
+//! existing image is never rewritten, since other checkouts may share it;
+//! this node then only checks its identity and attaches it. An image in
+//! another format is built again (derived images over it are replaced).
 
 use super::repo;
 use crate::graph::{Action, Ctx, Dep, Node};
@@ -31,7 +32,7 @@ pub fn node() -> Node {
         // runs the node, and so attaches it, before anything reads it.
         outputs: vec![identity_file(&aim_paths::system_image_mount())],
         tools: Vec::new(),
-        recipe: 2,
+        recipe: 3,
         action: Action::Image,
         boot: true,
     }
@@ -60,6 +61,15 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     let lock = Lock::read(&repo(LOCK))?;
     let want = lock.get("SHA256")?;
     let image = aim_paths::system_image();
+    if image.exists() && aim_storage::disk::format_of(&image)? != system::FORMAT {
+        log.line(&format!(
+            "{} is not {}; building it again",
+            image.display(),
+            system::FORMAT
+        ));
+        system::detach_all(&image)?;
+        fs::remove_file(&image).map_err(|e| format!("{}: {e}", image.display()))?;
+    }
     if !image.exists() {
         let archive = repo(lock.get("ARCHIVE")?);
         let got = hash::sha256_file(&archive).map_err(|e| format!("{}: {e}", archive.display()))?;

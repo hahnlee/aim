@@ -136,6 +136,11 @@ pub fn openat(a: [u64; 6]) -> i64 {
     } else {
         hflags
     };
+    // An original ELF with a translation-cache entry is opened as the
+    // translated file, before the guest reads its headers.
+    if let Some(fd) = crate::xrt::open_translated(&r.host, &r.guest, hflags) {
+        return fd as i64;
+    }
     // SAFETY: host path from the resolver.
     let fd = unsafe { libc::open(r.host.as_ptr(), hflags, mode as libc::c_uint) };
     if fd < 0 {
@@ -144,8 +149,7 @@ pub fn openat(a: [u64; 6]) -> i64 {
     if creating {
         attrs::created(attrs::Host::Fd(fd), || r.guest.clone());
     }
-    // An original ELF with a translation-cache entry is replaced by the
-    // translated file here, before the guest reads its headers.
+    // Or it is replaced by the translated file here.
     crate::xrt::on_open(fd, &r.host, &r.guest, hflags);
     fd as i64
 }
@@ -1138,6 +1142,18 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
 
 /// close_range(first, last, flags): CLOSE_RANGE_CLOEXEC (4) marks instead
 /// of closing; CLOSE_RANGE_UNSHARE (2) has nothing to unshare.
+/// execve in place: every guest fd marked close-on-exec is closed, as
+/// `close` would.
+pub fn close_on_exec() {
+    for fd in fdtab::open_fds() {
+        // SAFETY: plain fcntl; a closed fd reads as -1.
+        if !fdtab::is_hidden(fd) && unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC > 0
+        {
+            close([fd as u64, 0, 0, 0, 0, 0]);
+        }
+    }
+}
+
 pub fn close_range(a: [u64; 6]) -> i64 {
     let (lo, hi, flags) = (a[0] as u32, a[1] as u32, a[2]);
     if flags & !6 != 0 || lo > hi {

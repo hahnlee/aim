@@ -25,6 +25,9 @@ use aim_android_init::props::protocol::{
     decode_request, encode_reply, truncated_reply,
 };
 
+/// How often an idle socket thread looks at its stop flag.
+const STOP_POLL_MS: i32 = 100;
+
 /// One decoded request waiting for the main loop.
 #[derive(Debug)]
 pub struct SetRequest {
@@ -46,10 +49,12 @@ impl SetRequest {
     }
 }
 
-/// Events the socket threads send to the boot loop.
+/// Events the socket threads and the child watcher send to the boot loop.
 #[derive(Debug)]
 pub enum PropertyEvent {
     Set(SetRequest),
+    /// SIGCHLD: a child may have exited; the loop reaps it.
+    ChildExited,
 }
 
 /// The listening sockets and their threads.
@@ -163,8 +168,16 @@ impl PropertySockets {
                                 }
                             });
                         }
+                        // Wait for the next connection, looking at `stop`
+                        // now and then.
                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(5));
+                            let mut p = libc::pollfd {
+                                fd: listener.as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            };
+                            // SAFETY: one pollfd on our stack.
+                            unsafe { libc::poll(&mut p, 1, STOP_POLL_MS) };
                         }
                         Err(_) => std::thread::sleep(Duration::from_millis(5)),
                     }

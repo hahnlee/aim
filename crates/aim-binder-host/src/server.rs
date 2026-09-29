@@ -3,6 +3,8 @@
 //! - The **service port** (a bootstrap name) takes `OPEN`. Each open file
 //!   gets a **file port** (`THREAD`, `MMAP`, `POLL`) and a readiness socket
 //!   whose other end is the guest's binder fd.
+//! - The service port also answers `FILES`: the files whose pages this
+//!   process shares as memory objects ([`Server::share_file`]).
 //! - Each guest thread that issues binder ioctls gets a **thread port** and a
 //!   daemon thread that serves it. The ioctl runs on that thread and may
 //!   block in the driver, as the guest thread blocks in the kernel.
@@ -17,7 +19,7 @@ use aim_binder_driver::{
 };
 
 use crate::mach::{self, Buffer, Msg, Port, Received};
-use crate::wire::{self, Ioctl, IoctlReply, Reader, Writer};
+use crate::wire::{self, Ioctl, IoctlReply, Reader, SharedFile, Writer};
 
 /// A fileport as the driver's opaque `File`.
 struct FilePort(Port);
@@ -129,6 +131,7 @@ pub struct Server {
     set: Port,
     files: Mutex<HashMap<Port, Arc<OpenFile>>>,
     kq: i32,
+    shared: Mutex<Vec<SharedFile>>,
 }
 
 impl Server {
@@ -149,6 +152,7 @@ impl Server {
             set,
             files: Mutex::new(HashMap::new()),
             kq,
+            shared: Mutex::new(Vec::new()),
         });
         let s = server.clone();
         std::thread::Builder::new()
@@ -169,7 +173,9 @@ impl Server {
             let Ok(req) = mach::receive(&mut buf, self.set) else {
                 continue;
             };
-            let result = if req.local == self.service {
+            let result = if req.local == self.service && req.id == wire::FILES {
+                self.shared_files(&req)
+            } else if req.local == self.service {
                 self.open(&req)
             } else {
                 let file = self.files.lock().unwrap().get(&req.local).cloned();
@@ -200,6 +206,26 @@ impl Server {
             };
             mach::reply(&mut buf, req.reply, &msg);
         }
+    }
+
+    /// Share the pages of the file `file.dev`/`file.ino` with every guest:
+    /// `file.entry` is a read-only memory entry of this process's shared
+    /// mapping of it ([`mach::share_read_only`]), which the server keeps.
+    pub fn share_file(&self, file: SharedFile) {
+        self.shared.lock().unwrap().push(file);
+    }
+
+    fn shared_files(&self, req: &Received) -> Result<ControlReply, Errno> {
+        let first = Reader::new(&req.data).u32()? as usize;
+        let shared = self.shared.lock().unwrap();
+        let mut w = Writer::default();
+        w.u32(shared.len() as u32);
+        let mut ports = Vec::new();
+        for f in shared.iter().skip(first).take(mach::MAX_PORTS) {
+            w.u64(f.dev).u64(f.ino).u64(f.size);
+            ports.push((f.entry, mach::COPY_SEND));
+        }
+        Ok((ports, w.0))
     }
 
     fn open(&self, req: &Received) -> Result<ControlReply, Errno> {
