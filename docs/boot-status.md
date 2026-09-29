@@ -37,7 +37,8 @@ guest-init --image <derived> --data <data> --run \
 guest-init registers the native clipboard with servicemanager when
 `servicemanager.ready` is set; `service check clipboard` finds it.
 Boots with it reach `sys.boot_completed` as before (four boots of a
-reused data image, 20-25 s); SystemUI and Gboard, which listen to the
+reused data image, 20-25 s; fresh data images 50-52 s, then a cold
+Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's clipboard tests pass but one
 (#428). An empty list gives the original clipboard back.
 

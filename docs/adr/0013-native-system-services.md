@@ -106,9 +106,11 @@ migration from the ADR 0012 stack, not a rewrite.
 
 ## Measurements
 
-Each migration step records boot to first app window, app start (cold and
-warm), idle CPU and memory, and its CTS results, in docs/perf-baseline.md
-and the step's PR.
+Each migration step records targeted measurements of what it changes (the
+binder trace of the calls it serves, their latency before and after, a
+smoke boot with a cold app start) and its CTS results, in
+[system-services.md](../system-services.md) and the step's PR; no full
+benchmark runs.
 
 ## Steps
 
@@ -132,7 +134,11 @@ The migration's state and conformance results are in
   `image/native-services` turned into `nop`s in place: a verified,
   symbolic edit (the class, the call and its unused result are checked,
   so a changed SystemServer fails the build instead of being patched
-  wrongly), recorded as a `replace` in `image/overlay.toml`. It is the
+  wrongly), recorded as a `replace` in `image/overlay.toml`. The jar's
+  oat files name its entries by CRC, so they are compiled again for the
+  edited jar (`verify`, as the original's are used under the ART
+  exception, #440); without them system_server verified services.jar at
+  run time and a cold Settings start after boot timed out. It is the
   ADR 0012 exception for SystemServer that decision 5.3 anticipated.
 - **The pilot.** `clipboard` on `NSPasteboard` passes 35 of CTS's 36
   clipboard tests (the original: 36); the missing one needs DeviceConfig

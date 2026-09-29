@@ -47,7 +47,12 @@ every step: replace superseded facts instead of appending a log.
    `const-class` and `invoke-virtual`) turned into `nop`s, in place; the
    dex checksums and the jar's CRC are recomputed and nothing else changes
    (`aim_android_image::system_server`, the `system-server` node, ADR 0013
-   "Steps"). guest-init reads the same list from the image.
+   "Steps"). The node then compiles the jar's `services.odex` and `.vdex`
+   again with the rebuilt dex2oat64 (`verify`, against the regenerated boot
+   image): the image's name the jar's entries by CRC, and without matching
+   ones system_server verifies all of services.jar at run time (ANRs, and
+   a cold Settings start after boot timed out). guest-init reads the same
+   list from the image.
 5. **Reverse bridge.** system_server code that calls a replaced service's
    `LocalServices` interface needs a bridge to the native service. For
    clipboard there is none to bridge: `ClipboardService` publishes no local

@@ -50,7 +50,7 @@ pub fn run(node: &Node, ctx: &Ctx, log: &mut Log) -> Result<Vec<PathBuf>, String
         Action::BootImage => boot_image::run(ctx, log)?,
         Action::Angle => angle::run(log)?,
         Action::MoltenVk => moltenvk::run(log)?,
-        Action::SystemServer => system_server::run(log)?,
+        Action::SystemServer => system_server::run(ctx, log)?,
         Action::DerivedImage => derived_image::run(log)?,
         Action::TranslationCache => translation_cache::run(ctx, log)?,
         Action::Cargo(_) => unreachable!(),

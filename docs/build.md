@@ -67,7 +67,7 @@ non-cargo stages are declared in code:
 | `boot-image` | `art`, `image`, `host/linux-run` (order only) | | `target/aim/boot-image/framework` |
 | `angle` | | `upstream/angle.lock`, `upstream/angle-args.gn` | `_build/angle-source/out/AimRelease` |
 | `moltenvk` | | `upstream/moltenvk.lock` | `target/aim/moltenvk` (`libMoltenVK.dylib`, `LICENSE`, `vk.xml`) |
-| `system-server` | `image` | `image/native-services` | `target/aim/system-server/services.jar`: SystemServer without the start of the natively implemented services (docs/system-services.md) |
+| `system-server` | `image`, `boot-image`, `host/linux-run` (order only) | `image/native-services` | `target/aim/system-server/services.jar`, SystemServer without the start of the natively implemented services (docs/system-services.md), and its `oat/arm64/services.{odex,vdex}` |
 | `derived-image` | `image` and the producer of every built overlay source | `image/overlay.toml` and its checked-in sources | `target/aim/derived.shadow`, attached at `target/aim/derived` |
 | `translation-cache` | `derived-image`, `host/linux-translate` | | the derived image's `translated/` |
 
