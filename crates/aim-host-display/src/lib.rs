@@ -222,13 +222,5 @@ fn request(r: &Request, fds: &[i32]) -> i64 {
     }
 }
 
-/// The guest's `CLOCK_MONOTONIC` (the host's), in nanoseconds.
-pub fn monotonic_ns() -> i64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: fills the local timespec.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    ts.tv_sec * 1_000_000_000 + ts.tv_nsec
-}
+/// The guest's `CLOCK_MONOTONIC`, in nanoseconds.
+pub use aim_hostcall::clock::monotonic_ns;

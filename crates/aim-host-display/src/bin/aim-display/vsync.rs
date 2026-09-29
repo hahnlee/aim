@@ -6,12 +6,12 @@
 //! shown at, from the link's model of the display's timing, exact to the
 //! host tick. The vsync reported is the model's last refresh before the
 //! callback: `inOutputTime` minus whole periods. Host ticks
-//! (`mach_absolute_time`) are converted to the guest's `CLOCK_MONOTONIC`
-//! (the host's, which also counts sleep) by the offset between the two
-//! clocks measured at the callback.
+//! (`mach_absolute_time`) are the guest's `CLOCK_MONOTONIC`.
 
 use std::ffi::c_void;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+
+use aim_hostcall::clock::ticks_to_ns;
 
 #[repr(C)]
 struct CVSMPTETime {
@@ -68,37 +68,12 @@ unsafe extern "C" {
     fn CGMainDisplayID() -> u32;
 }
 
-#[repr(C)]
-struct MachTimebaseInfo {
-    numer: u32,
-    denom: u32,
-}
-
-unsafe extern "C" {
-    fn mach_absolute_time() -> u64;
-    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
-}
-
-/// Host ticks to nanoseconds.
-fn ticks_to_ns(ticks: u64) -> i64 {
-    static TIMEBASE: OnceLock<(u64, u64)> = OnceLock::new();
-    let (numer, denom) = *TIMEBASE.get_or_init(|| {
-        let mut tb = MachTimebaseInfo { numer: 0, denom: 0 };
-        // SAFETY: fills the local struct.
-        unsafe { mach_timebase_info(&mut tb) };
-        (tb.numer as u64, tb.denom as u64)
-    });
-    (ticks as u128 * numer as u128 / denom as u128) as i64
-}
-
 pub use aim_host_display::monotonic_ns;
 
 /// A host uptime timestamp (`NSEvent.timestamp`: `mach_absolute_time` in
 /// seconds) in the guest's `CLOCK_MONOTONIC`.
 pub fn uptime_to_monotonic(seconds: f64) -> i64 {
-    // SAFETY: plain clock reads.
-    let (mono, host) = (monotonic_ns(), ticks_to_ns(unsafe { mach_absolute_time() }));
-    (seconds * 1e9) as i64 + (mono - host)
+    (seconds * 1e9) as i64
 }
 
 /// One refresh, in guest time.
@@ -124,19 +99,17 @@ extern "C" fn on_refresh(
 ) -> i32 {
     // SAFETY: Core Video passes valid timestamps for the call.
     let output = unsafe { &*output };
-    // SAFETY: plain clock reads.
-    let (mono, host) = (monotonic_ns(), ticks_to_ns(unsafe { mach_absolute_time() }));
+    let now = monotonic_ns();
     if output.video_time_scale <= 0 || output.video_refresh_period <= 0 {
         return 0;
     }
     let period = (output.video_refresh_period as i128 * 1_000_000_000
         / output.video_time_scale as i128) as i64;
     let shown = ticks_to_ns(output.host_time);
-    let last = shown - period * (shown - host + period - 1).div_euclid(period);
     let tick = Tick {
-        timestamp_ns: last + (mono - host),
+        timestamp_ns: shown - period * (shown - now + period - 1).div_euclid(period),
         period_ns: period,
-        now_ns: mono,
+        now_ns: now,
     };
     if let Some(sink) = SINK.lock().unwrap().as_ref() {
         sink(tick);

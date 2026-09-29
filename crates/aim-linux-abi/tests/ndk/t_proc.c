@@ -224,7 +224,7 @@ static void* worker(void* arg) {
   return NULL;
 }
 
-// Thread ids are 2^29 + (pid << 12) + n: /proc, the scheduler calls and
+// Thread ids are 2^17 + (pid << 11) + n, above every pid and below 2^28: /proc, the scheduler calls and
 // tgkill accept them, and a thread's comm follows pthread_setname_np.
 static void threads_and_names(void) {
   CHECK(pipe(worker_go) == 0);
@@ -232,7 +232,7 @@ static void threads_and_names(void) {
   pthread_t t;
   CHECK(pthread_create(&t, NULL, worker, NULL) == 0);
   while (!__atomic_load_n(&worker_tid, __ATOMIC_SEQ_CST)) usleep(1000);
-  CHECK(worker_tid > (1 << 29));
+  CHECK(worker_tid > (1 << 17) && worker_tid < (1 << 28));
   char path[96], name[32];
   snprintf(path, sizeof path, "/proc/self/task/%d", worker_tid);
   struct stat st;

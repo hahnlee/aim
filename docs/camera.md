@@ -46,10 +46,10 @@ capability (`characteristics.rs`):
   The static metadata uses nominal values for a laptop camera: 4 mm, f/2.0,
   and a sensor sized for a 70° horizontal field of view.
 - **Timestamps:** `SENSOR_INFO_TIMESTAMP_SOURCE` is `REALTIME`. A frame's
-  `CMSampleBuffer` presentation time (host clock) is converted to the host's
-  CLOCK_MONOTONIC, which the syscall layer serves as the guest's
-  CLOCK_MONOTONIC and CLOCK_BOOTTIME. Shutter and result carry the same
-  timestamp (readout timestamp equal to it).
+  `CMSampleBuffer` presentation time (host ticks, which stop while the Mac
+  sleeps) is converted to the guest's CLOCK_BOOTTIME (`aim_hostcall::clock`).
+  Shutter and result carry the same timestamp (readout timestamp equal to
+  it).
 
 The static metadata, templates and results are `camera_metadata_t` buffers
 written by `metadata.rs` (libcamera_metadata is a system library a vendor

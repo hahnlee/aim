@@ -26,10 +26,13 @@
 //! This crate is `no_std` and holds only the contract: numbers, argument
 //! layouts, the guest-side call ([`guest`], aarch64 Linux/Android only) and
 //! the shape of a host module ([`HostModule`]), plus how host modules reach
-//! system libraries ([`dylib`], macOS only).
+//! system libraries ([`dylib`]) and the guest's clocks ([`clock`]), macOS
+//! only.
 
 #![no_std]
 
+#[cfg(target_os = "macos")]
+pub mod clock;
 #[cfg(target_os = "macos")]
 pub mod dylib;
 
@@ -968,7 +971,7 @@ pub mod camera {
         /// Out: the frame's sequence number.
         pub seq: u64,
         /// Out: the start of the frame's exposure, on the guest's
-        /// CLOCK_BOOTTIME (the host's CLOCK_MONOTONIC), nanoseconds.
+        /// CLOCK_BOOTTIME, nanoseconds.
         pub timestamp_ns: i64,
     }
 

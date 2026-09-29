@@ -16,8 +16,9 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
+use super::clock::{self, Base};
 use super::fdtab::{self, Kind};
-use crate::errno::{self, EAGAIN, EBADF, EINVAL};
+use crate::errno::{self, EAGAIN, EBADF, EINVAL, EPERM};
 
 const O_NONBLOCK: u64 = 0o4000;
 const O_CLOEXEC: u64 = 0o2000000;
@@ -173,26 +174,12 @@ pub fn eventfd2(a: [u64; 6]) -> i64 {
 
 // ---- timerfd ----------------------------------------------------------------
 
-const CLOCK_REALTIME: u64 = 0;
-const CLOCK_MONOTONIC: u64 = 1;
-const CLOCK_BOOTTIME: u64 = 7;
-const CLOCK_REALTIME_ALARM: u64 = 8;
-const CLOCK_BOOTTIME_ALARM: u64 = 9;
+const CLOCK_TAI: u64 = 11;
 const TFD_TIMER_ABSTIME: u64 = 1;
 const TFD_TIMER_CANCEL_ON_SET: u64 = 2;
 
-fn now_ns(clock: libc::clockid_t) -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: local timespec.
-    unsafe { libc::clock_gettime(clock, &mut ts) };
-    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
-}
-
 fn mono() -> u64 {
-    now_ns(libc::CLOCK_MONOTONIC)
+    Base::Monotonic.now()
 }
 
 #[derive(Default)]
@@ -206,7 +193,7 @@ struct TimerState {
 
 pub struct TimerFd {
     peer: AtomicI32,
-    realtime: bool,
+    base: Base,
     state: Mutex<TimerState>,
 }
 
@@ -291,7 +278,7 @@ pub(super) fn load_event(r: &mut super::fork_state::Reader) -> Arc<EventFd> {
 /// share the timer with the parent; here each process has a copy).
 pub(super) fn save_timer(t: &TimerFd, w: &mut super::fork_state::Writer) {
     w.i32(t.peer.load(Ordering::Relaxed));
-    w.bool(t.realtime);
+    w.u32(t.base.index());
     let s = t.state.lock().unwrap();
     w.u64(s.next);
     w.u64(s.interval);
@@ -300,7 +287,7 @@ pub(super) fn save_timer(t: &TimerFd, w: &mut super::fork_state::Writer) {
 
 pub(super) fn load_timer(r: &mut super::fork_state::Reader) -> Arc<TimerFd> {
     let peer = r.i32();
-    let realtime = r.bool();
+    let base = Base::from_index(r.u32());
     let state = TimerState {
         next: r.u64(),
         interval: r.u64(),
@@ -308,7 +295,7 @@ pub(super) fn load_timer(r: &mut super::fork_state::Reader) -> Arc<TimerFd> {
     };
     let t = Arc::new(TimerFd {
         peer: AtomicI32::new(peer),
-        realtime,
+        base,
         state: Mutex::new(state),
     });
     TIMERS.list.lock().unwrap().1.push(Arc::downgrade(&t));
@@ -370,10 +357,11 @@ impl TimerFd {
 
 pub fn timerfd_create(a: [u64; 6]) -> i64 {
     let (clock, flags) = (a[0], a[1]);
-    let realtime = match clock {
-        CLOCK_REALTIME | CLOCK_REALTIME_ALARM => true,
-        CLOCK_MONOTONIC | CLOCK_BOOTTIME | CLOCK_BOOTTIME_ALARM => false,
-        _ => return -(EINVAL as i64),
+    let base = match clock::timer_base(clock) {
+        Ok(_) if clock == CLOCK_TAI => return -(EINVAL as i64),
+        Ok(b) => b,
+        Err(e) if e == -(EPERM as i64) => return e,
+        Err(_) => return -(EINVAL as i64),
     };
     if flags & !(O_NONBLOCK | O_CLOEXEC) != 0 {
         return -(EINVAL as i64);
@@ -384,7 +372,7 @@ pub fn timerfd_create(a: [u64; 6]) -> i64 {
     };
     let t = Arc::new(TimerFd {
         peer: AtomicI32::new(peer),
-        realtime,
+        base,
         state: Mutex::new(TimerState::default()),
     });
     register(&t);
@@ -447,13 +435,8 @@ pub fn timerfd_settime(a: [u64; 6]) -> i64 {
         0
     } else if flags & TFD_TIMER_ABSTIME == 0 {
         now + value
-    } else if t.realtime {
-        // Absolute wall-clock time, converted once to the monotonic clock.
-        (now + value)
-            .saturating_sub(now_ns(libc::CLOCK_REALTIME))
-            .max(1)
     } else {
-        value.max(1)
+        t.base.deadline(value).max(1)
     };
     drain(fd);
     s.token = false;

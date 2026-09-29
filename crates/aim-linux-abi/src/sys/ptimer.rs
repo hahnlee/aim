@@ -13,6 +13,7 @@
 
 use std::sync::{Mutex, MutexGuard};
 
+use super::clock::{self, Base};
 use super::park::{self, PTIMER_EXPIRY};
 use super::sigframe::Siginfo;
 use crate::errno::{EINVAL, ENOMEM};
@@ -30,7 +31,7 @@ const MAX_TIMERS: usize = 4096;
 
 pub struct Timer {
     id: i32,
-    realtime: bool,
+    base: Base,
     /// None for SIGEV_NONE.
     signo: Option<i32>,
     value: u64,
@@ -148,18 +149,10 @@ pub fn dequeued(info: &mut Siginfo) {
     }
 }
 
-fn clock_realtime(clock: u64) -> Result<bool, i64> {
-    match clock {
-        0 | 8 => Ok(true),      // REALTIME(_ALARM)
-        1 | 7 | 9 => Ok(false), // MONOTONIC, BOOTTIME(_ALARM)
-        _ => Err(-(EINVAL as i64)),
-    }
-}
-
 /// timer_create(clock, sevp, timerid).
 pub fn timer_create(a: [u64; 6]) -> i64 {
-    let realtime = match clock_realtime(a[0]) {
-        Ok(r) => r,
+    let base = match clock::timer_base(a[0]) {
+        Ok(b) => b,
         Err(e) => return e,
     };
     // Kernel struct sigevent: value, signo, notify, then the thread id.
@@ -197,7 +190,7 @@ pub fn timer_create(a: [u64; 6]) -> i64 {
     let id = (0..).find(|i| !t.iter().any(|tm| tm.id == *i)).unwrap_or(0);
     t.push(Timer {
         id,
-        realtime,
+        base,
         signo: target.map(|_| signo),
         value: value.unwrap_or(id as u64),
         tid: target.flatten(),
@@ -249,7 +242,7 @@ pub fn timer_settime(a: [u64; 6]) -> i64 {
         tm.next = match value {
             0 => 0,
             v if flags & TIMER_ABSTIME == 0 => now.saturating_add(v),
-            v => park::absolute(v, tm.realtime).max(1),
+            v => tm.base.deadline(v).max(1),
         };
         tm.overrun = 0;
         let prev = tm.armed.take();
@@ -323,8 +316,13 @@ mod tests {
             timer_create([1, ev.as_ptr() as u64, &mut id as *mut i32 as u64, 0, 0, 0]),
             0
         );
+        // CPU-time timers are not provided.
         assert_eq!(
             timer_create([2, ev.as_ptr() as u64, &mut id as *mut i32 as u64, 0, 0, 0]),
+            -95
+        );
+        assert_eq!(
+            timer_create([10, ev.as_ptr() as u64, &mut id as *mut i32 as u64, 0, 0, 0]),
             -(EINVAL as i64)
         );
         // 1 s, then every 250 ms.

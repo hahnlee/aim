@@ -104,13 +104,14 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     }
 
     // The guest view: the original image with the ART exception binaries in
-    // place of the ART APEX's, and a writable /data and /tmp.
+    // place of the ART APEX's, and a writable /data and /tmp. The output is
+    // staged in the work tree and replaces the previous one only once
+    // complete, so a failed rebuild keeps it.
     let out = aim_paths::boot_image();
     let work = out.with_extension("work");
     // dex2oat's linux-run records load-time sites in the work cache, whose
     // entries are read-only.
     let _ = force_remove(&work);
-    let _ = fs::remove_dir_all(&out);
     for dir in ["data/out/arm64", "data/ext/arm64", "tmp"] {
         fs::create_dir_all(work.join(dir)).map_err(|e| e.to_string())?;
     }
@@ -228,19 +229,27 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
         }
     }
 
-    fs::create_dir_all(out.join("framework/arm64")).map_err(|e| e.to_string())?;
+    let staged = work.join("framework");
+    fs::create_dir_all(staged.join("arm64")).map_err(|e| e.to_string())?;
     let mut files = 0;
     for entry in fs::read_dir(work.join("data/out/arm64")).map_err(|e| e.to_string())? {
         let from = entry.map_err(|e| e.to_string())?.path();
         let name = from.file_name().unwrap().to_owned();
         let to = match from.extension().and_then(|e| e.to_str()) {
-            Some("art" | "oat") => out.join("framework/arm64").join(name),
-            Some("vdex") => out.join("framework").join(name),
+            Some("art" | "oat") => staged.join("arm64").join(name),
+            Some("vdex") => staged.join(name),
             _ => continue,
         };
-        fs::copy(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
+        fs::rename(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
         files += 1;
     }
+    // The previous output moves into the work tree, which goes last.
+    let dest = out.join("framework");
+    fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    if dest.exists() {
+        fs::rename(&dest, work.join("previous")).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&staged, &dest).map_err(|e| e.to_string())?;
     force_remove(&work).map_err(|e| e.to_string())?;
     log.line(&format!(
         "boot image: {} ({files} files for {} BCP jars + {} extension(s))",

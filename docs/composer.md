@@ -85,7 +85,7 @@ the composer's `linux-run`:
 callback's own time, with about 1 ms of jitter. Its `inOutputTime` comes
 from the link's model of the display's timing and is exact to the tick. The
 vsync reported is the model's last refresh before the callback. It is
-converted to the guest's `CLOCK_MONOTONIC`, which is the host's.
+in the guest's `CLOCK_MONOTONIC`, which counts the same host ticks.
 
 Host code never calls guest code, so vsyncs travel as 32-byte
 `display::Event` records on the server connection, whose fd the HAL

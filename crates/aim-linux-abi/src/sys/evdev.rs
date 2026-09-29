@@ -47,6 +47,7 @@ use aim_host_display::input::{
 };
 use aim_host_display::wire;
 
+use super::clock::Base;
 use super::dir::{self, Entry};
 use super::fdtab::{self, Kind};
 use super::procfs::Node;
@@ -533,22 +534,14 @@ fn describe(dir: &std::path::Path, index: u32) -> Option<Descriptor> {
     wire::recv_record::<Descriptor>(s.as_fd()).ok().flatten()
 }
 
-/// Nanoseconds to add to a `CLOCK_MONOTONIC` time for `clock`
-/// (`CLOCK_BOOTTIME` is the monotonic clock here, as in `clock_gettime`).
+/// Nanoseconds to add to a `CLOCK_MONOTONIC` time for `clock`.
 fn clock_offset(clock: i32) -> i64 {
-    if clock != CLOCK_REALTIME {
-        return 0;
-    }
-    let now = |id| {
-        let mut ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: fills the local timespec.
-        unsafe { libc::clock_gettime(id, &mut ts) };
-        ts.tv_sec * 1_000_000_000 + ts.tv_nsec
+    let base = match clock {
+        CLOCK_REALTIME => Base::Realtime,
+        CLOCK_BOOTTIME => Base::Boottime,
+        _ => return 0,
     };
-    now(libc::CLOCK_REALTIME) - now(libc::CLOCK_MONOTONIC)
+    base.now() as i64 - Base::Monotonic.now() as i64
 }
 
 fn evdev_of(fd: i32) -> Option<Arc<Evdev>> {

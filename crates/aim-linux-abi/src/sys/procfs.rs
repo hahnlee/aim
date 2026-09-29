@@ -243,25 +243,15 @@ fn comm(p: i32) -> String {
     base.chars().take(15).collect()
 }
 
+/// When the host booted on the wall clock (CLOCK_REALTIME minus
+/// CLOCK_BOOTTIME), as (seconds, microseconds).
 fn boot_time() -> (i64, i64) {
-    let mut tv = libc::timeval {
-        tv_sec: 0,
-        tv_usec: 0,
-    };
-    let mut len = std::mem::size_of::<libc::timeval>();
-    let mut mib = [libc::CTL_KERN, libc::KERN_BOOTTIME];
-    // SAFETY: sysctl into a local timeval.
-    unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            2,
-            (&mut tv as *mut libc::timeval).cast(),
-            &mut len,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    (tv.tv_sec, tv.tv_usec as i64)
+    use super::clock::Base;
+    let ns = Base::Realtime.now() - Base::Boottime.now();
+    (
+        (ns / 1_000_000_000) as i64,
+        (ns % 1_000_000_000 / 1000) as i64,
+    )
 }
 
 fn now() -> f64 {

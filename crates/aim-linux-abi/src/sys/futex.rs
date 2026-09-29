@@ -20,6 +20,7 @@ use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::SeqCst};
 
+use super::clock::Base;
 use super::park;
 use super::signal;
 use super::thread::{self, Thread};
@@ -619,7 +620,12 @@ fn deadline(ts: u64, relative: bool, realtime: bool) -> Result<Option<u64>, i64>
     Ok(Some(if relative {
         park::after(ns)
     } else {
-        park::absolute(ns, realtime)
+        if realtime {
+            Base::Realtime
+        } else {
+            Base::Monotonic
+        }
+        .deadline(ns)
     }))
 }
 
@@ -759,14 +765,8 @@ mod tests {
                 0,
             )
         } as u64;
-        let mut deadline = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: a local timespec.
-        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut deadline) };
-        deadline.tv_sec += 2;
-        let deadline = &*Box::leak(Box::new(deadline)) as *const libc::timespec as u64;
+        let deadline = Box::leak(Box::new([0i64; 2])).as_mut_ptr() as u64;
+        park::write_timespec(deadline, park::after(2_000_000_000));
         let wait = move |bits: u64| {
             std::thread::spawn(move || futex([word_addr, FUTEX_WAIT_BITSET, 0, deadline, 0, bits]))
         };
