@@ -208,6 +208,11 @@ impl Server {
         }
     }
 
+    /// The driver every guest process of this server opens.
+    pub fn driver(&self) -> &Arc<Driver> {
+        &self.driver
+    }
+
     /// Share the pages of the file `file.dev`/`file.ino` with every guest:
     /// `file.entry` is a read-only memory entry of this process's shared
     /// mapping of it ([`mach::share_read_only`]), which the server keeps.

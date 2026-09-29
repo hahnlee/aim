@@ -106,6 +106,41 @@ migration from the ADR 0012 stack, not a rewrite.
 
 ## Measurements
 
-Each migration step records boot to first app window, app start (cold and
-warm), idle CPU and memory, and its CTS results, in docs/perf-baseline.md
-and the step's PR.
+Each migration step records targeted measurements of what it changes (the
+binder trace of the calls it serves, their latency before and after, a
+smoke boot with a cold app start) and its CTS results, in
+[system-services.md](../system-services.md) and the step's PR; no full
+benchmark runs.
+
+## Steps
+
+The migration's state and conformance results are in
+[system-services.md](../system-services.md).
+
+### M1: the replacement pipeline, on clipboard (2026-09-29)
+
+- **Generated AIDL.** The framework interfaces a native service serves or
+  calls are generated from the pinned `.aidl` files
+  (`crates/aim-services/sources.lock`) into `aim-service-aidl`; every
+  transaction code is checked against the stubs in the image's
+  `framework.jar`.
+- **The service host.** Native services are a binder process of the
+  driver inside guest-init (`aim_binder_host::local`), registered with
+  servicemanager when it is ready.
+- **The SystemServer exception.** SystemServer has no configuration to
+  leave a service out, and rebuilding `services.jar` from source would
+  take the platform build. The derived image's `services.jar` is the
+  original with the one `startService(Foo.class)` call of each service in
+  `image/native-services` turned into `nop`s in place: a verified,
+  symbolic edit (the class, the call and its unused result are checked,
+  so a changed SystemServer fails the build instead of being patched
+  wrongly), recorded as a `replace` in `image/overlay.toml`. The jar's
+  oat files name its entries by CRC, so they are compiled again for the
+  edited jar (`verify`, as the original's are used under the ART
+  exception, #440); without them system_server verified services.jar at
+  run time and a cold Settings start after boot timed out. It is the
+  ADR 0012 exception for SystemServer that decision 5.3 anticipated.
+- **The pilot.** `clipboard` on `NSPasteboard` passes 35 of CTS's 36
+  clipboard tests (the original: 36); the missing one needs DeviceConfig
+  (#428). What system_server-internal state native services need, and how
+  their permission checks are made fast, are #430 and #432.

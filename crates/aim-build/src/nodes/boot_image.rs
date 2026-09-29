@@ -40,7 +40,7 @@ pub fn node() -> Node {
 }
 
 /// A key of the original boot.oat's header (`key\0value\0` pairs).
-fn oat_key(oat: &Path, key: &str) -> Result<String, String> {
+pub(super) fn oat_key(oat: &Path, key: &str) -> Result<String, String> {
     let data = fs::read(oat).map_err(|e| format!("{}: {e}", oat.display()))?;
     let mut needle = key.as_bytes().to_vec();
     needle.push(0);
@@ -65,8 +65,6 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     // Never a link: the tree is read-only input.
     let image = fs::canonicalize(aim_paths::original_image()).map_err(|e| e.to_string())?;
     let framework = image.join("system/framework");
-    let art = aim_paths::art().join("stripped");
-    let linux_run = ctx.workspace.host_bin("linux-run");
     let bcp = oat_key(&framework.join("arm64/boot.oat"), "bootclasspath")?;
     let jars: Vec<&str> = bcp.split(':').collect();
 
@@ -115,67 +113,8 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     for dir in ["data/out/arm64", "data/ext/arm64", "tmp"] {
         fs::create_dir_all(work.join(dir)).map_err(|e| e.to_string())?;
     }
-    let mut map = format!(
-        "root\t/\t{}\nrw\t/data\t{}\nrw\t/tmp\t{}\n",
-        image.display(),
-        work.join("data").display(),
-        work.join("tmp").display()
-    );
-    for lib in [
-        "libart",
-        "libartbase",
-        "libdexfile",
-        "libprofile",
-        "libopenjdkjvm",
-    ] {
-        map.push_str(&format!(
-            "rw\t/apex/com.android.art/lib64/{lib}.so\t{}\n",
-            art.join(format!("lib64/{lib}.so")).display()
-        ));
-    }
-    map.push_str(&format!(
-        "rw\t/apex/com.android.art/bin/dex2oat64\t{}\n",
-        art.join("bin/dex2oat64").display()
-    ));
-    fs::write(work.join("path-map"), map).map_err(|e| e.to_string())?;
-
-    // Without a generated linker configuration linker64 uses its default
-    // namespace, which LD_LIBRARY_PATH points at the APEXes libart links.
-    let dex2oat = |log: &mut Log, args: &[String]| {
-        log.run(
-            Command::new(&linux_run)
-                .env_clear()
-                .env(
-                    "LD_LIBRARY_PATH",
-                    "/apex/com.android.art/lib64:/apex/com.android.i18n/lib64:/apex/com.android.os.statsd/lib64",
-                )
-                .env("ANDROID_ROOT", "/system")
-                .env("ANDROID_DATA", "/data")
-                .env("ANDROID_ART_ROOT", "/apex/com.android.art")
-                .env("ANDROID_I18N_ROOT", "/apex/com.android.i18n")
-                .arg("--inherit-env")
-                .arg("--path-map")
-                .arg(work.join("path-map"))
-                .arg("--cache")
-                .arg(work.join("cache"))
-                .arg("/apex/com.android.art/bin/dex2oat64")
-                .args([
-                    "--runtime-arg",
-                    "-Xms64m",
-                    "--runtime-arg",
-                    "-Xmx1024m",
-                    "--instruction-set=arm64",
-                    "--instruction-set-features=default",
-                    "--image-format=lz4",
-                    "--force-determinism",
-                    "--generate-build-id",
-                    "--avoid-storing-invocation",
-                    "--compilation-reason=prebuilt",
-                    "--android-root=/system",
-                ])
-                .args(args),
-        )
-    };
+    let dex2oat = Dex2oat::new(ctx, &image, &work, &[])?;
+    let dex2oat = |log: &mut Log, args: &[String]| dex2oat.run(log, args);
 
     let mut primary_args: Vec<String> = jars
         .iter()
@@ -258,4 +197,97 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
         extensions.len()
     ));
     Ok(())
+}
+
+/// The rebuilt dex2oat64 on the syscall layer, in a guest view of the
+/// original image with the ART exception binaries in place of the ART
+/// APEX's, a writable `/data` and `/tmp` under `work`, and `files`
+/// (guest path, host path) mapped over the image.
+pub(super) struct Dex2oat {
+    linux_run: PathBuf,
+    work: PathBuf,
+}
+
+impl Dex2oat {
+    pub fn new(
+        ctx: &Ctx,
+        image: &Path,
+        work: &Path,
+        files: &[(&str, PathBuf)],
+    ) -> Result<Dex2oat, String> {
+        let art = aim_paths::art().join("stripped");
+        let mut map = format!(
+            "root\t/\t{}\nrw\t/data\t{}\nrw\t/tmp\t{}\n",
+            image.display(),
+            work.join("data").display(),
+            work.join("tmp").display()
+        );
+        let mut entries: Vec<(String, PathBuf)> = [
+            "libart",
+            "libartbase",
+            "libdexfile",
+            "libprofile",
+            "libopenjdkjvm",
+        ]
+        .iter()
+        .map(|lib| {
+            (
+                format!("/apex/com.android.art/lib64/{lib}.so"),
+                art.join(format!("lib64/{lib}.so")),
+            )
+        })
+        .collect();
+        entries.push((
+            "/apex/com.android.art/bin/dex2oat64".into(),
+            art.join("bin/dex2oat64"),
+        ));
+        entries.extend(files.iter().map(|(g, h)| (g.to_string(), h.clone())));
+        for (guest, host) in entries {
+            map.push_str(&format!("rw\t{guest}\t{}\n", host.display()));
+        }
+        fs::write(work.join("path-map"), map).map_err(|e| e.to_string())?;
+        Ok(Dex2oat {
+            linux_run: ctx.workspace.host_bin("linux-run"),
+            work: work.to_path_buf(),
+        })
+    }
+
+    /// Runs dex2oat64 with the common arguments and `args`. Without a
+    /// generated linker configuration linker64 uses its default namespace,
+    /// which LD_LIBRARY_PATH points at the APEXes libart links.
+    pub fn run(&self, log: &mut Log, args: &[String]) -> Result<(), String> {
+        log.run(
+            Command::new(&self.linux_run)
+                .env_clear()
+                .env(
+                    "LD_LIBRARY_PATH",
+                    "/apex/com.android.art/lib64:/apex/com.android.i18n/lib64:/apex/com.android.os.statsd/lib64",
+                )
+                .env("ANDROID_ROOT", "/system")
+                .env("ANDROID_DATA", "/data")
+                .env("ANDROID_ART_ROOT", "/apex/com.android.art")
+                .env("ANDROID_I18N_ROOT", "/apex/com.android.i18n")
+                .arg("--inherit-env")
+                .arg("--path-map")
+                .arg(self.work.join("path-map"))
+                .arg("--cache")
+                .arg(self.work.join("cache"))
+                .arg("/apex/com.android.art/bin/dex2oat64")
+                .args([
+                    "--runtime-arg",
+                    "-Xms64m",
+                    "--runtime-arg",
+                    "-Xmx1024m",
+                    "--instruction-set=arm64",
+                    "--instruction-set-features=default",
+                    "--image-format=lz4",
+                    "--force-determinism",
+                    "--generate-build-id",
+                    "--avoid-storing-invocation",
+                    "--compilation-reason=prebuilt",
+                    "--android-root=/system",
+                ])
+                .args(args),
+        )
+    }
 }

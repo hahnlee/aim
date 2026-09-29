@@ -64,6 +64,11 @@ programs, and implement only what lies below it.
      from AOSP source with the base-relative compressed-reference patches, as
      Android ELF. The boot image is regenerated with it. The patch series, its
      build and the boot image plan are in `docs/art-exception-patches.md`.
+   - **SystemServer (ADR 0013):** `services.jar` without the start of each
+     service a native implementation replaces (`image/native-services`):
+     that one call's instructions become `nop`s in place, checked
+     symbolically at build time, and its oat files are compiled again for
+     the edited jar (ADR 0013, "Steps").
 
 5. **Derived system image.** The original archive plus a checked-in overlay
    manifest (additions, and explicitly listed replacements and removals)

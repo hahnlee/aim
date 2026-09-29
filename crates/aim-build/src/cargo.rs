@@ -211,9 +211,14 @@ impl Workspace {
                     .filter(|t| t.kind.iter().any(|k| k == "bin"))
                 {
                     let artifact = self.host_bin(&target.name);
+                    let deps = if self.needs_generated_sources(id) {
+                        vec![Dep::on("aidl-gen")]
+                    } else {
+                        Vec::new()
+                    };
                     nodes.push(Node {
                         name: format!("host/{}", target.name),
-                        deps: Vec::new(),
+                        deps,
                         inputs: self.declared_inputs(id),
                         outputs: vec![artifact.clone()],
                         tools: vec![Tool::Rustc],

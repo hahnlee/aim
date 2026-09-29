@@ -73,6 +73,21 @@ impl Driver {
         pending.deliver();
     }
 
+    /// Start recording every transaction ([`Driver::take_trace`]).
+    pub fn start_trace(&self) {
+        let mut st = self.lock();
+        st.trace = Some(crate::trace::Trace::new());
+        self.unlock(st);
+    }
+
+    /// The transactions completed since the last call.
+    pub fn take_trace(&self) -> Vec<crate::TraceRecord> {
+        let mut st = self.lock();
+        let records = st.trace.as_mut().map(|t| t.take()).unwrap_or_default();
+        self.unlock(st);
+        records
+    }
+
     /// `binder_open`.
     pub fn open(&self, device: Device, creds: Credentials) -> ProcHandle {
         let mut st = self.lock();

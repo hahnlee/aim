@@ -1,0 +1,256 @@
+# System services
+
+The living record of ADR 0013's migration: which of Android's system
+services run as native implementations on the Mac, how they are replaced,
+what apps use, and how each replacement conforms. Keep it current with
+every step: replace superseded facts instead of appending a log.
+
+## Status
+
+| Service | Implementation | Conformance (CTS 16_r1) | Since |
+| --- | --- | --- | --- |
+| `clipboard` (IClipboard) | native, `crates/aim-services`, backed by `NSPasteboard` | 35 of 36 tests pass (original: 36 of 36); app checks pass | M1, 2026-09-29 |
+| every other service | the original, in SystemServer or its daemon | | |
+
+## How a service is replaced
+
+1. **Its AIDL, generated.** `crates/aim-services/sources.lock` pins the
+   framework `.aidl` files at the image's tag (sha256 per file). The
+   `aidl-gen` node of `cargo aim` fetches them (gitiles, else git) and
+   generates `aim-service-aidl` (`target/aim/gen/service-aidl`,
+   `crates/aim-build/src/nodes/service_aidl.rs`): each interface's
+   descriptor, every method's code (AIDL's rule: the first call
+   transaction plus the method's index or explicit id), and for the
+   methods the lock selects the parcel (de)serialization of their
+   arguments and replies over `aim_binder_host::parcel`. A Java-only
+   parcelable is a type parameter the service implements
+   (`ReadParcelable`, `WriteParcelable`) from the pinned Java source.
+   The node then reads the `TRANSACTION_*` constants of each interface's
+   stub in the image's own `framework.jar` (`aim_android_image::dex`) and
+   fails unless every method's code matches: codes cannot drift, and
+   nothing is numbered by hand or found by reflection.
+2. **A host binder process.** guest-init hosts the binder driver; the
+   native services are one more process of it (`aim_binder_host::local`),
+   with the system uid and system_server's SELinux context, serving their
+   nodes on host threads. A call to them crosses no Mach hop after the
+   caller's own. A service sees the caller's pid and uid from the driver,
+   and reaches the original services it consults (permissions, app ops,
+   users) as a client, through servicemanager.
+3. **Registered under the original name.** When servicemanager sets
+   `servicemanager.ready` (at boot, and again after a restart), guest-init
+   registers each native service with `addService`, as
+   `SystemService.publishBinderService` does.
+4. **The original not started.** `image/native-services` lists each
+   native service and the SystemServer class it replaces. SystemServer has
+   no switch to leave a service out, so the derived image's `services.jar`
+   is the original with that class's `startService(Foo.class)` call (its
+   `const-class` and `invoke-virtual`) turned into `nop`s, in place; the
+   dex checksums and the jar's CRC are recomputed and nothing else changes
+   (`aim_android_image::system_server`, the `system-server` node, ADR 0013
+   "Steps"). The node then compiles the jar's `services.odex` and `.vdex`
+   again with the rebuilt dex2oat64 (`verify`, against the regenerated boot
+   image): the image's name the jar's entries by CRC, and without matching
+   ones system_server verifies all of services.jar at run time (ANRs, and
+   a cold Settings start after boot timed out). guest-init reads the same
+   list from the image.
+5. **Reverse bridge.** system_server code that calls a replaced service's
+   `LocalServices` interface needs a bridge to the native service. For
+   clipboard there is none to bridge: `ClipboardService` publishes no local
+   interface, and nothing else in `services/` reaches into it (searched at
+   the tag). What a native service needs from system_server internals is
+   #430.
+6. **Conformance.** The CTS module(s) for the service's API, before (the
+   original) and after (native), plus the app checks; failing tests keep
+   the original.
+
+## Inventory: what apps use
+
+**Method.** guest-init `--binder-trace FILE` makes the binder driver
+record every transaction: sender pid and euid, target pid, the interface
+token at the start of the data, code, one-way or not, and for a
+synchronous call the time from the driver taking `BC_TRANSACTION` to it
+taking the target's `BC_REPLY` (the target's wake, its work and its way
+back into the driver; not the caller's own hops). On a booted device, each
+app was cold-started with `am force-stop; am start -W -S`, left 6 s, and
+its pid taken from ActivityManager's `Start proc` line.
+`tools/binder-trace-report.py` names services (from `service list`) and
+methods (from the `TRANSACTION_*` constants of every stub in the image's
+jars). `cargo aim boot -- --binder-trace FILE` records one.
+
+**Cold starts on the original stack** (2026-09-29, first boot of a reused
+data image, M2 Pro, load average about 20):
+
+| App | Transactions | One-way | Services | Synchronous p50 | p99 |
+| --- | --- | --- | --- | --- | --- |
+| Settings | 407 | 64 | 45 | 2.1 ms | 113 ms |
+| Calculator | 142 | 49 | 24 | 1.4 ms | 117 ms |
+| Chrome | 1,215 | 248 | 51 | 0.53 ms | 15.6 ms |
+
+Services by calls (Settings, Calculator, Chrome); interfaces without a
+servicemanager name are objects handed out by a service:
+
+| Service | Settings | Calculator | Chrome |
+| --- | --- | --- | --- |
+| device_policy | 5 | 0 | 492 |
+| IDisplayEventConnection (SurfaceFlinger) | 22 | 25 | 142 |
+| package | 83 | 10 | 74 |
+| activity | 39 | 8 | 85 |
+| SurfaceFlinger, SurfaceFlingerAIDL | 32 | 30 | 88 |
+| manager (servicemanager) | 33 | 16 | 33 |
+| IContentProvider (mostly the settings provider) | 31 | 7 | 31 |
+| connectivity, network_management | 2 | 2 | 67 |
+| IActivityClientController, IWindowSession, window | 17 | 13 | 54 |
+| user | 20 | 1 | 8 |
+| appops | 27 | 0 | 1 |
+| safety_center | 23 | 0 | 0 |
+| allocator HAL | 7 | 7 | 7 |
+| display, accessibility, input_method | 14 | 13 | 13 |
+| content, appwidget, notification, activity_task, uimode, voiceinteraction, content capture | 13 | 4 | 50 |
+| clipboard | 0 | 2 | 1 |
+| 38 others (alarm, role, usb, media.camera, GMS's own interfaces, pings, ...) | 39 | 4 | 69 |
+
+What stands out:
+
+- Chrome calls `IDevicePolicyManager.getProfileOwnerAsUser` and
+  `getDeviceOwnerComponent` 246 times each during its start.
+- Settings reads package and app-op state heavily (83 `package`, 27
+  `appops` calls); every app reads the settings provider.
+- servicemanager is slow: `isDeclared` 95-117 ms, `updatableViaApex`
+  110 ms, `checkService2` 4 ms at p50 (#435).
+- Calculator reads the clipboard at start (`addPrimaryClipChangedListener`,
+  `getPrimaryClip`), Chrome registers a listener.
+
+### Binder latency baseline
+
+ADR 0013's target: p50 < 20 us, p99 < 200 us per call.
+
+| What | p50 | p99 |
+| --- | --- | --- |
+| All synchronous calls of a first boot (59,624, load about 20) | 1.2 ms | 318 ms |
+| Calls answered by system_server (44,000) | 0.9 ms | 53 ms |
+| Calls answered by servicemanager (3,295) | 5.6 ms | 831 ms |
+| `IClipboard.hasPrimaryClip` from the shell, idle, original (41 calls) | 221 us | 997 us |
+| The same, native clipboard (40 calls) | 541 us | 2,988 us |
+| `addPrimaryClipChangedListener` during a cold start, original | 377-1,878 us | |
+| The same, native clipboard | 15-18 us | |
+
+A binder hop itself costs 6.5 us (docs/binder-driver.md); what the
+table shows is the servers' work, under load, and system_server's Java.
+
+## Internal dependencies of leaf candidates
+
+From the sources at `android-16.0.0_r1` (`services/core`):
+
+- **clipboard** (`ClipboardService`). Consults ActivityManagerInternal
+  (`handleIncomingUser`, `getUidProcessState`), UriGrantsManagerInternal
+  (permission owner, grant checks, revocation), WindowManagerInternal
+  (`isUidFocused`, `getTopFocusedDisplayId`), VirtualDeviceManagerInternal,
+  ContentCaptureManagerInternal, AutofillManagerInternal and
+  PackageManagerInternal (`isSameApp`); over binder or managers:
+  IUriGrantsManager, IUserManager, AppOpsManager, PackageManager,
+  KeyguardManager, TextClassificationManager, Toast, DeviceConfig,
+  Settings.Secure, statsd. Publishes no `LocalServices` interface; nothing
+  in system_server calls into it. A leaf.
+- **vibrator** (`VibratorManagerService`). Consults
+  PowerManagerInternal, VirtualDeviceManagerInternal and
+  PackageManagerInternal; IBatteryStats, AppOps, PowerManager,
+  AudioManager, InputManager. Publishes no local interface; system_server
+  uses it through the public Vibrator API (PowerManager's Notifier,
+  ActivityManager, notification's VibratorHelper, AudioService,
+  PhoneWindowManager, biometrics), which a native binder serves as well.
+  A leaf; the device declares no vibrator today.
+- **notification** (`NotificationManagerService`). Consults twelve local
+  interfaces (UsageStats, PermissionPolicy, JobScheduler, ActivityManager,
+  ActivityTaskManager, WindowManager, UserManager, UriGrants,
+  PackageManager, DevicePolicy, Lights, StatusBarManager) and SystemUI's
+  NotificationDelegate, and publishes `NotificationManagerInternal`, which
+  ActivityManager (foreground-service notifications), WindowManager's
+  DisplayPolicy, PermissionPolicyService and three job services call. Not
+  a leaf: it needs the bridge in both directions (#430).
+
+## The clipboard (M1 pilot)
+
+`crates/aim-services/src/clipboard.rs` follows `ClipboardService.java` at
+the tag: a primary clip per user and device, set by any app and read only
+by the focused app, the default input method or a holder of
+READ_CLIPBOARD_IN_BACKGROUND (INTERNAL_SYSTEM_WINDOW with focus for system
+windows); each access checks the caller's package and notes the
+READ/WRITE_CLIPBOARD app op (a MODE_ERRORED throws, as `noteOp` does);
+listeners are told of each change they may read and forgotten when they
+die; a clip is copied to related profiles unless a restriction forbids it,
+and cleared an hour after its last use. `ClipData` is read and written in
+its Java parcel form (`clip.rs`), its binders held while the clip is.
+
+The Mac takes the emulator's place (`EmulatorClipboardMonitor`): a clip set
+on the default device puts its first item's text on the Mac's pasteboard;
+text copied on the Mac becomes user 0's clip, set by the system uid and
+labelled "host clipboard". The Mac's text is read only when an app pastes
+it (a change is noticed from `changeCount` and the types, which do not
+read the content). Clearing an Android clip clears the Mac's pasteboard
+only while it still holds that clip.
+
+Where the original uses a system_server-internal API with no binder form,
+the native clipboard does without, or stands in:
+
+- focus: the focused root task's `effectiveUid` for
+  `WindowManagerInternal.isUidFocused`; content capture, autofill and
+  virtual devices not consulted (#430);
+- the default input method: `IInputMethodManager`'s current method for
+  `Settings.Secure.DEFAULT_INPUT_METHOD`;
+- no URI permission grants (#429); no DeviceConfig or Settings.Secure
+  (#428); no paste toast, text classification (clips are marked
+  `CLASSIFICATION_NOT_PERFORMED`) or statistics (#431);
+- clips it cannot parse are refused, and fds and `dumpsys clipboard` are
+  not served (#433);
+- SystemUI shows its clipboard overlay for the Mac's copies (#434).
+
+**Cost.** A call that needs no check is fast: `addPrimaryClipChangedListener`
+takes 15-18 us against 377-1,878 us for the original. A call that checks
+access is slower than the original, because each check is a call into
+system_server: `hasPrimaryClip` makes four (`IAppOpsService.checkPackage`
+275 us, `IPermissionManager.checkPermission`,
+`IAppOpsService.checkOperationForDevice`, `ITrustManager.isDeviceLocked`,
+about 80 us each), 541 us in all against 221 us (#432).
+
+## Conformance
+
+**Suite.** The official Android 16 CTS, `android-cts-16_r1-linux_x86-arm`
+(the image is `BE2A.250530.026.F3`, security patch 2025-07-05), pinned in
+`upstream/cts.lock`. The release zip is 18.6 GB; `tools/cts-module.py`
+fetches only the pinned entries with HTTP range requests into `_build/cts`
+and checks their sha256. The CTS is Apache-2.0 AOSP with its test
+libraries under their own licenses; it is a local test input, never
+shipped or committed.
+
+**Run.** On a booted device (`cargo aim boot`), install
+`CtsContentUriTestApp.apk` then `CtsContentTestCases.apk` (`pm install -r
+-g [-t]`) and run the classes with `am instrument -w -r
+--no-hidden-api-checks -e class ... android.content.cts/androidx.test.runner.AndroidJUnitRunner`.
+`am instrument` runs on `app_process`, which needs init's class path:
+a debugging shell sources it first (`while read -r e n v; do [ "$e" =
+export ] && export "$n=$v"; done < /data/system/environ/classpath`).
+
+| Class (CtsContentTestCases) | Tests | Original | Native |
+| --- | --- | --- | --- |
+| ClipboardManagerTest | 15 | 15 pass | 15 pass |
+| ClipboardManagerListenerTest | 1 | pass | pass |
+| ClipboardAutoClearTest | 3 | 3 pass | 2 pass; `testAutoClearJob` fails (#428) |
+| ClipDataTest | 11 | 11 pass | 11 pass |
+| ClipDescriptionTest | 6 | 6 pass | 6 pass |
+
+The original's numbers are from the same boot procedure with
+`image/native-services` empty. The five classes take 3 min 10 s against
+the original and 3 min 20 s against the native clipboard. One native run of ClipboardManagerTest was
+cut short by a SurfaceFlinger hang in a task snapshot that took
+system_server down (#436); the rerun passed.
+
+**App checks** (native clipboard, device window):
+
+- Settings search: text typed in the field and copied (Ctrl+A, Ctrl+C) is
+  on the Mac's pasteboard (`pbpaste`); text copied on the Mac pastes into
+  the field (Ctrl+V), and copying it back after typing one more character
+  puts the combined text on the Mac.
+- Chrome: text copied on the Mac pastes into the omnibox, and the
+  omnibox's text copies back to the Mac.
+- Calculator, Settings and Chrome start (cold, `am start -W -S`); SystemUI
+  and Gboard, which listen to the clipboard, run without errors.

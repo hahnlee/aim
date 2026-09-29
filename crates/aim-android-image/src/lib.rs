@@ -8,11 +8,13 @@
 //! manifest and the hash of every overlay source.
 
 pub mod assemble;
+pub mod dex;
 pub mod diff;
 pub mod identity;
 pub mod manifest;
 pub mod plan;
 pub mod problem;
+pub mod system_server;
 
 pub use assemble::{Outcome, assemble};
 pub use identity::Identity;

@@ -1,0 +1,37 @@
+# The framework AIDL of the native system services (ADR 0013,
+# crates/aim-services): the aidl-gen node of `cargo aim` (docs/build.md)
+# fetches these files at the tag of the pinned image, checks each against
+# its sha256, generates Rust from them
+# (crates/aim-build/src/nodes/service_aidl.rs) and checks every
+# transaction code against the image's own stubs. Shell-style assignments.
+AOSP_TAG=android-16.0.0_r1
+
+# project|path|sha256
+SOURCE_FILES=(
+  "platform/frameworks/base|core/java/android/content/IClipboard.aidl|631331c41fba8d7b7a0f1c2815e498068571af9ad0c2677b3cbd0ac9e144b03b"
+  "platform/frameworks/base|core/java/android/content/IOnPrimaryClipChangedListener.aidl|fd26aa5ccf0a71ee74550fed93ec969db01b840be72bef52208f94e451961633"
+  "platform/frameworks/native|libs/binder/aidl/android/os/IServiceManager.aidl|9ac0520979c800c1a7d0c05c6a167da9b0ea6c66e160822e0b255c25bda15e02"
+  "platform/frameworks/base|core/java/android/app/IActivityManager.aidl|458945b089157964f6cce63c00fdfcaeb8bb04ce18d06c515e2a53628cab52a1"
+  "platform/frameworks/base|core/java/android/app/IActivityTaskManager.aidl|71b288fb77dcab8b556da805dd69afc11c273842d78a79ca192d06e7f51746ad"
+  "platform/frameworks/base|core/java/com/android/internal/app/IAppOpsService.aidl|2e6fb1b32c87a4e0a4a26f7cac77e31e70fa3db441ad87bd4031b6fd999080ed"
+  "platform/frameworks/base|core/java/android/permission/IPermissionManager.aidl|68234acd6d2a08ef924cddbbfd38b2b73e26df961f6a41251f9490ed58c10403"
+  "platform/frameworks/base|core/java/android/os/IUserManager.aidl|0f0c0f8ed3d6764b141e94ad3a3c5ca2c3ed92193372228096baf9d4d61d83e0"
+  "platform/frameworks/base|core/java/android/app/trust/ITrustManager.aidl|032ad29ed8780c18823845ba629e722ce6bf3a796ef764f6b0f8d5a171d27016"
+  "platform/frameworks/base|core/java/com/android/internal/view/IInputMethodManager.aidl|83348aaedbc1fef4a032e7b614b93300e6fbef8d47840598155c241bfadaee7c"
+)
+
+# descriptor|jar of its stub in the image|methods to marshal (`*`: all).
+# Every method's code is generated and checked; only these get Rust for
+# their arguments and replies.
+INTERFACES=(
+  "android.content.IClipboard|system/framework/framework.jar|*"
+  "android.content.IOnPrimaryClipChangedListener|system/framework/framework.jar|*"
+  "android.os.IServiceManager|system/framework/framework.jar|addService,checkService"
+  "android.app.IActivityManager|system/framework/framework.jar|checkPermission,handleIncomingUser"
+  "android.app.IActivityTaskManager|system/framework/framework.jar|getFocusedRootTaskInfo"
+  "com.android.internal.app.IAppOpsService|system/framework/framework.jar|checkPackage,checkOperationForDevice,noteOperation"
+  "android.permission.IPermissionManager|system/framework/framework.jar|checkPermission"
+  "android.os.IUserManager|system/framework/framework.jar|isUserRunning,getProfileIds,hasUserRestriction"
+  "android.app.trust.ITrustManager|system/framework/framework.jar|isDeviceLocked"
+  "com.android.internal.view.IInputMethodManager|system/framework/framework.jar|getCurrentInputMethodInfoAsUser"
+)

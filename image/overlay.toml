@@ -445,6 +445,36 @@ path = "/vendor/etc/permissions/android.software.freeform_window_management.xml"
 source = "image/vendor/etc/permissions/android.software.freeform_window_management.xml"
 reason = "freeform windows: window mode shows each freeform task as a macOS window"
 
+# ADR 0013: system services implemented natively on the Mac. SystemServer
+# has no switch to leave a service out, so its services.jar is the
+# original with the start of each native service's original turned into
+# no-ops (the system-server node); guest-init reads the list to register
+# the native ones.
+
+[[replace]]
+path = "/system/framework/services.jar"
+source = "target/aim/system-server/services.jar"
+reason = "SystemServer does not start the services image/native-services lists (their startService calls are nops; nothing else changes), which native implementations replace (ADR 0013)"
+
+[[replace]]
+path = "/system/framework/oat/arm64/services.odex"
+source = "target/aim/system-server/oat/arm64/services.odex"
+reason = "the edited services.jar's oat file (verify, against the ART exception's boot image): the original names the original jar's entries by CRC"
+
+[[replace]]
+path = "/system/framework/oat/arm64/services.vdex"
+source = "target/aim/system-server/oat/arm64/services.vdex"
+reason = "the edited services.jar's verification data: the original's would not match it, and system_server would verify services.jar at run time"
+
+[[remove]]
+path = "/system/framework/oat/arm64/services.art"
+reason = "the original services.odex's app image, which belongs to the original jar and runtime"
+
+[[add]]
+path = "/system/etc/aim/native-services"
+source = "image/native-services"
+reason = "the system services implemented natively, which guest-init registers with servicemanager"
+
 [[add]]
 path = "/system_ext/bin/aim-windows"
 source = "target/aim/daemons/bin/aim-windows"

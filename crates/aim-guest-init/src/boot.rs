@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use aim_android_image::system_server::{NATIVE_SERVICES, parse_native_services};
 use aim_android_init::engine::{ActionManager, COLD_BOOT_DONE_PROP, ExecutedCommand, Step};
 use aim_android_init::props::load::{
     KernelBootProperties, PropertyInitOptions, create_serialized_property_info, property_init,
@@ -21,6 +22,7 @@ use aim_android_init::props::{SetEffect, Ucred};
 use aim_android_init::rc::{IdResolver, ScriptLoader, vendor_android_version};
 use aim_android_init::{ImageRoot, PropertyLookup};
 use aim_binder_host::server::Server;
+use aim_services::NativeServices;
 
 use crate::apex;
 use crate::executor::{GuestExecutor, Outgoing, PropsAdapter};
@@ -100,6 +102,9 @@ pub struct BootOptions {
     pub vulkan: Option<PathBuf>,
     pub display: Option<PathBuf>,
     pub trace: bool,
+    /// Run mode: append every binder transaction to this file
+    /// ([`trace_binder`]).
+    pub binder_trace: Option<PathBuf>,
     /// `androidboot.*` bootconfig entries (without the prefix).
     pub androidboot: Vec<(String, String)>,
     /// Run mode: stop everything after this long.
@@ -123,6 +128,7 @@ impl BootOptions {
             vulkan: None,
             display: None,
             trace: false,
+            binder_trace: None,
             // The device: init.rc imports init.aim.rc and vold reads
             // fstab.aim (image/overlay.toml).
             androidboot: vec![("hardware".to_string(), "aim".to_string())],
@@ -275,11 +281,76 @@ pub struct Boot {
     _sockets: Option<PropertySockets>,
     /// Run mode: the binder host behind every service's `--binder`.
     _binder: Option<Arc<Server>>,
+    /// Run mode: the system services implemented natively (ADR 0013),
+    /// registered once servicemanager is ready.
+    native_services: Option<Arc<NativeServices>>,
     /// Run mode: the data directory's case-sensitive image, attached at
     /// it for the boot (docs/storage.md). Declared last, so it is
     /// detached after the rest is dropped.
     pub report: BootReport,
     _data: Option<aim_storage::data::DataImage>,
+}
+
+/// `servicemanager` sets it once it serves calls.
+const SERVICEMANAGER_READY: &str = "servicemanager.ready";
+
+/// The system services the image says are native (ADR 0013): SystemServer
+/// does not start them, so they are created here, to be registered with
+/// servicemanager once it is ready.
+fn start_native_services(
+    image: &ImageRoot,
+    server: &Arc<Server>,
+) -> Result<Option<Arc<NativeServices>>, String> {
+    let Ok(list) = image.read(NATIVE_SERVICES) else {
+        return Ok(None);
+    };
+    let names: Vec<String> = parse_native_services(&String::from_utf8_lossy(&list))
+        .map_err(|e| format!("{NATIVE_SERVICES}: {e}"))?
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    NativeServices::new(server.driver(), &names)
+        .map(|s| Some(Arc::new(s)))
+        .map_err(|e| format!("native services: {e}"))
+}
+
+/// Trace every binder transaction into `file`, one tab-separated line
+/// each: microseconds since the trace started, device, sender pid and
+/// euid, target pid, interface token, code, `oneway` or `sync`, and a
+/// synchronous call's latency in nanoseconds (`-` without a reply).
+fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), String> {
+    use std::io::Write;
+    let mut out = std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let driver = server.driver().clone();
+    driver.start_trace();
+    std::thread::Builder::new()
+        .name("binder-trace".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                let mut text = String::new();
+                for r in driver.take_trace() {
+                    text.push_str(&format!(
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                        r.at.as_micros(),
+                        r.device,
+                        r.from_pid,
+                        r.from_euid,
+                        r.to_pid,
+                        r.descriptor,
+                        r.code,
+                        if r.oneway { "oneway" } else { "sync" },
+                        r.latency
+                            .map_or("-".to_string(), |l| l.as_nanos().to_string()),
+                    ));
+                }
+                if out.write_all(text.as_bytes()).is_err() {
+                    return;
+                }
+            }
+        })
+        .map(drop)
+        .map_err(|e| format!("binder trace: {e}"))
 }
 
 /// The controller mount points `SetupCgroups` would create from
@@ -438,8 +509,13 @@ impl Boot {
             }
             _ => None,
         };
+        let mut native_services = None;
         if let Some(server) = &binder {
             share_areas(&properties, server);
+            if let Some(file) = &options.binder_trace {
+                trace_binder(server, file)?;
+            }
+            native_services = start_native_services(&image, server)?;
         }
         let linux_run = LinuxRun {
             binary: linux_run_binary,
@@ -523,6 +599,7 @@ impl Boot {
             mac,
             _sockets: sockets,
             _binder: binder,
+            native_services,
             _data: data_image,
             report,
         })
@@ -626,6 +703,9 @@ impl Boot {
         for effect in served.effects {
             match effect {
                 SetEffect::Changed { name, value } => {
+                    if name == SERVICEMANAGER_READY && value == "true" {
+                        self.register_native_services();
+                    }
                     self.executor
                         .outbox
                         .push_back(Outgoing::PropertyChanged(name, value));
@@ -676,6 +756,23 @@ impl Boot {
             request.reply(code);
         }
         self.pump_outbox();
+    }
+
+    /// Registers the native services with servicemanager, which just set
+    /// `servicemanager.ready` (again after a restart). On another thread:
+    /// servicemanager waits for this property set's reply before it serves
+    /// calls.
+    fn register_native_services(&mut self) {
+        let Some(services) = self.native_services.clone() else {
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("native-services".into())
+            .spawn(move || {
+                if let Err(error) = services.register() {
+                    eprintln!("guest-init: native services: {error}");
+                }
+            });
     }
 
     /// Sets a property for the host, as init sets one, and runs its

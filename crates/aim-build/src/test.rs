@@ -152,6 +152,9 @@ pub fn run(
 ) -> Result<ExitCode, String> {
     if integration {
         graph::build(graph, &graph.all(), ctx, options)?;
+    } else {
+        // Host crates compile generated sources (aim-services).
+        graph::build(graph, &["aidl-gen".to_string()], ctx, options)?;
     }
     let binaries = compile(ctx)?;
     let skips = aim_paths::test_skips();

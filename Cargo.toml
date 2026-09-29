@@ -3,9 +3,10 @@
 # docs/build.md) builds both; plain `cargo build`/`cargo test` build the
 # host crates (default-members).
 #
-# The guest crates' AIDL and AOSP sources are not in Git: the aidl-gen node
-# of `cargo aim` fetches the pinned AOSP trees into _build/aosp and
-# generates the AIDL crates into target/aim/gen before cargo runs.
+# The AIDL and AOSP sources of the guest crates and of aim-services are not
+# in Git: the aidl-gen node of `cargo aim` fetches the pinned AOSP sources
+# into _build/aosp and generates the AIDL crates into target/aim/gen before
+# cargo runs.
 [workspace]
 members = [
     "crates/aim-android-image",
@@ -28,6 +29,8 @@ members = [
     "crates/aim-hostcall",
     "crates/aim-linux-abi",
     "crates/aim-paths",
+    "crates/aim-services",
+    "crates/aim-services/aidl",
     "crates/aim-storage",
     "crates/aim-sync-file",
     "tools/android-image-extract",
@@ -84,6 +87,8 @@ default-members = [
     "crates/aim-hostcall",
     "crates/aim-linux-abi",
     "crates/aim-paths",
+    "crates/aim-services",
+    "crates/aim-services/aidl",
     "crates/aim-storage",
     "crates/aim-sync-file",
     "tools/android-image-extract",

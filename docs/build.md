@@ -40,6 +40,7 @@ selects a group (`cargo aim build hal`). `-v` shows the tools' output,
 | `_build/android16-image.dmg` | The system image (`image` node): the original and its translation cache as an uncompressed read-only case-sensitive disk image, mounted at `_build/android16-image` (docs/storage.md) |
 | `_build/aosp/` | AOSP trees fetched at the image's tag, each checked against its lock's hash |
 | `_build/downloads/` | Their archives (and the MoltenVK release), so a refetch needs no network |
+| `_build/cts/` | The pinned entries of the CTS release (`upstream/cts.lock`, `tools/cts-module.py`; docs/system-services.md) |
 | `_build/xsdc`, `_build/angle-source`, `_build/depot_tools` | Pinned checkouts |
 | `target/aim/<node>/` | Every build output (`hal/bin`, `art/stripped`, `boot-image`, ...) |
 | `target/aim/derived.shadow` | The derived image: the system image's changes by the overlay and its translations, mounted read-only at `target/aim/derived` |
@@ -57,15 +58,16 @@ non-cargo stages are declared in code:
 
 | Node | Upstream | Inputs (declared) | Outputs |
 | --- | --- | --- | --- |
-| `host/<bin>` | | manifests, build scripts, `Cargo.lock`, cargo config; found: dep-info | cargo's `target/release/<bin>` |
+| `host/<bin>` | `aidl-gen` when it compiles generated sources (aim-services) | manifests, build scripts, `Cargo.lock`, cargo config; found: dep-info | cargo's `target/release/<bin>` |
 | `image` | `host/android-image-extract`, `host/linux-translate` (order only) | `image/original.lock` | `_build/android16-image.dmg`, attached |
-| `aidl-gen` | | `hal/sources.lock`, `daemons/sources.lock`, `tools/lib/*.py`, AIDL crate manifests | `target/aim/gen/{hal,daemon}-aidl` |
+| `aidl-gen` | `image` (order only) | `hal/sources.lock`, `daemons/sources.lock`, `crates/aim-services/sources.lock`, `image/original.lock`, `tools/lib/*.py`, AIDL crate manifests | `target/aim/gen/{hal,daemon,service}-aidl` |
 | `hal/<package>`, `daemon/<package>` | `image`; `aidl-gen` when a dependency's sources are generated or fetched | as `host/*` | `target/aim/{hal,daemons}/...` |
 | `xsdc` | | `upstream/android16-xsdc.lock` | `target/aim/xsdc` |
 | `art` | `xsdc`, `image` | `patches/art-android/*`, `tools/art-android/*`; found: n2's deps log | `target/aim/art/stripped` |
 | `boot-image` | `art`, `image`, `host/linux-run` (order only) | | `target/aim/boot-image/framework` |
 | `angle` | | `upstream/angle.lock`, `upstream/angle-args.gn` | `_build/angle-source/out/AimRelease` |
 | `moltenvk` | | `upstream/moltenvk.lock` | `target/aim/moltenvk` (`libMoltenVK.dylib`, `LICENSE`, `vk.xml`) |
+| `system-server` | `image`, `boot-image`, `host/linux-run` (order only) | `image/native-services` | `target/aim/system-server/services.jar`, SystemServer without the start of the natively implemented services (docs/system-services.md), and its `oat/arm64/services.{odex,vdex}` |
 | `derived-image` | `image` and the producer of every built overlay source | `image/overlay.toml` and its checked-in sources | `target/aim/derived.shadow`, attached at `target/aim/derived` |
 | `translation-cache` | `derived-image`, `host/linux-translate` | | the derived image's `translated/` |
 
@@ -135,8 +137,10 @@ info); `.cargo/config.toml` names the NDK linker through a wrapper that
 and the image's `libbinder_ndk.so` and `libnativewindow.so` are linked from
 `target/aim/link`.
 
-The guest crates need `aidl-gen` first: the AIDL crates' sources and AOSP's
-binder crate are not in Git. `cargo aim build hal/health` does that;
+The guest crates and `aim-services` need `aidl-gen` first: the AIDL
+crates' sources and AOSP's binder crate are not in Git. A plain `cargo
+build` of the host crates on a fresh checkout therefore starts with
+`cargo aim build aidl-gen`. `cargo aim build hal/health` does that;
 afterwards `cargo build -p health --target aarch64-linux-android --profile
 android` also works.
 
@@ -171,7 +175,8 @@ a second ANGLE build per worktree would cost gigabytes.
 
 ## Tests
 
-`cargo aim test` compiles the host crates' tests (`cargo test --release
+`cargo aim test` builds `aidl-gen` (aim-services compiles generated
+sources), compiles the host crates' tests (`cargo test --release
 --no-run`) and runs each test binary on its own, from its package directory,
 with a timeout (`--timeout SECS`, default 900) that kills the binary's whole
 process group, so a hung guest cannot outlive it. Without `--integration` it

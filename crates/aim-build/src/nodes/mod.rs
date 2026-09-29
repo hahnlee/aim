@@ -9,6 +9,8 @@ mod boot_image;
 mod derived_image;
 mod image;
 mod moltenvk;
+mod service_aidl;
+mod system_server;
 mod translation_cache;
 mod xsdc;
 
@@ -26,6 +28,7 @@ pub fn declare(mut built: Vec<Node>) -> Result<Vec<Node>, String> {
         boot_image::node(),
         angle::node(),
         moltenvk::node(),
+        system_server::node(),
     ]);
     let derived = derived_image::node(&built)?;
     built.push(derived);
@@ -47,6 +50,7 @@ pub fn run(node: &Node, ctx: &Ctx, log: &mut Log) -> Result<Vec<PathBuf>, String
         Action::BootImage => boot_image::run(ctx, log)?,
         Action::Angle => angle::run(log)?,
         Action::MoltenVk => moltenvk::run(log)?,
+        Action::SystemServer => system_server::run(ctx, log)?,
         Action::DerivedImage => derived_image::run(log)?,
         Action::TranslationCache => translation_cache::run(ctx, log)?,
         Action::Cargo(_) => unreachable!(),
@@ -77,6 +81,7 @@ pub fn clean(node: &Node) -> Result<(), String> {
         // The build tree of a checkout other checkouts may share.
         Action::Angle => Vec::new(),
         Action::MoltenVk => vec![aim_paths::moltenvk()],
+        Action::SystemServer => vec![system_server::out()],
         Action::DerivedImage => {
             detach_derived()?;
             vec![aim_paths::derived_image_shadow()]

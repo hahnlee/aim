@@ -228,6 +228,8 @@ pub(crate) struct State {
     pub wakes: Vec<Arc<Condvar>>,
     /// External wakes to deliver once the lock is released.
     pub notifications: Vec<(Notifier, Option<Tid>)>,
+    /// Transactions being traced ([`crate::Driver::start_trace`]).
+    pub trace: Option<crate::trace::Trace>,
 }
 
 /// Wakes collected under the lock, delivered after it is released.
