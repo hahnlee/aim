@@ -467,6 +467,12 @@ pub fn peer(pid: i32) -> PeerCred {
     PeerCred { pid, uid, gid }
 }
 
+/// The real uid of host process `pid` from the process table, as a signal
+/// it sends carries it (`si_uid`).
+pub fn real_uid_of(pid: i32) -> Option<u32> {
+    identity_of(pid).map(|id| id.uid[0])
+}
+
 /// The credentials of process `pid` of the namespace, for a permission
 /// check: a pid with no entry is root.
 fn target(pid: i32) -> Identity {

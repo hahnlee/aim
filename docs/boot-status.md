@@ -164,6 +164,10 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
   (`other_processes_through_proc_and_scheduling`) and `tests/ndk.rs`
   (`background_qos`, host priority 46); not yet in a boot (#232 blocked
   the branch's `linux-run`).
+- Signals from another guest process carry its namespace pid and guest
+  real uid; a child stays in the process table as a zombie until a parent
+  in the namespace reaps it, so SIGCHLD and `waitid` report its uid
+  (#383).
 - The process table is the guest's pid namespace for every call that
   names a process, not only `/proc` (#341): `kill` (also `-1` and process
   groups), pidfds, the scheduler and priority calls and the rest reach

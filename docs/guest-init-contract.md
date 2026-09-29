@@ -186,7 +186,9 @@ rlimit	13	40	40
   (`docs/fork.md`). The layer writes the child's identity to
   `<dir of FILE>/by-pid/<host pid>`, where guest-init already links each
   service's pid; each process also writes its own entry when it starts
-  and after `execve`. It removes the file when the process exits. The by-pid
+  and after `execve`. The entry goes when a parent in the namespace reaps
+  the process (until then it is a zombie there, whose uid SIGCHLD and
+  `waitid` report), or when the process exits otherwise. The by-pid
   directory is the process table for peer credentials:
   - `SO_PEERCRED` and `SCM_CREDENTIALS` on AF_UNIX sockets must report the
     peer's guest pid, uid and gid from there (`LOCAL_PEERPID` →

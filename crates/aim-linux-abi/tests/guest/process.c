@@ -899,6 +899,16 @@ static char* slurp(const char* path) {
 }
 
 static int peer_up[2], peer_down[2];
+static volatile pid_t chld_pid;
+static volatile uid_t chld_uid;
+
+static void on_chld(int sig, siginfo_t* si, void* uc) {
+  (void)sig;
+  (void)uc;
+  chld_pid = si->si_pid;
+  chld_uid = si->si_uid;
+}
+
 // A thread of the child: it names itself, reports its tid, and reports
 // whether the scheduling the parent set reached it.
 static void* peer_worker(void* arg) {
@@ -924,6 +934,8 @@ static void* peer_worker(void* arg) {
 // (uid 10057) renames itself as zygote renames its children (PR_SET_NAME
 // and argv rewritten in place) and runs a second thread.
 static void peers(void) {
+  struct sigaction sa = {.sa_sigaction = on_chld, .sa_flags = SA_SIGINFO | SA_RESTART};
+  sigaction(SIGCHLD, &sa, NULL);
   CHECK(pipe(peer_up) == 0 && pipe(peer_down) == 0, "pipes");
   pid_t child = fork();
   if (child == 0) {
@@ -992,10 +1004,14 @@ static void peers(void) {
   int ok = 0;
   write(peer_down[1], "c", 1);
   CHECK(read(peer_up[0], &ok, sizeof(ok)) == sizeof(ok) && ok, "the thread took it");
+  // SIGCHLD and waitid carry the child's uid and pid.
   write(peer_down[1], "x", 1);
-  int status;
-  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-        "child %#x", status);
+  siginfo_t si = {0};
+  CHECK(waitid(P_PID, child, &si, WEXITED) == 0 && si.si_pid == child && si.si_uid == 10057,
+        "waitid pid %d uid %d", si.si_pid, si.si_uid);
+  for (int i = 0; i < 1000 && !chld_pid; i++) usleep(1000);
+  CHECK(chld_pid == child && chld_uid == 10057, "SIGCHLD pid %d uid %d", chld_pid, chld_uid);
+  signal(SIGCHLD, SIG_DFL);
   printf("ok peers\n");
 }
 

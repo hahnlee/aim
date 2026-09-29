@@ -273,8 +273,8 @@ fn signals_and_priorities_need_permission() {
 }
 
 /// Another process's /proc entries (its threads, rewritten argv, names,
-/// owner and credentials) and its threads' scheduling set from outside, as
-/// Linux reports them.
+/// owner and credentials), its threads' scheduling set from outside, and
+/// SIGCHLD's sender, as Linux reports them.
 #[test]
 fn other_processes_through_proc_and_scheduling() {
     check("peers");

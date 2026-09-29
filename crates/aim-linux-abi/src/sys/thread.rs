@@ -541,7 +541,13 @@ pub fn exit_group(a: [u64; 6]) -> ! {
 
 fn end_process(code: i32) -> ! {
     super::fork::spawn::wait_handovers();
-    super::cred::forget(pid());
+    // A parent in the namespace reaps this process and drops its entry
+    // then: until then it is a zombie there, whose credentials SIGCHLD
+    // and waitid report.
+    // SAFETY: trivial.
+    if !super::pidns::contains(unsafe { libc::getppid() }) {
+        super::cred::forget(pid());
+    }
     super::pidns::leave();
     // SAFETY: ending the process without host atexit handlers, as Linux's
     // exit_group.
