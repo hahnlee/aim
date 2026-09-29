@@ -203,6 +203,13 @@ rlimit	13	40	40
     processes only. An entry counts only for a process started before the
     entry was written, so a pid the Mac reuses is never a member. A
     forking process writes its child's entry before `fork` returns.
+  - Next to its entry each process keeps a record, `by-pid/<pid>.proc`
+    (`sys/procrec.rs`), which it maps shared: its threads with their
+    `comm` and scheduling, and a copy of its argument area. Other
+    processes read `/proc/<pid>/task`, `comm` and `cmdline` there, and
+    change a thread's scheduling by writing its slot; Darwin's SIGINFO
+    asks the process to refresh the argument area and to hand a change
+    to the thread, which applies it to its host thread.
   - A `linux-run` started with neither `--identity` nor `--by-pid` makes a
     private table and is the init of that namespace: its descendants die
     with it and the table goes.

@@ -13,6 +13,7 @@
 #include <linux/seccomp.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +56,9 @@
   } while (0)
 
 static const char* self_path;
+// main's argv, and the end of its strings.
+static char** main_argv;
+static char* main_args_end;
 
 static int pidfd_open(pid_t pid, unsigned flags) { return syscall(SYS_pidfd_open, pid, flags); }
 static int pidfd_send_signal(int fd, int sig) { return syscall(SYS_pidfd_send_signal, fd, sig, NULL, 0); }
@@ -884,6 +888,117 @@ static void permissions(void) {
 }
 #undef DENIED
 
+static char* slurp(const char* path) {
+  static char buf[4096];
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) return NULL;
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  buf[n < 0 ? 0 : n] = 0;
+  return buf;
+}
+
+static int peer_up[2], peer_down[2];
+// A thread of the child: it names itself, reports its tid, and reports
+// whether the scheduling the parent set reached it.
+static void* peer_worker(void* arg) {
+  (void)arg;
+  prctl(PR_SET_NAME, "peer-worker");
+  pid_t tid = gettid();
+  write(peer_up[1], &tid, sizeof(tid));
+  char c;
+  read(peer_down[0], &c, 1);
+  struct sched_param sp = {0};
+  int ok = 0;
+  for (int i = 0; i < 5000 && !ok; i++) {
+    ok = sched_getscheduler(0) == SCHED_FIFO && sched_getparam(0, &sp) == 0 &&
+         sp.sched_priority == 1 && getpriority(PRIO_PROCESS, 0) == -10;
+    if (!ok) usleep(1000);
+  }
+  write(peer_up[1], &ok, sizeof(ok));
+  read(peer_down[0], &c, 1);
+  return NULL;
+}
+
+// Another process through /proc and the scheduling calls: a child
+// (uid 10057) renames itself as zygote renames its children (PR_SET_NAME
+// and argv rewritten in place) and runs a second thread.
+static void peers(void) {
+  CHECK(pipe(peer_up) == 0 && pipe(peer_down) == 0, "pipes");
+  pid_t child = fork();
+  if (child == 0) {
+    if (setresgid(10057, 10057, 10057) != 0 || setresuid(10057, 10057, 10057) != 0) _exit(9);
+    prctl(PR_SET_NAME, "peer-main");
+    memset(main_argv[0], 0, main_args_end - main_argv[0]);
+    strcpy(main_argv[0], "renamed-child");
+    pthread_t t;
+    if (pthread_create(&t, NULL, peer_worker, NULL) != 0) _exit(8);
+    pthread_join(t, NULL);
+    _exit(0);
+  }
+  pid_t tid;
+  CHECK(read(peer_up[0], &tid, sizeof(tid)) == sizeof(tid), "worker tid");
+  char path[128], *text;
+  // Processes at the top of /proc, their threads under task/.
+  int listed_child = 0, listed_tid = 0, named = 0;
+  DIR* proc = opendir("/proc");
+  for (struct dirent* e; (e = readdir(proc));) {
+    int p = atoi(e->d_name);
+    listed_child |= p == child;
+    listed_tid |= p == tid;
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", p);
+    if (p > 0 && (text = slurp(path)) && !strcmp(text, "renamed-child")) named = p;
+  }
+  closedir(proc);
+  CHECK(listed_child && !listed_tid, "/proc lists the child %d, not its thread %d", listed_child,
+        listed_tid);
+  CHECK(named == child, "the child by its rewritten argv: %d", named);
+  int tasks = 0;
+  snprintf(path, sizeof(path), "/proc/%d/task", child);
+  DIR* task = opendir(path);
+  CHECK(task != NULL, "%s", path);
+  for (struct dirent* e; (e = readdir(task));) tasks += atoi(e->d_name) == child || atoi(e->d_name) == tid;
+  closedir(task);
+  CHECK(tasks == 2, "task/ lists %d of the 2 threads", tasks);
+  snprintf(path, sizeof(path), "/proc/%d/task/%d", child, tid);
+  CHECK(access(path, F_OK) == 0, "%s", path);
+  snprintf(path, sizeof(path), "/proc/%d/task/%d", child, tid + 1);
+  CHECK(access(path, F_OK) == -1 && errno == ENOENT, "%s", path);
+  snprintf(path, sizeof(path), "/proc/%d/comm", child);
+  CHECK((text = slurp(path)) && !strcmp(text, "peer-main\n"), "comm '%s'", text);
+  snprintf(path, sizeof(path), "/proc/%d/task/%d/comm", child, tid);
+  CHECK((text = slurp(path)) && !strcmp(text, "peer-worker\n"), "thread comm '%s'", text);
+  snprintf(path, sizeof(path), "/proc/%d/stat", tid);
+  CHECK((text = slurp(path)) && atoi(text) == tid && strstr(text, " (peer-worker) "),
+        "thread stat '%s'", text);
+  snprintf(path, sizeof(path), "/proc/%d/status", child);
+  CHECK((text = slurp(path)) && strstr(text, "Name:\tpeer-main\n") && strstr(text, "\nThreads:\t2\n") &&
+            strstr(text, "\nUid:\t10057\t10057\t10057\t10057\n") &&
+            strstr(text, "\nCapEff:\t0000000000000000\n"),
+        "status '%s'", text);
+  // The kernel's owner of /proc/<pid> is the process's effective ids.
+  struct stat st;
+  snprintf(path, sizeof(path), "/proc/%d", child);
+  CHECK(stat(path, &st) == 0 && st.st_uid == 10057 && st.st_gid == 10057, "owner %d", st.st_uid);
+  // Its thread's scheduling, set from here, reaches the thread.
+  struct sched_param sp = {.sched_priority = 1};
+  CHECK(sched_setscheduler(tid, SCHED_FIFO, &sp) == 0, "SCHED_FIFO");
+  CHECK(setpriority(PRIO_PROCESS, tid, -10) == 0, "nice -10");
+  CHECK(sched_getscheduler(tid) == SCHED_FIFO && getpriority(PRIO_PROCESS, tid) == -10,
+        "read back");
+  CHECK(sched_getscheduler(child) == SCHED_OTHER && getpriority(PRIO_PROCESS, child) == 0,
+        "the main thread keeps its own");
+  CHECK(sched_getscheduler(tid + 1) == -1 && errno == ESRCH, "no such thread");
+  int ok = 0;
+  write(peer_down[1], "c", 1);
+  CHECK(read(peer_up[0], &ok, sizeof(ok)) == sizeof(ok) && ok, "the thread took it");
+  write(peer_down[1], "x", 1);
+  int status;
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+        "child %#x", status);
+  printf("ok peers\n");
+}
+
 // Without a process table, linux-run is the init of a private pid
 // namespace: this prints its pid and a child's and exits, and the child
 // dies with it (tests/process.rs).
@@ -994,6 +1109,8 @@ static void seccomp_filter(void) {
 
 int main(int argc, char** argv) {
   self_path = "/data/local/tmp/process";
+  main_argv = argv;
+  main_args_end = argv[argc - 1] + strlen(argv[argc - 1]) + 1;
   // An empty argv arrives as one empty argv[0].
   if (argc == 1 && argv[0][0] == 0) return 3;
   if (strcmp(argv[0], "exit") == 0) return 0;
@@ -1036,7 +1153,7 @@ int main(int argc, char** argv) {
       {"seccomp_filter", seccomp_filter},
       {"xattrs", xattrs},           {"pf_key", pf_key},
       {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
-      {"permissions", permissions},
+      {"permissions", permissions}, {"peers", peers},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},
   };
   for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {

@@ -90,10 +90,18 @@ fn entry_names(dir: &std::path::Path, pid: i32, info: &libc::proc_bsdinfo) -> bo
     else {
         return false;
     };
-    let started = SystemTime::UNIX_EPOCH
+    start_time(info) <= written
+}
+
+fn start_time(info: &libc::proc_bsdinfo) -> SystemTime {
+    SystemTime::UNIX_EPOCH
         + Duration::from_secs(info.pbi_start_tvsec)
-        + Duration::from_micros(info.pbi_start_tvusec);
-    started <= written
+        + Duration::from_micros(info.pbi_start_tvusec)
+}
+
+/// When host process `pid` started.
+pub fn started(pid: i32) -> Option<SystemTime> {
+    bsd_info(pid).map(|i| start_time(&i))
 }
 
 /// The members with their host process information: this process and the
