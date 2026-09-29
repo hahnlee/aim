@@ -4,7 +4,8 @@
 //! every write, so the derived image costs only what the overlay changes;
 //! it is then mounted read-only at `target/aim/derived` (docs/storage.md).
 //!
-//! Its upstream is read from the overlay: a source under `target/` or
+//! Its upstream is read from the overlay: a source (or included manifest,
+//! whose own sources that node produces too) under `target/` or
 //! `_build/` must be an output of some node, which the derived image then
 //! depends on (a source no node produces is an error); every other source
 //! is a checked-in input.
@@ -29,10 +30,12 @@ pub fn node(others: &[Node]) -> Result<Node, String> {
     let built = [aim_paths::root().join("target"), aim_paths::fetched()];
     let mut inputs = vec![overlay];
     let mut deps = BTreeSet::from(["image".to_string()]);
-    for entry in &manifest.entries {
-        let Some(source) = &entry.source else {
-            continue;
-        };
+    let sources = manifest
+        .entries
+        .iter()
+        .filter_map(|e| Some((e.source.as_ref()?, e.line)))
+        .chain(manifest.includes.iter().map(|i| (&i.source, i.line)));
+    for (source, line) in sources {
         let path = aim_paths::root().join(source);
         if !built.iter().any(|b| path.starts_with(b)) {
             inputs.push(path);
@@ -43,8 +46,7 @@ pub fn node(others: &[Node]) -> Result<Node, String> {
             .find(|n| n.outputs.iter().any(|o| path.starts_with(o)))
             .ok_or_else(|| {
                 format!(
-                    "{OVERLAY}:{}: no node produces {source} (`cargo aim status` lists the nodes)",
-                    entry.line
+                    "{OVERLAY}:{line}: no node produces {source} (`cargo aim status` lists the nodes)"
                 )
             })?;
         deps.insert(producer.name.clone());

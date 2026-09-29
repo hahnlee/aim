@@ -42,6 +42,21 @@ Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's clipboard tests pass but one
 (#428). An empty list gives the original clipboard back.
 
+## Compiled oat files (2026-09-30)
+
+The boot image extension holds all 31 mainline BCP jars, as the original's,
+and the 29 oat files with code (system_server's class path,
+`org.apache.http.legacy`, six `speed` apps) are compiled for it by the `oat`
+node (docs/art-exception-patches.md, "Other oat files"); the image's
+dexoptanalyzer finds them usable, the originals not. The 139 `verify` odex
+files are still rejected ("Read barrier state mismatch": no CMC without
+userfaultfd, #442) and their vdex used. On four fresh-data smoke boots at
+load 4-17 rising to 40-60 (two before, two after), `sys.boot_completed`
+came at 50-51 s either way and `boot_progress_enable_screen` at 36.5-40.7 s
+before, 36.8-37.3 s after; a cold Settings start took 10.5 s and 33.5 s
+before, 45 s and 19.3 s after, dominated by ANRs of com.android.phone and
+GMS in all four.
+
 ## Boot timeline (2026-09-29)
 
 A first boot at load 5 on the M2 Pro (docs/perf-baseline.md, "Where the

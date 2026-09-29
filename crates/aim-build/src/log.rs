@@ -20,6 +20,15 @@ impl Log {
         Ok(Log { file, verbose })
     }
 
+    /// Another handle on the same log, for a command run on another thread.
+    pub fn share(&self) -> Result<Log, String> {
+        let file = self.file.try_clone().map_err(|e| e.to_string())?;
+        Ok(Log {
+            file,
+            verbose: self.verbose,
+        })
+    }
+
     pub fn line(&mut self, text: &str) {
         let _ = writeln!(self.file, "{text}");
         if self.verbose {

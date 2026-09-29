@@ -1,0 +1,312 @@
+//! `oat`: the image's compiled oat files, compiled again for the ART
+//! exception (ADR 0012 decision 4).
+//!
+//! An oat file with code is valid only for the runtime configuration and
+//! boot image it was compiled against; the regenerated boot image has other
+//! checksums, so ART rejects the code of every original odex whose
+//! compiler filter depends on it (all but `verify`), and system_server and
+//! a few apps would run their code interpreted. Each of those is compiled
+//! again the way the original was, as its header records: its compiler
+//! filter, class loader context and boot class path, its profile
+//! (`<jar>.prof` for `speed-profile`) and its app image where the original
+//! ships one. `verify` oat files stay: their vdex is still used.
+//!
+//! services.jar is the `system-server` node's edited jar; its profile names
+//! the original's dex checksums, so it goes through profman's text form to
+//! name the edited one's.
+//!
+//! The output is `root/` (the files at their guest paths) and
+//! `overlay.toml`, the entries image/overlay.toml includes.
+
+use super::boot_image::{Dex2oat, boot_image_location, oat_dex_locations, oat_key};
+use crate::graph::{Action, Ctx, Dep, Node};
+use crate::log::Log;
+use aim_android_image::assemble::force_remove;
+use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+const PARTITIONS: [&str; 4] = ["system", "system_ext", "product", "vendor"];
+const WORKERS: usize = 4;
+
+pub fn out() -> PathBuf {
+    aim_paths::out().join("oat")
+}
+
+pub fn node() -> Node {
+    Node {
+        name: "oat".into(),
+        deps: vec![
+            Dep::on("image"),
+            Dep::on("art"),
+            Dep::on("boot-image"),
+            Dep::on("system-server"),
+            Dep::order_only("host/linux-run"),
+        ],
+        inputs: Vec::new(),
+        outputs: vec![out()],
+        tools: Vec::new(),
+        recipe: 1,
+        action: Action::Oat,
+        boot: true,
+    }
+}
+
+/// One original odex to compile again.
+struct Job {
+    /// Guest path of the odex.
+    odex: String,
+    /// Guest path of its jar or APK.
+    dex: String,
+    filter: String,
+    context: String,
+    bcp: String,
+    app_image: bool,
+}
+
+impl Job {
+    fn stem(&self) -> &str {
+        let name = self.odex.rsplit('/').next().unwrap();
+        name.strip_suffix(".odex").unwrap()
+    }
+}
+
+pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
+    let image = fs::canonicalize(aim_paths::original_image()).map_err(|e| e.to_string())?;
+    let mut odexes = Vec::new();
+    for partition in PARTITIONS {
+        find_odex(&image, &image.join(partition), &mut odexes)?;
+    }
+    odexes.sort();
+    let boot_image = boot_image_location(&image)?;
+    let mut jobs = Vec::new();
+    for odex in odexes {
+        let host = image.join(&odex[1..]);
+        let filter = oat_key(&host, "compiler-filter")?;
+        if filter == "verify" {
+            continue;
+        }
+        jobs.push(Job {
+            dex: oat_dex_locations(&host)?.swap_remove(0),
+            context: strip_checksums(&oat_key(&host, "classpath")?),
+            bcp: oat_key(&host, "bootclasspath")?,
+            app_image: host.with_extension("art").is_file(),
+            filter,
+            odex,
+        });
+    }
+
+    // The guest view: the regenerated boot image and the edited jars over
+    // the image's; the originals of those jars, for their profiles, under
+    // /data/original.
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    let boot = aim_paths::boot_image().join("framework");
+    for (dir, guest) in [
+        (boot.join("arm64"), "/system/framework/arm64"),
+        (boot.clone(), "/system/framework"),
+    ] {
+        for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.is_file() {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                files.push((format!("{guest}/{name}"), path));
+            }
+        }
+    }
+    let edited = [(
+        "/system/framework/services.jar",
+        super::system_server::out().join("services.jar"),
+    )];
+    files.extend(edited.iter().map(|(g, h)| (g.to_string(), h.clone())));
+    let file_refs: Vec<(&str, PathBuf)> =
+        files.iter().map(|(g, h)| (g.as_str(), h.clone())).collect();
+
+    let out = out();
+    let work = out.with_extension("work");
+    let _ = force_remove(&work);
+    let staged = work.join("staged");
+    let workers = WORKERS.min(jobs.len());
+    let mut dex2oats = Vec::new();
+    for index in 0..workers {
+        let dir = work.join(format!("worker{index}"));
+        for sub in ["data/out", "data/prof", "tmp"] {
+            fs::create_dir_all(dir.join(sub)).map_err(|e| e.to_string())?;
+        }
+        for (guest, _) in &edited {
+            let copy = dir.join("data/original").join(&guest[1..]);
+            fs::create_dir_all(copy.parent().unwrap()).map_err(|e| e.to_string())?;
+            fs::copy(image.join(&guest[1..]), &copy).map_err(|e| e.to_string())?;
+        }
+        dex2oats.push((Dex2oat::new(ctx, &image, &dir, &file_refs)?, dir));
+    }
+
+    log.line(&format!(
+        "{} oat files with code, {workers} at once",
+        jobs.len()
+    ));
+    let edited: Vec<&str> = edited.iter().map(|(g, _)| *g).collect();
+    let next = Mutex::new(jobs.iter());
+    let failed = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for (dex2oat, dir) in &dex2oats {
+            let (next, failed, staged, edited, boot_image) =
+                (&next, &failed, &staged, &edited, &boot_image);
+            let mut log = log.share().expect("log handle");
+            scope.spawn(move || {
+                while let Some(job) = { next.lock().unwrap().next() } {
+                    let original = edited.contains(&job.dex.as_str());
+                    if let Err(e) =
+                        compile(job, boot_image, original, dex2oat, dir, staged, &mut log)
+                    {
+                        failed.lock().unwrap().push(format!("{}: {e}", job.odex));
+                    }
+                }
+            });
+        }
+    });
+    let failed = failed.into_inner().unwrap();
+    if !failed.is_empty() {
+        return Err(failed.join("\n"));
+    }
+
+    // Each output replaces the original's file of that name.
+    let root = aim_paths::root();
+    let relative = |p: &Path| p.strip_prefix(root).unwrap().display().to_string();
+    let mut manifest = String::from(
+        "# Written by the `oat` node of `cargo aim`; image/overlay.toml includes it.\n\nschema = 1\n",
+    );
+    for job in &jobs {
+        let dir = job.odex.rsplit_once('/').unwrap().0;
+        for extension in ["odex", "vdex", "art"] {
+            let guest = format!("{dir}/{}.{extension}", job.stem());
+            let produced = staged.join("root").join(&guest[1..]);
+            match (image.join(&guest[1..]).is_file(), produced.is_file()) {
+                (true, true) => write!(
+                    manifest,
+                    "\n[[replace]]\npath = \"{guest}\"\nsource = \"{}\"\nreason = \"compiled again ({}, as the original) for the ART exception's runtime and boot image, whose checksums the original's code names\"\n",
+                    relative(&out.join("root").join(&guest[1..])),
+                    job.filter
+                )
+                .unwrap(),
+                (true, false) => return Err(format!("dex2oat wrote no {guest}")),
+                (false, _) => {}
+            }
+        }
+    }
+    fs::write(staged.join("overlay.toml"), manifest).map_err(|e| e.to_string())?;
+
+    let _ = force_remove(&out);
+    fs::rename(&staged, &out).map_err(|e| e.to_string())?;
+    force_remove(&work).map_err(|e| e.to_string())?;
+    log.line(&format!("oat files: {}", out.display()));
+    Ok(())
+}
+
+/// Compiles `job` against `boot_image` (the location the runtime loads)
+/// with `dex2oat`, whose view has `dir` as /data, into
+/// `staged/root/<guest path>`. `original`: the jar is an edited one whose
+/// original is under /data/original.
+fn compile(
+    job: &Job,
+    boot_image: &str,
+    original: bool,
+    dex2oat: &Dex2oat,
+    dir: &Path,
+    staged: &Path,
+    log: &mut Log,
+) -> Result<(), String> {
+    let stem = job.stem();
+    let mut args = vec![
+        format!("--dex-file={}", job.dex),
+        format!("--dex-location={}", job.dex),
+        format!("--compiler-filter={}", job.filter),
+        format!("--class-loader-context={}", job.context),
+        "--runtime-arg".into(),
+        format!("-Xbootclasspath:{}", job.bcp),
+        "--runtime-arg".into(),
+        format!("-Xbootclasspath-locations:{}", job.bcp),
+        format!("--boot-image={boot_image}"),
+        format!("--oat-file=/data/out/{stem}.odex"),
+        format!("--oat-location={}", job.odex),
+    ];
+    if job.filter == "speed-profile" {
+        let apk = if original {
+            format!("/data/original{}", job.dex)
+        } else {
+            job.dex.clone()
+        };
+        let text = dex2oat.profman(
+            log,
+            &[
+                "--dump-classes-and-methods".into(),
+                format!("--profile-file={}.prof", job.dex),
+                format!("--apk={apk}"),
+                format!("--dex-location={}", job.dex),
+            ],
+        )?;
+        fs::write(dir.join(format!("data/prof/{stem}.txt")), text).map_err(|e| e.to_string())?;
+        dex2oat.profman(
+            log,
+            &[
+                format!("--create-profile-from=/data/prof/{stem}.txt"),
+                format!("--apk={}", job.dex),
+                format!("--dex-location={}", job.dex),
+                format!("--reference-profile-file=/data/prof/{stem}.prof"),
+            ],
+        )?;
+        args.push(format!("--profile-file=/data/prof/{stem}.prof"));
+    }
+    if job.app_image {
+        args.push(format!("--app-image-file=/data/out/{stem}.art"));
+    }
+    dex2oat.run(log, &args)?;
+
+    let dest = staged.join("root").join(&job.odex[1..]).with_file_name("");
+    fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(dir.join("data/out")).map_err(|e| e.to_string())? {
+        let from = entry.map_err(|e| e.to_string())?.path();
+        fs::rename(&from, dest.join(from.file_name().unwrap())).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Guest paths of the `oat/arm64/*.odex` files under `dir`, not through
+/// links.
+fn find_odex(image: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(), String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_dir() {
+            find_odex(image, &path, found)?;
+        } else if kind.is_file()
+            && path.extension().is_some_and(|e| e == "odex")
+            && path.parent().is_some_and(|p| p.ends_with("oat/arm64"))
+        {
+            found.push(format!("/{}", path.strip_prefix(image).unwrap().display()));
+        }
+    }
+    Ok(())
+}
+
+/// A class loader context without its dex checksums (`jar*123`), which
+/// dex2oat records again from the jars it opens.
+fn strip_checksums(context: &str) -> String {
+    let mut out = String::new();
+    let mut skipping = false;
+    for c in context.chars() {
+        if c == '*' {
+            skipping = true;
+        } else if skipping && c.is_ascii_digit() {
+            continue;
+        } else {
+            skipping = false;
+            out.push(c);
+        }
+    }
+    out
+}

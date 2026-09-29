@@ -67,7 +67,8 @@ non-cargo stages are declared in code:
 | `boot-image` | `art`, `image`, `host/linux-run` (order only) | | `target/aim/boot-image/framework` |
 | `angle` | | `upstream/angle.lock`, `upstream/angle-args.gn` | `_build/angle-source/out/AimRelease` |
 | `moltenvk` | | `upstream/moltenvk.lock` | `target/aim/moltenvk` (`libMoltenVK.dylib`, `LICENSE`, `vk.xml`) |
-| `system-server` | `image`, `boot-image`, `host/linux-run` (order only) | `image/native-services` | `target/aim/system-server/services.jar`, SystemServer without the start of the natively implemented services (docs/system-services.md), and its `oat/arm64/services.{odex,vdex}` |
+| `system-server` | `image` | `image/native-services` | `target/aim/system-server/services.jar`, SystemServer without the start of the natively implemented services (docs/system-services.md) |
+| `oat` | `image`, `art`, `boot-image`, `system-server`, `host/linux-run` (order only) | | `target/aim/oat`: the image's oat files with code compiled again (docs/art-exception-patches.md, "Other oat files") at their guest paths under `root/`, and `overlay.toml`, which `image/overlay.toml` includes |
 | `derived-image` | `image` and the producer of every built overlay source | `image/overlay.toml` and its checked-in sources | `target/aim/derived.shadow`, attached at `target/aim/derived` |
 | `translation-cache` | `derived-image`, `host/linux-translate` | | the derived image's `translated/` |
 

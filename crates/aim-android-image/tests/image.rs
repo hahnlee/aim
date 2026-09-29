@@ -320,6 +320,52 @@ source = "image/files/hosts"
 }
 
 #[test]
+fn includes_add_their_entries_and_nest_no_further() {
+    use aim_android_image::manifest::expand;
+    let fixture = Fixture::new();
+    write(
+        &fixture.sources.join("target/built/overlay.toml"),
+        r#"schema = 1
+[[replace]]
+path = "/system/app/Stock/oat/arm64/Stock.odex"
+source = "image/files/hosts"
+reason = "compiled again"
+"#,
+    );
+    let text = r#"schema = 1
+[[remove]]
+path = "/system/etc/hosts"
+reason = "a"
+[[include]]
+source = "target/built/overlay.toml"
+reason = "built"
+"#;
+    let mut manifest = parse(text).expect("parses");
+    expand(&mut manifest, &fixture.sources).expect("expands");
+    let plan = validate(&manifest, &fixture.original, &fixture.sources).expect("validates");
+    let paths: Vec<&str> = plan.steps.iter().map(|s| s.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["/system/app/Stock/oat/arm64/Stock.odex", "/system/etc/hosts"]
+    );
+    // An included entry is checked like any other, at its include's line.
+    write(
+        &fixture.sources.join("target/built/overlay.toml"),
+        "schema = 1\n[[remove]]\npath = \"/system/etc/hosts\"\nreason = \"b\"\n",
+    );
+    let mut manifest = parse(text).expect("parses");
+    expand(&mut manifest, &fixture.sources).expect("expands");
+    let problems = validate(&manifest, &fixture.original, &fixture.sources).unwrap_err();
+    assert_eq!(problems[0].kind, ProblemKind::Duplicate);
+    // Includes need a reason and nest no further.
+    let bare = "schema = 1\n[[include]]\nsource = \"target/built/overlay.toml\"\n";
+    assert_eq!(fixture.problems(bare), [ProblemKind::MissingReason]);
+    write(&fixture.sources.join("target/built/overlay.toml"), text);
+    let mut manifest = parse(text).expect("parses");
+    assert!(expand(&mut manifest, &fixture.sources).is_err());
+}
+
+#[test]
 fn identity_is_stable_and_detects_changes() {
     let fixture = Fixture::new();
     let base = compute(&fixture, OVERLAY);
