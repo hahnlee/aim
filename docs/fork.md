@@ -80,7 +80,12 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
    execs or dies of a signal before the handover is done waits for it
    (`wait_handovers`), since the child cannot start without it.
 6. **The child** maps every entry at its address. Only the heap window is
-   mapped over; any other collision is an error. It then restores the
+   mapped over; any other collision is an error. Code is mapped without
+   execute permission and made executable after, as `mmap` and `mprotect`
+   make it: Darwin takes a page faulted through an entry mapped
+   executable from every other mapping of that page, on every such
+   fault, so apps forked from zygote made each other refault the shared
+   libraries' code without end (#444). It then restores the
    state and rebuilds what the state names:
    - kqueues for epolls, inotifies and pidfds on their numbers;
    - the timerfd thread;
