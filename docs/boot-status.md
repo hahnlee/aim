@@ -57,6 +57,23 @@ before, 36.8-37.3 s after; a cold Settings start took 10.5 s and 33.5 s
 before, 45 s and 19.3 s after, dominated by ANRs of com.android.phone and
 GMS in all four.
 
+## Shared code stays mapped (2026-09-30, #444)
+
+Fork children map code without execute and make it executable after
+(docs/fork.md), so they no longer make every guest process refault the
+shared libraries' code. On a settled boot of a reused data image (host
+load 2-3), before and after:
+
+| Check | Before | After |
+| --- | --- | --- |
+| `free(malloc(64))` loop, faults per iteration during a cold start | 0.16-0.72 | 0 |
+| Guest CPU 7 min after boot | 1,565 s, 96 % system | 78 s, 46 % system (#446) |
+| `isDeclared` after 300 ms idle | 1.7-2.3 ms | 1.1-1.7 ms, no faults |
+| Cold start (`am start -W -S`): Settings, Calculator, Chrome | 0.97-1.01, 1.45-1.46, 1.06-1.14 s | 0.23, 0.31, 0.29-0.34 s |
+
+One of the two boots with the fix hit SurfaceFlinger's hung task
+snapshot (#436).
+
 ## Boot timeline (2026-09-29)
 
 A first boot at load 5 on the M2 Pro (docs/perf-baseline.md, "Where the

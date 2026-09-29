@@ -165,31 +165,37 @@ of `am start -W -S`: Chrome 756 ms, Settings 754 ms, Calculator 1,134 ms.
   milliseconds: `IUserManager.getUserPropertiesCopy` 12.7 ms,
   `getProfileParent` 12.5 ms, `INotificationManager.getNotificationChannels`
   47 ms, `IActivityManager.setProcessStateSummary` up to 24 ms.
-- **The servers run in the kernel.** During one start system_server
-  uses 0.07 s user and 0.3-0.4 s total CPU (35-58 K page faults) and
-  SurfaceFlinger 0.1 s user and 1-2 s total (130-245 K faults); seven
-  minutes after boot all guest processes together have 60 s user and
-  1,565 s total CPU. `sample` of a busy server shows its time on libc's
-  malloc/free path (scudo's mutex, the outline atomics, the TLS stubs),
-  and those instructions take page faults: a `free(malloc(64))` loop
-  takes no fault in a quiet guest but 0.4-1.5 per iteration while an app
-  starts, because hot text pages of libraries every guest process maps
-  (libc, libc++, libbase, ...) keep losing their mappings (#444).
+- **The servers ran in the kernel** (fixed, #444). Fork children mapped
+  the shared libraries' code through memory entries mapped executable,
+  and Darwin takes a page faulted through such a mapping from every
+  other mapping of it, so every app forked from zygote made all other
+  guest processes refault libc's, libc++'s and libbase's hot code (a
+  `free(malloc(64))` loop: 0.16-0.72 faults per iteration while an app
+  started; guest processes 95 % system time). With the code mapped
+  without execute and made executable after (docs/fork.md), the same
+  loop takes no fault during a start, and a cold start of Settings,
+  Calculator and Chrome went from 1.0, 1.45 and 1.1 s to 0.23, 0.31 and
+  0.29-0.34 s (2026-09-30, settled boot, host load 2-3). Seven minutes
+  after boot the guest has used 78 s of CPU (42 s user), where it used
+  1,565 s (60 s user). The system time left, 30 % at idle and 46 % over
+  the boot, is syscalls and first-touch faults, not refaults (#446).
 - **servicemanager** (#435) answers `isDeclared`, `getService2` and
   `updatableViaApex` for the graphics allocator in 20-53 ms each during a
   start: 163 ms of Calculator's 318 ms of synchronous binder time. Its
   work is libvintf walking the manifests (malloc/free of many small
-  strings), 80-150 us back to back, 1.3-4 ms after 300 ms of idle (50-200
-  faults per call), and 0.3-1 s right after boot, when com.android.phone
-  restarts after each startup ANR (#241) and asks for the radio HALs every
-  0.4 s. Not VINTF re-reads (the cache holds), file access or the driver.
-  Its "no idle thread" was the trace counting only threads waiting in a
-  read; an epoll looper's idle poll-mode thread now counts as free.
+  strings), 120 us back to back and 1.1-1.7 ms after 300 ms of idle,
+  without faults (a native Darwin program's burst of that size is as slow
+  after such an idle: the core's clock). Under the fault storm it took
+  0.3-1 s right after boot, when com.android.phone restarts after each
+  startup ANR (#241) and asks for the radio HALs every 0.4 s. Not VINTF
+  re-reads (the cache holds), file access or the driver. Its "no idle
+  thread" was the trace counting only threads waiting in a read; an
+  epoll looper's idle poll-mode thread now counts as free.
 - system_server: 99.9 % of its threads' samples wait in the kernel
-  (kevent, ulock, mach_msg); what it runs is the same malloc/free path.
-  In three of four runs a CLOSE transition's task snapshot hung in
-  SurfaceFlinger (RenderEngine waiting on a fence) and the watchdog
-  killed system_server (#436).
+  (kevent, ulock, mach_msg). In three of four runs a CLOSE transition's
+  task snapshot hung in SurfaceFlinger (RenderEngine waiting on a fence)
+  and the watchdog killed system_server (#436); once in two boots with
+  #444 fixed.
 
 ## Internal dependencies of leaf candidates
 

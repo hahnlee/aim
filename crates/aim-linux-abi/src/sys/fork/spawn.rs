@@ -388,19 +388,7 @@ fn map_regions(r: &mut Reader, entries: &[Port]) -> Result<(), String> {
                         Backing::Share => VM_INHERIT_SHARE,
                         _ => VM_INHERIT_COPY,
                     };
-                    mach_vm_map(
-                        task(),
-                        &mut addr,
-                        g.len,
-                        0,
-                        flags,
-                        e,
-                        0,
-                        0,
-                        g.prot,
-                        g.max_prot,
-                        inherit,
-                    )
+                    map_entry(&mut addr, g.len, flags, e, g.prot, g.max_prot, inherit)
                 }
             }
         };
@@ -413,6 +401,43 @@ fn map_regions(r: &mut Reader, entries: &[Port]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Map memory entry `e` at `addr` with protection `prot`. Execute is
+/// added after the mapping: a page faulted through an entry mapped
+/// executable is taken from every other mapping of it on each fault, so
+/// the processes sharing a library's code would refault it endlessly
+/// (#444). Code made executable with mprotect has no such cost.
+fn map_entry(
+    addr: &mut u64,
+    len: u64,
+    flags: i32,
+    e: Port,
+    prot: i32,
+    max: i32,
+    inherit: u32,
+) -> Kr {
+    // SAFETY: the caller owns the target range.
+    unsafe {
+        let kr = mach_vm_map(
+            task(),
+            addr,
+            len,
+            0,
+            flags,
+            e,
+            0,
+            0,
+            prot & !VM_PROT_EXECUTE,
+            max,
+            inherit,
+        );
+        if kr == 0 && prot & VM_PROT_EXECUTE != 0 {
+            mach_vm_protect(task(), *addr, len, 0, prot)
+        } else {
+            kr
+        }
+    }
 }
 
 /// JIT memory (RWX, `jit`): a fresh `MAP_JIT` mapping at the parent's
@@ -970,4 +995,96 @@ fn become_child(h: Handover) -> String {
     super::child_started(c, stack, set_tid, clear_tid);
     // SAFETY: this thread's context, holding the forking thread's registers.
     unsafe { context::resume(ctx) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn faults() -> i64 {
+        // SAFETY: getrusage into a local.
+        unsafe {
+            let mut r: libc::rusage = std::mem::zeroed();
+            libc::getrusage(libc::RUSAGE_SELF, &mut r);
+            r.ru_minflt
+        }
+    }
+
+    fn touch(at: u64, len: u64) {
+        for o in (0..len).step_by(16384) {
+            // SAFETY: reading a mapped page.
+            unsafe { std::ptr::read_volatile((at + o) as *const u8) };
+        }
+    }
+
+    /// A fork child's mapping of shared code keeps its pages mapped, and
+    /// the parent's, from one touch to the next (#444).
+    #[test]
+    fn shared_code_stays_mapped() {
+        let len = 8 * 16384;
+        let path = std::env::temp_dir().join(format!("aim-fork-code-{}", std::process::id()));
+        std::fs::write(&path, vec![0xc0u8; len as usize]).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        // SAFETY: fresh mappings of our own file; each is unmapped below.
+        unsafe {
+            use std::os::fd::AsRawFd;
+            let code = libc::mmap(
+                std::ptr::null_mut(),
+                len as usize,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            ) as u64;
+            assert_eq!(
+                libc::mprotect(
+                    code as *mut _,
+                    len as usize,
+                    libc::PROT_READ | libc::PROT_EXEC
+                ),
+                0
+            );
+            let rx = VM_PROT_READ | VM_PROT_EXECUTE;
+            let (mut size, mut e) = (len, 0);
+            assert_eq!(
+                mach_make_memory_entry_64(
+                    task(),
+                    &mut size,
+                    code,
+                    rx | MAP_MEM_VM_SHARE,
+                    &mut e,
+                    0
+                ),
+                0
+            );
+            let mut view = 0;
+            assert_eq!(
+                map_entry(
+                    &mut view,
+                    len,
+                    VM_FLAGS_ANYWHERE,
+                    e,
+                    rx,
+                    rx,
+                    VM_INHERIT_SHARE
+                ),
+                0
+            );
+            mach_port_deallocate(task(), e);
+            touch(code, len);
+            touch(view, len);
+            let before = faults();
+            let rounds = 4;
+            for _ in 0..rounds {
+                touch(code, len);
+                touch(view, len);
+            }
+            let refaults = faults() - before;
+            mach_vm_deallocate(task(), view, len);
+            libc::munmap(code as *mut _, len as usize);
+            // A few of the test's own, not one per page and round.
+            assert!(refaults < rounds * 2, "{refaults} refaults");
+        }
+    }
 }
