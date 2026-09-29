@@ -44,6 +44,7 @@ mod procfs;
 mod pstate;
 mod ptimer;
 mod selinuxfs;
+mod sharedfile;
 mod sigframe;
 mod signal;
 mod sync_file;

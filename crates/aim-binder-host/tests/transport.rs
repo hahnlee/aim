@@ -401,3 +401,72 @@ fn a_transaction_with_many_fds_reaches_the_reader() {
         }
     }
 }
+
+/// Files the daemon's process shares reach a client, paged past one
+/// message's ports, as memory entries of the file's own pages.
+#[test]
+fn shared_files_reach_the_client_as_the_same_pages() {
+    use aim_binder_host::mach;
+    use aim_binder_host::wire::SharedFile;
+    use std::os::unix::fs::MetadataExt;
+
+    let name = format!(
+        "dev.aim.test.binder-host.{}.{}",
+        std::process::id(),
+        NAME.fetch_add(1, Ordering::Relaxed)
+    );
+    let server = Server::start(&name).unwrap();
+    let path = std::env::temp_dir().join(format!("aim-shared-file-{}", std::process::id()));
+    let file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .unwrap();
+    const LEN: usize = 16384;
+    file.set_len(LEN as u64).unwrap();
+    let meta = file.metadata().unwrap();
+    // SAFETY: a shared mapping of our file, and a reservation for its view.
+    let (rw, view) = unsafe {
+        use std::os::fd::AsRawFd;
+        let rw = libc::mmap(
+            std::ptr::null_mut(),
+            LEN,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        ) as *mut u8;
+        let view = libc::mmap(
+            std::ptr::null_mut(),
+            LEN,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        ) as *const u8;
+        (rw, view)
+    };
+    let entry = mach::share_read_only(rw as u64, LEN as u64).unwrap();
+    for i in 0..300 {
+        server.share_file(SharedFile {
+            dev: meta.dev() as u32 as u64,
+            ino: meta.ino() + i,
+            size: LEN as u64,
+            entry,
+        });
+    }
+    let client = Client::connect(&name).unwrap();
+    let shared = client.shared_files().unwrap();
+    assert_eq!(shared.len(), 300);
+    assert_eq!(shared[299].ino, meta.ino() + 299);
+    assert_eq!(shared[0].size, LEN as u64);
+    mach::map_read_only(shared[0].entry, view as u64, LEN as u64).unwrap();
+    // SAFETY: both mappings are LEN bytes long.
+    unsafe {
+        rw.add(100).write(7);
+        assert_eq!(view.add(100).read_volatile(), 7);
+    }
+    let _ = std::fs::remove_file(&path);
+}

@@ -53,6 +53,19 @@ pub mod vm {
             prot: i32,
         ) -> i32;
         pub fn mach_vm_deallocate(task: libc::mach_port_t, address: u64, size: u64) -> i32;
+        pub fn mach_vm_map(
+            task: libc::mach_port_t,
+            address: *mut u64,
+            size: u64,
+            mask: u64,
+            flags: i32,
+            object: libc::mach_port_t,
+            offset: u64,
+            copy: i32,
+            cur: i32,
+            max: i32,
+            inheritance: u32,
+        ) -> i32;
         pub fn mach_vm_region(
             task: libc::mach_port_t,
             address: *mut u64,

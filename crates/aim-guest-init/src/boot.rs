@@ -30,7 +30,7 @@ use crate::launch::{
     DryRunLauncher, Exit, HostLauncher, Launcher, LinuxRun, LinuxRunOptions, describe_launch,
 };
 use crate::paths::Layout;
-use crate::props::{Properties, heap_properties, mapped_properties};
+use crate::props::{Properties, heap_properties, mapped_properties, share_areas};
 use crate::propsvc::{PropertyEvent, PropertySockets, SetRequest};
 use crate::supervisor::{DEFAULT_PATH, Planner};
 
@@ -438,6 +438,9 @@ impl Boot {
             }
             _ => None,
         };
+        if let Some(server) = &binder {
+            share_areas(&properties, server);
+        }
         let linux_run = LinuxRun {
             binary: linux_run_binary,
             image: options.image.clone(),

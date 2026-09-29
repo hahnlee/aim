@@ -345,10 +345,15 @@ emulates the device.
   - one file per context, and `properties_serial`, each `PA_SIZE`
     (128 KiB) and mode 0444.
 
-  It keeps its own writable `MAP_SHARED` mapping of each file.
+  It keeps its own writable `MAP_SHARED` mapping of each file, and shares
+  a read-only memory entry of each through the binder host (`FILES`, the
+  file's device, inode and size).
 - Guest readers `open` the files read-only and `mmap` them `MAP_SHARED`.
-  The layer must map them as host `MAP_SHARED` mappings of the same file, so
-  both sides share pages.
+  The layer maps guest-init's memory entry of the file (`sys/sharedfile.rs`),
+  so both sides share pages; without a binder host it maps the file itself.
+  A host file mapping costs 1-3 ms per call in a guest process while
+  guest-init holds the file mapped writable (the host's endpoint security
+  agent, #337), and every program maps about a dozen areas.
 - `__system_property_wait` and `__system_property_wait_any` sleep with
   **non-private** `FUTEX_WAIT_BITSET` (`FUTEX_BITSET_MATCH_ANY`) on a
   serial word, and have a timeout when one is given.

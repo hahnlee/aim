@@ -266,7 +266,17 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         Protect,
     }
     let mut copied = false;
-    let (base, finish) = if kind == MAP_SHARED || kind == MAP_SHARED_VALIDATE {
+    let shared = kind == MAP_SHARED || kind == MAP_SHARED_VALIDATE;
+    let (base, finish) = if shared
+        && !anon
+        && !noreplace
+        && let Some(r) = super::sharedfile::map(fd, addr, len, prot as i32, fixed, off)
+    {
+        match r {
+            Ok(b) => (b, Finish::Nothing),
+            Err(e) => return e,
+        }
+    } else if shared {
         if !anon
             && let Some(r) = super::memfd::map_shared(fd, addr, len, host_prot(prot), fixed, off)
         {

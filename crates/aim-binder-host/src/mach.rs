@@ -184,6 +184,7 @@ const VM_FLAGS_FIXED_OVERWRITE: i32 = 0x4000;
 const VM_PROT_READ: i32 = 1;
 const VM_PROT_WRITE: i32 = 2;
 const MAP_MEM_NAMED_CREATE: i32 = 0x2_0000;
+const MAP_MEM_VM_SHARE: i32 = 0x40_0000;
 const VM_INHERIT_NONE: u32 = 2;
 
 /// Fresh shared memory of `len` bytes, mapped read-write here. Returns the
@@ -220,6 +221,24 @@ pub fn new_shared_memory(len: u64) -> Result<(Port, u64), Kern> {
         }
     }
     Ok((entry, addr))
+}
+
+/// A read-only memory entry of `[addr, addr+len)`, which this task maps
+/// shared: the same pages, for other tasks to map.
+pub fn share_read_only(addr: u64, len: u64) -> Result<Port, Kern> {
+    let (mut size, mut entry) = (len, NULL);
+    // SAFETY: making an entry of our own mapping.
+    check(unsafe {
+        mach_make_memory_entry_64(
+            task(),
+            &mut size,
+            addr,
+            MAP_MEM_VM_SHARE | VM_PROT_READ,
+            &mut entry,
+            NULL,
+        )
+    })?;
+    Ok(entry)
 }
 
 /// Map a memory entry read-only (current and maximum protection) over

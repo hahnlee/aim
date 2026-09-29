@@ -9,6 +9,7 @@
 //! | [`POLL`] | file port | tid | status, readiness drain |
 //! | [`INTERRUPT`] | file port | tid | status |
 //! | [`IOCTL`] | thread port | [`Ioctl`] | [`IoctlReply`] |
+//! | [`FILES`] | service port | index of the first file | status, the number of files, then each file's device, inode and size from that index on; their memory entries |
 
 use aim_binder_driver::Errno;
 
@@ -18,7 +19,19 @@ pub const MMAP: i32 = 0x6264_0003;
 pub const POLL: i32 = 0x6264_0004;
 pub const IOCTL: i32 = 0x6264_0005;
 pub const INTERRUPT: i32 = 0x6264_0006;
+pub const FILES: i32 = 0x6264_0007;
 pub const REPLY: i32 = 0x6264_0100;
+
+/// A file whose pages the daemon's process shares as a memory object
+/// ([`crate::server::Server::share_file`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SharedFile {
+    pub dev: u64,
+    pub ino: u64,
+    pub size: u64,
+    /// A read-only memory entry of the file's pages (a send right).
+    pub entry: crate::mach::Port,
+}
 
 /// Linux EPROTO: a malformed message.
 pub const EPROTO: Errno = 71;
