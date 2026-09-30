@@ -157,6 +157,12 @@ The migration's state and conformance results are in
   are not all notified to a process outside system_server (#467, #430).
   The rule and the measurements are in
   [system-services.md](../system-services.md), "Mirrored state".
+- Shell permission delegation decides an instrumentation target's app
+  ops without notice, so a uid that an installed instrumentation targets
+  has its modes asked each time (#467). Permissions stay asked: their
+  listener misses development and role grants and the delegation, and
+  the owner's complete signal, the client-cache nonce, lives in
+  `ApplicationSharedMemory`, which only app processes receive (#497).
 
 ### M2: the vibrator (2026-09-30)
 

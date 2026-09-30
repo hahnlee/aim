@@ -79,6 +79,7 @@ owner's standard listener, registered with generated AIDL codes:
 | --- | --- | --- |
 | a package is the uid's | `IAppOpsService.checkPackage` | `IPackageManager.registerPackageMonitorCallback` (every package change, all users) |
 | an app op's mode | `IAppOpsService.checkOperationForDevice` | `startWatchingModeWithFlags(op, WATCH_FOREGROUND_CHANGES)`, one callback per op, and the package callback |
+| an installed instrumentation targets the uid | `IPackageManager.getPackagesForUid`, `queryInstrumentationAsUser` | the package callback |
 | focus (the focused root task's uid) | `IActivityTaskManager.getFocusedRootTaskInfo` | `registerTaskStackListener` (every task change) |
 | the system user's device is locked | `ITrustManager.isDeviceLocked` | `ITrustManager.registerDeviceLockedStateListener` |
 
@@ -88,18 +89,34 @@ setting, so no uid observer is needed. Noting an app op
 (`noteOperation`), which records an access and decides nothing the check
 did not, is sent from a background thread.
 
-Two inputs are asked each time. Permissions: shell permission delegation
-(`UiAutomation.adoptShellPermissionIdentity`, which CTS uses) changes what
-`checkPermission` answers for the instrumented app without any
-notification (`testReadInBackgroundRequiresPermission` failed with a
-permission mirror); the same delegation changes its app-op checks
-unnoticed too (#467). The input method: its owner is the
-`DEFAULT_INPUT_METHOD` setting, and `IContentService.registerContentObserver`
-refuses an observer from a process ActivityManager does not know
-("Failed to find PID", `checkContentProviderAccess`), which the service
-host is (#430). The clipboard evaluates the original's disjunction with
-focus first, so only a read by an app without focus (the input method,
-a service) asks them.
+Three inputs are asked each time. Permissions: their owner's listener,
+`IPermissionManager.addOnPermissionsChangeListener`, is told of runtime
+permissions only. Granting or revoking a development or role permission
+(`pm grant`, the role holders') notifies nobody
+(`onInstallPermissionGranted`, `PermissionManagerServiceImpl` at the
+tag), and shell permission delegation and root's permission overrides
+(`UiAutomation.adoptShellPermissionIdentity`, `addOverridePermissionState`,
+`AccessCheckDelegate`) change answers without notice
+(`testReadInBackgroundRequiresPermission` failed with a permission
+mirror). What every change bumps is the owner's client-cache nonce
+(`PackageManager.invalidatePackageInfoCache`), which apps' own
+`checkPermission` cache follows; with
+`pic_separate_permission_notifications` and `pic_uses_shared_memory` on
+in this image it is the `package_info_cache` nonce in
+`ApplicationSharedMemory`, which system_server hands only to app
+processes (#497, #430). An instrumentation target's app ops: delegation
+decides the ops of the uid it delegates to as shell's and tells no mode
+watcher either (#467). It delegates only to the target of an active
+instrumentation, a uid one of whose packages an installed
+instrumentation targets (an SDK sandbox's uid: its client's), so those
+uids' modes are asked each time and every other uid's are mirrored. The
+input method: its owner is the `DEFAULT_INPUT_METHOD` setting, and
+`IContentService.registerContentObserver` refuses an observer from a
+process ActivityManager does not know ("Failed to find PID",
+`checkContentProviderAccess`), which the service host is (#430). The
+clipboard evaluates the original's disjunction with focus first, so only
+a read by an app without focus (the input method, a service) asks for a
+permission or the input method.
 
 **The rule.** A value is kept only while its listener is registered: the
 listener is registered before the first query, and a query keeps its
@@ -338,8 +355,9 @@ the native clipboard does without, or stands in:
 **Cost.** A call that needs no check is fast: `addPrimaryClipChangedListener`
 takes 15-18 us against 377-1,878 us for the original. A checked call
 reads mirrored state ("Mirrored state"), so a focused app's read makes
-no call into system_server; a read by an app without focus asks the
-input method and a permission. Measured 2026-09-30 in one boot each,
+no call into system_server unless an installed instrumentation targets
+the app (a test, which asks the app op's mode); a read by an app without
+focus asks the input method and a permission. Measured 2026-09-30 in one boot each,
 before and after the mirror, with a binder trace over the CTS run below
 (the same data directory; host load 21 before, 6 after, so the shell
 loop's numbers are the cleaner comparison):
@@ -353,10 +371,20 @@ loop's numbers are the cleaner comparison):
 | `getPrimaryClip`, input method without focus (48) | 455 / 16,398 us | 254 / 4,771 us |
 | `setPrimaryClip`, CTS app (29) | 2,334 / 8,575 us | 2,475 / 11,522 us |
 
-The service host's calls into system_server over the run went from
-2,582 (1,106 app ops, 593 permissions, 369 trust, 285 input method, 146
-focus) to 972 (273 app ops, nearly all background notes; 356 input
-method and 213 permissions, from reads without focus; 43 focus). A write still asks `IUserManager` for the profiles
+With an instrumentation target's modes asked (2026-09-30, one boot,
+the same data directory and run, host load about 12), the CTS app, a
+target, pays one `checkOperationForDevice` per read while the shell in
+the same boot stays mirrored: `hasPrimaryClip` 227 / 1,685 us (CTS app,
+116), 20 / 142 us (shell loop, 40); `getPrimaryClip` 177 / 512 us,
+`getPrimaryClipDescription` 165 / 471 us. Whether a uid is a target took
+nine `IPackageManager` calls over the run. Results of the CTS classes
+below and of CtsVibratorTestCases (268 pass, 33 skip) are unchanged.
+
+The mirror took the service host's calls into system_server over the
+run from 2,582 (1,106 app ops, 593 permissions, 369 trust, 285 input
+method, 146 focus) to 972 (273 app ops, nearly all background notes; 356
+input method and 213 permissions, from reads without focus; 43 focus);
+asking a target's modes brings the app ops back to 463 (196 checks). A write still asks `IUserManager` for the profiles
 (#460).
 
 ## The vibrator
