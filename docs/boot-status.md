@@ -73,9 +73,11 @@ the next 60 s of idle:
 The GNSS HAL's CoreLocation thread no longer spins while updates are on.
 Content files of `/proc`, `/sys` and selinuxfs are reused, ART's JIT
 memfd is no longer copied, and ashmem and `faccessat` make fewer host
-calls. What remains is mostly host per-call cost (#418), the binder
-transport (#451), credential publication (#449), eager copies of
-private file mappings (#450).
+calls. A credential change rewrites the process's by-pid entry in place
+(`PR_CAPBSET_DROP` 175-357 us to 4.5-4.9 us, #449), and a private
+mapping of a plain file maps the file copy-on-write instead of copying
+it (4 MiB: 309-344 us to 12 us, #450). What remains is mostly host
+per-call cost (#418) and the binder transport (#451).
 
 ## Vsync off at idle (2026-09-30, #452)
 

@@ -1,13 +1,20 @@
 //! Memory syscalls: mmap, munmap, mremap, mprotect, madvise, brk.
 //!
-//! - Private file mappings of translated files (and of originals with
-//!   nothing to rewrite) stay file-backed. Executable ones are mapped shared
-//!   and read-only, then made executable, so every process shares the same
-//!   pages (Darwin refuses PROT_EXEC in the mmap itself; ADR 0012,
-//!   "Platform probes").
-//! - Private file mappings of other files are materialized as anonymous
-//!   memory filled with `pread`, and rewritten (see `patch`) before they
-//!   become executable.
+//! - Executable private file mappings of translated files (and of
+//!   originals with nothing to rewrite) are mapped shared and read-only,
+//!   then made executable, so every process shares the same pages (Darwin
+//!   refuses PROT_EXEC in the mmap itself; ADR 0012, "Platform probes").
+//!   Executable private mappings of other files are materialized as
+//!   anonymous memory filled with `pread` and rewritten (see `patch`).
+//! - Other private mappings of regular files map the file copy-on-write,
+//!   as Linux does: pages are shared with the file until written, and a
+//!   write stays private. Whether a later change to the file shows is
+//!   unspecified (mmap(2)): Linux shows it in pages not written yet,
+//!   Darwin's copy-on-write keeps the file as it was at mmap (as the
+//!   anonymous copies did). An access to a page wholly past the end of
+//!   the file faults (SIGBUS), and MADV_DONTNEED reads the file again. A
+//!   mapping of a file that needs rewriting is rewritten when it becomes
+//!   executable ([`mprotect`]), which copies only the pages written.
 //! - Shared file mappings go straight to Darwin `mmap`.
 //! - A BoringSSL FIPS module rewritten at load time gets its integrity hash
 //!   recomputed in memory, as the translator does for cached files.
@@ -268,7 +275,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         Nothing,
         Protect,
     }
-    let mut copied = false;
+    let mut noted = false;
     let shared = kind == MAP_SHARED || kind == MAP_SHARED_VALIDATE;
     let (base, finish) = if shared
         && !anon
@@ -318,8 +325,9 @@ pub fn mmap(a: [u64; 6]) -> i64 {
             };
             crate::diag::register_fd_module(b, len, fd, off);
             (b, Finish::Protect)
-        } else if !anon && !exec && xrt::is_shared_source(fd) {
-            // Data and read-only segments of such files: file-backed COW.
+        } else if !anon && !exec && maps_file(fd) {
+            // The file itself, copy-on-write.
+            noted = true;
             match host_mmap(
                 addr,
                 len,
@@ -352,7 +360,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
                 Err(e) => return e,
             };
             if fill {
-                copied = true;
+                noted = true;
                 if let Err(e) = populate(b, len, fd, off) {
                     // SAFETY: unmapping what we just mapped.
                     unsafe { libc::munmap(b as *mut _, len as usize) };
@@ -409,7 +417,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         }
     }
     copies::forget(base, base + len);
-    if copied {
+    if noted {
         note_file_copy(base, len, fd, off);
     }
     base as i64
@@ -425,17 +433,24 @@ pub fn exec_reset() {
     DEFERRED_UNMAPS.with(|d| d.borrow_mut().clear());
 }
 
-/// Record that `[base, base+len)` holds a copy of `fd` from `off`.
+/// Record that `[base, base+len)` maps (or holds a copy of) `fd` from
+/// `off`.
 fn note_file_copy(base: u64, len: u64, fd: i32, off: u64) {
     let mut buf = [0u8; libc::PATH_MAX as usize];
-    // SAFETY: F_GETPATH writes at most PATH_MAX bytes.
-    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } < 0 {
-        return;
-    }
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes; fstat into a local
+    // buffer.
+    let st = unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) < 0 || libc::fstat(fd, &mut st) < 0 {
+            return;
+        }
+        st
+    };
     let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
     let host = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..n]));
     let guest = super::procfs::fd_guest_path(fd).unwrap_or_default();
-    copies::note(base, len, &host, &guest, off);
+    let id = (st.st_dev as u32 as u64, st.st_ino);
+    copies::note_file(base, len, &host, &guest, off, id);
 }
 
 thread_local! {
@@ -474,6 +489,29 @@ pub fn run_deferred_unmaps() -> usize {
     })
 }
 
+/// Whether private mappings of `fd` can map the file itself: a regular
+/// file other than a memfd, whose pages move to anonymous memory once it
+/// has an executable view (`memfd`).
+fn maps_file(fd: i32) -> bool {
+    // SAFETY: fstat into a local buffer.
+    let regular = unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        libc::fstat(fd, &mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFREG
+    };
+    regular && !super::memfd::is_memfd(fd)
+}
+
+/// Whether the region at `addr` maps a file whose pages are never
+/// rewritten: shared (writing would change the file), or a translated
+/// file or one with nothing to rewrite.
+fn unrewritten_file(addr: u64) -> bool {
+    vmmap::region_at(addr).is_some_and(|r| {
+        r.file
+            .as_ref()
+            .is_some_and(|(host, _, _)| r.shared || xrt::is_shared_source(host))
+    })
+}
+
 /// Whether the region at `addr` is backed by a file.
 fn file_backed(addr: u64) -> bool {
     let mut buf = [0u8; 16];
@@ -492,9 +530,10 @@ fn file_backed(addr: u64) -> bool {
 ///
 /// - Pieces that are already executable are not touched: they were rewritten
 ///   when they became executable, and other threads may be running them.
-/// - File-backed pieces are translated files (or need nothing).
+/// - Shared file mappings and mappings of translated files need nothing.
 /// - Other pieces are not executable, so nothing runs them: they are made
-///   readable if needed, scanned and rewritten, then protected.
+///   readable if needed, scanned and rewritten (a private file mapping
+///   gets its own copy of each page written), then protected.
 pub fn mprotect(a: [u64; 6]) -> i64 {
     let (addr, len, prot) = (a[0], page_up(a[1]), a[2] & !(PROT_BTI | PROT_MTE));
     if addr & (PAGE - 1) != 0 {
@@ -519,7 +558,7 @@ pub fn mprotect(a: [u64; 6]) -> i64 {
             // A memfd's views are ART's dual-mapped JIT cache: never scanned.
             if cur_prot & libc::PROT_EXEC == 0
                 && !(rwx && vmmap::info_at(lo).is_some_and(|i| i.empty))
-                && !file_backed(lo)
+                && !unrewritten_file(lo)
                 && super::memfd::anon_name(lo).is_none()
             {
                 if cur_prot & libc::PROT_READ == 0 {
@@ -628,13 +667,15 @@ fn discard_private(addr: u64, len: u64) -> i64 {
                 if fd < 0 {
                     continue;
                 }
+                // A fork child's copy reports offset 0 (`copies`).
+                let offset = copies::find(lo).map_or(r.offset, |(_, off)| off);
                 let m = host_mmap(
                     lo,
                     n,
                     prot,
                     libc::MAP_FIXED | libc::MAP_PRIVATE,
                     fd,
-                    r.offset as i64,
+                    offset as i64,
                 );
                 // SAFETY: our temporary fd.
                 unsafe { libc::close(fd) };

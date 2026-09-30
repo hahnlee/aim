@@ -1,8 +1,11 @@
-//! Anonymous memory standing in for private file mappings: ELF segments
-//! the loader copied and rewrote, and private file mappings of files that
-//! are not translated (`mem::mmap`). Linux would show them file-backed.
-//! Recording what file each came from lets `/proc/self/maps` name them and
-//! lets MADV_DONTNEED restore the file's contents instead of zeros.
+//! Private file mappings: anonymous memory standing in for them (ELF
+//! segments the loader copied and rewrote, executable private mappings of
+//! files that are not translated), and the file-backed ones (`mem::mmap`).
+//! Linux would show all of them file-backed. Recording what file each came
+//! from, and from where, lets `/proc/self/maps` name them and lets
+//! MADV_DONTNEED restore the file's contents instead of zeros. A fork
+//! child needs the offset of a file-backed one too: its copy of the
+//! mapping reports offset 0 into a copy of the file's pages.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -53,6 +56,12 @@ pub fn note(start: u64, len: u64, host: &Path, guest: &str, offset: u64) {
         use std::os::unix::fs::MetadataExt;
         (m.dev() as u32 as u64, m.ino())
     });
+    note_file(start, len, host, guest, offset, (dev, ino));
+}
+
+/// As [`note`], for the file with device and inode `id`.
+pub fn note_file(start: u64, len: u64, host: &Path, guest: &str, offset: u64, id: (u64, u64)) {
+    let (dev, ino) = id;
     forget(start, start + len);
     COPIES.lock().unwrap().insert(
         start,

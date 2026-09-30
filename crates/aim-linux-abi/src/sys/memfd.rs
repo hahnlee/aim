@@ -111,6 +111,11 @@ fn memfd_stat(fd: i32) -> Option<libc::stat> {
     stat_fd(fd).filter(marked)
 }
 
+/// Whether `fd` is a memfd.
+pub fn is_memfd(fd: i32) -> bool {
+    memfd_stat(fd).is_some()
+}
+
 /// Where memfd files are named while referenced.
 fn dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();

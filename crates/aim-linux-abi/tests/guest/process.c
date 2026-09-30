@@ -1135,6 +1135,22 @@ static void bench(void) {
         "capbset child %#x", st);
   out[n] = 0;
   printf("%s", out);
+  // A private read-only mapping of a plain file, as of an APK or a font.
+  enum { MAPPED = 4 << 20, M = 50 };
+  int fd = open("/data/local/tmp/bench-map", O_RDWR | O_CREAT | O_TRUNC, 0600);
+  CHECK(fd >= 0 && ftruncate(fd, MAPPED) == 0, "bench-map");
+  double m[M];
+  for (int i = 0; i < M; i++) {
+    double s = now_us();
+    char* p = mmap(NULL, MAPPED, PROT_READ, MAP_PRIVATE, fd, 0);
+    CHECK(p != MAP_FAILED, "mmap");
+    m[i] = now_us() - s;
+    munmap(p, MAPPED);
+  }
+  close(fd);
+  unlink("/data/local/tmp/bench-map");
+  qsort(m, M, sizeof(double), cmp);
+  printf("bench mmap 4 MiB MAP_PRIVATE file p50 %.1f us p90 %.1f us\n", m[M / 2], m[M * 9 / 10]);
 }
 
 // fork+exit+wait with a large address space: N mappings of alternating
