@@ -69,7 +69,10 @@ const PAGE: u64 = 16384;
 const MARK: u32 = libc::UF_NODUMP | libc::UF_HIDDEN;
 const NAME_ATTR: &CStr = c"dev.aim.memfd";
 const SEAL_ATTR: &str = "dev.aim.memfd.seal.";
-/// A sweep runs at a process's first memfd_create and every this many after.
+/// A process sweeps at every this many memfd_create calls. Not at its
+/// first: a sweep opens every file in the directory (milliseconds of host
+/// kernel time with a few dozen memfds alive), and every app would pay it
+/// on start (#446). The processes that make many memfds sweep for all.
 const SWEEP_EVERY: u32 = 64;
 /// Files younger than this are left to their creator, which may not hold
 /// its lock yet.
@@ -234,6 +237,11 @@ fn sweep(dir: &std::path::Path, min_age: i64) {
     }
 }
 
+/// Whether the `n`th memfd_create of this process (from 0) sweeps.
+fn sweep_due(n: u32) -> bool {
+    n % SWEEP_EVERY == SWEEP_EVERY - 1
+}
+
 pub fn memfd_create(a: [u64; 6]) -> i64 {
     static CREATED: AtomicU32 = AtomicU32::new(0);
     let flags = a[1];
@@ -248,7 +256,7 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
     if name.len() > 249 {
         return -(EINVAL as i64);
     }
-    if CREATED.fetch_add(1, Ordering::Relaxed) % SWEEP_EVERY == 0 {
+    if sweep_due(CREATED.fetch_add(1, Ordering::Relaxed)) {
         sweep(dir(), SWEEP_MIN_AGE);
     }
     let mut tmpl = dir().join("XXXXXX").into_os_string().into_encoded_bytes();
@@ -823,6 +831,13 @@ mod tests {
         assert!(reopen(other, libc::O_RDONLY).is_none());
         // SAFETY: our fd.
         unsafe { libc::close(other) };
+    }
+
+    /// A process's first memfds do not sweep; every 64th does.
+    #[test]
+    fn a_process_sweeps_after_its_first_memfds() {
+        let due: Vec<u32> = (0..200).filter(|&n| sweep_due(n)).collect();
+        assert_eq!(due, [63, 127, 191]);
     }
 
     /// A sweep removes the names only of files no description holds.
