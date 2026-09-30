@@ -16,7 +16,7 @@ const REPORT_TYPE_FEATURE: u32 = 2;
 const REPORT_ANGLE: isize = 1;
 
 aim_hostcall::dylib! {
-    static IO_KIT = c"/System/Library/Frameworks/IOKit.framework/IOKit" {
+    pub(crate) static IO_KIT = c"/System/Library/Frameworks/IOKit.framework/IOKit" {
         fn IOHIDManagerCreate(alloc: CFTypeRef, options: u32) -> CFTypeRef;
         fn IOHIDManagerSetDeviceMatching(manager: CFTypeRef, matching: CFTypeRef);
         fn IOHIDManagerCopyDevices(manager: CFTypeRef) -> CFTypeRef;

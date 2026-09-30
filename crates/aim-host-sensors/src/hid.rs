@@ -39,7 +39,7 @@ struct Api {
 /// signature.
 unsafe fn symbol<F: Copy>(name: &CStr) -> Option<F> {
     const { assert!(size_of::<F>() == size_of::<*mut c_void>()) };
-    // SAFETY: a NUL-terminated name; IOKit is linked (lib.rs), so its
+    // SAFETY: a NUL-terminated name; IOKit is open ([`api`]), so its
     // exports are in the default namespace.
     let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
     // SAFETY: caller contract; a non-null export is a function of type F.
@@ -49,6 +49,11 @@ unsafe fn symbol<F: Copy>(name: &CStr) -> Option<F> {
 fn api() -> Option<&'static Api> {
     static API: OnceLock<Option<Api>> = OnceLock::new();
     API.get_or_init(|| {
+        // IOKit is opened on first use (aim_hostcall::dylib), and these
+        // lookups are not declared there, so open it first.
+        if !crate::lid::IO_KIT.load() {
+            return None;
+        }
         // SAFETY: each symbol has the signature IOKit has exported since
         // macOS 10.8.
         unsafe {

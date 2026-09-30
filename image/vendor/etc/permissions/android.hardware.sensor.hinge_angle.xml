@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A Mac with a lid angle sensor: the sensors HAL lists it (docs/vendor-hals.md),
+     and the overlay puts this file in the SKUs that have it
+     (crates/aim-guest-init/src/sku.rs). -->
+<permissions>
+    <feature name="android.hardware.sensor.hinge_angle" />
+</permissions>

@@ -18,8 +18,9 @@
      tablet. With android.hardware.telephony the phone process builds its
      phones and RIL and waits for IRadio services that never come.
      Without the sensor features too: the sensors HAL (hal/sensors) lists
-     the ambient light sensor and the lid angle only on a Mac that has them
-     (docs/vendor-hals.md), and nothing backs the others. -->
+     the ambient light sensor and the lid angle only on a Mac that has them,
+     whose SKU's directory declares them (docs/vendor-hals.md), and nothing
+     backs the others. -->
 <permissions>
     <feature name="android.hardware.audio.output" />
     <feature name="android.hardware.bluetooth" />

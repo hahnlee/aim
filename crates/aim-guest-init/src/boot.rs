@@ -473,12 +473,26 @@ impl Boot {
             RunMode::DryRun => heap_properties(info)?,
             RunMode::Run => mapped_properties(&layout.properties_dir(), info)?,
         };
+        // The bootloader's SKU follows the Mac, unless an `androidboot`
+        // option names one.
+        let named = options
+            .androidboot
+            .iter()
+            .any(|(k, _)| k == crate::sku::KEY);
+        let sku = match options.mode {
+            RunMode::Run if !named => {
+                crate::sku::host().map(|s| (crate::sku::KEY.to_string(), s.to_string()))
+            }
+            _ => None,
+        };
         let init_options = PropertyInitOptions {
             kernel: KernelBootProperties {
                 bootconfig: options
                     .androidboot
                     .iter()
-                    .map(|(k, v)| (format!("androidboot.{k}"), v.clone()))
+                    .cloned()
+                    .chain(sku)
+                    .map(|(k, v)| (format!("androidboot.{k}"), v))
                     .collect(),
                 ..Default::default()
             },
