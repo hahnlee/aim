@@ -17,6 +17,7 @@
 //! - [`executor`], [`boot`]: the `CommandExecutor` and init's main loop.
 //! - [`mac`]: the Mac's time zone, language and appearance as
 //!   `vendor.aim.mac.*` properties.
+//! - [`sku`]: the SKU a bootloader would report, from the Mac's sensors.
 //!
 //! What the syscall layer must provide for this to work is specified in
 //! `docs/guest-init-contract.md`.
@@ -33,6 +34,7 @@ pub mod mac;
 pub mod paths;
 pub mod props;
 pub mod propsvc;
+pub mod sku;
 pub mod supervisor;
 pub mod unixsock;
 

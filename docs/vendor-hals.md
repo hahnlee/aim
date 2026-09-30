@@ -100,9 +100,15 @@ and honest:
   and apps handle it. There is no accelerometer, gyroscope or magnetometer:
   the Mac's motion sensors are not reachable from user space, and a fake
   one would mislead apps.
-- The image declares no `android.hardware.sensor.*` feature
-  (`image/vendor/etc/permissions/handheld_core_hardware.xml`): a feature
-  file is fixed in the image, and neither sensor is on every Mac.
+- The features follow the Mac the way a vendor declares per-SKU hardware.
+  `handheld_core_hardware.xml` declares no `android.hardware.sensor.*`
+  feature, since neither sensor is on every Mac. At boot guest-init reads
+  the sensors as the HAL does and reports the SKU
+  (`androidboot.product.vendor.sku`, `crates/aim-guest-init/src/sku.rs`):
+  `light`, `hinge` or `light_hinge`, or none on a Mac with neither.
+  SystemConfig then adds the features in
+  `/vendor/etc/permissions/sku_<sku>/`: `android.hardware.sensor.light`
+  and `android.hardware.sensor.hinge_angle`.
 - Both are on-change and not wake-up sensors. While one is active, a poller
   reads the host at the requested rate (between 200 ms and 1 s) and writes
   an event when a value changes, and once on activation. `flush` writes
