@@ -107,11 +107,19 @@ pub struct AudioObjectPropertyAddress {
     pub element: u32,
 }
 
-const SYSTEM_OBJECT: AudioObjectID = 1;
-const OBJECT_SCOPE_GLOBAL: u32 = fourcc(b"glob");
+/// `AudioObjectPropertyListenerProc`.
+pub type PropertyListener = unsafe extern "C" fn(
+    object: AudioObjectID,
+    count: u32,
+    addresses: *const AudioObjectPropertyAddress,
+    client_data: *mut c_void,
+) -> OSStatus;
+
+pub const SYSTEM_OBJECT: AudioObjectID = 1;
+pub const OBJECT_SCOPE_GLOBAL: u32 = fourcc(b"glob");
 const OBJECT_SCOPE_INPUT: u32 = fourcc(b"inpt");
-const OBJECT_SCOPE_OUTPUT: u32 = fourcc(b"outp");
-const DEFAULT_OUTPUT_DEVICE: u32 = fourcc(b"dOut");
+pub const OBJECT_SCOPE_OUTPUT: u32 = fourcc(b"outp");
+pub const DEFAULT_OUTPUT_DEVICE: u32 = fourcc(b"dOut");
 const DEFAULT_INPUT_DEVICE: u32 = fourcc(b"dIn ");
 const NOMINAL_SAMPLE_RATE: u32 = fourcc(b"nsrt");
 const STREAM_CONFIGURATION: u32 = fourcc(b"slay");
@@ -137,6 +145,31 @@ aim_hostcall::dylib! {
             qualifier: *const c_void,
             size: *mut u32,
             data: *mut c_void,
+        ) -> OSStatus;
+        fn AudioObjectSetPropertyData(
+            object: AudioObjectID,
+            address: *const AudioObjectPropertyAddress,
+            qualifier_size: u32,
+            qualifier: *const c_void,
+            size: u32,
+            data: *const c_void,
+        ) -> OSStatus;
+        fn AudioObjectIsPropertySettable(
+            object: AudioObjectID,
+            address: *const AudioObjectPropertyAddress,
+            settable: *mut u8,
+        ) -> OSStatus;
+        pub fn AudioObjectAddPropertyListener(
+            object: AudioObjectID,
+            address: *const AudioObjectPropertyAddress,
+            listener: PropertyListener,
+            client_data: *mut c_void,
+        ) -> OSStatus;
+        pub fn AudioObjectRemovePropertyListener(
+            object: AudioObjectID,
+            address: *const AudioObjectPropertyAddress,
+            listener: PropertyListener,
+            client_data: *mut c_void,
         ) -> OSStatus;
     }
 }
@@ -245,7 +278,7 @@ pub fn set_property_slice<T>(
     }
 }
 
-fn object_property<T: Default>(object: AudioObjectID, selector: u32, scope: u32) -> Option<T> {
+pub fn object_property<T: Default>(object: AudioObjectID, selector: u32, scope: u32) -> Option<T> {
     let address = AudioObjectPropertyAddress {
         selector,
         scope,
@@ -265,6 +298,29 @@ fn object_property<T: Default>(object: AudioObjectID, selector: u32, scope: u32)
         )
     };
     (status == 0 && size as usize == std::mem::size_of::<T>()).then_some(value)
+}
+
+/// Sets an object property from a value, if the object has it settable.
+pub fn set_object_property<T>(object: AudioObjectID, selector: u32, scope: u32, value: &T) -> bool {
+    let address = AudioObjectPropertyAddress {
+        selector,
+        scope,
+        element: 0,
+    };
+    let mut settable = 0u8;
+    // SAFETY: `value` is a live T of the size passed.
+    unsafe {
+        AudioObjectIsPropertySettable(object, &address, &mut settable) == 0
+            && settable != 0
+            && AudioObjectSetPropertyData(
+                object,
+                &address,
+                0,
+                std::ptr::null(),
+                std::mem::size_of::<T>() as u32,
+                (value as *const T).cast(),
+            ) == 0
+    }
 }
 
 fn object_property_bytes(object: AudioObjectID, selector: u32, scope: u32) -> Option<Vec<u8>> {

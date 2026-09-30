@@ -16,6 +16,7 @@ mod coreaudio;
 pub mod io;
 mod null;
 mod stream;
+pub mod volume;
 mod wire;
 
 use std::collections::HashMap;

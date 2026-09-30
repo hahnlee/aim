@@ -590,6 +590,8 @@ impl Boot {
                     Arc::new(move |guest: &str| map.readable_by_others(guest)),
                 );
             }
+            // Android's media volume is the Mac's output volume.
+            aim_services::volume::start(server.driver());
             mark("binder host and native services started");
         }
         let linux_run = LinuxRun {
