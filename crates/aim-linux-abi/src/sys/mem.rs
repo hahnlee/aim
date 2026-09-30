@@ -218,6 +218,9 @@ pub fn mmap(a: [u64; 6]) -> i64 {
     {
         return r;
     }
+    if flags & MAP_ANONYMOUS == 0 && fd >= 0 {
+        super::procfs::on_mmap(fd);
+    }
     if flags & MAP_ANONYMOUS == 0
         && fd >= 0
         && let Some(e) = super::ashmem::before_mmap(fd, len, prot)

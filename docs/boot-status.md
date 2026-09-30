@@ -57,6 +57,26 @@ before, 36.8-37.3 s after; a cold Settings start took 10.5 s and 33.5 s
 before, 45 s and 19.3 s after, dominated by ANRs of com.android.phone and
 GMS in all four.
 
+## Guest kernel time (2026-09-30, #446)
+
+On a settled boot of a reused data image, main (80965c99) against the
+fixes of #446, measured 7 minutes after `sys.boot_completed`, then over
+the next 60 s of idle:
+
+| Check | Before | After |
+| --- | --- | --- |
+| Guest CPU 7 min after boot | 77 s, 48 % system (GNSS HAL 20 s) | 53 s, 51 % system |
+| Faults in that time | 1.22 M | 0.93 M |
+| Guest CPU per idle minute | 1.4-6.8 s, 33-49 % system | 1.6 s, 46 % system |
+| Cold start: Settings, Calculator, Chrome | 0.23, 0.30-0.33, 0.31 s | 0.21, 0.30-0.32, 0.30 s |
+
+The GNSS HAL's CoreLocation thread no longer spins while updates are on.
+Content files of `/proc`, `/sys` and selinuxfs are reused, ART's JIT
+memfd is no longer copied, and ashmem and `faccessat` make fewer host
+calls. What remains is mostly host per-call cost (#418), the binder
+transport (#451), credential publication (#449), eager copies of
+private file mappings (#450) and SurfaceFlinger's idle vsync (#452).
+
 ## Shared code stays mapped (2026-09-30, #444)
 
 Fork children map code without execute and make it executable after

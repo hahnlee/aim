@@ -38,7 +38,10 @@ pub enum Kind {
     /// A directory stream: host entries read once, or a synthesized
     /// `/proc`/`/sys` directory.
     Dir(Arc<Mutex<super::dir::DirStream>>),
-    /// A kernel file whose writes act (`knob`).
+    /// A synthesized kernel file: an unlinked file holding its contents
+    /// (`procfs::content_fd`).
+    Content,
+    /// A kernel file whose writes act (`knob`); also a content file.
     Knob(Arc<knob::Knob>),
     /// An open evdev device (`/dev/input/eventN`).
     Evdev(Arc<evdev::Evdev>),
@@ -71,8 +74,10 @@ pub fn get(fd: i32) -> Option<Kind> {
 
 /// The guest closed `fd` (or is about to replace it with dup2).
 pub fn on_close(fd: i32) {
-    if get(fd).is_none() {
-        return;
+    match get(fd) {
+        None => return,
+        Some(Kind::Content | Kind::Knob(_)) => super::procfs::recycle(fd),
+        Some(_) => {}
     }
     set_slow(fd, false);
     TABLE.write().unwrap().remove(&fd);
@@ -147,7 +152,9 @@ pub fn anon_name(fd: i32) -> Option<String> {
             Kind::Inotify(_) => "anon_inode:inotify",
             Kind::SyncFile => "anon_inode:sync_file",
             Kind::Evdev(e) => return Some(e.path()),
-            Kind::Sock(_) | Kind::Dir(_) | Kind::Memfd(_) | Kind::Knob(_) => return None,
+            Kind::Sock(_) | Kind::Dir(_) | Kind::Memfd(_) | Kind::Content | Kind::Knob(_) => {
+                return None;
+            }
         }
         .to_string(),
     )
@@ -270,8 +277,9 @@ pub fn is_hidden(fd: i32) -> bool {
 
 /// Fork: every fd's kind, with fds that share an object (dup'ed ones)
 /// sharing it again in the child, and the layer's hidden fds. The fds
-/// themselves are inherited. Knob and evdev fds stay plain fds: a knob's
-/// action is code, and an input device is opened again.
+/// themselves are inherited. Content, knob and evdev fds stay plain fds: a
+/// content file is the parent's to reuse, a knob's action is code, and an
+/// input device is opened again.
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
     let table = TABLE.read().unwrap();
     let mut objects: Vec<*const ()> = Vec::new();
@@ -285,7 +293,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Inotify(a) => Arc::as_ptr(a) as *const (),
             Kind::Dir(a) => Arc::as_ptr(a) as *const (),
             Kind::Memfd(_) | Kind::SyncFile => std::ptr::null(),
-            Kind::Knob(_) | Kind::Evdev(_) => continue,
+            Kind::Content | Kind::Knob(_) | Kind::Evdev(_) => continue,
         };
         let (i, new) = match objects.iter().position(|&o| !p.is_null() && o == p) {
             Some(i) => (i, false),
@@ -336,7 +344,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
                 w.u64(k.1);
             }
             Kind::SyncFile => w.u32(7),
-            Kind::Knob(_) | Kind::Evdev(_) => unreachable!(),
+            Kind::Content | Kind::Knob(_) | Kind::Evdev(_) => unreachable!(),
         }
     });
     w.seq(HIDDEN.lock().unwrap().iter(), |w, fd| w.i32(*fd));
