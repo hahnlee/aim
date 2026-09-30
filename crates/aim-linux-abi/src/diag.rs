@@ -165,6 +165,7 @@ struct MContext64 {
 /// # Safety
 /// Handler arguments from the kernel.
 pub unsafe fn report(sig: i32, info: *mut libc::siginfo_t, uc: *mut libc::c_void) {
+    LAST_FAULT.with(|f| f.set(None));
     let uc = uc as *mut libc::ucontext_t;
     // SAFETY: SA_SIGINFO handler arguments from the kernel.
     unsafe {
@@ -192,7 +193,90 @@ pub unsafe fn report(sig: i32, info: *mut libc::siginfo_t, uc: *mut libc::c_void
             crate::diag!("{line}");
         }
         crate::diag!("[linux-abi]   guest tp {:#x}", crate::context::guest_tp());
+        frames(ss.fp);
     }
+}
+
+/// A synchronous fault handed to a guest handler: signal, pc, lr, fp, sp,
+/// fault address and ESR.
+#[derive(Clone, Copy)]
+pub struct Fault {
+    pub sig: i32,
+    pub pc: u64,
+    pub lr: u64,
+    pub fp: u64,
+    pub sp: u64,
+    pub addr: u64,
+    pub esr: u32,
+}
+
+thread_local! {
+    /// The calling thread's last fault a guest handler took.
+    static LAST_FAULT: std::cell::Cell<Option<Fault>> = const { std::cell::Cell::new(None) };
+}
+
+/// Note a fault a guest handler takes (async-signal-safe: no locks, no
+/// allocation). Handlers take faults on purpose (ART's implicit null and
+/// stack checks), so it is reported only if the thread then dies of it.
+pub fn note_fault(f: Fault) {
+    LAST_FAULT.with(|c| c.set(Some(f)));
+}
+
+/// The calling thread dies of `sig` by its default action: report the
+/// last fault its guest handler took, if it was that signal (a crash
+/// handler such as debuggerd's re-raises it).
+pub fn report_death(sig: i32) {
+    let Some(f) = LAST_FAULT.with(|c| c.take()).filter(|f| f.sig == sig) else {
+        return;
+    };
+    crate::diag!(
+        "[linux-abi] fatal signal {sig} after the guest's handler; its last fault on tid {}: pc {:#x} ({}), fault addr {:#x}, esr {:#x}",
+        crate::sys::host_tid(),
+        f.pc,
+        describe(f.pc),
+        f.addr,
+        f.esr
+    );
+    crate::diag!(
+        "[linux-abi]   lr {:#x} ({}) sp {:#x}",
+        f.lr,
+        describe(f.lr),
+        f.sp
+    );
+    frames(f.fp);
+}
+
+/// Most frames of a frame-pointer walk.
+const FRAMES: usize = 16;
+
+/// The return addresses of the frame-record chain from `fp` (AAPCS64:
+/// [fp] is the caller's fp, [fp + 8] the return address), each read
+/// fault-safely; the walk stops at a record that does not lie above the
+/// last one.
+fn frames(mut fp: u64) {
+    for i in 0..FRAMES {
+        let mut rec = [0u64; 2];
+        let mut got = 0u64;
+        // SAFETY: a fault-safe copy from our own task into a local.
+        let kr = unsafe {
+            mach_vm_read_overwrite(mach_task_self_, fp, 16, rec.as_mut_ptr() as u64, &mut got)
+        };
+        if fp == 0 || fp % 16 != 0 || kr != 0 || got != 16 || rec[1] == 0 {
+            return;
+        }
+        // Return addresses may carry a PAC signature in the top bits.
+        let ret = rec[1] & 0x00ff_ffff_ffff_ffff;
+        crate::diag!("[linux-abi]   #{i:02} {ret:#x} ({})", describe(ret));
+        if rec[0] <= fp {
+            return;
+        }
+        fp = rec[0];
+    }
+}
+
+unsafe extern "C" {
+    static mach_task_self_: libc::mach_port_t;
+    fn mach_vm_read_overwrite(t: libc::mach_port_t, a: u64, s: u64, d: u64, o: *mut u64) -> i32;
 }
 
 /// Install the host signal handlers (faults, `brk` sites, guest signals).

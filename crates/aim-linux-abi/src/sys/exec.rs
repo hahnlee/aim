@@ -27,7 +27,8 @@
 //!
 //! - open fds without O_CLOEXEC: guest fds are host fds, and Darwin's exec
 //!   keeps exactly those;
-//! - the signal mask and the ignored dispositions ([`ExecState`]);
+//! - the signal mask, the ignored dispositions and the interval timers
+//!   ([`ExecState`]);
 //! - credentials (after the exec capability transform), the working
 //!   directory and the personality.
 //!
@@ -92,6 +93,8 @@ pub struct ExecState {
     pub personality: u32,
     /// The process's own mounts (`vfs::own_mounts_text`).
     pub mounts: String,
+    /// The armed interval timers (`itimer::exec_text`).
+    pub itimers: String,
 }
 
 const SIG_SETMASK: u64 = 2;
@@ -113,6 +116,7 @@ impl ExecState {
         }
         super::pstate::set_personality(self.personality);
         vfs::load_own_mounts(&self.mounts);
+        super::itimer::exec_restore(&self.itimers);
     }
 
     fn current() -> ExecState {
@@ -133,6 +137,7 @@ impl ExecState {
             sigign,
             personality: super::pstate::personality_value(),
             mounts: vfs::own_mounts_text(),
+            itimers: super::itimer::exec_text(),
         }
     }
 }
@@ -438,6 +443,9 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
     ]);
     if !state.mounts.is_empty() {
         host.extend([arg("--mounts"), arg(&state.mounts)]);
+    }
+    if !state.itimers.is_empty() {
+        host.extend([arg("--itimers"), arg(&state.itimers)]);
     }
     host.extend([
         arg("--inherit-env"),

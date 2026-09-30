@@ -224,6 +224,33 @@ fn posix_timers() {
 }
 
 #[test]
+fn interval_timers() {
+    check("t_itimer", &[]);
+}
+
+/// A process that dies of a fault its crash handler took (debuggerd's,
+/// installed by the linker) is reported by the layer: signal, fault
+/// address, and pc and lr with their mappings.
+#[test]
+fn fatal_fault_report() {
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_crash");
+    let prog = g.build(&clang, "t_crash");
+    let (ok, out) = g.run(&[prog.as_str()]);
+    println!("{out}");
+    assert!(!ok && out.contains("crashing"), "{out}");
+    assert!(
+        out.contains("fatal signal 11 after the guest's handler")
+            && out.contains("fault addr 0x104")
+            && out.contains("(/data/local/tmp/t_crash+"),
+        "no fault report:\n{out}"
+    );
+}
+
+#[test]
 fn clocks() {
     check("t_clock", &[]);
 }

@@ -25,6 +25,7 @@ mod fsops;
 mod futex;
 mod genfs;
 mod inotify;
+mod itimer;
 mod jit;
 mod knob;
 mod mem;
@@ -253,6 +254,8 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         85 => event::timerfd_create(a),
         86 => event::timerfd_settime(a),
         87 => event::timerfd_gettime(a),
+        102 => itimer::getitimer(a),
+        103 => itimer::setitimer(a),
         107 => ptimer::timer_create(a),
         108 => ptimer::timer_gettime(a),
         109 => ptimer::timer_getoverrun(a),

@@ -238,7 +238,7 @@ const TASK_ABSOLUTETIME_INFO: u32 = 1;
 /// threads'. Mach reports live threads in microseconds; the caller's own
 /// share, read before the total, is replaced by its exact time, read
 /// after it, so the total is never behind the caller's thread clock.
-fn own_process_times() -> Option<(u64, u64)> {
+pub(super) fn own_process_times() -> Option<(u64, u64)> {
     let mut abs = TaskAbsolutetimeInfo::default();
     // SAFETY: all-zero Mach info structs are valid.
     let (mut live, mut me): (libc::task_thread_times_info, libc::thread_basic_info) =
