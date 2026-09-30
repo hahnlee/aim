@@ -54,7 +54,7 @@ Beside the data directory `DATA` (its image `DATA.asif`, guest-init's
 | `state` | the keeper's pid, guest-init's pid (its binder is `dev.aim.guest-init.<pid>.binder`), the mode and the start time |
 | `log` | the output of the keeper, guest-init, aim-display and aim-apps |
 | `display`, `capture.bmp` | aim-display's socket and captures (SIGUSR1) |
-| `apps/` | the shims (window mode), registered with Launch Services |
+| `apps/` | the shims (window mode), registered with Launch Services; they also show the guest's notifications ([notifications.md](notifications.md)) |
 
 **One guest per data directory.** A guest is resident while the keeper
 holds `lock`; a `state` left by a keeper that was killed is not one.
