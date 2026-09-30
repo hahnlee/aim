@@ -14,7 +14,10 @@
 //! The codes follow AIDL's rule (first call transaction plus the method's
 //! index, or its explicit id) and are then checked against the image
 //! itself: the `TRANSACTION_*` constants of each interface's Java stub in
-//! the pinned image's jars, all of them, so a code cannot drift.
+//! the pinned image's jars, all of them, so a code cannot drift. The few
+//! binder interfaces the framework writes by hand (`IContentProvider`)
+//! have no AIDL: the codes a native service calls are read from the
+//! interface's own constants in the image (`CONSTANTS`).
 
 use crate::fetch::Source;
 use crate::lockfile::Lock;
@@ -305,12 +308,18 @@ fn snake(name: &str) -> String {
     }
 }
 
+/// A method's name as a type: its words capitalized, without the
+/// underscores some names have (`checkGrantUriPermission_ignoreNonSystem`).
 fn camel(name: &str) -> String {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
+    name.split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 /// How a type is marshalled.
@@ -679,6 +688,43 @@ fn stub_codes(
     Ok((codes, found))
 }
 
+/// The module of a hand-written interface: its descriptor and the
+/// transaction codes `names`, read from the constants of `descriptor`'s
+/// class in `jar`.
+fn constants_code(
+    image: &Path,
+    jar: &str,
+    descriptor: &str,
+    names: &str,
+) -> Result<String, String> {
+    let path = image.join(jar);
+    let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let class = format!("L{};", descriptor.replace('.', "/"));
+    let mut values = BTreeMap::new();
+    for dex in aim_android_image::system_server::dex_files(&bytes)? {
+        let dex = Dex::parse(dex)?;
+        if let Some(def) = dex.class(&class) {
+            values.extend(dex.static_values(def)?);
+        }
+    }
+    match values.get("descriptor") {
+        Some(Value::String(d)) if d == descriptor => {}
+        _ => return Err(format!("{jar}: {descriptor} does not declare itself")),
+    }
+    let mut s = String::new();
+    writeln!(s, "/// `{descriptor}` (constants of {jar})").unwrap();
+    writeln!(s, "pub mod {} {{", module_name(descriptor)).unwrap();
+    writeln!(s, "    pub const DESCRIPTOR: &str = \"{descriptor}\";").unwrap();
+    for name in names.split(',') {
+        let Some(Value::Int(code)) = values.get(name) else {
+            return Err(format!("{jar}: {descriptor} has no int constant `{name}`"));
+        };
+        writeln!(s, "    pub const {name}: u32 = {};", *code as u32).unwrap();
+    }
+    writeln!(s, "}}\n").unwrap();
+    Ok(s)
+}
+
 /// Fetches the pinned AIDL, generates the Rust and checks the codes
 /// against the image.
 pub fn run(log: &mut Log) -> Result<(), String> {
@@ -726,6 +772,13 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         }
         let selected: Vec<String> = methods.split(',').map(str::to_string).collect();
         code += &interface_code(&iface, &selected, origin)?;
+    }
+    for entry in lock.array("CONSTANTS") {
+        let fields: Vec<&str> = entry.split('|').collect();
+        let [descriptor, jar, names] = fields[..] else {
+            return Err(format!("{LOCK}: bad CONSTANTS entry `{entry}`"));
+        };
+        code += &constants_code(&image, jar, descriptor, names)?;
     }
     let dir = out();
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -776,6 +829,10 @@ interface IClipboard {
 
     #[test]
     fn names() {
+        assert_eq!(
+            camel("checkGrantUriPermission_ignoreNonSystem"),
+            "CheckGrantUriPermissionIgnoreNonSystem"
+        );
         assert_eq!(snake("setPrimaryClip"), "set_primary_clip");
         assert_eq!(snake("getUIDState"), "get_uid_state");
         assert_eq!(snake("type"), "r#type");

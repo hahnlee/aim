@@ -13,29 +13,29 @@
 //!
 //! The Mac takes the emulator's place (EmulatorClipboardMonitor): a clip
 //! set on the default device becomes the Mac's text, and text copied on
-//! the Mac becomes user 0's clip, set by the system uid. The Mac's text is
-//! read only when an app pastes it.
+//! the Mac becomes user 0's clip, set as a mirrored device syncs its
+//! clipboard (by the shell, with SystemUI's overlay suppressed). The Mac's
+//! text is read only when an app pastes it.
 //!
 //! What the original does through system_server-internal APIs is done
 //! through their binder counterparts (docs/system-services.md); where
-//! none exists, this service does without: URI permission grants (#429),
-//! focus as WindowManager sees it, content capture and autofill access and
-//! virtual devices (#430), the paste toast, text classification and
-//! statistics (#431), and DeviceConfig and Settings.Secure (#428).
+//! none exists, this service does without: granting clipped URIs to the
+//! apps that read them (#429), focus as WindowManager sees it, content
+//! capture and autofill access and virtual devices (#430), the paste
+//! toast, text classification and statistics (#431).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
-use aim_binder_host::parcel::{
-    Binder, EX_UNSUPPORTED_OPERATION, Exception, Parcel, UNKNOWN_TRANSACTION,
-};
+use aim_binder_host::parcel::{Binder, Exception, Parcel, UNKNOWN_TRANSACTION};
 use aim_service_aidl::android_content_iclipboard as ic;
 use aim_service_aidl::android_content_ionprimaryclipchangedlistener as listener;
 
 use crate::clip::{ClipData, ClipDescription};
 use crate::pasteboard;
+use crate::settings::Settings;
 use crate::system::{MODE_ALLOWED, System};
 
 /// `AppOpsManager.OP_READ_CLIPBOARD` and `OP_WRITE_CLIPBOARD`.
@@ -46,12 +46,35 @@ pub const APP_OPS: [i32; 2] = [OP_READ_CLIPBOARD, OP_WRITE_CLIPBOARD];
 /// `Context.DEVICE_ID_DEFAULT` and `DEVICE_ID_INVALID`.
 const DEVICE_ID_DEFAULT: i32 = 0;
 const DEVICE_ID_INVALID: i32 = -1;
-/// `Process.SYSTEM_UID`, `NOBODY_UID`; `UserHandle.PER_USER_RANGE`.
+/// `Process.SYSTEM_UID`, `SHELL_UID`, `NOBODY_UID`;
+/// `UserHandle.PER_USER_RANGE`.
 const SYSTEM_UID: i32 = 1000;
+const SHELL_UID: i32 = 2000;
 const NOBODY_UID: i32 = 9999;
 const PER_USER_RANGE: i32 = 100_000;
+/// The package a mirrored device's clipboard sync sets clips as, which
+/// SystemUI shows no overlay for when the clip asks it not to
+/// (`ClipboardOverlaySuppressionControllerImpl.SHELL_PACKAGE`).
+const SHELL_PACKAGE: &str = "com.android.shell";
+/// `DeviceConfig.NAMESPACE_CLIPBOARD` and the properties the original
+/// reads.
+const NAMESPACE: &str = "clipboard";
+const AUTO_CLEAR_ENABLED: &str = "auto_clear_enabled";
+const AUTO_CLEAR_TIMEOUT: &str = "auto_clear_timeout";
+/// `ClipboardManager.DEVICE_CONFIG_SHOW_ACCESS_NOTIFICATIONS`, and its
+/// default.
+const SHOW_ACCESS_NOTIFICATIONS: &str = "show_access_notifications";
+const DEFAULT_SHOW_ACCESS_NOTIFICATIONS: bool = true;
 /// `ClipboardService.DEFAULT_CLIPBOARD_TIMEOUT_MILLIS`.
-const AUTO_CLEAR: Duration = Duration::from_secs(3600);
+const DEFAULT_AUTO_CLEAR_MILLIS: i64 = 3_600_000;
+/// `Settings.Secure.CLIPBOARD_SHOW_ACCESS_NOTIFICATIONS` and
+/// `DEFAULT_INPUT_METHOD`.
+const SECURE_SHOW_ACCESS_NOTIFICATIONS: &str = "clipboard_show_access_notifications";
+const SECURE_DEFAULT_INPUT_METHOD: &str = "default_input_method";
+/// `Intent.FLAG_GRANT_READ_URI_PERMISSION`.
+const FLAG_GRANT_READ_URI_PERMISSION: i32 = 1;
+/// `IBinder.DUMP_TRANSACTION`.
+const DUMP_TRANSACTION: u32 = u32::from_be_bytes(*b"_DMP");
 /// How often the Mac's pasteboard is looked at for a change.
 const MAC_POLL: Duration = Duration::from_millis(250);
 
@@ -120,6 +143,7 @@ struct State {
 
 pub struct ClipboardService {
     system: Arc<System>,
+    settings: Arc<Settings>,
     process: Arc<LocalProcess>,
     state: Mutex<State>,
     this: Weak<ClipboardService>,
@@ -132,9 +156,14 @@ struct Caller {
 }
 
 impl ClipboardService {
-    pub fn new(process: Arc<LocalProcess>, system: Arc<System>) -> Arc<Self> {
+    pub fn new(
+        process: Arc<LocalProcess>,
+        system: Arc<System>,
+        settings: Arc<Settings>,
+    ) -> Arc<Self> {
         let service = Arc::new_cyclic(|this| Self {
             system,
+            settings,
             process,
             state: Mutex::new(State {
                 mac_seen: pasteboard::change_count(),
@@ -169,7 +198,13 @@ impl ClipboardService {
             let primary = Primary::Mac {
                 timestamp: now_millis(),
             };
-            self.set_primary_on(0, DEVICE_ID_DEFAULT, Some(primary), SYSTEM_UID, None);
+            self.set_primary_on(
+                0,
+                DEVICE_ID_DEFAULT,
+                Some(primary),
+                SHELL_UID,
+                Some(SHELL_PACKAGE),
+            );
         }
         let due: Vec<(i32, i32, i32)> = {
             let st = self.state.lock().unwrap();
@@ -223,9 +258,14 @@ impl ClipboardService {
         }
     }
 
-    /// `isDefaultIme`.
+    /// `isDefaultIme`: the package of `Settings.Secure.DEFAULT_INPUT_METHOD`
+    /// (`ComponentName.unflattenFromString`).
     fn is_default_ime(&self, user_id: i32, package: &str) -> Result<bool> {
-        Ok(self.system.default_ime_package(user_id)?.as_deref() == Some(package))
+        let ime = self.settings.secure(SECURE_DEFAULT_INPUT_METHOD, user_id)?;
+        Ok(ime
+            .as_deref()
+            .and_then(|c| c.split_once('/'))
+            .is_some_and(|(p, _)| p == package))
     }
 
     /// `clipboardAccessAllowed`.
@@ -345,7 +385,7 @@ impl ClipboardService {
                     .has_user_restriction(DISALLOW_SHARE_INTO_MANAGED_PROFILE, id)?
                     && self.clipboard_exists(id, device_id)?
                 {
-                    let primary = copy.clone().map(|clip| {
+                    let primary = copy.clone().map(|mut clip| {
                         let held = clip
                             .handles()
                             .into_iter()
@@ -450,7 +490,18 @@ impl ClipboardService {
         }
     }
 
-    fn schedule_auto_clear(&self, user_id: i32, device_id: i32) {
+    /// `scheduleAutoClear`, as the clipboard's DeviceConfig says.
+    fn schedule_auto_clear(&self, user_id: i32, device_id: i32) -> Result<()> {
+        if !self
+            .settings
+            .config_bool(NAMESPACE, AUTO_CLEAR_ENABLED, true)?
+        {
+            return Ok(());
+        }
+        let timeout =
+            self.settings
+                .config_long(NAMESPACE, AUTO_CLEAR_TIMEOUT, DEFAULT_AUTO_CLEAR_MILLIS)?;
+        let at = Instant::now() + Duration::from_millis(timeout.max(0) as u64);
         if let Some(board) = self
             .state
             .lock()
@@ -458,8 +509,30 @@ impl ClipboardService {
             .clipboards
             .get_mut(&(user_id, device_id))
         {
-            board.clear_at = Some(Instant::now() + AUTO_CLEAR);
+            board.clear_at = Some(at);
         }
+        Ok(())
+    }
+
+    /// `checkDataOwner`: throws unless `uid` may grant read access to each
+    /// item's content URI and intent data.
+    fn check_data_owner(&self, clip: &ClipData, uid: i32) -> Result<()> {
+        for uri in clip
+            .items
+            .iter()
+            .flat_map(|i| [&i.uri, &i.intent_data])
+            .flatten()
+        {
+            if let Some((uri, user)) = content_uri(uri, user_of(uid)) {
+                self.system.check_grant_uri_permission(
+                    uid,
+                    &uri,
+                    FLAG_GRANT_READ_URI_PERMISSION,
+                    user,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// `checkAndSetPrimaryClip`.
@@ -474,7 +547,7 @@ impl ClipboardService {
         device_id: i32,
         source_package: Option<&str>,
     ) -> Result<()> {
-        let Some(clip) = clip.filter(|c| !c.items.is_empty()) else {
+        let Some(mut clip) = clip.filter(|c| !c.items.is_empty()) else {
             return Err(Exception::illegal_argument("No items"));
         };
         let uid = self.intending_uid(caller, package, user_id)?;
@@ -492,14 +565,16 @@ impl ClipboardService {
         )? {
             return Ok(());
         }
+        self.check_data_owner(&clip, uid)?;
+        clip.keep_files(&|fd| self.process.file(fd))
+            .map_err(|_| Exception::illegal_argument("bad parcel: a file descriptor is gone"))?;
         let held = clip
             .handles()
             .into_iter()
             .map(|h| self.process.strong(h))
             .collect();
         self.set_primary(Some((clip, held)), uid, device, source_package)?;
-        self.schedule_auto_clear(user_id, device);
-        Ok(())
+        self.schedule_auto_clear(user_id, device)
     }
 
     /// The common part of the read methods: the intending user and device,
@@ -535,6 +610,20 @@ impl ClipboardService {
     fn enforce(&self, caller: &Caller, permission: &str) -> Result<()> {
         self.system
             .enforce_permission(permission, caller.pid, caller.uid)
+    }
+
+    /// The check of the access notification methods, with their message.
+    fn enforce_access_notifications(&self, caller: &Caller) -> Result<()> {
+        if self.system.check_permission(
+            MANAGE_CLIPBOARD_ACCESS_NOTIFICATION,
+            caller.pid,
+            caller.uid,
+        )? {
+            return Ok(());
+        }
+        Err(Exception::security(
+            "areClipboardAccessNotificationsEnable requires permission MANAGE_CLIPBOARD_ACCESS_NOTIFICATION",
+        ))
     }
 
     fn dispatch(&self, call: &mut Call<'_>) -> Result<Option<Parcel>> {
@@ -617,7 +706,7 @@ impl ClipboardService {
                         .as_ref()
                         .and_then(Self::clip_of);
                     if clip.is_some() {
-                        self.schedule_auto_clear(a.user_id, device);
+                        self.schedule_auto_clear(a.user_id, device)?;
                     }
                 }
                 ic::write_get_primary_clip_reply(&mut reply, clip.as_ref());
@@ -733,15 +822,42 @@ impl ClipboardService {
                 }
                 ic::write_get_primary_clip_source_reply(&mut reply, &source);
             }
-            ic::ARE_CLIPBOARD_ACCESS_NOTIFICATIONS_ENABLED_FOR_USER
-            | ic::SET_CLIPBOARD_ACCESS_NOTIFICATIONS_ENABLED_FOR_USER => {
-                self.enforce(&caller, MANAGE_CLIPBOARD_ACCESS_NOTIFICATION)?;
-                // Settings.Secure is the settings provider's, which this
-                // service does not reach yet (#428).
-                return Err(Exception::new(
-                    EX_UNSUPPORTED_OPERATION,
-                    "clipboard access notifications: Settings.Secure is not reachable from the native clipboard",
-                ));
+            ic::ARE_CLIPBOARD_ACCESS_NOTIFICATIONS_ENABLED_FOR_USER => {
+                let a =
+                    ic::AreClipboardAccessNotificationsEnabledForUser::read(r).map_err(status)?;
+                self.enforce_access_notifications(&caller)?;
+                let default = self.settings.config_bool(
+                    NAMESPACE,
+                    SHOW_ACCESS_NOTIFICATIONS,
+                    DEFAULT_SHOW_ACCESS_NOTIFICATIONS,
+                )?;
+                // Settings.Secure.getIntForUser: the default for a value
+                // that is not a number.
+                let enabled = self
+                    .settings
+                    .secure(SECURE_SHOW_ACCESS_NOTIFICATIONS, a.user_id)?
+                    .and_then(|v| v.parse::<i32>().ok())
+                    .unwrap_or(default.into());
+                ic::write_are_clipboard_access_notifications_enabled_for_user_reply(
+                    &mut reply,
+                    enabled != 0,
+                );
+            }
+            ic::SET_CLIPBOARD_ACCESS_NOTIFICATIONS_ENABLED_FOR_USER => {
+                let a =
+                    ic::SetClipboardAccessNotificationsEnabledForUser::read(r).map_err(status)?;
+                self.enforce_access_notifications(&caller)?;
+                self.settings.put_secure(
+                    SECURE_SHOW_ACCESS_NOTIFICATIONS,
+                    if a.enable { "1" } else { "0" },
+                    a.user_id,
+                )?;
+                ic::write_set_clipboard_access_notifications_enabled_for_user_reply(&mut reply);
+            }
+            DUMP_TRANSACTION => {
+                // Binder.onTransact: the original's ClipboardImpl dumps
+                // nothing.
+                reply.write_no_exception();
             }
             _ => return Ok(None),
         }
@@ -804,9 +920,36 @@ impl ClipboardService {
     }
 }
 
+/// A `content:` URI as `ContentProvider.getUriWithoutUserId` and
+/// `getUserIdFromUri(uri, default_user)` split it: without the user in
+/// its authority (`user@authority`), and that user. None for another
+/// scheme.
+fn content_uri(uri: &str, default_user: i32) -> Option<(String, i32)> {
+    let rest = uri.strip_prefix("content:")?;
+    let Some(after) = rest.strip_prefix("//") else {
+        return Some((uri.to_string(), default_user));
+    };
+    let end = after.find(['/', '?', '#']).unwrap_or(after.len());
+    let authority = &after[..end];
+    let Some(at) = authority.rfind('@') else {
+        return Some((uri.to_string(), default_user));
+    };
+    // UserHandle.USER_NULL for a user that is not a number.
+    let user = authority[..at].parse().unwrap_or(-10_000);
+    Some((
+        format!("content://{}{}", &authority[at + 1..], &after[end..]),
+        user,
+    ))
+}
+
 impl Service for ClipboardService {
     fn descriptor(&self) -> &str {
         ic::DESCRIPTOR
+    }
+
+    fn accepts_fds(&self) -> bool {
+        // A clip's bundles may carry some; so does a dump.
+        true
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {

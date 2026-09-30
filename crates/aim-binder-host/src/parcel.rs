@@ -7,8 +7,12 @@
 //! is its length (-1 for null) then its code units and a NUL; String16 is
 //! Java's `writeString` and AIDL's `String`, String8 Java's `writeString8`.
 //! A binder is a `flat_binder_object`, recorded in the object offsets,
-//! followed by its stability (`Stability::Level`).
+//! followed by its stability (`Stability::Level`). A file descriptor is a
+//! `flat_binder_object` too: a parcel being written holds the file, and
+//! the process that sends it gives it an fd for the send
+//! ([`crate::local`]).
 
+use aim_binder_driver::File;
 use aim_binder_driver::uapi::{
     BINDER_TYPE_BINDER, BINDER_TYPE_FD, BINDER_TYPE_HANDLE, FLAT_BINDER_FLAG_ACCEPTS_FDS,
     FLAT_BINDER_FLAG_PRIORITY_MASK, FLAT_BINDER_OBJECT_SIZE, FlatBinderObject,
@@ -88,6 +92,19 @@ impl Exception {
 pub struct Parcel {
     data: Vec<u8>,
     objects: Vec<u64>,
+    files: Files,
+}
+
+/// The files of a parcel's fd objects, by the objects' offsets.
+#[derive(Clone, Default)]
+pub struct Files(pub Vec<(u64, File)>);
+
+impl std::fmt::Debug for Files {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(at, _)| at))
+            .finish()
+    }
 }
 
 impl Parcel {
@@ -102,6 +119,11 @@ impl Parcel {
     /// The offsets of the binder objects in [`Parcel::data`].
     pub fn objects(&self) -> &[u64] {
         &self.objects
+    }
+
+    /// The files its fd objects stand for, by their offsets.
+    pub fn files(&self) -> &[(u64, File)] {
+        &self.files.0
     }
 
     fn pad(&mut self) {
@@ -187,6 +209,20 @@ impl Parcel {
         });
     }
 
+    /// A file descriptor (`writeFileDescriptor`) for `file`.
+    pub fn write_file(&mut self, file: File) {
+        let at = self.data.len() as u64;
+        self.objects.push(at);
+        self.files.0.push((at, file));
+        let object = FlatBinderObject {
+            kind: BINDER_TYPE_FD,
+            flags: 0,
+            binder: 0,
+            cookie: 0,
+        };
+        self.data.extend_from_slice(&object.encode());
+    }
+
     /// The interface token of a call (`Parcel::writeInterfaceToken`).
     pub fn write_interface_token(&mut self, descriptor: &str) {
         self.write_i32(STRICT_MODE_PENALTY_GATHER);
@@ -214,8 +250,16 @@ impl Parcel {
     /// Bytes read from another parcel, with the binder objects among them
     /// (offsets relative to `bytes`).
     pub fn write_raw(&mut self, bytes: &[u8], objects: &[u64]) {
+        self.write_raw_files(bytes, objects, &[]);
+    }
+
+    /// [`Parcel::write_raw`], with the files of the fd objects among them.
+    pub fn write_raw_files(&mut self, bytes: &[u8], objects: &[u64], files: &[(u64, File)]) {
         let base = self.data.len() as u64;
         self.objects.extend(objects.iter().map(|o| base + o));
+        self.files
+            .0
+            .extend(files.iter().map(|(at, f)| (base + at, f.clone())));
         self.data.extend_from_slice(bytes);
         self.pad();
     }
@@ -271,6 +315,15 @@ impl<'a> Reader<'a> {
             .map(|o| o - start as u64)
             .collect();
         (&self.data[start..self.pos], objects)
+    }
+
+    /// Where the first binder object at or past the position is.
+    pub fn next_object(&self) -> Option<usize> {
+        self.objects
+            .iter()
+            .map(|&o| o as usize)
+            .filter(|&o| o >= self.pos)
+            .min()
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8]> {

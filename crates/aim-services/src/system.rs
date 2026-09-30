@@ -7,9 +7,9 @@
 //! stands in for. What a focused app's access reads (package ownership,
 //! app-op modes, focus, whether the device is locked) is mirrored
 //! ([`crate::mirror`]), each fed by its owner's listener; noting an app op,
-//! which only records the access, is sent in the background. Permissions,
-//! the input method and an instrumentation target's app ops are asked
-//! each time (docs/system-services.md, "Mirrored state").
+//! which only records the access, is sent in the background. Permissions
+//! and an instrumentation target's app ops are asked each time
+//! (docs/system-services.md, "Mirrored state").
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Sender};
@@ -18,15 +18,15 @@ use std::sync::{Arc, Mutex, Weak};
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
 use aim_binder_host::parcel::{Binder, Exception, Parcel, Reader, Result as ParcelResult};
 use aim_service_aidl::{
-    ReadParcelable, Returned, android_app_iactivitymanager as am,
+    ReadParcelable, Returned, WriteParcelable, android_app_iactivitymanager as am,
     android_app_iactivitytaskmanager as atm, android_app_itaskstacklistener as task_listener,
-    android_app_trust_itrustmanager as trust, android_content_pm_ipackagemanager as package,
-    android_os_iremotecallback as remote_callback, android_os_iservicemanager as sm,
-    android_os_iusermanager as um, android_permission_ipermissionmanager as pm,
+    android_app_iurigrantsmanager as ugm, android_app_trust_itrustmanager as trust,
+    android_content_pm_ipackagemanager as package, android_os_iremotecallback as remote_callback,
+    android_os_iservicemanager as sm, android_os_iusermanager as um,
+    android_permission_ipermissionmanager as pm,
     com_android_internal_app_iappopscallback as ops_callback,
     com_android_internal_app_iappopsservice as appops,
     com_android_internal_policy_idevicelockedstatelistener as lock_listener,
-    com_android_internal_view_iinputmethodmanager as imm,
 };
 
 use crate::mirror::Mirror;
@@ -326,6 +326,63 @@ impl System {
             |p| args.write(p),
             am::read_handle_incoming_user_reply,
         )
+    }
+
+    /// `IActivityManager.getContentProviderExternal(name, user, token,
+    /// tag)`: the provider, held for `token`. Its `ProviderInfo` carries
+    /// no binder, so the holder's first binder is the provider's.
+    pub fn content_provider_external(
+        self: &Arc<Self>,
+        name: &str,
+        user_id: i32,
+        token: Binder,
+        tag: &str,
+    ) -> Result<Option<Strong>> {
+        let service = self.service("activity")?;
+        let mut data = Parcel::new();
+        am::GetContentProviderExternal {
+            name: Some(name.into()),
+            user_id,
+            token: Some(token),
+            tag: Some(tag.into()),
+        }
+        .write(&mut data);
+        let reply = service
+            .transact(am::GET_CONTENT_PROVIDER_EXTERNAL, &data, false)
+            .map_err(|s| unreachable_service("activity", s))?;
+        let holder = am::read_get_content_provider_external_reply::<ContentProviderHolder>(
+            &mut reply.reader(),
+        )
+        .map_err(|s| unreachable_service("activity", s))??;
+        Ok(holder
+            .and_then(|h| h.provider)
+            .map(|handle| self.process.strong(handle)))
+    }
+
+    /// `UriGrantsManagerInternal.checkGrantUriPermission(uid, null, uri,
+    /// modeFlags, userId)`, which throws unless `uid` may grant `uri`;
+    /// its binder form answers system callers the same way.
+    pub fn check_grant_uri_permission(
+        self: &Arc<Self>,
+        uid: i32,
+        uri: &str,
+        mode_flags: i32,
+        user_id: i32,
+    ) -> Result<()> {
+        let args = ugm::CheckGrantUriPermissionIgnoreNonSystem {
+            source_uid: uid,
+            target_pkg: None,
+            uri: Some(StringUri(uri)),
+            mode_flags,
+            user_id,
+        };
+        self.call(
+            "uri_grants",
+            ugm::CHECK_GRANT_URI_PERMISSION_IGNORE_NON_SYSTEM,
+            |p| args.write(p),
+            ugm::read_check_grant_uri_permission_ignore_non_system_reply,
+        )
+        .map(drop)
     }
 
     /// `PackageManager.checkPermission(permission, package)` in
@@ -656,19 +713,36 @@ impl System {
         )?;
         Ok(focused == Some(uid))
     }
+}
 
-    /// The package of `user`'s current input method, which stands in for
-    /// `Settings.Secure.DEFAULT_INPUT_METHOD` (the input method service
-    /// keeps the setting and its current method the same).
-    pub fn default_ime_package(self: &Arc<Self>, user_id: i32) -> Result<Option<String>> {
-        let args = imm::GetCurrentInputMethodInfoAsUser { user_id };
-        let info = self.call(
-            "input_method",
-            imm::GET_CURRENT_INPUT_METHOD_INFO_AS_USER,
-            |p| args.write(p),
-            imm::read_get_current_input_method_info_as_user_reply::<InputMethodInfo>,
-        )?;
-        Ok(info.and_then(|i| i.id?.split('/').next().map(str::to_string)))
+/// `ContentProviderHolder`, up to its provider: the first binder past
+/// its `ProviderInfo`.
+struct ContentProviderHolder {
+    provider: Option<u32>,
+}
+
+impl ReadParcelable for ContentProviderHolder {
+    fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
+        let Some(at) = r.next_object() else {
+            return Ok(Self { provider: None });
+        };
+        r.set_position(at);
+        Ok(Self {
+            provider: match r.read_binder()? {
+                Some(Binder::Handle(h)) => Some(h),
+                _ => None,
+            },
+        })
+    }
+}
+
+/// `Uri.StringUri` (`Uri.writeToParcel`: its type and its string).
+struct StringUri<'a>(&'a str);
+
+impl WriteParcelable for StringUri<'_> {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i32(1);
+        p.write_string8(Some(self.0));
     }
 }
 
@@ -718,19 +792,6 @@ impl ReadParcelable for RootTaskInfo {
         r.read_i32()?; // taskId
         Ok(Self {
             effective_uid: r.read_i32()?,
-        })
-    }
-}
-
-/// `InputMethodInfo`: its id (`package/class`).
-struct InputMethodInfo {
-    id: Option<String>,
-}
-
-impl ReadParcelable for InputMethodInfo {
-    fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
-        Ok(Self {
-            id: r.read_string16()?,
         })
     }
 }

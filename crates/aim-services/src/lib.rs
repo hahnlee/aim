@@ -13,11 +13,13 @@
 //! ([`aim_binder_host::local`]). docs/system-services.md tracks which
 //! services are native and how they conform.
 
+mod bundle;
 pub mod clip;
 pub mod clipboard;
 mod mirror;
 pub mod notifications;
 mod pasteboard;
+mod settings;
 mod system;
 pub mod vibrator;
 
@@ -53,6 +55,7 @@ impl NativeServices {
             },
         );
         let system = system::System::new(process.clone(), &clipboard::APP_OPS);
+        let settings = settings::Settings::new(process.clone(), system.clone());
         let mut services = Vec::new();
         for name in names {
             // A service and the names it is published under, as its
@@ -60,7 +63,11 @@ impl NativeServices {
             let published: Vec<(&str, Arc<dyn Service>)> = match name.as_str() {
                 "clipboard" => vec![(
                     "clipboard",
-                    clipboard::ClipboardService::new(process.clone(), system.clone()),
+                    clipboard::ClipboardService::new(
+                        process.clone(),
+                        system.clone(),
+                        settings.clone(),
+                    ),
                 )],
                 "vibrator_manager" => vec![
                     (
