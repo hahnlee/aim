@@ -370,20 +370,13 @@ fn category_of(p: &Post) -> String {
     id
 }
 
-/// `image` as a PNG file for Notification Center to take.
-fn image_file(image: &Image) -> Option<PathBuf> {
-    let dir = std::env::temp_dir().join("aim-notifications");
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!(
-        "{}-{}.png",
-        std::process::id(),
-        FILES.fetch_add(1, Ordering::Relaxed)
-    ));
-    let bytes = path.as_os_str().as_encoded_bytes();
-    // SAFETY: CoreFoundation, CoreGraphics and ImageIO objects created and
-    // released here.
+/// `image` as a `CGImage`, released by the caller; null if it cannot be
+/// read.
+pub fn cg_image(image: &Image) -> *const c_void {
+    // SAFETY: CoreFoundation and CoreGraphics objects created and released
+    // here, but the image returned.
     unsafe {
-        let image = match image {
+        match image {
             Image::Rgba {
                 width,
                 height,
@@ -422,16 +415,33 @@ fn image_file(image: &Image) -> Option<PathBuf> {
                 let source = CGImageSourceCreateWithData(data, std::ptr::null());
                 CFRelease(data);
                 if source.is_null() {
-                    return None;
+                    return std::ptr::null();
                 }
                 let image = CGImageSourceCreateImageAtIndex(source, 0, std::ptr::null());
                 CFRelease(source);
                 image
             }
-        };
-        if image.is_null() {
-            return None;
         }
+    }
+}
+
+/// `image` as a PNG file for Notification Center to take.
+fn image_file(image: &Image) -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join("aim-notifications");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!(
+        "{}-{}.png",
+        std::process::id(),
+        FILES.fetch_add(1, Ordering::Relaxed)
+    ));
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let image = cg_image(image);
+    if image.is_null() {
+        return None;
+    }
+    // SAFETY: CoreFoundation, CoreGraphics and ImageIO objects created and
+    // released here.
+    unsafe {
         let url = CFURLCreateFromFileSystemRepresentation(
             std::ptr::null(),
             bytes.as_ptr(),
@@ -620,14 +630,23 @@ pub fn handle(m: Message) {
     on_main(move || {
         let _pool = crate::objc::Pool::new();
         match m {
-            Message::Post(p) => post_authorized(&p),
+            Message::Post(p) => {
+                crate::status::post(&p);
+                post_authorized(&p);
+            }
             Message::Remove { key, .. } => {
+                crate::status::remove(&key);
                 if let Asked::Asking(waiting) = &mut *ASKED.lock().unwrap() {
                     waiting.retain(|p| p.key != key);
                 }
                 remove(&key);
             }
             Message::Authorize { package } => request(package),
+            Message::Indicator {
+                package,
+                indicator,
+                on,
+            } => crate::status::indicator(&package, indicator, on),
             _ => {}
         }
     });

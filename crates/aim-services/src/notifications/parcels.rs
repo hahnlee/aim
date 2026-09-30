@@ -60,6 +60,8 @@ pub const FLAG_ONLY_ALERT_ONCE: i32 = 0x8;
 pub const FLAG_NO_CLEAR: i32 = 0x20;
 pub const FLAG_FOREGROUND_SERVICE: i32 = 0x40;
 pub const FLAG_GROUP_SUMMARY: i32 = 0x200;
+/// Set by NMS (`api_rich_ongoing`), never by the app.
+pub const FLAG_PROMOTED_ONGOING: i32 = 0x40000;
 
 /// Reads a blob's file: the fd of a call or reply being read, and how
 /// many bytes of it.
@@ -115,12 +117,50 @@ pub struct Extras {
     pub messages: Vec<Message>,
     pub picture: Option<Icon>,
     pub large_icon: Option<Icon>,
+    /// `EXTRA_SHORT_CRITICAL_TEXT`.
+    pub short_critical_text: Option<String>,
+    /// `EXTRA_SHOW_CHRONOMETER`, `EXTRA_CHRONOMETER_COUNT_DOWN`: the
+    /// template counts from or to `when`.
+    pub show_chronometer: bool,
+    pub chronometer_count_down: bool,
+    /// `EXTRA_PROGRESS`, `EXTRA_PROGRESS_MAX`,
+    /// `EXTRA_PROGRESS_INDETERMINATE`.
+    pub progress: Option<i32>,
+    pub progress_max: Option<i32>,
+    pub progress_indeterminate: bool,
+    /// `EXTRA_COLORIZED`.
+    pub colorized: bool,
+    /// `EXTRA_TEMPLATE`: the style's class name.
+    pub template: Option<String>,
+    /// `EXTRA_CALL_TYPE`.
+    pub call_type: i32,
+}
+
+/// A `Chronometer` of a notification's custom views, from the actions
+/// `RemoteViews.setChronometer` and `setChronometerCountDown` add.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ViewChronometer {
+    /// Its base, `SystemClock.elapsedRealtime()` milliseconds.
+    pub base: i64,
+    pub count_down: bool,
+    pub started: bool,
+}
+
+/// What a notification's custom views show that the Mac uses.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Views {
+    /// There is a content, big or heads-up view.
+    pub custom: bool,
+    pub chronometer: Option<ViewChronometer>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Notification {
     /// The token its `PendingIntent`s are sent with (`mAllowlistToken`).
     pub allowlist_token: Option<Binder>,
+    /// `System.currentTimeMillis()` milliseconds.
+    pub when: i64,
+    pub small_icon: Option<Icon>,
     pub content_intent: Option<Binder>,
     pub full_screen_intent: Option<Binder>,
     pub ticker: Option<String>,
@@ -132,6 +172,7 @@ pub struct Notification {
     /// Its `BubbleMetadata`'s flags.
     pub bubble_flags: i32,
     pub extras: Extras,
+    pub views: Views,
     pub actions: Vec<Action>,
     pub channel_id: Option<String>,
     pub shortcut_id: Option<String>,
@@ -245,15 +286,16 @@ fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification
         return Err(BAD_VALUE);
     }
     n.allowlist_token = r.read_binder()?;
-    r.read_i64()?; // when
+    n.when = r.read_i64()?;
     r.read_i64()?; // creationTime
-    typed(r, |r| icon(r, files))?; // small icon
+    n.small_icon = typed(r, |r| icon(r, files))?;
     r.read_i32()?; // number
     n.content_intent = typed(r, pending_intent)?.flatten();
     typed(r, pending_intent)?; // delete intent
     n.ticker = typed(r, char_sequence)?.flatten();
-    typed(r, |r| remote_views(r, files, 0))?; // ticker view
-    typed(r, |r| remote_views(r, files, 0))?; // content view
+    let mut ticker = Views::default();
+    typed(r, |r| remote_views(r, files, 0, &mut ticker))?;
+    n.views.custom |= typed(r, |r| remote_views(r, files, 0, &mut n.views))?.is_some();
     n.large_icon = typed(r, |r| icon(r, files))?;
     r.read_i32()?; // defaults
     n.flags = r.read_i32()?;
@@ -276,8 +318,10 @@ fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification
             n.actions.push(a);
         }
     }
-    typed(r, |r| remote_views(r, files, 0))?; // big content view
-    typed(r, |r| remote_views(r, files, 0))?; // heads-up content view
+    for _ in 0..2 {
+        // big and heads-up content views
+        n.views.custom |= typed(r, |r| remote_views(r, files, 0, &mut n.views))?.is_some();
+    }
     r.read_i32()?; // visibility
     if r.read_i32()? != 0 {
         let mut public = Notification::default();
@@ -321,9 +365,10 @@ fn bubble_metadata(r: &mut Reader<'_>, files: &dyn Files) -> Result<i32> {
 /// How deep `RemoteViews` nest (`RemoteViews.MAX_NESTED_VIEWS`).
 const MAX_NESTED_VIEWS: u32 = 10;
 
-/// `RemoteViews(Parcel)`, read past. The root of a hierarchy (`depth` 0)
-/// carries the bitmap and collection caches its children share.
-fn remote_views(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()> {
+/// `RemoteViews(Parcel)`, read past but for what `seen` keeps. The root
+/// of a hierarchy (`depth` 0) carries the bitmap and collection caches its
+/// children share.
+fn remote_views(r: &mut Reader<'_>, files: &dyn Files, depth: u32, seen: &mut Views) -> Result<()> {
     if depth > MAX_NESTED_VIEWS {
         return Err(BAD_VALUE);
     }
@@ -337,7 +382,7 @@ fn remote_views(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()>
         for _ in 0..r.read_i32()?.max(0) {
             r.read_i32()?;
             r.read_string8()?;
-            collection_items(r, files, depth)?;
+            collection_items(r, files, depth, seen)?;
         }
     }
     match mode {
@@ -351,18 +396,18 @@ fn remote_views(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()>
                 r.read_i32()?; // layout, view id, light background layout
             }
             for _ in 0..r.read_i32()?.max(0) {
-                view_action(r, files, depth)?;
+                view_action(r, files, depth, seen)?;
             }
         }
         // MODE_HAS_LANDSCAPE_AND_PORTRAIT
         1 => {
-            remote_views(r, files, depth + 1)?;
-            remote_views(r, files, depth + 1)?;
+            remote_views(r, files, depth + 1, seen)?;
+            remote_views(r, files, depth + 1, seen)?;
         }
         // MODE_HAS_SIZED_REMOTEVIEWS
         2 => {
             for _ in 0..r.read_i32()?.max(0) {
-                remote_views(r, files, depth + 1)?;
+                remote_views(r, files, depth + 1, seen)?;
             }
         }
         _ => return Err(BAD_VALUE),
@@ -375,7 +420,12 @@ fn remote_views(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()>
 
 /// `RemoteViews.RemoteCollectionItems(Parcel)`: its views, the first a
 /// root of its own unless the items are attached to a hierarchy.
-fn collection_items(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()> {
+fn collection_items(
+    r: &mut Reader<'_>,
+    files: &dyn Files,
+    depth: u32,
+    seen: &mut Views,
+) -> Result<()> {
     r.read_bool()?; // has stable ids
     r.read_i32()?; // view type count
     let length = r.read_i32()?;
@@ -383,7 +433,7 @@ fn collection_items(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result
     let attached = r.read_bool()?;
     for i in 0..length.max(0) {
         let child = if i == 0 && !attached { 0 } else { depth + 1 };
-        remote_views(r, files, child)?;
+        remote_views(r, files, child, seen)?;
     }
     Ok(())
 }
@@ -400,17 +450,21 @@ fn remote_response(r: &mut Reader<'_>) -> Result<()> {
     Ok(())
 }
 
-/// `RemoteViews.BaseReflectionAction(Parcel)`: its value's type.
-fn reflection(r: &mut Reader<'_>) -> Result<i32> {
+/// `RemoteViews.BaseReflectionAction(Parcel)`: its method and its value's
+/// type.
+fn reflection(r: &mut Reader<'_>) -> Result<(Option<String>, i32)> {
     r.read_i32()?; // view id
-    r.read_string8()?; // method
-    r.read_i32()
+    let method = r.read_string8()?;
+    Ok((method, r.read_i32()?))
 }
 
 /// One of a `RemoteViews`' actions: its tag, then the action
 /// (`RemoteViews.getActionFromParcel`).
-fn view_action(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()> {
+fn view_action(r: &mut Reader<'_>, files: &dyn Files, depth: u32, seen: &mut Views) -> Result<()> {
     let ints = |r: &mut Reader<'_>, n: usize| r.skip(4 * n);
+    fn chronometer(seen: &mut Views) -> &mut ViewChronometer {
+        seen.chronometer.get_or_insert_default()
+    }
     match r.read_i32()? {
         // SetOnClickResponse, SetOnCheckedChangeResponse
         1 | 29 => {
@@ -419,30 +473,37 @@ fn view_action(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()> 
         }
         // ReflectionAction
         2 => match reflection(r)? {
+            // A Chronometer's (RemoteViews.setChronometer,
+            // setChronometerCountDown).
+            (Some(m), 1) if m == "setStarted" => chronometer(seen).started = r.read_i32()? != 0,
+            (Some(m), 1) if m == "setCountDown" => {
+                chronometer(seen).count_down = r.read_i32()? != 0
+            }
+            (Some(m), 5) if m == "setBase" => chronometer(seen).base = r.read_i64()?,
             // boolean, byte, short, int, float, char, blend mode
-            1..=4 | 6 | 8 | 17 => ints(r, 1)?,
+            (_, 1..=4 | 6 | 8 | 17) => ints(r, 1)?,
             // long, double
-            5 | 7 => r.skip(8)?,
-            9 => {
+            (_, 5 | 7) => r.skip(8)?,
+            (_, 9) => {
                 r.read_string8()?;
             }
-            10 => {
+            (_, 10) => {
                 char_sequence(r)?;
             }
-            11 => {
+            (_, 11) => {
                 typed(r, uri)?;
             }
-            12 => {
+            (_, 12) => {
                 typed(r, |r| bitmap(r, files))?;
             }
-            13 => skip_bundle_or_null(r)?,
-            14 => {
+            (_, 13) => skip_bundle_or_null(r)?,
+            (_, 14) => {
                 typed(r, crate::clip::intent)?;
             }
-            15 => {
+            (_, 15) => {
                 typed(r, color_state_list)?;
             }
-            16 => {
+            (_, 16) => {
                 typed(r, |r| icon(r, files))?;
             }
             _ => {}
@@ -452,7 +513,7 @@ fn view_action(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()> 
         // ViewGroupActionAdd: view, index, stable id, the views
         4 => {
             ints(r, 3)?;
-            remote_views(r, files, depth + 1)?;
+            remote_views(r, files, depth + 1, seen)?;
         }
         // ViewContentNavigation, SetEmptyView, ViewGroupActionRemove,
         // SetCompoundButtonChecked, SetRadioGroupChecked
@@ -519,7 +580,7 @@ fn view_action(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()> 
             ints(r, 2)?;
         }
         // NightModeReflectionAction: light and dark values
-        30 => match reflection(r)? {
+        30 => match reflection(r)?.1 {
             16 => {
                 typed(r, |r| icon(r, files))?;
                 typed(r, |r| icon(r, files))?;
@@ -536,7 +597,7 @@ fn view_action(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()> 
         31 => {
             ints(r, 3)?;
             if typed(r, crate::clip::intent)?.is_none() {
-                collection_items(r, files, depth)?;
+                collection_items(r, files, depth, seen)?;
             }
         }
         // Draw instructions (behind a flag) and unknown actions.
@@ -729,7 +790,7 @@ fn color_state_list(r: &mut Reader<'_>) -> Result<()> {
 }
 
 /// `Icon(Parcel)`.
-fn icon(r: &mut Reader<'_>, files: &dyn Files) -> Result<Icon> {
+pub(crate) fn icon(r: &mut Reader<'_>, files: &dyn Files) -> Result<Icon> {
     let icon = match r.read_i32()? {
         // TYPE_BITMAP, TYPE_ADAPTIVE_BITMAP
         1 | 5 => bitmap(r, files)?.map_or(Icon::Unreadable, Icon::Image),
@@ -805,7 +866,7 @@ const PREMUL: i32 = 2;
 
 /// `Bitmap_writeToParcel`: its pixels as RGBA, if the format is one the
 /// Mac takes.
-fn bitmap(r: &mut Reader<'_>, files: &dyn Files) -> Result<Option<Image>> {
+pub(crate) fn bitmap(r: &mut Reader<'_>, files: &dyn Files) -> Result<Option<Image>> {
     r.read_i32()?; // mutable
     let color_type = r.read_i32()?;
     let alpha_type = r.read_i32()?;
@@ -911,7 +972,7 @@ fn remote_input(r: &mut Reader<'_>) -> Result<RemoteInput> {
 }
 
 /// One `writeValue`, skipped.
-fn skip_value(r: &mut Reader<'_>) -> Result<()> {
+pub(crate) fn skip_value(r: &mut Reader<'_>) -> Result<()> {
     let kind = r.read_i32()?;
     if length_prefixed(kind) {
         let len = r.read_i32()?;
@@ -961,7 +1022,7 @@ fn skip_value(r: &mut Reader<'_>) -> Result<()> {
 
 /// A value read as text (a `String` or `CharSequence`); other values are
 /// skipped.
-fn text_value(r: &mut Reader<'_>, kind: i32) -> Result<Option<String>> {
+pub(crate) fn text_value(r: &mut Reader<'_>, kind: i32) -> Result<Option<String>> {
     match kind {
         VAL_STRING => r.read_string16(),
         VAL_CHARSEQUENCE => char_sequence(r),
@@ -971,7 +1032,7 @@ fn text_value(r: &mut Reader<'_>, kind: i32) -> Result<Option<String>> {
 
 /// A bundle's entries (`BaseBundle.writeToParcelInner`): `visit` reads a
 /// value it wants and returns true; the others are skipped. -1 is null.
-fn walk_bundle(
+pub(crate) fn walk_bundle(
     r: &mut Reader<'_>,
     visit: &mut dyn FnMut(&str, i32, &mut Reader<'_>) -> Result<bool>,
 ) -> Result<()> {
@@ -1005,7 +1066,7 @@ fn walk_bundle(
 
 /// `writeParcelable`'s class name, then the parcelable, if it is a
 /// `Bitmap` or an `Icon`.
-fn parcelable_image(r: &mut Reader<'_>, files: &dyn Files) -> Result<Option<Icon>> {
+pub(crate) fn parcelable_image(r: &mut Reader<'_>, files: &dyn Files) -> Result<Option<Icon>> {
     Ok(match r.read_string16()?.as_deref() {
         Some("android.graphics.Bitmap") => {
             Some(bitmap(r, files)?.map_or(Icon::Unreadable, Icon::Image))
@@ -1022,6 +1083,10 @@ fn extras(r: &mut Reader<'_>, files: &dyn Files) -> Result<Extras> {
         let text = |r: &mut Reader<'_>, slot: &mut Option<String>| -> Result<bool> {
             *slot = text_value(r, kind)?;
             Ok(matches!(kind, VAL_STRING | VAL_CHARSEQUENCE))
+        };
+        let flag = |r: &mut Reader<'_>, slot: &mut bool| -> Result<bool> {
+            *slot = r.read_i32()? != 0;
+            Ok(true)
         };
         match (key, kind) {
             ("android.title", _) => text(r, &mut e.title),
@@ -1041,6 +1106,26 @@ fn extras(r: &mut Reader<'_>, files: &dyn Files) -> Result<Extras> {
             }
             ("android.largeIcon", VAL_PARCELABLE) => {
                 e.large_icon = parcelable_image(r, files)?;
+                Ok(true)
+            }
+            ("android.shortCriticalText", _) => text(r, &mut e.short_critical_text),
+            ("android.template", _) => text(r, &mut e.template),
+            ("android.showChronometer", VAL_BOOLEAN) => flag(r, &mut e.show_chronometer),
+            ("android.chronometerCountDown", VAL_BOOLEAN) => flag(r, &mut e.chronometer_count_down),
+            ("android.progressIndeterminate", VAL_BOOLEAN) => {
+                flag(r, &mut e.progress_indeterminate)
+            }
+            ("android.colorized", VAL_BOOLEAN) => flag(r, &mut e.colorized),
+            ("android.progress", VAL_INTEGER) => {
+                e.progress = Some(r.read_i32()?);
+                Ok(true)
+            }
+            ("android.progressMax", VAL_INTEGER) => {
+                e.progress_max = Some(r.read_i32()?);
+                Ok(true)
+            }
+            ("android.callType", VAL_INTEGER) => {
+                e.call_type = r.read_i32()?;
                 Ok(true)
             }
             ("android.messages", VAL_PARCELABLEARRAY) => {
@@ -1416,12 +1501,26 @@ mod tests {
         p.write_i32(0x7f0c_0001);
         p.write_i32(-1);
         p.write_i32(0);
-        p.write_i32(2); // actions
+        p.write_i32(5); // actions
         p.write_i32(2); // ReflectionAction: setText, a CharSequence
         p.write_i32(0x7f09_0001);
         p.write_string8(Some("setText"));
         p.write_i32(10);
         cs(p, "Custom");
+        // RemoteViews.setChronometer and setChronometerCountDown: a long
+        // and two booleans.
+        p.write_i32(2);
+        p.write_i32(0x7f09_0003);
+        p.write_string8(Some("setBase"));
+        p.write_i32(5);
+        p.write_i64(123_456);
+        for method in ["setStarted", "setCountDown"] {
+            p.write_i32(2);
+            p.write_i32(0x7f09_0003);
+            p.write_string8(Some(method));
+            p.write_i32(1);
+            p.write_i32(1);
+        }
         p.write_i32(12); // BitmapReflectionAction: setImageBitmap, bitmap 0
         p.write_i32(0x7f09_0002);
         p.write_string8(Some("setImageBitmap"));
@@ -1620,6 +1719,15 @@ mod tests {
         assert_eq!(n.actions[0].title.as_deref(), Some("Reply"));
         assert_eq!(n.actions[0].inputs[0].result_key, "reply_key");
         assert_eq!(n.binders().count(), 2);
+        assert_eq!(n.when, 1);
+        assert_eq!(
+            n.small_icon,
+            Some(Icon::Resource {
+                package: "com.example".into(),
+                id: 0x7f01_0001,
+            })
+        );
+        assert!(!n.views.custom);
     }
 
     #[test]
@@ -1652,6 +1760,15 @@ mod tests {
         assert_eq!(n.extras.title.as_deref(), Some("Title"));
         assert_eq!(n.channel_id.as_deref(), Some("chat"));
         assert_eq!(n.actions.len(), 1);
+        assert!(n.views.custom);
+        assert_eq!(
+            n.views.chronometer,
+            Some(ViewChronometer {
+                base: 123_456,
+                count_down: true,
+                started: true,
+            })
+        );
     }
 
     #[test]

@@ -19,6 +19,9 @@
 //! An app's request for POST_NOTIFICATIONS goes to the host of the same
 //! shim, launched if need be, which asks the Mac and answers; a shim's
 //! own setting goes to the bridge (#470).
+//!
+//! An app's indicators (the microphone, camera or location in use) go to
+//! the same shim, launched if need be, as long as they are on.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
@@ -28,7 +31,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aim_host_display::notify::{Message, Post};
+use aim_host_display::notify::{Indicator, Message, Post};
 
 use crate::hosts::Host;
 
@@ -47,6 +50,8 @@ struct State {
     launching: BTreeMap<String, Instant>,
     /// Packages whose authorization the bridge asked for, until answered.
     authorizing: BTreeSet<String>,
+    /// The indicators on, by package.
+    indicators: BTreeSet<(String, Indicator)>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -54,6 +59,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     shown: BTreeMap::new(),
     launching: BTreeMap::new(),
     authorizing: BTreeSet::new(),
+    indicators: BTreeSet::new(),
 });
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -135,7 +141,10 @@ fn deliver(s: &mut State, owner: &str, m: &Message) {
         h.send_notify(m);
         return;
     }
-    if !matches!(m, Message::Post(_) | Message::Authorize { .. }) {
+    if !matches!(
+        m,
+        Message::Post(_) | Message::Authorize { .. } | Message::Indicator { on: true, .. }
+    ) {
         return;
     }
     if s.launching
@@ -206,6 +215,19 @@ pub fn serve_bridge(sock: UnixStream) {
                 s.shown.remove(key);
                 package.clone()
             }
+            Message::Indicator {
+                package,
+                indicator,
+                on,
+            } => {
+                let entry = (package.clone(), *indicator);
+                if *on {
+                    s.indicators.insert(entry);
+                } else {
+                    s.indicators.remove(&entry);
+                }
+                package.clone()
+            }
             _ => continue,
         };
         if let Some(owner) = owner(&package) {
@@ -215,6 +237,16 @@ pub fn serve_bridge(sock: UnixStream) {
     let mut s = STATE.lock().unwrap();
     s.bridge = None;
     s.authorizing.clear();
+    for (package, indicator) in std::mem::take(&mut s.indicators) {
+        if let Some(owner) = owner(&package) {
+            let off = Message::Indicator {
+                package,
+                indicator,
+                on: false,
+            };
+            deliver(&mut s, &owner, &off);
+        }
+    }
     let shown: Vec<Post> = std::mem::take(&mut s.shown).into_values().collect();
     for p in shown {
         if let Some(owner) = owner(&p.package) {
@@ -248,6 +280,15 @@ pub fn host_connected(h: &Arc<Host>) {
         if owner(package).as_deref() == Some(h.package.as_str()) {
             h.send_notify(&Message::Authorize {
                 package: package.clone(),
+            });
+        }
+    }
+    for (package, indicator) in &s.indicators {
+        if owner(package).as_deref() == Some(h.package.as_str()) {
+            h.send_notify(&Message::Indicator {
+                package: package.clone(),
+                indicator: *indicator,
+                on: true,
             });
         }
     }
