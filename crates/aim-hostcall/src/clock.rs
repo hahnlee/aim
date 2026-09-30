@@ -26,8 +26,8 @@ unsafe extern "C" {
 /// `numer << 32 | denom`; 0 until read.
 static TIMEBASE: AtomicU64 = AtomicU64::new(0);
 
-/// Host ticks to nanoseconds.
-pub fn ticks_to_ns(ticks: u64) -> i64 {
+/// The host tick's length in nanoseconds, as (numerator, denominator).
+pub fn timebase() -> (u32, u32) {
     let mut tb = TIMEBASE.load(Relaxed);
     if tb == 0 {
         let mut info = MachTimebaseInfo { numer: 1, denom: 1 };
@@ -36,7 +36,13 @@ pub fn ticks_to_ns(ticks: u64) -> i64 {
         tb = (info.numer as u64) << 32 | info.denom.max(1) as u64;
         TIMEBASE.store(tb, Relaxed);
     }
-    let (numer, denom) = (tb >> 32, tb & 0xffff_ffff);
+    ((tb >> 32) as u32, tb as u32)
+}
+
+/// Host ticks to nanoseconds.
+pub fn ticks_to_ns(ticks: u64) -> i64 {
+    let (numer, denom) = timebase();
+    let (numer, denom) = (numer as u64, denom as u64);
     // Split so that nothing overflows 64 bits for centuries of uptime.
     ((ticks / denom) * numer + (ticks % denom) * numer / denom) as i64
 }

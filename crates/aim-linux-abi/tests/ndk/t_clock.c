@@ -1,10 +1,12 @@
 // Linux clock semantics, after LTP's clock_gettime, clock_getres,
 // clock_nanosleep and timerfd tests: ids, resolutions, the order between
 // clocks, CPU clocks, and sleeps and timers on each clock. The calls go
-// through syscall(2), not bionic's vDSO path.
+// through syscall(2); `vdso` checks bionic's vDSO path against them.
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/auxv.h>
 #include <sys/capability.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
@@ -215,7 +217,68 @@ static void alarm_capability(void) {
   CHECK(waitpid(p, &st, 0) == p && WIFEXITED(st) && WEXITSTATUS(st) == 0);
 }
 
-// Not a check: what a clock read costs without a vDSO.
+static int64_t vdso_ns(clockid_t id) {
+  struct timespec ts;
+  if (clock_gettime(id, &ts) != 0) return -errno;
+  return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+// bionic's clock_gettime, clock_getres and gettimeofday go through the
+// vDSO: each agrees with the syscall, served clock or not.
+static void vdso(void) {
+  CHECK(getauxval(AT_SYSINFO_EHDR) != 0);
+  const clockid_t ids[] = {CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_RAW,
+                           CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC_COARSE, CLOCK_BOOTTIME,
+                           CLOCK_REALTIME_ALARM, CLOCK_BOOTTIME_ALARM, CLOCK_TAI_};
+  // The wall clock may be slewed between reads; allow it a microsecond.
+  for (unsigned i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+    int slack = ids[i] == CLOCK_MONOTONIC || ids[i] == CLOCK_MONOTONIC_RAW ||
+                        ids[i] == CLOCK_MONOTONIC_COARSE || ids[i] == CLOCK_BOOTTIME ||
+                        ids[i] == CLOCK_BOOTTIME_ALARM
+                    ? 0
+                    : 1000;
+    int64_t before = ns_of(ids[i]), t = vdso_ns(ids[i]), after = ns_of(ids[i]);
+    CHECK(before - slack <= t && t <= after + slack);
+  }
+  CHECK(vdso_ns(CLOCK_THREAD_CPUTIME_ID) > 0);
+  CHECK(vdso_ns(10) == -EINVAL && vdso_ns(12) == -EINVAL && vdso_ns(-100) == -EINVAL);
+  for (clockid_t id = -1; id <= 12; id++) {
+    struct timespec a = {7, 7}, b = {7, 7};
+    int ra = syscall(SYS_clock_getres, id, &a) == 0 ? 0 : -errno;
+    int rb = clock_getres(id, &b) == 0 ? 0 : -errno;
+    CHECK(ra == rb && a.tv_sec == b.tv_sec && a.tv_nsec == b.tv_nsec);
+  }
+  CHECK(clock_getres(CLOCK_MONOTONIC, NULL) == 0);
+  // Interleaved, the two paths never go back.
+  int64_t last = ns_of(CLOCK_MONOTONIC);
+  for (int k = 0; k < 100000; k++) {
+    int64_t t = k & 1 ? ns_of(CLOCK_MONOTONIC) : vdso_ns(CLOCK_MONOTONIC);
+    CHECK(t >= last);
+    last = t;
+  }
+  struct timeval tv;
+  struct timezone tz = {.tz_minuteswest = 99, .tz_dsttime = 99};
+  int64_t before = ns_of(CLOCK_REALTIME) / 1000;
+  CHECK(gettimeofday(&tv, &tz) == 0);
+  int64_t after = ns_of(CLOCK_REALTIME) / 1000, us = tv.tv_sec * 1000000LL + tv.tv_usec;
+  CHECK(before - 1 <= us && us <= after + 1 && tv.tv_usec < 1000000);
+  CHECK(tz.tz_minuteswest == 0 && tz.tz_dsttime == 0);
+  CHECK(gettimeofday(NULL, NULL) == 0);
+  // /proc/self/maps names it, as Linux does.
+  FILE* f = fopen("/proc/self/maps", "r");
+  CHECK(f != NULL);
+  char line[512];
+  int data = 0, code = 0;
+  while (fgets(line, sizeof(line), f)) {
+    data += strstr(line, " r--p ") && strstr(line, "[vvar]") != NULL;
+    code += strstr(line, " r-xp ") && strstr(line, "[vdso]") != NULL;
+  }
+  fclose(f);
+  CHECK(data == 1 && code == 1);
+}
+
+// Not a check: what a clock read costs through the syscall and through
+// bionic (the vDSO).
 static void cost(void) {
   const int n = 200000;
   struct timespec ts;
@@ -237,6 +300,7 @@ int main(void) {
   RUN(nanosleep_clocks);
   RUN(timerfd_clocks);
   RUN(alarm_capability);
+  RUN(vdso);
   cost();
   DONE();
 }

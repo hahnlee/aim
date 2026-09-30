@@ -415,6 +415,8 @@ fn maps() -> String {
             name = c.guest;
         } else if r.start < stack.hi && stack.lo < r.end && prot != 0 {
             name = "[stack]".into();
+        } else if let Some(n) = crate::vdso::name_of(r.start) {
+            name = n.into();
         } else if let Some(n) = super::memfd::anon_name(r.start) {
             name = n;
         }

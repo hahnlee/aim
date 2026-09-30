@@ -170,6 +170,7 @@ pub fn save(w: &mut Writer) {
     crate::xrt::fork_save(w);
     crate::diag::fork_save(w);
     crate::patch::fork_save(w);
+    crate::vdso::fork_save(w);
     cred::fork_save(w);
     process::fork_save(w);
     procfs::fork_save(w);
@@ -193,6 +194,7 @@ pub fn restore(r: &mut Reader) -> bool {
     crate::xrt::fork_restore(r);
     crate::diag::fork_restore(r);
     crate::patch::fork_restore(r);
+    crate::vdso::fork_restore(r);
     cred::fork_restore(r);
     process::fork_restore(r);
     procfs::fork_restore(r);

@@ -6,22 +6,19 @@
 //!   host's boot in nanoseconds (`aim_hostcall::clock`, which host modules
 //!   stamp events with).
 //! - REALTIME, its COARSE and ALARM variants and TAI (offset 0, as until
-//!   an NTP daemon sets one) are the host's wall clock. Darwin keeps it in
-//!   microseconds; the nanoseconds come from the monotonic clock, kept
-//!   within the wall clock's microsecond.
+//!   an NTP daemon sets one) are the host's wall clock, to the nanosecond.
 //! - CPU clocks: PROCESS_CPUTIME_ID, THREAD_CPUTIME_ID and the encoded ids
 //!   of `clock_getcpuclockid`/`pthread_getcpuclockid` (a pid, or a tid of
 //!   the caller's process).
 //!
 //! Resolutions are Linux's with high-resolution timers: 1 ns, except the
 //! COARSE clocks and the tick-based CPU clocks (PROF, VIRT), which have a
-//! tick of a CONFIG_HZ=250 kernel. There is no vDSO: each read is a
-//! syscall, and the host reads cost 10-20 ns of it.
+//! tick of a CONFIG_HZ=250 kernel. The vDSO (`crate::vdso`) serves the
+//! MONOTONIC, BOOTTIME and REALTIME reads without a syscall, from the same
+//! sources and with the same arithmetic.
 //!
 //! Timers and sleeps keep their deadlines on the monotonic clock
 //! ([`Base::deadline`]).
-
-use std::sync::atomic::{AtomicI64, Ordering::Relaxed};
 
 use aim_hostcall::clock::{boottime_ns, monotonic_ns, ticks_to_ns};
 
@@ -30,6 +27,7 @@ use crate::errno::{EINVAL, EPERM};
 
 unsafe extern "C" {
     fn clock_gettime_nsec_np(clock: libc::clockid_t) -> u64;
+    fn mach_absolute_time() -> u64;
     static mach_task_self_: libc::mach_port_t;
 }
 
@@ -52,7 +50,7 @@ const CPUCLOCK_SCHED: i64 = 2;
 const CPUCLOCK_PERTHREAD: i64 = 4;
 
 /// TICK_NSEC at CONFIG_HZ=250, as GKI kernels are built.
-const TICK_NS: u64 = 4_000_000;
+pub(crate) const TICK_NS: u64 = 4_000_000;
 const CAP_WAKE_ALARM: u32 = 35;
 const EOPNOTSUPP: i64 = 95;
 
@@ -112,25 +110,68 @@ pub fn timer_base(id: u64) -> Result<Base, i64> {
     Ok(base)
 }
 
-/// The host's wall clock in nanoseconds: the monotonic clock plus an
-/// offset re-taken whenever the result leaves the wall clock's current
-/// microsecond (a step, a slew, or the first read).
+/// Darwin's commpage (xnu `osfmk/arm/cpu_capabilities.h`), mapped read-only
+/// into every process: the clock state libsystem's `mach_absolute_time`,
+/// `mach_continuous_time` and `gettimeofday` read without a trap. The vDSO
+/// reads it too.
+pub mod commpage {
+    pub const BASE: u64 = 0xf_ffff_c000;
+    /// u64 added to the counter for `mach_absolute_time`; changes on wake.
+    pub const TIMEBASE_OFFSET: u64 = 0x88;
+    /// u8: how user space reads the counter; 0 when it cannot.
+    pub const USER_TIMEBASE: u64 = 0x90;
+    /// u8: the counter keeps running across sleep.
+    pub const CONT_HWCLOCK: u64 = 0x91;
+    /// u64 added to the counter for `mach_continuous_time` when it does.
+    pub const CONT_HW_TIMEBASE: u64 = 0xa8;
+    /// The wall clock at a tick: tick, seconds, a 64-bit fraction of a
+    /// second, the fraction per tick, and ticks per second (u64 each).
+    pub const TIMEOFDAY: u64 = 0x120;
+}
+
+/// The host's wall clock in nanoseconds, as Darwin's `gettimeofday`
+/// computes it from the commpage but to the nanosecond: the kernel's
+/// timestamp plus the ticks since it at the kernel's rate. A timestamp a
+/// second old is refreshed by the `gettimeofday` syscall, which libsystem
+/// makes when it finds it so.
 pub fn realtime_ns() -> i64 {
-    static OFFSET: AtomicI64 = AtomicI64::new(0);
+    if let Some(t) = commpage_realtime() {
+        return t;
+    }
     let mut tv = libc::timeval {
         tv_sec: 0,
         tv_usec: 0,
     };
     // SAFETY: fills the local timeval.
     unsafe { libc::gettimeofday(&mut tv, std::ptr::null_mut()) };
-    let wall = tv.tv_sec * 1_000_000_000 + tv.tv_usec as i64 * 1000;
-    let mono = monotonic_ns();
-    let t = mono + OFFSET.load(Relaxed);
-    if (wall..wall + 1000).contains(&t) {
-        return t;
+    commpage_realtime().unwrap_or(tv.tv_sec * 1_000_000_000 + tv.tv_usec as i64 * 1000)
+}
+
+/// The commpage's wall clock (libsystem's `__commpage_gettimeofday`), or
+/// None when it cannot serve it. The vDSO computes the same.
+fn commpage_realtime() -> Option<i64> {
+    let at = |i: u64| {
+        // SAFETY: the commpage is mapped in every Darwin process.
+        unsafe { ((commpage::BASE + commpage::TIMEOFDAY + i * 8) as *const u64).read_volatile() }
+    };
+    let (tick, now, sec, frac, scale, per_sec) = loop {
+        let tick = at(0);
+        // SAFETY: reads the clock.
+        let now = unsafe { mach_absolute_time() };
+        let v = (tick, now, at(1), at(2), at(3), at(4));
+        if at(0) == tick {
+            break v;
+        }
+    };
+    let delta = now.wrapping_sub(tick);
+    if tick == 0 || delta >= per_sec || sec >> 63 != 0 {
+        return None;
     }
-    OFFSET.store(wall - mono, Relaxed);
-    wall
+    let step = scale as u128 * delta as u128;
+    let (frac, carry) = frac.overflowing_add(step as u64);
+    let sec = sec + (step >> 64) as u64 + carry as u64;
+    let nsec = (frac as u128 * 1_000_000_000) >> 64;
+    Some((sec * 1_000_000_000 + nsec as u64) as i64)
 }
 
 /// An encoded CPU clock: (pid or tid, 0 for the caller; per thread;
