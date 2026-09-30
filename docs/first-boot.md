@@ -2,7 +2,8 @@
 
 Status: design (#565). Implemented: item 4, the data image as a clone
 (#563); item 1, the device's APK compiled in the image; item 2, the
-package parser cache in a build-time template ("The template").
+package parser cache in a build-time template ("The template"). Item 3
+fails its parity check ("Item 3's checks") and waits for a decision.
 
 A first boot (a new data directory) reaches `sys.boot_completed` in about
 11 s, a repeat boot of the same data in about 5.4 s. The difference is
@@ -273,7 +274,7 @@ identities, keys and seeds.
   normalized (times, uids, key set ids, code path names, domain set ids,
   the owner of a permission two packages declare). A new kind of
   per-boot value in PMS's output then fails the test instead of being
-  shipped unnoticed.
+  shipped unnoticed. Run by hand so far (#620).
 - **Parity.** A template first boot against an original first boot:
   `dumpsys package` (packages, flags, permissions and their flags,
   preferred activities, domain verification state), `pm list packages
@@ -283,6 +284,43 @@ identities, keys and seeds.
   CtsDomainVerificationDeviceStandaloneTestCases, CtsOsTestCases,
   CtsBootStatsTestCases. And the app checks (the integration gate,
   Settings, Chrome, Calculator, the tracked games).
+
+### Item 3's checks, 2026-10-01: parity fails in the permission module
+
+A candidate template with item 3's set (packages.xml and
+package-restrictions.xml with their reserve copies, packages.list, the
+decompressed stubs, `dalvik-cache/arm64`), taken at the build boot's
+clean shutdown, against an original first boot (device mode, main
+c498155b plus that day's work):
+
+- **Time.** `sys.boot_completed` 5.27 s and 6.78 s from the candidate
+  (host load 2.7) against 10.24 s (load 5.9); `pms_start` to `pms_ready`
+  0.64 s against 3.81 s, `pms_ready` to `ams_ready` 1.18 s against
+  2.56 s.
+- **Packages.** `pm list packages -f` and `dumpsys role` the same, up to
+  uids, stub directory names and the Play Store's own update of itself.
+  CtsOsTestCases: 922 tests, the same 50 failures both ways.
+  CtsDomainVerificationDeviceStandaloneTestCases hangs both ways (#618).
+  Settings and Chrome start.
+- **Permissions: not the same.** From the candidate, Google Play
+  services has none of its default grants (31 runtime permissions
+  `granted=false` against `GRANTED_BY_DEFAULT`), and Messages, Phone,
+  the Google app and the sound picker lack `RESTRICTION_SYSTEM_EXEMPT` on
+  their restricted permissions (108 such flags against 159). This is the
+  risk below: the permission module makes a system package's state as
+  the package is added, which a first boot from PMS's state skips.
+- **Structure: a new kind of per-boot value.** Two builds' settings
+  differ, beyond the listed values, in package-restrictions.xml: the
+  components apps enabled or disabled and the packages they started in
+  the seconds before the shutdown (131 against 4 entries). PMS's own
+  state is its constructor's write (`write settings`, before
+  `pms_ready`, when no app has run); a clean shutdown writes the apps'
+  changes too.
+
+Item 3 therefore does not land: the remedy the design names (the
+permission module's user 0 state in the template) is excluded by the
+decision on #565, which keeps runtime permissions and roles off the
+template.
 
 ## Image changes and existing data
 
@@ -326,10 +364,10 @@ time (#529 and the pre-zygote work).
   restricted-permission exemptions) is made as the scan adds the package;
   from the template the packages are known, and user 0's state is read
   from a file that is not there before default grants run
-  (`getDefaultPermissionGrantFingerprint` is unset). If the parity check
-  shows a difference there, the permission module's user 0 state
-  (`runtime-permissions.xml`, `roles.xml`: no identity) joins the
-  template; nothing of the original is changed.
+  (`getDefaultPermissionGrantFingerprint` is unset). The parity check
+  found this difference (above). The design's remedy, the permission
+  module's user 0 state (`runtime-permissions.xml`, `roles.xml`: no
+  identity) in the template, is excluded by the decision on #565.
 - **Per-device values.** Item 3's list; the structure check catches new
   ones.
 - **The build boots Android.** A boot failure fails the build, the build
