@@ -7,3 +7,9 @@ service aim-windows /system_ext/bin/aim-windows
     user system
     group system
     oneshot
+
+# Its binder handles and task listener die with system_server: start it
+# again with the new one, as zygote's own onrestart does for the native
+# services that talk to system_server.
+on property:init.svc.zygote=restarting
+    restart aim-windows
