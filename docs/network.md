@@ -17,7 +17,7 @@ writes.
 | AF_PACKET SOCK_RAW and classic BPF filters | `sys/packet.rs` |
 | `eth0`'s virtual router: DHCP and ARP | `sys/dhcp.rs` |
 | Interface ioctls (`SIOCGIFFLAGS`, `SIOCSIFADDR`, `SIOCGIFINDEX`, ...) | `netif::ioctl` |
-| SO_MARK, SO_BINDTODEVICE, ping sockets, UDP connect to port 0 | `sys/net.rs` (`Family::Inet`) |
+| SO_MARK, SO_BINDTODEVICE, IP_MULTICAST_ALL, ping sockets, UDP connect to port 0 | `sys/net.rs` (`Family::Inet`) |
 | INetd interface calls over ioctls and rtnetlink | `daemons/netd/src/interfaces.rs` |
 | `android.hardware.ethernet` | `image/vendor/etc/permissions/android.hardware.ethernet.xml` |
 | NDK tests | `crates/aim-linux-abi/tests/ndk/t_netif.c`, `t_netwatch.c` |
@@ -161,6 +161,13 @@ SKF_NET_OFF). Packet sockets of other processes do not see these frames.
 - IPv4 ping sockets (SOCK_DGRAM, IPPROTO_ICMP) receive the ICMP message
   without the IP header, as on Linux.
 - `SO_RCVBUF`/`SO_SNDBUF` of 0 are raised to Linux's minimum.
+- `IP_MULTICAST_ALL` (an IPv4-level option Linux takes on IPv6 sockets
+  too) is kept per socket. libcore clears it on every `DatagramSocket` and
+  failed on ENOPROTOOPT, so no Java UDP socket could be made (SntpClient's
+  network time among them, #515). Darwin delivers multicast only to
+  sockets that joined the group, as Linux does with the flag cleared; a
+  socket that keeps it set does not get groups other sockets joined
+  (#524).
 
 **netd.** Our netd sets and reads interfaces through the ioctls and
 rtnetlink, as the original's InterfaceController does; networks, routes,

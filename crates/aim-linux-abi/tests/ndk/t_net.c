@@ -317,6 +317,7 @@ static void options(void) {
 }
 
 static void inet_loopback(void) {
+  socklen_t gl;
   int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
   CHECK(s >= 0);
   int on = 1;
@@ -341,6 +342,15 @@ static void inet_loopback(void) {
   close(s);
   int u = socket(AF_INET6, SOCK_DGRAM, 0);
   CHECK(u >= 0);
+  // libcore's DatagramSocket clears IP_MULTICAST_ALL, an IPv4-level
+  // option Linux takes on an IPv6 socket too (ip(7)).
+  int all = -1;
+  gl = sizeof all;
+  CHECK(getsockopt(u, IPPROTO_IP, IP_MULTICAST_ALL, &all, &gl) == 0 && all == 1);
+  int off = 0, two = 2;
+  CHECK(setsockopt(u, IPPROTO_IP, IP_MULTICAST_ALL, &off, sizeof off) == 0);
+  CHECK(getsockopt(u, IPPROTO_IP, IP_MULTICAST_ALL, &all, &gl) == 0 && all == 0);
+  CHECK(setsockopt(u, IPPROTO_IP, IP_MULTICAST_ALL, &two, sizeof two) == -1 && errno == EINVAL);
   struct sockaddr_in6 a6 = {.sin6_family = AF_INET6, .sin6_addr = IN6ADDR_LOOPBACK_INIT};
   CHECK(bind(u, (struct sockaddr*)&a6, sizeof a6) == 0);
   socklen_t l6 = sizeof a6;
