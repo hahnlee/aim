@@ -143,6 +143,8 @@ impl BootOptions {
 pub struct CommandReport {
     pub executed: ExecutedCommand,
     pub effects: Vec<Effect>,
+    /// When it ran, since the boot started.
+    pub at: Duration,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -157,6 +159,10 @@ pub struct BootReport {
     pub triggers: Vec<String>,
     pub fatal: Option<String>,
     pub shutdown: Option<String>,
+    /// The boot's preparation steps, the waits of init's queue and the
+    /// properties services set, each with when it ended since the boot
+    /// started.
+    pub timeline: Vec<(Duration, String)>,
     pub property_count: usize,
     pub services_declared: usize,
     pub diagnostics: Vec<String>,
@@ -421,6 +427,18 @@ impl Boot {
     /// areas and `PropertyInit`, the ueventd role, the APEX list, scripts,
     /// the boot queue and (run mode) the property sockets.
     pub fn prepare(options: BootOptions) -> Result<Self, String> {
+        // The boot's start, as the kernel's boot is init's: `ro.boottime.*`
+        // and the timeline count from here.
+        let epoch = Instant::now();
+        // The wall clock too, to line the timeline up with logd's.
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let mut timeline = vec![(
+            Duration::ZERO,
+            format!("boot started at {:.3} (Unix time)", wall.as_secs_f64()),
+        )];
+        let mut mark = |what: &str| timeline.push((epoch.elapsed(), what.to_string()));
         let image = ImageRoot::new(&options.image);
         if !image.exists("/system/etc/init/hw/init.rc") {
             return Err(format!(
@@ -433,6 +451,7 @@ impl Boot {
             RunMode::Run => Some(aim_storage::data::DataImage::attach(&options.data)?),
             RunMode::DryRun => None,
         };
+        mark("data image attached");
         let data = data_image
             .as_ref()
             .map_or_else(|| options.data.clone(), |d| d.dir().to_path_buf());
@@ -440,6 +459,7 @@ impl Boot {
         layout.prepare().map_err(|e| e.to_string())?;
         let map = layout.path_map();
         std::fs::write(layout.path_map_file(), map.to_file_text()).map_err(|e| e.to_string())?;
+        mark("runtime layout prepared");
         let mut report = BootReport::default();
 
         let vendor_api_level = vendor_android_version(&image).unwrap_or(36);
@@ -475,12 +495,14 @@ impl Boot {
         }
         // ueventd's role: there is no coldboot to wait for.
         properties.init_set(COLD_BOOT_DONE_PROP, "true");
+        mark("properties initialized");
         report.diagnostics = diagnostics.iter().map(|d| d.to_string()).collect();
 
         let apexes = apex::scan(&image);
         let xml = apex::apex_info_list_xml(&apexes);
         std::fs::write(layout.apex_info_list(), &xml).map_err(|e| e.to_string())?;
         apex::write_bootstrap(&layout.bootstrap_apex_dir(), &apexes).map_err(|e| e.to_string())?;
+        mark("APEX list written");
 
         let ids = IdResolver::from_image(&image, &properties);
         let scripts = ScriptLoader {
@@ -504,6 +526,7 @@ impl Boot {
 
         let mut manager = ActionManager::new(scripts, vendor_api_level);
         manager.queue_boot(&properties);
+        mark("init scripts loaded");
 
         let linux_run_binary = options.linux_run.clone().unwrap_or_else(default_linux_run);
         let linux_run_options = match options.mode {
@@ -536,6 +559,7 @@ impl Boot {
                     Arc::new(move |guest: &str| map.readable_by_others(guest)),
                 );
             }
+            mark("binder host and native services started");
         }
         let linux_run = LinuxRun {
             binary: linux_run_binary,
@@ -565,7 +589,7 @@ impl Boot {
             vendor_api_level,
             env: vec![("PATH".to_string(), DEFAULT_PATH.to_string())],
             rlimits: Vec::new(),
-            boot_epoch: Instant::now(),
+            boot_epoch: epoch,
         };
         let mut fs = FsOps::new(map, layout.fs_attrs_file(), options.mode == RunMode::Run);
         fs.set_path_map_file(layout.path_map_file());
@@ -607,6 +631,8 @@ impl Boot {
         } else {
             (None, None)
         };
+        mark("prepared");
+        report.timeline = timeline;
 
         Ok(Self {
             options,
@@ -719,9 +745,13 @@ impl Boot {
         }
         let mut reply = served.reply;
         let mut persist = false;
+        let at = self.elapsed();
         for effect in served.effects {
             match effect {
                 SetEffect::Changed { name, value } => {
+                    self.report
+                        .timeline
+                        .push((at, format!("pid {} set {name}={value}", request.peer_pid)));
                     if name == SERVICEMANAGER_READY && value == "true" {
                         self.register_native_services();
                     }
@@ -731,6 +761,13 @@ impl Boot {
                 }
                 SetEffect::Control(message) => {
                     let result = self.executor.handle_control(&message);
+                    self.report.timeline.push((
+                        at,
+                        format!(
+                            "pid {} ctl.{} {}",
+                            message.from_pid, message.action, message.target
+                        ),
+                    ));
                     self.report.log.push(format!(
                         "ctl.{} {} from pid {}: {}",
                         message.action,
@@ -803,7 +840,12 @@ impl Boot {
         self.pump_outbox();
     }
 
-    fn record_command(&mut self, executed: ExecutedCommand) {
+    /// Since the boot started.
+    fn elapsed(&self) -> Duration {
+        self.executor.planner.boot_epoch.elapsed()
+    }
+
+    fn record_command(&mut self, executed: ExecutedCommand, at: Duration) {
         let effects = self.executor.take_effects();
         let event = executed
             .action
@@ -814,9 +856,11 @@ impl Boot {
         if !event.is_empty() && !event.contains('=') && !self.report.triggers.contains(&event) {
             self.report.triggers.push(event);
         }
-        self.report
-            .commands
-            .push(CommandReport { executed, effects });
+        self.report.commands.push(CommandReport {
+            executed,
+            effects,
+            at,
+        });
     }
 
     /// Satisfies a wait nobody will: in a dry run always, in a run with
@@ -836,6 +880,8 @@ impl Boot {
         self.executor.stop_at = deadline;
         let dry = self.options.mode == RunMode::DryRun;
         let mut blocked_since: Option<Instant> = None;
+        // What init's queue is blocked on, and since when.
+        let mut waiting: Option<(Duration, String)> = None;
         let mut idle_logged = false;
         let mut steps = 0usize;
         loop {
@@ -865,15 +911,24 @@ impl Boot {
                 self.report.shutdown = self.executor.shutdown.clone();
                 break;
             }
+            let at = self.elapsed();
             let step = {
                 let mut adapter = PropsAdapter(self.props.clone());
                 self.manager
                     .execute_one_command(&mut adapter, &mut self.executor)
             };
+            if !matches!(step, Step::WaitingForProperty { .. } | Step::WaitingForExec)
+                && let Some((since, what)) = waiting.take()
+            {
+                self.report.timeline.push((
+                    at,
+                    format!("waited {:.3} s for {what}", (at - since).as_secs_f64()),
+                ));
+            }
             let wait = match step {
                 Step::Ran(executed) => {
                     blocked_since = None;
-                    self.record_command(executed);
+                    self.record_command(executed, at);
                     continue;
                 }
                 Step::Idle => {
@@ -882,11 +937,14 @@ impl Boot {
                     }
                     if !idle_logged {
                         idle_logged = true;
-                        let elapsed = self.executor.planner.boot_epoch.elapsed();
+                        let elapsed = self.elapsed();
                         self.report.log.push(format!(
                             "boot queue first idle after {:.2} s",
                             elapsed.as_secs_f64()
                         ));
+                        self.report
+                            .timeline
+                            .push((elapsed, "boot queue first idle".to_string()));
                     }
                     None
                 }
@@ -895,6 +953,7 @@ impl Boot {
                         self.simulate_property(&name, &value);
                         continue;
                     }
+                    waiting.get_or_insert_with(|| (at, format!("{name}={value}")));
                     Some(("property", name, value))
                 }
                 Step::WaitingForExec => {
@@ -909,6 +968,12 @@ impl Boot {
                         }
                         continue;
                     }
+                    waiting.get_or_insert_with(|| {
+                        let pid = self.executor.exec_pid.unwrap_or(0);
+                        let launch = self.executor.launches.iter().rev().find(|l| l.pid == pid);
+                        let service = launch.map_or("", |l| l.spec.service.as_str());
+                        (at, format!("{service} (pid {pid})"))
+                    });
                     Some(("exec", String::new(), String::new()))
                 }
             };
