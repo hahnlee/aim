@@ -53,11 +53,19 @@ fn statfs(path: &CString) -> Option<libc::statfs> {
     (unsafe { libc::statfs(path.as_ptr(), &mut s) } == 0).then_some(s)
 }
 
+/// The volumes, once the path map is known; none before (a process
+/// without one, such as a test of the syscall layer, has no reserve).
 fn volumes() -> &'static [Volume] {
     static VOLUMES: OnceLock<Vec<Volume>> = OnceLock::new();
+    if let Some(v) = VOLUMES.get() {
+        return v;
+    }
+    let Some(hosts) = vfs::writable_hosts() else {
+        return &[];
+    };
     VOLUMES.get_or_init(|| {
         let mut out: Vec<Volume> = Vec::new();
-        for host in vfs::writable_hosts() {
+        for host in hosts {
             let Ok(path) = CString::new(host.as_os_str().as_bytes()) else {
                 continue;
             };

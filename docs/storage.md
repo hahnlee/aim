@@ -45,6 +45,9 @@ bench`) keeps everything of `DATA` in `DATA.asif` beside it:
 - After a stop, the boot's logs (`DATA/run/logs`) are in the detached
   image; `diskutil image attach --nobrowse --mountPoint DATA DATA.asif`
   shows them again (`diskutil eject` it before the next boot).
+- **Bounded waits**: every disk image tool call has a time limit (two
+  minutes; half an hour for converting an image). A hung storagekitd
+  (#425) makes the boot fail with that call named instead of hanging it.
 - A data directory from before data images (a plain directory with
   content) is refused; move it away or remove it.
   `aim_storage::data::remove` removes a data directory with its image.

@@ -5,7 +5,8 @@
 
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::io::Read;
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 /// An attached image, as `hdiutil info` lists it.
@@ -23,10 +24,60 @@ pub struct Attached {
     pub mounts: Vec<PathBuf>,
 }
 
+/// How long a disk image tool may take. A hung storagekitd leaves them
+/// waiting forever (#425); a boot fails instead.
+const LIMIT: Duration = Duration::from_secs(120);
+/// How long converting a whole image may take.
+const CONVERT_LIMIT: Duration = Duration::from_secs(30 * 60);
+
 fn run(command: &mut Command) -> Result<Output, String> {
-    let output = command
-        .output()
+    run_within(command, LIMIT)
+}
+
+fn run_within(command: &mut Command, limit: Duration) -> Result<Output, String> {
+    let describe = |command: &Command| {
+        let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
+        format!("{} {}", command.get_program().to_string_lossy(), args.join(" "))
+    };
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("{:?}: {e}", command.get_program()))?;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as _));
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{}: no answer in {} s (a hung storagekitd? #425)",
+                    describe(command),
+                    limit.as_secs()
+                ));
+            }
+            Err(e) => return Err(format!("{}: {e}", describe(command))),
+        }
+    };
+    let output = Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    };
     if output.status.success() {
         Ok(output)
     } else {
@@ -35,12 +86,7 @@ fn run(command: &mut Command) -> Result<Output, String> {
         if !stdout.trim().is_empty() {
             text = format!("{} {text}", stdout.trim());
         }
-        let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
-        Err(format!(
-            "{} {}: {text}",
-            command.get_program().to_string_lossy(),
-            args.join(" ")
-        ))
+        Err(format!("{}: {text}", describe(command)))
     }
 }
 
@@ -209,10 +255,13 @@ pub fn format_of(image: &Path) -> Result<String, String> {
 /// Writes `source` (an image) as a new image `destination` in `format`
 /// (`ULFO`, `UDZO`, `ULMO`, `ASIF`...).
 pub fn convert(source: &Path, destination: &Path, format: &str) -> Result<(), String> {
-    run(Command::new("diskutil")
-        .args(["image", "create", "from", "--format", format])
-        .arg(source)
-        .arg(destination))
+    run_within(
+        Command::new("diskutil")
+            .args(["image", "create", "from", "--format", format])
+            .arg(source)
+            .arg(destination),
+        CONVERT_LIMIT,
+    )
     .map(|_| ())
 }
 

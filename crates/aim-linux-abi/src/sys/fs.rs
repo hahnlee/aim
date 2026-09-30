@@ -343,7 +343,14 @@ pub fn writev(a: [u64; 6]) -> i64 {
 
 /// `v` cut to what [`space::charge`] lets a write to `fd` put on its volume.
 fn charge_iov(fd: i32, v: &[libc::iovec]) -> Result<Cow<'_, [libc::iovec]>, i64> {
-    let total = v.iter().map(|io| io.iov_len as u64).sum();
+    let total = v
+        .iter()
+        .try_fold(0u64, |t, io| t.checked_add(io.iov_len as u64))
+        .filter(|&t| t <= isize::MAX as u64);
+    // A total past SSIZE_MAX is the host call's EINVAL.
+    let Some(total) = total else {
+        return Ok(Cow::Borrowed(v));
+    };
     let mut left = space::charge(fd, total)?;
     if left == total {
         return Ok(Cow::Borrowed(v));
