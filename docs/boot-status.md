@@ -161,8 +161,17 @@ BINDER_WRITE_READ went from 14.8 to 8.7 µs of kernel time in the caller
 up to `sys.boot_completed`, and from 25.8 to 10.0 µs while Settings
 started twice and Chrome once (0.98 to 0.33 s in all; one boot each). A process no longer sweeps the memfd
 directory at its first memfd_create (2.2 ms with 48 memfds alive; 49
-calls in a boot averaged 2.9 ms). What is left of a binder call is the
-Mach transport, about 7 µs per ioctl (#451).
+calls in a boot averaged 2.9 ms).
+
+A binder read that waits for work no longer blocks a thread of the
+binder daemon: it parks, and the daemon thread that brings the work
+answers it (docs/binder-driver.md, "Driver–process path"). A call
+crosses four Mach hops and no wake inside the daemon, and the driver's
+maps no longer hash with SipHash. On a settled boot (one each, host load
+10 and 6), the synchronous calls of a Settings and a Chrome cold start
+went from p50 61 to 51 µs, and guest-init's CPU over the starts from
+0.74 to 0.60 s. What is left in the caller is one Mach round trip per
+ioctl, about 7 µs of kernel time in a boot (#451).
 
 membarrier now interrupts only the guest threads that are running, as
 Linux does, instead of every thread of the task (host unit benchmark, 60

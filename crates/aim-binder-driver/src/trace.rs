@@ -9,7 +9,10 @@
 //! free target thread, or the wait for one when none was free; the
 //! second is the target's work with its hops out of and back into the
 //! driver; the third is the sender's wake. The sender's own hops into and
-//! out of the driver are not part of it.
+//! out of the driver are not part of it. A read parked by
+//! [`crate::Driver::ioctl_or_park`] takes its work when it is resumed, on
+//! the thread that brought the work: the target's wake then falls in its
+//! work, and the sender's wake after the third span.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

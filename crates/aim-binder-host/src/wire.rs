@@ -40,6 +40,10 @@ pub const EPROTO: Errno = 71;
 pub struct Writer(pub Vec<u8>);
 
 impl Writer {
+    pub fn with_capacity(n: usize) -> Self {
+        Self(Vec::with_capacity(n))
+    }
+
     pub fn u32(&mut self, v: u32) -> &mut Self {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
@@ -117,7 +121,9 @@ pub struct Ioctl {
 
 impl Ioctl {
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::default();
+        let segments: usize = self.segments.iter().map(|(_, b)| 12 + b.len()).sum();
+        let fds = 4 * (self.fds.len() + self.reserved.len());
+        let mut w = Writer::with_capacity(28 + self.arg.len() + segments + fds);
         w.u32(self.cmd).bytes(&self.arg);
         w.u32(self.segments.len() as u32);
         for (addr, bytes) in &self.segments {
@@ -178,7 +184,9 @@ pub struct IoctlReply {
 
 impl IoctlReply {
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::default();
+        let writes: usize = self.writes.iter().map(|(_, b)| 12 + b.len()).sum();
+        let fds = 4 * (self.installs.len() + self.closes.len());
+        let mut w = Writer::with_capacity(28 + self.arg.len() + writes + fds);
         w.i32(self.status).bytes(&self.arg);
         w.u32(self.writes.len() as u32);
         for (addr, bytes) in &self.writes {

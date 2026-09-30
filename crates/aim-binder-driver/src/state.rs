@@ -12,10 +12,43 @@
 //! with that lock held.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::{Arc, Condvar};
 
 use crate::alloc::Allocator;
 use crate::host::{Credentials, Errno, File, ReceiveMemory, errno};
+
+/// A map keyed by the driver's ids and guest tids. Neither is chosen by a
+/// guest program, so a multiplicative hash does: the default SipHash was
+/// the largest share of the driver's time per transaction.
+pub(crate) type IdMap<K, V> = HashMap<K, V, BuildHasherDefault<IdHasher>>;
+
+#[derive(Default)]
+pub(crate) struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.write_u64(*b as u64);
+        }
+    }
+
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+
+    fn write_u32(&mut self, v: u32) {
+        self.write_u64(v as u64);
+    }
+
+    fn write_i32(&mut self, v: i32) {
+        self.write_u64(v as u32 as u64);
+    }
+}
 
 pub(crate) type ProcId = u64;
 pub(crate) type NodeId = u64;
@@ -73,6 +106,9 @@ pub(crate) struct Thread {
     pub ee: ExtendedError,
     pub interrupted: bool,
     pub wait: Arc<Condvar>,
+    /// The read that would wait here instead returned to its caller
+    /// ([`crate::Driver::ioctl_or_park`]); this resumes it.
+    pub parked: Option<Resume>,
 }
 
 impl Thread {
@@ -90,6 +126,7 @@ impl Thread {
             ee: ExtendedError::default(),
             interrupted: false,
             wait: Arc::new(Condvar::new()),
+            parked: None,
         }
     }
 }
@@ -101,6 +138,9 @@ pub(crate) struct Ref {
     pub death: Option<DeathId>,
 }
 
+/// Resumes a parked read: its caller issues the ioctl again.
+pub type Resume = Box<dyn FnOnce() + Send>;
+
 /// Called with a thread id when a poll-mode thread gets work, or with
 /// `None` when process work has no waiting thread to take it.
 pub type Notifier = Arc<dyn Fn(Option<Tid>) + Send + Sync>;
@@ -108,11 +148,11 @@ pub type Notifier = Arc<dyn Fn(Option<Tid>) + Send + Sync>;
 pub(crate) struct Proc {
     pub context: usize,
     pub creds: Credentials,
-    pub threads: HashMap<Tid, Thread>,
+    pub threads: IdMap<Tid, Thread>,
     /// Nodes this process owns, by user pointer.
     pub nodes: BTreeMap<u64, NodeId>,
     pub refs_by_desc: BTreeMap<u32, Ref>,
-    pub refs_by_node: HashMap<NodeId, u32>,
+    pub refs_by_node: IdMap<NodeId, u32>,
     pub todo: VecDeque<Work>,
     pub waiting_threads: VecDeque<Tid>,
     pub delivered_death: Vec<DeathId>,
@@ -219,13 +259,15 @@ pub(crate) struct Context {
 #[derive(Default)]
 pub(crate) struct State {
     pub contexts: Vec<Context>,
-    pub procs: HashMap<ProcId, Proc>,
-    pub nodes: HashMap<NodeId, Node>,
-    pub txns: HashMap<TxnId, Txn>,
-    pub deaths: HashMap<DeathId, Death>,
+    pub procs: IdMap<ProcId, Proc>,
+    pub nodes: IdMap<NodeId, Node>,
+    pub txns: IdMap<TxnId, Txn>,
+    pub deaths: IdMap<DeathId, Death>,
     next_id: u64,
     /// Thread wakes to deliver once the lock is released.
     pub wakes: Vec<Arc<Condvar>>,
+    /// Parked reads to resume once the lock is released.
+    pub resumes: Vec<Resume>,
     /// External wakes to deliver once the lock is released.
     pub notifications: Vec<(Notifier, Option<Tid>)>,
     /// Transactions being traced ([`crate::Driver::start_trace`]).
@@ -235,15 +277,19 @@ pub(crate) struct State {
 /// Wakes collected under the lock, delivered after it is released.
 pub(crate) struct PendingWakes {
     wakes: Vec<Arc<Condvar>>,
+    resumes: Vec<Resume>,
     notifications: Vec<(Notifier, Option<Tid>)>,
 }
 
 impl PendingWakes {
     pub fn is_empty(&self) -> bool {
-        self.wakes.is_empty() && self.notifications.is_empty()
+        self.wakes.is_empty() && self.resumes.is_empty() && self.notifications.is_empty()
     }
 
     pub fn deliver(self) {
+        for resume in self.resumes {
+            resume();
+        }
         for wait in self.wakes {
             wait.notify_one();
         }
@@ -257,6 +303,7 @@ impl State {
     pub fn take_wakes(&mut self) -> PendingWakes {
         PendingWakes {
             wakes: std::mem::take(&mut self.wakes),
+            resumes: std::mem::take(&mut self.resumes),
             notifications: std::mem::take(&mut self.notifications),
         }
     }
@@ -284,10 +331,10 @@ impl State {
             Proc {
                 context,
                 creds,
-                threads: HashMap::new(),
+                threads: IdMap::default(),
                 nodes: BTreeMap::new(),
                 refs_by_desc: BTreeMap::new(),
-                refs_by_node: HashMap::new(),
+                refs_by_node: IdMap::default(),
                 todo: VecDeque::new(),
                 waiting_threads: VecDeque::new(),
                 delivered_death: Vec::new(),
@@ -331,15 +378,33 @@ impl State {
         }
     }
 
+    /// Wake the thread if it waits for work: notify its wait, or resume its
+    /// parked read. Either is delivered once the lock is released, so the
+    /// woken thread does not wake up only to block on the driver lock.
+    pub fn wake_waiter(&mut self, proc: ProcId, tid: Tid) {
+        let Some(p) = self.procs.get_mut(&proc) else {
+            return;
+        };
+        let Some(t) = p.threads.get_mut(&tid) else {
+            return;
+        };
+        match t.parked.take() {
+            Some(resume) => {
+                p.waiting_threads.retain(|t| *t != tid);
+                self.resumes.push(resume);
+            }
+            None => self.wakes.push(t.wait.clone()),
+        }
+    }
+
     fn wake_thread(&mut self, proc: ProcId, tid: Tid) {
+        self.wake_waiter(proc, tid);
         let Some(p) = self.procs.get(&proc) else {
             return;
         };
-        let Some(t) = p.threads.get(&tid) else { return };
-        // Notified once the lock is released, so the woken thread does not
-        // wake up only to block on the driver lock.
-        self.wakes.push(t.wait.clone());
-        if t.looper & LOOPER_POLL != 0
+        if p.threads
+            .get(&tid)
+            .is_some_and(|t| t.looper & LOOPER_POLL != 0)
             && let Some(n) = &p.notifier
         {
             self.notifications.push((n.clone(), Some(tid)));

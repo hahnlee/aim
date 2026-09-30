@@ -40,5 +40,5 @@ mod write;
 
 pub use driver::{Device, Driver, MAX_MAPPING, ProcHandle};
 pub use host::{Credentials, Errno, File, GuestProcess, HeapReceiveMemory, ReceiveMemory, errno};
-pub use state::{Notifier, Tid};
+pub use state::{Notifier, Resume, Tid};
 pub use trace::TraceRecord;
