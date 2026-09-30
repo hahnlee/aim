@@ -98,14 +98,23 @@ Lgettid:
 Lread:
     mov     x16, #3
     b       Lfd_darwin
-Lwrite:
-    mov     x16, #4
-    b       Lfd_darwin
 Lpread:
     mov     x16, #153
     b       Lfd_darwin
+// Writes are charged to the process's budget of unchecked bytes
+// (sys/space.rs); past it, they take the full path, which looks at the
+// volume's free space.
+Lwrite:
 Lpwrite:
-    mov     x16, #154
+    adrp    x16, {budget}@PAGE
+    ldr     x17, [x16, {budget}@PAGEOFF]
+    subs    x17, x17, x2
+    b.lo    Lfull
+    str     x17, [x16, {budget}@PAGEOFF]
+    mov     x16, #4                     // write
+    cmp     x8, #64
+    b.eq    Lfd_darwin
+    mov     x16, #154                   // pwrite
     b       Lfd_darwin
 Lclose:
     mov     x16, #6

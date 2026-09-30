@@ -19,8 +19,13 @@ bench`) keeps everything of `DATA` in `DATA.asif` beside it:
 
 - **Created on demand**: `diskutil image create blank --format ASIF`
   with no filesystem, then `newfs_apfs -e` (case-sensitive APFS, volume
-  `aim-data`). Its size is a ceiling of 64 GB (what `df /data` shows); the
-  file holds only what the guest wrote. Nothing is preallocated.
+  `aim-data`). Its size is only a ceiling: the size of the Mac volume
+  holding the image (`aim_storage::data::ceiling`), which is what `df
+  /data` shows; the file holds only what the guest wrote. Nothing is
+  preallocated. An image found smaller than that at attach (made with the
+  64 GB ceiling used before, or moved to a larger disk) is detached, grown
+  with `diskutil image resize`, which keeps its data, and attached again;
+  that costs about a second once.
 - **Attached at start, detached at stop**: guest-init attaches it at
   `DATA` (`diskutil image attach --nobrowse --mountPoint DATA`) before it
   lays out the boot, and detaches it (`diskutil eject`) when the boot ends,
@@ -40,9 +45,46 @@ bench`) keeps everything of `DATA` in `DATA.asif` beside it:
 - After a stop, the boot's logs (`DATA/run/logs`) are in the detached
   image; `diskutil image attach --nobrowse --mountPoint DATA DATA.asif`
   shows them again (`diskutil eject` it before the next boot).
+- **Bounded waits**: every disk image tool call has a time limit (two
+  minutes; half an hour for converting an image). A hung storagekitd
+  (#425) makes the boot fail with that call named instead of hanging it.
 - A data directory from before data images (a plain directory with
   content) is refused; move it away or remove it.
   `aim_storage::data::remove` removes a data directory with its image.
+
+### Space: the Mac's free space, less a reserve
+
+The ceiling is the Mac's whole volume, so the real limit is its free
+space. APFS in a sparse image reports its host volume's free space as its
+own (thin provisioning): `df` of a data image on a volume with 650 MB free
+shows 650 MB available. Past that, the image cannot grow, and its writes
+do not fail with ENOSPC: they fail with EIO, and the image is detached
+under the running guest (measured: a 1 GB host volume, writes into a data
+image on it failed with EIO with 21 MB still free, and the volume
+vanished).
+
+So the syscall layer keeps the last 1 GiB of every volume behind a
+writable path map entry out of the guest's reach
+(`crates/aim-linux-abi/src/sys/space.rs`), as a Linux filesystem keeps
+reserved blocks:
+
+- statfs and fstatfs report the reserve as used (`f_bfree`, `f_bavail`),
+  so Android's low-storage checks (`StorageManager`, installd's free
+  space, the device storage monitor, all statfs) see the space the guest
+  may really use;
+- write, pwrite, writev, pwritev, copy_file_range, sendfile and splice
+  into a regular file on such a volume are cut short at the reserve, and
+  fail with ENOSPC when nothing is left; fallocate fails with ENOSPC.
+
+A statfs per write would cost a syscall each, so each process holds a
+budget of bytes it may write unchecked, a 64th of the room left (at most
+16 MiB). The lean syscall path (`trampoline.S`) charges write and pwrite
+to it and sends the write to Rust once it runs out, where the volumes
+are looked at again. Many processes writing at once still stop short of
+the reserve, and writes through shared mappings, which are not counted,
+fall into it. `tests/data_image.rs` fills a small volume under the
+guest's `/data`: `dd` stops with ENOSPC, `df` shows 0 available, the
+volume keeps its reserve, and `fsck_apfs` finds it clean.
 
 ### Space: TRIM, and compaction at stop
 
@@ -52,14 +94,23 @@ Measured on macOS 27 (26A428), M2 Pro:
 | --- | --- |
 | Sparse bundle, 1 MiB or 8 MiB bands | keeps all of it: APFS's TRIM frees no band, and `hdiutil compact` returned 3 MB |
 | ASIF | APFS TRIMs, and ASIF punches the TRIMmed chunks out of its file, but only once about 2 GiB are free: 1.75 GiB freed stay, 2 GiB are returned at unmount |
-| ASIF with compaction at stop | 11 MB left (`tests/data.rs`, `deleted_data_returns_to_the_host_at_stop`) |
+| ASIF with compaction at stop | 1 MB left (`tests/data.rs`, `deleted_data_returns_to_the_host_at_stop`) |
 
-Hence ASIF rather than a sparse bundle, and at stop, when the image's file
-holds more than 512 MiB beyond what its volume uses, guest-init allocates
-2 GiB in the volume without writing it (`F_PREALLOCATE`) and frees it
-before it unmounts: APFS then TRIMs all free space, and the file shrinks to
-what the guest's files use. It needs that much free space on the host
-for a moment.
+APFS TRIMs once about a 32nd of its container has been freed (64 GB:
+1.75 GiB freed stay, 2 GiB return; 16 GB: 300 MB stay, 700 MB return; a
+494 GB container kept 18 GiB freed through an unmount). Hence ASIF rather
+than a sparse bundle, and at stop, when the image's file holds more than
+512 MiB beyond what its volume uses (`ATTR_VOL_SPACEUSED`; statfs's used
+blocks count the host's use too), guest-init allocates a 24th of the
+container in the volume without writing it (`F_PREALLOCATE`), unlinks the
+file while it is open, closes it and runs `F_FULLFSYNC` on the volume:
+APFS then TRIMs all free space at unmount, and the file shrinks to what
+the guest's files use. Nothing is written and it takes milliseconds; it
+needs only free space in the container, which is the Mac's. Without the
+full sync the TRIM waits for the next mount; a preallocation released at
+close counts as nothing freed; and extending the file over its
+preallocation (as compaction did with a 64 GB ceiling) writes zeros into
+the image.
 
 ## System image
 

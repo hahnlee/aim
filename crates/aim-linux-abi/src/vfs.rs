@@ -221,6 +221,23 @@ pub fn mount_points() -> Vec<MountPoint> {
         .collect()
 }
 
+/// The host paths the guest writes to: the path map's writable entries,
+/// or the root without a path map. None before [`init`].
+pub fn writable_hosts() -> Option<Vec<PathBuf>> {
+    let v = VFS.get()?;
+    if !v.mapped {
+        return Some(vec![v.root.clone()]);
+    }
+    let mounts = v.mounts.read().unwrap();
+    Some(
+        mounts
+            .iter()
+            .filter(|m| !m.own && m.area == Area::Writable)
+            .map(|m| m.host.clone())
+            .collect(),
+    )
+}
+
 pub fn cwd() -> String {
     vfs().cwd.lock().unwrap().clone()
 }
