@@ -260,15 +260,23 @@ and every property a service sets, since guest-init started (also
 boot prepares and runs early-init and init; the `fs` stage's `mount_all`
 waits for it (docs/storage.md). On a second boot (host load 26-31) the
 preparation takes 0.16 s, the attach ends at 0.50-0.53 s and the mount
-waits 0-0.07 s for it; `start zygote` runs at 1.65-1.85 s and
-`boot_progress_start` follows at 2.4-2.6 s. A first boot clones the
-image from the empty template of the `userdata/empty` node
+waits 0-0.07 s for it; `start zygote` runs at 1.58-1.60 s (a first
+and a second boot, host load 10) and `boot_progress_start` about 0.75 s
+later. linkerconfig runs once, at `perform_apex_config --bootstrap`:
+post-fs-data's run would see the same APEXes (#564). A first boot
+clones the image from the empty template of the `userdata/empty` node
 (docs/storage.md): its attach ends at 0.41 s and the mount does not wait
 (host load 12; creating the image held the mount up by 0.6 s before,
 #563). Between the mount and zygote-start, init runs its exec
 programs one after another (about 25-120 ms each, mostly starting
 `linux-run`); the longest are bpfloader (0.3-0.6 s) and
-`aconfigd-mainline init` (0.12-0.36 s) (#529).
+`aconfigd-mainline init` (0.12-0.36 s) (#529). bpfloader's 0.32 s
+(run alone: 0.31 s) is three process images (netbpfload execs
+uprobestatsbpfload, then the platform bpfloader, about 0.03 s each),
+netbpfload's own 300,000 `lseek`/`read` calls of 0.3-0.6 us each
+(bionic stdio re-reading its ELF objects; a Linux kernel costs about the
+same) and the 142 objects' file creations, pins (hard links), renames and
+owner records at 0.1-0.5 ms each on the host (#418, #561).
 
 ## Debugging
 

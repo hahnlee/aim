@@ -297,16 +297,23 @@ fn read_header(fd: i32) -> Option<(Header, libc::stat)> {
 
 /// Run `f` on the map behind `fd`, mapping it into this process once.
 fn with_map<R>(fd: i32, f: impl FnOnce(&Map) -> Result<R, i64>) -> Result<R, i64> {
-    let (h, st) = read_header(fd).ok_or(-(EBADF as i64))?;
-    if h.kind != KIND_MAP {
-        return Err(-(EINVAL as i64));
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fstat into a local buffer.
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(-(EBADF as i64));
     }
+    // Object files are never removed during a boot, so a mapped one is
+    // known by its inode alone.
     let key = (st.st_dev as u32 as u64, st.st_ino);
     let mut g = MAPPED.lock().unwrap();
     let maps = g.get_or_insert_with(HashMap::new);
     let map = match maps.entry(key) {
         std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
         std::collections::hash_map::Entry::Vacant(e) => {
+            let (h, st) = read_header(fd).ok_or(-(EBADF as i64))?;
+            if h.kind != KIND_MAP {
+                return Err(-(EINVAL as i64));
+            }
             let len = st.st_size as usize;
             // SAFETY: a shared mapping of the whole object file.
             let base = unsafe {

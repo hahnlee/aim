@@ -530,7 +530,7 @@ impl GuestExecutor {
                     "linkerconfig did not finish in time".to_string()
                 });
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -709,6 +709,16 @@ impl GuestExecutor {
                 "created /data/misc/apexdata for {made} of {} APEXes",
                 names.len()
             )));
+            // init runs linkerconfig again here because apexd has activated
+            // the APEXes since the bootstrap run. Every APEX of the derived
+            // image is active from the start (`apex`), so that run already
+            // saw the same list and wrote the same configuration.
+            if self.launches.iter().any(|l| l.helper) {
+                self.effect(Effect::NoOp(
+                    "linkerconfig: the APEXes are those of the bootstrap run".to_string(),
+                ));
+                return Ok(());
+            }
         }
         self.update_linker_config()
     }
