@@ -842,9 +842,8 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         };
         code += &constants_code(&image, jar, descriptor, names)?;
     }
-    let dir = out();
-    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    fs::write(dir.join("lib.rs"), code).map_err(|e| e.to_string())
+    // Unchanged code keeps its mtime, so cargo does not compile it again.
+    crate::cargo::write_if_changed(&out().join("lib.rs"), code.as_bytes(), 0o644)
 }
 
 #[cfg(test)]

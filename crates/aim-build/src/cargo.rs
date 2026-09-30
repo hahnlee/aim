@@ -11,9 +11,10 @@
 //! A cargo node's declared inputs are the manifests and build scripts of
 //! the local packages it depends on, `Cargo.lock` and `.cargo/config.toml`;
 //! its found inputs are the source files of cargo's dep-info for the
-//! artifact. Sources under `target/` and `_build/` are covered by the
-//! upstream nodes that produce them (aidl-gen), which a guest node depends
-//! on when its dependencies include such a package.
+//! artifact, the sources aidl-gen generates or fetches among them: a node
+//! whose dependencies include such a package runs after aidl-gen (order
+//! only), and is stale only when the generated files it compiles changed,
+//! not whenever another AIDL crate did.
 
 use crate::graph::{Action, Ctx, Dep, Node};
 use crate::log::Log;
@@ -212,7 +213,7 @@ impl Workspace {
                 {
                     let artifact = self.host_bin(&target.name);
                     let deps = if self.needs_generated_sources(id) {
-                        vec![Dep::on("aidl-gen")]
+                        vec![Dep::order_only("aidl-gen")]
                     } else {
                         Vec::new()
                     };
@@ -257,7 +258,7 @@ impl Workspace {
             };
             let mut deps = vec![Dep::on("image")];
             if self.needs_generated_sources(id) {
-                deps.push(Dep::on("aidl-gen"));
+                deps.push(Dep::order_only("aidl-gen"));
             }
             nodes.push(Node {
                 name: format!("{prefix}/{}", package.name),
@@ -388,8 +389,8 @@ pub fn install_file(from: &Path, to: &Path) -> Result<(), String> {
     write_if_changed(to, &bytes, 0o755)
 }
 
-/// The repository sources a dep-info file lists, other than under `target/`
-/// and `_build/`.
+/// The repository sources a dep-info file lists: those outside `target/`
+/// and `_build/`, and the ones aidl-gen generates or fetches.
 pub fn dep_info(path: &Path) -> Result<Vec<PathBuf>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let first = text.lines().next().unwrap_or_default();
@@ -407,12 +408,17 @@ pub fn dep_info(path: &Path) -> Result<Vec<PathBuf>, String> {
         }
     }
     paths.push(current);
-    Ok(repository_sources(
-        paths
-            .into_iter()
-            .filter(|p| !p.is_empty())
-            .map(PathBuf::from),
-    ))
+    let generated = [aim_paths::generated(), aim_paths::aosp()];
+    let (made, rest): (Vec<PathBuf>, Vec<PathBuf>) = paths
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .partition(|p| generated.iter().any(|g| p.starts_with(g)));
+    let mut sources = repository_sources(rest);
+    sources.extend(made);
+    sources.sort();
+    sources.dedup();
+    Ok(sources)
 }
 
 /// `paths` inside the repository but outside `target/` and `_build/`,
@@ -442,4 +448,38 @@ pub fn normalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dep_info_keeps_generated_sources() {
+        let root = aim_paths::root();
+        let [source, generated, fetched, built] = [
+            root.join("crates/x/src/lib.rs"),
+            aim_paths::generated().join("hal-aidl/x/lib.rs"),
+            aim_paths::aosp().join("binder/src/lib.rs"),
+            root.join("target/release/build/x/out/y.rs"),
+        ];
+        let file = std::env::temp_dir().join(format!("aim-dep-info-{}.d", std::process::id()));
+        let listed = [
+            &source,
+            &generated,
+            &fetched,
+            &built,
+            &PathBuf::from("/usr/x.h"),
+        ]
+        .map(|p| p.display().to_string().replace(' ', "\\ "));
+        fs::write(
+            &file,
+            format!("{}: {}\n", built.display(), listed.join(" ")),
+        )
+        .unwrap();
+        let mut want = vec![source, generated, fetched];
+        want.sort();
+        assert_eq!(dep_info(&file).unwrap(), want);
+        fs::remove_file(&file).unwrap();
+    }
 }

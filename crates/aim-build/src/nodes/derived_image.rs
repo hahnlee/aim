@@ -111,3 +111,18 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     log.line(&format!("built {} ({})", mount.display(), derived.hex));
     Ok(())
 }
+
+/// The mounted derived image's identity and its shadow file's creation
+/// time: a shadow made again, even with the same identity, has lost what
+/// the translation cache wrote into it.
+pub fn output_key() -> Option<String> {
+    let identity = identity::read_tree_identity(&aim_paths::derived_image()).ok()??;
+    let created = fs::metadata(aim_paths::derived_image_shadow())
+        .and_then(|m| m.created())
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(crate::hash::sha256(
+        format!("{identity} {}", created.as_nanos()).as_bytes(),
+    ))
+}

@@ -40,6 +40,11 @@ pub const RECLAIM_THRESHOLD: u64 = 512 << 20;
 const TRIM_BATCH_DIVISOR: u64 = 24;
 /// How long a busy volume is waited for at detach.
 const PATIENCE: Duration = Duration::from_secs(20);
+/// How long a synced volume is waited for at stop. The security agent
+/// keeps a boot's freshly written files open longer than a stop should
+/// wait (still scanning after 21 s); once the volume is synced, the forced
+/// unmount after this only closes its reads.
+const SYNCED_PATIENCE: Duration = Duration::from_secs(2);
 
 /// The size the data image `image` may reach: that of the host volume
 /// holding it.
@@ -175,7 +180,14 @@ impl DataImage {
         {
             eprintln!("aim-storage: compacting {}: {e}", self.image.display());
         }
-        disk::detach(&device, PATIENCE)
+        let patience = match sync_volume(&self.dir) {
+            Ok(()) => SYNCED_PATIENCE,
+            Err(e) => {
+                eprintln!("aim-storage: syncing {}: {e}", self.dir.display());
+                PATIENCE
+            }
+        };
+        disk::detach(&device, patience)
     }
 }
 
@@ -221,6 +233,25 @@ fn release_to_trim(mount: &Path, batch: u64) -> Result<(), String> {
     // SAFETY: an open descriptor.
     if unsafe { libc::fcntl(root.as_raw_fd(), libc::F_FULLFSYNC) } != 0 {
         return Err(format!("F_FULLFSYNC: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+/// Writes everything of the volume at `mount` to its disk and waits for
+/// that (`sync_volume_np(3)`, a full sync).
+fn sync_volume(mount: &Path) -> Result<(), String> {
+    const SYNC_VOLUME_FULLSYNC: libc::c_int = 0x01;
+    const SYNC_VOLUME_WAIT: libc::c_int = 0x02;
+    unsafe extern "C" {
+        fn sync_volume_np(path: *const libc::c_char, flags: libc::c_int) -> libc::c_int;
+    }
+    let path =
+        std::ffi::CString::new(mount.as_os_str().as_encoded_bytes()).map_err(|e| e.to_string())?;
+    // SAFETY: a NUL-terminated path; libSystem's function.
+    let status = unsafe { sync_volume_np(path.as_ptr(), SYNC_VOLUME_FULLSYNC | SYNC_VOLUME_WAIT) };
+    // It returns an errno value, not -1.
+    if status != 0 {
+        return Err(std::io::Error::from_raw_os_error(status).to_string());
     }
     Ok(())
 }
@@ -302,5 +333,11 @@ mod tests {
             image_of(Path::new("/t/boot/data")),
             PathBuf::from("/t/boot/data.asif")
         );
+    }
+
+    #[test]
+    fn syncs_a_volume_by_any_path_on_it() {
+        sync_volume(&std::env::temp_dir()).unwrap();
+        assert!(sync_volume(Path::new("/nonexistent/aim")).is_err());
     }
 }
