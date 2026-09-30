@@ -80,7 +80,9 @@ label, in the layout of the pinned `TaskInfo`, `Intent` (with
 `Uri` and `Bundle`.
 
 It connects to the display server with `FN_WINDOWS`, which answers the
-server's mode:
+server's mode. Its binders die with system_server, so its rc starts it
+again when zygote restarts (`init.svc.zygote=restarting`); the server
+drops the old connection's tasks. The mode:
 
 - **Device mode:** it sets the default display's windowing mode to
   fullscreen (`setWindowingMode` persists, so a window-mode boot is undone)
