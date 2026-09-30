@@ -235,8 +235,9 @@ checkout: each has its own derived image mount, display socket and data
 directory, and each guest-init its own binder service name. They share
 the system image's attachment and the user's translation cache
 (`~/Library/Caches/aim/translated`, whose entries are published
-atomically). Window mode's shims have the same bundle identifiers in
-every checkout, so run one window-mode boot at a time (#506). Run
+atomically). Window mode's shims have bundle identifiers scoped to the
+data directory (docs/windows.md, "Identity"), so window-mode boots of two
+checkouts run side by side too. Run
 `target/release/cargo-aim` only through `cargo aim` or with the same
 `CARGO_TARGET_DIR`: it builds the host binaries it starts into cargo's
 target directory.

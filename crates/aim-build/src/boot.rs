@@ -6,7 +6,8 @@
 //! `target/aim/boot/capture.bmp`. `--windows` runs aim-display in window
 //! mode (docs/windows.md) instead of one phone-sized device window, and
 //! keeps a shim for each launcher activity in `target/aim/boot/apps`
-//! (never the user's Applications folder) while the boot runs.
+//! (never the user's Applications folder) while the boot runs, with bundle
+//! identifiers scoped to the data directory, apart from other guests'.
 
 use crate::graph::Ctx;
 use std::ffi::OsString;
@@ -101,7 +102,8 @@ pub fn guest_init(ctx: &Ctx, data: &Path, display: &Path) -> Command {
 }
 
 /// aim-apps's arguments: shims in `dir/apps` for the guest booted from the
-/// derived image with `data`, following installs.
+/// derived image with `data`, following installs, with bundle identifiers
+/// of their own.
 fn shims_args(ctx: &Ctx, dir: &Path, data: &Path) -> Vec<OsString> {
     vec![
         "shims".into(),
@@ -116,6 +118,7 @@ fn shims_args(ctx: &Ctx, dir: &Path, data: &Path) -> Vec<OsString> {
         "--into".into(),
         dir.join("apps").into(),
         "--watch".into(),
+        "--scoped".into(),
     ]
 }
 

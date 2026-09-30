@@ -155,9 +155,11 @@ fn display_args(files: &Files, windows: bool) -> Vec<OsString> {
 }
 
 /// aim-apps's arguments: a shim for each launcher app in the state
-/// directory, following installs.
-fn shims_args(files: &Files) -> Vec<OsString> {
-    vec![
+/// directory, following installs; with bundle identifiers of their own
+/// unless this is the user's data directory (`own`), whose shims keep
+/// theirs (and with them their notification settings).
+fn shims_args(files: &Files, own: bool) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
         "shims".into(),
         "--image".into(),
         aim_paths::derived_image().into(),
@@ -170,7 +172,11 @@ fn shims_args(files: &Files) -> Vec<OsString> {
         "--into".into(),
         files.apps().into(),
         "--watch".into(),
-    ]
+    ];
+    if !own {
+        args.push("--scoped".into());
+    }
+    args
 }
 
 fn guest_init_args(files: &Files) -> Vec<OsString> {
@@ -262,7 +268,7 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
     if state.windows {
         children.0.push(
             Command::new(program("aim-apps"))
-                .args(shims_args(files))
+                .args(shims_args(files, files.is_default()))
                 .spawn()
                 .map_err(|e| format!("aim-apps: {e}"))?,
         );
@@ -373,7 +379,7 @@ mod tests {
         assert_eq!(after("--data"), "/d");
         assert_eq!(after("--display"), "/d.aimctl/display");
         assert!(args.contains(&"--run"));
-        let shims = shims_args(&files);
+        let shims = shims_args(&files, false);
         let shims = strings(&shims);
         assert_eq!(
             shims[shims.iter().position(|a| *a == "--data").unwrap() + 1],
@@ -383,6 +389,10 @@ mod tests {
             shims[shims.iter().position(|a| *a == "--into").unwrap() + 1],
             "/d.aimctl/apps"
         );
+        assert!(shims.contains(&"--scoped"));
+        // The user's own guest keeps the stable identifiers.
+        assert!(!strings(&shims_args(&files, true)).contains(&"--scoped"));
+        assert!(files.is_of(Path::new("/d")) && !files.is_of(Path::new("/e")));
     }
 
     #[test]
