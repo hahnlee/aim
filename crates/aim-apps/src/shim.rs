@@ -10,6 +10,10 @@
 //! shim (`AIMPrimary`: the entry named as the application, else its
 //! first) has the package's bundle identifier; it also shows the package's
 //! other windows and its notifications.
+//!
+//! Launch Services and Notification Center tell apps apart by bundle
+//! identifier, so the shims of a guest other than the user's own have
+//! identifiers scoped to its data directory (`scope`).
 
 use std::fs;
 use std::io;
@@ -31,6 +35,8 @@ pub struct Shim<'a> {
     pub socket: &'a Path,
     /// The window host binary (`aim-display`).
     pub host: &'a Path,
+    /// The guest's scope in bundle identifiers, if not the user's own.
+    pub scope: Option<&'a str>,
 }
 
 /// What an existing shim says about itself.
@@ -38,7 +44,7 @@ pub struct Shim<'a> {
 pub struct Stamp {
     pub package: String,
     pub activity: String,
-    /// "LAYOUT/version/socket/host size-modification time".
+    /// "LAYOUT/version/socket/scope/host size-modification time".
     pub version: String,
 }
 
@@ -48,10 +54,27 @@ fn escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// The scope of a guest whose `/data` is `data`: a hash of its absolute
+/// path, the same for every run.
+pub fn scope(data: &Path) -> io::Result<String> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::path::absolute(data)?;
+    // FNV-1a, 32 bits.
+    let hash = path
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .fold(0x811c_9dc5u32, |h, &b| {
+            (h ^ b as u32).wrapping_mul(0x0100_0193)
+        });
+    Ok(format!("{hash:08x}"))
+}
+
 /// A bundle identifier for `app`: its package's for the primary entry,
 /// else the package's and the activity's (without the package prefix);
-/// letters, digits, hyphens and dots.
-pub fn bundle_id(app: &App) -> String {
+/// letters, digits, hyphens and dots. A scoped guest's are under
+/// `dev.aim.app-SCOPE` instead of `dev.aim.app`.
+pub fn bundle_id(app: &App, scope: Option<&str>) -> String {
     let safe = |s: &str| -> String {
         s.chars()
             .map(|c| {
@@ -63,15 +86,19 @@ pub fn bundle_id(app: &App) -> String {
             })
             .collect()
     };
+    let base = match scope {
+        Some(scope) => format!("dev.aim.app-{scope}"),
+        None => "dev.aim.app".into(),
+    };
     let package = safe(&app.package);
     if app.primary {
-        return format!("dev.aim.app.{package}");
+        return format!("{base}.{package}");
     }
     let class = app
         .activity
         .strip_prefix(&format!("{}.", app.package))
         .unwrap_or(&app.activity);
-    format!("dev.aim.app.{package}.{}", safe(class))
+    format!("{base}.{package}.{}", safe(class))
 }
 
 fn version(s: &Shim) -> io::Result<String> {
@@ -81,9 +108,10 @@ fn version(s: &Shim) -> io::Result<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     Ok(format!(
-        "{LAYOUT}/{}/{}/{}-{modified}",
+        "{LAYOUT}/{}/{}/{}/{}-{modified}",
         s.app.version,
         s.socket.display(),
+        s.scope.unwrap_or(""),
         host.len()
     ))
 }
@@ -130,7 +158,7 @@ fn info_plist(s: &Shim, version: &str) -> String {
 </dict>
 </plist>
 "#,
-        id = bundle_id(s.app),
+        id = bundle_id(s.app, s.scope),
         app_label = escape(&s.app.app_label),
         primary = if s.app.primary {
             "\t<key>AIMPrimary</key>\n\t<true/>\n"
@@ -270,6 +298,7 @@ mod tests {
             icns: b"",
             socket: Path::new("/tmp/display"),
             host: Path::new("/bin/sh"),
+            scope: None,
         };
         let p = info_plist(&s, "1/7/x");
         assert_eq!(
@@ -280,17 +309,33 @@ mod tests {
         assert_eq!(plist_value(&p, "AIMShimVersion").as_deref(), Some("1/7/x"));
         assert_eq!(plist_value(&p, "AIMAppLabel").as_deref(), Some("Example"));
         assert!(p.contains("<key>AIMPrimary</key>"));
-        assert_eq!(bundle_id(&app), "dev.aim.app.org.example-app");
+        assert_eq!(bundle_id(&app, None), "dev.aim.app.org.example-app");
+        assert_eq!(
+            bundle_id(&app, Some("0a1b2c3d")),
+            "dev.aim.app-0a1b2c3d.org.example-app"
+        );
         let other = App {
             primary: false,
             activity: "org.example_app.voice.Search$A".into(),
             ..app.clone()
         };
         assert_eq!(
-            bundle_id(&other),
+            bundle_id(&other, None),
             "dev.aim.app.org.example-app.voice.Search-A"
         );
+        assert_eq!(
+            bundle_id(&other, Some("0a1b2c3d")),
+            "dev.aim.app-0a1b2c3d.org.example-app.voice.Search-A"
+        );
         assert!(!info_plist(&Shim { app: &other, ..s }, "").contains("AIMPrimary"));
+    }
+
+    #[test]
+    fn scopes_follow_the_data_directory() {
+        let a = scope(Path::new("/a/data")).unwrap();
+        assert_eq!(a.len(), 8);
+        assert_eq!(a, scope(Path::new("/a/data")).unwrap());
+        assert_ne!(a, scope(Path::new("/b/data")).unwrap());
     }
 
     #[test]
@@ -415,6 +460,7 @@ pub fn sync(
     framework: &crate::apk::Apk,
     socket: &Path,
     host: &Path,
+    scope: Option<&str>,
 ) -> io::Result<Synced> {
     fs::create_dir_all(dir)?;
     let mut ours = ours(dir)?;
@@ -440,6 +486,7 @@ pub fn sync(
             icns: &[],
             socket,
             host,
+            scope,
         };
         if current(&bundle, &probe) {
             continue;

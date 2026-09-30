@@ -57,6 +57,17 @@ impl Files {
         Ok(Files { data, dir })
     }
 
+    /// Whether this is the user's own data directory, `default_data`.
+    pub fn is_default(&self) -> bool {
+        let Ok(default) = default_data() else {
+            return false;
+        };
+        let (Some(parent), Some(name)) = (default.parent(), default.file_name()) else {
+            return false;
+        };
+        fs::canonicalize(parent).is_ok_and(|p| p.join(name) == self.data)
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }

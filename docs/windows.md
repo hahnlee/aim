@@ -248,6 +248,16 @@ Settings.app/Contents/
   of an app that posts notifications. One more shim, "Android System"
   (`android`, framework-res's label and icon, no activity), stands for the
   platform.
+- **Identity.** Launch Services, Notification Center, the Dock and
+  Spotlight tell apps apart by bundle identifier. The shims of the user's
+  own guest (`aimctl`'s default data directory) have stable identifiers,
+  `dev.aim.app.<package>` for a package's primary shim and
+  `dev.aim.app.<package>.<activity>` for its others, so their
+  notification settings last. Every other guest's (`cargo aim boot
+  --windows`, `aimctl --data`) are scoped to its data directory
+  (`aim-apps shims --scoped`: `dev.aim.app-<hash>.<package>`, the hash of
+  the path of its `/data`), so two window-mode guests on one Mac keep
+  apart, and their entries go with their shims.
 - **Notifications.** A shim shows its app's notifications as its own
   ([notifications.md](notifications.md)); the server opens it in the
   background (`--notifications`: no activity, no Dock icon until a window

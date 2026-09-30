@@ -1,7 +1,7 @@
 //! `aim-apps`: the guest's launcher apps as macOS apps.
 //!
 //! ```text
-//! aim-apps shims --image ROOT [--data DATA] --display SOCKET --host AIM_DISPLAY --into DIR [--watch]
+//! aim-apps shims --image ROOT [--data DATA [--scoped]] --display SOCKET --host AIM_DISPLAY --into DIR [--watch]
 //! aim-apps install --image ROOT [--data DATA] --display SOCKET --host AIM_DISPLAY
 //! aim-apps clean --into DIR
 //! aim-apps icon APK --framework FRAMEWORK_RES --out FILE.png|FILE.icns [--size N]
@@ -13,7 +13,9 @@
 //!   packages without a shim of their own); with
 //!   `--watch` it follows installs and uninstalls (`DATA/system/
 //!   packages.list` changing), and a rebuilt `AIM_DISPLAY`, until it is
-//!   stopped.
+//!   stopped. `--scoped` gives the shims bundle identifiers of their own
+//!   (`shim::scope` of `DATA`), for a guest beside the user's, whose shims
+//!   keep the stable ones.
 //! - `install` does the same into `~/Applications/aim Apps`.
 //! - `clean` removes the shims from `DIR` and from Launch Services.
 //! - `icon` lists an APK's launcher activities and draws the first one's
@@ -27,7 +29,7 @@ use aim_apps::apk::{Apk, Resources};
 use aim_apps::icon::{self, Icon};
 
 const USAGE: &str = "usage:
-  aim-apps shims --image ROOT [--data DATA] --display SOCKET --host AIM_DISPLAY --into DIR [--watch]
+  aim-apps shims --image ROOT [--data DATA [--scoped]] --display SOCKET --host AIM_DISPLAY --into DIR [--watch]
   aim-apps install --image ROOT [--data DATA] --display SOCKET --host AIM_DISPLAY
   aim-apps clean --into DIR
   aim-apps icon APK --framework FRAMEWORK_RES --out FILE.png|FILE.icns [--size N]";
@@ -47,6 +49,7 @@ struct Args {
     host: Option<PathBuf>,
     into: Option<PathBuf>,
     watch: bool,
+    scoped: bool,
 }
 
 fn main() -> ExitCode {
@@ -82,6 +85,7 @@ fn parse(rest: &[String]) -> Result<Args, String> {
             "--host" => a.host = Some(value()?),
             "--into" => a.into = Some(value()?),
             "--watch" => a.watch = true,
+            "--scoped" => a.scoped = true,
             s if s.starts_with("--") => return Err(USAGE.into()),
             _ => a.positional.push(PathBuf::from(arg)),
         }
@@ -154,6 +158,13 @@ fn shims(a: &Args, dir: PathBuf) -> Result<(), String> {
     let host = a.host.as_deref().ok_or(USAGE)?;
     let framework = open(&root.join("system/framework/framework-res.apk"))?;
     let data = a.data.as_deref();
+    let scope = match (a.scoped, data) {
+        (false, _) => None,
+        (true, Some(d)) => {
+            Some(aim_apps::shim::scope(d).map_err(|e| format!("{}: {e}", d.display()))?)
+        }
+        (true, None) => return Err(USAGE.into()),
+    };
     let mut seen = None;
     loop {
         // The guest's package list, and the window host binary.
@@ -172,8 +183,9 @@ fn shims(a: &Args, dir: PathBuf) -> Result<(), String> {
                     app,
                 });
             }
-            let done = aim_apps::shim::sync(&dir, &apps, &framework, socket, host)
-                .map_err(|e| format!("{}: {e}", dir.display()))?;
+            let done =
+                aim_apps::shim::sync(&dir, &apps, &framework, socket, host, scope.as_deref())
+                    .map_err(|e| format!("{}: {e}", dir.display()))?;
             for p in &done.written {
                 println!("shim {p}");
             }
