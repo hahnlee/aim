@@ -128,6 +128,16 @@ also lets `cargo aim status` say what changed:
   translation-cache stale  after derived-image
 ```
 
+Downstream nodes see an upstream's output instead of its key where the
+output is cheap to name (early cutoff): a cargo node's artifact, and the
+derived image's identity with its shadow file's creation time (a shadow
+made again has lost what the translation cache wrote into it). A crate
+built again to the same binary, or a derived image found unchanged,
+leaves what follows fresh. A cargo node that compiles generated AIDL
+crates or fetched AOSP sources runs after `aidl-gen` (order only) and
+keys on the generated files its dep-info lists, so a change to one
+service's AIDL rebuilds what compiles it, not every HAL and daemon.
+
 Nodes run in dependency order, several at once where the graph allows. Ready
 cargo nodes of one kind share one cargo invocation (`host`, `hal`, `daemon`:
 the daemons build AOSP's binder crate with its `system` feature, the HALs

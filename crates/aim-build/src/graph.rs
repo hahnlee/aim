@@ -6,6 +6,10 @@
 //! declared ones plus those its tools reported last time (cargo dep-info,
 //! n2's deps log). A node whose key matches its stamp and whose outputs
 //! exist is skipped.
+//!
+//! Downstream nodes see an upstream's output instead of its key where that
+//! is cheap to name ([`nodes::output_key`]): a cargo artifact built again
+//! the same, or a derived image found unchanged, leaves them fresh.
 
 use crate::cargo::{self, Unit};
 use crate::hash::{self, FileState, KeyHasher};
@@ -383,7 +387,7 @@ pub fn build(
                 };
                 match staleness(graph, node, &eval, stamp.as_ref()) {
                     None => {
-                        keys.insert(name.clone(), eval.key);
+                        keys.insert(name.clone(), published(node, eval.key));
                         states.insert(name.clone(), State::Done);
                         fresh += 1;
                     }
@@ -476,7 +480,7 @@ pub fn build(
                             found,
                         }
                         .write(name)?;
-                        Ok(eval.key)
+                        Ok(published(node, eval.key))
                     });
                 match result {
                     Ok(key) => {
@@ -509,6 +513,11 @@ pub fn build(
     } else {
         Err(failures.join("\n"))
     }
+}
+
+/// The key downstream nodes see for `node`: its output's, else its own.
+fn published(node: &Node, key: String) -> String {
+    nodes::output_key(node).unwrap_or(key)
 }
 
 fn indent(text: &str) -> String {
@@ -550,7 +559,7 @@ pub fn status(graph: &Graph, targets: &[String], ctx: &Ctx) -> Result<usize, Str
         let reason = match graph.evaluate(node, &ctx.tools, &keys, &found, &known, false) {
             Ok(eval) => {
                 let reason = staleness(graph, node, &eval, stamp.as_ref());
-                keys.insert(name.clone(), eval.key);
+                keys.insert(name.clone(), published(node, eval.key));
                 reason
             }
             Err(error) => {

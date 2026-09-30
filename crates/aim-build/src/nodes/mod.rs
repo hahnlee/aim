@@ -65,6 +65,20 @@ pub fn run(node: &Node, ctx: &Ctx, log: &mut Log) -> Result<Vec<PathBuf>, String
     Ok(Vec::new())
 }
 
+/// A key for what `node` made, for early cutoff (docs/build.md, "Keys and
+/// stamps"): a cargo artifact's content, or the derived image's identity
+/// and shadow file. `None` where naming the output costs as much as a
+/// rebuild; downstream nodes then see the node's own key.
+pub fn output_key(node: &Node) -> Option<String> {
+    match &node.action {
+        Action::Cargo(unit) => {
+            crate::hash::sha256_file(unit.install.as_ref().unwrap_or(&unit.artifact)).ok()
+        }
+        Action::DerivedImage => derived_image::output_key(),
+        _ => None,
+    }
+}
+
 /// Every file under `dir` (relative to the repository root).
 fn files(dir: &str) -> Vec<PathBuf> {
     crate::hash::files_under(&aim_paths::root().join(dir))
