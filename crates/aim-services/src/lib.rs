@@ -16,6 +16,7 @@
 pub mod clip;
 pub mod clipboard;
 mod mirror;
+pub mod notifications;
 mod pasteboard;
 mod system;
 

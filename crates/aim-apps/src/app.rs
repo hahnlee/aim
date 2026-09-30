@@ -129,6 +129,45 @@ pub fn read(
     }))
 }
 
+/// The platform itself (`framework-res.apk`, package `android`): its
+/// application's label and icon, and no activity. Its shim shows the
+/// notifications of packages that have no shim of their own
+/// (`docs/notifications.md`).
+pub fn system(framework: &Apk) -> Result<Option<App>> {
+    let manifest = framework.manifest()?;
+    let Some(Value::String(package)) = manifest.named("package") else {
+        return Ok(None);
+    };
+    let Some(application) = manifest.children.iter().find(|c| c.name == "application") else {
+        return Ok(None);
+    };
+    let theme = match application.attr(ATTR_THEME) {
+        Some(Value::Ref(id)) => *id,
+        _ => 0,
+    };
+    let res = Resources {
+        app: framework,
+        framework: None,
+        theme,
+    };
+    let label = application
+        .attr(ATTR_LABEL)
+        .and_then(|v| res.string(v))
+        .unwrap_or_else(|| package.clone());
+    let version = match manifest.attr(ATTR_VERSION_CODE) {
+        Some(Value::Int(v)) => *v as i64,
+        _ => 0,
+    };
+    Ok(Some(App {
+        package: package.clone(),
+        label,
+        version,
+        activity: String::new(),
+        icon: application.attr(ATTR_ICON).cloned(),
+        theme,
+    }))
+}
+
 impl App {
     /// The app's icon as a macOS `.icns`.
     pub fn icns(&self, apk: &Apk, framework: Option<&Apk>) -> Option<Vec<u8>> {

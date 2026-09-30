@@ -14,6 +14,9 @@
 //! both ends write [`display::Window`](aim_hostcall::display::Window)
 //! records.
 //!
+//! The notification bridge (`docs/notifications.md`) opens one with
+//! [`OP_NOTIFICATIONS`] and exchanges [`crate::notify`] frames on it.
+//!
 //! A window host (an app's shim, `docs/windows.md`) opens a connection with
 //! [`OP_HOST`]; from then on both ends write [`Host`] records: the server
 //! sends it the buffers, presents and task records of its package, and it
@@ -27,7 +30,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use aim_hostcall::display::{Import, Window};
 
 /// Sent in the hello; the server closes a connection of another version.
-pub const VERSION: u64 = 5;
+pub const VERSION: u64 = 6;
 
 /// `id` = [`VERSION`], `flag` = display index.
 pub const OP_HELLO: u32 = 1;
@@ -52,6 +55,9 @@ pub const OP_CURSOR: u32 = 8;
 pub const CURSOR_CHANGED: u32 = 1;
 /// [`OP_CURSOR`] carries an acquire fence.
 pub const CURSOR_ACQUIRE: u32 = 2;
+/// `id` = [`VERSION`]: the notification bridge's hello; the server answers
+/// its mode (a `u32`), then [`crate::notify`] frames follow both ways.
+pub const OP_NOTIFICATIONS: u32 = 9;
 
 /// [`Host::op`] values.
 pub mod host {
@@ -79,6 +85,8 @@ pub mod host {
     /// premultiplied RGBA pixels, which follow the record (`id` bytes; 0:
     /// the default cursor); `input.x`, `input.y` its hot spot.
     pub const CURSOR: u32 = 10;
+    /// Either way: a [`crate::notify`] frame follows.
+    pub const NOTIFY: u32 = 11;
 }
 
 /// [`HostInput::kind`] values: `translate::Input`'s methods. Positions

@@ -112,11 +112,14 @@ fn shims_args(ctx: &Ctx, dir: &Path, data: &Path) -> Vec<OsString> {
 }
 
 /// aim-display's arguments: its socket and capture file in `dir`, and a
-/// phone-sized device window or window mode.
+/// phone-sized device window or window mode with the shims in `dir/apps`.
 fn display_args(dir: &Path, windows: bool) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec!["--socket".into(), dir.join("display").into()];
     if windows {
         args.extend(["--mode", "windows"].map(OsString::from));
+        // The shims show the guest's notifications.
+        args.push("--apps".into());
+        args.push(dir.join("apps").into());
     } else {
         args.extend(["--size", "1080x1920"].map(OsString::from));
     }
@@ -153,6 +156,8 @@ mod tests {
                 "/b/display",
                 "--mode",
                 "windows",
+                "--apps",
+                "/b/apps",
                 "--capture",
                 "/b/capture.bmp"
             ]

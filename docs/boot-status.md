@@ -762,6 +762,15 @@ name and icon in the Dock; a click in the Calculator shim's window, behind
 Chrome's, focused its task and typed 7, and keys typed 5 5. `pm uninstall`
 of Calculator removed its shim, and `pm install` wrote it again.
 
+**Notifications** (2026-09-30, #4, [notifications.md](notifications.md)):
+guest-init's notification bridge registers with NotificationManagerService
+once it is published; the first boot's notifications ("Android is
+starting", Play Store's) appeared in Notification Center from the "Android
+System" and Play Store shims, which the display server opened in the
+background, and `cmd notification post` from the shell uid from "Android
+System". CtsNotificationTestCases' NotificationManagerTest passes as
+without the bridge (114 of 114).
+
 ## Pointer, scrolling and shortcuts (2026-09-29, #214, #288)
 
 A window-mode boot of the derived image with the mouse device

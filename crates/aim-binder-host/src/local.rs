@@ -10,10 +10,11 @@
 //! other processes' nodes, holds references to them and learns of their
 //! death, following the protocol as libbinder uses it.
 //!
-//! Its nodes accept file descriptors, as libbinder's do, but no service
-//! keeps one yet (#433): they are closed after the call, and a call that
-//! carries some to a service that takes none fails as the driver fails it
-//! for a node that does not accept them. It asks for none in replies.
+//! Its nodes accept file descriptors, as libbinder's do: they are closed
+//! after the call, which may take a file it keeps ([`LocalProcess::file`]),
+//! and a call that carries some to a service that takes none fails as the
+//! driver fails it for a node that does not accept them. Replies may carry
+//! fds too (`TF_ACCEPT_FDS`, as libbinder asks), closed with the reply.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -191,6 +192,8 @@ impl Received {
 impl Drop for Received {
     fn drop(&mut self) {
         if self.buffer != 0 {
+            self.process
+                .close(self.process.received_fds(self.data, &self.objects));
             let mut out = Commands::default();
             out.u32(BC_FREE_BUFFER).u64(self.buffer);
             self.process.write(&out.0);
@@ -404,7 +407,7 @@ impl LocalProcess {
             target: u64::from(handle),
             cookie: 0,
             code,
-            flags: if oneway { TF_ONE_WAY } else { 0 },
+            flags: TF_ACCEPT_FDS | if oneway { TF_ONE_WAY } else { 0 },
             sender_pid: 0,
             sender_euid: 0,
             data_size: data.data().len() as u64,
@@ -536,6 +539,19 @@ impl LocalProcess {
         }
     }
 
+    /// The file behind `fd` of a call or reply being read, to keep past
+    /// its close.
+    pub fn file(&self, fd: u32) -> Option<File> {
+        self.files.lock().unwrap().files.get(&fd).cloned()
+    }
+
+    fn close(&self, fds: Vec<u32>) {
+        let mut files = self.files.lock().unwrap();
+        for fd in fds {
+            files.files.remove(&fd);
+        }
+    }
+
     /// The file descriptors the driver installed for a received call:
     /// its fd objects and the fds of its fd arrays.
     fn received_fds(&self, data: &[u8], objects: &[u64]) -> Vec<u32> {
@@ -589,12 +605,7 @@ impl LocalProcess {
             (Some(_), PING_TRANSACTION) => Ok(Parcel::new()),
             (Some(s), _) => s.transact(&mut call),
         };
-        {
-            let mut files = self.files.lock().unwrap();
-            for fd in fds {
-                files.files.remove(&fd);
-            }
-        }
+        self.close(fds);
         out.extend_from_slice(&BC_FREE_BUFFER.to_le_bytes());
         out.extend_from_slice(&tr.buffer.to_le_bytes());
         if call.is_oneway() {

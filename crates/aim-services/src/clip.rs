@@ -9,9 +9,8 @@
 //! Not parsed, so refused with `BAD_VALUE`: a clip icon (`Bitmap`), an
 //! item's `ActivityInfo` or `TextLinks` (both set only inside
 //! system_server), and the text spans whose parcel form is not a fixed
-//! list of ints and strings (typeface, text appearance, suggestion, easy
-//! edit, locale, TTS, accessibility replacement, line break config and
-//! the writing tools span) (#433).
+//! list of ints and strings (text appearance, suggestion, easy edit,
+//! locale, TTS, accessibility replacement and line break config) (#433).
 
 use aim_binder_driver::uapi::{BINDER_TYPE_HANDLE, FlatBinderObject};
 use aim_binder_host::parcel::{BAD_VALUE, Parcel, Reader, Result};
@@ -232,13 +231,13 @@ impl WriteParcelable for ClipData {
 }
 
 /// `TextUtils.writeToParcel` of a plain string.
-fn write_char_sequence(p: &mut Parcel, text: Option<&str>) {
+pub(crate) fn write_char_sequence(p: &mut Parcel, text: Option<&str>) {
     p.write_i32(1);
     p.write_string8(text);
 }
 
 /// `TextUtils.CHAR_SEQUENCE_CREATOR`: the text, past its spans.
-fn char_sequence(r: &mut Reader<'_>) -> Result<Option<String>> {
+pub(crate) fn char_sequence(r: &mut Reader<'_>) -> Result<Option<String>> {
     let kind = r.read_i32()?;
     let text = r.read_string8()?;
     if text.is_none() || kind == 1 {
@@ -251,7 +250,7 @@ fn char_sequence(r: &mut Reader<'_>) -> Result<Option<String>> {
         }
         // Each span's writeToParcelInternal: i = int (or float), s = String.
         let layout = match span {
-            5 | 6 | 14 | 15 => "",
+            5 | 6 | 14 | 15 | 31 => "",
             2 | 3 | 4 | 12 | 20 | 21 | 25 | 27 | 28 => "i",
             7 | 10 | 16 => "ii",
             9 => "iii",
@@ -259,6 +258,8 @@ fn char_sequence(r: &mut Reader<'_>) -> Result<Option<String>> {
             1 | 11 => "s",
             18 => "ss",
             26 => "si",
+            // The family, then the typeface's pid and index.
+            13 => "sii",
             _ => return Err(BAD_VALUE),
         };
         for field in layout.chars() {
@@ -278,7 +279,7 @@ fn char_sequence(r: &mut Reader<'_>) -> Result<Option<String>> {
 }
 
 /// `Uri.CREATOR`: the URI string, or none for null.
-fn uri(r: &mut Reader<'_>) -> Result<Option<String>> {
+pub(crate) fn uri(r: &mut Reader<'_>) -> Result<Option<String>> {
     match r.read_i32()? {
         0 => Ok(None),
         1..=3 => r.read_string8(),
@@ -288,7 +289,7 @@ fn uri(r: &mut Reader<'_>) -> Result<Option<String>> {
 
 /// `BaseBundle.readFromParcelInner`, skipped: the length, and unless
 /// empty, the magic, that many bytes and whether it holds an intent.
-fn bundle(r: &mut Reader<'_>) -> Result<()> {
+pub(crate) fn bundle(r: &mut Reader<'_>) -> Result<()> {
     let length = r.read_i32()?;
     if length <= 0 {
         return Ok(());
@@ -304,7 +305,7 @@ fn bundle(r: &mut Reader<'_>) -> Result<()> {
 
 /// `Intent(Parcel)`: its data URIs (its own, its selector's, its clip's
 /// and its original intent's).
-fn intent(r: &mut Reader<'_>) -> Result<Vec<String>> {
+pub(crate) fn intent(r: &mut Reader<'_>) -> Result<Vec<String>> {
     let mut uris = Vec::new();
     r.read_string8()?; // action
     uris.extend(uri(r)?);
