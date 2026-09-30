@@ -321,7 +321,12 @@ fn inode_attrs(host: Host, st: &libc::stat) -> (Option<Attr>, Option<Attr>) {
     {
         return (k.guest, k.original);
     }
-    let guest = guest_attr(host);
+    // The image's volume is read-only: no guest attribute to read there.
+    let guest = if vfs::on_read_only_root(st.st_dev) {
+        None
+    } else {
+        guest_attr(host)
+    };
     let original = if guest.is_none() {
         original(host)
     } else {

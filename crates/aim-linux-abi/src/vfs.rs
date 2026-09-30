@@ -74,6 +74,8 @@ struct Vfs {
     root: PathBuf,
     /// Whether a path map is in use (the image is then read-only).
     mapped: bool,
+    /// The device of the root when it is a read-only mount (the image's).
+    read_only_dev: Option<i32>,
     /// Longest guest prefix first; among equal prefixes the latest mount.
     mounts: RwLock<Vec<Mount>>,
     /// Directory holding the path map (the guest-init runtime directory).
@@ -167,14 +169,33 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
     let root = root
         .canonicalize()
         .map_err(|e| format!("--root {}: {e}", root.display()))?;
+    let read_only_dev = read_only_dev(&root);
     let _ = VFS.set(Vfs {
         root,
         mapped: !mounts.is_empty(),
+        read_only_dev,
         mounts: RwLock::new(mounts),
         runtime,
         cwd: Mutex::new("/".into()),
     });
     Ok(())
+}
+
+/// The device of the filesystem holding `root`, if it is mounted read-only.
+fn read_only_dev(root: &Path) -> Option<i32> {
+    let c = CString::new(root.as_os_str().as_bytes()).ok()?;
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: NUL-terminated path, local buffers.
+    let ok =
+        unsafe { libc::statfs(c.as_ptr(), &mut fs) == 0 && libc::stat(c.as_ptr(), &mut st) == 0 };
+    (ok && fs.f_flags & libc::MNT_RDONLY as u32 != 0).then_some(st.st_dev)
+}
+
+/// Whether host device `dev` is the read-only volume of the root: nothing
+/// on it can have been changed by a guest.
+pub fn on_read_only_root(dev: i32) -> bool {
+    VFS.get().and_then(|v| v.read_only_dev) == Some(dev)
 }
 
 fn vfs() -> &'static Vfs {
