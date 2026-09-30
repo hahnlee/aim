@@ -537,6 +537,11 @@ reason = "declares the removed goldfish Codec2 store (HIDL)"
 path = "/vendor/etc/init/android.hardware.radio.ranchu.rc"
 reason = "the ranchu radio HAL talks to QEMU's modem; telephony is undeclared"
 
+[[replace]]
+path = "/vendor/etc/permissions/handheld_core_hardware.xml"
+source = "image/vendor/etc/permissions/handheld_core_hardware.xml"
+reason = "declares telephony (calling, data, GSM, IMS, messaging, radio access, subscriptions) for the removed ranchu radio HAL; the device has no modem, so the phone process builds no phones or RIL"
+
 [[remove]]
 path = "/vendor/etc/vintf/manifest/android.hardware.radio.ranchu.xml"
 reason = "declares the removed ranchu radio HAL"

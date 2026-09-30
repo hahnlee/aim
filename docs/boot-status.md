@@ -55,7 +55,36 @@ load 4-17 rising to 40-60 (two before, two after), `sys.boot_completed`
 came at 50-51 s either way and `boot_progress_enable_screen` at 36.5-40.7 s
 before, 36.8-37.3 s after; a cold Settings start took 10.5 s and 33.5 s
 before, 45 s and 19.3 s after, dominated by ANRs of com.android.phone and
-GMS in all four.
+GMS in all four (gone since; see "First boot").
+
+## First boot (2026-09-30, #241, #375)
+
+Two fresh first boots of main (49eed57f, host load 9.5) and of the device
+without telephony (load 3.9), measured from guest-init's start to
+`sys.boot_completed` and the 5 minutes after, CPU per guest process from
+the host every 2 s:
+
+| Check | Before | Without telephony |
+| --- | --- | --- |
+| `sys.boot_completed` (1 s polling, within noise) | 14 s | 16 s |
+| `am_anr`, `am_crash` | 0, 0 | 0, 0 |
+| RILJ log lines (phone process) | 180 | 0 |
+| lmkd kills (host memory pressure, #300) | 25 | 0 |
+| Guest CPU: boot, 0-2 min, 2-5 min | 17.5, 191, 10.4 s | 20.4, 167, 12.3 s |
+| Settings cold start | 278 ms | 253 ms |
+
+The ANRs of com.android.phone and GMS persistent ("failed to complete
+startup") no longer happen. The device declares no telephony (the
+emulator's `handheld_core_hardware.xml` without it, `image/overlay.toml`),
+so the phone process no longer builds a GSM phone and RIL for a modem it
+does not have. The first two minutes are Android's and Google's own work:
+Play Store and GMS update themselves from the network 40-70 s after boot
+(`installPackageLI` stops them and their clients), dex2oat compiles the
+updates (about 28 s of CPU), GMS and the Google apps start (about 90 s),
+system_server takes 18-21 s. guest-init takes 14-19 s: it hosts the binder
+driver, whose transport cost is #451. After two minutes the guest is
+nearly idle. The kills of cached processes in the first run came from
+lmkd reacting to the Mac's memory pressure, not from the guest.
 
 ## Guest kernel time (2026-09-30, #446)
 

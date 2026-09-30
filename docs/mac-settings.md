@@ -25,8 +25,8 @@ the Mac's settings are only read.
   `ACTION_TIMEZONE_CHANGED`, and the time zone detector reads the device
   zone back from it (`dumpsys time_zone_detector`:
   `getDeviceTimeZone()`). The detector's manual suggestion is not usable:
-  with automatic detection on (the default, with the emulator's telephony
-  and geolocation declarations) its capability is "not applicable".
+  with automatic detection on (the default, with the geolocation
+  declaration) its capability is "not applicable".
 - **The appearance at boot** is applied at `sys.boot_completed`, so a
   boot after the Mac changed shows the previous appearance until then.
   UiModeManager takes a change from its start, before the system is
