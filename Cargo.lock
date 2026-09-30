@@ -276,6 +276,16 @@ name = "aim-windows-core"
 version = "0.1.0"
 
 [[package]]
+name = "aimctl"
+version = "0.1.0"
+dependencies = [
+ "aim-apps",
+ "aim-paths",
+ "aim-storage",
+ "libc",
+]
+
+[[package]]
 name = "allocator"
 version = "0.1.0"
 dependencies = [

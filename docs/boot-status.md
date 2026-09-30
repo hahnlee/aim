@@ -722,6 +722,10 @@ linux-run --root target/aim/derived/root --path-map target/aim/boot/data/run/pat
 cargo aim storage                     # the images and what they occupy
 ```
 
+`aimctl` ([aimctl.md](aimctl.md)) runs the same boot in the background
+(`aimctl --data DIR start`), with `aimctl shell` in place of the linux-run
+lines above.
+
 After a stop, `target/aim/boot/data` is empty (detached); a second
 `cargo aim boot` attaches the same image, and installed apps start with
 their data. Look for a data image left attached by a crash with

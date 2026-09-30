@@ -1,0 +1,13 @@
+[package]
+license.workspace = true
+name = "aimctl"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The user's manager of a resident guest: start, stop and inspect it, and list, install, open and uninstall its apps (docs/aimctl.md)"
+
+[dependencies]
+aim-apps = { path = "../aim-apps" }
+aim-paths.workspace = true
+aim-storage.workspace = true
+libc.workspace = true
