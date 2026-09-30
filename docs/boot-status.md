@@ -134,6 +134,13 @@ directory at its first memfd_create (2.2 ms with 48 memfds alive; 49
 calls in a boot averaged 2.9 ms). What is left of a binder call is the
 Mach transport, about 7 µs per ioctl (#451).
 
+membarrier now interrupts only the guest threads that are running, as
+Linux does, instead of every thread of the task (host unit benchmark, 60
+parked and 2 spinning threads: 115 to 58 µs of kernel time per call,
+#503). ashmem PIN and UNPIN skip reading the region's attribute while
+the file's ctime shows nobody changed it (an UNPIN+PIN pair: 32-39 to
+19-21 µs, #504). Neither is measured in a boot yet.
+
 ## Vsync off at idle (2026-09-30, #452)
 
 SurfaceFlinger kept hardware vsync on for good, because it ignored
