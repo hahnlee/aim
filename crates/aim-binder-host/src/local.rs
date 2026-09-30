@@ -633,7 +633,11 @@ impl LocalProcess {
                 Ok(p)
             }
             (Some(_), PING_TRANSACTION) => Ok(Parcel::new()),
-            (Some(s), _) => s.transact(&mut call),
+            (Some(s), _) => {
+                let collect = tr.flags & crate::appops::FLAG_COLLECT_NOTED_APP_OPS != 0;
+                let uid = collect.then_some(tr.sender_euid);
+                crate::appops::collecting(uid, || s.transact(&mut call))
+            }
         };
         self.close(fds);
         out.extend_from_slice(&BC_FREE_BUFFER.to_le_bytes());
@@ -885,5 +889,81 @@ mod tests {
         echo.transact(WATCH, &watch, false).unwrap();
         driver.release(client.handle);
         deaths.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    /// Notes op 1 for its caller when it collects for it.
+    struct Noting;
+
+    impl Service for Noting {
+        fn descriptor(&self) -> &str {
+            "test.INoting"
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            if crate::appops::collecting_uid() == Some(call.sender_euid) {
+                crate::appops::collect_sync(1, None);
+            }
+            let mut reply = Parcel::new();
+            reply.write_no_exception();
+            Ok(reply)
+        }
+    }
+
+    #[test]
+    fn noted_ops_go_back_to_a_caller_that_collects() {
+        let driver = Driver::new();
+        let server = open(&driver, 100, 1000);
+        let Binder::Local(ptr) = server.add_service(Arc::new(Noting)) else {
+            unreachable!()
+        };
+        let mut object = FlatBinderObject {
+            kind: BINDER_TYPE_BINDER,
+            flags: 0,
+            binder: ptr,
+            cookie: ptr,
+        }
+        .encode();
+        server
+            .ioctl(server.tid(), BINDER_SET_CONTEXT_MGR_EXT, &mut object)
+            .unwrap();
+        server.start();
+        let client = open(&driver, 300, 10123);
+        // As BinderProxy.transact sends a call when listening for its ops.
+        let call = |flags: u32| {
+            let tr = TransactionData {
+                target: 0,
+                cookie: 0,
+                code: 1,
+                flags,
+                sender_pid: 0,
+                sender_euid: 0,
+                data_size: 0,
+                offsets_size: 0,
+                buffer: 0,
+                offsets: 0,
+            };
+            let mut out = Commands::default();
+            out.u32(BC_TRANSACTION).bytes(&tr.encode());
+            let tr = client.wait(&mut out.0, Until::Reply).unwrap().unwrap();
+            let received = Received {
+                process: client.arc(),
+                buffer: tr.buffer,
+                // SAFETY: the reply, in the receive buffer until dropped.
+                data: unsafe {
+                    std::slice::from_raw_parts(tr.buffer as *const u8, tr.data_size as usize)
+                },
+                objects: Vec::new(),
+            };
+            received.data.to_vec()
+        };
+        let collected = call(TF_ACCEPT_FDS | crate::appops::FLAG_COLLECT_NOTED_APP_OPS);
+        let mut r = Reader::new(&collected, &[]);
+        assert_eq!(r.read_i32(), Ok(-127));
+        assert_eq!(r.read_i32(), Ok(36));
+        assert_eq!(r.read_i32(), Ok(1));
+        assert_eq!(r.read_string16(), Ok(None));
+        assert_eq!(r.read_i64(), Ok(1 << 1));
+        let mut r = Reader::new(&collected, &[]);
+        assert_eq!(r.read_exception(), Ok(Ok(())));
+        assert_eq!(call(TF_ACCEPT_FDS), 0i32.to_le_bytes());
     }
 }

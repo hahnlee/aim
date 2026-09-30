@@ -10,8 +10,8 @@
 //! - [`client`]: what the syscall layer calls for `open`, `ioctl`, `mmap`
 //!   and poll registration on a binder fd;
 //! - [`wire`] and [`mach`]: the messages and the Mach primitives under them;
-//! - [`local`] and [`parcel`]: a binder process on the host itself, for
-//!   native system services (ADR 0013).
+//! - [`local`], [`parcel`] and [`appops`]: a binder process on the host
+//!   itself, for native system services (ADR 0013).
 //!
 //! Each guest ioctl is one `mach_msg(SEND|RCV)` from the calling thread to
 //! its own daemon thread, which runs the driver's ioctl and may block in it.
@@ -19,6 +19,7 @@
 //! shared memory, mapped read-write in the daemon and read-only in the
 //! guest. Fds travel as fileports. See `docs/binder-driver.md`.
 
+pub mod appops;
 pub mod client;
 pub mod local;
 pub mod mach;
