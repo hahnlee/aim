@@ -250,3 +250,16 @@ The migration's state and conformance results are in
   having asked gets provisional authorization at its first post. Details
   are in
   [notifications.md](../notifications.md), "The permission".
+
+### Permissions, part 2: the design (2026-10-01)
+
+- Permissions and app-op modes are one state on Android 16
+  (`AccessCheckingService`, `access.abx`), and its two front ends are held
+  by ActivityManager (`AppOpsService`) and created by PackageManager
+  (`PermissionManagerService`); PermissionController must stay an app
+  while those two are original. So neither AppOps nor PermissionManager
+  is replaced alone: the access state is proposed to move with
+  PackageManager (M4), the front ends with ActivityManager, and
+  PermissionController after both (#616, a decision). The design, the
+  measured traffic and the CTS modules are in
+  [permissions.md](../permissions.md).
