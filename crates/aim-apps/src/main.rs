@@ -140,6 +140,7 @@ fn icon_command(a: &Args) -> Result<(), String> {
             app: &apk,
             framework: framework.as_ref(),
             theme: app.theme,
+            night: false,
         };
         let icon = Icon::of(&res, app.icon.as_ref().ok_or("no icon")?).ok_or("no icon")?;
         icon::render(&res, &icon, a.size.unwrap_or(1024)).png()

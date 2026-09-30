@@ -11,6 +11,10 @@
 //! first) has the package's bundle identifier; it also shows the package's
 //! other windows and its notifications.
 //!
+//! Its splash screen's background (`AIMSplashBackground`, and
+//! `AIMSplashBackgroundDark` for the Mac's dark appearance) is the
+//! launcher activity's, as Android's starting window has it.
+//!
 //! Launch Services and Notification Center tell apps apart by bundle
 //! identifier, so the shims of a guest other than the user's own have
 //! identifiers scoped to its data directory (`scope`).
@@ -25,7 +29,7 @@ use crate::app::App;
 const EXECUTABLE: &str = "aim-app";
 /// Bumped when a shim's layout or icon drawing changes, so shims are
 /// written again.
-pub const LAYOUT: u32 = 4;
+pub const LAYOUT: u32 = 5;
 
 /// A shim to write: the app, its icon, and where its windows come from.
 pub struct Shim<'a> {
@@ -37,6 +41,9 @@ pub struct Shim<'a> {
     pub host: &'a Path,
     /// The guest's scope in bundle identifiers, if not the user's own.
     pub scope: Option<&'a str>,
+    /// The splash screen's background in the light and dark appearance,
+    /// ARGB.
+    pub splash: [Option<u32>; 2],
 }
 
 /// What an existing shim says about itself.
@@ -118,6 +125,16 @@ fn version(s: &Shim) -> io::Result<String> {
 
 fn info_plist(s: &Shim, version: &str) -> String {
     let label = escape(&s.app.label);
+    let splash: String = ["AIMSplashBackground", "AIMSplashBackgroundDark"]
+        .iter()
+        .zip(s.splash)
+        .filter_map(|(key, c)| {
+            Some(format!(
+                "\t<key>{key}</key>\n\t<string>#{:08x}</string>\n",
+                c?
+            ))
+        })
+        .collect();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -151,7 +168,7 @@ fn info_plist(s: &Shim, version: &str) -> String {
 	<string>{activity}</string>
 	<key>AIMAppLabel</key>
 	<string>{app_label}</string>
-{primary}	<key>AIMDisplaySocket</key>
+{primary}{splash}	<key>AIMDisplaySocket</key>
 	<string>{socket}</string>
 	<key>AIMShimVersion</key>
 	<string>{stamp}</string>
@@ -292,6 +309,7 @@ mod tests {
             activity: "org.example_app.Main".into(),
             icon: None,
             theme: 0,
+            activity_theme: 0,
         };
         let s = Shim {
             app: &app,
@@ -299,6 +317,7 @@ mod tests {
             socket: Path::new("/tmp/display"),
             host: Path::new("/bin/sh"),
             scope: None,
+            splash: [Some(0xff20_2124), None],
         };
         let p = info_plist(&s, "1/7/x");
         assert_eq!(
@@ -309,6 +328,11 @@ mod tests {
         assert_eq!(plist_value(&p, "AIMShimVersion").as_deref(), Some("1/7/x"));
         assert_eq!(plist_value(&p, "AIMAppLabel").as_deref(), Some("Example"));
         assert!(p.contains("<key>AIMPrimary</key>"));
+        assert_eq!(
+            plist_value(&p, "AIMSplashBackground").as_deref(),
+            Some("#ff202124")
+        );
+        assert!(!p.contains("AIMSplashBackgroundDark"));
         assert_eq!(bundle_id(&app, None), "dev.aim.app.org.example-app");
         assert_eq!(
             bundle_id(&app, Some("0a1b2c3d")),
@@ -349,6 +373,7 @@ mod tests {
             activity: activity.into(),
             icon: None,
             theme: 0,
+            activity_theme: 0,
         };
         let dir = Path::new("/apps");
         let name = |a: &App, taken: &[&str]| {
@@ -487,6 +512,7 @@ pub fn sync(
             socket,
             host,
             scope,
+            splash: [None; 2],
         };
         if current(&bundle, &probe) {
             continue;
@@ -497,10 +523,13 @@ pub fn sync(
         let Some(icns) = i.app.icns(&apk, Some(framework)) else {
             continue;
         };
+        let splash =
+            [false, true].map(|night| i.app.splash_background(&apk, Some(framework), night));
         write(
             &bundle,
             &Shim {
                 icns: &icns,
+                splash,
                 ..probe
             },
         )?;

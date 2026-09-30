@@ -1,7 +1,7 @@
 //! The resource table (`resources.arsc`, `ResTable`): packages, types,
 //! and each entry's values per configuration, with the choice of the
-//! configuration a Mac shows (the default language or English, no night
-//! mode, left to right, the highest density).
+//! configuration a Mac shows (the default language or English, its
+//! appearance's night mode, left to right, the highest density).
 
 use std::collections::HashMap;
 
@@ -27,7 +27,8 @@ pub struct Config {
     pub density: u16,
     pub sdk: u16,
     pub layout_dir: u8,
-    pub night: bool,
+    /// `night` (true) or `notnight` (false), if the configuration says.
+    pub night: Option<bool>,
 }
 
 pub const DENSITY_ANY: u16 = 0xfffe;
@@ -53,30 +54,41 @@ impl Config {
             density: short(14),
             sdk: short(24),
             layout_dir: byte(28) & 0xc0,
-            night: byte(29) & 0x30 == 0x20,
+            night: match byte(29) & 0x30 {
+                0x10 => Some(false),
+                0x20 => Some(true),
+                _ => None,
+            },
         }
     }
 
-    /// Whether a Mac in English, day, left to right can use it.
-    fn matches(&self) -> bool {
+    /// Whether a Mac in English, left to right, in night mode or not, can
+    /// use it.
+    fn matches(&self, night: bool) -> bool {
         self.mcc == 0
             && self.mnc == 0
             && (self.language == [0, 0] || self.language == *b"en")
             && self.sdk <= SDK
             && self.layout_dir != 0x80
-            && !self.night
+            && self.night.is_none_or(|n| n == night)
     }
 
-    /// Higher is better: the default language, then the density a Mac
-    /// wants (any, then the highest), then the newest API level.
-    fn score(&self) -> (bool, u32, u16) {
+    /// Higher is better: the default language, then a night mode that
+    /// matches, then the density a Mac wants (any, then the highest),
+    /// then the newest API level.
+    fn score(&self) -> (bool, bool, u32, u16) {
         let density = match self.density {
             DENSITY_ANY => u32::MAX,
             DENSITY_NONE => u32::MAX - 1,
             0 => 160,
             d => d as u32,
         };
-        (self.language == [0, 0], density, self.sdk)
+        (
+            self.language == [0, 0],
+            self.night.is_some(),
+            density,
+            self.sdk,
+        )
     }
 }
 
@@ -125,14 +137,15 @@ impl Table {
         })
     }
 
-    /// Resource `id` in the best configuration that has it.
-    pub fn get(&self, id: u32) -> Option<(&Entry, Config)> {
+    /// Resource `id` in the best configuration that has it, in night mode
+    /// or not.
+    pub fn get(&self, id: u32, night: bool) -> Option<(&Entry, Config)> {
         let p = self.packages.iter().find(|p| p.id == (id >> 24) as u8)?;
         let entry = (id & 0xffff) as u16;
         p.types
             .get(&((id >> 16) as u8))?
             .iter()
-            .filter(|t| t.config.matches())
+            .filter(|t| t.config.matches(night))
             .filter_map(|t| t.entries.get(&entry).map(|e| (e, t.config)))
             .max_by_key(|(_, c)| c.score())
     }

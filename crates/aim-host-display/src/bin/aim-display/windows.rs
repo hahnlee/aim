@@ -14,8 +14,9 @@
 //!   the display's stacking stays the screen's, and a task Android moves to
 //!   the back (Back on its root activity) minimizes its window;
 //! - an app that goes home (a HOME intent) hides, as with Cmd+H;
-//! - an app its shim launches shows a splash, its icon on the window
-//!   background, at once and until Android reports its first frame.
+//! - an app its shim launches shows a splash, its icon on its splash
+//!   screen's background (else the window background), at once and until
+//!   Android reports its first frame.
 //! - closing the window removes the task, and a removed task's window
 //!   closes;
 //! - an orientation an activity asks for turns the window to landscape or
@@ -53,7 +54,7 @@ use crate::hosts::Host;
 use crate::metal::Target;
 use crate::objc::{
     CGPoint, CGRect, CGSize, Id, Sel, class, class_addMethod, nsstring, on_main, on_main_after,
-    release, sel,
+    release, sel, text,
 };
 use crate::window::{NS_BACKING_STORE_BUFFERED, NS_WINDOW_STYLE};
 
@@ -675,7 +676,7 @@ pub fn splash() {
         CGRect = cg(c), usize = NS_WINDOW_STYLE, usize = NS_BACKING_STORE_BUFFERED, bool = false);
     send!(w, c"setReleasedWhenClosed:" => (), bool = false);
     send!(w, c"setCollectionBehavior:" => (), usize = FULL_SCREEN_NONE);
-    let title = crate::shim::app_name().unwrap_or_default();
+    let title = crate::shim::info("CFBundleDisplayName").unwrap_or_default();
     send!(w, c"setTitle:" => (), Id = nsstring(&title));
     let view = splash_view(CGRect {
         size: CGSize {
@@ -689,6 +690,9 @@ pub fn splash() {
     send!(w, c"makeKeyAndOrderFront:" => (), Id = std::ptr::null_mut());
     let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
     send!(app, c"activateIgnoringOtherApps:" => (), bool = true);
+    // On screen now, not once the run loop turns: the host may not run it
+    // yet.
+    send!(class(c"CATransaction"), c"flush" => ());
     with(|s| {
         s.splash = Some(Splash {
             window: Some(w),
@@ -697,14 +701,41 @@ pub fn splash() {
     });
 }
 
-/// The app's icon, centered on the window background, filling `frame`.
+/// The app's splash screen background in the Mac's appearance, as its
+/// shim names it (`AIMSplashBackground`, `AIMSplashBackgroundDark`), else
+/// the window background.
+fn splash_background() -> Id {
+    let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
+    let appearance = send!(app, c"effectiveAppearance" => Id);
+    let names = [
+        nsstring("NSAppearanceNameAqua"),
+        nsstring("NSAppearanceNameDarkAqua"),
+    ];
+    let names = send!(class(c"NSArray"), c"arrayWithObjects:count:" => Id,
+        *const Id = names.as_ptr(), usize = names.len());
+    let best = send!(appearance, c"bestMatchFromAppearancesWithNames:" => Id, Id = names);
+    let key = if !best.is_null() && text(best) == "NSAppearanceNameDarkAqua" {
+        "AIMSplashBackgroundDark"
+    } else {
+        "AIMSplashBackground"
+    };
+    let argb =
+        crate::shim::info(key).and_then(|v| u32::from_str_radix(v.strip_prefix('#')?, 16).ok());
+    let Some(argb) = argb else {
+        return send!(class(c"NSColor"), c"windowBackgroundColor" => Id);
+    };
+    let [a, r, g, b] = argb.to_be_bytes().map(|c| f64::from(c) / 255.0);
+    send!(class(c"NSColor"), c"colorWithSRGBRed:green:blue:alpha:" => Id,
+        f64 = r, f64 = g, f64 = b, f64 = a)
+}
+
+/// The app's icon, centered on its splash background, filling `frame`.
 fn splash_view(frame: CGRect) -> Id {
     let v = send!(class(c"NSView"), c"alloc" => Id);
     let v = send!(v, c"initWithFrame:" => Id, CGRect = frame);
     send!(v, c"setAutoresizingMask:" => (), usize = SIZABLE);
     send!(v, c"setWantsLayer:" => (), bool = true);
-    let background = send!(class(c"NSColor"), c"windowBackgroundColor" => Id);
-    let background = send!(background, c"CGColor" => Id);
+    let background = send!(splash_background(), c"CGColor" => Id);
     let layer = send!(v, c"layer" => Id);
     send!(layer, c"setBackgroundColor:" => (), Id = background);
     let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
