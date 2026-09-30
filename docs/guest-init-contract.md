@@ -422,9 +422,14 @@ emulates the device.
 - **Image paths.** guest-init reads the image (scripts, `build.prop`,
   property contexts) with its symlinks resolved relative to the guest root,
   as `linux-run` does.
-- **linkerconfig.** `perform_apex_config` and `update_linker_config` run the
-  original `/apex/com.android.runtime/bin/linkerconfig --target
-  /linkerconfig` as root through `linux-run`, and wait for it.
+- **linkerconfig.** `perform_apex_config --bootstrap` and
+  `update_linker_config` run the original
+  `/apex/com.android.runtime/bin/linkerconfig --target /linkerconfig` as
+  root through `linux-run`, and wait for it. init runs it again at
+  post-fs-data's `perform_apex_config` because apexd has activated the
+  APEXes since; here every APEX is active from the start, so that run
+  would see the same list and write the same files (compared on two
+  boots), and guest-init skips it (#564).
 
 ## 10. First launches (2026-09-27)
 

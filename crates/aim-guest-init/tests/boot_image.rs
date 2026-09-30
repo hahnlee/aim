@@ -165,6 +165,12 @@ fn real_image_dry_run_boot() {
     // Roles: no ueventd process; apexd only serves apexservice.
     assert!(!launched.contains("ueventd"));
     assert!(!launched.contains("apexd-bootstrap"));
+    // linkerconfig runs once, at `perform_apex_config --bootstrap`: the
+    // post-fs-data run would see the same APEXes.
+    assert_eq!(
+        boot.executor.launches.iter().filter(|l| l.helper).count(),
+        1
+    );
     assert_eq!(boot.property("apexd.status").as_deref(), Some("ready"));
     // apex.all.ready is the replaced apexd's to set once it serves; a dry
     // run starts no process.
