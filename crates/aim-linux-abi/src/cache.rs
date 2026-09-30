@@ -8,8 +8,14 @@
 //! <dir>/<sha256>-v<VERSION>/meta   what the translator found (key=value lines)
 //! <dir>/<sha256>-v<VERSION>/elf    the translated file (only when translated)
 //! <dir>/<sha256>-v<VERSION>-sites/sites  load-time sites ([`sites_key`])
-//! <dir>/index/<sha256 of host path> -> "<dev>:<ino>:<size>:<mtime> <sha256>"
+//! <dir>/index/<sha256 of host path> -> "<dev>:<ino>:<size>:<mtime> <sha256> <summary>"
 //! ```
+//!
+//! The summary repeats what the digest's entry records, so a lookup opens
+//! nothing: `v<VERSION> translated|identity <ctr_el0>`, `v<VERSION>
+//! unsupported`, or `v<VERSION> sites` when only load-time sites are
+//! recorded. A link written before summaries existed has none; its entry's
+//! `meta` is read instead.
 //!
 //! An ELF stored inside another file (an APK's native library) is indexed
 //! as `<host path>!<offset>` ([`member_path`]).
@@ -20,15 +26,15 @@
 //! since the volume's mount point and device change with every attach:
 //!
 //! ```text
-//! <volume>/translated/paths/<sha256 of relative path> -> "<ino>:<size>:<mtime> <sha256>"
+//! <volume>/translated/paths/<sha256 of relative path> -> "<ino>:<size>:<mtime> <sha256> <summary>"
 //! ```
 //!
 //! - An entry is staged in `<dir>/.tmp-*`, made read-only, and published with
 //!   one `rename`, so readers see a complete entry or none. It is never
 //!   modified afterwards. A version bump changes every key, which
 //!   invalidates all older entries at once.
-//! - The index lets the runtime find an original's entry without hashing it:
-//!   one `readlink` per ELF open. Index links are replaced atomically
+//! - The index lets the runtime find an original's entry without hashing it
+//!   or opening anything: one `readlink` per ELF open. Index links are replaced atomically
 //!   (`rename` of a new symlink) when a file at a path changes, and are
 //!   checked against the file's current stat, so a stale link is a miss.
 
@@ -348,11 +354,18 @@ impl Cache {
     /// The sha256 recorded for the file at `host_path`, if the index has it
     /// and the file has not changed since.
     pub fn lookup_digest(&self, host_path: &Path, st: &FileStat) -> Option<String> {
+        self.read_index(host_path, st).map(|(sha, _)| sha)
+    }
+
+    /// The digest and summary (None in a link written before summaries)
+    /// the index records for `host_path`, if the file has not changed since.
+    fn read_index(&self, host_path: &Path, st: &FileStat) -> Option<(String, Option<String>)> {
         let (link, want) = self.index_link(host_path, st)?;
         let target = fs::read_link(link).ok()?;
-        let target = target.to_str()?;
-        let (tag, sha) = target.split_once(' ')?;
-        (tag == want && sha.len() == 64).then(|| sha.to_string())
+        let mut fields = target.to_str()?.splitn(3, ' ');
+        let (tag, sha) = (fields.next()?, fields.next()?);
+        (tag == want && sha.len() == 64)
+            .then(|| (sha.to_string(), fields.next().map(str::to_string)))
     }
 
     /// Read a published entry.
@@ -377,10 +390,29 @@ impl Cache {
         })
     }
 
-    /// The entry for the original file at `host_path`, through the index.
+    /// The entry for the original file at `host_path`, from the index's
+    /// summary (an unsupported entry's reason is only in its `meta`).
     pub fn lookup(&self, host_path: &Path, st: &FileStat) -> Option<Entry> {
-        let sha = self.lookup_digest(host_path, st)?;
-        self.entry(&xlate::key_for_digest(&sha))
+        let (sha, summary) = self.read_index(host_path, st)?;
+        let key = xlate::key_for_digest(&sha);
+        let Some(summary) = summary else {
+            return self.entry(&key);
+        };
+        let mut fields = summary.split(' ');
+        if fields.next()? != format!("v{}", xlate::VERSION) {
+            return None;
+        }
+        let kind = match fields.next()? {
+            "translated" => EntryKind::Translated(self.entry_dir(&key).join("elf")),
+            "identity" => EntryKind::Identity,
+            "unsupported" => EntryKind::Unsupported(String::new()),
+            _ => return None,
+        };
+        let ctr_el0 = match fields.next() {
+            Some(c) => u32::from_str_radix(c.trim_start_matches("0x"), 16).ok()?,
+            None => 0,
+        };
+        Some(Entry { key, kind, ctr_el0 })
     }
 
     /// Publish an entry atomically. Returns false if it already existed.
@@ -480,18 +512,35 @@ impl Cache {
             f.sync_all()?;
             set_mode(&path, 0o444)
         })?;
-        self.record_index(member, st, sha256)
+        self.record_sites_index(member, st, sha256)
     }
 
-    /// Point the index entry of `host_path` at `sha256`.
-    pub fn record_index(&self, host_path: &Path, st: &FileStat, sha256: &str) -> io::Result<()> {
+    /// Point the index entry of `member` at `sha256`, whose load-time
+    /// sites are recorded.
+    pub fn record_sites_index(&self, member: &Path, st: &FileStat, sha256: &str) -> io::Result<()> {
+        self.record_index(member, st, sha256, "sites", None)
+    }
+
+    /// Point the index entry of `host_path` at `sha256`, whose entry has
+    /// `outcome` (and `ctr_el0`, for translated and identity entries).
+    fn record_index(
+        &self,
+        host_path: &Path,
+        st: &FileStat,
+        sha256: &str,
+        outcome: &str,
+        ctr_el0: Option<u32>,
+    ) -> io::Result<()> {
         let (link, tag) = self.index_link(host_path, st).ok_or_else(|| {
             io::Error::other(format!(
                 "{}: outside the image this cache belongs to",
                 host_path.display()
             ))
         })?;
-        let want = format!("{tag} {sha256}");
+        let mut want = format!("{tag} {sha256} v{} {outcome}", xlate::VERSION);
+        if let Some(c) = ctr_el0 {
+            want.push_str(&format!(" {c:#x}"));
+        }
         if fs::read_link(&link).ok().as_deref() == Some(Path::new(&want)) {
             return Ok(());
         }
@@ -523,12 +572,12 @@ impl Cache {
         let sha = xlate::sha256_hex(&bytes);
         let key = xlate::key_for_digest(&sha);
         if let Some(e) = self.entry(&key) {
-            self.record_index(host_path, &st, &sha)?;
-            let kind = match e.kind {
-                EntryKind::Translated(_) => "translated",
-                EntryKind::Identity => "identity",
-                EntryKind::Unsupported(_) => "unsupported",
+            let (kind, ctr_el0) = match e.kind {
+                EntryKind::Translated(_) => ("translated", Some(e.ctr_el0)),
+                EntryKind::Identity => ("identity", Some(e.ctr_el0)),
+                EntryKind::Unsupported(_) => ("unsupported", None),
             };
+            self.record_index(host_path, &st, &sha, kind, ctr_el0)?;
             return Ok(Some(FileResult {
                 key,
                 translated_now: false,
@@ -547,7 +596,11 @@ impl Cache {
             _ => None,
         };
         let now = self.publish(&key, &meta, output)?;
-        self.record_index(host_path, &st, &sha)?;
+        let ctr_el0 = match &t.outcome {
+            Outcome::Unsupported(_) => None,
+            _ => Some(t.report.ctr_el0),
+        };
+        self.record_index(host_path, &st, &sha, t.outcome.name(), ctr_el0)?;
         Ok(Some(FileResult {
             key,
             translated_now: now,
@@ -559,7 +612,7 @@ impl Cache {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cache, FileStat, migrate_legacy_dir};
+    use super::{Cache, EntryKind, FileStat, migrate_legacy_dir};
     use std::fs;
 
     #[test]
@@ -577,7 +630,7 @@ mod tests {
         assert!(Cache::image_of(&root).is_none(), "no translated/ yet");
         let cache = Cache::image(&root);
         let st = FileStat::of_path(&lib).unwrap();
-        cache.record_index(&lib, &st, &sha).unwrap();
+        cache.record_sites_index(&lib, &st, &sha).unwrap();
         assert!(Cache::image_of(&root).is_some());
         assert_eq!(cache.lookup_digest(&lib, &st), Some(sha.clone()));
         // Another attach: another device and mount point, same relative
@@ -610,8 +663,66 @@ mod tests {
         // A path outside the tree is not the image cache's.
         let st3 = FileStat::of_path(&outside).unwrap();
         assert_eq!(other.lookup_digest(&outside, &st3), None);
-        assert!(other.record_index(&outside, &st3, &sha).is_err());
+        assert!(other.record_sites_index(&outside, &st3, &sha).is_err());
         super::remove_tree(&vol).unwrap();
+    }
+
+    /// A lookup takes the entry's outcome from the index link and opens
+    /// nothing; a link without a summary still finds the entry's `meta`.
+    #[test]
+    fn lookup_reads_the_index_summary() {
+        let dir = std::env::temp_dir().join(format!("aim-index-summary-{}", std::process::id()));
+        let _ = super::remove_tree(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("lib.so");
+        fs::write(&file, b"original").unwrap();
+        let st = FileStat::of_path(&file).unwrap();
+        let cache = Cache::new(dir.join("cache"));
+        let sha = "cd".repeat(32);
+        let key = crate::xlate::key_for_digest(&sha);
+
+        // No entry directory exists: the summary alone answers.
+        cache
+            .record_index(&file, &st, &sha, "translated", Some(0x8444_c004))
+            .unwrap();
+        let e = cache.lookup(&file, &st).unwrap();
+        assert_eq!(
+            e.kind,
+            EntryKind::Translated(cache.entry_dir(&key).join("elf"))
+        );
+        assert_eq!((e.key.as_str(), e.ctr_el0), (key.as_str(), 0x8444_c004));
+        cache
+            .record_index(&file, &st, &sha, "identity", Some(1))
+            .unwrap();
+        assert_eq!(cache.lookup(&file, &st).unwrap().kind, EntryKind::Identity);
+        cache.record_sites_index(&file, &st, &sha).unwrap();
+        assert!(cache.lookup(&file, &st).is_none());
+        assert_eq!(cache.lookup_digest(&file, &st), Some(sha.clone()));
+
+        // Another translator version's summary is a miss.
+        let (link, tag) = cache.index_link(&file, &st).unwrap();
+        let relink = |target: String| {
+            fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(target, &link).unwrap();
+        };
+        relink(format!("{tag} {sha} v0 translated 0x1"));
+        assert!(cache.lookup(&file, &st).is_none());
+
+        // A link from before summaries: the entry's meta.
+        relink(format!("{tag} {sha}"));
+        assert!(cache.lookup(&file, &st).is_none());
+        fs::create_dir_all(cache.entry_dir(&key)).unwrap();
+        fs::write(
+            cache.entry_dir(&key).join("meta"),
+            format!(
+                "version={}\noutcome=identity\nctr_el0=0x5\n",
+                crate::xlate::VERSION
+            ),
+        )
+        .unwrap();
+        let e = cache.lookup(&file, &st).unwrap();
+        assert_eq!((e.kind, e.ctr_el0), (EntryKind::Identity, 5));
+        super::remove_tree(&dir).unwrap();
     }
 
     #[test]

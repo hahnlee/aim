@@ -92,7 +92,8 @@ root/               the guest's root: the original files, byte-identical,
                     and original owners and modes (dev.aim.android-inode)
 root.identity       the archive's sha256
 translated/         <sha256>-v<VERSION>/{meta,elf}: translated copies
-translated/paths/   <sha256 of the path relative to root/> -> "<ino>:<size>:<mtime> <sha256>"
+translated/paths/   <sha256 of the path relative to root/> -> "<ino>:<size>:<mtime> <sha256> <summary>"
+                    (the summary names the entry's outcome; crates/aim-linux-abi/src/cache.rs)
 ```
 
 An existing image is never rewritten: other checkouts may link and use
