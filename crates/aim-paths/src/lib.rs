@@ -155,6 +155,12 @@ pub fn derived_image() -> PathBuf {
     derived_image_mount().join("root")
 }
 
+/// The data templates a new data directory starts from (`userdata`
+/// node, docs/first-boot.md).
+pub fn userdata() -> PathBuf {
+    out().join("userdata")
+}
+
 /// Markers of tests that skipped for a missing input (see [`skip`]).
 pub fn test_skips() -> PathBuf {
     out().join("test-skips")

@@ -18,7 +18,7 @@ fn dir(name: &str) -> PathBuf {
 #[test]
 fn names_that_differ_only_in_case_coexist() {
     let dir = dir("case");
-    let image = DataImage::attach(&dir).unwrap();
+    let image = DataImage::attach(&dir, None).unwrap();
     assert!(disk::is_mount_point(&dir));
     // Made at its ceiling, so the next attach need not grow it.
     let ceiling = data::ceiling(&data::image_of(&dir)).unwrap();
@@ -31,7 +31,7 @@ fn names_that_differ_only_in_case_coexist() {
     assert!(!disk::is_mount_point(&dir));
 
     // The data persists in the image.
-    let image = DataImage::attach(&dir).unwrap();
+    let image = DataImage::attach(&dir, None).unwrap();
     assert_eq!(fs::read_to_string(dir.join("foo")).unwrap(), "lower");
     drop(image);
     data::remove(&dir).unwrap();
@@ -41,7 +41,7 @@ fn names_that_differ_only_in_case_coexist() {
 #[test]
 fn deleted_data_returns_to_the_host_at_stop() {
     let dir = dir("reclaim");
-    let image = DataImage::attach(&dir).unwrap();
+    let image = DataImage::attach(&dir, None).unwrap();
     let empty = data::usage(&dir).unwrap().allocated;
     let mut file = fs::File::create(dir.join("big")).unwrap();
     // Incompressible, so the volume really stores 1 GiB.
@@ -76,8 +76,8 @@ fn deleted_data_returns_to_the_host_at_stop() {
 #[test]
 fn one_user_and_recovery_from_a_crash() {
     let dir = dir("lock");
-    let image = DataImage::attach(&dir).unwrap();
-    let second = DataImage::attach(&dir).unwrap_err();
+    let image = DataImage::attach(&dir, None).unwrap();
+    let second = DataImage::attach(&dir, None).unwrap_err();
     assert!(second.contains("in use"), "{second}");
     drop(image);
 
@@ -92,7 +92,7 @@ fn one_user_and_recovery_from_a_crash() {
     )
     .unwrap();
     fs::write(dir.join("kept"), "x").unwrap();
-    let image = DataImage::attach(&dir).unwrap();
+    let image = DataImage::attach(&dir, None).unwrap();
     assert!(
         disk::attached()
             .unwrap()
@@ -108,7 +108,7 @@ fn one_user_and_recovery_from_a_crash() {
 fn old_plain_data_directories_are_refused() {
     let dir = dir("plain");
     fs::create_dir_all(dir.join("data")).unwrap();
-    let error = DataImage::attach(&dir).unwrap_err();
+    let error = DataImage::attach(&dir, None).unwrap_err();
     assert!(error.contains("before data images"), "{error}");
     fs::remove_dir_all(&dir).unwrap();
 }
@@ -131,7 +131,7 @@ fn an_image_grows_to_its_host_volume_and_keeps_its_data() {
     fs::write(dir.join("kept"), "x").unwrap();
     disk::detach(&device, std::time::Duration::from_secs(20)).unwrap();
 
-    let attached = DataImage::attach(&dir).unwrap();
+    let attached = DataImage::attach(&dir, None).unwrap();
     let ceiling = data::ceiling(&image).unwrap();
     assert_eq!(disk::capacity(&dir), Some(ceiling));
     assert_eq!(fs::read_to_string(dir.join("kept")).unwrap(), "x");
@@ -140,4 +140,37 @@ fn an_image_grows_to_its_host_volume_and_keeps_its_data() {
     // Nothing is preallocated: the file holds what the volume uses.
     assert!(before < 64 << 20, "the grown image holds {before} bytes");
     data::remove(&dir).unwrap();
+}
+
+#[test]
+fn data_directories_start_from_a_template_apart() {
+    let template = dir("template");
+    let template_image = data::image_of(&template);
+    data::create(&template_image).unwrap();
+    let image = DataImage::attach(&template, None).unwrap();
+    fs::write(template.join("shipped"), "t").unwrap();
+    drop(image);
+
+    // Two data directories from it, attached at once: each has what the
+    // template had, and its own writes.
+    let (one, two) = (dir("from-a"), dir("from-b"));
+    let a = DataImage::attach(&one, Some(&template_image)).unwrap();
+    let b = DataImage::attach(&two, Some(&template_image)).unwrap();
+    for d in [&one, &two] {
+        assert_eq!(fs::read_to_string(d.join("shipped")).unwrap(), "t");
+    }
+    fs::write(one.join("mine"), "a").unwrap();
+    fs::remove_file(one.join("shipped")).unwrap();
+    assert!(!two.join("mine").exists());
+    assert!(two.join("shipped").exists());
+    drop((a, b));
+
+    // The template is only read when there is no image.
+    let a = DataImage::attach(&one, Some(&template_image)).unwrap();
+    assert_eq!(fs::read_to_string(one.join("mine")).unwrap(), "a");
+    assert!(!one.join("shipped").exists());
+    drop(a);
+    for d in [&one, &two, &template] {
+        data::remove(d).unwrap();
+    }
 }

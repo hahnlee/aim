@@ -3,7 +3,9 @@
 //! boot runs (docs/storage.md).
 //!
 //! - **Created on demand** as a sparse image (ASIF) that occupies only what
-//!   the guest wrote. Its size, what the guest sees as `/data`'s, is only a
+//!   the guest wrote, as an APFS clone of a template (a prepared image,
+//!   the `userdata` build node's) where there is one, which costs nothing,
+//!   or made empty. Its size, what the guest sees as `/data`'s, is only a
 //!   [`ceiling`]: the size of the host volume holding it, to which an
 //!   image found smaller is grown at attach. The Mac's free space is the
 //!   real limit; the guest's syscall layer keeps it from taking the last of
@@ -101,9 +103,54 @@ pub struct DataImage {
     _lock: File,
 }
 
+/// The empty data image among the data templates.
+pub const EMPTY_TEMPLATE: &str = "empty.asif";
+
+/// The name of the data template a build-time first boot of the system
+/// image of identity `image` made for a device of `sku` (the SKU makes
+/// system features, which the template's package state depends on).
+pub fn template_name(image: &str, sku: Option<&str>) -> String {
+    let image = &image[..image.len().min(16)];
+    match sku {
+        Some(sku) => format!("userdata-{image}-{sku}.asif"),
+        None => format!("userdata-{image}.asif"),
+    }
+}
+
+/// The data template in `dir` (the `userdata` build node's output) a new
+/// data directory starts from: the one made for the system image of
+/// identity `image` and a device of `sku`, else the empty image.
+pub fn template(dir: &Path, image: Option<&str>, sku: Option<&str>) -> Option<PathBuf> {
+    image
+        .map(|image| dir.join(template_name(image, sku)))
+        .into_iter()
+        .chain([dir.join(EMPTY_TEMPLATE)])
+        .find(|t| t.is_file())
+}
+
+/// Makes an empty data image at `image`: one case-sensitive APFS volume
+/// of up to its [`ceiling`].
+pub fn create(image: &Path) -> Result<(), String> {
+    disk::create_case_sensitive(image, &ceiling(image)?.to_string(), VOLUME)
+}
+
+/// Makes `image` a copy of the data image `template`: an APFS clone on the
+/// template's volume. Written under another name first, so that an
+/// interrupted copy leaves no image.
+fn copy_template(template: &Path, image: &Path) -> Result<(), String> {
+    let mut name = image.as_os_str().to_os_string();
+    name.push(".part");
+    let part = PathBuf::from(name);
+    let _ = fs::remove_file(&part);
+    // std's copy clones where it can (fclonefileat).
+    fs::copy(template, &part).map_err(|e| format!("{}: {e}", template.display()))?;
+    fs::rename(&part, image).map_err(|e| format!("{}: {e}", image.display()))
+}
+
 impl DataImage {
-    /// Attaches the image of `dir` at `dir`, creating it first if needed.
-    pub fn attach(dir: &Path) -> Result<Self, String> {
+    /// Attaches the image of `dir` at `dir`, making it first if needed: a
+    /// copy of `template` where there is one, or an empty image.
+    pub fn attach(dir: &Path, template: Option<&Path>) -> Result<Self, String> {
         let dir = mount_point(dir)?;
         let image = image_of(&dir);
         let ceiling = ceiling(&image)?;
@@ -117,7 +164,10 @@ impl DataImage {
                     dir.display()
                 ));
             }
-            disk::create_case_sensitive(&image, &ceiling.to_string(), VOLUME)?;
+            match template {
+                Some(template) => copy_template(template, &image)?,
+                None => create(&image)?,
+            }
         }
         let lock_path = lock_of(&dir);
         let lock = File::create(&lock_path).map_err(|e| format!("{}: {e}", lock_path.display()))?;
@@ -348,6 +398,29 @@ mod tests {
             runtime_of(Path::new("/t/boot/data")),
             PathBuf::from("/t/boot/data.run")
         );
+    }
+
+    #[test]
+    fn a_template_of_the_sku_else_the_empty_one() {
+        let dir = std::env::temp_dir().join(format!("aim-templates-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let image = "1104a3eb1b9101e6974dd1fff9a0fc2f";
+        assert_eq!(template(&dir, Some(image), Some("light")), None);
+        fs::write(dir.join(EMPTY_TEMPLATE), "").unwrap();
+        let empty = Some(dir.join("empty.asif"));
+        assert_eq!(template(&dir, Some(image), Some("light")), empty);
+        fs::write(dir.join("userdata-1104a3eb1b9101e6-light.asif"), "").unwrap();
+        assert_eq!(
+            template(&dir, Some(image), Some("light")),
+            Some(dir.join("userdata-1104a3eb1b9101e6-light.asif"))
+        );
+        assert_eq!(template(&dir, Some(image), None), empty);
+        assert_eq!(
+            template(&dir, Some("2104a3eb1b9101e6"), Some("light")),
+            empty
+        );
+        assert_eq!(template(&dir, None, Some("light")), empty);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

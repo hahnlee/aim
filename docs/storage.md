@@ -17,12 +17,17 @@ rights and which stay hidden from the Finder (`nobrowse`):
 `guest-init --run --data DATA` (and so `cargo aim boot` and `cargo aim
 bench`) keeps everything of `DATA` in `DATA.asif` beside it:
 
-- **Created on demand**: `diskutil image create blank --format ASIF`
-  with no filesystem, then `newfs_apfs -e` (case-sensitive APFS, volume
-  `aim-data`). Its size is only a ceiling: the size of the Mac volume
-  holding the image (`aim_storage::data::ceiling`), which is what `df
-  /data` shows; the file holds only what the guest wrote. Nothing is
-  preallocated. An image found smaller than that at attach (made with the
+- **Created on demand**: an APFS clone (`clonefile`, a copy on another
+  volume) of a data template in `guest-init --userdata DIR` (`cargo aim
+  boot` and aimctl pass `target/aim/userdata`, docs/first-boot.md), which
+  is instant: the empty image `DIR/empty.asif` of the `userdata/empty`
+  node. Without one, `diskutil image create blank --format ASIF` with no
+  filesystem, then `newfs_apfs -e` (case-sensitive APFS, volume
+  `aim-data`), about 0.5 s more of a first boot (#563). Clones share the
+  template's volume UUID, which the guest does not see. Its size is only
+  a ceiling: the size of the Mac volume holding the image
+  (`aim_storage::data::ceiling`), which is what `df /data` shows; the
+  file holds only what the guest wrote. Nothing is preallocated. An image found smaller than that at attach (made with the
   64 GB ceiling used before, or moved to a larger disk) is detached, grown
   with `diskutil image resize`, which keeps its data, and attached again;
   that costs about a second once.

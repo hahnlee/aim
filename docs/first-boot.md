@@ -1,6 +1,7 @@
 # First boot
 
-Status: design (#565), not implemented.
+Status: design (#565); item 4, the data image as a clone (#563), is
+implemented.
 
 A first boot (a new data directory) reaches `sys.boot_completed` in about
 11 s, a repeat boot of the same data in about 5.4 s. The difference is
@@ -248,9 +249,10 @@ template (another Mac) boots without one until one is built.
 clones the template into `<data>.asif` (`clonefile`; a real copy when the
 data directory is on another volume), then attaches it as a repeat boot
 does; an image smaller than the host volume is grown as today. guest-init
-gets the template's path as an argument (`--userdata`), from `cargo aim
-boot` and aimctl, which pick the one of the booted image and the Mac's
-SKU. Without one, the image is created empty, as today.
+gets the templates' directory as an argument (`--userdata DIR`, from
+`cargo aim boot` and aimctl) and picks the template of the booted image's
+identity and the device's SKU (`aim_storage::data::template`), else the
+empty image `DIR/empty.asif`. Without either, the image is created empty.
 
 The first boot then runs the original from that state: PMS as on a repeat
 boot, every other owner as on a first boot, generating the device's own

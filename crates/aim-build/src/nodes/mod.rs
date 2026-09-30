@@ -15,6 +15,7 @@ mod oat;
 mod service_aidl;
 mod system_server;
 mod translation_cache;
+mod userdata;
 mod xsdc;
 
 use crate::graph::{Action, Ctx, Node};
@@ -38,6 +39,7 @@ pub fn declare(mut built: Vec<Node>) -> Result<Vec<Node>, String> {
     let derived = derived_image::node(&built)?;
     built.push(derived);
     built.push(translation_cache::node());
+    built.push(userdata::empty());
     Ok(built)
 }
 
@@ -60,6 +62,7 @@ pub fn run(node: &Node, ctx: &Ctx, log: &mut Log) -> Result<Vec<PathBuf>, String
         Action::Oat => oat::run(ctx, log)?,
         Action::DerivedImage => derived_image::run(log)?,
         Action::TranslationCache => translation_cache::run(ctx, log)?,
+        Action::EmptyUserdata => userdata::run_empty(log)?,
         Action::Cargo(_) => unreachable!(),
     }
     Ok(Vec::new())
@@ -105,6 +108,7 @@ pub fn clean(node: &Node) -> Result<(), String> {
         Action::SystemServer => vec![system_server::out()],
         Action::DeviceServices => vec![device_services::out()],
         Action::Oat => vec![oat::out()],
+        Action::EmptyUserdata => vec![userdata::out().join(aim_storage::data::EMPTY_TEMPLATE)],
         Action::DerivedImage => {
             detach_derived()?;
             vec![aim_paths::derived_image_shadow()]

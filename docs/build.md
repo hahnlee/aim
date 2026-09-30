@@ -78,6 +78,7 @@ non-cargo stages are declared in code:
 | `oat` | `image`, `art`, `boot-image`, `system-server`, `host/linux-run` (order only) | | `target/aim/oat`: the image's oat files with code compiled again (docs/art-exception-patches.md, "Other oat files") at their guest paths under `root/`, and `overlay.toml`, which `image/overlay.toml` includes |
 | `derived-image` | `image` and the producer of every built overlay source | `image/overlay.toml` and its checked-in sources | `target/aim/derived.shadow`, attached at `target/aim/derived` |
 | `translation-cache` | `derived-image`, `host/linux-translate` | | the derived image's `translated/` |
+| `userdata/empty` | | | `target/aim/userdata/empty.asif`: the empty data image a new data directory starts as a clone of (`guest-init --userdata`, docs/first-boot.md) |
 
 The default `cargo aim build` builds every node except the HALs' test
 clients (`[package.metadata.vendor-hal] test = ...`), which `cargo aim test
