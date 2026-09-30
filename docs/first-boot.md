@@ -1,7 +1,8 @@
 # First boot
 
-Status: design (#565); item 4, the data image as a clone (#563), and
-item 1, the device's APK compiled in the image, are implemented.
+Status: design (#565). Implemented: item 4, the data image as a clone
+(#563); item 1, the device's APK compiled in the image; item 2, the
+package parser cache in a build-time template ("The template").
 
 A first boot (a new data directory) reaches `sys.boot_completed` in about
 11 s, a repeat boot of the same data in about 5.4 s. The difference is
@@ -212,18 +213,19 @@ mechanism with content.
 
 ### Made by a build-time first boot
 
-A node of `cargo aim` (`userdata`, the name of AOSP's data partition
-image) runs the original's first boot at build time and keeps what item 3
-lists:
+The `userdata/template` node of `cargo aim` (after AOSP's data
+partition image; `crates/aim-build/src/nodes/userdata.rs`) runs the
+original's first boot at build time and keeps what is shipped (today
+item 2's parser cache):
 
 1. **Boot.** guest-init boots the derived image on a scratch data
-   directory, the same boot as a user's first boot, with no window on
-   the Mac (to settle when implementing: window mode shows only app
-   tasks). It waits for `sys.boot_completed` and the deferred app data
-   reconcile, then shuts Android down as a device does (`svc power
-   shutdown`: ShutdownThread has PMS write its settings synchronously,
-   then init's `sys.powerctl`, which guest-init takes as the end of the
-   boot). Play Store starts updating itself within 30 s of
+   directory made from the empty image, the same boot as a user's first
+   boot, in window mode (which shows only app tasks; a first-run task
+   may still show a window for a moment, #607). At
+   `sys.boot_completed` it shuts Android down as a device does (`svc
+   power shutdown`, run with init's environment as `adb shell` runs it:
+   ShutdownThread has PMS write its settings, then init's
+   `sys.powerctl` ends the boot, 3 s later). Play Store starts updating itself within 30 s of
    `sys.boot_completed`; what it installs is not in the shipped set, and
    step 2 fails the build if it reached `packages.xml`.
 2. **Check.** `packages.xml` lists only the image's packages (no package
@@ -233,12 +235,16 @@ lists:
    build boot's image, with owners, labels and mtimes. A copy into a
    fresh volume, not a deletion from the used one: the used volume's
    freed blocks would still hold its keys and seeds.
-4. **Publish.** `target/aim/userdata/<sku>.asif`, with a manifest of the
-   shipped files and their sha256.
+4. **Publish.** `target/aim/userdata/userdata-<image>-<sku>.asif` (the
+   derived image's identity, the SKU the build boot's guest-init gave
+   the device), with `.sha256`, the shipped files and their sha256.
+   The node takes about 30 s of a build whose derived image changed
+   (28.5 s on 2026-10-01: the boot 14.5 s, the shutdown 3 s).
 
 The node's key is the derived image's output key (its identity and its
 shadow's creation time: the APK mtimes the cache and PMS compare are the
-shadow's), the SKU, and the node's recipe. It does not depend on the
+shadow's) and the node's recipe; the template's name carries the image
+and the SKU, and guest-init takes only the one of the image it boots. It does not depend on the
 runtime's binaries (order-only, as the `oat` node's `linux-run`): the
 content is the original's output, whatever runs it. A SKU without a
 template (another Mac) boots without one until one is built.

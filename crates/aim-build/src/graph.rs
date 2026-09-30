@@ -62,6 +62,7 @@ pub enum Action {
     DerivedImage,
     TranslationCache,
     EmptyUserdata,
+    UserdataTemplate,
 }
 
 pub struct Node {

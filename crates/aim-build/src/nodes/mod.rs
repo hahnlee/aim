@@ -40,6 +40,7 @@ pub fn declare(mut built: Vec<Node>) -> Result<Vec<Node>, String> {
     built.push(derived);
     built.push(translation_cache::node());
     built.push(userdata::empty());
+    built.push(userdata::template());
     Ok(built)
 }
 
@@ -63,6 +64,7 @@ pub fn run(node: &Node, ctx: &Ctx, log: &mut Log) -> Result<Vec<PathBuf>, String
         Action::DerivedImage => derived_image::run(log)?,
         Action::TranslationCache => translation_cache::run(ctx, log)?,
         Action::EmptyUserdata => userdata::run_empty(log)?,
+        Action::UserdataTemplate => userdata::run_template(ctx, log)?,
         Action::Cargo(_) => unreachable!(),
     }
     Ok(Vec::new())
@@ -109,6 +111,8 @@ pub fn clean(node: &Node) -> Result<(), String> {
         Action::DeviceServices => vec![device_services::out()],
         Action::Oat => vec![oat::out()],
         Action::EmptyUserdata => vec![userdata::out().join(aim_storage::data::EMPTY_TEMPLATE)],
+        // Its templates go with the next run.
+        Action::UserdataTemplate => Vec::new(),
         Action::DerivedImage => {
             detach_derived()?;
             vec![aim_paths::derived_image_shadow()]

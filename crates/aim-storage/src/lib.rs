@@ -7,8 +7,10 @@
 //!
 //! - [`system`]: the pinned original image as a compressed read-only image
 //!   with its translation cache, and the derived image as a shadow over it;
-//! - [`data`]: the writable data of one data directory, a sparse image.
+//! - [`data`]: the writable data of one data directory, a sparse image;
+//! - [`copy`]: copies between them that keep what the guest sees.
 
+pub mod copy;
 pub mod data;
 pub mod disk;
 pub mod system;
