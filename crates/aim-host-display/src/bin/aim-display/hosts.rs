@@ -1,8 +1,10 @@
 //! Window hosts, in the display server (`docs/windows.md`, "App shims"):
-//! the processes that show one package's task windows under the app's own
-//! Dock icon (`shim.rs`).
+//! the processes that show task windows under an app's own Dock icon
+//! (`shim.rs`), one per launcher activity.
 //!
-//! A host gets the task records of its package and the frames to show: the
+//! A task goes to the host of the activity it was started with, else to
+//! the host that stands for its package (the primary shim's, else any).
+//! A host gets the task records of its tasks and the frames to show: the
 //! buffers once each, as their memfds, and every present. A present waits
 //! (at most [`SAMPLE_MS`]) until each host has read its buffer, so the
 //! composer may reuse it, and the present fence waits for them too. The
@@ -31,6 +33,8 @@ const SAMPLE_MS: u64 = 250;
 
 pub struct Host {
     pub package: String,
+    /// Its launcher activity's class; empty for the system shim.
+    pub activity: String,
     writer: Mutex<UnixStream>,
     /// Buffers the host has.
     imported: Mutex<HashSet<u64>>,
@@ -44,14 +48,27 @@ pub struct Host {
 static HOSTS: Mutex<Vec<Arc<Host>>> = Mutex::new(Vec::new());
 static SEQ: AtomicU32 = AtomicU32::new(0);
 
-/// The host of `package`.
+/// The host that stands for `package`: its primary shim's, else any.
 pub fn of(package: &str) -> Option<Arc<Host>> {
-    HOSTS
+    let hosts = HOSTS.lock().unwrap();
+    let mut all = hosts.iter().filter(|h| h.package == package);
+    let first = all.clone().next();
+    all.find(|h| crate::apps::is_primary(package, &h.activity))
+        .or(first)
+        .cloned()
+}
+
+/// The host that shows a task of `package` started with `activity`
+/// (`package/class`): that activity's, else the package's.
+pub fn for_task(package: &str, activity: &str) -> Option<Arc<Host>> {
+    let class = activity.split_once('/').map_or("", |(_, c)| c);
+    let exact = HOSTS
         .lock()
         .unwrap()
         .iter()
-        .find(|h| h.package == package)
-        .cloned()
+        .find(|h| h.package == package && !class.is_empty() && h.activity == class)
+        .cloned();
+    exact.or_else(|| of(package))
 }
 
 /// The task a host's window `number` shows.
@@ -229,12 +246,16 @@ pub fn serve(sock: OwnedFd) {
     let mut sock = UnixStream::from(sock);
     let Some(hello) = read(&mut sock) else { return };
     let Ok(writer) = sock.try_clone() else { return };
-    let package = hello.window.text().to_string();
+    let (package, activity) = match hello.window.text().split_once('/') {
+        Some((p, a)) => (p.to_string(), a.to_string()),
+        None => return,
+    };
     if hello.op != host::HELLO || hello.id != wire::VERSION || package.is_empty() {
         return;
     }
     let h = Arc::new(Host {
         package: package.clone(),
+        activity: activity.clone(),
         writer: Mutex::new(writer),
         imported: Mutex::new(HashSet::new()),
         sampled: Mutex::new((0, 0, false)),
@@ -243,8 +264,11 @@ pub fn serve(sock: OwnedFd) {
     });
     {
         let mut hosts = HOSTS.lock().unwrap();
-        // One host per package: a second shim of it is turned away.
-        if hosts.iter().any(|o| o.package == package) {
+        // One host per activity: a second shim of it is turned away.
+        if hosts
+            .iter()
+            .any(|o| o.package == package && o.activity == activity)
+        {
             return;
         }
         hosts.push(h.clone());
@@ -252,9 +276,9 @@ pub fn serve(sock: OwnedFd) {
     if let Some(image) = crate::cursor::current() {
         h.send_cursor(Some(&image));
     }
-    eprintln!("aim-display: window host for {package}");
-    let adopted = h.clone();
-    on_main(move || crate::windows::adopt(&adopted.package, &adopted));
+    eprintln!("aim-display: window host for {package}/{activity}");
+    let adopted = package.clone();
+    on_main(move || crate::windows::route_package(&adopted));
     crate::notifications::host_connected(&h);
     while let Some(r) = read(&mut sock) {
         match r.op {
@@ -281,8 +305,8 @@ pub fn serve(sock: OwnedFd) {
     HOSTS.lock().unwrap().retain(|o| !Arc::ptr_eq(o, &h));
     h.sampled.lock().unwrap().2 = true;
     h.cond.notify_all();
-    eprintln!("aim-display: window host for {package} left");
-    on_main(move || crate::windows::disown(&package));
+    eprintln!("aim-display: window host for {package}/{activity} left");
+    on_main(move || crate::windows::route_package(&package));
 }
 
 /// A host's request, for the task bridge.

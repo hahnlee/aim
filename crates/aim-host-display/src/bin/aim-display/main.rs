@@ -25,6 +25,7 @@
 
 #[macro_use]
 mod objc;
+mod apps;
 mod cursor;
 mod hosts;
 mod input;
@@ -392,7 +393,7 @@ fn main() {
                 }
             }
             "--capture" => capture = Some(PathBuf::from(value())),
-            "--apps" => notifications::set_apps(std::path::Path::new(&value())),
+            "--apps" => apps::set_dir(std::path::Path::new(&value())),
             _ => {
                 eprintln!("{USAGE}");
                 std::process::exit(2)

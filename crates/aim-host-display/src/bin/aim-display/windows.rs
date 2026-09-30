@@ -24,8 +24,9 @@
 //! window says once how to go back ([`back_hint`]), until dismissed.
 //!
 //! The same windows run in the display server and in a window host, an
-//! app's shim (`shim.rs`): the server shows the tasks of packages no host
-//! has, and hands a host's package's tasks to it ([`crate::hosts`]). A host
+//! app's shim (`shim.rs`): the server hands each task to the host of its
+//! activity or package ([`crate::hosts::for_task`]) and shows the tasks no
+//! host takes. A host
 //! sends its requests and input through the server, which alone knows
 //! which task is in front.
 
@@ -35,13 +36,14 @@ use std::ffi::c_void;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aim_host_display::input::translate::Phase;
 use aim_host_display::windows::{Frame, Screen, bounds, content, view_to_display};
 use aim_hostcall::display::{Window as Record, window};
 
+use crate::hosts::Host;
 use crate::metal::Target;
 use crate::objc::{
     CGPoint, CGRect, CGSize, Id, Sel, class, class_addMethod, nsstring, on_main, on_main_after,
@@ -104,11 +106,13 @@ struct Held {
 #[derive(Clone, Default)]
 struct Info {
     package: String,
+    /// The activity it was started with, `package/class`.
+    activity: String,
     title: String,
     /// Its bounds and caption, once it has a window.
     bounds: Option<([i32; 4], i32)>,
-    /// A window host shows it.
-    hosted: bool,
+    /// The window host that shows it (in the server).
+    host: Option<Arc<Host>>,
     /// Its window asked to close it.
     closing: bool,
 }
@@ -252,6 +256,7 @@ fn note(s: &mut State, r: &Record) -> Info {
     let info = s.infos.entry(r.task).or_default();
     match r.op {
         window::PACKAGE => info.package = r.text().to_string(),
+        window::ACTIVITY => info.activity = r.text().to_string(),
         window::TITLE => info.title = r.text().to_string(),
         window::TASK => info.bounds = Some((r.bounds, r.caption)),
         _ => {}
@@ -260,20 +265,19 @@ fn note(s: &mut State, r: &Record) -> Info {
 }
 
 /// A record of the task bridge (in the server): a window host's when one
-/// shows the task's package, else shown here.
+/// shows the task, else shown here.
 fn on_bridge_record(r: &Record) {
-    let host = with(|s| {
-        let info = note(s, r);
+    with(|s| {
+        note(s, r);
         if r.op == window::FRONT {
             s.front = Some(r.task);
         }
-        let host = crate::hosts::of(&info.package);
-        if let Some(i) = s.infos.get_mut(&r.task) {
-            i.hosted = host.is_some();
-        }
-        host
-    })
-    .flatten();
+    });
+    if matches!(r.op, window::PACKAGE | window::ACTIVITY) && route(r.task) {
+        // The new owner got the task as it is now, this record included.
+        return;
+    }
+    let host = with(|s| s.infos.get(&r.task).and_then(|i| i.host.clone())).flatten();
     match host {
         Some(h) => {
             h.send_window(r);
@@ -298,7 +302,7 @@ pub fn on_host_record(r: &Record) {
 fn apply(r: &Record) {
     match r.op {
         window::TASK => task(r.task, r.bounds, r.caption),
-        window::PACKAGE | window::TITLE => {
+        window::PACKAGE | window::ACTIVITY | window::TITLE => {
             let shown = with(|s| {
                 let w = s.tasks.get(&r.task)?.window;
                 Some((w, s.infos.get(&r.task)?.title()))
@@ -319,63 +323,79 @@ fn apply(r: &Record) {
     }
 }
 
-/// A window host for `package` connected (in the server): the windows of
-/// its tasks move there.
-pub fn adopt(package: &str, host: &crate::hosts::Host) {
-    let tasks: Vec<(i32, Info)> = with(|s| {
-        s.infos
-            .iter_mut()
-            .filter(|(_, i)| i.package == package && !i.hosted)
-            .map(|(&task, i)| {
-                i.hosted = true;
-                (task, i.clone())
-            })
-            .collect()
-    })
-    .unwrap_or_default();
-    let front = with(|s| s.front).flatten();
-    for (task, info) in tasks {
-        close_window(task);
-        let text = |op, text: &str| Record::with_text(op, task, text);
-        host.send_window(&text(window::PACKAGE, &info.package));
-        host.send_window(&text(window::TITLE, &info.title));
-        if let Some((bounds, caption)) = info.bounds {
-            host.send_window(&Record {
-                op: window::TASK,
-                task,
-                bounds,
-                caption,
-                ..Default::default()
-            });
+/// Give `task` to the window host that should show it now
+/// ([`crate::hosts::for_task`]), or to the server: the one that showed it
+/// lets it go and the new one gets what is known of it. Whether it moved.
+fn route(task: i32) -> bool {
+    let Some(Some((old, new, info, front))) = with(|s| {
+        let i = s.infos.get_mut(&task)?;
+        let new = crate::hosts::for_task(&i.package, &i.activity);
+        let same = match (&i.host, &new) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        // A window closed from its host stays closed.
+        if same || i.closing {
+            return None;
         }
-        if front == Some(task) {
-            host.send_window(&Record {
-                op: window::FRONT,
-                task,
-                ..Default::default()
-            });
+        let old = std::mem::replace(&mut i.host, new.clone());
+        Some((old, new, i.clone(), s.front == Some(task)))
+    }) else {
+        return false;
+    };
+    match old {
+        Some(h) => h.send_window(&Record {
+            op: window::REMOVED,
+            task,
+            ..Default::default()
+        }),
+        None => close_window(task),
+    }
+    match new {
+        Some(h) => {
+            let text = |op, text: &str| Record::with_text(op, task, text);
+            h.send_window(&text(window::PACKAGE, &info.package));
+            h.send_window(&text(window::ACTIVITY, &info.activity));
+            h.send_window(&text(window::TITLE, &info.title));
+            if let Some((bounds, caption)) = info.bounds {
+                h.send_window(&Record {
+                    op: window::TASK,
+                    task,
+                    bounds,
+                    caption,
+                    ..Default::default()
+                });
+            }
+            if front {
+                h.send_window(&Record {
+                    op: window::FRONT,
+                    task,
+                    ..Default::default()
+                });
+            }
+        }
+        None => {
+            if let Some((b, caption)) = info.bounds {
+                create(task, b, caption);
+            }
         }
     }
+    true
 }
 
-/// The window host for `package` left (in the server): the windows of its
-/// tasks come back here.
-pub fn disown(package: &str) {
-    let tasks: Vec<(i32, Info)> = with(|s| {
+/// A window host of `package` came or went (in the server): its tasks
+/// move to the host that should show them now.
+pub fn route_package(package: &str) {
+    let tasks: Vec<i32> = with(|s| {
         s.infos
-            .iter_mut()
-            .filter(|(_, i)| i.package == package && i.hosted && !i.closing)
-            .map(|(&task, i)| {
-                i.hosted = false;
-                (task, i.clone())
-            })
+            .iter()
+            .filter(|(_, i)| i.package == package)
+            .map(|(&t, _)| t)
             .collect()
     })
     .unwrap_or_default();
-    for (task, info) in tasks {
-        if let Some((b, caption)) = info.bounds {
-            create(task, b, caption);
-        }
+    for task in tasks {
+        route(task);
     }
 }
 

@@ -21,6 +21,7 @@ const SYSTEM_APPS: [&str; 8] = [
     "vendor/priv-app",
 ];
 
+/// A launcher entry and the APK it is read from.
 pub struct Installed {
     pub apk: PathBuf,
     pub app: App,
@@ -43,9 +44,10 @@ fn apks(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The launcher apps of the guest whose system image root is `root` and
-/// whose `/data` is `data`, by package: an installed APK over the image's,
-/// and the newest version. With `data`, packages not installed or not
+/// The launcher entries (one per launcher activity) of the guest whose
+/// system image root is `root` and whose `/data` is `data`, each package's
+/// from one APK: an installed APK over the image's, and the newest
+/// version. With `data`, packages not installed or not
 /// enabled for user 0, and launcher activities disabled at run time, are
 /// left out.
 pub fn scan(root: &Path, data: Option<&Path>, framework: &Apk) -> Vec<Installed> {
@@ -60,7 +62,8 @@ pub fn scan(root: &Path, data: Option<&Path>, framework: &Apk) -> Vec<Installed>
     if let Some(data) = data {
         apks(&data.join("app"), 2, &mut paths);
     }
-    let mut out: Vec<(bool, Installed)> = Vec::new();
+    // By package: whether it is from /data, its APK and entries.
+    let mut out: Vec<(bool, PathBuf, Vec<App>)> = Vec::new();
     for (i, path) in paths.into_iter().enumerate() {
         let from_data = i >= system;
         let Ok(apk) = Apk::open(&path) else { continue };
@@ -74,19 +77,34 @@ pub fn scan(root: &Path, data: Option<&Path>, framework: &Apk) -> Vec<Installed>
         if pkg.is_some_and(|p| !p.installed || !p.enabled) {
             continue;
         }
-        let Ok(Some(app)) = app::read(&apk, Some(framework), pkg) else {
+        let Ok(apps) = app::read(&apk, Some(framework), pkg) else {
             continue;
         };
-        match out.iter_mut().find(|(_, o)| o.app.package == app.package) {
-            Some((d, o)) if (from_data, app.version) > (*d, o.app.version) => {
+        let Some(version) = apps.first().map(|a| a.version) else {
+            continue;
+        };
+        match out
+            .iter_mut()
+            .find(|(_, _, o)| o[0].package == manifest_package)
+        {
+            Some((d, p, o)) if (from_data, version) > (*d, o[0].version) => {
                 *d = from_data;
-                *o = Installed { apk: path, app };
+                *p = path;
+                *o = apps;
             }
             Some(_) => {}
-            None => out.push((from_data, Installed { apk: path, app })),
+            None => out.push((from_data, path, apps)),
         }
     }
-    let mut apps: Vec<Installed> = out.into_iter().map(|(_, i)| i).collect();
+    let mut apps: Vec<Installed> = out
+        .into_iter()
+        .flat_map(|(_, apk, apps)| {
+            apps.into_iter().map(move |app| Installed {
+                apk: apk.clone(),
+                app,
+            })
+        })
+        .collect();
     apps.sort_by(|a, b| a.app.label.cmp(&b.app.label));
     apps
 }

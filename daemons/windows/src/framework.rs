@@ -348,6 +348,7 @@ fn on_transact(
                 aim_windows_core::component(&mut Reader(data))
                     .ok()
                     .flatten()
+                    .map(|(package, _)| package)
             } else {
                 None
             };

@@ -30,7 +30,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use aim_hostcall::display::{Import, Window};
 
 /// Sent in the hello; the server closes a connection of another version.
-pub const VERSION: u64 = 6;
+pub const VERSION: u64 = 7;
 
 /// `id` = [`VERSION`], `flag` = display index.
 pub const OP_HELLO: u32 = 1;
@@ -61,7 +61,8 @@ pub const OP_NOTIFICATIONS: u32 = 9;
 
 /// [`Host::op`] values.
 pub mod host {
-    /// Host: its package, in `window.text`; `id` = [`super::VERSION`].
+    /// Host: its package and launcher activity, `package/class`, in
+    /// `window.text`; `id` = [`super::VERSION`].
     pub const HELLO: u32 = 1;
     /// Server: a buffer (`import`), its fd attached; `id` names it.
     pub const IMPORT: u32 = 2;

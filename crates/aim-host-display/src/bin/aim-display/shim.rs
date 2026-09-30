@@ -3,12 +3,14 @@
 //! package (`AIMPackage`), its launcher activity (`AIMActivity`) and the
 //! display server (`AIMDisplaySocket`).
 //!
-//! It shows that package's task windows under the bundle's name and Dock
-//! icon. The server sends it the package's task records, the buffers (as
-//! memfds, mapped here as in the server) and every present, which it draws
-//! into its windows and answers once its GPU pass has read the buffer, and
-//! the pointer's image for its windows' cursor. Its
-//! windows' requests and input go back to the server.
+//! It shows task windows under the bundle's name and Dock icon: those of
+//! the tasks started with its activity, and, for the package's primary
+//! shim (else any of the package's), the package's others
+//! ([`crate::hosts::for_task`]). The server sends it their task records,
+//! the buffers (as memfds, mapped here as in the server) and every
+//! present, which it draws into its windows and answers once its GPU pass
+//! has read the buffer, and the pointer's image for its windows' cursor.
+//! Its windows' requests and input go back to the server.
 //!
 //! Launching the shim, or clicking it in the Dock, starts the app (its
 //! launcher activity: Android brings a running task to the front). Quitting
@@ -214,7 +216,7 @@ pub fn run(package: String, activity: String, socket: &Path) -> ! {
     let named = Rec {
         op: host::HELLO,
         id: wire::VERSION,
-        window: Record::with_text(0, 0, &package),
+        window: Record::with_text(0, 0, &format!("{package}/{activity}")),
         ..Default::default()
     };
     let (Ok(writer), Ok(()), Ok(())) = (
