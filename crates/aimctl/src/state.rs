@@ -59,10 +59,13 @@ impl Files {
 
     /// Whether this is the user's own data directory, `default_data`.
     pub fn is_default(&self) -> bool {
-        let Ok(default) = default_data() else {
-            return false;
-        };
-        let (Some(parent), Some(name)) = (default.parent(), default.file_name()) else {
+        default_data().is_ok_and(|d| self.is_of(&d))
+    }
+
+    /// Whether these are the files of `data` (its parent resolved as
+    /// `of` does, without creating it).
+    pub fn is_of(&self, data: &Path) -> bool {
+        let (Some(parent), Some(name)) = (data.parent(), data.file_name()) else {
             return false;
         };
         fs::canonicalize(parent).is_ok_and(|p| p.join(name) == self.data)
