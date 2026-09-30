@@ -16,10 +16,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
-/// Test targets `cargo aim test` does not run: (package, target, why).
-const EXCLUDED: &[(&str, &str, &str)] =
-    &[("aim-linux-abi", "threads", "#219: hangs intermittently")];
-
 struct TestBinary {
     package: String,
     target: String,
@@ -166,15 +162,6 @@ pub fn run(
         let name = format!("{}/{}", binary.package, binary.target);
         let unit = matches!(binary.kind.as_str(), "lib" | "bin" | "proc-macro");
         if !unit && (!integration || binary.kind != "test") {
-            continue;
-        }
-        if let Some((_, _, why)) = EXCLUDED
-            .iter()
-            .find(|(p, t, _)| *p == binary.package && *t == binary.target)
-        {
-            if integration {
-                println!("  excluded {name} ({why})");
-            }
             continue;
         }
         let log_path = aim_paths::cache().join("logs/test").join(format!(

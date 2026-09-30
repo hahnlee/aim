@@ -18,7 +18,7 @@
 
 use std::cell::UnsafeCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::SeqCst};
 
 use super::clock::Base;
 use super::park;
@@ -50,10 +50,8 @@ const EDEADLK: i64 = 35;
 
 const UL_COMPARE_AND_WAIT_SHARED: u32 = 3;
 const ULF_WAKE_ALL: u32 = 0x100;
+const ULF_WAKE_THREAD: u32 = 0x200;
 const ULF_NO_ERRNO: u32 = 0x0100_0000;
-/// Longest single shared wait: a guest signal that races with entering the
-/// kernel wait is noticed within this time.
-const SHARED_SLICE_NS: u64 = 100_000_000;
 
 unsafe extern "C" {
     fn __ulock_wait2(
@@ -481,34 +479,69 @@ fn mapping_is_shared(addr: u64) -> bool {
     kr == 0 && a <= addr && info[2] == VM_INHERIT_SHARE
 }
 
+/// Wait in the kernel until woken, the deadline, or a guest signal. A
+/// guest signal wakes this thread's wait (ULF_WAKE_THREAD) while `armed`;
+/// the waiter checks the attention flag after arming, so a signal that
+/// comes before the kernel wait is seen there or reaches it. The wait is
+/// one kernel wait, so no wake is lost to a gap between waits.
 fn shared_wait(addr: u64, val: u32, deadline: Option<u64>) -> i64 {
-    let th = thread::current();
     if word(addr).load(SeqCst) != val {
         return -(EAGAIN as i64);
     }
-    loop {
-        if th.is_some_and(signal::interrupted) {
-            return -(EINTR as i64);
+    let th = thread::current();
+    // SAFETY: this thread's own port.
+    let port = unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) };
+    let armed = AtomicBool::new(false);
+    // The window between arming and entering the kernel wait takes no
+    // lock, so this ends as soon as the waiter runs on.
+    let wake = || {
+        while armed.load(SeqCst) {
+            // SAFETY: waking this waiter's thread on its futex word.
+            let r = unsafe {
+                __ulock_wake(
+                    UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_THREAD | ULF_NO_ERRNO,
+                    addr as *mut _,
+                    port as u64,
+                )
+            };
+            // Not in the kernel wait yet (or no longer).
+            if !matches!(-r, libc::ENOENT | libc::EALREADY) {
+                break;
+            }
+            std::thread::yield_now();
         }
-        let now = park::monotonic();
-        let slice = match deadline {
-            Some(d) if now >= d => return -ETIMEDOUT,
-            Some(d) => (d - now).min(SHARED_SLICE_NS),
-            None => SHARED_SLICE_NS,
+    };
+    let wait = || loop {
+        let timeout = match deadline {
+            Some(d) => match d.checked_sub(park::monotonic()) {
+                Some(t) if t > 0 => t,
+                _ => return -ETIMEDOUT,
+            },
+            None => 0,
         };
-        // SAFETY: waiting on a guest futex word in shared memory.
-        let r = unsafe {
-            __ulock_wait2(
-                UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO,
-                addr as *mut _,
-                val as u64,
-                slice,
-                0,
-            )
+        armed.store(true, SeqCst);
+        let r = if th.is_some_and(|t| t.sig.attn.load(SeqCst) != 0) {
+            -libc::EINTR
+        } else {
+            // SAFETY: waiting on a guest futex word in shared memory.
+            unsafe {
+                __ulock_wait2(
+                    UL_COMPARE_AND_WAIT_SHARED | ULF_NO_ERRNO,
+                    addr as *mut _,
+                    val as u64,
+                    timeout,
+                    0,
+                )
+            }
         };
+        armed.store(false, SeqCst);
         match -r {
             _ if r >= 0 => return 0,
-            libc::ETIMEDOUT | libc::EINTR => {
+            libc::ETIMEDOUT => {}
+            libc::EINTR => {
+                if th.is_some_and(signal::interrupted) {
+                    return -(EINTR as i64);
+                }
                 if word(addr).load(SeqCst) != val {
                     return 0;
                 }
@@ -516,7 +549,8 @@ fn shared_wait(addr: u64, val: u32, deadline: Option<u64>) -> i64 {
             libc::EFAULT => return -(EFAULT as i64),
             _ => return 0,
         }
-    }
+    };
+    signal::interruptible(&wake, wait).unwrap_or(-(EINTR as i64))
 }
 
 fn shared_wake(addr: u64, n: u32) -> i64 {
@@ -749,6 +783,26 @@ mod tests {
         assert!(wake_op_cmp(u32::MAX, 2 << 24));
     }
 
+    /// Whether the thread `port` is in `__ulock_wait2`'s kernel wait: its pc
+    /// is just past the stub's `svc`. The waits here return only when woken.
+    fn in_ulock_wait(port: u32) -> bool {
+        unsafe extern "C" {
+            fn thread_get_state(t: u32, flavor: i32, state: *mut u64, count: *mut u32) -> i32;
+        }
+        const ARM_THREAD_STATE64: i32 = 6;
+        const SVC_0X80: u32 = 0xd400_1001;
+        let stub = __ulock_wait2 as usize as *const u32;
+        // SAFETY: the stub's first instructions.
+        let svc = (0..8)
+            .find(|&i| unsafe { *stub.add(i) } == SVC_0X80)
+            .unwrap();
+        let (mut state, mut count) = ([0u64; 34], 68u32);
+        // SAFETY: arm_thread_state64 (x0-x28, fp, lr, sp, pc, cpsr) of our thread.
+        let kr =
+            unsafe { thread_get_state(port, ARM_THREAD_STATE64, state.as_mut_ptr(), &mut count) };
+        kr == 0 && state[32] == stub as u64 + 4 * (svc as u64 + 1)
+    }
+
     #[test]
     fn a_shared_bitset_wake_reaches_the_matching_waiter() {
         // libfmq's EventFlag: FUTEX_WAIT_BITSET / FUTEX_WAKE_BITSET on a
@@ -766,12 +820,24 @@ mod tests {
             )
         } as u64;
         let deadline = Box::leak(Box::new([0i64; 2])).as_mut_ptr() as u64;
-        park::write_timespec(deadline, park::after(2_000_000_000));
+        park::write_timespec(deadline, park::after(10_000_000_000));
+        let (tx, rx) = std::sync::mpsc::channel();
         let wait = move |bits: u64| {
-            std::thread::spawn(move || futex([word_addr, FUTEX_WAIT_BITSET, 0, deadline, 0, bits]))
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                // SAFETY: this thread's own port.
+                tx.send(unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) })
+                    .unwrap();
+                futex([word_addr, FUTEX_WAIT_BITSET, 0, deadline, 0, bits])
+            })
         };
         let (on_1, on_2) = (wait(1), wait(2));
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // A wake before a waiter waits is lost, as on Linux: wake once both wait.
+        let ports = [rx.recv().unwrap(), rx.recv().unwrap()];
+        while !ports.iter().all(|&p| in_ulock_wait(p)) {
+            assert!(!on_1.is_finished() && !on_2.is_finished());
+            std::thread::yield_now();
+        }
         futex([word_addr, FUTEX_WAKE_BITSET, 1, 0, 0, 2]);
         assert_eq!(on_2.join().unwrap(), 0, "the waiter on bit 2 timed out");
         // The other waiter wakes spuriously, which futex users tolerate.

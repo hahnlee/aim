@@ -192,12 +192,6 @@ an error, since every input was built first. Tests use the derived image
 `cargo aim` built; plain `cargo test` does not rebuild it, so run `cargo aim
 build` first after a change to its inputs.
 
-Excluded from `cargo aim test` (listed in `crates/aim-build/src/test.rs`):
-
-| Target | Why |
-| --- | --- |
-| `aim-linux-abi/threads` | #219: hangs intermittently |
-
 ## Worktrees
 
 A git worktree has no `_build`. Link the large inputs from the main
