@@ -88,14 +88,16 @@ pub enum Family {
     Packet(Arc<super::packet::Socket>),
 }
 
-/// SO_MARK and SO_BINDTODEVICE of an AF_INET/AF_INET6 socket, whether it
-/// is connected to port 0 (`datagram_to_port_zero`) or to the virtual DHCP
-/// server (`connect_to_router`), and whether it is an IPv4 ping socket
-/// (`recv_ping`).
+/// SO_MARK, SO_BINDTODEVICE and IP_MULTICAST_ALL of an AF_INET/AF_INET6
+/// socket, whether it is connected to port 0 (`datagram_to_port_zero`) or
+/// to the virtual DHCP server (`connect_to_router`), and whether it is an
+/// IPv4 ping socket (`recv_ping`).
 #[derive(Default)]
 pub struct InetOpts {
     mark: std::sync::atomic::AtomicU32,
     device: Mutex<String>,
+    /// IP_MULTICAST_ALL cleared (Linux sets it on a new socket).
+    multicast_own: AtomicBool,
     port_zero: AtomicBool,
     router: AtomicBool,
     icmp4: AtomicBool,
@@ -150,6 +152,7 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
             w.bool(o.port_zero.load(Ordering::Relaxed));
             w.bool(o.router.load(Ordering::Relaxed));
             w.bool(o.icmp4.load(Ordering::Relaxed));
+            w.bool(o.multicast_own.load(Ordering::Relaxed));
         }
         Family::Netlink(n) => {
             w.u32(2);
@@ -179,6 +182,7 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
             o.port_zero.store(r.bool(), Ordering::Relaxed);
             o.router.store(r.bool(), Ordering::Relaxed);
             o.icmp4.store(r.bool(), Ordering::Relaxed);
+            o.multicast_own.store(r.bool(), Ordering::Relaxed);
             Family::Inet(o)
         }
         2 => Family::Netlink(super::netlink::Socket::load(r)),
@@ -2193,6 +2197,7 @@ const L_SO_RCVTIMEO_NEW: u64 = 66;
 const L_SO_SNDTIMEO_NEW: u64 = 67;
 
 const IPPROTO_IP: u64 = 0;
+const L_IP_MULTICAST_ALL: u64 = 49;
 const IPPROTO_ICMP: u64 = 1;
 const IPPROTO_TCP: u64 = 6;
 const IPPROTO_IPV6: u64 = 41;
@@ -2355,7 +2360,8 @@ fn setsockopt_other(fd: i32, level: u64, opt: u64, val: u64, len: u32) -> Option
             super::packet::attach_filter(p, val, len)
         }
         (1, L_SO_DETACH_FILTER, Some(Family::Packet(p))) => super::packet::detach_filter(p),
-        (1, L_SO_MARK | L_SO_BINDTODEVICE, None | Some(Family::Inet(_))) => {
+        (1, L_SO_MARK | L_SO_BINDTODEVICE, None | Some(Family::Inet(_)))
+        | (IPPROTO_IP, L_IP_MULTICAST_ALL, None | Some(Family::Inet(_))) => {
             if let Err(e) = is_socket(fd) {
                 return Some(e);
             }
@@ -2376,9 +2382,31 @@ fn setsockopt_other(fd: i32, level: u64, opt: u64, val: u64, len: u32) -> Option
     })
 }
 
-/// SO_MARK (CAP_NET_ADMIN) and SO_BINDTODEVICE on an AF_INET/AF_INET6
-/// socket.
+/// SO_MARK (CAP_NET_ADMIN), SO_BINDTODEVICE and IP_MULTICAST_ALL on an
+/// AF_INET/AF_INET6 socket.
+///
+/// IP_MULTICAST_ALL off limits a socket's multicast to the groups it
+/// joined itself (ip(7)). Darwin delivers multicast that way whatever the
+/// flag (`udp_input` skips sockets without their own memberships), so the
+/// flag is recorded for getsockopt; a socket that keeps it on does not get
+/// the groups other sockets joined (#524).
 fn inet_option(fd: i32, o: &InetOpts, opt: u64, val: u64, len: u32) -> i64 {
+    if opt == L_IP_MULTICAST_ALL {
+        // ip_setsockopt reads an int, or one byte from a shorter value.
+        // SAFETY: the guest's option value of `len` bytes.
+        let v = unsafe {
+            match len {
+                0 => return -(EINVAL as i64),
+                1..4 => (val as *const u8).read() as i32,
+                _ => (val as *const i32).read_unaligned(),
+            }
+        };
+        if v != 0 && v != 1 {
+            return -(EINVAL as i64);
+        }
+        o.multicast_own.store(v == 0, Ordering::Relaxed);
+        return 0;
+    }
     if opt == L_SO_MARK {
         if len < 4 {
             return -(EINVAL as i64);
@@ -2456,6 +2484,9 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
         let int = |v: i32| put_opt(&v.to_le_bytes(), val, len);
         match (level, opt, &s.family) {
             (1, L_SO_MARK, Family::Inet(o)) => return int(o.mark.load(Ordering::Relaxed) as i32),
+            (IPPROTO_IP, L_IP_MULTICAST_ALL, Family::Inet(o)) => {
+                return int(!o.multicast_own.load(Ordering::Relaxed) as i32);
+            }
             (1, L_SO_BINDTODEVICE, Family::Inet(o)) => {
                 let mut n = o.device.lock().unwrap().as_bytes().to_vec();
                 n.push(0);
@@ -2474,6 +2505,9 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
     }
     if level == 1 && opt == L_SO_MARK {
         return put_opt(&0i32.to_le_bytes(), val, len);
+    }
+    if level == IPPROTO_IP && opt == L_IP_MULTICAST_ALL {
+        return put_opt(&1i32.to_le_bytes(), val, len);
     }
     if let Some((l, o)) = int_option(level, opt) {
         let Some(v) = get_int(fd, l, o) else {
@@ -2589,6 +2623,45 @@ mod tests {
         for n in [&b"logd"[..], b"jdwp-control", b"a/b c\0d"] {
             assert_eq!(unescape(&escape(n)), n);
         }
+    }
+
+    #[test]
+    fn multicast_all_is_recorded_per_socket() {
+        // SAFETY: a host socket this test owns.
+        let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, 0) };
+        assert!(fd >= 0);
+        let get = || {
+            let (mut v, mut l) = (-1i32, 4u32);
+            let r = getsockopt([
+                fd as u64,
+                IPPROTO_IP,
+                L_IP_MULTICAST_ALL,
+                &mut v as *mut i32 as u64,
+                &mut l as *mut u32 as u64,
+                0,
+            ]);
+            (r, v)
+        };
+        let set = |v: i32, len: u64| {
+            setsockopt([
+                fd as u64,
+                IPPROTO_IP,
+                L_IP_MULTICAST_ALL,
+                &v as *const i32 as u64,
+                len,
+                0,
+            ])
+        };
+        assert_eq!(get(), (0, 1));
+        assert_eq!(set(0, 4), 0);
+        assert_eq!(get(), (0, 0));
+        assert_eq!(set(2, 4), -(EINVAL as i64));
+        assert_eq!(set(1, 1), 0);
+        assert_eq!(get(), (0, 1));
+        assert_eq!(set(0, 0), -(EINVAL as i64));
+        fdtab::on_close(fd);
+        // SAFETY: our socket.
+        unsafe { libc::close(fd) };
     }
 
     #[test]

@@ -985,40 +985,29 @@ const MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 5;
 const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 6;
 
 unsafe extern "C" {
-    fn task_threads(task: libc::mach_port_t, list: *mut *mut u32, count: *mut u32) -> i32;
     fn thread_get_register_pointer_values(
         thread: u32,
         sp: *mut u64,
         length: *mut usize,
         values: *mut u64,
     ) -> i32;
-    fn mach_thread_self() -> u32;
-    fn mach_port_deallocate(task: libc::mach_port_t, name: u32) -> i32;
 }
 
-/// Serialize every other thread of the process: reading a thread's
-/// registers makes the kernel interrupt it, which is a full barrier and a
-/// context synchronization on its core (as .NET does on macOS arm64).
+/// Serialize the process's other running threads, as Linux interrupts
+/// only the cores that run them: reading a thread's registers makes the
+/// kernel interrupt it, which is a full barrier and a context
+/// synchronization on its core (as .NET does on macOS arm64). A thread
+/// that is not running takes the scheduler's thread lock, which reading
+/// its state also takes, and an exception return before it runs again;
+/// the fence puts the caller's accesses before that read, as Linux's
+/// smp_mb before it looks at the run queues.
 fn barrier_all_threads() {
-    let mut list: *mut u32 = std::ptr::null_mut();
-    let mut count = 0u32;
-    // SAFETY: task_threads returns a vm_allocated array of send rights.
-    unsafe {
-        if task_threads(task(), &mut list, &mut count) != 0 {
-            return;
-        }
-        let me = mach_thread_self();
-        for i in 0..count as usize {
-            let t = *list.add(i);
-            if t != me {
-                let (mut sp, mut n, mut regs) = (0u64, 128usize, [0u64; 128]);
-                thread_get_register_pointer_values(t, &mut sp, &mut n, regs.as_mut_ptr());
-            }
-            mach_port_deallocate(task(), t);
-        }
-        mach_port_deallocate(task(), me);
-        mach_vm_deallocate(task(), list as u64, count as u64 * 4);
-    }
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    super::thread::each_running_other(|t| {
+        let (mut sp, mut n, mut regs) = (0u64, 128usize, [0u64; 128]);
+        // SAFETY: a live thread of this task; results into locals.
+        unsafe { thread_get_register_pointer_values(t, &mut sp, &mut n, regs.as_mut_ptr()) };
+    });
 }
 
 pub fn membarrier(a: [u64; 6]) -> i64 {

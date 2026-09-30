@@ -13,7 +13,8 @@
 //!
 //! Unpinned pages are never purged: PIN reports ASHMEM_NOT_PURGED.
 
-use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use crate::errno::{self, EINVAL, EPERM};
 
@@ -195,8 +196,21 @@ impl Default for State {
     }
 }
 
-/// Serializes this process's read-modify-write of the attribute.
-static LOCK: Mutex<()> = Mutex::new(());
+/// This process's last copy of each region's state, by (device, inode),
+/// with the file's ctime when it was read or written; the lock serializes
+/// the process's read-modify-writes. Writing the attribute moves the
+/// ctime, so while it is unchanged the copy is current, and the read (7 us
+/// of host kernel time) is skipped (#504). Like the read-modify-write
+/// itself, this is not atomic across processes.
+static STATES: LazyLock<Mutex<HashMap<(u64, u64), Known>>> = LazyLock::new(Default::default);
+
+/// A state and the ctime its file had then.
+type Known = (Ctime, State);
+type Ctime = (i64, i64);
+
+fn ctime(st: &libc::stat) -> Ctime {
+    (st.st_ctime, st.st_ctime_nsec)
+}
 
 fn load(fd: i32) -> State {
     let mut buf = vec![0u8; 4096];
@@ -216,20 +230,35 @@ fn store(fd: i32, s: &State) -> i64 {
     if r < 0 { -(errno::last() as i64) } else { 0 }
 }
 
-fn update(fd: i32, f: impl FnOnce(&mut State) -> i64) -> i64 {
-    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut s = load(fd);
+/// Change the state of region `fd`, whose fstat is `st`.
+fn update(fd: i32, st: &libc::stat, f: impl FnOnce(&mut State) -> i64) -> i64 {
+    let mut states = STATES.lock().unwrap_or_else(|e| e.into_inner());
+    // Regions are not seen closing; dropping the copies only costs reads.
+    if states.len() > 1024 {
+        states.clear();
+    }
+    let key = (st.st_dev as u32 as u64, st.st_ino);
+    let mut s = match states.get(&key) {
+        Some((t, s)) if *t == ctime(st) => s.clone(),
+        _ => load(fd),
+    };
     let before = s.clone();
     let r = f(&mut s);
     // Unchanged (a PIN of pinned pages, say): no write, which costs a
     // security check besides the attribute (#446).
     if r < 0 || s == before {
+        states.insert(key, (ctime(st), before));
         return r;
     }
-    match store(fd, &s) {
-        0 => r,
-        e => e,
+    let e = store(fd, &s);
+    let mut now: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fstat into a local buffer.
+    if e == 0 && unsafe { libc::fstat(fd, &mut now) } == 0 {
+        states.insert(key, (ctime(&now), s));
+    } else {
+        states.remove(&key);
     }
+    if e < 0 { e } else { r }
 }
 
 fn page_up(n: u64) -> u64 {
@@ -240,7 +269,7 @@ fn page_up(n: u64) -> u64 {
 /// (its name and size are fixed from then on). None: not ashmem or fine.
 pub fn before_mmap(fd: i32, len: u64, prot: u64) -> Option<i64> {
     let st = stat_of(fd)?;
-    let r = update(fd, |s| {
+    let r = update(fd, &st, |s| {
         if st.st_size == 0 {
             return -(EINVAL as i64);
         }
@@ -282,10 +311,11 @@ fn change_ranges(v: &mut Vec<(u64, u64)>, a: u64, b: u64, add: bool) {
     *v = out;
 }
 
-fn pin(fd: i32, req: u64, arg: u64, size: u64) -> i64 {
+fn pin(fd: i32, st: &libc::stat, req: u64, arg: u64) -> i64 {
+    let size = st.st_size as u64;
     // SAFETY: guest struct ashmem_pin { u32 offset, len; }.
     let [off, len] = unsafe { (arg as *const [u32; 2]).read_unaligned() }.map(|v| v as u64);
-    update(fd, |s| {
+    update(fd, st, |s| {
         if !s.mapped {
             return -(EINVAL as i64);
         }
@@ -325,7 +355,7 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
             // SAFETY: guest buffer of up to ASHMEM_NAME_LEN bytes.
             let name = unsafe { std::slice::from_raw_parts(arg as *const u8, NAME_LEN) };
             let len = name.iter().position(|&c| c == 0).unwrap_or(NAME_LEN - 1);
-            update(fd, |s| {
+            update(fd, &st, |s| {
                 if s.mapped {
                     return -(EINVAL as i64);
                 }
@@ -347,7 +377,7 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
             }
             0
         }
-        SET_SIZE => update(fd, |s| {
+        SET_SIZE => update(fd, &st, |s| {
             if s.mapped {
                 return -(EINVAL as i64);
             }
@@ -355,7 +385,7 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
             errno::check(unsafe { libc::ftruncate(fd, arg as i64) } as i64)
         }),
         GET_SIZE => st.st_size,
-        SET_PROT_MASK => update(fd, |s| {
+        SET_PROT_MASK => update(fd, &st, |s| {
             // Bits can only be removed.
             if arg as u32 & !s.prot != 0 || arg > PROT_MASK as u64 {
                 return -(EINVAL as i64);
@@ -364,7 +394,7 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
             0
         }),
         GET_PROT_MASK => load(fd).prot as i64,
-        PIN | UNPIN | GET_PIN_STATUS => pin(fd, req, arg, st.st_size as u64),
+        PIN | UNPIN | GET_PIN_STATUS => pin(fd, &st, req, arg),
         // Nothing is ever purged, so there is nothing to purge.
         PURGE_ALL_CACHES => 0,
         GET_FILE_ID => {
@@ -455,6 +485,30 @@ mod tests {
         assert_eq!(ioctl(fd, GET_NAME, buf.as_mut_ptr() as u64), Some(0));
         assert_eq!(&buf[..13], &name);
         // SAFETY: our fds.
+        unsafe { libc::close(fd) };
+    }
+
+    #[test]
+    fn another_holders_change_is_seen() {
+        let fd = region();
+        assert_eq!(ioctl(fd, SET_SIZE, 2 * PAGE), Some(0));
+        assert_eq!(before_mmap(fd, 2 * PAGE, 3), None);
+        let all = [0u32, 0];
+        assert_eq!(ioctl(fd, UNPIN, all.as_ptr() as u64), Some(0));
+        // Another process pins the first page: it writes the attribute.
+        let mut s = load(fd);
+        change_ranges(&mut s.unpinned, 0, 0, false);
+        assert_eq!(store(fd, &s), 0);
+        let first = [0u32, PAGE as u32];
+        assert_eq!(
+            ioctl(fd, GET_PIN_STATUS, first.as_ptr() as u64),
+            Some(IS_PINNED)
+        );
+        assert_eq!(
+            ioctl(fd, GET_PIN_STATUS, all.as_ptr() as u64),
+            Some(IS_UNPINNED)
+        );
+        // SAFETY: our fd.
         unsafe { libc::close(fd) };
     }
 }

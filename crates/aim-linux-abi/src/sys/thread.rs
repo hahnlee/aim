@@ -162,6 +162,38 @@ pub fn cpu_times(tid: i32) -> Option<(u64, u64)> {
     })
 }
 
+/// Call `f` with the Mach port of every other guest thread that is
+/// running (on a core or waiting for one), under the table lock, so none
+/// can finish exiting meanwhile. A thread whose state cannot be read
+/// counts as running.
+pub fn each_running_other(mut f: impl FnMut(libc::mach_port_t)) {
+    with_table(|t| {
+        for th in t.values() {
+            let p = th.pthread.load(SeqCst);
+            if p == 0 || is_current(th) {
+                continue;
+            }
+            // SAFETY: the pthread is alive while it is in the table (whose
+            // lock is held); THREAD_BASIC_INFO into a local of its size.
+            let (port, running) = unsafe {
+                let port = libc::pthread_mach_thread_np(p as libc::pthread_t);
+                let mut info: libc::thread_basic_info = std::mem::zeroed();
+                let mut count = libc::THREAD_BASIC_INFO_COUNT;
+                let kr = libc::thread_info(
+                    port,
+                    libc::THREAD_BASIC_INFO as u32,
+                    (&mut info as *mut libc::thread_basic_info).cast(),
+                    &mut count,
+                );
+                (port, kr != 0 || info.run_state == libc::TH_STATE_RUNNING)
+            };
+            if running {
+                f(port);
+            }
+        }
+    });
+}
+
 pub fn unpark(tid: i32) {
     if let Some(th) = find(tid) {
         th.park.unpark();
