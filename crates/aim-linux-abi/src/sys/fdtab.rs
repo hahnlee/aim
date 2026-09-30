@@ -49,6 +49,8 @@ pub enum Kind {
     SyncFile,
     /// `/dev/random` or `/dev/urandom` open for writing (`random`).
     Random,
+    /// A binder device file; the daemon holds its state.
+    Binder(aim_binder_host::client::BinderFile),
 }
 
 static TABLE: LazyLock<RwLock<HashMap<i32, Kind>>> = LazyLock::new(Default::default);
@@ -160,7 +162,8 @@ pub fn anon_name(fd: i32) -> Option<String> {
             | Kind::Memfd(_)
             | Kind::Content
             | Kind::Knob(_)
-            | Kind::Random => {
+            | Kind::Random
+            | Kind::Binder(_) => {
                 return None;
             }
         }
@@ -285,9 +288,10 @@ pub fn is_hidden(fd: i32) -> bool {
 
 /// Fork: every fd's kind, with fds that share an object (dup'ed ones)
 /// sharing it again in the child, and the layer's hidden fds. The fds
-/// themselves are inherited. Content, knob and evdev fds stay plain fds: a
-/// content file is the parent's to reuse, a knob's action is code, and an
-/// input device is opened again.
+/// themselves are inherited. Content, knob, evdev and binder fds stay plain
+/// fds: a content file is the parent's to reuse, a knob's action is code,
+/// an input device is opened again, and a binder file is the parent's
+/// process of the driver.
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
     let table = TABLE.read().unwrap();
     let mut objects: Vec<*const ()> = Vec::new();
@@ -301,7 +305,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Inotify(a) => Arc::as_ptr(a) as *const (),
             Kind::Dir(a) => Arc::as_ptr(a) as *const (),
             Kind::Memfd(_) | Kind::SyncFile | Kind::Random => std::ptr::null(),
-            Kind::Content | Kind::Knob(_) | Kind::Evdev(_) => continue,
+            Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => continue,
         };
         let (i, new) = match objects.iter().position(|&o| !p.is_null() && o == p) {
             Some(i) => (i, false),
@@ -353,7 +357,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             }
             Kind::SyncFile => w.u32(7),
             Kind::Random => w.u32(8),
-            Kind::Content | Kind::Knob(_) | Kind::Evdev(_) => unreachable!(),
+            Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => unreachable!(),
         }
     });
     w.seq(HIDDEN.lock().unwrap().iter(), |w, fd| w.i32(*fd));

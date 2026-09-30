@@ -446,6 +446,12 @@ of `am start -W -S`: Chrome 756 ms, Settings 754 ms, Calculator 1,134 ms.
 | Of that, the serving thread's own binder calls | 0 | 6.1 ms |
 | Return to the sender | 7 us | 132 us |
 
+These spans are the driver's (`tools/binder-trace-report.py`), measured
+before reads parked in the daemon (#451). Since then a parked read takes
+its work as soon as the work is queued, so the delivery and the return
+hold no guest thread's wake: the target thread's wake through the daemon
+counts as the server's work, and the sender's comes after the return.
+
 - **The transport is not the cost.** No call waited for a busy server
   (every server had a free thread); wake and return are 7-9 us. What is
   slow is the servers' work, and it is rarely nested binder calls: of the

@@ -173,7 +173,10 @@ maps no longer hash with SipHash. On a settled boot (one each, host load
 10 and 6), the synchronous calls of a Settings and a Chrome cold start
 went from p50 61 to 51 µs, and guest-init's CPU over the starts from
 0.74 to 0.60 s. What is left in the caller is one Mach round trip per
-ioctl, about 7 µs of kernel time in a boot (#451).
+ioctl, about 7 µs of kernel time in a boot (#451). Since no daemon thread
+blocks, one per CPU serves every guest binder thread (#553): guest-init
+has 33 threads after a boot and a Settings and a Chrome start, where it
+had one per guest binder thread.
 
 membarrier now interrupts only the guest threads that are running, as
 Linux does, instead of every thread of the task (host unit benchmark, 60

@@ -112,12 +112,14 @@ runs it alone. The `client` module is what the syscall layer calls
   fd is one end, and the other end goes to the daemon as a fileport. The
   daemon answers with a **file port** that stands for the open file.
 - **Threads.** The first ioctl of a guest thread asks the file port for a
-  **thread port**. A daemon thread serves it.
+  **thread port**, which names the guest thread. A pool of daemon threads,
+  one per CPU, receives on the port set of every thread port (#553).
 - **Ioctls.** Each guest binder ioctl is one `mach_msg(SEND|RCV)` from the
   calling thread to its thread port, answered through a send-once right.
-  The daemon thread runs `Driver::ioctl_or_park`. A read that would wait
-  for work parks instead of blocking the daemon thread, which goes back to
-  waiting for requests; the guest thread stays blocked in its `mach_msg`,
+  The daemon thread that receives it runs `Driver::ioctl_or_park`. A read
+  that would wait for work parks instead of blocking the daemon thread,
+  which goes back to waiting for requests, so no daemon thread ever
+  blocks in the driver; the guest thread stays blocked in its `mach_msg`,
   as it would in the kernel. The thread that brings the work (a daemon
   thread running another guest's transaction or reply, an interrupt, the
   release) runs the parked read and sends its answer.

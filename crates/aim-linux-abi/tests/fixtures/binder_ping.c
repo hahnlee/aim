@@ -3,7 +3,8 @@
 //   binder_ping ping N        N pings of servicemanager (IBinder's
 //                             PING_TRANSACTION, answered by its BBinder);
 //   binder_ping serve NAME    add service NAME and serve it on this thread;
-//   binder_ping call NAME N   N calls of NAME's increment method.
+//   binder_ping call NAME N   N calls of NAME's increment method;
+//   binder_ping fd            the file semantics of a binder fd.
 //
 // ping and call print one line of round-trip times in microseconds, timed
 // in the guest. The service manager and thread pool functions are platform
@@ -12,11 +13,17 @@
 
 #include <android/binder_ibinder.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/android/binder.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <time.h>
+#include <unistd.h>
 
 #define DESCRIPTOR "dev.aim.IPing"
 #define INCREMENT FIRST_CALL_TRANSACTION
@@ -81,7 +88,36 @@ static int increment(AIBinder* b, int32_t v, int32_t* result) {
     return st;
 }
 
+static int fd_failed(const char* what) {
+    fprintf(stderr, "binder_ping: fd: %s (errno %d)\n", what, errno);
+    return 1;
+}
+
+// A dup of a binder fd is the same binder file, also once the original is
+// closed; read and write are not binder operations (EINVAL), and a binder
+// fd is no socket (ENOTSOCK).
+static int fd_semantics(void) {
+    struct binder_version v = {0};
+    char c = 0;
+    int type;
+    socklen_t len = sizeof type;
+    int fd = open("/dev/binder", O_RDWR | O_CLOEXEC);
+    int copy = fd < 0 ? -1 : dup(fd);
+    if (copy < 0) return fd_failed("open and dup");
+    close(fd);
+    if (ioctl(copy, BINDER_VERSION, &v) != 0 || v.protocol_version != BINDER_CURRENT_PROTOCOL_VERSION)
+        return fd_failed("BINDER_VERSION on the dup");
+    if (read(copy, &c, 1) != -1 || errno != EINVAL) return fd_failed("read");
+    if (write(copy, &c, 1) != -1 || errno != EINVAL) return fd_failed("write");
+    if (getsockopt(copy, SOL_SOCKET, SO_TYPE, &type, &len) != -1 || errno != ENOTSOCK)
+        return fd_failed("getsockopt");
+    close(copy);
+    printf("binder fd: ok\n");
+    return 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc == 2 && strcmp(argv[1], "fd") == 0) return fd_semantics();
     if (argc == 3 && strcmp(argv[1], "serve") == 0) {
         binder_exception_t (*add)(AIBinder*, const char*) = platform("AServiceManager_addService");
         bool (*max_threads)(uint32_t) = platform("ABinderProcess_setThreadPoolMaxThreadCount");
@@ -99,7 +135,7 @@ int main(int argc, char** argv) {
     }
     int call = argc == 4 && strcmp(argv[1], "call") == 0;
     if (!call && !(argc == 3 && strcmp(argv[1], "ping") == 0)) {
-        fprintf(stderr, "usage: binder_ping ping N | serve NAME | call NAME N\n");
+        fprintf(stderr, "usage: binder_ping ping N | serve NAME | call NAME N | fd\n");
         return 2;
     }
     AIBinder* b = check_service(call ? argv[2] : "manager");

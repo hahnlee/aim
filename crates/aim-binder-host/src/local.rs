@@ -20,7 +20,7 @@
 //! writes.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -81,8 +81,7 @@ static NEXT_TID: AtomicI32 = AtomicI32::new(1);
 thread_local! {
     static THREAD: ThreadState = ThreadState {
         tid: NEXT_TID.fetch_add(1, Ordering::Relaxed),
-        used: RefCell::new(Vec::new()),
-        pending: RefCell::new(Pending::default()),
+        joined: RefCell::new(Vec::new()),
     };
 }
 
@@ -90,22 +89,25 @@ thread_local! {
 /// used (`BINDER_THREAD_EXIT`, as `IPCThreadState`'s destructor does).
 struct ThreadState {
     tid: i32,
-    used: RefCell<Vec<Weak<LocalProcess>>>,
-    /// Returns read but not yet taken by the wait they belong to: a
-    /// nested call's reply can be read while an outer call waits.
-    pending: RefCell<Pending>,
+    joined: RefCell<Vec<Joined>>,
 }
 
-#[derive(Default)]
-struct Pending {
-    complete: usize,
-    reply: Option<TransactionData>,
-    error: Option<StatusCode>,
+/// A process the thread used, with the returns it read from it but has
+/// not handled yet (`IPCThreadState::mIn`): a wait ends at its result and
+/// leaves what follows for the thread's next wait.
+struct Joined {
+    process: Weak<LocalProcess>,
+    input: VecDeque<(u32, Vec<u8>)>,
 }
 
 impl Drop for ThreadState {
     fn drop(&mut self) {
-        for process in self.used.borrow().iter().filter_map(Weak::upgrade) {
+        for process in self
+            .joined
+            .borrow()
+            .iter()
+            .filter_map(|j| j.process.upgrade())
+        {
             let mut arg = [0u8; 4];
             let _ = process.ioctl(self.tid, BINDER_THREAD_EXIT, &mut arg);
         }
@@ -297,11 +299,24 @@ impl LocalProcess {
     /// This thread's driver thread id, registering it for its exit.
     fn tid(&self) -> i32 {
         THREAD.with(|t| {
-            let mut used = t.used.borrow_mut();
-            if !used.iter().any(|p| p.ptr_eq(&self.this)) {
-                used.push(self.this.clone());
+            let mut joined = t.joined.borrow_mut();
+            if !joined.iter().any(|j| j.process.ptr_eq(&self.this)) {
+                joined.push(Joined {
+                    process: self.this.clone(),
+                    input: VecDeque::new(),
+                });
             }
             t.tid
+        })
+    }
+
+    /// This thread's queue of unhandled returns from this process.
+    fn input<R>(&self, f: impl FnOnce(&mut VecDeque<(u32, Vec<u8>)>) -> R) -> R {
+        self.tid();
+        THREAD.with(|t| {
+            let mut joined = t.joined.borrow_mut();
+            let joined = joined.iter_mut().find(|j| j.process.ptr_eq(&self.this));
+            f(&mut joined.unwrap().input)
         })
     }
 
@@ -475,55 +490,47 @@ impl LocalProcess {
             .collect()
     }
 
-    /// `waitForResponse` and `executeCommand`: talks to the driver and
-    /// handles its returns until `until`.
+    /// `waitForResponse` and `executeCommand`: handles the thread's
+    /// returns one at a time, talking to the driver (and sending `out`)
+    /// when it has none, until `until`. A failed call ends any wait but a
+    /// looper's.
     fn wait(&self, out: &mut Vec<u8>, until: Until) -> Result<Option<TransactionData>, StatusCode> {
-        let mut read = vec![0u8; READ_SIZE];
         loop {
-            let taken = THREAD.with(|t| {
-                let mut p = t.pending.borrow_mut();
-                if let Some(error) = p.error.take() {
-                    return Some(Err(error));
-                }
-                match until {
-                    Until::Complete if p.complete > 0 => {
-                        p.complete -= 1;
-                        Some(Ok(None))
-                    }
-                    Until::Reply if p.reply.is_some() => {
-                        // A synchronous call's own completion comes with
-                        // its reply.
-                        p.complete = 0;
-                        Some(Ok(p.reply.take()))
-                    }
-                    _ => None,
-                }
-            });
-            if let Some(result) = taken {
-                return result;
-            }
-            let (consumed, n) = self.talk(out, &mut read).map_err(|e| -e)?;
-            out.drain(..consumed);
-            let mut at = 0;
-            while at + 4 <= n {
-                let cmd = u32::from_le_bytes(read[at..at + 4].try_into().unwrap());
-                let payload = read[at + 4..at + 4 + ioc_size(cmd)].to_vec();
-                at += 4 + ioc_size(cmd);
-                self.execute_command(cmd, &payload, out);
+            let Some((cmd, payload)) = self.input(|input| input.pop_front()) else {
+                self.read(out).map_err(|e| -e)?;
+                continue;
+            };
+            match (cmd, until) {
+                (_, Until::Forever) => self.execute_command(cmd, &payload, out),
+                (BR_TRANSACTION_COMPLETE, Until::Complete) => return Ok(None),
+                // A synchronous call's own completion.
+                (BR_TRANSACTION_COMPLETE, Until::Reply) => {}
+                (BR_REPLY, Until::Reply) => return Ok(Some(TransactionData::decode(&payload))),
+                (BR_DEAD_REPLY, _) => return Err(DEAD_OBJECT),
+                (BR_FAILED_REPLY | BR_FROZEN_REPLY, _) => return Err(FAILED_TRANSACTION),
+                _ => self.execute_command(cmd, &payload, out),
             }
         }
     }
 
-    fn execute_command(&self, cmd: u32, payload: &[u8], out: &mut Vec<u8>) {
-        let pending = |f: &dyn Fn(&mut Pending)| THREAD.with(|t| f(&mut t.pending.borrow_mut()));
-        match cmd {
-            BR_TRANSACTION_COMPLETE => pending(&|p| p.complete += 1),
-            BR_REPLY => {
-                let tr = TransactionData::decode(payload);
-                pending(&|p| p.reply = Some(tr));
+    /// Writes `out` and queues what the driver returns.
+    fn read(&self, out: &mut Vec<u8>) -> Result<(), Errno> {
+        let mut read = [0u8; READ_SIZE];
+        let (consumed, n) = self.talk(out, &mut read)?;
+        out.drain(..consumed);
+        self.input(|input| {
+            let mut at = 0;
+            while at + 4 <= n {
+                let cmd = u32::from_le_bytes(read[at..at + 4].try_into().unwrap());
+                input.push_back((cmd, read[at + 4..at + 4 + ioc_size(cmd)].to_vec()));
+                at += 4 + ioc_size(cmd);
             }
-            BR_DEAD_REPLY => pending(&|p| p.error = Some(DEAD_OBJECT)),
-            BR_FAILED_REPLY | BR_FROZEN_REPLY => pending(&|p| p.error = Some(FAILED_TRANSACTION)),
+        });
+        Ok(())
+    }
+
+    fn execute_command(&self, cmd: u32, payload: &[u8], out: &mut Vec<u8>) {
+        match cmd {
             BR_TRANSACTION | BR_TRANSACTION_SEC_CTX => {
                 self.execute(TransactionData::decode(payload), out);
             }
@@ -546,7 +553,7 @@ impl LocalProcess {
                 out.extend_from_slice(&cookie.to_le_bytes());
             }
             BR_SPAWN_LOOPER => self.spawn_looper(true),
-            _ => {} // NOOP, OK, RELEASE, DECREFS, death cleared, spam
+            _ => {} // NOOP, OK, RELEASE, DECREFS, death cleared, a looper's results
         }
     }
 
@@ -633,6 +640,8 @@ impl LocalProcess {
                 Ok(p)
             }
             (Some(_), PING_TRANSACTION) => Ok(Parcel::new()),
+            // Ops noted for a caller that asks for them go back with the
+            // reply (`Binder.execTransactInternal`).
             (Some(s), _) => {
                 let collect = tr.flags & crate::appops::FLAG_COLLECT_NOTED_APP_OPS != 0;
                 let uid = collect.then_some(tr.sender_euid);
@@ -784,10 +793,9 @@ mod tests {
         p
     }
 
-    #[test]
-    fn serves_calls_references_and_deaths() {
-        let driver = Driver::new();
-        let manager = open(&driver, 100, 1000);
+    /// Starts a context manager serving a [`Registry`].
+    fn start_registry(driver: &Arc<Driver>) -> Arc<LocalProcess> {
+        let manager = open(driver, 100, 1000);
         let registry = Arc::new(Registry {
             process: Mutex::new(Arc::downgrade(&manager)),
             names: Mutex::new(HashMap::new()),
@@ -806,6 +814,25 @@ mod tests {
             .ioctl(manager.tid(), BINDER_SET_CONTEXT_MGR_EXT, &mut object)
             .unwrap();
         manager.start();
+        manager
+    }
+
+    /// Registers `binder` of `server` as `n` and looks it up in `client`.
+    fn publish(server: &LocalProcess, client: &LocalProcess, n: &str, binder: Binder) -> Strong {
+        let mut add = name(n);
+        add.write_binder(Some(binder));
+        server.transact(0, ADD, &add, false).unwrap();
+        let reply = client.transact(0, GET, &name(n), false).unwrap();
+        let Some(Binder::Handle(h)) = reply.reader().read_binder().unwrap() else {
+            panic!("no {n} binder");
+        };
+        client.strong(h)
+    }
+
+    #[test]
+    fn serves_calls_references_and_deaths() {
+        let driver = Driver::new();
+        let _manager = start_registry(&driver);
 
         let server = open(&driver, 200, 1000);
         let (died, deaths) = mpsc::channel();
@@ -815,17 +842,8 @@ mod tests {
             watched: Mutex::new(Vec::new()),
         }));
         server.start();
-        let mut add = name("echo");
-        add.write_binder(Some(echo));
-        server.transact(0, ADD, &add, false).unwrap();
-
         let client = open(&driver, 300, 10123);
-        let reply = client.transact(0, GET, &name("echo"), false).unwrap();
-        let Some(Binder::Handle(h)) = reply.reader().read_binder().unwrap() else {
-            panic!("no echo binder");
-        };
-        let echo = client.strong(h);
-        drop(reply);
+        let echo = publish(&server, &client, "echo", echo);
         let mut arg = Parcel::new();
         arg.write_i32(42);
         let reply = echo.transact(ECHO, &arg, false).unwrap();
@@ -844,15 +862,7 @@ mod tests {
         // none, closed after the call by one that does.
         let sink = Arc::new(Sink(AtomicI32::new(0)));
         let sink_binder = server.add_service(sink.clone());
-        let mut add = name("sink");
-        add.write_binder(Some(sink_binder));
-        server.transact(0, ADD, &add, false).unwrap();
-        let reply = client.transact(0, GET, &name("sink"), false).unwrap();
-        let Some(Binder::Handle(h)) = reply.reader().read_binder().unwrap() else {
-            panic!("no sink binder");
-        };
-        let sink_handle = client.strong(h);
-        drop(reply);
+        let sink_handle = publish(&server, &client, "sink", sink_binder);
         let file: File = Arc::new(());
         let fd = Local {
             files: &client.files,
@@ -889,6 +899,62 @@ mod tests {
         echo.transact(WATCH, &watch, false).unwrap();
         driver.release(client.handle);
         deaths.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    /// Releases its own process while it serves a call, as a process that
+    /// dies mid-call.
+    struct Dies {
+        driver: Arc<Driver>,
+        process: Mutex<Weak<LocalProcess>>,
+    }
+
+    impl Service for Dies {
+        fn descriptor(&self) -> &str {
+            "test.IDies"
+        }
+        fn transact(&self, _: &mut Call<'_>) -> Reply {
+            let process = self.process.lock().unwrap().upgrade().unwrap();
+            self.driver.release(process.handle);
+            Ok(Parcel::new())
+        }
+    }
+
+    /// A call whose target dies after its completion fails with
+    /// DEAD_OBJECT, and the thread's next one-way call still goes out
+    /// (`waitForResponse` drops a synchronous call's own completion).
+    #[test]
+    fn a_failed_call_leaves_the_next_oneway_call_intact() {
+        let driver = Driver::new();
+        let _manager = start_registry(&driver);
+        let client = open(&driver, 300, 10123);
+
+        let doomed = open(&driver, 200, 1000);
+        let dies = doomed.add_service(Arc::new(Dies {
+            driver: driver.clone(),
+            process: Mutex::new(Arc::downgrade(&doomed)),
+        }));
+        doomed.start();
+        let dies = publish(&doomed, &client, "dies", dies);
+
+        let server = open(&driver, 400, 1000);
+        let sink = Arc::new(Sink(AtomicI32::new(0)));
+        let sink_binder = server.add_service(sink.clone());
+        server.start();
+        let sink_handle = publish(&server, &client, "sink", sink_binder);
+
+        assert_eq!(
+            dies.transact(1, &Parcel::new(), false).err(),
+            Some(DEAD_OBJECT)
+        );
+        sink_handle.transact(1, &Parcel::new(), true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while sink.0.load(Ordering::Relaxed) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the one-way call was lost"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Notes op 1 for its caller when it collects for it.

@@ -5,14 +5,14 @@
 //!   whose other end is the guest's binder fd.
 //! - The service port also answers `FILES`: the files whose pages this
 //!   process shares as memory objects ([`Server::share_file`]).
-//! - Each guest thread that issues binder ioctls gets a **thread port** and a
-//!   daemon thread that serves it. The ioctl runs on that thread and may
-//!   block in the driver, as the guest thread blocks in the kernel.
+//! - Each guest thread that issues binder ioctls gets a **thread port**. A
+//!   small pool of daemon threads receives on the set of all thread ports
+//!   and runs the ioctls; none blocks in the driver ([`Worker`]).
 //! - **Release** is the last close of the guest's binder fd, which includes
 //!   process death: the daemon's end of the readiness socket reads EOF.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use aim_binder_driver::{
     Credentials, Device, Driver, Errno, File, GuestProcess, ProcHandle, ReceiveMemory, Tid, errno,
@@ -107,15 +107,6 @@ struct OpenFile {
 }
 
 impl OpenFile {
-    /// Stop serving a thread port, unless release already destroyed it.
-    fn forget_thread(&self, port: Port) {
-        let mut threads = self.threads.lock().unwrap();
-        if let Some(i) = threads.iter().position(|p| *p == port) {
-            threads.swap_remove(i);
-            mach::destroy_receive(port);
-        }
-    }
-
     /// Re-evaluate readiness for the polling thread, with the readiness
     /// lock held across the driver's poll so a concurrent wake is not lost.
     fn refresh(&self, driver: &Driver) -> u32 {
@@ -140,6 +131,25 @@ pub struct Server {
     files: Mutex<HashMap<Port, Arc<OpenFile>>>,
     kq: i32,
     shared: Mutex<Vec<SharedFile>>,
+    pool: Arc<Pool>,
+}
+
+/// The thread ports, served by the workers.
+struct Pool {
+    driver: Arc<Driver>,
+    /// The port set of every thread port.
+    set: Port,
+    threads: RwLock<HashMap<Port, (Arc<OpenFile>, Tid)>>,
+}
+
+impl Pool {
+    /// Stop serving a thread port, unless release already destroyed it.
+    fn forget(&self, port: Port) {
+        if let Some((file, _)) = self.threads.write().unwrap().remove(&port) {
+            file.threads.lock().unwrap().retain(|p| *p != port);
+            mach::destroy_receive(port);
+        }
+    }
 }
 
 impl Server {
@@ -149,19 +159,33 @@ impl Server {
             mach::check_in(name).map_err(|kr| format!("bootstrap_check_in {name}: {kr:#x}"))?;
         let set = mach::new_port_set().map_err(|kr| format!("port set: {kr:#x}"))?;
         mach::move_member(service, set).map_err(|kr| format!("port set: {kr:#x}"))?;
+        let driver = Driver::new();
+        let pool = Arc::new(Pool {
+            driver: driver.clone(),
+            set: mach::new_port_set().map_err(|kr| format!("port set: {kr:#x}"))?,
+            threads: RwLock::new(HashMap::new()),
+        });
         // SAFETY: plain kqueue.
         let kq = unsafe { libc::kqueue() };
         if kq < 0 {
             return Err("kqueue failed".into());
         }
         let server = Arc::new(Self {
-            driver: Driver::new(),
+            driver,
             service,
             set,
             files: Mutex::new(HashMap::new()),
             kq,
             shared: Mutex::new(Vec::new()),
+            pool: pool.clone(),
         });
+        for _ in 0..std::thread::available_parallelism().map_or(4, |n| n.get()) {
+            let worker = Worker(pool.clone());
+            std::thread::Builder::new()
+                .name("binder-worker".into())
+                .spawn(move || worker.run())
+                .map_err(|e| e.to_string())?;
+        }
         let s = server.clone();
         std::thread::Builder::new()
             .name("binder-control".into())
@@ -314,19 +338,10 @@ impl Server {
                 let tid = r.i32()?;
                 let port = mach::new_port(false).map_err(|_| errno::ENOMEM)?;
                 file.threads.lock().unwrap().push(port);
-                let worker = Worker {
-                    driver: self.driver.clone(),
-                    file: file.clone(),
-                    tid,
-                    port,
-                };
-                if std::thread::Builder::new()
-                    .name(format!("binder-{tid}"))
-                    .stack_size(256 << 10)
-                    .spawn(move || worker.run())
-                    .is_err()
-                {
-                    file.forget_thread(port);
+                let thread = (file.clone(), tid);
+                self.pool.threads.write().unwrap().insert(port, thread);
+                if mach::move_member(port, self.pool.set).is_err() {
+                    self.pool.forget(port);
                     return Err(errno::ENOMEM);
                 }
                 Ok((vec![(port, mach::MAKE_SEND)], Vec::new()))
@@ -389,8 +404,9 @@ impl Server {
             };
             self.driver.release(file.handle);
             mach::destroy_receive(port);
-            for t in std::mem::take(&mut *file.threads.lock().unwrap()) {
-                mach::destroy_receive(t);
+            let threads = std::mem::take(&mut *file.threads.lock().unwrap());
+            for t in threads {
+                self.pool.forget(t);
             }
             // SAFETY: closing our end; kqueue drops the registration.
             unsafe { libc::close(fd) };
@@ -398,9 +414,11 @@ impl Server {
     }
 }
 
-/// Serves one guest thread's ioctls. A read that would wait parks instead
+/// Serves the ioctls of any guest thread: a guest thread has one ioctl in
+/// flight at a time, and a worker never blocks, so one worker per CPU
+/// serves them all. A read that would wait parks instead
 /// ([`Driver::ioctl_or_park`]), and the thread that brings its work
-/// answers it, so the worker never blocks in the driver.
+/// answers it.
 ///
 /// A worker sends the answers of the calls it resumed, and its own, when it
 /// is done with the request. One goes out in the `mach_msg` that waits for
@@ -408,12 +426,7 @@ impl Server {
 /// blocks, as Linux wakes the target of a binder call synchronously: a
 /// resumed one, whose thread waits for a transaction or a reply, before the
 /// worker's own.
-struct Worker {
-    driver: Arc<Driver>,
-    file: Arc<OpenFile>,
-    tid: Tid,
-    port: Port,
-}
+struct Worker(Arc<Pool>);
 
 impl Worker {
     fn run(self) {
@@ -425,24 +438,24 @@ impl Worker {
         loop {
             let next = match answer.take() {
                 Some(a) => {
-                    let r = mach::reply_and_receive(&mut buf, a.to, &a.msg, self.port);
+                    let r = mach::reply_and_receive(&mut buf, a.to, &a.msg, self.0.set);
                     drop(a.files);
                     r
                 }
-                None => mach::receive(&mut buf, self.port),
+                None => mach::receive(&mut buf, self.0.set),
             };
-            let Ok(req) = next else { return };
+            let Ok(req) = next else { continue };
+            let port = req.local;
             let own = match self.call(req) {
                 Ok(call) => call.run(),
                 Err(a) => Some(a),
             };
-            if own.as_ref().is_some_and(|a| a.exit) {
-                let resumed = OUTBOX.with(|o| o.borrow_mut().take()).unwrap_or_default();
-                resumed.into_iter().chain(own).for_each(Answer::send);
-                self.file.forget_thread(self.port);
-                return;
-            }
             let mut resumed = OUTBOX.with(|o| std::mem::take(o.borrow_mut().as_mut().unwrap()));
+            if own.as_ref().is_some_and(|a| a.exit) {
+                resumed.into_iter().chain(own).for_each(Answer::send);
+                self.0.forget(port);
+                continue;
+            }
             answer = match resumed.pop() {
                 Some(last) => {
                     resumed.into_iter().chain(own).for_each(Answer::send);
@@ -454,18 +467,25 @@ impl Worker {
     }
 
     fn call(&self, req: Received) -> Result<Call, Answer> {
-        let io = match Ioctl::decode(&req.data) {
-            Ok(io) if io.fds.len() == req.ports.len() => io,
-            _ => {
-                for p in &req.ports {
-                    mach::release_send(*p);
-                }
-                let reply = IoctlReply {
-                    status: wire::EPROTO,
-                    ..Default::default()
-                };
-                return Err(Answer::new(req.reply, reply, Vec::new(), false));
+        let thread = self.0.threads.read().unwrap().get(&req.local).cloned();
+        // A thread port of a file being released is gone.
+        let status = if thread.is_some() {
+            wire::EPROTO
+        } else {
+            errno::EBADF
+        };
+        let io = Ioctl::decode(&req.data)
+            .ok()
+            .filter(|io| io.fds.len() == req.ports.len());
+        let (Some(io), Some((file, tid))) = (io, thread) else {
+            for p in &req.ports {
+                mach::release_send(*p);
             }
+            let reply = IoctlReply {
+                status,
+                ..Default::default()
+            };
+            return Err(Answer::new(req.reply, reply, Vec::new(), false));
         };
         let guest = Gathered {
             segments: io.segments,
@@ -481,9 +501,9 @@ impl Worker {
             installed: Vec::new(),
         };
         Ok(Call {
-            driver: self.driver.clone(),
-            file: self.file.clone(),
-            tid: self.tid,
+            driver: self.0.driver.clone(),
+            file,
+            tid,
             to: req.reply,
             cmd: io.cmd,
             arg: io.arg,

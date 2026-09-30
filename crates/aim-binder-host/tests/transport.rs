@@ -398,3 +398,81 @@ fn shared_files_reach_the_client_as_the_same_pages() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+/// More guest threads wait in the driver at once than the daemon has
+/// workers: a parked read holds no worker (#553). Every caller's call is
+/// delivered before any looper replies.
+#[test]
+fn more_waiting_threads_than_workers() {
+    let name = format!(
+        "dev.aim.test.binder-host.{}.{}",
+        std::process::id(),
+        NAME.fetch_add(1, Ordering::Relaxed)
+    );
+    let _server = Server::start(&name).unwrap();
+    let client = Client::connect(&name).unwrap();
+    let n = 4 * std::thread::available_parallelism().map_or(4, |n| n.get());
+    let mgr = open(&client, 1000, "u:r:servicemanager:s0");
+    let mut fbo = FlatBinderObject {
+        kind: BINDER_TYPE_BINDER,
+        flags: 0,
+        binder: 0x1234,
+        cookie: 0x5678,
+    }
+    .encode();
+    mgr.ioctl(
+        100,
+        BINDER_SET_CONTEXT_MGR_EXT,
+        fbo.as_mut_ptr() as u64,
+        &mut Own,
+    )
+    .unwrap();
+    let all_delivered = std::sync::Arc::new(std::sync::Barrier::new(n));
+    for i in 0..n {
+        let all_delivered = all_delivered.clone();
+        std::thread::spawn(move || {
+            let tid = 1000 + i as i32;
+            let mut enter = Vec::new();
+            cmd(&mut enter, BC_ENTER_LOOPER, &[]);
+            let mut read = write_read(&mgr, tid, &enter, true).unwrap();
+            let call = loop {
+                if let Some((_, tr)) = returns(&read)
+                    .into_iter()
+                    .find(|(c, _)| *c == BR_TRANSACTION)
+                {
+                    break tr.unwrap();
+                }
+                read = write_read(&mgr, tid, &[], true).unwrap();
+            };
+            all_delivered.wait();
+            let mut reply = Vec::new();
+            cmd(&mut reply, BC_FREE_BUFFER, &call.buffer.to_le_bytes());
+            cmd(&mut reply, BC_REPLY, &TransactionData::default().encode());
+            write_read(&mgr, tid, &reply, false).unwrap();
+        });
+    }
+    let caller = open(&client, 10_001, "u:r:shell:s0");
+    let (done, finished) = std::sync::mpsc::channel();
+    for i in 0..n {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let tid = 5000 + i as i32;
+            let tr = TransactionData {
+                code: 1,
+                ..Default::default()
+            };
+            let mut write = Vec::new();
+            cmd(&mut write, BC_TRANSACTION, &tr.encode());
+            let mut read = write_read(&caller, tid, &write, true).unwrap();
+            while !returns(&read).iter().any(|(c, _)| *c == BR_REPLY) {
+                read = write_read(&caller, tid, &[], true).unwrap();
+            }
+            done.send(()).unwrap();
+        });
+    }
+    for _ in 0..n {
+        finished
+            .recv_timeout(Duration::from_secs(20))
+            .expect("a call never completed");
+    }
+}

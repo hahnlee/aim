@@ -5,21 +5,20 @@
 //! A binder fd is a host socket whose peer is the daemon: epoll and poll see
 //! it readable while a read would find work, and its last close (including
 //! process exit) releases the binder process. ioctl, mmap and poll
-//! registration go to the daemon.
+//! registration go to the daemon. The fd table (`fdtab`) holds its file, so
+//! dup'ed fds resolve and a closed one no longer does.
 
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use aim_binder_driver::Device;
 use aim_binder_host::client::{BinderFile, Client, UserMemory};
 
+use super::fdtab::Kind;
 use crate::errno::{EINTR, EINVAL, ENODEV, ENOMEM, EPERM};
 
 /// The daemon's bootstrap name, to reconnect after fork.
 static NAME: OnceLock<String> = OnceLock::new();
 static CLIENT: Mutex<Option<Client>> = Mutex::new(None);
-/// Open binder files by the inode of their socket, so dup'ed fds resolve.
-static FILES: Mutex<Option<HashMap<u64, BinderFile>>> = Mutex::new(None);
 
 /// The files whose pages the daemon's process shares (`sharedfile`); none
 /// without a daemon.
@@ -46,17 +45,11 @@ pub fn init(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn inode(fd: i32) -> Option<u64> {
-    // SAFETY: fstat into a local buffer.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    (unsafe { libc::fstat(fd, &mut st) } == 0 && st.st_mode & libc::S_IFMT == libc::S_IFSOCK)
-        .then_some(st.st_ino)
-}
-
 fn lookup(fd: i32) -> Option<BinderFile> {
-    let files = FILES.lock().unwrap();
-    let files = files.as_ref()?;
-    files.get(&inode(fd)?).copied()
+    match super::fdtab::get(fd)? {
+        Kind::Binder(file) => Some(file),
+        _ => None,
+    }
 }
 
 struct Guest;
@@ -136,14 +129,7 @@ pub fn open(guest_path: &str, flags: u64) -> Option<i64> {
     );
     Some(match file {
         Ok(f) => {
-            let Some(ino) = inode(f.fd) else {
-                return Some(-(ENOMEM as i64));
-            };
-            FILES
-                .lock()
-                .unwrap()
-                .get_or_insert_with(HashMap::new)
-                .insert(ino, f);
+            super::fdtab::insert(f.fd, Kind::Binder(f));
             f.fd as i64
         }
         Err(e) => -(e as i64),
