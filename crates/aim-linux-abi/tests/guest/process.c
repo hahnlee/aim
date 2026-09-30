@@ -1013,6 +1013,51 @@ static void peer_ids(void) {
   printf("ok peer_ids\n");
 }
 
+// A process rewrites its entry in place on every credential change: a
+// reader never sees one half done. The child flips between one group and
+// many while this process reads its status.
+static void entry_rewrites(void) {
+  enum { MANY = 200 };
+  static gid_t many[MANY];
+  for (int i = 0; i < MANY; i++) many[i] = 20000 + i;
+  int ready[2];
+  CHECK(pipe(ready) == 0, "pipe");
+  pid_t child = fork();
+  if (child == 0) {
+    gid_t one = 3003;
+    if (setgroups(1, &one) != 0) _exit(9);
+    write(ready[1], "r", 1);
+    for (;;)
+      if (setgroups(MANY, many) != 0 || setgroups(1, &one) != 0) _exit(9);
+  }
+  char c, path[64], *text;
+  CHECK(read(ready[0], &c, 1) == 1, "child ready");
+  snprintf(path, sizeof(path), "/proc/%d/status", child);
+  int seen[2] = {0, 0};
+  for (int i = 0; i < 2000; i++) {
+    CHECK((text = slurp(path)), "status");
+    char* g = strstr(text, "\nGroups:\t");
+    CHECK(g && strstr(text, "\nCapBnd:\t000001ffffffffff\n"), "status '%s'", text);
+    g += strlen("\nGroups:\t");
+    if (strncmp(g, "3003 \n", 6) == 0) {
+      seen[0]++;
+    } else {
+      for (int k = 0; k < MANY; k++) {
+        char want[16];
+        int n = snprintf(want, sizeof(want), "%d ", 20000 + k);
+        CHECK(strncmp(g, want, n) == 0, "groups '%.80s' at %d", g, k);
+        g += n;
+      }
+      CHECK(*g == '\n', "groups end '%.20s'", g);
+      seen[1]++;
+    }
+  }
+  kill(child, SIGKILL);
+  waitpid(child, NULL, 0);
+  printf("entry_rewrites read %d with one group, %d with many\n", seen[0], seen[1]);
+  printf("ok entry_rewrites\n");
+}
+
 // Without a process table, linux-run is the init of a private pid
 // namespace: this prints its pid and a child's and exits, and the child
 // dies with it (tests/process.rs).
@@ -1065,6 +1110,31 @@ static void bench(void) {
   }
   qsort(t, N / 5, sizeof(double), cmp);
   printf("bench fork+exec+exit+wait p50 %.0f us p90 %.0f us\n", t[N / 10], t[N / 5 * 9 / 10]);
+  // A credential change, as zygote's specialization makes about 45: each
+  // drop changes the bounding set.
+  int p[2];
+  CHECK(pipe(p) == 0, "pipe");
+  pid_t pid = fork();
+  if (pid == 0) {
+    double d[CAP_LAST_CAP + 1];
+    for (int c = 0; c <= CAP_LAST_CAP; c++) {
+      double s = now_us();
+      if (prctl(PR_CAPBSET_DROP, c, 0, 0, 0) != 0) _exit(1);
+      d[c] = now_us() - s;
+    }
+    qsort(d, CAP_LAST_CAP + 1, sizeof(double), cmp);
+    dprintf(p[1], "bench PR_CAPBSET_DROP p50 %.1f us p90 %.1f us\n", d[(CAP_LAST_CAP + 1) / 2],
+            d[(CAP_LAST_CAP + 1) * 9 / 10]);
+    _exit(0);
+  }
+  close(p[1]);
+  char out[128];
+  ssize_t n = read(p[0], out, sizeof(out) - 1);
+  int st;
+  CHECK(n > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+        "capbset child %#x", st);
+  out[n] = 0;
+  printf("%s", out);
 }
 
 // fork+exit+wait with a large address space: N mappings of alternating
@@ -1168,6 +1238,7 @@ int main(int argc, char** argv) {
       {"xattrs", xattrs},           {"pf_key", pf_key},
       {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
       {"permissions", permissions}, {"peer_ids", peer_ids},
+      {"entry_rewrites", entry_rewrites},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},
   };
   for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {

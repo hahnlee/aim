@@ -659,14 +659,13 @@ impl Boot {
                 context,
             );
         }
-        let identity = std::fs::read_to_string(
-            self.layout
+        let identity = Identity::read_entry(
+            &self
+                .layout
                 .identity_dir()
                 .join("by-pid")
                 .join(pid.to_string()),
-        )
-        .ok()
-        .and_then(|text| Identity::parse_file_text(&text).ok());
+        );
         match identity {
             Some(identity) => (
                 Ucred {
