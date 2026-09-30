@@ -15,10 +15,18 @@
 //! the original's dex checksums, so it goes through profman's text form to
 //! name the edited one's.
 //!
+//! The device's own jar (the `device-services` node) follows services.jar
+//! on the system server class path, before the APEXes' jars, so it is
+//! compiled too (`speed`, as the APEXes' service jars), and every oat file
+//! whose class loader context has services.jar is compiled again with it
+//! in the context, `verify` ones included: ART rejects an oat file whose
+//! context differs from the loader's.
+//!
 //! The output is `root/` (the files at their guest paths) and
 //! `overlay.toml`, the entries image/overlay.toml includes.
 
 use super::boot_image::{Dex2oat, boot_image_location, oat_dex_locations, oat_key};
+use super::device_services;
 use crate::graph::{Action, Ctx, Dep, Node};
 use crate::log::Log;
 use aim_android_image::assemble::force_remove;
@@ -27,6 +35,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+const SERVICES: &str = "/system/framework/services.jar";
+const DEVICE_SERVICES_ODEX: &str = "/system/framework/oat/arm64/aim-services.odex";
 const PARTITIONS: [&str; 4] = ["system", "system_ext", "product", "vendor"];
 const WORKERS: usize = 4;
 
@@ -42,12 +52,13 @@ pub fn node() -> Node {
             Dep::on("art"),
             Dep::on("boot-image"),
             Dep::on("system-server"),
+            Dep::on("device-services"),
             Dep::order_only("host/linux-run"),
         ],
         inputs: Vec::new(),
         outputs: vec![out()],
         tools: Vec::new(),
-        recipe: 1,
+        recipe: 2,
         action: Action::Oat,
         boot: true,
     }
@@ -84,18 +95,39 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     for odex in odexes {
         let host = image.join(&odex[1..]);
         let filter = oat_key(&host, "compiler-filter")?;
-        if filter == "verify" {
+        let original = strip_checksums(&oat_key(&host, "classpath")?);
+        let context = with_device_services(&original);
+        if filter == "verify" && context == original {
             continue;
         }
         jobs.push(Job {
             dex: oat_dex_locations(&host)?.swap_remove(0),
-            context: strip_checksums(&oat_key(&host, "classpath")?),
+            context,
             bcp: oat_key(&host, "bootclasspath")?,
             app_image: host.with_extension("art").is_file(),
             filter,
             odex,
         });
     }
+    // The device's jar, loaded after services.jar as its class loader has
+    // it.
+    let services = jobs
+        .iter()
+        .find(|j| j.dex == SERVICES)
+        .ok_or("no oat file of services.jar")?;
+    let context = match services.context.strip_suffix(']') {
+        Some(jars) if jars.ends_with('[') => format!("{jars}{SERVICES}]"),
+        Some(jars) => format!("{jars}:{SERVICES}]"),
+        None => return Err(format!("services.jar's context {}", services.context)),
+    };
+    jobs.push(Job {
+        odex: DEVICE_SERVICES_ODEX.into(),
+        dex: device_services::JAR.into(),
+        filter: "speed".into(),
+        context,
+        bcp: services.bcp.clone(),
+        app_image: false,
+    });
 
     // The guest view: the regenerated boot image and the edited jars over
     // the image's; the originals of those jars, for their profiles, under
@@ -114,11 +146,9 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
             }
         }
     }
-    let edited = [(
-        "/system/framework/services.jar",
-        super::system_server::out().join("services.jar"),
-    )];
+    let edited = [(SERVICES, super::system_server::out().join("services.jar"))];
     files.extend(edited.iter().map(|(g, h)| (g.to_string(), h.clone())));
+    files.push((device_services::JAR.into(), device_services::jar()));
     let file_refs: Vec<(&str, PathBuf)> =
         files.iter().map(|(g, h)| (g.as_str(), h.clone())).collect();
 
@@ -190,6 +220,13 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
                 )
                 .unwrap(),
                 (true, false) => return Err(format!("dex2oat wrote no {guest}")),
+                (false, true) if job.odex == DEVICE_SERVICES_ODEX => write!(
+                    manifest,
+                    "\n[[add]]\npath = \"{guest}\"\nsource = \"{}\"\nreason = \"the device's own jar compiled ({})\"\n",
+                    relative(&out.join("root").join(&guest[1..])),
+                    job.filter
+                )
+                .unwrap(),
                 (false, _) => {}
             }
         }
@@ -309,4 +346,32 @@ fn strip_checksums(context: &str) -> String {
         }
     }
     out
+}
+
+/// `context` with the device's jar after services.jar, where the system
+/// server class path has it.
+fn with_device_services(context: &str) -> String {
+    let jar = device_services::JAR;
+    context
+        .replace(&format!("{SERVICES}:"), &format!("{SERVICES}:{jar}:"))
+        .replace(&format!("{SERVICES}]"), &format!("{SERVICES}:{jar}]"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_services_follow_services() {
+        let jar = device_services::JAR;
+        assert_eq!(
+            with_device_services(&format!("PCL[];PCL[/a.jar:{SERVICES}:/apex/b.jar]")),
+            format!("PCL[];PCL[/a.jar:{SERVICES}:{jar}:/apex/b.jar]")
+        );
+        assert_eq!(
+            with_device_services(&format!("PCL[/a.jar:{SERVICES}]")),
+            format!("PCL[/a.jar:{SERVICES}:{jar}]")
+        );
+        assert_eq!(with_device_services("PCL[/a.jar]"), "PCL[/a.jar]");
+    }
 }

@@ -17,6 +17,12 @@ Both are fetched at `android-16.0.0_r1` (`patches/art-android/sources.lock`)
 into the ignored `_build/aosp`. The series in
 `patches/art-android/` does not touch them.
 
+The device-specific system services (`java/device-services`) are compiled
+with a pinned Eclipse Temurin JDK (`upstream/java-toolchain.lock`). It is a
+build tool: its `javac` compiles our sources and its runtime runs d8 and
+apksigner; no JDK class or library is linked into the output (the code runs
+on the image's own libcore) or shipped.
+
 ## License texts and upstream source
 
 The complete upstream license and notice documents are in

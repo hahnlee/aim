@@ -89,7 +89,8 @@ setting, so no uid observer is needed. Noting an app op
 (`noteOperation`), which records an access and decides nothing the check
 did not, is sent from a background thread.
 
-Two inputs are asked each time. Permissions: their owner's listener,
+**Permissions** are kept by their owner's client-cache nonce, not by a
+listener. The owner's listener,
 `IPermissionManager.addOnPermissionsChangeListener`, is told of runtime
 permissions only. Granting or revoking a development or role permission
 (`pm grant`, the role holders') notifies nobody
@@ -98,13 +99,21 @@ tag), and shell permission delegation and root's permission overrides
 (`UiAutomation.adoptShellPermissionIdentity`, `addOverridePermissionState`,
 `AccessCheckDelegate`) change answers without notice
 (`testReadInBackgroundRequiresPermission` failed with a permission
-mirror). What every change bumps is the owner's client-cache nonce
-(`PackageManager.invalidatePackageInfoCache`), which apps' own
-`checkPermission` cache follows; with
+mirror). Every change bumps the nonce
+(`PackageManager.invalidatePackageInfoCache`) that apps' own
+`checkPermission` cache follows. With
 `pic_separate_permission_notifications` and `pic_uses_shared_memory` on
-in this image it is the `package_info_cache` nonce in
-`ApplicationSharedMemory`, which system_server hands only to app
-processes (#497, #430). An instrumentation target's app ops: delegation
+in this image, that is the `package_info_cache` nonce in
+`ApplicationSharedMemory`, which the system_server bridge hands the host
+("The system_server bridge"). The host keeps a check's answer as
+`PropertyInvalidatedCache.query` does: keyed by permission and uid
+(`checkPermission`; the pid decides nothing) or by permission and
+package (`IPermissionManager.checkPermission`), stored with the nonce
+read before asking, and dropped once the nonce differs. While the nonce
+is unset or reserved, or before the bridge is attached, every check is
+asked (`crates/aim-services/src/system.rs`).
+
+One input is asked each time. An instrumentation target's app ops: delegation
 decides the ops of the uid it delegates to as shell's and tells no mode
 watcher either (#467). It delegates only to the target of an active
 instrumentation, a uid one of whose packages an installed
@@ -164,7 +173,7 @@ task stack listener's snapshots carry a buffer's. They are closed after
 the call, and a service that takes none refuses a call with some, as the
 driver refuses it for a node that does not accept them.
 
-## The system_server bridge (design, #430)
+## The system_server bridge (#430)
 
 Some inputs of the originals' decisions exist only inside system_server
 (`LocalServices`), and some change signals reach only processes
@@ -224,7 +233,7 @@ started by ActivityManager does.
 
 - It publishes nothing to servicemanager. The service host registers one
   binder of its own, and the bridge hands it the bridge's binder when
-  system services are ready (`PHASE_SYSTEM_SERVICES_READY`). Only the
+  system services are ready. Only the
   host holds it, and every call must come from the system uid. A new
   system_server attaches again; when it dies, the host drops the bridge
   and everything fed through it, as for any owner ("Mirrored state").
@@ -244,22 +253,79 @@ started by ActivityManager does.
   memory read per use and cannot race a change, where an observer is a
   callback per change. Observers are for inputs without a generation.
 
-**What it adds to the image.** The jar, appended last to the platform's
-`systemserverclasspath.pb` (a `replace`; last, so the class loader
-context and oat files of `services.jar` stay valid) and compiled by the
-`oat` node; a static overlay of `android` in `/vendor/overlay` that sets
-`config_deviceSpecificSystemServices`. The bridge is Java (code in
-system_server is dex), compiled against the image's own classes, and
-the build checks every internal method it calls in the image's jars, as
-it checks transaction codes, so a changed internal API fails the build
-instead of the boot. The build needs a Java compiler, a dexer and an
-APK builder and signer, new build inputs with their licences (#520).
+**What it adds to the image** (#520; `image/overlay.toml`, ADR 0013).
+
+- `/system/framework/aim-services.jar`: `dev.aim.server.DeviceServices`,
+  a `SystemService`, and the Java of our AIDL (`IBridge`, `IServiceHost`
+  in `java/device-services/aidl`). It is built by the `device-services`
+  node with a pinned JDK and SDK build tools (docs/build.md, "Java"),
+  against stubs of the image's classes. The build checks the stubs and
+  every class, field and method the dex names against the image's
+  jars, so a changed internal API fails the build instead of the boot.
+- `/system/etc/classpaths/systemserverclasspath.pb` (a `replace`): the
+  platform's fragment with the jar appended. `derive_classpath` puts
+  the platform's fragment before the APEXes' (`/apex/*`, sorted), so on
+  `SYSTEMSERVERCLASSPATH` the jar comes right after `services.jar`, not
+  last. The class loader context of `services.jar` and of the platform
+  jars before it stays valid. That of every APEX service jar (and the
+  standalone ones, whose parent is the whole path) names the jar, so
+  the `oat` node compiles those again with it, as well as the jar
+  itself (`speed`). A classpath fragment of its own would need an APEX,
+  and a standalone jar (`STANDALONE_SYSTEMSERVER_JARS`) is not on the
+  class loader `startService(className)` uses.
+- `/vendor/overlay/aim-framework-overlay.apk`: a static overlay of
+  `android` that sets `config_deviceSpecificSystemServices`, signed with
+  AOSP's public test key.
+
+`DeviceServices` publishes nothing. The service host registers
+`aim.service_host` (`IServiceHost`) with servicemanager, which refuses
+app uids. SystemServer starts device-specific services after
+`PHASE_SYSTEM_SERVICES_READY`, so at its first phase,
+`PHASE_DEVICE_SPECIFIC_SERVICES_READY`, the service hands it the
+`IBridge` binder with a one-way call. The host takes the bridge only
+from the system uid, and the bridge answers only the system uid.
+Further device pieces (#470's `ActivityInterceptorCallback`) register
+from the same service.
 
 **Maintenance and CTS.** Each method is one internal call; the internal
 APIs it names are checked per image. It runs in system_server, so it
-throws only what the original caller would. No servicemanager name,
-permission or public API changes, so no CTS module sees it; each
+throws only what the original caller would. No permission or public API
+changes. The one new servicemanager name, `aim.service_host`, belongs to
+the service host, and no CTS module expects the set of names. Each
 service's own CTS stays the gate.
+
+**Nonces (#497).** `IBridge.getApplicationSharedMemory` returns a
+read-only fd of ActivityManager's `ApplicationSharedMemory`
+(`getReadOnlyFileDescriptor`, what `bindApplication` hands an app). The
+host maps it (`crates/aim-services/src/nonces.rs`) and finds a nonce's
+handle in the store's name block, read when its hash (`Arrays.hashCode`)
+matches, as `NonceStore.getHandleForName` does. Permission checks
+(`IActivityManager.checkPermission`, `IPermissionManager.checkPermission`)
+are then kept as `PermissionManager`'s `sPermissionCache` and
+`sPackageNamePermissionCache` keep them ("Mirrored state").
+
+**Measured** (2026-09-30, the second boot of a data directory, load
+about 8, a binder trace over the CTS runs below). system_server logs
+`StartDeviceSpecificServices dev.aim.server.DeviceServices` and
+"bridge attached to the native service host". `cmd overlay list android`
+shows the overlay enabled, and `sys.boot_completed` came after 12 s.
+During CtsVibratorTestCases, every `vibrate` and `cancelVibrate` checks
+VIBRATE:
+
+| | Calls | p50 / p99 |
+| --- | --- | --- |
+| a kept answer (no call to system_server) | 45 | 10.9 / 84.8 us |
+| a check asked (`IActivityManager.checkPermission`, then kept) | 60 | 56.2 / 207.9 us |
+| the host's `checkPermission` itself | 74 in the boot | 34.8 / 203.8 us |
+
+So a check costs one mutex and one memory read instead of a round trip
+of about 35 us to system_server (p50). The CTS app adopts and drops
+shell permissions around its tests, and each change bumps the nonce, so
+more than half of its checks are asked. An app without delegation has
+its answers kept until a permission or package changes. The
+same boot passed the five clipboard classes (36 of 36) and
+CtsVibratorTestCases (268 pass, 33 skip, as recorded), and started
+Settings cold in 231 ms.
 
 **The core milestones.** Each method is the binder form of an owner
 still in system_server and goes when its owner moves native (URI grants,
@@ -267,10 +333,10 @@ window focus, ActivityManager's provider access check). A native
 ActivityManager knows the service host without a bridge, and the shared
 memory is its own. With SystemServer gone, the bridge is gone.
 
-**Order.** The build of the jar and the overlay, shared with #470
-(#520); the permission and user nonces (#497, #460), which end the
-per-call asks; URI grants (#429); focus, content capture, autofill and
-virtual devices (#430).
+**Order.** Done: the build of the jar and the overlay, shared with #470
+(#520), and the permission nonce (#497). Next: the user nonce (#460);
+URI grants (#429); focus, content capture, autofill and virtual devices
+(#430).
 
 ## Inventory: what apps use
 
@@ -830,8 +896,10 @@ trace over the shell loop and the CTS run below):
 | `vibrate`, CTS app (40) | 231 / 1,601 us | 41 / 117 us |
 | `cancelVibrate`, CTS app (65) | 81 / 1,050 us | 42 / 145 us |
 
-`vibrate` and `cancelVibrate` ask ActivityManager for VIBRATE each time
-(permissions are not mirrored, "Mirrored state"); the rest asks nothing.
+`vibrate` and `cancelVibrate` check VIBRATE; since the system_server
+bridge the answer is kept by the permission nonce, and a kept one takes
+`vibrate` to about 11 us (p50, "The system_server bridge"). The rest asks
+nothing.
 
 ## Conformance
 

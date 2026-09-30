@@ -7,7 +7,9 @@ mod angle;
 mod art;
 mod boot_image;
 mod derived_image;
+mod device_services;
 mod image;
+mod java;
 mod moltenvk;
 mod oat;
 mod service_aidl;
@@ -30,6 +32,7 @@ pub fn declare(mut built: Vec<Node>) -> Result<Vec<Node>, String> {
         angle::node(),
         moltenvk::node(),
         system_server::node(),
+        device_services::node(),
         oat::node(),
     ]);
     let derived = derived_image::node(&built)?;
@@ -53,6 +56,7 @@ pub fn run(node: &Node, ctx: &Ctx, log: &mut Log) -> Result<Vec<PathBuf>, String
         Action::Angle => angle::run(log)?,
         Action::MoltenVk => moltenvk::run(log)?,
         Action::SystemServer => system_server::run(log)?,
+        Action::DeviceServices => device_services::run(log)?,
         Action::Oat => oat::run(ctx, log)?,
         Action::DerivedImage => derived_image::run(log)?,
         Action::TranslationCache => translation_cache::run(ctx, log)?,
@@ -85,6 +89,7 @@ pub fn clean(node: &Node) -> Result<(), String> {
         Action::Angle => Vec::new(),
         Action::MoltenVk => vec![aim_paths::moltenvk()],
         Action::SystemServer => vec![system_server::out()],
+        Action::DeviceServices => vec![device_services::out()],
         Action::Oat => vec![oat::out()],
         Action::DerivedImage => {
             detach_derived()?;

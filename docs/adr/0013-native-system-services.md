@@ -185,3 +185,32 @@ The migration's state and conformance results are in
   chosen ([system-services.md](../system-services.md), "The
   system_server bridge"). Its image additions are exceptions to record
   when built (#520); each query goes when its owner moves native.
+
+### The system_server bridge, part 1 (2026-09-30)
+
+- **The exception.** The device's own system service
+  (`dev.aim.server.DeviceServices`, `java/device-services`) enters the
+  image as a device vendor's does, through three `image/overlay.toml`
+  entries. `aim-services.jar` is added. The platform's
+  `systemserverclasspath.pb` is replaced by one with that jar appended:
+  only the system server class path holds classes SystemServer starts by
+  name, and no other fragment is the device's. A static framework-res
+  overlay in `/vendor/overlay` sets `config_deviceSpecificSystemServices`.
+  On `SYSTEMSERVERCLASSPATH` the jar follows `services.jar` and precedes
+  the APEX jars, so the `oat` node compiles it and compiles again the
+  oat files whose class loader context names `services.jar`.
+  SystemServer itself is unchanged.
+- **The build.** Java, dex and APKs come from a pinned JDK and SDK build
+  tools (`upstream/java-toolchain.lock`, licence records in
+  THIRD_PARTY_NOTICES). The overlay is signed with AOSP's public test key
+  (a user decision on #520): a preinstalled overlay needs a stable key,
+  not the platform's. The code is compiled against stubs that are checked
+  with every reference against the image's jars, so a changed internal
+  API fails the build.
+- **First slice (#497).** The service hands the native service host a
+  bridge (`IBridge`, answering the system uid only). Its first method
+  gives the read-only `ApplicationSharedMemory`, whose
+  `package_info_cache` nonce keys the host's permission checks as it
+  keys apps' own caches. Measurements and CTS are in
+  [system-services.md](../system-services.md), "The system_server
+  bridge".

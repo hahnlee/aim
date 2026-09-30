@@ -198,6 +198,42 @@
       "revision_lock": "upstream/angle.lock",
       "source_url": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxxabi/+/fc1897a2c12aa27e703c3ed48b62eba8abf4ce19/LICENSE.TXT",
       "sha256": "e2b35be49f7284a45b7baca8fc7b3ab7440e7902392b2528a457816b5bb2a15c"
+    },
+    {
+      "file": "licensing/third-party/temurin-jdk-LICENSE",
+      "project": "Eclipse Temurin JDK",
+      "revision": "17.0.20.1+1",
+      "upstream_path": "jdk-17.0.20.1+1/Contents/Home/legal/java.base/LICENSE",
+      "revision_lock": "upstream/java-toolchain.lock",
+      "source_url": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.20.1_1.tar.gz",
+      "sha256": "4b9abebc4338048a7c2dc184e9f800deb349366bdf28eb23c2677a77b4c87726"
+    },
+    {
+      "file": "licensing/third-party/temurin-jdk-ASSEMBLY_EXCEPTION",
+      "project": "Eclipse Temurin JDK",
+      "revision": "17.0.20.1+1",
+      "upstream_path": "jdk-17.0.20.1+1/Contents/Home/legal/java.base/ASSEMBLY_EXCEPTION",
+      "revision_lock": "upstream/java-toolchain.lock",
+      "source_url": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.20.1_1.tar.gz",
+      "sha256": "a44eb7b5caf5534c6ef536b21edb40b4d6babf91bf97d9d45596868618b2c6fb"
+    },
+    {
+      "file": "licensing/third-party/r8-LICENSE",
+      "project": "r8/r8",
+      "revision": "a7ad18a70460b799d0482e497c109a75bf7f91de",
+      "upstream_path": "LICENSE",
+      "revision_lock": "upstream/java-toolchain.lock",
+      "source_url": "https://r8.googlesource.com/r8/+/a7ad18a70460b799d0482e497c109a75bf7f91de/LICENSE",
+      "sha256": "68834f116f8ff545f05d14753357b620748156d60ee36b26beab4cb3f317efe4"
+    },
+    {
+      "file": "licensing/third-party/android-sdk-license.txt",
+      "project": "Android SDK repository",
+      "revision": "repository2-3.xml, license android-sdk-license",
+      "upstream_path": "sdk-repository/license[@id=android-sdk-license]",
+      "revision_lock": "upstream/java-toolchain.lock",
+      "source_url": "https://dl.google.com/android/repository/repository2-3.xml",
+      "sha256": "1f8729233617b193fd619213792ae16a41b95d2bbbf525dfe66998252ba68b16"
     }
   ]
 }

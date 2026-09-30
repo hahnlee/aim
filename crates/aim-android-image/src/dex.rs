@@ -8,6 +8,9 @@ use sha1::{Digest, Sha1};
 
 pub type Result<T> = std::result::Result<T, String>;
 
+/// `dex::kDexNoIndex`.
+const NO_INDEX: u32 = u32::MAX;
+
 /// An `encoded_value` of a class's static values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
@@ -21,6 +24,8 @@ pub enum Value {
 
 pub struct ClassDef {
     pub descriptor: String,
+    pub superclass: Option<String>,
+    interfaces_off: u32,
     class_data_off: u32,
     static_values_off: u32,
 }
@@ -89,8 +94,14 @@ impl<'a> Dex<'a> {
         let (class_defs, class_count) = (count(0x64)?, count(0x60)?);
         for i in 0..class_count {
             let at = class_defs + i * 32;
+            let superclass = u32_at(data, at + 8)?;
             dex.classes.push(ClassDef {
                 descriptor: dex.type_name(u32_at(data, at)?)?,
+                superclass: match superclass {
+                    NO_INDEX => None,
+                    index => Some(dex.type_name(index)?),
+                },
+                interfaces_off: u32_at(data, at + 12)?,
                 class_data_off: u32_at(data, at + 24)?,
                 static_values_off: u32_at(data, at + 28)?,
             });
@@ -152,6 +163,59 @@ impl<'a> Dex<'a> {
 
     fn field_name(&self, index: u32) -> Result<String> {
         self.string(u32_at(self.data, self.field_ids + 8 * index as usize + 4)?)
+    }
+
+    /// A field id: (class descriptor, name, type descriptor).
+    pub fn field(&self, index: u32) -> Result<(String, String, String)> {
+        let at = self.field_ids + 8 * index as usize;
+        Ok((
+            self.type_name(u32::from(u16_at(self.data, at)?))?,
+            self.field_name(index)?,
+            self.type_name(u32::from(u16_at(self.data, at + 2)?))?,
+        ))
+    }
+
+    /// The number of field and method ids: every field and method the
+    /// dex defines or refers to.
+    pub fn ids(&self) -> Result<(u32, u32)> {
+        Ok((u32_at(self.data, 0x50)?, u32_at(self.data, 0x58)?))
+    }
+
+    /// The interfaces `class` implements directly.
+    pub fn interfaces(&self, class: &ClassDef) -> Result<Vec<String>> {
+        if class.interfaces_off == 0 {
+            return Ok(Vec::new());
+        }
+        let at = class.interfaces_off as usize;
+        (0..u32_at(self.data, at)? as usize)
+            .map(|i| self.type_name(u32::from(u16_at(self.data, at + 4 + 2 * i)?)))
+            .collect()
+    }
+
+    /// The field and method ids `class` declares.
+    pub fn members(&self, class: &ClassDef) -> Result<(Vec<u32>, Vec<u32>)> {
+        let (mut fields, mut methods) = (Vec::new(), Vec::new());
+        if class.class_data_off == 0 {
+            return Ok((fields, methods));
+        }
+        let mut at = class.class_data_off as usize;
+        let counts: Vec<u32> = (0..4)
+            .map(|_| uleb128(self.data, &mut at))
+            .collect::<Result<_>>()?;
+        for (i, count) in counts.into_iter().enumerate() {
+            let mut index = 0u32;
+            for _ in 0..count {
+                index += uleb128(self.data, &mut at)?;
+                uleb128(self.data, &mut at)?;
+                if i < 2 {
+                    fields.push(index);
+                } else {
+                    uleb128(self.data, &mut at)?;
+                    methods.push(index);
+                }
+            }
+        }
+        Ok((fields, methods))
     }
 
     pub fn class(&self, descriptor: &str) -> Option<&ClassDef> {

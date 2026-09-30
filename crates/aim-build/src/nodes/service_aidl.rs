@@ -666,10 +666,23 @@ fn stub_codes(
 ) -> Result<(BTreeMap<String, u32>, String), String> {
     let path = image.join(jar);
     let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    dex_stub_codes(
+        &aim_android_image::system_server::dex_files(&bytes)?,
+        descriptor,
+    )
+    .map_err(|e| format!("{jar}: {e}"))
+}
+
+/// The `TRANSACTION_*` codes and `DESCRIPTOR` of `descriptor`'s stub in
+/// `dexes`.
+fn dex_stub_codes(
+    dexes: &[&[u8]],
+    descriptor: &str,
+) -> Result<(BTreeMap<String, u32>, String), String> {
     let class = format!("L{};", descriptor.replace('.', "/"));
     let stub = format!("L{}$Stub;", descriptor.replace('.', "/"));
     let (mut codes, mut found_descriptor) = (BTreeMap::new(), None);
-    for dex in aim_android_image::system_server::dex_files(&bytes)? {
+    for dex in dexes {
         let dex = Dex::parse(dex)?;
         for name in [&class, &stub] {
             let Some(def) = dex.class(name) else { continue };
@@ -684,8 +697,54 @@ fn stub_codes(
             }
         }
     }
-    let found = found_descriptor.ok_or_else(|| format!("{jar}: no stub of {descriptor}"))?;
+    let found = found_descriptor.ok_or_else(|| format!("no stub of {descriptor}"))?;
     Ok((codes, found))
+}
+
+/// Our own interfaces (`OWN_INTERFACES`): descriptor, parsed AIDL, the
+/// methods to marshal.
+fn own_interfaces(lock: &Lock) -> Result<Vec<(Interface, Vec<String>, String)>, String> {
+    let mut out = Vec::new();
+    for entry in lock.array("OWN_INTERFACES") {
+        let fields: Vec<&str> = entry.split('|').collect();
+        let [descriptor, file, methods] = fields[..] else {
+            return Err(format!("{LOCK}: bad OWN_INTERFACES entry `{entry}`"));
+        };
+        let path = aim_paths::root().join(file);
+        let text = fs::read_to_string(&path).map_err(|e| format!("{file}: {e}"))?;
+        let iface = parse(&text).map_err(|e| format!("{file}: {e}"))?;
+        if iface.descriptor() != descriptor {
+            return Err(format!("{file}: declares {}", iface.descriptor()));
+        }
+        out.push((
+            iface,
+            methods.split(',').map(str::to_string).collect(),
+            file.to_string(),
+        ));
+    }
+    Ok(out)
+}
+
+/// Checks the Java stubs of our own interfaces in `dex` against the codes
+/// generated for the Rust side.
+pub fn check_own_stubs(dex: &Path) -> Result<(), String> {
+    let lock = Lock::read(&aim_paths::root().join(LOCK))?;
+    let bytes = fs::read(dex).map_err(|e| format!("{}: {e}", dex.display()))?;
+    for (iface, _, file) in own_interfaces(&lock)? {
+        let descriptor = iface.descriptor();
+        let (stub, found) = dex_stub_codes(&[&bytes], &descriptor)?;
+        let ours: BTreeMap<String, u32> = iface
+            .methods
+            .iter()
+            .map(|m| (m.name.clone(), m.code))
+            .collect();
+        if found != descriptor || stub != ours {
+            return Err(format!(
+                "{file}: the Java stub's codes {stub:?} are not the generated {ours:?}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The module of a hand-written interface: its descriptor and the
@@ -772,6 +831,9 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         }
         let selected: Vec<String> = methods.split(',').map(str::to_string).collect();
         code += &interface_code(&iface, &selected, origin)?;
+    }
+    for (iface, selected, file) in own_interfaces(&lock)? {
+        code += &interface_code(&iface, &selected, &file)?;
     }
     for entry in lock.array("CONSTANTS") {
         let fields: Vec<&str> = entry.split('|').collect();

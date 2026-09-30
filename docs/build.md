@@ -31,7 +31,9 @@ selects a group (`cargo aim build hal`). `-v` shows the tools' output,
 - The Android SDK (`ANDROID_SDK_ROOT`, else `~/Library/Android/sdk`) with
   NDK `28.2.13676358` and `build-tools/36.0.0` (its `aidl` is pinned by
   sha256 in `hal/sources.lock`).
-- JDK 17 (Homebrew `openjdk@17`), `python3`, `git`, `curl`.
+- JDK 17 (Homebrew `openjdk@17`) for the ART build and xsdc, `python3`,
+  `git`, `curl`, `unzip`. The device services' toolchain is fetched
+  ("Java").
 - The pinned image archive in `_prebuilt` (`image/original.lock`).
 - For ANGLE only: an ANGLE checkout (fetched when missing, ~15 GB with its
   toolchain; see "ANGLE") and the system `ninja`.
@@ -44,6 +46,7 @@ selects a group (`cargo aim build hal`). `-v` shows the tools' output,
 | `_build/aosp/` | AOSP trees fetched at the image's tag, each checked against its lock's hash |
 | `_build/downloads/` | Their archives (and the MoltenVK release), so a refetch needs no network |
 | `_build/cts/` | The pinned entries of the CTS release (`upstream/cts.lock`, `tools/cts-module.py`; docs/system-services.md) |
+| `_build/java/` | The Java toolchain of `upstream/java-toolchain.lock`, unpacked ("Java") |
 | `_build/xsdc`, `_build/angle-source`, `_build/depot_tools` | Pinned checkouts |
 | `target/aim/<node>/` | Every build output (`hal/bin`, `art/stripped`, `boot-image`, ...) |
 | `target/aim/derived.shadow` | The derived image: the system image's changes by the overlay and its translations, mounted read-only at `target/aim/derived` |
@@ -70,6 +73,7 @@ non-cargo stages are declared in code:
 | `boot-image` | `art`, `image`, `host/linux-run` (order only) | | `target/aim/boot-image/framework` |
 | `angle` | | `upstream/angle.lock`, `upstream/angle-args.gn` | `_build/angle-source/out/AimRelease` |
 | `moltenvk` | | `upstream/moltenvk.lock` | `target/aim/moltenvk` (`libMoltenVK.dylib`, `LICENSE`, `vk.xml`) |
+| `device-services` | `image` | `upstream/java-toolchain.lock`, `java/device-services/*`, `java/framework-overlay/*` | `target/aim/device-services`: `aim-services.jar`, the platform's `systemserverclasspath.pb` with it appended, `framework-overlay.apk` ("Java") |
 | `system-server` | `image` | `image/native-services` | `target/aim/system-server/services.jar`, SystemServer without the start of the natively implemented services (docs/system-services.md) |
 | `oat` | `image`, `art`, `boot-image`, `system-server`, `host/linux-run` (order only) | | `target/aim/oat`: the image's oat files with code compiled again (docs/art-exception-patches.md, "Other oat files") at their guest paths under `root/`, and `overlay.toml`, which `image/overlay.toml` includes |
 | `derived-image` | `image` and the producer of every built overlay source | `image/overlay.toml` and its checked-in sources | `target/aim/derived.shadow`, attached at `target/aim/derived` |
@@ -165,6 +169,35 @@ ANGLE is the exception: its node runs the system `ninja`, for two reasons.
   built by ninja would be rebuilt from scratch, and a fresh ANGLE build
   needs Xcode's Metal Toolchain component (`xcodebuild -downloadComponent
   MetalToolchain`).
+
+## Java
+
+Code that runs in system_server is dex, and a framework overlay is an APK
+(docs/system-services.md, "The system_server bridge"). The
+`device-services` node builds both with the toolchain of
+`upstream/java-toolchain.lock`, downloaded into `_build/downloads`, checked
+against its sha256 and unpacked into `_build/java`: a Temurin JDK 17
+(`javac`, and the runtime of d8 and apksigner), the SDK Build-Tools'
+d8, aapt2, apksigner and aidl, and AOSP's public test key. They are build
+tools; nothing of them is linked into the output or put in the image.
+
+- `java/device-services/src` and the Java of its AIDL
+  (`java/device-services/aidl`, whose Rust side `aidl-gen` generates,
+  `OWN_INTERFACES` of `crates/aim-services/sources.lock`) are compiled
+  against `java/device-services/stubs`: stubs of the image's classes with
+  only the members used. The stubs are dexed and checked against the
+  image's jars on the boot and system server class paths
+  (`aim_android_image::linkage`): every class, superclass, member and
+  constant a stub declares must be the image's. Then every class, field
+  and method the dexed code refers to outside itself must resolve in those
+  jars as ART resolves it. A changed internal API fails the build instead
+  of the boot. The Java stubs' transaction codes are checked against the
+  ones generated for the Rust side.
+- The jar holds one stored, aligned `classes.dex`, as the platform's do.
+- `java/framework-overlay` is linked by aapt2 against the image's
+  `framework-res.apk` and signed by apksigner with the test key, which
+  suffices for a preinstalled package; PackageManager keeps its
+  certificate, so the key must not change.
 
 ## ANGLE
 

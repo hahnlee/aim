@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The device's static overlay of framework-res (preinstalled in
+     /vendor/overlay): names our device-specific system services. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.aim.overlay.framework">
+    <application android:hasCode="false" />
+    <overlay
+        android:targetPackage="android"
+        android:isStatic="true"
+        android:priority="1" />
+</manifest>

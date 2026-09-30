@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Started by SystemServer's startOtherServices, from the system
+         server class path (java/device-services). -->
+    <string-array name="config_deviceSpecificSystemServices" translatable="false">
+        <item>dev.aim.server.DeviceServices</item>
+    </string-array>
+</resources>
