@@ -172,3 +172,16 @@ The migration's state and conformance results are in
   what is not served yet is #479 and #480. Clipboard writes still ask
   for the user's profiles: no change notification reaches the service
   host (#460, #430).
+
+### The system_server bridge (design, 2026-09-30)
+
+- What native services need from system_server internals (URI grant
+  owners, focus, content capture, virtual devices, `LocalServices`
+  callers) and from being a process ActivityManager knows (content
+  observers, receivers, `ApplicationSharedMemory`) comes through one
+  device-specific system service of ours (`config_deviceSpecificSystemServices`),
+  which hands the service host a binder of internal queries. A persistent
+  proxy app, or a process record made for the host, was weighed and not
+  chosen ([system-services.md](../system-services.md), "The
+  system_server bridge"). Its image additions are exceptions to record
+  when built (#520); each query goes when its owner moves native.

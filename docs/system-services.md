@@ -60,8 +60,8 @@ every step: replace superseded facts instead of appending a log.
    `LocalServices` interface needs a bridge to the native service. For
    clipboard there is none to bridge: `ClipboardService` publishes no local
    interface, and nothing else in `services/` reaches into it (searched at
-   the tag). What a native service needs from system_server internals is
-   #430.
+   the tag). Both directions go through one bridge ("The system_server
+   bridge").
 6. **Conformance.** The CTS module(s) for the service's API, before (the
    original) and after (native), plus the app checks; failing tests keep
    the original.
@@ -163,6 +163,114 @@ The binder host's nodes accept file descriptors, as libbinder's do: the
 task stack listener's snapshots carry a buffer's. They are closed after
 the call, and a service that takes none refuses a call with some, as the
 driver refuses it for a node that does not accept them.
+
+## The system_server bridge (design, #430)
+
+Some inputs of the originals' decisions exist only inside system_server
+(`LocalServices`), and some change signals reach only processes
+ActivityManager knows. What the native services lack (sources at the
+tag):
+
+| Input | The original's source | What it takes |
+| --- | --- | --- |
+| a setting without a generation, another provider's changes | `IContentService.registerContentObserver` | a known process: `checkContentProviderAccess` looks the caller's pid up in `mPidsSelfLocked` ("Failed to find PID") |
+| a user's profiles (#460) | user broadcasts (`registerReceiverWithFeature`), or `UserManager`'s cache nonce | a known process; the nonce is in `ApplicationSharedMemory` |
+| every change of a permission check's answer (#497) | the `package_info_cache` nonce | `ApplicationSharedMemory`, whose read-only fd only `IApplicationThread.bindApplication` hands out |
+| URI grants to a clip's readers (#429) | `UriGrantsManagerInternal.newUriPermissionOwner`, `revokeUriPermissionFromOwner` | code in system_server: no binder interface hands out an owner; `IActivityManager.grantUriPermission` grants as the caller's uid, and a grant by the system uid is refused (`checkGrantUriPermissionUnlocked`) |
+| focus (the notification shade, an overlay) | `WindowManagerInternal.isUidFocused`, `registerWindowFocusChangeListener` | code in system_server |
+| content capture, augmented autofill, virtual devices | `ContentCaptureManagerInternal.isContentCaptureServiceForUser`, `AutofillManagerInternal.isAugmentedAutofillServiceForUser`, `VirtualDeviceManagerInternal.getDeviceIdsForUid`, `getDeviceOwnerUid` | code in system_server |
+| system_server calling a replaced service (notification) | the service's `LocalServices` interface | code in system_server |
+
+**Who ActivityManager knows.** A pid enters `mPidsSelfLocked` in two
+places: `ProcessList.handleProcessStartedLocked`, after zygote forked a
+process ActivityManager asked for, and `setSystemProcess`, for
+system_server's own pid. `attachApplication` from any other process finds
+no pending record and kills the caller ("No pending application record").
+Speaking `IApplicationThread` does not make a process known; being
+started by ActivityManager does.
+
+**Options.**
+
+1. *A persistent system package whose process is the host.*
+   ActivityManager starts it through zygote at `systemReady`, so its
+   process is known, receives `ApplicationSharedMemory` and may register
+   observers and receivers. That process is a new guest process from
+   zygote (running `ActivityThread`, or a wrapper program, `wrap.sh` of
+   a debuggable app or a `wrap.<name>` property), never the service host
+   inside guest-init, and `attachApplication` kills a caller
+   ActivityManager did not start. It would be a Java proxy app registering on
+   the host's behalf and passing it the shared memory, with a uid of its
+   own: `android.uid.system` needs the platform's signing key. It covers
+   the first three rows only, adds a process to every boot and a second
+   mechanism beside the one the other rows need, and has no use in the
+   core milestones.
+2. *Registering as a system process, as system_server registers
+   itself.* `setSystemProcess` makes a record for system_server's own
+   pid; no binder or internal API makes one for another. Doing it anyway
+   is code in system_server writing ActivityManager's private state:
+   option 3 with more reach into internals.
+3. *A device-specific system service in system_server* (chosen). A
+   device vendor adds system services without changing SystemServer:
+   `config_deviceSpecificSystemServices` (framework-res, set by the
+   vendor's static overlay) names classes that `startOtherServices`
+   starts with `SystemServiceManager.startService(className)` from the
+   system server class path. Code there reaches every row: system_server
+   is a known process, owns `ApplicationSharedMemory`
+   (`getReadOnlyFileDescriptor`) and holds the `LocalServices`
+   interfaces. #470 needs the same service for its
+   `ActivityInterceptorCallback`.
+
+**The bridge.** One service in one jar of ours:
+
+- It publishes nothing to servicemanager. The service host registers one
+  binder of its own, and the bridge hands it the bridge's binder when
+  system services are ready (`PHASE_SYSTEM_SERVICES_READY`). Only the
+  host holds it, and every call must come from the system uid. A new
+  system_server attaches again; when it dies, the host drops the bridge
+  and everything fed through it, as for any owner ("Mirrored state").
+- Its interface is an AIDL file of ours with codes generated for both
+  sides. Each method is the binder form of one internal call, with the
+  original's arguments: the read-only `ApplicationSharedMemory` fd (the
+  host reads the nonces in the pinned `NonceStore` layout; #497, #460);
+  registering the host's `IContentObserver` and `IIntentReceiver` as
+  system_server's; `newUriPermissionOwner` and
+  `revokeUriPermissionFromOwner`, the grants themselves going through
+  `IUriGrantsManager.grantUriPermissionFromOwner` as `ClipboardService`
+  makes them (#429); `isUidFocused`, with a focus listener that drops
+  the host's focus mirror; the content capture, autofill and virtual
+  device queries; later, for a replaced service with a local interface,
+  its `LocalServices` implementation forwarding to the native binder.
+- The clipboard's settings stay on generations: a generation is one
+  memory read per use and cannot race a change, where an observer is a
+  callback per change. Observers are for inputs without a generation.
+
+**What it adds to the image.** The jar, appended last to the platform's
+`systemserverclasspath.pb` (a `replace`; last, so the class loader
+context and oat files of `services.jar` stay valid) and compiled by the
+`oat` node; a static overlay of `android` in `/vendor/overlay` that sets
+`config_deviceSpecificSystemServices`. The bridge is Java (code in
+system_server is dex), compiled against the image's own classes, and
+the build checks every internal method it calls in the image's jars, as
+it checks transaction codes, so a changed internal API fails the build
+instead of the boot. The build needs a Java compiler, a dexer and an
+APK builder and signer, new build inputs with their licences (#520).
+
+**Maintenance and CTS.** Each method is one internal call; the internal
+APIs it names are checked per image. It runs in system_server, so it
+throws only what the original caller would. No servicemanager name,
+permission or public API changes, so no CTS module sees it; each
+service's own CTS stays the gate.
+
+**The core milestones.** Each method is the binder form of an owner
+still in system_server and goes when its owner moves native (URI grants,
+window focus, ActivityManager's provider access check). A native
+ActivityManager knows the service host without a bridge, and the shared
+memory is its own. With SystemServer gone, the bridge is gone.
+
+**Order.** The build of the jar and the overlay, shared with #470
+(#520); the permission and user nonces (#497, #460), which end the
+per-call asks; URI grants (#429); focus, content capture, autofill and
+virtual devices (#430).
 
 ## Inventory: what apps use
 
