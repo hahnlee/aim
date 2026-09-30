@@ -48,27 +48,32 @@ pub struct Host {
 static HOSTS: Mutex<Vec<Arc<Host>>> = Mutex::new(Vec::new());
 static SEQ: AtomicU32 = AtomicU32::new(0);
 
-/// The host that stands for `package`: its primary shim's, else any.
+/// The host of the shim that stands for `package` (`apps::stands_for`):
+/// it shows the package's notifications.
 pub fn of(package: &str) -> Option<Arc<Host>> {
-    let hosts = HOSTS.lock().unwrap();
-    let mut all = hosts.iter().filter(|h| h.package == package);
-    let first = all.clone().next();
-    all.find(|h| crate::apps::is_primary(package, &h.activity))
-        .or(first)
+    HOSTS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|h| h.package == package && crate::apps::stands_for(package, &h.activity))
         .cloned()
 }
 
 /// The host that shows a task of `package` started with `activity`
-/// (`package/class`): that activity's, else the package's.
+/// (`package/class`): that activity's, else the one that stands for the
+/// package, else any of the package's.
 pub fn for_task(package: &str, activity: &str) -> Option<Arc<Host>> {
     let class = activity.split_once('/').map_or("", |(_, c)| c);
-    let exact = HOSTS
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|h| h.package == package && !class.is_empty() && h.activity == class)
-        .cloned();
-    exact.or_else(|| of(package))
+    let hosts = HOSTS.lock().unwrap();
+    let mut all = hosts.iter().filter(|h| h.package == package);
+    all.clone()
+        .find(|h| !class.is_empty() && h.activity == class)
+        .or_else(|| {
+            all.clone()
+                .find(|h| crate::apps::stands_for(package, &h.activity))
+        })
+        .or_else(|| all.next())
+        .cloned()
 }
 
 /// The task a host's window `number` shows.

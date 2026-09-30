@@ -120,10 +120,10 @@ pub fn serve_bridge(sock: UnixStream) {
     }
 }
 
-/// A window host connected: it shows its package's notifications when it
-/// is the one that stands for the package (`hosts::of`).
+/// A window host connected: it shows its package's notifications when its
+/// shim stands for the package (`apps::stands_for`).
 pub fn host_connected(h: &Arc<Host>) {
-    if !crate::hosts::of(&h.package).is_some_and(|o| Arc::ptr_eq(&o, h)) {
+    if !crate::apps::stands_for(&h.package, &h.activity) {
         return;
     }
     let mut s = STATE.lock().unwrap();

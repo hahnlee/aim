@@ -89,13 +89,11 @@ pub fn bundle(package: &str) -> Option<PathBuf> {
     with(|shims| of(shims, package).map(|s| s.bundle.clone()))
 }
 
-/// Whether `activity` is `package`'s primary launcher activity.
-pub fn is_primary(package: &str, activity: &str) -> bool {
-    with(|shims| {
-        shims
-            .iter()
-            .any(|s| s.primary && s.package == package && s.activity == activity)
-    })
+/// Whether the shim of `package`'s `activity` (a class) stands for the
+/// package: its primary one, else its first; any, for a package the
+/// shims do not know.
+pub fn stands_for(package: &str, activity: &str) -> bool {
+    with(|shims| of(shims, package).is_none_or(|s| s.activity == activity))
 }
 
 /// The title of a task of `package` started with `activity`
