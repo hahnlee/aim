@@ -244,7 +244,8 @@ fn snapshot() -> Result<Snapshot, i64> {
             continue;
         }
         let (prot, max_prot) = (i.prot as i32 & VM_PROT_ALL, i.max_prot as i32 & VM_PROT_ALL);
-        let backing = if i.shared {
+        // The string pages are the process's stack, mapped from its record.
+        let backing = if i.shared && !super::super::procrec::is_strings(start) {
             Backing::Share
         } else if i.empty {
             Backing::Fresh

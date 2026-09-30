@@ -201,6 +201,7 @@ pub fn gettid() -> i64 {
 pub fn set_name(name: [u8; 16]) {
     if let Some(t) = current() {
         *t.name.lock().unwrap_or_else(|e| e.into_inner()) = name;
+        super::procrec::named(t.tid, &name);
     }
 }
 
@@ -217,6 +218,7 @@ pub fn set_name_of(tid: i32, name: [u8; 16]) -> bool {
         return false;
     };
     *t.name.lock().unwrap_or_else(|e| e.into_inner()) = name;
+    super::procrec::named(tid, &name);
     if is_current(&t) {
         let len = name.iter().position(|&b| b == 0).unwrap_or(15);
         if let Ok(c) = std::ffi::CString::new(&name[..len]) {
@@ -234,6 +236,50 @@ pub fn owner(tid: i32) -> i32 {
     } else {
         tid
     }
+}
+
+/// The `comm` of a new program, the base name of the file it was executed
+/// by (Linux's `begin_new_exec`), for the calling thread.
+pub fn name_program(filename: &[u8]) {
+    let base = filename.rsplit(|&b| b == b'/').next().unwrap_or_default();
+    let mut name = [0u8; 16];
+    let n = base.len().min(15);
+    name[..n].copy_from_slice(&base[..n]);
+    set_name_of(host_tid() as i32, name);
+}
+
+/// The slot of this process's thread `tid` in its record (`procrec`).
+pub fn slot(tid: i32) -> usize {
+    if tid == pid() {
+        0
+    } else {
+        ((tid - TID_BASE) as u32 & TIDS_PER_PROCESS) as usize
+    }
+}
+
+/// Host thread id of a running pthread.
+fn host_id(p: usize) -> u64 {
+    let mut id = 0u64;
+    if p != 0 {
+        // SAFETY: a live pthread of this process.
+        unsafe { libc::pthread_threadid_np(p as libc::pthread_t, &mut id) };
+    }
+    id
+}
+
+/// Host thread id of this process's thread `tid`, 0 until it runs.
+pub fn host_thread_id(tid: i32) -> Option<u64> {
+    find(tid).map(|t| host_id(t.pthread.load(SeqCst)))
+}
+
+/// Write every thread into this process's new record.
+pub fn publish_threads() {
+    with_table(|t| {
+        for th in t.values() {
+            let name = *th.name.lock().unwrap_or_else(|e| e.into_inner());
+            super::procrec::thread(th.tid, host_id(th.pthread.load(SeqCst)), &name);
+        }
+    });
 }
 
 /// Every tid of this process, in order.
@@ -289,6 +335,7 @@ pub fn register_current(ctx: *mut GuestContext, stacks: HostStacks) {
     // SAFETY: pthread_self is always valid.
     th.pthread
         .store(unsafe { libc::pthread_self() } as usize, SeqCst);
+    super::procrec::thread(th.tid, host_id(th.pthread.load(SeqCst)), &[0; 16]);
     if th.tid == pid() {
         MAIN_PTHREAD.store(th.pthread.load(SeqCst), SeqCst);
         MAIN_THREAD.store(Arc::as_ptr(&th) as usize, SeqCst);
@@ -376,6 +423,7 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
             th.clear_child_tid.store(ctid, SeqCst);
         }
         t.insert(tid, th.clone());
+        super::procrec::thread(tid, 0, &th.name.lock().unwrap());
         Some(th)
     });
     let Some(th) = th else {
@@ -423,6 +471,7 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
     };
     if !ok {
         with_table_mut(|t| t.remove(&tid));
+        super::procrec::gone(tid);
         // SAFETY: the child never started; reclaim what it would own.
         unsafe {
             drop(Box::from_raw(boot));
@@ -447,6 +496,7 @@ extern "C" fn thread_start(arg: *mut libc::c_void) -> *mut libc::c_void {
         *th.stacks.lock().unwrap() = Some(context::bind(ctx, boot.tp));
         th.pthread.store(libc::pthread_self() as usize, SeqCst);
     }
+    super::procrec::running(th.tid, host_id(th.pthread.load(SeqCst)));
     drop(boot);
     // SAFETY: the context holds the child's registers.
     unsafe { context::resume(ctx) }
@@ -476,6 +526,7 @@ pub fn exit(a: [u64; 6]) -> ! {
         t.remove(&th.tid);
         t.len()
     });
+    super::procrec::gone(th.tid);
     let ctid = th.clear_child_tid.load(SeqCst);
     if ctid != 0 {
         // SAFETY: the guest tid word registered with CLONE_CHILD_CLEARTID or
@@ -570,13 +621,12 @@ pub fn alone() -> bool {
 }
 
 /// execve in place, on the process's only thread: no clear_child_tid or
-/// robust list, the `comm` of a new process, no thread pointer and an
-/// empty shadow call stack.
+/// robust list, no thread pointer and an empty shadow call stack (the
+/// loader names the new program, [`name_program`]).
 pub(super) fn exec_reset() {
     let th = current().expect("exec from a thread without a guest context");
     th.clear_child_tid.store(0, SeqCst);
     th.robust_list.store(0, SeqCst);
-    *th.name.lock().unwrap_or_else(|e| e.into_inner()) = [0; 16];
     context::set_guest_tp(0);
     if let Some(st) = th.stacks.lock().unwrap().as_ref() {
         context::set_guest_scs(st.scs());

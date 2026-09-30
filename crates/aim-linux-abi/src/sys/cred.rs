@@ -335,29 +335,10 @@ fn publish(id: &Identity) {
     }
 }
 
-/// The command line of the program this process exec'd in place (argv,
-/// each argument NUL-terminated), which other processes read from the
-/// `by-pid` entry: the host's argv still names the program the process
-/// was started with.
-static CMDLINE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
-
 /// This process's `by-pid` entry, open for writing in place, and the
 /// length written so far (a shorter text is padded to it with empty
 /// lines, which readers skip).
 static ENTRY: Mutex<Option<(std::fs::File, usize)>> = Mutex::new(None);
-
-/// The `by-pid` entry text of `id`, with the exec'd command line.
-fn entry_text(id: &Identity) -> String {
-    let mut text = id.to_text();
-    if let Some(c) = CMDLINE.lock().unwrap().as_ref() {
-        text.push_str("cmdline\t");
-        for b in c {
-            text.push_str(&format!("{b:02x}"));
-        }
-        text.push('\n');
-    }
-    text
-}
 
 /// Write `id` as the `by-pid` entry of `pid`, replacing (never modifying)
 /// what is there. Returns the new file, open for writing.
@@ -372,7 +353,7 @@ fn write_entry(dir: &std::path::Path, pid: i32, id: &Identity) -> Option<std::fs
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&tmp)
         .ok()?;
-    f.write_all(entry_text(id).as_bytes()).ok()?;
+    f.write_all(id.to_text().as_bytes()).ok()?;
     std::fs::rename(&tmp, dir.join(pid.to_string())).ok()?;
     Some(f)
 }
@@ -432,7 +413,7 @@ fn write_own_entry(id: &Identity) {
         *g = open_entry(dir, pid, id);
     }
     if let Some((f, len)) = g.as_mut() {
-        rewrite(f, len, entry_text(id));
+        rewrite(f, len, id.to_text());
     }
 }
 
@@ -465,24 +446,13 @@ fn read_entry_at(path: &std::path::Path) -> Option<String> {
 }
 
 /// execve in place: the new program's credentials
-/// ([`Identity::exec_transform`]) and its command line `cmdline`.
-pub fn exec(cmdline: Vec<u8>) {
-    *CMDLINE.lock().unwrap() = Some(cmdline);
+/// ([`Identity::exec_transform`]).
+pub fn exec() {
     let mut g = STATE.lock().unwrap();
     let id = g.get_or_insert_with(Identity::default);
     id.exec_transform();
     publish(id);
     write_own_entry(id);
-}
-
-/// The command line process `pid` of this namespace exec'd in place, from
-/// its `by-pid` entry.
-pub fn entry_cmdline(pid: i32) -> Option<Vec<u8>> {
-    let text = read_entry(pid)?;
-    let hex = text.lines().find_map(|l| l.strip_prefix("cmdline\t"))?;
-    (0..hex.len() / 2)
-        .map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok())
-        .collect()
 }
 
 /// Set this process's identity at start-up. `by_pid` is the process table
@@ -577,11 +547,13 @@ pub(super) fn note_child(pid: i32) {
     }
 }
 
-/// The process `pid` is gone (exited or reaped): drop its entry.
+/// The process `pid` is gone (exited or reaped): drop its entry and
+/// record.
 pub(super) fn forget(pid: i32) {
     if let Some(dir) = BY_PID.get() {
         let _ = std::fs::remove_file(dir.join(pid.to_string()));
     }
+    super::procrec::forget(pid);
 }
 
 /// Credentials of a peer process, as `SO_PEERCRED` and `SCM_CREDENTIALS`

@@ -41,6 +41,7 @@ mod pidns;
 mod poll;
 mod process;
 mod procfs;
+mod procrec;
 mod pstate;
 mod ptimer;
 mod selinuxfs;
@@ -78,8 +79,8 @@ pub use process::set_exe;
 pub use procfs::{StackInfo, note_stack};
 pub use pstate::kernel_release;
 pub(crate) use signal::{install_host_handlers, repoke_self};
-pub use thread::host_tid;
 pub(crate) use thread::{Thread, register_current};
+pub use thread::{host_tid, name_program};
 pub use window::init as init_heap_window;
 
 /// Read by the trampoline: while set, every syscall takes the full path so

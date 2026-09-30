@@ -194,6 +194,7 @@ pub fn load_program(
         trace_image(&program.guest, &image);
     }
     sys::init_brk(image.end);
+    sys::name_program(execfn);
     let sp = loader::build_stack(&loader::StackInputs {
         argv,
         envp,

@@ -87,6 +87,25 @@ driver, whose transport cost is #451. After two minutes the guest is
 nearly idle. The kills of cached processes in the first run came from
 lmkd reacting to the Mac's memory pressure, not from the guest.
 
+## Other processes in /proc (2026-09-30, #238, #379)
+
+Each process keeps a record beside its by-pid entry
+(`docs/guest-init-contract.md` section 4): its threads, and the stack
+pages of its argument strings, mapped from the record. Another
+process's `cmdline`, `comm`, `task/` and per-thread `stat` read it.
+One boot each of main (aeb32a54) and the branch in the main tree, a
+fresh data image (main's boot was its first, the branch's its second),
+host load 3-25:
+
+| Check | main | branch |
+| --- | --- | --- |
+| `ps -A -o NAME` of zygote's children | 66 of 121 lines empty, `pidof system_server` empty | none empty; system_server, SystemUI, phone, Settings named |
+| `/proc/<system_server>/task` | 1 entry | 224 threads; `top -H -p` lists them with TIME+ per thread |
+| "Render thread does not belong to process" | 1 | 0 |
+| logd host syscalls per log line, 30 s after `sys.boot_completed` | 9.0 (452,613 for 50,095 lines) | 1.2 (33,445 for 28,016) |
+| the same over the next 30 s | 5.0 (29,896 for 5,980) | 1.0 (77 for 78) |
+| Settings scroll, 10 swipes: frames, janky, p50/p90 | 419, 0.72 %, 8/9 ms | 417, 0.24 %, 8/9 ms |
+
 ## Guest kernel time (2026-09-30, #446)
 
 On a settled boot of a reused data image, main (80965c99) against the
@@ -116,7 +135,7 @@ Pro, host load 7-16, a reused data image, boot to 4 minutes after
 | Item | Kernel time | Per call | Owner |
 | --- | --- | --- | --- |
 | page faults and other time outside syscalls | 5.4 s of 23.5 s | | Chrome alone 1.75 s in its start (#500) |
-| openat | 3.8 s | 81 µs | host open under the security agent (#418); logd reading `/proc/<pid>/cmdline` of zygote's children, empty to it, on every log line (#238) |
+| openat | 3.8 s | 81 µs | host open under the security agent (#418); logd reading `/proc/<pid>/cmdline` of zygote's children, empty to it, on every log line (#238, fixed since: see "Other processes in /proc") |
 | BINDER_WRITE_READ | 2.5 s | 14 µs, 7 µs of it the Mach round trip | #451 |
 | mmap of files | 1.9 s | 40 µs small, 1.5-5 ms at 16 MiB and more | #501 |
 | faccessat, madvise(DONTNEED) | 0.9 s each | 25 µs, 5.5 µs | #505, #502 |
@@ -627,7 +646,6 @@ The host's security agent did not flag or block any of the four boots
 ### Open
 
 - #239 boot time and frame times after the spawned fork;
-- #238 app processes' names in `/proc/<pid>/cmdline` for other processes;
 - #240 wide-gamut EGL configs; #241 phone and GMS startup ANRs; #242
   battery temperature; #230 traced aborts (traced_probes' were its memory
   watchdog reading four times its rss from `/proc`, now counted in the
@@ -699,9 +717,8 @@ What is not covered: ActivityManager's process groups
 (`setProcessGroup`) change nothing on the host. Without cgroup
 controllers libprocessgroup's background profile keeps only its timer
 slack action, which has no process form, so the call fails in the guest
-(#297). Kills name no process (`Kill '' (pid)`): another process's
-`/proc/<pid>/cmdline` and `comm` read empty for zygote's children
-(#298).
+(#297). Kills name their process: another process's
+`/proc/<pid>/cmdline` and `comm` come from its record (#238).
 
 **Morning check** (one boot slot, after the throttle is lifted):
 

@@ -294,6 +294,13 @@ fn other_processes_ids_in_proc_and_siginfo() {
     check("peer_ids");
 }
 
+/// Another process's command line as its memory holds it, its comm, and
+/// its threads under /proc/<pid>/task and /proc/<tid> (#238, #379).
+#[test]
+fn other_processes_names_and_threads_in_proc() {
+    check("other_procs");
+}
+
 /// A process's entry is rewritten in place on each credential change, and
 /// never read half done.
 #[test]

@@ -41,7 +41,10 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
 2. **Snapshot.** The parent walks the VM entries of the range and makes a
    Mach memory entry for each one:
    - a copy-on-write copy (`MAP_MEM_VM_COPY`) of private memory. A copy of
-     an inaccessible entry is taken after briefly making it readable;
+     an inaccessible entry is taken after briefly making it readable. The
+     stack pages holding the argument strings, which the process maps
+     from its record (`sys/procrec.rs`), are private memory to the guest
+     and copied too; the child maps its copy from a record of its own;
    - the memory itself (`MAP_MEM_VM_SHARE`) of shared memory: MAP_SHARED
      files and memory, memfds, ashmem and binder buffers. The execute
      permission Darwin refuses for a shared file entry is left out;

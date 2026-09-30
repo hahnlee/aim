@@ -8,7 +8,8 @@
 //!   (`docs/guest-init-contract.md` section 7) take precedence over the
 //!   synthesized ones and may be rewritten by the guest, but for sysfs's
 //!   device trees, which hold only the modeled devices (`device_tree`).
-//! - `/proc/<pid>` for another process is read from Darwin's process info;
+//! - `/proc/<pid>` for another process is read from Darwin's process info
+//!   and the process's record (`procrec`: threads, names, command line);
 //!   memory maps and fds are only available for this process.
 
 use std::ffi::CString;
@@ -41,8 +42,11 @@ pub struct StackInfo {
 /// The current program's; replaced when the process execs in place.
 static STACK: RwLock<Option<StackInfo>> = RwLock::new(None);
 
+/// Note the program's stack and make the process's record of it
+/// (`procrec`).
 pub fn note_stack(s: StackInfo) {
     *STACK.write().unwrap_or_else(|e| e.into_inner()) = Some(s);
+    super::procrec::init(&s);
 }
 
 fn stack() -> Option<StackInfo> {
@@ -224,21 +228,26 @@ unsafe extern "C" {
     fn mach_vm_read_overwrite(t: libc::mach_port_t, a: u64, s: u64, d: u64, o: *mut u64) -> i32;
 }
 
-/// This process's command line, as Linux's `get_mm_cmdline` reads it: the
-/// argument area; or, when its last byte is no longer NUL (setproctitle(3)
-/// wrote past argv, into the environment area if that follows), the title
-/// from the start up to its first NUL, within the two areas and a page.
-fn own_cmdline(s: &StackInfo) -> Vec<u8> {
-    let (lo, hi) = s.args;
-    if hi <= lo || read_guest(hi - 1, hi).first().is_none_or(|&c| c == 0) {
-        return read_guest(lo, hi);
+/// A command line as Linux's `get_mm_cmdline` reads it from the memory
+/// `read` reads: the argument area `args`; or, when its last byte is no
+/// longer NUL (setproctitle(3) wrote past argv, into the environment area
+/// `env` if that follows), the title from the start up to its first NUL,
+/// within the two areas and a page.
+pub(super) fn linux_cmdline(
+    args: (u64, u64),
+    env: (u64, u64),
+    read: impl Fn(u64, u64) -> Vec<u8>,
+) -> Vec<u8> {
+    let (lo, hi) = args;
+    if hi <= lo || read(hi - 1, hi).first().is_none_or(|&c| c == 0) {
+        return read(lo, hi);
     }
-    let end = if s.env.0 == hi && s.env.1 >= s.env.0 {
-        s.env.1
+    let end = if env.0 == hi && env.1 >= env.0 {
+        env.1
     } else {
         hi
     };
-    let mut title = read_guest(lo, end.min(lo + super::mem::PAGE));
+    let mut title = read(lo, end.min(lo + super::mem::PAGE));
     if let Some(n) = title.iter().position(|&c| c == 0) {
         title.truncate(n + 1);
     }
@@ -249,9 +258,9 @@ fn cmdline(p: i32) -> Vec<u8> {
     if p == pid()
         && let Some(s) = stack()
     {
-        return own_cmdline(&s);
+        return linux_cmdline(s.args, s.env, read_guest);
     }
-    if let Some(c) = super::cred::entry_cmdline(p) {
+    if let Some(c) = super::procrec::cmdline(p) {
         return c;
     }
     let mut out = Vec::new();
@@ -262,12 +271,13 @@ fn cmdline(p: i32) -> Vec<u8> {
     out
 }
 
+/// The `comm` of process `p`: its main thread's.
 fn comm(p: i32) -> String {
+    if let Some(n) = thread_comm(p, p) {
+        return n;
+    }
     let argv0 = if p == pid() {
         super::process::exe_guest_path()
-    } else if let Some(c) = super::cred::entry_cmdline(p) {
-        let argv0 = c.split(|&b| b == 0).next().unwrap_or_default();
-        String::from_utf8_lossy(argv0).into_owned()
     } else {
         host_argv(p)
             .first()
@@ -305,7 +315,49 @@ fn ncpu() -> usize {
 
 const TICKS: u64 = 100;
 
-fn stat_line(p: i32) -> Option<String> {
+/// `PROC_PIDTHREADID64INFO` (sys/proc_info.h): a thread by its host id.
+const PROC_PIDTHREADID64INFO: i32 = 15;
+
+/// User and system CPU time of thread `tid` of process `p`, in
+/// nanoseconds, and its state, from its host thread.
+fn thread_times(p: i32, tid: i32) -> Option<(u64, u64, char)> {
+    let host = if p == pid() {
+        super::thread::host_thread_id(tid)?
+    } else {
+        super::procrec::threads(p)?
+            .into_iter()
+            .find(|t| t.tid == tid)?
+            .host
+    };
+    let mut ti: libc::proc_threadinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_threadinfo>() as i32;
+    // SAFETY: proc_pidinfo writes at most `size` bytes.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            p,
+            PROC_PIDTHREADID64INFO,
+            host,
+            (&mut ti as *mut libc::proc_threadinfo).cast(),
+            size,
+        )
+    };
+    if n != size {
+        return Some((0, 0, 'S'));
+    }
+    // TH_STATE_* (mach/thread_info.h).
+    let state = match ti.pth_run_state {
+        1 => 'R',
+        2 => 'T',
+        4 => 'D',
+        _ => 'S',
+    };
+    Some((ti.pth_user_time, ti.pth_system_time, state))
+}
+
+/// `/proc/<p>/stat`, or with `thread` its thread's
+/// `/proc/<p>/task/<tid>/stat`: the thread's id, `comm`, state and CPU
+/// times.
+fn stat_line(p: i32, thread: Option<i32>) -> Option<String> {
     let t = task_info(p)?;
     let b = &t.pbsd;
     let ti = &t.ptinfo;
@@ -325,16 +377,23 @@ fn stat_line(p: i32) -> Option<String> {
         StackInfo::default()
     };
     let rss_pages = ti.pti_resident_size / super::mem::PAGE;
+    let (id, name, user, system, state) = match thread {
+        Some(tid) => {
+            let (user, system, state) = thread_times(p, tid).unwrap_or((0, 0, state));
+            let name = thread_comm(p, tid).unwrap_or_else(|| comm(p));
+            (tid, name, user, system, state)
+        }
+        None => (p, comm(p), ti.pti_total_user, ti.pti_total_system, state),
+    };
     Some(format!(
-        "{p} ({}) {state} {} {} {} 0 -1 4194560 {} 0 {} 0 {} {} 0 0 20 {} {} 0 {start} {} {rss_pages} 18446744073709551615 0 0 {} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 {} {} {} {} 0\n",
-        comm(p),
+        "{id} ({name}) {state} {} {} {} 0 -1 4194560 {} 0 {} 0 {} {} 0 0 20 {} {} 0 {start} {} {rss_pages} 18446744073709551615 0 0 {} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 {} {} {} {} 0\n",
         super::pidns::vnr(b.pbi_ppid as i32),
         b.pbi_pgid,
         b.pbi_pgid,
         ti.pti_faults,
         ti.pti_pageins,
-        ns_to_ticks(ti.pti_total_user),
-        ns_to_ticks(ti.pti_total_system),
+        ns_to_ticks(user),
+        ns_to_ticks(system),
         b.pbi_nice,
         if p == pid() {
             tids(p).len() as i32
@@ -356,7 +415,9 @@ fn cred_lines(p: i32) -> String {
     super::cred::proc_status(p)
 }
 
-fn status(p: i32) -> Option<String> {
+/// `/proc/<p>/status`, or with `thread` its thread's: the thread's `comm`
+/// and id.
+fn status(p: i32, thread: Option<i32>) -> Option<String> {
     let t = task_info(p)?;
     let state = match t.pbsd.pbi_status {
         2 => "R (running)",
@@ -367,7 +428,7 @@ fn status(p: i32) -> Option<String> {
     let kb = |b: u64| b / 1024;
     let n = ncpu();
     Some(format!(
-        "Name:\t{}\nUmask:\t0022\nState:\t{state}\nTgid:\t{p}\nNgid:\t0\nPid:\t{p}\nPPid:\t{}\nTracerPid:\t0\n\
+        "Name:\t{}\nUmask:\t0022\nState:\t{state}\nTgid:\t{p}\nNgid:\t0\nPid:\t{}\nPPid:\t{}\nTracerPid:\t0\n\
          {}FDSize:\t256\n\
          VmPeak:\t{} kB\nVmSize:\t{} kB\nVmLck:\t0 kB\nVmPin:\t0 kB\nVmHWM:\t{} kB\nVmRSS:\t{} kB\n\
          RssAnon:\t{} kB\nRssFile:\t0 kB\nRssShmem:\t0 kB\nVmData:\t{} kB\nVmStk:\t8192 kB\nVmExe:\t0 kB\n\
@@ -375,7 +436,10 @@ fn status(p: i32) -> Option<String> {
          ShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\n\
          SigCgt:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\n\
          Cpus_allowed:\t{:x}\nCpus_allowed_list:\t0-{}\nvoluntary_ctxt_switches:\t{}\nnonvoluntary_ctxt_switches:\t0\n",
-        comm(p),
+        thread
+            .and_then(|tid| thread_comm(p, tid))
+            .unwrap_or_else(|| comm(p)),
+        thread.unwrap_or(p),
         super::pidns::vnr(t.pbsd.pbi_ppid as i32),
         cred_lines(p),
         kb(t.ptinfo.pti_virtual_size),
@@ -411,7 +475,19 @@ fn statm(p: i32) -> Option<String> {
 fn maps() -> String {
     let stack = stack().unwrap_or_default();
     let mut out = String::new();
-    for r in vmmap::regions(0, u64::MAX) {
+    let mut regions = vmmap::regions(0, u64::MAX).peekable();
+    while let Some(mut r) = regions.next() {
+        // The string pages are the top of the stack, mapped from the
+        // process record (`procrec`): one `[stack]` with the rest.
+        if super::procrec::is_strings(r.start) {
+            r.shared = false;
+            r.file = None;
+        }
+        while let Some(n) = regions.next_if(|n| {
+            n.start == r.end && n.prot == r.prot && super::procrec::is_strings(n.start)
+        }) {
+            r.end = n.end;
+        }
         let prot = r.prot;
         let perms = format!(
             "{}{}{}{}",
@@ -768,13 +844,13 @@ fn pids() -> Vec<i32> {
     v
 }
 
-/// The tids of process `p`: the guest threads for this process; other
-/// processes' threads are not listed.
+/// The tids of process `p`: its guest threads, another process's from its
+/// record.
 fn tids(p: i32) -> Vec<i32> {
     let t = if p == pid() {
         super::thread::tids()
     } else {
-        Vec::new()
+        super::procrec::threads(p).map_or(Vec::new(), |v| v.into_iter().map(|t| t.tid).collect())
     };
     if t.is_empty() { vec![p] } else { t }
 }
@@ -877,9 +953,16 @@ fn mountinfo() -> String {
         .collect()
 }
 
-/// The `comm` of this process's thread `tid`, once it has been named.
-fn thread_comm(tid: i32) -> Option<String> {
-    let n = super::thread::name_of(tid)?;
+/// The `comm` of thread `tid` of process `p`, once it has been named.
+fn thread_comm(p: i32, tid: i32) -> Option<String> {
+    let n = if p == pid() {
+        super::thread::name_of(tid)?
+    } else {
+        super::procrec::threads(p)?
+            .into_iter()
+            .find(|t| t.tid == tid)?
+            .name
+    };
     let len = n.iter().position(|&b| b == 0).unwrap_or(16);
     (len > 0).then(|| String::from_utf8_lossy(&n[..len]).into_owned())
 }
@@ -900,12 +983,12 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
         }
         "cmdline" => Node::File(cmdline(p)),
         "comm" => {
-            let named = me.then(|| thread_comm(thread.unwrap_or(p))).flatten();
+            let named = thread.and_then(|t| thread_comm(p, t));
             Node::File(format!("{}\n", named.unwrap_or_else(|| comm(p))).into_bytes())
         }
         "environ" if me => Node::File(stack().map_or(Vec::new(), |s| read_guest(s.env.0, s.env.1))),
-        "stat" => Node::File(stat_line(p)?.into_bytes()),
-        "status" => Node::File(status(p)?.into_bytes()),
+        "stat" => Node::File(stat_line(p, thread)?.into_bytes()),
+        "status" => Node::File(status(p, thread)?.into_bytes()),
         "statm" => Node::File(statm(p)?.into_bytes()),
         "maps" if me => Node::File(maps().into_bytes()),
         "mounts" => Node::File(mounts().into_bytes()),
@@ -1007,7 +1090,7 @@ pub fn node(guest: &str) -> Option<Node> {
                 if p == n {
                     return pid_node(p, tail, None);
                 }
-                if p == me && !tids(p).contains(&n) {
+                if !tids(p).contains(&n) {
                     return None;
                 }
                 return pid_node(p, tail, Some(n));
@@ -1400,7 +1483,7 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         ));
     }
     if let Some(tid) = comm_tid(&canon) {
-        let name = thread_comm(tid).unwrap_or_else(|| comm(pid()));
+        let name = thread_comm(pid(), tid).unwrap_or_else(|| comm(pid()));
         return Some(super::knob::open(
             format!("{name}\n").as_bytes(),
             cloexec,
