@@ -196,7 +196,11 @@ that dominate, the copies cost nanoseconds and the wakes cost microseconds.
   Through the daemon it is a fileport (`fileport_makeport` /
   `fileport_makefd`) carried in the same Mach message: SCM_RIGHTS through the
   daemon without a second channel. The receiving shim installs it at a
-  pre-reserved fd number. Each thread keeps 8 of them; a transaction with
+  pre-reserved fd number. The placeholders are unconnected sockets
+  duplicated from one another, not `/dev/null`: replacing or refilling one
+  then costs well under a microsecond of host kernel time, where opening
+  and closing a vnode costs 30 and 7 µs on a Mac (#451). Each thread keeps
+  8 of them; a transaction with
   more files stays queued, the read returns `want_fds`, and the shim reads
   again with that many (`GuestProcess::can_install`). Linux has no such
   limit, and Chrome passes its child processes a dozen or more (#256).

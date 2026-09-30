@@ -107,8 +107,33 @@ memfd is no longer copied, and ashmem and `faccessat` make fewer host
 calls. A credential change rewrites the process's by-pid entry in place
 (`PR_CAPBSET_DROP` 175-357 us to 4.5-4.9 us, #449), and a private
 mapping of a plain file maps the file copy-on-write instead of copying
-it (4 MiB: 309-344 us to 12 us, #450). What remains is mostly host
-per-call cost (#418) and the binder transport (#451).
+it (4 MiB: 309-344 us to 12 us, #450).
+
+Where the remaining kernel time went before the two fixes below, from a
+per-syscall profile of host user and kernel time (a temporary build; M2
+Pro, host load 7-16, a reused data image, boot to 4 minutes after
+`sys.boot_completed`), largest first:
+
+| Item | Kernel time | Per call | Owner |
+| --- | --- | --- | --- |
+| page faults and other time outside syscalls | 5.4 s of 23.5 s | | Chrome alone 1.75 s in its start (#500) |
+| openat | 3.8 s | 81 µs | host open under the security agent (#418); logd reading `/proc/<pid>/cmdline` of zygote's children, empty to it, on every log line (#238) |
+| BINDER_WRITE_READ | 2.5 s | 14 µs, 7 µs of it the Mach round trip | #451 |
+| mmap of files | 1.9 s | 40 µs small, 1.5-5 ms at 16 MiB and more | #501 |
+| faccessat, madvise(DONTNEED) | 0.9 s each | 25 µs, 5.5 µs | #505, #502 |
+| membarrier, ashmem PIN | 0.5 s, 0.4 s | 140 µs, 16 µs | #503, #504 |
+| fork (zygote's clone) | 0.5 s | 10 ms | #421 |
+
+A binder read reserves placeholder fds for the files a transaction may
+carry. They were opens of `/dev/null`, and installing a file over one
+closed a vnode: about 40 µs of kernel time per file received. They are
+sockets now (docs/binder-driver.md, "Fd transport"), and a
+BINDER_WRITE_READ went from 14.8 to 8.7 µs of kernel time in the caller
+up to `sys.boot_completed`, and from 25.8 to 10.0 µs while Settings
+started twice and Chrome once (0.98 to 0.33 s in all; one boot each). A process no longer sweeps the memfd
+directory at its first memfd_create (2.2 ms with 48 memfds alive; 49
+calls in a boot averaged 2.9 ms). What is left of a binder call is the
+Mach transport, about 7 µs per ioctl (#451).
 
 ## Vsync off at idle (2026-09-30, #452)
 
