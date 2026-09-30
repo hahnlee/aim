@@ -30,41 +30,6 @@ diff --git a/runtime/mirror/object_reference.h b/runtime/mirror/object_reference
    }
  
    // Convert an ObjPtr to a compressed reference.
-diff --git a/runtime/obj_ptr.h b/runtime/obj_ptr.h
---- a/runtime/obj_ptr.h
-+++ b/runtime/obj_ptr.h
-@@ -94,6 +94,14 @@
-       return reinterpret_cast<MirrorType*>(
-           static_cast<uintptr_t>(static_cast<uint32_t>(reference_ << kObjectAlignmentShift)));
-     } else {
-+#if ART_HEAP_REFERENCE_BASE != 0
-+      if (reference_ != 0u) {
-+        if (reference_ >= kArtCompressedReferenceBase) {
-+          return reinterpret_cast<MirrorType*>(reference_);
-+        }
-+        return reinterpret_cast<MirrorType*>(kArtCompressedReferenceBase + reference_);
-+      }
-+#endif
-       return reinterpret_cast<MirrorType*>(reference_);
-     }
-   }
-diff --git a/runtime/obj_ptr-inl.h b/runtime/obj_ptr-inl.h
---- a/runtime/obj_ptr-inl.h
-+++ b/runtime/obj_ptr-inl.h
-@@ -54,6 +54,13 @@
- inline uintptr_t ObjPtr<MirrorType>::Encode(MirrorType* ptr) {
-   uintptr_t ref = reinterpret_cast<uintptr_t>(ptr);
-   DCHECK_ALIGNED(ref, kObjectAlignment);
-+#if ART_HEAP_REFERENCE_BASE != 0
-+  if (!kObjPtrPoisoning && ref != 0u) {
-+    DCHECK_GE(ref, kArtCompressedReferenceBase);
-+    DCHECK_LT(ref, kArtCompressedReferenceLimit);
-+    return ref - kArtCompressedReferenceBase;
-+  }
-+#endif
-   if (kObjPtrPoisoning && ref != 0) {
-     DCHECK_LE(ref, 0xFFFFFFFFU);
-     ref >>= kObjectAlignmentShift;
 diff --git a/runtime/lock_word.h b/runtime/lock_word.h
 --- a/runtime/lock_word.h
 +++ b/runtime/lock_word.h
