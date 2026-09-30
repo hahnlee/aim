@@ -128,6 +128,7 @@ fn ignored(sig: i32, act: &KSigaction) -> bool {
 /// The guest's default action for a fatal signal: the process dies of the
 /// Darwin equivalent (so its parent sees the signal), or exits 128+sig.
 pub fn die(sig: i32) -> ! {
+    crate::diag::report_death(sig);
     super::fork::spawn::wait_handovers();
     super::pidns::leave();
     let h = to_host(sig);
@@ -854,6 +855,15 @@ fn guest_fault(ctx: &GuestContext, hsig: i32, code: i32, m: &mut DarwinMcontext)
     if act.handler == SIG_DFL || act.handler == SIG_IGN || mask & bit(sig) != 0 {
         return Some(sig);
     }
+    crate::diag::note_fault(crate::diag::Fault {
+        sig,
+        pc: m.pc,
+        lr: m.lr,
+        fp: m.fp,
+        sp: m.sp,
+        addr: f.fault_address,
+        esr: f.esr as u32,
+    });
     let cpu = Cpu::from_mc(m);
     let t = Taken { info: f.info, act };
     frame(th, &cpu, &t, mask, f.esr, f.fault_address).to_mc(m);

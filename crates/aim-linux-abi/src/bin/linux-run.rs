@@ -57,6 +57,8 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
   --sigign HEX           ignored signals
   --personality HEX      personality(2) value
   --mounts TEXT          the process's own mounts (bind, tmpfs), one per line
+  --itimers TEXT         armed interval timers, as which:interval:remaining
+                         (ns), comma-separated
   --exec EXECFN          PROGRAM is followed by the full argv (argv[0]
                          included) and EXECFN is AT_EXECFN, as after execve
 
@@ -179,6 +181,7 @@ fn main() {
             "--sigign" => state.sigign = hex(value()),
             "--personality" => state.personality = hex(value()) as u32,
             "--mounts" => state.mounts = value().to_string_lossy().into_owned(),
+            "--itimers" => state.itimers = value().to_string_lossy().into_owned(),
             "--exec" => execfn = Some(value().into_vec()),
             "--help" | "-h" => {
                 println!("{USAGE}");
