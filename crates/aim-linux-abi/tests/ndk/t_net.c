@@ -330,6 +330,16 @@ static void inet_loopback(void) {
   int c = socket(AF_INET, SOCK_STREAM, 0);
   CHECK(connect(c, (struct sockaddr*)&a, sizeof a) == 0);
   CHECK(setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on) == 0);
+  // tcp(7): TCP_USER_TIMEOUT reads back as set, in milliseconds.
+  unsigned ut = 0;
+  socklen_t utl = sizeof ut;
+  CHECK(getsockopt(c, IPPROTO_TCP, TCP_USER_TIMEOUT, &ut, &utl) == 0 && ut == 0);
+  ut = 1500;
+  CHECK(setsockopt(c, IPPROTO_TCP, TCP_USER_TIMEOUT, &ut, sizeof ut) == 0);
+  ut = 0;
+  CHECK(getsockopt(c, IPPROTO_TCP, TCP_USER_TIMEOUT, &ut, &utl) == 0 && ut == 1500);
+  int neg = -1;
+  CHECK(setsockopt(c, IPPROTO_TCP, TCP_USER_TIMEOUT, &neg, sizeof neg) == -1 && errno == EINVAL);
   struct sockaddr_in peer;
   socklen_t pl = sizeof peer;
   int d = accept(s, (struct sockaddr*)&peer, &pl);
