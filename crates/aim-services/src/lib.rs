@@ -19,6 +19,7 @@ mod mirror;
 pub mod notifications;
 mod pasteboard;
 mod system;
+pub mod vibrator;
 
 use std::sync::Arc;
 
@@ -54,11 +55,28 @@ impl NativeServices {
         let system = system::System::new(process.clone(), &clipboard::APP_OPS);
         let mut services = Vec::new();
         for name in names {
-            let service: Arc<dyn Service> = match name.as_str() {
-                "clipboard" => clipboard::ClipboardService::new(process.clone(), system.clone()),
+            // A service and the names it is published under, as its
+            // original publishes them.
+            let published: Vec<(&str, Arc<dyn Service>)> = match name.as_str() {
+                "clipboard" => vec![(
+                    "clipboard",
+                    clipboard::ClipboardService::new(process.clone(), system.clone()),
+                )],
+                "vibrator_manager" => vec![
+                    (
+                        "vibrator_manager",
+                        vibrator::VibratorManagerService::new(process.clone(), system.clone()),
+                    ),
+                    (
+                        "external_vibrator_service",
+                        Arc::new(vibrator::ExternalVibratorService),
+                    ),
+                ],
                 other => return Err(format!("no native implementation of `{other}`")),
             };
-            services.push((name.clone(), process.add_service(service)));
+            for (name, service) in published {
+                services.push((name.to_string(), process.add_service(service)));
+            }
         }
         process.start();
         Ok(Self { system, services })

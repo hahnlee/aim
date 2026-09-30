@@ -270,6 +270,23 @@ impl System {
         .map(|r| r == PERMISSION_GRANTED)
     }
 
+    /// `PermissionEnforcer.enforcePermission(permission, pid, uid)`, what
+    /// `@EnforcePermission` generates, for a permission without an app op.
+    pub fn enforce_permission(
+        self: &Arc<Self>,
+        permission: &str,
+        pid: i32,
+        uid: i32,
+    ) -> Result<()> {
+        if self.check_permission(permission, pid, uid)? {
+            Ok(())
+        } else {
+            Err(Exception::security(format!(
+                "Access denied, requires: {permission}"
+            )))
+        }
+    }
+
     /// `ActivityManagerInternal.handleIncomingUser`.
     #[allow(clippy::too_many_arguments)]
     pub fn handle_incoming_user(

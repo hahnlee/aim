@@ -334,12 +334,7 @@ fn audio_attributes(r: &mut Reader<'_>) -> Result<()> {
 
 /// `writeBundle`: -1 for null, else the bundle.
 fn skip_bundle_or_null(r: &mut Reader<'_>) -> Result<()> {
-    let at = r.position();
-    if r.read_i32()? == -1 {
-        return Ok(());
-    }
-    r.set_position(at);
-    skip_bundle(r)
+    skip_bundle(r).map(drop)
 }
 
 /// An array of `n` elements of `size` bytes each (-1 for null).

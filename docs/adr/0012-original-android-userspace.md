@@ -583,8 +583,10 @@ nothing unprivileged for it to drive ([vendor-hals.md](../vendor-hals.md)).
   path can add Classic audio. The SCS-built Bluetooth JNI loads through the
   load-time rewrite, which turns its shadow-call-stack instructions.
 
-Undeclared, so absent: telephony, NFC, vibrator, IR, UWB and Thread, plus
-`update_engine` and `snapuserd` (the image is pre-flattened).
+Undeclared, so absent: telephony, NFC, vibrator (its HAL, and the
+framework's vibrator control service that only a vibrator HAL's vendor
+side calls), IR, UWB and Thread, plus `update_engine` and `snapuserd`
+(the image is pre-flattened).
 
 USB: the device is a USB host (`android.hardware.usb.host`, the Mac's
 ports), so UsbService runs; no USB device is passed through yet, so none

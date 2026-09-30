@@ -289,15 +289,16 @@ pub(crate) fn uri(r: &mut Reader<'_>) -> Result<Option<String>> {
 
 /// `BaseBundle.readFromParcelInner`, skipped: the length, and unless
 /// empty, the magic, that many bytes and whether it holds an intent.
-pub(crate) fn bundle(r: &mut Reader<'_>) -> Result<()> {
+/// Whether there was one: a negative length is null.
+pub(crate) fn bundle(r: &mut Reader<'_>) -> Result<bool> {
     let length = r.read_i32()?;
     if length <= 0 {
-        return Ok(());
+        return Ok(length == 0);
     }
     match r.read_i32()? {
         BUNDLE_MAGIC | BUNDLE_MAGIC_NATIVE => {
             r.skip(length as usize)?;
-            r.read_bool().map(drop)
+            r.read_bool().map(|_| true)
         }
         _ => Err(BAD_VALUE),
     }
