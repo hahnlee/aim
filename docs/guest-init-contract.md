@@ -138,6 +138,12 @@ guest-init builds it exactly as init does:
 Without the option, `linux-run` keeps using `default_android_env()`, which
 drops the descriptor variables.
 
+guest-init publishes init's own part (1 and 2, as they stand) in
+`<runtime>/environ`, one `NAME=value` per line, replaced whole at every
+change. It is the environment adbd's shell inherits: `aimctl shell` and
+`tools/guest-shell.sh` start the guest's shell with it and
+`--inherit-env`.
+
 ## 4. `--identity FILE`: credentials
 
 Darwin runs every service as the host user. The Linux credentials init would

@@ -169,10 +169,12 @@ fn shell(files: &Files, command: &[String]) -> Result<ExitCode, String> {
     } else {
         vec!["/system/bin/sh", "-c", &script]
     };
-    let status = guest
-        .command(&argv)
-        .status()
-        .map_err(|e| format!("linux-run: {e}"))?;
+    let mut command = guest.command(&argv);
+    // An interactive shell gets the terminal's type, as adbd's does.
+    if let (true, Some(term)) = (argv.len() == 1, std::env::var_os("TERM")) {
+        command.env("TERM", term);
+    }
+    let status = command.status().map_err(|e| format!("linux-run: {e}"))?;
     Ok(exit_code(status))
 }
 

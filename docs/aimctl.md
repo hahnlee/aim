@@ -68,7 +68,11 @@ boot` on it does).
 programs with `linux-run --root <derived> --path-map DATA/run/path-map
 --binder dev.aim.guest-init.<pid>.binder --by-pid DATA/run/identity/by-pid`,
 so they see the guest's files, reach its services, and see and signal its
-processes (`ps -A`, `kill`), as `adb shell` does on a device.
+processes (`ps -A`, `kill`), as `adb shell` does on a device. Like adbd's
+shell they inherit init's global environment (`DATA/run/environ`:
+`PATH`, `BOOTCLASSPATH`, `ANDROID_*`, ...), so `app_process` tools such
+as `uiautomator` and `am instrument` run; an interactive shell also gets
+the terminal's `TERM`.
 
 - **install** copies the APKs (APFS clones) into the guest's
   `/data/local/tmp`, runs `pm install -r` on them (several APKs are one

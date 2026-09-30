@@ -180,6 +180,15 @@ impl Planner {
         }
     }
 
+    /// Publishes `env` in the layout's environ file, replaced whole.
+    pub fn write_env(&self) -> Result<(), String> {
+        let path = self.layout.environ_file();
+        let text: String = self.env.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+        let temp = path.with_extension("tmp");
+        std::fs::write(&temp, text).map_err(|e| format!("{}: {e}", temp.display()))?;
+        std::fs::rename(&temp, &path).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
     /// `Service::Start` up to `fork`: argument expansion, the program
     /// check, descriptors, environment and credentials.
     pub fn plan(

@@ -110,6 +110,10 @@ impl Files {
     pub fn by_pid(&self) -> PathBuf {
         self.data.join("run/identity/by-pid")
     }
+    /// init's global environment, which the guest's shells inherit.
+    pub fn environ(&self) -> PathBuf {
+        self.data.join("run/environ")
+    }
 }
 
 /// A resident guest, as its `state` file records it.
@@ -236,6 +240,7 @@ mod tests {
         assert_eq!(files.guest_lock(), root.join("new/data.lock"));
         assert_eq!(files.path_map(), root.join("new/data/run/path-map"));
         assert_eq!(files.by_pid(), root.join("new/data/run/identity/by-pid"));
+        assert_eq!(files.environ(), root.join("new/data/run/environ"));
         fs::remove_dir_all(root).unwrap();
     }
 

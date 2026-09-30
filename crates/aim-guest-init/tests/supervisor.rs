@@ -493,3 +493,13 @@ fn timeout_period_kills_the_service() {
         .process_actions(&mut f.launcher, f.now + Duration::from_secs(4));
     assert_eq!(f.launcher.kills.last(), Some(&(pid, libc::SIGKILL)));
 }
+
+#[test]
+fn global_environment_is_published_for_shells() {
+    let mut f = fixture("sv-environ");
+    f.planner.set_env("BOOTCLASSPATH", "/a.jar:/b.jar");
+    f.planner.set_env("PATH", "/system/bin");
+    f.planner.write_env().unwrap();
+    let text = std::fs::read_to_string(f.planner.layout.environ_file()).unwrap();
+    assert_eq!(text, "PATH=/system/bin\nBOOTCLASSPATH=/a.jar:/b.jar\n");
+}

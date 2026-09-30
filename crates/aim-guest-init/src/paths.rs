@@ -354,9 +354,10 @@ const RUNTIME_DIRS: &[&str] = &[
 const DATA_DIRS: &[&str] = &["data", "metadata", "cache"];
 
 impl Layout {
-    /// `runtime` defaults to `<data>/run`.
+    /// `runtime` defaults to `<data>.run`, beside the data directory
+    /// (`aim_storage::data::runtime_of`).
     pub fn new(image: PathBuf, data: PathBuf, runtime: Option<PathBuf>) -> Self {
-        let runtime = runtime.unwrap_or_else(|| data.join("run"));
+        let runtime = runtime.unwrap_or_else(|| aim_storage::data::runtime_of(&data));
         Self {
             image,
             data,
@@ -400,6 +401,11 @@ impl Layout {
     }
     pub fn sockets_file(&self) -> PathBuf {
         self.runtime.join("sockets")
+    }
+    /// init's global environment, one `NAME=value` per line: what shells
+    /// (adbd's, here `aimctl shell`) inherit.
+    pub fn environ_file(&self) -> PathBuf {
+        self.runtime.join("environ")
     }
     pub fn apex_info_list(&self) -> PathBuf {
         self.runtime.join("apex").join("apex-info-list.xml")
@@ -480,18 +486,19 @@ impl Layout {
             .as_nanos();
         fs::rename(&self.runtime, swept.join(stamp.to_string()))?;
         // Also what an interrupted sweep left.
-        let thread = std::thread::Builder::new()
-            .name("runtime-sweep".into())
-            .spawn(move || {
-                make_writable_recursive(&swept);
-                let _ = fs::remove_dir_all(&swept);
-            })?;
-        Ok(Sweep(Some(thread)))
+        remove_in_background(swept)
     }
 
-    /// Creates the directories. The runtime directory is wiped first when a
-    /// previous boot created it; a non-empty foreign directory is refused.
+    /// Creates the runtime and the persistent directories.
     pub fn prepare(&self) -> io::Result<()> {
+        self.prepare_runtime()?;
+        self.prepare_data().map(drop)
+    }
+
+    /// Creates the runtime directories. The runtime directory is wiped
+    /// first when a previous boot created it; a non-empty foreign
+    /// directory is refused.
+    pub fn prepare_runtime(&self) -> io::Result<()> {
         if self.runtime.exists() {
             let ours = self.runtime.join(RUNTIME_MARKER).exists();
             let empty = fs::read_dir(&self.runtime)?.next().is_none();
@@ -511,16 +518,6 @@ impl Layout {
         for name in RUNTIME_DIRS {
             fs::create_dir_all(self.runtime.join(name))?;
         }
-        for name in DATA_DIRS {
-            fs::create_dir_all(self.data.join(name))?;
-        }
-        // The mount point of /data/user/0, a symlink to /data/data in
-        // earlier layouts (#221).
-        let user0 = self.data.join("data/user/0");
-        if fs::symlink_metadata(&user0).is_ok_and(|m| m.file_type().is_symlink()) {
-            fs::remove_file(&user0)?;
-        }
-        fs::create_dir_all(&user0)?;
         for dir in [
             self.properties_dir(),
             self.socket_dir(),
@@ -539,6 +536,37 @@ impl Layout {
         fs::write(self.dev_dir().join("kmsg"), b"")?;
         Ok(())
     }
+
+    /// Creates the persistent directories, once the data directory is
+    /// mounted. Removes, in the background, the runtime directory earlier
+    /// layouts kept in it (`<data>/run`).
+    pub fn prepare_data(&self) -> io::Result<Sweep> {
+        for name in DATA_DIRS {
+            fs::create_dir_all(self.data.join(name))?;
+        }
+        // The mount point of /data/user/0, a symlink to /data/data in
+        // earlier layouts (#221).
+        let user0 = self.data.join("data/user/0");
+        if fs::symlink_metadata(&user0).is_ok_and(|m| m.file_type().is_symlink()) {
+            fs::remove_file(&user0)?;
+        }
+        fs::create_dir_all(&user0)?;
+        let old = self.data.join("run");
+        if old != self.runtime && old.join(RUNTIME_MARKER).exists() {
+            return remove_in_background(old);
+        }
+        Ok(Sweep(None))
+    }
+}
+
+fn remove_in_background(dir: PathBuf) -> io::Result<Sweep> {
+    let thread = std::thread::Builder::new()
+        .name("runtime-sweep".into())
+        .spawn(move || {
+            make_writable_recursive(&dir);
+            let _ = fs::remove_dir_all(&dir);
+        })?;
+    Ok(Sweep(Some(thread)))
 }
 
 /// A previous boot's runtime directory being removed; dropping it waits
