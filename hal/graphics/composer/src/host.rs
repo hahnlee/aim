@@ -4,7 +4,7 @@ use std::io::Read;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use aim_gralloc::Handle;
-use aim_hostcall::display::{Connect, Event, Import, Present, event};
+use aim_hostcall::display::{Connect, Cursor, Event, Import, Present, event};
 use aim_hostcall::guest::{self, Errno};
 
 /// The connected display: its mode, and the fd its events arrive on.
@@ -49,6 +49,26 @@ impl Host {
         guest::display_present(&mut args)?;
         // SAFETY: the host call returned a new fd that we now own.
         Ok(unsafe { OwnedFd::from_raw_fd(args.present) })
+    }
+
+    /// Show buffer `id` (0: none) as the hardware cursor, its top left
+    /// corner at `at`; `changed`: new content, ready once `acquire`
+    /// signals.
+    pub fn cursor(
+        &self,
+        id: u64,
+        at: (i32, i32),
+        changed: bool,
+        acquire: Option<BorrowedFd>,
+    ) -> Result<(), Errno> {
+        let mut args = Cursor {
+            id,
+            x: at.0,
+            y: at.1,
+            changed: changed as u32,
+            acquire: acquire.map_or(-1, |f| f.as_raw_fd()),
+        };
+        guest::display_cursor(&mut args)
     }
 
     pub fn release(&self, id: u64) -> Result<(), Errno> {

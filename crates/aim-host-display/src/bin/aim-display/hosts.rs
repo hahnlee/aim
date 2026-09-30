@@ -11,7 +11,7 @@
 //! the server's own.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -20,8 +20,9 @@ use std::time::{Duration, Instant};
 
 use aim_host_display::input::translate::{Button, Gesture, Phase, Scroll, Twist};
 use aim_host_display::wire::{self, Host as Rec, HostInput, host, input};
-use aim_hostcall::display::{Window as Record, window};
+use aim_hostcall::display::{Import, Window as Record, window};
 
+use crate::cursor::Image;
 use crate::metal::{Fence, Texture};
 use crate::objc::on_main;
 
@@ -149,6 +150,34 @@ impl Waiter {
                 f.shown(at);
             }
         }
+    }
+}
+
+/// The pointer's image (None: the arrow), for every host's views.
+pub fn cursor(image: Option<&Image>) {
+    let (width, height, hot, pixels) = image.map_or((0, 0, (0, 0), &[][..]), |i| {
+        (i.width, i.height, i.hot, &i.pixels[..])
+    });
+    let r = Rec {
+        op: host::CURSOR,
+        id: pixels.len() as u64,
+        import: Import {
+            width,
+            height,
+            stride_bytes: width * 4,
+            ..Default::default()
+        },
+        input: HostInput {
+            x: hot.0 as f64,
+            y: hot.1 as f64,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    for h in HOSTS.lock().unwrap().iter() {
+        let mut w = h.writer.lock().unwrap();
+        let _ = wire::send(std::os::fd::AsFd::as_fd(&*w), wire::bytes(&r), None)
+            .and_then(|()| w.write_all(pixels));
     }
 }
 

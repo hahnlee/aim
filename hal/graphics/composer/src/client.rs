@@ -186,6 +186,7 @@ impl Client {
             if let Some(c) = &layer.composition {
                 d.set_composition(layer.layer, c.composition);
             }
+            d.cursor.command(host, layer);
         }
         if let Some(target) = &cmd.clientTarget {
             let Buffer {
@@ -262,7 +263,9 @@ impl IComposerClient for Client {
 
     fn destroyLayer(&self, display: i64, layer: i64) -> binder::Result<()> {
         check_display(display)?;
-        if self.0.display.lock().unwrap().destroy_layer(layer) {
+        let mut d = self.0.display.lock().unwrap();
+        d.cursor.destroyed(&self.0.host, layer);
+        if d.destroy_layer(layer) {
             Ok(())
         } else {
             Err(error(EX_BAD_LAYER))

@@ -27,6 +27,7 @@
 //! packet is not sent. A client's event masks drop the events it masked.
 
 pub mod codes;
+pub mod cursor;
 pub mod keymap;
 pub mod server;
 pub mod translate;

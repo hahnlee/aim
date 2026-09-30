@@ -24,6 +24,7 @@
 
 #[macro_use]
 mod objc;
+mod cursor;
 mod hosts;
 mod input;
 mod metal;
@@ -267,6 +268,13 @@ impl Display {
                 wire::OP_RELEASE => {
                     textures.remove(&r.id);
                     hosts::release(r.id);
+                }
+                wire::OP_CURSOR => {
+                    let acquire = (r.flag & wire::CURSOR_ACQUIRE != 0)
+                        .then(|| fds.pop())
+                        .flatten();
+                    let changed = r.flag & wire::CURSOR_CHANGED != 0;
+                    cursor::serve(r.id, textures.get(&r.id), changed, acquire, r.x, r.y);
                 }
                 wire::OP_SET_VSYNC => {
                     client.vsync.store(r.flag != 0, Ordering::Relaxed);

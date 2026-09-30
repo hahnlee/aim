@@ -19,14 +19,22 @@
 //! - **Pinch and rotate.** A trackpad's magnify and rotate gestures are two
 //!   fingers on the touchscreen centered on the pointer, which spread and
 //!   turn with the gesture, as on a phone.
+//! - **Smart zoom.** A trackpad's two-finger double tap is a double tap
+//!   where the pointer is ([`double_tap`]).
 //! - **Keys.** Physical keys ([`keymap`](super::keymap)) through the
 //!   keyboard's keymap, down and up. Key repeat is Android's (the keyboard
 //!   declares no `EV_REP`), so AppKit's repeats are dropped.
 //! - **Command.** The Mac's shortcut key is Android's Ctrl: Cmd+C, V, X,
 //!   A, Z and every other Cmd+key press and release Ctrl and the key.
 //!   Cmd+Left and Right are Home and End, Cmd+Up and Down Ctrl+Home and
-//!   Ctrl+End, as in a Mac text field. Command itself does not reach
-//!   Android (whose Meta taps and Meta+letter shortcuts it would trigger).
+//!   Ctrl+End, as in a Mac text field. Cmd+Delete deletes to the line's
+//!   start (Shift+Home, then Backspace), Cmd+Forward Delete to its end.
+//!   Command itself does not reach Android (whose Meta taps and
+//!   Meta+letter shortcuts it would trigger).
+//! - **Option** is Alt, except that Option+Left and Right move by word
+//!   and Option+Delete and Forward Delete delete one: Android's Ctrl with
+//!   the key (its Alt there moves to the line's edge and deletes the whole
+//!   line). Shift, held, extends the selection, as on the Mac.
 //! - **Back.** The Mac's ways back are the keyboard's `KEY_BACK`
 //!   (`Generic.kl`: BACK): Cmd+[, the mouse's back button and a two-finger
 //!   swipe to the right. A trackpad gesture that starts mostly rightward
@@ -38,6 +46,7 @@
 use std::sync::Mutex;
 
 use super::codes::*;
+use super::cursor::Hotspots;
 use super::keymap::{self, Modifier};
 use super::server::Devices;
 use super::{KEYBOARD, MOUSE, TOUCHSCREEN};
@@ -61,9 +70,13 @@ const MAC_LEFT: u16 = 0x7b;
 const MAC_RIGHT: u16 = 0x7c;
 const MAC_DOWN: u16 = 0x7d;
 const MAC_UP: u16 = 0x7e;
+// The macOS virtual keys of Delete and Forward Delete.
+const MAC_DELETE: u16 = 0x33;
+const MAC_FORWARD_DELETE: u16 = 0x75;
+/// `NSEventModifierFlagOption`.
+pub const OPTION: u64 = 1 << 19;
 /// `NSEventModifierFlagCommand`.
 pub const COMMAND: u64 = 1 << 20;
-const KEY_RIGHTCTRL: u16 = 97;
 /// The display pixel under view point `(x, y)` (origin at the bottom left)
 /// of a `view_w` x `view_h` point view showing a `width` x `height` pixel
 /// display aspect-fitted and centered; None outside the picture.
@@ -112,6 +125,22 @@ fn to_display_unclamped(
     let px = (x - ox) / scale;
     let from_bottom = (y - oy) / scale;
     Some((px, height as f64 - from_bottom))
+}
+
+/// A double tap ending at `t` (ns): the primary button's phases and
+/// times. Android's GestureDetector takes taps shorter than `TAP_TIMEOUT`
+/// (100 ms), the second down 40 to 300 ms after the first up
+/// (`DOUBLE_TAP_MIN_TIME`, `DOUBLE_TAP_TIMEOUT`), as a double tap. The
+/// taps lie before `t`, as the gesture did: EventHub takes a time in the
+/// future as the present.
+pub fn double_tap(t: i64) -> [(Phase, i64); 4] {
+    const MS: i64 = 1_000_000;
+    [
+        (Phase::Down, t - 150 * MS),
+        (Phase::Up, t - 110 * MS),
+        (Phase::Down, t - 40 * MS),
+        (Phase::Up, t),
+    ]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +252,7 @@ struct Pointer {
     pinch: Option<Pinch>,
     /// Mouse buttons down.
     buttons: Vec<Button>,
+    hotspots: Hotspots,
 }
 
 /// The input side of the display server: its devices and the translation
@@ -330,19 +360,29 @@ impl Input {
     }
 
     /// The mouse's position, display pixel `(x, y)`, clamped to the display.
-    fn place(&self, x: f64, y: f64) -> [(u16, u16, i32); 3] {
+    fn place(&self, s: &mut Pointer, x: f64, y: f64) -> [(u16, u16, i32); 3] {
         let c = |v: f64, n: u32| v.clamp(0.0, n as f64 - 1.0) as i32;
+        let (x, y) = (c(x, self.width), c(y, self.height));
+        s.hotspots.pointer(x, y);
         [
             (EV_KEY, BTN_TOOL_MOUSE, 1),
-            (EV_ABS, ABS_X, c(x, self.width)),
-            (EV_ABS, ABS_Y, c(y, self.height)),
+            (EV_ABS, ABS_X, x),
+            (EV_ABS, ABS_Y, y),
         ]
     }
 
     /// The pointer moved to display pixel `(x, y)` with no button down:
     /// the mouse hovers there.
     pub fn hover(&self, x: f64, y: f64, t: i64) {
-        self.devices.emit(MOUSE, t, &self.place(x, y));
+        let at = self.place(&mut self.state.lock().unwrap(), x, y);
+        self.devices.emit(MOUSE, t, &at);
+    }
+
+    /// The pointer's sprite, image `key` of `w` x `h` pixels, lies at
+    /// display pixel `(x, y)`: its hot spot ([`Hotspots`]).
+    pub fn hotspot(&self, key: u64, w: i32, h: i32, x: i32, y: i32) -> (i32, i32) {
+        let mut s = self.state.lock().unwrap();
+        s.hotspots.place(key, w, h, x, y)
     }
 
     /// The pointer left the display's windows: the mouse leaves (its tool
@@ -360,7 +400,7 @@ impl Input {
         if down {
             s.buttons.push(b);
         }
-        let [a, bx, by] = self.place(x, y);
+        let [a, bx, by] = self.place(&mut s, x, y);
         self.devices
             .emit(MOUSE, t, &[a, bx, by, (EV_KEY, b.code(), down as i32)]);
     }
@@ -427,7 +467,7 @@ impl Input {
         if v_units == 0 && h_units == 0 {
             return;
         }
-        let [a, bx, by] = self.place(e.x, e.y);
+        let [a, bx, by] = self.place(&mut s, e.x, e.y);
         self.devices.emit(
             MOUSE,
             t,
@@ -578,6 +618,20 @@ impl Input {
             }
             return;
         }
+        if down && flags & OPTION != 0 {
+            let word = match mac {
+                MAC_LEFT => Some(KEY_LEFT),
+                MAC_RIGHT => Some(KEY_RIGHT),
+                MAC_DELETE => Some(KEY_BACKSPACE),
+                MAC_FORWARD_DELETE => Some(KEY_DELETE),
+                _ => None,
+            };
+            // Each AppKit repeat does it again; its keyUp finds no key
+            // down.
+            if let Some(key) = word {
+                return self.chord(&[KEY_LEFTCTRL], true, key, t);
+            }
+        }
         if repeat {
             return;
         }
@@ -595,26 +649,55 @@ impl Input {
             MAC_RIGHT => (false, KEY_END),
             MAC_UP => (true, KEY_HOME),
             MAC_DOWN => (true, KEY_END),
+            MAC_DELETE => {
+                self.chord(&[KEY_LEFTSHIFT], false, KEY_HOME, t);
+                return self.tap(KEY_BACKSPACE, t);
+            }
+            MAC_FORWARD_DELETE => {
+                self.chord(&[KEY_LEFTSHIFT], false, KEY_END, t);
+                return self.tap(KEY_DELETE, t);
+            }
             _ => match keymap::linux_key(mac) {
                 Some(k) => (true, k),
                 None => return,
             },
         };
-        let s = self.state.lock().unwrap();
-        // A Ctrl held on the Mac stays down.
-        let press_ctrl = ctrl
-            && !s
-                .keys
-                .iter()
-                .any(|&(_, k)| k == KEY_LEFTCTRL || k == KEY_RIGHTCTRL);
-        drop(s);
-        if press_ctrl {
-            self.devices.emit(KEYBOARD, t, &[(EV_KEY, KEY_LEFTCTRL, 1)]);
-        }
+        let mods: &[u16] = if ctrl { &[KEY_LEFTCTRL] } else { &[] };
+        self.chord(mods, false, key, t);
+    }
+
+    /// Press and release `key` with modifiers `mods` (left ones) down,
+    /// pressing only those not held on the Mac already (either side);
+    /// `lift_alt` releases the Alts held meanwhile.
+    fn chord(&self, mods: &[u16], lift_alt: bool, key: u16, t: i64) {
+        let held: Vec<u16> = self
+            .state
+            .lock()
+            .unwrap()
+            .keys
+            .iter()
+            .map(|k| k.1)
+            .collect();
+        let right = |m: u16| match m {
+            KEY_LEFTCTRL => KEY_RIGHTCTRL,
+            KEY_LEFTSHIFT => KEY_RIGHTSHIFT,
+            _ => m,
+        };
+        let press: Vec<u16> = mods
+            .iter()
+            .copied()
+            .filter(|&m| !held.contains(&m) && !held.contains(&right(m)))
+            .collect();
+        let lift: Vec<u16> = held
+            .into_iter()
+            .filter(|&k| lift_alt && (k == KEY_LEFTALT || k == KEY_RIGHTALT))
+            .collect();
+        let emit = |k: u16, v: i32| self.devices.emit(KEYBOARD, t, &[(EV_KEY, k, v)]);
+        lift.iter().for_each(|&k| emit(k, 0));
+        press.iter().for_each(|&k| emit(k, 1));
         self.tap(key, t);
-        if press_ctrl {
-            self.devices.emit(KEYBOARD, t, &[(EV_KEY, KEY_LEFTCTRL, 0)]);
-        }
+        press.iter().rev().for_each(|&k| emit(k, 0));
+        lift.iter().for_each(|&k| emit(k, 1));
     }
 
     /// `flagsChanged:` for virtual key `mac` with `modifierFlags` `flags`.
@@ -863,6 +946,90 @@ mod tests {
     }
 
     #[test]
+    fn mac_text_shortcuts() {
+        let (input, dir) = setup("text");
+        let mut k = open(&dir, KEYBOARD);
+        let option = OPTION | 0x20;
+        let shift = 1 << 17 | 0x02;
+        // Option+Left is Ctrl+Left, with Alt lifted meanwhile; its repeat
+        // does it again and its keyUp sends nothing.
+        input.flags_changed(0x3a, option, 1);
+        input.key(0x7b, true, false, option, 2);
+        input.key(0x7b, true, true, option, 3);
+        input.key(0x7b, false, false, option, 4);
+        let word = |key| {
+            [
+                (KEY_LEFTALT, 0),
+                (KEY_LEFTCTRL, 1),
+                (key, 1),
+                (key, 0),
+                (KEY_LEFTCTRL, 0),
+                (KEY_LEFTALT, 1),
+            ]
+        };
+        assert_eq!(keys(&mut k, 2), [(KEY_LEFTALT, 1)]);
+        assert_eq!(keys(&mut k, 24), [word(KEY_LEFT), word(KEY_LEFT)].concat());
+        // Option+Delete deletes a word: Ctrl+Backspace; Option+Shift+Right
+        // selects one: Shift stays down.
+        input.key(0x33, true, false, option, 5);
+        input.flags_changed(0x38, option | shift, 6);
+        input.key(0x7c, true, false, option | shift, 7);
+        input.flags_changed(0x38, option, 8);
+        input.flags_changed(0x3a, 0, 9);
+        assert_eq!(
+            keys(&mut k, 30),
+            [
+                &word(KEY_BACKSPACE)[..],
+                &[(KEY_LEFTSHIFT, 1)],
+                &word(KEY_RIGHT),
+                &[(KEY_LEFTSHIFT, 0), (KEY_LEFTALT, 0)],
+            ]
+            .concat()
+        );
+        // Cmd+Delete deletes to the line's start, Cmd+Forward Delete to
+        // its end.
+        input.key(0x33, true, false, COMMAND, 10);
+        input.key(0x75, true, false, COMMAND, 11);
+        assert_eq!(
+            keys(&mut k, 24),
+            [
+                (KEY_LEFTSHIFT, 1),
+                (KEY_HOME, 1),
+                (KEY_HOME, 0),
+                (KEY_LEFTSHIFT, 0),
+                (KEY_BACKSPACE, 1),
+                (KEY_BACKSPACE, 0),
+                (KEY_LEFTSHIFT, 1),
+                (KEY_END, 1),
+                (KEY_END, 0),
+                (KEY_LEFTSHIFT, 0),
+                (KEY_DELETE, 1),
+                (KEY_DELETE, 0),
+            ]
+        );
+        // Cmd+Shift+Left and Up select to the line's and the text's start:
+        // Shift+Home and Ctrl+Shift+Home, Shift held from the Mac.
+        input.flags_changed(0x38, shift, 12);
+        input.key(0x7b, true, false, COMMAND | shift, 13);
+        input.key(0x7e, true, false, COMMAND | shift, 14);
+        input.flags_changed(0x38, 0, 15);
+        assert_eq!(
+            keys(&mut k, 16),
+            [
+                (KEY_LEFTSHIFT, 1),
+                (KEY_HOME, 1),
+                (KEY_HOME, 0),
+                (KEY_LEFTCTRL, 1),
+                (KEY_HOME, 1),
+                (KEY_HOME, 0),
+                (KEY_LEFTCTRL, 0),
+                (KEY_LEFTSHIFT, 0),
+            ]
+        );
+        input.close();
+    }
+
+    #[test]
     fn mouse_hovers_clicks_and_scrolls_where_the_pointer_is() {
         let (input, dir) = setup("mouse");
         let mut m = open(&dir, MOUSE);
@@ -971,6 +1138,37 @@ mod tests {
                 (EV_ABS, ABS_MT_TRACKING_ID, -1),
                 (EV_KEY, BTN_TOUCH, 0),
             ]
+        );
+        input.close();
+    }
+
+    #[test]
+    fn smart_zoom_is_a_double_tap() {
+        let (input, dir) = setup("zoom");
+        let mut t = open(&dir, TOUCHSCREEN);
+        let taps = double_tap(1_000_000_000);
+        let ms = |i: usize, j: usize| (taps[j].1 - taps[i].1) / 1_000_000;
+        // Two taps shorter than TAP_TIMEOUT, the second down within the
+        // double tap window, ending at the gesture's time.
+        assert!(ms(0, 1) < 100 && ms(2, 3) < 100);
+        assert!((40..=300).contains(&ms(1, 2)));
+        assert_eq!(taps[3].1, 1_000_000_000);
+        for (phase, at) in taps {
+            input.pointer(phase, 25.0, 50.0, 50.0, 100.0, at);
+        }
+        let down = |id| {
+            [
+                (EV_ABS, ABS_MT_TRACKING_ID, id),
+                (EV_ABS, ABS_MT_POSITION_X, 50),
+                (EV_ABS, ABS_MT_POSITION_Y, 100),
+                (EV_KEY, BTN_TOUCH, 1),
+            ]
+        };
+        let up = [(EV_ABS, ABS_MT_TRACKING_ID, -1), (EV_KEY, BTN_TOUCH, 0)];
+        // The second tap's position is unchanged: not sent again.
+        assert_eq!(
+            read(&mut t, 13),
+            [&down(0)[..], &up, &down(1)[..1], &down(1)[3..], &up].concat()
         );
         input.close();
     }

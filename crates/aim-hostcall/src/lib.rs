@@ -249,7 +249,7 @@ pub mod gpu {
 /// Asynchronous events (vsync) arrive as [`Event`] records on a descriptor
 /// the guest reads, since host code never calls guest code.
 pub mod display {
-    pub const VERSION: u32 = 3;
+    pub const VERSION: u32 = 4;
 
     /// Connect to the display server and describe display
     /// [`Connect::display`]. Returns a new guest fd that yields [`Event`]
@@ -272,6 +272,10 @@ pub mod display {
     /// ([`Windows`]). Returns a new guest fd that carries [`Window`]
     /// records both ways, or the errors of [`FN_CONNECT`].
     pub const FN_WINDOWS: u32 = 6;
+    /// Set the display's hardware cursor ([`Cursor`]): the mouse pointer's
+    /// sprite, which the Mac's cursor shows. Returns 0, `-EBADF` for a bad
+    /// fence or `-ENOTCONN`.
+    pub const FN_CURSOR: u32 = 7;
 
     /// Argument block of [`FN_CONNECT`].
     #[repr(C)]
@@ -328,6 +332,23 @@ pub mod display {
         /// Out: a sync_file fd that signals when the buffer is on screen
         /// (the present fence), or -1.
         pub present: i32,
+    }
+
+    /// Argument block of [`FN_CURSOR`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Cursor {
+        /// The imported buffer showing the cursor, or 0 for none.
+        pub id: u64,
+        /// The buffer's top left corner on the display, in pixels.
+        pub x: i32,
+        pub y: i32,
+        /// 1 when the buffer's content is new, 0 when only the position
+        /// moved.
+        pub changed: u32,
+        /// A sync_file fd that signals when new content is ready, or -1.
+        /// The caller keeps it.
+        pub acquire: i32,
     }
 
     /// Argument block of [`FN_SET_VSYNC`].
@@ -1313,6 +1334,11 @@ pub mod guest {
             &mut display::Buffer { id },
         )
         .map(drop)
+    }
+
+    /// Set the display's hardware cursor.
+    pub fn display_cursor(args: &mut display::Cursor) -> Result<(), Errno> {
+        call_with(module::DISPLAY, display::FN_CURSOR, args).map(drop)
     }
 
     /// Start or stop vsync events.

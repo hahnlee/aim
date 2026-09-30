@@ -6,7 +6,7 @@
 //! writes only [`display::Event`](aim_hostcall::display::Event) records,
 //! which the guest reads directly. Requests are fixed-size [`Request`]
 //! records; an [`OP_IMPORT`] carries the buffer's fd as `SCM_RIGHTS`, an
-//! [`OP_PRESENT`] its fences.
+//! [`OP_PRESENT`] and an [`OP_CURSOR`] their fences.
 //!
 //! The guest's task bridge (`docs/windows.md`) opens its own connection
 //! with [`OP_WINDOWS`]; the server answers with a filled
@@ -27,7 +27,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use aim_hostcall::display::{Import, Window};
 
 /// Sent in the hello; the server closes a connection of another version.
-pub const VERSION: u64 = 4;
+pub const VERSION: u64 = 5;
 
 /// `id` = [`VERSION`], `flag` = display index.
 pub const OP_HELLO: u32 = 1;
@@ -43,6 +43,15 @@ pub const OP_SET_VSYNC: u32 = 5;
 pub const OP_WINDOWS: u32 = 6;
 /// `id` = [`VERSION`]: a window host's hello; [`Host`] records follow.
 pub const OP_HOST: u32 = 7;
+/// The hardware cursor: `id` is the buffer (0: none), `x`, `y` its top left
+/// corner, `flag` [`CURSOR_CHANGED`] and [`CURSOR_ACQUIRE`] (the fence
+/// rides along).
+pub const OP_CURSOR: u32 = 8;
+
+/// [`OP_CURSOR`]: the buffer's content is new.
+pub const CURSOR_CHANGED: u32 = 1;
+/// [`OP_CURSOR`] carries an acquire fence.
+pub const CURSOR_ACQUIRE: u32 = 2;
 
 /// [`Host::op`] values.
 pub mod host {
@@ -66,6 +75,10 @@ pub mod host {
     pub const NUMBER: u32 = 8;
     /// Host: it minimized a window; stack the tasks as the screen does.
     pub const RESTACK: u32 = 9;
+    /// Server: the pointer's image, `import.width` x `import.height`
+    /// premultiplied RGBA pixels, which follow the record (`id` bytes; 0:
+    /// the default cursor); `input.x`, `input.y` its hot spot.
+    pub const CURSOR: u32 = 10;
 }
 
 /// [`HostInput::kind`] values: `translate::Input`'s methods. Positions
@@ -136,9 +149,12 @@ pub const PRESENT_ACQUIRE: u32 = 1;
 pub struct Request {
     pub op: u32,
     pub flag: u32,
-    /// The buffer of [`OP_PRESENT`] and [`OP_RELEASE`].
+    /// The buffer of [`OP_PRESENT`], [`OP_RELEASE`] and [`OP_CURSOR`].
     pub id: u64,
     pub import: Import,
+    /// The position of [`OP_CURSOR`].
+    pub x: i32,
+    pub y: i32,
 }
 
 /// A plain-old-data record as bytes.
