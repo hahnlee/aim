@@ -43,7 +43,7 @@ INTERFACES=(
   "android.app.IActivityManager|system/framework/framework.jar|checkPermission,handleIncomingUser,openContentUri,sendIntentSender,getContentProviderExternal"
   "android.app.IActivityTaskManager|system/framework/framework.jar|getFocusedRootTaskInfo,registerTaskStackListener"
   "com.android.internal.app.IAppOpsService|system/framework/framework.jar|checkPackage,checkOperationForDevice,noteOperation,startWatchingModeWithFlags"
-  "android.permission.IPermissionManager|system/framework/framework.jar|checkPermission"
+  "android.permission.IPermissionManager|system/framework/framework.jar|checkPermission,grantRuntimePermission,revokeRuntimePermission,updatePermissionFlags"
   "android.os.IUserManager|system/framework/framework.jar|isUserRunning,getProfileIds,hasUserRestriction"
   "android.app.trust.ITrustManager|system/framework/framework.jar|isDeviceLocked,registerDeviceLockedStateListener"
   "android.app.ITaskStackListener|system/framework/framework.jar|onTaskStackChanged"
@@ -75,4 +75,5 @@ CONSTANTS=(
 OWN_INTERFACES=(
   "dev.aim.server.IBridge|java/device-services/aidl/dev/aim/server/IBridge.aidl|*"
   "dev.aim.server.IServiceHost|java/device-services/aidl/dev/aim/server/IServiceHost.aidl|*"
+  "dev.aim.server.INotificationPermissionCallback|java/device-services/aidl/dev/aim/server/INotificationPermissionCallback.aidl|*"
 )

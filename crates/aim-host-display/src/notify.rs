@@ -85,6 +85,19 @@ pub enum Message {
         shown: bool,
         error: Option<String>,
     },
+    /// Bridge to host: the app asks for POST_NOTIFICATIONS; ask the Mac
+    /// for `package`'s full authorization (its prompt, the first time).
+    Authorize { package: String },
+    /// Host to bridge: the Mac's setting for `package`, allowed (fully,
+    /// provisionally or for a session), denied, or not yet determined
+    /// (`None`). A shim sends it when it starts, when its app becomes
+    /// active, when the setting changed as it posted, and in answer to
+    /// [`Message::Authorize`] (`answer`).
+    Authorization {
+        package: String,
+        allowed: Option<bool>,
+        answer: bool,
+    },
 }
 
 const POST: u8 = 1;
@@ -94,6 +107,8 @@ const ACTION: u8 = 4;
 const DISMISS: u8 = 5;
 const SHOWN: u8 = 6;
 const FULL_SCREEN: u8 = 7;
+const AUTHORIZE: u8 = 8;
+const AUTHORIZATION: u8 = 9;
 
 struct Out(Vec<u8>);
 
@@ -227,6 +242,24 @@ impl Message {
                 o.u8(*shown as u8);
                 o.opt(error.as_deref());
             }
+            Message::Authorize { package } => {
+                o.u8(AUTHORIZE);
+                o.str(package);
+            }
+            Message::Authorization {
+                package,
+                allowed,
+                answer,
+            } => {
+                o.u8(AUTHORIZATION);
+                o.str(package);
+                o.u8(match allowed {
+                    None => 0,
+                    Some(false) => 1,
+                    Some(true) => 2,
+                });
+                o.u8(*answer as u8);
+            }
         }
         o.0
     }
@@ -295,6 +328,17 @@ impl Message {
                 shown: i.u8()? != 0,
                 error: i.opt()?,
             },
+            AUTHORIZE => Message::Authorize { package: i.str()? },
+            AUTHORIZATION => Message::Authorization {
+                package: i.str()?,
+                allowed: match i.u8()? {
+                    0 => None,
+                    1 => Some(false),
+                    2 => Some(true),
+                    _ => return Err(bad()),
+                },
+                answer: i.u8()? != 0,
+            },
             _ => return Err(bad()),
         };
         if !i.0.is_empty() {
@@ -333,7 +377,7 @@ impl Message {
         Message::decode(&body).map(Some)
     }
 
-    /// The key of the notification it is about.
+    /// The key of the notification it is about, or the package.
     pub fn key(&self) -> &str {
         match self {
             Message::Post(p) => &p.key,
@@ -343,6 +387,7 @@ impl Message {
             | Message::Dismiss { key }
             | Message::FullScreen { key }
             | Message::Shown { key, .. } => key,
+            Message::Authorize { package } | Message::Authorization { package, .. } => package,
         }
     }
 }
@@ -397,6 +442,24 @@ mod tests {
                 key: "k".into(),
                 shown: false,
                 error: Some("denied".into()),
+            },
+            Message::Authorize {
+                package: "p".into(),
+            },
+            Message::Authorization {
+                package: "p".into(),
+                allowed: None,
+                answer: true,
+            },
+            Message::Authorization {
+                package: "p".into(),
+                allowed: Some(false),
+                answer: false,
+            },
+            Message::Authorization {
+                package: "p".into(),
+                allowed: Some(true),
+                answer: true,
             },
         ];
         let mut stream = Vec::new();

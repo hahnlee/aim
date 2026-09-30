@@ -511,6 +511,15 @@ path = "/vendor/overlay/aim-framework-overlay.apk"
 source = "target/aim/device-services/framework-overlay.apk"
 reason = "the device's static overlay of framework-res: config_deviceSpecificSystemServices names the device's system service"
 
+# Temporary (#470), until PermissionController is native (ADR 0013): the
+# device's system service redirects a request for POST_NOTIFICATIONS
+# alone to this activity, which answers it with the Mac's prompt.
+
+[[add]]
+path = "/system/app/AimNotificationPermission/AimNotificationPermission.apk"
+source = "target/aim/device-services/notification-permission.apk"
+reason = "temporary exception (#470): the invisible activity started in place of PermissionController's dialog for a request of POST_NOTIFICATIONS alone; it asks the Mac's prompt through the native service host and returns PermissionController's result"
+
 [[add]]
 path = "/system_ext/bin/aim-windows"
 source = "target/aim/daemons/bin/aim-windows"

@@ -214,3 +214,27 @@ The migration's state and conformance results are in
   keys apps' own caches. Measurements and CTS are in
   [system-services.md](../system-services.md), "The system_server
   bridge".
+
+### The notification permission, a temporary exception (2026-09-30)
+
+- **The exception (#470).** An app's request for `POST_NOTIFICATIONS`
+  shows only the Mac's prompt (a user decision on #470). Until
+  PermissionController is native (the permissions milestone; #550), the
+  device's system service registers a `PRODUCT_ORDERED_ID`
+  `ActivityInterceptorCallback`, the vendor's hook for activity starts,
+  that redirects a request for that permission alone, and
+  PermissionPolicyService's request for a pre-33 app, to an invisible
+  activity in a preinstalled APK (`java/notification-permission`, an
+  `add` in `image/overlay.toml`). The activity asks the native service
+  host through a request object only the redirected intent carries; the
+  host has the app's shim ask the Mac, sets the permission as a device's
+  settings do, and the activity returns PermissionController's result.
+  Every other permission goes to PermissionController, and SystemServer
+  and PermissionController are unchanged.
+- **The mirror.** The Mac's per-app setting is mirrored into the
+  permission when a shim starts and when its app becomes active: denied
+  revokes, allowed (also provisional) grants. Shims no longer ask for
+  authorization at start; an app that holds the permission without
+  having asked gets provisional authorization at its first post. Details
+  are in
+  [notifications.md](../notifications.md), "The permission".

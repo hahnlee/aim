@@ -2,9 +2,14 @@
 //! Android notifications as its own Mac notifications
 //! (`UNUserNotificationCenter`), and what the user does with them.
 //!
-//! The shim asks for provisional authorization: notifications go quietly
-//! to Notification Center without a prompt, until the user chooses to
-//! show them prominently there. Each notification's identifier is its
+//! The Mac's authorization is Android's POST_NOTIFICATIONS (#470): the
+//! shim asks for full authorization (the Mac's prompt, the first time)
+//! when the app requests the permission. An app that holds it without
+//! having asked (NMS posted) gets provisional authorization at its first
+//! post: its notifications go quietly to Notification Center until the
+//! user chooses. The shim tells the bridge the Mac's setting when it
+//! starts, when its app becomes active and when the setting changed as it
+//! asked. Each notification's identifier is its
 //! Android key; its actions are a category's, each a button or, for a
 //! `RemoteInput`, a text field; a dismissal is reported (the categories'
 //! custom dismiss action). The Dock badge counts the app's notifications
@@ -83,8 +88,13 @@ const UTF8: u32 = 0x0800_0100;
 /// `kCGImageAlphaPremultipliedLast`, `kCGImageAlphaLast`.
 const PREMULTIPLIED_LAST: u32 = 1;
 const ALPHA_LAST: u32 = 3;
-/// `UNAuthorizationOption`: badge, sound, alert, provisional.
-const AUTHORIZATION: usize = 1 | 2 | 4 | 64;
+/// `UNAuthorizationOption`: badge, sound, alert; provisional.
+const AUTHORIZATION: usize = 1 | 2 | 4;
+const PROVISIONAL: usize = 64;
+/// `UNAuthorizationStatus`: not determined, denied (then authorized,
+/// provisional, ephemeral).
+const NOT_DETERMINED: isize = 0;
+const DENIED: isize = 1;
 /// `UNNotificationCategoryOptionCustomDismissAction`.
 const CUSTOM_DISMISS: usize = 1;
 /// `UNNotificationInterruptionLevel`: passive, active.
@@ -109,6 +119,22 @@ struct Shown {
 }
 
 static SHOWN: Mutex<Option<Shown>> = Mutex::new(None);
+
+/// Whether this run has asked for authorization before posting.
+enum Asked {
+    No,
+    /// Posts waiting for the answer, in order.
+    Asking(Vec<Post>),
+    Yes,
+}
+
+static ASKED: Mutex<Asked> = Mutex::new(Asked::No);
+/// The Mac's setting as last told to the bridge.
+static TOLD: Mutex<Option<Option<bool>>> = Mutex::new(None);
+/// The packages whose request waits for the prompt on screen: one prompt
+/// answers every request that comes while it is up (the system shim's
+/// stands for every package without a shim).
+static REQUESTS: Mutex<Option<Vec<String>>> = Mutex::new(None);
 /// Names the image files handed to Notification Center.
 static FILES: AtomicU64 = AtomicU64::new(0);
 
@@ -151,20 +177,24 @@ extern "C" fn once_invoke(block: *const OnceBlock, arg: Id) {
 }
 
 fn once_block(f: impl FnOnce(Id) + Send + 'static) -> OnceBlock {
+    let work: Box<Work> = Box::new(Box::new(f));
+    stack_block(once_invoke as *const c_void, Box::into_raw(work).cast())
+}
+
+fn stack_block(invoke: *const c_void, work: *mut c_void) -> OnceBlock {
     static DESCRIPTOR: Descriptor = Descriptor {
         reserved: 0,
         size: size_of::<OnceBlock>(),
     };
-    let work: Box<Work> = Box::new(Box::new(f));
     OnceBlock {
         header: BlockHeader {
             isa: (&raw const _NSConcreteStackBlock).cast(),
             flags: 0,
             reserved: 0,
-            invoke: once_invoke as *const c_void,
+            invoke,
         },
         descriptor: &DESCRIPTOR,
-        work: Box::into_raw(work).cast(),
+        work,
     }
 }
 
@@ -185,17 +215,79 @@ fn call_block_usize(block: Id, v: usize) {
     }
 }
 
-extern "C" fn authorized(_block: *const GlobalBlock, granted: bool, error: Id) {
-    if !granted {
-        eprintln!(
-            "aim-display: notifications not authorized: {}",
-            text(send!(error, c"localizedDescription" => Id))
-        );
+type Granted = Box<dyn FnOnce(bool) + Send>;
+
+extern "C" fn granted_invoke(block: *const OnceBlock, granted: bool, _error: Id) {
+    // SAFETY: the heap copy of a block `granted_block` made; its work is
+    // taken once.
+    let work = unsafe { Box::from_raw((*block).work.cast::<Granted>()) };
+    work(granted);
+}
+
+/// A block like [`once_block`]'s for a completion handler that takes a
+/// `BOOL` and an `NSError`.
+fn granted_block(f: impl FnOnce(bool) + Send + 'static) -> OnceBlock {
+    let work: Box<Granted> = Box::new(Box::new(f));
+    stack_block(granted_invoke as *const c_void, Box::into_raw(work).cast())
+}
+
+/// The Mac's setting: allowed, denied or not determined (`None`).
+fn allowed(status: isize) -> Option<bool> {
+    match status {
+        NOT_DETERMINED => None,
+        DENIED => Some(false),
+        _ => Some(true),
     }
 }
 
-/// Starts showing notifications: the delegate and the authorization.
-/// Main thread.
+/// Calls `then` with the Mac's setting for the app.
+fn setting(then: impl FnOnce(Option<bool>) + Send + 'static) {
+    let block = once_block(move |settings: Id| {
+        then(allowed(send!(settings, c"authorizationStatus" => isize)))
+    });
+    send!(center(), c"getNotificationSettingsWithCompletionHandler:" => (),
+        *const OnceBlock = &block);
+}
+
+/// Asks for authorization with `options` (full: the Mac's prompt, unless
+/// the user has answered it), then calls `then` with the setting.
+fn authorize(options: usize, then: impl FnOnce(Option<bool>) + Send + 'static) {
+    let block = granted_block(move |_| setting(then));
+    send!(center(), c"requestAuthorizationWithOptions:completionHandler:" => (),
+        usize = options, *const OnceBlock = &block);
+}
+
+/// Tells the bridge the app's setting: always, or only if it changed.
+fn tell(allowed: Option<bool>, always: bool) {
+    let Some(package) = crate::shim::info("AIMPackage") else {
+        return;
+    };
+    {
+        let mut told = TOLD.lock().unwrap();
+        if !always && *told == Some(allowed) {
+            return;
+        }
+        *told = Some(allowed);
+    }
+    crate::shim::notify(&Message::Authorization {
+        package,
+        allowed,
+        answer: false,
+    });
+}
+
+/// Tells the bridge the app's setting (the shim started, or its app
+/// became active).
+pub fn mirror() {
+    setting(|allowed| tell(allowed, true));
+}
+
+extern "C" fn became_active(_block: *const GlobalBlock, _note: Id) {
+    mirror();
+}
+
+/// Starts showing notifications: the delegate, and the setting told
+/// whenever the app becomes active. Main thread.
 pub fn start() {
     *SHOWN.lock().unwrap() = Some(Shown {
         passive: HashSet::new(),
@@ -206,10 +298,12 @@ pub fn start() {
     send!(c, c"setDelegate:" => (), Id = delegate());
     // Those of an earlier run are gone or shown again once connected.
     send!(c, c"removeAllDeliveredNotifications" => ());
-    static AUTHORIZED: std::sync::OnceLock<GlobalBlock> = std::sync::OnceLock::new();
-    let block = AUTHORIZED.get_or_init(|| GlobalBlock::new(authorized as *const c_void));
-    send!(c, c"requestAuthorizationWithOptions:completionHandler:" => (),
-        usize = AUTHORIZATION, *const GlobalBlock = block);
+    static ACTIVE: std::sync::OnceLock<GlobalBlock> = std::sync::OnceLock::new();
+    let block = ACTIVE.get_or_init(|| GlobalBlock::new(became_active as *const c_void));
+    let observers = send!(class(c"NSNotificationCenter"), c"defaultCenter" => Id);
+    send!(observers, c"addObserverForName:object:queue:usingBlock:" => Id,
+        Id = nsstring("NSApplicationDidBecomeActiveNotification"), Id = std::ptr::null_mut(),
+        Id = std::ptr::null_mut(), *const GlobalBlock = block);
     set_categories();
 }
 
@@ -469,13 +563,71 @@ fn badge() {
     send!(tile, c"setBadgeLabel:" => (), Id = label);
 }
 
+/// Shows `p` once this run has asked for authorization, which the first
+/// post does. Main thread.
+fn post_authorized(p: &Post) {
+    let mut asked = ASKED.lock().unwrap();
+    match &mut *asked {
+        Asked::Yes => {
+            drop(asked);
+            post(p);
+        }
+        Asked::Asking(waiting) => waiting.push(p.clone()),
+        Asked::No => {
+            *asked = Asked::Asking(vec![p.clone()]);
+            authorize(AUTHORIZATION | PROVISIONAL, |allowed| {
+                tell(allowed, false);
+                on_main(|| {
+                    let _pool = crate::objc::Pool::new();
+                    let asked = std::mem::replace(&mut *ASKED.lock().unwrap(), Asked::Yes);
+                    if let Asked::Asking(waiting) = asked {
+                        waiting.iter().for_each(post);
+                    }
+                });
+            });
+        }
+    }
+}
+
+/// The app asks for the permission: full authorization, answered with
+/// the setting.
+fn request(package: String) {
+    {
+        let mut requests = REQUESTS.lock().unwrap();
+        if let Some(waiting) = requests.as_mut() {
+            waiting.push(package);
+            return;
+        }
+        *requests = Some(vec![package]);
+    }
+    authorize(AUTHORIZATION, |allowed| {
+        let own = crate::shim::info("AIMPackage");
+        for package in REQUESTS.lock().unwrap().take().unwrap_or_default() {
+            if own.as_deref() == Some(package.as_str()) {
+                *TOLD.lock().unwrap() = Some(allowed);
+            }
+            crate::shim::notify(&Message::Authorization {
+                package,
+                allowed,
+                answer: true,
+            });
+        }
+    });
+}
+
 /// A message from the server.
 pub fn handle(m: Message) {
     on_main(move || {
         let _pool = crate::objc::Pool::new();
-        match &m {
-            Message::Post(p) => post(p),
-            Message::Remove { key, .. } => remove(key),
+        match m {
+            Message::Post(p) => post_authorized(&p),
+            Message::Remove { key, .. } => {
+                if let Asked::Asking(waiting) = &mut *ASKED.lock().unwrap() {
+                    waiting.retain(|p| p.key != key);
+                }
+                remove(&key);
+            }
+            Message::Authorize { package } => request(package),
             _ => {}
         }
     });
@@ -545,4 +697,18 @@ fn delegate() -> Id {
         cls
     };
     send!(cls, c"new" => Id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provisional_and_ephemeral_are_allowed() {
+        assert_eq!(allowed(NOT_DETERMINED), None);
+        assert_eq!(allowed(DENIED), Some(false));
+        for status in 2..=4 {
+            assert_eq!(allowed(status), Some(true));
+        }
+    }
 }

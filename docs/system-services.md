@@ -284,8 +284,13 @@ app uids. SystemServer starts device-specific services after
 `PHASE_DEVICE_SPECIFIC_SERVICES_READY`, the service hands it the
 `IBridge` binder with a one-way call. The host takes the bridge only
 from the system uid, and the bridge answers only the system uid.
-Further device pieces (#470's `ActivityInterceptorCallback`) register
-from the same service.
+#470's `ActivityInterceptorCallback`, which answers an app's request
+for POST_NOTIFICATIONS with the Mac's prompt, registers from the same
+service when the host asks (`IBridge.interceptNotificationPermissionRequests`,
+only while the Mac shows notifications); its request reaches the host as
+`IServiceHost.requestNotificationPermission`, a temporary exception
+until PermissionController is native (docs/notifications.md, "The
+permission"; #550).
 
 **Maintenance and CTS.** Each method is one internal call; the internal
 APIs it names are checked per image. It runs in system_server, so it

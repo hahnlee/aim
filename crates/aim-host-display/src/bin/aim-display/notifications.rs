@@ -15,8 +15,12 @@
 //! in its window when the user unlocks, as on a locked phone. Otherwise
 //! it is an ordinary alerting notification (macOS's time-sensitive level
 //! needs an entitlement ad hoc signed shims cannot have).
+//!
+//! An app's request for POST_NOTIFICATIONS goes to the host of the same
+//! shim, launched if need be, which asks the Mac and answers; a shim's
+//! own setting goes to the bridge (#470).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
@@ -41,12 +45,15 @@ struct State {
     shown: BTreeMap<String, Post>,
     /// Shims launched and not yet connected.
     launching: BTreeMap<String, Instant>,
+    /// Packages whose authorization the bridge asked for, until answered.
+    authorizing: BTreeSet<String>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
     bridge: None,
     shown: BTreeMap::new(),
     launching: BTreeMap::new(),
+    authorizing: BTreeSet::new(),
 });
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -128,7 +135,7 @@ fn deliver(s: &mut State, owner: &str, m: &Message) {
         h.send_notify(m);
         return;
     }
-    if !matches!(m, Message::Post(_)) {
+    if !matches!(m, Message::Post(_) | Message::Authorize { .. }) {
         return;
     }
     if s.launching
@@ -155,6 +162,15 @@ fn deliver(s: &mut State, owner: &str, m: &Message) {
     });
 }
 
+/// Write `m` to the bridge.
+fn to_bridge(s: &mut State, m: &Message) {
+    if let Some(b) = s.bridge.as_mut()
+        && let Err(e) = b.write_all(&m.frame())
+    {
+        eprintln!("aim-display: notification bridge: {e}");
+    }
+}
+
 /// Serve the notification bridge's connection until it closes; its
 /// notifications go with it.
 pub fn serve_bridge(sock: UnixStream) {
@@ -168,14 +184,23 @@ pub fn serve_bridge(sock: UnixStream) {
                 let new = s.shown.insert(p.key.clone(), p.clone()).is_none();
                 if new && p.full_screen && mac_locked() {
                     wake_display();
-                    let launch = Message::FullScreen { key: p.key.clone() };
-                    if let Some(b) = s.bridge.as_mut()
-                        && let Err(e) = b.write_all(&launch.frame())
-                    {
-                        eprintln!("aim-display: notification bridge: {e}");
-                    }
+                    to_bridge(&mut s, &Message::FullScreen { key: p.key.clone() });
                 }
                 p.package.clone()
+            }
+            Message::Authorize { package } => {
+                if owner(package).is_none() {
+                    // No shim to ask: the permission stays as it is.
+                    let answer = Message::Authorization {
+                        package: package.clone(),
+                        allowed: None,
+                        answer: true,
+                    };
+                    to_bridge(&mut s, &answer);
+                    continue;
+                }
+                s.authorizing.insert(package.clone());
+                package.clone()
             }
             Message::Remove { key, package } => {
                 s.shown.remove(key);
@@ -189,6 +214,7 @@ pub fn serve_bridge(sock: UnixStream) {
     }
     let mut s = STATE.lock().unwrap();
     s.bridge = None;
+    s.authorizing.clear();
     let shown: Vec<Post> = std::mem::take(&mut s.shown).into_values().collect();
     for p in shown {
         if let Some(owner) = owner(&p.package) {
@@ -218,10 +244,18 @@ pub fn host_connected(h: &Arc<Host>) {
             h.send_notify(&Message::Post(p));
         }
     }
+    for package in &s.authorizing {
+        if owner(package).as_deref() == Some(h.package.as_str()) {
+            h.send_notify(&Message::Authorize {
+                package: package.clone(),
+            });
+        }
+    }
 }
 
-/// What the user did with a notification, from a window host.
-pub fn from_host(m: &Message) {
+/// What the user did with a notification, or the Mac's setting, from
+/// window host `h`.
+pub fn from_host(h: &Host, m: &Message) {
     if let Message::Shown { key, shown, error } = m {
         let state = if *shown { "shown" } else { "not shown" };
         match error {
@@ -231,9 +265,17 @@ pub fn from_host(m: &Message) {
         return;
     }
     let mut s = STATE.lock().unwrap();
-    if let Some(b) = s.bridge.as_mut()
-        && let Err(e) = b.write_all(&m.frame())
+    if let Message::Authorization {
+        package, answer, ..
+    } = m
     {
-        eprintln!("aim-display: notification bridge: {e}");
+        if *answer {
+            s.authorizing.remove(package);
+        } else if *package != h.package || h.activity.is_empty() {
+            // A shim mirrors its own app's setting; the system shim
+            // stands for no app.
+            return;
+        }
     }
+    to_bridge(&mut s, m);
 }
