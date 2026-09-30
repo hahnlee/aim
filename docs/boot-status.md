@@ -31,11 +31,13 @@ guest-init --image <derived> --data <data> --run \
 ## Native system services (2026-09-29, ADR 0013)
 
 `image/native-services` lists the system services implemented natively
-(docs/system-services.md): today `clipboard`. The derived image's
-`services.jar` does not start `ClipboardService` (its
-`SystemServerTiming: StartClipboardService` trace line stays), and
-guest-init registers the native clipboard with servicemanager when
-`servicemanager.ready` is set; `service check clipboard` finds it.
+(docs/system-services.md): today `clipboard` and `vibrator_manager`
+(with `external_vibrator_service`). The derived image's `services.jar`
+does not start `ClipboardService` or `VibratorManagerService$Lifecycle`
+(their `SystemServerTiming` trace lines stay), and guest-init registers
+the native services with servicemanager when `servicemanager.ready` is
+set; `service check clipboard` finds it. The vibrator control service
+(`IVibratorControlService/default`) is no longer declared or published.
 Boots with it reach `sys.boot_completed` as before (four boots of a
 reused data image, 20-25 s; fresh data images 50-52 s, then a cold
 Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
