@@ -4,13 +4,12 @@
 //! These are the binder equivalents of what the original service asks
 //! other services in its process; where the original uses a
 //! system_server-internal API that has none, the method says what it
-//! stands in for. What a decision reads on every call (package ownership,
-//! app-op modes, focus, the default input method, whether the device is
-//! locked) is mirrored ([`crate::mirror`]), each fed by its owner's
-//! listener; noting an app op, which only records the access, is sent in
-//! the background. Permissions are asked each time: shell permission
-//! delegation (`adoptShellPermissionIdentity`) changes them without a
-//! notification.
+//! stands in for. What a focused app's access reads (package ownership,
+//! app-op modes, focus, whether the device is locked) is mirrored
+//! ([`crate::mirror`]), each fed by its owner's listener; noting an app op,
+//! which only records the access, is sent in the background. Permissions
+//! and the input method are asked each time (docs/system-services.md,
+//! "Mirrored state").
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Sender};
@@ -19,10 +18,9 @@ use std::sync::{Arc, Mutex, Weak};
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
 use aim_binder_host::parcel::{Binder, Exception, Parcel, Reader, Result as ParcelResult};
 use aim_service_aidl::{
-    ReadParcelable, Returned, WriteParcelable, android_app_iactivitymanager as am,
+    ReadParcelable, Returned, android_app_iactivitymanager as am,
     android_app_iactivitytaskmanager as atm, android_app_itaskstacklistener as task_listener,
-    android_app_trust_itrustmanager as trust, android_content_icontentservice as content,
-    android_content_pm_ipackagemanager as package, android_database_icontentobserver as observer,
+    android_app_trust_itrustmanager as trust, android_content_pm_ipackagemanager as package,
     android_os_iremotecallback as remote_callback, android_os_iservicemanager as sm,
     android_os_iusermanager as um, android_permission_ipermissionmanager as pm,
     com_android_internal_app_iappopscallback as ops_callback,
@@ -48,10 +46,6 @@ const USER_ALL: i32 = -1;
 const USER_SYSTEM: i32 = 0;
 /// `Context.DEVICE_ID_DEFAULT`.
 const DEVICE_ID_DEFAULT: i32 = 0;
-/// `Build.VERSION.SDK_INT` of the pinned image, as system_server registers.
-const SDK_INT: i32 = 36;
-/// `Settings.Secure.getUriFor(DEFAULT_INPUT_METHOD)`.
-const DEFAULT_INPUT_METHOD_URI: &str = "content://settings/secure/default_input_method";
 
 /// A failure to reach a service, as the exception a Java caller would
 /// see once system_server rethrew it.
@@ -75,8 +69,6 @@ pub struct System {
     modes: Mirror<(i32, i32, String), i32>,
     /// The focused root task's effective uid.
     focus: Mirror<(), Option<i32>>,
-    /// The package of each user's input method.
-    ime: Mirror<i32, Option<String>>,
     /// Whether the system user's device is locked.
     locked: Mirror<(), bool>,
     notes: Sender<Note>,
@@ -88,7 +80,6 @@ struct Listeners {
     /// One per watched op: a callback is registered for one op.
     ops: Vec<(i32, Binder)>,
     packages: Binder,
-    ime: Binder,
     locked: Binder,
 }
 
@@ -124,7 +115,6 @@ impl System {
                     s.packages.invalidate();
                     s.modes.invalidate();
                 }),
-                ime: node(observer::DESCRIPTOR, false, |s| s.ime.invalidate()),
                 locked: node(lock_listener::DESCRIPTOR, false, |s| s.locked.invalidate()),
             };
             Self {
@@ -134,7 +124,6 @@ impl System {
                 packages: Mirror::new(),
                 modes: Mirror::new(),
                 focus: Mirror::new(),
-                ime: Mirror::new(),
                 locked: Mirror::new(),
                 notes,
             }
@@ -588,41 +577,16 @@ impl System {
 
     /// The package of `user`'s current input method, which stands in for
     /// `Settings.Secure.DEFAULT_INPUT_METHOD` (the input method service
-    /// sets the setting when it switches, and follows it when another
-    /// writes it); the setting's observer tells of a change.
+    /// keeps the setting and its current method the same).
     pub fn default_ime_package(self: &Arc<Self>, user_id: i32) -> Result<Option<String>> {
-        self.ime.get(
-            user_id,
-            || {
-                let observer = self.listeners.ime;
-                self.watch(
-                    "content",
-                    content::REGISTER_CONTENT_OBSERVER,
-                    |p| {
-                        content::RegisterContentObserver {
-                            uri: Some(Uri(DEFAULT_INPUT_METHOD_URI)),
-                            notify_for_descendants: false,
-                            observer: Some(observer),
-                            user_handle: USER_ALL,
-                            target_sdk_version: SDK_INT,
-                        }
-                        .write(p)
-                    },
-                    content::read_register_content_observer_reply,
-                    |s| s.ime.unwatch(),
-                )
-            },
-            || {
-                let args = imm::GetCurrentInputMethodInfoAsUser { user_id };
-                let info = self.call(
-                    "input_method",
-                    imm::GET_CURRENT_INPUT_METHOD_INFO_AS_USER,
-                    |p| args.write(p),
-                    imm::read_get_current_input_method_info_as_user_reply::<InputMethodInfo>,
-                )?;
-                Ok(info.and_then(|i| i.id?.split('/').next().map(str::to_string)))
-            },
-        )
+        let args = imm::GetCurrentInputMethodInfoAsUser { user_id };
+        let info = self.call(
+            "input_method",
+            imm::GET_CURRENT_INPUT_METHOD_INFO_AS_USER,
+            |p| args.write(p),
+            imm::read_get_current_input_method_info_as_user_reply::<InputMethodInfo>,
+        )?;
+        Ok(info.and_then(|i| i.id?.split('/').next().map(str::to_string)))
     }
 }
 
@@ -675,16 +639,6 @@ impl ReadParcelable for InputMethodInfo {
         Ok(Self {
             id: r.read_string16()?,
         })
-    }
-}
-
-/// `Uri`, as a `StringUri` writes itself.
-struct Uri(&'static str);
-
-impl WriteParcelable for Uri {
-    fn write_to(&self, p: &mut Parcel) {
-        p.write_i32(1); // StringUri.TYPE_ID
-        p.write_string8(Some(self.0));
     }
 }
 

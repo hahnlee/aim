@@ -35,7 +35,8 @@ every step: replace superseded facts instead of appending a log.
    nodes on host threads. A call to them crosses no Mach hop after the
    caller's own. A service sees the caller's pid and uid from the driver,
    and reaches the original services it consults (permissions, app ops,
-   users) as a client, through servicemanager.
+   users) as a client, through servicemanager. What its decisions read on
+   every call it mirrors (below, "Mirrored state").
 3. **Registered under the original name.** When servicemanager sets
    `servicemanager.ready` (at boot, and again after a restart), guest-init
    registers each native service with `addService`, as
@@ -63,6 +64,61 @@ every step: replace superseded facts instead of appending a log.
 6. **Conformance.** The CTS module(s) for the service's API, before (the
    original) and after (native), plus the app checks; failing tests keep
    the original.
+
+## Mirrored state
+
+A native service decides on every call by state that other services own
+(whether a package is the caller's, its permissions, app-op modes, focus,
+the input method, whether the device is locked). Asking the owner each
+time costs a system_server round trip per input, so the service host
+keeps a mirror of each (`crates/aim-services/src/mirror.rs`), fed by the
+owner's standard listener, registered with generated AIDL codes:
+
+| Input | Owner's query (on a miss) | Listener that drops it |
+| --- | --- | --- |
+| a package is the uid's | `IAppOpsService.checkPackage` | `IPackageManager.registerPackageMonitorCallback` (every package change, all users) |
+| an app op's mode | `IAppOpsService.checkOperationForDevice` | `startWatchingModeWithFlags(op, WATCH_FOREGROUND_CHANGES)`, one callback per op, and the package callback |
+| focus (the focused root task's uid) | `IActivityTaskManager.getFocusedRootTaskInfo` | `registerTaskStackListener` (every task change) |
+| the system user's device is locked | `ITrustManager.isDeviceLocked` | `ITrustManager.registerDeviceLockedStateListener` |
+
+`WATCH_FOREGROUND_CHANGES` also reports a uid's change of foreground state
+for an op in `MODE_FOREGROUND`, the one input of a mode that is not a
+setting, so no uid observer is needed. Noting an app op
+(`noteOperation`), which records an access and decides nothing the check
+did not, is sent from a background thread.
+
+Two inputs are asked each time. Permissions: shell permission delegation
+(`UiAutomation.adoptShellPermissionIdentity`, which CTS uses) changes what
+`checkPermission` answers for the instrumented app without any
+notification (`testReadInBackgroundRequiresPermission` failed with a
+permission mirror); the same delegation changes its app-op checks
+unnoticed too (#467). The input method: its owner is the
+`DEFAULT_INPUT_METHOD` setting, and `IContentService.registerContentObserver`
+refuses an observer from a process ActivityManager does not know
+("Failed to find PID", `checkContentProviderAccess`), which the service
+host is (#430). The clipboard evaluates the original's disjunction with
+focus first, so only a read by an app without focus (the input method,
+a service) asks them.
+
+**The rule.** A value is kept only while its listener is registered: the
+listener is registered before the first query, and a query keeps its
+answer only if no notification arrived while it ran (a generation count),
+so a kept value is never older than the last notification. A
+notification drops what it may have changed, and the next decision asks
+the owner once. When the owner dies (system_server restarts), the
+registration dies with it: the mirror is dropped and decisions are
+synchronous queries until the listener is registered again. The owners
+send their notifications one-way when they commit a change, most from a
+handler thread, so a call that races a change is decided as just before
+it until the notification arrives, as for every other client of these
+listeners. Other users' lock state is asked each time; virtual devices
+are never locked (`TrustManagerService`). Writes still ask
+`IUserManager` for the user's profiles (#460).
+
+The binder host's nodes accept file descriptors, as libbinder's do: the
+task stack listener's snapshots carry a buffer's. They are closed after
+the call, and a service that takes none refuses a call with some, as the
+driver refuses it for a node that does not accept them.
 
 ## Inventory: what apps use
 

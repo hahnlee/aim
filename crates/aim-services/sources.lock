@@ -22,8 +22,6 @@ SOURCE_FILES=(
   "platform/frameworks/native|libs/permission/aidl/com/android/internal/app/IAppOpsCallback.aidl|82574f3b0897bf513c60a9868b0f1155ba89ef8d113abc4b4d99b5dec73498a0"
   "platform/frameworks/base|core/java/android/content/pm/IPackageManager.aidl|7b02c7375bc969da513471dbed8aa41751490398dcdc4d580a5557e59c861263"
   "platform/frameworks/base|core/java/android/os/IRemoteCallback.aidl|31120af262690e1d7f4dd4f2befdcca13c4fa30ed10278bfdc722c31298e0b2a"
-  "platform/frameworks/base|core/java/android/content/IContentService.aidl|855d605f790eea2001f9ef52229a7a9612eed53f0cadf88b5c8e3bfd1db31657"
-  "platform/frameworks/base|core/java/android/database/IContentObserver.aidl|a9640ecf33e7da6235cac63a9b58bed19fe478cad5387ce1a873b9de08c71813"
   "platform/frameworks/base|core/java/com/android/internal/policy/IDeviceLockedStateListener.aidl|1fb9a8d4c1d86f5f1363062cc0bf307cd72427ed7884135a2d879316b3ffc20a"
 )
 
@@ -45,7 +43,5 @@ INTERFACES=(
   "com.android.internal.app.IAppOpsCallback|system/framework/framework.jar|*"
   "android.content.pm.IPackageManager|system/framework/framework.jar|registerPackageMonitorCallback"
   "android.os.IRemoteCallback|system/framework/framework.jar|*"
-  "android.content.IContentService|system/framework/framework.jar|registerContentObserver"
-  "android.database.IContentObserver|system/framework/framework.jar|onChange"
   "com.android.internal.policy.IDeviceLockedStateListener|system/framework/framework.jar|*"
 )
