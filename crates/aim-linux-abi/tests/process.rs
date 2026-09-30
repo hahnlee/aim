@@ -259,6 +259,11 @@ fn a_fatal_signal_ends_the_host_process_with_it() {
 }
 
 #[test]
+fn a_pending_signal_the_suspend_mask_blocks_waits() {
+    check("suspend_pending");
+}
+
+#[test]
 fn seccomp_filters_are_accepted() {
     check("seccomp_filter");
 }
