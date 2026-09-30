@@ -159,6 +159,14 @@ impl Drawer<'_> {
                     .or(items.first());
                 plain.is_some_and(|i| self.inner(i, apk, r, depth, level))
             }
+            "animation-list" => {
+                // An AnimationDrawable not running shows its first frame
+                // (a status icon such as the download arrow).
+                e.children
+                    .iter()
+                    .find(|c| c.name == "item")
+                    .is_some_and(|i| self.inner(i, apk, r, depth, level))
+            }
             "level-list" => {
                 // The first item whose level range holds the level.
                 let level = level as i32;

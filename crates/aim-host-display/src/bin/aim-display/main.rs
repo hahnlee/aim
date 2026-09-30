@@ -34,6 +34,7 @@ mod metal;
 mod notifications;
 mod shim;
 mod stats;
+mod status;
 mod un;
 mod vsync;
 mod window;

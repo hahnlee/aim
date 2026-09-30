@@ -35,6 +35,84 @@ pub struct Action {
     pub input: Option<String>,
 }
 
+/// Where a live notification's chronometer stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clock {
+    /// It counts up from, or down to, `base_ms` of the guest's
+    /// `SystemClock.elapsedRealtime()` (`CLOCK_BOOTTIME`,
+    /// `aim_hostcall::clock::boottime_ns`).
+    Counting { base_ms: i64, down: bool },
+    /// It stands still at `shown_ms` (a paused timer).
+    Stopped { shown_ms: i64 },
+}
+
+impl Clock {
+    /// What an Android `Chronometer` shows at `now_ms` of the same clock
+    /// (`Chronometer.updateText`, `DateUtils.formatElapsedTime`).
+    pub fn text(&self, now_ms: i64) -> String {
+        let ms = match *self {
+            Clock::Counting { base_ms, down } if down => base_ms - now_ms,
+            Clock::Counting { base_ms, .. } => now_ms - base_ms,
+            Clock::Stopped { shown_ms } => shown_ms,
+        };
+        let s = (ms / 1000).unsigned_abs();
+        let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
+        let text = if h > 0 {
+            format!("{h}:{m:02}:{s:02}")
+        } else {
+            format!("{m:02}:{s:02}")
+        };
+        if ms / 1000 < 0 {
+            format!("\u{2212}{text}")
+        } else {
+            text
+        }
+    }
+
+    /// How long after `now_ms` its text may next change: at the next
+    /// whole second it counts; never when it stands still.
+    pub fn next_change_ms(&self, now_ms: i64) -> Option<i64> {
+        let Clock::Counting { base_ms, .. } = *self else {
+            return None;
+        };
+        match (now_ms - base_ms).rem_euclid(1000) {
+            0 => Some(1000),
+            r => Some(1000 - r),
+        }
+    }
+}
+
+/// A live notification's progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub value: u32,
+    pub max: u32,
+    pub indeterminate: bool,
+}
+
+/// An ongoing activity the app's menu bar item shows while its
+/// notification lasts, as SystemUI's status bar chip shows an Android 16
+/// Live Update (`docs/notifications.md`, "The menu bar").
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Live {
+    /// `Notification.EXTRA_SHORT_CRITICAL_TEXT`, if the app gave one.
+    pub text: String,
+    pub clock: Option<Clock>,
+    pub progress: Option<Progress>,
+    /// The small icon, whose alpha the item draws (a template image).
+    pub icon: Option<Image>,
+}
+
+/// What an app's indicator item stands for: an app op SystemUI's status
+/// bar indicators watch while the app has it active
+/// (`AppOpsManager.startWatchingActive`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Indicator {
+    Microphone,
+    Camera,
+    Location,
+}
+
 /// A posted or updated notification, as the Mac shows it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Post {
@@ -56,6 +134,8 @@ pub struct Post {
     pub full_screen: bool,
     pub actions: Vec<Action>,
     pub image: Option<Image>,
+    /// It is an ongoing activity the menu bar shows.
+    pub live: Option<Box<Live>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +178,13 @@ pub enum Message {
         allowed: Option<bool>,
         answer: bool,
     },
+    /// Bridge to host: `package` has, or no longer has, what `indicator`
+    /// stands for in use.
+    Indicator {
+        package: String,
+        indicator: Indicator,
+        on: bool,
+    },
 }
 
 const POST: u8 = 1;
@@ -109,6 +196,7 @@ const SHOWN: u8 = 6;
 const FULL_SCREEN: u8 = 7;
 const AUTHORIZE: u8 = 8;
 const AUTHORIZATION: u8 = 9;
+const INDICATOR: u8 = 10;
 
 struct Out(Vec<u8>);
 
@@ -117,6 +205,9 @@ impl Out {
         self.0.push(v);
     }
     fn u32(&mut self, v: u32) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn i64(&mut self, v: i64) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
     fn bytes(&mut self, v: &[u8]) {
@@ -130,6 +221,27 @@ impl Out {
         self.u8(v.is_some() as u8);
         if let Some(v) = v {
             self.str(v);
+        }
+    }
+    fn image(&mut self, v: Option<&Image>) {
+        match v {
+            None => self.u8(0),
+            Some(Image::Rgba {
+                width,
+                height,
+                premultiplied,
+                pixels,
+            }) => {
+                self.u8(1);
+                self.u32(*width);
+                self.u32(*height);
+                self.u8(*premultiplied as u8);
+                self.bytes(pixels);
+            }
+            Some(Image::Encoded(data)) => {
+                self.u8(2);
+                self.bytes(data);
+            }
         }
     }
 }
@@ -155,6 +267,9 @@ impl In<'_> {
     fn u32(&mut self) -> io::Result<u32> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
+    fn i64(&mut self) -> io::Result<i64> {
+        Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
     fn bytes(&mut self) -> io::Result<Vec<u8>> {
         let n = self.u32()? as usize;
         Ok(self.take(n)?.to_vec())
@@ -167,6 +282,27 @@ impl In<'_> {
             Some(self.str()?)
         } else {
             None
+        })
+    }
+    fn image(&mut self) -> io::Result<Option<Image>> {
+        Ok(match self.u8()? {
+            0 => None,
+            1 => {
+                let (width, height) = (self.u32()?, self.u32()?);
+                let premultiplied = self.u8()? != 0;
+                let pixels = self.bytes()?;
+                if pixels.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+                    return Err(bad());
+                }
+                Some(Image::Rgba {
+                    width,
+                    height,
+                    premultiplied,
+                    pixels,
+                })
+            }
+            2 => Some(Image::Encoded(self.bytes()?)),
+            _ => return Err(bad()),
         })
     }
 }
@@ -193,24 +329,29 @@ impl Message {
                     o.str(&a.title);
                     o.opt(a.input.as_deref());
                 }
-                match &p.image {
-                    None => o.u8(0),
-                    Some(Image::Rgba {
-                        width,
-                        height,
-                        premultiplied,
-                        pixels,
-                    }) => {
-                        o.u8(1);
-                        o.u32(*width);
-                        o.u32(*height);
-                        o.u8(*premultiplied as u8);
-                        o.bytes(pixels);
+                o.image(p.image.as_ref());
+                o.u8(p.live.is_some() as u8);
+                if let Some(l) = &p.live {
+                    o.str(&l.text);
+                    match l.clock {
+                        None => o.u8(0),
+                        Some(Clock::Counting { base_ms, down }) => {
+                            o.u8(1);
+                            o.i64(base_ms);
+                            o.u8(down as u8);
+                        }
+                        Some(Clock::Stopped { shown_ms }) => {
+                            o.u8(2);
+                            o.i64(shown_ms);
+                        }
                     }
-                    Some(Image::Encoded(data)) => {
-                        o.u8(2);
-                        o.bytes(data);
+                    o.u8(l.progress.is_some() as u8);
+                    if let Some(p) = l.progress {
+                        o.u32(p.value);
+                        o.u32(p.max);
+                        o.u8(p.indeterminate as u8);
                     }
+                    o.image(l.icon.as_ref());
                 }
             }
             Message::Remove { key, package } => {
@@ -260,6 +401,16 @@ impl Message {
                 });
                 o.u8(*answer as u8);
             }
+            Message::Indicator {
+                package,
+                indicator,
+                on,
+            } => {
+                o.u8(INDICATOR);
+                o.str(package);
+                o.u8(*indicator as u8);
+                o.u8(*on as u8);
+            }
         }
         o.0
     }
@@ -278,24 +429,35 @@ impl Message {
                         input: i.opt()?,
                     });
                 }
-                let image = match i.u8()? {
-                    0 => None,
-                    1 => {
-                        let (width, height) = (i.u32()?, i.u32()?);
-                        let premultiplied = i.u8()? != 0;
-                        let pixels = i.bytes()?;
-                        if pixels.len() as u64 != u64::from(width) * u64::from(height) * 4 {
-                            return Err(bad());
-                        }
-                        Some(Image::Rgba {
-                            width,
-                            height,
-                            premultiplied,
-                            pixels,
+                let image = i.image()?;
+                let live = if i.u8()? != 0 {
+                    let text = i.str()?;
+                    let clock = match i.u8()? {
+                        0 => None,
+                        1 => Some(Clock::Counting {
+                            base_ms: i.i64()?,
+                            down: i.u8()? != 0,
+                        }),
+                        2 => Some(Clock::Stopped { shown_ms: i.i64()? }),
+                        _ => return Err(bad()),
+                    };
+                    let progress = if i.u8()? != 0 {
+                        Some(Progress {
+                            value: i.u32()?,
+                            max: i.u32()?,
+                            indeterminate: i.u8()? != 0,
                         })
-                    }
-                    2 => Some(Image::Encoded(i.bytes()?)),
-                    _ => return Err(bad()),
+                    } else {
+                        None
+                    };
+                    Some(Box::new(Live {
+                        text,
+                        clock,
+                        progress,
+                        icon: i.image()?,
+                    }))
+                } else {
+                    None
                 };
                 Message::Post(Post {
                     key,
@@ -309,6 +471,7 @@ impl Message {
                     full_screen: flags & 4 != 0,
                     actions,
                     image,
+                    live,
                 })
             }
             REMOVE => Message::Remove {
@@ -338,6 +501,16 @@ impl Message {
                     _ => return Err(bad()),
                 },
                 answer: i.u8()? != 0,
+            },
+            INDICATOR => Message::Indicator {
+                package: i.str()?,
+                indicator: match i.u8()? {
+                    0 => Indicator::Microphone,
+                    1 => Indicator::Camera,
+                    2 => Indicator::Location,
+                    _ => return Err(bad()),
+                },
+                on: i.u8()? != 0,
             },
             _ => return Err(bad()),
         };
@@ -387,7 +560,9 @@ impl Message {
             | Message::Dismiss { key }
             | Message::FullScreen { key }
             | Message::Shown { key, .. } => key,
-            Message::Authorize { package } | Message::Authorization { package, .. } => package,
+            Message::Authorize { package }
+            | Message::Authorization { package, .. }
+            | Message::Indicator { package, .. } => package,
         }
     }
 }
@@ -425,6 +600,27 @@ mod tests {
                     premultiplied: true,
                     pixels: vec![1, 2, 3, 4, 5, 6, 7, 8],
                 }),
+                live: Some(Box::new(Live {
+                    text: "5 min".into(),
+                    clock: Some(Clock::Counting {
+                        base_ms: 1_234_567,
+                        down: true,
+                    }),
+                    progress: Some(Progress {
+                        value: 3,
+                        max: 10,
+                        indeterminate: false,
+                    }),
+                    icon: Some(Image::Encoded(vec![0x89, b'P'])),
+                })),
+            }),
+            Message::Post(Post {
+                key: "k".into(),
+                live: Some(Box::new(Live {
+                    clock: Some(Clock::Stopped { shown_ms: -5_000 }),
+                    ..Default::default()
+                })),
+                ..Default::default()
             }),
             Message::Remove {
                 key: "k".into(),
@@ -461,6 +657,11 @@ mod tests {
                 allowed: Some(true),
                 answer: true,
             },
+            Message::Indicator {
+                package: "p".into(),
+                indicator: Indicator::Location,
+                on: true,
+            },
         ];
         let mut stream = Vec::new();
         for m in &messages {
@@ -471,6 +672,27 @@ mod tests {
             assert_eq!(Message::read(&mut r).unwrap().as_ref(), Some(m));
         }
         assert_eq!(Message::read(&mut r).unwrap(), None);
+    }
+
+    #[test]
+    fn reads_as_a_chronometer() {
+        let down = Clock::Counting {
+            base_ms: 300_000,
+            down: true,
+        };
+        assert_eq!(down.text(1_000), "04:59");
+        assert_eq!(down.text(300_999), "00:00");
+        assert_eq!(down.text(305_000), "\u{2212}00:05");
+        let up = Clock::Counting {
+            base_ms: 0,
+            down: false,
+        };
+        assert_eq!(up.text(3_723_000), "1:02:03");
+        assert_eq!(Clock::Stopped { shown_ms: 59_999 }.text(0), "00:59");
+        assert_eq!(down.next_change_ms(1_000), Some(1000));
+        assert_eq!(down.next_change_ms(1_250), Some(750));
+        assert_eq!(up.next_change_ms(-1_250), Some(250));
+        assert_eq!(Clock::Stopped { shown_ms: 0 }.next_change_ms(0), None);
     }
 
     #[test]

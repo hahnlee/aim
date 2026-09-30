@@ -29,6 +29,8 @@ request until PermissionController is native ("The permission").
 | Messages between bridge, server and shims | `crates/aim-host-display/src/notify.rs` |
 | Routing in the display server, shim launches | `bin/aim-display/notifications.rs` |
 | `UNUserNotificationCenter` in a shim | `bin/aim-display/un.rs` |
+| An app's menu bar items: live notifications, indicators, system status icons | `bin/aim-display/status.rs` |
+| The indicators' sources: app ops, the next alarm clock | `crates/aim-services/src/notifications/indicators.rs` |
 | The platform's shim, signed shims | `crates/aim-apps` (`app::system`, `shim::write`) |
 | POST_NOTIFICATIONS: the permission set as the Mac decides | `crates/aim-services/src/notifications/permission.rs`, `crates/aim-services/src/service_host.rs` |
 | The request's interceptor and activity | `java/device-services` (`NotificationPermissionInterceptor`), `java/notification-permission` |
@@ -71,7 +73,8 @@ picture and large icon as `Bitmap` or `Icon`), actions (title,
 `PendingIntent`, `RemoteInput`s), channel, shortcut id, group alert
 behavior and bubble flags. Custom views (`RemoteViews`: content, big,
 heads-up and ticker views, `DecoratedCustomViewStyle`, `setContent`) are
-read past, not kept (`RemoteViews.writeToParcel` with its bitmap and
+read past, not kept but for a `Chronometer`'s base, direction and state
+(the menu bar's, below) (`RemoteViews.writeToParcel` with its bitmap and
 collection caches, its `ApplicationInfo`, squashed or not, and each
 action by its tag): the Mac shows the notification's standard extras,
 which apps set along with a custom view. An action it does not know (the
@@ -201,6 +204,66 @@ into the permission afterwards.
   notifications go quietly to Notification Center, no prompt, until the
   user chooses there or the app requests the permission. Its posts wait
   for that, in order.
+
+## The menu bar
+
+Status that SystemUI's status bar shows for an app is the app's own Mac
+menu bar item (`NSStatusItem` of its shim, as the Live Activities macOS
+shows in the menu bar; #463). The Mac's menu bar shows the device's own
+status (clock, battery, network), so Android's is not mirrored.
+
+**Live notifications.** A notification (not a group summary) is live,
+and its item shows while it lasts, when:
+
+- it is ongoing and NMS promoted it (`FLAG_PROMOTED_ONGOING`, an Android
+  16 Live Update);
+- it is ongoing and has the characteristics NMS promotes by
+  (`Notification.hasPromotableCharacteristics`: a title, no custom views,
+  and either an ongoing `CallStyle` or a colorized notification of no
+  style, `BigTextStyle`, `CallStyle` or `ProgressStyle`). The image's
+  framework has the Live Updates UI off (`android.app.ui_rich_ongoing` is a
+  fixed read-only flag, off), so an app may not be promoted unless the user
+  allowed it, which the image's Settings do not offer; the Mac is the UI
+  that decides;
+- its time runs in a chronometer (`setUsesChronometer`, or a `Chronometer`
+  in its custom content view, as Clock's timers and stopwatch have it):
+  timers, stopwatches, calls, recordings, ongoing or not (Clock's timers
+  are not).
+
+The item shows the notification's small icon as a template image (drawn
+as the other icons are, see above) and a short text: the app's
+`EXTRA_SHORT_CRITICAL_TEXT`, else the chronometer, counting as Android's
+`Chronometer` does (`MM:SS`, `H:MM:SS`, a minus sign past a countdown's
+end; the time a paused timer stands at), else the progress in percent.
+The bridge sends the chronometer's base on the guest's `elapsedRealtime`
+(`CLOCK_BOOTTIME`, which the shim reads the same way) and the progress as
+the template shows it (`EXTRA_PROGRESS`, `EXTRA_PROGRESS_MAX`,
+indeterminate). Clicked, the item shows a popover: the app's name, the
+title (clicking it is a click on the notification: its content intent),
+the text, the chronometer, a progress bar and the actions as buttons
+(`sendIntentSender` as from Notification Center; actions that take text
+stay in Notification Center). An update changes the item in place; the
+item goes when the notification is removed or stops being live. The
+notification itself is in Notification Center as before.
+
+**Indicators.** An app's item, a symbol, while (`indicators.rs`):
+
+| Android (as SystemUI shows it) | Source | Item |
+| --- | --- | --- |
+| microphone in use (privacy indicator) | `IAppOpsService.startWatchingActive`: `RECORD_AUDIO`, `PHONE_CALL_MICROPHONE` | `mic.fill` |
+| camera in use (privacy indicator) | `CAMERA`, `PHONE_CALL_CAMERA` | `video.fill` |
+| high-power location (the location icon) | `MONITOR_HIGH_POWER_LOCATION` | `location.fill` |
+
+An op indicator is on while the app has any of its ops active, with any
+attribution tag; uids below `FIRST_APPLICATION_UID` are the platform's
+and not shown. The display server keeps the indicators on, launches the
+app's shim in the background for one as for a notification, and turns
+them off when the bridge goes. Clicked, an indicator brings the app to
+the front. Not shown yet: the next alarm clock (#591) and VPN (#583).
+
+**System status icons** (`IStatusBar.setIcon`, once the native status
+bar replaces SystemUI's, `docs/m1-shell.md`) are items of the package
+that set them the same way: the icon as a template, its number as text.
 
 ## What the user does
 

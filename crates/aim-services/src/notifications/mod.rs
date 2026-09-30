@@ -18,12 +18,15 @@
 //! notification's full-screen intent, as SystemUI does when the device is.
 //! An app's request for POST_NOTIFICATIONS is answered by its shim's
 //! authorization prompt, and the Mac's per-app setting is mirrored into
-//! the permission ([`permission`], #470).
+//! the permission ([`permission`], #470). The app ops SystemUI's status
+//! bar indicators watch go to the apps' menu bar items too
+//! ([`indicators`]).
 //!
 //! Only in window mode: in device mode SystemUI's shade shows them.
 
 mod icons;
-mod parcels;
+mod indicators;
+pub(crate) mod parcels;
 mod permission;
 
 pub use icons::GuestFiles;
@@ -40,7 +43,7 @@ use aim_apps::apk::Apk;
 use aim_binder_driver::{Credentials, Device, Driver};
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, Exception, Parcel, Reader, UNKNOWN_TRANSACTION};
-use aim_host_display::notify::{self, Image, Message, Post};
+use aim_host_display::notify::{self, Clock, Image, Live, Message, Post, Progress};
 use aim_host_display::wire;
 use aim_hostcall::display::mode;
 use aim_service_aidl::{
@@ -53,8 +56,8 @@ use aim_service_aidl::{
 
 use parcels::{
     Channel, ComponentName, FLAG_FOREGROUND_SERVICE, FLAG_GROUP_SUMMARY, FLAG_NO_CLEAR,
-    FLAG_ONGOING_EVENT, FLAG_ONLY_ALERT_ONCE, Files, NotificationStats, RankingUpdate, ReplyIntent,
-    SendOptions, StatusBarNotification, Visibility,
+    FLAG_ONGOING_EVENT, FLAG_ONLY_ALERT_ONCE, FLAG_PROMOTED_ONGOING, Files, NotificationStats,
+    RankingUpdate, ReplyIntent, SendOptions, StatusBarNotification, Visibility,
 };
 
 /// `Process.SYSTEM_UID` and system_server's context, as the other native
@@ -80,6 +83,15 @@ const RETRY: Duration = Duration::from_secs(1);
 const MAX_BLOB: usize = 64 << 20;
 /// `UserHandle.USER_SYSTEM`: the user the Mac's setting is mirrored into.
 const USER_SYSTEM: i32 = 0;
+/// `Notification.CallStyle.CALL_TYPE_ONGOING`.
+const CALL_TYPE_ONGOING: i32 = 2;
+const CALL_STYLE: &str = "android.app.Notification$CallStyle";
+/// The styles `Notification.hasPromotableStyle` accepts besides none.
+const PROMOTABLE_STYLES: [&str; 3] = [
+    "android.app.Notification$BigTextStyle",
+    CALL_STYLE,
+    "android.app.Notification$ProgressStyle",
+];
 
 /// Called once with the permission's state after the user's answer.
 pub type Answer = Box<dyn FnOnce(bool) + Send>;
@@ -92,6 +104,8 @@ static MAC: Mutex<Weak<Bridge>> = Mutex::new(Weak::new());
 struct Entry {
     package: String,
     notification: parcels::Notification,
+    /// Its small icon as the menu bar shows it, if it is live.
+    live_icon: Option<Image>,
     /// References to its binders, held as long as it is shown.
     _binders: Vec<Strong>,
 }
@@ -116,6 +130,8 @@ pub struct Bridge {
     /// Requests for POST_NOTIFICATIONS waiting for the Mac's answer: the
     /// user of each, by package.
     requests: Mutex<HashMap<String, Vec<(i32, Answer)>>>,
+    /// The app ops active that the indicators show.
+    active: Mutex<indicators::Active>,
 }
 
 /// The listener node.
@@ -168,6 +184,7 @@ impl Bridge {
             }),
             gone: Condvar::new(),
             requests: Mutex::new(HashMap::new()),
+            active: Mutex::default(),
         });
         process.start();
         *MAC.lock().unwrap() = Arc::downgrade(&bridge);
@@ -284,6 +301,7 @@ impl Bridge {
             }
             self.state.lock().unwrap().manager = Some(manager);
             self.sync();
+            self.watch_ops();
             let mut state = self.state.lock().unwrap();
             while state.manager.is_some() {
                 state = self.gone.wait(state).unwrap();
@@ -304,6 +322,7 @@ impl Bridge {
                 package: e.package,
             });
         }
+        self.ops_gone();
         self.gone.notify_all();
     }
 
@@ -396,12 +415,28 @@ impl Bridge {
             .into_iter()
             .flatten()
             .find_map(|i| self.image(i, user));
-        let post = to_post(&sbn, &key, importance, updated, image);
+        let live = is_live(n).then(|| {
+            // An update with the same small icon (a progress step) keeps
+            // the image drawn.
+            let kept = self
+                .state
+                .lock()
+                .unwrap()
+                .entries
+                .get(&key)
+                .filter(|old| old.notification.small_icon == n.small_icon)
+                .and_then(|old| old.live_icon.clone());
+            let icon = kept.or_else(|| n.small_icon.as_ref().and_then(|i| self.image(i, user)));
+            Box::new(to_live(n, Now::read(), icon))
+        });
+        let live_icon = live.as_ref().and_then(|l| l.icon.clone());
+        let post = to_post(&sbn, &key, importance, updated, image).map(|p| Post { live, ..p });
         self.state.lock().unwrap().entries.insert(
             key,
             Entry {
                 package: sbn.package.clone(),
                 notification: sbn.notification.clone(),
+                live_icon,
                 _binders: binders,
             },
         );
@@ -614,7 +649,8 @@ impl Bridge {
             Message::Post(_)
             | Message::Remove { .. }
             | Message::Shown { .. }
-            | Message::Authorize { .. } => Err("not from the Mac".into()),
+            | Message::Authorize { .. }
+            | Message::Indicator { .. } => Err("not from the Mac".into()),
         }
     }
 
@@ -749,11 +785,100 @@ fn to_post(
             })
             .collect(),
         image,
+        live: None,
     })
 }
 
+/// Whether the menu bar shows `n` as an ongoing activity: an ongoing
+/// notification NMS promoted (`FLAG_PROMOTED_ONGOING`), or would promote
+/// but for the framework's Live Updates UI, which is off in the image
+/// (`ui_rich_ongoing`, so apps may not be promoted by default): the
+/// characteristics of `Notification.hasPromotableCharacteristics`; and a
+/// notification whose time runs in a chronometer (a timer, a stopwatch, a
+/// call, a recording), ongoing or not (Clock's timers are not).
+fn is_live(n: &parcels::Notification) -> bool {
+    if n.flags & FLAG_GROUP_SUMMARY != 0 {
+        return false;
+    }
+    let e = &n.extras;
+    let style = e.template.as_deref();
+    let promotable = !n.views.custom
+        && e.title.as_deref().is_some_and(|t| !t.is_empty())
+        && ((style == Some(CALL_STYLE) && e.call_type == CALL_TYPE_ONGOING)
+            || (e.colorized && style.is_none_or(|s| PROMOTABLE_STYLES.contains(&s))));
+    let ongoing = n.flags & FLAG_ONGOING_EVENT != 0
+        && (n.flags & FLAG_PROMOTED_ONGOING != 0 || promotable);
+    let chronometer = if n.views.custom {
+        n.views.chronometer.is_some()
+    } else {
+        e.show_chronometer
+    };
+    ongoing || chronometer
+}
+
+/// The clocks a chronometer is read against, in milliseconds.
+#[derive(Clone, Copy)]
+struct Now {
+    /// `SystemClock.elapsedRealtime()`.
+    boot_ms: i64,
+    /// `System.currentTimeMillis()`.
+    wall_ms: i64,
+}
+
+impl Now {
+    fn read() -> Now {
+        Now {
+            boot_ms: aim_hostcall::clock::boottime_ns() / 1_000_000,
+            wall_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64),
+        }
+    }
+}
+
+/// What the menu bar shows of live notification `n`: its custom views'
+/// chronometer if it has custom views, else the template's.
+fn to_live(n: &parcels::Notification, now: Now, icon: Option<Image>) -> Live {
+    let e = &n.extras;
+    let clock = if n.views.custom {
+        n.views
+            .chronometer
+            .map(|c| match (c.started, c.count_down) {
+                (true, down) => Clock::Counting {
+                    base_ms: c.base,
+                    down,
+                },
+                (false, true) => Clock::Stopped {
+                    shown_ms: c.base - now.boot_ms,
+                },
+                (false, false) => Clock::Stopped {
+                    shown_ms: now.boot_ms - c.base,
+                },
+            })
+    } else {
+        e.show_chronometer.then_some(Clock::Counting {
+            base_ms: n.when - now.wall_ms + now.boot_ms,
+            down: e.chronometer_count_down,
+        })
+    };
+    // A bar shows when it has a maximum or is indeterminate
+    // (`Notification.Builder.hasProgress`).
+    let max = e.progress_max.unwrap_or(0).max(0) as u32;
+    let progress = (max > 0 || e.progress_indeterminate).then(|| Progress {
+        value: (e.progress.unwrap_or(0).max(0) as u32).min(max),
+        max,
+        indeterminate: e.progress_indeterminate,
+    });
+    Live {
+        text: e.short_critical_text.clone().unwrap_or_default(),
+        clock,
+        progress,
+        icon,
+    }
+}
+
 /// Blobs of a call or reply, read from the files the guest sent.
-struct ProcessFiles<'a>(&'a LocalProcess);
+pub(crate) struct ProcessFiles<'a>(pub(crate) &'a LocalProcess);
 
 impl Files for ProcessFiles<'_> {
     fn read(&self, fd: u32, len: usize) -> Option<Vec<u8>> {
@@ -870,5 +995,101 @@ mod tests {
         let mut none = with_full_screen_intent();
         none.notification.full_screen_intent = None;
         assert!(!full_screen(&none, Some(IMPORTANCE_HIGH), false));
+    }
+
+    fn ongoing() -> parcels::Notification {
+        let mut n = parcels::Notification {
+            flags: FLAG_ONGOING_EVENT,
+            ..Default::default()
+        };
+        n.extras.title = Some("Download".into());
+        n
+    }
+
+    #[test]
+    fn lives_in_the_menu_bar_as_it_would_be_promoted() {
+        let mut n = ongoing();
+        assert!(!is_live(&n));
+        n.extras.colorized = true;
+        assert!(is_live(&n));
+        n.extras.template = Some("android.app.Notification$ProgressStyle".into());
+        assert!(is_live(&n));
+        n.extras.template = Some("android.app.Notification$InboxStyle".into());
+        assert!(!is_live(&n));
+        let mut call = ongoing();
+        call.extras.template = Some(CALL_STYLE.into());
+        call.extras.call_type = CALL_TYPE_ONGOING;
+        assert!(is_live(&call));
+        call.flags = 0;
+        assert!(!is_live(&call));
+        call.flags = FLAG_PROMOTED_ONGOING;
+        assert!(!is_live(&call));
+        let mut promoted = ongoing();
+        promoted.flags |= FLAG_PROMOTED_ONGOING;
+        assert!(is_live(&promoted));
+        promoted.flags |= FLAG_GROUP_SUMMARY;
+        assert!(!is_live(&promoted));
+        let mut untitled = ongoing();
+        untitled.extras.colorized = true;
+        untitled.extras.title = None;
+        assert!(!is_live(&untitled));
+    }
+
+    #[test]
+    fn a_running_chronometer_is_live() {
+        let mut n = ongoing();
+        n.extras.show_chronometer = true;
+        n.extras.chronometer_count_down = true;
+        n.when = 1_000_000;
+        assert!(is_live(&n));
+        let now = Now {
+            boot_ms: 5_000,
+            wall_ms: 900_000,
+        };
+        assert_eq!(
+            to_live(&n, now, None).clock,
+            Some(Clock::Counting {
+                base_ms: 105_000,
+                down: true
+            })
+        );
+        // A custom view's chronometer, paused: it shows what it showed.
+        // Not ongoing, as Clock's timers.
+        let mut timer = parcels::Notification::default();
+        timer.extras.title = None;
+        timer.views.custom = true;
+        assert!(!is_live(&timer));
+        timer.views.chronometer = Some(parcels::ViewChronometer {
+            base: 65_000,
+            count_down: true,
+            started: false,
+        });
+        assert!(is_live(&timer));
+        assert_eq!(
+            to_live(&timer, now, None).clock,
+            Some(Clock::Stopped { shown_ms: 60_000 })
+        );
+    }
+
+    #[test]
+    fn shows_progress_as_the_template_does() {
+        let mut n = ongoing();
+        n.extras.progress = Some(30);
+        let now = Now {
+            boot_ms: 0,
+            wall_ms: 0,
+        };
+        assert_eq!(to_live(&n, now, None).progress, None);
+        n.extras.progress_max = Some(20);
+        assert_eq!(
+            to_live(&n, now, None).progress,
+            Some(Progress {
+                value: 20,
+                max: 20,
+                indeterminate: false
+            })
+        );
+        n.extras.short_critical_text = Some("5 km".into());
+        assert_eq!(to_live(&n, now, None).text, "5 km");
     }
 }
