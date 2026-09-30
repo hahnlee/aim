@@ -16,6 +16,7 @@
 mod bundle;
 pub mod clip;
 pub mod clipboard;
+pub mod location;
 mod mirror;
 mod nonces;
 pub mod notifications;
@@ -60,7 +61,10 @@ impl NativeServices {
                 security_context: Some(SYSTEM_SERVER_CONTEXT.into()),
             },
         );
-        let system = system::System::new(process.clone(), &clipboard::APP_OPS);
+        let system = system::System::new(
+            process.clone(),
+            &[&clipboard::APP_OPS[..], &location::APP_OPS[..]].concat(),
+        );
         let settings = settings::Settings::new(process.clone(), system.clone());
         // First, so system_server finds it whichever services are native.
         let mut services = vec![(
@@ -77,6 +81,14 @@ impl NativeServices {
                 "clipboard" => vec![(
                     "clipboard",
                     clipboard::ClipboardService::new(
+                        process.clone(),
+                        system.clone(),
+                        settings.clone(),
+                    ),
+                )],
+                "location" => vec![(
+                    "location",
+                    location::LocationManagerService::new(
                         process.clone(),
                         system.clone(),
                         settings.clone(),

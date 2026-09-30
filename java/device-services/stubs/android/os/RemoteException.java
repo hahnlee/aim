@@ -2,4 +2,6 @@
 // the members used, checked against the image by the device-services node.
 package android.os;
 
-public class RemoteException extends android.util.AndroidException {}
+public class RemoteException extends android.util.AndroidException {
+    public RuntimeException rethrowFromSystemServer() { throw new RuntimeException("stub"); }
+}

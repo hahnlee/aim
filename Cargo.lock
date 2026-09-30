@@ -242,6 +242,7 @@ dependencies = [
  "aim-binder-driver",
  "aim-binder-host",
  "aim-host-display",
+ "aim-host-location",
  "aim-hostcall",
  "aim-service-aidl",
  "libc",

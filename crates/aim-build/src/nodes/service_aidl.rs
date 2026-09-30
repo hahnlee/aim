@@ -208,7 +208,8 @@ fn parse(text: &str) -> Result<Interface, String> {
                 package = p.next()?;
                 p.expect(";")?;
             }
-            "import" => while p.next()? != ";" {},
+            // An import, or a parcelable declared without a body.
+            "import" | "parcelable" => while p.next()? != ";" {},
             "oneway" | "interface" => break,
             other => return Err(format!("expected an interface, found `{other}`")),
         }
@@ -350,6 +351,12 @@ fn kind(ty: &Type) -> Result<Kind, String> {
         ("int", false) => Kind::Plain("i32", "r.read_i32()?", "p.write_i32({v});"),
         ("long", false) => Kind::Plain("i64", "r.read_i64()?", "p.write_i64({v});"),
         ("float", false) => Kind::Plain("f32", "r.read_f32()?", "p.write_f32({v});"),
+        // `writeDouble`: the value's 8 bytes, as a long's.
+        ("double", false) => Kind::Plain(
+            "f64",
+            "f64::from_bits(r.read_i64()? as u64)",
+            "p.write_i64({v}.to_bits() as i64);",
+        ),
         ("boolean", false) => Kind::Plain("bool", "r.read_bool()?", "p.write_bool({v});"),
         ("String", false) => Kind::Plain(
             "Option<String>",

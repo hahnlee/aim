@@ -3,6 +3,8 @@
 package android.os;
 
 public final class UserHandle {
+    public static final UserHandle ALL = null;
+
     public UserHandle(int userId) { throw new RuntimeException("stub"); }
     public static UserHandle of(int userId) { throw new RuntimeException("stub"); }
 }
