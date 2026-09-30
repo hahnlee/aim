@@ -465,6 +465,28 @@ path = "/system/etc/aim/native-services"
 source = "image/native-services"
 reason = "the system services implemented natively, which guest-init registers with servicemanager"
 
+# The device's own system service (ADR 0013, "The system_server bridge";
+# the device-services node): SystemServer starts the classes
+# config_deviceSpecificSystemServices names from the system server class
+# path, as it starts a device vendor's. The `oat` node compiles the jar
+# and, since it precedes the APEXes' jars on the class path, compiles
+# again the oat files whose class loader context names services.jar.
+
+[[add]]
+path = "/system/framework/aim-services.jar"
+source = "target/aim/device-services/aim-services.jar"
+reason = "the device's system service: the bridge that hands the native service host system_server's internal state"
+
+[[replace]]
+path = "/system/etc/classpaths/systemserverclasspath.pb"
+source = "target/aim/device-services/systemserverclasspath.pb"
+reason = "the platform's fragment with aim-services.jar appended after services.jar: only the system server class path can hold a class SystemService starts by name, and no other fragment is the device's"
+
+[[add]]
+path = "/vendor/overlay/aim-framework-overlay.apk"
+source = "target/aim/device-services/framework-overlay.apk"
+reason = "the device's static overlay of framework-res: config_deviceSpecificSystemServices names the device's system service"
+
 [[add]]
 path = "/system_ext/bin/aim-windows"
 source = "target/aim/daemons/bin/aim-windows"

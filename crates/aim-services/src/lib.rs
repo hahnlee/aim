@@ -17,8 +17,10 @@ mod bundle;
 pub mod clip;
 pub mod clipboard;
 mod mirror;
+mod nonces;
 pub mod notifications;
 mod pasteboard;
+mod service_host;
 mod settings;
 mod system;
 pub mod vibrator;
@@ -31,6 +33,10 @@ use aim_binder_host::parcel::Binder;
 
 /// `Process.SYSTEM_UID`: the native services act as system_server did.
 const SYSTEM_UID: u32 = 1000;
+/// The name the service host registers with servicemanager, where the
+/// device's system service in system_server finds it
+/// (java/device-services).
+const SERVICE_HOST: &str = "aim.service_host";
 /// system_server's SELinux context, which servicemanager checks the
 /// registration of these names against.
 const SYSTEM_SERVER_CONTEXT: &str = "u:r:system_server:s0";
@@ -56,7 +62,11 @@ impl NativeServices {
         );
         let system = system::System::new(process.clone(), &clipboard::APP_OPS);
         let settings = settings::Settings::new(process.clone(), system.clone());
-        let mut services = Vec::new();
+        // First, so system_server finds it whichever services are native.
+        let mut services = vec![(
+            SERVICE_HOST.to_string(),
+            process.add_service(Arc::new(service_host::ServiceHost::new(&system))),
+        )];
         for name in names {
             // A service and the names it is published under, as its
             // original publishes them.

@@ -7,9 +7,11 @@
 //! stands in for. What a focused app's access reads (package ownership,
 //! app-op modes, focus, whether the device is locked) is mirrored
 //! ([`crate::mirror`]), each fed by its owner's listener; noting an app op,
-//! which only records the access, is sent in the background. Permissions
-//! and an instrumentation target's app ops are asked each time
-//! (docs/system-services.md, "Mirrored state").
+//! which only records the access, is sent in the background. Permission
+//! checks are kept as apps' `PermissionManager` keeps them, by the
+//! `package_info_cache` nonce the system_server bridge hands over
+//! ([`crate::nonces`]); an instrumentation target's app ops are asked each
+//! time (docs/system-services.md, "Mirrored state").
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Sender};
@@ -27,10 +29,15 @@ use aim_service_aidl::{
     com_android_internal_app_iappopscallback as ops_callback,
     com_android_internal_app_iappopsservice as appops,
     com_android_internal_policy_idevicelockedstatelistener as lock_listener,
+    dev_aim_server_ibridge as bridge,
 };
 
 use crate::mirror::Mirror;
+use crate::nonces::Nonces;
 
+/// The nonce of `PermissionManager`'s caches (`getPackageInfoCacheKey`
+/// with `pic_separate_permission_notifications`, on in this image).
+const PACKAGE_INFO_NONCE: &str = "package_info_cache";
 /// `PackageManager.PERMISSION_GRANTED`.
 const PERMISSION_GRANTED: i32 = 0;
 /// `VirtualDeviceManager.PERSISTENT_DEVICE_ID_DEFAULT`.
@@ -83,6 +90,19 @@ pub struct System {
     /// Whether the system user's device is locked.
     locked: Mirror<(), bool>,
     notes: Sender<Note>,
+    /// The nonces in system_server's shared memory, from the bridge.
+    nonces: Mutex<Option<Arc<Nonces>>>,
+    permissions: Mutex<Permissions>,
+}
+
+/// Permission checks kept with the nonce they were asked at, as
+/// `PermissionManager`'s `sPermissionCache` (by permission and uid; the
+/// pid does not decide) and `sPackageNamePermissionCache` keep them.
+#[derive(Default)]
+struct Permissions {
+    nonce: i64,
+    uids: HashMap<(String, i32), bool>,
+    packages: HashMap<(String, String), bool>,
 }
 
 /// The listener nodes the mirrors are fed by.
@@ -139,6 +159,8 @@ impl System {
                 focus: Mirror::new(),
                 locked: Mirror::new(),
                 notes,
+                nonces: Mutex::new(None),
+                permissions: Mutex::new(Permissions::default()),
             }
         });
         let this = Arc::downgrade(&system);
@@ -269,18 +291,100 @@ impl System {
         pid: i32,
         uid: i32,
     ) -> Result<bool> {
-        let args = am::CheckPermission {
-            permission: Some(permission.into()),
-            pid,
-            uid,
-        };
-        self.call(
-            "activity",
-            am::CHECK_PERMISSION,
-            |p| args.write(p),
-            am::read_check_permission_reply,
+        let key = (permission.to_string(), uid);
+        self.cached(
+            |p| &mut p.uids,
+            key,
+            || {
+                let args = am::CheckPermission {
+                    permission: Some(permission.into()),
+                    pid,
+                    uid,
+                };
+                self.call(
+                    "activity",
+                    am::CHECK_PERMISSION,
+                    |p| args.write(p),
+                    am::read_check_permission_reply,
+                )
+                .map(|r| r == PERMISSION_GRANTED)
+            },
         )
-        .map(|r| r == PERMISSION_GRANTED)
+    }
+
+    /// A permission check's answer: the one kept at the current
+    /// `package_info_cache` nonce, else `ask`'s, kept with the nonce read
+    /// before asking (`PropertyInvalidatedCache.query`). system_server
+    /// bumps the nonce after a change, so a kept answer is never older
+    /// than the last change. Without the bridge, or while the nonce is
+    /// unset, every check is asked.
+    fn cached<K: Eq + std::hash::Hash>(
+        &self,
+        table: fn(&mut Permissions) -> &mut HashMap<K, bool>,
+        key: K,
+        ask: impl FnOnce() -> Result<bool>,
+    ) -> Result<bool> {
+        let nonces = self.nonces.lock().unwrap().clone();
+        let Some(nonce) = nonces.and_then(|n| n.get(PACKAGE_INFO_NONCE)) else {
+            return ask();
+        };
+        {
+            let mut kept = self.permissions.lock().unwrap();
+            if kept.nonce != nonce {
+                *kept = Permissions {
+                    nonce,
+                    ..Permissions::default()
+                };
+            }
+            if let Some(&granted) = table(&mut kept).get(&key) {
+                return Ok(granted);
+            }
+        }
+        let granted = ask()?;
+        let mut kept = self.permissions.lock().unwrap();
+        if kept.nonce == nonce {
+            table(&mut kept).insert(key, granted);
+        }
+        Ok(granted)
+    }
+
+    /// Takes system_server's bridge (#430): maps the shared memory of its
+    /// cache nonces, dropped again when system_server dies.
+    pub fn attach_bridge(self: &Arc<Self>, handle: u32) -> Result<()> {
+        let strong = self.process.strong(handle);
+        let mut data = Parcel::new();
+        bridge::GetApplicationSharedMemory {}.write(&mut data);
+        let failed = |s| unreachable_service("bridge", s);
+        let reply = strong
+            .transact(bridge::GET_APPLICATION_SHARED_MEMORY, &data, false)
+            .map_err(failed)?;
+        let fd = bridge::read_get_application_shared_memory_reply::<ParcelFileDescriptor>(
+            &mut reply.reader(),
+        )
+        .map_err(failed)??
+        .ok_or_else(|| failed(aim_binder_host::parcel::BAD_VALUE))?;
+        let nonces = self
+            .process
+            .file(fd.0)
+            .and_then(|file| Nonces::map(&file))
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "the bridge's shared memory is not a nonce store",
+                )
+            })?;
+        drop(reply);
+        *self.nonces.lock().unwrap() = Some(Arc::new(nonces));
+        let this = Arc::downgrade(self);
+        self.process.link_to_death(
+            &strong,
+            Box::new(move || {
+                if let Some(system) = this.upgrade() {
+                    system.nonces.lock().unwrap().take();
+                }
+            }),
+        );
+        Ok(())
     }
 
     /// `PermissionEnforcer.enforcePermission(permission, pid, uid)`, what
@@ -392,19 +496,26 @@ impl System {
         permission: &str,
         package: &str,
     ) -> Result<bool> {
-        let args = pm::CheckPermission {
-            package_name: Some(package.into()),
-            permission_name: Some(permission.into()),
-            persistent_device_id: Some(PERSISTENT_DEVICE_ID_DEFAULT.into()),
-            user_id: 0,
-        };
-        self.call(
-            "permissionmgr",
-            pm::CHECK_PERMISSION,
-            |p| args.write(p),
-            pm::read_check_permission_reply,
+        let key = (permission.to_string(), package.to_string());
+        self.cached(
+            |p| &mut p.packages,
+            key,
+            || {
+                let args = pm::CheckPermission {
+                    package_name: Some(package.into()),
+                    permission_name: Some(permission.into()),
+                    persistent_device_id: Some(PERSISTENT_DEVICE_ID_DEFAULT.into()),
+                    user_id: 0,
+                };
+                self.call(
+                    "permissionmgr",
+                    pm::CHECK_PERMISSION,
+                    |p| args.write(p),
+                    pm::read_check_permission_reply,
+                )
+                .map(|r| r == PERMISSION_GRANTED)
+            },
         )
-        .map(|r| r == PERMISSION_GRANTED)
     }
 
     /// Tells the package, mode and instrumentation mirrors of every
@@ -743,6 +854,19 @@ impl WriteParcelable for StringUri<'_> {
     fn write_to(&self, p: &mut Parcel) {
         p.write_i32(1);
         p.write_string8(Some(self.0));
+    }
+}
+
+/// `ParcelFileDescriptor` (`writeToParcel` without a comm channel: 0, the
+/// fd), as the fd's index in this process.
+struct ParcelFileDescriptor(u32);
+
+impl ReadParcelable for ParcelFileDescriptor {
+    fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
+        if r.read_i32()? != 0 {
+            return Err(aim_binder_host::parcel::BAD_VALUE);
+        }
+        Ok(Self(r.read_fd()?))
     }
 }
 
