@@ -131,8 +131,13 @@ fn main() {
                 Err(error) => format!("  ERROR: {error}"),
             };
             println!(
-                "[{}] {}:{} {}{}",
-                executed.action, executed.file, executed.line, executed.command, result
+                "{:8.3} [{}] {}:{} {}{}",
+                command.at.as_secs_f64(),
+                executed.action,
+                executed.file,
+                executed.line,
+                executed.command,
+                result
             );
             for effect in &command.effects {
                 println!("    {:<8} {}", effect.kind(), effect.text());
@@ -150,6 +155,9 @@ fn main() {
         }
         for line in &report.log {
             println!("log: {line}");
+        }
+        for (at, what) in &report.timeline {
+            println!("timeline: {:8.3} {what}", at.as_secs_f64());
         }
         println!("no-op reasons:");
         for (reason, count) in report.noop_reasons() {

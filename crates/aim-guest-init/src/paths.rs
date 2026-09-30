@@ -459,6 +459,36 @@ impl Layout {
         PathMap::new(self.image.clone(), entries)
     }
 
+    /// Moves the runtime directory a previous boot created aside, next to
+    /// it, and removes it on another thread, as a new boot gets an empty
+    /// tmpfs without waiting for the old one's pages. [`Layout::prepare`]
+    /// then finds no runtime directory to wipe.
+    pub fn sweep_runtime(&self) -> io::Result<Sweep> {
+        if !self.runtime.join(RUNTIME_MARKER).exists() {
+            return Ok(Sweep(None));
+        }
+        let name = self
+            .runtime
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let swept = self.runtime.with_file_name(format!(".{name}.swept"));
+        fs::create_dir_all(&swept)?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        fs::rename(&self.runtime, swept.join(stamp.to_string()))?;
+        // Also what an interrupted sweep left.
+        let thread = std::thread::Builder::new()
+            .name("runtime-sweep".into())
+            .spawn(move || {
+                make_writable_recursive(&swept);
+                let _ = fs::remove_dir_all(&swept);
+            })?;
+        Ok(Sweep(Some(thread)))
+    }
+
     /// Creates the directories. The runtime directory is wiped first when a
     /// previous boot created it; a non-empty foreign directory is refused.
     pub fn prepare(&self) -> io::Result<()> {
@@ -508,6 +538,18 @@ impl Layout {
         // until the syscall layer emulates it; writes append there.
         fs::write(self.dev_dir().join("kmsg"), b"")?;
         Ok(())
+    }
+}
+
+/// A previous boot's runtime directory being removed; dropping it waits
+/// for the removal.
+pub struct Sweep(Option<std::thread::JoinHandle<()>>);
+
+impl Drop for Sweep {
+    fn drop(&mut self) {
+        if let Some(thread) = self.0.take() {
+            let _ = thread.join();
+        }
     }
 }
 
