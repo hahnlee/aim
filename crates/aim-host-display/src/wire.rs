@@ -16,6 +16,8 @@
 //!
 //! The notification bridge (`docs/notifications.md`) opens one with
 //! [`OP_NOTIFICATIONS`] and exchanges [`crate::notify`] frames on it.
+//! The status bar of the lightweight shell (`docs/m1-shell.md`) opens one
+//! with [`OP_SHELL`] and exchanges [`crate::shell`] frames on it.
 //!
 //! A window host (an app's shim, `docs/windows.md`) opens a connection with
 //! [`OP_HOST`]; from then on both ends write [`Host`] records: the server
@@ -30,7 +32,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use aim_hostcall::display::{Import, Window};
 
 /// Sent in the hello; the server closes a connection of another version.
-pub const VERSION: u64 = 7;
+pub const VERSION: u64 = 8;
 
 /// `id` = [`VERSION`], `flag` = display index.
 pub const OP_HELLO: u32 = 1;
@@ -58,6 +60,10 @@ pub const CURSOR_ACQUIRE: u32 = 2;
 /// `id` = [`VERSION`]: the notification bridge's hello; the server answers
 /// its mode (a `u32`), then [`crate::notify`] frames follow both ways.
 pub const OP_NOTIFICATIONS: u32 = 9;
+/// `id` = [`VERSION`]: the lightweight shell's status bar's hello; the
+/// server answers its mode (a `u32`), then [`crate::shell`] frames follow
+/// both ways.
+pub const OP_SHELL: u32 = 11;
 
 /// [`Host::op`] values.
 pub mod host {
@@ -88,6 +94,8 @@ pub mod host {
     pub const CURSOR: u32 = 10;
     /// Either way: a [`crate::notify`] frame follows.
     pub const NOTIFY: u32 = 11;
+    /// Either way: a [`crate::shell`] frame follows.
+    pub const SHELL: u32 = 13;
 }
 
 /// [`HostInput::kind`] values: `translate::Input`'s methods. Positions

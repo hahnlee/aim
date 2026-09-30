@@ -131,6 +131,21 @@ pub fn notify(m: &aim_host_display::notify::Message) {
     }
 }
 
+/// A status bar message for the server.
+pub fn shell(m: &aim_host_display::shell::Message) {
+    if let Some(l) = LINK.get() {
+        let w = l.writer.lock().unwrap();
+        let r = Rec {
+            op: host::SHELL,
+            ..Default::default()
+        };
+        if wire::send(w.as_fd(), wire::bytes(&r), None).is_ok() {
+            let _ = wire::send(w.as_fd(), &m.frame(), None);
+        }
+    }
+}
+
+
 /// Start the app (or bring its task to the front), with a splash until it
 /// has drawn when it has no window yet.
 pub fn launch() {
@@ -335,6 +350,10 @@ fn serve(sock: &mut UnixStream) {
             }
             host::NOTIFY => match aim_host_display::notify::Message::read(sock) {
                 Ok(Some(m)) => crate::un::handle(m),
+                _ => break,
+            },
+            host::SHELL => match aim_host_display::shell::Message::read(sock) {
+                Ok(Some(m)) => on_main(move || crate::shell::handle(m)),
                 _ => break,
             },
             _ => break,

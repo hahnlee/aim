@@ -156,7 +156,7 @@ SystemUI has no configuration to start without its UI, and its
 | Keyguard APIs | bind fails: not showing, not secure (`KeyguardServiceDelegate.java:160-173`) | `isKeyguardLocked` false, `requestDismissKeyguard` gets `onDismissError`, `isDeviceLocked` false | correct for a Mac (its login is the lock), D2 |
 | Screen pinning | `LockTaskController.java:658-664` → `showScreenPinningRequest` | `startLockTask` silently does not pin | native confirm sheet → `startSystemLockTaskMode` |
 | `StatusBarManager.expandNotificationsPanel`, `collapsePanels` | no-ops without `mBar` | nothing (also nothing to expand) | native `IStatusBar`: open/close Notification Center is not possible from an app; stays a no-op, as on a device without a shade |
-| Quick Settings tiles (`TileService`), `requestAddTileService` | bound only by SystemUI; request answers `TILE_ADD_REQUEST_ERROR_NO_STATUS_BAR_SERVICE` (`:2494-2513`) | tiles never bound | D8 |
+| Quick Settings tiles (`TileService`), `requestAddTileService` | bound only by SystemUI; request answers `TILE_ADD_REQUEST_ERROR_NO_STATUS_BAR_SERVICE` (`:2494-2513`) | tiles never bound | D8: the native `IStatusBar` answers a dismissed dialog (the app hears "not added", no denial recorded) |
 | IME picker | system_server's dialog (`InputMethodMenuController.java:79-199`) | unchanged | none (IME windows themselves: #23) |
 | Recents, `ActivityManager.AppTask` | ActivityTaskManager | unchanged | none; the recents key maps to nothing |
 | Wallpaper API | files and colors in system_server (`WallpaperManagerService.java:546`) | unchanged; no wallpaper drawn | none |
@@ -164,7 +164,7 @@ SystemUI has no configuration to start without its UI, and its
 | Clipboard overlay | SystemUI's `ClipboardListener` | none (#434 gone) | none |
 | Window magnification (accessibility) | `requestMagnificationConnection` → SystemUI | window magnification unavailable, full-screen magnification works | issue after step 4 |
 | USB permission, slice permission, sensor-privacy unblock | SystemUI activities | not shown; requests unanswered | only if the device exposes USB devices or sensor-privacy toggles; issues then |
-| Global actions, shutdown UI | fall back to system_server's own | unchanged | none |
+| Global actions, shutdown UI | fall back to system_server's own only while no `IStatusBar` is registered (`StatusBarManagerService.java:1857-1861`, `:711-723`) | with the native `IStatusBar`: no power menu, no shutdown UI | #585 |
 
 ## 4. What starts only for the shell
 
