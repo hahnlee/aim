@@ -436,6 +436,13 @@ pub fn map() -> Result<u64, String> {
     Ok(base)
 }
 
+/// `__kernel_rt_sigreturn` of this process's vDSO, where a handler
+/// installed without SA_RESTORER returns (Linux's `setup_return`).
+pub fn rt_sigreturn() -> u64 {
+    let at = aim_vdso_rt_sigreturn as usize - aim_vdso_start as usize;
+    BASE.load(Relaxed) + (TEXT_OFF + at) as u64
+}
+
 /// What `/proc/<pid>/maps` names the mapping at `addr`: `[vvar]`, `[vdso]`.
 pub fn name_of(addr: u64) -> Option<&'static str> {
     let base = BASE.load(Relaxed);
@@ -512,7 +519,7 @@ mod tests {
             unsafe { std::mem::transmute(sym(base, image, "__kernel_clock_getres")) };
         let tod: unsafe extern "C" fn(*mut [i64; 2], *mut [i32; 2]) -> i32 =
             unsafe { std::mem::transmute(sym(base, image, "__kernel_gettimeofday")) };
-        sym(base, image, "__kernel_rt_sigreturn");
+        assert_eq!(sym(base, image, "__kernel_rt_sigreturn"), rt_sigreturn());
 
         let ns = |t: [i64; 2]| t[0] * 1_000_000_000 + t[1];
         let clocks: [(i32, fn() -> i64); 6] = [

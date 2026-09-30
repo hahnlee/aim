@@ -573,7 +573,7 @@ fn frame(th: &Thread, cpu: &Cpu, t: &Taken, uc_mask: u64, esr: u64, fault: u64) 
         uc_mask,
         esr,
         fault_address: fault,
-        default_restorer: context::restorer(),
+        default_restorer: crate::vdso::rt_sigreturn(),
     };
     // SAFETY: the guest stack (or alternate stack) the frame goes on is the
     // guest's own; a bad one faults like Linux's forced SIGSEGV.

@@ -264,6 +264,11 @@ fn a_pending_signal_the_suspend_mask_blocks_waits() {
 }
 
 #[test]
+fn a_handler_without_a_restorer_returns_through_the_vdso() {
+    check("vdso_sigreturn");
+}
+
+#[test]
 fn seccomp_filters_are_accepted() {
     check("seccomp_filter");
 }
