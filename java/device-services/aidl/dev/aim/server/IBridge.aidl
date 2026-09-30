@@ -12,4 +12,10 @@ interface IBridge {
      * holds the framework's cache nonces (#497).
      */
     ParcelFileDescriptor getApplicationSharedMemory();
+
+    /**
+     * Sends apps' requests for POST_NOTIFICATIONS alone to the Mac's
+     * prompt, for a host that shows notifications on the Mac (#470).
+     */
+    void interceptNotificationPermissionRequests();
 }

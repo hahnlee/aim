@@ -5,8 +5,9 @@ notifications of the app that posted them: its shim's banner, its entry in
 Notification Center, its Dock badge. The original NotificationManagerService
 (NMS) keeps every notification, channel, permission and policy, and SystemUI
 keeps running; the bridge is one more of NMS's listeners, as SystemUI's is.
-No APK or system app is added and no framework code changes (ADR 0012; M1
-step 2 of [m1-shell.md](m1-shell.md)).
+No framework code changes (ADR 0012; M1 step 2 of
+[m1-shell.md](m1-shell.md)); the one APK added answers the permission
+request until PermissionController is native ("The permission").
 
 ```text
  app ──enqueueNotification──▶ NMS (system_server) ──INotificationListener──▶ bridge (guest-init)
@@ -29,6 +30,8 @@ step 2 of [m1-shell.md](m1-shell.md)).
 | Routing in the display server, shim launches | `bin/aim-display/notifications.rs` |
 | `UNUserNotificationCenter` in a shim | `bin/aim-display/un.rs` |
 | The platform's shim, signed shims | `crates/aim-apps` (`app::system`, `shim::write`) |
+| POST_NOTIFICATIONS: the permission set as the Mac decides | `crates/aim-services/src/notifications/permission.rs`, `crates/aim-services/src/service_host.rs` |
+| The request's interceptor and activity | `java/device-services` (`NotificationPermissionInterceptor`), `java/notification-permission` |
 
 ## The listener
 
@@ -142,14 +145,62 @@ shim that connects gets its package's
 notifications; at start it removes what an earlier run left.
 
 A shim posts with `UNUserNotificationCenter`: identifier the notification's
-key, provisional authorization (no prompt; notifications go quietly to
-Notification Center until the user lets the app show banners), a category
-per set of actions with the custom dismiss action. macOS only lets a signed
-bundle, outside temporary directories, post: aim-apps signs each shim ad hoc
-(`codesign --sign -`). The Mac's per-app setting and Android's
-`POST_NOTIFICATIONS` are independent (#470). After each post or removal the shim reports whether
-the notification is delivered, and the server logs it (`aim-display:
-notification KEY: shown`).
+key, a category per set of actions with the custom dismiss action. macOS
+only lets a signed bundle, outside temporary directories, post: aim-apps
+signs each shim ad hoc (`codesign --sign -`). After each post or removal
+the shim reports whether the notification is delivered, and the server
+logs it (`aim-display: notification KEY: shown`).
+
+## The permission (#470)
+
+The Mac's per-app setting is Android's `POST_NOTIFICATIONS`: the app's
+request shows only the Mac's prompt, and the Mac's setting is mirrored
+into the permission afterwards.
+
+- **The request.** Until PermissionController is native (ADR 0013; #550),
+  a temporary exception answers it. The device's system service in
+  system_server (`java/device-services`, `NotificationPermissionInterceptor`)
+  registers a `PRODUCT_ORDERED_ID` `ActivityInterceptorCallback` once the
+  service host tells it the Mac shows notifications
+  (`IBridge.interceptNotificationPermissionRequests`). A start of
+  PermissionController's dialog (`PermissionPolicyInternal.isIntentToPermissionDialog`)
+  for `POST_NOTIFICATIONS` alone, from the app (`ACTION_REQUEST_PERMISSIONS`)
+  or from PermissionPolicyService for a pre-33 app
+  (`ACTION_REQUEST_PERMISSIONS_FOR_OTHER`), is redirected to the invisible
+  activity of `java/notification-permission` (`/system/app/AimNotificationPermission`),
+  in the same task and with the same result record. Every other request
+  goes to PermissionController. The redirected intent carries an
+  `INotificationPermissionRequest` for that app and user, the only way
+  the activity can ask. It applies PermissionController's rules
+  (`NotificationGrantBehavior`): a permission the app does not request is
+  denied, a pre-33 app's own request is filtered (no prompt, no result),
+  a fixed one is answered as it stands. Otherwise it asks the service
+  host (`IServiceHost.requestNotificationPermission`), which sends
+  `Authorize` through the display server to the shim that shows the
+  app's notifications (its own, else "Android System"), launched in the
+  background if need be. The shim asks for full authorization (badge,
+  sound, alert: the Mac's prompt, unless the user answered it before)
+  and answers with the setting; one prompt answers every request that
+  comes while it is up. The host grants or revokes the
+  permission as a device's settings do (`PermissionHelper.setNotificationPermission`
+  with `userSet`: `IPermissionManager.grantRuntimePermission` or
+  `revokeRuntimePermission`, then the user-set flag, without the fixed,
+  default-grant and review flags), and the activity returns
+  PermissionController's result (the names, and `PERMISSION_GRANTED` or
+  `PERMISSION_DENIED` for each). Without any shim to ask, the request is
+  answered with the permission as it stands.
+- **The mirror.** A shim tells the bridge its app's setting when it
+  starts, when the app becomes active, and when it changed as the shim
+  asked. Denied revokes the permission of the system user, allowed (fully,
+  provisionally or for a session) grants it, not determined changes
+  nothing. The system shim, which stands for no app, is not mirrored.
+- **Posting.** Shims no longer ask for authorization at start. A shim's
+  first post of a run asks for provisional authorization if the Mac's
+  setting is not determined (the app holds `POST_NOTIFICATIONS` without
+  having asked, since NMS posted: a system app, a default grant):
+  notifications go quietly to Notification Center, no prompt, until the
+  user chooses there or the app requests the permission. Its posts wait
+  for that, in order.
 
 ## What the user does
 

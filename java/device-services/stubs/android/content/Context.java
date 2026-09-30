@@ -2,4 +2,9 @@
 // the members used, checked against the image by the device-services node.
 package android.content;
 
-public abstract class Context {}
+import android.content.pm.PackageManager;
+
+public abstract class Context {
+    public abstract PackageManager getPackageManager();
+    public abstract int checkPermission(String permission, int pid, int uid);
+}

@@ -301,7 +301,7 @@ pub fn serve(sock: OwnedFd) {
             }
             host::RESTACK => on_main(crate::windows::restack),
             host::NOTIFY => match aim_host_display::notify::Message::read(&mut sock) {
-                Ok(Some(m)) => crate::notifications::from_host(&m),
+                Ok(Some(m)) => crate::notifications::from_host(&h, &m),
                 _ => break,
             },
             _ => break,

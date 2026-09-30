@@ -65,7 +65,10 @@ impl NativeServices {
         // First, so system_server finds it whichever services are native.
         let mut services = vec![(
             SERVICE_HOST.to_string(),
-            process.add_service(Arc::new(service_host::ServiceHost::new(&system))),
+            process.add_service(Arc::new(service_host::ServiceHost::new(
+                process.clone(),
+                &system,
+            ))),
         )];
         for name in names {
             // A service and the names it is published under, as its

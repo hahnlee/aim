@@ -42,14 +42,15 @@ public final class DeviceServices extends SystemService {
         }
     }
 
-    private static void attachBridge() {
+    private void attachBridge() {
         IBinder host = ServiceManager.checkService(SERVICE_HOST);
         if (host == null) {
             Slog.i(TAG, "no native service host");
             return;
         }
         try {
-            IServiceHost.Stub.asInterface(host).attachBridge(new Bridge());
+            IServiceHost service = IServiceHost.Stub.asInterface(host);
+            service.attachBridge(new Bridge(getContext(), service));
             Slog.i(TAG, "bridge attached to the native service host");
         } catch (RemoteException e) {
             Slog.w(TAG, "cannot attach the bridge", e);
@@ -57,6 +58,14 @@ public final class DeviceServices extends SystemService {
     }
 
     private static final class Bridge extends IBridge.Stub {
+        private final Context context;
+        private final IServiceHost host;
+
+        Bridge(Context context, IServiceHost host) {
+            this.context = context;
+            this.host = host;
+        }
+
         @Override
         public ParcelFileDescriptor getApplicationSharedMemory() {
             enforceSystemUid();
@@ -66,6 +75,12 @@ public final class DeviceServices extends SystemService {
             } catch (IOException e) {
                 throw new IllegalStateException(e);
             }
+        }
+
+        @Override
+        public void interceptNotificationPermissionRequests() {
+            enforceSystemUid();
+            NotificationPermissionInterceptor.register(context, host);
         }
 
         private static void enforceSystemUid() {

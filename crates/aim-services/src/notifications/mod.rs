@@ -16,11 +16,15 @@
 //! fill-in intent; a dismissal is `cancelNotificationsFromListener`.
 //! When the Mac is locked or asleep, the server has the bridge launch a
 //! notification's full-screen intent, as SystemUI does when the device is.
+//! An app's request for POST_NOTIFICATIONS is answered by its shim's
+//! authorization prompt, and the Mac's per-app setting is mirrored into
+//! the permission ([`permission`], #470).
 //!
 //! Only in window mode: in device mode SystemUI's shade shows them.
 
 mod icons;
 mod parcels;
+mod permission;
 
 pub use icons::GuestFiles;
 
@@ -74,6 +78,15 @@ const BUBBLE_SUPPRESS_NOTIFICATION: i32 = 0x2;
 const RETRY: Duration = Duration::from_secs(1);
 /// The largest blob it maps.
 const MAX_BLOB: usize = 64 << 20;
+/// `UserHandle.USER_SYSTEM`: the user the Mac's setting is mirrored into.
+const USER_SYSTEM: i32 = 0;
+
+/// Called once with the permission's state after the user's answer.
+pub type Answer = Box<dyn FnOnce(bool) + Send>;
+
+/// The bridge while it shows notifications on the Mac, for the service
+/// host.
+static MAC: Mutex<Weak<Bridge>> = Mutex::new(Weak::new());
 
 /// A notification the Mac shows, and the binders its actions need.
 struct Entry {
@@ -100,6 +113,9 @@ pub struct Bridge {
     state: Mutex<State>,
     /// Signalled when NMS dies.
     gone: Condvar,
+    /// Requests for POST_NOTIFICATIONS waiting for the Mac's answer: the
+    /// user of each, by package.
+    requests: Mutex<HashMap<String, Vec<(i32, Answer)>>>,
 }
 
 /// The listener node.
@@ -151,8 +167,10 @@ impl Bridge {
                 entries: HashMap::new(),
             }),
             gone: Condvar::new(),
+            requests: Mutex::new(HashMap::new()),
         });
         process.start();
+        *MAC.lock().unwrap() = Arc::downgrade(&bridge);
         let this = bridge.clone();
         std::thread::Builder::new()
             .name("notifications-mac".into())
@@ -160,6 +178,63 @@ impl Bridge {
             .map_err(|e| e.to_string())?;
         bridge.follow_manager();
         Ok(())
+    }
+
+    /// The bridge, if it shows notifications on the Mac (window mode).
+    pub fn mac() -> Option<Arc<Bridge>> {
+        MAC.lock().unwrap().upgrade()
+    }
+
+    /// Asks the Mac for `package`'s notification authorization (its
+    /// shim's prompt, the first time), grants or revokes POST_NOTIFICATIONS
+    /// of `user` by the answer, and tells `answer` the permission's state.
+    pub fn request_permission(&self, package: String, user: i32, answer: Answer) {
+        let first = {
+            let mut requests = self.requests.lock().unwrap();
+            let waiting = requests.entry(package.clone()).or_default();
+            waiting.push((user, answer));
+            waiting.len() == 1
+        };
+        if first {
+            self.send(&Message::Authorize { package });
+        }
+    }
+
+    /// The Mac's setting for `package`: applied to the users waiting for
+    /// it (an answer), else mirrored into the system user.
+    fn authorization(&self, package: &str, allowed: Option<bool>, answer: bool) {
+        let waiting = if answer {
+            self.requests
+                .lock()
+                .unwrap()
+                .remove(package)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut users: Vec<i32> = if answer {
+            waiting.iter().map(|(user, _)| *user).collect()
+        } else {
+            vec![USER_SYSTEM]
+        };
+        users.sort_unstable();
+        users.dedup();
+        if let Some(allow) = allowed {
+            for &user in &users {
+                if let Err(e) = self.set_notifications(package, user, allow) {
+                    eprintln!("guest-init: notifications: {package}: permission: {e}");
+                }
+            }
+        }
+        for (user, answer) in waiting {
+            answer(
+                self.notifications_granted(package, user)
+                    .unwrap_or_else(|e| {
+                        eprintln!("guest-init: notifications: {package}: permission: {e}");
+                        false
+                    }),
+            );
+        }
     }
 
     /// Registers with NMS whenever it is published, until the process
@@ -528,9 +603,18 @@ impl Bridge {
                 };
                 self.send_intent(target, token, None)
             }
-            Message::Post(_) | Message::Remove { .. } | Message::Shown { .. } => {
-                Err("not from the Mac".into())
+            Message::Authorization {
+                package,
+                allowed,
+                answer,
+            } => {
+                self.authorization(package, *allowed, *answer);
+                Ok(())
             }
+            Message::Post(_)
+            | Message::Remove { .. }
+            | Message::Shown { .. }
+            | Message::Authorize { .. } => Err("not from the Mac".into()),
         }
     }
 

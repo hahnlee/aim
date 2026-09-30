@@ -220,13 +220,15 @@ impl Toolchain {
         fs::remove_file(&unaligned).map_err(|e| e.to_string())
     }
 
-    /// Builds and signs the APK of `manifest` and the resources under
-    /// `res`, linked against the image's `framework-res.apk`, into `out`.
+    /// Builds and signs the APK of `manifest`, the resources under `res`
+    /// and the code of `dex` (a `classes.dex`), linked against the image's
+    /// `framework-res.apk`, into `out`.
     pub fn apk(
         &self,
         log: &mut Log,
         manifest: &Path,
-        res: &Path,
+        res: Option<&Path>,
+        dex: Option<&Path>,
         framework: &Path,
         out: &Path,
     ) -> Result<(), String> {
@@ -234,32 +236,51 @@ impl Toolchain {
         let _ = fs::remove_dir_all(&work);
         fs::create_dir_all(&work).map_err(|e| e.to_string())?;
         let aapt2 = self.build_tools.join("aapt2");
-        let compiled = work.join("res.zip");
-        log.run(
-            Command::new(&aapt2)
-                .arg("compile")
-                .arg("--dir")
-                .arg(res)
-                .arg("-o")
-                .arg(&compiled),
-        )?;
+        let mut link = Command::new(&aapt2);
+        link.arg("link")
+            .arg("--manifest")
+            .arg(manifest)
+            .arg("-I")
+            .arg(framework)
+            .args([
+                "--min-sdk-version",
+                MIN_API,
+                "--target-sdk-version",
+                MIN_API,
+            ]);
+        if let Some(res) = res {
+            let compiled = work.join("res.zip");
+            log.run(
+                Command::new(&aapt2)
+                    .arg("compile")
+                    .arg("--dir")
+                    .arg(res)
+                    .arg("-o")
+                    .arg(&compiled),
+            )?;
+            link.arg(compiled);
+        }
         let unsigned = work.join("unsigned.apk");
+        log.run(link.arg("-o").arg(&unsigned))?;
+        if let Some(dex) = dex {
+            log.run(
+                Command::new(self.jdk.join("bin/jar"))
+                    .arg("--update")
+                    .arg("--no-compress")
+                    .arg("--no-manifest")
+                    .arg("--file")
+                    .arg(&unsigned)
+                    .arg("-C")
+                    .arg(dex.parent().unwrap())
+                    .arg(dex.file_name().unwrap()),
+            )?;
+        }
+        let aligned = work.join("aligned.apk");
         log.run(
-            Command::new(&aapt2)
-                .arg("link")
-                .arg("--manifest")
-                .arg(manifest)
-                .arg("-I")
-                .arg(framework)
-                .args([
-                    "--min-sdk-version",
-                    MIN_API,
-                    "--target-sdk-version",
-                    MIN_API,
-                ])
-                .arg("-o")
+            Command::new(self.build_tools.join("zipalign"))
+                .args(["-f", "4"])
                 .arg(&unsigned)
-                .arg(&compiled),
+                .arg(&aligned),
         )?;
         log.run(
             self.java()
@@ -273,24 +294,27 @@ impl Toolchain {
                 .arg(&self.cert)
                 .arg("--out")
                 .arg(out)
-                .arg(&unsigned),
+                .arg(&aligned),
         )?;
         fs::remove_dir_all(&work).map_err(|e| e.to_string())
     }
 }
 
-/// Fails unless the stubs in `stubs` declare what the image's jars on
-/// `jars` (guest paths) declare, and everything `dex` refers to outside
-/// itself is in those jars.
+/// Fails unless the stubs in `stubs`, if given, declare what the image's
+/// jars on `jars` (guest paths) declare, and everything `dex` refers to
+/// outside itself is in those jars.
 pub fn check_linkage(
     image: &Path,
     jars: &[String],
-    stubs: &Path,
+    stubs: Option<&Path>,
     dex: &Path,
 ) -> Result<(), String> {
     let read = |p: &Path| fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
     let classpath = ClassPath::read(image, jars)?;
-    let mut problems = classpath.stub_mismatches(&read(stubs)?)?;
+    let mut problems = match stubs {
+        Some(stubs) => classpath.stub_mismatches(&read(stubs)?)?,
+        None => Vec::new(),
+    };
     problems.extend(classpath.unresolved(&read(dex)?)?);
     if !problems.is_empty() {
         return Err(format!(

@@ -242,6 +242,7 @@ pub fn run(package: String, activity: String, socket: &Path) -> ! {
         None,
     ));
     std::thread::spawn(move || serve(&mut sock));
+    crate::un::mirror();
     watch_bundle();
     // SIGTERM and SIGINT quit the app normally, closing its tasks.
     crate::input::quit_on_signals();

@@ -10,4 +10,5 @@ public abstract class SystemService {
     public SystemService(Context context) { throw new RuntimeException("stub"); }
     public abstract void onStart();
     public void onBootPhase(int phase) { throw new RuntimeException("stub"); }
+    public final Context getContext() { throw new RuntimeException("stub"); }
 }

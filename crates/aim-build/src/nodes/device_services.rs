@@ -9,7 +9,11 @@
 //!   jar appended, which the `oat` node compiles like the others;
 //! - `framework-overlay.apk`, the static overlay of framework-res of
 //!   `java/framework-overlay` that names the service in
-//!   `config_deviceSpecificSystemServices`, signed with AOSP's test key.
+//!   `config_deviceSpecificSystemServices`, signed with AOSP's test key;
+//! - `notification-permission.apk`, the activity of
+//!   `java/notification-permission` that system_server starts in place of
+//!   PermissionController's dialog for POST_NOTIFICATIONS (#470), compiled
+//!   with the Java of the AIDL and checked against the boot class path.
 
 use super::java::{self, Toolchain};
 use super::{files, repo, service_aidl};
@@ -22,6 +26,7 @@ use std::path::PathBuf;
 
 const SOURCES: &str = "java/device-services";
 const OVERLAY: &str = "java/framework-overlay";
+const NOTIFICATION_PERMISSION: &str = "java/notification-permission";
 /// The jar's guest path.
 pub const JAR: &str = "/system/framework/aim-services.jar";
 const FRAGMENT: &str = "system/etc/classpaths/systemserverclasspath.pb";
@@ -38,6 +43,7 @@ pub fn node() -> Node {
     let mut inputs = vec![repo(java::LOCK)];
     inputs.extend(files(SOURCES));
     inputs.extend(files(OVERLAY));
+    inputs.extend(files(NOTIFICATION_PERMISSION));
     Node {
         name: "device-services".into(),
         deps: vec![Dep::on("image")],
@@ -46,9 +52,10 @@ pub fn node() -> Node {
             jar(),
             out().join("systemserverclasspath.pb"),
             out().join("framework-overlay.apk"),
+            out().join("notification-permission.apk"),
         ],
         tools: Vec::new(),
-        recipe: 1,
+        recipe: 2,
         action: Action::DeviceServices,
         boot: true,
     }
@@ -71,20 +78,21 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     let classes = work.join("classes");
     tools.javac(
         log,
-        &[sources.join("src"), generated],
+        &[sources.join("src"), generated.clone()],
         std::slice::from_ref(&stubs),
         &classes,
         true,
     )?;
     let stubs_dex = tools.d8(log, &stubs, None, &work.join("stubs-dex"))?;
     let dex = tools.d8(log, &classes, Some(&stubs), &work.join("dex"))?;
-    let mut jars = classpath::jars(&image, "bootclasspath.pb", BOOTCLASSPATH)?;
+    let boot = classpath::jars(&image, "bootclasspath.pb", BOOTCLASSPATH)?;
+    let mut jars = boot.clone();
     jars.extend(classpath::jars(
         &image,
         "systemserverclasspath.pb",
         SYSTEMSERVERCLASSPATH,
     )?);
-    java::check_linkage(&image, &jars, &stubs_dex, &dex)?;
+    java::check_linkage(&image, &jars, Some(&stubs_dex), &dex)?;
     service_aidl::check_own_stubs(&dex)?;
     tools.jar(log, &dex, &staged.join("aim-services.jar"))?;
 
@@ -102,9 +110,31 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     tools.apk(
         log,
         &overlay.join("AndroidManifest.xml"),
-        &overlay.join("res"),
+        Some(&overlay.join("res")),
+        None,
         &image.join("system/framework/framework-res.apk"),
         &staged.join("framework-overlay.apk"),
+    )?;
+
+    // An app's code: it links against the boot class path only.
+    let app = repo(NOTIFICATION_PERMISSION);
+    let app_classes = work.join("app-classes");
+    tools.javac(
+        log,
+        &[app.join("src"), generated],
+        std::slice::from_ref(&stubs),
+        &app_classes,
+        true,
+    )?;
+    let app_dex = tools.d8(log, &app_classes, Some(&stubs), &work.join("app-dex"))?;
+    java::check_linkage(&image, &boot, None, &app_dex)?;
+    tools.apk(
+        log,
+        &app.join("AndroidManifest.xml"),
+        None,
+        Some(&app_dex),
+        &image.join("system/framework/framework-res.apk"),
+        &staged.join("notification-permission.apk"),
     )?;
 
     let _ = force_remove(&out);

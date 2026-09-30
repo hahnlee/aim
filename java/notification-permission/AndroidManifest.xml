@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The activity system_server starts in place of PermissionController's
+     dialog for a request of POST_NOTIFICATIONS alone (#470): preinstalled,
+     and visible to every app, whose request it answers. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.aim.notificationpermission">
+    <application
+        android:label="Notification permission"
+        android:allowBackup="false"
+        android:forceQueryable="true">
+        <activity
+            android:name=".RequestActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:configChanges="density|fontScale|keyboard|keyboardHidden|layoutDirection|locale|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" />
+    </application>
+</manifest>

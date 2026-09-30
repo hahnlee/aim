@@ -73,7 +73,7 @@ non-cargo stages are declared in code:
 | `boot-image` | `art`, `image`, `host/linux-run` (order only) | | `target/aim/boot-image/framework` |
 | `angle` | | `upstream/angle.lock`, `upstream/angle-args.gn` | `_build/angle-source/out/AimRelease` |
 | `moltenvk` | | `upstream/moltenvk.lock` | `target/aim/moltenvk` (`libMoltenVK.dylib`, `LICENSE`, `vk.xml`) |
-| `device-services` | `image` | `upstream/java-toolchain.lock`, `java/device-services/*`, `java/framework-overlay/*` | `target/aim/device-services`: `aim-services.jar`, the platform's `systemserverclasspath.pb` with it appended, `framework-overlay.apk` ("Java") |
+| `device-services` | `image` | `upstream/java-toolchain.lock`, `java/device-services/*`, `java/framework-overlay/*`, `java/notification-permission/*` | `target/aim/device-services`: `aim-services.jar`, the platform's `systemserverclasspath.pb` with it appended, `framework-overlay.apk`, `notification-permission.apk` ("Java") |
 | `system-server` | `image` | `image/native-services` | `target/aim/system-server/services.jar`, SystemServer without the start of the natively implemented services (docs/system-services.md) |
 | `oat` | `image`, `art`, `boot-image`, `system-server`, `host/linux-run` (order only) | | `target/aim/oat`: the image's oat files with code compiled again (docs/art-exception-patches.md, "Other oat files") at their guest paths under `root/`, and `overlay.toml`, which `image/overlay.toml` includes |
 | `derived-image` | `image` and the producer of every built overlay source | `image/overlay.toml` and its checked-in sources | `target/aim/derived.shadow`, attached at `target/aim/derived` |
@@ -227,6 +227,10 @@ tools; nothing of them is linked into the output or put in the image.
   `framework-res.apk` and signed by apksigner with the test key, which
   suffices for a preinstalled package; PackageManager keeps its
   certificate, so the key must not change.
+- `java/notification-permission` is an app (#470): its code and the Java
+  of the AIDL are compiled against the same stubs, checked against the
+  boot class path only (an app's), added to the APK stored, aligned and
+  signed with the test key.
 
 ## ANGLE
 
