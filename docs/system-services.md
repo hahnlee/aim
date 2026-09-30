@@ -10,6 +10,7 @@ every step: replace superseded facts instead of appending a log.
 | Service | Implementation | Conformance (CTS 16_r1) | Since |
 | --- | --- | --- | --- |
 | `clipboard` (IClipboard) | native, `crates/aim-services`, backed by `NSPasteboard` | 35 of 36 tests pass (original: 36 of 36); app checks pass | M1, 2026-09-29 |
+| `vibrator_manager` (IVibratorManagerService), `external_vibrator_service` | native, `crates/aim-services`: the original without a vibrator, as on a Mac | CtsVibratorTestCases: 268 of 301 pass, 33 skip (no vibrator), each test as the original | M2, 2026-09-30 |
 | every other service | the original, in SystemServer or its daemon | | |
 
 ## How a service is replaced
@@ -112,8 +113,18 @@ send their notifications one-way when they commit a change, most from a
 handler thread, so a call that races a change is decided as just before
 it until the notification arrives, as for every other client of these
 listeners. Other users' lock state is asked each time; virtual devices
-are never locked (`TrustManagerService`). Writes still ask
-`IUserManager` for the user's profiles (#460).
+are never locked (`TrustManagerService`).
+
+A clipboard write still asks `IUserManager.getProfileIds`, the one call
+on its common path (the restrictions are asked only for a user with
+profiles). Nothing that tells of a change in a user's profiles reaches
+the service host: `IUserManager`'s one listener reports restrictions,
+the user broadcasts need a receiver in a process ActivityManager knows
+(`registerReceiverWithFeature` returns null for any other caller), and
+`UserManager`'s own cache invalidation, which would be the signal, keeps
+its nonce in `ApplicationSharedMemory` in this image
+(`application_shared_memory_enabled`, `pic_uses_shared_memory`), not in
+a system property (#460, #430).
 
 The binder host's nodes accept file descriptors, as libbinder's do: the
 task stack listener's snapshots carry a buffer's. They are closed after
@@ -275,7 +286,8 @@ From the sources at `android-16.0.0_r1` (`services/core`):
   uses it through the public Vibrator API (PowerManager's Notifier,
   ActivityManager, notification's VibratorHelper, AudioService,
   PhoneWindowManager, biometrics), which a native binder serves as well.
-  A leaf; the device declares no vibrator today.
+  A leaf; the device declares no vibrator. Native since M2 ("The
+  vibrator").
 - **notification** (`NotificationManagerService`). Consults twelve local
   interfaces (UsageStats, PermissionPolicy, JobScheduler, ActivityManager,
   ActivityTaskManager, WindowManager, UserManager, UriGrants,
@@ -347,6 +359,58 @@ focus) to 972 (273 app ops, nearly all background notes; 356 input
 method and 213 permissions, from reads without focus; 43 focus). A write still asks `IUserManager` for the profiles
 (#460).
 
+## The vibrator
+
+`crates/aim-services/src/vibrator.rs` serves `vibrator_manager` and
+`external_vibrator_service`, the binders SystemServer's
+`VibratorManagerService` publishes. A Mac has no vibration motor and the
+derived image no vibrator HAL, so the original ran without a vibrator:
+no vibrator ids, capabilities 0, no `VibratorInfo`, "No vibrator found"
+from `cmd vibrator_manager list`. The native service is that original,
+`VibratorManagerService.java` at the tag with no `VibratorController`:
+
+- `isVibrating` and the state listener calls check
+  ACCESS_VIBRATOR_STATE and answer false: no vibrator has the id;
+- `vibrate` and `cancelVibrate` check VIBRATE, and a vibration with a
+  token for another uid UPDATE_APP_OPS_STATS, with the original's
+  messages, then have nothing to play or cancel; `setAlwaysOnEffect`
+  checks VIBRATE_ALWAYS_ON and fails for anything but a removal; haptic
+  feedback (one-way) plays nothing;
+- a vendor session (`vendor_vibration_effects` is on in the image)
+  checks its three permissions and ends unsupported: its callback gets
+  `onFinished(STATUS_UNSUPPORTED)` without starting, and cancelling it
+  changes nothing;
+- `external_vibrator_service` mutes every external (audio-coupled)
+  vibration, as the original does without a vibrator with external
+  control (`haptics_scale_v2_enabled` is off, so the factor stays
+  undefined).
+
+Combined vibrations are read to their end as Java reads them (parcel
+tokens, length-prefixed segments, the vendor data's bundle) and refused
+where Java's reading throws; their content decides nothing without a
+vibrator. The original's third binder, the vibrator control service
+(`IVibratorControlService/default`), is published only when declared;
+only a vibrator HAL's vendor side calls it, and the derived image drops
+its declaration with the HAL.
+
+Not here: the `OP_VIBRATE` access the original records for a vibration
+its settings let through, which plays on no vibrator (#479); `dumpsys`
+and `cmd vibrator_manager` (#480).
+
+**Cost** (2026-09-30, one boot each, the same data directory, host load
+about 7; the driver's latency of each synchronous call, from a binder
+trace over the shell loop and the CTS run below):
+
+| Call | Original p50 / p99 | Native p50 / p99 |
+| --- | --- | --- |
+| `getCapabilities`, shell loop (40) | 33 / 191 us | 9 / 22 us |
+| `getVibratorIds`, shell loop (40) | 31 / 165 us | 8 / 15 us |
+| `vibrate`, CTS app (40) | 231 / 1,601 us | 41 / 117 us |
+| `cancelVibrate`, CTS app (65) | 81 / 1,050 us | 42 / 145 us |
+
+`vibrate` and `cancelVibrate` ask ActivityManager for VIBRATE each time
+(permissions are not mirrored, "Mirrored state"); the rest asks nothing.
+
 ## Conformance
 
 **Suite.** The official Android 16 CTS, `android-cts-16_r1-linux_x86-arm`
@@ -374,7 +438,19 @@ export ] && export "$n=$v"; done < /data/system/environ/classpath`).
 | ClipDescriptionTest | 6 | 6 pass | 6 pass |
 
 The original's numbers are from the same boot procedure with
-`image/native-services` empty. The five classes take 3 min 10 s against
+`image/native-services` empty.
+
+The vibrator: `CtsVibratorTestCases` (all 301 tests, hidden API checks
+on, as its config asks), installed with `pm install -r -g -t` and run
+with `am instrument -w -r android.os.vibrator.cts/androidx.test.runner.AndroidJUnitRunner`.
+Against the original (`image/native-services` with the clipboard only)
+and the native vibrator, each test ends the same: 268 pass and 33 skip
+on assumptions of a vibrator (`hasVibrator`, `areVendorSessionsSupported`,
+a vibrator id), among them the vendor session tests that need one; the
+two that need none (`testDeviceWithoutVibrator_returnsUnsupportedStatus`,
+`testVendorSessionsNotSupported_returnsUnsupportedStatus`) pass. The
+same boots started Settings cold (`am start -W -S`: 315 and 249 ms) and
+passed ClipboardManagerTest. The five classes take 3 min 10 s against
 the original and 3 min 20 s against the native clipboard. One native run of ClipboardManagerTest was
 cut short by a SurfaceFlinger hang in a task snapshot that took
 system_server down (#436); the rerun passed.

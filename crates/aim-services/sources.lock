@@ -27,6 +27,10 @@ SOURCE_FILES=(
   "platform/frameworks/base|core/java/android/service/notification/INotificationListener.aidl|b69999d69e40719070d969683afeef99a6446d4b19a62b2c07990d7b2643d617"
   "platform/frameworks/base|core/java/android/service/notification/IStatusBarNotificationHolder.aidl|aec6674ca251c5ab65b030fffde07d9b2e82e416f674fe28cbd33e0b7dd45e54"
   "platform/frameworks/base|core/java/com/android/internal/statusbar/IStatusBarService.aidl|11a05c71bb5ef6b24bec607d0ad7c7f5aaee8ddd26fa85899304b6e75a0196e1"
+  "platform/frameworks/base|core/java/android/os/IVibratorManagerService.aidl|df36e61dd62d9c22a4c59b9499bde468da8711ea46a7efb38c9c5e932c8e902b"
+  "platform/frameworks/base|core/java/android/os/vibrator/IVibrationSessionCallback.aidl|6d4bafaa83f83a48a343ef0d3875a17c1b3d3f80bfb555d7c0d8d46197cc3cc1"
+  "platform/frameworks/base|core/java/android/os/ICancellationSignal.aidl|3a3423eb076bb4ed64d50c35e3afa905782604a2b0f3373f0040ce470f02d191"
+  "platform/frameworks/base|core/java/android/os/IExternalVibratorService.aidl|3a524863da5241684e4870e648580cdb81bd15a53c86b554283b5c3bf159998a"
 )
 
 # descriptor|jar of its stub in the image|methods to marshal (`*`: all).
@@ -52,4 +56,8 @@ INTERFACES=(
   "android.service.notification.INotificationListener|system/framework/framework.jar|onListenerConnected,onNotificationPosted,onNotificationPostedFull,onNotificationRemoved,onNotificationRemovedFull"
   "android.service.notification.IStatusBarNotificationHolder|system/framework/framework.jar|get"
   "com.android.internal.statusbar.IStatusBarService|system/framework/framework.jar|onNotificationClick,onNotificationDirectReplied"
+  "android.os.IVibratorManagerService|system/framework/framework.jar|*"
+  "android.os.vibrator.IVibrationSessionCallback|system/framework/framework.jar|onFinished"
+  "android.os.ICancellationSignal|system/framework/framework.jar|*"
+  "android.os.IExternalVibratorService|system/framework/framework.jar|*"
 )

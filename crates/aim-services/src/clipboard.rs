@@ -533,16 +533,8 @@ impl ClipboardService {
     }
 
     fn enforce(&self, caller: &Caller, permission: &str) -> Result<()> {
-        if self
-            .system
-            .check_permission(permission, caller.pid, caller.uid)?
-        {
-            Ok(())
-        } else {
-            Err(Exception::security(format!(
-                "Access denied, requires: {permission}"
-            )))
-        }
+        self.system
+            .enforce_permission(permission, caller.pid, caller.uid)
     }
 
     fn dispatch(&self, call: &mut Call<'_>) -> Result<Option<Parcel>> {

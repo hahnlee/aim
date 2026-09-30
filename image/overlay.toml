@@ -618,6 +618,10 @@ reason = "UWB radio; UWB is undeclared"
 path = "/apex/com.android.hardware.vibrator"
 reason = "the example vibrator fakes a motor; the vibrator is undeclared"
 
+[[remove]]
+path = "/system/etc/vintf/manifest/manifest_services_android.frameworks.vibrator.xml"
+reason = "declares the vibrator control service, which only a vibrator HAL's vendor side calls; the device has none, and the native vibrator_manager (image/native-services) does not serve it"
+
 # The ART exception (ADR 0012 decision 4, docs/art-exception-patches.md):
 # macOS maps nothing below 4 GiB, so ART is rebuilt from the pinned sources
 # with base-relative 32-bit heap references (patches/art-android/), by
