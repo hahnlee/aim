@@ -197,6 +197,9 @@ std::arch::global_asm!(
     ".globl _aim_vdso_end",
     ".alt_entry _aim_vdso_end",
     "_aim_vdso_end:",
+    // Not copied: keeps the end label inside the block, where the linker
+    // leaves it (a label at the end of an atom may be placed elsewhere).
+    "udf #0",
     ".purgem COMMPAGE",
     ".purgem COUNTER",
     ".purgem ABSTIME",
