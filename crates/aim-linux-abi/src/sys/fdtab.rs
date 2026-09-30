@@ -437,19 +437,16 @@ mod tests {
     /// numbers of those it did not, and keeps its own.
     #[test]
     fn a_fork_child_hides_only_inherited_fds() {
-        // SAFETY: new pipes of our own; `gone` is closed, as a parent's
-        // kqueue is in the child.
-        let (own, inherited, gone) = unsafe {
+        // SAFETY: a new pipe of our own.
+        let (own, inherited) = unsafe {
             let mut p = [0; 2];
-            let mut q = [0; 2];
             libc::pipe(p.as_mut_ptr());
-            libc::pipe(q.as_mut_ptr());
-            libc::close(q[1]);
-            (p[0], p[1], q[0])
+            (p[0], p[1])
         };
+        // Not open here, as a parent's kqueue is not in the child: a number
+        // above any descriptor table, which no other test's fd can take.
+        let gone = i32::MAX;
         keep_hidden(own);
-        // SAFETY: our fd.
-        unsafe { libc::close(gone) };
         keep_inherited_hidden(vec![inherited, gone]);
         assert!(is_hidden(own) && is_hidden(inherited) && !is_hidden(gone));
         for fd in [own, inherited] {
