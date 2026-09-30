@@ -319,15 +319,16 @@ const TICKS: u64 = 100;
 const PROC_PIDTHREADID64INFO: i32 = 15;
 
 /// User and system CPU time of thread `tid` of process `p`, in
-/// nanoseconds.
-fn thread_times(p: i32, tid: i32) -> Option<(u64, u64)> {
-    if p == pid() {
-        return super::thread::cpu_times(tid);
-    }
-    let host = super::procrec::threads(p)?
-        .into_iter()
-        .find(|t| t.tid == tid)?
-        .host;
+/// nanoseconds, and its state, from its host thread.
+fn thread_times(p: i32, tid: i32) -> Option<(u64, u64, char)> {
+    let host = if p == pid() {
+        super::thread::host_thread_id(tid)?
+    } else {
+        super::procrec::threads(p)?
+            .into_iter()
+            .find(|t| t.tid == tid)?
+            .host
+    };
     let mut ti: libc::proc_threadinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_threadinfo>() as i32;
     // SAFETY: proc_pidinfo writes at most `size` bytes.
@@ -340,15 +341,22 @@ fn thread_times(p: i32, tid: i32) -> Option<(u64, u64)> {
             size,
         )
     };
-    Some(if n == size {
-        (ti.pth_user_time, ti.pth_system_time)
-    } else {
-        (0, 0)
-    })
+    if n != size {
+        return Some((0, 0, 'S'));
+    }
+    // TH_STATE_* (mach/thread_info.h).
+    let state = match ti.pth_run_state {
+        1 => 'R',
+        2 => 'T',
+        4 => 'D',
+        _ => 'S',
+    };
+    Some((ti.pth_user_time, ti.pth_system_time, state))
 }
 
 /// `/proc/<p>/stat`, or with `thread` its thread's
-/// `/proc/<p>/task/<tid>/stat`: the thread's id, `comm` and CPU times.
+/// `/proc/<p>/task/<tid>/stat`: the thread's id, `comm`, state and CPU
+/// times.
 fn stat_line(p: i32, thread: Option<i32>) -> Option<String> {
     let t = task_info(p)?;
     let b = &t.pbsd;
@@ -369,13 +377,13 @@ fn stat_line(p: i32, thread: Option<i32>) -> Option<String> {
         StackInfo::default()
     };
     let rss_pages = ti.pti_resident_size / super::mem::PAGE;
-    let (id, name, user, system) = match thread {
+    let (id, name, user, system, state) = match thread {
         Some(tid) => {
-            let (user, system) = thread_times(p, tid).unwrap_or_default();
+            let (user, system, state) = thread_times(p, tid).unwrap_or((0, 0, state));
             let name = thread_comm(p, tid).unwrap_or_else(|| comm(p));
-            (tid, name, user, system)
+            (tid, name, user, system, state)
         }
-        None => (p, comm(p), ti.pti_total_user, ti.pti_total_system),
+        None => (p, comm(p), ti.pti_total_user, ti.pti_total_system, state),
     };
     Some(format!(
         "{id} ({name}) {state} {} {} {} 0 -1 4194560 {} 0 {} 0 {} {} 0 0 20 {} {} 0 {start} {} {rss_pages} 18446744073709551615 0 0 {} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 {} {} {} {} 0\n",

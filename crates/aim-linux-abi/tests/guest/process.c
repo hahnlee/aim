@@ -1197,9 +1197,9 @@ static void other_procs(void) {
   snprintf(path, sizeof(path), "/proc/%d/task/%d/stat", pid, tid);
   c = slurp(path);
   char want[64];
-  int wn = snprintf(want, sizeof(want), "%d (RenderThread) ", tid);
+  int wn = snprintf(want, sizeof(want), "%d (RenderThread) S ", tid);
   CHECK(c && strncmp(c, want, wn) == 0, "thread stat '%s'", c ? c : "");
-  /* utime and stime are fields 14 and 15; the thread ran 50 ms. */
+  /* It sleeps; utime and stime are fields 14 and 15, and it ran 50 ms. */
   char* f = strchr(c, ')') + 2;
   for (int i = 3; i < 14; i++) f = strchr(f, ' ') + 1;
   long utime = strtol(f, &f, 10), stime = strtol(f, NULL, 10);
@@ -1210,7 +1210,7 @@ static void other_procs(void) {
   CHECK(c && strncmp(c, "Name:\tRenderThread\n", 19) == 0 && strstr(c, want), "status '%s'", c ? c : "");
   snprintf(path, sizeof(path), "/proc/%d/stat", tid);
   c = slurp(path);
-  wn = snprintf(want, sizeof(want), "%d (RenderThread) ", tid);
+  wn = snprintf(want, sizeof(want), "%d (RenderThread) S ", tid);
   CHECK(c && strncmp(c, want, wn) == 0, "/proc/<tid>/stat '%s'", c ? c : "");
   snprintf(path, sizeof(path), "/proc/%d/task/%d", pid, tid + 1);
   CHECK(access(path, F_OK) != 0 && errno == ENOENT, "a tid that is not there");

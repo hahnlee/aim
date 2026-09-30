@@ -267,6 +267,11 @@ fn host_id(p: usize) -> u64 {
     id
 }
 
+/// Host thread id of this process's thread `tid`, 0 until it runs.
+pub fn host_thread_id(tid: i32) -> Option<u64> {
+    find(tid).map(|t| host_id(t.pthread.load(SeqCst)))
+}
+
 /// Write every thread into this process's new record.
 pub fn publish_threads() {
     with_table(|t| {
