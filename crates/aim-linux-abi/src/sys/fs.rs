@@ -782,30 +782,41 @@ pub fn faccessat(dirfd: u64, path: u64, mode: u64, flags: u64) -> i64 {
     if mode & W_OK != 0 && r.read_only() {
         return -EROFS;
     }
-    let hflags = if flags & AT_EACCESS != 0 {
-        libc::AT_EACCESS
-    } else {
-        0
+    if !attrs::recording() {
+        // No guest owners: the host's answer.
+        let hflags = if flags & AT_EACCESS != 0 {
+            libc::AT_EACCESS
+        } else {
+            0
+        };
+        // SAFETY: host path.
+        let h = unsafe { libc::faccessat(libc::AT_FDCWD, r.host.as_ptr(), mode as i32, hflags) };
+        return if h < 0 { -(errno::last() as i64) } else { 0 };
+    }
+    // The file exists, and the guest identity passes the recorded owner
+    // and mode. A host access(2) would only add the host user's view, and
+    // costs a security check a stat does not (#446).
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: host path, local buffer.
+    let got = unsafe {
+        if follow {
+            libc::stat(r.host.as_ptr(), &mut st)
+        } else {
+            libc::lstat(r.host.as_ptr(), &mut st)
+        }
     };
-    // SAFETY: host path.
-    let h = unsafe { libc::faccessat(libc::AT_FDCWD, r.host.as_ptr(), mode as i32, hflags) };
-    if h < 0 {
+    if got < 0 {
         return -(errno::last() as i64);
     }
-    if vfs::runtime_dir().is_some() && mode & (R_OK | W_OK | 1) != 0 {
-        // The guest identity against the recorded owners and modes.
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: host path, local buffer.
-        if unsafe { libc::stat(r.host.as_ptr(), &mut st) } == 0 {
-            attrs::apply(attrs_host(&r), || r.guest.clone(), &mut st);
-            let (uid, gid) = attrs::ids(if flags & AT_EACCESS != 0 {
-                attrs::EFFECTIVE
-            } else {
-                attrs::REAL
-            });
-            if !attrs::permits(&st, mode as u32, uid, gid) {
-                return -13; // EACCES
-            }
+    if mode & (R_OK | W_OK | 1) != 0 {
+        attrs::apply(attrs_host(&r), || r.guest.clone(), &mut st);
+        let (uid, gid) = attrs::ids(if flags & AT_EACCESS != 0 {
+            attrs::EFFECTIVE
+        } else {
+            attrs::REAL
+        });
+        if !attrs::permits(&st, mode as u32, uid, gid) {
+            return -13; // EACCES
         }
     }
     0
