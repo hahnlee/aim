@@ -51,6 +51,9 @@ pub struct Post {
     pub passive: bool,
     /// Counts toward the app's badge.
     pub badge: bool,
+    /// It has a full-screen intent SystemUI would launch on a locked or
+    /// sleeping device (an incoming call, an alarm).
+    pub full_screen: bool,
     pub actions: Vec<Action>,
     pub image: Option<Image>,
 }
@@ -72,6 +75,9 @@ pub enum Message {
     },
     /// Host to bridge: the user dismissed it.
     Dismiss { key: String },
+    /// Server to bridge: the Mac is locked or asleep; launch the
+    /// notification's full-screen intent.
+    FullScreen { key: String },
     /// Host to server: after a post or removal, whether the Mac shows the
     /// notification, or why it could not (the server logs it).
     Shown {
@@ -87,6 +93,7 @@ const CLICK: u8 = 3;
 const ACTION: u8 = 4;
 const DISMISS: u8 = 5;
 const SHOWN: u8 = 6;
+const FULL_SCREEN: u8 = 7;
 
 struct Out(Vec<u8>);
 
@@ -165,7 +172,7 @@ impl Message {
                 ] {
                     o.str(s);
                 }
-                o.u8(p.passive as u8 | (p.badge as u8) << 1);
+                o.u8(p.passive as u8 | (p.badge as u8) << 1 | (p.full_screen as u8) << 2);
                 o.u32(p.actions.len() as u32);
                 for a in &p.actions {
                     o.str(&a.title);
@@ -208,6 +215,10 @@ impl Message {
             }
             Message::Dismiss { key } => {
                 o.u8(DISMISS);
+                o.str(key);
+            }
+            Message::FullScreen { key } => {
+                o.u8(FULL_SCREEN);
                 o.str(key);
             }
             Message::Shown { key, shown, error } => {
@@ -262,6 +273,7 @@ impl Message {
                     thread,
                     passive: flags & 1 != 0,
                     badge: flags & 2 != 0,
+                    full_screen: flags & 4 != 0,
                     actions,
                     image,
                 })
@@ -277,6 +289,7 @@ impl Message {
                 reply: i.opt()?,
             },
             DISMISS => Message::Dismiss { key: i.str()? },
+            FULL_SCREEN => Message::FullScreen { key: i.str()? },
             SHOWN => Message::Shown {
                 key: i.str()?,
                 shown: i.u8()? != 0,
@@ -328,6 +341,7 @@ impl Message {
             | Message::Click { key }
             | Message::Action { key, .. }
             | Message::Dismiss { key }
+            | Message::FullScreen { key }
             | Message::Shown { key, .. } => key,
         }
     }
@@ -349,6 +363,7 @@ mod tests {
                 thread: "g".into(),
                 passive: true,
                 badge: true,
+                full_screen: true,
                 actions: vec![
                     Action {
                         title: "Reply".into(),
@@ -377,6 +392,7 @@ mod tests {
                 reply: Some("ok".into()),
             },
             Message::Dismiss { key: "k".into() },
+            Message::FullScreen { key: "k".into() },
             Message::Shown {
                 key: "k".into(),
                 shown: false,

@@ -386,7 +386,7 @@ fn report(key: String, error: Option<String>, expected: bool, again: bool) {
 fn post(p: &Post) {
     let content = send!(class(c"UNMutableNotificationContent"), c"new" => Id);
     // Notification Center drops a notification without text; one whose
-    // content is only a custom view (#468) is titled with the app's name.
+    // content is only a custom view is titled with the app's name.
     let title = if p.title.is_empty() && p.body.is_empty() {
         crate::shim::app_name().unwrap_or_default()
     } else {

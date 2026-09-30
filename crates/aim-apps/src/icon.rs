@@ -178,6 +178,27 @@ pub fn render(res: &Resources, icon: &Icon, size: usize) -> Image {
     canvas.image()
 }
 
+/// Drawable `v` as a PNG `size` pixels square (a notification's large
+/// icon or picture): an adaptive icon as the Mac's app icons, anything
+/// else filling the square, as a 48 dp icon.
+pub fn picture(res: &Resources, v: &Value, size: usize) -> Option<Vec<u8>> {
+    let v = match Icon::of(res, v)? {
+        Icon::Legacy(v) => v,
+        adaptive => return render(res, &adaptive, size).png(),
+    };
+    let canvas = Canvas::new(size);
+    let d = Drawer {
+        res,
+        canvas: &canvas,
+        dp: size as f64 / 48.0,
+    };
+    let side = size as f64;
+    if !d.draw(&v, Rect::new(0.0, 0.0, side, side)) {
+        return None;
+    }
+    canvas.image().png()
+}
+
 /// `.icns` entry types and their sizes in pixels: 16, 32, 128, 256 and
 /// 512 points at 1x and 2x, and 64 (32@2x's 1x twin).
 const ICNS: [(&[u8; 4], usize); 11] = [

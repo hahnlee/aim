@@ -237,6 +237,7 @@ dependencies = [
 name = "aim-services"
 version = "0.1.0"
 dependencies = [
+ "aim-apps",
  "aim-binder-driver",
  "aim-binder-host",
  "aim-host-display",

@@ -14,23 +14,29 @@
 //! click (`IStatusBarService.onNotificationClick`, which auto-cancels);
 //! an action sends its `PendingIntent`, with a `RemoteInput` reply as its
 //! fill-in intent; a dismissal is `cancelNotificationsFromListener`.
+//! When the Mac is locked or asleep, the server has the bridge launch a
+//! notification's full-screen intent, as SystemUI does when the device is.
 //!
 //! Only in window mode: in device mode SystemUI's shade shows them.
 
+mod icons;
 mod parcels;
+
+pub use icons::GuestFiles;
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
+use aim_apps::apk::Apk;
 use aim_binder_driver::{Credentials, Device, Driver};
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, Exception, Parcel, Reader, UNKNOWN_TRANSACTION};
-use aim_host_display::notify::{self, Message, Post};
+use aim_host_display::notify::{self, Image, Message, Post};
 use aim_host_display::wire;
 use aim_hostcall::display::mode;
 use aim_service_aidl::{
@@ -58,6 +64,12 @@ const USER_ALL: i32 = -1;
 const COMPONENT: ComponentName<'static> = ComponentName("android", "aim.notifications.MacBridge");
 /// `NotificationManager.IMPORTANCE_LOW`: shown without interrupting.
 const IMPORTANCE_LOW: i32 = 2;
+/// `NotificationManager.IMPORTANCE_HIGH`: may take the screen.
+const IMPORTANCE_HIGH: i32 = 4;
+/// `Notification.GROUP_ALERT_SUMMARY`: a group's children do not alert.
+const GROUP_ALERT_SUMMARY: i32 = 1;
+/// `Notification.BubbleMetadata.FLAG_SUPPRESS_NOTIFICATION`.
+const BUBBLE_SUPPRESS_NOTIFICATION: i32 = 0x2;
 /// How often the bridge looks for NMS while it is not there.
 const RETRY: Duration = Duration::from_secs(1);
 /// The largest blob it maps.
@@ -79,6 +91,10 @@ struct State {
 
 pub struct Bridge {
     process: Arc<LocalProcess>,
+    /// The guest's files, for icons.
+    files: Arc<GuestFiles>,
+    /// framework-res, once an icon needed it.
+    framework: OnceLock<Option<Apk>>,
     listener: Binder,
     link: Mutex<UnixStream>,
     state: Mutex<State>,
@@ -96,20 +112,21 @@ type Target = (Binder, Option<Binder>, Option<String>);
 impl Bridge {
     /// Starts the bridge in the background: it connects to the display
     /// server at `display` and, in window mode, registers with NMS once it
-    /// is published (again after system_server restarts).
-    pub fn start(driver: &Arc<Driver>, display: &Path) {
+    /// is published (again after system_server restarts). Icons given as
+    /// a resource or a `file:` URI are read from `files`.
+    pub fn start(driver: &Arc<Driver>, display: &Path, files: Arc<GuestFiles>) {
         let driver = driver.clone();
         let display = display.to_owned();
         let _ = std::thread::Builder::new()
             .name("notifications".into())
             .spawn(move || {
-                if let Err(e) = Bridge::run(&driver, &display) {
+                if let Err(e) = Bridge::run(&driver, &display, files) {
                     eprintln!("guest-init: notifications: {e}");
                 }
             });
     }
 
-    fn run(driver: &Arc<Driver>, display: &Path) -> Result<(), String> {
+    fn run(driver: &Arc<Driver>, display: &Path, files: Arc<GuestFiles>) -> Result<(), String> {
         let Some(link) = connect(display)? else {
             return Ok(());
         };
@@ -126,6 +143,8 @@ impl Bridge {
         let bridge = Arc::new_cyclic(|this: &Weak<Bridge>| Bridge {
             listener: process.add_service(Arc::new(Listener(this.clone()))),
             process: process.clone(),
+            files,
+            framework: OnceLock::new(),
             link: Mutex::new(link),
             state: Mutex::new(State {
                 manager: None,
@@ -266,6 +285,9 @@ impl Bridge {
     fn posted(&self, sbn: StatusBarNotification) {
         let key = sbn.key();
         let n = &sbn.notification;
+        if !n.complete {
+            eprintln!("guest-init: notifications: {key}: read in part");
+        }
         let binders = n
             .binders()
             .filter_map(|b| match b {
@@ -292,7 +314,14 @@ impl Bridge {
             Some(channel.ok()?.ok()??.importance)
         });
         let updated = self.state.lock().unwrap().entries.contains_key(&key);
-        let post = to_post(&sbn, &key, importance, updated);
+        // UserHandle.getUserId: the posting app's user.
+        let user = sbn.uid / 100_000;
+        let e = &n.extras;
+        let image = [&e.picture, &e.large_icon, &n.large_icon]
+            .into_iter()
+            .flatten()
+            .find_map(|i| self.image(i, user));
+        let post = to_post(&sbn, &key, importance, updated, image);
         self.state.lock().unwrap().entries.insert(
             key,
             Entry {
@@ -487,6 +516,18 @@ impl Bridge {
                     .map_err(|s| format!("cancel: status {s}"))?
                     .map_err(|e| format!("cancel: {}", e.message))
             }
+            Message::FullScreen { .. } => {
+                let Some((target, token, _)) = entry(&|e| {
+                    Some((
+                        e.notification.full_screen_intent?,
+                        e.notification.allowlist_token,
+                        None,
+                    ))
+                }) else {
+                    return Ok(());
+                };
+                self.send_intent(target, token, None)
+            }
             Message::Post(_) | Message::Remove { .. } | Message::Shown { .. } => {
                 Err("not from the Mac".into())
             }
@@ -552,13 +593,14 @@ fn connect(display: &Path) -> Result<Option<UnixStream>, String> {
     Ok((answer == Some(mode::WINDOWS)).then_some(link))
 }
 
-/// What the Mac shows of `sbn`: none for a group's summary (the Mac
-/// groups by thread itself).
+/// What the Mac shows of `sbn`, with `image` drawn from its icons: none
+/// for a group's summary (the Mac groups by thread itself).
 fn to_post(
     sbn: &StatusBarNotification,
     key: &str,
     importance: Option<i32>,
     updated: bool,
+    image: Option<Image>,
 ) -> Option<Post> {
     let n = &sbn.notification;
     if n.flags & FLAG_GROUP_SUMMARY != 0 {
@@ -586,10 +628,16 @@ fn to_post(
             .or(n.ticker.clone())
             .unwrap_or_default(),
     };
-    let image = [&e.picture, &e.large_icon, &n.large_icon]
-        .into_iter()
-        .flatten()
-        .find_map(|i| i.image().cloned());
+    let passive = importance.is_some_and(|i| i <= IMPORTANCE_LOW)
+        || (updated && n.flags & FLAG_ONLY_ALERT_ONCE != 0);
+    // What SystemUI asks of a full-screen intent before the device's
+    // state (FullScreenIntentDecisionProvider): important enough, alerting,
+    // not a silenced group child, not shown as a bubble instead.
+    let full_screen = n.full_screen_intent.is_some()
+        && importance.is_some_and(|i| i >= IMPORTANCE_HIGH)
+        && !passive
+        && !(n.group.is_some() && n.group_alert_behavior == GROUP_ALERT_SUMMARY)
+        && n.bubble_flags & BUBBLE_SUPPRESS_NOTIFICATION == 0;
     let ongoing = n.flags & (FLAG_ONGOING_EVENT | FLAG_NO_CLEAR | FLAG_FOREGROUND_SERVICE) != 0;
     Some(Post {
         key: key.to_string(),
@@ -602,9 +650,9 @@ fn to_post(
             .clone()
             .or(n.group.clone())
             .unwrap_or_default(),
-        passive: importance.is_some_and(|i| i <= IMPORTANCE_LOW)
-            || (updated && n.flags & FLAG_ONLY_ALERT_ONCE != 0),
+        passive,
         badge: !ongoing,
+        full_screen,
         actions: n
             .actions
             .iter()
@@ -697,5 +745,46 @@ impl Service for Listener {
             _ => {}
         }
         Ok(Parcel::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_full_screen_intent() -> StatusBarNotification {
+        let mut sbn = StatusBarNotification {
+            package: "com.example".into(),
+            uid: 10_123,
+            ..Default::default()
+        };
+        sbn.notification.full_screen_intent = Some(Binder::Local(0x10));
+        sbn
+    }
+
+    #[test]
+    fn takes_the_screen_as_systemui_would() {
+        let full_screen = |sbn: &StatusBarNotification, importance, updated| {
+            to_post(sbn, "k", importance, updated, None)
+                .unwrap()
+                .full_screen
+        };
+        let mut sbn = with_full_screen_intent();
+        assert!(full_screen(&sbn, Some(IMPORTANCE_HIGH), false));
+        assert!(!full_screen(&sbn, Some(IMPORTANCE_HIGH - 1), false));
+        assert!(!full_screen(&sbn, None, false));
+        sbn.notification.flags = FLAG_ONLY_ALERT_ONCE;
+        assert!(full_screen(&sbn, Some(IMPORTANCE_HIGH), false));
+        assert!(!full_screen(&sbn, Some(IMPORTANCE_HIGH), true));
+        let mut child = with_full_screen_intent();
+        child.notification.group = Some("g".into());
+        child.notification.group_alert_behavior = GROUP_ALERT_SUMMARY;
+        assert!(!full_screen(&child, Some(IMPORTANCE_HIGH), false));
+        let mut bubble = with_full_screen_intent();
+        bubble.notification.bubble_flags = BUBBLE_SUPPRESS_NOTIFICATION;
+        assert!(!full_screen(&bubble, Some(IMPORTANCE_HIGH), false));
+        let mut none = with_full_screen_intent();
+        none.notification.full_screen_intent = None;
+        assert!(!full_screen(&none, Some(IMPORTANCE_HIGH), false));
     }
 }

@@ -24,6 +24,7 @@ step 2 of [m1-shell.md](m1-shell.md)).
 | --- | --- |
 | The listener and what it does for the user's actions | `crates/aim-services/src/notifications/mod.rs` |
 | `StatusBarNotification` and the other Java parcels | `crates/aim-services/src/notifications/parcels.rs` |
+| Resource and URI icons | `crates/aim-services/src/notifications/icons.rs`, `aim_apps::icon::picture` |
 | Messages between bridge, server and shims | `crates/aim-host-display/src/notify.rs` |
 | Routing in the display server, shim launches | `bin/aim-display/notifications.rs` |
 | `UNUserNotificationCenter` in a shim | `bin/aim-display/un.rs` |
@@ -46,7 +47,8 @@ system_server, the Mac's notifications are removed and the bridge registers
 again once NMS is back. All transaction codes come from the pinned AIDL
 (`crates/aim-services/sources.lock`): `INotificationManager`,
 `INotificationListener`, `IStatusBarNotificationHolder`,
-`IStatusBarService`, `IActivityManager.sendIntentSender`.
+`IStatusBarService`, `IActivityManager.sendIntentSender` and
+`openContentUri`, `IPackageManager.getApplicationInfo`.
 
 NMS sends `onNotificationPosted(holder, rankingUpdate)`; the bridge fetches
 the `StatusBarNotification` from the holder (`onNotificationPostedFull`
@@ -60,14 +62,37 @@ the rest after the call.
 
 What it reads of a notification (`Notification.writeToParcelImpl` at the
 tag, in order): the allowlist token, content intent, ticker, large icon,
-flags, group, extras (title, text, sub text, big text, conversation title,
-inbox lines, messages with their senders, the big picture and large icon as
-`Bitmap` or `Icon`), actions (title, `PendingIntent`, `RemoteInput`s),
-channel and shortcut id. `RemoteViews` are not read: a notification with a
-custom view keeps what precedes it (its ticker) (#468). Bitmaps are
-RGBA, BGRA, RGB 565, alpha 8 or gray; icons given as PNG or other encoded
-data are passed as they are; resource and URI icons are not drawn (#471).
-Full-screen intents are not sent (#469).
+flags, full-screen intent, group, extras (title, text, sub text, big text,
+conversation title, inbox lines, messages with their senders, the big
+picture and large icon as `Bitmap` or `Icon`), actions (title,
+`PendingIntent`, `RemoteInput`s), channel, shortcut id, group alert
+behavior and bubble flags. Custom views (`RemoteViews`: content, big,
+heads-up and ticker views, `DecoratedCustomViewStyle`, `setContent`) are
+read past, not kept (`RemoteViews.writeToParcel` with its bitmap and
+collection caches, its `ApplicationInfo`, squashed or not, and each
+action by its tag): the Mac shows the notification's standard extras,
+which apps set along with a custom view. An action it does not know (the
+flagged draw instructions) ends the reading, what precedes it is kept,
+and the bridge logs it (`guest-init: notifications: KEY: read in part`).
+
+Bitmaps are RGBA, BGRA, RGB 565, alpha 8 or gray; icons given as PNG or
+other encoded data are passed as they are. The other icons are loaded as
+SystemUI's `Icon.loadDrawable` loads them:
+
+- a resource (`Icon.createWithResource`, `android.resource://PKG/ID`):
+  drawn from the APK `IPackageManager.getApplicationInfo` names for its
+  package (with the framework's resources and the application's theme),
+  as aim-apps draws launcher icons: vector drawables, bitmaps, layer lists,
+  an adaptive icon as the Mac draws app icons; 256 pixels square;
+- a `content:` URI: opened by its provider for the system uid
+  (`IActivityManager.openContentUri`, as a system component opens one),
+  read from the file descriptor it returns;
+- a `file:` URI: read from the guest's file when an app could read it,
+  by the guest's modes (each directory searchable by others, the file
+  readable by them; guest-init's path map and `dev.aim.guest-inode`).
+
+An icon that cannot be loaded is logged (`guest-init: notifications:
+Resource { .. }: not loaded`).
 
 ## What the Mac shows
 
@@ -79,12 +104,29 @@ Full-screen intents are not sent (#469).
 | channel importance MIN or LOW, or an update of an only-alert-once notification | passive: Notification Center only, no banner or sound |
 | actions; a `RemoteInput` | buttons of a category; a text field |
 | not ongoing, not a foreground service | counts toward the Dock badge |
+| a full-screen intent (an incoming call, an alarm), importance HIGH, alerting | while the Mac's screen is locked or its display asleep: the display wakes and the intent is launched, so the activity is in its app's window at unlock; otherwise an ordinary alerting notification |
 
 The channel's importance comes from `getNotificationChannelForPackage`
 (the ranking update's copy is in the shared memory, not parsed). What NMS
 does not post (an app without `POST_NOTIFICATIONS`, a blocked app or
 channel) never reaches the Mac. The Mac's Focus applies to the shims as to
 any app; Android's own Do Not Disturb is not mapped to it.
+
+A full-screen intent is sent as SystemUI's `FullScreenIntentDecisionProvider`
+decides, with the Mac as the device: NMS has already removed it when the
+app may not use one (`USE_FULL_SCREEN_INTENT`, turning it into a sticky
+heads-up); the bridge asks for importance HIGH, an alerting post (not an
+only-alert-once update), not a child silenced by its group's alert
+behavior, not a bubble that suppresses its notification. The display
+server adds the device's state: the screen is locked
+(`CGSSessionScreenIsLocked`) or the main display asleep. Then it wakes the
+display (`IOPMAssertionDeclareUserActivity`; the screen stays locked) and
+the bridge sends the intent as SystemUI does (`sendIntentSender` with the
+allowlist token and background activity starts allowed). An unlocked,
+awake Mac gets an ordinary alerting notification: the time-sensitive
+level that would break through Focus needs the
+`com.apple.developer.usernotifications.time-sensitive` entitlement, which
+ad hoc signed shims cannot carry.
 
 ## The shims
 
