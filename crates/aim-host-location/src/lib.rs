@@ -142,6 +142,9 @@ fn set_updates(on: bool) {
 /// How long the run loop runs between checks of the guest's request.
 const TICK: f64 = 0.5;
 
+/// `kCFRunLoopRunFinished`: the mode has no sources or timers.
+const RUN_FINISHED: i32 = 1;
+
 fn run() {
     let s = state();
     // SAFETY: a new manager, owned by this thread for the process's life;
@@ -162,9 +165,18 @@ fn run() {
         unsafe { send::<()>(manager, c"startUpdatingLocation") };
         while *s.wanted.lock().unwrap() {
             // SAFETY: this thread's run loop, in the default mode.
-            unsafe { CFRunLoopRunInMode(*kCFRunLoopDefaultMode(), TICK, false) };
+            let r = unsafe { CFRunLoopRunInMode(*kCFRunLoopDefaultMode(), TICK, false) };
             let fix = latest(manager);
             *s.fix.lock().unwrap() = fix;
+            if r == RUN_FINISHED {
+                // The run loop has no source (the manager added none to
+                // this thread's): it returns at once, so wait out the tick
+                // here instead of spinning.
+                let wanted = s.wanted.lock().unwrap();
+                if *wanted {
+                    drop(s.changed.wait_timeout(wanted, Duration::from_secs_f64(TICK)));
+                }
+            }
         }
         // SAFETY: as above.
         unsafe { send::<()>(manager, c"stopUpdatingLocation") };
