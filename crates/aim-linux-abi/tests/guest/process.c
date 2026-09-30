@@ -13,6 +13,7 @@
 #include <linux/seccomp.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1127,6 +1128,109 @@ static void entry_rewrites(void) {
 // Without a process table, linux-run is the init of a private pid
 // namespace: this prints its pid and a child's and exits, and the child
 // dies with it (tests/process.rs).
+/* The argument area, which a program may rewrite (zygote names its
+ * children so). */
+static char* arg_area;
+static size_t arg_len;
+
+static int named_thread_pipe = -1;
+static void* named_thread(void* arg) {
+  (void)arg;
+  prctl(PR_SET_NAME, "RenderThread");
+  struct timespec t0, t;
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t0);
+  do clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+  while ((t.tv_sec - t0.tv_sec) * 1000000000L + t.tv_nsec - t0.tv_nsec < 50000000L);
+  pid_t tid = gettid();
+  write(named_thread_pipe, &tid, sizeof(tid));
+  for (;;) pause();
+  return NULL;
+}
+
+/* proc(5) of another process: its command line as its memory holds it,
+ * its comm, and its threads under /proc/<pid>/task and /proc/<tid>. */
+static void other_procs(void) {
+  int p[2];
+  CHECK(pipe(p) == 0, "pipe");
+  pid_t pid = fork();
+  CHECK(pid >= 0, "fork");
+  if (pid == 0) {
+    close(p[0]);
+    memset(arg_area, 0, arg_len);
+    strlcpy(arg_area, "com.example.app", arg_len);
+    prctl(PR_SET_NAME, "com.example.app");
+    named_thread_pipe = p[1];
+    pthread_t t;
+    pthread_create(&t, NULL, named_thread, NULL);
+    for (;;) pause();
+  }
+  close(p[1]);
+  pid_t tid = 0;
+  CHECK(read(p[0], &tid, sizeof(tid)) == sizeof(tid) && tid != pid, "tid %d", tid);
+  char path[96], cmd[4096];
+  snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+  int fd = open(path, O_RDONLY);
+  int n = read(fd, cmd, sizeof(cmd));
+  close(fd);
+  CHECK(n == (int)arg_len && strcmp(cmd, "com.example.app") == 0, "cmdline %d '%.*s'", n, n, cmd);
+  for (int i = 16; i < n; i++) CHECK(cmd[i] == 0, "cmdline byte %d", i);
+  snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+  char* c = slurp(path);
+  CHECK(c && strcmp(c, "com.example.app\n") == 0, "comm '%s'", c ? c : "");
+
+  snprintf(path, sizeof(path), "/proc/%d/task", pid);
+  DIR* d = opendir(path);
+  CHECK(d != NULL, "opendir %s", path);
+  int seen_main = 0, seen_tid = 0, others = 0;
+  for (struct dirent* e; (e = readdir(d));) {
+    if (e->d_name[0] == '.') continue;
+    int t = atoi(e->d_name);
+    if (t == pid) seen_main++;
+    else if (t == tid) seen_tid++;
+    else others++;
+  }
+  closedir(d);
+  CHECK(seen_main == 1 && seen_tid == 1 && others == 0, "task %d %d %d", seen_main, seen_tid, others);
+  snprintf(path, sizeof(path), "/proc/%d/task/%d/comm", pid, tid);
+  c = slurp(path);
+  CHECK(c && strcmp(c, "RenderThread\n") == 0, "thread comm '%s'", c ? c : "");
+  snprintf(path, sizeof(path), "/proc/%d/task/%d/stat", pid, tid);
+  c = slurp(path);
+  char want[64];
+  int wn = snprintf(want, sizeof(want), "%d (RenderThread) ", tid);
+  CHECK(c && strncmp(c, want, wn) == 0, "thread stat '%s'", c ? c : "");
+  /* utime and stime are fields 14 and 15; the thread ran 50 ms. */
+  char* f = strchr(c, ')') + 2;
+  for (int i = 3; i < 14; i++) f = strchr(f, ' ') + 1;
+  long utime = strtol(f, &f, 10), stime = strtol(f, NULL, 10);
+  CHECK(utime + stime >= 3, "thread ticks %ld %ld", utime, stime);
+  snprintf(path, sizeof(path), "/proc/%d/task/%d/status", pid, tid);
+  c = slurp(path);
+  snprintf(want, sizeof(want), "\nPid:\t%d\n", tid);
+  CHECK(c && strncmp(c, "Name:\tRenderThread\n", 19) == 0 && strstr(c, want), "status '%s'", c ? c : "");
+  snprintf(path, sizeof(path), "/proc/%d/stat", tid);
+  c = slurp(path);
+  wn = snprintf(want, sizeof(want), "%d (RenderThread) ", tid);
+  CHECK(c && strncmp(c, want, wn) == 0, "/proc/<tid>/stat '%s'", c ? c : "");
+  snprintf(path, sizeof(path), "/proc/%d/task/%d", pid, tid + 1);
+  CHECK(access(path, F_OK) != 0 && errno == ENOENT, "a tid that is not there");
+
+  d = opendir("/proc");
+  CHECK(d != NULL, "opendir /proc");
+  int listed = 0;
+  for (struct dirent* e; (e = readdir(d));) listed += atoi(e->d_name) == tid;
+  closedir(d);
+  CHECK(listed == 0, "/proc lists only thread-group leaders");
+
+  kill(pid, SIGKILL);
+  int st;
+  CHECK(waitpid(pid, &st, 0) == pid, "waitpid");
+  snprintf(path, sizeof(path), "/proc/%d/task", pid);
+  CHECK(access(path, F_OK) != 0, "a reaped process's tasks");
+  close(p[0]);
+  printf("ok other_procs\n");
+}
+
 static void ns_init_exit(void) {
   pid_t child = fork();
   CHECK(child >= 0, "fork");
@@ -1275,6 +1379,8 @@ static void seccomp_filter(void) {
 
 int main(int argc, char** argv) {
   self_path = "/data/local/tmp/process";
+  arg_area = argv[0];
+  arg_len = argv[argc - 1] + strlen(argv[argc - 1]) + 1 - argv[0];
   // An empty argv arrives as one empty argv[0].
   if (argc == 1 && argv[0][0] == 0) return 3;
   if (strcmp(argv[0], "exit") == 0) return 0;
@@ -1321,7 +1427,7 @@ int main(int argc, char** argv) {
       {"xattrs", xattrs},           {"pf_key", pf_key},
       {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
       {"permissions", permissions}, {"peer_ids", peer_ids},
-      {"entry_rewrites", entry_rewrites},
+      {"entry_rewrites", entry_rewrites}, {"other_procs", other_procs},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},
   };
   for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {

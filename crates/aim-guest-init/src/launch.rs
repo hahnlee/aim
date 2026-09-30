@@ -577,12 +577,10 @@ impl Launcher for HostLauncher {
             let r = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
             if r == pid as i32 {
                 self.children.remove(&pid);
-                let _ = fs::remove_file(
-                    self.layout
-                        .identity_dir()
-                        .join("by-pid")
-                        .join(pid.to_string()),
-                );
+                // Its entry and its record (`docs/guest-init-contract.md`).
+                let by_pid = self.layout.identity_dir().join("by-pid");
+                let _ = fs::remove_file(by_pid.join(pid.to_string()));
+                let _ = fs::remove_file(by_pid.join(format!("{pid}.proc")));
                 out.push((pid, Exit::from_wait_status(status)));
             } else if r < 0 {
                 self.children.remove(&pid);

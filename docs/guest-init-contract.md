@@ -204,10 +204,14 @@ rlimit	13	40	40
   - An entry written by the layer also carries saved ids (`suid`, `sgid`)
     that differ from the effective ones; the permission checks between
     processes (`kill`, `setpriority`, the scheduler calls) read them.
-  - After an `execve` in place (`sys/exec.rs`) the entry also carries the
-    new program's argv (`cmdline`, the NUL-terminated arguments in hex):
-    `/proc/<pid>/cmdline` and `comm` of another process read it, since
-    the host's argv still names the program the process started with.
+  - Beside its entry each process keeps its record, `by-pid/<pid>.proc`
+    (`sys/procrec.rs`), which it maps shared: a table of its threads
+    (tid, host thread id, `comm`) and the stack pages that hold its
+    argument and environment strings, which it maps from the record.
+    `/proc/<pid>/cmdline`, `comm`, `task` and `task/<tid>/stat` of
+    another process read it, so a program that rewrites its argv or
+    renames itself (zygote's children) shows that as on Linux. The
+    record goes with the entry.
   - It is also the guest's pid namespace: `/proc` lists the processes in
     it (and the reader), and `/proc/<pid>` of any other host process does
     not exist. Every call that names a process resolves it there (another

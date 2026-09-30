@@ -332,11 +332,7 @@ fn in_place(
     super::signal::exec_reset();
     super::thread::exec_reset();
     super::misc::exec_reset();
-    super::cred::exec(
-        argv.iter()
-            .flat_map(|a| a.iter().copied().chain([0]))
-            .collect(),
-    );
+    super::cred::exec();
     match crate::load_program(target, &argv, &envp, execfn) {
         Ok((entry, sp)) => {
             ctx.x = [0; 31];
