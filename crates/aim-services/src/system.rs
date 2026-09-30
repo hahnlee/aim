@@ -7,9 +7,9 @@
 //! stands in for. What a focused app's access reads (package ownership,
 //! app-op modes, focus, whether the device is locked) is mirrored
 //! ([`crate::mirror`]), each fed by its owner's listener; noting an app op,
-//! which only records the access, is sent in the background. Permissions
-//! and the input method are asked each time (docs/system-services.md,
-//! "Mirrored state").
+//! which only records the access, is sent in the background. Permissions,
+//! the input method and an instrumentation target's app ops are asked
+//! each time (docs/system-services.md, "Mirrored state").
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Sender};
@@ -46,6 +46,15 @@ const USER_ALL: i32 = -1;
 const USER_SYSTEM: i32 = 0;
 /// `Context.DEVICE_ID_DEFAULT`.
 const DEVICE_ID_DEFAULT: i32 = 0;
+/// `UserHandle.PER_USER_RANGE`; `Process.FIRST_APPLICATION_UID`,
+/// `FIRST_SDK_SANDBOX_UID`, `LAST_SDK_SANDBOX_UID`.
+const PER_USER_RANGE: i32 = 100_000;
+const FIRST_APPLICATION_UID: i32 = 10_000;
+const FIRST_SDK_SANDBOX_UID: i32 = 20_000;
+const LAST_SDK_SANDBOX_UID: i32 = 29_999;
+/// `ActivityManagerService.STOCK_PM_FLAGS`, what `startInstrumentation`
+/// looks instrumentations up with.
+const STOCK_PM_FLAGS: i32 = 1 << 10;
 
 /// A failure to reach a service, as the exception a Java caller would
 /// see once system_server rethrew it.
@@ -67,6 +76,8 @@ pub struct System {
     packages: Mirror<(i32, String), i32>,
     /// `checkOperation`'s mode by (op, uid, package).
     modes: Mirror<(i32, i32, String), i32>,
+    /// Whether an installed instrumentation targets the uid.
+    instrumented: Mirror<i32, bool>,
     /// The focused root task's effective uid.
     focus: Mirror<(), Option<i32>>,
     /// Whether the system user's device is locked.
@@ -109,11 +120,12 @@ impl System {
                         (op, binder)
                     })
                     .collect(),
-                // A package added, removed or changed: its uid and modes
-                // with it.
+                // A package added, removed or changed: its uid, modes and
+                // instrumentations with it.
                 packages: node(remote_callback::DESCRIPTOR, false, |s| {
                     s.packages.invalidate();
                     s.modes.invalidate();
+                    s.instrumented.invalidate();
                 }),
                 locked: node(lock_listener::DESCRIPTOR, false, |s| s.locked.invalidate()),
             };
@@ -123,6 +135,7 @@ impl System {
                 listeners,
                 packages: Mirror::new(),
                 modes: Mirror::new(),
+                instrumented: Mirror::new(),
                 focus: Mirror::new(),
                 locked: Mirror::new(),
                 notes,
@@ -337,8 +350,8 @@ impl System {
         .map(|r| r == PERMISSION_GRANTED)
     }
 
-    /// Tells the package and mode mirrors of every package change
-    /// (`PackageMonitor`'s callback).
+    /// Tells the package, mode and instrumentation mirrors of every
+    /// package change (`PackageMonitor`'s callback).
     fn watch_packages(self: &Arc<Self>) -> Result<()> {
         let callback = self.listeners.packages;
         self.watch(
@@ -355,6 +368,7 @@ impl System {
             |s| {
                 s.packages.unwatch();
                 s.modes.unwatch();
+                s.instrumented.unwatch();
             },
         )
     }
@@ -397,44 +411,52 @@ impl System {
         package: &str,
         attribution_tag: Option<&str>,
     ) -> Result<i32> {
-        let mode = self.modes.get(
-            (op, uid, package.to_string()),
-            || {
-                for &(op, callback) in &self.listeners.ops {
-                    self.watch(
-                        "appops",
-                        appops::START_WATCHING_MODE_WITH_FLAGS,
-                        |p| {
-                            appops::StartWatchingModeWithFlags {
-                                op,
-                                package_name: None,
-                                flags: WATCH_FOREGROUND_CHANGES,
-                                callback: Some(callback),
-                            }
-                            .write(p)
-                        },
-                        appops::read_start_watching_mode_with_flags_reply,
-                        |s| s.modes.unwatch(),
-                    )?;
-                }
-                self.watch_packages()
-            },
-            || {
-                let args = appops::CheckOperationForDevice {
-                    code: op,
-                    uid,
-                    package_name: Some(package.into()),
-                    attribution_tag: None,
-                    virtual_device_id: 0,
-                };
-                self.call(
-                    "appops",
-                    appops::CHECK_OPERATION_FOR_DEVICE,
-                    |p| args.write(p),
-                    appops::read_check_operation_for_device_reply,
-                )
-            },
-        )?;
+        let fetch = || {
+            let args = appops::CheckOperationForDevice {
+                code: op,
+                uid,
+                package_name: Some(package.into()),
+                attribution_tag: None,
+                virtual_device_id: 0,
+            };
+            self.call(
+                "appops",
+                appops::CHECK_OPERATION_FOR_DEVICE,
+                |p| args.write(p),
+                appops::read_check_operation_for_device_reply,
+            )
+        };
+        // Shell permission delegation decides the ops of an
+        // instrumentation's target as shell's and tells no mode watcher
+        // (`AccessCheckDelegate`, #467), so a target's modes are asked.
+        let mode = if self.instrumented(uid)? {
+            fetch()?
+        } else {
+            self.modes.get(
+                (op, uid, package.to_string()),
+                || {
+                    for &(op, callback) in &self.listeners.ops {
+                        self.watch(
+                            "appops",
+                            appops::START_WATCHING_MODE_WITH_FLAGS,
+                            |p| {
+                                appops::StartWatchingModeWithFlags {
+                                    op,
+                                    package_name: None,
+                                    flags: WATCH_FOREGROUND_CHANGES,
+                                    callback: Some(callback),
+                                }
+                                .write(p)
+                            },
+                            appops::read_start_watching_mode_with_flags_reply,
+                            |s| s.modes.unwatch(),
+                        )?;
+                    }
+                    self.watch_packages()
+                },
+                fetch,
+            )?
+        };
         if note {
             let note = (
                 op,
@@ -450,6 +472,49 @@ impl System {
             )));
         }
         Ok(mode)
+    }
+
+    /// Whether an installed instrumentation targets `uid`, the only uid
+    /// `startDelegateShellPermissionIdentity` can delegate to: its target
+    /// package is one of the uid's (`startInstrumentation`), or, for an SDK
+    /// sandbox's uid, of its client's.
+    fn instrumented(self: &Arc<Self>, uid: i32) -> Result<bool> {
+        self.instrumented.get(
+            uid,
+            || self.watch_packages(),
+            || {
+                let app = uid % PER_USER_RANGE;
+                let target = if (FIRST_SDK_SANDBOX_UID..=LAST_SDK_SANDBOX_UID).contains(&app) {
+                    uid - (FIRST_SDK_SANDBOX_UID - FIRST_APPLICATION_UID)
+                } else {
+                    uid
+                };
+                let args = package::GetPackagesForUid { uid: target };
+                let packages = self.call(
+                    "package",
+                    package::GET_PACKAGES_FOR_UID,
+                    |p| args.write(p),
+                    package::read_get_packages_for_uid_reply,
+                )?;
+                for name in packages.into_iter().flatten().flatten() {
+                    let args = package::QueryInstrumentationAsUser {
+                        target_package: Some(name),
+                        flags: STOCK_PM_FLAGS,
+                        user_id: target / PER_USER_RANGE,
+                    };
+                    let found = self.call(
+                        "package",
+                        package::QUERY_INSTRUMENTATION_AS_USER,
+                        |p| args.write(p),
+                        package::read_query_instrumentation_as_user_reply::<ParceledListSlice>,
+                    )?;
+                    if found.is_some_and(|list| list.len > 0) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            },
+        )
     }
 
     /// `IAppOpsService.noteOperation`.
@@ -613,6 +678,17 @@ struct SyncNotedAppOp;
 impl ReadParcelable for SyncNotedAppOp {
     fn read_from(_: &mut Reader<'_>) -> ParcelResult<Self> {
         Ok(Self)
+    }
+}
+
+/// `ParceledListSlice`, up to its length.
+struct ParceledListSlice {
+    len: i32,
+}
+
+impl ReadParcelable for ParceledListSlice {
+    fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
+        Ok(Self { len: r.read_i32()? })
     }
 }
 
