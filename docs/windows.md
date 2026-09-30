@@ -70,7 +70,8 @@ task's window lies exactly over the task. The rest follows from that:
 `IActivityTaskManager` (`registerTaskStackListener`, `getTaskBounds`,
 `resizeTask`, `setFocusedTask`, `removeTask`, `startActivityAsUser`),
 `IWindowManager` (`get`/`setWindowingMode`, base display size and density)
-and the `ITaskStackListener` it registers. These are Java AIDL interfaces
+and the `ITaskStackListener` it registers (tasks, focus and
+`onActivityRequestedOrientationChanged`). These are Java AIDL interfaces
 with no NDK backend, so the few calls are written by hand with the
 transaction codes of the pinned AIDL (first method = 1); the image's
 `framework.jar` stubs have the same `TRANSACTION_*` values. The
@@ -100,6 +101,7 @@ drops the old connection's tasks. The mode:
 | `ACTIVITY` | guest | the activity the task was started with, `package/class` (`origActivity`, an alias, else `realActivity`) |
 | `FRONT` | guest | the task is the focused, top one |
 | `MOVED_TO_BACK` | guest | Back on its root activity moved it behind the others |
+| `ORIENTATION` | guest | an activity of it asked for landscape, portrait or neither (`setRequestedOrientation`) |
 | `REMOVED` | guest | the task is gone |
 | `SET_BOUNDS` | server | move or resize the task (`resizeTask`); the bridge answers with `TASK` |
 | `FOCUS` | server | `setFocusedTask` |
@@ -129,6 +131,22 @@ drops the old connection's tasks. The mode:
   while the app is active. A press in a window whose task is not in front
   focuses the task first and holds the touch until Android reports it in
   front (250 ms at most), so it lands on that task.
+- **Orientation.** An activity's `setRequestedOrientation` of a
+  landscape or portrait orientation (`ActivityInfo.isFixedOrientation*`)
+  turns its window's content to those proportions, its width and height
+  swapped around its centre, fitted into the screen's visible part (never
+  full screen); a request for neither (unspecified, sensor, user, ...)
+  gives it back the size the user gave it, unless the user resized it
+  since. The task follows the window as after the user's resize. A
+  manifest's `screenOrientation` needs nothing of the window: freeform
+  launches such a task with bounds of that orientation
+  (`TaskLaunchParamsModifier`).
+- **System bars.** Apps in window mode see no status or navigation bar:
+  the platform gives a floating (freeform) task's windows only caption and
+  IME insets (`InsetsPolicy`), and while a freeform task is visible it
+  shows the system bars itself (`DisplayPolicy.updateSystemBarsLw`), so an
+  app's immersive request (`WindowInsetsController.hide`) changes nothing.
+  They still get the caption bar's inset (the freeform caption, 42 dp).
 - **Minimize and close.** A minimized window's task goes behind the
   visible windows' tasks (they are focused back to front, in the screen's
   order). Closing a window removes its task; a removed task closes its

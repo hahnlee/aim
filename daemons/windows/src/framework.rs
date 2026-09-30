@@ -10,7 +10,7 @@
 //! A class associated with each remote binder writes the interface token,
 //! as a generated proxy's does.
 
-use aim_windows_core::{Error, Read, TaskInfo, write};
+use aim_windows_core::{Error, Orientation, Read, TaskInfo, write};
 use binder::binder_impl::{
     AssociateClass, BorrowedParcel, IBinderInternal, Proxy, Remotable, TransactionCode,
 };
@@ -44,6 +44,7 @@ mod listener {
     pub const ON_TASK_REMOVED: u32 = 10;
     pub const ON_TASK_MOVED_TO_FRONT: u32 = 11;
     pub const ON_TASK_DESCRIPTION_CHANGED: u32 = 12;
+    pub const ON_ACTIVITY_REQUESTED_ORIENTATION_CHANGED: u32 = 13;
     pub const ON_TASK_FOCUS_CHANGED: u32 = 23;
     pub const ON_TASK_MOVED_TO_BACK: u32 = 26;
 }
@@ -270,6 +271,8 @@ pub enum Event {
     DescriptionChanged(TaskInfo),
     Focused(i32),
     MovedToBack(TaskInfo),
+    /// An activity of the task asked for an orientation.
+    Orientation(i32, Orientation),
 }
 
 pub trait ITaskStackListener: Interface {
@@ -365,8 +368,12 @@ fn on_transact(
             }
             Event::Focused(task)
         }
-        // The other callbacks (pinned activities, snapshots, orientation,
-        // lock task mode, ...) change nothing the windows show.
+        listener::ON_ACTIVITY_REQUESTED_ORIENTATION_CHANGED => {
+            let task = data.read()?;
+            Event::Orientation(task, Orientation::from_screen_orientation(data.read()?))
+        }
+        // The other callbacks (pinned activities, snapshots, lock task
+        // mode, ...) change nothing the windows show.
         _ => return Ok(()),
     };
     listener.event(e);

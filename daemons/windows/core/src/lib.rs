@@ -71,6 +71,31 @@ pub struct TaskInfo {
     pub label: Option<String>,
 }
 
+/// What an activity's requested orientation asks of its window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Orientation {
+    /// Nothing fixed: the window keeps the user's proportions.
+    #[default]
+    Any,
+    Landscape,
+    Portrait,
+}
+
+impl Orientation {
+    /// An `ActivityInfo.SCREEN_ORIENTATION_*` value, as
+    /// `ActivityInfo.isFixedOrientationLandscape` and `...Portrait` group
+    /// them.
+    pub fn from_screen_orientation(o: i32) -> Orientation {
+        match o {
+            // LANDSCAPE, SENSOR_LANDSCAPE, REVERSE_LANDSCAPE, USER_LANDSCAPE
+            0 | 6 | 8 | 11 => Orientation::Landscape,
+            // PORTRAIT, SENSOR_PORTRAIT, REVERSE_PORTRAIT, USER_PORTRAIT
+            1 | 7 | 9 | 12 => Orientation::Portrait,
+            _ => Orientation::Any,
+        }
+    }
+}
+
 /// A `ComponentName` written by `ComponentName.writeToParcel(c, out)`:
 /// its package and class, or None for null.
 pub fn component(r: &mut impl Read) -> Result<Option<(String, String)>, Error> {
@@ -382,6 +407,28 @@ mod tests {
             running_task_info(&mut Bytes(&o.0[..20])),
             Err(Error::Malformed)
         );
+    }
+
+    #[test]
+    fn fixed_orientations() {
+        use Orientation::*;
+        for (o, want) in [
+            (-1, Any), // UNSPECIFIED
+            (0, Landscape),
+            (1, Portrait),
+            (2, Any), // USER
+            (4, Any), // SENSOR
+            (6, Landscape),
+            (7, Portrait),
+            (8, Landscape),
+            (9, Portrait),
+            (10, Any), // FULL_SENSOR
+            (11, Landscape),
+            (12, Portrait),
+            (14, Any), // LOCKED
+        ] {
+            assert_eq!(Orientation::from_screen_orientation(o), want, "{o}");
+        }
     }
 
     #[test]
