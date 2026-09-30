@@ -233,4 +233,8 @@ The whole `image` node (extraction, translation, conversion) takes about
 The Mac's security agent (Exosphere) scans a volume's freshly written
 files for a while and keeps them open, so a detach may find the volume
 busy; detaching retries for 20 s (2 min for the system image's build
-volume), then unmounts by force.
+volume), then unmounts by force. At a guest's stop the agent still held
+a database of the boot's after 21 s, so every stop waited out those 20 s:
+guest-init now syncs the data volume first (`sync_volume_np`, a full
+sync, waited for) and waits 2 s, and the forced unmount then only closes
+the agent's reads.
