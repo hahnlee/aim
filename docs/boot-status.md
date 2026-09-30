@@ -265,10 +265,12 @@ waits 0-0.07 s for it; `start zygote` runs at 1.58-1.60 s (a first
 and a second boot, host load 10) and `boot_progress_start` about 0.75 s
 later. linkerconfig runs once, at `perform_apex_config --bootstrap`:
 post-fs-data's run would see the same APEXes (#564). A first boot
-clones the image from the empty template of the `userdata/empty` node
-(docs/storage.md): its attach ends at 0.41 s and the mount does not wait
-(host load 12; creating the image held the mount up by 0.6 s before,
-#563). Between the mount and zygote-start, init runs its exec
+clones the image from the template of the `userdata/template` node
+(docs/first-boot.md): its attach ends at 0.41-0.53 s and the mount waits
+0-0.07 s (host load 12-14; creating the image held the mount up by
+0.6 s before, #563), and PackageManager's system scan reads all 287
+packages from the template's parser cache (`cached: 287`; `cached: 0`
+before). Between the mount and zygote-start, init runs its exec
 programs one after another (about 25-120 ms each, mostly starting
 `linux-run`); the longest are bpfloader (0.3-0.6 s) and
 `aconfigd-mainline init` (0.12-0.36 s) (#529). bpfloader's 0.32 s

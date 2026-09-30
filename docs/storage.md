@@ -20,8 +20,9 @@ bench`) keeps everything of `DATA` in `DATA.asif` beside it:
 - **Created on demand**: an APFS clone (`clonefile`, a copy on another
   volume) of a data template in `guest-init --userdata DIR` (`cargo aim
   boot` and aimctl pass `target/aim/userdata`, docs/first-boot.md), which
-  is instant: the empty image `DIR/empty.asif` of the `userdata/empty`
-  node. Without one, `diskutil image create blank --format ASIF` with no
+  is instant: the one a build-time first boot made for the booted image
+  and the Mac's SKU (`userdata/template` node), else the empty image
+  `DIR/empty.asif` (`userdata/empty`). Without one, `diskutil image create blank --format ASIF` with no
   filesystem, then `newfs_apfs -e` (case-sensitive APFS, volume
   `aim-data`), about 0.5 s more of a first boot (#563). Clones share the
   template's volume UUID, which the guest does not see. Its size is only

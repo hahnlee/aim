@@ -79,6 +79,7 @@ non-cargo stages are declared in code:
 | `derived-image` | `image` and the producer of every built overlay source | `image/overlay.toml` and its checked-in sources | `target/aim/derived.shadow`, attached at `target/aim/derived` |
 | `translation-cache` | `derived-image`, `host/linux-translate` | | the derived image's `translated/` |
 | `userdata/empty` | | | `target/aim/userdata/empty.asif`: the empty data image a new data directory starts as a clone of (`guest-init --userdata`, docs/first-boot.md) |
+| `userdata/template` | `derived-image`; `userdata/empty`, `translation-cache`, `host/guest-init`, `host/linux-run`, `host/aim-display`, `host/aim-binderd` (order only) | | `target/aim/userdata/userdata-<image>-<sku>.asif` and `.sha256`: what a build-time first boot of the derived image writes that a new data directory starts from (docs/first-boot.md) |
 
 The default `cargo aim build` builds every node except the HALs' test
 clients (`[package.metadata.vendor-hal] test = ...`), which `cargo aim test

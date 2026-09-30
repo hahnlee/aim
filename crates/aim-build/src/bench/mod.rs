@@ -166,16 +166,18 @@ impl Fixtures {
 }
 
 /// aim-display and guest-init of one run; dropping it stops both.
-struct Session {
-    display: Child,
-    init: Child,
+pub(crate) struct Session {
+    pub(crate) display: Child,
+    pub(crate) init: Child,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // SAFETY: signals children we started. guest-init stops its services
-        // on SIGTERM.
-        unsafe { libc::kill(self.init.id() as i32, libc::SIGTERM) };
+        // guest-init stops its services on SIGTERM.
+        if matches!(self.init.try_wait(), Ok(None)) {
+            // SAFETY: signals a child we started, not yet reaped.
+            unsafe { libc::kill(self.init.id() as i32, libc::SIGTERM) };
+        }
         let deadline = Instant::now() + Duration::from_secs(60);
         while matches!(self.init.try_wait(), Ok(None)) {
             if Instant::now() > deadline {
@@ -192,7 +194,7 @@ impl Drop for Session {
 }
 
 impl Session {
-    fn check(&mut self) -> Result<(), String> {
+    pub(crate) fn check(&mut self) -> Result<(), String> {
         match self.init.try_wait() {
             Ok(None) => Ok(()),
             Ok(Some(status)) => Err(format!("guest-init exited: {status}")),
@@ -203,18 +205,18 @@ impl Session {
 
 /// Runs guest programs through linux-run on one boot's path map and binder
 /// host.
-struct Guest {
-    linux_run: PathBuf,
-    path_map: PathBuf,
-    binder: String,
+pub(crate) struct Guest {
+    pub(crate) linux_run: PathBuf,
+    pub(crate) path_map: PathBuf,
+    pub(crate) binder: String,
     /// The host directory behind the guest's `/data`.
-    data: PathBuf,
+    pub(crate) data: PathBuf,
 }
 
 impl Guest {
     /// The program's stdout; an error on a timeout or when linux-run was
     /// killed.
-    fn run(&self, argv: &[&str], timeout: Duration) -> Result<String, String> {
+    pub(crate) fn run(&self, argv: &[&str], timeout: Duration) -> Result<String, String> {
         let mut child = Command::new(&self.linux_run)
             .arg("--root")
             .arg(aim_paths::derived_image())
@@ -257,7 +259,7 @@ impl Guest {
         Ok(out)
     }
 
-    fn sh(&self, script: &str) -> Result<String, String> {
+    pub(crate) fn sh(&self, script: &str) -> Result<String, String> {
         self.run(&["/system/bin/sh", "-c", script], Duration::from_secs(60))
     }
 
