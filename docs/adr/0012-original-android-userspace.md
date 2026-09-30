@@ -449,8 +449,9 @@ Details in [composer.md](../composer.md).
   intervals have an SD of 0.4 µs, against about 1 ms for the callback
   times. Records go to an fd the HAL reads, since host code never calls the
   guest.
-- **Client composition only, and no fences.** A present returns no fence,
-  and the HAL reports `PRESENT_FENCE_IS_NOT_RELIABLE`.
+- **Client composition only.** A present returns a present fence that
+  signals at the vsync that shows the frame, and SurfaceFlinger predicts
+  vsync from it, enabling hardware vsync only to resync (composer.md).
 - **External textures are emulated in the GLES driver.** ANGLE's Metal
   backend lacks `GL_OES_EGL_image_external`, which RenderEngine requires.
   The driver maps external targets onto 2D textures on hidden texture

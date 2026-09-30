@@ -75,7 +75,28 @@ Content files of `/proc`, `/sys` and selinuxfs are reused, ART's JIT
 memfd is no longer copied, and ashmem and `faccessat` make fewer host
 calls. What remains is mostly host per-call cost (#418), the binder
 transport (#451), credential publication (#449), eager copies of
-private file mappings (#450) and SurfaceFlinger's idle vsync (#452).
+private file mappings (#450).
+
+## Vsync off at idle (2026-09-30, #452)
+
+SurfaceFlinger kept hardware vsync on for good, because it ignored
+present fences (docs/composer.md, "Vsync"): at 120 Hz, the composer and
+SurfaceFlinger handled every vsync while nothing changed. Present fences
+now signal at the vsync that shows the frame, SurfaceFlinger predicts
+vsync from them, and aim-display runs its display link only while vsync
+is enabled. On a settled boot of a reused data image (host load 5-7), one
+idle minute, before (c0a2b9b7) and after:
+
+| Check | Before | After |
+| --- | --- | --- |
+| Composer HAL, SurfaceFlinger CPU | 0.40 s, 0.28 s | 0.01 s, 0.02 s |
+| aim-display (host) CPU | 0.22 s | 0.01 s |
+| All guest processes | 2.6 s | 1.4 s |
+| Settings cold start (3) | 255, 214, 224 ms | 239, 215, 213 ms |
+| Settings scroll (10 swipes) | 0 % janky, p50/p90/p99 7/9/12 ms | 0 % janky, 7/9/13 ms |
+
+During the scroll the display link did not run: SurfaceFlinger scheduled
+all 253 frames from its model.
 
 ## Shared code stays mapped (2026-09-30, #444)
 

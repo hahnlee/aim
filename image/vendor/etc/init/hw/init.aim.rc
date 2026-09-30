@@ -30,6 +30,11 @@ on early-init
     # pending; otherwise it presents every other vsync.
     setprop ro.surface_flinger.max_frame_buffer_acquired_buffers 3
     setprop debug.sf.enable_gl_backpressure 0
+    # Present fences signal when the frame was shown, so SurfaceFlinger
+    # keeps its vsync model with them and enables vsync only to resync.
+    # The emulator's vendor properties, which this image starts from,
+    # ignore them, and SurfaceFlinger then keeps vsync on for good.
+    setprop debug.sf.vsync_reactor_ignore_present_fences false
 
 # Partitions are directories of the derived image and /data is a host
 # directory: aim-guest-init's mount_all mounts nothing and raises the

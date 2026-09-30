@@ -152,8 +152,13 @@ pub struct Frame {
 }
 
 /// A present's fence: signaled once everything that shows the frame has
-/// shown it (each drawable, and each window host), at the latest of their
-/// times. The present itself holds one count until [`Fence::done`].
+/// shown it (each drawable, and each window host), at the display's first
+/// vsync at or after the latest of their times, as a panel's present fence
+/// signals at the refresh that starts showing the frame. SurfaceFlinger
+/// predicts vsync from these times, and not every one is a refresh's: a
+/// drawable Core Animation dropped for a newer one counts when its handler
+/// ran, and a window host when it read the frame. The present itself holds
+/// one count until [`Fence::done`].
 #[derive(Clone)]
 pub struct Fence(Arc<Mutex<(usize, i64, Option<Writer>)>>);
 
@@ -176,7 +181,7 @@ impl Fence {
             && let Some(w) = p.2.take()
         {
             let at = if p.1 > 0 { p.1 } else { vsync::monotonic_ns() };
-            w.signal_at(at, 1);
+            w.signal_at(vsync::vsync_at_or_after(at), 1);
         }
     }
 
