@@ -5,7 +5,7 @@
 #
 # Usage: tools/guest-logcat.sh [--linux-run PATH] RUNTIME_DIR [logcat args]
 #   RUNTIME_DIR  the boot's runtime directory (guest-init's --runtime,
-#                by default <data>/run)
+#                by default <data>.run)
 #   logcat args  default: -d -b all -v threadtime
 set -euo pipefail
 

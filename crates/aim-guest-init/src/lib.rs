@@ -14,7 +14,8 @@
 //!   the writable areas of the guest view, and the guest owners of their
 //!   files.
 //! - [`apex`]: `/apex/apex-info-list.xml` for the pre-flattened APEX tree.
-//! - [`executor`], [`boot`]: the `CommandExecutor` and init's main loop.
+//! - [`executor`], [`boot`]: the `CommandExecutor` and init's main loop;
+//!   [`mount`]: the data image, attached while the boot starts.
 //! - [`mac`]: the Mac's time zone, language and appearance as
 //!   `vendor.aim.mac.*` properties.
 //! - [`sku`]: the SKU a bootloader would report, from the Mac's sensors.
@@ -31,6 +32,7 @@ pub mod guest_inode;
 pub mod identity;
 pub mod launch;
 pub mod mac;
+pub mod mount;
 pub mod paths;
 pub mod props;
 pub mod propsvc;

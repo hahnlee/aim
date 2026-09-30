@@ -106,7 +106,7 @@ Mac: new DNS servers only        the next renewal (a DHCPACK with them)
   arrives on it. Such binds do not conflict with each other.
   Without a network it fails with ENETUNREACH. A renewal for an address
   the Mac no longer has is NAKed, and DhcpClient starts over.
-- **Test hook.** `<runtime>/net/simulate` (`<data>/run/net/simulate` for
+- **Test hook.** `<runtime>/net/simulate` (`<data>.run/net/simulate` for
   `cargo aim boot`) changes what the guest sees without touching the Mac:
   `down` takes the network away; `addr A/P`, `gateway G`, `dns S...` and
   `lease SECONDS` replace those values of the Mac's network. An empty or
@@ -114,8 +114,8 @@ Mac: new DNS servers only        the next renewal (a DHCPACK with them)
   Mac's real network, so a simulated address is only what Android is told.
 
 ```sh
-echo down > target/aim/boot/data/run/net/simulate   # outage
-: > target/aim/boot/data/run/net/simulate           # back
+echo down > target/aim/boot/data.run/net/simulate   # outage
+: > target/aim/boot/data.run/net/simulate           # back
 ```
 
 ## The kernel side

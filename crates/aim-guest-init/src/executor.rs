@@ -30,6 +30,7 @@ use aim_android_init::rc::{CommandSpec, Rlimit, Service, expand_props};
 
 use crate::fsops::{Effect, FsOps, parse_mode};
 use crate::launch::{Exit, LaunchSpec, Launcher};
+use crate::mount::DataMount;
 use crate::props::{Properties, decode_persistent_properties, encode_persistent_properties};
 use crate::supervisor::{Planner, StartOutcome, Supervisor, SupervisorEvent, template_service};
 
@@ -93,6 +94,8 @@ pub struct GuestExecutor {
     /// The boot's deadline (`--timeout`): a wait for a helper ends there
     /// too, as it does when a stop is requested.
     pub stop_at: Option<Instant>,
+    /// `/data`, `/metadata` and `/cache`, which `mount_all` mounts.
+    pub data: Option<Rc<RefCell<DataMount>>>,
 }
 
 impl GuestExecutor {
@@ -121,6 +124,7 @@ impl GuestExecutor {
             exec_pid: None,
             helper_timeout: Duration::from_secs(60),
             stop_at: None,
+            data: None,
         }
     }
 
@@ -174,9 +178,6 @@ impl GuestExecutor {
         match outcome {
             StartOutcome::Started { pid, spec } => {
                 let service = spec.service.clone();
-                if spec.service.starts_with("exec ") {
-                    self.exec_pid.get_or_insert(pid);
-                }
                 self.launches.push(LaunchRecord {
                     pid,
                     spec: *spec,
@@ -437,6 +438,9 @@ impl GuestExecutor {
                 return Err(error);
             }
         };
+        if blocking && let StartOutcome::Started { pid, .. } = &outcome {
+            self.exec_pid = Some(*pid);
+        }
         let effect = self.record_start(outcome);
         self.effect(effect);
         Ok(if blocking {
@@ -638,12 +642,23 @@ impl GuestExecutor {
         } else {
             "default"
         };
-        let _ = self.set_property(&format!("ro.boottime.init.mount_all.{mode}"), "0");
+        // The first mounts the data image; init records how long it took.
+        let waited = match &self.data {
+            Some(data) => data.borrow_mut().mount().inspect_err(|error| {
+                self.fatal
+                    .get_or_insert_with(|| format!("mount_all: {error}"));
+            })?,
+            None => Duration::ZERO,
+        };
+        let _ = self.set_property(
+            &format!("ro.boottime.init.mount_all.{mode}"),
+            &waited.as_millis().to_string(),
+        );
         if mode == "early" {
-            return Ok(Effect::NoOp(
-                "mount_all --early: partitions are pre-extracted into the derived image"
-                    .to_string(),
-            ));
+            return Ok(Effect::Applied(format!(
+                "mount_all --early: /data, /metadata and /cache mounted after {:.3} s; the other partitions are pre-extracted into the derived image",
+                waited.as_secs_f64()
+            )));
         }
         // userdata "mounted": queue_fs_event(FS_MGR_MNTALL_DEV_NOT_ENCRYPTED).
         let _ = self.set_property("ro.crypto.state", "unencrypted");

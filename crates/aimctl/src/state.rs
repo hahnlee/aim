@@ -100,19 +100,22 @@ impl Files {
     pub fn guest_data(&self) -> PathBuf {
         self.data.join("data")
     }
-    /// The running guest's filesystem view (guest-init's runtime
-    /// directory, `DATA/run`).
+    /// guest-init's runtime directory, `DATA.run`.
+    fn runtime(&self) -> PathBuf {
+        aim_storage::data::runtime_of(&self.data)
+    }
+    /// The running guest's filesystem view.
     pub fn path_map(&self) -> PathBuf {
-        self.data.join("run/path-map")
+        self.runtime().join("path-map")
     }
     /// The running guest's process table: a process that names it joins
     /// the guest's pid namespace.
     pub fn by_pid(&self) -> PathBuf {
-        self.data.join("run/identity/by-pid")
+        self.runtime().join("identity/by-pid")
     }
     /// init's global environment, which the guest's shells inherit.
     pub fn environ(&self) -> PathBuf {
-        self.data.join("run/environ")
+        self.runtime().join("environ")
     }
 }
 
@@ -238,9 +241,9 @@ mod tests {
         assert_eq!(files.dir(), root.join("new/data.aimctl"));
         assert_eq!(files.state(), root.join("new/data.aimctl/state"));
         assert_eq!(files.guest_lock(), root.join("new/data.lock"));
-        assert_eq!(files.path_map(), root.join("new/data/run/path-map"));
-        assert_eq!(files.by_pid(), root.join("new/data/run/identity/by-pid"));
-        assert_eq!(files.environ(), root.join("new/data/run/environ"));
+        assert_eq!(files.path_map(), root.join("new/data.run/path-map"));
+        assert_eq!(files.by_pid(), root.join("new/data.run/identity/by-pid"));
+        assert_eq!(files.environ(), root.join("new/data.run/environ"));
         fs::remove_dir_all(root).unwrap();
     }
 
