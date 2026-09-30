@@ -750,6 +750,21 @@ handlers make), not through posted AppKit events.
 | A two-finger swipe right, then momentum | `KEY_BACK` down/up only, no `REL_HWHEEL`; SearchActivity back to Settings |
 | The pointer sprite | `CURSOR` in SurfaceFlinger's HWC layers; absent from the presented frame (the display server's capture), present in `screencap` |
 
+**The Mac cursor, smart zoom and text shortcuts** (2026-09-30, #387,
+#391, #394): a window-mode boot, a window host of the server's protocol
+sending the records `aim-display`'s handlers send and reading the cursor
+records every host gets; Settings' search field (SettingsIntelligence,
+Gboard as the input method).
+
+| Check | Result |
+| --- | --- |
+| The mouse over the window, then over the field, resting at each | the host gets the arrow (48x48, hot spot (9, 7): its tip) and over the field the I-beam (48x48, hot spot (24, 22): its middle), each time the pointer crosses; typing hides the pointer, and the host gets the default cursor |
+| Typing "hello world", then a double tap (smart zoom's four touches) on "hello" and z | "z world": the double tap selected the word |
+| Cmd+Right, Option+Delete | "z ": the word before deleted |
+| abc, Option+Left, x | "z xabc" (keys a third of a second apart; with no gap Gboard applied its composed letters after the move) |
+| Cmd+Delete | "abc": deleted to the line's start |
+| Cmd+Left, Cmd+Shift+Right, q | "q": the selection replaced |
+
 A device-mode boot then, keys written into the keyboard as the display
 server sends them:
 
