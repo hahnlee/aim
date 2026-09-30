@@ -293,6 +293,11 @@ fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification
     typed(r, |r| bubble_metadata(r, files))?;
     r.read_bool()?; // allow system generated contextual actions
     r.read_i32()?; // FGS defer behavior
+    // Notification.writeToParcel ends with the PendingIntents it wrote:
+    // an ArraySet of values.
+    for _ in 0..r.read_i32()?.max(0) {
+        skip_value(r)?;
+    }
     n.complete = true;
     Ok(())
 }
@@ -367,8 +372,10 @@ fn icon(r: &mut Reader<'_>, files: &dyn Files) -> Result<Icon> {
             r.read_f32()?;
             Icon::Elsewhere
         }
-        // TYPE_DATA: its length, then a blob of it
+        // TYPE_DATA: its length, then `writeBlob` (the length again, then
+        // the blob)
         3 => {
+            r.read_i32()?;
             let len = r.read_i32()?;
             blob(r, files, len)?
                 .map(|d| Icon::Image(Image::Encoded(d)))
@@ -1032,6 +1039,19 @@ mod tests {
         p.write_i32(0); // bubble metadata
         p.write_bool(true);
         p.write_i32(0); // FGS defer behavior
+        // allPendingIntents: the content intent, twice (an ArraySet of
+        // parcelables).
+        p.write_i32(2);
+        for _ in 0..2 {
+            p.write_i32(VAL_PARCELABLE);
+            let length_at = p.position();
+            p.write_i32(0);
+            let start = p.position();
+            p.write_string16(Some("android.app.PendingIntent"));
+            p.write_binder(Some(intent));
+            let len = (p.position() - start) as i32;
+            p.set_i32_at(length_at, len);
+        }
     }
 
     #[test]
@@ -1075,6 +1095,25 @@ mod tests {
         assert_eq!(n.actions[0].title.as_deref(), Some("Reply"));
         assert_eq!(n.actions[0].inputs[0].result_key, "reply_key");
         assert_eq!(n.binders().count(), 2);
+    }
+
+    #[test]
+    fn reads_a_data_icon_in_place() {
+        let png = [0x89, b'P', b'N', b'G', 1];
+        let mut p = Parcel::new();
+        p.write_i32(3); // TYPE_DATA
+        p.write_i32(png.len() as i32);
+        p.write_i32(png.len() as i32); // writeBlob: its length,
+        p.write_i32(0); // BLOB_INPLACE,
+        p.write_raw(&png, &[]); // then the bytes, padded
+        p.write_i32(0); // no tint
+        p.write_i32(9);
+        let mut r = Reader::new(p.data(), p.objects());
+        assert_eq!(
+            icon(&mut r, &NoFiles).unwrap(),
+            Icon::Image(Image::Encoded(png.to_vec()))
+        );
+        assert_eq!(r.remaining(), 0);
     }
 
     #[test]
