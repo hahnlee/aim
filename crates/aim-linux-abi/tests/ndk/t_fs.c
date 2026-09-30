@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -147,6 +148,44 @@ static void at_calls(void) {
   CHECK(access("/system/build.prop", W_OK) == -1 && errno == EROFS);
   close(fd);
   close(dfd);
+}
+
+// A fork child knows the owners its parent read, and sees a later chown
+// or chmod by either process, as every process sees one inode.
+static void owners_across_fork(void) {
+  int fd = make("owned", "x");
+  CHECK(fd >= 0);
+  close(fd);
+  CHECK(chown(p("owned"), 10123, 10124) == 0 && chmod(p("owned"), 0640) == 0);
+  struct stat st;
+  CHECK(stat(p("owned"), &st) == 0 && st.st_uid == 10123 && (st.st_mode & 0777) == 0640);
+  int go[2], done[2];
+  CHECK(pipe(go) == 0 && pipe(done) == 0);
+  fflush(stdout);
+  FORK_OR_SKIP(c);
+  if (c == 0) {
+    char b;
+    if (stat(p("owned"), &st) != 0 || st.st_uid != 10123 || st.st_gid != 10124 ||
+        (st.st_mode & 0777) != 0640)
+      _exit(1);
+    if (write(done[1], "r", 1) != 1 || read(go[0], &b, 1) != 1) _exit(2);
+    if (stat(p("owned"), &st) != 0 || (st.st_mode & 0777) != 0600 || st.st_uid != 2000) _exit(3);
+    _exit(chmod(p("owned"), 0604) == 0 ? 0 : 4);
+  }
+  char b;
+  CHECK(read(done[0], &b, 1) == 1);
+  CHECK(chmod(p("owned"), 0600) == 0 && chown(p("owned"), 2000, -1) == 0);
+  CHECK(write(go[1], "g", 1) == 1);
+  int status;
+  CHECK(waitpid(c, &status, 0) == c && WIFEXITED(status));
+  if (WEXITSTATUS(status)) printf("child failed at step %d\n", WEXITSTATUS(status));
+  CHECK(WEXITSTATUS(status) == 0);
+  CHECK(stat(p("owned"), &st) == 0 && (st.st_mode & 0777) == 0604 && st.st_uid == 2000);
+  close(go[0]);
+  close(go[1]);
+  close(done[0]);
+  close(done[1]);
+  unlink(p("owned"));
 }
 
 static void rename2(void) {
@@ -314,6 +353,7 @@ int main(int argc, char** argv) {
   RUN(stat_layout);
   RUN(getdents_types);
   RUN(at_calls);
+  RUN(owners_across_fork);
   RUN(rename2);
   RUN(sizes_and_sync);
   RUN(copies);

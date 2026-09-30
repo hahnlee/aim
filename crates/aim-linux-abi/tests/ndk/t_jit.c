@@ -1,7 +1,8 @@
 // Application JITs: V8's code range pattern (a large PROT_NONE
 // reservation, aligned by over-reserving and trimming, made RWX with
-// mprotect, then written and run), RWX mmaps, and threads and fork
-// children running JIT code.
+// mprotect, then written and run), RWX mmaps, threads and fork children
+// running JIT code, and ART's memfd views.
+#include <fcntl.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -195,11 +196,49 @@ static void fork_child(void) {
   munmap(p, PG);
 }
 
+// ART's JIT cache: one memfd mapped as data (RW), code (RX) and the
+// code's writable alias (RW). Every view, however it got its address,
+// shows the same memory once one is executable, and a private mapping of
+// the memfd is a copy-on-write view of its contents.
+static void memfd_views(void) {
+  int fd = memfd_create("jit-cache", MFD_ALLOW_SEALING);
+  CHECK(fd >= 0 && ftruncate(fd, 4 * PG) == 0);
+  char* data = mmap(NULL, 2 * PG, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  char* alias = mmap(NULL, 2 * PG, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 2 * PG);
+  CHECK(data != MAP_FAILED && alias != MAP_FAILED);
+  data[0] = 'd';
+  char* priv = mmap(NULL, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+  CHECK(priv != MAP_FAILED && priv[0] == 'd');
+  priv[0] = 'p';
+  CHECK(data[0] == 'd');
+  munmap(priv, PG);
+  // The alias moves before the code view exists.
+  char* spot = mmap(NULL, 2 * PG, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(spot != MAP_FAILED);
+  char* moved = mremap(alias, 2 * PG, 2 * PG, MREMAP_MAYMOVE | MREMAP_FIXED, spot);
+  CHECK(moved == spot);
+  char* code = mmap(NULL, 2 * PG, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 2 * PG);
+  CHECK(code != MAP_FAILED);
+  uint32_t* c = (uint32_t*)moved;
+  c[0] = 0x52800000u | (60u << 5);  // mov w0, #60
+  c[1] = 0xd65f03c0u;               // ret
+  __builtin___clear_cache(code, code + 8);
+  CHECK(((fn_t)code)() == 60);
+  data[1] = 'e';
+  char b[2];
+  CHECK(pread(fd, b, 2, 0) == 2 && b[0] == 'd' && b[1] == 'e');
+  munmap(data, 2 * PG);
+  munmap(moved, 2 * PG);
+  munmap(code, 2 * PG);
+  close(fd);
+}
+
 int main(void) {
   RUN(v8_code_range);
   RUN(rwx_mmap);
   RUN(self_modifying);
   RUN(threads);
   RUN(fork_child);
+  RUN(memfd_views);
   DONE();
 }

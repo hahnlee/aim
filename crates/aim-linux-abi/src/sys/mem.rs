@@ -287,11 +287,14 @@ pub fn mmap(a: [u64; 6]) -> i64 {
             Err(e) => return e,
         }
     } else if shared {
-        if !anon
-            && let Some(r) = super::memfd::map_shared(fd, addr, len, host_prot(prot), fixed, off)
-        {
-            return r;
-        }
+        let memfd = if anon {
+            None
+        } else {
+            match super::memfd::map_shared(fd, addr, len, host_prot(prot), fixed, off) {
+                super::memfd::Shared::Done(r) => return r,
+                super::memfd::Shared::File(k) => k,
+            }
+        };
         let f = hflags | libc::MAP_SHARED | if anon { libc::MAP_ANON } else { 0 };
         match host_mmap(
             addr,
@@ -301,7 +304,12 @@ pub fn mmap(a: [u64; 6]) -> i64 {
             if anon { -1 } else { fd },
             off as i64,
         ) {
-            Ok(b) => (b, Finish::Nothing),
+            Ok(b) => {
+                if let Some(k) = memfd {
+                    super::memfd::note_view(k, b, len, off);
+                }
+                (b, Finish::Nothing)
+            }
             Err(e) => return e,
         }
     } else if kind == MAP_PRIVATE {
@@ -490,15 +498,14 @@ pub fn run_deferred_unmaps() -> usize {
 }
 
 /// Whether private mappings of `fd` can map the file itself: a regular
-/// file other than a memfd, whose pages move to anonymous memory once it
-/// has an executable view (`memfd`).
+/// file, but not a memfd whose pages moved to anonymous memory for an
+/// executable view (`memfd`). Copying a 16 MiB memfd cost 1.6 ms (#501).
 fn maps_file(fd: i32) -> bool {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fstat into a local buffer.
-    let regular = unsafe {
-        let mut st: libc::stat = std::mem::zeroed();
-        libc::fstat(fd, &mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFREG
-    };
-    regular && !super::memfd::is_memfd(fd)
+    let regular =
+        unsafe { libc::fstat(fd, &mut st) } == 0 && st.st_mode & libc::S_IFMT == libc::S_IFREG;
+    regular && !super::memfd::converted(&st)
 }
 
 /// Whether the region at `addr` maps a file whose pages are never
@@ -829,6 +836,7 @@ fn map_file_at(
 fn move_to(old: u64, old_len: u64, new: u64, new_len: u64, keep_old: bool) -> Result<(), i64> {
     let moved = old_len.min(new_len);
     remap_shared(new, old, moved)?;
+    super::memfd::note_alias(old, new, moved);
     copies::moved(old, new, moved);
     if new_len > old_len {
         extend_at(new + old_len, new_len - old_len, new + old_len - PAGE, true)?;
@@ -875,7 +883,10 @@ pub fn mremap(a: [u64; 6]) -> i64 {
             Err(e) => return e,
         };
         return match remap_shared(at, old, new_len) {
-            Ok(()) => at as i64,
+            Ok(()) => {
+                super::memfd::note_alias(old, at, new_len);
+                at as i64
+            }
             Err(e) => e,
         };
     }
