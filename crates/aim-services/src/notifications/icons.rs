@@ -85,6 +85,7 @@ impl Bridge {
             app: &app,
             framework: framework.as_ref(),
             theme: info.theme as u32,
+            night: false,
         };
         aim_apps::icon::picture(&res, &Value::Ref(id as u32), SIZE).map(Image::Encoded)
     }

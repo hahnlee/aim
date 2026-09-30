@@ -54,12 +54,14 @@ impl Apk {
     }
 }
 
-/// An app's resources: its own table, the framework's, and a theme.
+/// An app's resources: its own table, the framework's, a theme, and the
+/// night mode their configurations are chosen for.
 pub struct Resources<'a> {
     pub app: &'a Apk,
     pub framework: Option<&'a Apk>,
     /// The style whose attributes `?attr` values take.
     pub theme: u32,
+    pub night: bool,
 }
 
 /// `android:attr/theme`: `<application android:theme>`.
@@ -81,7 +83,7 @@ impl<'a> Resources<'a> {
     /// files.
     pub fn entry(&self, id: u32) -> Option<(Entry, Config, &'a Apk)> {
         let (apk, table) = self.table_of(id)?;
-        let (e, c) = table.get(id)?;
+        let (e, c) = table.get(id, self.night)?;
         Some((e.clone(), c, apk))
     }
 
@@ -121,6 +123,32 @@ impl<'a> Resources<'a> {
             style = parent;
         }
         None
+    }
+
+    /// A color, or a color state list's color for no state, as ARGB.
+    pub fn color(&self, v: &Value) -> Option<u32> {
+        match self.resolve(v)? {
+            (Value::Color(c), _) => Some(c),
+            (Value::String(path), apk) if path.ends_with(".xml") => {
+                let e = res::xml(&apk.file(&path).ok()?).ok()?;
+                if e.name != "selector" {
+                    return None;
+                }
+                let item = e
+                    .children
+                    .iter()
+                    .rev()
+                    .find(|i| !i.attrs.iter().any(|a| a.name.starts_with("state_")))?;
+                let c = self.color(item.named("color")?)?;
+                let alpha = match item.named("alpha").and_then(|a| self.resolve(a)) {
+                    Some((Value::Float(a), _)) => a,
+                    _ => 1.0,
+                };
+                let a = ((c >> 24) as f32 * alpha).round() as u32;
+                Some(a << 24 | c & 0x00ff_ffff)
+            }
+            _ => None,
+        }
     }
 
     /// A string resource's text.

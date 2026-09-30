@@ -203,12 +203,18 @@ pub fn run(package: String, activity: String, socket: &Path) -> ! {
         BACKGROUND.store(true, Ordering::Relaxed);
         set_policy(ACCESSORY);
     }
-    crate::un::start();
     let device = crate::metal::device();
     if device.is_null() {
         fail("no Metal device");
     }
     crate::windows::start(device);
+    // The splash shows first, before the renderer, the notification
+    // center and the server's connection are set up (#605); the launch
+    // goes once connected.
+    if !BACKGROUND.load(Ordering::Relaxed) && !activity.is_empty() {
+        crate::windows::splash();
+    }
+    crate::un::start();
     let renderer = Renderer::new(device).unwrap_or_else(|e| fail(&format!("shader: {e}")));
     let Ok(mut sock) = UnixStream::connect(socket) else {
         fail(&format!(

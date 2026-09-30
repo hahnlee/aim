@@ -918,9 +918,9 @@ Window-mode boots of 2026-10-01 (#463):
 
 | Check | Result |
 | --- | --- |
-| Splash (D4) | opening YouTube.app cold: its window with the YouTube icon on a plain background 1.1 s after `open` (#605), YouTube's UI in it about a second later |
+| Splash (D4) | opening YouTube.app cold: its window with the YouTube icon on YouTube's splash color (white; Clock's black), YouTube's UI in it about a second later. The host shows the splash before it sets up its renderer, notification center and connection (#605): 0.22-0.26 s from `open` to the window on screen on an idle Mac, against 0.28-0.31 s before (a probe shim); the first recording's 1.1 s was at load 7. The color is the launcher activity's `windowSplashScreenBackground` or `windowBackground`, light and dark (#606) |
 | HOME (D6) | `am start -c HOME` over Settings: the launcher (or the placeholder home) in front, Settings' window gone from the screen (a window of the server: minimized; a shim's app: hidden) |
-| The lightweight shell, a check-only variant (`cargo aim build --variant lightweight-shell`) | boots to `sys.boot_completed` (fresh data 10.5 s, repeat 4.6-4.7 s against the default image's 5.1 s, at a higher load); HOME is the placeholder `SystemUserHomeActivity`; no SystemUI, launcher or wallpaper process, but `googlequicksearchbox:search` (#604); the overlay's services absent; standard Mac title bars (caption 0, #545); CtsWallpaperTestCases fails in setUp without ImageWallpaper (#603) |
+| The lightweight shell, a check-only variant (`cargo aim build --variant lightweight-shell`) | boots to `sys.boot_completed` (fresh data 10.5 s, repeat 4.6-4.7 s against the default image's 5.1 s, at a higher load); HOME is the placeholder `SystemUserHomeActivity`; no SystemUI, launcher or wallpaper picker process; `googlequicksearchbox:search` runs, bound by the default assistant's `:interactor` (#604); the overlay's services absent; standard Mac title bars (caption 0, #545); CtsWallpaperTestCases fails in setUp without ImageWallpaper (#603) |
 
 **Notifications** (2026-09-30, #4, [notifications.md](notifications.md)):
 guest-init's notification bridge registers with NotificationManagerService

@@ -13,6 +13,11 @@ const ATTR_NAME: u32 = 0x0101_0003;
 const ATTR_ENABLED: u32 = 0x0101_000e;
 const ATTR_VERSION_CODE: u32 = 0x0101_021b;
 const ATTR_TARGET_ACTIVITY: u32 = 0x0101_0202;
+const ATTR_WINDOW_BACKGROUND: u32 = 0x0101_0054;
+const ATTR_SPLASH_BACKGROUND: u32 = 0x0101_062c;
+/// `Theme.DeviceDefault.DayNight`: the splash screen's theme for an
+/// activity without one.
+const THEME_DEFAULT: u32 = 0x0103_02e3;
 
 /// An entry a launcher lists: one launcher activity of an app.
 #[derive(Clone, Debug)]
@@ -31,6 +36,9 @@ pub struct App {
     /// The launcher activity's icon, else the application's.
     pub icon: Option<Value>,
     pub theme: u32,
+    /// The launcher activity's theme (or its alias target's), else the
+    /// application's; 0 for none.
+    pub activity_theme: u32,
 }
 
 /// `android:enabled`, which may be a (configuration-dependent) resource.
@@ -105,6 +113,7 @@ pub fn read(
         app: apk,
         framework,
         theme,
+        night: false,
     };
     if !enabled(&res, application) {
         return Ok(Vec::new());
@@ -156,6 +165,14 @@ pub fn read(
             .find_map(|c| c.attr(ATTR_ICON))
             .or(application.attr(ATTR_ICON))
             .cloned();
+        let activity_theme = chain
+            .iter()
+            .flatten()
+            .find_map(|c| match c.attr(ATTR_THEME) {
+                Some(Value::Ref(id)) => Some(*id),
+                _ => None,
+            })
+            .unwrap_or(theme);
         let activity = class_name(package, activity);
         // A class listed twice (an activity and an alias of one name) is
         // one entry.
@@ -171,6 +188,7 @@ pub fn read(
             activity,
             icon,
             theme,
+            activity_theme,
         });
     }
     // The one named as the application, else the first.
@@ -201,6 +219,7 @@ pub fn system(framework: &Apk) -> Result<Option<App>> {
         app: framework,
         framework: None,
         theme,
+        night: false,
     };
     let label = application
         .attr(ATTR_LABEL)
@@ -219,6 +238,7 @@ pub fn system(framework: &Apk) -> Result<Option<App>> {
         activity: String::new(),
         icon: application.attr(ATTR_ICON).cloned(),
         theme,
+        activity_theme: theme,
     }))
 }
 
@@ -229,8 +249,36 @@ impl App {
             app: apk,
             framework,
             theme: self.theme,
+            night: false,
         };
         let icon = Icon::of(&res, self.icon.as_ref()?)?;
         crate::icon::icns(&res, &icon)
+    }
+
+    /// The background of the launcher activity's splash screen, as
+    /// Android's starting window draws it, in night mode or not (ARGB):
+    /// its theme's `windowSplashScreenBackground`, else its
+    /// `windowBackground` if that is a color. None when neither is, or
+    /// the color is transparent.
+    pub fn splash_background(
+        &self,
+        apk: &Apk,
+        framework: Option<&Apk>,
+        night: bool,
+    ) -> Option<u32> {
+        let res = Resources {
+            app: apk,
+            framework,
+            theme: match self.activity_theme {
+                0 => THEME_DEFAULT,
+                t => t,
+            },
+            night,
+        };
+        let visible = |c: &u32| c >> 24 != 0;
+        res.color(&Value::Attr(ATTR_SPLASH_BACKGROUND))
+            .filter(visible)
+            .or_else(|| res.color(&Value::Attr(ATTR_WINDOW_BACKGROUND)))
+            .filter(visible)
     }
 }
