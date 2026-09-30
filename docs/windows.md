@@ -229,8 +229,11 @@ Settings.app/Contents/
   quarters of the body on a white plate. The drawables are Android's own
   resources, read from the APK: PNG and WebP bitmaps, vector drawables
   (paths, groups, clip paths, strokes, gradients, tints), `inset`,
-  `rotate` (at level 0, as the Clock's hands), `layer-list`, `shape`,
-  `selector`, colors and theme attributes. The `.icns` has every size
+  `layer-list`, `shape`, `selector`, colors and theme attributes, and the
+  level drawables at their level (0 unless a `scale`'s `android:level`
+  sets one), as Android draws them: `rotate` at its angle for the level
+  (the Clock's hands), `level-list`'s item for it, `scale` shrunk by it
+  and `clip` cut to it (neither draws anything at level 0). The `.icns` has every size
   from 16 to 1024 (1x and 2x), drawn at its own resolution.
 - **Install and uninstall.** `aim-apps shims --watch` keeps a directory
   holding one shim per launcher entry (an enabled MAIN/LAUNCHER activity or
