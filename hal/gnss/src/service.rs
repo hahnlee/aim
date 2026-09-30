@@ -7,7 +7,15 @@
 //!
 //! Fixes are polled from the host at the requested interval (at least
 //! [`MIN_INTERVAL`]), and each new one is delivered once.
+//!
+//! As a receiver's chip reports asynchronously, every callback of a session
+//! (status and location) is delivered by the [`Reporter`]'s own thread,
+//! after the call that caused it has returned and with no lock of the HAL
+//! held. The framework calls `start` and `stop` holding its own locks, and
+//! its callbacks take them; a callback inside such a call re-enters
+//! system_server on the calling thread and deadlocks (#459).
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -110,9 +118,64 @@ pub fn to_location(f: &Fix, now_ns: i64) -> Option<GnssLocation> {
     })
 }
 
+/// A callback of a session, queued for the [`Reporter`].
+#[derive(Debug)]
+pub enum Report {
+    Status(GnssStatusValue),
+    Location(GnssLocation),
+}
+
+#[derive(Default)]
+struct Reports {
+    callback: Option<Strong<dyn IGnssCallback>>,
+    queue: VecDeque<Report>,
+}
+
+/// Delivers [`Report`]s in order to the framework's callback, from its own
+/// thread.
+#[derive(Clone, Default)]
+pub struct Reporter(Arc<(Mutex<Reports>, Condvar)>);
+
+impl Reporter {
+    /// Replaces the callback; reports still queued go to the new one, or
+    /// nowhere.
+    fn set_callback(&self, callback: Option<Strong<dyn IGnssCallback>>) {
+        self.0.0.lock().unwrap().callback = callback;
+    }
+
+    pub fn post(&self, report: Report) {
+        self.0.0.lock().unwrap().queue.push_back(report);
+        self.0.1.notify_one();
+    }
+
+    /// Delivers the queued reports; never returns.
+    pub fn run(&self) {
+        let (lock, cv) = &*self.0;
+        loop {
+            let mut reports = lock.lock().unwrap();
+            let report = loop {
+                match reports.queue.pop_front() {
+                    Some(r) => break r,
+                    None => reports = cv.wait(reports).unwrap(),
+                }
+            };
+            let Some(cb) = reports.callback.clone() else {
+                continue;
+            };
+            drop(reports);
+            let delivered = match &report {
+                Report::Status(s) => cb.gnssStatusCb(*s),
+                Report::Location(l) => cb.gnssLocationCb(l),
+            };
+            if let Err(e) = delivered {
+                log::warn!("cannot deliver {report:?}: {e}");
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
-    callback: Option<Strong<dyn IGnssCallback>>,
     running: bool,
     interval: Duration,
     single: bool,
@@ -125,12 +188,17 @@ struct State {
 #[derive(Clone, Default)]
 pub struct Gnss {
     state: Arc<(Mutex<State>, Condvar)>,
+    reporter: Reporter,
 }
 
 impl Interface for Gnss {}
 
 impl Gnss {
-    /// Delivers new host fixes while a session runs; never returns.
+    pub fn reporter(&self) -> Reporter {
+        self.reporter.clone()
+    }
+
+    /// Reports new host fixes while a session runs; never returns.
     pub fn run(&self) {
         let (lock, cv) = &*self.state;
         let mut state = lock.lock().unwrap();
@@ -148,21 +216,13 @@ impl Gnss {
             let location = fix.ok().and_then(|f| to_location(&f, boottime_ns()));
             if let Some(l) = location.filter(|l| l.timestampMillis > state.last_ms) {
                 state.last_ms = l.timestampMillis;
-                if let Some(cb) = &state.callback {
-                    let _ = cb.gnssLocationCb(&l);
-                }
+                self.reporter.post(Report::Location(l));
                 if state.single {
                     self.stop_locked(&mut state);
                 }
             }
             let interval = state.interval.max(MIN_INTERVAL);
             state = cv.wait_timeout(state, interval).unwrap().0;
-        }
-    }
-
-    fn status(state: &State, status: GnssStatusValue) {
-        if let Some(cb) = &state.callback {
-            let _ = cb.gnssStatusCb(status);
         }
     }
 
@@ -174,8 +234,10 @@ impl Gnss {
         if let Err(e) = guest::location_updates(false) {
             log::warn!("host call location.stop failed: errno {}", e.0);
         }
-        Self::status(state, GnssStatusValue::SESSION_END);
-        Self::status(state, GnssStatusValue::ENGINE_OFF);
+        self.reporter
+            .post(Report::Status(GnssStatusValue::SESSION_END));
+        self.reporter
+            .post(Report::Status(GnssStatusValue::ENGINE_OFF));
     }
 }
 
@@ -190,20 +252,24 @@ fn log_authorization(a: u32) {
 
 impl IGnss for Gnss {
     fn setCallback(&self, callback: &Strong<dyn IGnssCallback>) -> binder::Result<()> {
+        // Capabilities and system info are answered within setCallback, as
+        // AOSP's default IGnss does: the framework initializes the HAL with
+        // it, before any session and outside the locks its session
+        // callbacks take.
         let _ = callback.gnssSetCapabilitiesCb(CAPABILITY_SCHEDULING);
         let _ = callback.gnssSetSystemInfoCb(&GnssSystemInfo {
             // The model year of the Mac's positioning is unknown.
             yearOfHw: 0,
             name: "darwin CoreLocation".into(),
         });
-        self.state.0.lock().unwrap().callback = Some(callback.clone());
+        self.reporter.set_callback(Some(callback.clone()));
         Ok(())
     }
 
     fn close(&self) -> binder::Result<()> {
         let mut state = self.state.0.lock().unwrap();
         self.stop_locked(&mut state);
-        state.callback = None;
+        self.reporter.set_callback(None);
         Ok(())
     }
 
@@ -269,8 +335,10 @@ impl IGnss for Gnss {
             Status::new_exception(ExceptionCode::ILLEGAL_STATE, None)
         })?;
         state.running = true;
-        Self::status(&state, GnssStatusValue::ENGINE_ON);
-        Self::status(&state, GnssStatusValue::SESSION_BEGIN);
+        self.reporter
+            .post(Report::Status(GnssStatusValue::ENGINE_ON));
+        self.reporter
+            .post(Report::Status(GnssStatusValue::SESSION_BEGIN));
         cv.notify_all();
         Ok(())
     }
@@ -341,6 +409,137 @@ impl IGnss for Gnss {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use android_hardware_gnss::aidl::android::hardware::gnss::IGnssCallback::{
+        BnGnssCallback, GnssSvInfo::GnssSvInfo,
+    };
+    use binder::BinderFeatures;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::thread::{self, ThreadId};
+
+    /// Plays the framework: each session callback takes `lock`, as
+    /// `GnssStatusProvider.onReportStatus` takes its multiplexer's lock.
+    struct Framework {
+        lock: Arc<Mutex<()>>,
+        reports: Mutex<Sender<(String, ThreadId)>>,
+    }
+
+    impl Interface for Framework {}
+
+    impl Framework {
+        fn record(&self, what: String) -> binder::Result<()> {
+            let _held = self.lock.lock().unwrap();
+            let _ = self
+                .reports
+                .lock()
+                .unwrap()
+                .send((what, thread::current().id()));
+            Ok(())
+        }
+    }
+
+    impl IGnssCallback for Framework {
+        fn gnssSetCapabilitiesCb(&self, _: i32) -> binder::Result<()> {
+            Ok(())
+        }
+        fn gnssStatusCb(&self, status: GnssStatusValue) -> binder::Result<()> {
+            self.record(format!("{status:?}"))
+        }
+        fn gnssSvStatusCb(&self, _: &[GnssSvInfo]) -> binder::Result<()> {
+            Ok(())
+        }
+        fn gnssLocationCb(&self, l: &GnssLocation) -> binder::Result<()> {
+            self.record(format!("location {}", l.timestampMillis))
+        }
+        fn gnssNmeaCb(&self, _: i64, _: &str) -> binder::Result<()> {
+            Ok(())
+        }
+        fn gnssAcquireWakelockCb(&self) -> binder::Result<()> {
+            Ok(())
+        }
+        fn gnssReleaseWakelockCb(&self) -> binder::Result<()> {
+            Ok(())
+        }
+        fn gnssSetSystemInfoCb(&self, _: &GnssSystemInfo) -> binder::Result<()> {
+            Ok(())
+        }
+        fn gnssRequestTimeCb(&self) -> binder::Result<()> {
+            Ok(())
+        }
+        fn gnssRequestLocationCb(&self, _: bool, _: bool) -> binder::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn framework(gnss: &Gnss) -> (Arc<Mutex<()>>, Receiver<(String, ThreadId)>) {
+        let (tx, rx) = channel();
+        let lock = Arc::new(Mutex::new(()));
+        let cb = BnGnssCallback::new_binder(
+            Framework {
+                lock: lock.clone(),
+                reports: Mutex::new(tx),
+            },
+            BinderFeatures::default(),
+        );
+        gnss.setCallback(&cb).unwrap();
+        let reporter = gnss.reporter();
+        thread::spawn(move || reporter.run());
+        (lock, rx)
+    }
+
+    fn next(rx: &Receiver<(String, ThreadId)>) -> (String, ThreadId) {
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("no report within 10 s")
+    }
+
+    #[test]
+    fn stop_reports_after_it_returns_from_another_thread() {
+        let gnss = Gnss::default();
+        let (lock, rx) = framework(&gnss);
+        // Fixes keep coming while sessions start and stop.
+        let reporter = gnss.reporter();
+        thread::spawn(move || {
+            for ms in 0.. {
+                reporter.post(Report::Location(GnssLocation {
+                    timestampMillis: ms,
+                    ..Default::default()
+                }));
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        for _ in 0..50 {
+            gnss.state.0.lock().unwrap().running = true;
+            {
+                // The framework calls stop holding the lock its callbacks
+                // take; a callback within stop would never return.
+                let _held = lock.lock().unwrap();
+                gnss.stop().unwrap();
+            }
+            let mut statuses = Vec::new();
+            while statuses.len() < 2 {
+                let (what, thread) = next(&rx);
+                assert_ne!(thread, thread::current().id());
+                if !what.starts_with("location") {
+                    statuses.push(what);
+                }
+            }
+            assert_eq!(statuses, ["SESSION_END", "ENGINE_OFF"]);
+        }
+    }
+
+    #[test]
+    fn reports_arrive_in_order() {
+        let gnss = Gnss::default();
+        let (_lock, rx) = framework(&gnss);
+        let reporter = gnss.reporter();
+        reporter.post(Report::Status(GnssStatusValue::SESSION_BEGIN));
+        reporter.post(Report::Location(GnssLocation {
+            timestampMillis: 7,
+            ..Default::default()
+        }));
+        reporter.post(Report::Status(GnssStatusValue::SESSION_END));
+        let got: Vec<String> = (0..3).map(|_| next(&rx).0).collect();
+        assert_eq!(got, ["SESSION_BEGIN", "location 7", "SESSION_END"]);
+    }
 
     fn fix() -> Fix {
         Fix {

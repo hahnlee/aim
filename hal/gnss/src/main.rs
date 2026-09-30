@@ -30,6 +30,8 @@ fn main() {
         std::process::exit(1);
     }
     log::info!("registered {INSTANCE}");
+    let reporter = gnss.reporter();
+    std::thread::spawn(move || reporter.run());
     std::thread::spawn(move || gnss.run());
     binder::ProcessState::join_thread_pool();
 }
