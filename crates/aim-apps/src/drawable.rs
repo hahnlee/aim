@@ -1,7 +1,9 @@
 //! Drawing an app's drawables the way Android draws them, for its icon:
 //! colors, bitmaps (PNG, WebP), vector drawables with their groups, clip
 //! paths, strokes and gradients, and the containers launcher icons use
-//! (`inset`, `rotate`, `layer-list`, `bitmap`, `shape`, `selector`, ...).
+//! (`inset`, `rotate`, `layer-list`, `bitmap`, `shape`, `selector`, ...),
+//! with levels as Android sets them (0 unless a `scale` sets one), so a
+//! `clip` or `scale` at level 0 draws nothing.
 //!
 //! Lengths in dp are drawn at the canvas's scale for the drawable's frame;
 //! theme attributes resolve against the app's theme.
@@ -12,6 +14,12 @@ use crate::res::{Element, Value};
 
 /// How deep drawables may nest (a drawable referring to itself ends).
 const MAX_DEPTH: u32 = 16;
+
+/// A drawable's highest level (`Drawable.MAX_LEVEL`).
+const MAX_LEVEL: f64 = 10000.0;
+
+/// `Gravity.LEFT`, the default of `scale` and `clip`.
+const LEFT: i32 = 3;
 
 pub struct Drawer<'a> {
     pub res: &'a Resources<'a>,
@@ -36,16 +44,18 @@ fn num(e: &Element, name: &str, default: f64) -> f64 {
 impl Drawer<'_> {
     /// Draw drawable `v` into `r`. Returns whether anything could be drawn.
     pub fn draw(&self, v: &Value, r: Rect) -> bool {
-        self.draw_at(v, r, 0)
+        self.draw_at(v, r, 0, 0)
     }
 
     /// Draw an inline drawable of the app's (an adaptive icon's layer
     /// written in place) into `r`.
     pub fn draw_element(&self, e: &Element, r: Rect) -> bool {
-        self.draw_xml(e, self.res.app, r, 1)
+        self.draw_xml(e, self.res.app, r, 1, 0)
     }
 
-    fn draw_at(&self, v: &Value, r: Rect, depth: u32) -> bool {
+    /// Draw `v` at `level` (0 to 10000; a drawable's is 0 unless a
+    /// container sets it).
+    fn draw_at(&self, v: &Value, r: Rect, depth: u32, level: u32) -> bool {
         if depth > MAX_DEPTH {
             return false;
         }
@@ -59,7 +69,7 @@ impl Drawer<'_> {
             }
             Value::String(path) if path.ends_with(".xml") => match apk.file(&path) {
                 Ok(b) => match crate::res::xml(&b) {
-                    Ok(e) => self.draw_xml(&e, apk, r, depth + 1),
+                    Ok(e) => self.draw_xml(&e, apk, r, depth + 1, level),
                     Err(_) => false,
                 },
                 Err(_) => false,
@@ -76,19 +86,29 @@ impl Drawer<'_> {
     }
 
     /// The drawable an element names (`android:drawable`) or holds.
-    fn inner(&self, e: &Element, apk: &Apk, r: Rect, depth: u32) -> bool {
+    fn inner(&self, e: &Element, apk: &Apk, r: Rect, depth: u32, level: u32) -> bool {
         if let Some(v) = e.named("drawable") {
-            return self.draw_at(v, r, depth);
+            return self.draw_at(v, r, depth, level);
         }
         e.children
             .first()
-            .is_some_and(|c| self.draw_xml(c, apk, r, depth + 1))
+            .is_some_and(|c| self.draw_xml(c, apk, r, depth + 1, level))
     }
 
-    fn draw_xml(&self, e: &Element, apk: &Apk, r: Rect, depth: u32) -> bool {
+    /// An integer attribute.
+    fn int(&self, e: &Element, name: &str, default: i32) -> i32 {
+        match e.named(name).and_then(|v| self.res.resolve(v)) {
+            Some((Value::Int(i), _)) => i,
+            _ => default,
+        }
+    }
+
+    fn draw_xml(&self, e: &Element, apk: &Apk, r: Rect, depth: u32, level: u32) -> bool {
         match e.name.as_str() {
             "vector" => self.vector(e, r),
-            "bitmap" | "nine-patch" => e.named("src").is_some_and(|v| self.draw_at(v, r, depth)),
+            "bitmap" | "nine-patch" => e
+                .named("src")
+                .is_some_and(|v| self.draw_at(v, r, depth, level)),
             "color" => match e.named("color").and_then(|v| self.paint(v)) {
                 Some(Paint::Solid(c)) => {
                     self.canvas.fill_rect(r, c);
@@ -110,7 +130,7 @@ impl Drawer<'_> {
                     side("insetRight", r.w),
                     side("insetBottom", r.h),
                 );
-                self.inner(e, apk, inner, depth)
+                self.inner(e, apk, inner, depth, level)
             }
             "layer-list" | "ripple" => {
                 let mut drew = false;
@@ -125,11 +145,11 @@ impl Drawer<'_> {
                             .unwrap_or(0.0)
                     };
                     let inner = r.inset(side("left"), side("top"), side("right"), side("bottom"));
-                    drew |= self.inner(item, apk, inner, depth);
+                    drew |= self.inner(item, apk, inner, depth, level);
                 }
                 drew
             }
-            "selector" | "level-list" => {
+            "selector" => {
                 // The item for no state: the last without state attributes.
                 let items: Vec<&Element> = e.children.iter().filter(|c| c.name == "item").collect();
                 let plain = items
@@ -137,11 +157,22 @@ impl Drawer<'_> {
                     .rev()
                     .find(|i| !i.attrs.iter().any(|a| a.name.starts_with("state_")))
                     .or(items.first());
-                plain.is_some_and(|i| self.inner(i, apk, r, depth))
+                plain.is_some_and(|i| self.inner(i, apk, r, depth, level))
+            }
+            "level-list" => {
+                // The first item whose level range holds the level.
+                let level = level as i32;
+                e.children
+                    .iter()
+                    .filter(|c| c.name == "item")
+                    .find(|i| {
+                        (self.int(i, "minLevel", 0)..=self.int(i, "maxLevel", 0)).contains(&level)
+                    })
+                    .is_some_and(|i| self.inner(i, apk, r, depth, level as u32))
             }
             "rotate" => {
-                // At level 0, a drawable's own level, it stands at
-                // `fromDegrees` about its pivot (50 % by default).
+                // It stands between `fromDegrees` and `toDegrees` by its
+                // level, about its pivot (50 % by default).
                 let pivot = |name: &str, extent: f64| match e.named(name) {
                     Some(v) => self.res.resolve(v).and_then(|(v, _)| match v {
                         Value::Fraction(_) => v.length(extent as f32).map(f64::from),
@@ -152,29 +183,92 @@ impl Drawer<'_> {
                 let (Some(px), Some(py)) = (pivot("pivotX", r.w), pivot("pivotY", r.h)) else {
                     return false;
                 };
-                let t = rotation(num(e, "fromDegrees", 0.0), r.x + px, r.y + py);
+                let from = num(e, "fromDegrees", 0.0);
+                let to = num(e, "toDegrees", 360.0);
+                let degrees = from + (to - from) * f64::from(level) / MAX_LEVEL;
+                let t = rotation(degrees, r.x + px, r.y + py);
                 let mut drew = false;
                 self.canvas.saved(|| {
                     self.canvas.transform(t);
-                    drew = self.inner(e, apk, r, depth);
+                    drew = self.inner(e, apk, r, depth, level);
                 });
                 drew
             }
-            "scale" | "clip" | "animated-vector" | "adaptive-icon" => {
-                if e.name == "adaptive-icon" {
-                    let mut drew = false;
-                    for part in ["background", "foreground"] {
-                        if let Some(p) = e.children.iter().find(|c| c.name == part) {
-                            drew |= self.inner(p, apk, r, depth);
-                        }
-                    }
-                    drew
-                } else {
-                    self.inner(e, apk, r, depth)
+            "scale" => {
+                // `android:level` sets its level, and so its child's; at
+                // level 0 the child is not drawn.
+                let level = self.int(e, "level", level as i32).clamp(0, 10000) as u32;
+                if level == 0 {
+                    return false;
                 }
+                let scale = |name: &str, extent: f64| match self.percent(e, name) {
+                    Some(s) if s > 0.0 => at_level(extent, level, s),
+                    _ => extent,
+                };
+                let (w, h) = (scale("scaleWidth", r.w), scale("scaleHeight", r.h));
+                if w <= 0.0 || h <= 0.0 {
+                    return false;
+                }
+                let inner = gravity(self.int(e, "scaleGravity", LEFT), w, h, r);
+                self.inner(e, apk, inner, depth, level)
+            }
+            "clip" => {
+                // It shows the part of its child its level gives (none at
+                // level 0), along its orientation (horizontal by default).
+                if level == 0 {
+                    return false;
+                }
+                let orientation = self.int(e, "clipOrientation", 1);
+                let w = if orientation & 1 != 0 {
+                    at_level(r.w, level, 1.0)
+                } else {
+                    r.w
+                };
+                let h = if orientation & 2 != 0 {
+                    at_level(r.h, level, 1.0)
+                } else {
+                    r.h
+                };
+                let shown = gravity(self.int(e, "gravity", LEFT), w, h, r);
+                let mut clip = Path::new();
+                clip.move_to(shown.x, shown.y);
+                clip.line_to(shown.x + shown.w, shown.y);
+                clip.line_to(shown.x + shown.w, shown.y + shown.h);
+                clip.line_to(shown.x, shown.y + shown.h);
+                clip.close();
+                let mut drew = false;
+                self.canvas.saved(|| {
+                    self.canvas.clip(&clip, false);
+                    drew = self.inner(e, apk, r, depth, level);
+                });
+                drew
+            }
+            "animated-vector" => self.inner(e, apk, r, depth, level),
+            "adaptive-icon" => {
+                let mut drew = false;
+                for part in ["background", "foreground"] {
+                    if let Some(p) = e.children.iter().find(|c| c.name == part) {
+                        drew |= self.inner(p, apk, r, depth, level);
+                    }
+                }
+                drew
             }
             "shape" => self.shape(e, r),
             _ => false,
+        }
+    }
+
+    /// A scale attribute: a fraction, or a string such as `"50%"`.
+    fn percent(&self, e: &Element, name: &str) -> Option<f64> {
+        match self.res.resolve(e.named(name)?)?.0 {
+            v @ Value::Fraction(_) => v.length(1.0).map(f64::from),
+            Value::String(s) => s
+                .strip_suffix('%')?
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .map(|p| p / 100.0),
+            _ => None,
         }
     }
 
@@ -412,6 +506,26 @@ impl Drawer<'_> {
     }
 }
 
+/// An extent scaled down by `scale` of it at level 0, whole at 10000.
+fn at_level(extent: f64, level: u32, scale: f64) -> f64 {
+    extent - extent * (1.0 - f64::from(level) / MAX_LEVEL) * scale
+}
+
+/// `Gravity.apply` (left to right): a `w` by `h` rect placed in `r`.
+fn gravity(g: i32, w: f64, h: f64, r: Rect) -> Rect {
+    // Per axis: 2 pulls to the start, 4 to the end, both fill, neither
+    // centers.
+    let axis = |bits: i32, start: f64, extent: f64, size: f64| match bits & 6 {
+        0 => (start + (extent - size) / 2.0, size),
+        2 => (start, size),
+        4 => (start + extent - size, size),
+        _ => (start, extent),
+    };
+    let (x, w) = axis(g, r.x, r.w, w);
+    let (y, h) = axis(g >> 4, r.y, r.h, h);
+    Rect::new(x, y, w, h)
+}
+
 /// A rotation by `degrees` (clockwise, y running down) about (px, py).
 fn rotation(degrees: f64, px: f64, py: f64) -> Transform {
     let (sin, cos) = degrees.to_radians().sin_cos();
@@ -458,6 +572,32 @@ fn path_of(e: &Element) -> Option<Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extent_by_level() {
+        // A clip shows nothing at level 0 and all at 10000; a 50 % scale
+        // keeps half at level 0 and three quarters at 5000.
+        assert_eq!(at_level(108.0, 0, 1.0), 0.0);
+        assert_eq!(at_level(108.0, 10000, 1.0), 108.0);
+        assert_eq!(at_level(108.0, 0, 0.5), 54.0);
+        assert_eq!(at_level(108.0, 5000, 0.5), 81.0);
+    }
+
+    #[test]
+    fn gravity_places() {
+        let r = Rect::new(10.0, 20.0, 100.0, 50.0);
+        let at = |g| {
+            let p = gravity(g, 40.0, 10.0, r);
+            (p.x, p.y, p.w, p.h)
+        };
+        // LEFT: at the left, centered vertically.
+        assert_eq!(at(0x03), (10.0, 40.0, 40.0, 10.0));
+        // RIGHT | BOTTOM, CENTER, FILL, START (left to right).
+        assert_eq!(at(0x55), (70.0, 60.0, 40.0, 10.0));
+        assert_eq!(at(0x11), (40.0, 40.0, 40.0, 10.0));
+        assert_eq!(at(0x77), (10.0, 20.0, 100.0, 50.0));
+        assert_eq!(at(0x0080_0003 | 0x30), (10.0, 20.0, 40.0, 10.0));
+    }
 
     #[test]
     fn rotation_about_pivot() {
