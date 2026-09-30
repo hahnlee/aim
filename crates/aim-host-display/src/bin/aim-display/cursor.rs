@@ -209,3 +209,36 @@ fn ns_cursor(i: &Image, scale: f64) -> Id {
     send!(image, c"release" => ());
     cursor
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::objc::Pool;
+
+    #[test]
+    fn the_cursor_is_the_images_pixels_in_points() {
+        let _pool = Pool::new();
+        // A 2x Retina view: 8x12 pixels are 4x6 points, the hot spot (2, 6)
+        // pixels is (1, 3) points from the top left.
+        let image = Image {
+            width: 8,
+            height: 12,
+            pixels: (0..8 * 12 * 4).map(|i| i as u8).collect(),
+            hot: (2, 6),
+        };
+        let cursor = ns_cursor(&image, 2.0);
+        let hot = send!(cursor, c"hotSpot" => CGPoint);
+        assert_eq!((hot.x, hot.y), (1.0, 3.0));
+        let ns_image = send!(cursor, c"image" => Id);
+        let size = send!(ns_image, c"size" => CGSize);
+        assert_eq!((size.width, size.height), (4.0, 6.0));
+        let reps = send!(ns_image, c"representations" => Id);
+        let rep = send!(reps, c"firstObject" => Id);
+        assert_eq!(send!(rep, c"pixelsWide" => isize), 8);
+        let data = send!(rep, c"bitmapData" => *const u8);
+        // SAFETY: the representation's 8x12 RGBA pixels.
+        let pixels = unsafe { std::slice::from_raw_parts(data, image.pixels.len()) };
+        assert_eq!(pixels, &image.pixels[..]);
+        send!(cursor, c"release" => ());
+    }
+}
