@@ -49,7 +49,7 @@ INTERFACES=(
   "com.android.internal.view.IInputMethodManager|system/framework/framework.jar|getCurrentInputMethodInfoAsUser"
   "android.app.ITaskStackListener|system/framework/framework.jar|onTaskStackChanged"
   "com.android.internal.app.IAppOpsCallback|system/framework/framework.jar|*"
-  "android.content.pm.IPackageManager|system/framework/framework.jar|registerPackageMonitorCallback"
+  "android.content.pm.IPackageManager|system/framework/framework.jar|registerPackageMonitorCallback,getPackagesForUid,queryInstrumentationAsUser"
   "android.os.IRemoteCallback|system/framework/framework.jar|*"
   "com.android.internal.policy.IDeviceLockedStateListener|system/framework/framework.jar|*"
   "android.app.INotificationManager|system/framework/framework.jar|registerListener,unregisterListener,cancelNotificationsFromListener,getActiveNotificationsFromListener,getNotificationChannelForPackage"
