@@ -35,7 +35,7 @@ nterp rewrites in `crates/art-bootstrap/src/runtime_art/nterp.rs` and the
 `ImageWriter::IsInBootImage` rewrite in `runtime_art/dex2oat.rs` (removed;
 see git history).
 
-The new series is 8 patches, 4,717 lines as files (+1,544 / -348 changed
+The new series is 8 patches, 4,701 lines as files (+1,532 / -348 changed
 lines, 320 hunks), against 9,771 lines for the 184 Darwin patches. It contains
 no Darwin, Mach or Apple code.
 
@@ -114,7 +114,7 @@ subtrees. The files of the patches are disjoint.
 | Patch | Lines | Changes | Purpose |
 | --- | --- | --- | --- |
 | `0001-heap-reference-window.patch` | 121 | +48 -9 | The base constant, conversions, and `MemMap`'s low-4 GiB allocator moved into the window with plain `mmap` |
-| `0002-runtime-heap-reference-encoding.patch` | 647 | +198 -59 | Reference encoding in the runtime: `PtrCompression`, `ObjPtr`, lock-word forwarding, heap/card table/bitmaps, vreg and GC-root visitors |
+| `0002-runtime-heap-reference-encoding.patch` | 612 | +183 -59 | Reference encoding in the runtime: `PtrCompression`, lock-word forwarding, heap/card table/bitmaps, vreg and GC-root visitors |
 | `0003-image-logical-addresses.patch` | 360 | +104 -39 | Image loader, app-image writer, image writer, OAT code and entry-point addresses: logical <-> window |
 | `0004-quick-entrypoint-boundaries.patch` | 591 | +252 -17 | Quick entrypoints (C++ and arm64 assembly) decode arguments from and encode results for managed code |
 | `0005-nterp-heap-base.patch` | 353 | +81 -8 | nterp (arm64ng mterp) decodes before dereferences and C++ calls |
@@ -141,11 +141,16 @@ in the window and bounds-checks against the window. Not ported from the old
 arena-preserving `munmap` (Darwin kernel workarounds; the window is the
 syscall layer's job).
 
-**0002 — runtime encoding** (44 hunks):
+**0002 — runtime encoding** (42 hunks):
 
 - `mirror/object_reference.h`: `PtrCompression::Compress/Decompress` store the
   offset and keep 0 as null.
-- `obj_ptr.h`, `obj_ptr-inl.h`: `ObjPtr` encode/decode relative to the base.
+- `ObjPtr` is upstream's: in a release build it holds the native pointer, so
+  the runtime's non-heap sentinels (`Thread::GetDeoptimizationException()`,
+  0x100) survive it. Encoding it relative to the base turned that sentinel
+  into a pointer into the window's null page, so a pending deoptimization
+  was taken for a real exception and crashed the interpreter reading its
+  class (#536).
 - `lock_word.h`, `lock_word-inl.h`: the forwarding address in the 32-bit lock
   word is an offset; the payload is shifted as `uint32_t` before the base is
   added back.
@@ -577,7 +582,7 @@ Files are abbreviated: `rt/` = `runtime/`, `opt/` = `compiler/optimizing/`,
 | `0156-darwin-dex-cookie-identity-trace` | `rt/class_loader_context.cc` | b | Env-gated Darwin tracing. |
 | `0157-darwin-define-class-dex-registration-trace` | `rt/native/dalvik_system_DexFile.cc` | b | Env-gated Darwin tracing. |
 | `0158-darwin-register-dex-trace` | `rt/class_linker.cc` | b | Env-gated Darwin tracing. |
-| `0159-darwin-objptr-base-relative-boundary` | `rt/obj_ptr-inl.h`, `rt/obj_ptr.h` | a | `ObjPtr` encodes/decodes relative to the base. |
+| `0159-darwin-objptr-base-relative-boundary` | `rt/obj_ptr-inl.h`, `rt/obj_ptr.h` | a | `ObjPtr` encodes/decodes relative to the base. Ported, then dropped: a release `ObjPtr` holds native pointers, and the encoding broke the deoptimization sentinel (#536). |
 | `0164-darwin-clone-dex-for-child-loader` | `rt/native/dalvik_system_DexFile.cc` | d | Clones a DexFile already registered with another loader; needed only if the collision comes from Android semantics rather than the old single-process multi-app model. |
 | `0165-darwin-publish-aot-unwind-maps` | `rt/class_linker.cc` | b | Darwin unwinder registry. |
 | `0166-darwin-oat-quick-code-host-address` | `rt/oat/oat_file-inl.h` | a | OAT method code address converted from logical to window. |
