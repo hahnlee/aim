@@ -422,6 +422,7 @@ const AT_SECURE: u64 = 23;
 const AT_RANDOM: u64 = 25;
 const AT_HWCAP2: u64 = 26;
 const AT_EXECFN: u64 = 31;
+const AT_SYSINFO_EHDR: u64 = 33;
 
 const STACK_SIZE: u64 = 8 << 20;
 
@@ -478,6 +479,7 @@ pub fn build_stack(inp: &StackInputs) -> Result<u64, String> {
     unsafe { libc::getentropy(rnd.as_mut_ptr().cast(), rnd.len()) };
     let random = push_bytes(&rnd);
 
+    let vdso = crate::vdso::map()?;
     let (hwcap, hwcap2) = crate::hwcap::host_hwcaps();
     let id = crate::sys::cred::current();
     let (uid, euid, gid, egid) = (
@@ -488,6 +490,7 @@ pub fn build_stack(inp: &StackInputs) -> Result<u64, String> {
     );
     let p = inp.program;
     let auxv: Vec<(u64, u64)> = vec![
+        (AT_SYSINFO_EHDR, vdso),
         (AT_HWCAP, hwcap),
         (AT_PAGESZ, PAGE),
         (AT_CLKTCK, 100),

@@ -22,6 +22,7 @@ pub mod hwcap;
 pub mod loader;
 pub mod patch;
 pub mod sys;
+pub mod vdso;
 pub mod vfs;
 pub mod xlate;
 pub mod xrt;

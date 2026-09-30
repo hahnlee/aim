@@ -8,7 +8,7 @@ mod ashmem;
 mod attrs;
 mod binder;
 mod bpf;
-mod clock;
+pub(crate) mod clock;
 mod copies;
 mod copy;
 pub mod cred;

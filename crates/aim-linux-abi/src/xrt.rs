@@ -274,7 +274,7 @@ fn sites_of(fd: i32, st: &FileStat, start: u64, size: u64) -> Option<Arc<Sites>>
     if let (Some(c), Some(m), Some(sha)) = (cache, &member, &sha)
         && let Some(mut sites) = c.sites(sha)
     {
-        let _ = c.record_index(m, st, sha);
+        let _ = c.record_sites_index(m, st, sha);
         sites.iter_mut().for_each(|s| s.0 += start);
         return Some(Arc::new(Sites { sites, fips: None }));
     }
