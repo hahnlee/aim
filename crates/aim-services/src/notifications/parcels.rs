@@ -4,10 +4,9 @@
 //! `BaseBundle`, `Parcel.writeValue`, `Notification.Action`,
 //! `RemoteInput`, `Intent`, `ClipData`).
 //!
-//! A notification is read in order up to its shortcut id. `RemoteViews`
-//! (custom content, ticker or heads-up views) and bubble metadata are not
-//! parsed: reading stops there, and what came before is kept
-//! ([`Notification::complete`] is false, #468).
+//! A notification is read in order. `RemoteViews` (custom content, ticker
+//! or heads-up views) are not parsed: reading stops there, and what came
+//! before is kept ([`Notification::complete`] is false, #468).
 
 use aim_binder_host::parcel::{BAD_TYPE, BAD_VALUE, Binder, Parcel, Reader, Result};
 use aim_host_display::notify::Image;
@@ -132,7 +131,7 @@ pub struct Notification {
     pub actions: Vec<Action>,
     pub channel_id: Option<String>,
     pub shortcut_id: Option<String>,
-    /// Read to the end of what the bridge uses.
+    /// Read to its end.
     pub complete: bool,
 }
 
@@ -287,7 +286,26 @@ fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification
     n.channel_id = typed(r, |r| r.read_string8())?.flatten();
     r.read_i64()?; // timeout
     n.shortcut_id = typed(r, |r| r.read_string8())?.flatten();
+    typed(r, |r| r.read_string16())?; // locus id
+    r.read_i32()?; // badge icon
+    typed(r, char_sequence)?; // settings text
+    r.read_i32()?; // group alert behavior
+    typed(r, |r| bubble_metadata(r, files))?;
+    r.read_bool()?; // allow system generated contextual actions
+    r.read_i32()?; // FGS defer behavior
     n.complete = true;
+    Ok(())
+}
+
+/// `Notification.BubbleMetadata(Parcel)`.
+fn bubble_metadata(r: &mut Reader<'_>, files: &dyn Files) -> Result<()> {
+    typed(r, pending_intent)?;
+    typed(r, |r| icon(r, files))?;
+    r.read_i32()?; // desired height
+    r.read_i32()?; // flags
+    typed(r, pending_intent)?; // delete intent
+    r.read_i32()?; // desired height resource
+    typed(r, |r| r.read_string8())?; // shortcut id
     Ok(())
 }
 
@@ -1027,7 +1045,7 @@ mod tests {
         p.write_i32(10_123);
         p.write_i32(99);
         java_notification(&mut p, intent);
-        p.write_i32(0); // user
+        p.write_i32(10); // user
         p.write_i64(4); // post time
         p.write_i32(0); // override group key
         p.write_i32(0); // instance id
@@ -1035,7 +1053,8 @@ mod tests {
         let sbn = StatusBarNotification::read(&mut r, &NoFiles).unwrap();
         let n = &sbn.notification;
         assert!(n.complete);
-        assert_eq!(sbn.key(), "0|com.example|5|null|10123");
+        assert_eq!(sbn.key(), "10|com.example|5|null|10123");
+        assert_eq!(r.remaining(), 0);
         assert_eq!(n.content_intent, Some(intent));
         assert_eq!(n.flags, FLAG_ONLY_ALERT_ONCE);
         assert_eq!(n.group.as_deref(), Some("group"));

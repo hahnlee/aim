@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use aim_host_display::notify::{Image, Message, Post};
 
-use crate::objc::{GlobalBlock, Id, Sel, class, nsstring, on_main, release, text};
+use crate::objc::{GlobalBlock, Id, Sel, class, nsstring, on_main, on_main_after, release, text};
 use crate::objc::{class_addMethod, objc_allocateClassPair, objc_registerClassPair, sel};
 
 #[link(name = "UserNotifications", kind = "framework")]
@@ -361,8 +361,10 @@ fn image_file(image: &Image) -> Option<PathBuf> {
     }
 }
 
-/// Tell the server whether the Mac now shows `key`.
-fn report(key: String, error: Option<String>) {
+/// Tell the server whether the Mac now shows `key`: once it is as
+/// `expected`, or after a second look 2 s later (Notification Center
+/// takes a moment for an attachment).
+fn report(key: String, error: Option<String>, expected: bool, again: bool) {
     let block = once_block(move |delivered: Id| {
         let n = send!(delivered, c"count" => usize);
         let shown = (0..n).any(|i| {
@@ -370,6 +372,10 @@ fn report(key: String, error: Option<String>) {
             let request = send!(note, c"request" => Id);
             text(send!(request, c"identifier" => Id)) == key
         });
+        if shown != expected && error.is_none() && again {
+            on_main_after(2000, move || report(key, None, expected, false));
+            return;
+        }
         crate::shim::notify(&Message::Shown { key, shown, error });
     });
     send!(center(), c"getDeliveredNotificationsWithCompletionHandler:" => (),
@@ -424,7 +430,7 @@ fn post(p: &Post) {
     let key = p.key.clone();
     let block = once_block(move |error: Id| {
         let error = (!error.is_null()).then(|| text(send!(error, c"localizedDescription" => Id)));
-        on_main(move || report(key, error));
+        on_main(move || report(key, error, true, true));
     });
     send!(center(), c"addNotificationRequest:withCompletionHandler:" => (),
         Id = request, *const OnceBlock = &block);
@@ -440,7 +446,7 @@ fn remove(key: &str) {
         s.badged.remove(key);
     }
     badge();
-    report(key.to_string(), None);
+    report(key.to_string(), None, false, true);
 }
 
 /// The Dock badge: the notifications that count, if any.
