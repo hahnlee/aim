@@ -32,7 +32,7 @@ const READ_TIMEOUT_MS: i32 = 5000;
 
 impl Bridge {
     /// `icon` as the Mac shows it; `user` is the posting app's.
-    pub(super) fn image(&self, icon: &Icon, user: i32) -> Option<Image> {
+    pub(crate) fn image(&self, icon: &Icon, user: i32) -> Option<Image> {
         let image = match icon {
             Icon::Image(i) => return Some(i.clone()),
             Icon::Unreadable => return None,

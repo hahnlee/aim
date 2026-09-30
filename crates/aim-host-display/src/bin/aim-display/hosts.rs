@@ -76,6 +76,16 @@ pub fn for_task(package: &str, activity: &str) -> Option<Arc<Host>> {
         .cloned()
 }
 
+/// The host whose window shows task `task`.
+pub fn showing(task: i32) -> Option<Arc<Host>> {
+    HOSTS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|h| h.numbers.lock().unwrap().contains_key(&task))
+        .cloned()
+}
+
 /// The task a host's window `number` shows.
 pub fn task_of_window(number: isize) -> Option<i32> {
     HOSTS.lock().unwrap().iter().find_map(|h| {
@@ -132,6 +142,20 @@ impl Host {
             let _ = wire::send(fd, &m.frame(), None);
         }
     }
+
+    /// Pass a status bar message on: its record, then its frame.
+    pub fn send_shell(&self, m: &aim_host_display::shell::Message) {
+        let w = self.writer.lock().unwrap();
+        let r = Rec {
+            op: host::SHELL,
+            ..Default::default()
+        };
+        let fd = std::os::fd::AsFd::as_fd(&*w);
+        if wire::send(fd, wire::bytes(&r), None).is_ok() {
+            let _ = wire::send(fd, &m.frame(), None);
+        }
+    }
+
 
     /// Pass a task record on.
     pub fn send_window(&self, r: &Record) {
@@ -285,6 +309,7 @@ pub fn serve(sock: OwnedFd) {
     let adopted = package.clone();
     on_main(move || crate::windows::route_package(&adopted));
     crate::notifications::host_connected(&h);
+    crate::shell::host_connected(&h);
     while let Some(r) = read(&mut sock) {
         match r.op {
             host::SAMPLED => {
@@ -302,6 +327,10 @@ pub fn serve(sock: OwnedFd) {
             host::RESTACK => on_main(crate::windows::restack),
             host::NOTIFY => match aim_host_display::notify::Message::read(&mut sock) {
                 Ok(Some(m)) => crate::notifications::from_host(&h, &m),
+                _ => break,
+            },
+            host::SHELL => match aim_host_display::shell::Message::read(&mut sock) {
+                Ok(Some(m)) => crate::shell::from_host(&m),
                 _ => break,
             },
             _ => break,

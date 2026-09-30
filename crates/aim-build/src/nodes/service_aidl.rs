@@ -345,6 +345,11 @@ fn kind(ty: &Type) -> Result<Kind, String> {
             "read_string_list(r)?",
             "write_string_list(p, {v}.as_deref());",
         ),
+        ("byte", true) => Kind::Plain(
+            "Option<Vec<u8>>",
+            "read_byte_array(r)?",
+            "write_byte_array(p, {v}.as_deref());",
+        ),
         ("int", true) => Kind::Plain(
             "Option<Vec<i32>>",
             "read_int_array(r)?",
@@ -666,6 +671,27 @@ pub fn write_int_array(p: &mut Parcel, value: Option<&[i32]>) {
     }
 }
 
+/// `createByteArray`: its length (-1 for null), then the bytes, padded.
+pub fn read_byte_array(r: &mut Reader<'_>) -> Result<Option<Vec<u8>>> {
+    let n = r.read_i32()?;
+    if n < 0 {
+        return Ok(None);
+    }
+    let at = r.position();
+    r.skip(n as usize)?;
+    Ok(Some(r.since(at).0[..n as usize].to_vec()))
+}
+
+pub fn write_byte_array(p: &mut Parcel, value: Option<&[u8]>) {
+    match value {
+        None => p.write_i32(-1),
+        Some(v) => {
+            p.write_i32(v.len() as i32);
+            p.write_raw(v, &[]);
+        }
+    }
+}
+
 /// `createStringArray` / `createStringArrayList`.
 pub fn read_string_list(r: &mut Reader<'_>) -> Result<Option<Vec<Option<String>>>> {
     let n = r.read_i32()?;
@@ -915,6 +941,7 @@ interface IClipboard {
     oneway void ping(IOnChanged listener) = 7;
     int[] ids(boolean all);
     void setAll(in List<ClipData> clips);
+    void token(in byte[] hat);
     parcelable Nested { int x; }
 }
 "#;
@@ -935,7 +962,8 @@ interface IClipboard {
                 ("getPrimaryClip", 2, false),
                 ("ping", 8, true),
                 ("ids", 4, false),
-                ("setAll", 5, false)
+                ("setAll", 5, false),
+                ("token", 6, false)
             ]
         );
         assert_eq!(iface.methods[0].params[0].ty.name, "ClipData");
@@ -965,5 +993,6 @@ interface IClipboard {
         assert!(code.contains("impl<ClipData: WriteParcelable> SetPrimaryClip<ClipData> {"));
         assert!(!code.contains("fn read_ping_reply"));
         assert!(code.contains("pub fn write_ids_reply(p: &mut Parcel, result: &Option<Vec<i32>>)"));
+        assert!(code.contains("pub hat: Option<Vec<u8>>,"));
     }
 }

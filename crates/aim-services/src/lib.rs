@@ -20,6 +20,7 @@ pub mod location;
 mod mirror;
 mod nonces;
 pub mod notifications;
+pub mod statusbar;
 mod pasteboard;
 mod service_host;
 mod settings;

@@ -32,9 +32,13 @@ mod hosts;
 mod input;
 mod metal;
 mod notifications;
+mod shell;
+mod sheets;
 mod shim;
 mod stats;
 mod status;
+mod system_icons;
+mod toast;
 mod un;
 mod vsync;
 mod window;
@@ -308,6 +312,14 @@ impl Display {
                         && self.mode == mode::WINDOWS
                     {
                         notifications::serve_bridge(sock.into());
+                    }
+                    return;
+                }
+                wire::OP_SHELL if r.id == wire::VERSION => {
+                    // Window mode's shims show it; in device mode, this
+                    // process.
+                    if wire::send(sock.as_fd(), wire::bytes(&self.mode), None).is_ok() {
+                        shell::serve_bar(sock.into(), self.mode == mode::WINDOWS);
                     }
                     return;
                 }
