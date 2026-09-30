@@ -440,6 +440,30 @@ path = "/vendor/etc/permissions/android.hardware.ethernet.xml"
 source = "image/vendor/etc/permissions/android.hardware.ethernet.xml"
 reason = "the device's eth0, the Mac's network (docs/network.md): EthernetService runs only with this feature"
 
+# Per-Mac sensor features (docs/vendor-hals.md): guest-init reports the
+# sensors this Mac has as the vendor SKU, and SystemConfig adds the
+# features of /vendor/etc/permissions/sku_<sku>/.
+
+[[add]]
+path = "/vendor/etc/permissions/sku_light/android.hardware.sensor.light.xml"
+source = "image/vendor/etc/permissions/android.hardware.sensor.light.xml"
+reason = "the SKU of a Mac whose sensors HAL lists the ambient light sensor (androidboot.product.vendor.sku from guest-init, docs/vendor-hals.md)"
+
+[[add]]
+path = "/vendor/etc/permissions/sku_hinge/android.hardware.sensor.hinge_angle.xml"
+source = "image/vendor/etc/permissions/android.hardware.sensor.hinge_angle.xml"
+reason = "the SKU of a Mac whose sensors HAL lists the lid angle (androidboot.product.vendor.sku from guest-init, docs/vendor-hals.md)"
+
+[[add]]
+path = "/vendor/etc/permissions/sku_light_hinge/android.hardware.sensor.light.xml"
+source = "image/vendor/etc/permissions/android.hardware.sensor.light.xml"
+reason = "the SKU of a Mac whose sensors HAL lists the ambient light sensor (androidboot.product.vendor.sku from guest-init, docs/vendor-hals.md)"
+
+[[add]]
+path = "/vendor/etc/permissions/sku_light_hinge/android.hardware.sensor.hinge_angle.xml"
+source = "image/vendor/etc/permissions/android.hardware.sensor.hinge_angle.xml"
+reason = "the SKU of a Mac whose sensors HAL lists the lid angle (androidboot.product.vendor.sku from guest-init, docs/vendor-hals.md)"
+
 # Window mode (docs/windows.md): freeform windowing, and the task bridge
 # that makes each freeform task a macOS window of the display server.
 

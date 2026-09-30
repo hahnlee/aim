@@ -92,6 +92,7 @@ dependencies = [
  "aim-android-image",
  "aim-android-init",
  "aim-binder-host",
+ "aim-host-sensors",
  "aim-hostcall",
  "aim-paths",
  "aim-services",

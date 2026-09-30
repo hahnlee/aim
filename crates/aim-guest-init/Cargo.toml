@@ -17,6 +17,7 @@ path = "src/bin/guest-init.rs"
 aim-android-image = { path = "../aim-android-image" }
 aim-android-init = { path = "../aim-android-init" }
 aim-binder-host = { path = "../aim-binder-host" }
+aim-host-sensors = { path = "../aim-host-sensors" }
 aim-services = { path = "../aim-services" }
 aim-hostcall.workspace = true
 aim-storage.workspace = true
