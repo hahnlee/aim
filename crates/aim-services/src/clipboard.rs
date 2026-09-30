@@ -41,6 +41,8 @@ use crate::system::{MODE_ALLOWED, System};
 /// `AppOpsManager.OP_READ_CLIPBOARD` and `OP_WRITE_CLIPBOARD`.
 pub const OP_READ_CLIPBOARD: i32 = 29;
 pub const OP_WRITE_CLIPBOARD: i32 = 30;
+/// The app ops its access decisions read.
+pub const APP_OPS: [i32; 2] = [OP_READ_CLIPBOARD, OP_WRITE_CLIPBOARD];
 /// `Context.DEVICE_ID_DEFAULT` and `DEVICE_ID_INVALID`.
 const DEVICE_ID_DEFAULT: i32 = 0;
 const DEVICE_ID_INVALID: i32 = -1;
@@ -245,17 +247,19 @@ impl ClipboardService {
             return Ok(false);
         }
         // Writing needs no focus; the original's permission and IME
-        // lookups decide nothing for it, so they are left out.
+        // lookups decide nothing for it, so they are left out. The rest is
+        // the original's disjunction with the mirrored inputs first, so a
+        // focused app's read asks no other service.
         let allowed = op != OP_READ_CLIPBOARD
+            || (device_id == DEVICE_ID_DEFAULT && self.system.uid_focused(uid)?)
+            || self.is_default_ime(user_id, package)?
             || self
                 .system
                 .package_has_permission(READ_CLIPBOARD_IN_BACKGROUND, package)?
-            || self.is_default_ime(user_id, package)?
-            || (device_id == DEVICE_ID_DEFAULT && self.system.uid_focused(uid)?)
-            || (self
-                .system
-                .package_has_permission(INTERNAL_SYSTEM_WINDOW, package)?
-                && self.system.uid_focused(caller_uid)?);
+            || (self.system.uid_focused(caller_uid)?
+                && self
+                    .system
+                    .package_has_permission(INTERNAL_SYSTEM_WINDOW, package)?);
         if !allowed {
             eprintln!(
                 "clipboard: denying clipboard access to {package}, application is not in focus nor is it a system service for user {user_id}"

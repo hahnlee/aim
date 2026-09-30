@@ -15,6 +15,7 @@
 
 pub mod clip;
 pub mod clipboard;
+mod mirror;
 mod pasteboard;
 mod system;
 
@@ -49,7 +50,7 @@ impl NativeServices {
                 security_context: Some(SYSTEM_SERVER_CONTEXT.into()),
             },
         );
-        let system = system::System::new(process.clone());
+        let system = system::System::new(process.clone(), &clipboard::APP_OPS);
         let mut services = Vec::new();
         for name in names {
             let service: Arc<dyn Service> = match name.as_str() {

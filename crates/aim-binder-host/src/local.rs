@@ -10,8 +10,10 @@
 //! other processes' nodes, holds references to them and learns of their
 //! death, following the protocol as libbinder uses it.
 //!
-//! Its nodes do not accept file descriptors, and it asks for none in
-//! replies: a transaction that carries one fails in the driver (#433).
+//! Its nodes accept file descriptors, as libbinder's do, but no service
+//! keeps one yet (#433): they are closed after the call, and a call that
+//! carries some to a service that takes none fails as the driver fails it
+//! for a node that does not accept them. It asks for none in replies.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -47,6 +49,11 @@ pub trait Service: Send + Sync {
     fn descriptor(&self) -> &str;
     /// Handles one call; a one-way call's reply is dropped.
     fn transact(&self, call: &mut Call<'_>) -> Reply;
+    /// Whether its calls may carry file descriptors (closed after the
+    /// call).
+    fn accepts_fds(&self) -> bool {
+        false
+    }
 }
 
 /// An incoming call, with the caller's identity from the driver.
@@ -529,6 +536,32 @@ impl LocalProcess {
         }
     }
 
+    /// The file descriptors the driver installed for a received call:
+    /// its fd objects and the fds of its fd arrays.
+    fn received_fds(&self, data: &[u8], objects: &[u64]) -> Vec<u32> {
+        let u32_at = |at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+        let mut fds = Vec::new();
+        for &at in objects {
+            let at = at as usize;
+            match u32_at(at) {
+                BINDER_TYPE_FD => fds.push(u32_at(at + 8)),
+                BINDER_TYPE_FDA => {
+                    let array = FdArrayObject::decode(&data[at..at + FD_ARRAY_OBJECT_SIZE]);
+                    let parent = objects[array.parent as usize] as usize;
+                    let parent = BufferObject::decode(&data[parent..parent + BUFFER_OBJECT_SIZE]);
+                    let base = (parent.buffer + array.parent_offset) as *const u32;
+                    for i in 0..array.num_fds as usize {
+                        // SAFETY: the driver placed the parent buffer, with
+                        // the array's fds, in this call's receive buffer.
+                        fds.push(unsafe { base.add(i).read_unaligned() });
+                    }
+                }
+                _ => {}
+            }
+        }
+        fds
+    }
+
     /// Serves one incoming call and sends its reply.
     fn execute(&self, tr: TransactionData, out: &mut Vec<u8>) {
         // SAFETY: the call's data in the receive buffer, alive until the
@@ -544,8 +577,10 @@ impl LocalProcess {
             sender_euid: tr.sender_euid,
             data: Reader::new(data, &objects),
         };
+        let fds = self.received_fds(data, &objects);
         let reply = match (&service, tr.code) {
             (None, _) => Err(UNKNOWN_TRANSACTION),
+            (Some(s), _) if !fds.is_empty() && !s.accepts_fds() => Err(FAILED_TRANSACTION),
             (Some(s), INTERFACE_TRANSACTION) => {
                 let mut p = Parcel::new();
                 p.write_string16(Some(s.descriptor()));
@@ -554,6 +589,12 @@ impl LocalProcess {
             (Some(_), PING_TRANSACTION) => Ok(Parcel::new()),
             (Some(s), _) => s.transact(&mut call),
         };
+        {
+            let mut files = self.files.lock().unwrap();
+            for fd in fds {
+                files.files.remove(&fd);
+            }
+        }
         out.extend_from_slice(&BC_FREE_BUFFER.to_le_bytes());
         out.extend_from_slice(&tr.buffer.to_le_bytes());
         if call.is_oneway() {
@@ -663,6 +704,22 @@ mod tests {
         }
     }
 
+    /// Counts its calls; takes file descriptors.
+    struct Sink(AtomicI32);
+
+    impl Service for Sink {
+        fn descriptor(&self) -> &str {
+            "test.ISink"
+        }
+        fn transact(&self, _: &mut Call<'_>) -> Reply {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(Parcel::new())
+        }
+        fn accepts_fds(&self) -> bool {
+            true
+        }
+    }
+
     fn open(driver: &Arc<Driver>, pid: i32, uid: u32) -> Arc<LocalProcess> {
         LocalProcess::open(
             driver,
@@ -736,6 +793,38 @@ mod tests {
             client.transact(0, 99, &name("x"), false).err(),
             Some(UNKNOWN_TRANSACTION)
         );
+
+        // A call with a file descriptor: refused by a service that takes
+        // none, closed after the call by one that does.
+        let sink = Arc::new(Sink(AtomicI32::new(0)));
+        let sink_binder = server.add_service(sink.clone());
+        let mut add = name("sink");
+        add.write_binder(Some(sink_binder));
+        server.transact(0, ADD, &add, false).unwrap();
+        let reply = client.transact(0, GET, &name("sink"), false).unwrap();
+        let Some(Binder::Handle(h)) = reply.reader().read_binder().unwrap() else {
+            panic!("no sink binder");
+        };
+        let sink_handle = client.strong(h);
+        drop(reply);
+        let file: File = Arc::new(());
+        let fd = Local {
+            files: &client.files,
+        }
+        .install_file(file)
+        .unwrap();
+        let mut object = [0u8; FD_OBJECT_SIZE];
+        object[..4].copy_from_slice(&BINDER_TYPE_FD.to_le_bytes());
+        object[8..12].copy_from_slice(&fd.to_le_bytes());
+        let mut with_fd = Parcel::new();
+        with_fd.write_raw(&object, &[0]);
+        assert_eq!(
+            echo.transact(ECHO, &with_fd, false).err(),
+            Some(FAILED_TRANSACTION)
+        );
+        sink_handle.transact(1, &with_fd, false).unwrap();
+        assert_eq!(sink.0.load(Ordering::Relaxed), 1);
+        assert!(server.files.lock().unwrap().files.is_empty());
 
         // A node of the client, watched by the server, dies with it.
         let listener = client.add_service(Arc::new(Registry {

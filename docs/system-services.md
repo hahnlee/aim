@@ -35,7 +35,8 @@ every step: replace superseded facts instead of appending a log.
    nodes on host threads. A call to them crosses no Mach hop after the
    caller's own. A service sees the caller's pid and uid from the driver,
    and reaches the original services it consults (permissions, app ops,
-   users) as a client, through servicemanager.
+   users) as a client, through servicemanager. What its decisions read on
+   every call it mirrors (below, "Mirrored state").
 3. **Registered under the original name.** When servicemanager sets
    `servicemanager.ready` (at boot, and again after a restart), guest-init
    registers each native service with `addService`, as
@@ -63,6 +64,61 @@ every step: replace superseded facts instead of appending a log.
 6. **Conformance.** The CTS module(s) for the service's API, before (the
    original) and after (native), plus the app checks; failing tests keep
    the original.
+
+## Mirrored state
+
+A native service decides on every call by state that other services own
+(whether a package is the caller's, its permissions, app-op modes, focus,
+the input method, whether the device is locked). Asking the owner each
+time costs a system_server round trip per input, so the service host
+keeps a mirror of each (`crates/aim-services/src/mirror.rs`), fed by the
+owner's standard listener, registered with generated AIDL codes:
+
+| Input | Owner's query (on a miss) | Listener that drops it |
+| --- | --- | --- |
+| a package is the uid's | `IAppOpsService.checkPackage` | `IPackageManager.registerPackageMonitorCallback` (every package change, all users) |
+| an app op's mode | `IAppOpsService.checkOperationForDevice` | `startWatchingModeWithFlags(op, WATCH_FOREGROUND_CHANGES)`, one callback per op, and the package callback |
+| focus (the focused root task's uid) | `IActivityTaskManager.getFocusedRootTaskInfo` | `registerTaskStackListener` (every task change) |
+| the system user's device is locked | `ITrustManager.isDeviceLocked` | `ITrustManager.registerDeviceLockedStateListener` |
+
+`WATCH_FOREGROUND_CHANGES` also reports a uid's change of foreground state
+for an op in `MODE_FOREGROUND`, the one input of a mode that is not a
+setting, so no uid observer is needed. Noting an app op
+(`noteOperation`), which records an access and decides nothing the check
+did not, is sent from a background thread.
+
+Two inputs are asked each time. Permissions: shell permission delegation
+(`UiAutomation.adoptShellPermissionIdentity`, which CTS uses) changes what
+`checkPermission` answers for the instrumented app without any
+notification (`testReadInBackgroundRequiresPermission` failed with a
+permission mirror); the same delegation changes its app-op checks
+unnoticed too (#467). The input method: its owner is the
+`DEFAULT_INPUT_METHOD` setting, and `IContentService.registerContentObserver`
+refuses an observer from a process ActivityManager does not know
+("Failed to find PID", `checkContentProviderAccess`), which the service
+host is (#430). The clipboard evaluates the original's disjunction with
+focus first, so only a read by an app without focus (the input method,
+a service) asks them.
+
+**The rule.** A value is kept only while its listener is registered: the
+listener is registered before the first query, and a query keeps its
+answer only if no notification arrived while it ran (a generation count),
+so a kept value is never older than the last notification. A
+notification drops what it may have changed, and the next decision asks
+the owner once. When the owner dies (system_server restarts), the
+registration dies with it: the mirror is dropped and decisions are
+synchronous queries until the listener is registered again. The owners
+send their notifications one-way when they commit a change, most from a
+handler thread, so a call that races a change is decided as just before
+it until the notification arrives, as for every other client of these
+listeners. Other users' lock state is asked each time; virtual devices
+are never locked (`TrustManagerService`). Writes still ask
+`IUserManager` for the user's profiles (#460).
+
+The binder host's nodes accept file descriptors, as libbinder's do: the
+task stack listener's snapshots carry a buffer's. They are closed after
+the call, and a service that takes none refuses a call with some, as the
+driver refuses it for a node that does not accept them.
 
 ## Inventory: what apps use
 
@@ -136,7 +192,8 @@ ADR 0013's target: p50 < 20 us, p99 < 200 us per call.
 | Calls answered by system_server (44,000) | 0.9 ms | 53 ms |
 | Calls answered by servicemanager (3,295) | 5.6 ms | 831 ms |
 | `IClipboard.hasPrimaryClip` from the shell, idle, original (41 calls) | 221 us | 997 us |
-| The same, native clipboard (40 calls) | 541 us | 2,988 us |
+| The same, native clipboard asking system_server (40 calls) | 541 us | 2,988 us |
+| The same, native clipboard with mirrored state (40 calls, 2026-09-30) | 15 us | 95 us |
 | `addPrimaryClipChangedListener` during a cold start, original | 377-1,878 us | |
 | The same, native clipboard | 15-18 us | |
 
@@ -265,12 +322,28 @@ the native clipboard does without, or stands in:
 - SystemUI shows its clipboard overlay for the Mac's copies (#434).
 
 **Cost.** A call that needs no check is fast: `addPrimaryClipChangedListener`
-takes 15-18 us against 377-1,878 us for the original. A call that checks
-access is slower than the original, because each check is a call into
-system_server: `hasPrimaryClip` makes four (`IAppOpsService.checkPackage`
-275 us, `IPermissionManager.checkPermission`,
-`IAppOpsService.checkOperationForDevice`, `ITrustManager.isDeviceLocked`,
-about 80 us each), 541 us in all against 221 us (#432).
+takes 15-18 us against 377-1,878 us for the original. A checked call
+reads mirrored state ("Mirrored state"), so a focused app's read makes
+no call into system_server; a read by an app without focus asks the
+input method and a permission. Measured 2026-09-30 in one boot each,
+before and after the mirror, with a binder trace over the CTS run below
+(the same data directory; host load 21 before, 6 after, so the shell
+loop's numbers are the cleaner comparison):
+
+| Call (sender's total, p50 / p99) | Asking system_server | Mirrored |
+| --- | --- | --- |
+| `hasPrimaryClip`, shell loop (40) | 293 / 728 us | 15 / 95 us |
+| `hasPrimaryClip`, CTS app (69) | 716 / 2,149 us | 61 / 1,162 us |
+| `getPrimaryClip`, CTS app (29) | 506 / 1,186 us | 61 / 634 us |
+| `getPrimaryClipDescription`, CTS app (30) | 622 / 1,353 us | 52 / 339 us |
+| `getPrimaryClip`, input method without focus (48) | 455 / 16,398 us | 254 / 4,771 us |
+| `setPrimaryClip`, CTS app (29) | 2,334 / 8,575 us | 2,475 / 11,522 us |
+
+The service host's calls into system_server over the run went from
+2,582 (1,106 app ops, 593 permissions, 369 trust, 285 input method, 146
+focus) to 972 (273 app ops, nearly all background notes; 356 input
+method and 213 permissions, from reads without focus; 43 focus). A write still asks `IUserManager` for the profiles
+(#460).
 
 ## Conformance
 
