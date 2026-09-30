@@ -75,8 +75,8 @@ aim_hostcall::dylib! {
     }
 }
 
-/// `[[NSProcessInfo processInfo] thermalState]`.
-fn thermal_state() -> u32 {
+/// `[[NSProcessInfo processInfo] thermalState]`: one of [`thermal::state`].
+pub fn thermal_state() -> u32 {
     type Send = unsafe extern "C" fn(*mut c_void, *const c_void) -> isize;
     // SAFETY: both messages take no argument; `processInfo` returns the
     // shared (never released) instance and `thermalState` an NSInteger.

@@ -185,6 +185,21 @@ The migration's state and conformance results are in
   grants' location packages). Its five CTS modules end each test as the
   original. What is not served yet is #569-#572.
 
+### M2: thermal (2026-10-01)
+
+- `thermalservice` is native: the original `ThermalManagerService` with
+  the Mac in the thermal HAL's place, read in the service host from the
+  host module the HAL used (macOS's thermal state as the `SKIN` status,
+  the CPU and battery temperatures, no thresholds and so no headroom).
+  It is a leaf and needs nothing from the bridge. Its CTS
+  (CtsThermalTestCases, `PowerManager_ThermalTest`) ends each test as
+  the original, and `cmd thermalservice` answers as the original, served
+  by a shell command reader every native service can use. Not served:
+  the statsd atoms and the event log entry (#617). Chosen over `power`,
+  which apps call most (GMS's wake locks) but whose local interface 37
+  source files of system_server use, and `uimode`, whose configuration
+  changes go through ActivityTaskManager's internals.
+
 ### The system_server bridge (design, 2026-09-30)
 
 - What native services need from system_server internals (URI grant
