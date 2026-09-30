@@ -76,8 +76,14 @@ or not.
 
 ### Scanning
 
-`LE Set (Extended) Scan Enable` scans with `scanForPeripherals`. Each
-advertisement becomes a report:
+`LE Set (Extended) Scan Enable` scans with `scanForPeripherals`, actively
+and without pause. The controller reports what arrives within the scan
+windows the host set (`LE Set (Extended) Scan Parameters`: a window every
+interval from the enable, of the first PHY's for extended ones), as a
+duty-cycled radio would; the default is continuous. A low-power
+background scan (GMS Fast Pair's runs at idle) so gets a phone's share of
+the advertisements around, not a report for each one CoreBluetooth
+hears. Each advertisement within a window becomes a report:
 
 - after the legacy commands, LE Advertising Reports: the rebuilt data split
   into an `ADV_IND`/`ADV_NONCONN_IND` and a `SCAN_RSP`, 31 bytes each;
@@ -194,11 +200,11 @@ because constructors of its HIDL dependencies wait for
 
 ## Verified (2026-09-28)
 
-- **Unit tests.** `cargo test -p aim-host-bluetooth`: 27 tests.
+- **Unit tests.** `cargo test -p aim-host-bluetooth`: 28 tests.
   - HCI encodings and the Supported Commands bitmap.
   - The controller against a fake CoreBluetooth backend: the stack's
-    start-up dialogue, legacy and extended scanning, direct and accept-list
-    connections, cancel, reset, disconnect, advertising.
+    start-up dialogue, legacy and extended scanning, scan windows, direct
+    and accept-list connections, cancel, reset, disconnect, advertising.
   - ATT to GATT translation: discovery, reads, blobs, writes, long writes,
     CCCDs, notifications, indications, Service Changed and errors.
   - L2CAP fragmentation, reassembly, signaling and the Security Manager.
@@ -212,6 +218,17 @@ because constructors of its HIDL dependencies wait for
   Real advertisements and the GATT Device Name read need the Bluetooth
   permission granted for the terminal. Without it the scan reports no
   devices, which the test reports but does not fail on.
+
+- **Idle** (2026-09-30, M2 Pro, first boots of disposable data
+  directories, 2 minutes from 2.5 minutes after `sys.boot_completed`).
+  GMS's `nearby_fast_pair` scanner scans in `BALANCED` mode throughout
+  (`dumpsys bluetooth_manager`). Before the scan windows, then with them:
+
+  | | Before | After |
+  | --- | --- | --- |
+  | HCI events to the stack | 8.6/s | 2.5/s |
+  | Bluetooth app CPU | 0.38 s | 0.08 s |
+  | HAL CPU | 0.31 s | 0.16 s |
 
 ## Not done
 

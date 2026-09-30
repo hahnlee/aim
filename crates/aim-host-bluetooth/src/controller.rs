@@ -1,9 +1,9 @@
 //! The virtual LE controller: HCI commands from the Android stack in,
 //! events and ACL data out, with a [`Backend`] as the radio.
 //!
-//! - Scanning is the backend's scan; each advertisement becomes an LE
-//!   Advertising Report, or an LE Extended Advertising Report when the host
-//!   uses the extended commands.
+//! - Scanning is the backend's scan; each advertisement received within a
+//!   scan window becomes an LE Advertising Report, or an LE Extended
+//!   Advertising Report when the host uses the extended commands.
 //! - Initiating connects through the backend to the peer address, or to any
 //!   device on the Filter Accept List, as soon as the backend knows it. The
 //!   link is reported up once the device's GATT tree is discovered, so the
@@ -15,6 +15,7 @@
 //!   stored, as a dual-mode controller with an idle BR/EDR radio would.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::Instant;
 
 use crate::adv::{self, Addr, Advertisement};
 use crate::att::{Bearer, Output};
@@ -31,12 +32,39 @@ const FIRST_HANDLE: u16 = 0x0040;
 /// parameter bytes less the subevent, the count and the report header.
 const EXTENDED_REPORT_DATA: usize = 229;
 
-#[derive(Default)]
 struct Scan {
     enabled: bool,
     extended: bool,
     filter_duplicates: bool,
     seen: HashSet<Addr>,
+    /// The scan interval and window, in units of 0.625 ms.
+    interval: u16,
+    window: u16,
+    /// When the scan began: a window opens every interval from here.
+    since: Instant,
+}
+
+impl Default for Scan {
+    fn default() -> Self {
+        // The spec's defaults: 10 ms windows, back to back.
+        Scan {
+            enabled: false,
+            extended: false,
+            filter_duplicates: false,
+            seen: HashSet::new(),
+            interval: 0x10,
+            window: 0x10,
+            since: Instant::now(),
+        }
+    }
+}
+
+impl Scan {
+    /// Whether a duty-cycled radio would be listening at `t`.
+    fn listening(&self, t: Instant) -> bool {
+        let us = t.duration_since(self.since).as_micros();
+        us % (u128::from(self.interval) * 625) < u128::from(self.window) * 625
+    }
 }
 
 enum Peers {
@@ -118,6 +146,7 @@ pub struct Controller {
     rssi: HashMap<PeerId, i8>,
     s: State,
     out: Vec<(u32, Vec<u8>)>,
+    now: Box<dyn Fn() -> Instant + Send>,
 }
 
 fn u16_at(p: &[u8], i: usize) -> u16 {
@@ -155,7 +184,7 @@ fn min_len(opcode: u16) -> usize {
         cmd::LE_SET_EXTENDED_ADVERTISING_DATA | cmd::LE_SET_EXTENDED_SCAN_RESPONSE_DATA => 4,
         cmd::LE_SET_EXTENDED_ADVERTISING_ENABLE => 2,
         cmd::LE_REMOVE_ADVERTISING_SET => 1,
-        cmd::LE_SET_EXTENDED_SCAN_PARAMETERS => 3,
+        cmd::LE_SET_EXTENDED_SCAN_PARAMETERS => 8,
         cmd::LE_SET_EXTENDED_SCAN_ENABLE => 6,
         cmd::LE_EXTENDED_CREATE_CONNECTION => 26,
         _ => 0,
@@ -171,6 +200,7 @@ impl Controller {
             rssi: HashMap::new(),
             s: State::default(),
             out: Vec::new(),
+            now: Box::new(Instant::now),
         }
     }
 
@@ -376,19 +406,14 @@ impl Controller {
             | cmd::LE_ADD_DEVICE_TO_FILTER_ACCEPT_LIST
             | cmd::LE_REMOVE_DEVICE_FROM_FILTER_ACCEPT_LIST => self.accept_list(opcode, a),
             cmd::LE_SET_SCAN_PARAMETERS | cmd::LE_SET_EXTENDED_SCAN_PARAMETERS => {
-                // CoreBluetooth always scans actively; the parameters are
-                // the radio's business.
-                let st = if self.s.scan.enabled {
-                    status::COMMAND_DISALLOWED
-                } else {
-                    status::SUCCESS
-                };
+                let st = self.scan_parameters(opcode, a);
                 self.complete(opcode, &[st]);
             }
             cmd::LE_SET_SCAN_ENABLE | cmd::LE_SET_EXTENDED_SCAN_ENABLE => {
                 let (enable, filter) = (a[0] != 0, a[1] != 0);
                 if enable && !self.s.scan.enabled {
                     self.s.scan.seen.clear();
+                    self.s.scan.since = (self.now)();
                 }
                 self.s.scan.enabled = enable;
                 self.s.scan.filter_duplicates = filter;
@@ -531,6 +556,33 @@ impl Controller {
             }
         };
         self.complete(opcode, &[st]);
+    }
+
+    /// CoreBluetooth scans actively and without pause; the interval and
+    /// window make the reports those of a duty-cycled radio. The type is
+    /// the radio's business. Extended parameters take the first PHY's.
+    fn scan_parameters(&mut self, opcode: u16, a: &[u8]) -> u8 {
+        const PHYS: u8 = 0b101; // LE 1M, LE Coded
+        if self.s.scan.enabled {
+            return status::COMMAND_DISALLOWED;
+        }
+        let timing = if opcode == cmd::LE_SET_SCAN_PARAMETERS {
+            Some((u16_at(a, 1), u16_at(a, 3), 0x4000))
+        } else {
+            let phys = a[2];
+            (phys != 0 && phys & !PHYS == 0 && a.len() >= 3 + 5 * phys.count_ones() as usize)
+                .then(|| (u16_at(a, 4), u16_at(a, 6), 0xffff))
+        };
+        match timing {
+            Some((interval, window, max))
+                if (4..=interval).contains(&window) && interval <= max =>
+            {
+                self.s.scan.interval = interval;
+                self.s.scan.window = window;
+                status::SUCCESS
+            }
+            _ => status::INVALID_PARAMETERS,
+        }
     }
 
     /// Scan in the backend while the host scans, or while initiating waits
@@ -737,7 +789,10 @@ impl Controller {
             self.backend.connect(peer);
             self.update_scan();
         }
-        if !self.s.scan.enabled || self.s.scan.filter_duplicates && !self.s.scan.seen.insert(addr) {
+        if !self.s.scan.enabled
+            || !self.s.scan.listening((self.now)())
+            || self.s.scan.filter_duplicates && !self.s.scan.seen.insert(addr)
+        {
             return;
         }
         if self.s.scan.extended {

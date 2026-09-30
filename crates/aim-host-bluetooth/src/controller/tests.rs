@@ -3,6 +3,7 @@
 //! advertising.
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use super::*;
 use crate::att::Op;
@@ -284,6 +285,68 @@ fn extended_scan_reports() {
     assert_eq!(u16_at(&e[1], 4), 0);
     assert_eq!(e[1][27], 242 - 229);
     assert_eq!(e[0][1] as usize + 2, e[0].len());
+}
+
+#[test]
+fn scan_reports_only_within_windows() {
+    let (mut c, _) = new();
+    let t0 = Instant::now();
+    let now = Arc::new(Mutex::new(t0));
+    let clock = now.clone();
+    c.now = Box::new(move || *clock.lock().unwrap());
+    let at = |ms| *now.lock().unwrap() = t0 + std::time::Duration::from_millis(ms);
+    // Windows must be 4 to `interval` units; extended PHYs are 1M and Coded.
+    for (opcode, params) in [
+        (
+            cmd::LE_SET_SCAN_PARAMETERS,
+            &[1, 0x10, 0, 0x11, 0, 0, 0][..],
+        ),
+        (cmd::LE_SET_SCAN_PARAMETERS, &[1, 0x10, 0, 0x03, 0, 0, 0]),
+        (cmd::LE_SET_SCAN_PARAMETERS, &[1, 0x01, 0x40, 0x10, 0, 0, 0]),
+        (
+            cmd::LE_SET_EXTENDED_SCAN_PARAMETERS,
+            &[1, 0, 0b010, 1, 0x10, 0, 0x10, 0],
+        ),
+        (
+            cmd::LE_SET_EXTENDED_SCAN_PARAMETERS,
+            &[1, 0, 0b101, 1, 0x10, 0, 0x10, 0],
+        ),
+    ] {
+        assert_eq!(
+            complete(&mut c, opcode, params),
+            vec![status::INVALID_PARAMETERS],
+            "{params:02x?}"
+        );
+    }
+    // Windows of 80 ms every 1.28 s, reporting duplicates.
+    assert_eq!(
+        complete(
+            &mut c,
+            cmd::LE_SET_SCAN_PARAMETERS,
+            &[1, 0x00, 0x08, 0x80, 0, 0, 0]
+        ),
+        vec![0]
+    );
+    assert_eq!(complete(&mut c, cmd::LE_SET_SCAN_ENABLE, &[1, 0]), vec![0]);
+    for (ms, reported) in [
+        (10, true),
+        (79, true),
+        (81, false),
+        (1000, false),
+        (1285, true),
+        (1370, false),
+    ] {
+        at(ms);
+        c.on_event(advertisement("HR", true));
+        assert_eq!(events(&mut c).len(), usize::from(reported), "at {ms} ms");
+    }
+    // A scan enabled later has its windows from then on.
+    complete(&mut c, cmd::LE_SET_SCAN_ENABLE, &[0, 0]);
+    at(2000);
+    complete(&mut c, cmd::LE_SET_SCAN_ENABLE, &[1, 0]);
+    at(2010);
+    c.on_event(advertisement("HR", true));
+    assert_eq!(events(&mut c).len(), 1);
 }
 
 fn services() -> Vec<Service> {
