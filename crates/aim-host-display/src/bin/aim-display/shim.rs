@@ -145,6 +145,19 @@ pub fn shell(m: &aim_host_display::shell::Message) {
     }
 }
 
+/// A media message for the server.
+pub fn media(m: &aim_host_display::media::Message) {
+    if let Some(l) = LINK.get() {
+        let w = l.writer.lock().unwrap();
+        let r = Rec {
+            op: host::MEDIA,
+            ..Default::default()
+        };
+        if wire::send(w.as_fd(), wire::bytes(&r), None).is_ok() {
+            let _ = wire::send(w.as_fd(), &m.frame(), None);
+        }
+    }
+}
 
 /// Start the app (or bring its task to the front), with a splash until it
 /// has drawn when it has no window yet.
@@ -356,6 +369,10 @@ fn serve(sock: &mut UnixStream) {
             }
             host::NOTIFY => match aim_host_display::notify::Message::read(sock) {
                 Ok(Some(m)) => crate::un::handle(m),
+                _ => break,
+            },
+            host::MEDIA => match aim_host_display::media::Message::read(sock) {
+                Ok(Some(m)) => crate::media::handle(m),
                 _ => break,
             },
             host::SHELL => match aim_host_display::shell::Message::read(sock) {

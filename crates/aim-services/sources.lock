@@ -65,6 +65,12 @@ SOURCE_FILES=(
   "platform/frameworks/base|core/java/android/view/accessibility/IAccessibilityManager.aidl|e4cb1529bc3087c995499954be57a8931aba253feba1c76e65a2571eb72cfcf5"
   "platform/frameworks/base|media/java/android/media/IAudioService.aidl|66f57b88d780b182f41d199a6e2e2a79765feb2584cae17993423555581296c8"
   "platform/frameworks/base|media/java/android/media/IAudioDeviceVolumeDispatcher.aidl|dae533b4d5ac3f82323bd4d39018c3d9137c8e5eb5133c6b041fadbeb729bfa1"
+  "platform/frameworks/base|media/java/android/media/session/ISessionManager.aidl|ce64a61490fb71061fc5cedaf73f40118b7c65667b859454248b78e6e2f3070e"
+  "platform/frameworks/base|media/java/android/media/session/IOnMediaKeyEventSessionChangedListener.aidl|c9b6319fb092ec547aeae274be61a88967070c811eefff76b442ac7d1a6eeff6"
+  "platform/frameworks/base|media/java/android/media/session/ISessionController.aidl|c5f1f1291d21cfdfb3dadcbdfd00ce3c7683b0fd41da06e5524bc10c9a7d7334"
+  "platform/frameworks/base|media/java/android/media/session/ISessionControllerCallback.aidl|9f2bc82b2d4f0faf13916a4cee67bf0828fe1e1e5c53759756e533d2de6d1d21"
+  "platform/frameworks/base|media/java/android/media/projection/IMediaProjectionManager.aidl|66d3da0cf547d0a39ac743cdc57fe32e6aa629d984ba9ef0c8185608c5b5a87b"
+  "platform/frameworks/base|media/java/android/media/projection/IMediaProjection.aidl|7f665ca0d510538a955b0a0fd9031e3b26ceb7b91526e446d1485dbb4fbdd367"
 )
 
 # descriptor|jar of its stub in the image|methods to marshal (`*`: all).
@@ -128,6 +134,12 @@ INTERFACES=(
   "android.view.accessibility.IAccessibilityManager|system/framework/framework.jar|sendAccessibilityEvent"
   "android.media.IAudioService|system/framework/framework.jar|registerDeviceVolumeDispatcherForAbsoluteVolume,setStreamVolumeWithAttribution,adjustStreamVolumeWithAttribution,getStreamMinVolume,getStreamMaxVolume"
   "android.media.IAudioDeviceVolumeDispatcher|system/framework/framework.jar|*"
+  "android.media.session.ISessionManager|system/framework/framework.jar|getMediaKeyEventSession,addOnMediaKeyEventSessionChangedListener"
+  "android.media.session.IOnMediaKeyEventSessionChangedListener|system/framework/framework.jar|*"
+  "android.media.session.ISessionController|system/framework/framework.jar|registerCallback,unregisterCallback,getPackageName,getMetadata,getPlaybackState,play,pause,stop,next,previous,seekTo"
+  "android.media.session.ISessionControllerCallback|system/framework/framework.jar|onSessionDestroyed,onPlaybackStateChanged,onMetadataChanged"
+  "android.media.projection.IMediaProjectionManager|system/framework/framework.jar|hasProjectionPermission,createProjection,getProjection"
+  "android.media.projection.IMediaProjection|system/framework/framework.jar|setLaunchCookie"
 )
 
 # Binder interfaces the framework writes by hand, without AIDL:
@@ -146,4 +158,6 @@ OWN_INTERFACES=(
   "dev.aim.server.INotificationPermissionCallback|java/device-services/aidl/dev/aim/server/INotificationPermissionCallback.aidl|*"
   "dev.aim.server.ILocationBridge|java/device-services/aidl/dev/aim/server/ILocationBridge.aidl|*"
   "dev.aim.server.ILocationHost|java/device-services/aidl/dev/aim/server/ILocationHost.aidl|*"
+  "dev.aim.server.IScreenCaptureConsent|java/device-services/aidl/dev/aim/server/IScreenCaptureConsent.aidl|*"
+  "dev.aim.server.IScreenCaptureConsentCallback|java/device-services/aidl/dev/aim/server/IScreenCaptureConsentCallback.aidl|*"
 )

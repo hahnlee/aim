@@ -20,6 +20,9 @@ public class Intent {
     public String getAction() { throw new RuntimeException("stub"); }
     public String getStringExtra(String name) { throw new RuntimeException("stub"); }
     public boolean getBooleanExtra(String name, boolean defaultValue) { throw new RuntimeException("stub"); }
+    public boolean hasExtra(String name) { throw new RuntimeException("stub"); }
+    public <T extends android.os.Parcelable> T getParcelableExtra(String name) { throw new RuntimeException("stub"); }
+    public Intent putExtras(android.os.Bundle extras) { throw new RuntimeException("stub"); }
     public android.net.Uri getData() { throw new RuntimeException("stub"); }
     public String[] getStringArrayExtra(String name) { throw new RuntimeException("stub"); }
     public IBinder getIBinderExtra(String name) { throw new RuntimeException("stub"); }

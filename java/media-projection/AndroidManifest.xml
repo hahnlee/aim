@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The MediaProjection consent activity (docs/media.md) that
+     config_mediaProjectionPermissionDialogComponent names in place of
+     SystemUI's: preinstalled, and visible to every app, which starts it
+     for a result (MediaProjectionManager.createScreenCaptureIntent). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.aim.mediaprojection">
+    <!-- Any app may ask; SystemUI sees every package too. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <application
+        android:label="Screen capture"
+        android:allowBackup="false"
+        android:forceQueryable="true">
+        <activity
+            android:name=".ConsentActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:finishOnCloseSystemDialogs="true"
+            android:launchMode="singleTop"
+            android:visibleToInstantApps="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:configChanges="density|fontScale|keyboard|keyboardHidden|layoutDirection|locale|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" />
+    </application>
+</manifest>

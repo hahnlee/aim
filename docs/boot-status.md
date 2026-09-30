@@ -935,6 +935,17 @@ timer keeps its actions), resource and `file:` icons are drawn on the Mac,
 and full-screen intents launch while the Mac is locked (not exercised on a
 locked Mac).
 
+**Media** (2026-10-01, #463, [media.md](media.md)): guest-init's media
+bridge follows the media session Android's media keys go to and publishes
+it as the Mac's Now Playing from the app's shim (VLC: `now playing
+org.videolan.vlc (Playing)`, then `nothing` after a force-stop). Screen
+capture requests start the device's consent activity
+(`/system/app/AimMediaProjection`, named by the framework overlay in place
+of SystemUI's), which asks with a sheet on the app's window and creates
+the projection through MediaProjectionManagerService. The Mac's Now
+Playing UI and an answer to the sheet were not exercised (no clicks);
+CtsMediaProjection* wait for SystemUI's dialog (#632).
+
 ## Pointer, scrolling and shortcuts (2026-09-29, #214, #288)
 
 A window-mode boot of the derived image with the mouse device

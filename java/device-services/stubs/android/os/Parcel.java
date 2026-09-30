@@ -7,6 +7,7 @@ public final class Parcel {
     public static Parcel obtain() { throw new RuntimeException("stub"); }
     public static Parcel obtain(IBinder binder) { throw new RuntimeException("stub"); }
     public final void recycle() { throw new RuntimeException("stub"); }
+    public final void setDataPosition(int pos) { throw new RuntimeException("stub"); }
     public final void writeInterfaceToken(String interfaceName) { throw new RuntimeException("stub"); }
     public final void enforceInterface(String interfaceName) { throw new RuntimeException("stub"); }
     public final void writeString(String val) { throw new RuntimeException("stub"); }

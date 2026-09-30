@@ -589,6 +589,9 @@ impl Boot {
                     display,
                     Arc::new(move |guest: &str| map.readable_by_others(guest)),
                 );
+                // The Mac's Now Playing and screen capture consent, from
+                // the original media session and projection services.
+                aim_services::media::Bridge::start(server.driver(), display);
             }
             // Android's media volume is the Mac's output volume.
             aim_services::volume::start(server.driver());

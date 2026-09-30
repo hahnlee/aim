@@ -2,4 +2,7 @@
 // the members used, checked against the image by the device-services node.
 package android.os;
 
-public final class Bundle extends BaseBundle {}
+public final class Bundle extends BaseBundle {
+    public Bundle() { throw new RuntimeException("stub"); }
+    public void putBinder(String key, IBinder value) { throw new RuntimeException("stub"); }
+}

@@ -8,4 +8,6 @@ public class ParcelFileDescriptor implements Parcelable {
     public static final Parcelable.Creator<ParcelFileDescriptor> CREATOR = null;
 
     public ParcelFileDescriptor(FileDescriptor fd) { throw new RuntimeException("stub"); }
+    @Override
+    public void writeToParcel(Parcel out, int flags) { throw new RuntimeException("stub"); }
 }

@@ -17,6 +17,7 @@ mod bundle;
 pub mod clip;
 pub mod clipboard;
 pub mod location;
+pub mod media;
 mod mirror;
 mod nonces;
 pub mod notifications;
