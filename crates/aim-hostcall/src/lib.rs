@@ -416,6 +416,9 @@ pub mod display {
         /// Guest: the task went behind the others (Back on its root
         /// activity moves it to the back).
         pub const MOVED_TO_BACK: u32 = 6;
+        /// Guest: the activity the task was started with,
+        /// `package/class`, in [`super::Window::text`].
+        pub const ACTIVITY: u32 = 7;
         /// Server: move or resize the task to [`super::Window::bounds`].
         pub const SET_BOUNDS: u32 = 16;
         /// Server: make the task the top (focused) one.

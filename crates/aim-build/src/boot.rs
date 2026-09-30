@@ -5,8 +5,8 @@
 //! aim-display writes the last presented buffer to
 //! `target/aim/boot/capture.bmp`. `--windows` runs aim-display in window
 //! mode (docs/windows.md) instead of one phone-sized device window, and
-//! keeps a shim for each launcher app in `target/aim/boot/apps` (never the
-//! user's Applications folder).
+//! keeps a shim for each launcher activity in `target/aim/boot/apps`
+//! (never the user's Applications folder) while the boot runs.
 
 use crate::graph::Ctx;
 use std::ffi::OsString;
@@ -45,6 +45,14 @@ pub fn run(
     if let Some(apps) = &mut apps {
         let _ = apps.kill();
         let _ = apps.wait();
+        // The shims go with the boot, and out of Launch Services.
+        let cleaned = Command::new(ctx.workspace.host_bin("aim-apps"))
+            .args(["clean", "--into"])
+            .arg(dir.join("apps"))
+            .status();
+        if !cleaned.is_ok_and(|s| s.success()) {
+            eprintln!("aim-apps clean {}: failed", dir.join("apps").display());
+        }
     }
     Ok(if status.success() {
         ExitCode::SUCCESS

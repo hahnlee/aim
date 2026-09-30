@@ -41,6 +41,8 @@ const CAPTION_DP: i32 = 42;
 #[derive(Default)]
 struct Task {
     package: Option<String>,
+    /// The activity it was started with, `package/class`.
+    activity: Option<String>,
     label: Option<String>,
     /// An activity of it has run (it came to the front or had focus).
     running: bool,
@@ -111,6 +113,9 @@ impl Bridge {
                     if let Some(p) = &t.package {
                         out.push(Window::with_text(window::PACKAGE, task, p));
                     }
+                    if let Some(a) = &t.activity {
+                        out.push(Window::with_text(window::ACTIVITY, task, a));
+                    }
                     if let Some(l) = &t.label {
                         out.push(Window::with_text(window::TITLE, task, l));
                     }
@@ -175,7 +180,7 @@ impl Bridge {
         }
     }
 
-    /// Take what `info` says of the task's package and label.
+    /// Take what `info` says of the task's package, activity and label.
     fn update(&self, info: &aim_windows_core::TaskInfo) {
         let task = info.task_id;
         let mut out = Vec::new();
@@ -188,6 +193,12 @@ impl Bridge {
                 t.package = info.package.clone();
                 if let (true, Some(p)) = (shown, &t.package) {
                     out.push(Window::with_text(window::PACKAGE, task, p));
+                }
+            }
+            if t.activity.is_none() && info.activity.is_some() {
+                t.activity = info.activity.clone();
+                if let (true, Some(a)) = (shown, &t.activity) {
+                    out.push(Window::with_text(window::ACTIVITY, task, a));
                 }
             }
             if t.label != info.label {

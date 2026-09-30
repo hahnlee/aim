@@ -80,7 +80,9 @@ label, in the layout of the pinned `TaskInfo`, `Intent` (with
 `Uri` and `Bundle`.
 
 It connects to the display server with `FN_WINDOWS`, which answers the
-server's mode:
+server's mode. Its binders die with system_server, so its rc starts it
+again when zygote restarts (`init.svc.zygote=restarting`); the server
+drops the old connection's tasks. The mode:
 
 - **Device mode:** it sets the default display's windowing mode to
   fullscreen (`setWindowingMode` persists, so a window-mode boot is undone)
@@ -95,6 +97,7 @@ server's mode:
 | --- | --- | --- |
 | `TASK` | guest | the task's bounds and caption height, new or changed |
 | `PACKAGE`, `TITLE` | guest | the task's package; its `TaskDescription` label |
+| `ACTIVITY` | guest | the activity the task was started with, `package/class` (`origActivity`, an alias, else `realActivity`) |
 | `FRONT` | guest | the task is the focused, top one |
 | `MOVED_TO_BACK` | guest | Back on its root activity moved it behind the others |
 | `REMOVED` | guest | the task is gone |
@@ -130,7 +133,10 @@ server's mode:
   visible windows' tasks (they are focused back to front, in the screen's
   order). Closing a window removes its task; a removed task closes its
   window. Zoom (the green button) resizes; full screen is off.
-- **Title.** The task's `TaskDescription` label, else its package.
+- **Title.** The task's `TaskDescription` label, else what a launcher
+  calls it: in a shim, the shim's name; in the server, the label of the
+  launcher activity the task was started with, else its app's label (both
+  from the shims in `--apps`); else its package.
 - **Occlusion.** Hidden and minimized windows are not presented into; a
   window that becomes visible shows the last frame at once.
 
@@ -161,8 +167,8 @@ Command is the shortcut key and Android's Ctrl ([input.md](input.md)),
 except for the window's own:
 
 - **Cmd+W** closes the window, which removes its task.
-- **Cmd+Q** quits the app: in a shim, the shim quits, closing its app's
-  tasks; in the server's own windows, every window of the key window's
+- **Cmd+Q** quits the app: in a shim, the shim quits, closing the tasks
+  it shows; in the server's own windows, every window of the key window's
   package closes.
 
 The first window of a run shows a hint at its bottom ("Swipe with two
@@ -171,35 +177,47 @@ is kept in the `dev.aim` defaults (`BackHintDismissed`).
 
 ## App shims
 
-Each launcher app of the guest is also a small macOS app, a **shim**, with
-the app's name and icon, so it has its own Dock icon, Cmd+Tab entry,
-Launchpad and Spotlight presence (#248):
+Each launcher entry of the guest (a launcher activity, as a launcher lists
+them: a package with two, like the Google app's "Google" and "Voice
+Search", has two) is also a small macOS app, a **shim**, with the entry's
+name and icon, so it has its own Dock icon, Cmd+Tab entry, Launchpad and
+Spotlight presence (#248, #356):
 
 ```text
 Settings.app/Contents/
   Info.plist            CFBundleName "Settings", AIMPackage com.android.settings,
+                        AIMActivity com.android.settings.Settings,
+                        AIMAppLabel "Settings", AIMPrimary,
                         AIMDisplaySocket <server socket>
   MacOS/aim-app         the aim-display binary (an APFS clone)
   Resources/AppIcon.icns
 ```
 
 - **Hosting.** Run from a bundle that names a package, aim-display is that
-  app's **window host** (`bin/aim-display/shim.rs`). It connects to the
-  display server (`OP_HOST`), which hands it the package's task records and
+  entry's **window host** (`bin/aim-display/shim.rs`). It connects to the
+  display server (`OP_HOST`, naming its package and activity), which hands
+  it the task records of the tasks started with its activity and, for the
+  package's primary shim (the entry named as the app, else its first;
+  else any running shim of the package), the package's other tasks, and
   the frames (each buffer's memfd once, then every present). It draws its
   windows' parts of each frame as the server does and answers when its GPU
   pass has read the buffer; the server's present waits for that (250 ms at
   most) and its present fence counts it. Its requests go to the task
   bridge and its input to the server's devices, through the server
-  (`bin/aim-display/hosts.rs`). Tasks of packages without a host stay in
-  the server's own windows; a host that connects takes its package's
-  windows over, and one that quits or crashes gives them back.
+  (`bin/aim-display/hosts.rs`). Tasks no host takes stay in the server's
+  own windows; a host that connects takes its tasks' windows over, and one
+  that quits or crashes gives them back.
 - **Launch.** Opening a shim (Finder, Dock, Launchpad, Spotlight, `open`)
-  starts the app's launcher activity in a new task (`LAUNCH`); Android
-  brings a running task to the front instead. Clicking the Dock icon again
-  does the same. Quitting a shim closes its app's tasks. Closing its last
-  window does not quit it, as with a Mac app (an app may pass through a
-  task that closes before its next one opens).
+  starts its launcher activity in a new task (`LAUNCH`); Android brings a
+  running task to the front instead. Clicking the Dock icon again does the
+  same. Quitting a shim closes the tasks it shows. Closing its last window
+  does not quit it, as with a Mac app (an app may pass through a task that
+  closes before its next one opens); a shim whose bundle is removed (its
+  app uninstalled) quits once it has no window.
+- **The server** has no Dock icon in window mode (an accessory app): each
+  app is its shim. Its own windows show the tasks no shim shows (packages
+  without a launcher activity, or whose shim is not running), titled as
+  above.
 - **Stacking.** With windows in several processes, the server restacks the
   tasks by the screen's order of all their windows (`CGWindowListCreate`)
   when one is minimized.
@@ -211,18 +229,21 @@ Settings.app/Contents/
   quarters of the body on a white plate. The drawables are Android's own
   resources, read from the APK: PNG and WebP bitmaps, vector drawables
   (paths, groups, clip paths, strokes, gradients, tints), `inset`,
-  `layer-list`, `shape`, `selector`, colors and theme attributes. The
-  `.icns` has every size from 16 to 1024 (1x and 2x), drawn at its own
-  resolution.
+  `rotate` (at level 0, as the Clock's hands), `layer-list`, `shape`,
+  `selector`, colors and theme attributes. The `.icns` has every size
+  from 16 to 1024 (1x and 2x), drawn at its own resolution.
 - **Install and uninstall.** `aim-apps shims --watch` keeps a directory
-  holding one shim per launcher app (an app with an enabled MAIN/LAUNCHER
-  activity), from the image's app directories and `/data/app` (installed
-  apps, updates of system apps and decompressed ones), rewriting a shim
-  whose app or icon drawing changed and removing the shims of uninstalled
-  apps; it follows `/data/system/packages.list`. Written bundles are
-  registered with Launch Services. `cargo aim boot --windows` runs it into
-  `target/aim/boot/apps`; `aim-apps install` writes into
-  `~/Applications/aim Apps` instead (not run by the build or the tests).
+  holding one shim per launcher entry (an enabled MAIN/LAUNCHER activity or
+  alias; its label and icon, else its target activity's, else the app's),
+  from the image's app directories and `/data/app` (installed apps,
+  updates of system apps and decompressed ones), rewriting a shim whose
+  entry or icon drawing changed and removing the shims of uninstalled apps
+  and disabled activities; it follows `/data/system/packages.list`.
+  Written bundles are registered with Launch Services, and removed ones
+  unregistered (`lsregister -u`). `cargo aim boot --windows` runs it into
+  `target/aim/boot/apps` and removes them when the boot ends (`aim-apps
+  clean`); `aim-apps install` writes into `~/Applications/aim Apps`
+  instead (not run by the build or the tests).
   Each bundle is signed ad hoc (`codesign --sign -`), which macOS requires
   of an app that posts notifications. One more shim, "Android System"
   (`android`, framework-res's label and icon, no activity), stands for the

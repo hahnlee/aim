@@ -3,19 +3,23 @@
 //! package (`AIMPackage`), its launcher activity (`AIMActivity`) and the
 //! display server (`AIMDisplaySocket`).
 //!
-//! It shows that package's task windows under the bundle's name and Dock
-//! icon. The server sends it the package's task records, the buffers (as
-//! memfds, mapped here as in the server) and every present, which it draws
-//! into its windows and answers once its GPU pass has read the buffer, and
-//! the pointer's image for its windows' cursor. Its
-//! windows' requests and input go back to the server.
+//! It shows task windows under the bundle's name and Dock icon: those of
+//! the tasks started with its activity, and, for the package's primary
+//! shim (else any of the package's), the package's others
+//! ([`crate::hosts::for_task`]). The server sends it their task records,
+//! the buffers (as memfds, mapped here as in the server) and every
+//! present, which it draws into its windows and answers once its GPU pass
+//! has read the buffer, and the pointer's image for its windows' cursor.
+//! Its windows' requests and input go back to the server.
 //!
 //! Launching the shim, or clicking it in the Dock, starts the app (its
 //! launcher activity: Android brings a running task to the front). Quitting
 //! it closes the app's tasks. The server launches it with
 //! `--notifications` to show the app's notifications (`un.rs`) while the
 //! app has no window: it then starts nothing, and has no Dock icon until a
-//! window opens. The system shim (package `android`) has no activity.
+//! window opens. The system shim (package `android`) has no activity. A
+//! host whose shim is removed (its app uninstalled) quits once it has no
+//! window.
 
 use std::collections::HashMap;
 use std::os::fd::AsFd;
@@ -43,6 +47,9 @@ struct Link {
 static BACKGROUND: AtomicBool = AtomicBool::new(false);
 
 static LINK: OnceLock<Link> = OnceLock::new();
+
+/// How often a host looks whether its shim is still there.
+const BUNDLE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Whether this process is a window host.
 pub fn is_host() -> bool {
@@ -189,7 +196,7 @@ fn read(sock: &mut UnixStream, fds: &mut Vec<std::os::fd::OwnedFd>) -> Option<Re
 /// `activity`, served by the display server at `socket`. Never returns.
 pub fn run(package: String, activity: String, socket: &Path) -> ! {
     let _pool = crate::objc::Pool::new();
-    crate::window::app(mode::WINDOWS);
+    crate::window::app(mode::WINDOWS, false);
     if std::env::args().any(|a| a == "--notifications") {
         BACKGROUND.store(true, Ordering::Relaxed);
         set_policy(ACCESSORY);
@@ -214,7 +221,7 @@ pub fn run(package: String, activity: String, socket: &Path) -> ! {
     let named = Rec {
         op: host::HELLO,
         id: wire::VERSION,
-        window: Record::with_text(0, 0, &package),
+        window: Record::with_text(0, 0, &format!("{package}/{activity}")),
         ..Default::default()
     };
     let (Ok(writer), Ok(()), Ok(())) = (
@@ -235,12 +242,37 @@ pub fn run(package: String, activity: String, socket: &Path) -> ! {
         None,
     ));
     std::thread::spawn(move || serve(&mut sock));
+    watch_bundle();
     // SIGTERM and SIGINT quit the app normally, closing its tasks.
     crate::input::quit_on_signals();
     if !BACKGROUND.load(Ordering::Relaxed) {
         launch();
     }
     crate::window::run()
+}
+
+/// Quit once the shim is gone (its app was uninstalled, and aim-apps
+/// removed it) and no window is left. The bundle must be missing twice
+/// in a row: a rewrite replaces it at once.
+fn watch_bundle() {
+    let bundle = send!(class(c"NSBundle"), c"mainBundle" => Id);
+    let plist = Path::new(&text(send!(bundle, c"bundlePath" => Id))).join("Contents/Info.plist");
+    std::thread::spawn(move || {
+        let mut missing = 0;
+        loop {
+            std::thread::sleep(BUNDLE_POLL);
+            missing = if plist.exists() { 0 } else { missing + 1 };
+            if missing >= 2 {
+                on_main(|| {
+                    if crate::windows::window_numbers().is_empty() {
+                        eprintln!("aim-display: the app's shim is gone");
+                        let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
+                        send!(app, c"terminate:" => (), Id = std::ptr::null_mut());
+                    }
+                });
+            }
+        }
+    });
 }
 
 /// The server's records, until it goes away.

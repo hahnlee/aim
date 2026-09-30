@@ -63,18 +63,22 @@ pub struct TaskInfo {
     /// The package of the task's root activity (`baseActivity`, else
     /// `realActivity`).
     pub package: Option<String>,
+    /// The activity the task was started with, `package/class`: the
+    /// component its intent named (`origActivity`, an alias), else
+    /// `realActivity`.
+    pub activity: Option<String>,
     /// `taskDescription.getLabel()`.
     pub label: Option<String>,
 }
 
 /// A `ComponentName` written by `ComponentName.writeToParcel(c, out)`:
-/// its package, or None for null.
-pub fn component(r: &mut impl Read) -> Result<Option<String>, Error> {
+/// its package and class, or None for null.
+pub fn component(r: &mut impl Read) -> Result<Option<(String, String)>, Error> {
     let Some(package) = r.string16()? else {
         return Ok(None);
     };
-    r.string16()?;
-    Ok(Some(package))
+    let class = r.string16()?.unwrap_or_default();
+    Ok(Some((package, class)))
 }
 
 /// A `Bundle` written by `writeBundle`: a length (-1 null, 0 empty), then
@@ -145,7 +149,7 @@ pub fn running_task_info(r: &mut impl Read) -> Result<Option<TaskInfo>, Error> {
     }
     let base = component(r)?;
     component(r)?; // topActivity
-    component(r)?; // origActivity
+    let orig = component(r)?;
     let real = component(r)?;
     r.int()?; // numActivities
     r.long()?; // lastActiveTime
@@ -157,7 +161,8 @@ pub fn running_task_info(r: &mut impl Read) -> Result<Option<TaskInfo>, Error> {
         task_id,
         display_id,
         running,
-        package: base.or(real),
+        package: base.or(real.clone()).map(|(p, _)| p),
+        activity: orig.or(real).map(|(p, c)| format!("{p}/{c}")),
         label,
     }))
 }
@@ -331,6 +336,7 @@ mod tests {
                 display_id: 0,
                 running: true,
                 package: Some("org.example".into()),
+                activity: Some("org.example/org.example.Main".into()),
                 label: Some("Settings — Wi‑Fi".into()),
             }
         );
@@ -338,6 +344,25 @@ mod tests {
         let info = running_task_info(&mut Bytes(&bytes)).unwrap().unwrap();
         assert_eq!(info.label, None);
         assert_eq!(info.package.as_deref(), Some("org.example"));
+    }
+
+    #[test]
+    fn an_alias_is_the_activity_started() {
+        let mut o = Out::default();
+        o.int(1).int(7).int(0).int(7);
+        o.int(10123).int(0).int(1).int(0);
+        o.component(Some(("org.example", "org.example.Real")))
+            .component(None)
+            .component(Some(("org.example", "org.example.Alias")))
+            .component(Some(("org.example", "org.example.Real")))
+            .int(1)
+            .long(1)
+            .int(0);
+        let info = running_task_info(&mut Bytes(&o.0)).unwrap().unwrap();
+        assert_eq!(
+            info.activity.as_deref(),
+            Some("org.example/org.example.Alias")
+        );
     }
 
     #[test]

@@ -741,7 +741,7 @@ tasks. On an M2 Pro with other agents' boots loading the host (load average
 
 | Check | Result |
 | --- | --- |
-| Settings, Calculator (installed with `pm install`) and Chrome from `am start` | three native windows titled with their package (no `TaskDescription` label), each showing its task, no Android caption |
+| Settings, Calculator (installed with `pm install`) and Chrome from `am start` | three native windows, each showing its task, no Android caption; a window the server shows itself is titled as the launcher names its task (Settings: "Settings", 2026-09-30), not with its package |
 | A click in a window | one touch at the display pixel under it (point × 2); Settings opened the page clicked |
 | Raising a window | `mCurrentFocus` becomes its task |
 | Resize (Accessibility, 412×756 to 640×820 points) | the task's bounds 1280×1592 pixels; Chrome lays out for the width |
@@ -763,8 +763,20 @@ no-op and did not help).
 GMS's, disabled by a resource, left out). Opening Calculator.app,
 Settings.app and Chrome.app started each app in its own process with its
 name and icon in the Dock; a click in the Calculator shim's window, behind
-Chrome's, focused its task and typed 7, and keys typed 5 5. `pm uninstall`
-of Calculator removed its shim, and `pm install` wrote it again.
+Chrome's, focused its task and typed 7, and keys typed 5 5.
+
+Window-mode boots of 2026-09-30 (#352, #354, #356, #357):
+
+| Check | Result |
+| --- | --- |
+| Shims per launcher activity | 22 shims; the Google app has two, "Google" (primary, `dev.aim.app.com.google.android.googlequicksearchbox`) and "Voice Search" (its own bundle identifier); each connects as the host of its activity |
+| Server window | `am start` of Settings with no shim running: a window of the server titled "Settings"; opening Settings.app moved the task into the shim's window |
+| Server in the Dock | none: `lsappinfo` type `UIElement`; the Dock shows the shims' icons (Google, Voice Search, Clock with its hands at 10:10) |
+| Uninstall | `pm uninstall` of Calculator (its shim open): the bundle removed within 4 s, its host exited, and Launch Services no longer lists it; at the end of the boot `aim-apps clean` left no bundle or registration of `target/aim/boot/apps` |
+| system_server restart | zygote was killed and restarted once early in every boot (#490); the task bridge now restarts with it (`init.svc.zygote=restarting`) and windows appear |
+
+VoiceSearchActivity opened no window of its own (no freeform task with
+bounds was reported for it).
 
 **Notifications** (2026-09-30, #4, [notifications.md](notifications.md)):
 guest-init's notification bridge registers with NotificationManagerService

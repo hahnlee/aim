@@ -88,13 +88,15 @@ any app; Android's own Do Not Disturb is not mapped to it.
 
 ## The shims
 
-The server keeps what is shown. A notification goes to the host of its
-package; a package without a shim (the shell, the phone app, the system)
-goes to the platform's shim, "Android System" (`android`, written by
-aim-apps with framework-res's label and icon, no activity). When the shim is
-not running, the server opens it in the background (`open -g -j ...
---args --notifications`): it starts no activity and has no Dock icon until
-the app shows a window. A shim that connects gets its package's
+The server keeps what is shown. A notification goes to the host of the
+shim that stands for its package: its primary one (of a package with
+several launcher entries, the one named as the app); a package without a
+shim (the shell, the phone app, the system) goes to the platform's shim,
+"Android System" (`android`, written by aim-apps with framework-res's
+label and icon, no activity). When that shim is not running, the server
+opens it in the background (`open -g -j ... --args --notifications`): it
+starts no activity and has no Dock icon until the app shows a window. A
+shim that connects gets its package's
 notifications; at start it removes what an earlier run left.
 
 A shim posts with `UNUserNotificationCenter`: identifier the notification's

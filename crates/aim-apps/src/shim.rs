@@ -1,11 +1,15 @@
-//! App shims: one small macOS app bundle per Android launcher app, with
-//! the app's name and icon, that opens the app in window mode.
+//! App shims: one small macOS app bundle per Android launcher activity, as
+//! a launcher lists them, with the activity's name and icon, that opens it
+//! in window mode.
 //!
 //! The bundle's executable is the display server binary (`aim-display`),
 //! which, run from a bundle whose `Info.plist` names a package
-//! (`AIMPackage`), hosts that app's windows under the bundle's Dock icon,
-//! talking to the display server at `AIMDisplaySocket`
-//! (`docs/windows.md`, "App shims").
+//! (`AIMPackage`) and activity (`AIMActivity`), hosts that activity's task
+//! windows under the bundle's Dock icon, talking to the display server at
+//! `AIMDisplaySocket` (`docs/windows.md`, "App shims"). A package's primary
+//! shim (`AIMPrimary`: the entry named as the application, else its
+//! first) has the package's bundle identifier; it also shows the package's
+//! other windows and its notifications.
 
 use std::fs;
 use std::io;
@@ -17,7 +21,7 @@ use crate::app::App;
 const EXECUTABLE: &str = "aim-app";
 /// Bumped when a shim's layout or icon drawing changes, so shims are
 /// written again.
-pub const LAYOUT: u32 = 3;
+pub const LAYOUT: u32 = 4;
 
 /// A shim to write: the app, its icon, and where its windows come from.
 pub struct Shim<'a> {
@@ -33,6 +37,7 @@ pub struct Shim<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Stamp {
     pub package: String,
+    pub activity: String,
     /// "LAYOUT/version/socket/host size-modification time".
     pub version: String,
 }
@@ -43,19 +48,30 @@ fn escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// A bundle identifier for `package`: letters, digits, hyphens and dots.
-pub fn bundle_id(package: &str) -> String {
-    let safe: String = package
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    format!("dev.aim.app.{safe}")
+/// A bundle identifier for `app`: its package's for the primary entry,
+/// else the package's and the activity's (without the package prefix);
+/// letters, digits, hyphens and dots.
+pub fn bundle_id(app: &App) -> String {
+    let safe = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    };
+    let package = safe(&app.package);
+    if app.primary {
+        return format!("dev.aim.app.{package}");
+    }
+    let class = app
+        .activity
+        .strip_prefix(&format!("{}.", app.package))
+        .unwrap_or(&app.activity);
+    format!("dev.aim.app.{package}.{}", safe(class))
 }
 
 fn version(s: &Shim) -> io::Result<String> {
@@ -105,14 +121,22 @@ fn info_plist(s: &Shim, version: &str) -> String {
 	<string>{package}</string>
 	<key>AIMActivity</key>
 	<string>{activity}</string>
-	<key>AIMDisplaySocket</key>
+	<key>AIMAppLabel</key>
+	<string>{app_label}</string>
+{primary}	<key>AIMDisplaySocket</key>
 	<string>{socket}</string>
 	<key>AIMShimVersion</key>
 	<string>{stamp}</string>
 </dict>
 </plist>
 "#,
-        id = bundle_id(&s.app.package),
+        id = bundle_id(s.app),
+        app_label = escape(&s.app.app_label),
+        primary = if s.app.primary {
+            "\t<key>AIMPrimary</key>\n\t<true/>\n"
+        } else {
+            ""
+        },
         code = s.app.version,
         package = escape(&s.app.package),
         activity = escape(&s.app.activity),
@@ -140,14 +164,18 @@ pub fn stamp(bundle: &Path) -> Option<Stamp> {
     let plist = fs::read_to_string(bundle.join("Contents/Info.plist")).ok()?;
     Some(Stamp {
         package: plist_value(&plist, "AIMPackage")?,
+        activity: plist_value(&plist, "AIMActivity").unwrap_or_default(),
         version: plist_value(&plist, "AIMShimVersion").unwrap_or_default(),
     })
 }
 
 /// Whether the shim at `bundle` is `s` as it would be written now.
 pub fn current(bundle: &Path, s: &Shim) -> bool {
-    stamp(bundle)
-        .is_some_and(|st| st.package == s.app.package && version(s).is_ok_and(|v| st.version == v))
+    stamp(bundle).is_some_and(|st| {
+        st.package == s.app.package
+            && st.activity == s.app.activity
+            && version(s).is_ok_and(|v| st.version == v)
+    })
 }
 
 /// Write `s` as the bundle `bundle` (replacing what is there).
@@ -200,19 +228,24 @@ fn clone(from: &Path, to: &Path) -> io::Result<()> {
     fs::copy(from, to).map(drop)
 }
 
-/// The bundle path for `app` in `dir`: its label, or its label and
-/// package when another app has the label.
+/// The bundle path for `app` in `dir`: its label, else (another shim has
+/// the label) its label and package, else its label and activity.
 pub fn path(dir: &Path, app: &App, taken: &[String]) -> PathBuf {
-    let clean: String = app
-        .label
-        .chars()
-        .map(|c| if c == '/' || c == ':' { '-' } else { c })
-        .collect();
-    let name = if taken.contains(&clean) {
-        format!("{clean} ({})", app.package)
-    } else {
-        clean
+    let clean = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c == '/' || c == ':' { '-' } else { c })
+            .collect()
     };
+    let label = clean(&app.label);
+    let names = [
+        label.clone(),
+        format!("{label} ({})", clean(&app.package)),
+        format!("{label} ({})", clean(&app.activity)),
+    ];
+    let name = names
+        .iter()
+        .find(|n| !taken.contains(n))
+        .unwrap_or(&names[2]);
     dir.join(format!("{name}.app"))
 }
 
@@ -225,6 +258,8 @@ mod tests {
         let app = App {
             package: "org.example_app".into(),
             label: "A & <B>".into(),
+            app_label: "Example".into(),
+            primary: true,
             version: 7,
             activity: "org.example_app.Main".into(),
             icon: None,
@@ -243,7 +278,45 @@ mod tests {
         );
         assert_eq!(plist_value(&p, "CFBundleName").as_deref(), Some("A & <B>"));
         assert_eq!(plist_value(&p, "AIMShimVersion").as_deref(), Some("1/7/x"));
-        assert_eq!(bundle_id("org.example_app"), "dev.aim.app.org.example-app");
+        assert_eq!(plist_value(&p, "AIMAppLabel").as_deref(), Some("Example"));
+        assert!(p.contains("<key>AIMPrimary</key>"));
+        assert_eq!(bundle_id(&app), "dev.aim.app.org.example-app");
+        let other = App {
+            primary: false,
+            activity: "org.example_app.voice.Search$A".into(),
+            ..app.clone()
+        };
+        assert_eq!(
+            bundle_id(&other),
+            "dev.aim.app.org.example-app.voice.Search-A"
+        );
+        assert!(!info_plist(&Shim { app: &other, ..s }, "").contains("AIMPrimary"));
+    }
+
+    #[test]
+    fn paths_stay_apart() {
+        let app = |package: &str, activity: &str| App {
+            package: package.into(),
+            label: "Clock".into(),
+            app_label: "Clock".into(),
+            primary: true,
+            version: 1,
+            activity: activity.into(),
+            icon: None,
+            theme: 0,
+        };
+        let dir = Path::new("/apps");
+        let name = |a: &App, taken: &[&str]| {
+            let taken: Vec<String> = taken.iter().map(|s| s.to_string()).collect();
+            path(dir, a, &taken)
+        };
+        let a = app("a.clock", "a.clock.Main");
+        assert_eq!(name(&a, &[]), dir.join("Clock.app"));
+        assert_eq!(name(&a, &["Clock"]), dir.join("Clock (a.clock).app"));
+        assert_eq!(
+            name(&a, &["Clock", "Clock (a.clock)"]),
+            dir.join("Clock (a.clock.Main).app")
+        );
     }
 }
 
@@ -283,16 +356,59 @@ fn register(bundle: &Path) {
     }
 }
 
-/// What a sync changed.
+/// The Launch Services registration tool.
+const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+
+/// Remove the shim at `bundle`, and its Launch Services registration, so
+/// the Dock, Launchpad and Spotlight forget it.
+fn remove(bundle: &Path) -> io::Result<()> {
+    let unregistered = std::process::Command::new(LSREGISTER)
+        .arg("-u")
+        .arg(bundle)
+        .status();
+    if !unregistered.is_ok_and(|s| s.success()) {
+        eprintln!("aim-apps: lsregister -u {}: failed", bundle.display());
+    }
+    fs::remove_dir_all(bundle)
+}
+
+/// Our shims in `dir`.
+fn ours(dir: &Path) -> io::Result<Vec<(PathBuf, Stamp)>> {
+    Ok(fs::read_dir(dir)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "app"))
+        .filter_map(|p| stamp(&p).map(|s| (p, s)))
+        .collect())
+}
+
+/// A bundle's file name.
+fn name(bundle: &Path) -> String {
+    bundle
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+}
+
+/// Remove our shims from `dir` (other files stay): their names.
+pub fn clean(dir: &Path) -> io::Result<Vec<String>> {
+    let mut removed = Vec::new();
+    for (bundle, _) in ours(dir)? {
+        remove(&bundle)?;
+        removed.push(name(&bundle));
+    }
+    Ok(removed)
+}
+
+/// What a sync changed: the bundles' names.
 #[derive(Debug, Default)]
 pub struct Synced {
     pub written: Vec<String>,
     pub removed: Vec<String>,
 }
 
-/// Make `dir` hold one shim per app of `apps`: new and changed apps are
-/// written, and our shims of apps no longer installed are removed. Other
-/// files in `dir` are left alone.
+/// Make `dir` hold one shim per entry of `apps`: new and changed entries
+/// are written, and our shims of entries no longer there are removed.
+/// Other files in `dir` are left alone.
 pub fn sync(
     dir: &Path,
     apps: &[crate::installed::Installed],
@@ -301,16 +417,18 @@ pub fn sync(
     host: &Path,
 ) -> io::Result<Synced> {
     fs::create_dir_all(dir)?;
-    let mut ours: Vec<(PathBuf, Stamp)> = fs::read_dir(dir)?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "app"))
-        .filter_map(|p| stamp(&p).map(|s| (p, s)))
-        .collect();
+    let mut ours = ours(dir)?;
     let mut done = Synced::default();
-    let mut taken: Vec<String> = Vec::new();
+    // Names of the shims kept or written, and of those still to be matched.
+    let mut taken: Vec<String> = ours
+        .iter()
+        .filter_map(|(p, _)| Some(p.file_stem()?.to_string_lossy().into_owned()))
+        .collect();
     for i in apps {
-        let bundle = match ours.iter().position(|(_, s)| s.package == i.app.package) {
+        let found = ours
+            .iter()
+            .position(|(_, s)| s.package == i.app.package && s.activity == i.app.activity);
+        let bundle = match found {
             Some(k) => ours.swap_remove(k).0,
             None => path(dir, &i.app, &taken),
         };
@@ -340,11 +458,11 @@ pub fn sync(
             },
         )?;
         register(&bundle);
-        done.written.push(i.app.package.clone());
+        done.written.push(name(&bundle));
     }
-    for (bundle, s) in ours {
-        fs::remove_dir_all(&bundle)?;
-        done.removed.push(s.package);
+    for (bundle, _) in ours {
+        remove(&bundle)?;
+        done.removed.push(name(&bundle));
     }
     Ok(done)
 }

@@ -94,7 +94,7 @@ fn a_cursor_buffer_is_the_window_hosts_cursor() {
     let named = Host {
         op: host::HELLO,
         id: wire::VERSION,
-        window: Window::with_text(0, 0, "test.cursor"),
+        window: Window::with_text(0, 0, "test.cursor/test.cursor.Main"),
         ..Default::default()
     };
     wire::send(sock.as_fd(), wire::bytes(&named), None).unwrap();

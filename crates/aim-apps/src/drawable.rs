@@ -1,7 +1,7 @@
 //! Drawing an app's drawables the way Android draws them, for its icon:
 //! colors, bitmaps (PNG, WebP), vector drawables with their groups, clip
 //! paths, strokes and gradients, and the containers launcher icons use
-//! (`inset`, `layer-list`, `bitmap`, `shape`, `selector`, ...).
+//! (`inset`, `rotate`, `layer-list`, `bitmap`, `shape`, `selector`, ...).
 //!
 //! Lengths in dp are drawn at the canvas's scale for the drawable's frame;
 //! theme attributes resolve against the app's theme.
@@ -139,7 +139,28 @@ impl Drawer<'_> {
                     .or(items.first());
                 plain.is_some_and(|i| self.inner(i, apk, r, depth))
             }
-            "rotate" | "scale" | "clip" | "animated-vector" | "adaptive-icon" => {
+            "rotate" => {
+                // At level 0, a drawable's own level, it stands at
+                // `fromDegrees` about its pivot (50 % by default).
+                let pivot = |name: &str, extent: f64| match e.named(name) {
+                    Some(v) => self.res.resolve(v).and_then(|(v, _)| match v {
+                        Value::Fraction(_) => v.length(extent as f32).map(f64::from),
+                        v => v.length(1.0).map(f64::from),
+                    }),
+                    None => Some(extent / 2.0),
+                };
+                let (Some(px), Some(py)) = (pivot("pivotX", r.w), pivot("pivotY", r.h)) else {
+                    return false;
+                };
+                let t = rotation(num(e, "fromDegrees", 0.0), r.x + px, r.y + py);
+                let mut drew = false;
+                self.canvas.saved(|| {
+                    self.canvas.transform(t);
+                    drew = self.inner(e, apk, r, depth);
+                });
+                drew
+            }
+            "scale" | "clip" | "animated-vector" | "adaptive-icon" => {
                 if e.name == "adaptive-icon" {
                     let mut drew = false;
                     for part in ["background", "foreground"] {
@@ -391,6 +412,19 @@ impl Drawer<'_> {
     }
 }
 
+/// A rotation by `degrees` (clockwise, y running down) about (px, py).
+fn rotation(degrees: f64, px: f64, py: f64) -> Transform {
+    let (sin, cos) = degrees.to_radians().sin_cos();
+    Transform {
+        a: cos,
+        b: sin,
+        c: -sin,
+        d: cos,
+        tx: px - (cos * px - sin * py),
+        ty: py - (sin * px + cos * py),
+    }
+}
+
 fn with_alpha(argb: u32, alpha: f64) -> u32 {
     let a = ((argb >> 24) as f64 * alpha.clamp(0.0, 1.0)).round() as u32;
     (argb & 0x00ff_ffff) | a << 24
@@ -419,4 +453,21 @@ fn path_of(e: &Element) -> Option<Path> {
     let mut p = Path::new();
     crate::pathdata::build(d, &mut p);
     Some(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotation_about_pivot() {
+        // A hand from the center (54, 54) to 12 o'clock, turned 90
+        // degrees, points to 3 o'clock; the pivot stays.
+        let t = rotation(90.0, 54.0, 54.0);
+        let at = |x: f64, y: f64| (t.a * x + t.c * y + t.tx, t.b * x + t.d * y + t.ty);
+        let (x, y) = at(54.0, 10.0);
+        assert!((x - 98.0).abs() < 1e-9 && (y - 54.0).abs() < 1e-9);
+        let (x, y) = at(54.0, 54.0);
+        assert!((x - 54.0).abs() < 1e-9 && (y - 54.0).abs() < 1e-9);
+    }
 }

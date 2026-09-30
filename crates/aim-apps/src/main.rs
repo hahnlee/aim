@@ -3,10 +3,11 @@
 //! ```text
 //! aim-apps shims --image ROOT [--data DATA] --display SOCKET --host AIM_DISPLAY --into DIR [--watch]
 //! aim-apps install --image ROOT [--data DATA] --display SOCKET --host AIM_DISPLAY
+//! aim-apps clean --into DIR
 //! aim-apps icon APK --framework FRAMEWORK_RES --out FILE.png|FILE.icns [--size N]
 //! ```
 //!
-//! - `shims` keeps `DIR` holding one shim per launcher app of the guest
+//! - `shims` keeps `DIR` holding one shim per launcher activity of the guest
 //!   whose system image root is `ROOT` and whose `/data` is `DATA`, and
 //!   one for the platform (`android`, which shows the notifications of
 //!   packages without a shim of their own); with
@@ -14,7 +15,9 @@
 //!   packages.list` changing), and a rebuilt `AIM_DISPLAY`, until it is
 //!   stopped.
 //! - `install` does the same into `~/Applications/aim Apps`.
-//! - `icon` draws one APK's launcher icon as a macOS icon.
+//! - `clean` removes the shims from `DIR` and from Launch Services.
+//! - `icon` lists an APK's launcher activities and draws the first one's
+//!   icon as a macOS icon.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -26,6 +29,7 @@ use aim_apps::icon::{self, Icon};
 const USAGE: &str = "usage:
   aim-apps shims --image ROOT [--data DATA] --display SOCKET --host AIM_DISPLAY --into DIR [--watch]
   aim-apps install --image ROOT [--data DATA] --display SOCKET --host AIM_DISPLAY
+  aim-apps clean --into DIR
   aim-apps icon APK --framework FRAMEWORK_RES --out FILE.png|FILE.icns [--size N]";
 
 /// How often `--watch` looks at the package list.
@@ -95,6 +99,13 @@ fn run(args: &[String]) -> Result<(), String> {
             let home = std::env::var_os("HOME").ok_or("no HOME")?;
             shims(&a, Path::new(&home).join("Applications/aim Apps"))
         }
+        "clean" => {
+            let dir = a.into.as_deref().ok_or(USAGE)?;
+            for p in aim_apps::shim::clean(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+                println!("removed {p}");
+            }
+            Ok(())
+        }
         _ => Err(USAGE.into()),
     }
 }
@@ -110,10 +121,14 @@ fn icon_command(a: &Args) -> Result<(), String> {
     let out = a.out.as_ref().ok_or(USAGE)?;
     let apk = open(apk)?;
     let framework = a.framework.as_deref().map(open).transpose()?;
-    let app = aim_apps::app::read(&apk, framework.as_ref(), None)
-        .map_err(|e| e.to_string())?
-        .ok_or("not a launcher app")?;
-    println!("{} \"{}\" version {}", app.package, app.label, app.version);
+    let apps = aim_apps::app::read(&apk, framework.as_ref(), None).map_err(|e| e.to_string())?;
+    for app in &apps {
+        println!(
+            "{}/{} \"{}\" version {}",
+            app.package, app.activity, app.label, app.version
+        );
+    }
+    let app = apps.first().ok_or("not a launcher app")?;
     let bytes = if out.extension().is_some_and(|e| e == "icns") {
         app.icns(&apk, framework.as_ref())
     } else {
@@ -165,7 +180,7 @@ fn shims(a: &Args, dir: PathBuf) -> Result<(), String> {
             for p in &done.removed {
                 println!("removed {p}");
             }
-            println!("{} apps in {}", apps.len(), dir.display());
+            println!("{} shims in {}", apps.len(), dir.display());
             seen = Some(now);
         }
         if !a.watch {

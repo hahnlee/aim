@@ -11,9 +11,8 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use aim_host_display::notify::{Message, Post};
 
@@ -25,9 +24,6 @@ const SYSTEM: &str = "android";
 /// again.
 const LAUNCH_WAIT: Duration = Duration::from_secs(20);
 
-/// The shims' directory (`--apps`).
-static APPS: OnceLock<PathBuf> = OnceLock::new();
-
 struct State {
     /// The bridge's connection, to write to.
     bridge: Option<UnixStream>,
@@ -35,60 +31,19 @@ struct State {
     shown: BTreeMap<String, Post>,
     /// Shims launched and not yet connected.
     launching: BTreeMap<String, Instant>,
-    /// The shims in `APPS` by package, and when the directory was read.
-    shims: (Option<SystemTime>, BTreeMap<String, PathBuf>),
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
     bridge: None,
     shown: BTreeMap::new(),
     launching: BTreeMap::new(),
-    shims: (None, BTreeMap::new()),
 });
 
-pub fn set_apps(dir: &Path) {
-    let _ = APPS.set(dir.to_owned());
-}
-
-/// `AIMPackage` of a shim's `Info.plist` (which aim-apps writes).
-fn shim_package(bundle: &Path) -> Option<String> {
-    let plist = std::fs::read_to_string(bundle.join("Contents/Info.plist")).ok()?;
-    let rest = &plist[plist.find("<key>AIMPackage</key>")?..];
-    let start = rest.find("<string>")? + "<string>".len();
-    let end = rest[start..].find("</string>")?;
-    Some(
-        rest[start..start + end]
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&"),
-    )
-}
-
-/// The shims by package, read again when the directory changed.
-fn shims(s: &mut State) -> &BTreeMap<String, PathBuf> {
-    if let Some(dir) = APPS.get() {
-        let modified = std::fs::metadata(dir).and_then(|m| m.modified()).ok();
-        if modified != s.shims.0 {
-            let found = std::fs::read_dir(dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "app"))
-                .filter_map(|p| Some((shim_package(&p)?, p)))
-                .collect();
-            s.shims = (modified, found);
-        }
-    }
-    &s.shims.1
-}
-
 /// The package whose shim shows `package`'s notifications.
-fn owner(s: &mut State, package: &str) -> Option<String> {
-    let shims = shims(s);
+fn owner(package: &str) -> Option<String> {
     [package, SYSTEM]
         .into_iter()
-        .find(|p| shims.contains_key(*p))
+        .find(|p| crate::apps::bundle(p).is_some())
         .map(str::to_string)
 }
 
@@ -107,7 +62,7 @@ fn deliver(s: &mut State, owner: &str, m: &Message) {
     {
         return;
     }
-    let Some(bundle) = shims(s).get(owner).cloned() else {
+    let Some(bundle) = crate::apps::bundle(owner) else {
         return;
     };
     s.launching.insert(owner.to_string(), Instant::now());
@@ -144,7 +99,7 @@ pub fn serve_bridge(sock: UnixStream) {
             }
             _ => continue,
         };
-        if let Some(owner) = owner(&mut s, &package) {
+        if let Some(owner) = owner(&package) {
             deliver(&mut s, &owner, &m);
         }
     }
@@ -152,7 +107,7 @@ pub fn serve_bridge(sock: UnixStream) {
     s.bridge = None;
     let shown: Vec<Post> = std::mem::take(&mut s.shown).into_values().collect();
     for p in shown {
-        if let Some(owner) = owner(&mut s, &p.package) {
+        if let Some(owner) = owner(&p.package) {
             deliver(
                 &mut s,
                 &owner,
@@ -165,13 +120,17 @@ pub fn serve_bridge(sock: UnixStream) {
     }
 }
 
-/// A window host connected: it shows its package's notifications.
+/// A window host connected: it shows its package's notifications when its
+/// shim stands for the package (`apps::stands_for`).
 pub fn host_connected(h: &Arc<Host>) {
+    if !crate::apps::stands_for(&h.package, &h.activity) {
+        return;
+    }
     let mut s = STATE.lock().unwrap();
     s.launching.remove(&h.package);
     let posts: Vec<Post> = s.shown.values().cloned().collect();
     for p in posts {
-        if owner(&mut s, &p.package).as_deref() == Some(h.package.as_str()) {
+        if owner(&p.package).as_deref() == Some(h.package.as_str()) {
             h.send_notify(&Message::Post(p));
         }
     }
