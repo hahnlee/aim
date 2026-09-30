@@ -5,7 +5,7 @@ package com.android.server;
 import android.content.Context;
 
 public abstract class SystemService {
-    public static final int PHASE_SYSTEM_SERVICES_READY = 500;
+    public static final int PHASE_DEVICE_SPECIFIC_SERVICES_READY = 520;
 
     public SystemService(Context context) { throw new RuntimeException("stub"); }
     public abstract void onStart();

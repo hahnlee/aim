@@ -17,10 +17,10 @@ import java.io.IOException;
 /**
  * The device's own system service, which SystemServer starts from
  * {@code config_deviceSpecificSystemServices} (the framework overlay of
- * java/framework-overlay). It publishes nothing: when system services are
- * ready it hands the native service host (ADR 0013) the bridge to
- * system_server's internal state (docs/system-services.md, "The
- * system_server bridge").
+ * java/framework-overlay), after the system services are ready. It
+ * publishes nothing: at its first boot phase it hands the native service
+ * host (ADR 0013) the bridge to system_server's internal state
+ * (docs/system-services.md, "The system_server bridge").
  */
 public final class DeviceServices extends SystemService {
     private static final String TAG = "AimDeviceServices";
@@ -37,7 +37,7 @@ public final class DeviceServices extends SystemService {
 
     @Override
     public void onBootPhase(int phase) {
-        if (phase == PHASE_SYSTEM_SERVICES_READY) {
+        if (phase == PHASE_DEVICE_SPECIFIC_SERVICES_READY) {
             attachBridge();
         }
     }
