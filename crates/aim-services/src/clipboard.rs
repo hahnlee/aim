@@ -247,17 +247,19 @@ impl ClipboardService {
             return Ok(false);
         }
         // Writing needs no focus; the original's permission and IME
-        // lookups decide nothing for it, so they are left out.
+        // lookups decide nothing for it, so they are left out. The rest is
+        // the original's disjunction with the mirrored inputs first, so a
+        // focused app's read asks no other service.
         let allowed = op != OP_READ_CLIPBOARD
+            || (device_id == DEVICE_ID_DEFAULT && self.system.uid_focused(uid)?)
+            || self.is_default_ime(user_id, package)?
             || self
                 .system
                 .package_has_permission(READ_CLIPBOARD_IN_BACKGROUND, package)?
-            || self.is_default_ime(user_id, package)?
-            || (device_id == DEVICE_ID_DEFAULT && self.system.uid_focused(uid)?)
-            || (self
-                .system
-                .package_has_permission(INTERNAL_SYSTEM_WINDOW, package)?
-                && self.system.uid_focused(caller_uid)?);
+            || (self.system.uid_focused(caller_uid)?
+                && self
+                    .system
+                    .package_has_permission(INTERNAL_SYSTEM_WINDOW, package)?);
         if !allowed {
             eprintln!(
                 "clipboard: denying clipboard access to {package}, application is not in focus nor is it a system service for user {user_id}"

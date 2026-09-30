@@ -5,10 +5,12 @@
 //! other services in its process; where the original uses a
 //! system_server-internal API that has none, the method says what it
 //! stands in for. What a decision reads on every call (package ownership,
-//! permissions, app-op modes, focus, the default input method, whether the
-//! device is locked) is mirrored ([`crate::mirror`]), each fed by its
-//! owner's listener; noting an app op, which only records the access, is
-//! sent in the background.
+//! app-op modes, focus, the default input method, whether the device is
+//! locked) is mirrored ([`crate::mirror`]), each fed by its owner's
+//! listener; noting an app op, which only records the access, is sent in
+//! the background. Permissions are asked each time: shell permission
+//! delegation (`adoptShellPermissionIdentity`) changes them without a
+//! notification.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Sender};
@@ -22,9 +24,7 @@ use aim_service_aidl::{
     android_app_trust_itrustmanager as trust, android_content_icontentservice as content,
     android_content_pm_ipackagemanager as package, android_database_icontentobserver as observer,
     android_os_iremotecallback as remote_callback, android_os_iservicemanager as sm,
-    android_os_iusermanager as um,
-    android_permission_ionpermissionschangelistener as perm_listener,
-    android_permission_ipermissionmanager as pm,
+    android_os_iusermanager as um, android_permission_ipermissionmanager as pm,
     com_android_internal_app_iappopscallback as ops_callback,
     com_android_internal_app_iappopsservice as appops,
     com_android_internal_policy_idevicelockedstatelistener as lock_listener,
@@ -71,8 +71,6 @@ pub struct System {
     listeners: Listeners,
     /// `checkPackage`'s mode by (uid, package).
     packages: Mirror<(i32, String), i32>,
-    /// Whether a package holds a permission, by (permission, package).
-    permissions: Mirror<(&'static str, String), bool>,
     /// `checkOperation`'s mode by (op, uid, package).
     modes: Mirror<(i32, i32, String), i32>,
     /// The focused root task's effective uid.
@@ -89,7 +87,6 @@ struct Listeners {
     task_stack: Binder,
     /// One per watched op: a callback is registered for one op.
     ops: Vec<(i32, Binder)>,
-    permissions: Binder,
     packages: Binder,
     ime: Binder,
     locked: Binder,
@@ -121,14 +118,10 @@ impl System {
                         (op, binder)
                     })
                     .collect(),
-                permissions: node(perm_listener::DESCRIPTOR, false, |s| {
-                    s.permissions.invalidate()
-                }),
-                // A package added, removed or changed: its uid, grants and
-                // modes with it.
+                // A package added, removed or changed: its uid and modes
+                // with it.
                 packages: node(remote_callback::DESCRIPTOR, false, |s| {
                     s.packages.invalidate();
-                    s.permissions.invalidate();
                     s.modes.invalidate();
                 }),
                 ime: node(observer::DESCRIPTOR, false, |s| s.ime.invalidate()),
@@ -139,7 +132,6 @@ impl System {
                 services: Mutex::new(HashMap::new()),
                 listeners,
                 packages: Mirror::new(),
-                permissions: Mirror::new(),
                 modes: Mirror::new(),
                 focus: Mirror::new(),
                 ime: Mirror::new(),
@@ -321,47 +313,26 @@ impl System {
     /// system_server's context (user 0, the default device).
     pub fn package_has_permission(
         self: &Arc<Self>,
-        permission: &'static str,
+        permission: &str,
         package: &str,
     ) -> Result<bool> {
-        self.permissions.get(
-            (permission, package.to_string()),
-            || {
-                let listener = self.listeners.permissions;
-                self.watch(
-                    "permissionmgr",
-                    pm::ADD_ON_PERMISSIONS_CHANGE_LISTENER,
-                    |p| {
-                        pm::AddOnPermissionsChangeListener {
-                            listener: Some(listener),
-                        }
-                        .write(p)
-                    },
-                    pm::read_add_on_permissions_change_listener_reply,
-                    |s| s.permissions.unwatch(),
-                )?;
-                self.watch_packages()
-            },
-            || {
-                let args = pm::CheckPermission {
-                    package_name: Some(package.into()),
-                    permission_name: Some(permission.into()),
-                    persistent_device_id: Some(PERSISTENT_DEVICE_ID_DEFAULT.into()),
-                    user_id: 0,
-                };
-                self.call(
-                    "permissionmgr",
-                    pm::CHECK_PERMISSION,
-                    |p| args.write(p),
-                    pm::read_check_permission_reply,
-                )
-                .map(|r| r == PERMISSION_GRANTED)
-            },
+        let args = pm::CheckPermission {
+            package_name: Some(package.into()),
+            permission_name: Some(permission.into()),
+            persistent_device_id: Some(PERSISTENT_DEVICE_ID_DEFAULT.into()),
+            user_id: 0,
+        };
+        self.call(
+            "permissionmgr",
+            pm::CHECK_PERMISSION,
+            |p| args.write(p),
+            pm::read_check_permission_reply,
         )
+        .map(|r| r == PERMISSION_GRANTED)
     }
 
-    /// Tells the package, permission and mode mirrors of every package
-    /// change (`PackageMonitor`'s callback).
+    /// Tells the package and mode mirrors of every package change
+    /// (`PackageMonitor`'s callback).
     fn watch_packages(self: &Arc<Self>) -> Result<()> {
         let callback = self.listeners.packages;
         self.watch(
@@ -377,7 +348,6 @@ impl System {
             package::read_register_package_monitor_callback_reply,
             |s| {
                 s.packages.unwatch();
-                s.permissions.unwatch();
                 s.modes.unwatch();
             },
         )
