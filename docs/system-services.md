@@ -282,6 +282,242 @@ of `am start -W -S`: Chrome 756 ms, Settings 754 ms, Calculator 1,134 ms.
   and the watchdog killed system_server (#436); once in two boots with
   #444 fixed.
 
+## Shrinking SystemServer
+
+What SystemServer starts, what each start and each running service
+costs, and which services can stop (ADR 0013 decision 5.3, and the
+"original not started" step of every replacement). An analysis: nothing
+here is removed yet.
+
+**Method.** One disposable data directory booted twice (main 712da8eb,
+M2 Pro, host load about 9): a first boot, then Chrome
+(`org.chromium.chrome`) installed and Settings and Chrome started once,
+4 minutes to settle, then a second boot with `--binder-trace`. At this
+image's log level `TimingsTraceAndSlog` logs only where each section
+begins (`SystemServerTiming`, `ActivityManagerTiming`; the "took"
+line is verbose), so a section's time is until the next line of the
+same thread, at millisecond resolution, untraced work included. Phases
+come from the events log (`boot_progress_*`), times from guest-init's
+spawn. Idle: host CPU and RSS of every guest process 3 minutes after
+the second boot, and again 2 minutes later, with the binder trace of
+those 2 minutes; then Settings and Chrome started cold
+(`am start -W -S`: 596 and 460 ms) with the trace of each.
+
+### Boot timeline
+
+| Phase | First boot | Second boot |
+| --- | --- | --- |
+| Zygote starts (`boot_progress_start`) | 4.5 s | 7.1 s |
+| Preload | 4.9-6.4 s | 7.5-8.7 s |
+| `system_run` | 6.8 s | 9.2 s |
+| `pms_ready` | 12.0 s | 10.2 s |
+| `startOtherServices` | 12.3-15.8 s | 10.4-11.1 s |
+| `ams_ready` | 15.5 s | 11.0 s |
+| Home and SystemUI started | 15.8 s | 11.1 s |
+| `enable_screen` (the launcher drew) | 16.2 s | 11.5 s |
+| SurfaceFlinger's boot finished (keyguard and wallpaper drawn) | 16.5 s | 11.8 s |
+| `sys.boot_completed` | 16.6 s | 11.8 s |
+
+Both boots start the same services before zygote in the same order; why
+zygote came 2.6 s later in the second (the binder trace, host load, the
+existing data image) was not established.
+
+**Where system_server's time goes** (second boot, `system_run` to
+`ams_ready`, 1.8 s): SystemServer's init and system config 0.3 s,
+PackageManagerService 643 ms, OverlayManagerService 194 ms, system
+providers 73 ms, network stats 84 ms, Wi-Fi 42 ms, fonts 35 ms,
+ActivityManager 32 ms, connectivity 29 ms, notification 22 ms; every
+other service takes 0-3 ms to start and its boot phases as little (1,111
+sections under 5 ms, 262 ms in all). The first boot adds the package
+scan (PackageManagerService 4.9 s) and dexopt (`UpdatePackagesIfNeeded`,
+2.3 s).
+
+**What `sys.boot_completed` waits on.** SystemServer starts home and
+SystemUI together (11.12 s). ActivityManager enables the screen when
+home goes idle: the launcher's process started at 11.2 s, resumed at
+11.37 s and drew at 11.455 s, and `enable_screen` followed at 11.458 s
+(the keyguard service was not connected yet). WindowManager then waits
+for SystemUI's windows, the keyguard (notification shade) and the image
+wallpaper, before it tells SurfaceFlinger the boot finished (11.774 s);
+ActivityManager's `finishBooting` runs boot phase 1000 (13 ms) and sets
+`sys.boot_completed` (11.79 s). No boot animation is waited for. The
+shell holds boot completion for 0.67 s after home is started: 0.34 s for
+the launcher, 0.32 s for the keyguard and wallpaper.
+
+### Steady state
+
+- **Idle.** Over 2 idle minutes all 114 guest processes used 2.24 s of
+  CPU. system_server used 0.24 s; it has 208 threads and 304 MB of RSS
+  (shared pages counted) and received 418 binder transactions, nearly
+  all from GMS (`activity` 135, `power` 52, `package` 46, `alarm` 17,
+  `connectivity` 16), 59 ms of work. The largest idle consumer is
+  Bluetooth: its HAL sends the Bluetooth app about 11 HCI events a
+  second (1,342), a third of the guest's idle CPU (#514).
+- **From boot to idle** (3 minutes): system_server 8.1 s of CPU,
+  SystemUI 1.5 s, the launcher 2.5 s, GMS 6.3 s, all processes 60 s.
+- **Cold starts.** system_server received 886 transactions during
+  Settings' start and 536 during Chrome's; its work was 252 and 84 ms
+  (`am`'s own shell command excluded). Settings: `location` 129,
+  `package` 110, `permissionmgr` 110, `activity` 80, `device_policy`
+  61, `appops` 53, the settings provider 25, `safety_center` 23, `user`
+  22. Chrome: `activity` 123, `package` 72, `connectivity` 42,
+  `activity_task` 17, `content` 16, the rest under 10 each.
+- **Per service** inside system_server, threads and CPU cannot be told
+  apart yet: another process's `/proc/<pid>/task` lists only its main
+  thread (#379), zygote's children have an empty `comm` to other
+  processes (#238), and the host threads are unnamed. What the tables
+  below give per service is its start time and the binder calls it
+  received.
+
+### Classification
+
+Every service SystemServer starts on this image, in four classes:
+
+- **A**: the Mac has no such hardware or function. **A1**: a device
+  without it does not start it, by its configuration: a feature in
+  the permissions XML, a `config_` resource (a vendor overlay) or a
+  build property. **A2**: every device of this kind starts it; only an
+  edit of SystemServer (the `image/native-services` edit) stops it.
+- **B**: the Mac owns what it does: a native replacement (M2), or the
+  shell (M1).
+- **C**: the core (M4-M6).
+- **D**: needed as it is for now.
+
+Start times are the service's start plus its boot phases, first / second
+boot, in ms; calls are the binder transactions it received in the 2 idle
+minutes / Settings' start / Chrome's start.
+
+**Already off** on this device: ConsumerIr, MMS (no telephony feature),
+fingerprint, face and iris, HDMI-CEC, TV input and interactive apps,
+tuner, broadcast radio, context hub, UWB, persistent data block and OEM
+lock (no `ro.frp.pst`), VR, Wear and Auto services, display offload,
+isolated compilation, contextual search and system captions (no
+`config_` service), the vibrator (native), the clipboard (native).
+
+**A1**
+
+| Service | Start ms | Calls | How a device without it avoids it | CTS and app impact |
+| --- | --- | --- | --- | --- |
+| Wi-Fi: `wifi`, `wifiscanner`, `wifip2p` (WifiService, WifiScanningService, WifiP2pService) | 133 / 45 | 3 / 1 / 3 | features `android.hardware.wifi`, `.wifi.direct`, `.wifi.passpoint` (`/vendor/etc/permissions`); init's `wificond` has its own script | The guest's network is `eth0`; Android's Wi-Fi has no HAL here and never connects. Without the feature `getSystemService(WIFI_SERVICE)` is null (CTS expects that), Wi-Fi tests skip, Play filters apps that require Wi-Fi. A native `wifi` reporting the Mac's Wi-Fi would be B instead. |
+| `usb` (UsbService) | 2 / 0 | 0 / 3 / 0 | feature `android.hardware.usb.host` (no accessory feature is declared) | No USB device reaches the guest. UsbManager has no service behind it; USB tests require the feature. Settings asks it 3 times at start. |
+| `network_time_update_service` (NetworkTimeUpdateService) | 0 / 0 | - | build property `config.disable_networktime=true` | The Mac owns the clock; the service fails today anyway (#515). Time detection keeps its other sources. |
+| `otadexopt` (OtaDexOptService) | 0 / 0 | - | build property `config.disable_otadexopt=true` | A/B OTA dexopt; the image is updated by `cargo aim`, never by OTA. |
+| GestureLauncherService | 0 / 0 | - | `config_cameraDoubleTapPowerGestureEnabled`, `config_emergencyGestureEnabled` and the camera lift trigger off | Power-button gestures; the Mac has no power button events. |
+| `wallpaper_effects_generation` | 1 / 0 | 0 | `config_defaultWallpaperEffectsGenerationService` empty | Pixel's generated wallpaper effects. |
+
+Persistent or boot-started system apps without hardware (not
+SystemServer services; a device without the hardware does not ship
+the APK, a `remove` in `image/overlay.toml`): `com.android.se`
+(SecureElement, no eSE or UICC), `com.android.dynsystem` (two processes
+at `BOOT_COMPLETED`, dynamic system updates), `com.android.emulator.multidisplay`
+(#462). With `com.android.phone` (A2) they are five processes, 0.56 s of
+CPU up to idle.
+
+**A2**
+
+| Service | Start ms | Calls | CTS and app impact |
+| --- | --- | --- | --- |
+| TradeInModeService | 2 / 7 | - | Phone trade-in evaluation (a read-only aconfig flag, `enableTradeInMode`). |
+| `soundtrigger_middleware`, `soundtrigger` | 4 / 4 | 0 | No hotword DSP (no sound trigger HAL): no modules. VoiceInteraction asks for them. |
+| `telephony.registry` (TelephonyRegistry) and `com.android.phone` | 2 / 1 | 0 | Tablets without telephony start both. Apps register telephony callbacks without checking the feature, so the registry stays unless replaced by a native one that never calls back. |
+| EmergencyAffordanceService | 0 / 2 | - | Emergency-call affordance of telephony. |
+| `reboot_readiness`, `system_update`, `updatelock`, `recovery` (RecoverySystemService), `dynamic_system` | 5 / 5 | 0 | OTA, recovery and dynamic system updates; factory reset (`rebootWipeUserData`) is the one path apps and Settings reach, which on the Mac is a new data image. |
+| `serial` (SerialService) | 1 / 1 | 0 | No serial ports. |
+| DockObserver, WiredAccessoryManager | 1 / 1 | - | Dock and headset-jack events from `/sys/class/switch` and input; the Mac's audio routes are the host's. |
+| `lights` (LightsService) | 0 / 0 | 0 | No lights HAL; serves an empty list. |
+| TestHarnessModeService | 1 / 1 | - | Needs the persistent data block, which is off (it logs so at boot). |
+
+All of A together: 152 ms of the first boot's SystemServer and 67 ms of
+the second's, Wi-Fi most of it.
+
+**B**, by start cost (the shell last):
+
+| Service | Start ms | Calls | macOS owner |
+| --- | --- | --- | --- |
+| `netstats`, `connectivity`, `netpolicy`, `ethernet`, `network_management` (NetworkStatsService, ConnectivityService, ...) | 180 / 125 | 26 / 13 / 45 | Network framework (#304 feeds `eth0` today) |
+| `notification` | 19 / 22 | 0 / 2 / 2 | UserNotifications (#4; not a leaf, #430) |
+| `audio` (AudioService) | 22 / 13 | 0 | Core Audio (HAL today) |
+| `power` (PowerManagerService), `batteryproperties`, `battery` | 18 / 15 | 52 / 3 / 5 | IOKit power sources and assertions (health HAL today) |
+| `location`, `country_detector`, `location_time_zone_manager` | 17 / 12 | 0 / 129 / 0 | Core Location (GNSS HAL today) |
+| `display` (DisplayManagerService) | 9 / 9 | 1 / 6 / 9 | NSScreen |
+| `input_method` (InputMethodManagerService) | 18 / 6 | 0 / 4 / 3 | The Mac's input methods (#23) |
+| `time_detector`, `time_zone_detector`, `alarm` | 9 / 8 | 17 / 6 / 0 | The Mac's clock and time zone (#283) |
+| `uimode` (UiModeManagerService), `color_display`, twilight | 2 / 3 | 0 / 0 / 3 | Appearance and Night Shift (#281) |
+| `locale` (LocaleManagerService) | 2 / 1 | 0 / 1 / 1 | The Mac's languages (#282) |
+| `sensor_privacy` | 3 / 8 | 0 | Camera and microphone privacy (TCC, #291) |
+| `media_session`, `media_router`, `media_projection`, `media_communication` | 10 / 7 | 0 | Now Playing, AirPlay, ScreenCaptureKit |
+| `thermalservice`, `hardware_properties` | 3 / 2 | 0 / 0 / 2 | Thermal state (HAL today) |
+| `biometric`, `auth` | 7 / 4 | 0 | Touch ID; no biometric HAL today |
+| `print`, `midi` | 1 / 2 | 0 | macOS printing, Core MIDI |
+| Shell (M1): `statusbar`, `wallpaper` (off by `config_enableWallpaperService`), `appwidget` (feature `android.software.app_widgets`), `dreams`, `search_ui`, `smartspace`, `app_prediction` (the launcher's; off by their `config_` services) | 8 / 8 | 0 / 15 / 0 | The Mac's desktop, Dock and menu bar |
+
+**C**: `package` (PackageManagerService with the installer, domain
+verification, dexopt and `overlay`), `activity` and `activity_task`
+(with `appops`, `batterystats`, `procstats`, `permission`,
+`permissionmgr`, access checking, the permission policy), `user`,
+`window`, `input` (InputManagerService), `content` and the settings
+provider.
+
+**D**: everything else, as it is. Device and storage: StorageManager,
+StorageStats, DeviceStorageMonitor, CameraServiceProxy, SensorService,
+SensorNotification, DeviceStateManager, Bluetooth (over our HAL),
+Telecom, Adb, Font, WebViewUpdate, Pinner (pins the launcher and
+Trichrome in memory), GpuService, HintManager, PowerStats. App model and
+policy: Account, DeviceIdle, JobScheduler, UsageStats, AppHibernation,
+GameManager, AppCompatOverrides, Backup, BlobStore, Slice, Shortcut,
+LauncherApps, CrossProfileApps, People, Restrictions, DevicePolicy,
+Role, Supervision, EnhancedConfirmation, AppFunction, IntrusionDetection,
+AdvancedProtection, AuthenticationPolicy, Trust, LockSettings,
+BackgroundInstallControl, AppBinding, VirtualDevice, CompanionDevice,
+SafetyCenter, AppSearch, HealthConnect, AdServices, OnDevicePersonalization,
+SdkSandbox, DeviceLock (the devicelock APEX declares its feature),
+Ranging (started for Bluetooth LE with the channel-sounding flag). Text, voice and
+content: Accessibility, TextServices, TextClassification, Autofill,
+Credential, ContentCapture (the clipboard consults it), VoiceInteraction,
+SpeechRecognition, TextToSpeech, MusicRecognition, AmbientContext,
+WearableSensing, OnDeviceIntelligence, Translation, Search. Network:
+NetworkScore, VpnManager, PacProxy, SecurityState, NetworkStack,
+Tethering. Infrastructure: Watchdog, PlatformCompat, FileIntegrity,
+FeatureFlags, UriGrants, IStats, MemtrackProxy, DataLoaderManager,
+Incremental, SystemConfig, CachedDeviceState, BinderCallsStats,
+LooperStats, NativeTombstoneManager, BugreportManager, DropBox,
+EntropyMixer, SchedulingPolicy, KeyChain, KeyAttestationApplicationIdProvider,
+BinaryTransparency, AttestationVerification, SignedConfig, AppIntegrity,
+NetworkWatchlist, IpConnectivityMetrics, SelinuxAuditLogs,
+DynamicCodeLogging, PruneInstantApps, LogcatManager, Tracing,
+DynamicInstrumentation, StatsCompanion, StatsPullAtom, StatsBootstrapAtom,
+IncidentCompanion, Profiling, CrashRecovery, Rollback, RemoteProvisioning,
+MediaResourceMonitor, MediaMetrics, DiskStats, Runtime, GraphicsStats.
+
+### What stopping them would save
+
+- **A**, ranked: Wi-Fi (45-133 ms, the `wificond` daemon and Wi-Fi's
+  threads), the four hardware-less system apps and `com.android.phone`
+  (five processes, 0.56 s of CPU after boot), TradeInMode (7 ms), sound
+  trigger (4 ms), then 1-2 ms each. With all of A off,
+  `sys.boot_completed` would come about 0.07 s earlier on a second boot
+  (11.8 to 11.7 s) and 0.15 s on a first: within noise. No A service
+  received a binder call at idle or during the cold starts, apart from
+  Wi-Fi's 3 and USB's 3 (Settings).
+- **B**, ranked by boot cost: network 125-180 ms, notification 19-22 ms,
+  audio 13-22 ms, power and battery 15-18 ms, location 12-17 ms (and 129
+  calls in Settings' start), display 9 ms, input method 6-18 ms,
+  media 7-10 ms, time 8-9 ms. By steady-state traffic: `power` (52 calls per idle 2
+  minutes), `alarm` (17), `connectivity` (16 idle, 42 in Chrome's
+  start), `location` (Settings).
+- **M1**: without SystemUI and the launcher gating it, boot completion
+  would follow home's start directly: about 11.15 s instead of 11.8 s on
+  the second boot (-0.65 s), and SystemUI (86 threads, 1.5 s of CPU to
+  idle), the launcher (50 threads, 2.5 s) and the wallpaper would not
+  run.
+- **Larger than all of these**: the time before zygote (4.5-7.1 s:
+  guest-init, early init, the native services), zygote's preload
+  (1.3-1.5 s) and PackageManagerService (0.64 s on a second boot). The
+  services SystemServer starts cost about 0.7 s of a second boot's
+  11.8 s, and at idle system_server uses 0.2 % of a core; stopping A
+  saves little time: its value is fewer threads and binder surfaces,
+  and a smaller original to replace.
+
 ## Internal dependencies of leaf candidates
 
 From the sources at `android-16.0.0_r1` (`services/core`):

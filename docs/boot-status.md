@@ -177,14 +177,16 @@ fence never signaled and RenderEngine waited on it for ever. Fixed
 (docs/composer.md, "Buffers and presents"); 20 force-stops of a visible
 Settings in one boot then passed.
 
-## Boot timeline (2026-09-29)
+## Boot timeline (2026-09-30)
 
-A first boot at load 5 on the M2 Pro (docs/perf-baseline.md, "Where the
-time goes: exec, process start and the early boot"): guest-init prepares
-for 1.4 s, launches zygote at 2.9 s; `boot_progress_start` 3.5 s,
-`boot_progress_system_run` 6.2 s, `boot_progress_pms_ready` 11.9 s,
-`boot_progress_enable_screen` 34.8 s. Before the exec work of that day
-zygote was launched at 5.3-5.5 s and started at 6.3-6.5 s.
+One disposable data directory, first and second boot, host load about 9
+on the M2 Pro (docs/system-services.md, "Shrinking SystemServer", has
+the SystemServer detail): `boot_progress_start` 4.5 and 7.1 s,
+`system_run` 6.8 and 9.2 s, `pms_ready` 12.0 and 10.2 s, `ams_ready`
+15.5 and 11.0 s, `enable_screen` 16.2 and 11.5 s, `sys.boot_completed`
+16.6 and 11.8 s. SystemServer's services take about 0.7 s of a second
+boot; the shell (the launcher's first draw, then SystemUI's keyguard
+and wallpaper) holds boot completion for 0.67 s after home starts.
 
 ## Debugging
 
