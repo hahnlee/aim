@@ -35,6 +35,12 @@ on early-init
     # The emulator's vendor properties, which this image starts from,
     # ignore them, and SurfaceFlinger then keeps vsync on for good.
     setprop debug.sf.vsync_reactor_ignore_present_fences false
+    # SystemServer's switches for a device without these functions
+    # (docs/system-services.md, "Shrinking SystemServer"): the Mac owns
+    # the clock, so no NetworkTimeUpdateService; the image is updated by
+    # `cargo aim`, never by an A/B OTA, so no OtaDexoptService.
+    setprop config.disable_networktime true
+    setprop config.disable_otadexopt true
 
 # Partitions are directories of the derived image and /data is a host
 # directory: aim-guest-init's mount_all mounts nothing and raises the
