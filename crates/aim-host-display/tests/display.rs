@@ -1,6 +1,8 @@
 //! The display server end to end, from the host side of the module: a
 //! buffer in a file (as a memfd is on the host) is imported, presented and
-//! captured back, and vsync events arrive at the display's rate.
+//! captured back, vsync events arrive at the display's rate while enabled
+//! and stop while disabled, and present fences signal on the display's
+//! vsync timeline.
 //!
 //! Opens a small window: run it in a logged-in session.
 
@@ -37,6 +39,55 @@ fn call<T>(func: u32, args: &mut T) -> i64 {
 
 fn pixel(x: u32, y: u32) -> [u8; 4] {
     [(x * 4) as u8, (y * 5) as u8, 0x80, 0xff]
+}
+
+/// The next vsync event, or `None` after `timeout_ms`.
+fn next_vsync(events: &OwnedFd, timeout_ms: i32) -> Option<Event> {
+    let mut pfd = libc::pollfd {
+        fd: events.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: polls one local pollfd.
+    if unsafe { libc::poll(&mut pfd, 1, timeout_ms) } != 1 {
+        return None;
+    }
+    let mut e = Event::default();
+    // SAFETY: reads one plain-old-data record from our socket.
+    let n = unsafe {
+        libc::read(
+            events.as_raw_fd(),
+            (&mut e as *mut Event).cast(),
+            size_of::<Event>(),
+        )
+    };
+    assert_eq!(n, size_of::<Event>() as isize);
+    assert_eq!(e.kind, event::VSYNC);
+    Some(e)
+}
+
+/// Present buffer 7 with `acquire` (-1 for none); its present fence.
+fn present(acquire: i32) -> OwnedFd {
+    let mut present = Present {
+        id: 7,
+        acquire,
+        present: -1,
+    };
+    assert_eq!(call(FN_PRESENT, &mut present), 0);
+    // SAFETY: the module returned a new fd for us.
+    unsafe { OwnedFd::from_raw_fd(present.present) }
+}
+
+fn shown_at(fence: &OwnedFd) -> i64 {
+    assert!(aim_sync_file::wait(fence.as_fd(), 5000), "present fence");
+    let aim_sync_file::State::Signaled {
+        timestamp_ns,
+        status: 1,
+    } = aim_sync_file::state(fence.as_fd())
+    else {
+        panic!("{:?}", aim_sync_file::state(fence.as_fd()));
+    };
+    timestamp_ns
 }
 
 fn wait_for(path: &Path) -> Vec<u8> {
@@ -117,14 +168,7 @@ fn presents_a_buffer_and_delivers_vsync() {
     // The server shows the buffer once its acquire fence signals, and the
     // present fence signals once it is on screen.
     let (acquire, content) = aim_sync_file::pair().unwrap();
-    let mut present = Present {
-        id: 7,
-        acquire: acquire.as_raw_fd(),
-        present: -1,
-    };
-    assert_eq!(call(FN_PRESENT, &mut present), 0);
-    // SAFETY: the module returned a new fd for us.
-    let shown = unsafe { OwnedFd::from_raw_fd(present.present) };
+    let shown = present(acquire.as_raw_fd());
     std::thread::sleep(Duration::from_millis(100));
     assert!(
         !aim_sync_file::wait(shown.as_fd(), 0),
@@ -132,14 +176,7 @@ fn presents_a_buffer_and_delivers_vsync() {
     );
     let ready = aim_sync_file::monotonic_ns();
     content.signal(1);
-    assert!(aim_sync_file::wait(shown.as_fd(), 5000), "present fence");
-    let aim_sync_file::State::Signaled {
-        timestamp_ns,
-        status: 1,
-    } = aim_sync_file::state(shown.as_fd())
-    else {
-        panic!("{:?}", aim_sync_file::state(shown.as_fd()));
-    };
+    let timestamp_ns = shown_at(&shown);
     assert!(
         timestamp_ns > ready,
         "shown at {timestamp_ns}, ready at {ready}"
@@ -147,17 +184,9 @@ fn presents_a_buffer_and_delivers_vsync() {
 
     // Vsync: a steady stream at the display's period.
     assert_eq!(call(FN_SET_VSYNC, &mut SetVsync { enabled: 1 }), 0);
-    let mut file = std::fs::File::from(events);
     let mut stamps = Vec::new();
     while stamps.len() < 30 {
-        let mut e = Event::default();
-        // SAFETY: `Event` is plain old data.
-        let buf = unsafe {
-            std::slice::from_raw_parts_mut((&mut e as *mut Event).cast(), size_of::<Event>())
-        };
-        file.read_exact(buf).unwrap();
-        assert_eq!(e.kind, event::VSYNC);
-        stamps.push(e.timestamp_ns);
+        stamps.push(next_vsync(&events, 1000).expect("vsync").timestamp_ns);
     }
     let period = info.vsync_period_ns as i64;
     for w in stamps.windows(2) {
@@ -171,7 +200,25 @@ fn presents_a_buffer_and_delivers_vsync() {
         );
     }
 
-    // The presented buffer, read back by the server.
+    // A present fence signals at a vsync, which SurfaceFlinger's vsync
+    // model relies on.
+    let at = shown_at(&present(-1));
+    let phase = (at - stamps[stamps.len() - 1]).rem_euclid(period);
+    assert!(
+        phase.min(period - phase) < period / 20,
+        "shown {phase} ns after a vsync, period {period}"
+    );
+
+    // Disabled, no more vsyncs arrive (after those already sent).
+    assert_eq!(call(FN_SET_VSYNC, &mut SetVsync { enabled: 0 }), 0);
+    for _ in 0..10 {
+        if next_vsync(&events, 50).is_none() {
+            break;
+        }
+    }
+    assert!(next_vsync(&events, 300).is_none(), "vsync while disabled");
+
+    // The presented buffer, read back by the server while vsync is off.
     // SAFETY: a signal to the server we started.
     unsafe { libc::kill(server.0.id() as i32, libc::SIGUSR1) };
     let bmp = wait_for(&capture);
@@ -180,6 +227,15 @@ fn presents_a_buffer_and_delivers_vsync() {
         let [r, g, b, a] = pixel(x, y);
         assert_eq!(&bmp[at..at + 4], &[b, g, r, a], "pixel {x},{y}");
     }
+
+    // Enabled again, vsync resumes within a few periods.
+    let enabled = Instant::now();
+    assert_eq!(call(FN_SET_VSYNC, &mut SetVsync { enabled: 1 }), 0);
+    assert!(
+        next_vsync(&events, 200).is_some(),
+        "no vsync after enabling"
+    );
+    eprintln!("first vsync {:?} after enabling", enabled.elapsed());
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_dir_all(&dir);
 }

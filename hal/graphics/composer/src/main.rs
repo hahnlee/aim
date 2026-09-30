@@ -46,8 +46,9 @@ impl IComposer for Composer {
     }
 
     fn getCapabilities(&self) -> binder::Result<Vec<Capability>> {
-        // There are no present fences to rely on (docs/composer.md).
-        Ok(vec![Capability::PRESENT_FENCE_IS_NOT_RELIABLE])
+        // Present fences signal when the frame was shown (docs/composer.md),
+        // so SurfaceFlinger predicts vsync from them and turns vsync off.
+        Ok(Vec::new())
     }
 }
 

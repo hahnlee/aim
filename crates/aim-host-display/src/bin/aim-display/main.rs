@@ -18,7 +18,8 @@
 //!
 //! On start it prints one line with the window number (for
 //! `screencapture -l`), the display mode and the refresh period. Every
-//! 5 seconds it prints vsync and present statistics to stderr. SIGUSR1
+//! 5 seconds in which vsync ran or frames were presented it prints their
+//! statistics to stderr. SIGUSR1
 //! writes the last presented buffer to the `--capture` file (BMP).
 
 #[macro_use]
@@ -37,7 +38,7 @@ use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_host_display::wire::{self, Request};
@@ -90,10 +91,40 @@ impl Display {
     }
 }
 
-static CAPTURE_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// The write end of the pipe SIGUSR1 wakes the capture thread through.
+static CAPTURE_PIPE: AtomicI32 = AtomicI32::new(-1);
 
 extern "C" fn on_sigusr1(_sig: i32) {
-    CAPTURE_REQUESTED.store(true, Ordering::Relaxed);
+    // SAFETY: write(2) is async-signal-safe.
+    unsafe {
+        libc::write(
+            CAPTURE_PIPE.load(Ordering::Relaxed),
+            [0u8].as_ptr().cast(),
+            1,
+        )
+    };
+}
+
+/// Write a capture for each SIGUSR1.
+fn capture_on_signal() {
+    let mut fds = [0; 2];
+    // SAFETY: fills `fds` with a new pipe.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        eprintln!("aim-display: pipe: {}", std::io::Error::last_os_error());
+        std::process::exit(1);
+    }
+    CAPTURE_PIPE.store(fds[1], Ordering::Relaxed);
+    std::thread::spawn(move || {
+        let mut b = [0u8; 16];
+        // SAFETY: reads into a local buffer from our pipe.
+        while unsafe { libc::read(fds[0], b.as_mut_ptr().cast(), b.len()) } > 0 {
+            if let Some(d) = DISPLAY.get() {
+                d.capture();
+            }
+        }
+    });
+    // SAFETY: the handler only writes to the pipe.
+    unsafe { libc::signal(libc::SIGUSR1, on_sigusr1 as usize) };
 }
 
 impl Display {
@@ -121,9 +152,17 @@ impl Display {
                 };
             }
         }
-        if CAPTURE_REQUESTED.swap(false, Ordering::Relaxed) {
-            self.capture();
-        }
+    }
+
+    /// Run the display link while a client wants vsync.
+    fn update_vsync(&self) {
+        vsync::update(|| {
+            self.clients
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.vsync.load(Ordering::Relaxed))
+        });
     }
 
     fn capture(&self) {
@@ -229,7 +268,10 @@ impl Display {
                     textures.remove(&r.id);
                     hosts::release(r.id);
                 }
-                wire::OP_SET_VSYNC => client.vsync.store(r.flag != 0, Ordering::Relaxed),
+                wire::OP_SET_VSYNC => {
+                    client.vsync.store(r.flag != 0, Ordering::Relaxed);
+                    self.update_vsync();
+                }
                 wire::OP_WINDOWS if r.id == wire::VERSION => {
                     let answer = Windows {
                         mode: self.mode,
@@ -252,6 +294,7 @@ impl Display {
             .lock()
             .unwrap()
             .retain(|c| !Arc::ptr_eq(c, &client));
+        self.update_vsync();
     }
 }
 
@@ -344,11 +387,9 @@ fn main() {
         );
         std::process::exit(2)
     }
-    // SAFETY: plain signal dispositions; the handler only stores an atomic.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-        libc::signal(libc::SIGUSR1, on_sigusr1 as usize);
-    }
+    // SAFETY: a plain signal disposition.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    capture_on_signal();
 
     let _pool = objc::Pool::new();
     let device = metal::device();
@@ -374,7 +415,7 @@ fn main() {
     // The display is black until the first frame.
     renderer.present(None, &targets, None);
 
-    let period = vsync::start(Box::new(|tick| {
+    let period = vsync::create(Box::new(|tick| {
         if let Some(d) = DISPLAY.get() {
             d.on_vsync(tick)
         }
