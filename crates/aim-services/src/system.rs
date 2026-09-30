@@ -7,7 +7,9 @@
 //! stands in for. What a focused app's access reads (package ownership,
 //! app-op modes, focus, whether the device is locked) is mirrored
 //! ([`crate::mirror`]), each fed by its owner's listener; noting an app op,
-//! which only records the access, is sent in the background. Permission
+//! which only records the access, is sent in the background, and an op
+//! noted for the caller is sent back with the reply
+//! ([`aim_binder_host::appops`]). Permission
 //! checks are kept as apps' `PermissionManager` keeps them, by the
 //! `package_info_cache` nonce the system_server bridge hands over
 //! ([`crate::nonces`]); an instrumentation target's app ops are asked each
@@ -72,8 +74,20 @@ fn unreachable_service(what: &str, status: i32) -> Exception {
     )
 }
 
-/// An app op to note: `(op, uid, package, attribution tag)`.
-type Note = (i32, i32, String, Option<String>);
+/// An app op to note: `(op, uid, package, attribution tag)`, and the
+/// message for the app's async noted-op callback when collected for it.
+type Note = (i32, i32, String, Option<String>, Option<String>);
+
+/// `AppOpsManager.NotedOpCollectionMode`, `DONT_COLLECT` including
+/// `COLLECT_SELF`: this process has no op-noted callback of its own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Collection {
+    None,
+    /// Sent back with the reply to the caller the op is noted for.
+    Sync,
+    /// Told to the app's async noted-op callback.
+    Async,
+}
 
 pub struct System {
     process: Arc<LocalProcess>,
@@ -90,6 +104,8 @@ pub struct System {
     /// Whether the system user's device is locked.
     locked: Mirror<(), bool>,
     notes: Sender<Note>,
+    /// `AppOpsManager.sAppOpsToNote`: whether an op's notes are collected.
+    collected_ops: Mutex<HashMap<i32, bool>>,
     /// The nonces in system_server's shared memory, from the bridge.
     nonces: Mutex<Option<Arc<Nonces>>>,
     permissions: Mutex<Permissions>,
@@ -165,6 +181,7 @@ impl System {
                 focus: Mirror::new(),
                 locked: Mirror::new(),
                 notes,
+                collected_ops: Mutex::new(HashMap::new()),
                 nonces: Mutex::new(None),
                 permissions: Mutex::new(Permissions::default()),
                 bridge_listeners: Mutex::new(Vec::new()),
@@ -174,9 +191,9 @@ impl System {
         let _ = std::thread::Builder::new()
             .name("appops-notes".into())
             .spawn(move || {
-                for (op, uid, package, tag) in noted {
+                for (op, uid, package, tag, message) in noted {
                     let Some(system) = this.upgrade() else { break };
-                    if let Err(e) = system.note_op(op, uid, &package, tag.as_deref()) {
+                    if let Err(e) = system.note_op(op, uid, &package, tag.as_deref(), message) {
                         eprintln!(
                             "services: noteOperation({op}, {uid}, {package}): {}",
                             e.message
@@ -586,7 +603,9 @@ impl System {
     /// `AppOpsManager.noteOp` (`note`) or `checkOp`, on the default device;
     /// both throw on `MODE_ERRORED`. The mode is `checkOp`'s, the one
     /// `noteOp` decides by; the note, which records the access, is sent in
-    /// the background.
+    /// the background, collected as `noteOp` collects it. An async note's
+    /// message is this thread's stack, as `noteOp` without one sends its
+    /// own (`getFormattedStackTrace`).
     pub fn app_op(
         self: &Arc<Self>,
         note: bool,
@@ -642,11 +661,18 @@ impl System {
             )?
         };
         if note {
+            let collection = self.collection(op, uid, package);
+            if collection == Collection::Sync && mode == MODE_ALLOWED {
+                aim_binder_host::appops::collect_sync(op, attribution_tag);
+            }
+            let message = (collection == Collection::Async)
+                .then(|| std::backtrace::Backtrace::force_capture().to_string());
             let note = (
                 op,
                 uid,
                 package.to_string(),
                 attribution_tag.map(Into::into),
+                message,
             );
             let _ = self.notes.send(note);
         }
@@ -701,21 +727,23 @@ impl System {
         )
     }
 
-    /// `IAppOpsService.noteOperation`.
+    /// `IAppOpsService.noteOperation`, with the message of a note
+    /// collected for the app's async noted-op callback.
     fn note_op(
         self: &Arc<Self>,
         op: i32,
         uid: i32,
         package: &str,
         attribution_tag: Option<&str>,
+        async_message: Option<String>,
     ) -> Result<()> {
         let args = appops::NoteOperation {
             code: op,
             uid,
             package_name: Some(package.into()),
             attribution_tag: attribution_tag.map(Into::into),
-            should_collect_async_noted_op: false,
-            message: None,
+            should_collect_async_noted_op: async_message.is_some(),
+            message: async_message,
             should_collect_message: true,
         };
         self.call(
@@ -728,9 +756,8 @@ impl System {
     }
 
     /// `AppOpsManager.noteOpNoThrow(op, uid, package, tag, message)` of
-    /// system_server for an app: noted now, its mode the answer. A note
-    /// for an app is collected for its async noted-op callback, with
-    /// `message` (`COLLECT_ASYNC`).
+    /// system_server for an app: noted now, its mode the answer, collected
+    /// as `getNotedOpCollectionMode` decides.
     pub(crate) fn note_op_now(
         self: &Arc<Self>,
         op: i32,
@@ -739,22 +766,60 @@ impl System {
         attribution_tag: Option<&str>,
         message: &str,
     ) -> Result<i32> {
+        let collection = self.collection(op, uid, package);
         let args = appops::NoteOperation {
             code: op,
             uid,
             package_name: Some(package.into()),
             attribution_tag: attribution_tag.map(Into::into),
-            should_collect_async_noted_op: uid != crate::SYSTEM_UID as i32,
+            should_collect_async_noted_op: collection == Collection::Async,
             message: Some(message.into()),
             should_collect_message: true,
         };
-        self.call(
+        let Some(noted) = self.call(
             "appops",
             appops::NOTE_OPERATION,
             |p| args.write(p),
-            appops::read_note_operation_reply::<NotedMode>,
-        )
-        .map(|m| m.map_or(MODE_ERRORED, |m| m.0))
+            appops::read_note_operation_reply::<NotedOp>,
+        )?
+        else {
+            return Ok(MODE_ERRORED);
+        };
+        if collection == Collection::Sync && noted.mode == MODE_ALLOWED {
+            aim_binder_host::appops::collect_sync(op, noted.attribution_tag.as_deref());
+        }
+        Ok(noted.mode)
+    }
+
+    /// `AppOpsManager.getNotedOpCollectionMode` of system_server
+    /// (`currentOpPackageName` "android"): a note for the caller of the
+    /// call this thread serves, when it collects, goes back with the reply;
+    /// one for another app to its async callback.
+    fn collection(self: &Arc<Self>, op: i32, uid: i32, package: &str) -> Collection {
+        let known = self.collected_ops.lock().unwrap().get(&op).copied();
+        let collected = match known {
+            Some(collected) => collected,
+            None => {
+                let args = appops::ShouldCollectNotes { op_code: op };
+                let Ok(collected) = self.call(
+                    "appops",
+                    appops::SHOULD_COLLECT_NOTES,
+                    |p| args.write(p),
+                    appops::read_should_collect_notes_reply,
+                ) else {
+                    return Collection::None;
+                };
+                self.collected_ops.lock().unwrap().insert(op, collected);
+                collected
+            }
+        };
+        if !collected || (uid == crate::SYSTEM_UID as i32 && package == "android") {
+            Collection::None
+        } else if aim_binder_host::appops::collecting_uid() == Some(uid as u32) {
+            Collection::Sync
+        } else {
+            Collection::Async
+        }
     }
 
     pub fn user_running(self: &Arc<Self>, user_id: i32) -> Result<bool> {
@@ -916,13 +981,27 @@ impl ReadParcelable for ParcelFileDescriptor {
     }
 }
 
-/// `SyncNotedAppOp`'s mode: its flags, then the mode.
-struct NotedMode(i32);
+/// `SyncNotedAppOp`'s mode and the attribution tag it was noted under.
+struct NotedOp {
+    mode: i32,
+    attribution_tag: Option<String>,
+}
 
-impl ReadParcelable for NotedMode {
+impl ReadParcelable for NotedOp {
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
-        r.read_i32()?; // which of the nullable fields follow
-        Ok(Self(r.read_i32()?))
+        // Which of the nullable fields follow.
+        let fields = r.read_i32()?;
+        let mode = r.read_i32()?;
+        r.read_i32()?; // the op
+        let attribution_tag = if fields & 0x4 != 0 {
+            r.read_string16()?
+        } else {
+            None
+        };
+        Ok(Self {
+            mode,
+            attribution_tag,
+        })
     }
 }
 
@@ -998,5 +1077,34 @@ impl Service for Listener {
 
     fn accepts_fds(&self) -> bool {
         self.fds
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `SyncNotedAppOp.writeToParcel`: the null fields' flags, mode, op,
+    /// then the tag and package present.
+    fn sync_noted(tag: Option<&str>) -> Parcel {
+        let mut p = Parcel::new();
+        p.write_i32(if tag.is_some() { 0x4 } else { 0 } | 0x8);
+        p.write_i32(MODE_ALLOWED);
+        p.write_i32(1);
+        if tag.is_some() {
+            p.write_string16(tag);
+        }
+        p.write_string16(Some("com.example"));
+        p
+    }
+
+    #[test]
+    fn a_noted_op_keeps_the_tag_it_was_noted_under() {
+        for tag in [Some("tag"), None] {
+            let p = sync_noted(tag);
+            let noted = NotedOp::read_from(&mut Reader::new(p.data(), &[])).unwrap();
+            assert_eq!(noted.mode, MODE_ALLOWED);
+            assert_eq!(noted.attribution_tag.as_deref(), tag);
+        }
     }
 }

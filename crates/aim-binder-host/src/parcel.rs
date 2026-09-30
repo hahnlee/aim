@@ -47,8 +47,7 @@ pub const EX_NULL_POINTER: i32 = -4;
 pub const EX_ILLEGAL_STATE: i32 = -5;
 pub const EX_UNSUPPORTED_OPERATION: i32 = -7;
 pub const EX_SERVICE_SPECIFIC: i32 = -8;
-/// Reply headers that precede the exception code.
-const EX_HAS_NOTED_APPOPS_REPLY_HEADER: i32 = -127;
+/// A reply header that precedes the exception code.
 const EX_HAS_STRICTMODE_REPLY_HEADER: i32 = -128;
 
 /// A binder in a parcel.
@@ -233,12 +232,14 @@ impl Parcel {
 
     /// `writeNoException`.
     pub fn write_no_exception(&mut self) {
+        crate::appops::prefix_reply(self);
         self.write_i32(0);
     }
 
     /// `writeException`: the code, the message and an empty remote stack
     /// trace.
     pub fn write_exception(&mut self, exception: &Exception) {
+        crate::appops::prefix_reply(self);
         self.write_i32(exception.code);
         self.write_string16(Some(&exception.message));
         self.write_i32(0);
@@ -435,13 +436,11 @@ impl<'a> Reader<'a> {
     /// callee threw.
     pub fn read_exception(&mut self) -> Result<std::result::Result<(), Exception>> {
         let mut code = self.read_i32()?;
-        if code == EX_HAS_NOTED_APPOPS_REPLY_HEADER {
-            // AppOpsManager.readAndLogNotedAppops
-            for _ in 0..self.read_i32()? {
-                self.read_string16()?;
-                self.read_i64()?;
-                self.read_i64()?;
-            }
+        if code == crate::appops::EX_HAS_NOTED_APPOPS_REPLY_HEADER {
+            // No op-noted callback here: skipped by its size, which counts
+            // from itself (`Status::readFromParcel`).
+            let start = self.pos;
+            self.pos = start + self.read_i32()?.max(4) as usize;
             code = self.read_i32()?;
         }
         if code == EX_HAS_STRICTMODE_REPLY_HEADER {

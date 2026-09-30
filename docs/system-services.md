@@ -89,7 +89,14 @@ owner's standard listener, registered with generated AIDL codes:
 for an op in `MODE_FOREGROUND`, the one input of a mode that is not a
 setting, so no uid observer is needed. Noting an app op
 (`noteOperation`), which records an access and decides nothing the check
-did not, is sent from a background thread.
+did not, is sent from a background thread. A note is collected as
+`AppOpsManager.getNotedOpCollectionMode` decides (the op's
+`shouldCollectNotes`, asked once): one for the caller of the call being
+served, when that call carries `FLAG_COLLECT_NOTED_APP_OPS`, goes back
+ahead of the reply's status (`EX_HAS_NOTED_APPOPS_REPLY_HEADER`, written
+by `aim_binder_host::appops` for every native service, as
+`Parcel.writeNoException` does), one for another app to its async
+noted-op callback.
 
 **Permissions** are kept by their owner's client-cache nonce, not by a
 listener. The owner's listener,

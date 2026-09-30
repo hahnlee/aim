@@ -82,7 +82,7 @@ INTERFACES=(
   "android.os.IServiceManager|system/framework/framework.jar|addService,checkService"
   "android.app.IActivityManager|system/framework/framework.jar|checkPermission,handleIncomingUser,openContentUri,sendIntentSender,getContentProviderExternal,registerUidObserver,getUidProcessState,getCurrentUserId,getRunningUserIds,broadcastIntentWithFeature,registerIntentSenderCancelListenerEx,unregisterIntentSenderCancelListener"
   "android.app.IActivityTaskManager|system/framework/framework.jar|getFocusedRootTaskInfo,registerTaskStackListener,startSystemLockTaskMode"
-  "com.android.internal.app.IAppOpsService|system/framework/framework.jar|checkPackage,checkOperationForDevice,noteOperation,startWatchingModeWithFlags,startOperation,finishOperation,setUserRestriction,startWatchingActive"
+  "com.android.internal.app.IAppOpsService|system/framework/framework.jar|checkPackage,checkOperationForDevice,noteOperation,shouldCollectNotes,startWatchingModeWithFlags,startOperation,finishOperation,setUserRestriction,startWatchingActive"
   "android.permission.IPermissionManager|system/framework/framework.jar|checkPermission,grantRuntimePermission,revokeRuntimePermission,updatePermissionFlags,addOnPermissionsChangeListener"
   "android.os.IUserManager|system/framework/framework.jar|isUserRunning,getProfileIds,hasUserRestriction,isUserVisible,getCredentialOwnerProfile"
   "android.app.trust.ITrustManager|system/framework/framework.jar|isDeviceLocked,registerDeviceLockedStateListener"
