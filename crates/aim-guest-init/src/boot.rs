@@ -480,6 +480,7 @@ impl Boot {
         let apexes = apex::scan(&image);
         let xml = apex::apex_info_list_xml(&apexes);
         std::fs::write(layout.apex_info_list(), &xml).map_err(|e| e.to_string())?;
+        apex::write_bootstrap(&layout.bootstrap_apex_dir(), &apexes).map_err(|e| e.to_string())?;
 
         let ids = IdResolver::from_image(&image, &properties);
         let scripts = ScriptLoader {

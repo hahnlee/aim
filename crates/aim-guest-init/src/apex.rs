@@ -9,6 +9,9 @@
 //! subcontext and linkerconfig reads the whole list.
 
 use std::fmt::Write as _;
+use std::fs;
+use std::io;
+use std::path::Path;
 
 use aim_android_init::ImageRoot;
 
@@ -196,6 +199,33 @@ pub fn bootstrap_apexes(entries: &[ApexEntry]) -> Vec<String> {
         .collect()
 }
 
+/// apexd's bootstrap mode: the `vendorBootstrap` APEXes as `/bootstrap-apex`
+/// shows them, where libvintf reads the vendor VINTF fragments (the info
+/// list and `<name>/etc/vintf`) until `apex.all.ready`. Without them
+/// servicemanager refuses the `early_hal` HALs' `addService` (the
+/// gatekeeper HAL aborted, and system_server, which needs gatekeeperd
+/// behind it, crashed when it came first: #205, #490). `dir` is the host
+/// directory of `/bootstrap-apex`; each APEX is a link to its flattened
+/// `/apex/<name>`.
+pub fn write_bootstrap(dir: &Path, entries: &[ApexEntry]) -> io::Result<()> {
+    let bootstrap: Vec<ApexEntry> = entries
+        .iter()
+        .filter(|e| e.vendor_bootstrap)
+        .cloned()
+        .collect();
+    fs::write(
+        dir.join("apex-info-list.xml"),
+        apex_info_list_xml(&bootstrap),
+    )?;
+    for entry in &bootstrap {
+        std::os::unix::fs::symlink(
+            format!("/apex/{}", entry.module_name),
+            dir.join(&entry.module_name),
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +285,38 @@ mod tests {
         assert_eq!(parsed[0].module_name, "com.android.hardware.power");
         assert_eq!(parsed[0].partition, "VENDOR");
         assert!(parsed[0].is_active);
+    }
+
+    #[test]
+    fn bootstrap_lists_and_links_vendor_bootstrap_apexes() {
+        let entry = |name: &str, vendor_bootstrap| ApexEntry {
+            module_name: name.into(),
+            module_path: format!("/vendor/apex/{name}.apex"),
+            version_code: 1,
+            version_name: String::new(),
+            partition: "VENDOR".into(),
+            vendor_bootstrap,
+        };
+        let dir = std::env::temp_dir().join(format!("gi-bootstrap-apex-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        write_bootstrap(
+            &dir,
+            &[
+                entry("com.android.hardware.gatekeeper", true),
+                entry("com.android.hardware.power", false),
+            ],
+        )
+        .unwrap();
+        let parsed =
+            read_apex_info_list(&fs::read_to_string(dir.join("apex-info-list.xml")).unwrap());
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].module_name, "com.android.hardware.gatekeeper");
+        assert_eq!(
+            fs::read_link(dir.join("com.android.hardware.gatekeeper")).unwrap(),
+            Path::new("/apex/com.android.hardware.gatekeeper")
+        );
+        assert!(!dir.join("com.android.hardware.power").exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

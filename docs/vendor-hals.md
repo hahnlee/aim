@@ -100,6 +100,9 @@ and honest:
   and apps handle it. There is no accelerometer, gyroscope or magnetometer:
   the Mac's motion sensors are not reachable from user space, and a fake
   one would mislead apps.
+- The image declares no `android.hardware.sensor.*` feature
+  (`image/vendor/etc/permissions/handheld_core_hardware.xml`): a feature
+  file is fixed in the image, and neither sensor is on every Mac.
 - Both are on-change and not wake-up sensors. While one is active, a poller
   reads the host at the requested rate (between 200 ms and 1 s) and writes
   an event when a value changes, and once on activation. `flush` writes
@@ -191,6 +194,8 @@ Wi-Fi positioning or a nearby iPhone's GNSS.
 - The syscall layer's shared futexes have no bitsets (Darwin's shared
   `__ulock` has none). A bitset wait is treated as a plain wait, which
   gives spurious wakeups that libfmq tolerates.
-- Before `apex.all.ready`, the vendor APEXes' VINTF fragments are ignored,
-  and the power HAL's `addService` was refused. guest-init's apexd role now
-  sets the property with `apexd.status=ready`.
+- Before `apex.all.ready`, libvintf reads the vendor APEXes' VINTF
+  fragments from `/bootstrap-apex`, which lists only the `vendorBootstrap`
+  ones (the gatekeeper HAL); the others' `addService` is refused until
+  then. guest-init's apexd role sets the property with
+  `apexd.status=ready`.
