@@ -419,6 +419,9 @@ pub mod display {
         /// Guest: the activity the task was started with,
         /// `package/class`, in [`super::Window::text`].
         pub const ACTIVITY: u32 = 7;
+        /// Guest: an activity of the task asked for an orientation
+        /// (`setRequestedOrientation`), [`super::Window::orientation`].
+        pub const ORIENTATION: u32 = 8;
         /// Server: move or resize the task to [`super::Window::bounds`].
         pub const SET_BOUNDS: u32 = 16;
         /// Server: make the task the top (focused) one.
@@ -429,6 +432,14 @@ pub mod display {
         /// [`super::Window::text`], in a new task (or bring its task to the
         /// front).
         pub const LAUNCH: u32 = 19;
+    }
+
+    /// [`Window::orientation`] values.
+    pub mod orientation {
+        /// Any: the window has the user's proportions.
+        pub const ANY: u32 = 0;
+        pub const LANDSCAPE: u32 = 1;
+        pub const PORTRAIT: u32 = 2;
     }
 
     /// A record on the connection [`FN_WINDOWS`] returns.
@@ -442,7 +453,8 @@ pub mod display {
         pub bounds: [i32; 4],
         /// The height of the task's caption, inside the top of `bounds`.
         pub caption: i32,
-        pub _reserved: u32,
+        /// One of [`orientation`], with [`window::ORIENTATION`].
+        pub orientation: u32,
         /// UTF-8, NUL-padded (cut at a character boundary).
         pub text: [u8; 224],
     }
@@ -454,7 +466,7 @@ pub mod display {
                 task: 0,
                 bounds: [0; 4],
                 caption: 0,
-                _reserved: 0,
+                orientation: 0,
                 text: [0; 224],
             }
         }

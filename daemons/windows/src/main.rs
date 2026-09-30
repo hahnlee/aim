@@ -13,6 +13,11 @@
 //! not freeform) is the desktop the windows float over, and a task without
 //! activities (a split-screen root WMShell organizes, a task restored from
 //! recents and not started) or off the display is not shown.
+//!
+//! An orientation an activity asks for (`setRequestedOrientation`) goes to
+//! the task's window, which takes landscape or portrait proportions, or
+//! the user's again. A manifest's `screenOrientation` needs nothing:
+//! freeform launches such a task with bounds of that orientation.
 
 mod framework;
 
@@ -22,8 +27,9 @@ use std::io::{Read as _, Write as _};
 use std::os::fd::FromRawFd;
 use std::sync::{Arc, Mutex};
 
-use aim_hostcall::display::{Window, Windows, mode, window};
+use aim_hostcall::display::{Window, Windows, mode, orientation, window};
 use aim_hostcall::guest;
+use aim_windows_core::Orientation;
 use binder::Interface;
 
 use framework::{
@@ -48,6 +54,8 @@ struct Task {
     running: bool,
     /// The bounds last reported, while the task has a window.
     shown: Option<[i32; 4]>,
+    /// The orientation an activity of it last asked for.
+    orientation: Orientation,
 }
 
 struct Bridge {
@@ -120,6 +128,9 @@ impl Bridge {
                         out.push(Window::with_text(window::TITLE, task, l));
                     }
                     out.push(self.task_record(task, b));
+                    if t.orientation != Orientation::Any {
+                        out.push(orientation_record(task, t.orientation));
+                    }
                     commit = Some(b);
                 }
                 (Some(old), Some(b)) if old != b || force => {
@@ -258,6 +269,19 @@ impl Bridge {
                 }
                 self.front(task);
             }
+            Event::Orientation(task, o) => {
+                let shown = {
+                    let mut tasks = self.tasks.lock().unwrap();
+                    let t = tasks.entry(task).or_default();
+                    t.orientation = o;
+                    t.shown.is_some()
+                };
+                // Every request goes to the window, the same one again
+                // too: the user may have changed its proportions since.
+                if shown {
+                    self.send(&orientation_record(task, o));
+                }
+            }
             Event::MovedToFront(_) | Event::DescriptionChanged(_) | Event::MovedToBack(_) => {}
         }
     }
@@ -294,6 +318,19 @@ impl Bridge {
         if let Err(e) = r {
             log::warn!("request {} for task {task}: {e}", w.op);
         }
+    }
+}
+
+fn orientation_record(task: i32, o: Orientation) -> Window {
+    Window {
+        op: window::ORIENTATION,
+        task,
+        orientation: match o {
+            Orientation::Any => orientation::ANY,
+            Orientation::Landscape => orientation::LANDSCAPE,
+            Orientation::Portrait => orientation::PORTRAIT,
+        },
+        ..Default::default()
     }
 }
 

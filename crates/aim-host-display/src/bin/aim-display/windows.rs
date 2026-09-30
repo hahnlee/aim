@@ -14,7 +14,10 @@
 //!   the display's stacking stays the screen's, and a task Android moves to
 //!   the back (Back on its root activity) minimizes its window;
 //! - closing the window removes the task, and a removed task's window
-//!   closes.
+//!   closes;
+//! - an orientation an activity asks for turns the window to landscape or
+//!   portrait proportions around its centre, within the screen, and a
+//!   request for none turns it back to the user's size.
 //!
 //! A press in a window whose task is not the top one focuses the task first
 //! and holds the touch until Android reports the task in front (or
@@ -40,8 +43,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aim_host_display::input::translate::Phase;
-use aim_host_display::windows::{Frame, Screen, bounds, content, view_to_display};
-use aim_hostcall::display::{Window as Record, window};
+use aim_host_display::windows::{Frame, Screen, bounds, content, fit, turn, view_to_display};
+use aim_hostcall::display::{Window as Record, orientation, window};
 
 use crate::hosts::Host;
 use crate::metal::Target;
@@ -87,6 +90,9 @@ struct TaskWindow {
     closed: bool,
     /// When the user last moved or resized the window.
     moved: Option<Instant>,
+    /// The content's size (points) the user gave the window, while it is
+    /// turned for an orientation an activity asked for.
+    user: Option<CGSize>,
 }
 
 impl TaskWindow {
@@ -115,6 +121,8 @@ struct Info {
     host: Option<Arc<Host>>,
     /// Its window asked to close it.
     closing: bool,
+    /// The orientation an activity of it asked for.
+    orientation: u32,
 }
 
 impl Info {
@@ -261,6 +269,7 @@ fn note(s: &mut State, r: &Record) -> Info {
         window::ACTIVITY => info.activity = r.text().to_string(),
         window::TITLE => info.title = r.text().to_string(),
         window::TASK => info.bounds = Some((r.bounds, r.caption)),
+        window::ORIENTATION => info.orientation = r.orientation,
         _ => {}
     }
     info.clone()
@@ -315,6 +324,7 @@ fn apply(r: &Record) {
             }
         }
         window::FRONT => front(r.task),
+        window::ORIENTATION => orient(r.task, r.orientation),
         window::REMOVED => remove(r.task),
         window::MOVED_TO_BACK => {
             if let Some(Some(w)) = with(|s| s.tasks.get(&r.task).map(|t| t.window)) {
@@ -365,6 +375,14 @@ fn route(task: i32) -> bool {
                     task,
                     bounds,
                     caption,
+                    ..Default::default()
+                });
+            }
+            if info.orientation != orientation::ANY {
+                h.send_window(&Record {
+                    op: window::ORIENTATION,
+                    task,
+                    orientation: info.orientation,
                     ..Default::default()
                 });
             }
@@ -568,6 +586,7 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
         visible: true,
         closed: false,
         moved: None,
+        user: None,
     };
     send!(w, c"setTitle:" => (), Id = nsstring(&title));
     with(|s| {
@@ -588,6 +607,52 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
         set_bounds(task, bounds(placed, caption));
     }
     update_targets(Some(task));
+}
+
+/// An activity of `task` asked for orientation `o`: the window's content
+/// turns to its proportions around its centre, within the screen's
+/// visible part, or (for none) back to the size the user gave it. The
+/// window's resize resizes the task, as the user's does.
+fn orient(task: i32, o: u32) {
+    let Some(Some((w, user))) = with(|s| {
+        let t = s.tasks.get(&task).filter(|t| !t.closed)?;
+        Some((t.window, t.user))
+    }) else {
+        return;
+    };
+    if send!(w, c"inLiveResize" => bool) {
+        return;
+    }
+    let whole = send!(w, c"frame" => CGRect);
+    let c = frame(send!(w, c"contentRectForFrameRect:" => CGRect, CGRect = whole));
+    // Below the menu bar and beside the Dock, with room for the title bar.
+    let screen = send!(class(c"NSScreen"), c"mainScreen" => Id);
+    let mut area = frame(send!(screen, c"visibleFrame" => CGRect));
+    area.height -= whole.size.height - c.height;
+    let turned = match o {
+        orientation::LANDSCAPE | orientation::PORTRAIT => {
+            turn(c, o == orientation::LANDSCAPE, area).map(|f| {
+                (
+                    f,
+                    Some(user.unwrap_or(CGSize {
+                        width: c.width,
+                        height: c.height,
+                    })),
+                )
+            })
+        }
+        _ => user.map(|u| (fit(c, u.width, u.height, area), None)),
+    };
+    let Some((f, user)) = turned else {
+        return;
+    };
+    with(|s| {
+        if let Some(t) = s.tasks.get_mut(&task) {
+            t.user = user;
+        }
+    });
+    let f = send!(w, c"frameRectForContentRect:" => CGRect, CGRect = cg(f));
+    send!(w, c"setFrame:display:" => (), CGRect = f, bool = true);
 }
 
 fn set_bounds(task: i32, b: [i32; 4]) {
@@ -830,6 +895,10 @@ extern "C" fn did_resize(_: Id, _: Sel, note: Id) {
 }
 
 extern "C" fn did_end_live_resize(_: Id, _: Sel, note: Id) {
+    // The user's own size, which a request for no orientation keeps.
+    if let Some((task, _)) = task_of(note) {
+        with(|s| s.tasks.get_mut(&task).map(|t| t.user = None));
+    }
     moved(note);
 }
 

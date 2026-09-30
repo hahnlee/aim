@@ -84,6 +84,30 @@ pub fn bounds(content: [i32; 4], caption: i32) -> [i32; 4] {
     [l, t - caption, r, b]
 }
 
+/// Window content `c` (a frame) turned to landscape or portrait
+/// proportions, as an activity asked: its width and height swapped around
+/// its centre, fitted into `area`. None when it has them already, or is
+/// square.
+pub fn turn(c: Frame, landscape: bool, area: Frame) -> Option<Frame> {
+    if c.width == c.height || (c.width > c.height) == landscape {
+        return None;
+    }
+    Some(fit(c, c.height, c.width, area))
+}
+
+/// A `width` by `height` frame around `c`'s centre, scaled down (in
+/// proportion) to fit into `area` and moved into it.
+pub fn fit(c: Frame, width: f64, height: f64, area: Frame) -> Frame {
+    let k = (area.width / width).min(area.height / height).min(1.0);
+    let (width, height) = (width * k, height * k);
+    Frame {
+        x: (c.x + (c.width - width) / 2.0).clamp(area.x, area.x + area.width - width),
+        y: (c.y + (c.height - height) / 2.0).clamp(area.y, area.y + area.height - height),
+        width,
+        height,
+    }
+}
+
 /// The display pixel under point (`x`, `y`) of a view `view_height` points
 /// tall (origin at the bottom left) whose top left shows display pixel
 /// `origin`, one pixel per 1/`scale` point.
@@ -154,6 +178,37 @@ mod tests {
         assert_eq!(bounds(content(b, 84), 84), b);
         // A task shorter than its caption has no content.
         assert_eq!(content([0, 0, 10, 50], 84), [0, 50, 10, 50]);
+    }
+
+    fn f(x: f64, y: f64, width: f64, height: f64) -> Frame {
+        Frame {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn turning_swaps_the_sides_around_the_centre() {
+        let area = f(0.0, 0.0, 1728.0, 1080.0);
+        let portrait = f(600.0, 200.0, 400.0, 700.0);
+        assert_eq!(
+            turn(portrait, true, area),
+            Some(f(450.0, 350.0, 700.0, 400.0))
+        );
+        assert_eq!(turn(portrait, false, area), None);
+        assert_eq!(turn(f(0.0, 0.0, 500.0, 500.0), true, area), None);
+        // Near an edge it moves into the area; too large, it shrinks in
+        // proportion, never filling more than the area.
+        assert_eq!(
+            turn(f(1500.0, 0.0, 200.0, 400.0), true, area),
+            Some(f(1328.0, 100.0, 400.0, 200.0))
+        );
+        assert_eq!(
+            turn(f(0.0, 0.0, 600.0, 2000.0), true, area),
+            Some(f(0.0, 561.6, 1728.0, 518.4))
+        );
     }
 
     #[test]
