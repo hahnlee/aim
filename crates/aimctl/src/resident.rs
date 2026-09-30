@@ -137,15 +137,11 @@ fn tail(path: &Path, bytes: u64) -> String {
 }
 
 /// aim-display's arguments: its socket and capture file in the state
-/// directory, and a phone-sized device window or window mode with the
-/// shims.
+/// directory, and a phone-sized device window or window mode.
 fn display_args(files: &Files, windows: bool) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec!["--socket".into(), files.display().into()];
     if windows {
         args.extend(["--mode", "windows"].map(OsString::from));
-        // The shims show the guest's notifications.
-        args.push("--apps".into());
-        args.push(files.apps().into());
     } else {
         args.extend(["--size", "1080x1920"].map(OsString::from));
     }
@@ -356,8 +352,6 @@ mod tests {
                 "/d.aimctl/display",
                 "--mode",
                 "windows",
-                "--apps",
-                "/d.aimctl/apps",
                 "--capture",
                 "/d.aimctl/capture.bmp"
             ]
