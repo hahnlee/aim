@@ -751,8 +751,10 @@ const MREMAP_MAYMOVE: u64 = 1;
 const MREMAP_FIXED: u64 = 2;
 const MREMAP_DONTUNMAP: u64 = 4;
 
-/// Allocate anonymous memory at exactly `addr` (it must be free), with the
-/// protection of the page below it.
+/// Map `[addr, addr+len)` as the continuation of the mapping whose last
+/// page is `like`, as mremap(2) grows it: the file's following pages with
+/// the same sharing and protection for a file mapping, fresh anonymous
+/// memory otherwise. `addr` must be free unless `replace`.
 fn extend_at(addr: u64, len: u64, like: u64, replace: bool) -> Result<(), i64> {
     let replace = replace || window::is_free(addr, len);
     let mut at = addr;
@@ -762,11 +764,64 @@ fn extend_at(addr: u64, len: u64, like: u64, replace: bool) -> Result<(), i64> {
     if unsafe { mach_vm_allocate(task(), &mut at, len, flags) } != 0 {
         return Err(-(ENOMEM as i64));
     }
-    if let Some(r) = vmmap::region_at(like) {
+    let Some(r) = vmmap::region_at(like).filter(|r| r.start <= like) else {
+        return Ok(());
+    };
+    let prot = r.prot as u64 & (PROT_READ | PROT_WRITE | PROT_EXEC);
+    // A private file mapping (or a copy standing in for one) is recorded
+    // with its file and offset, which a fork child's copy does not report.
+    // Executable file views not recorded are translated code the guest
+    // mapped private, from a cache file ([`mmap`]).
+    let copy = copies::find(like);
+    let file = match (&copy, &r.file) {
+        (Some((c, off)), _) => Some((c.host.clone(), off + PAGE, false)),
+        (None, Some((host, _, _))) if prot & PROT_EXEC == 0 => {
+            Some((host.clone(), r.offset + (like - r.start) + PAGE, r.shared))
+        }
+        _ => None,
+    };
+    let Some((host, off, shared)) = file else {
         // SAFETY: our fresh allocation.
-        unsafe { mach_vm_protect(task(), addr, len, 0, r.prot as i32) };
+        unsafe { mach_vm_protect(task(), addr, len, 0, prot as i32) };
+        return Ok(());
+    };
+    let mapped = map_file_at(addr, len, prot, &host, off, shared);
+    if let Err(e) = mapped {
+        window::unmap(addr, len);
+        return Err(e);
+    }
+    if let Some((c, _)) = copy {
+        copies::note_file(addr, len, &c.host, &c.guest, off, (c.dev, c.ino));
     }
     Ok(())
+}
+
+/// Map `host` from `off` at `addr` (replacing what is there) as the guest's
+/// mmap would.
+fn map_file_at(
+    addr: u64,
+    len: u64,
+    prot: u64,
+    host: &std::path::Path,
+    off: u64,
+    shared: bool,
+) -> Result<(), i64> {
+    let c = std::ffi::CString::new(host.as_os_str().as_bytes()).map_err(|_| -(ENOMEM as i64))?;
+    let mode = if shared && prot & PROT_WRITE != 0 {
+        libc::O_RDWR
+    } else {
+        libc::O_RDONLY
+    };
+    // SAFETY: reopening the mapping's own backing file.
+    let fd = unsafe { libc::open(c.as_ptr(), mode | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(-(errno::last() as i64));
+    }
+    let kind = if shared { MAP_SHARED } else { MAP_PRIVATE };
+    let r = mmap([addr, len, prot, kind | MAP_FIXED, fd as u64, off]);
+    // SAFETY: our temporary fd.
+    unsafe { libc::close(fd) };
+    if r < 0 { Err(r) } else { Ok(()) }
 }
 
 /// Move `[old, old+old_len)` to `new` (resized to `new_len`), replacing
@@ -776,7 +831,7 @@ fn move_to(old: u64, old_len: u64, new: u64, new_len: u64, keep_old: bool) -> Re
     remap_shared(new, old, moved)?;
     copies::moved(old, new, moved);
     if new_len > old_len {
-        extend_at(new + old_len, new_len - old_len, old + old_len - PAGE, true)?;
+        extend_at(new + old_len, new_len - old_len, new + old_len - PAGE, true)?;
     }
     if keep_old {
         // MREMAP_DONTUNMAP: the old range stays mapped, empty.
