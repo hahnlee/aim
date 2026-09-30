@@ -187,6 +187,20 @@ the SystemServer detail): `boot_progress_start` 4.5 and 7.1 s,
 boot; the shell (the launcher's first draw, then SystemUI's keyguard
 and wallpaper) holds boot completion for 0.67 s after home starts.
 
+guest-init's report breaks the time before zygote down: each command
+carries the time it ran, and its `timeline:` lines give the preparation
+steps (data image, runtime layout, property areas, scripts, binder
+host), every wait of init's queue with its length, and every property
+a service sets, since guest-init started (also `ro.boottime.*`'s
+epoch). Preparation cost 1.6 s on a first and 2.0 s on a second boot:
+attaching the data image (0.4-0.9 s), wiping the previous runtime
+directory (0.9 s on a second boot) and mapping the 355 property area
+files (0.5 s), the last two held up by the host's endpoint security
+agent, about 1 ms per writable shared mapping and per unlink. The old
+runtime directory is now removed in the background and the areas are
+mapped on eight threads (under 10 ms and about 0.18 s with a stand-in
+`linux-run`).
+
 ## Debugging
 
 The original logd runs, and every service logs to it. Read it with the
