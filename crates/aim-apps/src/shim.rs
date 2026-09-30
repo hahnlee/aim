@@ -17,7 +17,7 @@ use crate::app::App;
 const EXECUTABLE: &str = "aim-app";
 /// Bumped when a shim's layout or icon drawing changes, so shims are
 /// written again.
-pub const LAYOUT: u32 = 3;
+pub const LAYOUT: u32 = 4;
 
 /// A shim to write: the app, its icon, and where its windows come from.
 pub struct Shim<'a> {
