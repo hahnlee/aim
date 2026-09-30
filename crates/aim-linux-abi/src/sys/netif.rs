@@ -522,7 +522,9 @@ fn prefix_mask(p: u8) -> Ipv4Addr {
 fn is_socket(fd: i32) -> bool {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fstat into a local buffer.
-    unsafe { libc::fstat(fd, &mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFSOCK }
+    let host =
+        unsafe { libc::fstat(fd, &mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFSOCK };
+    host && !super::net::hidden_socket(fd)
 }
 
 /// The socket ioctls on interfaces. None: not one of them (or not a

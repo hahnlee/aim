@@ -1,11 +1,13 @@
 // epoll, poll/ppoll/pselect, eventfd and timerfd.
 #include <fcntl.h>
 #include <poll.h>
+#include <net/if.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/timerfd.h>
@@ -256,6 +258,51 @@ static void timerfd_abstime_and_epoll(void) {
   close(t);
 }
 
+// Every socket call on a file that is not a socket fails with ENOTSOCK
+// (socket(7)); the interface ioctls are not its ioctls.
+static int socket_calls_fail(int fd) {
+  char b[8] = {0};
+  int v;
+  socklen_t n = sizeof(v);
+  struct sockaddr_storage sa;
+  socklen_t sl = sizeof(sa);
+  struct iovec io = {b, sizeof(b)};
+  struct msghdr m = {.msg_iov = &io, .msg_iovlen = 1};
+  struct mmsghdr mm = {.msg_hdr = m};
+  struct ifreq ifr = {0};
+#define NOTSOCK(call) ((call) == -1 && errno == ENOTSOCK)
+  return NOTSOCK(send(fd, b, 1, MSG_DONTWAIT)) && NOTSOCK(recv(fd, b, 1, MSG_DONTWAIT)) &&
+         NOTSOCK(sendto(fd, b, 1, 0, NULL, 0)) && NOTSOCK(recvfrom(fd, b, 1, 0, NULL, NULL)) &&
+         NOTSOCK(sendmsg(fd, &m, 0)) && NOTSOCK(recvmsg(fd, &m, MSG_DONTWAIT)) &&
+         NOTSOCK(sendmmsg(fd, &mm, 1, 0)) && NOTSOCK(recvmmsg(fd, &mm, 1, MSG_DONTWAIT, NULL)) &&
+         NOTSOCK(getsockopt(fd, SOL_SOCKET, SO_TYPE, &v, &n)) &&
+         NOTSOCK(setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof(v))) &&
+         NOTSOCK(getsockname(fd, (struct sockaddr*)&sa, &sl)) &&
+         NOTSOCK(getpeername(fd, (struct sockaddr*)&sa, &sl)) && NOTSOCK(shutdown(fd, SHUT_RD)) &&
+         NOTSOCK(listen(fd, 1)) && NOTSOCK(accept4(fd, NULL, NULL, 0)) &&
+         NOTSOCK(bind(fd, (struct sockaddr*)&sa, sizeof(struct sockaddr))) &&
+         NOTSOCK(connect(fd, (struct sockaddr*)&sa, sizeof(struct sockaddr))) &&
+         ioctl(fd, SIOCGIFINDEX, &ifr) == -1 && errno == ENOTTY;
+#undef NOTSOCK
+}
+
+static void not_sockets(void) {
+  int e = eventfd(0, EFD_NONBLOCK);
+  int t = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+  int p[2];
+  CHECK(e >= 0 && t >= 0 && pipe(p) == 0);
+  CHECK(socket_calls_fail(e));
+  CHECK(socket_calls_fail(t));
+  CHECK(socket_calls_fail(p[0]));
+  // They still work as what they are.
+  uint64_t v = 1;
+  CHECK(write(e, &v, sizeof(v)) == sizeof(v) && read(e, &v, sizeof(v)) == sizeof(v) && v == 1);
+  close(e);
+  close(t);
+  close(p[0]);
+  close(p[1]);
+}
+
 int main(void) {
   RUN(eventfd_counter);
   RUN(eventfd_semaphore);
@@ -268,5 +315,6 @@ int main(void) {
   RUN(poll_ppoll_pselect);
   RUN(timerfd_relative_and_periodic);
   RUN(timerfd_abstime_and_epoll);
+  RUN(not_sockets);
   DONE();
 }

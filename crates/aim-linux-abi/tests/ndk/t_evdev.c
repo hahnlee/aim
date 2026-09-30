@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/time.h>
@@ -451,6 +452,28 @@ static void nodes(void) {
   close(fd);
 }
 
+// An evdev node is no socket (socket(7)): socket calls fail with ENOTSOCK.
+static void not_a_socket(void) {
+  int fd = open("/dev/input/event1", O_RDWR | O_NONBLOCK);
+  CHECK(fd >= 0);
+  char b[24] = {0};
+  int v;
+  socklen_t n = sizeof(v);
+  struct sockaddr_storage sa;
+  socklen_t sl = sizeof(sa);
+  CHECK(send(fd, b, sizeof(b), 0) == -1 && errno == ENOTSOCK);
+  CHECK(recv(fd, b, sizeof(b), MSG_DONTWAIT) == -1 && errno == ENOTSOCK);
+  CHECK(getsockopt(fd, SOL_SOCKET, SO_TYPE, &v, &n) == -1 && errno == ENOTSOCK);
+  CHECK(setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof(v)) == -1 && errno == ENOTSOCK);
+  CHECK(getsockname(fd, (struct sockaddr*)&sa, &sl) == -1 && errno == ENOTSOCK);
+  CHECK(getpeername(fd, (struct sockaddr*)&sa, &sl) == -1 && errno == ENOTSOCK);
+  CHECK(shutdown(fd, SHUT_RDWR) == -1 && errno == ENOTSOCK);
+  // Still the device.
+  int version = 0;
+  CHECK(ioctl(fd, EVIOCGVERSION, &version) == 0 && version == EV_VERSION);
+  close(fd);
+}
+
 int main(int argc, char** argv) {
   if (argc == 3 && !strcmp(argv[1], "exec")) return exec_child(atoi(argv[2]));
   self = argv[0];
@@ -464,5 +487,6 @@ int main(int argc, char** argv) {
   RUN(clock_flush);
   RUN(across_exec);
   RUN(nodes);
+  RUN(not_a_socket);
   DONE();
 }
