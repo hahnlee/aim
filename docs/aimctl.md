@@ -87,10 +87,31 @@ processes (`ps -A`, `kill`), as `adb shell` does on a device.
 - **logs** is `logcat -d`, or `logcat` with `--follow`; other options go
   to logcat (`aimctl logs -b events`, `aimctl logs -s ActivityManager`).
 - **status** measures guest-init and the linux-run processes on the
-  guest's path map (`ps`: resident memory, recent CPU in percent of a
-  core) and the data image (what its file occupies, and what the guest's
+  guest's path map (`ps`: resident memory summed over them, so a
+  shared page counts in every process that maps it; recent CPU in percent of a core)
+  and the data image (what its file occupies, and what the guest's
   files use while it is attached).
 
 `install`, `uninstall` and `open` wait for `sys.boot_completed`; the
 framework calls have time limits (ten minutes for `pm install`, two for
 the others).
+
+## Checked (2026-09-30)
+
+One session in window mode on a fresh data directory, M2 Pro, other agents'
+builds loading the host:
+
+| Step | Result |
+| --- | --- |
+| `start --windows` | back after 2 s (`booting`); a second `start` refused ("already running") |
+| `status` | `running` 17 s after start; 89 processes, 441 MB image |
+| `shell getprop ro.build.version.release`, `shell ps -A` | `16`; 95 lines, the guest's processes |
+| `install` Calculator (a copy of `_build/installed-apps`'s APK) | `Success`; the APK's sha256 unchanged |
+| `apps` | 19 launcher apps, Calculator among them; a shim for each |
+| `open com.android.calculator2` | the shim opened; Calculator the resumed activity, displayed in 428 ms |
+| `logs -s ActivityTaskManager`, `logs --follow` | the launch's `START` and `Displayed`; 494 lines in 5 s |
+| `uninstall com.android.calculator2` | `Success`; gone from `apps` |
+| `stop` | `stopped` after 22 s; no process of the guest left, the data image detached |
+
+`pidof` of a running app finds nothing: other processes see an app's
+`/proc/<pid>/cmdline` empty (#238).
