@@ -28,18 +28,40 @@ public final class DeviceServices extends SystemService {
     /** The native service host's name in servicemanager. */
     private static final String SERVICE_HOST = "aim.service_host";
 
+    private final LocationBridge mLocation;
+
     public DeviceServices(Context context) {
         super(context);
+        mLocation = new LocationBridge(context);
     }
 
     @Override
-    public void onStart() {}
+    public void onStart() {
+        mLocation.publish();
+    }
 
     @Override
     public void onBootPhase(int phase) {
         if (phase == PHASE_DEVICE_SPECIFIC_SERVICES_READY) {
             attachBridge();
+        } else if (phase == PHASE_THIRD_PARTY_APPS_CAN_START) {
+            mLocation.onThirdPartyAppsCanStart();
         }
+    }
+
+    @Override
+    public void onUserStarting(TargetUser user) {
+        mLocation.onUserStarting(user.getUserIdentifier());
+    }
+
+    @Override
+    public void onUserSwitching(TargetUser from, TargetUser to) {
+        mLocation.onUserSwitching(from.getUserIdentifier(), to.getUserIdentifier());
+    }
+
+    @Override
+    public void onUserStopped(TargetUser user) {
+        mLocation.onUserStopped(user.getUserIdentifier());
     }
 
     private void attachBridge() {
@@ -50,7 +72,7 @@ public final class DeviceServices extends SystemService {
         }
         try {
             IServiceHost service = IServiceHost.Stub.asInterface(host);
-            service.attachBridge(new Bridge(getContext(), service));
+            service.attachBridge(new Bridge(getContext(), service, mLocation));
             Slog.i(TAG, "bridge attached to the native service host");
         } catch (RemoteException e) {
             Slog.w(TAG, "cannot attach the bridge", e);
@@ -60,10 +82,12 @@ public final class DeviceServices extends SystemService {
     private static final class Bridge extends IBridge.Stub {
         private final Context context;
         private final IServiceHost host;
+        private final LocationBridge location;
 
-        Bridge(Context context, IServiceHost host) {
+        Bridge(Context context, IServiceHost host, LocationBridge location) {
             this.context = context;
             this.host = host;
+            this.location = location;
         }
 
         @Override
@@ -81,6 +105,12 @@ public final class DeviceServices extends SystemService {
         public void interceptNotificationPermissionRequests() {
             enforceSystemUid();
             NotificationPermissionInterceptor.register(context, host);
+        }
+
+        @Override
+        public ILocationBridge getLocationBridge(ILocationHost host) {
+            enforceSystemUid();
+            return location.attach(host);
         }
 
         private static void enforceSystemUid() {

@@ -93,7 +93,13 @@ pub struct System {
     /// The nonces in system_server's shared memory, from the bridge.
     nonces: Mutex<Option<Arc<Nonces>>>,
     permissions: Mutex<Permissions>,
+    /// Told of each bridge system_server hands over (a handle held for
+    /// the call).
+    bridge_listeners: Mutex<Vec<BridgeListener>>,
 }
+
+/// Told of a bridge attached, with its handle.
+type BridgeListener = Box<dyn Fn(u32) + Send + Sync>;
 
 /// Permission checks kept with the nonce they were asked at, as
 /// `PermissionManager`'s `sPermissionCache` (by permission and uid; the
@@ -161,6 +167,7 @@ impl System {
                 notes,
                 nonces: Mutex::new(None),
                 permissions: Mutex::new(Permissions::default()),
+                bridge_listeners: Mutex::new(Vec::new()),
             }
         });
         let this = Arc::downgrade(&system);
@@ -218,7 +225,7 @@ impl System {
     }
 
     /// Calls `code` of service `name` and reads its reply.
-    fn call<T>(
+    pub(crate) fn call<T>(
         self: &Arc<Self>,
         name: &'static str,
         code: u32,
@@ -384,7 +391,16 @@ impl System {
                 }
             }),
         );
+        for listener in self.bridge_listeners.lock().unwrap().iter() {
+            listener(handle);
+        }
         Ok(())
+    }
+
+    /// Tells `listener` of each bridge attached from now on, with its
+    /// handle, valid while it is called.
+    pub fn add_bridge_listener(&self, listener: BridgeListener) {
+        self.bridge_listeners.lock().unwrap().push(listener);
     }
 
     /// `PermissionEnforcer.enforcePermission(permission, pid, uid)`, what
@@ -711,6 +727,36 @@ impl System {
         .map(drop)
     }
 
+    /// `AppOpsManager.noteOpNoThrow(op, uid, package, tag, message)` of
+    /// system_server for an app: noted now, its mode the answer. A note
+    /// for an app is collected for its async noted-op callback, with
+    /// `message` (`COLLECT_ASYNC`).
+    pub(crate) fn note_op_now(
+        self: &Arc<Self>,
+        op: i32,
+        uid: i32,
+        package: &str,
+        attribution_tag: Option<&str>,
+        message: &str,
+    ) -> Result<i32> {
+        let args = appops::NoteOperation {
+            code: op,
+            uid,
+            package_name: Some(package.into()),
+            attribution_tag: attribution_tag.map(Into::into),
+            should_collect_async_noted_op: uid != crate::SYSTEM_UID as i32,
+            message: Some(message.into()),
+            should_collect_message: true,
+        };
+        self.call(
+            "appops",
+            appops::NOTE_OPERATION,
+            |p| args.write(p),
+            appops::read_note_operation_reply::<NotedMode>,
+        )
+        .map(|m| m.map_or(MODE_ERRORED, |m| m.0))
+    }
+
     pub fn user_running(self: &Arc<Self>, user_id: i32) -> Result<bool> {
         let args = um::IsUserRunning { user_id };
         self.call(
@@ -867,6 +913,16 @@ impl ReadParcelable for ParcelFileDescriptor {
             return Err(aim_binder_host::parcel::BAD_VALUE);
         }
         Ok(Self(r.read_fd()?))
+    }
+}
+
+/// `SyncNotedAppOp`'s mode: its flags, then the mode.
+struct NotedMode(i32);
+
+impl ReadParcelable for NotedMode {
+    fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
+        r.read_i32()?; // which of the nullable fields follow
+        Ok(Self(r.read_i32()?))
     }
 }
 

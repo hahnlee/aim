@@ -124,7 +124,9 @@ fn state() -> &'static State {
     })
 }
 
-fn set_updates(on: bool) {
+/// Starts or stops CoreLocation's updates ([`FN_START`], [`FN_STOP`]), for
+/// the guest's HAL or a native service in this process (ADR 0013).
+pub fn set_updates(on: bool) {
     static THREAD: OnceLock<()> = OnceLock::new();
     let s = state();
     *s.wanted.lock().unwrap() = on;

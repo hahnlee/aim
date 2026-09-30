@@ -1,5 +1,8 @@
 package dev.aim.server;
 
+import dev.aim.server.ILocationBridge;
+import dev.aim.server.ILocationHost;
+
 /**
  * What the native system services need from system_server's internals
  * (docs/system-services.md, "The system_server bridge"): each method is
@@ -18,4 +21,10 @@ interface IBridge {
      * prompt, for a host that shows notifications on the Mac (#470).
      */
     void interceptNotificationPermissionRequests();
+
+    /**
+     * The location bridge (ILocationBridge), for `host`, the native
+     * location service's side of it.
+     */
+    ILocationBridge getLocationBridge(ILocationHost host);
 }

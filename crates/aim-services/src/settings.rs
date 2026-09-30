@@ -33,6 +33,7 @@ const AUTHORITY: &str = "settings";
 const GET_CONFIG: &str = "GET_config";
 const LIST_CONFIG: &str = "LIST_config";
 const GET_SECURE: &str = "GET_secure";
+const GET_GLOBAL: &str = "GET_global";
 const PUT_SECURE: &str = "PUT_secure";
 const USER_KEY: &str = "_user";
 const PREFIX_KEY: &str = "_prefix";
@@ -270,14 +271,24 @@ impl Settings {
 
     /// `Settings.Secure.getStringForUser(resolver, name, user)`.
     pub fn secure(&self, name: &str, user_id: i32) -> Result<Option<String>> {
-        let key = (GET_SECURE, user_id, name.to_string());
+        self.tracked(GET_SECURE, name, user_id)
+    }
+
+    /// `Settings.Global.getString(resolver, name)`.
+    pub fn global(&self, name: &str) -> Result<Option<String>> {
+        self.tracked(GET_GLOBAL, name, USER_SYSTEM)
+    }
+
+    /// A `GET_*` value, kept while its generation is unchanged.
+    fn tracked(&self, method: &'static str, name: &str, user_id: i32) -> Result<Option<String>> {
+        let key = (method, user_id, name.to_string());
         if let Some((value, generation)) = self.kept.lock().unwrap().values.get(&key)
             && generation.current()
         {
             return Ok(value.clone());
         }
         let (entries, generation) = self.call(
-            GET_SECURE,
+            method,
             Some(name),
             &[
                 (USER_KEY, Value::Int(user_id)),

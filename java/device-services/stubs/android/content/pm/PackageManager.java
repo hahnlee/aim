@@ -16,6 +16,8 @@ public abstract class PackageManager {
 
     public static class NameNotFoundException extends android.util.AndroidException {}
 
+    public abstract ApplicationInfo getApplicationInfo(String packageName, int flags) throws NameNotFoundException;
+
     public abstract PackageInfo getPackageInfoAsUser(String packageName, int flags, int userId) throws NameNotFoundException;
     public abstract int getPermissionFlags(String permName, String packageName, UserHandle user);
 }

@@ -11,6 +11,7 @@ aim-apps = { path = "../aim-apps" }
 aim-binder-driver = { path = "../aim-binder-driver" }
 aim-binder-host = { path = "../aim-binder-host" }
 aim-host-display = { path = "../aim-host-display" }
+aim-host-location = { path = "../aim-host-location" }
 aim-hostcall.workspace = true
 aim-service-aidl = { path = "aidl" }
 libc.workspace = true

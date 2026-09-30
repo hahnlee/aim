@@ -3,6 +3,7 @@
 package android.content.pm;
 
 public class ApplicationInfo extends PackageItemInfo {
+    public boolean enabled;
     public int targetSdkVersion;
     public int uid;
 }
