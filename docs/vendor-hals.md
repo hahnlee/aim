@@ -132,6 +132,13 @@ Wi-Fi positioning or a nearby iPhone's GNSS.
 - The HAL polls at the `setPositionMode` interval (at least 1 s) and
   delivers each new fix once. `RECURRENCE_SINGLE` stops after the first
   fix.
+- Session callbacks (status and location) come from the HAL's own
+  reporting thread, in order, after the call that caused them has returned
+  and with no HAL lock held, as a receiver's chip reports asynchronously.
+  The framework calls `start` and `stop` holding locks its callbacks take,
+  so a status callback inside `stop` deadlocked system_server (#459).
+  Capabilities and system info are answered within `setCallback`, as
+  AOSP's default HAL does.
 - A fix carries CoreLocation's accuracies: horizontal accuracy always;
   altitude, speed and bearing, each with its accuracy, only when
   CoreLocation marks them valid (non-negative). `elapsedRealtime` is
