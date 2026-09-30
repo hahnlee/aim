@@ -175,7 +175,7 @@ disposable data directory), reading the display server's log:
   notifications shown by "Android System" (`shown`).
 - A Clock timer (`am start -a android.intent.action.SET_TIMER ...
   SKIP_UI`): shown by Clock's shim, titled "Clock" (its content is a
-  custom view, #468); a click (as the shim sends it) sent its content
+  custom view and it sets no title or text); a click (as the shim sends it) sent its content
   intent and `DeskClock` became the resumed activity (its task goes to
   Clock's shim, which was running).
 - A dismissal (as the shim sends it) cancelled the notification in NMS
@@ -183,7 +183,25 @@ disposable data directory), reading the display server's log:
   shown`).
 - Settings cold-starts (`am start -W`) as before.
 
-Not exercised end to end: a click on the Mac itself (the shim's
+A second window-mode boot (2026-09-30, the custom views, icons and
+full-screen intents), reading what the display server passes a window
+host (a test host standing in for "Android System" and Clock's shims):
+
+- `cmd notification post -I` as the shell uid, each shown with a 256x256
+  PNG: `file:///data/local/tmp/x.png` (the file itself),
+  `@drawable/ic_dialog_alert` and `android.resource://android/17301543`
+  (framework-res's drawn alert icon). `file:///data/system/packages.xml`
+  is shown without an image and logged `not loaded` (not readable by
+  others).
+- The Clock timer's notification (a custom content view with its
+  `ApplicationInfo`) is read to its end: its channel, and its actions
+  ("Pause", "+1 minute"), which it used to lose, reach the Mac.
+- No notification of the boot or of the CTS run below (435 posts) was
+  read in part.
+
+Not exercised end to end: a `content:` icon (NMS refuses the shell's post
+of one without a URI grant; `openContentUri` is not reached), the
+full-screen intent on a locked Mac (the Mac was not locked), a click on the Mac itself (the shim's
 `UNUserNotificationCenter` delegate), actions and replies (their
 `PendingIntent`s go through the same `sendIntentSender` as clicks; the
 reply's fill-in intent is checked against the `Intent` reader in unit
@@ -196,6 +214,6 @@ tests).
 
 | Class | Tests | Without the bridge (main) | With the bridge |
 | --- | --- | --- | --- |
-| NotificationManagerTest (listeners, channels, styles, trampolines, autogrouping, ...) | 114 | 114 pass | 114 pass |
-| StatusBarNotificationTest | 20 | 20 pass | 20 pass |
-| NotificationStatsTest | 11 | 11 pass | 11 pass |
+| NotificationManagerTest (listeners, channels, styles, trampolines, autogrouping, ...) | 114 | 114 pass | 114 pass (also with custom views, icons and full-screen intents) |
+| StatusBarNotificationTest | 20 | 20 pass | 20 pass (idem) |
+| NotificationStatsTest | 11 | 11 pass | 11 pass (idem) |
