@@ -39,6 +39,11 @@ importing that coupling. The old crates retire with the old stack (#153).
 - **Entry points.** `Driver::open`, `mmap`, `ioctl` / `ioctl_user`, `poll`,
   `set_notifier`, `interrupt` and `release` mirror the file operations. The
   argument of `ioctl` is the `_IOC_SIZE(cmd)` bytes of the ioctl structure.
+  `ioctl_or_park` is `ioctl` for a caller that must not block in it: a read
+  that would wait for work returns instead, and its resume runs, on the
+  thread that brings the work (or an interrupt, or the release), when the
+  caller should issue the ioctl again. Its writes are consumed by then, as
+  for a read restarted after a signal.
 - **The calling process.** It is reached through `GuestProcess`: user copies,
   plus `get_file`, `install_file` and `close_fd`.
 - **Receive buffers.** They are written through `ReceiveMemory`.
@@ -91,7 +96,9 @@ locking. The owner is the daemon (#168). A guest keeps only its fd → driver
 process mapping, its receive mapping and its Mach ports. One lock guards
 the core. Thread wakes are delivered after it is released, so a woken reader
 does not block on the lock it was woken under. That brought the in-process
-p50 from 13.5 to 9.2 µs.
+p50 from 13.5 to 9.2 µs. The maps keyed by the driver's ids and guest tids
+use a multiplicative hash: SipHash was the largest share of the daemon's
+user time per call.
 
 ## Driver–process path
 
@@ -108,9 +115,18 @@ runs it alone. The `client` module is what the syscall layer calls
   **thread port**. A daemon thread serves it.
 - **Ioctls.** Each guest binder ioctl is one `mach_msg(SEND|RCV)` from the
   calling thread to its thread port, answered through a send-once right.
-  The daemon thread runs `Driver::ioctl` and may block in it, as the guest
-  thread blocks in the kernel. It sends that answer in the same `mach_msg`
-  that waits for the next request.
+  The daemon thread runs `Driver::ioctl_or_park`. A read that would wait
+  for work parks instead of blocking the daemon thread, which goes back to
+  waiting for requests; the guest thread stays blocked in its `mach_msg`,
+  as it would in the kernel. The thread that brings the work (a daemon
+  thread running another guest's transaction or reply, an interrupt, the
+  release) runs the parked read and sends its answer.
+- **Hand-offs.** A daemon thread sends the answers it produced when it is
+  done with a request, one of them in the same `mach_msg` that waits for
+  its next request, so the thread it wakes can take this CPU as this one
+  blocks, as Linux wakes the target of a binder call synchronously. A
+  resumed answer, whose thread waits for a transaction or a reply, goes
+  there before the daemon thread's own.
 - **Guest memory.** The daemon never reads guest memory. The shim sends the
   argument structure and gathers what the driver will read from the write
   stream: each `BC_TRANSACTION`/`BC_REPLY`'s data and offsets, and for
@@ -124,40 +140,61 @@ runs it alone. The `client` module is what the syscall layer calls
   `binder_poll`. The polling thread is registered from `epoll_ctl` and
   `ppoll`, the paths from which Linux calls `binder_poll`.
 
-A call and its reply cross four Mach hops: client → daemon → server, then
-server → daemon → client. The daemon adds two thread wakes: the client's
-daemon thread wakes the server's, and the other way back.
+A call and its reply cross four Mach hops and no other wake: client →
+daemon thread (which runs the call and the server's parked read) →
+server, then server → daemon thread (which runs the reply and the
+client's parked read) → client. Linux crosses two. Until parked reads
+(#451), a daemon thread blocked in the driver for each waiting guest
+thread, and each direction added a wake inside the daemon.
 
-Transport alone, measured in `experiments/p1/01-binder-transport` (removed;
-see git history) on an M2 Pro:
+Wake primitives between two threads, 256-byte messages, 100,000 round
+trips on an M2 Pro with a host load of 9-16 (2026-09-30):
 
-| path | p50 | p99 |
-| --- | --- | --- |
-| relayed Mach, 4 hops | 6.5–6.7 µs | 19 µs |
-| direct Mach, 2 hops | 6.2–6.6 µs | 14 µs |
-| relayed Unix sockets | 10.3–10.5 µs | 16 µs |
-| the core in-process (two threads, condvar) | 9.2 µs | 17 µs |
+| primitive | p50 | p99 | caller's system time per round trip |
+| --- | --- | --- | --- |
+| Mach `SEND\|RCV`, reply through a send-once right | 2.5-2.9 µs | 12 µs | 1.5-1.8 µs |
+| shared memory and `os_sync_wait_on_address` / `os_sync_wake_by_address_any`, threads | 4.9 µs | 15 µs | 2.2 µs |
+| the same between processes (`OS_SYNC_*_SHARED`) | 6.4 µs | 37 µs | 4.2 µs |
+| the same, spinning 2,000 iterations before waiting | 0.2 µs | 0.3 µs | none: a core spins for each waiter |
 
-Other options:
+A Mach round trip is the cheapest blocking wake measured; a ulock wake
+costs more kernel time on both sides and more latency. Spinning wins only
+while a core stays busy for every waiting thread, which a booting device
+at a load of 10-20 cannot spare, and a ring in shared memory would put
+the core's data where any guest can corrupt it. So the transport stays
+Mach, one message per ioctl, and the work went into the hops. The four
+Mach hops of the protocol alone, without the driver, take 10.5 µs p50.
 
-- **Shared memory with futex-style wakes.** This would put the core's data
-  structures in memory every guest can corrupt.
-- **Unix sockets.** About 4 µs slower at p50.
+Through the daemon (`cargo test -p aim-binder-host --release --test
+latency -- --nocapture`: a small call and reply between two threads of
+the test process, as IPCThreadState drives them; medians of six runs
+alternating with the previous build, host load 3-9):
+
+| daemon | p50 | p90 | p99 | caller's CPU per call |
+| --- | --- | --- | --- | --- |
+| a thread blocked in the driver per waiting guest thread | 23.3 µs | 35 µs | 50 µs | 1.8 µs user, 2.9 µs system |
+| parked reads, hand-offs, multiplicative hash | 17.5 µs | 26 µs | 40 µs | 1.3 µs user, 3.0 µs system |
+
+The caller's system time is its one `mach_msg` per ioctl, as before;
+what went is the daemon's inner wakes and much of its hashing.
 
 End to end, between original guest processes (M2 Pro, release build,
 20,000 calls after 2,000 warm-up, timed in the guest with the image's
-`libbinder_ndk`; `crates/aim-linux-abi/tests/servicemanager.rs`):
+`libbinder_ndk`; `crates/aim-linux-abi/tests/servicemanager.rs`; three
+runs alternating with the previous build, host load about 30 from
+parallel boots, 2026-09-30):
 
-| call | p50 | p90 | p99 |
-| --- | --- | --- | --- |
-| `AIBinder_ping` of servicemanager (epoll `Looper`, 3 server ioctls) | 27–30 µs | 32–44 µs | 41–64 µs |
-| a service method, server blocked in `joinThreadPool` | 26–27 µs | 30–46 µs | 40–90 µs |
+| call | daemon | p50 | p90 | p99 |
+| --- | --- | --- | --- | --- |
+| `AIBinder_ping` of servicemanager (epoll `Looper`, 3 server ioctls) | blocking reads | 40.5–40.9 µs | 48–49 µs | 69–70 µs |
+| | parked reads | 35.6–36.4 µs | 44–45 µs | 62–79 µs |
+| a service method, server blocked in `joinThreadPool` | blocking reads | 35.5–35.8 µs | 45–46 µs | 64 µs |
+| | parked reads | 30.2–32.4 µs | 38–39 µs | 53–55 µs |
 
-Linux takes about 10–30 µs per transaction. Each ioctl here is a Mach round
-trip to another thread (about 4 µs per hand-off). The two daemon-internal
-wakes per call are what parked reads remove: a read with no work would not
-block its daemon thread but keep the guest's send-once right, and whoever
-queues work for it would run its read pass and answer it directly.
+An earlier run at a lower host load gave 27–30 µs and 26–27 µs p50
+before.
+
+Linux takes about 10–30 µs per transaction.
 
 ## Receive buffers
 
@@ -259,8 +296,12 @@ exception replies. Its nodes do not accept file descriptors (#433).
 and euid, target pid, the interface token at the start of the data (AIDL's
 descriptor or HIDL's interface name), code, one-way or not, and for a
 synchronous call the time from the driver taking `BC_TRANSACTION` to it
-taking the target's `BC_REPLY`. guest-init `--binder-trace FILE` appends
-them to a file once a second; `tools/binder-trace-report.py` names the
+taking the target's `BC_REPLY`, split at the target's read taking it,
+and then the sender's read taking the reply. Through the daemon a read
+takes its work when the parked read is resumed, on the daemon thread that
+brought it: the target guest thread's wake counts as the target's work,
+and the sender's wake comes after the last span. guest-init
+`--binder-trace FILE` appends them to a file once a second; `tools/binder-trace-report.py` names the
 services and methods (docs/system-services.md, "Inventory").
 
 ## Tests
@@ -287,6 +328,9 @@ as `IPCThreadState` does.
   - security contexts, poll, non-blocking reads and `EINTR`.
 - **`tests/latency.rs`** measures a small call and reply:
   `cargo test --release --test latency -- --nocapture`.
+- **Parked reads** (`tests/protocol.rs`): a parked read resumes on work
+  queued by another process, on an interrupt and on release, and the
+  reissued ioctl does not redo its writes.
 
 Across processes:
 
@@ -294,6 +338,8 @@ Across processes:
   and two binder files in one host process. It covers a transaction with
   data, an fd and a security context, readiness and its drain, the reply,
   and release on the last close, seen as `BR_DEAD_BINDER`.
+  `tests/latency.rs` times a small call and reply through the daemon and
+  the caller's CPU time per call.
 - **`cargo test -p aim-linux-abi --release --test servicemanager --
   --nocapture`** runs the pinned image and is skipped when it is absent. The
   test plays the minimum of init: property areas and the property service

@@ -398,7 +398,16 @@ impl Server {
     }
 }
 
-/// Serves one guest thread's ioctls.
+/// Serves one guest thread's ioctls. A read that would wait parks instead
+/// ([`Driver::ioctl_or_park`]), and the thread that brings its work
+/// answers it, so the worker never blocks in the driver.
+///
+/// A worker sends the answers of the calls it resumed, and its own, when it
+/// is done with the request. One goes out in the `mach_msg` that waits for
+/// the next request, so the thread it wakes can take this CPU as the worker
+/// blocks, as Linux wakes the target of a binder call synchronously: a
+/// resumed one, whose thread waits for a transaction or a reply, before the
+/// worker's own.
 struct Worker {
     driver: Arc<Driver>,
     file: Arc<OpenFile>,
@@ -408,56 +417,57 @@ struct Worker {
 
 impl Worker {
     fn run(self) {
+        OUTBOX.with(|o| *o.borrow_mut() = Some(Vec::new()));
         let mut buf = Buffer::default();
         // The previous answer goes out in the same mach_msg that waits for
         // the next request.
-        let mut answer: Option<(Port, Msg, Vec<File>)> = None;
+        let mut answer: Option<Answer> = None;
         loop {
             let next = match answer.take() {
-                Some((to, msg, files)) => {
-                    let r = mach::reply_and_receive(&mut buf, to, &msg, self.port);
-                    drop(files);
+                Some(a) => {
+                    let r = mach::reply_and_receive(&mut buf, a.to, &a.msg, self.port);
+                    drop(a.files);
                     r
                 }
                 None => mach::receive(&mut buf, self.port),
             };
             let Ok(req) = next else { return };
-            let (reply, ports, files, cmd) = self.ioctl(&req);
-            let exit = reply.status == 0 && cmd == aim_binder_driver::uapi::BINDER_THREAD_EXIT;
-            let msg = Msg {
-                id: wire::REPLY,
-                ports,
-                data: reply.encode(),
+            let own = match self.call(req) {
+                Ok(call) => call.run(),
+                Err(a) => Some(a),
             };
-            if exit {
-                mach::reply(&mut buf, req.reply, &msg);
+            if own.as_ref().is_some_and(|a| a.exit) {
+                let resumed = OUTBOX.with(|o| o.borrow_mut().take()).unwrap_or_default();
+                resumed.into_iter().chain(own).for_each(Answer::send);
                 self.file.forget_thread(self.port);
                 return;
             }
-            answer = Some((req.reply, msg, files));
+            let mut resumed = OUTBOX.with(|o| std::mem::take(o.borrow_mut().as_mut().unwrap()));
+            answer = match resumed.pop() {
+                Some(last) => {
+                    resumed.into_iter().chain(own).for_each(Answer::send);
+                    Some(last)
+                }
+                None => own,
+            };
         }
     }
 
-    fn ioctl(&self, req: &Received) -> (IoctlReply, Vec<(Port, u32)>, Vec<File>, u32) {
+    fn call(&self, req: Received) -> Result<Call, Answer> {
         let io = match Ioctl::decode(&req.data) {
             Ok(io) if io.fds.len() == req.ports.len() => io,
             _ => {
                 for p in &req.ports {
                     mach::release_send(*p);
                 }
-                return (
-                    IoctlReply {
-                        status: wire::EPROTO,
-                        ..Default::default()
-                    },
-                    Vec::new(),
-                    Vec::new(),
-                    0,
-                );
+                let reply = IoctlReply {
+                    status: wire::EPROTO,
+                    ..Default::default()
+                };
+                return Err(Answer::new(req.reply, reply, Vec::new(), false));
             }
         };
-        let cmd = io.cmd;
-        let mut guest = Gathered {
+        let guest = Gathered {
             segments: io.segments,
             files: io
                 .fds
@@ -470,20 +480,138 @@ impl Worker {
             reply: IoctlReply::default(),
             installed: Vec::new(),
         };
-        let mut arg = io.arg;
-        let result = self
-            .driver
-            .ioctl(self.file.handle, self.tid, io.cmd, &mut arg, &mut guest);
-        let mut reply = guest.reply;
+        Ok(Call {
+            driver: self.driver.clone(),
+            file: self.file.clone(),
+            tid: self.tid,
+            to: req.reply,
+            cmd: io.cmd,
+            arg: io.arg,
+            guest,
+        })
+    }
+}
+
+thread_local! {
+    /// On a worker thread: the answers of calls resumed on it, which it
+    /// sends.
+    static OUTBOX: std::cell::RefCell<Option<Vec<Answer>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// One guest ioctl, from its request until its answer.
+struct Call {
+    driver: Arc<Driver>,
+    file: Arc<OpenFile>,
+    tid: Tid,
+    /// The requester's send-once right.
+    to: Port,
+    cmd: u32,
+    arg: Vec<u8>,
+    guest: Gathered,
+}
+
+/// Where a parked call waits for its resume.
+enum Slot {
+    Running,
+    /// Resumed before the call was stored: it retries at once.
+    Woken,
+    Parked(Box<Call>),
+}
+
+impl Call {
+    /// Issue the ioctl: its answer, or `None` if its read parked, in which
+    /// case the thread that resumes it sends the answer.
+    fn run(mut self) -> Option<Answer> {
+        loop {
+            let slot = Arc::new(Mutex::new(Slot::Running));
+            let waker = slot.clone();
+            let resume = Box::new(move || {
+                let parked = std::mem::replace(&mut *waker.lock().unwrap(), Slot::Woken);
+                if let Slot::Parked(call) = parked
+                    && let Some(answer) = call.run()
+                {
+                    answer.deliver();
+                }
+            });
+            let handle = self.file.handle;
+            let outcome = self.driver.ioctl_or_park(
+                handle,
+                self.tid,
+                self.cmd,
+                &mut self.arg,
+                &mut self.guest,
+                resume,
+            );
+            match outcome {
+                Some(result) => return Some(self.finish(result)),
+                None => {
+                    let mut slot = slot.lock().unwrap();
+                    if !matches!(*slot, Slot::Woken) {
+                        *slot = Slot::Parked(Box::new(self));
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish(self, result: Result<(), Errno>) -> Answer {
+        let mut reply = self.guest.reply;
         reply.status = result.err().unwrap_or(0);
-        reply.arg = arg;
+        reply.arg = self.arg;
         reply.drain = self.file.refresh(&self.driver);
-        let ports = guest
-            .installed
+        let exit = reply.status == 0 && self.cmd == aim_binder_driver::uapi::BINDER_THREAD_EXIT;
+        Answer::new(self.to, reply, self.guest.installed, exit)
+    }
+}
+
+/// An ioctl's answer, and the files it installs, kept until it is sent.
+struct Answer {
+    to: Port,
+    msg: Msg,
+    files: Vec<File>,
+    /// The thread left the driver (`BINDER_THREAD_EXIT`).
+    exit: bool,
+}
+
+impl Answer {
+    fn new(to: Port, reply: IoctlReply, files: Vec<File>, exit: bool) -> Self {
+        let ports = files
             .iter()
             .map(|f| (f.downcast_ref::<FilePort>().unwrap().0, mach::COPY_SEND))
             .collect();
-        (reply, ports, guest.installed, cmd)
+        let msg = Msg {
+            id: wire::REPLY,
+            ports,
+            data: reply.encode(),
+        };
+        Self {
+            to,
+            msg,
+            files,
+            exit,
+        }
+    }
+
+    /// Send it, or leave it to the worker this runs on.
+    fn deliver(self) {
+        let this = OUTBOX.with(|o| match o.borrow_mut().as_mut() {
+            Some(outbox) => {
+                outbox.push(self);
+                None
+            }
+            None => Some(self),
+        });
+        if let Some(answer) = this {
+            answer.send();
+        }
+    }
+
+    fn send(self) {
+        thread_local! {
+            static BUF: std::cell::RefCell<Buffer> = std::cell::RefCell::new(Buffer::default());
+        }
+        BUF.with(|b| mach::reply(&mut b.borrow_mut(), self.to, &self.msg));
     }
 }
 
@@ -491,7 +619,8 @@ impl Worker {
 /// memory the syscall layer gathered, and the fds it passed.
 struct Gathered {
     segments: Vec<(u64, Vec<u8>)>,
-    files: HashMap<u32, File>,
+    /// The files the caller passed, by its fd (a few at most).
+    files: Vec<(u32, File)>,
     reserved: Vec<u32>,
     grow: bool,
     reply: IoctlReply,
@@ -523,7 +652,11 @@ impl GuestProcess for Gathered {
     }
 
     fn get_file(&mut self, fd: u32) -> Result<File, Errno> {
-        self.files.get(&fd).cloned().ok_or(errno::EBADF)
+        self.files
+            .iter()
+            .find(|(f, _)| *f == fd)
+            .map(|(_, file)| file.clone())
+            .ok_or(errno::EBADF)
     }
 
     fn install_file(&mut self, file: File) -> Result<u32, Errno> {

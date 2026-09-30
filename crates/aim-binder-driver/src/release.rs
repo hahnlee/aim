@@ -19,6 +19,7 @@ impl State {
         };
         p.waiting_threads.retain(|t| *t != tid);
         thread.wait.notify_all();
+        self.resumes.extend(thread.parked);
 
         let mut active = 0;
         let mut send_reply = None;

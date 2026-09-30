@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::alloc::Allocator;
 use crate::host::{Credentials, Errno, GuestProcess, ReceiveMemory, errno};
 use crate::read::Pass;
-use crate::state::{ExtendedError, LOOPER_POLL, LOOPER_WAITING, Notifier, ProcId, State, Tid};
+use crate::state::{
+    ExtendedError, LOOPER_POLL, LOOPER_WAITING, Notifier, ProcId, Resume, State, Tid,
+};
 use crate::uapi::*;
 
 /// The binder devices of the pinned image. Each is its own context: its own
@@ -160,7 +162,7 @@ impl Driver {
         let mut st = self.lock();
         if let Some(t) = st.thread(proc.0, tid) {
             t.interrupted = true;
-            t.wait.notify_all();
+            st.wake_waiter(proc.0, tid);
         }
         self.unlock(st);
     }
@@ -170,10 +172,13 @@ impl Driver {
     /// `BR_DEAD_REPLY`; holders of its nodes get `BR_DEAD_BINDER`.
     pub fn release(&self, proc: ProcHandle) {
         let mut st = self.lock();
-        if let Some(p) = st.procs.get(&proc.0) {
-            for t in p.threads.values() {
-                t.wait.notify_all();
-            }
+        let tids: Vec<Tid> = st
+            .procs
+            .get(&proc.0)
+            .map(|p| p.threads.keys().copied().collect())
+            .unwrap_or_default();
+        for tid in tids {
+            st.wake_waiter(proc.0, tid);
         }
         st.release_proc(proc.0);
         self.unlock(st);
@@ -191,6 +196,41 @@ impl Driver {
         arg: &mut [u8],
         guest: &mut dyn GuestProcess,
     ) -> Result<(), Errno> {
+        self.ioctl_parking(proc, tid, cmd, arg, guest, &mut None)
+    }
+
+    /// [`Driver::ioctl`] for a caller that must not block in it: a read
+    /// that would wait for work returns `None` instead. `resume` then runs
+    /// once, outside the driver lock and on whichever thread brings the
+    /// work (or an interrupt, or the release), and the caller issues the
+    /// ioctl again with `arg` as it now is: its writes are consumed, as for
+    /// a read restarted after a signal. Reads by parked threads wait
+    /// nowhere, so a host needs no thread per waiting guest thread.
+    pub fn ioctl_or_park(
+        &self,
+        proc: ProcHandle,
+        tid: Tid,
+        cmd: u32,
+        arg: &mut [u8],
+        guest: &mut dyn GuestProcess,
+        resume: Resume,
+    ) -> Option<Result<(), Errno>> {
+        let mut park = Some(resume);
+        let result = self.ioctl_parking(proc, tid, cmd, arg, guest, &mut park);
+        park.map(|_| result)
+    }
+
+    /// An ioctl that parks its read instead of waiting when `park` holds a
+    /// resume (and takes it).
+    fn ioctl_parking(
+        &self,
+        proc: ProcHandle,
+        tid: Tid,
+        cmd: u32,
+        arg: &mut [u8],
+        guest: &mut dyn GuestProcess,
+        park: &mut Option<Resume>,
+    ) -> Result<(), Errno> {
         if arg.len() != ioc_size(cmd) {
             return Err(errno::EINVAL);
         }
@@ -199,7 +239,10 @@ impl Driver {
             self.unlock(st);
             return Err(e);
         }
-        let (mut st, result) = self.dispatch(st, proc.0, tid, cmd, arg, guest);
+        let (mut st, result) = match cmd {
+            BINDER_WRITE_READ => self.write_read(st, proc.0, tid, arg, guest, park),
+            _ => self.dispatch(st, proc.0, tid, cmd, arg),
+        };
         if let Some(t) = st.thread(proc.0, tid) {
             t.looper_need_return = false;
         }
@@ -238,10 +281,8 @@ impl Driver {
         tid: Tid,
         cmd: u32,
         arg: &mut [u8],
-        guest: &mut dyn GuestProcess,
     ) -> (MutexGuard<'a, State>, Result<(), Errno>) {
         let result = match cmd {
-            BINDER_WRITE_READ => return self.write_read(st, proc, tid, arg, guest),
             BINDER_SET_MAX_THREADS => {
                 st.procs.get_mut(&proc).unwrap().max_threads = u32_at(arg, 0);
                 Ok(())
@@ -299,6 +340,7 @@ impl Driver {
         tid: Tid,
         arg: &mut [u8],
         guest: &mut dyn GuestProcess,
+        park: &mut Option<Resume>,
     ) -> (MutexGuard<'a, State>, Result<(), Errno>) {
         let mut bwr = WriteRead::decode(arg);
         let mut result = Ok(());
@@ -326,7 +368,7 @@ impl Driver {
             }
         }
         if bwr.read_size > 0 {
-            let (guard, r) = self.thread_read(st, proc, tid, &mut bwr, guest);
+            let (guard, r) = self.thread_read(st, proc, tid, &mut bwr, guest, park);
             st = guard;
             if !st.procs.get(&proc).is_none_or(|p| p.todo.is_empty()) {
                 st.wakeup_proc(proc);
@@ -337,7 +379,7 @@ impl Driver {
         (st, result)
     }
 
-    /// `binder_thread_read`, including the wait for work.
+    /// `binder_thread_read`, including the wait for work, or parking it.
     fn thread_read<'a>(
         &'a self,
         mut st: MutexGuard<'a, State>,
@@ -345,6 +387,7 @@ impl Driver {
         tid: Tid,
         bwr: &mut WriteRead,
         guest: &mut dyn GuestProcess,
+        park: &mut Option<Resume>,
     ) -> (MutexGuard<'a, State>, Result<(), Errno>) {
         let start = bwr.read_consumed as usize;
         let capacity = bwr.read_size as usize;
@@ -392,6 +435,13 @@ impl Driver {
                         .unwrap()
                         .waiting_threads
                         .push_back(tid);
+                }
+                if let Some(resume) = park.take() {
+                    // Nothing was read: the retry starts this read over.
+                    let t = st.thread(proc, tid).unwrap();
+                    t.looper &= !LOOPER_WAITING;
+                    t.parked = Some(resume);
+                    return (st, Ok(()));
                 }
                 st = wait.wait(st).unwrap_or_else(|e| e.into_inner());
                 if let Some(p) = st.procs.get_mut(&proc) {

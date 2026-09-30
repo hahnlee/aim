@@ -297,6 +297,85 @@ fn nonblocking_reads_and_interrupts() {
     assert_eq!(reader.join().unwrap(), Err(errno::EINTR));
 }
 
+/// A read that would wait parks instead: its resume runs when work
+/// arrives (on the thread that queued it), on an interrupt and on release,
+/// and the ioctl issued again with its argument as the park left it reads
+/// on without redoing the writes.
+#[test]
+fn parked_reads_resume_on_work_interrupts_and_release() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let driver = Driver::new();
+    let q = context_manager(&driver, 0);
+    let p = Process::open(&driver, Device::Binder, P_PID, 10_001, 0);
+    let resumed = Arc::new(AtomicUsize::new(0));
+    let resume = || -> aim_binder_driver::Resume {
+        let resumed = resumed.clone();
+        Box::new(move || {
+            resumed.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    let mut read = vec![0u8; READ_CAPACITY];
+    let mut arg = WriteRead {
+        read_size: read.len() as u64,
+        read_buffer: read.as_mut_ptr() as u64,
+        ..Default::default()
+    }
+    .encode();
+    assert_eq!(
+        q.ioctl_or_park(Q_PID, BINDER_WRITE_READ, &mut arg, resume()),
+        None
+    );
+    assert_eq!(resumed.load(Ordering::SeqCst), 0);
+
+    // P's one-way call resumes it before P's ioctl returns.
+    p.transact(
+        P_PID,
+        Commands::new().transaction(0, 5, TF_ONE_WAY, &Parcel::new()),
+    );
+    assert_eq!(resumed.load(Ordering::SeqCst), 1);
+    q.ioctl(Q_PID, BINDER_WRITE_READ, &mut arg).unwrap();
+    let bwr = WriteRead::decode(&arg);
+    let returns = parse_returns(&read[..bwr.read_consumed as usize]);
+    assert_eq!(names(&returns), ["BR_NOOP", "BR_TRANSACTION"]);
+    let (tr, _) = find_transaction(&returns);
+    assert_eq!(tr.code, 5);
+
+    // An interrupt resumes it, and the retry fails with EINTR.
+    let free = Commands::new().free_buffer(tr.buffer).bytes.clone();
+    let mut arg = WriteRead {
+        write_size: free.len() as u64,
+        write_buffer: free.as_ptr() as u64,
+        read_size: read.len() as u64,
+        read_buffer: read.as_mut_ptr() as u64,
+        ..Default::default()
+    }
+    .encode();
+    assert_eq!(
+        q.ioctl_or_park(Q_PID, BINDER_WRITE_READ, &mut arg, resume()),
+        None
+    );
+    assert_eq!(WriteRead::decode(&arg).write_consumed, free.len() as u64);
+    driver.interrupt(q.handle, Q_PID);
+    assert_eq!(resumed.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        q.ioctl_or_park(Q_PID, BINDER_WRITE_READ, &mut arg, resume()),
+        Some(Err(errno::EINTR))
+    );
+
+    // Release resumes it, and the retry finds the file gone.
+    assert_eq!(
+        q.ioctl_or_park(Q_PID, BINDER_WRITE_READ, &mut arg, resume()),
+        None
+    );
+    q.release();
+    assert_eq!(resumed.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        q.ioctl(Q_PID, BINDER_WRITE_READ, &mut arg),
+        Err(errno::EBADF)
+    );
+}
+
 #[test]
 fn oneway_calls_are_serialized_per_node() {
     let driver = Driver::new();

@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 
 use aim_binder_driver::uapi::*;
 use aim_binder_driver::{
-    Credentials, Device, Driver, Errno, File, GuestProcess, HeapReceiveMemory, ProcHandle, errno,
+    Credentials, Device, Driver, Errno, File, GuestProcess, HeapReceiveMemory, ProcHandle, Resume,
+    errno,
 };
 
 /// libbinder's `BINDER_VM_SIZE` with 16 KiB pages: 1 MiB minus two pages.
@@ -152,6 +153,19 @@ impl Process {
     pub fn ioctl(&self, tid: i32, cmd: u32, arg: &mut [u8]) -> Result<(), Errno> {
         let mut guest = Guest { files: &self.files };
         self.driver.ioctl(self.handle, tid, cmd, arg, &mut guest)
+    }
+
+    /// [`Process::ioctl`] through `Driver::ioctl_or_park`.
+    pub fn ioctl_or_park(
+        &self,
+        tid: i32,
+        cmd: u32,
+        arg: &mut [u8],
+        resume: Resume,
+    ) -> Option<Result<(), Errno>> {
+        let mut guest = Guest { files: &self.files };
+        self.driver
+            .ioctl_or_park(self.handle, tid, cmd, arg, &mut guest, resume)
     }
 
     /// `BINDER_SET_CONTEXT_MGR_EXT` as servicemanager issues it.
