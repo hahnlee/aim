@@ -214,6 +214,33 @@ directories. The system image is mounted beside the real image file, so
 every checkout that links it uses the one attachment; each checkout has
 its own derived image (a shadow file over it).
 
+A worktree can start from the main checkout's outputs instead of building
+them again (the ART node alone takes about 13 minutes): APFS clones share
+their blocks until one side writes, and the stamps are keyed by content
+and relative paths, so `cargo aim build` then runs only what the branch
+changed. Leave out `derived` (a mount point), `derived.shadow` (rebuilt in
+seconds), `boot` and `bench`:
+
+```sh
+mkdir -p target/aim target/aim-cache
+for e in "$MAIN"/target/aim/*; do
+  case ${e##*/} in derived|derived.shadow|boot|bench) ;; *) cp -c -R "$e" target/aim/ ;; esac
+done
+cp -c "$MAIN"/target/aim-cache/*.stamp target/aim-cache/
+cargo aim build
+```
+
+`cargo aim boot` then runs from the worktree beside a boot of another
+checkout: each has its own derived image mount, display socket and data
+directory, and each guest-init its own binder service name. They share
+the system image's attachment and the user's translation cache
+(`~/Library/Caches/aim/translated`, whose entries are published
+atomically). Window mode's shims have the same bundle identifiers in
+every checkout, so run one window-mode boot at a time (#506). Run
+`target/release/cargo-aim` only through `cargo aim` or with the same
+`CARGO_TARGET_DIR`: it builds the host binaries it starts into cargo's
+target directory.
+
 `target` may be a link to a directory elsewhere (such as a per-worktree
 target directory), but then set `CARGO_TARGET_DIR` to its real path: tests
 put guest directories under cargo's `CARGO_TARGET_TMPDIR` and hand them to
