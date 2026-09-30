@@ -436,7 +436,7 @@ the APK, a `remove` in `image/overlay.toml`): `com.android.se`
 (SecureElement, no eSE or UICC), `com.android.dynsystem` (two processes
 at `BOOT_COMPLETED`, dynamic system updates), `com.android.emulator.multidisplay`
 (#462). With `com.android.phone` (A2) they are five processes, 0.56 s of
-CPU up to idle.
+CPU up to idle. The three are removed since 2026-09-30.
 
 **A2**
 
