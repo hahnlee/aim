@@ -25,6 +25,7 @@ mod service_host;
 mod settings;
 mod system;
 pub mod vibrator;
+pub mod volume;
 
 use std::sync::Arc;
 

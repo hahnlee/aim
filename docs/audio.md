@@ -68,12 +68,57 @@ MacBook Pro), so a patch's minimum stream buffer is 528 frames, and
 AudioFlinger runs its FastMixer over it. There are no MMAP ports
 (`getMmapPolicyInfos` is `NEVER`), so AAudio takes its legacy path.
 
-`IConfig` returns no surround formats and an empty engine configuration:
-the policy engine then uses its default product strategies. It has no
-volume curves either, so every stream plays at 0 dB until volume groups
-come from the image's volume XML (the reference HAL reads them from
-`audio_policy_configuration.xml`). The effect factory has no effects.
+`IConfig` returns no surround formats and no product strategies (the
+policy engine then uses its defaults). Its volume groups come from the
+image's volume tables, `/vendor/etc/audio_policy_volumes.xml` and
+`default_volume_tables.xml`, as the reference HAL's
+`AudioPolicyConfigXmlConverter` builds them from the volumes
+`audio_policy_configuration.xml` includes (`hal/audio/src/volumes.rs`): one
+group per stream with its curve per device category, the index range of
+public streams left to AudioService (`INDEX_DEFERRED_TO_AUDIO_SERVICE`),
+0 to 100 for the internal ones. Without them every group had the range 0
+to 0, and AudioService no volume steps at all. The effect factory has no
+effects.
 Sound dose, telephony and Bluetooth are absent (null interfaces).
+
+## Volume
+
+Android's media volume is the Mac's output volume, in both directions
+(decision D7 of [m1-shell.md](m1-shell.md)), by the platform's mechanism for
+a sink that owns its volume, as HdmiControlService uses it for a TV or an
+audio system. AudioService is unchanged.
+
+- **The speaker is an absolute-volume device.** Once AudioService is
+  published, a controller in guest-init's native services
+  (`crates/aim-services/src/volume.rs`, system uid) registers an
+  `IAudioDeviceVolumeDispatcher` for `DEVICE_OUT_SPEAKER` with
+  `IAudioService.registerDeviceVolumeDispatcherForAbsoluteVolume`
+  (behavior `ABSOLUTE`, adjustments left to AudioService), at the Mac's
+  volume; again after system_server restarts. The HAL process cannot: the
+  call needs `MODIFY_AUDIO_ROUTING`, which audioserver's uid lacks.
+  `dumpsys audio` lists the speaker under "absolute volume devices".
+- **Android to Mac.** AudioService plays the media stream at full scale on
+  the speaker and hands each change of STREAM_MUSIC's index (an app, Settings,
+  a key) to the dispatcher, which sets the Mac's volume; a nonzero volume
+  also unmutes the Mac, as its keys do.
+- **Mac to Android.** A change of the default output device's volume or
+  mute (keys, menu bar, another app) or of the device itself comes back as
+  `setStreamVolume` or `adjustStreamVolume(ADJUST_MUTE/UNMUTE)` of
+  STREAM_MUSIC with `FLAG_ABSOLUTE_VOLUME`: AudioService does not send it
+  back, shows no volume UI, and apps see the new index and
+  `VOLUME_CHANGED_ACTION` as for any change.
+- **The Mac side** (`crates/aim-host-audio/src/volume.rs`) reads and sets
+  the default output device's virtual main volume (the menu bar's slider)
+  and mute through CoreAudio, and listens to both and to the default
+  device. A device without a volume control (a digital output) leaves
+  Android's volume Android's own. CoreAudio is first touched once
+  AudioService is published, so a boot without system_server makes no
+  CoreAudio client in guest-init.
+- **Other streams** play at their maximum index's level times the Mac's
+  volume: for an absolute-volume device of this kind AudioService sends
+  every stream's maximum index to the policy (`applyDeviceVolume_syncVSS`),
+  so their own Android indices do not attenuate the speaker (#602). The
+  safe-media-volume warning does not apply to the speaker.
 
 ## A stream
 

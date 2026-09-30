@@ -330,6 +330,8 @@ enum Kind {
     Plain(&'static str, &'static str, &'static str),
     /// A Java-only parcelable, as the named type parameter.
     Parcelable(String),
+    /// A `List` of one, as `writeTypedList` writes it.
+    ParcelableList(String),
 }
 
 fn kind(ty: &Type) -> Result<Kind, String> {
@@ -376,6 +378,13 @@ fn kind(ty: &Type) -> Result<Kind, String> {
         }
         (b, false) if ty.args.is_empty() && b.chars().next().is_some_and(char::is_uppercase) => {
             Kind::Parcelable(b.to_string())
+        }
+        ("List", false)
+            if ty.args.len() == 1
+                && matches!(kind(&ty.args[0])?, Kind::Parcelable(_))
+                && !ty.args[0].array =>
+        {
+            Kind::ParcelableList(ty.args[0].name.clone())
         }
         _ => return Err(format!("type `{}` is not supported", ty.name)),
     })
@@ -439,6 +448,17 @@ fn method_code(m: &Method) -> Result<String, String> {
                     format!("Option<{t}>"),
                     "read_typed(r)?".into(),
                     "write_typed(p, {v}.as_ref());".into(),
+                ));
+            }
+            Kind::ParcelableList(t) => {
+                if !generics.contains(&t) {
+                    generics.push(t.clone());
+                }
+                fields.push((
+                    snake(&p.name),
+                    format!("Option<Vec<Option<{t}>>>"),
+                    "read_typed_list(r)?".into(),
+                    "write_typed_list(p, {v}.as_deref());".into(),
                 ));
             }
         }
@@ -537,6 +557,9 @@ fn method_code(m: &Method) -> Result<String, String> {
                 writeln!(s, "        Ok(match r.read_exception()? {{").unwrap();
                 writeln!(s, "            Ok(()) => Ok(read_typed(r)?),").unwrap();
                 writeln!(s, "            Err(e) => Err(e),\n        }})\n    }}\n").unwrap();
+            }
+            Kind::ParcelableList(t) => {
+                return Err(format!("{}: returning List<{t}> is not supported", m.name));
             }
         }
     }
@@ -658,6 +681,27 @@ pub fn write_string_list(p: &mut Parcel, value: Option<&[Option<String>]>) {
         Some(v) => {
             p.write_i32(v.len() as i32);
             v.iter().for_each(|s| p.write_string16(s.as_deref()));
+        }
+    }
+}
+
+/// `createTypedArrayList`: a count (-1 for null), then each element as
+/// `readTypedObject`.
+pub fn read_typed_list<T: ReadParcelable>(r: &mut Reader<'_>) -> Result<Option<Vec<Option<T>>>> {
+    let n = r.read_i32()?;
+    if n < 0 {
+        return Ok(None);
+    }
+    (0..n).map(|_| read_typed(r)).collect::<Result<Vec<_>>>().map(Some)
+}
+
+/// `writeTypedList`.
+pub fn write_typed_list<T: WriteParcelable>(p: &mut Parcel, value: Option<&[Option<T>]>) {
+    match value {
+        None => p.write_i32(-1),
+        Some(v) => {
+            p.write_i32(v.len() as i32);
+            v.iter().for_each(|x| write_typed(p, x.as_ref()));
         }
     }
 }
@@ -870,6 +914,7 @@ interface IClipboard {
     @nullable ClipData getPrimaryClip(String pkg);
     oneway void ping(IOnChanged listener) = 7;
     int[] ids(boolean all);
+    void setAll(in List<ClipData> clips);
     parcelable Nested { int x; }
 }
 "#;
@@ -889,7 +934,8 @@ interface IClipboard {
                 ("setPrimaryClip", 1, false),
                 ("getPrimaryClip", 2, false),
                 ("ping", 8, true),
-                ("ids", 4, false)
+                ("ids", 4, false),
+                ("setAll", 5, false)
             ]
         );
         assert_eq!(iface.methods[0].params[0].ty.name, "ClipData");
@@ -914,6 +960,8 @@ interface IClipboard {
         assert!(code.contains("pub const SET_PRIMARY_CLIP: u32 = 1;"));
         assert!(code.contains("pub struct SetPrimaryClip<ClipData> {"));
         assert!(code.contains("pub fn read_get_primary_clip_reply<ClipData: ReadParcelable>"));
+        assert!(code.contains("pub clips: Option<Vec<Option<ClipData>>>,"));
+        assert!(code.contains("write_typed_list(p, self.clips.as_deref());"));
         assert!(code.contains("impl<ClipData: WriteParcelable> SetPrimaryClip<ClipData> {"));
         assert!(!code.contains("fn read_ping_reply"));
         assert!(code.contains("pub fn write_ids_reply(p: &mut Parcel, result: &Option<Vec<i32>>)"));

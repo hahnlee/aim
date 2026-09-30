@@ -5,8 +5,8 @@
 //! - `android.hardware.audio.core.IModule/default`, the primary module over
 //!   the Mac's default output and input devices;
 //! - `android.hardware.audio.core.IConfig/default`, with no surround
-//!   formats and an empty engine configuration (the policy engine's
-//!   defaults);
+//!   formats and an engine configuration of the policy engine's default
+//!   product strategies and the image's volume tables;
 //! - `android.hardware.audio.effect.IFactory/default`, with no effects.
 //!
 //! Streams play and capture through the host-call module `audio`
@@ -18,6 +18,7 @@ mod host;
 mod logger;
 mod module;
 mod stream;
+mod volumes;
 
 use aim_hostcall::{audio, guest, module as hostcall_module};
 use android_hardware_audio_core::aidl::android::hardware::audio::core::{
@@ -40,9 +41,21 @@ impl IConfig for Config {
         Ok(SurroundSoundConfig::default())
     }
 
-    /// Empty: the policy engine uses its default product strategies.
+    /// No product strategies (the policy engine uses its defaults), and
+    /// the volume groups of the image's volume tables.
     fn getEngineConfig(&self) -> binder::Result<AudioHalEngineConfig> {
-        Ok(AudioHalEngineConfig::default())
+        let documents: Vec<String> = volumes::FILES
+            .iter()
+            .filter_map(|path| {
+                std::fs::read_to_string(path)
+                    .inspect_err(|e| log::warn!("{path}: {e}"))
+                    .ok()
+            })
+            .collect();
+        Ok(AudioHalEngineConfig {
+            volumeGroups: volumes::groups(&documents),
+            ..Default::default()
+        })
     }
 }
 

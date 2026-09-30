@@ -53,6 +53,8 @@ SOURCE_FILES=(
   "platform/frameworks/base|location/java/android/location/provider/IPopulationDensityProvider.aidl|dd0cfbd3ba77fd1accebdbd852bdf210318a6853853089b3543156ab98a42cc1"
   "platform/frameworks/base|location/java/android/location/provider/IS2CellIdsCallback.aidl|e277e996dcf4eae67b29da5b3c35317cf7595a123ce17a21e30e771daf6e61f9"
   "platform/frameworks/base|location/java/android/location/provider/IS2LevelCallback.aidl|57227499cad24014ea87c295bc289cd3b249a77103cb8b3d419eb02598b11014"
+  "platform/frameworks/base|media/java/android/media/IAudioService.aidl|66f57b88d780b182f41d199a6e2e2a79765feb2584cae17993423555581296c8"
+  "platform/frameworks/base|media/java/android/media/IAudioDeviceVolumeDispatcher.aidl|dae533b4d5ac3f82323bd4d39018c3d9137c8e5eb5133c6b041fadbeb729bfa1"
 )
 
 # descriptor|jar of its stub in the image|methods to marshal (`*`: all).
@@ -104,6 +106,8 @@ INTERFACES=(
   "android.location.provider.IPopulationDensityProvider|system/framework/framework-location.jar|getDefaultCoarseningLevel,getCoarsenedS2Cells"
   "android.location.provider.IS2CellIdsCallback|system/framework/framework-location.jar|onError"
   "android.location.provider.IS2LevelCallback|system/framework/framework-location.jar|*"
+  "android.media.IAudioService|system/framework/framework.jar|registerDeviceVolumeDispatcherForAbsoluteVolume,setStreamVolumeWithAttribution,adjustStreamVolumeWithAttribution,getStreamMinVolume,getStreamMaxVolume"
+  "android.media.IAudioDeviceVolumeDispatcher|system/framework/framework.jar|*"
 )
 
 # Binder interfaces the framework writes by hand, without AIDL:

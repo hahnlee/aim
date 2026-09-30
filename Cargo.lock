@@ -241,6 +241,7 @@ dependencies = [
  "aim-apps",
  "aim-binder-driver",
  "aim-binder-host",
+ "aim-host-audio",
  "aim-host-display",
  "aim-host-location",
  "aim-hostcall",
