@@ -143,6 +143,25 @@ cargo nodes of one kind share one cargo invocation (`host`, `hal`, `daemon`:
 the daemons build AOSP's binder crate with its `system` feature, the HALs
 without it, so they cannot share an invocation).
 
+### Rebuild times
+
+A branch that changes one host crate costs its cargo build and nothing
+else. Measured in the main checkout before the early cutoff and the
+incremental profile (M2 Pro, load 4-7), `cargo aim build` after a change
+to one file:
+
+| Change | Time |
+| --- | --- |
+| `aim-linux-abi` (linux-run, linux-translate) | 7.7 s: cargo 5.0 s, then the translation cache 2.7 s |
+| `aim-services` (guest-init) | 3.5 s |
+| nothing | 0.5 s |
+
+The host crates build incrementally (`[profile.release]` in
+`Cargo.toml`), with release's usual 16 codegen units: in a worktree,
+all host binaries after a one-line change to `aim-linux-abi` took 4.1 s
+instead of 6.8 s, and after one to `aim-services` 0.9-4.1 s instead of
+5.2-9.2 s. The incremental state costs about 600 MB in `target/release`.
+
 ## One Cargo workspace
 
 The root workspace holds the host crates and the guest crates (`hal/`,

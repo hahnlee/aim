@@ -118,10 +118,20 @@ log = "0.4"
 sha2 = "0.10"
 static_assertions = "1"
 
+# The host crates: incremental, so a branch switch recompiles only what
+# changed in a crate (docs/build.md, "Rebuild times"). The codegen units
+# are release's default without incremental, not incremental's 256, which
+# would split linux-run's hot paths further.
+[profile.release]
+incremental = true
+codegen-units = 16
+
 # The guest crates are built with this profile (`cargo aim`), as Soong
-# builds them: LTO, one codegen unit, no debug info.
+# builds them: LTO (which rules out incremental), one codegen unit, no
+# debug info.
 [profile.android]
 inherits = "release"
 lto = true
 codegen-units = 1
+incremental = false
 strip = "debuginfo"
