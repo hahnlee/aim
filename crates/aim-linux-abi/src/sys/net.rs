@@ -23,9 +23,10 @@
 //!   a marker (the SO_LINGER time, unused while lingering is off); sockets
 //!   guest-init created are listed in `<runtime>/sockets`.
 //! - **Options Darwin has no place for:** an AF_INET/AF_INET6 socket given
-//!   SO_MARK or SO_BINDTODEVICE gets an entry holding them
-//!   (`Family::Inet`); SO_BINDTODEVICE also binds the host socket to the
-//!   host interface behind the device (`IP_BOUND_IF`). A datagram socket
+//!   SO_MARK, SO_BINDTODEVICE or TCP_USER_TIMEOUT gets an entry holding
+//!   them (`Family::Inet`); SO_BINDTODEVICE also binds the host socket to
+//!   the host interface behind the device (`IP_BOUND_IF`), and
+//!   TCP_USER_TIMEOUT sets Darwin's `TCP_RXT_CONNDROPTIME` in seconds. A datagram socket
 //!   connected to port 0 is connected to the discard port on the host.
 
 use std::ffi::CString;
@@ -98,6 +99,8 @@ pub struct InetOpts {
     device: Mutex<String>,
     /// IP_MULTICAST_ALL cleared (Linux sets it on a new socket).
     multicast_own: AtomicBool,
+    /// TCP_USER_TIMEOUT in milliseconds, as set.
+    user_timeout: std::sync::atomic::AtomicU32,
     port_zero: AtomicBool,
     router: AtomicBool,
     icmp4: AtomicBool,
@@ -153,6 +156,7 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
             w.bool(o.router.load(Ordering::Relaxed));
             w.bool(o.icmp4.load(Ordering::Relaxed));
             w.bool(o.multicast_own.load(Ordering::Relaxed));
+            w.u32(o.user_timeout.load(Ordering::Relaxed));
         }
         Family::Netlink(n) => {
             w.u32(2);
@@ -183,6 +187,7 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
             o.router.store(r.bool(), Ordering::Relaxed);
             o.icmp4.store(r.bool(), Ordering::Relaxed);
             o.multicast_own.store(r.bool(), Ordering::Relaxed);
+            o.user_timeout.store(r.u32(), Ordering::Relaxed);
             Family::Inet(o)
         }
         2 => Family::Netlink(super::netlink::Socket::load(r)),
@@ -2200,6 +2205,10 @@ const IPPROTO_IP: u64 = 0;
 const L_IP_MULTICAST_ALL: u64 = 49;
 const IPPROTO_ICMP: u64 = 1;
 const IPPROTO_TCP: u64 = 6;
+const L_TCP_USER_TIMEOUT: u64 = 18;
+/// Darwin's TCP_RXT_CONNDROPTIME: seconds of unacknowledged retransmission
+/// before the connection drops.
+const TCP_RXT_CONNDROPTIME: i32 = 0x80;
 const IPPROTO_IPV6: u64 = 41;
 
 /// Darwin (level, option) of a plain int option.
@@ -2361,7 +2370,8 @@ fn setsockopt_other(fd: i32, level: u64, opt: u64, val: u64, len: u32) -> Option
         }
         (1, L_SO_DETACH_FILTER, Some(Family::Packet(p))) => super::packet::detach_filter(p),
         (1, L_SO_MARK | L_SO_BINDTODEVICE, None | Some(Family::Inet(_)))
-        | (IPPROTO_IP, L_IP_MULTICAST_ALL, None | Some(Family::Inet(_))) => {
+        | (IPPROTO_IP, L_IP_MULTICAST_ALL, None | Some(Family::Inet(_)))
+        | (IPPROTO_TCP, L_TCP_USER_TIMEOUT, None | Some(Family::Inet(_))) => {
             if let Err(e) = is_socket(fd) {
                 return Some(e);
             }
@@ -2382,8 +2392,8 @@ fn setsockopt_other(fd: i32, level: u64, opt: u64, val: u64, len: u32) -> Option
     })
 }
 
-/// SO_MARK (CAP_NET_ADMIN), SO_BINDTODEVICE and IP_MULTICAST_ALL on an
-/// AF_INET/AF_INET6 socket.
+/// SO_MARK (CAP_NET_ADMIN), SO_BINDTODEVICE, IP_MULTICAST_ALL and
+/// TCP_USER_TIMEOUT on an AF_INET/AF_INET6 socket.
 ///
 /// IP_MULTICAST_ALL off limits a socket's multicast to the groups it
 /// joined itself (ip(7)). Darwin delivers multicast that way whatever the
@@ -2391,6 +2401,35 @@ fn setsockopt_other(fd: i32, level: u64, opt: u64, val: u64, len: u32) -> Option
 /// flag is recorded for getsockopt; a socket that keeps it on does not get
 /// the groups other sockets joined (#524).
 fn inet_option(fd: i32, o: &InetOpts, opt: u64, val: u64, len: u32) -> i64 {
+    if opt == L_TCP_USER_TIMEOUT {
+        // tcp(7): the milliseconds transmitted data may stay unacknowledged
+        // before the connection closes, 0 the system default. Darwin counts
+        // whole seconds, so the host gets the timeout rounded up.
+        if len < 4 {
+            return -(EINVAL as i64);
+        }
+        // SAFETY: a guest int option value.
+        let ms = unsafe { (val as *const i32).read_unaligned() };
+        if ms < 0 {
+            return -(EINVAL as i64);
+        }
+        let secs = (ms as u32).div_ceil(1000) as i32;
+        // SAFETY: an int option on the host socket.
+        let r = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                TCP_RXT_CONNDROPTIME,
+                (&secs as *const i32).cast(),
+                4,
+            )
+        };
+        if r < 0 {
+            return -(errno::last() as i64);
+        }
+        o.user_timeout.store(ms as u32, Ordering::Relaxed);
+        return 0;
+    }
     if opt == L_IP_MULTICAST_ALL {
         // ip_setsockopt reads an int, or one byte from a shorter value.
         // SAFETY: the guest's option value of `len` bytes.
@@ -2487,6 +2526,9 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
             (IPPROTO_IP, L_IP_MULTICAST_ALL, Family::Inet(o)) => {
                 return int(!o.multicast_own.load(Ordering::Relaxed) as i32);
             }
+            (IPPROTO_TCP, L_TCP_USER_TIMEOUT, Family::Inet(o)) => {
+                return int(o.user_timeout.load(Ordering::Relaxed) as i32);
+            }
             (1, L_SO_BINDTODEVICE, Family::Inet(o)) => {
                 let mut n = o.device.lock().unwrap().as_bytes().to_vec();
                 n.push(0);
@@ -2508,6 +2550,13 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
     }
     if level == IPPROTO_IP && opt == L_IP_MULTICAST_ALL {
         return put_opt(&1i32.to_le_bytes(), val, len);
+    }
+    if level == IPPROTO_TCP && opt == L_TCP_USER_TIMEOUT {
+        // Never set: the host's (a non-TCP socket fails as on Linux).
+        let Some(v) = get_int(fd, libc::IPPROTO_TCP, TCP_RXT_CONNDROPTIME) else {
+            return -(errno::last() as i64);
+        };
+        return put_opt(&(v * 1000).to_le_bytes(), val, len);
     }
     if let Some((l, o)) = int_option(level, opt) {
         let Some(v) = get_int(fd, l, o) else {
@@ -2659,6 +2708,46 @@ mod tests {
         assert_eq!(set(1, 1), 0);
         assert_eq!(get(), (0, 1));
         assert_eq!(set(0, 0), -(EINVAL as i64));
+        fdtab::on_close(fd);
+        // SAFETY: our socket.
+        unsafe { libc::close(fd) };
+    }
+
+    #[test]
+    fn tcp_user_timeout_round_trips() {
+        // SAFETY: a host socket this test owns.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0);
+        let get = || {
+            let (mut v, mut l) = (-1i32, 4u32);
+            let r = getsockopt([
+                fd as u64,
+                IPPROTO_TCP,
+                L_TCP_USER_TIMEOUT,
+                &mut v as *mut i32 as u64,
+                &mut l as *mut u32 as u64,
+                0,
+            ]);
+            (r, v)
+        };
+        let set = |v: i32| {
+            setsockopt([
+                fd as u64,
+                IPPROTO_TCP,
+                L_TCP_USER_TIMEOUT,
+                &v as *const i32 as u64,
+                4,
+                0,
+            ])
+        };
+        assert_eq!(get(), (0, 0));
+        assert_eq!(set(1500), 0);
+        assert_eq!(get(), (0, 1500));
+        assert_eq!(
+            get_int(fd, libc::IPPROTO_TCP, TCP_RXT_CONNDROPTIME),
+            Some(2)
+        );
+        assert_eq!(set(-1), -(EINVAL as i64));
         fdtab::on_close(fd);
         // SAFETY: our socket.
         unsafe { libc::close(fd) };
