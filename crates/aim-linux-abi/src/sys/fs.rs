@@ -152,6 +152,9 @@ pub fn openat(a: [u64; 6]) -> i64 {
     }
     // Or it is replaced by the translated file here.
     crate::xrt::on_open(fd, &r.host, &r.guest, hflags);
+    if matches!(r.guest.as_str(), "/dev/random" | "/dev/urandom") {
+        super::random::adopt(fd);
+    }
     fd as i64
 }
 
@@ -183,7 +186,7 @@ fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         Kind::Sock(_) => net::read(fd, iov),
         Kind::Dir(_) => Some(-EISDIR),
         Kind::Epoll(_) | Kind::SyncFile => Some(-(EINVAL as i64)),
-        Kind::Content | Kind::Knob(_) => None,
+        Kind::Content | Kind::Knob(_) | Kind::Random => None,
         Kind::Memfd(_) => {
             let mut total = 0i64;
             for v in iov {
@@ -213,6 +216,7 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         Kind::Epoll(_) | Kind::Inotify(_) | Kind::SyncFile => Some(-(EINVAL as i64)),
         Kind::Content => None,
         Kind::Knob(k) => Some(super::knob::write(fd, &k, iov)),
+        Kind::Random => Some(super::random::write(iov)),
         Kind::Memfd(_) => {
             if memfd::write_sealed(fd) {
                 return Some(-EPERM);
@@ -246,6 +250,8 @@ fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i
         Kind::Knob(_) => Some(errno::check(
             unsafe { libc::pread(fd, buf as *mut _, len, pos) } as i64,
         )),
+        Kind::Random if write => Some(super::random::write(&one(buf, len))),
+        Kind::Random => None,
         _ => Some(-ESPIPE),
     }
 }
