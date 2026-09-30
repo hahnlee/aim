@@ -17,6 +17,9 @@ cargo aim clean [NODE...]        # forget nodes and remove their outputs
 cargo aim storage [DATA...]      # what the disk images occupy, docs/storage.md
 ```
 
+What the build made runs as a resident guest, with its apps managed, by
+`aimctl` (`target/release/aimctl`, [aimctl.md](aimctl.md)).
+
 `cargo aim build hal/health` builds one node and what it needs; a prefix
 selects a group (`cargo aim build hal`). `-v` shows the tools' output,
 `-j N` runs up to N nodes at once (default 3). Each node's output goes to
