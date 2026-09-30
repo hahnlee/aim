@@ -20,6 +20,7 @@
 //!   directory does (zygote's tmpfs over `/data/user` hides the path map's
 //!   `/data/user/0`).
 
+use std::collections::HashMap;
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -73,6 +74,8 @@ struct Vfs {
     root: PathBuf,
     /// Whether a path map is in use (the image is then read-only).
     mapped: bool,
+    /// The device of the root when it is a read-only mount (the image's).
+    read_only_dev: Option<i32>,
     /// Longest guest prefix first; among equal prefixes the latest mount.
     mounts: RwLock<Vec<Mount>>,
     /// Directory holding the path map (the guest-init runtime directory).
@@ -166,14 +169,33 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
     let root = root
         .canonicalize()
         .map_err(|e| format!("--root {}: {e}", root.display()))?;
+    let read_only_dev = read_only_dev(&root);
     let _ = VFS.set(Vfs {
         root,
         mapped: !mounts.is_empty(),
+        read_only_dev,
         mounts: RwLock::new(mounts),
         runtime,
         cwd: Mutex::new("/".into()),
     });
     Ok(())
+}
+
+/// The device of the filesystem holding `root`, if it is mounted read-only.
+fn read_only_dev(root: &Path) -> Option<i32> {
+    let c = CString::new(root.as_os_str().as_bytes()).ok()?;
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: NUL-terminated path, local buffers.
+    let ok =
+        unsafe { libc::statfs(c.as_ptr(), &mut fs) == 0 && libc::stat(c.as_ptr(), &mut st) == 0 };
+    (ok && fs.f_flags & libc::MNT_RDONLY as u32 != 0).then_some(st.st_dev)
+}
+
+/// Whether host device `dev` is the read-only volume of the root: nothing
+/// on it can have been changed by a guest.
+pub fn on_read_only_root(dev: i32) -> bool {
+    VFS.get().and_then(|v| v.read_only_dev) == Some(dev)
 }
 
 fn vfs() -> &'static Vfs {
@@ -525,6 +547,35 @@ impl Resolved {
     }
 }
 
+/// Symlink answers for the read-only image (target, or None for anything
+/// else), which never change: resolving walks every component, and the
+/// image's paths are the most walked.
+static IMAGE_LINKS: Mutex<Option<HashMap<PathBuf, Option<PathBuf>>>> = Mutex::new(None);
+const IMAGE_LINKS_MAX: usize = 1 << 14;
+
+/// The target of the symlink at `host`, if it is one.
+fn link_target(host: PathBuf, area: Area) -> Option<PathBuf> {
+    if area != Area::Image || !vfs().mapped {
+        return std::fs::read_link(&host).ok();
+    }
+    if let Some(known) = IMAGE_LINKS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&host))
+    {
+        return known.clone();
+    }
+    let target = std::fs::read_link(&host).ok();
+    let mut links = IMAGE_LINKS.lock().unwrap();
+    let map = links.get_or_insert_with(HashMap::new);
+    if map.len() >= IMAGE_LINKS_MAX {
+        map.clear();
+    }
+    map.insert(host, target.clone());
+    target
+}
+
 /// Resolve a guest path relative to a Linux dirfd into a host path.
 pub fn resolve(dirfd: i32, path: &[u8], follow_last: bool) -> Result<Resolved, Errno> {
     if path.is_empty() {
@@ -565,8 +616,8 @@ pub fn resolve(dirfd: i32, path: &[u8], follow_last: bool) -> Result<Resolved, E
         if done[0] == b"proc" {
             continue;
         }
-        let (host, _) = lookup(&join_guest(&done));
-        let Ok(target) = std::fs::read_link(&host) else {
+        let (host, area) = lookup(&join_guest(&done));
+        let Some(target) = link_target(host, area) else {
             continue;
         };
         links += 1;
