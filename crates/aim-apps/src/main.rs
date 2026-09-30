@@ -3,6 +3,7 @@
 //! ```text
 //! aim-apps shims --image ROOT [--data DATA] --display SOCKET --host AIM_DISPLAY --into DIR [--watch]
 //! aim-apps install --image ROOT [--data DATA] --display SOCKET --host AIM_DISPLAY
+//! aim-apps clean --into DIR
 //! aim-apps icon APK --framework FRAMEWORK_RES --out FILE.png|FILE.icns [--size N]
 //! ```
 //!
@@ -14,6 +15,7 @@
 //!   packages.list` changing), and a rebuilt `AIM_DISPLAY`, until it is
 //!   stopped.
 //! - `install` does the same into `~/Applications/aim Apps`.
+//! - `clean` removes the shims from `DIR` and from Launch Services.
 //! - `icon` lists an APK's launcher activities and draws the first one's
 //!   icon as a macOS icon.
 
@@ -27,6 +29,7 @@ use aim_apps::icon::{self, Icon};
 const USAGE: &str = "usage:
   aim-apps shims --image ROOT [--data DATA] --display SOCKET --host AIM_DISPLAY --into DIR [--watch]
   aim-apps install --image ROOT [--data DATA] --display SOCKET --host AIM_DISPLAY
+  aim-apps clean --into DIR
   aim-apps icon APK --framework FRAMEWORK_RES --out FILE.png|FILE.icns [--size N]";
 
 /// How often `--watch` looks at the package list.
@@ -95,6 +98,13 @@ fn run(args: &[String]) -> Result<(), String> {
         "install" => {
             let home = std::env::var_os("HOME").ok_or("no HOME")?;
             shims(&a, Path::new(&home).join("Applications/aim Apps"))
+        }
+        "clean" => {
+            let dir = a.into.as_deref().ok_or(USAGE)?;
+            for p in aim_apps::shim::clean(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+                println!("removed {p}");
+            }
+            Ok(())
         }
         _ => Err(USAGE.into()),
     }

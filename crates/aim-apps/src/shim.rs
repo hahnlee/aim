@@ -356,6 +356,22 @@ fn register(bundle: &Path) {
     }
 }
 
+/// The Launch Services registration tool.
+const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+
+/// Remove the shim at `bundle`, and its Launch Services registration, so
+/// the Dock, Launchpad and Spotlight forget it.
+fn remove(bundle: &Path) -> io::Result<()> {
+    let unregistered = std::process::Command::new(LSREGISTER)
+        .arg("-u")
+        .arg(bundle)
+        .status();
+    if !unregistered.is_ok_and(|s| s.success()) {
+        eprintln!("aim-apps: lsregister -u {}: failed", bundle.display());
+    }
+    fs::remove_dir_all(bundle)
+}
+
 /// Our shims in `dir`.
 fn ours(dir: &Path) -> io::Result<Vec<(PathBuf, Stamp)>> {
     Ok(fs::read_dir(dir)?
@@ -371,6 +387,16 @@ fn name(bundle: &Path) -> String {
     bundle
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+}
+
+/// Remove our shims from `dir` (other files stay): their names.
+pub fn clean(dir: &Path) -> io::Result<Vec<String>> {
+    let mut removed = Vec::new();
+    for (bundle, _) in ours(dir)? {
+        remove(&bundle)?;
+        removed.push(name(&bundle));
+    }
+    Ok(removed)
 }
 
 /// What a sync changed: the bundles' names.
@@ -435,7 +461,7 @@ pub fn sync(
         done.written.push(name(&bundle));
     }
     for (bundle, _) in ours {
-        fs::remove_dir_all(&bundle)?;
+        remove(&bundle)?;
         done.removed.push(name(&bundle));
     }
     Ok(done)

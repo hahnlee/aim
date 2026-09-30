@@ -17,7 +17,9 @@
 //! it closes the app's tasks. The server launches it with
 //! `--notifications` to show the app's notifications (`un.rs`) while the
 //! app has no window: it then starts nothing, and has no Dock icon until a
-//! window opens. The system shim (package `android`) has no activity.
+//! window opens. The system shim (package `android`) has no activity. A
+//! host whose shim is removed (its app uninstalled) quits once it has no
+//! window.
 
 use std::collections::HashMap;
 use std::os::fd::AsFd;
@@ -45,6 +47,9 @@ struct Link {
 static BACKGROUND: AtomicBool = AtomicBool::new(false);
 
 static LINK: OnceLock<Link> = OnceLock::new();
+
+/// How often a host looks whether its shim is still there.
+const BUNDLE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Whether this process is a window host.
 pub fn is_host() -> bool {
@@ -237,12 +242,37 @@ pub fn run(package: String, activity: String, socket: &Path) -> ! {
         None,
     ));
     std::thread::spawn(move || serve(&mut sock));
+    watch_bundle();
     // SIGTERM and SIGINT quit the app normally, closing its tasks.
     crate::input::quit_on_signals();
     if !BACKGROUND.load(Ordering::Relaxed) {
         launch();
     }
     crate::window::run()
+}
+
+/// Quit once the shim is gone (its app was uninstalled, and aim-apps
+/// removed it) and no window is left. The bundle must be missing twice
+/// in a row: a rewrite replaces it at once.
+fn watch_bundle() {
+    let bundle = send!(class(c"NSBundle"), c"mainBundle" => Id);
+    let plist = Path::new(&text(send!(bundle, c"bundlePath" => Id))).join("Contents/Info.plist");
+    std::thread::spawn(move || {
+        let mut missing = 0;
+        loop {
+            std::thread::sleep(BUNDLE_POLL);
+            missing = if plist.exists() { 0 } else { missing + 1 };
+            if missing >= 2 {
+                on_main(|| {
+                    if crate::windows::window_numbers().is_empty() {
+                        eprintln!("aim-display: the app's shim is gone");
+                        let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
+                        send!(app, c"terminate:" => (), Id = std::ptr::null_mut());
+                    }
+                });
+            }
+        }
+    });
 }
 
 /// The server's records, until it goes away.

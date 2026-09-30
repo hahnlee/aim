@@ -210,7 +210,8 @@ Settings.app/Contents/
   running task to the front instead. Clicking the Dock icon again does the
   same. Quitting a shim closes the tasks it shows. Closing its last window
   does not quit it, as with a Mac app (an app may pass through a task that
-  closes before its next one opens).
+  closes before its next one opens); a shim whose bundle is removed (its
+  app uninstalled) quits once it has no window.
 - **The server** has no Dock icon in window mode (an accessory app): each
   app is its shim. Its own windows show the tasks no shim shows (packages
   without a launcher activity, or whose shim is not running), titled as
@@ -236,10 +237,11 @@ Settings.app/Contents/
   updates of system apps and decompressed ones), rewriting a shim whose
   entry or icon drawing changed and removing the shims of uninstalled apps
   and disabled activities; it follows `/data/system/packages.list`.
-  Written bundles are registered with Launch Services. `cargo aim boot
-  --windows` runs it into `target/aim/boot/apps`; `aim-apps install`
-  writes into `~/Applications/aim Apps` instead (not run by the build or
-  the tests).
+  Written bundles are registered with Launch Services, and removed ones
+  unregistered (`lsregister -u`). `cargo aim boot --windows` runs it into
+  `target/aim/boot/apps` and removes them when the boot ends (`aim-apps
+  clean`); `aim-apps install` writes into `~/Applications/aim Apps`
+  instead (not run by the build or the tests).
   Each bundle is signed ad hoc (`codesign --sign -`), which macOS requires
   of an app that posts notifications. One more shim, "Android System"
   (`android`, framework-res's label and icon, no activity), stands for the
