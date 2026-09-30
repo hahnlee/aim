@@ -11,6 +11,7 @@
 //! | `/dev` | `<runtime>/dev` | writable | per boot (tmpfs on a device) |
 //! | `/mnt`, `/tmp`, `/storage`, `/config`, `/data_mirror`, `/linkerconfig` | `<runtime>/<name>` | writable | per boot |
 //! | `/apex/apex-info-list.xml` | `<runtime>/apex/apex-info-list.xml` | writable | per boot |
+//! | `/bootstrap-apex` | `<runtime>/bootstrap-apex` | writable | per boot: apexd's bootstrap APEXes |
 //! | `/data`, `/metadata`, `/cache` | `<data>/<name>` | writable | persistent |
 //! | `/data/user/0` | `<data>/data/data` | writable | persistent (vold's bind of `/data/data`) |
 //! | `/proc`, `/sys` | `<runtime>/kernfs/{proc,sys}` | kernfs | per boot: values init wrote |
@@ -310,6 +311,7 @@ const RUNTIME_DIRS: &[&str] = &[
     "config",
     "data_mirror",
     "linkerconfig",
+    "bootstrap-apex",
 ];
 /// Persistent guest directories backed by `<data>/<name>`.
 const DATA_DIRS: &[&str] = &["data", "metadata", "cache"];
@@ -364,6 +366,10 @@ impl Layout {
     }
     pub fn apex_info_list(&self) -> PathBuf {
         self.runtime.join("apex").join("apex-info-list.xml")
+    }
+    /// Host directory the guest sees as `/bootstrap-apex`.
+    pub fn bootstrap_apex_dir(&self) -> PathBuf {
+        self.runtime.join("bootstrap-apex")
     }
 
     pub fn path_map(&self) -> PathMap {

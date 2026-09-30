@@ -236,7 +236,7 @@ keeps exiting and init restarts it every 5 s.
 | prng_seeder | running | |
 | keystore2 | running | waits for `apexservice` (`IApexService.getActivePackages`) for the module hash (#200) |
 | vendor.keymint-default | running | software KeyMint |
-| vendor.gatekeeper_nonsecure | running | the first start ends with SIGABRT and no log message; the restart registers `IGatekeeper/default` (#205) |
+| vendor.gatekeeper_nonsecure | running | registers `IGatekeeper/default` at its first start: `/bootstrap-apex` declares it before `apex.all.ready` |
 | gatekeeperd | running | |
 | credstore, vendor.identity-default | running | |
 | vendor.health-aim | running | our health HAL |
@@ -289,10 +289,12 @@ killed": debuggerd's `crash_dump64` does not run yet (#191).
 - `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER)` is accepted.
 - A `#!` script as `linux-run`'s program runs its interpreter.
 - guest-init plays apexd more closely: `apex.all.ready` is set at
-  activation (libvintf reads the vendor APEXes' VINTF fragments only
-  then), a lazy `aidl/apexservice` start no longer resets `apexd.status`,
-  and `perform_apex_config --bootstrap` loads the scripts of
-  `vendorBootstrap` APEXes (the gatekeeper HAL, class `early_hal`).
+  activation (libvintf reads the vendor APEXes' VINTF fragments from
+  `/apex` only then, and before it from `/bootstrap-apex`, which lists the
+  `vendorBootstrap` APEXes), a lazy `aidl/apexservice` start no longer
+  resets `apexd.status`, and `perform_apex_config --bootstrap` loads the
+  scripts of `vendorBootstrap` APEXes (the gatekeeper HAL, class
+  `early_hal`).
 - guest-init resolves symlinks in the image relative to the guest root, as
   a GSI's `/system_ext -> /system/system_ext` needs.
 - guest-init's shutdown stops services without running `onrestart`.
@@ -547,7 +549,7 @@ frames are slow (#239).
 | **Input** | passed | A tap written into aim-display's touchscreen through its injection path (a client of `DISPLAY.input/event0` writing `ABS_MT_*`, `BTN_TOUCH` and `SYN_REPORT` records; no host HID events) on "Connected devices" opens it: `topResumedActivity` goes from `.Settings` to `.SubSettings`, and the second capture shows the "Connected devices" page. |
 | **Audio** | passed | `service check media.audio_flinger`: found. `audio_tone 2000 0` (AAudio, -90 dBFS): 96,000 frames written, `output_xruns 0`, `ok done`. AudioFlinger's primary output (`AUDIO_DEVICE_OUT_SPEAKER`) wrote 240,768 frames; the HAL logged "output stream in standby: 240768 frames, 469 device callbacks, 0 xrun frames, peak -90.0 dBFS": the stream reached CoreAudio, not the null sink. |
 | **Vulkan** | partial | `ro.hardware.vulkan=aim` loads `vulkan.aim.so` over MoltenVK (docs/vulkan-driver.md); `pm list features`: `android.hardware.vulkan.level` 0, `.version` 1.3, `.compute`; `dumpsys gpu`: `vulkanVersion = 4206592`. The NDK checks run in `tests/vulkan.rs` (two queues of one family, AHardwareBuffer and YUV images, sync-fd semaphores on the GPU). In a boot, the swapchain mode draws 100 frames, and with `debug.hwui.renderer=skiavk` (a test setting; the default stays GLES) Settings, Chrome and Clock draw with `Pipeline=Skia (Vulkan)`. |
-| **Sensors** | passed | `dumpsys sensorservice`: Ambient Light Sensor (`android.sensor.light`) and Lid Angle Sensor (`android.sensor.hinge_angle`), vendor "Apple (darwin host)". |
+| **Sensors** | passed | `dumpsys sensorservice`: Ambient Light Sensor (`android.sensor.light`) and Lid Angle Sensor (`android.sensor.hinge_angle`), vendor "Apple (darwin host)". `pm list features` has no `android.hardware.sensor.*` (2026-09-30; per-host features: #496). |
 | **Thermal** | passed | `dumpsys thermalservice`: HAL AIDL 3 connected; cpu 52.9 °C, battery 33.8 °C, skin NaN. |
 | **Health** | passed | `dumpsys battery`: level 80, AC powered, as `pmset -g batt` (80 %; AC attached). Temperature reads 0 (#242). |
 | **Bluetooth** | passed | `dumpsys bluetooth_manager`: `enabled: true`, `state: ON`, crashed 0 times, over our HAL's virtual controller. No scan was run (TCC). |
@@ -800,7 +802,7 @@ Window-mode boots of 2026-09-30 (#352, #354, #356, #357):
 | Server window | `am start` of Settings with no shim running: a window of the server titled "Settings"; opening Settings.app moved the task into the shim's window |
 | Server in the Dock | none: `lsappinfo` type `UIElement`; the Dock shows the shims' icons (Google, Voice Search, Clock with its hands at 10:10) |
 | Uninstall | `pm uninstall` of Calculator (its shim open): the bundle removed within 4 s, its host exited, and Launch Services no longer lists it; at the end of the boot `aim-apps clean` left no bundle or registration of `target/aim/boot/apps` |
-| system_server restart | zygote was killed and restarted once early in every boot (#490); the task bridge now restarts with it (`init.svc.zygote=restarting`) and windows appear |
+| system_server restart | none in five boots on one disposable data image (2026-09-30); before, every boot after the first restarted zygote (#490): system_server reached BiometricService before gatekeeperd, whose HAL's first start had aborted, and died ("Gatekeeper service not available"), and zygote killed itself with it. The task bridge still restarts with zygote (`init.svc.zygote=restarting`) |
 
 VoiceSearchActivity opened no window of its own (no freeform task with
 bounds was reported for it).

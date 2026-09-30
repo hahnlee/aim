@@ -80,6 +80,7 @@ kernfs	/proc	<runtime>/kernfs/proc
 | `/dev` | `<runtime>/dev` | `rw` | per boot (tmpfs on a device) |
 | `/mnt`, `/tmp`, `/storage`, `/config`, `/data_mirror`, `/linkerconfig` | `<runtime>/<name>` | `rw` | per boot |
 | `/apex/apex-info-list.xml` | `<runtime>/apex/apex-info-list.xml` | `rw` (one file) | per boot |
+| `/bootstrap-apex` | `<runtime>/bootstrap-apex` | `rw` | per boot |
 | `/data`, `/metadata`, `/cache` | `<data>/<name>` | `rw` | persistent |
 | `/data/user/0` | `<data>/data/data` | `rw` | persistent (vold's bind of `/data/data`) |
 | `/proc`, `/sys` | `<runtime>/kernfs/{proc,sys}` | `kernfs` | per boot |
@@ -403,6 +404,10 @@ emulates the device.
     the scripts of the APEXes whose manifest sets `vendorBootstrap`, which
     apexd would activate then; the others' scripts load at
     `perform_apex_config`.
+  - `/bootstrap-apex` shows those APEXes as apexd's bootstrap mode does:
+    an `apex-info-list.xml` of them and, for each, a link to its
+    `/apex/<name>`. libvintf reads the vendor VINTF fragments there until
+    `apex.all.ready`, so servicemanager accepts the `early_hal` HALs.
 - **Image paths.** guest-init reads the image (scripts, `build.prop`,
   property contexts) with its symlinks resolved relative to the guest root,
   as `linux-run` does.
