@@ -914,6 +914,14 @@ Window-mode boots of 2026-09-30 (#352, #354, #356, #357):
 VoiceSearchActivity opened no window of its own (no freeform task with
 bounds was reported for it).
 
+Window-mode boots of 2026-10-01 (#463):
+
+| Check | Result |
+| --- | --- |
+| Splash (D4) | opening YouTube.app cold: its window with the YouTube icon on a plain background 1.1 s after `open` (#605), YouTube's UI in it about a second later |
+| HOME (D6) | `am start -c HOME` over Settings: the launcher (or the placeholder home) in front, Settings' window gone from the screen (a window of the server: minimized; a shim's app: hidden) |
+| The lightweight shell, a check-only variant (`cargo aim build --variant lightweight-shell`) | boots to `sys.boot_completed` (fresh data 10.5 s, repeat 4.6-4.7 s against the default image's 5.1 s, at a higher load); HOME is the placeholder `SystemUserHomeActivity`; no SystemUI, launcher or wallpaper process, but `googlequicksearchbox:search` (#604); the overlay's services absent; standard Mac title bars (caption 0, #545); CtsWallpaperTestCases fails in setUp without ImageWallpaper (#603) |
+
 **Notifications** (2026-09-30, #4, [notifications.md](notifications.md)):
 guest-init's notification bridge registers with NotificationManagerService
 once it is published; the first boot's notifications ("Android is

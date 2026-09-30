@@ -131,9 +131,11 @@ pub fn notify(m: &aim_host_display::notify::Message) {
     }
 }
 
-/// Start the app (or bring its task to the front).
+/// Start the app (or bring its task to the front), with a splash until it
+/// has drawn when it has no window yet.
 pub fn launch() {
     if let Some(activity) = LINK.get().and_then(|l| l.activity.as_ref()) {
+        crate::windows::splash();
         send_window(Record::with_text(window::LAUNCH, 0, activity));
     }
 }

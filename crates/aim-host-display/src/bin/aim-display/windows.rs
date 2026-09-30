@@ -13,6 +13,9 @@
 //! - a minimized window's task goes behind the visible windows' tasks, so
 //!   the display's stacking stays the screen's, and a task Android moves to
 //!   the back (Back on its root activity) minimizes its window;
+//! - an app that goes home (a HOME intent) hides, as with Cmd+H;
+//! - an app its shim launches shows a splash, its icon on the window
+//!   background, at once and until Android reports its first frame.
 //! - closing the window removes the task, and a removed task's window
 //!   closes;
 //! - an orientation an activity asks for turns the window to landscape or
@@ -78,6 +81,18 @@ const HUD_MATERIAL: isize = 13;
 const WITHIN_WINDOW: isize = 1;
 const ACTIVE: isize = 1;
 const HINT: &str = "Swipe with two fingers or press \u{2318}[ to go back";
+/// A splash window's content before the task has bounds, in points:
+/// Android's default size of a freeform task (`LaunchParamsUtil`, 412 x
+/// 732 dp), as on a 2x screen.
+const SPLASH: CGSize = CGSize {
+    width: 412.0,
+    height: 732.0,
+};
+/// The app icon's size on a splash, in points.
+const SPLASH_ICON: f64 = 128.0;
+/// `NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin |
+/// NSViewMaxYMargin`: stays centered.
+const CENTERED: usize = 1 | 4 | 8 | 32;
 
 struct TaskWindow {
     window: Id,
@@ -151,6 +166,15 @@ struct State {
     /// Set while the server changes windows itself, so the delegate does
     /// not report the change back.
     applying: bool,
+    /// The splash of a launch not yet drawn (in a window host).
+    splash: Option<Splash>,
+}
+
+/// A launch's splash: a window of its own until the task has one, then a
+/// view over the task in the task's windows.
+struct Splash {
+    window: Option<Id>,
+    views: Vec<Id>,
 }
 
 thread_local! {
@@ -213,6 +237,7 @@ pub fn start(device: Id) -> crate::window::Window {
             held: None,
             generation: 0,
             applying: false,
+            splash: None,
         })
     });
     let (dpi_x, dpi_y) = crate::window::main_display_dpi();
@@ -278,6 +303,15 @@ fn note(s: &mut State, r: &Record) -> Info {
 /// A record of the task bridge (in the server): a window host's when one
 /// shows the task, else shown here.
 fn on_bridge_record(r: &Record) {
+    if r.op == window::DRAWN {
+        // The launch a window host asked for.
+        if let Some((package, _)) = r.text().split_once('/')
+            && let Some(h) = crate::hosts::for_task(package, r.text())
+        {
+            h.send_window(r);
+        }
+        return;
+    }
     with(|s| {
         note(s, r);
         if r.op == window::FRONT {
@@ -305,6 +339,9 @@ fn on_bridge_record(r: &Record) {
 
 /// A record the server passed on (in a window host).
 pub fn on_host_record(r: &Record) {
+    if r.op == window::DRAWN {
+        return drawn();
+    }
     with(|s| note(s, r));
     apply(r);
 }
@@ -325,6 +362,7 @@ fn apply(r: &Record) {
         }
         window::FRONT => front(r.task),
         window::ORIENTATION => orient(r.task, r.orientation),
+        window::HIDE => hide(r.task),
         window::REMOVED => remove(r.task),
         window::MOVED_TO_BACK => {
             if let Some(Some(w)) = with(|s| s.tasks.get(&r.task).map(|t| t.window)) {
@@ -571,6 +609,12 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
     send!(view, c"setLayer:" => (), Id = layer);
     send!(view, c"setWantsLayer:" => (), bool = true);
     send!(container, c"addSubview:" => (), Id = view);
+    // A launch not yet drawn shows its splash over the task.
+    if with(|s| s.splash.is_some()) == Some(true) {
+        let splash = splash_view(bounds_pt);
+        send!(container, c"addSubview:" => (), Id = splash);
+        with(|s| s.splash.as_mut().map(|sp| sp.views.push(splash)));
+    }
     send!(w, c"setContentView:" => (), Id = container);
     release(container);
     send!(w, c"makeFirstResponder:" => bool, Id = view);
@@ -595,6 +639,11 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
     let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
     send!(w, c"makeKeyAndOrderFront:" => (), Id = std::ptr::null_mut());
     send!(app, c"activateIgnoringOtherApps:" => (), bool = true);
+    // The splash moved into the task's window.
+    if let Some(Some(sw)) = with(|s| s.splash.as_mut().and_then(|sp| sp.window.take())) {
+        send!(sw, c"close" => ());
+        release(sw);
+    }
     // The screen may not take the window where the task is (above the menu
     // bar, over the Dock): showing it moves it, and the task follows.
     let placed = window_content(&screen, w);
@@ -607,6 +656,87 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
         set_bounds(task, bounds(placed, caption));
     }
     update_targets(Some(task));
+}
+
+/// The app's launch starts (in a window host): until it has drawn its
+/// first frame, a window shows the splash at once, and then the task's
+/// window over the task (docs/m1-shell.md, D4). Android draws no starting
+/// window without WMShell.
+pub fn splash() {
+    if with(|s| s.tasks.is_empty() && s.splash.is_none()) != Some(true) {
+        return;
+    }
+    // Centered where Android places a new freeform task.
+    let screen = send!(class(c"NSScreen"), c"mainScreen" => Id);
+    let area = frame(send!(screen, c"visibleFrame" => CGRect));
+    let c = fit(area, SPLASH.width, SPLASH.height, area);
+    let w = send!(class(c"NSWindow"), c"alloc" => Id);
+    let w = send!(w, c"initWithContentRect:styleMask:backing:defer:" => Id,
+        CGRect = cg(c), usize = NS_WINDOW_STYLE, usize = NS_BACKING_STORE_BUFFERED, bool = false);
+    send!(w, c"setReleasedWhenClosed:" => (), bool = false);
+    send!(w, c"setCollectionBehavior:" => (), usize = FULL_SCREEN_NONE);
+    let title = crate::shim::app_name().unwrap_or_default();
+    send!(w, c"setTitle:" => (), Id = nsstring(&title));
+    let view = splash_view(CGRect {
+        size: CGSize {
+            width: c.width,
+            height: c.height,
+        },
+        ..Default::default()
+    });
+    send!(w, c"setContentView:" => (), Id = view);
+    release(view);
+    send!(w, c"makeKeyAndOrderFront:" => (), Id = std::ptr::null_mut());
+    let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
+    send!(app, c"activateIgnoringOtherApps:" => (), bool = true);
+    with(|s| {
+        s.splash = Some(Splash {
+            window: Some(w),
+            views: Vec::new(),
+        })
+    });
+}
+
+/// The app's icon, centered on the window background, filling `frame`.
+fn splash_view(frame: CGRect) -> Id {
+    let v = send!(class(c"NSView"), c"alloc" => Id);
+    let v = send!(v, c"initWithFrame:" => Id, CGRect = frame);
+    send!(v, c"setAutoresizingMask:" => (), usize = SIZABLE);
+    send!(v, c"setWantsLayer:" => (), bool = true);
+    let background = send!(class(c"NSColor"), c"windowBackgroundColor" => Id);
+    let background = send!(background, c"CGColor" => Id);
+    let layer = send!(v, c"layer" => Id);
+    send!(layer, c"setBackgroundColor:" => (), Id = background);
+    let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
+    let image = send!(app, c"applicationIconImage" => Id);
+    let icon = send!(class(c"NSImageView"), c"imageViewWithImage:" => Id, Id = image);
+    send!(icon, c"setFrame:" => (), CGRect = CGRect {
+        x: (frame.size.width - SPLASH_ICON) / 2.0,
+        y: (frame.size.height - SPLASH_ICON) / 2.0,
+        size: CGSize {
+            width: SPLASH_ICON,
+            height: SPLASH_ICON,
+        },
+    });
+    send!(icon, c"setAutoresizingMask:" => (), usize = CENTERED);
+    send!(v, c"addSubview:" => (), Id = icon);
+    v
+}
+
+/// The launch has drawn its first frame, or ended without one: the
+/// splash goes.
+fn drawn() {
+    let Some(Some(splash)) = with(|s| s.splash.take()) else {
+        return;
+    };
+    for v in splash.views {
+        send!(v, c"removeFromSuperview" => ());
+        release(v);
+    }
+    if let Some(w) = splash.window {
+        send!(w, c"close" => ());
+        release(w);
+    }
 }
 
 /// An activity of `task` asked for orientation `o`: the window's content
@@ -778,24 +908,43 @@ pub fn pointer(view: Id, phase: Phase, x: f64, y: f64, view_height: f64, t: i64)
     true
 }
 
+/// The windows this process shows of the app (package) of `task`.
+fn app_windows(s: &State, task: i32) -> Vec<Id> {
+    let Some(package) = s.infos.get(&task).map(|i| &i.package) else {
+        return Vec::new();
+    };
+    s.tasks
+        .iter()
+        .filter(|(t, _)| s.infos.get(t).is_some_and(|i| i.package == *package))
+        .map(|(_, tw)| tw.window)
+        .collect()
+}
+
 /// Cmd+Q in the server's task window `w`: its app quits, as a window
 /// host's does: every window of its package closes.
 pub fn quit_app(w: Id) {
     let windows = with(|s| {
-        let (task, _) = s.tasks.iter().find(|(_, t)| t.window == w)?;
-        let package = s.infos.get(task)?.package.clone();
-        Some(
-            s.tasks
-                .iter()
-                .filter(|(t, _)| s.infos.get(t).is_some_and(|i| i.package == package))
-                .map(|(_, tw)| tw.window)
-                .collect::<Vec<_>>(),
-        )
+        let (&task, _) = s.tasks.iter().find(|(_, t)| t.window == w)?;
+        Some(app_windows(s, task))
     })
     .flatten()
     .unwrap_or_default();
     for w in windows {
         send!(w, c"performClose:" => (), Id = std::ptr::null_mut());
+    }
+}
+
+/// `task`'s app went home: a window host hides, as Cmd+H hides it, and
+/// its Dock icon brings it back; the server, which shows several apps,
+/// minimizes that app's windows.
+fn hide(task: i32) {
+    if crate::shim::is_host() {
+        let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
+        send!(app, c"hide:" => (), Id = std::ptr::null_mut());
+        return;
+    }
+    for w in with(|s| app_windows(s, task)).unwrap_or_default() {
+        send!(w, c"miniaturize:" => (), Id = std::ptr::null_mut());
     }
 }
 
