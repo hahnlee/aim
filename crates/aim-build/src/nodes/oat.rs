@@ -22,6 +22,10 @@
 //! in the context, `verify` ones included: ART rejects an oat file whose
 //! context differs from the loader's.
 //!
+//! The device's own APKs are preopted as a device vendor preopts an app
+//! without a profile, `verify` as the image's apps, so that no first boot
+//! compiles them.
+//!
 //! The output is `root/` (the files at their guest paths) and
 //! `overlay.toml`, the entries image/overlay.toml includes.
 
@@ -37,6 +41,12 @@ use std::sync::Mutex;
 
 const SERVICES: &str = "/system/framework/services.jar";
 const DEVICE_SERVICES_ODEX: &str = "/system/framework/oat/arm64/aim-services.odex";
+/// The device's APKs (`add`s of image/overlay.toml), by guest path, and
+/// their file in the `device-services` node's output.
+const DEVICE_APKS: [(&str, &str); 1] = [(
+    "/system/app/AimNotificationPermission/AimNotificationPermission.apk",
+    "notification-permission.apk",
+)];
 const PARTITIONS: [&str; 4] = ["system", "system_ext", "product", "vendor"];
 const WORKERS: usize = 4;
 
@@ -58,7 +68,7 @@ pub fn node() -> Node {
         inputs: Vec::new(),
         outputs: vec![out()],
         tools: Vec::new(),
-        recipe: 2,
+        recipe: 3,
         action: Action::Oat,
         boot: true,
     }
@@ -120,14 +130,27 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
         Some(jars) => format!("{jars}:{SERVICES}]"),
         None => return Err(format!("services.jar's context {}", services.context)),
     };
+    let bcp = services.bcp.clone();
     jobs.push(Job {
         odex: DEVICE_SERVICES_ODEX.into(),
         dex: device_services::JAR.into(),
         filter: "speed".into(),
         context,
-        bcp: services.bcp.clone(),
+        bcp: bcp.clone(),
         app_image: false,
     });
+    // The device's APKs.
+    for (apk, _) in DEVICE_APKS {
+        jobs.push(Job {
+            odex: app_odex(apk),
+            dex: apk.into(),
+            filter: "verify".into(),
+            // Their target SDK adds no implicit library.
+            context: "PCL[]".into(),
+            bcp: bcp.clone(),
+            app_image: false,
+        });
+    }
 
     // The guest view: the regenerated boot image and the edited jars over
     // the image's; the originals of those jars, for their profiles, under
@@ -149,6 +172,9 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     let edited = [(SERVICES, super::system_server::out().join("services.jar"))];
     files.extend(edited.iter().map(|(g, h)| (g.to_string(), h.clone())));
     files.push((device_services::JAR.into(), device_services::jar()));
+    for (apk, built) in DEVICE_APKS {
+        files.push((apk.into(), device_services::out().join(built)));
+    }
     let file_refs: Vec<(&str, PathBuf)> =
         files.iter().map(|(g, h)| (g.as_str(), h.clone())).collect();
 
@@ -220,9 +246,9 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
                 )
                 .unwrap(),
                 (true, false) => return Err(format!("dex2oat wrote no {guest}")),
-                (false, true) if job.odex == DEVICE_SERVICES_ODEX => write!(
+                (false, true) if !image.join(&job.dex[1..]).exists() => write!(
                     manifest,
-                    "\n[[add]]\npath = \"{guest}\"\nsource = \"{}\"\nreason = \"the device's own jar compiled ({})\"\n",
+                    "\n[[add]]\npath = \"{guest}\"\nsource = \"{}\"\nreason = \"the device's own code compiled ({})\"\n",
                     relative(&out.join("root").join(&guest[1..])),
                     job.filter
                 )
@@ -308,6 +334,14 @@ fn compile(
     Ok(())
 }
 
+/// The odex of the app `apk` (`<dir>/<name>.apk`):
+/// `<dir>/oat/arm64/<name>.odex`.
+fn app_odex(apk: &str) -> String {
+    let (dir, name) = apk.rsplit_once('/').unwrap();
+    let stem = name.strip_suffix(".apk").unwrap_or(name);
+    format!("{dir}/oat/arm64/{stem}.odex")
+}
+
 /// Guest paths of the `oat/arm64/*.odex` files under `dir`, not through
 /// links.
 fn find_odex(image: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(), String> {
@@ -360,6 +394,14 @@ fn with_device_services(context: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_app_odex_sits_in_its_oat_directory() {
+        assert_eq!(
+            app_odex("/system/app/A/A.apk"),
+            "/system/app/A/oat/arm64/A.odex"
+        );
+    }
 
     #[test]
     fn device_services_follow_services() {
