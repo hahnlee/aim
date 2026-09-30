@@ -52,6 +52,9 @@ fn stack() -> Option<StackInfo> {
 /// Fork: the main thread's stack areas (the child's memory has them at
 /// the same addresses).
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    // The pool stays with this process: its hidden fds go before the
+    // child inherits the fd table.
+    POOL.drain();
     w.opt(stack(), |w, s| {
         for v in [
             s.lo,
@@ -1113,33 +1116,165 @@ fn proc_entry(canon: &str) -> Option<i32> {
         .ok()
 }
 
-/// A file holding `data`, positioned at 0.
+/// Files of content fds the guest closed while nothing else referred to
+/// them, kept as hidden fds for the next content fd: creating and removing
+/// a file takes over 100 µs of kernel time on a Mac, rewriting one a few
+/// (#446). A fork child does not get them ([`fork_save`]).
+static POOL: Pool = Pool(Mutex::new(Vec::new()));
+const POOL_MAX: usize = 8;
+
+struct Pool(Mutex<Vec<i32>>);
+
+/// A file holding `data`, positioned at 0. Closing it gives the file back
+/// to the pool ([`recycle`]).
 pub(super) fn content_fd(data: &[u8], cloexec: bool) -> i64 {
+    let fd = match POOL.reuse(data, cloexec) {
+        Some(fd) => fd,
+        None => match fresh(data) {
+            Ok(fd) => {
+                fdtab::set_flags(fd, false, cloexec);
+                fd
+            }
+            Err(e) => return e,
+        },
+    };
+    fdtab::insert(fd, Kind::Content);
+    fd as i64
+}
+
+/// A new unlinked file holding `data`.
+fn fresh(data: &[u8]) -> Result<i32, i64> {
     let mut tmpl = std::env::temp_dir()
         .join("linux-abi-proc.XXXXXX")
         .into_os_string()
         .into_encoded_bytes();
     tmpl.push(0);
     // SAFETY: mkstemp fills the template; the name is removed at once.
+    let fd = unsafe { libc::mkstemp(tmpl.as_mut_ptr().cast()) };
+    if fd < 0 {
+        return Err(-(errno::last() as i64));
+    }
+    // SAFETY: the name mkstemp just made.
+    unsafe { libc::unlink(tmpl.as_ptr().cast()) };
+    fill(fd, data);
+    Ok(fd)
+}
+
+/// Make the file of `fd` hold exactly `data`, positioned at 0.
+fn fill(fd: i32, data: &[u8]) {
+    let mut off = 0;
+    // SAFETY: writing our own file from a local buffer.
     unsafe {
-        let fd = libc::mkstemp(tmpl.as_mut_ptr().cast());
-        if fd < 0 {
-            return -(errno::last() as i64);
-        }
-        libc::unlink(tmpl.as_ptr().cast());
-        let mut off = 0;
         while off < data.len() {
-            let n = libc::write(fd, data[off..].as_ptr().cast(), data.len() - off);
+            let n = libc::pwrite(
+                fd,
+                data[off..].as_ptr().cast(),
+                data.len() - off,
+                off as i64,
+            );
             if n <= 0 {
                 break;
             }
             off += n as usize;
         }
+        libc::ftruncate(fd, off as i64);
         libc::lseek(fd, 0, libc::SEEK_SET);
-        // Read-only, as procfs files mostly are.
-        fdtab::set_flags(fd, false, cloexec);
-        fd as i64
     }
+}
+
+impl Pool {
+    /// A pooled file holding `data`, on the lowest free fd.
+    fn reuse(&self, data: &[u8], cloexec: bool) -> Option<i32> {
+        let h = self.0.lock().unwrap().pop()?;
+        fill(h, data);
+        let cmd = if cloexec {
+            libc::F_DUPFD_CLOEXEC
+        } else {
+            libc::F_DUPFD
+        };
+        // SAFETY: plain fcntls on our hidden fd; its status flags (O_NONBLOCK,
+        // O_APPEND) are the last user's, so they are cleared.
+        let fd = unsafe {
+            libc::fcntl(h, libc::F_SETFL, 0);
+            libc::fcntl(h, cmd, 0)
+        };
+        fdtab::unhide(h);
+        // SAFETY: our hidden fd; `fd`, if any, keeps the file open.
+        unsafe { libc::close(h) };
+        (fd >= 0).then_some(fd)
+    }
+
+    /// The guest is closing content fd `fd`: its file goes back to the pool
+    /// unless another fd, a process, a message or a mapping still refers to it.
+    fn recycle(&self, fd: i32) {
+        let mut pool = self.0.lock().unwrap();
+        if pool.len() >= POOL_MAX
+            || shared(fd)
+            || file_id(fd).is_none_or(|id| MAPPED.lock().unwrap().contains(&id))
+        {
+            return;
+        }
+        // SAFETY: duplicating the guest's fd before it closes it.
+        let h = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, fdtab::hidden_base()) };
+        if h >= 0 {
+            fdtab::keep_hidden(h);
+            pool.push(h);
+        }
+    }
+
+    /// Close the pooled files.
+    fn drain(&self) {
+        for h in self.0.lock().unwrap().drain(..) {
+            fdtab::unhide(h);
+            // SAFETY: our hidden fd.
+            unsafe { libc::close(h) };
+        }
+    }
+}
+
+/// Content files that were mapped, by (dev, ino): a mapping holds the file
+/// without an fd (libselinux maps `/sys/fs/selinux/status`), so they never
+/// go back to the pool.
+static MAPPED: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+
+fn file_id(fd: i32) -> Option<(u64, u64)> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fstat into a local buffer.
+    (unsafe { libc::fstat(fd, &mut st) } == 0).then_some((st.st_dev as u64, st.st_ino))
+}
+
+/// `fd` is being mapped.
+pub fn on_mmap(fd: i32) {
+    if matches!(fdtab::get(fd), Some(Kind::Content | Kind::Knob(_)))
+        && let Some(id) = file_id(fd)
+    {
+        MAPPED.lock().unwrap().push(id);
+    }
+}
+
+/// The guest is closing content fd `fd` ([`Pool::recycle`]).
+pub fn recycle(fd: i32) {
+    POOL.recycle(fd);
+}
+
+/// Whether the open file of `fd` has other references than `fd`
+/// (`PROC_FP_SHARED`); true when that cannot be told.
+fn shared(fd: i32) -> bool {
+    const PROC_PIDFDVNODEINFO: i32 = 1;
+    const PROC_FP_SHARED: u32 = 1;
+    // struct vnode_fdinfo (176 bytes); fi_status is its second word.
+    let mut info = [0u32; 44];
+    // SAFETY: a buffer of the flavour's size.
+    let n = unsafe {
+        libc::proc_pidfdinfo(
+            libc::getpid(),
+            fd,
+            PROC_PIDFDVNODEINFO,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of_val(&info) as i32,
+        )
+    };
+    n <= 4 || info[1] & PROC_FP_SHARED != 0
 }
 
 /// A directory fd for a synthesized directory.
@@ -1499,6 +1634,61 @@ mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
+    /// Held by tests that start processes or need no other process to
+    /// inherit their fds.
+    static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn read_all(fd: i32) -> Vec<u8> {
+        let mut b = vec![0u8; 64];
+        // SAFETY: a local buffer.
+        let n = unsafe { libc::pread(fd, b.as_mut_ptr().cast(), b.len(), 0) };
+        b.truncate(n.max(0) as usize);
+        b
+    }
+
+    #[test]
+    fn a_closed_content_file_is_reused_only_when_nothing_else_holds_it() {
+        let _spawns = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+        let pool = super::Pool(std::sync::Mutex::new(Vec::new()));
+        let ino = |fd: i32| {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: a local buffer.
+            unsafe { libc::fstat(fd, &mut st) };
+            st.st_ino
+        };
+        // SAFETY: plain fd calls on our own fds.
+        let close = |fd: i32| unsafe { libc::close(fd) };
+        let a = super::fresh(b"a longer first content\n").unwrap();
+        let first = ino(a);
+        // SAFETY: plain dup of our fd.
+        let dup = unsafe { libc::dup(a) };
+        // Still held by `dup`: not pooled.
+        pool.recycle(a);
+        close(a);
+        assert!(pool.reuse(b"b\n", true).is_none());
+        assert_eq!(read_all(dup), b"a longer first content\n");
+        // The last fd: pooled and reused, holding exactly its new contents,
+        // at offset 0, visible and not close-on-exec as asked.
+        pool.recycle(dup);
+        close(dup);
+        let c = pool.reuse(b"c\n", false).unwrap();
+        assert_eq!(ino(c), first);
+        assert_eq!(read_all(c), b"c\n");
+        // SAFETY: plain fcntl/lseek on our fd.
+        unsafe {
+            assert_eq!(libc::lseek(c, 0, libc::SEEK_CUR), 0);
+            assert_eq!(libc::fcntl(c, libc::F_GETFD) & libc::FD_CLOEXEC, 0);
+        }
+        assert!(!crate::sys::fdtab::is_hidden(c));
+        // A mapped one is not reused: the mapping still shows its contents.
+        crate::sys::fdtab::insert(c, crate::sys::fdtab::Kind::Content);
+        super::on_mmap(c);
+        crate::sys::fdtab::on_close(c);
+        pool.recycle(c);
+        close(c);
+        assert!(pool.reuse(b"d\n", true).is_none());
+    }
+
     #[test]
     fn guest_argv_skips_linux_run_options() {
         let argv = |s: &str| {
@@ -1522,6 +1712,7 @@ mod tests {
     /// The host's gzip reads `/proc/config.gz` back verbatim.
     #[test]
     fn config_gz_is_gzip() {
+        let _spawns = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
         let big: String = super::KERNEL_CONFIG.repeat(200);
         for data in ["", super::KERNEL_CONFIG, big.as_str()] {
             let mut child = Command::new("gzip")

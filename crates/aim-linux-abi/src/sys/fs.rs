@@ -182,7 +182,7 @@ fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         Kind::Sock(_) => net::read(fd, iov),
         Kind::Dir(_) => Some(-EISDIR),
         Kind::Epoll(_) | Kind::SyncFile => Some(-(EINVAL as i64)),
-        Kind::Knob(_) => None,
+        Kind::Content | Kind::Knob(_) => None,
         Kind::Memfd(_) => {
             let mut total = 0i64;
             for v in iov {
@@ -210,6 +210,7 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         Kind::Evdev(_) => super::evdev::write(fd, buf, len),
         Kind::Dir(_) => Some(-(EBADF as i64)),
         Kind::Epoll(_) | Kind::Inotify(_) | Kind::SyncFile => Some(-(EINVAL as i64)),
+        Kind::Content => None,
         Kind::Knob(k) => Some(super::knob::write(fd, &k, iov)),
         Kind::Memfd(_) => {
             if memfd::write_sealed(fd) {
@@ -238,6 +239,7 @@ fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i
             memfd::rw(fd, buf, len, Some(pos), write)
         }
         Kind::Dir(_) if !write => Some(-EISDIR),
+        Kind::Content => None,
         Kind::Knob(k) if write => Some(super::knob::write(fd, &k, &one(buf, len))),
         // SAFETY: guest buffer.
         Kind::Knob(_) => Some(errno::check(
@@ -338,7 +340,7 @@ pub fn preadv(write: bool, a: [u64; 6]) -> i64 {
     if pos == -1 {
         return if write { writev(a) } else { readv(a) };
     }
-    if fdtab::get(fd).is_some() {
+    if fdtab::get(fd).is_some_and(|k| !matches!(k, Kind::Content)) {
         let mut total = 0i64;
         for io in v {
             let r = match special_pio(fd, io.iov_base as u64, io.iov_len, pos + total, write) {
