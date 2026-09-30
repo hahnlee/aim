@@ -33,6 +33,7 @@ members = [
     "crates/aim-services/aidl",
     "crates/aim-storage",
     "crates/aim-sync-file",
+    "crates/aimctl",
     "tools/android-image-extract",
     # Guest (aarch64-linux-android).
     "hal/aidl/*",
@@ -91,6 +92,7 @@ default-members = [
     "crates/aim-services/aidl",
     "crates/aim-storage",
     "crates/aim-sync-file",
+    "crates/aimctl",
     "tools/android-image-extract",
     # lmkd's policy and the task bridge's parcel reading, guest libraries,
     # are built for the host too to run their tests.
