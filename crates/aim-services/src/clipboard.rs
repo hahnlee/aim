@@ -964,3 +964,21 @@ impl Service for ClipboardService {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_the_user_off_content_uris() {
+        assert_eq!(
+            content_uri("content://10@media/external/1?x#f", 0),
+            Some(("content://media/external/1?x#f".into(), 10))
+        );
+        assert_eq!(
+            content_uri("content://com.example.files/a", 10),
+            Some(("content://com.example.files/a".into(), 10))
+        );
+        assert_eq!(content_uri("https://example.com", 0), None);
+    }
+}

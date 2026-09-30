@@ -394,16 +394,11 @@ the native clipboard does without, or stands in:
 **Cost.** A call that needs no check is fast: `addPrimaryClipChangedListener`
 takes 15-18 us against 377-1,878 us for the original. A checked call
 reads mirrored state ("Mirrored state"), so a focused app's read makes
-<<<<<<< HEAD
 no call into system_server unless an installed instrumentation targets
 the app (a test, which asks the app op's mode); a read by an app without
-focus asks the input method and a permission. Measured 2026-09-30 in one boot each,
-=======
-no call into system_server; a read by an app without focus asks a
-permission (the input method setting is read again only after it
-changed; before 2026-09-30 it was asked each time, as in the numbers
+focus asks a permission (the input method setting is read again only
+after it changed; before that it was asked each time, as in the numbers
 below). Measured 2026-09-30 in one boot each,
->>>>>>> d9ec4f65 (chore(services): drop the unused input method lookup; aidl-gen recipe 3)
 before and after the mirror, with a binder trace over the CTS run below
 (the same data directory; host load 21 before, 6 after, so the shell
 loop's numbers are the cleaner comparison):
