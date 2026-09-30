@@ -354,10 +354,11 @@ pub fn get_seals(fd: i32) -> i64 {
     }
 }
 
-/// A shared writable mapping of `k` in this process.
+/// A shared writable mapping of `k` by the guest of this process.
 fn mapped_writable(k: Key) -> bool {
-    vmmap::regions(0, u64::MAX)
-        .any(|r| r.shared && r.prot & 2 != 0 && r.file.as_ref().is_some_and(|f| (f.1, f.2) == k))
+    vmmap::shared_regions(super::arena::LO, super::arena::HI)
+        .into_iter()
+        .any(|r| r.prot & 2 != 0 && r.file.as_ref().is_some_and(|f| (f.1, f.2) == k))
 }
 
 /// Serializes this process's check-and-add of seals.
@@ -463,8 +464,10 @@ fn convert(k: Key, fd: Option<i32>, min_size: u64) -> Result<(u64, u64), i64> {
     if let Some(a) = with(|m| m.get(&k).and_then(|f| f.anon)) {
         return Ok(a);
     }
-    let views: Vec<vmmap::Region> = vmmap::regions(0, u64::MAX)
-        .filter(|r| r.shared && r.file.as_ref().is_some_and(|f| (f.1, f.2) == k))
+    // The guest's views, all in the guest range.
+    let views: Vec<vmmap::Region> = vmmap::shared_regions(super::arena::LO, super::arena::HI)
+        .into_iter()
+        .filter(|r| r.file.as_ref().is_some_and(|f| (f.1, f.2) == k))
         .collect();
     let file_size = fd.and_then(stat_fd).map_or(0, |s| s.st_size as u64);
     let extent = views
@@ -477,6 +480,11 @@ fn convert(k: Key, fd: Option<i32>, min_size: u64) -> Result<(u64, u64), i64> {
     // Fork children share it, as they share the file.
     super::mem::inherit_shared(base, size);
     match fd {
+        // A file with no blocks once what its mappings wrote is flushed
+        // holds only zeros, as the fresh memory does: ART sizes its JIT
+        // cache's memfd to the cache's capacity and maps it twice at once,
+        // and reading 64 MiB of holes would touch every page.
+        Some(fd) if !holds_data(fd) => {}
         Some(fd) => {
             let mut done = 0u64;
             while done < file_size {
@@ -521,6 +529,14 @@ fn convert(k: Key, fd: Option<i32>, min_size: u64) -> Result<(u64, u64), i64> {
         }
     });
     Ok((base, size))
+}
+
+/// Whether the file of `fd` has any block, with the pages its mappings
+/// dirtied written first (a sparse file's holes have none).
+fn holds_data(fd: i32) -> bool {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: plain fsync and fstat of our fd.
+    unsafe { libc::fsync(fd) != 0 || libc::fstat(fd, &mut st) != 0 || st.st_blocks != 0 }
 }
 
 /// mmap(MAP_SHARED) of `fd`. None when the host mapping of the file itself
@@ -690,6 +706,48 @@ mod tests {
 
     /// F_SEAL_EXEC on an executable memfd brings the write seals; a
     /// MFD_NOEXEC_SEAL memfd is not executable and sealable.
+    #[test]
+    fn executable_view_keeps_what_was_written_through_a_mapping() {
+        let fd = create("jit", 0);
+        let size = 8 << 20;
+        // SAFETY: our test fd, sparse, mapped writable: data written
+        // through the mapping at the start and past a hole.
+        let rw = unsafe {
+            libc::ftruncate(fd, size);
+            let rw = libc::mmap(
+                std::ptr::null_mut(),
+                size as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            ) as *mut u8;
+            std::ptr::copy_nonoverlapping(b"head".as_ptr(), rw, 4);
+            std::ptr::copy_nonoverlapping(b"tail".as_ptr(), rw.add((4 << 20) + 7), 4);
+            rw
+        };
+        let view = map_shared(
+            fd,
+            0,
+            size as u64,
+            libc::PROT_READ | libc::PROT_EXEC,
+            false,
+            0,
+        )
+        .unwrap();
+        assert!(view > 0);
+        // SAFETY: the view is readable and `size` long.
+        unsafe {
+            let v = std::slice::from_raw_parts(view as *const u8, size as usize);
+            assert_eq!(&v[..4], b"head");
+            assert_eq!(&v[(4 << 20) + 7..(4 << 20) + 11], b"tail");
+            assert!(v[4..(4 << 20) + 7].iter().all(|&b| b == 0));
+            libc::munmap(view as *mut _, size as usize);
+            libc::munmap(rw.cast(), size as usize);
+        }
+        close(fd);
+    }
+
     #[test]
     fn exec_seal() {
         let fd = create("x", MFD_ALLOW_SEALING);

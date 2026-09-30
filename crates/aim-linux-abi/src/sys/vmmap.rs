@@ -179,6 +179,27 @@ pub fn region_at(addr: u64) -> Option<Region> {
     })
 }
 
+/// The shared regions overlapping `[lo, hi)`, clipped to it: the entries
+/// are walked without the path lookup (several microseconds each), which
+/// only the shared ones get.
+pub fn shared_regions(lo: u64, hi: u64) -> Vec<Region> {
+    let mut out = Vec::new();
+    let mut cur = lo;
+    while cur < hi {
+        let Some(i) = info_at(cur) else {
+            break;
+        };
+        if i.start >= hi {
+            break;
+        }
+        if i.shared && i.tag != super::window::TAG {
+            out.extend(regions(cur.max(i.start), i.end.min(hi)));
+        }
+        cur = i.end;
+    }
+    out
+}
+
 /// Regions overlapping `[lo, hi)`, clipped to it.
 pub fn regions(lo: u64, hi: u64) -> impl Iterator<Item = Region> {
     let mut cur = lo;
