@@ -45,6 +45,7 @@ mod procfs;
 mod procrec;
 mod pstate;
 mod ptimer;
+mod random;
 mod selinuxfs;
 mod sharedfile;
 mod sigframe;

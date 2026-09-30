@@ -222,6 +222,41 @@ static void pf_key(void) {
   printf("ok pf_key\n");
 }
 
+// random(4): any process may write /dev/random and /dev/urandom (mode
+// 0666); the bytes are mixed in without entropy credit and every write
+// returns its length, through dup and fork too. Reads stay random.
+static void random_writes(void) {
+  const char* paths[] = {"/dev/urandom", "/dev/random"};
+  char buf[64];
+  memset(buf, 0x5a, sizeof(buf));
+  for (int i = 0; i < 2; i++) {
+    int fd = open(paths[i], O_WRONLY | O_CLOEXEC);
+    CHECK(fd >= 0, "open %s", paths[i]);
+    CHECK(write(fd, buf, sizeof(buf)) == sizeof(buf), "write %s", paths[i]);
+    CHECK(write(fd, buf, 0) == 0, "empty write");
+    struct iovec iov[2] = {{buf, 10}, {buf, 20}};
+    CHECK(writev(fd, iov, 2) == 30, "writev");
+    CHECK(pwrite(fd, buf, 7, 0) == 7, "pwrite");
+    int d = dup(fd);
+    CHECK(d >= 0 && write(d, buf, 5) == 5, "write through dup");
+    close(d);
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork");
+    if (pid == 0) _exit(write(fd, buf, 3) == 3 ? 0 : 1);
+    int st;
+    CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+          "write in a fork child");
+    close(fd);
+  }
+  int fd = open("/dev/urandom", O_RDWR | O_CLOEXEC);
+  CHECK(fd >= 0 && write(fd, buf, 8) == 8, "read-write open");
+  char a[16] = {0}, b[16] = {0};
+  CHECK(read(fd, a, sizeof(a)) == sizeof(a) && read(fd, b, sizeof(b)) == sizeof(b), "read");
+  CHECK(memcmp(a, b, sizeof(a)) != 0, "two reads the same");
+  close(fd);
+  printf("ok random_writes\n");
+}
+
 static void fork_wait(void) {
   pid_t parent = getpid();
   int p[2];
@@ -1425,6 +1460,7 @@ int main(int argc, char** argv) {
       {"identity", identity},       {"identity_file", identity_file},
       {"seccomp_filter", seccomp_filter},
       {"xattrs", xattrs},           {"pf_key", pf_key},
+      {"random_writes", random_writes},
       {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
       {"permissions", permissions}, {"peer_ids", peer_ids},
       {"entry_rewrites", entry_rewrites}, {"other_procs", other_procs},

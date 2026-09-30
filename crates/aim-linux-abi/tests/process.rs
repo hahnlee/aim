@@ -164,6 +164,11 @@ fn xattrs_and_selinux_labels() {
 }
 
 #[test]
+fn any_process_writes_the_random_devices() {
+    check("random_writes");
+}
+
+#[test]
 fn a_pf_key_socket_opens_and_closes() {
     check("pf_key");
 }

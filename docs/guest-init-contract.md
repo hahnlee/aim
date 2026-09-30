@@ -106,7 +106,9 @@ Resolution rules:
    `/apex/apex-info-list.xml` is a file inside the read-only `/apex`.
 2. The passthrough host devices (`/dev/null`, `/dev/zero`, `/dev/random`,
    `/dev/urandom`, `/dev/tty`) take precedence over the `/dev` entry, as
-   they do today in `vfs.rs`.
+   they do today in `vfs.rs`. A write to a random device succeeds for any
+   process, as random(4) has it (Darwin's takes writes from root only):
+   the layer counts the bytes (`sys/random.rs`).
 3. Paths resolve **component by component**, and symlinks are interpreted
    relative to the guest root wherever they are stored. Examples are `/bin`
    in the image and `/dev/stdin -> /proc/self/fd/0` in the runtime `/dev`.
