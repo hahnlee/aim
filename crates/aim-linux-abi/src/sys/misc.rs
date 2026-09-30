@@ -53,6 +53,11 @@ static DUMPABLE: AtomicU64 = AtomicU64::new(1);
 static TIMERSLACK: AtomicU64 = AtomicU64::new(50_000);
 static SECCOMP: AtomicU64 = AtomicU64::new(0);
 
+/// Whether the process is dumpable (PR_SET_DUMPABLE), which ptrace needs.
+pub fn dumpable() -> bool {
+    DUMPABLE.load(Relaxed) == 1
+}
+
 /// execve in place: the keep-capabilities flag clears and the process is
 /// dumpable again (Linux's `setup_new_exec` for a program that gains no
 /// privileges).

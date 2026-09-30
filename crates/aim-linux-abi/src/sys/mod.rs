@@ -46,6 +46,7 @@ mod procrec;
 mod pstate;
 mod ptimer;
 mod random;
+mod ptrace;
 mod selinuxfs;
 mod sharedfile;
 mod sigframe;
@@ -80,6 +81,7 @@ pub use pidns::new_table as new_pid_namespace;
 pub use process::set_exe;
 pub use procfs::{StackInfo, note_stack};
 pub use pstate::kernel_release;
+pub use ptrace::start as start_ptrace_agent;
 pub(crate) use signal::{install_host_handlers, repoke_self};
 pub(crate) use thread::{Thread, register_current};
 pub use thread::{host_tid, name_program};
@@ -342,6 +344,7 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         221 => exec::execve(ctx, a),
         281 => exec::execveat(ctx, a),
         95 => wait::waitid(a),
+        117 => ptrace::ptrace(a),
         260 => wait::wait4(a),
         424 => wait::pidfd_send_signal(a),
         434 => wait::pidfd_open(a),

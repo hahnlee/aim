@@ -132,6 +132,16 @@ pub fn contains(pid: i32) -> bool {
         })
 }
 
+/// Whether host process `pid` exists and has not exited.
+pub fn running(pid: i32) -> bool {
+    bsd_info(pid).is_some_and(|i| i.pbi_status != libc::SZOMB)
+}
+
+/// Whether host process `pid` is a child of this one (zombies too).
+pub fn is_child(pid: i32) -> bool {
+    bsd_info(pid).is_some_and(|i| i.pbi_ppid as i32 == me())
+}
+
 /// A host pid as the namespace numbers it: itself for a member, else 0.
 pub fn vnr(pid: i32) -> i32 {
     if contains(pid) { pid } else { 0 }

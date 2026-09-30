@@ -129,6 +129,7 @@ fn ignored(sig: i32, act: &KSigaction) -> bool {
 /// Darwin equivalent (so its parent sees the signal), or exits 128+sig.
 pub fn die(sig: i32) -> ! {
     crate::diag::report_death(sig);
+    super::ptrace::process_ending(sig);
     super::fork::spawn::wait_handovers();
     super::pidns::leave();
     let h = to_host(sig);
@@ -310,6 +311,15 @@ fn poke_locked(th: &Thread) {
     if !thread::is_current(th) {
         th.raise_host_locked(CARRIER);
     }
+}
+
+/// Interrupt this process's thread `tid` for a ptrace stop (`ptrace`).
+pub fn poke(tid: i32) {
+    thread::with_table(|t| {
+        if let Some(th) = t.get(&tid) {
+            poke_locked(th)
+        }
+    });
 }
 
 fn host_self(sig: i32) -> i64 {
@@ -531,6 +541,10 @@ pub fn interrupted(th: &Thread) -> bool {
     if th.sig.attn.load(SeqCst) == 0 {
         return false;
     }
+    // The call returns for the stop, and restarts after it.
+    if super::ptrace::trap_pending(th.tid) {
+        return true;
+    }
     let mut stash = lock(&th.sig.stash);
     if stash.is_some() {
         return true;
@@ -626,6 +640,14 @@ pub fn after_syscall(ctx: &GuestContext, nr: u64, a: &[u64; 6], r: i64) -> bool 
     if r != -(EINTR as i64) {
         return false;
     }
+    // A ptrace stop that interrupted the call sees it about to restart,
+    // as Linux's `do_signal` shows a debugger.
+    if super::ptrace::trap_pending(th.tid) {
+        let mut cpu = Cpu::from_ctx(ctx);
+        cpu.pc -= 4;
+        cpu.x[0] = a[0];
+        super::ptrace::trap_stop(th.tid, &cpu);
+    }
     let mut stash = lock(&th.sig.stash);
     if stash.is_some() {
         return false;
@@ -672,6 +694,7 @@ extern "C" fn linux_abi_deliver(ctx: *mut GuestContext) {
         let Some(th) = thread_of(ctx) else {
             return;
         };
+        super::ptrace::trap_stop(th.tid, &Cpu::from_ctx(ctx));
         let taken = lock(&th.sig.stash).take().or_else(|| take(th));
         let restart = th.sig.restart_nr.swap(0, Relaxed);
         let Some(t) = taken else {
@@ -707,6 +730,7 @@ extern "C" fn linux_abi_deliver(ctx: *mut GuestContext) {
 
 /// Deliver everything deliverable on a thread interrupted in guest code.
 fn deliver_to_mc(th: &Thread, m: &mut DarwinMcontext) {
+    super::ptrace::trap_stop(th.tid, &Cpu::from_mc(m));
     while let Some(t) = take(th) {
         let cpu = Cpu::from_mc(m);
         frame(th, &cpu, &t, th.sig.mask(), 0, 0).to_mc(m);
@@ -1119,17 +1143,52 @@ fn my_pid() -> i64 {
     super::process::getpid()
 }
 
-/// Send host signal `h` (0: none) for Linux `sig` to another process `p`
-/// of the namespace, with `check_kill_permission`'s rule: the credentials
-/// of `cred::may_signal`, or SIGCONT within the caller's session.
+/// Send Linux `sig` (host signal `h`, 0: none) to process `p` of the
+/// namespace, with `check_kill_permission`'s rule: the credentials of
+/// `cred::may_signal`, or SIGCONT within the caller's session.
+///
+/// Darwin has no real-time signals, and reports a SIGSEGV, SIGBUS, SIGILL,
+/// SIGFPE, SIGTRAP or SIGSYS that `kill` sends as a fault of whatever the
+/// target thread last did. Those go to the target's agent (`ptrace`),
+/// which queues them as Linux does; the rest go through Darwin.
 pub(super) fn signal_process(p: i32, sig: i32, h: i32) -> i64 {
+    if p == libc_getpid() {
+        return if sig == 0 {
+            0
+        } else {
+            send_process(sender(sig, sigframe::SI_USER))
+        };
+    }
     // SAFETY: trivial.
     let same_session = || unsafe { libc::getsid(p) == libc::getsid(0) };
     if !(super::cred::may_signal(p) || sig == SIGCONT && same_session()) {
         return -(EPERM as i64);
     }
+    if sig != 0 && (h == 0 || SYNCHRONOUS & bit(sig) != 0) {
+        return super::ptrace::remote_signal(p, 0, &sender(sig, sigframe::SI_USER));
+    }
     // SAFETY: plain kill of a process of the namespace.
     crate::errno::check(unsafe { libc::kill(p, h) } as i64)
+}
+
+fn libc_getpid() -> i32 {
+    // SAFETY: trivial.
+    unsafe { libc::getpid() }
+}
+
+/// A signal another process of the namespace sent through the agent
+/// (`ptrace`): to thread `tid` of this process, or to the process (0).
+pub fn from_peer(tid: i32, info: Siginfo) -> i64 {
+    if !valid(info.signo as u64) {
+        return -(EINVAL as i64);
+    }
+    if tid == 0 {
+        return send_process(info);
+    }
+    match thread::find(tid) {
+        Some(th) => send_thread(&th, info),
+        None => -(ESRCH as i64),
+    }
 }
 
 /// kill(pid, sig). Other processes are signalled through Darwin, which has
@@ -1147,12 +1206,6 @@ pub fn kill(a: [u64; 6]) -> i64 {
         };
     }
     let h = to_host(sig);
-    if sig != 0 && h == 0 {
-        if pid == 0 {
-            return send_process(sender(sig, sigframe::SI_USER));
-        }
-        return -(EINVAL as i64);
-    }
     let targets = match pid {
         -1 => super::pidns::members().map(|m| (m, true)),
         ..=0 => {
@@ -1172,6 +1225,9 @@ pub fn kill(a: [u64; 6]) -> i64 {
         }
     };
     let Some((targets, all)) = targets else {
+        if sig != 0 && h == 0 {
+            return -(EINVAL as i64);
+        }
         // SAFETY: plain kill of a process or group.
         return crate::errno::check(unsafe { libc::kill(pid as i32, h) } as i64);
     };
@@ -1214,10 +1270,13 @@ pub fn tgkill(nr: u64, a: [u64; 6]) -> i64 {
         (None, a[0] as i32 as i64, a[1] as i32)
     };
     // Another process's thread (its tid names the process, see `thread`):
-    // Darwin signals whole processes, so the signal goes to the process.
+    // through that process's agent.
     let owner = thread::owner(tid as i32) as i64;
     if tid > 0 && owner != my_pid() && tgid.is_none_or(|g| g == owner) {
-        return kill([owner as u64, sig as u64, 0, 0, 0, 0]);
+        if !(0..=NSIG).contains(&sig) {
+            return -(EINVAL as i64);
+        }
+        return peer(owner as i32, tid as i32, sender(sig, sigframe::SI_TKILL));
     }
     match target(tgid, tid, sig) {
         Err(e) => e,
@@ -1227,12 +1286,37 @@ pub fn tgkill(nr: u64, a: [u64; 6]) -> i64 {
 }
 
 /// The guest's siginfo for rt_(tg)sigqueueinfo. Linux lets a process claim
-/// any si_code towards itself, the only target here.
+/// any si_code towards itself only.
 fn queued_info(sig: i32, p: u64) -> Siginfo {
     // SAFETY: guest siginfo.
     let mut info = unsafe { Siginfo::read(p) };
     info.signo = sig;
     info
+}
+
+/// Send `info` to thread `tid` (0: the whole process) of another process
+/// `pid` through its agent, with `check_kill_permission`'s rules. Signal 0
+/// only checks.
+fn peer(pid: i32, tid: i32, info: Siginfo) -> i64 {
+    if let Err(e) = super::pidns::check(pid) {
+        return e;
+    }
+    if !super::cred::may_signal(pid) {
+        return -(EPERM as i64);
+    }
+    if info.signo == 0 {
+        return 0;
+    }
+    super::ptrace::remote_signal(pid, tid, &info)
+}
+
+/// Another process's queued signal: Linux refuses a sender's claim of a
+/// kernel or tkill code there (`do_rt_sigqueueinfo`).
+fn queued_to_peer(pid: i32, tid: i32, info: Siginfo) -> i64 {
+    if info.code >= 0 || info.code == sigframe::SI_TKILL {
+        return -(EPERM as i64);
+    }
+    peer(pid, tid, info)
 }
 
 /// rt_sigqueueinfo(tgid, sig, info).
@@ -1241,8 +1325,11 @@ pub fn rt_sigqueueinfo(a: [u64; 6]) -> i64 {
     if !valid(sig as u64) {
         return -(EINVAL as i64);
     }
+    if tgid <= 0 {
+        return -(EINVAL as i64);
+    }
     if tgid != my_pid() {
-        return -(if tgid <= 0 { EINVAL } else { ESRCH } as i64);
+        return queued_to_peer(tgid as i32, 0, queued_info(sig, a[2]));
     }
     send_process(queued_info(sig, a[2]))
 }
@@ -1253,7 +1340,11 @@ pub fn rt_tgsigqueueinfo(a: [u64; 6]) -> i64 {
     if !valid(sig as u64) {
         return -(EINVAL as i64);
     }
-    let th = match target(Some(a[0] as i32 as i64), a[1] as i32 as i64, sig) {
+    let (tgid, tid) = (a[0] as i32, a[1] as i32);
+    if tgid > 0 && tid > 0 && tgid as i64 != my_pid() && thread::owner(tid) == tgid {
+        return queued_to_peer(tgid, tid, queued_info(sig, a[3]));
+    }
+    let th = match target(Some(tgid as i64), tid as i64, sig) {
         Ok(t) => t,
         Err(e) => return e,
     };

@@ -133,6 +133,7 @@ pub fn run(opts: RunOptions) -> String {
         Err(e) => return format!("pid namespace: {e}"),
     };
     sys::cred::init(opts.identity, Some(by_pid));
+    sys::start_ptrace_agent();
     sys::init_exec(opts.runtime_args);
     context::init_thread();
     diag::install_signal_handlers();

@@ -8,9 +8,9 @@
 //!   (`docs/guest-init-contract.md` section 7) take precedence over the
 //!   synthesized ones and may be rewritten by the guest, but for sysfs's
 //!   device trees, which hold only the modeled devices (`device_tree`).
-//! - `/proc/<pid>` for another process is read from Darwin's process info
-//!   and the process's record (`procrec`: threads, names, command line);
-//!   memory maps and fds are only available for this process.
+//! - `/proc/<pid>` for another process is read from Darwin's process info,
+//!   the process's record (`procrec`: threads, names, tracers, command
+//!   line) and its agent (`ptrace`: memory maps and fds).
 
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -106,7 +106,7 @@ pub fn fd_guest_path(fd: i32) -> Result<String, Errno> {
 }
 
 /// Target of `/proc/self/fd/N`.
-fn fd_link(fd: i32) -> Option<String> {
+pub(super) fn fd_link(fd: i32) -> Option<String> {
     if fdtab::is_hidden(fd) {
         return None;
     }
@@ -387,7 +387,7 @@ fn stat_line(p: i32, thread: Option<i32>) -> Option<String> {
     };
     Some(format!(
         "{id} ({name}) {state} {} {} {} 0 -1 4194560 {} 0 {} 0 {} {} 0 0 20 {} {} 0 {start} {} {rss_pages} 18446744073709551615 0 0 {} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 {} {} {} {} 0\n",
-        super::pidns::vnr(b.pbi_ppid as i32),
+        super::process::linux_ppid(b.pbi_ppid as i32),
         b.pbi_pgid,
         b.pbi_pgid,
         ti.pti_faults,
@@ -428,7 +428,7 @@ fn status(p: i32, thread: Option<i32>) -> Option<String> {
     let kb = |b: u64| b / 1024;
     let n = ncpu();
     Some(format!(
-        "Name:\t{}\nUmask:\t0022\nState:\t{state}\nTgid:\t{p}\nNgid:\t0\nPid:\t{}\nPPid:\t{}\nTracerPid:\t0\n\
+        "Name:\t{}\nUmask:\t0022\nState:\t{state}\nTgid:\t{p}\nNgid:\t0\nPid:\t{}\nPPid:\t{}\nTracerPid:\t{}\n\
          {}FDSize:\t256\n\
          VmPeak:\t{} kB\nVmSize:\t{} kB\nVmLck:\t0 kB\nVmPin:\t0 kB\nVmHWM:\t{} kB\nVmRSS:\t{} kB\n\
          RssAnon:\t{} kB\nRssFile:\t0 kB\nRssShmem:\t0 kB\nVmData:\t{} kB\nVmStk:\t8192 kB\nVmExe:\t0 kB\n\
@@ -440,7 +440,8 @@ fn status(p: i32, thread: Option<i32>) -> Option<String> {
             .and_then(|tid| thread_comm(p, tid))
             .unwrap_or_else(|| comm(p)),
         thread.unwrap_or(p),
-        super::pidns::vnr(t.pbsd.pbi_ppid as i32),
+        super::process::linux_ppid(t.pbsd.pbi_ppid as i32),
+        tracer(p, thread.unwrap_or(p)),
         cred_lines(p),
         kb(t.ptinfo.pti_virtual_size),
         kb(t.ptinfo.pti_virtual_size),
@@ -459,6 +460,16 @@ fn status(p: i32, thread: Option<i32>) -> Option<String> {
     ))
 }
 
+/// The tracer of thread `tid` of process `p`, or 0.
+fn tracer(p: i32, tid: i32) -> i32 {
+    if p == pid() {
+        return super::ptrace::tracer_of(tid);
+    }
+    super::procrec::threads(p)
+        .and_then(|v| v.into_iter().find(|t| t.tid == tid))
+        .map_or(0, |t| t.tracer)
+}
+
 /// In pages of the guest's page size (`AT_PAGESZ`), as `rss` in `stat`.
 fn statm(p: i32) -> Option<String> {
     let t = task_info(p)?;
@@ -472,7 +483,7 @@ fn statm(p: i32) -> Option<String> {
 }
 
 /// Linux-format `/proc/self/maps` from the VM map.
-fn maps() -> String {
+pub(super) fn maps() -> String {
     let stack = stack().unwrap_or_default();
     let mut out = String::new();
     let mut regions = vmmap::regions(0, u64::MAX).peekable();
@@ -848,7 +859,9 @@ fn pids() -> Vec<i32> {
 /// record.
 fn tids(p: i32) -> Vec<i32> {
     let t = if p == pid() {
-        super::thread::tids()
+        let mut t = super::thread::tids();
+        t.extend(super::procrec::foreign_tids());
+        t
     } else {
         super::procrec::threads(p).map_or(Vec::new(), |v| v.into_iter().map(|t| t.tid).collect())
     };
@@ -991,6 +1004,7 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
         "status" => Node::File(status(p, thread)?.into_bytes()),
         "statm" => Node::File(statm(p)?.into_bytes()),
         "maps" if me => Node::File(maps().into_bytes()),
+        "maps" => Node::File(super::ptrace::remote_maps(p)?.into_bytes()),
         "mounts" => Node::File(mounts().into_bytes()),
         "mountinfo" => Node::File(mountinfo().into_bytes()),
         "oom_score_adj" if me => {
@@ -998,7 +1012,7 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
         }
         "oom_score_adj" => Node::File(b"0\n".to_vec()),
         "attr" => Node::Dir(entries(&[("current", dir::DT_REG)])),
-        "attr/current" => Node::File(attr_current()),
+        "attr/current" => Node::File(attr_current(p)),
         "exe" if me => Node::Link(super::process::exe_guest_path()),
         "cwd" if me => Node::Link(vfs::cwd()),
         "root" => Node::Link("/".into()),
@@ -1009,6 +1023,12 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
                 .map(|fd| Entry::new(fd as u64 + 1, dir::DT_LNK, fd.to_string()))
                 .collect(),
         ),
+        "fd" => Node::Dir(
+            super::ptrace::remote_fds(p)?
+                .into_iter()
+                .map(|fd| Entry::new(fd as u64 + 1, dir::DT_LNK, fd.to_string()))
+                .collect(),
+        ),
         "task" if thread.is_none() => Node::Dir(
             tids(p)
                 .into_iter()
@@ -1016,9 +1036,14 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
                 .collect(),
         ),
         _ => {
-            if let Some(n) = rest.strip_prefix("fd/").filter(|_| me) {
+            if let Some(n) = rest.strip_prefix("fd/") {
                 let fd: i32 = n.parse().ok()?;
-                return fd_link(fd).map(Node::Link);
+                return if me {
+                    fd_link(fd)
+                } else {
+                    super::ptrace::remote_fd_link(p, fd)
+                }
+                .map(Node::Link);
             }
             let t = rest.strip_prefix("task/").filter(|_| thread.is_none())?;
             let (tid, sub) = t.split_once('/').unwrap_or((t, ""));
@@ -1084,7 +1109,8 @@ pub fn node(guest: &str) -> Option<Node> {
             "sys" => return sys_node(tail),
             n => {
                 // `/proc/<tid>` of a thread other than a main thread: the
-                // thread's view of its process, as on Linux.
+                // thread's view of its process, as on Linux, with the
+                // process's tasks.
                 let n: i32 = n.parse().ok()?;
                 let p = super::thread::owner(n);
                 if p == n {
@@ -1092,6 +1118,9 @@ pub fn node(guest: &str) -> Option<Node> {
                 }
                 if !tids(p).contains(&n) {
                     return None;
+                }
+                if tail == "task" || tail.starts_with("task/") {
+                    return pid_node(p, tail, None);
                 }
                 return pid_node(p, tail, Some(n));
             }
@@ -1726,8 +1755,8 @@ pub fn readlink(path: &[u8]) -> Option<Result<Vec<u8>, Errno>> {
 }
 
 /// `attr/current`: the identity's context, NUL-terminated.
-fn attr_current() -> Vec<u8> {
-    let mut v = super::cred::seclabel().into_bytes();
+fn attr_current(p: i32) -> Vec<u8> {
+    let mut v = super::cred::seclabel_of(p).into_bytes();
     v.push(0);
     v
 }

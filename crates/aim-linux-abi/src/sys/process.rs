@@ -55,7 +55,16 @@ pub fn getpid() -> i64 {
 /// in an ancestor namespace.
 pub fn getppid() -> i64 {
     // SAFETY: trivial.
-    super::pidns::vnr(unsafe { libc::getppid() }) as i64
+    linux_ppid(unsafe { libc::getppid() }) as i64
+}
+
+/// The parent process Linux reports for host parent `host`: its thread
+/// group, when it is a thread running as a process of its own (`fork`).
+pub fn linux_ppid(host: i32) -> i32 {
+    match super::pidns::vnr(host) {
+        0 => 0,
+        p => super::procrec::tgid(p),
+    }
 }
 
 pub use super::thread::gettid;

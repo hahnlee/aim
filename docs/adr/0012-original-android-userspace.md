@@ -368,8 +368,9 @@ is `crates/aim-linux-abi/tests/art.rs`.
   - The translation cache makes ART start-up twice as slow as load-time
     rewriting, for the libraries alone as well as with the boot image's oat
     files.
-  - No tombstones: crash_dump64 cannot `ptrace` (ENOSYS) and cannot read
-    another process's `/proc/<pid>/fd`.
+  - No tombstones: crash_dump64 could not `ptrace` (ENOSYS) or read another
+    process's `/proc/<pid>/fd` (closed in #557: see "A process's agent"
+    below).
   - `/sys/kernel/tracing/trace_marker` does not exist (libcutils trace).
   - ART's statsd metrics are stubbed until `statslog_art` is generated
     (#162).
@@ -643,7 +644,15 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   `security.selinux` is the original inode's label, a `genfscon` label, or
   `unlabeled`.
 - **A thread with its own file table** (bionic's debuggerd pseudothread)
-  runs as a process.
+  runs as a process, listed among its parent's tasks; its children's
+  parent is the parent's process. `clone(CLONE_FILES)` without CLONE_VM is
+  a fork with a copied file table (#595).
+- **A process's agent** (`sys/ptrace/`): Darwin lets no process stop,
+  read or write another, so each process serves its peers through a
+  socket next to its by-pid entry: ptrace (SEIZE, INTERRUPT, CONT, DETACH,
+  GETREGSET, PEEKDATA, clone events; no signal-delivery-stops, #594),
+  `process_vm_readv`/`writev`, and `/proc/<pid>/{maps,fd}`. A traced
+  thread stops where the layer delivers signals.
 - **Answered "unsupported" (Android falls back):** cgroup v1 controllers,
   the other namespaces, SELinux enforcement (permissive), userfaultfd (ART
   uses its copying collector) and BINDER_FREEZE.

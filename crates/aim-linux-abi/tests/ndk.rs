@@ -218,6 +218,13 @@ fn procfs() {
     check("t_proc", &["two", "args"]);
 }
 
+/// ptrace, process_vm_readv/writev and another process's `/proc`, as
+/// debuggerd's crash_dump uses them.
+#[test]
+fn ptrace() {
+    check("t_ptrace", &[]);
+}
+
 #[test]
 fn posix_timers() {
     check("t_timer", &[]);
