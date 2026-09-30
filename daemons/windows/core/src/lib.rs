@@ -107,12 +107,13 @@ pub fn component(r: &mut impl Read) -> Result<Option<(String, String)>, Error> {
 }
 
 /// A `Bundle` written by `writeBundle`: a length (-1 null, 0 empty), then
-/// a magic number and that many bytes.
+/// a magic number, that many bytes and whether it holds an intent.
 fn bundle(r: &mut impl Read) -> Result<(), Error> {
     let len = r.int()?;
     if len > 0 {
         r.int()?;
         r.skip(len as usize)?;
+        r.boolean()?;
     }
     Ok(())
 }
@@ -195,6 +196,45 @@ pub fn running_task_info(r: &mut impl Read) -> Result<Option<TaskInfo>, Error> {
 /// Encodes what Java's `Parcel` writes, for tests and for the few values
 /// the bridge writes itself.
 pub mod write {
+    /// `BaseBundle.BUNDLE_MAGIC`.
+    const BUNDLE_MAGIC: i32 = 0x4C44_4E42;
+    /// `Parcel.VAL_PARCELABLE`, a length-prefixed value.
+    const VAL_PARCELABLE: i32 = 4;
+
+    /// `writeString` (UTF-16), as 32-bit words: a length in code units,
+    /// the units and a NUL, zero-padded to 4 (-1 for null).
+    pub fn string16(s: Option<&str>) -> Vec<i32> {
+        let Some(s) = s else { return vec![-1] };
+        let mut units: Vec<u16> = s.encode_utf16().collect();
+        let mut words = vec![units.len() as i32];
+        units.push(0);
+        if units.len() % 2 != 0 {
+            units.push(0);
+        }
+        words.extend(
+            units
+                .chunks_exact(2)
+                .map(|c| (c[0] as u32 | (c[1] as u32) << 16) as i32),
+        );
+        words
+    }
+
+    /// The `Bundle` of `ActivityOptions.setLaunchBounds(bounds)`, as
+    /// `Bundle.writeToParcel` writes it: one `Rect` under
+    /// `android:activity.launchBounds`.
+    pub fn launch_bounds_options(bounds: [i32; 4]) -> Vec<i32> {
+        let mut rect = string16(Some("android.graphics.Rect"));
+        rect.extend(bounds);
+        let mut map = vec![1];
+        map.extend(string16(Some("android:activity.launchBounds")));
+        map.extend([VAL_PARCELABLE, rect.len() as i32 * 4]);
+        map.extend(rect);
+        let mut words = vec![map.len() as i32 * 4, BUNDLE_MAGIC];
+        words.extend(map);
+        words.push(0); // no intent in it
+        words
+    }
+
     /// `writeString8`, as 32-bit words: a byte length, the bytes and a
     /// NUL, zero-padded to 4 (-1 for null).
     pub fn string8(s: Option<&str>) -> Vec<i32> {
@@ -278,14 +318,8 @@ mod tests {
             self
         }
         fn string16(&mut self, s: Option<&str>) -> &mut Self {
-            let Some(s) = s else { return self.int(-1) };
-            let units: Vec<u16> = s.encode_utf16().collect();
-            self.int(units.len() as i32);
-            for u in units.iter().chain([&0]) {
-                self.0.extend_from_slice(&u.to_le_bytes());
-            }
-            while self.0.len() % 4 != 0 {
-                self.0.push(0);
+            for w in write::string16(s) {
+                self.int(w);
             }
             self
         }
@@ -321,6 +355,7 @@ mod tests {
                 Some(n) => {
                     self.int(n as i32).int(0x4C444E42);
                     self.0.extend(std::iter::repeat_n(7, n));
+                    self.int(0);
                 }
                 None => {
                     self.int(-1);
@@ -445,5 +480,40 @@ mod tests {
         let mut r = Bytes(&o.0);
         assert_eq!(r.string8().unwrap().as_deref(), Some("héllo"));
         assert_eq!(r.int(), Ok(7));
+    }
+
+    #[test]
+    fn launch_bounds_bundle() {
+        let mut o = Out::default();
+        o.string16(Some("héllo")).string16(Some("ab")).int(7);
+        let mut r = Bytes(&o.0);
+        assert_eq!(r.string16().unwrap().as_deref(), Some("héllo"));
+        assert_eq!(r.string16().unwrap().as_deref(), Some("ab"));
+        assert_eq!(r.int(), Ok(7));
+
+        let words = write::launch_bounds_options([1748, 516, 2572, 1980]);
+        let mut o = Out::default();
+        words.iter().for_each(|&w| {
+            o.int(w);
+        });
+        let mut r = Bytes(&o.0);
+        let len = r.int().unwrap() as usize;
+        assert_eq!(r.int(), Ok(0x4C444E42));
+        assert_eq!(len, o.0.len() - 12);
+        assert_eq!(r.int(), Ok(1));
+        assert_eq!(
+            r.string16().unwrap().as_deref(),
+            Some("android:activity.launchBounds")
+        );
+        assert_eq!(r.int(), Ok(4));
+        assert_eq!(r.int(), Ok(len as i32 - 4 - 64 - 8));
+        assert_eq!(
+            r.string16().unwrap().as_deref(),
+            Some("android.graphics.Rect")
+        );
+        for v in [1748, 516, 2572, 1980, 0] {
+            assert_eq!(r.int(), Ok(v));
+        }
+        assert_eq!(r.int(), Err(Error::Malformed));
     }
 }
