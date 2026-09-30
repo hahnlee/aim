@@ -31,7 +31,7 @@ use crate::identity::Identity;
 use crate::launch::{
     DryRunLauncher, Exit, HostLauncher, Launcher, LinuxRun, LinuxRunOptions, describe_launch,
 };
-use crate::paths::Layout;
+use crate::paths::{Layout, Sweep};
 use crate::props::{Properties, heap_properties, mapped_properties, share_areas};
 use crate::propsvc::{PropertyEvent, PropertySockets, SetRequest};
 use crate::supervisor::{DEFAULT_PATH, Planner};
@@ -294,6 +294,9 @@ pub struct Boot {
     /// it for the boot (docs/storage.md). Declared last, so it is
     /// detached after the rest is dropped.
     pub report: BootReport,
+    /// The previous boot's runtime directory, removed while this one runs;
+    /// before the data image is detached.
+    _sweep: Sweep,
     _data: Option<aim_storage::data::DataImage>,
 }
 
@@ -456,6 +459,7 @@ impl Boot {
             .as_ref()
             .map_or_else(|| options.data.clone(), |d| d.dir().to_path_buf());
         let layout = Layout::new(options.image.clone(), data, options.runtime.clone());
+        let sweep = layout.sweep_runtime().map_err(|e| e.to_string())?;
         layout.prepare().map_err(|e| e.to_string())?;
         let map = layout.path_map();
         std::fs::write(layout.path_map_file(), map.to_file_text()).map_err(|e| e.to_string())?;
@@ -647,6 +651,7 @@ impl Boot {
             _binder: binder,
             native_services,
             _data: data_image,
+            _sweep: sweep,
             report,
         })
     }

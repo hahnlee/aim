@@ -12,7 +12,9 @@ use std::sync::atomic::AtomicU32;
 
 use aim_android_init::props::area::{AreaMemory, HeapMemory};
 use aim_android_init::props::areas::{PROPERTIES_SERIAL, PROPERTY_INFO};
-use aim_android_init::props::{FutexWaker, PA_SIZE, PropertyAreas, PropertyService, WakeTarget};
+use aim_android_init::props::{
+    FutexWaker, PA_SIZE, PropertyAreas, PropertyInfoArea, PropertyService, WakeTarget,
+};
 use aim_binder_host::mach;
 use aim_binder_host::server::Server;
 use aim_binder_host::wire::SharedFile;
@@ -71,6 +73,9 @@ impl MmapMemory {
         }
     }
 }
+
+// SAFETY: the mapping belongs to the value alone; nothing else unmaps it.
+unsafe impl Send for MmapMemory {}
 
 impl Drop for MmapMemory {
     fn drop(&mut self) {
@@ -155,10 +160,17 @@ pub fn mapped_properties(dir: &Path, property_info: Vec<u8>) -> Result<Propertie
     let info_path = dir.join(PROPERTY_INFO);
     fs::write(&info_path, &property_info).map_err(|e| format!("{}: {e}", info_path.display()))?;
     set_mode(&info_path, 0o444);
+    let mut names: Vec<String> = PropertyInfoArea::new(&property_info)?
+        .contexts()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    names.push(PROPERTIES_SERIAL.to_string());
+    let mut created = create_files(dir, &names);
     let mut bases = HashMap::new();
     let mut failure = None;
     let areas = PropertyAreas::with_memory(property_info, |name| {
-        match MmapMemory::create_file(&dir.join(name), PA_SIZE) {
+        match created.remove(name).expect("created for every context") {
             Ok(memory) => {
                 bases.insert(name.to_string(), memory.base() as usize);
                 AreaBacking::Mapped(memory)
@@ -176,6 +188,35 @@ pub fn mapped_properties(dir: &Path, property_info: Vec<u8>) -> Result<Propertie
     let mut service = PropertyService::with_areas(areas);
     service.set_waker(Box::new(SharedAreaWaker::new(bases, UlockShared)));
     Ok(service)
+}
+
+/// Creates and maps the area files `names` in `dir` on several threads: a
+/// writable shared mapping of a file costs about a millisecond each while
+/// the host's endpoint security agent looks at it (#337), and those waits
+/// overlap.
+fn create_files(dir: &Path, names: &[String]) -> HashMap<String, io::Result<MmapMemory>> {
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+    let chunk = names.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = names
+            .chunks(chunk)
+            .map(|names| {
+                scope.spawn(move || {
+                    names
+                        .iter()
+                        .map(|name| {
+                            let memory = MmapMemory::create_file(&dir.join(name), PA_SIZE);
+                            (name.clone(), memory)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("area file thread"))
+            .collect()
+    })
 }
 
 /// Share the mapped areas' pages with the guests through the binder host
