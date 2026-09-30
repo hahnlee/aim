@@ -25,8 +25,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use aim_hostcall::display::{
-    Buffer, Connect, FN_CONNECT, FN_IMPORT, FN_PRESENT, FN_RELEASE, FN_SET_VSYNC, FN_WINDOWS,
-    Import, Present, SetVsync, VERSION, Windows,
+    Buffer, Connect, Cursor, FN_CONNECT, FN_CURSOR, FN_IMPORT, FN_PRESENT, FN_RELEASE,
+    FN_SET_VSYNC, FN_WINDOWS, Import, Present, SetVsync, VERSION, Windows,
 };
 use aim_hostcall::{HostModule, args_mut, errno, module};
 use wire::Request;
@@ -80,6 +80,7 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
             )
         }),
         FN_WINDOWS => unsafe { args_mut::<Windows>(args, len) }.map(windows),
+        FN_CURSOR => unsafe { args_mut::<Cursor>(args, len) }.map(|c| cursor(c)),
         _ => Err(neg(errno::ENOSYS)),
     };
     r.unwrap_or_else(|e| e)
@@ -209,6 +210,36 @@ fn present(p: &mut Present) -> i64 {
         p.present = aim_sync_file::give_to_guest(fence);
     }
     r
+}
+
+/// The hardware cursor, with its acquire fence.
+fn cursor(c: &Cursor) -> i64 {
+    // SAFETY: F_GETFD only checks that the guest's fd is open.
+    if c.acquire >= 0 && unsafe { libc::fcntl(c.acquire, libc::F_GETFD) } < 0 {
+        return neg(errno::EBADF);
+    }
+    let mut flag = if c.changed != 0 {
+        wire::CURSOR_CHANGED
+    } else {
+        0
+    };
+    let fds: &[i32] = if c.acquire >= 0 {
+        flag |= wire::CURSOR_ACQUIRE;
+        &[c.acquire]
+    } else {
+        &[]
+    };
+    request(
+        &Request {
+            op: wire::OP_CURSOR,
+            flag,
+            id: c.id,
+            x: c.x,
+            y: c.y,
+            ..Default::default()
+        },
+        fds,
+    )
 }
 
 fn request(r: &Request, fds: &[i32]) -> i64 {

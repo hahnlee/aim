@@ -9,8 +9,10 @@
 //! (`NSTextInputClient`) is not handled yet (#23): keys go out as physical
 //! keys.
 //!
-//! The primary button is a touch; hovering, the other buttons, scrolling
-//! and the trackpad's pinch and rotation go where the pointer is. In
+//! The views' cursor is the pointer's sprite (`cursor.rs`). The primary
+//! button is a touch; hovering, the other buttons, scrolling
+//! and the trackpad's pinch, rotation and smart zoom go where the pointer
+//! is. In
 //! window mode Cmd+W closes the window (its task) and Cmd+Q quits the app,
 //! closing its tasks.
 
@@ -19,7 +21,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use aim_host_display::input::server::Devices;
-use aim_host_display::input::translate::{COMMAND, Input, Phase};
+use aim_host_display::input::translate::{COMMAND, Input, Phase, double_tap};
 use aim_host_display::input::{KEYBOARD, device_dir, devices, keymap};
 use aim_host_display::wire::{HostInput, input as kind};
 
@@ -93,32 +95,42 @@ fn locate(view: Id, event: Id) -> Option<(f64, f64, [i32; 4], f64)> {
     Some((x, y, input.display(), scale))
 }
 
-pub fn pointer(view: Id, event: Id, phase: Phase) {
+/// The primary button at `event`'s point, at `t`.
+fn pointer(view: Id, event: Id, phase: Phase, t: i64) {
     let (p, b) = point(view, event);
-    if crate::windows::pointer(view, phase, p.x, p.y, b.size.height, time(event)) {
+    if crate::windows::pointer(view, phase, p.x, p.y, b.size.height, t) {
         return;
     }
     if let Some(input) = INPUT.get() {
-        input.pointer(phase, p.x, p.y, b.size.width, b.size.height, time(event));
+        input.pointer(phase, p.x, p.y, b.size.width, b.size.height, t);
     }
 }
 
 extern "C" fn mouse_down(this: Id, _: Sel, event: Id) {
-    pointer(this, event, Phase::Down);
+    pointer(this, event, Phase::Down, time(event));
 }
 
 extern "C" fn mouse_dragged(this: Id, _: Sel, event: Id) {
-    pointer(this, event, Phase::Drag);
+    pointer(this, event, Phase::Drag, time(event));
 }
 
 extern "C" fn mouse_up(this: Id, _: Sel, event: Id) {
-    pointer(this, event, Phase::Up);
+    pointer(this, event, Phase::Up, time(event));
+}
+
+/// `smartMagnifyWithEvent:`, a two-finger double tap: a double tap where
+/// the pointer is, which zooms as on a phone.
+extern "C" fn smart_magnify(this: Id, _: Sel, event: Id) {
+    for (phase, t) in double_tap(time(event)) {
+        pointer(this, event, phase, t);
+    }
 }
 
 /// The pointer moved over the view (no button, or one other than the
 /// primary held): the mouse follows it.
 extern "C" fn mouse_moved(this: Id, _: Sel, event: Id) {
-    if let Some((x, y, _, _)) = locate(this, event) {
+    if let Some((x, y, _, scale)) = locate(this, event) {
+        crate::cursor::entered(scale);
         deliver(HostInput {
             kind: kind::HOVER,
             x,
@@ -130,6 +142,7 @@ extern "C" fn mouse_moved(this: Id, _: Sel, event: Id) {
 }
 
 extern "C" fn mouse_exited(_: Id, _: Sel, event: Id) {
+    crate::cursor::exited();
     deliver(HostInput {
         kind: kind::LEAVE,
         time_ns: time(event),
@@ -427,9 +440,11 @@ fn view_class() -> Id {
                 (c"scrollWheel:", scroll_wheel),
                 (c"magnifyWithEvent:", magnify),
                 (c"rotateWithEvent:", rotate),
+                (c"smartMagnifyWithEvent:", smart_magnify),
                 (c"keyDown:", key_down),
                 (c"keyUp:", key_up),
                 (c"flagsChanged:", flags_changed),
+                (c"cursorUpdate:", crate::cursor::cursor_update),
             ],
         );
         // SAFETY: adds BOOL methods to the class registered above.
@@ -452,9 +467,10 @@ fn view_class() -> Id {
     }) as Id
 }
 
-// NSTrackingAreaOptions: entered and exited, moved, whether or not the app
-// is active, over the view's visible rectangle as it changes.
-const TRACKING: usize = 0x01 | 0x02 | 0x80 | 0x200;
+// NSTrackingAreaOptions: entered and exited, moved, cursor updates,
+// whether or not the app is active, over the view's visible rectangle as
+// it changes.
+const TRACKING: usize = 0x01 | 0x02 | 0x04 | 0x80 | 0x200;
 
 /// A content view: `frame` in points. It hosts a layer of the display and
 /// takes its window's input, the pointer's moves included.

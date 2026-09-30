@@ -8,6 +8,7 @@
 //! the client target, which the server shows without copying it.
 
 mod client;
+mod cursor;
 mod display;
 mod host;
 mod logger;

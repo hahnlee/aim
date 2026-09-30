@@ -9,8 +9,8 @@
 //! (`docs/composer.md`).
 //!
 //! The one exception is the cursor: the display's hardware cursor is the
-//! Mac's own, which already shows where the pointer is, so a `CURSOR`
-//! layer (the pointer's sprite) stays one and is not drawn.
+//! Mac's own, so a `CURSOR` layer (the pointer's sprite) stays one and is
+//! not drawn; its buffer is the Mac's cursor ([`Cursor`]).
 
 use std::collections::HashMap;
 use std::os::fd::{AsFd, OwnedFd};
@@ -23,6 +23,7 @@ use android_hardware_graphics_composer3::aidl::android::hardware::graphics::comp
     IComposerClient::{EX_BAD_PARAMETER, EX_NO_RESOURCES},
 };
 
+use crate::cursor::Cursor;
 use crate::host::Host;
 
 pub struct Display {
@@ -38,6 +39,7 @@ pub struct Display {
     /// Layers the last validation made `CLIENT`, applied when
     /// SurfaceFlinger accepts the changes.
     changes: Vec<i64>,
+    pub cursor: Cursor,
 }
 
 /// A failed command, as a composer3 `EX_*` code.
@@ -53,6 +55,7 @@ impl Display {
             target: None,
             target_fence: None,
             changes: Vec::new(),
+            cursor: Cursor::default(),
         }
     }
 
@@ -170,6 +173,7 @@ impl Display {
 
     /// Forget everything, as for a new client.
     pub fn reset(&mut self, host: &Host) {
+        self.cursor.clear(host);
         for id in self.imported.keys() {
             let _ = host.release(*id);
         }

@@ -6,7 +6,8 @@
 //! It shows that package's task windows under the bundle's name and Dock
 //! icon. The server sends it the package's task records, the buffers (as
 //! memfds, mapped here as in the server) and every present, which it draws
-//! into its windows and answers once its GPU pass has read the buffer. Its
+//! into its windows and answers once its GPU pass has read the buffer, and
+//! the pointer's image for its windows' cursor. Its
 //! windows' requests and input go back to the server.
 //!
 //! Launching the shim, or clicking it in the Dock, starts the app (its
@@ -23,6 +24,7 @@ use aim_host_display::input::translate::Phase;
 use aim_host_display::wire::{self, Host as Rec, HostInput, Request, host, input};
 use aim_hostcall::display::{Connect, Window as Record, mode, window};
 
+use crate::cursor::Image;
 use crate::metal::{Renderer, Texture};
 use crate::objc::{class, nsstring, on_main, text};
 
@@ -236,6 +238,24 @@ fn serve(sock: &mut UnixStream) {
             host::WINDOW => {
                 let w = r.window;
                 on_main(move || crate::windows::on_host_record(&w));
+            }
+            host::CURSOR => {
+                let i = r.import;
+                let mut pixels = vec![0; r.id as usize];
+                if pixels.len() != i.width as usize * i.height as usize * 4
+                    || !wire::recv(sock.as_fd(), &mut pixels, &mut fds).unwrap_or(false)
+                {
+                    break;
+                }
+                let image = (!pixels.is_empty()).then(|| {
+                    Arc::new(Image {
+                        width: i.width,
+                        height: i.height,
+                        pixels,
+                        hot: (r.input.x as i32, r.input.y as i32),
+                    })
+                });
+                on_main(move || crate::cursor::show(image));
             }
             _ => break,
         }

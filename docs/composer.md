@@ -127,8 +127,12 @@ set it; `init.aim.rc` clears it (#452).
 - **The cursor** is the one layer left as it asked: a `CURSOR` layer (the
   mouse pointer's sprite, [input.md](input.md)) stays `CURSOR`, the
   display's hardware cursor, which is the Mac's own cursor over the
-  window. It is not drawn; `setCursorPosition` and its buffer are
-  accepted and unused.
+  window. It is not drawn. Its buffers are imported like the client
+  target's (per slot, as SurfaceFlinger sends a handle once), and each
+  buffer and position (`setLayerBuffer`, `setCursorPosition`, the display
+  frame) goes to the server with `FN_CURSOR`, which shows the image as the
+  Mac's cursor ([input.md](input.md), "The pointer icon"); a destroyed
+  cursor layer shows none.
 - **Fences.** The client target's acquire fence (RenderEngine's fence for
   its composition) goes to the display server with the present, and the
   present fence comes back (see "Buffers and presents"); SurfaceFlinger

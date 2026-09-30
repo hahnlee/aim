@@ -19,7 +19,7 @@ NSView events ──▶ translate::Input ──▶ server::Devices ──unix so
 | A window host's input, applied in the server | `bin/aim-display/hosts.rs` (`apply`) |
 | `/dev/input/eventN`, ioctls, `/sys` nodes | `crates/aim-linux-abi/src/sys/evdev.rs` |
 | Device configuration | `image/vendor/usr/idc/aim-*.idc` → `/vendor/usr/idc/` (`image/overlay.toml`) |
-| The pointer's sprite as the hardware cursor | `hal/graphics/composer` ([composer.md](composer.md)) |
+| The pointer's sprite as the hardware cursor, the Mac's cursor | `hal/graphics/composer` ([composer.md](composer.md)); `bin/aim-display/cursor.rs`, its hot spot `crates/aim-host-display/src/input/cursor.rs` |
 
 ## The devices
 
@@ -72,12 +72,37 @@ character map are the image's `Generic.kl` and `Generic.kcm`.
     `CURSOR` composition, the display's hardware cursor, which is the
     Mac's own cursor, so it is not drawn into the frame. Screenshots
     SurfaceFlinger renders itself (`screencap`) still show it.
+    The Mac's cursor shows the layer's image, as a virtual GPU's host
+    cursor does: the composer passes on its buffer and position
+    (`FN_CURSOR`), and the display server reads the pixels once the
+    acquire fence signals and makes them an `NSCursor` for its views and
+    the window hosts' (`cursorUpdate:`). Whatever icon Android picks is
+    the cursor: the arrow, the I-beam over text, the hand over links,
+    resize arrows, the wait icon, and an app's own `PointerIcon` bitmaps.
+    The image is display pixels, sized in points by the view's pixels per
+    point, so a Retina window shows its pixels one to one. Without a
+    cursor layer the views show the arrow.
+    - **Hot spot.** A composer is not told an icon's hot spot (a DRM
+      cursor plane is; HWC has no call for it). The layer lies at the
+      pointer's position minus the hot spot, and that position is one the
+      mouse device reported, so the server finds it
+      (`input::cursor::Hotspots`): the offset that puts the most of the
+      image's recent positions on positions the mouse had, on a tie the
+      image's known one, else one as many events old as the last image
+      showed. It is exact at once when the mouse rests, and while it
+      moves once an image was seen at rest; each image's hot spot is
+      kept by its pixels' hash.
 - **Pinch and rotate** (`magnifyWithEvent:`, `rotateWithEvent:`) are two
   fingers on the touchscreen (slots 0 and 1) centered on the pointer,
   40 mm apart at first (above Android's 27 mm minimum scaling span), which
   spread with the magnification and turn with the rotation, as on a
   phone; they lift when both gestures end. ChromeOS does the same.
-  Smart zoom (a two-finger double tap) is not mapped.
+- **Smart zoom** (a two-finger double tap, `smartMagnifyWithEvent:`) is a
+  double tap of the primary button where the pointer is, which zooms as
+  on a phone: two 40 ms taps 70 ms apart, ending at the gesture's time
+  (GestureDetector's double tap is a second down 40 to 300 ms after the
+  first up). The taps are stamped before the gesture, which is when they
+  happened; EventHub takes a time in the future as the present.
 - **Keys.** macOS virtual key codes map to the key at the same place on a
   PC keyboard (ANSI, ISO and JIS keys; Option is Alt, JIS Eisu/Kana are
   `KEY_HANJA`/`KEY_HANGEUL`, which `Generic.kl` calls EISU/KANA), through
@@ -96,10 +121,19 @@ character map are the image's `Generic.kl` and `Generic.kcm`.
   every other Cmd+key) press Ctrl, the key and release both, which is
   Android's copy, paste, cut, select all and undo; each AppKit repeat does
   it again. Cmd+Left and Right are Home and End, Cmd+Up and Down
-  Ctrl+Home and Ctrl+End. Command itself never reaches Android, whose Meta
+  Ctrl+Home and Ctrl+End; with Shift held they select, as on the Mac.
+  Cmd+Delete deletes to the line's start (Shift+Home, then Backspace:
+  Android has no key for it) and Cmd+Forward Delete to its end.
+  Command itself never reaches Android, whose Meta
   tap (all apps) and Meta+letter shortcuts it would trigger. In window
   mode Cmd+W closes the window (its task) and Cmd+Q quits the app
   ([windows.md](windows.md)).
+- **Option is Alt**, except for the Mac's word keys: Option+Left and
+  Right move by word and Option+Delete and Forward Delete delete one,
+  which are Android's Ctrl with the key (`ArrowKeyMovementMethod`,
+  `BaseKeyListener`; its Alt there moves to the line's edge and deletes
+  the whole line). The held Alt is released around them. With Shift they
+  select by word. Each AppKit repeat does it again.
 - **Back.** Cmd+[ and a two-finger swipe to the right (when "swipe between
   pages" is on) press the keyboard's `KEY_BACK`; the mouse's back button
   is the mouse's. A trackpad gesture whose first 8 points go mostly right
@@ -259,7 +293,8 @@ codes the open file's masks drop (they are never queued).
 
 | Test | Shows |
 | --- | --- |
-| `aim-host-display` unit tests | key map and usages, modifiers, view-to-pixel mapping (Retina, resize, letterbox), input-core rules, masks, packets, state for late openers, grab, injection, hotplug removal, stale nodes; the mouse's hover, buttons and two-axis scrolling in units; Cmd shortcuts as Ctrl; the swipe that is Back and does not scroll (nor its momentum) against one that scrolls; pinch and rotation as two fingers; keymap remapping with the held key released, axis changes, flush |
+| `aim-host-display` unit tests | key map and usages, modifiers, view-to-pixel mapping (Retina, resize, letterbox), input-core rules, masks, packets, state for late openers, grab, injection, hotplug removal, stale nodes; the mouse's hover, buttons and two-axis scrolling in units; Cmd shortcuts as Ctrl; the Mac's text shortcuts (Option's word keys as Ctrl with Alt lifted, Cmd+Delete, Cmd+Shift selection); smart zoom as a double tap within GestureDetector's window; the cursor's hot spot at rest, settling while the mouse moves, and carried to a new image by the lag; the swipe that is Back and does not scroll (nor its momentum) against one that scrolls; pinch and rotation as two fingers; keymap remapping with the held key released, axis changes, flush |
+| `aim-host-display` `tests/cursor.rs`, `aim-display`'s unit test | a cursor buffer the module passes on (`FN_CURSOR`) reaches a window host as the pointer's image with the hot spot under its resting mouse, and no cursor as the default one; the `NSCursor` is the image's pixels at their size in points, the hot spot in points |
 | `aim-linux-abi` `tests/input.rs` | the original `getevent -lpi` lists the three devices with their capabilities and held state (`BTN_TOUCH*`, `KEY_A*`, the mouse's axes and `INPUT_PROP_POINTER`), and `getevent -l` prints the packets `translate::Input` makes from a touch, a drag clamped at the edge, a key (AppKit repeat dropped), right Shift, a hover, a right click, a wheel line and a trackpad's horizontal pixels; `getevent -t` opens devices hotplugged under its inotify watch, with the event's own monotonic time; a dead server's nodes are removed when getevent lists them |
 | `tests/ndk.rs` `evdev` (`t_evdev.c`, Linux UAPI headers) | every ioctl above with Linux's return values and errnos (masks filtering one open file's queue while its key state still has the masked key; axes changed for another open file; keymap by scan code and index, remapped and restored; a clock change dropping the queue for `SYN_DROPPED`), read/write/poll/epoll semantics, clocks, grab, revoke, the open file across `execve` (non-blocking, clock, grab, `/proc/self/fd`), stat/fstat/readdir/`/proc/self/fd`, `realpath` of `/sys/dev/char` |
 | `tests/ndk.rs` `eventhub` (`t_eventhub.cpp`) | the image's `libinputreader.so` EventHub scans `/dev/input`, classifies `TOUCH \| TOUCH_MT`, `KEYBOARD \| ALPHAKEY` (built-in keyboard, from its `.idc`; `Generic.kl`, `Generic.kcm`) and the mouse `TOUCH`, finds sysfs root `/sys/devices/virtual`, and reads a key written into the keyboard |
