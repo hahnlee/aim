@@ -151,6 +151,10 @@ impl Inner {
 pub struct LocationManagerService {
     env: Arc<Env>,
     inner: Mutex<Inner>,
+    /// Held from the end of an operation through its broadcasts, so they
+    /// go out before the call returns and in the order of the operations,
+    /// as the original sends them under its lock.
+    broadcasting: Mutex<()>,
     fg: timer::Executor,
     alarms: timer::Alarms,
     /// The token of the service's app op user restrictions (the original
@@ -233,6 +237,7 @@ impl LocationManagerService {
                     geocoder: None,
                     density: None,
                 }),
+                broadcasting: Mutex::new(()),
                 fg: timer::Executor::new("location-fg"),
                 alarms: timer::Alarms::new(now_ms),
                 restriction_token,
@@ -260,11 +265,13 @@ impl LocationManagerService {
     /// GNSS session), and after the lock the effects.
     fn with<T>(&self, f: impl FnOnce(&mut Inner, &Env, &mut Effects) -> T) -> T {
         let mut effects = Effects::default();
-        let result = {
+        let (result, _broadcasting) = {
             let mut inner = self.inner.lock().unwrap();
             let result = f(&mut inner, &self.env, &mut effects);
             self.settle(&mut inner, &mut effects);
-            result
+            let broadcasting = (!effects.broadcasts.is_empty())
+                .then(|| self.broadcasting.lock().unwrap());
+            (result, broadcasting)
         };
         self.apply(effects);
         result
@@ -345,9 +352,9 @@ impl LocationManagerService {
         });
     }
 
-    /// What the operations leave to do without the lock: broadcasts,
-    /// the service's own listeners, provider request listeners, and app
-    /// op restrictions.
+    /// What the operations leave to do without the lock: broadcasts, sent
+    /// now, then the service's own listeners, provider request listeners
+    /// and app op restrictions.
     fn apply(&self, effects: Effects) {
         let Effects {
             broadcasts,
@@ -362,11 +369,11 @@ impl LocationManagerService {
             .filter_map(|i| i.as_ref().map(|i| i.uid))
             .collect();
         let env = self.env.clone();
+        for (intent, user) in broadcasts {
+            env.broadcast(&|p| intent.write(p), user);
+        }
         let this = self.this.clone();
         self.fg.post(move || {
-            for (intent, user) in broadcasts {
-                env.broadcast(&|p| intent.write(p), user);
-            }
             for (f, l) in internal {
                 f(l);
             }

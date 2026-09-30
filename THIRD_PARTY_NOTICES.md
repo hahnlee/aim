@@ -22,6 +22,9 @@ travel with any redistributed covered sources or binaries.
   files name their origin and copyright. [Upstream](https://android.googlesource.com/platform/system/memory/lmkd/).
 - **AOSP framework services.** `crates/aim-services` reimplements
   `ClipboardService` (`services/core/java/com/android/server/clipboard`)
+  and `LocationManagerService` with its provider managers
+  (`services/core/java/com/android/server/location`), ports
+  `S2CellIdUtils` (`core/java/com/android/internal/location/geometry`)
   and reads and writes the parcel forms of `ClipData`, `ClipDescription`,
   `TextUtils`' spans, `Intent`, `Uri`, `BaseBundle` and the replies of the
   services it calls, following `platform/frameworks/base` at

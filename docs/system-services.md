@@ -11,6 +11,7 @@ every step: replace superseded facts instead of appending a log.
 | --- | --- | --- | --- |
 | `clipboard` (IClipboard) | native, `crates/aim-services`, backed by `NSPasteboard` | 36 of 36 tests pass, as the original; app checks pass | M1, 2026-09-29 |
 | `vibrator_manager` (IVibratorManagerService), `external_vibrator_service` | native, `crates/aim-services`: the original without a vibrator, as on a Mac | CtsVibratorTestCases: 268 of 301 pass, 33 skip (no vibrator), each test as the original | M2, 2026-09-30 |
+| `location` (ILocationManager) | native, `crates/aim-services`: gps from CoreLocation, network, fused and the geocoder bound from Google Play services through the bridge | CtsLocation{Fine,Coarse,None,Gnss,Privileged}TestCases: each test as the original (234 pass, 10 skip, 3 fail and 2 hang in GNSS tests without a fix) | M2, 2026-09-30 |
 | every other service | the original, in SystemServer or its daemon | | |
 
 ## How a service is replaced
@@ -906,6 +907,92 @@ bridge the answer is kept by the permission nonce, and a kept one takes
 `vibrate` to about 11 us (p50, "The system_server bridge"). The rest asks
 nothing.
 
+## The location service
+
+`crates/aim-services/src/location/` serves `location` (ILocationManager),
+the one binder SystemServer's `LocationManagerService` publishes,
+following `LocationManagerService.java` and `LocationProviderManager.java`
+at the tag:
+
+- **Providers**, in the original's order: `passive`; `network` and
+  `fused`, bound from the apps that serve them (Google Play services on
+  this image, as the original binds them: `config_enable*Overlay`,
+  `ServiceWatcher`); `gps`, the Mac's location (below); and test
+  providers. Each manager keeps its registrations (listeners, pending
+  intents, current-location requests, the service's own), decides which
+  are active (permission and app op, the location setting per user, a
+  visible user, the package denylist, the location power save mode),
+  merges the active ones into the provider's request (delayed as the
+  original delays it), keeps the last locations per user (fine, coarse,
+  and with the settings bypass), and delivers what the provider reports
+  with the original's checks (the fastest interval with its jitter, the
+  smallest displacement, maximum updates, expiration) and app ops
+  (`FINE_LOCATION`/`COARSE_LOCATION` noted before each delivery,
+  `MONITOR_LOCATION` and `MONITOR_HIGH_POWER_LOCATION` started while a
+  registration is active).
+- **The Mac's location** (`mac.rs`): CoreLocation's fixes from the host
+  module the GNSS HAL uses (`aim_host_location`, in this process), read
+  every second while a provider served by it has a request, each new fix
+  reported once per provider interval. A fix becomes a `Location` as the
+  HAL builds a `GnssLocation`, with `GnssLocationProvider`'s extras. The
+  gps provider has `GnssLocationProvider`'s properties and identity
+  (`android`, `GnssService`), and the GNSS surface answers as the
+  original does with the HAL: capabilities `SCHEDULING`, hardware
+  "darwin CoreLocation", no satellites, NMEA, measurements, navigation
+  messages or antenna information; status listeners hear the session
+  start and stop and the first fix.
+- **Coarse locations** (`fudger.rs`, `s2.rs`): `LocationFudger`, with the
+  population density provider's S2 cells (`LocationFudgerCache`) for the
+  providers present when it binds, as the image's
+  `density_based_coarse_locations` has it.
+- **Proximity alerts** (`geofence.rs`): `GeofenceManager` over the fused
+  provider.
+- **Geocoding**: forwarded to the bound geocode provider.
+- **Its inputs** (`env.rs`, `watch.rs`): permissions (the #497 nonce
+  cache), app op modes (mirrored) and notes (made before the access they
+  record), foreground state (a uid observer cut at
+  `IMPORTANCE_FOREGROUND_SERVICE`), runtime permission and app op
+  changes, settings read by their generation and observed through the
+  bridge, platform compat changes (`DELIVER_HISTORICAL_LOCATIONS`,
+  `BLOCK_PENDING_INTENT_SYSTEM_API_USAGE`, `LOW_POWER_EXCEPTIONS`).
+
+**The bridge** (`LocationBridge.java`, `ILocationBridge`,
+`ILocationHost`): what the original does inside system_server.
+
+| What | Why system_server |
+| --- | --- |
+| binding `network`, `fused`, the geocoder and the population density provider (`ServiceWatcher`, `CurrentUserServiceSupplier`) | a service is bound by a process ActivityManager knows |
+| settings observers (location mode, throttling, package denylist, DeviceConfig `location`) | `registerContentObserver` refuses a process ActivityManager does not know |
+| SystemConfig's location allowlists | read by system_server from `/system/etc` |
+| user lifecycle, user visibility, location power save mode, screen on/off, package resets | `SystemService` callbacks, `UserManagerInternal`, `PowerManagerInternal`, receivers |
+| `LocationManagerInternal` (AppOpsPolicy's location source tags) | a `LocalServices` interface |
+| the location packages of the default grants | `LegacyPermissionManagerInternal`, set before `PackageManagerService` grants |
+| `LocationManager.invalidateLocalLocationEnabledCaches` | the nonce is in system_server's shared memory |
+
+The default grants run in `PackageManagerService.systemReady`, before the
+device's service starts; on a first boot or an upgrade the bridge runs
+them again once the location packages are known.
+
+Not here: `cmd location` and the original's full dump (#569); MSL
+altitude, delivery wake locks and the emergency bypass (#570); the
+hardware activity recognition and geofence proxies (#571); usage
+statistics (#572).
+
+**Cost** (2026-09-30, a Settings cold start twice after 3 minutes
+settled, the same boot procedure, a binder trace; the driver's latency
+of each synchronous call to `location`): PermissionController's burst at
+the start is most of it.
+
+| Call | Original: calls, mean | Native: calls, mean |
+| --- | --- | --- |
+| `isProviderPackage` (PermissionController) | 184, 84.9 us | 184, 52.9 us |
+| `getExtraLocationControllerPackage` (PermissionController) | 175, 73.1 us | 175, 45.4 us |
+| `isLocationEnabledForUser` (Settings) | 2, 37 us | 2, 50 us |
+| all of `location` | 28.5 ms | 17.8 ms |
+
+TotalTime of the two starts: 224 and 201 ms with the original, 233 and
+187 ms native.
+
 ## Conformance
 
 **Suite.** The official Android 16 CTS, `android-cts-16_r1-linux_x86-arm`
@@ -949,6 +1036,20 @@ passed ClipboardManagerTest. The five classes take 3 min 10 s against
 the original and 3 min 20 s against the native clipboard. One native run of ClipboardManagerTest was
 cut short by a SurfaceFlinger hang in a task snapshot that took
 system_server down (#436); the rerun passed.
+
+Location: `CtsLocationFineTestCases`, `CtsLocationCoarseTestCases`,
+`CtsLocationNoneTestCases`, `CtsLocationGnssTestCases` and
+`CtsLocationPrivilegedTestCases` (hidden API checks on), installed with
+`pm install -r -g -t` and run whole with `am instrument -w -r`, 400 s
+per module. Against the original and the native service each test ends
+the same: Fine 100 pass and 4 skip, Coarse 11 pass, None 112 pass and 2
+skip, Gnss and Privileged as far as their hang. Both hang in the same
+GNSS test (`testVariedRatesOnOff`, `testGnssMeasurementRegistration_enableFullTracking`)
+and fail the same three GNSS assumptions: the host process has no
+CoreLocation fix in these boots, so the gps provider reports none. Run alone,
+`testGetLastKnownLocation_NoteOp` failed once natively and then passed
+three times; it compares app op times in milliseconds with `>=`, and a
+fast enough run ends its check in the millisecond of the access before.
 
 **App checks** (native clipboard, device window):
 
