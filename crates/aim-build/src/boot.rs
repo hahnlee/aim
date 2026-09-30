@@ -97,7 +97,9 @@ pub fn guest_init(ctx: &Ctx, data: &Path, display: &Path) -> Command {
         .arg("--vulkan")
         .arg(aim_paths::moltenvk())
         .arg("--display")
-        .arg(display);
+        .arg(display)
+        .arg("--userdata")
+        .arg(aim_paths::userdata());
     command
 }
 

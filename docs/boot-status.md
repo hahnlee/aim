@@ -261,9 +261,11 @@ boot prepares and runs early-init and init; the `fs` stage's `mount_all`
 waits for it (docs/storage.md). On a second boot (host load 26-31) the
 preparation takes 0.16 s, the attach ends at 0.50-0.53 s and the mount
 waits 0-0.07 s for it; `start zygote` runs at 1.65-1.85 s and
-`boot_progress_start` follows at 2.4-2.6 s. A first boot creates the
-image, and its attach (0.9-1.4 s under load) still holds the mount up by
-about 0.5 s. Between the mount and zygote-start, init runs its exec
+`boot_progress_start` follows at 2.4-2.6 s. A first boot clones the
+image from the empty template of the `userdata/empty` node
+(docs/storage.md): its attach ends at 0.41 s and the mount does not wait
+(host load 12; creating the image held the mount up by 0.6 s before,
+#563). Between the mount and zygote-start, init runs its exec
 programs one after another (about 25-120 ms each, mostly starting
 `linux-run`); the longest are bpfloader (0.3-0.6 s) and
 `aconfigd-mainline init` (0.12-0.36 s) (#529).

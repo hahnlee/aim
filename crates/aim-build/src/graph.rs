@@ -61,6 +61,7 @@ pub enum Action {
     Oat,
     DerivedImage,
     TranslationCache,
+    EmptyUserdata,
 }
 
 pub struct Node {

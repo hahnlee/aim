@@ -1,12 +1,15 @@
 //! `guest-init --image <derived-root> --data <writable-root> --dry-run|--run
 //! [--only svc1,svc2] [--exclude svc1,svc2] [--runtime DIR] [--linux-run PATH]
 //! [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]
-//! [--binder-trace FILE] [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]`
+//! [--binder-trace FILE] [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]
+//! [--userdata DIR]`
 //!
 //! Development entry point for aimd's init role. With `--run`, the data
 //! directory's persistent content lives in a case-sensitive disk image
-//! beside it (`<data>.asif`), created on first use, attached hidden at
-//! `<data>` for the boot and detached when it stops (docs/storage.md).
+//! beside it (`<data>.asif`), created on first use (a copy of a template
+//! in the `userdata` node's output `--userdata DIR`, where there is one),
+//! attached hidden at `<data>` for the boot and detached when it stops
+//! (docs/storage.md).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -18,7 +21,8 @@ fn usage() -> ! {
     eprintln!(
         "usage: guest-init --image DIR --data DIR (--dry-run | --run) [--only a,b] [--exclude a,b] [--runtime DIR]\n\
          \x20                 [--linux-run PATH] [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]\n\
-         \x20                 [--binder-trace FILE] [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]"
+         \x20                 [--binder-trace FILE] [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]\n\
+         \x20                 [--userdata DIR]"
     );
     std::process::exit(2);
 }
@@ -50,6 +54,7 @@ fn main() {
     let mut timeout = None;
     let mut androidboot = Vec::new();
     let mut quiet = false;
+    let mut userdata = None;
     while let Some(arg) = args.next() {
         let mut value = || args.next().unwrap_or_else(|| usage());
         match arg.as_str() {
@@ -80,6 +85,7 @@ fn main() {
             "--trace" => trace = true,
             "--binder-trace" => binder_trace = Some(PathBuf::from(value())),
             "--quiet" => quiet = true,
+            "--userdata" => userdata = Some(PathBuf::from(value())),
             "--timeout" => {
                 timeout = Some(Duration::from_secs_f64(
                     value().parse().unwrap_or_else(|_| usage()),
@@ -107,6 +113,7 @@ fn main() {
     options.trace = trace;
     options.binder_trace = binder_trace;
     options.timeout = timeout;
+    options.userdata = userdata;
     if !androidboot.is_empty() {
         options.androidboot = androidboot;
     }

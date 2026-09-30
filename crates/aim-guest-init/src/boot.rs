@@ -113,6 +113,9 @@ pub struct BootOptions {
     /// Run mode with `--only` or `--exclude`: a `wait_for_prop` or `exec`
     /// nobody selected can satisfy is simulated after this long.
     pub simulate_after: Duration,
+    /// Run mode: the data templates (`userdata` build node) a new data
+    /// directory starts from (`aim_storage::data::template`).
+    pub userdata: Option<PathBuf>,
 }
 
 impl BootOptions {
@@ -135,6 +138,7 @@ impl BootOptions {
             androidboot: vec![("hardware".to_string(), "aim".to_string())],
             timeout: None,
             simulate_after: Duration::from_secs(2),
+            userdata: None,
         }
     }
 }
@@ -459,6 +463,12 @@ impl Boot {
         let data_mount = DataMount::start(
             layout.clone(),
             (options.mode == RunMode::Run).then(|| options.data.clone()),
+            options.userdata.clone(),
+            options
+                .androidboot
+                .iter()
+                .find(|(k, _)| k == crate::sku::KEY)
+                .map(|(_, v)| v.clone()),
             epoch,
         )?;
         let data_mount = Rc::new(RefCell::new(data_mount));

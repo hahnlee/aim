@@ -192,6 +192,8 @@ fn guest_init_args(files: &Files) -> Vec<OsString> {
         aim_paths::moltenvk().into(),
         "--display".into(),
         files.display().into(),
+        "--userdata".into(),
+        aim_paths::userdata().into(),
         "--quiet".into(),
     ]
 }

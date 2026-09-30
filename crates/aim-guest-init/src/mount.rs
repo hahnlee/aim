@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use aim_storage::data::DataImage;
+use aim_android_image::identity::read_tree_identity;
+use aim_storage::data::{self, DataImage};
 
 use crate::paths::{Layout, Sweep};
 
@@ -29,13 +30,33 @@ pub struct DataMount {
 
 impl DataMount {
     /// Starts attaching the image of `dir` (run mode), or lays the data
-    /// directory out in place (`None`, a dry run).
-    pub fn start(layout: Layout, dir: Option<PathBuf>, epoch: Instant) -> Result<Self, String> {
+    /// directory out in place (`None`, a dry run). A data directory without
+    /// an image starts from a template in `userdata` (`data::template`),
+    /// for the booted system image and the SKU `named` or, without one, the
+    /// Mac's.
+    pub fn start(
+        layout: Layout,
+        dir: Option<PathBuf>,
+        userdata: Option<PathBuf>,
+        named: Option<String>,
+        epoch: Instant,
+    ) -> Result<Self, String> {
+        let image = layout.image.clone();
         let pending = dir
             .map(|dir| {
                 std::thread::Builder::new()
                     .name("data-attach".into())
-                    .spawn(move || DataImage::attach(&dir).map(|image| (image, Instant::now())))
+                    .spawn(move || {
+                        let template = userdata
+                            .filter(|_| !data::image_of(&dir).exists())
+                            .and_then(|userdata| {
+                                let identity = read_tree_identity(&image).ok().flatten();
+                                let sku = named.or_else(|| crate::sku::host().map(str::to_string));
+                                data::template(&userdata, identity.as_deref(), sku.as_deref())
+                            });
+                        DataImage::attach(&dir, template.as_deref())
+                            .map(|image| (image, Instant::now()))
+                    })
                     .map_err(|e| format!("data image: {e}"))
             })
             .transpose()?;

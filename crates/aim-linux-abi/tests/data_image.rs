@@ -64,7 +64,7 @@ fn guest_data_is_case_sensitive_and_keeps_owners() {
     let runtime = tmp.join(format!("data-image-{}-run", std::process::id()));
     data::remove(&dir).unwrap();
 
-    let volume = DataImage::attach(&dir).unwrap();
+    let volume = DataImage::attach(&dir, None).unwrap();
     let map = path_map(&image, volume.dir(), &runtime);
     let out = sh(
         &image,
@@ -76,7 +76,7 @@ fn guest_data_is_case_sensitive_and_keeps_owners() {
     volume.detach().unwrap();
 
     // A second boot: the same data, a new runtime directory.
-    let volume = DataImage::attach(&dir).unwrap();
+    let volume = DataImage::attach(&dir, None).unwrap();
     let map = path_map(&image, volume.dir(), &runtime);
     let out = sh(&image, &map, "stat -c '%u:%g' /data/app1 && cat /data/foo");
     assert_eq!(out, "10123:10123\nlower\n");
