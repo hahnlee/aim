@@ -219,6 +219,17 @@ because constructors of its HIDL dependencies wait for
   permission granted for the terminal. Without it the scan reports no
   devices, which the test reports but does not fail on.
 
+- **Idle** (2026-09-30, M2 Pro, first boots of disposable data
+  directories, 2 minutes from 2.5 minutes after `sys.boot_completed`).
+  GMS's `nearby_fast_pair` scanner scans in `BALANCED` mode throughout
+  (`dumpsys bluetooth_manager`). Before the scan windows, then with them:
+
+  | | Before | After |
+  | --- | --- | --- |
+  | HCI events to the stack | 8.6/s | 2.5/s |
+  | Bluetooth app CPU | 0.38 s | 0.08 s |
+  | HAL CPU | 0.31 s | 0.16 s |
+
 ## Not done
 
 - BR/EDR (classic audio needs a USB controller path, ADR 0012).
