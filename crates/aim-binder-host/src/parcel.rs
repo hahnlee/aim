@@ -10,8 +10,8 @@
 //! followed by its stability (`Stability::Level`).
 
 use aim_binder_driver::uapi::{
-    BINDER_TYPE_BINDER, BINDER_TYPE_HANDLE, FLAT_BINDER_FLAG_PRIORITY_MASK,
-    FLAT_BINDER_OBJECT_SIZE, FlatBinderObject,
+    BINDER_TYPE_BINDER, BINDER_TYPE_HANDLE, FLAT_BINDER_FLAG_ACCEPTS_FDS,
+    FLAT_BINDER_FLAG_PRIORITY_MASK, FLAT_BINDER_OBJECT_SIZE, FlatBinderObject,
 };
 
 /// A libbinder `status_t`.
@@ -165,7 +165,7 @@ impl Parcel {
             },
             Some(Binder::Local(ptr)) => FlatBinderObject {
                 kind: BINDER_TYPE_BINDER,
-                flags: DEFAULT_SCHED_BITS,
+                flags: DEFAULT_SCHED_BITS | FLAT_BINDER_FLAG_ACCEPTS_FDS,
                 binder: ptr,
                 cookie: ptr,
             },

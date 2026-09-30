@@ -41,6 +41,8 @@ use crate::system::{MODE_ALLOWED, System};
 /// `AppOpsManager.OP_READ_CLIPBOARD` and `OP_WRITE_CLIPBOARD`.
 pub const OP_READ_CLIPBOARD: i32 = 29;
 pub const OP_WRITE_CLIPBOARD: i32 = 30;
+/// The app ops its access decisions read.
+pub const APP_OPS: [i32; 2] = [OP_READ_CLIPBOARD, OP_WRITE_CLIPBOARD];
 /// `Context.DEVICE_ID_DEFAULT` and `DEVICE_ID_INVALID`.
 const DEVICE_ID_DEFAULT: i32 = 0;
 const DEVICE_ID_INVALID: i32 = -1;
