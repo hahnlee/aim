@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use super::park::Parker;
 use super::signal::ThreadSignals;
@@ -123,7 +123,10 @@ impl Thread {
     }
 }
 
-static THREADS: Mutex<Option<HashMap<i32, Arc<Thread>>>> = Mutex::new(None);
+/// Lookups and signal sends share it; a sender holds it across the host
+/// pthread_kill, so an exclusive lock let a signal flood starve the
+/// target's own lookups (sched_getscheduler) for good (#219).
+static THREADS: LazyLock<RwLock<HashMap<i32, Arc<Thread>>>> = LazyLock::new(Default::default);
 static NEXT_TID: AtomicU32 = AtomicU32::new(0);
 /// The main thread's exit code once it has called `exit` (the process
 /// exits with it when the last thread does), else -1.
@@ -134,13 +137,11 @@ static MAIN_PTHREAD: AtomicUsize = AtomicUsize::new(0);
 static MAIN_THREAD: AtomicUsize = AtomicUsize::new(0);
 
 pub fn with_table<R>(f: impl FnOnce(&HashMap<i32, Arc<Thread>>) -> R) -> R {
-    let mut t = THREADS.lock().unwrap_or_else(|e| e.into_inner());
-    f(t.get_or_insert_with(HashMap::new))
+    f(&THREADS.read().unwrap_or_else(|e| e.into_inner()))
 }
 
 fn with_table_mut<R>(f: impl FnOnce(&mut HashMap<i32, Arc<Thread>>) -> R) -> R {
-    let mut t = THREADS.lock().unwrap_or_else(|e| e.into_inner());
-    f(t.get_or_insert_with(HashMap::new))
+    f(&mut THREADS.write().unwrap_or_else(|e| e.into_inner()))
 }
 
 pub fn find(tid: i32) -> Option<Arc<Thread>> {
