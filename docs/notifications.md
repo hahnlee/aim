@@ -120,6 +120,37 @@ A notification Android removes is removed from Notification Center.
 
 ## Verification
 
-`cmd notification post` (the shell's notifications, shown by "Android
-System") in a window-mode smoke boot, with the server's log; clicks and
-dismissals entered as a window host would send them; see the step's PR.
+A window-mode smoke boot (2026-09-30, `cargo aim boot --windows`, a
+disposable data directory), reading the display server's log:
+
+- The platform's notifications at first boot ("Android is starting",
+  Play Store's) were shown by "Android System" and by Play Store's shim,
+  launched in the background.
+- `cmd notification post` run as the shell uid: plain, big picture with a
+  data large icon (an ashmem blob over 16 KiB) and messaging style
+  notifications shown by "Android System" (`shown`).
+- A Clock timer (`am start -a android.intent.action.SET_TIMER ...
+  SKIP_UI`): shown by Clock's shim, titled "Clock" (its content is a
+  custom view, #468); a click (as the shim sends it) sent its content
+  intent and `DeskClock` became the resumed activity, in Clock's window.
+- A dismissal (as the shim sends it) cancelled the notification in NMS
+  (`cmd notification list`), which then left Notification Center (`not
+  shown`).
+- Settings cold-starts (`am start -W`) as before.
+
+Not exercised end to end: a click on the Mac itself (the shim's
+`UNUserNotificationCenter` delegate), actions and replies (their
+`PendingIntent`s go through the same `sendIntentSender` as clicks; the
+reply's fill-in intent is checked against the `Intent` reader in unit
+tests).
+
+**CTS** (`CtsNotificationTestCases` of CTS 16_r1, pinned in
+`upstream/cts.lock`; installed with its helper APKs as its
+`AndroidTest.xml` lists them, run with `am instrument` as in
+[system-services.md](system-services.md), window mode):
+
+| Class | Tests | Without the bridge (main) | With the bridge |
+| --- | --- | --- | --- |
+| NotificationManagerTest (listeners, channels, styles, trampolines, autogrouping, ...) | 114 | 114 pass | 114 pass |
+| StatusBarNotificationTest | 20 | 20 pass | 20 pass |
+| NotificationStatsTest | 11 | 11 pass | 11 pass |

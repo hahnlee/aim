@@ -385,7 +385,14 @@ fn report(key: String, error: Option<String>, expected: bool, again: bool) {
 /// Show or update `p`. Main thread.
 fn post(p: &Post) {
     let content = send!(class(c"UNMutableNotificationContent"), c"new" => Id);
-    send!(content, c"setTitle:" => (), Id = nsstring(&p.title));
+    // Notification Center drops a notification without text; one whose
+    // content is only a custom view (#468) is titled with the app's name.
+    let title = if p.title.is_empty() && p.body.is_empty() {
+        crate::shim::app_name().unwrap_or_default()
+    } else {
+        p.title.clone()
+    };
+    send!(content, c"setTitle:" => (), Id = nsstring(&title));
     send!(content, c"setSubtitle:" => (), Id = nsstring(&p.subtitle));
     send!(content, c"setBody:" => (), Id = nsstring(&p.body));
     send!(content, c"setThreadIdentifier:" => (), Id = nsstring(&p.thread));
