@@ -228,8 +228,14 @@ impl System {
         read: impl FnOnce(&mut Reader<'_>) -> ParcelResult<Returned<()>>,
         unwatch: fn(&System),
     ) -> Result<()> {
-        self.call(name, code, write, read)?;
         let service = self.service(name)?;
+        let mut data = Parcel::new();
+        write(&mut data);
+        let reply = service
+            .transact(code, &data, false)
+            .map_err(|s| unreachable_service(name, s))?;
+        read(&mut reply.reader()).map_err(|s| unreachable_service(name, s))??;
+        // The instance registered with; one already dead is reported at once.
         let this = Arc::downgrade(self);
         self.process.link_to_death(
             &service,
