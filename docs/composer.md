@@ -98,7 +98,7 @@ receives from `FN_CONNECT`. A thread in the HAL reads them and calls
 `IComposerCallback.onVsync` while SurfaceFlinger has vsync enabled. The
 server runs the display link only while a client has vsync enabled, as a
 display controller raises its vsync interrupt only while the driver asks
-for it; the first vsync comes 6–14 ms after enabling. The server declares
+for it; the first vsync comes 5–14 ms after enabling. The server declares
 its activity latency-critical, so App Nap does not throttle the link while
 the window is in the background.
 
