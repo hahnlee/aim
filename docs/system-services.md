@@ -192,7 +192,8 @@ ADR 0013's target: p50 < 20 us, p99 < 200 us per call.
 | Calls answered by system_server (44,000) | 0.9 ms | 53 ms |
 | Calls answered by servicemanager (3,295) | 5.6 ms | 831 ms |
 | `IClipboard.hasPrimaryClip` from the shell, idle, original (41 calls) | 221 us | 997 us |
-| The same, native clipboard (40 calls) | 541 us | 2,988 us |
+| The same, native clipboard asking system_server (40 calls) | 541 us | 2,988 us |
+| The same, native clipboard with mirrored state (40 calls, 2026-09-30) | 15 us | 95 us |
 | `addPrimaryClipChangedListener` during a cold start, original | 377-1,878 us | |
 | The same, native clipboard | 15-18 us | |
 
@@ -321,12 +322,28 @@ the native clipboard does without, or stands in:
 - SystemUI shows its clipboard overlay for the Mac's copies (#434).
 
 **Cost.** A call that needs no check is fast: `addPrimaryClipChangedListener`
-takes 15-18 us against 377-1,878 us for the original. A call that checks
-access is slower than the original, because each check is a call into
-system_server: `hasPrimaryClip` makes four (`IAppOpsService.checkPackage`
-275 us, `IPermissionManager.checkPermission`,
-`IAppOpsService.checkOperationForDevice`, `ITrustManager.isDeviceLocked`,
-about 80 us each), 541 us in all against 221 us (#432).
+takes 15-18 us against 377-1,878 us for the original. A checked call
+reads mirrored state ("Mirrored state"), so a focused app's read makes
+no call into system_server; a read by an app without focus asks the
+input method and a permission. Measured 2026-09-30 in one boot each,
+before and after the mirror, with a binder trace over the CTS run below
+(the same data directory; host load 21 before, 6 after, so the shell
+loop's numbers are the cleaner comparison):
+
+| Call (sender's total, p50 / p99) | Asking system_server | Mirrored |
+| --- | --- | --- |
+| `hasPrimaryClip`, shell loop (40) | 293 / 728 us | 15 / 95 us |
+| `hasPrimaryClip`, CTS app (69) | 716 / 2,149 us | 61 / 1,162 us |
+| `getPrimaryClip`, CTS app (29) | 506 / 1,186 us | 61 / 634 us |
+| `getPrimaryClipDescription`, CTS app (30) | 622 / 1,353 us | 52 / 339 us |
+| `getPrimaryClip`, input method without focus (48) | 455 / 16,398 us | 254 / 4,771 us |
+| `setPrimaryClip`, CTS app (29) | 2,334 / 8,575 us | 2,475 / 11,522 us |
+
+The service host's calls into system_server over the run went from
+2,582 (1,106 app ops, 593 permissions, 369 trust, 285 input method, 146
+focus) to 972 (273 app ops, nearly all background notes; 356 input
+method and 213 permissions, from reads without focus; 43 focus). A write still asks `IUserManager` for the profiles
+(#460).
 
 ## Conformance
 

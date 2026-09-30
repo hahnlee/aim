@@ -146,3 +146,14 @@ The migration's state and conformance results are in
   clipboard tests (the original: 36); the missing one needs DeviceConfig
   (#428). What system_server-internal state native services need, and how
   their permission checks are made fast, are #430 and #432.
+
+### Permissions, part 1: mirrored access state (2026-09-30)
+
+- A native service's access decisions read state other services own.
+  The service host mirrors what a focused app's access reads (package
+  ownership, app-op modes, focus, the device lock), each fed by its
+  owner's standard listener and dropped when the owner dies; permissions
+  and the input method are still asked each time, because their changes
+  are not all notified to a process outside system_server (#467, #430).
+  The rule and the measurements are in
+  [system-services.md](../system-services.md), "Mirrored state".
