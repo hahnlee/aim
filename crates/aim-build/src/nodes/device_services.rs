@@ -15,8 +15,10 @@
 //!   shell (docs/m1-shell.md), signed likewise;
 //! - `notification-permission.apk`, the activity of
 //!   `java/notification-permission` that system_server starts in place of
-//!   PermissionController's dialog for POST_NOTIFICATIONS (#470), compiled
-//!   with the Java of the AIDL and checked against the boot class path.
+//!   PermissionController's dialog for POST_NOTIFICATIONS (#470), and
+//!   `media-projection.apk`, the MediaProjection consent activity of
+//!   `java/media-projection` (docs/media.md), each compiled with the Java
+//!   of the AIDL and checked against the boot class path.
 
 use super::java::{self, Toolchain};
 use super::{files, repo, service_aidl};
@@ -31,6 +33,7 @@ const SOURCES: &str = "java/device-services";
 const OVERLAY: &str = "java/framework-overlay";
 const SHELL_OVERLAY: &str = "java/lightweight-shell-overlay";
 const NOTIFICATION_PERMISSION: &str = "java/notification-permission";
+const MEDIA_PROJECTION: &str = "java/media-projection";
 /// The jar's guest path.
 pub const JAR: &str = "/system/framework/aim-services.jar";
 const FRAGMENT: &str = "system/etc/classpaths/systemserverclasspath.pb";
@@ -49,6 +52,7 @@ pub fn node() -> Node {
     inputs.extend(files(OVERLAY));
     inputs.extend(files(SHELL_OVERLAY));
     inputs.extend(files(NOTIFICATION_PERMISSION));
+    inputs.extend(files(MEDIA_PROJECTION));
     Node {
         name: "device-services".into(),
         deps: vec![Dep::on("image")],
@@ -59,6 +63,7 @@ pub fn node() -> Node {
             out().join("framework-overlay.apk"),
             out().join("lightweight-shell-overlay.apk"),
             out().join("notification-permission.apk"),
+            out().join("media-projection.apk"),
         ],
         tools: Vec::new(),
         recipe: 2,
@@ -128,25 +133,35 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     }
 
     // An app's code: it links against the boot class path only.
-    let app = repo(NOTIFICATION_PERMISSION);
-    let app_classes = work.join("app-classes");
-    tools.javac(
-        log,
-        &[app.join("src"), generated],
-        std::slice::from_ref(&stubs),
-        &app_classes,
-        true,
-    )?;
-    let app_dex = tools.d8(log, &app_classes, Some(&stubs), &work.join("app-dex"))?;
-    java::check_linkage(&image, &boot, None, &app_dex)?;
-    tools.apk(
-        log,
-        &app.join("AndroidManifest.xml"),
-        None,
-        Some(&app_dex),
-        &image.join("system/framework/framework-res.apk"),
-        &staged.join("notification-permission.apk"),
-    )?;
+    for (dir, apk) in [
+        (NOTIFICATION_PERMISSION, "notification-permission"),
+        (MEDIA_PROJECTION, "media-projection"),
+    ] {
+        let app = repo(dir);
+        let app_classes = work.join(format!("{apk}-classes"));
+        tools.javac(
+            log,
+            &[app.join("src"), generated.clone()],
+            std::slice::from_ref(&stubs),
+            &app_classes,
+            true,
+        )?;
+        let app_dex = tools.d8(
+            log,
+            &app_classes,
+            Some(&stubs),
+            &work.join(format!("{apk}-dex")),
+        )?;
+        java::check_linkage(&image, &boot, None, &app_dex)?;
+        tools.apk(
+            log,
+            &app.join("AndroidManifest.xml"),
+            None,
+            Some(&app_dex),
+            &image.join("system/framework/framework-res.apk"),
+            &staged.join(format!("{apk}.apk")),
+        )?;
+    }
 
     let _ = force_remove(&out);
     fs::rename(&staged, &out).map_err(|e| e.to_string())?;

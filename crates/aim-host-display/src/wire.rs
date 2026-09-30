@@ -16,6 +16,8 @@
 //!
 //! The notification bridge (`docs/notifications.md`) opens one with
 //! [`OP_NOTIFICATIONS`] and exchanges [`crate::notify`] frames on it.
+//! The media bridge (`docs/media.md`) opens one with [`OP_MEDIA`] and
+//! exchanges [`crate::media`] frames on it.
 //! The status bar of the lightweight shell (`docs/m1-shell.md`) opens one
 //! with [`OP_SHELL`] and exchanges [`crate::shell`] frames on it.
 //!
@@ -60,6 +62,9 @@ pub const CURSOR_ACQUIRE: u32 = 2;
 /// `id` = [`VERSION`]: the notification bridge's hello; the server answers
 /// its mode (a `u32`), then [`crate::notify`] frames follow both ways.
 pub const OP_NOTIFICATIONS: u32 = 9;
+/// `id` = [`VERSION`]: the media bridge's hello; the server answers its
+/// mode (a `u32`), then [`crate::media`] frames follow both ways.
+pub const OP_MEDIA: u32 = 10;
 /// `id` = [`VERSION`]: the lightweight shell's status bar's hello; the
 /// server answers its mode (a `u32`), then [`crate::shell`] frames follow
 /// both ways.
@@ -94,6 +99,8 @@ pub mod host {
     pub const CURSOR: u32 = 10;
     /// Either way: a [`crate::notify`] frame follows.
     pub const NOTIFY: u32 = 11;
+    /// Either way: a [`crate::media`] frame follows.
+    pub const MEDIA: u32 = 12;
     /// Either way: a [`crate::shell`] frame follows.
     pub const SHELL: u32 = 13;
 }

@@ -27,11 +27,14 @@
 #[macro_use]
 mod objc;
 mod apps;
+mod consent;
 mod cursor;
 mod hosts;
 mod input;
+mod media;
 mod metal;
 mod notifications;
+mod nowplaying;
 mod shell;
 mod sheets;
 mod shim;
@@ -312,6 +315,14 @@ impl Display {
                         && self.mode == mode::WINDOWS
                     {
                         notifications::serve_bridge(sock.into());
+                    }
+                    return;
+                }
+                wire::OP_MEDIA if r.id == wire::VERSION => {
+                    // Window mode's shims show media; in device mode, this
+                    // process.
+                    if wire::send(sock.as_fd(), wire::bytes(&self.mode), None).is_ok() {
+                        media::serve_bridge(sock.into(), self.mode == mode::WINDOWS);
                     }
                     return;
                 }

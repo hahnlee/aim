@@ -15,6 +15,7 @@
 //! ([`FN_WINDOWS`]) and exchanges window records on it directly.
 
 pub mod input;
+pub mod media;
 pub mod notify;
 pub mod shell;
 pub mod windows;

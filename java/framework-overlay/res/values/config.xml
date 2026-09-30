@@ -5,4 +5,8 @@
     <string-array name="config_deviceSpecificSystemServices" translatable="false">
         <item>dev.aim.server.DeviceServices</item>
     </string-array>
+    <!-- MediaProjectionManager.createScreenCaptureIntent's activity: the
+         device's consent activity (java/media-projection), which asks the
+         Mac, in place of SystemUI's dialog (docs/media.md). -->
+    <string name="config_mediaProjectionPermissionDialogComponent" translatable="false">dev.aim.mediaprojection/dev.aim.mediaprojection.ConsentActivity</string>
 </resources>

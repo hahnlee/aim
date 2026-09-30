@@ -156,6 +156,18 @@ impl Host {
         }
     }
 
+    /// Pass a media message on: its record, then its frame.
+    pub fn send_media(&self, m: &aim_host_display::media::Message) {
+        let w = self.writer.lock().unwrap();
+        let r = Rec {
+            op: host::MEDIA,
+            ..Default::default()
+        };
+        let fd = std::os::fd::AsFd::as_fd(&*w);
+        if wire::send(fd, wire::bytes(&r), None).is_ok() {
+            let _ = wire::send(fd, &m.frame(), None);
+        }
+    }
 
     /// Pass a task record on.
     pub fn send_window(&self, r: &Record) {
@@ -309,6 +321,7 @@ pub fn serve(sock: OwnedFd) {
     let adopted = package.clone();
     on_main(move || crate::windows::route_package(&adopted));
     crate::notifications::host_connected(&h);
+    crate::media::host_connected(&h);
     crate::shell::host_connected(&h);
     while let Some(r) = read(&mut sock) {
         match r.op {
@@ -327,6 +340,10 @@ pub fn serve(sock: OwnedFd) {
             host::RESTACK => on_main(crate::windows::restack),
             host::NOTIFY => match aim_host_display::notify::Message::read(&mut sock) {
                 Ok(Some(m)) => crate::notifications::from_host(&h, &m),
+                _ => break,
+            },
+            host::MEDIA => match aim_host_display::media::Message::read(&mut sock) {
+                Ok(Some(m)) => crate::media::from_host(Some(&h), &m),
                 _ => break,
             },
             host::SHELL => match aim_host_display::shell::Message::read(&mut sock) {
