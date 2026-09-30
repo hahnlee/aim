@@ -416,17 +416,23 @@ mod tests {
     use std::sync::mpsc::{Receiver, Sender, channel};
     use std::thread::{self, ThreadId};
 
+    #[derive(Debug, PartialEq)]
+    enum Seen {
+        Status(GnssStatusValue),
+        Location(i64),
+    }
+
     /// Plays the framework: each session callback takes `lock`, as
     /// `GnssStatusProvider.onReportStatus` takes its multiplexer's lock.
     struct Framework {
         lock: Arc<Mutex<()>>,
-        reports: Mutex<Sender<(String, ThreadId)>>,
+        reports: Mutex<Sender<(Seen, ThreadId)>>,
     }
 
     impl Interface for Framework {}
 
     impl Framework {
-        fn record(&self, what: String) -> binder::Result<()> {
+        fn record(&self, what: Seen) -> binder::Result<()> {
             let _held = self.lock.lock().unwrap();
             let _ = self
                 .reports
@@ -442,13 +448,13 @@ mod tests {
             Ok(())
         }
         fn gnssStatusCb(&self, status: GnssStatusValue) -> binder::Result<()> {
-            self.record(format!("{status:?}"))
+            self.record(Seen::Status(status))
         }
         fn gnssSvStatusCb(&self, _: &[GnssSvInfo]) -> binder::Result<()> {
             Ok(())
         }
         fn gnssLocationCb(&self, l: &GnssLocation) -> binder::Result<()> {
-            self.record(format!("location {}", l.timestampMillis))
+            self.record(Seen::Location(l.timestampMillis))
         }
         fn gnssNmeaCb(&self, _: i64, _: &str) -> binder::Result<()> {
             Ok(())
@@ -470,7 +476,7 @@ mod tests {
         }
     }
 
-    fn framework(gnss: &Gnss) -> (Arc<Mutex<()>>, Receiver<(String, ThreadId)>) {
+    fn framework(gnss: &Gnss) -> (Arc<Mutex<()>>, Receiver<(Seen, ThreadId)>) {
         let (tx, rx) = channel();
         let lock = Arc::new(Mutex::new(()));
         let cb = BnGnssCallback::new_binder(
@@ -486,7 +492,7 @@ mod tests {
         (lock, rx)
     }
 
-    fn next(rx: &Receiver<(String, ThreadId)>) -> (String, ThreadId) {
+    fn next(rx: &Receiver<(Seen, ThreadId)>) -> (Seen, ThreadId) {
         rx.recv_timeout(Duration::from_secs(10))
             .expect("no report within 10 s")
     }
@@ -518,11 +524,14 @@ mod tests {
             while statuses.len() < 2 {
                 let (what, thread) = next(&rx);
                 assert_ne!(thread, thread::current().id());
-                if !what.starts_with("location") {
-                    statuses.push(what);
+                if let Seen::Status(s) = what {
+                    statuses.push(s);
                 }
             }
-            assert_eq!(statuses, ["SESSION_END", "ENGINE_OFF"]);
+            assert_eq!(
+                statuses,
+                [GnssStatusValue::SESSION_END, GnssStatusValue::ENGINE_OFF]
+            );
         }
     }
 
@@ -537,8 +546,15 @@ mod tests {
             ..Default::default()
         }));
         reporter.post(Report::Status(GnssStatusValue::SESSION_END));
-        let got: Vec<String> = (0..3).map(|_| next(&rx).0).collect();
-        assert_eq!(got, ["SESSION_BEGIN", "location 7", "SESSION_END"]);
+        let got: Vec<Seen> = (0..3).map(|_| next(&rx).0).collect();
+        assert_eq!(
+            got,
+            [
+                Seen::Status(GnssStatusValue::SESSION_BEGIN),
+                Seen::Location(7),
+                Seen::Status(GnssStatusValue::SESSION_END),
+            ]
+        );
     }
 
     fn fix() -> Fix {
