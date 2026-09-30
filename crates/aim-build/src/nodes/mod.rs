@@ -22,8 +22,9 @@ use crate::graph::{Action, Ctx, Node};
 use crate::log::Log;
 use std::path::PathBuf;
 
-/// The static nodes, then the derived image over `built` (every other node).
-pub fn declare(mut built: Vec<Node>) -> Result<Vec<Node>, String> {
+/// The static nodes, then the derived image (of image variant `variant`,
+/// if given) over `built` (every other node).
+pub fn declare(mut built: Vec<Node>, variant: Option<&str>) -> Result<Vec<Node>, String> {
     built.extend([
         image::node(),
         aidl::node(),
@@ -36,7 +37,8 @@ pub fn declare(mut built: Vec<Node>) -> Result<Vec<Node>, String> {
         device_services::node(),
         oat::node(),
     ]);
-    let derived = derived_image::node(&built)?;
+    let variant = variant.map(derived_image::variant).transpose()?;
+    let derived = derived_image::node(&built, variant)?;
     built.push(derived);
     built.push(translation_cache::node());
     built.push(userdata::empty());
@@ -61,7 +63,7 @@ pub fn run(node: &Node, ctx: &Ctx, log: &mut Log) -> Result<Vec<PathBuf>, String
         Action::SystemServer => system_server::run(log)?,
         Action::DeviceServices => device_services::run(log)?,
         Action::Oat => oat::run(ctx, log)?,
-        Action::DerivedImage => derived_image::run(log)?,
+        Action::DerivedImage(ref variant) => derived_image::run(variant.as_deref(), log)?,
         Action::TranslationCache => translation_cache::run(ctx, log)?,
         Action::EmptyUserdata => userdata::run_empty(log)?,
         Action::UserdataTemplate => userdata::run_template(ctx, log)?,
@@ -79,7 +81,7 @@ pub fn output_key(node: &Node) -> Option<String> {
         Action::Cargo(unit) => {
             crate::hash::sha256_file(unit.install.as_ref().unwrap_or(&unit.artifact)).ok()
         }
-        Action::DerivedImage => derived_image::output_key(),
+        Action::DerivedImage(_) => derived_image::output_key(),
         _ => None,
     }
 }
@@ -113,7 +115,7 @@ pub fn clean(node: &Node) -> Result<(), String> {
         Action::EmptyUserdata => vec![userdata::out().join(aim_storage::data::EMPTY_TEMPLATE)],
         // Its templates go with the next run.
         Action::UserdataTemplate => Vec::new(),
-        Action::DerivedImage => {
+        Action::DerivedImage(_) => {
             detach_derived()?;
             vec![aim_paths::derived_image_shadow()]
         }

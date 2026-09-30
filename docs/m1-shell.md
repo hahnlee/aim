@@ -64,19 +64,22 @@ checkpoint commit, `PHASE_BOOT_COMPLETED` to every system service
 and `UserController.onBootComplete`: `LOCKED_BOOT_COMPLETED` and
 `BOOT_COMPLETED` to apps (WorkManager, alarms re-armed, GMS).
 
-**Where the mode comes from.** The derived image serves both modes, and
-device mode keeps the shell (ADR 0013, consequences). The mode is a boot
-input: guest-init gets it from its command line (as `aim-display --mode
-windows` now) and sets a vendor SKU, `ro.boot.product.vendor.sku=windows`,
-a property Android already keys device variants on. Everything
-mode-dependent follows it with a supported mechanism:
+**One image for both modes** (D1): the derived image leaves the shell
+out, and device mode is a debugging view of the display without an
+Android shell; nothing depends on the mode. SystemUI is
+`android:persistent` (`packages/SystemUI/AndroidManifest.xml:409`), so
+AMS starts it whatever SystemServer does; only its absence keeps it from
+running. Until the switch this is a check-only image variant, `cargo aim
+build --variant lightweight-shell` ([build.md](build.md), "Image
+variants"), whose entries (`image/variants/lightweight-shell.toml`) move
+into `image/overlay.toml` with the switch:
 
 | What | Mechanism |
 | --- | --- |
-| The placeholder home | `init.aim.rc`: `on property:ro.boot.product.vendor.sku=windows`, `setprop ro.system_user_home_needed true` |
-| Resource values (wallpaper check, shell-only service configs) | static RROs with `android:requiredSystemPropertyName`/`Value`; framework-res declares no overlayable, so a preinstalled overlay may override its configs (`cmds/idmap2/libidmap2/ResourceMapping.cpp:60-75`) |
-| Features (PiP, if D3 says so) | `/vendor/etc/sysconfig/sku_windows/`, read only for that SKU (`SystemConfig.java:707-715`, `<unavailable-feature>`) |
-| The shell packages | open, decision D1: SystemUI is `android:persistent` (`packages/SystemUI/AndroidManifest.xml:409`), so AMS starts it whatever SystemServer does; only its absence or a disabled package keeps it from running |
+| The shell packages | removed: SystemUIGoogle, NexusLauncherRelease, WallpaperPickerGoogleRelease and ThemePicker (the wallpaper and style pickers), QuickAccessWallet (a plugin of SystemUI's global actions) |
+| The placeholder home | `/vendor/etc/init/aim-lightweight-shell.rc`: `setprop ro.system_user_home_needed true` |
+| Resource values (wallpaper check, shell-only service configs) | a static RRO, `java/lightweight-shell-overlay`, in `/system_ext/overlay`: framework-res declares no overlayable, so a preinstalled overlay may override its configs (`cmds/idmap2/libidmap2/ResourceMapping.cpp:60-75`), and `/system_ext` overlays take precedence over `/product`'s (`PackagePartitions`), where `PixelConfigOverlayCommon` names the shell-only services |
+| No caption | the same rc: `ro.vendor.aim.freeform_caption_dp=0`, which aim-windows reports ([windows.md](windows.md)) |
 
 ## 2. WMShell's roles
 
@@ -212,12 +215,12 @@ callbacks.
 
 | | Question | Options | Recommendation |
 | --- | --- | --- | --- |
-| D1 | How window mode leaves the shell packages out, and whether the modes share a data directory | (a) the shell is removed from the image for both modes (device mode shows the display without an Android shell); (b) a mode-conditional `remove` in image/overlay.toml that guest-init applies by path map for the SKU: switching modes on one data directory makes PackageManager drop and re-add them (the launcher's layout, SystemUI's settings and the HOME role are reset); (c) as (b) with one data directory per mode | (c) while device mode keeps the shell; (a) once device mode is a debugging view |
+| D1 | How window mode leaves the shell packages out, and whether the modes share a data directory | (a) the shell is removed from the image for both modes (device mode shows the display without an Android shell); (b) a mode-conditional `remove` in image/overlay.toml that guest-init applies by path map for the SKU: switching modes on one data directory makes PackageManager drop and re-add them (the launcher's layout, SystemUI's settings and the HOME role are reset); (c) as (b) with one data directory per mode | decided (#463): (a), no SKU for the mode |
 | D2 | The Android lock credential in window mode | no Android credential (the Mac login is the lock; a PIN set in Settings leaves user 0's credential-encrypted storage locked at the next boot, with no unlock UI); or a native unlock and credential sheet (step 4) | the native sheet, since Settings lets users set a PIN |
 | D3 | Picture-in-picture | declare `android.software.picture_in_picture` unavailable in window mode (apps check it); or step 8 with a floating Mac window | unavailable in M1, step 8 later |
-| D4 | Splash screens | none; the Mac window shows the app's icon on its splash background until the first frame (aim-apps draws the icons); or step 8 | none in M1 |
+| D4 | Splash screens | none; the Mac window shows the app's icon on its splash background until the first frame (aim-apps draws the icons); or step 8 | decided (#463): the shim's window appears at once with the app's icon until the first frame (`startActivityAndWait`, [windows.md](windows.md), "App shims"); step 8 later |
 | D5 | Language of the Android-side replacements that must be Android components (the consent activity, an organizer and player) | Java app / `app_process`; Rust `NativeActivity` over JNI; thin C++ over libgui | Rust where the NDK reaches, the rest decided per piece |
-| D6 | What an app's "go home" (a HOME intent) does on the Mac | nothing visible (the translucent placeholder takes focus); hide the app's windows; show the desktop | hide the app's windows |
+| D6 | What an app's "go home" (a HOME intent) does on the Mac | nothing visible (the translucent placeholder takes focus); hide the app's windows; show the desktop | decided (#463): the app hides, as with Cmd+H ([windows.md](windows.md), "Home") |
 | D7 | Volume | Android's stream volumes stay Android's, with a Mac-style HUD; or tie the music stream to the Mac's output volume | decided (#463): the media volume is the Mac's output volume, both ways, no HUD, mute follows the Mac |
 | D8 | Quick Settings tiles | a menu-bar extra that binds apps' `TileService`s; or none (`requestAddTileService` answers "not added") | none in M1 |
 

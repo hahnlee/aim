@@ -57,6 +57,9 @@ commands:
 options:
   -v, --verbose          show the commands' output
   -j, --jobs N           nodes to run at once (default 3)
+  --variant NAME         (build, boot, status) the derived image with the
+                         entries of image/variants/NAME.toml too, a check-only
+                         image; a build without it makes the image again
 
 A NODE is a name from `cargo aim status` or a prefix of names: `hal` is every
 hal/... node.";
@@ -103,6 +106,7 @@ struct Args {
     runs: usize,
     keep: bool,
     compare: Vec<String>,
+    variant: Option<String>,
 }
 
 fn parse(args: Vec<String>) -> Result<Args, String> {
@@ -121,6 +125,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         runs: 1,
         keep: false,
         compare: Vec::new(),
+        variant: None,
     };
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().ok_or(format!("{flag} needs a value"));
@@ -146,6 +151,9 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
                     .ok_or("--runs needs a positive number")?
             }
             "--keep" if parsed.command == "bench" => parsed.keep = true,
+            "--variant" if matches!(parsed.command.as_str(), "build" | "boot" | "status") => {
+                parsed.variant = Some(value(&arg)?)
+            }
             "--compare" if parsed.command == "bench" => {
                 parsed.compare = vec![value(&arg)?, value(&arg)?];
             }
@@ -168,9 +176,9 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
     Ok(parsed)
 }
 
-fn load(verbose: bool) -> Result<(Graph, Ctx), String> {
+fn load(verbose: bool, variant: Option<&str>) -> Result<(Graph, Ctx), String> {
     let workspace = cargo::Workspace::load()?;
-    let nodes = nodes::declare(workspace.nodes()?)?;
+    let nodes = nodes::declare(workspace.nodes()?, variant)?;
     let graph = Graph::new(nodes)?;
     Ok((
         graph,
@@ -208,7 +216,7 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
     let options = Options { jobs: args.jobs };
     match args.command.as_str() {
         "build" => {
-            let (graph, ctx) = load(args.verbose)?;
+            let (graph, ctx) = load(args.verbose, args.variant.as_deref())?;
             let targets = if args.names.is_empty() {
                 graph.boot_set()
             } else {
@@ -219,7 +227,7 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         "status" => {
-            let (graph, ctx) = load(args.verbose)?;
+            let (graph, ctx) = load(args.verbose, args.variant.as_deref())?;
             let targets = if args.names.is_empty() {
                 graph.all()
             } else {
@@ -229,7 +237,7 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         "clean" => {
-            let (graph, _) = load(args.verbose)?;
+            let (graph, _) = load(args.verbose, args.variant.as_deref())?;
             let _lock = lock()?;
             if args.names.is_empty() {
                 nodes::detach_derived()?;
@@ -247,12 +255,12 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         "test" => {
-            let (graph, ctx) = load(args.verbose)?;
+            let (graph, ctx) = load(args.verbose, args.variant.as_deref())?;
             let _lock = lock()?;
             test::run(&graph, &ctx, &options, args.integration, args.timeout)
         }
         "boot" => {
-            let (graph, ctx) = load(args.verbose)?;
+            let (graph, ctx) = load(args.verbose, args.variant.as_deref())?;
             {
                 let _lock = lock()?;
                 graph::build(&graph, &graph.boot_set(), &ctx, &options)?;
@@ -261,7 +269,7 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
         }
         "bench" if !args.compare.is_empty() => bench::compare(&args.compare[0], &args.compare[1]),
         "bench" => {
-            let (graph, ctx) = load(args.verbose)?;
+            let (graph, ctx) = load(args.verbose, args.variant.as_deref())?;
             {
                 let _lock = lock()?;
                 graph::build(&graph, &graph.boot_set(), &ctx, &options)?;

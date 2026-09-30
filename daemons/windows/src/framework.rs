@@ -21,7 +21,7 @@ use binder::{
 
 /// `IActivityTaskManager` transaction codes.
 mod atm {
-    pub const START_ACTIVITY_AS_USER: u32 = 3;
+    pub const START_ACTIVITY_AND_WAIT: u32 = 6;
     pub const SET_FOCUSED_TASK: u32 = 20;
     pub const REMOVE_TASK: u32 = 22;
     pub const GET_TASK_BOUNDS: u32 = 32;
@@ -185,10 +185,11 @@ impl BpActivityTaskManager {
         Ok(call(&self.binder, atm::REMOVE_TASK, |p| p.write(&task))?.read()?)
     }
 
-    /// Start launcher activity `class` of `package` as a launcher would;
-    /// the `ActivityManager.START_*` result.
-    pub fn start_activity(&self, package: &str, class: &str) -> Result<i32> {
-        let reply = call(&self.binder, atm::START_ACTIVITY_AS_USER, |p| {
+    /// Start launcher activity `class` of `package` as a launcher would,
+    /// and wait until it has drawn its first frame (or the launch ended),
+    /// as `am start -W` does; the `ActivityManager.START_*` result.
+    pub fn start_activity_and_wait(&self, package: &str, class: &str) -> Result<i32> {
+        let reply = call(&self.binder, atm::START_ACTIVITY_AND_WAIT, |p| {
             p.write(&None::<SpIBinder>)?; // caller
             p.write(&"android")?; // callingPackage
             p.write(&None::<String>)?; // callingFeatureId
@@ -203,6 +204,10 @@ impl BpActivityTaskManager {
             p.write(&0i32)?; // no options
             p.write(&USER_CURRENT)
         })?;
+        // The `WaitResult`, as `writeTypedObject` writes it: its result first.
+        if reply.read::<i32>()? == 0 {
+            return Err(Status::new_exception(ExceptionCode::ILLEGAL_STATE, None));
+        }
         Ok(reply.read()?)
     }
 }

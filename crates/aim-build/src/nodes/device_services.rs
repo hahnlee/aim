@@ -10,6 +10,9 @@
 //! - `framework-overlay.apk`, the static overlay of framework-res of
 //!   `java/framework-overlay` that names the service in
 //!   `config_deviceSpecificSystemServices`, signed with AOSP's test key;
+//! - `lightweight-shell-overlay.apk`, the overlay of
+//!   `java/lightweight-shell-overlay` for the image without the Android
+//!   shell (docs/m1-shell.md), signed likewise;
 //! - `notification-permission.apk`, the activity of
 //!   `java/notification-permission` that system_server starts in place of
 //!   PermissionController's dialog for POST_NOTIFICATIONS (#470), compiled
@@ -26,6 +29,7 @@ use std::path::PathBuf;
 
 const SOURCES: &str = "java/device-services";
 const OVERLAY: &str = "java/framework-overlay";
+const SHELL_OVERLAY: &str = "java/lightweight-shell-overlay";
 const NOTIFICATION_PERMISSION: &str = "java/notification-permission";
 /// The jar's guest path.
 pub const JAR: &str = "/system/framework/aim-services.jar";
@@ -43,6 +47,7 @@ pub fn node() -> Node {
     let mut inputs = vec![repo(java::LOCK)];
     inputs.extend(files(SOURCES));
     inputs.extend(files(OVERLAY));
+    inputs.extend(files(SHELL_OVERLAY));
     inputs.extend(files(NOTIFICATION_PERMISSION));
     Node {
         name: "device-services".into(),
@@ -52,6 +57,7 @@ pub fn node() -> Node {
             jar(),
             out().join("systemserverclasspath.pb"),
             out().join("framework-overlay.apk"),
+            out().join("lightweight-shell-overlay.apk"),
             out().join("notification-permission.apk"),
         ],
         tools: Vec::new(),
@@ -106,15 +112,20 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     }));
     fs::write(staged.join("systemserverclasspath.pb"), fragment).map_err(|e| e.to_string())?;
 
-    let overlay = repo(OVERLAY);
-    tools.apk(
-        log,
-        &overlay.join("AndroidManifest.xml"),
-        Some(&overlay.join("res")),
-        None,
-        &image.join("system/framework/framework-res.apk"),
-        &staged.join("framework-overlay.apk"),
-    )?;
+    for (dir, apk) in [
+        (OVERLAY, "framework-overlay.apk"),
+        (SHELL_OVERLAY, "lightweight-shell-overlay.apk"),
+    ] {
+        let overlay = repo(dir);
+        tools.apk(
+            log,
+            &overlay.join("AndroidManifest.xml"),
+            Some(&overlay.join("res")),
+            None,
+            &image.join("system/framework/framework-res.apk"),
+            &staged.join(apk),
+        )?;
+    }
 
     // An app's code: it links against the boot class path only.
     let app = repo(NOTIFICATION_PERMISSION);

@@ -1,0 +1,10 @@
+# The lightweight shell (docs/m1-shell.md): the image has no launcher,
+# SystemUI or wallpaper.
+
+on early-init
+    # ActivityManagerService enables the platform's placeholder home,
+    # SystemUserHomeActivity: boot completion waits for a HOME activity.
+    setprop ro.system_user_home_needed true
+    # No WMShell, so no window decoration draws a caption in a freeform
+    # task: aim-windows reports none, and the Mac's title bar is its own.
+    setprop ro.vendor.aim.freeform_caption_dp 0

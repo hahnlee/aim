@@ -1,0 +1,41 @@
+# The lightweight shell (docs/m1-shell.md, #463): the derived image
+# without the Android shell, built only on request as a check-only
+# variant (`cargo aim build --variant lightweight-shell`, docs/build.md).
+# Its entries count as image/overlay.toml's, with the same schema and
+# rules; they move there when the variant becomes the image (D1: one
+# image for both modes).
+
+schema = 1
+
+# The shell's packages: macOS is the shell (the Dock, the menu bar,
+# Notification Center), so none of them runs.
+
+[[remove]]
+path = "/system_ext/priv-app/SystemUIGoogle"
+reason = "SystemUI (the status bar, shade, keyguard, ImageWallpaper, WMShell): the lightweight shell has none; the platform handles its absence (docs/m1-shell.md, sections 1 and 3)"
+
+[[remove]]
+path = "/system_ext/priv-app/NexusLauncherRelease"
+reason = "the launcher (Quickstep: home, recents, taskbar): the placeholder home of ro.system_user_home_needed is the HOME activity"
+
+[[remove]]
+path = "/system_ext/priv-app/WallpaperPickerGoogleRelease"
+reason = "the wallpaper and style picker: no wallpaper is drawn without SystemUI's ImageWallpaper"
+
+[[remove]]
+path = "/system_ext/priv-app/ThemePicker"
+reason = "AOSP's wallpaper and style picker, as the removed Google one"
+
+[[remove]]
+path = "/system_ext/priv-app/QuickAccessWallet"
+reason = "a plugin only SystemUI's global actions load"
+
+[[add]]
+path = "/vendor/etc/init/aim-lightweight-shell.rc"
+source = "image/vendor/etc/init/aim-lightweight-shell.rc"
+reason = "the placeholder home (ro.system_user_home_needed) and no freeform caption for aim-windows"
+
+[[add]]
+path = "/system_ext/overlay/aim-lightweight-shell-overlay.apk"
+source = "target/aim/device-services/lightweight-shell-overlay.apk"
+reason = "static overlay of framework-res: no wait for a wallpaper at boot, and none of the services only the shell uses; in /system_ext, whose overlays take precedence over /product's"

@@ -18,10 +18,15 @@
 //! the task's window, which takes landscape or portrait proportions, or
 //! the user's again. A manifest's `screenOrientation` needs nothing:
 //! freeform launches such a task with bounds of that orientation.
+//!
+//! The desktop coming to the front over the task in front (the app started
+//! a HOME intent) hides that task's app, as Cmd+H hides a Mac app: its
+//! tasks stay, and its Dock icon brings them back (docs/m1-shell.md, D6).
 
 mod framework;
 
 use std::collections::HashMap;
+use std::ffi::c_char;
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::fd::FromRawFd;
@@ -41,8 +46,17 @@ use framework::{
 const DISPLAY: i32 = 0;
 /// The height of a freeform task's caption, which the original window
 /// decoration draws inside the top of the task: WMShell's
-/// `freeform_decor_caption_height` in the pinned image's SystemUI.
+/// `freeform_decor_caption_height` in the pinned image's SystemUI. An
+/// image without WMShell says so in [`CAPTION_PROPERTY`].
 const CAPTION_DP: i32 = 42;
+/// The caption's height in dp, where the image sets it.
+const CAPTION_PROPERTY: &std::ffi::CStr = c"ro.vendor.aim.freeform_caption_dp";
+
+unsafe extern "C" {
+    /// bionic: a system property's value, at most `PROP_VALUE_MAX` (92)
+    /// bytes with its NUL, and its length.
+    fn __system_property_get(name: *const c_char, value: *mut c_char) -> i32;
+}
 
 #[derive(Default)]
 struct Task {
@@ -69,6 +83,8 @@ struct Bridge {
     size: (i32, i32),
     /// The caption's height in pixels.
     caption: i32,
+    /// The task with a window last in front.
+    in_front: Mutex<Option<i32>>,
 }
 
 impl Bridge {
@@ -173,6 +189,13 @@ impl Bridge {
         }
     }
 
+    /// Whether `task` fills the display: the desktop the windows float
+    /// over (the home task).
+    fn desktop(&self, task: i32) -> bool {
+        let (w, h) = self.size;
+        matches!(self.atm.task_bounds(task), Ok(Some(b)) if b == [0, 0, w, h])
+    }
+
     fn shown(&self, task: i32) -> bool {
         self.tasks
             .lock()
@@ -183,6 +206,7 @@ impl Bridge {
 
     fn front(&self, task: i32) {
         if self.shown(task) {
+            *self.in_front.lock().unwrap() = Some(task);
             self.send(&Window {
                 op: window::FRONT,
                 task,
@@ -238,6 +262,7 @@ impl Bridge {
                 self.refresh(task, false);
             }
             Event::Removed(task) => {
+                self.in_front.lock().unwrap().take_if(|&mut t| t == task);
                 let t = self.tasks.lock().unwrap().remove(&task);
                 if t.is_some_and(|t| t.shown.is_some()) {
                     self.send(&Window {
@@ -251,13 +276,31 @@ impl Bridge {
                 self.update(&info);
                 self.refresh(info.task_id, false);
                 self.front(info.task_id);
+                if self.desktop(info.task_id)
+                    && let Some(task) = self.in_front.lock().unwrap().take()
+                    && self.shown(task)
+                {
+                    self.send(&Window {
+                        op: window::HIDE,
+                        task,
+                        ..Default::default()
+                    });
+                }
             }
             Event::DescriptionChanged(info) if info.display_id == DISPLAY => self.update(&info),
-            Event::MovedToBack(info) if self.shown(info.task_id) => self.send(&Window {
-                op: window::MOVED_TO_BACK,
-                task: info.task_id,
-                ..Default::default()
-            }),
+            Event::MovedToBack(info) if self.shown(info.task_id) => {
+                // Not a HOME intent: the desktop that comes to the front
+                // after it hides nothing.
+                self.in_front
+                    .lock()
+                    .unwrap()
+                    .take_if(|&mut t| t == info.task_id);
+                self.send(&Window {
+                    op: window::MOVED_TO_BACK,
+                    task: info.task_id,
+                    ..Default::default()
+                })
+            }
             Event::Focused(task) => {
                 let started = {
                     let mut tasks = self.tasks.lock().unwrap();
@@ -286,8 +329,23 @@ impl Bridge {
         }
     }
 
+    /// Start launcher activity `activity` (`package/class`), then tell the
+    /// display server once it has drawn its first frame or the launch has
+    /// ended: a splash shows until then.
+    fn launch(&self, activity: &str) {
+        match activity.split_once('/') {
+            Some((package, class)) => match self.atm.start_activity_and_wait(package, class) {
+                Ok(r) if r < 0 => log::warn!("start {activity}: {r}"),
+                Ok(_) => {}
+                Err(e) => log::warn!("start {activity}: {e}"),
+            },
+            None => log::warn!("start {activity}: not package/class"),
+        }
+        self.send(&Window::with_text(window::DRAWN, 0, activity));
+    }
+
     /// Carry out one request of the display server.
-    fn request(&self, w: &Window) {
+    fn request(self: &Arc<Self>, w: &Window) {
         let task = w.task;
         let r = match w.op {
             window::SET_BOUNDS => {
@@ -299,17 +357,12 @@ impl Bridge {
             }
             window::FOCUS => self.atm.set_focused_task(task),
             window::CLOSE => self.atm.remove_task(task).map(drop),
-            window::LAUNCH => match w.text().split_once('/') {
-                Some((package, class)) => self.atm.start_activity(package, class).map(|r| {
-                    if r < 0 {
-                        log::warn!("start {}: {r}", w.text());
-                    }
-                }),
-                None => {
-                    log::warn!("start {}: not package/class", w.text());
-                    Ok(())
-                }
-            },
+            window::LAUNCH => {
+                // It waits for the app's first frame; other requests go on.
+                let (bridge, activity) = (self.clone(), w.text().to_string());
+                std::thread::spawn(move || bridge.launch(&activity));
+                Ok(())
+            }
             op => {
                 log::warn!("unknown request {op}");
                 Ok(())
@@ -376,7 +429,7 @@ fn main() {
         }
     };
     // As `getDimensionPixelSize` rounds.
-    let caption = (CAPTION_DP * density + 80) / 160;
+    let caption = (caption_dp() * density + 80) / 160;
     let Ok(writer) = host.try_clone() else {
         std::process::exit(1);
     };
@@ -387,6 +440,7 @@ fn main() {
         tasks: Mutex::new(HashMap::new()),
         size,
         caption,
+        in_front: Mutex::new(None),
     });
     let listener = framework::new_listener(Listener(bridge.clone()));
     if let Err(e) = bridge.atm.register_task_stack_listener(&listener) {
@@ -413,6 +467,18 @@ fn main() {
         }
         bridge.request(&w);
     }
+}
+
+/// [`CAPTION_PROPERTY`], else [`CAPTION_DP`].
+fn caption_dp() -> i32 {
+    let mut value = [0u8; 92];
+    // SAFETY: a NUL-terminated name and a buffer of PROP_VALUE_MAX bytes.
+    let len =
+        unsafe { __system_property_get(CAPTION_PROPERTY.as_ptr(), value.as_mut_ptr().cast()) };
+    std::str::from_utf8(&value[..len.clamp(0, 91) as usize])
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(CAPTION_DP)
 }
 
 /// Freeform windowing on the default display in window mode, fullscreen

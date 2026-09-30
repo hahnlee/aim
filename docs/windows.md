@@ -45,9 +45,11 @@ task's window lies exactly over the task. The rest follows from that:
 - **The caption and the bars are out of sight.** The freeform caption
   (WMShell's window decoration, 42 dp) lies inside the top of the task,
   under the window's title bar, which is made at least as tall (a unified
-  toolbar). The status bar lies under the menu bar; the display has
-  `BAR_MARGIN` rows below the screen, where the navigation bar or taskbar
-  lies.
+  toolbar). An image without WMShell (the lightweight shell,
+  [m1-shell.md](m1-shell.md)) sets `ro.vendor.aim.freeform_caption_dp` to
+  0: no caption, and a standard title bar (#545). The status bar lies
+  under the menu bar; the display has `BAR_MARGIN` rows below the screen,
+  where the navigation bar or taskbar lies.
 
 ## Pieces
 
@@ -68,7 +70,7 @@ task's window lies exactly over the task. The rest follows from that:
 `aim-windows` is a system daemon (`/system_ext/etc/init/aim-windows.rc`,
 `user system`) that speaks the platform's own binder interfaces:
 `IActivityTaskManager` (`registerTaskStackListener`, `getTaskBounds`,
-`resizeTask`, `setFocusedTask`, `removeTask`, `startActivityAsUser`),
+`resizeTask`, `setFocusedTask`, `removeTask`, `startActivityAndWait`),
 `IWindowManager` (`get`/`setWindowingMode`, base display size and density)
 and the `ITaskStackListener` it registers (tasks, focus and
 `onActivityRequestedOrientationChanged`). These are Java AIDL interfaces
@@ -103,10 +105,12 @@ drops the old connection's tasks. The mode:
 | `MOVED_TO_BACK` | guest | Back on its root activity moved it behind the others |
 | `ORIENTATION` | guest | an activity of it asked for landscape, portrait or neither (`setRequestedOrientation`) |
 | `REMOVED` | guest | the task is gone |
+| `HIDE` | guest | the desktop (a task that fills the display: home) came to the front over the task: its app hides |
+| `DRAWN` | guest | the `LAUNCH` of `package/class` drew its first frame, or ended |
 | `SET_BOUNDS` | server | move or resize the task (`resizeTask`); the bridge answers with `TASK` |
 | `FOCUS` | server | `setFocusedTask` |
 | `CLOSE` | server | `removeTask` |
-| `LAUNCH` | server | start a package's launcher activity in a new task |
+| `LAUNCH` | server | start a package's launcher activity in a new task (`startActivityAndWait`, in a thread of its own; `DRAWN` when it returns) |
 
 ## Windows
 
@@ -157,6 +161,12 @@ drops the old connection's tasks. The mode:
   from the shims in `--apps`); else its package.
 - **Occlusion.** Hidden and minimized windows are not presented into; a
   window that becomes visible shows the last frame at once.
+- **Home.** An app that starts a HOME intent while its task is in front
+  brings the desktop (the home task) to the front: its app hides, as Cmd+H
+  hides a Mac app, and its tasks stay; the Dock icon brings it back
+  (m1-shell.md, D6). The server, which shows several apps, minimizes that
+  app's windows instead. A task Android moves to the back (Back on its
+  root activity) is not a HOME intent and hides nothing.
 
 ## Back
 
@@ -228,7 +238,12 @@ Settings.app/Contents/
 - **Launch.** Opening a shim (Finder, Dock, Launchpad, Spotlight, `open`)
   starts its launcher activity in a new task (`LAUNCH`); Android brings a
   running task to the front instead. Clicking the Dock icon again does the
-  same. Quitting a shim closes the tasks it shows. Closing its last window
+  same. A shim with no window shows a splash at once: a window with the
+  app's icon on the window background, which moves into the task's window
+  when Android gives the task bounds and goes when the launch has drawn
+  its first frame (`DRAWN`, what `am start -W` waits for). Android draws
+  no starting window of its own without WMShell (m1-shell.md, D4).
+  Quitting a shim closes the tasks it shows. Closing its last window
   does not quit it, as with a Mac app (an app may pass through a task that
   closes before its next one opens); a shim whose bundle is removed (its
   app uninstalled) quits once it has no window.

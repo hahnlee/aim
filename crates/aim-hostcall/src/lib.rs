@@ -422,6 +422,14 @@ pub mod display {
         /// Guest: an activity of the task asked for an orientation
         /// (`setRequestedOrientation`), [`super::Window::orientation`].
         pub const ORIENTATION: u32 = 8;
+        /// Guest: the task's app went home (the desktop came to the front
+        /// while the task was in front): the app's windows hide, as Cmd+H
+        /// hides a Mac app's.
+        pub const HIDE: u32 = 9;
+        /// Guest: the launch of `package/class` in [`super::Window::text`]
+        /// the server asked for ([`LAUNCH`]) has drawn its first frame, or
+        /// ended without one.
+        pub const DRAWN: u32 = 10;
         /// Server: move or resize the task to [`super::Window::bounds`].
         pub const SET_BOUNDS: u32 = 16;
         /// Server: make the task the top (focused) one.
