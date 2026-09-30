@@ -43,6 +43,17 @@ reused data image, 20-25 s; fresh data images 50-52 s, then a cold
 Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
 
+The device's own system service (`dev.aim.server.DeviceServices`,
+docs/system-services.md, "The system_server bridge") is on the system
+server class path (`/system/framework/aim-services.jar`, compiled by the
+`oat` node) and named by the static overlay
+`/vendor/overlay/aim-framework-overlay.apk`. SystemServer starts it in
+`StartDeviceSpecificServices`, and at
+`PHASE_DEVICE_SPECIFIC_SERVICES_READY` it hands guest-init's service
+host (`aim.service_host`) the bridge: guest-init logs "system_server's
+bridge attached". Its second boot of a data directory reached
+`sys.boot_completed` in 12 s (load 8), and Settings started cold in 231 ms.
+
 ## Compiled oat files (2026-09-30)
 
 The boot image extension holds all 31 mainline BCP jars, as the original's,
