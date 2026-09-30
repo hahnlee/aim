@@ -67,6 +67,32 @@ pub fn task_of_window(number: isize) -> Option<i32> {
 }
 
 impl Host {
+    /// The pointer's image (None: the arrow), its pixels after the record.
+    fn send_cursor(&self, image: Option<&Image>) {
+        let (width, height, hot, pixels) = image.map_or((0, 0, (0, 0), &[][..]), |i| {
+            (i.width, i.height, i.hot, &i.pixels[..])
+        });
+        let r = Rec {
+            op: host::CURSOR,
+            id: pixels.len() as u64,
+            import: Import {
+                width,
+                height,
+                stride_bytes: width * 4,
+                ..Default::default()
+            },
+            input: HostInput {
+                x: hot.0 as f64,
+                y: hot.1 as f64,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut w = self.writer.lock().unwrap();
+        let _ = wire::send(std::os::fd::AsFd::as_fd(&*w), wire::bytes(&r), None)
+            .and_then(|()| w.write_all(pixels));
+    }
+
     fn send(&self, r: &Rec, fd: Option<i32>) -> bool {
         let w = self.writer.lock().unwrap();
         wire::send(std::os::fd::AsFd::as_fd(&*w), wire::bytes(r), fd).is_ok()
@@ -155,29 +181,8 @@ impl Waiter {
 
 /// The pointer's image (None: the arrow), for every host's views.
 pub fn cursor(image: Option<&Image>) {
-    let (width, height, hot, pixels) = image.map_or((0, 0, (0, 0), &[][..]), |i| {
-        (i.width, i.height, i.hot, &i.pixels[..])
-    });
-    let r = Rec {
-        op: host::CURSOR,
-        id: pixels.len() as u64,
-        import: Import {
-            width,
-            height,
-            stride_bytes: width * 4,
-            ..Default::default()
-        },
-        input: HostInput {
-            x: hot.0 as f64,
-            y: hot.1 as f64,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
     for h in HOSTS.lock().unwrap().iter() {
-        let mut w = h.writer.lock().unwrap();
-        let _ = wire::send(std::os::fd::AsFd::as_fd(&*w), wire::bytes(&r), None)
-            .and_then(|()| w.write_all(pixels));
+        h.send_cursor(image);
     }
 }
 
@@ -230,6 +235,9 @@ pub fn serve(sock: OwnedFd) {
             return;
         }
         hosts.push(h.clone());
+    }
+    if let Some(image) = crate::cursor::current() {
+        h.send_cursor(Some(&image));
     }
     eprintln!("aim-display: window host for {package}");
     let adopted = h.clone();

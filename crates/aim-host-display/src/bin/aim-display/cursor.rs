@@ -99,6 +99,11 @@ pub fn serve(
     }
 }
 
+/// The server's current image, for a window host that just came.
+pub fn current() -> Option<Arc<Image>> {
+    SPRITE.lock().unwrap().as_ref().map(|s| s.image.clone())
+}
+
 /// Show `image` in this process's views and the window hosts'.
 fn publish(image: Option<Arc<Image>>) {
     crate::hosts::cursor(image.as_deref());
