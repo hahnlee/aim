@@ -534,6 +534,18 @@ path = "/vendor/etc/vintf/manifest/android.hardware.media.c2@1.0-service-goldfis
 reason = "declares the removed goldfish Codec2 store (HIDL)"
 
 [[remove]]
+path = "/system/app/SecureElement"
+reason = "the OMAPI service (com.android.se, persistent) reaches an eSE or UICC through a secure element HAL; the device has neither and declares no se.omapi feature"
+
+[[remove]]
+path = "/system/priv-app/DynamicSystemInstallationService"
+reason = "installs dynamic system images (DSU) to boot next, which a derived image does not; its two processes start at BOOT_COMPLETED"
+
+[[remove]]
+path = "/system_ext/priv-app/MultiDisplayProvider"
+reason = "the emulator's multi-display app (persistent, system uid): its receiver and JNI drive the extra displays the emulator host adds over its pipe (#462)"
+
+[[remove]]
 path = "/vendor/etc/init/android.hardware.radio.ranchu.rc"
 reason = "the ranchu radio HAL talks to QEMU's modem; telephony is undeclared"
 

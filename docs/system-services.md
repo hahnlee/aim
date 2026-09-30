@@ -410,8 +410,9 @@ of `am start -W -S`: Chrome 756 ms, Settings 754 ms, Calculator 1,134 ms.
 
 What SystemServer starts, what each start and each running service
 costs, and which services can stop (ADR 0013 decision 5.3, and the
-"original not started" step of every replacement). An analysis: nothing
-here is removed yet.
+"original not started" step of every replacement). The measurements
+below are from before any of it was turned off; what is off since is
+under "A1".
 
 **Method.** One disposable data directory booted twice (main 712da8eb,
 M2 Pro, host load about 9): a first boot, then Chrome
@@ -529,13 +530,21 @@ isolated compilation, contextual search and system captions (no
 | GestureLauncherService | 0 / 0 | - | `config_cameraDoubleTapPowerGestureEnabled`, `config_emergencyGestureEnabled` and the camera lift trigger off | Power-button gestures; the Mac has no power button events. |
 | `wallpaper_effects_generation` | 1 / 0 | 0 | `config_defaultWallpaperEffectsGenerationService` empty | Pixel's generated wallpaper effects. |
 
+Off since 2026-09-30, by the device's configuration: network time and
+OTA dexopt (`init.aim.rc` sets the two properties at `early-init`).
+Wi-Fi stays declared: presenting the Mac's network as Wi-Fi (#265)
+needs the features. USB stays: without the `usb` service GMS persistent
+crash-loops (#336), so `android.hardware.usb.host` is declared.
+The gesture launcher and wallpaper effects need a framework-res
+overlay, which the image build cannot make yet (#526).
+
 Persistent or boot-started system apps without hardware (not
 SystemServer services; a device without the hardware does not ship
 the APK, a `remove` in `image/overlay.toml`): `com.android.se`
 (SecureElement, no eSE or UICC), `com.android.dynsystem` (two processes
 at `BOOT_COMPLETED`, dynamic system updates), `com.android.emulator.multidisplay`
 (#462). With `com.android.phone` (A2) they are five processes, 0.56 s of
-CPU up to idle.
+CPU up to idle. The three are removed since 2026-09-30.
 
 **A2**
 
