@@ -1,7 +1,7 @@
 # First boot
 
-Status: design (#565); item 4, the data image as a clone (#563), is
-implemented.
+Status: design (#565); item 4, the data image as a clone (#563), and
+item 1, the device's APK compiled in the image, are implemented.
 
 A first boot (a new data directory) reaches `sys.boot_completed` in about
 11 s, a repeat boot of the same data in about 5.4 s. The difference is
