@@ -529,7 +529,12 @@ impl Boot {
             // Android's notifications on the Mac, from the original
             // NotificationManagerService once it is published.
             if let Some(display) = &options.display {
-                aim_services::notifications::Bridge::start(server.driver(), display);
+                let map = map.clone();
+                aim_services::notifications::Bridge::start(
+                    server.driver(),
+                    display,
+                    Arc::new(move |guest: &str| map.readable_by_others(guest)),
+                );
             }
         }
         let linux_run = LinuxRun {

@@ -8,9 +8,19 @@
 //! without a shim (the shell, system components) is shown by the system
 //! shim, `android`. The server keeps the notifications shown, so a host
 //! that connects (again) gets its package's at once.
+//!
+//! A new notification with a full-screen intent (`Post::full_screen`)
+//! arriving while the Mac's screen is locked or its display asleep wakes
+//! the display, and the bridge launches the intent: the app's activity is
+//! in its window when the user unlocks, as on a locked phone. Otherwise
+//! it is an ordinary alerting notification (macOS's time-sensitive level
+//! needs an entitlement ad hoc signed shims cannot have).
 
 use std::collections::BTreeMap;
+use std::ffi::c_void;
+use std::io::Write;
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -38,6 +48,71 @@ static STATE: Mutex<State> = Mutex::new(State {
     shown: BTreeMap::new(),
     launching: BTreeMap::new(),
 });
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGSessionCopyCurrentDictionary() -> *const c_void;
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayIsAsleep(display: u32) -> u32;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
+    fn CFStringCreateWithCString(
+        alloc: *const c_void,
+        s: *const std::ffi::c_char,
+        encoding: u32,
+    ) -> *const c_void;
+    fn CFBooleanGetValue(b: *const c_void) -> bool;
+    fn CFRelease(obj: *const c_void);
+}
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOPMAssertionDeclareUserActivity(name: *const c_void, kind: u32, id: *mut u32) -> i32;
+}
+
+const UTF8: u32 = 0x0800_0100;
+
+/// A CFString of `s`, released by the caller.
+fn cf_string(s: &std::ffi::CStr) -> *const c_void {
+    // SAFETY: a NUL-terminated string.
+    unsafe { CFStringCreateWithCString(std::ptr::null(), s.as_ptr(), UTF8) }
+}
+
+/// Whether the Mac's screen is locked or its main display asleep.
+fn mac_locked() -> bool {
+    // SAFETY: plain queries; the session dictionary and key are released.
+    unsafe {
+        if CGDisplayIsAsleep(CGMainDisplayID()) != 0 {
+            return true;
+        }
+        let session = CGSessionCopyCurrentDictionary();
+        if session.is_null() {
+            return false;
+        }
+        let key = cf_string(c"CGSSessionScreenIsLocked");
+        let v = CFDictionaryGetValue(session, key);
+        let locked = !v.is_null() && CFBooleanGetValue(v);
+        CFRelease(key);
+        CFRelease(session);
+        locked
+    }
+}
+
+/// Wakes the display as the user's activity would (it stays locked).
+fn wake_display() {
+    static ASSERTION: AtomicU32 = AtomicU32::new(0);
+    let mut id = ASSERTION.load(Ordering::Relaxed);
+    let name = cf_string(c"Android full-screen notification");
+    // SAFETY: a CFString name and an assertion id we keep; kIOPMUserActiveLocal.
+    unsafe {
+        IOPMAssertionDeclareUserActivity(name, 0, &mut id);
+        CFRelease(name);
+    }
+    ASSERTION.store(id, Ordering::Relaxed);
+}
 
 /// The package whose shim shows `package`'s notifications.
 fn owner(package: &str) -> Option<String> {
@@ -90,7 +165,16 @@ pub fn serve_bridge(sock: UnixStream) {
         let mut s = STATE.lock().unwrap();
         let package = match &m {
             Message::Post(p) => {
-                s.shown.insert(p.key.clone(), p.clone());
+                let new = s.shown.insert(p.key.clone(), p.clone()).is_none();
+                if new && p.full_screen && mac_locked() {
+                    wake_display();
+                    let launch = Message::FullScreen { key: p.key.clone() };
+                    if let Some(b) = s.bridge.as_mut()
+                        && let Err(e) = b.write_all(&launch.frame())
+                    {
+                        eprintln!("aim-display: notification bridge: {e}");
+                    }
+                }
                 p.package.clone()
             }
             Message::Remove { key, package } => {
@@ -138,7 +222,6 @@ pub fn host_connected(h: &Arc<Host>) {
 
 /// What the user did with a notification, from a window host.
 pub fn from_host(m: &Message) {
-    use std::io::Write;
     if let Message::Shown { key, shown, error } = m {
         let state = if *shown { "shown" } else { "not shown" };
         match error {

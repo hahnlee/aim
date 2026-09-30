@@ -26,6 +26,7 @@
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// Guest paths the syscall layer passes through to the host device node.
@@ -227,6 +228,42 @@ impl PathMap {
         let guest = join_guest(&done);
         let (host, area) = self.lookup(&guest);
         Ok(Resolved { guest, host, area })
+    }
+
+    /// The host file of guest path `guest` (symlinks followed) if a
+    /// process that neither owns it nor is in its group may read it: each
+    /// directory on the way searchable by others and the file readable by
+    /// them, by its guest mode (`guest_inode`, else the host's). The
+    /// read-only image is readable throughout.
+    pub fn readable_by_others(&self, guest: &str) -> Option<PathBuf> {
+        let resolved = self.resolve(guest, true).ok()?;
+        let parts: Vec<&str> = resolved
+            .guest
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .collect();
+        let mut at = String::new();
+        for (i, part) in parts.iter().enumerate() {
+            at.push('/');
+            at.push_str(part);
+            // Others' read for the file, search for a directory.
+            let need = if i + 1 == parts.len() { 0o004 } else { 0o001 };
+            match self.lookup(&at) {
+                (_, Area::ReadOnlyImage) => {}
+                (host, Area::Writable { .. }) => {
+                    let recorded = crate::guest_inode::read(&host).ok().flatten();
+                    let mode = match recorded.and_then(|a| a.mode) {
+                        Some(m) => m,
+                        None => fs::metadata(&host).ok()?.permissions().mode(),
+                    };
+                    if mode & need == 0 {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some(resolved.host)
     }
 
     /// The table in the `--path-map` file format (see the contract).
@@ -528,6 +565,42 @@ mod tests {
             map.lookup("/proc/sys/vm/x").1,
             Area::Kernfs { .. }
         ));
+    }
+
+    #[test]
+    fn others_read_by_guest_modes() {
+        use crate::guest_inode::{GuestInode, record};
+        let dir = std::env::temp_dir().join(format!("aim-paths-others-{}", std::process::id()));
+        let tmp = dir.join("data/local/tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("x.png"), b"png").unwrap();
+        let mode = |p: &Path, m: u32| {
+            record(
+                p,
+                GuestInode {
+                    mode: Some(m),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        mode(&dir.join("data"), 0o771);
+        mode(&dir.join("data/local"), 0o751);
+        mode(&tmp, 0o771);
+        mode(&tmp.join("x.png"), 0o644);
+        let map = Layout::new("/img".into(), dir.clone(), Some("/r".into())).path_map();
+        let x = "/data/local/tmp/x.png";
+        assert_eq!(map.readable_by_others(x), Some(tmp.join("x.png")));
+        mode(&tmp.join("x.png"), 0o640);
+        assert_eq!(map.readable_by_others(x), None);
+        mode(&tmp.join("x.png"), 0o644);
+        mode(&dir.join("data/local"), 0o750);
+        assert_eq!(map.readable_by_others(x), None);
+        assert_eq!(
+            map.readable_by_others("/system/framework/framework-res.apk"),
+            Some(PathBuf::from("/img/system/framework/framework-res.apk"))
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

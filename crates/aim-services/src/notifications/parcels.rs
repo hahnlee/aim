@@ -2,11 +2,12 @@
 //! the Java wire format of the pinned tag (`StatusBarNotification`,
 //! `Notification.writeToParcelImpl`, `Icon`, `Bitmap_writeToParcel`,
 //! `BaseBundle`, `Parcel.writeValue`, `Notification.Action`,
-//! `RemoteInput`, `Intent`, `ClipData`).
+//! `RemoteInput`, `Intent`, `ClipData`, `RemoteViews`, `ApplicationInfo`).
 //!
 //! A notification is read in order. `RemoteViews` (custom content, ticker
-//! or heads-up views) are not parsed: reading stops there, and what came
-//! before is kept ([`Notification::complete`] is false, #468).
+//! or heads-up views) are read past, not kept: the Mac cannot show them.
+//! What cannot be read ends the reading, and what came before is kept
+//! ([`Notification::complete`] is false).
 
 use aim_binder_host::parcel::{BAD_TYPE, BAD_VALUE, Binder, Parcel, Reader, Result};
 use aim_host_display::notify::Image;
@@ -66,21 +67,19 @@ pub trait Files {
     fn read(&self, fd: u32, len: usize) -> Option<Vec<u8>>;
 }
 
-/// A notification's icon, as far as the Mac can show it.
+/// A notification's icon.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Icon {
     Image(Image),
-    /// A resource or URI of the app: not drawn.
-    Elsewhere,
-}
-
-impl Icon {
-    pub fn image(&self) -> Option<&Image> {
-        match self {
-            Icon::Image(i) => Some(i),
-            Icon::Elsewhere => None,
-        }
-    }
+    /// Drawable `id` of `package`'s resources.
+    Resource {
+        package: String,
+        id: i32,
+    },
+    /// A `content:` or `file:` URI.
+    Uri(String),
+    /// A bitmap in a format the Mac does not take.
+    Unreadable,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -123,10 +122,15 @@ pub struct Notification {
     /// The token its `PendingIntent`s are sent with (`mAllowlistToken`).
     pub allowlist_token: Option<Binder>,
     pub content_intent: Option<Binder>,
+    pub full_screen_intent: Option<Binder>,
     pub ticker: Option<String>,
     pub large_icon: Option<Icon>,
     pub flags: i32,
     pub group: Option<String>,
+    /// `Notification.GROUP_ALERT_*`.
+    pub group_alert_behavior: i32,
+    /// Its `BubbleMetadata`'s flags.
+    pub bubble_flags: i32,
     pub extras: Extras,
     pub actions: Vec<Action>,
     pub channel_id: Option<String>,
@@ -138,10 +142,14 @@ pub struct Notification {
 impl Notification {
     /// Every binder it holds, which must outlive the parcel it came in.
     pub fn binders(&self) -> impl Iterator<Item = Binder> + '_ {
-        [self.allowlist_token, self.content_intent]
-            .into_iter()
-            .chain(self.actions.iter().map(|a| a.intent))
-            .flatten()
+        [
+            self.allowlist_token,
+            self.content_intent,
+            self.full_screen_intent,
+        ]
+        .into_iter()
+        .chain(self.actions.iter().map(|a| a.intent))
+        .flatten()
     }
 }
 
@@ -244,10 +252,8 @@ fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification
     n.content_intent = typed(r, pending_intent)?.flatten();
     typed(r, pending_intent)?; // delete intent
     n.ticker = typed(r, char_sequence)?.flatten();
-    // tickerView and contentView: RemoteViews.
-    if r.read_i32()? != 0 || r.read_i32()? != 0 {
-        return Ok(());
-    }
+    typed(r, |r| remote_views(r, files, 0))?; // ticker view
+    typed(r, |r| remote_views(r, files, 0))?; // content view
     n.large_icon = typed(r, |r| icon(r, files))?;
     r.read_i32()?; // defaults
     n.flags = r.read_i32()?;
@@ -258,7 +264,7 @@ fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification
     for _ in 0..4 {
         r.read_i32()?; // ledARGB, ledOnMS, ledOffMS, iconLevel
     }
-    typed(r, pending_intent)?; // full-screen intent
+    n.full_screen_intent = typed(r, pending_intent)?.flatten();
     r.read_i32()?; // priority
     r.read_string8()?; // category
     n.group = r.read_string8()?;
@@ -270,10 +276,8 @@ fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification
             n.actions.push(a);
         }
     }
-    // bigContentView and headsUpContentView: RemoteViews.
-    if r.read_i32()? != 0 || r.read_i32()? != 0 {
-        return Ok(());
-    }
+    typed(r, |r| remote_views(r, files, 0))?; // big content view
+    typed(r, |r| remote_views(r, files, 0))?; // heads-up content view
     r.read_i32()?; // visibility
     if r.read_i32()? != 0 {
         let mut public = Notification::default();
@@ -289,8 +293,8 @@ fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification
     typed(r, |r| r.read_string16())?; // locus id
     r.read_i32()?; // badge icon
     typed(r, char_sequence)?; // settings text
-    r.read_i32()?; // group alert behavior
-    typed(r, |r| bubble_metadata(r, files))?;
+    n.group_alert_behavior = r.read_i32()?;
+    n.bubble_flags = typed(r, |r| bubble_metadata(r, files))?.unwrap_or(0);
     r.read_bool()?; // allow system generated contextual actions
     r.read_i32()?; // FGS defer behavior
     // Notification.writeToParcel ends with the PendingIntents it wrote:
@@ -302,15 +306,385 @@ fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification
     Ok(())
 }
 
-/// `Notification.BubbleMetadata(Parcel)`.
-fn bubble_metadata(r: &mut Reader<'_>, files: &dyn Files) -> Result<()> {
+/// `Notification.BubbleMetadata(Parcel)`: its flags.
+fn bubble_metadata(r: &mut Reader<'_>, files: &dyn Files) -> Result<i32> {
     typed(r, pending_intent)?;
     typed(r, |r| icon(r, files))?;
     r.read_i32()?; // desired height
-    r.read_i32()?; // flags
+    let flags = r.read_i32()?;
     typed(r, pending_intent)?; // delete intent
     r.read_i32()?; // desired height resource
     typed(r, |r| r.read_string8())?; // shortcut id
+    Ok(flags)
+}
+
+/// How deep `RemoteViews` nest (`RemoteViews.MAX_NESTED_VIEWS`).
+const MAX_NESTED_VIEWS: u32 = 10;
+
+/// `RemoteViews(Parcel)`, read past. The root of a hierarchy (`depth` 0)
+/// carries the bitmap and collection caches its children share.
+fn remote_views(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()> {
+    if depth > MAX_NESTED_VIEWS {
+        return Err(BAD_VALUE);
+    }
+    let mode = r.read_i32()?;
+    if depth == 0 {
+        // BitmapCache: a typed list of bitmaps.
+        for _ in 0..r.read_i32()?.max(0) {
+            typed(r, |r| bitmap(r, files))?;
+        }
+        // RemoteCollectionCache: intent id, URI, items.
+        for _ in 0..r.read_i32()?.max(0) {
+            r.read_i32()?;
+            r.read_string8()?;
+            collection_items(r, files, depth)?;
+        }
+    }
+    match mode {
+        // MODE_NORMAL
+        0 => {
+            typed(r, application_info)?;
+            if r.read_i32()? != 0 {
+                r.skip(8)?; // ideal size, a SizeF
+            }
+            for _ in 0..3 {
+                r.read_i32()?; // layout, view id, light background layout
+            }
+            for _ in 0..r.read_i32()?.max(0) {
+                view_action(r, files, depth)?;
+            }
+        }
+        // MODE_HAS_LANDSCAPE_AND_PORTRAIT
+        1 => {
+            remote_views(r, files, depth + 1)?;
+            remote_views(r, files, depth + 1)?;
+        }
+        // MODE_HAS_SIZED_REMOTEVIEWS
+        2 => {
+            for _ in 0..r.read_i32()?.max(0) {
+                remote_views(r, files, depth + 1)?;
+            }
+        }
+        _ => return Err(BAD_VALUE),
+    }
+    r.read_i32()?; // apply flags
+    r.read_i64()?; // provider instance id
+    r.read_bool()?; // has draw instructions
+    Ok(())
+}
+
+/// `RemoteViews.RemoteCollectionItems(Parcel)`: its views, the first a
+/// root of its own unless the items are attached to a hierarchy.
+fn collection_items(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()> {
+    r.read_bool()?; // has stable ids
+    r.read_i32()?; // view type count
+    let length = r.read_i32()?;
+    skip_array(r, 8)?; // ids
+    let attached = r.read_bool()?;
+    for i in 0..length.max(0) {
+        let child = if i == 0 && !attached { 0 } else { depth + 1 };
+        remote_views(r, files, child)?;
+    }
+    Ok(())
+}
+
+/// `RemoteViews.RemoteResponse.readFromParcel`.
+fn remote_response(r: &mut Reader<'_>) -> Result<()> {
+    pending_intent(r)?;
+    if r.read_bool()? {
+        typed(r, crate::clip::intent)?; // fill-in intent
+    }
+    r.read_i32()?; // interaction type
+    skip_array(r, 4)?; // view ids
+    aim_service_aidl::read_string_list(r)?; // element names
+    Ok(())
+}
+
+/// `RemoteViews.BaseReflectionAction(Parcel)`: its value's type.
+fn reflection(r: &mut Reader<'_>) -> Result<i32> {
+    r.read_i32()?; // view id
+    r.read_string8()?; // method
+    r.read_i32()
+}
+
+/// One of a `RemoteViews`' actions: its tag, then the action
+/// (`RemoteViews.getActionFromParcel`).
+fn view_action(r: &mut Reader<'_>, files: &dyn Files, depth: u32) -> Result<()> {
+    let ints = |r: &mut Reader<'_>, n: usize| r.skip(4 * n);
+    match r.read_i32()? {
+        // SetOnClickResponse, SetOnCheckedChangeResponse
+        1 | 29 => {
+            r.read_i32()?;
+            remote_response(r)?;
+        }
+        // ReflectionAction
+        2 => match reflection(r)? {
+            // boolean, byte, short, int, float, char, blend mode
+            1..=4 | 6 | 8 | 17 => ints(r, 1)?,
+            // long, double
+            5 | 7 => r.skip(8)?,
+            9 => {
+                r.read_string8()?;
+            }
+            10 => {
+                char_sequence(r)?;
+            }
+            11 => {
+                typed(r, uri)?;
+            }
+            12 => {
+                typed(r, |r| bitmap(r, files))?;
+            }
+            13 => skip_bundle_or_null(r)?,
+            14 => {
+                typed(r, crate::clip::intent)?;
+            }
+            15 => {
+                typed(r, color_state_list)?;
+            }
+            16 => {
+                typed(r, |r| icon(r, files))?;
+            }
+            _ => {}
+        },
+        // SetDrawableTint: view, target background, color, mode
+        3 => ints(r, 4)?,
+        // ViewGroupActionAdd: view, index, stable id, the views
+        4 => {
+            ints(r, 3)?;
+            remote_views(r, files, depth + 1)?;
+        }
+        // ViewContentNavigation, SetEmptyView, ViewGroupActionRemove,
+        // SetCompoundButtonChecked, SetRadioGroupChecked
+        5 | 6 | 7 | 26 | 27 => ints(r, 2)?,
+        // SetPendingIntentTemplate, SetOnStylusHandwritingResponse
+        8 | 34 => {
+            r.read_i32()?;
+            pending_intent(r)?;
+        }
+        // SetRemoteViewsAdapterIntent
+        10 => {
+            r.read_i32()?;
+            typed(r, crate::clip::intent)?;
+        }
+        // TextViewDrawableAction: four icons, or four resources
+        11 => {
+            ints(r, 2)?;
+            if r.read_i32()? != 0 {
+                for _ in 0..4 {
+                    typed(r, |r| icon(r, files))?;
+                }
+            } else {
+                ints(r, 4)?;
+            }
+        }
+        // BitmapReflectionAction: view, method, bitmap id
+        12 => {
+            r.read_i32()?;
+            r.read_string8()?;
+            r.read_i32()?;
+        }
+        // TextViewSizeAction: view, units, size
+        13 => ints(r, 3)?,
+        // ViewPaddingAction
+        14 => ints(r, 5)?,
+        // SetRemoteInputsAction
+        18 => {
+            r.read_i32()?;
+            for _ in 0..r.read_i32()?.max(0) {
+                typed(r, remote_input)?;
+            }
+        }
+        // LayoutParamAction
+        19 => ints(r, 4)?,
+        // SetRippleDrawableColor: a ColorStateList by writeParcelable
+        21 => {
+            r.read_i32()?;
+            if r.read_string16()?.is_some() {
+                color_state_list(r)?;
+            }
+        }
+        // SetIntTagAction, SetViewOutlinePreferredRadiusAction
+        22 | 28 => ints(r, 3)?,
+        // RemoveFromParentAction
+        23 => ints(r, 1)?,
+        // ResourceReflectionAction, AttributeReflectionAction: type, id
+        24 | 32 => {
+            reflection(r)?;
+            ints(r, 2)?;
+        }
+        // ComplexUnitDimensionReflectionAction: value, unit
+        25 => {
+            reflection(r)?;
+            ints(r, 2)?;
+        }
+        // NightModeReflectionAction: light and dark values
+        30 => match reflection(r)? {
+            16 => {
+                typed(r, |r| icon(r, files))?;
+                typed(r, |r| icon(r, files))?;
+            }
+            15 => {
+                typed(r, color_state_list)?;
+                typed(r, color_state_list)?;
+            }
+            4 => ints(r, 2)?,
+            _ => return Err(BAD_VALUE),
+        },
+        // SetRemoteCollectionItemListAdapterAction: view, intent id,
+        // replaced, the service intent, else the items
+        31 => {
+            ints(r, 3)?;
+            if typed(r, crate::clip::intent)?.is_none() {
+                collection_items(r, files, depth)?;
+            }
+        }
+        // Draw instructions (behind a flag) and unknown actions.
+        _ => return Err(BAD_TYPE),
+    }
+    Ok(())
+}
+
+/// What an `ApplicationInfo` says of where an app's resources are.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ApplicationInfo {
+    pub source_dir: Option<String>,
+    pub theme: i32,
+}
+
+impl aim_service_aidl::ReadParcelable for ApplicationInfo {
+    fn read_from(r: &mut Reader<'_>) -> Result<Self> {
+        application_info(r)?.ok_or(BAD_VALUE)
+    }
+}
+
+/// `writeString8Array`: a count (-1 for null), then the strings.
+fn string8_array(r: &mut Reader<'_>) -> Result<()> {
+    for _ in 0..r.read_i32()?.max(0) {
+        r.read_string8()?;
+    }
+    Ok(())
+}
+
+/// `ApplicationInfo.CREATOR` (`readSquashed`): none when it refers back
+/// to a copy written earlier in the parcel.
+fn application_info(r: &mut Reader<'_>) -> Result<Option<ApplicationInfo>> {
+    if r.read_i32()? != 0 {
+        return Ok(None);
+    }
+    // PackageItemInfo: name, package, label, non-localized label, icon,
+    // logo, meta-data, banner, user icon, archived.
+    r.read_string8()?;
+    r.read_string8()?;
+    r.read_i32()?;
+    char_sequence(r)?;
+    r.skip(8)?;
+    skip_bundle_or_null(r)?;
+    r.skip(12)?;
+    // Task affinity, permission, process, class name.
+    for _ in 0..4 {
+        r.read_string8()?;
+    }
+    let theme = r.read_i32()?;
+    // Flags, private flags and more, the screen width limits.
+    r.skip(24)?;
+    if r.read_i32()? != 0 {
+        r.skip(16)?; // storage UUID
+    }
+    r.read_string8()?; // scan source dir
+    r.read_string8()?; // scan public source dir
+    let source_dir = r.read_string8()?;
+    r.read_string8()?; // public source dir
+    for _ in 0..3 {
+        string8_array(r)?; // split names, source dirs, public source dirs
+    }
+    // Split dependencies: a SparseArray of int arrays.
+    for _ in 0..r.read_i32()?.max(0) {
+        r.read_i32()?;
+        skip_value(r)?;
+    }
+    for _ in 0..3 {
+        r.read_string8()?; // native library dirs
+    }
+    r.read_i32()?;
+    r.read_string8()?; // CPU ABIs
+    r.read_string8()?;
+    string8_array(r)?; // resource dirs
+    string8_array(r)?; // overlay paths
+    r.read_string8()?; // SELinux info
+    r.read_string8()?;
+    string8_array(r)?; // shared library files
+    for _ in 0..2 {
+        // Shared libraries, optional shared libraries.
+        for _ in 0..r.read_i32()?.max(0) {
+            typed(r, shared_library_info)?;
+        }
+    }
+    for _ in 0..3 {
+        r.read_string8()?; // data dirs
+    }
+    r.skip(12)?; // uid, min and target SDK
+    r.read_i64()?; // version code
+    r.skip(12)?; // enabled, enabled setting, install location
+    r.read_string8()?; // manage space activity
+    r.read_string8()?; // backup agent
+    // Description, UI options, backup content, extraction rules, cross
+    // profile, network security config, category, sandbox version.
+    r.skip(32)?;
+    r.read_string8()?; // class loader
+    string8_array(r)?; // split class loaders
+    r.read_i32()?; // compile SDK
+    r.read_string8()?; // its codename
+    r.read_string8()?; // app component factory
+    r.skip(16)?; // icon, round icon, hidden API policy, hidden until installed
+    r.read_string8()?; // zygote preload
+    // GWP-ASan, MTE, heap zero init, raw external storage access.
+    r.skip(16)?;
+    r.read_i64()?; // creation time
+    for _ in 0..r.read_i32()?.max(0) {
+        r.read_string16()?; // app class names by process
+        r.read_string16()?;
+    }
+    r.skip(12)?; // locale config, cross-uid activity switch, page size compat
+    for _ in 0..r.read_i32()?.max(0) {
+        r.read_string16()?; // known activity embedding certificates
+    }
+    Ok(Some(ApplicationInfo { source_dir, theme }))
+}
+
+/// `SharedLibraryInfo(Parcel)`, read past.
+fn shared_library_info(r: &mut Reader<'_>) -> Result<()> {
+    r.read_string8()?; // path
+    r.read_string8()?; // package
+    if r.read_i32()? != 0 {
+        string8_array(r)?; // code paths
+    }
+    r.read_string8()?; // name
+    r.read_i64()?; // version
+    r.read_i32()?; // type
+    versioned_package(r)?; // declaring package
+    // Dependent packages: a list of values.
+    for _ in 0..r.read_i32()?.max(0) {
+        skip_value(r)?;
+    }
+    for _ in 0..r.read_i32()?.max(0) {
+        typed(r, shared_library_info)?; // dependencies
+    }
+    r.read_bool()?; // native
+    for _ in 0..r.read_i32()?.max(0) {
+        versioned_package(r)?; // optional dependent packages
+    }
+    aim_service_aidl::read_string_list(r)?; // certificate digests
+    Ok(())
+}
+
+/// A `VersionedPackage` by `writeParcelable`: its class, then the package
+/// and version.
+fn versioned_package(r: &mut Reader<'_>) -> Result<()> {
+    if r.read_string16()?.is_some() {
+        r.read_string8()?;
+        r.read_i64()?;
+    }
     Ok(())
 }
 
@@ -358,14 +732,14 @@ fn color_state_list(r: &mut Reader<'_>) -> Result<()> {
 fn icon(r: &mut Reader<'_>, files: &dyn Files) -> Result<Icon> {
     let icon = match r.read_i32()? {
         // TYPE_BITMAP, TYPE_ADAPTIVE_BITMAP
-        1 | 5 => bitmap(r, files)?.map_or(Icon::Elsewhere, Icon::Image),
+        1 | 5 => bitmap(r, files)?.map_or(Icon::Unreadable, Icon::Image),
         // TYPE_RESOURCE: package, id, monochrome, inset scale
         2 => {
-            r.read_string16()?;
-            r.read_i32()?;
+            let package = r.read_string16()?.unwrap_or_default();
+            let id = r.read_i32()?;
             r.read_bool()?;
             r.read_f32()?;
-            Icon::Elsewhere
+            Icon::Resource { package, id }
         }
         // TYPE_DATA: its length, then `writeBlob` (the length again, then
         // the blob)
@@ -374,13 +748,10 @@ fn icon(r: &mut Reader<'_>, files: &dyn Files) -> Result<Icon> {
             let len = r.read_i32()?;
             blob(r, files, len)?
                 .map(|d| Icon::Image(Image::Encoded(d)))
-                .unwrap_or(Icon::Elsewhere)
+                .unwrap_or(Icon::Unreadable)
         }
         // TYPE_URI, TYPE_URI_ADAPTIVE_BITMAP
-        4 | 6 => {
-            r.read_string16()?;
-            Icon::Elsewhere
-        }
+        4 | 6 => Icon::Uri(r.read_string16()?.unwrap_or_default()),
         _ => return Err(BAD_VALUE),
     };
     typed(r, color_state_list)?; // tint
@@ -637,7 +1008,7 @@ fn walk_bundle(
 fn parcelable_image(r: &mut Reader<'_>, files: &dyn Files) -> Result<Option<Icon>> {
     Ok(match r.read_string16()?.as_deref() {
         Some("android.graphics.Bitmap") => {
-            Some(bitmap(r, files)?.map_or(Icon::Elsewhere, Icon::Image))
+            Some(bitmap(r, files)?.map_or(Icon::Unreadable, Icon::Image))
         }
         Some("android.graphics.drawable.Icon") => Some(icon(r, files)?),
         _ => None,
@@ -903,11 +1274,169 @@ mod tests {
         write_char_sequence(p, Some(s));
     }
 
+    /// A 1x1 RGBA bitmap in place, as `Bitmap_writeToParcel` writes it.
+    fn java_bitmap(p: &mut Parcel) {
+        p.write_i32(0);
+        p.write_i32(RGBA_8888);
+        p.write_i32(PREMUL);
+        p.write_i32(-1);
+        p.write_i32(1);
+        p.write_i32(1);
+        p.write_i32(4);
+        p.write_i32(160);
+        p.write_i64(7);
+        p.write_i32(0);
+        p.write_i32(4);
+        p.write_i32(i32::from_le_bytes([1, 2, 3, 4]));
+    }
+
+    /// `ApplicationInfo.writeToParcel` of an app with one shared library,
+    /// not squashed.
+    fn java_application_info(p: &mut Parcel) {
+        p.write_i32(0); // squashing: the first copy
+        p.write_string8(Some("com.example.App"));
+        p.write_string8(Some("com.example"));
+        p.write_i32(0x7f0a_0000);
+        cs(p, "Example");
+        p.write_i32(0x7f08_0000);
+        p.write_i32(0);
+        p.write_i32(-1); // meta-data
+        for _ in 0..3 {
+            p.write_i32(0);
+        }
+        for s in [Some("com.example"), None, Some("com.example"), None] {
+            p.write_string8(s);
+        }
+        p.write_i32(0x7f0f_0001); // theme
+        for _ in 0..6 {
+            p.write_i32(0);
+        }
+        p.write_i32(1);
+        p.write_i64(1);
+        p.write_i64(2);
+        for _ in 0..2 {
+            p.write_string8(None);
+        }
+        p.write_string8(Some("/data/app/~~a/com.example-b/base.apk"));
+        p.write_string8(Some("/data/app/~~a/com.example-b/base.apk"));
+        p.write_i32(1);
+        p.write_string8(Some("config.en"));
+        p.write_i32(-1);
+        p.write_i32(-1);
+        p.write_i32(1); // split dependencies: {1: [0]}
+        p.write_i32(1);
+        p.write_i32(VAL_INTARRAY);
+        p.write_i32(1);
+        p.write_i32(0);
+        for _ in 0..3 {
+            p.write_string8(Some("/lib"));
+        }
+        p.write_i32(0);
+        p.write_string8(Some("arm64-v8a"));
+        p.write_string8(None);
+        p.write_i32(-1);
+        p.write_i32(0);
+        p.write_string8(Some("default:targetSdkVersion=36"));
+        p.write_string8(None);
+        p.write_i32(-1);
+        p.write_i32(1); // a shared library
+        p.write_i32(1);
+        p.write_string8(Some("/system/framework/lib.jar"));
+        p.write_string8(None);
+        p.write_i32(1);
+        p.write_i32(1);
+        p.write_string8(Some("/system/framework/lib.jar"));
+        p.write_string8(Some("lib"));
+        p.write_i64(-1);
+        p.write_i32(0);
+        p.write_string16(Some("android.content.pm.VersionedPackage"));
+        p.write_string8(Some("android"));
+        p.write_i64(36);
+        p.write_i32(-1); // dependent packages
+        p.write_i32(-1); // dependencies
+        p.write_bool(false);
+        p.write_i32(0);
+        p.write_i32(-1);
+        p.write_i32(-1); // optional shared libraries
+        for _ in 0..3 {
+            p.write_string8(Some("/data/user/0/com.example"));
+        }
+        for v in [10_123, 24, 36] {
+            p.write_i32(v);
+        }
+        p.write_i64(3);
+        for _ in 0..3 {
+            p.write_i32(1);
+        }
+        p.write_string8(None);
+        p.write_string8(None);
+        for _ in 0..8 {
+            p.write_i32(0);
+        }
+        p.write_string8(None);
+        p.write_i32(-1);
+        p.write_i32(36);
+        p.write_string8(Some("REL"));
+        p.write_string8(None);
+        for _ in 0..4 {
+            p.write_i32(0);
+        }
+        p.write_string8(None);
+        for _ in 0..3 {
+            p.write_i32(0);
+        }
+        p.write_i32(1); // raw external storage access: unset
+        p.write_i64(5);
+        p.write_i32(1);
+        p.write_string16(Some("com.example"));
+        p.write_string16(Some("com.example.App"));
+        for _ in 0..3 {
+            p.write_i32(0);
+        }
+        p.write_i32(-1);
+    }
+
+    /// A custom view as `RemoteViews.writeToParcel` writes one with
+    /// `setTextViewText` and `setImageViewBitmap`: the bitmap in the root's
+    /// cache, the application info in full (or, `squashed`, as an offset
+    /// back to an earlier copy).
+    fn java_remote_views(p: &mut Parcel, squashed: bool) {
+        p.write_i32(0); // MODE_NORMAL
+        p.write_i32(1); // bitmap cache
+        p.write_i32(1);
+        java_bitmap(p);
+        p.write_i32(0); // collection cache
+        p.write_i32(1);
+        if squashed {
+            p.write_i32(400);
+        } else {
+            java_application_info(p);
+        }
+        p.write_i32(0); // ideal size
+        p.write_i32(0x7f0c_0001);
+        p.write_i32(-1);
+        p.write_i32(0);
+        p.write_i32(2); // actions
+        p.write_i32(2); // ReflectionAction: setText, a CharSequence
+        p.write_i32(0x7f09_0001);
+        p.write_string8(Some("setText"));
+        p.write_i32(10);
+        cs(p, "Custom");
+        p.write_i32(12); // BitmapReflectionAction: setImageBitmap, bitmap 0
+        p.write_i32(0x7f09_0002);
+        p.write_string8(Some("setImageBitmap"));
+        p.write_i32(0);
+        p.write_i32(0); // apply flags
+        p.write_i64(-1);
+        p.write_bool(false);
+    }
+
     /// A notification as `Notification.writeToParcelImpl` writes a
     /// builder's: a resource small icon, a content intent, a bitmap large
     /// icon in place, big text and messages in its extras, one action
-    /// with a remote input, a channel.
-    fn java_notification(p: &mut Parcel, intent: Binder) {
+    /// with a remote input, a channel; with `custom`, custom content and
+    /// big content views (`DecoratedCustomViewStyle`).
+    fn java_notification(p: &mut Parcel, intent: Binder, custom: bool) {
         p.write_i32(1);
         p.write_binder(None); // allowlist token
         p.write_i64(1);
@@ -926,21 +1455,13 @@ mod tests {
         p.write_i32(0); // delete intent
         p.write_i32(0); // ticker
         p.write_i32(0); // ticker view
-        p.write_i32(0); // content view
+        p.write_i32(custom as i32); // content view
+        if custom {
+            java_remote_views(p, false);
+        }
         p.write_i32(1); // large icon: a 1x1 RGBA bitmap in place
         p.write_i32(1);
-        p.write_i32(0);
-        p.write_i32(RGBA_8888);
-        p.write_i32(PREMUL);
-        p.write_i32(-1);
-        p.write_i32(1);
-        p.write_i32(1);
-        p.write_i32(4);
-        p.write_i32(160);
-        p.write_i64(7);
-        p.write_i32(0);
-        p.write_i32(4);
-        p.write_i32(i32::from_le_bytes([1, 2, 3, 4]));
+        java_bitmap(p);
         p.write_i32(0);
         p.write_i32(3);
         p.write_i32(0); // defaults
@@ -1018,7 +1539,10 @@ mod tests {
         for _ in 0..4 {
             p.write_i32(0);
         }
-        p.write_i32(0); // big content view
+        p.write_i32(custom as i32); // big content view
+        if custom {
+            java_remote_views(p, true);
+        }
         p.write_i32(0); // heads-up view
         p.write_i32(0); // visibility
         p.write_i32(0); // public version
@@ -1049,9 +1573,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reads_a_builder_notification() {
-        let intent = Binder::Local(0x10);
+    /// A `StatusBarNotification` of `java_notification`.
+    fn java_sbn(intent: Binder, custom: bool) -> Parcel {
         let mut p = Parcel::new();
         p.write_string16(Some("com.example"));
         p.write_string16(Some("com.example"));
@@ -1059,11 +1582,18 @@ mod tests {
         p.write_i32(0); // no tag
         p.write_i32(10_123);
         p.write_i32(99);
-        java_notification(&mut p, intent);
+        java_notification(&mut p, intent, custom);
         p.write_i32(10); // user
         p.write_i64(4); // post time
         p.write_i32(0); // override group key
         p.write_i32(0); // instance id
+        p
+    }
+
+    #[test]
+    fn reads_a_builder_notification() {
+        let intent = Binder::Local(0x10);
+        let p = java_sbn(intent, false);
         let mut r = Reader::new(p.data(), p.objects());
         let sbn = StatusBarNotification::read(&mut r, &NoFiles).unwrap();
         let n = &sbn.notification;
@@ -1112,7 +1642,35 @@ mod tests {
     }
 
     #[test]
-    fn keeps_what_precedes_a_custom_view() {
+    fn reads_past_custom_views() {
+        let p = java_sbn(Binder::Local(0x10), true);
+        let mut r = Reader::new(p.data(), p.objects());
+        let sbn = StatusBarNotification::read(&mut r, &NoFiles).unwrap();
+        let n = &sbn.notification;
+        assert!(n.complete);
+        assert_eq!(r.remaining(), 0);
+        assert_eq!(n.extras.title.as_deref(), Some("Title"));
+        assert_eq!(n.channel_id.as_deref(), Some("chat"));
+        assert_eq!(n.actions.len(), 1);
+    }
+
+    #[test]
+    fn reads_an_application_info() {
+        let mut p = Parcel::new();
+        java_application_info(&mut p);
+        let mut r = Reader::new(p.data(), p.objects());
+        assert_eq!(
+            application_info(&mut r).unwrap(),
+            Some(ApplicationInfo {
+                source_dir: Some("/data/app/~~a/com.example-b/base.apk".into()),
+                theme: 0x7f0f_0001,
+            })
+        );
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn keeps_what_precedes_an_unknown_view_action() {
         let mut p = Parcel::new();
         p.write_i32(1);
         p.write_binder(None);
@@ -1125,10 +1683,13 @@ mod tests {
         p.write_i32(1);
         cs(&mut p, "ticker");
         p.write_i32(0);
-        p.write_i32(1); // a content view
+        p.write_i32(1); // a content view with an action of tag 99
+        for v in [0, 0, 0, 0, 0, -1, 0, 0, 1, 99] {
+            p.write_i32(v);
+        }
         let mut r = Reader::new(p.data(), p.objects());
         let mut n = Notification::default();
-        read_notification(&mut r, &NoFiles, &mut n).unwrap();
+        assert!(read_notification(&mut r, &NoFiles, &mut n).is_err());
         assert!(!n.complete);
         assert_eq!(n.ticker.as_deref(), Some("ticker"));
     }

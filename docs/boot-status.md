@@ -814,7 +814,10 @@ starting", Play Store's) appeared in Notification Center from the "Android
 System" and Play Store shims, which the display server opened in the
 background, and `cmd notification post` from the shell uid from "Android
 System". CtsNotificationTestCases' NotificationManagerTest passes as
-without the bridge (114 of 114).
+without the bridge (114 of 114). Custom views are read past (Clock's
+timer keeps its actions), resource and `file:` icons are drawn on the Mac,
+and full-screen intents launch while the Mac is locked (not exercised on a
+locked Mac).
 
 ## Pointer, scrolling and shortcuts (2026-09-29, #214, #288)
 
