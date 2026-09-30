@@ -132,7 +132,8 @@ disposable data directory), reading the display server's log:
 - A Clock timer (`am start -a android.intent.action.SET_TIMER ...
   SKIP_UI`): shown by Clock's shim, titled "Clock" (its content is a
   custom view, #468); a click (as the shim sends it) sent its content
-  intent and `DeskClock` became the resumed activity, in Clock's window.
+  intent and `DeskClock` became the resumed activity (its task goes to
+  Clock's shim, which was running).
 - A dismissal (as the shim sends it) cancelled the notification in NMS
   (`cmd notification list`), which then left Notification Center (`not
   shown`).
