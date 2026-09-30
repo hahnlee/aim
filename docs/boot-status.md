@@ -138,7 +138,7 @@ calls. A credential change rewrites the process's by-pid entry in place
 mapping of a plain file maps the file copy-on-write instead of copying
 it (4 MiB: 309-344 us to 12 us, #450).
 
-Where the remaining kernel time went before the two fixes below, from a
+Where the remaining kernel time went before the fixes below, from a
 per-syscall profile of host user and kernel time (a temporary build; M2
 Pro, host load 7-16, a reused data image, boot to 4 minutes after
 `sys.boot_completed`), largest first:
@@ -148,8 +148,8 @@ Pro, host load 7-16, a reused data image, boot to 4 minutes after
 | page faults and other time outside syscalls | 5.4 s of 23.5 s | | Chrome alone 1.75 s in its start (#500) |
 | openat | 3.8 s | 81 µs | host open under the security agent (#418); logd reading `/proc/<pid>/cmdline` of zygote's children, empty to it, on every log line (#238, fixed since: see "Other processes in /proc") |
 | BINDER_WRITE_READ | 2.5 s | 14 µs, 7 µs of it the Mach round trip | #451 |
-| mmap of files | 1.9 s | 40 µs small, 1.5-5 ms at 16 MiB and more | #501 |
-| faccessat, madvise(DONTNEED) | 0.9 s each | 25 µs, 5.5 µs | #505, #502 |
+| mmap of files | 1.9 s | 40 µs small, 1.5-5 ms at 16 MiB and more | ART's JIT memfd and private memfd mappings, fixed below (#501) |
+| faccessat, madvise(DONTNEED) | 0.9 s each | 25 µs, 5.5 µs | each app re-reading owner attributes zygote had read, fixed below (#505); #502 |
 | membarrier, ashmem PIN | 0.5 s, 0.4 s | 140 µs, 16 µs | #503, #504 |
 | fork (zygote's clone) | 0.5 s | 10 ms | #421 |
 
@@ -170,6 +170,24 @@ parked and 2 spinning threads: 115 to 58 µs of kernel time per call,
 #503). ashmem PIN and UNPIN skip reading the region's attribute while
 the file's ctime shows nobody changed it (an UNPIN+PIN pair: 32-39 to
 19-21 µs, #504). Neither is measured in a boot yet.
+
+The large file mappings were ART's JIT cache: its memfd's first
+executable view looked for the memfd's other views by walking the whole
+VM map, 3.5-4.8 ms of kernel time in a process with 3,000 mappings. The
+process now records where it maps a memfd (48-50 µs). A private mapping
+of a memfd maps it copy-on-write instead of copying it (16 MiB: 1.6 to
+0.16 ms). A fork child starts with its parent's owner attributes (an
+app with zygote's; still checked against each inode's ctime), so its
+first stat of a file zygote knew costs 2.6 µs instead of 20 µs (#478,
+#505). On a reused data image, one boot each (host load about 12),
+before and after:
+
+| Check | Before | After |
+| --- | --- | --- |
+| All guest processes at `sys.boot_completed` + 60 s: CPU, system | 48.2 s, 23.3 s | 36.9 s, 16.3 s |
+| The same after the cold starts below | 55.6 s, 26.0 s | 42.8 s, 18.6 s |
+| Settings cold start (3): time, the app's system CPU | 206-234 ms, 0.11-0.13 s | 177-199 ms, 0.09-0.10 s |
+| Calculator cold start: time, system CPU | 331 ms, 0.17 s | 296 ms, 0.13 s |
 
 ## Vsync off at idle (2026-09-30, #452)
 

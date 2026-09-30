@@ -60,7 +60,10 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
      and the hidden fds;
    - identity and the by-pid entry, the executable, the stack areas,
      personality, prctl state, the program break, file-copy records,
-     memfds, SELinux attributes and pidfds;
+     memfds and where they are mapped, SELinux attributes and pidfds;
+   - the owner attributes read so far (`sys/attrs.rs`), so an app does
+     not read again what zygote read (a first stat of an image file costs
+     about 20 µs, a known one 1.5-2.6 µs);
    - signal dispositions, and the forking thread's mask, alternate stack,
      name and scheduling attributes;
    - the translation runtime's file table, stub islands and diagnostics

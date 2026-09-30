@@ -87,6 +87,19 @@ struct Memfd {
     /// Anonymous memory holding the contents once mapped executable:
     /// (base, size).
     anon: Option<(u64, u64)>,
+    /// Where this process mapped the file (start, length, file offset),
+    /// until it is converted: a mapping may since have gone.
+    views: Vec<(u64, u64, u64)>,
+}
+
+impl Memfd {
+    fn new(name: String) -> Memfd {
+        Memfd {
+            name,
+            anon: None,
+            views: Vec::new(),
+        }
+    }
 }
 
 static MEMFDS: Mutex<Option<HashMap<Key, Memfd>>> = Mutex::new(None);
@@ -114,9 +127,10 @@ fn memfd_stat(fd: i32) -> Option<libc::stat> {
     stat_fd(fd).filter(marked)
 }
 
-/// Whether `fd` is a memfd.
-pub fn is_memfd(fd: i32) -> bool {
-    memfd_stat(fd).is_some()
+/// Whether the file of stat `st` is a memfd whose contents this process
+/// moved to anonymous memory (mapped executable).
+pub fn converted(st: &libc::stat) -> bool {
+    marked(st) && with(|m| m.get(&key_of(st)).is_some_and(|f| f.anon.is_some()))
 }
 
 /// Where memfd files are named while referenced.
@@ -153,7 +167,7 @@ fn know(k: Key, fd: i32) {
     }
     let name = read_name(fd);
     with(|m| {
-        m.entry(k).or_insert(Memfd { name, anon: None });
+        m.entry(k).or_insert(Memfd::new(name));
     });
 }
 
@@ -308,15 +322,7 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
         return if r < 0 { r } else { -(errno::last() as i64) };
     };
     let k = key_of(&st);
-    with(|m| {
-        m.insert(
-            k,
-            Memfd {
-                name: String::from_utf8_lossy(name).into_owned(),
-                anon: None,
-            },
-        )
-    });
+    with(|m| m.insert(k, Memfd::new(String::from_utf8_lossy(name).into_owned())));
     fdtab::insert(fd, Kind::Memfd(k));
     fd as i64
 }
@@ -477,11 +483,22 @@ fn convert(k: Key, fd: Option<i32>, min_size: u64) -> Result<(u64, u64), i64> {
     if let Some(a) = with(|m| m.get(&k).and_then(|f| f.anon)) {
         return Ok(a);
     }
-    // The guest's views, all in the guest range.
-    let views: Vec<vmmap::Region> = vmmap::shared_regions(super::arena::LO, super::arena::HI)
-        .into_iter()
-        .filter(|r| r.file.as_ref().is_some_and(|f| (f.1, f.2) == k))
-        .collect();
+    // The guest's views: those this process made that still map the file.
+    // Walking the whole map for them took milliseconds in a process with
+    // a few thousand mappings (#501).
+    let made = with(|m| m.get(&k).map(|f| f.views.clone()).unwrap_or_default());
+    let mut views: Vec<vmmap::Region> = Vec::new();
+    for (start, len, off) in made {
+        for r in vmmap::regions(start, start + len) {
+            if r.shared
+                && r.file.as_ref().is_some_and(|f| (f.1, f.2) == k)
+                && r.offset == off + (r.start - start)
+                && !views.iter().any(|v| v.start == r.start)
+            {
+                views.push(r);
+            }
+        }
+    }
     let file_size = fd.and_then(stat_fd).map_or(0, |s| s.st_size as u64);
     let extent = views
         .iter()
@@ -539,9 +556,56 @@ fn convert(k: Key, fd: Option<i32>, min_size: u64) -> Result<(u64, u64), i64> {
     with(|m| {
         if let Some(f) = m.get_mut(&k) {
             f.anon = Some((base, size));
+            f.views = Vec::new();
         }
     });
     Ok((base, size))
+}
+
+/// Views of memfds past this many are checked, and those gone forgotten.
+const VIEWS_CHECKED_PAST: usize = 8;
+
+/// This process mapped memfd `k` shared at `[start, start+len)` from `off`.
+pub fn note_view(k: Key, start: u64, len: u64, off: u64) {
+    let views = with(|m| {
+        let f = m.get_mut(&k)?;
+        f.views.retain(|v| v.0 + v.1 <= start || start + len <= v.0);
+        f.views.push((start, len, off));
+        (f.views.len() > VIEWS_CHECKED_PAST).then(|| f.views.clone())
+    });
+    if let Some(views) = views {
+        let live: Vec<_> = views
+            .into_iter()
+            .filter(|&(start, len, off)| {
+                vmmap::regions(start, start + len).any(|r| {
+                    r.file.as_ref().is_some_and(|f| (f.1, f.2) == k)
+                        && r.offset == off + (r.start - start)
+                })
+            })
+            .collect();
+        with(|m| {
+            if let Some(f) = m.get_mut(&k) {
+                f.views = live;
+            }
+        });
+    }
+}
+
+/// mremap made `[to, to+len)` another view of `[from, from+len)`: the
+/// memfd views there have one more.
+pub fn note_alias(from: u64, to: u64, len: u64) {
+    let aliases: Vec<(Key, u64, u64, u64)> = with(|m| {
+        m.iter()
+            .flat_map(|(&k, f)| f.views.iter().map(move |&v| (k, v)))
+            .filter_map(|(k, (start, vlen, off))| {
+                let (lo, hi) = (start.max(from), (start + vlen).min(from + len));
+                (lo < hi).then(|| (k, to + (lo - from), hi - lo, off + (lo - start)))
+            })
+            .collect()
+    });
+    for (k, start, len, off) in aliases {
+        note_view(k, start, len, off);
+    }
 }
 
 /// Whether the file of `fd` has any block, with the pages its mappings
@@ -552,46 +616,57 @@ fn holds_data(fd: i32) -> bool {
     unsafe { libc::fsync(fd) != 0 || libc::fstat(fd, &mut st) != 0 || st.st_blocks != 0 }
 }
 
-/// mmap(MAP_SHARED) of `fd`. None when the host mapping of the file itself
-/// is right (not a memfd, or not executable and not converted yet).
-pub fn map_shared(fd: i32, addr: u64, len: u64, prot: i32, fixed: bool, off: u64) -> Option<i64> {
-    let st = memfd_stat(fd)?;
+/// What [`map_shared`] did.
+pub enum Shared {
+    /// Mapped, or failed: the mmap's result.
+    Done(i64),
+    /// The caller maps the file itself, and reports a memfd's view with
+    /// [`note_view`].
+    File(Option<Key>),
+}
+
+/// mmap(MAP_SHARED) of `fd`: the host mapping of the file itself is right
+/// unless it is a memfd mapped executable or converted already.
+pub fn map_shared(fd: i32, addr: u64, len: u64, prot: i32, fixed: bool, off: u64) -> Shared {
+    let Some(st) = memfd_stat(fd) else {
+        return Shared::File(None);
+    };
     let k = key_of(&st);
     know(k, fd);
     let seals = read_seals(fd);
     if prot & libc::PROT_WRITE != 0 && seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0 {
-        return Some(-(EPERM as i64));
+        return Shared::Done(-(EPERM as i64));
     }
     let anon = with(|m| m.get(&k).and_then(|f| f.anon));
     if anon.is_none() && prot & libc::PROT_EXEC == 0 {
-        return None;
+        return Shared::File(Some(k));
     }
     if prot & libc::PROT_EXEC != 0 && seals & F_SEAL_EXEC != 0 {
-        return Some(-(libc::EACCES as i64));
+        return Shared::Done(-(libc::EACCES as i64));
     }
     let (base, size) = match convert(k, Some(fd), off + len) {
         Ok(a) => a,
-        Err(e) => return Some(e),
+        Err(e) => return Shared::Done(e),
     };
     if off + len > size {
-        return Some(-(libc::ENOMEM as i64));
+        return Shared::Done(-(libc::ENOMEM as i64));
     }
     let target = if fixed {
         addr
     } else {
         match super::mem::allocate(len) {
             Ok(a) => a,
-            Err(e) => return Some(e),
+            Err(e) => return Shared::Done(e),
         }
     };
     if let Err(e) = super::mem::remap_shared(target, base + off, len) {
-        return Some(e);
+        return Shared::Done(e);
     }
     // SAFETY: the view we just created.
     if unsafe { libc::mprotect(target as *mut _, len as usize, prot) } < 0 {
-        return Some(-(errno::last() as i64));
+        return Shared::Done(-(errno::last() as i64));
     }
-    Some(target as i64)
+    Shared::Done(target as i64)
 }
 
 /// mprotect adding PROT_EXEC over `[lo, hi)`: shared views of memfds there
@@ -660,6 +735,11 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             w.u64(b);
             w.u64(s);
         });
+        w.seq(f.views.iter(), |w, v| {
+            w.u64(v.0);
+            w.u64(v.1);
+            w.u64(v.2);
+        });
     });
 }
 
@@ -670,6 +750,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             Memfd {
                 name: r.str(),
                 anon: r.opt(|r| (r.u64(), r.u64())),
+                views: r.seq(|r| (r.u64(), r.u64(), r.u64())),
             },
         )
     });
@@ -723,38 +804,38 @@ mod tests {
     fn executable_view_keeps_what_was_written_through_a_mapping() {
         let fd = create("jit", 0);
         let size = 8 << 20;
-        // SAFETY: our test fd, sparse, mapped writable: data written
-        // through the mapping at the start and past a hole.
-        let rw = unsafe {
-            libc::ftruncate(fd, size);
-            let rw = libc::mmap(
-                std::ptr::null_mut(),
-                size as usize,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            ) as *mut u8;
+        // SAFETY: our test fd, sparse.
+        unsafe { libc::ftruncate(fd, size) };
+        // The guest's writable view (PROT_READ | PROT_WRITE, MAP_SHARED).
+        let rw = super::super::mem::mmap([0, size as u64, 3, 1, fd as u64, 0]);
+        assert!(rw > 0);
+        let rw = rw as *mut u8;
+        // SAFETY: data written through the mapping at the start and past
+        // a hole.
+        unsafe {
             std::ptr::copy_nonoverlapping(b"head".as_ptr(), rw, 4);
             std::ptr::copy_nonoverlapping(b"tail".as_ptr(), rw.add((4 << 20) + 7), 4);
-            rw
-        };
-        let view = map_shared(
+        }
+        let Shared::Done(view) = map_shared(
             fd,
             0,
             size as u64,
             libc::PROT_READ | libc::PROT_EXEC,
             false,
             0,
-        )
-        .unwrap();
+        ) else {
+            panic!("not converted");
+        };
         assert!(view > 0);
-        // SAFETY: the view is readable and `size` long.
+        // SAFETY: the view is readable and `size` long; the writable view
+        // now maps the same memory.
         unsafe {
             let v = std::slice::from_raw_parts(view as *const u8, size as usize);
             assert_eq!(&v[..4], b"head");
             assert_eq!(&v[(4 << 20) + 7..(4 << 20) + 11], b"tail");
             assert!(v[4..(4 << 20) + 7].iter().all(|&b| b == 0));
+            std::ptr::copy_nonoverlapping(b"code".as_ptr(), rw.add(64), 4);
+            assert_eq!(&v[64..68], b"code");
             libc::munmap(view as *mut _, size as usize);
             libc::munmap(rw.cast(), size as usize);
         }

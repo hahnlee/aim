@@ -307,10 +307,56 @@ struct Known {
 }
 
 /// Reading an attribute costs about 15 µs on the development Mac, 10 to 30
-/// times a stat, so each
-/// process keeps what it read, by (dev, ino).
+/// times a stat, so each process keeps what it read, by (dev, ino), and a
+/// fork child starts with its parent's (an app with what zygote read).
 static INODES: Mutex<Option<HashMap<(i32, u64), Known>>> = Mutex::new(None);
 const INODES_MAX: usize = 1 << 16;
+
+/// Fork: the attributes read so far. They stay valid in the child as they
+/// do here, while the inode's ctime is unchanged.
+/// One inode in the fork state: dev, ino, ctime seconds and nanoseconds,
+/// a presence byte (guest 1, original 2), then both attributes encoded.
+const RECORD: usize = 4 + 8 + 8 + 8 + 1 + 20 + 20;
+
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    let inodes = INODES.lock().unwrap();
+    let mut b = Vec::with_capacity(inodes.as_ref().map_or(0, |m| m.len()) * RECORD);
+    for (&(dev, ino), k) in inodes.iter().flatten() {
+        b.extend_from_slice(&dev.to_le_bytes());
+        b.extend_from_slice(&ino.to_le_bytes());
+        b.extend_from_slice(&k.ctime.0.to_le_bytes());
+        b.extend_from_slice(&k.ctime.1.to_le_bytes());
+        b.push(k.guest.is_some() as u8 | (k.original.is_some() as u8) << 1);
+        b.extend_from_slice(&encode(k.guest.unwrap_or_default()));
+        b.extend_from_slice(&encode(k.original.unwrap_or_default()));
+    }
+    w.bytes(&b);
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let b = r.bytes();
+    let word = |b: &[u8]| i64::from_le_bytes(b.try_into().unwrap());
+    let known: HashMap<_, _> = b
+        .chunks_exact(RECORD)
+        .map(|b| {
+            let present = b[28];
+            let attr = |bit: u8, at: usize| {
+                (present & bit != 0).then(|| decode(&b[at..at + 20]).unwrap_or_default())
+            };
+            let key = (
+                i32::from_le_bytes(b[..4].try_into().unwrap()),
+                word(&b[4..12]) as u64,
+            );
+            let k = Known {
+                ctime: (word(&b[12..20]), word(&b[20..28])),
+                guest: attr(1, 29),
+                original: attr(2, 49),
+            };
+            (key, k)
+        })
+        .collect();
+    *INODES.lock().unwrap() = (!known.is_empty()).then_some(known);
+}
 
 /// The guest and original attributes of `host`, whose stat is `st`.
 fn inode_attrs(host: Host, st: &libc::stat) -> (Option<Attr>, Option<Attr>) {
@@ -525,6 +571,99 @@ mod tests {
         assert!(!permits(&st, 4, 7, 7));
         assert!(permits(&st, 6, 0, 0));
         assert!(!permits(&st, 1, 0, 0));
+    }
+
+    #[test]
+    fn a_fork_child_keeps_what_was_read_and_sees_later_changes() {
+        use crate::sys::fork_state::{Reader, Writer};
+        use std::os::unix::ffi::OsStrExt;
+        let (_view, dir) = vfs::test_view();
+        let f = dir.join(format!("data/fork-attrs-{}", std::process::id()));
+        std::fs::write(&f, b"x").unwrap();
+        let h = std::ffi::CString::new(f.as_os_str().as_bytes()).unwrap();
+        let a = Attr {
+            uid: Some(10123),
+            gid: Some(10123),
+            mode: Some(0o640),
+        };
+        record(Host::Path(&h), String::new, a);
+        assert_eq!(lookup(Host::Path(&h), String::new), a);
+        let mut w = Writer::default();
+        fork_save(&mut w);
+        let blob = w.into_bytes();
+        *INODES.lock().unwrap() = None;
+        let mut r = Reader::new(&blob);
+        fork_restore(&mut r);
+        assert!(r.ok());
+        // The child has the parent's reading of the inode...
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: host path, local buffer.
+        assert_eq!(unsafe { libc::lstat(h.as_ptr(), &mut st) }, 0);
+        let inodes = INODES.lock().unwrap();
+        let known = &inodes.as_ref().unwrap()[&(st.st_dev, st.st_ino)];
+        assert_eq!((known.guest, known.original), (Some(a), None));
+        drop(inodes);
+        // ...until the inode changes, from any process: a chmod updates
+        // the attribute and the ctime.
+        record(
+            Host::Path(&h),
+            String::new,
+            Attr {
+                mode: Some(0o600),
+                ..Attr::default()
+            },
+        );
+        assert_eq!(
+            lookup(Host::Path(&h), String::new),
+            Attr {
+                mode: Some(0o600),
+                ..a
+            }
+        );
+        std::fs::remove_file(&f).unwrap();
+    }
+
+    /// What carrying the attributes costs a fork (#478): `cargo test -p
+    /// aim-linux-abi --lib --release fork_carry_cost -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore]
+    fn fork_carry_cost() {
+        use crate::sys::fork_state::{Reader, Writer};
+        let _view = vfs::test_view();
+        let a = Attr {
+            uid: Some(1000),
+            gid: Some(1000),
+            mode: Some(0o644),
+        };
+        for n in [1_000u64, 10_000] {
+            *INODES.lock().unwrap() = Some(
+                (0..n)
+                    .map(|i| {
+                        let original = Some(a);
+                        let k = Known {
+                            ctime: (i as i64, 0),
+                            guest: None,
+                            original,
+                        };
+                        ((1, i), k)
+                    })
+                    .collect(),
+            );
+            let start = std::time::Instant::now();
+            let mut w = Writer::default();
+            fork_save(&mut w);
+            let blob = w.into_bytes();
+            let saved = start.elapsed();
+            fork_restore(&mut Reader::new(&blob));
+            eprintln!(
+                "{n} inodes: {} bytes, save {} us, restore {} us",
+                blob.len(),
+                saved.as_micros(),
+                (start.elapsed() - saved).as_micros()
+            );
+        }
+        *INODES.lock().unwrap() = None;
     }
 
     #[test]
