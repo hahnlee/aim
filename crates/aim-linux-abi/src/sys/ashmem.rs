@@ -140,7 +140,7 @@ pub fn link_name(st: &libc::stat) -> Option<String> {
 }
 
 /// A region's state besides its size.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct State {
     prot: u32,
     mapped: bool,
@@ -219,8 +219,11 @@ fn store(fd: i32, s: &State) -> i64 {
 fn update(fd: i32, f: impl FnOnce(&mut State) -> i64) -> i64 {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut s = load(fd);
+    let before = s.clone();
     let r = f(&mut s);
-    if r < 0 {
+    // Unchanged (a PIN of pinned pages, say): no write, which costs a
+    // security check besides the attribute (#446).
+    if r < 0 || s == before {
         return r;
     }
     match store(fd, &s) {
