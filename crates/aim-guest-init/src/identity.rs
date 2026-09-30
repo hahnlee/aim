@@ -104,6 +104,21 @@ impl Identity {
         out
     }
 
+    /// A process's `by-pid` entry, read under a shared `flock`: the
+    /// process rewrites it in place under an exclusive one.
+    pub fn read_entry(path: &std::path::Path) -> Option<Self> {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        let file = std::fs::File::open(path).ok()?;
+        // SAFETY: plain flock on our open file; closing it unlocks.
+        while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } < 0
+            && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+        {}
+        let mut text = String::new();
+        (&file).read_to_string(&mut text).ok()?;
+        Self::parse_file_text(&text).ok()
+    }
+
     pub fn parse_file_text(text: &str) -> Result<Self, String> {
         let mut identity = Identity {
             service: String::new(),

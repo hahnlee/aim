@@ -1,12 +1,16 @@
 // Memory syscalls: mremap, madvise, mincore, msync, mlock, membarrier,
-// process_vm_readv, and ART's dual-mapped JIT cache over a memfd.
+// process_vm_readv, private file mappings, and ART's dual-mapped JIT cache
+// over a memfd.
 #include <fcntl.h>
 #include <linux/membarrier.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -103,6 +107,100 @@ static void membarrier_and_vm_readv(void) {
 
 typedef int (*fn_t)(void);
 
+// Whether /proc/self/maps names `path` for the mapping at `at`.
+static int maps_names(void* at, const char* path) {
+  static char buf[1 << 20];
+  int fd = open("/proc/self/maps", O_RDONLY);
+  size_t n = 0;
+  ssize_t r;
+  while (fd >= 0 && n < sizeof buf - 1 && (r = read(fd, buf + n, sizeof buf - 1 - n)) > 0) n += r;
+  close(fd);
+  buf[n] = 0;
+  char start[32];
+  snprintf(start, sizeof start, "\n%lx-", (unsigned long)at);
+  char* line = strstr(buf, start);
+  char* end = line ? strchr(line + 1, '\n') : NULL;
+  if (!line || !end) return 0;
+  *end = 0;
+  return strstr(line, path) != NULL;
+}
+
+static sigjmp_buf bus_jmp;
+
+static void on_bus(int sig) {
+  siglongjmp(bus_jmp, sig);
+}
+
+// MAP_PRIVATE of a file: copy-on-write of the file's pages, as on Linux.
+static void private_file_mappings(void) {
+  const char* path = "/data/local/tmp/t_mem_private";
+  int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+  CHECK(fd >= 0);
+  static char page[PG];
+  for (int i = 0; i < 3; i++) {
+    memset(page, 'f' + i, PG);
+    CHECK(pwrite(fd, page, PG, (off_t)i * PG) == PG);
+  }
+  char* p = mmap(NULL, 2 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, PG);
+  char* q = mmap(NULL, 2 * PG, PROT_READ, MAP_PRIVATE, fd, PG);
+  char* s = mmap(NULL, 2 * PG, PROT_READ, MAP_SHARED, fd, PG);
+  CHECK(p != MAP_FAILED && q != MAP_FAILED && s != MAP_FAILED);
+  CHECK(p[0] == 'g' && p[2 * PG - 1] == 'h' && q[PG] == 'h');
+  // A write stays in its mapping: not in the file, nor in other mappings.
+  p[0] = 'w';
+  char b = 0;
+  CHECK(pread(fd, &b, 1, PG) == 1 && b == 'g' && q[0] == 'g' && s[0] == 'g');
+  // Whether a later change to the file shows is unspecified (mmap(2)):
+  // Linux shows it in pages not written yet; Darwin, as the copies before
+  // it, keeps the file as it was at mmap.
+  CHECK(pwrite(fd, "xy", 2, PG) == 2);
+  CHECK(q[0] == 'g' && p[0] == 'w' && p[1] == 'g' && s[0] == 'x');
+  CHECK(maps_names(q, path));
+  // A page wholly past the end of the file faults.
+  char* past = mmap(NULL, 4 * PG, PROT_READ, MAP_PRIVATE, fd, 0);
+  CHECK(past != MAP_FAILED);
+  struct sigaction sa = {.sa_handler = on_bus}, old;
+  sigaction(SIGBUS, &sa, &old);
+  volatile char v = 0;
+  int sig = sigsetjmp(bus_jmp, 1);
+  if (sig == 0) v = past[3 * PG];
+  sigaction(SIGBUS, &old, NULL);
+  munmap(past, 4 * PG);
+  CHECK(sig == SIGBUS && v == 0);
+  // A fork child has the same view; MADV_DONTNEED reads the file again.
+  FORK_OR_SKIP(c);
+  if (c == 0) {
+    int step = p[0] != 'w'                          ? 1
+               : q[0] != 'g'                        ? 2
+               : madvise(p, PG, MADV_DONTNEED) != 0 ? 3
+               : p[0] != 'x'                        ? 4
+               : !maps_names(q, path)               ? 5
+                                                    : 0;
+    _exit(step);
+  }
+  int st;
+  CHECK(waitpid(c, &st, 0) == c && WIFEXITED(st));
+  int step = WEXITSTATUS(st);
+  if (step) printf("child failed at step %d\n", step);
+  CHECK(step == 0 && p[0] == 'w');
+  munmap(p, 2 * PG);
+  munmap(q, 2 * PG);
+  munmap(s, 2 * PG);
+  // Code in a private file mapping is rewritten when it becomes
+  // executable; the file keeps the original.
+  uint32_t code[3] = {0xd2801588 /* mov x8, #172 (getpid) */, 0xd4000001 /* svc #0 */,
+                      0xd65f03c0 /* ret */};
+  CHECK(pwrite(fd, code, sizeof code, 0) == sizeof code);
+  char* x = mmap(NULL, PG, PROT_READ, MAP_PRIVATE, fd, 0);
+  CHECK(x != MAP_FAILED && mprotect(x, PG, PROT_READ | PROT_EXEC) == 0);
+  CHECK(((fn_t)x)() == getpid());
+  uint32_t w = 0;
+  CHECK(pread(fd, &w, 4, 4) == 4 && w == code[1]);
+  munmap(x, PG);
+  close(fd);
+  unlink(path);
+}
+
 static void jit_dual_mapping(void) {
   // ART's JitMemoryRegion: one memfd, a writable data view and an
   // executable code view of the same pages.
@@ -145,6 +243,7 @@ int main(void) {
   RUN(madvise_dontneed);
   RUN(mincore_msync_mlock);
   RUN(membarrier_and_vm_readv);
+  RUN(private_file_mappings);
   RUN(jit_dual_mapping);
   DONE();
 }

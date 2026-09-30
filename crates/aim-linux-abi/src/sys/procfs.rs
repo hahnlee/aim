@@ -401,7 +401,9 @@ fn maps() -> String {
         );
         let (mut offset, mut dev, mut ino, mut name) = (0u64, 0u64, 0u64, String::new());
         if let Some((path, d, i)) = &r.file {
-            offset = r.offset;
+            // A fork child's copy of a private file mapping reports
+            // offset 0 (`copies`).
+            offset = super::copies::find(r.start).map_or(r.offset, |(_, off)| off);
             dev = *d;
             ino = *i;
             name = super::memfd::link_name(path, *d, *i)

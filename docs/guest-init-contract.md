@@ -186,7 +186,12 @@ rlimit	13	40	40
   (`docs/fork.md`). The layer writes the child's identity to
   `<dir of FILE>/by-pid/<host pid>`, where guest-init already links each
   service's pid; each process also writes its own entry when it starts
-  and after `execve`. The entry goes when a parent in the namespace reaps
+  and after `execve`. A process keeps its entry open and rewrites it in
+  place on every credential change, under an exclusive `flock`, padding
+  a shorter text with empty lines; readers take a shared `flock` around
+  their read. It never writes through guest-init's link: a process whose
+  entry is that link replaces it with a file of its own first. The entry
+  goes when a parent in the namespace reaps
   the process (until then it is a zombie there, whose uid SIGCHLD and
   `waitid` report), or when the process exits otherwise. The by-pid
   directory is the process table for peer credentials:
@@ -208,7 +213,8 @@ rlimit	13	40	40
     host process is ESRCH); `kill(-1)` and process groups reach its
     processes only. An entry counts only for a process started before the
     entry was written, so a pid the Mac reuses is never a member. A
-    forking process writes its child's entry before `fork` returns.
+    forking process writes its child's entry before the child takes its
+    state, and the child keeps that file.
   - A `linux-run` started with neither `--identity` nor `--by-pid` makes a
     private table and is the init of that namespace: its descendants die
     with it and the table goes.

@@ -284,6 +284,13 @@ fn other_processes_ids_in_proc_and_siginfo() {
     check("peer_ids");
 }
 
+/// A process's entry is rewritten in place on each credential change, and
+/// never read half done.
+#[test]
+fn credential_changes_are_seen_whole() {
+    check("entry_rewrites");
+}
+
 #[test]
 fn identity_files_inherited_env_and_fds_reach_the_guest() {
     let Some(root) = root() else { return };

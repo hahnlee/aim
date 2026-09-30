@@ -612,6 +612,8 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
                 w.i32(*fd);
                 w.bool(*cloexec);
             });
+            // Before the handover: the child keeps this entry.
+            crate::sys::cred::note_child(pid);
             pid
         }
         Err(e) => {

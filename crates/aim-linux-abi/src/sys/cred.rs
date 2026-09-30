@@ -12,8 +12,11 @@
 //!
 //! - fork: the child inherits the state (memory is copied) and writes it to
 //!   `by-pid/<pid>` next to the identity file, the process table peers read
-//!   for `SO_PEERCRED` ([`peer`]). Every later change rewrites that entry,
-//!   and it is removed when the process exits or is reaped.
+//!   for `SO_PEERCRED` ([`peer`]). The process keeps its entry open and
+//!   every later change rewrites it in place under an exclusive `flock`,
+//!   which readers take shared ([`read_entry`]): a change costs a few
+//!   microseconds, where replacing the file costs a create and a rename.
+//!   The entry is removed when the process exits or is reaped.
 //! - exec: the state after the exec capability transform travels on
 //!   `linux-run`'s command line (`--identity-text`).
 
@@ -338,10 +341,13 @@ fn publish(id: &Identity) {
 /// was started with.
 static CMDLINE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
-/// Write `id` as the `by-pid` entry of `pid`, replacing (never modifying)
-/// what is there.
-fn write_entry(pid: i32, id: &Identity) {
-    let Some(dir) = BY_PID.get() else { return };
+/// This process's `by-pid` entry, open for writing in place, and the
+/// length written so far (a shorter text is padded to it with empty
+/// lines, which readers skip).
+static ENTRY: Mutex<Option<(std::fs::File, usize)>> = Mutex::new(None);
+
+/// The `by-pid` entry text of `id`, with the exec'd command line.
+fn entry_text(id: &Identity) -> String {
     let mut text = id.to_text();
     if let Some(c) = CMDLINE.lock().unwrap().as_ref() {
         text.push_str("cmdline\t");
@@ -350,10 +356,112 @@ fn write_entry(pid: i32, id: &Identity) {
         }
         text.push('\n');
     }
+    text
+}
+
+/// Write `id` as the `by-pid` entry of `pid`, replacing (never modifying)
+/// what is there. Returns the new file, open for writing.
+fn write_entry(dir: &std::path::Path, pid: i32, id: &Identity) -> Option<std::fs::File> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
     let tmp = dir.join(format!(".{pid}.tmp"));
-    if std::fs::write(&tmp, text).is_ok() {
-        let _ = std::fs::rename(&tmp, dir.join(pid.to_string()));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&tmp)
+        .ok()?;
+    f.write_all(entry_text(id).as_bytes()).ok()?;
+    std::fs::rename(&tmp, dir.join(pid.to_string())).ok()?;
+    Some(f)
+}
+
+/// An exclusive or shared `flock` on `f` for the life of the guard.
+struct Flock<'a>(&'a std::fs::File);
+
+impl<'a> Flock<'a> {
+    fn new(f: &'a std::fs::File, op: i32) -> Flock<'a> {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: plain flock on an open file.
+        while unsafe { libc::flock(f.as_raw_fd(), op) } < 0 {
+            if crate::errno::last() != crate::errno::EINTR {
+                break;
+            }
+        }
+        Flock(f)
     }
+}
+
+impl Drop for Flock<'_> {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: as in `new`.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// This process's entry, opened for writing in place: the one its parent
+/// wrote before the fork handed it its state, or one it had before an
+/// exec; a new one when there is none, or only guest-init's link to the
+/// identity file (which never changes).
+fn open_entry(dir: &std::path::Path, pid: i32, id: &Identity) -> Option<(std::fs::File, usize)> {
+    use std::os::fd::{FromRawFd as _, IntoRawFd as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir.join(pid.to_string()))
+        .ok()
+        .filter(|f| f.metadata().is_ok_and(|m| m.is_file()))
+        .or_else(|| write_entry(dir, pid, id))?;
+    let len = f.metadata().ok()?.len() as usize;
+    // SAFETY: the layer's own fd, moved out of the guest's range.
+    let f = unsafe { std::fs::File::from_raw_fd(super::fdtab::hide(f.into_raw_fd())) };
+    Some((f, len))
+}
+
+/// Publish `id` as this process's `by-pid` entry, in place.
+fn write_own_entry(id: &Identity) {
+    let Some(dir) = BY_PID.get() else { return };
+    // SAFETY: trivial.
+    let pid = unsafe { libc::getpid() };
+    let mut g = ENTRY.lock().unwrap();
+    if g.is_none() {
+        *g = open_entry(dir, pid, id);
+    }
+    if let Some((f, len)) = g.as_mut() {
+        rewrite(f, len, entry_text(id));
+    }
+}
+
+/// Rewrite the entry `f`, `len` bytes long, with `text` in place.
+fn rewrite(f: &std::fs::File, len: &mut usize, text: String) {
+    use std::os::unix::fs::FileExt as _;
+    let mut text = text.into_bytes();
+    if text.len() < *len {
+        text.resize(*len, b'\n');
+    }
+    let _lock = Flock::new(f, libc::LOCK_EX);
+    if f.write_all_at(&text, 0).is_ok() {
+        *len = text.len();
+    }
+}
+
+/// Process `pid`'s `by-pid` entry, read under a shared `flock` so that no
+/// rewrite in place is seen half done.
+fn read_entry(pid: i32) -> Option<String> {
+    read_entry_at(&BY_PID.get()?.join(pid.to_string()))
+}
+
+fn read_entry_at(path: &std::path::Path) -> Option<String> {
+    use std::io::Read as _;
+    let f = std::fs::File::open(path).ok()?;
+    let _lock = Flock::new(&f, libc::LOCK_SH);
+    let mut text = String::new();
+    (&f).read_to_string(&mut text).ok()?;
+    Some(text)
 }
 
 /// execve in place: the new program's credentials
@@ -364,14 +472,13 @@ pub fn exec(cmdline: Vec<u8>) {
     let id = g.get_or_insert_with(Identity::default);
     id.exec_transform();
     publish(id);
-    // SAFETY: trivial.
-    write_entry(unsafe { libc::getpid() }, id);
+    write_own_entry(id);
 }
 
 /// The command line process `pid` of this namespace exec'd in place, from
 /// its `by-pid` entry.
 pub fn entry_cmdline(pid: i32) -> Option<Vec<u8>> {
-    let text = std::fs::read_to_string(BY_PID.get()?.join(pid.to_string())).ok()?;
+    let text = read_entry(pid)?;
     let hex = text.lines().find_map(|l| l.strip_prefix("cmdline\t"))?;
     (0..hex.len() / 2)
         .map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok())
@@ -384,8 +491,7 @@ pub fn init(id: Identity, by_pid: Option<PathBuf>) {
     publish(&id);
     if let Some(d) = by_pid {
         let _ = BY_PID.set(d);
-        // SAFETY: trivial.
-        write_entry(unsafe { libc::getpid() }, &id);
+        write_own_entry(&id);
     }
     *STATE.lock().unwrap() = Some(id);
 }
@@ -406,8 +512,7 @@ fn with<R>(f: impl FnOnce(&mut Identity) -> R) -> R {
     let r = f(id);
     if *id != before {
         publish(id);
-        // SAFETY: trivial.
-        write_entry(unsafe { libc::getpid() }, id);
+        write_own_entry(id);
     }
     r
 }
@@ -427,11 +532,15 @@ pub fn capable(cap: u32) -> bool {
     read(|id| id.capable(cap))
 }
 
-/// Fork: the identity, the process table and the forking thread's nice
-/// value (the child's main thread has it).
+/// Fork: the identity, the process table, this process's open entry (the
+/// child closes the copy it inherits) and the forking thread's nice value
+/// (the child's main thread has it).
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    use std::os::fd::AsRawFd as _;
     w.str(&current().to_text());
     w.opt(BY_PID.get(), |w, d| w.path(d));
+    let entry = ENTRY.lock().unwrap().as_ref().map(|e| e.0.as_raw_fd());
+    w.opt(entry, |w, fd| w.i32(fd));
     let tid = super::thread::gettid() as i32;
     let nice = THREAD_NICE
         .lock()
@@ -445,6 +554,10 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     let id = Identity::parse(&r.str()).unwrap_or_default();
     let by_pid = r.opt(|r| r.path());
+    if let Some(fd) = r.opt(|r| r.i32()) {
+        // SAFETY: the parent's entry fd, inherited and unused here.
+        unsafe { libc::close(fd) };
+    }
     if let Some(nice) = r.opt(|r| r.i32()) {
         // SAFETY: trivial.
         THREAD_NICE
@@ -455,11 +568,13 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     init(id, by_pid);
 }
 
-/// In the parent of a fork: the child's entry, before `fork` returns, so
-/// the pid is in the process table as soon as anyone can know it. The
-/// child writes it again when it starts.
+/// In the parent of a fork: the child's entry, before the child takes its
+/// state, so the pid is in the process table as soon as anyone can know
+/// it. The child keeps it and writes it again when it starts.
 pub(super) fn note_child(pid: i32) {
-    write_entry(pid, &current());
+    if let Some(dir) = BY_PID.get() {
+        write_entry(dir, pid, &current());
+    }
 }
 
 /// The process `pid` is gone (exited or reaped): drop its entry.
@@ -485,10 +600,7 @@ fn identity_of(pid: i32) -> Option<Identity> {
     if pid == unsafe { libc::getpid() } {
         return Some(current());
     }
-    BY_PID
-        .get()
-        .and_then(|d| std::fs::read_to_string(d.join(pid.to_string())).ok())
-        .and_then(|t| Identity::parse(&t).ok())
+    read_entry(pid).and_then(|t| Identity::parse(&t).ok())
 }
 
 /// The effective ids of host process `pid` from the process table. A pid
@@ -1312,6 +1424,38 @@ mod tests {
         };
         root.exec_transform();
         assert_eq!((root.cap_eff, root.cap_perm), (0xff, 0xff));
+    }
+
+    #[test]
+    fn entries_are_rewritten_in_place_never_through_init_links() {
+        let dir = std::env::temp_dir().join(format!("aim-cred-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        // guest-init links a service's pid to its identity file, which
+        // must never change.
+        let file = dir.join("logd.identity");
+        std::fs::write(&file, LOGD).unwrap();
+        std::os::unix::fs::symlink(&file, dir.join("7")).unwrap();
+        let mut id = Identity::parse(LOGD).unwrap();
+        let (f, mut len) = open_entry(&dir, 7, &id).unwrap();
+        assert!(std::fs::symlink_metadata(dir.join("7")).unwrap().is_file());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), LOGD);
+
+        // A shorter text leaves padding the parser skips, on the same file.
+        id.groups = (0..500).collect();
+        rewrite(&f, &mut len, id.to_text());
+        let long = len;
+        id.groups.clear();
+        id.uid = [10060; 4];
+        rewrite(&f, &mut len, id.to_text());
+        assert_eq!(len, long);
+        let text = read_entry_at(&dir.join("7")).unwrap();
+        assert_eq!(Identity::parse(&text).unwrap(), id);
+
+        // A process that has an entry of its own opens it again.
+        let (_, again) = open_entry(&dir, 7, &Identity::default()).unwrap();
+        assert_eq!(again, long);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

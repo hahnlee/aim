@@ -385,16 +385,15 @@ fn in_cache(p: &Path) -> bool {
     rt().caches.iter().any(|c| c.contains(p))
 }
 
-/// Whether non-executable private mappings of `fd` can stay file-backed
-/// (the file never needs rewriting in memory).
-pub fn is_shared_source(fd: i32) -> bool {
-    let Ok((st, _)) = FileStat::of_fd(fd) else {
-        return false;
-    };
-    matches!(
-        state(&st),
-        Some(FileState::Translated { .. } | FileState::Identity)
-    )
+/// Whether the file at `host` (a mapped region's) is never rewritten in
+/// memory: a translated file, or an original with nothing to rewrite.
+pub fn is_shared_source(host: &Path) -> bool {
+    FileStat::of_path(host).is_ok_and(|st| {
+        matches!(
+            state(&st),
+            Some(FileState::Translated { .. } | FileState::Identity)
+        )
+    })
 }
 
 /// Guest path of the original behind a substituted fd.
