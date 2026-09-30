@@ -7,7 +7,9 @@
 //! ```
 //!
 //! - `shims` keeps `DIR` holding one shim per launcher app of the guest
-//!   whose system image root is `ROOT` and whose `/data` is `DATA`; with
+//!   whose system image root is `ROOT` and whose `/data` is `DATA`, and
+//!   one for the platform (`android`, which shows the notifications of
+//!   packages without a shim of their own); with
 //!   `--watch` it follows installs and uninstalls (`DATA/system/
 //!   packages.list` changing), and a rebuilt `AIM_DISPLAY`, until it is
 //!   stopped.
@@ -145,7 +147,16 @@ fn shims(a: &Args, dir: PathBuf) -> Result<(), String> {
             modified(host),
         );
         if seen != Some(now) {
-            let apps = aim_apps::installed::scan(root, data, &framework);
+            let mut apps = aim_apps::installed::scan(root, data, &framework);
+            // The platform's own shim shows notifications of packages
+            // without one.
+            let framework_path = root.join("system/framework/framework-res.apk");
+            if let Ok(Some(app)) = aim_apps::app::system(&framework) {
+                apps.push(aim_apps::installed::Installed {
+                    apk: framework_path,
+                    app,
+                });
+            }
             let done = aim_apps::shim::sync(&dir, &apps, &framework, socket, host)
                 .map_err(|e| format!("{}: {e}", dir.display()))?;
             for p in &done.written {

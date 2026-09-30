@@ -9,5 +9,7 @@ description = "Android's system services as native macOS implementations, served
 [dependencies]
 aim-binder-driver = { path = "../aim-binder-driver" }
 aim-binder-host = { path = "../aim-binder-host" }
+aim-host-display = { path = "../aim-host-display" }
 aim-hostcall.workspace = true
 aim-service-aidl = { path = "aidl" }
+libc.workspace = true

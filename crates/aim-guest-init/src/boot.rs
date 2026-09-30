@@ -525,6 +525,11 @@ impl Boot {
                 trace_binder(server, file)?;
             }
             native_services = start_native_services(&image, server)?;
+            // Android's notifications on the Mac, from the original
+            // NotificationManagerService once it is published.
+            if let Some(display) = &options.display {
+                aim_services::notifications::Bridge::start(server.driver(), display);
+            }
         }
         let linux_run = LinuxRun {
             binary: linux_run_binary,

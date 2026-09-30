@@ -30,6 +30,14 @@ impl Drop for FilePort {
     }
 }
 
+/// A new host fd for a file a guest sent (a fileport), which a binder
+/// process on the host received.
+pub fn file_fd(file: &File) -> Option<std::os::fd::OwnedFd> {
+    let port = file.downcast_ref::<FilePort>()?.0;
+    // SAFETY: a new fd this process owns.
+    mach::port_to_fd(port).map(|fd| unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) })
+}
+
 /// A receive buffer: shared memory mapped read-write here and read-only in
 /// the guest.
 struct SharedReceive {

@@ -10,7 +10,7 @@
 //! followed by its stability (`Stability::Level`).
 
 use aim_binder_driver::uapi::{
-    BINDER_TYPE_BINDER, BINDER_TYPE_HANDLE, FLAT_BINDER_FLAG_ACCEPTS_FDS,
+    BINDER_TYPE_BINDER, BINDER_TYPE_FD, BINDER_TYPE_HANDLE, FLAT_BINDER_FLAG_ACCEPTS_FDS,
     FLAT_BINDER_FLAG_PRIORITY_MASK, FLAT_BINDER_OBJECT_SIZE, FlatBinderObject,
 };
 
@@ -351,6 +351,18 @@ impl<'a> Reader<'a> {
             BINDER_TYPE_HANDLE if recorded => Ok(Some(Binder::Handle(object.handle()))),
             _ => Err(BAD_TYPE),
         }
+    }
+
+    /// A file descriptor (`writeFileDescriptor`): the fd the driver
+    /// installed in this process ([`crate::local::LocalProcess::file`]).
+    pub fn read_fd(&mut self) -> Result<u32> {
+        let at = self.pos as u64;
+        let raw = self.take(FLAT_BINDER_OBJECT_SIZE)?;
+        let object = FlatBinderObject::decode(raw);
+        if object.kind != BINDER_TYPE_FD || !self.objects.contains(&at) {
+            return Err(BAD_TYPE);
+        }
+        Ok(object.binder as u32)
     }
 
     /// `enforceInterface`: the token of a call to `descriptor`.

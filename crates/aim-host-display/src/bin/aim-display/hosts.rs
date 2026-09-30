@@ -98,6 +98,19 @@ impl Host {
         wire::send(std::os::fd::AsFd::as_fd(&*w), wire::bytes(r), fd).is_ok()
     }
 
+    /// Pass a notification message on: its record, then its frame.
+    pub fn send_notify(&self, m: &aim_host_display::notify::Message) {
+        let w = self.writer.lock().unwrap();
+        let r = Rec {
+            op: host::NOTIFY,
+            ..Default::default()
+        };
+        let fd = std::os::fd::AsFd::as_fd(&*w);
+        if wire::send(fd, wire::bytes(&r), None).is_ok() {
+            let _ = wire::send(fd, &m.frame(), None);
+        }
+    }
+
     /// Pass a task record on.
     pub fn send_window(&self, r: &Record) {
         self.send(
@@ -242,6 +255,7 @@ pub fn serve(sock: OwnedFd) {
     eprintln!("aim-display: window host for {package}");
     let adopted = h.clone();
     on_main(move || crate::windows::adopt(&adopted.package, &adopted));
+    crate::notifications::host_connected(&h);
     while let Some(r) = read(&mut sock) {
         match r.op {
             host::SAMPLED => {
@@ -257,6 +271,10 @@ pub fn serve(sock: OwnedFd) {
                     .insert(r.flag as i32, r.id as isize);
             }
             host::RESTACK => on_main(crate::windows::restack),
+            host::NOTIFY => match aim_host_display::notify::Message::read(&mut sock) {
+                Ok(Some(m)) => crate::notifications::from_host(&m),
+                _ => break,
+            },
             _ => break,
         }
     }

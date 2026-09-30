@@ -17,7 +17,7 @@ use crate::app::App;
 const EXECUTABLE: &str = "aim-app";
 /// Bumped when a shim's layout or icon drawing changes, so shims are
 /// written again.
-pub const LAYOUT: u32 = 2;
+pub const LAYOUT: u32 = 3;
 
 /// A shim to write: the app, its icon, and where its windows come from.
 pub struct Shim<'a> {
@@ -163,8 +163,26 @@ pub fn write(bundle: &Path, s: &Shim) -> io::Result<()> {
     fs::write(contents.join("Resources/AppIcon.icns"), s.icns)?;
     let exe = contents.join("MacOS").join(EXECUTABLE);
     clone(s.host, &exe)?;
+    sign(&tmp)?;
     let _ = fs::remove_dir_all(bundle);
     fs::rename(&tmp, bundle)
+}
+
+/// Sign the bundle ad hoc, sealing its `Info.plist` with the executable:
+/// macOS lets only a signed bundle post notifications as itself.
+fn sign(bundle: &Path) -> io::Result<()> {
+    let status = std::process::Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign", "-"])
+        .arg(bundle)
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "codesign {}: {status}",
+            bundle.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Copy `from` to `to`, as an APFS clone where the volume allows.

@@ -1,4 +1,4 @@
-//! `aim-display --socket PATH [--mode device|windows] [--size WxH] [--title TEXT] [--capture FILE]`
+//! `aim-display --socket PATH [--mode device|windows] [--size WxH] [--title TEXT] [--capture FILE] [--apps DIR]`
 //!
 //! The display server (`docs/composer.md`): macOS windows showing the
 //! guest's display. It owns what must live on the host's main thread
@@ -10,7 +10,8 @@
 //! - **Device mode** (the default): one window showing the whole display.
 //! - **Window mode** (`--mode windows`, `docs/windows.md`): one window per
 //!   Android task, which the guest's task bridge reports; the display is
-//!   the Mac's main screen.
+//!   the Mac's main screen. The app shims in `--apps DIR` show the
+//!   guest's notifications (`docs/notifications.md`).
 //!
 //! The windows' input is the guest's evdev devices, listening sockets in
 //! `PATH.input` (`docs/input.md`), removed when the server quits (device
@@ -28,8 +29,10 @@ mod cursor;
 mod hosts;
 mod input;
 mod metal;
+mod notifications;
 mod shim;
 mod stats;
+mod un;
 mod vsync;
 mod window;
 mod windows;
@@ -52,7 +55,7 @@ use stats::Stats;
 /// How long a present waits for its buffer's acquire fence.
 const ACQUIRE_TIMEOUT_MS: i32 = 3000;
 
-const USAGE: &str = "usage: aim-display --socket PATH [--mode device|windows] [--size WxH] [--title TEXT] [--capture FILE]";
+const USAGE: &str = "usage: aim-display --socket PATH [--mode device|windows] [--size WxH] [--title TEXT] [--capture FILE] [--apps DIR]";
 
 struct Client {
     /// Events go out on the connection the guest reads.
@@ -295,6 +298,16 @@ impl Display {
                 wire::OP_HOST if r.id == wire::VERSION && self.mode == mode::WINDOWS => {
                     return hosts::serve(sock);
                 }
+                wire::OP_NOTIFICATIONS if r.id == wire::VERSION => {
+                    // Only window mode's shims show them; in device mode
+                    // SystemUI does.
+                    if wire::send(sock.as_fd(), wire::bytes(&self.mode), None).is_ok()
+                        && self.mode == mode::WINDOWS
+                    {
+                        notifications::serve_bridge(sock.into());
+                    }
+                    return;
+                }
                 _ => break,
             }
         }
@@ -379,6 +392,7 @@ fn main() {
                 }
             }
             "--capture" => capture = Some(PathBuf::from(value())),
+            "--apps" => notifications::set_apps(std::path::Path::new(&value())),
             _ => {
                 eprintln!("{USAGE}");
                 std::process::exit(2)

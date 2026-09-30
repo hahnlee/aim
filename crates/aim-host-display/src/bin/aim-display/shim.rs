@@ -12,12 +12,16 @@
 //!
 //! Launching the shim, or clicking it in the Dock, starts the app (its
 //! launcher activity: Android brings a running task to the front). Quitting
-//! it closes the app's tasks.
+//! it closes the app's tasks. The server launches it with
+//! `--notifications` to show the app's notifications (`un.rs`) while the
+//! app has no window: it then starts nothing, and has no Dock icon until a
+//! window opens. The system shim (package `android`) has no activity.
 
 use std::collections::HashMap;
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_host_display::input::translate::Phase;
@@ -29,10 +33,14 @@ use crate::metal::{Renderer, Texture};
 use crate::objc::{class, nsstring, on_main, text};
 
 struct Link {
-    /// The launcher activity, `package/class`.
-    activity: String,
+    /// The launcher activity, `package/class`; none for the system shim.
+    activity: Option<String>,
     writer: Mutex<UnixStream>,
 }
+
+/// Started to show notifications (`--notifications`): no Dock icon until
+/// the app shows a window.
+static BACKGROUND: AtomicBool = AtomicBool::new(false);
 
 static LINK: OnceLock<Link> = OnceLock::new();
 
@@ -102,10 +110,24 @@ pub fn touch(task: i32, phase: Phase, x: f64, y: f64, area: [i32; 4], t: i64) {
     });
 }
 
+/// A notification message for the server.
+pub fn notify(m: &aim_host_display::notify::Message) {
+    if let Some(l) = LINK.get() {
+        let w = l.writer.lock().unwrap();
+        let r = Rec {
+            op: host::NOTIFY,
+            ..Default::default()
+        };
+        if wire::send(w.as_fd(), wire::bytes(&r), None).is_ok() {
+            let _ = wire::send(w.as_fd(), &m.frame(), None);
+        }
+    }
+}
+
 /// Start the app (or bring its task to the front).
 pub fn launch() {
-    if let Some(l) = LINK.get() {
-        send_window(Record::with_text(window::LAUNCH, 0, &l.activity));
+    if let Some(activity) = LINK.get().and_then(|l| l.activity.as_ref()) {
+        send_window(Record::with_text(window::LAUNCH, 0, activity));
     }
 }
 
@@ -118,6 +140,15 @@ pub fn close_all() {
             ..Default::default()
         });
     }
+}
+
+/// `NSApplicationActivationPolicy`.
+const REGULAR: isize = 0;
+const ACCESSORY: isize = 1;
+
+fn set_policy(policy: isize) {
+    let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
+    send!(app, c"setActivationPolicy:" => bool, isize = policy);
 }
 
 /// `key` of the main bundle's `Info.plist`, if this process runs from a
@@ -159,6 +190,11 @@ fn read(sock: &mut UnixStream, fds: &mut Vec<std::os::fd::OwnedFd>) -> Option<Re
 pub fn run(package: String, activity: String, socket: &Path) -> ! {
     let _pool = crate::objc::Pool::new();
     crate::window::app(mode::WINDOWS);
+    if std::env::args().any(|a| a == "--notifications") {
+        BACKGROUND.store(true, Ordering::Relaxed);
+        set_policy(ACCESSORY);
+    }
+    crate::un::start();
     let device = crate::metal::device();
     if device.is_null() {
         fail("no Metal device");
@@ -189,7 +225,7 @@ pub fn run(package: String, activity: String, socket: &Path) -> ! {
         fail("the display server did not answer");
     };
     let _ = LINK.set(Link {
-        activity: format!("{package}/{activity}"),
+        activity: (!activity.is_empty()).then(|| format!("{package}/{activity}")),
         writer: Mutex::new(writer),
     });
     let _ = crate::DISPLAY.set(crate::Display::new(
@@ -201,7 +237,9 @@ pub fn run(package: String, activity: String, socket: &Path) -> ! {
     std::thread::spawn(move || serve(&mut sock));
     // SIGTERM and SIGINT quit the app normally, closing its tasks.
     crate::input::quit_on_signals();
-    launch();
+    if !BACKGROUND.load(Ordering::Relaxed) {
+        launch();
+    }
     crate::window::run()
 }
 
@@ -237,6 +275,9 @@ fn serve(sock: &mut UnixStream) {
             }
             host::WINDOW => {
                 let w = r.window;
+                if w.op == window::TASK && BACKGROUND.swap(false, Ordering::Relaxed) {
+                    on_main(|| set_policy(REGULAR));
+                }
                 on_main(move || crate::windows::on_host_record(&w));
             }
             host::CURSOR => {
@@ -257,6 +298,10 @@ fn serve(sock: &mut UnixStream) {
                 });
                 on_main(move || crate::cursor::show(image));
             }
+            host::NOTIFY => match aim_host_display::notify::Message::read(sock) {
+                Ok(Some(m)) => crate::un::handle(m),
+                _ => break,
+            },
             _ => break,
         }
         fds.clear();

@@ -1,0 +1,701 @@
+//! The notification bridge (`docs/notifications.md`): Android's
+//! notifications as Mac notifications, while the original
+//! NotificationManagerService (NMS) and SystemUI keep running.
+//!
+//! A native `INotificationListener` of the system uid registers with the
+//! original NMS (`INotificationManager.registerListener`, as SystemUI's
+//! listener does) and gets every posted, updated and removed notification
+//! with its `StatusBarNotification`. It sends what the Mac shows of each
+//! ([`aim_host_display::notify::Post`]) to the display server, which
+//! passes it to the posting app's shim (its own Mac identity). What the
+//! user does there comes back: a click sends the notification's content
+//! `PendingIntent` (`IActivityManager.sendIntentSender`, with the
+//! notification's allowlist token, as SystemUI sends it) and reports the
+//! click (`IStatusBarService.onNotificationClick`, which auto-cancels);
+//! an action sends its `PendingIntent`, with a `RemoteInput` reply as its
+//! fill-in intent; a dismissal is `cancelNotificationsFromListener`.
+//!
+//! Only in window mode: in device mode SystemUI's shade shows them.
+
+mod parcels;
+
+use std::collections::HashMap;
+use std::io::Write;
+use std::os::fd::{AsFd, AsRawFd};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::time::Duration;
+
+use aim_binder_driver::{Credentials, Device, Driver};
+use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
+use aim_binder_host::parcel::{BAD_VALUE, Binder, Exception, Parcel, Reader, UNKNOWN_TRANSACTION};
+use aim_host_display::notify::{self, Message, Post};
+use aim_host_display::wire;
+use aim_hostcall::display::mode;
+use aim_service_aidl::{
+    Returned, android_app_iactivitymanager as am, android_app_inotificationmanager as nm,
+    android_os_iservicemanager as sm,
+    android_service_notification_inotificationlistener as listener,
+    android_service_notification_istatusbarnotificationholder as holder,
+    com_android_internal_statusbar_istatusbarservice as statusbar,
+};
+
+use parcels::{
+    Channel, ComponentName, FLAG_FOREGROUND_SERVICE, FLAG_GROUP_SUMMARY, FLAG_NO_CLEAR,
+    FLAG_ONGOING_EVENT, FLAG_ONLY_ALERT_ONCE, Files, NotificationStats, RankingUpdate, ReplyIntent,
+    SendOptions, StatusBarNotification, Visibility,
+};
+
+/// `Process.SYSTEM_UID` and system_server's context, as the other native
+/// services.
+const SYSTEM_UID: u32 = 1000;
+const SYSTEM_SERVER_CONTEXT: &str = "u:r:system_server:s0";
+/// `UserHandle.USER_ALL`: every user's notifications.
+const USER_ALL: i32 = -1;
+/// The listener's component, as NMS records it (a system listener is not
+/// bound, so no such class exists).
+const COMPONENT: ComponentName<'static> = ComponentName("android", "aim.notifications.MacBridge");
+/// `NotificationManager.IMPORTANCE_LOW`: shown without interrupting.
+const IMPORTANCE_LOW: i32 = 2;
+/// How often the bridge looks for NMS while it is not there.
+const RETRY: Duration = Duration::from_secs(1);
+/// The largest blob it maps.
+const MAX_BLOB: usize = 64 << 20;
+
+/// A notification the Mac shows, and the binders its actions need.
+struct Entry {
+    package: String,
+    notification: parcels::Notification,
+    /// References to its binders, held as long as it is shown.
+    _binders: Vec<Strong>,
+}
+
+struct State {
+    /// NMS, while registered with it.
+    manager: Option<Arc<Strong>>,
+    entries: HashMap<String, Entry>,
+}
+
+pub struct Bridge {
+    process: Arc<LocalProcess>,
+    listener: Binder,
+    link: Mutex<UnixStream>,
+    state: Mutex<State>,
+    /// Signalled when NMS dies.
+    gone: Condvar,
+}
+
+/// The listener node.
+struct Listener(Weak<Bridge>);
+
+/// What a click or action sends: the `IIntentSender`, the allowlist token
+/// and the key of its `RemoteInput`'s result.
+type Target = (Binder, Option<Binder>, Option<String>);
+
+impl Bridge {
+    /// Starts the bridge in the background: it connects to the display
+    /// server at `display` and, in window mode, registers with NMS once it
+    /// is published (again after system_server restarts).
+    pub fn start(driver: &Arc<Driver>, display: &Path) {
+        let driver = driver.clone();
+        let display = display.to_owned();
+        let _ = std::thread::Builder::new()
+            .name("notifications".into())
+            .spawn(move || {
+                if let Err(e) = Bridge::run(&driver, &display) {
+                    eprintln!("guest-init: notifications: {e}");
+                }
+            });
+    }
+
+    fn run(driver: &Arc<Driver>, display: &Path) -> Result<(), String> {
+        let Some(link) = connect(display)? else {
+            return Ok(());
+        };
+        let process = LocalProcess::open(
+            driver,
+            Device::Binder,
+            Credentials {
+                pid: std::process::id() as i32,
+                euid: SYSTEM_UID,
+                security_context: Some(SYSTEM_SERVER_CONTEXT.into()),
+            },
+        );
+        let reader = link.try_clone().map_err(|e| e.to_string())?;
+        let bridge = Arc::new_cyclic(|this: &Weak<Bridge>| Bridge {
+            listener: process.add_service(Arc::new(Listener(this.clone()))),
+            process: process.clone(),
+            link: Mutex::new(link),
+            state: Mutex::new(State {
+                manager: None,
+                entries: HashMap::new(),
+            }),
+            gone: Condvar::new(),
+        });
+        process.start();
+        let this = bridge.clone();
+        std::thread::Builder::new()
+            .name("notifications-mac".into())
+            .spawn(move || this.serve_mac(reader))
+            .map_err(|e| e.to_string())?;
+        bridge.follow_manager();
+        Ok(())
+    }
+
+    /// Registers with NMS whenever it is published, until the process
+    /// ends.
+    fn follow_manager(self: &Arc<Self>) {
+        loop {
+            let Some(manager) = self.find("notification") else {
+                std::thread::sleep(RETRY);
+                continue;
+            };
+            let manager = Arc::new(manager);
+            let this = Arc::downgrade(self);
+            self.process.link_to_death(
+                &manager,
+                Box::new(move || {
+                    if let Some(b) = this.upgrade() {
+                        b.manager_died();
+                    }
+                }),
+            );
+            let mut data = Parcel::new();
+            nm::RegisterListener {
+                listener: Some(self.listener),
+                component: Some(COMPONENT),
+                userid: USER_ALL,
+            }
+            .write(&mut data);
+            match manager.transact(nm::REGISTER_LISTENER, &data, false) {
+                Ok(reply) => match nm::read_register_listener_reply(&mut reply.reader()) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        eprintln!("guest-init: notifications: registerListener: {}", e.message);
+                        std::thread::sleep(RETRY);
+                        continue;
+                    }
+                    Err(s) => {
+                        eprintln!("guest-init: notifications: registerListener: status {s}");
+                        std::thread::sleep(RETRY);
+                        continue;
+                    }
+                },
+                Err(s) => {
+                    eprintln!("guest-init: notifications: registerListener: status {s}");
+                    std::thread::sleep(RETRY);
+                    continue;
+                }
+            }
+            self.state.lock().unwrap().manager = Some(manager);
+            self.sync();
+            let mut state = self.state.lock().unwrap();
+            while state.manager.is_some() {
+                state = self.gone.wait(state).unwrap();
+            }
+        }
+    }
+
+    /// NMS died with system_server: its notifications are gone.
+    fn manager_died(&self) {
+        let entries = {
+            let mut state = self.state.lock().unwrap();
+            state.manager = None;
+            std::mem::take(&mut state.entries)
+        };
+        for (key, e) in entries {
+            self.send(&Message::Remove {
+                key,
+                package: e.package,
+            });
+        }
+        self.gone.notify_all();
+    }
+
+    /// `name` from servicemanager.
+    fn find(&self, name: &str) -> Option<Strong> {
+        let mut data = Parcel::new();
+        sm::CheckService {
+            name: Some(name.into()),
+        }
+        .write(&mut data);
+        let reply = self
+            .process
+            .transact(0, sm::CHECK_SERVICE, &data, false)
+            .ok()?;
+        let Ok(Ok(Some(Binder::Handle(h)))) = sm::read_check_service_reply(&mut reply.reader())
+        else {
+            return None;
+        };
+        Some(self.process.strong(h))
+    }
+
+    fn manager(&self) -> Option<Arc<Strong>> {
+        self.state.lock().unwrap().manager.clone()
+    }
+
+    fn send(&self, m: &Message) {
+        let mut link = self.link.lock().unwrap();
+        if let Err(e) = link.write_all(&m.frame()) {
+            eprintln!("guest-init: notifications: display server: {e}");
+        }
+    }
+
+    /// Calls `code` of service `name` (found each time: these calls are
+    /// the user's clicks) and reads the reply.
+    fn call<T>(
+        &self,
+        name: &str,
+        code: u32,
+        write: impl FnOnce(&mut Parcel),
+        read: impl FnOnce(&mut Reader<'_>) -> aim_binder_host::parcel::Result<Returned<T>>,
+    ) -> Result<T, String> {
+        let service = self.find(name).ok_or(format!("no {name} service"))?;
+        let mut data = Parcel::new();
+        write(&mut data);
+        let reply = service
+            .transact(code, &data, false)
+            .map_err(|s| format!("{name}: status {s}"))?;
+        read(&mut reply.reader())
+            .map_err(|s| format!("{name}: status {s}"))?
+            .map_err(|e: Exception| format!("{name}: {}", e.message))
+    }
+
+    /// A notification was posted or updated.
+    fn posted(&self, sbn: StatusBarNotification) {
+        let key = sbn.key();
+        let n = &sbn.notification;
+        let binders = n
+            .binders()
+            .filter_map(|b| match b {
+                Binder::Handle(h) => Some(self.process.strong(h)),
+                Binder::Local(_) => None,
+            })
+            .collect();
+        let importance = n.channel_id.as_deref().and_then(|channel| {
+            let args = nm::GetNotificationChannelForPackage {
+                pkg: Some(sbn.package.clone()),
+                uid: sbn.uid,
+                channel_id: Some(channel.into()),
+                conversation_id: n.shortcut_id.clone(),
+                include_deleted: false,
+            };
+            let manager = self.manager()?;
+            let mut data = Parcel::new();
+            args.write(&mut data);
+            let reply = manager
+                .transact(nm::GET_NOTIFICATION_CHANNEL_FOR_PACKAGE, &data, false)
+                .ok()?;
+            let channel =
+                nm::read_get_notification_channel_for_package_reply::<Channel>(&mut reply.reader());
+            Some(channel.ok()?.ok()??.importance)
+        });
+        let updated = self.state.lock().unwrap().entries.contains_key(&key);
+        let post = to_post(&sbn, &key, importance, updated);
+        self.state.lock().unwrap().entries.insert(
+            key,
+            Entry {
+                package: sbn.package.clone(),
+                notification: sbn.notification.clone(),
+                _binders: binders,
+            },
+        );
+        if let Some(post) = post {
+            self.send(&Message::Post(post));
+        }
+    }
+
+    fn removed(&self, key: String) {
+        if let Some(e) = self.state.lock().unwrap().entries.remove(&key) {
+            self.send(&Message::Remove {
+                key,
+                package: e.package,
+            });
+        }
+    }
+
+    /// Calls `f` with the notification a `IStatusBarNotificationHolder`
+    /// holds, while the reply it came in (and its binders) is alive.
+    fn fetch(&self, holder: Option<Binder>, f: impl FnOnce(StatusBarNotification)) {
+        let Some(Binder::Handle(h)) = holder else {
+            return;
+        };
+        let mut data = Parcel::new();
+        holder::Get {}.write(&mut data);
+        let reply = match self.process.transact(h, holder::GET, &data, false) {
+            Ok(reply) => reply,
+            Err(s) => {
+                eprintln!("guest-init: notifications: holder: status {s}");
+                return;
+            }
+        };
+        let mut r = reply.reader();
+        let read = (|| -> aim_binder_host::parcel::Result<Option<StatusBarNotification>> {
+            if r.read_exception()?.is_err() || r.read_i32()? == 0 {
+                return Ok(None);
+            }
+            StatusBarNotification::read(&mut r, &ProcessFiles(&self.process)).map(Some)
+        })();
+        if let Ok(Some(sbn)) = read {
+            f(sbn);
+        }
+    }
+
+    /// What NMS already holds when the bridge registers.
+    fn sync(&self) {
+        let Some(manager) = self.manager() else {
+            return;
+        };
+        let mut data = Parcel::new();
+        nm::GetActiveNotificationsFromListener {
+            token: Some(self.listener),
+            keys: None,
+            trim: 0,
+        }
+        .write(&mut data);
+        let Ok(reply) = manager.transact(nm::GET_ACTIVE_NOTIFICATIONS_FROM_LISTENER, &data, false)
+        else {
+            return;
+        };
+        let mut r = reply.reader();
+        let files = ProcessFiles(&self.process);
+        let mut posted = Vec::new();
+        let _ = (|| -> aim_binder_host::parcel::Result<()> {
+            if r.read_exception()?.is_err() || r.read_i32()? == 0 {
+                return Ok(());
+            }
+            // ParceledListSlice: the count, the class, then items inline
+            // while they fit, then a binder for the rest.
+            let count = r.read_i32()?;
+            if count <= 0 {
+                return Ok(());
+            }
+            r.read_string16()?;
+            while posted.len() < count as usize {
+                if r.read_i32()? == 0 {
+                    break;
+                }
+                let sbn = StatusBarNotification::read(&mut r, &files)?;
+                let complete = sbn.notification.complete;
+                posted.push(sbn);
+                if !complete {
+                    // What follows it cannot be found.
+                    return Ok(());
+                }
+            }
+            Ok(())
+        })();
+        for sbn in posted {
+            self.posted(sbn);
+        }
+    }
+
+    /// The display server's messages: what the user did on the Mac.
+    fn serve_mac(self: Arc<Self>, mut reader: UnixStream) {
+        loop {
+            match Message::read(&mut reader) {
+                Ok(Some(m)) => {
+                    if let Err(e) = self.user(&m) {
+                        eprintln!("guest-init: notifications: {}: {e}", m.key());
+                    }
+                }
+                Ok(None) => return,
+                Err(e) => {
+                    eprintln!("guest-init: notifications: display server: {e}");
+                    return;
+                }
+            }
+        }
+    }
+
+    fn user(&self, m: &Message) -> Result<(), String> {
+        let key = m.key().to_string();
+        let entry = |f: &dyn Fn(&Entry) -> Option<Target>| {
+            let state = self.state.lock().unwrap();
+            state.entries.get(&key).and_then(f)
+        };
+        match m {
+            Message::Click { .. } => {
+                let Some((target, token, _)) = entry(&|e| {
+                    Some((
+                        e.notification.content_intent?,
+                        e.notification.allowlist_token,
+                        None,
+                    ))
+                }) else {
+                    return Ok(());
+                };
+                self.send_intent(target, token, None)?;
+                self.call(
+                    "statusbar",
+                    statusbar::ON_NOTIFICATION_CLICK,
+                    |p| {
+                        statusbar::OnNotificationClick {
+                            key: Some(key.clone()),
+                            nv: Some(Visibility(&key)),
+                        }
+                        .write(p)
+                    },
+                    statusbar::read_on_notification_click_reply,
+                )
+            }
+            Message::Action { index, reply, .. } => {
+                let Some((target, token, result_key)) = entry(&|e| {
+                    let a = e.notification.actions.get(*index as usize)?;
+                    Some((
+                        a.intent?,
+                        e.notification.allowlist_token,
+                        a.inputs.first().map(|i| i.result_key.clone()),
+                    ))
+                }) else {
+                    return Ok(());
+                };
+                let fill_in = match (reply, &result_key) {
+                    (Some(text), Some(result_key)) => Some(ReplyIntent { result_key, text }),
+                    _ => None,
+                };
+                let replied = fill_in.is_some();
+                self.send_intent(target, token, fill_in)?;
+                if !replied {
+                    return Ok(());
+                }
+                self.call(
+                    "statusbar",
+                    statusbar::ON_NOTIFICATION_DIRECT_REPLIED,
+                    |p| {
+                        statusbar::OnNotificationDirectReplied {
+                            key: Some(key.clone()),
+                        }
+                        .write(p)
+                    },
+                    statusbar::read_on_notification_direct_replied_reply,
+                )
+            }
+            Message::Dismiss { .. } => {
+                let manager = self.manager().ok_or("not registered")?;
+                let mut data = Parcel::new();
+                nm::CancelNotificationsFromListener {
+                    token: Some(self.listener),
+                    keys: Some(vec![Some(key.clone())]),
+                }
+                .write(&mut data);
+                let reply = manager
+                    .transact(nm::CANCEL_NOTIFICATIONS_FROM_LISTENER, &data, false)
+                    .map_err(|s| format!("cancel: status {s}"))?;
+                nm::read_cancel_notifications_from_listener_reply(&mut reply.reader())
+                    .map_err(|s| format!("cancel: status {s}"))?
+                    .map_err(|e| format!("cancel: {}", e.message))
+            }
+            Message::Post(_) | Message::Remove { .. } | Message::Shown { .. } => {
+                Err("not from the Mac".into())
+            }
+        }
+    }
+
+    /// `PendingIntent.send` as SystemUI does it for a notification.
+    fn send_intent(
+        &self,
+        target: Binder,
+        token: Option<Binder>,
+        fill_in: Option<ReplyIntent<'_>>,
+    ) -> Result<(), String> {
+        let code = self.call(
+            "activity",
+            am::SEND_INTENT_SENDER,
+            |p| {
+                am::SendIntentSender {
+                    caller: None,
+                    target: Some(target),
+                    whitelist_token: token,
+                    code: 0,
+                    intent: fill_in,
+                    resolved_type: None,
+                    finished_receiver: None,
+                    required_permission: None,
+                    options: Some(SendOptions),
+                }
+                .write(p)
+            },
+            am::read_send_intent_sender_reply,
+        )?;
+        // ActivityManager.START_CANCELED and other errors are negative.
+        if code < 0 {
+            return Err(format!("sendIntentSender: {code}"));
+        }
+        Ok(())
+    }
+}
+
+/// The display server, if it shows notifications (window mode).
+fn connect(display: &Path) -> Result<Option<UnixStream>, String> {
+    let link = UnixStream::connect(display).map_err(|e| format!("{}: {e}", display.display()))?;
+    let hello = wire::Request {
+        op: wire::OP_NOTIFICATIONS,
+        id: wire::VERSION,
+        ..Default::default()
+    };
+    wire::send(link.as_fd(), wire::bytes(&hello), None).map_err(|e| e.to_string())?;
+    let answer = wire::recv_record::<u32>(link.as_fd()).map_err(|e| e.to_string())?;
+    // SO_NOSIGPIPE: a write after the server has gone fails instead.
+    let on: libc::c_int = 1;
+    // SAFETY: setsockopt on our socket with a local int.
+    unsafe {
+        libc::setsockopt(
+            link.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            (&on as *const libc::c_int).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    Ok((answer == Some(mode::WINDOWS)).then_some(link))
+}
+
+/// What the Mac shows of `sbn`: none for a group's summary (the Mac
+/// groups by thread itself).
+fn to_post(
+    sbn: &StatusBarNotification,
+    key: &str,
+    importance: Option<i32>,
+    updated: bool,
+) -> Option<Post> {
+    let n = &sbn.notification;
+    if n.flags & FLAG_GROUP_SUMMARY != 0 {
+        return None;
+    }
+    let e = &n.extras;
+    let title = e
+        .conversation_title
+        .clone()
+        .or(e.title.clone())
+        .unwrap_or_default();
+    let body = match e.messages.last() {
+        Some(m) => {
+            let text = m.text.clone().unwrap_or_default();
+            match &m.sender {
+                Some(s) if *s != title => format!("{s}: {text}"),
+                _ => text,
+            }
+        }
+        None => e
+            .big_text
+            .clone()
+            .or(e.text.clone())
+            .or_else(|| (!e.lines.is_empty()).then(|| e.lines.join("\n")))
+            .or(n.ticker.clone())
+            .unwrap_or_default(),
+    };
+    let image = [&e.picture, &e.large_icon, &n.large_icon]
+        .into_iter()
+        .flatten()
+        .find_map(|i| i.image().cloned());
+    let ongoing = n.flags & (FLAG_ONGOING_EVENT | FLAG_NO_CLEAR | FLAG_FOREGROUND_SERVICE) != 0;
+    Some(Post {
+        key: key.to_string(),
+        package: sbn.package.clone(),
+        title,
+        subtitle: e.sub_text.clone().unwrap_or_default(),
+        body,
+        thread: sbn
+            .override_group_key
+            .clone()
+            .or(n.group.clone())
+            .unwrap_or_default(),
+        passive: importance.is_some_and(|i| i <= IMPORTANCE_LOW)
+            || (updated && n.flags & FLAG_ONLY_ALERT_ONCE != 0),
+        badge: !ongoing,
+        actions: n
+            .actions
+            .iter()
+            .map(|a| notify::Action {
+                title: a.title.clone().unwrap_or_default(),
+                input: a
+                    .inputs
+                    .first()
+                    .map(|i| i.label.clone().unwrap_or_default()),
+            })
+            .collect(),
+        image,
+    })
+}
+
+/// Blobs of a call or reply, read from the files the guest sent.
+struct ProcessFiles<'a>(&'a LocalProcess);
+
+impl Files for ProcessFiles<'_> {
+    fn read(&self, fd: u32, len: usize) -> Option<Vec<u8>> {
+        if len == 0 || len > MAX_BLOB {
+            return None;
+        }
+        let file = self.0.file(fd)?;
+        let fd = aim_binder_host::server::file_fd(&file)?;
+        // SAFETY: a read-only shared mapping of a file we hold open,
+        // copied and unmapped here.
+        unsafe {
+            let p = libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd.as_raw_fd(),
+                0,
+            );
+            if p == libc::MAP_FAILED {
+                return None;
+            }
+            let bytes = std::slice::from_raw_parts(p.cast::<u8>(), len).to_vec();
+            libc::munmap(p, len);
+            Some(bytes)
+        }
+    }
+}
+
+impl Service for Listener {
+    fn descriptor(&self) -> &str {
+        listener::DESCRIPTOR
+    }
+
+    fn accepts_fds(&self) -> bool {
+        // The ranking update's shared memory, and bitmaps' ashmem.
+        true
+    }
+
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        let Some(bridge) = self.0.upgrade() else {
+            return Err(UNKNOWN_TRANSACTION);
+        };
+        let files = ProcessFiles(&bridge.process);
+        let r = &mut call.data;
+        match call.code {
+            listener::ON_NOTIFICATION_POSTED => {
+                let args = listener::OnNotificationPosted::<RankingUpdate>::read(r)?;
+                bridge.fetch(args.notification_holder, |sbn| bridge.posted(sbn));
+            }
+            listener::ON_NOTIFICATION_POSTED_FULL => {
+                r.enforce_interface(listener::DESCRIPTOR)?;
+                if r.read_i32()? != 0 {
+                    // Its binders live while this call is served.
+                    bridge.posted(StatusBarNotification::read(r, &files)?);
+                }
+            }
+            listener::ON_NOTIFICATION_REMOVED => {
+                let args =
+                    listener::OnNotificationRemoved::<RankingUpdate, NotificationStats>::read(r)?;
+                bridge.fetch(args.notification_holder, |sbn| bridge.removed(sbn.key()));
+            }
+            listener::ON_NOTIFICATION_REMOVED_FULL => {
+                r.enforce_interface(listener::DESCRIPTOR)?;
+                if r.read_i32()? == 0 {
+                    return Err(BAD_VALUE);
+                }
+                bridge.removed(StatusBarNotification::read(r, &files)?.key());
+            }
+            // Connected (the bridge reads what NMS holds once
+            // registerListener returns), rankings, hints, filters, and the
+            // assistants' calls: nothing the Mac shows.
+            _ => {}
+        }
+        Ok(Parcel::new())
+    }
+}

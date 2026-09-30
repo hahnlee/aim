@@ -23,6 +23,10 @@ SOURCE_FILES=(
   "platform/frameworks/base|core/java/android/content/pm/IPackageManager.aidl|7b02c7375bc969da513471dbed8aa41751490398dcdc4d580a5557e59c861263"
   "platform/frameworks/base|core/java/android/os/IRemoteCallback.aidl|31120af262690e1d7f4dd4f2befdcca13c4fa30ed10278bfdc722c31298e0b2a"
   "platform/frameworks/base|core/java/com/android/internal/policy/IDeviceLockedStateListener.aidl|1fb9a8d4c1d86f5f1363062cc0bf307cd72427ed7884135a2d879316b3ffc20a"
+  "platform/frameworks/base|core/java/android/app/INotificationManager.aidl|7a34afacfb392fea1046d564cb0d6a412828afca94fb4bc22ba90103e9c89980"
+  "platform/frameworks/base|core/java/android/service/notification/INotificationListener.aidl|b69999d69e40719070d969683afeef99a6446d4b19a62b2c07990d7b2643d617"
+  "platform/frameworks/base|core/java/android/service/notification/IStatusBarNotificationHolder.aidl|aec6674ca251c5ab65b030fffde07d9b2e82e416f674fe28cbd33e0b7dd45e54"
+  "platform/frameworks/base|core/java/com/android/internal/statusbar/IStatusBarService.aidl|11a05c71bb5ef6b24bec607d0ad7c7f5aaee8ddd26fa85899304b6e75a0196e1"
 )
 
 # descriptor|jar of its stub in the image|methods to marshal (`*`: all).
@@ -32,7 +36,7 @@ INTERFACES=(
   "android.content.IClipboard|system/framework/framework.jar|*"
   "android.content.IOnPrimaryClipChangedListener|system/framework/framework.jar|*"
   "android.os.IServiceManager|system/framework/framework.jar|addService,checkService"
-  "android.app.IActivityManager|system/framework/framework.jar|checkPermission,handleIncomingUser"
+  "android.app.IActivityManager|system/framework/framework.jar|checkPermission,handleIncomingUser,sendIntentSender"
   "android.app.IActivityTaskManager|system/framework/framework.jar|getFocusedRootTaskInfo,registerTaskStackListener"
   "com.android.internal.app.IAppOpsService|system/framework/framework.jar|checkPackage,checkOperationForDevice,noteOperation,startWatchingModeWithFlags"
   "android.permission.IPermissionManager|system/framework/framework.jar|checkPermission"
@@ -44,4 +48,8 @@ INTERFACES=(
   "android.content.pm.IPackageManager|system/framework/framework.jar|registerPackageMonitorCallback"
   "android.os.IRemoteCallback|system/framework/framework.jar|*"
   "com.android.internal.policy.IDeviceLockedStateListener|system/framework/framework.jar|*"
+  "android.app.INotificationManager|system/framework/framework.jar|registerListener,unregisterListener,cancelNotificationsFromListener,getActiveNotificationsFromListener,getNotificationChannelForPackage"
+  "android.service.notification.INotificationListener|system/framework/framework.jar|onListenerConnected,onNotificationPosted,onNotificationPostedFull,onNotificationRemoved,onNotificationRemovedFull"
+  "android.service.notification.IStatusBarNotificationHolder|system/framework/framework.jar|get"
+  "com.android.internal.statusbar.IStatusBarService|system/framework/framework.jar|onNotificationClick,onNotificationDirectReplied"
 )
