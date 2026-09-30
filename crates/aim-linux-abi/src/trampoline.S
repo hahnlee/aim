@@ -390,17 +390,6 @@ _linux_abi_resume:
 _linux_abi_resume_trap:
     udf     #0x6c78
 
-// Restorer for guest handlers installed without SA_RESTORER: rt_sigreturn
-// through the same stub frame a redirected svc builds.
-    .globl _linux_abi_restorer
-    .alt_entry _linux_abi_restorer
-_linux_abi_restorer:
-    mov     x8, #139
-    stp     x16, x17, [sp, #-32]!
-    str     x30, [sp, #16]
-    bl      _linux_abi_syscall_entry
-    brk     #0
-
 // void linux_abi_enter_guest(const GuestContext *ctx)  -- never returns.
 // Loads the full register state and branches to ctx->pc. x17 carries the
 // branch target, so the guest starts with x17 == pc (Linux leaves it unspecified).

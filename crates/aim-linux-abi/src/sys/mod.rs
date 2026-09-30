@@ -260,6 +260,7 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         // sockets
         198 => net::socket(a),
         199 => net::socketpair(a),
+        200..=212 | 242 | 243 | 269 if net::hidden_socket(a[0] as i32) => -net::ENOTSOCK,
         200 => net::bind(a),
         201 => net::listen(a),
         202 => net::accept4([a[0], a[1], a[2], 0, 0, 0]),

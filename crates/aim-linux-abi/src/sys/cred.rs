@@ -1501,13 +1501,18 @@ mod tests {
             prlimit(261, [0, RLIMIT_NPROC, 0, at, 0, 0]),
             -(EFAULT as i64)
         );
-        // Reading the new limit from it is fine; an unmapped one is not.
+        // Reading the new limit (the current one) from it is fine; an
+        // inaccessible one is not. The pages stay mapped until the end, so
+        // no other thread can map memory there meanwhile and have the
+        // limit read from it.
         assert_eq!(prlimit(164, [RLIMIT_NPROC, at, 0, 0, 0, 0]), 0);
-        // SAFETY: our page.
-        assert_eq!(unsafe { libc::munmap(p, 2 * page) }, 0);
+        // SAFETY: our pages.
+        assert_eq!(unsafe { libc::mprotect(p, 2 * page, libc::PROT_NONE) }, 0);
         assert_eq!(
             prlimit(164, [RLIMIT_NPROC, at, 0, 0, 0, 0]),
             -(EFAULT as i64)
         );
+        // SAFETY: our pages.
+        assert_eq!(unsafe { libc::munmap(p, 2 * page) }, 0);
     }
 }

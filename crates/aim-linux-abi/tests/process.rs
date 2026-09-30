@@ -259,6 +259,16 @@ fn a_fatal_signal_ends_the_host_process_with_it() {
 }
 
 #[test]
+fn a_pending_signal_the_suspend_mask_blocks_waits() {
+    check("suspend_pending");
+}
+
+#[test]
+fn a_handler_without_a_restorer_returns_through_the_vdso() {
+    check("vdso_sigreturn");
+}
+
+#[test]
 fn seccomp_filters_are_accepted() {
     check("seccomp_filter");
 }

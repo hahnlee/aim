@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -614,6 +615,71 @@ static void fork_then_exit(void) {
   CHECK(read(p[0], &c, 1) == 1 && c == 'g', "the grandchild ran");
   close(p[0]);
   printf("ok fork_then_exit\n");
+}
+
+static volatile sig_atomic_t suspend_usr1, suspend_term;
+static void count_usr1(int sig) { (void)sig; suspend_usr1++; }
+static void count_term(int sig) { (void)sig; suspend_term++; }
+
+// sigsuspend(2) sleeps with a mask; a pending signal that mask blocks
+// neither wakes nor kills the process, and is delivered once unblocked.
+// (bionic's pause() is sigsuspend with an empty mask, so there it would.)
+static void suspend_pending(void) {
+  pid_t pid = fork();
+  CHECK(pid >= 0, "fork");
+  if (pid == 0) {
+    sigset_t term, usr1, set;
+    sigemptyset(&term);
+    sigaddset(&term, SIGTERM);
+    sigemptyset(&usr1);
+    sigaddset(&usr1, SIGUSR1);
+    signal(SIGUSR1, count_usr1);
+    sigprocmask(SIG_BLOCK, &term, NULL);
+    kill(getpid(), SIGTERM);
+    if (sigsuspend(&term) != -1 || errno != EINTR || suspend_usr1 != 1) _exit(10);
+    sigprocmask(SIG_BLOCK, &usr1, NULL);
+    if (sigpending(&set) != 0 || !sigismember(&set, SIGTERM)) _exit(11);
+    if (sigsuspend(&term) != -1 || errno != EINTR || suspend_usr1 != 2) _exit(12);
+    // sigsuspend restores the mask it replaced.
+    if (sigprocmask(SIG_BLOCK, NULL, &set) != 0 || !sigismember(&set, SIGUSR1)) _exit(13);
+    signal(SIGTERM, count_term);
+    sigprocmask(SIG_UNBLOCK, &term, NULL);
+    _exit(suspend_term == 1 ? 3 : 14);
+  }
+  int st;
+  for (int i = 0; i < 2; i++) {
+    usleep(300000);
+    CHECK(waitpid(pid, &st, WNOHANG) == 0, "the child ended (%d): status %#x", i, st);
+    kill(pid, SIGUSR1);
+  }
+  CHECK(waitpid(pid, &st, 0) == pid, "waitpid");
+  CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 3, "status %#x", st);
+  printf("ok suspend_pending\n");
+}
+
+static volatile uintptr_t raw_return;
+static void raw_handler(int sig) {
+  (void)sig;
+  raw_return = (uintptr_t)__builtin_return_address(0);
+}
+
+// A handler installed without SA_RESTORER (raw rt_sigaction; bionic always
+// sets one) returns through the vDSO's __kernel_rt_sigreturn, as Linux's
+// arm64 setup_return arranges.
+static void vdso_sigreturn(void) {
+  struct {
+    uintptr_t handler;
+    unsigned long flags;
+    uintptr_t restorer;
+    uint64_t mask;
+  } ka = {(uintptr_t)raw_handler, 0, 0, 0}, old;
+  CHECK(syscall(SYS_rt_sigaction, SIGUSR2, &ka, &old, 8) == 0, "rt_sigaction");
+  CHECK(kill(getpid(), SIGUSR2) == 0, "kill");
+  uintptr_t vdso = getauxval(AT_SYSINFO_EHDR);
+  CHECK(vdso != 0 && raw_return >= vdso && raw_return < vdso + 16384,
+        "return address %#lx, vDSO at %#lx", (unsigned long)raw_return, (unsigned long)vdso);
+  CHECK(syscall(SYS_rt_sigaction, SIGUSR2, &old, NULL, 8) == 0, "restore");
+  printf("ok vdso_sigreturn\n");
 }
 
 static void death_by_signal(void) {
@@ -1248,6 +1314,7 @@ int main(int argc, char** argv) {
       {"exec_script", exec_script}, {"exec_state", exec_state},
       {"waitid_variants", waitid_variants},
       {"pidfd_poll", pidfd_poll},   {"epoll_fork", epoll_fork},   {"death_by_signal", death_by_signal},
+      {"suspend_pending", suspend_pending}, {"vdso_sigreturn", vdso_sigreturn},
       {"fork_memory", fork_memory}, {"fork_then_exit", fork_then_exit},
       {"identity", identity},       {"identity_file", identity_file},
       {"seccomp_filter", seccomp_filter},

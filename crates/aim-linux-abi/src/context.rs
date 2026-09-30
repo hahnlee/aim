@@ -43,7 +43,6 @@ unsafe extern "C" {
     fn linux_abi_recheck();
     fn linux_abi_tail_end();
     fn linux_abi_resume_trap() -> !;
-    fn linux_abi_restorer();
     fn linux_abi_text_end();
 }
 
@@ -384,11 +383,6 @@ pub fn resume_trap() -> ! {
 
 pub fn resume_trap_pc() -> u64 {
     linux_abi_resume_trap as usize as u64
-}
-
-/// Return address for guest handlers installed without SA_RESTORER.
-pub fn restorer() -> u64 {
-    linux_abi_restorer as usize as u64
 }
 
 /// Where a signal-interrupted pc lies, for deciding how to deliver.

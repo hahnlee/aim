@@ -52,7 +52,7 @@ const L_SOCK_NONBLOCK: u64 = 0o4000;
 const L_SOCK_CLOEXEC: u64 = 0o2000000;
 
 const EAFNOSUPPORT: i64 = 97;
-const ENOTSOCK: i64 = 88;
+pub(super) const ENOTSOCK: i64 = 88;
 const EPROTONOSUPPORT: i64 = 93;
 const ENOPROTOOPT: i64 = 92;
 const EOPNOTSUPP: i64 = 95;
@@ -853,6 +853,16 @@ pub fn socketpair(a: [u64; 6]) -> i64 {
     0
 }
 
+/// Whether `fd` is a file the layer keeps as a host socket that is no
+/// socket to the guest (eventfd, timerfd, evdev, sync_file): socket calls
+/// on it fail with ENOTSOCK, as on Linux.
+pub fn hidden_socket(fd: i32) -> bool {
+    matches!(
+        fdtab::get(fd),
+        Some(Kind::Event(_) | Kind::Timer(_) | Kind::Evdev(_) | Kind::SyncFile)
+    )
+}
+
 fn is_socket(fd: i32) -> Result<(), i64> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fstat into a local buffer.
@@ -936,6 +946,9 @@ pub fn bind(a: [u64; 6]) -> i64 {
 
 pub fn connect(a: [u64; 6]) -> i64 {
     let fd = a[0] as i32;
+    if let Err(e) = is_socket(fd) {
+        return e;
+    }
     if let Some(s) = any_sock(fd) {
         match &s.family {
             Family::Netlink(_) => {
