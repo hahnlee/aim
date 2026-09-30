@@ -118,14 +118,16 @@ struct Info {
 }
 
 impl Info {
-    /// The window title: the task's label, else its app's name (a window
-    /// host's), else its package.
+    /// The window title: the task's label, else as a launcher names it:
+    /// the window host's name, or (in the server) its launcher activity's
+    /// or app's label from the shims; else its package.
     fn title(&self) -> String {
         if !self.title.is_empty() {
-            self.title.clone()
-        } else {
-            crate::shim::app_name().unwrap_or_else(|| self.package.clone())
+            return self.title.clone();
         }
+        crate::shim::app_name()
+            .or_else(|| crate::apps::title(&self.package, &self.activity))
+            .unwrap_or_else(|| self.package.clone())
     }
 }
 

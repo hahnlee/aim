@@ -11,7 +11,8 @@
 //! - **Window mode** (`--mode windows`, `docs/windows.md`): one window per
 //!   Android task, which the guest's task bridge reports; the display is
 //!   the Mac's main screen. The app shims in `--apps DIR` show the
-//!   guest's notifications (`docs/notifications.md`).
+//!   guest's notifications (`docs/notifications.md`) and name the
+//!   server's own windows.
 //!
 //! The windows' input is the guest's evdev devices, listening sockets in
 //! `PATH.input` (`docs/input.md`), removed when the server quits (device
@@ -420,7 +421,7 @@ fn main() {
         eprintln!("aim-display: no Metal device");
         std::process::exit(1);
     }
-    window::app(display_mode);
+    window::app(display_mode, true);
     let win = if display_mode == mode::WINDOWS {
         windows::start(device)
     } else {

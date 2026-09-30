@@ -191,7 +191,7 @@ fn read(sock: &mut UnixStream, fds: &mut Vec<std::os::fd::OwnedFd>) -> Option<Re
 /// `activity`, served by the display server at `socket`. Never returns.
 pub fn run(package: String, activity: String, socket: &Path) -> ! {
     let _pool = crate::objc::Pool::new();
-    crate::window::app(mode::WINDOWS);
+    crate::window::app(mode::WINDOWS, false);
     if std::env::args().any(|a| a == "--notifications") {
         BACKGROUND.store(true, Ordering::Relaxed);
         set_policy(ACCESSORY);

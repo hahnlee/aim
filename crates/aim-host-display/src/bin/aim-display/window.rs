@@ -66,6 +66,7 @@ pub fn on_screen_windows() -> Vec<u32> {
 pub const NS_WINDOW_STYLE: usize = 1 | 2 | 4 | 8; // titled, closable, miniaturizable, resizable
 pub const NS_BACKING_STORE_BUFFERED: usize = 2;
 const NS_APPLICATION_ACTIVATION_POLICY_REGULAR: isize = 0;
+const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: isize = 1;
 const MTL_PIXEL_FORMAT_BGRA8_UNORM: usize = 80;
 
 /// The display server's mode, one of `aim_hostcall::display::mode`.
@@ -149,11 +150,22 @@ pub fn main_display_dpi() -> (f64, f64) {
     }
 }
 
-/// Create the application for `display_mode`. Main thread only.
-pub fn app(display_mode: u32) {
+/// Create the application for `display_mode`, the display `server`'s or a
+/// window host's. Main thread only.
+///
+/// Window mode's server has no Dock icon: each app is its shim, with the
+/// app's own; the server's windows show the tasks no shim shows (apps
+/// without one, or whose shim is not running), titled as the launcher
+/// names them.
+pub fn app(display_mode: u32, server: bool) {
     MODE.store(display_mode, Ordering::Relaxed);
     let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
-    send!(app, c"setActivationPolicy:" => bool, isize = NS_APPLICATION_ACTIVATION_POLICY_REGULAR);
+    let policy = if server && display_mode == mode::WINDOWS {
+        NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY
+    } else {
+        NS_APPLICATION_ACTIVATION_POLICY_REGULAR
+    };
+    send!(app, c"setActivationPolicy:" => bool, isize = policy);
     send!(app, c"setDelegate:" => (), Id = app_delegate());
     // The display link must keep its rate while the windows are in the
     // background: no App Nap, and latency-critical scheduling.

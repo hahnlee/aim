@@ -1,6 +1,7 @@
 //! The app shims in `--apps DIR` (`docs/windows.md`, "App shims"), as
 //! aim-apps writes them: one per launcher activity, read again when the
-//! directory changes. The server launches them for notifications.
+//! directory changes. The server launches them (for notifications) and
+//! titles its own windows with their labels.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -13,6 +14,9 @@ pub struct Shim {
     pub package: String,
     /// The launcher activity's class; empty for the system shim.
     pub activity: String,
+    /// The activity's label (`CFBundleName`) and the application's.
+    pub label: String,
+    pub app_label: String,
     /// The package's primary shim (`AIMPrimary`).
     pub primary: bool,
 }
@@ -42,10 +46,13 @@ fn value(plist: &str, key: &str) -> Option<String> {
 fn read(bundle: PathBuf) -> Option<Shim> {
     let plist = std::fs::read_to_string(bundle.join("Contents/Info.plist")).ok()?;
     let package = value(&plist, "AIMPackage")?;
+    let label = value(&plist, "CFBundleName").unwrap_or_else(|| package.clone());
     Some(Shim {
         activity: value(&plist, "AIMActivity").unwrap_or_default(),
+        app_label: value(&plist, "AIMAppLabel").unwrap_or_else(|| label.clone()),
         primary: plist.contains("<key>AIMPrimary</key>"),
         package,
+        label,
         bundle,
     })
 }
@@ -88,5 +95,21 @@ pub fn is_primary(package: &str, activity: &str) -> bool {
         shims
             .iter()
             .any(|s| s.primary && s.package == package && s.activity == activity)
+    })
+}
+
+/// The title of a task of `package` started with `activity`
+/// (`package/class`) that has no label of its own, as a launcher names
+/// it: that launcher activity's label, else the application's.
+pub fn title(package: &str, activity: &str) -> Option<String> {
+    let class = activity.split_once('/').map_or("", |(_, c)| c);
+    with(|shims| {
+        match shims
+            .iter()
+            .find(|s| s.package == package && s.activity == class)
+        {
+            Some(s) => Some(s.label.clone()),
+            None => of(shims, package).map(|s| s.app_label.clone()),
+        }
     })
 }

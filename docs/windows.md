@@ -131,8 +131,10 @@ server's mode:
   visible windows' tasks (they are focused back to front, in the screen's
   order). Closing a window removes its task; a removed task closes its
   window. Zoom (the green button) resizes; full screen is off.
-- **Title.** The task's `TaskDescription` label, else its app's name (a
-  shim's), else its package.
+- **Title.** The task's `TaskDescription` label, else what a launcher
+  calls it: in a shim, the shim's name; in the server, the label of the
+  launcher activity the task was started with, else its app's label (both
+  from the shims in `--apps`); else its package.
 - **Occlusion.** Hidden and minimized windows are not presented into; a
   window that becomes visible shows the last frame at once.
 
@@ -209,6 +211,10 @@ Settings.app/Contents/
   same. Quitting a shim closes the tasks it shows. Closing its last window
   does not quit it, as with a Mac app (an app may pass through a task that
   closes before its next one opens).
+- **The server** has no Dock icon in window mode (an accessory app): each
+  app is its shim. Its own windows show the tasks no shim shows (packages
+  without a launcher activity, or whose shim is not running), titled as
+  above.
 - **Stacking.** With windows in several processes, the server restacks the
   tasks by the screen's order of all their windows (`CGWindowListCreate`)
   when one is minimized.
