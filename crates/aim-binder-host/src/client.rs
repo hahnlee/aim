@@ -382,22 +382,38 @@ impl BinderFile {
     }
 }
 
+/// Top the pool up to `count` placeholders. A placeholder only holds its
+/// number, so it is a socket that was never connected: installing a file
+/// over it (dup2) closes a socket, where closing a vnode such as /dev/null
+/// costs microseconds of host kernel time. New ones are duplicates of one
+/// already held.
 fn refill_reserved(pool: &mut Vec<i32>, count: usize) {
     while pool.len() < count {
-        // SAFETY: opening /dev/null and duplicating it upward.
+        // SAFETY: duplicating a placeholder, or a new socket, upward.
         let fd = unsafe {
-            let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-            if null < 0 {
-                return;
+            match pool.first() {
+                Some(&held) => libc::fcntl(held, libc::F_DUPFD_CLOEXEC, RESERVED_FD_BASE),
+                None => {
+                    let s = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+                    if s < 0 {
+                        return;
+                    }
+                    let fd = libc::fcntl(s, libc::F_DUPFD_CLOEXEC, RESERVED_FD_BASE);
+                    libc::close(s);
+                    fd
+                }
             }
-            let fd = libc::fcntl(null, libc::F_DUPFD_CLOEXEC, RESERVED_FD_BASE);
-            libc::close(null);
-            fd
         };
-        if fd < 0 {
+        if fd >= 0 {
+            pool.push(fd);
+        } else if !pool.is_empty()
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF)
+        {
+            // The guest closed that number: it holds nothing of ours.
+            pool.remove(0);
+        } else {
             return;
         }
-        pool.push(fd);
     }
 }
 
@@ -499,5 +515,44 @@ fn gather_transaction(tr: &TransactionData, sg: bool, mem: &mut dyn UserMemory, 
             _ => {}
         }
         buffers.push(buffer);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_socket(fd: i32) -> bool {
+        // SAFETY: fstat into a local buffer.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        unsafe { libc::fstat(fd, &mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFSOCK }
+    }
+
+    /// Placeholders are distinct close-on-exec sockets high up, and a
+    /// number the process closed behind the pool's back is replaced.
+    #[test]
+    fn placeholders_are_sockets_and_survive_a_closed_one() {
+        let mut pool = Vec::new();
+        refill_reserved(&mut pool, RESERVED_FDS);
+        assert_eq!(pool.len(), RESERVED_FDS);
+        let mut sorted = pool.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), RESERVED_FDS);
+        for &fd in &pool {
+            assert!(fd >= RESERVED_FD_BASE && is_socket(fd));
+            // SAFETY: plain fcntl on our fd.
+            assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, libc::FD_CLOEXEC);
+        }
+        let gone = pool[0];
+        // SAFETY: closing our own placeholder, as a guest might.
+        unsafe { libc::close(gone) };
+        refill_reserved(&mut pool, RESERVED_FDS + 1);
+        assert_eq!(pool.len(), RESERVED_FDS + 1);
+        assert!(pool.iter().all(|&fd| is_socket(fd)));
+        for fd in pool {
+            // SAFETY: our placeholders.
+            unsafe { libc::close(fd) };
+        }
     }
 }
