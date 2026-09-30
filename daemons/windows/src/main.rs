@@ -332,13 +332,22 @@ impl Bridge {
     /// Start launcher activity `activity` (`package/class`), then tell the
     /// display server once it has drawn its first frame or the launch has
     /// ended: a splash shows until then.
+    ///
+    /// A task started with it that has a window keeps the window's place:
+    /// the launch, which brings that task to the front, gives it its own
+    /// bounds as launch bounds. Without them freeform lays the task out
+    /// again as a new one, and cascades it away from its own bounds.
     fn launch(&self, activity: &str) {
+        let bounds = (self.tasks.lock().unwrap().values())
+            .find_map(|t| t.shown.filter(|_| t.activity.as_deref() == Some(activity)));
         match activity.split_once('/') {
-            Some((package, class)) => match self.atm.start_activity_and_wait(package, class) {
-                Ok(r) if r < 0 => log::warn!("start {activity}: {r}"),
-                Ok(_) => {}
-                Err(e) => log::warn!("start {activity}: {e}"),
-            },
+            Some((package, class)) => {
+                match self.atm.start_activity_and_wait(package, class, bounds) {
+                    Ok(r) if r < 0 => log::warn!("start {activity}: {r}"),
+                    Ok(_) => {}
+                    Err(e) => log::warn!("start {activity}: {e}"),
+                }
+            }
             None => log::warn!("start {activity}: not package/class"),
         }
         self.send(&Window::with_text(window::DRAWN, 0, activity));

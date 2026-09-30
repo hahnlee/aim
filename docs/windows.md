@@ -144,7 +144,9 @@ drops the old connection's tasks. The mode:
   since. The task follows the window as after the user's resize. A
   manifest's `screenOrientation` needs nothing of the window: freeform
   launches such a task with bounds of that orientation
-  (`TaskLaunchParamsModifier`).
+  (`TaskLaunchParamsModifier`). An activity of a fixed manifest
+  orientation that starts in a running task (or comes to its top when the
+  one above finishes) does not turn the window (#593).
 - **System bars.** Apps in window mode see no status or navigation bar:
   the platform gives a floating (freeform) task's windows only caption and
   IME insets (`InsetsPolicy`), and while a freeform task is visible it
@@ -237,12 +239,22 @@ Settings.app/Contents/
   that quits or crashes gives them back.
 - **Launch.** Opening a shim (Finder, Dock, Launchpad, Spotlight, `open`)
   starts its launcher activity in a new task (`LAUNCH`); Android brings a
-  running task to the front instead. Clicking the Dock icon again does the
-  same. A shim with no window shows a splash at once: a window with the
-  app's icon on the window background, which moves into the task's window
+  running task to the front instead, where its window is: the launch gives
+  a task it started that has a window its own bounds as launch bounds
+  (`ActivityOptions.setLaunchBounds`), or freeform would lay it out again
+  as a new task and cascade it away from itself. Clicking the Dock icon
+  again does the same. A shim with no window shows a splash at once, before
+  it sets up its renderer or connects (#605): a window with the app's icon
+  on its splash screen background, which moves into the task's window
   when Android gives the task bounds and goes when the launch has drawn
   its first frame (`DRAWN`, what `am start -W` waits for). Android draws
-  no starting window of its own without WMShell (m1-shell.md, D4).
+  no starting window of its own without WMShell (m1-shell.md, D4). The
+  background is what Android's starting window takes (#606): the launcher
+  activity's theme's `windowSplashScreenBackground`, else its
+  `windowBackground` if a color, for the Mac's light and dark appearance,
+  which aim-apps writes into the shim's `Info.plist`
+  (`AIMSplashBackground`, `AIMSplashBackgroundDark`); else the Mac's
+  window background.
   Quitting a shim closes the tasks it shows. Closing its last window
   does not quit it, as with a Mac app (an app may pass through a task that
   closes before its next one opens); a shim whose bundle is removed (its
@@ -306,3 +318,15 @@ toasts, SystemUI's heads-up notifications) are drawn where Android puts them on 
 display, which only a window over that place shows. Windows on a screen
 other than the main one show nothing there (the display covers the main
 screen only).
+
+An activity start into a running task from anywhere but a shim (an app's
+own `FLAG_ACTIVITY_NEW_TASK` start, a notification's `PendingIntent`,
+`am start`) moves its window by freeform's cascade: freeform lays the
+reused task out again from its persisted bounds, and moves it off itself
+(#613). An activity of a fixed manifest orientation that comes to the top
+of a running task does not turn the window: a freeform task is never the
+display's orientation source, so `onTaskRequestedOrientationChanged` does
+not come, and the top activity's `ActivityInfo` is only in the
+`RunningTaskInfo` past its `Configuration`, with a whole `ApplicationInfo`
+in it. The native task organizer's `onTaskInfoChanged` gives it (#593,
+#463).

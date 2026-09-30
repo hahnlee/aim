@@ -188,7 +188,13 @@ impl BpActivityTaskManager {
     /// Start launcher activity `class` of `package` as a launcher would,
     /// and wait until it has drawn its first frame (or the launch ended),
     /// as `am start -W` does; the `ActivityManager.START_*` result.
-    pub fn start_activity_and_wait(&self, package: &str, class: &str) -> Result<i32> {
+    /// `bounds` are the launch bounds (`ActivityOptions.setLaunchBounds`).
+    pub fn start_activity_and_wait(
+        &self,
+        package: &str,
+        class: &str,
+        bounds: Option<[i32; 4]>,
+    ) -> Result<i32> {
         let reply = call(&self.binder, atm::START_ACTIVITY_AND_WAIT, |p| {
             p.write(&None::<SpIBinder>)?; // caller
             p.write(&"android")?; // callingPackage
@@ -201,7 +207,15 @@ impl BpActivityTaskManager {
             p.write(&0i32)?; // requestCode
             p.write(&0i32)?; // flags
             p.write(&0i32)?; // no ProfilerInfo
-            p.write(&0i32)?; // no options
+            match bounds {
+                Some(b) => {
+                    p.write(&1i32)?;
+                    write::launch_bounds_options(b)
+                        .iter()
+                        .try_for_each(|w| p.write(w))?;
+                }
+                None => p.write(&0i32)?, // no options
+            }
             p.write(&USER_CURRENT)
         })?;
         // The `WaitResult`, as `writeTypedObject` writes it: its result first.
