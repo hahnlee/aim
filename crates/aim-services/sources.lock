@@ -17,7 +17,6 @@ SOURCE_FILES=(
   "platform/frameworks/base|core/java/android/permission/IPermissionManager.aidl|68234acd6d2a08ef924cddbbfd38b2b73e26df961f6a41251f9490ed58c10403"
   "platform/frameworks/base|core/java/android/os/IUserManager.aidl|0f0c0f8ed3d6764b141e94ad3a3c5ca2c3ed92193372228096baf9d4d61d83e0"
   "platform/frameworks/base|core/java/android/app/trust/ITrustManager.aidl|032ad29ed8780c18823845ba629e722ce6bf3a796ef764f6b0f8d5a171d27016"
-  "platform/frameworks/base|core/java/com/android/internal/view/IInputMethodManager.aidl|83348aaedbc1fef4a032e7b614b93300e6fbef8d47840598155c241bfadaee7c"
   "platform/frameworks/base|core/java/android/app/ITaskStackListener.aidl|a9a555bfd3680f26f801ade3310b6e17d19c24e82b66936ab03122acc7c2be5b"
   "platform/frameworks/native|libs/permission/aidl/com/android/internal/app/IAppOpsCallback.aidl|82574f3b0897bf513c60a9868b0f1155ba89ef8d113abc4b4d99b5dec73498a0"
   "platform/frameworks/base|core/java/android/content/pm/IPackageManager.aidl|7b02c7375bc969da513471dbed8aa41751490398dcdc4d580a5557e59c861263"
@@ -31,6 +30,7 @@ SOURCE_FILES=(
   "platform/frameworks/base|core/java/android/os/vibrator/IVibrationSessionCallback.aidl|6d4bafaa83f83a48a343ef0d3875a17c1b3d3f80bfb555d7c0d8d46197cc3cc1"
   "platform/frameworks/base|core/java/android/os/ICancellationSignal.aidl|3a3423eb076bb4ed64d50c35e3afa905782604a2b0f3373f0040ce470f02d191"
   "platform/frameworks/base|core/java/android/os/IExternalVibratorService.aidl|3a524863da5241684e4870e648580cdb81bd15a53c86b554283b5c3bf159998a"
+  "platform/frameworks/base|core/java/android/app/IUriGrantsManager.aidl|15fd9c7d8977ff48e776b0eaa140ea82b90b4f1ec0d1789de7d8e4dfe9af3fb2"
 )
 
 # descriptor|jar of its stub in the image|methods to marshal (`*`: all).
@@ -40,13 +40,12 @@ INTERFACES=(
   "android.content.IClipboard|system/framework/framework.jar|*"
   "android.content.IOnPrimaryClipChangedListener|system/framework/framework.jar|*"
   "android.os.IServiceManager|system/framework/framework.jar|addService,checkService"
-  "android.app.IActivityManager|system/framework/framework.jar|checkPermission,handleIncomingUser,openContentUri,sendIntentSender"
+  "android.app.IActivityManager|system/framework/framework.jar|checkPermission,handleIncomingUser,openContentUri,sendIntentSender,getContentProviderExternal"
   "android.app.IActivityTaskManager|system/framework/framework.jar|getFocusedRootTaskInfo,registerTaskStackListener"
   "com.android.internal.app.IAppOpsService|system/framework/framework.jar|checkPackage,checkOperationForDevice,noteOperation,startWatchingModeWithFlags"
   "android.permission.IPermissionManager|system/framework/framework.jar|checkPermission"
   "android.os.IUserManager|system/framework/framework.jar|isUserRunning,getProfileIds,hasUserRestriction"
   "android.app.trust.ITrustManager|system/framework/framework.jar|isDeviceLocked,registerDeviceLockedStateListener"
-  "com.android.internal.view.IInputMethodManager|system/framework/framework.jar|getCurrentInputMethodInfoAsUser"
   "android.app.ITaskStackListener|system/framework/framework.jar|onTaskStackChanged"
   "com.android.internal.app.IAppOpsCallback|system/framework/framework.jar|*"
   "android.content.pm.IPackageManager|system/framework/framework.jar|getApplicationInfo,registerPackageMonitorCallback,getPackagesForUid,queryInstrumentationAsUser"
@@ -60,4 +59,12 @@ INTERFACES=(
   "android.os.vibrator.IVibrationSessionCallback|system/framework/framework.jar|onFinished"
   "android.os.ICancellationSignal|system/framework/framework.jar|*"
   "android.os.IExternalVibratorService|system/framework/framework.jar|*"
+  "android.app.IUriGrantsManager|system/framework/framework.jar|checkGrantUriPermission_ignoreNonSystem"
+)
+
+# Binder interfaces the framework writes by hand, without AIDL:
+# descriptor|jar of the interface in the image|its int constants (the
+# transaction codes) to read from the image.
+CONSTANTS=(
+  "android.content.IContentProvider|system/framework/framework.jar|CALL_TRANSACTION"
 )

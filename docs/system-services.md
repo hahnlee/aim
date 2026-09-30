@@ -9,7 +9,7 @@ every step: replace superseded facts instead of appending a log.
 
 | Service | Implementation | Conformance (CTS 16_r1) | Since |
 | --- | --- | --- | --- |
-| `clipboard` (IClipboard) | native, `crates/aim-services`, backed by `NSPasteboard` | 35 of 36 tests pass (original: 36 of 36); app checks pass | M1, 2026-09-29 |
+| `clipboard` (IClipboard) | native, `crates/aim-services`, backed by `NSPasteboard` | 36 of 36 tests pass, as the original; app checks pass | M1, 2026-09-29 |
 | `vibrator_manager` (IVibratorManagerService), `external_vibrator_service` | native, `crates/aim-services`: the original without a vibrator, as on a Mac | CtsVibratorTestCases: 268 of 301 pass, 33 skip (no vibrator), each test as the original | M2, 2026-09-30 |
 | every other service | the original, in SystemServer or its daemon | | |
 
@@ -89,7 +89,7 @@ setting, so no uid observer is needed. Noting an app op
 (`noteOperation`), which records an access and decides nothing the check
 did not, is sent from a background thread.
 
-Three inputs are asked each time. Permissions: their owner's listener,
+Two inputs are asked each time. Permissions: their owner's listener,
 `IPermissionManager.addOnPermissionsChangeListener`, is told of runtime
 permissions only. Granting or revoking a development or role permission
 (`pm grant`, the role holders') notifies nobody
@@ -110,13 +110,29 @@ watcher either (#467). It delegates only to the target of an active
 instrumentation, a uid one of whose packages an installed
 instrumentation targets (an SDK sandbox's uid: its client's), so those
 uids' modes are asked each time and every other uid's are mirrored. The
-input method: its owner is the `DEFAULT_INPUT_METHOD` setting, and
-`IContentService.registerContentObserver` refuses an observer from a
-process ActivityManager does not know ("Failed to find PID",
-`checkContentProviderAccess`), which the service host is (#430). The
 clipboard evaluates the original's disjunction with focus first, so only
 a read by an app without focus (the input method, a service) asks for a
-permission or the input method.
+permission.
+
+**Settings.** What the original reads from the settings provider
+(`Settings.Secure`, `DeviceConfig`) is kept as the framework's own
+settings clients keep it (`Settings.NameValueCache`), not by an
+observer: `IContentService.registerContentObserver` refuses one from a
+process ActivityManager does not know ("Failed to find PID",
+`checkContentProviderAccess`), which the service host is (#430). The
+service host reads the provider as system_server's code does,
+`IContentProvider.call` (`GET_secure`, `PUT_secure`, `GET_config`) on the
+provider `IActivityManager.getContentProviderExternal` hands out, and
+asks it to track each value's generation: the reply carries the
+provider's generation array (a `MemoryIntArray` in ashmem, mapped
+read-only in the service host) and the value's index. A kept value is
+used while its generation is unchanged, one memory read; the provider
+bumps it with every change, so a value is never older than the last
+change. A `DeviceConfig` namespace is tracked as a whole (`LIST_config`
+of its prefix), since the provider bumps only the namespace for any of
+its properties; its values are read after its generation. Everything
+kept goes when the provider (system_server) dies
+(`crates/aim-services/src/settings.rs`).
 
 **The rule.** A value is kept only while its listener is registered: the
 listener is registered before the first query, and a query keeps its
@@ -326,16 +342,30 @@ windows); each access checks the caller's package and notes the
 READ/WRITE_CLIPBOARD app op (a MODE_ERRORED throws, as `noteOp` does);
 listeners are told of each change they may read and forgotten when they
 die; a clip is copied to related profiles unless a restriction forbids it,
-and cleared an hour after its last use. `ClipData` is read and written in
-its Java parcel form (`clip.rs`), its binders held while the clip is.
+and cleared after its last use as `DeviceConfig` says
+(`clipboard/auto_clear_enabled`, `auto_clear_timeout`, an hour by
+default); a setter must be able to grant read access to the clip's
+`content:` URIs and intent data (`checkDataOwner`, through
+`IUriGrantsManager.checkGrantUriPermission_ignoreNonSystem`, the binder
+form of the same check for system callers). The access notification
+methods read and write `Settings.Secure.clipboard_show_access_notifications`,
+and the default input method is `Settings.Secure.default_input_method`
+("Settings" above). `ClipData` is read and written in its Java parcel
+form (`clip.rs`): every framework span, `TextLinks`, bundles with file
+descriptors (held as files while the clip is, as its binders are); a
+dump writes nothing, as the original's.
 
 The Mac takes the emulator's place (`EmulatorClipboardMonitor`): a clip set
 on the default device puts its first item's text on the Mac's pasteboard;
-text copied on the Mac becomes user 0's clip, set by the system uid and
-labelled "host clipboard". The Mac's text is read only when an app pastes
-it (a change is noticed from `changeCount` and the types, which do not
-read the content). Clearing an Android clip clears the Mac's pasteboard
-only while it still holds that clip.
+text copied on the Mac becomes user 0's clip, labelled "host clipboard"
+with SystemUI's `SUPPRESS_CLIPBOARD_OVERLAY`, and set as a mirrored
+device's clipboard sync sets it: by the shell uid, from
+`com.android.shell`, the one source SystemUI honours the extra for off
+the emulator (`ClipboardOverlaySuppressionControllerImpl`), so a copy on
+the Mac raises no overlay in the device window. The Mac's text is read
+only when an app pastes it (a change is noticed from `changeCount` and
+the types, which do not read the content). Clearing an Android clip
+clears the Mac's pasteboard only while it still holds that clip.
 
 Where the original uses a system_server-internal API with no binder form,
 the native clipboard does without, or stands in:
@@ -343,21 +373,32 @@ the native clipboard does without, or stands in:
 - focus: the focused root task's `effectiveUid` for
   `WindowManagerInternal.isUidFocused`; content capture, autofill and
   virtual devices not consulted (#430);
-- the default input method: `IInputMethodManager`'s current method for
-  `Settings.Secure.DEFAULT_INPUT_METHOD`;
-- no URI permission grants (#429); no DeviceConfig or Settings.Secure
-  (#428); no paste toast, text classification (clips are marked
-  `CLASSIFICATION_NOT_PERFORMED`) or statistics (#431);
-- clips it cannot parse are refused, and fds and `dumpsys clipboard` are
-  not served (#433);
-- SystemUI shows its clipboard overlay for the Mac's copies (#434).
+- no URI permission grants to the apps that read a clip (#429): the
+  grant (`IUriGrantsManager.grantUriPermissionFromOwner`) takes a
+  permission owner only `UriGrantsManagerInternal.newUriPermissionOwner`
+  makes, and no binder interface hands one out;
+- no paste toast, text classification (clips are marked
+  `CLASSIFICATION_NOT_PERFORMED`) or statistics (#431). The toast's
+  text is the app's label in the device's language and the framework's
+  `pasted_from_clipboard`, which system_server resolves with the app's
+  and its own `Resources` (no binder interface returns a label), and
+  with safety protection on it is a custom-view toast, a window
+  system_server adds itself; classification is a session of the
+  `textclassification` service with its request, callback and result
+  parcels; the statistics are statsd socket writes from system_server's
+  identity;
+- a clip icon (`Bitmap`) and an item's `ActivityInfo` are refused: no
+  API gives an app's clip either, and the original drops the activity
+  info when it hands a clip out.
 
 **Cost.** A call that needs no check is fast: `addPrimaryClipChangedListener`
 takes 15-18 us against 377-1,878 us for the original. A checked call
 reads mirrored state ("Mirrored state"), so a focused app's read makes
 no call into system_server unless an installed instrumentation targets
 the app (a test, which asks the app op's mode); a read by an app without
-focus asks the input method and a permission. Measured 2026-09-30 in one boot each,
+focus asks a permission (the input method setting is read again only
+after it changed; before that it was asked each time, as in the numbers
+below). Measured 2026-09-30 in one boot each,
 before and after the mirror, with a binder trace over the CTS run below
 (the same data directory; host load 21 before, 6 after, so the shell
 loop's numbers are the cleaner comparison):
@@ -461,7 +502,7 @@ export ] && export "$n=$v"; done < /data/system/environ/classpath`).
 | --- | --- | --- | --- |
 | ClipboardManagerTest | 15 | 15 pass | 15 pass |
 | ClipboardManagerListenerTest | 1 | pass | pass |
-| ClipboardAutoClearTest | 3 | 3 pass | 2 pass; `testAutoClearJob` fails (#428) |
+| ClipboardAutoClearTest | 3 | 3 pass | 3 pass (2026-09-30, with DeviceConfig read, #428) |
 | ClipDataTest | 11 | 11 pass | 11 pass |
 | ClipDescriptionTest | 6 | 6 pass | 6 pass |
 
@@ -484,6 +525,15 @@ cut short by a SurfaceFlinger hang in a task snapshot that took
 system_server down (#436); the rerun passed.
 
 **App checks** (native clipboard, device window):
+
+- 2026-09-30 (the settings, URI check, spans and shell-source change):
+  text copied on the Mac became the clip without SystemUI's overlay
+  (`ClipboardListener: Clipboard overlay suppressed.`), pasted into
+  Settings search (Ctrl+V) and, with two characters typed, copied back
+  to the Mac; `dumpsys clipboard` exits 0; the access notification
+  setting reads 1, is written 0 through the clipboard
+  (`settings get secure clipboard_show_access_notifications`: 0) and
+  reads 0 back.
 
 - Settings search: text typed in the field and copied (Ctrl+A, Ctrl+C) is
   on the Mac's pasteboard (`pbpaste`); text copied on the Mac pastes into

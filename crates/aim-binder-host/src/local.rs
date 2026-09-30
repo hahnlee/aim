@@ -15,6 +15,9 @@
 //! and a call that carries some to a service that takes none fails as the
 //! driver fails it for a node that does not accept them. Replies may carry
 //! fds too (`TF_ACCEPT_FDS`, as libbinder asks), closed with the reply.
+//! The files of a parcel this process sends get fds for the send, closed
+//! once the driver has taken them, as a libbinder parcel owns the fds it
+//! writes.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -115,6 +118,15 @@ struct FileTable {
     next: u32,
 }
 
+impl FileTable {
+    fn install(&mut self, file: File) -> u32 {
+        let fd = self.next;
+        self.next += 1;
+        self.files.insert(fd, file);
+        fd
+    }
+}
+
 /// The process as the driver sees it in one ioctl: its memory is this
 /// address space.
 struct Local<'a> {
@@ -153,11 +165,7 @@ impl GuestProcess for Local<'_> {
     }
 
     fn install_file(&mut self, file: File) -> Result<u32, Errno> {
-        let mut table = self.files.lock().unwrap();
-        let fd = table.next;
-        table.next += 1;
-        table.files.insert(fd, file);
-        Ok(fd)
+        Ok(self.files.lock().unwrap().install(file))
     }
 
     fn close_fd(&mut self, fd: u32) {
@@ -403,6 +411,7 @@ impl LocalProcess {
         data: &Parcel,
         oneway: bool,
     ) -> Result<Received, StatusCode> {
+        let (bytes, fds) = self.install_files(data);
         let tr = TransactionData {
             target: u64::from(handle),
             cookie: 0,
@@ -410,9 +419,9 @@ impl LocalProcess {
             flags: TF_ACCEPT_FDS | if oneway { TF_ONE_WAY } else { 0 },
             sender_pid: 0,
             sender_euid: 0,
-            data_size: data.data().len() as u64,
+            data_size: bytes.len() as u64,
             offsets_size: 8 * data.objects().len() as u64,
-            buffer: data.data().as_ptr() as u64,
+            buffer: bytes.as_ptr() as u64,
             offsets: data.objects().as_ptr() as u64,
         };
         let mut out = Commands::default();
@@ -424,7 +433,9 @@ impl LocalProcess {
             } else {
                 Until::Reply
             },
-        )?;
+        );
+        self.close(fds);
+        let reply = reply?;
         let Some(tr) = reply else {
             return Ok(Received {
                 process: self.arc(),
@@ -545,6 +556,25 @@ impl LocalProcess {
         self.files.lock().unwrap().files.get(&fd).cloned()
     }
 
+    /// `parcel`'s bytes with an fd of this process in each fd object, and
+    /// those fds, to close once the driver has taken the files.
+    fn install_files<'p>(&self, parcel: &'p Parcel) -> (std::borrow::Cow<'p, [u8]>, Vec<u32>) {
+        if parcel.files().is_empty() {
+            return (parcel.data().into(), Vec::new());
+        }
+        let mut bytes = parcel.data().to_vec();
+        let mut fds = Vec::new();
+        let mut table = self.files.lock().unwrap();
+        for (at, file) in parcel.files() {
+            let fd = table.install(file.clone());
+            // flat_binder_object.handle, which holds the fd.
+            let at = *at as usize + 8;
+            bytes[at..at + 4].copy_from_slice(&fd.to_le_bytes());
+            fds.push(fd);
+        }
+        (bytes.into(), fds)
+    }
+
     fn close(&self, fds: Vec<u32>) {
         let mut files = self.files.lock().unwrap();
         for fd in fds {
@@ -611,13 +641,13 @@ impl LocalProcess {
         if call.is_oneway() {
             return;
         }
-        let status;
-        let (bytes, offsets, flags): (&[u8], &[u64], u32) = match &reply {
-            Ok(p) => (p.data(), p.objects(), 0),
-            Err(s) => {
-                status = s.to_le_bytes();
-                (&status, &[], TF_STATUS_CODE)
-            }
+        let ((bytes, fds), offsets, flags) = match &reply {
+            Ok(p) => (self.install_files(p), p.objects(), 0),
+            Err(s) => (
+                (s.to_le_bytes().to_vec().into(), Vec::new()),
+                &[][..],
+                TF_STATUS_CODE,
+            ),
         };
         let tr = TransactionData {
             target: 0,
@@ -635,6 +665,7 @@ impl LocalProcess {
         out.extend_from_slice(&tr.encode());
         // The reply's bytes must live until the driver copied them.
         let _ = self.wait(out, Until::Complete);
+        self.close(fds);
     }
 }
 
@@ -836,6 +867,13 @@ mod tests {
         sink_handle.transact(1, &with_fd, false).unwrap();
         assert_eq!(sink.0.load(Ordering::Relaxed), 1);
         assert!(server.files.lock().unwrap().files.is_empty());
+        // A parcel's own file gets an fd for the send only.
+        client.close(vec![fd]);
+        let mut with_file = Parcel::new();
+        with_file.write_file(Arc::new(()));
+        sink_handle.transact(1, &with_file, false).unwrap();
+        assert_eq!(sink.0.load(Ordering::Relaxed), 2);
+        assert!(client.files.lock().unwrap().files.is_empty());
 
         // A node of the client, watched by the server, dies with it.
         let listener = client.add_service(Arc::new(Registry {
