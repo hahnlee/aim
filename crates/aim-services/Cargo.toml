@@ -13,6 +13,7 @@ aim-binder-host = { path = "../aim-binder-host" }
 aim-host-audio = { path = "../aim-host-audio" }
 aim-host-display = { path = "../aim-host-display" }
 aim-host-location = { path = "../aim-host-location" }
+aim-host-sensors = { path = "../aim-host-sensors" }
 aim-hostcall.workspace = true
 aim-service-aidl = { path = "aidl" }
 libc.workspace = true

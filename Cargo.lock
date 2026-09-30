@@ -244,6 +244,7 @@ dependencies = [
  "aim-host-audio",
  "aim-host-display",
  "aim-host-location",
+ "aim-host-sensors",
  "aim-hostcall",
  "aim-service-aidl",
  "libc",

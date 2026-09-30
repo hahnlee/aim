@@ -12,6 +12,7 @@ every step: replace superseded facts instead of appending a log.
 | `clipboard` (IClipboard) | native, `crates/aim-services`, backed by `NSPasteboard` | 36 of 36 tests pass, as the original; app checks pass | M1, 2026-09-29 |
 | `vibrator_manager` (IVibratorManagerService), `external_vibrator_service` | native, `crates/aim-services`: the original without a vibrator, as on a Mac | CtsVibratorTestCases: 268 of 301 pass, 33 skip (no vibrator), each test as the original | M2, 2026-09-30 |
 | `location` (ILocationManager) | native, `crates/aim-services`: gps from CoreLocation, network, fused and the geocoder bound from Google Play services through the bridge | CtsLocation{Fine,Coarse,None,Gnss,Privileged}TestCases: each test as the original (234 pass, 10 skip, 3 fail and 2 hang in GNSS tests without a fix) | M2, 2026-09-30 |
+| `thermalservice` (IThermalService) | native, `crates/aim-services`: the Mac's thermal state as the `SKIN` status, its CPU and battery temperatures | CtsThermalTestCases and CtsOsTestCases `PowerManager_ThermalTest`: each test as the original (12 pass, 2 skip without a headroom) | M2, 2026-10-01 |
 | every other service | the original, in SystemServer or its daemon | | |
 
 ## How a service is replaced
@@ -651,7 +652,7 @@ the second's, Wi-Fi most of it.
 | `locale` (LocaleManagerService) | 2 / 1 | 0 / 1 / 1 | The Mac's languages (#282) |
 | `sensor_privacy` | 3 / 8 | 0 | Camera and microphone privacy (TCC, #291) |
 | `media_session`, `media_router`, `media_projection`, `media_communication` | 10 / 7 | 0 | Now Playing, AirPlay, ScreenCaptureKit |
-| `thermalservice`, `hardware_properties` | 3 / 2 | 0 / 0 / 2 | Thermal state (HAL today) |
+| `thermalservice`, `hardware_properties` | 3 / 2 | 0 / 0 / 2 | Thermal state (`thermalservice` native since M2) |
 | `biometric`, `auth` | 7 / 4 | 0 | Touch ID; no biometric HAL today |
 | `print`, `midi` | 1 / 2 | 0 | macOS printing, Core MIDI |
 | Shell (M1): `statusbar`, `wallpaper` (off by `config_enableWallpaperService`), `appwidget` (feature `android.software.app_widgets`), `dreams`, `search_ui`, `smartspace`, `app_prediction` (the launcher's; off by their `config_` services) | 8 / 8 | 0 / 15 / 0 | The Mac's desktop, Dock and menu bar |
@@ -993,6 +994,57 @@ the start is most of it.
 TotalTime of the two starts: 224 and 201 ms with the original, 233 and
 187 ms native.
 
+## The thermal service
+
+`crates/aim-services/src/thermal.rs` serves `thermalservice`
+(IThermalService), the one binder SystemServer's
+`ThermalManagerService` publishes, following `ThermalManagerService.java`
+at the tag with the Mac in the thermal HAL's place. The image's HAL
+(`hal/thermal`, [vendor-hals.md](vendor-hals.md)) reported the Mac to
+the original; the native service reads the same host module
+(`aim_host_sensors`) in the service host:
+
+- **Temperatures.** `SKIN`, whose throttling status is macOS's thermal
+  state (`NSProcessInfo.thermalState`: nominal `NONE`, fair `LIGHT`,
+  serious `SEVERE`, critical `CRITICAL`) and whose value is unknown
+  (NaN); `CPU` and `BATTERY` when the Mac reads them. The thermal status
+  is the highest `SKIN` status; a change of the thermal state is noticed
+  within 5 s, as the HAL polled it.
+- **No cooling devices and no thresholds**, as with that HAL, so no
+  headroom: `getThermalHeadroom` is NaN, the headroom thresholds are
+  seven NaNs (`allow_thermal_headroom_thresholds` is on in the image)
+  and no headroom listener is called.
+- **Listeners** (`RemoteCallbackList`): temperature listeners (DEVICE_POWER,
+  optionally one type) hear each temperature whose status changed,
+  status listeners each new status, both the current state when they
+  register; a `SHUTDOWN` temperature shuts down through `power`.
+- **Checks**: DEVICE_POWER for the temperatures, cooling devices and
+  temperature listeners, through the #497 cache; DUMP for `dumpsys`.
+- **The shell command** (`cmd thermalservice`, shell and root only):
+  `inject-temperature`, `override-status`, `reset`, `headroom`, `help`,
+  with the original's messages and results. `IBinder.SHELL_COMMAND_TRANSACTION`
+  is read and answered as `Binder` and `ShellCommand` do
+  (`crates/aim-services/src/shell.rs`, for every native service).
+
+`ThermalManagerService` publishes no local interface; system_server's
+display services reach it through its binder. It needs nothing from the
+bridge. Not here: the statsd atoms and the `thermal_changed` event log
+entry (#617). The HAL now has no client (#624).
+
+**Cost** (2026-10-01, the second boot of a data directory each, load
+about 8.5, a binder trace; the driver's latency of each synchronous call
+to `thermalservice`):
+
+| Call | Original p50 / p99 | Native p50 / p99 |
+| --- | --- | --- |
+| `getCurrentThermalStatus`, shell loop (42) | 40.7 / 65.3 us | 8.2 / 12.7 us |
+| `registerThermalStatusListener`, an app | 260 us | 20-25 us |
+| `getCurrentTemperatures`, shell loop (41) | 24.9 / 50.3 ms | 24.9 / 51.0 ms |
+
+Reading the Mac's temperatures is the cost of `getCurrentTemperatures`
+either way (#625). Settings started cold in 226 and 228 ms with the
+original, 218 and 214 ms native.
+
 ## Conformance
 
 **Suite.** The official Android 16 CTS, `android-cts-16_r1-linux_x86-arm`
@@ -1050,6 +1102,16 @@ CoreLocation fix in these boots, so the gps provider reports none. Run alone,
 `testGetLastKnownLocation_NoteOp` failed once natively and then passed
 three times; it compares app op times in milliseconds with `>=`, and a
 fast enough run ends its check in the millisecond of the access before.
+
+Thermal: `CtsThermalTestCases` (the NDK's `AThermal`, all 9 tests) and
+`CtsOsTestCases`'s `android.os.cts.PowerManager_ThermalTest` (5 tests),
+hidden API checks on, installed with `pm install -r -g -t` and run with
+`am instrument -w -r`. Against the original and the native service each
+test ends the same: 12 pass, and `testGetThermalHeadroom` and
+`testGetThermalHeadroomThresholds` skip, since the Mac gives no
+headroom. `cmd thermalservice` prints the same for `help`, `headroom`,
+`override-status` (valid, out of range, not a number, missing) and an
+unknown command, with the same results.
 
 **App checks** (native clipboard, device window):
 

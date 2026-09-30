@@ -24,7 +24,9 @@ pub mod statusbar;
 mod pasteboard;
 mod service_host;
 mod settings;
+mod shell;
 mod system;
+pub mod thermal;
 pub mod vibrator;
 pub mod volume;
 
@@ -106,6 +108,10 @@ impl NativeServices {
                         Arc::new(vibrator::ExternalVibratorService),
                     ),
                 ],
+                "thermalservice" => vec![(
+                    "thermalservice",
+                    thermal::ThermalManagerService::new(process.clone(), system.clone()),
+                )],
                 other => return Err(format!("no native implementation of `{other}`")),
             };
             for (name, service) in published {

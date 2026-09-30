@@ -61,6 +61,9 @@ Temperatures come from the HID event system's sensor services (usage page
 - The example thermal HAL of the vendor APEX `com.android.hardware.thermal`
   reports no temperatures and never throttles. The overlay removes that
   APEX, so ours serves the instance.
+- Its client was SystemServer's ThermalManagerService. `thermalservice`
+  is native now ([system-services.md](system-services.md)) and reads the
+  same host module in the service host, so the HAL has no client (#624).
 - The CPU and battery temperatures are optional; see
   [Private API](#private-api-optional). Without them the list is `SKIN`
   alone, which is also what a Mac without Apple silicon's sensor names
