@@ -33,6 +33,8 @@ pub fn node() -> Node {
         // The generated codes are checked against the image's stubs.
         repo("image/original.lock"),
     ];
+    // Our own interfaces (`OWN_INTERFACES` of the lock).
+    inputs.extend(files("java/device-services/aidl"));
     // The generators check each crate's manifest against its imports.
     for dir in ["hal/aidl", "daemons/aidl"] {
         inputs.extend(files(dir).into_iter().filter(|p| p.ends_with("Cargo.toml")));

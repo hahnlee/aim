@@ -8,9 +8,11 @@
 //! manifest and the hash of every overlay source.
 
 pub mod assemble;
+pub mod classpath;
 pub mod dex;
 pub mod diff;
 pub mod identity;
+pub mod linkage;
 pub mod manifest;
 pub mod plan;
 pub mod problem;

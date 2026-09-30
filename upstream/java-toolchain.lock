@@ -1,0 +1,32 @@
+# The Java toolchain of the device-specific system services (the
+# `device-services` node of `cargo aim`, docs/build.md, "Java"): code that
+# runs in system_server is dex, and a framework overlay is an APK. Build
+# tools only: nothing of them is linked into our code or put in the image.
+# Each archive is downloaded into _build/downloads, checked against its
+# sha256 and unpacked into _build/java. Shell-style assignments.
+
+# Eclipse Temurin (OpenJDK, GPL-2.0-only WITH Classpath-exception-2.0):
+# javac, and the runtime d8 and apksigner run on.
+JDK_VERSION=17.0.20.1+1
+JDK_URL=https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.20.1_1.tar.gz
+JDK_SHA256=196d13ba5f10414bef7f6a05a9b3f00edacb18ebacef2b99485db9e2ee18f0e8
+
+# Android SDK Build-Tools (Google's repository, repository2-3.xml; its
+# sha1 there is 199ae0047ee61e842f8ee0c6d3918e44fb9a1f83): d8 (R8,
+# BSD-3-Clause), aapt2 and apksigner (Apache-2.0), and aidl, the same
+# binary as AIDL_COMPILER of hal/sources.lock.
+BUILD_TOOLS_VERSION=36.0.0
+BUILD_TOOLS_URL=https://dl.google.com/android/repository/build-tools_r36_macosx.zip
+BUILD_TOOLS_SHA256=04e7f3a72044de4926fa038fa0e251a37bba1e1c3fb8beab6f8401bfd9eb4bf3
+# The archive's top directory.
+BUILD_TOOLS_DIR=android-16
+
+# AOSP's public test key (platform/build, Apache-2.0), which signs the
+# preinstalled overlays: PackageManager keeps a preinstalled package's
+# certificate, so the key must be stable; it need not be the platform's.
+AOSP_TAG=android-16.0.0_r1
+# project|path|sha256
+TEST_KEY=(
+  "platform/build|target/product/security/testkey.pk8|495675d32e89a149d5abe191f4e9c0e218b9068714e9b53a7c91e164a0741a23"
+  "platform/build|target/product/security/testkey.x509.pem|a4384ba815b9499a5ce349b4e33c1755278873fe2eac150a068823f526e6dbde"
+)
