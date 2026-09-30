@@ -224,11 +224,32 @@ unsafe extern "C" {
     fn mach_vm_read_overwrite(t: libc::mach_port_t, a: u64, s: u64, d: u64, o: *mut u64) -> i32;
 }
 
+/// This process's command line, as Linux's `get_mm_cmdline` reads it: the
+/// argument area; or, when its last byte is no longer NUL (setproctitle(3)
+/// wrote past argv, into the environment area if that follows), the title
+/// from the start up to its first NUL, within the two areas and a page.
+fn own_cmdline(s: &StackInfo) -> Vec<u8> {
+    let (lo, hi) = s.args;
+    if hi <= lo || read_guest(hi - 1, hi).first().is_none_or(|&c| c == 0) {
+        return read_guest(lo, hi);
+    }
+    let end = if s.env.0 == hi && s.env.1 >= s.env.0 {
+        s.env.1
+    } else {
+        hi
+    };
+    let mut title = read_guest(lo, end.min(lo + super::mem::PAGE));
+    if let Some(n) = title.iter().position(|&c| c == 0) {
+        title.truncate(n + 1);
+    }
+    title
+}
+
 fn cmdline(p: i32) -> Vec<u8> {
     if p == pid()
         && let Some(s) = stack()
     {
-        return read_guest(s.args.0, s.args.1);
+        return own_cmdline(&s);
     }
     if let Some(c) = super::cred::entry_cmdline(p) {
         return c;

@@ -12,6 +12,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -87,6 +88,40 @@ static void status_stat_cmdline(void) {
   CHECK(slurp("/proc/self/comm", big, sizeof big) > 0 && strcmp(big, "t_proc\n") == 0);
   snprintf(want, sizeof want, "/proc/%d/status", getpid());
   CHECK(slurp(want, big, sizeof big) > 0);
+}
+
+// /proc/self/cmdline after the argument area is rewritten in place
+// (proc(5), Linux's get_mm_cmdline): the whole area while its last byte is
+// NUL (zygote's setArgV0 renames within it); else, setproctitle(3) style,
+// the title up to its NUL, which may run on into the environment area.
+static void setproctitle_area(void) {
+  extern char** environ;
+  char* start = args[0];
+  char* end = args[nargs - 1] + strlen(args[nargs - 1]) + 1;
+  size_t area = end - start;
+  size_t room = environ[0] == end ? strlen(environ[0]) : 0;
+  FORK_OR_SKIP(pid);
+  if (pid == 0) {
+    int bad = 0;
+    memset(start, 0, area);
+    strcpy(start, "renamed");
+    ssize_t n = slurp("/proc/self/cmdline", big, sizeof big);
+    bad |= (n != (ssize_t)area || strcmp(big, "renamed") != 0) << 0;
+    size_t len = area + (room < 10 ? room : 10);
+    memset(start, 'x', len);
+    if (room > 0) start[len] = 0;
+    n = slurp("/proc/self/cmdline", big, sizeof big);
+    size_t want = room > 0 ? len + 1 : area;
+    bad |= (n != (ssize_t)want || memcmp(big, start, want) != 0) << 1;
+    strcpy(start, "abc");
+    n = slurp("/proc/self/cmdline", big, sizeof big);
+    bad |= (n != 4 || strcmp(big, "abc") != 0) << 2;
+    _exit(bad);
+  }
+  int st;
+  CHECK(waitpid(pid, &st, 0) == pid);
+  if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) printf("child status %#x\n", st);
+  CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
 }
 
 static void fds_and_links(void) {
@@ -338,6 +373,7 @@ int main(int argc, char** argv) {
   snprintf(self_path, sizeof self_path, "%s", argv[0]);
   RUN(maps_and_main_stack);
   RUN(status_stat_cmdline);
+  RUN(setproctitle_area);
   RUN(fds_and_links);
   RUN(system_files);
   RUN(proc_dirs);
