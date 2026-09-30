@@ -223,11 +223,19 @@ Settings.app/Contents/
   registered with Launch Services. `cargo aim boot --windows` runs it into
   `target/aim/boot/apps`; `aim-apps install` writes into
   `~/Applications/aim Apps` instead (not run by the build or the tests).
+  Each bundle is signed ad hoc (`codesign --sign -`), which macOS requires
+  of an app that posts notifications. One more shim, "Android System"
+  (`android`, framework-res's label and icon, no activity), stands for the
+  platform.
+- **Notifications.** A shim shows its app's notifications as its own
+  ([notifications.md](notifications.md)); the server opens it in the
+  background (`--notifications`: no activity, no Dock icon until a window
+  opens) when a notification comes and it is not running.
 
 ## Not covered yet
 
 System windows that belong to no task (ANR and other system dialogs,
-toasts, heads-up notifications) are drawn where Android puts them on the
+toasts, SystemUI's heads-up notifications) are drawn where Android puts them on the
 display, which only a window over that place shows. Windows on a screen
 other than the main one show nothing there (the display covers the main
 screen only).

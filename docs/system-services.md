@@ -284,6 +284,8 @@ From the sources at `android-16.0.0_r1` (`services/core`):
   ActivityManager (foreground-service notifications), WindowManager's
   DisplayPolicy, PermissionPolicyService and three job services call. Not
   a leaf: it needs the bridge in both directions (#430).
+  Its notifications reach the Mac without replacing it: a native listener
+  registered with the original ([notifications.md](notifications.md)).
 
 ## The clipboard (M1 pilot)
 
