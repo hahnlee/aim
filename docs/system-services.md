@@ -9,7 +9,7 @@ every step: replace superseded facts instead of appending a log.
 
 | Service | Implementation | Conformance (CTS 16_r1) | Since |
 | --- | --- | --- | --- |
-| `clipboard` (IClipboard) | native, `crates/aim-services`, backed by `NSPasteboard` | 35 of 36 tests pass (original: 36 of 36); app checks pass | M1, 2026-09-29 |
+| `clipboard` (IClipboard) | native, `crates/aim-services`, backed by `NSPasteboard` | 36 of 36 tests pass, as the original; app checks pass | M1, 2026-09-29 |
 | `vibrator_manager` (IVibratorManagerService), `external_vibrator_service` | native, `crates/aim-services`: the original without a vibrator, as on a Mac | CtsVibratorTestCases: 268 of 301 pass, 33 skip (no vibrator), each test as the original | M2, 2026-09-30 |
 | every other service | the original, in SystemServer or its daemon | | |
 
@@ -502,7 +502,7 @@ export ] && export "$n=$v"; done < /data/system/environ/classpath`).
 | --- | --- | --- | --- |
 | ClipboardManagerTest | 15 | 15 pass | 15 pass |
 | ClipboardManagerListenerTest | 1 | pass | pass |
-| ClipboardAutoClearTest | 3 | 3 pass | 2 pass; `testAutoClearJob` fails (#428) |
+| ClipboardAutoClearTest | 3 | 3 pass | 3 pass (2026-09-30, with DeviceConfig read, #428) |
 | ClipDataTest | 11 | 11 pass | 11 pass |
 | ClipDescriptionTest | 6 | 6 pass | 6 pass |
 
@@ -525,6 +525,15 @@ cut short by a SurfaceFlinger hang in a task snapshot that took
 system_server down (#436); the rerun passed.
 
 **App checks** (native clipboard, device window):
+
+- 2026-09-30 (the settings, URI check, spans and shell-source change):
+  text copied on the Mac became the clip without SystemUI's overlay
+  (`ClipboardListener: Clipboard overlay suppressed.`), pasted into
+  Settings search (Ctrl+V) and, with two characters typed, copied back
+  to the Mac; `dumpsys clipboard` exits 0; the access notification
+  setting reads 1, is written 0 through the clipboard
+  (`settings get secure clipboard_show_access_notifications`: 0) and
+  reads 0 back.
 
 - Settings search: text typed in the field and copied (Ctrl+A, Ctrl+C) is
   on the Mac's pasteboard (`pbpaste`); text copied on the Mac pastes into
