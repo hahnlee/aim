@@ -71,6 +71,10 @@ the composer's `linux-run`:
   `CLOCK_MONOTONIC`), or the handler's time when Core Animation dropped the
   frame. Core Animation runs these handlers under a lock that adding one
   waits for, so the server adds them holding none of its own (#436).
+  The fence's time is the display's first vsync at or after that time, as
+  a panel's present fence signals at the refresh that starts showing the
+  frame; a dropped drawable, or a window host's read of the frame, is not
+  at a refresh by itself.
 - **Display mode.** The window's content in backing pixels: by default the
   main screen's visible frame, `--size WxH` otherwise. In window mode
   (`--mode windows`) it is the main screen and a bar margin, and each task
@@ -92,9 +96,20 @@ Host code never calls guest code, so vsyncs travel as 32-byte
 `display::Event` records on the server connection, whose fd the HAL
 receives from `FN_CONNECT`. A thread in the HAL reads them and calls
 `IComposerCallback.onVsync` while SurfaceFlinger has vsync enabled. The
-server stops sending while it is disabled. The server declares its activity
-latency-critical, so App Nap does not throttle the link while the window is
-in the background.
+server runs the display link only while a client has vsync enabled, as a
+display controller raises its vsync interrupt only while the driver asks
+for it; the first vsync comes 6–14 ms after enabling. The server declares
+its activity latency-critical, so App Nap does not throttle the link while
+the window is in the background.
+
+SurfaceFlinger's vsync model (`VSyncPredictor`) learns from present
+fences and asks for hardware vsync only to resync: after a mode change,
+when an app asks for frames after a pause, or when a present fence does
+not fit the model. It keeps vsync on for good when it ignores present
+fences, which it does when the HAL reports
+`PRESENT_FENCE_IS_NOT_RELIABLE` or `debug.sf.vsync_reactor_ignore_present_fences`
+is set. The emulator's vendor properties, which the image starts from,
+set it; `init.aim.rc` clears it (#452).
 
 ## The HAL
 
@@ -119,10 +134,9 @@ in the background.
   present fence comes back (see "Buffers and presents"); SurfaceFlinger
   releases the previous client target on it. Client composition needs no
   release fences of its own: SurfaceFlinger releases the layers' buffers
-  on RenderEngine's fence. `getCapabilities` still reports
-  `PRESENT_FENCE_IS_NOT_RELIABLE`, and the emulator's vendor properties
-  set `debug.sf.vsync_reactor_ignore_present_fences`, so vsync prediction
-  relies on the HAL's vsyncs.
+  on RenderEngine's fence. `getCapabilities` reports no capabilities:
+  present fences are reliable, and SurfaceFlinger predicts vsync from
+  them ("Vsync").
 - **Frames in flight.** A frame is on screen, and its present fence
   signals, about two vsyncs after SurfaceFlinger presents it (Core
   Animation shows a drawable at the compositor's next refresh). With two
