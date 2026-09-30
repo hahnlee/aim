@@ -173,6 +173,18 @@ The migration's state and conformance results are in
   for the user's profiles: no change notification reaches the service
   host (#460, #430).
 
+### M2: location (2026-09-30)
+
+- `location` is native: the original `LocationManagerService` and its
+  provider managers, with gps from the Mac's CoreLocation in the service
+  host and network, fused, the geocoder and the population density
+  provider bound from the apps that serve them, as the original binds
+  them, through the bridge (`LocationBridge`: provider binding, settings
+  observers, SystemConfig's allowlists, user, power save, screen and
+  package events, `LocationManagerInternal` for AppOpsPolicy, the default
+  grants' location packages). Its five CTS modules end each test as the
+  original. What is not served yet is #569-#572.
+
 ### The system_server bridge (design, 2026-09-30)
 
 - What native services need from system_server internals (URI grant

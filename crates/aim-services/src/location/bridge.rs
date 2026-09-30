@@ -247,39 +247,12 @@ impl Service for Observer {
     }
 }
 
-/// `Uri.CREATOR`, read past: a string URI, an opaque one or a
-/// hierarchical one, each part as `Uri.Part.writeTo` writes it.
+/// A `Uri`, read past.
 struct Uri;
 
 impl ReadParcelable for Uri {
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
-        let part = |r: &mut Reader<'_>| -> ParcelResult<()> {
-            // BOTH carries the encoded and the decoded value.
-            if r.read_i32()? == 0 {
-                r.read_string8()?;
-            }
-            r.read_string8()?;
-            Ok(())
-        };
-        match r.read_i32()? {
-            0 => {} // null
-            1 => {
-                r.read_string8()?;
-            }
-            2 => {
-                r.read_string8()?; // scheme
-                part(r)?; // scheme-specific part
-                part(r)?; // fragment
-            }
-            3 => {
-                r.read_string8()?; // scheme
-                for _ in 0..4 {
-                    part(r)?; // authority, path, query, fragment
-                }
-            }
-            _ => return Err(aim_binder_host::parcel::BAD_VALUE),
-        }
-        Ok(Uri)
+        crate::clip::uri(r).map(|_| Uri)
     }
 }
 
@@ -396,5 +369,29 @@ impl Service for Host {
             _ => return Err(UNKNOWN_TRANSACTION),
         }
         Ok(reply)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_each_uri_type_as_its_string() {
+        let mut p = Parcel::new();
+        p.write_i32(2); // the array's length, as onChangeEtc's
+        for (type_id, uri) in [(3, "content://settings/secure/location_mode"), (1, "a:b")] {
+            p.write_i32(1); // non-null
+            p.write_i32(type_id);
+            p.write_string8(Some(uri));
+        }
+        p.write_i32(0); // flags
+        let mut r = Reader::new(p.data(), p.objects());
+        for _ in 0..r.read_i32().unwrap() {
+            assert_eq!(r.read_i32().unwrap(), 1);
+            Uri::read_from(&mut r).unwrap();
+        }
+        assert_eq!(r.read_i32().unwrap(), 0);
+        assert_eq!(r.remaining(), 0);
     }
 }

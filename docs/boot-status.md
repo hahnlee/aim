@@ -31,9 +31,10 @@ guest-init --image <derived> --data <data> --run \
 ## Native system services (2026-09-29, ADR 0013)
 
 `image/native-services` lists the system services implemented natively
-(docs/system-services.md): today `clipboard` and `vibrator_manager`
-(with `external_vibrator_service`). The derived image's `services.jar`
-does not start `ClipboardService` or `VibratorManagerService$Lifecycle`
+(docs/system-services.md): today `clipboard`, `vibrator_manager`
+(with `external_vibrator_service`) and `location`. The derived image's
+`services.jar` does not start `ClipboardService`,
+`VibratorManagerService$Lifecycle` or `LocationManagerService$Lifecycle`
 (their `SystemServerTiming` trace lines stay), and guest-init registers
 the native services with servicemanager when `servicemanager.ready` is
 set; `service check clipboard` finds it. The vibrator control service
@@ -651,7 +652,7 @@ frames are slow (#239).
 | **Thermal** | passed | `dumpsys thermalservice`: HAL AIDL 3 connected; cpu 48.9 °C, battery 33.7 °C, skin NaN (2026-09-30). |
 | **Health** | passed | `dumpsys battery`: level 80, AC powered, as `pmset -g batt` (80 %; AC attached). Temperature reads 0 (#242). |
 | **Bluetooth** | passed | `dumpsys bluetooth_manager`: `enabled: true`, `state: ON`, crashed 0 times, over our HAL's virtual controller. No scan was run (TCC). |
-| **GNSS** | passed | `dumpsys location`: `gps provider` enabled and allowed; GNSS hardware model "darwin CoreLocation". |
+| **GNSS** | passed | `dumpsys location` (the native service, 2026-09-30): `gps provider` enabled and allowed, identity `1000/android[GnssService]`; network and fused bound from Google Play services. No fix in boots whose host process has no CoreLocation authorization. |
 
 The host's security agent did not flag or block any of the four boots
 (#232), each from a freshly built target directory.

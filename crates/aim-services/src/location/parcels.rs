@@ -872,6 +872,12 @@ pub struct Criteria {
 const CRITERIA_NO_REQUIREMENT: i32 = 0;
 
 impl Criteria {
+    /// `getAccuracy`: `ACCURACY_FINE` (1) from a high horizontal accuracy,
+    /// `ACCURACY_COARSE` (2) otherwise.
+    fn accuracy(&self) -> i32 {
+        if self.horizontal_accuracy >= 3 { 1 } else { 2 }
+    }
+
     /// `LocationProvider.propertiesMeetCriteria`.
     pub fn met_by(&self, name: &str, properties: Option<&ProviderProperties>) -> bool {
         if name == "passive" {
@@ -883,9 +889,7 @@ impl Criteria {
             // that have not finished binding yet
             return false;
         };
-        if self.horizontal_accuracy != CRITERIA_NO_REQUIREMENT
-            && self.horizontal_accuracy < properties.accuracy
-        {
+        if self.accuracy() != CRITERIA_NO_REQUIREMENT && self.accuracy() < properties.accuracy {
             return false;
         }
         if self.power_requirement != CRITERIA_NO_REQUIREMENT
@@ -1289,6 +1293,34 @@ mod tests {
         let back = T::read_from(&mut r).unwrap();
         assert_eq!(r.remaining(), 0);
         back
+    }
+
+    #[test]
+    fn criteria_compare_fine_or_coarse_accuracy() {
+        // new Criteria() with setAccuracy(ACCURACY_COARSE) and
+        // setPowerRequirement(POWER_MEDIUM).
+        let criteria = Criteria {
+            horizontal_accuracy: 1,
+            vertical_accuracy: 0,
+            speed_accuracy: 0,
+            bearing_accuracy: 0,
+            power_requirement: 2,
+            altitude_required: false,
+            bearing_required: false,
+            speed_required: false,
+            cost_allowed: false,
+        };
+        let coarse = ProviderProperties::with(2, 2);
+        assert!(criteria.met_by("test_provider", Some(&coarse)));
+        assert!(!criteria.met_by("fused", Some(&ProviderProperties::with(3, 2))));
+        assert!(!criteria.met_by("passive", Some(&coarse)));
+        // setAccuracy(ACCURACY_FINE) stores ACCURACY_HIGH.
+        let fine = Criteria {
+            horizontal_accuracy: 3,
+            ..criteria
+        };
+        assert!(!fine.met_by("test_provider", Some(&coarse)));
+        assert!(fine.met_by("gps", Some(&ProviderProperties::with(1, 1))));
     }
 
     #[test]
