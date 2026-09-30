@@ -915,9 +915,9 @@ shipped or committed.
 `CtsContentUriTestApp.apk` then `CtsContentTestCases.apk` (`pm install -r
 -g [-t]`) and run the classes with `am instrument -w -r
 --no-hidden-api-checks -e class ... android.content.cts/androidx.test.runner.AndroidJUnitRunner`.
-`am instrument` runs on `app_process`, which needs init's class path:
-a debugging shell sources it first (`while read -r e n v; do [ "$e" =
-export ] && export "$n=$v"; done < /data/system/environ/classpath`).
+`am instrument` runs on `app_process`, which needs init's class path;
+the guest's shells (`aimctl shell`, `tools/guest-shell.sh`) inherit it
+with the rest of init's environment (boot-status.md, "Debugging").
 
 | Class (CtsContentTestCases) | Tests | Original | Native |
 | --- | --- | --- | --- |

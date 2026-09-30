@@ -14,6 +14,7 @@ pub struct Guest {
     pub linux_run: PathBuf,
     pub path_map: PathBuf,
     pub by_pid: PathBuf,
+    pub environ: PathBuf,
     pub binder: String,
 }
 
@@ -25,13 +26,22 @@ impl Guest {
             linux_run: crate::program("linux-run"),
             path_map: files.path_map(),
             by_pid: files.by_pid(),
+            environ: files.environ(),
             binder: format!("dev.aim.guest-init.{guest}.binder"),
         })
     }
 
-    /// `argv` (a guest program and its arguments) run in the guest.
+    /// `argv` (a guest program and its arguments) run in the guest with
+    /// init's global environment, as adbd's shell inherits it; before
+    /// init's first `export`, with linux-run's default one.
     pub fn command(&self, argv: &[&str]) -> Command {
         let mut command = Command::new(&self.linux_run);
+        if let Ok(environ) = std::fs::read_to_string(&self.environ) {
+            command
+                .env_clear()
+                .envs(environ.lines().filter_map(|l| l.split_once('=')))
+                .arg("--inherit-env");
+        }
         command
             .arg("--root")
             .arg(aim_paths::derived_image())

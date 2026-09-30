@@ -253,9 +253,23 @@ tools/guest-logcat.sh <data>/run -d -s keystore2               # any logcat argu
   `<data>/run/logs/<service>.log`.
 - Fatal signals in host code are symbolized there, for example
   `_platform_memmove+0x1bc (libsystem_platform.dylib)`.
-- `linux-run --path-map <data>/run/path-map --binder
-  dev.aim.guest-init.<pid>.binder /system/bin/service list` lists the
+- `tools/guest-shell.sh <data> [COMMAND]` is the guest's shell as adbd
+  runs it: root, in the boot's pid namespace, with its binder and init's
+  global environment (`PATH`, `BOOTCLASSPATH`, `ANDROID_*` and the rest
+  of `<data>/run/environ`), so `app_process` tools (`uiautomator`,
+  `monkey`, `am instrument`) start. `aimctl shell` is the same for an
+  aimctl guest. `tools/guest-shell.sh <data> 'service list'` lists the
   registered binder services.
+- A UI dump (the accessibility view tree with each view's text, id and
+  bounds) of what the screen shows, for checks of Settings pages or of
+  the page Chrome shows:
+
+  ```
+  tools/guest-shell.sh <data> 'uiautomator dump /data/local/tmp/ui.xml >/dev/null && cat /data/local/tmp/ui.xml'
+  ```
+
+  The XML is one line; `grep -o 'text="[^"]\+"'` lists the visible
+  texts, in the guest's language (the Mac's).
 
 ## Early boot (2026-09-28)
 

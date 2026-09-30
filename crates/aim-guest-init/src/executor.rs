@@ -568,6 +568,9 @@ impl GuestExecutor {
                 count += 1;
             }
         }
+        if self.fs.apply {
+            self.planner.write_env()?;
+        }
         Ok(Effect::Recorded(format!("{count} exports from {path}")))
     }
 
@@ -950,6 +953,9 @@ impl GuestExecutor {
             }
             Command::Export { name, value } => {
                 self.planner.set_env(name, value);
+                if self.fs.apply {
+                    self.planner.write_env()?;
+                }
                 Effect::Recorded(format!("export {name}={value} (service environment)"))
             }
             Command::LoadExports { path } => self.load_exports(path)?,
