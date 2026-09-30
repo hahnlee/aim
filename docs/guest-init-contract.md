@@ -89,7 +89,8 @@ kernfs	/proc	<runtime>/kernfs/proc
 | init's `mount none SRC DST bind` between `rw` areas | SRC's host path | `rw` | added when init runs it; with `rec`, the entries below SRC are copied below DST |
 | everything else | `<image>/...` | `root`, read-only | derived image |
 
-`<runtime>` defaults to `<data>/run` and is recreated on every boot. An
+`<runtime>` defaults to `<data>.run`, beside the data directory and not
+in its image (docs/storage.md), and is recreated on every boot. An
 init bind mount rewrites the file, so processes started afterwards see it
 (the data mirrors zygote binds app data from); running processes do not.
 vold's bind of `/data/data` onto `/data/user/0` (`prepare_special_dirs`)

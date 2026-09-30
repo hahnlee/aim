@@ -151,7 +151,7 @@ fn audioserver_and_the_hal_play_through_coreaudio() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("audio-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let data = dir.join("data");
-    let logs = data.join("run/logs");
+    let logs = aim_storage::data::runtime_of(&data).join("logs");
     // guest-init hosts the binder driver in this process; its services run
     // until the boot's timeout.
     let (ready, is_ready) = channel();

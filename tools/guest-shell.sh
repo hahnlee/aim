@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs the image's shell in a running guest as adbd's shell would run it
 # (docs/boot-status.md, "Debugging"): with init's global environment
-# (<data>/run/environ: PATH, BOOTCLASSPATH, ANDROID_*, ...), the boot's
+# (<data>.run/environ: PATH, BOOTCLASSPATH, ANDROID_*, ...), the boot's
 # binder and its pid namespace, as root. `aimctl shell` does the same for
 # an aimctl guest.
 #
@@ -19,7 +19,7 @@ fi
 [[ $# -ge 1 ]] || { sed -n '8,10p' "$0" >&2; exit 2; }
 data="$1"
 shift
-runtime="$data/run"
+runtime="$data.run"
 # guest-init holds the data directory's lock while it runs.
 guest_init="$(lsof -t -- "$data.lock" 2>/dev/null | head -1)"
 [[ -n "$guest_init" && -f "$runtime/path-map" ]] || { echo "$data: no running guest" >&2; exit 1; }

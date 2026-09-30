@@ -27,11 +27,16 @@ bench`) keeps everything of `DATA` in `DATA.asif` beside it:
   with `diskutil image resize`, which keeps its data, and attached again;
   that costs about a second once.
 - **Attached at start, detached at stop**: guest-init attaches it at
-  `DATA` (`diskutil image attach --nobrowse --mountPoint DATA`) before it
-  lays out the boot, and detaches it (`diskutil eject`) when the boot ends,
-  on its timeout, SIGINT or SIGTERM. The path map, `DATA/run` (the
-  runtime directory, logs, the path map file) and the persistent `/data`,
-  `/metadata` and `/cache` are all on it, at the paths they had before.
+  `DATA` (`diskutil image attach --nobrowse --mountPoint DATA`) on another
+  thread from its start, and detaches it (`diskutil eject`) when the boot
+  ends, on its timeout, SIGINT or SIGTERM. The persistent `/data`,
+  `/metadata` and `/cache` are on it. Meanwhile the boot lays out its
+  runtime directory (`DATA.run`: `/dev`, sockets, the path map, logs),
+  which is not on it, and init runs up to its first `mount_all`, in the
+  `fs` stage, which waits for the attach as a device mounts its
+  partitions there (`crates/aim-guest-init/src/mount.rs`). On a second
+  boot the attach (about 0.5 s) is over by then. The runtime directory
+  earlier boots kept in the image (`DATA/run`) is removed at the mount.
 - **One user**: guest-init holds an exclusive lock on `DATA.lock` while the
   image is attached. A second guest-init on the same data fails at once.
 - **Crash recovery**: an image found attached at start belongs to a
@@ -42,9 +47,8 @@ bench`) keeps everything of `DATA` in `DATA.asif` beside it:
   on the file itself (`docs/guest-init-contract.md` section 6), so they
   are in the image with the data. They used to be in the runtime
   directory's table, which each boot wiped (#261).
-- After a stop, the boot's logs (`DATA/run/logs`) are in the detached
-  image; `diskutil image attach --nobrowse --mountPoint DATA DATA.asif`
-  shows them again (`diskutil eject` it before the next boot).
+- After a stop, the boot's logs stay in `DATA.run/logs` until the next
+  boot.
 - **Bounded waits**: every disk image tool call has a time limit (two
   minutes; half an hour for converting an image). A hung storagekitd
   (#425) makes the boot fail with that call named instead of hanging it.

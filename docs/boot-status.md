@@ -226,17 +226,20 @@ and wallpaper) holds boot completion for 0.67 s after home starts.
 
 guest-init's report breaks the time before zygote down: each command
 carries the time it ran, and its `timeline:` lines give the preparation
-steps (data image, runtime layout, property areas, scripts, binder
-host), every wait of init's queue with its length, and every property
-a service sets, since guest-init started (also `ro.boottime.*`'s
-epoch). Preparation cost 1.6 s on a first and 2.0 s on a second boot:
-attaching the data image (0.4-0.9 s), wiping the previous runtime
-directory (0.9 s on a second boot) and mapping the 355 property area
-files (0.5 s), the last two held up by the host's endpoint security
-agent, about 1 ms per writable shared mapping and per unlink. The old
-runtime directory is now removed in the background and the areas are
-mapped on eight threads (under 10 ms and about 0.18 s with a stand-in
-`linux-run`).
+steps (runtime layout, property areas, scripts, binder host), the data
+image's attach and mount, every wait of init's queue with its length,
+and every property a service sets, since guest-init started (also
+`ro.boottime.*`'s epoch). The data image attaches on a thread while the
+boot prepares and runs early-init and init; the `fs` stage's `mount_all`
+waits for it (docs/storage.md). On a second boot (host load 26-31) the
+preparation takes 0.16 s, the attach ends at 0.50-0.53 s and the mount
+waits 0-0.07 s for it; `start zygote` runs at 1.65-1.85 s and
+`boot_progress_start` follows at 2.4-2.6 s. A first boot creates the
+image, and its attach (0.9-1.4 s under load) still holds the mount up by
+about 0.5 s. Between the mount and zygote-start, init runs its exec
+programs one after another (about 25-120 ms each, mostly starting
+`linux-run`); the longest are bpfloader (0.3-0.6 s) and
+`aconfigd-mainline init` (0.12-0.36 s) (#529).
 
 ## Debugging
 
@@ -244,19 +247,19 @@ The original logd runs, and every service logs to it. Read it with the
 image's own logcat from another `linux-run` process:
 
 ```
-tools/guest-logcat.sh [--linux-run PATH] <data>/run            # logcat -d -b all -v threadtime
-tools/guest-logcat.sh <data>/run -d -s keystore2               # any logcat arguments
+tools/guest-logcat.sh [--linux-run PATH] <data>.run            # logcat -d -b all -v threadtime
+tools/guest-logcat.sh <data>.run -d -s keystore2               # any logcat arguments
 ```
 
 - A service's stdout and stderr (the layer's own messages: unimplemented
   syscalls, fatal signals with the faulting module) are in
-  `<data>/run/logs/<service>.log`.
+  `<data>.run/logs/<service>.log`.
 - Fatal signals in host code are symbolized there, for example
   `_platform_memmove+0x1bc (libsystem_platform.dylib)`.
 - `tools/guest-shell.sh <data> [COMMAND]` is the guest's shell as adbd
   runs it: root, in the boot's pid namespace, with its binder and init's
   global environment (`PATH`, `BOOTCLASSPATH`, `ANDROID_*` and the rest
-  of `<data>/run/environ`), so `app_process` tools (`uiautomator`,
+  of `<data>.run/environ`), so `app_process` tools (`uiautomator`,
   `monkey`, `am instrument`) start. `aimctl shell` is the same for an
   aimctl guest. `tools/guest-shell.sh <data> 'service list'` lists the
   registered binder services.
@@ -804,14 +807,14 @@ launch of the other runs.
 cargo aim build                       # attaches _build/android16-image and target/aim/derived
 cargo aim boot --data target/aim/boot/data
 # in another shell, with the boot's binder (guest-init's pid):
-linux-run --root target/aim/derived/root --path-map target/aim/boot/data/run/path-map \
+linux-run --root target/aim/derived/root --path-map target/aim/boot/data.run/path-map \
     --binder dev.aim.guest-init.<pid>.binder /system/bin/sh -c \
     'echo a > /data/local/tmp/Foo; echo b > /data/local/tmp/foo; ls /data/local/tmp'
 # a shell that should see and signal the boot's processes (ps, kill) joins
 # its pid namespace; without --by-pid it is alone in a private one:
-linux-run --root target/aim/derived/root --path-map target/aim/boot/data/run/path-map \
+linux-run --root target/aim/derived/root --path-map target/aim/boot/data.run/path-map \
     --binder dev.aim.guest-init.<pid>.binder \
-    --by-pid target/aim/boot/data/run/identity/by-pid /system/bin/ps -A
+    --by-pid target/aim/boot/data.run/identity/by-pid /system/bin/ps -A
 cargo aim storage                     # the images and what they occupy
 ```
 

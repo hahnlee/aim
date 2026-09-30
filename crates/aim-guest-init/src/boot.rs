@@ -31,6 +31,7 @@ use crate::identity::Identity;
 use crate::launch::{
     DryRunLauncher, Exit, HostLauncher, Launcher, LinuxRun, LinuxRunOptions, describe_launch,
 };
+use crate::mount::DataMount;
 use crate::paths::{Layout, Sweep};
 use crate::props::{Properties, heap_properties, mapped_properties, share_areas};
 use crate::propsvc::{PropertyEvent, PropertySockets, SetRequest};
@@ -290,14 +291,13 @@ pub struct Boot {
     /// Run mode: the system services implemented natively (ADR 0013),
     /// registered once servicemanager is ready.
     native_services: Option<Arc<NativeServices>>,
-    /// Run mode: the data directory's case-sensitive image, attached at
-    /// it for the boot (docs/storage.md). Declared last, so it is
-    /// detached after the rest is dropped.
     pub report: BootReport,
-    /// The previous boot's runtime directory, removed while this one runs;
-    /// before the data image is detached.
+    /// The previous boot's runtime directory, removed while this one runs.
     _sweep: Sweep,
-    _data: Option<aim_storage::data::DataImage>,
+    /// `/data`, `/metadata` and `/cache`: in run mode the data directory's
+    /// case-sensitive image, attached at it for the boot (docs/storage.md).
+    /// Declared last, so it is detached after the rest is dropped.
+    data: Rc<RefCell<DataMount>>,
 }
 
 /// `servicemanager` sets it once it serves calls.
@@ -449,18 +449,21 @@ impl Boot {
                 options.image.display()
             ));
         }
-        // Before the layout: its persistent directories are in the image.
-        let data_image = match options.mode {
-            RunMode::Run => Some(aim_storage::data::DataImage::attach(&options.data)?),
-            RunMode::DryRun => None,
+        // The data image attaches while the boot starts; init's mount_all
+        // waits for it (`mount`).
+        let data = match options.mode {
+            RunMode::Run => aim_storage::data::mount_point(&options.data)?,
+            RunMode::DryRun => options.data.clone(),
         };
-        mark("data image attached");
-        let data = data_image
-            .as_ref()
-            .map_or_else(|| options.data.clone(), |d| d.dir().to_path_buf());
         let layout = Layout::new(options.image.clone(), data, options.runtime.clone());
+        let data_mount = DataMount::start(
+            layout.clone(),
+            (options.mode == RunMode::Run).then(|| options.data.clone()),
+            epoch,
+        )?;
+        let data_mount = Rc::new(RefCell::new(data_mount));
         let sweep = layout.sweep_runtime().map_err(|e| e.to_string())?;
-        layout.prepare().map_err(|e| e.to_string())?;
+        layout.prepare_runtime().map_err(|e| e.to_string())?;
         let map = layout.path_map();
         std::fs::write(layout.path_map_file(), map.to_file_text()).map_err(|e| e.to_string())?;
         mark("runtime layout prepared");
@@ -633,6 +636,7 @@ impl Boot {
         let mut executor =
             GuestExecutor::new(props.clone(), launcher, planner, fs, options.only.clone());
         executor.exclude = options.exclude.clone();
+        executor.data = Some(data_mount.clone());
         executor.sync_services(manager.services());
 
         let mac = (options.mode == RunMode::Run).then(|| {
@@ -664,7 +668,7 @@ impl Boot {
             _sockets: sockets,
             _binder: binder,
             native_services,
-            _data: data_image,
+            data: data_mount,
             _sweep: sweep,
             report,
         })
@@ -1045,6 +1049,8 @@ impl Boot {
             let _ = self.executor.poll_processes();
         }
         self.report.fatal = self.executor.fatal.clone();
+        self.report.timeline.extend(self.data.borrow().timeline());
+        self.report.timeline.sort_by_key(|(at, _)| *at);
         self.report.property_count = self.props.borrow().areas().foreach().len();
         self.report.launches = self
             .executor

@@ -60,15 +60,25 @@ pub fn image_of(dir: &Path) -> PathBuf {
     dir.with_file_name(name)
 }
 
+/// The boot's runtime directory of the data directory `dir` (guest-init's
+/// `/dev`, sockets, identities and logs), beside it rather than in the
+/// image: a boot lays it out, and starts, while the image is attached.
+pub fn runtime_of(dir: &Path) -> PathBuf {
+    let mut name = dir.file_name().unwrap_or_default().to_os_string();
+    name.push(".run");
+    dir.with_file_name(name)
+}
+
 fn lock_of(dir: &Path) -> PathBuf {
     let mut name = dir.file_name().unwrap_or_default().to_os_string();
     name.push(".lock");
     dir.with_file_name(name)
 }
 
-/// `dir` with its parent resolved (the mount point must be a real path:
-/// linux-run's path maps compare host paths).
-fn real(dir: &Path) -> Result<PathBuf, String> {
+/// `dir` with its parent resolved, which is where its image is mounted (the
+/// mount point must be a real path: linux-run's path maps compare host
+/// paths).
+pub fn mount_point(dir: &Path) -> Result<PathBuf, String> {
     let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
         return Err(format!("{}: not a data directory path", dir.display()));
     };
@@ -94,7 +104,7 @@ pub struct DataImage {
 impl DataImage {
     /// Attaches the image of `dir` at `dir`, creating it first if needed.
     pub fn attach(dir: &Path) -> Result<Self, String> {
-        let dir = real(dir)?;
+        let dir = mount_point(dir)?;
         let image = image_of(&dir);
         let ceiling = ceiling(&image)?;
         if !image.exists() {
@@ -282,10 +292,10 @@ fn repair(image: &Path) -> Result<(), String> {
     result
 }
 
-/// Removes the data directory `dir` and its image, detaching it first.
-/// Nothing of it may be in use.
+/// Removes the data directory `dir`, its image and its runtime directory,
+/// detaching the image first. Nothing of it may be in use.
 pub fn remove(dir: &Path) -> Result<(), String> {
-    let dir = real(dir)?;
+    let dir = mount_point(dir)?;
     let image = image_of(&dir);
     if image.exists() {
         for attached in disk::attachments_of(&image)? {
@@ -294,6 +304,7 @@ pub fn remove(dir: &Path) -> Result<(), String> {
         fs::remove_file(&image).map_err(|e| format!("{}: {e}", image.display()))?;
     }
     let _ = fs::remove_file(lock_of(&dir));
+    let _ = fs::remove_dir_all(runtime_of(&dir));
     // Empty once detached; a plain directory from before data images
     // holds the data itself.
     match fs::remove_dir_all(&dir) {
@@ -314,7 +325,7 @@ pub struct Usage {
 }
 
 pub fn usage(dir: &Path) -> Result<Usage, String> {
-    let dir = real(dir)?;
+    let dir = mount_point(dir)?;
     let image = image_of(&dir);
     let allocated = disk::allocated(&image).map_err(|e| format!("{}: {e}", image.display()))?;
     let used = disk::is_mount_point(&dir)
@@ -332,6 +343,10 @@ mod tests {
         assert_eq!(
             image_of(Path::new("/t/boot/data")),
             PathBuf::from("/t/boot/data.asif")
+        );
+        assert_eq!(
+            runtime_of(Path::new("/t/boot/data")),
+            PathBuf::from("/t/boot/data.run")
         );
     }
 

@@ -65,11 +65,11 @@ boot` on it does).
 ## Talking to the guest
 
 `shell`, `logs`, `install`, `uninstall`, `open` and `status` run guest
-programs with `linux-run --root <derived> --path-map DATA/run/path-map
---binder dev.aim.guest-init.<pid>.binder --by-pid DATA/run/identity/by-pid`,
+programs with `linux-run --root <derived> --path-map DATA.run/path-map
+--binder dev.aim.guest-init.<pid>.binder --by-pid DATA.run/identity/by-pid`,
 so they see the guest's files, reach its services, and see and signal its
 processes (`ps -A`, `kill`), as `adb shell` does on a device. Like adbd's
-shell they inherit init's global environment (`DATA/run/environ`:
+shell they inherit init's global environment (`DATA.run/environ`:
 `PATH`, `BOOTCLASSPATH`, `ANDROID_*`, ...), so `app_process` tools such
 as `uiautomator` and `am instrument` run; an interactive shell also gets
 the terminal's `TERM`.

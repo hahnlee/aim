@@ -541,7 +541,7 @@ fn one_run(
     let mut session = Session { display, init };
     let guest = Guest {
         linux_run: ctx.workspace.host_bin("linux-run"),
-        path_map: data.join("run/path-map"),
+        path_map: aim_storage::data::runtime_of(&data).join("path-map"),
         binder: format!("dev.aim.guest-init.{}.binder", session.init.id()),
         data: data.join("data"),
     };
