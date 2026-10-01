@@ -10,7 +10,7 @@
 //! answered.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use aim_binder_host::parcel::{EX_SECURITY, Exception, Parcel, Reader, Result as ParcelResult};
@@ -32,6 +32,7 @@ use super::intent::ComponentName;
 use super::model::{PackageState, PackageUserState, State, System, User};
 use super::pkg::{AndroidPackage, booleans, booleans2::APEX};
 use super::resolve::Resolver;
+use super::system_config::Properties;
 use super::{reply, system_config};
 use crate::shadow::{Answer, ListSlice, ShadowCall, ShadowModel, Value};
 
@@ -108,14 +109,19 @@ impl PackageModel {
 
 /// Starts the package feed and the model of `package` and
 /// `package_native` over it, for a shadow comparison of guest-init's
-/// image `image`; the feed's states are written to `dump`.
+/// image `image` with the device's properties `props`; the feed's states
+/// are written to `dump`.
 pub fn start(
     system: &Arc<crate::system::System>,
     image: &Path,
+    props: Properties,
     dump: PathBuf,
 ) -> Result<Arc<PackageModel>, String> {
-    let props = system_config::build_props(image);
-    let device = system_config::system(image, &props)?;
+    let framework = system_config::Framework::load(image)?;
+    let image = image.to_path_buf();
+    // The device's side, read when the first state comes: the properties
+    // init sets are there by then.
+    let device: OnceLock<System> = OnceLock::new();
     let feed = Feed::start(system, Some(dump));
     let system = system.clone();
     // Each fed state with the device's constants and the users' unlock
@@ -144,6 +150,7 @@ pub fn start(
         {
             return Some(m.clone());
         }
+        let device = device.get_or_init(|| system_config::system(&image, &props, &framework));
         let mut state = (*fed).clone();
         state.system = System {
             force_system_packages_queryable: fed.system.force_system_packages_queryable,

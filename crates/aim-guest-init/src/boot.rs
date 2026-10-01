@@ -33,7 +33,7 @@ use crate::launch::{
 };
 use crate::mount::DataMount;
 use crate::paths::{Layout, Sweep};
-use crate::props::{Properties, heap_properties, mapped_properties, share_areas};
+use crate::props::{Properties, heap_properties, mapped_properties, read_property, share_areas};
 use crate::propsvc::{PropertyEvent, PropertySockets, SetRequest};
 use crate::supervisor::{DEFAULT_PATH, Planner};
 
@@ -591,10 +591,17 @@ impl Boot {
             }
             native_services = start_native_services(&image, server)?;
             if let Some((names, log)) = &options.binder_shadow {
+                let properties_dir = layout.properties_dir();
                 native_services
                     .as_ref()
                     .ok_or("--binder-shadow: the image has no native services")?
-                    .shadow(server.driver(), names, log, image.root())?;
+                    .shadow(
+                        server.driver(),
+                        names,
+                        log,
+                        image.root(),
+                        Box::new(move |name| read_property(&properties_dir, name)),
+                    )?;
             }
             // Android's notifications on the Mac, from the original
             // NotificationManagerService once it is published.

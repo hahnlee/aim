@@ -13,7 +13,8 @@ use std::sync::atomic::AtomicU32;
 use aim_android_init::props::area::{AreaMemory, HeapMemory};
 use aim_android_init::props::areas::{PROPERTIES_SERIAL, PROPERTY_INFO};
 use aim_android_init::props::{
-    FutexWaker, PA_SIZE, PropertyAreas, PropertyInfoArea, PropertyService, WakeTarget,
+    FutexWaker, PA_SIZE, PropAreaReader, PropertyAreas, PropertyInfoArea, PropertyService,
+    WakeTarget,
 };
 use aim_binder_host::mach;
 use aim_binder_host::server::Server;
@@ -188,6 +189,18 @@ pub fn mapped_properties(dir: &Path, property_info: Vec<u8>) -> Result<Propertie
     let mut service = PropertyService::with_areas(areas);
     service.set_waker(Box::new(SharedAreaWaker::new(bases, UlockShared)));
     Ok(service)
+}
+
+/// The value of the property `name` in the area files of `dir`, as a
+/// reader in another process sees it (`__system_property_get`): the
+/// area of its context by `property_info`, then the area's trie.
+pub fn read_property(dir: &Path, name: &str) -> Option<String> {
+    let info = fs::read(dir.join(PROPERTY_INFO)).ok()?;
+    let info = PropertyInfoArea::new(&info).ok()?;
+    let (index, _) = info.property_info_indexes(name);
+    let context = *info.contexts().get(index as usize)?;
+    let area = fs::read(dir.join(context)).ok()?;
+    PropAreaReader::new(&area).ok()?.get(name).map(|p| p.value)
 }
 
 /// Creates and maps the area files `names` in `dir` on several threads: a

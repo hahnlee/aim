@@ -136,14 +136,16 @@ fn log_line(log: &Log, line: &str) {
 }
 
 /// Starts comparing the original services `names` with their models,
-/// logging to `log`; `image` is the guest's root, which the package model
-/// reads the device's configuration from.
+/// logging to `log`; `image` is the guest's root and `props` its
+/// properties, which the package model reads the device's configuration
+/// from.
 pub(crate) fn start(
     driver: &Arc<Driver>,
     system: &Arc<System>,
     names: &[String],
     log: &Path,
     image: &Path,
+    props: crate::package::system_config::Properties,
 ) -> Result<(), String> {
     // One model of package and package_native, over the state the
     // original feeds it, written beside the log (crate::package::feed).
@@ -152,7 +154,7 @@ pub(crate) fn start(
         .any(|n| n == "package" || n == "package_native")
     {
         let dump = log.with_extension("package-feed.txt");
-        Some(crate::package::query::start(system, image, dump)?)
+        Some(crate::package::query::start(system, image, props, dump)?)
     } else {
         None
     };
