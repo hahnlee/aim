@@ -215,9 +215,28 @@ pub struct ComponentResolver {
     pub receivers: IntentResolver<FilterEntry>,
     pub services: IntentResolver<FilterEntry>,
     pub providers: IntentResolver<FilterEntry>,
-    /// Package and provider index; the first package to claim an
-    /// authority keeps it.
-    providers_by_authority: HashMap<String, (String, usize)>,
+    /// The first package to claim an authority keeps it.
+    providers_by_authority: HashMap<String, Registered>,
+}
+
+/// A provider `mProvidersByAuthority` holds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Registered {
+    pub package: String,
+    /// The provider's index in the package.
+    pub index: usize,
+    /// For the copy registration makes of a syncable provider with
+    /// several authorities: the copy's authorities (it is not syncable).
+    pub copy: Option<String>,
+}
+
+/// `String.split(";")`: trailing empty names dropped.
+fn authorities(s: &str) -> Vec<&str> {
+    let mut names: Vec<&str> = s.split(';').collect();
+    while names.last() == Some(&"") {
+        names.pop();
+    }
+    names
 }
 
 /// A component's main part.
@@ -249,14 +268,56 @@ impl ComponentResolver {
                 }
             }
             for (i, p) in pkg.providers.iter().enumerate() {
-                for name in p.authority.iter().flat_map(|a| a.split(';')) {
+                for name in p.authority.iter().flat_map(|a| authorities(a)) {
                     r.providers_by_authority
                         .entry(name.to_owned())
-                        .or_insert_with(|| (ps.name.clone(), i));
+                        .or_insert_with(|| Registered {
+                            package: ps.name.clone(),
+                            index: i,
+                            copy: None,
+                        });
                 }
             }
         }
+        for ps in state.packages.values() {
+            if let Some(pkg) = ps.pkg.as_deref() {
+                r.add_copies(ps, pkg);
+            }
+        }
         r
+    }
+
+    /// `addProvidersLocked`'s copies: a syncable provider keeps its first
+    /// authority (the fed package has what registration left it) and a
+    /// copy that is not syncable takes the declared others that are
+    /// free, after the authorities of the fed packages.
+    fn add_copies(&mut self, ps: &PackageState, pkg: &AndroidPackage) {
+        for (index, p) in pkg.providers.iter().enumerate() {
+            let declared = ps
+                .syncable_authorities
+                .iter()
+                .find(|(name, _)| *name == p.main.component.name);
+            let Some((_, declared)) = declared.filter(|_| p.syncable) else {
+                continue;
+            };
+            let mut names: Vec<&str> = p.authority.iter().map(String::as_str).collect();
+            for name in authorities(declared).into_iter().skip(1) {
+                if !self.providers_by_authority.contains_key(name) && !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            let copy = names.join(";");
+            for name in names.into_iter().skip(p.authority.is_some() as usize) {
+                self.providers_by_authority.insert(
+                    name.to_owned(),
+                    Registered {
+                        package: ps.name.clone(),
+                        index,
+                        copy: Some(copy.clone()),
+                    },
+                );
+            }
+        }
     }
 
     fn add(&mut self, ps: &PackageState, pkg: &AndroidPackage, kind: Kind, component: usize) {
@@ -286,11 +347,9 @@ impl ComponentResolver {
         }
     }
 
-    /// `mProvidersByAuthority.get`: the package and provider index.
-    pub fn provider_by_authority(&self, authority: &str) -> Option<(&str, usize)> {
-        self.providers_by_authority
-            .get(authority)
-            .map(|(p, i)| (p.as_str(), *i))
+    /// `mProvidersByAuthority.get`.
+    pub fn provider_by_authority(&self, authority: &str) -> Option<&Registered> {
+        self.providers_by_authority.get(authority)
     }
 }
 

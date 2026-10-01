@@ -139,6 +139,9 @@ fn package_record(name: &str, shared_user_app_id: Option<i32>) -> Vec<u8> {
     p.write_string16(Some("/private"));
     // FILTER_APPLICATION_QUERY overridden off.
     p.write_bool(false);
+    p.write_i32(1);
+    p.write_string16(Some("com.example.app.Sync"));
+    p.write_string16(Some("a;b"));
     p.data().to_vec()
 }
 
@@ -253,6 +256,10 @@ fn reads_a_package_record() {
         ("example.com", 1, "/private")
     );
     assert_eq!(p.filter_application_query, Some(false));
+    assert_eq!(
+        p.syncable_authorities,
+        [("com.example.app.Sync".into(), "a;b".into())]
+    );
     let u = &p.users[&0];
     assert!(u.installed && u.stopped && u.data_exists && !u.hidden);
     assert_eq!((u.ce_data_inode, u.de_data_inode), (11, 12));
