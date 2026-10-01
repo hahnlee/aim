@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The lightweight shell's static overlay of framework-res
      (docs/m1-shell.md): the device without SystemUI, the launcher and the
-     wallpaper. Preinstalled in /system_ext/overlay, whose overlays take
-     precedence over /product's (PixelConfigOverlayCommon). -->
+     wallpaper pickers. Preinstalled in /system_ext/overlay, whose overlays
+     take precedence over /product's (PixelConfigOverlayCommon). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="dev.aim.overlay.lightweightshell">
     <application android:hasCode="false" />

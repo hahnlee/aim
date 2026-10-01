@@ -320,6 +320,53 @@ static void inotify_dir(void) {
   rmdir(p("watch"));
 }
 
+// A write into a file of a watched directory is IN_MODIFY and
+// IN_CLOSE_WRITE for its name, also after the directory itself is done
+// changing: the file is created empty, then written (WallpaperManagerService
+// waits for IN_CLOSE_WRITE on its wallpaper file this way), and an existing
+// file is written again; a file renamed away and created anew as well.
+static int next_named(int in, uint32_t mask, const char* name) {
+  char buf[4096];
+  struct pollfd pf = {.fd = in, .events = POLLIN};
+  for (int tries = 0; tries < 8 && poll(&pf, 1, 1000) == 1; tries++) {
+    ssize_t n = read(in, buf, sizeof buf);
+    for (char* q = buf; n > 0 && q < buf + n;) {
+      struct inotify_event* e = (struct inotify_event*)q;
+      if ((e->mask & mask) && e->len > 0 && !strcmp(e->name, name)) return 1;
+      q += sizeof *e + e->len;
+    }
+  }
+  return 0;
+}
+
+static void inotify_write_into_entry(void) {
+  mkdir(p("written"), 0755);
+  int in = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+  CHECK(in >= 0);
+  CHECK(inotify_add_watch(in, p("written"), IN_CLOSE_WRITE | IN_CREATE) > 0);
+  int fd = open(p("written/w"), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  CHECK(fd >= 0);
+  CHECK(next_named(in, IN_CREATE, "w"));
+  CHECK(write(fd, "data", 4) == 4);
+  close(fd);
+  CHECK(next_named(in, IN_CLOSE_WRITE, "w"));
+  fd = open(p("written/w"), O_WRONLY | O_TRUNC | O_CLOEXEC);
+  CHECK(fd >= 0 && write(fd, "again", 5) == 5);
+  close(fd);
+  CHECK(next_named(in, IN_CLOSE_WRITE, "w"));
+  CHECK(rename(p("written/w"), p("written/old")) == 0);
+  fd = open(p("written/w"), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  CHECK(fd >= 0);
+  CHECK(next_named(in, IN_CREATE, "w"));
+  CHECK(write(fd, "new", 3) == 3);
+  close(fd);
+  CHECK(next_named(in, IN_CLOSE_WRITE, "w"));
+  close(in);
+  unlink(p("written/w"));
+  unlink(p("written/old"));
+  rmdir(p("written"));
+}
+
 // A change the watch does not ask for queues nothing, so poll and epoll do
 // not report the fd readable (a blocking read would wait for an event).
 static void inotify_unwatched_changes(void) {
@@ -360,5 +407,6 @@ int main(int argc, char** argv) {
   RUN(memfd_and_seals);
   RUN(inotify_dir);
   RUN(inotify_unwatched_changes);
+  RUN(inotify_write_into_entry);
   DONE();
 }

@@ -3,8 +3,11 @@
 //! An inotify fd is a kqueue with one vnode knote per watch. Directory
 //! watches keep a snapshot of their entries; a vnode event rescans the
 //! directory and turns the differences into IN_CREATE, IN_DELETE and (for
-//! entries whose size or mtime changed) IN_MODIFY + IN_CLOSE_WRITE. A file
-//! watch reports IN_MODIFY/IN_CLOSE_WRITE on writes. Self events
+//! entries whose size or mtime changed) IN_MODIFY + IN_CLOSE_WRITE. A
+//! write into a file changes nothing of its directory's vnode on Darwin,
+//! so a directory watch that asks for IN_MODIFY or IN_CLOSE_WRITE also has
+//! a knote on each regular file in it, which reports them for that entry.
+//! A file watch reports IN_MODIFY/IN_CLOSE_WRITE on writes. Self events
 //! (IN_ATTRIB, IN_DELETE_SELF, IN_MOVE_SELF, IN_IGNORED) come from the
 //! knote. Rename pairing (IN_MOVED_FROM/TO cookies) is not reported: a
 //! rename inside a watched directory shows as delete + create.
@@ -35,6 +38,9 @@ const IN_ONLYDIR: u32 = 0x0100_0000;
 const IN_DONT_FOLLOW: u32 = 0x0200_0000;
 const IN_MASK_ADD: u32 = 0x2000_0000;
 const IN_ALL_EVENTS: u32 = 0xfff;
+/// A knote's udata bit for a directory entry's knote: the watch's wd in
+/// bits 32-61, the entry's fd below.
+const ENTRY: usize = 1 << 62;
 
 const O_NONBLOCK: u64 = 0o4000;
 const O_CLOEXEC: u64 = 0o2000000;
@@ -56,6 +62,9 @@ struct Watch {
     mask: u32,
     host: CString,
     dir: Option<Snapshot>,
+    /// O_EVTONLY fds on the directory's regular files, by name, while
+    /// the mask asks for writes into them.
+    entries: HashMap<Vec<u8>, i32>,
 }
 
 #[derive(Default)]
@@ -110,16 +119,77 @@ fn event(wd: i32, mask: u32, name: &[u8]) -> Vec<u8> {
 }
 
 fn register(kq: i32, wd: i32, fd: i32) -> bool {
+    register_note(kq, fd, wd as usize)
+}
+
+fn register_note(kq: i32, fd: i32, udata: usize) -> bool {
     let k = libc::kevent {
         ident: fd as usize,
         filter: libc::EVFILT_VNODE,
         flags: libc::EV_ADD | libc::EV_CLEAR,
         fflags: VNODE_NOTES,
         data: 0,
-        udata: wd as usize as *mut _,
+        udata: udata as *mut _,
     };
     // SAFETY: one change, no events.
     unsafe { libc::kevent(kq, &k, 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0 }
+}
+
+fn entry_udata(wd: i32, fd: i32) -> usize {
+    ENTRY | (wd as usize) << 32 | fd as usize
+}
+
+/// Make watch `wd`'s entry knotes match its snapshot and mask: one on each
+/// regular file while the mask asks for IN_MODIFY or IN_CLOSE_WRITE, none
+/// otherwise. A replaced file (another inode) gets a new one.
+fn sync_entries(kq: i32, wd: i32, w: &mut Watch) {
+    let wanted = w.mask & (IN_MODIFY | IN_CLOSE_WRITE) != 0;
+    let files: HashMap<&Vec<u8>, u64> = match &w.dir {
+        Some(d) if wanted => d
+            .iter()
+            .filter(|(_, e)| !e.3)
+            .map(|(n, e)| (n, e.0))
+            .collect(),
+        _ => HashMap::new(),
+    };
+    w.entries.retain(|name, fd| {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: our entry fd, local buffer.
+        let ino = (unsafe { libc::fstat(*fd, &mut st) } == 0).then_some(st.st_ino);
+        let keep = ino.is_some() && files.get(name).copied() == ino;
+        if !keep {
+            // SAFETY: our entry fd; closing it drops its knote.
+            unsafe { libc::close(*fd) };
+        }
+        keep
+    });
+    for name in files.keys() {
+        if w.entries.contains_key(*name) {
+            continue;
+        }
+        let mut path = w.host.as_bytes().to_vec();
+        path.push(b'/');
+        path.extend_from_slice(name);
+        let Ok(path) = CString::new(path) else {
+            continue;
+        };
+        // SAFETY: an event-only open of the entry.
+        let efd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_EVTONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if efd < 0 {
+            continue;
+        }
+        if register_note(kq, efd, entry_udata(wd, efd)) {
+            w.entries.insert((*name).clone(), efd);
+        } else {
+            // SAFETY: our entry fd.
+            unsafe { libc::close(efd) };
+        }
+    }
 }
 
 /// Keep the kqueue readable while decoded events wait in the queue.
@@ -206,6 +276,7 @@ pub fn inotify_add_watch(a: [u64; 6]) -> i64 {
         } else {
             mask
         };
+        sync_entries(fd, *wd, w);
         return *wd as i64;
     }
     // SAFETY: an event-only open of the watched path.
@@ -221,16 +292,16 @@ pub fn inotify_add_watch(a: [u64; 6]) -> i64 {
     }
     s.next_wd += 1;
     let dir = is_dir.then(|| snapshot(&r.host));
-    s.watches.insert(
-        wd,
-        Watch {
-            fd: wfd,
-            dev_ino,
-            mask,
-            host: r.host,
-            dir,
-        },
-    );
+    let mut w = Watch {
+        fd: wfd,
+        dev_ino,
+        mask,
+        host: r.host,
+        dir,
+        entries: HashMap::new(),
+    };
+    sync_entries(fd, wd, &mut w);
+    s.watches.insert(wd, w);
     wd as i64
 }
 
@@ -238,8 +309,12 @@ fn remove(fd: i32, s: &mut State, wd: i32) -> bool {
     let Some(w) = s.watches.remove(&wd) else {
         return false;
     };
-    // SAFETY: closing the watch fd drops its knote.
+    // SAFETY: closing the watch's fds drops their knotes.
     unsafe { libc::close(w.fd) };
+    for efd in w.entries.values() {
+        // SAFETY: as above.
+        unsafe { libc::close(*efd) };
+    }
     s.queue.push_back(event(wd, IN_IGNORED, b""));
     signal_pending(fd, true);
     true
@@ -271,7 +346,14 @@ fn decode(fd: i32, s: &mut State, wd: i32, notes: u32) {
             for (name, e) in &new {
                 let isdir = if e.3 { IN_ISDIR } else { 0 };
                 match old.get(name) {
-                    None => out.push((IN_CREATE | isdir, name.clone())),
+                    None => {
+                        out.push((IN_CREATE | isdir, name.clone()));
+                        // Written before its knote could see it.
+                        if !e.3 && e.1 > 0 {
+                            out.push((IN_MODIFY, name.clone()));
+                            out.push((IN_CLOSE_WRITE, name.clone()));
+                        }
+                    }
                     Some(o) if o.0 == e.0 && (o.1, o.2) != (e.1, e.2) && !e.3 => {
                         out.push((IN_MODIFY, name.clone()));
                         out.push((IN_CLOSE_WRITE, name.clone()));
@@ -294,6 +376,9 @@ fn decode(fd: i32, s: &mut State, wd: i32, notes: u32) {
         out.push((IN_MODIFY, Vec::new()));
         out.push((IN_CLOSE_WRITE, Vec::new()));
     }
+    if w.dir.is_some() {
+        sync_entries(fd, wd, w);
+    }
     if notes & libc::NOTE_ATTRIB != 0 {
         out.push((IN_ATTRIB | dir_flag, Vec::new()));
     }
@@ -313,6 +398,46 @@ fn decode(fd: i32, s: &mut State, wd: i32, notes: u32) {
         }
     }
     if gone || (fired && mask & IN_ONESHOT != 0) {
+        remove(fd, s, wd);
+    }
+}
+
+/// A write into entry `efd` of directory watch `wd`: IN_MODIFY and
+/// IN_CLOSE_WRITE for its name, and its snapshot entry updated so the next
+/// rescan does not report it again. Its removal and renames come from the
+/// directory's own knote.
+fn decode_entry(fd: i32, s: &mut State, wd: i32, efd: i32, notes: u32) {
+    if notes & (libc::NOTE_WRITE | libc::NOTE_EXTEND) == 0 {
+        return;
+    }
+    let Some(w) = s.watches.get_mut(&wd) else {
+        return;
+    };
+    let Some(name) = w
+        .entries
+        .iter()
+        .find(|(_, f)| **f == efd)
+        .map(|(n, _)| n.clone())
+    else {
+        return;
+    };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: our entry fd, local buffer.
+    if unsafe { libc::fstat(efd, &mut st) } == 0
+        && let Some(e) = w.dir.as_mut().and_then(|d| d.get_mut(&name))
+    {
+        e.1 = st.st_size;
+        e.2 = st.st_mtime * 1_000_000_000 + st.st_mtime_nsec;
+    }
+    let mask = w.mask;
+    let mut fired = false;
+    for m in [IN_MODIFY, IN_CLOSE_WRITE] {
+        if m & mask != 0 {
+            s.queue.push_back(event(wd, m, &name));
+            fired = true;
+        }
+    }
+    if fired && mask & IN_ONESHOT != 0 {
         remove(fd, s, wd);
     }
 }
@@ -346,8 +471,17 @@ fn collect(fd: i32, s: &mut State, block: bool) -> i64 {
         return -(errno::last() as i64);
     }
     for e in &evs[..n as usize] {
-        if e.filter == libc::EVFILT_VNODE {
-            decode(fd, s, e.udata as usize as i32, e.fflags);
+        let udata = e.udata as usize;
+        if e.filter == libc::EVFILT_VNODE && udata & ENTRY != 0 {
+            decode_entry(
+                fd,
+                s,
+                (udata >> 32) as i32 & 0x3fff_ffff,
+                udata as u32 as i32,
+                e.fflags,
+            );
+        } else if e.filter == libc::EVFILT_VNODE {
+            decode(fd, s, udata as i32, e.fflags);
         }
     }
     0
@@ -438,6 +572,10 @@ pub(super) fn save(ino: &Inotify, w: &mut super::fork_state::Writer) {
                 w.bool(e.3);
             })
         });
+        w.seq(x.entries.iter(), |w, (name, efd)| {
+            w.bytes(name);
+            w.i32(*efd);
+        });
     });
     w.i32(s.next_wd);
     w.seq(s.queue.iter(), |w, e| w.bytes(e));
@@ -458,6 +596,7 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Inotify> {
                     .into_iter()
                     .collect()
             }),
+            entries: r.seq(|r| (r.bytes(), r.i32())).into_iter().collect(),
         };
         (wd, watch)
     });
@@ -491,6 +630,9 @@ pub fn after_fork_child() {
         let s = ino.state.lock().unwrap_or_else(|e| e.into_inner());
         for (wd, w) in &s.watches {
             register(fd, *wd, w.fd);
+            for efd in w.entries.values() {
+                register_note(fd, *efd, entry_udata(*wd, *efd));
+            }
         }
         if !s.queue.is_empty() {
             signal_pending(fd, true);
