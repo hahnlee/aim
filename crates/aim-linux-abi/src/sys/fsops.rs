@@ -6,6 +6,7 @@
 use super::attrs::{self, Attr, Host};
 use super::fs::{AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, check_writable};
 use super::memfd;
+use super::tmpfile;
 use crate::errno::{self, EINVAL, ENOENT, ENOSPC};
 use crate::sys::{guest_cstr, procfs};
 use crate::vfs::{self, Resolved};
@@ -141,16 +142,35 @@ pub fn linkat(a: [u64; 6]) -> i64 {
     if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
         return -(EINVAL as i64);
     }
-    let old = match resolve_w(a[0], a[1], flags & AT_SYMLINK_FOLLOW != 0) {
-        Ok(r) => r,
-        Err(e) => return e,
+    // SAFETY: guest path pointer.
+    let empty = flags & AT_EMPTY_PATH != 0 && unsafe { guest_cstr(a[1]) }.is_empty();
+    let old = if empty {
+        None
+    } else {
+        match resolve_w(a[0], a[1], flags & AT_SYMLINK_FOLLOW != 0) {
+            Ok(r) => Some(r),
+            Err(e) => return e,
+        }
     };
     let new = match resolve_w(a[2], a[3], false) {
         Ok(r) => r,
         Err(e) => return e,
     };
-    // SAFETY: host paths.
-    errno::check(unsafe { libc::link(old.host.as_ptr(), new.host.as_ptr()) } as i64)
+    // An open file, by AT_EMPTY_PATH or its /proc/self/fd link (how an
+    // O_TMPFILE file gets its name).
+    let fd = match &old {
+        None => Some(a[0] as i32),
+        Some(r) if flags & AT_SYMLINK_FOLLOW != 0 => tmpfile::proc_fd(&r.guest),
+        Some(_) => None,
+    };
+    match (fd, old) {
+        (Some(fd), _) => tmpfile::link_fd(fd, &new),
+        // SAFETY: host paths.
+        (None, Some(old)) => {
+            errno::check(unsafe { libc::link(old.host.as_ptr(), new.host.as_ptr()) } as i64)
+        }
+        (None, None) => unreachable!(),
+    }
 }
 
 const RENAME_NOREPLACE: u64 = 1;

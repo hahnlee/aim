@@ -90,8 +90,23 @@ pub fn openat(a: [u64; 6]) -> i64 {
     let (dirfd, flags, mode) = (a[0] as i32, a[2], a[3]);
     // SAFETY: guest path pointer.
     let path = unsafe { guest_cstr(a[1]) };
-    if flags & O_TMPFILE == O_TMPFILE {
-        return -95; // EOPNOTSUPP
+    if flags & O_TMPFILE != 0 {
+        // open(2): O_TMPFILE comes with O_DIRECTORY, without O_CREAT, and
+        // with write access.
+        if flags & (O_TMPFILE | O_DIRECTORY | O_CREAT) != O_TMPFILE | O_DIRECTORY
+            || flags & O_ACCMODE == 0
+        {
+            return -(EINVAL as i64);
+        }
+        return match vfs::resolve(dirfd, path, flags & O_NOFOLLOW == 0) {
+            Ok(r) => super::tmpfile::open(
+                &r,
+                flags & O_EXCL != 0,
+                open_flags_to_host(flags & !(O_DIRECTORY | O_EXCL)),
+                mode,
+            ),
+            Err(e) => -(e as i64),
+        };
     }
     if procfs::is_self_exe(path) {
         return match CString::new(crate::sys::process::exe_host_path()) {

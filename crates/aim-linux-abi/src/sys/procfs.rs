@@ -133,7 +133,8 @@ pub(super) fn fd_link(fd: i32) -> Option<String> {
         libc::S_IFIFO => return Some(format!("pipe:[{}]", st.st_ino)),
         _ => {}
     }
-    fd_guest_path(fd).ok()
+    let path = fd_guest_path(fd).ok()?;
+    super::tmpfile::fd_link(&path, &st).or(Some(path))
 }
 
 // ---- process information ---------------------------------------------------

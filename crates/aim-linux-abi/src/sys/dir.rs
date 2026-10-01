@@ -116,11 +116,11 @@ fn read_host_entries(fd: i32) -> Result<Vec<Entry>, i64> {
                 break;
             }
             let name_at = off + std::mem::offset_of!(DarwinDirent64, ty) + 1;
-            out.push(Entry::new(
-                d.ino,
-                d.ty,
-                &buf[name_at..name_at + d.namlen as usize],
-            ));
+            let name = &buf[name_at..name_at + d.namlen as usize];
+            // An unlinked O_TMPFILE file has no entry.
+            if !super::tmpfile::is_hidden(name) {
+                out.push(Entry::new(d.ino, d.ty, name));
+            }
             off += d.reclen as usize;
         }
     }

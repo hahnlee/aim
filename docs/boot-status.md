@@ -392,8 +392,9 @@ keeps exiting and init restarts it every 5 s.
 
 A crashing native process gets its symbolized backtrace in `logcat -b crash`,
 and `debuggerd -b <pid>` prints a process's stacks: debuggerd's `crash_dump64`
-runs on the layer's ptrace and cross-process `/proc` (#557). tombstoned cannot
-write the tombstone file yet (`O_TMPFILE`, #642).
+runs on the layer's ptrace and cross-process `/proc` (#557). tombstoned writes
+the tombstone to `/data/tombstones/tombstone_NN` (an `O_TMPFILE` it names with
+`linkat`, #642); its memory map names only the guest's files (#597).
 
 ### Fixed on the way
 

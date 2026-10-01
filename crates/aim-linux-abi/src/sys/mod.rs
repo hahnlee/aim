@@ -54,6 +54,7 @@ mod signal;
 pub(crate) mod space;
 mod sync_file;
 mod thread;
+mod tmpfile;
 mod uevent;
 mod uplink;
 mod vmmap;
