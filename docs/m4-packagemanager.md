@@ -704,3 +704,108 @@ Tracked on #702.
   oracle; (b) is the fallback if a class of APKs cannot reach parity.
 - **#616** (open): the access state moves after M4's switch, not in it
   (section 4).
+
+## Conformance bar
+
+The CTS modules a native PackageManager must end as the original does
+(ADR 0013, decision 4), at `android-cts-16_r1`, and the original's
+results on this device. The device-side modules and every file their
+configs install or push are pinned in `upstream/cts.lock`.
+
+**Modules.** Device-side modules (an instrumentation, run with
+`am instrument`):
+
+| Module | Covers | Tests |
+| --- | --- | --- |
+| CtsPackageManagerTestCases | `android.content.pm.cts` (37 classes; in 16_r1 they are no longer in CtsContentTestCases, which has none): queries, flags, components, properties, install and uninstall through the shell, checksums, archiving, incremental, launcher apps, signatures, resource hardening | 560 methods, more with parameters |
+| CtsAppEnumerationTestCases | package visibility (`<queries>`, force-queryable, shared uids, providers, intents, launcher apps, sync adapters) | 336 |
+| CtsPackageInstallTestCases | installer sessions through PackageInstaller's UI, install sources, constraints, app metadata, pre-verified domains | 81 |
+| CtsPackageInstallSessionTestCases | session parameters, pre-approval, update ownership | 71 |
+| CtsPackageUninstallTestCases | uninstall and archive through PackageInstaller | 16 |
+| CtsAtomicInstallTestCases | multi-package sessions | 33 |
+| CtsDomainVerificationDeviceStandaloneTestCases | domain verification (`domain_verification`) | 76 |
+| CtsSuspendAppsTestCases, CtsSuspendAppsPermissionTestCases | suspended packages | 33, 3 |
+| CtsPackageInstallAppOpDefaultTestCases, CtsPackageInstallAppOpDeniedTestCases | `REQUEST_INSTALL_PACKAGES` at install | 4, 4 |
+| CtsInstantAppTests | instant app resolution | 22 |
+| CtsPackageInstallerCUJ{Installation, InstallationViaIntentForResult, InstallationViaSession, Uninstallation, UpdateOwnerShip, UpdateSelf}TestCases, CtsPackageInstallerTapjackingTestCases | PackageInstaller's user journeys | 55, 27, 20, 14, 28, 16, 2 |
+| CtsShortcutManagerTestCases | `shortcut` and `launcherapps` | about 76 (JUnit 3) |
+
+Not pinned: CtsSecureFrpInstallTestCases (its config pushes
+`TestAppAv1.apk`, which the release does not contain);
+CtsPackageInstallerCUJDeviceAdminTestCases and
+CtsAdminPackageInstallerTestCases (a device owner);
+CtsPackageInstallerCUJMultiUsersTestCases and
+CtsDomainVerificationDeviceMultiUserTestCases (a secondary user);
+CtsRollbackManagerTestCases, CtsPackageWatchdogTestCases and
+CtsHibernationTestCases (services next to PackageManager, for slice C).
+The host-side modules of section 5's CTS table (Tradefed `HostTest`
+and `JarHostTest`) need an adb transport and a Tradefed host, which the
+runner below does not have (#701).
+
+**Run.** On a first boot of a new data directory in window mode, each
+module as its Tradefed config prepares it: the config's commands and
+settings in order, its pushed files copied to their `/data/local/tmp`
+paths, its APKs installed with `pm install -r -g -t` (and
+`--force-queryable` unless the config says false, as Tradefed does), then
+`am instrument -w -r` with the config's hidden API and annotation
+filters (a module with an `instant_app` parameter without its
+`@AppModeInstant` tests, as Tradefed's full-app run), and the packages
+uninstalled again. CTS expects en-US and the device follows the Mac's
+languages with no override (#709), so PackageInstaller,
+PermissionController and the modules' packages run in en-US through
+per-app locales (`cmd locale set-app-locales`); system_server's own
+dialogs stay in the Mac's language.
+
+**The original** (main e54a8234, window mode, first boots; ops checks
+m4cts-1 to m4cts-5):
+
+| Module | Pass / fail / skip | Time | Run |
+| --- | --- | --- | --- |
+| CtsAtomicInstallTestCases | 33 / 0 / 0 | 19 s | whole |
+| CtsAppEnumerationTestCases | 334 / 2 / 0 | 232 s | whole; the two `all_canSeeForceQueryable` failed because that run installed without `--force-queryable` (since fixed) |
+| CtsPackageUninstallTestCases | 14 / 2 / 0 | 141 s | whole (#730) |
+| CtsSuspendAppsTestCases | 30 / 1 / 2 | 95 s | whole (#709) |
+| CtsSuspendAppsPermissionTestCases | 3 / 0 / 0 | 1 s | whole |
+| CtsPackageInstallAppOpDefaultTestCases | 2 / 0 / 2 | 1 s | whole |
+| CtsPackageInstallAppOpDeniedTestCases | 4 / 0 / 0 | 8 s | whole |
+| CtsInstantAppTests | 22 / 0 / 0 | 1 s | whole |
+| CtsPackageInstallerCUJInstallationViaSessionTestCases | 20 / 0 / 0 | 169 s | whole |
+| CtsPackageInstallTestCases | 62 / 2 / 4 of 81 | 840 s (cut) | first 68; `ExternalSourcesInstantAppsTest#externalSourceDeniedTest` is instant-only and ran because that run lacked the filter (since fixed); `InstallAppMetadataTest#readAppMetadataFileShouldFail` (#717) |
+| CtsPackageInstallSessionTestCases | 28 / 2 / 0 of 71 | 600 s (cut) | first 30, before the per-app locales; the two `PreapprovalInstallTest#..._userAgree_statusSuccess` could not find `UPDATE ANYWAY` (#709) |
+| CtsDomainVerificationDeviceStandaloneTestCases | 17 / 0 / 0 of 76 | 600 s (cut) | hangs (#618) |
+| CtsPackageManagerTestCases | 39 / 0 / 1 of 156 (`PackageManagerTest`) | 350 s (cut) | first shard of the module |
+
+Not run yet: the other five CUJ modules, the tapjacking and shortcut
+modules, and the rest of CtsPackageManagerTestCases.
+
+**Failure clusters on the original**, each a gap below the guest or in
+the runner, to fix at its owner before the bar is final:
+
+- **The language (#709).** UI tests find PackageInstaller's and
+  system_server's buttons and titles by their English text. Per-app
+  locales fixed PackageInstaller's (CtsPackageUninstallTestCases went
+  from 4 to 14 passing and from 408 to 141 s); system_server's
+  `SuspendedAppActivity` stays in the Mac's language
+  (`DialogTests#testInterceptorActivity_moreDetails`).
+- **Domain verification hangs (#618)** after 17 tests on a first boot,
+  in `DomainVerificationFilterGroupTests`.
+- **No owner and mode check in `open` (#717).** An app reads the app
+  metadata file PackageManager keeps beside an APK, which a device denies.
+- **Archive dialogs (#730).** Two `ArchiveTest` cases get result code 1
+  from PackageInstaller's archive dialogs.
+- **`screenrecord` crashes (#710)** in its overlay thread (no EGL display)
+  for every test under `ScreenRecordRule`; the tests go on, but each
+  start costs time and fills the crash buffer.
+- PackageManager's settings writes log `Failed to enable fs-verity ...
+  Inappropriate ioctl for device` (ENOTTY, which Linux returns for a file
+  system without verity); no test failed on it so far.
+
+**Time.** On the development Mac (M2 Pro, host load 2-20): tests that
+drive PackageInstaller's UI take 8-12 s each (UiAutomator waits and a
+`screenrecord` start per test), PackageManagerTest's install-heavy tests
+about 9 s, AppEnumeration's queries under 1 s. Projected for one full run
+of the pinned modules: CtsPackageManagerTestCases about 85 min,
+CtsPackageInstallTestCases 17, CtsPackageInstallSessionTestCases 15, the
+six CUJ modules 25, AppEnumeration 4, the rest 10 (with domain
+verification fixed): about 2 h 40 min of device time, nine to ten
+sessions of at most 20 minutes, each a first boot with its installs.
