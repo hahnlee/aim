@@ -12,6 +12,7 @@ pub mod intent;
 pub mod intent_filter;
 pub mod intent_resolver;
 pub mod list;
+pub mod parse;
 pub mod permissions;
 pub mod restrictions;
 pub mod settings;
