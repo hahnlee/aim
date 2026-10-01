@@ -38,7 +38,8 @@ unsafe impl Send for Owned {}
 
 impl Owned {
     pub fn new(r: CFTypeRef) -> Option<Self> {
-        (!r.is_null()).then_some(Self(r))
+        // Lazily: an Owned made of NULL would release it when dropped.
+        (!r.is_null()).then(|| Self(r))
     }
 
     pub fn string(s: &CStr) -> Self {
@@ -87,5 +88,16 @@ pub fn string(value: CFTypeRef) -> Option<String> {
         let mut buf = [0 as c_char; 128];
         CFStringGetCString(value, buf.as_mut_ptr(), buf.len() as isize, UTF8)
             .then(|| CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_is_none_and_not_released() {
+        assert!(Owned::new(std::ptr::null()).is_none());
+        assert_eq!(string(Owned::string(c"aim").0).as_deref(), Some("aim"));
     }
 }
