@@ -4,7 +4,7 @@ use std::io::Read;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use aim_gralloc::Handle;
-use aim_hostcall::display::{Connect, Cursor, Event, Import, Present, event};
+use aim_hostcall::display::{Connect, Cursor, Event, Import, Layer, Layers, Present, event};
 use aim_hostcall::guest::{self, Errno};
 
 /// The connected display: its mode, and the fd its events arrive on.
@@ -47,6 +47,30 @@ impl Host {
             present: -1,
         };
         guest::display_present(&mut args)?;
+        // SAFETY: the host call returned a new fd that we now own.
+        Ok(unsafe { OwnedFd::from_raw_fd(args.present) })
+    }
+
+    /// Show a frame of `layers` (window mode) once their buffers and the
+    /// client target `target` (0: none) are ready; returns the present
+    /// fence.
+    pub fn layers(
+        &self,
+        layers: &[Layer],
+        rects: &[[i32; 4]],
+        target: u64,
+        acquire: Option<BorrowedFd>,
+    ) -> Result<OwnedFd, Errno> {
+        let mut args = Layers {
+            layers: layers.as_ptr() as u64,
+            count: layers.len() as u32,
+            rect_count: rects.len() as u32,
+            rects: rects.as_ptr() as u64,
+            client_target: target,
+            client_acquire: acquire.map_or(-1, |f| f.as_raw_fd()),
+            present: -1,
+        };
+        guest::display_layers(&mut args)?;
         // SAFETY: the host call returned a new fd that we now own.
         Ok(unsafe { OwnedFd::from_raw_fd(args.present) })
     }

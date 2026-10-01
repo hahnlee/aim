@@ -30,12 +30,13 @@ main screen**: display pixel (x, y) lies under screen point
 (x, H·s − y) / s for a screen H points tall at s pixels per point, and each
 task's window lies exactly over the task. The rest follows from that:
 
-- **Composition stays the original's.** SurfaceFlinger composes the
-  display as in device mode (client composition), and each window's layer
-  shows its task's part of the frame, one pixel per pixel. Nothing in the
-  composer HAL changed. Where two windows overlap, Android stacks the tasks
-  as the Mac stacks the windows (below), so what one window shows of
-  another task is covered by that task's own window on screen.
+- **Each window is composed from its task's layers.** The composer HAL
+  keeps the layers for device composition, and each window draws its own
+  task's layers, one pixel per pixel, at their place on the display
+  ([layers.md](layers.md)): where two tasks overlap, neither window shows
+  the other's pixels. Layers of no task (the IME, system dialogs) show in
+  system panels at their place on the screen; an app's toast lies within
+  its task and shows in its window.
 - **Input stays one touchscreen.** A press in a window is a touch at the
   display pixel under it, which Android's own hit testing sends to the
   task (and its dialogs and popups) there.
@@ -56,7 +57,9 @@ task's window lies exactly over the task. The rest follows from that:
 | --- | --- |
 | Geometry (screen points ↔ display pixels, content, caption) | `crates/aim-host-display/src/windows.rs` |
 | Task windows (AppKit), back hint | `crates/aim-host-display/src/bin/aim-display/windows.rs` |
-| Presenting a frame into several layers, each a crop | `bin/aim-display/metal.rs` (`Target`) |
+| Composing each window from its task's layers | `bin/aim-display/metal.rs` (`Target`, `LayerFrame`) |
+| Which task each layer is (attribution) | `crates/aim-host-display/src/layers.rs` |
+| System panels (layers of no task) | `bin/aim-display/panels.rs` |
 | Task bridge (guest, Rust): task listener and task calls | `daemons/windows` (`/system_ext/bin/aim-windows`) |
 | `RunningTaskInfo` parcel reading | `daemons/windows/core` |
 | Host-call `FN_WINDOWS`, records | `aim_hostcall::display::{Windows, Window, window}` |
@@ -325,11 +328,8 @@ Settings.app/Contents/
 
 ## Not covered yet
 
-System windows that belong to no task (ANR and other system dialogs,
-toasts, SystemUI's heads-up notifications) are drawn where Android puts them on the
-display, which only a window over that place shows. Windows on a screen
-other than the main one show nothing there (the display covers the main
-screen only).
+Windows on a screen other than the main one show nothing there (the
+display covers the main screen only).
 
 An activity start into a running task from anywhere but a shim (an app's
 own `FLAG_ACTIVITY_NEW_TASK` start, a notification's `PendingIntent`,

@@ -907,6 +907,23 @@ parts of the display; the bridge now commits such bounds by moving the
 task a pixel and back with `resizeTask` (a resize to the same bounds is a
 no-op and did not help).
 
+**Per-task composition** (2026-10-01, #692, [layers.md](layers.md)):
+window mode now composes each Mac window from its own task's layers
+(device composition in the composer HAL) instead of cropping one display
+buffer. Fresh window-mode boots (ops checks layers-1, -2, -5): every app
+layer `DEVICE` in `dumpsys SurfaceFlinger` (6 of 6, none `CLIENT`); Clock
+overlapping Settings (about 80 %) and Chrome (its left part), in either
+stacking order, each window showed only its own app; Chrome's first-run
+page filled its window (no dark strip, #691), and a force-stopped Chrome
+relaunched into a new window within 1 s; a Clock task moved by `am task
+resize` took its window and content along with no panel left behind;
+`input tap` in the Clock window switched its tab. No composition errors,
+SurfaceFlinger aborts or ANRs in logcat. Device mode stays client
+composition (`CLIENT`). On a first boot PackageManager installs GMS about
+30-40 s after boot completes; a Chrome running then kills itself
+(`DynamiteLoaderV2Impl: Module config changed, forcing restart`) and its
+window closes with its task.
+
 **App shims** (same boots): `aim-apps shims --watch` wrote 19 shims into
 `target/aim/boot/apps`, the packages `cmd package query-activities -a MAIN
 -c LAUNCHER` lists (Gboard's launcher activity, disabled at run time, and

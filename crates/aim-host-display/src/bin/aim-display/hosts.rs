@@ -5,7 +5,8 @@
 //! A task goes to the host of the activity it was started with, else to
 //! the host that stands for its package (the primary shim's, else any).
 //! A host gets the task records of its tasks and the frames to show: the
-//! buffers once each, as their memfds, and every present. A present waits
+//! buffers once each, as their memfds, and every present (a buffer, or a
+//! frame of layers with their owners, docs/layers.md). A present waits
 //! (at most [`SAMPLE_MS`]) until each host has read its buffer, so the
 //! composer may reuse it, and the present fence waits for them too. The
 //! host's requests go to the task bridge, and its input to the server's
@@ -25,7 +26,7 @@ use aim_host_display::wire::{self, Host as Rec, HostInput, host, input};
 use aim_hostcall::display::{Import, Window as Record, window};
 
 use crate::cursor::Image;
-use crate::metal::{Fence, Texture};
+use crate::metal::{Fence, LayerFrame, Texture};
 use crate::objc::on_main;
 
 /// The longest a present waits for a host to read its buffer.
@@ -189,31 +190,68 @@ pub struct Waiter {
     fence: Option<Fence>,
 }
 
-/// Ask every host to show `t`; the waiter collects their answers.
-pub fn present(t: &Texture, fence: Option<&Fence>) -> Waiter {
-    let hosts = HOSTS.lock().unwrap().clone();
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-    let id = t.import.id;
-    let mut asked = Vec::new();
-    for h in hosts {
-        if h.imported.lock().unwrap().insert(id) {
-            let r = Rec {
-                op: host::IMPORT,
-                id,
-                import: t.import,
-                ..Default::default()
-            };
-            if !h.send(&r, Some(t.fd().as_raw_fd())) {
-                continue;
-            }
+impl Host {
+    /// Give the host buffer `t` unless it has it.
+    fn import(&self, t: &Texture) -> bool {
+        let id = t.import.id;
+        if !self.imported.lock().unwrap().insert(id) {
+            return true;
         }
         let r = Rec {
-            op: host::PRESENT,
-            flag: seq,
+            op: host::IMPORT,
             id,
+            import: t.import,
             ..Default::default()
         };
-        if h.send(&r, None) {
+        self.send(&r, Some(t.fd().as_raw_fd()))
+    }
+}
+
+/// Ask every host to show `t`; the waiter collects their answers.
+pub fn present(t: &Texture, fence: Option<&Fence>) -> Waiter {
+    ask(fence, |h, seq| {
+        h.import(t)
+            && h.send(
+                &Rec {
+                    op: host::PRESENT,
+                    flag: seq,
+                    id: t.import.id,
+                    ..Default::default()
+                },
+                None,
+            )
+    })
+}
+
+/// Ask every host to show its tasks' layers of `f`.
+pub fn present_layers(f: &LayerFrame, fence: Option<&Fence>) -> Waiter {
+    let bytes = aim_host_display::layers::encode(&f.layers, &f.rects);
+    ask(fence, |h, seq| {
+        if !f.buffers().all(|t| h.import(t)) {
+            return false;
+        }
+        let r = Rec {
+            op: host::LAYERS,
+            flag: seq,
+            id: f.client.as_ref().map_or(0, |t| t.import.id),
+            ..Default::default()
+        };
+        let w = h.writer.lock().unwrap();
+        let fd = std::os::fd::AsFd::as_fd(&*w);
+        wire::send(fd, wire::bytes(&r), None)
+            .and_then(|()| wire::send(fd, &bytes, None))
+            .is_ok()
+    })
+}
+
+/// Present `seq` to every host `send` reaches; the waiter collects their
+/// answers.
+fn ask(fence: Option<&Fence>, send: impl Fn(&Host, u32) -> bool) -> Waiter {
+    let hosts = HOSTS.lock().unwrap().clone();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    let mut asked = Vec::new();
+    for h in hosts {
+        if send(&h, seq) {
             if let Some(f) = fence {
                 f.expect();
             }

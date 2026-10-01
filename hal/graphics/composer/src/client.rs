@@ -4,6 +4,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use aim_hostcall::display::mode;
 use android_hardware_common::aidl::android::hardware::common::NativeHandle::NativeHandle;
 use android_hardware_drm_common::aidl::android::hardware::drm::HdcpLevels::HdcpLevels;
 use android_hardware_graphics_common::aidl::android::hardware::graphics::common::{
@@ -48,6 +49,7 @@ use android_hardware_graphics_composer3::aidl::android::hardware::graphics::comp
     PresentOrValidate::PresentOrValidate,
     PresentOrValidate::Result::Result as PresentResult,
     ReadbackBufferAttributes::ReadbackBufferAttributes,
+    ReleaseFences::{Layer::Layer as ReleaseFence, ReleaseFences},
     RenderIntent::RenderIntent,
     VirtualDisplay::VirtualDisplay,
     VsyncPeriodChangeConstraints::VsyncPeriodChangeConstraints,
@@ -86,9 +88,10 @@ pub struct Shared {
 
 impl Shared {
     pub fn new(host: Host) -> Arc<Shared> {
+        let display = Mutex::new(Display::new(host.info.mode == mode::WINDOWS));
         Arc::new(Shared {
             host,
-            display: Mutex::new(Display::new()),
+            display,
             callback: Mutex::new(None),
             vsync: AtomicBool::new(false),
         })
@@ -183,10 +186,13 @@ impl Client {
                 fail(out, EX_BAD_LAYER);
                 continue;
             }
-            if let Some(c) = &layer.composition {
-                d.set_composition(layer.layer, c.composition);
+            if let Err(code) = d.command(host, layer) {
+                fail(out, code);
             }
             d.cursor.command(host, layer);
+        }
+        if let Some(m) = &cmd.colorTransformMatrix {
+            d.set_color_transform(m);
         }
         if let Some(target) = &cmd.clientTarget {
             let Buffer {
@@ -233,8 +239,24 @@ impl Client {
             d.accept_changes();
         }
         if cmd.presentDisplay
-            && let Some(fence) = d.present(host)
+            && let Some((fence, replaced)) = d.present(host)
         {
+            // Each buffer the frame replaced is released once it is shown.
+            let layers = replaced
+                .into_iter()
+                .filter_map(|layer| {
+                    Some(ReleaseFence {
+                        layer,
+                        fence: Some(ParcelFileDescriptor::new(fence.try_clone().ok()?)),
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !layers.is_empty() {
+                out.push(CommandResultPayload::ReleaseFences(ReleaseFences {
+                    display: DISPLAY,
+                    layers,
+                }));
+            }
             out.push(CommandResultPayload::PresentFence(PresentFence {
                 display: DISPLAY,
                 fence: Some(ParcelFileDescriptor::new(fence)),
@@ -265,7 +287,7 @@ impl IComposerClient for Client {
         check_display(display)?;
         let mut d = self.0.display.lock().unwrap();
         d.cursor.destroyed(&self.0.host, layer);
-        if d.destroy_layer(layer) {
+        if d.destroy_layer(&self.0.host, layer) {
             Ok(())
         } else {
             Err(error(EX_BAD_LAYER))

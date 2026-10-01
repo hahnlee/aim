@@ -1,8 +1,9 @@
 //! The display server end to end, from the host side of the module: a
 //! buffer in a file (as a memfd is on the host) is imported, presented and
 //! captured back, vsync events arrive at the display's rate while enabled
-//! and stop while disabled, and present fences signal on the display's
-//! vsync timeline.
+//! and stop while disabled, present fences signal on the display's vsync
+//! timeline, and a frame of layers (window mode's present) is shown once
+//! all its layers' content is ready.
 //!
 //! Opens a small window: run it in a logged-in session.
 
@@ -14,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use aim_host_display::{MODULE, set_server};
 use aim_hostcall::display::{
-    Connect, Event, FN_CONNECT, FN_IMPORT, FN_PRESENT, FN_SET_VSYNC, Import, Present, SetVsync,
-    event,
+    Connect, Event, FN_CONNECT, FN_IMPORT, FN_LAYERS, FN_PRESENT, FN_SET_VSYNC, Import, Layer,
+    Layers, Present, SetVsync, event, layer, mode,
 };
 
 const W: u32 = 64;
@@ -176,6 +177,76 @@ fn presents_a_buffer_and_delivers_vsync() {
     );
     let ready = aim_sync_file::monotonic_ns();
     content.signal(1);
+    let timestamp_ns = shown_at(&shown);
+    assert!(
+        timestamp_ns > ready,
+        "shown at {timestamp_ns}, ready at {ready}"
+    );
+
+    // A frame of layers: the buffer, then a flipped quarter of it over a
+    // color, each buffer layer with its own acquire fence. It is shown
+    // once both have signaled.
+    assert_eq!(info.mode, mode::DEVICE);
+    let (first, first_content) = aim_sync_file::pair().unwrap();
+    let (second, second_content) = aim_sync_file::pair().unwrap();
+    let whole = [0, 0, W as i32, H as i32];
+    let layers = [
+        Layer {
+            id: 1,
+            buffer: 7,
+            kind: layer::BUFFER,
+            frame: whole,
+            crop: [0.0, 0.0, W as f32, H as f32],
+            alpha: 1.0,
+            blend: 1,
+            acquire: first.as_raw_fd(),
+            ..Default::default()
+        },
+        Layer {
+            id: 2,
+            kind: layer::COLOR,
+            frame: [0, 0, 16, 16],
+            color: [1.0, 0.0, 0.0, 1.0],
+            alpha: 0.5,
+            blend: 2,
+            acquire: -1,
+            ..Default::default()
+        },
+        Layer {
+            id: 3,
+            buffer: 7,
+            kind: layer::BUFFER,
+            transform: 1,
+            frame: [8, 8, 40, 32],
+            crop: [0.0, 0.0, 32.0, 24.0],
+            alpha: 1.0,
+            blend: 2,
+            visible_count: 1,
+            acquire: second.as_raw_fd(),
+            ..Default::default()
+        },
+    ];
+    let rects = [[8, 8, 40, 32]];
+    let mut frame = Layers {
+        layers: layers.as_ptr() as u64,
+        count: layers.len() as u32,
+        rect_count: rects.len() as u32,
+        rects: rects.as_ptr() as u64,
+        client_target: 0,
+        client_acquire: -1,
+        present: -1,
+    };
+    assert_eq!(call(FN_LAYERS, &mut frame), 0);
+    // SAFETY: the module returned a new fd for us.
+    let shown = unsafe { OwnedFd::from_raw_fd(frame.present) };
+    first_content.signal(1);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !aim_sync_file::wait(shown.as_fd(), 0),
+        "shown before all its layers' content"
+    );
+    let ready = aim_sync_file::monotonic_ns();
+    second_content.signal(1);
     let timestamp_ns = shown_at(&shown);
     assert!(
         timestamp_ns > ready,
