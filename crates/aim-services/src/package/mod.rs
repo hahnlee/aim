@@ -8,6 +8,7 @@
 //! original builds them at its scan (#707). Sources are read at
 //! `android-16.0.0_r1`.
 
+pub mod apps_filter;
 pub mod intent;
 pub mod intent_filter;
 pub mod intent_resolver;

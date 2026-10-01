@@ -636,6 +636,10 @@ fn reads_a_parcel() {
     assert!(f.is_explicitly_visible_to_instant_app());
     let groups = f.uri_relative_filter_groups.as_ref().unwrap();
     assert_eq!(groups[0].filters.len(), 2);
+    // Written back as the original writes it.
+    let mut q = Parcel::new();
+    f.write(&mut q);
+    assert_eq!(q.data(), p.data());
 }
 
 /// `readFromXml`, as package-restrictions.xml keeps a preferred

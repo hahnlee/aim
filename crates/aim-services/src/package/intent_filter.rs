@@ -5,7 +5,7 @@
 //! Java compares them, by UTF-16 unit.
 
 use aim_android_xml::Element;
-use aim_binder_host::parcel::{BAD_VALUE, Reader, Result};
+use aim_binder_host::parcel::{BAD_VALUE, Parcel, Reader, Result};
 
 use super::uri::{Uri, parse_int};
 
@@ -112,6 +112,19 @@ impl PatternMatcher {
             kind,
             parsed,
         })
+    }
+
+    /// `writeToParcel`.
+    pub fn write(&self, p: &mut Parcel) {
+        p.write_string16(Some(&self.pattern));
+        p.write_i32(self.kind);
+        match &self.parsed {
+            Some(parsed) => {
+                p.write_i32(parsed.len() as i32);
+                parsed.iter().for_each(|&v| p.write_i32(v));
+            }
+            None => p.write_i32(-1),
+        }
     }
 
     /// `match`.
@@ -510,6 +523,13 @@ impl AuthorityEntry {
         })
     }
 
+    fn write(&self, p: &mut Parcel) {
+        p.write_string16(Some(&self.orig_host));
+        p.write_string16(Some(&self.host));
+        p.write_i32(self.wild as i32);
+        p.write_i32(self.port);
+    }
+
     /// `match(Uri, boolean)`.
     pub fn matches(&self, data: &Uri, wildcards: bool) -> i32 {
         let Some(host) = data.host() else {
@@ -633,6 +653,16 @@ impl UriRelativeFilterGroup {
         Ok(group)
     }
 
+    fn write(&self, p: &mut Parcel) {
+        p.write_i32(self.action);
+        p.write_i32(self.filters.len() as i32);
+        for f in &self.filters {
+            p.write_i32(f.uri_part);
+            p.write_i32(f.pattern_type);
+            p.write_string16(Some(&f.filter));
+        }
+    }
+
     fn parse(e: &Element) -> UriRelativeFilterGroup {
         let int = |e: &Element, name| e.string(name).and_then(|v| parse_int(&v)).unwrap_or(0);
         let mut group = UriRelativeFilterGroup::new(int(e, "allow"));
@@ -672,9 +702,11 @@ pub struct IntentFilter {
     pub auto_verify: bool,
     /// `VISIBILITY_*`.
     pub instant_app_visibility: i32,
-    /// Whether the filter has extras, which resolution never passes, so
-    /// such a filter never matches there.
-    pub has_extras: bool,
+    /// The extras an intent must carry, as their parcel
+    /// (`PersistableBundle.writeToParcel`); empty when read from XML. No
+    /// resolution passes an intent's extras, so such a filter never
+    /// matches there.
+    pub extras: Option<Vec<u8>>,
 }
 
 /// A MIME type the original refuses (`MalformedMimeTypeException`).
@@ -1032,7 +1064,7 @@ impl IntentFilter {
         if !self.match_categories(categories) {
             return NO_MATCH_CATEGORY;
         }
-        if self.has_extras {
+        if self.extras.is_some() {
             return NO_MATCH_EXTRAS;
         }
         data_match
@@ -1068,15 +1100,73 @@ impl IntentFilter {
         if r.read_i32()? != 0 {
             // A PersistableBundle: its length, then its magic, its data
             // and whether it has an intent.
+            let start = r.position();
             let length = r.read_i32()?;
             if length > 0 {
                 r.skip(4 + length as usize)?;
                 r.read_bool()?;
             }
-            f.has_extras = true;
+            f.extras = Some(r.since(start).0.to_vec());
         }
         f.uri_relative_filter_groups = read_list(r, |r| UriRelativeFilterGroup::read(r, strings))?;
         Ok(f)
+    }
+
+    /// `writeToParcel`.
+    pub fn write(&self, p: &mut Parcel) {
+        let strings = |p: &mut Parcel, list: &[String]| {
+            p.write_i32(list.len() as i32);
+            list.iter().for_each(|s| p.write_string16(Some(s)));
+        };
+        strings(p, &self.actions);
+        for list in [
+            &self.categories,
+            &self.schemes,
+            &self.static_types,
+            &self.types,
+            &self.mime_groups,
+        ] {
+            match list {
+                Some(list) => {
+                    p.write_i32(1);
+                    strings(p, list);
+                }
+                None => p.write_i32(0),
+            }
+        }
+        let patterns = |p: &mut Parcel, list: &Option<Vec<PatternMatcher>>| {
+            let list = list.as_deref().unwrap_or_default();
+            p.write_i32(list.len() as i32);
+            list.iter().for_each(|m| m.write(p));
+        };
+        patterns(p, &self.ssps);
+        let authorities = self.authorities.as_deref().unwrap_or_default();
+        p.write_i32(authorities.len() as i32);
+        authorities.iter().for_each(|a| a.write(p));
+        patterns(p, &self.paths);
+        p.write_i32(self.priority);
+        p.write_i32(self.has_static_partial_types as i32);
+        p.write_i32(self.has_dynamic_partial_types as i32);
+        p.write_i32(self.auto_verify as i32);
+        p.write_i32(self.instant_app_visibility);
+        p.write_i32(self.order);
+        match &self.extras {
+            Some(extras) => {
+                p.write_i32(1);
+                if extras.is_empty() {
+                    p.write_i32(0);
+                } else {
+                    p.write_raw(extras, &[]);
+                }
+            }
+            None => p.write_i32(0),
+        }
+        let groups = self
+            .uri_relative_filter_groups
+            .as_deref()
+            .unwrap_or_default();
+        p.write_i32(groups.len() as i32);
+        groups.iter().for_each(|g| g.write(p));
     }
 
     /// `readFromXml`, of the element holding the filter (a preferred
@@ -1120,7 +1210,7 @@ impl IntentFilter {
                         f.add_data_path(p);
                     }
                 }
-                ("extras", _) => f.has_extras = true,
+                ("extras", _) => f.extras = Some(Vec::new()),
                 ("uriRelativeFilterGroup", _) => {
                     f.add_uri_relative_filter_group(UriRelativeFilterGroup::parse(c))
                 }

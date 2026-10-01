@@ -35,7 +35,7 @@ pub trait Build<E, R> {
     fn result(&mut self, entry: &E, matched: i32) -> Option<R>;
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct IntentResolver<E> {
     entries: Vec<E>,
     /// Full MIME types, partial ones as `base/*`.
@@ -52,8 +52,8 @@ fn register(map: &mut HashMap<String, Vec<usize>>, key: &str, index: usize) {
     map.entry(key.to_owned()).or_default().push(index);
 }
 
-impl<E: Entry> IntentResolver<E> {
-    pub fn new() -> Self {
+impl<E> Default for IntentResolver<E> {
+    fn default() -> Self {
         IntentResolver {
             entries: Vec::new(),
             type_to_filter: HashMap::new(),
@@ -64,7 +64,9 @@ impl<E: Entry> IntentResolver<E> {
             typed_action_to_filter: HashMap::new(),
         }
     }
+}
 
+impl<E: Entry> IntentResolver<E> {
     pub fn entries(&self) -> &[E] {
         &self.entries
     }
@@ -282,7 +284,7 @@ mod tests {
     }
 
     fn resolver() -> IntentResolver<F> {
-        let mut r = IntentResolver::new();
+        let mut r = IntentResolver::default();
         r.add(F("a", filter(&["VIEW"], &["image/png"], &[], true)));
         r.add(F("b", filter(&["VIEW"], &["image/*"], &[], true)));
         r.add(F("c", filter(&["VIEW"], &["*/*"], &[], false)));
@@ -364,7 +366,7 @@ mod tests {
         };
         assert_eq!(r.query(&i, Some("image/png"), false, &mut b), ["b", "c"]);
         // A filter in two cuts is kept once.
-        let mut r = IntentResolver::new();
+        let mut r = IntentResolver::default();
         let mut f = filter(&["VIEW"], &["image/png"], &["content"], false);
         f.add_data_path(PatternMatcher::new("/", 1).unwrap());
         r.add(F("x", f));
