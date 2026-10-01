@@ -101,6 +101,13 @@ impl ShellCommand {
         }
     }
 
+    /// A line on the error output (`getErrPrintWriter().println`).
+    pub fn eprintln(&mut self, line: &str) {
+        if let Some(err) = &mut self.err {
+            let _ = writeln!(err, "{line}");
+        }
+    }
+
     /// What `exec` prints for an exception the command threw.
     pub fn exception(&mut self, exception: &str) {
         let command = self.command().unwrap_or_default().to_string();

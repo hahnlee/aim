@@ -7,4 +7,6 @@ public class Resources {
     public int getIdentifier(String name, String defType, String defPackage) { throw new RuntimeException("stub"); }
     public boolean getBoolean(int id) { throw new RuntimeException("stub"); }
     public String[] getStringArray(int id) { throw new RuntimeException("stub"); }
+    public int getInteger(int id) { throw new RuntimeException("stub"); }
+    public Configuration getConfiguration() { throw new RuntimeException("stub"); }
 }

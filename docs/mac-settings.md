@@ -37,6 +37,10 @@ the Mac's settings are only read.
   value. Whether an in-Android change should instead stick, or the Mac
   should always win, is open (#281).
 - **The clock.** `CLOCK_REALTIME` is the Mac's; only the zone was wrong.
+- **The native uimode** ([system-services.md](system-services.md),
+  "The uimode service") follows the appearance itself, from its start and
+  on the Mac's change notification, so the `cmd uimode night` trigger
+  repeats it (#655).
 
 ## Limits
 

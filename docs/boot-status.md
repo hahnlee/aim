@@ -32,10 +32,11 @@ guest-init --image <derived> --data <data> --run \
 
 `image/native-services` lists the system services implemented natively
 (docs/system-services.md): today `clipboard`, `vibrator_manager`
-(with `external_vibrator_service`), `location` and `thermalservice`. The
+(with `external_vibrator_service`), `location`, `thermalservice` and
+`uimode`. The
 derived image's `services.jar` does not start `ClipboardService`,
-`VibratorManagerService$Lifecycle`, `LocationManagerService$Lifecycle`
-or `ThermalManagerService`
+`VibratorManagerService$Lifecycle`, `LocationManagerService$Lifecycle`,
+`ThermalManagerService` or `UiModeManagerService`
 (their `SystemServerTiming` trace lines stay), and guest-init registers
 the native services with servicemanager when `servicemanager.ready` is
 set; `service check clipboard` finds it. The vibrator control service

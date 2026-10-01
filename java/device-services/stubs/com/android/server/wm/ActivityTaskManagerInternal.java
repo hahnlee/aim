@@ -4,4 +4,10 @@ package com.android.server.wm;
 
 public abstract class ActivityTaskManagerInternal {
     public abstract void registerActivityStartInterceptor(int id, ActivityInterceptorCallback callback);
+    public abstract PackageConfigurationUpdater createPackageConfigurationUpdater(String packageName, int userId);
+
+    public interface PackageConfigurationUpdater {
+        PackageConfigurationUpdater setNightMode(int nightMode);
+        boolean commit();
+    }
 }

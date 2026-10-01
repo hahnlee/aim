@@ -28,6 +28,7 @@ mod settings;
 mod shell;
 mod system;
 pub mod thermal;
+pub mod uimode;
 pub mod vibrator;
 pub mod volume;
 
@@ -109,6 +110,14 @@ impl NativeServices {
                         Arc::new(vibrator::ExternalVibratorService),
                     ),
                 ],
+                "uimode" => vec![(
+                    "uimode",
+                    uimode::UiModeManagerService::new(
+                        process.clone(),
+                        system.clone(),
+                        settings.clone(),
+                    ),
+                )],
                 "thermalservice" => vec![(
                     "thermalservice",
                     thermal::ThermalManagerService::new(process.clone(), system.clone()),

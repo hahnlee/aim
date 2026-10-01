@@ -71,6 +71,9 @@ SOURCE_FILES=(
   "platform/frameworks/base|media/java/android/media/session/ISessionControllerCallback.aidl|9f2bc82b2d4f0faf13916a4cee67bf0828fe1e1e5c53759756e533d2de6d1d21"
   "platform/frameworks/base|media/java/android/media/projection/IMediaProjectionManager.aidl|66d3da0cf547d0a39ac743cdc57fe32e6aa629d984ba9ef0c8185608c5b5a87b"
   "platform/frameworks/base|media/java/android/media/projection/IMediaProjection.aidl|7f665ca0d510538a955b0a0fd9031e3b26ceb7b91526e446d1485dbb4fbdd367"
+  "platform/frameworks/base|core/java/android/app/IUiModeManager.aidl|2ef38f88639ac1a9af91de8f92161dfcb70783d37f90f68afb425e2299eba75f"
+  "platform/frameworks/base|core/java/android/app/IUiModeManagerCallback.aidl|f89c858ca45201a2685dbacce9aeb75a490d2e3ad8853ab4ffdeda9ab15b6f06"
+  "platform/frameworks/base|core/java/android/app/IOnProjectionStateChangedListener.aidl|9c48475603563cccf3554f43158fc8e6d6b9d453eefcb813e8000fbe9e2c5ad2"
 )
 
 # descriptor|jar of its stub in the image|methods to marshal (`*`: all).
@@ -140,6 +143,9 @@ INTERFACES=(
   "android.media.session.ISessionControllerCallback|system/framework/framework.jar|onSessionDestroyed,onPlaybackStateChanged,onMetadataChanged"
   "android.media.projection.IMediaProjectionManager|system/framework/framework.jar|hasProjectionPermission,createProjection,getProjection"
   "android.media.projection.IMediaProjection|system/framework/framework.jar|setLaunchCookie"
+  "android.app.IUiModeManager|system/framework/framework.jar|*"
+  "android.app.IUiModeManagerCallback|system/framework/framework.jar|*"
+  "android.app.IOnProjectionStateChangedListener|system/framework/framework.jar|*"
 )
 
 # Binder interfaces the framework writes by hand, without AIDL:
@@ -160,4 +166,6 @@ OWN_INTERFACES=(
   "dev.aim.server.ILocationHost|java/device-services/aidl/dev/aim/server/ILocationHost.aidl|*"
   "dev.aim.server.IScreenCaptureConsent|java/device-services/aidl/dev/aim/server/IScreenCaptureConsent.aidl|*"
   "dev.aim.server.IScreenCaptureConsentCallback|java/device-services/aidl/dev/aim/server/IScreenCaptureConsentCallback.aidl|*"
+  "dev.aim.server.IUiModeBridge|java/device-services/aidl/dev/aim/server/IUiModeBridge.aidl|*"
+  "dev.aim.server.IUiModeHost|java/device-services/aidl/dev/aim/server/IUiModeHost.aidl|*"
 )
