@@ -7,4 +7,9 @@ import android.os.RemoteException;
 public interface IPackageManager extends android.os.IInterface {
     boolean isFirstBoot() throws RemoteException;
     boolean isDeviceUpgrading() throws RemoteException;
+    void registerPackageMonitorCallback(android.os.IRemoteCallback callback, int userId) throws RemoteException;
+    String getSuspendingPackage(String packageName, int userId) throws RemoteException;
+    int[] getPackageGids(String packageName, long flags, int userId) throws RemoteException;
+    InstallSourceInfo getInstallSourceInfo(String packageName, int userId) throws RemoteException;
+    byte[] getPreferredActivityBackup(int userId) throws RemoteException;
 }

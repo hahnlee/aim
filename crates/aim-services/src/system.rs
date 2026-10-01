@@ -204,6 +204,11 @@ impl System {
         system
     }
 
+    /// The binder process the services and the bridge's handles live in.
+    pub(crate) fn process(&self) -> Arc<LocalProcess> {
+        self.process.clone()
+    }
+
     /// `name` from servicemanager, kept until it dies.
     fn service(self: &Arc<Self>, name: &'static str) -> Result<Arc<Strong>> {
         if let Some(s) = self.services.lock().unwrap().get(name) {
@@ -412,6 +417,13 @@ impl System {
             listener(handle);
         }
         Ok(())
+    }
+
+    /// The `package_info_cache` nonce now; `None` without the bridge or
+    /// while it is unset.
+    pub(crate) fn package_info_nonce(&self) -> Option<i64> {
+        let nonces = self.nonces.lock().unwrap().clone();
+        nonces.and_then(|n| n.get(PACKAGE_INFO_NONCE))
     }
 
     /// Tells `listener` of each bridge attached from now on, with its

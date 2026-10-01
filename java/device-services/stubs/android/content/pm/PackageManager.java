@@ -25,4 +25,6 @@ public abstract class PackageManager {
     public abstract PackageInfo getPackageInfoAsUser(String packageName, int flags, int userId) throws NameNotFoundException;
     public abstract int getPermissionFlags(String permName, String packageName, UserHandle user);
     public abstract boolean hasSystemFeature(String featureName);
+    public abstract java.util.List<PermissionGroupInfo> getAllPermissionGroups(int flags);
+    public abstract java.util.List<PermissionInfo> queryPermissionsByGroup(String permissionGroup, int flags) throws NameNotFoundException;
 }

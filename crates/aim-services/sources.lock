@@ -170,4 +170,6 @@ OWN_INTERFACES=(
   "dev.aim.server.IScreenCaptureConsentCallback|java/device-services/aidl/dev/aim/server/IScreenCaptureConsentCallback.aidl|*"
   "dev.aim.server.IUiModeBridge|java/device-services/aidl/dev/aim/server/IUiModeBridge.aidl|*"
   "dev.aim.server.IUiModeHost|java/device-services/aidl/dev/aim/server/IUiModeHost.aidl|*"
+  "dev.aim.server.IPackageFeed|java/device-services/aidl/dev/aim/server/IPackageFeed.aidl|*"
+  "dev.aim.server.IPackageFeedHost|java/device-services/aidl/dev/aim/server/IPackageFeedHost.aidl|*"
 )

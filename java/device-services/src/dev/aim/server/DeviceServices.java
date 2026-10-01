@@ -42,11 +42,13 @@ public final class DeviceServices extends SystemService {
     private final LocationBridge mLocation;
     private final UiModeBridge mUiMode;
     private final LocaleBridge mLocale = new LocaleBridge();
+    private final PackageFeed mPackageFeed;
 
     public DeviceServices(Context context) {
         super(context);
         mLocation = new LocationBridge(context);
         mUiMode = new UiModeBridge(context);
+        mPackageFeed = new PackageFeed(context);
     }
 
     @Override
@@ -140,7 +142,8 @@ public final class DeviceServices extends SystemService {
         }
         try {
             IServiceHost service = IServiceHost.Stub.asInterface(host);
-            service.attachBridge(new Bridge(getContext(), service, mLocation, mUiMode, mLocale));
+            service.attachBridge(new Bridge(getContext(), service, mLocation, mUiMode, mLocale,
+                    mPackageFeed));
             Slog.i(TAG, "bridge attached to the native service host");
         } catch (RemoteException e) {
             Slog.w(TAG, "cannot attach the bridge", e);
@@ -153,14 +156,16 @@ public final class DeviceServices extends SystemService {
         private final LocationBridge location;
         private final UiModeBridge uiMode;
         private final LocaleBridge locale;
+        private final PackageFeed packageFeed;
 
         Bridge(Context context, IServiceHost host, LocationBridge location, UiModeBridge uiMode,
-                LocaleBridge locale) {
+                LocaleBridge locale, PackageFeed packageFeed) {
             this.context = context;
             this.host = host;
             this.location = location;
             this.uiMode = uiMode;
             this.locale = locale;
+            this.packageFeed = packageFeed;
         }
 
         @Override
@@ -196,6 +201,12 @@ public final class DeviceServices extends SystemService {
         public void updateLocales(String languageTags) {
             enforceSystemUid();
             locale.update(languageTags);
+        }
+
+        @Override
+        public IPackageFeed getPackageFeed(IPackageFeedHost host) {
+            enforceSystemUid();
+            return packageFeed.attach(host);
         }
 
         private static void enforceSystemUid() {

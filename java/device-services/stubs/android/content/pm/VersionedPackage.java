@@ -1,0 +1,9 @@
+// A stub of the image's class for compiling against (docs/build.md, "Java"):
+// the members used, checked against the image by the device-services node.
+package android.content.pm;
+
+public final class VersionedPackage {
+    public VersionedPackage(String packageName, long versionCode) { throw new RuntimeException("stub"); }
+    public String getPackageName() { throw new RuntimeException("stub"); }
+    public long getLongVersionCode() { throw new RuntimeException("stub"); }
+}
