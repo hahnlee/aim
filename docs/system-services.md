@@ -1012,17 +1012,20 @@ TotalTime of the two starts: 224 and 201 ms with the original, 233 and
 `crates/aim-services/src/thermal.rs` serves `thermalservice`
 (IThermalService), the one binder SystemServer's
 `ThermalManagerService` publishes, following `ThermalManagerService.java`
-at the tag with the Mac in the thermal HAL's place. The image's HAL
-(`hal/thermal`, [vendor-hals.md](vendor-hals.md)) reported the Mac to
-the original; the native service reads the same host module
-(`aim_host_sensors`) in the service host:
+at the tag with the Mac in the thermal HAL's place. The image has no
+thermal HAL ([vendor-hals.md](vendor-hals.md), #624); the native service
+reads the Mac in the service host through `aim_host_sensors`, which our
+HAL used through host-call:
 
 - **Temperatures.** `SKIN`, whose throttling status is macOS's thermal
   state (`NSProcessInfo.thermalState`: nominal `NONE`, fair `LIGHT`,
   serious `SEVERE`, critical `CRITICAL`) and whose value is unknown
   (NaN); `CPU` and `BATTERY` when the Mac reads them. The thermal status
   is the highest `SKIN` status; a change of the thermal state is noticed
-  within 5 s, as the HAL polled it.
+  within 5 s, as the HAL polled it. The state is read on each call; the
+  CPU and battery sensors at most every 5 s, the same period, since each
+  is a round trip to the HID event system (about 0.7 ms, some 20 of
+  them).
 - **No cooling devices and no thresholds**, as with that HAL, so no
   headroom: `getThermalHeadroom` is NaN, the headroom thresholds are
   seven NaNs (`allow_thermal_headroom_thresholds` is on in the image)
@@ -1042,7 +1045,7 @@ the original; the native service reads the same host module
 `ThermalManagerService` publishes no local interface; system_server's
 display services reach it through its binder. It needs nothing from the
 bridge. Not here: the statsd atoms and the `thermal_changed` event log
-entry (#617). The HAL now has no client (#624).
+entry (#617).
 
 **Cost** (2026-10-01, the second boot of a data directory each, load
 about 8.5, a binder trace; the driver's latency of each synchronous call

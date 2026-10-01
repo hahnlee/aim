@@ -134,30 +134,16 @@ reason = "the emulator's health HAL reads /sys/class/power_supply, which has no 
 path = "/vendor/etc/vintf/manifest/android.hardware.health-service.example.xml"
 reason = "IHealth/default is declared by our health HAL's fragment"
 
-# android.hardware.thermal, sensors and gnss (docs/vendor-hals.md): the
-# Mac's thermal state and temperatures, its ambient light sensor and lid
-# angle, and CoreLocation. Built by the hal/* nodes of `cargo aim`; their host
-# sides are the host-call modules `thermal`, `sensors` and `location`. The
-# power HAL stays the original (the vendor APEX's example service).
-
-[[add]]
-path = "/vendor/bin/hw/android.hardware.thermal-service.aim"
-source = "target/aim/hal/bin/android.hardware.thermal-service.aim"
-reason = "thermal HAL service (Rust, AIDL V3) reporting the Mac's thermal state via host-call"
-
-[[add]]
-path = "/vendor/etc/init/android.hardware.thermal-service.aim.rc"
-source = "hal/thermal/android.hardware.thermal-service.aim.rc"
-reason = "starts the thermal HAL"
-
-[[add]]
-path = "/vendor/etc/vintf/manifest/android.hardware.thermal-service.aim.xml"
-source = "hal/thermal/android.hardware.thermal-service.aim.xml"
-reason = "declares android.hardware.thermal.IThermal/default V3"
+# android.hardware.sensors and gnss (docs/vendor-hals.md): the Mac's
+# ambient light sensor and lid angle, and CoreLocation. Built by the hal/*
+# nodes of `cargo aim`; their host sides are the host-call modules `sensors`
+# and `location`. The power HAL stays the original (the vendor APEX's
+# example service). There is no thermal HAL: `thermalservice` is native and
+# reads the Mac itself (docs/system-services.md).
 
 [[remove]]
 path = "/apex/com.android.hardware.thermal"
-reason = "the example thermal HAL reports no temperatures and never throttles; ours serves IThermal/default from the Mac's thermal state"
+reason = "IThermal/default has no client: the native thermalservice reads the Mac's thermal state and temperatures in the service host, and the example HAL reports none and never throttles"
 
 [[add]]
 path = "/vendor/bin/hw/android.hardware.sensors-service.aim"
@@ -380,7 +366,7 @@ reason = "the Mac's pointer as an absolute mouse: hover, buttons, scrolling"
 # ClearKey DRM, the software KeyMint (with secure clock and shared secret),
 # identity credential, and the vendor APEXes authsecret, cas, dumpstate,
 # gatekeeper (nonsecure), neuralnetworks (CPU samples), power and widevine.
-# The thermal APEX is replaced above.
+# The thermal APEX goes above.
 
 [[replace]]
 path = "/vendor/etc/vintf/manifest.xml"

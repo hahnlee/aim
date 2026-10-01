@@ -2,9 +2,9 @@
 //! service (ADR 0013), in place of SystemServer's ThermalManagerService.
 //!
 //! This is `ThermalManagerService.java` at the pinned tag with the Mac in
-//! the thermal HAL's place. What the image's HAL (`hal/thermal`,
-//! docs/vendor-hals.md) reported to the original is read here from the
-//! host module in this process ([`aim_host_sensors`]):
+//! the thermal HAL's place (the image has none, docs/vendor-hals.md). What
+//! our HAL reported to the original is read here in this process
+//! ([`aim_host_sensors`]):
 //!
 //! - the `SKIN` temperature, whose throttling status is macOS's thermal
 //!   state and whose value is unknown (NaN); `CPU` and `BATTERY` when the

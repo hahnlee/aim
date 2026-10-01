@@ -523,15 +523,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "android_hardware_thermal"
-version = "3.0.0"
-dependencies = [
- "async-trait",
- "binder",
- "static_assertions",
-]
-
-[[package]]
 name = "android_media_audio_common_types"
 version = "4.0.0"
 dependencies = [
@@ -1180,16 +1171,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "thermal"
-version = "0.1.0"
-dependencies = [
- "aim-hostcall",
- "android_hardware_thermal",
- "binder",
- "log",
 ]
 
 [[package]]

@@ -357,7 +357,7 @@ keeps exiting and init restarts it every 5 s.
 | credstore, vendor.identity-default | running | |
 | vendor.health-aim | running | our health HAL |
 | vendor.graphics.allocator | running | our allocator HAL |
-| vendor.authsecret_default, vendor.cas-default, vendor.drm-widevine-hal, vendor.power-default, vendor.power.stats-default, vendor.thermal-example | running | vendor APEX HALs |
+| vendor.authsecret_default, vendor.cas-default, vendor.drm-widevine-hal, vendor.power-default, vendor.power.stats-default | running | vendor APEX HALs |
 | neuralnetworks_hal_service_* (3) | running | CPU sample drivers |
 | system_suspend | running | no `/sys/power/suspend_stats` |
 | tombstoned | running | |
@@ -668,7 +668,7 @@ frames are slow (#239).
 | **Audio** | passed | `service check media.audio_flinger`: found. `audio_tone 2000 0` (AAudio, -90 dBFS): 96,000 frames written, `output_xruns 0`, `ok done`. AudioFlinger's primary output (`AUDIO_DEVICE_OUT_SPEAKER`) wrote 240,768 frames; the HAL logged "output stream in standby: 240768 frames, 469 device callbacks, 0 xrun frames, peak -90.0 dBFS": the stream reached CoreAudio, not the null sink. |
 | **Vulkan** | partial | `ro.hardware.vulkan=aim` loads `vulkan.aim.so` over MoltenVK (docs/vulkan-driver.md); `pm list features`: `android.hardware.vulkan.level` 0, `.version` 1.3, `.compute`; `dumpsys gpu`: `vulkanVersion = 4206592`. The NDK checks run in `tests/vulkan.rs` (two queues of one family, AHardwareBuffer and YUV images, sync-fd semaphores on the GPU). In a boot, the swapchain mode draws 100 frames, and with `debug.hwui.renderer=skiavk` (a test setting; the default stays GLES) Settings, Chrome and Clock draw with `Pipeline=Skia (Vulkan)`. |
 | **Sensors** | passed | `dumpsys sensorservice`: Ambient Light Sensor (`android.sensor.light`) and Lid Angle Sensor (`android.sensor.hinge_angle`), vendor "Apple (darwin host)". `pm list features`: `android.hardware.sensor.light` and `.hinge_angle`, from the SKU guest-init reports (`ro.boot.product.vendor.sku` = `light_hinge`); no "cannot find light sensor" from DisplayPowerController (2026-09-30, #496). |
-| **Thermal** | passed | `dumpsys thermalservice` (the native service, 2026-10-01): status 0, cpu 44.2 °C, battery 30.6 °C, skin NaN; the HAL runs without a client (#624). |
+| **Thermal** | passed | `dumpsys thermalservice` (the native service, 2026-10-01): status 0, cpu 44.2 °C, battery 30.6 °C, skin NaN; no thermal HAL (#624). |
 | **Health** | passed | `dumpsys battery`: level 80, AC powered, as `pmset -g batt` (80 %; AC attached). Temperature reads 0 (#242). |
 | **Bluetooth** | passed | `dumpsys bluetooth_manager`: `enabled: true`, `state: ON`, crashed 0 times, over our HAL's virtual controller. No scan was run (TCC). |
 | **GNSS** | passed | `dumpsys location` (the native service, 2026-09-30): `gps provider` enabled and allowed, identity `1000/android[GnssService]`; network and fused bound from Google Play services. No fix in boots whose host process has no CoreLocation authorization. |

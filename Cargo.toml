@@ -52,7 +52,6 @@ members = [
     "hal/gnss",
     "hal/health",
     "hal/sensors",
-    "hal/thermal",
     "hal/vulkan",
     "hal/tests/bluetooth-hci-client",
     "hal/tests/camera-client",

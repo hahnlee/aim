@@ -67,6 +67,6 @@ by-name bypasses are never an option.
 - The composer HAL talks to `aim-display`, which owns the macOS window and
   turns AppKit input into evdev devices ([docs/composer.md](docs/composer.md),
   [docs/input.md](docs/input.md)).
-- Audio, Bluetooth, camera, sensors, GNSS, health and thermal are vendor HALs
+- Audio, Bluetooth, camera, sensors, GNSS and health are vendor HALs
   with host modules ([docs/audio.md](docs/audio.md),
   [docs/bluetooth.md](docs/bluetooth.md), [docs/camera.md](docs/camera.md)).
