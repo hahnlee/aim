@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aim_apps::apk::Apk;
 
@@ -56,13 +56,47 @@ impl Platform {
             // `ActivityTaskManager.getMaxRecentTasksStatic() / 6`.
             recents_limit: if low_ram { 36 } else { 48 } / 6,
             framework_overlays: Vec::new(),
+            framework_overlay_apks: Vec::new(),
             framework_attrs: framework.attr_ids(),
             framework,
             density_dpi: prop("ro.sf.lcd_density").and_then(|d| d.parse().ok()),
         };
-        platform.framework_overlays = framework_overlays(root, &platform.framework)?;
+        (platform.framework_overlay_apks, platform.framework_overlays) =
+            framework_overlays(root, &platform.framework)?
+                .into_iter()
+                .unzip();
         platform.use_round_icon = platform.framework_bool("config_useRoundIcon");
         Ok(platform)
+    }
+
+    /// The file a framework resource of type `kind` (such as `raw`)
+    /// names, from the APK its overlays leave it in (`openRawResource`),
+    /// of the image whose root is `root`.
+    pub fn framework_file(&self, root: &Path, kind: &str, name: &str) -> Option<Vec<u8>> {
+        let id = self.framework.id(kind, name)?;
+        let res = Resources {
+            tables: vec![&self.framework],
+            overlays: &self.framework_overlays,
+            config: self.config(),
+        };
+        let mut v = super::resources::Selected {
+            kind: super::resources::TYPE_REFERENCE,
+            data: id,
+            table: None,
+            resid: 0,
+            flags: 0,
+        };
+        res.resolve(&mut v);
+        let table = v.table?;
+        if v.kind != super::resources::TYPE_STRING {
+            return None;
+        }
+        let path = res.string(table, v.data)?;
+        let apk = match table {
+            0 => root.join("system/framework/framework-res.apk"),
+            i => self.framework_overlay_apks.get(i - 1)?.clone(),
+        };
+        Apk::open(&apk).and_then(|a| a.file(path)).ok()
     }
 
     /// A framework `bool` resource for the parser's configuration.
@@ -91,7 +125,7 @@ impl Platform {
 /// gives the zygote their idmaps: by partition, then priority, then path.
 /// None of this image's partitions configures its overlays
 /// (`overlay-config.xml`); one that does is refused.
-fn framework_overlays(root: &Path, framework: &Table) -> Result<Vec<Overlay>, String> {
+fn framework_overlays(root: &Path, framework: &Table) -> Result<Vec<(PathBuf, Overlay)>, String> {
     let mut found = Vec::new();
     for (rank, p) in PARTITIONS.iter().enumerate() {
         if root.join(p).join("overlay/config/config.xml").exists() {
@@ -143,7 +177,7 @@ fn framework_overlays(root: &Path, framework: &Table) -> Result<Vec<Overlay>, St
     found.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
     Ok(found
         .into_iter()
-        .map(|(_, _, _, t)| Overlay::new(framework, t))
+        .map(|(_, _, path, t)| (path, Overlay::new(framework, t)))
         .collect())
 }
 
