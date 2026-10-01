@@ -592,6 +592,7 @@ impl Boot {
             native_services = start_native_services(&image, server)?;
             if let Some((names, log)) = &options.binder_shadow {
                 let properties_dir = layout.properties_dir();
+                let files = map.clone();
                 native_services
                     .as_ref()
                     .ok_or("--binder-shadow: the image has no native services")?
@@ -601,6 +602,7 @@ impl Boot {
                         log,
                         image.root(),
                         Box::new(move |name| read_property(&properties_dir, name)),
+                        Box::new(move |guest: &str| files.readable_by_others(guest)),
                     )?;
             }
             // Android's notifications on the Mac, from the original

@@ -499,3 +499,43 @@ fn an_install_session_decides_the_install_reason_and_the_enabler() {
     let original = change::original(kind, &pre, &updated, APP, true);
     assert_eq!(model.unwrap(), original);
 }
+
+#[test]
+fn an_install_s_signers_are_verified_from_its_apks() {
+    // Signed with v3 and a proof-of-rotation lineage of two certificates.
+    const GSF: &str = "system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk";
+    let Some(root) = aim_paths::original_image_with(GSF) else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("aim-write-apks-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = dir.join("base.apk");
+    let _ = std::fs::remove_file(&base);
+    std::os::unix::fs::symlink(root.join(GSF), &base).unwrap();
+    let guest = "/data/app/~~a==/com.google.android.gsf-b==".to_string();
+    let host = dir.clone();
+    let apks = apk::Apks {
+        files: Box::new(move |p| (p == guest).then(|| host.clone())),
+        build: crate::package::sign::Build {
+            sdk_int: 36,
+            release: true,
+            always_load_past_certs_v4: true,
+        },
+    };
+    let ps = PackageState {
+        path: "/data/app/~~a==/com.google.android.gsf-b==".into(),
+        ..PackageState::default()
+    };
+    let pkg = AndroidPackage {
+        target_sdk_version: 36,
+        ..AndroidPackage::default()
+    };
+    let signatures = apks.signatures(&ps, &pkg).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(
+        signatures.scheme_version,
+        crate::package::sign::SIGNING_BLOCK_V3
+    );
+    assert_eq!(signatures.signatures.len(), 1);
+    assert_eq!(signatures.past_signatures.map(|p| p.len()), Some(2));
+}

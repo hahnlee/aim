@@ -15,6 +15,7 @@
 //! Installs, updates and removals are found as changes between observed
 //! states ([`change`]) and compared the same way, once settled.
 
+mod apk;
 mod change;
 mod enabled;
 mod session;
@@ -33,6 +34,7 @@ use super::info::user_state;
 use super::model::{PackageState, State};
 use super::query::{Query, States};
 use crate::shadow::{Answer, Check, CheckOutcome, ShadowCall, Value};
+pub use apk::{Apks, Files};
 use session::Sessions;
 
 /// How long a package's state in a user takes no write before the
@@ -64,6 +66,8 @@ struct Inner {
     first_available: i32,
     /// The install sessions the bridge tells of, once watched.
     sessions: Option<Arc<Sessions>>,
+    /// The installed APKs, once readable.
+    apks: Option<Apks>,
 }
 
 /// A package's install, update or removal, waiting to settle.
@@ -126,6 +130,12 @@ impl Writes {
     /// tells of from now on.
     pub fn watch_sessions(&self, system: &Arc<crate::system::System>) {
         self.inner.lock().unwrap().sessions = Some(Sessions::start(system));
+    }
+
+    /// Verifies the signers of the packages installed from now on, reading
+    /// their APKs through `apks`.
+    pub fn read_apks(&self, apks: Apks) {
+        self.inner.lock().unwrap().apks = Some(apks);
     }
 
     /// Keeps `state`, observed now, as a pre-state of the writes taken
@@ -317,9 +327,24 @@ impl Writes {
                 }
                 match model {
                     Err(NotModelled(reason)) => CheckOutcome::NotModelled(reason.into()),
-                    Ok(model) => {
-                        let original =
+                    Ok(mut model) => {
+                        let mut original =
                             change::original(c.kind, &c.pre, post, &c.name, session.is_some());
+                        // The signers, verified from the installed APKs.
+                        let installed =
+                            matches!(c.kind, change::Kind::Install | change::Kind::Update);
+                        if let (true, Some(apks), Some(ps), Some(pkg), Some(m), Some(o)) = (
+                            installed,
+                            &inner.apks,
+                            post.packages.get(&c.name),
+                            pkg,
+                            model.package.as_mut(),
+                            original.package.as_mut(),
+                        ) {
+                            m.signatures = Some(apks.signatures(ps, pkg));
+                            o.signatures =
+                                Some(ps.signatures.clone().ok_or_else(|| "unsigned".to_string()));
+                        }
                         if original == model {
                             CheckOutcome::Matched
                         } else {
