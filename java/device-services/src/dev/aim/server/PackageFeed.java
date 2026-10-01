@@ -1,7 +1,11 @@
 package dev.aim.server;
 
 import android.app.AppGlobals;
+import android.app.role.RoleManager;
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.UriRelativeFilter;
+import android.content.UriRelativeFilterGroup;
 import android.content.pm.IPackageManager;
 import android.content.pm.InstallSourceInfo;
 import android.content.pm.PackageManager;
@@ -14,10 +18,12 @@ import android.content.pm.SigningInfo;
 import android.content.pm.VersionedPackage;
 import android.content.pm.overlay.OverlayPaths;
 import android.content.res.Resources;
+import android.database.ContentObserver;
 import android.content.pm.verify.domain.DomainVerificationInfo;
 import android.content.pm.verify.domain.DomainVerificationManager;
 import android.content.pm.verify.domain.DomainVerificationUserState;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IRemoteCallback;
@@ -25,6 +31,7 @@ import android.os.Parcel;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.permission.PermissionManager;
+import android.provider.Settings;
 import android.util.Slog;
 import android.util.SparseArray;
 
@@ -40,7 +47,9 @@ import com.android.server.pm.pkg.SharedLibrary;
 import com.android.server.pm.pkg.SharedUserApi;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -115,6 +124,8 @@ final class PackageFeed extends IPackageFeed.Stub {
                 thread.start();
                 mHandler = thread.getThreadHandler();
                 registerPackageMonitor();
+                registerDeviceProvisioned();
+                registerRoleHolders();
             }
             mHandler.post(() -> mHost = host);
         }
@@ -148,6 +159,27 @@ final class PackageFeed extends IPackageFeed.Stub {
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
+    }
+
+    /**
+     * A batch when the device becomes provisioned: preferred activity
+     * resolution reads Settings.Global.DEVICE_PROVISIONED.
+     */
+    private void registerDeviceProvisioned() {
+        mContext.getContentResolver().registerContentObserver(
+                Settings.Global.getUriFor(Settings.Global.DEVICE_PROVISIONED), false,
+                new ContentObserver(mHandler) {
+                    @Override
+                    public void onChange(boolean selfChange) {
+                        sync(false, 0);
+                    }
+                });
+    }
+
+    /** A batch when a role's holders change: resolution reads the default browser. */
+    private void registerRoleHolders() {
+        mContext.getSystemService(RoleManager.class).addOnRoleHoldersChangedListenerAsUser(
+                r -> mHandler.post(r), (role, user) -> sync(false, 0), UserHandle.ALL);
     }
 
     /** One batch: the records that differ from what the host holds. */
@@ -384,10 +416,44 @@ final class PackageFeed extends IPackageFeed.Stub {
             p.writeInt(users.size());
             for (int i = 0; i < users.size(); i++) {
                 p.writeInt(users.keyAt(i));
-                userState(p, users.valueAt(i), s.getPackageName(), users.keyAt(i),
-                        domains != null);
+                userState(p, users.valueAt(i), s.getPackageName(), users.keyAt(i));
             }
+            uriRelativeFilterGroups(p, s.getPackageName(), users);
         });
+    }
+
+    /**
+     * The URI relative filter groups domain verification keeps for the
+     * package's web domains (the hosts of its users' selections), by
+     * domain.
+     */
+    private void uriRelativeFilterGroups(Parcel p, String packageName,
+            SparseArray<? extends PackageUserState> users) {
+        TreeSet<String> hosts = new TreeSet<>();
+        for (int i = 0; i < users.size(); i++) {
+            DomainVerificationUserState selection = domainSelection(packageName, users.keyAt(i));
+            if (selection != null) {
+                hosts.addAll(selection.getHostToStateMap().keySet());
+            }
+        }
+        Map<String, List<UriRelativeFilterGroup>> groups = hosts.isEmpty() ? Map.of()
+                : mContext.getSystemService(DomainVerificationManager.class)
+                        .getUriRelativeFilterGroups(packageName, new ArrayList<>(hosts));
+        TreeMap<String, List<UriRelativeFilterGroup>> sorted = new TreeMap<>(groups);
+        p.writeInt(sorted.size());
+        for (Map.Entry<String, List<UriRelativeFilterGroup>> e : sorted.entrySet()) {
+            p.writeString(e.getKey());
+            p.writeInt(e.getValue().size());
+            for (UriRelativeFilterGroup group : e.getValue()) {
+                p.writeInt(group.getAction());
+                p.writeInt(group.getUriRelativeFilters().size());
+                for (UriRelativeFilter f : group.getUriRelativeFilters()) {
+                    p.writeInt(f.getUriPart());
+                    p.writeInt(f.getPatternType());
+                    p.writeString(f.getFilter());
+                }
+            }
+        }
     }
 
     /** A SharedLibrary or SharedLibraryInfo, with its dependencies'. */
@@ -533,8 +599,7 @@ final class PackageFeed extends IPackageFeed.Stub {
         }
     }
 
-    private void userState(Parcel p, PackageUserState u, String packageName, int userId,
-            boolean domains) {
+    private void userState(Parcel p, PackageUserState u, String packageName, int userId) {
         p.writeLong(u.getCeDataInode());
         p.writeLong(u.getDeDataInode());
         p.writeInt(flags(u.isInstalled(), u.isStopped(), u.isNotLaunched(), u.isHidden(),
@@ -593,8 +658,7 @@ final class PackageFeed extends IPackageFeed.Stub {
             }
         }
         strings(p, granted);
-        DomainVerificationUserState selection = domains
-                ? domainSelection(packageName, userId) : null;
+        DomainVerificationUserState selection = domainSelection(packageName, userId);
         p.writeBoolean(selection != null);
         if (selection != null) {
             p.writeBoolean(selection.isLinkHandlingAllowed());
@@ -634,36 +698,104 @@ final class PackageFeed extends IPackageFeed.Stub {
 
     /**
      * A user's record: its preferred activities as the original backs them
-     * up (getPreferredActivityBackup, the full XML), or none. The
-     * persistent ones have no read API (#715).
+     * up (getPreferredActivityBackup, the full XML), or none; and its
+     * package-restrictions.xml as the original last wrote it, the only
+     * source of its persistent preferred activities and cross-profile
+     * intent filters, which no API reads (#715). The file lags the
+     * original's memory by its write delay; and its default browser (the
+     * browser role's holder).
      */
-    private static byte[] user(int userId) {
+    private byte[] user(int userId) {
         byte[] preferred;
         try {
             preferred = AppGlobals.getPackageManager().getPreferredActivityBackup(userId);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
+        byte[] restrictions = restrictions(userId);
+        List<String> browsers = mContext.getSystemService(RoleManager.class)
+                .getRoleHoldersAsUser(RoleManager.ROLE_BROWSER, UserHandle.of(userId));
         return record(p -> {
             p.writeInt(userId);
             p.writeByteArray(preferred);
+            p.writeByteArray(restrictions);
+            p.writeString(browsers.isEmpty() ? null : browsers.get(0));
         });
     }
 
     /**
+     * The user's package-restrictions.xml as ResilientAtomicFile reads it:
+     * an interrupted write's backup, else the file, else its reserve copy.
+     */
+    private static byte[] restrictions(int userId) {
+        File dir = Environment.getUserSystemDirectory(userId);
+        for (String name : new String[] {"package-restrictions-backup.xml",
+                "package-restrictions.xml", "package-restrictions.xml.reservecopy"}) {
+            File file = new File(dir, name);
+            if (!file.exists()) {
+                continue;
+            }
+            try {
+                return Files.readAllBytes(file.toPath());
+            } catch (IOException e) {
+                Slog.w(TAG, "cannot read " + file, e);
+            }
+        }
+        return null;
+    }
+
+    /** ResolverActivity's titles, by the action each is for (ActionTitle). */
+    private static final String[][] RESOLVER_TITLES = {
+        {"android.intent.action.VIEW", "whichViewApplication"},
+        {"android.intent.action.EDIT", "whichEditApplication"},
+        {"android.intent.action.SEND", "whichSendApplication"},
+        {"android.intent.action.SENDTO", "whichSendToApplication"},
+        {"android.intent.action.SEND_MULTIPLE", "whichSendApplication"},
+        {"android.media.action.IMAGE_CAPTURE", "whichImageCaptureApplication"},
+        {null, "whichApplication"},
+    };
+
+    /**
      * The system record: the configuration AppsFilter reads from the
      * framework's resources, config_forceSystemPackagesQueryable and
-     * config_forceQueryablePackages.
+     * config_forceQueryablePackages; what resolveIntent's chooser shows,
+     * the resolver activity's theme, its titles and
+     * config_customResolverActivity; Settings.Global.DEVICE_PROVISIONED;
+     * and the instant app resolver and installer PackageManager chose.
      */
-    private static byte[] system() {
+    private byte[] system() {
         Resources res = Resources.getSystem();
         boolean systemQueryable = res.getBoolean(
                 res.getIdentifier("config_forceSystemPackagesQueryable", "bool", "android"));
         String[] queryable = res.getStringArray(
                 res.getIdentifier("config_forceQueryablePackages", "array", "android"));
+        int theme = res.getIdentifier("Theme.Material.Dialog.Alert", "style", "android");
+        String customResolver = res.getString(
+                res.getIdentifier("config_customResolverActivity", "string", "android"));
+        int provisioned = Settings.Global.getInt(mContext.getContentResolver(),
+                Settings.Global.DEVICE_PROVISIONED, 0);
+        ComponentName resolver;
+        ComponentName installer;
+        try {
+            IPackageManager pm = AppGlobals.getPackageManager();
+            resolver = pm.getInstantAppResolverComponent();
+            installer = pm.getInstantAppInstallerComponent();
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
         return record(p -> {
             p.writeBoolean(systemQueryable);
             strings(p, Arrays.asList(queryable));
+            p.writeInt(theme);
+            p.writeInt(RESOLVER_TITLES.length);
+            for (String[] title : RESOLVER_TITLES) {
+                p.writeString(title[0]);
+                p.writeInt(res.getIdentifier(title[1], "string", "android"));
+            }
+            p.writeString(customResolver);
+            p.writeInt(provisioned);
+            p.writeString(resolver == null ? null : resolver.flattenToString());
+            p.writeString(installer == null ? null : installer.flattenToString());
         });
     }
 

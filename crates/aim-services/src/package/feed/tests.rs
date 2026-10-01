@@ -128,6 +128,15 @@ fn package_record(name: &str, shared_user_app_id: Option<i32>) -> Vec<u8> {
     p.write_bool(true);
     p.write_bool(false);
     p.write_i32(0);
+    // URI relative filter groups: example.com, one blocking group.
+    p.write_i32(1);
+    p.write_string16(Some("example.com"));
+    p.write_i32(1);
+    p.write_i32(1);
+    p.write_i32(1);
+    p.write_i32(0);
+    p.write_i32(0);
+    p.write_string16(Some("/private"));
     p.data().to_vec()
 }
 
@@ -146,6 +155,8 @@ fn user_record(id: i32) -> Vec<u8> {
     let mut p = Parcel::new();
     p.write_i32(id);
     write_byte_array(&mut p, Some(b"<pa />"));
+    write_byte_array(&mut p, Some(b"<package-restrictions />"));
+    p.write_string16(Some("com.example.browser"));
     p.data().to_vec()
 }
 
@@ -153,6 +164,14 @@ fn system_record() -> Vec<u8> {
     let mut p = Parcel::new();
     p.write_bool(true);
     strings(&mut p, &["com.android.settings"]);
+    p.write_i32(0x0103_0226);
+    p.write_i32(1);
+    p.write_string16(Some("android.intent.action.VIEW"));
+    p.write_i32(0x0104_0001);
+    p.write_string16(Some(""));
+    p.write_i32(1);
+    p.write_string16(None);
+    p.write_string16(Some("com.example/.Installer"));
     p.data().to_vec()
 }
 
@@ -220,6 +239,15 @@ fn reads_a_package_record() {
             "4a1e7c2d-0000-0000-0000-000000000000".into(),
             vec![("example.com".into(), 1)]
         ))
+    );
+    let (domain, groups) = &p.uri_relative_filter_groups[0];
+    assert_eq!(
+        (
+            domain.as_str(),
+            groups[0].action,
+            groups[0].filters[0].filter.as_str()
+        ),
+        ("example.com", 1, "/private")
     );
     let u = &p.users[&0];
     assert!(u.installed && u.stopped && u.data_exists && !u.hidden);
@@ -302,6 +330,28 @@ fn publishes_a_batch_whose_digest_matches() {
     assert_eq!(
         state.system.force_queryable_packages,
         ["com.android.settings"]
+    );
+    assert_eq!(
+        state.users[&0].default_browser.as_deref(),
+        Some("com.example.browser")
+    );
+    let restrictions = state.users[&0].restrictions.as_deref();
+    assert_eq!(restrictions, Some(&b"<package-restrictions />"[..]));
+    let platform = &state.platform;
+    assert_eq!(
+        platform.resolver_titles,
+        [(Some("android.intent.action.VIEW".into()), 0x0104_0001)]
+    );
+    assert_eq!(
+        (
+            platform.custom_resolver.as_deref(),
+            platform.device_provisioned
+        ),
+        (None, true)
+    );
+    assert_eq!(
+        platform.instant_app_installer.as_deref(),
+        Some("com.example/.Installer")
     );
     assert_eq!(inner.ended, Some((1, true)));
 

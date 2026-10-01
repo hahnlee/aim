@@ -6,9 +6,10 @@
 use aim_binder_host::parcel::{Reader, Result};
 use aim_service_aidl::{read_byte_array, read_int_array, read_string_list};
 
+use crate::package::intent_filter::UriRelativeFilterGroup;
 use crate::package::model::{
-    InstallSource, OverlayPaths, PackageState, PackageUserState, SharedLibrary, SharedUser,
-    StateFlags,
+    InstallSource, OverlayPaths, PackageState, PackageUserState, Platform, SharedLibrary,
+    SharedUser, StateFlags, User,
 };
 use crate::package::restrictions::{ArchiveActivity, ArchiveState};
 use crate::package::settings::{PRIVATE_FLAG_PRIVILEGED, Signatures, UsesSdkLibrary};
@@ -114,6 +115,19 @@ pub fn package(bytes: &[u8]) -> Result<(PackageState, Option<i32>)> {
     for _ in 0..count(r)? {
         let user = r.read_i32()?;
         s.users.insert(user, user_state(r)?);
+    }
+    for _ in 0..count(r)? {
+        let domain = string(r)?.unwrap_or_default();
+        let mut groups = Vec::new();
+        for _ in 0..count(r)? {
+            let mut g = UriRelativeFilterGroup::new(r.read_i32()?);
+            for _ in 0..count(r)? {
+                let (part, kind) = (r.read_i32()?, r.read_i32()?);
+                g.add(part, kind, &string(r)?.unwrap_or_default());
+            }
+            groups.push(g);
+        }
+        s.uri_relative_filter_groups.push((domain, groups));
     }
     Ok((s, bit(0).then_some(shared_user_app_id)))
 }
@@ -228,18 +242,41 @@ pub fn shared_user(bytes: &[u8]) -> Result<SharedUser> {
     })
 }
 
-/// A user's record: its id and its preferred activities as
-/// `getPreferredActivityBackup` writes them.
-pub fn user(bytes: &[u8]) -> Result<(i32, Option<Vec<u8>>)> {
+/// A user's record: its id, its preferred activities as
+/// `getPreferredActivityBackup` writes them, its
+/// `package-restrictions.xml` and its default browser.
+pub fn user(bytes: &[u8]) -> Result<User> {
     let r = &mut Reader::new(bytes, &[]);
-    Ok((r.read_i32()?, read_byte_array(r)?))
+    let id = r.read_i32()?;
+    Ok(User {
+        id,
+        preferred_activities: read_byte_array(r)?,
+        restrictions: read_byte_array(r)?,
+        default_browser: string(r)?,
+        ..User::default()
+    })
 }
 
-/// The system record: `config_forceSystemPackagesQueryable` and
-/// `config_forceQueryablePackages`.
-pub fn system(bytes: &[u8]) -> Result<(bool, Vec<String>)> {
+/// The system record: `config_forceSystemPackagesQueryable`,
+/// `config_forceQueryablePackages`, and what resolution reads (the
+/// resolver activity's theme and titles, the custom resolver, device
+/// provisioning, the instant app resolver and installer).
+pub fn system(bytes: &[u8]) -> Result<(bool, Vec<String>, Platform)> {
     let r = &mut Reader::new(bytes, &[]);
-    Ok((r.read_bool()?, strings(r)?))
+    let all = r.read_bool()?;
+    let packages = strings(r)?;
+    let mut p = Platform {
+        resolver_theme: r.read_i32()?,
+        ..Platform::default()
+    };
+    for _ in 0..count(r)? {
+        p.resolver_titles.push((string(r)?, r.read_i32()?));
+    }
+    p.custom_resolver = string(r)?.filter(|s| !s.is_empty());
+    p.device_provisioned = r.read_i32()? == 1;
+    p.instant_app_resolver = string(r)?;
+    p.instant_app_installer = string(r)?;
+    Ok((all, packages, p))
 }
 
 /// `SigningDetails`: the scheme (-1 for none), the signers, then the past

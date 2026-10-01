@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::pkg::AndroidPackage;
+use super::intent_filter::UriRelativeFilterGroup;
 use super::restrictions::ArchiveState;
 use super::settings::{Signatures, UsesSdkLibrary};
 
@@ -30,6 +31,26 @@ pub struct State {
     /// By user id.
     pub users: BTreeMap<i32, User>,
     pub system: System,
+    pub platform: Platform,
+}
+
+/// What resolution reads beside the packages: what PackageManager chose
+/// at boot and the platform's settings, as the feed gives them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Platform {
+    /// The resolver activity's theme (`Theme.Material.Dialog.Alert`).
+    pub resolver_theme: i32,
+    /// `ResolverActivity.ActionTitle`'s titles: action (`None` for the
+    /// default) and string resource.
+    pub resolver_titles: Vec<(Option<String>, i32)>,
+    /// `config_customResolverActivity`, flattened, if set.
+    pub custom_resolver: Option<String>,
+    /// `Settings.Global.DEVICE_PROVISIONED`.
+    pub device_provisioned: bool,
+    /// The instant app resolver and installer PackageManager chose at
+    /// boot, flattened.
+    pub instant_app_resolver: Option<String>,
+    pub instant_app_installer: Option<String>,
 }
 
 /// `PackageState` (`PackageStateInternal`).
@@ -74,6 +95,8 @@ pub struct PackageState {
     /// The domain verification state (`getDomainVerificationInfo`): the
     /// domain set id and each host's state; `None` without web domains.
     pub domain_verification: Option<(String, Vec<(String, i32)>)>,
+    /// Domain verification's URI relative filter groups, by web domain.
+    pub uri_relative_filter_groups: Vec<(String, Vec<UriRelativeFilterGroup>)>,
     /// The `AndroidPackage` as `PackageCacher.toCacheEntryStatic` writes
     /// it (the parser cache's format); `None` without code. Shared across
     /// versions while the original keeps the same object.
@@ -274,6 +297,12 @@ pub struct User {
     /// The preferred activities as `getPreferredActivityBackup` writes
     /// them (`<pa>`, in full); `None` without any.
     pub preferred_activities: Option<Vec<u8>>,
+    /// `package-restrictions.xml` as the original last wrote it: the
+    /// persistent preferred activities and cross-profile filters, which
+    /// no API reads (#715).
+    pub restrictions: Option<Vec<u8>>,
+    /// The browser role's holder (`DefaultAppProvider.getDefaultBrowser`).
+    pub default_browser: Option<String>,
 }
 
 /// SystemConfig and the device's constants the info generators read.

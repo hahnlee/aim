@@ -25,6 +25,7 @@ public abstract class Context {
     public Intent registerReceiverAsUser(BroadcastReceiver receiver, UserHandle user, IntentFilter filter, String broadcastPermission, Handler scheduler) { throw new RuntimeException("stub"); }
     public void unregisterReceiver(BroadcastReceiver receiver) { throw new RuntimeException("stub"); }
     public abstract PackageManager getPackageManager();
+    public abstract ContentResolver getContentResolver();
     public final <T> T getSystemService(Class<T> serviceClass) { throw new RuntimeException("stub"); }
     public abstract int checkPermission(String permission, int pid, int uid);
     public final int getColor(int id) { throw new RuntimeException("stub"); }
