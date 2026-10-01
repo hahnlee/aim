@@ -29,6 +29,11 @@ travel with any redistributed covered sources or binaries.
   `PatternMatcher`, `UriRelativeFilterGroup`, `UriCodec`), whose tests
   carry the cases of CTS's `IntentFilterTest` and `PatternMatcherTest`
   (`platform/cts`) and of `core/tests/coretests`' `PatternMatcherTest`,
+  ports PackageManager's package parser (`ParsingPackageUtils` and the
+  component parsers of `com.android.internal.pm.pkg`, `PackageImpl`'s
+  parcel as `PackageCacher` writes it, `TypedArray` and `TypedValue`, and
+  `libs/androidfw`'s configuration matching, overlays and reference
+  resolution),
   and reads and writes the parcel forms of `ClipData`, `ClipDescription`,
   `TextUtils`' spans, `Intent`, `Uri`, `BaseBundle` and the replies of the
   services it calls, following `platform/frameworks/base` at

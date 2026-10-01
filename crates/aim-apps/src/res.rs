@@ -220,10 +220,15 @@ pub struct Element {
 
 #[derive(Clone, Debug)]
 pub struct Attr {
+    /// The namespace's URI, empty for none.
+    pub ns: String,
     pub name: String,
     /// The attribute's resource id (`android:*` attributes), or 0.
     pub id: u32,
     pub value: Value,
+    /// The `Res_value` as stored: its type and data.
+    pub kind: u8,
+    pub data: u32,
 }
 
 impl Element {
@@ -270,6 +275,7 @@ pub fn xml(data: &[u8]) -> Result<Element> {
                 let mut attrs = Vec::with_capacity(count);
                 for i in 0..count {
                     let at = ext + start + i * size;
+                    let ns = u32_at(c.data, at)?;
                     let n = u32_at(c.data, at + 4)?;
                     let raw = u32_at(c.data, at + 8)?;
                     let kind = *c
@@ -283,9 +289,12 @@ pub fn xml(data: &[u8]) -> Result<Element> {
                         Value::decode(kind, data, pool)
                     };
                     attrs.push(Attr {
+                        ns: pool.get(ns).unwrap_or_default().to_owned(),
                         name: pool.get(n).unwrap_or_default().to_owned(),
                         id: ids.get(n as usize).copied().unwrap_or(0),
                         value,
+                        kind,
+                        data,
                     });
                 }
                 stack.push(Element {
