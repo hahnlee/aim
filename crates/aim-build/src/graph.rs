@@ -59,8 +59,7 @@ pub enum Action {
     SystemServer,
     DeviceServices,
     Oat,
-    /// With the manifest of a variant, if one was asked for.
-    DerivedImage(Option<PathBuf>),
+    DerivedImage,
     TranslationCache,
     EmptyUserdata,
     UserdataTemplate,

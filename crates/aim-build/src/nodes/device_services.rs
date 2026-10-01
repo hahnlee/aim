@@ -44,8 +44,8 @@ pub struct App {
     pub sources: &'static str,
     /// The APK's name in the node's output.
     pub apk: &'static str,
-    /// Where image/overlay.toml or a variant adds it, and where the `oat`
-    /// node compiles it for.
+    /// Where image/overlay.toml adds it, and where the `oat` node compiles
+    /// it for.
     pub guest: &'static str,
 }
 

@@ -98,8 +98,8 @@ migration from the ADR 0012 stack, not a rewrite.
 - Google Play services and apps that inspect the system (device policy,
   accessibility, launchers) depend on many services at once. They are the
   compatibility risk and are tested at every step.
-- The launcher and SystemUI stop running in window mode. They stay for the
-  device-window mode until the shell is replaced there too.
+- The launcher and SystemUI are not in the image (since 2026-10-01, in
+  both modes: device mode is a debugging view of the display, #463 D1).
 - AGENTS.md changes with this ADR: replacing a system service at its binder
   interface, gated by CTS, is no longer an exception. Reflection, name
   interception and app-specific branches stay forbidden.
@@ -330,3 +330,27 @@ The migration's state and conformance results are in
   assertion (#671), battery saver from Low Power Mode (#672). The
   design, its compatibility risks and the CTS modules are in
   [power.md](../power.md).
+
+### The shell: the lightweight shell is the image (2026-10-01)
+
+- Decision 5.1 is done ([m1-shell.md](../m1-shell.md), #463): the derived
+  image has no SystemUI, launcher, wallpaper pickers or wallet plugin, in
+  either mode (image/overlay.toml, "The lightweight shell", `remove`
+  entries with their reasons). In their place: an empty home of the
+  device's own, its static wallpaper, a static overlay of framework-res,
+  the native `IStatusBar` (toasts, the credential and pinning sheets,
+  per-app menu bar items) and the window shell, a task organizer and
+  transition player in the device service
+  ([task-organizer.md](../task-organizer.md)).
+- Checked before the switch, the shell against the image with SystemUI
+  (window mode): the same results in CtsToastTestCases,
+  CtsToastLegacyTestCases, CtsWidgetTestCases' ToastTest,
+  CtsMediaProjection*, CtsWallpaperTestCases (but #650) and
+  CtsNotificationTestCases' manager classes; CtsBiometricsTestCases
+  fails the five tests that drive SystemUI's credential views (the Mac
+  sheet answers); the notification module's bubble tests fail or hang
+  without bubbles (#679) and its classes ran 2.5x slower (#680).
+- Existing data directories upgrade at their first boot: PackageManager
+  drops the removed packages, and the device service sets the default
+  display area fullscreen again and drops the launch params recorded
+  while it was freeform, before WindowManager reads them (#636).

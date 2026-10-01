@@ -7,6 +7,20 @@ shell (Dock, shims, Spotlight, the menu bar, Notification Center), and apps
 keep their behavior. This document is the design and the plan; the work is
 tracked in #463.
 
+**Status: done** (2026-10-01). The derived image is the lightweight shell
+in both modes (section 1). Before the switch, the check-only image of it
+and the image with SystemUI gave the same CTS results for toasts, the
+credential prompt (but for the five tests that drive SystemUI's views),
+MediaProjection, the wallpaper (but for #650) and notifications, except
+for the bubble tests (#679), and the notification module ran 2.5x slower
+(#680); screen pinning showed and dropped its menu bar item by either
+route. A data directory from before the switch upgrades on its first
+boot: PackageManager drops the removed packages, the HOME role goes to
+the empty home, the wallpaper's component becomes the device's static
+wallpaper, and the device service sets the default display area
+fullscreen again and drops the launch params recorded while it was
+freeform (#636), which would cascade a running task (#613).
+
 Evidence is from the pinned sources (`android-16.0.0_r1`,
 `platform/frameworks/base`; paths below are relative to it, `wm/` is
 `services/core/java/com/android/server/wm/`, `am/`, `policy/` likewise), the
@@ -69,10 +83,7 @@ out, and device mode is a debugging view of the display without an
 Android shell; nothing depends on the mode. SystemUI is
 `android:persistent` (`packages/SystemUI/AndroidManifest.xml:409`), so
 AMS starts it whatever SystemServer does; only its absence keeps it from
-running. Until the switch this is a check-only image variant, `cargo aim
-build --variant lightweight-shell` ([build.md](build.md), "Image
-variants"), whose entries (`image/variants/lightweight-shell.toml`) move
-into `image/overlay.toml` with the switch:
+running. The entries are image/overlay.toml's "The lightweight shell":
 
 | What | Mechanism |
 | --- | --- |
@@ -80,8 +91,8 @@ into `image/overlay.toml` with the switch:
 | The home | `java/lightweight-home`, `/system_ext/app/AimHome`: an empty HOME activity over the wallpaper (section 1's table) |
 | The static wallpaper | `java/image-wallpaper`, a privileged app in `/system_ext/priv-app` with READ_WALLPAPER_INTERNAL: a `WallpaperService` drawing the current bitmap as SystemUI's ImageWallpaper does; the overlay names it in `image_wallpaper_component`, so WallpaperManagerService's static wallpaper, clear and default keep their meaning (#603) |
 | Resource values (the static wallpaper and its check, shell-only service configs) | a static RRO, `java/lightweight-shell-overlay`, in `/system_ext/overlay`: framework-res declares no overlayable, so a preinstalled overlay may override its configs (`cmds/idmap2/libidmap2/ResourceMapping.cpp:60-75`), and `/system_ext` overlays take precedence over `/product`'s (`PackagePartitions`), where `PixelConfigOverlayCommon` names the shell-only services |
-| No caption | `/vendor/etc/init/aim-lightweight-shell.rc`: `ro.vendor.aim.freeform_caption_dp=0`, which aim-windows reports ([windows.md](windows.md)) |
-| The native status bar | the same rc: `ro.vendor.aim.lightweight_shell=true`, on which guest-init starts the native `IStatusBar` (section 3) |
+| No caption | `init.aim.rc`: `ro.vendor.aim.freeform_caption_dp=0`, which aim-windows reports ([windows.md](windows.md)) |
+| The native status bar and the window shell | `init.aim.rc`: `ro.vendor.aim.lightweight_shell=true`, on which guest-init starts the native `IStatusBar` (section 3) and the device service the window shell ([task-organizer.md](task-organizer.md)) |
 
 ## 2. WMShell's roles
 
@@ -148,7 +159,7 @@ SystemUI has no configuration to start without its UI, and its
 | Notification clicks, actions, direct reply, clear | NMS only cancels on click (`NotificationManagerService.java:1352-1396`); SystemUI sends the `PendingIntent` and reports back | nothing happens | native notification listener (system uid, `INotificationManager.registerListener`) → `UNUserNotificationCenter`; click and actions send the `PendingIntent` and report `onNotificationClick`/`ActionClick`/`Clear` (#4) |
 | Full-screen intents, heads-up | SystemUI launches the FSI (`StatusBarNotificationActivityStarter.java:700-716`) | not launched | the listener: an FSI as a time-sensitive Mac notification that opens the intent |
 | Media controls | SystemUI's media carousel from media-style notifications | not shown (MediaSession works) | Mac Now Playing (`MPNowPlayingInfoCenter`, `MPRemoteCommandCenter`) of the session media keys go to, in the app's shim ([media.md](media.md)) |
-| Bubbles | WMShell | not offered | none (the notification shows normally) |
+| Bubbles | WMShell | not offered | none (the notification shows normally); CTS still expects them (#679) |
 | Volume controller, safe-volume warnings | `AudioService.setVolumeController` (`:13030-13035`), posts are no-ops without one (`:13214-13280`) | volumes change, no UI, warnings dropped | none: the media volume is the Mac's output volume, whose own UI shows it (D7, [audio.md](audio.md) "Volume"); no safe-volume warning on the speaker |
 | Output switcher | `showMediaOutputSwitcher` returns true, no-op (`StatusBarManagerService.java:993-1000`) | nothing | step 5 (the Mac's output picker) |
 | MediaProjection consent | `MediaProjectionManager.createScreenCaptureIntent` targets `config_mediaProjectionPermissionDialogComponent` (SystemUI's activity) | `ActivityNotFoundException`: no screen capture | an activity of ours at that config (RRO), with a Mac consent sheet on the app's window ([media.md](media.md)) |
@@ -219,7 +230,7 @@ callbacks.
 | --- | --- | --- | --- |
 | D1 | How window mode leaves the shell packages out, and whether the modes share a data directory | (a) the shell is removed from the image for both modes (device mode shows the display without an Android shell); (b) a mode-conditional `remove` in image/overlay.toml that guest-init applies by path map for the SKU: switching modes on one data directory makes PackageManager drop and re-add them (the launcher's layout, SystemUI's settings and the HOME role are reset); (c) as (b) with one data directory per mode | decided (#463): (a), no SKU for the mode |
 | D2 | The Android lock credential in window mode | no Android credential (the Mac login is the lock; a PIN set in Settings leaves user 0's credential-encrypted storage locked at the next boot, with no unlock UI); or a native unlock and credential sheet (step 4) | the native sheet, since Settings lets users set a PIN |
-| D3 | Picture-in-picture | declare `android.software.picture_in_picture` unavailable in window mode (apps check it); or step 8 with a floating Mac window | unavailable in M1, step 8 later |
+| D3 | Picture-in-picture | declare `android.software.picture_in_picture` unavailable in window mode (apps check it); or step 8 with a floating Mac window | unavailable in M1 (the image's `handheld_core_hardware.xml` does not declare it), step 8 later |
 | D4 | Splash screens | none; the Mac window shows the app's icon on its splash background until the first frame (aim-apps draws the icons); or step 8 | decided (#463): the shim's window appears at once with the app's icon until the first frame (`startActivityAndWait`, [windows.md](windows.md), "App shims"); step 8: the window shell draws Android's starting windows, and the Mac's splash covers only the time before the task's window ([task-organizer.md](task-organizer.md), "Starting windows") |
 | D5 | Language of the Android-side replacements that must be Android components (the consent activity, an organizer and player) | Java app / `app_process`; Rust `NativeActivity` over JNI; thin C++ over libgui | Rust where the NDK reaches, the rest decided per piece |
 | D6 | What an app's "go home" (a HOME intent) does on the Mac | nothing visible (the empty home takes focus); hide the app's windows; show the desktop | decided (#463): the app hides, as with Cmd+H ([windows.md](windows.md), "Home") |

@@ -29,9 +29,8 @@
 //!
 //! The output is `root/` (the files at their guest paths),
 //! `overlay.toml`, the entries image/overlay.toml includes, and
-//! `apps/<name>.toml` per app ([`app_manifest`]), which the manifest that
-//! adds the app includes beside it (image/overlay.toml or a variant), so
-//! that the node needs neither as an input.
+//! `apps/<name>.toml` per app ([`app_manifest`]), which image/overlay.toml
+//! includes beside the app, so that the node needs neither as an input.
 
 use super::boot_image::{Dex2oat, boot_image_location, oat_dex_locations, oat_key};
 use super::device_services;

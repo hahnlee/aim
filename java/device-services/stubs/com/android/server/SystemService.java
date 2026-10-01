@@ -17,6 +17,7 @@ public abstract class SystemService {
     public abstract void onStart();
     public void onBootPhase(int phase) { throw new RuntimeException("stub"); }
     public void onUserStarting(TargetUser user) { throw new RuntimeException("stub"); }
+    public void onUserUnlocking(TargetUser user) { throw new RuntimeException("stub"); }
     public void onUserSwitching(TargetUser from, TargetUser to) { throw new RuntimeException("stub"); }
     public void onUserStopped(TargetUser user) { throw new RuntimeException("stub"); }
     public final Context getContext() { throw new RuntimeException("stub"); }

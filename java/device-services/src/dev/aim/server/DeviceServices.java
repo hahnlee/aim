@@ -1,7 +1,9 @@
 package dev.aim.server;
 
+import android.app.WindowConfiguration;
 import android.content.Context;
 import android.os.Binder;
+import android.os.Environment;
 import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
@@ -9,10 +11,12 @@ import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.SystemProperties;
 import android.util.Slog;
+import android.view.IWindowManager;
 
 import com.android.internal.os.ApplicationSharedMemory;
 import com.android.server.SystemService;
 
+import java.io.File;
 import java.io.IOException;
 
 /**
@@ -30,6 +34,10 @@ public final class DeviceServices extends SystemService {
 
     /** The native service host's name in servicemanager. */
     private static final String SERVICE_HOST = "aim.service_host";
+    /** WindowManager's name in servicemanager (Context.WINDOW_SERVICE). */
+    private static final String WINDOW = "window";
+    /** Display.DEFAULT_DISPLAY. */
+    private static final int DEFAULT_DISPLAY = 0;
 
     private final LocationBridge mLocation;
     private final UiModeBridge mUiMode;
@@ -51,6 +59,7 @@ public final class DeviceServices extends SystemService {
         if (phase == PHASE_DEVICE_SPECIFIC_SERVICES_READY) {
             // Before the home activity starts: every task is organized.
             if (SystemProperties.getBoolean(WindowShell.PROPERTY, false)) {
+                fullscreenDisplayArea();
                 WindowShell.start(getContext());
             }
             attachBridge();
@@ -66,6 +75,13 @@ public final class DeviceServices extends SystemService {
     }
 
     @Override
+    public void onUserUnlocking(TargetUser user) {
+        if (SystemProperties.getBoolean(WindowShell.PROPERTY, false)) {
+            dropFreeformLaunchParams(user.getUserIdentifier());
+        }
+    }
+
+    @Override
     public void onUserSwitching(TargetUser from, TargetUser to) {
         mLocation.onUserSwitching(from.getUserIdentifier(), to.getUserIdentifier());
         mUiMode.onUserSwitching(from.getUserIdentifier(), to.getUserIdentifier());
@@ -74,6 +90,46 @@ public final class DeviceServices extends SystemService {
     @Override
     public void onUserStopped(TargetUser user) {
         mLocation.onUserStopped(user.getUserIdentifier());
+    }
+
+    /**
+     * Makes the default display area fullscreen, as the window shell has it
+     * (docs/task-organizer.md, section 2). WindowManager keeps a display's
+     * windowing mode in its display settings, and a boot from before the
+     * lightweight shell left it freeform there; WindowManager applies it to
+     * the display area once ActivityTaskManager knows freeform is
+     * supported, after this phase, so a check here reads fullscreen
+     * whatever is stored. Setting it stores fullscreen, before the home's
+     * first task could record launch params (#636).
+     */
+    private static void fullscreenDisplayArea() {
+        IWindowManager wm = IWindowManager.Stub.asInterface(ServiceManager.getService(WINDOW));
+        try {
+            wm.setWindowingMode(DEFAULT_DISPLAY, WindowConfiguration.WINDOWING_MODE_FULLSCREEN);
+        } catch (RemoteException e) {
+            Slog.w(TAG, "cannot make the default display area fullscreen", e);
+        }
+    }
+
+    /**
+     * Drops the launch params WindowManager recorded for `userId` while the
+     * default display area was freeform, before it reads them once the user
+     * is unlocked (#636): they would lay a running task out again and
+     * cascade it (#613). Under the window shell the display area is
+     * fullscreen and nothing records there (docs/task-organizer.md,
+     * section 2), so only the first boot of a data directory from before
+     * the lightweight shell finds any.
+     */
+    private static void dropFreeformLaunchParams(int userId) {
+        File dir = new File(Environment.getDataSystemCeDirectory(userId), "launch_params");
+        File[] records = dir.listFiles();
+        if (records == null || records.length == 0) {
+            return;
+        }
+        for (File record : records) {
+            record.delete();
+        }
+        Slog.i(TAG, "dropped " + records.length + " launch params of a freeform display area");
     }
 
     private void attachBridge() {
