@@ -254,6 +254,8 @@ fn original_servicemanager_serves_original_clients() {
         .unwrap();
     assert!(built.success());
     let bench = "/data/local/tmp/binder_ping";
+    let fd = guest.run_ok(&[bench, "fd"]);
+    assert!(fd.contains("binder fd: ok"), "{fd}");
     let iterations = if cfg!(debug_assertions) {
         "2000"
     } else {

@@ -863,12 +863,12 @@ pub fn socketpair(a: [u64; 6]) -> i64 {
 }
 
 /// Whether `fd` is a file the layer keeps as a host socket that is no
-/// socket to the guest (eventfd, timerfd, evdev, sync_file): socket calls
-/// on it fail with ENOTSOCK, as on Linux.
+/// socket to the guest (eventfd, timerfd, evdev, sync_file, binder):
+/// socket calls on it fail with ENOTSOCK, as on Linux.
 pub fn hidden_socket(fd: i32) -> bool {
     matches!(
         fdtab::get(fd),
-        Some(Kind::Event(_) | Kind::Timer(_) | Kind::Evdev(_) | Kind::SyncFile)
+        Some(Kind::Event(_) | Kind::Timer(_) | Kind::Evdev(_) | Kind::SyncFile | Kind::Binder(_))
     )
 }
 

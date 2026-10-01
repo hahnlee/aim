@@ -2,10 +2,17 @@
 """Summarizes a binder trace (`guest-init --binder-trace FILE`,
 docs/system-services.md): per process, which services, interfaces and
 methods it called, how often, and the driver's p50/p99 latency; then,
-per service, where the synchronous calls' time went: the wake of a
-target thread (or the wait for a free one), the target's work, and the
-sender's wake with the reply; and of the work, how much the serving
-thread spent in synchronous calls of its own (nested calls).
+per service, where the synchronous calls' time went: the delivery to a
+target thread's read (the wait for a free one included), the target's
+work, and the reply's return to the sender's read; and of the work, how
+much the serving thread spent in synchronous calls of its own (nested
+calls).
+
+The spans are the driver's. A read parked in the daemon (#451) takes its
+work as soon as the work is queued, on the daemon thread that brought it,
+so the delivery and the return hold no guest thread's wake: the target
+thread's wake through the daemon counts as its work, and the sender's
+comes after the return.
 
 Method names come from the image itself: every AIDL Java stub
 (`<Interface>$Stub`) in the image's jars declares a `TRANSACTION_<method>`
@@ -203,7 +210,7 @@ def main():
 
     print("## Where the synchronous calls' time went (us)")
     print()
-    print("| service | interface | calls | total p50 | p99 | wake/wait p50 | p99 "
+    print("| service | interface | calls | total p50 | p99 | delivery p50 | p99 "
           "| no idle thread | work p50 | p99 | its own calls p50 | p99 | return p50 | p99 |")
     print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     rows = [(d, v) for d, v in splits.items()]
@@ -228,7 +235,7 @@ def main():
     print()
     print("## The slowest synchronous calls (us)")
     print()
-    print("| caller | service | method | total | wake/wait | work | its own calls |")
+    print("| caller | service | method | total | delivery | work | its own calls |")
     print("| --- | --- | --- | --- | --- | --- | --- |")
     for total, pid, descriptor, code, deliver, work, inner in sorted(slowest, reverse=True)[:20]:
         service = ", ".join(names.get(descriptor, [])) or descriptor or "-"
