@@ -783,8 +783,8 @@ mod tests {
         assert!(wake_op_cmp(u32::MAX, 2 << 24));
     }
 
-    /// Whether the thread `port` is in `__ulock_wait2`'s kernel wait: its pc
-    /// is just past the stub's `svc`. The waits here return only when woken.
+    /// Whether the thread `port` has trapped into `__ulock_wait2`: its pc is
+    /// just past the stub's `svc`. It may not be queued on the word yet.
     fn in_ulock_wait(port: u32) -> bool {
         unsafe extern "C" {
             fn thread_get_state(t: u32, flavor: i32, state: *mut u64, count: *mut u32) -> i32;
@@ -832,12 +832,16 @@ mod tests {
             })
         };
         let (on_1, on_2) = (wait(1), wait(2));
-        // A wake before a waiter waits is lost, as on Linux: wake once both wait.
+        // Wake once both have passed the value check, as EventFlag does:
+        // set the bits in the word, then wake. A waiter that has trapped
+        // into the kernel but is not queued yet sees the new value there
+        // (the kernel compares under its lock), so the wake is never lost.
         let ports = [rx.recv().unwrap(), rx.recv().unwrap()];
         while !ports.iter().all(|&p| in_ulock_wait(p)) {
             assert!(!on_1.is_finished() && !on_2.is_finished());
             std::thread::yield_now();
         }
+        word(word_addr).store(2, SeqCst);
         futex([word_addr, FUTEX_WAKE_BITSET, 1, 0, 0, 2]);
         assert_eq!(on_2.join().unwrap(), 0, "the waiter on bit 2 timed out");
         // The other waiter wakes spuriously, which futex users tolerate.
