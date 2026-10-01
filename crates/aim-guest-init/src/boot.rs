@@ -291,10 +291,12 @@ pub struct Boot {
     mac: Option<Receiver<(String, String)>>,
     _sockets: Option<PropertySockets>,
     /// Run mode: the binder host behind every service's `--binder`.
-    _binder: Option<Arc<Server>>,
+    binder: Option<Arc<Server>>,
     /// Run mode: the system services implemented natively (ADR 0013),
     /// registered once servicemanager is ready.
     native_services: Option<Arc<NativeServices>>,
+    /// The native status bar runs (`start_status_bar`).
+    status_bar: bool,
     pub report: BootReport,
     /// The previous boot's runtime directory, removed while this one runs.
     _sweep: Sweep,
@@ -306,6 +308,10 @@ pub struct Boot {
 
 /// `servicemanager` sets it once it serves calls.
 const SERVICEMANAGER_READY: &str = "servicemanager.ready";
+
+/// The lightweight shell's init script sets it (docs/m1-shell.md): the
+/// image has no SystemUI, so the native status bar takes its place.
+const LIGHTWEIGHT_SHELL: &str = "ro.vendor.aim.lightweight_shell";
 
 /// The system services the image says are native (ADR 0013): SystemServer
 /// does not start them, so they are created here, to be registered with
@@ -681,8 +687,9 @@ impl Boot {
             events,
             mac,
             _sockets: sockets,
-            _binder: binder,
+            binder,
             native_services,
+            status_bar: false,
             data: data_mount,
             _sweep: sweep,
             report,
@@ -792,6 +799,7 @@ impl Boot {
                         .push((at, format!("pid {} set {name}={value}", request.peer_pid)));
                     if name == SERVICEMANAGER_READY && value == "true" {
                         self.register_native_services();
+                        self.start_status_bar();
                     }
                     self.executor
                         .outbox
@@ -867,6 +875,21 @@ impl Boot {
                     eprintln!("guest-init: native services: {error}");
                 }
             });
+    }
+
+    /// The native `IStatusBar` in SystemUI's place, where the image says
+    /// so: once per boot, once servicemanager is ready (the init script's
+    /// property is set by then). It follows system_server's restarts.
+    fn start_status_bar(&mut self) {
+        if self.status_bar
+            || self.props.borrow().property(LIGHTWEIGHT_SHELL).as_deref() != Some("true")
+        {
+            return;
+        }
+        if let (Some(server), Some(display)) = (&self.binder, &self.options.display) {
+            aim_services::statusbar::StatusBar::start(server.driver(), display);
+            self.status_bar = true;
+        }
     }
 
     /// Sets a property for the host, as init sets one, and runs its
