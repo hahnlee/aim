@@ -17,7 +17,13 @@
 //!   been freed, so at stop, when the file holds more than
 //!   [`RECLAIM_THRESHOLD`] beyond what the volume uses, a 24th of it is
 //!   allocated (not written) and freed again, and a full sync commits
-//!   that: the unmount then TRIMs everything free ("compaction").
+//!   that: the unmount then TRIMs everything free ("compaction"). The
+//!   container is as large as the Mac's volume, and an allocation in it
+//!   gets no more than the Mac has free: on a Mac with less free than a
+//!   24th of its volume, compaction frees in several rounds. APFS does not
+//!   always TRIM after compaction (measured: once in 20 to 30 stops, one
+//!   round or several); the image then keeps the freed space until a
+//!   later stop (#771; logged).
 //! - **One user:** the attaching process holds an exclusive lock on
 //!   `<data>.lock` (the disk image helper locks the image file itself). An
 //!   attachment found at the next start belongs to a process
@@ -230,16 +236,20 @@ impl DataImage {
         let Some(device) = self.device.take() else {
             return Ok(());
         };
-        if let Ok(Usage {
-            allocated,
-            used: Some(used),
-        }) = usage(&self.dir)
-            && allocated > used + RECLAIM_THRESHOLD
-            && let Some(size) = disk::capacity(&self.dir)
-            && let Err(e) = release_to_trim(&self.dir, size / TRIM_BATCH_DIVISOR)
-        {
-            eprintln!("aim-storage: compacting {}: {e}", self.image.display());
-        }
+        let compacted = match usage(&self.dir) {
+            Ok(Usage {
+                allocated,
+                used: Some(used),
+            }) if allocated > used + RECLAIM_THRESHOLD => {
+                if let Some(size) = disk::capacity(&self.dir)
+                    && let Err(e) = release_to_trim(&self.dir, size / TRIM_BATCH_DIVISOR)
+                {
+                    eprintln!("aim-storage: compacting {}: {e}", self.image.display());
+                }
+                Some(used)
+            }
+            _ => None,
+        };
         let patience = match sync_volume(&self.dir) {
             Ok(()) => SYNCED_PATIENCE,
             Err(e) => {
@@ -247,7 +257,19 @@ impl DataImage {
                 PATIENCE
             }
         };
-        disk::detach(&device, patience)
+        disk::detach(&device, patience)?;
+        if let Some(used) = compacted
+            && let Ok(allocated) = disk::allocated(&self.image)
+            && allocated > used + RECLAIM_THRESHOLD
+        {
+            eprintln!(
+                "aim-storage: {} keeps {} MiB the guest freed: APFS did not TRIM it at \
+                 unmount (#771)",
+                self.image.display(),
+                (allocated - used) >> 20
+            );
+        }
+        Ok(())
     }
 }
 
@@ -259,40 +281,48 @@ impl Drop for DataImage {
     }
 }
 
-/// Allocates `batch` bytes in the volume at `mount` (without writing
+/// Allocates `total` bytes in the volume at `mount` (without writing
 /// them), frees them and commits that, so that APFS TRIMs all free space
-/// when it unmounts. The file is unlinked while open: a preallocation
-/// released at close counts as nothing freed. Without the full sync the
-/// TRIM waits for the next mount.
-fn release_to_trim(mount: &Path, batch: u64) -> Result<(), String> {
+/// when it unmounts: in one round where the volume has `total` free, else
+/// in rounds of what it has. Each file is unlinked while open: a
+/// preallocation released at close counts as nothing freed. Without the
+/// full sync the TRIM waits for the next mount.
+fn release_to_trim(mount: &Path, total: u64) -> Result<(), String> {
     let path = mount.join(".aim-trim");
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    // As much as the volume has, if it has less.
-    let mut store = libc::fstore_t {
-        fst_flags: 0,
-        fst_posmode: libc::F_PEOFPOSMODE,
-        fst_offset: 0,
-        fst_length: batch as i64,
-        fst_bytesalloc: 0,
-    };
-    // SAFETY: an open descriptor and a local fstore_t.
-    let status = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PREALLOCATE, &mut store) };
-    let error = std::io::Error::last_os_error();
-    let removed = fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()));
-    drop(file);
-    removed?;
-    if status != 0 {
-        return Err(format!("F_PREALLOCATE: {error}"));
-    }
     let root = File::open(mount).map_err(|e| format!("{}: {e}", mount.display()))?;
-    // SAFETY: an open descriptor.
-    if unsafe { libc::fcntl(root.as_raw_fd(), libc::F_FULLFSYNC) } != 0 {
-        return Err(format!("F_FULLFSYNC: {}", std::io::Error::last_os_error()));
+    let mut freed = 0;
+    while freed < total {
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        // As much as the volume has, if it has less.
+        let mut store = libc::fstore_t {
+            fst_flags: 0,
+            fst_posmode: libc::F_PEOFPOSMODE,
+            fst_offset: 0,
+            fst_length: (total - freed) as i64,
+            fst_bytesalloc: 0,
+        };
+        // SAFETY: an open descriptor and a local fstore_t.
+        let status = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PREALLOCATE, &mut store) };
+        let error = std::io::Error::last_os_error();
+        let removed = fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()));
+        drop(file);
+        removed?;
+        if status != 0 {
+            return Err(format!("F_PREALLOCATE: {error}"));
+        }
+        if store.fst_bytesalloc <= 0 {
+            return Err(format!("{}: no free space to allocate", mount.display()));
+        }
+        freed += store.fst_bytesalloc as u64;
+        // SAFETY: an open descriptor.
+        if unsafe { libc::fcntl(root.as_raw_fd(), libc::F_FULLFSYNC) } != 0 {
+            return Err(format!("F_FULLFSYNC: {}", std::io::Error::last_os_error()));
+        }
     }
     Ok(())
 }
