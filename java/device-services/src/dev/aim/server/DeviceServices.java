@@ -7,6 +7,7 @@ import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.SystemProperties;
 import android.util.Slog;
 
 import com.android.internal.os.ApplicationSharedMemory;
@@ -21,6 +22,8 @@ import java.io.IOException;
  * publishes nothing: at its first boot phase it hands the native service
  * host (ADR 0013) the bridge to system_server's internal state
  * (docs/system-services.md, "The system_server bridge").
+ * In the lightweight shell it also starts the window shell (WindowShell,
+ * docs/task-organizer.md), which aim-windows finds as aim.window_shell.
  */
 public final class DeviceServices extends SystemService {
     private static final String TAG = "AimDeviceServices";
@@ -43,6 +46,10 @@ public final class DeviceServices extends SystemService {
     @Override
     public void onBootPhase(int phase) {
         if (phase == PHASE_DEVICE_SPECIFIC_SERVICES_READY) {
+            // Before the home activity starts: every task is organized.
+            if (SystemProperties.getBoolean(WindowShell.PROPERTY, false)) {
+                WindowShell.start();
+            }
             attachBridge();
         } else if (phase == PHASE_THIRD_PARTY_APPS_CAN_START) {
             mLocation.onThirdPartyAppsCanStart();

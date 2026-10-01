@@ -68,7 +68,7 @@ pub trait IActivityTaskManager: Interface {}
 pub trait IWindowManager: Interface {}
 
 /// Transactions of a Java service no one implements here.
-fn unused<I: ?Sized>(
+pub(crate) fn unused<I: ?Sized>(
     _: &I,
     _: TransactionCode,
     _: &BorrowedParcel<'_>,
@@ -98,7 +98,7 @@ impl IWindowManager for binder::binder_impl::Binder<BnWindowManager> {}
 
 /// Send `code` with the arguments `args` writes, and read the reply's
 /// status: the reply, positioned after it.
-fn call(
+pub(crate) fn call(
     binder: &SpIBinder,
     code: u32,
     args: impl FnOnce(&mut BorrowedParcel<'_>) -> Wire<()>,
@@ -188,12 +188,14 @@ impl BpActivityTaskManager {
     /// Start launcher activity `class` of `package` as a launcher would,
     /// and wait until it has drawn its first frame (or the launch ended),
     /// as `am start -W` does; the `ActivityManager.START_*` result.
-    /// `bounds` are the launch bounds (`ActivityOptions.setLaunchBounds`).
+    /// `bounds` are the launch bounds (`ActivityOptions.setLaunchBounds`),
+    /// `windowing_mode` the launch windowing mode.
     pub fn start_activity_and_wait(
         &self,
         package: &str,
         class: &str,
         bounds: Option<[i32; 4]>,
+        windowing_mode: Option<i32>,
     ) -> Result<i32> {
         let reply = call(&self.binder, atm::START_ACTIVITY_AND_WAIT, |p| {
             p.write(&None::<SpIBinder>)?; // caller
@@ -207,14 +209,13 @@ impl BpActivityTaskManager {
             p.write(&0i32)?; // requestCode
             p.write(&0i32)?; // flags
             p.write(&0i32)?; // no ProfilerInfo
-            match bounds {
-                Some(b) => {
-                    p.write(&1i32)?;
-                    write::launch_bounds_options(b)
-                        .iter()
-                        .try_for_each(|w| p.write(w))?;
-                }
-                None => p.write(&0i32)?, // no options
+            if bounds.is_some() || windowing_mode.is_some() {
+                p.write(&1i32)?;
+                write::launch_options(bounds, windowing_mode)
+                    .iter()
+                    .try_for_each(|w| p.write(w))?;
+            } else {
+                p.write(&0i32)?; // no options
             }
             p.write(&USER_CURRENT)
         })?;
@@ -270,7 +271,7 @@ pub fn window_manager() -> Option<BpWindowManager> {
 
 /// The service `name`, waited for, with its interface's class associated
 /// (so transactions carry the interface token).
-fn connect<N: Remotable, P: Proxy>(name: &str) -> Option<P> {
+pub(crate) fn connect<N: Remotable, P: Proxy>(name: &str) -> Option<P> {
     let mut b = binder::wait_for_service(name)?;
     if !b.associate_class(N::get_class()) {
         log::error!("{name} is not a {}", N::get_descriptor());

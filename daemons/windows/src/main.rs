@@ -22,8 +22,16 @@
 //! The desktop coming to the front over the task in front (the app started
 //! a HOME intent) hides that task's app, as Cmd+H hides a Mac app: its
 //! tasks stay, and its Dock icon brings them back (docs/m1-shell.md, D6).
+//!
+//! In an image with the window shell (`docs/task-organizer.md`) window mode
+//! is desktop windowing: the display stays fullscreen, the shell makes new
+//! tasks freeform and places their surfaces, and it tells the bridge each
+//! task's activity type (the desktop is the home task) and its top
+//! activity's manifest orientation, which turns the window as a request
+//! does.
 
 mod framework;
+mod shell;
 
 use std::collections::HashMap;
 use std::ffi::c_char;
@@ -41,6 +49,7 @@ use framework::{
     BpActivityTaskManager, BpWindowManager, Event, ITaskStackListener, WINDOWING_MODE_FREEFORM,
     WINDOWING_MODE_FULLSCREEN,
 };
+use shell::IWindowShellListener;
 
 /// The default display, the one the display server shows.
 const DISPLAY: i32 = 0;
@@ -51,6 +60,10 @@ const DISPLAY: i32 = 0;
 const CAPTION_DP: i32 = 42;
 /// The caption's height in dp, where the image sets it.
 const CAPTION_PROPERTY: &std::ffi::CStr = c"ro.vendor.aim.freeform_caption_dp";
+/// Set in the lightweight shell, whose system_server runs the window shell.
+const SHELL_PROPERTY: &std::ffi::CStr = c"ro.vendor.aim.lightweight_shell";
+/// `WindowConfiguration.ACTIVITY_TYPE_HOME`.
+const ACTIVITY_TYPE_HOME: i32 = 2;
 
 unsafe extern "C" {
     /// bionic: a system property's value, at most `PROP_VALUE_MAX` (92)
@@ -70,6 +83,9 @@ struct Task {
     shown: Option<[i32; 4]>,
     /// The orientation an activity of it last asked for.
     orientation: Orientation,
+    /// What the window shell last said of it: its activity type and its
+    /// top activity's `screenOrientation`.
+    shell: Option<(i32, i32)>,
 }
 
 struct Bridge {
@@ -85,6 +101,8 @@ struct Bridge {
     caption: i32,
     /// The task with a window last in front.
     in_front: Mutex<Option<i32>>,
+    /// The window shell places the tasks' surfaces and names the desktop.
+    shell: bool,
 }
 
 impl Bridge {
@@ -110,13 +128,14 @@ impl Bridge {
     /// goes. `force` reports its bounds even when they did not change (the
     /// answer to a resize the display server asked for).
     ///
-    /// Bounds Android gave the task itself (its launch position, or a shift
-    /// away from another task when an activity starts in it) do not always
-    /// reach the task's surface: the legacy freeform transitions can leave
-    /// the surface where it was, and the window would show another part of
-    /// the display. Those bounds are committed: moved a pixel and back
-    /// with `resizeTask`, whose change transitions place the surface (a
-    /// resize to the bounds the task has changes nothing).
+    /// Without the window shell, bounds Android gave the task itself (its
+    /// launch position, or a shift away from another task when an activity
+    /// starts in it) do not always reach the task's surface: the legacy
+    /// freeform transitions can leave the surface where it was, and the
+    /// window would show another part of the display. Those bounds are
+    /// committed: moved a pixel and back with `resizeTask`, whose change
+    /// transitions place the surface (a resize to the bounds the task has
+    /// changes nothing). The shell's transitions place it themselves.
     fn refresh(&self, task: i32, force: bool) {
         let _serial = self.serial.lock().unwrap();
         let bounds = match self.atm.task_bounds(task) {
@@ -147,11 +166,11 @@ impl Bridge {
                     if t.orientation != Orientation::Any {
                         out.push(orientation_record(task, t.orientation));
                     }
-                    commit = Some(b);
+                    commit = Some(b).filter(|_| !self.shell);
                 }
                 (Some(old), Some(b)) if old != b || force => {
                     out.push(self.task_record(task, b));
-                    if !force {
+                    if !force && !self.shell {
                         commit = Some(b);
                     }
                 }
@@ -189,11 +208,39 @@ impl Bridge {
         }
     }
 
-    /// Whether `task` fills the display: the desktop the windows float
-    /// over (the home task).
+    /// Whether `task` is the desktop the windows float over: the home
+    /// task, which fills the display. With the window shell a new task
+    /// fills it too until the shell makes it freeform, so the shell's
+    /// activity type decides.
     fn desktop(&self, task: i32) -> bool {
+        if self.shell {
+            let tasks = self.tasks.lock().unwrap();
+            return tasks
+                .get(&task)
+                .and_then(|t| t.shell)
+                .is_some_and(|(activity_type, _)| activity_type == ACTIVITY_TYPE_HOME);
+        }
         let (w, h) = self.size;
         matches!(self.atm.task_bounds(task), Ok(Some(b)) if b == [0, 0, w, h])
+    }
+
+    /// What the window shell says of `task`. A new top activity of a fixed
+    /// manifest orientation (or the one below it, when it finishes) turns
+    /// the window as `setRequestedOrientation` does; the orientation the
+    /// task had when the bridge first heard of it shaped its launch bounds.
+    fn shell_changed(&self, task: i32, activity_type: i32, orientation: i32) {
+        let turned = {
+            let mut tasks = self.tasks.lock().unwrap();
+            let t = tasks.entry(task).or_default();
+            let before = t.shell.replace((activity_type, orientation));
+            before.is_some_and(|(_, o)| o != orientation)
+        };
+        if turned {
+            self.on_event(Event::Orientation(
+                task,
+                Orientation::from_screen_orientation(orientation),
+            ));
+        }
     }
 
     fn shown(&self, task: i32) -> bool {
@@ -342,7 +389,13 @@ impl Bridge {
             .find_map(|t| t.shown.filter(|_| t.activity.as_deref() == Some(activity)));
         match activity.split_once('/') {
             Some((package, class)) => {
-                match self.atm.start_activity_and_wait(package, class, bounds) {
+                // With the window shell, freeform from the start, as a
+                // desktop's launcher starts apps.
+                let mode = self.shell.then_some(WINDOWING_MODE_FREEFORM);
+                match self
+                    .atm
+                    .start_activity_and_wait(package, class, bounds, mode)
+                {
                     Ok(r) if r < 0 => log::warn!("start {activity}: {r}"),
                     Ok(_) => {}
                     Err(e) => log::warn!("start {activity}: {e}"),
@@ -406,6 +459,12 @@ impl ITaskStackListener for Listener {
     }
 }
 
+impl IWindowShellListener for Listener {
+    fn task_changed(&self, task: i32, activity_type: i32, orientation: i32) {
+        self.0.shell_changed(task, activity_type, orientation);
+    }
+}
+
 fn main() {
     daemon_log::init("aim-windows");
     let mut w = Windows::default();
@@ -426,7 +485,8 @@ fn main() {
         std::process::exit(1);
     };
     let windows = w.mode == mode::WINDOWS;
-    set_windowing(&wm, windows);
+    let shell = windows && property(SHELL_PROPERTY).is_some_and(|v| v == "true");
+    set_windowing(&wm, windows && !shell);
     if !windows {
         return;
     }
@@ -450,11 +510,22 @@ fn main() {
         size,
         caption,
         in_front: Mutex::new(None),
+        shell,
     });
     let listener = framework::new_listener(Listener(bridge.clone()));
     if let Err(e) = bridge.atm.register_task_stack_listener(&listener) {
         log::error!("registerTaskStackListener: {e}");
         std::process::exit(1);
+    }
+    if shell {
+        let Some(window_shell) = shell::window_shell() else {
+            std::process::exit(1);
+        };
+        let listener = shell::new_listener(Listener(bridge.clone()));
+        if let Err(e) = window_shell.attach(&listener) {
+            log::error!("attach to the window shell: {e}");
+            std::process::exit(1);
+        }
     }
     log::info!(
         "window mode: display {}x{}, caption {caption} px",
@@ -480,21 +551,26 @@ fn main() {
 
 /// [`CAPTION_PROPERTY`], else [`CAPTION_DP`].
 fn caption_dp() -> i32 {
-    let mut value = [0u8; 92];
-    // SAFETY: a NUL-terminated name and a buffer of PROP_VALUE_MAX bytes.
-    let len =
-        unsafe { __system_property_get(CAPTION_PROPERTY.as_ptr(), value.as_mut_ptr().cast()) };
-    std::str::from_utf8(&value[..len.clamp(0, 91) as usize])
-        .ok()
+    property(CAPTION_PROPERTY)
         .and_then(|v| v.parse().ok())
         .unwrap_or(CAPTION_DP)
 }
 
-/// Freeform windowing on the default display in window mode, fullscreen
-/// otherwise; `setWindowingMode` persists it, so a device-mode boot after
-/// a window-mode one resets it.
-fn set_windowing(wm: &BpWindowManager, windows: bool) {
-    let want = if windows {
+/// The system property `name`, if set.
+fn property(name: &std::ffi::CStr) -> Option<String> {
+    let mut value = [0u8; 92];
+    // SAFETY: a NUL-terminated name and a buffer of PROP_VALUE_MAX bytes.
+    let len = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr().cast()) };
+    let value = std::str::from_utf8(&value[..len.clamp(0, 91) as usize]).ok()?;
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// Freeform windowing on the default display in window mode without the
+/// window shell, fullscreen otherwise (device mode, and desktop windowing,
+/// where the shell makes tasks freeform); `setWindowingMode` persists it,
+/// so a boot of the other kind resets it.
+fn set_windowing(wm: &BpWindowManager, freeform: bool) {
+    let want = if freeform {
         WINDOWING_MODE_FREEFORM
     } else {
         WINDOWING_MODE_FULLSCREEN

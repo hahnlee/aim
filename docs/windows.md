@@ -123,7 +123,9 @@ drops the old connection's tasks. The mode:
   would show another part of the display. The bridge commits them by
   moving the task a pixel and back with `resizeTask`, whose change
   transitions place the surface (a resize to the bounds the task already
-  has changes nothing).
+  has changes nothing). In the lightweight shell the window shell's
+  transitions place every task's surface, and nothing is committed
+  ([task-organizer.md](task-organizer.md)).
 - **Move and resize.** Moving the window moves the task at once; a live
   resize resizes it when the resize ends (each resize is a configuration
   change for the app). The window then takes the bounds the task got (a
@@ -329,4 +331,7 @@ display's orientation source, so `onTaskRequestedOrientationChanged` does
 not come, and the top activity's `ActivityInfo` is only in the
 `RunningTaskInfo` past its `Configuration`, with a whole `ApplicationInfo`
 in it. The native task organizer's `onTaskInfoChanged` gives it (#593,
-#463).
+#463). Both are covered in the lightweight shell, whose window shell makes
+window mode desktop windowing (a fullscreen display, freeform tasks: no
+persisted bounds to lay a task out from) and reports the top activity's
+orientation to the bridge ([task-organizer.md](task-organizer.md)).

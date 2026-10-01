@@ -10,5 +10,6 @@ public class Binder implements IBinder {
     public void attachInterface(IInterface owner, String descriptor) { throw new RuntimeException("stub"); }
     public IInterface queryLocalInterface(String descriptor) { throw new RuntimeException("stub"); }
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException { throw new RuntimeException("stub"); }
+    public void linkToDeath(DeathRecipient recipient, int flags) { throw new RuntimeException("stub"); }
     public final boolean transact(int code, Parcel data, Parcel reply, int flags) throws RemoteException { throw new RuntimeException("stub"); }
 }

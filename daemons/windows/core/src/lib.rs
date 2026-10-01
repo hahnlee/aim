@@ -198,6 +198,8 @@ pub fn running_task_info(r: &mut impl Read) -> Result<Option<TaskInfo>, Error> {
 pub mod write {
     /// `BaseBundle.BUNDLE_MAGIC`.
     const BUNDLE_MAGIC: i32 = 0x4C44_4E42;
+    /// `Parcel.VAL_INTEGER`.
+    const VAL_INTEGER: i32 = 1;
     /// `Parcel.VAL_PARCELABLE`, a length-prefixed value.
     const VAL_PARCELABLE: i32 = 4;
 
@@ -219,16 +221,23 @@ pub mod write {
         words
     }
 
-    /// The `Bundle` of `ActivityOptions.setLaunchBounds(bounds)`, as
-    /// `Bundle.writeToParcel` writes it: one `Rect` under
-    /// `android:activity.launchBounds`.
-    pub fn launch_bounds_options(bounds: [i32; 4]) -> Vec<i32> {
-        let mut rect = string16(Some("android.graphics.Rect"));
-        rect.extend(bounds);
-        let mut map = vec![1];
-        map.extend(string16(Some("android:activity.launchBounds")));
-        map.extend([VAL_PARCELABLE, rect.len() as i32 * 4]);
-        map.extend(rect);
+    /// The `Bundle` of `ActivityOptions.setLaunchBounds(bounds)` and
+    /// `setLaunchWindowingMode(mode)`, as `Bundle.writeToParcel` writes
+    /// it: a `Rect` under `android:activity.launchBounds`, an int under
+    /// `android.activity.windowingMode`.
+    pub fn launch_options(bounds: Option<[i32; 4]>, windowing_mode: Option<i32>) -> Vec<i32> {
+        let mut map = vec![bounds.is_some() as i32 + windowing_mode.is_some() as i32];
+        if let Some(bounds) = bounds {
+            let mut rect = string16(Some("android.graphics.Rect"));
+            rect.extend(bounds);
+            map.extend(string16(Some("android:activity.launchBounds")));
+            map.extend([VAL_PARCELABLE, rect.len() as i32 * 4]);
+            map.extend(rect);
+        }
+        if let Some(mode) = windowing_mode {
+            map.extend(string16(Some("android.activity.windowingMode")));
+            map.extend([VAL_INTEGER, mode]);
+        }
         let mut words = vec![map.len() as i32 * 4, BUNDLE_MAGIC];
         words.extend(map);
         words.push(0); // no intent in it
@@ -491,7 +500,7 @@ mod tests {
         assert_eq!(r.string16().unwrap().as_deref(), Some("ab"));
         assert_eq!(r.int(), Ok(7));
 
-        let words = write::launch_bounds_options([1748, 516, 2572, 1980]);
+        let words = write::launch_options(Some([1748, 516, 2572, 1980]), Some(5));
         let mut o = Out::default();
         words.iter().for_each(|&w| {
             o.int(w);
@@ -500,20 +509,28 @@ mod tests {
         let len = r.int().unwrap() as usize;
         assert_eq!(r.int(), Ok(0x4C444E42));
         assert_eq!(len, o.0.len() - 12);
-        assert_eq!(r.int(), Ok(1));
+        assert_eq!(r.int(), Ok(2));
         assert_eq!(
             r.string16().unwrap().as_deref(),
             Some("android:activity.launchBounds")
         );
         assert_eq!(r.int(), Ok(4));
-        assert_eq!(r.int(), Ok(len as i32 - 4 - 64 - 8));
+        // The Rect's name (48 bytes) and its four ints.
+        assert_eq!(r.int(), Ok(64));
         assert_eq!(
             r.string16().unwrap().as_deref(),
             Some("android.graphics.Rect")
         );
-        for v in [1748, 516, 2572, 1980, 0] {
+        for v in [1748, 516, 2572, 1980] {
             assert_eq!(r.int(), Ok(v));
         }
+        assert_eq!(
+            r.string16().unwrap().as_deref(),
+            Some("android.activity.windowingMode")
+        );
+        assert_eq!(r.int(), Ok(1));
+        assert_eq!(r.int(), Ok(5));
+        assert_eq!(r.int(), Ok(0));
         assert_eq!(r.int(), Err(Error::Malformed));
     }
 }
