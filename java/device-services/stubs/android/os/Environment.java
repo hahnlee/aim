@@ -5,6 +5,7 @@ package android.os;
 import java.io.File;
 
 public class Environment {
+    public static File getDataMiscDirectory() { throw new RuntimeException("stub"); }
     public static File getDataSystemCeDirectory(int userId) { throw new RuntimeException("stub"); }
     public static File getUserSystemDirectory(int userId) { throw new RuntimeException("stub"); }
 }

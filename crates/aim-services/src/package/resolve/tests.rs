@@ -210,6 +210,33 @@ fn filters_by_visibility_package_and_state() {
     };
     // An app without <queries> sees no other app...
     assert!(q(&r, 10004, &view(None, None)).is_empty());
+    // ...unless platform compat turns FILTER_APPLICATION_QUERY off for it
+    // or DeviceConfig turns filtering off.
+    let mut compat = (*s).clone();
+    compat
+        .packages
+        .get_mut("d.caller")
+        .unwrap()
+        .filter_application_query = Some(false);
+    let all = ["c.high.Open", "a.viewer.Image", "b.gallery.Open"];
+    assert_eq!(
+        q(
+            &Resolution::new(Arc::new(compat), &Default::default()),
+            10004,
+            &view(None, None)
+        ),
+        all
+    );
+    let mut off = (*s).clone();
+    off.platform.query_filtering_disabled = true;
+    assert_eq!(
+        q(
+            &Resolution::new(Arc::new(off), &Default::default()),
+            10004,
+            &view(None, None)
+        ),
+        all
+    );
     // ...and one that queries b.gallery sees it.
     assert_eq!(q(&r, 10005, &view(None, None)), ["b.gallery.Open"]);
     // The intent's package limits the result.
