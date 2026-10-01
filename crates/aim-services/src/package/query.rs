@@ -9,7 +9,7 @@
 //! feed does not give is not modelled: the call is reported, not
 //! answered.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -100,6 +100,9 @@ pub struct PackageModel {
     resolver: Resolver,
     /// The writes, compared with the original's (slice B).
     writes: Writes,
+    /// The not-modelled paths reported so far: native or not, the
+    /// method's code, the reason.
+    reported: Mutex<HashSet<(bool, u32, &'static str)>>,
 }
 
 impl PackageModel {
@@ -108,6 +111,7 @@ impl PackageModel {
             states,
             resolver: Resolver::default(),
             writes: Writes::default(),
+            reported: Mutex::new(HashSet::new()),
         })
     }
 }
@@ -234,7 +238,16 @@ impl ShadowModel for PackageModel {
         };
         match answered {
             Ok(reply) => Answer::Reply(reply),
-            Err(_) => Answer::NotModelled,
+            Err(NotModelled(reason)) => {
+                let key = (call.descriptor == native::DESCRIPTOR, call.code, reason);
+                if self.reported.lock().unwrap().insert(key) {
+                    eprintln!(
+                        "package shadow: {}#{} not modelled: {reason}",
+                        call.descriptor, call.code
+                    );
+                }
+                Answer::NotModelled
+            }
         }
     }
 
@@ -957,8 +970,18 @@ impl Query<'_> {
         let Some(info) = generate_package_info(&self.target(ps, p, &state, user), &x, flags) else {
             return Ok(None);
         };
-        if self.aconfig(PROVIDE_INFO_OF_APK_IN_APEX) && ps.apex_module_name.is_some() {
-            return Err(NotModelled("the active APEX of an APK in an APEX"));
+        let mut info = info;
+        if self.aconfig(PROVIDE_INFO_OF_APK_IN_APEX)
+            && let Some(module) = &ps.apex_module_name
+        {
+            // ApexManager.getActivePackageNameForApexModuleName: the
+            // active APEX of the module.
+            info.apex_package_name = self
+                .state
+                .packages
+                .values()
+                .find(|p| p.is.apex && p.apex_module_name.as_ref() == Some(module))
+                .map(|p| p.name.clone());
         }
         Ok(Some(info))
     }

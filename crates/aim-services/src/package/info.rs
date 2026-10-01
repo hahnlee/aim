@@ -163,9 +163,10 @@ const UUID_SYSTEM: (i64, i64) = (0x5d25_8386_e60d_59e3, 0x826d_0089_cdd4_2cc0_u6
 /// The aconfig flag `android.content.pm.nullable_data_dir`.
 pub const NULLABLE_DATA_DIR: &str = "android.content.pm.nullable_data_dir";
 
-/// `UserHandle.getUid`.
+/// `UserHandle.getUid` of the app id of `app_id` (Java's remainder: a
+/// package not scanned keeps its uid, -1).
 pub fn uid(user: i32, app_id: i32) -> i32 {
-    user * PER_USER_RANGE + app_id.rem_euclid(PER_USER_RANGE)
+    user * PER_USER_RANGE + app_id % PER_USER_RANGE
 }
 
 /// `String.hashCode`.
@@ -568,7 +569,8 @@ impl ComponentInfo {
             application_info: app,
             process_name: c.process_name.clone(),
             split_name: c.split_name.clone(),
-            attribution_tags: c.attribution_tags.clone(),
+            // `getAttributionTags`: empty for none.
+            attribution_tags: Some(c.attribution_tags.clone().unwrap_or_default()),
             description_res: c.component.description_res,
             enabled: c.enabled,
             exported: c.exported,
@@ -1241,18 +1243,21 @@ fn write_libraries(p: &mut Parcel, v: Option<&[SharedLibrary]>) {
     write_typed_array(p, v, write_library);
 }
 
-/// `SharedLibraryInfo.writeToParcel`. Optional dependents and
-/// certificate digests are not in the model: written empty.
+/// `SharedLibraryInfo.writeToParcel`. The library's own code paths are
+/// there only for a library without a path (a static or dynamic one's
+/// package; `getAllCodePaths` is the path otherwise); its dependents and
+/// dependencies are null until one is added. Optional dependents and
+/// certificate digests are not in the model (#740).
 fn write_library(p: &mut Parcel, l: &SharedLibrary) {
     const VERSIONED_PACKAGE: &str = "android.content.pm.VersionedPackage";
     p.write_string8(l.path.as_deref());
     p.write_string8(l.package_name.as_deref());
     match &l.code_paths {
-        Some(paths) => {
+        Some(paths) if l.path.is_none() => {
             p.write_i32(1);
             write_strings8(p, Some(paths));
         }
-        None => p.write_i32(0),
+        _ => p.write_i32(0),
     }
     p.write_string8(l.name.as_deref());
     p.write_i64(l.version);
@@ -1261,19 +1266,26 @@ fn write_library(p: &mut Parcel, l: &SharedLibrary) {
     p.write_string8(Some(&l.declaring.0));
     p.write_i64(l.declaring.1);
     // writeList of VersionedPackages: each a length-prefixed parcelable.
-    p.write_i32(l.dependents.len() as i32);
-    for (name, version) in &l.dependents {
-        p.write_i32(4);
-        let length = p.position();
+    if l.dependents.is_empty() {
         p.write_i32(-1);
-        let start = p.position();
-        p.write_string16(Some(VERSIONED_PACKAGE));
-        p.write_string8(Some(name));
-        p.write_i64(*version);
-        let end = p.position();
-        p.set_i32_at(length, (end - start) as i32);
+    } else {
+        p.write_i32(l.dependents.len() as i32);
+        for (name, version) in &l.dependents {
+            p.write_i32(4);
+            let length = p.position();
+            p.write_i32(-1);
+            let start = p.position();
+            p.write_string16(Some(VERSIONED_PACKAGE));
+            p.write_string8(Some(name));
+            p.write_i64(*version);
+            let end = p.position();
+            p.set_i32_at(length, (end - start) as i32);
+        }
     }
-    write_libraries(p, Some(&l.dependencies));
+    write_libraries(
+        p,
+        (!l.dependencies.is_empty()).then_some(&l.dependencies[..]),
+    );
     p.write_bool(l.native);
     p.write_i32(-1);
     p.write_i32(-1);
@@ -1988,7 +2000,7 @@ fn generate_instrumentation_info(
         functional_test: i.functional_test,
         source_dir: pkg.base_apk_path.clone(),
         public_source_dir: pkg.base_apk_path.clone(),
-        split_names: pkg.split_names.clone(),
+        split_names: Some(pkg.split_names.clone().unwrap_or_default()),
         split_source_dirs: splits.clone(),
         split_public_source_dirs: splits,
         split_dependencies: pkg.split_dependencies.clone().filter(|d| !d.is_empty()),
@@ -2014,7 +2026,8 @@ fn generate_permission_info(p: &pkg::Permission, flags: i64) -> PermissionInfo {
         background_permission: p.background_permission.clone(),
         description_res: p.component.description_res,
         request_res: p.request_res,
-        known_certs: p.known_certs.clone(),
+        // `getKnownCerts`: empty for none.
+        known_certs: Some(p.known_certs.clone().unwrap_or_default()),
     }
 }
 
@@ -2063,11 +2076,12 @@ pub fn generate_package_info(t: &Target<'_>, x: &Extras<'_>, flags: i64) -> Opti
     let mut app_info = generate_application_info(t, flags)?;
     let mut info = PackageInfo {
         package_name: Some(x.external_name.to_string()),
-        split_names: pkg.split_names.clone(),
+        // `getSplitNames`, `getSplitRevisionCodes`: empty for none.
+        split_names: Some(pkg.split_names.clone().unwrap_or_default()),
         version_code: pkg.version_code,
         version_code_major: pkg.version_code_major,
         base_revision_code: pkg.base_revision_code,
-        split_revision_codes: pkg.split_revision_codes.clone(),
+        split_revision_codes: Some(pkg.split_revision_codes.clone().unwrap_or_default()),
         version_name: pkg.version_name.clone(),
         shared_user_id: pkg.shared_user_id.clone(),
         shared_user_label: pkg.shared_user_label,
