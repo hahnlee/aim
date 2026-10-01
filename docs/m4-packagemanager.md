@@ -515,8 +515,15 @@ reads both.
   makes of them (D4). The parser (`crates/aim-services/src/package/parse`,
   `aim-package-parse`) matches a first boot's cache byte for byte for all
   288 packages (285 system packages and the 3 decompressed stubs under
-  `/data/app`). Signature verification is not ported yet (#720). The
-  cache depends on the device's locale and display density (#722).
+  `/data/app`). The cache depends on the device's locale and display
+  density (#722). Signature verification (`.../package/sign`,
+  `aim-package-sign`) makes the `SigningDetails` `packages.xml` records
+  (signers, scheme, lineage with capabilities, signing key set) for 242
+  of its 244 packages, whether it only collects certificates, as the
+  scan does, or verifies the contents, as an install does; the other two
+  are Play updates the copy of `/data` lacks. The fetched CTS test APKs
+  (v1, v3, v4 with `.idsig`) verify too. The paths no oracle checks yet
+  (v3.1, PSS, DSA, several signers) are #761.
 - **Package visibility.** `AppsFilterImpl` in Rust: `<queries>`,
   implicit grants (`grantImplicitAccess` from ActivityManager and
   WindowManager, synchronous so an app's next query sees it), force
