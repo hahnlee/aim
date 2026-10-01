@@ -2,4 +2,8 @@
 // the members used, checked against the image by the device-services node.
 package android.content.pm;
 
-public class ActivityInfo extends ComponentInfo {}
+public class ActivityInfo extends ComponentInfo {
+    public static final int SCREEN_ORIENTATION_UNSPECIFIED = -1;
+
+    public int screenOrientation;
+}
