@@ -9,8 +9,9 @@
 //! feed does not give is not modelled: the call is reported, not
 //! answered.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aim_binder_host::parcel::{EX_SECURITY, Exception, Parcel, Reader, Result as ParcelResult};
@@ -117,32 +118,51 @@ pub fn start(
     props: Properties,
     dump: PathBuf,
 ) -> Result<Arc<PackageModel>, String> {
-    let framework = system_config::Framework::load(image)?;
-    let image = image.to_path_buf();
-    // The device's side, read when the first state comes: the properties
-    // init sets are there by then.
-    let device: OnceLock<System> = OnceLock::new();
+    let join = Mutex::new(Join {
+        framework: system_config::Framework::load(image)?,
+        image: image.to_path_buf(),
+        props,
+        device: None,
+        system: system.clone(),
+        last: None,
+        parsed: HashMap::new(),
+    });
     let feed = Feed::start(system, Some(dump));
-    let system = system.clone();
-    // Each fed state with the device's constants and the users' unlock
-    // state (UserManager's: a user unlocked stays so), made once per
-    // state and change.
-    let merged: Mutex<Option<(Arc<State>, Arc<State>)>> = Mutex::new(None);
     Ok(PackageModel::new(Box::new(move |t| {
         let fed = feed.fresh(t)?;
-        let mut merged = merged.lock().unwrap();
-        let was = |id: i32| {
-            merged
-                .as_ref()
+        join.lock().unwrap().state(fed)
+    })))
+}
+
+/// What the model joins to each fed state: the device's side (read when
+/// the first state comes, when init has set the properties it needs),
+/// the users' unlock state (UserManager's; a user unlocked stays so) and
+/// each package's parsed package, decoded once per parcel.
+struct Join {
+    framework: system_config::Framework,
+    image: PathBuf,
+    props: Properties,
+    device: Option<System>,
+    system: Arc<crate::system::System>,
+    /// The last fed state and the state made of it.
+    last: Option<(Arc<State>, Arc<State>)>,
+    /// Parsed packages by their parcel's address, with the parcel.
+    parsed: HashMap<usize, (Arc<[u8]>, Arc<AndroidPackage>)>,
+}
+
+impl Join {
+    fn state(&mut self, fed: Arc<State>) -> Option<Arc<State>> {
+        let was = |last: &Option<(Arc<State>, Arc<State>)>, id: i32| {
+            last.as_ref()
                 .is_some_and(|(_, m)| m.users.get(&id).is_some_and(|u| u.unlocking_or_unlocked))
         };
         let mut unlocked = Vec::new();
         for &id in fed.users.keys() {
-            if was(id) || system.user_unlocking_or_unlocked(id).ok()? {
+            if was(&self.last, id) || self.system.user_unlocking_or_unlocked(id).ok()? {
                 unlocked.push(id);
             }
         }
-        if let Some((f, m)) = merged.as_ref()
+        if let Some((f, m)) = &self.last
             && Arc::ptr_eq(f, &fed)
             && m.users
                 .values()
@@ -150,7 +170,9 @@ pub fn start(
         {
             return Some(m.clone());
         }
-        let device = device.get_or_init(|| system_config::system(&image, &props, &framework));
+        let device = self.device.get_or_insert_with(|| {
+            system_config::system(&self.image, &self.props, &self.framework)
+        });
         let mut state = (*fed).clone();
         state.system = System {
             force_system_packages_queryable: fed.system.force_system_packages_queryable,
@@ -160,10 +182,27 @@ pub fn start(
         for user in state.users.values_mut() {
             user.unlocking_or_unlocked = unlocked.contains(&user.id);
         }
+        let mut parsed = HashMap::new();
+        let packages = state.packages.values_mut();
+        for ps in packages.chain(state.disabled_system_packages.values_mut()) {
+            let Some(parcel) = &ps.parcel else { continue };
+            let key = parcel.as_ptr() as usize;
+            let pkg = match self.parsed.remove(&key) {
+                Some((_, pkg)) => Some(pkg),
+                // A parcel that does not read leaves its package without
+                // one: its answers differ, with the parcel in the dump.
+                None => AndroidPackage::read_cache_entry(parcel).ok().map(Arc::new),
+            };
+            if let Some(pkg) = &pkg {
+                parsed.insert(key, (parcel.clone(), pkg.clone()));
+            }
+            ps.pkg = pkg;
+        }
+        self.parsed = parsed;
         let state = Arc::new(state);
-        *merged = Some((fed, state.clone()));
+        self.last = Some((fed, state.clone()));
         Some(state)
-    })))
+    }
 }
 
 impl ShadowModel for PackageModel {
