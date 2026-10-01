@@ -834,6 +834,9 @@ impl PermissionInfo {
 pub struct SigningInfo {
     pub scheme_version: i32,
     pub signatures: Vec<Vec<u8>>,
+    /// The signers' public keys as the original serialized them; `None`
+    /// where the model has none (#738).
+    pub public_keys: Option<Vec<Option<pkg::Serialized>>>,
     pub past_signing_certificates: Option<Vec<Vec<u8>>>,
 }
 
@@ -1024,9 +1027,7 @@ impl WriteParcelable for PackageInfo {
     }
 }
 
-/// `SigningDetails.writeToParcel`; `None` is `UNKNOWN`. Its public keys
-/// (`writeArraySet` of the certificates' keys as `Serializable`s) are not
-/// modelled: the details are written without them.
+/// `SigningDetails.writeToParcel`; `None` is `UNKNOWN`.
 pub fn write_signing_details(p: &mut Parcel, s: Option<&SigningInfo>) {
     let Some(s) = s else {
         p.write_bool(true);
@@ -1035,7 +1036,27 @@ pub fn write_signing_details(p: &mut Parcel, s: Option<&SigningInfo>) {
     p.write_bool(false);
     write_typed_array(p, Some(&s.signatures), |p, s| write_bytes(p, s));
     p.write_i32(s.scheme_version);
-    p.write_i32(-1);
+    // writeArraySet: each key a length-prefixed VAL_SERIALIZABLE.
+    match &s.public_keys {
+        None => p.write_i32(-1),
+        Some(keys) => {
+            p.write_i32(keys.len() as i32);
+            for key in keys {
+                let Some(key) = key else {
+                    p.write_i32(-1);
+                    continue;
+                };
+                p.write_i32(21);
+                let length = p.position();
+                p.write_i32(-1);
+                let start = p.position();
+                p.write_string16(Some(&key.class));
+                write_bytes(p, &key.bytes);
+                let end = p.position();
+                p.set_i32_at(length, (end - start) as i32);
+            }
+        }
+    }
     write_typed_array(p, s.past_signing_certificates.as_deref(), |p, s| {
         write_bytes(p, s)
     });
@@ -2004,6 +2025,7 @@ pub fn signing_info(pkg: &AndroidPackage) -> Option<SigningInfo> {
     Some(SigningInfo {
         scheme_version: s.scheme_version,
         signatures: s.signatures.clone().unwrap_or_default(),
+        public_keys: s.public_keys.clone(),
         past_signing_certificates: s.past_signing_certificates.clone(),
     })
 }

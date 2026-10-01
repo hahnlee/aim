@@ -136,13 +136,26 @@ fn log_line(log: &Log, line: &str) {
 }
 
 /// Starts comparing the original services `names` with their models,
-/// logging to `log`.
+/// logging to `log`; `image` is the guest's root, which the package model
+/// reads the device's configuration from.
 pub(crate) fn start(
     driver: &Arc<Driver>,
     system: &Arc<System>,
     names: &[String],
     log: &Path,
+    image: &Path,
 ) -> Result<(), String> {
+    // One model of package and package_native, over the state the
+    // original feeds it, written beside the log (crate::package::feed).
+    let package: Option<Arc<dyn ShadowModel>> = if names
+        .iter()
+        .any(|n| n == "package" || n == "package_native")
+    {
+        let dump = log.with_extension("package-feed.txt");
+        Some(crate::package::query::start(system, image, dump)?)
+    } else {
+        None
+    };
     let file = std::fs::File::create(log).map_err(|e| format!("{}: {e}", log.display()))?;
     let log: Log = Arc::new(Mutex::new(LineWriter::new(file)));
     let (copies, received) = mpsc::sync_channel(CAPACITY);
@@ -179,7 +192,13 @@ pub(crate) fn start(
     }
     let models = names
         .iter()
-        .map(|n| (n.clone(), model(n, system)))
+        .map(|n| {
+            let m = match (n.as_str(), &package) {
+                ("package" | "package_native", Some(p)) => p.clone(),
+                _ => model(n, system),
+            };
+            (n.clone(), m)
+        })
         .collect();
     let mut comparator = Comparator::new(models, roots, dropped);
     std::thread::Builder::new()

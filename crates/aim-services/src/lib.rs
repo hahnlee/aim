@@ -139,14 +139,16 @@ impl NativeServices {
     }
 
     /// Compares the original services `names` with their native models
-    /// ([`shadow`]), logging each call to `log`.
+    /// ([`shadow`]), logging each call to `log`; `image` is the guest's
+    /// root.
     pub fn shadow(
         &self,
         driver: &Arc<Driver>,
         names: &[String],
         log: &std::path::Path,
+        image: &std::path::Path,
     ) -> Result<(), String> {
-        shadow::start(driver, &self.system, names, log)
+        shadow::start(driver, &self.system, names, log, image)
     }
 
     /// Registers every service with servicemanager, which must be ready

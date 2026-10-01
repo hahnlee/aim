@@ -36,7 +36,7 @@ fn package(
         signing_details: Some(SigningDetails {
             signatures: Some(vec![vec![7, 7]]),
             scheme_version: 3,
-            past_signing_certificates: None,
+            ..SigningDetails::default()
         }),
         ..AndroidPackage::default()
     };
@@ -131,7 +131,7 @@ fn call(
     code: u32,
     write: impl FnOnce(&mut Parcel),
 ) -> Parcel {
-    let filter = AppsFilter::new(state, &Config::default());
+    let filter = AppsFilter::new(state, &crate::package::apps_filter::Config::default());
     let q = Query {
         state,
         filter: &filter,
