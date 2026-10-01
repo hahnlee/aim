@@ -381,10 +381,25 @@ impl Comparator {
             .partition(|e| e.deadline <= now);
         self.waiting = waiting;
         lines.extend(done.into_iter().map(Exchange::compare));
+        lines.extend(self.checks());
         let dropped = self.dropped.load(Ordering::Relaxed);
         if dropped != self.dropped_logged {
             self.dropped_logged = dropped;
             lines.push(format!("{{\"event\":\"dropped\",\"total\":{dropped}}}"));
+        }
+        lines
+    }
+
+    /// The models' checks that are due, each model asked once.
+    fn checks(&self) -> Vec<String> {
+        let mut asked: Vec<*const ()> = Vec::new();
+        let mut lines = Vec::new();
+        for model in self.models.values() {
+            let id = Arc::as_ptr(model) as *const ();
+            if !asked.contains(&id) {
+                asked.push(id);
+                lines.extend(model.checks().iter().map(super::Check::line));
+            }
         }
         lines
     }
@@ -440,6 +455,8 @@ impl Comparator {
             flags: copy.flags,
             sender_pid: copy.from_pid,
             sender_euid: copy.from_euid,
+            seq: copy.seq,
+            sent: copy.sent,
             data: call.reader(),
         });
         let slice = match &copy.reply {
@@ -513,6 +530,7 @@ mod tests {
             from_euid: 10_100,
             from_tid: 61,
             to_pid: REPLIER,
+            sent: Instant::now(),
             code,
             flags: 0,
             data,

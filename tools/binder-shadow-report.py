@@ -15,6 +15,13 @@ method of each shadowed service, the calls and how each ended:
 Then the watched nodes and drops (copies the comparison could not keep
 up with), and the first differences of each method.
 
+A model of writes also checks the state they leave (slice B): once the
+writes to a package in a user settle, the model's state of it against
+the original's. Those checks are a second table, per method: the calls
+they covered, by the check's outcome (matched, differed, not modelled:
+a call changed what the model does not hold), then the first differing
+checks.
+
 Method names come from the image's AIDL stubs, as in
 binder-trace-report.py (--image). With --trace (a `--binder-trace` file
 of the same boot), each method's row also shows the trace's count of
@@ -32,6 +39,7 @@ import os
 
 OUTCOMES = ["matched", "differed", "not_modelled", "oneway", "failed", "undecodable",
             "incomplete"]
+CHECK_OUTCOMES = ["matched", "differed", "not_modelled"]
 
 
 def trace_report():
@@ -66,10 +74,20 @@ def main():
     differences = collections.defaultdict(list)
     events = []
     dropped = 0
+    checked = collections.defaultdict(collections.Counter)  # (service, descriptor, code)
+    checks = collections.Counter()
+    check_differences = []
     for line in open(args.log, errors="replace"):
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if "check" in entry:
+            checks[entry["outcome"]] += 1
+            for _, code in entry["calls"]:
+                checked[(entry["service"], entry["descriptor"], code)][entry["outcome"]] += 1
+            if entry["outcome"] != "matched":
+                check_differences.append(entry)
             continue
         if "event" in entry:
             if entry["event"] == "dropped":
@@ -129,6 +147,38 @@ def main():
         for d, c in missing:
             print(f"| - | {d.rsplit('.', 1)[-1]} | {method(d, c)} | 0 | "
                   + " | " * len(OUTCOMES) + f"{traced[(d, c)]} |")
+
+    if checks:
+        print()
+        print(f"{sum(checks.values())} state checks: "
+              + ", ".join(f"{checks[o]} {o.replace('_', ' ')}"
+                          for o in CHECK_OUTCOMES if checks[o]))
+        print()
+        print("| service | interface | method | calls checked | "
+              + " | ".join(o.replace("_", " ") for o in CHECK_OUTCOMES) + " |")
+        print("|" + " --- |" * 3 + " ---: |" * (1 + len(CHECK_OUTCOMES)))
+        for key in sorted(checked, key=lambda k: (k[0], -sum(checked[k].values()))):
+            service, descriptor, code = key
+            counts = checked[key]
+            cells = [service, descriptor.rsplit(".", 1)[-1], method(descriptor, code),
+                     str(sum(counts.values()))]
+            cells += [str(counts[o]) if counts[o] else "" for o in CHECK_OUTCOMES]
+            print("| " + " | ".join(cells) + " |")
+        for outcome in ("differed", "not_modelled"):
+            shown = [e for e in check_differences if e["outcome"] == outcome]
+            if not shown:
+                continue
+            print()
+            print(f"## state checks {outcome.replace('_', ' ')}: {len(shown)} "
+                  f"(first {min(len(shown), args.differences)})")
+            for entry in shown[: args.differences]:
+                calls = ", ".join(f"seq {seq} {method(entry['descriptor'], code)}"
+                                  for seq, code in entry["calls"])
+                print()
+                print(f"- {entry['subject']}: {calls}")
+                for side in ("original", "model", "reason"):
+                    if side in entry:
+                        print(f"  - {side}: {json.dumps(entry[side])}")
 
     for key in sorted(differences):
         service, descriptor, code = key

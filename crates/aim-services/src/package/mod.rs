@@ -27,6 +27,7 @@ pub mod restrictions;
 pub mod settings;
 pub mod system_config;
 pub mod uri;
+pub mod write;
 
 use std::borrow::Cow;
 use std::collections::HashMap;

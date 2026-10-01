@@ -310,6 +310,7 @@ impl State {
                     from_euid: self.procs[&proc].creds.euid,
                     from_tid: tid,
                     to_pid: self.procs[&target_proc].creds.pid,
+                    sent: std::time::Instant::now(),
                     code: tr.code,
                     flags: tr.flags,
                     data: parcel,

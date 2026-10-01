@@ -34,8 +34,9 @@ use super::model::{PackageState, PackageUserState, State, System, User};
 use super::pkg::{AndroidPackage, booleans, booleans2::APEX};
 use super::resolve::Resolver;
 use super::system_config::Properties;
+use super::write::Writes;
 use super::{reply, system_config};
-use crate::shadow::{Answer, ListSlice, ShadowCall, ShadowModel, Value};
+use crate::shadow::{Answer, Check, ListSlice, ShadowCall, ShadowModel, Value};
 
 /// How long a comparison waits for the feed to catch up with the
 /// original.
@@ -97,6 +98,8 @@ pub struct PackageModel {
     states: States,
     /// Intent resolution, and the apps filter of each state.
     resolver: Resolver,
+    /// The writes, compared with the original's (slice B).
+    writes: Writes,
 }
 
 impl PackageModel {
@@ -104,6 +107,7 @@ impl PackageModel {
         Arc::new(PackageModel {
             states,
             resolver: Resolver::default(),
+            writes: Writes::default(),
         })
     }
 }
@@ -210,6 +214,10 @@ impl ShadowModel for PackageModel {
         let Some(state) = (self.states)(FRESH) else {
             return Answer::NotModelled;
         };
+        self.writes.observe(&state);
+        if let Some(answer) = self.writes.answer(call) {
+            return answer;
+        }
         if let Some(answer) = self.resolver.answer(&state, call) {
             return answer;
         }
@@ -242,6 +250,10 @@ impl ShadowModel for PackageModel {
             return Some(v);
         }
         reply::decode(descriptor, code, r)
+    }
+
+    fn checks(&self) -> Vec<Check> {
+        self.writes.checks(&self.states)
     }
 }
 
@@ -576,7 +588,11 @@ impl Query<'_> {
 
     /// Whether `uid` holds `permission` in its user: granted to one of its
     /// packages (`checkUidPermission`).
-    fn uid_has_permission(&self, uid: i32, permission: &str) -> Result<bool, NotModelled> {
+    pub(crate) fn uid_has_permission(
+        &self,
+        uid: i32,
+        permission: &str,
+    ) -> Result<bool, NotModelled> {
         let user = user_id(uid);
         let granted = |ps: &PackageState| {
             ps.users
@@ -599,7 +615,7 @@ impl Query<'_> {
     /// too. Where the recents may skip the check
     /// (`isRecentsAccessingChildProfiles`, the window manager's state), a
     /// denial is not modelled.
-    fn enforce_cross_user(
+    pub(crate) fn enforce_cross_user(
         &self,
         user: i32,
         same_user: bool,
@@ -646,7 +662,7 @@ impl Query<'_> {
     }
 
     /// `shouldFilterApplicationIncludingUninstalled`.
-    fn filtered_including_uninstalled(
+    pub(crate) fn filtered_including_uninstalled(
         &self,
         ps: Option<&PackageState>,
         user: i32,
