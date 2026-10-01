@@ -16,6 +16,7 @@
 mod bundle;
 pub mod clip;
 pub mod clipboard;
+pub mod locale;
 pub mod location;
 pub mod media;
 mod mirror;
@@ -72,6 +73,9 @@ impl NativeServices {
             &[&clipboard::APP_OPS[..], &location::APP_OPS[..]].concat(),
         );
         let settings = settings::Settings::new(process.clone(), system.clone());
+        // The device's languages follow the Mac's, whichever services are
+        // native.
+        locale::start(process.clone(), &system);
         // First, so system_server finds it whichever services are native.
         let mut services = vec![(
             SERVICE_HOST.to_string(),

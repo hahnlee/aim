@@ -256,6 +256,17 @@ The migration's state and conformance results are in
   [system-services.md](../system-services.md), "The system_server
   bridge".
 
+### The Mac's languages (2026-10-01)
+
+- The device's language list follows the Mac's preferred languages
+  (#344): the service host hands it to the bridge
+  (`IBridge.updateLocales`) at each attach and on each change of the
+  Mac's list, and the bridge applies it with the platform's own
+  `LocalePicker.updateLocales`, as Settings does. A choice made in
+  Android holds until the Mac's list changes. Image additions only in
+  the existing `aim-services.jar`; `LocaleManagerService` stays the
+  original ([mac-settings.md](../mac-settings.md), "The language list").
+
 ### The notification permission, a temporary exception (2026-09-30)
 
 - **The exception (#470).** An app's request for `POST_NOTIFICATIONS`
