@@ -39,15 +39,23 @@ static void maps_and_main_stack(void) {
   int local = 0;
   uintptr_t me = (uintptr_t)&local;
   int in_stack = 0, has_libc = 0, has_self = 0;
+  const char* foreign = NULL;
   for (char* line = strtok(big, "\n"); line; line = strtok(NULL, "\n")) {
     uintptr_t lo, hi;
     char perms[5];
-    if (sscanf(line, "%lx-%lx %4s", &lo, &hi, perms) != 3) continue;
+    int at = 0;
+    if (sscanf(line, "%lx-%lx %4s %*x %*x:%*x %*u %n", &lo, &hi, perms, &at) != 3) continue;
     if (strstr(line, "[stack]") && lo <= me && me < hi) in_stack = 1;
     if (strstr(line, "/apex/com.android.runtime/lib64/bionic/libc.so") && perms[2] == 'x') has_libc = 1;
     if (strstr(line, self_path)) has_self = 1;
+    // Every file named is one of this process's filesystem: the host's
+    // (the runtime, its libraries) is no file of it.
+    struct stat st;
+    const char* name = line + at;
+    if (at && name[0] == '/' && !strstr(name, " (deleted)") && stat(name, &st) != 0) foreign = line;
   }
-  CHECK(in_stack && has_libc && has_self);
+  if (foreign) printf("not a guest file: %s\n", foreign);
+  CHECK(in_stack && has_libc && has_self && !foreign);
   pthread_attr_t a;
   CHECK(pthread_getattr_np(pthread_self(), &a) == 0);
   void* base;

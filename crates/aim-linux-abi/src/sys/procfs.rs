@@ -508,16 +508,22 @@ pub(super) fn maps() -> String {
             if r.shared { 's' } else { 'p' }
         );
         let (mut offset, mut dev, mut ino, mut name) = (0u64, 0u64, 0u64, String::new());
-        if let Some((path, d, i)) = &r.file {
+        // A host file outside the guest's view (linux-run, dyld, host
+        // libraries, the process record) reads as anonymous memory: its
+        // path is the Mac's, not a file of the guest.
+        let guest_file = r.file.as_ref().and_then(|(path, d, i)| {
+            super::memfd::link_name(path, *d, *i)
+                .or_else(|| crate::xrt::original_guest_path_of_host(path))
+                .or_else(|| vfs::guest_path_of_host(path))
+                .map(|n| (n, *d, *i))
+        });
+        if let Some((n, d, i)) = guest_file {
             // A fork child's copy of a private file mapping reports
             // offset 0 (`copies`).
             offset = super::copies::find(r.start).map_or(r.offset, |(_, off)| off);
-            dev = *d;
-            ino = *i;
-            name = super::memfd::link_name(path, *d, *i)
-                .or_else(|| crate::xrt::original_guest_path_of_host(path))
-                .or_else(|| vfs::guest_path_of_host(path))
-                .unwrap_or_else(|| path.display().to_string());
+            dev = d;
+            ino = i;
+            name = n;
         } else if let Some((c, off)) = super::copies::find(r.start) {
             offset = off;
             dev = c.dev;
