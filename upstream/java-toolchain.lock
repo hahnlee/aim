@@ -13,8 +13,9 @@ JDK_SHA256=196d13ba5f10414bef7f6a05a9b3f00edacb18ebacef2b99485db9e2ee18f0e8
 
 # Android SDK Build-Tools (Google's repository, repository2-3.xml; its
 # sha1 there is 199ae0047ee61e842f8ee0c6d3918e44fb9a1f83): d8 (R8,
-# BSD-3-Clause), aapt2 and apksigner (Apache-2.0), and aidl, the same
-# binary as AIDL_COMPILER of hal/sources.lock.
+# BSD-3-Clause), aapt2, apksigner and dexdump (Apache-2.0; dexdump
+# verifies the edited services.jar, the `system-server` node), and aidl,
+# the same binary as AIDL_COMPILER of hal/sources.lock.
 BUILD_TOOLS_VERSION=36.0.0
 BUILD_TOOLS_URL=https://dl.google.com/android/repository/build-tools_r36_macosx.zip
 BUILD_TOOLS_SHA256=04e7f3a72044de4926fa038fa0e251a37bba1e1c3fb8beab6f8401bfd9eb4bf3

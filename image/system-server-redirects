@@ -1,0 +1,12 @@
+# Call sites of the original services.jar that call a static method of
+# the device's aim-services.jar instead (ADR 0013, #702 D1;
+# docs/system-services.md, "Redirected call sites"): the derived image's
+# services.jar has the target's method id, and every call of `call` in
+# the methods named `caller` is an invoke-static of `to` with the same
+# registers (`cargo aim build system-server`). `to` takes an instance
+# call's receiver first, then its arguments, and returns its result.
+# `calls` is how many calls there are; the build fails if the original
+# makes another number, or `to` is not a public static method of that
+# signature.
+#
+# caller (class.method)   call (class.method)   to (class.method)   calls   reason

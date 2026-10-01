@@ -1,8 +1,10 @@
 //! Reading dex files (`dex_file.h`, the Dalvik executable format) and the
-//! one kind of edit the derived image makes to them: turning instructions
-//! into `nop`s in place, which moves nothing else ([`system_server`]).
+//! one kind of edit the derived image makes to them in place: turning
+//! instructions into `nop`s, which moves nothing else ([`system_server`]).
+//! [`reindex`] writes a dex again with method ids added.
 //!
 //! [`system_server`]: crate::system_server
+//! [`reindex`]: crate::reindex
 
 use sha1::{Digest, Sha1};
 
@@ -24,6 +26,8 @@ pub enum Value {
 
 pub struct ClassDef {
     pub descriptor: String,
+    /// `access_flags`.
+    pub access: u32,
     pub superclass: Option<String>,
     interfaces_off: u32,
     class_data_off: u32,
@@ -97,6 +101,7 @@ impl<'a> Dex<'a> {
             let superclass = u32_at(data, at + 8)?;
             dex.classes.push(ClassDef {
                 descriptor: dex.type_name(u32_at(data, at)?)?,
+                access: u32_at(data, at + 4)?,
                 superclass: match superclass {
                     NO_INDEX => None,
                     index => Some(dex.type_name(index)?),
@@ -216,6 +221,31 @@ impl<'a> Dex<'a> {
             }
         }
         Ok((fields, methods))
+    }
+
+    /// The direct methods `class` declares (static, private and
+    /// constructors): their method ids and access flags.
+    pub fn direct_methods(&self, class: &ClassDef) -> Result<Vec<(u32, u32)>> {
+        if class.class_data_off == 0 {
+            return Ok(Vec::new());
+        }
+        let mut at = class.class_data_off as usize;
+        let counts: Vec<u32> = (0..3)
+            .map(|_| uleb128(self.data, &mut at))
+            .collect::<Result<_>>()?;
+        uleb128(self.data, &mut at)?;
+        for _ in 0..counts[0] + counts[1] {
+            uleb128(self.data, &mut at)?;
+            uleb128(self.data, &mut at)?;
+        }
+        let mut out = Vec::new();
+        let mut index = 0u32;
+        for _ in 0..counts[2] {
+            index += uleb128(self.data, &mut at)?;
+            out.push((index, uleb128(self.data, &mut at)?));
+            uleb128(self.data, &mut at)?;
+        }
+        Ok(out)
     }
 
     pub fn class(&self, descriptor: &str) -> Option<&ClassDef> {

@@ -361,7 +361,7 @@ The migration's state and conformance results are in
   `PackageManagerInternal` (148 methods) is used by 111 files in 54
   subsystems, with `Computer` snapshots and `PackageManagerLocal` (ART
   Service, the permission state); SystemServer calls
-  `PackageManagerService.main` in bootstrap and uses the result at nine
+  `PackageManagerService.main` in bootstrap and uses the result at eleven
   call sites, and PMS's injector builds UserManagerService and the
   permission front ends. Apps used 55 of `IPackageManager`'s 224 methods
   in a measured boot, idle, starts and installs, ten of them for 92 % of
@@ -378,3 +378,20 @@ The migration's state and conformance results are in
   facade. The access state moves after C (#616). The design, the CTS
   modules (22 of 52 host-side, #701) and the decisions (#702) are in
   [m4-packagemanager.md](../m4-packagemanager.md).
+
+### The redirect edit (2026-10-02)
+
+- Decided by the user (#702 D1, for #668 too): a second kind of
+  SystemServer exception, next to the `nop` edit. Named call sites of
+  services.jar (`image/system-server-redirects`, with a reason each) call
+  a static method of `aim-services.jar` instead, with the same registers
+  and the receiver first; the dex is written again with the targets'
+  method ids, re-indexed, every other byte's meaning unchanged. It is
+  checked as the `nop` edit is (each site found as often as listed, the
+  target a public static method of that signature) and verified as ART
+  opens it, recorded on the `replace` of services.jar in
+  `image/overlay.toml`. The list is empty until a user lands: M4's
+  slice C (PackageManagerService's `main` and its eleven uses in
+  SystemServer, UserManagerService's 15 calls) and a native `power`
+  (#668, core milestone). Details in
+  [system-services.md](../system-services.md), "Redirected call sites".

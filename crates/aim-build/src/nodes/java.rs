@@ -220,6 +220,17 @@ impl Toolchain {
         fs::remove_file(&unaligned).map_err(|e| e.to_string())
     }
 
+    /// Checks the dex files of `jar` as ART opens them: the build tools'
+    /// dexdump runs ART's `DexFileVerifier` on each (`-c`: and dumps
+    /// nothing).
+    pub fn verify_dex(&self, log: &mut Log, jar: &Path) -> Result<(), String> {
+        log.run(
+            Command::new(self.build_tools.join("dexdump"))
+                .arg("-c")
+                .arg(jar),
+        )
+    }
+
     /// Builds and signs the APK of `manifest`, the resources under `res`
     /// and the code of `dex` (a `classes.dex`), linked against the image's
     /// `framework-res.apk`, into `out`.

@@ -11,7 +11,10 @@
 //!
 //! The list is `image/native-services`: one `name class` line per service,
 //! the binder name the native implementation registers and the
-//! SystemServer class it replaces.
+//! SystemServer class it replaces. The same jar's call sites that call a
+//! method of `aim-services.jar` instead are [`redirect`]'s.
+//!
+//! [`redirect`]: crate::redirect
 
 use std::path::Path;
 
@@ -161,18 +164,18 @@ pub fn dex_files(jar: &[u8]) -> Result<Vec<&[u8]>, String> {
         .collect())
 }
 
-struct Entry {
+pub(crate) struct Entry {
     /// The local file header.
-    local: usize,
+    pub local: usize,
     /// The central directory header.
-    central: usize,
-    data: usize,
-    size: usize,
+    pub central: usize,
+    pub data: usize,
+    pub size: usize,
 }
 
 /// The jar's `classes*.dex` entries, which must be stored (as the
 /// platform's are, so ART can map them).
-fn stored_dex_entries(jar: &[u8]) -> Result<Vec<Entry>, String> {
+pub(crate) fn stored_dex_entries(jar: &[u8]) -> Result<Vec<Entry>, String> {
     let u16_at = |at: usize| u16::from_le_bytes([jar[at], jar[at + 1]]) as usize;
     let u32_at = |at: usize| u32::from_le_bytes(jar[at..at + 4].try_into().unwrap()) as usize;
     let eocd = (0..jar.len().saturating_sub(21))
