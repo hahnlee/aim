@@ -2,14 +2,15 @@
 
 The device follows four of the Mac's settings (#283, #282, #281, #288). The
 host reads them and the guest applies them through Android's own services,
-the way a device's vendor init would; no part of Android is patched, and
-the Mac's settings are only read.
+the way a device's vendor init would, or the native service that owns the
+setting follows the Mac itself; no part of Android is patched, and the
+Mac's settings are only read.
 
 | Setting | Mac source | Property | Applied by `init.aim.rc` |
 | --- | --- | --- | --- |
 | Time zone | the IANA name `/etc/localtime` links to, if the image's tzdata (`/apex/com.android.tzdata/etc/tz/tzdata`) has it | `vendor.aim.mac.time_zone` | at boot: `setprop persist.sys.timezone` in `post-fs-data`; while running: `cmd alarm set-timezone` (`AlarmManager.setTimeZone`) |
 | Language and region | `CFLocaleCopyPreferredLanguages`, each language Android can name, with `AppleLocale`'s region when it has none (`ko` + `ko_KR` → `ko-KR`, `zh-Hans` + `zh_CN` → `zh-Hans-CN`) | `vendor.aim.mac.locale` (the first) | at boot: `setprop persist.sys.locale` in `post-fs-data`; the whole list: the service host, through the bridge ("The language list") |
-| Appearance | `AppleInterfaceStyle` (`Dark`, or absent for Light; "Auto" updates it) | `vendor.aim.mac.night_mode` (`yes`/`no`) | `cmd uimode night` (`UiModeManager.setNightMode`, `ui_night_mode`), at `sys.boot_completed` and on each change |
+| Appearance | `AppleInterfaceStyle` (`Dark`, or absent for Light; "Auto" updates it) | none | not by `init.aim.rc`: the native `uimode` service sets the night mode (`ui_night_mode`) at its start and on `AppleInterfaceThemeChangedNotification` ([system-services.md](system-services.md), "The uimode service"; #655) |
 | Keyboard layout | `AppleCurrentKeyboardLayoutInputSourceID` of `com.apple.HIToolbox` (`com.apple.keylayout.Dvorak`), as the InputDevices layout with its characters, else US English ([input.md](input.md), "Layouts") | `vendor.aim.mac.keyboard_layout` (`keyboard_layout_english_us_dvorak`) | `aim-keyboard layout` (InputManager's layout override for the built-in keyboard), at `sys.boot_completed` and on each change |
 
 - **Host.** `aim-guest-init` (`src/mac.rs`) sets the properties after
@@ -27,20 +28,11 @@ the Mac's settings are only read.
   `getDeviceTimeZone()`). The detector's manual suggestion is not usable:
   with automatic detection on (the default, with the geolocation
   declaration) its capability is "not applicable".
-- **The appearance at boot** is applied at `sys.boot_completed`, so a
-  boot after the Mac changed shows the previous appearance until then.
-  UiModeManager takes a change from its start, before the system is
-  ready, but then never sends the new mode to the global configuration
-  (`am get-config` has no `night`/`notnight`).
 - **Changes made inside Android** hold until the Mac's setting changes
   again or the device boots: a property trigger fires only on a new
   value. Whether an in-Android change should instead stick, or the Mac
   should always win, is open (#281).
 - **The clock.** `CLOCK_REALTIME` is the Mac's; only the zone was wrong.
-- **The native uimode** ([system-services.md](system-services.md),
-  "The uimode service") follows the appearance itself, from its start and
-  on the Mac's change notification, so the `cmd uimode night` trigger
-  repeats it (#655).
 
 ## The language list (#344)
 
@@ -106,18 +98,14 @@ and Light:
 - `date`: KST, the Mac's time; `getprop persist.sys.timezone`
   `Asia/Seoul`, `persist.sys.locale` `ko-KR`; `am get-config`
   `ko-rKR-...-notnight`; Settings draws in Korean.
-- Live, through the same property path (`setprop vendor.aim.mac.night_mode
-  yes`, `vendor.aim.mac.time_zone America/Los_Angeles` from a guest
-  shell): `cmd uimode night` `yes`, `ui_night_mode` 2, Settings redraws
-  dark; `date` PDT, the status bar clock follows, and the detector's
-  device zone is `America/Los_Angeles` with confidence 100.
-- `cmd uimode night no` inside Android then held.
-- The next boot of that data image, left dark and on
-  `America/Los_Angeles` inside Android, started on `Asia/Seoul` (the
-  detector's device zone too) and switched to light at
-  `sys.boot_completed` (`am get-config` `notnight`).
+- Live, through the same property path (`setprop vendor.aim.mac.time_zone
+  America/Los_Angeles` from a guest shell): `date` PDT, the status bar
+  clock follows, and the detector's device zone is
+  `America/Los_Angeles` with confidence 100.
+- The next boot of that data image, left on `America/Los_Angeles` inside
+  Android, started on `Asia/Seoul` (the detector's device zone too).
 
 Unit tests: `mac::tests` of aim-guest-init (zone paths, tzdata index,
-appearance), `locale::tests` and `locale::mac::tests` of aim-services
+keyboard layouts), `locale::tests` and `locale::mac::tests` of aim-services
 (tag mapping, region, the list, when it applies, the Mac's list read and
 a change heard) and `boot_image::derived_image_tzdata_has_the_macs_zones`.

@@ -16,7 +16,7 @@
 //! - [`apex`]: `/apex/apex-info-list.xml` for the pre-flattened APEX tree.
 //! - [`executor`], [`boot`]: the `CommandExecutor` and init's main loop;
 //!   [`mount`]: the data image, attached while the boot starts.
-//! - [`mac`]: the Mac's time zone, language and appearance as
+//! - [`mac`]: the Mac's time zone, language and keyboard layout as
 //!   `vendor.aim.mac.*` properties.
 //! - [`sku`]: the SKU a bootloader would report, from the Mac's sensors.
 //!
