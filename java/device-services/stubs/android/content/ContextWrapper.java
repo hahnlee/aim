@@ -7,6 +7,12 @@ import android.content.pm.PackageManager;
 public class ContextWrapper extends Context {
     public ContextWrapper(Context base) { throw new RuntimeException("stub"); }
     @Override
+    public void setTheme(int resid) { throw new RuntimeException("stub"); }
+    @Override
+    public android.content.res.Resources.Theme getTheme() { throw new RuntimeException("stub"); }
+    @Override
+    public Context createConfigurationContext(android.content.res.Configuration overrideConfiguration) { throw new RuntimeException("stub"); }
+    @Override
     public PackageManager getPackageManager() { throw new RuntimeException("stub"); }
     @Override
     public int checkPermission(String permission, int pid, int uid) { throw new RuntimeException("stub"); }

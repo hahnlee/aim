@@ -6,4 +6,13 @@ public class ActivityInfo extends ComponentInfo {
     public static final int SCREEN_ORIENTATION_UNSPECIFIED = -1;
 
     public int screenOrientation;
+    public WindowLayout windowLayout;
+    public final int getThemeResource() { throw new RuntimeException("stub"); }
+
+    public static final class WindowLayout {
+        public final int minWidth;
+        public final int minHeight;
+
+        public WindowLayout(android.os.Parcel source) { throw new RuntimeException("stub"); }
+    }
 }

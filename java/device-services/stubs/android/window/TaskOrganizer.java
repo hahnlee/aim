@@ -14,4 +14,8 @@ public class TaskOrganizer extends WindowOrganizer {
     public void onTaskAppeared(ActivityManager.RunningTaskInfo taskInfo, SurfaceControl leash) { throw new RuntimeException("stub"); }
     public void onTaskVanished(ActivityManager.RunningTaskInfo taskInfo) { throw new RuntimeException("stub"); }
     public void onTaskInfoChanged(ActivityManager.RunningTaskInfo taskInfo) { throw new RuntimeException("stub"); }
+    public void addStartingWindow(StartingWindowInfo info) { throw new RuntimeException("stub"); }
+    public void removeStartingWindow(StartingWindowRemovalInfo removalInfo) { throw new RuntimeException("stub"); }
+    public void copySplashScreenView(int taskId) { throw new RuntimeException("stub"); }
+    public void onAppSplashScreenViewRemoved(int taskId) { throw new RuntimeException("stub"); }
 }

@@ -431,6 +431,11 @@ pub mod display {
         /// the server asked for ([`LAUNCH`]) has drawn its first frame, or
         /// ended without one.
         pub const DRAWN: u32 = 10;
+        /// Guest: the task is in picture-in-picture: its window floats
+        /// above the others, on every space, keeping its proportions.
+        pub const PINNED: u32 = 11;
+        /// Guest: the task left picture-in-picture.
+        pub const UNPINNED: u32 = 12;
         /// Server: move or resize the task to [`super::Window::bounds`].
         pub const SET_BOUNDS: u32 = 16;
         /// Server: make the task the top (focused) one.

@@ -1,0 +1,12 @@
+// A stub of the image's class for compiling against (docs/build.md, "Java"):
+// the members used, checked against the image by the device-services node.
+package android.graphics.drawable;
+
+public class AnimationDrawable extends DrawableContainer implements Animatable {
+    public AnimationDrawable() { throw new RuntimeException("stub"); }
+    @Override
+    public void start() { throw new RuntimeException("stub"); }
+    @Override
+    public void stop() { throw new RuntimeException("stub"); }
+    public long getTotalDuration() { throw new RuntimeException("stub"); }
+}

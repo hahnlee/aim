@@ -2,4 +2,6 @@
 // the members used, checked against the image by the device-services node.
 package android.app;
 
-public class ActivityOptions extends ComponentOptions {}
+public class ActivityOptions extends ComponentOptions {
+    public int getLaunchWindowingMode() { throw new RuntimeException("stub"); }
+}

@@ -51,7 +51,7 @@ public final class DeviceServices extends SystemService {
         if (phase == PHASE_DEVICE_SPECIFIC_SERVICES_READY) {
             // Before the home activity starts: every task is organized.
             if (SystemProperties.getBoolean(WindowShell.PROPERTY, false)) {
-                WindowShell.start();
+                WindowShell.start(getContext());
             }
             attachBridge();
         } else if (phase == PHASE_THIRD_PARTY_APPS_CAN_START) {

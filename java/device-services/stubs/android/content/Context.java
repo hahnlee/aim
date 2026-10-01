@@ -11,8 +11,14 @@ import android.os.UserHandle;
 public abstract class Context {
     public static final String LOCATION_SERVICE = "location";
     public static final String VR_SERVICE = "vrmanager";
+    public static final int CONTEXT_RESTRICTED = 4;
 
     public Resources getResources() { throw new RuntimeException("stub"); }
+    public abstract void setTheme(int resid);
+    public abstract Resources.Theme getTheme();
+    public final android.content.res.TypedArray obtainStyledAttributes(int[] attrs) { throw new RuntimeException("stub"); }
+    public Context createPackageContextAsUser(String packageName, int flags, UserHandle user) throws PackageManager.NameNotFoundException { throw new RuntimeException("stub"); }
+    public abstract Context createConfigurationContext(android.content.res.Configuration overrideConfiguration);
     public ApplicationInfo getApplicationInfo() { throw new RuntimeException("stub"); }
     public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter) { throw new RuntimeException("stub"); }
     public Intent registerReceiverAsUser(BroadcastReceiver receiver, UserHandle user, IntentFilter filter, String broadcastPermission, Handler scheduler) { throw new RuntimeException("stub"); }

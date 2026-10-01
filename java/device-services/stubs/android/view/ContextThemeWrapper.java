@@ -6,4 +6,5 @@ import android.content.ContextWrapper;
 
 public class ContextThemeWrapper extends ContextWrapper {
     public ContextThemeWrapper() { super(null); throw new RuntimeException("stub"); }
+    public ContextThemeWrapper(android.content.Context base, android.content.res.Resources.Theme theme) { super(null); throw new RuntimeException("stub"); }
 }

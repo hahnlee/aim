@@ -28,28 +28,35 @@
 //! tasks freeform and places their surfaces, and it tells the bridge each
 //! task's activity type (the desktop is the home task) and its top
 //! activity's manifest orientation, which turns the window as a request
-//! does.
+//! does. It says when a transition a task took part in finished: the
+//! window follows the task's bounds, and a launch's splash on the Mac gives
+//! way to the task's own starting window, which the shell draws.
+//!
+//! A launcher activity's new task opens where its window last was, as a
+//! desktop reopens an app's window ([`aim_windows_core::places`], kept in
+//! [`PLACES`]).
 
 mod framework;
 mod shell;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_char;
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::fd::FromRawFd;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_hostcall::display::{Window, Windows, mode, orientation, window};
 use aim_hostcall::guest;
 use aim_windows_core::Orientation;
+use aim_windows_core::places::Places;
 use binder::Interface;
 
 use framework::{
     BpActivityTaskManager, BpWindowManager, Event, ITaskStackListener, WINDOWING_MODE_FREEFORM,
     WINDOWING_MODE_FULLSCREEN,
 };
-use shell::IWindowShellListener;
+use shell::{BpWindowShell, IWindowShellListener};
 
 /// The default display, the one the display server shows.
 const DISPLAY: i32 = 0;
@@ -64,6 +71,10 @@ const CAPTION_PROPERTY: &std::ffi::CStr = c"ro.vendor.aim.freeform_caption_dp";
 const SHELL_PROPERTY: &std::ffi::CStr = c"ro.vendor.aim.lightweight_shell";
 /// `WindowConfiguration.ACTIVITY_TYPE_HOME`.
 const ACTIVITY_TYPE_HOME: i32 = 2;
+/// `WindowConfiguration.WINDOWING_MODE_PINNED`: picture-in-picture.
+const WINDOWING_MODE_PINNED: i32 = 2;
+/// Where each launcher activity's window last was, in the data directory.
+const PLACES: &str = "/data/system/aim-windows-places";
 
 unsafe extern "C" {
     /// bionic: a system property's value, at most `PROP_VALUE_MAX` (92)
@@ -83,9 +94,11 @@ struct Task {
     shown: Option<[i32; 4]>,
     /// The orientation an activity of it last asked for.
     orientation: Orientation,
-    /// What the window shell last said of it: its activity type and its
-    /// top activity's `screenOrientation`.
-    shell: Option<(i32, i32)>,
+    /// What the window shell last said of it: its activity type, its top
+    /// activity's `screenOrientation` and its windowing mode.
+    shell: Option<(i32, i32, i32)>,
+    /// A transition of it finished: its surface shows what it drew.
+    placed: bool,
 }
 
 struct Bridge {
@@ -103,6 +116,13 @@ struct Bridge {
     in_front: Mutex<Option<i32>>,
     /// The window shell places the tasks' surfaces and names the desktop.
     shell: bool,
+    /// The window shell, once attached.
+    window_shell: OnceLock<BpWindowShell>,
+    /// Where each activity's window last was ([`PLACES`]).
+    places: Mutex<Places>,
+    /// The activities of `LAUNCH`es whose splash still shows, with the
+    /// window shell.
+    launching: Mutex<HashSet<String>>,
 }
 
 impl Bridge {
@@ -147,6 +167,7 @@ impl Bridge {
         };
         let mut out = Vec::new();
         let mut commit = None;
+        let mut place = None;
         {
             let mut tasks = self.tasks.lock().unwrap();
             let t = tasks.entry(task).or_default();
@@ -166,6 +187,9 @@ impl Bridge {
                     if t.orientation != Orientation::Any {
                         out.push(orientation_record(task, t.orientation));
                     }
+                    if t.pinned() {
+                        out.push(pinned_record(task, true));
+                    }
                     commit = Some(b).filter(|_| !self.shell);
                 }
                 (Some(old), Some(b)) if old != b || force => {
@@ -181,10 +205,25 @@ impl Bridge {
                 }),
                 _ => {}
             }
+            // A window in picture-in-picture is not where the app's opens.
+            if bounds.is_some() && bounds != t.shown && !t.pinned() {
+                place = t.activity.clone().zip(bounds);
+            }
             t.shown = bounds;
+            if let Some(a) = t
+                .activity
+                .as_ref()
+                .filter(|_| t.placed && t.shown.is_some())
+                && self.launching.lock().unwrap().remove(a)
+            {
+                out.push(Window::with_text(window::DRAWN, 0, a));
+            }
         }
         for w in &out {
             self.send(w);
+        }
+        if let Some((activity, b)) = place {
+            self.remember(&activity, b);
         }
         if let Some(b) = commit {
             let [l, t, r, bottom] = b;
@@ -194,6 +233,19 @@ impl Bridge {
                 .and_then(|()| self.atm.resize_task(task, b));
             if let Err(e) = r {
                 log::warn!("task {task}: commit bounds: {e}");
+            }
+        }
+    }
+
+    /// Keep `bounds` as where `activity`'s window last was.
+    fn remember(&self, activity: &str, bounds: [i32; 4]) {
+        let mut places = self.places.lock().unwrap();
+        if places.set(activity, bounds) {
+            let partial = format!("{PLACES}.partial");
+            let r = std::fs::write(&partial, places.text())
+                .and_then(|()| std::fs::rename(&partial, PLACES));
+            if let Err(e) = r {
+                log::warn!("{PLACES}: {e}");
             }
         }
     }
@@ -218,7 +270,7 @@ impl Bridge {
             return tasks
                 .get(&task)
                 .and_then(|t| t.shell)
-                .is_some_and(|(activity_type, _)| activity_type == ACTIVITY_TYPE_HOME);
+                .is_some_and(|(activity_type, _, _)| activity_type == ACTIVITY_TYPE_HOME);
         }
         let (w, h) = self.size;
         matches!(self.atm.task_bounds(task), Ok(Some(b)) if b == [0, 0, w, h])
@@ -228,13 +280,20 @@ impl Bridge {
     /// manifest orientation (or the one below it, when it finishes) turns
     /// the window as `setRequestedOrientation` does; the orientation the
     /// task had when the bridge first heard of it shaped its launch bounds.
-    fn shell_changed(&self, task: i32, activity_type: i32, orientation: i32) {
-        let turned = {
+    /// A window whose task enters or leaves picture-in-picture floats or
+    /// stops floating.
+    fn shell_changed(&self, task: i32, activity_type: i32, orientation: i32, mode: i32) {
+        let (turned, pinned) = {
             let mut tasks = self.tasks.lock().unwrap();
             let t = tasks.entry(task).or_default();
-            let before = t.shell.replace((activity_type, orientation));
-            before.is_some_and(|(_, o)| o != orientation)
+            let was_pinned = t.pinned();
+            let before = t.shell.replace((activity_type, orientation, mode));
+            let pinned = Some(t.pinned()).filter(|&p| p != was_pinned && t.shown.is_some());
+            (before.is_some_and(|(_, o, _)| o != orientation), pinned)
         };
+        if let Some(p) = pinned {
+            self.send(&pinned_record(task, p));
+        }
         if turned {
             self.on_event(Event::Orientation(
                 task,
@@ -378,17 +437,29 @@ impl Bridge {
 
     /// Start launcher activity `activity` (`package/class`), then tell the
     /// display server once it has drawn its first frame or the launch has
-    /// ended: a splash shows until then.
+    /// ended: a splash shows until then. With the window shell, it shows
+    /// until the task's window shows the task's starting window.
     ///
     /// A task started with it that has a window keeps the window's place:
     /// the launch, which brings that task to the front, gives it its own
     /// bounds as launch bounds. Without them freeform lays the task out
-    /// again as a new one, and cascades it away from its own bounds.
+    /// again as a new one, and cascades it away from its own bounds. A new
+    /// task opens where the activity's window last was, while that is
+    /// within the display.
     fn launch(&self, activity: &str) {
+        let (w, h) = self.size;
+        let within = |&[l, t, r, b]: &[i32; 4]| l >= 0 && t >= 0 && r <= w && b <= h;
         let bounds = (self.tasks.lock().unwrap().values())
-            .find_map(|t| t.shown.filter(|_| t.activity.as_deref() == Some(activity)));
+            .find_map(|t| t.shown.filter(|_| t.activity.as_deref() == Some(activity)))
+            .or_else(|| {
+                let place = self.places.lock().unwrap().get(activity);
+                place.filter(|b| within(b) && self.windowed(*b))
+            });
         match activity.split_once('/') {
             Some((package, class)) => {
+                if self.shell {
+                    self.launching.lock().unwrap().insert(activity.to_string());
+                }
                 // With the window shell, freeform from the start, as a
                 // desktop's launcher starts apps.
                 let mode = self.shell.then_some(WINDOWING_MODE_FREEFORM);
@@ -403,7 +474,9 @@ impl Bridge {
             }
             None => log::warn!("start {activity}: not package/class"),
         }
-        self.send(&Window::with_text(window::DRAWN, 0, activity));
+        if !self.shell || self.launching.lock().unwrap().remove(activity) {
+            self.send(&Window::with_text(window::DRAWN, 0, activity));
+        }
     }
 
     /// Carry out one request of the display server.
@@ -411,7 +484,13 @@ impl Bridge {
         let task = w.task;
         let r = match w.op {
             window::SET_BOUNDS => {
-                let r = self.atm.resize_task(task, w.bounds);
+                let pinned = (self.tasks.lock().unwrap().get(&task)).is_some_and(Task::pinned);
+                let r = match self.window_shell.get().filter(|_| pinned) {
+                    // WindowManager leaves a pinned task's bounds to the
+                    // shell; they come back with the task placed.
+                    Some(s) => s.set_pip_bounds(task, w.bounds),
+                    None => self.atm.resize_task(task, w.bounds),
+                };
                 // The window follows the bounds the task got, which may
                 // differ (a minimum size).
                 self.refresh(task, true);
@@ -433,6 +512,25 @@ impl Bridge {
         if let Err(e) = r {
             log::warn!("request {} for task {task}: {e}", w.op);
         }
+    }
+}
+
+impl Task {
+    fn pinned(&self) -> bool {
+        self.shell
+            .is_some_and(|(_, _, mode)| mode == WINDOWING_MODE_PINNED)
+    }
+}
+
+fn pinned_record(task: i32, pinned: bool) -> Window {
+    Window {
+        op: if pinned {
+            window::PINNED
+        } else {
+            window::UNPINNED
+        },
+        task,
+        ..Default::default()
     }
 }
 
@@ -460,8 +558,13 @@ impl ITaskStackListener for Listener {
 }
 
 impl IWindowShellListener for Listener {
-    fn task_changed(&self, task: i32, activity_type: i32, orientation: i32) {
-        self.0.shell_changed(task, activity_type, orientation);
+    fn task_changed(&self, task: i32, activity_type: i32, orientation: i32, mode: i32) {
+        self.0.shell_changed(task, activity_type, orientation, mode);
+    }
+
+    fn task_placed(&self, task: i32) {
+        self.0.tasks.lock().unwrap().entry(task).or_default().placed = true;
+        self.0.refresh(task, false);
     }
 }
 
@@ -511,6 +614,11 @@ fn main() {
         caption,
         in_front: Mutex::new(None),
         shell,
+        window_shell: OnceLock::new(),
+        places: Mutex::new(Places::parse(
+            &std::fs::read_to_string(PLACES).unwrap_or_default(),
+        )),
+        launching: Mutex::new(HashSet::new()),
     });
     let listener = framework::new_listener(Listener(bridge.clone()));
     if let Err(e) = bridge.atm.register_task_stack_listener(&listener) {
@@ -526,6 +634,7 @@ fn main() {
             log::error!("attach to the window shell: {e}");
             std::process::exit(1);
         }
+        let _ = bridge.window_shell.set(window_shell);
     }
     log::info!(
         "window mode: display {}x{}, caption {caption} px",
