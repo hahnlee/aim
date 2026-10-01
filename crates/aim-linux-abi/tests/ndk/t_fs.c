@@ -1,5 +1,6 @@
 // File syscalls: pipes, dup3, fcntl, stat/statx, getdents64, *at calls,
-// renameat2, fallocate, copies, memfd seals, O_TMPFILE and inotify.
+// renameat2, fallocate, copies (splice through a pipe), memfd seals,
+// O_TMPFILE and inotify.
 // argv[1] is a writable directory.
 #include <dirent.h>
 #include <fcntl.h>
@@ -11,6 +12,7 @@
 #include <sys/inotify.h>
 #include <sys/mman.h>
 #include <sys/sendfile.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
@@ -259,6 +261,64 @@ static void copies(void) {
   unlink(p("dst"));
 }
 
+// A splice from a socket into a pipe moves what fits at once, even when
+// asked for more than the pipe holds; the caller drains the pipe after
+// (FileUtils' copy, as PackageInstaller streams an APK).
+static void splice_through_a_pipe(void) {
+  int sv[2], pp[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && pipe(pp) == 0);
+  static char data[256 << 10];
+  for (size_t i = 0; i < sizeof(data); i++) data[i] = (char)(i * 7);
+  FORK_OR_SKIP(pid);
+  if (pid == 0) {
+    close(sv[0]);
+    size_t sent = 0;
+    while (sent < sizeof(data)) {
+      ssize_t n = write(sv[1], data + sent, sizeof(data) - sent);
+      if (n <= 0) _exit(1);
+      sent += n;
+    }
+    _exit(0);
+  }
+  close(sv[1]);
+  alarm(20);
+  int dst = make("spliced", NULL);
+  size_t total = 0;
+  for (;;) {
+    ssize_t t = splice(sv[0], NULL, pp[1], NULL, 512 << 10, SPLICE_F_MOVE | SPLICE_F_MORE);
+    CHECK(t >= 0);
+    if (t == 0) break;
+    while (t > 0) {
+      ssize_t m = splice(pp[0], NULL, dst, NULL, t, SPLICE_F_MOVE | SPLICE_F_MORE);
+      CHECK(m > 0);
+      t -= m;
+      total += m;
+    }
+  }
+  alarm(0);
+  CHECK(total == sizeof(data));
+  static char back[256 << 10];
+  CHECK(pread(dst, back, sizeof(back), 0) == (ssize_t)sizeof(back) && !memcmp(back, data, sizeof(data)));
+  // A full pipe with SPLICE_F_NONBLOCK: EAGAIN instead of waiting.
+  char fill[4096] = {0};
+  CHECK(fcntl(pp[1], F_SETFL, O_NONBLOCK) == 0);
+  while (write(pp[1], fill, sizeof(fill)) > 0) {
+  }
+  CHECK(fcntl(pp[1], F_SETFL, 0) == 0);
+  int src = make("spliced2", "x");
+  loff_t o = 0;
+  CHECK(splice(src, &o, pp[1], NULL, 1, SPLICE_F_NONBLOCK) == -1 && errno == EAGAIN);
+  int status;
+  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  close(src);
+  close(dst);
+  close(sv[0]);
+  close(pp[0]);
+  close(pp[1]);
+  unlink(p("spliced"));
+  unlink(p("spliced2"));
+}
+
 static void memfd_and_seals(void) {
   int fd = memfd_create("sysio", MFD_CLOEXEC | MFD_ALLOW_SEALING);
   CHECK(fd >= 0);
@@ -462,6 +522,7 @@ int main(int argc, char** argv) {
   RUN(rename2);
   RUN(sizes_and_sync);
   RUN(copies);
+  RUN(splice_through_a_pipe);
   RUN(memfd_and_seals);
   RUN(tmpfile_and_linkat);
   RUN(inotify_dir);
