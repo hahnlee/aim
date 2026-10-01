@@ -16,6 +16,10 @@ import android.util.Slog;
  * opened or closed), which the installer does before it commits, and its
  * end. PackageManager offers no hook before a commit itself; the model
  * joins a session to the install it then sees in the package feed.
+ *
+ * The callback runs in system_server beside the original, so nothing it
+ * calls may fail system_server: a host that fails (dies, or answers with
+ * an error) is dropped, logged, and told of nothing more.
  */
 final class PackageWrites extends PackageInstaller.SessionCallback {
     private static final String TAG = "AimPackageWrites";
@@ -72,7 +76,7 @@ final class PackageWrites extends PackageInstaller.SessionCallback {
         }
         try {
             host.finished(sessionId, success);
-        } catch (RemoteException e) {
+        } catch (RemoteException | RuntimeException e) {
             lost(e);
         }
     }
@@ -80,12 +84,15 @@ final class PackageWrites extends PackageInstaller.SessionCallback {
     /** The session's parameters as they stand; none once it is gone. */
     private void send(int sessionId) {
         IPackageWritesHost host = mHost;
-        PackageInstaller.SessionInfo info = mInstaller.getSessionInfo(sessionId);
-        if (host == null || info == null) {
+        if (host == null) {
             return;
         }
         Parcel p = Parcel.obtain();
         try {
+            PackageInstaller.SessionInfo info = mInstaller.getSessionInfo(sessionId);
+            if (info == null) {
+                return;
+            }
             p.writeString(info.getAppPackageName());
             p.writeInt(info.userId);
             p.writeInt(info.getMode());
@@ -102,15 +109,15 @@ final class PackageWrites extends PackageInstaller.SessionCallback {
             p.writeBoolean(info.isCommitted());
             p.writeString(info.getResolvedBaseApkPath());
             host.session(sessionId, p.marshall());
-        } catch (RemoteException e) {
+        } catch (RemoteException | RuntimeException e) {
             lost(e);
         } finally {
             p.recycle();
         }
     }
 
-    private void lost(RemoteException e) {
-        Slog.w(TAG, "the package writes' host died", e);
+    private void lost(Exception e) {
+        Slog.e(TAG, "the package writes' host failed; it is told of no more sessions", e);
         mHost = null;
     }
 }
