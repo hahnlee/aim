@@ -94,6 +94,8 @@ pub struct Platform {
     /// order the zygote loads them.
     pub framework: Table,
     pub framework_overlays: Vec<resources::Overlay>,
+    /// The overlays' APKs, in the same order.
+    pub framework_overlay_apks: Vec<std::path::PathBuf>,
     /// The framework's attributes by name (`android:<name>`).
     pub framework_attrs: HashMap<String, u32>,
     /// The default display's density (`DisplayMetrics.densityDpi`), which

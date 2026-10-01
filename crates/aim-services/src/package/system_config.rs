@@ -12,7 +12,6 @@ use std::fs;
 use std::path::Path;
 
 use aim_android_xml::Element;
-use aim_apps::apk::Apk;
 
 use super::model::System;
 use super::parse::Platform;
@@ -186,17 +185,13 @@ fn int(s: Option<String>) -> Option<i32> {
     s?.trim().parse().ok()
 }
 
-/// `FallbackCategoryProvider.loadFallbacks`: framework-res's
-/// `fallback_categories` (a package, a category per line).
-fn fallback_categories(root: &Path, prop: &dyn Fn(&str) -> Option<String>) -> Vec<(String, i32)> {
+/// `FallbackCategoryProvider.loadFallbacks`: the framework's
+/// `raw/fallback_categories` (a package and a category per line).
+fn fallback_categories(csv: &[u8], prop: &dyn Fn(&str) -> Option<String>) -> Vec<(String, i32)> {
     if prop("fw.ignore_fb_categories").as_deref() == Some("true") {
         return Vec::new();
     }
-    let apk = root.join("system/framework/framework-res.apk");
-    let Ok(csv) = Apk::open(&apk).and_then(|a| a.file("res/raw/fallback_categories.csv")) else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&csv)
+    String::from_utf8_lossy(csv)
         .lines()
         .filter(|l| !l.starts_with('#'))
         .filter_map(|l| {
@@ -210,21 +205,26 @@ fn fallback_categories(root: &Path, prop: &dyn Fn(&str) -> Option<String>) -> Ve
 /// name.
 pub type Properties = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-/// What the image's framework fixes: its aconfig flags and
-/// `config_useRoundIcon` (the parser's platform).
+/// What the image's framework fixes: its aconfig flags,
+/// `config_useRoundIcon` and `raw/fallback_categories`, as its static
+/// overlays leave them (the parser's platform).
 pub struct Framework {
     flags: Vec<(String, bool)>,
     use_round_icon: bool,
+    fallback_categories: Vec<u8>,
 }
 
 impl Framework {
     pub fn load(root: &Path) -> Result<Framework, String> {
         let platform = Platform::load(root, Default::default())?;
-        let mut flags: Vec<(String, bool)> = platform.flags.into_iter().collect();
+        let mut flags: Vec<(String, bool)> = platform.flags.clone().into_iter().collect();
         flags.sort();
         Ok(Framework {
             flags,
             use_round_icon: platform.use_round_icon,
+            fallback_categories: platform
+                .framework_file(root, "raw", "fallback_categories")
+                .unwrap_or_default(),
         })
     }
 }
@@ -244,7 +244,7 @@ pub fn system(root: &Path, prop: &dyn Fn(&str) -> Option<String>, framework: &Fr
         // Settings.Global.compatibility_mode's default; PackageManager reads
         // the setting at systemReady (#737).
         compatibility_mode: true,
-        fallback_categories: fallback_categories(root, prop),
+        fallback_categories: fallback_categories(&framework.fallback_categories, prop),
         flags: framework.flags.clone(),
         ..System::default()
     }
