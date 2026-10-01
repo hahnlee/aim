@@ -9,6 +9,7 @@
 //! feed does not give is not modelled: the call is reported, not
 //! answered.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,18 +19,20 @@ use aim_service_aidl::android_content_pm_ipackagemanager as pm;
 use aim_service_aidl::android_content_pm_ipackagemanagernative as native;
 
 use super::apps_filter::{
-    self, AppsFilter, Config, NotModelled, ROOT_UID, SYSTEM_UID, Setting, app_id,
+    self, AppsFilter, NotModelled, ROOT_UID, SYSTEM_UID, Setting, app_id,
     is_system_or_root_or_shell, setting, should_filter_application, user_id,
 };
+use super::feed::Feed;
 use super::info::{
     self, ApplicationInfo, COMPONENT_ENABLED_STATE_DEFAULT, COMPONENT_ENABLED_STATE_DISABLED,
     COMPONENT_ENABLED_STATE_ENABLED, Extras, FLAG_SYSTEM, PackageInfo, Target, array_order,
     flags::*, generate_application_info, generate_package_info, user_state,
 };
 use super::intent::ComponentName;
-use super::model::{PackageState, PackageUserState, State, User};
-use super::pkg::{AndroidPackage, booleans};
-use super::reply;
+use super::model::{PackageState, PackageUserState, State, System, User};
+use super::pkg::{AndroidPackage, booleans, booleans2::APEX};
+use super::resolve::Resolver;
+use super::{reply, system_config};
 use crate::shadow::{Answer, ListSlice, ShadowCall, ShadowModel, Value};
 
 /// How long a comparison waits for the feed to catch up with the
@@ -90,33 +93,50 @@ pub type States = Box<dyn Fn(Duration) -> Option<Arc<State>> + Send + Sync>;
 /// `package` and `package_native`, modelled over the feed's state.
 pub struct PackageModel {
     states: States,
-    /// The apps filter of the last state answered from.
-    filter: Mutex<Option<(Arc<State>, Arc<AppsFilter>)>>,
+    /// Intent resolution, and the apps filter of each state.
+    resolver: Resolver,
 }
 
 impl PackageModel {
     pub fn new(states: States) -> Arc<PackageModel> {
         Arc::new(PackageModel {
             states,
-            filter: Mutex::new(None),
+            resolver: Resolver::default(),
         })
     }
+}
 
-    fn filter(&self, state: &Arc<State>) -> Arc<AppsFilter> {
-        let mut cached = self.filter.lock().unwrap();
-        if let Some((s, f)) = cached.as_ref()
-            && Arc::ptr_eq(s, state)
+/// Starts the package feed and the model of `package` and
+/// `package_native` over it, for a shadow comparison of guest-init's
+/// image `image`; the feed's states are written to `dump`.
+pub fn start(
+    system: &Arc<crate::system::System>,
+    image: &Path,
+    dump: PathBuf,
+) -> Result<Arc<PackageModel>, String> {
+    let props = system_config::build_props(image);
+    let device = system_config::system(image, &props)?;
+    let feed = Feed::start(system, Some(dump));
+    // Each fed state with the device's constants, made once per state.
+    let merged: Mutex<Option<(Arc<State>, Arc<State>)>> = Mutex::new(None);
+    Ok(PackageModel::new(Box::new(move |t| {
+        let fed = feed.fresh(t)?;
+        let mut merged = merged.lock().unwrap();
+        if let Some((f, m)) = merged.as_ref()
+            && Arc::ptr_eq(f, &fed)
         {
-            return f.clone();
+            return Some(m.clone());
         }
-        let config = Config {
-            force_system_packages_queryable: state.system.force_system_packages_queryable,
-            force_queryable_packages: state.system.force_queryable_packages.clone(),
+        let mut state = (*fed).clone();
+        state.system = System {
+            force_system_packages_queryable: fed.system.force_system_packages_queryable,
+            force_queryable_packages: fed.system.force_queryable_packages.clone(),
+            ..device.clone()
         };
-        let f = Arc::new(AppsFilter::new(state, &config));
-        *cached = Some((state.clone(), f.clone()));
-        f
-    }
+        let state = Arc::new(state);
+        *merged = Some((fed, state.clone()));
+        Some(state)
+    })))
 }
 
 impl ShadowModel for PackageModel {
@@ -124,10 +144,13 @@ impl ShadowModel for PackageModel {
         let Some(state) = (self.states)(FRESH) else {
             return Answer::NotModelled;
         };
-        let filter = self.filter(&state);
+        if let Some(answer) = self.resolver.answer(&state, call) {
+            return answer;
+        }
+        let resolution = self.resolver.resolution(&state);
         let q = Query {
             state: &state,
-            filter: &filter,
+            filter: &resolution.apps_filter,
             calling_uid: call.sender_euid as i32,
         };
         let answered = match call.descriptor {
@@ -147,6 +170,11 @@ impl ShadowModel for PackageModel {
         code: u32,
         r: &mut Reader<'_>,
     ) -> Option<ParcelResult<Value>> {
+        if descriptor == pm::DESCRIPTOR
+            && let Some(v) = self.resolver.decode_reply(code, r)
+        {
+            return Some(v);
+        }
         reply::decode(descriptor, code, r)
     }
 }
@@ -778,12 +806,7 @@ impl Query<'_> {
         let factory_only = flags & MATCH_FACTORY_ONLY != 0;
         let apex = flags & MATCH_APEX != 0;
         if factory_only && let Some(ps) = self.state.disabled_system_packages.get(&name) {
-            if !apex
-                && ps
-                    .pkg
-                    .as_deref()
-                    .is_some_and(|p| p.is2(super::pkg::booleans2::APEX))
-            {
+            if !apex && ps.pkg.as_deref().is_some_and(|p| p.is2(APEX)) {
                 return Ok(Ok(None));
             }
             if self.filter_shared_lib(ps, user, flags)? || self.filtered(Some(ps), uid, user)? {
@@ -795,7 +818,7 @@ impl Query<'_> {
             if factory_only && !ps.is.system {
                 return Ok(Ok(None));
             }
-            if !apex && p.is2(super::pkg::booleans2::APEX) {
+            if !apex && p.is2(APEX) {
                 return Ok(Ok(None));
             }
             if self.filter_shared_lib(ps, user, flags)? || self.filtered(Some(ps), uid, user)? {
@@ -877,7 +900,7 @@ impl Query<'_> {
         }
         let name = self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST);
         if let Some((ps, p)) = self.package_of(&name) {
-            if flags & MATCH_APEX == 0 && p.is2(super::pkg::booleans2::APEX) {
+            if flags & MATCH_APEX == 0 && p.is2(APEX) {
                 return Ok(Ok(None));
             }
             if self.filter_shared_lib(ps, user, flags)?
@@ -907,10 +930,7 @@ impl Query<'_> {
 
     /// `getInstallSource`.
     fn install_source(&self, name: &str, user: i32) -> Result<Option<Source<'_>>, NotModelled> {
-        if self
-            .package_of(name)
-            .is_some_and(|(_, p)| p.is2(super::pkg::booleans2::APEX))
-        {
+        if self.package_of(name).is_some_and(|(_, p)| p.is2(APEX)) {
             // InstallSource.EMPTY.
             return Ok(Some(None));
         }
@@ -984,6 +1004,7 @@ impl Query<'_> {
             .map(|s| info::SigningInfo {
                 scheme_version: s.scheme_version,
                 signatures: s.signatures.clone(),
+                public_keys: None,
                 past_signing_certificates: s
                     .past_signatures
                     .as_ref()
@@ -1387,37 +1408,36 @@ impl Query<'_> {
         let apex = flags & MATCH_APEX != 0;
         let factory = flags & MATCH_FACTORY_ONLY != 0;
         let archived_only = !uninstalled && flags & MATCH_ARCHIVED_PACKAGES != 0;
+        let is_apex = |ps: &PackageState| ps.pkg.as_deref().is_some_and(|p| p.is2(APEX));
         let mut list = Vec::new();
-        for ps in self.packages_in_order() {
-            let ps = if factory && ps.is.system {
-                self.state
-                    .disabled_system_packages
-                    .get(&ps.name)
-                    .unwrap_or(ps)
-            } else {
-                ps
-            };
-            if factory && !ps.is.system {
+        for current in self.packages_in_order() {
+            // Without MATCH_KNOWN_PACKAGES, only packages with code
+            // (`mPackages`), and an APEX by the current package.
+            if !(uninstalled || archived_only) && current.pkg.is_none() {
                 continue;
             }
-            if uninstalled || archived_only {
-                if !apex
-                    && ps
-                        .pkg
-                        .as_deref()
-                        .is_some_and(|p| p.is2(super::pkg::booleans2::APEX))
-                {
-                    continue;
-                }
-                let state = user_state(ps, user);
-                if archived_only && !state.installed && state.archive_state.is_none() {
-                    continue;
-                }
+            if factory && !current.is.system {
+                continue;
+            }
+            let ps = match factory {
+                true => self
+                    .state
+                    .disabled_system_packages
+                    .get(&current.name)
+                    .unwrap_or(current),
+                false => current,
+            };
+            let apex_of = if uninstalled || archived_only {
+                ps
             } else {
-                let Some(p) = ps.pkg.as_deref() else { continue };
-                if !apex && p.is2(super::pkg::booleans2::APEX) {
-                    continue;
-                }
+                current
+            };
+            if !apex && is_apex(apex_of) {
+                continue;
+            }
+            let state = user_state(ps, user);
+            if archived_only && !state.installed && state.archive_state.is_none() {
+                continue;
             }
             if self.filter_shared_lib(ps, user, flags)?
                 || self.filtered(Some(ps), self.calling_uid, user)?
@@ -1466,7 +1486,7 @@ impl Query<'_> {
                 }
             }
             let Some(p) = ps.pkg.as_deref() else { continue };
-            if !apex && p.is2(super::pkg::booleans2::APEX) {
+            if !apex && p.is2(APEX) {
                 continue;
             }
             if self.filter_shared_lib(ps, user, flags)?

@@ -5,8 +5,8 @@
 //! format, strings through `PackageParserCacheHelper`'s pool), and the
 //! parser cache under `/data/system/package_cache` holds the same.
 //! `PackageImpl(Parcel)` and its components' parcel constructors at
-//! `android-16.0.0_r1` are the reference; what no query reads (key set
-//! mappings, properties, feature flags) is read past.
+//! `android-16.0.0_r1` are the reference. Every field the parcel holds
+//! is kept, so the package can be written back as it was read (#723).
 
 use aim_binder_host::parcel::{BAD_VALUE, Reader, Result};
 
@@ -23,6 +23,7 @@ const VAL_FLOAT: i32 = 7;
 const VAL_DOUBLE: i32 = 8;
 const VAL_BOOLEAN: i32 = 9;
 const VAL_INTARRAY: i32 = 18;
+const VAL_SERIALIZABLE: i32 = 21;
 
 /// `BaseBundle.BUNDLE_MAGIC` and `BUNDLE_MAGIC_NATIVE`.
 const BUNDLE_MAGIC: i32 = 0x4C44_4E42;
@@ -152,6 +153,7 @@ pub struct Component {
     pub intents: Vec<ParsedIntentInfo>,
     /// `None`: none written; an empty bundle is `Some` with no entries.
     pub meta_data: Option<MetaData>,
+    pub properties: Option<Vec<(String, Property)>>,
 }
 
 /// `ParsedMainComponent`.
@@ -295,12 +297,59 @@ pub struct UsesPermission {
     pub flags: i32,
 }
 
-/// `ParsedProcess`, what an application's info shows of it.
+/// `ParsedProcess`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Process {
+    pub use_embedded_dex: bool,
     pub name: Option<String>,
     /// The application class by package (`getAppClassNamesByPackage`).
     pub app_class_names_by_package: Vec<(String, Option<String>)>,
+    pub denied_permissions: Vec<String>,
+    pub gwp_asan_mode: i32,
+    pub memtag_mode: i32,
+    pub native_heap_zero_initialized: i32,
+}
+
+/// `PackageManager.Property`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Property {
+    pub name: Option<String>,
+    pub package_name: Option<String>,
+    pub class_name: Option<String>,
+    pub value: PropertyValue,
+}
+
+/// A property's value by `Property.TYPE_*`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PropertyValue {
+    Bool(bool),
+    Float(f32),
+    Int(i32),
+    Resource(i32),
+    String(Option<String>),
+    /// A type the original reads as no property.
+    Unknown(i32),
+}
+
+/// A `Serializable` as a parcel carries it (`writeSerializable`): its
+/// class and its Java serialization.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Serialized {
+    pub class: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Key set aliases and their public keys (`readKeySetMapping`).
+pub type KeySetMapping = Vec<(Option<String>, Option<Vec<Option<Serialized>>>)>;
+
+/// `ParsedApexSystemService`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ApexSystemService {
+    pub name: Option<String>,
+    pub jar_path: Option<String>,
+    pub min_sdk_version: Option<String>,
+    pub max_sdk_version: Option<String>,
+    pub init_order: i32,
 }
 
 /// `ConfigurationInfo`.
@@ -328,12 +377,16 @@ pub struct FeatureInfo {
 pub struct SigningDetails {
     pub signatures: Option<Vec<Vec<u8>>>,
     pub scheme_version: i32,
+    /// The signers' public keys (`writeArraySet` of `PublicKey`s).
+    pub public_keys: Option<Vec<Option<Serialized>>>,
     pub past_signing_certificates: Option<Vec<Vec<u8>>>,
 }
 
 /// `PackageImpl`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AndroidPackage {
+    /// `mFeatureFlagState` as written: `flag=1`, `flag=0` or `flag=?`.
+    pub feature_flag_state: Option<Vec<Option<String>>>,
     /// `supportsSmallScreens` and the rest: `None` unset (`ForBoolean`).
     pub supports_small_screens: Option<bool>,
     pub supports_normal_screens: Option<bool>,
@@ -356,6 +409,8 @@ pub struct AndroidPackage {
     pub overlay_target_overlayable_name: Option<String>,
     pub overlay_category: Option<String>,
     pub overlay_priority: i32,
+    /// Overlayable names and their actors.
+    pub overlayables: Option<Vec<(String, Option<String>)>>,
     pub sdk_library_name: Option<String>,
     pub sdk_lib_version_major: i32,
     pub static_shared_library_name: Option<String>,
@@ -363,22 +418,31 @@ pub struct AndroidPackage {
     pub library_names: Vec<String>,
     pub uses_libraries: Vec<String>,
     pub uses_optional_libraries: Vec<String>,
+    pub uses_native_libraries: Vec<String>,
+    pub uses_optional_native_libraries: Vec<String>,
     pub uses_static_libraries: Vec<String>,
     pub uses_static_libraries_versions: Option<Vec<i64>>,
+    pub uses_static_libraries_cert_digests: Option<Vec<Option<Vec<Option<String>>>>>,
     pub uses_sdk_libraries: Vec<String>,
     pub uses_sdk_libraries_versions_major: Option<Vec<i64>>,
+    pub uses_sdk_libraries_cert_digests: Option<Vec<Option<Vec<Option<String>>>>>,
     pub uses_sdk_libraries_optional: Option<Vec<bool>>,
     pub shared_user_id: Option<String>,
     pub shared_user_label: i32,
     pub config_preferences: Option<Vec<ConfigurationInfo>>,
     pub req_features: Option<Vec<FeatureInfo>>,
     pub feature_groups: Option<Vec<Option<Vec<FeatureInfo>>>>,
+    pub restrict_update_hash: Option<Vec<u8>>,
     pub original_packages: Option<Vec<Option<String>>>,
+    pub adopt_permissions: Vec<String>,
     pub requested_permissions: Vec<String>,
     pub uses_permissions: Vec<UsesPermission>,
     pub implicit_permissions: Vec<String>,
+    pub upgrade_key_sets: Vec<String>,
+    pub key_set_mapping: Option<KeySetMapping>,
     pub protected_broadcasts: Vec<String>,
     pub activities: Vec<Activity>,
+    pub apex_system_services: Vec<ApexSystemService>,
     pub receivers: Vec<Activity>,
     pub services: Vec<Service>,
     pub providers: Vec<Provider>,
@@ -441,6 +505,7 @@ pub struct AndroidPackage {
     pub mime_groups: Vec<String>,
     pub gwp_asan_mode: i32,
     pub min_extension_versions: Option<Vec<(i32, i32)>>,
+    pub properties: Option<Vec<(String, Property)>>,
     pub memtag_mode: i32,
     pub native_heap_zero_initialized: i32,
     pub request_raw_external_storage_access: Option<bool>,
@@ -495,9 +560,8 @@ impl AndroidPackage {
 
     /// `PackageImpl(Parcel)`.
     pub fn read(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<AndroidPackage> {
-        // The feature flags' state.
-        string_array(r, s)?;
         Ok(AndroidPackage {
+            feature_flag_state: string_array(r, s)?,
             supports_small_screens: for_boolean(r)?,
             supports_normal_screens: for_boolean(r)?,
             supports_large_screens: for_boolean(r)?,
@@ -519,38 +583,25 @@ impl AndroidPackage {
             overlay_target_overlayable_name: s.string16(r)?,
             overlay_category: s.string16(r)?,
             overlay_priority: r.read_i32()?,
-            sdk_library_name: {
-                // The overlayables (`writeMap` of strings).
-                for _ in 0..r.read_i32()?.max(0) {
-                    skip_value(r, s)?;
-                    skip_value(r, s)?;
-                }
-                s.string16(r)?
-            },
+            overlayables: array(r, |r| {
+                let key = string_value(r, s)?.ok_or(BAD_VALUE)?;
+                Ok((key, string_value(r, s)?))
+            })?,
+            sdk_library_name: s.string16(r)?,
             sdk_lib_version_major: r.read_i32()?,
             static_shared_library_name: s.string16(r)?,
             static_shared_lib_version: r.read_i64()?,
             library_names: string_list(r, s)?,
             uses_libraries: string_list(r, s)?,
-            uses_optional_libraries: {
-                let optional = string_list(r, s)?;
-                // usesNativeLibraries, usesOptionalNativeLibraries.
-                string_list(r, s)?;
-                string_list(r, s)?;
-                optional
-            },
+            uses_optional_libraries: string_list(r, s)?,
+            uses_native_libraries: string_list(r, s)?,
+            uses_optional_native_libraries: string_list(r, s)?,
             uses_static_libraries: string_list(r, s)?,
-            uses_static_libraries_versions: {
-                let versions = long_array(r)?;
-                cert_digests(r, s)?;
-                versions
-            },
+            uses_static_libraries_versions: long_array(r)?,
+            uses_static_libraries_cert_digests: array(r, |r| string_array(r, s))?,
             uses_sdk_libraries: string_list(r, s)?,
-            uses_sdk_libraries_versions_major: {
-                let versions = long_array(r)?;
-                cert_digests(r, s)?;
-                versions
-            },
+            uses_sdk_libraries_versions_major: long_array(r)?,
+            uses_sdk_libraries_cert_digests: array(r, |r| string_array(r, s))?,
             uses_sdk_libraries_optional: array(r, |r| r.read_bool())?,
             shared_user_id: s.string16(r)?,
             shared_user_label: r.read_i32()?,
@@ -565,16 +616,10 @@ impl AndroidPackage {
             })?,
             req_features: typed_array(r, |r| feature_info(r, s))?,
             feature_groups: typed_array(r, |r| typed_array(r, |r| feature_info(r, s)))?,
-            original_packages: {
-                // restrictUpdateHash.
-                byte_array(r)?;
-                string_array(r, s)?
-            },
-            requested_permissions: {
-                // adoptPermissions.
-                string_list(r, s)?;
-                string_list(r, s)?
-            },
+            restrict_update_hash: byte_array(r)?,
+            original_packages: string_array(r, s)?,
+            adopt_permissions: string_list(r, s)?,
+            requested_permissions: string_list(r, s)?,
             uses_permissions: interface_list(r, |r| {
                 Ok(UsesPermission {
                     name: s.string16(r)?,
@@ -582,25 +627,25 @@ impl AndroidPackage {
                 })
             })?,
             implicit_permissions: string_list(r, s)?,
-            protected_broadcasts: {
-                // upgradeKeySets.
-                string_list(r, s)?;
-                key_set_mapping(r, s)?;
-                string_list(r, s)?
-            },
+            upgrade_key_sets: string_list(r, s)?,
+            key_set_mapping: array(r, |r| {
+                let alias = s.string16(r)?;
+                Ok((alias, array(r, |r| serializable(r, s))?))
+            })?,
+            protected_broadcasts: string_list(r, s)?,
             activities: interface_list(r, |r| Activity::read(r, s))?,
-            receivers: {
-                // apexSystemServices: a flag byte, name, jar path, min and
-                // max SDK, init order.
-                interface_list(r, |r| {
-                    r.read_i32()?;
-                    for _ in 0..4 {
-                        s.string16(r)?;
-                    }
-                    r.read_i32()
-                })?;
-                interface_list(r, |r| Activity::read(r, s))?
-            },
+            apex_system_services: interface_list(r, |r| {
+                // A flag byte (which of the strings are set), then all four.
+                r.read_i32()?;
+                Ok(ApexSystemService {
+                    name: s.string16(r)?,
+                    jar_path: s.string16(r)?,
+                    min_sdk_version: s.string16(r)?,
+                    max_sdk_version: s.string16(r)?,
+                    init_order: r.read_i32()?,
+                })
+            })?,
+            receivers: interface_list(r, |r| Activity::read(r, s))?,
             services: interface_list(r, |r| {
                 Ok(Service {
                     main: MainComponent::read(r, s)?,
@@ -689,14 +734,8 @@ impl AndroidPackage {
             mime_groups: string_list(r, s)?,
             gwp_asan_mode: r.read_i32()?,
             min_extension_versions: array(r, |r| Ok((r.read_i32()?, r.read_i32()?)))?,
-            memtag_mode: {
-                // The properties (`writeMap` of `Property`).
-                for _ in 0..r.read_i32()?.max(0) {
-                    skip_value(r, s)?;
-                    skip_value(r, s)?;
-                }
-                r.read_i32()?
-            },
+            properties: properties(r, s)?,
+            memtag_mode: r.read_i32()?,
             native_heap_zero_initialized: r.read_i32()?,
             request_raw_external_storage_access: for_boolean(r)?,
             locale_config_res: r.read_i32()?,
@@ -719,7 +758,6 @@ impl AndroidPackage {
         })
     }
 }
-
 impl Component {
     /// `ParsedComponentImpl(Parcel)`.
     fn read(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Component> {
@@ -735,12 +773,8 @@ impl Component {
             package_name: s.string16(r)?.ok_or(BAD_VALUE)?,
             intents: interface_list(r, |r| ParsedIntentInfo::read(r, s))?,
             meta_data: bundle(r, s)?,
+            properties: properties(r, s)?,
         };
-        // The properties.
-        for _ in 0..r.read_i32()?.max(0) {
-            skip_value(r, s)?;
-            skip_value(r, s)?;
-        }
         Ok(component)
     }
 }
@@ -954,11 +988,6 @@ fn byte_array(r: &mut Reader<'_>) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes[..n as usize].to_vec()))
 }
 
-/// The certificate digests of used libraries: arrays of string arrays.
-fn cert_digests(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<()> {
-    array(r, |r| string_array(r, s)).map(drop)
-}
-
 fn feature_info(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<FeatureInfo> {
     Ok(FeatureInfo {
         name: s.string8(r)?,
@@ -968,18 +997,15 @@ fn feature_info(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<FeatureInfo> 
     })
 }
 
-/// `ParsingPackageUtils.readKeySetMapping`, read past: an alias, then
-/// its keys as `Serializable`s (class name, bytes).
-fn key_set_mapping(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<()> {
-    for _ in 0..r.read_i32()?.max(0) {
-        s.string16(r)?;
-        for _ in 0..r.read_i32()?.max(0) {
-            if s.string16(r)?.is_some() {
-                byte_array(r)?;
-            }
-        }
-    }
-    Ok(())
+/// `readSerializable`: its class (null for none), then its bytes.
+fn serializable(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Serialized>> {
+    let Some(class) = s.string16(r)? else {
+        return Ok(None);
+    };
+    Ok(Some(Serialized {
+        class,
+        bytes: byte_array(r)?.ok_or(BAD_VALUE)?,
+    }))
 }
 
 /// `readValue` of a `Float` (`writeValue`).
@@ -1006,19 +1032,65 @@ fn value(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Value> {
     })
 }
 
-/// `readValue`, read past: a length-prefixed value by its length.
-fn skip_value(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<()> {
-    let at = r.position();
-    match r.read_i32()? {
-        2 | VAL_PARCELABLE | 11 | 12 | 16 | 17 | 21 => {
-            let len = usize::try_from(r.read_i32()?).map_err(|_| BAD_VALUE)?;
-            r.skip(len)
-        }
-        _ => {
-            r.set_position(at);
-            value(r, s).map(drop)
-        }
+/// `readValue` of a string (or null).
+fn string_value(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<String>> {
+    match value(r, s)? {
+        Value::String(v) => Ok(v),
+        Value::Null => Ok(None),
+        _ => Err(BAD_VALUE),
     }
+}
+
+/// `readValue` of a parcelable (`VAL_PARCELABLE`, length-prefixed): its
+/// creator's class read, then `read` reads it; `None` for null.
+fn parcelable<T>(
+    r: &mut Reader<'_>,
+    s: &mut dyn Strings,
+    read: impl FnOnce(&mut Reader<'_>, &mut dyn Strings) -> Result<T>,
+) -> Result<Option<T>> {
+    match r.read_i32()? {
+        VAL_NULL => Ok(None),
+        VAL_PARCELABLE => {
+            let len = usize::try_from(r.read_i32()?).map_err(|_| BAD_VALUE)?;
+            let end = r.position() + len;
+            s.string16(r)?.ok_or(BAD_VALUE)?;
+            let v = read(r, s)?;
+            if r.position() != end {
+                return Err(BAD_VALUE);
+            }
+            Ok(Some(v))
+        }
+        _ => Err(BAD_VALUE),
+    }
+}
+
+/// `readHashMap` of `Property`s (`mProperties`).
+fn properties(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<(String, Property)>>> {
+    array(r, |r| {
+        let key = string_value(r, s)?.ok_or(BAD_VALUE)?;
+        let property = parcelable(r, s, |r, s| {
+            let name = s.string16(r)?;
+            let kind = r.read_i32()?;
+            let package_name = s.string16(r)?;
+            let class_name = s.string16(r)?;
+            let value = match kind {
+                1 => PropertyValue::Bool(r.read_bool()?),
+                2 => PropertyValue::Float(r.read_f32()?),
+                3 => PropertyValue::Int(r.read_i32()?),
+                4 => PropertyValue::Resource(r.read_i32()?),
+                5 => PropertyValue::String(s.string16(r)?),
+                other => PropertyValue::Unknown(other),
+            };
+            Ok(Property {
+                name,
+                package_name,
+                class_name,
+                value,
+            })
+        })?
+        .ok_or(BAD_VALUE)?;
+        Ok((key, property))
+    })
 }
 
 /// `readBundle`: `None` for null.
@@ -1060,37 +1132,27 @@ fn sparse_int_arrays(r: &mut Reader<'_>) -> Result<Option<SplitDependencies>> {
     })
 }
 
-/// The processes (`writeMap` of `ParsedProcessImpl`s, each a
-/// length-prefixed parcelable).
+/// The processes (`writeMap` of `ParsedProcessImpl`s by name).
 fn processes(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<Process>>> {
     array(r, |r| {
-        skip_value(r, s)?;
-        if r.read_i32()? != VAL_PARCELABLE {
-            return Err(BAD_VALUE);
-        }
-        let len = usize::try_from(r.read_i32()?).map_err(|_| BAD_VALUE)?;
-        let end = r.position() + len;
-        s.string16(r)?.ok_or(BAD_VALUE)?;
-        // useEmbeddedDex's flag byte.
-        r.read_i32()?;
-        let name = s.string16(r)?;
-        let app_class_names_by_package = array(r, |r| {
-            let key = match value(r, s)? {
-                Value::String(Some(key)) => key,
-                _ => return Err(BAD_VALUE),
-            };
-            match value(r, s)? {
-                Value::String(class) => Ok((key, class)),
-                Value::Null => Ok((key, None)),
-                _ => Err(BAD_VALUE),
-            }
+        string_value(r, s)?;
+        parcelable(r, s, |r, s| {
+            let flags = r.read_i32()?;
+            Ok(Process {
+                use_embedded_dex: flags & 0x40 != 0,
+                name: s.string16(r)?,
+                app_class_names_by_package: array(r, |r| {
+                    let key = string_value(r, s)?.ok_or(BAD_VALUE)?;
+                    Ok((key, string_value(r, s)?))
+                })?
+                .unwrap_or_default(),
+                denied_permissions: string_list(r, s)?,
+                gwp_asan_mode: r.read_i32()?,
+                memtag_mode: r.read_i32()?,
+                native_heap_zero_initialized: r.read_i32()?,
+            })
         })?
-        .unwrap_or_default();
-        r.set_position(end);
-        Ok(Process {
-            name,
-            app_class_names_by_package,
-        })
+        .ok_or(BAD_VALUE)
     })
 }
 
@@ -1099,15 +1161,22 @@ fn signing_details(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Sig
     if s.string16(r)?.is_none() || r.read_bool()? {
         return Ok(None);
     }
-    let signatures = typed_array(r, |r| byte_array(r)?.ok_or(BAD_VALUE))?;
-    let scheme_version = r.read_i32()?;
-    // The public keys (`writeArraySet` of serializables).
-    for _ in 0..r.read_i32()?.max(0) {
-        skip_value(r, s)?;
-    }
     Ok(Some(SigningDetails {
-        signatures,
-        scheme_version,
+        signatures: typed_array(r, |r| byte_array(r)?.ok_or(BAD_VALUE))?,
+        scheme_version: r.read_i32()?,
+        public_keys: array(r, |r| match r.read_i32()? {
+            VAL_NULL => Ok(None),
+            VAL_SERIALIZABLE => {
+                let len = usize::try_from(r.read_i32()?).map_err(|_| BAD_VALUE)?;
+                let end = r.position() + len;
+                let key = serializable(r, s)?;
+                if r.position() != end {
+                    return Err(BAD_VALUE);
+                }
+                Ok(key)
+            }
+            _ => Err(BAD_VALUE),
+        })?,
         past_signing_certificates: typed_array(r, |r| byte_array(r)?.ok_or(BAD_VALUE))?,
     }))
 }
@@ -1364,6 +1433,17 @@ mod tests {
         );
         let process = &pkg.processes.as_ref().unwrap()[0];
         assert_eq!(process.name.as_deref(), Some("org.example.app:p"));
+        assert_eq!(
+            (process.gwp_asan_mode, process.denied_permissions.len()),
+            (-1, 0)
+        );
+        let keys = pkg.key_set_mapping.as_ref().unwrap();
+        assert_eq!(keys[0].0.as_deref(), Some("a"));
+        let key = keys[0].1.as_ref().unwrap()[0].as_ref().unwrap();
+        assert_eq!(
+            (key.class.as_str(), key.bytes.as_slice()),
+            ("java.security.PublicKey", &[2, 1][..])
+        );
         assert_eq!(
             process.app_class_names_by_package,
             [("org.example.app".into(), Some("org.example.App".into()))]

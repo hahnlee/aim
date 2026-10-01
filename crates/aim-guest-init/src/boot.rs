@@ -594,7 +594,7 @@ impl Boot {
                 native_services
                     .as_ref()
                     .ok_or("--binder-shadow: the image has no native services")?
-                    .shadow(server.driver(), names, log)?;
+                    .shadow(server.driver(), names, log, image.root())?;
             }
             // Android's notifications on the Mac, from the original
             // NotificationManagerService once it is published.
