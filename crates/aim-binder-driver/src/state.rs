@@ -272,6 +272,8 @@ pub(crate) struct State {
     pub notifications: Vec<(Notifier, Option<Tid>)>,
     /// Transactions being traced ([`crate::Driver::start_trace`]).
     pub trace: Option<crate::trace::Trace>,
+    /// Transactions being copied ([`crate::Driver::shadow`]).
+    pub shadow: Option<crate::shadow::Shadow>,
 }
 
 /// Wakes collected under the lock, delivered after it is released.
@@ -638,9 +640,17 @@ impl State {
                             p.nodes.remove(&ptr);
                         }
                     }
-                    self.nodes.remove(&id);
+                    self.remove_node(id);
                 }
             }
+        }
+    }
+
+    /// Drops a node nothing refers to any more.
+    pub fn remove_node(&mut self, id: NodeId) {
+        self.nodes.remove(&id);
+        if let Some(shadow) = &mut self.shadow {
+            shadow.node_gone(id);
         }
     }
 

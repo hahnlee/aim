@@ -32,6 +32,7 @@ mod driver;
 mod host;
 mod read;
 mod release;
+mod shadow;
 mod state;
 mod trace;
 mod transaction;
@@ -40,5 +41,8 @@ mod write;
 
 pub use driver::{Device, Driver, MAX_MAPPING, ProcHandle};
 pub use host::{Credentials, Errno, File, GuestProcess, HeapReceiveMemory, ReceiveMemory, errno};
+pub use shadow::{
+    FileId, ShadowCopy, ShadowKind, ShadowObject, ShadowParcel, ShadowReply, ShadowSink,
+};
 pub use state::{Notifier, Resume, Tid};
 pub use trace::TraceRecord;

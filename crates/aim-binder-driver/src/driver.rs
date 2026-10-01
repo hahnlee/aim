@@ -90,6 +90,25 @@ impl Driver {
         records
     }
 
+    /// Copy every transaction to the node `proc`'s `handle` refers to, and
+    /// its reply, into `sink`; then the transactions to the nodes those
+    /// replies hand out (`crate::shadow`). Returns the node, the copies'
+    /// `root`.
+    pub fn shadow(
+        &self,
+        proc: ProcHandle,
+        handle: u32,
+        sink: crate::ShadowSink,
+    ) -> Result<u64, Errno> {
+        let mut st = self.lock();
+        let node = st.get_ref(proc.0, handle, false).map(|r| r.node);
+        if let Some(node) = node {
+            st.shadow.get_or_insert_default().watch(node, sink);
+        }
+        self.unlock(st);
+        node.ok_or(errno::EINVAL)
+    }
+
     /// `binder_open`.
     pub fn open(&self, device: Device, creds: Credentials) -> ProcHandle {
         let mut st = self.lock();

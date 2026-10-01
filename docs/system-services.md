@@ -69,6 +69,20 @@ every step: replace superseded facts instead of appending a log.
    original) and after (native), plus the app checks; failing tests keep
    the original.
 
+**In shadow first.** A large service is compared with the original on
+every real call before it serves any (docs/m4-packagemanager.md, slice
+A). guest-init `--binder-shadow package,package_native
+--binder-shadow-log FILE` has the driver copy each transaction to those
+nodes and its reply, without waiting and without changing either (a
+full queue drops the copy and counts it), and follow the binders the
+original hands out in its replies (a `ParceledListSlice`'s retriever).
+The service host answers each call again from the service's model
+(`aim_services::shadow::ShadowModel`), decodes both replies with the
+generated parcel code, compares them, binders and fds by what they stand
+for, and writes a JSON line per call; `tools/binder-shadow-report.py`
+counts per method the calls matched, differed and not modelled, and
+lists the differences with both replies.
+
 ## Mirrored state
 
 A native service decides on every call by state that other services own

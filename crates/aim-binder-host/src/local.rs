@@ -354,6 +354,12 @@ impl LocalProcess {
         let _ = self.talk(commands, &mut []);
     }
 
+    /// Its open binder file description, for the driver's own calls
+    /// ([`Driver::shadow`]).
+    pub fn proc_handle(&self) -> ProcHandle {
+        self.handle
+    }
+
     /// Serves `service` as a node; the binder to hand out for it.
     pub fn add_service(&self, service: Arc<dyn Service>) -> Binder {
         let ptr = self.next_cookie.fetch_add(1, Ordering::Relaxed) << 4;
@@ -827,6 +833,105 @@ mod tests {
             panic!("no {n} binder");
         };
         client.strong(h)
+    }
+
+    /// Hands out a node of its own (as a `ParceledListSlice` hands out its
+    /// retriever) and echoes on it.
+    struct Lister {
+        process: Mutex<Weak<LocalProcess>>,
+        echo: Arc<Echo>,
+    }
+
+    impl Service for Lister {
+        fn descriptor(&self) -> &str {
+            "test.ILister"
+        }
+        fn transact(&self, _: &mut Call<'_>) -> Reply {
+            let process = self.process.lock().unwrap().upgrade().unwrap();
+            let mut reply = Parcel::new();
+            reply.write_i32(7);
+            reply.write_binder(Some(process.add_service(self.echo.clone())));
+            Ok(reply)
+        }
+    }
+
+    #[test]
+    fn shadow_copies_calls_replies_and_followed_nodes() {
+        use aim_binder_driver::{ShadowKind, ShadowReply, ShadowSink};
+        let driver = Driver::new();
+        let _manager = start_registry(&driver);
+        let server = open(&driver, 200, 1000);
+        let lister = server.add_service(Arc::new(Lister {
+            process: Mutex::new(Arc::downgrade(&server)),
+            echo: Arc::new(Echo {
+                process: Mutex::new(Arc::downgrade(&server)),
+                died: Mutex::new(mpsc::channel().0),
+                watched: Mutex::new(Vec::new()),
+            }),
+        }));
+        server.start();
+        let client = open(&driver, 300, 10123);
+        let lister = publish(&server, &client, "lister", lister);
+
+        // Whoever holds a reference can have the node shadowed.
+        let watcher = open(&driver, 400, 1000);
+        let found = watcher.transact(0, GET, &name("lister"), false).unwrap();
+        let Ok(Some(Binder::Handle(watched))) = found.reader().read_binder() else {
+            panic!("no lister")
+        };
+        let watched = watcher.strong(watched);
+        drop(found);
+        let (copies, received) = mpsc::sync_channel(4);
+        let sink = ShadowSink {
+            copies,
+            identify: |_| None,
+            dropped: Arc::default(),
+        };
+        assert!(
+            driver
+                .shadow(watcher.proc_handle(), 999, sink.clone())
+                .is_err()
+        );
+        driver
+            .shadow(watcher.proc_handle(), watched.handle, sink)
+            .unwrap();
+
+        let mut arg = Parcel::new();
+        arg.write_i32(5);
+        let reply = lister.transact(1, &arg, false).unwrap();
+        let mut r = reply.reader();
+        assert_eq!(r.read_i32(), Ok(7));
+        let Ok(Some(Binder::Handle(h))) = r.read_binder() else {
+            panic!("no binder")
+        };
+        let copy = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            (copy.from_pid, copy.from_euid, copy.to_pid),
+            (300, 10123, 200)
+        );
+        assert_eq!((copy.code, copy.follows), (1, None));
+        assert_eq!(copy.data.data, arg.data());
+        let ShadowReply::Reply { parcel, .. } = &copy.reply else {
+            panic!("no reply copy: {:?}", copy.reply)
+        };
+        let [object] = &parcel.objects[..] else {
+            panic!("{:?}", parcel.objects)
+        };
+        assert_eq!(object.offset, 4);
+        assert!(matches!(
+            object.kind,
+            ShadowKind::Binder { owner_pid: 200, .. }
+        ));
+
+        // The node the reply handed out is followed.
+        let echo = client.strong(h);
+        drop(reply);
+        let mut arg = Parcel::new();
+        arg.write_i32(9);
+        echo.transact(ECHO, &arg, false).unwrap();
+        let fetch = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!((fetch.code, fetch.follows), (ECHO, Some(copy.seq)));
+        assert!(matches!(fetch.reply, ShadowReply::Reply { .. }));
     }
 
     #[test]
