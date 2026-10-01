@@ -47,6 +47,10 @@ fn bsd_info(pid: i32) -> Option<libc::proc_bsdinfo> {
 /// temporary directory.
 const PRIVATE: &str = "aim-pidns-";
 
+/// The table's record of the process groups and sessions that processes
+/// brought in from outside, as whitespace-separated ids.
+const OUTSIDE: &str = "outside";
+
 /// A private table for a process started without one, with this process
 /// as its init. Tables whose init no longer runs are removed.
 pub fn new_table() -> Result<PathBuf, String> {
@@ -63,6 +67,31 @@ pub fn new_table() -> Result<PathBuf, String> {
     let dir = tmp.join(format!("{PRIVATE}{}", me()));
     std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     Ok(dir)
+}
+
+/// This process entered the namespace of table `dir` from outside (it was
+/// not forked or exec'd by a member): record the group and session it
+/// brought along, which read as 0 even once their leader is gone. One it
+/// leads itself is the namespace's own.
+pub fn enter(dir: &std::path::Path) {
+    use std::io::Write;
+    let file = dir.join(OUTSIDE);
+    let known = std::fs::read_to_string(&file).unwrap_or_default();
+    // SAFETY: trivial.
+    let ids = unsafe { [libc::getpgid(0), libc::getsid(0)] };
+    let line: String = ids
+        .iter()
+        .filter(|&&id| id > 0 && id != me() && !listed(&known, id))
+        .map(|id| format!("{id}\n"))
+        .collect();
+    if !line.is_empty() {
+        // One short O_APPEND write: entries of concurrent entrants do not mix.
+        let _ = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&file)
+            .and_then(|mut f| f.write_all(line.as_bytes()));
+    }
 }
 
 /// This process is ending. The init of a private namespace takes it along:
@@ -169,10 +198,23 @@ pub fn group(pgrp: i32) -> Option<Vec<i32>> {
 
 /// A session or process group id as the namespace numbers it: its own id
 /// if it was made inside, by a member that leads it or led it and exited,
-/// else 0 (pid_vnr of a pid from the parent namespace).
+/// else 0 (pid_vnr of a pid from the parent namespace). One whose leader
+/// is gone was made inside unless a process brought it in ([`enter`]).
 pub fn id_in_ns(id: i32) -> i32 {
     let inside = contains(id)
         || (bsd_info(id).is_none()
+            && !brought_in(id)
             && members_info().is_none_or(|m| m.iter().any(|(_, info)| info.pbi_pgid as i32 == id)));
     if inside { id } else { 0 }
+}
+
+fn listed(ids: &str, id: i32) -> bool {
+    ids.split_whitespace().any(|i| i.parse() == Ok(id))
+}
+
+/// Whether `id` is a group or session a process brought in from outside.
+fn brought_in(id: i32) -> bool {
+    super::cred::by_pid_dir()
+        .and_then(|d| std::fs::read_to_string(d.join(OUTSIDE)).ok())
+        .is_some_and(|ids| listed(&ids, id))
 }
