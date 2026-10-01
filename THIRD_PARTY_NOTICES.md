@@ -24,7 +24,11 @@ travel with any redistributed covered sources or binaries.
   `ClipboardService` (`services/core/java/com/android/server/clipboard`)
   and `LocationManagerService` with its provider managers
   (`services/core/java/com/android/server/location`), ports
-  `S2CellIdUtils` (`core/java/com/android/internal/location/geometry`)
+  `S2CellIdUtils` (`core/java/com/android/internal/location/geometry`),
+  ports PackageManager's intent matching (`IntentFilter`,
+  `PatternMatcher`, `UriRelativeFilterGroup`, `UriCodec`), whose tests
+  carry the cases of CTS's `IntentFilterTest` and `PatternMatcherTest`
+  (`platform/cts`) and of `core/tests/coretests`' `PatternMatcherTest`,
   and reads and writes the parcel forms of `ClipData`, `ClipDescription`,
   `TextUtils`' spans, `Intent`, `Uri`, `BaseBundle` and the replies of the
   services it calls, following `platform/frameworks/base` at
