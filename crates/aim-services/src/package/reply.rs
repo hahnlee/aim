@@ -29,6 +29,9 @@ pub fn decode(descriptor: &str, code: u32, r: &mut Reader<'_>) -> Option<Result<
     if descriptor != pm::DESCRIPTOR {
         return None;
     }
+    if code == pm::GET_PACKAGES_FOR_UID {
+        return Some(packages_for_uid(r));
+    }
     let item: fn(&mut D<'_, '_>) -> Result<()> = match code {
         pm::GET_PACKAGE_INFO => |d| d.package_info(),
         pm::GET_APPLICATION_INFO => |d| d.application_info("info"),
@@ -40,6 +43,24 @@ pub fn decode(descriptor: &str, code: u32, r: &mut Reader<'_>) -> Option<Result<
         _ => return None,
     };
     Some(read_reply(r, item))
+}
+
+/// `getPackagesForUid`'s names as a set: a shared user's packages come
+/// in the order of the original snapshot's `ArraySet` of package states,
+/// which hash by identity, so the order changes with each snapshot and is
+/// none an implementation could keep.
+fn packages_for_uid(r: &mut Reader<'_>) -> Result<Value> {
+    Ok(match pm::read_get_packages_for_uid_reply(r)? {
+        Err(e) => Value::Exception {
+            code: e.code,
+            message: e.message,
+        },
+        Ok(None) => Value::Null,
+        Ok(Some(mut names)) => {
+            names.sort();
+            Value::List(names.into_iter().map(D::str_value).collect())
+        }
+    })
 }
 
 fn read_reply(r: &mut Reader<'_>, item: fn(&mut D<'_, '_>) -> Result<()>) -> Result<Value> {
