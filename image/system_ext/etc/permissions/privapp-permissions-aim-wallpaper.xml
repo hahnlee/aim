@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The lightweight shell's static wallpaper (java/image-wallpaper, #603)
+     reads the wallpaper as SystemUI's ImageWallpaper does. -->
+<permissions>
+    <privapp-permissions package="dev.aim.wallpaper">
+        <permission name="android.permission.READ_WALLPAPER_INTERNAL"/>
+    </privapp-permissions>
+</permissions>

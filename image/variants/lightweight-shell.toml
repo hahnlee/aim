@@ -20,7 +20,7 @@ reason = "the launcher (Quickstep: home, recents, taskbar): the placeholder home
 
 [[remove]]
 path = "/system_ext/priv-app/WallpaperPickerGoogleRelease"
-reason = "the wallpaper and style picker: no wallpaper is drawn without SystemUI's ImageWallpaper"
+reason = "the wallpaper and style picker: nothing shows the wallpaper on the Mac"
 
 [[remove]]
 path = "/system_ext/priv-app/ThemePicker"
@@ -36,6 +36,16 @@ source = "image/vendor/etc/init/aim-lightweight-shell.rc"
 reason = "the placeholder home (ro.system_user_home_needed) and no freeform caption for aim-windows"
 
 [[add]]
+path = "/system_ext/priv-app/AimImageWallpaper/AimImageWallpaper.apk"
+source = "target/aim/device-services/image-wallpaper.apk"
+reason = "the static wallpaper in place of SystemUI's ImageWallpaper (#603): the overlay names it in image_wallpaper_component, so WallpaperManager's set, clear and default keep their meaning"
+
+[[add]]
+path = "/system_ext/etc/permissions/privapp-permissions-aim-wallpaper.xml"
+source = "image/system_ext/etc/permissions/privapp-permissions-aim-wallpaper.xml"
+reason = "READ_WALLPAPER_INTERNAL for the static wallpaper, a privileged app, as SystemUI has it"
+
+[[add]]
 path = "/system_ext/overlay/aim-lightweight-shell-overlay.apk"
 source = "target/aim/device-services/lightweight-shell-overlay.apk"
-reason = "static overlay of framework-res: no wait for a wallpaper at boot, and none of the services only the shell uses; in /system_ext, whose overlays take precedence over /product's"
+reason = "static overlay of framework-res: the device's own static wallpaper, no wait for it at boot, and none of the services only the shell uses; in /system_ext, whose overlays take precedence over /product's"

@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- No wallpaper is drawn (ImageWallpaper was SystemUI's): the
-         screen does not wait for one at boot. WallpaperManagerService and
-         its API stay. -->
+    <!-- The static wallpaper is the device's own (java/image-wallpaper,
+         #603), in place of SystemUI's ImageWallpaper; it is also the
+         default wallpaper. Nothing shows it on the Mac: the screen does
+         not wait for it at boot. -->
+    <string name="image_wallpaper_component" translatable="false">dev.aim.wallpaper/dev.aim.wallpaper.ImageWallpaper</string>
     <bool name="config_checkWallpaperAtBoot">false</bool>
 
     <!-- The services only the launcher and SystemUI use: SystemServer

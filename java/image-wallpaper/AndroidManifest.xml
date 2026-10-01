@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The static wallpaper of the lightweight shell (docs/m1-shell.md, #603),
+     in place of SystemUI's ImageWallpaper: the overlay names it in
+     image_wallpaper_component, which WallpaperManagerService binds for a
+     static wallpaper and as the default. Preinstalled as a privileged app:
+     reading the wallpaper takes READ_WALLPAPER_INTERNAL. No
+     WallpaperService intent filter, as SystemUI's has none: pickers do
+     not list it as a live wallpaper. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.aim.wallpaper">
+    <uses-permission android:name="android.permission.READ_WALLPAPER_INTERNAL" />
+    <application
+        android:label="Wallpaper"
+        android:allowBackup="false"
+        android:directBootAware="true">
+        <service
+            android:name=".ImageWallpaper"
+            android:exported="true"
+            android:permission="android.permission.BIND_WALLPAPER" />
+    </application>
+</manifest>

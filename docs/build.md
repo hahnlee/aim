@@ -158,7 +158,8 @@ directory for each image: PackageManager drops the packages a variant
 removes from a data directory it boots.
 
 - `lightweight-shell`: without SystemUI, the launcher and the wallpaper
-  pickers (docs/m1-shell.md, #463).
+  pickers, with the device's own static wallpaper (docs/m1-shell.md,
+  #463).
 
 ### Rebuild times
 

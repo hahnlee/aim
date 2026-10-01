@@ -78,7 +78,8 @@ into `image/overlay.toml` with the switch:
 | --- | --- |
 | The shell packages | removed: SystemUIGoogle, NexusLauncherRelease, WallpaperPickerGoogleRelease and ThemePicker (the wallpaper and style pickers), QuickAccessWallet (a plugin of SystemUI's global actions) |
 | The placeholder home | `/vendor/etc/init/aim-lightweight-shell.rc`: `setprop ro.system_user_home_needed true` |
-| Resource values (wallpaper check, shell-only service configs) | a static RRO, `java/lightweight-shell-overlay`, in `/system_ext/overlay`: framework-res declares no overlayable, so a preinstalled overlay may override its configs (`cmds/idmap2/libidmap2/ResourceMapping.cpp:60-75`), and `/system_ext` overlays take precedence over `/product`'s (`PackagePartitions`), where `PixelConfigOverlayCommon` names the shell-only services |
+| The static wallpaper | `java/image-wallpaper`, a privileged app in `/system_ext/priv-app` with READ_WALLPAPER_INTERNAL: a `WallpaperService` drawing the current bitmap as SystemUI's ImageWallpaper does; the overlay names it in `image_wallpaper_component`, so WallpaperManagerService's static wallpaper, clear and default keep their meaning (#603) |
+| Resource values (the static wallpaper and its check, shell-only service configs) | a static RRO, `java/lightweight-shell-overlay`, in `/system_ext/overlay`: framework-res declares no overlayable, so a preinstalled overlay may override its configs (`cmds/idmap2/libidmap2/ResourceMapping.cpp:60-75`), and `/system_ext` overlays take precedence over `/product`'s (`PackagePartitions`), where `PixelConfigOverlayCommon` names the shell-only services |
 | No caption | the same rc: `ro.vendor.aim.freeform_caption_dp=0`, which aim-windows reports ([windows.md](windows.md)) |
 
 ## 2. WMShell's roles
@@ -159,7 +160,7 @@ SystemUI has no configuration to start without its UI, and its
 | Quick Settings tiles (`TileService`), `requestAddTileService` | bound only by SystemUI; request answers `TILE_ADD_REQUEST_ERROR_NO_STATUS_BAR_SERVICE` (`:2494-2513`) | tiles never bound | D8: the native `IStatusBar` answers a dismissed dialog (the app hears "not added", no denial recorded) |
 | IME picker | system_server's dialog (`InputMethodMenuController.java:79-199`) | unchanged | none (IME windows themselves: #23) |
 | Recents, `ActivityManager.AppTask` | ActivityTaskManager | unchanged | none; the recents key maps to nothing |
-| Wallpaper API | files and colors in system_server (`WallpaperManagerService.java:546`) | unchanged; no wallpaper drawn | none |
+| Wallpaper API | files and colors in system_server (`WallpaperManagerService.java:546`) | unchanged; the device's static wallpaper (`java/image-wallpaper`) draws it, which nothing shows on the Mac | none (#603) |
 | Dynamic color (Material You) | SystemUI's ThemeOverlayController writes the palette overlays | apps get the image's default palette | step 6: the palette from the Mac's accent color, as `FabricatedOverlay`s through `IOverlayManager` |
 | Clipboard overlay | SystemUI's `ClipboardListener` | none (#434 gone) | none |
 | Window magnification (accessibility) | `requestMagnificationConnection` → SystemUI | window magnification unavailable, full-screen magnification works | issue after step 4 |

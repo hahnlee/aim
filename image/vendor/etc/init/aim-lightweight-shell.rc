@@ -1,5 +1,5 @@
 # The lightweight shell (docs/m1-shell.md): the image has no launcher,
-# SystemUI or wallpaper.
+# SystemUI or wallpaper picker.
 
 on early-init
     # ActivityManagerService enables the platform's placeholder home,
