@@ -301,6 +301,8 @@ pub fn kernel_dir(name: &str) -> PathBuf {
 /// Run `f` on the device state under its lock, after following the Mac's
 /// network; write back what changed and announce the events.
 fn transact<R>(f: impl FnOnce(&mut Vec<Link>, &mut Vec<Event>) -> R) -> R {
+    // The locked file must not reach a fork child (`spawn::own_fds`).
+    let _own = super::fork::spawn::own_fds();
     let path = kernel_dir("net").join("links");
     let file = std::fs::OpenOptions::new()
         .read(true)

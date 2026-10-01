@@ -31,7 +31,7 @@
 //!   host mapping, copied) go in the blob.
 
 use std::ffi::CString;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use super::state::{self, Reader, Writer};
@@ -478,6 +478,18 @@ fn map_jit(start: u64, len: u64, src: Option<Port>) -> Result<(), String> {
 
 // ---- descriptors --------------------------------------------------------------------
 
+/// A fork lists every open fd and passes it to the child, including one a
+/// host thread of the layer has open for a moment. A child given a
+/// description that holds a `flock` (netif's state file) would hold the
+/// lock for its life, so a thread holds this while it has such an fd open,
+/// and a fork waits for it.
+static OWN_FDS: RwLock<()> = RwLock::new(());
+
+/// Keep forks out while the layer has a locked fd of its own open.
+pub fn own_fds() -> RwLockReadGuard<'static, ()> {
+    OWN_FDS.read().unwrap_or_else(|e| e.into_inner())
+}
+
 /// The open fds `posix_spawn` can pass (all but kqueues), with their
 /// close-on-exec flags.
 fn inheritable_fds() -> Vec<(i32, bool)> {
@@ -609,6 +621,7 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     // Another thread may close an fd between the listing and the spawn,
     // which then fails with EBADF.
     let mut tries = 0;
+    let own = OWN_FDS.write().unwrap_or_else(|e| e.into_inner());
     let spawned = loop {
         let fds = inheritable_fds();
         match spawn(exe, runtime, &fds, port) {
@@ -616,6 +629,7 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
             r => break r.map(|pid| (pid, fds)),
         }
     };
+    drop(own);
     let pid = match spawned {
         Ok((pid, fds)) => {
             w.seq(fds.iter(), |w, (fd, cloexec)| {

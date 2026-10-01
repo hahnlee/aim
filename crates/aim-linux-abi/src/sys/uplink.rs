@@ -14,6 +14,8 @@
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::errno;
+
 /// The host's primary IPv4 network.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Uplink {
@@ -30,85 +32,102 @@ fn roundup(len: usize) -> usize {
     if len == 0 { 4 } else { (len + 3) & !3 }
 }
 
-/// The interface index and gateway of the IPv4 default route, from a
-/// routing socket's `RTM_GET`.
+/// The interface index and gateway of the IPv4 default route: the
+/// unscoped one of the kernel's routing table, read with `sysctl`
+/// (NET_RT_FLAGS), as netstat(1) reads it. A routing socket's RTM_GET
+/// reply can be lost among other routing messages, and reading it blocks.
 fn default_route() -> Option<(u32, Ipv4Addr)> {
-    // SAFETY: a routing socket of our own, closed below.
-    let s = unsafe { libc::socket(libc::PF_ROUTE, libc::SOCK_RAW, libc::AF_INET) };
-    if s < 0 {
-        return None;
-    }
-    let hdr = std::mem::size_of::<libc::rt_msghdr>();
-    let sin = std::mem::size_of::<libc::sockaddr_in>();
-    let mut msg = vec![0u8; hdr + 2 * sin];
-    // SAFETY: a zeroed header written into our buffer.
-    let seq = unsafe {
-        let mut h: libc::rt_msghdr = std::mem::zeroed();
-        h.rtm_msglen = msg.len() as u16;
-        h.rtm_version = libc::RTM_VERSION as u8;
-        h.rtm_type = libc::RTM_GET as u8;
-        h.rtm_addrs = libc::RTA_DST | libc::RTA_NETMASK;
-        h.rtm_pid = libc::getpid();
-        h.rtm_seq = 1;
-        (msg.as_mut_ptr() as *mut libc::rt_msghdr).write_unaligned(h);
-        h.rtm_seq
-    };
-    // Destination and netmask 0.0.0.0: the default route.
-    for i in 0..2 {
-        let at = hdr + i * sin;
-        msg[at] = sin as u8;
-        msg[at + 1] = libc::AF_INET as u8;
-    }
-    let mut reply = vec![0u8; 2048];
-    // SAFETY: writing our request and reading replies into our buffer.
-    let got = unsafe {
-        if libc::write(s, msg.as_ptr().cast(), msg.len()) != msg.len() as isize {
-            libc::close(s);
+    let mut mib = [
+        libc::CTL_NET,
+        libc::PF_ROUTE,
+        0,
+        libc::AF_INET,
+        libc::NET_RT_FLAGS,
+        libc::RTF_GATEWAY,
+    ];
+    let mut table = Vec::new();
+    loop {
+        let mut len = 0usize;
+        // SAFETY: sizing call.
+        let r = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                6,
+                std::ptr::null_mut(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if r < 0 {
             return None;
         }
-        let pid = libc::getpid();
-        let n = loop {
-            let n = libc::read(s, reply.as_mut_ptr().cast(), reply.len());
-            if n < hdr as isize {
-                break -1;
-            }
-            let h = (reply.as_ptr() as *const libc::rt_msghdr).read_unaligned();
-            if h.rtm_pid == pid && h.rtm_seq == seq {
-                break n;
-            }
+        // Room for routes added since.
+        len += len / 2 + 1024;
+        table.resize(len, 0u8);
+        // SAFETY: sysctl into our buffer of `len` bytes.
+        let r = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                6,
+                table.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
         };
-        libc::close(s);
-        n
-    };
-    if got < 0 {
-        return None;
+        if r == 0 {
+            table.truncate(len);
+            break;
+        }
+        if errno::last() != errno::ENOMEM {
+            return None;
+        }
     }
-    // SAFETY: a reply of at least a header, checked above.
-    let h = unsafe { (reply.as_ptr() as *const libc::rt_msghdr).read_unaligned() };
-    if h.rtm_errno != 0 || h.rtm_flags & libc::RTF_GATEWAY == 0 {
-        return None;
+    let hdr = std::mem::size_of::<libc::rt_msghdr>();
+    let mut at = 0;
+    while at + hdr <= table.len() {
+        // SAFETY: a whole header inside the table.
+        let h = unsafe { (table.as_ptr().add(at) as *const libc::rt_msghdr).read_unaligned() };
+        let end = (at + h.rtm_msglen as usize).min(table.len());
+        if h.rtm_msglen == 0 {
+            break;
+        }
+        if h.rtm_flags & (libc::RTF_IFSCOPE | libc::RTF_HOST) == 0
+            && let Some(gateway) = default_gateway(h.rtm_addrs, &table[at + hdr..end])
+        {
+            return Some((h.rtm_index as u32, gateway));
+        }
+        at = end;
     }
-    let mut at = hdr;
-    let mut gateway = None;
+    None
+}
+
+/// The IPv4 gateway of a route whose addresses (`addrs`, an RTA_ mask)
+/// are `sa`, if it is a default route: destination 0.0.0.0, mask 0.
+fn default_gateway(addrs: i32, sa: &[u8]) -> Option<Ipv4Addr> {
+    let (mut at, mut gateway, mut default) = (0, None, false);
     for bit in 0..libc::RTAX_MAX {
-        if h.rtm_addrs & (1 << bit) == 0 || at + 2 > got as usize {
+        if addrs & (1 << bit) == 0 {
             continue;
         }
-        let len = reply[at] as usize;
-        if 1 << bit == libc::RTA_GATEWAY
-            && reply[at + 1] == libc::AF_INET as u8
-            && at + 8 <= got as usize
-        {
-            gateway = Some(Ipv4Addr::new(
-                reply[at + 4],
-                reply[at + 5],
-                reply[at + 6],
-                reply[at + 7],
-            ));
+        let len = *sa.get(at)? as usize;
+        let addr = sa.get(at..at + len)?;
+        // A mask is stored without its trailing zero bytes.
+        let zero = addr.get(4..).is_none_or(|a| a.iter().all(|&b| b == 0));
+        match 1 << bit {
+            libc::RTA_DST => default = addr.get(1) == Some(&(libc::AF_INET as u8)) && zero,
+            libc::RTA_NETMASK => default &= zero,
+            libc::RTA_GATEWAY if addr.get(1) == Some(&(libc::AF_INET as u8)) => {
+                gateway = addr
+                    .get(4..8)
+                    .map(|a| Ipv4Addr::new(a[0], a[1], a[2], a[3]));
+            }
+            _ => {}
         }
         at += roundup(len);
     }
-    Some((h.rtm_index as u32, gateway?))
+    gateway.filter(|_| default)
 }
 
 fn prefix_of(mask: u32) -> u8 {
@@ -339,6 +358,57 @@ pub fn host_index(name: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sin(a: [u8; 4]) -> Vec<u8> {
+        let mut v = vec![16, libc::AF_INET as u8, 0, 0];
+        v.extend(a);
+        v.extend([0; 8]);
+        v
+    }
+
+    #[test]
+    fn a_default_route_has_destination_and_mask_0() {
+        let addrs = libc::RTA_DST | libc::RTA_GATEWAY | libc::RTA_NETMASK;
+        let gw = sin([172, 30, 1, 254]);
+        // The kernel stores a 0 mask as an empty address.
+        let default = [sin([0; 4]), gw.clone(), vec![0, 0, 0, 0]].concat();
+        assert_eq!(
+            default_gateway(addrs, &default),
+            Some(Ipv4Addr::new(172, 30, 1, 254))
+        );
+        let net = [
+            sin([10, 0, 0, 0]),
+            gw.clone(),
+            vec![5, 0, 0, 0, 255, 0, 0, 0],
+        ]
+        .concat();
+        assert_eq!(default_gateway(addrs, &net), None);
+        let narrow = [sin([0; 4]), gw, vec![5, 0, 0, 0, 128, 0, 0, 0]].concat();
+        assert_eq!(default_gateway(addrs, &narrow), None);
+    }
+
+    #[test]
+    fn the_default_route_is_the_one_route_8_gets() {
+        let out = std::process::Command::new("/sbin/route")
+            .args(["-n", "get", "default"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let field = |k: &str| {
+            text.lines()
+                .find_map(|l| l.trim().strip_prefix(k)?.strip_prefix(": "))
+                .map(str::to_string)
+        };
+        let want = field("gateway").and_then(|g| {
+            let index = std::ffi::CString::new(field("interface")?).ok()?;
+            // SAFETY: a NUL-terminated interface name.
+            Some((
+                unsafe { libc::if_nametoindex(index.as_ptr()) },
+                g.parse().ok()?,
+            ))
+        });
+        assert_eq!(default_route(), want, "{text}");
+    }
 
     #[test]
     fn nameservers_skip_comments_and_ipv6() {

@@ -5,10 +5,15 @@
 //! writable `/data/local/tmp` through a path map, like a service under
 //! guest-init. Skipped when the NDK or the extracted image is missing.
 
+use std::io::Read;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+/// How long a program may run before it counts as hung and is killed.
+const RUN_LIMIT: Duration = Duration::from_secs(300);
 
 fn ndk_clang() -> Option<PathBuf> {
     aim_paths::ndk_clang(35)
@@ -128,14 +133,39 @@ impl Guest {
                 Ok(())
             });
         }
-        let out = cmd.output().unwrap();
+        // Its own process group, so a hung program goes with its children.
+        cmd.process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
         drop(fds);
-        let text = format!(
+        let pid = child.id() as i32;
+        let read = |mut r: Box<dyn Read + Send>| {
+            std::thread::spawn(move || {
+                let mut v = Vec::new();
+                let _ = r.read_to_end(&mut v);
+                v
+            })
+        };
+        let out = read(Box::new(child.stdout.take().unwrap()));
+        let err = read(Box::new(child.stderr.take().unwrap()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(child.wait().unwrap()));
+        let status = rx.recv_timeout(RUN_LIMIT).ok();
+        if status.is_none() {
+            // SAFETY: the process group this test started.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            let _ = rx.recv();
+        }
+        let mut text = format!(
             "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
+            String::from_utf8_lossy(&out.join().unwrap()),
+            String::from_utf8_lossy(&err.join().unwrap())
         );
-        (out.status.success(), text)
+        if status.is_none() {
+            text += &format!("\n[test] still running after {RUN_LIMIT:?}: killed\n");
+        }
+        (status.is_some_and(|s| s.success()), text)
     }
 }
 

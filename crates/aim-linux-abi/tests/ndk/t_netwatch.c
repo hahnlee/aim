@@ -170,6 +170,9 @@ static void carrier(void) {
   CHECK(pipe(ready) == 0 && pipe(done) == 0);
   FORK_OR_SKIP(child);
   if (child == 0) {
+    // Only the parent's ends: if the parent fails, its exit ends the read.
+    close(ready[0]);
+    close(done[1]);
     int s = rtnl_link();
     char c = 1;
     write(ready[1], &c, 1);
@@ -177,6 +180,8 @@ static void carrier(void) {
     close(s);
     _exit(0);
   }
+  close(ready[1]);
+  close(done[0]);
   char c;
   CHECK(read(ready[0], &c, 1) == 1);
   hook("down\n");
