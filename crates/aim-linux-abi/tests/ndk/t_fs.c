@@ -1,6 +1,6 @@
 // File syscalls: pipes, dup3, fcntl, stat/statx, getdents64, *at calls,
-// renameat2, fallocate, copies, memfd seals and inotify. argv[1] is a
-// writable directory.
+// renameat2, fallocate, copies, memfd seals, O_TMPFILE and inotify.
+// argv[1] is a writable directory.
 #include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -290,6 +290,64 @@ static void memfd_and_seals(void) {
   close(fd);
 }
 
+static int listed(const char* dir) {
+  DIR* d = opendir(dir);
+  if (!d) return -1;
+  int n = 0;
+  struct dirent* e;
+  while ((e = readdir(d)) != NULL) n += strcmp(e->d_name, ".") && strcmp(e->d_name, "..");
+  closedir(d);
+  return n;
+}
+
+// O_TMPFILE: an unnamed file in a directory that linkat names later, by
+// its /proc/self/fd link (as tombstoned names a tombstone) or by
+// AT_EMPTY_PATH, unless it was opened O_EXCL (open(2), linkat(2)).
+static void tmpfile_and_linkat(void) {
+  CHECK(mkdir(p("tmp"), 0755) == 0);
+  int dfd = open(p("tmp"), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  CHECK(dfd >= 0);
+  CHECK(open(p("tmp"), O_TMPFILE | O_RDONLY, 0600) == -1 && errno == EINVAL);
+  CHECK(open(p("tmp"), O_TMPFILE | O_CREAT | O_RDWR, 0600) == -1 && errno == EINVAL);
+  close(make("tmp-file", "x"));
+  CHECK(open(p("tmp-file"), O_TMPFILE | O_RDWR, 0600) == -1 && errno == ENOTDIR);
+  int fd = open(p("tmp"), O_TMPFILE | O_WRONLY | O_CLOEXEC, 0640);
+  CHECK(fd >= 0);
+  CHECK(write(fd, "tomb", 4) == 4);
+  struct stat st;
+  CHECK(fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 4);
+  CHECK(listed(p("tmp")) == 0);
+  char link[64], target[512], want[512];
+  snprintf(link, sizeof link, "/proc/self/fd/%d", fd);
+  ssize_t n = readlink(link, target, sizeof target - 1);
+  CHECK(n > 0);
+  target[n] = 0;
+  snprintf(want, sizeof want, "%s/#%llu (deleted)", p("tmp"), (unsigned long long)st.st_ino);
+  CHECK(!strcmp(target, want));
+  CHECK(linkat(AT_FDCWD, link, dfd, "named", AT_SYMLINK_FOLLOW) == 0);
+  CHECK(listed(p("tmp")) == 1);
+  // The name is the same file: later writes show through it.
+  CHECK(write(fd, "stone", 5) == 5);
+  struct stat named;
+  CHECK(stat(p("tmp/named"), &named) == 0);
+  CHECK(named.st_ino == st.st_ino && named.st_size == 9);
+  close(fd);
+  // An existing name is not replaced.
+  fd = open(p("tmp"), O_TMPFILE | O_RDWR, 0600);
+  CHECK(fd >= 0);
+  CHECK(linkat(fd, "", dfd, "named", AT_EMPTY_PATH) == -1 && errno == EEXIST);
+  CHECK(linkat(fd, "", dfd, "second", AT_EMPTY_PATH) == 0);
+  CHECK(listed(p("tmp")) == 2);
+  close(fd);
+  // With O_EXCL it can never be linked.
+  fd = open(p("tmp"), O_TMPFILE | O_RDWR | O_EXCL, 0600);
+  CHECK(fd >= 0);
+  CHECK(linkat(fd, "", dfd, "never", AT_EMPTY_PATH) == -1 && errno == ENOENT);
+  close(fd);
+  CHECK(listed(p("tmp")) == 2);
+  close(dfd);
+}
+
 static void inotify_dir(void) {
   mkdir(p("watch"), 0755);
   int in = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
@@ -405,6 +463,7 @@ int main(int argc, char** argv) {
   RUN(sizes_and_sync);
   RUN(copies);
   RUN(memfd_and_seals);
+  RUN(tmpfile_and_linkat);
   RUN(inotify_dir);
   RUN(inotify_unwatched_changes);
   RUN(inotify_write_into_entry);

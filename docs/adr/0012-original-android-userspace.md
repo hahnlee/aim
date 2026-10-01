@@ -369,8 +369,8 @@ is `crates/aim-linux-abi/tests/art.rs`.
     rewriting, for the libraries alone as well as with the boot image's oat
     files.
   - No tombstones: crash_dump64 could not `ptrace` (ENOSYS) or read another
-    process's `/proc/<pid>/fd` (closed in #557: see "A process's agent"
-    below).
+    process's `/proc/<pid>/fd`, and tombstoned could not make its file with
+    `O_TMPFILE` (closed in #557 and #642: see "A process's agent" below).
   - `/sys/kernel/tracing/trace_marker` does not exist (libcutils trace).
   - ART's statsd metrics are stubbed until `statslog_art` is generated
     (#162).
