@@ -2,6 +2,8 @@ package dev.aim.server;
 
 import dev.aim.server.ILocationBridge;
 import dev.aim.server.ILocationHost;
+import dev.aim.server.IPackageFeed;
+import dev.aim.server.IPackageFeedHost;
 import dev.aim.server.IUiModeBridge;
 import dev.aim.server.IUiModeHost;
 
@@ -42,4 +44,10 @@ interface IBridge {
      * languages, as Settings' language page sets a choice.
      */
     void updateLocales(String languageTags);
+
+    /**
+     * The package feed (IPackageFeed) to `host`, the native PackageManager's
+     * model: a snapshot of the original's state now, then the changes.
+     */
+    IPackageFeed getPackageFeed(IPackageFeedHost host);
 }

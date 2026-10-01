@@ -1,0 +1,19 @@
+// A stub of the image's class for compiling against (docs/build.md, "Java"):
+// the members used, checked against the image by the device-services node.
+package android.content.pm;
+
+import java.util.List;
+
+public final class SharedLibraryInfo {
+    public SharedLibraryInfo(String name, long version, int type) { throw new RuntimeException("stub"); }
+    public String getName() { throw new RuntimeException("stub"); }
+    public String getPath() { throw new RuntimeException("stub"); }
+    public String getPackageName() { throw new RuntimeException("stub"); }
+    public List<String> getAllCodePaths() { throw new RuntimeException("stub"); }
+    public long getLongVersion() { throw new RuntimeException("stub"); }
+    public int getType() { throw new RuntimeException("stub"); }
+    public boolean isNative() { throw new RuntimeException("stub"); }
+    public VersionedPackage getDeclaringPackage() { throw new RuntimeException("stub"); }
+    public List<VersionedPackage> getDependentPackages() { throw new RuntimeException("stub"); }
+    public List<SharedLibraryInfo> getDependencies() { throw new RuntimeException("stub"); }
+}

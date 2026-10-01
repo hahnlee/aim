@@ -14,6 +14,7 @@ pub mod intent;
 pub mod intent_filter;
 pub mod info;
 pub mod intent_resolver;
+pub mod feed;
 pub mod list;
 pub mod model;
 pub mod parse;

@@ -317,7 +317,9 @@ until PermissionController is native (docs/notifications.md, "The
 permission"; #550). The Mac's preferred languages reach the device the
 same way: the host calls `IBridge.updateLocales`, which runs the
 platform's `LocalePicker.updateLocales` ([mac-settings.md](mac-settings.md),
-"The language list"; #344).
+"The language list"; #344). The native PackageManager's model is fed the
+original's state through it as well (`IBridge.getPackageFeed`;
+[m4-packagemanager.md](m4-packagemanager.md), slice A).
 
 **Maintenance and CTS.** Each method is one internal call; the internal
 APIs it names are checked per image. It runs in system_server, so it

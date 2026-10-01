@@ -1,0 +1,696 @@
+package dev.aim.server;
+
+import android.app.AppGlobals;
+import android.content.Context;
+import android.content.pm.IPackageManager;
+import android.content.pm.InstallSourceInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.PermissionGroupInfo;
+import android.content.pm.PermissionInfo;
+import android.content.pm.SharedLibraryInfo;
+import android.content.pm.Signature;
+import android.content.pm.SigningDetails;
+import android.content.pm.SigningInfo;
+import android.content.pm.VersionedPackage;
+import android.content.pm.overlay.OverlayPaths;
+import android.content.res.Resources;
+import android.content.pm.verify.domain.DomainVerificationInfo;
+import android.content.pm.verify.domain.DomainVerificationManager;
+import android.content.pm.verify.domain.DomainVerificationUserState;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.IRemoteCallback;
+import android.os.Parcel;
+import android.os.RemoteException;
+import android.os.UserHandle;
+import android.permission.PermissionManager;
+import android.util.Slog;
+import android.util.SparseArray;
+
+import com.android.internal.pm.parsing.pkg.ParsedPackage;
+import com.android.server.LocalManagerRegistry;
+import com.android.server.pm.PackageManagerLocal;
+import com.android.server.pm.parsing.PackageCacher;
+import com.android.server.pm.pkg.AndroidPackage;
+import com.android.server.pm.pkg.ArchiveState;
+import com.android.server.pm.pkg.PackageState;
+import com.android.server.pm.pkg.PackageUserState;
+import com.android.server.pm.pkg.SharedLibrary;
+import com.android.server.pm.pkg.SharedUserApi;
+
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+
+/**
+ * The feed of the original PackageManager's state to the native
+ * PackageManager's model in the service host (docs/m4-packagemanager.md,
+ * slice A): at attach a snapshot through PackageManagerLocal and the
+ * system APIs, then, on each package monitor callback and each sync the
+ * host asks for when the package_info_cache nonce moved, the records that
+ * changed. Every batch ends with the digest of a fresh snapshot, which the
+ * host checks its records against. It runs on a thread of its own and
+ * never under a lock of PackageManager's.
+ *
+ * The records are Parcels in the layout feed.rs reads; a parsed package
+ * is PackageImpl as the parser cache keeps it (PackageCacher), sent again
+ * only when the original holds another AndroidPackage for it.
+ */
+final class PackageFeed extends IPackageFeed.Stub {
+    private static final String TAG = "AimPackageFeed";
+
+    /** The records' kinds, as feed.rs numbers them. */
+    private static final int PACKAGE = 0;
+    private static final int DISABLED_SYSTEM_PACKAGE = 1;
+    private static final int PARSED = 2;
+    private static final int DISABLED_SYSTEM_PARSED = 3;
+    private static final int SHARED_USER = 4;
+    private static final int USER = 5;
+    private static final int SYSTEM = 6;
+    /** The largest chunk of a record in one transaction. */
+    private static final int CHUNK = 128 * 1024;
+    /** UserHandle.USER_ALL. */
+    private static final int USER_ALL = -1;
+    /** VirtualDeviceManager.PERSISTENT_DEVICE_ID_DEFAULT. */
+    private static final String DEVICE_DEFAULT = "default:0";
+
+    private final Context mContext;
+    private final Object mLock = new Object();
+    private Handler mHandler;
+    private boolean mScheduled;
+    private boolean mReset;
+    /** The latest sync's token. */
+    private long mToken;
+
+    // The feed thread's state.
+    private IPackageFeedHost mHost;
+    /** What the host holds: each record's SHA-256, by kind and key. */
+    private final TreeMap<Key, byte[]> mSent = new TreeMap<>();
+    /** The AndroidPackage each parsed record was made of. */
+    private final HashMap<Key, AndroidPackage> mParsed = new HashMap<>();
+    /** This batch's installed permission definitions, by owner package. */
+    private Map<String, TreeSet<String>> mInstalledPermissions;
+
+    PackageFeed(Context context) {
+        mContext = context;
+    }
+
+    /** IBridge.getPackageFeed: feeds `host` from now on, starting with a snapshot. */
+    IPackageFeed attach(IPackageFeedHost host) {
+        synchronized (mLock) {
+            if (mHandler == null) {
+                HandlerThread thread = new HandlerThread(TAG);
+                thread.start();
+                mHandler = thread.getThreadHandler();
+                registerPackageMonitor();
+            }
+            mHandler.post(() -> mHost = host);
+        }
+        sync(true, 0);
+        return this;
+    }
+
+    @Override
+    public void sync(boolean reset, long token) {
+        synchronized (mLock) {
+            mReset |= reset;
+            mToken = Math.max(mToken, token);
+            if (mHandler == null || mScheduled) {
+                return;
+            }
+            mScheduled = true;
+            mHandler.post(this::batch);
+        }
+    }
+
+    /** IPackageManager.registerPackageMonitorCallback: a delta per package broadcast. */
+    private void registerPackageMonitor() {
+        try {
+            AppGlobals.getPackageManager().registerPackageMonitorCallback(
+                    new IRemoteCallback.Stub() {
+                        @Override
+                        public void sendResult(Bundle data) {
+                            sync(false, 0);
+                        }
+                    }, USER_ALL);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /** One batch: the records that differ from what the host holds. */
+    private void batch() {
+        boolean reset;
+        long token;
+        synchronized (mLock) {
+            mScheduled = false;
+            reset = mReset;
+            mReset = false;
+            token = mToken;
+        }
+        IPackageFeedHost host = mHost;
+        if (host == null) {
+            return;
+        }
+        try {
+            send(host, reset, token);
+        } catch (RemoteException e) {
+            Slog.w(TAG, "the package feed's host died", e);
+            mHost = null;
+            mSent.clear();
+            mParsed.clear();
+        } catch (RuntimeException e) {
+            // What the host holds is unknown now: the next batch sends all.
+            Slog.e(TAG, "a package feed batch failed", e);
+            synchronized (mLock) {
+                mReset = true;
+            }
+        }
+    }
+
+    private void send(IPackageFeedHost host, boolean reset, long token) throws RemoteException {
+        if (reset) {
+            mSent.clear();
+            mParsed.clear();
+        }
+        TreeMap<Key, byte[]> records = new TreeMap<>();
+        TreeMap<Key, AndroidPackage> parsed = new TreeMap<>();
+        TreeSet<Integer> users = new TreeSet<>();
+        mInstalledPermissions = installedPermissions();
+        PackageManagerLocal local = LocalManagerRegistry.getManager(PackageManagerLocal.class);
+        try (PackageManagerLocal.UnfilteredSnapshot snapshot = local.withUnfilteredSnapshot()) {
+            for (PackageState state : snapshot.getPackageStates().values()) {
+                add(records, parsed, users, PACKAGE, PARSED, state);
+            }
+            for (PackageState state : snapshot.getDisabledSystemPackageStates().values()) {
+                add(records, parsed, users, DISABLED_SYSTEM_PACKAGE, DISABLED_SYSTEM_PARSED,
+                        state);
+            }
+            for (SharedUserApi user : snapshot.getSharedUsers().values()) {
+                records.put(new Key(SHARED_USER, user.getName()), sharedUser(user));
+            }
+        }
+        for (int user : users) {
+            records.put(new Key(USER, Integer.toString(user)), user(user));
+        }
+        records.put(new Key(SYSTEM, ""), system());
+        host.begin(reset);
+        for (Map.Entry<Key, byte[]> e : records.entrySet()) {
+            byte[] hash = sha256(e.getValue());
+            if (!Arrays.equals(hash, mSent.get(e.getKey()))) {
+                put(host, e.getKey(), e.getValue());
+                mSent.put(e.getKey(), hash);
+            }
+        }
+        for (Map.Entry<Key, AndroidPackage> e : parsed.entrySet()) {
+            if (mParsed.get(e.getKey()) != e.getValue()) {
+                byte[] record = PackageCacher.toCacheEntryStatic((ParsedPackage) e.getValue());
+                put(host, e.getKey(), record);
+                mSent.put(e.getKey(), sha256(record));
+                mParsed.put(e.getKey(), e.getValue());
+            }
+        }
+        for (Key key : new ArrayList<>(mSent.keySet())) {
+            if (!records.containsKey(key) && !parsed.containsKey(key)) {
+                host.remove(key.kind, key.name);
+                mSent.remove(key);
+                mParsed.remove(key);
+            }
+        }
+        host.end(digest(), token);
+    }
+
+    private void add(Map<Key, byte[]> records, Map<Key, AndroidPackage> parsed, Set<Integer> users,
+            int kind, int parsedKind, PackageState state) {
+        String name = state.getPackageName();
+        records.put(new Key(kind, name), packageState(state, kind == PACKAGE));
+        AndroidPackage pkg = state.getAndroidPackage();
+        if (pkg instanceof ParsedPackage) {
+            parsed.put(new Key(parsedKind, name), pkg);
+        }
+        SparseArray<? extends PackageUserState> states = state.getUserStates();
+        for (int i = 0; i < states.size(); i++) {
+            users.add(states.keyAt(i));
+        }
+    }
+
+    private static void put(IPackageFeedHost host, Key key, byte[] record) throws RemoteException {
+        int at = 0;
+        do {
+            int end = Math.min(record.length, at + CHUNK);
+            host.put(key.kind, key.name, record.length,
+                    at == 0 && end == record.length ? record : Arrays.copyOfRange(record, at, end));
+            at = end;
+        } while (at < record.length);
+    }
+
+    /**
+     * The SHA-256 of the records the host holds: per record in key order
+     * its kind, its key's length and UTF-8 bytes, and its own SHA-256.
+     */
+    private byte[] digest() {
+        MessageDigest digest = sha256();
+        for (Map.Entry<Key, byte[]> e : mSent.entrySet()) {
+            byte[] name = e.getKey().name.getBytes(StandardCharsets.UTF_8);
+            digest.update(int32(e.getKey().kind));
+            digest.update(int32(name.length));
+            digest.update(name);
+            digest.update(e.getValue());
+        }
+        return digest.digest();
+    }
+
+    private static byte[] int32(int v) {
+        return new byte[] {(byte) (v >> 24), (byte) (v >> 16), (byte) (v >> 8), (byte) v};
+    }
+
+    private static MessageDigest sha256() {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static byte[] sha256(byte[] bytes) {
+        return sha256().digest(bytes);
+    }
+
+    // The records. Each is a Parcel: strings as writeString, lists as
+    // their size (-1 for null) and elements, booleans in flag words.
+
+    private interface Writer {
+        void write(Parcel p);
+    }
+
+    private static byte[] record(Writer writer) {
+        Parcel p = Parcel.obtain();
+        try {
+            writer.write(p);
+            return p.marshall();
+        } finally {
+            p.recycle();
+        }
+    }
+
+    /**
+     * A package state's record; `installed`: the package the name stands
+     * for now, not the system package an update replaced, whose install
+     * source no API gives (#714).
+     */
+    private byte[] packageState(PackageState s, boolean installed) {
+        return record(p -> {
+            p.writeString(s.getPackageName());
+            p.writeInt(s.getAppId());
+            p.writeInt(s.getSharedUserAppId());
+            File path = s.getPath();
+            p.writeString(path == null ? null : path.getPath());
+            p.writeString(s.getVolumeUuid());
+            p.writeString(s.getPrimaryCpuAbi());
+            p.writeString(s.getSecondaryCpuAbi());
+            p.writeString(s.getCpuAbiOverride());
+            p.writeString(s.getSeInfo());
+            p.writeString(s.getApexModuleName());
+            p.writeLong(s.getVersionCode());
+            p.writeInt(s.getTargetSdkVersion());
+            p.writeInt(s.getCategoryOverride());
+            p.writeInt(s.getHiddenApiEnforcementPolicy());
+            p.writeLong(s.getLastModifiedTime());
+            p.writeLong(s.getLastUpdateTime());
+            p.writeByteArray(s.getRestrictUpdateHash());
+            p.writeInt(flags(s.hasSharedUser(), s.isApex(), s.isApkInUpdatedApex(),
+                    s.isDebuggable(), s.isDefaultToDeviceProtectedStorage(),
+                    s.isExternalStorage(), s.isForceQueryableOverride(),
+                    s.isHiddenUntilInstalled(), s.isInstallPermissionsFixed(),
+                    s.isLeavingSharedUser(), s.isOdm(), s.isOem(),
+                    s.isPageSizeAppCompatEnabled(), s.isPendingRestore(), s.isPersistent(),
+                    s.isPrivileged(), s.isProduct(), s.isRequiredForSystemUser(),
+                    s.isScannedAsStoppedSystemApp(), s.isSystem(), s.isSystemExt(),
+                    s.isUpdateAvailable(), s.isUpdatedSystemApp(), s.isVendor()));
+            Map<String, Set<String>> mimeGroups = s.getMimeGroups();
+            p.writeInt(mimeGroups == null ? -1 : mimeGroups.size());
+            if (mimeGroups != null) {
+                for (Map.Entry<String, Set<String>> e : new TreeMap<>(mimeGroups).entrySet()) {
+                    p.writeString(e.getKey());
+                    strings(p, e.getValue() == null ? null : new TreeSet<>(e.getValue()));
+                }
+            }
+            String[] staticLibraries = s.getUsesStaticLibraries();
+            long[] staticVersions = s.getUsesStaticLibrariesVersions();
+            p.writeInt(staticLibraries.length);
+            for (int i = 0; i < staticLibraries.length; i++) {
+                p.writeString(staticLibraries[i]);
+                p.writeLong(staticVersions[i]);
+            }
+            String[] sdkLibraries = s.getUsesSdkLibraries();
+            long[] sdkVersions = s.getUsesSdkLibrariesVersionsMajor();
+            boolean[] sdkOptional = s.getUsesSdkLibrariesOptional();
+            p.writeInt(sdkLibraries.length);
+            for (int i = 0; i < sdkLibraries.length; i++) {
+                p.writeString(sdkLibraries[i]);
+                p.writeLong(sdkVersions[i]);
+                p.writeBoolean(sdkOptional[i]);
+            }
+            strings(p, s.getUsesLibraryFiles());
+            List<SharedLibrary> libraries = s.getSharedLibraryDependencies();
+            p.writeInt(libraries.size());
+            for (SharedLibrary l : libraries) {
+                sharedLibrary(p, l.getName(), l.getPath(), l.getPackageName(), l.getAllCodePaths(),
+                        l.getVersion(), l.getType(), l.isNative(), l.getDeclaringPackage(),
+                        l.getDependentPackages(), l.getDependencies());
+            }
+            strings(p, mInstalledPermissions.get(s.getPackageName()));
+            signing(p, s.getSigningInfo());
+            installSource(p, installed ? s : null);
+            DomainVerificationInfo domains = domainVerification(s.getPackageName());
+            p.writeBoolean(domains != null);
+            if (domains != null) {
+                p.writeString(domains.getIdentifier().toString());
+                hostStates(p, domains.getHostToStateMap());
+            }
+            SparseArray<? extends PackageUserState> users = s.getUserStates();
+            p.writeInt(users.size());
+            for (int i = 0; i < users.size(); i++) {
+                p.writeInt(users.keyAt(i));
+                userState(p, users.valueAt(i), s.getPackageName(), users.keyAt(i),
+                        domains != null);
+            }
+        });
+    }
+
+    /** A SharedLibrary or SharedLibraryInfo, with its dependencies'. */
+    private static void sharedLibrary(Parcel p, String name, String path, String packageName,
+            List<String> codePaths, long version, int type, boolean isNative,
+            VersionedPackage declaring, List<VersionedPackage> dependents,
+            List<SharedLibraryInfo> dependencies) {
+        p.writeString(name);
+        p.writeString(path);
+        p.writeString(packageName);
+        strings(p, codePaths);
+        p.writeLong(version);
+        p.writeInt(type);
+        p.writeBoolean(isNative);
+        p.writeString(declaring.getPackageName());
+        p.writeLong(declaring.getLongVersionCode());
+        p.writeInt(dependents.size());
+        for (VersionedPackage d : dependents) {
+            p.writeString(d.getPackageName());
+            p.writeLong(d.getLongVersionCode());
+        }
+        p.writeInt(dependencies == null ? -1 : dependencies.size());
+        if (dependencies != null) {
+            for (SharedLibraryInfo l : dependencies) {
+                sharedLibrary(p, l.getName(), l.getPath(), l.getPackageName(),
+                        l.getAllCodePaths(), l.getLongVersion(), l.getType(), l.isNative(),
+                        l.getDeclaringPackage(), l.getDependentPackages(), l.getDependencies());
+            }
+        }
+    }
+
+    /** The installed permission definitions, by the package that defines each. */
+    private Map<String, TreeSet<String>> installedPermissions() {
+        PackageManager pm = mContext.getPackageManager();
+        List<String> groups = new ArrayList<>();
+        groups.add(null);
+        for (PermissionGroupInfo group : pm.getAllPermissionGroups(0)) {
+            groups.add(group.name);
+        }
+        HashMap<String, TreeSet<String>> installed = new HashMap<>();
+        for (String group : groups) {
+            List<PermissionInfo> permissions;
+            try {
+                permissions = pm.queryPermissionsByGroup(group, 0);
+            } catch (PackageManager.NameNotFoundException e) {
+                continue;
+            }
+            for (PermissionInfo permission : permissions) {
+                installed.computeIfAbsent(permission.packageName, k -> new TreeSet<>())
+                        .add(permission.name);
+            }
+        }
+        return installed;
+    }
+
+    private static int flags(boolean... bits) {
+        int flags = 0;
+        for (int i = 0; i < bits.length; i++) {
+            if (bits[i]) {
+                flags |= 1 << i;
+            }
+        }
+        return flags;
+    }
+
+    private static void strings(Parcel p, Collection<String> strings) {
+        p.writeInt(strings == null ? -1 : strings.size());
+        if (strings != null) {
+            for (String s : strings) {
+                p.writeString(s);
+            }
+        }
+    }
+
+    /** SigningDetails: the scheme, the signers, the lineage with its capabilities. */
+    private static void signing(Parcel p, SigningInfo info) {
+        signing(p, info == null ? null : info.getSigningDetails());
+    }
+
+    private static void signing(Parcel p, SigningDetails details) {
+        if (details == null) {
+            p.writeInt(-1);
+            return;
+        }
+        p.writeInt(details.getSignatureSchemeVersion());
+        signatures(p, details.getSignatures());
+        signatures(p, details.getPastSigningCertificates());
+    }
+
+    private static void signatures(Parcel p, Signature[] signatures) {
+        p.writeInt(signatures == null ? -1 : signatures.length);
+        if (signatures != null) {
+            for (Signature s : signatures) {
+                p.writeByteArray(s.toByteArray());
+                p.writeInt(s.getFlags());
+            }
+        }
+    }
+
+    /** getInstallSourceInfo, asked in a user the package is installed in; none for null. */
+    private static void installSource(Parcel p, PackageState s) {
+        InstallSourceInfo info = null;
+        SparseArray<? extends PackageUserState> users = s == null ? null : s.getUserStates();
+        for (int i = 0; users != null && i < users.size() && info == null; i++) {
+            if (!users.valueAt(i).isInstalled()) {
+                continue;
+            }
+            try {
+                info = AppGlobals.getPackageManager()
+                        .getInstallSourceInfo(s.getPackageName(), users.keyAt(i));
+            } catch (RemoteException e) {
+                throw e.rethrowFromSystemServer();
+            } catch (IllegalArgumentException e) {
+                // Not visible in that user after all.
+            }
+        }
+        p.writeBoolean(info != null);
+        if (info != null) {
+            p.writeString(info.getInstallingPackageName());
+            p.writeString(info.getInitiatingPackageName());
+            p.writeString(info.getOriginatingPackageName());
+            p.writeString(info.getUpdateOwnerPackageName());
+            p.writeInt(info.getPackageSource());
+            signing(p, info.getInitiatingPackageSigningInfo());
+        }
+    }
+
+    /** The package's domain verification state; null without web domains. */
+    private DomainVerificationInfo domainVerification(String packageName) {
+        try {
+            return mContext.getSystemService(DomainVerificationManager.class)
+                    .getDomainVerificationInfo(packageName);
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            return null;
+        }
+    }
+
+    private static void hostStates(Parcel p, Map<String, Integer> states) {
+        p.writeInt(states.size());
+        for (Map.Entry<String, Integer> e : new TreeMap<>(states).entrySet()) {
+            p.writeString(e.getKey());
+            p.writeInt(e.getValue());
+        }
+    }
+
+    private void userState(Parcel p, PackageUserState u, String packageName, int userId,
+            boolean domains) {
+        p.writeLong(u.getCeDataInode());
+        p.writeLong(u.getDeDataInode());
+        p.writeInt(flags(u.isInstalled(), u.isStopped(), u.isNotLaunched(), u.isHidden(),
+                u.isSuspended(), u.isInstantApp(), u.isVirtualPreload(), u.isQuarantined(),
+                u.dataExists()));
+        p.writeInt(u.getDistractionFlags());
+        p.writeInt(u.getEnabledState());
+        p.writeString(u.getLastDisableAppCaller());
+        Set<String> enabled = u.getEnabledComponents();
+        strings(p, enabled == null ? null : new TreeSet<>(enabled));
+        Set<String> disabled = u.getDisabledComponents();
+        strings(p, disabled == null ? null : new TreeSet<>(disabled));
+        p.writeInt(u.getInstallReason());
+        p.writeInt(u.getUninstallReason());
+        p.writeString(u.getHarmfulAppWarning());
+        p.writeString(u.getSplashScreenTheme());
+        p.writeLong(u.getFirstInstallTimeMillis());
+        p.writeInt(u.getMinAspectRatio());
+        ArchiveState archive = u.getArchiveState();
+        p.writeBoolean(archive != null);
+        if (archive != null) {
+            p.writeString(archive.getInstallerTitle());
+            p.writeLong(archive.getArchiveTimeMillis());
+            List<ArchiveState.ArchiveActivityInfo> activities = archive.getActivityInfos();
+            p.writeInt(activities.size());
+            for (ArchiveState.ArchiveActivityInfo a : activities) {
+                p.writeString(a.getTitle());
+                p.writeString(a.getOriginalComponentName().flattenToString());
+                p.writeString(path(a.getIconBitmap()));
+                p.writeString(path(a.getMonochromeIconBitmap()));
+            }
+        }
+        OverlayPaths overlays = u.getAllOverlayPaths();
+        p.writeBoolean(overlays != null);
+        if (overlays != null) {
+            strings(p, overlays.getOverlayPaths());
+            strings(p, overlays.getResourceDirs());
+        }
+        IPackageManager pm = AppGlobals.getPackageManager();
+        try {
+            p.writeString(u.isSuspended() ? pm.getSuspendingPackage(packageName, userId) : null);
+            p.writeIntArray(u.isInstalled() ? pm.getPackageGids(packageName, 0, userId) : null);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+        TreeSet<String> granted = new TreeSet<>();
+        if (u.isInstalled()) {
+            Map<String, PermissionManager.PermissionState> states =
+                    mContext.createContextAsUser(UserHandle.of(userId), 0)
+                            .getSystemService(PermissionManager.class)
+                            .getAllPermissionStates(packageName, DEVICE_DEFAULT);
+            for (Map.Entry<String, PermissionManager.PermissionState> e : states.entrySet()) {
+                if (e.getValue().isGranted()) {
+                    granted.add(e.getKey());
+                }
+            }
+        }
+        strings(p, granted);
+        DomainVerificationUserState selection = domains
+                ? domainSelection(packageName, userId) : null;
+        p.writeBoolean(selection != null);
+        if (selection != null) {
+            p.writeBoolean(selection.isLinkHandlingAllowed());
+            hostStates(p, selection.getHostToStateMap());
+        }
+    }
+
+    private static String path(Path path) {
+        return path == null ? null : path.toString();
+    }
+
+    /** getDomainVerificationUserState in `userId`; null where not visible. */
+    private DomainVerificationUserState domainSelection(String packageName, int userId) {
+        try {
+            return mContext.createContextAsUser(UserHandle.of(userId), 0)
+                    .getSystemService(DomainVerificationManager.class)
+                    .getDomainVerificationUserState(packageName);
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            return null;
+        }
+    }
+
+    private static byte[] sharedUser(SharedUserApi u) {
+        return record(p -> {
+            p.writeString(u.getName());
+            p.writeInt(u.getAppId());
+            p.writeBoolean(u.isPrivileged());
+            p.writeInt(u.getSeInfoTargetSdkVersion());
+            TreeSet<String> packages = new TreeSet<>();
+            for (PackageState s : u.getPackageStates()) {
+                packages.add(s.getPackageName());
+            }
+            strings(p, packages);
+            signing(p, u.getSigningDetails());
+        });
+    }
+
+    /**
+     * A user's record: its preferred activities as the original backs them
+     * up (getPreferredActivityBackup, the full XML), or none. The
+     * persistent ones have no read API (#715).
+     */
+    private static byte[] user(int userId) {
+        byte[] preferred;
+        try {
+            preferred = AppGlobals.getPackageManager().getPreferredActivityBackup(userId);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+        return record(p -> {
+            p.writeInt(userId);
+            p.writeByteArray(preferred);
+        });
+    }
+
+    /**
+     * The system record: the configuration AppsFilter reads from the
+     * framework's resources, config_forceSystemPackagesQueryable and
+     * config_forceQueryablePackages.
+     */
+    private static byte[] system() {
+        Resources res = Resources.getSystem();
+        boolean systemQueryable = res.getBoolean(
+                res.getIdentifier("config_forceSystemPackagesQueryable", "bool", "android"));
+        String[] queryable = res.getStringArray(
+                res.getIdentifier("config_forceQueryablePackages", "array", "android"));
+        return record(p -> {
+            p.writeBoolean(systemQueryable);
+            strings(p, Arrays.asList(queryable));
+        });
+    }
+
+    /** A record's kind and key, in the order the digest takes them. */
+    private static final class Key implements Comparable<Key> {
+        final int kind;
+        final String name;
+
+        Key(int kind, String name) {
+            this.kind = kind;
+            this.name = name;
+        }
+
+        @Override
+        public int compareTo(Key other) {
+            return kind != other.kind ? Integer.compare(kind, other.kind)
+                    : name.compareTo(other.name);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Key k && k.kind == kind && k.name.equals(name);
+        }
+
+        @Override
+        public int hashCode() {
+            return kind * 31 + name.hashCode();
+        }
+    }
+}

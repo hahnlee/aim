@@ -67,10 +67,10 @@ artd through ART Service, apexd (`IApexService`, 23), idmap2d through
 OverlayManagerService (`IIdmap2`, 10), incremental (`IIncrementalService`,
 25), vold.
 
-**What apps use** ("Measured" below): 55 of
+**What apps use** ("Measured surface" below): 55 of
 `IPackageManager`'s 224 methods were called in a first and a repeat
-boot with idle time, cold starts, installs and an uninstall, and ten of
-them made 92 % of the calls: package and component queries, intent
+boot with idle time, cold starts, installs and an uninstall, and twenty
+of them made 98 % of the calls: package and component queries, intent
 queries, enabled state (read and set), install sources, features.
 `package_native` saw three methods, from `media.metrics`; the installer
 ten session methods, from Play Store. Apps keep `getPackageInfo`,
@@ -80,41 +80,217 @@ ten session methods, from Play Store. Apps keep `getPackageInfo`,
 `package_info_cache` nonce changes; everything else, intent queries
 included, is a binder call.
 
-### Measured
+## Measured surface
 
-A census (2026-10-02, main e54a8234, window mode): a binder trace of a template first boot of a new data
-directory with 2 idle minutes, then of its repeat boot with 2 idle
-minutes, Settings started cold twice, Calculator and Chrome installed
-with `pm install` and started cold twice each, and a probe APK installed
-and uninstalled. Calls received, by interface:
+**Method** (2026-10-02, main e54a8234, M2 Pro, load
+6-7). Window mode, the default image, a fresh disposable data directory
+started from the userdata template (so PackageManager's first boot runs
+as a repeat boot would, docs/first-boot.md). Both boots ran
+`cargo aim boot --windows -- --binder-trace FILE` (docs/system-services.md,
+"Inventory"). The first boot was traced to `boot_completed` (6.8 s from
+the binder host's start) and then 2 idle minutes. The repeat boot was
+traced to `boot_completed` (6.5 s), 2 idle minutes, and then the
+following, each followed by 6 s:
 
-| Interface | First boot and idle | Repeat boot and the session |
-| --- | --- | --- |
-| `IPackageManager` | 23,175 (apps 23,116, the service host 37, natives 22) | 8,132 |
-| `IPermissionManager` | 2,793 | 1,831 |
-| `IPackageInstallerSession` | 213 (Play Store) | 0 |
-| `IPackageInstaller` | 20 | 9 |
-| `IPackageManagerNative` | 8 (`media.metrics`) | 8 |
-| `IInstalld` (from system_server) | 1,628 | 920 |
-| `IArtd` (from system_server) | 136 | 31 |
-| `ILauncherApps`, `IShortcutService`, `ICrossProfileApps`, `IDomainVerificationManager` | 389, 14, 27, 13 | 315, 7, 4, 13 |
+- two cold starts of Settings (`am start -W -S`; 236 and 185 ms);
+- `pm install -r -g` of Calculator and of Chrome
+  (`_build/installed-apps`);
+- two cold starts of Chrome (1,059 and 270 ms) and of Calculator (285
+  and 271 ms);
+- install and uninstall of the probe `orientprobe2.apk`.
 
-`IPackageManager` on the first boot, by method: `getPackageInfo` 8,170
-(Google Play services and Play Store, despite the apps' cache),
-`queryIntentActivities` 3,327, `queryIntentServices` 2,415,
-`getInstallSourceInfo` 1,681, `getApplicationInfo` 1,502,
-`setComponentEnabledSetting` 1,187, `getComponentEnabledSetting` 1,057,
-`getApplicationEnabledSetting` 844, `hasSystemFeature` 692,
-`resolveIntent` 388; 44 more methods share the last 8 %. Most of it is
-the idle minutes after the first boot (Play Store updating itself,
-Google Play services setting itself up). The changes apps make are
-frequent, not rare: `setComponentEnabledSetting` is the sixth most
-called method. Per phase of the repeat session, all callers counted:
-Settings' two cold starts 124 and 89 calls, Calculator's 130 and 38,
-Chrome's 1,197 (Play Store reacting to the install just before) and 72;
-each install 207-262, the uninstall 1,133 (Digital Wellbeing resolving
-its intents again).
-system_server's own calls do not appear: they are in-process (#700).
+A PING to `package` from the shell marked each phase. Callers come from
+`ps -A` snapshots: an app is a zygote child or a uid ≥ 10000, the
+service host is the native services' process, and native is any other
+process. Method names and codes come from the image's AIDL stubs
+(`TRANSACTION_*` in framework.jar, via `tools/binder-trace-report.py`).
+These are the same stubs that `aim-service-aidl`'s generated codes are
+checked against (the four `IPackageManager` methods in
+`crates/aim-services/sources.lock` agree). The tracked game set is not
+included because no document names it (#704).
+
+**What the trace cannot see.** system_server's own calls into
+PackageManager are Java calls (`PackageManagerInternal`, `Computer`
+snapshots, `PackageManagerLocal`), not binder transactions. The trace
+shows 0 for system_server in every row. Measuring those calls is #700.
+`pm install` and `pm uninstall` are one `cmd package` shell command
+each, which runs the install inside system_server. Their rows show
+only the reactions of other processes. Play's own installs go through
+`IPackageInstaller`, as the first boot shows (#703). A native
+PackageManager also serves `cmd package`.
+
+**Totals.** The table counts transactions to the six interfaces M4
+serves. `IPackageManager` has 224 codes at this pin; 55 were called.
+`IPackageInstaller` has 26 (6 called), `IPackageInstallerSession` 34
+(10), `IPermissionManager` 33 (10), `IPermissionChecker` 3 (2) and
+`IPackageManagerNative` 14 (3).
+
+| Phase | Length | All binder | package | permissionmgr | permission_checker | installer + sessions | package_native |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| First boot, to boot_completed | 6.8 s | 10,133 | 874 | 19 | 19 | 0 | 2 |
+| First boot, 2 idle minutes | 124 s | 117,042 | 22,301 | 2,774 | 191 | 233 | 6 |
+| Repeat boot, to boot_completed | 6.5 s | 13,710 | 1,095 | 25 | 29 | 1 | 5 |
+| Repeat boot, 2 idle minutes | 126 s | 18,036 | 3,539 | 1,149 | 27 | 5 | 3 |
+| Settings, 1st / 2nd start | 8 s each | 2,281 / 1,464 | 124 / 89 | 102 / 222 | 0 | 0 | 0 |
+| Chrome, 1st / 2nd start | 8 s each | 2,938 / 1,365 | 1,197 / 72 | 230 / 2 | 1 / 1 | 0 | 0 |
+| Calculator, 1st / 2nd start | 8 s each | 1,289 / 973 | 130 / 38 | 39 / 2 | 0 | 0 | 0 |
+| Install Calculator / Chrome / probe | 7-10 s each | 998 / 1,055 / 840 | 262 / 246 / 207 | 3 / 36 / 15 | 0 | 1 / 1 / 1 | 0 |
+| Uninstall probe | 7 s | 2,111 | 1,133 | 6 | 0 | 0 | 0 |
+
+The started app's own calls, within its phase:
+
+| Start | Its transactions | To package | package driver time | Other PM/permission calls |
+| --- | ---: | ---: | ---: | --- |
+| Settings, 1st / 2nd | 417 / 417 | 83 / 83 | 4.2 / 3.9 ms | `IPermissionManager.checkPermission` 1, `IPermissionController.countPermissionApps` 1, `IShortcutService.getShortcuts` 1 |
+| Chrome, 1st / 2nd | 465 / 475 | 51 / 41 | 3.0 / 1.9 ms | `IPermissionManager.checkPermission` 1 (1st) |
+| Calculator, 1st / 2nd | 157 / 147 | 10 / 10 | 0.3 / 0.3 ms | none |
+
+The calls to `package` are cheap at the driver: p50 46 µs and p99 656 µs
+over 23,030 calls in the first boot, and p50 40 µs and p99 746 µs over
+8,040 in the repeat boot. They were 2.0 s and 0.67 s of driver time.
+
+**Per method.** The table lists `IPackageManager` methods with at least
+10 calls, then every called method of the other five interfaces. The
+columns are calls in the first boot (to `boot_completed`, idle), in the
+repeat boot (to `boot_completed`, idle), in the six app starts and in
+the four install and uninstall phases. In the callers columns, `g.` is
+`com.google.android.` and `a.` is `com.android.`.
+
+| interface.method (code) | first:boot | first:idle | repeat:boot | repeat:idle | starts | install | app / native / host | main callers |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| IPackageManager.getPackageInfo (3) | 269 | 7901 | 280 | 1123 | 95 | 463 | 10129 / 2 / 0 | g.gms.persistent 3912, g.gms 2720, a.vending 1727 |
+| IPackageManager.queryIntentActivities (30) | 4 | 3323 | 21 | 574 | 642 | 668 | 5232 / 0 / 0 | a.vending 2921, g.apps.wellbeing 1454, a.settings 274 |
+| IPackageManager.queryIntentServices (34) | 103 | 2312 | 55 | 202 | 30 | 3 | 2705 / 0 / 0 | g.gms.persistent 1287, g.gms 1065, g.googlequicksearchbox:search 101 |
+| IPackageManager.getApplicationInfo (9) | 105 | 1397 | 150 | 437 | 83 | 301 | 2467 / 6 / 0 | g.apps.wellbeing 696, g.gms.persistent 441, g.gms 422 |
+| IPackageManager.getInstallSourceInfo (55) |  | 1681 | 3 | 1 | 286 | 31 | 2002 / 0 / 0 | a.vending 1940, a.vending:background 53, g.permissioncontroller 6 |
+| IPackageManager.getComponentEnabledSetting (89) | 24 | 1033 | 123 | 266 | 4 | 8 | 1458 / 0 / 0 | g.gms 1223, a.vending 72, g.as 33 |
+| IPackageManager.setComponentEnabledSetting (87) | 62 | 1125 | 29 | 76 | 4 | 2 | 1298 / 0 / 0 | g.gms 832, a.vending 76, g.gms.persistent 66 |
+| IPackageManager.hasSystemFeature (105) | 123 | 569 | 167 | 204 | 85 | 2 | 1144 / 6 / 0 | g.gms 118, a.settings 98, a.vending 90 |
+| IPackageManager.getApplicationEnabledSetting (91) |  | 844 | 3 | 5 | 248 | 29 | 1129 / 0 / 0 | a.vending 1063, a.vending:background 53, g.partnersetup 9 |
+| IPackageManager.resolveIntent (27) | 9 | 379 | 12 | 291 | 5 | 244 | 940 / 0 / 0 | g.apps.wellbeing 730, g.gms.ui 94, a.settings 67 |
+| IPackageManager.getPackagesForUid (20) | 56 | 300 | 68 | 72 | 17 | 10 | 506 / 2 / 15 | g.gms 130, g.gms.persistent 117, g.permissioncontroller 52 |
+| IPackageManager.resolveContentProvider (41) | 4 | 232 | 7 | 45 | 13 | 8 | 309 / 0 / 0 | g.settings.intelligence 83, g.documentsui 79, g.gms 37 |
+| IPackageManager.queryIntentReceivers (32) | 13 | 189 | 25 | 43 | 21 | 5 | 296 / 0 / 0 | a.phone 75, g.gms 44, a.settings 40 |
+| IPackageManager.getNameForUid (21) | 16 | 175 | 16 | 39 | 3 | 1 | 250 / 0 / 0 | g.gms.persistent 116, g.gms 113, g.gms.ui 5 |
+| IPackageManager.notifyDexLoad (111) | 36 | 97 | 48 | 34 | 9 | 1 | 221 / 4 / 0 | g.gms 19, g.gms.unstable 11, g.inputmethod.latin 9 |
+| IPackageManager.notifyPackagesReplacedReceived (187) |  | 224 |  |  |  |  | 224 / 0 / 0 | g.bluetooth 4, android.process.acore 4, g.adservices.api 4 |
+| IPackageManager.queryIntentContentProviders (35) | 2 | 34 | 3 | 8 | 35 | 43 | 125 / 0 / 0 | a.settings 80, g.documentsui 17, g.bluetooth 14 |
+| IPackageManager.getActivityInfo (11) |  | 74 |  | 32 | 10 |  | 116 / 0 / 0 | g.gms.ui 106, org.chromium.chrome 10 |
+| IPackageManager.getServiceInfo (14) | 5 | 46 | 11 | 12 | 8 |  | 82 / 0 / 0 | g.inputmethod.latin 10, g.googlequicksearchbox:search 10, a.vending 8 |
+| IPackageManager.resolveService (33) | 2 | 40 | 6 | 14 | 2 |  | 64 / 0 / 0 | a.settings 30, g.gms 18, g.apps.safetyhub 8 |
+| IPackageManager.getInstalledPackages (36) | 1 | 35 | 4 | 3 | 6 | 14 | 63 / 0 / 0 | g.gms 23, a.vending 17, g.permissioncontroller 9 |
+| IPackageManager.getInstallerPackageName (54) |  | 41 | 2 | 12 | 3 |  | 58 / 0 / 0 | g.gms.unstable 18, g.gms 11, a.vending 7 |
+| IPackageManager.getProviderInfo (15) | 6 | 23 | 11 | 10 |  | 1 | 50 / 1 / 0 | g.settings.intelligence 3, g.gms 3, g.bluetooth 2 |
+| IPackageManager.getSystemAvailableFeatures (104) | 1 | 32 | 2 | 4 | 2 |  | 41 / 0 / 0 | g.gms 20, a.vending 7, g.googlequicksearchbox:search 2 |
+| IPackageManager.queryInstrumentationAsUser (46) | 12 | 13 | 12 |  | 2 |  | 0 / 0 / 39 | service host 39 |
+| IPackageManager.checkSignatures (17) |  | 11 | 7 | 1 | 12 |  | 31 / 0 / 0 | a.settings 24, g.gms 4, a.vending 3 |
+| IPackageManager.notifyPackageUse (110) | 9 | 5 | 11 | 1 |  |  | 24 / 2 / 0 | a.phone 6, android.process.acore 6, a.networkstack.process 4 |
+| IPackageManager.isInstantApp (151) | 2 | 19 | 1 | 2 | 2 |  | 26 / 0 / 0 | g.gms.persistent 9, g.gms 7, g.apps.wellbeing 2 |
+| IPackageManager.getRotationResolverPackageName (175) |  | 20 |  | 6 |  |  | 26 / 0 / 0 | a.settings 26 |
+| IPackageManager.getPackageUid (5) | 1 | 4 | 5 |  | 8 | 6 | 24 / 0 / 0 | a.settings 16, g.providers.media.module 6, g.bluetooth 2 |
+| IPackageManager.getInstalledApplications (39) | 1 | 18 | 1 | 3 |  | 1 | 24 / 0 / 0 | g.gms 8, a.settings 8, g.apps.wellbeing 3 |
+| IPackageManager.getSystemSharedLibraryNames (102) | 1 | 19 | 1 | 2 |  |  | 23 / 0 / 0 | g.gms 19, a.vending 4 |
+| IPackageManager.getPropertyAsUser (209) |  | 19 |  | 3 |  |  | 22 / 0 / 0 | a.settings 11, g.gms 9, g.as 2 |
+| IPackageManager.setApplicationEnabledSetting (90) |  | 11 |  | 3 |  |  | 12 / 2 / 0 | g.partnersetup 9, g.gms 3, uid1027 2 |
+| IPackageManager.getInstalledModules (183) |  | 8 | 1 | 2 |  | 1 | 12 / 0 / 0 | a.settings 6, a.vending 4, a.vending:background 2 |
+| IPackageManager.getInstantAppResolverSettingsComponent (164) |  | 10 |  | 2 |  |  | 12 / 0 / 0 | a.settings 12 |
+| IPackageManager.getSdkSandboxPackageName (146) | 2 |  | 1 |  | 8 |  | 11 / 0 / 0 | org.chromium.chrome 4, dev.aim.home 2, a.settings 2 |
+| IPermissionManager.getPermissionFlags (7) |  | 2186 |  | 1001 | 525 | 26 | 3738 / 0 / 0 | g.permissioncontroller 3738 |
+| IPermissionManager.getPermissionInfo (3) | 11 | 315 | 10 | 117 | 45 | 13 | 511 / 0 / 0 | g.gms 359, g.gms.persistent 95, g.permissioncontroller 57 |
+| IPermissionChecker.checkPermission (1) | 17 | 191 | 27 | 27 | 2 |  | 197 / 67 / 0 | android.process.acore 93, g.bluetooth 88, cameraserver 67 |
+| IPermissionManager.checkPermission (30) | 3 | 176 | 9 | 21 | 4 |  | 212 / 0 / 1 | g.gms.persistent 89, g.gms 84, a.vending 14 |
+| IPackageInstallerSession.getNames (3) |  | 77 |  |  |  |  | 77 / 0 / 0 | a.vending:background 76, a.vending 1 |
+| IPackageInstallerSession.isMultiPackage (20) |  | 74 |  |  |  |  | 74 / 0 / 0 | a.vending:background 74 |
+| IPermissionManager.getPermissionGroupInfo (2) | 1 | 30 | 1 |  | 11 | 4 | 47 / 0 / 0 | g.permissioncontroller 47 |
+| IPermissionManager.addOnPermissionsChangeListener (10) | 3 | 34 | 3 | 5 | 1 |  | 44 / 0 / 2 | g.permissioncontroller 29, g.gms 11, g.gms.persistent 4 |
+| IPackageInstallerSession.openWrite (4) |  | 30 |  |  |  |  | 30 / 0 / 0 | a.vending:background 22, a.vending 8 |
+| IPermissionManager.removeOnPermissionsChangeListener (11) |  | 25 |  | 3 |  |  | 28 / 0 / 0 | g.permissioncontroller 28 |
+| IPackageInstallerSession.setClientProgress (1) |  | 25 |  |  |  |  | 25 / 0 / 0 | a.vending:background 25 |
+| IPermissionManager.updatePermissionFlags (8) |  | 4 |  | 2 |  | 13 | 18 / 0 / 1 | g.permissioncontroller 18, service host 1 |
+| IPermissionManager.queryPermissionsByGroup (4) |  |  |  |  | 11 | 4 | 15 / 0 / 0 | g.permissioncontroller 15 |
+| IPackageInstaller.getStagedSessions (9) |  | 6 |  | 3 |  |  | 9 / 0 / 0 | a.vending:background 6, a.vending 3 |
+| IPackageManagerNative.getNamesForUids (1) | 2 | 2 | 3 | 1 |  |  | 0 / 8 / 0 | media.metrics 8 |
+| IPackageInstaller.getMySessions (8) |  | 5 |  | 2 |  |  | 7 / 0 / 0 | a.vending 4, a.vending:background 3 |
+| IPackageInstaller.getSessionInfo (6) |  | 3 |  |  |  | 3 | 6 / 0 / 0 | g.gms 5, a.vending:background 1 |
+| IPermissionManager.registerAttributionSource (27) |  | 4 | 2 |  |  |  | 6 / 0 / 0 | g.gms 6 |
+| IPermissionChecker.checkOp (3) | 2 |  | 2 |  |  |  | 4 / 0 / 0 | android.process.acore 4 |
+| IPackageManagerNative.getInstallerForPackage (3) |  | 2 | 1 | 1 |  |  | 0 / 4 / 0 | media.metrics 4 |
+| IPackageManagerNative.getVersionCodeForPackage (4) |  | 2 | 1 | 1 |  |  | 0 / 4 / 0 | media.metrics 4 |
+| IPackageInstaller.registerCallback (10) |  | 2 | 1 |  |  |  | 3 / 0 / 0 | g.gms 3 |
+| IPackageInstaller.createSession (1) |  | 2 |  |  |  |  | 2 / 0 / 0 | a.vending 1, a.vending:background 1 |
+| IPackageInstaller.openSession (5) |  | 2 |  |  |  |  | 2 / 0 / 0 | a.vending 1, a.vending:background 1 |
+| IPackageInstallerSession.commit (12) |  | 2 |  |  |  |  | 2 / 0 / 0 | a.vending 1, a.vending:background 1 |
+| IPermissionManager.getSplitPermissions (20) | 1 |  |  |  |  |  | 1 / 0 / 0 | g.gms 1 |
+| IPackageInstallerSession.getDataLoaderParams (17) |  | 1 |  |  |  |  | 1 / 0 / 0 | a.vending:background 1 |
+| IPackageInstallerSession.setChecksums (8) |  | 1 |  |  |  |  | 1 / 0 / 0 | a.vending:background 1 |
+| IPackageInstallerSession.openWriteAppMetadata (31) |  | 1 |  |  |  |  | 1 / 0 / 0 | a.vending:background 1 |
+| IPackageInstallerSession.close (11) |  | 1 |  |  |  |  | 1 / 0 / 0 | a.vending:background 1 |
+| IPackageInstallerSession.abandon (14) |  | 1 |  |  |  |  | 1 / 0 / 0 | a.vending:background 1 |
+
+Called once or twice: `IPackageManager` getUnsuspendablePackagesForUser,
+getChangedPackages, getReceiverInfo, setApplicationCategoryHint,
+queryContentProviders, getSharedLibraries, getAppMetadataFd,
+getAppMetadataSource, requestPackageChecksums, verifyPendingInstall,
+canonicalToCurrentPackageNames, isPackageStateProtected,
+getModuleInfo, verifyIntentFilter, getPermissionControllerPackageName,
+registerPackageMonitorCallback (the service host), getPackageInstaller,
+getSystemCaptionsServicePackageName.
+
+**What PackageManager sends.** These are system_server's binder calls out,
+which a native PackageManager makes in its place. In the first boot /
+the repeat boot with its phases:
+
+- `installd`: 1,628 / 920 (`android.os.IInstalld`);
+- `artd`: 136 / 31;
+- `IPackageInstallerCallback` to registered apps: 22 / 105, mostly
+  `onSessionProgressChanged`;
+- `IOnPermissionsChangeListener`: 15 / 108;
+- PermissionController's `IPermissionController`: 64 / 20, mostly
+  `updateUserSensitiveForApp`;
+- LauncherApps' `IOnAppsChangedListener`: 86 / 15.
+
+The PackageManager-side services next to it are called by apps:
+`launcherapps` 389 / 315, `domain_verification` 13 / 13, `shortcut`
+14 / 7 and `crossprofileapps` 27 / 4.
+
+**Findings.**
+
+- **Apps call package; system_server cannot, over binder.** Every
+  counted call came from an app process, the native service host or a
+  native daemon. The service host made 39 `queryInstrumentationAsUser`
+  calls, 15 `getPackagesForUid` and 3 `registerPackageMonitorCallback`.
+  `media.metrics` was the only native caller of `package_native`, with
+  16 calls of 3 methods. `cameraserver` made 67
+  `permission_checker.checkPermission` calls. system_server's own reads
+  of package state are the larger and unmeasured part (#700).
+- **Google's apps dominate, not the started apps.** Of 31,307 `package`
+  calls, Play Services (all its processes), the Play Store and Digital
+  Wellbeing made about 25,400 (81 %). The started apps' own starts made 83 (Settings),
+  41-51 (Chrome) and 10 (Calculator). Twenty methods make up 98 % of the
+  calls. In descending order they are getPackageInfo,
+  queryIntentActivities, queryIntentServices, getApplicationInfo,
+  getInstallSourceInfo, the component and application enabled
+  settings, hasSystemFeature, resolveIntent and getPackagesForUid.
+- **Package changes fan out.** Each install or uninstall brings
+  200-1,100 `package` calls from other apps. The Play Store re-reads
+  install sources and enabled states (Chrome's first start phase holds
+  the Play Store's 286 getInstallSourceInfo and 248
+  getApplicationEnabledSetting calls after Chrome's install). Digital
+  Wellbeing re-resolves every launcher activity (an uninstall brought
+  494 queryIntentActivities and 244 resolveIntent calls). The first
+  boot's 224 `notifyPackagesReplacedReceived` calls come from every
+  process that received `MY_PACKAGE_REPLACED`.
+- **PermissionController polls flags.** `getPermissionFlags` is 3,738 of
+  4,624 `permissionmgr` calls, all from PermissionController, in bursts
+  after boot and at Settings' and Chrome's first starts (docs/permissions.md
+  saw the same).
+- **The first boot's idle minutes are heavy.** The 2 minutes after
+  `boot_completed` carried 117,042 transactions, 22,301 of them to
+  `package`. That is 6.5 times the repeat boot's idle and is Google's
+  apps' first-run work. The Play Store also created, wrote and
+  committed two install sessions and showed a window with no user
+  action (#703). That is the only use of `IPackageInstallerSession`
+  measured.
 
 ## 2. Callers inside system_server
 
@@ -275,8 +451,8 @@ The first-boot template (#565, #647; [first-boot.md](first-boot.md))
 ships `packages.xml`, `packages.list`, user 0's restrictions, the parser
 cache, the decompressed stubs and the permission module's files, as the
 original's build-time first boot wrote them. The native owner reads
-them in Rust (`crates/aim-services`, after the ABX reader of
-`crates/aim-build/src/abx.rs`), tested on the files of a template first
+them in Rust (`crates/aim-services/src/package`, on the binary and text
+XML of `crates/aim-android-xml`), tested on the files of a template first
 boot with an installed app, a disabled package and a disabled
 component.
 
@@ -334,9 +510,13 @@ reads both.
   parser resolves them, aconfig flags) and verifies them after
   `ApkSignatureVerifier` (v1 JAR, v2, v3 and v3.1 with rotation, v4 for
   incremental), producing the `PackageImpl` parcel. The image's parser
-  cache is the oracle: the parcel of each of the 286 system packages must
-  equal the original's byte for byte, and the CTS test APKs' must equal
-  what the original makes of them (D4).
+  cache is the oracle: each package's parcel must equal the original's
+  byte for byte, and the CTS test APKs' must equal what the original
+  makes of them (D4). The parser (`crates/aim-services/src/package/parse`,
+  `aim-package-parse`) matches a first boot's cache byte for byte for all
+  288 packages (285 system packages and the 3 decompressed stubs under
+  `/data/app`). Signature verification is not ported yet (#720). The
+  cache depends on the device's locale and display density (#722).
 - **Package visibility.** `AppsFilterImpl` in Rust: `<queries>`,
   implicit grants (`grantImplicitAccess` from ActivityManager and
   WindowManager, synchronous so an app's next query sees it), force
@@ -381,6 +561,29 @@ nothing.
   `package_info_cache` nonce and its package monitor callback. The
   feed's completeness is itself checked: before each comparison the
   model asks for a fresh snapshot digest.
+
+  As built: `PackageFeed` (`aim-services.jar`) hands the host an
+  `IPackageFeed` (`IBridge.getPackageFeed`) and sends records on
+  `IPackageFeedHost`, synchronous calls from a thread of its own: each
+  package and disabled system package (`PackageState` and every user's
+  `PackageUserState` getters, signing, the install source of
+  `getInstallSourceInfo`, the domain verification state, the installed
+  permission definitions, gids and granted permissions), each parsed
+  package as `PackageCacher.toCacheEntryStatic` writes it (sent again only
+  when the original holds another `AndroidPackage`), each shared user,
+  each user's preferred activities (`getPreferredActivityBackup`, in
+  full) and AppsFilter's configuration, a large record in chunks. A batch
+  sends what differs from what the host holds and ends with the SHA-256
+  of a fresh snapshot's records; the host
+  (`crates/aim-services/src/package/feed`) publishes the state
+  (`package::model::State`) only when its own records give the same
+  digest, else asks for every record again. A batch follows each package
+  monitor callback; `Feed::fresh`, before a comparison, reads the nonce
+  and, when it moved, asks for one (one-way, with a token the batch
+  ends with) and waits for it. Nothing reads what only the internal
+  interfaces hold: part of the install source (#714), the persistent
+  preferred activities and cross-profile filters (#715), component label
+  and icon overrides and the loading state (#716).
 - **The comparison.** guest-init's binder driver, given `--binder-shadow
   package,package_native` (a diagnostic CLI option, like
   `--binder-trace`), hands the service host a copy of each transaction
