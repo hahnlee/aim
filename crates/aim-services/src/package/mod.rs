@@ -11,11 +11,14 @@
 pub mod apps_filter;
 pub mod intent;
 pub mod intent_filter;
+pub mod info;
 pub mod intent_resolver;
 pub mod list;
 pub mod model;
 pub mod parse;
 pub mod pkg;
+pub mod query;
+pub mod reply;
 pub mod permissions;
 pub mod restrictions;
 pub mod settings;
