@@ -235,8 +235,9 @@ native owner reads and writes the same ones in the same formats:
   `runtime-permissions.xml`, `packages.xml`'s permissions) are read only
   to migrate when `access.abx` is missing, so a native owner writes
   `access.abx` for every user it knows, or the original migrates stale
-  state after a switch back. `crates/aim-build/src/abx.rs` already reads
-  ABX.
+  state after a switch back. `aim_services::package::permissions` reads
+  both `access.abx` and `runtime-permissions.xml` as their owners do
+  (binary XML in `crates/aim-android-xml`).
 - **AppOps' own files**, with the front end (step 3):
   `/data/system/appops_accesses.xml` (recent accesses, text XML),
   `/data/system/appops/history` (the historical registry) and

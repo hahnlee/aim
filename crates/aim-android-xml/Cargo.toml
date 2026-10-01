@@ -1,0 +1,9 @@
+[package]
+license.workspace = true
+name = "aim-android-xml"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Android's XML persistence (binary XML and text XML), read and written as the platform does"
+
+[dependencies]

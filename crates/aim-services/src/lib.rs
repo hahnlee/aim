@@ -22,6 +22,7 @@ pub mod media;
 mod mirror;
 mod nonces;
 pub mod notifications;
+pub mod package;
 pub mod statusbar;
 mod pasteboard;
 mod service_host;

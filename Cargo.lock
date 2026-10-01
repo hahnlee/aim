@@ -37,9 +37,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aim-android-xml"
+version = "0.1.0"
+
+[[package]]
 name = "aim-apps"
 version = "0.1.0"
 dependencies = [
+ "aim-android-xml",
  "android-image-extract",
  "libc",
 ]
@@ -61,6 +66,7 @@ name = "aim-build"
 version = "0.1.0"
 dependencies = [
  "aim-android-image",
+ "aim-android-xml",
  "aim-paths",
  "aim-storage",
  "libc",
@@ -238,6 +244,7 @@ dependencies = [
 name = "aim-services"
 version = "0.1.0"
 dependencies = [
+ "aim-android-xml",
  "aim-apps",
  "aim-binder-driver",
  "aim-binder-host",

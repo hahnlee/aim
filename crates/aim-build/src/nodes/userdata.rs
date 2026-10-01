@@ -379,19 +379,16 @@ fn check(volume: &Path, settings: &Path) -> Result<Vec<PathBuf>, String> {
         ));
     };
     let path = settings.join(PACKAGES);
-    let elements =
-        crate::abx::elements(&fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+    let root = fs::read(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|b| aim_android_xml::read(&b))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     let problem = |what: String| Err(format!("{}: {what}", path.display()));
-    let top = |name: &'static str| {
-        elements
-            .iter()
-            .filter(move |e| e.depth == 1 && e.name == name)
-    };
+    let top = |name: &'static str| root.children().filter(move |e| e.name == name);
     let recorded = top("version")
         .find(|v| v.attr("volumeUuid").is_none())
-        .and_then(|v| v.attr("fingerprint"));
-    if recorded != Some(fingerprint.as_str()) {
+        .and_then(|v| v.string("fingerprint"));
+    if recorded.as_deref() != Some(fingerprint.as_str()) {
         return problem(format!(
             "fingerprint {recorded:?}, the cache's {fingerprint}"
         ));
@@ -399,12 +396,12 @@ fn check(volume: &Path, settings: &Path) -> Result<Vec<PathBuf>, String> {
     if top("verifier").next().is_some() {
         return problem("a verifier identity".into());
     }
-    let updated: Vec<&str> = top("updated-package")
-        .filter_map(|p| p.attr("name"))
+    let updated: Vec<_> = top("updated-package")
+        .filter_map(|p| p.string("name"))
         .collect();
     let mut stubs = Vec::new();
     for package in top("package") {
-        let (Some(name), Some(code)) = (package.attr("name"), package.attr("codePath")) else {
+        let (Some(name), Some(code)) = (package.string("name"), package.string("codePath")) else {
             return problem("a package without a name or code path".into());
         };
         let Some(dir) = code.strip_prefix("/data/app/") else {

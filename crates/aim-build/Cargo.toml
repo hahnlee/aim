@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 aim-android-image = { path = "../aim-android-image" }
+aim-android-xml = { path = "../aim-android-xml" }
 aim-paths.workspace = true
 aim-storage.workspace = true
 libc.workspace = true
