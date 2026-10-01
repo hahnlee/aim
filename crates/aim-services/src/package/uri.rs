@@ -205,6 +205,13 @@ impl Uri {
         self.encoded_path().map(|p| decode(&p))
     }
 
+    /// `getPathSegments`: the decoded non-empty segments of the path.
+    pub fn path_segments(&self) -> Vec<String> {
+        self.encoded_path()
+            .map(|p| p.split('/').filter(|s| !s.is_empty()).map(decode).collect())
+            .unwrap_or_default()
+    }
+
     /// `StringUri.parseQuery`.
     fn encoded_query(&self) -> Option<&str> {
         if self.kind == Kind::Opaque {

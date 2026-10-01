@@ -253,6 +253,39 @@ fn filters_by_visibility_package_and_state() {
 }
 
 #[test]
+fn overlay_actors_see_their_targets_and_overlays() {
+    let mut s = (*state()).clone();
+    s.system.named_actors = vec![("ns".into(), "editor".into(), "d.caller".into())];
+    let gallery = s.packages.get_mut("b.gallery").unwrap();
+    Arc::make_mut(gallery.pkg.as_mut().unwrap()).overlayables =
+        Some(vec![("Theme".into(), Some("overlay://ns/editor".into()))]);
+    let overlay = package("g.overlay", 10007, false, |p| {
+        p.overlay_target = Some("b.gallery".into());
+        p.overlay_target_overlayable_name = Some("Theme".into());
+        p.activities = vec![Activity {
+            main: main(
+                "g.overlay",
+                "g.overlay.Open",
+                vec![filter(VIEW, Some("image/png"), None, 0)],
+            ),
+            ..Activity::default()
+        }];
+    });
+    s.packages.insert(overlay.name.clone(), overlay);
+    let q = |s: &State| {
+        let r = Resolution::new(Arc::new(s.clone()), &Default::default());
+        names(
+            &r.query_intent_activities(&view(None, None), Some("image/png"), 0, 0, 10004)
+                .unwrap(),
+        )
+    };
+    assert_eq!(q(&s), ["b.gallery.Open", "g.overlay.Open"]);
+    // An actor no SystemConfig names acts on nothing.
+    s.system.named_actors[0].1 = "other".into();
+    assert!(q(&s).is_empty());
+}
+
+#[test]
 fn resolves_explicit_services_and_providers() {
     let r = Resolution::new(state(), &Default::default());
     let mut i = view(None, None);

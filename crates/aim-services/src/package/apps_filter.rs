@@ -11,10 +11,11 @@
 //! are the original's runtime state and not in the feed: the model knows
 //! none (#724).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::model::{PackageState, SharedUser, State};
 use super::pkg::{AndroidPackage, MainComponent, booleans};
+use super::uri::Uri;
 
 /// A path of the original that depends on state the model does not
 /// have; the query is reported as not modelled.
@@ -116,6 +117,9 @@ pub struct AppsFilter {
     /// Packages that target Android 10 or lower (`FeatureConfig`'s
     /// disabled packages).
     disabled: HashSet<String>,
+    /// `OverlayReferenceMapper`'s actor packages and the targets and
+    /// overlays they act on.
+    actors: HashMap<String, HashSet<String>>,
 }
 
 fn pkg(ps: &PackageState) -> Option<&AndroidPackage> {
@@ -207,6 +211,69 @@ fn instruments(source: &AndroidPackage, target: &AndroidPackage) -> bool {
         .any(|i| i.target_package.as_deref() == Some(target.package_name.as_str()))
 }
 
+/// `OverlayActorEnforcer.getPackageNameForActor`: the package a named
+/// actor (`overlay://namespace/name`) stands for.
+fn actor_package<'a>(actor: &str, named: &'a [(String, String, String)]) -> Option<&'a str> {
+    let uri = Uri::parse(actor);
+    let segments = uri.path_segments();
+    if uri.scheme() != Some("overlay") || segments.len() != 1 {
+        return None;
+    }
+    let namespace = uri.authority()?;
+    named
+        .iter()
+        .find(|(ns, name, _)| *ns == namespace && *name == segments[0])
+        .map(|(_, _, package)| package.as_str())
+}
+
+/// `String.hashCode`, which orders an `ArrayMap`'s keys.
+fn java_hash(s: &str) -> i32 {
+    s.encode_utf16()
+        .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
+}
+
+/// `OverlayReferenceMapper`'s rebuilt map: each overlayable's actor acts
+/// on its target and the overlays of that overlayable. An actor package
+/// named by several actors keeps the last actor's packages in the
+/// original's `ArrayMap` order.
+fn overlay_actors(
+    packages: &[(&PackageState, &AndroidPackage)],
+    named: &[(String, String, String)],
+) -> HashMap<String, HashSet<String>> {
+    let mut by_actor: Vec<(&str, HashSet<String>)> = Vec::new();
+    for (_, target) in packages {
+        for (overlayable, actor) in target.overlayables.iter().flatten() {
+            let Some(actor) = actor.as_deref() else {
+                continue;
+            };
+            let i = match by_actor.iter().position(|(a, _)| *a == actor) {
+                Some(i) => i,
+                None => {
+                    by_actor.push((actor, HashSet::new()));
+                    by_actor.len() - 1
+                }
+            };
+            let acted = &mut by_actor[i].1;
+            acted.insert(target.package_name.clone());
+            acted.extend(
+                packages
+                    .iter()
+                    .filter(|(_, o)| {
+                        o.overlay_target.as_deref() == Some(target.package_name.as_str())
+                            && o.overlay_target_overlayable_name.as_deref()
+                                == Some(overlayable.as_str())
+                    })
+                    .map(|(_, o)| o.package_name.clone()),
+            );
+        }
+    }
+    by_actor.sort_by_key(|(a, _)| java_hash(a));
+    by_actor
+        .into_iter()
+        .filter_map(|(a, acted)| Some((actor_package(a, named)?.to_owned(), acted)))
+        .collect()
+}
+
 /// `SigningDetails.signaturesMatchExactly`: the same set of signers.
 fn signatures_match_exactly(a: &PackageState, b: &PackageState) -> bool {
     let (Some(a), Some(b)) = (&a.signatures, &b.signatures) else {
@@ -254,6 +321,7 @@ impl AppsFilter {
                 f.disabled.insert(ps.name.clone());
             }
         }
+        f.actors = overlay_actors(&packages, &state.system.named_actors);
         for &(qs, q) in &packages {
             for &(ts, t) in &packages {
                 if qs.app_id == ts.app_id {
@@ -328,7 +396,14 @@ impl AppsFilter {
             Setting::Package(ps) => vec![ps],
             Setting::Shared(su) => shared_packages(state, su).collect(),
         };
-        let callers: Vec<&AndroidPackage> = callers.into_iter().filter_map(pkg).collect();
+        let acts_on_target = |t: &AndroidPackage| {
+            callers.iter().any(|c| {
+                self.actors
+                    .get(&c.name)
+                    .is_some_and(|acted| acted.contains(&t.package_name))
+            })
+        };
+        let callers: Vec<&AndroidPackage> = callers.iter().copied().filter_map(pkg).collect();
         if callers
             .iter()
             .any(|p| self.disabled.contains(&p.package_name))
@@ -345,13 +420,12 @@ impl AppsFilter {
             return false;
         }
         let pair = (calling_app_id, target.app_id);
-        // Overlay actors (OverlayReferenceMapper, SystemConfig's named
-        // actors) are not modelled (#729).
         !(self.force_queryable.contains(&target.app_id)
             || self.queries_via_package.contains(&pair)
             || self.queries_via_component.contains(&pair)
             || self.queryable_via_uses_library.contains(&pair)
-            || self.queryable_via_uses_permission.contains(&pair))
+            || self.queryable_via_uses_permission.contains(&pair)
+            || acts_on_target(t))
     }
 }
 

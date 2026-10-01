@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::pkg::AndroidPackage;
 use super::intent_filter::UriRelativeFilterGroup;
+use super::pkg::AndroidPackage;
 use super::restrictions::ArchiveState;
 use super::settings::{Signatures, UsesSdkLibrary};
 
@@ -328,4 +328,6 @@ pub struct System {
     pub force_system_packages_queryable: bool,
     /// `config_forceQueryablePackages`.
     pub force_queryable_packages: Vec<String>,
+    /// SystemConfig's named actors: namespace, actor name and package.
+    pub named_actors: Vec<(String, String, String)>,
 }
