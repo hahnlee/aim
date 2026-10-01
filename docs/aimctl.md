@@ -36,14 +36,17 @@ of 1080×1920, or window mode with `--windows`), in window mode
 guest-init on the data directory, and stops them when guest-init ends or
 it gets SIGTERM, SIGINT or SIGHUP: guest-init stops its services and
 detaches the data image (three minutes at most, then it is killed), then
-the display server and the shims' keeper get SIGTERM. The shims quit with
-the display server.
+the display server and the shims' keeper get SIGTERM (ten seconds, then
+SIGKILL; an app-modal alert of the display server is ended first). The
+shims quit with the display server.
 
 `aimctl start` runs `aimctl run` in a session of its own, with its output
 in the log, and returns once guest-init has laid out the guest (the first
 start creates the data image). `aimctl status` then says `booting`, and
 `running` once Android set `sys.boot_completed`. `aimctl stop` sends the
-keeper SIGTERM and waits until it is gone.
+keeper SIGTERM and waits until it is gone; a keeper still there after four
+minutes is killed with its session (the display server, the shims' keeper
+and guest-init), and `stop` says so.
 
 Beside the data directory `DATA` (its image `DATA.asif`, guest-init's
 `DATA.lock`) lies `DATA.aimctl/`:

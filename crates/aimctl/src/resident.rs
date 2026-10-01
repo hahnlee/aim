@@ -23,6 +23,14 @@ const START_PATIENCE: Duration = Duration::from_secs(180);
 /// How long guest-init may take to stop its services and detach the data
 /// image before it is killed.
 const STOP_PATIENCE: Duration = Duration::from_secs(180);
+/// How long the display server and the shims' keeper may take to quit
+/// after SIGTERM before they are killed.
+const CHILD_PATIENCE: Duration = Duration::from_secs(10);
+/// How long `stop` waits for `aimctl run`: guest-init's patience, the
+/// children's and the detach. After it, the run's process group is killed.
+const RUN_PATIENCE: Duration = Duration::from_secs(STOP_PATIENCE.as_secs() + 60);
+/// How long a killed process group may take to go.
+const KILL_PATIENCE: Duration = Duration::from_secs(10);
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -198,17 +206,38 @@ fn guest_init_args(files: &Files) -> Vec<OsString> {
     ]
 }
 
-/// Children stopped when dropped: SIGTERM, then waited for.
+/// Children stopped when dropped, by [`end`].
 struct Children(Vec<Child>);
 
 impl Drop for Children {
     fn drop(&mut self) {
-        for child in &mut self.0 {
-            // SAFETY: signals a child we started.
-            unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-            let _ = child.wait();
+        for pid in end(&mut self.0, CHILD_PATIENCE) {
+            eprintln!("aimctl: pid {pid} did not quit within {CHILD_PATIENCE:?}; killed it");
         }
     }
+}
+
+/// Ends `children`: SIGTERM to each, SIGKILL to those still running after
+/// `patience`, and every one reaped. The pids that needed SIGKILL.
+fn end(children: &mut [Child], patience: Duration) -> Vec<u32> {
+    for child in children.iter() {
+        // SAFETY: signals a child we started and have not reaped.
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    }
+    let deadline = Instant::now() + patience;
+    let mut killed = Vec::new();
+    for child in children.iter_mut() {
+        while matches!(child.try_wait(), Ok(None)) {
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                killed.push(child.id());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    killed
 }
 
 fn start_display(files: &Files, windows: bool) -> Result<Child, String> {
@@ -315,24 +344,58 @@ pub fn stop(files: &Files) -> Result<ExitCode, String> {
         println!("not running");
         return Ok(ExitCode::SUCCESS);
     };
-    // SAFETY: signals the process holding the data directory's aimctl lock.
-    if unsafe { libc::kill(state.pid as i32, libc::SIGTERM) } != 0 {
-        return Err(format!(
-            "pid {}: {}",
-            state.pid,
-            std::io::Error::last_os_error()
-        ));
+    if end_run(&files.lock(), state.pid, RUN_PATIENCE)? {
+        println!(
+            "stopped; pid {} did not stop in time and was killed",
+            state.pid
+        );
+    } else {
+        println!("stopped");
     }
-    // guest-init's own patience, the children's stop and the detach.
-    let deadline = Instant::now() + STOP_PATIENCE + Duration::from_secs(60);
-    while state::held(&files.lock()) {
-        if Instant::now() > deadline {
-            return Err(format!("pid {} did not stop", state.pid));
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    println!("stopped");
     Ok(ExitCode::SUCCESS)
+}
+
+/// Whether, within `patience`, nothing holds `lock` and process `pid` is
+/// gone.
+fn ended(lock: &Path, pid: libc::pid_t, patience: Duration) -> bool {
+    let deadline = Instant::now() + patience;
+    // SAFETY: signal 0 only checks that the process exists.
+    while state::held(lock) || unsafe { libc::kill(pid, 0) } == 0 {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
+}
+
+/// Stops `aimctl run` `pid`, the holder of `lock`: SIGTERM, and once
+/// `patience` has passed, SIGKILL to its process group (the session
+/// `start` made: the display server, the shims' keeper and guest-init
+/// with it) or to it alone. Whether it had to be killed.
+fn end_run(lock: &Path, pid: u32, patience: Duration) -> Result<bool, String> {
+    let pid = pid as libc::pid_t;
+    // SAFETY: plain queries and signals of the lock's holder.
+    let leads = unsafe { libc::getpgid(pid) } == pid;
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        return Err(format!("pid {pid}: {}", std::io::Error::last_os_error()));
+    }
+    if ended(lock, pid, patience) {
+        return Ok(false);
+    }
+    // SAFETY: as above.
+    unsafe {
+        if leads {
+            libc::killpg(pid, libc::SIGKILL);
+        } else {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    if ended(lock, pid, KILL_PATIENCE) {
+        Ok(true)
+    } else {
+        Err(format!("pid {pid} did not stop, even killed"))
+    }
 }
 
 #[cfg(test)]
@@ -395,6 +458,94 @@ mod tests {
         // The user's own guest keeps the stable identifiers.
         assert!(!strings(&shims_args(&files, true)).contains(&"--scoped"));
         assert!(files.is_of(Path::new("/d")) && !files.is_of(Path::new("/e")));
+    }
+
+    /// `program` with `args`, in a session of its own, SIGTERM ignored
+    /// when `deaf`.
+    fn spawn(program: &str, args: &[&str], deaf: bool) -> Child {
+        let mut command = Command::new(program);
+        command.args(args);
+        // SAFETY: setsid and signal are async-signal-safe.
+        unsafe {
+            command.pre_exec(move || {
+                libc::setsid();
+                if deaf {
+                    libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                }
+                Ok(())
+            })
+        };
+        command.spawn().unwrap()
+    }
+
+    /// Whether process group `pgid` empties within `patience`.
+    fn empties(pgid: u32, patience: Duration) -> bool {
+        let deadline = Instant::now() + patience;
+        // SAFETY: signal 0 only checks for members.
+        while unsafe { libc::killpg(pgid as i32, 0) } == 0 {
+            if Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
+    #[test]
+    fn children_deaf_to_sigterm_are_killed() {
+        let mut children = vec![
+            spawn("/bin/sleep", &["600"], false),
+            spawn("/bin/sleep", &["600"], true),
+        ];
+        let deaf = children[1].id();
+        let start = Instant::now();
+        assert_eq!(end(&mut children, Duration::from_millis(300)), [deaf]);
+        assert!(start.elapsed() < Duration::from_secs(5));
+        for child in &mut children {
+            assert!(child.try_wait().unwrap().is_some());
+        }
+    }
+
+    /// A stand-in for `aimctl run`: a session leader that holds `lock`,
+    /// with a child of its own (the display server), both SIGTERM-deaf
+    /// when `deaf`. It is reaped by a thread, as launchd reaps a run.
+    fn fake_run(lock: &Path, deaf: bool) -> u32 {
+        let script = "fork or exec '/bin/sleep', '600'; \
+                      use Fcntl ':flock'; open my $f, '>', $ARGV[0] or die; \
+                      flock $f, LOCK_EX or die; sleep 600";
+        let mut run = spawn(
+            "/usr/bin/perl",
+            &["-e", script, lock.to_str().unwrap()],
+            deaf,
+        );
+        let pid = run.id();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !state::held(lock) {
+            assert!(
+                Instant::now() < deadline,
+                "the fake run never took its lock"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::spawn(move || run.wait());
+        pid
+    }
+
+    #[test]
+    fn stop_kills_a_run_deaf_to_sigterm_with_its_children() {
+        let lock = std::env::temp_dir().join(format!("aimctl-stop-{}", std::process::id()));
+        let pid = fake_run(&lock, true);
+        assert_eq!(end_run(&lock, pid, Duration::from_millis(300)), Ok(true));
+        assert!(!state::held(&lock));
+        assert!(empties(pid, KILL_PATIENCE));
+        // A run that quits on SIGTERM is not killed; its child is left to
+        // it, so it goes here.
+        let pid = fake_run(&lock, false);
+        assert_eq!(end_run(&lock, pid, KILL_PATIENCE), Ok(false));
+        // SAFETY: the test's own process group.
+        unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+        assert!(empties(pid, KILL_PATIENCE));
+        fs::remove_file(&lock).unwrap();
     }
 
     #[test]
