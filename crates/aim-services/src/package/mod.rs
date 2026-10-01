@@ -8,10 +8,12 @@
 //! original builds them at its scan (#707). Sources are read at
 //! `android-16.0.0_r1`.
 
+pub mod intent_filter;
 pub mod list;
 pub mod permissions;
 pub mod restrictions;
 pub mod settings;
+pub mod uri;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
