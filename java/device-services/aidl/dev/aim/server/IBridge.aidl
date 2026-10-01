@@ -4,6 +4,7 @@ import dev.aim.server.ILocationBridge;
 import dev.aim.server.ILocationHost;
 import dev.aim.server.IPackageFeed;
 import dev.aim.server.IPackageFeedHost;
+import dev.aim.server.IPackageWritesHost;
 import dev.aim.server.IUiModeBridge;
 import dev.aim.server.IUiModeHost;
 
@@ -50,4 +51,10 @@ interface IBridge {
      * model: a snapshot of the original's state now, then the changes.
      */
     IPackageFeed getPackageFeed(IPackageFeedHost host);
+
+    /**
+     * Tells `host`, the native PackageManager's write model, of the
+     * original's install sessions from now on (IPackageWritesHost).
+     */
+    void watchPackageWrites(IPackageWritesHost host);
 }

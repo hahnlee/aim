@@ -136,10 +136,12 @@ pub fn start(
         parsed: HashMap::new(),
     });
     let feed = Feed::start(system, Some(dump));
-    Ok(PackageModel::new(Box::new(move |t| {
+    let model = PackageModel::new(Box::new(move |t| {
         let fed = feed.fresh(t)?;
         join.lock().unwrap().state(fed)
-    })))
+    }));
+    model.writes.watch_sessions(system);
+    Ok(model)
 }
 
 /// What the model joins to each fed state: the device's side (read when
