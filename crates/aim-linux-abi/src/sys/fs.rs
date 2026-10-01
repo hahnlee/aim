@@ -1147,8 +1147,6 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
     }
 }
 
-const TCGETS: u64 = 0x5401;
-const TIOCGWINSZ: u64 = 0x5413;
 const FIONREAD: u64 = 0x541b;
 const FIONBIO: u64 = 0x5421;
 const FIONCLEX: u64 = 0x5450;
@@ -1178,23 +1176,10 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
         if fdtab::is_hidden(fd) || libc::fcntl(fd, libc::F_GETFD) < 0 {
             return -(EBADF as i64);
         }
-        let tty = libc::isatty(fd) == 1;
+        if let Some(r) = super::tty::ioctl(fd, req, arg) {
+            return r;
+        }
         match req {
-            TCGETS | TIOCGWINSZ if !tty => -(ENOTTY as i64),
-            TIOCGWINSZ => {
-                let mut ws: libc::winsize = std::mem::zeroed();
-                if libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) < 0 {
-                    return -(errno::last() as i64);
-                }
-                // struct winsize has the same layout on both kernels.
-                (arg as *mut libc::winsize).write_unaligned(ws);
-                0
-            }
-            TCGETS => {
-                // Report a tty with a zeroed Linux termios (60 bytes).
-                std::ptr::write_bytes(arg as *mut u8, 0, 60);
-                0
-            }
             FIONREAD => {
                 let n = match inotify::pending_bytes(fd) {
                     Some(n) => n as i32,

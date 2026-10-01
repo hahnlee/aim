@@ -201,6 +201,11 @@ fn files() {
 }
 
 #[test]
+fn pseudo_terminals() {
+    check("t_pty", &[]);
+}
+
+#[test]
 fn sockets() {
     check("t_net", &["/data/local/tmp"]);
 }

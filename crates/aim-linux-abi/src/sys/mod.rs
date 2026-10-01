@@ -55,6 +55,7 @@ pub(crate) mod space;
 mod sync_file;
 mod thread;
 mod tmpfile;
+pub(crate) mod tty;
 mod uevent;
 mod uplink;
 mod vmmap;
