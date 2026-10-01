@@ -135,6 +135,7 @@ impl Guest {
         }
         // Its own process group, so a hung program goes with its children.
         cmd.process_group(0)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn().unwrap();
