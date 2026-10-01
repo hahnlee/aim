@@ -68,6 +68,69 @@ pub trait ShadowModel: Send + Sync {
     ) -> Option<ParcelResult<Value>> {
         None
     }
+
+    /// The state checks that are due: each compares what calls answered
+    /// earlier changed in the model with what they changed in the
+    /// original. Called on the comparison's thread after each step.
+    fn checks(&self) -> Vec<Check> {
+        Vec::new()
+    }
+}
+
+/// A check of the state a model's calls left against the original's:
+/// a write's effect, compared once the original has made it.
+pub struct Check {
+    pub service: String,
+    pub descriptor: String,
+    /// The calls it covers: each one's sequence number and code.
+    pub calls: Vec<(u64, u32)>,
+    /// What was compared, e.g. a package in a user.
+    pub subject: String,
+    pub outcome: CheckOutcome,
+}
+
+pub enum CheckOutcome {
+    Matched,
+    Differed {
+        original: Value,
+        model: Value,
+    },
+    /// A call it covers changed what the model does not hold.
+    NotModelled(String),
+}
+
+impl Check {
+    /// The check's log line.
+    pub(crate) fn line(&self) -> String {
+        let mut line = String::from("{\"check\":\"state\",\"service\":");
+        value::json_string(&self.service, &mut line);
+        line.push_str(",\"descriptor\":");
+        value::json_string(&self.descriptor, &mut line);
+        line.push_str(",\"calls\":[");
+        for (i, (seq, code)) in self.calls.iter().enumerate() {
+            if i > 0 {
+                line.push(',');
+            }
+            line.push_str(&format!("[{seq},{code}]"));
+        }
+        line.push_str("],\"subject\":");
+        value::json_string(&self.subject, &mut line);
+        match &self.outcome {
+            CheckOutcome::Matched => line.push_str(",\"outcome\":\"matched\""),
+            CheckOutcome::Differed { original, model } => {
+                line.push_str(",\"outcome\":\"differed\",\"original\":");
+                original.json(&mut line);
+                line.push_str(",\"model\":");
+                model.json(&mut line);
+            }
+            CheckOutcome::NotModelled(reason) => {
+                line.push_str(",\"outcome\":\"not_modelled\",\"reason\":");
+                value::json_string(reason, &mut line);
+            }
+        }
+        line.push('}');
+        line
+    }
 }
 
 /// A call as the original received it.
@@ -80,6 +143,10 @@ pub struct ShadowCall<'a> {
     pub flags: u32,
     pub sender_pid: i32,
     pub sender_euid: u32,
+    /// The driver's sequence number of the call.
+    pub seq: u64,
+    /// When the driver took the call, before the original could see it.
+    pub sent: Instant,
     /// At the interface token. A binder in it reads as
     /// `Binder::Handle(i)` and an fd as `i`, its identity's index.
     pub data: Reader<'a>,

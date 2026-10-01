@@ -13,6 +13,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
+use std::time::Instant;
 
 use crate::host::File;
 use crate::state::{IdMap, NodeId, TxnId};
@@ -76,6 +77,8 @@ pub struct ShadowCopy {
     pub from_euid: u32,
     pub from_tid: i32,
     pub to_pid: i32,
+    /// When the driver took the call, before its target could see it.
+    pub sent: Instant,
     pub code: u32,
     pub flags: u32,
     pub data: ShadowParcel,
@@ -211,6 +214,7 @@ mod tests {
             from_euid: 2,
             from_tid: 3,
             to_pid: 4,
+            sent: Instant::now(),
             code,
             flags: 0,
             data: ShadowParcel::default(),
