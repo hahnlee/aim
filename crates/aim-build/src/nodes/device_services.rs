@@ -35,12 +35,42 @@ use std::path::PathBuf;
 const SOURCES: &str = "java/device-services";
 const OVERLAY: &str = "java/framework-overlay";
 const SHELL_OVERLAY: &str = "java/lightweight-shell-overlay";
-const NOTIFICATION_PERMISSION: &str = "java/notification-permission";
-const MEDIA_PROJECTION: &str = "java/media-projection";
-const IMAGE_WALLPAPER: &str = "java/image-wallpaper";
-const LIGHTWEIGHT_HOME: &str = "java/lightweight-home";
 /// The jar's guest path.
 pub const JAR: &str = "/system/framework/aim-services.jar";
+
+/// An app with code the node builds.
+pub struct App {
+    /// Its sources, relative to the repository root.
+    pub sources: &'static str,
+    /// The APK's name in the node's output.
+    pub apk: &'static str,
+    /// Where image/overlay.toml or a variant adds it, and where the `oat`
+    /// node compiles it for.
+    pub guest: &'static str,
+}
+
+pub const APPS: [App; 4] = [
+    App {
+        sources: "java/notification-permission",
+        apk: "notification-permission.apk",
+        guest: "/system/app/AimNotificationPermission/AimNotificationPermission.apk",
+    },
+    App {
+        sources: "java/media-projection",
+        apk: "media-projection.apk",
+        guest: "/system/app/AimMediaProjection/AimMediaProjection.apk",
+    },
+    App {
+        sources: "java/image-wallpaper",
+        apk: "image-wallpaper.apk",
+        guest: "/system_ext/priv-app/AimImageWallpaper/AimImageWallpaper.apk",
+    },
+    App {
+        sources: "java/lightweight-home",
+        apk: "lightweight-home.apk",
+        guest: "/system_ext/app/AimHome/AimHome.apk",
+    },
+];
 const FRAGMENT: &str = "system/etc/classpaths/systemserverclasspath.pb";
 
 pub fn out() -> PathBuf {
@@ -56,24 +86,21 @@ pub fn node() -> Node {
     inputs.extend(files(SOURCES));
     inputs.extend(files(OVERLAY));
     inputs.extend(files(SHELL_OVERLAY));
-    inputs.extend(files(NOTIFICATION_PERMISSION));
-    inputs.extend(files(MEDIA_PROJECTION));
-    inputs.extend(files(IMAGE_WALLPAPER));
-    inputs.extend(files(LIGHTWEIGHT_HOME));
+    for app in &APPS {
+        inputs.extend(files(app.sources));
+    }
+    let mut outputs = vec![
+        jar(),
+        out().join("systemserverclasspath.pb"),
+        out().join("framework-overlay.apk"),
+        out().join("lightweight-shell-overlay.apk"),
+    ];
+    outputs.extend(APPS.iter().map(|app| out().join(app.apk)));
     Node {
         name: "device-services".into(),
         deps: vec![Dep::on("image")],
         inputs,
-        outputs: vec![
-            jar(),
-            out().join("systemserverclasspath.pb"),
-            out().join("framework-overlay.apk"),
-            out().join("lightweight-shell-overlay.apk"),
-            out().join("notification-permission.apk"),
-            out().join("media-projection.apk"),
-            out().join("image-wallpaper.apk"),
-            out().join("lightweight-home.apk"),
-        ],
+        outputs,
         tools: Vec::new(),
         recipe: 2,
         action: Action::DeviceServices,
@@ -142,13 +169,9 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     }
 
     // An app's code: it links against the boot class path only.
-    for (dir, apk) in [
-        (NOTIFICATION_PERMISSION, "notification-permission"),
-        (MEDIA_PROJECTION, "media-projection"),
-        (IMAGE_WALLPAPER, "image-wallpaper"),
-        (LIGHTWEIGHT_HOME, "lightweight-home"),
-    ] {
-        let app = repo(dir);
+    for App { sources, apk, .. } in &APPS {
+        let app = repo(sources);
+        let apk = apk.strip_suffix(".apk").unwrap();
         let app_classes = work.join(format!("{apk}-classes"));
         tools.javac(
             log,

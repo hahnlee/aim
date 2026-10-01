@@ -40,10 +40,18 @@ path = "/system_ext/app/AimHome/AimHome.apk"
 source = "target/aim/device-services/lightweight-home.apk"
 reason = "the HOME activity in the launcher's place, with DEFAULT for ActivityTaskManager's resolution (the platform's SystemUserHomeActivity has none, and Settings' FallbackHome would restart for ever)"
 
+[[include]]
+source = "target/aim/oat/apps/AimHome.toml"
+reason = "its code compiled by the `oat` node, so that no first boot compiles it"
+
 [[add]]
 path = "/system_ext/priv-app/AimImageWallpaper/AimImageWallpaper.apk"
 source = "target/aim/device-services/image-wallpaper.apk"
 reason = "the static wallpaper in place of SystemUI's ImageWallpaper (#603): the overlay names it in image_wallpaper_component, so WallpaperManager's set, clear and default keep their meaning"
+
+[[include]]
+source = "target/aim/oat/apps/AimImageWallpaper.toml"
+reason = "its code compiled by the `oat` node, so that no first boot compiles it"
 
 [[add]]
 path = "/system_ext/etc/permissions/privapp-permissions-aim-wallpaper.xml"

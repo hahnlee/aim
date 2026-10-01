@@ -506,6 +506,10 @@ path = "/system/app/AimNotificationPermission/AimNotificationPermission.apk"
 source = "target/aim/device-services/notification-permission.apk"
 reason = "temporary exception (#470): the invisible activity started in place of PermissionController's dialog for a request of POST_NOTIFICATIONS alone; it asks the Mac's prompt through the native service host and returns PermissionController's result"
 
+[[include]]
+source = "target/aim/oat/apps/AimNotificationPermission.toml"
+reason = "its code compiled by the `oat` node, so that no first boot compiles it"
+
 # The MediaProjection consent (docs/media.md): the static overlay's
 # config_mediaProjectionPermissionDialogComponent names this activity in
 # place of SystemUI's, so screen capture works without SystemUI.
@@ -514,6 +518,10 @@ reason = "temporary exception (#470): the invisible activity started in place of
 path = "/system/app/AimMediaProjection/AimMediaProjection.apk"
 source = "target/aim/device-services/media-projection.apk"
 reason = "the MediaProjection consent activity apps start for a screen capture (config_mediaProjectionPermissionDialogComponent), in place of SystemUI's: it asks the Mac through the native service host, which creates the projection through the original MediaProjectionManagerService, and returns SystemUI's result"
+
+[[include]]
+source = "target/aim/oat/apps/AimMediaProjection.toml"
+reason = "its code compiled by the `oat` node, so that no first boot compiles it"
 
 [[add]]
 path = "/system_ext/bin/aim-windows"

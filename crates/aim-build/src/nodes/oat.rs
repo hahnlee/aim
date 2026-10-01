@@ -22,12 +22,16 @@
 //! in the context, `verify` ones included: ART rejects an oat file whose
 //! context differs from the loader's.
 //!
-//! The device's own APKs are preopted as a device vendor preopts an app
-//! without a profile, `verify` as the image's apps, so that no first boot
-//! compiles them.
+//! The device's own APKs (the `device-services` node's
+//! [`device_services::APPS`]) are preopted as a device vendor preopts an
+//! app without a profile, `verify` as the image's apps, so that no first
+//! boot compiles them.
 //!
-//! The output is `root/` (the files at their guest paths) and
-//! `overlay.toml`, the entries image/overlay.toml includes.
+//! The output is `root/` (the files at their guest paths),
+//! `overlay.toml`, the entries image/overlay.toml includes, and
+//! `apps/<name>.toml` per app ([`app_manifest`]), which the manifest that
+//! adds the app includes beside it (image/overlay.toml or a variant), so
+//! that the node needs neither as an input.
 
 use super::boot_image::{Dex2oat, boot_image_location, oat_dex_locations, oat_key};
 use super::device_services;
@@ -41,17 +45,22 @@ use std::sync::Mutex;
 
 const SERVICES: &str = "/system/framework/services.jar";
 const DEVICE_SERVICES_ODEX: &str = "/system/framework/oat/arm64/aim-services.odex";
-/// The device's APKs (`add`s of image/overlay.toml), by guest path, and
-/// their file in the `device-services` node's output.
-const DEVICE_APKS: [(&str, &str); 1] = [(
-    "/system/app/AimNotificationPermission/AimNotificationPermission.apk",
-    "notification-permission.apk",
-)];
 const PARTITIONS: [&str; 4] = ["system", "system_ext", "product", "vendor"];
 const WORKERS: usize = 4;
 
 pub fn out() -> PathBuf {
     aim_paths::out().join("oat")
+}
+
+/// The manifest of the compiled files of the device's app at `guest`,
+/// relative to the repository root, as an `[[include]]` names it.
+pub fn app_manifest(guest: &str) -> String {
+    let name = guest.rsplit('/').next().unwrap();
+    let name = name.strip_suffix(".apk").unwrap_or(name);
+    format!(
+        "{}/apps/{name}.toml",
+        out().strip_prefix(aim_paths::root()).unwrap().display()
+    )
 }
 
 pub fn node() -> Node {
@@ -68,7 +77,7 @@ pub fn node() -> Node {
         inputs: Vec::new(),
         outputs: vec![out()],
         tools: Vec::new(),
-        recipe: 3,
+        recipe: 4,
         action: Action::Oat,
         boot: true,
     }
@@ -84,6 +93,8 @@ struct Job {
     context: String,
     bcp: String,
     app_image: bool,
+    /// One of the device's apps, whose files go to its own manifest.
+    app: bool,
 }
 
 impl Job {
@@ -117,6 +128,7 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
             app_image: host.with_extension("art").is_file(),
             filter,
             odex,
+            app: false,
         });
     }
     // The device's jar, loaded after services.jar as its class loader has
@@ -138,17 +150,19 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
         context,
         bcp: bcp.clone(),
         app_image: false,
+        app: false,
     });
     // The device's APKs.
-    for (apk, _) in DEVICE_APKS {
+    for app in &device_services::APPS {
         jobs.push(Job {
-            odex: app_odex(apk),
-            dex: apk.into(),
+            odex: app_odex(app.guest),
+            dex: app.guest.into(),
             filter: "verify".into(),
             // Their target SDK adds no implicit library.
             context: "PCL[]".into(),
             bcp: bcp.clone(),
             app_image: false,
+            app: true,
         });
     }
 
@@ -172,8 +186,8 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     let edited = [(SERVICES, super::system_server::out().join("services.jar"))];
     files.extend(edited.iter().map(|(g, h)| (g.to_string(), h.clone())));
     files.push((device_services::JAR.into(), device_services::jar()));
-    for (apk, built) in DEVICE_APKS {
-        files.push((apk.into(), device_services::out().join(built)));
+    for app in &device_services::APPS {
+        files.push((app.guest.into(), device_services::out().join(app.apk)));
     }
     let file_refs: Vec<(&str, PathBuf)> =
         files.iter().map(|(g, h)| (g.as_str(), h.clone())).collect();
@@ -229,17 +243,23 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     // Each output replaces the original's file of that name.
     let root = aim_paths::root();
     let relative = |p: &Path| p.strip_prefix(root).unwrap().display().to_string();
-    let mut manifest = String::from(
-        "# Written by the `oat` node of `cargo aim`; image/overlay.toml includes it.\n\nschema = 1\n",
-    );
+    let header = |includer: &str| {
+        format!(
+            "# Written by the `oat` node of `cargo aim`; {includer} includes it.\n\nschema = 1\n"
+        )
+    };
+    let mut manifest = header("image/overlay.toml");
+    fs::create_dir_all(staged.join("apps")).map_err(|e| e.to_string())?;
     for job in &jobs {
+        let mut app = header("the manifest that adds the app");
+        let entries = if job.app { &mut app } else { &mut manifest };
         let dir = job.odex.rsplit_once('/').unwrap().0;
         for extension in ["odex", "vdex", "art"] {
             let guest = format!("{dir}/{}.{extension}", job.stem());
             let produced = staged.join("root").join(&guest[1..]);
             match (image.join(&guest[1..]).is_file(), produced.is_file()) {
                 (true, true) => write!(
-                    manifest,
+                    entries,
                     "\n[[replace]]\npath = \"{guest}\"\nsource = \"{}\"\nreason = \"compiled again ({}, as the original) for the ART exception's runtime and boot image, whose checksums the original's code names\"\n",
                     relative(&out.join("root").join(&guest[1..])),
                     job.filter
@@ -247,7 +267,7 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
                 .unwrap(),
                 (true, false) => return Err(format!("dex2oat wrote no {guest}")),
                 (false, true) if !image.join(&job.dex[1..]).exists() => write!(
-                    manifest,
+                    entries,
                     "\n[[add]]\npath = \"{guest}\"\nsource = \"{}\"\nreason = \"the device's own code compiled ({})\"\n",
                     relative(&out.join("root").join(&guest[1..])),
                     job.filter
@@ -255,6 +275,11 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
                 .unwrap(),
                 (false, _) => {}
             }
+        }
+        if job.app {
+            let path = root.join(app_manifest(&job.dex));
+            let staged_path = staged.join(path.strip_prefix(&out).unwrap());
+            fs::write(staged_path, app).map_err(|e| e.to_string())?;
         }
     }
     fs::write(staged.join("overlay.toml"), manifest).map_err(|e| e.to_string())?;
@@ -400,6 +425,14 @@ mod tests {
         assert_eq!(
             app_odex("/system/app/A/A.apk"),
             "/system/app/A/oat/arm64/A.odex"
+        );
+    }
+
+    #[test]
+    fn an_app_has_a_manifest_of_its_own() {
+        assert_eq!(
+            app_manifest("/system_ext/app/AimHome/AimHome.apk"),
+            "target/aim/oat/apps/AimHome.toml"
         );
     }
 
