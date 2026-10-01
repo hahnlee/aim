@@ -119,13 +119,16 @@ impl PackageModel {
 /// Starts the package feed and the model of `package` and
 /// `package_native` over it, for a shadow comparison of guest-init's
 /// image `image` with the device's properties `props`; the feed's states
-/// are written to `dump`.
+/// are written to `dump`, and installed packages are read through
+/// `files`.
 pub fn start(
     system: &Arc<crate::system::System>,
     image: &Path,
     props: Properties,
     dump: PathBuf,
+    files: super::write::Files,
 ) -> Result<Arc<PackageModel>, String> {
+    let build = super::sign::Build::of(&super::parse::Platform::load(image, Default::default())?);
     let join = Mutex::new(Join {
         framework: system_config::Framework::load(image)?,
         image: image.to_path_buf(),
@@ -141,6 +144,7 @@ pub fn start(
         join.lock().unwrap().state(fed)
     }));
     model.writes.watch_sessions(system);
+    model.writes.read_apks(super::write::Apks { files, build });
     Ok(model)
 }
 

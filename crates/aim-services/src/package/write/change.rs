@@ -21,6 +21,7 @@ use super::session::Session;
 use crate::package::apps_filter::{FIRST_APPLICATION_UID, NotModelled};
 use crate::package::model::{PackageState, State};
 use crate::package::pkg::AndroidPackage;
+use crate::package::settings::Signatures;
 use crate::shadow::Value;
 
 /// What happened to a package between two states.
@@ -98,6 +99,9 @@ pub(super) struct View {
     /// The system package an update replaces: its code path.
     pub disabled_system_path: Option<String>,
     pub users: Vec<(i32, UserView)>,
+    /// The signers, or why they could not be verified: `None` when the
+    /// model could not read the APKs.
+    pub signatures: Option<Result<Signatures, String>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,6 +203,7 @@ fn view(state: &State, name: &str, session: bool) -> Option<View> {
             .get(name)
             .map(|d| d.path.clone()),
         users: user_view(ps, session),
+        signatures: None,
     })
 }
 
@@ -387,6 +392,7 @@ fn install(
             updated_system_app: false,
             disabled_system_path: None,
             users,
+            signatures: None,
         }),
         shared_user,
         sources: Vec::new(),
@@ -446,6 +452,7 @@ fn update(
             updated_system_app: ps.is.system,
             disabled_system_path,
             users,
+            signatures: None,
         }),
         shared_user: shared_view(pre, ps.shared_user.as_deref()),
         sources: Vec::new(),
@@ -532,6 +539,40 @@ pub(super) fn freed_app_id(pre: &State, post: &State, name: &str) -> Option<i32>
     }
 }
 
+/// Signers as logged: the scheme and each certificate's SHA-256.
+fn signatures_value(s: Option<&Result<Signatures, String>>) -> Value {
+    let digest = |c: &[u8]| {
+        use sha2::{Digest, Sha256};
+        Value::Str(
+            Sha256::digest(c)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+        )
+    };
+    match s {
+        None => Value::Null,
+        Some(Err(e)) => Value::Fields(vec![("failed".into(), Value::Str(e.clone()))]),
+        Some(Ok(s)) => Value::Fields(vec![
+            ("scheme".into(), Value::Int(s.scheme_version)),
+            (
+                "certificates".into(),
+                Value::List(s.signatures.iter().map(|c| digest(c)).collect()),
+            ),
+            (
+                "past".into(),
+                s.past_signatures.as_ref().map_or(Value::Null, |past| {
+                    Value::List(
+                        past.iter()
+                            .map(|(c, caps)| Value::List(vec![digest(c), Value::Int(*caps)]))
+                            .collect(),
+                    )
+                }),
+            ),
+        ]),
+    }
+}
+
 impl Outcome {
     pub fn value(&self) -> Value {
         let s = |v: &Option<String>| v.clone().map_or(Value::Null, Value::Str);
@@ -546,6 +587,7 @@ impl Outcome {
                 ("system".into(), Value::Bool(p.system)),
                 ("updatedSystemApp".into(), Value::Bool(p.updated_system_app)),
                 ("disabledSystemPath".into(), s(&p.disabled_system_path)),
+                ("signatures".into(), signatures_value(p.signatures.as_ref())),
                 (
                     "users".into(),
                     Value::List(

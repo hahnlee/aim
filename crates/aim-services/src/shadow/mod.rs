@@ -217,6 +217,7 @@ pub(crate) fn start(
     log: &Path,
     image: &Path,
     props: crate::package::system_config::Properties,
+    files: crate::package::write::Files,
 ) -> Result<(), String> {
     // One model of package and package_native, over the state the
     // original feeds it, written beside the log (crate::package::feed).
@@ -225,7 +226,9 @@ pub(crate) fn start(
         .any(|n| n == "package" || n == "package_native")
     {
         let dump = log.with_extension("package-feed.txt");
-        Some(crate::package::query::start(system, image, props, dump)?)
+        Some(crate::package::query::start(
+            system, image, props, dump, files,
+        )?)
     } else {
         None
     };
