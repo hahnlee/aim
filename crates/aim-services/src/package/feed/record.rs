@@ -130,6 +130,11 @@ pub fn package(bytes: &[u8]) -> Result<(PackageState, Option<i32>)> {
         s.uri_relative_filter_groups.push((domain, groups));
     }
     s.filter_application_query = Some(r.read_bool()?);
+    for _ in 0..count(r)? {
+        let provider = string(r)?.unwrap_or_default();
+        s.syncable_authorities
+            .push((provider, string(r)?.unwrap_or_default()));
+    }
     Ok((s, bit(0).then_some(shared_user_app_id)))
 }
 

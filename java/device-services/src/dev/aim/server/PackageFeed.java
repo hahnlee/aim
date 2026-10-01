@@ -9,9 +9,11 @@ import android.content.UriRelativeFilterGroup;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.IPackageManager;
 import android.content.pm.InstallSourceInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.PermissionGroupInfo;
 import android.content.pm.PermissionInfo;
+import android.content.pm.ProviderInfo;
 import android.content.pm.SharedLibraryInfo;
 import android.content.pm.Signature;
 import android.content.pm.SigningDetails;
@@ -41,6 +43,7 @@ import android.util.SparseArray;
 
 import com.android.internal.compat.IPlatformCompat;
 import com.android.internal.pm.parsing.pkg.ParsedPackage;
+import com.android.internal.pm.pkg.component.ParsedProvider;
 import com.android.server.LocalManagerRegistry;
 import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.parsing.PackageCacher;
@@ -62,6 +65,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -120,6 +124,13 @@ final class PackageFeed extends IPackageFeed.Stub {
     private final TreeMap<Key, byte[]> mSent = new TreeMap<>();
     /** The AndroidPackage each parsed record was made of. */
     private final HashMap<Key, AndroidPackage> mParsed = new HashMap<>();
+    /**
+     * Syncable providers' declared authorities, by the AndroidPackage they
+     * were read for: this batch's and the previous one's.
+     */
+    private IdentityHashMap<AndroidPackage, Map<String, String>> mDeclared =
+            new IdentityHashMap<>();
+    private IdentityHashMap<AndroidPackage, Map<String, String>> mDeclaredBefore;
     /** This batch's installed permission definitions, by owner package. */
     private Map<String, TreeSet<String>> mInstalledPermissions;
 
@@ -253,6 +264,8 @@ final class PackageFeed extends IPackageFeed.Stub {
         TreeMap<Key, AndroidPackage> parsed = new TreeMap<>();
         TreeSet<Integer> users = new TreeSet<>();
         mInstalledPermissions = installedPermissions();
+        mDeclaredBefore = mDeclared;
+        mDeclared = new IdentityHashMap<>();
         PackageManagerLocal local = LocalManagerRegistry.getManager(PackageManagerLocal.class);
         try (PackageManagerLocal.UnfilteredSnapshot snapshot = local.withUnfilteredSnapshot()) {
             for (PackageState state : snapshot.getPackageStates().values()) {
@@ -452,6 +465,7 @@ final class PackageFeed extends IPackageFeed.Stub {
             }
             uriRelativeFilterGroups(p, s.getPackageName(), users);
             p.writeBoolean(filterApplicationQuery(s));
+            syncableAuthorities(p, s.getAndroidPackage());
         });
     }
 
@@ -487,6 +501,53 @@ final class PackageFeed extends IPackageFeed.Stub {
                 }
             }
         }
+    }
+
+    /**
+     * The authorities the manifest declares for each syncable provider
+     * with several, by provider: registration (ComponentResolver's
+     * addProvidersLocked) leaves the first in the package's provider and
+     * gives the rest to a copy that is not in the package. Read from the
+     * base APK once per AndroidPackage.
+     */
+    private void syncableAuthorities(Parcel p, AndroidPackage pkg) {
+        Map<String, String> declared = Map.of();
+        if (pkg != null && hasSyncableProvider(pkg)) {
+            declared = mDeclaredBefore.get(pkg);
+            if (declared == null) {
+                declared = new TreeMap<>();
+                PackageInfo info = mContext.getPackageManager().getPackageArchiveInfo(
+                        pkg.getBaseApkPath(), PackageManager.GET_PROVIDERS
+                                | PackageManager.MATCH_DISABLED_COMPONENTS
+                                | PackageManager.MATCH_DIRECT_BOOT_AWARE
+                                | PackageManager.MATCH_DIRECT_BOOT_UNAWARE);
+                if (info == null) {
+                    Slog.w(TAG, "cannot read the providers of " + pkg.getBaseApkPath());
+                } else if (info.providers != null) {
+                    for (ProviderInfo provider : info.providers) {
+                        if (provider.isSyncable && provider.authority != null
+                                && provider.authority.indexOf(';') >= 0) {
+                            declared.put(provider.name, provider.authority);
+                        }
+                    }
+                }
+            }
+            mDeclared.put(pkg, declared);
+        }
+        p.writeInt(declared.size());
+        for (Map.Entry<String, String> e : declared.entrySet()) {
+            p.writeString(e.getKey());
+            p.writeString(e.getValue());
+        }
+    }
+
+    private static boolean hasSyncableProvider(AndroidPackage pkg) {
+        for (ParsedProvider provider : pkg.getProviders()) {
+            if (provider.isSyncable()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

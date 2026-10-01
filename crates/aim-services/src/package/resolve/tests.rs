@@ -313,6 +313,34 @@ fn overlay_actors_see_their_targets_and_overlays() {
 }
 
 #[test]
+fn registers_a_syncable_providers_later_authorities_to_a_copy() {
+    let mut s = (*state()).clone();
+    let gallery = s.packages.get_mut("b.gallery").unwrap();
+    // The manifest declares three authorities; b.media is b.gallery.Media's.
+    gallery.syncable_authorities = vec![("b.gallery.Sync".into(), "b.sync;b.sync2;b.media".into())];
+    Arc::make_mut(gallery.pkg.as_mut().unwrap())
+        .providers
+        .push(Provider {
+            main: main("b.gallery", "b.gallery.Sync", Vec::new()),
+            authority: Some("b.sync".into()),
+            syncable: true,
+            ..Provider::default()
+        });
+    let r = Resolution::new(Arc::new(s), &Default::default());
+    let get = |name| {
+        let pi = r
+            .resolve_content_provider(name, 0, 0, SYSTEM_UID)
+            .unwrap()
+            .unwrap();
+        (pi.info.item.name, pi.authority, pi.is_syncable)
+    };
+    let sync = Some("b.gallery.Sync".to_string());
+    assert_eq!(get("b.sync"), (sync.clone(), Some("b.sync".into()), true));
+    assert_eq!(get("b.sync2"), (sync, Some("b.sync;b.sync2".into()), false));
+    assert_eq!(get("b.media").0.as_deref(), Some("b.gallery.Media"));
+}
+
+#[test]
 fn resolves_explicit_services_and_providers() {
     let r = Resolution::new(state(), &Default::default());
     let mut i = view(None, None);

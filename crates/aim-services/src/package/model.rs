@@ -104,6 +104,10 @@ pub struct PackageState {
     /// package (with its overrides); `None` where no feed gave it, which
     /// leaves the change's own rule (on from the package's target SDK 30).
     pub filter_application_query: Option<bool>,
+    /// The authorities the manifest declares for each syncable provider
+    /// with several, by provider class (registration leaves the package's
+    /// provider only the first).
+    pub syncable_authorities: Vec<(String, String)>,
     /// The `AndroidPackage` as `PackageCacher.toCacheEntryStatic` writes
     /// it (the parser cache's format); `None` without code. Shared across
     /// versions while the original keeps the same object.

@@ -11,6 +11,10 @@ public abstract class PackageManager {
     public static final int PERMISSION_GRANTED = 0;
     public static final int PERMISSION_DENIED = -1;
     public static final int GET_PERMISSIONS = 4096;
+    public static final int GET_PROVIDERS = 8;
+    public static final int MATCH_DISABLED_COMPONENTS = 512;
+    public static final int MATCH_DIRECT_BOOT_UNAWARE = 262144;
+    public static final int MATCH_DIRECT_BOOT_AWARE = 524288;
     public static final int FLAG_PERMISSION_POLICY_FIXED = 4;
     public static final int FLAG_PERMISSION_SYSTEM_FIXED = 16;
     public static final String FEATURE_TELEVISION = "android.hardware.type.television";
@@ -28,4 +32,5 @@ public abstract class PackageManager {
     public abstract java.util.List<PermissionGroupInfo> getAllPermissionGroups(int flags);
     public abstract java.util.List<PermissionInfo> queryPermissionsByGroup(String permissionGroup, int flags) throws NameNotFoundException;
     public abstract PackageInstaller getPackageInstaller();
+    public PackageInfo getPackageArchiveInfo(String archiveFilePath, int flags) { throw new RuntimeException("stub"); }
 }

@@ -10,6 +10,7 @@
 //! verification (#726), the chooser's preferred and resolver activities
 //! (#727), other profiles and persistent preferred activities (#715).
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -967,10 +968,10 @@ impl Resolution {
             return Err(NotModelled("another user's provider (URI grants)"));
         }
         self.enforce_cross_user(calling_uid, user)?;
-        let Some((package, index)) = provider else {
+        let Some(registered) = provider else {
             return Ok(None);
         };
-        let Some(ps) = self.state.packages.get(package) else {
+        let Some(ps) = self.state.packages.get(&registered.package) else {
             return Ok(None);
         };
         let Some(pkg) = ps.pkg.as_deref() else {
@@ -987,8 +988,13 @@ impl Resolution {
         let Some(app) = generate_application_info(&t, flags) else {
             return Ok(None);
         };
-        let provider = &pkg.providers[index];
-        let Some(pi) = generate_provider_info(&t, provider, flags, Some(Arc::new(app))) else {
+        let mut provider = Cow::Borrowed(&pkg.providers[registered.index]);
+        if let Some(copy) = &registered.copy {
+            let p = provider.to_mut();
+            p.authority = Some(copy.clone());
+            p.syncable = false;
+        }
+        let Some(pi) = generate_provider_info(&t, &provider, flags, Some(Arc::new(app))) else {
             return Ok(None);
         };
         if !is_enabled_and_matches(ps, &provider.main, flags, user) {
