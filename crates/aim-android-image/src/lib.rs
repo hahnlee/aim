@@ -16,6 +16,8 @@ pub mod linkage;
 pub mod manifest;
 pub mod plan;
 pub mod problem;
+pub mod redirect;
+pub mod reindex;
 pub mod system_server;
 
 pub use assemble::{Outcome, assemble};

@@ -69,6 +69,36 @@ every step: replace superseded facts instead of appending a log.
    original) and after (native), plus the app checks; failing tests keep
    the original.
 
+**Redirected call sites** (#702 D1, #668). Where the original is not
+started by a `startService(Foo.class)` (PackageManagerService's static
+`main`), or system_server must reach code of ours before the device's
+service starts (a local interface at bootstrap), SystemServer's call
+sites are redirected: `image/system-server-redirects` lists, with a
+reason each, a calling class and method name, the call as the dex names
+it, the static method of `aim-services.jar` that takes its place, and
+how many calls there are. The `system-server` node gives services.jar's
+dex the target's method id, with the strings, type and proto it needs,
+which re-indexes the dex and lays it out again
+(`aim_android_image::reindex`: every index and offset remapped, sections
+and items in their order, instructions at their length), and turns each
+call into an `invoke-static` of the target with the same registers; the
+target takes an instance call's receiver first, then its arguments, and
+returns its result (`aim_android_image::redirect`). The build fails
+unless the caller makes exactly that many calls of one method, not a
+constructor or `super` call, and the target is a public static method of
+a public class of the jar with that signature; the edited jar's dex files
+are then verified as ART opens them (the build tools' `dexdump -c`, ART's
+`DexFileVerifier`). The test (`crates/aim-android-image/tests/system_server.rs`)
+redirects eight calls of SystemServer and UserManagerService in the
+pinned services.jar to a fixture class and compares dexdump's
+disassembly of every dex before and after: only the redirected calls
+differ. The list is empty: its first users are M4's slice C
+(m4-packagemanager.md, "The call sites") and a native `power` (#668, in
+the core milestone). services.jar's class loader context does not hold
+aim-services.jar, so the `oat` node compiles a redirected call against an
+unresolved method; what that costs the caller's class is measured with
+the first entry (#757).
+
 **In shadow first.** A large service is compared with the original on
 every real call before it serves any (docs/m4-packagemanager.md, slice
 A). guest-init `--binder-shadow package,package_native

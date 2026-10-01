@@ -26,7 +26,7 @@ than the package service:
 | --- | --- | --- |
 | `PackageManagerService` | `package` (IPackageManager), `package_native` (IPackageManagerNative); `PackageManagerInternal`, `PackageManagerLocal` | the state (`Settings`), the scan, installs, intent resolution, package visibility (`AppsFilterImpl`), shared libraries, key sets, preferred activities, suspension, instant apps |
 | `PackageInstallerService` | IPackageInstaller through `getPackageInstaller()`; one IPackageInstallerSession per session | holds the concrete `PackageManagerService` |
-| `UserManagerService` | `user` (IUserManager, published by SystemServer's `LifeCycle`); `UserManagerInternal` | takes PMS's lock as its `packagesLock`, holds the concrete PMS and calls it 12 times (`createNewUser`, `onNewUserCreated`, `cleanUpUser`, `addCrossProfileIntentFilter`, `snapshotComputer`, `hasSystemFeature`, `isDeviceUpgrading`) |
+| `UserManagerService` | `user` (IUserManager, published by SystemServer's `LifeCycle`); `UserManagerInternal` | takes PMS's lock as its `packagesLock`, holds the concrete PMS and calls it 15 times (`createNewUser`, `onNewUserCreated`, `cleanUpUser`, `addCrossProfileIntentFilter`, `snapshotComputer`, `hasSystemFeature`, `isDeviceUpgrading`) |
 | `PermissionManagerService` (`PermissionManagerService.create`), `LegacyPermissionManagerService` | `permissionmgr`, `permission_checker`, `legacy_permission`; their internal interfaces | the front ends of `AccessCheckingService`'s state ([permissions.md](permissions.md)) |
 | `ArtManagerService`, `DexManager`, `PackageDexOptimizer`, `ApexManager`, `ComponentResolver`, `AppsFilterImpl`, `Settings`, three `PackageParser2`s | | `Settings` writes the files below; `ApexManager` talks to apexd |
 
@@ -44,8 +44,9 @@ PMS (`mPackageManagerService`): nine call sites of `isFirstBoot`,
 `updatePackagesIfNeeded`, `updateMetricsIfNeeded`,
 `performFstrimIfNeeded` and `initializeArtManagerLocal`;
 `OtaDexoptService.main`, a tenth, is off on this device
-(`config.disable_otadexopt`). Outside SystemServer the
-concrete class is used only for its constants.
+(`config.disable_otadexopt`), and `HsumBootUserInitializer.createInstance`,
+an eleventh, reads it only in the headless system user mode. Outside
+SystemServer the concrete class is used only for its constants.
 
 ## 1. The binder surface
 
@@ -390,17 +391,49 @@ the parser cache's 4.9 MB).
 
 **What it needs from SystemServer.** PMS is a static call in
 `startBootstrapServices`, not a `startService(Foo.class)` the
-native-services edit can turn into `nop`s, and SystemServer uses its result at
-nine more call sites. A facade in its place needs a new kind of
-SystemServer exception, the one #668 asks for `power`: a symbolic
-redirect of a call site to a static method of `aim-services.jar`. For
-M4 that is `PackageManagerService.main(...)` to the facade's `main`
-(same arguments; it returns `null` into `mPackageManagerService`) and
-each of the nine uses (`invoke-virtual`, or the argument of
-`initializeArtManagerLocal`) to an `invoke-static` of the facade taking
-the same registers (the receiver arrives as the `null`),
-checked symbolically as the `nop` edit is: a changed SystemServer fails
-the build. A dex rewrite with new method ids (decision D1).
+native-services edit can turn into `nop`s, and SystemServer uses its
+result at eleven more call sites. A facade in its place uses the redirect
+edit (decision D1; docs/system-services.md, "Redirected call sites"):
+`PackageManagerService.main(...)` becomes a call of the facade's `main`
+(same arguments; it returns `null` into `mPackageManagerService`), and
+each use that reads it an `invoke-static` of the facade with the same
+registers, the receiver (the `null`) first, checked symbolically as the `nop` edit is:
+a changed SystemServer fails the build.
+
+**The call sites**, from the image's `services.jar` dex. They go into
+`image/system-server-redirects` with slice C, each to the facade's static
+method of the same name (`calls` as counted here), not before. In
+`com.android.server.SystemServer`:
+
+| Caller | Call (`com.android.server.pm.`) | Calls | At C |
+| --- | --- | --- | --- |
+| `startBootstrapServices` | `PackageManagerService.main` (static) | 1 | the facade's `main`: attaches to the native owner and publishes the local interfaces |
+| `startBootstrapServices` | `PackageManagerService.isFirstBoot` | 1 | redirected |
+| `startBootstrapServices` | `OtaDexoptService.main(Context, PackageManagerService)` (static) | 1 | stays: not reached, `config.disable_otadexopt` |
+| `isFirstBootOrUpgrade` | `PackageManagerService.isFirstBoot`, `PackageManagerService.isDeviceUpgrading` | 1 each | redirected |
+| `lambda$startOtherServices$6` | `PackageManagerService.waitForAppDataPrepared` | 1 | redirected |
+| `startOtherServices` | `DexOptHelper.initializeArtManagerLocal(Context, PackageManagerService)` (static) | 1 | redirected: ART Service over the facade's `PackageManagerLocal` |
+| `startOtherServices` | `PackageManagerService.updatePackagesIfNeeded`, `updateMetricsIfNeeded`, `performFstrimIfNeeded`, `systemReady` | 1 each | redirected |
+| `startOtherServices` | `com.android.server.HsumBootUserInitializer.createInstance(ActivityManagerService, PackageManagerService, ContentResolver, boolean)` (static) | 1 | stays: it returns `null` without the headless system user mode and never reads the PMS |
+
+UserManagerService stays original (D2), and its calls of the concrete
+PMS (`mPm`, which the facade passes as `null` when it constructs it) go
+to the facade. In `com.android.server.pm.UserManagerService`:
+
+| Caller | Call (`PackageManagerService.`) | Calls |
+| --- | --- | --- |
+| `createUserInternalUncheckedNoTracing` | `createNewUser` | 1 |
+| `createUserInternalUncheckedNoTracing` | `onNewUserCreated` | 1 |
+| `lambda$convertPreCreatedUserIfPossible$6` | `onNewUserCreated` | 1 |
+| `doesDeviceHardwareSupportPrivateSpace` | `hasSystemFeature` | 4 |
+| `removeUserState` | `cleanUpUser` | 1 |
+| `setDefaultCrossProfileIntentFilters` | `snapshotComputer` | 2 |
+| `setDefaultCrossProfileIntentFilters` | `addCrossProfileIntentFilter` (`invoke-virtual/range`) | 2 |
+| `verifyCallingPackage` | `snapshotComputer` | 1 |
+| `UserManagerService$LifeCycle.onBootPhase` | `isDeviceUpgrading` | 1 |
+
+That is 15 calls, nine lines of the list; `snapshotComputer` returns the
+facade's `Computer`.
 
 **Risks.**
 
@@ -680,17 +713,19 @@ Tracked on #702.
 
 - **D1. A redirect edit of SystemServer** (with #668). The facade must
   stand where `PackageManagerService.main` is called, in bootstrap, and
-  serve its nine uses. Options: (a) a symbolic redirect of named call
+  serve its eleven uses. Options: (a) a symbolic redirect of named call
   sites to static methods of `aim-services.jar`, a dex rewrite of
   services.jar with new method ids, verified as the `nop` edit is; (b)
   no edit, and PackageManager stays original until ActivityManager and
   WindowManager are native and the in-process callers are gone (M4 after
   M5 and M6, one much larger switch). Recommended: (a), decided once for
-  `power` and M4 alike; needed only for C.
+  `power` and M4 alike; needed only for C. Decided (a) (2026-10-02); the
+  edit is built (docs/system-services.md, "Redirected call sites"), and
+  its list stays empty until C ("The call sites", section 2).
 - **D2. The user service at the switch.** UserManagerService is built by
-  PMS's injector, shares its lock and calls the concrete PMS 12 times.
+  PMS's injector, shares its lock and calls the concrete PMS 15 times.
   Options: (a) keep it original, constructed by the facade, with those
-  12 calls redirected to the facade (D1's edit, inside
+  15 calls redirected to the facade (D1's edit, inside
   `UserManagerService`); (b) a native `user` in C too (105 methods,
   `UserManagerInternal`'s 58 methods for 76 files, multi-user CTS).
   Recommended: (a): a smaller C, users unchanged, and `user` replaced
