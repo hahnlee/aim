@@ -6,7 +6,7 @@
 use aim_binder_host::parcel::{BAD_VALUE, Reader, Result};
 use aim_service_aidl::ReadParcelable;
 
-use super::intent_filter::{ACTION_VIEW, Strings};
+use super::intent_filter::{ACTION_VIEW, Plain, Strings};
 use super::uri::Uri;
 use crate::clip::{ClipData, bundle};
 
@@ -140,11 +140,17 @@ impl Intent {
     }
 }
 
+/// An intent in a binder call.
+impl ReadParcelable for Intent {
+    fn read_from(r: &mut Reader<'_>) -> Result<Intent> {
+        Intent::read(r, &mut Plain)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use aim_binder_host::parcel::Parcel;
 
-    use super::super::intent_filter::Plain;
     use super::*;
 
     /// An intent as `Intent.writeToParcel` writes `new Intent(VIEW,
