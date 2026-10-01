@@ -117,13 +117,30 @@ pub fn start(
     let props = system_config::build_props(image);
     let device = system_config::system(image, &props)?;
     let feed = Feed::start(system, Some(dump));
-    // Each fed state with the device's constants, made once per state.
+    let system = system.clone();
+    // Each fed state with the device's constants and the users' unlock
+    // state (UserManager's: a user unlocked stays so), made once per
+    // state and change.
     let merged: Mutex<Option<(Arc<State>, Arc<State>)>> = Mutex::new(None);
     Ok(PackageModel::new(Box::new(move |t| {
         let fed = feed.fresh(t)?;
         let mut merged = merged.lock().unwrap();
+        let was = |id: i32| {
+            merged
+                .as_ref()
+                .is_some_and(|(_, m)| m.users.get(&id).is_some_and(|u| u.unlocking_or_unlocked))
+        };
+        let mut unlocked = Vec::new();
+        for &id in fed.users.keys() {
+            if was(id) || system.user_unlocking_or_unlocked(id).ok()? {
+                unlocked.push(id);
+            }
+        }
         if let Some((f, m)) = merged.as_ref()
             && Arc::ptr_eq(f, &fed)
+            && m.users
+                .values()
+                .all(|u| u.unlocking_or_unlocked == unlocked.contains(&u.id))
         {
             return Some(m.clone());
         }
@@ -133,6 +150,9 @@ pub fn start(
             force_queryable_packages: fed.system.force_queryable_packages.clone(),
             ..device.clone()
         };
+        for user in state.users.values_mut() {
+            user.unlocking_or_unlocked = unlocked.contains(&user.id);
+        }
         let state = Arc::new(state);
         *merged = Some((fed, state.clone()));
         Some(state)

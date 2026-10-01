@@ -844,6 +844,17 @@ impl System {
         )
     }
 
+    /// `UserManager.isUserUnlockingOrUnlocked`.
+    pub fn user_unlocking_or_unlocked(self: &Arc<Self>, user_id: i32) -> Result<bool> {
+        let args = um::IsUserUnlockingOrUnlocked { user_id };
+        self.call(
+            "user",
+            um::IS_USER_UNLOCKING_OR_UNLOCKED,
+            |p| args.write(p),
+            um::read_is_user_unlocking_or_unlocked_reply,
+        )
+    }
+
     /// `UserManager.getProfiles(user, true)`, as ids.
     pub fn profile_ids(self: &Arc<Self>, user_id: i32) -> Result<Vec<i32>> {
         let args = um::GetProfileIds {
