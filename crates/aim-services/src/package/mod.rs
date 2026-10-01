@@ -25,6 +25,7 @@ pub mod permissions;
 pub mod resolve;
 pub mod restrictions;
 pub mod settings;
+pub mod sign;
 pub mod system_config;
 pub mod uri;
 pub mod write;
