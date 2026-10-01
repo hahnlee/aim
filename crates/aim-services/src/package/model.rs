@@ -40,7 +40,7 @@ pub struct State {
 pub struct Platform {
     /// The resolver activity's theme (`Theme.Material.Dialog.Alert`).
     pub resolver_theme: i32,
-    /// `ResolverActivity.ActionTitle`'s titles: action (`None` for the
+    /// `ResolverActivity.ActionTitle`'s labels (`getLabelRes`): action (`None` for the
     /// default) and string resource.
     pub resolver_titles: Vec<(Option<String>, i32)>,
     /// `config_customResolverActivity`, flattened, if set.

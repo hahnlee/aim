@@ -858,15 +858,15 @@ final class PackageFeed extends IPackageFeed.Stub {
         return null;
     }
 
-    /** ResolverActivity's titles, by the action each is for (ActionTitle). */
+    /** ResolverActivity.getLabelRes: ActionTitle's labels, by action (HOME never matches). */
     private static final String[][] RESOLVER_TITLES = {
-        {"android.intent.action.VIEW", "whichViewApplication"},
-        {"android.intent.action.EDIT", "whichEditApplication"},
-        {"android.intent.action.SEND", "whichSendApplication"},
-        {"android.intent.action.SENDTO", "whichSendToApplication"},
-        {"android.intent.action.SEND_MULTIPLE", "whichSendApplication"},
-        {"android.media.action.IMAGE_CAPTURE", "whichImageCaptureApplication"},
-        {null, "whichApplication"},
+        {"android.intent.action.VIEW", "whichViewApplicationLabel"},
+        {"android.intent.action.EDIT", "whichEditApplicationLabel"},
+        {"android.intent.action.SEND", "whichSendApplicationLabel"},
+        {"android.intent.action.SENDTO", "whichSendToApplicationLabel"},
+        {"android.intent.action.SEND_MULTIPLE", "whichSendApplicationLabel"},
+        {"android.media.action.IMAGE_CAPTURE", "whichImageCaptureApplicationLabel"},
+        {null, "whichApplicationLabel"},
     };
 
     /**
