@@ -10,8 +10,8 @@
 //! verification (#726), the chooser's preferred and resolver activities
 //! (#727), other profiles and persistent preferred activities (#715).
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel, Reader, Result as ParcelResult};
 use aim_service_aidl::ReadParcelable;
@@ -22,8 +22,8 @@ use super::apps_filter::{
     should_filter_application, user_id,
 };
 use super::component_resolver::{
-    ComponentResolver, Info, Kind, MATCH_EXPLICITLY_VISIBLE_ONLY, MATCH_INSTANT,
-    MATCH_VISIBLE_TO_INSTANT_APP_ONLY, ResolveInfo, Results, resolve_priority_order,
+    ComponentResolver, Info, Kind, MATCH_DEFAULT_ONLY, MATCH_EXPLICITLY_VISIBLE_ONLY,
+    MATCH_INSTANT, MATCH_VISIBLE_TO_INSTANT_APP_ONLY, ResolveInfo, Results, resolve_priority_order,
 };
 use super::info::{
     ActivityInfo, ProviderInfo, Target, generate_application_info, generate_provider_info,
@@ -35,6 +35,7 @@ use super::intent::{
 };
 use super::intent_filter::{IntentFilter, Plain};
 use super::model::State;
+use super::preferred::{self, Preferred};
 use super::query::Query;
 use super::reply;
 use super::uri;
@@ -61,14 +62,37 @@ pub struct Resolution {
     pub state: Arc<State>,
     pub components: ComponentResolver,
     pub apps_filter: AppsFilter,
+    /// Each user's preferred activities.
+    preferred: BTreeMap<i32, Preferred>,
+    /// `getSetupWizardPackageNameImpl`, found once.
+    setup_wizard: OnceLock<Option<String>>,
+    /// Each user's legacy domain verification states, by package.
+    legacy: BTreeMap<i32, HashMap<String, i32>>,
 }
 
 impl Resolution {
     pub fn new(state: Arc<State>, config: &apps_filter::Config) -> Resolution {
+        let preferred = state
+            .users
+            .iter()
+            .map(|(&id, u)| {
+                let p =
+                    Preferred::parse(u.preferred_activities.as_deref(), u.restrictions.as_deref());
+                (id, p)
+            })
+            .collect();
+        let legacy = state
+            .users
+            .iter()
+            .map(|(&id, u)| (id, domains::legacy_domain_states(u)))
+            .collect();
         Resolution {
             components: ComponentResolver::new(&state),
             apps_filter: AppsFilter::new(&state, config),
             state,
+            preferred,
+            setup_wizard: OnceLock::new(),
+            legacy,
         }
     }
 
@@ -176,16 +200,27 @@ impl Resolution {
         Ok(self.update_flags(flags, user))
     }
 
-    /// `isImplicitImageCaptureIntentAndNotSetByDpc`: the persistent
-    /// preferred activities are not in the feed.
-    fn implicit_image_capture(&self, intent: &Intent) -> Result<bool> {
-        if intent.is_implicit_image_capture_intent() {
-            Err(NotModelled(
-                "camera intents (persistent preferred activities)",
-            ))
-        } else {
-            Ok(false)
-        }
+    /// `isImplicitImageCaptureIntentAndNotSetByDpc`: a camera intent no
+    /// persistent preferred activity of a device policy answers.
+    fn implicit_image_capture(
+        &self,
+        intent: &Intent,
+        user: i32,
+        resolved_type: Option<&str>,
+        flags: i64,
+    ) -> bool {
+        intent.is_implicit_image_capture_intent()
+            && !self.preferred(user).is_some_and(|p| {
+                let default_only = flags & MATCH_DEFAULT_ONLY != 0;
+                preferred::query(&p.persistent, intent, resolved_type, default_only)
+                    .iter()
+                    .any(|ppa| ppa.set_by_dpm)
+            })
+    }
+
+    /// The user's preferred activities.
+    fn preferred(&self, user: i32) -> Option<&Preferred> {
+        self.preferred.get(&user)
     }
 
     /// The model's limits: other profiles' results.
@@ -225,7 +260,7 @@ impl Resolution {
             calling_uid,
             false,
             comp.is_some() || package.is_some(),
-            self.implicit_image_capture(intent)?,
+            self.implicit_image_capture(intent, user, resolved_type, flags),
         )?;
         let mut list = match comp {
             Some(comp) => {
@@ -359,26 +394,30 @@ impl Resolution {
                 }
             }
         }
-        if package.is_none() && intent.has_web_uri() && result.len() > 1 {
-            return Err(NotModelled("web links' domain verification"));
-        }
-        if intent.has_web_uri() {
-            // sortResult: already sorted by the resolver, and stable.
+        if package.is_none() && intent.has_web_uri() {
+            if result.len() > 1 {
+                result = self.filter_web_candidates(intent, flags, result, user)?;
+            }
+            // sortResult.
             result.sort_by(resolve_priority_order);
         }
         Ok(result)
     }
 
-    /// `isInstantAppResolutionAllowed`'s checks that need no instant app
-    /// resolver: when they pass, the original asks its resolver, which
-    /// the model does not know.
+    /// `isInstantAppResolutionAllowed` up to the domain checks: without
+    /// an instant app resolver and installer it is never allowed; when
+    /// its checks pass, the original asks its resolver, which the model
+    /// does not (#725).
     fn check_instant_resolution(
         &self,
         intent: &Intent,
         resolved: &[ResolveInfo],
         skip_package_check: bool,
     ) -> Result<()> {
-        if intent.component.is_some()
+        let platform = &self.state.platform;
+        if platform.instant_app_resolver.is_none()
+            || platform.instant_app_installer.is_none()
+            || intent.component.is_some()
             || intent.has_flag(FLAG_IGNORE_EPHEMERAL)
             || intent.has_flag(FLAG_ACTIVITY_REQUIRE_NON_BROWSER)
             || (!skip_package_check && intent.package.is_some())
@@ -555,7 +594,7 @@ impl Resolution {
             calling_uid,
             false,
             false,
-            self.implicit_image_capture(intent)?,
+            self.implicit_image_capture(intent, user, resolved_type, flags),
         )?;
         self.enforce_cross_user(calling_uid, user)?;
         let mut query =
@@ -572,9 +611,18 @@ impl Resolution {
                 {
                     return Ok(Some(query.swap_remove(0)));
                 }
-                Err(NotModelled(
-                    "preferred activities and the resolver activity",
-                ))
+                let preferred = self.find_preferred_activity(
+                    intent,
+                    resolved_type,
+                    flags,
+                    &query,
+                    user,
+                    calling_uid,
+                )?;
+                if let Some(ri) = preferred {
+                    return Ok(Some(ri));
+                }
+                self.chooser(intent, &query, user).map(Some)
             }
         }
     }
@@ -758,7 +806,7 @@ impl Resolution {
             calling_uid,
             false,
             false,
-            self.implicit_image_capture(intent)?,
+            self.implicit_image_capture(intent, user, resolved_type, flags),
         )?;
         let (intent, original) = match (&intent.component, &intent.selector) {
             (None, Some(selector)) => (&**selector, Some(intent)),
@@ -1260,6 +1308,9 @@ impl Resolver {
         Answer::NotModelled
     }
 }
+
+mod chooser;
+mod domains;
 
 #[cfg(test)]
 mod tests;

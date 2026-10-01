@@ -12,4 +12,6 @@ public interface IPackageManager extends android.os.IInterface {
     int[] getPackageGids(String packageName, long flags, int userId) throws RemoteException;
     InstallSourceInfo getInstallSourceInfo(String packageName, int userId) throws RemoteException;
     byte[] getPreferredActivityBackup(int userId) throws RemoteException;
+    android.content.ComponentName getInstantAppResolverComponent() throws RemoteException;
+    android.content.ComponentName getInstantAppInstallerComponent() throws RemoteException;
 }

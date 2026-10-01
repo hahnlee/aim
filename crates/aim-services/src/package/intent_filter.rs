@@ -673,6 +673,14 @@ impl UriRelativeFilterGroup {
         group
     }
 
+    /// `matchGroupsToUri`: the first group that matches decides.
+    pub fn match_groups(groups: &[UriRelativeFilterGroup], data: &Uri) -> bool {
+        groups
+            .iter()
+            .find(|g| g.matches(data))
+            .is_some_and(|g| g.action == ACTION_ALLOW)
+    }
+
     fn matches(&self, data: &Uri) -> bool {
         !self.filters.is_empty() && self.filters.iter().all(|f| f.matches(data))
     }
@@ -942,11 +950,8 @@ impl IntentFilter {
 
     /// `matchRelRefGroups`: the first group that matches decides.
     fn match_rel_ref_groups(&self, data: &Uri) -> bool {
-        self.uri_relative_filter_groups
-            .iter()
-            .flatten()
-            .find(|g| g.matches(data))
-            .is_some_and(|g| g.action == ACTION_ALLOW)
+        let groups = self.uri_relative_filter_groups.as_deref().unwrap_or_default();
+        UriRelativeFilterGroup::match_groups(groups, data)
     }
 
     /// `matchData(type, scheme, data, wildcardSupported)`.

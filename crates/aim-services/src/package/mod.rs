@@ -19,6 +19,7 @@ pub mod list;
 pub mod model;
 pub mod parse;
 pub mod pkg;
+pub mod preferred;
 pub mod query;
 pub mod reply;
 pub mod permissions;

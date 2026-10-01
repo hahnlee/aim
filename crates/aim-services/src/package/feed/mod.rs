@@ -32,7 +32,7 @@ use aim_service_aidl::{
 };
 use sha2::{Digest, Sha256};
 
-use super::model::{PackageState, State, User};
+use super::model::{PackageState, State};
 use crate::SYSTEM_UID;
 use crate::system::System;
 
@@ -339,20 +339,14 @@ fn build(
                 state.shared_users.insert(key.name.clone(), user);
             }
             USER => {
-                let (id, preferred_activities) = record::user(bytes).map_err(failed)?;
-                state.users.insert(
-                    id,
-                    User {
-                        id,
-                        preferred_activities,
-                        ..User::default()
-                    },
-                );
+                let user = record::user(bytes).map_err(failed)?;
+                state.users.insert(user.id, user);
             }
             SYSTEM => {
-                let (all, packages) = record::system(bytes).map_err(failed)?;
+                let (all, packages, platform) = record::system(bytes).map_err(failed)?;
                 state.system.force_system_packages_queryable = all;
                 state.system.force_queryable_packages = packages;
+                state.platform = platform;
             }
             _ => return Err(format!("{key:?}: no such kind")),
         }

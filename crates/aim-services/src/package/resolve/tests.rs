@@ -134,6 +134,17 @@ fn state() -> Arc<State> {
             }];
         }),
         package("d.caller", 10004, false, |_| {}),
+        package("android", 1000, true, |_| {}),
+        package("f.jpeg", 10006, true, |p| {
+            p.activities = vec![Activity {
+                main: main(
+                    "f.jpeg",
+                    "f.jpeg.Show",
+                    vec![filter(VIEW, Some("image/jpeg"), None, 0)],
+                ),
+                ..Activity::default()
+            }];
+        }),
         package("e.queries", 10005, false, |p| {
             p.queries_packages = vec!["b.gallery".into()]
         }),
@@ -286,42 +297,36 @@ fn resolves_explicit_services_and_providers() {
         .resolve_intent(&view(None, None), Some("image/png"), 0, 0, SYSTEM_UID)
         .unwrap();
     assert_eq!(best.unwrap().component().1, "c.high.Open");
+    // b.gallery's Open, not visible to e.queries' caller: one result.
+    let mut i = view(None, None);
+    i.package = Some("b.gallery".into());
     let best = r
-        .resolve_intent(&view(None, None), Some("image/jpeg"), 0, 0, SYSTEM_UID)
+        .resolve_intent(&i, Some("image/png"), 0, 0, 10005)
         .unwrap();
-    assert_eq!(best.unwrap().component().1, "a.viewer.Image");
+    assert_eq!(best.unwrap().component().1, "b.gallery.Open");
 }
 
 #[test]
 fn reports_what_is_not_modelled() {
     let r = Resolution::new(state(), &Default::default());
-    // Two web handlers need domain verification.
-    let mut s = (*state()).clone();
-    let b = s.packages.get_mut("b.gallery").unwrap();
-    let mut pkg = (**b.pkg.as_ref().unwrap()).clone();
-    pkg.activities.push(Activity {
-        main: main(
-            "b.gallery",
-            "b.gallery.Web",
-            vec![filter(VIEW, None, Some("https"), 0)],
-        ),
-        ..Activity::default()
-    });
-    b.pkg = Some(Arc::new(pkg));
-    let r2 = Resolution::new(Arc::new(s), &Default::default());
     let web = view(None, Some("https://example.com/"));
+    // Without an instant app resolver, a web link is answered.
+    let list = r
+        .query_intent_activities(&web, None, 0, 0, SYSTEM_UID)
+        .unwrap();
+    assert_eq!(names(&list), ["a.viewer.Web"]);
+    // With one, a web link with a host goes to instant app resolution;
+    // without a host it does not.
+    let mut s = (*state()).clone();
+    s.platform.instant_app_resolver = Some("g/.Resolver".into());
+    s.platform.instant_app_installer = Some("g/.Installer".into());
+    let r2 = Resolution::new(Arc::new(s), &Default::default());
     assert!(
         r2.query_intent_activities(&web, None, 0, 0, SYSTEM_UID)
             .is_err()
     );
-    // A web link with a host may go to instant app resolution; without
-    // one, a single web handler is answered.
-    assert!(
-        r.query_intent_activities(&web, None, 0, 0, SYSTEM_UID)
-            .is_err()
-    );
     let bare = view(None, Some("https:"));
-    let list = r
+    let list = r2
         .query_intent_activities(&bare, None, 0, 0, SYSTEM_UID)
         .unwrap();
     assert_eq!(names(&list), ["a.viewer.Web"]);
@@ -360,4 +365,202 @@ fn decodes_its_replies() {
     };
     assert_eq!(fields[0].0, "activityInfo");
     assert!(matches!(fields[1], (ref n, Value::Fields(_)) if n == "filter"));
+}
+
+/// The state with user 0's preferred and package restrictions.
+fn with_preferred(backup: Option<&str>, restrictions: Option<&str>) -> Arc<State> {
+    let mut s = (*state()).clone();
+    let u = s.users.get_mut(&0).unwrap();
+    u.preferred_activities = backup.map(|b| b.as_bytes().to_vec());
+    u.restrictions = restrictions.map(|b| b.as_bytes().to_vec());
+    s.platform.resolver_titles = vec![(Some(VIEW.into()), 7), (None, 9)];
+    s.platform.device_provisioned = true;
+    Arc::new(s)
+}
+
+fn chosen(s: Arc<State>, ty: &str) -> ResolveInfo {
+    let r = Resolution::new(s, &Default::default());
+    r.resolve_intent(&view(None, None), Some(ty), 0, 0, SYSTEM_UID)
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn chooses_preferred_persistent_or_the_resolver() {
+    // a.viewer.Image and f.jpeg.Show tie: the chooser.
+    let ri = chosen(with_preferred(None, None), "image/jpeg");
+    assert_eq!(
+        ri.component(),
+        ("android", "com.android.internal.app.ResolverActivity")
+    );
+    let Info::Activity(ai) = &ri.info else {
+        panic!()
+    };
+    assert_eq!(ai.info.item.label_res, 7);
+    assert!(ai.info.item.meta_data.is_some() && ai.info.exported);
+    assert_eq!((ri.match_, ri.priority, ri.user_handle), (0, 0, 0));
+    // A preferred activity chosen among the same set.
+    let pa = |set: &str| {
+        format!(
+            r#"<preferred-backup><preferred-activities>
+<item name="f.jpeg/.Show" match="600000" always="true" set="2">
+<set name="f.jpeg/.Show" /><set name="{set}" />
+<filter><action name="{VIEW}" /><cat name="{DEFAULT}" /><type name="image/*" /></filter>
+</item></preferred-activities></preferred-backup>"#
+        )
+    };
+    let ri = chosen(
+        with_preferred(Some(&pa("a.viewer/.Image")), None),
+        "image/jpeg",
+    );
+    assert_eq!(ri.component().1, "f.jpeg.Show");
+    // A set that no longer covers the results: ask again.
+    let r = Resolution::new(with_preferred(Some(&pa("x/.Y")), None), &Default::default());
+    let got = r
+        .resolve_intent(&view(None, None), Some("image/jpeg"), 0, 0, SYSTEM_UID)
+        .unwrap();
+    assert_eq!(
+        got.unwrap().component().1,
+        "com.android.internal.app.ResolverActivity"
+    );
+    // A persistent preferred activity wins.
+    let ppa = format!(
+        r#"<package-restrictions><persistent-preferred-activities>
+<item name="a.viewer/.Image"><filter><action name="{VIEW}" /><cat name="{DEFAULT}" />
+<type name="image/*" /></filter></item></persistent-preferred-activities></package-restrictions>"#
+    );
+    let ri = chosen(with_preferred(None, Some(&ppa)), "image/jpeg");
+    assert_eq!(ri.component().1, "a.viewer.Image");
+}
+
+fn web_filter(host: Option<&str>) -> ParsedIntentInfo {
+    let mut f = IntentFilter::default();
+    f.add_action(VIEW);
+    f.add_category(DEFAULT);
+    f.add_category("android.intent.category.BROWSABLE");
+    f.add_data_scheme("https");
+    if let Some(h) = host {
+        f.add_data_authority(h, None);
+    }
+    ParsedIntentInfo {
+        filter: f,
+        has_default: true,
+        ..ParsedIntentInfo::default()
+    }
+}
+
+/// Two apps handling example.com links and two browsers.
+fn web_state(edit: impl FnOnce(&mut State)) -> Arc<State> {
+    let web = |name: &'static str, app_id: i32, host: Option<&'static str>, installed: i64| {
+        let mut ps = package(name, app_id, true, |p| {
+            p.activities = vec![Activity {
+                main: main(name, &format!("{name}.Web"), vec![web_filter(host)]),
+                ..Activity::default()
+            }];
+        });
+        let us = ps.users.get_mut(&0).unwrap();
+        us.first_install_time = installed;
+        us.domain_selection = Some((true, Vec::new()));
+        ps
+    };
+    let mut s = State {
+        packages: [
+            web("app.one", 10021, Some("example.com"), 100),
+            web("app.two", 10022, Some("example.com"), 200),
+            web("browser.a", 10023, None, 1),
+            web("browser.b", 10024, None, 1),
+        ]
+        .into_iter()
+        .map(|p| (p.name.clone(), p))
+        .collect(),
+        users: [(
+            0,
+            User {
+                unlocking_or_unlocked: true,
+                ..User::default()
+            },
+        )]
+        .into(),
+        ..State::default()
+    };
+    edit(&mut s);
+    Arc::new(s)
+}
+
+fn web_names(s: Arc<State>, flags: i64, categories: &[&str]) -> Vec<String> {
+    let r = Resolution::new(s, &Default::default());
+    let mut i = view(None, Some("https:"));
+    // A host would also ask the instant app resolver (#725): resolve
+    // with one through the domain filter alone.
+    i.data = Some(Uri::parse("https://example.com/a"));
+    i.categories = Some(categories.iter().map(|c| c.to_string()).collect());
+    let found = r.query_activities_body(&i, None, flags | 0xC0000, SYSTEM_UID, 0, None);
+    let mut names = names(&found.unwrap());
+    names.sort();
+    names
+}
+
+#[test]
+fn web_links_go_to_approved_apps_or_browsers() {
+    let browsable = ["android.intent.category.BROWSABLE"];
+    // Not a verification intent (BROWSABLE without matching DEFAULT): the
+    // apps and every browser.
+    let all = web_names(web_state(|_| {}), 0, &browsable);
+    assert_eq!(
+        all,
+        [
+            "app.one.Web",
+            "app.two.Web",
+            "browser.a.Web",
+            "browser.b.Web"
+        ]
+    );
+    // With a default browser, only it of the browsers.
+    let one = web_names(
+        web_state(|s| s.users.get_mut(&0).unwrap().default_browser = Some("browser.b".into())),
+        0,
+        &browsable,
+    );
+    assert_eq!(one, ["app.one.Web", "app.two.Web", "browser.b.Web"]);
+    // A verification intent with no approval: the browsers.
+    let none = web_names(web_state(|_| {}), MATCH_DEFAULT_ONLY, &browsable);
+    assert_eq!(none, ["browser.a.Web", "browser.b.Web"]);
+    // Both verified: the last installed.
+    let verified = |s: &mut State| {
+        for p in ["app.one", "app.two"] {
+            let us = s.packages.get_mut(p).unwrap().users.get_mut(&0).unwrap();
+            us.domain_selection = Some((true, vec![("example.com".into(), 2)]));
+        }
+    };
+    assert_eq!(
+        web_names(web_state(verified), MATCH_DEFAULT_ONLY, &browsable),
+        ["app.two.Web"]
+    );
+    // Link handling turned off for app.two, selection by the user for
+    // app.one: app.one.
+    let selected = |s: &mut State| {
+        let us = s
+            .packages
+            .get_mut("app.one")
+            .unwrap()
+            .users
+            .get_mut(&0)
+            .unwrap();
+        us.domain_selection = Some((
+            true,
+            vec![("*.example.com".into(), 1), ("example.com".into(), 1)],
+        ));
+        let us = s
+            .packages
+            .get_mut("app.two")
+            .unwrap()
+            .users
+            .get_mut(&0)
+            .unwrap();
+        us.domain_selection = Some((false, vec![("example.com".into(), 2)]));
+    };
+    assert_eq!(
+        web_names(web_state(selected), MATCH_DEFAULT_ONLY, &browsable),
+        ["app.one.Web"]
+    );
 }

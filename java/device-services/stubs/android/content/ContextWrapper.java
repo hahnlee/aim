@@ -15,6 +15,8 @@ public class ContextWrapper extends Context {
     @Override
     public PackageManager getPackageManager() { throw new RuntimeException("stub"); }
     @Override
+    public ContentResolver getContentResolver() { throw new RuntimeException("stub"); }
+    @Override
     public int checkPermission(String permission, int pid, int uid) { throw new RuntimeException("stub"); }
     @Override
     public String getBasePackageName() { throw new RuntimeException("stub"); }
