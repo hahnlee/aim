@@ -106,7 +106,8 @@ drops the old connection's tasks. The mode:
 | `ORIENTATION` | guest | an activity of it asked for landscape, portrait or neither (`setRequestedOrientation`) |
 | `REMOVED` | guest | the task is gone |
 | `HIDE` | guest | the desktop (a task that fills the display: home) came to the front over the task: its app hides |
-| `DRAWN` | guest | the `LAUNCH` of `package/class` drew its first frame, or ended |
+| `DRAWN` | guest | the `LAUNCH` of `package/class` drew its first frame, or ended (with the window shell: its task's window shows its starting window) |
+| `PINNED`, `UNPINNED` | guest | the task entered or left picture-in-picture: its window floats, or no longer ([task-organizer.md](task-organizer.md), "Picture-in-picture") |
 | `SET_BOUNDS` | server | move or resize the task (`resizeTask`); the bridge answers with `TASK` |
 | `FOCUS` | server | `setFocusedTask` |
 | `CLOSE` | server | `removeTask` |
@@ -126,6 +127,14 @@ drops the old connection's tasks. The mode:
   has changes nothing). In the lightweight shell the window shell's
   transitions place every task's surface, and nothing is committed
   ([task-organizer.md](task-organizer.md)).
+- **Where a window reopens.** A launcher activity's new task opens where
+  its window last was, as a Mac app's window does (#635): the bridge keeps
+  each activity's last bounds in `/data/system/aim-windows-places` and
+  gives them to a `LAUNCH` as launch bounds while they lie within the
+  display. Starts from elsewhere (an app's own new task, a notification)
+  open at Android's default bounds, as on a desktop-windowing device. On a
+  freeform display area (no window shell) the platform's own record
+  (`LaunchParamsPersister`) agrees.
 - **Move and resize.** Moving the window moves the task at once; a live
   resize resizes it when the resize ends (each resize is a configuration
   change for the app). The window then takes the bounds the task got (a
@@ -250,7 +259,9 @@ Settings.app/Contents/
   on its splash screen background, which moves into the task's window
   when Android gives the task bounds and goes when the launch has drawn
   its first frame (`DRAWN`, what `am start -W` waits for). Android draws
-  no starting window of its own without WMShell (m1-shell.md, D4). The
+  no starting window of its own without WMShell (m1-shell.md, D4); with the
+  window shell it does, and the splash goes once the task's window shows
+  it ([task-organizer.md](task-organizer.md), "Starting windows"). The
   background is what Android's starting window takes (#606): the launcher
   activity's theme's `windowSplashScreenBackground`, else its
   `windowBackground` if a color, for the Mac's light and dark appearance,

@@ -5,4 +5,6 @@ package android.window;
 public final class WindowContainerTransaction {
     public WindowContainerTransaction() { throw new RuntimeException("stub"); }
     public WindowContainerTransaction setWindowingMode(WindowContainerToken container, int windowingMode) { throw new RuntimeException("stub"); }
+    public WindowContainerTransaction setActivityWindowingMode(WindowContainerToken container, int windowingMode) { throw new RuntimeException("stub"); }
+    public WindowContainerTransaction setBounds(WindowContainerToken container, android.graphics.Rect bounds) { throw new RuntimeException("stub"); }
 }

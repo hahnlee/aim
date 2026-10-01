@@ -3,5 +3,8 @@
 package android.content.pm;
 
 public class PackageItemInfo {
+    public String name;
+    public String packageName;
+    public android.graphics.drawable.Drawable loadIcon(PackageManager pm) { throw new RuntimeException("stub"); }
     public CharSequence loadLabel(PackageManager pm) { throw new RuntimeException("stub"); }
 }

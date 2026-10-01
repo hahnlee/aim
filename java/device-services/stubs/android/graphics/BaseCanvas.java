@@ -4,4 +4,5 @@ package android.graphics;
 
 public abstract class BaseCanvas {
     public BaseCanvas() { throw new RuntimeException("stub"); }
+    public void drawPath(Path path, Paint paint) { throw new RuntimeException("stub"); }
 }

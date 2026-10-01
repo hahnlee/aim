@@ -21,7 +21,9 @@
 //!   closes;
 //! - an orientation an activity asks for turns the window to landscape or
 //!   portrait proportions around its centre, within the screen, and a
-//!   request for none turns it back to the user's size.
+//!   request for none turns it back to the user's size;
+//! - a task in picture-in-picture floats above the other windows, on every
+//!   space, keeping its proportions.
 //!
 //! A press in a window whose task is not the top one focuses the task first
 //! and holds the touch until Android reports the task in front (or
@@ -65,6 +67,11 @@ const HOLD_MS: u64 = 250;
 const SETTLE_MS: u64 = 500;
 /// `NSWindowCollectionBehaviorFullScreenNone`: the green button zooms.
 const FULL_SCREEN_NONE: usize = 1 << 9;
+/// `NSWindowCollectionBehaviorCanJoinAllSpaces`.
+const ALL_SPACES: usize = 1 << 0;
+/// `NSFloatingWindowLevel` and `NSNormalWindowLevel`.
+const FLOATING_LEVEL: isize = 3;
+const NORMAL_LEVEL: isize = 0;
 /// `NSWindowToolbarStyleUnified`.
 const TOOLBAR_UNIFIED: isize = 3;
 /// `NSWindowOcclusionStateVisible`.
@@ -139,6 +146,8 @@ struct Info {
     closing: bool,
     /// The orientation an activity of it asked for.
     orientation: u32,
+    /// It is in picture-in-picture.
+    pinned: bool,
 }
 
 impl Info {
@@ -296,6 +305,8 @@ fn note(s: &mut State, r: &Record) -> Info {
         window::TITLE => info.title = r.text().to_string(),
         window::TASK => info.bounds = Some((r.bounds, r.caption)),
         window::ORIENTATION => info.orientation = r.orientation,
+        window::PINNED => info.pinned = true,
+        window::UNPINNED => info.pinned = false,
         _ => {}
     }
     info.clone()
@@ -364,6 +375,7 @@ fn apply(r: &Record) {
         window::FRONT => front(r.task),
         window::ORIENTATION => orient(r.task, r.orientation),
         window::HIDE => hide(r.task),
+        window::PINNED | window::UNPINNED => float(r.task),
         window::REMOVED => remove(r.task),
         window::MOVED_TO_BACK => {
             if let Some(Some(w)) = with(|s| s.tasks.get(&r.task).map(|t| t.window)) {
@@ -422,6 +434,13 @@ fn route(task: i32) -> bool {
                     op: window::ORIENTATION,
                     task,
                     orientation: info.orientation,
+                    ..Default::default()
+                });
+            }
+            if info.pinned {
+                h.send_window(&Record {
+                    op: window::PINNED,
+                    task,
                     ..Default::default()
                 });
             }
@@ -533,6 +552,8 @@ fn task(task: i32, b: [i32; 4], caption: i32) {
         }
     });
     follow(task);
+    // A PiP's new aspect ratio (the app's params).
+    float(task);
     update_targets(Some(task));
 }
 
@@ -656,7 +677,39 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
     if placed != c {
         set_bounds(task, bounds(placed, caption));
     }
+    float(task);
     update_targets(Some(task));
+}
+
+/// A window whose task is in picture-in-picture floats above the others,
+/// on every space, and keeps its proportions when resized; one whose task
+/// left it no longer does.
+fn float(task: i32) {
+    let Some(Some((w, c, pinned))) = with(|s| {
+        let t = s.tasks.get(&task)?;
+        Some((t.window, t.content(), s.infos.get(&task)?.pinned))
+    }) else {
+        return;
+    };
+    let (level, spaces) = if pinned {
+        (FLOATING_LEVEL, ALL_SPACES)
+    } else {
+        (NORMAL_LEVEL, 0)
+    };
+    send!(w, c"setLevel:" => (), isize = level);
+    send!(w, c"setCollectionBehavior:" => (), usize = FULL_SCREEN_NONE | spaces);
+    // Either replaces the other.
+    if pinned {
+        send!(w, c"setContentAspectRatio:" => (), CGSize = CGSize {
+            width: (c[2] - c[0]).max(1) as f64,
+            height: (c[3] - c[1]).max(1) as f64,
+        });
+    } else {
+        send!(w, c"setContentResizeIncrements:" => (), CGSize = CGSize {
+            width: 1.0,
+            height: 1.0,
+        });
+    }
 }
 
 /// The app's launch starts (in a window host): until it has drawn its

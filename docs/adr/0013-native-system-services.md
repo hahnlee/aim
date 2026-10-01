@@ -283,6 +283,17 @@ The migration's state and conformance results are in
   settings do, and the activity returns PermissionController's result.
   Every other permission goes to PermissionController, and SystemServer
   and PermissionController are unchanged.
+- **The one product interceptor (2026-10-01).** WindowManager takes one
+  callback per id, and a product has one id, so the device registers one
+  `PRODUCT_ORDERED_ID` callback (`ProductInterceptor`) that hands each
+  start to its callbacks in order: the notification-permission redirect
+  above, and in the lightweight shell the window shell's `LaunchModes`,
+  which only notes the windowing mode a start's `ActivityOptions` ask for
+  and never intercepts. On the shell's fullscreen display area
+  WindowManager resolves an explicit fullscreen launch and one without a
+  mode alike; the window shell makes only the latter freeform, as a
+  freeform display area does ([task-organizer.md](../task-organizer.md),
+  "Explicit windowing modes").
 - **The mirror.** The Mac's per-app setting is mirrored into the
   permission when a shim starts and when its app becomes active: denied
   revokes, allowed (also provisional) grants. Shims no longer ask for

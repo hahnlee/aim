@@ -14,4 +14,11 @@ interface IWindowShell {
      * it dies.
      */
     void attach(IWindowShellListener listener);
+
+    /**
+     * Moves or resizes task `taskId` in picture-in-picture, as the user
+     * moved its window: WindowManager's resizeTask leaves pinned tasks to
+     * the shell.
+     */
+    void setPipBounds(int taskId, int left, int top, int right, int bottom);
 }

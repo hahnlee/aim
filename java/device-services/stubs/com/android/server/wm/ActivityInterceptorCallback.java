@@ -18,6 +18,7 @@ public interface ActivityInterceptorCallback {
         public Intent getIntent() { throw new RuntimeException("stub"); }
         public String getCallingPackage() { throw new RuntimeException("stub"); }
         public ActivityOptions getCheckedOptions() { throw new RuntimeException("stub"); }
+        public ActivityInfo getActivityInfo() { throw new RuntimeException("stub"); }
 
         public static final class Builder {
             public Builder(int callingUid, int callingPid, int realCallingUid, int realCallingPid, int userId, Intent intent, ResolveInfo rInfo, ActivityInfo aInfo) { throw new RuntimeException("stub"); }

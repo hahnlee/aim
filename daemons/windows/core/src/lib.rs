@@ -10,6 +10,10 @@
 //! task, its display, its activities' packages and its label. A base
 //! intent carrying `ClipData` is not read further (its layout is long and
 //! a launched task's intent does not have one).
+//!
+//! [`places`] is the bridge's record of where each app's window last was.
+
+pub mod places;
 
 /// Reading a Parcel the way Java's `Parcel` reads what it wrote.
 pub trait Read {

@@ -15,7 +15,6 @@ import android.util.Slog;
 import com.android.server.LocalServices;
 import com.android.server.policy.PermissionPolicyInternal;
 import com.android.server.wm.ActivityInterceptorCallback;
-import com.android.server.wm.ActivityTaskManagerInternal;
 
 import java.util.Arrays;
 
@@ -49,9 +48,7 @@ final class NotificationPermissionInterceptor implements ActivityInterceptorCall
     }
 
     static void register(Context context, IServiceHost host) {
-        LocalServices.getService(ActivityTaskManagerInternal.class)
-                .registerActivityStartInterceptor(
-                        PRODUCT_ORDERED_ID, new NotificationPermissionInterceptor(context, host));
+        ProductInterceptor.add(new NotificationPermissionInterceptor(context, host));
     }
 
     @Override
