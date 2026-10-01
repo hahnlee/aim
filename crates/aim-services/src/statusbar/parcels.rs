@@ -46,6 +46,33 @@ impl ReadParcelable for Skipped {
     }
 }
 
+/// `ActivityTaskManager.RootTaskInfo`, up to its task id.
+pub struct RootTask {
+    pub id: i32,
+}
+
+impl ReadParcelable for RootTask {
+    fn read_from(r: &mut Reader<'_>) -> Result<Self> {
+        let rect = |r: &mut Reader<'_>| -> Result<()> {
+            if r.read_i32()? != 0 {
+                (0..4).try_for_each(|_| r.read_i32().map(drop))?;
+            }
+            Ok(())
+        };
+        rect(r)?; // bounds
+        aim_service_aidl::read_int_array(r)?; // child task ids
+        aim_service_aidl::read_string_list(r)?; // child task names
+        for _ in 0..r.read_i32()?.max(0) {
+            rect(r)?; // child task bounds
+        }
+        aim_service_aidl::read_int_array(r)?; // child task user ids
+        r.read_i32()?; // visible
+        r.read_i32()?; // position
+        r.read_i32()?; // TaskInfo.userId
+        Ok(RootTask { id: r.read_i32()? })
+    }
+}
+
 /// `writeParcelable`'s class name, then the object; `None` for null.
 fn parcelable<T>(
     r: &mut Reader<'_>,

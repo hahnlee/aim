@@ -14,4 +14,8 @@
     <string name="config_defaultContextualSearchPackageName" translatable="false"></string>
     <string name="config_defaultWallpaperEffectsGenerationService" translatable="false"></string>
     <string name="config_defaultContentSuggestionsService" translatable="false"></string>
+
+    <!-- System_server's own shutdown dialog, as without a SystemUI: the
+         native status bar shows none. -->
+    <bool name="config_showSysuiShutdown">false</bool>
 </resources>

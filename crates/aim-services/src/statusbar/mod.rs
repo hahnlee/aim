@@ -18,7 +18,9 @@
 //!   ([`auth`]);
 //! - the screen pinning request (`showScreenPinningRequest`) as a sheet;
 //!   accepted, the task is pinned (`startSystemLockTaskMode`), as
-//!   SystemUI's ScreenPinningRequest does.
+//!   SystemUI's ScreenPinningRequest does; while a task is pinned
+//!   (`showPinningEnterExitToast`), its app's menu bar item unpins it
+//!   (`stopSystemLockTaskMode`), as SystemUI's navigation bar does.
 //!
 //! Every other call is answered as on a device without a notification
 //! shade, quick settings or navigation bar: it changes nothing, and a
@@ -50,7 +52,7 @@ use aim_service_aidl::{
 };
 
 use crate::notifications::{Bridge, ProcessFiles};
-use parcels::{Component, Registered, Skipped, StatusBarIcon, Text};
+use parcels::{Component, Registered, RootTask, Skipped, StatusBarIcon, Text};
 
 /// `Process.SYSTEM_UID` and system_server's context, as the other native
 /// services.
@@ -71,6 +73,8 @@ struct State {
     /// The package of each slot's icon.
     icons: HashMap<String, String>,
     auth: Option<auth::Request>,
+    /// The pinned task, while there is one.
+    pinned: Option<i32>,
 }
 
 pub struct StatusBar {
@@ -125,6 +129,7 @@ impl StatusBar {
                 next_toast: 1,
                 icons: HashMap::new(),
                 auth: None,
+                pinned: None,
             }),
             gone: Condvar::new(),
         });
@@ -195,7 +200,7 @@ impl StatusBar {
     /// StatusBarManagerService died with system_server: what it asked for
     /// is gone.
     fn service_died(&self) {
-        let (toast, icons, request) = {
+        let (toast, icons, request, pinned) = {
             let mut state = self.state.lock().unwrap();
             state.service = None;
             let toast = state.toast.take();
@@ -203,6 +208,7 @@ impl StatusBar {
                 toast.and_then(|id| Some((id, state.toasts.remove(&id)?.package))),
                 std::mem::take(&mut state.icons),
                 state.auth.take(),
+                state.pinned.take(),
             )
         };
         self.state.lock().unwrap().toasts.clear();
@@ -218,6 +224,12 @@ impl StatusBar {
         }
         if let Some(r) = request {
             self.send(&r.dismiss());
+        }
+        if let Some(task) = pinned {
+            self.send(&Message::LockTask {
+                task,
+                pinned: false,
+            });
         }
         self.gone.notify_all();
     }
@@ -330,6 +342,37 @@ impl StatusBar {
         self.send(&Message::Pin { task });
     }
 
+    /// `showPinningEnterExitToast`: screen pinning started or ended. The
+    /// task pinned is the focused one: LockTaskController moves it to the
+    /// front before it tells the status bar.
+    fn lock_task(&self, entering: bool) {
+        let task = entering
+            .then(|| {
+                self.call(
+                    "activity_task",
+                    atm::GET_FOCUSED_ROOT_TASK_INFO,
+                    |p| atm::GetFocusedRootTaskInfo {}.write(p),
+                    atm::read_get_focused_root_task_info_reply::<RootTask>,
+                )
+                .inspect_err(|e| eprintln!("guest-init: statusbar: the pinned task: {e}"))
+                .ok()
+                .flatten()
+                .map(|t| t.id)
+            })
+            .flatten();
+        eprintln!("guest-init: statusbar: pinning {entering}, task {task:?}");
+        let previous = std::mem::replace(&mut self.state.lock().unwrap().pinned, task);
+        if let Some(task) = previous {
+            self.send(&Message::LockTask {
+                task,
+                pinned: false,
+            });
+        }
+        if let Some(task) = task {
+            self.send(&Message::LockTask { task, pinned: true });
+        }
+    }
+
     /// The display server's messages: what the Mac showed and what the
     /// user did.
     fn serve_mac(self: Arc<Self>, mut reader: UnixStream) {
@@ -365,13 +408,28 @@ impl StatusBar {
                     eprintln!("guest-init: statusbar: pinning task {task}: {e}");
                 }
             }
+            Message::Unpin { task } => {
+                if self.state.lock().unwrap().pinned != Some(task) {
+                    return;
+                }
+                let unpinned = self.call(
+                    "activity_task",
+                    atm::STOP_SYSTEM_LOCK_TASK_MODE,
+                    |p| atm::StopSystemLockTaskMode {}.write(p),
+                    atm::read_stop_system_lock_task_mode_reply,
+                );
+                if let Err(e) = unpinned {
+                    eprintln!("guest-init: statusbar: unpinning task {task}: {e}");
+                }
+            }
             Message::Toast { .. }
             | Message::HideToast { .. }
             | Message::Icon { .. }
             | Message::Authenticate(_)
             | Message::Retry { .. }
             | Message::Dismiss { .. }
-            | Message::Pin { .. } => {
+            | Message::Pin { .. }
+            | Message::LockTask { .. } => {
                 eprintln!("guest-init: statusbar: {m:?} is not from the Mac");
             }
         }
@@ -455,6 +513,9 @@ impl Service for Node {
                 }
                 bar::SHOW_SCREEN_PINNING_REQUEST => {
                     sb.pin_request(bar::ShowScreenPinningRequest::read(r)?.task_id)
+                }
+                bar::SHOW_PINNING_ENTER_EXIT_TOAST => {
+                    sb.lock_task(bar::ShowPinningEnterExitToast::read(r)?.entering)
                 }
                 bar::REQUEST_ADD_TILE => {
                     let args = bar::RequestAddTile::<Component, Text, Skipped>::read(r)?;

@@ -2,8 +2,8 @@
 //! `IStatusBar` (`aim_services::statusbar`), the display server and the
 //! window hosts (`docs/m1-shell.md`, "What else SystemUI provides"): an
 //! app's text toasts, its system status icons, the device credential
-//! sheet of `BiometricPrompt` and the screen pinning request, each shown
-//! by the app's shim.
+//! sheet of `BiometricPrompt`, the screen pinning request and the way out
+//! of a pinned task, each shown by the app's shim.
 //!
 //! The status bar opens a connection with [`crate::wire::OP_SHELL`]; the
 //! server answers with its mode (one `u32`), and from then on both ends
@@ -98,6 +98,11 @@ pub enum Message {
     /// Host to status bar: the user's answer (false as well when it could
     /// not be asked).
     Pinned { task: i32, accepted: bool },
+    /// Status bar to host: task `task` is pinned (screen pinning), or no
+    /// longer.
+    LockTask { task: i32, pinned: bool },
+    /// Host to status bar: the user asked to unpin task `task`.
+    Unpin { task: i32 },
 }
 
 const TOAST: u8 = 1;
@@ -112,6 +117,8 @@ const CANCEL: u8 = 9;
 const DISMISS: u8 = 10;
 const PIN: u8 = 11;
 const PINNED: u8 = 12;
+const LOCK_TASK: u8 = 13;
+const UNPIN: u8 = 14;
 
 struct Out(Vec<u8>);
 
@@ -296,6 +303,15 @@ impl Message {
                 o.u32(*task as u32);
                 o.u8(*accepted as u8);
             }
+            Message::LockTask { task, pinned } => {
+                o.u8(LOCK_TASK);
+                o.u32(*task as u32);
+                o.u8(*pinned as u8);
+            }
+            Message::Unpin { task } => {
+                o.u8(UNPIN);
+                o.u32(*task as u32);
+            }
         }
         o.0
     }
@@ -368,6 +384,13 @@ impl Message {
             PINNED => Message::Pinned {
                 task: i.u32()? as i32,
                 accepted: i.u8()? != 0,
+            },
+            LOCK_TASK => Message::LockTask {
+                task: i.u32()? as i32,
+                pinned: i.u8()? != 0,
+            },
+            UNPIN => Message::Unpin {
+                task: i.u32()? as i32,
             },
             _ => return Err(bad()),
         };
@@ -477,6 +500,11 @@ mod tests {
                 task: 12,
                 accepted: true,
             },
+            Message::LockTask {
+                task: 12,
+                pinned: true,
+            },
+            Message::Unpin { task: 12 },
         ];
         let mut stream = Vec::new();
         for m in &messages {

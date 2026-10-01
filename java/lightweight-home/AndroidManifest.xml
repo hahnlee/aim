@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The lightweight shell's HOME activity (docs/m1-shell.md): nothing
+     over the wallpaper, as an empty launcher.
+     Boot completion waits for a HOME activity, and ActivityTaskManager
+     resolves HOME with MATCH_DEFAULT_ONLY, so the filter has DEFAULT
+     (the platform's SystemUserHomeActivity has not, and Settings'
+     FallbackHome, priority -1000, would finish and restart for ever).
+     Direct boot aware: it is also the home before the user is unlocked. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.aim.home">
+    <application
+        android:label="Home"
+        android:allowBackup="false"
+        android:directBootAware="true">
+        <activity
+            android:name=".Home"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:clearTaskOnLaunch="true"
+            android:stateNotNeeded="true"
+            android:excludeFromRecents="true"
+            android:resumeWhilePausing="true"
+            android:theme="@android:style/Theme.Wallpaper.NoTitleBar"
+            android:configChanges="density|fontScale|keyboard|keyboardHidden|layoutDirection|locale|orientation|screenLayout|screenSize|smallestScreenSize|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

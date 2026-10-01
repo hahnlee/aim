@@ -2,13 +2,14 @@
 //! (`docs/m1-shell.md`): what the service host's native `IStatusBar` asks
 //! to show goes to the window host (the shim) that stands for the app:
 //! toasts ([`crate::toast`]), the credential and pinning sheets
-//! ([`crate::sheets`]) and system status icons (the app's menu bar item);
-//! what the Mac showed and what the user answered comes back.
+//! ([`crate::sheets`]), system status icons and the pinned task's way out
+//! (the app's menu bar items); what the Mac showed and what the user
+//! answered comes back.
 //!
 //! No shim is launched for any of them. A toast or sheet of an app whose
 //! shim does not run is this process's: the tasks no shim shows are its
-//! windows, and in device mode it is the one Mac app. A pinning request
-//! goes to the host that shows the task. An icon goes to the package's
+//! windows, and in device mode it is the one Mac app. A pinning request,
+//! and that the task is pinned, go to the host that shows the task. An icon goes to the package's
 //! shim, else the system shim, `android`, as notifications do; the server
 //! keeps the icons, so a host that connects (again) gets its package's.
 
@@ -107,12 +108,20 @@ pub fn serve_bar(sock: UnixStream, windows: bool) {
                 }
                 continue;
             }
-            Message::Pin { task } => crate::hosts::showing(*task),
+            Message::Pin { task } | Message::LockTask { task, .. } => {
+                let host = crate::hosts::showing(*task);
+                eprintln!(
+                    "aim-display: status bar: {m:?} to {}",
+                    host.as_ref().map_or("the server", |h| h.package.as_str())
+                );
+                host
+            }
             Message::ToastShown { .. }
             | Message::ToastHidden { .. }
             | Message::Secret { .. }
             | Message::Cancel { .. }
-            | Message::Pinned { .. } => continue,
+            | Message::Pinned { .. }
+            | Message::Unpin { .. } => continue,
         };
         deliver(&s, host, m);
     }
@@ -155,6 +164,7 @@ pub fn from_host(m: &Message) {
             | Message::Secret { .. }
             | Message::Cancel { .. }
             | Message::Pinned { .. }
+            | Message::Unpin { .. }
     ) {
         to_bar(&mut STATE.lock().unwrap(), m);
     }
@@ -170,6 +180,7 @@ pub fn handle(m: Message) {
         Message::Retry { id, lockout_ms, .. } => crate::sheets::retry(id, lockout_ms),
         Message::Dismiss { id, .. } => crate::sheets::dismiss(id),
         Message::Pin { task } => crate::sheets::pin(task),
+        Message::LockTask { task, pinned } => crate::system_icons::pinned(task, pinned),
         // The app's menu bar item (`status.rs`).
         Message::Icon {
             package,
@@ -180,7 +191,8 @@ pub fn handle(m: Message) {
         | Message::ToastHidden { .. }
         | Message::Secret { .. }
         | Message::Cancel { .. }
-        | Message::Pinned { .. } => {}
+        | Message::Pinned { .. }
+        | Message::Unpin { .. } => {}
     }
 }
 

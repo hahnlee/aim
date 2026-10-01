@@ -159,7 +159,8 @@ removes from a data directory it boots.
 
 - `lightweight-shell`: without SystemUI, the launcher and the wallpaper
   pickers, with the device's own static wallpaper (docs/m1-shell.md,
-  #463).
+  #463). Its init script sets `ro.vendor.aim.lightweight_shell`, on which
+  guest-init starts the native status bar in SystemUI's place.
 
 ### Rebuild times
 

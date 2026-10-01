@@ -47,6 +47,8 @@ const TOGGLE: isize = -2;
 const OPEN: isize = -1;
 /// The tag of an indicator's item: it brings the app to the front.
 const LAUNCH: isize = -3;
+/// The tag of the pinned task's menu item, whose identifier is the task.
+pub const UNPIN: isize = -4;
 
 struct Item {
     /// The `NSStatusItem`, retained.
@@ -182,6 +184,18 @@ pub fn launch_item() -> Id {
     send!(button, c"setTag:" => (), isize = LAUNCH);
     send!(button, c"setImagePosition:" => (), usize = IMAGE_LEFT);
     item
+}
+
+/// An autoreleased menu item sending `pressed:` with `identifier` and
+/// `tag`.
+pub fn menu_item(title: &str, identifier: &str, tag: isize) -> Id {
+    let item = send!(class(c"NSMenuItem"), c"alloc" => Id);
+    let item = send!(item, c"initWithTitle:action:keyEquivalent:" => Id,
+        Id = nsstring(title), Sel = sel(c"pressed:"), Id = nsstring(""));
+    send!(item, c"setTarget:" => (), Id = TARGET.with(|t| *t));
+    send!(item, c"setIdentifier:" => (), Id = nsstring(identifier));
+    send!(item, c"setTag:" => (), isize = tag);
+    send!(item, c"autorelease" => Id)
 }
 
 /// Remove a menu bar item and release it.
@@ -422,6 +436,12 @@ extern "C" fn pressed(_: Id, _: Sel, sender: Id) {
     }
     if tag == LAUNCH {
         crate::shim::launch();
+        return;
+    }
+    if tag == UNPIN {
+        if let Ok(task) = key.parse() {
+            crate::shell::answer(&aim_host_display::shell::Message::Unpin { task });
+        }
         return;
     }
     if let Some(popover) = ITEMS.with_borrow(|items| items.get(&key).map(|i| i.popover)) {

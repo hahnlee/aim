@@ -19,8 +19,9 @@
 //!   `media-projection.apk`, the MediaProjection consent activity of
 //!   `java/media-projection` (docs/media.md), and `image-wallpaper.apk`,
 //!   the lightweight shell's static wallpaper of `java/image-wallpaper`
-//!   (#603), each compiled with the Java of the AIDL and checked against
-//!   the boot class path.
+//!   (#603), and `lightweight-home.apk`, its HOME activity of
+//!   `java/lightweight-home`, each compiled with the Java of the AIDL and
+//!   checked against the boot class path.
 
 use super::java::{self, Toolchain};
 use super::{files, repo, service_aidl};
@@ -37,6 +38,7 @@ const SHELL_OVERLAY: &str = "java/lightweight-shell-overlay";
 const NOTIFICATION_PERMISSION: &str = "java/notification-permission";
 const MEDIA_PROJECTION: &str = "java/media-projection";
 const IMAGE_WALLPAPER: &str = "java/image-wallpaper";
+const LIGHTWEIGHT_HOME: &str = "java/lightweight-home";
 /// The jar's guest path.
 pub const JAR: &str = "/system/framework/aim-services.jar";
 const FRAGMENT: &str = "system/etc/classpaths/systemserverclasspath.pb";
@@ -57,6 +59,7 @@ pub fn node() -> Node {
     inputs.extend(files(NOTIFICATION_PERMISSION));
     inputs.extend(files(MEDIA_PROJECTION));
     inputs.extend(files(IMAGE_WALLPAPER));
+    inputs.extend(files(LIGHTWEIGHT_HOME));
     Node {
         name: "device-services".into(),
         deps: vec![Dep::on("image")],
@@ -69,6 +72,7 @@ pub fn node() -> Node {
             out().join("notification-permission.apk"),
             out().join("media-projection.apk"),
             out().join("image-wallpaper.apk"),
+            out().join("lightweight-home.apk"),
         ],
         tools: Vec::new(),
         recipe: 2,
@@ -142,6 +146,7 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         (NOTIFICATION_PERMISSION, "notification-permission"),
         (MEDIA_PROJECTION, "media-projection"),
         (IMAGE_WALLPAPER, "image-wallpaper"),
+        (LIGHTWEIGHT_HOME, "lightweight-home"),
     ] {
         let app = repo(dir);
         let app_classes = work.join(format!("{apk}-classes"));

@@ -16,7 +16,7 @@ reason = "SystemUI (the status bar, shade, keyguard, ImageWallpaper, WMShell): t
 
 [[remove]]
 path = "/system_ext/priv-app/NexusLauncherRelease"
-reason = "the launcher (Quickstep: home, recents, taskbar): the placeholder home of ro.system_user_home_needed is the HOME activity"
+reason = "the launcher (Quickstep: home, recents, taskbar): java/lightweight-home is the HOME activity"
 
 [[remove]]
 path = "/system_ext/priv-app/WallpaperPickerGoogleRelease"
@@ -33,7 +33,12 @@ reason = "a plugin only SystemUI's global actions load"
 [[add]]
 path = "/vendor/etc/init/aim-lightweight-shell.rc"
 source = "image/vendor/etc/init/aim-lightweight-shell.rc"
-reason = "the placeholder home (ro.system_user_home_needed) and no freeform caption for aim-windows"
+reason = "the native status bar in SystemUI's place, and no freeform caption for aim-windows"
+
+[[add]]
+path = "/system_ext/app/AimHome/AimHome.apk"
+source = "target/aim/device-services/lightweight-home.apk"
+reason = "the HOME activity in the launcher's place, with DEFAULT for ActivityTaskManager's resolution (the platform's SystemUserHomeActivity has none, and Settings' FallbackHome would restart for ever)"
 
 [[add]]
 path = "/system_ext/priv-app/AimImageWallpaper/AimImageWallpaper.apk"
