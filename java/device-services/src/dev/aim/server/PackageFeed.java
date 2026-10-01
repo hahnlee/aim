@@ -6,6 +6,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.UriRelativeFilter;
 import android.content.UriRelativeFilterGroup;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.IPackageManager;
 import android.content.pm.InstallSourceInfo;
 import android.content.pm.PackageManager;
@@ -24,17 +25,21 @@ import android.content.pm.verify.domain.DomainVerificationManager;
 import android.content.pm.verify.domain.DomainVerificationUserState;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.FileObserver;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IRemoteCallback;
 import android.os.Parcel;
 import android.os.RemoteException;
+import android.os.ServiceManager;
 import android.os.UserHandle;
 import android.permission.PermissionManager;
+import android.provider.DeviceConfig;
 import android.provider.Settings;
 import android.util.Slog;
 import android.util.SparseArray;
 
+import com.android.internal.compat.IPlatformCompat;
 import com.android.internal.pm.parsing.pkg.ParsedPackage;
 import com.android.server.LocalManagerRegistry;
 import com.android.server.pm.PackageManagerLocal;
@@ -92,12 +97,18 @@ final class PackageFeed extends IPackageFeed.Stub {
     private static final int CHUNK = 128 * 1024;
     /** UserHandle.USER_ALL. */
     private static final int USER_ALL = -1;
+    /** PackageManager.FILTER_APPLICATION_QUERY. */
+    private static final long FILTER_APPLICATION_QUERY = 135549675L;
+    /** AppsFilterImpl.FeatureConfigImpl's DeviceConfig flag. */
+    private static final String FILTERING_ENABLED = "package_query_filtering_enabled";
     /** VirtualDeviceManager.PERSISTENT_DEVICE_ID_DEFAULT. */
     private static final String DEVICE_DEFAULT = "default:0";
 
     private final Context mContext;
     private final Object mLock = new Object();
     private Handler mHandler;
+    /** Kept so that it keeps watching. */
+    private FileObserver mCompatOverrides;
     private boolean mScheduled;
     private boolean mReset;
     /** The latest sync's token. */
@@ -126,6 +137,7 @@ final class PackageFeed extends IPackageFeed.Stub {
                 registerPackageMonitor();
                 registerDeviceProvisioned();
                 registerRoleHolders();
+                registerQueryFiltering();
             }
             mHandler.post(() -> mHost = host);
         }
@@ -180,6 +192,26 @@ final class PackageFeed extends IPackageFeed.Stub {
     private void registerRoleHolders() {
         mContext.getSystemService(RoleManager.class).addOnRoleHoldersChangedListenerAsUser(
                 r -> mHandler.post(r), (role, user) -> sync(false, 0), UserHandle.ALL);
+    }
+
+    /**
+     * A batch when package query filtering may have changed: its
+     * DeviceConfig flag, or platform compat's overrides, which it saves
+     * to compat_framework_overrides.xml on each change and no API reports.
+     */
+    private void registerQueryFiltering() {
+        DeviceConfig.addOnPropertiesChangedListener(
+                DeviceConfig.NAMESPACE_PACKAGE_MANAGER_SERVICE, r -> mHandler.post(r),
+                properties -> sync(false, 0));
+        mCompatOverrides = new FileObserver(
+                new File(Environment.getDataMiscDirectory(), "appcompat"),
+                FileObserver.CLOSE_WRITE | FileObserver.MOVED_TO) {
+            @Override
+            public void onEvent(int event, String path) {
+                sync(false, 0);
+            }
+        };
+        mCompatOverrides.startWatching();
     }
 
     /** One batch: the records that differ from what the host holds. */
@@ -419,6 +451,7 @@ final class PackageFeed extends IPackageFeed.Stub {
                 userState(p, users.valueAt(i), s.getPackageName(), users.keyAt(i));
             }
             uriRelativeFilterGroups(p, s.getPackageName(), users);
+            p.writeBoolean(filterApplicationQuery(s));
         });
     }
 
@@ -453,6 +486,24 @@ final class PackageFeed extends IPackageFeed.Stub {
                     p.writeString(f.getFilter());
                 }
             }
+        }
+    }
+
+    /**
+     * Whether FILTER_APPLICATION_QUERY is on for the package, as
+     * AppsFilterImpl's FeatureConfig asks platform compat (with the
+     * package's name and target SDK, all the change reads).
+     */
+    private static boolean filterApplicationQuery(PackageState s) {
+        ApplicationInfo info = new ApplicationInfo();
+        info.packageName = s.getPackageName();
+        info.targetSdkVersion = s.getTargetSdkVersion();
+        try {
+            return IPlatformCompat.Stub.asInterface(
+                    ServiceManager.getService(Context.PLATFORM_COMPAT_SERVICE))
+                    .getAppConfig(info).isChangeEnabled(FILTER_APPLICATION_QUERY);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
         }
     }
 
@@ -772,6 +823,8 @@ final class PackageFeed extends IPackageFeed.Stub {
         int theme = res.getIdentifier("Theme.Material.Dialog.Alert", "style", "android");
         String customResolver = res.getString(
                 res.getIdentifier("config_customResolverActivity", "string", "android"));
+        boolean filtering = DeviceConfig.getBoolean(
+                DeviceConfig.NAMESPACE_PACKAGE_MANAGER_SERVICE, FILTERING_ENABLED, true);
         int provisioned = Settings.Global.getInt(mContext.getContentResolver(),
                 Settings.Global.DEVICE_PROVISIONED, 0);
         ComponentName resolver;
@@ -796,6 +849,7 @@ final class PackageFeed extends IPackageFeed.Stub {
             p.writeInt(provisioned);
             p.writeString(resolver == null ? null : resolver.flattenToString());
             p.writeString(installer == null ? null : installer.flattenToString());
+            p.writeBoolean(filtering);
         });
     }
 

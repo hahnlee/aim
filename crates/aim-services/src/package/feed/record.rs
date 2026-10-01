@@ -129,6 +129,7 @@ pub fn package(bytes: &[u8]) -> Result<(PackageState, Option<i32>)> {
         }
         s.uri_relative_filter_groups.push((domain, groups));
     }
+    s.filter_application_query = Some(r.read_bool()?);
     Ok((s, bit(0).then_some(shared_user_app_id)))
 }
 
@@ -260,7 +261,8 @@ pub fn user(bytes: &[u8]) -> Result<User> {
 /// The system record: `config_forceSystemPackagesQueryable`,
 /// `config_forceQueryablePackages`, and what resolution reads (the
 /// resolver activity's theme and titles, the custom resolver, device
-/// provisioning, the instant app resolver and installer).
+/// provisioning, the instant app resolver and installer, whether package
+/// query filtering is on).
 pub fn system(bytes: &[u8]) -> Result<(bool, Vec<String>, Platform)> {
     let r = &mut Reader::new(bytes, &[]);
     let all = r.read_bool()?;
@@ -276,6 +278,7 @@ pub fn system(bytes: &[u8]) -> Result<(bool, Vec<String>, Platform)> {
     p.device_provisioned = r.read_i32()? == 1;
     p.instant_app_resolver = string(r)?;
     p.instant_app_installer = string(r)?;
+    p.query_filtering_disabled = !r.read_bool()?;
     Ok((all, packages, p))
 }
 

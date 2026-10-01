@@ -51,6 +51,9 @@ pub struct Platform {
     /// boot, flattened.
     pub instant_app_resolver: Option<String>,
     pub instant_app_installer: Option<String>,
+    /// AppsFilter's DeviceConfig flag `package_query_filtering_enabled`
+    /// is off: no package is filtered.
+    pub query_filtering_disabled: bool,
 }
 
 /// `PackageState` (`PackageStateInternal`).
@@ -97,6 +100,10 @@ pub struct PackageState {
     pub domain_verification: Option<(String, Vec<(String, i32)>)>,
     /// Domain verification's URI relative filter groups, by web domain.
     pub uri_relative_filter_groups: Vec<(String, Vec<UriRelativeFilterGroup>)>,
+    /// `FILTER_APPLICATION_QUERY` as platform compat gives it for the
+    /// package (with its overrides); `None` where no feed gave it, which
+    /// leaves the change's own rule (on from the package's target SDK 30).
+    pub filter_application_query: Option<bool>,
     /// The `AndroidPackage` as `PackageCacher.toCacheEntryStatic` writes
     /// it (the parser cache's format); `None` without code. Shared across
     /// versions while the original keeps the same object.

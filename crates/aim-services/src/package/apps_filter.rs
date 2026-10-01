@@ -63,8 +63,8 @@ pub fn is_system_or_root_or_shell(uid: i32) -> bool {
     matches!(app_id(uid), ROOT_UID | SYSTEM_UID | SHELL_UID)
 }
 
-/// `PackageManager.FILTER_APPLICATION_QUERY`: on from Android 11 (R);
-/// per-package compat overrides are not modelled (#729).
+/// `PackageManager.FILTER_APPLICATION_QUERY`: on from Android 11 (R),
+/// unless platform compat overrides it for the package.
 const FILTER_APPLICATION_QUERY_SINCE_SDK: i32 = 30;
 const QUERY_ALL_PACKAGES: &str = "android.permission.QUERY_ALL_PACKAGES";
 
@@ -317,7 +317,10 @@ impl AppsFilter {
             if system_signed || forced {
                 f.force_queryable.insert(ps.app_id);
             }
-            if pkg(ps).is_some() && ps.target_sdk_version < FILTER_APPLICATION_QUERY_SINCE_SDK {
+            let filtered = ps
+                .filter_application_query
+                .unwrap_or(ps.target_sdk_version >= FILTER_APPLICATION_QUERY_SINCE_SDK);
+            if pkg(ps).is_some() && !filtered {
                 f.disabled.insert(ps.name.clone());
             }
         }
@@ -389,6 +392,12 @@ impl AppsFilter {
         calling_app_id: i32,
         target: &PackageState,
     ) -> bool {
+        // FeatureConfig's DeviceConfig flag. The original's cache keeps
+        // what it computed before the flag changed until something
+        // recomputes it; the model follows the flag at once.
+        if state.platform.query_filtering_disabled {
+            return false;
+        }
         let Some(calling) = setting(state, calling_app_id) else {
             return true;
         };

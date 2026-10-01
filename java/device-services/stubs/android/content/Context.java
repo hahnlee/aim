@@ -10,6 +10,7 @@ import android.os.UserHandle;
 
 public abstract class Context {
     public static final String LOCATION_SERVICE = "location";
+    public static final String PLATFORM_COMPAT_SERVICE = "platform_compat";
     public static final String VR_SERVICE = "vrmanager";
     public static final int CONTEXT_RESTRICTED = 4;
 

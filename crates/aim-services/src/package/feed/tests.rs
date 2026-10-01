@@ -137,6 +137,8 @@ fn package_record(name: &str, shared_user_app_id: Option<i32>) -> Vec<u8> {
     p.write_i32(0);
     p.write_i32(0);
     p.write_string16(Some("/private"));
+    // FILTER_APPLICATION_QUERY overridden off.
+    p.write_bool(false);
     p.data().to_vec()
 }
 
@@ -172,6 +174,7 @@ fn system_record() -> Vec<u8> {
     p.write_i32(1);
     p.write_string16(None);
     p.write_string16(Some("com.example/.Installer"));
+    p.write_bool(true);
     p.data().to_vec()
 }
 
@@ -249,6 +252,7 @@ fn reads_a_package_record() {
         ),
         ("example.com", 1, "/private")
     );
+    assert_eq!(p.filter_application_query, Some(false));
     let u = &p.users[&0];
     assert!(u.installed && u.stopped && u.data_exists && !u.hidden);
     assert_eq!((u.ce_data_inode, u.de_data_inode), (11, 12));
@@ -353,6 +357,7 @@ fn publishes_a_batch_whose_digest_matches() {
         platform.instant_app_installer.as_deref(),
         Some("com.example/.Installer")
     );
+    assert!(!platform.query_filtering_disabled);
     assert_eq!(inner.ended, Some((1, true)));
 
     // A later batch removes the parcel; one with a stale digest is not
