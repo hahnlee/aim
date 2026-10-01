@@ -17,6 +17,8 @@ mod hid;
 mod lid;
 
 use std::ffi::{c_char, c_void};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use aim_hostcall::sensors::{self, Readings, present};
 use aim_hostcall::thermal::{self, Thermal};
@@ -107,19 +109,44 @@ fn temperatures(select: impl Fn(&str) -> bool) -> Vec<f32> {
         .collect()
 }
 
-pub fn read_thermal() -> Thermal {
+/// How long a temperature reading stands: the period the thermal HAL
+/// polled at. Each sensor is a round trip to the HID event system (about
+/// 0.7 ms, some 20 of them), and these change slowly.
+const TEMPERATURES_MAX_AGE: Duration = Duration::from_secs(5);
+
+/// The hottest CPU die and the battery, read at most every
+/// [`TEMPERATURES_MAX_AGE`].
+fn cpu_and_battery() -> (f32, f32) {
+    static LAST: Mutex<Option<(Instant, f32, f32)>> = Mutex::new(None);
+    // Held while reading, so callers at once share one reading.
+    let mut last = LAST.lock().unwrap();
+    if let Some((at, cpu, battery)) = *last
+        && at.elapsed() < TEMPERATURES_MAX_AGE
+    {
+        return (cpu, battery);
+    }
     // CPU die sensors are named "PMU tdie<n>"; the battery's are "gas gauge
     // battery".
     let cpu = temperatures(|n| n.starts_with("PMU tdie"));
     let battery = temperatures(|n| n == "gas gauge battery");
+    let cpu = cpu.iter().copied().reduce(f32::max).unwrap_or(f32::NAN);
+    let battery = if battery.is_empty() {
+        f32::NAN
+    } else {
+        battery.iter().sum::<f32>() / battery.len() as f32
+    };
+    *last = Some((Instant::now(), cpu, battery));
+    (cpu, battery)
+}
+
+/// The thermal state, read now, and the temperatures, read within
+/// [`TEMPERATURES_MAX_AGE`].
+pub fn read_thermal() -> Thermal {
+    let (cpu_celsius, battery_celsius) = cpu_and_battery();
     Thermal {
         state: thermal_state(),
-        cpu_celsius: cpu.iter().copied().reduce(f32::max).unwrap_or(f32::NAN),
-        battery_celsius: if battery.is_empty() {
-            f32::NAN
-        } else {
-            battery.iter().sum::<f32>() / battery.len() as f32
-        },
+        cpu_celsius,
+        battery_celsius,
     }
 }
 
@@ -156,6 +183,19 @@ mod tests {
         for c in [t.cpu_celsius, t.battery_celsius] {
             assert!(c.is_nan() || (0.0..150.0).contains(&c));
         }
+    }
+
+    #[test]
+    fn temperatures_are_read_once_per_period() {
+        let first = read_thermal();
+        let start = Instant::now();
+        let again = read_thermal();
+        assert!(start.elapsed() < Duration::from_millis(10));
+        assert_eq!(first.cpu_celsius.to_bits(), again.cpu_celsius.to_bits());
+        assert_eq!(
+            first.battery_celsius.to_bits(),
+            again.battery_celsius.to_bits()
+        );
     }
 
     #[test]

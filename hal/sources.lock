@@ -37,7 +37,6 @@ AIDL_INTERFACES=(
   "android.hardware.health|4|$hw|health/aidl/aidl_api/android.hardware.health/4|"
   "android.hardware.sensors|3|$hw|sensors/aidl/aidl_api/android.hardware.sensors/3|android.hardware.common-V2,android.hardware.common.fmq-V1"
   "android.hardware.bluetooth|1|$hw|bluetooth/aidl/aidl_api/android.hardware.bluetooth/1|"
-  "android.hardware.thermal|3|$hw|thermal/aidl/aidl_api/android.hardware.thermal/3|"
   "android.hardware.gnss|2|$hw|gnss/aidl/aidl_api/android.hardware.gnss/2|"
   "android.hardware.camera.common|1|$hw|camera/common/aidl/aidl_api/android.hardware.camera.common/1|"
   "android.hardware.camera.metadata|1|$hw|camera/metadata/aidl/aidl_api/android.hardware.camera.metadata/1|"

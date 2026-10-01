@@ -1,6 +1,6 @@
-# Small vendor HALs: power, thermal, sensors and GNSS (ADR 0012, P5)
+# Small vendor HALs: power, sensors and GNSS (ADR 0012, P5)
 
-These HALs report what a Mac can tell Android about its power, heat,
+These HALs report what a Mac can tell Android about its power,
 surroundings and position. Each of ours is a Rust AIDL service under `hal/`
 that reaches its host side through host-call ([host-call.md](host-call.md)),
 built by `cargo aim` ([build.md](build.md)) and placed by `image/overlay.toml`,
@@ -11,7 +11,7 @@ faked.
 | HAL | Instance | Service | Host module |
 | --- | --- | --- | --- |
 | power | `IPower/default` V6 | the original (vendor APEX `com.android.hardware.power`) | none |
-| thermal | `IThermal/default` V3 | `android.hardware.thermal-service.aim` (`hal/thermal`) | 4 `thermal` (`crates/aim-host-sensors`) |
+| thermal | none | none: `thermalservice` is native and reads the Mac ([Thermal](#thermal-no-hal)) | none |
 | sensors | `ISensors/default` V3 | `android.hardware.sensors-service.aim` (`hal/sensors`) | 5 `sensors` (`crates/aim-host-sensors`) |
 | GNSS | `IGnss/default` V2 | `android.hardware.gnss-service.aim` (`hal/gnss`) | 6 `location` (`crates/aim-host-location`) |
 
@@ -34,44 +34,25 @@ our own, because the Mac offers nothing a power HAL could drive:
 
 A HAL of ours would therefore only log, which is what the example does.
 
-## Thermal
+## Thermal: no HAL
 
-macOS summarizes its thermal pressure as `NSProcessInfo.thermalState`
-(nominal, fair, serious, critical), with no privileges needed.
-Temperatures come from the HID event system's sensor services (usage page
-0xff00, usage 5), which are readable without root.
+The image declares no `IThermal`. Its one client was SystemServer's
+ThermalManagerService, and `thermalservice` is native now
+([system-services.md](system-services.md), "The thermal service"): it
+reads macOS's thermal state (`NSProcessInfo.thermalState`) and the HID
+event system's temperature sensors (usage page 0xff00, usage 5) in the
+service host, through `crates/aim-host-sensors`, as our HAL did through
+host-call. With no client left, the HAL went (#624), as a vendor ships no
+HAL nothing reads. The vendor APEX's example `com.android.hardware.thermal`,
+which reports no temperatures and never throttles, stays removed. The
+framework compatibility matrix lists the thermal HAL as optional.
 
-- `getTemperatures` returns:
-  - `SKIN` (`skin`), whose throttling status is the thermal state: nominal
-    maps to `NONE`, fair to `LIGHT`, serious to `SEVERE` and critical to
-    `CRITICAL`. The Mac has no skin sensor we can read, so its value is NaN,
-    which `Temperature` specifies for an unavailable value;
-  - `CPU` (`cpu`): the hottest `PMU tdie*` die sensor, when present;
-  - `BATTERY` (`battery`): the mean of the battery gauge's sensors, when
-    present.
-
-  CPU and battery carry no throttling status of their own, because macOS
-  gives none per sensor.
-- Callbacks: a poller checks the state every 5 s and sends
-  `notifyThrottling(skin)` to the matching callbacks when the status
-  changes. Callbacks may filter by type, as in AOSP's default HAL.
-- There are no thresholds (macOS keeps its own) and no cooling devices
-  (the fans are the SMC's). `forecastSkinTemperature` is
-  `UNSUPPORTED_OPERATION`, as in the default implementation.
-- The example thermal HAL of the vendor APEX `com.android.hardware.thermal`
-  reports no temperatures and never throttles. The overlay removes that
-  APEX, so ours serves the instance.
-- Its client was SystemServer's ThermalManagerService. `thermalservice`
-  is native now ([system-services.md](system-services.md)) and reads the
-  same host module in the service host, so the HAL has no client (#624).
-- The CPU and battery temperatures are optional; see
-  [Private API](#private-api-optional). Without them the list is `SKIN`
-  alone, which is also what a Mac without Apple silicon's sensor names
-  reports.
+Host-call module 4 (`thermal`) still serves the same reading; no guest
+program calls it (#641).
 
 ## Private API (optional)
 
-The temperatures (thermal) and the ambient light sensor (sensors) come from
+The temperatures (thermalservice) and the ambient light sensor (sensors) come from
 IOKit's `IOHIDEventSystemClient*` and `IOHIDServiceClient*` functions
 (`crates/aim-host-sensors/src/hid.rs`). IOKit exports them, but they are
 **private API**: undocumented, with no compatibility promise. They need no
@@ -80,12 +61,12 @@ privileges, and third-party temperature monitors use them.
 - They are optional. They are resolved with `dlsym` at run time, never
   linked, so the host binary loads on a macOS without them. When a symbol
   is missing, or a call returns nothing, the host module reports those
-  readings as absent: thermal omits `CPU` and `BATTERY`, and sensors does
+  readings as absent: thermalservice omits `CPU` and `BATTERY`, and sensors does
   not list the light sensor. No path depends on them. The thermal state
   (`NSProcessInfo`) and the lid angle (`IOHIDManager`) are public API.
 - **Distribution:** App Store review rejects private API use, and a
   sandboxed build may not reach the HID event system. Such a build would
-  drop `hid.rs`, which leaves thermal with `SKIN` alone and sensors with the
+  drop `hid.rs`, which leaves thermalservice with `SKIN` alone and sensors with the
   lid angle alone. No other code changes.
 
 ## Sensors

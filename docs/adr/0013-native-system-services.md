@@ -194,7 +194,8 @@ The migration's state and conformance results are in
   It is a leaf and needs nothing from the bridge. Its CTS
   (CtsThermalTestCases, `PowerManager_ThermalTest`) ends each test as
   the original, and `cmd thermalservice` answers as the original, served
-  by a shell command reader every native service can use. Not served:
+  by a shell command reader every native service can use. The thermal
+  HAL, left with no client, is no longer in the image (#624). Not served:
   the statsd atoms and the event log entry (#617). Chosen over `power`,
   which apps call most (GMS's wake locks) but whose local interface 37
   source files of system_server use, and `uimode`, whose configuration

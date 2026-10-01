@@ -98,7 +98,7 @@ first.
 | 1 | health | 1 | `FN_BATTERY`: fill `health::Battery` |
 | 2 | gpu | 1 | `FN_INIT`, `FN_IMPORT_BUFFER`, `FN_PRESENT`, and the generated EGL/GLES entry points from `FN_TABLE_BASE` ([gles-driver.md](gles-driver.md)) |
 | 3 | display | 3 | `FN_CONNECT` (returns the event fd), `FN_IMPORT`, `FN_PRESENT`, `FN_RELEASE`, `FN_SET_VSYNC` ([composer.md](composer.md)); `FN_WINDOWS` (returns the task bridge's record fd, [windows.md](windows.md)) |
-| 4 | thermal | 1 | `FN_READ`: fill `thermal::Thermal` ([vendor-hals.md](vendor-hals.md)) |
+| 4 | thermal | 1 | `FN_READ`: fill `thermal::Thermal`; no guest caller since the thermal HAL went (#641, [vendor-hals.md](vendor-hals.md)) |
 | 5 | sensors | 1 | `FN_READ`: fill `sensors::Readings` ([vendor-hals.md](vendor-hals.md)) |
 | 6 | location | 1 | `FN_START`, `FN_STOP`; `FN_READ`: fill `location::Fix` ([vendor-hals.md](vendor-hals.md)) |
 | 7 | audio | 1 | `FN_DEVICES`; `FN_OPEN` on a ring memfd, `FN_START`, `FN_STOP`, `FN_CLOSE` ([audio.md](audio.md)) |
@@ -153,7 +153,7 @@ The interfaces P4 and P5 need build: power V6 (imports common.fmq V1),
 graphics composer3 V4, allocator V2 and common V6 (with drm.common V1),
 audio.core V3 (with audio.common V4, audio.effect V3, audio.core.sounddose
 V3, media.audio.common.types V4 and media.audio.eraser.types V1), sensors
-V3, bluetooth V1, health V4, thermal V3, gnss V2 and camera.provider V1
+V3, bluetooth V1, health V4, gnss V2 and camera.provider V1
 (with camera.device, camera.common and camera.metadata V1), over common V2
 and common.fmq V1.
 
@@ -185,7 +185,8 @@ instance is undeclared and the original services take their no-HAL paths:
 - replaced by ours: the graphics allocator, mapper and GLES driver
   ([graphics-buffers.md](graphics-buffers.md),
   [gles-driver.md](gles-driver.md));
-- replaced by ours: thermal (the vendor APEX's example), sensors and GNSS
+- replaced by ours: sensors and GNSS; the vendor APEX's example thermal
+  HAL goes with no replacement (`thermalservice` is native)
   ([vendor-hals.md](vendor-hals.md));
 - replaced by ours: audio, whose HIDL audio-effect declaration in
   `manifest.xml` also goes ([audio.md](audio.md));
