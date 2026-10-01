@@ -106,6 +106,8 @@ fn parse_synth(req: &[u8]) -> Result<(&'static str, Vec<String>), Errno> {
 
 /// The next `uevent_seqnum` of the boot.
 pub(super) fn next_seqnum() -> u64 {
+    // The locked file must not reach a fork child (`spawn::own_fds`).
+    let _own = super::fork::spawn::own_fds();
     let path = super::netif::kernel_dir("uevent").join("seqnum");
     let Ok(mut f) = std::fs::OpenOptions::new()
         .read(true)

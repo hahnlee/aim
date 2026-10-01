@@ -439,6 +439,8 @@ fn read_entry(pid: i32) -> Option<String> {
 
 fn read_entry_at(path: &std::path::Path) -> Option<String> {
     use std::io::Read as _;
+    // The locked file must not reach a fork child (`spawn::own_fds`).
+    let _own = super::fork::spawn::own_fds();
     let f = std::fs::File::open(path).ok()?;
     let _lock = Flock::new(&f, libc::LOCK_SH);
     let mut text = String::new();
