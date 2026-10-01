@@ -303,3 +303,19 @@ The migration's state and conformance results are in
   PermissionController after both (#616, a decision). The design, the
   measured traffic and the CTS modules are in
   [permissions.md](../permissions.md).
+
+### M2: power, the design (2026-10-01)
+
+- `power` is not replaced in M2. Its local interface must exist before
+  ActivityManager's `initPowerManagement` at bootstrap, which the
+  in-place SystemServer edit cannot provide (#668, a decision); its
+  service drives DisplayManager's power controllers and runs Notifier,
+  battery saver and shutdown inside system_server, under its callers'
+  locks. Implementation is paused (compatibility first); it is proposed
+  for the core milestone with DisplayManager and WindowManager. The Mac's
+  part does not wait for it: Android's wake locks as an idle-sleep
+  assertion at the system suspend service (#669), the Mac's display
+  sleep as Android's sleep (#670), keep-screen-on as a display-sleep
+  assertion (#671), battery saver from Low Power Mode (#672). The
+  design, its compatibility risks and the CTS modules are in
+  [power.md](../power.md).
