@@ -1,8 +1,8 @@
 //! `guest-init --image <derived-root> --data <writable-root> --dry-run|--run
 //! [--only svc1,svc2] [--exclude svc1,svc2] [--runtime DIR] [--linux-run PATH]
 //! [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]
-//! [--binder-trace FILE] [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]
-//! [--userdata DIR]`
+//! [--binder-trace FILE] [--binder-shadow SERVICES --binder-shadow-log FILE]
+//! [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR]`
 //!
 //! Development entry point for aimd's init role. With `--run`, the data
 //! directory's persistent content lives in a case-sensitive disk image
@@ -21,8 +21,8 @@ fn usage() -> ! {
     eprintln!(
         "usage: guest-init --image DIR --data DIR (--dry-run | --run) [--only a,b] [--exclude a,b] [--runtime DIR]\n\
          \x20                 [--linux-run PATH] [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]\n\
-         \x20                 [--binder-trace FILE] [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet]\n\
-         \x20                 [--userdata DIR]"
+         \x20                 [--binder-trace FILE] [--binder-shadow a,b --binder-shadow-log FILE]\n\
+         \x20                 [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR]"
     );
     std::process::exit(2);
 }
@@ -51,6 +51,7 @@ fn main() {
     let (mut gpu, mut vulkan, mut display) = (None, None, None);
     let mut trace = false;
     let mut binder_trace = None;
+    let (mut binder_shadow, mut binder_shadow_log) = (None, None);
     let mut timeout = None;
     let mut androidboot = Vec::new();
     let mut quiet = false;
@@ -84,6 +85,16 @@ fn main() {
             "--display" => display = Some(PathBuf::from(value())),
             "--trace" => trace = true,
             "--binder-trace" => binder_trace = Some(PathBuf::from(value())),
+            "--binder-shadow" => {
+                binder_shadow = Some(
+                    value()
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
+                )
+            }
+            "--binder-shadow-log" => binder_shadow_log = Some(PathBuf::from(value())),
             "--quiet" => quiet = true,
             "--userdata" => userdata = Some(PathBuf::from(value())),
             "--timeout" => {
@@ -112,6 +123,11 @@ fn main() {
     options.display = display;
     options.trace = trace;
     options.binder_trace = binder_trace;
+    options.binder_shadow = match (binder_shadow, binder_shadow_log) {
+        (None, None) => None,
+        (Some(names), Some(log)) => Some((names, log)),
+        _ => usage(),
+    };
     options.timeout = timeout;
     options.userdata = userdata;
     if !androidboot.is_empty() {

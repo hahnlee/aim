@@ -100,7 +100,7 @@ impl State {
         self.release_work(async_todo);
         let node = self.nodes.get_mut(&id).unwrap();
         if node.refs.is_empty() {
-            self.nodes.remove(&id);
+            self.remove_node(id);
             return;
         }
         node.proc = None;

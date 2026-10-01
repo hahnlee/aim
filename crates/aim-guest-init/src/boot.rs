@@ -106,6 +106,9 @@ pub struct BootOptions {
     /// Run mode: append every binder transaction to this file
     /// ([`trace_binder`]).
     pub binder_trace: Option<PathBuf>,
+    /// Run mode: compare these original services with their native models
+    /// and log each call to the file (`aim_services::shadow`).
+    pub binder_shadow: Option<(Vec<String>, PathBuf)>,
     /// `androidboot.*` bootconfig entries (without the prefix).
     pub androidboot: Vec<(String, String)>,
     /// Run mode: stop everything after this long.
@@ -133,6 +136,7 @@ impl BootOptions {
             display: None,
             trace: false,
             binder_trace: None,
+            binder_shadow: None,
             // The device: init.rc imports init.aim.rc and vold reads
             // fstab.aim (image/overlay.toml).
             androidboot: vec![("hardware".to_string(), "aim".to_string())],
@@ -586,6 +590,12 @@ impl Boot {
                 trace_binder(server, file)?;
             }
             native_services = start_native_services(&image, server)?;
+            if let Some((names, log)) = &options.binder_shadow {
+                native_services
+                    .as_ref()
+                    .ok_or("--binder-shadow: the image has no native services")?
+                    .shadow(server.driver(), names, log)?;
+            }
             // Android's notifications on the Mac, from the original
             // NotificationManagerService once it is published.
             if let Some(display) = &options.display {

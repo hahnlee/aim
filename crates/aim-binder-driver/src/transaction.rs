@@ -3,7 +3,8 @@
 //! delivery to a thread or queue, failed replies and buffer release.
 
 use crate::alloc::align8;
-use crate::host::{Errno, GuestProcess, errno};
+use crate::host::{Errno, File, GuestProcess, errno};
+use crate::shadow::{FileId, ShadowCopy, ShadowKind, ShadowObject, ShadowParcel, ShadowReply};
 use crate::state::{
     BufferRecord, ErrorSlot, FdFixup, LOOPER_ENTERED, LOOPER_POLL, LOOPER_REGISTERED, NodeId,
     ProcId, State, Tid, Txn, TxnId, Work,
@@ -267,6 +268,10 @@ impl State {
             buffer.clear_on_free = tr.flags & TF_CLEAR_BUF != 0;
         }
 
+        let identify = self.shadow.as_ref().and_then(|s| match *in_reply_to_out {
+            Some(original) => s.identify_reply(original),
+            None => s.identify(target_node),
+        });
         let copied = self.copy_transaction(
             proc,
             tid,
@@ -277,15 +282,42 @@ impl State {
             extra_buffers_size,
             secctx.as_deref(),
             *in_reply_to_out,
+            identify,
             guest,
         );
-        if let Err(failure) = copied {
-            self.abort_transaction(target_proc, id, buffer_offset);
-            return Err(failure);
-        }
+        let shadowed = match copied {
+            Ok(shadowed) => shadowed,
+            Err(failure) => {
+                self.abort_transaction(target_proc, id, buffer_offset);
+                return Err(failure);
+            }
+        };
 
         if self.trace.is_some() && !reply {
             self.trace_sent(proc, tid, target_proc, id, tr, guest);
+        }
+        let mut reply_copy = None;
+        if let Some((parcel, own)) = shadowed {
+            if reply {
+                reply_copy = Some((parcel, own));
+            } else {
+                let copy = ShadowCopy {
+                    seq: 0,
+                    node: 0,
+                    root: 0,
+                    follows: None,
+                    from_pid: self.procs[&proc].creds.pid,
+                    from_euid: self.procs[&proc].creds.euid,
+                    from_tid: tid,
+                    to_pid: self.procs[&target_proc].creds.pid,
+                    code: tr.code,
+                    flags: tr.flags,
+                    data: parcel,
+                    reply: ShadowReply::Failed,
+                };
+                let node = target_node.unwrap();
+                self.shadow.as_mut().unwrap().sent(id, node, copy, oneway);
+            }
         }
 
         let complete = if allocation.oneway_spam_suspect {
@@ -307,6 +339,12 @@ impl State {
             self.procs.get_mut(&target_proc).unwrap().outstanding_txns += 1;
             if let Some(trace) = &mut self.trace {
                 trace.replied(in_reply_to, id);
+            }
+            if let Some((parcel, own)) = reply_copy {
+                self.shadow
+                    .as_mut()
+                    .unwrap()
+                    .replied(in_reply_to, tr.flags, parcel, &own);
             }
             self.free_transaction(in_reply_to);
         } else if !oneway {
@@ -401,6 +439,9 @@ impl State {
         if let Some(t) = self.txns.get_mut(&id) {
             t.buffer = None;
         }
+        if let Some(shadow) = &mut self.shadow {
+            shadow.failed(id);
+        }
         self.txns.remove(&id);
         self.free_buffer(target_proc, buffer_offset, true, None);
     }
@@ -426,7 +467,9 @@ impl State {
 
     /// Build the target buffer: data, offsets, scatter-gather payloads and
     /// the security context, with every object translated, then write it
-    /// into the target's mapping in one copy.
+    /// into the target's mapping in one copy. With `identify`, also the
+    /// shadow copy of the data as the sender wrote it, and the sender's
+    /// own nodes among its objects.
     #[allow(clippy::too_many_arguments)]
     fn copy_transaction(
         &mut self,
@@ -439,8 +482,9 @@ impl State {
         extra_buffers_size: u64,
         secctx: Option<&[u8]>,
         in_reply_to: Option<TxnId>,
+        identify: Option<fn(&File) -> Option<FileId>>,
         guest: &mut dyn GuestProcess,
-    ) -> Result<(), Failure> {
+    ) -> Result<Option<(ShadowParcel, Vec<NodeId>)>, Failure> {
         let data_size = tr.data_size as usize;
         let offsets_size = tr.offsets_size as usize;
         if offsets_size % 8 != 0 || extra_buffers_size % 8 != 0 {
@@ -468,6 +512,13 @@ impl State {
                 .copy_from_user(tr.offsets, &mut image[off_start..off_start + offsets_size])
                 .map_err(|_| fail(BR_FAILED_REPLY, errno::EFAULT))?;
         }
+        let mut shadow = identify.map(|_| {
+            let parcel = ShadowParcel {
+                data: image[..data_size].to_vec(),
+                objects: Vec::new(),
+            };
+            (parcel, Vec::new())
+        });
         if let Some(ctx) = secctx {
             let at = buffer_size - align8(ctx.len() as u64).unwrap() as usize;
             image[at..at + ctx.len()].copy_from_slice(ctx);
@@ -503,6 +554,7 @@ impl State {
             }
             off_min = object_offset + size;
             let object = &mut image[object_offset..object_offset + size];
+            let mut copied = ShadowKind::Other;
             match kind {
                 BINDER_TYPE_BINDER | BINDER_TYPE_WEAK_BINDER => {
                     let mut fp = FlatBinderObject::decode(object);
@@ -510,6 +562,10 @@ impl State {
                     let node = self.new_node(proc, fp.binder, fp.cookie, fp.flags);
                     if self.nodes[&node].cookie != fp.cookie {
                         return Err(fail(BR_FAILED_REPLY, errno::EINVAL));
+                    }
+                    if let Some((_, own)) = &mut shadow {
+                        own.push(node);
+                        copied = self.shadow_binder(node);
                     }
                     let desc = self
                         .inc_ref_for_node(target_proc, node, strong, Some((proc, tid)))
@@ -535,6 +591,9 @@ impl State {
                         .get_ref(proc, fp.handle(), strong)
                         .map(|r| r.node)
                         .ok_or(fail(BR_FAILED_REPLY, errno::EINVAL))?;
+                    if shadow.is_some() {
+                        copied = self.shadow_binder(node);
+                    }
                     if self.nodes[&node].proc == Some(target_proc) {
                         // Back to its owner: the owner sees its own object.
                         let n = &self.nodes[&node];
@@ -574,6 +633,9 @@ impl State {
                     let file = guest
                         .get_file(fd)
                         .map_err(|_| fail(BR_FAILED_REPLY, errno::EBADF))?;
+                    if let Some(identify) = identify {
+                        copied = ShadowKind::File(identify(&file));
+                    }
                     fixups.push(FdFixup {
                         offset: object_offset + 8,
                         file,
@@ -688,12 +750,27 @@ impl State {
                 }
                 _ => unreachable!(),
             }
+            if let Some((parcel, _)) = &mut shadow {
+                parcel.objects.push(ShadowObject {
+                    offset: object_offset,
+                    kind: copied,
+                });
+            }
         }
 
         let memory = self.procs[&target_proc].receive.clone().unwrap();
         memory.write(buffer_offset, &image);
         self.txns.get_mut(&id).unwrap().fd_fixups = fixups;
-        Ok(())
+        Ok(shadow)
+    }
+
+    /// A binder of a shadow copy: its node and the pid of its owner.
+    fn shadow_binder(&self, node: NodeId) -> ShadowKind {
+        let owner_pid = self.nodes[&node]
+            .proc
+            .and_then(|p| self.procs.get(&p))
+            .map_or(0, |p| p.creds.pid);
+        ShadowKind::Binder { node, owner_pid }
     }
 
     /// `binder_proc_transaction`: queue a transaction on a thread, the
@@ -758,6 +835,9 @@ impl State {
         };
         if let Some(trace) = &mut self.trace {
             trace.dropped(id);
+        }
+        if let Some(shadow) = &mut self.shadow {
+            shadow.failed(id);
         }
         if let Some(to) = t.to_proc {
             if let Some(p) = self.procs.get_mut(&to) {

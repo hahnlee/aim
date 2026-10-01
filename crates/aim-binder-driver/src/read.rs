@@ -170,7 +170,7 @@ impl State {
             if let Some(p) = self.procs.get_mut(&proc) {
                 p.nodes.remove(&ptr);
             }
-            self.nodes.remove(&id);
+            self.remove_node(id);
         }
         let mut put = |cmd: u32| {
             out.extend_from_slice(&cmd.to_le_bytes());
