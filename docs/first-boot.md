@@ -1,9 +1,10 @@
 # First boot
 
-Status: design (#565). Implemented: item 4, the data image as a clone
-(#563); item 1, the device's APK compiled in the image; item 2, the
-package parser cache in a build-time template ("The template"). Item 3
-fails its parity check ("Item 3's checks") and waits for a decision.
+Status: implemented (#565): item 4, the data image as a clone (#563);
+item 1, the device's APK compiled in the image; items 2 and 3, the
+package parser cache, PackageManager's state and the permission module's
+state in a build-time template ("The template"). A first boot reaches
+`sys.boot_completed` in about 4.9 s.
 
 A first boot (a new data directory) reaches `sys.boot_completed` in about
 11 s, a repeat boot of the same data in about 5.4 s. The difference is
@@ -123,7 +124,8 @@ are logged only when neither first boot nor upgrade) and
 messages ("Android is starting") on a boot that is not the first. Both
 show only during boot.
 
-The shipped set, all written by PMS, installd and artd:
+The shipped set, written by PMS, installd, artd and the permission
+module:
 
 | Path | What |
 | --- | --- |
@@ -132,6 +134,7 @@ The shipped set, all written by PMS, installd and artd:
 | `system/package_cache/<fingerprint>/` | item 2 |
 | `app/~~*/<pkg>-*/` of the three stubs | the decompressed APKs and their `oat/` |
 | `dalvik-cache/arm64/` | what first-boot dexopt compiled for the APKs inside APEXes |
+| `misc/apexdata/com.android.permission/access.abx`; `misc_de/0/apexdata/com.android.permission/{access.abx,runtime-permissions.xml,roles.xml}`; each with its `.reservecopy` | the permission module's state of the device and of user 0: runtime permissions with their flags and app ops, the default grants' fingerprint, roles (the user's decision on #565) |
 
 Each with its owner, mode, SELinux label (the xattrs of
 `docs/guest-init-contract.md` section 6) and mtime, 300 MB in all, of
@@ -157,7 +160,6 @@ first boot for every owner but PMS):
 | LockSettings, gatekeeper, recoverable keystore | `system_de/0/spblob/`, `system/locksettings.db`, `system/recoverablekeystore.db` | the user's synthetic password and its keys |
 | odsign | `misc/odsign/` | its signing key's certificate |
 | bootstat | `misc/bootstat/` | the factory reset time is the device's first boot |
-| Permission module | `misc_de/0/apexdata/com.android.permission/` (runtime permissions, roles) | default grants and roles run on the device (no grant fingerprint recorded, as on a first boot) |
 | AccountManager, usage stats, app ops, jobs, notifications, dropbox, logs | their files | per-device history |
 | Apps | their data directories | GMS and GSF create device identifiers there |
 | init, vold, apexd, aconfigd | `/metadata`, `/data/property`, their `/data/misc` directories | cheap, and partly per boot |
@@ -216,39 +218,45 @@ mechanism with content.
 
 The `userdata/template` node of `cargo aim` (after AOSP's data
 partition image; `crates/aim-build/src/nodes/userdata.rs`) runs the
-original's first boot at build time and keeps what is shipped (today
-item 2's parser cache):
+original's first boot at build time and keeps the shipped set of item 3,
+the parser cache with it:
 
 1. **Boot.** guest-init boots the derived image on a scratch data
    directory made from the empty image, the same boot as a user's first
    boot, in window mode (which shows only app tasks; a first-run task
-   may still show a window for a moment, #607). At
-   `sys.boot_completed` it shuts Android down as a device does (`svc
-   power shutdown`, run with init's environment as `adb shell` runs it:
-   ShutdownThread has PMS write its settings, then init's
-   `sys.powerctl` ends the boot, 3 s later). Play Store starts updating itself within 30 s of
-   `sys.boot_completed`; what it installs is not in the shipped set, and
-   step 2 fails the build if it reached `packages.xml`.
-2. **Check.** `packages.xml` lists only the image's packages (no package
-   an installer added), has no verifier identity, and records the
-   image's fingerprint.
+   may still show a window for a moment, #607). While it runs, the node
+   copies PMS's settings out of the data volume as PMS's constructor
+   first writes them (`write settings`, about 7.5 s in), before any app
+   runs, and the permission module's files once the role controller has
+   written `roles.xml` and the module has been quiet for 3 s (about 23 s
+   in); each copy is taken again if a write began meanwhile. After
+   `sys.boot_completed` (boot dexopt is over by `ams_ready`) and both
+   copies, it stops the boot. Play Store starts updating itself within
+   30 s of `sys.boot_completed`; what it installs is not in the shipped
+   set, and step 2 fails the build if it reached `packages.xml`.
+2. **Check.** The settings list only the image's packages (no package an
+   installer added; the stubs' directories exist), have no verifier
+   identity, and record the image's fingerprint, the parser cache's name.
 3. **Copy.** A new, empty data image receives the shipped paths from the
-   build boot's image, with owners, labels and mtimes. A copy into a
-   fresh volume, not a deletion from the used one: the used volume's
-   freed blocks would still hold its keys and seeds.
+   build boot's image and the copies, with owners, labels and mtimes
+   (`aim_storage::copy`). A copy into a fresh volume, not a deletion
+   from the used one: the used volume's freed blocks would still hold
+   its keys and seeds.
 4. **Publish.** `target/aim/userdata/userdata-<image>-<sku>.asif` (the
    derived image's identity, the SKU the build boot's guest-init gave
    the device), with `.sha256`, the shipped files and their sha256.
-   The node takes about 30 s of a build whose derived image changed
-   (28.5 s on 2026-10-01: the boot 14.5 s, the shutdown 3 s).
+   The node takes about 30-40 s of a build whose derived image changed
+   (the boot to the permission module's copy, about 23 s, and the copy
+   of about 300 MB).
 
 The node's key is the derived image's output key (its identity and its
 shadow's creation time: the APK mtimes the cache and PMS compare are the
 shadow's) and the node's recipe; the template's name carries the image
-and the SKU, and guest-init takes only the one of the image it boots. It does not depend on the
-runtime's binaries (order-only, as the `oat` node's `linux-run`): the
-content is the original's output, whatever runs it. A SKU without a
-template (another Mac) boots without one until one is built.
+and the SKU, and guest-init takes only the one of the image it boots.
+It does not depend on the runtime's binaries (order-only, as the `oat`
+node's `linux-run`): the content is the original's output, whatever
+runs it. A SKU without a template (another Mac) boots without one until
+one is built.
 
 ### A data directory starts from it
 
@@ -285,42 +293,42 @@ identities, keys and seeds.
   CtsBootStatsTestCases. And the app checks (the integration gate,
   Settings, Chrome, Calculator, the tracked games).
 
-### Item 3's checks, 2026-10-01: parity fails in the permission module
+### Item 3's checks (2026-10-01, ops checks fb-9 and fb-12)
 
-A candidate template with item 3's set (packages.xml and
-package-restrictions.xml with their reserve copies, packages.list, the
-decompressed stubs, `dalvik-cache/arm64`), taken at the build boot's
-clean shutdown, against an original first boot (device mode, main
-c498155b plus that day's work):
-
-- **Time.** `sys.boot_completed` 5.27 s and 6.78 s from the candidate
-  (host load 2.7) against 10.24 s (load 5.9); `pms_start` to `pms_ready`
-  0.64 s against 3.81 s, `pms_ready` to `ams_ready` 1.18 s against
-  2.56 s.
-- **Packages.** `pm list packages -f` and `dumpsys role` the same, up to
-  uids, stub directory names and the Play Store's own update of itself.
-  CtsOsTestCases: 922 tests, the same 50 failures both ways.
-  CtsDomainVerificationDeviceStandaloneTestCases hangs both ways (#618).
-  Settings and Chrome start.
-- **Permissions: not the same.** From the candidate, Google Play
-  services has none of its default grants (31 runtime permissions
-  `granted=false` against `GRANTED_BY_DEFAULT`), and Messages, Phone,
-  the Google app and the sound picker lack `RESTRICTION_SYSTEM_EXEMPT` on
-  their restricted permissions (108 such flags against 159). This is the
-  risk below: the permission module makes a system package's state as
-  the package is added, which a first boot from PMS's state skips.
-- **Structure: a new kind of per-boot value.** Two builds' settings
-  differ, beyond the listed values, in package-restrictions.xml: the
-  components apps enabled or disabled and the packages they started in
-  the seconds before the shutdown (131 against 4 entries). PMS's own
-  state is its constructor's write (`write settings`, before
-  `pms_ready`, when no app has run); a clean shutdown writes the apps'
-  changes too.
-
-Item 3 therefore does not land: the remedy the design names (the
-permission module's user 0 state in the template) is excluded by the
-decision on #565, which keeps runtime permissions and roles off the
-template.
+- **Without the permission module's state, parity fails.** From a
+  template of PMS's state alone, Google Play services had none of its 31
+  default runtime grants, and Messages, Phone, the Google app and the
+  sound picker lacked `RESTRICTION_SYSTEM_EXEMPT` on their restricted
+  permissions: the permission module makes a system package's state as
+  the package is added, which a first boot from PMS's state skips (the
+  risk below). The template therefore carries the module's state too,
+  which the user approved on #565.
+- **PMS's settings are its constructor's write.** Settings taken at a
+  clean shutdown also held what apps did in the seconds before it (the
+  components they enabled or disabled, the packages they started): 131
+  against 4 entries in two builds. The node takes `write settings`'
+  output, before `pms_ready`, when no app has run.
+- **Structure, two builds: the same** up to the listed values.
+  `packages.xml` (3713 elements) and `package-restrictions.xml` (312);
+  both `access.abx` with app ids mapped to their packages; `roles.xml`
+  up to its `packagesHash`; the stubs but for Chrome's and WebView's
+  odex.
+- **Parity, template first boot against original first boots of the
+  same image: the same.** Runtime permissions (3508 granted, 219 denied),
+  321 default and 112 role grants, 159 system and 10 installer
+  restricted-permission exemptions, in every package; `pm list packages
+  -f`, `dumpsys role`; CtsOsTestCases (922 tests, the same 50 failures);
+  CtsPermissionTestCases (500 s cap: the 125 tests both reached, the
+  same results, 22 shared failures of the syscall layer's file
+  permissions); CtsRoleTestCases (the template's run completes, 112 tests
+  and 3 failures in `openDefaultAppList*`; on the original the test app
+  crashes in its 11th test, `setAndGetDefaultHolders`, which passes on
+  the template). CtsDomainVerificationDeviceStandaloneTestCases hangs
+  both ways (#618); CtsBootStatsTestCases is a host test, not run here.
+- **Time.** `sys.boot_completed` 4.93 s and 4.91 s from the template (host
+  load 16-18) against 10.55 s (load 9); `pms_start` to `pms_ready` 0.57 s
+  against 3.90 s, `pms_ready` to `ams_ready` 0.47 s against 2.64 s. A
+  repeat boot of the same data: 5.43 s.
 
 ## Image changes and existing data
 
@@ -365,9 +373,8 @@ time (#529 and the pre-zygote work).
   from the template the packages are known, and user 0's state is read
   from a file that is not there before default grants run
   (`getDefaultPermissionGrantFingerprint` is unset). The parity check
-  found this difference (above). The design's remedy, the permission
-  module's user 0 state (`runtime-permissions.xml`, `roles.xml`: no
-  identity) in the template, is excluded by the decision on #565.
+  found this difference, and the template carries the module's state
+  (above).
 - **Per-device values.** Item 3's list; the structure check catches new
   ones.
 - **The build boots Android.** A boot failure fails the build, the build
@@ -377,14 +384,22 @@ time (#529 and the pre-zygote work).
   features would have to key it too.
 - **Size.** 300 MB per template and SKU; clones share its blocks until
   the guest writes them.
+- **The permission module's snapshot** waits for the role controller's
+  first write and 3 s of quiet (about 23 s after the build boot starts);
+  a module that wrote later would be taken mid-way. The structure check
+  (two builds, #620) would show it.
 
 ## Decisions
 
-1. Whether a template may carry item 3's per-device outcomes (times, app
-   ids, the permission owner race, the stubs' code path names, domain
-   verification set ids), identical on every install of one image build.
-   None is an identity, key or salt. Without them there is no item 3, and
-   a first boot stays about 10 s (items 1, 2 and 4 save under a second).
+1. (#565, approved) A template carries item 3's per-device outcomes
+   (times, app ids, the permission owner race, the stubs' code path
+   names, domain verification set ids), identical on every install of
+   one image build. None is an identity, key or salt.
+2. (#565, approved) A template carries the permission module's state:
+   both `access.abx`, `runtime-permissions.xml` and `roles.xml`, with
+   their reserve copies. Never shipped: `ANDROID_ID`/SSAID, keystore, lock
+   settings, the entropy seed, odsign, the factory reset time, accounts
+   and app data.
 
 ## Order
 
