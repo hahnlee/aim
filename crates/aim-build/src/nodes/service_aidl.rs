@@ -330,7 +330,7 @@ enum Kind {
     Plain(&'static str, &'static str, &'static str),
     /// A Java-only parcelable, as the named type parameter.
     Parcelable(String),
-    /// A `List` of one, as `writeTypedList` writes it.
+    /// A typed `List` or array; both write a count and typed elements.
     ParcelableList(String),
 }
 
@@ -355,6 +355,11 @@ fn kind(ty: &Type) -> Result<Kind, String> {
             "read_int_array(r)?",
             "write_int_array(p, {v}.as_deref());",
         ),
+        ("boolean", true) => Kind::Plain(
+            "Option<Vec<bool>>",
+            "read_bool_array(r)?",
+            "write_bool_array(p, {v}.as_deref());",
+        ),
         ("int", false) => Kind::Plain("i32", "r.read_i32()?", "p.write_i32({v});"),
         ("long", false) => Kind::Plain("i64", "r.read_i64()?", "p.write_i64({v});"),
         ("float", false) => Kind::Plain("f32", "r.read_f32()?", "p.write_f32({v});"),
@@ -373,6 +378,15 @@ fn kind(ty: &Type) -> Result<Kind, String> {
         ("IBinder", false) => {
             Kind::Plain("Option<Binder>", "r.read_binder()?", "p.write_binder({v});")
         }
+        ("Map", false)
+            if ty.args.len() == 2 && ty.args.iter().all(|a| a.name == "String" && !a.array) =>
+        {
+            Kind::Plain(
+                "Option<Vec<(Option<String>, Option<String>)>>",
+                "read_string_map(r)?",
+                "write_string_map(p, {v}.as_deref());",
+            )
+        }
         (b, false)
             if b.len() > 1
                 && b.starts_with('I')
@@ -383,6 +397,9 @@ fn kind(ty: &Type) -> Result<Kind, String> {
         }
         (b, false) if ty.args.is_empty() && b.chars().next().is_some_and(char::is_uppercase) => {
             Kind::Parcelable(b.to_string())
+        }
+        (b, true) if ty.args.is_empty() && b.chars().next().is_some_and(char::is_uppercase) => {
+            Kind::ParcelableList(b.to_string())
         }
         ("List", false)
             if ty.args.len() == 1
@@ -430,7 +447,10 @@ fn method_code(m: &Method) -> Result<String, String> {
     let mut generics = Vec::new();
     let mut fields = Vec::new();
     for p in &m.params {
-        if !matches!(p.direction.as_str(), "" | "in") {
+        if p.direction == "out" {
+            continue;
+        }
+        if !matches!(p.direction.as_str(), "" | "in" | "inout") {
             return Err(format!(
                 "{}: `{}` parameters are not supported",
                 m.name, p.direction
@@ -520,6 +540,13 @@ fn method_code(m: &Method) -> Result<String, String> {
     }
     writeln!(s, "        }}\n    }}\n").unwrap();
     if !m.oneway {
+        if m.params
+            .iter()
+            .any(|p| matches!(p.direction.as_str(), "out" | "inout"))
+        {
+            s += &output_reply_code(m)?;
+            return Ok(s);
+        }
         let fname = snake(&m.name);
         match kind(&m.ret)? {
             Kind::Void => {
@@ -564,10 +591,114 @@ fn method_code(m: &Method) -> Result<String, String> {
                 writeln!(s, "            Err(e) => Err(e),\n        }})\n    }}\n").unwrap();
             }
             Kind::ParcelableList(t) => {
-                return Err(format!("{}: returning List<{t}> is not supported", m.name));
+                writeln!(s, "    pub fn write_{fname}_reply<{t}: WriteParcelable>(p: &mut Parcel, result: Option<&[Option<{t}>]>) {{").unwrap();
+                writeln!(s, "        p.write_no_exception();").unwrap();
+                writeln!(s, "        write_typed_list(p, result);\n    }}\n").unwrap();
+                writeln!(s, "    pub fn read_{fname}_reply<{t}: ReadParcelable>(r: &mut Reader<'_>) -> Result<Returned<Option<Vec<Option<{t}>>>>> {{").unwrap();
+                writeln!(s, "        Ok(match r.read_exception()? {{").unwrap();
+                writeln!(s, "            Ok(()) => Ok(read_typed_list(r)?),").unwrap();
+                writeln!(s, "            Err(e) => Err(e),\n        }})\n    }}\n").unwrap();
             }
         }
     }
+    Ok(s)
+}
+
+/// A reply with AIDL `out` or `inout` parameters: the return value first,
+/// then each output in declaration order, as the Java Stub writes it.
+fn output_reply_code(m: &Method) -> Result<String, String> {
+    let mut generics = Vec::new();
+    let mut fields = Vec::new();
+    let mut add = |name: String, ty: &Type| -> Result<(), String> {
+        let (rust, read, write) = match kind(ty)? {
+            Kind::Void => return Err(format!("{}: void output", m.name)),
+            Kind::Plain(rust, read, write) => {
+                (rust.to_string(), read.to_string(), write.to_string())
+            }
+            Kind::Parcelable(t) => {
+                if !generics.contains(&t) {
+                    generics.push(t.clone());
+                }
+                (
+                    format!("Option<{t}>"),
+                    "read_typed(r)?".into(),
+                    "write_typed(p, {v}.as_ref());".into(),
+                )
+            }
+            Kind::ParcelableList(t) => {
+                if !generics.contains(&t) {
+                    generics.push(t.clone());
+                }
+                (
+                    format!("Option<Vec<Option<{t}>>>"),
+                    "read_typed_list(r)?".into(),
+                    "write_typed_list(p, {v}.as_deref());".into(),
+                )
+            }
+        };
+        fields.push((name, rust, read, write));
+        Ok(())
+    };
+    if !matches!(kind(&m.ret)?, Kind::Void) {
+        add("result".into(), &m.ret)?;
+    }
+    for p in &m.params {
+        if matches!(p.direction.as_str(), "out" | "inout") {
+            add(snake(&p.name), &p.ty)?;
+        }
+    }
+    let name = format!("{}Reply", camel(&m.name));
+    let fname = snake(&m.name);
+    let params = if generics.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", generics.join(", "))
+    };
+    let bounds = |trait_name: &str| {
+        if generics.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<{}>",
+                generics
+                    .iter()
+                    .map(|g| format!("{g}: {trait_name}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    };
+    let mut s = String::new();
+    writeln!(s, "    #[derive(Debug)]\n    pub struct {name}{params} {{").unwrap();
+    for (field, ty, _, _) in &fields {
+        writeln!(s, "        pub {field}: {ty},").unwrap();
+    }
+    writeln!(s, "    }}\n").unwrap();
+    writeln!(
+        s,
+        "    pub fn write_{fname}_reply{}(p: &mut Parcel, value: &{name}{params}) {{",
+        bounds("WriteParcelable")
+    )
+    .unwrap();
+    writeln!(s, "        p.write_no_exception();").unwrap();
+    for (field, _, _, write) in &fields {
+        writeln!(
+            s,
+            "        {}",
+            write.replace("{v}", &format!("value.{field}"))
+        )
+        .unwrap();
+    }
+    writeln!(s, "    }}\n").unwrap();
+    writeln!(s, "    pub fn read_{fname}_reply{}(r: &mut Reader<'_>) -> Result<Returned<{name}{params}>> {{",
+        bounds("ReadParcelable")).unwrap();
+    writeln!(s, "        Ok(match r.read_exception()? {{").unwrap();
+    writeln!(s, "            Ok(()) => Ok({name} {{").unwrap();
+    for (field, _, read, _) in &fields {
+        writeln!(s, "                {field}: {read},").unwrap();
+    }
+    writeln!(s, "            }}),").unwrap();
+    writeln!(s, "            Err(e) => Err(e),\n        }})\n    }}\n").unwrap();
     Ok(s)
 }
 
@@ -671,6 +802,25 @@ pub fn write_int_array(p: &mut Parcel, value: Option<&[i32]>) {
     }
 }
 
+/// `createBooleanArray` / `writeBooleanArray`.
+pub fn read_bool_array(r: &mut Reader<'_>) -> Result<Option<Vec<bool>>> {
+    let n = r.read_i32()?;
+    if n < 0 {
+        return Ok(None);
+    }
+    (0..n).map(|_| r.read_bool()).collect::<Result<Vec<_>>>().map(Some)
+}
+
+pub fn write_bool_array(p: &mut Parcel, value: Option<&[bool]>) {
+    match value {
+        None => p.write_i32(-1),
+        Some(v) => {
+            p.write_i32(v.len() as i32);
+            v.iter().for_each(|b| p.write_bool(*b));
+        }
+    }
+}
+
 /// `createByteArray`: its length (-1 for null), then the bytes, padded.
 pub fn read_byte_array(r: &mut Reader<'_>) -> Result<Option<Vec<u8>>> {
     let n = r.read_i32()?;
@@ -711,8 +861,33 @@ pub fn write_string_list(p: &mut Parcel, value: Option<&[Option<String>]>) {
     }
 }
 
-/// `createTypedArrayList`: a count (-1 for null), then each element as
-/// `readTypedObject`.
+/// The typed `Map<String, String>` of the Java AIDL backend.
+pub fn read_string_map(r: &mut Reader<'_>) -> Result<Option<Vec<(Option<String>, Option<String>)>>> {
+    let n = r.read_i32()?;
+    if n < 0 {
+        return Ok(None);
+    }
+    (0..n)
+        .map(|_| Ok((r.read_string16()?, r.read_string16()?)))
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+pub fn write_string_map(p: &mut Parcel, value: Option<&[(Option<String>, Option<String>)]>) {
+    match value {
+        None => p.write_i32(-1),
+        Some(v) => {
+            p.write_i32(v.len() as i32);
+            for (key, value) in v {
+                p.write_string16(key.as_deref());
+                p.write_string16(value.as_deref());
+            }
+        }
+    }
+}
+
+/// `createTypedArrayList` / `createTypedArray`: a count (-1 for null),
+/// then each element as `readTypedObject`.
 pub fn read_typed_list<T: ReadParcelable>(r: &mut Reader<'_>) -> Result<Option<Vec<Option<T>>>> {
     let n = r.read_i32()?;
     if n < 0 {
