@@ -384,7 +384,8 @@ fn a_guest_cannot_reach_host_processes() {
         "# aim-guest-init identity v1\nservice\tguest\nuid\t10050\ngid\t10050\n",
     )
     .unwrap();
-    host_process_unreachable(root, &["--identity", id.to_str().unwrap()]);
+    host_process_unreachable(root, &["--identity", id.to_str().unwrap()], false);
+    host_process_unreachable(root, &["--identity", id.to_str().unwrap()], true);
 }
 
 /// A guest started without a table (a test, a debugging shell) is alone in
@@ -393,7 +394,8 @@ fn a_guest_cannot_reach_host_processes() {
 #[test]
 fn a_standalone_guest_has_a_private_namespace() {
     let Some(root) = root() else { return };
-    host_process_unreachable(root, &[]);
+    host_process_unreachable(root, &[], false);
+    host_process_unreachable(root, &[], true);
 
     let out = linux_run(root, &[PROGRAM, "ns_init_exit"], |_| {});
     let so = String::from_utf8_lossy(&out.stdout);
@@ -425,7 +427,9 @@ fn a_standalone_guest_has_a_private_namespace() {
 }
 
 /// `pid_namespace` of `tests/guest/process.c` with a host process's pid.
-fn host_process_unreachable(root: &Path, args: &[&str]) {
+/// With `leader_gone`, the guest starts in a session and process group
+/// whose leader has exited, as under a shell that went away.
+fn host_process_unreachable(root: &Path, args: &[&str], leader_gone: bool) {
     let mut host = Command::new("/bin/sleep")
         .arg("60")
         .process_group(0)
@@ -434,20 +438,82 @@ fn host_process_unreachable(root: &Path, args: &[&str]) {
     let host_pid = host.id().to_string();
     let mut argv = args.to_vec();
     argv.extend([PROGRAM, "pid_namespace", &host_pid]);
-    let out = linux_run(root, &argv, |_| {});
+    // An orphaned guest's status is not ours to see; its output says.
+    let (status, so, se) = if leader_gone {
+        let (so, se) = orphaned_linux_run(root, &argv);
+        (None, so, se)
+    } else {
+        let out = linux_run(root, &argv, |_| {});
+        (Some(out.status), out.stdout, out.stderr)
+    };
     let alive = host.try_wait().unwrap().is_none();
     let _ = host.kill();
     let _ = host.wait();
-    let (so, se) = (
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    let (so, se) = (String::from_utf8_lossy(&so), String::from_utf8_lossy(&se));
     assert!(
-        out.status.success() && so.contains("ok pid_namespace\n"),
-        "{:?}\nstdout:\n{so}\nstderr:\n{se}",
-        out.status
+        status.is_none_or(|s| s.success()) && so.contains("ok pid_namespace\n"),
+        "{status:?}\nstdout:\n{so}\nstderr:\n{se}"
     );
     assert!(alive, "the host process survived");
+}
+
+/// `linux_run` in a new session and process group whose leader, a host
+/// shell, has exited and been reaped before the guest starts: its stdout
+/// and stderr.
+fn orphaned_linux_run(root: &Path, args: &[&str]) -> (Vec<u8>, Vec<u8>) {
+    let mut sh = Command::new("/bin/sh");
+    // The background job waits for a line on the shell's stdin, so it
+    // runs only once the leader is gone; `$!` names it.
+    sh.args([
+        "-c",
+        r#"exec 3<&0; { read -r _ <&3; exec "$@" 3<&-; } </dev/null & echo $!"#,
+        "sh",
+        env!("CARGO_BIN_EXE_linux-run"),
+        "--no-cache",
+        "--root",
+        root.to_str().unwrap(),
+    ])
+    .args(args)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    // SAFETY: setsid between fork and exec.
+    unsafe {
+        sh.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        })
+    };
+    let mut leader = sh.spawn().unwrap();
+    let mut go = leader.stdin.take().unwrap();
+    let (mut so, se) = (leader.stdout.take().unwrap(), leader.stderr.take().unwrap());
+    assert!(leader.wait().unwrap().success());
+    let read = |mut r: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut v = Vec::new();
+            r.read_to_end(&mut v).unwrap();
+            v
+        })
+    };
+    let mut line = [0u8; 16];
+    let n = so.read(&mut line).unwrap();
+    let pid: i32 = String::from_utf8_lossy(&line[..n]).trim().parse().unwrap();
+    let (out, err) = (read(Box::new(so)), read(Box::new(se)));
+    std::io::Write::write_all(&mut go, b"go\n").unwrap();
+    drop(go);
+    // Not our child: it is done when its output ends, or killed at the
+    // deadline.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !out.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !out.is_finished() {
+        // SAFETY: the guest this test started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    (out.join().unwrap(), err.join().unwrap())
 }
 
 /// The image's mksh forks, pipes and execs itself; its parent waits for

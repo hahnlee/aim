@@ -132,6 +132,10 @@ pub fn run(opts: RunOptions) -> String {
         Ok(d) => d,
         Err(e) => return format!("pid namespace: {e}"),
     };
+    // Started from outside the namespace, not by a member's execve.
+    if opts.execfn.is_none() {
+        sys::enter_pid_namespace(&by_pid);
+    }
     sys::cred::init(opts.identity, Some(by_pid));
     sys::start_ptrace_agent();
     sys::init_exec(opts.runtime_args);

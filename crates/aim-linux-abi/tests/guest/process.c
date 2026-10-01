@@ -888,8 +888,9 @@ static void pid_namespace(pid_t host) {
   GONE(capget(&h, d));
   snprintf(path, sizeof(path), "/proc/%d/stat", host);
   CHECK(access(path, F_OK) == -1 && errno == ENOENT, "%s", path);
-  // The host process that started this one is its parent and leads its
-  // group and session.
+  // The host process that started this one is its parent, and its group
+  // and session come from outside too, whether or not their leader still
+  // runs.
   CHECK(getppid() == 0, "outside parent %d", getppid());
   CHECK(getpgid(0) == 0 && getsid(0) == 0, "outside group %d session %d", getpgid(0), getsid(0));
   // Alone in the namespace, kill(-1) has no target (Linux skips the caller)
