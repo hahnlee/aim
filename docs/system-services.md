@@ -300,7 +300,10 @@ service when the host asks (`IBridge.interceptNotificationPermissionRequests`,
 only while the Mac shows notifications); its request reaches the host as
 `IServiceHost.requestNotificationPermission`, a temporary exception
 until PermissionController is native (docs/notifications.md, "The
-permission"; #550).
+permission"; #550). The Mac's preferred languages reach the device the
+same way: the host calls `IBridge.updateLocales`, which runs the
+platform's `LocalePicker.updateLocales` ([mac-settings.md](mac-settings.md),
+"The language list"; #344).
 
 **Maintenance and CTS.** Each method is one internal call; the internal
 APIs it names are checked per image. It runs in system_server, so it

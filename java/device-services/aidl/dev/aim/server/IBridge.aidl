@@ -35,4 +35,11 @@ interface IBridge {
      * service's side of it.
      */
     IUiModeBridge getUiModeBridge(IUiModeHost host);
+
+    /**
+     * LocalePicker.updateLocales: the device's languages become
+     * `languageTags` (LocaleList.forLanguageTags), the Mac's preferred
+     * languages, as Settings' language page sets a choice.
+     */
+    void updateLocales(String languageTags);
 }

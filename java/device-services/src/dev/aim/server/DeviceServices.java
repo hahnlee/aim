@@ -33,6 +33,7 @@ public final class DeviceServices extends SystemService {
 
     private final LocationBridge mLocation;
     private final UiModeBridge mUiMode;
+    private final LocaleBridge mLocale = new LocaleBridge();
 
     public DeviceServices(Context context) {
         super(context);
@@ -55,6 +56,7 @@ public final class DeviceServices extends SystemService {
             attachBridge();
         } else if (phase == PHASE_THIRD_PARTY_APPS_CAN_START) {
             mLocation.onThirdPartyAppsCanStart();
+            mLocale.onThirdPartyAppsCanStart();
         }
     }
 
@@ -82,7 +84,7 @@ public final class DeviceServices extends SystemService {
         }
         try {
             IServiceHost service = IServiceHost.Stub.asInterface(host);
-            service.attachBridge(new Bridge(getContext(), service, mLocation, mUiMode));
+            service.attachBridge(new Bridge(getContext(), service, mLocation, mUiMode, mLocale));
             Slog.i(TAG, "bridge attached to the native service host");
         } catch (RemoteException e) {
             Slog.w(TAG, "cannot attach the bridge", e);
@@ -94,12 +96,15 @@ public final class DeviceServices extends SystemService {
         private final IServiceHost host;
         private final LocationBridge location;
         private final UiModeBridge uiMode;
+        private final LocaleBridge locale;
 
-        Bridge(Context context, IServiceHost host, LocationBridge location, UiModeBridge uiMode) {
+        Bridge(Context context, IServiceHost host, LocationBridge location, UiModeBridge uiMode,
+                LocaleBridge locale) {
             this.context = context;
             this.host = host;
             this.location = location;
             this.uiMode = uiMode;
+            this.locale = locale;
         }
 
         @Override
@@ -129,6 +134,12 @@ public final class DeviceServices extends SystemService {
         public IUiModeBridge getUiModeBridge(IUiModeHost host) {
             enforceSystemUid();
             return uiMode.attach(host);
+        }
+
+        @Override
+        public void updateLocales(String languageTags) {
+            enforceSystemUid();
+            locale.update(languageTags);
         }
 
         private static void enforceSystemUid() {

@@ -8,7 +8,7 @@ the Mac's settings are only read.
 | Setting | Mac source | Property | Applied by `init.aim.rc` |
 | --- | --- | --- | --- |
 | Time zone | the IANA name `/etc/localtime` links to, if the image's tzdata (`/apex/com.android.tzdata/etc/tz/tzdata`) has it | `vendor.aim.mac.time_zone` | at boot: `setprop persist.sys.timezone` in `post-fs-data`; while running: `cmd alarm set-timezone` (`AlarmManager.setTimeZone`) |
-| Language and region | the first of `AppleLanguages` Android can name, with `AppleLocale`'s region when it has none (`ko` + `ko_KR` → `ko-KR`, `zh-Hans` + `zh_CN` → `zh-Hans-CN`) | `vendor.aim.mac.locale` | at boot: `setprop persist.sys.locale` in `post-fs-data` |
+| Language and region | `CFLocaleCopyPreferredLanguages`, each language Android can name, with `AppleLocale`'s region when it has none (`ko` + `ko_KR` → `ko-KR`, `zh-Hans` + `zh_CN` → `zh-Hans-CN`) | `vendor.aim.mac.locale` (the first) | at boot: `setprop persist.sys.locale` in `post-fs-data`; the whole list: the service host, through the bridge ("The language list") |
 | Appearance | `AppleInterfaceStyle` (`Dark`, or absent for Light; "Auto" updates it) | `vendor.aim.mac.night_mode` (`yes`/`no`) | `cmd uimode night` (`UiModeManager.setNightMode`, `ui_night_mode`), at `sys.boot_completed` and on each change |
 | Keyboard layout | `AppleCurrentKeyboardLayoutInputSourceID` of `com.apple.HIToolbox` (`com.apple.keylayout.Dvorak`), as the InputDevices layout with its characters, else US English ([input.md](input.md), "Layouts") | `vendor.aim.mac.keyboard_layout` (`keyboard_layout_english_us_dvorak`) | `aim-keyboard layout` (InputManager's layout override for the built-in keyboard), at `sys.boot_completed` and on each change |
 
@@ -42,15 +42,61 @@ the Mac's settings are only read.
   on the Mac's change notification, so the `cmd uimode night` trigger
   repeats it (#655).
 
-## Limits
+## The language list (#344)
 
-- Only the first language: `persist.sys.locale` holds one tag, and the
-  locale list lives in the `system_locales` setting, which only
-  `ActivityManager.updatePersistentConfiguration` (Settings'
-  `LocalePicker`) writes. There is no shell command for it.
-- The language follows the Mac at boot only, for the same reason.
-- Once a language is picked in Android's Settings, `system_locales` is
-  set and wins over `persist.sys.locale` at every boot.
+`persist.sys.locale` holds one tag; the device's list lives in the
+`system_locales` setting and the global configuration, which only
+`ActivityManager.updatePersistentConfiguration` (Settings'
+`LocalePicker`) changes, with no shell command for it. So the service
+host applies the list through the system_server bridge
+([system-services.md](system-services.md), "The system_server bridge"):
+
+- **Host** (`crates/aim-services/src/locale/`). The Mac's preferred
+  languages (`CFLocaleCopyPreferredLanguages`) mapped as in the table,
+  each once (`LocaleList` refuses a repetition). A thread of its own
+  runs a CFRunLoop for the distributed
+  `AppleLanguagePreferencesChangedNotification` and CoreFoundation's
+  `kCFLocaleCurrentLocaleDidChangeNotification` (NSCurrentLocaleDidChange).
+- **Bridge.** `IBridge.updateLocales(tags)` runs the platform's
+  `LocalePicker.updateLocales` in system_server (`LocaleBridge.java`):
+  the configuration with `userSetLocale`, persisted to `system_locales`
+  and `persist.sys.locale`, as Settings' language page does.
+- **When.** Each time a bridge attaches (every boot, and again after
+  system_server restarted), and on a notification whose re-read list
+  differs from the last one seen. A notification that leaves the list as
+  it was (another region setting) changes nothing.
+- **Changes made inside Android** (Settings' language page, an app with
+  `CHANGE_CONFIGURATION`) hold until the Mac's list changes or the
+  device boots, as the appearance does (the user's decision on #344).
+  Android never writes the Mac's languages.
+- **At boot** the bridge attaches at `PHASE_DEVICE_SPECIFIC_SERVICES_READY`,
+  before AppOpsService is ready, so ActivityManager refuses
+  system_server's own persistent configuration change (`WRITE_SETTINGS`).
+  The list waits for `PHASE_THIRD_PARTY_APPS_CAN_START`, which comes
+  after the apps' data is prepared (`waitForAppDataPrepared`; at
+  `PHASE_ACTIVITY_MANAGER_READY` a first boot started a receiver of the
+  change without its data directory, #665) and before the persistent
+  apps and home start. Until then the configuration is
+  `persist.sys.locale`, the Mac's first language, or a list chosen in
+  Android before.
+
+## Verified: the language list (2026-10-01)
+
+Device boots of the working tree with the Mac on `("ko-KR")`, `ko_KR`
+(the Mac's language was not changed; checks locale-1..4):
+
+- A first boot of a new data image: `AimLocaleBridge: languages set to
+  the Mac's: ko-KR` once, 13 ms after `OnBootPhase_600`, no permission
+  denial; `system_locales` `ko-KR` (unset before), `persist.sys.locale`
+  `ko-KR`, `am get-config` `ko-rKR`; Settings' language page lists
+  한국어 (대한민국); the crash buffer empty.
+- `settings put system system_locales en-US,ja-JP`, then a boot of the
+  same data: `system_locales` `ko-KR` again, the Mac's.
+- CtsLocaleManagerTestCases: OK (31 tests); its own system locale
+  changes held afterwards (no further bridge call).
+- A live change of the Mac's list is not checked in a boot (it would
+  change the Mac's settings): its handling is unit-tested, and it takes
+  the same `IBridge.updateLocales` call.
 
 ## Verified (2026-09-29)
 
@@ -71,5 +117,7 @@ and Light:
   detector's device zone too) and switched to light at
   `sys.boot_completed` (`am get-config` `notnight`).
 
-Unit tests: `mac::tests` (zone paths, tzdata index, tag mapping, region,
-appearance) and `boot_image::derived_image_tzdata_has_the_macs_zones`.
+Unit tests: `mac::tests` of aim-guest-init (zone paths, tzdata index,
+appearance), `locale::tests` and `locale::mac::tests` of aim-services
+(tag mapping, region, the list, when it applies, the Mac's list read and
+a change heard) and `boot_image::derived_image_tzdata_has_the_macs_zones`.

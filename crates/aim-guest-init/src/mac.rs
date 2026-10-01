@@ -10,7 +10,9 @@ use std::sync::mpsc::Sender;
 
 /// An IANA zone name in the image's tzdata.
 pub const TIME_ZONE_PROP: &str = "vendor.aim.mac.time_zone";
-/// The primary language as an Android BCP-47 tag, with the Mac's region.
+/// The first of the Mac's languages as the device names it
+/// (`aim_services::locale`): the language Android starts in, before the
+/// service host applies the whole list.
 pub const LOCALE_PROP: &str = "vendor.aim.mac.locale";
 /// `yes` in Dark appearance, else `no` (`cmd uimode night`).
 pub const NIGHT_MODE_PROP: &str = "vendor.aim.mac.night_mode";
@@ -85,83 +87,6 @@ pub fn tzdata_has(tzdata: &[u8], name: &str) -> bool {
     })
 }
 
-/// A macOS language or locale identifier (`zh-Hans`, `sr_Latn_RS`,
-/// `en_KR@rg=gbzzzz`) as a BCP-47 tag with canonical case, the region
-/// `region` added when it has none. `None` for what is not a
-/// language-script-region tag, such as the pre-10.4 names (`English`).
-pub fn android_locale(tag: &str, region: Option<&str>) -> Option<String> {
-    let tag = tag.split('@').next().unwrap_or_default();
-    let mut parts = tag.split(['-', '_']);
-    let language = parts.next()?;
-    if !(2..=3).contains(&language.len()) || !language.bytes().all(|b| b.is_ascii_alphabetic()) {
-        return None;
-    }
-    let mut out = language.to_ascii_lowercase();
-    let mut has_region = false;
-    for part in parts {
-        let alpha = part.bytes().all(|b| b.is_ascii_alphabetic());
-        let digits = part.bytes().all(|b| b.is_ascii_digit());
-        out.push('-');
-        match part.len() {
-            4 if alpha && !has_region => {
-                out.push_str(&part[..1].to_ascii_uppercase());
-                out.push_str(&part[1..].to_ascii_lowercase());
-            }
-            2 if alpha => {
-                has_region = true;
-                out.push_str(&part.to_ascii_uppercase());
-            }
-            3 if digits => {
-                has_region = true;
-                out.push_str(part);
-            }
-            5..=8 if part.bytes().all(|b| b.is_ascii_alphanumeric()) => {
-                out.push_str(&part.to_ascii_lowercase())
-            }
-            _ => return None,
-        }
-    }
-    if !has_region && let Some(region) = region {
-        out.push('-');
-        out.push_str(&region.to_ascii_uppercase());
-    }
-    Some(out)
-}
-
-/// The region of an `AppleLocale` value (`ko_KR`, `en_US@rg=krzzzz`):
-/// the `rg` override if any, else its region subtag.
-pub fn locale_region(apple_locale: &str) -> Option<String> {
-    let (locale, keywords) = apple_locale.split_once('@').unwrap_or((apple_locale, ""));
-    let from_rg = keywords.split(';').find_map(|kv| {
-        let rg = kv.strip_prefix("rg=")?;
-        let region = rg.get(..2)?;
-        region
-            .bytes()
-            .all(|b| b.is_ascii_alphabetic())
-            .then(|| region.to_ascii_uppercase())
-    });
-    from_rg.or_else(|| {
-        locale
-            .split(['-', '_'])
-            .skip(1)
-            .find(|p| {
-                (p.len() == 2 && p.bytes().all(|b| b.is_ascii_alphabetic()))
-                    || (p.len() == 3 && p.bytes().all(|b| b.is_ascii_digit()))
-            })
-            .map(str::to_ascii_uppercase)
-    })
-}
-
-/// The device locale for the Mac's preferred languages and region: the
-/// first language Android can name. Only one: `persist.sys.locale` holds a
-/// single tag.
-pub fn primary_locale(languages: &[String], apple_locale: Option<&str>) -> Option<String> {
-    let region = apple_locale.and_then(locale_region);
-    languages
-        .iter()
-        .find_map(|tag| android_locale(tag, region.as_deref()))
-}
-
 /// `cmd uimode night`'s argument for an `AppleInterfaceStyle` value.
 pub fn night_mode(interface_style: Option<&str>) -> &'static str {
     if interface_style == Some("Dark") {
@@ -184,9 +109,7 @@ pub fn properties(tzdata: &[u8]) -> Vec<(&'static str, String)> {
     // SAFETY: CoreFoundation calls on values this function owns.
     unsafe {
         CFPreferencesAppSynchronize(*kCFPreferencesAnyApplication());
-        let languages = preference("AppleLanguages").map_or_else(Vec::new, |v| v.strings());
-        let apple_locale = preference("AppleLocale").and_then(|v| v.string());
-        if let Some(locale) = primary_locale(&languages, apple_locale.as_deref()) {
+        if let Some(locale) = aim_services::locale::preferred_locales().into_iter().next() {
             out.push((LOCALE_PROP, locale));
         }
         let style = preference("AppleInterfaceStyle").and_then(|v| v.string());
@@ -221,8 +144,9 @@ pub fn watch(
                 std::thread::sleep(POLL);
                 let current = properties(&tzdata);
                 for (name, value) in &current {
-                    // The language is applied when Android starts
-                    // (`persist.sys.locale`), so only a boot follows it.
+                    // The language is Android's at its start
+                    // (`persist.sys.locale`); the service host follows
+                    // the Mac's changes (`aim_services::locale`).
                     if *name != LOCALE_PROP
                         && !last.iter().any(|(n, v)| n == name && v == value)
                         && events.send((name.to_string(), value.clone())).is_err()
@@ -252,9 +176,6 @@ aim_hostcall::dylib! {
         fn CFStringGetCString(s: CFTypeRef, buf: *mut c_char, size: isize, encoding: u32) -> bool;
         fn CFGetTypeID(cf: CFTypeRef) -> usize;
         fn CFStringGetTypeID() -> usize;
-        fn CFArrayGetTypeID() -> usize;
-        fn CFArrayGetCount(array: CFTypeRef) -> isize;
-        fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
         fn CFRelease(cf: CFTypeRef);
     }
 }
@@ -278,18 +199,6 @@ impl Cf {
     fn string(&self) -> Option<String> {
         // SAFETY: a valid CF value.
         unsafe { to_string(self.0) }
-    }
-
-    fn strings(&self) -> Vec<String> {
-        // SAFETY: a valid CF value; array elements are borrowed.
-        unsafe {
-            if CFGetTypeID(self.0) != CFArrayGetTypeID() {
-                return Vec::new();
-            }
-            (0..CFArrayGetCount(self.0))
-                .filter_map(|i| to_string(CFArrayGetValueAtIndex(self.0, i)))
-                .collect()
-        }
     }
 }
 
@@ -380,61 +289,6 @@ mod tests {
     }
 
     #[test]
-    fn macos_language_tags_as_android_locales() {
-        let l = |tag, region| android_locale(tag, region);
-        assert_eq!(l("ko-KR", None).as_deref(), Some("ko-KR"));
-        assert_eq!(l("ko", Some("KR")).as_deref(), Some("ko-KR"));
-        assert_eq!(l("en-US", Some("KR")).as_deref(), Some("en-US"));
-        assert_eq!(l("zh-Hans", Some("CN")).as_deref(), Some("zh-Hans-CN"));
-        assert_eq!(l("zh-Hant-TW", Some("KR")).as_deref(), Some("zh-Hant-TW"));
-        assert_eq!(l("zh_Hant_HK", None).as_deref(), Some("zh-Hant-HK"));
-        assert_eq!(l("sr-Latn", None).as_deref(), Some("sr-Latn"));
-        assert_eq!(l("sr-Latn-RS", None).as_deref(), Some("sr-Latn-RS"));
-        assert_eq!(l("es-419", Some("MX")).as_deref(), Some("es-419"));
-        assert_eq!(l("yue-Hant", Some("HK")).as_deref(), Some("yue-Hant-HK"));
-        assert_eq!(l("ca-ES-valencia", None).as_deref(), Some("ca-ES-valencia"));
-        assert_eq!(l("EN_gb", None).as_deref(), Some("en-GB"));
-        assert_eq!(l("en_US@rg=krzzzz", None).as_deref(), Some("en-US"));
-        assert_eq!(l("English", Some("US")), None);
-        assert_eq!(l("", None), None);
-        assert_eq!(l("en--US", None), None);
-    }
-
-    #[test]
-    fn region_of_apple_locale() {
-        assert_eq!(locale_region("ko_KR").as_deref(), Some("KR"));
-        assert_eq!(locale_region("zh-Hans_CN").as_deref(), Some("CN"));
-        assert_eq!(locale_region("en_US@rg=gbzzzz").as_deref(), Some("GB"));
-        assert_eq!(locale_region("es_419").as_deref(), Some("419"));
-        assert_eq!(locale_region("en"), None);
-    }
-
-    #[test]
-    fn primary_locale_is_the_first_nameable_language() {
-        let langs = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(
-            primary_locale(&langs(&["ko-KR", "en-US"]), Some("ko_KR")).as_deref(),
-            Some("ko-KR")
-        );
-        assert_eq!(
-            primary_locale(&langs(&["English", "ja"]), Some("ja_JP")).as_deref(),
-            Some("ja-JP")
-        );
-        assert_eq!(
-            primary_locale(&langs(&["en"]), Some("en_KR@rg=krzzzz")).as_deref(),
-            Some("en-KR")
-        );
-        assert_eq!(primary_locale(&[], Some("ko_KR")), None);
-    }
-
-    #[test]
-    fn dark_appearance_is_night_mode() {
-        assert_eq!(night_mode(Some("Dark")), "yes");
-        assert_eq!(night_mode(None), "no");
-        assert_eq!(night_mode(Some("Light")), "no");
-    }
-
-    #[test]
     fn mac_keyboard_layouts_as_android_layouts() {
         let l = keyboard_layout;
         assert_eq!(
@@ -451,6 +305,13 @@ mod tests {
             "keyboard_layout_english_us"
         );
         assert_eq!(l(""), "keyboard_layout_english_us");
+    }
+
+    #[test]
+    fn dark_appearance_is_night_mode() {
+        assert_eq!(night_mode(Some("Dark")), "yes");
+        assert_eq!(night_mode(None), "no");
+        assert_eq!(night_mode(Some("Light")), "no");
     }
 
     #[test]
