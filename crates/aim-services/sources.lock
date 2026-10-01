@@ -88,7 +88,7 @@ INTERFACES=(
   "android.app.IActivityTaskManager|system/framework/framework.jar|getFocusedRootTaskInfo,registerTaskStackListener,startSystemLockTaskMode,stopSystemLockTaskMode"
   "com.android.internal.app.IAppOpsService|system/framework/framework.jar|checkPackage,checkOperationForDevice,noteOperation,shouldCollectNotes,startWatchingModeWithFlags,startOperation,finishOperation,setUserRestriction,startWatchingActive"
   "android.permission.IPermissionManager|system/framework/framework.jar|checkPermission,grantRuntimePermission,revokeRuntimePermission,updatePermissionFlags,addOnPermissionsChangeListener"
-  "android.os.IUserManager|system/framework/framework.jar|isUserRunning,getProfileIds,hasUserRestriction,isUserVisible,getCredentialOwnerProfile"
+  "android.os.IUserManager|system/framework/framework.jar|isUserRunning,getProfileIds,hasUserRestriction,isUserVisible,getCredentialOwnerProfile,isUserUnlockingOrUnlocked"
   "android.app.trust.ITrustManager|system/framework/framework.jar|isDeviceLocked,registerDeviceLockedStateListener"
   "android.app.ITaskStackListener|system/framework/framework.jar|onTaskStackChanged"
   "com.android.internal.app.IAppOpsCallback|system/framework/framework.jar|*"
