@@ -43,12 +43,14 @@ public final class DeviceServices extends SystemService {
     private final UiModeBridge mUiMode;
     private final LocaleBridge mLocale = new LocaleBridge();
     private final PackageFeed mPackageFeed;
+    private final PackageWrites mPackageWrites;
 
     public DeviceServices(Context context) {
         super(context);
         mLocation = new LocationBridge(context);
         mUiMode = new UiModeBridge(context);
         mPackageFeed = new PackageFeed(context);
+        mPackageWrites = new PackageWrites(context);
     }
 
     @Override
@@ -143,7 +145,7 @@ public final class DeviceServices extends SystemService {
         try {
             IServiceHost service = IServiceHost.Stub.asInterface(host);
             service.attachBridge(new Bridge(getContext(), service, mLocation, mUiMode, mLocale,
-                    mPackageFeed));
+                    mPackageFeed, mPackageWrites));
             Slog.i(TAG, "bridge attached to the native service host");
         } catch (RemoteException e) {
             Slog.w(TAG, "cannot attach the bridge", e);
@@ -157,15 +159,17 @@ public final class DeviceServices extends SystemService {
         private final UiModeBridge uiMode;
         private final LocaleBridge locale;
         private final PackageFeed packageFeed;
+        private final PackageWrites packageWrites;
 
         Bridge(Context context, IServiceHost host, LocationBridge location, UiModeBridge uiMode,
-                LocaleBridge locale, PackageFeed packageFeed) {
+                LocaleBridge locale, PackageFeed packageFeed, PackageWrites packageWrites) {
             this.context = context;
             this.host = host;
             this.location = location;
             this.uiMode = uiMode;
             this.locale = locale;
             this.packageFeed = packageFeed;
+            this.packageWrites = packageWrites;
         }
 
         @Override
@@ -207,6 +211,12 @@ public final class DeviceServices extends SystemService {
         public IPackageFeed getPackageFeed(IPackageFeedHost host) {
             enforceSystemUid();
             return packageFeed.attach(host);
+        }
+
+        @Override
+        public void watchPackageWrites(IPackageWritesHost host) {
+            enforceSystemUid();
+            packageWrites.attach(host);
         }
 
         private static void enforceSystemUid() {

@@ -654,6 +654,27 @@ owner without side effects, and compared with the original's outcome.
   calling no daemon. After the original's commit, the owner compares
   its result with the original's delta, up to the per-device values
   first-boot.md lists (app ids, code path names, times).
+
+  As built (`crates/aim-services/src/package/write`): PackageManager has
+  no hook before a commit, so a binder write is answered from the latest
+  state the model observed before the driver took the call (each shadow
+  copy carries that instant), and its change applied to a replica of the
+  package's state in that user. `pm install` and `pm uninstall` run
+  inside system_server, so installs, updates and removals are found as
+  changes between observed states, each computed from the state before
+  it. The bridge's `PackageWrites` tells the model of each install
+  session's parameters (`IBridge.watchPackageWrites`,
+  `IPackageWritesHost`), sent before the installer commits it, and the
+  model joins a session to its install. Once a package has settled for
+  2 s, the model's result is compared with a fresh state of the
+  original; the shadow log carries the comparison as a `check` line, and
+  `tools/binder-shadow-report.py` counts the checks per operation.
+  Modelled: setComponentEnabledSetting and setApplicationEnabledSetting
+  (not yet a caller changing another package, #754), installs and
+  updates (app id, shared user, users' state; not yet signing and
+  libraries), removals for every user and for some users. Not yet: the
+  parser's oracle on installs (#760), restoring a system package,
+  suspension, preferred activities.
 - The parser's oracle runs here too: every APK the original parses
   (boot, install) is parsed natively and the parcels compared.
 - **Bar.** No unexplained difference over the device-side install

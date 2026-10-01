@@ -25,6 +25,7 @@ fn package(name: &str, app_id: i32, edit: impl FnOnce(&mut PackageState)) -> Pac
     let mut ps = PackageState {
         name: name.into(),
         app_id,
+        target_sdk_version: 35,
         ..PackageState::default()
     };
     ps.pkg = Some(Arc::new(AndroidPackage {
@@ -275,4 +276,226 @@ fn the_same_state_again_changes_nothing() {
     assert_eq!(exception(&a), None);
     let checks = due(&writes, pre);
     assert!(matches!(checks[0].outcome, CheckOutcome::Matched));
+}
+
+/// `state` with `name` installed as the original would: app id `app_id`,
+/// stopped and not launched in user 0.
+fn installed(name: &str, app_id: i32, edit: impl FnOnce(&mut PackageState)) -> PackageState {
+    package(name, app_id, |ps| {
+        ps.path = format!("/data/app/~~AbCd==/{name}-EfGh==");
+        let u = ps.users.get_mut(&0).unwrap();
+        *u = PackageUserState {
+            stopped: true,
+            not_launched: true,
+            first_install_time: 0x1234,
+            ..PackageUserState::default()
+        };
+        edit(ps)
+    })
+}
+
+fn assert_matched(check: &Check) {
+    match &check.outcome {
+        CheckOutcome::Matched => {}
+        CheckOutcome::Differed { original, model } => {
+            panic!("{}: original {original:?}, model {model:?}", check.subject)
+        }
+        CheckOutcome::NotModelled(reason) => panic!("{}: not modelled: {reason}", check.subject),
+    }
+}
+
+fn change_checks(pre: &Arc<State>, post: &Arc<State>) -> Vec<Check> {
+    let writes = Writes::default();
+    writes.observe(pre);
+    writes.observe(post);
+    due(&writes, post.clone())
+}
+
+#[test]
+fn an_install_takes_the_first_free_app_id() {
+    let pre = state(|s| {
+        s.packages.get_mut(OTHER).unwrap().app_id = 10102;
+    });
+    let post = state(|s| {
+        s.packages.get_mut(OTHER).unwrap().app_id = 10102;
+        let p = installed("org.example.new", 10000, |_| {});
+        s.packages.insert(p.name.clone(), p);
+    });
+    let checks = change_checks(&pre, &post);
+    assert_eq!(checks.len(), 1);
+    assert_eq!(
+        (checks[0].operation.as_str(), checks[0].subject.as_str()),
+        ("install", "org.example.new")
+    );
+    assert_matched(&checks[0]);
+
+    // Another app id is a difference.
+    let post = state(|s| {
+        s.packages.get_mut(OTHER).unwrap().app_id = 10102;
+        let p = installed("org.example.new", 10103, |_| {});
+        s.packages.insert(p.name.clone(), p);
+    });
+    let checks = change_checks(&pre, &post);
+    assert!(matches!(checks[0].outcome, CheckOutcome::Differed { .. }));
+}
+
+#[test]
+fn a_removal_leaves_its_shared_user_and_installer_records() {
+    use crate::package::model::SharedUser;
+    let shared = |packages: &[&str]| SharedUser {
+        name: "org.example.shared".into(),
+        app_id: 10200,
+        packages: packages.iter().map(|p| p.to_string()).collect(),
+        ..SharedUser::default()
+    };
+    let pre = state(|s| {
+        let a = s.packages.get_mut(APP).unwrap();
+        a.app_id = 10200;
+        a.shared_user = Some("org.example.shared".into());
+        s.packages.get_mut(OTHER).unwrap().install_source.installer = Some(APP.into());
+        s.shared_users
+            .insert("org.example.shared".into(), shared(&[APP]));
+    });
+    let post = state(|s| {
+        s.packages.remove(APP);
+        s.packages.get_mut(OTHER).unwrap().install_source.installer = None;
+    });
+    let checks = change_checks(&pre, &post);
+    assert_eq!(checks[0].operation, "removal");
+    assert_matched(&checks[0]);
+
+    // The shared user kept is a difference.
+    let post = state(|s| {
+        s.packages.remove(APP);
+        s.packages.get_mut(OTHER).unwrap().install_source.installer = None;
+        s.shared_users
+            .insert("org.example.shared".into(), shared(&[]));
+    });
+    let checks = change_checks(&pre, &post);
+    assert!(matches!(checks[0].outcome, CheckOutcome::Differed { .. }));
+}
+
+#[test]
+fn a_system_package_s_first_update_keeps_it_disabled() {
+    let system = |ps: &mut PackageState| {
+        ps.is.system = true;
+        ps.path = "/product/app/Other".into();
+    };
+    let pre = state(|s| system(s.packages.get_mut(OTHER).unwrap()));
+    let post = state(|s| {
+        let disabled = s.packages.get(OTHER).cloned().map(|mut d| {
+            system(&mut d);
+            d
+        });
+        s.disabled_system_packages
+            .insert(OTHER.into(), disabled.unwrap());
+        let p = s.packages.get_mut(OTHER).unwrap();
+        p.is.system = true;
+        p.is.updated_system_app = true;
+        p.path = format!("/data/app/~~x==/{OTHER}-y==");
+    });
+    let checks = change_checks(&pre, &post);
+    assert_eq!(checks[0].operation, "update");
+    assert_matched(&checks[0]);
+}
+
+#[test]
+fn a_user_removal_resets_the_user_s_state() {
+    let system = |ps: &mut PackageState| {
+        ps.is.system = true;
+        ps.path = "/product/app/Other".into();
+    };
+    let pre = state(|s| system(s.packages.get_mut(OTHER).unwrap()));
+    let post = state(|s| {
+        let p = s.packages.get_mut(OTHER).unwrap();
+        system(p);
+        *p.users.get_mut(&0).unwrap() = PackageUserState {
+            installed: false,
+            stopped: true,
+            not_launched: true,
+            ..PackageUserState::default()
+        };
+    });
+    let checks = change_checks(&pre, &post);
+    assert_eq!(checks[0].operation, "user removal");
+    assert_matched(&checks[0]);
+}
+
+#[test]
+fn a_session_reads_as_the_bridge_writes_it() {
+    let mut p = Parcel::new();
+    p.write_string16(Some(APP));
+    for v in [-1, 1, 0x400002, 4] {
+        p.write_i32(v);
+    }
+    p.write_string16(Some("com.android.vending"));
+    for v in [10050, -1, 3, 0, 0, 0, -1, 1] {
+        p.write_i32(v);
+    }
+    p.write_string16(None);
+    let s = session::Session::read(7, p.data()).unwrap();
+    assert_eq!(
+        s,
+        session::Session {
+            id: 7,
+            package: Some(APP.into()),
+            user: -1,
+            mode: 1,
+            install_flags: 0x400002,
+            install_reason: 4,
+            installer: Some("com.android.vending".into()),
+            installer_uid: 10050,
+            originating_uid: -1,
+            package_source: 3,
+            parent: -1,
+            committed: true,
+            ..session::Session::default()
+        }
+    );
+}
+
+#[test]
+fn an_install_session_decides_the_install_reason_and_the_enabler() {
+    let s = session::Session {
+        user: -1,
+        install_reason: 4,
+        installer: Some("com.android.vending".into()),
+        ..session::Session::default()
+    };
+    let pre = state(|_| {});
+    let new = installed("org.example.new", 10000, |ps| {
+        let u = ps.users.get_mut(&0).unwrap();
+        u.install_reason = 4;
+        u.last_disable_app_caller = Some("com.android.vending".into());
+    });
+    let pkg = new.pkg.clone().unwrap();
+    let post = state(|st| {
+        st.packages.insert(new.name.clone(), new.clone());
+    });
+    let kind = change::Kind::Install;
+    let model = change::model(
+        kind,
+        &pre,
+        &post,
+        "org.example.new",
+        Some(&pkg),
+        Some(&s),
+        0,
+    );
+    let original = change::original(kind, &pre, &post, "org.example.new", true);
+    assert_eq!(model.unwrap(), original);
+
+    // An update keeps the reason the user installed it with, and is
+    // enabled by its installer.
+    let updated = state(|st| {
+        let p = st.packages.get_mut(APP).unwrap();
+        p.path = format!("/data/app/~~z==/{APP}-w==");
+        let u = p.users.get_mut(&0).unwrap();
+        u.last_disable_app_caller = Some("com.android.vending".into());
+    });
+    let pkg = updated.packages[APP].pkg.clone().unwrap();
+    let kind = change::Kind::Update;
+    let model = change::model(kind, &pre, &updated, APP, Some(&pkg), Some(&s), 0);
+    let original = change::original(kind, &pre, &updated, APP, true);
+    assert_eq!(model.unwrap(), original);
 }

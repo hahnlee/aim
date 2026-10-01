@@ -82,7 +82,9 @@ pub trait ShadowModel: Send + Sync {
 pub struct Check {
     pub service: String,
     pub descriptor: String,
-    /// The calls it covers: each one's sequence number and code.
+    /// What the calls did, e.g. an install.
+    pub operation: String,
+    /// The calls it covers, if any: each one's sequence number and code.
     pub calls: Vec<(u64, u32)>,
     /// What was compared, e.g. a package in a user.
     pub subject: String,
@@ -106,6 +108,8 @@ impl Check {
         value::json_string(&self.service, &mut line);
         line.push_str(",\"descriptor\":");
         value::json_string(&self.descriptor, &mut line);
+        line.push_str(",\"operation\":");
+        value::json_string(&self.operation, &mut line);
         line.push_str(",\"calls\":[");
         for (i, (seq, code)) in self.calls.iter().enumerate() {
             if i > 0 {

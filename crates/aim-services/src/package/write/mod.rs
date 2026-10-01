@@ -11,8 +11,13 @@
 //! and user apply to the replica in turn. Once none came for [`SETTLE`],
 //! every write has reached the original, and the replica is compared with
 //! a fresh state of it ([`Writes::checks`]).
+//!
+//! Installs, updates and removals are found as changes between observed
+//! states ([`change`]) and compared the same way, once settled.
 
+mod change;
 mod enabled;
+mod session;
 #[cfg(test)]
 mod tests;
 
@@ -28,6 +33,7 @@ use super::info::user_state;
 use super::model::{PackageState, State};
 use super::query::{Query, States};
 use crate::shadow::{Answer, Check, CheckOutcome, ShadowCall, Value};
+use session::Sessions;
 
 /// How long a package's state in a user takes no write before the
 /// replica is compared with the original's.
@@ -51,6 +57,22 @@ struct Inner {
     filter: Option<(Arc<State>, Arc<AppsFilter>)>,
     /// The package states being written, by package and user.
     tracks: BTreeMap<(String, i32), Track>,
+    /// The packages installed, updated or removed, in the order found.
+    changes: Vec<Change>,
+    /// `AppIdSettingMap`'s first available app id: raised past each app
+    /// id a removal frees, from system_server's start.
+    first_available: i32,
+    /// The install sessions the bridge tells of, once watched.
+    sessions: Option<Arc<Sessions>>,
+}
+
+/// A package's install, update or removal, waiting to settle.
+struct Change {
+    name: String,
+    kind: change::Kind,
+    /// The state before it.
+    pre: Arc<State>,
+    found: Instant,
 }
 
 /// One package's state in one user while it is written.
@@ -100,6 +122,12 @@ impl Enabled {
 }
 
 impl Writes {
+    /// Joins installs to the install sessions system_server's bridge
+    /// tells of from now on.
+    pub fn watch_sessions(&self, system: &Arc<crate::system::System>) {
+        self.inner.lock().unwrap().sessions = Some(Sessions::start(system));
+    }
+
     /// Keeps `state`, observed now, as a pre-state of the writes taken
     /// from now on.
     pub fn observe(&self, state: &Arc<State>) {
@@ -111,6 +139,18 @@ impl Writes {
             .is_some_and(|(_, s)| Arc::ptr_eq(s, state))
         {
             return;
+        }
+        if let Some((_, prev)) = inner.seen.back().cloned() {
+            for (name, kind) in change::changes(&prev, state) {
+                if !inner.changes.iter().any(|c| c.name == name) {
+                    inner.changes.push(Change {
+                        name,
+                        kind,
+                        pre: prev.clone(),
+                        found: now,
+                    });
+                }
+            }
         }
         inner.seen.push_back((now, state.clone()));
         // The newest state older than HISTORY stays: it is the pre-state
@@ -201,38 +241,105 @@ impl Writes {
                 .filter_map(|k| inner.tracks.remove(&k).map(|t| (k, t)))
                 .collect()
         };
-        if due.is_empty() {
+        let changed: Vec<Change> = {
+            let mut inner = self.inner.lock().unwrap();
+            let (due, waiting) = std::mem::take(&mut inner.changes)
+                .into_iter()
+                .partition(|c| now.duration_since(c.found) >= SETTLE);
+            inner.changes = waiting;
+            due
+        };
+        if due.is_empty() && changed.is_empty() {
             return Vec::new();
         }
         let state = states(FRESH);
         if let Some(state) = &state {
             self.observe(state);
         }
-        due.into_iter()
-            .map(|((package, user), track)| {
-                let outcome = match (&track.not_modelled, &state) {
-                    (Some(reason), _) => CheckOutcome::NotModelled(reason.to_string()),
-                    (None, None) => CheckOutcome::NotModelled("no fresh state".into()),
-                    (None, Some(state)) => {
-                        let original = state.packages.get(&package).map(|ps| Enabled::of(ps, user));
-                        match original {
-                            Some(o) if o == track.replica => CheckOutcome::Matched,
-                            o => CheckOutcome::Differed {
-                                original: o.map_or(Value::Null, |o| o.value()),
-                                model: track.replica.value(),
-                            },
+        let mut checks: Vec<Check> = changed
+            .into_iter()
+            .map(|c| self.check_change(c, state.as_deref()))
+            .collect();
+        checks.extend(due.into_iter().map(|((package, user), track)| {
+            let outcome = match (&track.not_modelled, &state) {
+                (Some(reason), _) => CheckOutcome::NotModelled(reason.to_string()),
+                (None, None) => CheckOutcome::NotModelled("no fresh state".into()),
+                (None, Some(state)) => {
+                    let original = state.packages.get(&package).map(|ps| Enabled::of(ps, user));
+                    match original {
+                        Some(o) if o == track.replica => CheckOutcome::Matched,
+                        o => CheckOutcome::Differed {
+                            original: o.map_or(Value::Null, |o| o.value()),
+                            model: track.replica.value(),
+                        },
+                    }
+                }
+            };
+            Check {
+                service: "package".into(),
+                descriptor: pm::DESCRIPTOR.into(),
+                operation: "enabled settings".into(),
+                calls: track.calls,
+                subject: format!("{package} user {user}"),
+                outcome,
+            }
+        }));
+        checks
+    }
+
+    /// Compares a settled install, update or removal with the original's,
+    /// `post` the original's state now.
+    fn check_change(&self, c: Change, post: Option<&State>) -> Check {
+        let outcome = match post {
+            None => CheckOutcome::NotModelled("no fresh state".into()),
+            Some(post) => {
+                let mut inner = self.inner.lock().unwrap();
+                let pkg = post.packages.get(&c.name).and_then(|ps| ps.pkg.as_deref());
+                let session = match c.kind {
+                    change::Kind::Install | change::Kind::Update => {
+                        inner.sessions.as_ref().and_then(|s| s.installed(&c.name))
+                    }
+                    _ => None,
+                };
+                let model = change::model(
+                    c.kind,
+                    &c.pre,
+                    post,
+                    &c.name,
+                    pkg,
+                    session.as_ref(),
+                    inner.first_available,
+                );
+                if c.kind == change::Kind::Removal
+                    && let Some(id) = change::freed_app_id(&c.pre, post, &c.name)
+                {
+                    inner.first_available = inner.first_available.max(id + 1);
+                }
+                match model {
+                    Err(NotModelled(reason)) => CheckOutcome::NotModelled(reason.into()),
+                    Ok(model) => {
+                        let original =
+                            change::original(c.kind, &c.pre, post, &c.name, session.is_some());
+                        if original == model {
+                            CheckOutcome::Matched
+                        } else {
+                            CheckOutcome::Differed {
+                                original: original.value(),
+                                model: model.value(),
+                            }
                         }
                     }
-                };
-                Check {
-                    service: "package".into(),
-                    descriptor: pm::DESCRIPTOR.into(),
-                    calls: track.calls,
-                    subject: format!("{package} user {user}"),
-                    outcome,
                 }
-            })
-            .collect()
+            }
+        };
+        Check {
+            service: "package".into(),
+            descriptor: pm::DESCRIPTOR.into(),
+            operation: c.kind.name().into(),
+            calls: Vec::new(),
+            subject: c.name,
+            outcome,
+        }
     }
 }
 
