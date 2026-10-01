@@ -1,10 +1,12 @@
 # First boot
 
 Status: implemented (#565): item 4, the data image as a clone (#563);
-item 1, the device's APK compiled in the image; items 2 and 3, the
-package parser cache, PackageManager's state and the permission module's
-state in a build-time template ("The template"). A first boot reaches
-`sys.boot_completed` in about 4.9 s.
+item 1, the device's APK compiled in the image; item 3, PackageManager's
+state and the permission module's state in a build-time template ("The
+template"). Item 2, the package parser cache, is not shipped: it depends
+on the device's locale (#722). A first boot reached
+`sys.boot_completed` in about 4.9 s with the cache shipped; parsing on
+the device adds 0.2-0.5 s to it (item 2).
 
 A first boot (a new data directory) reaches `sys.boot_completed` in about
 11 s, a repeat boot of the same data in about 5.4 s. The difference is
@@ -97,9 +99,44 @@ system features (`<uses-permission android:requiredFeature>`,
 (`androidboot.product.vendor.sku`, the `sku_<sku>` permission files), so
 a cache belongs to one image and one SKU.
 
-The 286 entries were byte-identical in fb1 and fb2. The original reads
-the cache on every repeat boot; reading it on a first boot is the same
-code path with the same result, and it holds no per-device value.
+The 286 entries were byte-identical in fb1 and fb2, but they are not
+the image's alone: a parse resolves resource references for the parsing
+configuration, the device's default locale (`ResourcesImpl` takes
+`LocaleList.getDefault()`, which is `persist.sys.locale`) and its default
+display's metrics (`ParsingPackageUtils` makes `new Resources(assets,
+mDisplayMetrics, null)`). So `<meta-data android:value="@string/...">` is
+cached as the string of the locale the parse ran in: PrebuiltBugle,
+PrebuiltGmsCore, WellbeingPrebuilt and Velvet hold Korean strings in a
+cache made in `ko-KR`, and the package parser's oracle
+(`aim-package-parse --locale en-US`) finds their `metaData` different in
+`en-US`. Neither the cache's name nor `isCacheFileUpToDate` looks at the
+configuration, and the original never re-resolves an entry: a phone
+keeps its first boot's values when its user changes the language (an
+AOSP quirk), and its first boot runs in the factory locale
+(`ro.product.locale`). The density is the image's (`ro.sf.lcd_density`,
+init.aim.rc); the locale is the Mac's, which AIM sets before the first
+boot (`setprop persist.sys.locale` in `post-fs-data`,
+docs/mac-settings.md).
+
+A cache made by the build boot would therefore carry the build Mac's
+language into every data directory. **The template does not ship it.**
+The device's first boot parses every package as a repeat boot without a
+cache does (`preparePackageParserCache` makes the directory) and writes
+the cache in the device's own locale, as a first boot without a template
+does. A later change of the Mac's language keeps the entries, as on a
+phone.
+
+Checked 2026-10-02 (ops checks fbcache-1 and -2, Mac in `ko-KR`): the
+285 entries of a template first boot and of a first boot without a
+template are byte-identical (the Korean `metaData` of the four packages
+included), as are their `pm list packages -f -U` up to uids and the
+stubs' code path names; the template first boot also caches the three
+stubs' `/data/app` copies, which an original first boot scans before it
+decompresses them. The parse costs the template first boot 0.2-0.5 s of
+the system scan (`system_scan_start` to its end 0.63 and 1.03 s, against
+0.42 and 0.48 s on the repeat boots of the same data; host load 8-18). A
+boot in another locale was not run: the device's first locale is the
+Mac's, and the check changes no Mac settings.
 
 ### 3. PMS's state: `packages.xml` and the decompressed stubs
 
@@ -137,7 +174,6 @@ module:
 | --- | --- |
 | `system/packages.xml`, its `.reservecopy`, `system/packages.list` | package settings; the uid list for native daemons |
 | `system/users/0/package-restrictions.xml`, its `.reservecopy` | user 0's package state: installed, enabled, stopped, preferred activities |
-| `system/package_cache/<fingerprint>/` | item 2 |
 | `app/~~*/<pkg>-*/` of the three stubs | the decompressed APKs and their `oat/` |
 | `dalvik-cache/arm64/` | what first-boot dexopt compiled for the APKs inside APEXes |
 | `misc/apexdata/com.android.permission/access.abx`; `misc_de/0/apexdata/com.android.permission/{access.abx,runtime-permissions.xml,roles.xml}`; each with its `.reservecopy` | the permission module's state of the device and of user 0: runtime permissions with their flags and app ops, the default grants' fingerprint, roles (the user's decision on #565) |
@@ -224,8 +260,7 @@ mechanism with content.
 
 The `userdata/template` node of `cargo aim` (after AOSP's data
 partition image; `crates/aim-build/src/nodes/userdata.rs`) runs the
-original's first boot at build time and keeps the shipped set of item 3,
-the parser cache with it:
+original's first boot at build time and keeps the shipped set of item 3:
 
 1. **Boot.** guest-init boots the derived image on a scratch data
    directory made from the empty image, the same boot as a user's first
@@ -242,7 +277,8 @@ the parser cache with it:
    set, and step 2 fails the build if it reached `packages.xml`.
 2. **Check.** The settings list only the image's packages (no package an
    installer added; the stubs' directories exist), have no verifier
-   identity, and record the image's fingerprint, the parser cache's name.
+   identity, and record the image's fingerprint, the name of the build
+   boot's parser cache.
 3. **Copy.** A new, empty data image receives the shipped paths from the
    build boot's image and the copies, with owners, labels and mtimes
    (`aim_storage::copy`). A copy into a fresh volume, not a deletion
@@ -283,8 +319,8 @@ identities, keys and seeds.
 
 - **Structure.** Two builds of the template must give the same shipped
   set up to the values listed in item 3: an integration test compares the
-  parser caches byte for byte, the stubs' APKs byte for byte, and
-  `packages.xml` and `package-restrictions.xml` with those values
+  stubs' APKs byte for byte, and `packages.xml` and
+  `package-restrictions.xml` with those values
   normalized (times, uids, key set ids, code path names, domain set ids,
   the owner of a permission two packages declare). A new kind of
   per-boot value in PMS's output then fails the test instead of being
@@ -360,13 +396,13 @@ First boot to `sys.boot_completed`, from the check above (host load
 | --- | --- |
 | 4: the data image as a clone | 0.5 s (#563) |
 | 1: the device's APK compiled in the image | one of 24 dexopt packages |
-| 2 + 3: the template | the stubs (2.9 s), the uncached part of the scan (0.2 s), dexopt (2.0 s), most of the first-boot part of `write settings` (up to 0.15 s): about 5.2 s |
+| 3: the template | the stubs (2.9 s), dexopt (2.0 s), most of the first-boot part of `write settings` (up to 0.15 s): about 5 s |
 
 With all of it, a first boot is a repeat boot plus the device's own work
-outside PMS (user 0, settings, keys, default grants) and the core app
-directories: about 5.5 s at these loads (10.9 s less the 5.7 s above,
-with the core directories and the rest of `ams_ready` to the first draw
-still first-boot work), against 5.4 s for the repeat boot. The last step to 5 s at low load is the repeat boot's own
+outside PMS (user 0, settings, keys, default grants), the system scan's
+parse (item 2) and the core app directories: about 5.5-6 s at these
+loads (10.9 s less the 5 s above, with the parse, the core directories
+and the rest of `ams_ready` to the first draw still first-boot work), against 5.4 s for the repeat boot. The last step to 5 s at low load is the repeat boot's own
 time (#529 and the pre-zygote work).
 
 ## Risks
@@ -414,6 +450,7 @@ time (#529 and the pre-zygote work).
 2. The device's APK compiled by the `oat` node (item 1): image only.
 3. The `userdata` node shipping the parser cache alone (item 2), with the
    structure check: proves the build boot, the copy with owners, labels
-   and mtimes, and the keys, with an output that has no per-device value.
+   and mtimes, and the keys. The cache later proved to depend on the
+   locale and left the template (#722).
 4. PMS's state (item 3), after the decision, with the parity check and
    CTS against an original first boot.

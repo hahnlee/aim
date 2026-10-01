@@ -278,7 +278,11 @@ permission state (docs/first-boot.md), PackageManager takes 0.57 s from
 `pms_start` to `pms_ready` (3.90 s on an original first boot: the scan,
 the stubs' decompression) and 0.47 s to `ams_ready` (2.64 s: boot
 dexopt), and `sys.boot_completed` comes at 4.9 s (10.6 s without the
-template; host load 9-18, 2026-10-01). Between the mount and zygote-start, init runs its exec
+template; host load 9-18, 2026-10-01). Those times had the parser cache
+in the template; it depends on the device's locale and is no longer
+shipped (#722), so the scan parses every package: 0.63-1.03 s against
+0.42-0.48 s on a repeat boot, `pms_start` to `pms_ready` 0.85-1.35 s
+(host load 8-14, 2026-10-02). Between the mount and zygote-start, init runs its exec
 programs one after another (about 25-120 ms each, mostly starting
 `linux-run`); the longest are bpfloader (0.3-0.6 s) and
 `aconfigd-mainline init` (0.12-0.36 s) (#529). bpfloader's 0.32 s
