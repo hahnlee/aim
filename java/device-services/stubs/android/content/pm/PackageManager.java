@@ -13,6 +13,10 @@ public abstract class PackageManager {
     public static final int GET_PERMISSIONS = 4096;
     public static final int FLAG_PERMISSION_POLICY_FIXED = 4;
     public static final int FLAG_PERMISSION_SYSTEM_FIXED = 16;
+    public static final String FEATURE_TELEVISION = "android.hardware.type.television";
+    public static final String FEATURE_LEANBACK = "android.software.leanback";
+    public static final String FEATURE_AUTOMOTIVE = "android.hardware.type.automotive";
+    public static final String FEATURE_WATCH = "android.hardware.type.watch";
 
     public static class NameNotFoundException extends android.util.AndroidException {}
 
@@ -20,4 +24,5 @@ public abstract class PackageManager {
 
     public abstract PackageInfo getPackageInfoAsUser(String packageName, int flags, int userId) throws NameNotFoundException;
     public abstract int getPermissionFlags(String permName, String packageName, UserHandle user);
+    public abstract boolean hasSystemFeature(String featureName);
 }

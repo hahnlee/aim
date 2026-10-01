@@ -2,6 +2,8 @@ package dev.aim.server;
 
 import dev.aim.server.ILocationBridge;
 import dev.aim.server.ILocationHost;
+import dev.aim.server.IUiModeBridge;
+import dev.aim.server.IUiModeHost;
 
 /**
  * What the native system services need from system_server's internals
@@ -27,4 +29,10 @@ interface IBridge {
      * location service's side of it.
      */
     ILocationBridge getLocationBridge(ILocationHost host);
+
+    /**
+     * The uimode bridge (IUiModeBridge), for `host`, the native uimode
+     * service's side of it.
+     */
+    IUiModeBridge getUiModeBridge(IUiModeHost host);
 }

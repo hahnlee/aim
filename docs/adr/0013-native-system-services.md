@@ -201,6 +201,19 @@ The migration's state and conformance results are in
   source files of system_server use, and `uimode`, whose configuration
   changes go through ActivityTaskManager's internals.
 
+### M2: uimode (2026-10-01)
+
+- `uimode` is native: the original `UiModeManagerService` with the
+  Mac's appearance as the night mode (read, never changed) and night mode
+  managed by the system (`isNightModeLocked`, requests answered as the
+  original answers them under `config_lockDayNightMode`). Its
+  configuration changes, an app's night mode, broadcasts, notification,
+  dock apps, dreams and wake lock go through the bridge
+  (`UiModeBridge`, `IUiModeBridge`, `IUiModeHost`; image additions only
+  in the existing `aim-services.jar`). `UiModeManagerTest`
+  (CtsAppTestCases) ends each test as the original
+  (docs/system-services.md, "The uimode service").
+
 ### The system_server bridge (design, 2026-09-30)
 
 - What native services need from system_server internals (URI grant

@@ -13,6 +13,7 @@ every step: replace superseded facts instead of appending a log.
 | `vibrator_manager` (IVibratorManagerService), `external_vibrator_service` | native, `crates/aim-services`: the original without a vibrator, as on a Mac | CtsVibratorTestCases: 268 of 301 pass, 33 skip (no vibrator), each test as the original | M2, 2026-09-30 |
 | `location` (ILocationManager) | native, `crates/aim-services`: gps from CoreLocation, network, fused and the geocoder bound from Google Play services through the bridge | CtsLocation{Fine,Coarse,None,Gnss,Privileged}TestCases: each test as the original (234 pass, 10 skip, 3 fail and 2 hang in GNSS tests without a fix) | M2, 2026-09-30 |
 | `thermalservice` (IThermalService) | native, `crates/aim-services`: the Mac's thermal state as the `SKIN` status, its CPU and battery temperatures | CtsThermalTestCases and CtsOsTestCases `PowerManager_ThermalTest`: each test as the original (12 pass, 2 skip without a headroom) | M2, 2026-10-01 |
+| `uimode` (IUiModeManager) | native, `crates/aim-services`: night mode follows the Mac's appearance, managed by the system | CtsAppTestCases `UiModeManagerTest`: each test as the original (49 pass, 7 skip without visible background users) | M2, 2026-10-01 |
 | every other service | the original, in SystemServer or its daemon | | |
 
 ## How a service is replaced
@@ -1060,6 +1061,97 @@ to `thermalservice`):
 Reading the Mac's temperatures is the cost of `getCurrentTemperatures`
 either way (#625). Settings started cold in 226 and 228 ms with the
 original, 218 and 214 ms native.
+
+## The uimode service
+
+`crates/aim-services/src/uimode/` serves `uimode` (IUiModeManager), the
+one binder SystemServer's `UiModeManagerService` publishes, following
+`UiModeManagerService.java` at the tag with the Mac as the owner of
+night mode, in its place (`image/native-services`).
+
+- **The Mac's appearance** (`mac.rs`): `AppleInterfaceStyle` of the
+  global domain through CFPreferences (`Dark`, or absent in Light; macOS
+  keeps it current in Auto), and `AppleInterfaceThemeChangedNotification`
+  from the distributed notification center, heard on a thread of its own
+  running a CFRunLoop. At start, over what was persisted, and on each
+  change, the night mode becomes yes (Dark) or no (Light), persisted to
+  `ui_night_mode` and applied at once, as a `setNightMode` by the
+  system. Android never changes the Mac's appearance.
+- **A system-managed night mode.** `isNightModeLocked` is true, as the
+  image's `config_lockDayNightMode` has it for the original: `setNightMode`, the custom
+  times and `setNightModeActivated*` without `MODIFY_DAY_NIGHT_MODE` are
+  refused as the original refuses them (logged; `false` where the
+  method returns one). With it (Settings, SystemUI's tile, the shell,
+  the CTS) they are answered as the original answers them, and the
+  result holds until the Mac changes, as `init.aim.rc`'s `cmd uimode
+  night` does for the original today ([mac-settings.md](mac-settings.md)).
+- **The rest is the original's**: the UI mode type (car, desk, VR, the
+  image's television and watch features, `config_lockUiMode`), car mode
+  by priority with its broadcasts, notification, status bar and dock
+  app, the dock and desk broadcasts, dreams when docked, the wake lock of
+  car and desk mode, battery saver's night mode, the twilight and custom
+  schedules (the custom schedule's alarm on the Mac's clock), attention
+  mode, per-app night mode, projection holders and listeners, contrast
+  and force invert with their callbacks, `persist.sys.theme`, the
+  clients' `getNightMode` and `getCurrentModeType` caches, the dump and
+  `cmd uimode`.
+- **Checks**: `MODIFY_DAY_NIGHT_MODE`, `ENTER_CAR_MODE_PRIORITIZED`,
+  `INTERACT_ACROSS_USERS`, `TOGGLE_AUTOMOTIVE_PROJECTION`,
+  `READ_PROJECTION_STATE` and `DUMP` through the #497 cache; a caller's
+  package through the mirrored `checkPackage`.
+
+**The bridge** (`UiModeBridge.java`, `IUiModeBridge`, `IUiModeHost`):
+what the original does inside system_server.
+
+| What | Why system_server |
+| --- | --- |
+| the global configuration (`ActivityTaskManager.updateConfiguration`, after `WindowManagerInternal.clearSnapshotCache`), a dock app started with its configuration (`startActivityWithConfig`, `Sandman`) | `Configuration` and `Intent` parcels, `LocalServices` |
+| an app's night mode (`ActivityTaskManagerInternal.createPackageConfigurationUpdater`, the process's package by `ActivityManagerInternal.getPackageNameByPid`) | a `LocalServices` interface |
+| the clients' caches (`UiModeManager.invalidateNightModeCache`, `invalidateCurrentModeTypeCache`) | the nonces are in system_server's shared memory |
+| `persist.sys.theme` | system_server's property context |
+| the car mode broadcasts, the dock mode's ordered broadcast and its result, the car mode notification and status bar, dreams when docked, the full wake lock | broadcasts, notifications and wake locks of the `android` package; `DreamManagerInternal`, `PowerManagerInternal`, `WindowManagerInternal` |
+| docking, charging, battery saver's night mode, twilight, screen off and dreaming, time changes, restored settings, shutdown, VR, user switches | receivers, `PowerManagerInternal`, `TwilightManager`, `IVrManager`, `SystemService` callbacks |
+| settings observers (`ui_night_mode`, contrast, force invert, setup complete) | `registerContentObserver` refuses a process ActivityManager does not know |
+| the resources and features of the original's configuration, the `forceInvertColor` flag | system_server's resources |
+
+The bridge attaches at `PHASE_DEVICE_SPECIFIC_SERVICES_READY`, where the
+original computes its configuration at `PHASE_SYSTEM_SERVICES_READY`;
+until then `getCurrentModeType` is undefined in both. No state lock is
+held across a call to system_server that changes something: a change's
+effects run after it, in the order the changes were made, before the
+call that made them returns.
+
+Not here: visible background users (`enforceCurrentUserIfVisibleBackgroundEnabled`
+decides nothing without them, as on this image). `init.aim.rc`'s `cmd
+uimode night` trigger on guest-init's `vendor.aim.mac.night_mode` now
+repeats what the service already did (#655).
+
+**Conformance** (2026-10-01, device mode; the pinned CTS has no
+separate uimode module, and no app-compat test calls the service):
+CtsAppTestCases' `android.app.cts.UiModeManagerTest` (56 tests, hidden
+API checks off as its config asks) ends each test as the original: 49
+pass, 7 skip (visible background users). `cmd uimode` prints the same
+for `help`, `night`, `car`, `time` and their bad arguments, with the
+same results (an exception's stack trace aside); `cmd uimode night
+yes|no` switches the global configuration (`night`/`notnight`) and
+leaves the Mac's appearance as it was. The original's start step no
+longer runs (no `Starting com.android.server.UiModeManagerService` or
+its boot phases; its `SystemServerTiming` line stays).
+
+**Cost** (the second boot of a data directory each, a binder trace; the
+driver's latency of each synchronous call to `uimode`, p50):
+
+| Call | Original | Native |
+| --- | --- | --- |
+| `addCallback` (13-15 at boot) | 92.3 us | 21.3 us |
+| `getCurrentModeType` (8-11) | 34.4 us | 20.9 us |
+| `getContrast` (13-15) | 62.7 us | 18.8 us |
+| `getForceInvertState` (13-15) | 50.2 us | 17.1 us |
+| `getNightModeCustomType` (6-10) | 42.3 us | 39.2 us |
+
+system_server's own calls (BatterySaverPolicy's projection listener)
+are binder calls now. Settings started cold in 208 and 184 ms with the
+original, 216 and 193 ms native (load 8-23).
 
 ## Conformance
 

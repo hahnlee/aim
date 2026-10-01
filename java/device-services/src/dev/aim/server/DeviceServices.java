@@ -32,10 +32,12 @@ public final class DeviceServices extends SystemService {
     private static final String SERVICE_HOST = "aim.service_host";
 
     private final LocationBridge mLocation;
+    private final UiModeBridge mUiMode;
 
     public DeviceServices(Context context) {
         super(context);
         mLocation = new LocationBridge(context);
+        mUiMode = new UiModeBridge(context);
     }
 
     @Override
@@ -64,6 +66,7 @@ public final class DeviceServices extends SystemService {
     @Override
     public void onUserSwitching(TargetUser from, TargetUser to) {
         mLocation.onUserSwitching(from.getUserIdentifier(), to.getUserIdentifier());
+        mUiMode.onUserSwitching(from.getUserIdentifier(), to.getUserIdentifier());
     }
 
     @Override
@@ -79,7 +82,7 @@ public final class DeviceServices extends SystemService {
         }
         try {
             IServiceHost service = IServiceHost.Stub.asInterface(host);
-            service.attachBridge(new Bridge(getContext(), service, mLocation));
+            service.attachBridge(new Bridge(getContext(), service, mLocation, mUiMode));
             Slog.i(TAG, "bridge attached to the native service host");
         } catch (RemoteException e) {
             Slog.w(TAG, "cannot attach the bridge", e);
@@ -90,11 +93,13 @@ public final class DeviceServices extends SystemService {
         private final Context context;
         private final IServiceHost host;
         private final LocationBridge location;
+        private final UiModeBridge uiMode;
 
-        Bridge(Context context, IServiceHost host, LocationBridge location) {
+        Bridge(Context context, IServiceHost host, LocationBridge location, UiModeBridge uiMode) {
             this.context = context;
             this.host = host;
             this.location = location;
+            this.uiMode = uiMode;
         }
 
         @Override
@@ -118,6 +123,12 @@ public final class DeviceServices extends SystemService {
         public ILocationBridge getLocationBridge(ILocationHost host) {
             enforceSystemUid();
             return location.attach(host);
+        }
+
+        @Override
+        public IUiModeBridge getUiModeBridge(IUiModeHost host) {
+            enforceSystemUid();
+            return uiMode.attach(host);
         }
 
         private static void enforceSystemUid() {

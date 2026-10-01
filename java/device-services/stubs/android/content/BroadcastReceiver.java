@@ -6,5 +6,6 @@ public abstract class BroadcastReceiver {
     public BroadcastReceiver() { throw new RuntimeException("stub"); }
     public abstract void onReceive(Context context, Intent intent);
     public final void setResultCode(int code) { throw new RuntimeException("stub"); }
+    public final int getResultCode() { throw new RuntimeException("stub"); }
     public int getSendingUserId() { throw new RuntimeException("stub"); }
 }

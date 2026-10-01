@@ -8,4 +8,5 @@ public abstract class PowerManagerInternal {
     public PowerManagerInternal() { throw new RuntimeException("stub"); }
     public abstract void registerLowPowerModeObserver(int serviceType, Consumer<PowerSaveState> listener);
     public abstract PowerSaveState getLowPowerState(int serviceType);
+    public abstract boolean isAmbientDisplaySuppressed();
 }

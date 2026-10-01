@@ -787,7 +787,7 @@ fn java_int(s: &str) -> std::result::Result<i32, String> {
 
 /// `Float.parseFloat`: a decimal with an optional `f` or `d` suffix,
 /// `NaN` or `Infinity`, around blanks.
-fn java_float_parse(s: &str) -> Option<f32> {
+pub(crate) fn java_float_parse(s: &str) -> Option<f32> {
     let t = s.trim();
     let t = t.strip_suffix(['f', 'F', 'd', 'D']).unwrap_or(t);
     let (sign, body) = match t.strip_prefix('-') {

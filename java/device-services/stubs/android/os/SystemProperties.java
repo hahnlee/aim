@@ -5,4 +5,5 @@ package android.os;
 public class SystemProperties {
     public static boolean getBoolean(String key, boolean def) { throw new RuntimeException("stub"); }
     private SystemProperties() { throw new RuntimeException("stub"); }
+    public static void set(String key, String val) { throw new RuntimeException("stub"); }
 }
