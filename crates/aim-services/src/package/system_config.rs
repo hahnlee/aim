@@ -40,6 +40,8 @@ pub struct SystemConfig {
     /// `mAvailableFeatures`, as added: name and version.
     pub features: Vec<(String, i32)>,
     pub hidden_api_allowlist: Vec<String>,
+    /// `mNamedActors`: namespace, actor name and package.
+    pub named_actors: Vec<(String, String, String)>,
     unavailable: Vec<String>,
 }
 
@@ -166,6 +168,20 @@ impl SystemConfig {
                         self.hidden_api_allowlist.push(package.into_owned());
                     }
                 }
+                // Any directory may name actors; a duplicate or one in the
+                // android namespace stops the original's system server.
+                "named-actor" => {
+                    let attr = |n| {
+                        e.string(n)
+                            .filter(|v| !v.is_empty())
+                            .map(|v| v.into_owned())
+                    };
+                    if let (Some(namespace), Some(actor), Some(package)) =
+                        (attr("namespace"), attr("name"), attr("package"))
+                    {
+                        self.named_actors.push((namespace, actor, package));
+                    }
+                }
                 _ => {}
             }
         }
@@ -240,6 +256,7 @@ pub fn system(root: &Path, prop: &dyn Fn(&str) -> Option<String>, framework: &Fr
         // `FeatureInfo.GL_ES_VERSION_UNDEFINED` without the property.
         gl_es_version: int(prop("ro.opengles.version")).unwrap_or(0),
         hidden_api_allowlist: config.hidden_api_allowlist,
+        named_actors: config.named_actors,
         use_round_icon: framework.use_round_icon,
         // Settings.Global.compatibility_mode's default; PackageManager reads
         // the setting at systemReady (#737).
@@ -277,7 +294,7 @@ mod tests {
         write(
             &root,
             "vendor/etc/permissions/v.xml",
-            r#"<permissions><feature name="v" /><hidden-api-whitelisted-app package="not.allowed" /></permissions>"#,
+            r#"<permissions><feature name="v" /><hidden-api-whitelisted-app package="not.allowed" /><named-actor namespace="ns" name="a" package="v.actor" /><named-actor namespace="ns" name="" package="none" /></permissions>"#,
         );
         write(
             &root,
@@ -316,6 +333,11 @@ mod tests {
             ]
         );
         assert_eq!(c.hidden_api_allowlist, ["org.example"]);
+        // Any partition names actors; one without a name is skipped.
+        assert_eq!(
+            c.named_actors,
+            [("ns".to_string(), "a".to_string(), "v.actor".to_string())]
+        );
 
         let low_ram = |name: &str| (name == "ro.config.low_ram").then(|| "true".to_string());
         let c = SystemConfig::read(&root, &low_ram);
