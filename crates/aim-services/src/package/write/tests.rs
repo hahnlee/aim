@@ -101,6 +101,7 @@ fn answer(writes: &Writes, uid: u32, seq: u64, sent: Instant, call: (u32, Parcel
             sender_euid: uid,
             seq,
             sent,
+            dropped: 0,
             data: Reader::new(data.data(), &[]),
         })
         .expect("a write")
@@ -130,7 +131,7 @@ fn due(writes: &Writes, state: Arc<State>) -> Vec<Check> {
 fn an_app_changes_its_components_and_the_original_agrees() {
     let writes = Writes::default();
     let pre = state(|_| {});
-    writes.observe(&pre);
+    writes.observe(&pre, 0);
     let sent = Instant::now();
     let a = answer(&writes, 10100, 1, sent, set(Some(MAIN), APP, 2));
     assert_eq!(exception(&a), None);
@@ -165,7 +166,7 @@ fn an_app_changes_its_components_and_the_original_agrees() {
 fn a_difference_shows_both_states() {
     let writes = Writes::default();
     let pre = state(|_| {});
-    writes.observe(&pre);
+    writes.observe(&pre, 0);
     answer(&writes, 10100, 1, Instant::now(), set(None, APP, 3));
     // The original did not change the package.
     let checks = due(&writes, pre);
@@ -200,7 +201,7 @@ fn the_pre_state_is_older_than_the_call() {
     let writes = Writes::default();
     let sent = Instant::now();
     std::thread::sleep(Duration::from_millis(2));
-    writes.observe(&state(|_| {}));
+    writes.observe(&state(|_| {}), 0);
     let a = answer(&writes, 10100, 1, sent, set(Some(MAIN), APP, 2));
     assert!(
         matches!(a, Answer::NotModelled),
@@ -211,7 +212,7 @@ fn the_pre_state_is_older_than_the_call() {
 #[test]
 fn the_original_s_exceptions() {
     let writes = Writes::default();
-    writes.observe(&state(|_| {}));
+    writes.observe(&state(|_| {}), 0);
     let now = Instant::now();
     let a = answer(&writes, 10100, 1, now, set(Some(MAIN), OTHER, 2));
     assert_eq!(
@@ -262,7 +263,7 @@ fn the_original_s_exceptions() {
 #[test]
 fn another_package_s_protection_is_not_modelled() {
     let writes = Writes::default();
-    writes.observe(&state(|_| {}));
+    writes.observe(&state(|_| {}), 0);
     let a = answer(&writes, 1000, 1, Instant::now(), set(None, APP, 2));
     assert!(matches!(a, Answer::NotModelled));
 }
@@ -271,7 +272,7 @@ fn another_package_s_protection_is_not_modelled() {
 fn the_same_state_again_changes_nothing() {
     let writes = Writes::default();
     let pre = state(|_| {});
-    writes.observe(&pre);
+    writes.observe(&pre, 0);
     let a = answer(&writes, 10100, 1, Instant::now(), set(Some(B), APP, 2));
     assert_eq!(exception(&a), None);
     let checks = due(&writes, pre);
@@ -306,8 +307,8 @@ fn assert_matched(check: &Check) {
 
 fn change_checks(pre: &Arc<State>, post: &Arc<State>) -> Vec<Check> {
     let writes = Writes::default();
-    writes.observe(pre);
-    writes.observe(post);
+    writes.observe(pre, 0);
+    writes.observe(post, 0);
     due(&writes, post.clone())
 }
 
@@ -538,4 +539,42 @@ fn an_install_s_signers_are_verified_from_its_apks() {
     );
     assert_eq!(signatures.signatures.len(), 1);
     assert_eq!(signatures.past_signatures.map(|p| p.len()), Some(2));
+}
+
+#[test]
+fn only_what_the_writes_named_is_compared() {
+    let writes = Writes::default();
+    let pre = state(|_| {});
+    writes.observe(&pre, 0);
+    answer(&writes, 10100, 1, Instant::now(), set(Some(MAIN), APP, 2));
+    // system_server enabled B itself, in process: not the app's write.
+    let post = state(|s| {
+        let u = s.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap();
+        u.disabled_components = vec![MAIN.into()];
+        u.enabled_components = vec![B.into()];
+    });
+    let checks = due(&writes, post);
+    assert_matched(&checks[0]);
+}
+
+#[test]
+fn a_package_written_while_copies_were_dropped_is_not_compared() {
+    let writes = Writes::default();
+    let pre = state(|_| {});
+    writes.observe(&pre, 3);
+    let (code, data) = set(Some(MAIN), APP, 2);
+    writes.answer(&mut ShadowCall {
+        service: "package",
+        descriptor: pm::DESCRIPTOR,
+        code,
+        flags: 0,
+        sender_pid: 77,
+        sender_euid: 10100,
+        seq: 1,
+        sent: Instant::now(),
+        dropped: 5,
+        data: Reader::new(data.data(), &[]),
+    });
+    let checks = due(&writes, pre);
+    assert!(matches!(checks[0].outcome, CheckOutcome::NotModelled(_)));
 }
