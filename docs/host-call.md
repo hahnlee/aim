@@ -214,7 +214,9 @@ and joins the binder thread pool.
   battery: level, status, AC and times from `IOPSCopyPowerSourcesInfo`, and
   charge (mAh), cycle count and voltage from the `AppleSmartBattery`
   registry entry. Current macOS no longer publishes battery temperature
-  there, so it reads 0.
+  there, so it reads 0. A Mac without a battery (a Mac mini, Studio or
+  iMac) reports none present, on AC power, status unknown and health
+  not available, with every battery value 0 (#646).
 - **Callbacks.** They get the state on registration, on `update()` and
   every 60 s (AOSP's fast periodic chore), since there are no power-supply
   uevents.

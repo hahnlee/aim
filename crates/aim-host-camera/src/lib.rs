@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use aim_hostcall::camera::{
     Device, Devices, FN_CLOSE, FN_DEVICES, FN_FRAME, FN_OPEN, Frame, MAX_DEVICES, MAX_OUTPUTS,
-    MAX_SIZES, Open, Output, Session, VERSION, access, format, source,
+    MAX_SIZES, Open, Output, Session, Size, VERSION, access, format, source,
 };
 use aim_hostcall::{HostModule, args_mut, errno, module};
 
@@ -98,20 +98,36 @@ fn copy_str(dst: &mut [u8], s: &str) {
 }
 
 fn devices() -> Devices {
-    let mut out = Devices::default();
     let Some(api) = avf::api() else {
-        return out;
+        return Devices::default();
     };
-    out.access = avf::access_status(api);
-    for (d, c) in out.devices.iter_mut().zip(avf::cameras(api)) {
+    let cams = avf::cameras(api);
+    listed(
+        avf::access_status(api),
+        cams.iter()
+            .map(|c| (c.id.as_str(), c.name.as_str(), c.facing, c.sizes.as_slice())),
+    )
+}
+
+/// The guest's list of the cameras `(id, name, facing, sizes)`, as many as
+/// it holds: an empty one on a Mac with no camera attached.
+fn listed<'a>(
+    access: u32,
+    cams: impl IntoIterator<Item = (&'a str, &'a str, u32, &'a [Size])>,
+) -> Devices {
+    let mut out = Devices {
+        access,
+        ..Devices::default()
+    };
+    for (d, (id, name, facing, sizes)) in out.devices.iter_mut().zip(cams) {
         *d = Device::default();
-        copy_str(&mut d.id, &c.id);
-        copy_str(&mut d.name, &c.name);
-        d.facing = c.facing;
-        for (s, size) in d.sizes.iter_mut().zip(&c.sizes) {
+        copy_str(&mut d.id, id);
+        copy_str(&mut d.name, name);
+        d.facing = facing;
+        for (s, size) in d.sizes.iter_mut().zip(sizes) {
             *s = *size;
         }
-        d.size_count = c.sizes.len().min(MAX_SIZES) as u32;
+        d.size_count = sizes.len().min(MAX_SIZES) as u32;
         out.count += 1;
     }
     out
@@ -475,6 +491,35 @@ mod tests {
             let n = write(&f, &o) as usize;
             assert!(n > 100 && blob[..2] == [0xff, 0xd8]);
         }
+    }
+
+    #[test]
+    fn lists_only_the_cameras_attached() {
+        use aim_hostcall::camera::facing;
+        // A Mac with no camera (a Mac mini or Studio with none attached).
+        let none = listed(access::AUTHORIZED, []);
+        assert_eq!((none.count, none.access), (0, access::AUTHORIZED));
+        // One with an external camera alone: it is the first.
+        let sizes = [Size {
+            width: 1280,
+            height: 720,
+            max_fps: 30,
+            reserved: 0,
+        }];
+        let usb = listed(
+            access::NOT_DETERMINED,
+            [("usb-1", "USB Camera", facing::EXTERNAL, &sizes[..])],
+        );
+        assert_eq!(usb.count, 1);
+        assert_eq!(usb.devices[0].facing, facing::EXTERNAL);
+        assert_eq!(&usb.devices[0].id[..6], b"usb-1\0");
+        assert_eq!(usb.devices[0].size_count, 1);
+        // More than the list holds.
+        let many = listed(
+            access::AUTHORIZED,
+            (0..MAX_DEVICES + 2).map(|_| ("c", "C", facing::EXTERNAL, &sizes[..])),
+        );
+        assert_eq!(many.count as usize, MAX_DEVICES);
     }
 
     #[test]

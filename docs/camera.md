@@ -21,7 +21,9 @@ it.
 (built-in wide angle, external and Continuity cameras), built-in first,
 then by `uniqueID`. Listing needs no camera permission and shows no
 prompt. The provider reads the list once at start-up. Device `n` is
-`device@1.1/internal/n` and Camera2 id `"n"`.
+`device@1.1/internal/n` and Camera2 id `"n"`. A Mac with no camera (a Mac
+mini or Studio with none attached) lists none, and the provider serves
+an empty list (#646).
 
 Each device is a **LIMITED** camera with the `BACKWARD_COMPATIBLE`
 capability (`characteristics.rs`):

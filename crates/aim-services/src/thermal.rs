@@ -862,6 +862,28 @@ mod tests {
     }
 
     #[test]
+    fn missing_sensors_are_left_out() {
+        let kinds = |t| temperatures(t).iter().map(|t| t.kind).collect::<Vec<_>>();
+        let reading = |cpu_celsius, battery_celsius| Thermal {
+            state: state::FAIR,
+            cpu_celsius,
+            battery_celsius,
+        };
+        assert_eq!(
+            kinds(reading(50.0, 30.0)),
+            [TYPE_SKIN, TYPE_CPU, TYPE_BATTERY]
+        );
+        // A Mac without a battery, and one whose sensors are unreadable.
+        assert_eq!(kinds(reading(50.0, f32::NAN)), [TYPE_SKIN, TYPE_CPU]);
+        let none = temperatures(reading(f32::NAN, f32::NAN));
+        assert_eq!(none.len(), 1);
+        assert_eq!(
+            (none[0].kind, none[0].status),
+            (TYPE_SKIN, THROTTLING_LIGHT)
+        );
+    }
+
+    #[test]
     fn temperatures_print_and_parcel_as_java() {
         let t = Temperature {
             value: 50.0,
