@@ -9,6 +9,7 @@
 //! `android-16.0.0_r1`.
 
 pub mod apps_filter;
+pub mod component_resolver;
 pub mod intent;
 pub mod intent_filter;
 pub mod info;
@@ -20,6 +21,7 @@ pub mod pkg;
 pub mod query;
 pub mod reply;
 pub mod permissions;
+pub mod resolve;
 pub mod restrictions;
 pub mod settings;
 pub mod uri;
