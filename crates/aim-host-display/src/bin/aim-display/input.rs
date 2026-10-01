@@ -368,6 +368,13 @@ unsafe extern "C" {
 
 extern "C" fn terminate(_: *mut c_void) {
     let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
+    // terminate: does nothing while an app-modal alert runs (#631): end
+    // its loop, and quit once it has returned.
+    if !send!(app, c"modalWindow" => Id).is_null() {
+        send!(app, c"abortModal" => ());
+        crate::objc::on_main(|| terminate(std::ptr::null_mut()));
+        return;
+    }
     send!(app, c"terminate:" => (), Id = std::ptr::null_mut());
 }
 
