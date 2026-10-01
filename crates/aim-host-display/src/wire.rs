@@ -34,7 +34,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use aim_hostcall::display::{Import, Window};
 
 /// Sent in the hello; the server closes a connection of another version.
-pub const VERSION: u64 = 8;
+pub const VERSION: u64 = 9;
 
 /// `id` = [`VERSION`], `flag` = display index.
 pub const OP_HELLO: u32 = 1;
@@ -69,6 +69,11 @@ pub const OP_MEDIA: u32 = 10;
 /// server answers its mode (a `u32`), then [`crate::shell`] frames follow
 /// both ways.
 pub const OP_SHELL: u32 = 11;
+/// A frame of layers (window mode, docs/layers.md): `id` is the client
+/// target (0: none); [`crate::layers::encode`]'s bytes follow. The fds are
+/// the present fence's writer, then the acquire fence when `flag` has
+/// [`PRESENT_ACQUIRE`].
+pub const OP_LAYERS: u32 = 12;
 
 /// [`Host::op`] values.
 pub mod host {
@@ -103,6 +108,10 @@ pub mod host {
     pub const MEDIA: u32 = 12;
     /// Either way: a [`crate::shell`] frame follows.
     pub const SHELL: u32 = 13;
+    /// Server: show a frame of layers in the host's windows, each layer
+    /// with its owner; `flag` = sequence, `id` = the client target (0:
+    /// none); [`crate::layers::encode`]'s bytes follow.
+    pub const LAYERS: u32 = 14;
 }
 
 /// [`HostInput::kind`] values: `translate::Input`'s methods. Positions

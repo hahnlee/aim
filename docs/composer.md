@@ -78,7 +78,8 @@ the composer's `linux-run`:
 - **Display mode.** The window's content in backing pixels: by default the
   main screen's visible frame, `--size WxH` otherwise. In window mode
   (`--mode windows`) it is the main screen and a bar margin, and each task
-  window presents its task's part of every frame ([windows.md](windows.md)). Its density is the
+  window shows its task's layers ([windows.md](windows.md),
+  [layers.md](layers.md)). Its density is the
   screen's (backing pixels per inch from `CGDisplayScreenSize`), its
   refresh period the display link's nominal one. Android pixels are backing
   pixels, never points.
@@ -118,12 +119,17 @@ set it; `init.aim.rc` clears it (#452).
   configures the displays hotplugged during registration.
   `getDisplayConfigurations` and the legacy `getDisplayConfigs` and
   `getDisplayAttribute` describe the same mode.
-- **Client composition only.** Validation turns every layer that is not
-  `CLIENT` into `CLIENT` (`ChangedCompositionTypes`) and states the client
-  target format (`RGBA_8888`, brightness 1). SurfaceFlinger composes with
-  RenderEngine (Skia on GLES, ANGLE on Metal) into the client target, and a
-  present shows it. Device composition of layers (a Metal pass per layer)
-  can come later without changing the protocol.
+- **Client composition in device mode.** Validation turns every layer
+  that is not `CLIENT` into `CLIENT` (`ChangedCompositionTypes`) and states
+  the client target format (`RGBA_8888`, brightness 1). SurfaceFlinger
+  composes with RenderEngine (Skia on GLES, ANGLE on Metal) into the client
+  target, and a present shows it.
+- **Device composition in window mode** ([layers.md](layers.md)):
+  `FN_CONNECT` answers the server's mode. Layers the server can draw stay
+  `DEVICE` or `SOLID_COLOR`, the `CLIENT` ones are made contiguous in z,
+  and a present (`FN_LAYERS`) sends every layer with its buffer, geometry
+  and visible region; each Mac window draws its own task's layers. Each
+  buffer a present replaced is released on its present fence.
 - **The cursor** is the one layer left as it asked: a `CURSOR` layer (the
   mouse pointer's sprite, [input.md](input.md)) stays `CURSOR`, the
   display's hardware cursor, which is the Mac's own cursor over the
@@ -155,10 +161,11 @@ set it; `init.aim.rc` clears it (#452).
   (p50 18–19 ms, presents 16.7 ms apart) on the same boot (host load
   average 3–60 before, about 25 after, 2026-09-29); with only one of the
   two it stayed at every other vsync.
-- **Client composition stays.** In a Settings scroll SurfaceFlinger's
-  RenderEngine thread spent under 1 % of its samples in GL once
-  composition no longer waited for the GPU; device composition of layers
-  in the display server would save little and is not done.
+- **Device mode keeps client composition.** In a Settings scroll
+  SurfaceFlinger's RenderEngine thread spent under 1 % of its samples in
+  GL once composition no longer waited for the GPU; device composition
+  would save little there. Window mode needs it for its windows to show
+  only their own tasks.
 - **Unsupported** (`EX_UNSUPPORTED`, and SurfaceFlinger takes its fallback):
   virtual displays, readback, identification data (SurfaceFlinger uses the
   port), content sampling, per-frame metadata, HDR conversion, overlay

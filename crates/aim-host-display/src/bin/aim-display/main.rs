@@ -10,9 +10,10 @@
 //! - **Device mode** (the default): one window showing the whole display.
 //! - **Window mode** (`--mode windows`, `docs/windows.md`): one window per
 //!   Android task, which the guest's task bridge reports; the display is
-//!   the Mac's main screen. The app shims in `--apps DIR` show the
-//!   guest's notifications (`docs/notifications.md`) and name the
-//!   server's own windows.
+//!   the Mac's main screen. Each window shows its task's layers
+//!   (`docs/layers.md`), and system panels the layers of no task. The app
+//!   shims in `--apps DIR` show the guest's notifications
+//!   (`docs/notifications.md`) and name the server's own windows.
 //!
 //! The windows' input is the guest's evdev devices, listening sockets in
 //! `PATH.input` (`docs/input.md`), removed when the server quits (device
@@ -35,8 +36,9 @@ mod media;
 mod metal;
 mod notifications;
 mod nowplaying;
-mod shell;
+mod panels;
 mod sheets;
+mod shell;
 mod shim;
 mod stats;
 mod status;
@@ -55,11 +57,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use aim_host_display::layers::{self, Attribution, Task};
 use aim_host_display::wire::{self, Request};
 use aim_hostcall::display::{Connect, Event, Windows, event, mode};
 use aim_sync_file::Writer;
 
-use metal::{Fence, Renderer, Target, Texture};
+use metal::{Fence, LayerFrame, Renderer, Target, Texture};
 use stats::Stats;
 
 /// How long a present waits for its buffer's acquire fence.
@@ -73,6 +76,15 @@ struct Client {
     vsync: AtomicBool,
 }
 
+/// What the last present showed.
+#[derive(Clone)]
+enum Shown {
+    /// A buffer: the client target of client composition.
+    Buffer(Arc<Texture>),
+    /// A frame of layers (window mode).
+    Layers(Arc<LayerFrame>),
+}
+
 struct Display {
     renderer: Renderer,
     info: Connect,
@@ -80,10 +92,18 @@ struct Display {
     mode: u32,
     clients: Mutex<Vec<Arc<Client>>>,
     /// Serializes presents from all clients.
-    last: Mutex<Option<Arc<Texture>>>,
+    last: Mutex<Option<Shown>>,
     /// The layers presents go to: the device window's, or the task
     /// windows' that are visible.
     targets: Mutex<Vec<Target>>,
+    /// The system panels' layers (in the server).
+    panels: Mutex<Vec<Target>>,
+    /// The tasks with windows and the front one, which the layers of a
+    /// frame are given to (in the server).
+    tasks: Mutex<(Vec<Task>, Option<i32>)>,
+    owners: Mutex<Attribution>,
+    /// A later attribution of the last frame is due.
+    again: AtomicBool,
     stats: Stats,
     capture: Option<PathBuf>,
 }
@@ -99,6 +119,10 @@ impl Display {
             clients: Mutex::new(Vec::new()),
             last: Mutex::new(None),
             targets: Mutex::new(Vec::new()),
+            panels: Mutex::new(Vec::new()),
+            tasks: Mutex::new((Vec::new(), None)),
+            owners: Mutex::new(Attribution::default()),
+            again: AtomicBool::new(false),
             stats: Stats::new(),
             capture,
         }
@@ -180,7 +204,8 @@ impl Display {
     }
 
     fn capture(&self) {
-        let (Some(path), Some(t)) = (&self.capture, self.last.lock().unwrap().clone()) else {
+        let last = self.last.lock().unwrap().clone();
+        let (Some(path), Some(Shown::Buffer(t))) = (&self.capture, last) else {
             eprintln!("aim-display: nothing to capture");
             return;
         };
@@ -208,23 +233,137 @@ impl Display {
             self.stats.present(frame);
         }
         hosts.wait();
-        *last = Some(t.clone());
+        *last = Some(Shown::Buffer(t.clone()));
         if let Some(f) = fence {
             f.done();
+        }
+    }
+
+    /// Show a frame of layers once its content is ready (`acquire`), each
+    /// window its task's layers, in this process's windows and panels and
+    /// the window hosts'; `fence` signals when it is on screen.
+    fn present_layers(&self, mut f: LayerFrame, acquire: Option<OwnedFd>, fence: Option<Writer>) {
+        if let Some(a) = acquire
+            && !aim_sync_file::wait(a.as_fd(), ACQUIRE_TIMEOUT_MS)
+        {
+            eprintln!(
+                "aim-display: acquire fence of a present not signaled in {ACQUIRE_TIMEOUT_MS} ms"
+            );
+        }
+        let fence = fence.map(Fence::new);
+        let mut last = self.last.lock().unwrap();
+        let again = self.attribute(&mut f);
+        let f = Arc::new(f);
+        self.show_layers(&f, fence.as_ref());
+        *last = Some(Shown::Layers(f.clone()));
+        drop(last);
+        if let Some(fence) = fence {
+            fence.done();
+        }
+        panels::update(&f);
+        self.attribute_again(again);
+    }
+
+    /// Show a frame of layers the server sent (in a window host).
+    fn show_host_layers(&self, f: LayerFrame) {
+        let mut last = self.last.lock().unwrap();
+        let f = Arc::new(f);
+        self.show_layers(&f, None);
+        *last = Some(Shown::Layers(f));
+    }
+
+    /// Draw `f` into this process's targets and the window hosts'.
+    fn show_layers(&self, f: &Arc<LayerFrame>, fence: Option<&Fence>) {
+        let mut targets = self.targets.lock().unwrap().clone();
+        targets.extend(self.panels.lock().unwrap().iter().cloned());
+        let hosts = hosts::present_layers(f, fence);
+        if let Some(frame) = self.renderer.compose(f, &targets, fence) {
+            self.stats.present(frame);
+        }
+        hosts.wait();
+    }
+
+    /// Give `f`'s layers their owners; when a layer waits for a task, the
+    /// time (ms) at which to do it again.
+    fn attribute(&self, f: &mut LayerFrame) -> Option<i64> {
+        let (tasks, front) = self.tasks.lock().unwrap().clone();
+        let display = [0, 0, self.info.width as i32, self.info.height as i32];
+        let now = vsync::monotonic_ns() / 1_000_000;
+        self.owners
+            .lock()
+            .unwrap()
+            .attribute(&mut f.layers, &tasks, display, front, now)
+    }
+
+    /// At `at` (ms), give the last frame's layers their owners again,
+    /// unless that is due already (a layer waiting since earlier).
+    fn attribute_again(&self, at: Option<i64>) {
+        if let Some(at) = at
+            && !self.again.swap(true, Ordering::Relaxed)
+        {
+            let wait = (at - vsync::monotonic_ns() / 1_000_000).max(0) as u64;
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+                if let Some(d) = DISPLAY.get() {
+                    d.again.store(false, Ordering::Relaxed);
+                    d.reattribute();
+                }
+            });
+        }
+    }
+
+    /// Give the last frame's layers their owners again (the tasks changed,
+    /// or a layer stopped waiting for one), and show it again if that
+    /// changed any.
+    fn reattribute(&self) {
+        let mut last = self.last.lock().unwrap();
+        let Some(Shown::Layers(old)) = last.clone() else {
+            return;
+        };
+        let mut f = LayerFrame::clone(&old);
+        let again = self.attribute(&mut f);
+        if f.layers != old.layers {
+            let f = Arc::new(f);
+            self.show_layers(&f, None);
+            *last = Some(Shown::Layers(f.clone()));
+            drop(last);
+            panels::update(&f);
+        }
+        self.attribute_again(again);
+    }
+
+    /// The tasks with windows, and the front one (the server's task
+    /// records).
+    fn set_tasks(&'static self, mut tasks: Vec<Task>, front: Option<i32>) {
+        tasks.sort_by_key(|t| t.id);
+        let mut t = self.tasks.lock().unwrap();
+        if *t != (tasks.clone(), front) {
+            *t = (tasks, front);
+            std::thread::spawn(|| self.reattribute());
         }
     }
 
     /// Show the last frame again in the layers of `targets` (a window that
     /// appeared or changed), without a fence.
     fn refresh(&self, targets: &[Target]) {
-        let last = self.last.lock().unwrap();
-        if let Some(t) = last.as_ref() {
-            self.renderer.present(Some(t), targets, None);
+        match self.last.lock().unwrap().as_ref() {
+            Some(Shown::Buffer(t)) => {
+                self.renderer.present(Some(t), targets, None);
+            }
+            Some(Shown::Layers(f)) => {
+                self.renderer.compose(f, targets, None);
+            }
+            None => {}
         }
     }
 
     fn set_targets(&self, targets: Vec<Target>) {
         *self.targets.lock().unwrap() = targets;
+    }
+
+    /// The system panels' layers.
+    fn set_panels(&self, targets: Vec<Target>) {
+        *self.panels.lock().unwrap() = targets;
     }
 
     /// Serve one client until it disconnects.
@@ -257,6 +396,8 @@ impl Display {
                         break;
                     }
                     self.clients.lock().unwrap().push(client.clone());
+                    // A new composer names its layers afresh.
+                    self.owners.lock().unwrap().reset();
                 }
                 wire::OP_IMPORT => {
                     let Some(fd) = fds.pop() else { break };
@@ -277,6 +418,18 @@ impl Display {
                         Some(t) => self.present(t, acquire, fence),
                         None => eprintln!("aim-display: present of unknown buffer {:#x}", r.id),
                     }
+                }
+                wire::OP_LAYERS => {
+                    let Ok((layers, rects)) = layers::read(sock.as_fd()) else {
+                        break;
+                    };
+                    let mut fds = fds.into_iter();
+                    let fence = fds.next().map(Writer::from);
+                    let acquire = (r.flag & wire::PRESENT_ACQUIRE != 0)
+                        .then(|| fds.next())
+                        .flatten();
+                    let f = LayerFrame::new(layers, rects, r.id, &textures);
+                    self.present_layers(f, acquire, fence);
                 }
                 wire::OP_RELEASE => {
                     textures.remove(&r.id);
@@ -478,7 +631,7 @@ fn main() {
         height: win.height,
         dpi_x_milli: (win.dpi_x * 1000.0) as u32,
         dpi_y_milli: (win.dpi_y * 1000.0) as u32,
-        _reserved: 0,
+        mode: display_mode,
         vsync_period_ns: period as u64,
     };
     let display = DISPLAY.get_or_init(|| Display::new(renderer, info, display_mode, capture));

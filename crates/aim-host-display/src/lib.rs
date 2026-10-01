@@ -15,6 +15,7 @@
 //! ([`FN_WINDOWS`]) and exchanges window records on it directly.
 
 pub mod input;
+pub mod layers;
 pub mod media;
 pub mod notify;
 pub mod shell;
@@ -28,8 +29,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use aim_hostcall::display::{
-    Buffer, Connect, Cursor, FN_CONNECT, FN_CURSOR, FN_IMPORT, FN_PRESENT, FN_RELEASE,
-    FN_SET_VSYNC, FN_WINDOWS, Import, Present, SetVsync, VERSION, Windows,
+    Buffer, Connect, Cursor, FN_CONNECT, FN_CURSOR, FN_IMPORT, FN_LAYERS, FN_PRESENT, FN_RELEASE,
+    FN_SET_VSYNC, FN_WINDOWS, Import, Layer, Layers, Present, SetVsync, VERSION, Windows,
 };
 use aim_hostcall::{HostModule, args_mut, errno, module};
 use wire::Request;
@@ -84,6 +85,7 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
         }),
         FN_WINDOWS => unsafe { args_mut::<Windows>(args, len) }.map(windows),
         FN_CURSOR => unsafe { args_mut::<Cursor>(args, len) }.map(|c| cursor(c)),
+        FN_LAYERS => unsafe { args_mut::<Layers>(args, len) }.map(layers),
         _ => Err(neg(errno::ENOSYS)),
     };
     r.unwrap_or_else(|e| e)
@@ -213,6 +215,84 @@ fn present(p: &mut Present) -> i64 {
         p.present = aim_sync_file::give_to_guest(fence);
     }
     r
+}
+
+/// A guest array of `count` `T`s at `at`, or `-EINVAL`.
+///
+/// # Safety
+/// `at` must point to `count` `T`s of guest memory for the call.
+unsafe fn guest_array<'a, T>(at: u64, count: u32) -> Result<&'a [T], i64> {
+    if count == 0 {
+        return Ok(&[]);
+    }
+    if at == 0 || at % align_of::<T>() as u64 != 0 {
+        return Err(neg(errno::EINVAL));
+    }
+    // SAFETY: checked above; the caller vouches for the memory.
+    Ok(unsafe { std::slice::from_raw_parts(at as *const T, count as usize) })
+}
+
+/// A frame of layers: the record, then the layers and rectangles, with the
+/// present fence's writer and one acquire fence, the merge of the layers'
+/// and the client target's; the guest gets the present fence.
+fn layers(f: &mut Layers) -> i64 {
+    // SAFETY: the guest's arrays of the sizes it gave, for this call.
+    let arrays = unsafe {
+        guest_array::<Layer>(f.layers, f.count)
+            .and_then(|l| Ok((l, guest_array::<[i32; 4]>(f.rects, f.rect_count)?)))
+    };
+    let (layers, rects) = match arrays {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    let mut acquire: Option<OwnedFd> = None;
+    let fences = layers.iter().map(|l| l.acquire).chain([f.client_acquire]);
+    for fd in fences.filter(|&fd| fd >= 0) {
+        // SAFETY: F_GETFD only checks that the guest's fd is open.
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+            return neg(errno::EBADF);
+        }
+        // SAFETY: open, checked above; borrowed for this call.
+        let fence = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        let merged = match &acquire {
+            None => fence.try_clone_to_owned(),
+            Some(a) => aim_sync_file::merge(a.as_fd(), fence),
+        };
+        match merged {
+            Ok(m) => acquire = Some(m),
+            Err(_) => return neg(errno::ENOMEM),
+        }
+    }
+    let Ok((fence, writer)) = aim_sync_file::pair() else {
+        return neg(errno::ENOMEM);
+    };
+    let mut fds = vec![writer.as_raw_fd()];
+    let mut flag = 0;
+    if let Some(a) = &acquire {
+        fds.push(a.as_raw_fd());
+        flag |= wire::PRESENT_ACQUIRE;
+    }
+    let sent: Vec<Layer> = layers.iter().map(|l| Layer { acquire: -1, ..*l }).collect();
+    let r = Request {
+        op: wire::OP_LAYERS,
+        flag,
+        id: f.client_target,
+        ..Default::default()
+    };
+    let guard = CONNECTION.lock().unwrap();
+    let Some(conn) = guard.as_ref() else {
+        return neg(errno::ENOTCONN);
+    };
+    let ok = wire::send_fds(conn.as_fd(), wire::bytes(&r), &fds)
+        .and_then(|()| wire::send(conn.as_fd(), &layers::encode(&sent, rects), None));
+    drop(guard);
+    // The server has its own copies of the fences now.
+    drop(writer);
+    if ok.is_err() {
+        return neg(errno::ENOTCONN);
+    }
+    f.present = aim_sync_file::give_to_guest(fence);
+    0
 }
 
 /// The hardware cursor, with its acquire fence.

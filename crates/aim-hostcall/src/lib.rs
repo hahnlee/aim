@@ -250,7 +250,7 @@ pub mod gpu {
 /// Asynchronous events (vsync) arrive as [`Event`] records on a descriptor
 /// the guest reads, since host code never calls guest code.
 pub mod display {
-    pub const VERSION: u32 = 4;
+    pub const VERSION: u32 = 5;
 
     /// Connect to the display server and describe display
     /// [`Connect::display`]. Returns a new guest fd that yields [`Event`]
@@ -277,6 +277,10 @@ pub mod display {
     /// sprite, which the Mac's cursor shows. Returns 0, `-EBADF` for a bad
     /// fence or `-ENOTCONN`.
     pub const FN_CURSOR: u32 = 7;
+    /// Show a frame of layers, each window its task's ([`Layers`], window
+    /// mode, docs/layers.md). Returns 0, `-EBADF` for a bad fence,
+    /// `-EINVAL` for a bad array or `-ENOTCONN`.
+    pub const FN_LAYERS: u32 = 8;
 
     /// Argument block of [`FN_CONNECT`].
     #[repr(C)]
@@ -290,7 +294,8 @@ pub mod display {
         /// Out: dots per inch times 1000.
         pub dpi_x_milli: u32,
         pub dpi_y_milli: u32,
-        pub _reserved: u32,
+        /// Out: how the server shows the display, one of [`mode`].
+        pub mode: u32,
         /// Out: nominal time between vsyncs.
         pub vsync_period_ns: u64,
     }
@@ -350,6 +355,84 @@ pub mod display {
         /// A sync_file fd that signals when new content is ready, or -1.
         /// The caller keeps it.
         pub acquire: i32,
+    }
+
+    /// [`Layer::kind`] values.
+    pub mod layer {
+        /// The imported buffer [`super::Layer::buffer`].
+        pub const BUFFER: u32 = 1;
+        /// [`super::Layer::color`].
+        pub const COLOR: u32 = 2;
+        /// Composed into the client target: the frame's client target
+        /// shows here.
+        pub const CLIENT: u32 = 3;
+    }
+
+    /// [`Layer::owner`] values, set by the server (docs/layers.md).
+    pub mod owner {
+        /// Shown nowhere: the desktop, a closed task's, or not yet known.
+        pub const NONE: u32 = 0;
+        /// Task [`super::Layer::task`]'s window shows it.
+        pub const TASK: u32 = 1;
+        /// A system window's: a panel of its own shows it.
+        pub const SYSTEM: u32 = 2;
+    }
+
+    /// A layer of a [`Layers`] frame. Rectangles are left, top, right,
+    /// bottom.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Layer {
+        /// The composer's layer id, the same while the layer lasts.
+        pub id: u64,
+        /// The imported buffer of a [`layer::BUFFER`] layer, else 0.
+        pub buffer: u64,
+        /// One of [`layer`].
+        pub kind: u32,
+        /// The buffer's `Transform`: flip horizontally 1, vertically 2,
+        /// then turn 90 degrees clockwise 4.
+        pub transform: u32,
+        /// Where it lies on the display, in pixels.
+        pub frame: [i32; 4],
+        /// The part of the buffer that fills `frame`, in buffer pixels.
+        pub crop: [f32; 4],
+        /// A [`layer::COLOR`] layer's red, green, blue and alpha.
+        pub color: [f32; 4],
+        /// The plane alpha.
+        pub alpha: f32,
+        /// `BlendMode`: none 1, premultiplied 2, coverage 3.
+        pub blend: u32,
+        /// Its visible region: `visible_count` rectangles of the frame's,
+        /// from `visible_first`.
+        pub visible_first: u32,
+        pub visible_count: u32,
+        /// In: a sync_file fd that signals when the buffer is ready, or
+        /// -1. The caller keeps it.
+        pub acquire: i32,
+        /// One of [`owner`], and the task of [`owner::TASK`].
+        pub owner: u32,
+        pub task: i32,
+        pub _reserved: u32,
+    }
+
+    /// Argument block of [`FN_LAYERS`].
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Layers {
+        /// Guest array of `count` [`Layer`]s, bottom first.
+        pub layers: u64,
+        pub count: u32,
+        /// Rectangles of the layers' visible regions.
+        pub rect_count: u32,
+        /// Guest array of `rect_count` `[i32; 4]`.
+        pub rects: u64,
+        /// The client target, an imported buffer, when a layer is
+        /// [`layer::CLIENT`]; else 0.
+        pub client_target: u64,
+        /// The client target's acquire fence, or -1. The caller keeps it.
+        pub client_acquire: i32,
+        /// Out: the present fence, as [`Present::present`].
+        pub present: i32,
     }
 
     /// Argument block of [`FN_SET_VSYNC`].
@@ -517,6 +600,8 @@ pub mod display {
     const _: () = assert!(core::mem::size_of::<Windows>() == 8);
     const _: () = assert!(core::mem::size_of::<Window>() == 256);
     const _: () = assert!(core::mem::size_of::<Import>() == 40);
+    const _: () = assert!(core::mem::size_of::<Layer>() == 104);
+    const _: () = assert!(core::mem::size_of::<Layers>() == 40);
     const _: () = assert!(core::mem::size_of::<Buffer>() == 8);
     const _: () = assert!(core::mem::size_of::<Present>() == 16);
     const _: () = assert!(core::mem::size_of::<SetVsync>() == 4);
@@ -1336,6 +1421,11 @@ pub mod guest {
     /// Set the display's hardware cursor.
     pub fn display_cursor(args: &mut display::Cursor) -> Result<(), Errno> {
         call_with(module::DISPLAY, display::FN_CURSOR, args).map(drop)
+    }
+
+    /// Show a frame of layers.
+    pub fn display_layers(args: &mut display::Layers) -> Result<(), Errno> {
+        call_with(module::DISPLAY, display::FN_LAYERS, args).map(drop)
     }
 
     /// Start or stop vsync events.

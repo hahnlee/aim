@@ -89,6 +89,9 @@ fn locate(view: Id, event: Id) -> Option<(f64, f64, [i32; 4], f64)> {
     if let Some((_, x, y, area, scale)) = crate::windows::locate(view, p.x, p.y, b.size.height) {
         return Some((x, y, area, scale));
     }
+    if let Some(at) = crate::panels::locate(view, p.x, p.y, b.size.height) {
+        return Some(at);
+    }
     let input = INPUT.get()?;
     let (x, y) = input.at(p.x, p.y, b.size.width, b.size.height)?;
     let scale = input.pixels_per_point(b.size.width, b.size.height);
@@ -101,8 +104,11 @@ fn pointer(view: Id, event: Id, phase: Phase, t: i64) {
     if crate::windows::pointer(view, phase, p.x, p.y, b.size.height, t) {
         return;
     }
-    if let Some(input) = INPUT.get() {
-        input.pointer(phase, p.x, p.y, b.size.width, b.size.height, t);
+    let Some(input) = INPUT.get() else { return };
+    // A system panel's press belongs to no task.
+    match crate::panels::locate(view, p.x, p.y, b.size.height) {
+        Some((x, y, area, _)) => input.touch(phase, x, y, area, t),
+        None => input.pointer(phase, p.x, p.y, b.size.width, b.size.height, t),
     }
 }
 

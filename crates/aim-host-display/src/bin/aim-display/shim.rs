@@ -8,8 +8,10 @@
 //! shim (else any of the package's), the package's others
 //! ([`crate::hosts::for_task`]). The server sends it their task records,
 //! the buffers (as memfds, mapped here as in the server) and every
-//! present, which it draws into its windows and answers once its GPU pass
-//! has read the buffer, and the pointer's image for its windows' cursor.
+//! present (a buffer, or a frame of layers whose owners the server set,
+//! docs/layers.md), which it draws into its windows and answers once its
+//! GPU pass has read the buffers, and the pointer's image for its windows'
+//! cursor.
 //! Its windows' requests and input go back to the server.
 //!
 //! Launching the shim, or clicking it in the Dock, starts the app (its
@@ -33,7 +35,7 @@ use aim_host_display::wire::{self, Host as Rec, HostInput, Request, host, input}
 use aim_hostcall::display::{Connect, Window as Record, mode, window};
 
 use crate::cursor::Image;
-use crate::metal::{Renderer, Texture};
+use crate::metal::{LayerFrame, Renderer, Texture};
 use crate::objc::{class, nsstring, on_main, text};
 
 struct Link {
@@ -312,6 +314,16 @@ fn watch_bundle() {
     });
 }
 
+/// Present `seq` has been read.
+fn sampled(seq: u32) {
+    send(&Rec {
+        op: host::SAMPLED,
+        flag: seq,
+        id: crate::vsync::monotonic_ns() as u64,
+        ..Default::default()
+    });
+}
+
 /// The server's records, until it goes away.
 fn serve(sock: &mut UnixStream) {
     let mut textures: HashMap<u64, Arc<Texture>> = HashMap::new();
@@ -335,12 +347,17 @@ fn serve(sock: &mut UnixStream) {
                 if let (Some(t), Some(d)) = (textures.get(&r.id), crate::DISPLAY.get()) {
                     d.present(t, None, None);
                 }
-                send(&Rec {
-                    op: host::SAMPLED,
-                    flag: r.flag,
-                    id: crate::vsync::monotonic_ns() as u64,
-                    ..Default::default()
-                });
+                sampled(r.flag);
+            }
+            host::LAYERS => {
+                let Ok((layers, rects)) = aim_host_display::layers::read(sock.as_fd()) else {
+                    break;
+                };
+                if let Some(d) = crate::DISPLAY.get() {
+                    let f = LayerFrame::new(layers, rects, r.id, &textures);
+                    d.show_host_layers(f);
+                }
+                sampled(r.flag);
             }
             host::WINDOW => {
                 let w = r.window;

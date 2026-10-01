@@ -3,8 +3,8 @@
 //! The display is the Mac's main screen ([`aim_host_display::windows`]),
 //! and the guest's task bridge reports the freeform tasks on it. Each gets
 //! an `NSWindow` exactly over its content, whose layer shows that part of
-//! every presented frame, one pixel per pixel. Window and task follow each
-//! other:
+//! every presented frame, one pixel per pixel, drawn from the task's own
+//! layers (`docs/layers.md`). Window and task follow each other:
 //!
 //! - moving the window moves the task, resizing it resizes the task once
 //!   the live resize ends, and the window takes the bounds the task got;
@@ -53,7 +53,7 @@ use aim_host_display::windows::{Frame, Screen, bounds, content, fit, turn, view_
 use aim_hostcall::display::{Window as Record, orientation, window};
 
 use crate::hosts::Host;
-use crate::metal::Target;
+use crate::metal::{Show, Target};
 use crate::objc::{
     CGPoint, CGRect, CGSize, Id, Sel, class, class_addMethod, nsstring, on_main, on_main_after,
     release, sel, text,
@@ -346,6 +346,24 @@ fn on_bridge_record(r: &Record) {
             }
         }
         None => apply(r),
+    }
+    publish_tasks();
+}
+
+/// The tasks' bounds and the front one, which the server gives each
+/// frame's layers to (`docs/layers.md`).
+fn publish_tasks() {
+    let Some((tasks, front)) = with(|s| {
+        let tasks = s.infos.iter().filter_map(|(&id, i)| {
+            i.bounds
+                .map(|(bounds, _)| aim_host_display::layers::Task { id, bounds })
+        });
+        (tasks.collect(), s.front)
+    }) else {
+        return;
+    };
+    if let Some(d) = crate::DISPLAY.get() {
+        d.set_tasks(tasks, front);
     }
 }
 
@@ -937,7 +955,7 @@ fn update_targets(changed: Option<i32>) {
             if !t.visible || t.closed {
                 continue;
             }
-            let target = Target::new(t.layer, Some(t.content()));
+            let target = Target::showing(t.layer, Some(t.content()), Show::Task(task));
             if changed == Some(task) {
                 fresh.push(target.clone());
             }

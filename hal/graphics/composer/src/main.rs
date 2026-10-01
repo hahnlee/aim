@@ -2,10 +2,12 @@
 //! `IComposer/default` V4 vendor HAL of the derived image
 //! (`docs/composer.md`).
 //!
-//! It serves one display, a macOS window owned by the display server
-//! (`aim-display`), which it reaches through the host-call module
-//! `display`. Every layer is composed by SurfaceFlinger's RenderEngine into
-//! the client target, which the server shows without copying it.
+//! It serves one display, shown by the display server (`aim-display`),
+//! which it reaches through the host-call module `display`. In device mode
+//! every layer is composed by SurfaceFlinger's RenderEngine into the
+//! client target, which the server shows without copying it; in window
+//! mode the server composes each Mac window from its task's layers
+//! (`docs/layers.md`).
 
 mod client;
 mod cursor;
