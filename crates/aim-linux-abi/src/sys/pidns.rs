@@ -103,13 +103,70 @@ pub fn leave() {
     else {
         return;
     };
-    for p in members().unwrap_or_default() {
-        if p != me() {
+    // The table goes once no member can add to it: a member killed as it
+    // starts may still be writing its files, and one may be forking.
+    loop {
+        let alive: Vec<i32> = members()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|&p| p != me() && running(p))
+            .collect();
+        if alive.is_empty() {
+            break;
+        }
+        for &p in &alive {
             // SAFETY: a process of this namespace.
             unsafe { libc::kill(p, libc::SIGKILL) };
         }
+        if !wait_exits(&alive) {
+            break;
+        }
     }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Wait until the processes `pids` have exited; false if one has not
+/// within 10 s.
+fn wait_exits(pids: &[i32]) -> bool {
+    // SAFETY: a kqueue of our own, closed below.
+    let kq = unsafe { libc::kqueue() };
+    if kq < 0 {
+        return false;
+    }
+    let mut left = 0;
+    for &p in pids {
+        // SAFETY: an all-zero kevent is valid.
+        let mut ev: libc::kevent = unsafe { std::mem::zeroed() };
+        ev.ident = p as usize;
+        ev.filter = libc::EVFILT_PROC;
+        ev.flags = libc::EV_ADD | libc::EV_ONESHOT;
+        ev.fflags = libc::NOTE_EXIT;
+        // SAFETY: registering one event; a process already gone is ESRCH.
+        if unsafe { libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) } == 0 {
+            left += 1;
+        }
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while left > 0 {
+        let Some(t) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            break;
+        };
+        let ts = libc::timespec {
+            tv_sec: t.as_secs() as libc::time_t,
+            tv_nsec: t.subsec_nanos() as libc::c_long,
+        };
+        // SAFETY: an all-zero kevent is valid.
+        let mut ev: libc::kevent = unsafe { std::mem::zeroed() };
+        // SAFETY: waiting for one event into our buffer.
+        match unsafe { libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &ts) } {
+            n if n > 0 => left -= 1,
+            n if n < 0 && crate::errno::last() == libc::EINTR => {}
+            _ => break,
+        }
+    }
+    // SAFETY: our kqueue.
+    unsafe { libc::close(kq) };
+    left == 0
 }
 
 /// Whether the table's entry for `pid` names the running process `info`.
