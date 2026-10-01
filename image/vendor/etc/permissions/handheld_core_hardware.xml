@@ -20,7 +20,9 @@
      Without the sensor features too: the sensors HAL (hal/sensors) lists
      the ambient light sensor and the lid angle only on a Mac that has them,
      whose SKU's directory declares them (docs/vendor-hals.md), and nothing
-     backs the others. -->
+     backs the others. Without picture-in-picture: the lightweight shell
+     has no PiP (docs/m1-shell.md, D3), and apps check the feature before
+     they ask for it. -->
 <permissions>
     <feature name="android.hardware.audio.output" />
     <feature name="android.hardware.bluetooth" />
@@ -53,7 +55,6 @@
     <!-- Feature to specify if the device support managed users. -->
     <feature name="android.software.managed_users" />
 
-    <feature name="android.software.picture_in_picture" />
     <feature name="android.software.activities_on_secondary_displays" />
 
     <feature name="android.software.cts" />

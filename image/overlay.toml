@@ -523,6 +523,59 @@ reason = "the MediaProjection consent activity apps start for a screen capture (
 source = "target/aim/oat/apps/AimMediaProjection.toml"
 reason = "its code compiled by the `oat` node, so that no first boot compiles it"
 
+# The lightweight shell (docs/m1-shell.md, ADR 0013 M1): macOS is the
+# shell (the Dock, the menu bar, Notification Center), so none of the
+# Android shell's packages is in the image, in either mode. init.aim.rc
+# starts the native status bar in SystemUI's place.
+
+[[remove]]
+path = "/system_ext/priv-app/SystemUIGoogle"
+reason = "SystemUI (the status bar, shade, keyguard, ImageWallpaper, WMShell): the lightweight shell has none; the platform handles its absence (docs/m1-shell.md, sections 1 and 3)"
+
+[[remove]]
+path = "/system_ext/priv-app/NexusLauncherRelease"
+reason = "the launcher (Quickstep: home, recents, taskbar): java/lightweight-home is the HOME activity"
+
+[[remove]]
+path = "/system_ext/priv-app/WallpaperPickerGoogleRelease"
+reason = "the wallpaper and style picker: nothing shows the wallpaper on the Mac"
+
+[[remove]]
+path = "/system_ext/priv-app/ThemePicker"
+reason = "AOSP's wallpaper and style picker, as the removed Google one"
+
+[[remove]]
+path = "/system_ext/priv-app/QuickAccessWallet"
+reason = "a plugin only SystemUI's global actions load"
+
+[[add]]
+path = "/system_ext/app/AimHome/AimHome.apk"
+source = "target/aim/device-services/lightweight-home.apk"
+reason = "the HOME activity in the launcher's place, with DEFAULT for ActivityTaskManager's resolution (the platform's SystemUserHomeActivity has none, and Settings' FallbackHome would restart for ever)"
+
+[[include]]
+source = "target/aim/oat/apps/AimHome.toml"
+reason = "its code compiled by the `oat` node, so that no first boot compiles it"
+
+[[add]]
+path = "/system_ext/priv-app/AimImageWallpaper/AimImageWallpaper.apk"
+source = "target/aim/device-services/image-wallpaper.apk"
+reason = "the static wallpaper in place of SystemUI's ImageWallpaper (#603): the overlay names it in image_wallpaper_component, so WallpaperManager's set, clear and default keep their meaning"
+
+[[include]]
+source = "target/aim/oat/apps/AimImageWallpaper.toml"
+reason = "its code compiled by the `oat` node, so that no first boot compiles it"
+
+[[add]]
+path = "/system_ext/etc/permissions/privapp-permissions-aim-wallpaper.xml"
+source = "image/system_ext/etc/permissions/privapp-permissions-aim-wallpaper.xml"
+reason = "READ_WALLPAPER_INTERNAL for the static wallpaper, a privileged app, as SystemUI has it"
+
+[[add]]
+path = "/system_ext/overlay/aim-lightweight-shell-overlay.apk"
+source = "target/aim/device-services/lightweight-shell-overlay.apk"
+reason = "static overlay of framework-res: the device's own static wallpaper, no wait for it at boot, and none of the services only the shell uses; in /system_ext, whose overlays take precedence over /product's"
+
 [[add]]
 path = "/system_ext/bin/aim-windows"
 source = "target/aim/daemons/bin/aim-windows"
@@ -610,7 +663,7 @@ reason = "the ranchu radio HAL talks to QEMU's modem; telephony is undeclared"
 [[replace]]
 path = "/vendor/etc/permissions/handheld_core_hardware.xml"
 source = "image/vendor/etc/permissions/handheld_core_hardware.xml"
-reason = "declares telephony (calling, data, GSM, IMS, messaging, radio access, subscriptions) for the removed ranchu radio HAL, and sensors QEMU fed the removed multihal; the device has no modem, so the phone process builds no phones or RIL, and declares no sensor the sensors HAL does not list on every Mac"
+reason = "declares telephony (calling, data, GSM, IMS, messaging, radio access, subscriptions) for the removed ranchu radio HAL, and sensors QEMU fed the removed multihal; the device has no modem, so the phone process builds no phones or RIL, and declares no sensor the sensors HAL does not list on every Mac; and picture-in-picture, which the lightweight shell does not offer (docs/m1-shell.md, D3)"
 
 [[remove]]
 path = "/vendor/etc/vintf/manifest/android.hardware.radio.ranchu.xml"

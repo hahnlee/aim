@@ -42,14 +42,13 @@ task's window lies exactly over the task. The rest follows from that:
 - **Android pixels and macOS points stay apart.** The display is the
   screen in backing pixels, never an upscale; `aim_host_display::windows`
   is the one place that converts.
-- **The caption and the bars are out of sight.** The freeform caption
-  (WMShell's window decoration, 42 dp) lies inside the top of the task,
-  under the window's title bar, which is made at least as tall (a unified
-  toolbar). An image without WMShell (the lightweight shell,
-  [m1-shell.md](m1-shell.md)) sets `ro.vendor.aim.freeform_caption_dp` to
-  0: no caption, and a standard title bar (#545). The status bar lies
-  under the menu bar; the display has `BAR_MARGIN` rows below the screen,
-  where the navigation bar or taskbar lies.
+- **No caption.** The image has no WMShell (the lightweight shell,
+  [m1-shell.md](m1-shell.md)), so no window decoration draws a freeform
+  caption: `ro.vendor.aim.freeform_caption_dp` is 0 and the window has a
+  standard title bar (#545); a caption height above 0 would lie inside
+  the top of the task, under a title bar made at least as tall. The
+  display still has `BAR_MARGIN` rows below the screen, for bars nothing
+  draws any more (#681).
 
 ## Pieces
 
@@ -124,9 +123,9 @@ drops the old connection's tasks. The mode:
   would show another part of the display. The bridge commits them by
   moving the task a pixel and back with `resizeTask`, whose change
   transitions place the surface (a resize to the bounds the task already
-  has changes nothing). In the lightweight shell the window shell's
-  transitions place every task's surface, and nothing is committed
-  ([task-organizer.md](task-organizer.md)).
+  has changes nothing). With the window shell (the image's, since the
+  lightweight shell) its transitions place every task's surface, and
+  nothing is committed ([task-organizer.md](task-organizer.md)).
 - **Where a window reopens.** A launcher activity's new task opens where
   its window last was, as a Mac app's window does (#635): the bridge keeps
   each activity's last bounds in `/data/system/aim-windows-places` and
@@ -342,7 +341,7 @@ display's orientation source, so `onTaskRequestedOrientationChanged` does
 not come, and the top activity's `ActivityInfo` is only in the
 `RunningTaskInfo` past its `Configuration`, with a whole `ApplicationInfo`
 in it. The native task organizer's `onTaskInfoChanged` gives it (#593,
-#463). Both are covered in the lightweight shell, whose window shell makes
+#463). Both are covered by the window shell, which makes
 window mode desktop windowing (a fullscreen display, freeform tasks: no
 persisted bounds to lay a task out from) and reports the top activity's
 orientation to the bridge ([task-organizer.md](task-organizer.md)).

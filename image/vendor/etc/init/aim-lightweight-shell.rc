@@ -1,9 +1,0 @@
-# The lightweight shell (docs/m1-shell.md): the image has no launcher,
-# SystemUI or wallpaper picker.
-
-on early-init
-    # No WMShell, so no window decoration draws a caption in a freeform
-    # task: aim-windows reports none, and the Mac's title bar is its own.
-    setprop ro.vendor.aim.freeform_caption_dp 0
-    # No SystemUI: guest-init starts the native status bar in its place.
-    setprop ro.vendor.aim.lightweight_shell true

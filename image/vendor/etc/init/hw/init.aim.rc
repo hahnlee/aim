@@ -41,6 +41,13 @@ on early-init
     # `cargo aim`, never by an A/B OTA, so no OtaDexoptService.
     setprop config.disable_networktime true
     setprop config.disable_otadexopt true
+    # The lightweight shell (docs/m1-shell.md): no SystemUI, so
+    # guest-init starts the native status bar in its place, and the
+    # window shell organizes the tasks; without WMShell no window
+    # decoration draws a caption in a freeform task, so aim-windows
+    # reports none and the Mac's title bar is its own.
+    setprop ro.vendor.aim.lightweight_shell true
+    setprop ro.vendor.aim.freeform_caption_dp 0
 
 # Partitions are directories of the derived image and /data is a host
 # directory: aim-guest-init's mount_all mounts nothing and raises the

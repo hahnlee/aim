@@ -6,9 +6,9 @@ task organizer and the transition player. This document is the design of
 the device's own, a "Mac-specific WMShell" (decisions D3, D4 and D5 of
 #463): a task organizer and a transition player in Java, in system_server,
 that make window mode Android 16's desktop windowing and tell aim-windows
-what only an organizer learns. It is built into every image and active only
-in the lightweight shell (`ro.vendor.aim.lightweight_shell`), a check-only
-variant until the switch.
+what only an organizer learns. It is active in the lightweight shell
+(`ro.vendor.aim.lightweight_shell`), the image in both modes since
+2026-10-01.
 
 Evidence is from the pinned sources (`android-16.0.0_r1`,
 `platform/frameworks/base`; `wm/` is
@@ -188,9 +188,13 @@ this and to the notification-permission redirect (ADR 0013).
 
 A data directory that booted with a freeform display area keeps the
 persister's records (`/data/system_ce/<user>/launch_params`), which are
-still read and give step 3 its bounds; the variant uses fresh data
-directories (build.md, "Image variants"), and the switch must drop them
-once (#636).
+still read and give step 3 its bounds, and WindowManager keeps the
+display area's freeform windowing mode in its display settings, so the
+home's first task would record again before aim-windows sets it. The
+device service sets the display area fullscreen at its first boot phase
+and drops the records when the user is unlocking, before the persister
+reads them (#636); only the first boot of a data directory from before
+the switch finds either.
 
 ## 3. The component
 
@@ -404,18 +408,17 @@ lightweight shell against the default image; the tests of WMShell's PiP
 menu and its gestures (`PipMenuActivity`, double tap) do not apply and are
 listed as expected differences.
 
-## 7. Coexistence with the default image
+## 7. Coexistence with SystemUI
 
-The default image keeps SystemUI and WMShell, which register their own
-organizer and player when SystemUI starts. Both registrations are
-last-wins (`wm/TaskOrganizerController.java:569`,
+SystemUI's WMShell registers its own organizer and player when SystemUI
+starts. Both registrations are last-wins
+(`wm/TaskOrganizerController.java:569`,
 `wm/TransitionController.java:380-382`), so two shells would take tasks
-from each other. The shell is therefore off unless the image says
-otherwise: `ro.vendor.aim.lightweight_shell` is set by
-`/vendor/etc/init/aim-lightweight-shell.rc`, which only the lightweight
-shell variant adds (`image/variants/lightweight-shell.toml`). Without it,
-`DeviceServices` creates nothing, `aim.window_shell` does not exist, and
-aim-windows sets the display freeform and commits bounds as before.
+from each other. The shell is therefore on only where the image says so:
+`ro.vendor.aim.lightweight_shell`, which init.aim.rc sets in the image
+without SystemUI. Without it, `DeviceServices` creates nothing,
+`aim.window_shell` does not exist, and aim-windows sets the display
+freeform and commits bounds as before (#681).
 
 ## 8. Failure modes
 
@@ -425,16 +428,15 @@ aim-windows sets the display freeform and commits bounds as before.
 | The shell's thread blocked | as above | it only applies transactions and makes one-way calls; nothing waits on WM from WM's thread |
 | aim-windows dies | new tasks stay fullscreen (one fills the display) | aim-windows restarts with zygote; a crash of it alone is a bug to fix, not a mode |
 | system_server restarts | everything registers again with the new one; aim-windows restarts and attaches again (its rc) | |
-| SystemUI registers too (a mixed image) | the last one wins | the property is only in the variant |
+| SystemUI registers too (a mixed image) | the last one wins | the property is only in the image without SystemUI |
 | A bounds change outside any transition | the organized task's surface stays where it was (WM no longer moves it) | none known with a player; a check compares window and surface positions (section 9) |
 | A move per drag event | each is a transition waiting for a redraw | measured; the leash drag of section 3 if it lags |
-| Persisted launch params from a freeform-display boot | #613 for those components | fresh data directories; #636 before the switch |
+| Persisted launch params from a freeform-display boot | #613 for those components | dropped at the first unlock (#636) |
 | The app's resources fail while its starting window is made | no starting window, as for a type of none; the transition waits for the app's first frame | logged; the Mac's splash covers the launch until then |
 
 ## 9. Verification
 
-Per change, in the variant (`cargo aim build --variant lightweight-shell`,
-window mode, a fresh data directory):
+Per change, in window mode with a fresh data directory:
 
 - `dumpsys activity containers`: the default display area fullscreen,
   app tasks freeform; `dumpsys window` names the registered organizer and

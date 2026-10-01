@@ -70,7 +70,7 @@ key or a salt may be made once and shipped.
 
 ### 1. The device's own APKs: compiled in the image
 
-The device's own apps (`add`s in `image/overlay.toml` or a variant:
+The device's own apps (`add`s in `image/overlay.toml`:
 `AimNotificationPermission.apk`, `AimMediaProjection.apk`, and the
 lightweight shell's `AimHome.apk` and `AimImageWallpaper.apk`) are the
 image APKs without an odex. A device vendor preopts its APKs; the `oat`

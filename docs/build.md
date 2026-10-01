@@ -145,23 +145,6 @@ cargo nodes of one kind share one cargo invocation (`host`, `hal`, `daemon`:
 the daemons build AOSP's binder crate with its `system` feature, the HALs
 without it, so they cannot share an invocation).
 
-### Image variants
-
-`cargo aim build --variant NAME` (also `boot` and `status`) builds the
-derived image with the entries and includes of `image/variants/NAME.toml`
-as well: a manifest of `image/overlay.toml`'s schema and rules. A
-variant is a check-only image of a change not yet made to every boot; it
-replaces the derived image (its identity differs, so the shadow is made
-again, a few seconds with the translation cache), and the next build
-without `--variant` makes the default image again. Use a fresh data
-directory for each image: PackageManager drops the packages a variant
-removes from a data directory it boots.
-
-- `lightweight-shell`: without SystemUI, the launcher and the wallpaper
-  pickers, with the device's own static wallpaper (docs/m1-shell.md,
-  #463). Its init script sets `ro.vendor.aim.lightweight_shell`, on which
-  guest-init starts the native status bar in SystemUI's place.
-
 ### Rebuild times
 
 A branch that changes one host crate costs its cargo build and nothing
@@ -246,7 +229,7 @@ tools; nothing of them is linked into the output or put in the image.
   `framework-res.apk` and signed by apksigner with the test key, which
   suffices for a preinstalled package; PackageManager keeps its
   certificate, so the key must not change. `java/lightweight-shell-overlay`
-  (the image variant below) is built the same way.
+  (the lightweight shell's, docs/m1-shell.md) is built the same way.
 - `java/notification-permission` is an app (#470): its code and the Java
   of the AIDL are compiled against the same stubs, checked against the
   boot class path only (an app's), added to the APK stored, aligned and

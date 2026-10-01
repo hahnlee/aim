@@ -10,12 +10,6 @@
 //! depends on (a source no node produces is an error); every other source
 //! is a checked-in input.
 //!
-//! A variant (`cargo aim build --variant NAME`) is the same image with the
-//! entries and includes of `image/variants/NAME.toml` too, a check-only
-//! image of a change not yet made to every boot (docs/build.md, "Image
-//! variants"). It replaces the derived image until a build without the
-//! variant.
-//!
 //! A device app ([`device_services::APPS`]) is added at the guest path it
 //! is built for, with the `oat` node's manifest of its compiled code
 //! ([`oat::app_manifest`]) included beside it, and that manifest only with
@@ -28,21 +22,8 @@ use aim_android_image::{Manifest, Problem, assemble, identity, manifest};
 use aim_storage::system;
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
 
 const OVERLAY: &str = "image/overlay.toml";
-const VARIANTS: &str = "image/variants";
-
-/// The manifest `variant` (a name) stands for.
-pub fn variant(name: &str) -> Result<PathBuf, String> {
-    let path = repo(VARIANTS).join(format!("{name}.toml"));
-    if !path.is_file() {
-        return Err(format!(
-            "no image variant `{name}` ({VARIANTS}/{name}.toml)"
-        ));
-    }
-    Ok(path)
-}
 
 /// `problems` of the manifest `name`, one per line.
 fn problems(name: &str, problems: Vec<Problem>) -> String {
@@ -50,32 +31,16 @@ fn problems(name: &str, problems: Vec<Problem>) -> String {
     lines.join("\n")
 }
 
-/// The name of the overlay `variant` adds to, for messages.
-fn name(variant: Option<&Path>) -> String {
-    match variant {
-        Some(v) => format!("{OVERLAY} with {}", v.display()),
-        None => OVERLAY.into(),
-    }
-}
-
-/// The overlay, with the entries and includes of `variant`.
-fn manifest(variant: Option<&Path>) -> Result<Manifest, String> {
-    let read = |path: &Path| {
-        let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        manifest::parse(&text).map_err(|p| problems(&path.display().to_string(), p))
-    };
-    let mut overlay = read(&repo(OVERLAY))?;
-    if let Some(path) = variant {
-        let added = read(path)?;
-        overlay.entries.extend(added.entries);
-        overlay.includes.extend(added.includes);
-    }
-    Ok(overlay)
+/// The overlay.
+fn manifest() -> Result<Manifest, String> {
+    let path = repo(OVERLAY);
+    let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    manifest::parse(&text).map_err(|p| problems(OVERLAY, p))
 }
 
 /// Each device app `manifest` adds is at its guest path, with its compiled
 /// code included; no app's code is included without the app.
-fn check_apps(manifest: &Manifest, name: &str) -> Result<(), String> {
+fn check_apps(manifest: &Manifest) -> Result<(), String> {
     let built = device_services::out();
     let built = built.strip_prefix(aim_paths::root()).unwrap();
     for app in &device_services::APPS {
@@ -89,19 +54,19 @@ fn check_apps(manifest: &Manifest, name: &str) -> Result<(), String> {
         match (added, included) {
             (Some(e), _) if e.path != app.guest => {
                 return Err(format!(
-                    "{name}:{}: {source} is built for {}, not {}",
+                    "{OVERLAY}:{}: {source} is built for {}, not {}",
                     e.line, app.guest, e.path
                 ));
             }
             (Some(e), None) => {
                 return Err(format!(
-                    "{name}:{}: {} needs its compiled code beside it: [[include]] source = \"{code}\"",
+                    "{OVERLAY}:{}: {} needs its compiled code beside it: [[include]] source = \"{code}\"",
                     e.line, app.guest
                 ));
             }
             (None, Some(i)) => {
                 return Err(format!(
-                    "{name}:{}: {code} without its app {}",
+                    "{OVERLAY}:{}: {code} without its app {}",
                     i.line, app.guest
                 ));
             }
@@ -111,12 +76,11 @@ fn check_apps(manifest: &Manifest, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn node(others: &[Node], variant: Option<PathBuf>) -> Result<Node, String> {
-    let manifest = manifest(variant.as_deref())?;
-    check_apps(&manifest, &name(variant.as_deref()))?;
+pub fn node(others: &[Node]) -> Result<Node, String> {
+    let manifest = manifest()?;
+    check_apps(&manifest)?;
     let built = [aim_paths::root().join("target"), aim_paths::fetched()];
     let mut inputs = vec![repo(OVERLAY)];
-    inputs.extend(variant.clone());
     let mut deps = BTreeSet::from(["image".to_string()]);
     let sources = manifest
         .entries
@@ -134,8 +98,7 @@ pub fn node(others: &[Node], variant: Option<PathBuf>) -> Result<Node, String> {
             .find(|n| n.outputs.iter().any(|o| path.starts_with(o)))
             .ok_or_else(|| {
                 format!(
-                    "{}:{line}: no node produces {source} (`cargo aim status` lists the nodes)",
-                    name(variant.as_deref())
+                    "{OVERLAY}:{line}: no node produces {source} (`cargo aim status` lists the nodes)"
                 )
             })?;
         deps.insert(producer.name.clone());
@@ -147,17 +110,17 @@ pub fn node(others: &[Node], variant: Option<PathBuf>) -> Result<Node, String> {
         outputs: vec![aim_paths::derived_image().join(".identity")],
         tools: Vec::new(),
         recipe: 2,
-        action: Action::DerivedImage(variant),
+        action: Action::DerivedImage,
         boot: true,
     })
 }
 
-pub fn run(variant: Option<&Path>, log: &mut Log) -> Result<(), String> {
+pub fn run(log: &mut Log) -> Result<(), String> {
     let original = fs::canonicalize(aim_paths::original_image()).map_err(|e| e.to_string())?;
-    let mut manifest = manifest(variant)?;
-    manifest::expand(&mut manifest, aim_paths::root()).map_err(|p| problems(&name(variant), p))?;
+    let mut manifest = manifest()?;
+    manifest::expand(&mut manifest, aim_paths::root()).map_err(|p| problems(OVERLAY, p))?;
     let plan = aim_android_image::validate(&manifest, &original, aim_paths::root())
-        .map_err(|p| problems(&name(variant), p))?;
+        .map_err(|p| problems(OVERLAY, p))?;
     let original_identity = identity::original_identity(&original, None)?
         .ok_or_else(|| format!("{}: no identity", original.display()))?;
     let derived = identity::compute(&original_identity, &plan);
@@ -219,7 +182,7 @@ mod tests {
     use super::*;
 
     fn check(text: &str) -> Result<(), String> {
-        check_apps(&manifest::parse(text).unwrap(), "m")
+        check_apps(&manifest::parse(text).unwrap())
     }
 
     #[test]
