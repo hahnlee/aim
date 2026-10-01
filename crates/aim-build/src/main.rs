@@ -6,6 +6,7 @@
 //! incremental work. The cargo nodes come from `cargo metadata`, the
 //! derived image's upstream from `image/overlay.toml`.
 
+mod abx;
 mod bench;
 mod boot;
 mod cargo;

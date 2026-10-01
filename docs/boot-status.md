@@ -272,9 +272,12 @@ post-fs-data's run would see the same APEXes (#564). A first boot
 clones the image from the template of the `userdata/template` node
 (docs/first-boot.md): its attach ends at 0.41-0.53 s and the mount waits
 0-0.07 s (host load 12-14; creating the image held the mount up by
-0.6 s before, #563), and PackageManager's system scan reads all 287
-packages from the template's parser cache (`cached: 287`; `cached: 0`
-before). Between the mount and zygote-start, init runs its exec
+0.6 s before, #563). From the template's PackageManager and
+permission state (docs/first-boot.md), PackageManager takes 0.57 s from
+`pms_start` to `pms_ready` (3.90 s on an original first boot: the scan,
+the stubs' decompression) and 0.47 s to `ams_ready` (2.64 s: boot
+dexopt), and `sys.boot_completed` comes at 4.9 s (10.6 s without the
+template; host load 9-18, 2026-10-01). Between the mount and zygote-start, init runs its exec
 programs one after another (about 25-120 ms each, mostly starting
 `linux-run`); the longest are bpfloader (0.3-0.6 s) and
 `aconfigd-mainline init` (0.12-0.36 s) (#529). bpfloader's 0.32 s
