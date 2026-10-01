@@ -11,6 +11,7 @@
 members = [
     "crates/aim-android-image",
     "crates/aim-android-init",
+    "crates/aim-android-xml",
     "crates/aim-apps",
     "crates/aim-guest-init",
     "crates/aim-binder-driver",
@@ -69,6 +70,7 @@ members = [
 default-members = [
     "crates/aim-android-image",
     "crates/aim-android-init",
+    "crates/aim-android-xml",
     "crates/aim-apps",
     "crates/aim-guest-init",
     "crates/aim-binder-driver",

@@ -7,5 +7,6 @@ publish = false
 description = "The guest's launcher apps as macOS apps: APK labels and icons, macOS icons and shim bundles"
 
 [dependencies]
+aim-android-xml = { path = "../aim-android-xml" }
 android-image-extract = { path = "../../tools/android-image-extract" }
 libc.workspace = true
