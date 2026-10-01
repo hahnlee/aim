@@ -10,11 +10,13 @@
 //!   original's first boot of the derived image writes that depends only
 //!   on the image and the SKU, for the derived image's identity and this
 //!   Mac's SKU, with `userdata-<image>-<sku>.sha256`, the files it holds:
-//!   PackageManager's parser cache, settings and decompressed stubs, boot
-//!   dexopt's output, and the permission module's state (docs/first-boot.md,
-//!   "What can be made at build time"). A first boot from it runs the
-//!   original from that state: PackageManager and the permission module as
-//!   on a repeat boot, every other owner as on a first boot.
+//!   PackageManager's settings and decompressed stubs, boot dexopt's
+//!   output, and the permission module's state (docs/first-boot.md, "What
+//!   can be made at build time"). A first boot from it runs the original
+//!   from that state: PackageManager and the permission module as on a
+//!   repeat boot, every other owner as on a first boot. PackageManager's
+//!   parser cache is not shipped: a parse resolves resource values for the
+//!   device's locale, so the device's first boot makes its own (#722).
 //!
 //! A template is the original's own output: a first boot of the derived
 //! image on a data directory made from the empty image, in window mode
@@ -48,9 +50,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-/// PackageManagerService's parser cache: a parcel of each package it
-/// parsed, named after the image's fingerprint and used while newer than
-/// its APK.
+/// PackageManagerService's parser cache, named after the image's
+/// fingerprint: not shipped, as its entries hold resource values resolved
+/// for the build boot's locale (`<meta-data>` strings), which the original
+/// never re-resolves (#722).
 const CACHE: &str = "data/system/package_cache";
 /// What first-boot dexopt compiled for the APKs inside APEXes.
 const DALVIK_CACHE: &str = "data/dalvik-cache/arm64";
@@ -128,7 +131,7 @@ pub fn template() -> Node {
         // Named after the SKU, which the build boot names.
         outputs: Vec::new(),
         tools: Vec::new(),
-        recipe: 2,
+        recipe: 3,
         action: Action::UserdataTemplate,
         boot: true,
     }
@@ -176,7 +179,7 @@ pub fn run_template(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
         .ok_or("the derived image has no identity")?;
     let name = data::template_name(&identity, sku.as_deref());
     let from = DataImage::attach(&boot, None)?;
-    let mut volume_files = vec![PathBuf::from(CACHE), PathBuf::from(DALVIK_CACHE)];
+    let mut volume_files = vec![PathBuf::from(DALVIK_CACHE)];
     volume_files.extend(check(from.dir(), &settings)?);
     let settings_files: Vec<PathBuf> = SETTINGS
         .iter()
@@ -359,8 +362,8 @@ fn take(
 }
 
 /// The build boot's volume at `volume` and the settings taken from it hold
-/// what a template may ship: one parser cache, and settings of the image's
-/// fingerprint (that of the cache) that list only the image's packages
+/// what a template may ship: settings of the image's fingerprint (that of
+/// the boot's one parser cache) that list only the image's packages
 /// (the stubs' decompressed copies in `/data/app`, which update a system
 /// package, and no package an installer added) and no verifier identity.
 /// Returns the stubs' directories.
