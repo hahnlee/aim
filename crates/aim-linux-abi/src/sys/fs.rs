@@ -1158,6 +1158,11 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
     }
     // SAFETY: isatty/ioctl on a guest fd with guest argument buffers.
     unsafe {
+        // Linux resolves the fd before the request (`ksys_ioctl`). The
+        // device handlers above answer only their own open fds.
+        if fdtab::is_hidden(fd) || libc::fcntl(fd, libc::F_GETFD) < 0 {
+            return -(EBADF as i64);
+        }
         let tty = libc::isatty(fd) == 1;
         match req {
             TCGETS | TIOCGWINSZ if !tty => -(ENOTTY as i64),

@@ -310,6 +310,44 @@ fn lean_syscalls_follow_linux_semantics() {
 }
 
 #[test]
+fn ioctl_resolves_the_fd_before_the_request() {
+    setup();
+    let mut fds = [0i32; 2];
+    // SAFETY: plain pipe.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let r = fds[0] as u64;
+    let mut out = [0u8; 64];
+    let out = out.as_mut_ptr() as u64;
+    assert_eq!(sys(29, [r, 0x541b, out, 0]), 0, "FIONREAD on a pipe");
+    assert_eq!(
+        sys(29, [r, 0x5401, out, 0]),
+        -25,
+        "TCGETS on a pipe: ENOTTY"
+    );
+    assert_eq!(sys(29, [r, 0x1234_5678, out, 0]), -25, "unknown: ENOTTY");
+    // A closed fd high enough that a test running alongside does not get
+    // it back, and one never opened.
+    // SAFETY: our pipe's fds, and an fd this test owns.
+    unsafe {
+        assert_eq!(libc::dup2(fds[0], 900), 900);
+        libc::close(900);
+        libc::close(fds[0]);
+        libc::close(fds[1]);
+    }
+    // BINDER_VERSION, TCGETS, TIOCGWINSZ, FIONREAD, FIONBIO and a request
+    // no driver knows.
+    for req in [0xc004_6209, 0x5401, 0x5413, 0x541b, 0x5421, 0x1234_5678] {
+        for fd in [900, 9999] {
+            assert_eq!(
+                sys(29, [fd, req, out, 0]),
+                -9,
+                "fd {fd} req {req:#x}: EBADF"
+            );
+        }
+    }
+}
+
+#[test]
 fn guest_thread_pointer_survives_syscalls_and_preemption() {
     setup();
     // SAFETY: symbols from global_asm above.
