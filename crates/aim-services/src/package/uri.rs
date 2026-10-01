@@ -6,6 +6,8 @@
 
 use aim_binder_host::parcel::{BAD_VALUE, Reader, Result};
 
+use super::intent_filter::Strings;
+
 /// A URI and the class it was parcelled as.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Uri {
@@ -40,7 +42,7 @@ impl Uri {
     }
 
     /// `Uri.CREATOR.createFromParcel`; `None` for `Uri.NULL_TYPE_ID`.
-    pub fn read(r: &mut Reader<'_>) -> Result<Option<Uri>> {
+    pub fn read(r: &mut Reader<'_>, strings: &mut dyn Strings) -> Result<Option<Uri>> {
         let kind = match r.read_i32()? {
             NULL_TYPE_ID => return Ok(None),
             STRING_TYPE_ID => Kind::String,
@@ -48,7 +50,7 @@ impl Uri {
             HIERARCHICAL_TYPE_ID => Kind::Hierarchical,
             _ => return Err(BAD_VALUE),
         };
-        let string = r.read_string8()?.ok_or(BAD_VALUE)?;
+        let string = strings.string8(r)?.ok_or(BAD_VALUE)?;
         Ok(Some(Uri { kind, string }))
     }
 
@@ -350,7 +352,7 @@ mod tests {
     #[test]
     fn makes_a_builders_path_absolute() {
         let mut r = Reader::new(&[], &[]);
-        assert!(Uri::read(&mut r).is_err());
+        assert!(Uri::read(&mut r, &mut super::super::intent_filter::Plain).is_err());
         let uri = Uri {
             kind: Kind::Hierarchical,
             string: "content://auth".into(),
