@@ -738,7 +738,9 @@ final class PackageFeed extends IPackageFeed.Stub {
             p.writeInt(u.getAppId());
             p.writeBoolean(u.isPrivileged());
             p.writeInt(u.getSeInfoTargetSdkVersion());
-            TreeSet<String> packages = new TreeSet<>();
+            // In the set's own order, which getPackagesForUid and
+            // getNameForUid follow.
+            List<String> packages = new ArrayList<>();
             for (PackageState s : u.getPackageStates()) {
                 packages.add(s.getPackageName());
             }
