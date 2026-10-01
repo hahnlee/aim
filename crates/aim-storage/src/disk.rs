@@ -1,15 +1,18 @@
 //! The macOS disk image tools, run as the user (no admin rights):
 //! `diskutil image` creates, converts and attaches images, `newfs_apfs -e`
 //! makes a case-sensitive APFS volume on a blank one, `diskutil eject`
-//! detaches, and `hdiutil info` lists what is attached.
+//! detaches, and the IORegistry lists what is attached.
 
 use std::ffi::CStr;
-use std::path::{Path, PathBuf};
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-/// An attached image, as `hdiutil info` lists it.
+mod registry;
+
+/// An attached image.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attached {
     pub image: PathBuf,
@@ -37,7 +40,11 @@ fn run(command: &mut Command) -> Result<Output, String> {
 fn run_within(command: &mut Command, limit: Duration) -> Result<Output, String> {
     let describe = |command: &Command| {
         let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
-        format!("{} {}", command.get_program().to_string_lossy(), args.join(" "))
+        format!(
+            "{} {}",
+            command.get_program().to_string_lossy(),
+            args.join(" ")
+        )
     };
     let mut child = command
         .stdin(Stdio::null())
@@ -90,56 +97,74 @@ fn run_within(command: &mut Command, limit: Duration) -> Result<Output, String> 
     }
 }
 
-/// Parses `hdiutil info`: blocks of `key : value` lines, then the image's
-/// devices as `device<TAB>hint<TAB>mount point` lines.
-pub fn parse_info(text: &str) -> Vec<Attached> {
+/// Every attached image, from the IORegistry: an `AppleDiskImageDevice`
+/// per attachment, with the image's and shadow's URLs, and the IOMedia of
+/// its disk, container and volumes below it; their mounts are the
+/// kernel's. Not `hdiutil info`, which, while another image attaches or
+/// detaches, succeeds with some attached images or their devices left out
+/// (#653).
+pub fn attached() -> Result<Vec<Attached>, String> {
+    let mounts = mounts()?;
     let mut out = Vec::new();
-    for block in text
-        .split("================================================")
-        .skip(1)
-    {
-        let mut attached = Attached {
-            image: PathBuf::new(),
-            shadow: None,
-            writable: false,
-            device: String::new(),
-            devices: Vec::new(),
-            mounts: Vec::new(),
+    for device in registry::Object::matching(c"AppleDiskImageDevice")? {
+        let mut media = Vec::new();
+        device.media(&mut media);
+        let Some((first, writable)) = media.first().map(|(d, w)| (d.clone(), *w)) else {
+            // Still attaching, or detaching: no disk yet, or any more.
+            continue;
         };
-        for line in block.lines() {
-            if line.starts_with("/dev/") {
-                let mut fields = line.split('\t');
-                let device = fields.next().unwrap_or("").trim();
-                if attached.device.is_empty() {
-                    attached.device = device.to_string();
-                }
-                attached.devices.push(device.to_string());
-                if let Some(mount) = fields.nth(1).map(str::trim).filter(|m| !m.is_empty()) {
-                    attached.mounts.push(PathBuf::from(mount));
-                }
-            } else if let Some((key, value)) = line.split_once(':') {
-                let value = value.trim();
-                match key.trim() {
-                    "image-path" => attached.image = PathBuf::from(value),
-                    "shadow-path" if value != "<none>" => {
-                        attached.shadow = Some(PathBuf::from(value))
-                    }
-                    "writeable" => attached.writable = value.eq_ignore_ascii_case("true"),
-                    _ => {}
-                }
-            }
-        }
-        if !attached.device.is_empty() {
-            out.push(attached);
-        }
+        let devices: Vec<String> = media.into_iter().map(|(d, _)| d).collect();
+        let Some(image) = device.path(c"DiskImageURL") else {
+            continue;
+        };
+        out.push(Attached {
+            image,
+            shadow: device.path(c"ShadowURL"),
+            writable,
+            device: first,
+            mounts: mounts
+                .iter()
+                .filter(|(from, _)| devices.contains(from))
+                .map(|(_, on)| on.clone())
+                .collect(),
+            devices,
+        });
     }
-    out
+    Ok(out)
 }
 
-/// Every attached image.
-pub fn attached() -> Result<Vec<Attached>, String> {
-    let output = run(Command::new("hdiutil").arg("info"))?;
-    Ok(parse_info(&String::from_utf8_lossy(&output.stdout)))
+/// The kernel's mounts, as (device, mount point).
+fn mounts() -> Result<Vec<(String, PathBuf)>, String> {
+    // SAFETY: a null buffer asks for the count.
+    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if count < 0 {
+        return Err(format!("getfsstat: {}", std::io::Error::last_os_error()));
+    }
+    // Room for mounts made in between. SAFETY: statfs is plain data.
+    let mut fs: Vec<libc::statfs> = vec![unsafe { std::mem::zeroed() }; count as usize + 16];
+    let size = (fs.len() * std::mem::size_of::<libc::statfs>()) as libc::c_int;
+    // SAFETY: a buffer of `size` bytes.
+    let count = unsafe { libc::getfsstat(fs.as_mut_ptr(), size, libc::MNT_NOWAIT) };
+    if count < 0 {
+        return Err(format!("getfsstat: {}", std::io::Error::last_os_error()));
+    }
+    fs.truncate(count as usize);
+    Ok(fs
+        .iter()
+        .map(|fs| {
+            // SAFETY: getfsstat NUL-terminates both names.
+            let (from, on) = unsafe {
+                (
+                    CStr::from_ptr(fs.f_mntfromname.as_ptr()),
+                    CStr::from_ptr(fs.f_mntonname.as_ptr()),
+                )
+            };
+            (
+                from.to_string_lossy().into_owned(),
+                PathBuf::from(std::ffi::OsStr::from_bytes(on.to_bytes())),
+            )
+        })
+        .collect())
 }
 
 /// The attachments of `image` (its real path).
@@ -162,8 +187,8 @@ pub struct Attach<'a> {
     pub mount: Option<&'a Path>,
 }
 
-/// Attaches `image` by its real path, which is what `hdiutil info` then
-/// lists ([`attachments_of`]); returns its device.
+/// Attaches `image` by its real path, which is what [`attached`] then
+/// lists; returns its device.
 pub fn attach(image: &Path, how: Attach) -> Result<String, String> {
     let image = &std::fs::canonicalize(image).map_err(|e| format!("{}: {e}", image.display()))?;
     let mut command = Command::new("diskutil");
@@ -348,53 +373,4 @@ pub fn used(mount: &Path) -> Option<u64> {
 pub fn capacity(path: &Path) -> Option<u64> {
     let fs = statfs(path)?;
     Some(fs.f_blocks * fs.f_bsize as u64)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn info_lists_images_devices_and_mounts() {
-        let text = "framework       : 704\n\
-            images          : 2\n\
-            ================================================\n\
-            image-path      : /a/sys.dmg\n\
-            shadow-path     : /a/d.shadow\n\
-            writeable       : false\n\
-            /dev/disk8\t\t\n\
-            /dev/disk9\tEF57347C-0000-11AA-AA11-00306543ECAC\t\n\
-            /dev/disk9s1\t41504653-0000-11AA-AA11-00306543ECAC\t/a/mnt one\n\
-            ================================================\n\
-            image-path      : /a/data.asif\n\
-            shadow-path     : <none>\n\
-            writeable       : TRUE\n\
-            /dev/disk4\t\t\n";
-        let got = parse_info(text);
-        assert_eq!(
-            got,
-            [
-                Attached {
-                    image: "/a/sys.dmg".into(),
-                    shadow: Some("/a/d.shadow".into()),
-                    writable: false,
-                    device: "/dev/disk8".into(),
-                    devices: vec![
-                        "/dev/disk8".into(),
-                        "/dev/disk9".into(),
-                        "/dev/disk9s1".into()
-                    ],
-                    mounts: vec!["/a/mnt one".into()],
-                },
-                Attached {
-                    image: "/a/data.asif".into(),
-                    shadow: None,
-                    writable: true,
-                    device: "/dev/disk4".into(),
-                    devices: vec!["/dev/disk4".into()],
-                    mounts: Vec::new(),
-                },
-            ]
-        );
-    }
 }
