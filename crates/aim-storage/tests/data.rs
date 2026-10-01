@@ -83,7 +83,7 @@ fn one_user_and_recovery_from_a_crash() {
 
     // A holder that died without detaching: attached, but nobody holds
     // the lock.
-    let device = disk::attach(
+    let crashed = disk::attach(
         &data::image_of(&dir),
         disk::Attach {
             mount: Some(&dir),
@@ -93,11 +93,19 @@ fn one_user_and_recovery_from_a_crash() {
     .unwrap();
     fs::write(dir.join("kept"), "x").unwrap();
     let image = DataImage::attach(&dir, None).unwrap();
+    // Found by the image, not the device: the crashed attachment's device
+    // is free once detached, and any attach (the other tests here, other
+    // processes) may get it.
+    let now = disk::attachments_of(&data::image_of(&dir)).unwrap();
+    assert_eq!(now.len(), 1, "{now:?}");
     assert!(
-        disk::attached()
-            .unwrap()
-            .iter()
-            .all(|a| a.device != device || a.mounts.contains(&fs::canonicalize(&dir).unwrap()))
+        now[0].mounts.contains(&fs::canonicalize(&dir).unwrap()),
+        "{now:?}"
+    );
+    let (_, from) = disk::mount_of(&dir).unwrap();
+    assert!(
+        now[0].devices.contains(&from),
+        "{from} not in {now:?} (crashed: {crashed})"
     );
     assert_eq!(fs::read_to_string(dir.join("kept")).unwrap(), "x");
     drop(image);
