@@ -130,6 +130,20 @@ impl Description {
     }
 }
 
+/// What a Mac without a battery (Mac mini, Studio, iMac, or a MacBook
+/// whose battery is out) reports: no battery, on mains power, as a device
+/// without one tells `android.hardware.health`.
+fn no_battery() -> Battery {
+    Battery {
+        ac_online: 1,
+        status: status::UNKNOWN,
+        health: condition::NOT_AVAILABLE,
+        time_to_full_seconds: -1,
+        time_to_empty_seconds: -1,
+        ..Battery::default()
+    }
+}
+
 /// Read the battery now.
 pub fn battery() -> Battery {
     let mut b = Battery {
@@ -143,10 +157,10 @@ pub fn battery() -> Battery {
     // are borrowed from the snapshot, which outlives their use.
     unsafe {
         let Some(info) = Owned::new(IOPSCopyPowerSourcesInfo()) else {
-            return b;
+            return no_battery();
         };
         let Some(list) = Owned::new(IOPSCopyPowerSourcesList(info.0)) else {
-            return b;
+            return no_battery();
         };
         for i in 0..CFArrayGetCount(list.0) {
             let d = IOPSGetPowerSourceDescription(info.0, CFArrayGetValueAtIndex(list.0, i));
@@ -160,11 +174,10 @@ pub fn battery() -> Battery {
             }
         }
     }
-    if b.present != 0 {
-        from_smart_battery(&mut b);
-    } else {
-        b.health = condition::NOT_AVAILABLE;
+    if b.present == 0 {
+        return no_battery();
     }
+    from_smart_battery(&mut b);
     b
 }
 
@@ -282,12 +295,28 @@ mod tests {
         let b = battery();
         eprintln!("{b:?}");
         if b.present == 0 {
-            assert_eq!(b.health, condition::NOT_AVAILABLE);
+            assert_eq!(b, no_battery());
             return;
         }
         assert!((0..=100).contains(&b.level_percent));
         assert!((status::UNKNOWN..=status::FULL).contains(&b.status));
         assert!(b.full_charge_design_uah >= 0 && b.charge_counter_uah >= 0);
+    }
+
+    #[test]
+    fn without_a_battery_the_mac_is_on_mains() {
+        let b = no_battery();
+        assert_eq!((b.present, b.ac_online), (0, 1));
+        assert_eq!(
+            (b.status, b.health),
+            (status::UNKNOWN, condition::NOT_AVAILABLE)
+        );
+        assert_eq!(b.temperature_tenths_celsius, 0, "no battery temperature");
+        assert_eq!(
+            (b.level_percent, b.cycle_count, b.full_charge_uah),
+            (0, 0, 0)
+        );
+        assert_eq!((b.time_to_full_seconds, b.time_to_empty_seconds), (-1, -1));
     }
 
     #[test]

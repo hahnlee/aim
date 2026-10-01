@@ -163,12 +163,18 @@ fn ambient_light() -> Option<f32> {
 }
 
 pub fn read_sensors() -> Readings {
+    readings(ambient_light(), lid::angle())
+}
+
+/// The readings of the sensors that answered: a desktop Mac, with neither
+/// an ambient light sensor nor a lid, has none present.
+fn readings(light_lux: Option<f32>, hinge_degrees: Option<f32>) -> Readings {
     let mut r = Readings::default();
-    if let Some(lux) = ambient_light() {
+    if let Some(lux) = light_lux {
         r.present |= present::LIGHT;
         r.light_lux = lux;
     }
-    if let Some(angle) = lid::angle() {
+    if let Some(angle) = hinge_degrees {
         r.present |= present::HINGE;
         r.hinge_degrees = angle;
     }
@@ -209,6 +215,18 @@ mod tests {
         assert_eq!(r.present & !(present::LIGHT | present::HINGE), 0);
         assert!(r.light_lux >= 0.0);
         assert!((0.0..=360.0).contains(&r.hinge_degrees));
+    }
+
+    #[test]
+    fn absent_sensors_are_not_present() {
+        assert_eq!(readings(None, None), Readings::default());
+        let laptop = readings(Some(12.0), Some(110.0));
+        assert_eq!(laptop.present, present::LIGHT | present::HINGE);
+        let no_lid = readings(Some(12.0), None);
+        assert_eq!(
+            (no_lid.present, no_lid.hinge_degrees),
+            (present::LIGHT, 0.0)
+        );
     }
 
     #[test]
