@@ -457,6 +457,7 @@ impl Comparator {
             sender_euid: copy.from_euid,
             seq: copy.seq,
             sent: copy.sent,
+            dropped: self.dropped.load(Ordering::Relaxed),
             data: call.reader(),
         });
         let slice = match &copy.reply {

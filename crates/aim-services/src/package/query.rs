@@ -224,7 +224,7 @@ impl ShadowModel for PackageModel {
         let Some(state) = (self.states)(FRESH) else {
             return Answer::NotModelled;
         };
-        self.writes.observe(&state);
+        self.writes.observe(&state, call.dropped);
         if let Some(answer) = self.writes.answer(call) {
             return answer;
         }

@@ -9,8 +9,12 @@
 //! compared as any reply is) and applies what it changes to a replica of
 //! the package's state in that user; further writes to the same package
 //! and user apply to the replica in turn. Once none came for [`SETTLE`],
-//! every write has reached the original, and the replica is compared with
-//! a fresh state of it ([`Writes::checks`]).
+//! every write has reached the original, and what the writes named (each
+//! component, the package's own state) is compared with a fresh state of
+//! it ([`Writes::checks`]): system_server's own writes to the package's
+//! other parts never cross binder. A copy the shadow dropped may have been
+//! a write too, so a package written while copies were dropped is not
+//! compared.
 //!
 //! Installs, updates and removals are found as changes between observed
 //! states ([`change`]) and compared the same way, once settled.
@@ -30,7 +34,10 @@ use aim_binder_host::parcel::Parcel;
 use aim_service_aidl::android_content_pm_ipackagemanager as pm;
 
 use super::apps_filter::{AppsFilter, Config, NotModelled};
-use super::info::user_state;
+use super::info::{
+    COMPONENT_ENABLED_STATE_DEFAULT, COMPONENT_ENABLED_STATE_DISABLED,
+    COMPONENT_ENABLED_STATE_ENABLED, user_state,
+};
 use super::model::{PackageState, State};
 use super::query::{Query, States};
 use crate::shadow::{Answer, Check, CheckOutcome, ShadowCall, Value};
@@ -53,8 +60,11 @@ pub struct Writes {
 
 #[derive(Default)]
 struct Inner {
-    /// The states observed and when, oldest first.
-    seen: VecDeque<(Instant, Arc<State>)>,
+    /// The states observed, when, and the copies dropped by then; oldest
+    /// first.
+    seen: VecDeque<(Instant, Arc<State>, u64)>,
+    /// The copies the shadow dropped so far.
+    dropped: u64,
     /// The apps filter of the latest pre-state.
     filter: Option<(Arc<State>, Arc<AppsFilter>)>,
     /// The package states being written, by package and user.
@@ -82,10 +92,14 @@ struct Change {
 /// One package's state in one user while it is written.
 struct Track {
     replica: Enabled,
+    /// What the writes named: components by class, `None` the package.
+    named: BTreeSet<Option<String>>,
     /// The calls applied: sequence number and code.
     calls: Vec<(u64, u32)>,
     /// Why the replica no longer stands for the original's state.
     not_modelled: Option<&'static str>,
+    /// The copies dropped by the time of the first write's pre-state.
+    dropped: u64,
     last: Instant,
 }
 
@@ -109,19 +123,35 @@ impl Enabled {
         }
     }
 
-    fn value(&self) -> Value {
-        let list = |s: &BTreeSet<String>| Value::List(s.iter().cloned().map(Value::Str).collect());
-        Value::Fields(vec![
-            ("enabled".into(), Value::Int(self.enabled)),
-            (
-                "lastDisableAppCaller".into(),
-                self.last_disable_app_caller
-                    .clone()
-                    .map_or(Value::Null, Value::Str),
-            ),
-            ("enabledComponents".into(), list(&self.enabled_components)),
-            ("disabledComponents".into(), list(&self.disabled_components)),
-        ])
+    /// The state of what `named` names: each component's
+    /// (`COMPONENT_ENABLED_STATE_*`), and the package's own with its last
+    /// enabler.
+    fn named(&self, named: &BTreeSet<Option<String>>) -> Value {
+        let mut fields = Vec::new();
+        for n in named {
+            match n {
+                None => {
+                    fields.push(("enabled".into(), Value::Int(self.enabled)));
+                    fields.push((
+                        "lastDisableAppCaller".into(),
+                        self.last_disable_app_caller
+                            .clone()
+                            .map_or(Value::Null, Value::Str),
+                    ));
+                }
+                Some(class) => {
+                    let state = if self.enabled_components.contains(class) {
+                        COMPONENT_ENABLED_STATE_ENABLED
+                    } else if self.disabled_components.contains(class) {
+                        COMPONENT_ENABLED_STATE_DISABLED
+                    } else {
+                        COMPONENT_ENABLED_STATE_DEFAULT
+                    };
+                    fields.push((class.clone(), Value::Int(state)));
+                }
+            }
+        }
+        Value::Fields(fields)
     }
 }
 
@@ -139,18 +169,19 @@ impl Writes {
     }
 
     /// Keeps `state`, observed now, as a pre-state of the writes taken
-    /// from now on.
-    pub fn observe(&self, state: &Arc<State>) {
+    /// from now on; `dropped`: the copies the shadow dropped so far.
+    pub fn observe(&self, state: &Arc<State>, dropped: u64) {
         let now = Instant::now();
         let mut inner = self.inner.lock().unwrap();
+        inner.dropped = inner.dropped.max(dropped);
         if inner
             .seen
             .back()
-            .is_some_and(|(_, s)| Arc::ptr_eq(s, state))
+            .is_some_and(|(_, s, _)| Arc::ptr_eq(s, state))
         {
             return;
         }
-        if let Some((_, prev)) = inner.seen.back().cloned() {
+        if let Some((_, prev, _)) = inner.seen.back().cloned() {
             for (name, kind) in change::changes(&prev, state) {
                 if !inner.changes.iter().any(|c| c.name == name) {
                     inner.changes.push(Change {
@@ -162,7 +193,8 @@ impl Writes {
                 }
             }
         }
-        inner.seen.push_back((now, state.clone()));
+        let dropped = inner.dropped;
+        inner.seen.push_back((now, state.clone(), dropped));
         // The newest state older than HISTORY stays: it is the pre-state
         // of any write taken since.
         while inner.seen.len() > 1 && now.duration_since(inner.seen[1].0) > HISTORY {
@@ -184,7 +216,8 @@ impl Writes {
             return Some(Answer::NotModelled);
         };
         let mut inner = self.inner.lock().unwrap();
-        let Some(pre) = inner.pre_state(call.sent) else {
+        inner.dropped = inner.dropped.max(call.dropped);
+        let Some((pre, dropped)) = inner.pre_state(call.sent) else {
             return Some(Answer::NotModelled);
         };
         let filter = inner.filter(&pre);
@@ -221,11 +254,14 @@ impl Writes {
         if let Some(after) = after {
             let track = inner.tracks.entry(key).or_insert(Track {
                 replica: after.clone(),
+                named: BTreeSet::new(),
                 calls: Vec::new(),
                 not_modelled: None,
+                dropped,
                 last: now,
             });
             track.replica = after;
+            track.named.insert(setting.class);
             track.calls.push((call.seq, call.code));
             track.last = now;
         }
@@ -263,8 +299,9 @@ impl Writes {
             return Vec::new();
         }
         let state = states(FRESH);
+        let dropped = self.inner.lock().unwrap().dropped;
         if let Some(state) = &state {
-            self.observe(state);
+            self.observe(state, dropped);
         }
         let mut checks: Vec<Check> = changed
             .into_iter()
@@ -274,13 +311,20 @@ impl Writes {
             let outcome = match (&track.not_modelled, &state) {
                 (Some(reason), _) => CheckOutcome::NotModelled(reason.to_string()),
                 (None, None) => CheckOutcome::NotModelled("no fresh state".into()),
+                (None, Some(_)) if dropped > track.dropped => {
+                    CheckOutcome::NotModelled("copies dropped while it was written".into())
+                }
                 (None, Some(state)) => {
-                    let original = state.packages.get(&package).map(|ps| Enabled::of(ps, user));
-                    match original {
-                        Some(o) if o == track.replica => CheckOutcome::Matched,
+                    let model = track.replica.named(&track.named);
+                    match state.packages.get(&package) {
+                        Some(ps) if Enabled::of(ps, user).named(&track.named) == model => {
+                            CheckOutcome::Matched
+                        }
                         o => CheckOutcome::Differed {
-                            original: o.map_or(Value::Null, |o| o.value()),
-                            model: track.replica.value(),
+                            original: o.map_or(Value::Null, |ps| {
+                                Enabled::of(ps, user).named(&track.named)
+                            }),
+                            model,
                         },
                     }
                 }
@@ -369,13 +413,14 @@ impl Writes {
 }
 
 impl Inner {
-    /// The latest state observed before `sent`.
-    fn pre_state(&self, sent: Instant) -> Option<Arc<State>> {
+    /// The latest state observed before `sent`, and the copies dropped
+    /// by then.
+    fn pre_state(&self, sent: Instant) -> Option<(Arc<State>, u64)> {
         self.seen
             .iter()
             .rev()
-            .find(|(at, _)| *at < sent)
-            .map(|(_, s)| s.clone())
+            .find(|(at, ..)| *at < sent)
+            .map(|(_, s, dropped)| (s.clone(), *dropped))
     }
 
     fn filter(&mut self, state: &Arc<State>) -> Arc<AppsFilter> {

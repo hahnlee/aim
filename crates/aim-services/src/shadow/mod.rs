@@ -151,6 +151,8 @@ pub struct ShadowCall<'a> {
     pub seq: u64,
     /// When the driver took the call, before the original could see it.
     pub sent: Instant,
+    /// The copies the shadow dropped so far, without comparing them.
+    pub dropped: u64,
     /// At the interface token. A binder in it reads as
     /// `Binder::Handle(i)` and an fd as `i`, its identity's index.
     pub data: Reader<'a>,
