@@ -17,5 +17,17 @@ aim-host-location = { path = "../aim-host-location" }
 aim-host-sensors = { path = "../aim-host-sensors" }
 aim-hostcall.workspace = true
 aim-service-aidl = { path = "aidl" }
+android-image-extract = { path = "../../tools/android-image-extract" }
+dsa = "0.6"
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 libc.workspace = true
-sha2.workspace = true
+md-5 = { version = "0.10", features = ["oid"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+p384 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+p521 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+rsa = { version = "0.9", default-features = false, features = ["std"] }
+sha1 = { version = "0.10", features = ["oid"] }
+sha2 = { workspace = true, features = ["oid"] }
+
+[dev-dependencies]
+aim-paths.workspace = true
