@@ -73,7 +73,8 @@ pub mod module {
     pub const GPU: u32 = 2;
     /// The display server's window (the composer HAL's host side).
     pub const DISPLAY: u32 = 3;
-    /// Thermal state and temperatures (the thermal HAL's host side).
+    /// Retired (#641): the thermal HAL's host side, which `thermalservice`
+    /// replaced. A call to it is answered as to an unknown module.
     pub const THERMAL: u32 = 4;
     /// Ambient light and lid angle (the sensors HAL's host side).
     pub const SENSORS: u32 = 5;
@@ -515,38 +516,6 @@ pub mod display {
     const _: () = assert!(core::mem::size_of::<Present>() == 16);
     const _: () = assert!(core::mem::size_of::<SetVsync>() == 4);
     const _: () = assert!(core::mem::size_of::<Event>() == 32);
-}
-
-/// Module [`module::THERMAL`]: the host's thermal state and temperatures,
-/// for `android.hardware.thermal`.
-pub mod thermal {
-    pub const VERSION: u32 = 1;
-
-    /// Fill a [`Thermal`]. Returns 0.
-    pub const FN_READ: u32 = 1;
-
-    /// `NSProcessInfoThermalState` values.
-    pub mod state {
-        pub const NOMINAL: u32 = 0;
-        pub const FAIR: u32 = 1;
-        pub const SERIOUS: u32 = 2;
-        pub const CRITICAL: u32 = 3;
-    }
-
-    /// Argument block of [`FN_READ`] (output only). A temperature the host
-    /// cannot read is NaN.
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug, Default, PartialEq)]
-    pub struct Thermal {
-        /// One of [`state`].
-        pub state: u32,
-        /// The hottest CPU die sensor, in degrees Celsius.
-        pub cpu_celsius: f32,
-        /// The battery (mean of its gauge sensors), in degrees Celsius.
-        pub battery_celsius: f32,
-    }
-
-    const _: () = assert!(core::mem::size_of::<Thermal>() == 12);
 }
 
 /// Module [`module::SENSORS`]: the host's ambient light sensor and lid
@@ -1376,13 +1345,6 @@ pub mod guest {
     /// record fd.
     pub fn display_windows(args: &mut display::Windows) -> Result<i32, Errno> {
         call_with(module::DISPLAY, display::FN_WINDOWS, args).map(|fd| fd as i32)
-    }
-
-    /// The host's thermal state and temperatures.
-    pub fn thermal() -> Result<thermal::Thermal, Errno> {
-        let mut t = thermal::Thermal::default();
-        call_with(module::THERMAL, thermal::FN_READ, &mut t)?;
-        Ok(t)
     }
 
     /// The host's ambient light and lid angle.

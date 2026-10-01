@@ -4,7 +4,7 @@ name = "aim-host-sensors"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Host-call modules for android.hardware.thermal and android.hardware.sensors: the Mac's thermal state, temperatures, ambient light and lid angle"
+description = "The Mac's thermal state and temperatures for thermalservice, and the host-call module for android.hardware.sensors: ambient light and lid angle"
 
 [dependencies]
 aim-hostcall.workspace = true
