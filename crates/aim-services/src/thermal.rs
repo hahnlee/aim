@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
 use aim_binder_host::parcel::{Binder, EX_NULL_POINTER, Exception, Parcel, UNKNOWN_TRANSACTION};
-use aim_hostcall::thermal::{Thermal, state};
+use aim_host_sensors::{Thermal, state};
 use aim_service_aidl::{
     WriteParcelable, android_os_ipowermanager as power,
     android_os_ithermaleventlistener as event_listener, android_os_ithermalservice as its,

@@ -9,7 +9,7 @@
 //! through [`crate::sys`] with the full register save instead.
 //!
 //! Modules are Rust crates linked into the syscall layer; [`MODULES`] is the
-//! registry, indexed by module id.
+//! registry, indexed by module id, with a retired id left empty.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -26,20 +26,22 @@ unsafe fn core_call(_func: u32, _args: u64, _len: u64) -> i64 {
     -(errno::ENOSYS as i64)
 }
 
-/// Every host module, at the index of its id.
-static MODULES: &[&HostModule] = &[
-    &CORE,
-    &aim_host_health::MODULE,
-    &aim_host_gpu::MODULE,
-    &aim_host_display::MODULE,
-    &aim_host_sensors::THERMAL,
-    &aim_host_sensors::SENSORS,
-    &aim_host_location::MODULE,
-    &aim_host_audio::MODULE,
-    &aim_host_bluetooth::MODULE,
-    &aim_host_camera::MODULE,
-    &aim_host_memory::MODULE,
-    &aim_host_vulkan::MODULE,
+/// Every host module, at the index of its id; `None` for a retired id,
+/// which is never reused.
+static MODULES: &[Option<&HostModule>] = &[
+    Some(&CORE),
+    Some(&aim_host_health::MODULE),
+    Some(&aim_host_gpu::MODULE),
+    Some(&aim_host_display::MODULE),
+    // module::THERMAL (#641).
+    None,
+    Some(&aim_host_sensors::SENSORS),
+    Some(&aim_host_location::MODULE),
+    Some(&aim_host_audio::MODULE),
+    Some(&aim_host_bluetooth::MODULE),
+    Some(&aim_host_camera::MODULE),
+    Some(&aim_host_memory::MODULE),
+    Some(&aim_host_vulkan::MODULE),
 ];
 
 const _: () = {
@@ -47,7 +49,9 @@ const _: () = {
     assert!(aim_hostcall::SYSCALL_NR & !0xffff_0000 == 0);
     let mut i = 0;
     while i < MODULES.len() {
-        assert!(MODULES[i].id as usize == i, "MODULES must be indexed by id");
+        if let Some(m) = MODULES[i] {
+            assert!(m.id as usize == i, "MODULES must be indexed by id");
+        }
         i += 1;
     }
 };
@@ -70,7 +74,7 @@ pub fn call(module: u64, func: u64, args: u64, len: u64) -> i64 {
     let (Ok(module), Ok(func)) = (u32::try_from(module), u32::try_from(func)) else {
         return -(errno::ENOSYS as i64);
     };
-    let Some(m) = MODULES.get(module as usize) else {
+    let Some(Some(m)) = MODULES.get(module as usize) else {
         return -(errno::ENOSYS as i64);
     };
     if func == FN_VERSION {
@@ -85,7 +89,10 @@ pub fn call(module: u64, func: u64, args: u64, len: u64) -> i64 {
 
 /// Name of a module, for tracing.
 pub fn module_name(module: u64) -> &'static str {
-    MODULES.get(module as usize).map_or("?", |m| m.name)
+    match MODULES.get(module as usize) {
+        Some(Some(m)) => m.name,
+        _ => "?",
+    }
 }
 
 /// Entry from the host-call path of `trampoline.S`, on the host stack.
@@ -117,6 +124,9 @@ mod tests {
         let enosys = -(errno::ENOSYS as i64);
         assert_eq!(call(0, 1, 0, 0), enosys);
         assert_eq!(call(MODULES.len() as u64, 0, 0, 0), enosys);
+        // A retired module answers as an unknown one, its version too.
+        assert_eq!(call(module::THERMAL as u64, 0, 0, 0), enosys);
+        assert_eq!(call(module::THERMAL as u64, 1, 0, 0), enosys);
         assert_eq!(call(1 << 32, 0, 0, 0), enosys);
         assert_eq!(
             call(module::BLUETOOTH as u64, 0, 0, 0),

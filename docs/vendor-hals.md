@@ -47,8 +47,8 @@ HAL nothing reads. The vendor APEX's example `com.android.hardware.thermal`,
 which reports no temperatures and never throttles, stays removed. The
 framework compatibility matrix lists the thermal HAL as optional.
 
-Host-call module 4 (`thermal`) still serves the same reading; no guest
-program calls it (#641).
+Host-call module 4 (`thermal`), which served our HAL, is retired: the id
+is answered as an unknown module and never reused (#641).
 
 ## Private API (optional)
 

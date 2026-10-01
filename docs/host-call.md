@@ -98,7 +98,7 @@ first.
 | 1 | health | 1 | `FN_BATTERY`: fill `health::Battery` |
 | 2 | gpu | 1 | `FN_INIT`, `FN_IMPORT_BUFFER`, `FN_PRESENT`, and the generated EGL/GLES entry points from `FN_TABLE_BASE` ([gles-driver.md](gles-driver.md)) |
 | 3 | display | 3 | `FN_CONNECT` (returns the event fd), `FN_IMPORT`, `FN_PRESENT`, `FN_RELEASE`, `FN_SET_VSYNC` ([composer.md](composer.md)); `FN_WINDOWS` (returns the task bridge's record fd, [windows.md](windows.md)) |
-| 4 | thermal | 1 | `FN_READ`: fill `thermal::Thermal`; no guest caller since the thermal HAL went (#641, [vendor-hals.md](vendor-hals.md)) |
+| 4 | (retired) | | was the thermal HAL's host side; answered as an unknown module since the HAL went (`thermalservice` is native, #641). The id is never reused |
 | 5 | sensors | 1 | `FN_READ`: fill `sensors::Readings` ([vendor-hals.md](vendor-hals.md)) |
 | 6 | location | 1 | `FN_START`, `FN_STOP`; `FN_READ`: fill `location::Fix` ([vendor-hals.md](vendor-hals.md)) |
 | 7 | audio | 1 | `FN_DEVICES`; `FN_OPEN` on a ring memfd, `FN_START`, `FN_STOP`, `FN_CLOSE` ([audio.md](audio.md)) |

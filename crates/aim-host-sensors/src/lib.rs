@@ -1,7 +1,7 @@
-//! Host-call modules [`aim_hostcall::module::THERMAL`] and
-//! [`aim_hostcall::module::SENSORS`]: what the Mac can tell about its
-//! temperature and surroundings without privileges, for the guest thermal
-//! and sensors HALs.
+//! What the Mac can tell about its temperature and surroundings without
+//! privileges: its thermal state and temperatures for the native
+//! `thermalservice`, and host-call module
+//! [`aim_hostcall::module::SENSORS`] for the guest sensors HAL.
 //!
 //! - Thermal state: `NSProcessInfo.thermalState`, the public summary of the
 //!   Mac's thermal pressure.
@@ -21,15 +21,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use aim_hostcall::sensors::{self, Readings, present};
-use aim_hostcall::thermal::{self, Thermal};
 use aim_hostcall::{HostModule, args_mut, errno, module};
-
-pub static THERMAL: HostModule = HostModule {
-    id: module::THERMAL,
-    name: "thermal",
-    version: thermal::VERSION,
-    call: call_thermal,
-};
 
 pub static SENSORS: HostModule = HostModule {
     id: module::SENSORS,
@@ -53,14 +45,6 @@ unsafe fn fill<T>(args: u64, len: u64, fill: impl FnOnce() -> T) -> i64 {
     }
 }
 
-unsafe fn call_thermal(func: u32, args: u64, len: u64) -> i64 {
-    match func {
-        // SAFETY: the registry passes the guest's argument block.
-        thermal::FN_READ => unsafe { fill(args, len, read_thermal) },
-        _ => -(errno::ENOSYS as i64),
-    }
-}
-
 unsafe fn call_sensors(func: u32, args: u64, len: u64) -> i64 {
     match func {
         // SAFETY: the registry passes the guest's argument block.
@@ -77,7 +61,27 @@ aim_hostcall::dylib! {
     }
 }
 
-/// `[[NSProcessInfo processInfo] thermalState]`: one of [`thermal::state`].
+/// `NSProcessInfoThermalState` values.
+pub mod state {
+    pub const NOMINAL: u32 = 0;
+    pub const FAIR: u32 = 1;
+    pub const SERIOUS: u32 = 2;
+    pub const CRITICAL: u32 = 3;
+}
+
+/// The Mac's thermal state and temperatures. A temperature the Mac cannot
+/// read is NaN.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Thermal {
+    /// One of [`state`].
+    pub state: u32,
+    /// The hottest CPU die sensor, in degrees Celsius.
+    pub cpu_celsius: f32,
+    /// The battery (mean of its gauge sensors), in degrees Celsius.
+    pub battery_celsius: f32,
+}
+
+/// `[[NSProcessInfo processInfo] thermalState]`: one of [`state`].
 pub fn thermal_state() -> u32 {
     type Send = unsafe extern "C" fn(*mut c_void, *const c_void) -> isize;
     // SAFETY: both messages take no argument; `processInfo` returns the
@@ -89,7 +93,7 @@ pub fn thermal_state() -> u32 {
             sel_registerName(c"processInfo".as_ptr()),
         ) as *mut c_void;
         let state = send(info, sel_registerName(c"thermalState".as_ptr()));
-        state.clamp(0, thermal::state::CRITICAL as isize) as u32
+        state.clamp(0, state::CRITICAL as isize) as u32
     }
 }
 
@@ -179,7 +183,7 @@ mod tests {
     fn thermal_is_plausible() {
         let t = read_thermal();
         eprintln!("{t:?}");
-        assert!(t.state <= thermal::state::CRITICAL);
+        assert!(t.state <= state::CRITICAL);
         for c in [t.cpu_celsius, t.battery_celsius] {
             assert!(c.is_nan() || (0.0..150.0).contains(&c));
         }
@@ -209,17 +213,13 @@ mod tests {
 
     #[test]
     fn calls_check_the_argument_block() {
-        let mut t = Thermal::default();
-        let p = &mut t as *mut Thermal as u64;
         let mut r = Readings::default();
         let q = &mut r as *mut Readings as u64;
         let einval = -(errno::EINVAL as i64);
         // SAFETY: live, correctly sized blocks; the bad calls never touch them.
         unsafe {
-            assert_eq!(call_thermal(thermal::FN_READ, p, 11), einval);
-            assert_eq!(call_thermal(thermal::FN_READ, 0, 12), einval);
-            assert_eq!(call_thermal(9, p, 12), -(errno::ENOSYS as i64));
-            assert_eq!(call_thermal(thermal::FN_READ, p, 12), 0);
+            assert_eq!(call_sensors(sensors::FN_READ, 0, 12), einval);
+            assert_eq!(call_sensors(9, q, 12), -(errno::ENOSYS as i64));
             assert_eq!(call_sensors(sensors::FN_READ, q, 16), einval);
             assert_eq!(call_sensors(sensors::FN_READ, q, 12), 0);
         }
