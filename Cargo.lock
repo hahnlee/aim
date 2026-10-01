@@ -255,6 +255,7 @@ dependencies = [
  "aim-hostcall",
  "aim-service-aidl",
  "libc",
+ "sha2",
 ]
 
 [[package]]
