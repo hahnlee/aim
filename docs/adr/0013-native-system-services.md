@@ -354,3 +354,27 @@ The migration's state and conformance results are in
   drops the removed packages, and the device service sets the default
   display area fullscreen again and drops the launch params recorded
   while it was freeform, before WindowManager reads them (#636).
+
+### M4: PackageManager, the design (2026-10-02)
+
+- PackageManager's largest surface is not binder: inside system_server,
+  `PackageManagerInternal` (148 methods) is used by 111 files in 54
+  subsystems, with `Computer` snapshots and `PackageManagerLocal` (ART
+  Service, the permission state); SystemServer calls
+  `PackageManagerService.main` in bootstrap and uses the result at nine
+  call sites, and PMS's injector builds UserManagerService and the
+  permission front ends. Apps used 55 of `IPackageManager`'s 224 methods
+  in a measured boot, idle, starts and installs, ten of them for 92 % of
+  the calls.
+- While ActivityManager, WindowManager and the permission front ends are
+  original, a native owner serves them through a facade in
+  system_server, a replica of its state kept by a version counter in
+  shared memory; it needs a symbolic redirect of SystemServer's call
+  sites, the edit #668 asks for `power`.
+- M4 lands in three slices: A, the read model in shadow (compared with
+  the original on every real call by a driver option, serving nothing);
+  B, the write model in shadow (installs and changes computed without
+  side effects and compared); C, the switch, on a branch, with the
+  facade. The access state moves after C (#616). The design, the CTS
+  modules (22 of 52 host-side, #701) and the decisions (#702) are in
+  [m4-packagemanager.md](../m4-packagemanager.md).
