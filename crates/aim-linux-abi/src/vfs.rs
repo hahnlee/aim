@@ -3,7 +3,8 @@
 //! `docs/guest-init-contract.md` section 2).
 //!
 //! - The longest matching guest prefix wins, on whole components; the host
-//!   device nodes in [`HOST_DEVICES`] take precedence over any `/dev` entry.
+//!   device nodes in [`HOST_DEVICES`] and the pty slaves `/dev/pts/N`
+//!   (`sys::tty`) take precedence over any `/dev` entry.
 //! - Paths are resolved component by component with symlinks interpreted
 //!   relative to the guest root, the way a chroot would, so absolute links
 //!   inside the image (for example `/bin -> /system/bin`) stay inside it.
@@ -38,6 +39,7 @@ pub const HOST_DEVICES: &[&str] = &[
     "/dev/random",
     "/dev/urandom",
     "/dev/tty",
+    "/dev/ptmx",
 ];
 
 /// Where a guest path lives.
@@ -299,6 +301,9 @@ pub fn lookup(guest: &str) -> (PathBuf, Area) {
     if HOST_DEVICES.contains(&guest) {
         return (PathBuf::from(guest), Area::HostDevice);
     }
+    if let Some(host) = crate::sys::tty::pts_host(guest) {
+        return (PathBuf::from(host), Area::HostDevice);
+    }
     let v = vfs();
     if let Some((m, rest)) = holder(&v.mounts.read().unwrap(), guest) {
         let host = if rest.is_empty() {
@@ -472,6 +477,9 @@ pub fn guest_path_of_host(host: &Path) -> Option<String> {
     let s = host.to_str()?;
     if HOST_DEVICES.contains(&s) {
         return Some(s.to_string());
+    }
+    if let Some(guest) = crate::sys::tty::pts_guest(s) {
+        return Some(guest);
     }
     // The mount deepest into the host tree (a bind over its source's area);
     // between mounts of the same host directory, the shorter mount point

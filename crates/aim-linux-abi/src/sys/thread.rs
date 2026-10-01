@@ -606,6 +606,7 @@ pub fn exit_group(a: [u64; 6]) -> ! {
 }
 
 fn end_process(code: i32) -> ! {
+    super::tty::drain_on_exit();
     super::ptrace::process_ending(code << 8);
     super::fork::spawn::wait_handovers();
     // A parent in the namespace reaps this process and drops its entry
