@@ -206,56 +206,47 @@ fn fallback_categories(root: &Path, prop: &dyn Fn(&str) -> Option<String>) -> Ve
         .collect()
 }
 
-/// The device's side of the model's state, read from the image whose
-/// root is `root` and the properties `prop`.
-pub fn system(root: &Path, prop: &dyn Fn(&str) -> Option<String>) -> Result<System, String> {
+/// Properties as the device has them at run time: a property's value by
+/// name.
+pub type Properties = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// What the image's framework fixes: its aconfig flags and
+/// `config_useRoundIcon` (the parser's platform).
+pub struct Framework {
+    flags: Vec<(String, bool)>,
+    use_round_icon: bool,
+}
+
+impl Framework {
+    pub fn load(root: &Path) -> Result<Framework, String> {
+        let platform = Platform::load(root, Default::default())?;
+        let mut flags: Vec<(String, bool)> = platform.flags.into_iter().collect();
+        flags.sort();
+        Ok(Framework {
+            flags,
+            use_round_icon: platform.use_round_icon,
+        })
+    }
+}
+
+/// The device's side of the model's state: SystemConfig and the
+/// framework's constants of the image whose root is `root`, with the
+/// properties `prop` (the device's at run time: the SKU picks permission
+/// directories, init sets the GL ES version).
+pub fn system(root: &Path, prop: &dyn Fn(&str) -> Option<String>, framework: &Framework) -> System {
     let config = SystemConfig::read(root, prop);
-    let names = config.features.iter().map(|(n, _)| n.clone()).collect();
-    let platform = Platform::load(root, names)?;
-    let mut flags: Vec<(String, bool)> = platform.flags.into_iter().collect();
-    flags.sort();
-    Ok(System {
+    System {
         features: config.features,
         // `FeatureInfo.GL_ES_VERSION_UNDEFINED` without the property.
         gl_es_version: int(prop("ro.opengles.version")).unwrap_or(0),
         hidden_api_allowlist: config.hidden_api_allowlist,
-        use_round_icon: platform.use_round_icon,
+        use_round_icon: framework.use_round_icon,
         // Settings.Global.compatibility_mode's default; PackageManager reads
         // the setting at systemReady (#737).
         compatibility_mode: true,
         fallback_categories: fallback_categories(root, prop),
-        flags,
+        flags: framework.flags.clone(),
         ..System::default()
-    })
-}
-
-/// The properties of the image's build.prop files (a device's read-only
-/// ones), for `prop`.
-pub fn build_props(root: &Path) -> impl Fn(&str) -> Option<String> {
-    let mut props = Vec::new();
-    for file in [
-        "system/build.prop",
-        "vendor/build.prop",
-        "odm/etc/build.prop",
-        "product/etc/build.prop",
-        "system_ext/etc/build.prop",
-    ] {
-        let Ok(text) = fs::read_to_string(root.join(file)) else {
-            continue;
-        };
-        for line in text.lines() {
-            if let Some((k, v)) = line.split_once('=')
-                && !k.trim_start().starts_with('#')
-            {
-                props.push((k.trim().to_string(), v.trim().to_string()));
-            }
-        }
-    }
-    move |name: &str| {
-        props
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.clone())
     }
 }
 
