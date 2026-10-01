@@ -450,18 +450,19 @@ pub struct Fault {
 /// memory faults are classified through the VM map: nothing mapped is
 /// SEGV_MAPERR, a protection that forbids the access is SEGV_ACCERR, and
 /// anything else (the pager failed) is BUS_ADRERR.
-pub fn translate_fault(hsig: i32, host_code: i32, m: &DarwinMcontext) -> Fault {
+///
+/// Darwin's exception state may still describe the thread's previous
+/// exception (its last syscall, say) when it reports a fault: the address
+/// is then the siginfo's (`si_addr`), and an access at the pc is a fetch.
+pub fn translate_fault(hsig: i32, host_code: i32, si_addr: u64, m: &DarwinMcontext) -> Fault {
     let esr = m.esr as u64;
     let ec = esr >> 26;
+    let stale = !matches!(ec, 0x20 | 0x21 | 0x24 | 0x25);
     let data_abort = ec == 0x24 || ec == 0x25;
-    let insn_abort = ec == 0x20 || ec == 0x21;
+    let insn_abort = ec == 0x20 || ec == 0x21 || (stale && si_addr == m.pc);
     let (signo, code, addr) = match hsig {
         libc::SIGSEGV | libc::SIGBUS => {
-            let addr = if data_abort || insn_abort {
-                m.far
-            } else {
-                m.pc
-            };
+            let addr = if stale { si_addr } else { m.far };
             if data_abort && esr & 0x3f == 0x21 {
                 (SIGBUS, BUS_ADRALN, addr)
             } else if (super::window::BASE..super::window::BASE + 0x1000).contains(&addr) {
@@ -505,7 +506,8 @@ pub fn translate_fault(hsig: i32, host_code: i32, m: &DarwinMcontext) -> Fault {
     let mem = signo == SIGSEGV || signo == SIGBUS;
     Fault {
         info: Siginfo::fault(signo, code, addr),
-        esr: if mem { esr } else { 0 },
+        // A stale ESR describes some other exception: the guest gets none.
+        esr: if mem && !stale { esr } else { 0 },
         fault_address: if mem { addr } else { 0 },
     }
 }
@@ -622,5 +624,25 @@ mod tests {
         // SAFETY: reading the frame just built.
         let (_, _, saved) = unsafe { restore(e.sp).unwrap() };
         assert_eq!((saved.sp, saved.flags), (alt_base, SS_AUTODISARM));
+    }
+
+    #[test]
+    fn a_fault_with_a_stale_esr_takes_the_siginfo_address() {
+        // ART's implicit suspend check (`ldr x21, [x21]` with x21 = 0) as
+        // Darwin once reported it: the ESR of the thread's last syscall.
+        // SAFETY: plain integers.
+        let mut m: DarwinMcontext = unsafe { std::mem::zeroed() };
+        m.esr = 0x5600_0080;
+        m.pc = 0x0100_7084_7108;
+        let f = translate_fault(libc::SIGSEGV, 2, 0, &m);
+        assert_eq!(
+            (f.info.signo, f.info.code, f.fault_address),
+            (SIGSEGV, SEGV_MAPERR, 0)
+        );
+        assert_eq!(f.esr, 0, "no ESR record for the guest");
+        // The same fault with its own ESR keeps it.
+        m.esr = 0x9200_0006;
+        let f = translate_fault(libc::SIGSEGV, 2, 0, &m);
+        assert_eq!((f.info.code, f.esr), (SEGV_MAPERR, 0x9200_0006));
     }
 }

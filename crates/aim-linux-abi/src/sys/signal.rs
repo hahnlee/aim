@@ -821,7 +821,7 @@ unsafe fn host_signal(hsig: i32, si: &libc::siginfo_t, uc: *mut libc::c_void) ->
         if context::region(m.pc) != context::Region::Other || ctx.in_host != 0 {
             return host_fault;
         }
-        return guest_fault(ctx, hsig, si.si_code, m);
+        return guest_fault(ctx, hsig, si.si_code, si.si_addr as u64, m);
     }
     let sig = from_host(hsig);
     if sig == 0 {
@@ -852,8 +852,14 @@ unsafe fn host_signal(hsig: i32, si: &libc::siginfo_t, uc: *mut libc::c_void) ->
 
 /// A synchronous fault in guest code. Some(signal) when the guest has no
 /// handler that can run (Linux then kills the process with the signal).
-fn guest_fault(ctx: &GuestContext, hsig: i32, code: i32, m: &mut DarwinMcontext) -> Option<i32> {
-    let f = sigframe::translate_fault(hsig, code, m);
+fn guest_fault(
+    ctx: &GuestContext,
+    hsig: i32,
+    code: i32,
+    si_addr: u64,
+    m: &mut DarwinMcontext,
+) -> Option<i32> {
+    let f = sigframe::translate_fault(hsig, code, si_addr, m);
     let sig = f.info.signo;
     // macOS maps nothing below 4 GiB, so an access there beyond the null
     // pages (which implicit null checks use) is a stray pointer, such as a
