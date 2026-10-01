@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering::
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use super::park::Parker;
+use super::sigframe::Cpu;
 use super::signal::ThreadSignals;
 use crate::context::{self, GuestContext, HostStacks};
 use crate::errno::{EAGAIN, EINVAL, ENOSYS, ESRCH};
@@ -310,6 +311,7 @@ pub fn publish_threads() {
         for th in t.values() {
             let name = *th.name.lock().unwrap_or_else(|e| e.into_inner());
             super::procrec::thread(th.tid, host_id(th.pthread.load(SeqCst)), &name);
+            super::procrec::traced(th.tid, super::ptrace::tracer_of(th.tid));
         }
     });
 }
@@ -433,6 +435,7 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
     let Some(parent) = current() else {
         return -(EINVAL as i64);
     };
+    let traced = super::ptrace::clone_event(flags);
     let child_ctx = Box::into_raw(context::copy_regs(ctx));
     // SAFETY: fresh context owned here until the child starts.
     let c = unsafe { &mut *child_ctx };
@@ -464,6 +467,9 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
         return -(EAGAIN as i64);
     };
     let tid = th.tid;
+    if let Some(e) = &traced {
+        super::ptrace::born_traced(tid, e.tracer, e.options);
+    }
     c.tid = tid as u64;
     c.attn = &th.sig.attn;
     c.thread = Arc::into_raw(th.clone());
@@ -504,6 +510,7 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
     if !ok {
         with_table_mut(|t| t.remove(&tid));
         super::procrec::gone(tid);
+        super::ptrace::forget(tid);
         // SAFETY: the child never started; reclaim what it would own.
         unsafe {
             drop(Box::from_raw(boot));
@@ -511,6 +518,9 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
             drop(Box::from_raw(child_ctx));
         }
         return -(EAGAIN as i64);
+    }
+    if let Some(e) = &traced {
+        super::ptrace::clone_stop(e, tid, &Cpu::from_ctx(ctx));
     }
     tid as i64
 }
@@ -559,6 +569,9 @@ pub fn exit(a: [u64; 6]) -> ! {
         t.len()
     });
     super::procrec::gone(th.tid);
+    if left > 0 {
+        super::ptrace::thread_ended(th.tid, code << 8);
+    }
     let ctid = th.clear_child_tid.load(SeqCst);
     if ctid != 0 {
         // SAFETY: the guest tid word registered with CLONE_CHILD_CLEARTID or
@@ -593,6 +606,7 @@ pub fn exit_group(a: [u64; 6]) -> ! {
 }
 
 fn end_process(code: i32) -> ! {
+    super::ptrace::process_ending(code << 8);
     super::fork::spawn::wait_handovers();
     // A parent in the namespace reaps this process and drops its entry
     // then: until then it is a zombie there, whose credentials SIGCHLD

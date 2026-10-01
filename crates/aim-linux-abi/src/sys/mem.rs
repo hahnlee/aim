@@ -1043,19 +1043,12 @@ pub fn membarrier(a: [u64; 6]) -> i64 {
     }
 }
 
-/// process_vm_readv/writev on this process; other processes' memory is out
-/// of reach on Darwin (EPERM).
+/// process_vm_readv/writev: on this process here, on another through its
+/// agent (`ptrace`). `pid` may name any thread of the process.
 pub fn process_vm_rw(write: bool, a: [u64; 6]) -> i64 {
     let (pid, local, lcnt, remote, rcnt, flags) = (a[0] as i32, a[1], a[2], a[3], a[4], a[5]);
     if flags != 0 || lcnt > 1024 || rcnt > 1024 {
         return -(EINVAL as i64);
-    }
-    // SAFETY: trivial.
-    if pid != unsafe { libc::getpid() } {
-        return match super::pidns::check(pid) {
-            Ok(_) => -(libc::EPERM as i64),
-            Err(e) => e,
-        };
     }
     // SAFETY: guest iovec arrays of the given counts.
     let iov = |p: u64, n: u64| unsafe {
@@ -1066,6 +1059,11 @@ pub fn process_vm_rw(write: bool, a: [u64; 6]) -> i64 {
             .collect::<Vec<_>>()
     };
     let (l, r) = (iov(local, lcnt), iov(remote, rcnt));
+    let owner = super::thread::owner(pid);
+    // SAFETY: trivial.
+    if pid <= 0 || owner != unsafe { libc::getpid() } {
+        return super::ptrace::remote_vm(write, owner, &l, &r);
+    }
     let (mut li, mut lo, mut done) = (0usize, 0u64, 0u64);
     for (rbase, rlen) in r {
         let mut ro = 0u64;

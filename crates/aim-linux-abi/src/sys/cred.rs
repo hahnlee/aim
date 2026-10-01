@@ -33,6 +33,7 @@ const CAP_KILL: u32 = 5;
 const CAP_SETGID: u32 = 6;
 const CAP_SETUID: u32 = 7;
 const CAP_SETPCAP: u32 = 8;
+const CAP_SYS_PTRACE: u32 = 19;
 const CAP_SYS_NICE: u32 = 23;
 const RLIMIT_NICE: usize = 13;
 const CAP_SYS_RESOURCE: u32 = 24;
@@ -607,6 +608,22 @@ pub fn may_signal(pid: i32) -> bool {
     })
 }
 
+/// `__ptrace_may_access` (kernel/ptrace.c) but for the dumpable rule: the
+/// caller's real ids (with `fs`, its filesystem ids) are each of the
+/// target's real, effective and saved ids, or it has CAP_SYS_PTRACE.
+pub fn may_ptrace(pid: i32, fs: bool) -> bool {
+    let t = target(pid);
+    read(|id| {
+        let (u, g) = if fs {
+            (id.uid[3], id.gid[3])
+        } else {
+            (id.uid[0], id.gid[0])
+        };
+        id.capable(CAP_SYS_PTRACE)
+            || (t.uid[..3].iter().all(|&x| x == u) && t.gid[..3].iter().all(|&x| x == g))
+    })
+}
+
 /// `set_one_prio_perm` and the scheduler's `check_same_owner`
 /// (kernel/sys.c, kernel/sched/syscalls.c): the caller's effective uid is
 /// the target's real or effective uid, or it has CAP_SYS_NICE.
@@ -646,7 +663,13 @@ pub fn proc_status(pid: i32) -> String {
 
 /// `/proc/self/attr/current`.
 pub fn seclabel() -> String {
-    let l = current().seclabel;
+    // SAFETY: trivial.
+    seclabel_of(unsafe { libc::getpid() })
+}
+
+/// `/proc/<pid>/attr/current`: another process's from the process table.
+pub fn seclabel_of(pid: i32) -> String {
+    let l = identity_of(pid).unwrap_or_default().seclabel;
     if l.is_empty() {
         "u:r:init:s0".into()
     } else {

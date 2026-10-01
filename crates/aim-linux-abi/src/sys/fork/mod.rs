@@ -11,10 +11,16 @@
 //! `vfork` (CLONE_VM | CLONE_VFORK) is a fork whose parent waits until the
 //! child execs or exits, which is all POSIX lets a vfork child do. The
 //! wait is a close-on-exec pipe the child holds.
+//!
+//! CLONE_FILES without CLONE_VM (debuggerd's snapshot process, a double
+//! clone that execs nothing) is a fork too: Darwin processes cannot share
+//! a file table, so the child's is a copy, and what either side opens or
+//! closes afterwards stays its own (#595).
 
 pub(crate) mod spawn;
 pub(crate) mod state;
 
+use super::sigframe::Cpu;
 use crate::context::GuestContext;
 use crate::errno::{self, EINVAL};
 
@@ -42,9 +48,8 @@ const CLONE_NEWNET: u64 = 0x4000_0000;
 const CLONE_NEWTIME: u64 = 0x80;
 
 /// Sharing a process cannot do with another Darwin process, and namespaces
-/// (answered unsupported, ADR 0012).
+/// (answered unsupported, ADR 0012). CLONE_FILES is copied (see above).
 const UNSUPPORTED: u64 = CLONE_FS
-    | CLONE_FILES
     | CLONE_SIGHAND
     | CLONE_THREAD
     | CLONE_PARENT
@@ -71,7 +76,8 @@ pub fn is_fork(flags: u64) -> bool {
 /// own, its writes to memory stay its own (the handler reads none back),
 /// and the parent sees the tid handshake the handler waits on
 /// (CLONE_CHILD_SETTID, then CLONE_CHILD_CLEARTID with a futex wake when
-/// it ends).
+/// it ends). It is a thread of the parent's in `/proc/<pid>/task`, and
+/// its children's parent is the parent's process, as crash_dump checks.
 fn is_own_files_thread(flags: u64) -> bool {
     flags & (CLONE_THREAD | CLONE_VM | CLONE_FILES) == CLONE_THREAD | CLONE_VM
 }
@@ -80,6 +86,13 @@ fn is_own_files_thread(flags: u64) -> bool {
 /// `child_tid` now, and 0 plus a futex wake once the process `pid` ends.
 /// The layer reaps it; the guest never forked it.
 fn own_files_thread_started(pid: i32, r: &Request) {
+    super::procrec::foreign(pid, &super::thread::name());
+    if r.flags & CLONE_CHILD_CLEARTID == 0 || r.child_tid == 0 {
+        std::thread::spawn(move || {
+            reap(pid);
+            super::procrec::gone(pid);
+        });
+    }
     if r.child_tid == 0 {
         return;
     }
@@ -94,13 +107,19 @@ fn own_files_thread_started(pid: i32, r: &Request) {
     }
     let addr = r.child_tid;
     std::thread::spawn(move || {
-        let mut status = 0;
-        // SAFETY: reaping the process that stands for the thread.
-        while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 && errno::last() == errno::EINTR {}
-        // SAFETY: as above; the guest waits on this word.
+        reap(pid);
+        super::procrec::gone(pid);
+        // SAFETY: the guest's tid word; the guest waits on it.
         unsafe { (addr as *mut i32).write_volatile(0) };
         super::futex::wake_one(addr);
     });
+}
+
+/// Reap the process that stands for an own-files thread.
+fn reap(pid: i32) {
+    let mut status = 0;
+    // SAFETY: waiting for our child.
+    while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 && errno::last() == errno::EINTR {}
 }
 
 /// `struct clone_args` flags of a `clone3` call, for [`is_fork`].
@@ -188,6 +207,7 @@ fn fork(ctx: &mut GuestContext, mut r: Request) -> i64 {
         // SAFETY: our pipe.
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
+    let traced = super::ptrace::clone_event(r.flags);
     let setup = spawn::ChildSetup {
         stack: r.stack,
         tls: (r.flags & CLONE_SETTLS != 0).then_some(r.tls),
@@ -202,6 +222,9 @@ fn fork(ctx: &mut GuestContext, mut r: Request) -> i64 {
             0
         },
         vfork: vfork.then_some((done[0], done[1])),
+        traced: traced.as_ref().map(|e| (e.tracer, e.options)),
+        // SAFETY: trivial.
+        thread_of: own_files_thread.then(|| unsafe { libc::getpid() }),
     };
     let pid = match spawn::fork(ctx, &setup, runtime) {
         Ok(pid) => pid,
@@ -225,6 +248,9 @@ fn fork(ctx: &mut GuestContext, mut r: Request) -> i64 {
             let fd = super::wait::open_pidfd(pid, false);
             (r.pidfd as *mut i32).write_unaligned(fd as i32);
         }
+    }
+    if let Some(e) = &traced {
+        super::ptrace::clone_stop(e, pid, &Cpu::from_ctx(ctx));
     }
     if vfork {
         // SAFETY: our pipe: read until the child's end closes.

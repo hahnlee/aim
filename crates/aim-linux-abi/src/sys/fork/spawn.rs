@@ -528,6 +528,10 @@ pub struct ChildSetup {
     /// A vfork parent's wait pipe (read end, write end): the child keeps
     /// the write end until it execs or exits.
     pub vfork: Option<(i32, i32)>,
+    /// The tracer and options the child starts traced with (a clone event).
+    pub traced: Option<(i32, u64)>,
+    /// For an own-files thread: the process it is a thread of.
+    pub thread_of: Option<i32>,
 }
 
 fn save_context(w: &mut Writer, ctx: &GuestContext) {
@@ -587,6 +591,11 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
         w.i32(rd);
         w.i32(wr);
     });
+    w.opt(setup.traced, |w, (tracer, options)| {
+        w.i32(tracer);
+        w.u64(options);
+    });
+    w.opt(setup.thread_of, |w, p| w.i32(p));
     save_context(&mut w, ctx);
     w.u64(context::guest_tp());
     w.bytes(&shadow_stack());
@@ -962,7 +971,15 @@ fn become_child(h: Handover) -> String {
     let set_tid = r.u64();
     let clear_tid = r.u64();
     let vfork = r.opt(|r| (r.i32(), r.i32()));
+    let traced = r.opt(|r| (r.i32(), r.u64()));
+    let thread_of = r.opt(|r| r.i32());
     let ctx = context::init_thread();
+    // Traced before the agent serves (`state::restore`), and stopped before
+    // the first guest instruction.
+    if let Some((tracer, options)) = traced {
+        // SAFETY: trivial.
+        super::super::ptrace::born_traced(unsafe { libc::getpid() }, tracer, options);
+    }
     crate::diag::install_signal_handlers();
     // SAFETY: this thread's fresh context.
     let c = unsafe { &mut *ctx };
@@ -996,6 +1013,9 @@ fn become_child(h: Handover) -> String {
     context::set_guest_scs(base + scs.len() as u64);
     context::set_guest_tp(tls.unwrap_or(tp));
     super::child_started(c, stack, set_tid, clear_tid);
+    if let Some(p) = thread_of {
+        super::super::procrec::set_tgid(p);
+    }
     // SAFETY: this thread's context, holding the forking thread's registers.
     unsafe { context::resume(ctx) }
 }

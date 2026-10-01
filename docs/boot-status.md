@@ -386,8 +386,10 @@ keeps exiting and init restarts it every 5 s.
 | surfaceflinger | excluded: SIGABRT | guest-init passes no `--gpu` (#204), so RenderEngine gets `EGL_BAD_DISPLAY`; with it, RenderEngine runs on ANGLE and SurfaceFlinger aborts with "failed to get hwcomposer service" (the composer is P4) |
 | zygote | excluded | ART (P2) |
 
-Every crashing process also logs "crash_dump helper failed to exec, or was
-killed": debuggerd's `crash_dump64` does not run yet (#191).
+A crashing native process gets its symbolized backtrace in `logcat -b crash`,
+and `debuggerd -b <pid>` prints a process's stacks: debuggerd's `crash_dump64`
+runs on the layer's ptrace and cross-process `/proc` (#557). tombstoned cannot
+write the tombstone file yet (`O_TMPFILE`, #642).
 
 ### Fixed on the way
 

@@ -79,7 +79,9 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
    them. The child gets a send right to a port of the parent's through its
    registered ports. The parent writes the child's by-pid entry before
    the handover, so the child is in the pid namespace at once and keeps
-   that file as its own.
+   that file as its own. The child of a traced thread whose options
+   report the clone (PTRACE_EVENT_FORK, _VFORK or _CLONE) starts traced
+   and stops before its first instruction (`sys/ptrace/`).
 5. **Handover.** A host thread of the parent serves the port. The child
    sends its reply port and receives the memory entries and the blob in one
    message. If the child dies first, a no-senders notification ends the
@@ -111,7 +113,12 @@ child. umask and rlimits come with `posix_spawn`.
 
 `vfork` takes the same path. The parent waits on a close-on-exec pipe
 whose write end the child holds until it execs or exits. A thread with
-its own file table (debuggerd's pseudothread) is a fork too.
+its own file table (debuggerd's pseudothread) is a fork too: it is a task
+of its parent's in `/proc/<pid>/task` (the parent's process record lists
+it), and its own children's parent is the parent's process, as
+crash_dump checks with `getppid` (its record names that thread group).
+So is `clone(CLONE_FILES)` without CLONE_VM (debuggerd's snapshot of the
+crashing process), whose file table is a copy (#595).
 
 ## What a child does not get
 

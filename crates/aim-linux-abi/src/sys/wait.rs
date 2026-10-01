@@ -101,6 +101,24 @@ pub fn wait4(a: [u64; 6]) -> i64 {
     if options & !(WNOHANG | WUNTRACED | WCONTINUED | WNOTHREAD | WALL | WCLONE) != 0 {
         return -(EINVAL as i64);
     }
+    if pid > 0
+        && let Some(r) = super::ptrace::wait(pid, options & WNOHANG != 0)
+    {
+        return match r {
+            Ok(st) => {
+                if let Some(st) = st.filter(|_| status != 0) {
+                    // SAFETY: guest int.
+                    unsafe { (status as *mut i32).write_unaligned(st) };
+                }
+                if rusage != 0 {
+                    // SAFETY: guest struct rusage.
+                    unsafe { std::ptr::write_bytes(rusage as *mut u8, 0, 144) };
+                }
+                st.map_or(0, |_| pid as i64)
+            }
+            Err(e) => e,
+        };
+    }
     let mut hopts = 0;
     if options & WNOHANG != 0 {
         hopts |= libc::WNOHANG;

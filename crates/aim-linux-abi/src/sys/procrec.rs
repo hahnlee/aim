@@ -6,7 +6,9 @@
 //! and its command line from its memory. Darwin lets no process read
 //! another's memory, so the record holds
 //! - a table of the process's threads: tid, host thread id (for their CPU
-//!   times) and `comm`, written as they change;
+//!   times), `comm` and tracer, written as they change, with the threads
+//!   that run as processes of their own (`fork`'s own-files threads);
+//! - the thread group id, for such a process;
 //! - the pages of the main thread's stack that hold its argument and
 //!   environment strings. The process maps those pages from the record,
 //!   shared: the record is that memory, so a program that rewrites its
@@ -24,6 +26,8 @@ use super::procfs::StackInfo;
 
 /// One slot per possible thread of a process (`thread::slot`).
 const SLOTS: usize = 2048;
+/// Then slots for threads that run as processes of their own.
+const FOREIGN: usize = 16;
 /// Offset of the string pages in the record.
 const STRINGS: u64 = 128 << 10;
 const PAGE: u64 = super::mem::PAGE;
@@ -35,14 +39,17 @@ struct Header {
     len: AtomicU64,
     args: [AtomicU64; 2],
     env: [AtomicU64; 2],
-    _pad: [u64; 2],
+    /// The thread group of a process that is another's thread, else 0.
+    tgid: AtomicU64,
+    _pad: u64,
 }
 
 #[repr(C)]
 struct Slot {
     /// 0 for a free slot.
     tid: AtomicI32,
-    _pad: u32,
+    /// The tracer's pid, or 0.
+    tracer: AtomicI32,
     host: AtomicU64,
     name: [AtomicU8; 16],
 }
@@ -50,7 +57,7 @@ struct Slot {
 #[repr(C)]
 struct Table {
     header: Header,
-    slots: [Slot; SLOTS],
+    slots: [Slot; SLOTS + FOREIGN],
 }
 
 const TABLE: usize = std::mem::size_of::<Table>();
@@ -164,11 +171,63 @@ pub fn is_strings(addr: u64) -> bool {
     (MAPPED[0].load(Relaxed)..MAPPED[1].load(Relaxed)).contains(&addr)
 }
 
-fn slot(tid: i32) -> Option<&'static Slot> {
+fn table() -> Option<&'static Table> {
     // SAFETY: mapped for the life of the process (or until execve, which
     // runs on the only thread).
-    let t = unsafe { OWN.load(Acquire).as_ref() }?;
-    t.slots.get(super::thread::slot(tid))
+    unsafe { OWN.load(Acquire).as_ref() }
+}
+
+fn slot(tid: i32) -> Option<&'static Slot> {
+    let t = table()?;
+    // SAFETY: trivial.
+    if super::thread::owner(tid) == unsafe { libc::getpid() } {
+        t.slots.get(super::thread::slot(tid))
+    } else {
+        t.slots[SLOTS..].iter().find(|s| s.tid.load(Acquire) == tid)
+    }
+}
+
+/// Process `tid` is a thread of this one, named `name` (a fork's own-files
+/// thread); false when all slots for such are taken.
+pub fn foreign(tid: i32, name: &[u8; 16]) -> bool {
+    let Some(t) = table() else {
+        return false;
+    };
+    let Some(s) = t.slots[SLOTS..]
+        .iter()
+        .find(|s| s.tid.compare_exchange(0, tid, AcqRel, Relaxed).is_ok())
+    else {
+        return false;
+    };
+    for (d, &b) in s.name.iter().zip(name) {
+        d.store(b, Relaxed);
+    }
+    true
+}
+
+/// This process's threads that are processes of their own.
+pub fn foreign_tids() -> Vec<i32> {
+    table().map_or(Vec::new(), |t| {
+        t.slots[SLOTS..]
+            .iter()
+            .map(|s| s.tid.load(Acquire))
+            .filter(|&tid| tid != 0)
+            .collect()
+    })
+}
+
+/// This process is a thread of process `tgid`.
+pub fn set_tgid(tgid: i32) {
+    if let Some(t) = table() {
+        t.header.tgid.store(tgid as u64, Relaxed);
+    }
+}
+
+/// Thread `tid` is traced by `tracer` (0: no longer).
+pub fn traced(tid: i32, tracer: i32) {
+    if let Some(s) = slot(tid) {
+        s.tracer.store(tracer, Relaxed);
+    }
 }
 
 /// Thread `tid` exists, named `name`, on host thread `host` (0 until it
@@ -197,13 +256,17 @@ pub fn named(tid: i32, name: &[u8; 16]) {
 
 pub fn gone(tid: i32) {
     if let Some(s) = slot(tid) {
+        s.tracer.store(0, Relaxed);
         s.tid.store(0, Release);
     }
 }
 
-/// The process `pid` is gone: drop its record.
+/// The process `pid` is gone: drop its record and its agent's socket.
 pub fn forget(pid: i32) {
-    if let Some(p) = path(pid) {
+    for p in [path(pid), super::ptrace::socket_path(pid)]
+        .into_iter()
+        .flatten()
+    {
         let _ = std::fs::remove_file(p);
     }
 }
@@ -214,6 +277,8 @@ pub struct ThreadInfo {
     /// Host thread id (`pthread_threadid_np`), 0 until it runs.
     pub host: u64,
     pub name: [u8; 16],
+    /// The tracer's pid, or 0.
+    pub tracer: i32,
 }
 
 fn open(pid: i32) -> Option<std::fs::File> {
@@ -235,7 +300,7 @@ fn u64_at(b: &[u8], i: usize) -> u64 {
 /// The threads of process `pid`, by tid; none without a record.
 pub fn threads(pid: i32) -> Option<Vec<ThreadInfo>> {
     let f = open(pid)?;
-    let b = read_at(&f, HEADER as u64, SLOTS * SLOT);
+    let b = read_at(&f, HEADER as u64, (SLOTS + FOREIGN) * SLOT);
     let mut v: Vec<ThreadInfo> = b
         .chunks_exact(SLOT)
         .filter_map(|s| {
@@ -244,11 +309,22 @@ pub fn threads(pid: i32) -> Option<Vec<ThreadInfo>> {
                 tid,
                 host: u64_at(s, 8),
                 name: s[16..32].try_into().unwrap(),
+                tracer: i32::from_le_bytes(s[4..8].try_into().unwrap()),
             })
         })
         .collect();
     v.sort_unstable_by_key(|t| t.tid);
     Some(v)
+}
+
+/// The thread group of process `pid`: another process when `pid` is one of
+/// its threads, else `pid`.
+pub fn tgid(pid: i32) -> i32 {
+    let h = open(pid).map(|f| read_at(&f, 0, HEADER));
+    match h.map_or(0, |h| u64_at(&h, 48)) {
+        0 => pid,
+        g => g as i32,
+    }
 }
 
 /// The command line of process `pid`, read from its string pages as
