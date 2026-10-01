@@ -75,7 +75,7 @@ non-cargo stages are declared in code:
 | `moltenvk` | | `upstream/moltenvk.lock` | `target/aim/moltenvk` (`libMoltenVK.dylib`, `LICENSE`, `vk.xml`) |
 | `device-services` | `image` | `upstream/java-toolchain.lock`, `java/device-services/*`, `java/framework-overlay/*`, `java/notification-permission/*` | `target/aim/device-services`: `aim-services.jar`, the platform's `systemserverclasspath.pb` with it appended, `framework-overlay.apk`, `notification-permission.apk` ("Java") |
 | `system-server` | `image` | `image/native-services` | `target/aim/system-server/services.jar`, SystemServer without the start of the natively implemented services (docs/system-services.md) |
-| `oat` | `image`, `art`, `boot-image`, `system-server`, `host/linux-run` (order only) | | `target/aim/oat`: the image's oat files with code compiled again, and the device's own APKs compiled (docs/art-exception-patches.md, "Other oat files"), at their guest paths under `root/`, and `overlay.toml`, which `image/overlay.toml` includes |
+| `oat` | `image`, `art`, `boot-image`, `system-server`, `host/linux-run` (order only) | | `target/aim/oat`: the image's oat files with code compiled again, and the device's own APKs compiled (docs/art-exception-patches.md, "Other oat files"), at their guest paths under `root/`, `overlay.toml`, which `image/overlay.toml` includes, and `apps/<name>.toml` per device app, which the manifest that adds the app includes beside it |
 | `derived-image` | `image` and the producer of every built overlay source | `image/overlay.toml` and its checked-in sources | `target/aim/derived.shadow`, attached at `target/aim/derived` |
 | `translation-cache` | `derived-image`, `host/linux-translate` | | the derived image's `translated/` |
 | `userdata/empty` | | | `target/aim/userdata/empty.asif`: the empty data image a new data directory starts as a clone of (`guest-init --userdata`, docs/first-boot.md) |
@@ -148,8 +148,8 @@ without it, so they cannot share an invocation).
 ### Image variants
 
 `cargo aim build --variant NAME` (also `boot` and `status`) builds the
-derived image with the entries of `image/variants/NAME.toml` as well: a
-manifest of `image/overlay.toml`'s schema and rules, without includes. A
+derived image with the entries and includes of `image/variants/NAME.toml`
+as well: a manifest of `image/overlay.toml`'s schema and rules. A
 variant is a check-only image of a change not yet made to every boot; it
 replaces the derived image (its identity differs, so the shadow is made
 again, a few seconds with the translation cache), and the next build

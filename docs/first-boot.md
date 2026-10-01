@@ -68,12 +68,18 @@ The rule for each item: the result must be the original's own output for
 this image, and nothing the original makes per device as an identity, a
 key or a salt may be made once and shipped.
 
-### 1. The device's own APK: compiled in the image
+### 1. The device's own APKs: compiled in the image
 
-`AimNotificationPermission.apk` (an `add` in `image/overlay.toml`) is the
-one image APK without an odex. A device vendor preopts its APKs; the
-`oat` node compiles it as it compiles `aim-services.jar`. Image only;
-saves one package of first-boot dexopt.
+The device's own apps (`add`s in `image/overlay.toml` or a variant:
+`AimNotificationPermission.apk`, `AimMediaProjection.apk`, and the
+lightweight shell's `AimHome.apk` and `AimImageWallpaper.apk`) are the
+image APKs without an odex. A device vendor preopts its APKs; the `oat`
+node compiles each app the `device-services` node builds
+(`device_services::APPS`) as it compiles `aim-services.jar`, and the
+manifest that adds an app includes its compiled code
+(`target/aim/oat/apps/<name>.toml`; `cargo aim` refuses an app added
+without it, #619). Image only; saves a package of first-boot dexopt per
+app.
 
 ### 2. The package parser cache
 

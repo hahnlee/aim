@@ -423,9 +423,11 @@ is the `system-server` node's edited jar; profman turns its profile into text
 and back against the edited jar. The node writes `target/aim/oat/overlay.toml`,
 which `image/overlay.toml` includes; the image's dexoptanalyzer then answers
 "no dexopt needed" for them (the originals: "dex2oat for filter"). The
-device's own APKs (the overlay's `add`s: `AimNotificationPermission.apk`)
-are compiled too, `verify` as the image's apps, so that no first boot
-compiles them (docs/first-boot.md, item 1).
+device's own APKs (the `device-services` node's apps) are compiled too,
+`verify` as the image's apps, so that no first boot compiles them; each
+app's files are in a manifest of their own, `target/aim/oat/apps/<name>.toml`,
+which the manifest that adds the app includes (docs/first-boot.md,
+item 1).
 
 ## Classification
 

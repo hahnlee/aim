@@ -11,11 +11,17 @@
 //! is a checked-in input.
 //!
 //! A variant (`cargo aim build --variant NAME`) is the same image with the
-//! entries of `image/variants/NAME.toml` too, a check-only image of a
-//! change not yet made to every boot (docs/build.md, "Image variants"). It
-//! replaces the derived image until a build without the variant.
+//! entries and includes of `image/variants/NAME.toml` too, a check-only
+//! image of a change not yet made to every boot (docs/build.md, "Image
+//! variants"). It replaces the derived image until a build without the
+//! variant.
+//!
+//! A device app ([`device_services::APPS`]) is added at the guest path it
+//! is built for, with the `oat` node's manifest of its compiled code
+//! ([`oat::app_manifest`]) included beside it, and that manifest only with
+//! its app.
 
-use super::repo;
+use super::{device_services, oat, repo};
 use crate::graph::{Action, Dep, Node};
 use crate::log::Log;
 use aim_android_image::{Manifest, Problem, assemble, identity, manifest};
@@ -52,7 +58,7 @@ fn name(variant: Option<&Path>) -> String {
     }
 }
 
-/// The overlay, with the entries of `variant` (which includes nothing).
+/// The overlay, with the entries and includes of `variant`.
 fn manifest(variant: Option<&Path>) -> Result<Manifest, String> {
     let read = |path: &Path| {
         let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -61,16 +67,53 @@ fn manifest(variant: Option<&Path>) -> Result<Manifest, String> {
     let mut overlay = read(&repo(OVERLAY))?;
     if let Some(path) = variant {
         let added = read(path)?;
-        if !added.includes.is_empty() {
-            return Err(format!("{}: a variant includes nothing", path.display()));
-        }
         overlay.entries.extend(added.entries);
+        overlay.includes.extend(added.includes);
     }
     Ok(overlay)
 }
 
+/// Each device app `manifest` adds is at its guest path, with its compiled
+/// code included; no app's code is included without the app.
+fn check_apps(manifest: &Manifest, name: &str) -> Result<(), String> {
+    let built = device_services::out();
+    let built = built.strip_prefix(aim_paths::root()).unwrap();
+    for app in &device_services::APPS {
+        let source = built.join(app.apk).display().to_string();
+        let code = oat::app_manifest(app.guest);
+        let added = manifest
+            .entries
+            .iter()
+            .find(|e| e.source.as_deref() == Some(source.as_str()));
+        let included = manifest.includes.iter().find(|i| i.source == code);
+        match (added, included) {
+            (Some(e), _) if e.path != app.guest => {
+                return Err(format!(
+                    "{name}:{}: {source} is built for {}, not {}",
+                    e.line, app.guest, e.path
+                ));
+            }
+            (Some(e), None) => {
+                return Err(format!(
+                    "{name}:{}: {} needs its compiled code beside it: [[include]] source = \"{code}\"",
+                    e.line, app.guest
+                ));
+            }
+            (None, Some(i)) => {
+                return Err(format!(
+                    "{name}:{}: {code} without its app {}",
+                    i.line, app.guest
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn node(others: &[Node], variant: Option<PathBuf>) -> Result<Node, String> {
     let manifest = manifest(variant.as_deref())?;
+    check_apps(&manifest, &name(variant.as_deref()))?;
     let built = [aim_paths::root().join("target"), aim_paths::fetched()];
     let mut inputs = vec![repo(OVERLAY)];
     inputs.extend(variant.clone());
@@ -169,4 +212,42 @@ pub fn output_key() -> Option<String> {
     Some(crate::hash::sha256(
         format!("{identity} {}", created.as_nanos()).as_bytes(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(text: &str) -> Result<(), String> {
+        check_apps(&manifest::parse(text).unwrap(), "m")
+    }
+
+    #[test]
+    fn a_device_app_comes_with_its_compiled_code() {
+        let add = |path: &str| {
+            format!(
+                "[[add]]\npath = \"{path}\"\nsource = \"target/aim/device-services/lightweight-home.apk\"\n"
+            )
+        };
+        let include =
+            "[[include]]\nsource = \"target/aim/oat/apps/AimHome.toml\"\nreason = \"r\"\n";
+        let home = "/system_ext/app/AimHome/AimHome.apk";
+        assert_eq!(check("schema = 1\n"), Ok(()));
+        assert_eq!(
+            check(&format!("schema = 1\n{}{include}", add(home))),
+            Ok(())
+        );
+        let without = check(&format!("schema = 1\n{}", add(home))).unwrap_err();
+        assert!(
+            without.contains("target/aim/oat/apps/AimHome.toml"),
+            "{without}"
+        );
+        let moved = check(&format!(
+            "schema = 1\n{}{include}",
+            add("/system/app/H/H.apk")
+        ));
+        assert!(moved.unwrap_err().contains("is built for"));
+        let orphan = check(&format!("schema = 1\n{include}")).unwrap_err();
+        assert!(orphan.contains("without its app"), "{orphan}");
+    }
 }
