@@ -824,12 +824,12 @@ time zone, languages with their region, and light/dark appearance:
 aim-guest-init sets `vendor.aim.mac.*` before init's first action and
 when the Mac changes them, and `init.aim.rc` applies them with
 `persist.sys.timezone` and `persist.sys.locale` (the first language) in
-`post-fs-data`, `cmd alarm set-timezone` and `cmd uimode night`. The
-service host applies the whole language list through the system_server
-bridge at boot and when the Mac's list changes (#344). A first boot on a
-Mac on Asia/Seoul, `ko-KR` and Light shows KST (the Mac's clock),
-`ko-rKR` and `notnight`, and `system_locales` `ko-KR`; Settings draws in
-Korean.
+`post-fs-data` and `cmd alarm set-timezone`; the native uimode service
+follows the appearance itself (#655). The service host applies the
+whole language list through the system_server bridge at boot and when
+the Mac's list changes (#344). A first boot on a Mac on Asia/Seoul,
+`ko-KR` and Light shows KST (the Mac's clock), `ko-rKR` and `notnight`,
+and `system_locales` `ko-KR`; Settings draws in Korean.
 
 ## Storage images (2026-09-29)
 

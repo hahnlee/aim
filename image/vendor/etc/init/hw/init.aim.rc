@@ -67,12 +67,6 @@ on post-fs-data
 on property:sys.boot_completed=1 && property:vendor.aim.mac.time_zone=*
     exec_background - system system -- /system/bin/cmd alarm set-timezone ${vendor.aim.mac.time_zone}
 
-# The appearance goes through UiModeManager (ui_night_mode), at the end
-# of the boot and on each change of the Mac's. Not earlier: a change
-# before the system is ready never reaches the global configuration.
-on property:sys.boot_completed=1 && property:vendor.aim.mac.night_mode=*
-    exec_background - system system -- /system/bin/cmd uimode night ${vendor.aim.mac.night_mode}
-
 # The keyboard layout goes to InputManager as the built-in keyboard's
 # layout override (docs/input.md, "Layouts"), once the system is ready
 # and on each change of the Mac's.

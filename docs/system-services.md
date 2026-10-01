@@ -1086,8 +1086,7 @@ night mode, in its place (`image/native-services`).
   refused as the original refuses them (logged; `false` where the
   method returns one). With it (Settings, SystemUI's tile, the shell,
   the CTS) they are answered as the original answers them, and the
-  result holds until the Mac changes, as `init.aim.rc`'s `cmd uimode
-  night` does for the original today ([mac-settings.md](mac-settings.md)).
+  result holds until the Mac changes ([mac-settings.md](mac-settings.md)).
 - **The rest is the original's**: the UI mode type (car, desk, VR, the
   image's television and watch features, `config_lockUiMode`), car mode
   by priority with its broadcasts, notification, status bar and dock
@@ -1125,9 +1124,7 @@ effects run after it, in the order the changes were made, before the
 call that made them returns.
 
 Not here: visible background users (`enforceCurrentUserIfVisibleBackgroundEnabled`
-decides nothing without them, as on this image). `init.aim.rc`'s `cmd
-uimode night` trigger on guest-init's `vendor.aim.mac.night_mode` now
-repeats what the service already did (#655).
+decides nothing without them, as on this image).
 
 **Conformance** (2026-10-01, device mode; the pinned CTS has no
 separate uimode module, and no app-compat test calls the service):

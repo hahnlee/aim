@@ -1,7 +1,8 @@
-//! The Mac's time zone, language, appearance and keyboard layout, which
-//! the device follows (docs/mac-settings.md). guest-init reads them before init's first
-//! action and publishes them as `vendor.aim.mac.*` properties, and
-//! republishes the time zone and appearance when the Mac changes them.
+//! The Mac's time zone, language and keyboard layout, which the device
+//! follows (docs/mac-settings.md). guest-init reads them before init's
+//! first action and publishes them as `vendor.aim.mac.*` properties, and
+//! republishes the time zone and keyboard layout when the Mac changes
+//! them. The appearance is the native uimode service's own.
 //! `init.aim.rc` applies the values through Android's own services, as a
 //! device's vendor init would. Nothing here changes the Mac's settings.
 
@@ -14,8 +15,6 @@ pub const TIME_ZONE_PROP: &str = "vendor.aim.mac.time_zone";
 /// (`aim_services::locale`): the language Android starts in, before the
 /// service host applies the whole list.
 pub const LOCALE_PROP: &str = "vendor.aim.mac.locale";
-/// `yes` in Dark appearance, else `no` (`cmd uimode night`).
-pub const NIGHT_MODE_PROP: &str = "vendor.aim.mac.night_mode";
 /// The built-in keyboard's layout: an InputDevices layout's resource name
 /// (`aim-keyboard layout`).
 pub const KEYBOARD_LAYOUT_PROP: &str = "vendor.aim.mac.keyboard_layout";
@@ -87,15 +86,6 @@ pub fn tzdata_has(tzdata: &[u8], name: &str) -> bool {
     })
 }
 
-/// `cmd uimode night`'s argument for an `AppleInterfaceStyle` value.
-pub fn night_mode(interface_style: Option<&str>) -> &'static str {
-    if interface_style == Some("Dark") {
-        "yes"
-    } else {
-        "no"
-    }
-}
-
 /// The Mac's current values of the `vendor.aim.mac.*` properties. The time
 /// zone is left out when the guest's tzdata (`tzdata`) lacks it.
 pub fn properties(tzdata: &[u8]) -> Vec<(&'static str, String)> {
@@ -112,8 +102,6 @@ pub fn properties(tzdata: &[u8]) -> Vec<(&'static str, String)> {
         if let Some(locale) = aim_services::locale::preferred_locales().into_iter().next() {
             out.push((LOCALE_PROP, locale));
         }
-        let style = preference("AppleInterfaceStyle").and_then(|v| v.string());
-        out.push((NIGHT_MODE_PROP, night_mode(style.as_deref()).to_string()));
         let toolbox = cfstring(c"com.apple.HIToolbox");
         CFPreferencesAppSynchronize(toolbox);
         let layout = app_preference("AppleCurrentKeyboardLayoutInputSourceID", toolbox)
@@ -200,12 +188,6 @@ impl Cf {
         // SAFETY: a valid CF value.
         unsafe { to_string(self.0) }
     }
-}
-
-/// The global-domain value of `key`, as `defaults read -g` shows it.
-unsafe fn preference(key: &str) -> Option<Cf> {
-    // SAFETY: the any-application domain.
-    unsafe { app_preference(key, *kCFPreferencesAnyApplication()) }
 }
 
 /// Application `app`'s value of `key`, as `defaults read APP KEY` shows
@@ -308,19 +290,10 @@ mod tests {
     }
 
     #[test]
-    fn dark_appearance_is_night_mode() {
-        assert_eq!(night_mode(Some("Dark")), "yes");
-        assert_eq!(night_mode(None), "no");
-        assert_eq!(night_mode(Some("Light")), "no");
-    }
-
-    #[test]
     fn reads_the_macs_settings() {
-        // No tzdata: the zone is left out. The appearance is always named.
+        // No tzdata: the zone is left out. The layout is always named.
         let props = properties(&[]);
         assert!(!props.iter().any(|(n, _)| *n == TIME_ZONE_PROP));
-        let night = props.iter().find(|(n, _)| *n == NIGHT_MODE_PROP).unwrap();
-        assert!(night.1 == "yes" || night.1 == "no");
         let layout = props
             .iter()
             .find(|(n, _)| *n == KEYBOARD_LAYOUT_PROP)
