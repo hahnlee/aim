@@ -426,6 +426,19 @@ original ABI/path/setter APIs, not the complete original ScanPackageUtils entry
 point. Full boot/install selection, extraction/alignment, membership effects and
 snapshot publication remain #810/#702; native PMS is not activated.
 
+`NativeLibraryInstallPolicy` now inspects selected-ABI ZIP entries using the
+guest page size and original NativeLibraryHelper admission rules (2026-10-03).
+Direct APK mapping requires stored, page-aligned entries; 16 KiB compatibility
+can extract 4 KiB-aligned entries unless disabled by the device or manifest.
+Debuggable `wrap.sh` always requires extraction. Local-header corruption,
+encrypted entries, inconsistent stored lengths and NUL names reject.
+`Apks::native_library_install_plan` checks all base/split APKs before returning
+their extraction decisions without writing APKs or native files. Package unit
+tests pass (194, 3.00s), including 4/16/64 KiB admission, disabled compatibility,
+debug wrappers and corrupt headers. This is an admission plan, not a completed
+installation; extraction, ELF alignment, original-runtime comparison of these
+admission decisions and boot/install owner integration remain #810/#702.
+
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained
 setting, identity, UID, signer and leaving status before mutation; stale or

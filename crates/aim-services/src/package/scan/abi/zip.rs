@@ -17,6 +17,72 @@ pub enum SupportedAbi {
     Index(usize),
 }
 
+/// Guest page size and the original installation owner's policy inputs.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeLibraryInstallPolicy {
+    pub page_size: u64,
+    pub extract: bool,
+    pub debuggable: bool,
+    pub compat_16kb_disabled: bool,
+    pub manifest_compat_disabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeLibraryEntry {
+    pub name: Vec<u8>,
+    pub offset: u64,
+    pub extract: bool,
+}
+
+impl NativeLibraryInstallPolicy {
+    /// NativeLibraryHelper.copyFileIfChanged's admission and extraction rules.
+    /// This reads the APK only; a plan is not proof of completed extraction.
+    pub fn inspect(
+        self,
+        source: &dyn ReadAt,
+        abi: &str,
+    ) -> Result<Vec<NativeLibraryEntry>, String> {
+        if self.page_size < 4096 || !self.page_size.is_power_of_two() {
+            return Err("invalid guest page size".into());
+        }
+        let archive = Archive::open(source).map_err(|e| e.to_string())?;
+        let mut entries = Vec::new();
+        for entry in &archive.entries {
+            if entry.name.contains(&0) {
+                return Err("APK ZIP entry name contains NUL".into());
+            }
+            if entry.name.len() >= 4096 || library_abi(&entry.name) != Some(abi.as_bytes()) {
+                continue;
+            }
+            let file = entry.name.rsplit(|b| *b == b'/').next().unwrap();
+            let offset = archive.data_offset(entry).map_err(|e| e.to_string())?;
+            let mut extract = self.extract || (self.debuggable && file == b"wrap.sh");
+            if !extract {
+                if entry.method != 0 {
+                    return Err("native library is compressed with extractNativeLibs=false".into());
+                }
+                // Also reject inconsistent stored lengths before direct mapping.
+                archive.stored(entry).map_err(|e| e.to_string())?;
+                if offset % self.page_size != 0 {
+                    extract = self.page_size == 16384
+                        && !self.compat_16kb_disabled
+                        && !self.manifest_compat_disabled
+                        && offset % 4096 == 0;
+                    if !extract {
+                        return Err("native library is not guest-page-aligned".into());
+                    }
+                }
+            }
+            entries.push(NativeLibraryEntry {
+                name: entry.name.clone(),
+                offset,
+                extract,
+            });
+        }
+        Ok(entries)
+    }
+}
+
 impl ZipNativeLibraries {
     /// Reads only ZIP inventory, without extracting or changing an APK.
     pub fn read(source: &dyn ReadAt) -> Result<Self, String> {
@@ -69,6 +135,37 @@ impl ZipNativeLibraries {
 }
 
 impl crate::package::write::Apks {
+    /// Validate every base/split before the installation owner changes files.
+    pub fn native_library_install_plan(
+        &self,
+        pkg: &crate::package::pkg::AndroidPackage,
+        abi: &str,
+        policy: NativeLibraryInstallPolicy,
+    ) -> Result<Vec<(String, Vec<NativeLibraryEntry>)>, String> {
+        let base = pkg
+            .base_apk_path
+            .as_deref()
+            .ok_or("missing base APK path")?;
+        let mut paths = vec![base];
+        if let Some(splits) = &pkg.split_code_paths {
+            for split in splits {
+                paths.push(split.as_deref().ok_or("null split APK path")?);
+            }
+        }
+        paths
+            .into_iter()
+            .map(|path| {
+                let host = (self.files)(path).ok_or_else(|| format!("unmapped APK: {path}"))?;
+                let source = android_image_extract::source::FileSource::open(&host)
+                    .map_err(|e| format!("{path}: {e}"))?;
+                let entries = policy
+                    .inspect(&source, abi)
+                    .map_err(|e| format!("{path}: {e}"))?;
+                Ok((path.to_owned(), entries))
+            })
+            .collect()
+    }
+
     pub fn zip_native_libraries(
         &self,
         pkg: &crate::package::pkg::AndroidPackage,
@@ -116,6 +213,98 @@ fn filename_safe(name: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Empty ZIP payloads isolate ZIP admission from ELF/content extraction.
+    fn archive(name: &[u8], offset: usize, method: u16) -> Vec<u8> {
+        let extra = offset - 30 - name.len();
+        let mut bytes = vec![0; 30];
+        bytes[..4].copy_from_slice(&0x04034b50u32.to_le_bytes());
+        bytes[8..10].copy_from_slice(&method.to_le_bytes());
+        bytes[26..28].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes[28..30].copy_from_slice(&(extra as u16).to_le_bytes());
+        bytes.extend_from_slice(name);
+        bytes.resize(offset, 0);
+        let mut central = vec![0; 46];
+        central[..4].copy_from_slice(&0x02014b50u32.to_le_bytes());
+        central[10..12].copy_from_slice(&method.to_le_bytes());
+        central[28..30].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(&central);
+        bytes.extend_from_slice(name);
+        let mut end = vec![0; 22];
+        end[..4].copy_from_slice(&0x06054b50u32.to_le_bytes());
+        end[8..10].copy_from_slice(&1u16.to_le_bytes());
+        end[10..12].copy_from_slice(&1u16.to_le_bytes());
+        end[12..16].copy_from_slice(&((46 + name.len()) as u32).to_le_bytes());
+        end[16..20].copy_from_slice(&(offset as u32).to_le_bytes());
+        bytes.extend_from_slice(&end);
+        bytes
+    }
+
+    fn install_policy(page_size: u64) -> NativeLibraryInstallPolicy {
+        NativeLibraryInstallPolicy {
+            page_size,
+            extract: false,
+            debuggable: false,
+            compat_16kb_disabled: false,
+            manifest_compat_disabled: false,
+        }
+    }
+
+    #[test]
+    fn direct_apk_mapping_requires_stored_guest_page_aligned_entries() {
+        for page in [4096, 16384, 65536] {
+            let policy = install_policy(page);
+            let apk = archive(b"lib/arm64-v8a/libx.so", page as usize, 0);
+            let before = apk.clone();
+            assert!(!policy.inspect(&apk, "arm64-v8a").unwrap()[0].extract);
+            assert_eq!(apk, before);
+            assert!(
+                policy
+                    .inspect(
+                        &archive(b"lib/arm64-v8a/libx.so", page as usize, 8),
+                        "arm64-v8a"
+                    )
+                    .is_err()
+            );
+            assert!(
+                policy
+                    .inspect(
+                        &archive(b"lib/arm64-v8a/libx.so", page as usize + 1, 0),
+                        "arm64-v8a"
+                    )
+                    .is_err()
+            );
+        }
+        assert!(install_policy(0).inspect(&vec![], "arm64-v8a").is_err());
+    }
+
+    #[test]
+    fn compatibility_and_debug_wrap_extraction_follow_original_policy() {
+        let apk = archive(b"lib/arm64-v8a/libx.so", 4096, 0);
+        let mut policy = install_policy(16384);
+        assert!(policy.inspect(&apk, "arm64-v8a").unwrap()[0].extract);
+        policy.manifest_compat_disabled = true;
+        assert!(policy.inspect(&apk, "arm64-v8a").is_err());
+        policy.manifest_compat_disabled = false;
+        policy.compat_16kb_disabled = true;
+        assert!(policy.inspect(&apk, "arm64-v8a").is_err());
+        policy.debuggable = true;
+        let wrap = archive(b"lib/arm64-v8a/wrap.sh", 100, 8);
+        assert!(policy.inspect(&wrap, "arm64-v8a").unwrap()[0].extract);
+        assert!(policy.inspect(&wrap, "x86").unwrap().is_empty());
+        policy.debuggable = false;
+        assert!(policy.inspect(&wrap, "arm64-v8a").is_err());
+        policy.extract = true;
+        assert!(policy.inspect(&wrap, "arm64-v8a").unwrap()[0].extract);
+        let mut corrupt = apk;
+        corrupt[0] = 0;
+        assert!(policy.inspect(&corrupt, "arm64-v8a").is_err());
+        assert!(
+            policy
+                .inspect(&archive(b"lib/arm64-v8a/nu\0l.so", 100, 0), "x86")
+                .is_err()
+        );
+    }
     #[test]
     fn original_name_rules_include_non_so_files_and_reject_nested_or_unsafe_files() {
         for name in [

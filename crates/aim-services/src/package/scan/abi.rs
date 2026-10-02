@@ -5,7 +5,7 @@ use crate::package::pkg::AndroidPackage;
 mod lifecycle;
 mod zip;
 pub use lifecycle::{AbiScanContext, AbiScanMode};
-pub use zip::{SupportedAbi, ZipNativeLibraries};
+pub use zip::{NativeLibraryEntry, NativeLibraryInstallPolicy, SupportedAbi, ZipNativeLibraries};
 mod policy;
 pub use policy::{
     AbiPolicy, AbiSelectionError, NativeLibraryError, NativeLibraryScan, PackageAbis,
