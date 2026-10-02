@@ -355,6 +355,11 @@ fn kind(ty: &Type) -> Result<Kind, String> {
             "read_int_array(r)?",
             "write_int_array(p, {v}.as_deref());",
         ),
+        ("long", true) => Kind::Plain(
+            "Option<Vec<i64>>",
+            "read_long_array(r)?",
+            "write_long_array(p, {v}.as_deref());",
+        ),
         ("boolean", true) => Kind::Plain(
             "Option<Vec<bool>>",
             "read_bool_array(r)?",
@@ -798,6 +803,25 @@ pub fn write_int_array(p: &mut Parcel, value: Option<&[i32]>) {
         Some(v) => {
             p.write_i32(v.len() as i32);
             v.iter().for_each(|x| p.write_i32(*x));
+        }
+    }
+}
+
+/// `createLongArray` / `writeLongArray`.
+pub fn read_long_array(r: &mut Reader<'_>) -> Result<Option<Vec<i64>>> {
+    let n = r.read_i32()?;
+    if n < 0 {
+        return Ok(None);
+    }
+    (0..n).map(|_| r.read_i64()).collect::<Result<Vec<_>>>().map(Some)
+}
+
+pub fn write_long_array(p: &mut Parcel, value: Option<&[i64]>) {
+    match value {
+        None => p.write_i32(-1),
+        Some(v) => {
+            p.write_i32(v.len() as i32);
+            v.iter().for_each(|x| p.write_i64(*x));
         }
     }
 }

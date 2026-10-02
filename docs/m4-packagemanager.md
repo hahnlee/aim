@@ -106,7 +106,7 @@ service host is the native services' process, and native is any other
 process. Method names and codes come from the image's AIDL stubs
 (`TRANSACTION_*` in framework.jar, via `tools/binder-trace-report.py`).
 These are the same stubs that `aim-service-aidl`'s generated codes are
-checked against (the four `IPackageManager` methods in
+checked against (all 224 `IPackageManager` methods in
 `crates/aim-services/sources.lock` agree). The tracked game set is not
 included because no document names it (#704).
 
