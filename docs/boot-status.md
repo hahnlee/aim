@@ -242,13 +242,13 @@ prefer the incoming legacy path. A verified-signer scan test rejects an
 unrelated data update without any candidate mutation and accepts the matching
 update while retaining UID, user state and existing MIME values. All eight
 explicit scan tests and eight original-image DEX policy tests pass; the latter
-pin Settings.updatePackageSetting and PackageSetting.updateMimeGroups. This
+pin Settings.updatePackageSetting and PackageSetting.updateMimeGroups.
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained
 setting, identity, UID, signer and leaving status before mutation; stale or
 unreconciled candidates reject unchanged. The scan clock and verified-code
 owner supply timestamps. Earliest first-install time excludes zero and follows
-the original Long.MAX_VALUE sentinel. A null current clock uses file time for
+the original Long.MAX_VALUE sentinel. A zero current clock uses file time for
 new installs, or updates last-update time only for changed system-directory
 code; a nonzero clock honors the original explicit update-time policy.
 USER_ALL modifies only existing explicit user states. Parsed long version,
