@@ -676,6 +676,77 @@ fn new_settings_match_the_original_runtime() {
     }
     assert_eq!(original.next(), None);
     eprintln!("native/original ZIP ABI and RenderScript inventory match 17 archive cases");
+    let abi_policy = AbiPolicy::from_platform(&apks.platform, &all_abis, &supported_abis, &|key| {
+        properties.get(key).cloned()
+    })
+    .unwrap();
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "abi-selection",
+        "/data/local/tmp/code-time.cache",
+    ]));
+    let output = String::from_utf8(original.stdout).unwrap();
+    let mut original = output.lines();
+    let mut cases = 0;
+    for archive in [0, 1, 2, 3, 9] {
+        let path = format!("/data/local/tmp/abi-inventory-{archive}-0.zip");
+        let mut pkg = AndroidPackage {
+            base_apk_path: Some(path),
+            ..Default::default()
+        };
+        let inventory = zip_apks.zip_native_libraries(&pkg).unwrap();
+        for multi in [false, true] {
+            for prefer32 in [false, true] {
+                for sdk in [34, 35] {
+                    for override_abi in [None, Some("x86"), Some("arm64-v8a")] {
+                        for library in [false, true] {
+                            pkg.booleans = if multi {
+                                aim_services::package::pkg::booleans::MULTI_ARCH
+                            } else {
+                                0
+                            } | if prefer32 {
+                                aim_services::package::pkg::booleans::USE_32_BIT_ABI
+                            } else {
+                                0
+                            };
+                            pkg.target_sdk_version = sdk;
+                            pkg.library_names = if library {
+                                vec!["fixture.library".into()]
+                            } else {
+                                vec![]
+                            };
+                            let result = match PackageAbis::select(
+                                &pkg,
+                                &inventory,
+                                &abi_policy,
+                                override_abi,
+                            ) {
+                                Ok(selected) => format!(
+                                    "{},{}",
+                                    selected.primary.as_deref().unwrap_or("null"),
+                                    selected.secondary.as_deref().unwrap_or("null")
+                                ),
+                                Err(error) => format!("error={},{}", error.code, error.message),
+                            };
+                            assert_eq!(
+                                original.next().unwrap(),
+                                format!("case {cases} {result}"),
+                                "archive={archive}, multi={multi}, prefer32={prefer32}, sdk={sdk}, override={override_abi:?}, library={library}"
+                            );
+                            cases += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 240);
+    assert_eq!(original.next(), None);
+    eprintln!("native/original PackageAbiHelper ABI policy matches {cases} cases");
     let inventory = aim_paths::derived_image();
     let bundled_apks = aim_services::package::write::Apks {
         platform: aim_services::package::parse::Platform::load(&inventory, Default::default())
@@ -743,6 +814,69 @@ fn new_settings_match_the_original_runtime() {
         assert_eq!(actual.secondary, None);
         assert!(!actual.multi_arch_mismatch);
         if present {
+            let planned = bundled_apks
+                .native_library_scan(
+                    &pkg,
+                    &abi_policy,
+                    &NativeLibraryEnvironment {
+                        preferred_abi,
+                        app_lib32_install_dir: "/data/app-lib",
+                        code_is_directory: true,
+                        canonical_source: None,
+                    },
+                    true,
+                    false,
+                    None,
+                )
+                .unwrap();
+            assert!(!planned.requires_extraction);
+            assert!(!planned.multi_arch_mismatch);
+            let original = run(boot.command().args([
+                "shell",
+                "/system/bin/app_process",
+                "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+                "/system/bin",
+                "com.android.server.pm.NewSettingOracle",
+                "scan-abi-package",
+                "/data/local/tmp/bundled-abi.cache",
+            ]));
+            assert_eq!(
+                String::from_utf8(original.stdout).unwrap(),
+                format!(
+                    "{}\n{}\n{}\n{}\n{}\n{}\n",
+                    planned.abis.primary.as_deref().unwrap_or("null"),
+                    planned.abis.secondary.as_deref().unwrap_or("null"),
+                    planned.paths.root,
+                    planned.paths.requires_isa,
+                    planned.paths.primary,
+                    planned.paths.secondary.as_deref().unwrap_or("null")
+                ),
+                "combined ABI phase: {code_path}"
+            );
+            let mut parsed = pkg.clone();
+            planned.apply_metadata(&mut parsed);
+            assert_eq!(parsed.primary_cpu_abi, actual.primary);
+            let mut vanished = pkg.clone();
+            vanished.base_apk_path = Some("/system/nonexistent.apk".into());
+            let before = vanished.clone();
+            assert!(
+                bundled_apks
+                    .native_library_scan(
+                        &vanished,
+                        &abi_policy,
+                        &NativeLibraryEnvironment {
+                            preferred_abi,
+                            app_lib32_install_dir: "/data/app-lib",
+                            code_is_directory: true,
+                            canonical_source: None
+                        },
+                        true,
+                        false,
+                        None
+                    )
+                    .is_err()
+            );
+            assert_eq!(vanished, before);
             let zip = bundled_apks.zip_native_libraries(&pkg).unwrap();
             let original = run(boot.command().args([
                 "shell",
@@ -1122,7 +1256,44 @@ fn new_settings_match_the_original_runtime() {
         )
     );
     assert!(!abis.multi_arch_mismatch);
-    abis.apply(&mut code.parsed);
+    let selected = PackageAbis::select(
+        &code.parsed,
+        &bundled_apks.zip_native_libraries(&code.parsed).unwrap(),
+        &abi_policy,
+        None,
+    )
+    .unwrap();
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "abi-package",
+        "/data/local/tmp/code-time.cache",
+    ]));
+    assert_eq!(
+        String::from_utf8(original.stdout).unwrap(),
+        format!(
+            "{}\n{}\n",
+            selected.primary.as_deref().unwrap_or("null"),
+            selected.secondary.as_deref().unwrap_or("null")
+        )
+    );
+    let native_libraries = bundled_apks
+        .native_library_scan(
+            &code.parsed,
+            &abi_policy,
+            &abi_environment,
+            true,
+            false,
+            None,
+        )
+        .unwrap();
+    assert_eq!(native_libraries.abis.primary, abis.primary);
+    assert_eq!(native_libraries.abis.secondary, abis.secondary);
+    assert!(!native_libraries.requires_extraction);
+    native_libraries.apply_metadata(&mut code.parsed);
     eprintln!("native/original bundled GSF ABI inventory matches");
     let paths = NativeLibraryPaths::derive(
         &code.parsed,

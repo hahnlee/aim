@@ -2,6 +2,34 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("scan-abi-package")) {
+            var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                    java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
+            var helper = new PackageAbiHelperImpl();
+            var abis = helper.derivePackageAbi(pkg, true, false, null, new java.io.File("/data/app-lib")).first;
+            abis.applyTo(pkg);
+            if (abis.primary == null) {
+                abis = helper.getBundledAppAbis(pkg); abis.applyTo(pkg);
+            }
+            var paths = helper.deriveNativeLibraryPaths(pkg, true, false, new java.io.File("/data/app-lib"));
+            System.out.println(abis.primary); System.out.println(abis.secondary);
+            System.out.println(paths.nativeLibraryRootDir); System.out.println(paths.nativeLibraryRootRequiresIsa);
+            System.out.println(paths.nativeLibraryDir); System.out.println(paths.secondaryNativeLibraryDir);
+            return;
+        }
+        if (args.length != 0 && args[0].equals("abi-package")) {
+            var pkg = com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
+            var abis = new PackageAbiHelperImpl().derivePackageAbi(pkg,
+                true, false, null, new java.io.File("/data/app-lib")).first;
+            System.out.println(abis.primary); System.out.println(abis.secondary);
+            return;
+        }
+        if (args.length != 0 && args[0].equals("abi-selection")) {
+            abiSelection(java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
+            return;
+        }
         if (args.length != 0 && args[0].equals("zip-package")) {
             var pkg = com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
                 java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
@@ -188,6 +216,36 @@ public final class NewSettingOracle {
                 System.out.println(com.android.internal.content.NativeLibraryHelper.hasRenderscriptBitcode(handle));
             } catch (java.io.IOException error) {
                 System.out.println("error");
+            }
+        }
+    }
+
+    private static void abiSelection(byte[] cache) throws Exception {
+        int cases = 0;
+        for (int archive : new int[] {0, 1, 2, 3, 9}) {
+            for (boolean multi : new boolean[] {false, true}) {
+                for (boolean prefer32 : new boolean[] {false, true}) {
+                    for (int sdk : new int[] {34, 35}) {
+                        for (String overrideAbi : new String[] {null, "x86", "arm64-v8a"}) {
+                            for (boolean library : new boolean[] {false, true}) {
+                                var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                                    com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(cache);
+                                pkg.setBaseApkPath("/data/local/tmp/abi-inventory-" + archive + "-0.zip")
+                                    .setSplitCodePaths(null).setMultiArch(multi).set32BitAbiPreferred(prefer32)
+                                    .setTargetSdkVersion(sdk);
+                                if (library) pkg.addLibraryName("fixture.library");
+                                System.out.print("case " + cases++ + " ");
+                                try {
+                                    var abis = new PackageAbiHelperImpl().derivePackageAbi(pkg,
+                                        true, false, overrideAbi, new java.io.File("/data/app-lib")).first;
+                                    System.out.println(abis.primary + "," + abis.secondary);
+                                } catch (PackageManagerException error) {
+                                    System.out.println("error=" + error.error + "," + error.getMessage());
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

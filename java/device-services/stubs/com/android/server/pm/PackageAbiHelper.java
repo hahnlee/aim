@@ -6,6 +6,7 @@ interface PackageAbiHelper {
         public final String primary;
         public final String secondary;
         Abis(String primary, String secondary) { throw new RuntimeException("stub"); }
+        public void applyTo(com.android.internal.pm.parsing.pkg.ParsedPackage pkg) { throw new RuntimeException("stub"); }
     }
     final class NativeLibraryPaths {
         public final String nativeLibraryRootDir;

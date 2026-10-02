@@ -57,7 +57,7 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (187 package unit tests pass). These are not
+shared snapshot publication (190 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
@@ -349,7 +349,7 @@ app removed by the overlay against original PackageAbiHelperImpl, then derives
 GSF ABIs and paths before accepting its setting metadata. Native inventory reads
 the actual derived image used by that boot, not the original image whose removed
 libraries differ. Unit coverage also checks monolithic/cluster, 32/64/both/neither,
-preference, multiarch and error branches. Full APK ABI policy and extraction,
+preference, multiarch and error branches. Extraction/alignment,
 shared-UID lifecycle integration and complete boot-scan wiring remain #810/#702;
 native PMS is not activated.
 
@@ -381,9 +381,28 @@ safe/unsafe/nested/long names, RenderScript and NUL rejection), then compares
 actual unchanged APK inventories of four image apps with original
 NativeLibraryHelper. All prior runtime cases, Settings launch and owned cleanup
 pass (2026-10-03, 78.16s); 187 package unit tests pass (3.04s) and Java image API
-linkage passes (16.0s). This owns inventory matching; full PackageAbiHelper
-policy (multiarch/override/RenderScript), extraction/alignment and boot/install
-side effects remain #810/#702. Original PMS still runs.
+linkage passes (16.0s). This owns inventory matching; extraction/alignment and
+boot/install side effects remain #810/#702. Original PMS still runs.
+
+`AbiPolicy` reads ordered supported ABIs, the image's multiarch-match aconfig
+flag and reported native-bridge ISA properties; absent image policy rejects.
+`PackageAbis` ports multiarch 32/64 selection and preference, SDK-35 native-only
+matching, override semantics, RenderScript's 32-bit requirement and native
+shared-library rejection. Rejections preserve original install codes/messages.
+`Apks::native_library_scan` stages this selection, uses bundled inventory only
+for a non-updated system package with no primary ABI, and calculates final
+native paths without mutating an erroneous input. It reports required extraction;
+`apply_metadata` commits metadata after the side-effect owner has completed
+required work. A disposable original runtime matches ABI decisions and full
+error codes/messages in 240 combinations of ZIP inputs, multiarch, preference,
+SDK, overrides and shared libraries. The combined factory derivation agrees with
+original helper calls on four unchanged image apps; GSF's ZIP decision and
+combined metadata feed the accepted setting. Disappearing APKs reject unchanged.
+All prior runtime checks, Settings launch and owned cleanup pass (2026-10-03,
+80.20s); 190 package units pass (3.45s), including native-bridge filtering,
+and Java image API linkage passes (16.3s). Extraction/alignment, saved-ABI/move
+scan branches, full boot selection/publication and install side effects remain
+#810/#702; native PMS is not activated.
 
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained

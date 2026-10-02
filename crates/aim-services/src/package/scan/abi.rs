@@ -4,6 +4,10 @@
 use crate::package::pkg::AndroidPackage;
 mod zip;
 pub use zip::{SupportedAbi, ZipNativeLibraries};
+mod policy;
+pub use policy::{
+    AbiPolicy, AbiSelectionError, NativeLibraryError, NativeLibraryScan, PackageAbis,
+};
 
 /// Image/installation and guest filesystem inputs supplied by their owners.
 pub struct NativeLibraryEnvironment<'a> {

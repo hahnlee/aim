@@ -10,6 +10,10 @@ public abstract class PackageImpl implements ParsedPackage {
     public PackageImpl setBaseApkPath(String path) { throw new RuntimeException("stub"); }
     public PackageImpl setPrimaryCpuAbi(String abi) { throw new RuntimeException("stub"); }
     public PackageImpl setSecondaryCpuAbi(String abi) { throw new RuntimeException("stub"); }
+    public PackageImpl setSplitCodePaths(String[] paths) { throw new RuntimeException("stub"); }
+    public PackageImpl setMultiArch(boolean value) { throw new RuntimeException("stub"); }
+    public PackageImpl set32BitAbiPreferred(boolean value) { throw new RuntimeException("stub"); }
+    public PackageImpl addLibraryName(String name) { throw new RuntimeException("stub"); }
     public PackageImpl setTargetSdkVersion(int value) { throw new RuntimeException("stub"); }
     public PackageImpl addUsesLibrary(String name) { throw new RuntimeException("stub"); }
     public PackageImpl addUsesOptionalLibrary(String name) { throw new RuntimeException("stub"); }
