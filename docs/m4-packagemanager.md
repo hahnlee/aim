@@ -552,7 +552,7 @@ the system UID only; it currently attaches after bootstrap, so C's facade
 still must expose the same owner query before the native boot scan (#702).
 A disposable original-PMS boot (2026-10-02, boot completed) tested the
 Rust-to-Java call: SDK 30 returned false, SDK 31/36 true. Device-service
-linkage verification and 131 package unit tests pass. The image has no
+linkage verification and 133 package unit tests pass. The image has no
 `android.content.pm.Flags.sdkLibIndependence` API or loaded aconfig entry
 for that flag. Inspecting its original `services.jar` shows that the SDK
 dependency collection call passes `required=true` directly. `Policy::pinned`
@@ -577,6 +577,22 @@ Settings launched successfully (warm, 90 ms). These inputs are not a
 reconciled query snapshot. APEX state stays separate for apexd verification,
 and new/removed image package reconciliation and publication remain
 unimplemented (#702).
+`scan::Image` now supplies image inputs for a first boot without settings.
+It follows the pinned partition capabilities and scan-directory order,
+inherits each active APEX's preinstalled partition and factory/change
+metadata from the owner, retains duplicate declarations for reconciliation,
+and rejects a missing framework package. Parser features not implemented
+and signature failures abort the candidate; malformed system-directory
+candidates retain their failure reasons. On a disposable original-PMS
+boot (2026-10-02, boot completed), all 243 image APK candidates parsed and
+verified. Their manifest names match all 243 system packages from
+`pm list packages -s -f --match-libraries`; every non-updated system APK
+path matches, while five updates run from data. Five directories without
+APKs are retained as rejected. Settings started successfully (warm,
+126 ms). Explicit integration tests use original APKs to check discovery
+without settings, ordering, duplicate names, stage exclusion and
+empty/absent framework failure. The records do not allocate UIDs or
+publish a reconciled snapshot (#702).
 Verified SPKI keys now become the pinned runtime's Serializable public
 keys for native query records (#738). An explicitly run disposable-boot
 integration test compares six RSA/EC/DSA serialization streams byte for

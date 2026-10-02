@@ -6,6 +6,9 @@
 use super::{State, parse, pkg::AndroidPackage, settings, sign, write::Apks};
 use std::collections::BTreeMap;
 
+mod image;
+pub use image::{Apex, Code, Image, Kind, Location, Partition, Rejected};
+
 #[derive(Debug)]
 pub struct Record {
     pub settings: settings::Package,

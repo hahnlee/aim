@@ -1,6 +1,71 @@
 //! Exercise scan inputs with original signed code. Explicit runs require
 //! the pinned image; no parser cache, feed or writable guest data is used.
-use aim_services::package::{State, parse::Platform, scan::Inputs, settings, write::Apks};
+use aim_services::package::{
+    State,
+    parse::Platform,
+    scan::{Image, Inputs, Kind, Partition},
+    settings,
+    write::Apks,
+};
+
+struct Fixture(std::path::PathBuf);
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn image_scan_keeps_locations_duplicates_and_rejections_without_settings() {
+    let original = aim_paths::original_image();
+    let dir = std::env::temp_dir().join(format!("aim-image-scan-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let fixture = Fixture(dir);
+    let framework = fixture.0.join("system/framework");
+    let overlay = fixture.0.join("product/overlay");
+    let app = fixture.0.join("product/priv-app/GSF");
+    for path in [&framework, &overlay, &app] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let gsf =
+        original.join("system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk");
+    std::os::unix::fs::symlink(
+        original.join("system/framework/framework-res.apk"),
+        framework.join("framework-res.apk"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&gsf, overlay.join("gsf.apk")).unwrap();
+    std::os::unix::fs::symlink(&gsf, app.join("original.apk")).unwrap();
+    std::fs::create_dir(framework.join("arm64")).unwrap();
+    std::fs::create_dir(framework.join("vmdl1.tmp")).unwrap();
+    let root = fixture.0.clone();
+    let apks = Apks {
+        files: Box::new(move |p| Some(root.join(p.trim_start_matches('/')))),
+        platform: Platform::load(&original, Default::default()).unwrap(),
+    };
+    let image = Image::load(&apks, &[]).unwrap();
+    assert_eq!(image.packages.len(), 3);
+    assert_eq!(image.packages[0].location.kind, Kind::Overlay);
+    assert_eq!(image.packages[1].location.kind, Kind::Framework);
+    assert_eq!(image.packages[1].parsed.package_name, "android");
+    assert_eq!(image.packages[2].location.partition, Partition::Product);
+    assert!(image.packages[2].location.privileged());
+    assert_eq!(
+        image.packages[0].parsed.package_name,
+        image.packages[2].parsed.package_name
+    );
+    assert_eq!(image.packages[0].signing, image.packages[2].signing);
+    assert_eq!(image.rejected.len(), 1);
+    assert_eq!(image.rejected[0].location.path, "/system/framework/arm64");
+    assert!(image.rejected[0].reason.contains("No packages found"));
+    std::fs::remove_file(framework.join("framework-res.apk")).unwrap();
+    let error = Image::load(&apks, &[]).unwrap_err();
+    assert_eq!(error.phase, "framework");
+    assert_eq!(error.package, "android");
+    std::fs::remove_dir_all(&framework).unwrap();
+    assert_eq!(Image::load(&apks, &[]).unwrap_err().phase, "framework");
+}
 
 #[test]
 #[ignore = "requires the pinned original image; run explicitly"]

@@ -57,7 +57,7 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (131 package unit tests pass). These are not
+shared snapshot publication (133 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
@@ -125,11 +125,28 @@ signatures. Settings launched successfully (warm, 90 ms). An explicitly
 run original-image integration
 test checks active/disabled GSF records, nonstandard APK paths, v3 lineage,
 SPKI retention, input immutability and code disappearing between parsing
-and verification. All 131 package
+and verification. All 133 package
 unit tests run with their inputs present and pass. These are scan inputs,
 not reconciled package snapshots; APEX verification belongs to apexd,
 and new/removed image package reconciliation and publication remain
 unimplemented (#702). This does not activate the native scan.
+`scan::Image` supplies the first-boot image inputs without settings:
+overlay directories in reverse partition order, the framework, then each
+partition's priv-app/app directories and active APEX directories in the
+owner's reported order. Records retain the partition, privilege and
+factory/changed APEX origin; duplicate package names are preserved for
+reconciliation. Unsupported parser behavior and signature failures abort
+the candidate; invalid directory candidates retain their rejection reason,
+and a missing framework package fails. On a disposable original-PMS boot
+(2026-10-02, boot completed), all 243 image APK candidates parsed and
+verified. Their distinct manifest names matched all 243 system packages
+from `pm list packages -s -f --match-libraries`, and every non-updated
+system APK path matched; five updated packages run from data. Five
+directories without APKs were reported as rejected. Settings launched
+successfully (warm, 126 ms). Explicit image-input integration tests check
+ordering, duplicate names, verified original APKs, stage filtering,
+rejection retention and absent/empty framework failure. UID allocation,
+scan reconciliation and snapshot publication still remain under #702.
 
 The device's own system service (`dev.aim.server.DeviceServices`,
 docs/system-services.md, "The system_server bridge") is on the system
