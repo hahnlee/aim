@@ -3,7 +3,7 @@
 //! and `setEnabledSettingInternalLocked` at `android-16.0.0_r1`, for the
 //! one setting each call carries.
 
-use aim_binder_host::parcel::{EX_SECURITY, Exception, Parcel};
+use aim_binder_host::parcel::{EX_SECURITY, Exception, Parcel, Reader};
 use aim_service_aidl::android_content_pm_ipackagemanager as pm;
 
 use super::Enabled;
@@ -19,7 +19,6 @@ use crate::package::intent::ComponentName;
 use crate::package::model::PackageState;
 use crate::package::pkg::{AndroidPackage, booleans2};
 use crate::package::query::Query;
-use crate::shadow::ShadowCall;
 
 const CHANGE_COMPONENT_ENABLED_STATE: &str = "android.permission.CHANGE_COMPONENT_ENABLED_STATE";
 const SUSPEND_APPS: &str = "android.permission.SUSPEND_APPS";
@@ -30,11 +29,14 @@ const JELLY_BEAN: i32 = 16;
 
 /// One `ComponentEnabledSetting`, with the call's user and package.
 #[derive(Debug, PartialEq)]
-pub(super) struct Setting {
+pub struct Setting {
     pub package: String,
     /// The component's class; `None` for the package.
     pub class: Option<String>,
     pub new_state: i32,
+    /// `PackageManager.DONT_KILL_APP` and `SYNCHRONOUS`, passed unchanged
+    /// to the service's side effects and persistence policy.
+    pub flags: i32,
     pub user: i32,
     /// `callingPackage`, the calling uid when the caller gave none.
     pub calling_package: String,
@@ -43,27 +45,27 @@ pub(super) struct Setting {
 impl Setting {
     /// The setting a call carries; `None` for another call, or one with
     /// no component (a `NullPointerException` in the original).
-    pub fn read(call: &mut ShadowCall<'_>) -> Option<Setting> {
-        let uid = call.sender_euid;
-        let (package, class, new_state, user, calling) = match call.code {
+    pub fn read(code: u32, uid: u32, data: &mut Reader<'_>) -> Option<Setting> {
+        let (package, class, new_state, flags, user, calling) = match code {
             pm::SET_COMPONENT_ENABLED_SETTING => {
-                let a =
-                    pm::SetComponentEnabledSetting::<ComponentName>::read(&mut call.data).ok()?;
+                let a = pm::SetComponentEnabledSetting::<ComponentName>::read(data).ok()?;
                 let c = a.component_name?;
                 (
                     c.package,
                     Some(c.class),
                     a.new_state,
+                    a.flags,
                     a.user_id,
                     a.calling_package,
                 )
             }
             pm::SET_APPLICATION_ENABLED_SETTING => {
-                let a = pm::SetApplicationEnabledSetting::read(&mut call.data).ok()?;
+                let a = pm::SetApplicationEnabledSetting::read(data).ok()?;
                 (
                     a.package_name?,
                     None,
                     a.new_state,
+                    a.flags,
                     a.user_id,
                     a.calling_package,
                 )
@@ -74,6 +76,7 @@ impl Setting {
             package,
             class,
             new_state,
+            flags,
             user,
             calling_package: calling.unwrap_or_else(|| uid.to_string()),
         })
@@ -89,7 +92,7 @@ impl Setting {
 }
 
 /// The reply of a call that threw nothing.
-pub(super) fn reply(code: u32) -> Parcel {
+pub fn reply(code: u32) -> Parcel {
     let mut p = Parcel::new();
     match code {
         pm::SET_COMPONENT_ENABLED_SETTING => pm::write_set_component_enabled_setting_reply(&mut p),
@@ -101,7 +104,7 @@ pub(super) fn reply(code: u32) -> Parcel {
 /// What `s` leaves of its package's state in its user, given the state
 /// `current` holds now: `None` when the user does not exist, and the
 /// exception the original throws.
-pub(super) fn decide(
+pub fn decide(
     q: &Query<'_>,
     s: &Setting,
     calling_pid: i32,

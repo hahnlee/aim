@@ -54,7 +54,12 @@ Two original-PMS boots on disposable native-written data (2026-10-02)
 reached `sys.boot_completed=1`: Settings read as disabled (`enabled=2`),
 then after a native reset to default, Settings launched successfully
 (`am start -W`, 85 ms). This checks file compatibility; the native
-PackageManager service and SystemServer facade are not activated.
+PackageManager service and SystemServer facade are not activated. The
+C branch also has Binder query receivers for `package` and
+`package_native`, tested for caller visibility, interface tokens and
+shared snapshot publication (116 package unit tests pass). These are not
+registered in guest-init; their write path still returns an explicit
+unsupported-operation exception.
 
 The device's own system service (`dev.aim.server.DeviceServices`,
 docs/system-services.md, "The system_server bridge") is on the system

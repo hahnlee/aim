@@ -276,11 +276,7 @@ impl PackageModel {
             filter: &resolution.apps_filter,
             calling_uid: call.sender_euid as i32,
         };
-        let answered = match call.descriptor {
-            pm::DESCRIPTOR => q.package(call.code, &mut call.data),
-            native::DESCRIPTOR => q.native(call.code, &mut call.data),
-            _ => Err(NotModelled("another interface")),
-        };
+        let answered = q.answer(call.descriptor, call.code, &mut call.data);
         match answered {
             Ok(reply) => Answer::Reply(reply),
             Err(NotModelled(reason)) => {
@@ -334,6 +330,17 @@ fn thrown<T>(r: Thrown<T>, write: impl FnOnce(&mut Parcel, T)) -> Answered {
 }
 
 impl Query<'_> {
+    /// Answers a package query with the caller's Binder identity. The
+    /// reader includes the interface token, checked by generated AIDL.
+    /// An unavailable state dependency remains an explicit error.
+    pub fn answer(&self, descriptor: &str, code: u32, data: &mut Reader<'_>) -> Answered {
+        match descriptor {
+            pm::DESCRIPTOR => self.package(code, data),
+            native::DESCRIPTOR => self.native(code, data),
+            _ => Err(NotModelled("another interface")),
+        }
+    }
+
     fn package(&self, code: u32, r: &mut Reader<'_>) -> Answered {
         match code {
             pm::GET_PACKAGE_INFO => {

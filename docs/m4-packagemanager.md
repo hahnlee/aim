@@ -500,6 +500,21 @@ native code disabled Settings, the original PMS booted and read
 again and launched Settings (`am start -W`: status ok, 85 ms). No native
 writer runs beside PMS; this store is not yet wired into the C service.
 
+`package::service::PackageQueries` implements the host Binder receiver for
+`package` and `package_native` over the owner's published scan snapshot.
+Both endpoints capture the same shared source, each call retaining one
+immutable version while the owner publishes later versions. They reuse
+the shadow-tested query and resolution code with the driver's calling
+uid and the pinned generated AIDL readers. Unsupported state dependencies
+and writes return an explicit unsupported-operation exception. The
+enabled-write decoder is also shared and retains `DONT_KILL_APP` and
+`SYNCHRONOUS` flags for the future mutation path. Receiver unit tests cover
+visibility by caller uid, interface-token rejection and publication to
+existing endpoints; all 116 package tests pass. Guest-init does not
+register these receivers; native scanning, mutation side effects and the
+SystemServer facade remain prerequisites tracked in #798 and the M4
+issues.
+
 **Who writes what, by slice:**
 
 | Slice | Package files | Permission files | App files |

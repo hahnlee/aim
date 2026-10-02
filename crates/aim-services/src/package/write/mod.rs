@@ -21,7 +21,7 @@
 
 mod apk;
 mod change;
-mod enabled;
+pub mod enabled;
 mod oracle;
 mod session;
 #[cfg(test)]
@@ -218,7 +218,8 @@ impl Writes {
         {
             return None;
         }
-        let Some(setting) = enabled::Setting::read(call) else {
+        let Some(setting) = enabled::Setting::read(call.code, call.sender_euid, &mut call.data)
+        else {
             return Some(Answer::NotModelled);
         };
         let mut inner = self.inner.lock().unwrap();

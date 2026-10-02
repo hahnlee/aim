@@ -1234,9 +1234,24 @@ impl Resolver {
         if call.descriptor != pm::DESCRIPTOR {
             return None;
         }
-        let code = call.code;
+        self.query(state, call.code, call.sender_euid as i32, &mut call.data)
+            .map(|answer| match answer {
+                Ok(reply) => Answer::Reply(reply),
+                Err(NotModelled(reason)) => self.not_modelled(call.code, reason),
+            })
+    }
+
+    /// Intent queries shared by the shadow and native service. The
+    /// reader includes the AIDL interface token; `uid` is Binder's
+    /// caller, never a package name supplied in a transaction.
+    pub fn query(
+        &self,
+        state: &Arc<State>,
+        code: u32,
+        uid: i32,
+        data: &mut Reader<'_>,
+    ) -> Option<Result<Parcel>> {
         let r = self.resolution(state);
-        let uid = call.sender_euid as i32;
         let mut p = Parcel::new();
         let slice = |items| ListSlice {
             creator: "android.content.pm.ResolveInfo".into(),
@@ -1247,11 +1262,11 @@ impl Resolver {
             | pm::QUERY_INTENT_SERVICES
             | pm::QUERY_INTENT_RECEIVERS
             | pm::QUERY_INTENT_CONTENT_PROVIDERS => {
-                let Ok(a) = pm::QueryIntentActivities::<Intent>::read(&mut call.data) else {
-                    return Some(Answer::NotModelled);
+                let Ok(a) = pm::QueryIntentActivities::<Intent>::read(data) else {
+                    return Some(Err(NotModelled("a malformed intent query")));
                 };
                 let Some(intent) = &a.intent else {
-                    return Some(self.not_modelled(code, "a null intent"));
+                    return Some(Err(NotModelled("a null intent")));
                 };
                 let rt = a.resolved_type.as_deref();
                 let query = match code {
@@ -1264,11 +1279,11 @@ impl Resolver {
                     .map(|list| pm::write_query_intent_activities_reply(&mut p, Some(&slice(list))))
             }
             pm::RESOLVE_INTENT | pm::RESOLVE_SERVICE => {
-                let Ok(a) = pm::ResolveIntent::<Intent>::read(&mut call.data) else {
-                    return Some(Answer::NotModelled);
+                let Ok(a) = pm::ResolveIntent::<Intent>::read(data) else {
+                    return Some(Err(NotModelled("a malformed intent resolution")));
                 };
                 let Some(intent) = &a.intent else {
-                    return Some(self.not_modelled(code, "a null intent"));
+                    return Some(Err(NotModelled("a null intent")));
                 };
                 let resolve = match code {
                     pm::RESOLVE_INTENT => Resolution::resolve_intent,
@@ -1285,21 +1300,18 @@ impl Resolver {
                 .map(|ri| pm::write_resolve_intent_reply(&mut p, ri.as_ref()))
             }
             pm::RESOLVE_CONTENT_PROVIDER => {
-                let Ok(a) = pm::ResolveContentProvider::read(&mut call.data) else {
-                    return Some(Answer::NotModelled);
+                let Ok(a) = pm::ResolveContentProvider::read(data) else {
+                    return Some(Err(NotModelled("a malformed provider resolution")));
                 };
                 let Some(name) = &a.name else {
-                    return Some(self.not_modelled(code, "a null authority"));
+                    return Some(Err(NotModelled("a null authority")));
                 };
                 r.resolve_content_provider(name, a.flags, a.user_id, uid)
                     .map(|pi| pm::write_resolve_content_provider_reply(&mut p, pi.as_ref()))
             }
             _ => return None,
         };
-        Some(match done {
-            Ok(()) => Answer::Reply(p),
-            Err(NotModelled(reason)) => self.not_modelled(code, reason),
-        })
+        Some(done.map(|()| p))
     }
 
     /// Reports a reason the first time a method meets it.
