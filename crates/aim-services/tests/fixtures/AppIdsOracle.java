@@ -2,6 +2,44 @@ package com.android.server.pm;
 
 public final class AppIdsOracle {
     public static void main(String[] args) {
+        if (args.length != 0 && args[0].equals("identity")) {
+            com.android.internal.pm.parsing.pkg.PackageImpl pkg =
+                (com.android.internal.pm.parsing.pkg.PackageImpl)
+                    com.android.internal.pm.parsing.pkg.PackageImpl.forTesting("new");
+            com.android.internal.pm.pkg.component.ParsedComponentImpl[] components = {
+                new com.android.internal.pm.pkg.component.ParsedActivityImpl(),
+                new com.android.internal.pm.pkg.component.ParsedActivityImpl(),
+                new com.android.internal.pm.pkg.component.ParsedServiceImpl(),
+                new com.android.internal.pm.pkg.component.ParsedProviderImpl(),
+                new com.android.internal.pm.pkg.component.ParsedPermissionImpl(),
+                new com.android.internal.pm.pkg.component.ParsedPermissionGroupImpl(),
+                new com.android.internal.pm.pkg.component.ParsedInstrumentationImpl(),
+            };
+            for (com.android.internal.pm.pkg.component.ParsedComponentImpl c : components) {
+                c.setName("new.Class");
+                c.setPackageName("new");
+                c.getComponentName(); // Populate the original cached ComponentName.
+                if (c instanceof com.android.internal.pm.pkg.component.ParsedMainComponentImpl) {
+                    ((com.android.internal.pm.pkg.component.ParsedMainComponentImpl) c).setProcessName("new:process");
+                }
+            }
+            pkg.addActivity((com.android.internal.pm.pkg.component.ParsedActivity) components[0]);
+            pkg.addReceiver((com.android.internal.pm.pkg.component.ParsedActivity) components[1]);
+            pkg.addService((com.android.internal.pm.pkg.component.ParsedService) components[2]);
+            pkg.addProvider((com.android.internal.pm.pkg.component.ParsedProvider) components[3]);
+            pkg.addPermission((com.android.internal.pm.pkg.component.ParsedPermission) components[4]);
+            pkg.addPermissionGroup((com.android.internal.pm.pkg.component.ParsedPermissionGroup) components[5]);
+            pkg.addInstrumentation((com.android.internal.pm.pkg.component.ParsedInstrumentation) components[6]);
+            pkg.setPackageName("old");
+            System.out.println(pkg.getPackageName() + " " + pkg.getManifestPackageName());
+            for (com.android.internal.pm.pkg.component.ParsedComponentImpl c : components) {
+                String process = c instanceof com.android.internal.pm.pkg.component.ParsedMainComponentImpl
+                    ? ((com.android.internal.pm.pkg.component.ParsedMainComponentImpl) c).getProcessName() : "-";
+                System.out.println(c.getPackageName() + " " + c.getName() + " " + process
+                    + " " + c.getComponentName().getPackageName() + " " + c.getComponentName().getClassName());
+            }
+            return;
+        }
         if (args.length != 0 && args[0].equals("oem")) {
             com.android.server.SystemConfig config = new com.android.server.SystemConfig(false);
             for (int i = 1; i < args.length; i++) {

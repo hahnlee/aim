@@ -122,6 +122,101 @@ fn allocation_matches_the_original_runtime() {
         lines.join("\n") + "\n"
     );
 
+    use aim_services::package::pkg::*;
+    let component = Component {
+        name: "new.Class".into(),
+        package_name: "new".into(),
+        ..Default::default()
+    };
+    let main = MainComponent {
+        component: component.clone(),
+        process_name: Some("new:process".into()),
+        ..Default::default()
+    };
+    let mut renamed = AndroidPackage {
+        package_name: "new".into(),
+        manifest_package_name: Some("new".into()),
+        activities: vec![Activity {
+            main: main.clone(),
+            ..Default::default()
+        }],
+        receivers: vec![Activity {
+            main: main.clone(),
+            ..Default::default()
+        }],
+        services: vec![Service {
+            main: main.clone(),
+            ..Default::default()
+        }],
+        providers: vec![Provider {
+            main,
+            ..Default::default()
+        }],
+        permissions: vec![Permission {
+            component: component.clone(),
+            ..Default::default()
+        }],
+        permission_groups: vec![PermissionGroup {
+            component: component.clone(),
+            ..Default::default()
+        }],
+        instrumentations: vec![Instrumentation {
+            component,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    aim_services::package::scan::Identity {
+        manifest_name: "new".into(),
+        internal_name: "old".into(),
+        real_name: Some("new".into()),
+    }
+    .apply(&mut renamed);
+    let mut expected = format!(
+        "{} {}\n",
+        renamed.package_name,
+        renamed.manifest_package_name.as_ref().unwrap()
+    );
+    for (component, process) in [
+        (
+            &renamed.activities[0].main.component,
+            renamed.activities[0].main.process_name.as_deref(),
+        ),
+        (
+            &renamed.receivers[0].main.component,
+            renamed.receivers[0].main.process_name.as_deref(),
+        ),
+        (
+            &renamed.services[0].main.component,
+            renamed.services[0].main.process_name.as_deref(),
+        ),
+        (
+            &renamed.providers[0].main.component,
+            renamed.providers[0].main.process_name.as_deref(),
+        ),
+        (&renamed.permissions[0].component, None),
+        (&renamed.permission_groups[0].component, None),
+        (&renamed.instrumentations[0].component, None),
+    ] {
+        expected.push_str(&format!(
+            "{} {} {} {} {}\n",
+            component.package_name,
+            component.name,
+            process.unwrap_or("-"),
+            component.package_name,
+            component.name
+        ));
+    }
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.AppIdsOracle",
+        "identity",
+    ]));
+    assert_eq!(String::from_utf8(original.stdout).unwrap(), expected);
+
     // Original SystemConfig reads these disposable vendor/OEM fixtures
     // with zero partition permissions: the UID tag has no allow-bit gate.
     let root = boot.data.join("data/local/tmp/uid-image");
@@ -255,6 +350,7 @@ fn allocation_matches_the_original_runtime() {
     assert_eq!(inputs.active.len(), state.settings.packages.len());
     for (name, record) in &inputs.active {
         assert_eq!(&record.identity.internal_name, name);
+        assert_eq!(&record.parsed.package_name, name);
         assert_eq!(
             merged.ids.get(record.settings.app_id),
             restored.get(record.settings.app_id)

@@ -55,7 +55,7 @@ impl Inputs {
                     message,
                 };
                 let flags = physical_parse_flags(&ps.code_path).map_err(|e| fail("location", e))?;
-                let parsed = apks
+                let mut parsed = apks
                     .parsed_path(&ps.code_path, flags)
                     .map_err(|e| fail("parse", e))?;
                 let identity = Identity::select(
@@ -75,6 +75,7 @@ impl Inputs {
                 let signing = apks
                     .signing_details(&parsed)
                     .map_err(|e| fail("signatures", e))?;
+                identity.apply(&mut parsed);
                 let records = if disabled {
                     &mut inputs.disabled
                 } else {

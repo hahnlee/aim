@@ -13,7 +13,7 @@ pub struct Identity {
 
 impl Identity {
     /// Select from a raw native-parsed APK, before any owner rename.
-    /// Parsed component names are transformed separately at publication.
+    /// Apply the result after code verification, before reconciliation.
     pub fn select(pkg: &AndroidPackage, settings: &Settings, system: bool) -> Self {
         let manifest_name = pkg
             .manifest_package_name
@@ -47,11 +47,119 @@ impl Identity {
             real_name,
         }
     }
+
+    /// PackageImpl.setPackageName changes the package and each top-level
+    /// component's owning package. Manifest/class/process names and
+    /// component attributes remain those parsed from the original APK.
+    pub fn apply(&self, pkg: &mut AndroidPackage) {
+        pkg.package_name.clone_from(&self.internal_name);
+        for p in &mut pkg.permissions {
+            p.component.package_name.clone_from(&self.internal_name);
+        }
+        for g in &mut pkg.permission_groups {
+            g.component.package_name.clone_from(&self.internal_name);
+        }
+        for a in pkg.activities.iter_mut().chain(&mut pkg.receivers) {
+            a.main
+                .component
+                .package_name
+                .clone_from(&self.internal_name);
+        }
+        for p in &mut pkg.providers {
+            p.main
+                .component
+                .package_name
+                .clone_from(&self.internal_name);
+        }
+        for s in &mut pkg.services {
+            s.main
+                .component
+                .package_name
+                .clone_from(&self.internal_name);
+        }
+        for i in &mut pkg.instrumentations {
+            i.component.package_name.clone_from(&self.internal_name);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package::pkg::*;
+    #[test]
+    fn applying_identity_changes_only_the_original_owners_fields() {
+        let component = Component {
+            name: "new.Class".into(),
+            package_name: "new".into(),
+            flags: 7,
+            ..Default::default()
+        };
+        let main = MainComponent {
+            component: component.clone(),
+            process_name: Some("new:process".into()),
+            ..Default::default()
+        };
+        let mut pkg = AndroidPackage {
+            package_name: "new".into(),
+            manifest_package_name: Some("new".into()),
+            activities: vec![Activity {
+                main: main.clone(),
+                ..Default::default()
+            }],
+            receivers: vec![Activity {
+                main: main.clone(),
+                ..Default::default()
+            }],
+            services: vec![Service {
+                main: main.clone(),
+                ..Default::default()
+            }],
+            providers: vec![Provider {
+                main: main.clone(),
+                ..Default::default()
+            }],
+            permissions: vec![Permission {
+                component: component.clone(),
+                ..Default::default()
+            }],
+            permission_groups: vec![PermissionGroup {
+                component: component.clone(),
+                ..Default::default()
+            }],
+            instrumentations: vec![Instrumentation {
+                component,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let before = pkg.clone();
+        let identity = Identity {
+            manifest_name: "new".into(),
+            internal_name: "old".into(),
+            real_name: Some("new".into()),
+        };
+        identity.apply(&mut pkg);
+        assert_eq!(pkg.package_name, "old");
+        let fields = [
+            &pkg.activities[0].main.component,
+            &pkg.receivers[0].main.component,
+            &pkg.services[0].main.component,
+            &pkg.providers[0].main.component,
+            &pkg.permissions[0].component,
+            &pkg.permission_groups[0].component,
+            &pkg.instrumentations[0].component,
+        ];
+        assert!(
+            fields
+                .iter()
+                .all(|c| c.package_name == "old" && c.name == "new.Class" && c.flags == 7)
+        );
+        let mut restored = identity;
+        restored.internal_name = "new".into();
+        restored.apply(&mut pkg);
+        assert_eq!(pkg, before);
+    }
     #[test]
     fn ordinary_static_and_declared_system_renames_select_distinct_names() {
         let mut pkg = AndroidPackage {
