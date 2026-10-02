@@ -6,6 +6,9 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
     public Abis getBundledAppAbis(com.android.server.pm.pkg.AndroidPackage pkg) {
         throw new RuntimeException("stub");
     }
+    public String getAdjustedAbiForSharedUser(
+            android.util.ArraySet<? extends com.android.server.pm.pkg.PackageStateInternal> members,
+            com.android.server.pm.pkg.AndroidPackage scanned) { throw new RuntimeException("stub"); }
     public NativeLibraryPaths deriveNativeLibraryPaths(
             com.android.server.pm.pkg.AndroidPackage pkg, boolean system,
             boolean updated, java.io.File appLib32InstallDir) {

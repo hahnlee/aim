@@ -57,7 +57,7 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (183 package unit tests pass). These are not
+shared snapshot publication (185 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
@@ -350,8 +350,24 @@ GSF ABIs and paths before accepting its setting metadata. Native inventory reads
 the actual derived image used by that boot, not the original image whose removed
 libraries differ. Unit coverage also checks monolithic/cluster, 32/64/both/neither,
 preference, multiarch and error branches. APK ZIP ABI selection/extraction,
-shared-UID ABI adjustment and complete boot-scan wiring remain #810/#702; native
-PMS is not activated.
+shared-UID lifecycle integration and complete boot-scan wiring remain #810/#702;
+native PMS is not activated.
+
+`SharedUserAbi` ports original primary-ABI selection and application separately:
+the scanned package takes precedence, updates skip their retained setting,
+otherwise the first ABI-bearing member in owner-supplied ArraySet order selects
+the ABI. ISA conflicts retain package/required-owner diagnostics rather than
+discarding an ABI. Application updates only ABI-less settings and the scanned
+package, preserves secondary ABIs and existing parsed members, and returns changed
+code paths for subsequent dex/installation work. A disposable original-PMS boot
+compares selection, settings, scanned ABI, retained parsed ABIs and changed paths
+with original PackageAbiHelperImpl and ScanPackageUtils in 60 cases, including
+updates, ISA aliases/conflicts, absent/loaded parsed members and no required ABI
+(2026-10-03, 72.67s). All prior runtime checks, Settings launch and owned cleanup
+pass; 185 package unit tests pass (2.99s), focused ABI tests pass, and Java image
+API linkage passes (13.2s). These helpers do not establish the full boot owner's
+membership order, run dex/installation side effects or activate native PMS;
+boot and install lifecycle integration remains #810/#702.
 
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained

@@ -443,6 +443,129 @@ fn new_settings_match_the_original_runtime() {
         cache.bytes,
     )
     .unwrap();
+    let original_abis = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "shared-abis",
+        "/data/local/tmp/code-time.cache",
+    ]));
+    let output = String::from_utf8(original_abis.stdout).unwrap();
+    let mut original = output.lines();
+    let mut cases = 0;
+    for layout in [
+        [None, None, None],
+        [None, Some("armeabi-v7a"), Some("arm64-v8a")],
+        [Some("armeabi-v7a"), Some("armeabi"), None],
+        [Some("arm64-v8a"), None, Some("x86")],
+    ] {
+        for scan in 0..5 {
+            for loaded in 0..3 {
+                let header = original.next().unwrap();
+                let order = header.strip_prefix(&format!("case {cases} ")).unwrap();
+                // The original exposes its actual ArraySet membership order.
+                let mut members: Vec<_> = order
+                    .split(',')
+                    .map(|name| {
+                        let at = ["a", "b", "c"].iter().position(|n| *n == name).unwrap();
+                        aim_services::package::settings::Package {
+                            name: name.into(),
+                            code_path: format!("/system/nonexistent/{name}"),
+                            primary_cpu_abi: layout[at].map(str::to_owned),
+                            secondary_cpu_abi: Some("x86_64".into()),
+                            ..Default::default()
+                        }
+                    })
+                    .collect();
+                let mut scanned = (scan != 0).then(|| AndroidPackage {
+                    package_name: if scan < 3 {
+                        "new"
+                    } else if scan == 3 {
+                        "a"
+                    } else {
+                        "b"
+                    }
+                    .into(),
+                    primary_cpu_abi: match scan {
+                        2 => Some("arm64-v8a".into()),
+                        4 => Some("armeabi-v7a".into()),
+                        _ => None,
+                    },
+                    ..Default::default()
+                });
+                let parsed: std::collections::BTreeMap<_, _> = members
+                    .iter()
+                    .filter(|_| loaded != 0)
+                    .map(|p| {
+                        (
+                            p.name.clone(),
+                            AndroidPackage {
+                                primary_cpu_abi: (loaded == 2).then(|| "arm64-v8a".into()),
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect();
+                let choice = SharedUserAbi::derive(&members, scanned.as_ref()).unwrap();
+                assert_eq!(
+                    original.next().unwrap(),
+                    choice.primary.as_deref().unwrap_or("null"),
+                    "{header}"
+                );
+                let changed = choice.apply(&mut members, &parsed, scanned.as_mut());
+                assert_eq!(
+                    original.next().unwrap(),
+                    scanned
+                        .as_ref()
+                        .map(|p| p.primary_cpu_abi.as_deref().unwrap_or("null"))
+                        .unwrap_or("absent"),
+                    "{header}"
+                );
+                let settings = members
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "{}={};",
+                            p.name,
+                            p.primary_cpu_abi.as_deref().unwrap_or("null")
+                        )
+                    })
+                    .collect::<String>();
+                assert_eq!(original.next().unwrap(), settings, "{header}");
+                let paths = if changed.is_empty() {
+                    "null".into()
+                } else {
+                    format!("[{}]", changed.join(", "))
+                };
+                assert_eq!(original.next().unwrap(), paths, "{header}");
+                let parsed = members
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "{}={};",
+                            p.name,
+                            parsed
+                                .get(&p.name)
+                                .map(|p| p.primary_cpu_abi.as_deref().unwrap_or("null"))
+                                .unwrap_or("absent")
+                        )
+                    })
+                    .collect::<String>();
+                assert_eq!(original.next().unwrap(), parsed, "{header}");
+                assert!(
+                    members
+                        .iter()
+                        .all(|p| p.secondary_cpu_abi.as_deref() == Some("x86_64"))
+                );
+                cases += 1;
+            }
+        }
+    }
+    assert_eq!(cases, 60);
+    assert_eq!(original.next(), None);
+    eprintln!("native/original shared UID ABI selection and application match {cases} cases");
     let original_time = run(boot.command().args([
         "shell",
         "/system/bin/app_process",

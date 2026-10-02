@@ -2,6 +2,10 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("shared-abis")) {
+            sharedAbis(java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
+            return;
+        }
         if (args.length != 0 && args[0].equals("bundled-abis")) {
             var pkg = com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
                 java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
@@ -136,6 +140,60 @@ public final class NewSettingOracle {
             new java.io.File("/system/nonexistent/" + name), null, null, null,
             1L, flags, privateFlags, null, true, false, false, false, null,
             null, null, null, null, null, null, new java.util.UUID(0, 0), 36, null);
+    }
+
+    private static void sharedAbis(byte[] cache) throws Exception {
+        String[][] layouts = {{null, null, null}, {null, "armeabi-v7a", "arm64-v8a"},
+            {"armeabi-v7a", "armeabi", null}, {"arm64-v8a", null, "x86"}};
+        int cases = 0;
+        for (String[] layout : layouts) {
+            for (int scan = 0; scan < 5; scan++) {
+                for (int loaded = 0; loaded < 3; loaded++) {
+                    var group = new SharedUserSetting("group", 0, 0);
+                    var parsed = new java.util.HashMap<String, com.android.internal.pm.parsing.pkg.PackageImpl>();
+                    for (int i = 0; i < 3; i++) {
+                        String name = new String[] {"a", "b", "c"}[i];
+                        var setting = member(name, 0, 0).setPrimaryCpuAbi(layout[i])
+                            .setSecondaryCpuAbi("x86_64");
+                        if (loaded != 0) {
+                            var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                                com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(cache);
+                            pkg.setPackageName(name).setPrimaryCpuAbi(loaded == 1 ? null : "arm64-v8a");
+                            setting.setPkg(pkg); parsed.put(name, pkg);
+                        }
+                        group.addPackage(setting);
+                    }
+                    com.android.internal.pm.parsing.pkg.PackageImpl scanned = null;
+                    if (scan != 0) {
+                        scanned = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                            com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(cache);
+                        scanned.setPackageName(scan < 3 ? "new" : scan == 3 ? "a" : "b")
+                            .setPrimaryCpuAbi(scan == 2 ? "arm64-v8a" : scan == 4 ? "armeabi-v7a" : null);
+                    }
+                    var order = new java.util.ArrayList<String>();
+                    for (var setting : group.getPackageStates()) order.add(setting.getPackageName());
+                    System.out.println("case " + cases++ + " " + String.join(",", order));
+                    String abi = new PackageAbiHelperImpl().getAdjustedAbiForSharedUser(
+                        group.getPackageStates(), scanned);
+                    System.out.println(abi);
+                    var changed = ScanPackageUtils.applyAdjustedAbiToSharedUser(group, scanned, abi);
+                    System.out.println(scanned == null ? "absent" :
+                        com.android.server.pm.parsing.pkg.AndroidPackageUtils.getRawPrimaryCpuAbi(scanned));
+                    for (var state : group.getPackageStates()) {
+                        var setting = (PackageSetting) state;
+                        System.out.print(setting.getPackageName() + "=" + setting.getPrimaryCpuAbiLegacy() + ";");
+                    }
+                    System.out.println();
+                    System.out.println(changed);
+                    for (String name : order) {
+                        System.out.print(name + "=" + (parsed.containsKey(name)
+                            ? com.android.server.pm.parsing.pkg.AndroidPackageUtils.getRawPrimaryCpuAbi(parsed.get(name))
+                            : "absent") + ";");
+                    }
+                    System.out.println();
+                }
+            }
+        }
     }
 
     private static void groupState(SharedUserSetting group) {

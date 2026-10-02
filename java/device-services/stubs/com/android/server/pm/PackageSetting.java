@@ -1,6 +1,10 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 public class PackageSetting extends SettingBase {
+    public String getPackageName() { throw new RuntimeException("stub"); }
+    public PackageSetting setPrimaryCpuAbi(String abi) { throw new RuntimeException("stub"); }
+    public PackageSetting setSecondaryCpuAbi(String abi) { throw new RuntimeException("stub"); }
+    public PackageSetting setPkg(com.android.server.pm.pkg.AndroidPackage pkg) { throw new RuntimeException("stub"); }
     void setInstalled(boolean installed, int user) { throw new RuntimeException("stub"); }
     void setUninstallReason(int reason, int user) { throw new RuntimeException("stub"); }
     int getUninstallReason(int user) { throw new RuntimeException("stub"); }

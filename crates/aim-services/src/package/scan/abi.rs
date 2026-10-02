@@ -1,5 +1,5 @@
-//! Native library paths after ABI selection, ported from PackageAbiHelperImpl
-//! and VMRuntime at android-16.0.0_r1 (#810).
+//! Native library paths, bundled ABIs and shared-user ABI adjustment, ported
+//! from PackageAbiHelperImpl, ScanPackageUtils and VMRuntime at android-16.0.0_r1 (#810).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use crate::package::pkg::AndroidPackage;
 
@@ -206,6 +206,91 @@ impl crate::package::write::Apks {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SharedUserAbiMismatch {
+    /// None identifies the scanned package, rather than an existing member.
+    pub required_by: Option<String>,
+    pub required_isa: String,
+    pub package: String,
+    pub package_isa: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SharedUserAbi {
+    pub primary: Option<String>,
+    pub mismatches: Vec<SharedUserAbiMismatch>,
+}
+
+impl SharedUserAbi {
+    /// PackageAbiHelperImpl.getAdjustedAbiForSharedUser. Members retain the
+    /// shared-user owner's ArraySet order; settings with no ABI are skipped.
+    pub fn derive(
+        members: &[crate::package::settings::Package],
+        scanned: Option<&AndroidPackage>,
+    ) -> Result<Self, String> {
+        let mut primary = scanned.and_then(|p| p.primary_cpu_abi.clone());
+        let mut required = primary.as_deref().map(instruction_set).transpose()?;
+        let mut required_by = None;
+        let mut mismatches = Vec::new();
+        for member in members {
+            if scanned.is_some_and(|p| p.package_name == member.name) {
+                continue;
+            }
+            let Some(abi) = member.primary_cpu_abi.as_deref() else {
+                continue;
+            };
+            let isa = instruction_set(abi)?;
+            if let Some(required) = required {
+                if required != isa {
+                    mismatches.push(SharedUserAbiMismatch {
+                        required_by: required_by.clone(),
+                        required_isa: required.into(),
+                        package: member.name.clone(),
+                        package_isa: isa.into(),
+                    });
+                }
+            } else {
+                primary = Some(abi.into());
+                required = Some(isa);
+                required_by = Some(member.name.clone());
+            }
+        }
+        Ok(Self {
+            primary,
+            mismatches,
+        })
+    }
+
+    /// ScanPackageUtils.applyAdjustedAbiToSharedUser: settings without a raw
+    /// ABI inherit it; existing parsed members and all secondary ABIs stay as
+    /// they are. Returned code paths feed the later dex/installation owner.
+    pub fn apply(
+        &self,
+        members: &mut [crate::package::settings::Package],
+        parsed: &std::collections::BTreeMap<String, AndroidPackage>,
+        scanned: Option<&mut AndroidPackage>,
+    ) -> Vec<String> {
+        let scanned_name = scanned.as_ref().map(|p| p.package_name.clone());
+        if let Some(scanned) = scanned {
+            scanned.primary_cpu_abi = self.primary.clone();
+        }
+        let mut changed = Vec::new();
+        for member in members {
+            if scanned_name.as_deref() == Some(&member.name) || member.primary_cpu_abi.is_some() {
+                continue;
+            }
+            member.primary_cpu_abi = self.primary.clone();
+            if parsed
+                .get(&member.name)
+                .is_some_and(|p| p.primary_cpu_abi != self.primary)
+            {
+                changed.push(member.code_path.clone());
+            }
+        }
+        changed
+    }
+}
+
 fn instruction_set(abi: &str) -> Result<&'static str, String> {
     match abi {
         "armeabi" | "armeabi-v7a" => Ok("arm"),
@@ -271,6 +356,108 @@ mod tests {
             canonical_source: None,
         }
     }
+    #[test]
+    fn shared_user_abi_preserves_existing_members_and_reports_isa_conflicts() {
+        use crate::package::settings::Package;
+        let mut members = vec![
+            Package {
+                name: "a".into(),
+                primary_cpu_abi: Some("armeabi".into()),
+                ..Default::default()
+            },
+            Package {
+                name: "b".into(),
+                primary_cpu_abi: Some("armeabi-v7a".into()),
+                ..Default::default()
+            },
+            Package {
+                name: "c".into(),
+                primary_cpu_abi: Some("arm64-v8a".into()),
+                ..Default::default()
+            },
+            Package {
+                name: "d".into(),
+                code_path: "/system/app/d".into(),
+                secondary_cpu_abi: Some("x86_64".into()),
+                ..Default::default()
+            },
+        ];
+        let mut scanned = AndroidPackage {
+            package_name: "a".into(),
+            secondary_cpu_abi: Some("x86".into()),
+            ..Default::default()
+        };
+        let choice = SharedUserAbi::derive(&members, Some(&scanned)).unwrap();
+        assert_eq!(choice.primary.as_deref(), Some("armeabi-v7a"));
+        assert_eq!(
+            choice.mismatches,
+            vec![SharedUserAbiMismatch {
+                required_by: Some("b".into()),
+                required_isa: "arm".into(),
+                package: "c".into(),
+                package_isa: "arm64".into(),
+            }]
+        );
+        let parsed = std::collections::BTreeMap::from([("d".into(), AndroidPackage::default())]);
+        assert_eq!(
+            choice.apply(&mut members, &parsed, Some(&mut scanned)),
+            vec!["/system/app/d"]
+        );
+        assert_eq!(members[0].primary_cpu_abi.as_deref(), Some("armeabi"));
+        assert_eq!(members[2].primary_cpu_abi.as_deref(), Some("arm64-v8a"));
+        assert_eq!(members[3].primary_cpu_abi, choice.primary);
+        assert_eq!(members[3].secondary_cpu_abi.as_deref(), Some("x86_64"));
+        assert_eq!(scanned.primary_cpu_abi, choice.primary);
+        assert_eq!(scanned.secondary_cpu_abi.as_deref(), Some("x86"));
+        assert_eq!(parsed["d"].primary_cpu_abi, None);
+        let choice = SharedUserAbi::derive(
+            &members,
+            Some(&AndroidPackage {
+                primary_cpu_abi: Some("arm64-v8a".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(choice.primary.as_deref(), Some("arm64-v8a"));
+        assert_eq!(choice.mismatches.len(), 3);
+        assert!(choice.mismatches.iter().all(|m| m.required_by.is_none()));
+    }
+
+    #[test]
+    fn shared_user_abi_rejects_unknown_isa_and_handles_no_requirement() {
+        use crate::package::settings::Package;
+        let mut members = vec![Package {
+            name: "a".into(),
+            primary_cpu_abi: Some("invalid".into()),
+            ..Default::default()
+        }];
+        let before = members.clone();
+        assert!(SharedUserAbi::derive(&members, None).is_err());
+        assert_eq!(members, before);
+        let mut scanned = AndroidPackage {
+            package_name: "a".into(),
+            ..Default::default()
+        };
+        let none = SharedUserAbi::derive(&members, Some(&scanned)).unwrap();
+        assert_eq!(none.primary, None);
+        assert!(
+            none.apply(&mut members, &Default::default(), Some(&mut scanned))
+                .is_empty()
+        );
+        assert_eq!(members, before);
+        members[0].primary_cpu_abi = None;
+        let none = SharedUserAbi::derive(&members, None).unwrap();
+        let parsed = std::collections::BTreeMap::from([(
+            "a".into(),
+            AndroidPackage {
+                primary_cpu_abi: Some("arm64-v8a".into()),
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(none.apply(&mut members, &parsed, None), vec![String::new()]);
+        assert_eq!(members[0].primary_cpu_abi, None);
+    }
+
     #[test]
     fn bundled_inventory_selects_preferred_abis_and_reports_multiarch_mismatch() {
         let bit32 = vec!["armeabi-v7a".into(), "armeabi".into()];
