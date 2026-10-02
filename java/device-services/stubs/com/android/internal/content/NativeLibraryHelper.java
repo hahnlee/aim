@@ -13,4 +13,5 @@ public class NativeLibraryHelper {
     public static int findSupportedAbi(Handle handle, String[] supported) { throw new RuntimeException("stub"); }
     public static boolean hasRenderscriptBitcode(Handle handle) throws java.io.IOException { throw new RuntimeException("stub"); }
     public static int copyNativeBinaries(Handle handle, java.io.File directory, String abi) { throw new RuntimeException("stub"); }
+    public static int checkAlignmentForCompatMode(Handle handle, String root, boolean requiresIsa, String override) { throw new RuntimeException("stub"); }
 }

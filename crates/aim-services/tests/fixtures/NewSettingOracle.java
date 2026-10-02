@@ -2,6 +2,10 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("native-alignment")) {
+            nativeAlignment();
+            return;
+        }
         if (args.length != 0 && args[0].equals("native-copy")) {
             nativeCopy();
             return;
@@ -228,6 +232,77 @@ public final class NewSettingOracle {
         }
     }
 
+    private static void nativeAlignment() throws Exception {
+        int cases = 0;
+        for (int archive = 0; archive < 15; archive++) {
+            for (boolean extract : new boolean[] {false, true}) {
+                for (boolean requiresIsa : new boolean[] {false, true}) {
+                    int id = cases++;
+                    String root = "/data/local/tmp/native-alignment-" + id;
+                    var directory = java.nio.file.Path.of(root + (requiresIsa ? "/arm64" : ""));
+                    java.nio.file.Files.createDirectories(directory);
+                    var paths = new java.util.ArrayList<String>();
+                    for (int split = 0; split < (archive >= 13 ? 2 : 1); split++) {
+                        byte[] payload = new byte[archive == 6 ? 3 : 120];
+                        if (payload.length >= 64) {
+                            var elf = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                            elf.putInt(0, 0x464c457f); elf.put(4, (byte)(archive == 5 ? 1 : 2));
+                            elf.putLong(32, archive == 8 ? -1L : 64L);
+                            elf.putShort(54, (short)56); elf.putShort(56, (short)(archive == 7 ? 2 : 1));
+                            elf.putInt(64, archive == 4 ? 2 : 1);
+                            elf.putLong(112, archive == 1 || archive == 3 || (archive == 13 && split == 1) ? 16384 : 4096);
+                        }
+                        String file = "lib" + split + ".so";
+                        String name = archive == 11 ? "lib/x86/" + file : archive == 12 ? "assets/" + file : "lib/arm64-v8a/" + file;
+                        int method = archive == 9 || (archive == 14 && split == 1) ? 8 : 0;
+                        int offset = archive == 0 || archive == 1 || (archive >= 13 && split == 0) ? 4096 :
+                            archive == 2 || archive == 3 ? 16384 : 100;
+                        String path = root + "-" + split + ".zip";
+                        writeNativeZip(path, name, payload, method, offset); paths.add(path);
+                        if (extract && archive != 10) java.nio.file.Files.write(directory.resolve(file), payload);
+                    }
+                    try (var handle = com.android.internal.content.NativeLibraryHelper.Handle.create(
+                            paths, false, extract, true, false)) {
+                        int flags = com.android.internal.content.NativeLibraryHelper.checkAlignmentForCompatMode(
+                            handle, root, requiresIsa, "x86");
+                        System.out.println("case " + id + " " + String.join(",", paths) + " " + root + " "
+                            + requiresIsa + " " + extract + " " + flags);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void writeNativeZip(String path, String name, byte[] payload, int method, int offset) throws Exception {
+        byte[] compressed = payload;
+        if (method == 8) {
+            var compressor = new java.util.zip.Deflater(6, true);
+            compressor.setInput(payload); compressor.finish();
+            byte[] buffer = new byte[128]; int size = compressor.deflate(buffer);
+            compressed = java.util.Arrays.copyOf(buffer, size); compressor.end();
+        }
+        byte[] names = name.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        var crc = new java.util.zip.CRC32(); crc.update(payload);
+        int central = offset + compressed.length;
+        var zip = java.nio.ByteBuffer.allocate(central + 46 + names.length + 22)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        int when = (((2025 - 1980) << 9) | (1 << 5) | 2) << 16 | (3 << 11) | (4 << 5) | 3;
+        zip.putInt(0, 0x04034b50); zip.putShort(4, (short)20); zip.putShort(8, (short)method);
+        zip.putInt(10, when); zip.putInt(14, (int)crc.getValue());
+        zip.putInt(18, compressed.length); zip.putInt(22, payload.length);
+        zip.putShort(26, (short)names.length); zip.putShort(28, (short)(offset - 30 - names.length));
+        zip.position(30); zip.put(names); zip.position(offset); zip.put(compressed);
+        zip.putInt(central, 0x02014b50); zip.putShort(central + 4, (short)20); zip.putShort(central + 6, (short)20);
+        zip.putShort(central + 10, (short)method); zip.putInt(central + 12, when);
+        zip.putInt(central + 16, (int)crc.getValue()); zip.putInt(central + 20, compressed.length);
+        zip.putInt(central + 24, payload.length); zip.putShort(central + 28, (short)names.length);
+        zip.position(central + 46); zip.put(names);
+        int end = zip.position(); zip.putInt(end, 0x06054b50);
+        zip.putShort(end + 8, (short)1); zip.putShort(end + 10, (short)1);
+        zip.putInt(end + 12, 46 + names.length); zip.putInt(end + 16, central);
+        java.nio.file.Files.write(java.nio.file.Path.of(path), zip.array());
+    }
+
     private static void nativeCopy() throws Exception {
         var localTime = java.time.LocalDateTime.of(2025, 1, 2, 3, 4, 6);
         System.out.println("clock " + localTime.atZone(java.time.ZoneId.systemDefault()).toEpochSecond());
@@ -242,35 +317,9 @@ public final class NewSettingOracle {
                         String file = archive == 4 ? "wrap.sh" : "libx.so";
                         byte[] payload = "native payload".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
                         int method = archive == 0 || archive >= 4 ? 8 : 0;
-                        byte[] compressed = payload;
-                        if (method == 8) {
-                            var compressor = new java.util.zip.Deflater(6, true);
-                            compressor.setInput(payload); compressor.finish();
-                            byte[] buffer = new byte[128]; int size = compressor.deflate(buffer);
-                            compressed = java.util.Arrays.copyOf(buffer, size); compressor.end();
-                        }
                         int offset = archive == 2 ? 4096 : archive == 3 ? 16384 : 100;
-                        byte[] names = name.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
-                        var crc = new java.util.zip.CRC32(); crc.update(payload);
-                        int central = offset + compressed.length;
-                        var zip = java.nio.ByteBuffer.allocate(central + 46 + names.length + 22)
-                            .order(java.nio.ByteOrder.LITTLE_ENDIAN);
-                        int when = (((2025 - 1980) << 9) | (1 << 5) | 2) << 16 | (3 << 11) | (4 << 5) | 3;
-                        zip.putInt(0, 0x04034b50); zip.putShort(4, (short)20); zip.putShort(8, (short)method);
-                        zip.putInt(10, when); zip.putInt(14, (int)crc.getValue());
-                        zip.putInt(18, compressed.length); zip.putInt(22, payload.length);
-                        zip.putShort(26, (short)names.length); zip.putShort(28, (short)(offset - 30 - names.length));
-                        zip.position(30); zip.put(names); zip.position(offset); zip.put(compressed);
-                        zip.putInt(central, 0x02014b50); zip.putShort(central + 4, (short)20); zip.putShort(central + 6, (short)20);
-                        zip.putShort(central + 10, (short)method); zip.putInt(central + 12, when);
-                        zip.putInt(central + 16, (int)crc.getValue()); zip.putInt(central + 20, compressed.length);
-                        zip.putInt(central + 24, payload.length); zip.putShort(central + 28, (short)names.length);
-                        zip.position(central + 46); zip.put(names);
-                        int end = zip.position(); zip.putInt(end, 0x06054b50);
-                        zip.putShort(end + 8, (short)1); zip.putShort(end + 10, (short)1);
-                        zip.putInt(end + 12, 46 + names.length); zip.putInt(end + 16, central);
                         String path = "/data/local/tmp/native-copy-" + id + ".zip";
-                        java.nio.file.Files.write(java.nio.file.Path.of(path), zip.array());
+                        writeNativeZip(path, name, payload, method, offset);
                         var directory = new java.io.File("/data/local/tmp/native-copy-original-" + id);
                         if (!directory.mkdir()) throw new java.io.IOException("native directory creation failed");
                         try (var handle = com.android.internal.content.NativeLibraryHelper.Handle.create(

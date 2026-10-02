@@ -208,7 +208,7 @@ impl crate::package::write::Apks {
     }
 }
 
-fn library_abi(name: &[u8]) -> Option<&[u8]> {
+pub(super) fn library_abi(name: &[u8]) -> Option<&[u8]> {
     if name.len() < 13 {
         return None;
     }

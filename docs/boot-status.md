@@ -440,14 +440,22 @@ checked into an exclusive temporary file, synced, assigned ZIP modification
 time, 0755 mode and guest ownership, then renamed. Failures preserve the old
 file and remove temporary output; installation error codes remain typed.
 DOS time conversion requires the guest clock owner, avoiding host timezone
-assumptions. APKs remain read-only. Package units pass (196, 3.47s), including
+assumptions. APKs remain read-only. Package units pass (198, 3.44s), including
 corrupt-payload rollback, metadata and reuse. The disposable original runtime
 matches admission errors, extraction content/mtime and repeated-copy reuse in
-48 combinations at 16 KiB guest pages (2026-10-03, 78.88s); all earlier checks,
-Settings launch and owned cleanup pass. Java image API linkage passes (19.4s).
-ELF alignment, guest-clock delivery, complete base/split and multiarch copy
-orchestration, and boot/install owner integration remain #810/#702; native PMS
-is not activated.
+48 combinations at 16 KiB guest pages (2026-10-03, 84.07s); all earlier checks,
+Settings launch and owned cleanup pass. Java image API linkage passes (15.4s).
+`Apks::native_library_alignment` selects the original supported 64-bit ABI over
+the base/split union, applies the root's ISA rule, and combines pinned ZIP/ELF
+page-compatibility flags. It inspects APK offsets when extraction is disabled
+and extracted files otherwise; compressed direct entries, unreadable/truncated
+headers and offset overflow return errors. Non-64-bit ELF classes and non-LOAD
+segments follow the original diagnostic's rules; this is not loader validation.
+The same runtime matches 60 alignment cases, including split aggregation and
+error precedence, missing files, malformed program headers and ISA paths. Scan
+policy/setting application of these flags, guest-clock delivery, complete
+base/split and multiarch copy orchestration, and boot/install owner integration
+remain #810/#702; native PMS is not activated.
 
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained

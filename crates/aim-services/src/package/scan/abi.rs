@@ -2,6 +2,7 @@
 //! from PackageAbiHelperImpl, ScanPackageUtils and VMRuntime at android-16.0.0_r1 (#810).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use crate::package::pkg::AndroidPackage;
+mod alignment;
 mod install;
 mod lifecycle;
 pub use install::{NativeLibraryCopy, NativeLibraryInstallError};

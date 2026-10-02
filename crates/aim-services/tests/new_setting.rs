@@ -819,6 +819,51 @@ fn new_settings_match_the_original_runtime() {
     eprintln!(
         "native/original ZIP admission, extraction and reuse match {cases} cases at {page_size}-byte guest pages"
     );
+    let alignment = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "native-alignment",
+    ]));
+    let output = String::from_utf8(alignment.stdout).unwrap();
+    let mut cases = 0;
+    for line in output.lines() {
+        let columns: Vec<_> = line.split_whitespace().collect();
+        assert_eq!(columns[0], "case");
+        assert_eq!(columns[1].parse::<usize>().unwrap(), cases);
+        let paths: Vec<_> = columns[2].split(',').collect();
+        let package = AndroidPackage {
+            base_apk_path: Some(paths[0].into()),
+            split_code_paths: Some(paths[1..].iter().map(|p| Some((*p).into())).collect()),
+            ..Default::default()
+        };
+        let native_paths = NativeLibraryPaths {
+            root: columns[3].into(),
+            requires_isa: columns[4].parse().unwrap(),
+            primary: String::new(),
+            secondary: None,
+        };
+        let policy = NativeLibraryInstallPolicy {
+            page_size,
+            extract: columns[5].parse().unwrap(),
+            debuggable: true,
+            compat_16kb_disabled: false,
+            manifest_compat_disabled: false,
+        };
+        let flags = zip_apks.native_library_alignment(&package, &bit64, &native_paths, policy);
+        assert_eq!(
+            flags.map(|f| f as i32).unwrap_or(-1),
+            columns[6].parse::<i32>().unwrap(),
+            "{line}"
+        );
+        cases += 1;
+    }
+    assert_eq!(cases, 60);
+    eprintln!(
+        "native/original ZIP and ELF alignment flags match {cases} base/split and ISA-path cases"
+    );
     let abi_policy = AbiPolicy::from_platform(&apks.platform, &all_abis, &supported_abis, &|key| {
         properties.get(key).cloned()
     })
