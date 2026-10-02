@@ -57,7 +57,7 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (130 package unit tests pass). These are not
+shared snapshot publication (131 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
@@ -105,8 +105,24 @@ The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest
 paths, retaining v3 and its two-certificate lineage; null and unreadable
-split paths fail explicitly (#801). All 130 package tests run with their
-inputs present and pass. This does not activate the native scan.
+split paths fail explicitly (#801). `scan::Inputs` now reads persisted
+active and disabled-system APK locations with native parsing and full
+signature verification, retaining SPKI keys separately from Java query
+serialization (#738). Parse flags follow the physical partition, rather
+than an updated system package's saved system flag. On a disposable
+original-PMS boot (2026-10-02, boot completed), all 243 active APK packages
+and five disabled system packages parsed and verified. Every active
+package's verified certificate, scheme version and lineage matched the
+original persisted settings; disabled originals do not persist their
+signatures. Settings launched successfully (warm, 90 ms). An explicitly
+run original-image integration
+test checks active/disabled GSF records, nonstandard APK paths, v3 lineage,
+SPKI retention, input immutability and code disappearing between parsing
+and verification. All 131 package
+unit tests run with their inputs present and pass. These are scan inputs,
+not reconciled package snapshots; APEX verification belongs to apexd,
+and new/removed image package reconciliation and publication remain
+unimplemented (#702). This does not activate the native scan.
 
 The device's own system service (`dev.aim.server.DeviceServices`,
 docs/system-services.md, "The system_server bridge") is on the system

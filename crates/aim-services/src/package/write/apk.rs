@@ -1,7 +1,7 @@
 //! An installed package's APKs, read from the guest's files: their
 //! signers, verified as the original's `ApkSignatureVerifier` verifies an
 //! install (`package::sign`), and the package the native parser makes of
-//! them (`package::parse`), the parser's oracle on installs.
+//! them (`package::parse`), for install checks and native scan inputs.
 
 use std::path::PathBuf;
 
@@ -28,6 +28,18 @@ impl Apks {
     /// APK's, which each split shares (`getSigningDetails`, verified in
     /// full).
     pub fn signatures(&self, pkg: &AndroidPackage) -> Result<Signatures, String> {
+        let details = self.signing_details(pkg)?;
+        Ok(Signatures {
+            scheme_version: details.scheme_version,
+            signatures: details.signatures,
+            public_keys: None,
+            past_signatures: details.past_signing_certificates,
+        })
+    }
+
+    /// Native verified details retain SPKI keys for the persistence owner;
+    /// Java serialization for query parcels is separate (#738).
+    pub fn signing_details(&self, pkg: &AndroidPackage) -> Result<sign::SigningDetails, String> {
         let base = pkg
             .base_apk_path
             .as_ref()
@@ -51,7 +63,7 @@ impl Apks {
             v4: None,
         };
         let splits: Vec<Apk> = (1..sources.len()).map(apk).collect();
-        let details = sign::package_signing_details(
+        sign::package_signing_details(
             &apk(0),
             &splits,
             pkg.static_shared_library_name.is_some(),
@@ -59,20 +71,19 @@ impl Apks {
             false,
             &Build::of(&self.platform),
         )
-        .map_err(|e| e.to_string())?;
-        Ok(Signatures {
-            scheme_version: details.scheme_version,
-            signatures: details.signatures,
-            public_keys: None,
-            past_signatures: details.past_signing_certificates,
-        })
+        .map_err(|e| e.to_string())
     }
 
     /// The package the native parser makes of the APK at `ps`'s code path,
     /// read back as the original's parcel reads.
     pub fn parsed(&self, ps: &PackageState) -> Result<AndroidPackage, String> {
-        let dir = (self.files)(&ps.path).ok_or_else(|| format!("{}: not readable", ps.path))?;
-        let package = parse::parse(&dir, &ps.path, 0, &self.platform).map_err(|e| e.to_string())?;
+        self.parsed_path(&ps.path, 0)
+    }
+
+    pub fn parsed_path(&self, path: &str, flags: i32) -> Result<AndroidPackage, String> {
+        let host = (self.files)(path).ok_or_else(|| format!("{path}: not readable"))?;
+        let package =
+            parse::parse(&host, path, flags, &self.platform).map_err(|e| e.to_string())?;
         AndroidPackage::read_cache_entry(&package.to_cache_entry().bytes)
             .map_err(|s| format!("the parser's entry does not read: status {s}"))
     }

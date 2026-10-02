@@ -552,7 +552,7 @@ the system UID only; it currently attaches after bootstrap, so C's facade
 still must expose the same owner query before the native boot scan (#702).
 A disposable original-PMS boot (2026-10-02, boot completed) tested the
 Rust-to-Java call: SDK 30 returned false, SDK 31/36 true. Device-service
-linkage verification and 130 package unit tests pass. The image has no
+linkage verification and 131 package unit tests pass. The image has no
 `android.content.pm.Flags.sdkLibIndependence` API or loaded aconfig entry
 for that flag. Inspecting its original `services.jar` shows that the SDK
 dependency collection call passes `required=true` directly. `Policy::pinned`
@@ -563,6 +563,20 @@ SDK call signature/range registers and constant assignment without an
 intervening write or branch, and rejects a changed image implementation.
 SDK dependency/certificate CTS remains open (#800); this is provenance
 verification, not CTS acceptance.
+`scan::Inputs` now loads persisted active and disabled-system APK records
+without the original parser cache or feed, using physical scan-location
+flags and full signature verification. It retains native SPKI keys and
+returns contextual errors without mutating persistence. An explicitly run
+original-image integration test covers active/disabled GSF, nonstandard
+APK paths, v3 lineage, SPKI retention and missing-code errors. On a
+disposable original-PMS boot (2026-10-02, boot completed), all 243 active
+APK packages and five disabled system packages parsed and verified;
+all active certificates, scheme versions and lineages matched original
+persisted settings. Disabled originals do not persist their signatures.
+Settings launched successfully (warm, 90 ms). These inputs are not a
+reconciled query snapshot. APEX state stays separate for apexd verification,
+and new/removed image package reconciliation and publication remain
+unimplemented (#702).
 `Selection::files` assembles the provider's base/split paths followed by
 its already-resolved transitive files, preserving first occurrence.
 Tests cover ordering, missing/optional dependencies, SDK policy,
