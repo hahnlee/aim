@@ -7,4 +7,18 @@ public class PackageSetting extends SettingBase {
     public PackageSetting setSigningDetails(android.content.pm.SigningDetails details) {
         throw new RuntimeException("stub");
     }
+    public PackageSetting setAppId(int id) { throw new RuntimeException("stub"); }
+    public int getAppId() { throw new RuntimeException("stub"); }
+    public int getCategoryOverride() { throw new RuntimeException("stub"); }
+    public int getPageSizeAppCompatFlags() { throw new RuntimeException("stub"); }
+    public float getLoadingProgress() { throw new RuntimeException("stub"); }
+    public boolean isLoading() { throw new RuntimeException("stub"); }
+    public PackageKeySetData getKeySetData() { throw new RuntimeException("stub"); }
+    public java.util.UUID getDomainSetId() { throw new RuntimeException("stub"); }
+    public boolean hasSharedUser() { throw new RuntimeException("stub"); }
+    public boolean isScannedAsStoppedSystemApp() { throw new RuntimeException("stub"); }
+    public com.android.server.pm.pkg.PackageUserStateInternal readUserState(int user) { throw new RuntimeException("stub"); }
+    boolean getInstalled(int user) { throw new RuntimeException("stub"); }
+    public boolean getInstantApp(int user) { throw new RuntimeException("stub"); }
+    boolean getVirtualPreload(int user) { throw new RuntimeException("stub"); }
 }

@@ -1,7 +1,7 @@
 //! UID preparation before scan reconciliation, ported from pinned
 //! android-16.0.0_r1 InstallPackageHelper, Settings and ScanPackageUtils.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
-use super::{Code, Error, Identity};
+use super::{Code, Error, Identity, NewSetting, SettingMetadata, UserPolicy};
 use crate::package::{
     owner::{
         app_ids::Owner,
@@ -131,6 +131,39 @@ impl UidScan {
             .insert(identity.internal_name.clone(), uid.clone());
         self.pending.insert(identity.internal_name.clone());
         Ok((identity, uid))
+    }
+
+    /// Construct only a newly allocated pending setting. Existing settings need
+    /// the update/adoption owner rather than the new-package constructor (#804).
+    /// Keeps the UID pending until signing and scan enrichment also succeed.
+    pub fn new_setting(
+        &self,
+        identity: &Identity,
+        metadata: SettingMetadata,
+        users: UserPolicy<'_>,
+    ) -> Result<NewSetting, Error> {
+        let name = &identity.internal_name;
+        let fail = |message: &str| Error {
+            package: name.clone(),
+            path: metadata.code_path.clone(),
+            phase: "setting",
+            message: message.into(),
+        };
+        if !self.pending.contains(name) {
+            return Err(fail("new setting requires a pending UID preparation"));
+        }
+        let uid = self
+            .packages
+            .get(name)
+            .ok_or_else(|| fail("package has no UID preparation"))?;
+        let owner = match &uid.shared_user {
+            Some(group) => Owner::SharedUser(group.clone()),
+            None => Owner::Package(name.clone()),
+        };
+        if self.identities.ids.get(uid.app_id) != Some(&owner) {
+            return Err(fail("new setting UID preparation no longer owns its slot"));
+        }
+        Ok(NewSetting::new(identity, uid, metadata, users))
     }
 
     /// After signature and metadata reconciliation succeeds, retain the UID
