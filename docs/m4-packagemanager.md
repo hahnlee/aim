@@ -510,7 +510,7 @@ and writes return an explicit unsupported-operation exception. The
 enabled-write decoder is also shared and retains `DONT_KILL_APP` and
 `SYNCHRONOUS` flags for the future mutation path. Receiver unit tests cover
 visibility by caller uid, interface-token rejection and publication to
-existing endpoints; all 118 package tests pass. Guest-init does not
+existing endpoints; all 122 package tests pass. Guest-init does not
 register these receivers; native scanning, mutation side effects and the
 SystemServer facade remain prerequisites tracked in #798 and the M4
 issues.
@@ -521,10 +521,23 @@ native library lists. It applies partition and SKU permissions, file
 existence, SDK limits and bootclasspath transition conditions, retaining
 the dependency names. On a disposable original-PMS boot (2026-10-02,
 `sys.boot_completed=1`), all 19 built-in library names and paths matched
-`pm list libraries -v` and `dumpsys package libraries`. The remaining four
-libraries in the original's 23-entry registry are APK declarations; the
-native registry must still assemble those and resolve dependencies before
-#707's full registry and CTS acceptance can pass.
+`pm list libraries -v` and `dumpsys package libraries`.
+
+`package::libraries::Registry` registers built-in and APK-declared
+dynamic, static and SDK libraries by name/version, retaining code paths,
+internal package names and manifest declaring names. Dynamic declarations
+require a system app, cannot replace an existing library, and an updated
+system app may expose only names its original declared. A disposable
+original-PMS data check (2026-10-02, boot completed) read `packages.xml`
+and parsed APKs without the feed: 22 of the original's 23 library names
+and paths matched, including Trichrome's static version 694313732 and
+internal package name. The missing GMS declaration is blocked by split
+APK parsing (#720). The diagnostic parsed 240 packages and failed three:
+GMS and Play Store splits, and Google Search's layout without a supplied
+runtime display density. These failures make the scan check incomplete.
+Library dependency resolution, the complete native scan and #707's CTS
+acceptance still remain; declaration records are not yet served as full
+shared-library query results.
 
 **Who writes what, by slice:**
 
