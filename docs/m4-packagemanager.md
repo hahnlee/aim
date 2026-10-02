@@ -643,7 +643,7 @@ seven component kinds get the selected internal owning name; manifest,
 class and process names retain their parsed values. An explicit original
 runtime fixture fills the ComponentName cache before renaming and compares
 all seven kinds, their recomputed ComponentNames and unchanged name fields
-with native records. Java linkage verification and all three explicit
+with native records. Java linkage verification and all explicit
 scan/runtime tests pass. All 146 package unit tests pass, and every active
 parsed package carries its selected internal name.
 `sign::History` now follows pinned SigningDetails certificate relationship
@@ -682,9 +682,20 @@ two-history merges and 2,197 group/candidate/member merges: signer order,
 capabilities, scheme version, key count and changed signal all match. All
 16 restored groups retain their original saved signatures after merging
 the verified active members. Invalid saved certificates fail without
-changing the group. Ordered scan commit integration, unknown-group
-initialization and physical-system OTA signer replacement remain
-unimplemented (#803, #805). Legacy certificate compatibility/recovery,
+changing the group. The shared UID owner now preserves per-scan
+`signaturesChanged`: normal reconciliation sets false only when unset;
+commit initializes unknown signers; a physical-system signature failure
+may replace the first unchecked group signer, and later failures must pass
+the SYSTEM join rule. /data updates cannot use that exception even if
+FLAG_SYSTEM is saved. Inconsistent later system members reject at first
+API <=29 and raise a fatal system error above 29. An explicit original-
+image test pins inspected ReconcilePackageUtils and Settings commit DEX,
+including these branches and null-signer initialization. All three explicit
+native scan tests pass; real GSF/platform certificates check initialization,
+first/later OTA replacements, /data rejection, snapshots and error
+atomicity. Scan records retain physical origin for this policy. Ordered
+scan commit integration and an actual OTA boot remain unimplemented
+(#803, #805). Legacy certificate compatibility/recovery,
 upgrade keysets, owner-authorized rollback, full UID reconciliation and
 snapshot publication remain unimplemented (#804). These normal signature
 gates and merge primitives do not activate C.

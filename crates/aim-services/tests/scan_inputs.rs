@@ -109,6 +109,14 @@ fn persisted_active_and_disabled_apks_are_parsed_and_verified() {
     assert_eq!(active.parsed.base_apk_path.as_deref(), Some(UPDATE));
     assert_eq!(disabled.parsed.base_apk_path.as_deref(), Some(SYSTEM));
     assert_eq!(active.signing, disabled.signing);
+    assert_eq!(
+        active.origin,
+        aim_services::package::owner::shared_users::ScanOrigin::Data
+    );
+    assert_eq!(
+        disabled.origin,
+        aim_services::package::owner::shared_users::ScanOrigin::SystemDirectory
+    );
     assert_eq!(active.signing.scheme_version, 3);
     assert_eq!(active.signing.signatures.len(), 1);
     assert_eq!(
@@ -187,4 +195,95 @@ fn persisted_active_and_disabled_apks_are_parsed_and_verified() {
     let error = Inputs::load(&state, &disappearing).unwrap_err();
     assert_eq!(error.phase, "signatures");
     assert_eq!(state, before);
+}
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn shared_uid_scan_signatures_follow_commit_and_ota_order() {
+    use aim_services::package::owner::shared_users::{ScanOrigin, SharedUser, SignatureError};
+    let root = aim_paths::original_image();
+    let image = root.clone();
+    let apks = Apks {
+        files: Box::new(move |p| Some(image.join(p.trim_start_matches('/')))),
+        platform: Platform::load(&root, Default::default()).unwrap(),
+    };
+    let verified = |path| {
+        let parsed = apks
+            .parsed_path(path, aim_services::package::parse::PARSE_IS_SYSTEM_DIR)
+            .unwrap();
+        apks.signing_details(&parsed).unwrap()
+    };
+    let google =
+        verified("/system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk");
+    let platform = verified("/system/framework/framework-res.apk");
+    assert_ne!(google.signatures, platform.signatures);
+    let mut group = SharedUser {
+        app_id: 1000,
+        flags: 1,
+        private_flags: 8,
+        signatures: None,
+        signatures_changed: None,
+    };
+    assert!(!group.merge_authorized_lineage(&google, &[]).unwrap());
+    assert_eq!(group.signatures_changed, Some(false));
+    assert!(group.signatures.is_none());
+    assert!(group.commit_initial_signatures(&google).unwrap());
+    let initialized = group.clone();
+    assert!(!group.commit_initial_signatures(&platform).unwrap());
+    assert_eq!(group, initialized);
+    assert_eq!(
+        group.signatures.as_ref().unwrap().signatures,
+        google.signatures
+    );
+
+    // A /data update of a system package cannot take the OTA branch.
+    let mut first = initialized.clone();
+    first.signatures_changed = None;
+    let before = first.clone();
+    assert_eq!(
+        first.replace_after_signature_failure(&platform, ScanOrigin::Data, 36),
+        Err(SignatureError::NonSystemMismatch)
+    );
+    assert_eq!(first, before);
+    first
+        .replace_after_signature_failure(&platform, ScanOrigin::SystemDirectory, 36)
+        .unwrap();
+    assert_eq!(first.signatures_changed, Some(true));
+    assert_eq!(first.app_id, initialized.app_id);
+    assert_eq!(
+        (first.flags, first.private_flags),
+        (initialized.flags, initialized.private_flags)
+    );
+    assert_eq!(
+        first.signatures.as_ref().unwrap().signatures,
+        platform.signatures
+    );
+    let before = first.clone();
+    assert_eq!(
+        first.replace_after_signature_failure(&google, ScanOrigin::SystemDirectory, 36),
+        Err(SignatureError::FatalSystemMismatch)
+    );
+    assert_eq!(first, before);
+    assert_eq!(
+        first.replace_after_signature_failure(&google, ScanOrigin::SystemDirectory, 29),
+        Err(SignatureError::Rejected { code: -104 })
+    );
+    assert_eq!(first, before);
+    first
+        .replace_after_signature_failure(&platform, ScanOrigin::SystemDirectory, 36)
+        .unwrap();
+    assert_eq!(first, before);
+
+    // A previous normal check also ends the first-package exemption.
+    let before = group.clone();
+    assert_eq!(
+        group.replace_after_signature_failure(&platform, ScanOrigin::SystemDirectory, 36),
+        Err(SignatureError::FatalSystemMismatch)
+    );
+    assert_eq!(group, before);
+    let snapshot = group.clone();
+    group.signatures_changed = None;
+    assert_eq!(snapshot.signatures_changed, Some(false));
+    assert_eq!(group.signatures_changed, None);
+    assert_eq!(group.signatures, snapshot.signatures);
 }

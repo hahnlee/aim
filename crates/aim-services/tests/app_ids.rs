@@ -615,6 +615,7 @@ fn allocation_matches_the_original_runtime() {
                             flags: 0,
                             private_flags: 0,
                             signatures: Some(saved.clone()),
+                            signatures_changed: None,
                         };
                         let changed = group
                             .merge_authorized_lineage(b, std::slice::from_ref(member))

@@ -4,7 +4,9 @@
 //! Reconciliation, new/removed image packages, APEX state and publication
 //! are separate phases; these records are not a query snapshot.
 
-use super::{State, parse, pkg::AndroidPackage, settings, sign, write::Apks};
+use super::{
+    State, owner::shared_users::ScanOrigin, parse, pkg::AndroidPackage, settings, sign, write::Apks,
+};
 use std::collections::BTreeMap;
 
 mod authorize;
@@ -19,6 +21,7 @@ pub struct Record {
     pub parsed: AndroidPackage,
     pub signing: sign::SigningDetails,
     pub identity: Identity,
+    pub origin: ScanOrigin,
 }
 
 #[derive(Debug, Default)]
@@ -95,6 +98,11 @@ impl Inputs {
                             parsed,
                             signing,
                             identity,
+                            origin: if flags & parse::PARSE_IS_SYSTEM_DIR != 0 {
+                                ScanOrigin::SystemDirectory
+                            } else {
+                                ScanOrigin::Data
+                            },
                         },
                     )
                     .is_some()

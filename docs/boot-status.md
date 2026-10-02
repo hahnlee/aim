@@ -199,7 +199,7 @@ PackageImpl.setPackageName does. An explicit original-runtime fixture
 populates the original ComponentName cache before renaming and compares
 all resulting package/component identities, unchanged manifest/class names
 and main-component process names with native records. Java linkage and
-all three explicit scan/runtime tests pass; all 146 package unit tests
+all explicit scan/runtime tests pass; all 146 package unit tests
 pass. Every active parsed package now carries its selected internal name.
 `sign::History` now compares verified and persisted certificate histories
 with the pinned SigningDetails capability, ancestor and exact multi-signer
@@ -236,9 +236,21 @@ merges and 2,197 group/candidate/member merges, including capabilities,
 scheme versions, key counts and the changed signal. All 16 restored groups
 retain their saved signing records when the verified active members are
 merged. Invalid saved certificates reject the merge without changing the
-group. This owner primitive is not wired into an ordered scan commit;
-unknown-group initialization and physical-system OTA signer replacement
-remain unimplemented (#803, #805). Legacy certificate compatibility/
+group. The shared UID owner now carries the original per-scan
+`signaturesChanged` state. Normal reconciliation initializes it to false;
+commit initializes unknown group signatures without overwriting existing
+signers. A physical-system signature failure can establish a new group
+signer only before the first check, or after passing the SYSTEM join rule;
+/data code is rejected. Inconsistent later system members produce a
+reconcile rejection at first API <=29 and a fatal system error above 29.
+An explicit original-image test pins the inspected ReconcilePackageUtils
+and Settings commit DEX branches, including that API boundary and null
+signer initialization. Three explicit native scan tests pass; real GSF
+and platform certificates exercise initialization, first/later OTA cases,
+/data rejection, snapshots and error atomicity. Scan records retain their
+physical origin independently of saved FLAG_SYSTEM. These owner
+transitions are not wired into an ordered scan commit or an OTA boot
+(#803, #805). Legacy certificate compatibility/
 recovery, upgrade keysets, owner-authorized rollback, full UID
 reconciliation and native snapshot publication remain unimplemented
 (#804). This does not activate native PMS.

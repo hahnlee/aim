@@ -3,7 +3,7 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::app_ids::{AppIds, Error, Owner};
 use crate::package::settings::{Settings, Signatures};
-use crate::package::sign::{self, MergeRule, SigningDetails};
+use crate::package::sign::{self, History, JoinType, MergeRule, SigningDetails};
 use crate::package::system_config::SystemConfig;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,13 +14,46 @@ pub struct SharedUser {
     pub flags: i32,
     pub private_flags: i32,
     pub signatures: Option<Signatures>,
+    /// Per-scan state: None before reconciliation, false after a normal
+    /// check, true after an OTA signer replacement. Never persisted.
+    pub signatures_changed: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanOrigin {
+    SystemDirectory,
+    Data,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignatureError {
+    NonSystemMismatch,
+    Rejected { code: i32 },
+    FatalSystemMismatch,
+    Certificates(String),
+}
+
+fn saved_signatures(details: &SigningDetails) -> Result<Signatures, String> {
+    if details.signatures.is_empty() {
+        return Err("verified package has no signing certificates".into());
+    }
+    Ok(Signatures {
+        scheme_version: details.scheme_version,
+        signatures: details.signatures.clone(),
+        past_signatures: details.past_signing_certificates.clone(),
+        public_keys: Some(
+            sign::serialize_public_keys(&details.public_keys)?
+                .into_iter()
+                .map(Some)
+                .collect(),
+        ),
+    })
 }
 
 impl SharedUser {
     /// ReconcilePackageUtils's normal, already-authorized merge. Members
     /// are the other parsed packages in this group, in owner scan order.
-    /// Unknown initialization and OTA signature replacement are separate
-    /// commit/reconciliation steps (#803). Errors leave the group intact.
+    /// Errors leave the group and its scan state intact.
     pub fn merge_authorized_lineage(
         &mut self,
         candidate: &SigningDetails,
@@ -30,6 +63,7 @@ impl SharedUser {
         let previous = SigningDetails::from_saved(self.signatures.as_ref().unwrap_or(&unknown))?;
         let merged = previous.merge_lineage_with(candidate, MergeRule::OtherCapability)?;
         if matches!(&merged, Cow::Borrowed(s) if std::ptr::eq(*s, &previous)) {
+            self.signatures_changed.get_or_insert(false);
             return Ok(false);
         }
         let mut merged = merged.into_owned();
@@ -38,13 +72,62 @@ impl SharedUser {
                 .merge_lineage_with(member, MergeRule::RestrictedCapability)?
                 .into_owned();
         }
-        let public_keys = sign::serialize_public_keys(&merged.public_keys)?;
-        self.signatures = Some(Signatures {
-            scheme_version: merged.scheme_version,
-            signatures: merged.signatures,
-            past_signatures: merged.past_signing_certificates,
-            public_keys: Some(public_keys.into_iter().map(Some).collect()),
-        });
+        self.signatures = Some(saved_signatures(&merged)?);
+        self.signatures_changed.get_or_insert(false);
+        Ok(true)
+    }
+
+    /// The physical-system exception in ReconcilePackageUtils, invoked
+    /// only after the normal signature gates failed. A saved FLAG_SYSTEM
+    /// on a /data APK does not select SystemDirectory. Existing members
+    /// are irrelevant to the SYSTEM join rule.
+    pub fn replace_after_signature_failure(
+        &mut self,
+        candidate: &SigningDetails,
+        origin: ScanOrigin,
+        first_api_level: i32,
+    ) -> Result<(), SignatureError> {
+        if origin != ScanOrigin::SystemDirectory {
+            return Err(SignatureError::NonSystemMismatch);
+        }
+        let unknown = Signatures::default();
+        let previous = self.signatures.as_ref().unwrap_or(&unknown);
+        if self.signatures_changed.is_some()
+            && !History::verified(candidate).can_join_shared_user(
+                &History::saved(previous),
+                JoinType::System,
+                &[],
+            )
+        {
+            return Err(if first_api_level <= 29 {
+                SignatureError::Rejected {
+                    code: sign::INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES,
+                }
+            } else {
+                SignatureError::FatalSystemMismatch
+            });
+        }
+        let signatures = saved_signatures(candidate).map_err(SignatureError::Certificates)?;
+        self.signatures = Some(signatures);
+        self.signatures_changed = Some(true);
+        Ok(())
+    }
+
+    /// Settings.insertPackageSettingLPw initializes unknown group
+    /// signatures during commit, after reconciliation has checked the
+    /// candidate. Existing signing details and the scan marker survive.
+    pub fn commit_initial_signatures(
+        &mut self,
+        candidate: &SigningDetails,
+    ) -> Result<bool, String> {
+        if self
+            .signatures
+            .as_ref()
+            .is_some_and(|s| !s.signatures.is_empty())
+        {
+            return Ok(false);
+        }
+        self.signatures = Some(saved_signatures(candidate)?);
         Ok(true)
     }
 }
@@ -197,6 +280,7 @@ impl Bootstrap {
                 flags,
                 private_flags,
                 signatures: None,
+                signatures_changed: None,
             },
         );
         Ok(())
@@ -214,6 +298,7 @@ mod tests {
             app_id: 10001,
             flags: 1,
             private_flags: 8,
+            signatures_changed: None,
             signatures: Some(Signatures {
                 signatures: vec![vec![1, 2, 3]],
                 ..Default::default()
@@ -340,6 +425,7 @@ mod tests {
                 flags: 1,
                 private_flags: 8,
                 signatures: None,
+                signatures_changed: None,
             }
         );
         assert_eq!(boot.rejected.len(), 5);
