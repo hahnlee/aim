@@ -849,7 +849,6 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
         target_sdk_version: c.parsed.target_sdk_version,
         restrict_update_hash: c.parsed.restrict_update_hash.clone(),
     };
-    let libraries = aim_services::package::libraries::Registry::default();
     let policy = UserPolicy {
         install_user: None,
         users: Some(&[]),
@@ -860,7 +859,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     };
     let mut scan = SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
     let accepted = scan
-        .apply_new_system(&google, &libraries, metadata(&google), policy)
+        .apply_new_system(&google, metadata(&google), policy)
         .unwrap();
     let group = google.parsed.shared_user_id.as_ref().unwrap();
     let uid = accepted.record.settings.app_id;
@@ -895,11 +894,11 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     );
     let snapshot = scan.clone();
     assert!(matches!(
-        scan.apply_new_system(&google, &libraries, metadata(&google), policy),
+        scan.apply_new_system(&google, metadata(&google), policy),
         Err(SigningError::Rejected(_))
     ));
     assert_eq!(scan, snapshot);
-    scan.apply_new_system(&platform, &libraries, metadata(&platform), policy)
+    scan.apply_new_system(&platform, metadata(&platform), policy)
         .unwrap();
     assert_eq!(scan.settings.packages.len(), 2);
     assert_eq!(scan.settings.packages[1].app_id, 1000);
@@ -916,12 +915,12 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     google.signing = platform.signing.clone();
     let snapshot = scan.clone();
     assert!(matches!(
-        scan.apply_new_system(&google, &libraries, metadata(&google), policy),
+        scan.apply_new_system(&google, metadata(&google), policy),
         Err(SigningError::Fatal(_))
     ));
     assert_eq!(scan, snapshot);
     google.signing = original_signer;
-    scan.apply_new_system(&google, &libraries, metadata(&google), policy)
+    scan.apply_new_system(&google, metadata(&google), policy)
         .unwrap();
     assert_eq!(scan.settings.packages.last().unwrap().app_id, uid);
 
@@ -946,7 +945,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
         google.signing = original_signer.clone();
         let mut ota = SigningScan::new(&Default::default(), &restored, first_api).unwrap();
         let first = ota
-            .apply_new_system(&google, &libraries, metadata(&google), policy)
+            .apply_new_system(&google, metadata(&google), policy)
             .unwrap();
         assert!(first.signing.system_signature_mismatch.is_some());
         assert_eq!(first.record.settings.app_id, 10010);
@@ -958,7 +957,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
         google.signing = platform.signing.clone();
         let snapshot = ota.clone();
         match ota
-            .apply_new_system(&google, &libraries, metadata(&google), policy)
+            .apply_new_system(&google, metadata(&google), policy)
             .unwrap_err()
         {
             SigningError::Rejected(e) => {
@@ -978,7 +977,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     google.signing = SigningDetails::from_saved(&Default::default()).unwrap();
     let snapshot = scan.clone();
     assert!(
-        matches!(scan.apply_new_system(&google, &libraries, metadata(&google), policy), Err(SigningError::Rejected(ref e)) if e.phase == "signatures")
+        matches!(scan.apply_new_system(&google, metadata(&google), policy), Err(SigningError::Rejected(ref e)) if e.phase == "signatures")
     );
     assert_eq!(scan.settings, snapshot.settings);
     assert_eq!(
@@ -988,7 +987,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     assert!(scan.identities.ids.get(10001).is_none());
     google.signing = original_signer;
     let independent = scan
-        .apply_new_system(&google, &libraries, metadata(&google), policy)
+        .apply_new_system(&google, metadata(&google), policy)
         .unwrap();
     assert_eq!(independent.record.settings.app_id, 10002);
     assert!(!independent.record.settings.shared_user);
@@ -1005,7 +1004,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     google.signing = SigningDetails::from_saved(&Default::default()).unwrap();
     let snapshot = scan.clone();
     assert!(matches!(
-        scan.apply_new_system(&google, &libraries, metadata(&google), policy),
+        scan.apply_new_system(&google, metadata(&google), policy),
         Err(SigningError::Rejected(_))
     ));
     assert_eq!(scan.settings, snapshot.settings);
@@ -1025,7 +1024,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     );
     google.signing = original_signer;
     let retried = scan
-        .apply_new_system(&google, &libraries, metadata(&google), policy)
+        .apply_new_system(&google, metadata(&google), policy)
         .unwrap();
     assert_eq!(retried.record.settings.app_id, 10004);
     assert_eq!(scan.settings.shared_users.last().unwrap().name, "new.group");
@@ -1034,13 +1033,13 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     let snapshot = scan.clone();
     google.location.path = "/data/app/new/base.apk".into();
     assert!(
-        matches!(scan.apply_new_system(&google, &libraries, metadata(&google), policy), Err(SigningError::Rejected(ref e)) if e.phase == "location")
+        matches!(scan.apply_new_system(&google, metadata(&google), policy), Err(SigningError::Rejected(ref e)) if e.phase == "location")
     );
     assert_eq!(scan, snapshot);
     google.location.path = "/system/app/new/base.apk".into();
     google.parsed.static_shared_library_name = Some("static".into());
     assert!(
-        matches!(scan.apply_new_system(&google, &libraries, metadata(&google), policy), Err(SigningError::Rejected(ref e)) if e.message.contains("shared UID"))
+        matches!(scan.apply_new_system(&google, metadata(&google), policy), Err(SigningError::Rejected(ref e)) if e.message.contains("shared UID"))
     );
     assert_eq!(scan, snapshot);
 }
@@ -1145,7 +1144,6 @@ fn static_library_scan_checks_the_previous_version_and_commits_the_target() {
             });
         }
     }
-    let prior = settings.clone();
     let code = Code {
         location: Location {
             path: google.settings.code_path.clone(),
@@ -1157,35 +1155,67 @@ fn static_library_scan_checks_the_previous_version_and_commits_the_target() {
         signing: google.signing.clone(),
     };
     let mut scan = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+    // Populate the owned registry in accepted scan order, rather than injecting
+    // declarations ahead of signer reconciliation.
+    for version in [1, 5, 9] {
+        let mut parsed = raw.clone();
+        parsed.static_shared_lib_version = version;
+        let identity = Identity::select(&parsed, &settings, true);
+        identity.apply(&mut parsed);
+        let record = Record {
+            settings: settings
+                .packages
+                .iter()
+                .find(|p| p.name == identity.internal_name)
+                .unwrap()
+                .clone(),
+            parsed,
+            identity,
+            signing: if version == 5 {
+                platform.signing.clone()
+            } else {
+                google.signing.clone()
+            },
+            origin: ScanOrigin::SystemDirectory,
+        };
+        let outcome = scan.apply(&record).unwrap();
+        assert_eq!(outcome.system_signature_mismatch.is_some(), version != 1);
+        assert_eq!(
+            scan.libraries
+                .get("test.static", version)
+                .unwrap()
+                .package_name
+                .as_deref(),
+            Some(record.settings.name.as_str())
+        );
+    }
+    let prior = scan.settings.clone();
+    let metadata = |c: &Code| SettingMetadata {
+        code_path: c.location.path.clone(),
+        legacy_native_library_path: None,
+        primary_cpu_abi: None,
+        secondary_cpu_abi: None,
+        version_code: c.parsed.static_shared_lib_version,
+        flags: settings::FLAG_SYSTEM,
+        private_flags: 0,
+        last_modified_time: 0,
+        uses_sdk_libraries: vec![],
+        uses_static_libraries: vec![],
+        mime_groups: vec![],
+        domain_set_id: [2; 16],
+        target_sdk_version: c.parsed.target_sdk_version,
+        restrict_update_hash: None,
+    };
+    let policy = UserPolicy {
+        install_user: None,
+        users: None,
+        allow_install: true,
+        instant_app: false,
+        virtual_preload: false,
+        stopped_system_app: false,
+    };
     let accepted = scan
-        .apply_new_system(
-            &code,
-            &registry,
-            SettingMetadata {
-                code_path: code.location.path.clone(),
-                legacy_native_library_path: None,
-                primary_cpu_abi: None,
-                secondary_cpu_abi: None,
-                version_code: 7,
-                flags: settings::FLAG_SYSTEM,
-                private_flags: 0,
-                last_modified_time: 0,
-                uses_sdk_libraries: vec![],
-                uses_static_libraries: vec![],
-                mime_groups: vec![],
-                domain_set_id: [2; 16],
-                target_sdk_version: raw.target_sdk_version,
-                restrict_update_hash: None,
-            },
-            UserPolicy {
-                install_user: None,
-                users: None,
-                allow_install: true,
-                instant_app: false,
-                virtual_preload: false,
-                stopped_system_app: false,
-            },
-        )
+        .apply_new_system(&code, metadata(&code), policy)
         .unwrap();
     // System-directory mismatch follows the original OTA exception, with an
     // explicit diagnostic. The selected previous version is not overwritten.
@@ -1212,6 +1242,40 @@ fn static_library_scan_checks_the_previous_version_and_commits_the_target() {
         Some("test")
     );
 
+    // A declaration failure after signer reconciliation publishes neither
+    // signatures nor libraries, while new UID cleanup advances the cursor.
+    let mut broken = Code {
+        location: code.location.clone(),
+        parsed: code.parsed.clone(),
+        signing: code.signing.clone(),
+    };
+    broken.parsed.static_shared_lib_version = 8;
+    broken.parsed.base_apk_path = None;
+    let snapshot = scan.clone();
+    assert!(
+        matches!(scan.apply_new_system(&broken, metadata(&broken), policy), Err(SigningError::Rejected(ref e)) if e.phase == "libraries")
+    );
+    assert_eq!(scan.settings, snapshot.settings);
+    assert_eq!(scan.libraries, snapshot.libraries);
+    assert_eq!(
+        scan.identities.shared_users,
+        snapshot.identities.shared_users
+    );
+    assert!(scan.identities.ids.get(10003).is_none());
+    broken.parsed.base_apk_path = code.parsed.base_apk_path.clone();
+    let retried = scan
+        .apply_new_system(&broken, metadata(&broken), policy)
+        .unwrap();
+    assert_eq!(retried.record.settings.app_id, 10005);
+    assert_eq!(
+        scan.libraries
+            .get("test.static", 8)
+            .unwrap()
+            .package_name
+            .as_deref(),
+        Some("test_8")
+    );
+
     // Same input under /data must reject the version-5 signer mismatch even
     // though version 1, version 9 and the target's own signer could match.
     let target = settings::Package {
@@ -1232,16 +1296,12 @@ fn static_library_scan_checks_the_previous_version_and_commits_the_target() {
         origin: ScanOrigin::Data,
     };
     let mut scan = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+    scan.libraries = registry.clone();
     let snapshot = scan.clone();
     assert!(
-        matches!(scan.apply_with_libraries(&record, &registry), Err(SigningError::Rejected(ref e)) if e.phase == "authorization")
+        matches!(scan.apply(&record), Err(SigningError::Rejected(ref e)) if e.phase == "authorization")
     );
     assert_eq!(scan, snapshot);
-    assert!(
-        matches!(scan.apply(&record), Err(SigningError::Rejected(ref e)) if e.message.contains("registry"))
-    );
-    assert_eq!(scan, snapshot);
-
     // The real GSF lineage grants installed-data capability to its older
     // certificate. Selection must use that previous library signer, rather
     // than the target version's already-matching current certificate.
@@ -1259,8 +1319,9 @@ fn static_library_scan_checks_the_previous_version_and_commits_the_target() {
         ..Default::default()
     });
     let mut scan = SigningScan::new(&Default::default(), &rotated, 36).unwrap();
+    scan.libraries = registry.clone();
     assert!(
-        scan.apply_with_libraries(&record, &registry)
+        scan.apply(&record)
             .unwrap()
             .system_signature_mismatch
             .is_none()
@@ -1287,9 +1348,10 @@ fn static_library_scan_checks_the_previous_version_and_commits_the_target() {
     };
     revoked.signing.past_signing_certificates.as_mut().unwrap()[0].1 &= !1;
     let mut scan = SigningScan::new(&Default::default(), &rotated, 36).unwrap();
+    scan.libraries = registry.clone();
     let snapshot = scan.clone();
     assert!(
-        matches!(scan.apply_with_libraries(&revoked, &registry), Err(SigningError::Rejected(ref e)) if e.phase == "authorization")
+        matches!(scan.apply(&revoked), Err(SigningError::Rejected(ref e)) if e.phase == "authorization")
     );
     assert_eq!(scan, snapshot);
 
@@ -1305,8 +1367,9 @@ fn static_library_scan_checks_the_previous_version_and_commits_the_target() {
     disabled.signatures = Some(saved(&platform.signing));
     settings.disabled_system_packages.push(disabled);
     let mut scan = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+    scan.libraries = registry.clone();
     assert!(
-        scan.apply_with_libraries(&record, &registry)
+        scan.apply(&record)
             .unwrap()
             .system_signature_mismatch
             .is_none()
@@ -1327,9 +1390,99 @@ fn static_library_scan_checks_the_previous_version_and_commits_the_target() {
     disabled.signatures = Some(saved(&platform.signing));
     settings.disabled_system_packages.push(disabled);
     let mut scan = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+    scan.libraries = registry.clone();
     let snapshot = scan.clone();
     assert!(
-        matches!(scan.apply_with_libraries(&record, &registry), Err(SigningError::Rejected(ref e)) if e.message.contains("updated system"))
+        matches!(scan.apply(&record), Err(SigningError::Rejected(ref e)) if e.message.contains("updated system"))
     );
     assert_eq!(scan, snapshot);
+    // Updated-system dynamic declarations need the verified disabled original;
+    // only names from that original survive. Inputs here are labeled policy
+    // records using original verified signer material, not edited APKs.
+    let active_setting = settings::Package {
+        name: "provider".into(),
+        app_id: 10020,
+        code_path: "/data/app/provider/base.apk".into(),
+        flags: settings::FLAG_SYSTEM,
+        signatures: Some(saved(&google.signing)),
+        ..Default::default()
+    };
+    let old_setting = settings::Package {
+        code_path: "/system/app/provider".into(),
+        signatures: None,
+        ..active_setting.clone()
+    };
+    let mut old_parsed = google.parsed.clone();
+    old_parsed.package_name = "provider".into();
+    old_parsed.manifest_package_name = Some("provider".into());
+    old_parsed.shared_user_id = None;
+    old_parsed.library_names = vec!["allowed".into(), "builtin".into()];
+    let identity = Identity::select(&old_parsed, &Default::default(), true);
+    let old = Record {
+        settings: old_setting.clone(),
+        parsed: old_parsed.clone(),
+        signing: google.signing.clone(),
+        identity: identity.clone(),
+        origin: ScanOrigin::SystemDirectory,
+    };
+    let mut parsed = old_parsed.clone();
+    parsed.library_names.push("added.by.update".into());
+    parsed.base_apk_path = Some(active_setting.code_path.clone());
+    let updated = Record {
+        settings: active_setting.clone(),
+        parsed,
+        signing: google.signing.clone(),
+        identity,
+        origin: ScanOrigin::Data,
+    };
+    let settings = settings::Settings {
+        packages: vec![active_setting],
+        disabled_system_packages: vec![old_setting],
+        ..Default::default()
+    };
+    let mut config = aim_services::package::system_config::SystemConfig::default();
+    config.libraries.insert(
+        "builtin".into(),
+        aim_services::package::system_config::Library {
+            name: "builtin".into(),
+            filename: "/system/framework/builtin.jar".into(),
+            dependencies: vec![],
+            on_bootclasspath_since: None,
+            on_bootclasspath_before: None,
+            can_be_safely_ignored: false,
+            native: false,
+        },
+    );
+    let mut scan = SigningScan::new(&config, &settings, 36).unwrap();
+    let snapshot = scan.clone();
+    assert!(
+        matches!(scan.apply(&updated), Err(SigningError::Rejected(ref e)) if e.phase == "libraries")
+    );
+    assert_eq!(scan, snapshot);
+    let mut wrong = Record {
+        settings: old.settings.clone(),
+        parsed: old.parsed.clone(),
+        signing: old.signing.clone(),
+        identity: old.identity.clone(),
+        origin: old.origin,
+    };
+    wrong.settings.code_path = "/system/app/other".into();
+    assert!(
+        matches!(scan.apply_with_disabled(&updated, Some(&wrong)), Err(SigningError::Rejected(ref e)) if e.phase == "identity")
+    );
+    assert_eq!(scan, snapshot);
+    scan.apply_with_disabled(&updated, Some(&old)).unwrap();
+    let allowed = scan.libraries.get("allowed", -1).unwrap();
+    assert_eq!(allowed.package_name.as_deref(), Some("provider"));
+    assert_eq!(
+        allowed.code_paths.as_ref().unwrap(),
+        &vec!["/data/app/provider/base.apk".to_string()]
+    );
+    assert!(scan.libraries.get("added.by.update", -1).is_none());
+    assert_eq!(
+        scan.libraries.get("builtin", -1).unwrap().path.as_deref(),
+        Some("/system/framework/builtin.jar")
+    );
+    assert_eq!(snapshot.libraries.entries().count(), 1);
+    assert_eq!(scan.libraries.entries().count(), 2);
 }

@@ -34,6 +34,7 @@ pub enum SharedUidMigration {
 pub struct SigningScan {
     pub settings: Settings,
     pub identities: Bootstrap,
+    pub libraries: Registry,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
 }
@@ -67,6 +68,7 @@ impl SigningScan {
         Ok(Self {
             identities: Bootstrap::restore(config, settings)?,
             settings: settings.clone(),
+            libraries: Registry::new(config),
             first_api_level,
             parsed: Vec::new(),
         })
@@ -79,7 +81,6 @@ impl SigningScan {
     pub fn apply_new_system(
         &mut self,
         code: &Code,
-        libraries: &Registry,
         metadata: SettingMetadata,
         users: UserPolicy<'_>,
     ) -> Result<NewPackageOutcome, SigningError> {
@@ -141,7 +142,7 @@ impl SigningScan {
             origin: ScanOrigin::SystemDirectory,
         };
         next.settings.packages.push(record.settings.clone());
-        let signing = match next.apply_with_libraries(&record, libraries) {
+        let signing = match next.apply(&record) {
             Ok(outcome) => outcome,
             Err(error) => {
                 preparation
@@ -169,25 +170,19 @@ impl SigningScan {
     /// later failure preserves earlier committed candidate records; the
     /// caller may discard the whole candidate after a fatal system error.
     pub fn apply(&mut self, record: &Record) -> Result<SigningOutcome, SigningError> {
-        if record.parsed.static_shared_library_name.is_some() {
-            return Err(SigningError::Rejected(Error {
-                package: record.settings.name.clone(),
-                path: record.settings.code_path.clone(),
-                phase: "identity",
-                message: "static signer selection requires the declaration registry (#806)".into(),
-            }));
-        }
-        self.reconcile(record, None)
+        self.apply_with_disabled(record, None)
     }
 
-    /// Initial boot scan's static-library signature-check setting. The caller
-    /// supplies the complete owner registry; SCAN_INITIAL skips upgrade keysets.
-    pub fn apply_with_libraries(
+    /// Initial boot scan uses declarations from prior accepted records. A
+    /// dynamic updated-system provider needs its verified disabled original.
+    /// SCAN_INITIAL skips upgrade-keyset handling as in the original.
+    pub fn apply_with_disabled(
         &mut self,
         record: &Record,
-        libraries: &Registry,
+        disabled: Option<&Record>,
     ) -> Result<SigningOutcome, SigningError> {
-        let check = libraries
+        let check = self
+            .libraries
             .latest_static_setting(&record.parsed, &self.settings)
             .cloned();
         if record.parsed.static_shared_library_name.is_some()
@@ -201,13 +196,32 @@ impl SigningScan {
                 message: "shared UID is not allowed in a static shared library".into(),
             }));
         }
-        self.reconcile(record, check.as_ref())
+        if let Some(old) = disabled {
+            if old.settings.name != record.settings.name
+                || old.identity.internal_name != record.settings.name
+                || old.parsed.package_name != record.settings.name
+                || !self
+                    .settings
+                    .disabled_system_packages
+                    .iter()
+                    .any(|p| *p == old.settings)
+            {
+                return Err(SigningError::Rejected(Error {
+                    package: record.settings.name.clone(),
+                    path: record.settings.code_path.clone(),
+                    phase: "identity",
+                    message: "disabled library original disagrees with saved identity".into(),
+                }));
+            }
+        }
+        self.reconcile(record, check.as_ref(), disabled)
     }
 
     fn reconcile(
         &mut self,
         record: &Record,
         signature_check: Option<&crate::package::settings::Package>,
+        disabled: Option<&Record>,
     ) -> Result<SigningOutcome, SigningError> {
         let fail = |phase, message| Error {
             package: record.settings.name.clone(),
@@ -348,8 +362,20 @@ impl SigningScan {
                 .commit_initial_signatures(&record.signing)
                 .map_err(|e| reject("signatures", e))?;
         }
+        let mut libraries = self.libraries.clone();
+        libraries
+            .add_scan_record(
+                record,
+                disabled,
+                self.settings
+                    .disabled_system_packages
+                    .iter()
+                    .any(|p| p.name == previous.name),
+            )
+            .map_err(|e| reject("libraries", e.0.into()))?;
         // All fallible work finishes before changing this candidate.
         self.settings.packages[at].signatures = Some(signatures);
+        self.libraries = libraries;
         if let (Some(name), Some(group)) = (group_name, group) {
             let saved = self
                 .settings

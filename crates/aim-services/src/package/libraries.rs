@@ -25,7 +25,7 @@ pub const TYPE_SDK_PACKAGE: i32 = 3;
 
 /// SharedLibrariesImpl's name/version map. Scan order matters: dynamic
 /// declarations cannot replace an existing built-in or dynamic library.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Registry {
     entries: BTreeMap<String, BTreeMap<i64, SharedLibrary>>,
 }
@@ -89,6 +89,39 @@ impl Registry {
                 Ok(())
             };
         };
+        self.add_parsed(
+            &ps.name,
+            pkg,
+            ps.is.system,
+            ps.is.updated_system_app,
+            disabled.and_then(|p| p.pkg.as_deref()),
+        )
+    }
+
+    /// Scan-owned declaration view; no incomplete query PackageState is built.
+    pub(in crate::package) fn add_scan_record(
+        &mut self,
+        record: &super::scan::Record,
+        disabled: Option<&super::scan::Record>,
+        updated_system_app: bool,
+    ) -> Result<(), NotModelled> {
+        self.add_parsed(
+            &record.settings.name,
+            &record.parsed,
+            record.settings.flags & super::settings::FLAG_SYSTEM != 0,
+            updated_system_app,
+            disabled.map(|r| &r.parsed),
+        )
+    }
+
+    fn add_parsed(
+        &mut self,
+        package_name: &str,
+        pkg: &super::pkg::AndroidPackage,
+        system: bool,
+        updated_system_app: bool,
+        disabled: Option<&super::pkg::AndroidPackage>,
+    ) -> Result<(), NotModelled> {
         let sdk = pkg.sdk_library_name.as_ref().filter(|n| !n.is_empty());
         let static_name = pkg
             .static_shared_library_name
@@ -106,10 +139,10 @@ impl Registry {
                 pkg.static_shared_lib_version,
                 TYPE_STATIC,
             )
-        } else if ps.is.system && !pkg.library_names.is_empty() {
-            let allowed = if ps.is.updated_system_app {
+        } else if system && !pkg.library_names.is_empty() {
+            let allowed = if updated_system_app {
                 match disabled {
-                    Some(old) => old.pkg.as_ref(),
+                    Some(old) => Some(old),
                     None => {
                         return Err(NotModelled("an updated library's disabled system package"));
                     }
@@ -147,7 +180,7 @@ impl Registry {
             }
         }
         let declaring = if kind == TYPE_DYNAMIC {
-            &ps.name
+            package_name
         } else {
             pkg.manifest_package_name
                 .as_ref()
@@ -157,12 +190,12 @@ impl Registry {
             (i64::from(pkg.version_code_major) << 32) | i64::from(pkg.version_code as u32);
         for name in names {
             self.insert(SharedLibrary {
-                package_name: Some(ps.name.clone()),
+                package_name: Some(package_name.to_owned()),
                 code_paths: Some(paths.clone()),
                 name: Some(name),
                 version,
                 kind,
-                declaring: (declaring.clone(), package_version),
+                declaring: (declaring.to_owned(), package_version),
                 ..Default::default()
             });
         }

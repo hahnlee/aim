@@ -235,17 +235,28 @@ components, permission declarations, attributions, protected broadcasts and
 overlay target. `Registry::latest_static_setting` selects the greatest
 nonnegative declaration version strictly below the incoming version and looks
 up that declaration's package setting, without falling back to an older
-setting when the selected one is absent. The initial scan's
-`apply_with_libraries` checks that previous version's signer while retaining
-the target's UID/settings and selecting the request's disabled original.
+setting when the selected one is absent. `SigningScan` now owns the declaration registry, initialized from SystemConfig
+and extended only by accepted records. Its initial-scan `apply` uses prior
+accepted declarations for this signer selection, retains the target's
+UID/settings and selects the request's disabled original. `apply_with_disabled`
+requires a matching verified disabled record for an updated-system dynamic
+provider and admits only library names declared by that original. Existing
+built-in/dynamic entries retain their declarations. Signatures, group markers
+and the registry commit together after all fallible declaration work succeeds;
+a failed new declaration publishes neither settings nor library state and
+retains the original UID cleanup cursor.
 A labeled synthetic static-library policy test uses verified original GSF and
 framework signer material: data-origin mismatch rejects without mutation,
 system-origin mismatch follows the explicit OTA diagnostic, rotation accepts
 the real lineage's installed-data capability, revocation rejects, and unrelated
-versions/disabled originals remain unchanged. Six original-image DEX policy
-tests pin version selection and all declaration constraints; all 163 package
-unit tests pass. These are scan candidates; complete scan enrichment and actual
-owner/registry inputs, removed-package reconciliation, full pipeline
+versions/disabled originals remain unchanged. The same explicit scan suite
+now also builds the owned registry from accepted versions in order, checks
+registration failure/retry UID cleanup, missing/mismatched disabled-record
+rejection, updated-system declaration filtering and built-in preservation.
+All eight explicit original-APK scan tests pass (2026-10-02), alongside six
+original-image DEX policy tests and 163 package unit tests. These are scan
+candidates; complete scan enrichment, owner inputs and registry dependency
+resolution, removed-package reconciliation, full pipeline
 failure/side-effect cleanup, persistence and query publication remain under
 #702, #707, #803, #806 and #798.
 Saved signing reconciliation and UID conversion persistence are verified below.
