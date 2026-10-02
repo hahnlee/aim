@@ -57,7 +57,7 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (136 package unit tests pass). These are not
+shared snapshot publication (137 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
@@ -125,7 +125,7 @@ signatures. Settings launched successfully (warm, 90 ms). An explicitly
 run original-image integration
 test checks active/disabled GSF records, nonstandard APK paths, v3 lineage,
 SPKI retention, input immutability and code disappearing between parsing
-and verification. All 136 package
+and verification. All 137 package
 unit tests run with their inputs present and pass. These are scan inputs,
 not reconciled package snapshots; APEX verification belongs to apexd,
 and new/removed image package reconciliation and publication remain
@@ -154,9 +154,22 @@ An explicitly run original-runtime integration test matches imported-hole
 allocation, deletion, ownership replacement, fresh restoration and range
 exhaustion. The disposable original-PMS boot completed and all 243 active
 packages and 16 shared UID groups restored with their saved IDs. Java
-API linkage verification and 136 package unit tests pass. The allocator
+API linkage verification and 137 package unit tests pass. The allocator
 is not connected to scan reconciliation, persistence or snapshot
-publication; first-boot shared-user seeding also remains under #702.
+publication (#702). `owner::shared_users::Bootstrap` now constructs the
+nine pinned platform shared users and valid OEM declarations, preserving
+fixed IDs, system/privileged flags and contextual name/range/slot
+rejections (#803). SystemConfig reads OEM UID tags from every scanned
+partition, replaces repeated names and keeps ArrayMap's signed hash
+ordering with stable collision ties. Malformed declarations retain their
+image-relative file, raw attributes and rejection reason. An explicitly
+run original-runtime
+test compares the same disposable XMLs against original SystemConfig,
+including replacement, missing/empty/invalid values, signed limits and
+Arabic/fullwidth digits. Saved groups retained after the original scan
+match the seeded IDs; unused initial groups are pruned by the original.
+These are initial identity inputs: read-time merging, scan-time shared UID
+signature/migration policy, pruning and persistence are not connected.
 The pinned Settings DEX compiles out `disallowSdkLibsToBeApps`: SDK
 libraries require a positive app/shared-user ID, and native restoration
 rejects missing identities (#802). An explicit original-image test checks

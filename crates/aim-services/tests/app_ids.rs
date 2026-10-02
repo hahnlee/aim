@@ -122,6 +122,68 @@ fn allocation_matches_the_original_runtime() {
         lines.join("\n") + "\n"
     );
 
+    // Original SystemConfig reads these disposable vendor/OEM fixtures
+    // with zero partition permissions: the UID tag has no allow-bit gate.
+    let root = boot.data.join("data/local/tmp/uid-image");
+    let inputs = [
+        (
+            "vendor",
+            r#"<permissions>
+            <oem-defined-uid name="android.uid.Aa" uid="2900" />
+            <oem-defined-uid name="android.uid.BB" uid="2900" />
+            <oem-defined-uid name="android.uid.update" uid="2901" />
+            <oem-defined-uid name="android.uid.signed" uid="+2902" />
+            <oem-defined-uid name="android.uid.unicode" uid="٢٩٠٣" />
+            <oem-defined-uid name="android.uid.fullwidth" uid="２９０４" />
+            <oem-defined-uid name="android.uid.min" uid="-2147483648" />
+            <oem-defined-uid name="android.uid.max" uid="2147483647" />
+            <oem-defined-uid name="android.uid.space" uid=" 2905" />
+            <oem-defined-uid name="android.uid.overflow" uid="2147483648" />
+            <oem-defined-uid name="" uid="2906" />
+            <oem-defined-uid name="android.uid.empty" uid="" />
+            <oem-defined-uid name="android.uid.missing" />
+            </permissions>"#,
+        ),
+        (
+            "oem",
+            r#"<config><oem-defined-uid name="android.uid.update" uid="2999" />
+            <oem-defined-uid name="android.uid.invalid" uid="-1" /></config>"#,
+        ),
+    ];
+    for (partition, xml) in inputs {
+        let dir = root.join(partition).join("etc/permissions");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("uids.xml"), xml).unwrap();
+    }
+    let config = aim_services::package::system_config::SystemConfig::read(&root, &|_| None);
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.AppIdsOracle",
+        "oem",
+        "/data/local/tmp/uid-image/vendor/etc/permissions",
+        "/data/local/tmp/uid-image/oem/etc/permissions",
+    ]));
+    let expected = config
+        .oem_defined_uids
+        .iter()
+        .map(|(name, id)| format!("{name} {id}\n"))
+        .collect::<String>();
+    assert_eq!(String::from_utf8(original.stdout).unwrap(), expected);
+    assert_eq!(config.oem_defined_uids.len(), 9);
+    assert_eq!(config.rejected_oem_uids.len(), 5);
+    assert!(
+        config
+            .rejected_oem_uids
+            .iter()
+            .all(|r| r.path == "vendor/etc/permissions/uids.xml")
+    );
+    let bootstrap = aim_services::package::owner::shared_users::Bootstrap::new(&config);
+    assert_eq!(bootstrap.shared_users.len(), 14);
+    assert_eq!(bootstrap.rejected.len(), 4);
+
     let state = aim_services::package::State::read(&boot.data.join("data"), &[0])
         .unwrap()
         .unwrap();
@@ -135,6 +197,18 @@ fn allocation_matches_the_original_runtime() {
             Some(&Owner::SharedUser(group.name.clone()))
         );
     }
+    let seeded = aim_services::package::owner::shared_users::Bootstrap::new(&Default::default());
+    // PMS prunes unused seeded groups after scanning; the bootstrap
+    // input must not recreate them in a restored published snapshot.
+    let mut retained = 0;
+    for (name, group) in seeded.shared_users {
+        if let Some(saved) = state.settings.shared_users.iter().find(|g| g.name == name) {
+            assert_eq!(saved.app_id, group.app_id);
+            assert_eq!(restored.get(group.app_id), Some(&Owner::SharedUser(name)));
+            retained += 1;
+        }
+    }
+    assert!(retained > 0);
     for package in &state.settings.packages {
         if package.shared_user {
             assert!(matches!(

@@ -552,7 +552,7 @@ the system UID only; it currently attaches after bootstrap, so C's facade
 still must expose the same owner query before the native boot scan (#702).
 A disposable original-PMS boot (2026-10-02, boot completed) tested the
 Rust-to-Java call: SDK 30 returned false, SDK 31/36 true. Device-service
-linkage verification and 136 package unit tests pass. The image has no
+linkage verification and 137 package unit tests pass. The image has no
 `android.content.pm.Flags.sdkLibIndependence` API or loaded aconfig entry
 for that flag. Inspecting its original `services.jar` shows that the SDK
 dependency collection call passes `required=true` directly. `Policy::pinned`
@@ -601,9 +601,21 @@ runtime restriction on reusing deleted IDs and fresh-restoration holes.
 An explicitly run original-runtime test matches allocation, deletion,
 ownership replacement and exhaustion. On its disposable original-PMS
 boot (boot completed), all 243 active packages and 16 shared UID groups
-restored with their saved IDs. Java API linkage and 136 package unit tests
-pass. Scan reconciliation, first-boot shared-user seeding, UID persistence
-and snapshot publication are not connected (#702). The pinned Settings
+restored with their saved IDs. Java API linkage and 137 package unit tests
+pass. `owner::shared_users::Bootstrap` now seeds the nine pinned platform
+shared users and the valid OEM declarations with fixed IDs and
+system/privileged flags (#803). Rejected OEM names, ranges and slot
+conflicts retain their reasons. SystemConfig reads `oem-defined-uid`
+regardless of partition allow bits, applies later-name replacement and
+preserves ArrayMap's signed hash order and stable collision ties. Malformed
+declarations retain their file, raw attributes and rejection reason. An
+explicit original-runtime test compares the same disposable XMLs with
+original SystemConfig, covering invalid/missing attributes, replacements,
+signed integer limits and Arabic/fullwidth digits. Retained saved platform
+groups match the seed IDs; the original prunes unused seeds after scanning.
+Read-time merging, scan reconciliation, shared UID signature/migration
+policy, pruning, UID persistence and snapshot publication are not
+connected (#702, #803). The pinned Settings
 DEX compiles out the SDK/no-ID exception in the source: SDK libraries
 require a positive app/shared-user ID (#802). An explicit original-image
 test pins the inspected read/registration control flow, and native reader

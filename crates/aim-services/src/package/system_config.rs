@@ -53,7 +53,20 @@ pub struct SystemConfig {
     pub hidden_api_allowlist: Vec<String>,
     /// `mNamedActors`: namespace, actor name and package.
     pub named_actors: Vec<(String, String, String)>,
+    /// OEM names and IDs in ArrayMap order (signed String hash; ties
+    /// retain insertion order). Settings validates their registration.
+    pub oem_defined_uids: Vec<(String, i32)>,
+    pub rejected_oem_uids: Vec<RejectedOemUid>,
     unavailable: Vec<String>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct RejectedOemUid {
+    /// The file relative to the image root.
+    pub path: String,
+    pub name: Option<String>,
+    pub value: Option<String>,
+    pub reason: &'static str,
 }
 
 impl SystemConfig {
@@ -106,6 +119,8 @@ impl SystemConfig {
             }
         }
         c.read_native_libraries(root);
+        c.oem_defined_uids
+            .sort_by_key(|(name, _)| super::info::java_hash(name));
         // readAllPermissionsFromEnvironment.
         if prop("ro.crypto.type").as_deref() == Some("file") {
             c.add(FEATURE_FILE_BASED_ENCRYPTION, 0);
@@ -165,7 +180,7 @@ impl SystemConfig {
                 continue;
             };
             if root.name == "permissions" || root.name == "config" {
-                self.read_root(&root, flags, low_ram, image, prop);
+                self.read_root(&root, flags, low_ram, image, prop, &f);
             }
         }
     }
@@ -177,10 +192,49 @@ impl SystemConfig {
         low_ram: bool,
         image: &Path,
         prop: &dyn Fn(&str) -> Option<String>,
+        file: &Path,
     ) {
         for e in root.children() {
             let name = e.string("name").map(|s| s.into_owned());
             match e.name.as_str() {
+                // This tag is accepted regardless of partition permissions.
+                "oem-defined-uid" => {
+                    let value = e.string("uid").map(|s| s.into_owned());
+                    let reason = if name.as_deref().is_none_or(str::is_empty) {
+                        Some("missing name")
+                    } else if value.as_deref().is_none_or(str::is_empty) {
+                        Some("missing uid")
+                    } else if decimal_uid(value.as_deref().unwrap()).is_none() {
+                        Some("invalid decimal uid")
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = reason {
+                        self.rejected_oem_uids.push(RejectedOemUid {
+                            path: file
+                                .strip_prefix(image)
+                                .unwrap_or(file)
+                                .to_string_lossy()
+                                .into_owned(),
+                            name,
+                            value,
+                            reason,
+                        });
+                        continue;
+                    }
+                    if let (Some(name), Some(uid)) = (
+                        name.filter(|n| !n.is_empty()),
+                        value.as_deref().and_then(decimal_uid),
+                    ) {
+                        if let Some(old) =
+                            self.oem_defined_uids.iter_mut().find(|(n, _)| n == &name)
+                        {
+                            old.1 = uid;
+                        } else {
+                            self.oem_defined_uids.push((name, uid));
+                        }
+                    }
+                }
                 "library" | "apex-library" if flags & ALLOW_LIBS != 0 => {
                     if let Some(library) = Library::read(e, image, prop) {
                         self.libraries.insert(library.name.clone(), library);
@@ -266,6 +320,38 @@ impl SystemConfig {
 /// `XmlUtils.readIntAttribute` and `SystemProperties.getInt`.
 fn int(s: Option<String>) -> Option<i32> {
     s?.trim().parse().ok()
+}
+
+/// Integer.parseInt's decimal syntax: no whitespace, optional ASCII
+/// sign, Character.digit(char, 10) for BMP digits, checked signed range.
+fn decimal_uid(s: &str) -> Option<i32> {
+    const ZEROES: &[u32] = &[
+        0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66,
+        0xde6, 0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90,
+        0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0,
+        0xff10,
+    ];
+    let (negative, digits) = match s.as_bytes().first()? {
+        b'-' => (true, &s[1..]),
+        b'+' => (false, &s[1..]),
+        _ => (false, s),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut value = 0i64;
+    for c in digits.chars() {
+        let digit = ZEROES.iter().find_map(|&zero| {
+            (zero..zero + 10)
+                .contains(&(c as u32))
+                .then(|| c as u32 - zero)
+        })?;
+        value = value.checked_mul(10)?.checked_add(i64::from(digit))?;
+        if value > i64::from(i32::MAX) + i64::from(negative) {
+            return None;
+        }
+    }
+    i32::try_from(if negative { -value } else { value }).ok()
 }
 
 /// `FallbackCategoryProvider.loadFallbacks`: the framework's

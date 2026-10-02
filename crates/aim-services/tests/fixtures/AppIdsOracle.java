@@ -2,6 +2,16 @@ package com.android.server.pm;
 
 public final class AppIdsOracle {
     public static void main(String[] args) {
+        if (args.length != 0 && args[0].equals("oem")) {
+            com.android.server.SystemConfig config = new com.android.server.SystemConfig(false);
+            for (int i = 1; i < args.length; i++) {
+                config.readPermissions(android.util.Xml.newPullParser(), new java.io.File(args[i]), 0);
+            }
+            for (java.util.Map.Entry<String, Integer> entry : config.getOemDefinedUids().entrySet()) {
+                System.out.println(entry.getKey() + " " + entry.getValue());
+            }
+            return;
+        }
         AppIdSettingMap ids = new AppIdSettingMap();
         SettingBase a = new SharedUserSetting("a", 1, 8);
         SettingBase b = new SharedUserSetting("b", 1, 8);
