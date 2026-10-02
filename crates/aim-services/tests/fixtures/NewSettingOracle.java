@@ -2,6 +2,10 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("native-copy")) {
+            nativeCopy();
+            return;
+        }
         if (args.length != 0 && args[0].equals("abi-lifecycle")) {
             abiLifecycle(java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
             return;
@@ -220,6 +224,73 @@ public final class NewSettingOracle {
                 System.out.println(com.android.internal.content.NativeLibraryHelper.hasRenderscriptBitcode(handle));
             } catch (java.io.IOException error) {
                 System.out.println("error");
+            }
+        }
+    }
+
+    private static void nativeCopy() throws Exception {
+        var localTime = java.time.LocalDateTime.of(2025, 1, 2, 3, 4, 6);
+        System.out.println("clock " + localTime.atZone(java.time.ZoneId.systemDefault()).toEpochSecond());
+        int cases = 0;
+        for (int archive = 0; archive < 6; archive++) {
+            for (boolean extract : new boolean[] {false, true}) {
+                for (boolean debug : new boolean[] {false, true}) {
+                    for (boolean disabled : new boolean[] {false, true}) {
+                        int id = cases++;
+                        String name = archive == 4 ? "lib/arm64-v8a/wrap.sh" :
+                            archive == 5 ? "lib/x86/libx.so" : "lib/arm64-v8a/libx.so";
+                        String file = archive == 4 ? "wrap.sh" : "libx.so";
+                        byte[] payload = "native payload".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                        int method = archive == 0 || archive >= 4 ? 8 : 0;
+                        byte[] compressed = payload;
+                        if (method == 8) {
+                            var compressor = new java.util.zip.Deflater(6, true);
+                            compressor.setInput(payload); compressor.finish();
+                            byte[] buffer = new byte[128]; int size = compressor.deflate(buffer);
+                            compressed = java.util.Arrays.copyOf(buffer, size); compressor.end();
+                        }
+                        int offset = archive == 2 ? 4096 : archive == 3 ? 16384 : 100;
+                        byte[] names = name.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                        var crc = new java.util.zip.CRC32(); crc.update(payload);
+                        int central = offset + compressed.length;
+                        var zip = java.nio.ByteBuffer.allocate(central + 46 + names.length + 22)
+                            .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                        int when = (((2025 - 1980) << 9) | (1 << 5) | 2) << 16 | (3 << 11) | (4 << 5) | 3;
+                        zip.putInt(0, 0x04034b50); zip.putShort(4, (short)20); zip.putShort(8, (short)method);
+                        zip.putInt(10, when); zip.putInt(14, (int)crc.getValue());
+                        zip.putInt(18, compressed.length); zip.putInt(22, payload.length);
+                        zip.putShort(26, (short)names.length); zip.putShort(28, (short)(offset - 30 - names.length));
+                        zip.position(30); zip.put(names); zip.position(offset); zip.put(compressed);
+                        zip.putInt(central, 0x02014b50); zip.putShort(central + 4, (short)20); zip.putShort(central + 6, (short)20);
+                        zip.putShort(central + 10, (short)method); zip.putInt(central + 12, when);
+                        zip.putInt(central + 16, (int)crc.getValue()); zip.putInt(central + 20, compressed.length);
+                        zip.putInt(central + 24, payload.length); zip.putShort(central + 28, (short)names.length);
+                        zip.position(central + 46); zip.put(names);
+                        int end = zip.position(); zip.putInt(end, 0x06054b50);
+                        zip.putShort(end + 8, (short)1); zip.putShort(end + 10, (short)1);
+                        zip.putInt(end + 12, 46 + names.length); zip.putInt(end + 16, central);
+                        String path = "/data/local/tmp/native-copy-" + id + ".zip";
+                        java.nio.file.Files.write(java.nio.file.Path.of(path), zip.array());
+                        var directory = new java.io.File("/data/local/tmp/native-copy-original-" + id);
+                        if (!directory.mkdir()) throw new java.io.IOException("native directory creation failed");
+                        try (var handle = com.android.internal.content.NativeLibraryHelper.Handle.create(
+                                java.util.List.of(path), false, extract, debug, disabled)) {
+                            int first = com.android.internal.content.NativeLibraryHelper.copyNativeBinaries(handle, directory, "arm64-v8a");
+                            var output = new java.io.File(directory, file);
+                            Object key = output.exists() ? java.nio.file.Files.readAttributes(output.toPath(),
+                                java.nio.file.attribute.BasicFileAttributes.class).fileKey() : null;
+                            int second = com.android.internal.content.NativeLibraryHelper.copyNativeBinaries(handle, directory, "arm64-v8a");
+                            boolean reused = false;
+                            if (output.exists()) {
+                                if (key == null) throw new IllegalStateException("original inode unavailable");
+                                reused = key.equals(java.nio.file.Files.readAttributes(output.toPath(),
+                                    java.nio.file.attribute.BasicFileAttributes.class).fileKey());
+                            }
+                            System.out.println("case " + id + " " + path + " " + first + " " + second + " "
+                                + output.exists() + " " + output.lastModified() + " " + output.length() + " " + reused);
+                        }
+                    }
+                }
             }
         }
     }

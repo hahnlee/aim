@@ -258,6 +258,7 @@ dependencies = [
  "aim-service-aidl",
  "aim-storage",
  "android-image-extract",
+ "crc32fast",
  "dsa",
  "flate2",
  "libc",

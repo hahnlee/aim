@@ -1,6 +1,7 @@
 //! NativeLibraryHelper.findSupportedAbi/hasRenderscriptBitcode and
 //! ApkParsing.ValidLibraryPathLastSlash at android-16.0.0_r1 (#810).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
+use super::NativeLibraryInstallError;
 use android_image_extract::{source::ReadAt, zip::Archive};
 use std::collections::BTreeSet;
 
@@ -29,6 +30,7 @@ pub struct NativeLibraryInstallPolicy {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeLibraryEntry {
+    pub index: usize,
     pub name: Vec<u8>,
     pub offset: u64,
     pub extract: bool,
@@ -41,39 +43,48 @@ impl NativeLibraryInstallPolicy {
         self,
         source: &dyn ReadAt,
         abi: &str,
-    ) -> Result<Vec<NativeLibraryEntry>, String> {
+    ) -> Result<Vec<NativeLibraryEntry>, NativeLibraryInstallError> {
+        let invalid = |message| NativeLibraryInstallError::new(-2, message);
         if self.page_size < 4096 || !self.page_size.is_power_of_two() {
-            return Err("invalid guest page size".into());
+            return Err(NativeLibraryInstallError::new(
+                -110,
+                "invalid guest page size",
+            ));
         }
-        let archive = Archive::open(source).map_err(|e| e.to_string())?;
+        let archive = Archive::open(source).map_err(|e| invalid(e.to_string()))?;
         let mut entries = Vec::new();
-        for entry in &archive.entries {
+        for (index, entry) in archive.entries.iter().enumerate() {
             if entry.name.contains(&0) {
-                return Err("APK ZIP entry name contains NUL".into());
+                return Err(invalid("APK ZIP entry name contains NUL".into()));
             }
             if entry.name.len() >= 4096 || library_abi(&entry.name) != Some(abi.as_bytes()) {
                 continue;
             }
             let file = entry.name.rsplit(|b| *b == b'/').next().unwrap();
-            let offset = archive.data_offset(entry).map_err(|e| e.to_string())?;
+            let offset = archive
+                .data_offset(entry)
+                .map_err(|e| invalid(e.to_string()))?;
             let mut extract = self.extract || (self.debuggable && file == b"wrap.sh");
             if !extract {
                 if entry.method != 0 {
-                    return Err("native library is compressed with extractNativeLibs=false".into());
+                    return Err(invalid(
+                        "native library is compressed with extractNativeLibs=false".into(),
+                    ));
                 }
                 // Also reject inconsistent stored lengths before direct mapping.
-                archive.stored(entry).map_err(|e| e.to_string())?;
+                archive.stored(entry).map_err(|e| invalid(e.to_string()))?;
                 if offset % self.page_size != 0 {
                     extract = self.page_size == 16384
                         && !self.compat_16kb_disabled
                         && !self.manifest_compat_disabled
                         && offset % 4096 == 0;
                     if !extract {
-                        return Err("native library is not guest-page-aligned".into());
+                        return Err(invalid("native library is not guest-page-aligned".into()));
                     }
                 }
             }
             entries.push(NativeLibraryEntry {
+                index,
                 name: entry.name.clone(),
                 offset,
                 extract,
@@ -141,26 +152,32 @@ impl crate::package::write::Apks {
         pkg: &crate::package::pkg::AndroidPackage,
         abi: &str,
         policy: NativeLibraryInstallPolicy,
-    ) -> Result<Vec<(String, Vec<NativeLibraryEntry>)>, String> {
+    ) -> Result<Vec<(String, Vec<NativeLibraryEntry>)>, NativeLibraryInstallError> {
         let base = pkg
             .base_apk_path
             .as_deref()
-            .ok_or("missing base APK path")?;
+            .ok_or_else(|| NativeLibraryInstallError::new(-110, "missing base APK path"))?;
         let mut paths = vec![base];
         if let Some(splits) = &pkg.split_code_paths {
             for split in splits {
-                paths.push(split.as_deref().ok_or("null split APK path")?);
+                paths.push(
+                    split.as_deref().ok_or_else(|| {
+                        NativeLibraryInstallError::new(-110, "null split APK path")
+                    })?,
+                );
             }
         }
         paths
             .into_iter()
             .map(|path| {
-                let host = (self.files)(path).ok_or_else(|| format!("unmapped APK: {path}"))?;
+                let host = (self.files)(path).ok_or_else(|| {
+                    NativeLibraryInstallError::new(-2, format!("unmapped APK: {path}"))
+                })?;
                 let source = android_image_extract::source::FileSource::open(&host)
-                    .map_err(|e| format!("{path}: {e}"))?;
-                let entries = policy
-                    .inspect(&source, abi)
-                    .map_err(|e| format!("{path}: {e}"))?;
+                    .map_err(|e| NativeLibraryInstallError::new(-2, format!("{path}: {e}")))?;
+                let entries = policy.inspect(&source, abi).map_err(|e| {
+                    NativeLibraryInstallError::new(e.code, format!("{path}: {}", e.message))
+                })?;
                 Ok((path.to_owned(), entries))
             })
             .collect()

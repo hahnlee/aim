@@ -676,6 +676,149 @@ fn new_settings_match_the_original_runtime() {
     }
     assert_eq!(original.next(), None);
     eprintln!("native/original ZIP ABI and RenderScript inventory match 17 archive cases");
+    let page_size: u64 =
+        String::from_utf8(run(boot.command().args(["shell", "getconf", "PAGESIZE"])).stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+    let copied = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "native-copy",
+    ]));
+    let output = String::from_utf8(copied.stdout).unwrap();
+    let mut original = output.lines();
+    let zip_seconds: u64 = original
+        .next()
+        .unwrap()
+        .strip_prefix("clock ")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut cases = 0;
+    for archive in 0..6 {
+        for extract in [false, true] {
+            for debuggable in [false, true] {
+                for manifest_compat_disabled in [false, true] {
+                    let line = original.next().unwrap();
+                    let columns: Vec<_> = line.split_whitespace().collect();
+                    assert_eq!(columns[0], "case");
+                    assert_eq!(columns[1].parse::<usize>().unwrap(), cases);
+                    let path = columns[2];
+                    let policy = NativeLibraryInstallPolicy {
+                        page_size,
+                        extract,
+                        debuggable,
+                        manifest_compat_disabled,
+                        compat_16kb_disabled: properties
+                            .get("pm.16kb.app_compat.disabled")
+                            .is_some_and(|v| {
+                                matches!(v.as_str(), "1" | "true" | "y" | "yes" | "on")
+                            }),
+                    };
+                    let package = AndroidPackage {
+                        base_apk_path: Some(path.into()),
+                        ..Default::default()
+                    };
+                    let plan = zip_apks.native_library_install_plan(&package, "arm64-v8a", policy);
+                    assert_eq!(
+                        plan.as_ref().map(|_| 1).unwrap_or_else(|e| e.code),
+                        columns[3].parse::<i32>().unwrap(),
+                        "{line}"
+                    );
+                    let source = android_image_extract::source::FileSource::open(
+                        &(zip_apks.files)(path).unwrap(),
+                    )
+                    .unwrap();
+                    let directory = boot
+                        .data
+                        .join(format!("data/local/tmp/native-copy-native-{cases}"));
+                    fs::create_dir(&directory).unwrap();
+                    let clock = |dos| {
+                        assert_eq!(
+                            dos,
+                            (((2025 - 1980) << 9 | 1 << 5 | 2) << 16) | (3 << 11) | (4 << 5) | 3
+                        );
+                        // The fixture's clock converts DOS local time in the guest's timezone.
+                        Ok(std::time::UNIX_EPOCH + Duration::from_secs(zip_seconds))
+                    };
+                    let owner = aim_storage::guest_inode::GuestInode {
+                        uid: Some(0),
+                        gid: Some(0),
+                        mode: None,
+                    };
+                    let first = policy.copy_to(&source, "arm64-v8a", &directory, owner, &clock);
+                    assert_eq!(
+                        first.as_ref().map(|_| 1).unwrap_or_else(|e| e.code),
+                        columns[3].parse::<i32>().unwrap(),
+                        "{line}"
+                    );
+                    let second = policy.copy_to(&source, "arm64-v8a", &directory, owner, &clock);
+                    assert_eq!(
+                        second.as_ref().map(|_| 1).unwrap_or_else(|e| e.code),
+                        columns[4].parse::<i32>().unwrap(),
+                        "{line}"
+                    );
+                    let file = if archive == 4 { "wrap.sh" } else { "libx.so" };
+                    let native = directory.join(file);
+                    let exists = columns[5].parse::<bool>().unwrap();
+                    assert_eq!(native.exists(), exists, "{line}");
+                    if exists {
+                        assert_eq!(first.unwrap().extracted.len(), 1, "{line}");
+                        assert_eq!(second.unwrap().reused.len(), 1, "{line}");
+                        assert!(
+                            columns[8].parse::<bool>().unwrap(),
+                            "{line}: original replaced matching file"
+                        );
+                        let expected = boot.data.join(format!(
+                            "data/local/tmp/native-copy-original-{cases}/{file}"
+                        ));
+                        assert_eq!(
+                            fs::read(&native).unwrap(),
+                            fs::read(&expected).unwrap(),
+                            "{line}"
+                        );
+                        assert_eq!(
+                            fs::metadata(&native)
+                                .unwrap()
+                                .modified()
+                                .unwrap()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis(),
+                            columns[6].parse::<u128>().unwrap(),
+                            "{line}"
+                        );
+                        assert_eq!(
+                            fs::metadata(&native).unwrap().len(),
+                            columns[7].parse::<u64>().unwrap(),
+                            "{line}"
+                        );
+                        use std::os::unix::fs::PermissionsExt;
+                        assert_eq!(
+                            fs::metadata(&native).unwrap().permissions().mode() & 0o777,
+                            0o755
+                        );
+                    }
+                    assert_eq!(
+                        fs::read_dir(&directory).unwrap().count(),
+                        usize::from(exists),
+                        "{line}"
+                    );
+                    cases += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 48);
+    assert_eq!(original.next(), None);
+    eprintln!(
+        "native/original ZIP admission, extraction and reuse match {cases} cases at {page_size}-byte guest pages"
+    );
     let abi_policy = AbiPolicy::from_platform(&apks.platform, &all_abis, &supported_abis, &|key| {
         properties.get(key).cloned()
     })

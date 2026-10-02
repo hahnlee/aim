@@ -433,11 +433,21 @@ can extract 4 KiB-aligned entries unless disabled by the device or manifest.
 Debuggable `wrap.sh` always requires extraction. Local-header corruption,
 encrypted entries, inconsistent stored lengths and NUL names reject.
 `Apks::native_library_install_plan` checks all base/split APKs before returning
-their extraction decisions without writing APKs or native files. Package unit
-tests pass (194, 3.00s), including 4/16/64 KiB admission, disabled compatibility,
-debug wrappers and corrupt headers. This is an admission plan, not a completed
-installation; extraction, ELF alignment, original-runtime comparison of these
-admission decisions and boot/install owner integration remain #810/#702.
+their extraction decisions. `NativeLibraryInstallPolicy::copy_to` now extracts
+selected entries into the caller's checked native directory: size/CRC/mtime
+matches reuse the existing regular file; changed files are decoded and CRC
+checked into an exclusive temporary file, synced, assigned ZIP modification
+time, 0755 mode and guest ownership, then renamed. Failures preserve the old
+file and remove temporary output; installation error codes remain typed.
+DOS time conversion requires the guest clock owner, avoiding host timezone
+assumptions. APKs remain read-only. Package units pass (196, 3.47s), including
+corrupt-payload rollback, metadata and reuse. The disposable original runtime
+matches admission errors, extraction content/mtime and repeated-copy reuse in
+48 combinations at 16 KiB guest pages (2026-10-03, 78.88s); all earlier checks,
+Settings launch and owned cleanup pass. Java image API linkage passes (19.4s).
+ELF alignment, guest-clock delivery, complete base/split and multiarch copy
+orchestration, and boot/install owner integration remain #810/#702; native PMS
+is not activated.
 
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained
