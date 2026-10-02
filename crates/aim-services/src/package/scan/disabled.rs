@@ -57,7 +57,7 @@ pub enum UpdatedSystemSource {
 
 #[derive(Debug)]
 pub struct UpdatedSystemScan {
-    active: crate::package::settings::Package,
+    pub(super) active: crate::package::settings::Package,
     pub factory: DisabledSystemMetadata,
     pub source: UpdatedSystemSource,
 }
@@ -130,6 +130,18 @@ impl SigningScan {
         incremental: bool,
         domain_set_id: [u8; 16],
     ) -> Result<crate::package::settings::Package, SigningError> {
+        self.restore_updated_system_setting_with_id(selected, resources, incremental, &|| {
+            Ok(domain_set_id)
+        })
+    }
+
+    pub(super) fn restore_updated_system_setting_with_id(
+        &mut self,
+        selected: &UpdatedSystemScan,
+        resources: &crate::package::owner::resources::CodeResources,
+        incremental: bool,
+        new_domain_id: &dyn Fn() -> Result<[u8; 16], String>,
+    ) -> Result<crate::package::settings::Package, SigningError> {
         let factory = &selected.factory.record.settings;
         let reject = |message: String| {
             SigningError::Rejected(Error {
@@ -164,6 +176,7 @@ impl SigningScan {
         resources
             .clean(&active.code_path, incremental)
             .map_err(reject)?;
+        let domain_set_id = new_domain_id().map_err(reject)?;
         self.enable_system_setting(&factory.name, domain_set_id)
             .ok_or_else(|| reject("factory setting could not reserve its original UID".into()))
     }

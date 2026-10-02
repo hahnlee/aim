@@ -243,7 +243,18 @@ the factory setting only after cleanup succeeds. The original signed
 framework/GSF fixture actually deletes a disposable monolithic update and
 completes the active factory rescan, preserving UID/users and clearing the
 updated-system bit. Stale selection and incremental errors preserve code and
-settings. Filesystem tests cover directory order, parent/cache cleanup, app
+settings. `complete_updated_system_boot` now consumes that selection and raw
+image code, checks active/factory snapshots and identity/path/version/signers,
+then either retains data without an active image candidate or runs cleanup,
+domain-ID allocation, setting enable, fresh non-update manifest/library policy
+and complete active metadata scanning. ABI inputs reference the newly enabled
+setting rather than the stale data candidate. The fixture also checks that
+retaining data allocates no domain ID, incremental rejection allocates none,
+mismatched raw code rejects before deletion, and post-cleanup scan failure
+retains deletion/enabled settings without committing candidate metadata. The
+full image/data loop, publication and failure persistence remain pending;
+this is the integrated updated-system branch, not a complete native boot.
+Filesystem tests cover directory order, parent/cache cleanup, app
 data preservation and partial installer failure/retry; the directory backend
 in those tests deletes disposable files, not the original installd daemon.
 A native Binder client test now sends generated rmPackageDir requests through
@@ -260,9 +271,9 @@ old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 301 units pass (3.07s). The original signed framework/GSF fixture passes
-(22.53s), including real disposable file cleanup, setting enable and the factory
-active rescan. All eight
+All 301 units pass (3.02s). The original signed framework/GSF fixture passes
+(24.61s), including the integrated source completion, real disposable cleanup,
+setting enable, factory active rescan and failures before/after cleanup. All eight
 original-APK scan-input tests passed before this settings transition (5.69s). The Java image
 API linkage build passes (13.2s). This is the initial system APK phase, not a
 complete native boot or template: native APEX preparation, image/data version

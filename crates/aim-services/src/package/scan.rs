@@ -32,6 +32,8 @@ pub use abi::{
 mod boot;
 mod completion;
 mod disabled;
+mod updated_boot;
+pub use updated_boot::{UpdatedSystemBootInputs, UpdatedSystemBootOutcome};
 pub use boot::{FirstBootSystemInputs, SystemImageScan};
 pub use disabled::{DisabledSystemMetadata, UpdatedSystemScan, UpdatedSystemSource};
 mod setting;

@@ -247,7 +247,7 @@ fn initial_stopped(pkg: &AndroidPackage, config: &SystemConfig, enabled: bool) -
         })
 }
 
-fn sdk_libraries(pkg: &AndroidPackage) -> Result<Vec<UsesSdkLibrary>, String> {
+pub(super) fn sdk_libraries(pkg: &AndroidPackage) -> Result<Vec<UsesSdkLibrary>, String> {
     let versions = pkg
         .uses_sdk_libraries_versions_major
         .as_deref()
@@ -272,7 +272,7 @@ fn sdk_libraries(pkg: &AndroidPackage) -> Result<Vec<UsesSdkLibrary>, String> {
         .collect())
 }
 
-fn static_libraries(pkg: &AndroidPackage) -> Result<Vec<(String, i64)>, String> {
+pub(super) fn static_libraries(pkg: &AndroidPackage) -> Result<Vec<(String, i64)>, String> {
     let versions = pkg
         .uses_static_libraries_versions
         .as_deref()

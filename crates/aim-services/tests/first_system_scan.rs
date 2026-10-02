@@ -388,6 +388,17 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         };
         inputs
     };
+    let raw_factory = Image::load(&apks, &[]).unwrap().packages.remove(1);
+    let restore_inputs = || aim_services::package::scan::UpdatedSystemBootInputs {
+        completion: completion(),
+        compatibility: &compatibility,
+        platform: Some(&scan.packages[0].candidate.record.signing),
+        vendor_sdk: 36,
+        remove_test_base: None,
+        resources: &resources,
+        incremental: false,
+        new_domain_id: &domain_ids,
+    };
     use aim_services::package::scan::UpdatedSystemSource::{KeepData, RestoreFactory};
     for strict in [false, true] {
         let mut policy = SystemConfig::default();
@@ -477,6 +488,25 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 Some(&selected.factory.users)
             );
             assert_eq!(selected.factory.users[&0].first_install_time, -1);
+            if source == KeepData {
+                let before = owner.clone();
+                let next_domain = next_id.load(Ordering::SeqCst);
+                assert!(matches!(
+                    owner
+                        .complete_updated_system_boot(
+                            &selected,
+                            &raw_factory,
+                            &saved_users,
+                            None,
+                            &apks,
+                            restore_inputs()
+                        )
+                        .unwrap(),
+                    aim_services::package::scan::UpdatedSystemBootOutcome::KeepData
+                ));
+                assert_eq!(owner, before);
+                assert_eq!(next_id.load(Ordering::SeqCst), next_domain);
+            }
             if source == RestoreFactory {
                 let active = owner
                     .settings
@@ -512,33 +542,88 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 );
                 assert_eq!(owner, before);
                 assert!(disposable_code.exists());
-                let enabled = owner
-                    .restore_updated_system_setting(&selected, &resources, false, [98; 16])
-                    .unwrap();
-                assert!(!disposable_code.exists());
-                assert_eq!(enabled.code_path, active.code_path);
-                assert_eq!(enabled.domain_set_id, active.domain_set_id);
-                assert_eq!(enabled.signatures, active.signatures);
-                assert_eq!(enabled.version_code, saved.version_code);
-                assert_eq!(owner.identities, ids);
-                assert!(owner.disabled_user_states(&saved.name).is_none());
-                let mut restored_inputs = completion();
-                restored_inputs.context.mode = AbiScanMode::Existing {
-                    first_boot_or_upgrade: false,
-                    old_was_stub: false,
-                    saved: Some(&enabled),
+                let before = owner.clone();
+                let domain_before = next_id.load(Ordering::SeqCst);
+                let mut incremental_inputs = restore_inputs();
+                incremental_inputs.incremental = true;
+                assert!(
+                    owner
+                        .complete_updated_system_boot(
+                            &selected,
+                            &raw_factory,
+                            &saved_users,
+                            None,
+                            &apks,
+                            incremental_inputs
+                        )
+                        .is_err()
+                );
+                assert_eq!(owner, before);
+                assert_eq!(next_id.load(Ordering::SeqCst), domain_before);
+                assert!(disposable_code.exists());
+                let mut other_code = aim_services::package::scan::Code {
+                    location: raw_factory.location.clone(),
+                    parsed: raw_factory.parsed.clone(),
+                    signing: raw_factory.signing.clone(),
                 };
-                let restored = owner
-                    .scan_existing(
-                        &factory_code,
-                        update(),
+                other_code.parsed.version_code += 1;
+                assert!(
+                    owner
+                        .complete_updated_system_boot(
+                            &selected,
+                            &other_code,
+                            &saved_users,
+                            None,
+                            &apks,
+                            restore_inputs()
+                        )
+                        .is_err()
+                );
+                assert_eq!(owner, before);
+                assert!(disposable_code.exists());
+                let mut failed = owner.clone();
+                assert!(
+                    failed
+                        .complete_updated_system_boot(
+                            &selected,
+                            &raw_factory,
+                            &saved_users,
+                            None,
+                            &unreadable,
+                            restore_inputs()
+                        )
+                        .is_err()
+                );
+                assert!(!disposable_code.exists());
+                assert!(failed.settings.disabled_system_packages.is_empty());
+                let after_cleanup = failed
+                    .settings
+                    .packages
+                    .iter()
+                    .find(|p| p.name == saved.name)
+                    .unwrap();
+                assert_eq!(after_cleanup.code_path, active.code_path);
+                assert_eq!(after_cleanup.version_code, saved.version_code);
+                assert_eq!(failed.identities, ids);
+                assert_eq!(failed.libraries, owner.libraries);
+                std::fs::write(&disposable_code, b"disposable replaced code").unwrap();
+                let result = owner
+                    .complete_updated_system_boot(
+                        &selected,
+                        &raw_factory,
                         &saved_users,
                         None,
-                        None,
                         &apks,
-                        restored_inputs,
+                        restore_inputs(),
                     )
                     .unwrap();
+                let aim_services::package::scan::UpdatedSystemBootOutcome::Factory(restored) =
+                    result
+                else {
+                    panic!("factory restoration retained data");
+                };
+                assert!(!disposable_code.exists());
+                assert_eq!(owner.identities.ids, ids.ids);
                 assert_eq!(
                     restored.candidate.record.settings.code_path,
                     saved.code_path
