@@ -479,6 +479,91 @@ fn new_settings_match_the_original_runtime() {
         .split(',')
         .next()
         .unwrap();
+    let abi_list = |key| {
+        properties
+            .get(key)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.split(',').map(str::to_owned).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let bit32 = abi_list("ro.product.cpu.abilist32");
+    let bit64 = abi_list("ro.product.cpu.abilist64");
+    let supported_abis = SupportedAbis {
+        bit32: &bit32,
+        bit64: &bit64,
+    };
+    let inventory = aim_paths::derived_image();
+    let bundled_apks = aim_services::package::write::Apks {
+        platform: aim_services::package::parse::Platform::load(&inventory, Default::default())
+            .unwrap(),
+        files: Box::new(move |p| Some(inventory.join(p.trim_start_matches('/')))),
+    };
+    let mut bundled_cases = 0;
+    for (code_path, present) in [
+        ("/system/app/PrintSpooler", true),
+        ("/system/priv-app/BuiltInPrintService", true),
+        ("/system/priv-app/DeviceAsWebcam", true),
+        // The overlay removes this original app and its unpacked libraries.
+        ("/system_ext/priv-app/MultiDisplayProvider", false),
+        ("/product/app/Camera2", true),
+    ] {
+        let parsed = aim_services::package::parse::parse(
+            &root.join(code_path.trim_start_matches('/')),
+            code_path,
+            aim_services::package::parse::PARSE_IS_SYSTEM_DIR,
+            &apks.platform,
+        )
+        .unwrap()
+        .to_cache_entry();
+        let pkg = AndroidPackage::read_cache_entry(&parsed.bytes).unwrap();
+        fs::write(
+            boot.data.join("data/local/tmp/bundled-abi.cache"),
+            parsed.bytes,
+        )
+        .unwrap();
+        let actual = bundled_apks
+            .bundled_abis(
+                &pkg,
+                &NativeLibraryEnvironment {
+                    preferred_abi,
+                    app_lib32_install_dir: "/data/app-lib",
+                    code_is_directory: true,
+                    canonical_source: None,
+                },
+                &supported_abis,
+            )
+            .unwrap();
+        let original = run(boot.command().args([
+            "shell",
+            "/system/bin/app_process",
+            "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+            "/system/bin",
+            "com.android.server.pm.NewSettingOracle",
+            "bundled-abis",
+            "/data/local/tmp/bundled-abi.cache",
+        ]));
+        assert_eq!(
+            String::from_utf8(original.stdout).unwrap(),
+            format!(
+                "{}\n{}\n",
+                actual.primary.as_deref().unwrap_or("null"),
+                actual.secondary.as_deref().unwrap_or("null")
+            ),
+            "bundled ABI: {code_path}"
+        );
+        assert_eq!(
+            actual.primary.as_ref(),
+            if present { bit64.first() } else { None },
+            "derived 64-bit inventory: {code_path}"
+        );
+        assert_eq!(actual.secondary, None);
+        assert!(!actual.multi_arch_mismatch);
+        bundled_cases += 1;
+    }
+    assert_eq!(bundled_cases, 5);
+    eprintln!(
+        "native/original bundled ABI inventory matches {bundled_cases} image apps (4 present, 1 removed)"
+    );
     let mut path_cases = 0;
     for code in [
         "/system/app/Fixture",
@@ -803,6 +888,35 @@ fn new_settings_match_the_original_runtime() {
             None,
         )
         .unwrap();
+    let abi_environment = NativeLibraryEnvironment {
+        preferred_abi,
+        app_lib32_install_dir: "/data/app-lib",
+        code_is_directory: root.join(path.trim_start_matches('/')).is_dir(),
+        canonical_source: None,
+    };
+    let abis = bundled_apks
+        .bundled_abis(&code.parsed, &abi_environment, &supported_abis)
+        .unwrap();
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "bundled-abis",
+        "/data/local/tmp/code-time.cache",
+    ]));
+    assert_eq!(
+        String::from_utf8(original.stdout).unwrap(),
+        format!(
+            "{}\n{}\n",
+            abis.primary.as_deref().unwrap_or("null"),
+            abis.secondary.as_deref().unwrap_or("null")
+        )
+    );
+    assert!(!abis.multi_arch_mismatch);
+    abis.apply(&mut code.parsed);
+    eprintln!("native/original bundled GSF ABI inventory matches");
     let paths = NativeLibraryPaths::derive(
         &code.parsed,
         &NativeLibraryEnvironment {

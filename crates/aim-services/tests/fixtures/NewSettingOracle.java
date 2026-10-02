@@ -2,6 +2,14 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("bundled-abis")) {
+            var pkg = com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
+            var abis = new PackageAbiHelperImpl().getBundledAppAbis(pkg);
+            System.out.println(abis.primary);
+            System.out.println(abis.secondary);
+            return;
+        }
         if (args.length != 0 && args[0].equals("native-paths")) {
             var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
                 com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(

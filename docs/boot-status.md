@@ -57,7 +57,7 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (181 package unit tests pass). These are not
+shared snapshot publication (183 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
@@ -337,12 +337,21 @@ A disposable original-PMS runtime compares 72 path/system/update/selected-ABI
 combinations with original PackageAbiHelperImpl, then checks the actual GSF paths
 and propagates the calculated root into its accepted setting candidate. Existing
 24 shared-UID sequences, 48 library cases, manifest/constructor/update/time checks,
-Settings launch and owned cleanup pass too (2026-10-03, 79.72s). Java original API
-linkage passes (13.7s), all 181 package unit tests pass (11.34s), and focused path
+Settings launch and owned cleanup pass too (2026-10-03, 74.03s). Java original API
+linkage passes (13.7s), all 183 package unit tests pass (11.55s), and focused path
 coverage checks partition roots, unknown-root/invalid-ABI rejection and secondary
-paths. This does not select ABIs from APK ZIP contents or bundled lib inventory,
-extract native libraries, adjust shared-UID ABIs or activate native PMS; those
-owners and complete boot-scan wiring remain #810/#702.
+paths. `BundledAbis` now selects primary/secondary ABIs from the selected image's
+unpacked library inventory and ordered 32/64-bit ABI lists, preserving the
+preferred ISA and reporting both-ABI/non-multiarch packages without discarding
+either ABI. Missing/unreadable inventory inputs reject before mutation. The
+same runtime compares four image apps with real arm64 libraries and an original
+app removed by the overlay against original PackageAbiHelperImpl, then derives
+GSF ABIs and paths before accepting its setting metadata. Native inventory reads
+the actual derived image used by that boot, not the original image whose removed
+libraries differ. Unit coverage also checks monolithic/cluster, 32/64/both/neither,
+preference, multiarch and error branches. APK ZIP ABI selection/extraction,
+shared-UID ABI adjustment and complete boot-scan wiring remain #810/#702; native
+PMS is not activated.
 
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained

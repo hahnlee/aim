@@ -90,6 +90,122 @@ impl NativeLibraryPaths {
     }
 }
 
+/// The selected image's Build.SUPPORTED_{32,64}_BIT_ABIS in preference order.
+pub struct SupportedAbis<'a> {
+    pub bit32: &'a [String],
+    pub bit64: &'a [String],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundledAbis {
+    pub primary: Option<String>,
+    pub secondary: Option<String>,
+    /// The original reports this condition but still selects both ABIs.
+    pub multi_arch_mismatch: bool,
+}
+
+impl BundledAbis {
+    /// PackageAbiHelperImpl.getBundledAppAbis: inspect unpacked image libraries,
+    /// without opening the APK ZIP or copying a saved PackageSetting ABI.
+    pub fn derive(
+        pkg: &AndroidPackage,
+        env: &NativeLibraryEnvironment<'_>,
+        supported: &SupportedAbis<'_>,
+        exists: &dyn Fn(&str) -> Result<bool, String>,
+    ) -> Result<Self, String> {
+        let code = guest_path(pkg.path.as_deref().ok_or("missing package code path")?)?;
+        let source = guest_path(
+            pkg.base_apk_path
+                .as_deref()
+                .ok_or("missing base APK path")?,
+        )?;
+        let apk_root = bundled_root(&source, env.canonical_source)?;
+        let first32 = supported.bit32.first().map(String::as_str);
+        let first64 = supported.bit64.first().map(String::as_str);
+        let (has32, has64) = if code.ends_with(".apk") {
+            let name = code.rsplit('/').next().unwrap();
+            let name = if env.code_is_directory {
+                name
+            } else {
+                &name[..name.len() - 4]
+            };
+            let has64 = exists(&join(&join(&apk_root, "lib64"), name))?;
+            let has32 = exists(&join(&join(&apk_root, "lib"), name))?;
+            (has32, has64)
+        } else {
+            let root = join(&code, "lib");
+            let check = |abi: Option<&str>| -> Result<bool, String> {
+                match abi.filter(|a| !a.is_empty()) {
+                    Some(abi) => exists(&join(&root, instruction_set(abi)?)),
+                    None => Ok(false),
+                }
+            };
+            let has64 = check(first64)?;
+            let has32 = check(first32)?;
+            (has32, has64)
+        };
+        let get = |abi: Option<&str>, bits| -> Result<String, String> {
+            abi.map(str::to_owned)
+                .ok_or_else(|| format!("bundled {bits}-bit libraries without supported ABI"))
+        };
+        let (primary, secondary) = match (has32, has64) {
+            (false, false) => (None, None),
+            (true, false) => (Some(get(first32, 32)?), None),
+            (false, true) => (Some(get(first64, 64)?), None),
+            (true, true) => {
+                let narrow = get(first32, 32)?;
+                let wide = get(first64, 64)?;
+                if matches!(
+                    instruction_set(env.preferred_abi)?,
+                    "arm64" | "x86_64" | "riscv64"
+                ) {
+                    (Some(wide), Some(narrow))
+                } else {
+                    (Some(narrow), Some(wide))
+                }
+            }
+        };
+        Ok(Self {
+            primary,
+            secondary,
+            multi_arch_mismatch: has32
+                && has64
+                && !pkg.is(crate::package::pkg::booleans::MULTI_ARCH),
+        })
+    }
+
+    pub fn apply(self, pkg: &mut AndroidPackage) {
+        pkg.primary_cpu_abi = self.primary;
+        pkg.secondary_cpu_abi = self.secondary;
+    }
+}
+
+impl crate::package::write::Apks {
+    pub fn bundled_abis(
+        &self,
+        pkg: &AndroidPackage,
+        env: &NativeLibraryEnvironment<'_>,
+        supported: &SupportedAbis<'_>,
+    ) -> Result<BundledAbis, String> {
+        BundledAbis::derive(pkg, env, supported, &|path| {
+            let file =
+                (self.files)(path).ok_or_else(|| format!("unmapped library inventory: {path}"))?;
+            match std::fs::metadata(file) {
+                Ok(_) => Ok(true),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    Ok(false)
+                }
+                Err(e) => Err(format!("library inventory {path}: {e}")),
+            }
+        })
+    }
+}
+
 fn instruction_set(abi: &str) -> Result<&'static str, String> {
     match abi {
         "armeabi" | "armeabi-v7a" => Ok("arm"),
@@ -155,6 +271,101 @@ mod tests {
             canonical_source: None,
         }
     }
+    #[test]
+    fn bundled_inventory_selects_preferred_abis_and_reports_multiarch_mismatch() {
+        let bit32 = vec!["armeabi-v7a".into(), "armeabi".into()];
+        let bit64 = vec!["arm64-v8a".into(), "x86_64".into()];
+        let supported = SupportedAbis {
+            bit32: &bit32,
+            bit64: &bit64,
+        };
+        for monolithic in [false, true] {
+            for has32 in [false, true] {
+                for has64 in [false, true] {
+                    for prefer64 in [false, true] {
+                        for multi_arch in [false, true] {
+                            let code = if monolithic {
+                                "/system/app/fixture.apk"
+                            } else {
+                                "/system/app/fixture"
+                            };
+                            let mut pkg = AndroidPackage {
+                                path: Some(code.into()),
+                                base_apk_path: Some(if monolithic {
+                                    code.into()
+                                } else {
+                                    format!("{code}/base.apk")
+                                }),
+                                ..Default::default()
+                            };
+                            if multi_arch {
+                                pkg.booleans |= crate::package::pkg::booleans::MULTI_ARCH;
+                            }
+                            let mut config = env();
+                            config.preferred_abi =
+                                if prefer64 { "arm64-v8a" } else { "armeabi-v7a" };
+                            let result = BundledAbis::derive(&pkg, &config, &supported, &|path| {
+                                Ok(if path.contains("/lib64/") || path.ends_with("/arm64") {
+                                    has64
+                                } else {
+                                    has32
+                                })
+                            })
+                            .unwrap();
+                            let expected = match (has32, has64, prefer64) {
+                                (false, false, _) => (None, None),
+                                (true, false, _) => (Some("armeabi-v7a"), None),
+                                (false, true, _) => (Some("arm64-v8a"), None),
+                                (true, true, true) => (Some("arm64-v8a"), Some("armeabi-v7a")),
+                                (true, true, false) => (Some("armeabi-v7a"), Some("arm64-v8a")),
+                            };
+                            assert_eq!(
+                                (result.primary.as_deref(), result.secondary.as_deref()),
+                                expected
+                            );
+                            assert_eq!(result.multi_arch_mismatch, has32 && has64 && !multi_arch);
+                            result.apply(&mut pkg);
+                            assert_eq!(
+                                (
+                                    pkg.primary_cpu_abi.as_deref(),
+                                    pkg.secondary_cpu_abi.as_deref()
+                                ),
+                                expected
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_missing_abi_lists_and_inventory_errors_reject_without_mutation() {
+        let pkg = AndroidPackage {
+            path: Some("/system/app/fixture.apk".into()),
+            base_apk_path: Some("/system/app/fixture.apk".into()),
+            ..Default::default()
+        };
+        let before = pkg.clone();
+        let supported = SupportedAbis {
+            bit32: &[],
+            bit64: &[],
+        };
+        assert!(BundledAbis::derive(&pkg, &env(), &supported, &|_| Ok(true)).is_err());
+        assert_eq!(
+            BundledAbis::derive(
+                &pkg,
+                &env(),
+                &supported,
+                &|_| Err("inventory denied".into())
+            ),
+            Err("inventory denied".into())
+        );
+        let none = BundledAbis::derive(&pkg, &env(), &supported, &|_| Ok(false)).unwrap();
+        assert_eq!((none.primary, none.secondary), (None, None));
+        assert_eq!(pkg, before);
+    }
+
     #[test]
     fn cluster_uses_selected_or_preferred_isa_and_secondary_abi() {
         let mut pkg = AndroidPackage {

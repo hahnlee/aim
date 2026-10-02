@@ -21,7 +21,7 @@ pub use compatibility::LibraryCompatibility;
 mod bridge;
 pub use bridge::PolicyBridgeError;
 mod abi;
-pub use abi::{NativeLibraryEnvironment, NativeLibraryPaths};
+pub use abi::{BundledAbis, NativeLibraryEnvironment, NativeLibraryPaths, SupportedAbis};
 mod setting;
 mod signing;
 mod uids;

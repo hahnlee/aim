@@ -3,6 +3,9 @@ package com.android.server.pm;
 
 final class PackageAbiHelperImpl implements PackageAbiHelper {
     PackageAbiHelperImpl() {}
+    public Abis getBundledAppAbis(com.android.server.pm.pkg.AndroidPackage pkg) {
+        throw new RuntimeException("stub");
+    }
     public NativeLibraryPaths deriveNativeLibraryPaths(
             com.android.server.pm.pkg.AndroidPackage pkg, boolean system,
             boolean updated, java.io.File appLib32InstallDir) {
