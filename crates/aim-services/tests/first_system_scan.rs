@@ -459,6 +459,48 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 Some(&selected.factory.users)
             );
             assert_eq!(selected.factory.users[&0].first_install_time, -1);
+            if source == RestoreFactory {
+                let active = owner
+                    .settings
+                    .packages
+                    .iter()
+                    .find(|p| p.name == saved.name)
+                    .unwrap()
+                    .clone();
+                let ids = owner.identities.clone();
+                let enabled = owner.enable_system_setting(&saved.name, [98; 16]).unwrap();
+                assert_eq!(enabled.code_path, active.code_path);
+                assert_eq!(enabled.domain_set_id, active.domain_set_id);
+                assert_eq!(enabled.signatures, active.signatures);
+                assert_eq!(enabled.version_code, saved.version_code);
+                assert_eq!(owner.identities, ids);
+                assert!(owner.disabled_user_states(&saved.name).is_none());
+                let mut restored_inputs = completion();
+                restored_inputs.context.mode = AbiScanMode::Existing {
+                    first_boot_or_upgrade: false,
+                    old_was_stub: false,
+                    saved: Some(&enabled),
+                };
+                let restored = owner
+                    .scan_existing(
+                        &factory_code,
+                        update(),
+                        &saved_users,
+                        None,
+                        None,
+                        &apks,
+                        restored_inputs,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    restored.candidate.record.settings.code_path,
+                    saved.code_path
+                );
+                assert_eq!(restored.candidate.record.settings.app_id, saved.app_id);
+                assert_eq!(restored.candidate.record.settings.flags & (1 << 7), 0);
+                assert_eq!(restored.candidate.users, saved_users[&saved.name]);
+                assert!(owner.settings.disabled_system_packages.is_empty());
+            }
         }
     }
 

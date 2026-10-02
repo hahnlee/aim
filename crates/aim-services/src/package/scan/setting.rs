@@ -242,7 +242,7 @@ impl NewSetting {
     }
 }
 
-fn domain_id(id: [u8; 16]) -> String {
+pub(super) fn domain_id(id: [u8; 16]) -> String {
     let hex = id.iter().map(|b| format!("{b:02x}")).collect::<String>();
     format!(
         "{}-{}-{}-{}-{}",

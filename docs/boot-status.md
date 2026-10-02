@@ -214,8 +214,15 @@ successful active scans update those aliases, while later user insertions or
 removed/recreated states are not shared. The original PackageSetting constructor
 and shallow-copy APIs confirm default time 0 and shared changes (123 to 456);
 the native original-APK fixture checks retained live times, alias updates, cold
-isolation, stale copy rejection and rollback. Complete disable/enable transitions,
-user mutation integration and native reboot/template proof remain #815/#702/#798.
+isolation, stale copy rejection and rollback. The native settings owner now ports enableSystemPackageLPw: same-UID active
+settings retain code path, domain ID, signers, user restrictions and unselected
+fields, while factory ABI/version/library/MIME/install metadata is copied. A
+fresh setting reserves the exact UID with constructor defaults and a new
+domain ID. Duplicate active IDs or occupied slots retain the first owner and
+still remove the disabled setting, matching addPackageLPw failure semantics.
+Public flags are preserved at this phase; the later active scan computes the
+updated-system flag. Complete disable transitions, user mutation integration
+and native reboot/template proof remain #815/#702/#798.
 New-system scan entry points now remove a stale disabled factory setting when
 its active data setting is absent, before UID/signature/metadata preparation.
 Its users are removed too, while the shared UID survives until normal pruning.
@@ -225,13 +232,17 @@ successful fresh scan at the retained shared UID, with the updated-system bit
 clear. Active settings and eligible original-name adoption prevent stale
 removal; new-package allocation rejects an eligible adoption until the caller
 uses its existing-setting path (#804). Data locations reject without mutation.
-Factory restoration with active data still requires resource cleanup before
-enabling the system setting and rescanning; that owner is tracked in #816.
+The original signed framework/GSF fixture now enables the retained setting
+and completes the active factory rescan for a restore decision, preserving UID
+and user restrictions and clearing the updated-system bit. This sequence tests
+settings/scan ownership only: actual replaced-code cleanup must precede it in
+the native boot pipeline, and is still tracked in #816.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 295 units pass (3.04s), and all eight original-APK scan-input tests pass
-(5.69s). The Java image
+All 297 units pass (3.06s). The original signed framework/GSF fixture passes
+(22.30s), including settings enable and the factory active rescan. All eight
+original-APK scan-input tests passed before this settings transition (5.69s). The Java image
 API linkage build passes (14.6s). This is the initial system APK phase, not a
 complete native boot or template: native APEX preparation, image/data version
 selection, stub expansion, graph/permission/commit side effects, persistence and
