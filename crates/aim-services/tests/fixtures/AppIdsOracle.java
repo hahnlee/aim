@@ -1,7 +1,51 @@
 package com.android.server.pm;
 
 public final class AppIdsOracle {
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
+        if (args.length != 0 && (args[0].equals("merge") || args[0].equals("group-merge"))) {
+            byte[][] certs = new byte[4][];
+            for (int c = 0; c < certs.length; c++) {
+                certs[c] = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[c + 1]));
+            }
+            int[][] current = {{}, {1}, {2}, {2}, {3}, {3}, {3}, {4}, {1,2}, {2,1}, {1,3}, {3}, {2}};
+            int[][] past = {null, null, null, {1,2}, {1,2,3}, {2,3}, {4,2,3}, {1,2,4}, null, null, null, {3}, {1,2}};
+            int[][] flags = {null, null, null, {3,0}, {0,2,0}, {8,0}, {3,2,0}, {3,2,0}, null, null, null, {0}, {0,8}};
+            android.content.pm.SigningDetails[] cases = new android.content.pm.SigningDetails[current.length];
+            for (int i = 0; i < cases.length; i++) {
+                if (current[i].length == 0) { cases[i] = android.content.pm.SigningDetails.UNKNOWN; continue; }
+                android.content.pm.Signature[] signers = realSignatures(current[i], null, certs);
+                android.content.pm.Signature[] lineage = realSignatures(past[i], flags[i], certs);
+                cases[i] = new android.content.pm.SigningDetails(signers, i % 4 + 1, lineage);
+            }
+            if (args[0].equals("group-merge")) {
+                for (int i = 0; i < cases.length; i++) {
+                    for (int j = 0; j < cases.length; j++) {
+                        for (int k = 0; k < cases.length; k++) {
+                            android.content.pm.SigningDetails merged = cases[i].mergeLineageWith(cases[j], 1);
+                            boolean changed = merged != cases[i];
+                            if (changed) merged = merged.mergeLineageWith(cases[k], 2);
+                            System.out.println(i + " " + j + " " + k + " " + changed + " "
+                                + merged.getSignatureSchemeVersion() + " " + describe(merged.getSignatures(), certs, false)
+                                + " " + describe(merged.getPastSigningCertificates(), certs, true)
+                                + " " + (merged.getPublicKeys() == null ? 0 : merged.getPublicKeys().size()));
+                        }
+                    }
+                }
+                return;
+            }
+            for (int i = 0; i < cases.length; i++) {
+                for (int j = 0; j < cases.length; j++) {
+                    for (int rule = 0; rule < 3; rule++) {
+                        android.content.pm.SigningDetails merged = cases[i].mergeLineageWith(cases[j], rule);
+                        System.out.println(i + " " + j + " " + rule + " " + (merged == cases[i]) + " "
+                            + merged.getSignatureSchemeVersion() + " " + describe(merged.getSignatures(), certs, false)
+                            + " " + describe(merged.getPastSigningCertificates(), certs, true)
+                            + " " + (merged.getPublicKeys() == null ? 0 : merged.getPublicKeys().size()));
+                    }
+                }
+            }
+            return;
+        }
         if (args.length != 0 && (args[0].equals("trust") || args[0].equals("join") || args[0].equals("ancestry"))) {
             android.content.pm.SigningDetails[] cases = {
                 android.content.pm.SigningDetails.UNKNOWN,
@@ -143,6 +187,30 @@ public final class AppIdsOracle {
         System.out.println(full.acquireAndRegisterNewAppId(b));
         full.removeSetting(19999);
         System.out.println(full.acquireAndRegisterNewAppId(b));
+    }
+    private static android.content.pm.Signature[] realSignatures(int[] ids, int[] flags, byte[][] certs) {
+        if (ids == null) return null;
+        android.content.pm.Signature[] result = new android.content.pm.Signature[ids.length];
+        for (int i = 0; i < ids.length; i++) {
+            result[i] = new android.content.pm.Signature(certs[ids[i] - 1]);
+            if (flags != null) result[i].setFlags(flags[i]);
+        }
+        return result;
+    }
+    private static String describe(android.content.pm.Signature[] signatures, byte[][] certs, boolean flags) {
+        if (signatures == null) return "-";
+        String result = "";
+        for (android.content.pm.Signature signature : signatures) {
+            int id = -1;
+            for (int i = 0; i < certs.length; i++) {
+                if (java.util.Arrays.equals(signature.toByteArray(), certs[i])) id = i + 1;
+            }
+            if (id < 0) throw new AssertionError("unrecognized certificate");
+            if (!result.isEmpty()) result += ",";
+            result += id;
+            if (flags) result += ":" + signature.getFlags();
+        }
+        return result;
     }
     private static android.content.pm.SigningDetails details(int[] current, int[] past, int[] flags) {
         android.content.pm.Signature[] signatures = new android.content.pm.Signature[current.length];

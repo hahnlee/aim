@@ -5,6 +5,8 @@ package android.content.pm;
 public final class SigningDetails {
     public static final SigningDetails UNKNOWN = null;
     public SigningDetails(Signature[] signatures, int version, android.util.ArraySet<java.security.PublicKey> keys, Signature[] past) { throw new RuntimeException("stub"); }
+    public SigningDetails(Signature[] signatures, int version, Signature[] past) throws java.security.cert.CertificateException { throw new RuntimeException("stub"); }
+    public SigningDetails mergeLineageWith(SigningDetails other, int rule) { throw new RuntimeException("stub"); }
     public boolean checkCapability(SigningDetails old, int flags) { throw new RuntimeException("stub"); }
     public boolean hasCommonAncestor(SigningDetails other) { throw new RuntimeException("stub"); }
     public boolean hasAncestor(SigningDetails old) { throw new RuntimeException("stub"); }

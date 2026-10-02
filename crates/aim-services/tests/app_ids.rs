@@ -508,6 +508,174 @@ fn allocation_matches_the_original_runtime() {
             restored.get(record.settings.app_id)
         );
     }
+    // Valid DER certificates exercise the original merge constructor,
+    // which rebuilds its public-key set. These histories are relationship
+    // fixtures, not claims that any synthesized lineage verified an APK.
+    use aim_services::package::sign::{MergeRule, SigningDetails};
+    use std::borrow::Cow;
+    let certs: Vec<_> = inputs
+        .active
+        .values()
+        .flat_map(|r| r.signing.signatures.iter())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .take(4)
+        .collect();
+    assert_eq!(certs.len(), 4);
+    for (i, certificate) in certs.iter().enumerate() {
+        fs::write(
+            boot.data.join(format!("data/local/tmp/merge-cert-{i}.der")),
+            certificate,
+        )
+        .unwrap();
+    }
+    let merged_cases: Vec<_> = [
+        (vec![], None),
+        (vec![1], None),
+        (vec![2], None),
+        (vec![2], Some(vec![(1, 3), (2, 0)])),
+        (vec![3], Some(vec![(1, 0), (2, 2), (3, 0)])),
+        (vec![3], Some(vec![(2, 8), (3, 0)])),
+        (vec![3], Some(vec![(4, 3), (2, 2), (3, 0)])),
+        (vec![4], Some(vec![(1, 3), (2, 2), (4, 0)])),
+        (vec![1, 2], None),
+        (vec![2, 1], None),
+        (vec![1, 3], None),
+        (vec![3], Some(vec![(3, 0)])),
+        (vec![2], Some(vec![(1, 0), (2, 8)])),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (current, past))| {
+        let saved = Signatures {
+            scheme_version: if current.is_empty() {
+                0
+            } else {
+                i as i32 % 4 + 1
+            },
+            signatures: current.into_iter().map(|c| certs[c - 1].clone()).collect(),
+            past_signatures: past.map(|p| {
+                p.into_iter()
+                    .map(|(c, f)| (certs[c - 1].clone(), f))
+                    .collect()
+            }),
+            ..Default::default()
+        };
+        (SigningDetails::from_saved(&saved).unwrap(), saved)
+    })
+    .collect();
+    let describe = |details: &SigningDetails| {
+        let current = details
+            .signatures
+            .iter()
+            .map(|s| (certs.iter().position(|c| c == s).unwrap() + 1).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let past = details
+            .past_signing_certificates
+            .as_ref()
+            .map(|p| {
+                p.iter()
+                    .map(|(s, f)| format!("{}:{f}", certs.iter().position(|c| c == s).unwrap() + 1))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|| "-".into());
+        format!(
+            "{} {} {} {}",
+            details.scheme_version,
+            if current.is_empty() { "-" } else { &current },
+            past,
+            details.public_keys.len()
+        )
+    };
+    for mode in ["merge", "group-merge"] {
+        let mut expected = String::new();
+        for (i, (a, saved)) in merged_cases.iter().enumerate() {
+            for (j, (b, _)) in merged_cases.iter().enumerate() {
+                if mode == "merge" {
+                    for (r, rule) in [
+                        MergeRule::SelfCapability,
+                        MergeRule::OtherCapability,
+                        MergeRule::RestrictedCapability,
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let merged = a.merge_lineage_with(b, rule).unwrap();
+                        let unchanged = matches!(&merged, Cow::Borrowed(s) if std::ptr::eq(*s, a));
+                        expected
+                            .push_str(&format!("{i} {j} {r} {unchanged} {}\n", describe(&merged)));
+                    }
+                } else {
+                    for (k, (member, _)) in merged_cases.iter().enumerate() {
+                        let mut group = aim_services::package::owner::shared_users::SharedUser {
+                            app_id: 10001,
+                            flags: 0,
+                            private_flags: 0,
+                            signatures: Some(saved.clone()),
+                        };
+                        let changed = group
+                            .merge_authorized_lineage(b, std::slice::from_ref(member))
+                            .unwrap();
+                        let result =
+                            SigningDetails::from_saved(group.signatures.as_ref().unwrap()).unwrap();
+                        expected
+                            .push_str(&format!("{i} {j} {k} {changed} {}\n", describe(&result)));
+                    }
+                }
+            }
+        }
+        let original = run(boot.command().args([
+            "shell",
+            "/system/bin/app_process",
+            "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+            "/system/bin",
+            "com.android.server.pm.AppIdsOracle",
+            mode,
+            "/data/local/tmp/merge-cert-0.der",
+            "/data/local/tmp/merge-cert-1.der",
+            "/data/local/tmp/merge-cert-2.der",
+            "/data/local/tmp/merge-cert-3.der",
+        ]));
+        assert_eq!(
+            String::from_utf8(original.stdout).unwrap(),
+            expected,
+            "{mode}"
+        );
+    }
+    for (name, group) in &mut merged.shared_users {
+        let group_id = group.app_id;
+        for (package, record) in inputs
+            .active
+            .iter()
+            .filter(|(_, r)| r.settings.shared_user && r.settings.app_id == group_id)
+        {
+            let others: Vec<_> = inputs
+                .active
+                .iter()
+                .filter(|(n, r)| {
+                    *n != package && r.settings.shared_user && r.settings.app_id == group.app_id
+                })
+                .map(|(_, r)| r.signing.clone())
+                .collect();
+            assert!(
+                !group
+                    .merge_authorized_lineage(&record.signing, &others)
+                    .unwrap(),
+                "saved group changed: {name}"
+            );
+        }
+        let saved = state
+            .settings
+            .shared_users
+            .iter()
+            .find(|g| &g.name == name)
+            .unwrap();
+        assert_eq!(group.signatures, saved.signatures);
+    }
+
     let static_libraries: Vec<_> = inputs
         .active
         .values()

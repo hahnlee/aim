@@ -1,9 +1,11 @@
-//! First-boot identity input, ported from pinned PackageManagerService's
-//! constructor and Settings.add[Oem]SharedUserLPw (#803).
+//! Shared UID bootstrap and normal signing reconciliation, ported from
+//! pinned PackageManagerService, Settings and ReconcilePackageUtils (#803).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::app_ids::{AppIds, Error, Owner};
 use crate::package::settings::{Settings, Signatures};
+use crate::package::sign::{self, MergeRule, SigningDetails};
 use crate::package::system_config::SystemConfig;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -12,6 +14,39 @@ pub struct SharedUser {
     pub flags: i32,
     pub private_flags: i32,
     pub signatures: Option<Signatures>,
+}
+
+impl SharedUser {
+    /// ReconcilePackageUtils's normal, already-authorized merge. Members
+    /// are the other parsed packages in this group, in owner scan order.
+    /// Unknown initialization and OTA signature replacement are separate
+    /// commit/reconciliation steps (#803). Errors leave the group intact.
+    pub fn merge_authorized_lineage(
+        &mut self,
+        candidate: &SigningDetails,
+        other_members: &[SigningDetails],
+    ) -> Result<bool, String> {
+        let unknown = Signatures::default();
+        let previous = SigningDetails::from_saved(self.signatures.as_ref().unwrap_or(&unknown))?;
+        let merged = previous.merge_lineage_with(candidate, MergeRule::OtherCapability)?;
+        if matches!(&merged, Cow::Borrowed(s) if std::ptr::eq(*s, &previous)) {
+            return Ok(false);
+        }
+        let mut merged = merged.into_owned();
+        for member in other_members {
+            merged = merged
+                .merge_lineage_with(member, MergeRule::RestrictedCapability)?
+                .into_owned();
+        }
+        let public_keys = sign::serialize_public_keys(&merged.public_keys)?;
+        self.signatures = Some(Signatures {
+            scheme_version: merged.scheme_version,
+            signatures: merged.signatures,
+            past_signatures: merged.past_signing_certificates,
+            public_keys: Some(public_keys.into_iter().map(Some).collect()),
+        });
+        Ok(true)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,6 +207,23 @@ impl Bootstrap {
 mod tests {
     use super::*;
     use crate::package::settings::{Package, SharedUser as SavedGroup};
+
+    #[test]
+    fn invalid_saved_merge_certificates_leave_the_group_unchanged() {
+        let mut group = SharedUser {
+            app_id: 10001,
+            flags: 1,
+            private_flags: 8,
+            signatures: Some(Signatures {
+                signatures: vec![vec![1, 2, 3]],
+                ..Default::default()
+            }),
+        };
+        let before = group.clone();
+        let unknown = SigningDetails::from_saved(&Default::default()).unwrap();
+        assert!(group.merge_authorized_lineage(&unknown, &[]).is_err());
+        assert_eq!(group, before);
+    }
 
     #[test]
     fn restoration_preserves_seed_flags_saved_signers_members_and_pruning_cursor() {

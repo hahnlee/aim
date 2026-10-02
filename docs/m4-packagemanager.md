@@ -552,7 +552,7 @@ the system UID only; it currently attaches after bootstrap, so C's facade
 still must expose the same owner query before the native boot scan (#702).
 A disposable original-PMS boot (2026-10-02, boot completed) tested the
 Rust-to-Java call: SDK 30 returned false, SDK 31/36 true. Device-service
-linkage verification and 145 package unit tests pass. The image has no
+linkage verification and 146 package unit tests pass. The image has no
 `android.content.pm.Flags.sdkLibIndependence` API or loaded aconfig entry
 for that flag. Inspecting its original `services.jar` shows that the SDK
 dependency collection call passes `required=true` directly. `Policy::pinned`
@@ -601,7 +601,7 @@ runtime restriction on reusing deleted IDs and fresh-restoration holes.
 An explicitly run original-runtime test matches allocation, deletion,
 ownership replacement and exhaustion. On its disposable original-PMS
 boot (boot completed), all 243 active packages and 16 shared UID groups
-restored with their saved IDs. Java API linkage and 145 package unit tests
+restored with their saved IDs. Java API linkage and 146 package unit tests
 pass. `owner::shared_users::Bootstrap` now seeds the nine pinned platform
 shared users and the valid OEM declarations with fixed IDs and
 system/privileged flags (#803). Rejected OEM names, ranges and slot
@@ -621,7 +621,7 @@ original-PMS boot (2026-10-02, boot completed) restores all 243 active
 package IDs; after pruning, all 16 group names, IDs and signing records
 match the original saved settings. Unit tests cover flags, memberships,
 disabled-only members, snapshot/input immutability and cursor behavior;
-all 145 package unit tests pass. Conflicting decoded settings fail with
+all 146 package unit tests pass. Conflicting decoded settings fail with
 context; ordered recovery from corrupt raw Settings records remains
 unimplemented (#803). Scan reconciliation, shared UID signature/migration
 policy, UID persistence and snapshot publication are not connected
@@ -644,7 +644,7 @@ class and process names retain their parsed values. An explicit original
 runtime fixture fills the ComponentName cache before renaming and compares
 all seven kinds, their recomputed ComponentNames and unchanged name fields
 with native records. Java linkage verification and all three explicit
-scan/runtime tests pass. All 145 package unit tests pass, and every active
+scan/runtime tests pass. All 146 package unit tests pass, and every active
 parsed package carries its selected internal name.
 `sign::History` now follows pinned SigningDetails certificate relationship
 rules: lineage capabilities, strict/existing ancestors and exact
@@ -656,7 +656,7 @@ masks, including unknown details, revoked lineage rights, signer ordering
 and rollback direction. Every result matches original SigningDetails.
 The disposable original-PMS boot (2026-10-02, boot completed) native-parses
 and fully verifies all 243 active APKs; their verified histories all pass
-the normal existing-package gate against saved certificates. All 145
+the normal existing-package gate against saved certificates. All 146
 package unit tests and Java linkage pass. The shared UID join gate
 distinguishes new installs, updates and system scans, honors revoked
 lineage capabilities and checks every existing member for new installs.
@@ -672,10 +672,22 @@ package, known disabled-system and saved shared UID membership/divergence
 signature gates. All 243 active packages pass that connected path on the
 disposable original-PMS boot. Explicit original-image tests reject a
 fully signed GSF APK against unrelated package/disabled-system saved
-certificates without changing settings. Legacy certificate compatibility/
-recovery, upgrade keysets, group lineage merging, owner-authorized rollback,
-full UID reconciliation and snapshot publication remain unimplemented
-(#803, #804). These normal signature gates do not activate C.
+certificates without changing settings. `SigningDetails::merge_lineage_with`
+now joins compatible partial histories with self/other/restricted capability
+rules, preserving the unchanged-instance signal. The shared UID owner
+merges an authorized candidate, then applies restricted capabilities from
+other parsed members only if that first merge changed the group. An
+explicit original-runtime matrix with real DER certificates matches 507
+two-history merges and 2,197 group/candidate/member merges: signer order,
+capabilities, scheme version, key count and changed signal all match. All
+16 restored groups retain their original saved signatures after merging
+the verified active members. Invalid saved certificates fail without
+changing the group. Ordered scan commit integration, unknown-group
+initialization and physical-system OTA signer replacement remain
+unimplemented (#803, #805). Legacy certificate compatibility/recovery,
+upgrade keysets, owner-authorized rollback, full UID reconciliation and
+snapshot publication remain unimplemented (#804). These normal signature
+gates and merge primitives do not activate C.
 The pinned Settings
 DEX compiles out the SDK/no-ID exception in the source: SDK libraries
 require a positive app/shared-user ID (#802). An explicit original-image
