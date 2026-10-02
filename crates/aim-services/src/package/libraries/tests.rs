@@ -4,6 +4,175 @@ use super::*;
 use crate::package::pkg::AndroidPackage;
 use crate::package::system_config::Library;
 
+fn policy(native: bool, independence: bool) -> Policy {
+    Policy {
+        enforce_native_dependencies: native,
+        sdk_library_independence: independence,
+    }
+}
+
+#[test]
+fn dependency_order_and_provider_files_preserve_first_occurrence() {
+    let mut registry = Registry::new(&SystemConfig::default());
+    let mut provider = package("provider", |p| {
+        p.library_names = vec!["dynamic".into()];
+        p.split_code_paths = Some(vec![Some("/data/app/provider/feature.apk".into())]);
+    });
+    provider.is.system = true;
+    provider.uses_library_files = vec![
+        "/system/framework/transitive.jar".into(),
+        "/data/app/provider/base.apk".into(),
+    ];
+    registry.add_package(&provider, None).unwrap();
+    registry.insert(SharedLibrary {
+        name: Some("builtin".into()),
+        version: VERSION_UNDEFINED,
+        path: Some("/system/framework/transitive.jar".into()),
+        ..Default::default()
+    });
+    let available = BTreeMap::from([(provider.name.clone(), provider)]);
+    let app = package("app", |p| {
+        p.uses_libraries = vec!["dynamic".into(), "builtin".into()];
+        p.uses_optional_libraries = vec!["absent".into()];
+    });
+    let selection = registry
+        .collect(app.pkg.as_ref().unwrap(), &available, policy(false, false))
+        .unwrap();
+    assert_eq!(
+        selection
+            .libraries
+            .iter()
+            .map(|p| p.name.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["dynamic", "builtin"]
+    );
+    assert_eq!(
+        selection.files(&available).unwrap(),
+        [
+            "/data/app/provider/base.apk",
+            "/data/app/provider/feature.apk",
+            "/system/framework/transitive.jar"
+        ]
+    );
+}
+
+#[test]
+fn native_and_sdk_missing_dependencies_follow_explicit_policy() {
+    let registry = Registry::new(&SystemConfig::default());
+    let available = BTreeMap::new();
+    let app = package("app", |p| p.uses_native_libraries = vec!["native".into()]);
+    assert!(
+        registry
+            .collect(app.pkg.as_ref().unwrap(), &available, policy(false, false))
+            .unwrap()
+            .libraries
+            .is_empty()
+    );
+    assert_eq!(
+        registry
+            .collect(app.pkg.as_ref().unwrap(), &available, policy(true, false))
+            .unwrap_err(),
+        ResolveError::MissingLibrary("native".into())
+    );
+    let mut app = package("app", |p| {
+        p.uses_sdk_libraries = vec!["sdk".into()];
+        p.uses_sdk_libraries_versions_major = Some(vec![1]);
+        p.uses_sdk_libraries_optional = Some(vec![true]);
+    });
+    assert!(
+        registry
+            .collect(app.pkg.as_ref().unwrap(), &available, policy(false, true))
+            .unwrap()
+            .libraries
+            .is_empty()
+    );
+    assert_eq!(
+        registry
+            .collect(app.pkg.as_ref().unwrap(), &available, policy(false, false))
+            .unwrap_err(),
+        ResolveError::MissingLibrary("sdk".into())
+    );
+    Arc::make_mut(app.pkg.as_mut().unwrap()).uses_sdk_libraries_optional = Some(vec![false]);
+    assert_eq!(
+        registry
+            .collect(app.pkg.as_ref().unwrap(), &available, policy(false, true))
+            .unwrap_err(),
+        ResolveError::MissingLibrary("sdk".into())
+    );
+}
+
+#[test]
+fn versioned_library_checks_rotation_and_rejects_bad_or_different_digests() {
+    use crate::package::settings::Signatures;
+    use sha2::{Digest, Sha256};
+    let digest = |der: &[u8]| {
+        Sha256::digest(der)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let mut registry = Registry::new(&SystemConfig::default());
+    let mut provider = package("provider", |p| {
+        p.static_shared_library_name = Some("static".into());
+        p.static_shared_lib_version = 12;
+    });
+    provider.signatures = Some(Signatures {
+        signatures: vec![b"current".to_vec()],
+        past_signatures: Some(vec![(b"old".to_vec(), 0), (b"current".to_vec(), 0)]),
+        ..Default::default()
+    });
+    registry.add_package(&provider, None).unwrap();
+    let mut available = BTreeMap::from([(provider.name.clone(), provider)]);
+    let mut app = package("app", |p| {
+        p.uses_static_libraries = vec!["static".into()];
+        p.uses_static_libraries_versions = Some(vec![12]);
+        p.uses_static_libraries_cert_digests = Some(vec![Some(vec![Some(digest(b"old"))])]);
+    });
+    assert!(
+        registry
+            .collect(app.pkg.as_ref().unwrap(), &available, policy(false, false))
+            .is_ok()
+    );
+    Arc::make_mut(app.pkg.as_mut().unwrap()).uses_static_libraries_cert_digests =
+        Some(vec![Some(vec![Some("odd".into())])]);
+    assert_eq!(
+        registry
+            .collect(app.pkg.as_ref().unwrap(), &available, policy(false, false))
+            .unwrap_err(),
+        ResolveError::BadCertificateDigest("static".into())
+    );
+    Arc::make_mut(app.pkg.as_mut().unwrap()).uses_static_libraries_cert_digests =
+        Some(vec![Some(vec![Some(digest(b"other"))])]);
+    assert_eq!(
+        registry
+            .collect(app.pkg.as_ref().unwrap(), &available, policy(false, false))
+            .unwrap_err(),
+        ResolveError::DifferentSigners("static".into())
+    );
+    available.get_mut("provider").unwrap().signatures = Some(Signatures {
+        signatures: vec![b"first".to_vec(), b"second".to_vec()],
+        ..Default::default()
+    });
+    let pkg = Arc::make_mut(app.pkg.as_mut().unwrap());
+    pkg.target_sdk_version = 27;
+    pkg.uses_static_libraries_cert_digests = Some(vec![Some(vec![
+        Some(digest(b"second").to_uppercase()),
+        Some(digest(b"first").to_uppercase()),
+    ])]);
+    assert!(
+        registry
+            .collect(app.pkg.as_ref().unwrap(), &available, policy(false, false))
+            .is_ok()
+    );
+    Arc::make_mut(app.pkg.as_mut().unwrap()).target_sdk_version = 26;
+    assert_eq!(
+        registry
+            .collect(app.pkg.as_ref().unwrap(), &available, policy(false, false))
+            .unwrap_err(),
+        ResolveError::DifferentSigners("static".into())
+    );
+}
+
 fn package(name: &str, edit: impl FnOnce(&mut AndroidPackage)) -> PackageState {
     let mut pkg = AndroidPackage {
         package_name: name.into(),

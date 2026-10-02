@@ -537,7 +537,17 @@ APK packages, including GMS's 11 splits. The updated GMS's dynamic library
 is restricted to its original disabled system package's declarations.
 These checks cover library names/paths and parser success, not the whole
 native scan or installed GMS's complete parcel parity (#760).
-Library dependency resolution, the complete native scan and #707's CTS
+`Registry::collect` selects direct dependencies in the original order:
+required Java, static, optional Java, native when PlatformCompat enforces
+them, then SDK. Versioned dependencies check the provider's verified
+signatures, including certificate rotation and the pre-27 multi-signer
+rule. SDK independence and native enforcement are explicit policy inputs;
+the native scan still needs to supply them from their owners.
+`Selection::files` assembles the provider's base/split paths followed by
+its already-resolved transitive files, preserving first occurrence.
+Tests cover ordering, missing/optional dependencies, SDK policy,
+certificate validation and duplicate files. Complete graph construction,
+dependency propagation, static-library user installation, the native scan and #707's CTS
 acceptance still remain; declaration records are not yet served as full
 shared-library query results.
 

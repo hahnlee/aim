@@ -10,6 +10,9 @@ use super::apps_filter::NotModelled;
 use super::model::{PackageState, SharedLibrary};
 use super::system_config::SystemConfig;
 
+mod resolve;
+pub use resolve::{Policy, ResolveError, Selection};
+
 pub const VERSION_UNDEFINED: i64 = -1;
 pub const TYPE_BUILTIN: i32 = 0;
 pub const TYPE_DYNAMIC: i32 = 1;
