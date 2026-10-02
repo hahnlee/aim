@@ -57,7 +57,7 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (133 package unit tests pass). These are not
+shared snapshot publication (136 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
@@ -125,7 +125,7 @@ signatures. Settings launched successfully (warm, 90 ms). An explicitly
 run original-image integration
 test checks active/disabled GSF records, nonstandard APK paths, v3 lineage,
 SPKI retention, input immutability and code disappearing between parsing
-and verification. All 133 package
+and verification. All 136 package
 unit tests run with their inputs present and pass. These are scan inputs,
 not reconciled package snapshots; APEX verification belongs to apexd,
 and new/removed image package reconciliation and publication remain
@@ -145,8 +145,20 @@ system APK path matched; five updated packages run from data. Five
 directories without APKs were reported as rejected. Settings launched
 successfully (warm, 126 ms). Explicit image-input integration tests check
 ordering, duplicate names, verified original APKs, stage filtering,
-rejection retention and absent/empty framework failure. UID allocation,
-scan reconciliation and snapshot publication still remain under #702.
+rejection retention and absent/empty framework failure.
+`owner::app_ids::AppIds` restores active package and shared-user UID
+ownership without changing persisted IDs, registering disabled originals
+again or mutating settings. Its sparse slots preserve the pinned
+AppIdSettingMap's array extent, allocation range and deletion cursor.
+An explicitly run original-runtime integration test matches imported-hole
+allocation, deletion, ownership replacement, fresh restoration and range
+exhaustion. The disposable original-PMS boot completed and all 243 active
+packages and 16 shared UID groups restored with their saved IDs. Java
+API linkage verification and 136 package unit tests pass. The allocator
+is not connected to scan reconciliation, persistence or snapshot
+publication; first-boot shared-user seeding also remains under #702.
+Accepted SDK libraries without an app ID have no slot; their image-policy
+handling in the settings reader is tracked in #802.
 
 The device's own system service (`dev.aim.server.DeviceServices`,
 docs/system-services.md, "The system_server bridge") is on the system

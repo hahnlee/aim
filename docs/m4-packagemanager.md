@@ -552,7 +552,7 @@ the system UID only; it currently attaches after bootstrap, so C's facade
 still must expose the same owner query before the native boot scan (#702).
 A disposable original-PMS boot (2026-10-02, boot completed) tested the
 Rust-to-Java call: SDK 30 returned false, SDK 31/36 true. Device-service
-linkage verification and 133 package unit tests pass. The image has no
+linkage verification and 136 package unit tests pass. The image has no
 `android.content.pm.Flags.sdkLibIndependence` API or loaded aconfig entry
 for that flag. Inspecting its original `services.jar` shows that the SDK
 dependency collection call passes `required=true` directly. `Policy::pinned`
@@ -593,6 +593,18 @@ APKs are retained as rejected. Settings started successfully (warm,
 without settings, ordering, duplicate names, stage exclusion and
 empty/absent framework failure. The records do not allocate UIDs or
 publish a reconciled snapshot (#702).
+The native UID-slot owner (`owner::app_ids::AppIds`) restores active
+package and shared-user identities without modifying persisted settings;
+disabled originals do not register again. The sparse map retains the
+pinned AppIdSettingMap's array extent and deletion cursor, including its
+runtime restriction on reusing deleted IDs and fresh-restoration holes.
+An explicitly run original-runtime test matches allocation, deletion,
+ownership replacement and exhaustion. On its disposable original-PMS
+boot (boot completed), all 243 active packages and 16 shared UID groups
+restored with their saved IDs. Java API linkage and 136 package unit tests
+pass. Scan reconciliation, first-boot shared-user seeding, UID persistence
+and snapshot publication are not connected (#702). The settings reader's
+image policy for SDK libraries without an app ID is tracked in #802.
 Verified SPKI keys now become the pinned runtime's Serializable public
 keys for native query records (#738). An explicitly run disposable-boot
 integration test compares six RSA/EC/DSA serialization streams byte for

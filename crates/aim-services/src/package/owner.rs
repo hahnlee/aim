@@ -22,6 +22,8 @@ use aim_storage::guest_inode::{self, GuestInode};
 use super::write::Enabled;
 use super::{State, resilient, restrictions::Restrictions, sibling};
 
+pub mod app_ids;
+
 /// A failed write may have committed the main file before the reserve
 /// copy failed. Callers must publish that state even when reporting it.
 #[derive(Debug)]
