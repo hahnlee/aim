@@ -2,6 +2,20 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("page-size-setting")) {
+            for (int seed : new int[] {0, 6, 8, 16, 32, 64, 127}) {
+                for (int mode = -1; mode <= 128; mode++) {
+                    var setting = member("fixture", 0, 0).setPageSizeAppCompatFlags(seed);
+                    try {
+                        setting.setPageSizeAppCompatFlags(mode);
+                        System.out.println(seed + " " + mode + " " + setting.getPageSizeAppCompatFlags());
+                    } catch (IllegalArgumentException error) {
+                        System.out.println(seed + " " + mode + " error=" + error.getMessage());
+                    }
+                }
+            }
+            return;
+        }
         if (args.length != 0 && args[0].equals("native-alignment")) {
             nativeAlignment();
             return;

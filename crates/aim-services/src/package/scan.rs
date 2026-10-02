@@ -24,8 +24,9 @@ mod abi;
 pub use abi::{
     AbiPolicy, AbiScanContext, AbiScanMode, AbiSelectionError, BundledAbis, NativeLibraryCopy,
     NativeLibraryEntry, NativeLibraryEnvironment, NativeLibraryError, NativeLibraryInstallError,
-    NativeLibraryInstallPolicy, NativeLibraryPaths, NativeLibraryScan, PackageAbis, SharedUserAbi,
-    SharedUserAbiMismatch, SupportedAbi, SupportedAbis, ZipNativeLibraries,
+    NativeLibraryInstallPolicy, NativeLibraryPaths, NativeLibraryScan, PackageAbis,
+    PageSizeCompatPolicy, SharedUserAbi, SharedUserAbiMismatch, SupportedAbi, SupportedAbis,
+    ZipNativeLibraries,
 };
 mod setting;
 mod signing;

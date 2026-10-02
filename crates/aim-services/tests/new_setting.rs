@@ -864,6 +864,34 @@ fn new_settings_match_the_original_runtime() {
     eprintln!(
         "native/original ZIP and ELF alignment flags match {cases} base/split and ISA-path cases"
     );
+    let page_settings = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "page-size-setting",
+    ]));
+    let output = String::from_utf8(page_settings.stdout).unwrap();
+    let mut original = output.lines();
+    let mut cases = 0;
+    for seed in [0, 6, 8, 16, 32, 64, 127] {
+        for mode in -1..=128 {
+            let mut setting = aim_services::package::settings::Package::default();
+            setting.set_page_size_compat(seed).unwrap();
+            let value = match setting.set_page_size_compat(mode) {
+                Ok(()) => setting.page_size_compat.to_string(),
+                Err(error) => {
+                    assert_eq!(setting.page_size_compat, seed);
+                    format!("error={error}")
+                }
+            };
+            assert_eq!(original.next().unwrap(), format!("{seed} {mode} {value}"));
+            cases += 1;
+        }
+    }
+    assert_eq!(original.next(), None);
+    eprintln!("native/original page-size setting setter matches {cases} seed/mode combinations");
     let abi_policy = AbiPolicy::from_platform(&apks.platform, &all_abis, &supported_abis, &|key| {
         properties.get(key).cloned()
     })
@@ -1733,6 +1761,85 @@ fn new_settings_match_the_original_runtime() {
         .finish_native_library_metadata(candidate, &apks, &abi_policy, &abi_environment, context)
         .unwrap();
     assert!(!mismatch);
+    let page_policy = PageSizeCompatPolicy::from_platform(&apks.platform).unwrap();
+    let install = NativeLibraryInstallPolicy {
+        page_size,
+        extract: false,
+        debuggable: false,
+        compat_16kb_disabled: false,
+        manifest_compat_disabled: false,
+    };
+    if page_policy.enabled && page_size == 16384 {
+        let unchanged = scan.clone();
+        let mut no_manifest = duplicate(&candidate);
+        no_manifest.record.parsed.page_size_app_compat_flags = 0;
+        let (_, diagnostic) = scan
+            .finish_page_size_metadata(
+                no_manifest,
+                &no_inventory,
+                &page_policy,
+                &bit64,
+                install,
+                AbiScanContext {
+                    system: false,
+                    ..context
+                },
+            )
+            .unwrap();
+        assert!(diagnostic.unwrap().contains("unmapped APK"));
+        assert_eq!(scan, unchanged);
+    }
+    let mut candidate = candidate;
+    let before_page = candidate.record.settings.page_size_compat;
+    candidate.record.parsed.page_size_app_compat_flags = 32;
+    let stale_page = duplicate(&candidate);
+    let (candidate, diagnostic) = scan
+        .finish_page_size_metadata(
+            candidate,
+            &no_inventory,
+            &page_policy,
+            &bit64,
+            install,
+            context,
+        )
+        .unwrap();
+    assert_eq!(diagnostic, None);
+    let expected_page = if page_policy.enabled && page_size == 16384 {
+        before_page | 32
+    } else {
+        before_page
+    };
+    assert_eq!(candidate.record.settings.page_size_compat, expected_page);
+    let mut invalid_page = duplicate(&candidate);
+    invalid_page.record.parsed.page_size_app_compat_flags = 128;
+    let unchanged = scan.clone();
+    if page_policy.enabled && page_size == 16384 {
+        assert!(matches!(
+            scan.finish_page_size_metadata(
+                invalid_page,
+                &apks,
+                &page_policy,
+                &bit64,
+                install,
+                context
+            ),
+            Err(SigningError::NativeLibrary { .. })
+        ));
+        if expected_page != before_page {
+            assert!(matches!(
+                scan.finish_page_size_metadata(
+                    stale_page,
+                    &apks,
+                    &page_policy,
+                    &bit64,
+                    install,
+                    context
+                ),
+                Err(SigningError::Rejected(_))
+            ));
+        }
+        assert_eq!(scan, unchanged);
+    }
     assert_eq!(
         candidate.record.settings.primary_cpu_abi.as_deref(),
         Some("arm64-v8a")

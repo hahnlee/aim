@@ -123,6 +123,22 @@ pub struct Package {
     pub split_versions: Vec<(String, i32)>,
 }
 
+impl Package {
+    /// PackageSetting.setPageSizeAppCompatFlags at android-16.0.0_r1 (#810).
+    pub fn set_page_size_compat(&mut self, mode: i32) -> Result<(), String> {
+        if !(0..128).contains(&mode) {
+            return Err("Invalid page size compat mode specified".into());
+        }
+        self.page_size_compat |= mode;
+        if mode == 8 {
+            self.page_size_compat &= !16;
+        } else if mode == 16 {
+            self.page_size_compat &= !8;
+        }
+        Ok(())
+    }
+}
+
 /// `InstallSource`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InstallSource {
@@ -425,7 +441,7 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
     p.debuggable = e.bool("debuggable")?.unwrap_or(false);
     p.loading = e.bool("isLoading")?.unwrap_or(false);
     p.base_revision_code = e.int("baseRevisionCode")?.unwrap_or(0);
-    p.page_size_compat = e.int("pageSizeCompat")?.unwrap_or(0);
+    p.set_page_size_compat(e.int("pageSizeCompat")?.unwrap_or(0))?;
     p.domain_set_id = string(e, "domainSetId").filter(|id| !id.is_empty());
     for child in e.children() {
         if libraries(&mut p, child)? {

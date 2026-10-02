@@ -3,6 +3,8 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use crate::package::pkg::AndroidPackage;
 mod alignment;
+mod page_size;
+pub use page_size::PageSizeCompatPolicy;
 mod install;
 mod lifecycle;
 pub use install::{NativeLibraryCopy, NativeLibraryInstallError};

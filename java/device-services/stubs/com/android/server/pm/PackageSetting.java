@@ -25,6 +25,7 @@ public class PackageSetting extends SettingBase {
     public int getAppId() { throw new RuntimeException("stub"); }
     public int getCategoryOverride() { throw new RuntimeException("stub"); }
     public int getPageSizeAppCompatFlags() { throw new RuntimeException("stub"); }
+    public PackageSetting setPageSizeAppCompatFlags(int flags) { throw new RuntimeException("stub"); }
     public float getLoadingProgress() { throw new RuntimeException("stub"); }
     public boolean isLoading() { throw new RuntimeException("stub"); }
     public PackageKeySetData getKeySetData() { throw new RuntimeException("stub"); }

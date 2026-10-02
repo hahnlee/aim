@@ -65,6 +65,58 @@ pub struct NewPackageOutcome {
 }
 
 impl SigningScan {
+    /// Apply page-size scan policy after ABI/path and installation ownership.
+    /// Alignment errors retain existing flags and are returned for reporting.
+    pub fn finish_page_size_metadata(
+        &mut self,
+        mut candidate: NewPackageOutcome,
+        apks: &crate::package::write::Apks,
+        policy: &super::PageSizeCompatPolicy,
+        supported_64: &[String],
+        install: super::NativeLibraryInstallPolicy,
+        context: super::AbiScanContext<'_>,
+    ) -> Result<(NewPackageOutcome, Option<String>), SigningError> {
+        let record = &mut candidate.record;
+        let at = self.accepted_slot(record, "page-size")?;
+        if record.parsed.path.as_deref() != Some(&record.settings.code_path) {
+            return Err(SigningError::Rejected(Error {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                phase: "page-size",
+                message: "parsed code path disagrees with accepted setting".into(),
+            }));
+        }
+        let alignment = || {
+            let paths = super::NativeLibraryPaths {
+                root: record
+                    .parsed
+                    .native_library_root_dir
+                    .clone()
+                    .ok_or("missing native library root")?,
+                requires_isa: record.parsed.native_library_root_requires_isa,
+                primary: record.parsed.native_library_dir.clone().unwrap_or_default(),
+                secondary: record.parsed.secondary_native_library_dir.clone(),
+            };
+            apks.native_library_alignment(&record.parsed, supported_64, &paths, install)
+        };
+        let diagnostic = policy
+            .apply_setting(
+                &record.parsed,
+                &mut record.settings,
+                context,
+                install.page_size,
+                supported_64,
+                &alignment,
+            )
+            .map_err(|error| SigningError::NativeLibrary {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                error,
+            })?;
+        self.settings.packages[at] = record.settings.clone();
+        Ok((candidate, diagnostic))
+    }
+
     /// Finish the accepted candidate's scan ABI branch and setting metadata.
     /// Required extraction remains an explicit rejection until its owner has
     /// completed it (#810); factory/reuse phases can commit without copying.
