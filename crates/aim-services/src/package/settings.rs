@@ -4,15 +4,15 @@
 //! legacy permission definitions and the settings' versions, as
 //! `Settings.readSettingsLPw` reads them (`writeLPr` writes them).
 //!
-//! Not modelled yet: domain verification state (`<domain-verifications>`,
-//! `DomainVerificationPersistence`, #705) and what only older platforms
-//! write (per-package `<perms>`, `<enabled-components>` and
-//! `<disabled-components>`, `<domain-verification>`, the single-user
+//! Not modelled yet: what only older platforms write (per-package
+//! `<perms>`, `<enabled-components>`, `<disabled-components>`,
+//! `<domain-verification>`, the single-user
 //! preferred activities, `last-platform-version`, the pre-M `flags`), which
 //! the original reads only to migrate.
 
 use aim_android_xml::Element;
 
+use super::domain_verification;
 use super::{children, string};
 
 /// `ApplicationInfo.FLAG_SYSTEM`.
@@ -41,6 +41,7 @@ pub struct Settings {
     /// `mRenamedPackages`: new name, old name.
     pub renamed_packages: Vec<(String, String)>,
     pub key_sets: KeySets,
+    pub domain_verification: domain_verification::State,
 }
 
 /// `Settings.VersionInfo`.
@@ -247,6 +248,8 @@ impl Settings {
                 }
                 "verifier" => s.verifier = string(e, "device"),
                 "keyset-settings" => s.key_sets = key_sets(e)?,
+                "domain-verifications" => s.domain_verification.read(e)?,
+                "domain-verifications-legacy" => s.domain_verification.read_legacy(e)?,
                 "version" => {
                     let volume_uuid = string(e, "volumeUuid");
                     s.versions.retain(|v| v.volume_uuid != volume_uuid);

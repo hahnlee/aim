@@ -10,6 +10,7 @@
 
 pub mod apps_filter;
 pub mod component_resolver;
+pub mod domain_verification;
 pub mod intent;
 pub mod intent_filter;
 pub mod info;
@@ -284,6 +285,24 @@ mod tests {
     <lastIssuedKeyId value="1" />
     <lastIssuedKeySetId value="3" />
   </keyset-settings>
+  <domain-verifications>
+    <active>
+      <package-state packageName="android" id="00000000-0000-0000-0000-000000000001" hasAutoVerifyDomains="true" signature="abc">
+        <state><domain name="example.com" state="1" /><domain name="other.com" state="2" /><domain name="example.com" state="4" /></state>
+        <user-states>
+          <user-state userId="0" allowLinkHandling="true"><enabled-hosts><host name="example.com" /><host name="example.com" /><host name="" /></enabled-hosts></user-state>
+          <user-state allowLinkHandling="true" />
+        </user-states>
+        <uri-relative-filter-groups>
+          <domain name="example.com"><uri-relative-filter-group action="1"><uri-relative-filter uri-part="1" pattern-type="0" filter="/path" /></uri-relative-filter-group></domain>
+        </uri-relative-filter-groups>
+      </package-state>
+    </active>
+    <restored><package-state packageName="org.example.app" id="00000000-0000-0000-0000-000000000002" hasAutoVerifyDomains="false" /></restored>
+  </domain-verifications>
+  <domain-verifications-legacy>
+    <user-states packageName="android"><user-state userId="0" state="2" /><user-state userId="10" state="3" /><user-state userId="0" state="4" /></user-states>
+  </domain-verifications-legacy>
 </packages>
 "#;
 
@@ -428,6 +447,26 @@ mod tests {
         }
 
         let s = &state.settings;
+        let domains = &s.domain_verification;
+        assert_eq!(domains.active.len(), 1);
+        assert_eq!(domains.restored.len(), 1);
+        assert_eq!(domains.active[0].name, "android");
+        assert!(domains.active[0].has_auto_verify_domains);
+        assert_eq!(domains.active[0].signature.as_deref(), Some("abc"));
+        assert_eq!(
+            domains.active[0].domains,
+            [(Some("example.com".into()), 4), (Some("other.com".into()), 2)]
+        );
+        assert_eq!(domains.active[0].users.len(), 1);
+        assert_eq!(domains.active[0].users[0].enabled_hosts, ["example.com"]);
+        assert!(domains.active[0].users[0].allow_link_handling);
+        let group = &domains.active[0].uri_relative_filter_groups[0].1[0];
+        assert_eq!(group.action, 0);
+        assert_eq!(group.filters[0].filter, "/path");
+        assert_eq!(
+            domains.legacy,
+            [(Some("android".into()), vec![(0, 4), (10, 3)])]
+        );
         assert_eq!(s.versions.len(), 2);
         assert_eq!(
             s.versions[1].volume_uuid.as_deref(),
