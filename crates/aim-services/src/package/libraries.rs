@@ -51,6 +51,25 @@ impl Registry {
         self.entries.get(name)?.get(&version)
     }
 
+    /// SharedLibrariesImpl.getLatestStaticSharedLibraVersionLPr: the greatest
+    /// nonnegative version strictly below the incoming version, not the map's
+    /// absolute maximum. An absent selected setting does not fall back again.
+    pub fn latest_static_setting<'a>(
+        &self,
+        pkg: &super::pkg::AndroidPackage,
+        settings: &'a super::settings::Settings,
+    ) -> Option<&'a super::settings::Package> {
+        let versions = self.entries.get(pkg.static_shared_library_name.as_ref()?)?;
+        let (version, library) = versions
+            .range(..pkg.static_shared_lib_version)
+            .next_back()?;
+        if *version < 0 {
+            return None;
+        }
+        let name = library.package_name.as_ref()?;
+        settings.packages.iter().find(|p| &p.name == name)
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = &SharedLibrary> {
         self.entries.values().flat_map(|versions| versions.values())
     }

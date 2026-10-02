@@ -310,3 +310,105 @@ fn uid_cleanup_matches_the_pinned_owner_policy() {
     }
     assert_eq!(checked, 2);
 }
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn static_library_signature_setting_selection_matches_the_pinned_image() {
+    use sha2::{Digest, Sha256};
+    let jar =
+        Apk::open(&aim_paths::original_image().join("system/framework/services.jar")).unwrap();
+    let mut checked = 0;
+    for name in ["classes.dex", "classes2.dex", "classes3.dex"] {
+        let bytes = jar.file(name).unwrap();
+        let dex = Dex::parse(&bytes).unwrap();
+        let Some(class) = dex.class("Lcom/android/server/pm/SharedLibrariesImpl;") else {
+            continue;
+        };
+        for (method, length, hash) in [
+            (
+                "getLatestStaticSharedLibraVersionLPr",
+                58,
+                "b5296449707aa3eeb37ae91bf3fb6c1da86d5e8c143cc24c11f181af8ab7f807",
+            ),
+            (
+                "getStaticSharedLibLatestVersionSetting",
+                51,
+                "1a9ba3cadf25567c2fd6b0f9e920d4233dc58aa08205f27e02f884c6cfd46a20",
+            ),
+        ] {
+            let methods = dex.methods_named(class, method).unwrap();
+            assert_eq!(methods.len(), 1);
+            let words = units(&bytes, &methods[0]).unwrap();
+            assert_eq!(words.len(), length);
+            let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(bytes)),
+                hash,
+                "inspected {method} policy changed"
+            );
+            if method == "getLatestStaticSharedLibraVersionLPr" {
+                assert_eq!(&words[0x14..0x16], &[0x0216, 0xffff]); // previous version = -1
+                assert_eq!(&words[0x23..0x25], &[0x073b, 6]); // skip version >= incoming
+                assert_eq!(dex.method(words[0x26] as u32).unwrap().1, "max");
+                assert_eq!(&words[0x2c..0x2e], &[0x0416, 0]);
+                assert_eq!(&words[0x30..0x32], &[0x0a3a, 9]); // negative selection returns null
+                assert_eq!(dex.method(words[0x33] as u32).unwrap().1, "get");
+            } else {
+                assert_eq!(
+                    dex.method(words[0x15] as u32).unwrap().1,
+                    "getLatestStaticSharedLibraVersionLPr"
+                );
+                assert_eq!(dex.method(words[0x1f] as u32).unwrap().1, "getPackageName");
+                assert_eq!(dex.method(words[0x23] as u32).unwrap().1, "getPackageLPr");
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 2);
+}
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn static_library_declaration_constraints_match_the_pinned_image() {
+    use sha2::{Digest, Sha256};
+    let jar =
+        Apk::open(&aim_paths::original_image().join("system/framework/services.jar")).unwrap();
+    let mut checked = 0;
+    for name in ["classes.dex", "classes2.dex", "classes3.dex"] {
+        let bytes = jar.file(name).unwrap();
+        let dex = Dex::parse(&bytes).unwrap();
+        let Some(class) = dex.class("Lcom/android/server/pm/ScanPackageUtils;") else {
+            continue;
+        };
+        let methods = dex
+            .methods_named(class, "assertStaticSharedLibraryIsValid")
+            .unwrap();
+        assert_eq!(methods.len(), 1);
+        let words = units(&bytes, &methods[0]).unwrap();
+        assert_eq!(words.len(), 251);
+        let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(bytes)),
+            "11d48b036180d1095a59f44bab56eb82ef658204c11560aeb83c317732b64b4d"
+        );
+        for (at, method) in [
+            (0x00, "getTargetSdkVersion"),
+            (0x0c, "getOriginalPackages"),
+            (0x16, "getLibraryNames"),
+            (0x20, "getSharedUserId"),
+            (0x26, "getActivities"),
+            (0x30, "getServices"),
+            (0x3a, "getProviders"),
+            (0x44, "getReceivers"),
+            (0x4e, "getPermissionGroups"),
+            (0x58, "getAttributions"),
+            (0x62, "getPermissions"),
+            (0x6c, "getProtectedBroadcasts"),
+            (0x76, "getOverlayTarget"),
+        ] {
+            assert_eq!(dex.method(words[at + 1] as u32).unwrap().1, method);
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 1);
+}

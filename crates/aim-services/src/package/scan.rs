@@ -15,6 +15,7 @@ mod image;
 mod setting;
 mod signing;
 mod uids;
+mod validate;
 pub use identity::Identity;
 pub use image::{Apex, Code, Image, Kind, Location, Partition, Rejected};
 pub use setting::{NewSetting, SettingMetadata, User, UserPolicy};

@@ -9,6 +9,25 @@ pub(super) fn saved(
     verified: &sign::SigningDetails,
     settings: &settings::Settings,
 ) -> Result<(), String> {
+    with_disabled(
+        package,
+        verified,
+        settings,
+        settings
+            .disabled_system_packages
+            .iter()
+            .find(|p| p.name == package.name),
+    )
+}
+
+/// The disabled setting belongs to the scanned request, even when a static
+/// library's signature-check setting belongs to a different version.
+pub(super) fn with_disabled(
+    package: &settings::Package,
+    verified: &sign::SigningDetails,
+    settings: &settings::Settings,
+    disabled: Option<&settings::Package>,
+) -> Result<(), String> {
     let candidate = History::verified(verified);
     let known = |s: &settings::Signatures| !s.signatures.is_empty();
     let previous = package.signatures.as_ref().filter(|s| known(s));
@@ -19,10 +38,7 @@ pub(super) fn saved(
                     .into(),
             );
         }
-        if let Some(original) = settings
-            .disabled_system_packages
-            .iter()
-            .find(|p| p.name == package.name)
+        if let Some(original) = disabled
             .and_then(|p| p.signatures.as_ref())
             .filter(|s| known(s))
             && !candidate.allows_update_from(&History::saved(original), false)
@@ -120,6 +136,24 @@ mod tests {
         assert!(saved(&package, &verified(&rotated), &state).is_ok());
         state.disabled_system_packages[0].signatures = Some(Default::default());
         assert!(saved(&package, &verified(&rotated), &state).is_ok());
+    }
+
+    #[test]
+    fn disabled_signer_belongs_to_the_request_not_the_selected_library_version() {
+        let package = setting(Some(certificates(1, &[])));
+        let state = settings::Settings {
+            disabled_system_packages: vec![setting(Some(certificates(2, &[])))],
+            ..Default::default()
+        };
+        let candidate = verified(&certificates(1, &[]));
+        assert!(saved(&package, &candidate, &state).is_err());
+        assert!(with_disabled(&package, &candidate, &state, None).is_ok());
+        let request_disabled = settings::Package {
+            name: "other_version".into(),
+            signatures: Some(certificates(2, &[])),
+            ..Default::default()
+        };
+        assert!(with_disabled(&package, &candidate, &state, Some(&request_disabled)).is_err());
     }
 
     #[test]

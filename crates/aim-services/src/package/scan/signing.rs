@@ -9,6 +9,7 @@ use super::{
     physical_parse_flags,
 };
 use crate::package::{
+    libraries::Registry,
     owner::app_ids::Owner,
     owner::shared_users::{Bootstrap, RestoreError, ScanOrigin, SignatureError, saved_signatures},
     parse,
@@ -78,6 +79,7 @@ impl SigningScan {
     pub fn apply_new_system(
         &mut self,
         code: &Code,
+        libraries: &Registry,
         metadata: SettingMetadata,
         users: UserPolicy<'_>,
     ) -> Result<NewPackageOutcome, SigningError> {
@@ -109,14 +111,8 @@ impl SigningScan {
                 "new system package already has a saved setting",
             ));
         }
-        // ReconcilePackageUtils selects the latest static-library setting for
-        // signature checks. That selection requires the declaration registry.
-        if code.parsed.static_shared_library_name.is_some() {
-            return Err(reject(
-                "identity",
-                "new static library requires latest-version signer selection (#806)",
-            ));
-        }
+        super::validate::static_library(&code.parsed, users.instant_app)
+            .map_err(|e| reject("validation", &e))?;
         let mut preparation = UidScan::with_identities(&self.settings, self.identities.clone());
         let (identity, _) = preparation.apply(code).map_err(SigningError::Rejected)?;
         let setting = preparation
@@ -145,7 +141,7 @@ impl SigningScan {
             origin: ScanOrigin::SystemDirectory,
         };
         next.settings.packages.push(record.settings.clone());
-        let signing = match next.apply(&record) {
+        let signing = match next.apply_with_libraries(&record, libraries) {
             Ok(outcome) => outcome,
             Err(error) => {
                 preparation
@@ -173,6 +169,46 @@ impl SigningScan {
     /// later failure preserves earlier committed candidate records; the
     /// caller may discard the whole candidate after a fatal system error.
     pub fn apply(&mut self, record: &Record) -> Result<SigningOutcome, SigningError> {
+        if record.parsed.static_shared_library_name.is_some() {
+            return Err(SigningError::Rejected(Error {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                phase: "identity",
+                message: "static signer selection requires the declaration registry (#806)".into(),
+            }));
+        }
+        self.reconcile(record, None)
+    }
+
+    /// Initial boot scan's static-library signature-check setting. The caller
+    /// supplies the complete owner registry; SCAN_INITIAL skips upgrade keysets.
+    pub fn apply_with_libraries(
+        &mut self,
+        record: &Record,
+        libraries: &Registry,
+    ) -> Result<SigningOutcome, SigningError> {
+        let check = libraries
+            .latest_static_setting(&record.parsed, &self.settings)
+            .cloned();
+        if record.parsed.static_shared_library_name.is_some()
+            && (record.parsed.shared_user_id.is_some()
+                || check.as_ref().is_some_and(|p| p.shared_user))
+        {
+            return Err(SigningError::Rejected(Error {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                phase: "identity",
+                message: "shared UID is not allowed in a static shared library".into(),
+            }));
+        }
+        self.reconcile(record, check.as_ref())
+    }
+
+    fn reconcile(
+        &mut self,
+        record: &Record,
+        signature_check: Option<&crate::package::settings::Package>,
+    ) -> Result<SigningOutcome, SigningError> {
         let fail = |phase, message| Error {
             package: record.settings.name.clone(),
             path: record.settings.code_path.clone(),
@@ -253,7 +289,15 @@ impl SigningScan {
             ),
             None => None,
         };
-        let normal = authorize::saved(previous, &record.signing, &self.settings);
+        let normal = authorize::with_disabled(
+            signature_check.unwrap_or(previous),
+            &record.signing,
+            &self.settings,
+            self.settings
+                .disabled_system_packages
+                .iter()
+                .find(|p| p.name == previous.name),
+        );
         let mut mismatch = None;
         match normal {
             Ok(()) => {

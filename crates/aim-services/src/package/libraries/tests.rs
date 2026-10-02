@@ -434,3 +434,57 @@ fn invalid_code_paths_leave_the_registry_unchanged() {
     assert!(registry.add_package(&malformed, None).is_err());
     assert_eq!(registry.entries().count(), 0);
 }
+
+#[test]
+fn static_signer_selection_uses_the_greatest_strictly_older_nonnegative_version() {
+    let mut registry = Registry::default();
+    let mut settings = crate::package::settings::Settings::default();
+    for version in [-2, -1, 0, 1, 4, 9, i64::MAX] {
+        let name = format!("provider_{version}");
+        let ps = package(&name, |p| {
+            p.static_shared_library_name = Some("static".into());
+            p.static_shared_lib_version = version;
+        });
+        registry.add_package(&ps, None).unwrap();
+        settings.packages.push(crate::package::settings::Package {
+            name,
+            ..Default::default()
+        });
+    }
+    let mut incoming = AndroidPackage {
+        static_shared_library_name: Some("static".into()),
+        ..Default::default()
+    };
+    for (version, expected) in [
+        (i64::MIN, None),
+        (-1, None),
+        (0, None),
+        (1, Some(0)),
+        (4, Some(1)),
+        (5, Some(4)),
+        (9, Some(4)),
+        (i64::MAX, Some(9)),
+    ] {
+        incoming.static_shared_lib_version = version;
+        assert_eq!(
+            registry
+                .latest_static_setting(&incoming, &settings)
+                .map(|p| p.name.clone()),
+            expected.map(|v| format!("provider_{v}"))
+        );
+    }
+    incoming.static_shared_lib_version = 5;
+    settings.packages.retain(|p| p.name != "provider_4");
+    assert!(
+        registry
+            .latest_static_setting(&incoming, &settings)
+            .is_none()
+    );
+    assert!(settings.packages.iter().any(|p| p.name == "provider_1")); // no second fallback
+    incoming.static_shared_library_name = None;
+    assert!(
+        registry
+            .latest_static_setting(&incoming, &settings)
+            .is_none()
+    );
+}
