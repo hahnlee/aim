@@ -67,6 +67,9 @@ pub struct NewPackageOutcome {
 }
 
 impl SigningScan {
+    pub(super) fn has_scanned_package(&self, name: &str) -> bool {
+        self.parsed.iter().any(|(n, _, _, _)| n == name)
+    }
     /// Apply page-size scan policy after ABI/path and installation ownership.
     /// Alignment errors retain existing flags and are returned for reporting.
     pub fn finish_page_size_metadata(
@@ -623,6 +626,7 @@ impl SigningScan {
         metadata: SettingMetadata,
         users: UserPolicy<'_>,
     ) -> Result<NewPackageOutcome, SigningError> {
+        self.remove_stale_disabled_system(code)?;
         let (candidate, mut preparation) = self.prepare_new_system(code, metadata, users)?;
         preparation
             .accept_uid(&candidate.record.settings.name)
@@ -662,6 +666,16 @@ impl SigningScan {
             return Err(reject(
                 "identity",
                 "new system package already has a saved setting",
+            ));
+        }
+        if Identity::original_setting(&code.parsed, &self.settings, &|name| {
+            self.has_scanned_package(name)
+        })
+        .is_some()
+        {
+            return Err(reject(
+                "identity",
+                "new system scan must adopt the eligible original setting (#804)",
             ));
         }
         super::validate::static_library(&code.parsed, users.instant_app)

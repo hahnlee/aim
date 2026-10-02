@@ -75,6 +75,50 @@ fn updated_system_source(
 }
 
 impl SigningScan {
+    /// scanPackageForInitLI drops a stale disabled setting before attempting
+    /// the fresh system scan. The removal survives subsequent scan rejection;
+    /// shared UID allocation survives until the normal pruning phase.
+    pub fn remove_stale_disabled_system(&mut self, code: &Code) -> Result<bool, SigningError> {
+        let flags = physical_parse_flags(&code.location.path).map_err(|message| {
+            SigningError::Rejected(Error {
+                package: code.parsed.package_name.clone(),
+                path: code.location.path.clone(),
+                phase: "location",
+                message,
+            })
+        })?;
+        if flags & parse::PARSE_IS_SYSTEM_DIR == 0 {
+            return Err(SigningError::Rejected(Error {
+                package: code.parsed.package_name.clone(),
+                path: code.location.path.clone(),
+                phase: "location",
+                message: "stale factory recovery requires system code".into(),
+            }));
+        }
+        let identity = Identity::select(&code.parsed, &self.settings, true);
+        if self
+            .settings
+            .packages
+            .iter()
+            .any(|p| p.name == identity.internal_name)
+            || Identity::original_setting(&code.parsed, &self.settings, &|name| {
+                self.has_scanned_package(name)
+            })
+            .is_some()
+        {
+            return Ok(false);
+        }
+        let count = self.settings.disabled_system_packages.len();
+        self.settings
+            .disabled_system_packages
+            .retain(|p| p.name != identity.internal_name);
+        let removed = count != self.settings.disabled_system_packages.len();
+        if removed {
+            self.disabled_users.remove(&identity.internal_name);
+        }
+        Ok(removed)
+    }
+
     pub fn scanned_user_states(&self, name: &str) -> Option<&BTreeMap<i32, UserState>> {
         self.scanned_users.get(name)
     }

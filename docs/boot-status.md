@@ -177,7 +177,7 @@ private flags, version, target SDK, file time, update hash and current signing
 certificates match all 240 original packages at unchanged code paths. The saved
 scan still matches 243 active/3 disabled packages, 16 groups and 23 libraries;
 the whole comparison passes (254.72s), with unchanged disposable disk state and
-owned process/mount cleanup. A separate original-APK fixture passes (20.58s),
+owned process/mount cleanup. A separate original-APK fixture passes (22.28s),
 including reserved APEX UID preservation, invalid seed rejection, domain-owner
 failure, missing framework/image policy and unavailable pre-platform privilege
 policy. `SigningScan::scan_existing` also stages retained-UID reconciliation
@@ -216,10 +216,22 @@ and shallow-copy APIs confirm default time 0 and shared changes (123 to 456);
 the native original-APK fixture checks retained live times, alias updates, cold
 isolation, stale copy rejection and rollback. Complete disable/enable transitions,
 user mutation integration and native reboot/template proof remain #815/#702/#798.
+New-system scan entry points now remove a stale disabled factory setting when
+its active data setting is absent, before UID/signature/metadata preparation.
+Its users are removed too, while the shared UID survives until normal pruning.
+Like the original initial scan, that recovery remains committed if the new scan
+fails. The original-APK fixture verifies failed-scan cleanup followed by a
+successful fresh scan at the retained shared UID, with the updated-system bit
+clear. Active settings and eligible original-name adoption prevent stale
+removal; new-package allocation rejects an eligible adoption until the caller
+uses its existing-setting path (#804). Data locations reject without mutation.
+Factory restoration with active data still requires resource cleanup before
+enabling the system setting and rescanning; that owner is tracked in #816.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 295 units pass (3.06s), and the Java image
+All 295 units pass (3.04s), and all eight original-APK scan-input tests pass
+(5.69s). The Java image
 API linkage build passes (14.6s). This is the initial system APK phase, not a
 complete native boot or template: native APEX preparation, image/data version
 selection, stub expansion, graph/permission/commit side effects, persistence and

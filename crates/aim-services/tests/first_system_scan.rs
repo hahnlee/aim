@@ -462,6 +462,122 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         }
     }
 
+    // Missing data settings must not leave the factory marked as updated.
+    let mut fresh_code = Image::load(&apks, &[]).unwrap().packages.remove(1);
+    aim_services::package::scan::ScanPolicy::for_location(&fresh_code.location)
+        .apply(
+            &mut fresh_code.parsed,
+            &fresh_code.signing,
+            Some(&scan.packages[0].candidate.record.signing),
+            false,
+            &apks,
+            &compatibility,
+            None,
+        )
+        .unwrap();
+    let mut orphan = state.clone();
+    orphan.packages.retain(|p| p.name != saved.name);
+    let mut recovered =
+        aim_services::package::scan::SigningScan::new(&config, &orphan, 36).unwrap();
+    let before_ids = recovered.identities.ids.clone();
+    let metadata = || aim_services::package::scan::SettingMetadata {
+        code_path: fresh_code.location.path.clone(),
+        legacy_native_library_path: None,
+        primary_cpu_abi: None,
+        secondary_cpu_abi: None,
+        version_code: saved.version_code,
+        flags: saved.flags,
+        private_flags: saved.private_flags,
+        last_modified_time: 0,
+        uses_sdk_libraries: saved.uses_sdk_libraries.clone(),
+        uses_static_libraries: saved.uses_static_libraries.clone(),
+        mime_groups: fresh_code.parsed.mime_groups.clone(),
+        domain_set_id: [77; 16],
+        target_sdk_version: fresh_code.parsed.target_sdk_version,
+        restrict_update_hash: fresh_code.parsed.restrict_update_hash.clone(),
+    };
+    let recovery_inputs = || {
+        let mut inputs = completion();
+        inputs.context.mode = AbiScanMode::Existing {
+            first_boot_or_upgrade: true,
+            old_was_stub: false,
+            saved: None,
+        };
+        inputs
+    };
+    assert!(
+        recovered
+            .scan_new_system(
+                &fresh_code,
+                metadata(),
+                inputs(&domain_ids).users,
+                &unreadable,
+                recovery_inputs()
+            )
+            .is_err()
+    );
+    assert!(recovered.settings.disabled_system_packages.is_empty());
+    assert!(recovered.disabled_user_states(&saved.name).is_none());
+    assert!(
+        !recovered
+            .settings
+            .packages
+            .iter()
+            .any(|p| p.name == saved.name)
+    );
+    assert_eq!(recovered.identities.ids, before_ids);
+    let restored = recovered
+        .scan_new_system(
+            &fresh_code,
+            metadata(),
+            inputs(&domain_ids).users,
+            &apks,
+            recovery_inputs(),
+        )
+        .unwrap();
+    assert_eq!(restored.candidate.record.settings.app_id, saved.app_id);
+    assert_eq!(restored.candidate.record.settings.flags & (1 << 7), 0);
+    assert!(recovered.settings.disabled_system_packages.is_empty());
+    assert!(restored.candidate.users[&0].first_install_time > 0);
+    let mut live = aim_services::package::scan::SigningScan::new(&config, &state, 36).unwrap();
+    let before = live.clone();
+    assert!(!live.remove_stale_disabled_system(&fresh_code).unwrap());
+    assert_eq!(live, before);
+    let mut invalid_location = fresh_code.location.clone();
+    invalid_location.path = "/data/app/fixture-update".into();
+    let invalid_code = aim_services::package::scan::Code {
+        location: invalid_location,
+        parsed: fresh_code.parsed.clone(),
+        signing: fresh_code.signing.clone(),
+    };
+    assert!(live.remove_stale_disabled_system(&invalid_code).is_err());
+    assert_eq!(live, before);
+
+    // Original-name adoption is an existing package, not stale recovery.
+    let mut adoption_code = aim_services::package::scan::Code {
+        location: fresh_code.location.clone(),
+        parsed: fresh_code.parsed.clone(),
+        signing: fresh_code.signing.clone(),
+    };
+    adoption_code.parsed.package_name = "fixture.incoming".into();
+    adoption_code.parsed.manifest_package_name = Some("fixture.incoming".into());
+    adoption_code.parsed.original_packages = Some(vec![Some(saved.name.clone())]);
+    let mut adoption_settings = state.clone();
+    adoption_settings.disabled_system_packages[0].name = "fixture.incoming".into();
+    let mut adoption =
+        aim_services::package::scan::SigningScan::new(&config, &adoption_settings, 36).unwrap();
+    let before = adoption.clone();
+    assert!(
+        !adoption
+            .remove_stale_disabled_system(&adoption_code)
+            .unwrap()
+    );
+    assert!(
+        matches!(adoption.apply_new_system(&adoption_code, metadata(), inputs(&domain_ids).users),
+        Err(SigningError::Rejected(ref error)) if error.phase == "identity" && error.message.contains("eligible original"))
+    );
+    assert_eq!(adoption, before);
+
     let reserved = aim_services::package::settings::Settings {
         packages: vec![aim_services::package::settings::Package {
             name: "fixture.apex.module".into(),

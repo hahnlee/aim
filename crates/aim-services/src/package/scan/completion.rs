@@ -59,6 +59,7 @@ impl SigningScan {
         apks: &Apks,
         inputs: ScanMetadataCompletion<'_>,
     ) -> Result<CompletedScanMetadata, SigningError> {
+        self.remove_stale_disabled_system(code)?;
         let mut staged = self.clone();
         let (candidate, mut preparation) = match staged.prepare_new_system(code, metadata, users) {
             Ok(prepared) => prepared,
