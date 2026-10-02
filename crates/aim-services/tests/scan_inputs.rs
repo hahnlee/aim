@@ -334,8 +334,61 @@ fn ordered_signing_scan_commits_groups_and_preserves_prior_records_on_failure() 
     let inputs = Inputs::load_verified_code(&state, &apks).unwrap();
     let google = &inputs.active["com.google.android.gsf"];
     let platform = &inputs.active["android"];
+    let group_name = google.parsed.shared_user_id.as_deref().unwrap();
+    assert_ne!(platform.parsed.shared_user_id.as_deref(), Some(group_name));
+    state.settings.shared_users[0].name = group_name.into();
+    // This synthetic signer candidate exercises reconciliation without inventing
+    // a shared UID declaration in either original APK's parsed manifest.
+    let incompatible = aim_services::package::scan::Record {
+        settings: google.settings.clone(),
+        parsed: google.parsed.clone(),
+        signing: platform.signing.clone(),
+        identity: google.identity.clone(),
+        origin: google.origin,
+    };
     let before = state.clone();
     let mut scan = SigningScan::new(&Default::default(), &state.settings, 36).unwrap();
+    for declaration in [None, Some("other.shared.uid".into())] {
+        let mut changed = aim_services::package::scan::Record {
+            settings: google.settings.clone(),
+            parsed: google.parsed.clone(),
+            signing: google.signing.clone(),
+            identity: google.identity.clone(),
+            origin: google.origin,
+        };
+        changed.parsed.shared_user_id = declaration;
+        let snapshot = scan.clone();
+        let error = scan.apply(&changed).unwrap_err();
+        assert!(matches!(error, SigningError::Rejected(ref e) if e.phase == "identity"));
+        assert_eq!(scan, snapshot);
+    }
+    let mut leaving = aim_services::package::scan::Record {
+        settings: google.settings.clone(),
+        parsed: google.parsed.clone(),
+        signing: google.signing.clone(),
+        identity: google.identity.clone(),
+        origin: google.origin,
+    };
+    leaving.parsed.booleans |= aim_services::package::pkg::booleans::LEAVING_SHARED_UID;
+    let mut still_shared = scan.clone();
+    still_shared.apply(&leaving).unwrap();
+    assert!(still_shared.settings.packages[0].shared_user);
+    let mut left_settings = state.settings.clone();
+    left_settings
+        .packages
+        .retain(|p| p.name == google.settings.name);
+    left_settings.packages[0].shared_user = false;
+    left_settings.shared_users.clear();
+    leaving.settings.shared_user = false;
+    let mut left = SigningScan::new(&Default::default(), &left_settings, 36).unwrap();
+    let snapshot = left.clone();
+    leaving.parsed.booleans &= !aim_services::package::pkg::booleans::LEAVING_SHARED_UID;
+    let error = left.apply(&leaving).unwrap_err();
+    assert!(matches!(error, SigningError::Rejected(ref e) if e.phase == "identity"));
+    assert_eq!(left, snapshot);
+    leaving.parsed.booleans |= aim_services::package::pkg::booleans::LEAVING_SHARED_UID;
+    left.apply(&leaving).unwrap();
+    assert!(!left.settings.packages[0].shared_user);
     assert!(
         scan.apply(google)
             .unwrap()
@@ -343,7 +396,7 @@ fn ordered_signing_scan_commits_groups_and_preserves_prior_records_on_failure() 
             .is_none()
     );
     assert_eq!(
-        scan.identities.shared_users["group"].signatures_changed,
+        scan.identities.shared_users[group_name].signatures_changed,
         Some(false)
     );
     assert_eq!(
@@ -363,7 +416,13 @@ fn ordered_signing_scan_commits_groups_and_preserves_prior_records_on_failure() 
         google.signing.signatures
     );
     let committed = scan.clone();
-    assert!(matches!(scan.apply(platform), Err(SigningError::Fatal(_))));
+    let error = scan.apply(platform).unwrap_err();
+    assert!(matches!(error, SigningError::Rejected(ref e) if e.phase == "identity"));
+    assert_eq!(scan, committed);
+    assert!(matches!(
+        scan.apply(&incompatible),
+        Err(SigningError::Fatal(_))
+    ));
     assert_eq!(scan, committed);
     assert_eq!(state, before);
 
@@ -383,17 +442,20 @@ fn ordered_signing_scan_commits_groups_and_preserves_prior_records_on_failure() 
             .is_some()
     );
     assert_eq!(
-        scan.identities.shared_users["group"].signatures_changed,
+        scan.identities.shared_users[group_name].signatures_changed,
         Some(true)
     );
     assert_eq!(scan.settings.packages[0].app_id, 10001);
     let committed = scan.clone();
-    assert!(matches!(scan.apply(platform), Err(SigningError::Fatal(_))));
+    assert!(matches!(
+        scan.apply(&incompatible),
+        Err(SigningError::Fatal(_))
+    ));
     assert_eq!(scan, committed);
     let mut old_api = SigningScan::new(&Default::default(), &state.settings, 29).unwrap();
     old_api.apply(google).unwrap();
     assert!(matches!(
-        old_api.apply(platform),
+        old_api.apply(&incompatible),
         Err(SigningError::Rejected(_))
     ));
 

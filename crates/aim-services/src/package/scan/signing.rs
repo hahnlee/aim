@@ -5,6 +5,7 @@ use super::{Error, Record, authorize, physical_parse_flags};
 use crate::package::{
     owner::shared_users::{Bootstrap, RestoreError, ScanOrigin, SignatureError, saved_signatures},
     parse,
+    pkg::booleans,
     settings::Settings,
     sign::SigningDetails,
     system_config::SystemConfig,
@@ -102,6 +103,21 @@ impl SigningScan {
         } else {
             None
         };
+        // InstallPackageHelper.scanPackageNewLI ignores a leaving declaration
+        // only once the saved package no longer owns a shared UID. A changed
+        // group makes ScanPackageUtils replace the PackageSetting, rather than
+        // reuse its UID. This saved-identity phase cannot allocate that replacement.
+        let declared_group = selected_shared_user(
+            previous.shared_user,
+            record.parsed.shared_user_id.as_deref(),
+            record.parsed.is(booleans::LEAVING_SHARED_UID),
+        );
+        if group_name.as_deref() != declared_group {
+            return Err(reject(
+                "identity",
+                "manifest shared UID requires replacing saved UID ownership (#804)".into(),
+            ));
+        }
         let mut group = match &group_name {
             Some(name) => Some(
                 self.identities
@@ -187,5 +203,37 @@ impl SigningScan {
         Ok(SigningOutcome {
             system_signature_mismatch: mismatch,
         })
+    }
+}
+
+fn selected_shared_user(saved_shared: bool, declared: Option<&str>, leaving: bool) -> Option<&str> {
+    if !saved_shared && leaving {
+        None
+    } else {
+        declared
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_shared_user;
+
+    #[test]
+    fn shared_user_selection_retains_existing_members_until_migration() {
+        for (saved_shared, declared, leaving, selected) in [
+            (false, None, false, None),
+            (false, None, true, None),
+            (true, None, false, None),
+            (true, None, true, None),
+            (false, Some("uid"), false, Some("uid")),
+            (false, Some("uid"), true, None),
+            (true, Some("uid"), false, Some("uid")),
+            (true, Some("uid"), true, Some("uid")),
+        ] {
+            assert_eq!(
+                selected_shared_user(saved_shared, declared, leaving),
+                selected
+            );
+        }
     }
 }
