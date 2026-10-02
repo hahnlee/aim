@@ -16,7 +16,8 @@ guest-init --image <derived> --data <data> --run \
 - `--exclude` keeps services (and `exec` programs) from starting. A
   `wait_for_prop` or `exec` that only an excluded service would end is
   satisfied after two seconds, as with `--only`.
-- guest-init stops every service on its timeout, on SIGINT and on SIGTERM.
+- Shutdown cleanup is incomplete on SIGINT: guest processes and the
+  mounted data volume can remain after guest-init exits (#796).
 - `<data>` is a case-sensitive disk image, `<data>.asif`, that guest-init
   attaches at `<data>` for the boot and detaches when it stops
   (docs/storage.md); `cargo aim storage` shows what it occupies.
@@ -45,6 +46,15 @@ Boots with it reach `sys.boot_completed` as before (four boots of a
 reused data image, 20-25 s; fresh data images 50-52 s, then a cold
 Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
+
+PackageManager still runs original. On the M4 C branch, native
+`package::owner::Store` writes enabled settings to the original ABX
+restriction file with backup, reserve copy and system ownership (#798).
+Two original-PMS boots on disposable native-written data (2026-10-02)
+reached `sys.boot_completed=1`: Settings read as disabled (`enabled=2`),
+then after a native reset to default, Settings launched successfully
+(`am start -W`, 85 ms). This checks file compatibility; the native
+PackageManager service and SystemServer facade are not activated.
 
 The device's own system service (`dev.aim.server.DeviceServices`,
 docs/system-services.md, "The system_server bridge") is on the system

@@ -481,13 +481,24 @@ in-memory state.
 | `/data/app/~~*/<pkg>-*/`, `/data/user*/<u>/<pkg>`, `/data/misc/profiles` | files | installd on PMS's orders | apps, ART |
 
 The first-boot template (#565, #647; [first-boot.md](first-boot.md))
-ships `packages.xml`, `packages.list`, user 0's restrictions, the parser
-cache, the decompressed stubs and the permission module's files, as the
+ships `packages.xml`, `packages.list`, user 0's restrictions,
+the decompressed stubs and the permission module's files, as the
 original's build-time first boot wrote them. The native owner reads
 them in Rust (`crates/aim-services/src/package`, on the binary and text
 XML of `crates/aim-android-xml`), tested on the files of a template first
 boot with an installed app, a disabled package and a disabled
 component.
+
+On the C branch, `package::owner::Store` commits enabled settings to
+the complete restriction document as typed ABX, with the original's
+backup and reserve-copy protocol and guest inode ownership (#798).
+An interrupted main write preserves the previous state; a reserve-copy
+failure reports that the main file committed. It refuses a document
+changed outside the owner. In a disposable-data check (2026-10-02),
+native code disabled Settings, the original PMS booted and read
+`enabled=2`, then native code restored the default; the original booted
+again and launched Settings (`am start -W`: status ok, 85 ms). No native
+writer runs beside PMS; this store is not yet wired into the C service.
 
 **Who writes what, by slice:**
 

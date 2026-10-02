@@ -13,4 +13,5 @@
 pub mod copy;
 pub mod data;
 pub mod disk;
+pub mod guest_inode;
 pub mod system;

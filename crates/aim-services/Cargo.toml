@@ -17,6 +17,7 @@ aim-host-location = { path = "../aim-host-location" }
 aim-host-sensors = { path = "../aim-host-sensors" }
 aim-hostcall.workspace = true
 aim-service-aidl = { path = "aidl" }
+aim-storage.workspace = true
 android-image-extract = { path = "../../tools/android-image-extract" }
 dsa = "0.6"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }

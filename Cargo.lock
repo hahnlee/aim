@@ -255,6 +255,7 @@ dependencies = [
  "aim-hostcall",
  "aim-paths",
  "aim-service-aidl",
+ "aim-storage",
  "android-image-extract",
  "dsa",
  "flate2",

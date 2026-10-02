@@ -18,6 +18,7 @@ pub mod intent_resolver;
 pub mod feed;
 pub mod list;
 pub mod model;
+pub mod owner;
 pub mod parse;
 pub mod pkg;
 pub mod preferred;
