@@ -222,6 +222,63 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     assert_eq!(scan.owner.libraries, before.libraries);
     assert!(retained.copies.is_empty());
 
+    // The factory scan updates only the disabled copy while a data update is
+    // active. It neither reconciles signatures nor admits a live group member.
+    let mut state = scan.owner.settings.clone();
+    let active = state
+        .packages
+        .iter_mut()
+        .find(|p| p.name == saved.name)
+        .unwrap();
+    active.code_path = "/data/app/fixture-update".into();
+    active.flags |= 1 << 7;
+    state.disabled_system_packages.push(saved.clone());
+    let mut factory_owner =
+        aim_services::package::scan::SigningScan::new(&config, &state, 36).unwrap();
+    let mut factory_code = Image::load(&apks, &[]).unwrap().packages.remove(1);
+    aim_services::package::scan::ScanPolicy::for_location(&factory_code.location)
+        .apply(
+            &mut factory_code.parsed,
+            &factory_code.signing,
+            Some(&scan.packages[0].candidate.record.signing),
+            true,
+            &apks,
+            &compatibility,
+            None,
+        )
+        .unwrap();
+    let factory_before = factory_owner.clone();
+    assert!(matches!(
+        factory_owner.scan_disabled_system(&factory_code, update(), &saved_users, None, &unreadable, completion()),
+        Err(SigningError::Rejected(ref error)) if error.phase == "code-time"
+    ));
+    assert_eq!(factory_owner, factory_before);
+    let factory = factory_owner
+        .scan_disabled_system(
+            &factory_code,
+            update(),
+            &saved_users,
+            None,
+            &apks,
+            completion(),
+        )
+        .unwrap();
+    assert_eq!(
+        factory.record.settings.domain_set_id.as_deref(),
+        Some("63636363-6363-6363-6363-636363636363")
+    );
+    assert_eq!(factory.record.settings.signatures, saved.signatures);
+    assert_eq!(factory.users, saved_users[&saved.name]);
+    assert_eq!(
+        factory_owner.settings.packages,
+        factory_before.settings.packages
+    );
+    assert_eq!(factory_owner.identities, factory_before.identities);
+    assert_eq!(factory_owner.libraries, factory_before.libraries);
+    let mut expected = factory_before;
+    expected.settings.disabled_system_packages[0] = factory.record.settings;
+    assert_eq!(factory_owner, expected);
+
     let reserved = aim_services::package::settings::Settings {
         packages: vec![aim_services::package::settings::Package {
             name: "fixture.apex.module".into(),

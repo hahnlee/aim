@@ -31,7 +31,9 @@ pub use abi::{
 };
 mod boot;
 mod completion;
+mod disabled;
 pub use boot::{FirstBootSystemInputs, SystemImageScan};
+pub use disabled::DisabledSystemMetadata;
 mod setting;
 mod signing;
 pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};
