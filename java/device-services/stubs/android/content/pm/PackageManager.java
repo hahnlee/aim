@@ -31,6 +31,7 @@ public abstract class PackageManager {
     public abstract boolean hasSystemFeature(String featureName);
     public abstract java.util.List<PermissionGroupInfo> getAllPermissionGroups(int flags);
     public abstract java.util.List<PermissionInfo> queryPermissionsByGroup(String permissionGroup, int flags) throws NameNotFoundException;
+    public abstract PermissionInfo getPermissionInfo(String permissionName, int flags) throws NameNotFoundException;
     public abstract PackageInstaller getPackageInstaller();
     public PackageInfo getPackageArchiveInfo(String archiveFilePath, int flags) { throw new RuntimeException("stub"); }
 }

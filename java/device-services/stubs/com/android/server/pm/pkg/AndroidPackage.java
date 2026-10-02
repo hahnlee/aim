@@ -5,4 +5,5 @@ package com.android.server.pm.pkg;
 public interface AndroidPackage {
     String getBaseApkPath();
     java.util.List<com.android.internal.pm.pkg.component.ParsedProvider> getProviders();
+    java.util.List<com.android.internal.pm.pkg.component.ParsedPermission> getPermissions();
 }

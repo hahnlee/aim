@@ -310,7 +310,7 @@ fn publishes_a_batch_whose_digest_matches() {
     let user = user_record(0);
     let system = system_record();
     let mut inner = Inner::default();
-    inner.asked.push((1, Some(77)));
+    inner.asked.push((1, Some(77), Instant::now()));
     inner.begin(true);
     put(&mut inner, PACKAGE, "com.example.app", &package);
     put(&mut inner, PARSED, "com.example.app", b"parcel");

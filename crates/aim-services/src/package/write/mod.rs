@@ -22,6 +22,7 @@
 mod apk;
 mod change;
 mod enabled;
+mod oracle;
 mod session;
 #[cfg(test)]
 mod tests;
@@ -202,6 +203,11 @@ impl Writes {
         }
     }
 
+    /// The latest state observed before `sent`.
+    pub fn state_before(&self, sent: Instant) -> Option<Arc<State>> {
+        self.inner.lock().unwrap().pre_state(sent).map(|(s, _)| s)
+    }
+
     /// Answers a write of `package`, or `None` for another call.
     pub fn answer(&self, call: &mut ShadowCall<'_>) -> Option<Answer> {
         if call.descriptor != pm::DESCRIPTOR
@@ -298,14 +304,14 @@ impl Writes {
         if due.is_empty() && changed.is_empty() {
             return Vec::new();
         }
-        let state = states(FRESH);
+        let state = states(Instant::now(), FRESH);
         let dropped = self.inner.lock().unwrap().dropped;
         if let Some(state) = &state {
             self.observe(state, dropped);
         }
         let mut checks: Vec<Check> = changed
             .into_iter()
-            .map(|c| self.check_change(c, state.as_deref()))
+            .flat_map(|c| self.check_change(c, state.as_deref()))
             .collect();
         checks.extend(due.into_iter().map(|((package, user), track)| {
             let outcome = match (&track.not_modelled, &state) {
@@ -342,8 +348,9 @@ impl Writes {
     }
 
     /// Compares a settled install, update or removal with the original's,
-    /// `post` the original's state now.
-    fn check_change(&self, c: Change, post: Option<&State>) -> Check {
+    /// `post` the original's state now; an installed package's parse too.
+    fn check_change(&self, c: Change, post: Option<&State>) -> Vec<Check> {
+        let mut checks = Vec::new();
         let outcome = match post {
             None => CheckOutcome::NotModelled("no fresh state".into()),
             Some(post) => {
@@ -388,6 +395,14 @@ impl Writes {
                             m.signatures = Some(apks.signatures(ps, pkg));
                             o.signatures =
                                 Some(ps.signatures.clone().ok_or_else(|| "unsigned".to_string()));
+                            checks.push(Check {
+                                service: "package".into(),
+                                descriptor: pm::DESCRIPTOR.into(),
+                                operation: "install parse".into(),
+                                calls: Vec::new(),
+                                subject: c.name.clone(),
+                                outcome: oracle::compare(apks.parsed(ps), pkg),
+                            });
                         }
                         if original == model {
                             CheckOutcome::Matched
@@ -401,14 +416,18 @@ impl Writes {
                 }
             }
         };
-        Check {
-            service: "package".into(),
-            descriptor: pm::DESCRIPTOR.into(),
-            operation: c.kind.name().into(),
-            calls: Vec::new(),
-            subject: c.name,
-            outcome,
-        }
+        checks.insert(
+            0,
+            Check {
+                service: "package".into(),
+                descriptor: pm::DESCRIPTOR.into(),
+                operation: c.kind.name().into(),
+                calls: Vec::new(),
+                subject: c.name,
+                outcome,
+            },
+        );
+        checks
     }
 }
 

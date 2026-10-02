@@ -1,12 +1,14 @@
 //! An installed package's APKs, read from the guest's files: their
 //! signers, verified as the original's `ApkSignatureVerifier` verifies an
-//! install (`package::sign`).
+//! install (`package::sign`), and the package the native parser makes of
+//! them (`package::parse`), the parser's oracle on installs.
 
 use std::path::PathBuf;
 
 use android_image_extract::source::FileSource;
 
 use crate::package::model::PackageState;
+use crate::package::parse::{self, Platform};
 use crate::package::pkg::AndroidPackage;
 use crate::package::settings::Signatures;
 use crate::package::sign::{self, Apk, Build};
@@ -14,10 +16,11 @@ use crate::package::sign::{self, Apk, Build};
 /// Where the service host reads a guest path, if others may read it.
 pub type Files = Box<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
 
-/// The guest's files and the platform the verifier depends on.
+/// The guest's files and the platform the parser and the verifier
+/// depend on.
 pub struct Apks {
     pub files: Files,
-    pub build: Build,
+    pub platform: Platform,
 }
 
 impl Apks {
@@ -59,7 +62,7 @@ impl Apks {
             pkg.static_shared_library_name.is_some(),
             pkg.target_sdk_version,
             false,
-            &self.build,
+            &Build::of(&self.platform),
         )
         .map_err(|e| e.to_string())?;
         Ok(Signatures {
@@ -67,5 +70,15 @@ impl Apks {
             signatures: details.signatures,
             past_signatures: details.past_signing_certificates,
         })
+    }
+
+    /// The package the native parser makes of the APK at `ps`'s code path,
+    /// read back as the original's parcel reads (a split package is not
+    /// parsed yet, #720).
+    pub fn parsed(&self, ps: &PackageState) -> Result<AndroidPackage, String> {
+        let dir = (self.files)(&ps.path).ok_or_else(|| format!("{}: not readable", ps.path))?;
+        let package = parse::parse(&dir, &ps.path, 0, &self.platform).map_err(|e| e.to_string())?;
+        AndroidPackage::read_cache_entry(&package.to_cache_entry().bytes)
+            .map_err(|s| format!("the parser's entry does not read: status {s}"))
     }
 }

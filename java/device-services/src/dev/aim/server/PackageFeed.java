@@ -43,6 +43,7 @@ import android.util.SparseArray;
 
 import com.android.internal.compat.IPlatformCompat;
 import com.android.internal.pm.parsing.pkg.ParsedPackage;
+import com.android.internal.pm.pkg.component.ParsedPermission;
 import com.android.internal.pm.pkg.component.ParsedProvider;
 import com.android.server.LocalManagerRegistry;
 import com.android.server.pm.PackageManagerLocal;
@@ -263,11 +264,11 @@ final class PackageFeed extends IPackageFeed.Stub {
         TreeMap<Key, byte[]> records = new TreeMap<>();
         TreeMap<Key, AndroidPackage> parsed = new TreeMap<>();
         TreeSet<Integer> users = new TreeSet<>();
-        mInstalledPermissions = installedPermissions();
         mDeclaredBefore = mDeclared;
         mDeclared = new IdentityHashMap<>();
         PackageManagerLocal local = LocalManagerRegistry.getManager(PackageManagerLocal.class);
         try (PackageManagerLocal.UnfilteredSnapshot snapshot = local.withUnfilteredSnapshot()) {
+            mInstalledPermissions = installedPermissions(snapshot.getPackageStates().values());
             for (PackageState state : snapshot.getPackageStates().values()) {
                 add(records, parsed, users, PACKAGE, PARSED, state);
             }
@@ -598,7 +599,7 @@ final class PackageFeed extends IPackageFeed.Stub {
     }
 
     /** The installed permission definitions, by the package that defines each. */
-    private Map<String, TreeSet<String>> installedPermissions() {
+    private Map<String, TreeSet<String>> installedPermissions(Collection<PackageState> packages) {
         PackageManager pm = mContext.getPackageManager();
         List<String> groups = new ArrayList<>();
         groups.add(null);
@@ -616,6 +617,28 @@ final class PackageFeed extends IPackageFeed.Stub {
             for (PermissionInfo permission : permissions) {
                 installed.computeIfAbsent(permission.packageName, k -> new TreeSet<>())
                         .add(permission.name);
+            }
+        }
+        // Group queries can omit installed definitions.
+        for (PackageState state : packages) {
+            AndroidPackage pkg = state.getAndroidPackage();
+            if (pkg == null) {
+                continue;
+            }
+            for (ParsedPermission permission : pkg.getPermissions()) {
+                String name = permission.getName();
+                TreeSet<String> names = installed.get(state.getPackageName());
+                if (names != null && names.contains(name)) {
+                    continue;
+                }
+                try {
+                    PermissionInfo info = pm.getPermissionInfo(name, 0);
+                    if (state.getPackageName().equals(info.packageName)) {
+                        installed.computeIfAbsent(info.packageName, k -> new TreeSet<>()).add(name);
+                    }
+                } catch (PackageManager.NameNotFoundException e) {
+                    // A declared permission need not be the installed definition.
+                }
             }
         }
         return installed;

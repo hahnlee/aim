@@ -120,7 +120,7 @@ fn exception(a: &Answer) -> Option<(i32, String)> {
 }
 
 fn states(state: Arc<State>) -> States {
-    Box::new(move |_| Some(state.clone()))
+    Box::new(move |_, _| Some(state.clone()))
 }
 
 fn due(writes: &Writes, state: Arc<State>) -> Vec<Check> {
@@ -517,11 +517,7 @@ fn an_install_s_signers_are_verified_from_its_apks() {
     let host = dir.clone();
     let apks = apk::Apks {
         files: Box::new(move |p| (p == guest).then(|| host.clone())),
-        build: crate::package::sign::Build {
-            sdk_int: 36,
-            release: true,
-            always_load_past_certs_v4: true,
-        },
+        platform: crate::package::parse::Platform::load(&root, Default::default()).unwrap(),
     };
     let ps = PackageState {
         path: "/data/app/~~a==/com.google.android.gsf-b==".into(),

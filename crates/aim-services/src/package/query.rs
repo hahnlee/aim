@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aim_binder_host::parcel::{EX_SECURITY, Exception, Parcel, Reader, Result as ParcelResult};
 use aim_service_aidl::ReadParcelable;
@@ -90,14 +90,17 @@ type UsedVersion = fn(&PackageState, &str) -> Option<i64>;
 type Source<'a> = Option<&'a PackageState>;
 
 /// Where the model's state comes from: a state at least as new as the
-/// original's when asked (`feed::Feed::fresh`), or none.
-pub type States = Box<dyn Fn(Duration) -> Option<Arc<State>> + Send + Sync>;
+/// original's at the instant given (`feed::Feed::fresh_since`), or none.
+pub type States = Box<dyn Fn(Instant, Duration) -> Option<Arc<State>> + Send + Sync>;
 
 /// `package` and `package_native`, modelled over the feed's state.
 pub struct PackageModel {
     states: States,
     /// Intent resolution, and the apps filter of each state.
     resolver: Resolver,
+    /// The same for the states answered from again, kept apart so that
+    /// they do not evict the latest state's.
+    before: Resolver,
     /// The writes, compared with the original's (slice B).
     writes: Writes,
     /// The not-modelled paths reported so far: native or not, the
@@ -110,6 +113,7 @@ impl PackageModel {
         Arc::new(PackageModel {
             states,
             resolver: Resolver::default(),
+            before: Resolver::default(),
             writes: Writes::default(),
             reported: Mutex::new(HashSet::new()),
         })
@@ -128,7 +132,7 @@ pub fn start(
     dump: PathBuf,
     files: super::write::Files,
 ) -> Result<Arc<PackageModel>, String> {
-    let build = super::sign::Build::of(&super::parse::Platform::load(image, Default::default())?);
+    let platform = super::parse::Platform::load(image, Default::default())?;
     let join = Mutex::new(Join {
         framework: system_config::Framework::load(image)?,
         image: image.to_path_buf(),
@@ -139,12 +143,14 @@ pub fn start(
         parsed: HashMap::new(),
     });
     let feed = Feed::start(system, Some(dump));
-    let model = PackageModel::new(Box::new(move |t| {
-        let fed = feed.fresh(t)?;
+    let model = PackageModel::new(Box::new(move |since, t| {
+        let fed = feed.fresh_since(since, t)?;
         join.lock().unwrap().state(fed)
     }));
     model.writes.watch_sessions(system);
-    model.writes.read_apks(super::write::Apks { files, build });
+    model
+        .writes
+        .read_apks(super::write::Apks { files, platform });
     Ok(model)
 }
 
@@ -221,19 +227,52 @@ impl Join {
 
 impl ShadowModel for PackageModel {
     fn answer(&self, call: &mut ShadowCall<'_>) -> Answer {
-        let Some(state) = (self.states)(FRESH) else {
+        let Some(state) = (self.states)(call.sent, FRESH) else {
             return Answer::NotModelled;
         };
         self.writes.observe(&state, call.dropped);
         if let Some(answer) = self.writes.answer(call) {
             return answer;
         }
-        if let Some(answer) = self.resolver.answer(&state, call) {
+        self.query(&self.resolver, &state, call)
+    }
+
+    fn answer_before(&self, call: &mut ShadowCall<'_>) -> Option<Answer> {
+        let state = self.writes.state_before(call.sent)?;
+        match self.query(&self.before, &state, call) {
+            Answer::NotModelled => None,
+            answer => Some(answer),
+        }
+    }
+
+    fn decode_reply(
+        &self,
+        descriptor: &str,
+        code: u32,
+        r: &mut Reader<'_>,
+    ) -> Option<ParcelResult<Value>> {
+        if descriptor == pm::DESCRIPTOR
+            && let Some(v) = self.resolver.decode_reply(code, r)
+        {
+            return Some(v);
+        }
+        reply::decode(descriptor, code, r)
+    }
+
+    fn checks(&self) -> Vec<Check> {
+        self.writes.checks(&self.states)
+    }
+}
+
+impl PackageModel {
+    /// Answers a query from `state`, resolving intents with `resolver`.
+    fn query(&self, resolver: &Resolver, state: &Arc<State>, call: &mut ShadowCall<'_>) -> Answer {
+        if let Some(answer) = resolver.answer(state, call) {
             return answer;
         }
-        let resolution = self.resolver.resolution(&state);
+        let resolution = resolver.resolution(state);
         let q = Query {
-            state: &state,
+            state,
             filter: &resolution.apps_filter,
             calling_uid: call.sender_euid as i32,
         };
@@ -255,24 +294,6 @@ impl ShadowModel for PackageModel {
                 Answer::NotModelled
             }
         }
-    }
-
-    fn decode_reply(
-        &self,
-        descriptor: &str,
-        code: u32,
-        r: &mut Reader<'_>,
-    ) -> Option<ParcelResult<Value>> {
-        if descriptor == pm::DESCRIPTOR
-            && let Some(v) = self.resolver.decode_reply(code, r)
-        {
-            return Some(v);
-        }
-        reply::decode(descriptor, code, r)
-    }
-
-    fn checks(&self) -> Vec<Check> {
-        self.writes.checks(&self.states)
     }
 }
 
