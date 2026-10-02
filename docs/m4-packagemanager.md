@@ -510,7 +510,7 @@ and writes return an explicit unsupported-operation exception. The
 enabled-write decoder is also shared and retains `DONT_KILL_APP` and
 `SYNCHRONOUS` flags for the future mutation path. Receiver unit tests cover
 visibility by caller uid, interface-token rejection and publication to
-existing endpoints; all 122 package tests pass. Guest-init does not
+existing endpoints; all 123 package tests pass. Guest-init does not
 register these receivers; native scanning, mutation side effects and the
 SystemServer facade remain prerequisites tracked in #798 and the M4
 issues.
@@ -538,6 +538,14 @@ runtime display density. These failures make the scan check incomplete.
 Library dependency resolution, the complete native scan and #707's CTS
 acceptance still remain; declaration records are not yet served as full
 shared-library query results.
+
+The split asset loader prerequisite in `parse::resources` now compares
+matching resource configurations across all supplied APK tables instead
+of stopping at the first table. It combines all type-spec change flags,
+including nonmatching configurations, and retains the first ordinary APK
+on a configuration tie, as pinned `AssetManager2` does. This is tested
+with base/language-split tables; cluster parsing and manifest merging
+remain unimplemented (#720).
 
 **Who writes what, by slice:**
 
