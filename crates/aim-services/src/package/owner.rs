@@ -106,6 +106,22 @@ impl Store {
     ) -> Result<(), WriteError> {
         let root =
             signing::replace(&self.settings_document, settings).map_err(WriteError::before)?;
+        self.commit_package_document(root)
+    }
+
+    /// Persist owner-authorized single-member shared UID conversions together
+    /// with their signing scan. UID numbers and all unrelated metadata stay
+    /// fixed. Eligibility and image migration policy belong to the scan owner.
+    pub fn commit_shared_uid_migrations(
+        &mut self,
+        settings: &super::settings::Settings,
+    ) -> Result<(), WriteError> {
+        let root = signing::replace_migrations(&self.settings_document, settings)
+            .map_err(WriteError::before)?;
+        self.commit_package_document(root)
+    }
+
+    fn commit_package_document(&mut self, root: Element) -> Result<(), WriteError> {
         let persisted = super::settings::Settings::parse(&root).map_err(WriteError::before)?;
         let bytes = abx::write(&root).map_err(WriteError::before)?;
         let path = self.data.join("system/packages.xml");

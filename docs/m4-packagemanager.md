@@ -552,7 +552,7 @@ the system UID only; it currently attaches after bootstrap, so C's facade
 still must expose the same owner query before the native boot scan (#702).
 A disposable original-PMS boot (2026-10-02, boot completed) tested the
 Rust-to-Java call: SDK 30 returned false, SDK 31/36 true. Device-service
-linkage verification and 149 package unit tests pass. The image has no
+linkage verification and 152 package unit tests pass. The image has no
 `android.content.pm.Flags.sdkLibIndependence` API or loaded aconfig entry
 for that flag. Inspecting its original `services.jar` shows that the SDK
 dependency collection call passes `required=true` directly. `Policy::pinned`
@@ -601,7 +601,7 @@ runtime restriction on reusing deleted IDs and fresh-restoration holes.
 An explicitly run original-runtime test matches allocation, deletion,
 ownership replacement and exhaustion. On its disposable original-PMS
 boot (boot completed), all 243 active packages and 16 shared UID groups
-restored with their saved IDs. Java API linkage and 149 package unit tests
+restored with their saved IDs. Java API linkage and 152 package unit tests
 pass. `owner::shared_users::Bootstrap` now seeds the nine pinned platform
 shared users and the valid OEM declarations with fixed IDs and
 system/privileged flags (#803). Rejected OEM names, ranges and slot
@@ -621,7 +621,7 @@ original-PMS boot (2026-10-02, boot completed) restores all 243 active
 package IDs; after pruning, all 16 group names, IDs and signing records
 match the original saved settings. Unit tests cover flags, memberships,
 disabled-only members, snapshot/input immutability and cursor behavior;
-all 149 package unit tests pass. Conflicting decoded settings fail with
+all 152 package unit tests pass. Conflicting decoded settings fail with
 context; ordered recovery from corrupt raw Settings records remains
 unimplemented (#803). Scan reconciliation, shared UID signature/migration
 policy, UID persistence and snapshot publication are not connected
@@ -644,7 +644,7 @@ class and process names retain their parsed values. An explicit original
 runtime fixture fills the ComponentName cache before renaming and compares
 all seven kinds, their recomputed ComponentNames and unchanged name fields
 with native records. Java linkage verification and all explicit
-scan/runtime tests pass. All 149 package unit tests pass, and every active
+scan/runtime tests pass. All 152 package unit tests pass, and every active
 parsed package carries its selected internal name.
 `sign::History` now follows pinned SigningDetails certificate relationship
 rules: lineage capabilities, strict/existing ancestors and exact
@@ -724,9 +724,21 @@ NEW_INSTALL_ONLY remains the default and leaves existing groups intact.
 Five explicit scan tests cover unparsed/non-leaving members, absent or
 non-leaving disabled code, multiple members, policy selection, unchanged
 metadata, snapshots and preserved allocation. An original-image DEX test
-pins the three inspected eligibility/conversion methods. These are
-candidate-state checks; ownership persistence, publication and full boot
-migration remain under #803 and #798.
+pins the three inspected eligibility/conversion methods. `Store::commit_shared_uid_migrations` now persists owner-authorized
+single-member conversions together with signing state. It switches active
+and disabled records from sharedUserId to the same numeric userId, removes
+the group, and rebuilds certificate definitions/references after removal.
+Unrelated XML nodes and package metadata survive; partial conversions,
+remapped IDs, empty/multiple-member group deletion and cleared retained
+signers reject before writing. All 152 package unit tests pass. A real
+signed APK fixture is installed and updated by original PMS, native-parsed
+and integrity-verified, reconciled and migrated under BEST_EFFORT, then
+written while that disposable original PMS is stopped. On reboot original
+PMS retains the migrated UID (10213 in the recorded run), all 244 package
+UID/signature records and the other 16 groups; Settings launches. Main and
+reserve bytes match and owned data/process cleanup completes. The fixture
+requests no runtime permissions. Publication, permission-owner migration,
+complete native boot and CTS remain under #803, #798 and #702.
 `Store::commit_signatures` now persists package/group certificate and
 lineage capability state in the retained packages.xml document. It emits
 ABX with document-wide certificate definitions/references and the existing
@@ -734,7 +746,7 @@ backup/reserve/inode protocol, preserving unrelated attributes and nodes.
 Serialized public keys remain in the scan snapshot; packages.xml stores
 certificates. Metadata changes, cleared retained identities, duplicate/
 unmodelled owners and external document changes reject before commit.
-All 149 package unit tests pass. The disposable original-PMS runtime test
+All 152 package unit tests pass. The disposable original-PMS runtime test
 wrote all 243 active package and 16 group signing records into a separate
 native-owned fixture; native re-read matches complete persisted settings
 and main/reserve bytes match. Its live original-PMS data was not written.
