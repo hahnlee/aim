@@ -209,6 +209,22 @@ fn allocation_matches_the_original_runtime() {
         }
     }
     assert!(retained > 0);
+    let mut merged = aim_services::package::owner::shared_users::Bootstrap::restore(
+        &Default::default(),
+        &state.settings,
+    )
+    .unwrap();
+    merged.prune_unused(&state.settings);
+    assert_eq!(merged.shared_users.len(), state.settings.shared_users.len());
+    for saved in &state.settings.shared_users {
+        let group = &merged.shared_users[&saved.name];
+        assert_eq!(group.app_id, saved.app_id);
+        assert_eq!(group.signatures, saved.signatures);
+        assert_eq!(merged.ids.get(saved.app_id), restored.get(saved.app_id));
+    }
+    for saved in &state.settings.packages {
+        assert_eq!(merged.ids.get(saved.app_id), restored.get(saved.app_id));
+    }
     for package in &state.settings.packages {
         if package.shared_user {
             assert!(matches!(
