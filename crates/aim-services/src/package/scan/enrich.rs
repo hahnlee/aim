@@ -1,6 +1,6 @@
 //! ScanPackageUtils scan metadata and PackageStateUtils timestamp policy,
 //! ported from android-16.0.0_r1. Copyright (C) The Android Open Source
-//! Project, Apache License 2.0. ABI/flags and side effects have separate owners.
+//! Project, Apache License 2.0. ABI and side effects have separate owners.
 use crate::package::{
     pkg::{AndroidPackage, booleans},
     restrictions::UserState,
@@ -75,9 +75,65 @@ fn set_first(users: &mut BTreeMap<i32, UserState>, target: i32, time: i64) {
     }
 }
 
+pub(super) fn application(
+    package: &mut settings::Package,
+    parsed: &mut AndroidPackage,
+    factory_test: bool,
+    updated_system_app: bool,
+) {
+    parsed.booleans &= !booleans::FACTORY_TEST;
+    if factory_test
+        && parsed
+            .requested_permissions
+            .iter()
+            .any(|p| p == "android.permission.FACTORY_TEST")
+    {
+        parsed.booleans |= booleans::FACTORY_TEST;
+    }
+    (package.flags, package.private_flags) = super::application_flags(parsed, updated_system_app);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn final_flags_replace_saved_bits_and_gate_factory_mode_by_requested_permission() {
+        for factory in [false, true] {
+            for permission in [false, true] {
+                for old_factory in [false, true] {
+                    for updated in [false, true] {
+                        let mut pkg = AndroidPackage {
+                            target_sdk_version: 36,
+                            booleans: booleans::DEBUGGABLE
+                                | booleans::SYSTEM
+                                | if old_factory {
+                                    booleans::FACTORY_TEST
+                                } else {
+                                    0
+                                },
+                            requested_permissions: if permission {
+                                vec!["android.permission.FACTORY_TEST".into()]
+                            } else {
+                                vec!["android.permission.FACTORY_TEST.other".into()]
+                            },
+                            ..Default::default()
+                        };
+                        let mut setting = settings::Package {
+                            flags: -1,
+                            private_flags: -1,
+                            ..Default::default()
+                        };
+                        application(&mut setting, &mut pkg, factory, updated);
+                        assert_eq!(pkg.is(booleans::FACTORY_TEST), factory && permission);
+                        assert_eq!(setting.flags & 16 != 0, factory && permission);
+                        assert_eq!(setting.flags & 128 != 0, updated);
+                        assert_eq!(setting.flags & 3, 3);
+                        assert_eq!(setting.private_flags, 0);
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn scan_times_distinguish_initial_install_explicit_updates_and_changed_system_code() {
         let parsed = AndroidPackage {

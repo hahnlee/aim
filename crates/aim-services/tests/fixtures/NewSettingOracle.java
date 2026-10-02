@@ -2,6 +2,30 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("final-flags")) {
+            byte[] cache = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1]));
+            for (boolean factory : new boolean[] {false, true}) {
+                for (boolean permission : new boolean[] {false, true}) {
+                    for (boolean oldFactory : new boolean[] {false, true}) {
+                        for (boolean updated : new boolean[] {false, true}) {
+                            var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                                com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(cache);
+                            pkg.getRequestedPermissions().remove("android.permission.FACTORY_TEST");
+                            if (permission) pkg.addImplicitPermission("android.permission.FACTORY_TEST");
+                            pkg.setFactoryTest(oldFactory);
+                            pkg.setFactoryTest(factory && pkg.getRequestedPermissions().contains("android.permission.FACTORY_TEST"));
+                            var setting = member("fixture", -1, -1);
+                            setting.getPkgState().setUpdatedSystemApp(updated);
+                            var state = (com.android.server.pm.pkg.PackageStateInternal)(Object)setting;
+                            setting.setFlags(com.android.server.pm.parsing.PackageInfoUtils.appInfoFlags(pkg, state));
+                            setting.setPrivateFlags(com.android.server.pm.parsing.PackageInfoUtils.appInfoPrivateFlags(pkg, state));
+                            System.out.println(pkg.isFactoryTest() + " " + setting.getFlags() + " " + setting.getPrivateFlags());
+                        }
+                    }
+                }
+            }
+            return;
+        }
         if (args.length != 0 && args[0].equals("restore-native-directory")) {
             if (!android.os.SELinux.restorecon(new java.io.File(args[1])))
                 throw new java.io.IOException("restorecon rejected native directory");

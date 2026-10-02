@@ -511,8 +511,20 @@ runtime passes (83.02s), with prior component comparisons, Settings launch and
 owned cleanup. Generated ZIP completion tests isolate these seams; they do not
 prove a complete signed APK install or the original full ScanPackageUtils entry
 point. Files copied before a later error remain with the install cleanup owner.
-Complete boot ordering, final flags, persistence of the full result and replica
-publication remain #702/#810/#798.
+`finish_application_metadata` now completes factory-test and final public/private
+ApplicationInfo flags. Factory mode comes from the boot owner and requires the
+exact requested FACTORY_TEST permission; an old factory flag is cleared otherwise.
+Flags are recomputed from the adjusted parsed package and updated-system state,
+replacing retained bitfields. The accepted owner rejects stale candidates and
+refreshes a retained shared UID member's removal inputs without re-ORing cached
+group flags. The completion path includes this stage after code metadata.
+Original PackageImpl/PackageInfoUtils/SettingBase APIs match 16 factory/permission/
+old-flag/updated-system cases. All 289 aim-services units pass (3.71s); the expanded
+runtime passes (84.77s), including earlier checks, Settings launch and owned cleanup.
+The Java image API linkage build passes (13.8s). This checks the final flag helpers,
+not the whole original scan entry point. First admission of a new shared UID member
+must move after final enrichment (#812); complete boot ordering, full result
+persistence and replica publication remain #702/#810/#798.
 
 `Store::commit_native_library_metadata` now persists completed scan ABI/path
 metadata for retained active and disabled-system packages through the existing

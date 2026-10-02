@@ -14,6 +14,8 @@ pub struct ScanMetadataCompletion<'a> {
     pub install: NativeLibraryInstallPolicy,
     pub destination: Option<&'a NativeLibraryDestination<'a>>,
     pub clock: ScanClock,
+    /// Original SystemServer factory-test mode, supplied by its boot owner.
+    pub factory_test: bool,
 }
 
 #[derive(Debug)]
@@ -25,7 +27,7 @@ pub struct CompletedScanMetadata {
 }
 
 impl SigningScan {
-    /// Complete ABI/copy, page-size and code metadata in original stage order.
+    /// Complete ABI/copy, page-size, code and final application metadata.
     /// Only the finished candidate becomes accepted state. Files copied before
     /// a later error require cleanup by the install owner; this does not persist
     /// settings, publish a query replica or make filesystem rollback implicit.
@@ -75,6 +77,11 @@ impl SigningScan {
             inputs.context,
         )?;
         let candidate = staged.finish_code_metadata(candidate, apks, inputs.clock)?;
+        let candidate = staged.finish_application_metadata(
+            candidate,
+            inputs.factory_test,
+            inputs.context.updated,
+        )?;
         *self = staged;
         Ok(CompletedScanMetadata {
             candidate,
@@ -82,5 +89,63 @@ impl SigningScan {
             multi_arch_mismatch,
             alignment_diagnostic,
         })
+    }
+
+    /// Final ScanPackageUtils factory-test and ApplicationInfo flag enrichment.
+    /// Saved bitfields are replaced by the adjusted parsed package and the
+    /// setting owner's updated-system state. Publication remains a later phase.
+    pub fn finish_application_metadata(
+        &mut self,
+        mut candidate: NewPackageOutcome,
+        factory_test: bool,
+        updated_system_app: bool,
+    ) -> Result<NewPackageOutcome, SigningError> {
+        let record = &mut candidate.record;
+        let at = self.accepted_slot(record, "application-flags")?;
+        let reject = || {
+            SigningError::Rejected(super::Error {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                phase: "application-flags",
+                message: "accepted shared UID owner is missing".into(),
+            })
+        };
+        let mut shared = if record.settings.shared_user {
+            let name = &self
+                .settings
+                .shared_users
+                .iter()
+                .find(|g| g.app_id == record.settings.app_id)
+                .ok_or_else(reject)?
+                .name;
+            Some((
+                name.clone(),
+                self.identities
+                    .shared_users
+                    .get(name)
+                    .ok_or_else(reject)?
+                    .clone(),
+            ))
+        } else {
+            None
+        };
+        super::enrich::application(
+            &mut record.settings,
+            &mut record.parsed,
+            factory_test,
+            updated_system_app,
+        );
+        if let Some((name, mut group)) = shared.take() {
+            // A retained member's mutable setting changes in place in AOSP.
+            // Refresh its removal inputs without re-ORing cached group flags.
+            group.add_package(
+                &record.settings.name,
+                record.settings.flags,
+                record.settings.private_flags,
+            );
+            self.identities.shared_users.insert(name, group);
+        }
+        self.settings.packages[at] = record.settings.clone();
+        Ok(candidate)
     }
 }

@@ -2,6 +2,7 @@
 package com.android.server.pm;
 public class PackageSetting extends SettingBase {
     public String getPackageName() { throw new RuntimeException("stub"); }
+    public com.android.server.pm.pkg.PackageStateUnserialized getPkgState() { throw new RuntimeException("stub"); }
     public PackageSetting setPrimaryCpuAbi(String abi) { throw new RuntimeException("stub"); }
     public PackageSetting setSecondaryCpuAbi(String abi) { throw new RuntimeException("stub"); }
     public PackageSetting setPkg(com.android.server.pm.pkg.AndroidPackage pkg) { throw new RuntimeException("stub"); }

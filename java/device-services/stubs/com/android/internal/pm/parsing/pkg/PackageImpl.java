@@ -13,6 +13,10 @@ public abstract class PackageImpl implements ParsedPackage {
     public PackageImpl setSplitCodePaths(String[] paths) { throw new RuntimeException("stub"); }
     public PackageImpl setMultiArch(boolean value) { throw new RuntimeException("stub"); }
     public PackageImpl set32BitAbiPreferred(boolean value) { throw new RuntimeException("stub"); }
+    public PackageImpl setFactoryTest(boolean value) { throw new RuntimeException("stub"); }
+    public boolean isFactoryTest() { throw new RuntimeException("stub"); }
+    public java.util.Set<String> getRequestedPermissions() { throw new RuntimeException("stub"); }
+    public PackageImpl addImplicitPermission(String permission) { throw new RuntimeException("stub"); }
     public PackageImpl addLibraryName(String name) { throw new RuntimeException("stub"); }
     public String getNativeLibraryRootDir() { throw new RuntimeException("stub"); }
     public boolean isNativeLibraryRootRequiresIsa() { throw new RuntimeException("stub"); }

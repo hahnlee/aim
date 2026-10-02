@@ -2173,6 +2173,7 @@ fn new_settings_match_the_original_runtime() {
         // completion transaction retains all accepted metadata; copied files
         // remain the installation cleanup owner's responsibility.
         let inputs = || ScanMetadataCompletion {
+            factory_test: false,
             abi_policy: &abi_policy,
             native_environment: &install_env,
             context: install_context,
@@ -2398,6 +2399,7 @@ fn new_settings_match_the_original_runtime() {
         ..context
     };
     let inputs = || ScanMetadataCompletion {
+        factory_test: false,
         abi_policy: &abi_policy,
         native_environment: &abi_environment,
         context: combined_context,
@@ -2433,6 +2435,74 @@ fn new_settings_match_the_original_runtime() {
     assert_eq!(scan.identities.ids, before.identities.ids);
     eprintln!(
         "accepted scan reuse completion clears install-only override and preserves all stages on code-time failure"
+    );
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "final-flags",
+        "/data/local/tmp/code-time.cache",
+    ]));
+    let mut expected_flags = String::new();
+    for factory in [false, true] {
+        for permission in [false, true] {
+            for old_factory in [false, true] {
+                for updated in [false, true] {
+                    let mut owned = scan.clone();
+                    let mut candidate = duplicate(&combined.candidate);
+                    candidate.record.parsed = template.parsed.clone();
+                    candidate
+                        .record
+                        .parsed
+                        .requested_permissions
+                        .retain(|p| p != "android.permission.FACTORY_TEST");
+                    if permission {
+                        candidate
+                            .record
+                            .parsed
+                            .requested_permissions
+                            .push("android.permission.FACTORY_TEST".into());
+                    }
+                    if old_factory {
+                        candidate.record.parsed.booleans |=
+                            aim_services::package::pkg::booleans::FACTORY_TEST;
+                    } else {
+                        candidate.record.parsed.booleans &=
+                            !aim_services::package::pkg::booleans::FACTORY_TEST;
+                    }
+                    let stale = duplicate(&candidate);
+                    let final_candidate = owned
+                        .finish_application_metadata(candidate, factory, updated)
+                        .unwrap();
+                    use std::fmt::Write;
+                    writeln!(
+                        &mut expected_flags,
+                        "{} {} {}",
+                        final_candidate
+                            .record
+                            .parsed
+                            .is(aim_services::package::pkg::booleans::FACTORY_TEST),
+                        final_candidate.record.settings.flags,
+                        final_candidate.record.settings.private_flags,
+                    )
+                    .unwrap();
+                    if final_candidate.record.settings != stale.record.settings {
+                        let unchanged = owned.clone();
+                        assert!(matches!(
+                            owned.finish_application_metadata(stale, factory, updated),
+                            Err(SigningError::Rejected(_))
+                        ));
+                        assert_eq!(owned, unchanged);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(String::from_utf8(original.stdout).unwrap(), expected_flags);
+    eprintln!(
+        "native/original final factory and ApplicationInfo flags match 16 cases; stale final candidates reject"
     );
     let started = run(boot.command().args([
         "shell",
