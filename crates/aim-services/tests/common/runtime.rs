@@ -1,6 +1,6 @@
 //! Disposable original-runtime fixture support.
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 pub fn run(command: &mut Command) -> Output {
@@ -64,17 +64,4 @@ impl Drop for Boot {
         let mounts = run(&mut Command::new("mount")).stdout;
         assert!(!String::from_utf8_lossy(&mounts).contains(self.data.to_str().unwrap()));
     }
-}
-
-pub fn sources(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            files.extend(sources(&path));
-        } else if path.extension().is_some_and(|e| e == "java") {
-            files.push(path);
-        }
-    }
-    files
 }

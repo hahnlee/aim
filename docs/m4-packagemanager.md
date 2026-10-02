@@ -718,8 +718,16 @@ All 148 package unit tests pass. The disposable original-PMS runtime test
 wrote all 243 active package and 16 group signing records into a separate
 native-owned fixture; native re-read matches complete persisted settings
 and main/reserve bytes match. Its live original-PMS data was not written.
-An original-PMS reboot of this signature file and complete package-state
-persistence/publication remain pending (#798). New/removed package
+Original PackageSignatures.readXml now reads that native file; all 259
+signature owners match certificate bytes, scheme version, lineage
+capability flags and derived key counts. A separate explicit two-boot
+test stops original PMS, mounts its own stopped data volume, writes native
+signature persistence, detaches and restarts original PMS. Both boots
+complete; all 243 package and 16 shared UID signing/UID records survive,
+no signature XML read error is logged and Settings launches (`Status: ok`).
+This verifies original-reader and reboot compatibility of signature
+persistence. Complete package-state persistence/publication remains
+pending (#798). New/removed package
 reconciliation, boot wiring and an actual OTA boot remain pending
 (#702, #803, #805). Legacy certificate compatibility/recovery,
 upgrade keysets, owner-authorized rollback, full UID reconciliation and

@@ -8,9 +8,11 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 mod common {
+    pub mod java;
     pub mod runtime;
 }
-use common::runtime::{Boot, Data, run, sources};
+use common::java::sources;
+use common::runtime::{Boot, Data, run};
 
 impl Boot {
     fn oracle(&self, mode: &str) -> String {

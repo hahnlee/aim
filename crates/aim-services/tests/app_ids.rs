@@ -5,9 +5,11 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 mod common {
+    pub mod java;
     pub mod runtime;
 }
-use common::runtime::{Boot, Data, run, sources};
+use common::java::sources;
+use common::runtime::{Boot, Data, run};
 
 #[test]
 #[ignore = "requires aimctl, the pinned derived image, JDK and d8; run explicitly"]
@@ -815,6 +817,86 @@ fn allocation_matches_the_original_runtime() {
     assert_eq!(
         fs::read(&path).unwrap(),
         fs::read(path.with_file_name("packages.xml.reservecopy")).unwrap()
+    );
+
+    let rewritten = boot.data.join("data/local/tmp/native-signatures.xml");
+    fs::copy(&path, &rewritten).unwrap();
+    let root = aim_android_xml::read(&fs::read(&path).unwrap()).unwrap();
+    let mut expected = String::new();
+    let hex = |b: &[u8]| b.iter().map(|v| format!("{v:02x}")).collect::<String>();
+    for node in root.children() {
+        let signatures = match node.name.as_str() {
+            "package" | "updated-package" => {
+                let packages = if node.name == "package" {
+                    &desired.packages
+                } else {
+                    &desired.disabled_system_packages
+                };
+                &packages
+                    .iter()
+                    .find(|p| p.name == node.string("name").unwrap())
+                    .unwrap()
+                    .signatures
+            }
+            "shared-user" => {
+                &desired
+                    .shared_users
+                    .iter()
+                    .find(|g| g.name == node.string("name").unwrap())
+                    .unwrap()
+                    .signatures
+            }
+            _ => continue,
+        };
+        let Some(signatures) = signatures else {
+            continue;
+        };
+        let current = signatures
+            .signatures
+            .iter()
+            .map(|c| hex(c))
+            .collect::<Vec<_>>()
+            .join(",");
+        let past = signatures
+            .past_signatures
+            .as_ref()
+            .map(|p| {
+                p.iter()
+                    .map(|(c, f)| format!("{}:{f}", hex(c)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|| "-".into());
+        let key_count = SigningDetails::from_saved(signatures)
+            .unwrap()
+            .public_keys
+            .len();
+        expected.push_str(&format!(
+            "{} {} {} {} {} {key_count}\n",
+            node.name,
+            node.string("name").unwrap(),
+            signatures.scheme_version,
+            current,
+            past
+        ));
+    }
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.AppIdsOracle",
+        "read-signatures",
+        "/data/local/tmp/native-signatures.xml",
+    ]));
+    let actual = String::from_utf8(original.stdout).unwrap();
+    assert_eq!(actual.lines().count(), expected.lines().count());
+    for (line, (actual, expected)) in actual.lines().zip(expected.lines()).enumerate() {
+        assert_eq!(actual, expected, "original signature reader row {line}");
+    }
+    println!(
+        "original reader accepted {} native signature owners",
+        actual.lines().count()
     );
 
     println!(

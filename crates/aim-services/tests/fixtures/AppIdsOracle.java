@@ -2,6 +2,38 @@ package com.android.server.pm;
 
 public final class AppIdsOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("read-signatures")) {
+            java.util.ArrayList<android.content.pm.Signature> certificates = new java.util.ArrayList<>();
+            try (java.io.InputStream input = new java.io.FileInputStream(args[1])) {
+                com.android.modules.utils.TypedXmlPullParser parser = android.util.Xml.resolvePullParser(input);
+                String owner = null;
+                String name = null;
+                int type;
+                while ((type = parser.next()) != 1) {
+                    int depth = parser.getDepth();
+                    if (type == 2 && depth == 2) {
+                        String tag = parser.getName();
+                        if (tag.equals("package") || tag.equals("updated-package") || tag.equals("shared-user")) {
+                            owner = tag;
+                            name = parser.getAttributeValue(null, "name");
+                        }
+                    } else if (type == 2 && depth == 3 && owner != null && parser.getName().equals("sigs")) {
+                        PackageSignatures signatures = new PackageSignatures();
+                        signatures.readXml(parser, certificates);
+                        android.content.pm.SigningDetails details = signatures.mSigningDetails;
+                        if (details.getSignatures() == null) throw new AssertionError("original rejected " + name);
+                        System.out.println(owner + " " + name + " " + details.getSignatureSchemeVersion()
+                            + " " + certificateText(details.getSignatures(), false)
+                            + " " + certificateText(details.getPastSigningCertificates(), true)
+                            + " " + details.getPublicKeys().size());
+                    } else if (type == 3 && depth == 2) {
+                        owner = null;
+                        name = null;
+                    }
+                }
+            }
+            return;
+        }
         if (args.length != 0 && (args[0].equals("merge") || args[0].equals("group-merge"))) {
             byte[][] certs = new byte[4][];
             for (int c = 0; c < certs.length; c++) {
@@ -187,6 +219,19 @@ public final class AppIdsOracle {
         System.out.println(full.acquireAndRegisterNewAppId(b));
         full.removeSetting(19999);
         System.out.println(full.acquireAndRegisterNewAppId(b));
+    }
+    private static String certificateText(android.content.pm.Signature[] signatures, boolean flags) {
+        if (signatures == null) return "-";
+        StringBuilder result = new StringBuilder();
+        char[] hex = "0123456789abcdef".toCharArray();
+        for (android.content.pm.Signature signature : signatures) {
+            if (result.length() != 0) result.append(',');
+            for (byte b : signature.toByteArray()) {
+                result.append(hex[(b & 255) >>> 4]).append(hex[b & 15]);
+            }
+            if (flags) result.append(':').append(signature.getFlags());
+        }
+        return result.toString();
     }
     private static android.content.pm.Signature[] realSignatures(int[] ids, int[] flags, byte[][] certs) {
         if (ids == null) return null;
