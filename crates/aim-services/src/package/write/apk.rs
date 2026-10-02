@@ -24,31 +24,26 @@ pub struct Apks {
 }
 
 impl Apks {
-    /// The signers of the package installed at `ps`'s code path: its base
+    /// The signers of the parsed package's APK paths: its base
     /// APK's, which each split shares (`getSigningDetails`, verified in
     /// full).
-    pub fn signatures(
-        &self,
-        ps: &PackageState,
-        pkg: &AndroidPackage,
-    ) -> Result<Signatures, String> {
-        let dir = (self.files)(&ps.path).ok_or_else(|| format!("{}: not readable", ps.path))?;
-        let mut names: Vec<String> = std::fs::read_dir(&dir)
-            .map_err(|e| format!("{}: {e}", ps.path))?
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".apk"))
-            .collect();
-        names.sort();
-        let base = names
+    pub fn signatures(&self, pkg: &AndroidPackage) -> Result<Signatures, String> {
+        let base = pkg
+            .base_apk_path
+            .as_ref()
+            .ok_or("no parsed base APK path")?;
+        let mut paths = vec![base.clone()];
+        if let Some(splits) = &pkg.split_code_paths {
+            for path in splits {
+                paths.push(path.clone().ok_or("null parsed split APK path")?);
+            }
+        }
+        let sources = paths
             .iter()
-            .position(|n| n == "base.apk")
-            .ok_or_else(|| format!("{}: no base.apk", ps.path))?;
-        names.swap(0, base);
-        let paths: Vec<String> = names.iter().map(|n| format!("{}/{n}", ps.path)).collect();
-        let sources = names
-            .iter()
-            .map(|n| FileSource::open(&dir.join(n)).map_err(|e| format!("{}/{n}: {e}", ps.path)))
+            .map(|path| {
+                let host = (self.files)(path).ok_or_else(|| format!("{path}: not readable"))?;
+                FileSource::open(&host).map_err(|e| format!("{path}: {e}"))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let apk = |i: usize| Apk {
             path: &paths[i],
@@ -74,8 +69,7 @@ impl Apks {
     }
 
     /// The package the native parser makes of the APK at `ps`'s code path,
-    /// read back as the original's parcel reads (a split package is not
-    /// parsed yet, #720).
+    /// read back as the original's parcel reads.
     pub fn parsed(&self, ps: &PackageState) -> Result<AndroidPackage, String> {
         let dir = (self.files)(&ps.path).ok_or_else(|| format!("{}: not readable", ps.path))?;
         let package = parse::parse(&dir, &ps.path, 0, &self.platform).map_err(|e| e.to_string())?;

@@ -552,27 +552,28 @@ fn an_install_s_signers_are_verified_from_its_apks() {
     let Some(root) = aim_paths::original_image_with(GSF) else {
         return;
     };
-    let dir = std::env::temp_dir().join(format!("aim-write-apks-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let base = dir.join("base.apk");
-    let _ = std::fs::remove_file(&base);
-    std::os::unix::fs::symlink(root.join(GSF), &base).unwrap();
-    let guest = "/data/app/~~a==/com.google.android.gsf-b==".to_string();
-    let host = dir.clone();
+    let source = root.join(GSF);
+    let guest = "/data/app/example/nonstandard-base.apk";
+    let split = "/data/app/example/nonstandard-feature.apk";
     let apks = apk::Apks {
-        files: Box::new(move |p| (p == guest).then(|| host.clone())),
+        files: Box::new(move |p| ([guest, split].contains(&p)).then(|| source.clone())),
         platform: crate::package::parse::Platform::load(&root, Default::default()).unwrap(),
     };
-    let ps = PackageState {
-        path: "/data/app/~~a==/com.google.android.gsf-b==".into(),
-        ..PackageState::default()
-    };
-    let pkg = AndroidPackage {
+    let mut pkg = AndroidPackage {
         target_sdk_version: 36,
+        base_apk_path: Some(guest.into()),
         ..AndroidPackage::default()
     };
-    let signatures = apks.signatures(&ps, &pkg).unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
+    let signatures = apks.signatures(&pkg).unwrap();
+    pkg.split_code_paths = Some(vec![Some(split.into())]);
+    assert_eq!(apks.signatures(&pkg).unwrap(), signatures);
+    pkg.split_code_paths = Some(vec![None]);
+    assert_eq!(
+        apks.signatures(&pkg).unwrap_err(),
+        "null parsed split APK path"
+    );
+    pkg.split_code_paths = Some(vec![Some("/data/app/example/unreadable.apk".into())]);
+    assert!(apks.signatures(&pkg).unwrap_err().contains("not readable"));
     assert_eq!(
         signatures.scheme_version,
         crate::package::sign::SIGNING_BLOCK_V3

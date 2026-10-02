@@ -786,7 +786,12 @@ owner without side effects, and compared with the original's outcome.
   Modelled: setComponentEnabledSetting and setApplicationEnabledSetting
   (not yet a caller changing another package, #754), installs and
   updates (app id, shared user, users' state; not yet signing and
-  libraries), removals for every user and for some users. Not yet: the
+  libraries), removals for every user and for some users. The APK signature
+  adapter now verifies the parsed base/split paths directly, supporting
+  file inputs and cluster base names other than `base.apk` (#801). It
+  rejects null/unreadable paths; an original signed APK test checks both
+  nonstandard base/split guest paths and its v3 signing lineage without
+  altering the original. Not yet: the
   parser's oracle on installs (#760), restoring a system package,
   suspension, preferred activities.
 - The parser's oracle runs here too: every APK the original parses

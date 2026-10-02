@@ -101,6 +101,12 @@ is still pending. Bootstrap facade wiring, native scan
 integration and native PackageManager
 activation remain pending (#707);
 no native PackageManager CTS result is claimed.
+The write/scan signature adapter now reads the parser's declared base and
+split APK paths rather than discovering files by a `base.apk` name. An
+original signed GSF APK verifies through nonstandard base/split guest
+paths, retaining v3 and its two-certificate lineage; null and unreadable
+split paths fail explicitly (#801). All 130 package tests run with their
+inputs present and pass. This does not activate the native scan.
 
 The device's own system service (`dev.aim.server.DeviceServices`,
 docs/system-services.md, "The system_server bridge") is on the system

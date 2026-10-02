@@ -393,7 +393,7 @@ impl Writes {
                             model.package.as_mut(),
                             original.package.as_mut(),
                         ) {
-                            m.signatures = Some(apks.signatures(ps, pkg));
+                            m.signatures = Some(apks.signatures(pkg));
                             o.signatures =
                                 Some(ps.signatures.clone().ok_or_else(|| "unsigned".to_string()));
                             checks.push(Check {
