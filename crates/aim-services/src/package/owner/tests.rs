@@ -166,3 +166,84 @@ fn refuses_an_external_writer_and_unknown_targets() {
     assert!(error.message.contains("outside the native owner"));
     assert_eq!(fs::read(path).unwrap(), b"<package-restrictions />");
 }
+
+#[test]
+fn signature_commit_reindexes_certificates_and_retains_unrelated_documents() {
+    let data = Data::new();
+    let restrictions = data.settings();
+    fs::write(&restrictions, RESTRICTIONS).unwrap();
+    let path = data.0.join("system/packages.xml");
+    fs::write(&path, b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' custom='keep'><keep value='nested'/><sigs count='1' schemeVersion='3'><cert index='7' key='aa'/></sigs></package><shared-user name='group' userId='1000'><sigs count='1' schemeVersion='3'><cert index='7'/></sigs></shared-user><unknown attr='retain'/></packages>").unwrap();
+    let old_root = aim_android_xml::read(&fs::read(&path).unwrap()).unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let mut desired = store.state.settings.clone();
+    desired.packages[0].signatures = Some(super::super::settings::Signatures {
+        scheme_version: 3,
+        signatures: vec![vec![0xaa], vec![0xbb]],
+        past_signatures: Some(vec![(vec![0xcc], 3), (vec![0xaa], 1), (vec![0xbb], 0)]),
+        ..Default::default()
+    });
+    desired.shared_users[0].signatures = Some(super::super::settings::Signatures {
+        scheme_version: 3,
+        signatures: vec![vec![0xbb]],
+        past_signatures: Some(vec![(vec![0xcc], 3), (vec![0xbb], 0)]),
+        ..Default::default()
+    });
+    store.commit_signatures(&desired).unwrap();
+    assert_eq!(store.state.settings, desired);
+    assert_eq!(store.state(), &State::read(&data.0, &[0]).unwrap().unwrap());
+    assert_eq!(fs::read(&restrictions).unwrap(), RESTRICTIONS);
+    let bytes = fs::read(&path).unwrap();
+    assert!(bytes.starts_with(abx::MAGIC));
+    assert_eq!(bytes, fs::read(sibling(&path, ".reservecopy")).unwrap());
+    let root = aim_android_xml::read(&bytes).unwrap();
+    assert_eq!(
+        root.children().find(|e| e.name == "unknown"),
+        old_root.children().find(|e| e.name == "unknown")
+    );
+    let package = root.children().find(|e| e.name == "package").unwrap();
+    assert_eq!(package.string("custom").as_deref(), Some("keep"));
+    assert!(package.children().any(|e| e.name == "keep"));
+    let sigs = package.children().find(|e| e.name == "sigs").unwrap();
+    let certs: Vec<_> = sigs.children().filter(|e| e.name == "cert").collect();
+    assert_eq!(certs[0].int("index").unwrap(), Some(0));
+    assert_eq!(certs[1].int("index").unwrap(), Some(1));
+    let group = root.children().find(|e| e.name == "shared-user").unwrap();
+    let cert = group
+        .children()
+        .find(|e| e.name == "sigs")
+        .unwrap()
+        .children()
+        .next()
+        .unwrap();
+    assert_eq!(cert.int("index").unwrap(), Some(1));
+    assert!(cert.attr("key").is_none());
+    let persisted = fs::read(&path).unwrap();
+    let mut cleared = desired.clone();
+    cleared.packages[0].signatures = None;
+    assert!(!store.commit_signatures(&cleared).unwrap_err().committed);
+    assert_eq!(fs::read(&path).unwrap(), persisted);
+    assert_eq!(store.state.settings, desired);
+}
+
+#[test]
+fn signature_commit_refuses_metadata_changes_and_concurrent_writers() {
+    let data = Data::new();
+    data.settings();
+    let path = data.0.join("system/packages.xml");
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let before = fs::read(&path).unwrap();
+    let mut desired = store.state.settings.clone();
+    desired.packages[0].app_id += 1;
+    assert!(!store.commit_signatures(&desired).unwrap_err().committed);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    desired = store.state.settings.clone();
+    fs::write(
+        &path,
+        b"<packages><package name='other' codePath='/data/app/other' userId='10100'/></packages>",
+    )
+    .unwrap();
+    assert!(!store.commit_signatures(&desired).unwrap_err().committed);
+    assert_eq!(store.state.settings, desired);
+    assert!(!sibling(&path, ".reservecopy").exists());
+}

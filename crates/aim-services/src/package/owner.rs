@@ -24,6 +24,7 @@ use super::{State, resilient, restrictions::Restrictions, sibling};
 
 pub mod app_ids;
 pub mod shared_users;
+mod signing;
 
 /// A failed write may have committed the main file before the reserve
 /// copy failed. Callers must publish that state even when reporting it.
@@ -56,6 +57,7 @@ pub struct Store {
     data: PathBuf,
     state: State,
     restrictions: BTreeMap<u32, Element>,
+    settings_document: Element,
 }
 
 impl Store {
@@ -63,6 +65,15 @@ impl Store {
         let Some(state) = State::read(data, users)? else {
             return Ok(None);
         };
+        let settings_document = resilient(
+            &data.join("system/packages.xml"),
+            &data.join("system/packages-backup.xml"),
+            |root| Ok(root.clone()),
+        )?
+        .ok_or("settings document disappeared while opening owner")?;
+        if super::settings::Settings::parse(&settings_document)? != state.settings {
+            return Err("settings changed while opening native owner".into());
+        }
         let mut restrictions = BTreeMap::new();
         for &user in users {
             let dir = data.join("system/users").join(user.to_string());
@@ -78,11 +89,37 @@ impl Store {
             data: data.to_owned(),
             state,
             restrictions,
+            settings_document,
         }))
     }
 
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    /// Persist an owner-authorized signing scan. This changes signature
+    /// state only, retaining every unrelated XML node. Serialized keys
+    /// remain in the scan snapshot; packages.xml persists certificates.
+    pub fn commit_signatures(
+        &mut self,
+        settings: &super::settings::Settings,
+    ) -> Result<(), WriteError> {
+        let root =
+            signing::replace(&self.settings_document, settings).map_err(WriteError::before)?;
+        let persisted = super::settings::Settings::parse(&root).map_err(WriteError::before)?;
+        let bytes = abx::write(&root).map_err(WriteError::before)?;
+        let path = self.data.join("system/packages.xml");
+        let backup = self.data.join("system/packages-backup.xml");
+        prepare_document(&path, &backup, &self.settings_document, |root| {
+            super::settings::Settings::parse(root).map(|_| ())
+        })
+        .map_err(WriteError::before)?;
+        let result = write_resilient(&path, &backup, &bytes);
+        if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
+            self.settings_document = root;
+            self.state.settings = persisted;
+        }
+        result
     }
 
     /// Commits an enabled-state change that the service has validated.
@@ -215,8 +252,19 @@ fn remove(path: &Path) -> io::Result<()> {
 /// Refuse another writer's state. If only the reserve parsed, preserve
 /// it as the old backup before startWrite removes the reserve.
 fn prepare(path: &Path, backup: &Path, expected: &Element) -> Result<(), String> {
+    prepare_document(path, backup, expected, |root| {
+        Restrictions::parse(root).map(|_| ())
+    })
+}
+
+fn prepare_document(
+    path: &Path,
+    backup: &Path,
+    expected: &Element,
+    validate: impl Fn(&Element) -> Result<(), String>,
+) -> Result<(), String> {
     let parse = |root: &Element| {
-        Restrictions::parse(root)?;
+        validate(root)?;
         Ok(root.clone())
     };
     let current = resilient(path, backup, parse)?;

@@ -762,6 +762,61 @@ fn allocation_matches_the_original_runtime() {
         }
     }
     assert_eq!(state, before);
+    // Persist only into this test's own fixture; the original PMS keeps
+    // sole ownership of its mounted data. Store does not write live data.
+    let signature_data = data.0.join("signature-store");
+    fs::create_dir_all(signature_data.join("system")).unwrap();
+    fs::copy(
+        boot.data.join("data/system/packages.xml"),
+        signature_data.join("system/packages.xml"),
+    )
+    .unwrap();
+    let mut store = aim_services::package::owner::Store::open(&signature_data, &[0])
+        .unwrap()
+        .unwrap();
+    let mut desired = store.state().settings.clone();
+    for package in &mut desired.packages {
+        let verified = signing_scan
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == package.name)
+            .unwrap();
+        assert_eq!(package.app_id, verified.app_id);
+        package.signatures = verified.signatures.clone();
+    }
+    for group in &mut desired.shared_users {
+        let verified = signing_scan
+            .settings
+            .shared_users
+            .iter()
+            .find(|g| g.name == group.name)
+            .unwrap();
+        assert_eq!(group.app_id, verified.app_id);
+        group.signatures = verified.signatures.clone();
+    }
+    store.commit_signatures(&desired).unwrap();
+    let persisted = aim_services::package::State::read(&signature_data, &[0])
+        .unwrap()
+        .unwrap();
+    assert_eq!(store.state(), &persisted);
+    for package in &mut desired.packages {
+        if let Some(signatures) = &mut package.signatures {
+            signatures.public_keys = None;
+        }
+    }
+    for group in &mut desired.shared_users {
+        if let Some(signatures) = &mut group.signatures {
+            signatures.public_keys = None;
+        }
+    }
+    assert_eq!(persisted.settings, desired);
+    let path = signature_data.join("system/packages.xml");
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        fs::read(path.with_file_name("packages.xml.reservecopy")).unwrap()
+    );
+
     println!(
         "restored {} active packages and {} shared UID groups",
         state.settings.packages.len(),
