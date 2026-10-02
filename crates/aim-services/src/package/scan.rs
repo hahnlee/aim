@@ -12,8 +12,10 @@ use std::collections::BTreeMap;
 mod authorize;
 mod identity;
 mod image;
+mod signing;
 pub use identity::Identity;
 pub use image::{Apex, Code, Image, Kind, Location, Partition, Rejected};
+pub use signing::{SigningError, SigningOutcome, SigningScan};
 
 #[derive(Debug)]
 pub struct Record {
@@ -43,6 +45,24 @@ pub struct Error {
 
 impl Inputs {
     pub fn load(state: &State, apks: &Apks) -> Result<Self, Error> {
+        let inputs = Self::load_verified_code(state, apks)?;
+        for record in inputs.active.values() {
+            authorize::saved(&record.settings, &record.signing, &state.settings).map_err(
+                |message| Error {
+                    package: record.settings.name.clone(),
+                    path: record.settings.code_path.clone(),
+                    phase: "authorization",
+                    message,
+                },
+            )?;
+        }
+        Ok(inputs)
+    }
+
+    /// Integrity-verified code for ordered owner reconciliation. These
+    /// records have selected names but no saved signer/UID authorization;
+    /// callers must pass active records through SigningScan before commit.
+    pub fn load_verified_code(state: &State, apks: &Apks) -> Result<Self, Error> {
         let mut inputs = Self::default();
         for (packages, disabled) in [
             (&state.settings.packages, false),
@@ -80,10 +100,6 @@ impl Inputs {
                 let signing = apks
                     .signing_details(&parsed)
                     .map_err(|e| fail("signatures", e))?;
-                if !disabled {
-                    authorize::saved(ps, &signing, &state.settings)
-                        .map_err(|e| fail("authorization", e))?;
-                }
                 identity.apply(&mut parsed);
                 let records = if disabled {
                     &mut inputs.disabled

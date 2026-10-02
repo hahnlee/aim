@@ -287,3 +287,142 @@ fn shared_uid_scan_signatures_follow_commit_and_ota_order() {
     assert_eq!(group.signatures_changed, None);
     assert_eq!(group.signatures, snapshot.signatures);
 }
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn ordered_signing_scan_commits_groups_and_preserves_prior_records_on_failure() {
+    use aim_services::package::scan::{SigningError, SigningScan};
+    let root = aim_paths::original_image();
+    let image = root.clone();
+    let apks = Apks {
+        files: Box::new(move |p| {
+            Some(image.join(if p == "/data/app/gsf/base.apk" {
+                "system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk"
+            } else {
+                p.trim_start_matches('/')
+            }))
+        }),
+        platform: Platform::load(&root, Default::default()).unwrap(),
+    };
+    let package = |name: &str, path: &str| settings::Package {
+        name: name.into(),
+        code_path: path.into(),
+        app_id: 10001,
+        shared_user: true,
+        ..Default::default()
+    };
+    let mut state = State {
+        settings: settings::Settings {
+            packages: vec![
+                package(
+                    "com.google.android.gsf",
+                    "/system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk",
+                ),
+                package("android", "/system/framework/framework-res.apk"),
+            ],
+            shared_users: vec![settings::SharedUser {
+                name: "group".into(),
+                app_id: 10001,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        list: vec![],
+        access: None,
+        users: vec![],
+    };
+    let inputs = Inputs::load_verified_code(&state, &apks).unwrap();
+    let google = &inputs.active["com.google.android.gsf"];
+    let platform = &inputs.active["android"];
+    let before = state.clone();
+    let mut scan = SigningScan::new(&Default::default(), &state.settings, 36).unwrap();
+    assert!(
+        scan.apply(google)
+            .unwrap()
+            .system_signature_mismatch
+            .is_none()
+    );
+    assert_eq!(
+        scan.identities.shared_users["group"].signatures_changed,
+        Some(false)
+    );
+    assert_eq!(
+        scan.settings.shared_users[0]
+            .signatures
+            .as_ref()
+            .unwrap()
+            .signatures,
+        google.signing.signatures
+    );
+    assert_eq!(
+        scan.settings.packages[0]
+            .signatures
+            .as_ref()
+            .unwrap()
+            .signatures,
+        google.signing.signatures
+    );
+    let committed = scan.clone();
+    assert!(matches!(scan.apply(platform), Err(SigningError::Fatal(_))));
+    assert_eq!(scan, committed);
+    assert_eq!(state, before);
+
+    // First system mismatch replaces a previously saved group signer.
+    let old = settings::Signatures {
+        signatures: platform.signing.signatures.clone(),
+        scheme_version: platform.signing.scheme_version,
+        ..Default::default()
+    };
+    state.settings.shared_users[0].signatures = Some(old.clone());
+    state.settings.packages[0].signatures = Some(old);
+    let mut scan = SigningScan::new(&Default::default(), &state.settings, 36).unwrap();
+    assert!(
+        scan.apply(google)
+            .unwrap()
+            .system_signature_mismatch
+            .is_some()
+    );
+    assert_eq!(
+        scan.identities.shared_users["group"].signatures_changed,
+        Some(true)
+    );
+    assert_eq!(scan.settings.packages[0].app_id, 10001);
+    let committed = scan.clone();
+    assert!(matches!(scan.apply(platform), Err(SigningError::Fatal(_))));
+    assert_eq!(scan, committed);
+    let mut old_api = SigningScan::new(&Default::default(), &state.settings, 29).unwrap();
+    old_api.apply(google).unwrap();
+    assert!(matches!(
+        old_api.apply(platform),
+        Err(SigningError::Rejected(_))
+    ));
+
+    let mut data_state = state.clone();
+    data_state.settings.packages[0].code_path = "/data/app/gsf/base.apk".into();
+    data_state.settings.packages[0].flags = settings::FLAG_SYSTEM;
+    let mut data_inputs = Inputs::load_verified_code(&data_state, &apks).unwrap();
+    let mut data_scan = SigningScan::new(&Default::default(), &data_state.settings, 36).unwrap();
+    let before = data_scan.clone();
+    assert!(matches!(
+        data_scan.apply(&data_inputs.active["com.google.android.gsf"]),
+        Err(SigningError::Rejected(_))
+    ));
+    assert_eq!(data_scan, before);
+    let record = data_inputs
+        .active
+        .get_mut("com.google.android.gsf")
+        .unwrap();
+    record.origin = aim_services::package::owner::shared_users::ScanOrigin::SystemDirectory;
+    assert!(matches!(
+        data_scan.apply(record),
+        Err(SigningError::Rejected(_))
+    ));
+    assert_eq!(data_scan, before);
+    record.origin = aim_services::package::owner::shared_users::ScanOrigin::Data;
+    record.settings.app_id += 1;
+    assert!(matches!(
+        data_scan.apply(record),
+        Err(SigningError::Rejected(_))
+    ));
+    assert_eq!(data_scan, before);
+}

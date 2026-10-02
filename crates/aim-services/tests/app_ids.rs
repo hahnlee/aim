@@ -508,6 +508,61 @@ fn allocation_matches_the_original_runtime() {
             restored.get(record.settings.app_id)
         );
     }
+    let first_api = String::from_utf8(
+        run(boot
+            .command()
+            .args(["shell", "getprop", "ro.product.first_api_level"]))
+        .stdout,
+    )
+    .unwrap()
+    .trim()
+    .parse()
+    .unwrap_or(0);
+    let mut signing_scan = aim_services::package::scan::SigningScan::new(
+        &Default::default(),
+        &state.settings,
+        first_api,
+    )
+    .unwrap();
+    // This checks the supplied persisted-record order. The complete
+    // image/data scan chooses its own order before invoking this owner.
+    for package in &state.settings.packages {
+        let outcome = signing_scan.apply(&inputs.active[&package.name]).unwrap();
+        assert!(
+            outcome.system_signature_mismatch.is_none(),
+            "unexpected OTA replacement: {}",
+            package.name
+        );
+    }
+    for (saved, committed) in state
+        .settings
+        .packages
+        .iter()
+        .zip(&signing_scan.settings.packages)
+    {
+        let mut expected = saved.clone();
+        let keys = committed.signatures.as_ref().unwrap().public_keys.clone();
+        assert!(keys.as_ref().is_some_and(|k| !k.is_empty()));
+        expected.signatures.as_mut().unwrap().public_keys = keys;
+        assert_eq!(
+            &expected, committed,
+            "signing scan changed persisted metadata: {}",
+            saved.name
+        );
+    }
+    assert_eq!(
+        signing_scan.settings.shared_users,
+        state.settings.shared_users
+    );
+    signing_scan.identities.prune_unused(&signing_scan.settings);
+    for group in &state.settings.shared_users {
+        assert_eq!(
+            signing_scan.identities.ids.get(group.app_id),
+            restored.get(group.app_id)
+        );
+    }
+    assert_eq!(state, before);
+
     // Valid DER certificates exercise the original merge constructor,
     // which rebuilds its public-key set. These histories are relationship
     // fixtures, not claims that any synthesized lineage verified an APK.

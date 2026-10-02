@@ -248,9 +248,24 @@ and Settings commit DEX branches, including that API boundary and null
 signer initialization. Three explicit native scan tests pass; real GSF
 and platform certificates exercise initialization, first/later OTA cases,
 /data rejection, snapshots and error atomicity. Scan records retain their
-physical origin independently of saved FLAG_SYSTEM. These owner
-transitions are not wired into an ordered scan commit or an OTA boot
-(#803, #805). Legacy certificate compatibility/
+physical origin independently of saved FLAG_SYSTEM. `scan::SigningScan`
+now wires normal authorization, shared lineage merging, OTA state and
+initial signer commit for already-saved APK identities in caller-supplied
+order. Its candidate settings retain UID ownership and metadata; each
+record finishes all fallible work before updating package/group signatures,
+and later rejection or fatal mismatch leaves prior candidate commits
+intact. `Inputs::load_verified_code` provides integrity-verified records
+for this phase without granting saved signer/UID authorization; `load`
+retains the normal-gate diagnostic. Four explicit native scan tests pass,
+including sequential initial/OTA cases and rejection of /data replacement,
+tampered origin and UID changes. On a disposable original-PMS boot, all
+243 active saved APKs pass SigningScan in supplied persisted-record order;
+all package metadata and 16 saved group signatures/UIDs remain unchanged,
+with verified serialized keys supplied for package records. This is a
+candidate signing phase, not the complete image/data scan order or a disk/
+query-snapshot commit. New/removed package reconciliation, full boot
+wiring and an actual OTA boot remain pending (#702, #803, #805). Legacy
+certificate compatibility/
 recovery, upgrade keysets, owner-authorized rollback, full UID
 reconciliation and native snapshot publication remain unimplemented
 (#804). This does not activate native PMS.

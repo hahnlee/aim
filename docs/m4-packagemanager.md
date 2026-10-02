@@ -693,9 +693,22 @@ image test pins inspected ReconcilePackageUtils and Settings commit DEX,
 including these branches and null-signer initialization. All three explicit
 native scan tests pass; real GSF/platform certificates check initialization,
 first/later OTA replacements, /data rejection, snapshots and error
-atomicity. Scan records retain physical origin for this policy. Ordered
-scan commit integration and an actual OTA boot remain unimplemented
-(#803, #805). Legacy certificate compatibility/recovery,
+atomicity. Scan records retain physical origin for this policy.
+`scan::SigningScan` now connects normal authorization, shared lineage
+merging, OTA state and initial signer commit for already-saved APKs in
+caller-supplied order. Candidate settings preserve saved UID/metadata;
+package/group signing state changes only after all fallible work succeeds,
+and later rejection or fatal mismatch leaves earlier candidate commits
+intact. `Inputs::load_verified_code` supplies integrity-verified code for
+this owner phase; its records do not grant saved signer/UID authorization.
+Four explicit native scan tests pass, including initial/OTA sequences and
+/data, origin and UID-change rejection. On a disposable original-PMS boot
+all 243 active saved APKs pass SigningScan in supplied persisted-record
+order. Package metadata and all 16 saved group signing/UID records survive;
+verified serialized keys are supplied for package records. This is not
+the complete image/data scan order or a disk/query-snapshot commit.
+New/removed package reconciliation, boot wiring and an actual OTA boot
+remain pending (#702, #803, #805). Legacy certificate compatibility/recovery,
 upgrade keysets, owner-authorized rollback, full UID reconciliation and
 snapshot publication remain unimplemented (#804). These normal signature
 gates and merge primitives do not activate C.

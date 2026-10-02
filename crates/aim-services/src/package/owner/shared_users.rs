@@ -33,7 +33,7 @@ pub enum SignatureError {
     Certificates(String),
 }
 
-fn saved_signatures(details: &SigningDetails) -> Result<Signatures, String> {
+pub(in crate::package) fn saved_signatures(details: &SigningDetails) -> Result<Signatures, String> {
     if details.signatures.is_empty() {
         return Err("verified package has no signing certificates".into());
     }
