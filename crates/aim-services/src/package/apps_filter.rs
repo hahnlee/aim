@@ -557,6 +557,7 @@ mod tests {
         ps.signatures = Some(Signatures {
             scheme_version: 3,
             signatures: vec![vec![key]],
+            public_keys: None,
             past_signatures: None,
         });
     }

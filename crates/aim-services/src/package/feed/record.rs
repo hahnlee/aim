@@ -11,6 +11,7 @@ use crate::package::model::{
     InstallSource, OverlayPaths, PackageState, PackageUserState, Platform, SharedLibrary,
     SharedUser, StateFlags, User,
 };
+use crate::package::pkg::Serialized;
 use crate::package::restrictions::{ArchiveActivity, ArchiveState};
 use crate::package::settings::{PRIVATE_FLAG_PRIVILEGED, Signatures, UsesSdkLibrary};
 
@@ -287,17 +288,36 @@ pub fn system(bytes: &[u8]) -> Result<(bool, Vec<String>, Platform)> {
     Ok((all, packages, p))
 }
 
-/// `SigningDetails`: the scheme (-1 for none), the signers, then the past
-/// signers with their capabilities.
+/// `SigningDetails`: the scheme (-1 for none), signers, serialized public
+/// keys, then the past signers with their capabilities.
 fn signing(r: &mut Reader<'_>) -> Result<Option<Signatures>> {
     let scheme_version = r.read_i32()?;
     if scheme_version < 0 {
         return Ok(None);
     }
     let current = signatures(r)?.unwrap_or_default();
+    let keys = r.read_i32()?;
+    let public_keys = if keys < 0 {
+        None
+    } else {
+        Some(
+            (0..keys)
+                .map(|_| {
+                    let Some(class) = string(r)? else {
+                        return Ok(None);
+                    };
+                    Ok(Some(Serialized {
+                        class,
+                        bytes: read_byte_array(r)?.unwrap_or_default(),
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )
+    };
     Ok(Some(Signatures {
         scheme_version,
         signatures: current.into_iter().map(|(der, _)| der).collect(),
+        public_keys,
         past_signatures: signatures(r)?,
     }))
 }

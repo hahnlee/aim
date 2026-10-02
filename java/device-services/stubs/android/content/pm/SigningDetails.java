@@ -7,4 +7,5 @@ public final class SigningDetails {
     public int getSignatureSchemeVersion() { throw new RuntimeException("stub"); }
     public Signature[] getSignatures() { throw new RuntimeException("stub"); }
     public Signature[] getPastSigningCertificates() { throw new RuntimeException("stub"); }
+    public android.util.ArraySet<java.security.PublicKey> getPublicKeys() { throw new RuntimeException("stub"); }
 }

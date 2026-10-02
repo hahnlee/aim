@@ -62,6 +62,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.PublicKey;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -663,7 +664,7 @@ final class PackageFeed extends IPackageFeed.Stub {
         }
     }
 
-    /** SigningDetails: the scheme, the signers, the lineage with its capabilities. */
+    /** SigningDetails: the scheme, signers, keys and lineage. */
     private static void signing(Parcel p, SigningInfo info) {
         signing(p, info == null ? null : info.getSigningDetails());
     }
@@ -675,6 +676,13 @@ final class PackageFeed extends IPackageFeed.Stub {
         }
         p.writeInt(details.getSignatureSchemeVersion());
         signatures(p, details.getSignatures());
+        Set<PublicKey> keys = details.getPublicKeys();
+        p.writeInt(keys == null ? -1 : keys.size());
+        if (keys != null) {
+            for (PublicKey key : keys) {
+                p.writeSerializable(key);
+            }
+        }
         signatures(p, details.getPastSigningCertificates());
     }
 

@@ -1136,7 +1136,7 @@ impl Query<'_> {
             .map(|s| info::SigningInfo {
                 scheme_version: s.scheme_version,
                 signatures: s.signatures.clone(),
-                public_keys: None,
+                public_keys: s.public_keys.clone(),
                 past_signing_certificates: s
                     .past_signatures
                     .as_ref()

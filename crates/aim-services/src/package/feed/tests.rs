@@ -17,6 +17,9 @@ fn signing(p: &mut Parcel, scheme: i32, signers: &[&[u8]], past: Option<&[(&[u8]
         write_byte_array(p, Some(s));
         p.write_i32(0);
     }
+    p.write_i32(1);
+    p.write_string16(Some("sun.security.rsa.RSAPublicKeyImpl"));
+    write_byte_array(p, Some(b"serialized-key"));
     match past {
         None => p.write_i32(-1),
         Some(past) => {
@@ -94,7 +97,7 @@ fn package_record(name: &str, shared_user_app_id: Option<i32>) -> Vec<u8> {
     p.write_string16(None);
     p.write_string16(Some("com.android.vending"));
     p.write_i32(3);
-    p.write_i32(-1);
+    signing(&mut p, 3, &[b"\x04"], None);
     p.write_bool(true);
     p.write_string16(Some("4a1e7c2d-0000-0000-0000-000000000000"));
     p.write_i32(1);
@@ -232,13 +235,32 @@ fn reads_a_package_record() {
     let signatures = p.signatures.as_ref().unwrap();
     assert_eq!(signatures.scheme_version, 3);
     assert_eq!(signatures.signatures, [vec![1, 2]]);
+    assert_eq!(
+        signatures.public_keys.as_ref().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .bytes,
+        b"serialized-key"
+    );
     assert_eq!(signatures.past_signatures, Some(vec![(vec![3], 8)]));
     assert_eq!(
         p.install_source.installer.as_deref(),
         Some("com.android.vending")
     );
     assert_eq!(p.install_source.package_source, 3);
-    assert_eq!(p.install_source.initiating_package_signatures, None);
+    assert_eq!(
+        p.install_source
+            .initiating_package_signatures
+            .as_ref()
+            .unwrap()
+            .public_keys
+            .as_ref()
+            .unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .bytes,
+        b"serialized-key"
+    );
     assert_eq!(
         p.domain_verification,
         Some((

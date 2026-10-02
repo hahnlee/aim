@@ -68,6 +68,7 @@ impl Apks {
         Ok(Signatures {
             scheme_version: details.scheme_version,
             signatures: details.signatures,
+            public_keys: None,
             past_signatures: details.past_signing_certificates,
         })
     }
