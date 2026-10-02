@@ -38,7 +38,20 @@ impl ScanPolicy {
         groups: &Bootstrap,
         vendor_sdk: i32,
     ) {
-        if !self.privileged
+        if self.needs_shared_uid_privilege_check(pkg, groups, vendor_sdk)
+            && !current_signers_match(platform, signing)
+        {
+            self.privileged = true;
+        }
+    }
+
+    pub(super) fn needs_shared_uid_privilege_check(
+        self,
+        pkg: &AndroidPackage,
+        groups: &Bootstrap,
+        vendor_sdk: i32,
+    ) -> bool {
+        !self.privileged
             && !pkg.is(b::PRIVILEGED)
             && !pkg.is(b::LEAVING_SHARED_UID)
             && !(self.vendor && vendor_sdk < 28)
@@ -47,10 +60,6 @@ impl ScanPolicy {
                 .as_ref()
                 .and_then(|name| groups.shared_users.get(name))
                 .is_some_and(|g| g.private_flags & settings::PRIVATE_FLAG_PRIVILEGED != 0)
-            && !current_signers_match(platform, signing)
-        {
-            self.privileged = true;
-        }
     }
     pub fn for_location(location: &Location) -> Self {
         Self {

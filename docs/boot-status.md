@@ -139,7 +139,7 @@ SPKI retention, input immutability and code disappearing between parsing
 and verification. All 181 package
 unit tests run with their inputs present and pass. These are scan inputs,
 not reconciled package snapshots; APEX verification belongs to apexd,
-and new/removed image package reconciliation and publication remain
+and complete image/data version selection and publication remain
 unimplemented (#702). This does not activate the native scan.
 `scan::Image` supplies the first-boot image inputs without settings:
 overlay directories in reverse partition order, the framework, then each
@@ -157,6 +157,34 @@ directories without APKs were reported as rejected. Settings launched
 successfully (warm, 126 ms). Explicit image-input integration tests check
 ordering, duplicate names, verified original APKs, stage filtering,
 rejection retention and absent/empty framework failure.
+`SystemImageScan::first_boot` now consumes that physical image order through
+native scan ownership: shared-UID privilege and manifest/library policy,
+constructor library/MIME/domain inputs, UID/signing reconciliation, bundled ABI,
+page policy, actual code time and final application flags. APEX settings/UIDs
+must come from the preceding APEX owner; an APK in that input rejects. The
+original platform is available to policy only after its scan completes. Required
+framework booleans resolve through the image's static overlays and reject missing
+or non-boolean resources. SystemConfig now reads initial-package-state exemptions
+with the original partition-independent and Boolean.parseBoolean semantics;
+initial stopped state requires an enabled/exported launcher-category activity
+and excludes the platform and static overlays (#813). User/clock/domain inputs
+remain supplied by their owners, not guessed from a package feed.
+A disposable original-PMS comparison (2026-10-03) matches the boot-classpath
+policy, image stopped-state boolean and complete initial exception set. With no
+saved APK settings, the native phase completes all 243 image system APKs in
+physical order and preserves the five no-APK directory rejections. Final public/
+private flags, version, target SDK, file time, update hash and current signing
+certificates match all 240 original packages at unchanged code paths. The saved
+scan still matches 243 active/3 disabled packages, 16 groups and 23 libraries;
+the whole comparison passes (249.84s), with unchanged disposable disk state and
+owned process/mount cleanup. A separate original-APK fixture passes (14.59s),
+including reserved APEX UID preservation, invalid seed rejection, domain-owner
+failure, missing framework/image policy and unavailable pre-platform privilege
+policy. All 292 units pass (3.05s), and the Java image
+API linkage build passes (13.0s). This is the initial system APK phase, not a
+complete native boot or template: native APEX preparation, image/data version
+selection, stub expansion, graph/permission/commit side effects, persistence and
+replica publication remain #707/#702/#798/#810/#812/#813. Original PMS still runs.
 `owner::app_ids::AppIds` restores active package and shared-user UID
 ownership without changing persisted IDs, registering disabled originals
 again or mutating settings. Its sparse slots preserve the pinned

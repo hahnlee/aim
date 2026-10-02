@@ -29,7 +29,9 @@ pub use abi::{
     PageSizeCompatPolicy, SharedUserAbi, SharedUserAbiMismatch, SupportedAbi, SupportedAbis,
     ZipNativeLibraries,
 };
+mod boot;
 mod completion;
+pub use boot::{FirstBootSystemInputs, SystemImageScan};
 mod setting;
 mod signing;
 pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};

@@ -12,7 +12,7 @@
 //! from AOSP android-16.0.0_r1 `SystemConfig`, Copyright (C) The Android
 //! Open Source Project, Apache License 2.0.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -54,6 +54,8 @@ pub struct SystemConfig {
     /// `mAvailableFeatures`, as added: name and version.
     pub features: Vec<(String, i32)>,
     pub hidden_api_allowlist: Vec<String>,
+    /// Initial system packages explicitly exempted from stopped state.
+    pub initial_non_stopped_system_packages: BTreeSet<String>,
     /// `mNamedActors`: namespace, actor name and package.
     pub named_actors: Vec<(String, String, String)>,
     /// OEM names and IDs in ArrayMap order (signed String hash; ties
@@ -200,6 +202,17 @@ impl SystemConfig {
         for e in root.children() {
             let name = e.string("name").map(|s| s.into_owned());
             match e.name.as_str() {
+                "initial-package-state" => {
+                    if let (Some(package), Some(stopped)) =
+                        (e.string("package"), e.string("stopped"))
+                        && !package.is_empty()
+                        && !stopped.is_empty()
+                        && !stopped.eq_ignore_ascii_case("true")
+                    {
+                        self.initial_non_stopped_system_packages
+                            .insert(package.into_owned());
+                    }
+                }
                 // This tag is accepted regardless of partition permissions.
                 "oem-defined-uid" => {
                     let value = e.string("uid").map(|s| s.into_owned());
@@ -433,6 +446,38 @@ pub fn system(root: &Path, prop: &dyn Fn(&str) -> Option<String>, framework: &Fr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_package_state_uses_java_boolean_semantics_without_partition_gate() {
+        let xml = br#"<permissions>
+            <initial-package-state package="true" stopped="TrUe" />
+            <initial-package-state package="false" stopped="false" />
+            <initial-package-state package="invalid" stopped="1" />
+            <initial-package-state package="spaces" stopped=" true " />
+            <initial-package-state package="" stopped="false" />
+            <initial-package-state package="missing" />
+            <initial-package-state package="empty" stopped="" />
+            <initial-package-state stopped="false" />
+            <initial-package-state package="false" stopped="true" />
+        </permissions>"#;
+        let root = aim_android_xml::read(xml).unwrap();
+        let mut config = SystemConfig::default();
+        config.read_root(
+            &root,
+            0,
+            false,
+            Path::new("."),
+            &|_| None,
+            Path::new("policy.xml"),
+        );
+        assert_eq!(
+            config.initial_non_stopped_system_packages,
+            ["false", "invalid", "spaces"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+    }
 
     fn write(root: &Path, path: &str, text: &str) {
         let path = root.join(path);

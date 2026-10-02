@@ -4,15 +4,21 @@ use aim_services::package::{
     State,
     libraries::TYPE_STATIC,
     parse::Platform,
-    scan::{Apex, Inputs, Kind, Location, Partition, ScanPolicy, SigningScan, application_flags},
+    scan::{
+        AbiPolicy, Apex, FirstBootSystemInputs, Image, Inputs, Kind, LibraryCompatibility,
+        Location, NativeLibraryInstallPolicy, Partition, ScanClock, ScanPolicy, SigningScan,
+        SupportedAbis, SystemImageScan, UserPolicy, application_flags,
+    },
     system_config::SystemConfig,
     write::Apks,
 };
 use std::collections::BTreeMap;
 use std::fs;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 mod common {
+    pub mod java;
     pub mod runtime;
 }
 use common::runtime::{Boot, Data, run};
@@ -23,6 +29,45 @@ fn saved_scan_libraries_match_original_pms() {
     let dir = std::env::temp_dir().join(format!("aim-scan-runtime-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
+    let java = aim_paths::fetched().join("java");
+    let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
+    let classes = data.0.join("classes");
+    let stubs = data.0.join("stubs");
+    let dex = data.0.join("dex");
+    for path in [&classes, &stubs, &dex] {
+        fs::create_dir(path).unwrap();
+    }
+    run(Command::new(jdk.join("bin/javac"))
+        .args(["--release", "17", "-d"])
+        .arg(&stubs)
+        .args(common::java::sources(
+            &aim_paths::root().join("java/device-services/stubs"),
+        )));
+    run(Command::new(jdk.join("bin/javac"))
+        .args(["--release", "17", "-d"])
+        .arg(&classes)
+        .arg("-classpath")
+        .arg(&stubs)
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/BootScanOracle.java"),
+        ));
+    run(Command::new(jdk.join("bin/java"))
+        .arg("-cp")
+        .arg(java.join("build-tools-36.0.0/android-16/lib/d8.jar"))
+        .args([
+            "com.android.tools.r8.D8",
+            "--release",
+            "--min-api",
+            "36",
+            "--lib",
+        ])
+        .arg(&jdk)
+        .arg("--classpath")
+        .arg(&stubs)
+        .arg("--output")
+        .arg(&dex)
+        .arg(classes.join("com/android/server/BootScanOracle.class")));
     let boot = Boot {
         ctl: aim_paths::root().join("target/release/aimctl"),
         data: data.0.join("guest"),
@@ -56,8 +101,33 @@ fn saved_scan_libraries_match_original_pms() {
             Some((name.to_owned(), value.to_owned()))
         })
         .collect();
+    fs::copy(
+        dex.join("classes.dex"),
+        boot.data.join("data/local/tmp/boot-scan.dex"),
+    )
+    .unwrap();
+    let boot_policy = String::from_utf8(
+        run(boot.command().args([
+            "shell",
+            "/system/bin/app_process",
+            "-Djava.class.path=/data/local/tmp/boot-scan.dex:/system/framework/services.jar",
+            "/system/bin",
+            "com.android.server.BootScanOracle",
+        ]))
+        .stdout,
+    )
+    .unwrap();
+    let mut boot_policy = boot_policy.lines();
+    let test_base_on_bcp: bool = boot_policy.next().unwrap().parse().unwrap();
+    let stop_system_packages: bool = boot_policy.next().unwrap().parse().unwrap();
+    let initial_non_stopped: std::collections::BTreeSet<_> =
+        boot_policy.map(str::to_owned).collect();
     let image = aim_paths::derived_image();
     let config = SystemConfig::read(&image, &|name| properties.get(name).cloned());
+    assert_eq!(
+        config.initial_non_stopped_system_packages,
+        initial_non_stopped
+    );
     let mut platform = Platform::load(&image, Default::default()).unwrap();
     let density =
         String::from_utf8(run(boot.command().args(["shell", "wm", "density"])).stdout).unwrap();
@@ -141,6 +211,151 @@ fn saved_scan_libraries_match_original_pms() {
             })
         })
         .unwrap_or(28);
+    assert_eq!(
+        apks.platform
+            .framework_boolean("config_stopSystemPackagesByDefault")
+            .unwrap(),
+        stop_system_packages
+    );
+    let abi_list = |key| {
+        properties
+            .get(key)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.split(',').map(str::to_owned).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let bit32 = abi_list("ro.product.cpu.abilist32");
+    let bit64 = abi_list("ro.product.cpu.abilist64");
+    let all_abis = abi_list("ro.product.cpu.abilist");
+    let abi_policy = AbiPolicy::from_platform(
+        &apks.platform,
+        &all_abis,
+        &SupportedAbis {
+            bit32: &bit32,
+            bit64: &bit64,
+        },
+        &|name| properties.get(name).cloned(),
+    )
+    .unwrap();
+    let compatibility = LibraryCompatibility::new(
+        &config,
+        &|name| properties.get(name).cloned(),
+        test_base_on_bcp,
+    )
+    .unwrap();
+    let system_image = Image::load(&apks, &apexes).unwrap();
+    let system_count = system_image.packages.len();
+    let domain_sequence = std::sync::atomic::AtomicU32::new(1);
+    let domain_ids = || {
+        let mut id = [0; 16];
+        id[..4].copy_from_slice(
+            &domain_sequence
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .to_be_bytes(),
+        );
+        Ok(id)
+    };
+    let first_system = SystemImageScan::first_boot(
+        system_image,
+        &apks,
+        &config,
+        FirstBootSystemInputs {
+            apex_settings: &Default::default(),
+            first_api_level: first_api,
+            vendor_sdk,
+            abi_policy: &abi_policy,
+            compatibility: &compatibility,
+            preferred_abi: all_abis.first().unwrap(),
+            app_lib32_install_dir: "/data/app-lib",
+            platform_runtime_64bit: true,
+            install: NativeLibraryInstallPolicy {
+                page_size: 16384,
+                extract: false,
+                debuggable: false,
+                compat_16kb_disabled: false,
+                manifest_compat_disabled: false,
+            },
+            clock: ScanClock {
+                current_time: 0,
+                user_id: 0,
+                update_time: false,
+            },
+            factory_test: false,
+            users: UserPolicy {
+                install_user: Some(0),
+                users: None,
+                allow_install: true,
+                instant_app: false,
+                virtual_preload: false,
+                stopped_system_app: false,
+            },
+            // Explicit diagnostic IDs; actual domain state is not persisted.
+            new_domain_id: &domain_ids,
+        },
+    )
+    .unwrap();
+    assert_eq!(first_system.packages.len(), system_count);
+    for rejected in &first_system.rejected {
+        eprintln!(
+            "system parse rejection: {}: {}",
+            rejected.location.path, rejected.reason
+        );
+    }
+
+    let mut matched_source = 0;
+    for completed in &first_system.packages {
+        let candidate = &completed.candidate.record.settings;
+        if let Some(saved) =
+            original.settings.packages.iter().find(|saved| {
+                saved.name == candidate.name && saved.code_path == candidate.code_path
+            })
+        {
+            assert_eq!(
+                (candidate.flags, candidate.private_flags),
+                (saved.flags, saved.private_flags),
+                "first system flags: {}",
+                candidate.name
+            );
+            assert_eq!(
+                candidate.version_code, saved.version_code,
+                "first system version: {}",
+                candidate.name
+            );
+            assert_eq!(
+                candidate.target_sdk_version, saved.target_sdk_version,
+                "first system target SDK: {}",
+                candidate.name
+            );
+            assert_eq!(
+                candidate.last_modified_time, saved.last_modified_time,
+                "first system file time: {}",
+                candidate.name
+            );
+            assert_eq!(
+                candidate.restrict_update_hash, saved.restrict_update_hash,
+                "first system update hash: {}",
+                candidate.name
+            );
+            assert_eq!(
+                candidate.signatures.as_ref().unwrap().signatures,
+                saved.signatures.as_ref().unwrap().signatures,
+                "first system certificates: {}",
+                candidate.name
+            );
+            matched_source += 1;
+        }
+    }
+    assert!(
+        matched_source >= 230,
+        "only {matched_source} unchanged system sources matched"
+    );
+    eprintln!(
+        "first native scan final flags/version/SDK/time/hash/certificates match {matched_source} original packages at unchanged code paths"
+    );
+    eprintln!(
+        "first native image scan completed {system_count} system APKs in directory order; {} parse rejections, without persisted package settings",
+        first_system.rejected.len()
+    );
     let mut checked_flags = 0;
     let mut flag_mismatches = Vec::new();
     for saved in &original.settings.packages {

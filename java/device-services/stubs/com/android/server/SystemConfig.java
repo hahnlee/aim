@@ -9,6 +9,7 @@ public class SystemConfig {
     public SystemConfig(boolean readPermissions) { throw new RuntimeException("stub"); }
     public static SystemConfig getInstance() { throw new RuntimeException("stub"); }
     public ArrayMap<String, Integer> getOemDefinedUids() { throw new RuntimeException("stub"); }
+    public java.util.Set<String> getInitialNonStoppedSystemPackages() { throw new RuntimeException("stub"); }
     public void readPermissions(org.xmlpull.v1.XmlPullParser parser, java.io.File directory, int flags) {
         throw new RuntimeException("stub");
     }
