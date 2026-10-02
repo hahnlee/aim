@@ -302,7 +302,11 @@ impl SigningScan {
     }
 }
 
-fn selected_shared_user(saved_shared: bool, declared: Option<&str>, leaving: bool) -> Option<&str> {
+pub(super) fn selected_shared_user(
+    saved_shared: bool,
+    declared: Option<&str>,
+    leaving: bool,
+) -> Option<&str> {
     if !saved_shared && leaving {
         None
     } else {

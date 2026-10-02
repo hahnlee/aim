@@ -57,7 +57,7 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (152 package unit tests pass). These are not
+shared snapshot publication (156 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
@@ -125,7 +125,7 @@ signatures. Settings launched successfully (warm, 90 ms). An explicitly
 run original-image integration
 test checks active/disabled GSF records, nonstandard APK paths, v3 lineage,
 SPKI retention, input immutability and code disappearing between parsing
-and verification. All 152 package
+and verification. All 156 package
 unit tests run with their inputs present and pass. These are scan inputs,
 not reconciled package snapshots; APEX verification belongs to apexd,
 and new/removed image package reconciliation and publication remain
@@ -154,7 +154,7 @@ An explicitly run original-runtime integration test matches imported-hole
 allocation, deletion, ownership replacement, fresh restoration and range
 exhaustion. The disposable original-PMS boot completed and all 243 active
 packages and 16 shared UID groups restored with their saved IDs. Java
-API linkage verification and 152 package unit tests pass. The allocator
+API linkage verification and 156 package unit tests pass. The allocator
 is not connected to scan reconciliation, persistence or snapshot
 publication (#702). `owner::shared_users::Bootstrap` now constructs the
 nine pinned platform shared users and valid OEM declarations, preserving
@@ -177,11 +177,26 @@ boot (2026-10-02, boot completed) restores all 243 active package IDs and,
 after pruning, matches all 16 original saved group names, IDs and signing
 records. Unit tests cover seed flags, shared membership, disabled-only
 members, pruning, snapshot/input immutability and deletion cursor behavior;
-all 152 package unit tests pass. Conflicting decoded settings reject the
+all 156 package unit tests pass. Conflicting decoded settings reject the
 candidate with context; the original reader's ordered recovery from corrupt
-raw records is not implemented (#803). These identity inputs do not yet
-apply scan-time shared UID signature/migration policy or write/publish
-native package state (#702, #803).
+raw records remains pending (#803). `scan::UidScan` now prepares UID
+ownership from fully parsed and verified system-directory Code inputs.
+Saved names retain their IDs and manifest groups; duplicate image names
+reuse the same identity. New packages join an existing manifest group or
+create it with Settings' zero initial flags, while new leaving packages
+receive independent UIDs. Static-library names use the selected version
+suffix. `Bootstrap::get_shared_user` preserves existing groups/flags and
+creates a new group only after UID allocation succeeds. Lookup without
+creation, exhausted allocation, older snapshots and rejected transitions
+remain unchanged. Disabled/original-package metadata adoption and changed
+saved groups reject explicitly (#804). All 156 package unit tests, six
+explicit original-APK scan tests and three original-image DEX policy tests
+pass. The DEX policy test pins group creation and package registration
+branches, including the original insufficient-storage error. These are UID
+candidates; complete new PackageSettings, signing reconciliation for new
+members, failed-scan cleanup, persistence and query publication remain
+under #702, #803 and #798. Saved signing reconciliation and UID conversion
+persistence are verified below.
 `scan::Identity` selects manifest/internal/real names with the pinned
 static-library version suffix and declared system-package rename rules
 (#804). Persisted scan inputs reject a saved name different from the
@@ -199,7 +214,7 @@ PackageImpl.setPackageName does. An explicit original-runtime fixture
 populates the original ComponentName cache before renaming and compares
 all resulting package/component identities, unchanged manifest/class names
 and main-component process names with native records. Java linkage and
-all explicit scan/runtime tests pass; all 152 package unit tests
+all explicit scan/runtime tests pass; all 156 package unit tests
 pass. Every active parsed package now carries its selected internal name.
 `sign::History` now compares verified and persisted certificate histories
 with the pinned SigningDetails capability, ancestor and exact multi-signer
@@ -210,7 +225,7 @@ single/multiple signers, ordering, granted/revoked lineage capabilities and
 rollback direction; every result matches original SigningDetails.
 On the disposable original-PMS boot (2026-10-02, boot completed), all 243
 fully verified active APKs pass the normal existing-package signing gate
-against their saved certificates. All 152 package unit tests and Java
+against their saved certificates. All 156 package unit tests and Java
 linkage verification pass. The shared UID join gate distinguishes new
 installs, updates and system scans, including lineage capability revocation
 and every existing member. An explicit original-runtime matrix of 2,187
@@ -261,7 +276,7 @@ record finishes all fallible work before updating package/group signatures,
 and later rejection or fatal mismatch leaves prior candidate commits
 intact. `Inputs::load_verified_code` provides integrity-verified records
 for this phase without granting saved signer/UID authorization; `load`
-retains the normal-gate diagnostic. Five explicit native scan tests pass,
+retains the normal-gate diagnostic. Six explicit native scan tests pass,
 including sequential initial/OTA cases and rejection of /data replacement,
 tampered origin and UID changes, changed/missing manifest groups, and
 retained versus already-left shared UID declarations. The signer-mismatch
@@ -278,7 +293,7 @@ With the image's BEST_EFFORT policy selected explicitly, both versions
 become independent under the same app ID, the group is removed, and the
 UID-slot owner becomes the package without moving the allocation cursor.
 NEW_INSTALL_ONLY remains the default and leaves existing groups intact.
-Five explicit scan tests cover unparsed/non-leaving members, absent or
+Six explicit scan tests cover unparsed/non-leaving members, absent or
 non-leaving disabled code, multiple members, policy selection, unchanged
 metadata, snapshots and preserved allocation. An original-image DEX test
 pins the three inspected eligibility/conversion methods. `Store::commit_shared_uid_migrations` now persists owner-authorized
@@ -287,7 +302,7 @@ and disabled records from sharedUserId to the same numeric userId, removes
 the group, and rebuilds certificate definitions/references after removal.
 Unrelated XML nodes and package metadata survive; partial conversions,
 remapped IDs, empty/multiple-member group deletion and cleared retained
-signers reject before writing. All 152 package unit tests pass. A real
+signers reject before writing. All 156 package unit tests pass. A real
 signed APK fixture is installed and updated by original PMS, native-parsed
 and integrity-verified, reconciled and migrated under BEST_EFFORT, then
 written while that disposable original PMS is stopped. On reboot original
@@ -312,7 +327,7 @@ Unrelated package attributes/children and other root nodes survive;
 serialized public keys remain in the scan snapshot because packages.xml
 persists certificates. The writer rejects unrelated metadata changes,
 cleared retained signing identities, duplicate/unmodelled owners and
-external document changes. All 152 package unit tests pass. The disposable
+external document changes. All 156 package unit tests pass. The disposable
 original-PMS runtime test wrote all 243 active package and 16 group signing
 records into its separate native-owned fixture and re-read them with
 complete persisted settings parity; main/reserve bytes match. Original

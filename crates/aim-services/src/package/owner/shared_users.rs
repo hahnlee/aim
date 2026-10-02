@@ -161,6 +161,31 @@ pub enum RestoreError {
 }
 
 impl Bootstrap {
+    /// Settings.getSharedUserLPw: lookup never changes an existing group;
+    /// creation reserves an automatic UID before exposing the new group.
+    pub fn get_shared_user(
+        &mut self,
+        name: &str,
+        flags: i32,
+        private_flags: i32,
+        create: bool,
+    ) -> Result<Option<&SharedUser>, Error> {
+        if !self.shared_users.contains_key(name) && create {
+            let app_id = self.ids.acquire(Owner::SharedUser(name.into()))?;
+            self.shared_users.insert(
+                name.into(),
+                SharedUser {
+                    app_id,
+                    flags,
+                    private_flags,
+                    signatures: None,
+                    signatures_changed: None,
+                },
+            );
+        }
+        Ok(self.shared_users.get(name))
+    }
+
     /// Seed before Settings or APK reconciliation. No persistence or
     /// query snapshot is changed; rejected OEM records remain visible.
     pub fn new(config: &SystemConfig) -> Self {
@@ -291,6 +316,52 @@ impl Bootstrap {
 mod tests {
     use super::*;
     use crate::package::settings::{Package, SharedUser as SavedGroup};
+
+    #[test]
+    fn dynamic_shared_user_lookup_and_exhaustion_preserve_existing_ownership() {
+        let mut boot = Bootstrap::new(&Default::default());
+        let snapshot = boot.clone();
+        assert_eq!(boot.get_shared_user("missing", 3, 4, false), Ok(None));
+        assert_eq!(boot, snapshot);
+        assert_eq!(
+            boot.get_shared_user("android.uid.system", 0, 0, true)
+                .unwrap()
+                .unwrap(),
+            &snapshot.shared_users["android.uid.system"]
+        );
+        assert_eq!(boot, snapshot);
+        let created = boot
+            .get_shared_user("new.group", 3, 4, true)
+            .unwrap()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (created.app_id, created.flags, created.private_flags),
+            (10000, 3, 4)
+        );
+        assert!(created.signatures.is_none() && created.signatures_changed.is_none());
+        assert_eq!(
+            boot.ids.get(10000),
+            Some(&Owner::SharedUser("new.group".into()))
+        );
+        assert_eq!(
+            boot.get_shared_user("new.group", 1, 8, true).unwrap(),
+            Some(&created)
+        );
+        for _ in 10001..=19999 {
+            boot.ids.acquire(Owner::Package("filler".into())).unwrap();
+        }
+        let snapshot = boot.clone();
+        assert_eq!(
+            boot.get_shared_user("exhausted", 0, 0, true),
+            Err(Error::Exhausted)
+        );
+        assert_eq!(boot, snapshot);
+        assert_eq!(
+            boot.get_shared_user("new.group", 0, 0, true).unwrap(),
+            Some(&created)
+        );
+    }
 
     #[test]
     fn invalid_saved_merge_certificates_leave_the_group_unchanged() {

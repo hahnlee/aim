@@ -193,3 +193,61 @@ fn single_shared_uid_migration_matches_the_pinned_image() {
     }
     assert_eq!(checked, 3);
 }
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn uid_creation_matches_the_pinned_settings_policy() {
+    use sha2::{Digest, Sha256};
+    let jar =
+        Apk::open(&aim_paths::original_image().join("system/framework/services.jar")).unwrap();
+    let mut checked = 0;
+    for name in ["classes.dex", "classes2.dex", "classes3.dex"] {
+        let bytes = jar.file(name).unwrap();
+        let dex = Dex::parse(&bytes).unwrap();
+        let Some(class) = dex.class("Lcom/android/server/pm/Settings;") else {
+            continue;
+        };
+        for (method, length, expected) in [
+            (
+                "getSharedUserLPw",
+                95,
+                "3dfb87628423c895d4c08df45298df83472a2f3deecd1b9d2d61b1955be80df0",
+            ),
+            (
+                "registerAppIdLPw",
+                100,
+                "ff8181fc1924c3faca9761f417a137605154bb8193dc836d3e1befcc986f7203",
+            ),
+        ] {
+            let code = dex.methods_named(class, method).unwrap();
+            assert_eq!(code.len(), 1);
+            let words = units(&bytes, &code[0]).unwrap();
+            assert_eq!(words.len(), length);
+            let raw: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert_eq!(format!("{:x}", Sha256::digest(&raw)), expected);
+            if method == "getSharedUserLPw" {
+                assert_eq!(dex.method(words[3] as u32).unwrap().1, "get");
+                assert_eq!(&words[8..12], &[0x0039, 0x56, 0x0538, 0x54]); // Existing or !create bypasses allocation.
+                assert_eq!(
+                    dex.method(words[0x14] as u32).unwrap().1,
+                    "acquireAndRegisterNewAppId"
+                );
+                assert_eq!(dex.method(words[0x3e] as u32).unwrap().1, "put");
+                assert_eq!(words[0x59], 0xc312); // Insufficient storage (-4).
+            } else {
+                assert_eq!(
+                    dex.method(words[0x14] as u32).unwrap().1,
+                    "registerExistingAppId"
+                );
+                assert_eq!(
+                    dex.method(words[0x1b] as u32).unwrap().1,
+                    "acquireAndRegisterNewAppId"
+                );
+                assert_eq!(dex.method(words[0x1f] as u32).unwrap().1, "setAppId");
+                assert_eq!(words[0x5f], 0xc412); // Insufficient storage (-4).
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 2);
+}

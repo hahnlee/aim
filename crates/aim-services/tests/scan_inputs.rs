@@ -46,6 +46,22 @@ fn image_scan_keeps_locations_duplicates_and_rejections_without_settings() {
     };
     let image = Image::load(&apks, &[]).unwrap();
     assert_eq!(image.packages.len(), 3);
+    let mut uids =
+        aim_services::package::scan::UidScan::new(&Default::default(), &Default::default())
+            .unwrap();
+    let prepared: Vec<_> = image
+        .packages
+        .iter()
+        .map(|code| uids.apply(code).unwrap())
+        .collect();
+    assert_eq!(prepared[0].1, prepared[2].1);
+    assert_eq!(prepared[1].1.app_id, 1000);
+    assert_eq!(
+        prepared[1].1.shared_user.as_deref(),
+        Some("android.uid.system")
+    );
+    assert_eq!(uids.packages.len(), 2);
+
     assert_eq!(image.packages[0].location.kind, Kind::Overlay);
     assert_eq!(image.packages[1].location.kind, Kind::Framework);
     assert_eq!(image.packages[1].parsed.package_name, "android");
@@ -663,4 +679,80 @@ fn single_shared_uid_migration_preserves_ids_and_requires_both_versions_to_leave
         scan.identities.ids.acquire(Owner::Package("next".into())),
         before_ids.acquire(Owner::Package("next".into()))
     );
+}
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn new_uid_scan_creates_manifest_groups_and_keeps_leaving_new_packages_independent() {
+    use aim_services::package::{
+        owner::app_ids::Owner,
+        pkg::booleans,
+        scan::{Code, Kind, Location, Partition, UidScan},
+    };
+    let root = aim_paths::original_image();
+    let image = root.clone();
+    let apks = Apks {
+        files: Box::new(move |p| Some(image.join(p.trim_start_matches('/')))),
+        platform: Platform::load(&root, Default::default()).unwrap(),
+    };
+    let state = State {
+        settings: settings::Settings {
+            packages: vec![settings::Package {
+                name: "com.google.android.gsf".into(),
+                code_path:
+                    "/system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk"
+                        .into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        list: vec![],
+        access: None,
+        users: vec![],
+    };
+    let mut inputs = Inputs::load_verified_code(&state, &apks).unwrap();
+    let record = inputs.active.remove("com.google.android.gsf").unwrap();
+    let mut code = Code {
+        location: Location {
+            path: record.settings.code_path,
+            partition: Partition::SystemExt,
+            kind: Kind::PrivApp,
+            apex: None,
+        },
+        parsed: record.parsed,
+        signing: record.signing,
+    };
+    assert!(!code.parsed.is(booleans::LEAVING_SHARED_UID));
+    let group = code.parsed.shared_user_id.clone().unwrap();
+    let mut scan = UidScan::new(&Default::default(), &Default::default()).unwrap();
+    let (_, uid) = scan.apply(&code).unwrap();
+    assert_eq!(uid.app_id, 10000);
+    assert_eq!(uid.shared_user.as_deref(), Some(group.as_str()));
+    assert_eq!(
+        scan.identities.ids.get(uid.app_id),
+        Some(&Owner::SharedUser(group.clone()))
+    );
+    assert_eq!(scan.identities.shared_users[&group].flags, 0);
+    assert!(scan.identities.shared_users[&group].signatures.is_none()); // UID allocation grants no signing authorization.
+    let snapshot = scan.clone();
+    assert_eq!(scan.apply(&code).unwrap().1, uid);
+    assert_eq!(scan, snapshot);
+    code.parsed.shared_user_id = Some("changed.group".into());
+    assert_eq!(scan.apply(&code).unwrap_err().phase, "identity");
+    assert_eq!(scan, snapshot);
+    code.parsed.shared_user_id = Some(group.clone());
+    code.parsed.booleans |= booleans::LEAVING_SHARED_UID;
+    let mut leaving = UidScan::new(&Default::default(), &Default::default()).unwrap();
+    let (_, uid) = leaving.apply(&code).unwrap();
+    assert_eq!(uid.app_id, 10000);
+    assert_eq!(uid.shared_user, None);
+    assert!(!leaving.identities.shared_users.contains_key(&group));
+    assert_eq!(
+        leaving.identities.ids.get(uid.app_id),
+        Some(&Owner::Package(code.parsed.package_name.clone()))
+    );
+    // Already allocated independent identity ignores the leaving declaration.
+    let before = leaving.clone();
+    assert_eq!(leaving.apply(&code).unwrap().1, uid);
+    assert_eq!(leaving, before);
 }
