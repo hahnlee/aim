@@ -63,9 +63,15 @@ unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
 built-in library names and paths from `pm list libraries -v` and
 `dumpsys package libraries` on a disposable original-PMS boot
-(2026-10-02, `sys.boot_completed=1`). The declaration registry assembled
-from persisted package settings and native-parsed APKs matches all 23
-original library names/paths. With isolated split dependencies and asset
+(2026-10-02, `sys.boot_completed=1`). The scan-owned declaration registry matches all 23 original library
+names/paths after signer reconciliation of all 243 active APK packages
+and their three verified disabled originals (`scan_runtime`, 2026-10-02).
+All 16 saved shared UID groups and package metadata retain their state;
+verified public keys are rebuilt in the candidate. The diagnostic captures
+the original library dump, stops original PMS, then scans only its disposable
+reattached data image: persisted data is unchanged, and owned processes and
+mounts are cleaned. It uses persisted record order, not the complete boot
+image/data version selector. With isolated split dependencies and asset
 scopes implemented and runtime density supplied, the diagnostic parses
 all 243 installed APK packages, including GMS's 11 splits (#720). The
 native parser's output also
