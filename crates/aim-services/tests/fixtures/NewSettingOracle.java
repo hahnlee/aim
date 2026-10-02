@@ -2,6 +2,15 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("policy")) {
+            var pkg = com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
+            ScanPackageUtils.applyPolicy(pkg, Integer.parseInt(args[2]), null,
+                Boolean.parseBoolean(args[3]));
+            java.nio.file.Files.write(java.nio.file.Path.of(args[4]),
+                com.android.server.pm.parsing.PackageCacher.toCacheEntryStatic(pkg));
+            return;
+        }
         if (args.length != 0 && args[0].equals("time")) {
             var pkg = com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
                 java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));

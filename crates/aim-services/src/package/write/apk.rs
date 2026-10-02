@@ -26,6 +26,11 @@ pub struct Apks {
 }
 
 impl Apks {
+    /// PackageManagerServiceUtils.compressedFileExists: the sibling of a
+    /// code directory ending in -Stub contains an entry ending in .gz.
+    pub fn scan_compressed_files_exist(&self, pkg: &AndroidPackage) -> Result<bool, String> {
+        scan_compressed_files_exist(&self.files, pkg)
+    }
     /// PackageManagerServiceUtils.getLastModifiedTime for available scan code:
     /// a monolithic path's timestamp, or the maximum base/split APK timestamp.
     /// Read errors reject the candidate; code removal belongs to reconciliation.
@@ -103,6 +108,38 @@ impl Apks {
     }
 }
 
+fn scan_compressed_files_exist(files: &Files, pkg: &AndroidPackage) -> Result<bool, String> {
+    let path = std::path::Path::new(pkg.path.as_deref().ok_or("no parsed package path")?);
+    let Some(name) = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix("-Stub"))
+    else {
+        return Ok(false);
+    };
+    let parent = path.parent().ok_or("no stub parent directory")?;
+    let compressed = parent.join(name);
+    let guest = compressed.to_str().ok_or("non-UTF8 compressed path")?;
+    let host = files(guest).ok_or_else(|| format!("{guest}: not readable"))?;
+    let entries = match std::fs::read_dir(host) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("{guest}: {e}")),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{guest}: {e}"))?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .to_lowercase()
+            .ends_with(".gz")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn scan_file_time(files: &Files, pkg: &AndroidPackage) -> Result<i64, String> {
     use std::os::unix::fs::MetadataExt;
     let metadata = |path: &str| {
@@ -151,6 +188,37 @@ mod timestamp_tests {
             .set_times(FileTimes::new().set_modified(time))
             .unwrap();
     }
+    #[test]
+    fn compressed_inventory_uses_stub_sibling_and_case_insensitive_extension() {
+        let dir = std::env::temp_dir().join(format!("aim-compressed-unit-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let fixture = Fixture(dir);
+        let root = fixture.0.clone();
+        let files: Files = Box::new(move |p| Some(root.join(p.trim_start_matches('/'))));
+        let mut pkg = AndroidPackage {
+            path: Some("/Module-Stub".into()),
+            ..Default::default()
+        };
+        assert!(!scan_compressed_files_exist(&files, &pkg).unwrap());
+        fs::create_dir(fixture.0.join("Module")).unwrap();
+        fs::write(fixture.0.join("Module/ignored.apk"), []).unwrap();
+        assert!(!scan_compressed_files_exist(&files, &pkg).unwrap());
+        fs::write(fixture.0.join("Module/base.GZ"), []).unwrap();
+        assert!(scan_compressed_files_exist(&files, &pkg).unwrap());
+        pkg.path = Some("/Module-Stub/base.apk".into());
+        assert!(!scan_compressed_files_exist(&files, &pkg).unwrap());
+        pkg.path = Some("/Module-Stub-extra".into());
+        assert!(!scan_compressed_files_exist(&files, &pkg).unwrap());
+        pkg.path = Some("/Module-Stub".into());
+        let unreadable: Files = Box::new(|_| None);
+        assert!(scan_compressed_files_exist(&unreadable, &pkg).is_err());
+        fs::remove_file(fixture.0.join("Module/base.GZ")).unwrap();
+        fs::remove_file(fixture.0.join("Module/ignored.apk")).unwrap();
+        fs::remove_dir(fixture.0.join("Module")).unwrap();
+        fs::write(fixture.0.join("Module"), []).unwrap();
+        assert!(scan_compressed_files_exist(&files, &pkg).is_err());
+    }
+
     #[test]
     fn file_times_use_code_path_or_latest_apk_and_report_missing_inputs() {
         let dir = std::env::temp_dir().join(format!("aim-code-time-unit-{}", std::process::id()));

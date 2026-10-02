@@ -4,7 +4,7 @@ use aim_services::package::{
     State,
     libraries::TYPE_STATIC,
     parse::Platform,
-    scan::{Inputs, SigningScan},
+    scan::{Apex, Inputs, Kind, Location, Partition, ScanPolicy, SigningScan, application_flags},
     system_config::SystemConfig,
     write::Apks,
 };
@@ -79,6 +79,27 @@ fn saved_scan_libraries_match_original_pms() {
         .stdout,
     )
     .unwrap();
+    let apex_xml = run(boot
+        .command()
+        .args(["shell", "cat", "/apex/apex-info-list.xml"]));
+    let apex_xml = aim_android_xml::read(&apex_xml.stdout).unwrap();
+    let apexes: Vec<_> = apex_xml
+        .children()
+        .filter(|e| e.name == "apex-info")
+        .filter(|e| e.attr("isActive").unwrap().string().unwrap() == "true")
+        .map(|e| {
+            let attr = |name| e.attr(name).unwrap().string().unwrap().into_owned();
+            let original = attr("preinstalledModulePath");
+            let (partition, _) = partition_path(&original).unwrap();
+            Apex {
+                mount_path: format!("/apex/{}", attr("moduleName")),
+                partition,
+                factory: attr("isFactory") == "true",
+                // This diagnostic does not select changed APEX versions.
+                active_changed: false,
+            }
+        })
+        .collect();
     // Freeze only this owned data image before comparing disk state.
     run(boot.command().arg("stop"));
     let volume = aim_storage::data::DataImage::attach(&boot.data, None).unwrap();
@@ -107,6 +128,21 @@ fn saved_scan_libraries_match_original_pms() {
         .map(|n| n.parse().unwrap())
         .unwrap_or(0);
     let mut scan = SigningScan::new(&config, &original.settings, first_api).unwrap();
+    let platform_signing = &inputs.active["android"].signing;
+    let vendor_sdk = properties
+        .get("ro.vndk.version")
+        .map(|v| {
+            v.parse().unwrap_or_else(|_| {
+                if apks.platform.codenames.contains(v) {
+                    10000
+                } else {
+                    28
+                }
+            })
+        })
+        .unwrap_or(28);
+    let mut checked_flags = 0;
+    let mut flag_mismatches = Vec::new();
     for saved in &original.settings.packages {
         assert_eq!(
             apks.scan_file_time(&inputs.active[&saved.name].parsed)
@@ -116,6 +152,70 @@ fn saved_scan_libraries_match_original_pms() {
             saved.name
         );
 
+        let record = &inputs.active[&saved.name];
+        let location = scan_location(&saved.code_path, &apexes);
+        // InitAppsHelper scans overlay directories before framework-res.
+        let before_platform = location.as_ref().is_some_and(|l| l.kind == Kind::Overlay);
+        let mut policy = location
+            .as_ref()
+            .map(ScanPolicy::for_location)
+            .unwrap_or_default();
+        let disabled = inputs.disabled.get(&saved.name);
+        if let Some(original) = disabled {
+            // Disabled XML restores only system/priv-app flags. The original
+            // factory scan refreshes partition flags before scanning its update.
+            let location = scan_location(&original.settings.code_path, &apexes).unwrap();
+            let factory_policy = ScanPolicy::for_location(&location);
+            let mut parsed = original.parsed.clone();
+            factory_policy
+                .apply_manifest(
+                    &mut parsed,
+                    &original.signing,
+                    if location.kind == Kind::Overlay {
+                        None
+                    } else {
+                        Some(platform_signing)
+                    },
+                    false,
+                    &apks,
+                )
+                .unwrap();
+            let mut factory_setting = original.settings.clone();
+            (factory_setting.flags, factory_setting.private_flags) =
+                application_flags(&parsed, false);
+            policy.inherit_system_setting(&factory_setting);
+        }
+        policy.adjust_shared_uid_privilege(
+            &record.parsed,
+            &record.signing,
+            platform_signing,
+            &scan.identities,
+            vendor_sdk,
+        );
+        let mut parsed = record.parsed.clone();
+        policy
+            .apply_manifest(
+                &mut parsed,
+                &record.signing,
+                if before_platform {
+                    None
+                } else {
+                    Some(platform_signing)
+                },
+                disabled.is_some(),
+                &apks,
+            )
+            .unwrap();
+        let actual = application_flags(&parsed, disabled.is_some());
+        if actual != (saved.flags, saved.private_flags) {
+            flag_mismatches.push(format!(
+                "{}: native {actual:?}, original {:?}",
+                saved.name,
+                (saved.flags, saved.private_flags)
+            ));
+        }
+        checked_flags += 1;
+
         let result = scan
             .apply_with_disabled(
                 &inputs.active[&saved.name],
@@ -124,6 +224,14 @@ fn saved_scan_libraries_match_original_pms() {
             .unwrap_or_else(|error| panic!("{}: {error:?}", saved.name));
         assert!(result.system_signature_mismatch.is_none(), "{}", saved.name);
     }
+    assert_eq!(checked_flags, 243);
+    assert!(
+        flag_mismatches.is_empty(),
+        "original scan application flags: {flag_mismatches:#?}"
+    );
+    eprintln!(
+        "native scan manifest policy/application flags match all {checked_flags} original packages"
+    );
     for (saved, candidate) in original
         .settings
         .packages
@@ -184,4 +292,50 @@ fn saved_scan_libraries_match_original_pms() {
         original
     );
     volume.detach().unwrap();
+}
+
+fn partition_path(path: &str) -> Option<(Partition, &str)> {
+    [
+        ("/system/", Partition::System),
+        ("/vendor/", Partition::Vendor),
+        ("/odm/", Partition::Odm),
+        ("/oem/", Partition::Oem),
+        ("/product/", Partition::Product),
+        ("/system_ext/", Partition::SystemExt),
+    ]
+    .iter()
+    .find_map(|(prefix, p)| path.strip_prefix(prefix).map(|r| (*p, r)))
+}
+
+fn scan_location(path: &str, apexes: &[Apex]) -> Option<Location> {
+    if path.starts_with("/data/app/") {
+        return None;
+    }
+    let apex = apexes
+        .iter()
+        .find(|a| path.starts_with(&format!("{}/", a.mount_path)));
+    let (partition, relative) = partition_path(path)
+        .or_else(|| {
+            apex.map(|a| {
+                (
+                    a.partition,
+                    path.strip_prefix(&format!("{}/", a.mount_path)).unwrap(),
+                )
+            })
+        })
+        .unwrap_or_else(|| panic!("scan flag diagnostic needs explicit location: {path}"));
+    Some(Location {
+        path: path.into(),
+        partition,
+        kind: if relative.starts_with("overlay/") {
+            Kind::Overlay
+        } else if relative.starts_with("priv-app/") {
+            Kind::PrivApp
+        } else if relative.starts_with("framework/") {
+            Kind::Framework
+        } else {
+            Kind::App
+        },
+        apex: apex.cloned(),
+    })
 }

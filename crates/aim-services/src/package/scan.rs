@@ -14,6 +14,8 @@ mod enrich;
 pub use enrich::{ScanClock, ScanTime};
 mod identity;
 mod image;
+mod policy;
+pub use policy::{ScanPolicy, application_flags};
 mod setting;
 mod signing;
 mod uids;

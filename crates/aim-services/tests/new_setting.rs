@@ -242,24 +242,31 @@ fn new_settings_match_the_original_runtime() {
     };
     let input = aim_services::package::State {
         settings: Settings {
-            packages: vec![aim_services::package::settings::Package {
-                name: "com.google.android.gsf".into(),
-                code_path:
-                    "/system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk"
-                        .into(),
-                ..Default::default()
-            }],
+            packages: vec![
+                aim_services::package::settings::Package {
+                    name: "com.google.android.gsf".into(),
+                    code_path: concat!(
+                        "/system_ext/priv-app/GoogleServicesFramework/",
+                        "GoogleServicesFramework.apk"
+                    )
+                    .into(),
+                    ..Default::default()
+                },
+                aim_services::package::settings::Package {
+                    name: "android".into(),
+                    code_path: "/system/framework/framework-res.apk".into(),
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         },
         list: vec![],
         access: None,
         users: vec![],
     };
-    let template = Inputs::load_verified_code(&input, &apks)
-        .unwrap()
-        .active
-        .remove("com.google.android.gsf")
-        .unwrap();
+    let mut inputs = Inputs::load_verified_code(&input, &apks).unwrap();
+    let platform_signing = inputs.active.remove("android").unwrap().signing;
+    let template = inputs.active.remove("com.google.android.gsf").unwrap();
     let mut lines = Vec::new();
     for old_system in [0, 1] {
         for new_system in [0, 1] {
@@ -394,7 +401,102 @@ fn new_settings_match_the_original_runtime() {
         apks.scan_file_time(&template.parsed).unwrap(),
         expected_time
     );
-    let code = Code {
+    // Run the original applyPolicy on the same native-parsed original APK.
+    // Shared library compatibility belongs to another owner; compare the
+    // manifest/component restrictions without claiming full parcel equality.
+    for (policy, updated, original_flags) in [
+        (ScanPolicy::default(), false, 0),
+        (ScanPolicy::default(), true, 0),
+        (
+            ScanPolicy {
+                system: true,
+                privileged: true,
+                system_ext: true,
+                ..Default::default()
+            },
+            false,
+            (1 << 16) | (1 << 17) | (1 << 21),
+        ),
+        (
+            ScanPolicy {
+                system: true,
+                vendor: true,
+                apex: true,
+                ..Default::default()
+            },
+            false,
+            (1 << 16) | (1 << 19) | (1 << 26),
+        ),
+    ] {
+        run(boot.command().args([
+            "shell",
+            "/system/bin/app_process",
+            "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+            "/system/bin",
+            "com.android.server.pm.NewSettingOracle",
+            "policy",
+            "/data/local/tmp/code-time.cache",
+            &original_flags.to_string(),
+            &updated.to_string(),
+            "/data/local/tmp/scan-policy.cache",
+        ]));
+        let expected = AndroidPackage::read_cache_entry(
+            &fs::read(boot.data.join("data/local/tmp/scan-policy.cache")).unwrap(),
+        )
+        .unwrap();
+        let mut actual = template.parsed.clone();
+        policy
+            .apply_manifest(&mut actual, &template.signing, None, updated, &apks)
+            .unwrap();
+        assert_eq!(actual.booleans, expected.booleans);
+        assert_eq!(actual.booleans2, expected.booleans2);
+        assert_eq!(
+            actual
+                .activities
+                .iter()
+                .map(|c| &c.main)
+                .collect::<Vec<_>>(),
+            expected
+                .activities
+                .iter()
+                .map(|c| &c.main)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            actual.receivers.iter().map(|c| &c.main).collect::<Vec<_>>(),
+            expected
+                .receivers
+                .iter()
+                .map(|c| &c.main)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            actual.services.iter().map(|c| &c.main).collect::<Vec<_>>(),
+            expected
+                .services
+                .iter()
+                .map(|c| &c.main)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            actual.providers.iter().map(|c| &c.main).collect::<Vec<_>>(),
+            expected
+                .providers
+                .iter()
+                .map(|c| &c.main)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(actual.permission_groups, expected.permission_groups);
+        assert_eq!(actual.protected_broadcasts, expected.protected_broadcasts);
+        assert_eq!(actual.original_packages, expected.original_packages);
+        assert_eq!(actual.adopt_permissions, expected.adopt_permissions);
+        assert_eq!(
+            application_flags(&actual, updated),
+            application_flags(&expected, updated)
+        );
+    }
+    eprintln!("native manifest policy matches original applyPolicy for four GSF scan policies");
+    let mut code = Code {
         location: Location {
             path: path.clone(),
             partition: Partition::SystemExt,
@@ -404,6 +506,16 @@ fn new_settings_match_the_original_runtime() {
         parsed: template.parsed.clone(),
         signing: template.signing.clone(),
     };
+    ScanPolicy::for_location(&code.location)
+        .apply_manifest(
+            &mut code.parsed,
+            &code.signing,
+            Some(&platform_signing),
+            false,
+            &apks,
+        )
+        .unwrap();
+    let (flags, private_flags) = application_flags(&code.parsed, false);
     let mut scan = SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
     let candidate = scan
         .apply_new_system(
@@ -414,8 +526,8 @@ fn new_settings_match_the_original_runtime() {
                 primary_cpu_abi: None,
                 secondary_cpu_abi: None,
                 version_code: 0,
-                flags: 1,
-                private_flags: 8,
+                flags,
+                private_flags,
                 last_modified_time: 0,
                 uses_sdk_libraries: vec![],
                 uses_static_libraries: vec![],
@@ -456,6 +568,21 @@ fn new_settings_match_the_original_runtime() {
         files: Box::new(|_| None),
         platform: aim_services::package::parse::Platform::load(&root, Default::default()).unwrap(),
     };
+    let mut inaccessible_stub = code.parsed.clone();
+    inaccessible_stub.path = Some("/system_ext/priv-app/Fixture-Stub".into());
+    let unchanged = inaccessible_stub.clone();
+    assert!(
+        ScanPolicy::for_location(&code.location)
+            .apply_manifest(
+                &mut inaccessible_stub,
+                &code.signing,
+                Some(&platform_signing),
+                false,
+                &unreadable
+            )
+            .is_err()
+    );
+    assert_eq!(inaccessible_stub, unchanged);
     let snapshot = scan.clone();
     assert!(
         matches!(scan.finish_code_metadata(failed_candidate, &unreadable, clock),
@@ -463,6 +590,13 @@ fn new_settings_match_the_original_runtime() {
     );
     assert_eq!(scan, snapshot);
     let completed = scan.finish_code_metadata(candidate, &apks, clock).unwrap();
+    assert_eq!(
+        (
+            completed.record.settings.flags,
+            completed.record.settings.private_flags
+        ),
+        (flags, private_flags)
+    );
     assert_eq!(completed.record.settings.last_modified_time, expected_time);
     assert_eq!(completed.record.settings.last_update_time, expected_time);
     assert_eq!(completed.users[&0].first_install_time, expected_time);

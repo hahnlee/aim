@@ -1397,7 +1397,7 @@ fn aconfig(sys: &System, name: &str) -> bool {
 
 /// `AppInfoUtils.appInfoFlags` of the package (`PackageImpl`'s base
 /// flags).
-fn base_flags(pkg: &AndroidPackage) -> i32 {
+pub(super) fn base_flags(pkg: &AndroidPackage) -> i32 {
     use booleans::*;
     let b = |f: i64| pkg.is(f);
     flag(b(EXTERNAL_STORAGE), FLAG_EXTERNAL_STORAGE)
@@ -1455,7 +1455,7 @@ fn screens_since(v: Option<bool>, pkg: &AndroidPackage, sdk: i32) -> bool {
 }
 
 /// `AppInfoUtils.appInfoPrivateFlags`.
-fn base_private_flags(pkg: &AndroidPackage) -> i32 {
+pub(super) fn base_private_flags(pkg: &AndroidPackage) -> i32 {
     use booleans::*;
     let b = |f: i64| pkg.is(f);
     let mut flags = flag(b(STATIC_SHARED_LIBRARY), PRIVATE_FLAG_STATIC_SHARED_LIBRARY)
