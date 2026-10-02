@@ -12,6 +12,140 @@ fn policy(native: bool, independence: bool) -> Policy {
 }
 
 #[test]
+fn graph_resolves_multihop_paths_and_nested_apk_dependencies() {
+    let mut registry = Registry::new(&SystemConfig::default());
+    registry.insert(SharedLibrary {
+        name: Some("builtin".into()),
+        version: VERSION_UNDEFINED,
+        path: Some("/system/framework/builtin.jar".into()),
+        ..Default::default()
+    });
+    let mut available = BTreeMap::new();
+    for (name, dependencies) in [("a", vec!["b", "builtin"]), ("b", vec!["c"]), ("c", vec![])] {
+        let mut ps = package(name, |p| {
+            p.library_names = vec![name.into()];
+            p.uses_libraries = dependencies.iter().map(|n| (*n).into()).collect();
+        });
+        ps.is.system = true;
+        registry.add_package(&ps, None).unwrap();
+        available.insert(name.into(), ps);
+    }
+    available.insert(
+        "app".into(),
+        package("app", |p| p.uses_libraries = vec!["a".into(), "b".into()]),
+    );
+    let resolved = registry
+        .resolve(&available, &|_| Ok(policy(false, false)))
+        .unwrap();
+    assert_eq!(
+        resolved.packages["app"].uses_library_files,
+        [
+            "/data/app/a/base.apk",
+            "/data/app/b/base.apk",
+            "/data/app/c/base.apk",
+            "/system/framework/builtin.jar"
+        ]
+    );
+    let a = resolved.registry.get("a", VERSION_UNDEFINED).unwrap();
+    assert_eq!(a.dependencies.len(), 1);
+    assert_eq!(a.dependencies[0].name.as_deref(), Some("b"));
+    assert_eq!(a.dependencies[0].dependencies[0].name.as_deref(), Some("c"));
+    assert_eq!(resolved.packages["app"].uses_library_infos[0], *a);
+    assert!(available["app"].uses_library_files.is_empty());
+}
+
+#[test]
+fn graph_marks_static_libraries_installed_for_the_consumers_users() {
+    use crate::package::{model::PackageUserState, settings::Signatures};
+    use sha2::{Digest, Sha256};
+    let mut registry = Registry::new(&SystemConfig::default());
+    let mut provider = package("provider", |p| {
+        p.static_shared_library_name = Some("static".into());
+        p.static_shared_lib_version = 1;
+    });
+    provider.signatures = Some(Signatures {
+        signatures: vec![b"certificate".to_vec()],
+        ..Default::default()
+    });
+    provider.users = BTreeMap::from([
+        (
+            0,
+            PackageUserState {
+                installed: false,
+                ..Default::default()
+            },
+        ),
+        (
+            10,
+            PackageUserState {
+                installed: false,
+                ..Default::default()
+            },
+        ),
+    ]);
+    registry.add_package(&provider, None).unwrap();
+    let digest = Sha256::digest(b"certificate")
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect();
+    let mut app = package("app", |p| {
+        p.uses_static_libraries = vec!["static".into()];
+        p.uses_static_libraries_versions = Some(vec![1]);
+        p.uses_static_libraries_cert_digests = Some(vec![Some(vec![Some(digest)])]);
+    });
+    app.users = BTreeMap::from([
+        (0, Default::default()),
+        (
+            10,
+            PackageUserState {
+                installed: false,
+                ..Default::default()
+            },
+        ),
+    ]);
+    let mut available = BTreeMap::from([("provider".into(), provider), ("app".into(), app)]);
+    let resolved = registry
+        .resolve(&available, &|_| Ok(policy(false, false)))
+        .unwrap();
+    assert!(resolved.packages["provider"].users[&0].installed);
+    assert!(!resolved.packages["provider"].users[&10].installed);
+    assert!(!available["provider"].users[&0].installed);
+    available.get_mut("provider").unwrap().users.remove(&0);
+    assert_eq!(
+        registry
+            .resolve(&available, &|_| Ok(policy(false, false)))
+            .unwrap_err()
+            .cause,
+        ResolveError::Incomplete("static library user state")
+    );
+}
+
+#[test]
+fn graph_reports_cyclic_scan_order_without_publishing_partial_state() {
+    let mut registry = Registry::new(&SystemConfig::default());
+    let mut available = BTreeMap::new();
+    for (name, dep) in [("a", "b"), ("b", "a")] {
+        let mut ps = package(name, |p| {
+            p.library_names = vec![name.into()];
+            p.uses_libraries = vec![dep.into()];
+        });
+        ps.is.system = true;
+        registry.add_package(&ps, None).unwrap();
+        available.insert(name.into(), ps);
+    }
+    let before = available.clone();
+    assert_eq!(
+        registry
+            .resolve(&available, &|_| Ok(policy(false, false)))
+            .unwrap_err()
+            .cause,
+        ResolveError::Incomplete("cyclic library provider scan order")
+    );
+    assert_eq!(available, before);
+    assert!(registry.entries().all(|l| l.dependencies.is_empty()));
+}
+
+#[test]
 fn dependency_order_and_provider_files_preserve_first_occurrence() {
     let mut registry = Registry::new(&SystemConfig::default());
     let mut provider = package("provider", |p| {

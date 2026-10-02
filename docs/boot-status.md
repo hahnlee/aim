@@ -57,7 +57,7 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (127 package unit tests pass). These are not
+shared snapshot publication (130 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
@@ -81,8 +81,13 @@ Shared-library dependency resolution now has ordered direct selection,
 static/SDK version and signer checks,
 and file-path assembly from resolved provider snapshots. Tests cover
 missing/optional/native dependencies, SDK policy, signer rotation,
-multiple signers and deduplication. Native scan graph construction,
-policy wiring and native PackageManager activation remain pending (#707);
+multiple signers and deduplication. The candidate graph builder now
+resolves acyclic APK provider graphs, fills nested dependency records and
+package file paths, and marks static libraries installed for the direct
+consumer's installed users. Tests check multihop ordering, input
+immutability and user effects. Cyclic provider updates fail explicitly
+(#799); policy wiring, native scan integration and native PackageManager
+activation remain pending (#707);
 no native PackageManager CTS result is claimed.
 
 The device's own system service (`dev.aim.server.DeviceServices`,

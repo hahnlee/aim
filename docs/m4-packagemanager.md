@@ -546,8 +546,15 @@ the native scan still needs to supply them from their owners.
 `Selection::files` assembles the provider's base/split paths followed by
 its already-resolved transitive files, preserving first occurrence.
 Tests cover ordering, missing/optional dependencies, SDK policy,
-certificate validation and duplicate files. Complete graph construction,
-dependency propagation, static-library user installation, the native scan and #707's CTS
+certificate validation and duplicate files. `Registry::resolve` computes
+an acyclic provider graph into a separate candidate, resolving provider
+file paths before consumers, copying nested APK dependency records and
+applying static-library installation for direct consumers' installed
+users. Built-in library paths do not become APK dependency edges, matching
+`addSharedLibraryLPr`. Tests check multihop paths, nested records, user
+effects and unchanged inputs on failure. Cyclic provider scan/update
+order is explicitly unsupported (#799); this is not an Android install
+error. Policy wiring, scan/update integration, the native scan and #707's CTS
 acceptance still remain; declaration records are not yet served as full
 shared-library query results.
 

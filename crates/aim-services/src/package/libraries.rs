@@ -12,6 +12,8 @@ use super::system_config::SystemConfig;
 
 mod resolve;
 pub use resolve::{Policy, ResolveError, Selection};
+mod graph;
+pub use graph::{GraphError, Resolved};
 
 pub const VERSION_UNDEFINED: i64 = -1;
 pub const TYPE_BUILTIN: i32 = 0;
@@ -21,7 +23,7 @@ pub const TYPE_SDK_PACKAGE: i32 = 3;
 
 /// SharedLibrariesImpl's name/version map. Scan order matters: dynamic
 /// declarations cannot replace an existing built-in or dynamic library.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Registry {
     entries: BTreeMap<String, BTreeMap<i64, SharedLibrary>>,
 }
