@@ -4,7 +4,8 @@ use super::{
     NativeLibraryEnvironment, NativeLibraryError, NativeLibraryInstallPolicy, NewPackageOutcome,
     PageSizeCompatPolicy, ScanClock, SigningError, SigningScan,
 };
-use crate::package::write::Apks;
+use crate::package::{restrictions::UserState, write::Apks};
+use std::collections::BTreeMap;
 
 /// Image, filesystem, VM and clock inputs from the corresponding owners.
 pub struct ScanMetadataCompletion<'a> {
@@ -27,6 +28,26 @@ pub struct CompletedScanMetadata {
 }
 
 impl SigningScan {
+    /// Retained UID scans publish signer, library and setting changes only
+    /// after every metadata gate succeeds. Copied files still belong to the
+    /// install owner's cleanup transaction.
+    pub fn scan_existing(
+        &mut self,
+        code: &super::Code,
+        update: super::SettingUpdate,
+        saved_users: &BTreeMap<String, BTreeMap<i32, UserState>>,
+        all_users: Option<&[super::User]>,
+        disabled: Option<&super::Record>,
+        apks: &Apks,
+        inputs: ScanMetadataCompletion<'_>,
+    ) -> Result<CompletedScanMetadata, SigningError> {
+        let mut staged = self.clone();
+        let candidate = staged.apply_existing(code, update, saved_users, all_users, disabled)?;
+        let completed = staged.finish_scan_metadata(candidate, apks, inputs)?;
+        *self = staged;
+        Ok(completed)
+    }
+
     /// Stage a new system package through all metadata gates before admitting
     /// its final shared-UID member. A rejected independent allocation advances
     /// the original cleanup cursor; a new shared group survives until pruning.

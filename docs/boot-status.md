@@ -177,10 +177,16 @@ private flags, version, target SDK, file time, update hash and current signing
 certificates match all 240 original packages at unchanged code paths. The saved
 scan still matches 243 active/3 disabled packages, 16 groups and 23 libraries;
 the whole comparison passes (249.84s), with unchanged disposable disk state and
-owned process/mount cleanup. A separate original-APK fixture passes (14.59s),
+owned process/mount cleanup. A separate original-APK fixture passes (17.62s),
 including reserved APEX UID preservation, invalid seed rejection, domain-owner
 failure, missing framework/image policy and unavailable pre-platform privilege
-policy. All 292 units pass (3.05s), and the Java image
+policy. `SigningScan::scan_existing` also stages retained-UID reconciliation
+through all metadata gates before committing the scan owner. The fixture
+checks whole-owner rollback on an actual code-time read failure, then successful
+domain-setting replacement with unchanged UID, users, libraries and shared
+membership. Files copied before rejection still require install-owner cleanup;
+this transaction does not select image/data versions or persist settings.
+All 292 units pass (3.03s), and the Java image
 API linkage build passes (13.0s). This is the initial system APK phase, not a
 complete native boot or template: native APEX preparation, image/data version
 selection, stub expansion, graph/permission/commit side effects, persistence and

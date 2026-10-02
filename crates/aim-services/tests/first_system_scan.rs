@@ -3,8 +3,9 @@
 use aim_services::package::{
     parse::Platform,
     scan::{
-        AbiPolicy, FirstBootSystemInputs, Image, LibraryCompatibility, NativeLibraryInstallPolicy,
-        ScanClock, SigningError, SystemImageScan, UserPolicy,
+        AbiPolicy, AbiScanContext, AbiScanMode, FirstBootSystemInputs, Image, LibraryCompatibility,
+        NativeLibraryEnvironment, NativeLibraryInstallPolicy, ScanClock, ScanMetadataCompletion,
+        SettingUpdate, SigningError, SystemImageScan, UserPolicy,
     },
     system_config::SystemConfig,
     write::Apks,
@@ -95,7 +96,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .iter()
         .map(|code| apks.scan_file_time(&code.parsed).unwrap())
         .collect();
-    let scan = SystemImageScan::first_boot(image, &apks, &config, inputs(&domain_ids)).unwrap();
+    let mut scan = SystemImageScan::first_boot(image, &apks, &config, inputs(&domain_ids)).unwrap();
     assert!(scan.rejected.is_empty());
     assert_eq!(
         scan.packages
@@ -143,6 +144,84 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         );
         assert!(package.copies.is_empty());
     }
+    // A retained scan changes its domain setting before the code-time gate.
+    // Failure there must roll back every owner, including shared membership.
+    let prior = &scan.packages[1].candidate;
+    let saved = prior.record.settings.clone();
+    let saved_users = std::collections::BTreeMap::from([(saved.name.clone(), prior.users.clone())]);
+    let mut code = Image::load(&apks, &[]).unwrap().packages.remove(1);
+    code.parsed = prior.record.parsed.clone();
+    let update = || SettingUpdate {
+        code_path: saved.code_path.clone(),
+        legacy_native_library_path: saved.legacy_native_library_path.clone(),
+        primary_cpu_abi: saved.primary_cpu_abi.clone(),
+        secondary_cpu_abi: saved.secondary_cpu_abi.clone(),
+        flags: saved.flags,
+        private_flags: saved.private_flags,
+        uses_sdk_libraries: saved.uses_sdk_libraries.clone(),
+        uses_static_libraries: saved.uses_static_libraries.clone(),
+        mime_groups: code.parsed.mime_groups.clone(),
+        domain_set_id: [99; 16],
+        target_sdk_version: saved.target_sdk_version,
+        restrict_update_hash: saved.restrict_update_hash.clone(),
+    };
+    let environment = NativeLibraryEnvironment {
+        preferred_abi: "arm64-v8a",
+        app_lib32_install_dir: "/data/app-lib",
+        code_is_directory: true,
+        canonical_source: None,
+    };
+    let completion = || ScanMetadataCompletion {
+        abi_policy: &abi_policy,
+        native_environment: &environment,
+        context: AbiScanContext {
+            mode: AbiScanMode::Existing {
+                first_boot_or_upgrade: false,
+                old_was_stub: false,
+                saved: Some(&saved),
+            },
+            system: true,
+            updated: false,
+            override_abi: None,
+            platform_runtime_64bit: None,
+        },
+        install: inputs(&domain_ids).install,
+        destination: None,
+        clock: inputs(&domain_ids).clock,
+        factory_test: false,
+    };
+    let unreadable = Apks {
+        files: Box::new(|_| None),
+        platform: Platform::load(&original, Default::default()).unwrap(),
+    };
+    let before = scan.owner.clone();
+    assert!(matches!(
+        scan.owner.scan_existing(&code, update(), &saved_users, None, None, &unreadable, completion()),
+        Err(SigningError::Rejected(ref error)) if error.phase == "code-time"
+    ));
+    assert_eq!(scan.owner, before);
+    let retained = scan
+        .owner
+        .scan_existing(
+            &code,
+            update(),
+            &saved_users,
+            None,
+            None,
+            &apks,
+            completion(),
+        )
+        .unwrap();
+    assert_eq!(
+        retained.candidate.record.settings.domain_set_id.as_deref(),
+        Some("63636363-6363-6363-6363-636363636363")
+    );
+    assert_eq!(retained.candidate.record.settings.app_id, saved.app_id);
+    assert_eq!(retained.candidate.users, saved_users[&saved.name]);
+    assert_eq!(scan.owner.identities, before.identities);
+    assert_eq!(scan.owner.libraries, before.libraries);
+    assert!(retained.copies.is_empty());
+
     let reserved = aim_services::package::settings::Settings {
         packages: vec![aim_services::package::settings::Package {
             name: "fixture.apex.module".into(),
