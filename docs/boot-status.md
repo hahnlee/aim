@@ -189,7 +189,7 @@ suffix. `Bootstrap::get_shared_user` preserves existing groups/flags and
 creates a new group only after UID allocation succeeds. Lookup without
 creation, exhausted allocation, older snapshots and rejected transitions
 remain unchanged. Disabled/original-package metadata adoption and changed
-saved groups reject explicitly (#804). All 160 package unit tests, six
+saved groups reject explicitly (#804). All 160 package unit tests, seven
 explicit original-APK scan tests and four original-image DEX policy tests
 pass. The DEX policy test pins group creation and package registration
 branches, including the original insufficient-storage error and cleanup
@@ -202,7 +202,8 @@ accepted identities remain intact; a changed slot owner rejects cleanup.
 Final pruning requires all preparations resolved and retains accepted active
 or saved disabled members. Six explicit native scan tests include verified
 GSF input rejected, pruned and retried under the next UID. All 160 package
-unit tests and four original-image DEX policy tests pass. `UidScan::new_setting` now constructs new PackageSetting candidates only
+unit tests and four original-image DEX policy tests pass.
+`UidScan::new_setting` now constructs new PackageSetting candidates only
 for pending preparations with matching canonical slot ownership. The pinned
 constructor's code/ABI/library/MIME/domain metadata, unassigned keyset (-1),
 category (-1), unknown signing details and initial loading state are retained.
@@ -216,11 +217,24 @@ Settings.createNewSetting, including independent/shared UIDs, system flags,
 stopped policy and null/explicit/all install targets with uninitialized
 UserManager. All results match; Settings launches and owned processes/data
 are cleaned. Explicit-user-list policy is covered by unit tests. Java API
-linkage verification and all 160 package unit tests pass. These are setting
-candidates; new-member signing reconciliation, scan enrichment, full pipeline
-failure/side-effect cleanup, persistence and query publication remain under
-#702, #803 and #798. Saved signing reconciliation and UID conversion
-persistence are verified below.
+linkage verification and all 160 package unit tests pass.
+`SigningScan::apply_new_system` now connects new-system UID preparation,
+setting construction, INSTALL shared-UID authorization, ordered lineage merge
+and signer commit. Successful candidates return their signed settings, parsed
+identity and initial user states. Failure leaves package/user state unchanged;
+rejected independent slots are released with the original allocation cursor,
+and a rejected new shared group remains allocated until final pruning. Seven
+explicit original-APK scan integration tests pass (2026-10-02): real GSF and
+framework code initialize their original declared groups, and labeled synthetic
+policy/signer candidates check unrelated-member rejection, prior-record
+preservation, first OTA replacement, API <=29 rejection versus newer fatal
+mismatch, group pruning and retry IDs. Physical data paths and unsupported
+latest-static-library signer selection reject before allocation (#806). Four
+original-image DEX policy tests and all 160 package unit tests pass. These are
+scan candidates; complete scan enrichment and actual owner inputs, static and
+removed-package reconciliation, full pipeline failure/side-effect cleanup,
+persistence and query publication remain under #702, #707, #803 and #798.
+Saved signing reconciliation and UID conversion persistence are verified below.
 `scan::Identity` selects manifest/internal/real names with the pinned
 static-library version suffix and declared system-package rename rules
 (#804). Persisted scan inputs reject a saved name different from the

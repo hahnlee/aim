@@ -771,3 +771,275 @@ fn new_uid_scan_creates_manifest_groups_and_keeps_leaving_new_packages_independe
     assert_eq!(leaving.apply(&code).unwrap().1, uid);
     assert_eq!(leaving, before);
 }
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
+    use aim_services::package::{
+        owner::app_ids::Owner,
+        pkg::booleans,
+        scan::{Code, Location, SettingMetadata, SigningError, SigningScan, UserPolicy},
+        sign::SigningDetails,
+    };
+    let root = aim_paths::original_image();
+    let image = root.clone();
+    let apks = Apks {
+        files: Box::new(move |p| Some(image.join(p.trim_start_matches('/')))),
+        platform: Platform::load(&root, Default::default()).unwrap(),
+    };
+    let state = State {
+        settings: settings::Settings {
+            packages: [
+                (
+                    "com.google.android.gsf",
+                    "/system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk",
+                ),
+                ("android", "/system/framework/framework-res.apk"),
+            ]
+            .into_iter()
+            .map(|(name, path)| settings::Package {
+                name: name.into(),
+                code_path: path.into(),
+                ..Default::default()
+            })
+            .collect(),
+            ..Default::default()
+        },
+        list: vec![],
+        access: None,
+        users: vec![],
+    };
+    let mut inputs = Inputs::load_verified_code(&state, &apks).unwrap();
+    let code = |r: aim_services::package::scan::Record, partition, kind| Code {
+        location: Location {
+            path: r.settings.code_path,
+            partition,
+            kind,
+            apex: None,
+        },
+        parsed: r.parsed,
+        signing: r.signing,
+    };
+    let mut google = code(
+        inputs.active.remove("com.google.android.gsf").unwrap(),
+        Partition::SystemExt,
+        Kind::PrivApp,
+    );
+    let platform = code(
+        inputs.active.remove("android").unwrap(),
+        Partition::System,
+        Kind::Framework,
+    );
+    // Constructor inputs are explicit test policy. Code and declarations are
+    // original, parsed natively and fully integrity-verified above.
+    let metadata = |c: &Code| SettingMetadata {
+        code_path: c.location.path.clone(),
+        legacy_native_library_path: None,
+        primary_cpu_abi: None,
+        secondary_cpu_abi: None,
+        version_code: ((c.parsed.version_code_major as i64) << 32)
+            | c.parsed.version_code as u32 as i64,
+        flags: settings::FLAG_SYSTEM,
+        private_flags: settings::PRIVATE_FLAG_PRIVILEGED,
+        last_modified_time: 0,
+        uses_sdk_libraries: vec![],
+        uses_static_libraries: vec![],
+        mime_groups: c.parsed.mime_groups.clone(),
+        domain_set_id: [1; 16],
+        target_sdk_version: c.parsed.target_sdk_version,
+        restrict_update_hash: c.parsed.restrict_update_hash.clone(),
+    };
+    let policy = UserPolicy {
+        install_user: None,
+        users: Some(&[]),
+        allow_install: true,
+        instant_app: false,
+        virtual_preload: false,
+        stopped_system_app: true,
+    };
+    let mut scan = SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
+    let accepted = scan
+        .apply_new_system(&google, metadata(&google), policy)
+        .unwrap();
+    let group = google.parsed.shared_user_id.as_ref().unwrap();
+    let uid = accepted.record.settings.app_id;
+    assert_eq!(uid, 10000);
+    assert!(accepted.record.settings.shared_user);
+    assert!(accepted.signing.system_signature_mismatch.is_none());
+    assert_eq!(
+        accepted.users[&0],
+        aim_services::package::restrictions::UserState {
+            stopped: true,
+            ..Default::default()
+        }
+    );
+    assert_eq!(
+        accepted
+            .record
+            .settings
+            .signatures
+            .as_ref()
+            .unwrap()
+            .signatures,
+        google.signing.signatures
+    );
+    assert_eq!(accepted.record.parsed, google.parsed);
+    assert_eq!(
+        scan.identities.shared_users[group].signatures_changed,
+        Some(false)
+    );
+    assert_eq!(
+        scan.identities.ids.get(uid),
+        Some(&Owner::SharedUser(group.clone()))
+    );
+    let snapshot = scan.clone();
+    assert!(matches!(
+        scan.apply_new_system(&google, metadata(&google), policy),
+        Err(SigningError::Rejected(_))
+    ));
+    assert_eq!(scan, snapshot);
+    scan.apply_new_system(&platform, metadata(&platform), policy)
+        .unwrap();
+    assert_eq!(scan.settings.packages.len(), 2);
+    assert_eq!(scan.settings.packages[1].app_id, 1000);
+    assert_eq!(
+        scan.identities.shared_users[group].signatures_changed,
+        Some(false)
+    );
+    assert_eq!(scan.settings.packages[0], snapshot.settings.packages[0]);
+
+    // Synthetic name/signer policy candidates exercise failure without modifying
+    // either original APK. Initialized groups cannot accept an unrelated signer.
+    google.parsed.package_name = "new.member".into();
+    let original_signer = google.signing.clone();
+    google.signing = platform.signing.clone();
+    let snapshot = scan.clone();
+    assert!(matches!(
+        scan.apply_new_system(&google, metadata(&google), policy),
+        Err(SigningError::Fatal(_))
+    ));
+    assert_eq!(scan, snapshot);
+    google.signing = original_signer;
+    scan.apply_new_system(&google, metadata(&google), policy)
+        .unwrap();
+    assert_eq!(scan.settings.packages.last().unwrap().app_id, uid);
+
+    // First system mismatch can replace a restored group; subsequent members
+    // retain the per-scan marker and follow the pinned first-API failure policy.
+    let original_signer = google.signing.clone();
+    let restored = settings::Settings {
+        shared_users: vec![settings::SharedUser {
+            name: group.clone(),
+            app_id: 10010,
+            flags: 0,
+            signatures: Some(settings::Signatures {
+                signatures: platform.signing.signatures.clone(),
+                scheme_version: platform.signing.scheme_version,
+                ..Default::default()
+            }),
+        }],
+        ..Default::default()
+    };
+    for first_api in [29, 36] {
+        google.parsed.package_name = "first.new.member".into();
+        google.signing = original_signer.clone();
+        let mut ota = SigningScan::new(&Default::default(), &restored, first_api).unwrap();
+        let first = ota
+            .apply_new_system(&google, metadata(&google), policy)
+            .unwrap();
+        assert!(first.signing.system_signature_mismatch.is_some());
+        assert_eq!(first.record.settings.app_id, 10010);
+        assert_eq!(
+            ota.identities.shared_users[group].signatures_changed,
+            Some(true)
+        );
+        google.parsed.package_name = "second.new.member".into();
+        google.signing = platform.signing.clone();
+        let snapshot = ota.clone();
+        match ota
+            .apply_new_system(&google, metadata(&google), policy)
+            .unwrap_err()
+        {
+            SigningError::Rejected(e) => {
+                assert_eq!(first_api, 29);
+                assert!(e.message.contains("-104"));
+            }
+            SigningError::Fatal(_) => assert_eq!(first_api, 36),
+        }
+        assert_eq!(ota, snapshot);
+    }
+    google.signing = original_signer;
+
+    // Failed independent allocation removes the slot and advances the cursor.
+    google.parsed.package_name = "new.independent".into();
+    google.parsed.booleans |= booleans::LEAVING_SHARED_UID;
+    let original_signer = google.signing.clone();
+    google.signing = SigningDetails::from_saved(&Default::default()).unwrap();
+    let snapshot = scan.clone();
+    assert!(
+        matches!(scan.apply_new_system(&google, metadata(&google), policy), Err(SigningError::Rejected(ref e)) if e.phase == "signatures")
+    );
+    assert_eq!(scan.settings, snapshot.settings);
+    assert_eq!(
+        scan.identities.shared_users,
+        snapshot.identities.shared_users
+    );
+    assert!(scan.identities.ids.get(10001).is_none());
+    google.signing = original_signer;
+    let independent = scan
+        .apply_new_system(&google, metadata(&google), policy)
+        .unwrap();
+    assert_eq!(independent.record.settings.app_id, 10002);
+    assert!(!independent.record.settings.shared_user);
+    assert_eq!(
+        scan.identities.ids.get(10002),
+        Some(&Owner::Package("new.independent".into()))
+    );
+
+    // A failed new shared member retains only the group's allocation until prune.
+    google.parsed.package_name = "new.empty.group".into();
+    google.parsed.booleans &= !booleans::LEAVING_SHARED_UID;
+    google.parsed.shared_user_id = Some("new.group".into());
+    let original_signer = google.signing.clone();
+    google.signing = SigningDetails::from_saved(&Default::default()).unwrap();
+    let snapshot = scan.clone();
+    assert!(matches!(
+        scan.apply_new_system(&google, metadata(&google), policy),
+        Err(SigningError::Rejected(_))
+    ));
+    assert_eq!(scan.settings, snapshot.settings);
+    assert_eq!(
+        scan.identities.ids.get(10003),
+        Some(&Owner::SharedUser("new.group".into()))
+    );
+    assert!(
+        scan.identities.shared_users["new.group"]
+            .signatures
+            .is_none()
+    );
+    assert!(
+        scan.identities
+            .prune_unused(&scan.settings)
+            .contains(&"new.group".into())
+    );
+    google.signing = original_signer;
+    let retried = scan
+        .apply_new_system(&google, metadata(&google), policy)
+        .unwrap();
+    assert_eq!(retried.record.settings.app_id, 10004);
+    assert_eq!(scan.settings.shared_users.last().unwrap().name, "new.group");
+
+    // Physical-origin and latest static-library selection checks run before UID allocation.
+    let snapshot = scan.clone();
+    google.location.path = "/data/app/new/base.apk".into();
+    assert!(
+        matches!(scan.apply_new_system(&google, metadata(&google), policy), Err(SigningError::Rejected(ref e)) if e.phase == "location")
+    );
+    assert_eq!(scan, snapshot);
+    google.location.path = "/system/app/new/base.apk".into();
+    google.parsed.static_shared_library_name = Some("static".into());
+    assert!(
+        matches!(scan.apply_new_system(&google, metadata(&google), policy), Err(SigningError::Rejected(ref e)) if e.message.contains("latest-version"))
+    );
+    assert_eq!(scan, snapshot);
+}

@@ -1,16 +1,20 @@
-//! Ordered signing reconciliation for already-saved APK identities.
+//! Ordered signing reconciliation for saved and new system APK identities.
 //! Candidate state is separate from the published snapshot and disk.
 //! New/removed package reconciliation and side effects remain under #702.
 //! Shared UID migration is ported from android-16.0.0_r1 Settings,
 //! SharedUserSetting and SharedUidMigration.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
-use super::{Error, Record, authorize, physical_parse_flags};
+use super::{
+    Code, Error, Identity, Record, SettingMetadata, UidScan, UserPolicy, authorize,
+    physical_parse_flags,
+};
 use crate::package::{
     owner::app_ids::Owner,
     owner::shared_users::{Bootstrap, RestoreError, ScanOrigin, SignatureError, saved_signatures},
     parse,
     pkg::booleans,
-    settings::Settings,
+    restrictions::UserState,
+    settings::{Settings, SharedUser},
     sign::SigningDetails,
     system_config::SystemConfig,
 };
@@ -45,6 +49,14 @@ pub struct SigningOutcome {
     pub system_signature_mismatch: Option<String>,
 }
 
+/// Accepted new-system candidate; scan enrichment and publication follow.
+#[derive(Debug)]
+pub struct NewPackageOutcome {
+    pub record: Record,
+    pub users: BTreeMap<i32, UserState>,
+    pub signing: SigningOutcome,
+}
+
 impl SigningScan {
     pub fn new(
         config: &SystemConfig,
@@ -56,6 +68,103 @@ impl SigningScan {
             settings: settings.clone(),
             first_api_level,
             parsed: Vec::new(),
+        })
+    }
+
+    /// Reconcile verified new system-directory code through UID preparation,
+    /// setting construction, INSTALL shared-UID gates, merge and signer commit.
+    /// Rejection publishes no package/user state, but retains the original UID
+    /// cleanup cursor and an allocated group until final pruning.
+    pub fn apply_new_system(
+        &mut self,
+        code: &Code,
+        metadata: SettingMetadata,
+        users: UserPolicy<'_>,
+    ) -> Result<NewPackageOutcome, SigningError> {
+        let identity = Identity::select(&code.parsed, &self.settings, true);
+        let reject = |phase, message: &str| {
+            SigningError::Rejected(Error {
+                package: identity.internal_name.clone(),
+                path: code.location.path.clone(),
+                phase,
+                message: message.into(),
+            })
+        };
+        let flags =
+            physical_parse_flags(&code.location.path).map_err(|e| reject("location", &e))?;
+        if flags & parse::PARSE_IS_SYSTEM_DIR == 0 || metadata.code_path != code.location.path {
+            return Err(reject(
+                "location",
+                "new system setting disagrees with physical code path",
+            ));
+        }
+        if self
+            .settings
+            .packages
+            .iter()
+            .any(|p| p.name == identity.internal_name)
+        {
+            return Err(reject(
+                "identity",
+                "new system package already has a saved setting",
+            ));
+        }
+        // ReconcilePackageUtils selects the latest static-library setting for
+        // signature checks. That selection requires the declaration registry.
+        if code.parsed.static_shared_library_name.is_some() {
+            return Err(reject(
+                "identity",
+                "new static library requires latest-version signer selection (#806)",
+            ));
+        }
+        let mut preparation = UidScan::with_identities(&self.settings, self.identities.clone());
+        let (identity, _) = preparation.apply(code).map_err(SigningError::Rejected)?;
+        let setting = preparation
+            .new_setting(&identity, metadata, users)
+            .map_err(SigningError::Rejected)?;
+        let mut next = self.clone();
+        next.identities = preparation.identities.clone();
+        if let Some(name) = &preparation.packages[&identity.internal_name].shared_user {
+            let group = &next.identities.shared_users[name];
+            if !next.settings.shared_users.iter().any(|g| g.name == *name) {
+                next.settings.shared_users.push(SharedUser {
+                    name: name.clone(),
+                    app_id: group.app_id,
+                    flags: group.flags,
+                    signatures: group.signatures.clone(),
+                });
+            }
+        }
+        let mut parsed = code.parsed.clone();
+        identity.apply(&mut parsed);
+        let mut record = Record {
+            settings: setting.package,
+            parsed,
+            signing: code.signing.clone(),
+            identity,
+            origin: ScanOrigin::SystemDirectory,
+        };
+        next.settings.packages.push(record.settings.clone());
+        let signing = match next.apply(&record) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                preparation
+                    .reject_pending(&record.settings.name)
+                    .map_err(SigningError::Fatal)?;
+                self.identities = preparation.identities;
+                return Err(error);
+            }
+        };
+        // No fallible work follows publication into this scan candidate.
+        preparation
+            .accept_uid(&record.settings.name)
+            .map_err(SigningError::Fatal)?;
+        record.settings = next.settings.packages.last().unwrap().clone();
+        *self = next;
+        Ok(NewPackageOutcome {
+            record,
+            users: setting.users,
+            signing,
         })
     }
 

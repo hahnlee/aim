@@ -32,6 +32,11 @@ pub struct UidScan {
 impl UidScan {
     pub fn new(config: &SystemConfig, settings: &Settings) -> Result<Self, RestoreError> {
         let identities = Bootstrap::restore(config, settings)?;
+        Ok(Self::with_identities(settings, identities))
+    }
+
+    /// Preserve the current scan's allocation cursor and signing markers.
+    pub(super) fn with_identities(settings: &Settings, identities: Bootstrap) -> Self {
         let packages = settings
             .packages
             .iter()
@@ -58,12 +63,12 @@ impl UidScan {
                 )
             })
             .collect();
-        Ok(Self {
+        Self {
             identities,
             settings: settings.clone(),
             packages,
             pending: BTreeSet::new(),
-        })
+        }
     }
 
     /// Apply a fully parsed and verified system-directory candidate. Duplicate
