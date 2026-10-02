@@ -26,6 +26,8 @@
 mod asn1;
 mod block;
 mod crypto;
+mod history;
+pub use history::{History, INSTALLED_DATA, ROLLBACK, SHARED_USER_ID};
 mod jar;
 mod serialize;
 pub use serialize::public_keys as serialize_public_keys;

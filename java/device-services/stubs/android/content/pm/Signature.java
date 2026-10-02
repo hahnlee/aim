@@ -6,4 +6,5 @@ public class Signature {
     public Signature(byte[] signature) { throw new RuntimeException("stub"); }
     public byte[] toByteArray() { throw new RuntimeException("stub"); }
     public int getFlags() { throw new RuntimeException("stub"); }
+    public void setFlags(int flags) { throw new RuntimeException("stub"); }
 }

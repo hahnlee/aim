@@ -217,6 +217,52 @@ fn allocation_matches_the_original_runtime() {
     ]));
     assert_eq!(String::from_utf8(original.stdout).unwrap(), expected);
 
+    use aim_services::package::{settings::Signatures, sign::History};
+    let cases: Vec<_> = [
+        (vec![], None),
+        (vec![1], None),
+        (vec![2], None),
+        (vec![2], Some(vec![(1, 1), (2, 0)])),
+        (vec![2], Some(vec![(1, 0), (2, 0)])),
+        (vec![3], Some(vec![(1, 3), (2, 8), (3, 0)])),
+        (vec![1, 2], None),
+        (vec![2, 1], None),
+        (vec![1, 3], None),
+    ]
+    .into_iter()
+    .map(|(current, past)| Signatures {
+        signatures: current.into_iter().map(|c| vec![c]).collect(),
+        past_signatures: past.map(|p| p.into_iter().map(|(c, flags)| (vec![c], flags)).collect()),
+        ..Default::default()
+    })
+    .collect();
+    let mut expected = String::new();
+    for (i, candidate) in cases.iter().enumerate() {
+        for (j, old) in cases.iter().enumerate() {
+            let candidate = History::saved(candidate);
+            let old = History::saved(old);
+            for flags in [0, 1, 2, 3, 8, 31] {
+                expected.push_str(&format!(
+                    "{i} {j} {flags} {} {} {} {} {}\n",
+                    candidate.check_capability(&old, flags),
+                    candidate.has_ancestor(&old),
+                    candidate.has_ancestor_or_self(&old),
+                    candidate.allows_update_from(&old, false),
+                    candidate.allows_update_from(&old, true)
+                ));
+            }
+        }
+    }
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.AppIdsOracle",
+        "trust",
+    ]));
+    assert_eq!(String::from_utf8(original.stdout).unwrap(), expected);
+
     // Original SystemConfig reads these disposable vendor/OEM fixtures
     // with zero partition permissions: the UID tag has no allow-bit gate.
     let root = boot.data.join("data/local/tmp/uid-image");
@@ -351,6 +397,15 @@ fn allocation_matches_the_original_runtime() {
     for (name, record) in &inputs.active {
         assert_eq!(&record.identity.internal_name, name);
         assert_eq!(&record.parsed.package_name, name);
+        let previous = record
+            .settings
+            .signatures
+            .as_ref()
+            .expect("saved signing details");
+        assert!(
+            History::verified(&record.signing).allows_update_from(&History::saved(previous), false),
+            "normal signing gate: {name}"
+        );
         assert_eq!(
             merged.ids.get(record.settings.app_id),
             restored.get(record.settings.app_id)

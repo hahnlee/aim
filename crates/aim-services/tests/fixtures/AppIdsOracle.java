@@ -2,6 +2,32 @@ package com.android.server.pm;
 
 public final class AppIdsOracle {
     public static void main(String[] args) {
+        if (args.length != 0 && args[0].equals("trust")) {
+            android.content.pm.SigningDetails[] cases = {
+                android.content.pm.SigningDetails.UNKNOWN,
+                details(new int[]{1}, null, null),
+                details(new int[]{2}, null, null),
+                details(new int[]{2}, new int[]{1, 2}, new int[]{1, 0}),
+                details(new int[]{2}, new int[]{1, 2}, new int[]{0, 0}),
+                details(new int[]{3}, new int[]{1, 2, 3}, new int[]{3, 8, 0}),
+                details(new int[]{1, 2}, null, null),
+                details(new int[]{2, 1}, null, null),
+                details(new int[]{1, 3}, null, null),
+            };
+            for (int i = 0; i < cases.length; i++) {
+                for (int j = 0; j < cases.length; j++) {
+                    android.content.pm.SigningDetails candidate = cases[i], old = cases[j];
+                    boolean update = candidate.checkCapability(old, 1) || old.checkCapability(candidate, 8);
+                    for (int flag : new int[]{0, 1, 2, 3, 8, 31}) {
+                        System.out.println(i + " " + j + " " + flag + " "
+                            + candidate.checkCapability(old, flag) + " " + candidate.hasAncestor(old)
+                            + " " + candidate.hasAncestorOrSelf(old) + " " + update + " "
+                            + (update || old.hasAncestorOrSelf(candidate)));
+                    }
+                }
+            }
+            return;
+        }
         if (args.length != 0 && args[0].equals("identity")) {
             com.android.internal.pm.parsing.pkg.PackageImpl pkg =
                 (com.android.internal.pm.parsing.pkg.PackageImpl)
@@ -77,4 +103,17 @@ public final class AppIdsOracle {
         full.removeSetting(19999);
         System.out.println(full.acquireAndRegisterNewAppId(b));
     }
+    private static android.content.pm.SigningDetails details(int[] current, int[] past, int[] flags) {
+        android.content.pm.Signature[] signatures = new android.content.pm.Signature[current.length];
+        for (int i = 0; i < current.length; i++) signatures[i] = new android.content.pm.Signature(new byte[]{(byte) current[i]});
+        android.content.pm.Signature[] lineage = past == null ? null : new android.content.pm.Signature[past.length];
+        if (lineage != null) {
+            for (int i = 0; i < past.length; i++) {
+                lineage[i] = new android.content.pm.Signature(new byte[]{(byte) past[i]});
+                lineage[i].setFlags(flags[i]);
+            }
+        }
+        return new android.content.pm.SigningDetails(signatures, 3, null, lineage);
+    }
+
 }
