@@ -1,13 +1,18 @@
 //! What the package queries read of the device besides the package
 //! state, from the system image as the original reads it at boot:
-//! SystemConfig's features and hidden-API allowlist (the `etc/sysconfig`
+//! SystemConfig's features, libraries and hidden-API allowlist (the `etc/sysconfig`
 //! and `etc/permissions` XML of each partition and APEX,
 //! `SystemConfig.readAllPermissions` at `android-16.0.0_r1`), the
 //! framework's fallback app categories (`FallbackCategoryProvider`), its
 //! `config_useRoundIcon` and the aconfig flags (the parser's platform),
 //! and the GL ES version. Properties come from `prop`: the device's, as
 //! the original reads them at run time.
+//!
+//! The library declaration and public native list readers are ported
+//! from AOSP android-16.0.0_r1 `SystemConfig`, Copyright (C) The Android
+//! Open Source Project, Apache License 2.0.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -15,6 +20,9 @@ use aim_android_xml::Element;
 
 use super::model::System;
 use super::parse::Platform;
+
+mod libraries;
+pub use libraries::Library;
 
 /// `PackageManager.FEATURE_*` that SystemConfig adds from the environment.
 const FEATURE_FILE_BASED_ENCRYPTION: &str = "android.software.file_based_encryption";
@@ -31,12 +39,15 @@ const TIRAMISU: i32 = 33;
 
 /// What a partition's files may configure (`SystemConfig.ALLOW_*`).
 const ALLOW_FEATURES: u32 = 0x1;
+const ALLOW_LIBS: u32 = 0x2;
 const ALLOW_HIDDENAPI_WHITELISTING: u32 = 0x40;
 const ALLOW_ALL: u32 = !0;
 
-/// SystemConfig's features and hidden-API allowlist.
+/// SystemConfig's features, libraries and hidden-API allowlist.
 #[derive(Debug, Default, PartialEq)]
 pub struct SystemConfig {
+    /// `mSharedLibraries`, including public native libraries.
+    pub libraries: BTreeMap<String, Library>,
     /// `mAvailableFeatures`, as added: name and version.
     pub features: Vec<(String, i32)>,
     pub hidden_api_allowlist: Vec<String>,
@@ -62,21 +73,21 @@ impl SystemConfig {
                 }
             }
         };
-        // Vendor and ODM may add features; product and system_ext all of it
+        // Vendor and ODM may add libraries and features; product and system_ext all of it
         // that matters here (the product's allowlist is a TODO upstream).
-        let vendor = ALLOW_FEATURES;
+        let vendor = ALLOW_FEATURES | ALLOW_LIBS;
         partition("system", ALLOW_ALL, None);
         partition("vendor", vendor, prop("ro.boot.product.vendor.sku"));
         partition("odm", vendor, prop("ro.boot.product.hardware.sku"));
         partition("oem", ALLOW_FEATURES, None);
         partition(
             "product",
-            ALLOW_FEATURES | ALLOW_HIDDENAPI_WHITELISTING,
+            ALLOW_FEATURES | ALLOW_LIBS | ALLOW_HIDDENAPI_WHITELISTING,
             prop("ro.boot.hardware.sku"),
         );
         partition("system_ext", ALLOW_ALL, None);
         for (dir, flags) in dirs {
-            c.read_dir(&root.join(dir), flags, low_ram);
+            c.read_dir(&root.join(dir), flags, low_ram, root, prop);
         }
         if let Ok(apexes) = fs::read_dir(root.join("apex")) {
             let mut apexes: Vec<_> = apexes.flatten().map(|e| e.path()).collect();
@@ -84,10 +95,17 @@ impl SystemConfig {
             for apex in apexes {
                 let name = apex.file_name().unwrap_or_default().to_string_lossy();
                 if apex.is_dir() && !name.contains('@') {
-                    c.read_dir(&apex.join("etc/permissions"), ALLOW_FEATURES, low_ram);
+                    c.read_dir(
+                        &apex.join("etc/permissions"),
+                        ALLOW_FEATURES | ALLOW_LIBS,
+                        low_ram,
+                        root,
+                        prop,
+                    );
                 }
             }
         }
+        c.read_native_libraries(root);
         // readAllPermissionsFromEnvironment.
         if prop("ro.crypto.type").as_deref() == Some("file") {
             c.add(FEATURE_FILE_BASED_ENCRYPTION, 0);
@@ -122,7 +140,14 @@ impl SystemConfig {
 
     /// `readPermissions` of a directory: its XML files, `platform.xml` of a
     /// `permissions` directory last.
-    fn read_dir(&mut self, dir: &Path, flags: u32, low_ram: bool) {
+    fn read_dir(
+        &mut self,
+        dir: &Path,
+        flags: u32,
+        low_ram: bool,
+        image: &Path,
+        prop: &dyn Fn(&str) -> Option<String>,
+    ) {
         let Ok(entries) = fs::read_dir(dir) else {
             return;
         };
@@ -140,15 +165,27 @@ impl SystemConfig {
                 continue;
             };
             if root.name == "permissions" || root.name == "config" {
-                self.read_root(&root, flags, low_ram);
+                self.read_root(&root, flags, low_ram, image, prop);
             }
         }
     }
 
-    fn read_root(&mut self, root: &Element, flags: u32, low_ram: bool) {
+    fn read_root(
+        &mut self,
+        root: &Element,
+        flags: u32,
+        low_ram: bool,
+        image: &Path,
+        prop: &dyn Fn(&str) -> Option<String>,
+    ) {
         for e in root.children() {
             let name = e.string("name").map(|s| s.into_owned());
             match e.name.as_str() {
+                "library" | "apex-library" if flags & ALLOW_LIBS != 0 => {
+                    if let Some(library) = Library::read(e, image, prop) {
+                        self.libraries.insert(library.name.clone(), library);
+                    }
+                }
                 "feature" if flags & ALLOW_FEATURES != 0 => {
                     let version = int(e.string("version").map(|s| s.into_owned())).unwrap_or(0);
                     let allowed = !low_ram || e.string("notLowRam").as_deref() != Some("true");
@@ -183,6 +220,36 @@ impl SystemConfig {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    fn read_native_libraries(&mut self, root: &Path) {
+        let mut files = vec![root.join("vendor/etc/public.libraries.txt")];
+        for dir in ["system/etc", "system_ext/etc", "product/etc"] {
+            if let Ok(entries) = fs::read_dir(root.join(dir)) {
+                let mut paths: Vec<_> = entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        let name = p.file_name().unwrap_or_default().to_string_lossy();
+                        name.starts_with("public.libraries-") && name.ends_with(".txt")
+                    })
+                    .collect();
+                paths.sort();
+                files.extend(paths);
+            }
+        }
+        for file in files {
+            let Ok(text) = fs::read_to_string(file) else {
+                continue;
+            };
+            for line in text
+                .lines()
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            {
+                let name = line.trim().split(' ').next().unwrap().to_owned();
+                self.libraries.insert(name.clone(), Library::native(name));
             }
         }
     }
@@ -275,6 +342,95 @@ mod tests {
         let path = root.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn reads_library_owners_sdk_limits_and_native_lists() {
+        struct Data(std::path::PathBuf);
+        impl Drop for Data {
+            fn drop(&mut self) {
+                fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let data = Data(
+            std::env::temp_dir().join(format!("aim-sysconfig-libraries-{}", std::process::id())),
+        );
+        fs::create_dir(&data.0).unwrap();
+        let root = &data.0;
+        write(root, "system/framework/example.jar", "");
+        write(
+            root,
+            "system/etc/permissions/base.xml",
+            r#"<permissions>
+            <library name="kept" file="/system/framework/example.jar" dependency="a:b::"
+                min-device-sdk="36" max-device-sdk="36" on-bootclasspath-since="36" />
+            <library name="before" file="/system/framework/example.jar" on-bootclasspath-before="37" />
+            <library name="too-new" file="/system/framework/example.jar" min-device-sdk="37" />
+            <library name="too-old" file="/system/framework/example.jar" max-device-sdk="35" />
+            <library name="future" file="/system/framework/example.jar" min-device-sdk="Future" />
+            <library name="missing" file="/system/framework/missing.jar" />
+            <library name="no-file" />
+            <library name="libvendor.so" file="/system/framework/example.jar" />
+            </permissions>"#,
+        );
+        for partition in ["vendor", "odm", "product", "system_ext", "oem"] {
+            write(
+                root,
+                &format!("{partition}/etc/permissions/lib.xml"),
+                &format!(
+                    "<permissions><library name='{partition}' file='/system/framework/example.jar' /></permissions>"
+                ),
+            );
+        }
+        write(root, "apex/com.x/javalib/x.jar", "");
+        write(
+            root,
+            "apex/com.x/etc/permissions/x.xml",
+            "<permissions><apex-library name='apex' file='/apex/com.x/javalib/x.jar' /></permissions>",
+        );
+        write(
+            root,
+            "apex/com.x@1/etc/permissions/x.xml",
+            "<permissions><library name='versioned' file='/apex/com.x/javalib/x.jar' /></permissions>",
+        );
+        write(
+            root,
+            "vendor/etc/public.libraries.txt",
+            "# comment\nlibvendor.so 64\n\n",
+        );
+        write(
+            root,
+            "product/etc/public.libraries-example.txt",
+            "libproduct.so 32\n",
+        );
+        write(root, "system/etc/public.libraries.txt", "ignored.so\n");
+        let props = |name: &str| match name {
+            "ro.build.version.sdk" => Some("36".into()),
+            "ro.build.version.codename" => Some("REL".into()),
+            "ro.build.version.known_codenames" => Some("Baklava".into()),
+            _ => None,
+        };
+        let libraries = SystemConfig::read(root, &props).libraries;
+        assert_eq!(
+            libraries.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "apex",
+                "before",
+                "kept",
+                "libproduct.so",
+                "libvendor.so",
+                "odm",
+                "product",
+                "system_ext",
+                "vendor"
+            ]
+        );
+        assert_eq!(libraries["kept"].dependencies, ["a", "b"]);
+        assert!(libraries["kept"].can_be_safely_ignored);
+        assert!(libraries["before"].can_be_safely_ignored);
+        assert!(libraries["libvendor.so"].native);
+        assert_eq!(libraries["libvendor.so"].filename, "libvendor.so");
+        assert!(!libraries["apex"].native);
     }
 
     #[test]

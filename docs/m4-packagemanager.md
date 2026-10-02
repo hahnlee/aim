@@ -510,10 +510,21 @@ and writes return an explicit unsupported-operation exception. The
 enabled-write decoder is also shared and retains `DONT_KILL_APP` and
 `SYNCHRONOUS` flags for the future mutation path. Receiver unit tests cover
 visibility by caller uid, interface-token rejection and publication to
-existing endpoints; all 116 package tests pass. Guest-init does not
+existing endpoints; all 118 package tests pass. Guest-init does not
 register these receivers; native scanning, mutation side effects and the
 SystemServer facade remain prerequisites tracked in #798 and the M4
 issues.
+
+For the native scan's built-in shared library input (#707),
+`SystemConfig::read` reads `library`/`apex-library` declarations and public
+native library lists. It applies partition and SKU permissions, file
+existence, SDK limits and bootclasspath transition conditions, retaining
+the dependency names. On a disposable original-PMS boot (2026-10-02,
+`sys.boot_completed=1`), all 19 built-in library names and paths matched
+`pm list libraries -v` and `dumpsys package libraries`. The remaining four
+libraries in the original's 23-entry registry are APK declarations; the
+native registry must still assemble those and resolve dependencies before
+#707's full registry and CTS acceptance can pass.
 
 **Who writes what, by slice:**
 

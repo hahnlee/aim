@@ -57,9 +57,15 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (116 package unit tests pass). These are not
+shared snapshot publication (118 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
+The native scan's SystemConfig library reader also matches all 19
+built-in library names and paths from `pm list libraries -v` and
+`dumpsys package libraries` on a disposable original-PMS boot
+(2026-10-02, `sys.boot_completed=1`). Four APK-declared libraries remain
+to be assembled into the native registry (#707); this is input parity,
+not native PackageManager activation or a CTS result.
 
 The device's own system service (`dev.aim.server.DeviceServices`,
 docs/system-services.md, "The system_server bridge") is on the system
