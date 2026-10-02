@@ -9,6 +9,13 @@ pub const INSTALLED_DATA: i32 = 1;
 pub const SHARED_USER_ID: i32 = 2;
 pub const ROLLBACK: i32 = 8;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinType {
+    Install,
+    Update,
+    System,
+}
+
 #[derive(Clone, Copy)]
 pub struct History<'a> {
     current: &'a [Vec<u8>],
@@ -86,11 +93,68 @@ impl<'a> History<'a> {
             || old.check_capability(self, ROLLBACK)
             || (rollback && old.has_ancestor_or_self(self))
     }
+
+    /// PackageManagerServiceUtils.canJoinSharedUserId. The group history
+    /// is its owner-merged lineage, and members are its current package
+    /// histories. Unknown group initialization is a separate owner step.
+    pub fn can_join_shared_user(&self, group: &Self, kind: JoinType, members: &[Self]) -> bool {
+        let granted = self.check_capability(group, SHARED_USER_ID)
+            || group.check_capability(self, SHARED_USER_ID);
+        if granted && kind != JoinType::Install {
+            return true;
+        }
+        if !granted && group.has_ancestor(self) {
+            return kind == JoinType::System;
+        }
+        if !granted && self.has_ancestor(group) {
+            return kind != JoinType::Install;
+        }
+        if !granted {
+            return false;
+        }
+        // An installed member in the candidate's lineage cannot retain a
+        // shared UID after the candidate revoked that member's capability.
+        !members.iter().any(|member| {
+            self.has_ancestor(member) && !self.check_capability(member, SHARED_USER_ID)
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn join_types_preserve_revocation_direction_and_check_every_install_member() {
+        let old = Signatures {
+            signatures: vec![vec![1]],
+            ..Default::default()
+        };
+        let middle = Signatures {
+            signatures: vec![vec![2]],
+            ..Default::default()
+        };
+        let descendant = Signatures {
+            signatures: vec![vec![3]],
+            past_signatures: Some(vec![(vec![1], 2), (vec![2], 0), (vec![3], 0)]),
+            ..Default::default()
+        };
+        let revoked = Signatures {
+            signatures: vec![vec![2]],
+            past_signatures: Some(vec![(vec![1], 0), (vec![2], 0)]),
+            ..Default::default()
+        };
+        let old = History::saved(&old);
+        let middle = History::saved(&middle);
+        let new = History::saved(&descendant);
+        let revoked = History::saved(&revoked);
+        assert!(new.can_join_shared_user(&old, JoinType::Install, &[old]));
+        assert!(!new.can_join_shared_user(&old, JoinType::Install, &[old, middle]));
+        assert!(new.can_join_shared_user(&old, JoinType::Update, &[middle]));
+        assert!(!old.can_join_shared_user(&revoked, JoinType::Update, &[]));
+        assert!(old.can_join_shared_user(&revoked, JoinType::System, &[]));
+        assert!(!revoked.can_join_shared_user(&old, JoinType::Install, &[]));
+        assert!(revoked.can_join_shared_user(&old, JoinType::Update, &[]));
+    }
     #[test]
     fn capabilities_rotation_multisigners_unknown_and_rollback_follow_the_owner() {
         let a = Signatures {

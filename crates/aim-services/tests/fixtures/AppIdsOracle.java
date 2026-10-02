@@ -2,7 +2,7 @@ package com.android.server.pm;
 
 public final class AppIdsOracle {
     public static void main(String[] args) {
-        if (args.length != 0 && args[0].equals("trust")) {
+        if (args.length != 0 && (args[0].equals("trust") || args[0].equals("join"))) {
             android.content.pm.SigningDetails[] cases = {
                 android.content.pm.SigningDetails.UNKNOWN,
                 details(new int[]{1}, null, null),
@@ -14,6 +14,25 @@ public final class AppIdsOracle {
                 details(new int[]{2, 1}, null, null),
                 details(new int[]{1, 3}, null, null),
             };
+            if (args[0].equals("join")) {
+                for (int i = 0; i < cases.length; i++) {
+                    for (int j = 0; j < cases.length; j++) {
+                        for (int k = 0; k < cases.length; k++) {
+                            SharedUserSetting group = new SharedUserSetting("group", 1, 8);
+                            group.signatures.mSigningDetails = cases[j];
+                            PackageSetting member = new PackageSetting("member", null,
+                                new java.io.File("/data/app/member"), 0, 0,
+                                new java.util.UUID(0, 1)).setSigningDetails(cases[k]);
+                            group.addPackage(member);
+                            for (int kind = 0; kind < 3; kind++) {
+                                System.out.println(i + " " + j + " " + k + " " + kind + " "
+                                    + PackageManagerServiceUtils.canJoinSharedUserId("candidate", cases[i], group, kind));
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             for (int i = 0; i < cases.length; i++) {
                 for (int j = 0; j < cases.length; j++) {
                     android.content.pm.SigningDetails candidate = cases[i], old = cases[j];

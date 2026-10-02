@@ -217,7 +217,10 @@ fn allocation_matches_the_original_runtime() {
     ]));
     assert_eq!(String::from_utf8(original.stdout).unwrap(), expected);
 
-    use aim_services::package::{settings::Signatures, sign::History};
+    use aim_services::package::{
+        settings::Signatures,
+        sign::{History, JoinType},
+    };
     let cases: Vec<_> = [
         (vec![], None),
         (vec![1], None),
@@ -260,6 +263,34 @@ fn allocation_matches_the_original_runtime() {
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
         "trust",
+    ]));
+    assert_eq!(String::from_utf8(original.stdout).unwrap(), expected);
+
+    let mut expected = String::new();
+    for (i, candidate) in cases.iter().enumerate() {
+        for (j, group) in cases.iter().enumerate() {
+            for (k, member) in cases.iter().enumerate() {
+                for (kind, mode) in [JoinType::Install, JoinType::Update, JoinType::System]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let allowed = History::saved(candidate).can_join_shared_user(
+                        &History::saved(group),
+                        mode,
+                        &[History::saved(member)],
+                    );
+                    expected.push_str(&format!("{i} {j} {k} {kind} {allowed}\n"));
+                }
+            }
+        }
+    }
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.AppIdsOracle",
+        "join",
     ]));
     assert_eq!(String::from_utf8(original.stdout).unwrap(), expected);
 
@@ -406,6 +437,32 @@ fn allocation_matches_the_original_runtime() {
             History::verified(&record.signing).allows_update_from(&History::saved(previous), false),
             "normal signing gate: {name}"
         );
+        if record.settings.shared_user {
+            let group = state
+                .settings
+                .shared_users
+                .iter()
+                .find(|g| g.app_id == record.settings.app_id)
+                .unwrap();
+            let members: Vec<_> = inputs
+                .active
+                .values()
+                .filter(|r| r.settings.shared_user && r.settings.app_id == group.app_id)
+                .map(|r| History::verified(&r.signing))
+                .collect();
+            let details = group
+                .signatures
+                .as_ref()
+                .expect("saved shared signing details");
+            assert!(
+                History::verified(&record.signing).can_join_shared_user(
+                    &History::saved(details),
+                    JoinType::Update,
+                    &members,
+                ),
+                "shared signing gate: {name}"
+            );
+        }
         assert_eq!(
             merged.ids.get(record.settings.app_id),
             restored.get(record.settings.app_id)
