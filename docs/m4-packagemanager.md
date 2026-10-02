@@ -529,13 +529,14 @@ internal package names and manifest declaring names. Dynamic declarations
 require a system app, cannot replace an existing library, and an updated
 system app may expose only names its original declared. A disposable
 original-PMS data check (2026-10-02, boot completed) read `packages.xml`
-and parsed APKs without the feed: 22 of the original's 23 library names
+and parsed APKs without the feed: all 23 original library names
 and paths matched, including Trichrome's static version 694313732 and
-internal package name. With nonisolated split cluster parsing and runtime
-display density supplied, the diagnostic parses 242 packages; the
-installed GMS's isolated split asset dependencies remain unsupported
-(#720), leaving its declaration missing. This makes the scan check
-incomplete.
+internal package name. With isolated split dependency/asset loading and
+runtime display density supplied, the diagnostic parses all 243 installed
+APK packages, including GMS's 11 splits. The updated GMS's dynamic library
+is restricted to its original disabled system package's declarations.
+These checks cover library names/paths and parser success, not the whole
+native scan or installed GMS's complete parcel parity (#760).
 Library dependency resolution, the complete native scan and #707's CTS
 acceptance still remain; declaration records are not yet served as full
 shared-library query results.
@@ -554,8 +555,16 @@ the pinned aapt2 and checks the merged components, class loader, split
 fields and cache serialization, plus rejection of malformed clusters.
 On a disposable original-PMS boot (2026-10-02, boot completed), native
 output matches all 288 scan cache entries byte for byte, including the
-system GMS/Play Store packages. The installed GMS's isolated split loader
-and dependency tree remain unimplemented (#720).
+system GMS/Play Store packages. Isolated loading now builds the pinned
+`SplitDependencyLoader` tree, rejects missing targets, config targets that
+are not features and cycles, and serializes the tree in the original
+sparse-array format. Each feature's assets include its ancestors and their
+configuration splits, then its own APK and configuration splits; sibling
+feature assets are excluded. Config-only split parsing uses its own APK,
+as `SplitAssetDependencyLoader` does. The compiled integration test covers
+feature dependencies, config targeting, serialization and malformed trees;
+a unit test checks the asset scopes. Installed GMS parses, but its complete
+parcel comparison against the original is still pending (#760).
 
 **Who writes what, by slice:**
 

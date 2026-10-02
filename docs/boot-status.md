@@ -57,24 +57,27 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (123 package unit tests pass). These are not
+shared snapshot publication (124 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
 built-in library names and paths from `pm list libraries -v` and
 `dumpsys package libraries` on a disposable original-PMS boot
 (2026-10-02, `sys.boot_completed=1`). The declaration registry assembled
-from persisted package settings and native-parsed APKs matches 22 of the
-original's 23 library names/paths. With nonisolated split cluster parsing
-and runtime density supplied, the diagnostic parses 242 packages; only
-the installed GMS's isolated split asset dependencies remain unsupported
-(#720), leaving its declaration missing. The native parser's output also
+from persisted package settings and native-parsed APKs matches all 23
+original library names/paths. With isolated split dependencies and asset
+scopes implemented and runtime density supplied, the diagnostic parses
+all 243 installed APK packages, including GMS's 11 splits (#720). The
+native parser's output also
 matches all 288 original-PMS scan cache entries byte for byte on a
 disposable boot (2026-10-02, `sys.boot_completed=1`); these include the
 system GMS/Play Store packages, not the installed GMS cluster. A compiled
 split APK integration test passes for manifest merging, split ordering,
-cache serialization and malformed clusters. This remains an incomplete
-native scan check. Dependency resolution
+dependency serialization, missing/cyclic dependencies and malformed
+clusters; a unit test checks ancestor/config asset scopes without sibling
+assets. Installed GMS's full parser parcel has not been compared against
+the original (#760). This remains an incomplete native scan check.
+Shared-library dependency resolution
 and native PackageManager activation remain pending (#707); no native
 PackageManager CTS result is claimed.
 

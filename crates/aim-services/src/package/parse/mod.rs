@@ -8,7 +8,7 @@
 //! This parser makes what `PackageParser2.parsePackage` caches during a
 //! scan: no certificates (`PARSE_COLLECT_CERTIFICATES` is not set), and
 //! nothing the scan sets afterwards. What it does not port yet it refuses
-//! with [`Error::Unsupported`] rather than guess, among them isolated splits,
+//! with [`Error::Unsupported`] rather than guess, among them
 //! `<key-sets>`, `<install-constraints>`, `<extension-sdk>` and advanced
 //! glob patterns; none of the image's packages has them.
 //!
@@ -205,7 +205,7 @@ struct Parser<'a> {
     platform: &'a Platform,
     ctx: Ctx<'a>,
     flags: i32,
-    input: RefCell<Input>,
+    input: &'a RefCell<Input>,
 }
 
 /// Parses the package at `host` (an APK or a directory holding one) that
@@ -213,15 +213,21 @@ struct Parser<'a> {
 pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result<Package> {
     let (host, path) = descend(host, path)?;
     let parts = cluster::load(&host, &path)?;
+    let dependencies = cluster::dependencies(&parts)?;
     let base = &parts[0];
     let manifest = &base.manifest;
     let mut tables = vec![&platform.framework];
-    tables.extend(parts.iter().filter_map(|part| part.table.as_ref()));
+    tables.extend(
+        cluster::assets(parts.len(), dependencies.as_ref(), 0)
+            .iter()
+            .filter_map(|i| parts[*i].table.as_ref()),
+    );
     let res = Resources {
         tables,
         overlays: &platform.framework_overlays,
         config: platform.config(),
     };
+    let input = RefCell::new(Input::default());
     let parser = Parser {
         platform,
         ctx: Ctx {
@@ -230,7 +236,7 @@ pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result
             error: RefCell::new(None),
         },
         flags,
-        input: RefCell::new(Input::default()),
+        input: &input,
     };
     let mut pkg = parser.parse_base_apk(manifest, &base.path, &path)?;
     if base.table.as_ref().is_some_and(Table::defines_overlayable) {
@@ -241,6 +247,7 @@ pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result
         }
     }
     if parts.len() > 1 {
+        pkg.split_dependencies = dependencies.clone();
         let splits = &parts[1..];
         pkg.split_names = Some(splits.iter().map(|p| p.split.clone().unwrap()).collect());
         pkg.split_code_paths = Some(splits.iter().map(|p| p.path.clone()).collect());
@@ -248,7 +255,31 @@ pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result
         pkg.split_flags = Some(vec![0; splits.len()]);
         pkg.split_class_loader_names = Some(vec![None; splits.len()]);
         for (index, part) in splits.iter().enumerate() {
-            parser.parse_split(&mut pkg, part, index)?;
+            let mut tables = vec![&platform.framework];
+            tables.extend(
+                cluster::assets(parts.len(), dependencies.as_ref(), index + 1)
+                    .iter()
+                    .filter_map(|i| parts[*i].table.as_ref()),
+            );
+            let split_res = Resources {
+                tables,
+                overlays: &platform.framework_overlays,
+                config: platform.config(),
+            };
+            let split_parser = Parser {
+                platform,
+                ctx: Ctx {
+                    res: &split_res,
+                    attrs: &platform.framework_attrs,
+                    error: RefCell::new(None),
+                },
+                flags,
+                input: &input,
+            };
+            split_parser.parse_split(&mut pkg, part, index)?;
+            if let Some(e) = split_parser.ctx.error.take() {
+                return fail(e);
+            }
         }
     }
     if let Some(e) = parser.ctx.error.take() {

@@ -135,9 +135,83 @@ fn compiled_split_cluster_merges_and_validates_manifests() {
     let isolated = data.0.join("isolated");
     link(&isolated, "base", &base(true));
     link(&isolated, "feature", FEATURE);
+    link(
+        &isolated,
+        "config",
+        &CONFIG.replace(
+            "split=\"config.en\"",
+            "split=\"config.en\" configForSplit=\"feature\"",
+        ),
+    );
+    let pkg = parse(&isolated, "/data/app/example", 0, &platform).unwrap();
+    assert_eq!(
+        pkg.split_dependencies.as_ref().unwrap(),
+        &std::collections::BTreeMap::from([(0, vec![-1]), (2, vec![0, 1])])
+    );
+    let read = AndroidPackage::read_cache_entry(&pkg.to_cache_entry().bytes).unwrap();
+    assert_eq!(
+        read.split_dependencies,
+        Some(vec![(0, Some(vec![-1])), (2, Some(vec![0, 1]))])
+    );
+    link(
+        &isolated,
+        "child",
+        &FEATURE
+            .replace("split=\"feature\"", "split=\"zchild\"")
+            .replace(
+                "<application",
+                "<uses-split android:name=\"feature\" /><application",
+            )
+            .replace(".Feature", ".Child"),
+    );
+    let pkg = parse(&isolated, "/data/app/example", 0, &platform).unwrap();
+    assert_eq!(
+        pkg.split_dependencies.as_ref().unwrap().get(&3),
+        Some(&vec![2])
+    );
+    link(
+        &isolated,
+        "config",
+        &CONFIG.replace(
+            "split=\"config.en\"",
+            "split=\"config.en\" configForSplit=\"config.en\"",
+        ),
+    );
     assert!(matches!(
         parse(&isolated, "/data/app/example", 0, &platform),
-        Err(Error::Unsupported(_))
+        Err(Error::Parse(_))
+    ));
+    link(
+        &isolated,
+        "config",
+        &CONFIG.replace(
+            "split=\"config.en\"",
+            "split=\"config.en\" configForSplit=\"feature\"",
+        ),
+    );
+    link(
+        &isolated,
+        "feature",
+        &FEATURE.replace(
+            "<application",
+            "<uses-split android:name=\"absent\" /><application",
+        ),
+    );
+    assert!(matches!(
+        parse(&isolated, "/data/app/example", 0, &platform),
+        Err(Error::Parse(_))
+    ));
+    link(
+        &isolated,
+        "feature",
+        &FEATURE.replace(
+            "<application",
+            "<uses-split android:name=\"feature\" /><application",
+        ),
+    );
+    assert!(matches!(
+        parse(&isolated, "/data/app/example", 0, &platform),
+        Err(Error::Parse(_))
     ));
     let missing = data.0.join("missing");
     link(&missing, "feature", FEATURE);

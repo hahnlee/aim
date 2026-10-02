@@ -225,6 +225,7 @@ pub struct Package {
     pub zygote_preload_name: Option<String>,
     pub split_class_loader_names: Option<Vec<Option<String>>>,
     pub split_code_paths: Option<Vec<String>>,
+    pub split_dependencies: Option<std::collections::BTreeMap<i32, Vec<i32>>>,
     pub split_flags: Option<Vec<i32>>,
     pub split_names: Option<Vec<String>>,
     pub split_revision_codes: Option<Vec<i32>>,
@@ -366,6 +367,7 @@ impl Package {
             split_code_paths: None,
             split_flags: None,
             split_names: None,
+            split_dependencies: None,
             split_revision_codes: None,
             resizeable_activity: None,
             auto_revoke_permissions: 0,
@@ -690,10 +692,18 @@ impl Package {
         }
         w.field("splitCodePaths");
         w.strings(self.split_code_paths.as_deref());
-        // `writeSparseArray`: the parser builds split dependencies only for
-        // isolated splits, which no package parsed here has.
         w.field("splitDependencies");
-        w.int(-1);
+        match &self.split_dependencies {
+            None => w.int(-1),
+            Some(deps) => {
+                w.int(deps.len() as i32);
+                for (index, values) in deps {
+                    w.int(*index);
+                    w.int(18); // Parcel.VAL_INTARRAY
+                    w.ints(Some(values));
+                }
+            }
+        }
         w.field("splitFlags");
         w.ints(self.split_flags.as_deref());
         w.field("splitNames");

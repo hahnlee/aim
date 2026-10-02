@@ -1,5 +1,6 @@
 //! APK cluster selection and split parsing, ported from AOSP
-//! android-16.0.0_r1 `ApkLiteParseUtils` and `ParsingPackageUtils`,
+//! android-16.0.0_r1 `ApkLiteParseUtils`, `ParsingPackageUtils`,
+//! `SplitDependencyLoader` and `SplitAssetDependencyLoader`,
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::BTreeMap;
@@ -75,12 +76,93 @@ pub(super) fn load(host: &Path, path: &str) -> Result<Vec<Part>> {
     let base = parts
         .remove(&None)
         .ok_or_else(|| Error::Parse("Missing base APK".into()))?;
-    if !parts.is_empty() && attr_bool(&base.manifest, ANDROID, "isolatedSplits", false) {
-        return Err(Error::Unsupported(
-            "isolated split asset dependencies (#720)".into(),
-        ));
-    }
     Ok(std::iter::once(base).chain(parts.into_values()).collect())
+}
+
+/// SplitDependencyLoader's indices include the base at zero.
+pub(super) fn dependencies(parts: &[Part]) -> Result<Option<BTreeMap<i32, Vec<i32>>>> {
+    let uses = parts
+        .iter()
+        .map(|part| {
+            part.manifest
+                .children
+                .iter()
+                .find(|e| e.name == "uses-split")
+                .map(|e| {
+                    attr_value(e, ANDROID, "name")
+                        .ok_or_else(|| Error::Parse("<uses-split> requires android:name".into()))
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if parts.len() <= 1 || !attr_bool(&parts[0].manifest, ANDROID, "isolatedSplits", false) {
+        return Ok(None);
+    }
+    let find = |name: &str| {
+        parts
+            .iter()
+            .position(|p| p.split.as_deref() == Some(name))
+            .ok_or_else(|| Error::Parse(format!("Missing split '{name}'")))
+    };
+    let feature = |i: usize| attr_bool(&parts[i].manifest, ANDROID, "isFeatureSplit", false);
+    let mut deps = BTreeMap::from([(0, vec![-1])]);
+    for i in 1..parts.len() {
+        if feature(i) {
+            let parent = uses[i].as_deref().map(find).transpose()?.unwrap_or(0);
+            deps.insert(i as i32, vec![parent as i32]);
+        }
+    }
+    for i in 1..parts.len() {
+        if !feature(i) {
+            let parent = match attr_value(&parts[i].manifest, "", "configForSplit") {
+                Some(name) => {
+                    let target = find(&name)?;
+                    if !feature(target) {
+                        return fail("Configuration split targets a non-feature split");
+                    }
+                    target
+                }
+                None => 0,
+            };
+            deps.get_mut(&(parent as i32)).unwrap().push(i as i32);
+        }
+    }
+    for &start in deps.keys() {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut next = start;
+        while next != -1 {
+            if !seen.insert(next) {
+                return fail("Cycle detected in split dependencies");
+            }
+            next = deps.get(&next).map_or(-1, |values| values[0]);
+        }
+    }
+    Ok(Some(deps))
+}
+
+/// SplitAssetDependencyLoader's parent assets, own APK, then config APKs.
+pub(super) fn assets(
+    count: usize,
+    deps: Option<&BTreeMap<i32, Vec<i32>>>,
+    index: usize,
+) -> Vec<usize> {
+    let Some(deps) = deps else {
+        return (0..count).collect();
+    };
+    let mut chain = Vec::new();
+    let mut next = index as i32;
+    while next >= 0 {
+        chain.push(next);
+        next = deps.get(&next).map_or(-1, |values| values[0]);
+    }
+    let mut assets = Vec::new();
+    for i in chain.into_iter().rev() {
+        assets.push(i as usize);
+        if let Some(values) = deps.get(&i) {
+            assets.extend(values[1..].iter().map(|i| *i as usize));
+        }
+    }
+    assets
 }
 
 fn names(manifest: &Element) -> Result<(String, Option<String>, i32)> {
@@ -147,6 +229,26 @@ fn integer(manifest: &Element, name: &str) -> i32 {
         .find(|a| a.ns == ANDROID && a.name == name)
         .filter(|a| (TYPE_FIRST_INT..=TYPE_LAST_INT).contains(&a.kind))
         .map_or(0, |a| a.data as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn isolated_assets_follow_ancestors_and_their_configs() {
+        let deps = BTreeMap::from([
+            (0, vec![-1, 1]),
+            (2, vec![0, 3]),
+            (4, vec![2, 5]),
+            (6, vec![0, 7]),
+        ]);
+        assert_eq!(assets(8, Some(&deps), 0), [0, 1]);
+        assert_eq!(assets(8, Some(&deps), 4), [0, 1, 2, 3, 4, 5]);
+        assert_eq!(assets(8, Some(&deps), 6), [0, 1, 6, 7]);
+        assert_eq!(assets(8, Some(&deps), 3), [3]);
+        assert_eq!(assets(8, None, 4), (0..8).collect::<Vec<_>>());
+    }
 }
 
 impl Parser<'_> {
