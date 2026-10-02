@@ -2,6 +2,22 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("native-paths")) {
+            var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                    java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
+            pkg.setPath(args[4]); pkg.setBaseApkPath(args[5]);
+            pkg.setPrimaryCpuAbi(args[6].equals("-") ? null : args[6]);
+            pkg.setSecondaryCpuAbi(args[7].equals("-") ? null : args[7]);
+            var paths = new PackageAbiHelperImpl().deriveNativeLibraryPaths(pkg,
+                Boolean.parseBoolean(args[2]), Boolean.parseBoolean(args[3]),
+                new java.io.File("/data/app-lib"));
+            System.out.println(paths.nativeLibraryRootDir);
+            System.out.println(paths.nativeLibraryRootRequiresIsa);
+            System.out.println(paths.nativeLibraryDir);
+            System.out.println(paths.secondaryNativeLibraryDir);
+            return;
+        }
         if (args.length != 0 && args[0].equals("group-flags")) {
             groupFlags();
             return;

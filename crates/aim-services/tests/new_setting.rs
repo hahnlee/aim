@@ -473,6 +473,73 @@ fn new_settings_match_the_original_runtime() {
             Some((name.to_owned(), value.to_owned()))
         })
         .collect();
+    let preferred_abi = properties
+        .get("ro.product.cpu.abilist")
+        .unwrap()
+        .split(',')
+        .next()
+        .unwrap();
+    let mut path_cases = 0;
+    for code in [
+        "/system/app/Fixture",
+        "/system/app/fixture.apk",
+        "/apex/com.android.fixture/app/fixture.apk",
+    ] {
+        for primary in [None, Some("arm64-v8a"), Some("x86")] {
+            for secondary in [None, Some("armeabi-v7a")] {
+                for system in [false, true] {
+                    for updated in [false, true] {
+                        let mut pkg = template.parsed.clone();
+                        pkg.path = Some(code.into());
+                        pkg.base_apk_path = Some(if code.ends_with(".apk") {
+                            code.into()
+                        } else {
+                            format!("{code}/base.apk")
+                        });
+                        pkg.primary_cpu_abi = primary.map(Into::into);
+                        pkg.secondary_cpu_abi = secondary.map(Into::into);
+                        let original = run(boot.command().args([
+                            "shell", "/system/bin/app_process",
+                            "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+                            "/system/bin", "com.android.server.pm.NewSettingOracle", "native-paths",
+                            "/data/local/tmp/code-time.cache",
+                            if system { "true" } else { "false" },
+                            if updated { "true" } else { "false" },
+                            code, pkg.base_apk_path.as_deref().unwrap(),
+                            primary.unwrap_or("-"), secondary.unwrap_or("-"),
+                        ]));
+                        let paths = NativeLibraryPaths::derive(
+                            &pkg,
+                            &NativeLibraryEnvironment {
+                                preferred_abi,
+                                app_lib32_install_dir: "/data/app-lib",
+                                code_is_directory: false,
+                                canonical_source: None,
+                            },
+                            system,
+                            updated,
+                        )
+                        .unwrap();
+                        let expected = format!(
+                            "{}\n{}\n{}\n{}\n",
+                            paths.root,
+                            paths.requires_isa,
+                            paths.primary,
+                            paths.secondary.as_deref().unwrap_or("null")
+                        );
+                        assert_eq!(
+                            String::from_utf8(original.stdout).unwrap(),
+                            expected,
+                            "native library paths: {code}, {primary:?}, {secondary:?}, {system}, {updated}"
+                        );
+                        path_cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(path_cases, 72);
+    eprintln!("native/original library paths match {path_cases} selected-ABI cases");
     let config = SystemConfig::read(&aim_paths::derived_image(), &|p| properties.get(p).cloned());
     let framework =
         aim_services::package::system_config::Framework::load(&aim_paths::derived_image()).unwrap();
@@ -736,6 +803,44 @@ fn new_settings_match_the_original_runtime() {
             None,
         )
         .unwrap();
+    let paths = NativeLibraryPaths::derive(
+        &code.parsed,
+        &NativeLibraryEnvironment {
+            preferred_abi,
+            app_lib32_install_dir: "/data/app-lib",
+            code_is_directory: root.join(path.trim_start_matches('/')).is_dir(),
+            canonical_source: None,
+        },
+        true,
+        false,
+    )
+    .unwrap();
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "native-paths",
+        "/data/local/tmp/code-time.cache",
+        "true",
+        "false",
+        path,
+        code.parsed.base_apk_path.as_deref().unwrap(),
+        code.parsed.primary_cpu_abi.as_deref().unwrap_or("-"),
+        code.parsed.secondary_cpu_abi.as_deref().unwrap_or("-"),
+    ]));
+    assert_eq!(
+        String::from_utf8(original.stdout).unwrap(),
+        format!(
+            "{}\n{}\n{}\n{}\n",
+            paths.root,
+            paths.requires_isa,
+            paths.primary,
+            paths.secondary.as_deref().unwrap_or("null")
+        )
+    );
+    paths.apply(&mut code.parsed);
     let (flags, private_flags) = application_flags(&code.parsed, false);
     let mut scan = SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
     let candidate = scan
@@ -743,9 +848,9 @@ fn new_settings_match_the_original_runtime() {
             &code,
             SettingMetadata {
                 code_path: path.clone(),
-                legacy_native_library_path: None,
-                primary_cpu_abi: None,
-                secondary_cpu_abi: None,
+                legacy_native_library_path: code.parsed.native_library_root_dir.clone(),
+                primary_cpu_abi: code.parsed.primary_cpu_abi.clone(),
+                secondary_cpu_abi: code.parsed.secondary_cpu_abi.clone(),
                 version_code: 0,
                 flags,
                 private_flags,
@@ -780,6 +885,14 @@ fn new_settings_match_the_original_runtime() {
             system_signature_mismatch: None,
         },
     };
+    assert_eq!(
+        candidate.record.settings.legacy_native_library_path,
+        code.parsed.native_library_root_dir
+    );
+    assert_eq!(
+        candidate.record.parsed.native_library_dir,
+        code.parsed.native_library_dir
+    );
     let clock = ScanClock {
         current_time: 0,
         user_id: 0,

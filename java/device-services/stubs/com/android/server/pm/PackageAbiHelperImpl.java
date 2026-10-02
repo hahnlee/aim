@@ -1,0 +1,11 @@
+// Compile-only image API; checked by the device-services build node.
+package com.android.server.pm;
+
+final class PackageAbiHelperImpl implements PackageAbiHelper {
+    PackageAbiHelperImpl() {}
+    public NativeLibraryPaths deriveNativeLibraryPaths(
+            com.android.server.pm.pkg.AndroidPackage pkg, boolean system,
+            boolean updated, java.io.File appLib32InstallDir) {
+        throw new RuntimeException("stub");
+    }
+}
