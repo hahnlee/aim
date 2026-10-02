@@ -48,7 +48,29 @@ use aim_storage::data::{self, DataImage, EMPTY_TEMPLATE};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// The template boot's socket must fit in Darwin's `sockaddr_un.sun_path`
+/// even when the build lives under a long worktree path.
+struct DisplaySocketDir(PathBuf);
+
+impl DisplaySocketDir {
+    fn new() -> Result<Self, String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("aim-template-{}-{now}", std::process::id()));
+        fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for DisplaySocketDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 /// PackageManagerService's parser cache, named after the image's
 /// fingerprint: not shipped, as its entries hold resource values resolved
@@ -255,8 +277,9 @@ fn first_boot(
     log: &mut Log,
 ) -> Result<Option<String>, String> {
     let output = fs::File::create(work.join("guest-init.log")).map_err(|e| e.to_string())?;
-    let display = boot::start_display(ctx, work, true)?;
-    let init = boot::guest_init(ctx, dir, &work.join("display"))
+    let display_dir = DisplaySocketDir::new()?;
+    let display = boot::start_display(ctx, &display_dir.0, true)?;
+    let init = boot::guest_init(ctx, dir, &display_dir.0.join("display"))
         .arg("--quiet")
         .stdout(output.try_clone().map_err(|e| e.to_string())?)
         .stderr(output)
