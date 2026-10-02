@@ -1,6 +1,6 @@
 //! Scan identity selection, ported from android-16.0.0_r1
 //! PackageManagerService.renameStaticSharedLibraryPackage,
-//! ScanPackageUtils and AndroidPackageUtils (#804).
+//! InstallPackageHelper, ScanPackageUtils and AndroidPackageUtils (#804).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use crate::package::{pkg::AndroidPackage, settings::Settings};
 
@@ -12,6 +12,39 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// InstallPackageHelper.getOriginalPackageLocked: declarations are tried
+    /// backwards, and an already scanned original cannot transfer its data.
+    pub(super) fn original_setting<'a>(
+        pkg: &AndroidPackage,
+        settings: &'a Settings,
+        scanned: &dyn Fn(&str) -> bool,
+    ) -> Option<&'a crate::package::settings::Package> {
+        if Self::select(pkg, settings, true).real_name.is_some() {
+            return None;
+        }
+        pkg.original_packages
+            .as_ref()?
+            .iter()
+            .rev()
+            .flatten()
+            .find_map(|name| {
+                let old = settings.packages.iter().find(|p| p.name == *name)?;
+                if old.flags & crate::package::settings::FLAG_SYSTEM == 0 || scanned(name) {
+                    return None;
+                }
+                if old.shared_user {
+                    let group = settings
+                        .shared_users
+                        .iter()
+                        .find(|g| g.app_id == old.app_id)?;
+                    if pkg.shared_user_id.as_deref() != Some(&group.name) {
+                        return None;
+                    }
+                }
+                Some(old)
+            })
+    }
+
     /// Select from a raw native-parsed APK, before any owner rename.
     /// Apply the result after code verification, before reconciliation.
     pub fn select(pkg: &AndroidPackage, settings: &Settings, system: bool) -> Self {
@@ -87,6 +120,62 @@ impl Identity {
 mod tests {
     use super::*;
     use crate::package::pkg::*;
+    #[test]
+    fn originals_follow_reverse_order_system_presence_and_shared_uid_rules() {
+        use crate::package::settings::{FLAG_SYSTEM, Package, SharedUser};
+        let mut settings = Settings {
+            packages: ["first", "last"]
+                .map(|name| Package {
+                    name: name.into(),
+                    flags: FLAG_SYSTEM,
+                    ..Default::default()
+                })
+                .into(),
+            ..Default::default()
+        };
+        let mut pkg = AndroidPackage {
+            package_name: "new".into(),
+            original_packages: Some(vec![
+                Some("first".into()),
+                None,
+                Some("missing".into()),
+                Some("last".into()),
+            ]),
+            ..Default::default()
+        };
+        let selected = |settings: &Settings, scanned: &dyn Fn(&str) -> bool| {
+            Identity::original_setting(&pkg, settings, scanned).map(|p| p.name.clone())
+        };
+        assert_eq!(selected(&settings, &|_| false).as_deref(), Some("last"));
+        assert_eq!(
+            selected(&settings, &|n| n == "last").as_deref(),
+            Some("first")
+        );
+        assert_eq!(selected(&settings, &|_| true), None);
+        settings.packages[1].flags = 0;
+        assert_eq!(selected(&settings, &|_| false).as_deref(), Some("first"));
+        settings.packages[1].flags = FLAG_SYSTEM;
+        settings.packages[1].shared_user = true;
+        settings.packages[1].app_id = 1000;
+        settings.shared_users.push(SharedUser {
+            name: "group".into(),
+            app_id: 1000,
+            flags: 0,
+            signatures: None,
+        });
+        assert_eq!(selected(&settings, &|_| false).as_deref(), Some("first"));
+        pkg.shared_user_id = Some("group".into());
+        assert_eq!(
+            Identity::original_setting(&pkg, &settings, &|_| false)
+                .unwrap()
+                .name,
+            "last"
+        );
+        settings
+            .renamed_packages
+            .push(("new".into(), "first".into()));
+        assert!(Identity::original_setting(&pkg, &settings, &|_| false).is_none());
+    }
     #[test]
     fn applying_identity_changes_only_the_original_owners_fields() {
         let component = Component {

@@ -412,3 +412,76 @@ fn static_library_declaration_constraints_match_the_pinned_image() {
     }
     assert_eq!(checked, 1);
 }
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn original_package_adoption_matches_the_pinned_image() {
+    use sha2::{Digest, Sha256};
+    let jar =
+        Apk::open(&aim_paths::original_image().join("system/framework/services.jar")).unwrap();
+    let mut checked = 0;
+    for name in ["classes.dex", "classes2.dex", "classes3.dex"] {
+        let bytes = jar.file(name).unwrap();
+        let dex = Dex::parse(&bytes).unwrap();
+        for (owner, method, length, hash, calls) in [
+            (
+                "Lcom/android/server/pm/InstallPackageHelper;",
+                "getOriginalPackageLocked",
+                141,
+                "8fbf8744aeb68e04523625019408ca41c00b382bdf92256c05581d2196bb72aa",
+                vec![
+                    (0x00, "isPackageRenamed"),
+                    (0x08, "getOriginalPackages"),
+                    (0x22, "getPackageLPr"),
+                    (0x28, "verifyPackageUpdateLPr"),
+                    (0x33, "getSharedUserSettingLPr"),
+                    (0x43, "getSharedUserId"),
+                ],
+            ),
+            (
+                "Lcom/android/server/pm/InstallPackageHelper;",
+                "verifyPackageUpdateLPr",
+                106,
+                "b91832e6eb563a2cfb6b61b74f3140a3debd3e397d5051359533db043806197f",
+                vec![(0x00, "getFlags"), (0x39, "getPackageName"), (0x3d, "get")],
+            ),
+            (
+                "Lcom/android/server/pm/Settings;",
+                "createNewSetting",
+                445,
+                "38ee3270734cb2f90439b54418c46c60adaad5c3c0ed9c7beabd45407942c0d1",
+                vec![
+                    (0x20, "<init>"),
+                    (0x25, "setPath"),
+                    (0x37, "<init>"),
+                    (0x3a, "setSignatures"),
+                    (0x3e, "setLongVersionCode"),
+                    (0x60, "setDomainSetId"),
+                    (0x6c, "setFlags"),
+                ],
+            ),
+        ] {
+            let Some(class) = dex.class(owner) else {
+                continue;
+            };
+            let methods = dex.methods_named(class, method).unwrap();
+            assert_eq!(methods.len(), 1);
+            let words = units(&bytes, &methods[0]).unwrap();
+            assert_eq!(words.len(), length);
+            let raw: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert_eq!(format!("{:x}", Sha256::digest(raw)), hash, "{method}");
+            for (at, name) in calls {
+                assert_eq!(dex.method(words[at + 1] as u32).unwrap().1, name);
+            }
+            if method == "createNewSetting" {
+                assert_eq!(
+                    dex.method(words[0x21] as u32).unwrap().2,
+                    "(Lcom/android/server/pm/PackageSetting;Ljava/lang/String;)V"
+                );
+                assert_eq!(dex.method(words[0x38] as u32).unwrap().2, "()V");
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 3);
+}

@@ -74,6 +74,128 @@ impl SigningScan {
         })
     }
 
+    /// Adopt an unscanned original system package's setting and user states.
+    /// The caller supplies the complete saved user-state map by package name.
+    /// Code verification precedes this phase; publication and transfer side
+    /// effects follow only after the complete scan candidate succeeds.
+    pub fn apply_original_system(
+        &mut self,
+        code: &Code,
+        metadata: SettingMetadata,
+        original_users: &BTreeMap<String, BTreeMap<i32, UserState>>,
+    ) -> Result<NewPackageOutcome, SigningError> {
+        let reject = |phase, message: &str| {
+            SigningError::Rejected(Error {
+                package: code.parsed.package_name.clone(),
+                path: code.location.path.clone(),
+                phase,
+                message: message.into(),
+            })
+        };
+        let flags =
+            physical_parse_flags(&code.location.path).map_err(|e| reject("location", &e))?;
+        if flags & parse::PARSE_IS_SYSTEM_DIR == 0
+            || metadata.flags & crate::package::settings::FLAG_SYSTEM == 0
+            || metadata.code_path != code.location.path
+        {
+            return Err(reject(
+                "location",
+                "original adoption requires matching system code",
+            ));
+        }
+        let selected = Identity::select(&code.parsed, &self.settings, true);
+        if self
+            .settings
+            .packages
+            .iter()
+            .any(|p| p.name == selected.internal_name)
+        {
+            return Err(reject(
+                "identity",
+                "incoming package already has a saved setting",
+            ));
+        }
+        super::validate::static_library(&code.parsed, false)
+            .map_err(|e| reject("validation", &e))?;
+        let original = Identity::original_setting(&code.parsed, &self.settings, &|name| {
+            self.parsed.iter().any(|(n, _, _, _)| n == name)
+        })
+        .ok_or_else(|| reject("identity", "no eligible original system package"))?;
+        let group = if original.shared_user {
+            self.settings
+                .shared_users
+                .iter()
+                .find(|g| g.app_id == original.app_id)
+                .map(|g| g.name.as_str())
+        } else {
+            None
+        };
+        if group
+            != selected_shared_user(
+                original.shared_user,
+                code.parsed.shared_user_id.as_deref(),
+                code.parsed.is(booleans::LEAVING_SHARED_UID),
+            )
+        {
+            return Err(reject(
+                "identity",
+                "original adoption requires replacing UID ownership (#804)",
+            ));
+        }
+        let expected_owner = match group {
+            Some(name) => Owner::SharedUser(name.into()),
+            None => Owner::Package(original.name.clone()),
+        };
+        if self.identities.ids.get(original.app_id) != Some(&expected_owner) {
+            return Err(reject(
+                "identity",
+                "original setting no longer owns its UID",
+            ));
+        }
+        let users = original_users
+            .get(&original.name)
+            .ok_or_else(|| reject("setting", "original package user states were not supplied"))?;
+        let setting = super::NewSetting::adopt(original, users, &selected.manifest_name, metadata);
+        let identity = Identity {
+            manifest_name: selected.manifest_name,
+            internal_name: original.name.clone(),
+            real_name: setting.package.real_name.clone(),
+        };
+        let mut parsed = code.parsed.clone();
+        identity.apply(&mut parsed);
+        let mut record = Record {
+            settings: setting.package,
+            parsed,
+            signing: code.signing.clone(),
+            identity,
+            origin: ScanOrigin::SystemDirectory,
+        };
+        let mut next = self.clone();
+        let at = next
+            .settings
+            .packages
+            .iter()
+            .position(|p| p.name == record.settings.name)
+            .unwrap();
+        next.settings.packages[at] = record.settings.clone();
+        let signing = next.apply(&record)?;
+        record.settings = next.settings.packages[at].clone();
+        // addRenamedPackageLPw replaces the old ArrayMap value on acceptance.
+        next.settings
+            .renamed_packages
+            .retain(|(new, _)| new != &record.identity.manifest_name);
+        next.settings.renamed_packages.push((
+            record.identity.manifest_name.clone(),
+            record.settings.name.clone(),
+        ));
+        *self = next;
+        Ok(NewPackageOutcome {
+            record,
+            users: setting.users,
+            signing,
+        })
+    }
+
     /// Reconcile verified new system-directory code through UID preparation,
     /// setting construction, INSTALL shared-UID gates, merge and signer commit.
     /// Rejection publishes no package/user state, but retains the original UID

@@ -6,7 +6,7 @@ use crate::package::{restrictions::UserState, settings};
 use std::collections::BTreeMap;
 
 /// Inputs supplied by the code, ABI, scan flag and domain-verification owners.
-/// This is the new-package branch, without original/disabled-setting adoption.
+/// Used by new-package construction and original-package adoption.
 #[derive(Clone, Debug)]
 pub struct SettingMetadata {
     pub code_path: String,
@@ -55,6 +55,37 @@ pub struct NewSetting {
 }
 
 impl NewSetting {
+    /// Original-package branch of Settings.createNewSetting. In particular,
+    /// MIME groups, install source, key sets and user states come from the old
+    /// setting, while signatures start unknown for reconciliation.
+    pub(super) fn adopt(
+        original: &settings::Package,
+        users: &BTreeMap<i32, UserState>,
+        manifest_name: &str,
+        m: SettingMetadata,
+    ) -> Self {
+        let mut package = original.clone();
+        package.real_name = Some(manifest_name.into());
+        package.code_path = m.code_path;
+        package.legacy_native_library_path = m.legacy_native_library_path;
+        package.primary_cpu_abi = m.primary_cpu_abi;
+        package.secondary_cpu_abi = m.secondary_cpu_abi;
+        package.signatures = None;
+        package.version_code = m.version_code;
+        package.flags = m.flags;
+        package.private_flags = m.private_flags;
+        package.uses_sdk_libraries = m.uses_sdk_libraries;
+        package.uses_static_libraries = m.uses_static_libraries;
+        package.last_modified_time = m.last_modified_time;
+        package.domain_set_id = Some(domain_id(m.domain_set_id));
+        package.target_sdk_version = m.target_sdk_version;
+        package.restrict_update_hash = m.restrict_update_hash;
+        Self {
+            package,
+            users: users.clone(),
+        }
+    }
+
     pub(super) fn new(
         identity: &Identity,
         uid: &Uid,
@@ -95,19 +126,7 @@ impl NewSetting {
                 },
             );
         }
-        let hex = m
-            .domain_set_id
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
-        let domain_set_id = format!(
-            "{}-{}-{}-{}-{}",
-            &hex[..8],
-            &hex[8..12],
-            &hex[12..16],
-            &hex[16..20],
-            &hex[20..]
-        );
+        let domain_set_id = domain_id(m.domain_set_id);
         Self {
             package: settings::Package {
                 name: identity.internal_name.clone(),
@@ -145,6 +164,18 @@ impl NewSetting {
             users,
         }
     }
+}
+
+fn domain_id(id: [u8; 16]) -> String {
+    let hex = id.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
 }
 
 #[cfg(test)]

@@ -1042,6 +1042,151 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
         matches!(scan.apply_new_system(&google, metadata(&google), policy), Err(SigningError::Rejected(ref e)) if e.message.contains("shared UID"))
     );
     assert_eq!(scan, snapshot);
+    // Original-package declarations and metadata are synthetic policy inputs;
+    // APKs remain untouched and the signer is the verified original GSF signer.
+    google.parsed.static_shared_library_name = None;
+    google.parsed.shared_user_id = None;
+    google.parsed.package_name = "incoming".into();
+    google.parsed.manifest_package_name = Some("incoming".into());
+    google.parsed.original_packages = Some(vec![Some("old".into())]);
+    let old = settings::Package {
+        name: "old".into(),
+        code_path: "/system/app/old/base.apk".into(),
+        app_id: 11000,
+        flags: settings::FLAG_SYSTEM,
+        mime_groups: vec![("old.mime".into(), vec!["text/plain".into()])],
+        pending_restore: true,
+        category_hint: 8,
+        ..Default::default()
+    };
+    let old_users = std::collections::BTreeMap::from([(
+        10,
+        aim_services::package::restrictions::UserState {
+            installed: false,
+            enabled: 2,
+            disabled_components: vec!["old.Component".into()],
+            ..Default::default()
+        },
+    )]);
+    let users = std::collections::BTreeMap::from([("old".into(), old_users.clone())]);
+    let saved = settings::Settings {
+        packages: vec![old.clone()],
+        ..Default::default()
+    };
+    let mut scan = SigningScan::new(&Default::default(), &saved, 36).unwrap();
+    let snapshot = scan.clone();
+    assert!(
+        matches!(scan.apply_original_system(&google, metadata(&google), &Default::default()),
+        Err(SigningError::Rejected(ref e)) if e.phase == "setting")
+    );
+    assert_eq!(scan, snapshot);
+    // Fallible declaration work must not publish the copied original setting.
+    google.parsed.library_names = vec!["adopted.library".into()];
+    let base = google.parsed.base_apk_path.take();
+    assert!(
+        matches!(scan.apply_original_system(&google, metadata(&google), &users),
+        Err(SigningError::Rejected(ref e)) if e.phase == "libraries")
+    );
+    assert_eq!(scan, snapshot);
+    google.parsed.base_apk_path = base;
+    let adopted = scan
+        .apply_original_system(&google, metadata(&google), &users)
+        .unwrap();
+    assert_eq!(adopted.record.settings.name, "old");
+    assert_eq!(
+        adopted.record.settings.real_name.as_deref(),
+        Some("incoming")
+    );
+    assert_eq!(adopted.record.settings.app_id, 11000);
+    assert_eq!(adopted.record.settings.mime_groups, old.mime_groups);
+    assert_eq!(adopted.record.settings.category_hint, 8);
+    assert!(adopted.record.settings.pending_restore);
+    assert_eq!(adopted.record.parsed.package_name, "old");
+    assert_eq!(adopted.users, old_users);
+    assert_eq!(scan.settings.packages.len(), 1);
+    assert_eq!(
+        scan.settings.renamed_packages,
+        vec![("incoming".into(), "old".into())]
+    );
+    assert_eq!(scan.identities, snapshot.identities);
+    assert_eq!(
+        scan.libraries
+            .get("adopted.library", -1)
+            .unwrap()
+            .package_name
+            .as_deref(),
+        Some("old")
+    );
+    assert_eq!(saved.packages[0], old);
+    // A subsequent declaration cannot adopt an original already scanned.
+    google.parsed.package_name = "another".into();
+    google.parsed.manifest_package_name = Some("another".into());
+    let snapshot = scan.clone();
+    assert!(
+        matches!(scan.apply_original_system(&google, metadata(&google), &users),
+        Err(SigningError::Rejected(ref e)) if e.message.contains("eligible original"))
+    );
+    assert_eq!(scan, snapshot);
+    // Adoption retains a shared group's UID and still runs the INSTALL signer gate.
+    google.parsed.package_name = "incoming".into();
+    google.parsed.manifest_package_name = Some("incoming".into());
+    google.parsed.shared_user_id = Some("adopt.group".into());
+    let signatures = adopted.record.settings.signatures.clone();
+    let saved = settings::Settings {
+        packages: vec![settings::Package {
+            shared_user: true,
+            signatures: signatures.clone(),
+            ..old.clone()
+        }],
+        shared_users: vec![settings::SharedUser {
+            name: "adopt.group".into(),
+            app_id: 11000,
+            flags: 0,
+            signatures,
+        }],
+        ..Default::default()
+    };
+    let mut saved = saved;
+    let peer = settings::Package {
+        name: "peer".into(),
+        code_path: google.location.path.clone(),
+        ..saved.packages[0].clone()
+    };
+    saved.packages.push(peer.clone());
+    let mut scan = SigningScan::new(&Default::default(), &saved, 29).unwrap();
+    let peer_identity = aim_services::package::scan::Identity {
+        manifest_name: "incoming".into(),
+        internal_name: "peer".into(),
+        real_name: None,
+    };
+    let mut parsed = google.parsed.clone();
+    peer_identity.apply(&mut parsed);
+    scan.apply(&aim_services::package::scan::Record {
+        settings: peer,
+        parsed,
+        signing: google.signing.clone(),
+        identity: peer_identity,
+        origin: aim_services::package::owner::shared_users::ScanOrigin::SystemDirectory,
+    })
+    .unwrap();
+    let snapshot = scan.clone();
+    let signer = google.signing.clone();
+    google.signing = platform.signing.clone();
+    let rejected = scan.apply_original_system(&google, metadata(&google), &users);
+    assert!(
+        matches!(rejected, Err(SigningError::Rejected(ref e)) if e.phase == "authorization" && e.message.contains("-104")),
+        "unrelated signer should reject the initialized group"
+    );
+    assert_eq!(scan, snapshot);
+    google.signing = signer;
+    let accepted = scan
+        .apply_original_system(&google, metadata(&google), &users)
+        .unwrap();
+    assert_eq!(accepted.record.settings.app_id, 11000);
+    assert!(accepted.record.settings.shared_user);
+    assert_eq!(accepted.users, old_users);
+    assert_eq!(scan.identities.ids, snapshot.identities.ids);
+    assert!(accepted.signing.system_signature_mismatch.is_none());
 }
 
 #[test]
