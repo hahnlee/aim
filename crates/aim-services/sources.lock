@@ -150,7 +150,7 @@ INTERFACES=(
   "android.os.IThermalService|system/framework/framework.jar|registerThermalEventListener,registerThermalEventListenerWithType,unregisterThermalEventListener,registerThermalStatusListener,unregisterThermalStatusListener,getCurrentThermalStatus,getThermalHeadroom,registerThermalHeadroomListener,unregisterThermalHeadroomListener"
   "android.os.IThermalEventListener|system/framework/framework.jar|*"
   "android.os.IThermalStatusListener|system/framework/framework.jar|*"
-  "com.android.internal.compat.IPlatformCompat|system/framework/framework.jar|isChangeEnabledByUid"
+  "com.android.internal.compat.IPlatformCompat|system/framework/framework.jar|isChangeEnabledByUid,isChangeEnabled"
   "android.location.provider.ILocationProvider|system/framework/framework-location.jar|setLocationProviderManager,setRequest,flush"
   "android.location.provider.ILocationProviderManager|system/framework/framework-location.jar|onInitialize,onSetAllowed,onSetProperties,onReportLocation,onFlushComplete"
   "android.location.provider.IGeocodeProvider|system/framework/framework-location.jar|forwardGeocode,reverseGeocode"

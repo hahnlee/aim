@@ -2,11 +2,9 @@ package dev.aim.server;
 
 import android.app.WindowConfiguration;
 import android.content.Context;
-import android.content.pm.ApplicationInfo;
 import android.os.Binder;
 import android.os.Environment;
 import android.os.IBinder;
-import android.os.Parcel;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.RemoteException;
@@ -236,22 +234,6 @@ public final class DeviceServices extends SystemService {
         public boolean isTestBaseOnBootclasspath() {
             enforceSystemUid();
             return PackageBackwardCompatibility.bootClassPathContainsATB();
-        }
-
-        @Override
-        public boolean isPackageChangeEnabled(long changeId, byte[] applicationInfo) {
-            enforceSystemUid();
-            if (applicationInfo == null) throw new IllegalArgumentException("missing ApplicationInfo");
-            Parcel parcel = Parcel.obtain();
-            try {
-                parcel.unmarshall(applicationInfo, 0, applicationInfo.length);
-                parcel.setDataPosition(0);
-                ApplicationInfo info = ApplicationInfo.CREATOR.createFromParcel(parcel);
-                parcel.enforceNoDataAvail();
-                return platformCompat().isChangeEnabled(changeId, info);
-            } finally {
-                parcel.recycle();
-            }
         }
 
         private static PlatformCompat platformCompat() {

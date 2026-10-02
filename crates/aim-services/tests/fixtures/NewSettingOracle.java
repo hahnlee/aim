@@ -2,18 +2,20 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
-        if (args.length != 0 && args[0].equals("compat-info")) {
+        if (args.length != 0 && args[0].equals("compat-call")) {
             byte[] bytes = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1]));
-            android.os.Parcel parcel = android.os.Parcel.obtain();
+            var owner = android.os.ServiceManager.getService("platform_compat");
+            android.os.Parcel parcel = android.os.Parcel.obtain(owner);
+            android.os.Parcel reply = android.os.Parcel.obtain();
             try {
                 parcel.unmarshall(bytes, 0, bytes.length);
                 parcel.setDataPosition(0);
-                var info = android.content.pm.ApplicationInfo.CREATOR.createFromParcel(parcel);
-                parcel.enforceNoDataAvail();
-                var compat = com.android.internal.compat.IPlatformCompat.Stub.asInterface(
-                    android.os.ServiceManager.getService("platform_compat"));
-                System.out.println(compat.isChangeEnabled(133396946L, info));
+                if (!owner.transact(Integer.parseInt(args[2]), parcel, reply, 0)) {
+                    throw new IllegalStateException("compatibility transaction rejected");
+                }
+                java.nio.file.Files.write(java.nio.file.Path.of(args[3]), reply.marshall());
             } finally {
+                reply.recycle();
                 parcel.recycle();
             }
             return;

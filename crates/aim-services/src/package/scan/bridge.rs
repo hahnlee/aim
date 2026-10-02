@@ -9,7 +9,9 @@ use aim_binder_host::{
     local::Strong,
     parcel::{Exception, Parcel},
 };
-use aim_service_aidl::dev_aim_server_ibridge as bridge;
+use aim_service_aidl::{
+    com_android_internal_compat_iplatformcompat as compat, dev_aim_server_ibridge as bridge,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PolicyBridgeError {
@@ -40,7 +42,8 @@ impl ScanPolicy {
     /// Stage manifest policy, query the original compatibility owner only when
     /// its updater does, then commit library policy atomically. Failure never
     /// substitutes a guessed compatibility decision or changes the package.
-    pub fn apply_from_bridge(
+    /// `owner` is the original platform_compat binder, registered before PMS.
+    pub fn apply_from_platform_compat(
         self,
         pkg: &mut AndroidPackage,
         signing: &crate::package::sign::SigningDetails,
@@ -58,7 +61,7 @@ impl ScanPolicy {
         let change = if !compatibility.test_base_on_bootclasspath && !is_system {
             Some(change_enabled(
                 owner,
-                &info::app_info_without_state(&next, system),
+                info::app_info_without_state(&next, system),
                 133396946,
             )?)
         } else {
@@ -74,21 +77,19 @@ impl ScanPolicy {
 
 fn change_enabled(
     owner: &Strong,
-    info: &info::ApplicationInfo,
+    info: info::ApplicationInfo,
     change_id: i64,
 ) -> Result<bool, PolicyBridgeError> {
-    let mut encoded = Parcel::new();
-    info.write(&mut encoded, None);
     let mut data = Parcel::new();
-    bridge::IsPackageChangeEnabled {
+    compat::IsChangeEnabled {
         change_id,
-        application_info: Some(encoded.data().to_vec()),
+        app_info: Some(info),
     }
     .write(&mut data);
     let reply = owner
-        .transact(bridge::IS_PACKAGE_CHANGE_ENABLED, &data, false)
+        .transact(compat::IS_CHANGE_ENABLED, &data, false)
         .map_err(PolicyBridgeError::Transport)?;
-    bridge::read_is_package_change_enabled_reply(&mut reply.reader())
+    compat::read_is_change_enabled_reply(&mut reply.reader())
         .map_err(PolicyBridgeError::Transport)?
         .map_err(PolicyBridgeError::Owner)
 }
@@ -137,11 +138,11 @@ mod tests {
                 bridge::IS_TEST_BASE_ON_BOOTCLASSPATH => {
                     bridge::IsTestBaseOnBootclasspath::read(&mut call.data)?;
                 }
-                bridge::IS_PACKAGE_CHANGE_ENABLED => {
-                    let args = bridge::IsPackageChangeEnabled::read(&mut call.data)?;
-                    assert_eq!(args.change_id, 133396946);
-                    let bytes = args.application_info.unwrap();
-                    assert_eq!(&bytes[..4], &[0, 0, 0, 0]); // no parcel squashing
+                compat::IS_CHANGE_ENABLED => {
+                    call.data.enforce_interface(compat::DESCRIPTOR)?;
+                    assert_eq!(call.data.read_i64()?, 133396946);
+                    assert_eq!(call.data.read_i32()?, 1); // present ApplicationInfo
+                    assert_eq!(call.data.read_i32()?, 0); // no parcel squashing
                 }
                 _ => return Err(UNKNOWN_TRANSACTION),
             }
@@ -199,7 +200,7 @@ mod tests {
         for value in [0, 1, -1, -2] {
             owner.0.store(value, Ordering::Relaxed);
             let config = LibraryCompatibility::from_bridge(&Default::default(), &|_| None, &strong);
-            let change = change_enabled(&strong, &Default::default(), 133396946);
+            let change = change_enabled(&strong, Default::default(), 133396946);
             match value {
                 0 | 1 => {
                     assert_eq!(config.unwrap().test_base_on_bootclasspath, value == 1);

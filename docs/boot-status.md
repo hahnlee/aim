@@ -290,20 +290,27 @@ is separate on this image, and the unresolved-decision rollback check passes.
 The existing constructor/update/time/manifest checks, Settings launch and owned
 cleanup also pass. Unit coverage includes SDK thresholds, optional dependencies,
 hash-collision order and invalid input rollback. The generated system-UID-only
-IBridge now exposes the original PackageBackwardCompatibility build policy and
-PlatformCompat.isChangeEnabled on a native-generated raw ApplicationInfo parcel.
-Native `from_bridge`/`apply_from_bridge` preserve owner exceptions and transport
-errors and stage manifest/library changes atomically. An in-process Binder test
-checks false/true, owner rejection and transport failure; the original runtime
-reads four native ApplicationInfo payloads and returns the same SDK-dependent
-compatibility decisions as its own PackageImpl input. The new derived image builds
-(9.9s) and the disposable original-PMS runtime checks pass (68.26s), including the
-48 library cases, four manifest cases, constructor/update/time checks, Settings
-launch and owned cleanup. This does not exercise the new live bridge endpoints.
-The existing DeviceServices bridge attaches at DEVICE_SPECIFIC_SERVICES_READY,
-after the original PMS initial scan: early owner availability and native boot-scan
-wiring remain #808. ABI derivation, group member-flag aggregation and the complete
-boot scan selector/publication remain; no native-PMS CTS activation is claimed.
+IBridge exposes the original PackageBackwardCompatibility build policy.
+`ScanPolicy::apply_from_platform_compat` calls the original `platform_compat`
+Binder directly with generated pinned `IPlatformCompat.isChangeEnabled` and a
+native-generated typed ApplicationInfo. SystemServer registers that owner before
+PMS bootstrap; no additional Java compatibility-query relay is needed.
+Native `from_bridge`/`apply_from_platform_compat` preserve owner exceptions and
+transport errors and stage manifest/library changes atomically. An in-process
+Binder test checks false/true, owner rejection and transport failure. The original
+runtime processes four complete native-generated AIDL requests through its real
+compatibility Binder; native reply decoding agrees with its own PackageImpl-based
+SDK-dependent decisions. The derived image builds (45.5s, including post-restart
+original attachment), Java API linkage passes (14.6s), and the disposable
+original-PMS runtime checks pass (52.19s, 2026-10-03), including 48 library cases,
+four manifest cases, constructor/update/time checks, Settings launch and owned
+cleanup. All 176 package unit tests pass (10.68s). The runtime uses a guest sender
+for the native-generated request bytes; native-host Strong transport is covered
+by the in-process Binder test. The test.base build-policy bridge still attaches
+at DEVICE_SPECIFIC_SERVICES_READY, after the original PMS initial scan: early
+build-policy delivery and native boot-scan wiring remain #808. ABI derivation,
+group member-flag aggregation and the complete boot scan selector/publication
+remain; no native-PMS CTS activation is claimed.
 
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained

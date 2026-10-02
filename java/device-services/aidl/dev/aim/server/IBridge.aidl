@@ -64,7 +64,4 @@ interface IBridge {
     /** The selected image's PackageBackwardCompatibility build policy. */
     boolean isTestBaseOnBootclasspath();
 
-    /** PlatformCompat.isChangeEnabled for native PackageImpl's raw ApplicationInfo parcel. */
-    boolean isPackageChangeEnabled(long changeId, in byte[] applicationInfo);
-
 }

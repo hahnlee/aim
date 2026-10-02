@@ -508,27 +508,36 @@ fn new_settings_match_the_original_runtime() {
                         change.filter(|_| required == "-" && optional == "-" && !updated)
                     {
                         let mut encoded = aim_binder_host::parcel::Parcel::new();
-                        aim_services::package::info::app_info_without_state(&actual, &app_system)
-                            .write(&mut encoded, None);
+                        use aim_service_aidl::com_android_internal_compat_iplatformcompat as compat;
+                        compat::IsChangeEnabled {
+                            change_id: 133396946,
+                            app_info: Some(aim_services::package::info::app_info_without_state(
+                                &actual,
+                                &app_system,
+                            )),
+                        }
+                        .write(&mut encoded);
                         fs::write(
                             boot.data.join("data/local/tmp/compat-info.parcel"),
                             encoded.data(),
                         )
                         .unwrap();
-                        let result = run(boot.command().args([
+                        run(boot.command().args([
                             "shell", "/system/bin/app_process",
                             "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
-                            "/system/bin", "com.android.server.pm.NewSettingOracle", "compat-info",
+                            "/system/bin", "com.android.server.pm.NewSettingOracle", "compat-call",
                             "/data/local/tmp/compat-info.parcel",
-                        ]));
+                        ]).arg(compat::IS_CHANGE_ENABLED.to_string())
+                          .arg("/data/local/tmp/compat-reply.parcel"));
+                        let bytes =
+                            fs::read(boot.data.join("data/local/tmp/compat-reply.parcel")).unwrap();
+                        let mut reply = aim_binder_host::parcel::Reader::new(&bytes, &[]);
                         assert_eq!(
-                            String::from_utf8(result.stdout)
+                            compat::read_is_change_enabled_reply(&mut reply)
                                 .unwrap()
-                                .trim()
-                                .parse::<bool>()
                                 .unwrap(),
                             expected_change,
-                            "native ApplicationInfo compatibility input SDK {sdk}"
+                            "native AIDL compatibility call SDK {sdk}"
                         );
                     }
                     compatibility
