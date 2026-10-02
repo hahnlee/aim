@@ -108,6 +108,14 @@ fn saved_scan_libraries_match_original_pms() {
         .unwrap_or(0);
     let mut scan = SigningScan::new(&config, &original.settings, first_api).unwrap();
     for saved in &original.settings.packages {
+        assert_eq!(
+            apks.scan_file_time(&inputs.active[&saved.name].parsed)
+                .unwrap(),
+            saved.last_modified_time,
+            "original scan file time: {}",
+            saved.name
+        );
+
         let result = scan
             .apply_with_disabled(
                 &inputs.active[&saved.name],

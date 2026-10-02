@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 mod authorize;
 mod enrich;
-pub use enrich::ScanTime;
+pub use enrich::{ScanClock, ScanTime};
 mod identity;
 mod image;
 mod setting;

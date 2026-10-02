@@ -7,4 +7,5 @@ import com.android.internal.pm.parsing.pkg.ParsedPackage;
 public class PackageCacher {
     public PackageCacher(java.io.File cacheDir) { throw new RuntimeException("stub"); }
     public static byte[] toCacheEntryStatic(ParsedPackage pkg) { throw new RuntimeException("stub"); }
+    public static ParsedPackage fromCacheEntryStatic(byte[] bytes) { throw new RuntimeException("stub"); }
 }

@@ -18,6 +18,14 @@ pub struct ScanTime {
     pub update_time: bool,
 }
 
+/// ScanPackageUtils currentTime, userId and SCAN_UPDATE_TIME inputs.
+#[derive(Clone, Copy, Debug)]
+pub struct ScanClock {
+    pub current_time: i64,
+    pub user_id: i32,
+    pub update_time: bool,
+}
+
 pub(super) fn apply(
     package: &mut settings::Package,
     parsed: &AndroidPackage,

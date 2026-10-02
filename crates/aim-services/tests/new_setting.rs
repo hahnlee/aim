@@ -360,6 +360,114 @@ fn new_settings_match_the_original_runtime() {
         String::from_utf8(original_update.stdout).unwrap(),
         lines.join("\n") + "\n"
     );
+    // The original method reads the native parser's actual unchanged GSF
+    // path through its own PackageCacher and filesystem; no timestamps are fed.
+    let path = &template.settings.code_path;
+    let cache = aim_services::package::parse::parse(
+        &root.join(path.trim_start_matches('/')),
+        path,
+        aim_services::package::parse::PARSE_IS_SYSTEM_DIR,
+        &apks.platform,
+    )
+    .unwrap()
+    .to_cache_entry();
+    fs::write(
+        boot.data.join("data/local/tmp/code-time.cache"),
+        cache.bytes,
+    )
+    .unwrap();
+    let original_time = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "time",
+        "/data/local/tmp/code-time.cache",
+    ]));
+    let expected_time: i64 = String::from_utf8(original_time.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        apks.scan_file_time(&template.parsed).unwrap(),
+        expected_time
+    );
+    let code = Code {
+        location: Location {
+            path: path.clone(),
+            partition: Partition::SystemExt,
+            kind: Kind::PrivApp,
+            apex: None,
+        },
+        parsed: template.parsed.clone(),
+        signing: template.signing.clone(),
+    };
+    let mut scan = SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
+    let candidate = scan
+        .apply_new_system(
+            &code,
+            SettingMetadata {
+                code_path: path.clone(),
+                legacy_native_library_path: None,
+                primary_cpu_abi: None,
+                secondary_cpu_abi: None,
+                version_code: 0,
+                flags: 1,
+                private_flags: 8,
+                last_modified_time: 0,
+                uses_sdk_libraries: vec![],
+                uses_static_libraries: vec![],
+                mime_groups: code.parsed.mime_groups.clone(),
+                domain_set_id: [0; 16],
+                target_sdk_version: code.parsed.target_sdk_version,
+                restrict_update_hash: code.parsed.restrict_update_hash.clone(),
+            },
+            UserPolicy {
+                install_user: None,
+                users: None,
+                allow_install: true,
+                instant_app: false,
+                virtual_preload: false,
+                stopped_system_app: false,
+            },
+        )
+        .unwrap();
+    let failed_candidate = NewPackageOutcome {
+        record: Record {
+            settings: candidate.record.settings.clone(),
+            parsed: candidate.record.parsed.clone(),
+            signing: candidate.record.signing.clone(),
+            identity: candidate.record.identity.clone(),
+            origin: candidate.record.origin,
+        },
+        users: candidate.users.clone(),
+        signing: SigningOutcome {
+            system_signature_mismatch: None,
+        },
+    };
+    let clock = ScanClock {
+        current_time: 0,
+        user_id: 0,
+        update_time: false,
+    };
+    let unreadable = aim_services::package::write::Apks {
+        files: Box::new(|_| None),
+        platform: aim_services::package::parse::Platform::load(&root, Default::default()).unwrap(),
+    };
+    let snapshot = scan.clone();
+    assert!(
+        matches!(scan.finish_code_metadata(failed_candidate, &unreadable, clock),
+        Err(SigningError::Rejected(ref e)) if e.phase == "code-time")
+    );
+    assert_eq!(scan, snapshot);
+    let completed = scan.finish_code_metadata(candidate, &apks, clock).unwrap();
+    assert_eq!(completed.record.settings.last_modified_time, expected_time);
+    assert_eq!(completed.record.settings.last_update_time, expected_time);
+    assert_eq!(completed.users[&0].first_install_time, expected_time);
+    assert_eq!(scan.identities.ids, snapshot.identities.ids);
+    eprintln!("native/original GSF file time and accepted metadata match: {expected_time}");
     let started = run(boot.command().args([
         "shell",
         "am",

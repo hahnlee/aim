@@ -1,7 +1,13 @@
 package com.android.server.pm;
 
 public final class NewSettingOracle {
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("time")) {
+            var pkg = com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
+            System.out.println(PackageManagerServiceUtils.getLastModifiedTime(pkg));
+            return;
+        }
         if (args.length != 0 && args[0].equals("update")) {
             updates();
             return;

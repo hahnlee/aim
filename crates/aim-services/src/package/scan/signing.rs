@@ -60,6 +60,41 @@ pub struct NewPackageOutcome {
 }
 
 impl SigningScan {
+    /// Read the accepted code's actual file timestamp before finishing metadata.
+    /// No original image/data file is written, and read failures leave the scan
+    /// candidate unchanged. Full scan reconciliation handles removed code.
+    pub fn finish_code_metadata(
+        &mut self,
+        candidate: NewPackageOutcome,
+        apks: &crate::package::write::Apks,
+        clock: super::ScanClock,
+    ) -> Result<NewPackageOutcome, SigningError> {
+        let record = &candidate.record;
+        let reject = |message| {
+            SigningError::Rejected(Error {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                phase: "code-time",
+                message,
+            })
+        };
+        if record.parsed.path.as_deref() != Some(&record.settings.code_path) {
+            return Err(reject(
+                "parsed code path disagrees with accepted setting".into(),
+            ));
+        }
+        let file_time = apks.scan_file_time(&record.parsed).map_err(reject)?;
+        self.finish_metadata(
+            candidate,
+            super::ScanTime {
+                current_time: clock.current_time,
+                file_time,
+                user_id: clock.user_id,
+                update_time: clock.update_time,
+            },
+        )
+    }
+
     /// Finish timestamp/version/volume metadata of this accepted setting
     /// candidate. The caller obtains time inputs from the scan clock and
     /// verified code owner. Final flags/ABI and snapshot publication are separate.
