@@ -23,6 +23,8 @@ public class PackageSetting extends SettingBase {
         throw new RuntimeException("stub");
     }
     public PackageSetting setAppId(int id) { throw new RuntimeException("stub"); }
+    public PackageSetting setFirstInstallTime(long time, int user) { throw new RuntimeException("stub"); }
+    public PackageSetting(PackageSetting original, boolean sealedSnapshot) { super(0, 0); }
     public int getAppId() { throw new RuntimeException("stub"); }
     public int getCategoryOverride() { throw new RuntimeException("stub"); }
     public int getPageSizeAppCompatFlags() { throw new RuntimeException("stub"); }

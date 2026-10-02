@@ -9,7 +9,32 @@ use super::{
 use crate::package::{
     owner::shared_users::ScanOrigin, parse, restrictions::UserState, write::Apks,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct DisabledUserStates {
+    users: BTreeMap<i32, UserState>,
+    aliases: BTreeSet<i32>,
+}
+
+impl DisabledUserStates {
+    fn copied(users: &BTreeMap<i32, UserState>) -> Self {
+        Self {
+            users: users.clone(),
+            aliases: users.keys().copied().collect(),
+        }
+    }
+    fn update_active(&mut self, users: &BTreeMap<i32, UserState>) {
+        self.aliases.retain(|id| {
+            if let Some(user) = users.get(id) {
+                self.users.insert(*id, user.clone());
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
 
 /// Factory metadata is not an active signer/library admission. Its verified
 /// code is retained separately for the later updated-data signature gate.
@@ -50,6 +75,56 @@ fn updated_system_source(
 }
 
 impl SigningScan {
+    pub fn scanned_user_states(&self, name: &str) -> Option<&BTreeMap<i32, UserState>> {
+        self.scanned_users.get(name)
+    }
+    pub fn disabled_user_states(&self, name: &str) -> Option<&BTreeMap<i32, UserState>> {
+        self.disabled_users.get(name).map(|state| &state.users)
+    }
+
+    /// disableSystemPackageLPw(replaced=true) retains aliases to the accepted
+    /// factory's existing users. Settings/updated-system transition and
+    /// resource effects belong to the surrounding disable owner (#702).
+    pub fn copy_disabled_user_states(
+        &mut self,
+        completed: &super::CompletedScanMetadata,
+    ) -> Result<(), SigningError> {
+        let candidate = &completed.candidate;
+        self.accepted_slot(&candidate.record, "disabled-users")?;
+        let package = &candidate.record.settings;
+        if self.scanned_users.get(&package.name) != Some(&candidate.users)
+            || candidate.record.origin != ScanOrigin::SystemDirectory
+            || !self
+                .settings
+                .disabled_system_packages
+                .iter()
+                .any(|p| p == package)
+        {
+            return Err(SigningError::Rejected(Error {
+                package: package.name.clone(),
+                path: package.code_path.clone(),
+                phase: "disabled-users",
+                message: "disabled copy does not match the accepted factory setting".into(),
+            }));
+        }
+        self.disabled_users.insert(
+            package.name.clone(),
+            DisabledUserStates::copied(&candidate.users),
+        );
+        Ok(())
+    }
+
+    pub(super) fn update_disabled_user_aliases(
+        &mut self,
+        name: &str,
+        users: &BTreeMap<i32, UserState>,
+    ) {
+        self.scanned_users.insert(name.into(), users.clone());
+        if let Some(state) = self.disabled_users.get_mut(name) {
+            state.update_active(users);
+        }
+    }
+
     /// Factory refresh followed by scanPackageForInitLI's updated-system
     /// source decision. Only factory metadata is committed here; a restore
     /// outcome requires resource cleanup, enableSystemPackage and active scan.
@@ -57,7 +132,6 @@ impl SigningScan {
         &mut self,
         code: &Code,
         update: SettingUpdate,
-        factory_users: &BTreeMap<String, BTreeMap<i32, UserState>>,
         all_users: Option<&[super::User]>,
         config: &crate::package::system_config::SystemConfig,
         apks: &Apks,
@@ -106,8 +180,7 @@ impl SigningScan {
             group != selected,
         );
         let mut staged = self.clone();
-        let mut factory =
-            staged.scan_disabled_system(code, update, factory_users, all_users, apks, inputs)?;
+        let mut factory = staged.scan_disabled_system(code, update, all_users, apks, inputs)?;
         if source == UpdatedSystemSource::KeepData
             && config
                 .preinstall_packages_with_strict_signature_check
@@ -139,7 +212,6 @@ impl SigningScan {
         &mut self,
         code: &Code,
         update: SettingUpdate,
-        factory_users: &BTreeMap<String, BTreeMap<i32, UserState>>,
         all_users: Option<&[super::User]>,
         apks: &Apks,
         inputs: ScanMetadataCompletion<'_>,
@@ -211,13 +283,13 @@ impl SigningScan {
         }
         super::validate::static_library(&code.parsed, false)
             .map_err(|e| reject("validation", e))?;
-        let users = factory_users.get(&saved.name).ok_or_else(|| {
+        let users = self.disabled_users.get(&saved.name).ok_or_else(|| {
             reject(
                 "setting",
                 "disabled package user states were not supplied".into(),
             )
         })?;
-        let mut setting = NewSetting::update(saved, users, update, all_users, false);
+        let mut setting = NewSetting::update(saved, &users.users, update, all_users, false);
         let mut parsed = code.parsed.clone();
         identity.apply(&mut parsed);
         let native_error = |error| SigningError::NativeLibrary {
@@ -295,6 +367,19 @@ impl SigningScan {
         // scanPackageOnly preserves saved signatures. Strict recollection for
         // selected updated-system packages belongs to the version selector.
         self.settings.disabled_system_packages[at] = setting.package.clone();
+        self.disabled_users
+            .get_mut(&setting.package.name)
+            .expect("disabled user setting was validated")
+            .users
+            .clone_from(&setting.users);
+        let state = &self.disabled_users[&setting.package.name];
+        if let Some(active) = self.scanned_users.get_mut(&setting.package.name) {
+            for id in &state.aliases {
+                if let (Some(current), Some(user)) = (active.get_mut(id), state.users.get(id)) {
+                    current.clone_from(user);
+                }
+            }
+        }
         Ok(DisabledSystemMetadata {
             record: Record {
                 settings: setting.package,
@@ -313,6 +398,44 @@ impl SigningScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn copied_users_share_existing_states_but_not_later_insertions_or_restored_states() {
+        let mut active = BTreeMap::from([(
+            0,
+            UserState {
+                first_install_time: 123,
+                ..Default::default()
+            },
+        )]);
+        let mut copied = DisabledUserStates::copied(&active);
+        let mut restored = DisabledUserStates::default();
+        active.get_mut(&0).unwrap().first_install_time = 456;
+        active.insert(
+            10,
+            UserState {
+                first_install_time: 789,
+                ..Default::default()
+            },
+        );
+        copied.update_active(&active);
+        restored.update_active(&active);
+        assert_eq!(copied.users[&0].first_install_time, 456);
+        assert_eq!(copied.users.len(), 1);
+        assert!(restored.users.is_empty());
+        active.remove(&0);
+        copied.update_active(&active);
+        assert_eq!(copied.users[&0].first_install_time, 456);
+        active.insert(
+            0,
+            UserState {
+                first_install_time: 999,
+                ..Default::default()
+            },
+        );
+        copied.update_active(&active);
+        assert_eq!(copied.users[&0].first_install_time, 456);
+    }
+
     #[test]
     fn updated_system_source_requires_path_change_and_strictly_newer_version_or_uid_change() {
         use UpdatedSystemSource::{KeepData, RestoreFactory};

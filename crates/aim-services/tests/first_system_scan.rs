@@ -249,26 +249,25 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .unwrap();
     let factory_before = factory_owner.clone();
     assert!(matches!(
-        factory_owner.scan_disabled_system(&factory_code, update(), &saved_users, None, &unreadable, completion()),
+        factory_owner.scan_disabled_system(&factory_code, update(), None, &unreadable, completion()),
         Err(SigningError::Rejected(ref error)) if error.phase == "code-time"
     ));
     assert_eq!(factory_owner, factory_before);
     let factory = factory_owner
-        .scan_disabled_system(
-            &factory_code,
-            update(),
-            &saved_users,
-            None,
-            &apks,
-            completion(),
-        )
+        .scan_disabled_system(&factory_code, update(), None, &apks, completion())
         .unwrap();
     assert_eq!(
         factory.record.settings.domain_set_id.as_deref(),
         Some("63636363-6363-6363-6363-636363636363")
     );
     assert_eq!(factory.record.settings.signatures, saved.signatures);
-    assert_eq!(factory.users, saved_users[&saved.name]);
+    assert_eq!(factory.users[&0].first_install_time, -1);
+    assert_eq!(factory.record.settings.last_update_time, -1);
+    assert_eq!(
+        factory_owner.disabled_user_states(&saved.name),
+        Some(&factory.users)
+    );
+    assert_ne!(factory.users, saved_users[&saved.name]);
     assert_eq!(
         factory_owner.settings.packages,
         factory_before.settings.packages
@@ -277,7 +276,83 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     assert_eq!(factory_owner.libraries, factory_before.libraries);
     let mut expected = factory_before;
     expected.settings.disabled_system_packages[0] = factory.record.settings;
-    assert_eq!(factory_owner, expected);
+    assert_eq!(factory_owner.settings, expected.settings);
+
+    let mut hot_owner = scan.owner.clone();
+    hot_owner
+        .settings
+        .disabled_system_packages
+        .push(retained.candidate.record.settings.clone());
+    hot_owner.copy_disabled_user_states(&retained).unwrap();
+    assert_eq!(
+        hot_owner.disabled_user_states(&saved.name),
+        Some(&retained.candidate.users)
+    );
+    let hot_saved = retained.candidate.record.settings.clone();
+    let mut hot_inputs = completion();
+    hot_inputs.context.mode = AbiScanMode::Existing {
+        first_boot_or_upgrade: false,
+        old_was_stub: false,
+        saved: Some(&hot_saved),
+    };
+    let hot = hot_owner
+        .scan_disabled_system(&factory_code, update(), None, &apks, hot_inputs)
+        .unwrap();
+    assert_eq!(hot.users, retained.candidate.users);
+    assert_eq!(
+        hot.record.settings.last_update_time,
+        hot_saved.last_update_time
+    );
+    let mut changed_users = saved_users.clone();
+    changed_users
+        .get_mut(&saved.name)
+        .unwrap()
+        .get_mut(&0)
+        .unwrap()
+        .first_install_time = 456;
+    changed_users.get_mut(&saved.name).unwrap().insert(
+        10,
+        aim_services::package::restrictions::UserState {
+            first_install_time: 789,
+            ..Default::default()
+        },
+    );
+    let mut hot_inputs = completion();
+    hot_inputs.context.mode = AbiScanMode::Existing {
+        first_boot_or_upgrade: false,
+        old_was_stub: false,
+        saved: Some(&hot_saved),
+    };
+    let changed = hot_owner
+        .scan_existing(
+            &factory_code,
+            update(),
+            &changed_users,
+            None,
+            Some(&hot.record),
+            &apks,
+            hot_inputs,
+        )
+        .unwrap();
+    assert_eq!(changed.candidate.users[&0].first_install_time, 456);
+    assert_eq!(
+        hot_owner.scanned_user_states(&saved.name),
+        Some(&changed.candidate.users)
+    );
+    assert_eq!(
+        hot_owner.disabled_user_states(&saved.name).unwrap()[&0].first_install_time,
+        456
+    );
+    assert!(
+        !hot_owner
+            .disabled_user_states(&saved.name)
+            .unwrap()
+            .contains_key(&10)
+    );
+    hot_owner.settings.disabled_system_packages[0].version_code += 1;
+    let before = hot_owner.clone();
+    assert!(hot_owner.copy_disabled_user_states(&retained).is_err());
+    assert_eq!(hot_owner, before);
 
     let mut stale_factory = saved.clone();
     stale_factory.signatures = scan.packages[0]
@@ -324,17 +399,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             let mut owner =
                 aim_services::package::scan::SigningScan::new(&config, &settings, 36).unwrap();
             let before = owner.clone();
-            assert!(
-                matches!(owner.scan_updated_system(&factory_code, update(), &saved_users,
+            assert!(matches!(owner.scan_updated_system(&factory_code, update(),
                 None, &policy, &unreadable, selection_inputs()),
-                Err(SigningError::Rejected(ref error)) if error.phase == "code-time")
-            );
+                Err(SigningError::Rejected(ref error)) if error.phase == "code-time"));
             assert_eq!(owner, before);
             let selected = owner
                 .scan_updated_system(
                     &factory_code,
                     update(),
-                    &saved_users,
                     None,
                     &policy,
                     &apks,
@@ -379,7 +451,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             }
             let mut expected = before;
             expected.settings.disabled_system_packages[0] = selected.factory.record.settings;
-            assert_eq!(owner, expected);
+            assert_eq!(owner.settings, expected.settings);
+            assert_eq!(owner.identities, expected.identities);
+            assert_eq!(owner.libraries, expected.libraries);
+            assert_eq!(
+                owner.disabled_user_states(&saved.name),
+                Some(&selected.factory.users)
+            );
+            assert_eq!(selected.factory.users[&0].first_install_time, -1);
         }
     }
 

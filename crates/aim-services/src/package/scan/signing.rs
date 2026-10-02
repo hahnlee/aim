@@ -35,6 +35,8 @@ pub struct SigningScan {
     pub settings: Settings,
     pub identities: Bootstrap,
     pub libraries: Registry,
+    pub(super) disabled_users: BTreeMap<String, super::disabled::DisabledUserStates>,
+    pub(super) scanned_users: BTreeMap<String, BTreeMap<i32, UserState>>,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
 }
@@ -346,6 +348,7 @@ impl SigningScan {
             flags & parse::PARSE_IS_SYSTEM_DIR != 0,
         );
         self.settings.packages[at] = record.settings.clone();
+        self.update_disabled_user_aliases(&record.settings.name, &candidate.users);
         Ok(candidate)
     }
 
@@ -358,6 +361,14 @@ impl SigningScan {
             identities: Bootstrap::restore(config, settings)?,
             settings: settings.clone(),
             libraries: Registry::new(config),
+            // readDisabledSysPackageLPw creates fresh settings; it does not
+            // restore the active package's restriction state into them.
+            disabled_users: settings
+                .disabled_system_packages
+                .iter()
+                .map(|p| (p.name.clone(), Default::default()))
+                .collect(),
+            scanned_users: BTreeMap::new(),
             first_api_level,
             parsed: Vec::new(),
         })
@@ -469,6 +480,7 @@ impl SigningScan {
         next.settings.packages[at] = record.settings.clone();
         let signing = next.apply_with_disabled(&record, disabled)?;
         record.settings = next.settings.packages[at].clone();
+        next.update_disabled_user_aliases(&record.settings.name, &setting.users);
         *self = next;
         Ok(NewPackageOutcome {
             record,
@@ -591,6 +603,7 @@ impl SigningScan {
             record.identity.manifest_name.clone(),
             record.settings.name.clone(),
         ));
+        next.update_disabled_user_aliases(&record.settings.name, &setting.users);
         *self = next;
         Ok(NewPackageOutcome {
             record,

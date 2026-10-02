@@ -145,6 +145,22 @@ fn saved_scan_libraries_match_original_pms() {
         config.preinstall_packages_with_strict_signature_check,
         strict_signatures.lines().map(str::to_owned).collect()
     );
+    let factory_users = String::from_utf8(
+        run(boot.command().args([
+            "shell",
+            "/system/bin/app_process",
+            "-Djava.class.path=/data/local/tmp/boot-scan.dex:/system/framework/services.jar",
+            "/system/bin",
+            "com.android.server.BootScanOracle",
+            "factory-users",
+        ]))
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(
+        factory_users.lines().collect::<Vec<_>>(),
+        ["0", "456", "456"]
+    );
     let mut platform = Platform::load(&image, Default::default()).unwrap();
     let density =
         String::from_utf8(run(boot.command().args(["shell", "wm", "density"])).stdout).unwrap();
@@ -271,13 +287,6 @@ fn saved_scan_libraries_match_original_pms() {
         );
         Ok(id)
     };
-    let saved_users: BTreeMap<_, _> = original.users[0]
-        .1
-        .restrictions
-        .packages
-        .iter()
-        .map(|(name, user)| (name.clone(), BTreeMap::from([(0, user.clone())])))
-        .collect();
     let mut updated_scan = SigningScan::new(&config, &original.settings, first_api).unwrap();
     for saved in &original.settings.disabled_system_packages {
         let image_code = system_image
@@ -337,7 +346,6 @@ fn saved_scan_libraries_match_original_pms() {
                     target_sdk_version: code.parsed.target_sdk_version,
                     restrict_update_hash: code.parsed.restrict_update_hash.clone(),
                 },
-                &saved_users,
                 None,
                 &config,
                 &apks,
@@ -379,6 +387,12 @@ fn saved_scan_libraries_match_original_pms() {
             saved.name
         );
         assert_eq!(selected.factory.record.settings.app_id, saved.app_id);
+        assert_eq!(selected.factory.users[&0].first_install_time, -1);
+        assert_eq!(selected.factory.record.settings.last_update_time, -1);
+        assert_eq!(
+            updated_scan.disabled_user_states(&saved.name),
+            Some(&selected.factory.users)
+        );
         assert_eq!(updated_scan.settings.packages, before.settings.packages);
         assert_eq!(updated_scan.identities, before.identities);
         assert_eq!(updated_scan.libraries, before.libraries);
