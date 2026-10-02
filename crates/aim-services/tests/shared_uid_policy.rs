@@ -415,7 +415,7 @@ fn static_library_declaration_constraints_match_the_pinned_image() {
 
 #[test]
 #[ignore = "requires the pinned original image; run explicitly"]
-fn original_package_adoption_matches_the_pinned_image() {
+fn original_package_adoption_and_updates_match_the_pinned_image() {
     use sha2::{Digest, Sha256};
     let jar =
         Apk::open(&aim_paths::original_image().join("system/framework/services.jar")).unwrap();
@@ -460,6 +460,30 @@ fn original_package_adoption_matches_the_pinned_image() {
                     (0x6c, "setFlags"),
                 ],
             ),
+            (
+                "Lcom/android/server/pm/Settings;",
+                "updatePackageSetting",
+                375,
+                "a4dd702087c5713d3a07980d5027182c36c0141a000f2af5ebf9be471fdccb24",
+                vec![
+                    (0x16, "getPath"),
+                    (0x1e, "equals"),
+                    (0xcb, "getAllUsers"),
+                    (0xe3, "setInstalled"),
+                    (0xe9, "setUninstallReason"),
+                    (0xef, "setLegacyNativeLibraryPath"),
+                    (0x108, "updateMimeGroups"),
+                    (0x15a, "getFlags"),
+                    (0x166, "getPrivateFlags"),
+                ],
+            ),
+            (
+                "Lcom/android/server/pm/PackageSetting;",
+                "updateMimeGroups",
+                74,
+                "c3a05597b8e7d5a2139f388a7e885207066bad62183ac1000c3e19b19a2d17dc",
+                vec![(0x29, "containsKey"), (0x31, "get"), (0x3d, "<init>")],
+            ),
         ] {
             let Some(class) = dex.class(owner) else {
                 continue;
@@ -483,5 +507,5 @@ fn original_package_adoption_matches_the_pinned_image() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 3);
+    assert_eq!(checked, 5);
 }

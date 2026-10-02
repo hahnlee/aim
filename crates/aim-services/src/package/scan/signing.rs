@@ -51,7 +51,7 @@ pub struct SigningOutcome {
     pub system_signature_mismatch: Option<String>,
 }
 
-/// Accepted new-system candidate; scan enrichment and publication follow.
+/// Accepted setting candidate; scan enrichment and publication follow.
 #[derive(Debug)]
 pub struct NewPackageOutcome {
     pub record: Record,
@@ -71,6 +71,120 @@ impl SigningScan {
             libraries: Registry::new(config),
             first_api_level,
             parsed: Vec::new(),
+        })
+    }
+
+    /// Reconcile initial-scan setting updates from verified code. This keeps
+    /// the saved UID and signatures through Settings.updatePackageSetting,
+    /// then commits metadata and library declarations with signer state.
+    /// Remaining ScanPackageUtils enrichment and publication follow this phase.
+    pub fn apply_existing(
+        &mut self,
+        code: &Code,
+        update: super::SettingUpdate,
+        saved_users: &BTreeMap<String, BTreeMap<i32, UserState>>,
+        all_users: Option<&[super::User]>,
+        disabled: Option<&Record>,
+    ) -> Result<NewPackageOutcome, SigningError> {
+        let flags = physical_parse_flags(&code.location.path).map_err(|message| {
+            SigningError::Rejected(Error {
+                package: code.parsed.package_name.clone(),
+                path: code.location.path.clone(),
+                phase: "location",
+                message,
+            })
+        })?;
+        let identity = Identity::select(
+            &code.parsed,
+            &self.settings,
+            update.flags & crate::package::settings::FLAG_SYSTEM != 0,
+        );
+        let reject = |phase, message: &str| {
+            SigningError::Rejected(Error {
+                package: identity.internal_name.clone(),
+                path: code.location.path.clone(),
+                phase,
+                message: message.into(),
+            })
+        };
+        if update.code_path != code.location.path {
+            return Err(reject(
+                "location",
+                "setting update disagrees with physical code path",
+            ));
+        }
+        super::validate::static_library(&code.parsed, false)
+            .map_err(|e| reject("validation", &e))?;
+        let at = self
+            .settings
+            .packages
+            .iter()
+            .position(|p| p.name == identity.internal_name)
+            .ok_or_else(|| reject("identity", "setting update has no saved package"))?;
+        let original = &self.settings.packages[at];
+        let group = if original.shared_user {
+            self.settings
+                .shared_users
+                .iter()
+                .find(|g| g.app_id == original.app_id)
+                .map(|g| g.name.as_str())
+        } else {
+            None
+        };
+        if group
+            != selected_shared_user(
+                original.shared_user,
+                code.parsed.shared_user_id.as_deref(),
+                code.parsed.is(booleans::LEAVING_SHARED_UID),
+            )
+        {
+            return Err(reject(
+                "identity",
+                "setting update requires replacing UID ownership (#804)",
+            ));
+        }
+        let owner = match group {
+            Some(name) => Owner::SharedUser(name.into()),
+            None => Owner::Package(original.name.clone()),
+        };
+        if self.identities.ids.get(original.app_id) != Some(&owner) {
+            return Err(reject("identity", "saved package no longer owns its UID"));
+        }
+        let users = saved_users
+            .get(&original.name)
+            .ok_or_else(|| reject("setting", "saved package user states were not supplied"))?;
+        let setting = super::NewSetting::update(
+            original,
+            users,
+            update,
+            all_users,
+            self.settings
+                .disabled_system_packages
+                .iter()
+                .any(|p| p.name == original.name),
+        );
+        let mut parsed = code.parsed.clone();
+        identity.apply(&mut parsed);
+        let mut record = Record {
+            settings: setting.package,
+            parsed,
+            signing: code.signing.clone(),
+            identity,
+            origin: if flags & parse::PARSE_IS_SYSTEM_DIR != 0 {
+                ScanOrigin::SystemDirectory
+            } else {
+                ScanOrigin::Data
+            },
+        };
+        let mut next = self.clone();
+        next.settings.packages[at] = record.settings.clone();
+        let signing = next.apply_with_disabled(&record, disabled)?;
+        record.settings = next.settings.packages[at].clone();
+        *self = next;
+        Ok(NewPackageOutcome {
+            record,
+            users: setting.users,
+            signing,
         })
     }
 

@@ -18,7 +18,7 @@ mod uids;
 mod validate;
 pub use identity::Identity;
 pub use image::{Apex, Code, Image, Kind, Location, Partition, Rejected};
-pub use setting::{NewSetting, SettingMetadata, User, UserPolicy};
+pub use setting::{NewSetting, SettingMetadata, SettingUpdate, User, UserPolicy};
 pub use signing::{
     NewPackageOutcome, SharedUidMigration, SigningError, SigningOutcome, SigningScan,
 };

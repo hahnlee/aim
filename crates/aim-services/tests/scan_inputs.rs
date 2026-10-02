@@ -1187,6 +1187,51 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     assert_eq!(accepted.users, old_users);
     assert_eq!(scan.identities.ids, snapshot.identities.ids);
     assert!(accepted.signing.system_signature_mismatch.is_none());
+    // A verified update on /data must retain the old signer gate while staging
+    // code/ABI/MIME changes; signer rejection publishes none of those changes.
+    google.location.path = "/data/app/update/base.apk".into();
+    let update = |code: &Code| aim_services::package::scan::SettingUpdate {
+        code_path: code.location.path.clone(),
+        legacy_native_library_path: Some("new.lib".into()),
+        primary_cpu_abi: Some("arm64-v8a".into()),
+        secondary_cpu_abi: None,
+        flags: settings::FLAG_SYSTEM,
+        private_flags: 8,
+        uses_sdk_libraries: vec![],
+        uses_static_libraries: vec![],
+        mime_groups: vec!["old.mime".into(), "new.mime".into()],
+        domain_set_id: [2; 16],
+        target_sdk_version: 36,
+        restrict_update_hash: None,
+    };
+    let snapshot = scan.clone();
+    let signer = google.signing.clone();
+    google.signing = platform.signing.clone();
+    assert!(
+        matches!(scan.apply_existing(&google, update(&google), &users, None, None),
+        Err(SigningError::Rejected(ref e)) if e.phase == "authorization")
+    );
+    assert_eq!(scan, snapshot);
+    google.signing = signer;
+    let updated = scan
+        .apply_existing(&google, update(&google), &users, None, None)
+        .unwrap();
+    assert_eq!(updated.record.settings.code_path, google.location.path);
+    assert_eq!(updated.record.settings.app_id, 11000);
+    assert_eq!(
+        updated.record.settings.primary_cpu_abi.as_deref(),
+        Some("arm64-v8a")
+    );
+    assert_eq!(
+        updated.record.settings.mime_groups,
+        vec![
+            ("old.mime".into(), vec!["text/plain".into()]),
+            ("new.mime".into(), vec![])
+        ]
+    );
+    assert_eq!(updated.users, old_users);
+    assert_eq!(scan.identities.ids, snapshot.identities.ids);
+    assert!(updated.signing.system_signature_mismatch.is_none());
 }
 
 #[test]

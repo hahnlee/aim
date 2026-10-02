@@ -1,4 +1,4 @@
-//! Compare new-setting defaults against the pinned original constructor.
+//! Compare setting construction and initial updates with the pinned original PMS.
 use aim_services::package::{
     pkg::AndroidPackage,
     scan::*,
@@ -226,7 +226,141 @@ fn new_settings_match_the_original_runtime() {
         String::from_utf8(original.stdout).unwrap(),
         lines.join("\n") + "\n"
     );
-    run(boot.command().args([
+    let original_update = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "update",
+    ]));
+    let root = aim_paths::original_image();
+    let image = root.clone();
+    let apks = aim_services::package::write::Apks {
+        files: Box::new(move |p| Some(image.join(p.trim_start_matches('/')))),
+        platform: aim_services::package::parse::Platform::load(&root, Default::default()).unwrap(),
+    };
+    let input = aim_services::package::State {
+        settings: Settings {
+            packages: vec![aim_services::package::settings::Package {
+                name: "com.google.android.gsf".into(),
+                code_path:
+                    "/system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk"
+                        .into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        list: vec![],
+        access: None,
+        users: vec![],
+    };
+    let template = Inputs::load_verified_code(&input, &apks)
+        .unwrap()
+        .active
+        .remove("com.google.android.gsf")
+        .unwrap();
+    let mut lines = Vec::new();
+    for old_system in [0, 1] {
+        for new_system in [0, 1] {
+            for required in [0, 512] {
+                for changed in [false, true] {
+                    // Synthetic policy inputs isolate setting updates. The signer
+                    // comes from the original fully verified GSF APK; no APK changes.
+                    let package = aim_services::package::settings::Package {
+                        name: "fixture".into(),
+                        app_id: 10000,
+                        code_path: "/system/nonexistent/old".into(),
+                        legacy_native_library_path: Some("old.lib".into()),
+                        primary_cpu_abi: Some("old.abi".into()),
+                        flags: 64 | old_system,
+                        private_flags: required,
+                        version_code: 7,
+                        mime_groups: vec![("keep".into(), vec![]), ("remove".into(), vec![])],
+                        ..Default::default()
+                    };
+                    let settings = Settings {
+                        packages: vec![package],
+                        ..Default::default()
+                    };
+                    let mut scan = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+                    let mut parsed = template.parsed.clone();
+                    parsed.package_name = "fixture".into();
+                    parsed.manifest_package_name = Some("fixture".into());
+                    parsed.shared_user_id = None;
+                    let code = Code {
+                        parsed,
+                        signing: template.signing.clone(),
+                        location: Location {
+                            path: if changed {
+                                "/system/nonexistent/new"
+                            } else {
+                                "/system/nonexistent/old"
+                            }
+                            .into(),
+                            partition: Partition::System,
+                            kind: Kind::App,
+                            apex: None,
+                        },
+                    };
+                    let saved_users = std::collections::BTreeMap::from([(
+                        "fixture".into(),
+                        std::collections::BTreeMap::from([(
+                            0,
+                            aim_services::package::restrictions::UserState {
+                                installed: false,
+                                uninstall_reason: 3,
+                                ..Default::default()
+                            },
+                        )]),
+                    )]);
+                    let candidate = scan
+                        .apply_existing(
+                            &code,
+                            SettingUpdate {
+                                code_path: code.location.path.clone(),
+                                legacy_native_library_path: Some("new.lib".into()),
+                                primary_cpu_abi: Some("new.abi".into()),
+                                secondary_cpu_abi: None,
+                                flags: 128 | new_system,
+                                private_flags: 8 | (required ^ 512),
+                                uses_sdk_libraries: vec![],
+                                uses_static_libraries: vec![],
+                                mime_groups: vec!["keep".into(), "new".into()],
+                                domain_set_id: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                                target_sdk_version: 36,
+                                restrict_update_hash: Some(vec![1]),
+                            },
+                            &saved_users,
+                            None,
+                            None,
+                        )
+                        .unwrap();
+                    let p = candidate.record.settings;
+                    let mut names: Vec<_> = p.mime_groups.iter().map(|(n, _)| n.as_str()).collect();
+                    names.sort();
+                    lines.push(format!(
+                        "{} {} {} {} {} {} {} {} {} [{}]",
+                        p.app_id,
+                        p.shared_user,
+                        p.flags,
+                        p.private_flags,
+                        p.legacy_native_library_path.unwrap(),
+                        p.primary_cpu_abi.unwrap(),
+                        p.version_code,
+                        candidate.users[&0].installed,
+                        candidate.users[&0].uninstall_reason,
+                        names.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        String::from_utf8(original_update.stdout).unwrap(),
+        lines.join("\n") + "\n"
+    );
+    let started = run(boot.command().args([
         "shell",
         "am",
         "start",
@@ -234,4 +368,5 @@ fn new_settings_match_the_original_runtime() {
         "-n",
         "com.android.settings/.Settings",
     ]));
+    assert!(String::from_utf8_lossy(&started.stdout).contains("Status: ok"));
 }

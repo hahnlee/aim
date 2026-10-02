@@ -1,6 +1,13 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 public class PackageSetting extends SettingBase {
+    void setInstalled(boolean installed, int user) { throw new RuntimeException("stub"); }
+    void setUninstallReason(int reason, int user) { throw new RuntimeException("stub"); }
+    int getUninstallReason(int user) { throw new RuntimeException("stub"); }
+    public String getLegacyNativeLibraryPath() { throw new RuntimeException("stub"); }
+    public String getPrimaryCpuAbiLegacy() { throw new RuntimeException("stub"); }
+    public long getVersionCode() { throw new RuntimeException("stub"); }
+    public java.util.Map<String, java.util.Set<String>> getMimeGroups() { throw new RuntimeException("stub"); }
     public PackageSetting(String name, String realName, java.io.File path, int flags, int privateFlags, java.util.UUID domainSetId) {
         super(flags, privateFlags);
     }
