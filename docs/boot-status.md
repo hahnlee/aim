@@ -318,7 +318,7 @@ SDK-dependent decisions. The derived image builds (45.5s, including post-restart
 original attachment), Java API linkage passes (14.6s), and the disposable
 original-PMS runtime checks pass (52.19s, 2026-10-03), including 48 library cases,
 four manifest cases, constructor/update/time checks, Settings launch and owned
-cleanup. All 178 package unit tests pass (10.68s). The runtime uses a guest sender
+cleanup. All 178 package unit tests pass (11.55s). The runtime uses a guest sender
 for the native-generated request bytes; native-host Strong transport is covered
 by the in-process Binder test. The test.base build-policy bridge still attaches
 at DEVICE_SPECIFIC_SERVICES_READY, after the original PMS initial scan: early
