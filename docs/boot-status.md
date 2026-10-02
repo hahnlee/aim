@@ -1354,6 +1354,12 @@ and `system_locales` `ko-KR`; Settings draws in Korean.
 
 ## Storage images (2026-09-29)
 
+On a host with no attached images, IOKit can return success with a null
+matching iterator. The storage reader now treats that as an empty collection
+rather than resetting the invalid handle forever (#809). A real no-match IOKit
+regression test passes; the original read-only image attaches in 1.1s after a
+host restart, and the derived image rebuild completes (45.5s, 2026-10-03).
+
 The boot on the case-sensitive images of [storage.md](storage.md): the
 system image (compressed, with its translation cache), the derived image
 as its shadow, and the data directory as a data image. No boot
