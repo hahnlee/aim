@@ -1,11 +1,13 @@
 //! APK inputs for the native boot scan (#707). Reads persisted active and
 //! disabled-system code without the original parser cache or package feed.
+//! Active records pass normal saved package/shared-UID signature gates.
 //! Reconciliation, new/removed image packages, APEX state and publication
 //! are separate phases; these records are not a query snapshot.
 
 use super::{State, parse, pkg::AndroidPackage, settings, sign, write::Apks};
 use std::collections::BTreeMap;
 
+mod authorize;
 mod identity;
 mod image;
 pub use identity::Identity;
@@ -75,6 +77,10 @@ impl Inputs {
                 let signing = apks
                     .signing_details(&parsed)
                     .map_err(|e| fail("signatures", e))?;
+                if !disabled {
+                    authorize::saved(ps, &signing, &state.settings)
+                        .map_err(|e| fail("authorization", e))?;
+                }
                 identity.apply(&mut parsed);
                 let records = if disabled {
                     &mut inputs.disabled

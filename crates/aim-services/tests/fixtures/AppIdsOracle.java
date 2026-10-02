@@ -2,7 +2,7 @@ package com.android.server.pm;
 
 public final class AppIdsOracle {
     public static void main(String[] args) {
-        if (args.length != 0 && (args[0].equals("trust") || args[0].equals("join"))) {
+        if (args.length != 0 && (args[0].equals("trust") || args[0].equals("join") || args[0].equals("ancestry"))) {
             android.content.pm.SigningDetails[] cases = {
                 android.content.pm.SigningDetails.UNKNOWN,
                 details(new int[]{1}, null, null),
@@ -14,6 +14,28 @@ public final class AppIdsOracle {
                 details(new int[]{2, 1}, null, null),
                 details(new int[]{1, 3}, null, null),
             };
+            if (args[0].equals("ancestry")) {
+                cases = new android.content.pm.SigningDetails[]{
+                    android.content.pm.SigningDetails.UNKNOWN,
+                    details(new int[]{1}, null, null),
+                    details(new int[]{2}, null, null),
+                    details(new int[]{2}, new int[]{1, 2}, new int[]{3, 0}),
+                    details(new int[]{3}, new int[]{1, 2, 3}, new int[]{0, 2, 0}),
+                    details(new int[]{3}, new int[]{2, 3}, new int[]{8, 0}),
+                    details(new int[]{3}, new int[]{4, 2, 3}, new int[]{3, 2, 0}),
+                    details(new int[]{4}, new int[]{1, 2, 4}, new int[]{3, 2, 0}),
+                    details(new int[]{1, 2}, null, null),
+                    details(new int[]{2, 1}, null, null),
+                    details(new int[]{1, 3}, null, null),
+                    details(new int[]{3}, new int[]{3}, new int[]{0}),
+                };
+                for (int i = 0; i < cases.length; i++) {
+                    for (int j = 0; j < cases.length; j++) {
+                        System.out.println(i + " " + j + " " + cases[i].hasCommonAncestor(cases[j]));
+                    }
+                }
+                return;
+            }
             if (args[0].equals("join")) {
                 for (int i = 0; i < cases.length; i++) {
                     for (int j = 0; j < cases.length; j++) {

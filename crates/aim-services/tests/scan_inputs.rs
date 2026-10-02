@@ -122,6 +122,41 @@ fn persisted_active_and_disabled_apks_are_parsed_and_verified() {
     );
     assert!(!active.signing.public_keys.is_empty());
 
+    // Cryptographic validity does not authorize reuse of saved code/UID
+    // ownership with unrelated package or disabled-system certificates.
+    let unrelated = settings::Signatures {
+        signatures: vec![vec![1]],
+        ..Default::default()
+    };
+    state.settings.packages[0].signatures = Some(unrelated.clone());
+    let before = state.clone();
+    let error = Inputs::load(&state, &apks).unwrap_err();
+    assert_eq!(error.phase, "authorization");
+    assert!(
+        error
+            .message
+            .contains("existing package signatures mismatch")
+    );
+    assert_eq!(state, before);
+    state.settings.packages[0].signatures = Some(settings::Signatures {
+        signatures: active.signing.signatures.clone(),
+        past_signatures: active.signing.past_signing_certificates.clone(),
+        scheme_version: active.signing.scheme_version,
+        ..Default::default()
+    });
+    state.settings.disabled_system_packages[0].signatures = Some(unrelated);
+    let before = state.clone();
+    let error = Inputs::load(&state, &apks).unwrap_err();
+    assert_eq!(error.phase, "authorization");
+    assert!(
+        error
+            .message
+            .contains("updated system package signatures mismatch")
+    );
+    assert_eq!(state, before);
+    state.settings.disabled_system_packages[0].signatures = None;
+    assert!(Inputs::load(&state, &apks).is_ok());
+
     // A valid signed APK cannot inherit a different persisted identity.
     state.settings.packages[0].name = "unrelated.saved.package".into();
     let before = state.clone();

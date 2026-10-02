@@ -294,6 +294,46 @@ fn allocation_matches_the_original_runtime() {
     ]));
     assert_eq!(String::from_utf8(original.stdout).unwrap(), expected);
 
+    let ancestry: Vec<_> = [
+        (vec![], None),
+        (vec![1], None),
+        (vec![2], None),
+        (vec![2], Some(vec![(1, 3), (2, 0)])),
+        (vec![3], Some(vec![(1, 0), (2, 2), (3, 0)])),
+        (vec![3], Some(vec![(2, 8), (3, 0)])),
+        (vec![3], Some(vec![(4, 3), (2, 2), (3, 0)])),
+        (vec![4], Some(vec![(1, 3), (2, 2), (4, 0)])),
+        (vec![1, 2], None),
+        (vec![2, 1], None),
+        (vec![1, 3], None),
+        (vec![3], Some(vec![(3, 0)])),
+    ]
+    .into_iter()
+    .map(|(current, past)| Signatures {
+        signatures: current.into_iter().map(|c| vec![c]).collect(),
+        past_signatures: past.map(|p| p.into_iter().map(|(c, f)| (vec![c], f)).collect()),
+        ..Default::default()
+    })
+    .collect();
+    let mut expected = String::new();
+    for (i, candidate) in ancestry.iter().enumerate() {
+        for (j, other) in ancestry.iter().enumerate() {
+            expected.push_str(&format!(
+                "{i} {j} {}\n",
+                History::saved(candidate).has_common_ancestor(&History::saved(other))
+            ));
+        }
+    }
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.AppIdsOracle",
+        "ancestry",
+    ]));
+    assert_eq!(String::from_utf8(original.stdout).unwrap(), expected);
+
     // Original SystemConfig reads these disposable vendor/OEM fixtures
     // with zero partition permissions: the UID tag has no allow-bit gate.
     let root = boot.data.join("data/local/tmp/uid-image");

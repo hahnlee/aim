@@ -85,6 +85,40 @@ impl<'a> History<'a> {
         self.check_capability(old, 0)
     }
 
+    /// Sharing a signer is insufficient when the overlapping histories
+    /// disagree before it. Capability flags do not affect ancestry.
+    pub fn has_common_ancestor(&self, other: &Self) -> bool {
+        let lineage = |h: &Self| h.past.is_some_and(|p| !p.is_empty());
+        if !lineage(self) {
+            return other.has_ancestor_or_self(self);
+        }
+        if !lineage(other) {
+            return self.has_ancestor_or_self(other);
+        }
+        let (descendant, ancestor) = if self.has_ancestor_or_self(other) {
+            (self, other)
+        } else if other.has_ancestor(self) {
+            (other, self)
+        } else {
+            return false;
+        };
+        let descendant = descendant.past.unwrap();
+        let ancestor = ancestor.past.unwrap();
+        let Some(common) = descendant
+            .iter()
+            .rposition(|(s, _)| *s == ancestor.last().unwrap().0)
+        else {
+            return false;
+        };
+        let mut d = common;
+        let mut a = ancestor.len() - 1;
+        while d > 0 && a > 0 && descendant[d - 1].0 == ancestor[a - 1].0 {
+            d -= 1;
+            a -= 1;
+        }
+        d == 0 || a == 0
+    }
+
     /// The normal existing-package gate in verifySignatures. The caller
     /// supplies only an owner-authorized rollback. Legacy compatibility/
     /// certificate recovery and shared-user checks are separate gates.
