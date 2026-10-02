@@ -244,6 +244,7 @@ dependencies = [
 name = "aim-services"
 version = "0.1.0"
 dependencies = [
+ "aim-android-image",
  "aim-android-xml",
  "aim-apps",
  "aim-binder-driver",

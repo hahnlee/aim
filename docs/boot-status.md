@@ -91,9 +91,13 @@ is now queried through the system-server bridge (package name and target
 SDK, without PMS lookup). On a disposable original-PMS boot (2026-10-02,
 boot completed), a temporary Rust diagnostic received false for SDK 30
 and true for 31/36; Settings started successfully (warm, 90 ms). The
-diagnostic was removed and the boot/data cleaned. SDK library independence
-has no matching Flags API or aconfig entry in this image and still needs
-an authoritative policy (#800). Bootstrap facade wiring, native scan
+diagnostic was removed and the boot/data cleaned. The original image's
+`SharedLibrariesImpl` dex passes `required=true` for SDK dependencies;
+`Policy::pinned` therefore disables SDK independence. An explicitly run
+image integration test verifies that call argument and its straight-line
+assignment, rejecting changed policy code (#800). `Policy::from_bridge`
+combines it with the original PlatformCompat response. SDK dependency CTS
+is still pending. Bootstrap facade wiring, native scan
 integration and native PackageManager
 activation remain pending (#707);
 no native PackageManager CTS result is claimed.

@@ -541,8 +541,8 @@ native scan or installed GMS's complete parcel parity (#760).
 required Java, static, optional Java, native when PlatformCompat enforces
 them, then SDK. Versioned dependencies check the provider's verified
 signatures, including certificate rotation and the pre-27 multi-signer
-rule. SDK independence and native enforcement are explicit policy inputs;
-the native scan still needs to supply them from their owners.
+rule. Native enforcement comes from PlatformCompat; the pinned image's
+SDK policy is compiled directly into `SharedLibrariesImpl`.
 For native enforcement, `IBridge.areNativeLibraryDependenciesEnforced`
 now calls the original `PlatformCompat.isChangeEnabledInternal` install
 API with package name and target SDK, without looking up PMS state.
@@ -554,8 +554,15 @@ A disposable original-PMS boot (2026-10-02, boot completed) tested the
 Rust-to-Java call: SDK 30 returned false, SDK 31/36 true. Device-service
 linkage verification and 130 package unit tests pass. The image has no
 `android.content.pm.Flags.sdkLibIndependence` API or loaded aconfig entry
-for that flag; SDK policy provenance remains #800, without a guessed
-fallback.
+for that flag. Inspecting its original `services.jar` shows that the SDK
+dependency collection call passes `required=true` directly. `Policy::pinned`
+uses that compiled policy (independence disabled), and `Policy::from_bridge`
+combines it with the owner's native-enforcement answer. An explicitly run
+integration test reads the original image through `aim_paths`, checks the
+SDK call signature/range registers and constant assignment without an
+intervening write or branch, and rejects a changed image implementation.
+SDK dependency/certificate CTS remains open (#800); this is provenance
+verification, not CTS acceptance.
 `Selection::files` assembles the provider's base/split paths followed by
 its already-resolved transitive files, preserving first occurrence.
 Tests cover ordering, missing/optional dependencies, SDK policy,

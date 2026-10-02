@@ -7,7 +7,8 @@ use crate::package::pkg::AndroidPackage;
 use crate::package::settings::Signatures;
 use sha2::{Digest, Sha256};
 
-/// Supplied by PlatformCompat and the pinned aconfig flags for this app.
+/// Native enforcement comes from PlatformCompat; SDK behavior from the
+/// pinned image's compiled policy (`Policy::pinned`).
 pub struct Policy {
     pub enforce_native_dependencies: bool,
     pub sdk_library_independence: bool,
