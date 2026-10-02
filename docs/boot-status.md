@@ -273,8 +273,11 @@ post-fs-data's run would see the same APEXes (#564). A first boot
 clones the image from the template of the `userdata/template` node
 (docs/first-boot.md): its attach ends at 0.41-0.53 s and the mount waits
 0-0.07 s (host load 12-14; creating the image held the mount up by
-0.6 s before, #563). From the template's PackageManager and
-permission state (docs/first-boot.md), PackageManager takes 0.57 s from
+0.6 s before, #563). The template build boot puts its display socket in
+a short temporary directory so a long worktree path fits Darwin's Unix
+socket limit; the directory is removed when the boot stops. From the
+template's PackageManager and permission state (docs/first-boot.md),
+PackageManager takes 0.57 s from
 `pms_start` to `pms_ready` (3.90 s on an original first boot: the scan,
 the stubs' decompression) and 0.47 s to `ams_ready` (2.64 s: boot
 dexopt), and `sys.boot_completed` comes at 4.9 s (10.6 s without the
@@ -1022,4 +1025,3 @@ server sends them:
 | The Mac on 2-Set Korean (`2SetHangul`) | `vendor.aim.mac.keyboard_layout` `keyboard_layout_english_us`; `aim-keyboard` set it (logcat) |
 | G K S R M F in the Settings search field, Gboard on Korean | `KEY_G` … `KEY_F` in `getevent -lt`; the field reads 한글 |
 | Ctrl+Space, then the layout set to `keyboard_layout_english_us_dvorak` (as the Mac's Dvorak would) | Gboard on English; Q W E R T Y and H J K L type `',.pyf` and `dhtn` |
-
