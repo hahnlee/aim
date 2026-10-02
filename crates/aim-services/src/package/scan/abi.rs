@@ -2,6 +2,8 @@
 //! from PackageAbiHelperImpl, ScanPackageUtils and VMRuntime at android-16.0.0_r1 (#810).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use crate::package::pkg::AndroidPackage;
+mod zip;
+pub use zip::{SupportedAbi, ZipNativeLibraries};
 
 /// Image/installation and guest filesystem inputs supplied by their owners.
 pub struct NativeLibraryEnvironment<'a> {

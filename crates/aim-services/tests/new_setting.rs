@@ -611,10 +611,71 @@ fn new_settings_match_the_original_runtime() {
     };
     let bit32 = abi_list("ro.product.cpu.abilist32");
     let bit64 = abi_list("ro.product.cpu.abilist64");
+    let all_abis = abi_list("ro.product.cpu.abilist");
     let supported_abis = SupportedAbis {
         bit32: &bit32,
         bit64: &bit64,
     };
+    let zip_original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "zip-abis",
+    ]));
+    let zip_output = String::from_utf8(zip_original.stdout).unwrap();
+    let mut original = zip_output.lines().peekable();
+    let data_root = boot.data.clone();
+    let zip_apks = aim_services::package::write::Apks {
+        platform: aim_services::package::parse::Platform::load(&root, Default::default()).unwrap(),
+        files: Box::new(move |p| Some(data_root.join(p.trim_start_matches('/')))),
+    };
+    for case in 0..17 {
+        let header = original.next().unwrap();
+        let paths: Vec<_> = header
+            .strip_prefix(&format!("case {case} "))
+            .unwrap()
+            .split(',')
+            .collect();
+        let pkg = AndroidPackage {
+            base_apk_path: Some(paths[0].into()),
+            split_code_paths: Some(paths[1..].iter().map(|p| Some((*p).into())).collect()),
+            ..Default::default()
+        };
+        let inventory = zip_apks.zip_native_libraries(&pkg);
+        if original.peek() == Some(&"error") {
+            original.next();
+            assert!(inventory.is_err(), "{header}: original rejected ZIP");
+            continue;
+        }
+        let inventory = inventory.unwrap_or_else(|e| panic!("{header}: {e}"));
+        for supported in [
+            vec!["arm64-v8a", "x86"],
+            vec!["x86", "arm64-v8a"],
+            vec![],
+            vec!["unknown"],
+        ] {
+            let supported: Vec<_> = supported.into_iter().map(str::to_owned).collect();
+            let expected = match inventory.find_supported_abi(&supported) {
+                SupportedAbi::None => -114,
+                SupportedAbi::NoMatch => -113,
+                SupportedAbi::Index(at) => at as i32,
+            };
+            assert_eq!(
+                original.next().unwrap().parse::<i32>().unwrap(),
+                expected,
+                "{header}"
+            );
+        }
+        assert_eq!(
+            original.next().unwrap().parse::<bool>().unwrap(),
+            inventory.renderscript_bitcode,
+            "{header}"
+        );
+    }
+    assert_eq!(original.next(), None);
+    eprintln!("native/original ZIP ABI and RenderScript inventory match 17 archive cases");
     let inventory = aim_paths::derived_image();
     let bundled_apks = aim_services::package::write::Apks {
         platform: aim_services::package::parse::Platform::load(&inventory, Default::default())
@@ -681,6 +742,29 @@ fn new_settings_match_the_original_runtime() {
         );
         assert_eq!(actual.secondary, None);
         assert!(!actual.multi_arch_mismatch);
+        if present {
+            let zip = bundled_apks.zip_native_libraries(&pkg).unwrap();
+            let original = run(boot.command().args([
+                "shell",
+                "/system/bin/app_process",
+                "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+                "/system/bin",
+                "com.android.server.pm.NewSettingOracle",
+                "zip-package",
+                "/data/local/tmp/bundled-abi.cache",
+                &all_abis.join(","),
+            ]));
+            let selected = match zip.find_supported_abi(&all_abis) {
+                SupportedAbi::None => -114,
+                SupportedAbi::NoMatch => -113,
+                SupportedAbi::Index(at) => at as i32,
+            };
+            assert_eq!(
+                String::from_utf8(original.stdout).unwrap(),
+                format!("{selected}\n{}\n", zip.renderscript_bitcode),
+                "APK ZIP inventory: {code_path}"
+            );
+        }
         bundled_cases += 1;
     }
     assert_eq!(bundled_cases, 5);

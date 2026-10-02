@@ -23,7 +23,7 @@ pub use bridge::PolicyBridgeError;
 mod abi;
 pub use abi::{
     BundledAbis, NativeLibraryEnvironment, NativeLibraryPaths, SharedUserAbi,
-    SharedUserAbiMismatch, SupportedAbis,
+    SharedUserAbiMismatch, SupportedAbi, SupportedAbis, ZipNativeLibraries,
 };
 mod setting;
 mod signing;

@@ -57,7 +57,7 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (185 package unit tests pass). These are not
+shared snapshot publication (187 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
@@ -349,7 +349,7 @@ app removed by the overlay against original PackageAbiHelperImpl, then derives
 GSF ABIs and paths before accepting its setting metadata. Native inventory reads
 the actual derived image used by that boot, not the original image whose removed
 libraries differ. Unit coverage also checks monolithic/cluster, 32/64/both/neither,
-preference, multiarch and error branches. APK ZIP ABI selection/extraction,
+preference, multiarch and error branches. Full APK ABI policy and extraction,
 shared-UID lifecycle integration and complete boot-scan wiring remain #810/#702;
 native PMS is not activated.
 
@@ -368,6 +368,22 @@ pass; 185 package unit tests pass (2.99s), focused ABI tests pass, and Java imag
 API linkage passes (13.2s). These helpers do not establish the full boot owner's
 membership order, run dex/installation side effects or activate native PMS;
 boot and install lifecycle integration remains #810/#702.
+
+`ZipNativeLibraries` reads base and split APK inventories through the native
+filesystem owner and ports original NativeLibraryHelper.findSupportedAbi:
+the best supported-list index across APKs wins, with distinct no-native-code and
+no-matching-ABI results. Native candidates follow ApkParsing's path length, safe
+filename and no-subdirectory rules, including non-.so files; the JNI's pinned
+RenderScript filename rule is preserved. Malformed ZIPs, NUL entry names and
+unreadable/unmapped code reject explicitly. A disposable original runtime
+compares 17 newly generated ZIP archive groups (four ABI lists, split unions,
+safe/unsafe/nested/long names, RenderScript and NUL rejection), then compares
+actual unchanged APK inventories of four image apps with original
+NativeLibraryHelper. All prior runtime cases, Settings launch and owned cleanup
+pass (2026-10-03, 78.16s); 187 package unit tests pass (3.04s) and Java image API
+linkage passes (16.0s). This owns inventory matching; full PackageAbiHelper
+policy (multiarch/override/RenderScript), extraction/alignment and boot/install
+side effects remain #810/#702. Original PMS still runs.
 
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained

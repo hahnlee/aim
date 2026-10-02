@@ -2,6 +2,20 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("zip-package")) {
+            var pkg = com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
+            try (var handle = com.android.server.pm.parsing.pkg.AndroidPackageUtils.createNativeLibraryHandle(pkg)) {
+                System.out.println(com.android.internal.content.NativeLibraryHelper.findSupportedAbi(
+                    handle, args[2].equals("-") ? new String[] {} : args[2].split(",")));
+                System.out.println(com.android.internal.content.NativeLibraryHelper.hasRenderscriptBitcode(handle));
+            }
+            return;
+        }
+        if (args.length != 0 && args[0].equals("zip-abis")) {
+            zipAbis();
+            return;
+        }
         if (args.length != 0 && args[0].equals("shared-abis")) {
             sharedAbis(java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
             return;
@@ -140,6 +154,42 @@ public final class NewSettingOracle {
             new java.io.File("/system/nonexistent/" + name), null, null, null,
             1L, flags, privateFlags, null, true, false, false, false, null,
             null, null, null, null, null, null, new java.util.UUID(0, 0), 36, null);
+    }
+
+    private static void zipAbis() throws Exception {
+        String[][][] layouts = {
+            {{"assets/file"}}, {{"lib/x86/libx.so"}}, {{"lib/arm64-v8a/gdbserver"}},
+            {{"lib/x86/anything", "lib/arm64-v8a/libx.so"}}, {{"lib/unknown/libx.so"}},
+            {{"lib/x86/sub/libx.so", "lib/x86/lib x.so", "lib/a/x"}},
+            {{"lib/x86/lib+,-.=_x.so"}}, {{"lib/x86/lib\u00e9.so"}},
+            {{"lib/x86/"}}, {{"file.bc"}}, {{"dir/file.bc"}}, {{"bad dir/file.bc"}},
+            {{"lib/unknown/libx.so"}, {"lib/x86/libx.so"}},
+            {{"lib/x86/libx.so"}, {"lib/arm64-v8a/libx.so"}},
+            {{"assets/file"}, {"lib/arm64-v8a/libx.so", "nested/file.bc"}},
+            {{"lib/x86/" + "x".repeat(4096)}}, {{"lib/x86/lib\u0000x.so"}}
+        };
+        String[][] supported = {{"arm64-v8a", "x86"}, {"x86", "arm64-v8a"}, {}, {"unknown"}};
+        for (int i = 0; i < layouts.length; i++) {
+            var paths = new java.util.ArrayList<String>();
+            for (int split = 0; split < layouts[i].length; split++) {
+                String path = "/data/local/tmp/abi-inventory-" + i + "-" + split + ".zip";
+                try (var zip = new java.util.zip.ZipOutputStream(java.nio.file.Files.newOutputStream(java.nio.file.Path.of(path)))) {
+                    for (String name : layouts[i][split]) {
+                        zip.putNextEntry(new java.util.zip.ZipEntry(name));
+                        zip.write(new byte[] {1, 2, 3}); zip.closeEntry();
+                    }
+                }
+                paths.add(path);
+            }
+            System.out.println("case " + i + " " + String.join(",", paths));
+            try (var handle = com.android.internal.content.NativeLibraryHelper.Handle.create(paths, false, false, false, false)) {
+                for (String[] abis : supported) System.out.println(
+                    com.android.internal.content.NativeLibraryHelper.findSupportedAbi(handle, abis));
+                System.out.println(com.android.internal.content.NativeLibraryHelper.hasRenderscriptBitcode(handle));
+            } catch (java.io.IOException error) {
+                System.out.println("error");
+            }
+        }
     }
 
     private static void sharedAbis(byte[] cache) throws Exception {
